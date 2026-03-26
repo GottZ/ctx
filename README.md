@@ -104,7 +104,62 @@ All endpoints require an `X-Context-Key` header for authentication.
 | `/webhook/blob-search` | POST | Search blobs |
 | `/webhook/blob-manage` | POST | Blob CRUD |
 
-### Usage Examples
+### CLI
+
+The `ctx` CLI wraps all API endpoints. Install by symlinking into your `$PATH`:
+
+```bash
+ln -s /path/to/ctx /usr/local/bin/ctx
+```
+
+Configure once:
+
+```bash
+mkdir -p ~/.config/ctx
+cat > ~/.config/ctx/config <<'EOF'
+CTX_BASE_URL=https://your-n8n-host/webhook
+CTX_KEY=your-api-key-here
+EOF
+chmod 700 ~/.config/ctx && chmod 600 ~/.config/ctx/config
+```
+
+Usage:
+
+```bash
+# Hybrid search + LLM synthesis
+ctx query "What embedding model is used?"
+
+# Store a block
+ctx save infrastructure "My Title" - "Content here"
+
+# Pipe content from file
+cat notes.md | ctx save docs "My Notes"
+
+# Pipe question from stdin
+echo "How does the Write Guard work?" | ctx query
+
+# Compact search (no LLM, fast)
+ctx search learnings query:prompt
+
+# Stats, categories, guard
+ctx stats
+ctx categories
+ctx guard stats
+ctx guard list
+
+# Full block retrieval / deletion
+ctx get <block-id>
+ctx delete <block-id>
+
+# Rebuild topic map
+ctx digest
+```
+
+Run `ctx help` for the full command reference.
+
+### HTTP API
+
+All endpoints require an `X-Context-Key` header. The CLI is the recommended interface — use curl for automation or integration:
 
 ```bash
 # Store a knowledge block
@@ -118,18 +173,6 @@ curl -s -X POST https://your-n8n-host/webhook/context-agent \
   -H "Content-Type: application/json" \
   -H "X-Context-Key: YOUR_API_KEY" \
   -d '{"query":"What is the retrieval architecture?"}'
-
-# Compact search (no LLM, fast)
-curl -s -X POST https://your-n8n-host/webhook/context-search \
-  -H "Content-Type: application/json" \
-  -H "X-Context-Key: YOUR_API_KEY" \
-  -d '{"category":"reference","query":"retrieval","limit":5}'
-
-# Get stats
-curl -s -X POST https://your-n8n-host/webhook/context-manage \
-  -H "Content-Type: application/json" \
-  -H "X-Context-Key: YOUR_API_KEY" \
-  -d '{"action":"stats"}'
 ```
 
 ### Testing
@@ -167,6 +210,7 @@ Schema initialization is fully idempotent -- see `init-data.sh`.
 ## Project Structure
 
 ```
+├── ctx                   # CLI (symlink to $PATH)
 ├── docker-compose.yml    # Service definitions
 ├── .env.example          # Configuration template
 ├── init-data.sh          # Idempotent DB schema setup
@@ -183,7 +227,7 @@ Schema initialization is fully idempotent -- see `init-data.sh`.
 
 ## Configuration
 
-All configuration is via environment variables in `.env`. See `.env.example` for the full list.
+Server configuration is via environment variables in `.env` (see `.env.example`). CLI configuration lives in `~/.config/ctx/config`.
 
 Key variables:
 
