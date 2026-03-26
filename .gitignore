@@ -1,0 +1,37 @@
+# Secrets
+.env
+
+# Database data directories
+db/
+db-backup-pg17/
+
+# n8n runtime data
+data/
+
+# Backup files
+backups/
+backup-*.sql
+
+# Eval baseline (contains environment-specific data)
+.eval-baseline.json
+
+# Operational notes (contains secrets from session history)
+progress.md
+
+# Claude Code project memory (contains session-specific context with secrets)
+# CLAUDE.md is tracked — it contains project instructions without secrets
+.claude/
+
+# Internal working documents (session research, reviews — may contain secrets)
+.project/
+
+# Editor / OS
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+prompt.md

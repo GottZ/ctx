@@ -1,0 +1,642 @@
+{
+  "updatedAt": "2026-02-09T20:56:40.071Z",
+  "createdAt": "2026-02-06T08:52:27.917Z",
+  "id": "UsitIwjJK6nl7MzD",
+  "name": "context-store",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "context-store",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "id": "b1000001-0001-0001-0001-000000000001",
+      "name": "Webhook",
+      "webhookId": "b1000001-0001-0001-0001-000000000001"
+    },
+    {
+      "parameters": {
+        "jsCode": "// \u2500\u2500 Auth check \u2500\u2500\nconst auth = $('Auth Lookup').item.json;\nif (!auth.home_scope || auth.home_scope === '__UNAUTHORIZED__') {\n  return [{ json: { valid: false, error: 'Unauthorized: invalid API key' } }];\n}\nconst homeScope = auth.home_scope;\nconst allowedScopes = Array.isArray(auth.allowed_scopes) ? auth.allowed_scopes : [];\n\nconst body = $('Extract Key').item.json.body;\n\nconst category = body.category;\nconst title = body.title;\nconst content = body.content;\nconst tags = body.tags || [];\nconst metadata = body.metadata || {};\n\nif (!category || typeof category !== 'string' || category.trim() === '') {\n  return [{ json: { valid: false, error: 'category is required and must be a non-empty string' } }];\n}\nif (!title || typeof title !== 'string' || title.trim() === '') {\n  return [{ json: { valid: false, error: 'title is required and must be a non-empty string' } }];\n}\nif (!content || typeof content !== 'string' || content.trim() === '') {\n  return [{ json: { valid: false, error: 'content is required and must be a non-empty string' } }];\n}\n\n// Determine write scope\nlet writeScope = homeScope;\nif (body.scope === 'shared' && allowedScopes.includes('shared')) {\n  writeScope = 'shared';\n} else if (body.scope && body.scope !== homeScope) {\n  return [{ json: { valid: false, error: 'Cannot write to scope: ' + body.scope } }];\n}\n\nfunction esc(val) {\n  if (val === null || val === undefined) return 'NULL';\n  return \"'\" + String(val).replace(/'/g, \"''\") + \"'\";\n}\n\nfunction escArray(arr) {\n  if (!Array.isArray(arr) || arr.length === 0) return \"'{}'\";\n  const inner = arr.map(t => '\"' + String(t).replace(/\"/g, '\\\\\"').replace(/'/g, \"''\") + '\"').join(',');\n  return \"'{\" + inner + \"}'\";\n}\n\nfunction escJson(obj) {\n  if (!obj || typeof obj !== 'object') return \"'{}'::jsonb\";\n  const jsonStr = JSON.stringify(obj).replace(/'/g, \"''\");\n  return \"'\" + jsonStr + \"'::jsonb\";\n}\n\nconst c = esc(category.trim());\nconst t = esc(title.trim());\nconst co = esc(content.trim());\nconst ta = escArray(tags);\nconst m = escJson(metadata);\nconst sc = esc(writeScope);\n\nconst query = `INSERT INTO context_blocks (category, tags, title, content, metadata, scope) VALUES (${c}, ${ta}, ${t}, ${co}, ${m}, ${sc}) ON CONFLICT (category, title) DO UPDATE SET content = EXCLUDED.content, tags = EXCLUDED.tags, metadata = EXCLUDED.metadata, scope = EXCLUDED.scope, updated_at = now() RETURNING id, category, tags, title, content, metadata, scope, created_at, updated_at`;\n\nreturn [{ json: { valid: true, query: query } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "id": "b1000001-0001-0001-0001-000000000002",
+      "name": "Build Upsert"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        300
+      ],
+      "id": "b1000001-0001-0001-0001-000000000003",
+      "name": "Is Valid?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Build Upsert').item.json.query }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1100,
+        200
+      ],
+      "id": "b1000001-0001-0001-0001-000000000004",
+      "name": "Execute Upsert",
+      "credentials": {
+        "postgres": {
+          "id": "T7QVF2rMIr2bhWYG",
+          "name": "Context Store DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst row = items[0].json;\nreturn [{ json: { success: true, block: row } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        200
+      ],
+      "id": "b1000001-0001-0001-0001-000000000005",
+      "name": "Format Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1980,
+        200
+      ],
+      "id": "b1000001-0001-0001-0001-000000000006",
+      "name": "Success Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: $json.error }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        460
+      ],
+      "id": "b1000001-0001-0001-0001-000000000007",
+      "name": "Error Response"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.OLLAMA_HOST + '/api/embed' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({model: $vars.OLLAMA_EMBED_MODEL, input: $('Execute Upsert').item.json.title + ' ' + $('Execute Upsert').item.json.content}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        200
+      ],
+      "id": "b1000001-0001-0001-0001-000000000008",
+      "name": "Generate Embedding"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ 'UPDATE context_blocks SET embedding = \\'' + JSON.stringify($json.embeddings[0]) + '\\' WHERE id = \\'' + $('Execute Upsert').item.json.id + '\\'' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        200
+      ],
+      "id": "b1000001-0001-0001-0001-000000000009",
+      "name": "Store Embedding",
+      "credentials": {
+        "postgres": {
+          "id": "T7QVF2rMIr2bhWYG",
+          "name": "Context Store DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst headers = items[0].json.headers || {};\nconst body = items[0].json.body || items[0].json;\nconst rawKey = headers['x-context-key'] || '';\nconst apiKey = rawKey.replace(/[^a-f0-9]/gi, '');\nreturn [{ json: { apiKey, body } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "id": "cs-scope-0001-0001-000000000001",
+      "name": "Extract Key"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE((SELECT home_scope FROM context_api_keys WHERE api_key = '{{ $json.apiKey }}' AND active = true LIMIT 1),'__UNAUTHORIZED__') AS home_scope, COALESCE((SELECT allowed_scopes FROM context_api_keys WHERE api_key = '{{ $json.apiKey }}' AND active = true LIMIT 1),'{}'::text[]) AS allowed_scopes",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        300
+      ],
+      "id": "cs-scope-0002-0002-000000000002",
+      "name": "Auth Lookup",
+      "credentials": {
+        "postgres": {
+          "id": "T7QVF2rMIr2bhWYG",
+          "name": "Context Store DB"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Upsert": {
+      "main": [
+        [
+          {
+            "node": "Is Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [
+          {
+            "node": "Execute Upsert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Upsert": {
+      "main": [
+        [
+          {
+            "node": "Generate Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Embedding": {
+      "main": [
+        [
+          {
+            "node": "Store Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Embedding": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Key": {
+      "main": [
+        [
+          {
+            "node": "Auth Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auth Lookup": {
+      "main": [
+        [
+          {
+            "node": "Build Upsert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": true,
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": null,
+  "versionId": "125c72a2-a801-42db-b71d-2f0446fe1233",
+  "activeVersionId": "125c72a2-a801-42db-b71d-2f0446fe1233",
+  "versionCounter": 49,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-02-06T08:52:27.917Z",
+      "createdAt": "2026-02-06T08:52:27.917Z",
+      "role": "workflow:owner",
+      "workflowId": "UsitIwjJK6nl7MzD",
+      "projectId": "lkCht5XyAfzUeSUc",
+      "project": {
+        "updatedAt": "2026-02-06T08:39:44.701Z",
+        "createdAt": "2026-02-06T08:39:44.701Z",
+        "id": "lkCht5XyAfzUeSUc",
+        "name": "Unnamed Project",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "5cf229d8-79e8-4887-907d-54af31a25bbc"
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": {
+    "updatedAt": "2026-02-09T20:56:40.073Z",
+    "createdAt": "2026-02-09T20:56:40.073Z",
+    "versionId": "125c72a2-a801-42db-b71d-2f0446fe1233",
+    "workflowId": "UsitIwjJK6nl7MzD",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "context-store",
+          "responseMode": "responseNode",
+          "options": {},
+          "authentication": "headerAuth"
+        },
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          0,
+          300
+        ],
+        "id": "b1000001-0001-0001-0001-000000000001",
+        "name": "Webhook",
+        "webhookId": "b1000001-0001-0001-0001-000000000001",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "mGQAPoZWzsOXyCD3",
+            "name": "Context Store Auth"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const items = $input.all();\nconst body = items[0].json.body || items[0].json;\n\nconst category = body.category;\nconst title = body.title;\nconst content = body.content;\nconst tags = body.tags || [];\nconst metadata = body.metadata || {};\n\nif (!category || typeof category !== 'string' || category.trim() === '') {\n  return [{ json: { valid: false, error: 'category is required and must be a non-empty string' } }];\n}\nif (!title || typeof title !== 'string' || title.trim() === '') {\n  return [{ json: { valid: false, error: 'title is required and must be a non-empty string' } }];\n}\nif (!content || typeof content !== 'string' || content.trim() === '') {\n  return [{ json: { valid: false, error: 'content is required and must be a non-empty string' } }];\n}\n\nfunction esc(val) {\n  if (val === null || val === undefined) return 'NULL';\n  return \"'\" + String(val).replace(/'/g, \"''\") + \"'\";\n}\n\nfunction escArray(arr) {\n  if (!Array.isArray(arr) || arr.length === 0) return \"'{}'\";\n  const inner = arr.map(t => '\"' + String(t).replace(/\"/g, '\\\\\"').replace(/'/g, \"''\") + '\"').join(',');\n  return \"'{\" + inner + \"}'\";\n}\n\nfunction escJson(obj) {\n  if (!obj || typeof obj !== 'object') return \"'{}'::jsonb\";\n  const jsonStr = JSON.stringify(obj).replace(/'/g, \"''\");\n  return \"'\" + jsonStr + \"'::jsonb\";\n}\n\nconst c = esc(category.trim());\nconst t = esc(title.trim());\nconst co = esc(content.trim());\nconst ta = escArray(tags);\nconst m = escJson(metadata);\n\nconst query = `INSERT INTO context_blocks (category, tags, title, content, metadata) VALUES (${c}, ${ta}, ${t}, ${co}, ${m}) ON CONFLICT (category, title) DO UPDATE SET content = EXCLUDED.content, tags = EXCLUDED.tags, metadata = EXCLUDED.metadata, updated_at = now() RETURNING id, category, tags, title, content, metadata, created_at, updated_at`;\n\nreturn [{ json: { valid: true, query: query } }];\n"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          220,
+          300
+        ],
+        "id": "b1000001-0001-0001-0001-000000000002",
+        "name": "Build Upsert"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "cond-1",
+                "leftValue": "={{ $json.valid }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          440,
+          300
+        ],
+        "id": "b1000001-0001-0001-0001-000000000003",
+        "name": "Is Valid?"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "={{ $('Build Upsert').item.json.query }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          660,
+          200
+        ],
+        "id": "b1000001-0001-0001-0001-000000000004",
+        "name": "Execute Upsert",
+        "credentials": {
+          "postgres": {
+            "id": "T7QVF2rMIr2bhWYG",
+            "name": "Context Store DB"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const row = $('Execute Upsert').item.json;\nreturn [{ json: { success: true, block: row } }];\n"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1320,
+          200
+        ],
+        "id": "b1000001-0001-0001-0001-000000000005",
+        "name": "Format Response"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify($json) }}",
+          "options": {
+            "responseCode": 200
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          1540,
+          200
+        ],
+        "id": "b1000001-0001-0001-0001-000000000006",
+        "name": "Success Response"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify({ success: false, error: $json.error }) }}",
+          "options": {
+            "responseCode": 400
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          660,
+          460
+        ],
+        "id": "b1000001-0001-0001-0001-000000000007",
+        "name": "Error Response"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $vars.OLLAMA_HOST + '/api/embed' }}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({model: $vars.OLLAMA_EMBED_MODEL, input: $('Execute Upsert').item.json.title + ' ' + $('Execute Upsert').item.json.content}) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          880,
+          200
+        ],
+        "id": "b1000001-0001-0001-0001-000000000008",
+        "name": "Generate Embedding"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "={{ 'UPDATE context_blocks SET embedding = \\'' + JSON.stringify($json.embeddings[0]) + '\\' WHERE id = \\'' + $('Execute Upsert').item.json.id + '\\'' }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          1100,
+          200
+        ],
+        "id": "b1000001-0001-0001-0001-000000000009",
+        "name": "Store Embedding",
+        "credentials": {
+          "postgres": {
+            "id": "T7QVF2rMIr2bhWYG",
+            "name": "Context Store DB"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "Build Upsert",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Upsert": {
+        "main": [
+          [
+            {
+              "node": "Is Valid?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Valid?": {
+        "main": [
+          [
+            {
+              "node": "Execute Upsert",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Error Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Execute Upsert": {
+        "main": [
+          [
+            {
+              "node": "Generate Embedding",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Embedding": {
+        "main": [
+          [
+            {
+              "node": "Store Embedding",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Store Embedding": {
+        "main": [
+          [
+            {
+              "node": "Format Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format Response": {
+        "main": [
+          [
+            {
+              "node": "Success Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "null null",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-02-09T20:56:40.111Z",
+        "id": 19,
+        "workflowId": "UsitIwjJK6nl7MzD",
+        "versionId": "125c72a2-a801-42db-b71d-2f0446fe1233",
+        "event": "activated",
+        "userId": "5cf229d8-79e8-4887-907d-54af31a25bbc"
+      }
+    ]
+  }
+}

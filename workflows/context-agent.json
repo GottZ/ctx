@@ -1,0 +1,930 @@
+{
+  "updatedAt": "2026-02-09T23:38:36.197Z",
+  "createdAt": "2026-02-09T20:40:15.386Z",
+  "id": "e2eCUrv3UTsuavu2",
+  "name": "context-agent",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "context-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "id": "ca000001-0001-0001-0001-000000000001",
+      "name": "Webhook",
+      "webhookId": "ca000001-0001-0001-0001-000000000001"
+    },
+    {
+      "parameters": {
+        "jsCode": "// \u2500\u2500 Auth check \u2500\u2500\nconst auth = $('Auth Lookup').item.json;\nif (!auth.home_scope || auth.home_scope === '__UNAUTHORIZED__') {\n  return [{ json: { valid: false, error: 'Unauthorized: invalid API key' } }];\n}\nconst homeScope = auth.home_scope;\nconst allowedScopes = Array.isArray(auth.allowed_scopes) ? auth.allowed_scopes : [];\nconst readScopes = [homeScope, ...allowedScopes];\n\nconst body = $('Extract Key').item.json.body;\n\nconst query = body.query;\nconst category = body.category || null;\nconst tags = body.tags || null;\nlet limit = parseInt(body.limit) || 5;\nif (limit < 1) limit = 1;\nif (limit > 20) limit = 20;\n\nif (!query || typeof query !== 'string' || query.trim() === '') {\n  return [{ json: { valid: false, error: 'query is required' } }];\n}\n\nreturn [{ json: { valid: true, query: query.trim(), category, tags, limit, readScopes } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "id": "ca000001-0001-0001-0001-000000000002",
+      "name": "Build Query"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-valid",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        300
+      ],
+      "id": "ca000001-0001-0001-0001-000000000003",
+      "name": "Is Valid?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.OLLAMA_HOST + '/api/embed' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({model: $vars.OLLAMA_EMBED_MODEL, input: $('Build Query').item.json.query}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        200
+      ],
+      "id": "ca000001-0001-0001-0001-000000000004",
+      "name": "Generate Query Embedding"
+    },
+    {
+      "parameters": {
+        "jsCode": "const meta = $('Build Query').item.json;\nconst embeddingResponse = $('Generate Query Embedding').item.json;\nconst embedding = embeddingResponse.embeddings[0];\nconst embeddingStr = '[' + embedding.join(',') + ']';\n\nfunction esc(val) {\n  if (val === null || val === undefined) return 'NULL';\n  return \"'\" + String(val).replace(/'/g, \"''\") + \"'\";\n}\n\nfunction escArray(arr) {\n  if (!Array.isArray(arr) || arr.length === 0) return \"'{}'\";\n  const inner = arr.map(t => '\"' + String(t).replace(/\"/g, '\\\\\"').replace(/'/g, \"''\") + '\"').join(',');\n  return \"'{\" + inner + \"}'\";\n}\n\n// Scope filter\nconst readScopes = meta.readScopes || ['private', 'shared'];\nconst scopeFilter = `scope IN (${readScopes.map(s => esc(s)).join(', ')})`;\n\nconst baseConditions = [scopeFilter];\nif (meta.category) {\n  baseConditions.push(`category = ${esc(meta.category)}`);\n}\nif (meta.tags && Array.isArray(meta.tags) && meta.tags.length > 0) {\n  baseConditions.push(`tags && ${escArray(meta.tags)}`);\n}\n\nconst baseWhere = ' AND ' + baseConditions.join(' AND ');\n\nconst sql = `\nWITH vector_results AS (\n  SELECT id, category, tags, title, content, metadata, scope, updated_at,\n    1 - (embedding <=> '${embeddingStr}'::vector) AS vector_score,\n    ts_rank(\n      to_tsvector('german', coalesce(title, '') || ' ' || content),\n      plainto_tsquery('german', ${esc(meta.query)})\n    ) AS text_score\n  FROM context_blocks\n  WHERE embedding IS NOT NULL${baseWhere}\n),\nfulltext_results AS (\n  SELECT id, category, tags, title, content, metadata, scope, updated_at,\n    0.0::float AS vector_score,\n    ts_rank(\n      to_tsvector('german', coalesce(title, '') || ' ' || content),\n      plainto_tsquery('german', ${esc(meta.query)})\n    ) AS text_score\n  FROM context_blocks\n  WHERE embedding IS NULL${baseWhere}\n),\ncombined AS (\n  SELECT *,\n    (0.7 * vector_score + 0.3 * CASE WHEN text_score > 0 THEN LEAST(text_score * 3, 1.0) ELSE 0 END) AS combined_score\n  FROM vector_results\n  UNION ALL\n  SELECT *,\n    (CASE WHEN text_score > 0 THEN LEAST(text_score * 3, 1.0) ELSE 0.01 END) AS combined_score\n  FROM fulltext_results\n)\nSELECT id, category, tags, title, content, metadata, scope, updated_at,\n  round(vector_score::numeric, 4) AS vector_score,\n  round(text_score::numeric, 4) AS text_score,\n  round(combined_score::numeric, 4) AS combined_score\nFROM combined\nORDER BY combined_score DESC\nLIMIT ${meta.limit}\n`;\n\nreturn [{ json: { sql, query: meta.query, limit: meta.limit } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        200
+      ],
+      "id": "ca000001-0001-0001-0001-000000000005",
+      "name": "Build Hybrid SQL"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        200
+      ],
+      "id": "ca000001-0001-0001-0001-000000000006",
+      "name": "Hybrid Search",
+      "credentials": {
+        "postgres": {
+          "id": "T7QVF2rMIr2bhWYG",
+          "name": "Context Store DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = $input.all().filter(item => item.json && item.json.id);\nconst originalQuery = $('Build Hybrid SQL').item.json.query;\n\nif (results.length === 0) {\n  return [{ json: {\n    skipLLM: true,\n    answer: 'Keine relevanten Ergebnisse gefunden f\u00fcr: ' + originalQuery,\n    sources: []\n  } }];\n}\n\n// Truncate large blocks to prevent one source dominating\nconst MAX_BLOCK_CHARS = 1500;\nconst contextBlocks = results.map((item, i) => {\n  const r = item.json;\n  let content = r.content;\n  if (content.length > MAX_BLOCK_CHARS) {\n    content = content.substring(0, MAX_BLOCK_CHARS) + '\\n[... truncated]';\n  }\n  return `[${i+1}] \"${r.title}\" (${r.category}, score: ${r.combined_score}):\\n${content}`;\n}).join('\\n\\n---\\n\\n');\n\nconst sources = results.map(item => ({\n  id: item.json.id,\n  title: item.json.title,\n  category: item.json.category,\n  score: String(item.json.combined_score)\n}));\n\nconst systemPrompt = `<role>You are a RAG (Retrieval-Augmented Generation) assistant.</role>\n\n<task>Answer the user's question using ONLY the provided context blocks.</task>\n\n<constraints>\n1. Maximum response length: 150 words. Be as concise as possible.\n2. Cite sources using [1], [2], [3] notation matching the context block numbers.\n3. Use ONLY facts from the context blocks. Zero external knowledge.\n4. If the context blocks do not contain the answer, respond exactly: \"Die verf\u00fcgbaren Quellen enthalten keine Antwort auf diese Frage.\"\n5. Zero tolerance for hallucination. Never invent facts.\n6. Answer in the same language as the user's question.\n7. Do NOT summarize the entire context. Extract only what answers the question.\n</constraints>`;\n\nconst userPrompt = `QUESTION: ${originalQuery}\n\nCONTEXT BLOCKS (search these for the answer):\n${contextBlocks}\n\nAnswer the QUESTION above based on the context blocks. Focus on the specific question. Be concise.`;\n\nconst ollamaBody = JSON.stringify({\n  model: $vars.OLLAMA_CHAT_MODEL,\n  messages: [\n    { role: 'system', content: systemPrompt },\n    { role: 'user', content: userPrompt }\n  ],\n  stream: false,\n  options: { temperature: 0, num_predict: 1500 }\n});\n\nreturn [{ json: {\n  skipLLM: false,\n  ollamaBody,\n  sources,\n  resultCount: results.length\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        200
+      ],
+      "id": "ca000001-0001-0001-0001-000000000007",
+      "name": "Prepare LLM Prompt"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-skip",
+              "leftValue": "={{ $json.skipLLM }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "false"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1980,
+        200
+      ],
+      "id": "ca000001-0001-0001-0001-000000000008",
+      "name": "Route"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.OLLAMA_HOST + '/api/chat' }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.ollamaBody }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        100
+      ],
+      "id": "ca000001-0001-0001-0001-000000000009",
+      "name": "LLM Synthesis",
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "jsCode": "const prepData = $('Prepare LLM Prompt').item.json;\nconst llmResponse = $('LLM Synthesis').item.json;\nconst answer = llmResponse.message ? llmResponse.message.content : 'No response from LLM';\n\nreturn [{ json: {\n  success: true,\n  answer: answer,\n  sources: prepData.sources,\n  model: llmResponse.model || $vars.OLLAMA_CHAT_MODEL,\n  eval_count: llmResponse.eval_count || null\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        100
+      ],
+      "id": "ca000001-0001-0001-0001-000000000010",
+      "name": "Format LLM Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        100
+      ],
+      "id": "ca000001-0001-0001-0001-000000000011",
+      "name": "Respond Success"
+    },
+    {
+      "parameters": {
+        "jsCode": "const prepData = $('Prepare LLM Prompt').item.json;\nreturn [{ json: {\n  success: true,\n  answer: prepData.answer,\n  sources: []\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        300
+      ],
+      "id": "ca000001-0001-0001-0001-000000000012",
+      "name": "Format No Results"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2420,
+        300
+      ],
+      "id": "ca000001-0001-0001-0001-000000000013",
+      "name": "Respond No Results"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: $json.error }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        460
+      ],
+      "id": "ca000001-0001-0001-0001-000000000014",
+      "name": "Error Response"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst headers = items[0].json.headers || {};\nconst body = items[0].json.body || items[0].json;\nconst rawKey = headers['x-context-key'] || '';\nconst apiKey = rawKey.replace(/[^a-f0-9]/gi, '');\nreturn [{ json: { apiKey, body } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "id": "ca-scope-0001-0001-000000000001",
+      "name": "Extract Key"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE((SELECT home_scope FROM context_api_keys WHERE api_key = '{{ $json.apiKey }}' AND active = true LIMIT 1),'__UNAUTHORIZED__') AS home_scope, COALESCE((SELECT allowed_scopes FROM context_api_keys WHERE api_key = '{{ $json.apiKey }}' AND active = true LIMIT 1),'{}'::text[]) AS allowed_scopes",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        300
+      ],
+      "id": "ca-scope-0002-0002-000000000002",
+      "name": "Auth Lookup",
+      "credentials": {
+        "postgres": {
+          "id": "T7QVF2rMIr2bhWYG",
+          "name": "Context Store DB"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Query": {
+      "main": [
+        [
+          {
+            "node": "Is Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [
+          {
+            "node": "Generate Query Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Query Embedding": {
+      "main": [
+        [
+          {
+            "node": "Build Hybrid SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Hybrid SQL": {
+      "main": [
+        [
+          {
+            "node": "Hybrid Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hybrid Search": {
+      "main": [
+        [
+          {
+            "node": "Prepare LLM Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare LLM Prompt": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "LLM Synthesis",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format No Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Synthesis": {
+      "main": [
+        [
+          {
+            "node": "Format LLM Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format LLM Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format No Results": {
+      "main": [
+        [
+          {
+            "node": "Respond No Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Key": {
+      "main": [
+        [
+          {
+            "node": "Auth Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auth Lookup": {
+      "main": [
+        [
+          {
+            "node": "Build Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": true,
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": null,
+  "versionId": "fe0df205-9f26-4a13-b124-c9f65e1310f9",
+  "activeVersionId": "fe0df205-9f26-4a13-b124-c9f65e1310f9",
+  "versionCounter": 82,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-02-09T20:40:15.386Z",
+      "createdAt": "2026-02-09T20:40:15.386Z",
+      "role": "workflow:owner",
+      "workflowId": "e2eCUrv3UTsuavu2",
+      "projectId": "lkCht5XyAfzUeSUc",
+      "project": {
+        "updatedAt": "2026-02-06T08:39:44.701Z",
+        "createdAt": "2026-02-06T08:39:44.701Z",
+        "id": "lkCht5XyAfzUeSUc",
+        "name": "Unnamed Project",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "5cf229d8-79e8-4887-907d-54af31a25bbc"
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": {
+    "updatedAt": "2026-02-09T23:38:36.200Z",
+    "createdAt": "2026-02-09T23:38:36.200Z",
+    "versionId": "fe0df205-9f26-4a13-b124-c9f65e1310f9",
+    "workflowId": "e2eCUrv3UTsuavu2",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "context-agent",
+          "responseMode": "responseNode",
+          "options": {},
+          "authentication": "headerAuth"
+        },
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          0,
+          300
+        ],
+        "id": "ca000001-0001-0001-0001-000000000001",
+        "name": "Webhook",
+        "webhookId": "ca000001-0001-0001-0001-000000000001",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "mGQAPoZWzsOXyCD3",
+            "name": "Context Store Auth"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const items = $input.all();\nconst body = items[0].json.body || items[0].json;\n\nconst query = body.query;\nconst category = body.category || null;\nconst tags = body.tags || null;\nlet limit = parseInt(body.limit) || 5;\nif (limit < 1) limit = 1;\nif (limit > 20) limit = 20;\n\nif (!query || typeof query !== 'string' || query.trim() === '') {\n  return [{ json: { valid: false, error: 'query is required' } }];\n}\n\nreturn [{ json: { valid: true, query: query.trim(), category, tags, limit } }];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          220,
+          300
+        ],
+        "id": "ca000001-0001-0001-0001-000000000002",
+        "name": "Build Query"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "condition-valid",
+                "leftValue": "={{ $json.valid }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          440,
+          300
+        ],
+        "id": "ca000001-0001-0001-0001-000000000003",
+        "name": "Is Valid?"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $vars.OLLAMA_HOST + '/api/embed' }}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({model: $vars.OLLAMA_EMBED_MODEL, input: $('Build Query').item.json.query}) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          660,
+          200
+        ],
+        "id": "ca000001-0001-0001-0001-000000000004",
+        "name": "Generate Query Embedding"
+      },
+      {
+        "parameters": {
+          "jsCode": "const meta = $('Build Query').item.json;\nconst embeddingResponse = $('Generate Query Embedding').item.json;\nconst embedding = embeddingResponse.embeddings[0];\nconst embeddingStr = '[' + embedding.join(',') + ']';\n\nfunction esc(val) {\n  if (val === null || val === undefined) return 'NULL';\n  return \"'\" + String(val).replace(/'/g, \"''\") + \"'\";\n}\n\nfunction escArray(arr) {\n  if (!Array.isArray(arr) || arr.length === 0) return \"'{}'\";\n  const inner = arr.map(t => '\"' + String(t).replace(/\"/g, '\\\\\"').replace(/'/g, \"''\") + '\"').join(',');\n  return \"'{\" + inner + \"}'\";\n}\n\nconst baseConditions = [];\nif (meta.category) {\n  baseConditions.push(`category = ${esc(meta.category)}`);\n}\nif (meta.tags && Array.isArray(meta.tags) && meta.tags.length > 0) {\n  baseConditions.push(`tags && ${escArray(meta.tags)}`);\n}\n\nconst baseWhere = baseConditions.length > 0 ? ' AND ' + baseConditions.join(' AND ') : '';\n\nconst sql = `\nWITH vector_results AS (\n  SELECT id, category, tags, title, content, metadata, updated_at,\n    1 - (embedding <=> '${embeddingStr}'::vector) AS vector_score,\n    ts_rank(\n      to_tsvector('german', coalesce(title, '') || ' ' || content),\n      plainto_tsquery('german', ${esc(meta.query)})\n    ) AS text_score\n  FROM context_blocks\n  WHERE embedding IS NOT NULL${baseWhere}\n),\nfulltext_results AS (\n  SELECT id, category, tags, title, content, metadata, updated_at,\n    0.0::float AS vector_score,\n    ts_rank(\n      to_tsvector('german', coalesce(title, '') || ' ' || content),\n      plainto_tsquery('german', ${esc(meta.query)})\n    ) AS text_score\n  FROM context_blocks\n  WHERE embedding IS NULL${baseWhere}\n),\ncombined AS (\n  SELECT *,\n    (0.7 * vector_score + 0.3 * CASE WHEN text_score > 0 THEN LEAST(text_score * 3, 1.0) ELSE 0 END) AS combined_score\n  FROM vector_results\n  UNION ALL\n  SELECT *,\n    (CASE WHEN text_score > 0 THEN LEAST(text_score * 3, 1.0) ELSE 0.01 END) AS combined_score\n  FROM fulltext_results\n)\nSELECT id, category, tags, title, content, metadata, updated_at,\n  round(vector_score::numeric, 4) AS vector_score,\n  round(text_score::numeric, 4) AS text_score,\n  round(combined_score::numeric, 4) AS combined_score\nFROM combined\nORDER BY combined_score DESC\nLIMIT ${meta.limit}\n`;\n\nreturn [{ json: { sql, query: meta.query, limit: meta.limit } }];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          880,
+          200
+        ],
+        "id": "ca000001-0001-0001-0001-000000000005",
+        "name": "Build Hybrid SQL"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "={{ $json.sql }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          1100,
+          200
+        ],
+        "id": "ca000001-0001-0001-0001-000000000006",
+        "name": "Hybrid Search",
+        "credentials": {
+          "postgres": {
+            "id": "T7QVF2rMIr2bhWYG",
+            "name": "Context Store DB"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const results = $input.all().filter(item => item.json && item.json.id);\nconst originalQuery = $('Build Hybrid SQL').item.json.query;\n\nif (results.length === 0) {\n  return [{ json: {\n    skipLLM: true,\n    answer: 'Keine relevanten Ergebnisse gefunden f\u00fcr: ' + originalQuery,\n    sources: []\n  } }];\n}\n\n// Truncate large blocks to prevent one source dominating\nconst MAX_BLOCK_CHARS = 1500;\nconst contextBlocks = results.map((item, i) => {\n  const r = item.json;\n  let content = r.content;\n  if (content.length > MAX_BLOCK_CHARS) {\n    content = content.substring(0, MAX_BLOCK_CHARS) + '\\n[... truncated]';\n  }\n  return `[${i+1}] \"${r.title}\" (${r.category}, score: ${r.combined_score}):\\n${content}`;\n}).join('\\n\\n---\\n\\n');\n\nconst sources = results.map(item => ({\n  id: item.json.id,\n  title: item.json.title,\n  category: item.json.category,\n  score: String(item.json.combined_score)\n}));\n\nconst systemPrompt = `<role>You are a RAG (Retrieval-Augmented Generation) assistant.</role>\n\n<task>Answer the user's question using ONLY the provided context blocks.</task>\n\n<constraints>\n1. Maximum response length: 150 words. Be as concise as possible.\n2. Cite sources using [1], [2], [3] notation matching the context block numbers.\n3. Use ONLY facts from the context blocks. Zero external knowledge.\n4. If the context blocks do not contain the answer, respond exactly: \"Die verf\u00fcgbaren Quellen enthalten keine Antwort auf diese Frage.\"\n5. Zero tolerance for hallucination. Never invent facts.\n6. Answer in the same language as the user's question.\n7. Do NOT summarize the entire context. Extract only what answers the question.\n</constraints>`;\n\nconst userPrompt = `QUESTION: ${originalQuery}\n\nCONTEXT BLOCKS (search these for the answer):\n${contextBlocks}\n\nAnswer the QUESTION above based on the context blocks. Focus on the specific question. Be concise.`;\n\nconst ollamaBody = JSON.stringify({\n  model: $vars.OLLAMA_CHAT_MODEL,\n  messages: [\n    { role: 'system', content: systemPrompt },\n    { role: 'user', content: userPrompt }\n  ],\n  stream: false,\n  options: { temperature: 0, num_predict: 1500 }\n});\n\nreturn [{ json: {\n  skipLLM: false,\n  ollamaBody,\n  sources,\n  resultCount: results.length\n} }];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1320,
+          200
+        ],
+        "id": "ca000001-0001-0001-0001-000000000007",
+        "name": "Prepare LLM Prompt"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "condition-skip",
+                "leftValue": "={{ $json.skipLLM }}",
+                "rightValue": false,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "false"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          1540,
+          200
+        ],
+        "id": "ca000001-0001-0001-0001-000000000008",
+        "name": "Route"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $vars.OLLAMA_HOST + '/api/chat' }}",
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ $json.ollamaBody }}",
+          "options": {
+            "timeout": 60000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1760,
+          100
+        ],
+        "id": "ca000001-0001-0001-0001-000000000009",
+        "name": "LLM Synthesis",
+        "credentials": {}
+      },
+      {
+        "parameters": {
+          "jsCode": "const prepData = $('Prepare LLM Prompt').item.json;\nconst llmResponse = $('LLM Synthesis').item.json;\nconst answer = llmResponse.message ? llmResponse.message.content : 'No response from LLM';\n\nreturn [{ json: {\n  success: true,\n  answer: answer,\n  sources: prepData.sources,\n  model: llmResponse.model || $vars.OLLAMA_CHAT_MODEL,\n  eval_count: llmResponse.eval_count || null\n} }];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1980,
+          100
+        ],
+        "id": "ca000001-0001-0001-0001-000000000010",
+        "name": "Format LLM Response"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify($json) }}",
+          "options": {
+            "responseCode": 200
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          2200,
+          100
+        ],
+        "id": "ca000001-0001-0001-0001-000000000011",
+        "name": "Respond Success"
+      },
+      {
+        "parameters": {
+          "jsCode": "const prepData = $('Prepare LLM Prompt').item.json;\nreturn [{ json: {\n  success: true,\n  answer: prepData.answer,\n  sources: []\n} }];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1760,
+          300
+        ],
+        "id": "ca000001-0001-0001-0001-000000000012",
+        "name": "Format No Results"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify($json) }}",
+          "options": {
+            "responseCode": 200
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          1980,
+          300
+        ],
+        "id": "ca000001-0001-0001-0001-000000000013",
+        "name": "Respond No Results"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify({ success: false, error: $json.error }) }}",
+          "options": {
+            "responseCode": 400
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          660,
+          460
+        ],
+        "id": "ca000001-0001-0001-0001-000000000014",
+        "name": "Error Response"
+      }
+    ],
+    "connections": {
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "Build Query",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Query": {
+        "main": [
+          [
+            {
+              "node": "Is Valid?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Valid?": {
+        "main": [
+          [
+            {
+              "node": "Generate Query Embedding",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Error Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Query Embedding": {
+        "main": [
+          [
+            {
+              "node": "Build Hybrid SQL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Hybrid SQL": {
+        "main": [
+          [
+            {
+              "node": "Hybrid Search",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Hybrid Search": {
+        "main": [
+          [
+            {
+              "node": "Prepare LLM Prompt",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare LLM Prompt": {
+        "main": [
+          [
+            {
+              "node": "Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route": {
+        "main": [
+          [
+            {
+              "node": "LLM Synthesis",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Format No Results",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "LLM Synthesis": {
+        "main": [
+          [
+            {
+              "node": "Format LLM Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format LLM Response": {
+        "main": [
+          [
+            {
+              "node": "Respond Success",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format No Results": {
+        "main": [
+          [
+            {
+              "node": "Respond No Results",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "null null",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-02-09T23:38:36.263Z",
+        "id": 36,
+        "workflowId": "e2eCUrv3UTsuavu2",
+        "versionId": "fe0df205-9f26-4a13-b124-c9f65e1310f9",
+        "event": "activated",
+        "userId": "5cf229d8-79e8-4887-907d-54af31a25bbc"
+      },
+      {
+        "createdAt": "2026-02-09T23:38:41.262Z",
+        "id": 37,
+        "workflowId": "e2eCUrv3UTsuavu2",
+        "versionId": "fe0df205-9f26-4a13-b124-c9f65e1310f9",
+        "event": "activated",
+        "userId": "5cf229d8-79e8-4887-907d-54af31a25bbc"
+      }
+    ]
+  }
+}
