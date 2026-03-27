@@ -254,6 +254,17 @@ PGPASSWORD="${CONTEXT_DB_PASSWORD}" psql -v ON_ERROR_STOP=1 --username "${CONTEX
 	ALTER TABLE context_blocks
 	    ADD COLUMN IF NOT EXISTS guard_status  VARCHAR(20) DEFAULT 'active';
 
+	-- -- context_blocks: Scale-Vorbereitung (chunk hierarchy, quality, embedding queue) --
+	ALTER TABLE context_blocks ADD COLUMN IF NOT EXISTS source_id      UUID;
+	ALTER TABLE context_blocks ADD COLUMN IF NOT EXISTS parent_id      UUID;
+	ALTER TABLE context_blocks ADD COLUMN IF NOT EXISTS block_type     VARCHAR(30) DEFAULT 'knowledge';
+	ALTER TABLE context_blocks ADD COLUMN IF NOT EXISTS chunk_index    INTEGER;
+	ALTER TABLE context_blocks ADD COLUMN IF NOT EXISTS quality_score  REAL DEFAULT 1.0;
+	ALTER TABLE context_blocks ADD COLUMN IF NOT EXISTS embed_status   VARCHAR(20) DEFAULT 'done';
+	ALTER TABLE context_blocks ADD COLUMN IF NOT EXISTS description    TEXT;
+	ALTER TABLE context_blocks ADD COLUMN IF NOT EXISTS auto_tags      TEXT[] DEFAULT '{}';
+	ALTER TABLE context_blocks ADD COLUMN IF NOT EXISTS language       VARCHAR(10);
+
 	-- -- context_blocks: Phase 1 tsvector GENERATED columns --
 	DO $$
 	BEGIN
@@ -376,10 +387,23 @@ PGPASSWORD="${CONTEXT_DB_PASSWORD}" psql -v ON_ERROR_STOP=1 --username "${CONTEX
 	    ON context_blocks USING GIN(ts_en);
 
 	-- -- context_blocks: Phase 1 trigram indexes --
-	CREATE INDEX IF NOT EXISTS idx_trgm_content
-	    ON context_blocks USING GIN(content gin_trgm_ops);
+	-- NOTE: idx_trgm_content dropped (dead index, fulltext via ts_de/ts_en)
 	CREATE INDEX IF NOT EXISTS idx_trgm_title
 	    ON context_blocks USING GIN(title gin_trgm_ops);
+
+	-- -- context_blocks: Scale-Vorbereitung indexes --
+	CREATE INDEX IF NOT EXISTS idx_source_id
+	    ON context_blocks(source_id);
+	CREATE INDEX IF NOT EXISTS idx_parent_id
+	    ON context_blocks(parent_id);
+	CREATE INDEX IF NOT EXISTS idx_block_type
+	    ON context_blocks(block_type);
+	CREATE INDEX IF NOT EXISTS idx_embed_pending
+	    ON context_blocks(embed_status) WHERE embed_status != 'done';
+	CREATE INDEX IF NOT EXISTS idx_auto_tags
+	    ON context_blocks USING GIN(auto_tags);
+	CREATE INDEX IF NOT EXISTS idx_language
+	    ON context_blocks(language);
 
 	-- -- context_blocks: guard_status index --
 	CREATE INDEX IF NOT EXISTS idx_guard_status
@@ -527,6 +551,6 @@ echo "  Tables:     context_blocks, context_api_keys, context_blobs,"
 echo "              context_digest_state, context_guard_state,"
 echo "              context_access_log, context_write_log"
 echo "  Extensions: vector, timescaledb, pgcrypto, pg_trgm"
-echo "  Indexes:    16 regular + 1 HNSW (CONCURRENTLY)"
+echo "  Indexes:    21 regular + 1 HNSW (CONCURRENTLY)"
 echo "  Triggers:   trg_digest_dirty, trg_guard_dirty"
 echo "============================================================"

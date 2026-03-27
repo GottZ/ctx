@@ -6,7 +6,7 @@
 
 # ctx by GottZ — Claude Code Instructions
 
-n8n workflow automation, PostgreSQL 18 + pgvector, Custom Context Store (14 Workflows), Ollama (Qwen3-Embedding-8B + qwen3:4b-instruct, 24GB VRAM Quadro RTX 6000). Working directory: `/compose/n8n`
+n8n workflow automation, PostgreSQL 18 + pgvector, Custom Context Store (14 Workflows), Ollama (Qwen3-Embedding-8B + qwen3.5:9b, 24GB VRAM Quadro RTX 6000). Working directory: `/compose/n8n`
 
 **Immer zuerst `.project/prompt.md` lesen** — enthält Session-Übergabe, Architektur, Entscheidungen, Roadmap.
 
@@ -36,7 +36,7 @@ Für größere Änderungen:
 3. **Team-Lead Agent** — destilliert Ergebnisse, identifiziert kreative Ausreißer, nicht nur Konsens
 4. **Contrarian-Agents** — hinterfragen jede Entscheidung mit Paradigmen-Diversity (Skeptiker, Ökonom, Angreifer, Dissident)
 5. **Implementieren.** Offensichtliche Entscheidungen direkt umsetzen. Preparation nach `/tmp/`, dann Live-System.
-6. **Verifizieren** — `bash test.sh --with-ollama` (14 Tests) + `bash eval.sh` (35 Tests) nach jeder Änderung
+6. **Verifizieren** — `bash test.sh --with-ollama` (14 Tests) + `bash eval.sh` (43 Tests) nach jeder Änderung
 
 ### Technische Constraints
 
@@ -68,6 +68,7 @@ Kanonische Referenz: Block `019d25d8-b8aa-7f02-8ad0-e0bba7b7cfcf` (infrastructur
 - **Confidence/LLM Override**: Wenn LLM NO_RELEVANT_SOURCES sagt, wird confidence auf no_relevant_blocks_found überschrieben
 - **Query-Translation**: DE→EN mit Domain-Glossar (Schreibschutz→Write Guard, etc.)
 - **low_confidence**: Top-2 Sources statt Top-1 (breite Fragen brauchen mehr Kontext)
+- **Session 5 Workflow-Fixes**: Explain-Prefix entfernt (empirisch null Nutzen), isKwQuery entfernt (Reranker übernimmt), think:false in Synthesis+Reranker, escapeXml() für Content-Sanitization, parameterized SQL queries
 
 ## Containers
 
@@ -140,6 +141,23 @@ Guard API (über context-manage Webhook):
 
 CLI: `ctx guard [list|stats|resolve <id> archive|keep]`
 
+## Schema (context_store DB, Session 5)
+
+- 7 Tabellen: context_blocks, context_api_keys, context_blobs, context_digest_state, context_guard_state, context_access_log, context_write_log
+- 27 Spalten auf context_blocks (Session 5: +9 für Scale-Vorbereitung: source_id, parent_id, block_type, chunk_index, quality_score, embed_status, description, auto_tags, language)
+- PG-Tuning: shared_buffers=8GB, maintenance_work_mem=4GB, work_mem=64MB, effective_cache_size=48GB
+
+## Security (Session 5)
+
+- Parameterized SQL queries in context-agent (Build Hybrid SQL, Prepare Access Log)
+- XML-Escaping (escapeXml) in LLM-Prompt für Block-Content und Titles
+- Translation Prompt: System/User Message getrennt + Output-Whitelist
+- Scope-Isolation: DELETE/UPDATE nur auf home_scope (nicht allowed_scopes)
+- Rate-Limiting: 100 Writes/Min pro API-Key (HTTP 429)
+- Size Limits: Content 50KB, Title 500 chars, Category 100 chars, Blob 50MB
+- Guard: Batch LIMIT 100/Cycle, block_type-aware (chunks übersprungen), FIFO
+- key_hash Auth konsistent in allen Workflows (inkl. context-digest, context-manage access log)
+
 ## Ollama (Embedding + LLM)
 
 Host: `$OLLAMA_HOST (see .env)` (Quadro RTX 6000, 24GB VRAM, primäre GPU mit DWM ~1GB). Config in n8n Variables (`$vars`), NOT `$env`. `OLLAMA_NUM_PARALLEL=4` auf dem Windows-Host.
@@ -148,11 +166,11 @@ Host: `$OLLAMA_HOST (see .env)` (Quadro RTX 6000, 24GB VRAM, primäre GPU mit DW
 |----------|-------|---------|
 | `OLLAMA_HOST` | `$OLLAMA_HOST (see .env)` | API base URL |
 | `OLLAMA_EMBED_MODEL` | `qwen3-embedding:8b-ctx2k` | Embeddings (native 4096d, Matryoshka-truncated to 1024d, num_ctx=2048 via Modelfile → 5.7 GB statt 13.3 GB VRAM) |
-| `OLLAMA_CHAT_MODEL` | `qwen3:4b-instruct` | LLM synthesis (4B Q4_K_M, 7.8 GB VRAM, 94% KW-Extraktion, Session 3: 11 Modelle bis 22B getestet, keines besser) |
+| `OLLAMA_CHAT_MODEL` | `qwen3.5:9b` | LLM synthesis (9B, 9.0 GB VRAM, 97.7% eval pass rate, Session 5: ersetzt qwen3:4b-instruct) |
 
-VRAM-Budget: Embedding 5.7 + Synthese 7.8 = 13.5 GB → 9.5 GB Headroom.
+VRAM-Budget: Embedding 5.7 + Synthese 9.0 = 14.7 GB → 9.3 GB Headroom.
 
-**qwen3.5:9b**: Death-Spiral-Problem war API-Bug (#14793), nicht Modell-Problem. `/api/chat` mit `"think": false` funktioniert korrekt. Aber: 88% KW (vs 94% Champion), 2.6x langsamer. (Session 3, empirisch validiert)
+**qwen3.5:9b**: Aktuelles Synthese-Modell (Session 5). Death-Spiral-Problem war API-Bug (#14793), gelöst via /api/chat mit think:false. 42/43 eval PASS (97.7%), +10% KW vs qwen3:4b-instruct, bessere Constraint-#7-Einhaltung. 9.0 GB VRAM.
 
 **Session 3 Modell-Evaluation**: 11 Modelle getestet (4B-22B), Q4_K_M > Q8_0 für RAG (höhere Präzision → mehr Paraphrasierung → weniger KW-Treffer), IFEval korreliert nicht mit RAG-Qualität. Details: `memory/session3_model_evaluation.md`
 
@@ -174,6 +192,6 @@ docker compose logs -f n8n          # Logs
 
 ```bash
 bash /compose/n8n/test.sh --with-ollama   # 14 Tests (10 System + 4 Retrieval)
-bash /compose/n8n/eval.sh                 # 35 Tests (Confident, Bilingual, Negative, Keyword, Multi-hop, Retrieval)
+bash /compose/n8n/eval.sh                 # 43 Tests (Confident, Bilingual, Negative, Keyword, Imperative, Multi-hop, Retrieval)
 bash /compose/n8n/eval.sh --update-baseline  # Neue Baseline setzen nach validierter Änderung
 ```

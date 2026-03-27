@@ -88,7 +88,7 @@ S04|synthesis|What is the PostgreSQL version and what extension is used for vect
 S05|synthesis|What LLM model is used for synthesis in the context-agent?|confident|qwen3,4b,instruct|Model config
 S06|synthesis|How does the blob storage authenticate requests?|confident|key,hash,sha|Auth mechanism
 S07|synthesis|What is the RRF fusion strategy used in retrieval?|confident|rrf,fusion|Retrieval architecture
-S08|synthesis|What are the Write Guard similarity thresholds?|confident|0.95,0.85|Threshold values
+S08|synthesis|What are the Write Guard similarity thresholds?|confident|0.98,0.92|Threshold values
 S09|synthesis|What happened with the qwen3.5:9b model evaluation?|confident|death,spiral,thinking,token|Known failure case
 S10|synthesis|What is the Matryoshka truncation dimension for embeddings?|confident|1024|Embedding dimension
 
@@ -119,6 +119,16 @@ M02|synthesis|What is the full auth flow from API key to scope filtering?|confid
 M03|synthesis|How do Write Guard thresholds differ for temporal content vs normal content?|confident|temporal,0.98,0.92|Specialized thresholds
 M04|synthesis|What are the differences between context-search and context-agent?|confident|search,agent,llm,compact|Endpoint comparison
 M05|synthesis|How does the bilingual retrieval gap affect German queries and what is the fix?|confident|german,translation,retrieval|Problem + solution
+
+# --- IMPERATIVE (command-style queries, should NOT be confused with keywords) ---
+I01|synthesis|Zeig mir die Write Guard Thresholds|confident|0.98,0.92|DE imperative, known thresholds
+I02|synthesis|List all scope values|confident|private,shared|EN imperative, enum values
+I03|synthesis|Nenn die Modelle die im System laufen|confident|qwen3,embedding|DE imperative, model inventory
+I04|synthesis|Describe the RRF retrieval strategy|confident|semantic,rrf,weight|EN imperative, architecture
+I05|synthesis|Zeig Scopes|confident|private,shared|Minimal 2-word DE imperative
+I06|synthesis|Show me how auth works in the context store|confident|key,hash,scope|EN imperative, auth flow
+I07|synthesis|Liste alle Kategorien im Context Store auf|confident|infrastructure,learnings|DE imperative, categories
+I08|synthesis|Explain the blob storage authentication|confident|key,hash,blob|EN imperative, blob auth
 
 # --- RETRIEVAL QUALITY (context-search, no LLM — tests vector+FTS ranking) ---
 R01|retrieval|Write Guard|any|write guard|Top result relevance
@@ -373,6 +383,16 @@ if ! $RETRIEVAL_ONLY; then
   done < <(define_test_cases)
 
   echo ""
+  echo "  -- Imperative (command-style queries) --"
+  while IFS='|' read -r id type query expected_conf keywords desc; do
+    [[ "$id" =~ ^#.*$ ]] && continue
+    [[ -z "$id" ]] && continue
+    [[ "$type" != "synthesis" ]] && continue
+    [[ ! "$id" =~ ^I ]] && continue
+    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc"
+  done < <(define_test_cases)
+
+  echo ""
   echo "  -- Multi-hop (cross-block reasoning) --"
   while IFS='|' read -r id type query expected_conf keywords desc; do
     [[ "$id" =~ ^#.*$ ]] && continue
@@ -428,6 +448,7 @@ categories = {
     'bilingual': {'prefix': 'B', 'pass': 0, 'fail': 0},
     'negative':  {'prefix': 'N', 'pass': 0, 'fail': 0},
     'keyword':   {'prefix': 'K', 'pass': 0, 'fail': 0},
+    'imperative': {'prefix': 'I', 'pass': 0, 'fail': 0},
     'multihop':  {'prefix': 'M', 'pass': 0, 'fail': 0},
     'retrieval': {'prefix': 'R', 'pass': 0, 'fail': 0},
 }
@@ -502,7 +523,7 @@ print()
 # Category breakdown
 print('  Category        Pass  Fail  Total  Rate')
 print('  ' + '-' * 46)
-for cat in ['confident', 'bilingual', 'negative', 'keyword', 'multihop', 'retrieval']:
+for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'multihop', 'retrieval']:
     c = data['by_category'].get(cat, {'pass':0,'fail':0,'total':0})
     if c['total'] == 0:
         continue
@@ -574,7 +595,7 @@ elif cs['false_positive_rate'] < bs['false_positive_rate'] - 10:
     improvements.append(f'False positive rate: {bs[\"false_positive_rate\"]}% -> {cs[\"false_positive_rate\"]}% (IMPROVED)')
 
 # Per-category regressions
-for cat in ['confident', 'bilingual', 'negative', 'keyword', 'multihop', 'retrieval']:
+for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'multihop', 'retrieval']:
     cc = current['by_category'].get(cat, {'pass':0, 'total':0})
     bc = baseline['by_category'].get(cat, {'pass':0, 'total':0})
     if bc['total'] == 0 or cc['total'] == 0:

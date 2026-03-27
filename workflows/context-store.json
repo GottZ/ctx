@@ -1,0 +1,1263 @@
+{
+    "updatedAt": "2026-03-27T15:04:24.051Z",
+    "createdAt": "2026-02-06T08:52:27.917Z",
+    "id": "UsitIwjJK6nl7MzD",
+    "name": "context-store",
+    "description": null,
+    "active": true,
+    "isArchived": false,
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "context-store",
+                "responseMode": "responseNode",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "position": [
+                0,
+                300
+            ],
+            "id": "b1000001-0001-0001-0001-000000000001",
+            "name": "Webhook",
+            "webhookId": "b1000001-0001-0001-0001-000000000001"
+        },
+        {
+            "parameters": {
+                "jsCode": "const items = $input.all();\nconst headers = items[0].json.headers || {};\nconst body = items[0].json.body || items[0].json;\nconst rawKey = headers['x-context-key'] || '';\nconst apiKey = rawKey.replace(/[^a-f0-9]/gi, '');\nreturn [{ json: { apiKey, body } }];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                220,
+                300
+            ],
+            "id": "cs-scope-0001-0001-000000000001",
+            "name": "Extract Key"
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "WITH auth_update AS (\n  UPDATE context_api_keys SET last_used_at = now()\n  WHERE key_hash = encode(digest('{{ $json.apiKey }}', 'sha256'), 'hex') AND active = true\n  RETURNING id, home_scope, allowed_scopes\n)\nSELECT COALESCE(\n  (SELECT home_scope FROM auth_update LIMIT 1),\n  '__UNAUTHORIZED__'\n) AS home_scope,\nCOALESCE(\n  (SELECT allowed_scopes FROM auth_update LIMIT 1),\n  '{}'::text[]\n) AS allowed_scopes,\n(SELECT id FROM auth_update LIMIT 1) AS api_key_id",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                440,
+                300
+            ],
+            "id": "cs-scope-0002-0002-000000000002",
+            "name": "Auth Lookup",
+            "credentials": {
+                "postgres": {
+                    "id": "T7QVF2rMIr2bhWYG",
+                    "name": "Context Store DB"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// \u2500\u2500 Auth check \u2500\u2500\nconst auth = $('Auth Lookup').item.json;\nif (!auth.home_scope || auth.home_scope === '__UNAUTHORIZED__') {\n  return [{ json: { valid: false, error: 'Unauthorized: invalid API key' } }];\n}\nconst homeScope = auth.home_scope;\nconst allowedScopes = Array.isArray(auth.allowed_scopes) ? auth.allowed_scopes : [];\n\nconst body = $('Extract Key').item.json.body;\n\nconst category = body.category;\nconst title = body.title;\nconst content = body.content;\nconst tags = body.tags || [];\nconst metadata = body.metadata || {};\n\nif (!category || typeof category !== 'string' || category.trim() === '') {\n  return [{ json: { valid: false, error: 'category is required and must be a non-empty string' } }];\n}\nif (!title || typeof title !== 'string' || title.trim() === '') {\n  return [{ json: { valid: false, error: 'title is required and must be a non-empty string' } }];\n}\nif (!content || typeof content !== 'string' || content.trim() === '') {\n  return [{ json: { valid: false, error: 'content is required and must be a non-empty string' } }];\n}\n\n// Determine write scope\nlet writeScope = homeScope;\nlet scopeExplicit = !!body.scope;\nif (body.scope === 'shared' && allowedScopes.includes('shared')) {\n  writeScope = 'shared';\n} else if (body.scope && body.scope !== homeScope) {\n  return [{ json: { valid: false, error: 'Cannot write to scope: ' + body.scope } }];\n}\n\nfunction esc(val) {\n  if (val === null || val === undefined) return 'NULL';\n  return \"'\" + String(val).replace(/'/g, \"''\") + \"'\";\n}\n\nfunction escArray(arr) {\n  if (!Array.isArray(arr) || arr.length === 0) return \"'{}'\";\n  const inner = arr.map(t => '\"' + String(t).replace(/\"/g, '\\\\\"').replace(/'/g, \"''\") + '\"').join(',');\n  return \"'{\" + inner + \"}'\";\n}\n\nfunction escJson(obj) {\n  if (!obj || typeof obj !== 'object') return \"'{}'::jsonb\";\n  const jsonStr = JSON.stringify(obj).replace(/'/g, \"''\");\n  return \"'\" + jsonStr + \"'::jsonb\";\n}\n\nconst c = esc(category.trim());\nconst t = esc(title.trim());\nconst co = esc(content.trim());\nconst ta = escArray(tags);\nconst m = escJson(metadata);\nconst sc = esc(writeScope);\n\n// On INSERT: use writeScope. On UPDATE: preserve existing scope unless explicitly set.\nconst scopeOnUpdate = scopeExplicit ? 'scope = EXCLUDED.scope,' : '';\n\nconst query = `INSERT INTO context_blocks (category, tags, title, content, metadata, scope) VALUES (${c}, ${ta}, ${t}, ${co}, ${m}, ${sc}) ON CONFLICT (category, title) DO UPDATE SET content = EXCLUDED.content, tags = EXCLUDED.tags, metadata = EXCLUDED.metadata, ${scopeOnUpdate} updated_at = now() RETURNING id, category, tags, title, content, metadata, scope, created_at, updated_at`;\n\nreturn [{ json: { valid: true, query, content_raw: co, category_raw: c, title_raw: t, scope_raw: sc } }];\n"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                660,
+                300
+            ],
+            "id": "b1000001-0001-0001-0001-000000000002",
+            "name": "Build Upsert"
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "cond-1",
+                            "leftValue": "={{ $json.valid }}",
+                            "rightValue": true,
+                            "operator": {
+                                "type": "boolean",
+                                "operation": "true"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2.2,
+            "position": [
+                880,
+                300
+            ],
+            "id": "b1000001-0001-0001-0001-000000000003",
+            "name": "Is Valid?"
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "={{ 'SELECT id, title, category FROM context_blocks WHERE content_hash = encode(digest(' + $('Build Upsert').item.json.content_raw + ', \\'sha256\\'), \\'hex\\') AND NOT is_archived AND scope = ' + $('Build Upsert').item.json.scope_raw + ' AND category = ' + $('Build Upsert').item.json.category_raw + ' AND title = ' + $('Build Upsert').item.json.title_raw + ' LIMIT 1' }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                1100,
+                200
+            ],
+            "id": "hash-check-0001-0001-000000000001",
+            "name": "Hash Check",
+            "alwaysOutputData": true,
+            "credentials": {
+                "postgres": {
+                    "id": "T7QVF2rMIr2bhWYG",
+                    "name": "Context Store DB"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "cond-dup-1",
+                            "leftValue": "={{ $json.id }}",
+                            "rightValue": "",
+                            "operator": {
+                                "type": "string",
+                                "operation": "exists"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2.2,
+            "position": [
+                1320,
+                200
+            ],
+            "id": "is-dup-0001-0001-000000000001",
+            "name": "Is Duplicate?"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ JSON.stringify({ success: true, action: 'noop', reason: 'identical_content', existing_id: $json.id }) }}",
+                "options": {
+                    "responseCode": 200
+                }
+            },
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                1540,
+                100
+            ],
+            "id": "noop-resp-0001-0001-000000000001",
+            "name": "NOOP Response"
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "={{ $('Build Upsert').item.json.query }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                1540,
+                300
+            ],
+            "id": "b1000001-0001-0001-0001-000000000004",
+            "name": "Execute Upsert",
+            "credentials": {
+                "postgres": {
+                    "id": "T7QVF2rMIr2bhWYG",
+                    "name": "Context Store DB"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "={{ $vars.OLLAMA_HOST + '/api/embed' }}",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ JSON.stringify({model: $vars.OLLAMA_EMBED_MODEL, input: 'Instruct: Represent the document for retrieval\\nContent: ' + $('Execute Upsert').item.json.title + '\\n\\n' + $('Execute Upsert').item.json.content}) }}",
+                "options": {
+                    "timeout": 30000
+                }
+            },
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1760,
+                300
+            ],
+            "id": "b1000001-0001-0001-0001-000000000008",
+            "name": "Generate Embedding"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Matryoshka truncation: 4096d \u2192 1024d + L2-normalize\nconst fullEmbedding = $input.first().json.embeddings[0];\nconst truncated = fullEmbedding.slice(0, 1024);\nconst norm = Math.sqrt(truncated.reduce((sum, x) => sum + x * x, 0));\nconst normalized = norm > 0 ? truncated.map(x => x / norm) : truncated;\nreturn [{ json: { embeddings: [normalized], truncated_from: fullEmbedding.length, truncated_to: 1024 } }];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                300
+            ],
+            "id": "em-trunc-0001-0001-000000000001",
+            "name": "Truncate Embedding"
+        },
+        {
+            "parameters": {
+                "jsCode": "const embedding = $input.first().json.embeddings[0];\nconst dim = embedding.length;\nconst norm = Math.sqrt(embedding.reduce((sum, x) => sum + x * x, 0));\nconst isZeroVector = embedding.every(x => x === 0);\nconst mean = embedding.reduce((s, v) => s + v, 0) / dim;\nconst variance = embedding.reduce((sum, x) => sum + (x - mean) ** 2, 0) / dim;\n\nif (isZeroVector || dim !== 1024 || norm < 0.9 || norm > 1.1 || variance < 0.0001) {\n  throw new Error(`Embedding quality check failed: dim=${dim}, norm=${norm.toFixed(4)}, var=${variance.toFixed(6)}, zero=${isZeroVector}`);\n}\n\nreturn $input.all();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                300
+            ],
+            "id": "eq-gate-0001-0001-000000000001",
+            "name": "Embedding Quality Gate"
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "={{ 'UPDATE context_blocks SET embedding = \\'' + JSON.stringify($json.embeddings[0]) + '\\' WHERE id = \\'' + $('Execute Upsert').item.json.id + '\\'' }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                2420,
+                300
+            ],
+            "id": "b1000001-0001-0001-0001-000000000009",
+            "name": "Store Embedding",
+            "credentials": {
+                "postgres": {
+                    "id": "T7QVF2rMIr2bhWYG",
+                    "name": "Context Store DB"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "const items = $input.all();\nconst row = items[0].json;\nreturn [{ json: { success: true, block: row } }];\n"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                300
+            ],
+            "id": "b1000001-0001-0001-0001-000000000005",
+            "name": "Format Response"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ JSON.stringify($json) }}",
+                "options": {
+                    "responseCode": 200
+                }
+            },
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                2860,
+                300
+            ],
+            "id": "b1000001-0001-0001-0001-000000000006",
+            "name": "Success Response"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ JSON.stringify({ success: false, error: $json.error }) }}",
+                "options": {
+                    "responseCode": 400
+                }
+            },
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                1100,
+                460
+            ],
+            "id": "b1000001-0001-0001-0001-000000000007",
+            "name": "Error Response"
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "SELECT count(*) AS write_count FROM context_access_log\nWHERE api_key_id = '{{ $('Auth Lookup').item.json.api_key_id }}'::uuid\n  AND action = 'write'\n  AND created_at > now() - INTERVAL '60 seconds'",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                990,
+                150
+            ],
+            "id": "rate-limit-0001-0001-000000000001",
+            "name": "Rate Limit Check",
+            "alwaysOutputData": true,
+            "credentials": {
+                "postgres": {
+                    "id": "T7QVF2rMIr2bhWYG",
+                    "name": "Context Store DB"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "cond-rate-limit",
+                            "leftValue": "={{ Number($json.write_count) }}",
+                            "rightValue": 100,
+                            "operator": {
+                                "type": "number",
+                                "operation": "lt"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2.2,
+            "position": [
+                990,
+                300
+            ],
+            "id": "rate-gate-0001-0001-000000000001",
+            "name": "Under Rate Limit?"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ JSON.stringify({ success: false, error: 'Rate limit exceeded: max 100 writes per 60 seconds' }) }}",
+                "options": {
+                    "responseCode": 429
+                }
+            },
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                990,
+                500
+            ],
+            "id": "rate-429-0001-0001-000000000001",
+            "name": "Rate Limit Response"
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO context_access_log (api_key_id, block_id, action, metadata)\nVALUES (\n  '{{ $('Auth Lookup').item.json.api_key_id }}'::uuid,\n  '{{ $('Execute Upsert').item.json.id }}'::uuid,\n  'write',\n  '{}'::jsonb\n)",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                1650,
+                450
+            ],
+            "id": "write-log-0001-0001-000000000001",
+            "name": "Log Write",
+            "credentials": {
+                "postgres": {
+                    "id": "T7QVF2rMIr2bhWYG",
+                    "name": "Context Store DB"
+                }
+            }
+        }
+    ],
+    "connections": {
+        "Webhook": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Key",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Key": {
+            "main": [
+                [
+                    {
+                        "node": "Auth Lookup",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Auth Lookup": {
+            "main": [
+                [
+                    {
+                        "node": "Build Upsert",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build Upsert": {
+            "main": [
+                [
+                    {
+                        "node": "Is Valid?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Is Valid?": {
+            "main": [
+                [
+                    {
+                        "node": "Rate Limit Check",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Error Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Hash Check": {
+            "main": [
+                [
+                    {
+                        "node": "Is Duplicate?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Is Duplicate?": {
+            "main": [
+                [
+                    {
+                        "node": "NOOP Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Execute Upsert",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Execute Upsert": {
+            "main": [
+                [
+                    {
+                        "node": "Generate Embedding",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Log Write",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Generate Embedding": {
+            "main": [
+                [
+                    {
+                        "node": "Truncate Embedding",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Truncate Embedding": {
+            "main": [
+                [
+                    {
+                        "node": "Embedding Quality Gate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Embedding Quality Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Store Embedding",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Embedding": {
+            "main": [
+                [
+                    {
+                        "node": "Format Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format Response": {
+            "main": [
+                [
+                    {
+                        "node": "Success Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Rate Limit Check": {
+            "main": [
+                [
+                    {
+                        "node": "Under Rate Limit?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Under Rate Limit?": {
+            "main": [
+                [
+                    {
+                        "node": "Hash Check",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Rate Limit Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "callerPolicy": "workflowsFromSameOwner",
+        "availableInMCP": true,
+        "executionOrder": "v1"
+    },
+    "staticData": null,
+    "meta": null,
+    "pinData": null,
+    "versionId": "243f5fe1-8e2f-4cf8-982a-871c0d3454e4",
+    "activeVersionId": "243f5fe1-8e2f-4cf8-982a-871c0d3454e4",
+    "versionCounter": 84,
+    "triggerCount": 1,
+    "shared": [
+        {
+            "updatedAt": "2026-02-06T08:52:27.917Z",
+            "createdAt": "2026-02-06T08:52:27.917Z",
+            "role": "workflow:owner",
+            "workflowId": "UsitIwjJK6nl7MzD",
+            "projectId": "lkCht5XyAfzUeSUc",
+            "project": {
+                "updatedAt": "2026-02-06T08:39:44.701Z",
+                "createdAt": "2026-02-06T08:39:44.701Z",
+                "id": "lkCht5XyAfzUeSUc",
+                "name": "Unnamed Project",
+                "type": "personal",
+                "icon": null,
+                "description": null,
+                "creatorId": "5cf229d8-79e8-4887-907d-54af31a25bbc"
+            }
+        }
+    ],
+    "tags": [],
+    "activeVersion": {
+        "updatedAt": "2026-03-27T15:04:24.052Z",
+        "createdAt": "2026-03-27T15:04:24.052Z",
+        "versionId": "243f5fe1-8e2f-4cf8-982a-871c0d3454e4",
+        "workflowId": "UsitIwjJK6nl7MzD",
+        "nodes": [
+            {
+                "parameters": {
+                    "httpMethod": "POST",
+                    "path": "context-store",
+                    "responseMode": "responseNode",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.webhook",
+                "typeVersion": 2,
+                "position": [
+                    0,
+                    300
+                ],
+                "id": "b1000001-0001-0001-0001-000000000001",
+                "name": "Webhook",
+                "webhookId": "b1000001-0001-0001-0001-000000000001"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const items = $input.all();\nconst headers = items[0].json.headers || {};\nconst body = items[0].json.body || items[0].json;\nconst rawKey = headers['x-context-key'] || '';\nconst apiKey = rawKey.replace(/[^a-f0-9]/gi, '');\nreturn [{ json: { apiKey, body } }];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    220,
+                    300
+                ],
+                "id": "cs-scope-0001-0001-000000000001",
+                "name": "Extract Key"
+            },
+            {
+                "parameters": {
+                    "operation": "executeQuery",
+                    "query": "WITH auth_update AS (\n  UPDATE context_api_keys SET last_used_at = now()\n  WHERE key_hash = encode(digest('{{ $json.apiKey }}', 'sha256'), 'hex') AND active = true\n  RETURNING id, home_scope, allowed_scopes\n)\nSELECT COALESCE(\n  (SELECT home_scope FROM auth_update LIMIT 1),\n  '__UNAUTHORIZED__'\n) AS home_scope,\nCOALESCE(\n  (SELECT allowed_scopes FROM auth_update LIMIT 1),\n  '{}'::text[]\n) AS allowed_scopes,\n(SELECT id FROM auth_update LIMIT 1) AS api_key_id",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.postgres",
+                "typeVersion": 2.5,
+                "position": [
+                    440,
+                    300
+                ],
+                "id": "cs-scope-0002-0002-000000000002",
+                "name": "Auth Lookup",
+                "credentials": {
+                    "postgres": {
+                        "id": "T7QVF2rMIr2bhWYG",
+                        "name": "Context Store DB"
+                    }
+                }
+            },
+            {
+                "parameters": {
+                    "jsCode": "// \u2500\u2500 Auth check \u2500\u2500\nconst auth = $('Auth Lookup').item.json;\nif (!auth.home_scope || auth.home_scope === '__UNAUTHORIZED__') {\n  return [{ json: { valid: false, error: 'Unauthorized: invalid API key' } }];\n}\nconst homeScope = auth.home_scope;\nconst allowedScopes = Array.isArray(auth.allowed_scopes) ? auth.allowed_scopes : [];\n\nconst body = $('Extract Key').item.json.body;\n\nconst category = body.category;\nconst title = body.title;\nconst content = body.content;\nconst tags = body.tags || [];\nconst metadata = body.metadata || {};\n\nif (!category || typeof category !== 'string' || category.trim() === '') {\n  return [{ json: { valid: false, error: 'category is required and must be a non-empty string' } }];\n}\nif (!title || typeof title !== 'string' || title.trim() === '') {\n  return [{ json: { valid: false, error: 'title is required and must be a non-empty string' } }];\n}\nif (!content || typeof content !== 'string' || content.trim() === '') {\n  return [{ json: { valid: false, error: 'content is required and must be a non-empty string' } }];\n}\n\n// Determine write scope\nlet writeScope = homeScope;\nlet scopeExplicit = !!body.scope;\nif (body.scope === 'shared' && allowedScopes.includes('shared')) {\n  writeScope = 'shared';\n} else if (body.scope && body.scope !== homeScope) {\n  return [{ json: { valid: false, error: 'Cannot write to scope: ' + body.scope } }];\n}\n\nfunction esc(val) {\n  if (val === null || val === undefined) return 'NULL';\n  return \"'\" + String(val).replace(/'/g, \"''\") + \"'\";\n}\n\nfunction escArray(arr) {\n  if (!Array.isArray(arr) || arr.length === 0) return \"'{}'\";\n  const inner = arr.map(t => '\"' + String(t).replace(/\"/g, '\\\\\"').replace(/'/g, \"''\") + '\"').join(',');\n  return \"'{\" + inner + \"}'\";\n}\n\nfunction escJson(obj) {\n  if (!obj || typeof obj !== 'object') return \"'{}'::jsonb\";\n  const jsonStr = JSON.stringify(obj).replace(/'/g, \"''\");\n  return \"'\" + jsonStr + \"'::jsonb\";\n}\n\nconst c = esc(category.trim());\nconst t = esc(title.trim());\nconst co = esc(content.trim());\nconst ta = escArray(tags);\nconst m = escJson(metadata);\nconst sc = esc(writeScope);\n\n// On INSERT: use writeScope. On UPDATE: preserve existing scope unless explicitly set.\nconst scopeOnUpdate = scopeExplicit ? 'scope = EXCLUDED.scope,' : '';\n\nconst query = `INSERT INTO context_blocks (category, tags, title, content, metadata, scope) VALUES (${c}, ${ta}, ${t}, ${co}, ${m}, ${sc}) ON CONFLICT (category, title) DO UPDATE SET content = EXCLUDED.content, tags = EXCLUDED.tags, metadata = EXCLUDED.metadata, ${scopeOnUpdate} updated_at = now() RETURNING id, category, tags, title, content, metadata, scope, created_at, updated_at`;\n\nreturn [{ json: { valid: true, query, content_raw: co, category_raw: c, title_raw: t, scope_raw: sc } }];\n"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    660,
+                    300
+                ],
+                "id": "b1000001-0001-0001-0001-000000000002",
+                "name": "Build Upsert"
+            },
+            {
+                "parameters": {
+                    "conditions": {
+                        "options": {
+                            "caseSensitive": true,
+                            "leftValue": "",
+                            "typeValidation": "strict"
+                        },
+                        "conditions": [
+                            {
+                                "id": "cond-1",
+                                "leftValue": "={{ $json.valid }}",
+                                "rightValue": true,
+                                "operator": {
+                                    "type": "boolean",
+                                    "operation": "true"
+                                }
+                            }
+                        ],
+                        "combinator": "and"
+                    },
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 2.2,
+                "position": [
+                    880,
+                    300
+                ],
+                "id": "b1000001-0001-0001-0001-000000000003",
+                "name": "Is Valid?"
+            },
+            {
+                "parameters": {
+                    "operation": "executeQuery",
+                    "query": "={{ 'SELECT id, title, category FROM context_blocks WHERE content_hash = encode(digest(' + $('Build Upsert').item.json.content_raw + ', \\'sha256\\'), \\'hex\\') AND NOT is_archived AND scope = ' + $('Build Upsert').item.json.scope_raw + ' AND category = ' + $('Build Upsert').item.json.category_raw + ' AND title = ' + $('Build Upsert').item.json.title_raw + ' LIMIT 1' }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.postgres",
+                "typeVersion": 2.5,
+                "position": [
+                    1100,
+                    200
+                ],
+                "id": "hash-check-0001-0001-000000000001",
+                "name": "Hash Check",
+                "alwaysOutputData": true,
+                "credentials": {
+                    "postgres": {
+                        "id": "T7QVF2rMIr2bhWYG",
+                        "name": "Context Store DB"
+                    }
+                }
+            },
+            {
+                "parameters": {
+                    "conditions": {
+                        "options": {
+                            "caseSensitive": true,
+                            "leftValue": "",
+                            "typeValidation": "strict"
+                        },
+                        "conditions": [
+                            {
+                                "id": "cond-dup-1",
+                                "leftValue": "={{ $json.id }}",
+                                "rightValue": "",
+                                "operator": {
+                                    "type": "string",
+                                    "operation": "exists"
+                                }
+                            }
+                        ],
+                        "combinator": "and"
+                    },
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 2.2,
+                "position": [
+                    1320,
+                    200
+                ],
+                "id": "is-dup-0001-0001-000000000001",
+                "name": "Is Duplicate?"
+            },
+            {
+                "parameters": {
+                    "respondWith": "json",
+                    "responseBody": "={{ JSON.stringify({ success: true, action: 'noop', reason: 'identical_content', existing_id: $json.id }) }}",
+                    "options": {
+                        "responseCode": 200
+                    }
+                },
+                "type": "n8n-nodes-base.respondToWebhook",
+                "typeVersion": 1.1,
+                "position": [
+                    1540,
+                    100
+                ],
+                "id": "noop-resp-0001-0001-000000000001",
+                "name": "NOOP Response"
+            },
+            {
+                "parameters": {
+                    "operation": "executeQuery",
+                    "query": "={{ $('Build Upsert').item.json.query }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.postgres",
+                "typeVersion": 2.5,
+                "position": [
+                    1540,
+                    300
+                ],
+                "id": "b1000001-0001-0001-0001-000000000004",
+                "name": "Execute Upsert",
+                "credentials": {
+                    "postgres": {
+                        "id": "T7QVF2rMIr2bhWYG",
+                        "name": "Context Store DB"
+                    }
+                }
+            },
+            {
+                "parameters": {
+                    "method": "POST",
+                    "url": "={{ $vars.OLLAMA_HOST + '/api/embed' }}",
+                    "sendBody": true,
+                    "specifyBody": "json",
+                    "jsonBody": "={{ JSON.stringify({model: $vars.OLLAMA_EMBED_MODEL, input: 'Instruct: Represent the document for retrieval\\nContent: ' + $('Execute Upsert').item.json.title + '\\n\\n' + $('Execute Upsert').item.json.content}) }}",
+                    "options": {
+                        "timeout": 30000
+                    }
+                },
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [
+                    1760,
+                    300
+                ],
+                "id": "b1000001-0001-0001-0001-000000000008",
+                "name": "Generate Embedding"
+            },
+            {
+                "parameters": {
+                    "jsCode": "// Matryoshka truncation: 4096d \u2192 1024d + L2-normalize\nconst fullEmbedding = $input.first().json.embeddings[0];\nconst truncated = fullEmbedding.slice(0, 1024);\nconst norm = Math.sqrt(truncated.reduce((sum, x) => sum + x * x, 0));\nconst normalized = norm > 0 ? truncated.map(x => x / norm) : truncated;\nreturn [{ json: { embeddings: [normalized], truncated_from: fullEmbedding.length, truncated_to: 1024 } }];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    1980,
+                    300
+                ],
+                "id": "em-trunc-0001-0001-000000000001",
+                "name": "Truncate Embedding"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const embedding = $input.first().json.embeddings[0];\nconst dim = embedding.length;\nconst norm = Math.sqrt(embedding.reduce((sum, x) => sum + x * x, 0));\nconst isZeroVector = embedding.every(x => x === 0);\nconst mean = embedding.reduce((s, v) => s + v, 0) / dim;\nconst variance = embedding.reduce((sum, x) => sum + (x - mean) ** 2, 0) / dim;\n\nif (isZeroVector || dim !== 1024 || norm < 0.9 || norm > 1.1 || variance < 0.0001) {\n  throw new Error(`Embedding quality check failed: dim=${dim}, norm=${norm.toFixed(4)}, var=${variance.toFixed(6)}, zero=${isZeroVector}`);\n}\n\nreturn $input.all();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    2200,
+                    300
+                ],
+                "id": "eq-gate-0001-0001-000000000001",
+                "name": "Embedding Quality Gate"
+            },
+            {
+                "parameters": {
+                    "operation": "executeQuery",
+                    "query": "={{ 'UPDATE context_blocks SET embedding = \\'' + JSON.stringify($json.embeddings[0]) + '\\' WHERE id = \\'' + $('Execute Upsert').item.json.id + '\\'' }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.postgres",
+                "typeVersion": 2.5,
+                "position": [
+                    2420,
+                    300
+                ],
+                "id": "b1000001-0001-0001-0001-000000000009",
+                "name": "Store Embedding",
+                "credentials": {
+                    "postgres": {
+                        "id": "T7QVF2rMIr2bhWYG",
+                        "name": "Context Store DB"
+                    }
+                }
+            },
+            {
+                "parameters": {
+                    "jsCode": "const items = $input.all();\nconst row = items[0].json;\nreturn [{ json: { success: true, block: row } }];\n"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    2640,
+                    300
+                ],
+                "id": "b1000001-0001-0001-0001-000000000005",
+                "name": "Format Response"
+            },
+            {
+                "parameters": {
+                    "respondWith": "json",
+                    "responseBody": "={{ JSON.stringify($json) }}",
+                    "options": {
+                        "responseCode": 200
+                    }
+                },
+                "type": "n8n-nodes-base.respondToWebhook",
+                "typeVersion": 1.1,
+                "position": [
+                    2860,
+                    300
+                ],
+                "id": "b1000001-0001-0001-0001-000000000006",
+                "name": "Success Response"
+            },
+            {
+                "parameters": {
+                    "respondWith": "json",
+                    "responseBody": "={{ JSON.stringify({ success: false, error: $json.error }) }}",
+                    "options": {
+                        "responseCode": 400
+                    }
+                },
+                "type": "n8n-nodes-base.respondToWebhook",
+                "typeVersion": 1.1,
+                "position": [
+                    1100,
+                    460
+                ],
+                "id": "b1000001-0001-0001-0001-000000000007",
+                "name": "Error Response"
+            },
+            {
+                "parameters": {
+                    "operation": "executeQuery",
+                    "query": "SELECT count(*) AS write_count FROM context_access_log\nWHERE api_key_id = '{{ $('Auth Lookup').item.json.api_key_id }}'::uuid\n  AND action = 'write'\n  AND created_at > now() - INTERVAL '60 seconds'",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.postgres",
+                "typeVersion": 2.5,
+                "position": [
+                    990,
+                    150
+                ],
+                "id": "rate-limit-0001-0001-000000000001",
+                "name": "Rate Limit Check",
+                "alwaysOutputData": true,
+                "credentials": {
+                    "postgres": {
+                        "id": "T7QVF2rMIr2bhWYG",
+                        "name": "Context Store DB"
+                    }
+                }
+            },
+            {
+                "parameters": {
+                    "conditions": {
+                        "options": {
+                            "caseSensitive": true,
+                            "leftValue": "",
+                            "typeValidation": "strict"
+                        },
+                        "conditions": [
+                            {
+                                "id": "cond-rate-limit",
+                                "leftValue": "={{ Number($json.write_count) }}",
+                                "rightValue": 100,
+                                "operator": {
+                                    "type": "number",
+                                    "operation": "lt"
+                                }
+                            }
+                        ],
+                        "combinator": "and"
+                    },
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 2.2,
+                "position": [
+                    990,
+                    300
+                ],
+                "id": "rate-gate-0001-0001-000000000001",
+                "name": "Under Rate Limit?"
+            },
+            {
+                "parameters": {
+                    "respondWith": "json",
+                    "responseBody": "={{ JSON.stringify({ success: false, error: 'Rate limit exceeded: max 100 writes per 60 seconds' }) }}",
+                    "options": {
+                        "responseCode": 429
+                    }
+                },
+                "type": "n8n-nodes-base.respondToWebhook",
+                "typeVersion": 1.1,
+                "position": [
+                    990,
+                    500
+                ],
+                "id": "rate-429-0001-0001-000000000001",
+                "name": "Rate Limit Response"
+            },
+            {
+                "parameters": {
+                    "operation": "executeQuery",
+                    "query": "INSERT INTO context_access_log (api_key_id, block_id, action, metadata)\nVALUES (\n  '{{ $('Auth Lookup').item.json.api_key_id }}'::uuid,\n  '{{ $('Execute Upsert').item.json.id }}'::uuid,\n  'write',\n  '{}'::jsonb\n)",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.postgres",
+                "typeVersion": 2.5,
+                "position": [
+                    1650,
+                    450
+                ],
+                "id": "write-log-0001-0001-000000000001",
+                "name": "Log Write",
+                "credentials": {
+                    "postgres": {
+                        "id": "T7QVF2rMIr2bhWYG",
+                        "name": "Context Store DB"
+                    }
+                }
+            }
+        ],
+        "connections": {
+            "Webhook": {
+                "main": [
+                    [
+                        {
+                            "node": "Extract Key",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Extract Key": {
+                "main": [
+                    [
+                        {
+                            "node": "Auth Lookup",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Auth Lookup": {
+                "main": [
+                    [
+                        {
+                            "node": "Build Upsert",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Build Upsert": {
+                "main": [
+                    [
+                        {
+                            "node": "Is Valid?",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Is Valid?": {
+                "main": [
+                    [
+                        {
+                            "node": "Rate Limit Check",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ],
+                    [
+                        {
+                            "node": "Error Response",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Hash Check": {
+                "main": [
+                    [
+                        {
+                            "node": "Is Duplicate?",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Is Duplicate?": {
+                "main": [
+                    [
+                        {
+                            "node": "NOOP Response",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ],
+                    [
+                        {
+                            "node": "Execute Upsert",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Execute Upsert": {
+                "main": [
+                    [
+                        {
+                            "node": "Generate Embedding",
+                            "type": "main",
+                            "index": 0
+                        },
+                        {
+                            "node": "Log Write",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Generate Embedding": {
+                "main": [
+                    [
+                        {
+                            "node": "Truncate Embedding",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Truncate Embedding": {
+                "main": [
+                    [
+                        {
+                            "node": "Embedding Quality Gate",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Embedding Quality Gate": {
+                "main": [
+                    [
+                        {
+                            "node": "Store Embedding",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Store Embedding": {
+                "main": [
+                    [
+                        {
+                            "node": "Format Response",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Format Response": {
+                "main": [
+                    [
+                        {
+                            "node": "Success Response",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Rate Limit Check": {
+                "main": [
+                    [
+                        {
+                            "node": "Under Rate Limit?",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Under Rate Limit?": {
+                "main": [
+                    [
+                        {
+                            "node": "Hash Check",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ],
+                    [
+                        {
+                            "node": "Rate Limit Response",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            }
+        },
+        "authors": "Jan-Stefan Janetzky",
+        "name": null,
+        "description": null,
+        "autosaved": false,
+        "workflowPublishHistory": [
+            {
+                "createdAt": "2026-03-27T15:04:55.632Z",
+                "id": 202,
+                "workflowId": "UsitIwjJK6nl7MzD",
+                "versionId": "243f5fe1-8e2f-4cf8-982a-871c0d3454e4",
+                "event": "deactivated",
+                "userId": "8c4fb3f9-08f6-448a-92ff-60ad2acec15e"
+            },
+            {
+                "createdAt": "2026-03-27T15:04:55.643Z",
+                "id": 203,
+                "workflowId": "UsitIwjJK6nl7MzD",
+                "versionId": "243f5fe1-8e2f-4cf8-982a-871c0d3454e4",
+                "event": "activated",
+                "userId": "8c4fb3f9-08f6-448a-92ff-60ad2acec15e"
+            },
+            {
+                "createdAt": "2026-03-27T15:04:24.072Z",
+                "id": 198,
+                "workflowId": "UsitIwjJK6nl7MzD",
+                "versionId": "243f5fe1-8e2f-4cf8-982a-871c0d3454e4",
+                "event": "deactivated",
+                "userId": "8c4fb3f9-08f6-448a-92ff-60ad2acec15e"
+            },
+            {
+                "createdAt": "2026-03-27T15:04:24.081Z",
+                "id": 199,
+                "workflowId": "UsitIwjJK6nl7MzD",
+                "versionId": "243f5fe1-8e2f-4cf8-982a-871c0d3454e4",
+                "event": "activated",
+                "userId": "8c4fb3f9-08f6-448a-92ff-60ad2acec15e"
+            }
+        ]
+    }
+}
