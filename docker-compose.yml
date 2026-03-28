@@ -3,60 +3,6 @@
 # https://github.com/GottZ/ctx
 
 services:
-  n8n:
-    image: docker.n8n.io/n8nio/n8n
-    container_name: n8n
-    labels:
-      - "reversed.host=${N8N_HOSTNAME}"
-      - "reversed.port=443"
-      - "reversed.ssl=${N8N_SSL_DOMAIN}"
-    volumes:
-      - ./data:/home/node/.n8n
-    #ports:
-    #  - 127.0.0.1:5678:5678
-    networks:
-      - n8nintern
-    restart: unless-stopped
-    environment:
-      TZ: Europe/Berlin
-      NODE_ENV: production
-      N8N_DIAGNOSTICS_ENABLED: false
-
-      EXTERNAL_FRONTEND_HOOKS_URLS:
-      N8N_DIAGNOSTICS_CONFIG_FRONTEND:
-      N8N_DIAGNOSTICS_CONFIG_BACKEND:
-      #N8N_ENCRYPTION_KEY:
-      VUE_APP_URL_BASE_API: https://${N8N_HOSTNAME}/
-      N8N_HOST: ${N8N_HOSTNAME}
-      N8N_PROTOCOL: https
-      N8N_PORT: 443
-      N8N_PROXY_HOPS: 1
-      N8N_TEMPLATES_ENABLED: true
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: db
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
-      DB_POSTGRESDB_USER: ${POSTGRES_NON_ROOT_USER}
-      DB_POSTGRESDB_PASSWORD: ${POSTGRES_NON_ROOT_PASSWORD}
-      CONTEXT_DB_HOST: db
-      CONTEXT_DB_PORT: 5432
-      CONTEXT_DB_NAME: ${CONTEXT_DB}
-      CONTEXT_DB_USER: ${CONTEXT_DB_USER}
-      CONTEXT_DB_PASSWORD: ${CONTEXT_DB_PASSWORD}
-      OLLAMA_HOST: ${OLLAMA_HOST}
-      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL}
-      OLLAMA_EMBED_DIMS: ${OLLAMA_EMBED_DIMS}
-      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL}
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5678/healthz"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    depends_on:
-      db:
-        condition: service_healthy
-
   ctx:
     build:
       context: ./go
@@ -107,8 +53,6 @@ services:
       POSTGRES_DB:
       POSTGRES_USER:
       POSTGRES_PASSWORD:
-      POSTGRES_NON_ROOT_USER:
-      POSTGRES_NON_ROOT_PASSWORD:
       CONTEXT_DB: ${CONTEXT_DB}
       CONTEXT_DB_USER: ${CONTEXT_DB_USER}
       CONTEXT_DB_PASSWORD: ${CONTEXT_DB_PASSWORD}

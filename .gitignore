@@ -1,37 +1,21 @@
-# Secrets
-.env
+# Ignore all dotfiles/dotdirs (.env, .n8n/, .claude/, .project/, .eval-baseline.json, ...)
+.*
+!.gitignore
+!.env.example
 
-# Database data directories
+# Local overrides
+docker-compose.override.yml
+
+# Data & backups
 db/
 db-backup-pg17/
-
-# n8n runtime data
-data/
-
-# Backup files
 backups/
 backup-*.sql
 
-# Eval baseline (contains environment-specific data)
-.eval-baseline.json
-
-# Operational notes (contains secrets from session history)
+# Misc
 progress.md
-
-# Claude Code project memory (contains session-specific context with secrets)
-# CLAUDE.md is tracked — it contains project instructions without secrets
-.claude/
-
-# Internal working documents (session research, reviews — may contain secrets)
-.project/
-
-# Editor / OS
+prompt.md
 *.swp
 *.swo
 *~
-.DS_Store
 Thumbs.db
-
-# Node
-node_modules/
-prompt.md
