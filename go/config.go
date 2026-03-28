@@ -26,6 +26,9 @@ type Config struct {
 	OllamaEmbedDims  int
 	OllamaChatModel  string
 
+	// Ollama LLM behavior
+	OllamaThink string // "true", "false", or "" (omit from request)
+
 	// Reranker
 	RerankEnabled bool
 
@@ -57,6 +60,8 @@ func LoadConfig() (Config, error) {
 		OllamaEmbedModel: getEnv("OLLAMA_EMBED_MODEL", "qwen3-embedding:8b"),
 		OllamaEmbedDims:  embedDims,
 		OllamaChatModel:  getEnv("OLLAMA_CHAT_MODEL", "qwen3.5:9b"),
+
+		OllamaThink: getEnv("OLLAMA_THINK", "false"),
 
 		RerankEnabled: getEnv("CTX_RERANK_ENABLED", "false") == "true",
 

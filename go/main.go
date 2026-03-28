@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -58,6 +59,18 @@ func main() {
 	defer pool.Close()
 
 	slog.Info("database pool created", "host", cfg.ContextDBHost, "db", cfg.ContextDB)
+
+	// Set LLM think mode from config
+	switch cfg.OllamaThink {
+	case "true":
+		t := true
+		llm.ThinkMode = &t
+	case "false":
+		t := false
+		llm.ThinkMode = &t
+	default:
+		llm.ThinkMode = nil // omit from request
+	}
 
 	// Run database migrations
 	if err := store.RunMigrations(ctx, pool); err != nil {

@@ -67,6 +67,16 @@ echo "=== Context Store Benchmark ==="
 echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo ""
 
+# Config block — makes config drift visible
+echo "Config: webhook=$WEBHOOK"
+echo "Config: ollama=$(echo "${OLLAMA_HOST:-unset}" | sed 's|^\(https\?://[^@]*@\)|<redacted>@|')"
+echo "Config: embed_model=${OLLAMA_EMBED_MODEL:-unset}"
+echo "Config: embed_dims=${OLLAMA_EMBED_DIMS:-unset}"
+echo "Config: chat_model=${OLLAMA_CHAT_MODEL:-unset}"
+db_status=$(docker inspect --format '{{.State.Health.Status}}' n8n-db-1 2>/dev/null || echo "unknown")
+echo "Config: db=n8n-db-1 ($db_status)"
+echo ""
+
 # =====================================================================
 # PART 1: System Tests (no Ollama)
 # =====================================================================
@@ -221,10 +231,10 @@ fi
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "7" ]] && [[ "$col_count" == "27" ]]; then
+if [[ "$table_count" == "8" ]] && [[ "$col_count" == "27" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 7 tables + 27 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 8 tables + 27 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
@@ -238,7 +248,7 @@ fi
 
 # T09 GUARD_LIST_FILTER
 T="T09 GUARD_LIST_FILTER"
-resp=$(api "$WEBHOOK/context-manage" "$KEY_PRIVATE" '{"action":"guard-list","data":{"status":"clean"}}')
+resp=$(api "$WEBHOOK/context-manage" "$KEY_PRIVATE" '{"action":"guard-list","status":"clean"}')
 non_clean=$(echo "$resp" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)

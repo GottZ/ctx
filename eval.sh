@@ -314,6 +314,15 @@ echo "  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "================================================================="
 echo ""
 
+# --- Config ---
+TEST_COUNT=$(define_test_cases | grep -cE '^[A-Z][0-9]+\|')
+echo "Config: webhook=${WEBHOOK}"
+echo "Config: embed_model=${OLLAMA_EMBED_MODEL:-unset}"
+echo "Config: embed_dims=${OLLAMA_EMBED_DIMS:-unset}"
+echo "Config: chat_model=${OLLAMA_CHAT_MODEL:-unset}"
+echo "Config: tests=${TEST_COUNT}"
+echo ""
+
 # Preflight: verify connectivity
 echo "--- Preflight ---"
 preflight=$(api "$WEBHOOK/context-manage" '{"action":"stats"}' 15)

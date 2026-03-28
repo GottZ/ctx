@@ -68,7 +68,7 @@ A hybrid retrieval knowledge store serving as persistent external memory for AI 
 - Docker + Docker Compose
 - Go 1.23+ (for development)
 - Ollama instance with models pulled:
-  - `qwen3-embedding:8b` (or custom Modelfile variant)
+  - `qwen3-embedding:8b-ctx2k` (custom Modelfile with num_ctx=2048, saves ~8 GB VRAM)
   - `qwen3.5:9b`
 
 ### Setup
@@ -256,7 +256,7 @@ please use these names. For consulting and implementation support: [hire@gottz.d
 
 ## License
 
-MIT License — see [LICENSE](LICENSE).
+MPL-2.0 — see [LICENSE](LICENSE).
 
 ## Author
 

@@ -59,10 +59,14 @@ type ChatResponse struct {
 	EvalCount int     `json:"eval_count"`
 }
 
+// ThinkMode controls whether the LLM should use chain-of-thought reasoning.
+// Some models (e.g. qwen3.5) default to thinking mode and need explicit think:false
+// to avoid death-spiral behavior. Other models ignore this parameter.
+var ThinkMode *bool
+
 // Chat sends a non-streaming chat request to Ollama and returns the response content.
 // The timeout parameter controls the HTTP client timeout.
 func Chat(ctx context.Context, host, model, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
-	think := false
 	reqBody := ChatRequest{
 		Model: model,
 		Messages: []Message{
@@ -70,7 +74,7 @@ func Chat(ctx context.Context, host, model, systemPrompt, userPrompt string, opt
 			{Role: "user", Content: userPrompt},
 		},
 		Stream:  false,
-		Think:   &think,
+		Think:   ThinkMode,
 		Options: opts,
 	}
 

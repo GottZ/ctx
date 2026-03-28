@@ -74,7 +74,8 @@ Kanonische Referenz: Block `019d25d8-b8aa-7f02-8ad0-e0bba7b7cfcf` (infrastructur
 
 | Container | Image | Purpose |
 |-----------|-------|---------|
-| `n8n` | `docker.n8n.io/n8nio/n8n` | Workflow engine (port 443) |
+| `ctx` | `n8n-ctx` (local build from `go/`) | Go-Server: API, Guard, Digest (port 8080 intern, via Reverse-Proxy) |
+| `n8n` | `docker.n8n.io/n8nio/n8n` | Workflow engine (legacy, wird abgeschaltet) |
 | `n8n-db-1` | `pgvector-timescaledb:pg18` (custom build) | PostgreSQL 18.3 + pgvector 0.8.2 + TimescaleDB 2.26.0 |
 
 ## Database Access
@@ -111,25 +112,24 @@ Scope-Werte: `private`, `work`, `shared`
 - Schreiben: Default = `home_scope`, optional `scope: "shared"` im Body
 - Key-Verwaltung: Tabelle `context_api_keys` in DB `context_store`
 
-| Endpoint | Workflow ID | Zweck |
-|----------|-------------|-------|
-| `POST /webhook/context-agent` | `e2eCUrv3UTsuavu2` | **Primary MCP tool**: Weighted RRF + LLM synthesis (Prompt v5.2) |
-| `POST /webhook/context-store` | `UsitIwjJK6nl7MzD` | Upsert (category+title) + auto-embedding |
-| `POST /webhook/context-search` | `OA5IV9iAmYSk9peM` | Compact search (content_preview 200 chars, limit 10) |
-| `POST /webhook/context-manage` | `yaNR9nYP1lGUZWny` | stats, get, list-categories, list-meta, update, delete |
-| `POST /webhook/context-manage` (action: guard-list/guard-stats/guard-resolve) | `yaNR9nYP1lGUZWny` | Guard: flagged blocks, stats, resolve |
-| `POST /webhook/context-digest` | `ky0SFmXZ44RIicZN` | Rebuild topic-map-{scope} (deterministisch, kein LLM) |
-| (cron, kein Webhook) | `9HzqI6jlSV11tbtx` | auto-digest: 60s-Debounce nach Schreibvorgängen |
-| `POST /webhook/blob-store` | `KuwO8cwX38yTqHmF` | Binary speichern (base64, upsert) |
-| `POST /webhook/blob-fetch` | `EuwAvcpIkyNVvp1A` | Blob abrufen (id oder category+title, meta_only) |
-| `POST /webhook/blob-search` | `gkr8wbW0wzBYnRAI` | Blobs suchen (category, tags, mime_type) |
-| `POST /webhook/blob-manage` | `R8zWKoA5VZx0ra6f` | stats, get, list, delete |
+Base-URL: `$WEBHOOK_BASE_URL` (see .env, Reverse-Proxy → ctx Container)
 
-Schemas und Felder bei Bedarf per Context Store (infrastructure/"n8n DB Schemas") nachschlagen.
+| Endpoint | Zweck |
+|----------|-------|
+| `POST /webhook/context-agent` | **Primary**: Weighted RRF + LLM synthesis (Prompt v5.2) |
+| `POST /webhook/context-store` | Upsert (category+title+scope) + auto-embedding |
+| `POST /webhook/context-search` | Compact search (content_preview 200 chars, limit 10) |
+| `POST /webhook/context-manage` | stats, get, list-categories, list-meta, update, delete |
+| `POST /webhook/context-manage` (action: guard-*) | Guard: flagged blocks, stats, resolve |
+| `POST /webhook/blob-store` | Binary speichern (base64, upsert) |
+| `POST /webhook/blob-fetch` | Blob abrufen (id oder category+title, meta_only) |
+| `POST /webhook/blob-search` | Blobs suchen (category, tags, mime_type) |
+| `POST /webhook/blob-manage` | stats, get, list, delete |
+| `GET /health` | Healthcheck (DB + Ollama connectivity) |
 
 ## Write Guard
 
-Async Guard (Cron 60s, Workflow `context-guard` ID: IEL1rY4hwGLaEhwz):
+Async Guard (Go Scheduler, 60s Intervall, PG LISTEN/NOTIFY-getriggert):
 - Similarity Check auf neue/geänderte Blöcke (HNSW Top-3)
 - ≥0.98: Auto-Archive, 0.92-0.98: Flag "needs_review", <0.92: Clean (Session 3: von 0.95/0.85 angehoben, 80% False-Positive-Rate bei alten Schwellen)
 - Scope-aware: Cross-Scope-Matches werden redacted
@@ -141,10 +141,10 @@ Guard API (über context-manage Webhook):
 
 CLI: `ctx guard [list|stats|resolve <id> archive|keep]`
 
-## Schema (context_store DB, Session 5)
+## Schema (context_store DB)
 
-- 7 Tabellen: context_blocks, context_api_keys, context_blobs, context_digest_state, context_guard_state, context_access_log, context_write_log
-- 27 Spalten auf context_blocks (Session 5: +9 für Scale-Vorbereitung: source_id, parent_id, block_type, chunk_index, quality_score, embed_status, description, auto_tags, language)
+- 8 Tabellen: context_blocks, context_api_keys, context_blobs, context_digest_state, context_guard_state, context_access_log, context_write_log, _migrations
+- 27 Spalten auf context_blocks (inkl. Scale-Spalten: source_id, parent_id, block_type, chunk_index, quality_score, embed_status, description, auto_tags, language)
 - PG-Tuning: shared_buffers=8GB, maintenance_work_mem=4GB, work_mem=64MB, effective_cache_size=48GB
 
 ## Security (Session 5)
@@ -160,7 +160,7 @@ CLI: `ctx guard [list|stats|resolve <id> archive|keep]`
 
 ## Ollama (Embedding + LLM)
 
-Host: `$OLLAMA_HOST (see .env)` (Quadro RTX 6000, 24GB VRAM, primäre GPU mit DWM ~1GB). Config in n8n Variables (`$vars`), NOT `$env`. `OLLAMA_NUM_PARALLEL=4` auf dem Windows-Host.
+Host: `$OLLAMA_HOST (see .env)` (Quadro RTX 6000, 24GB VRAM, primäre GPU mit DWM ~1GB). Config via ENV in docker-compose.yml. `OLLAMA_NUM_PARALLEL=4` auf dem Windows-Host.
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
@@ -168,24 +168,19 @@ Host: `$OLLAMA_HOST (see .env)` (Quadro RTX 6000, 24GB VRAM, primäre GPU mit DW
 | `OLLAMA_EMBED_MODEL` | `qwen3-embedding:8b-ctx2k` | Embeddings (native 4096d, Matryoshka-truncated to 1024d, num_ctx=2048 via Modelfile → 5.7 GB statt 13.3 GB VRAM) |
 | `OLLAMA_CHAT_MODEL` | `qwen3.5:9b` | LLM synthesis (9B, 9.0 GB VRAM, 97.7% eval pass rate, Session 5: ersetzt qwen3:4b-instruct) |
 
-VRAM-Budget: Embedding 5.7 + Synthese 9.0 = 14.7 GB → 9.3 GB Headroom.
+VRAM-Budget: Embedding 5.3 + Synthese 9.0 = 14.3 GB → 9.7 GB Headroom. `OLLAMA_MAX_LOADED_MODELS=2` auf dem Host damit beide permanent geladen bleiben.
 
 **qwen3.5:9b**: Aktuelles Synthese-Modell (Session 5). Death-Spiral-Problem war API-Bug (#14793), gelöst via /api/chat mit think:false. 42/43 eval PASS (97.7%), +10% KW vs qwen3:4b-instruct, bessere Constraint-#7-Einhaltung. 9.0 GB VRAM.
 
 **Session 3 Modell-Evaluation**: 11 Modelle getestet (4B-22B), Q4_K_M > Q8_0 für RAG (höhere Präzision → mehr Paraphrasierung → weniger KW-Treffer), IFEval korreliert nicht mit RAG-Qualität. Details: `memory/session3_model_evaluation.md`
 
-## MCP Integration
-
-n8n MCP (OAuth) auf `/mcp-server/http`. Sichtbarkeit via `settings.availableInMCP` (NOT `meta`).
-
-**Hinweis:** n8n MCP wird nicht verwendet. Alle Zugriffe erfolgen über Webhooks (ctx CLI / curl). Grund: execute_workflow liefert ALL node runData (~200K+ Tokens).
-
 ## Docker
 
 ```bash
-docker compose restart n8n          # nach Settings-Änderungen
+docker compose up -d ctx            # ctx Server starten/neustarten
+docker compose build ctx            # nach Code-Änderungen neu bauen
+docker compose logs -f ctx          # Logs
 docker compose down && docker compose up -d   # Full restart
-docker compose logs -f n8n          # Logs
 ```
 
 ## Verifikation

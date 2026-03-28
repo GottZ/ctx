@@ -63,8 +63,10 @@ services:
       dockerfile: Dockerfile
     container_name: ctx
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:3001:8080"
+    labels:
+      - "reversed.host=${CTX_HOSTNAME}"
+      - "reversed.port=8080"
+      - "reversed.ssl=${CTX_SSL_DOMAIN}"
     environment:
       CONTEXT_DB: ${CONTEXT_DB}
       CONTEXT_DB_USER: ${CONTEXT_DB_USER}
@@ -75,6 +77,7 @@ services:
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL}
       OLLAMA_EMBED_DIMS: ${OLLAMA_EMBED_DIMS}
       OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL}
+      OLLAMA_THINK: ${OLLAMA_THINK:-false}
       LISTEN_ADDR: ":8080"
     networks:
       - n8nintern
