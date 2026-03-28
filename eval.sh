@@ -85,7 +85,7 @@ S01|synthesis|What embedding model does the context store use?|confident|qwen3,e
 S02|synthesis|How does the Write Guard detect duplicates?|confident|hash,similarity,async|Architecture knowledge
 S03|synthesis|What are the scope values in the multi-tenant system?|confident|private,work,shared|Scope enum values
 S04|synthesis|What is the PostgreSQL version and what extension is used for vectors?|confident|18,pgvector|DB stack
-S05|synthesis|What LLM model is used for synthesis in the context-agent?|confident|qwen3,4b,instruct|Model config
+S05|synthesis|What LLM model is used for synthesis in the context-agent?|confident|qwen3,9b|Model config
 S06|synthesis|How does the blob storage authenticate requests?|confident|key,hash,sha|Auth mechanism
 S07|synthesis|What is the RRF fusion strategy used in retrieval?|confident|rrf,fusion|Retrieval architecture
 S08|synthesis|What are the Write Guard similarity thresholds?|confident|0.98,0.92|Threshold values
@@ -97,7 +97,7 @@ B01|synthesis|Welches Embedding-Modell wird verwendet?|confident|qwen3,embedding
 B02|synthesis|Wie funktioniert der Write Guard?|confident|hash,similarity|DE query about guard
 B03|synthesis|Was ist der PostgreSQL Mount-Pfad?|confident|postgresql,var/lib|DE query, infra fact
 B04|synthesis|Welche Scope-Werte gibt es im Multi-Tenant-System?|confident|private,work,shared|DE enum values
-B05|synthesis|Was ist das Problem mit qwen3.5:9b?|confident|thinking,token,instruct|DE about model failure
+B05|synthesis|Was ist das Problem mit qwen3.5:9b?|confident|thinking,token|DE about model failure
 
 # --- NEGATIVE (should NOT be answerable from the store) ---
 N01|synthesis|What is the recipe for Kartoffelsuppe?|none||Completely off-topic

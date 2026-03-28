@@ -57,6 +57,43 @@ services:
       db:
         condition: service_healthy
 
+  ctx:
+    build:
+      context: ./go
+      dockerfile: Dockerfile
+    container_name: ctx
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:8080"
+    environment:
+      CONTEXT_DB: ${CONTEXT_DB}
+      CONTEXT_DB_USER: ${CONTEXT_DB_USER}
+      CONTEXT_DB_PASSWORD: ${CONTEXT_DB_PASSWORD}
+      CONTEXT_DB_HOST: db
+      CONTEXT_DB_PORT: 5432
+      OLLAMA_HOST: ${OLLAMA_HOST}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL}
+      OLLAMA_EMBED_DIMS: ${OLLAMA_EMBED_DIMS}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL}
+      LISTEN_ADDR: ":8080"
+    networks:
+      - n8nintern
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/ctx", "-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 32M
+
   db:
     build: ./db-image
     image: pgvector-timescaledb:pg18

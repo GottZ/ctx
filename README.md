@@ -15,22 +15,22 @@
 **Because sessions die. Knowledge shouldn't.**
 Your AI's save game — self-hosted, CLI-first, built on Postgres + pgvector.
 
-A hybrid retrieval knowledge store serving as persistent external memory for AI assistants. Built on [n8n](https://n8n.io) with [Ollama](https://ollama.com) for local embeddings and LLM synthesis. No cloud dependency. You own your data.
+A hybrid retrieval knowledge store serving as persistent external memory for AI assistants. Go single binary with PG Functions for core retrieval logic, [Ollama](https://ollama.com) for local embeddings and LLM synthesis. No cloud dependency. You own your data.
 
 ## Architecture
 
 ```
 ┌─────────────┐     ┌──────────────────────────────────────────┐
-│  Clients    │     │  n8n (Workflow Engine)                   │
-│  (curl/CLI) │────>│  14 Workflows: CRUD, Search, Guard, etc. │
-└─────────────┘     │  GottZ 4-Way RRF Engine                  │
+│  Clients    │     │  ctx (Go Single Binary, 16 MB)           │
+│  (curl/CLI) │────>│  HTTP API + Event Pipeline               │
+└─────────────┘     │  GottZ 4-Way RRF via PG Functions        │
                     └──────────┬───────────────┬───────────────┘
                                │               │
                     ┌──────────▼──────┐  ┌─────▼──────────┐
                     │  PostgreSQL 18  │  │  Ollama        │
                     │  + pgvector     │  │  (Embeddings   │
                     │  + TimescaleDB  │  │   + Synthesis) │
-                    │  + pg_trgm      │  └────────────────┘
+                    │  + PG Functions │  └────────────────┘
                     └─────────────────┘
 ```
 
@@ -41,10 +41,12 @@ A hybrid retrieval knowledge store serving as persistent external memory for AI 
   - English fulltext (tsvector + GIN) — weight 0.25
   - German fulltext (tsvector + GIN) — weight 0.20
   - Trigram title matching (pg_trgm) — weight 0.10
-- **LLM Synthesis**: Query answers generated from retrieved context via local Ollama
+- **PG Functions**: Core retrieval logic (`ctx_auth`, `ctx_rrf`, `ctx_guard_check`) runs inside PostgreSQL
+- **LLM Synthesis**: Query answers generated from retrieved context via local Ollama (Prompt v5.2)
 - **Bilingual**: Full German + English support with automatic query translation
-- **GottZ Scope Model**: Multi-tenant isolation via scope-based API key mapping (private/shared/custom)
-- **GottZ Guard**: Async duplicate detection with HNSW similarity thresholds (>=0.98 auto-archive, 0.92-0.98 flag for review)
+- **GottZ Scope Model**: Multi-tenant isolation via scope-based API key mapping (private/work/shared)
+- **GottZ Guard**: Event-driven duplicate detection with HNSW similarity thresholds (>=0.98 auto-archive, 0.92-0.98 flag)
+- **Event Pipeline**: PG LISTEN/NOTIFY via pgxlisten with demand interruption (queries > background work)
 - **Blob Storage**: Binary asset storage with scope isolation
 - **Content-Hash NOOP**: Skips redundant writes via SHA-256 generated column
 - **Automated Backups**: Daily pg_dump with integrity verification and 7-day rotation
@@ -53,20 +55,21 @@ A hybrid retrieval knowledge store serving as persistent external memory for AI 
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| Workflow Engine | n8n | API endpoints, orchestration |
-| Database | PostgreSQL 18 + pgvector 0.8.2 + TimescaleDB 2.26.0 | Storage, vector search, fulltext |
+| API Server | Go 1.23+ (4 dependencies, 16 MB binary) | HTTP endpoints, event pipeline, orchestration |
+| Database | PostgreSQL 18 + pgvector 0.8.2 + TimescaleDB 2.26.0 | Storage, vector search, fulltext, PG Functions |
 | Embeddings | Ollama + Qwen3-Embedding-8B | 1024d vectors (Matryoshka-truncated from 4096d) |
-| LLM Synthesis | Ollama + qwen3:4b-instruct | Query answer generation |
-| Container Runtime | Docker Compose | Deployment |
+| LLM Synthesis | Ollama + qwen3.5:9b | Query answer generation |
+| Container Runtime | Docker Compose | Deployment (distroless, 17.5 MB image) |
 
 ## Quick Start
 
 ### Prerequisites
 
 - Docker + Docker Compose
+- Go 1.23+ (for development)
 - Ollama instance with models pulled:
   - `qwen3-embedding:8b` (or custom Modelfile variant)
-  - `qwen3:4b-instruct`
+  - `qwen3.5:9b`
 
 ### Setup
 
@@ -75,14 +78,10 @@ A hybrid retrieval knowledge store serving as persistent external memory for AI 
 cp .env.example .env
 # Edit .env with your credentials and Ollama host
 
-# Build custom PostgreSQL image (pgvector + TimescaleDB)
-docker compose build db
-
-# Start services
+# Build and start (PostgreSQL + ctx)
 docker compose up -d
 
-# Initialize the context store schema (idempotent)
-bash init-data.sh
+# Schema is auto-initialized via embedded SQL migrations on first start.
 
 # Verify
 bash test.sh               # 10 system tests (no Ollama needed)
@@ -95,14 +94,16 @@ All endpoints require an `X-Context-Key` header for authentication.
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/webhook/context-store` | POST | Upsert blocks (auto-embeds) |
 | `/webhook/context-agent` | POST | Hybrid search + LLM synthesis |
+| `/webhook/context-store` | POST | Upsert blocks (auto-embeds) |
 | `/webhook/context-search` | POST | Compact search (no LLM) |
 | `/webhook/context-manage` | POST | CRUD operations, guard management |
+| `/webhook/context-digest` | POST | Trigger topic map rebuild |
 | `/webhook/blob-store` | POST | Store binary assets |
 | `/webhook/blob-fetch` | POST | Retrieve blobs |
 | `/webhook/blob-search` | POST | Search blobs |
 | `/webhook/blob-manage` | POST | Blob CRUD |
+| `/health` | GET | Health check (DB + Ollama) |
 
 ### CLI
 
@@ -117,7 +118,7 @@ Configure once:
 ```bash
 mkdir -p ~/.config/ctx
 cat > ~/.config/ctx/config <<'EOF'
-CTX_BASE_URL=https://your-n8n-host/webhook
+CTX_BASE_URL=https://your-host/webhook
 CTX_KEY=your-api-key-here
 EOF
 chmod 700 ~/.config/ctx && chmod 600 ~/.config/ctx/config
@@ -134,9 +135,6 @@ ctx save infrastructure "My Title" - "Content here"
 
 # Pipe content from file
 cat notes.md | ctx save docs "My Notes"
-
-# Pipe question from stdin
-echo "How does the Write Guard work?" | ctx query
 
 # Compact search (no LLM, fast)
 ctx search learnings query:prompt
@@ -157,24 +155,6 @@ ctx digest
 
 Run `ctx help` for the full command reference.
 
-### HTTP API
-
-All endpoints require an `X-Context-Key` header. The CLI is the recommended interface — use curl for automation or integration:
-
-```bash
-# Store a knowledge block
-curl -s -X POST https://your-n8n-host/webhook/context-store \
-  -H "Content-Type: application/json" \
-  -H "X-Context-Key: YOUR_API_KEY" \
-  -d '{"category":"reference","title":"Example Block","content":"Your knowledge here.","tags":["example"]}'
-
-# Query with hybrid search + LLM synthesis
-curl -s -X POST https://your-n8n-host/webhook/context-agent \
-  -H "Content-Type: application/json" \
-  -H "X-Context-Key: YOUR_API_KEY" \
-  -d '{"query":"What is the retrieval architecture?"}'
-```
-
 ### Testing
 
 ```bash
@@ -184,92 +164,84 @@ bash test.sh
 # Full test suite including Ollama retrieval tests
 bash test.sh --with-ollama
 
-# Evaluation harness (35 queries: confident, bilingual, negative, keyword, multi-hop)
+# Evaluation harness (43 queries: confident, bilingual, negative, keyword, imperative, multi-hop)
 bash eval.sh
 
 # Set new eval baseline after validated changes
 bash eval.sh --update-baseline
 ```
 
+## Go Server
+
+The ctx server is a single Go binary with 4 dependencies:
+
+| Dependency | Purpose |
+|-----------|---------|
+| pgx/v5 | PostgreSQL driver (binary protocol, COPY, connection pooling) |
+| pgvector-go | pgvector type support (vector, halfvec) |
+| chi/v5 | HTTP router (0 external dependencies, middleware stack) |
+| pgxlisten | PG LISTEN/NOTIFY with auto-reconnect |
+
+### PG Functions
+
+Core retrieval logic runs as PostgreSQL functions for portability and performance:
+
+| Function | Purpose |
+|----------|---------|
+| `ctx_auth(api_key)` | SHA-256 hash verification, scope resolution, last_used_at update |
+| `ctx_rrf(embedding, query, ...)` | Complete 4-Way Weighted RRF with iterative HNSW scan |
+| `ctx_guard_check(block_id)` | HNSW nearest-neighbor similarity check with threshold evaluation |
+
+### Event Pipeline
+
+PG triggers fire `NOTIFY` on block changes. The Go server listens via pgxlisten and triggers Guard (duplicate detection) and Digest (topic map rebuild) with demand interruption — active queries take priority over background work.
+
 ## Database Schema
 
-7 tables in the `context_store` database:
+8 tables in the `context_store` database:
 
 | Table | Purpose |
 |-------|---------|
-| `context_blocks` | Main knowledge store (18 columns incl. embedding, tsvectors, content_hash) |
+| `context_blocks` | Main knowledge store (27 columns incl. embedding, tsvectors, content_hash) |
 | `context_api_keys` | Multi-tenant API key to scope mapping |
 | `context_blobs` | Binary asset storage |
 | `context_digest_state` | Topic map freshness tracking |
 | `context_guard_state` | Write guard freshness tracking |
 | `context_access_log` | Read audit trail |
 | `context_write_log` | Write audit trail with guard decisions |
+| `_migrations` | Schema version tracking |
 
-Schema initialization is fully idempotent -- see `init-data.sh`.
+Schema initialization is fully idempotent via embedded SQL migrations that run on server start.
 
 ## Project Structure
 
 ```
-├── ctx                   # CLI (symlink to $PATH)
-├── docker-compose.yml    # Service definitions
+├── ctx                   # CLI (Bash, symlink to $PATH)
+├── docker-compose.yml    # Service definitions (ctx + db)
 ├── .env.example          # Configuration template
-├── init-data.sh          # Idempotent DB schema setup
+├── init-data.sh          # Legacy schema setup (superseded by Go migrations)
 ├── backup.sh             # Automated backup with rotation
-├── test.sh               # System + retrieval test suite
-├── eval.sh               # 35-query evaluation harness
+├── test.sh               # System + retrieval test suite (14 tests)
+├── eval.sh               # 43-query evaluation harness
 ├── db-image/             # Custom PostgreSQL Dockerfile
 │   └── Dockerfile        # pgvector + TimescaleDB on PG18
-├── scripts/              # Utility scripts
-│   ├── ingest-paper.ts   # Paper/document ingestion (Bun)
-│   └── test-ingest.sh    # Ingestion test script
-└── workflows/            # n8n workflow exports (JSON)
+└── go/                   # Go server source
+    ├── main.go           # Entrypoint, config, graceful shutdown
+    ├── server.go         # chi router, middleware stack
+    ├── config.go         # Environment-based configuration
+    ├── Dockerfile        # Multi-stage build (distroless, 17.5 MB)
+    ├── internal/
+    │   ├── auth/         # SHA-256 key verification via ctx_auth PG function
+    │   ├── embed/        # Ollama embedding client, Matryoshka truncation, L2-norm
+    │   ├── llm/          # Ollama chat client, translation, Prompt v5.2 synthesis
+    │   ├── rrf/          # RRF search via ctx_rrf PG function, LLM reranker
+    │   ├── guard/        # Write guard via ctx_guard_check PG function
+    │   ├── digest/       # Deterministic topic map builder
+    │   ├── events/       # PG LISTEN/NOTIFY listener + scheduler
+    │   ├── store/        # Block/blob CRUD, connection pool, migration runner
+    │   └── handler/      # HTTP handlers, middleware (auth, rate-limit, recovery)
+    └── migrations/       # Embedded SQL (schema, PG functions, triggers)
 ```
-
-## Configuration
-
-Server configuration is via environment variables in `.env` (see `.env.example`). CLI configuration lives in `~/.config/ctx/config`.
-
-Key variables:
-
-| Variable | Purpose |
-|----------|---------|
-| `POSTGRES_*` | Database credentials (admin) |
-| `CONTEXT_DB_*` | Context Store database credentials |
-| `OLLAMA_HOST` | Ollama API endpoint |
-| `OLLAMA_EMBED_MODEL` | Embedding model name |
-| `OLLAMA_CHAT_MODEL` | LLM synthesis model name |
-| `WEBHOOK_BASE_URL` | Base URL for API endpoints (used by test scripts) |
-| `CONTEXT_API_KEY_*` | API keys for multi-tenant access |
-
-## How It Works
-
-### Retrieval Pipeline
-
-1. **Query arrives** via `/webhook/context-agent`
-2. **Query translation**: German queries are translated to English with a domain glossary
-3. **GottZ 4-Way RRF parallel search**:
-   - Semantic: query is embedded via Ollama, cosine similarity against stored vectors
-   - English FTS: `ts_rank` against precomputed `ts_en` tsvector column
-   - German FTS: `ts_rank` against precomputed `ts_de` tsvector column
-   - Trigram: `similarity()` on title via pg_trgm
-4. **GottZ RRF**: weighted combination (k=60) produces final ranking
-5. **LLM Synthesis**: top results are fed to Ollama for a concise answer with source references
-
-### Write Pipeline
-
-1. **Block arrives** via `/webhook/context-store`
-2. **Content hash** (SHA-256) checked -- if unchanged, write is skipped (NOOP)
-3. **Upsert** on `(category, title)` -- same key updates existing block
-4. **Embedding** generated via Ollama and stored as `vector(1024)`
-5. **Tsvectors** updated for both German and English fulltext indexes
-6. **GottZ Guard** (async, 60s cron): checks new/changed blocks against HNSW top-3 neighbors using GottZ Guard thresholds
-   - Cosine similarity >= 0.98: auto-archived as duplicate
-   - 0.92-0.98: flagged for manual review
-   - < 0.92: clean, no action
-
-### GottZ Scope Model — Multi-Tenant Isolation
-
-Each API key maps to a `home_scope` and a set of `allowed_scopes` via the GottZ Scope Model. All queries are filtered by scope, ensuring tenants only see blocks they are authorized to access. Writes default to the key's `home_scope` unless explicitly overridden.
 
 ## Attribution
 
@@ -277,7 +249,7 @@ The architectural patterns in this project are named after their creator:
 
 - **GottZ 4-Way RRF** — Weighted Reciprocal Rank Fusion with 4 retrieval channels
 - **GottZ Scope Model** — Multi-tenant isolation via scope-based API key mapping
-- **GottZ Guard** — Async duplicate detection with calibrated similarity thresholds
+- **GottZ Guard** — Event-driven duplicate detection with calibrated similarity thresholds
 
 When referencing this architecture in documentation, articles, or derivative works,
 please use these names. For consulting and implementation support: [hire@gottz.de](mailto:hire@gottz.de)

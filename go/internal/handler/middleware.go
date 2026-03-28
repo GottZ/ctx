@@ -1,0 +1,164 @@
+package handler
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"log/slog"
+	"net/http"
+	"runtime/debug"
+	"time"
+
+	"github.com/GottZ/ctx/internal/auth"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// SchedulerNotifier is the interface the scheduler must implement for demand signaling.
+type SchedulerNotifier interface {
+	QueryStart()
+	QueryEnd()
+}
+
+// WithScheduler wraps an http.HandlerFunc to signal query start/end to the scheduler.
+func WithScheduler(sn SchedulerNotifier, next http.HandlerFunc) http.HandlerFunc {
+	if sn == nil {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		sn.QueryStart()
+		defer sn.QueryEnd()
+		next(w, r)
+	}
+}
+
+type contextKey string
+
+const (
+	requestIDKey contextKey = "request_id"
+	authResultKey contextKey = "auth_result"
+)
+
+// RequestIDFromContext extracts the request ID from the context.
+func RequestIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(requestIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
+// AuthResultFromContext extracts the AuthResult from the context.
+func AuthResultFromContext(ctx context.Context) *auth.AuthResult {
+	if ar, ok := ctx.Value(authResultKey).(*auth.AuthResult); ok {
+		return ar
+	}
+	return nil
+}
+
+// RequestID assigns a unique ID to each request and adds it to the context and response header.
+func RequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if id == "" {
+			b := make([]byte, 8)
+			if _, err := rand.Read(b); err != nil {
+				slog.Error("failed to generate request ID", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			id = hex.EncodeToString(b)
+		}
+
+		ctx := context.WithValue(r.Context(), requestIDKey, id)
+		w.Header().Set("X-Request-ID", id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// responseWriter wraps http.ResponseWriter to capture the status code.
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Logger logs each HTTP request with method, path, status, and duration.
+func Logger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+		next.ServeHTTP(rw, r)
+
+		slog.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.statusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"request_id", RequestIDFromContext(r.Context()),
+		)
+	})
+}
+
+// Recovery recovers from panics in HTTP handlers and returns a 500 error.
+func Recovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("panic recovered",
+					"error", rec,
+					"stack", string(debug.Stack()),
+					"method", r.Method,
+					"path", r.URL.Path,
+					"request_id", RequestIDFromContext(r.Context()),
+				)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Auth creates middleware that authenticates requests via X-Context-Key header.
+// It extracts the key, sanitizes it, calls auth.Authenticate, and stores the
+// result in context. Returns 401 on invalid key.
+func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rawKey := r.Header.Get("X-Context-Key")
+			apiKey := auth.SanitizeKey(rawKey)
+
+			result, err := auth.Authenticate(r.Context(), pool, apiKey)
+			if err != nil {
+				slog.Error("auth failed",
+					"error", err,
+					"request_id", RequestIDFromContext(r.Context()),
+				)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "authentication error"})
+				return
+			}
+
+			if !result.IsValid {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), authResultKey, result)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// MaxBodySize limits the request body to maxBytes. Returns 413 if exceeded.
+func MaxBodySize(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
