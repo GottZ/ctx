@@ -26,8 +26,9 @@ type SearchResult struct {
 
 // Search executes the ctx_rrf PG function with a single SQL call.
 // The embedding is passed as pgvector HalfVector, query/querySpaced for FTS,
-// scopes for scope filtering, and optional category/tags/limit.
-func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int) ([]SearchResult, error) {
+// scopes for scope filtering, and optional category/tags/limit/temporal.
+// temporal is a websearch_to_tsquery OR string for date expansion (may be empty).
+func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string) ([]SearchResult, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("rrf: empty embedding")
 	}
@@ -47,10 +48,16 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 		tagsParam = tags
 	}
 
+	// Pass temporal as NULL if empty (PG function default).
+	var temporalParam interface{}
+	if temporal != "" {
+		temporalParam = temporal
+	}
+
 	rows, err := pool.Query(ctx,
 		`SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at
-		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7)`,
-		hv, query, querySpaced, scopes, category, tagsParam, limit,
+		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8)`,
+		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: query ctx_rrf: %w", err)

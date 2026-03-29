@@ -146,8 +146,48 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Step 3b: LLM temporal normalization.
+	// Uses originalQuery to catch German temporal terms before translation.
+	var temporal string
+	var temporalResult *llm.TemporalResult
+	isTemporal := llm.HasTemporalIntent(originalQuery)
+
+	if isTemporal {
+		now := time.Now()
+		var err error
+		temporalResult, err = llm.NormalizeTemporal(ctx, h.ollamaHost, h.chatModel, originalQuery, now)
+		if err != nil {
+			slog.Warn("temporal normalization failed, falling back to rule-based",
+				"error", err,
+				"request_id", requestID,
+			)
+			// Fallback: rule-based expansion from rrf package.
+			temporal = rrf.ExpandTemporal(originalQuery, now)
+		} else if temporalResult != nil {
+			temporal = llm.TemporalToFTSExpansion(temporalResult.Dates)
+			slog.Info("temporal normalization",
+				"dates", temporalResult.Dates,
+				"fts_terms", temporal,
+				"request_id", requestID,
+			)
+		}
+	}
+
+	// Step 3c: Temporal prefix for embedding augmentation.
+	embedQuery := searchQuery
+	if temporalResult != nil {
+		prefix := llm.TemporalToEmbedPrefix(temporalResult.Dates)
+		if prefix != "" {
+			embedQuery = prefix + " " + searchQuery
+			slog.Info("temporal embed prefix",
+				"prefix", prefix,
+				"request_id", requestID,
+			)
+		}
+	}
+
 	// Step 4: Embed the search query with query prefix.
-	embedding, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, searchQuery, embed.PrefixQuery)
+	embedding, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedQuery, embed.PrefixQuery)
 	if err != nil {
 		slog.Error("embedding failed",
 			"error", err,
@@ -161,7 +201,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	querySpaced := strings.ReplaceAll(searchQuery, "-", " ")
 
 	// Step 6: RRF Search via PG function.
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, limit)
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, limit, temporal)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,
@@ -209,7 +249,12 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Step 8: Synthesize (filter, confidence, reorder, LLM call).
 	// Uses originalQuery so the LLM answers in the user's language.
-	synthResult, err := llm.Synthesize(ctx, h.ollamaHost, h.chatModel, originalQuery, sources)
+	// Temporal dates are passed for conditional date context in the synthesis prompt.
+	var temporalDates []llm.TemporalDate
+	if temporalResult != nil {
+		temporalDates = temporalResult.Dates
+	}
+	synthResult, err := llm.Synthesize(ctx, h.ollamaHost, h.chatModel, originalQuery, sources, temporalDates)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,

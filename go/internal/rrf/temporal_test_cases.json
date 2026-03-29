@@ -1,0 +1,563 @@
+{
+  "_meta": {
+    "description": "Temporal query resolution test suite for ctx knowledge store",
+    "reference_date": "2026-03-29",
+    "reference_weekday": "Sunday",
+    "calendar_context": {
+      "current_week": { "monday": "2026-03-23", "sunday": "2026-03-29" },
+      "last_week": { "monday": "2026-03-16", "sunday": "2026-03-22" },
+      "next_week": { "monday": "2026-03-30", "sunday": "2026-04-05" },
+      "week_after_next": { "monday": "2026-04-06", "sunday": "2026-04-12" },
+      "this_month": { "start": "2026-03-01", "end": "2026-03-31" },
+      "last_month": { "start": "2026-02-01", "end": "2026-02-28" },
+      "next_month": { "start": "2026-04-01", "end": "2026-04-30" }
+    },
+    "total_tests": 55,
+    "generated": "2026-03-29"
+  },
+  "tests": [
+    {
+      "id": "S01",
+      "category": "simple_single_day",
+      "query": "was wollte ich heute machen?",
+      "expected_dates": ["2026-03-29"],
+      "expected_direction": "today",
+      "difficulty": "easy",
+      "rationale": "Baseline: 'heute' is the most common temporal keyword. Must resolve to reference date."
+    },
+    {
+      "id": "S02",
+      "category": "simple_single_day",
+      "query": "what happened yesterday?",
+      "expected_dates": ["2026-03-28"],
+      "expected_direction": "past",
+      "difficulty": "easy",
+      "rationale": "English 'yesterday' resolves to day before reference date."
+    },
+    {
+      "id": "S03",
+      "category": "simple_single_day",
+      "query": "was war heite los?",
+      "expected_dates": ["2026-03-29"],
+      "expected_direction": "today",
+      "difficulty": "medium",
+      "rationale": "Typo: 'heite' → 'heute' (Levenshtein distance 1). Exercises fuzzy matching."
+    },
+    {
+      "id": "S04",
+      "category": "simple_single_day",
+      "query": "was steht morgen an?",
+      "expected_dates": ["2026-03-30"],
+      "expected_direction": "future",
+      "difficulty": "easy",
+      "rationale": "'morgen' resolves to next calendar day."
+    },
+    {
+      "id": "S05",
+      "category": "simple_single_day",
+      "query": "what do I need to do tomorrow?",
+      "expected_dates": ["2026-03-30"],
+      "expected_direction": "future",
+      "difficulty": "easy",
+      "rationale": "English 'tomorrow' resolves identically to German 'morgen'."
+    },
+    {
+      "id": "S06",
+      "category": "simple_single_day",
+      "query": "was war vorgestern?",
+      "expected_dates": ["2026-03-27"],
+      "expected_direction": "past",
+      "difficulty": "easy",
+      "rationale": "'vorgestern' (day before yesterday) resolves to 2 days back."
+    },
+    {
+      "id": "S07",
+      "category": "simple_single_day",
+      "query": "was ist übermorgen geplant?",
+      "expected_dates": ["2026-03-31"],
+      "expected_direction": "future",
+      "difficulty": "easy",
+      "rationale": "'übermorgen' (day after tomorrow) resolves to 2 days forward."
+    },
+    {
+      "id": "S08",
+      "category": "simple_single_day",
+      "query": "gestern war ein produktiver Tag",
+      "expected_dates": ["2026-03-28"],
+      "expected_direction": "past",
+      "difficulty": "easy",
+      "rationale": "'gestern' in a declarative statement (not question) still resolves."
+    },
+    {
+      "id": "S09",
+      "category": "simple_single_day",
+      "query": "morgrn habe ich ein Meeting",
+      "expected_dates": ["2026-03-30"],
+      "expected_direction": "future",
+      "difficulty": "medium",
+      "rationale": "Typo: 'morgrn' → 'morgen' (Levenshtein distance 1). Adjacent-key typo."
+    },
+    {
+      "id": "S10",
+      "category": "simple_single_day",
+      "query": "yesrerday I fixed the bug",
+      "expected_dates": ["2026-03-28"],
+      "expected_direction": "past",
+      "difficulty": "medium",
+      "rationale": "Typo: 'yesrerday' → 'yesterday' (Levenshtein distance 1: r→t substitution at pos 4). Tests English typo handling."
+    },
+    {
+      "id": "W01",
+      "category": "weekday_with_tense",
+      "query": "am Montag will ich die Migration starten",
+      "expected_dates": ["2026-03-30"],
+      "expected_direction": "future",
+      "difficulty": "medium",
+      "rationale": "Future tense ('will ich') + 'Montag'. Next Monday is 2026-03-30. Requires tense detection to disambiguate."
+    },
+    {
+      "id": "W02",
+      "category": "weekday_with_tense",
+      "query": "Montag war ich im Office",
+      "expected_dates": ["2026-03-23"],
+      "expected_direction": "past",
+      "difficulty": "medium",
+      "rationale": "Past tense ('war') + 'Montag'. Last Monday is 2026-03-23. Same weekday, opposite direction from W01."
+    },
+    {
+      "id": "W03",
+      "category": "weekday_with_tense",
+      "query": "was steht Freitag an?",
+      "expected_dates": ["2026-04-03"],
+      "expected_direction": "future",
+      "difficulty": "medium",
+      "rationale": "Future intent ('steht an') + 'Freitag'. Next Friday is 2026-04-03. Note: Friday was 2 days ago, so future is next week."
+    },
+    {
+      "id": "W04",
+      "category": "weekday_with_tense",
+      "query": "was war am Freitag?",
+      "expected_dates": ["2026-03-27"],
+      "expected_direction": "past",
+      "difficulty": "medium",
+      "rationale": "Past tense ('war') + 'Freitag'. Last Friday is 2026-03-27 (2 days ago). Same weekday as W03, opposite direction."
+    },
+    {
+      "id": "W05",
+      "category": "weekday_with_tense",
+      "query": "on Wednesday I deployed the fix",
+      "expected_dates": ["2026-03-25"],
+      "expected_direction": "past",
+      "difficulty": "medium",
+      "rationale": "English past tense + 'Wednesday'. Last Wednesday is 2026-03-25. Tests English weekday recognition."
+    },
+    {
+      "id": "W06",
+      "category": "weekday_with_tense",
+      "query": "Dienstag treffe ich mich mit dem Team",
+      "expected_dates": ["2026-03-31"],
+      "expected_direction": "future",
+      "difficulty": "medium",
+      "rationale": "Future context ('treffe ich mich') + 'Dienstag'. Next Tuesday is 2026-03-31."
+    },
+    {
+      "id": "W07",
+      "category": "weekday_with_tense",
+      "query": "the Thursday meeting was cancelled",
+      "expected_dates": ["2026-03-26"],
+      "expected_direction": "past",
+      "difficulty": "medium",
+      "rationale": "English past tense ('was cancelled') + 'Thursday'. Last Thursday is 2026-03-26."
+    },
+    {
+      "id": "W08",
+      "category": "weekday_with_tense",
+      "query": "Mittwoch habe ich frei",
+      "expected_dates": ["2026-04-01"],
+      "expected_direction": "future",
+      "difficulty": "hard",
+      "rationale": "'habe ich frei' implies a plan (future). Next Wednesday is 2026-04-01. Tricky: 'habe' is present tense but intent is future."
+    },
+    {
+      "id": "W09",
+      "category": "weekday_with_tense",
+      "query": "am Samstag war das Deployment",
+      "expected_dates": ["2026-03-28"],
+      "expected_direction": "past",
+      "difficulty": "easy",
+      "rationale": "Past tense + 'Samstag'. Yesterday (Saturday 2026-03-28). Tests that same-name weekday resolves to yesterday, not 6 days forward."
+    },
+    {
+      "id": "W10",
+      "category": "weekday_with_tense",
+      "query": "Donnerstag muss ich den Report abgeben",
+      "expected_dates": ["2026-04-02"],
+      "expected_direction": "future",
+      "difficulty": "medium",
+      "rationale": "Future obligation ('muss ich') + 'Donnerstag'. Next Thursday is 2026-04-02."
+    },
+    {
+      "id": "R01",
+      "category": "relative_range",
+      "query": "was ist letzte Woche passiert?",
+      "expected_dates": ["2026-03-16", "2026-03-22"],
+      "expected_direction": "range",
+      "difficulty": "medium",
+      "rationale": "'letzte Woche' resolves to ISO week Mon-Sun: 2026-03-16 to 2026-03-22. Tests week boundary calculation."
+    },
+    {
+      "id": "R02",
+      "category": "relative_range",
+      "query": "what's planned for this week?",
+      "expected_dates": ["2026-03-23", "2026-03-29"],
+      "expected_direction": "range",
+      "difficulty": "medium",
+      "rationale": "'this week' = current ISO week. Today is Sunday, so Mon 2026-03-23 to Sun 2026-03-29. Edge case: today is the last day."
+    },
+    {
+      "id": "R03",
+      "category": "relative_range",
+      "query": "nächste Woche habe ich viel vor",
+      "expected_dates": ["2026-03-30", "2026-04-05"],
+      "expected_direction": "range",
+      "difficulty": "medium",
+      "rationale": "'nächste Woche' = next ISO week: Mon 2026-03-30 to Sun 2026-04-05. Crosses month boundary."
+    },
+    {
+      "id": "R04",
+      "category": "relative_range",
+      "query": "vor 3 Tagen habe ich das gefixt",
+      "expected_dates": ["2026-03-26"],
+      "expected_direction": "past",
+      "difficulty": "medium",
+      "rationale": "'vor N Tagen' pattern. 2026-03-29 minus 3 = 2026-03-26 (Thursday). Tests numeric relative day parsing."
+    },
+    {
+      "id": "R05",
+      "category": "relative_range",
+      "query": "in 2 Tagen ist Deadline",
+      "expected_dates": ["2026-03-31"],
+      "expected_direction": "future",
+      "difficulty": "medium",
+      "rationale": "'in N Tagen' pattern. 2026-03-29 plus 2 = 2026-03-31 (Tuesday). Tests numeric relative day parsing forward."
+    },
+    {
+      "id": "R06",
+      "category": "relative_range",
+      "query": "was habe ich diesen Monat gemacht?",
+      "expected_dates": ["2026-03-01", "2026-03-31"],
+      "expected_direction": "range",
+      "difficulty": "medium",
+      "rationale": "'diesen Monat' = current calendar month. March 1-31. Tests month boundary resolution."
+    },
+    {
+      "id": "R07",
+      "category": "relative_range",
+      "query": "letzten Monat war viel los",
+      "expected_dates": ["2026-02-01", "2026-02-28"],
+      "expected_direction": "range",
+      "difficulty": "medium",
+      "rationale": "'letzten Monat' = February 2026 (28 days, not a leap year). Tests previous month with correct day count."
+    },
+    {
+      "id": "R08",
+      "category": "relative_range",
+      "query": "3 days ago there was a production incident",
+      "expected_dates": ["2026-03-26"],
+      "expected_direction": "past",
+      "difficulty": "medium",
+      "rationale": "English 'N days ago' pattern. Same as R04 in English. Tests cross-language numeric relative parsing."
+    },
+    {
+      "id": "R09",
+      "category": "relative_range",
+      "query": "in einer Woche muss das fertig sein",
+      "expected_dates": ["2026-04-05"],
+      "expected_direction": "future",
+      "difficulty": "medium",
+      "rationale": "'in einer Woche' = 7 days from now = 2026-04-05. Tests 'einer' as numeric 1."
+    },
+    {
+      "id": "R10",
+      "category": "relative_range",
+      "query": "last month's architecture decisions",
+      "expected_dates": ["2026-02-01", "2026-02-28"],
+      "expected_direction": "range",
+      "difficulty": "medium",
+      "rationale": "English 'last month' with possessive form. Same semantics as R07 but different syntax."
+    },
+    {
+      "id": "C01",
+      "category": "compound_complex",
+      "query": "seit Montag arbeite ich daran",
+      "expected_dates": ["2026-03-23", "2026-03-29"],
+      "expected_direction": "range",
+      "difficulty": "hard",
+      "rationale": "'seit Montag' = from last Monday to today (inclusive). Range 2026-03-23 to 2026-03-29. Tests 'seit' as range-start with implicit end=today."
+    },
+    {
+      "id": "C02",
+      "category": "compound_complex",
+      "query": "bis Freitag muss das fertig sein",
+      "expected_dates": ["2026-03-29", "2026-04-03"],
+      "expected_direction": "range",
+      "difficulty": "hard",
+      "rationale": "'bis Freitag' = deadline. Range from today to next Friday 2026-04-03. Tests 'bis' as range-end with implicit start=today."
+    },
+    {
+      "id": "C03",
+      "category": "compound_complex",
+      "query": "Montag in einer Woche treffen wir uns",
+      "expected_dates": ["2026-04-06"],
+      "expected_direction": "future",
+      "difficulty": "hard",
+      "rationale": "'Montag in einer Woche' = not next Monday (2026-03-30) but the one after (2026-04-06). Tests compound weekday + offset."
+    },
+    {
+      "id": "C04",
+      "category": "compound_complex",
+      "query": "übernächste Woche starten wir das Projekt",
+      "expected_dates": ["2026-04-06", "2026-04-12"],
+      "expected_direction": "range",
+      "difficulty": "hard",
+      "rationale": "'übernächste Woche' = week after next. Mon 2026-04-06 to Sun 2026-04-12. Tests double-prefix compound."
+    },
+    {
+      "id": "C05",
+      "category": "compound_complex",
+      "query": "Anfang der Woche hatte ich das besprochen",
+      "expected_dates": ["2026-03-23", "2026-03-24"],
+      "expected_direction": "past",
+      "difficulty": "hard",
+      "rationale": "'Anfang der Woche' = beginning of current week. Mon-Tue (2026-03-23 to 2026-03-24). Tests sub-week segment resolution."
+    },
+    {
+      "id": "C06",
+      "category": "compound_complex",
+      "query": "Ende nächster Woche ist Review",
+      "expected_dates": ["2026-04-03", "2026-04-05"],
+      "expected_direction": "future",
+      "difficulty": "hard",
+      "rationale": "'Ende nächster Woche' = end of next week. Thu-Sun (2026-04-03 to 2026-04-05). Tests sub-week segment on a different week."
+    },
+    {
+      "id": "C07",
+      "category": "compound_complex",
+      "query": "von Montag bis Mittwoch bin ich unterwegs",
+      "expected_dates": ["2026-03-30", "2026-04-01"],
+      "expected_direction": "range",
+      "difficulty": "hard",
+      "rationale": "'von X bis Y' explicit range. Next Mon 2026-03-30 to next Wed 2026-04-01. Tests dual-weekday range with future default."
+    },
+    {
+      "id": "C08",
+      "category": "compound_complex",
+      "query": "letzten Dienstag bis Donnerstag war ich krank",
+      "expected_dates": ["2026-03-24", "2026-03-26"],
+      "expected_direction": "range",
+      "difficulty": "hard",
+      "rationale": "'letzten' forces past. Tue 2026-03-24 to Thu 2026-03-26. Tests explicit past modifier on weekday range."
+    },
+    {
+      "id": "C09",
+      "category": "compound_complex",
+      "query": "seit vorgestern kein Deployment mehr",
+      "expected_dates": ["2026-03-27", "2026-03-29"],
+      "expected_direction": "range",
+      "difficulty": "hard",
+      "rationale": "'seit vorgestern' = from 2 days ago to today. Range 2026-03-27 to 2026-03-29. Tests 'seit' + relative day."
+    },
+    {
+      "id": "C10",
+      "category": "compound_complex",
+      "query": "next Tuesday through Thursday I have meetings",
+      "expected_dates": ["2026-03-31", "2026-04-02"],
+      "expected_direction": "range",
+      "difficulty": "hard",
+      "rationale": "English compound range 'through'. Tue 2026-03-31 to Thu 2026-04-02. Tests English range syntax."
+    },
+    {
+      "id": "A01",
+      "category": "ambiguous_contextual",
+      "query": "neulich habe ich daran gearbeitet",
+      "expected_dates": null,
+      "expected_direction": "vague_past",
+      "expected_window": { "from": "2026-03-15", "to": "2026-03-28" },
+      "difficulty": "hard",
+      "rationale": "'neulich' = recently, vaguely. No precise date. Could boost results from last ~2 weeks. Tests graceful degradation for vague terms."
+    },
+    {
+      "id": "A02",
+      "category": "ambiguous_contextual",
+      "query": "bald muss ich das deployen",
+      "expected_dates": null,
+      "expected_direction": "vague_future",
+      "expected_window": { "from": "2026-03-29", "to": "2026-04-12" },
+      "difficulty": "hard",
+      "rationale": "'bald' = soon, vaguely. No precise date. Could boost results in next ~2 weeks. Tests vague future handling."
+    },
+    {
+      "id": "A03",
+      "category": "ambiguous_contextual",
+      "query": "das letzte Mal als ich das gemacht habe",
+      "expected_dates": null,
+      "expected_direction": "vague_past",
+      "expected_window": null,
+      "difficulty": "hard",
+      "rationale": "'letztes Mal' has no temporal anchor — it refers to a previous occurrence, not a date. Parser should flag as temporally indeterminate."
+    },
+    {
+      "id": "A04",
+      "category": "ambiguous_contextual",
+      "query": "am Wochenende will ich das fertig haben",
+      "expected_dates": ["2026-04-04", "2026-04-05"],
+      "expected_direction": "future",
+      "difficulty": "hard",
+      "rationale": "'am Wochenende' + future tense. Today is Sunday (already weekend). 'will ich' indicates future, so next weekend: Sat 2026-04-04 to Sun 2026-04-05. Tricky: must not resolve to today."
+    },
+    {
+      "id": "A05",
+      "category": "ambiguous_contextual",
+      "query": "am Wochenende habe ich daran gearbeitet",
+      "expected_dates": ["2026-03-28", "2026-03-29"],
+      "expected_direction": "past",
+      "difficulty": "hard",
+      "rationale": "'am Wochenende' + past tense. Today is Sunday. Past reference = this/current weekend (Sat 2026-03-28 to Sun 2026-03-29). Contrasts with A04."
+    },
+    {
+      "id": "N01",
+      "category": "no_temporal_intent",
+      "query": "was ist der RRF-Score?",
+      "expected_dates": null,
+      "expected_direction": "none",
+      "difficulty": "easy",
+      "rationale": "Factual question about a concept. No temporal reference at all. Parser must return null/empty."
+    },
+    {
+      "id": "N02",
+      "category": "no_temporal_intent",
+      "query": "wie funktioniert der Guard?",
+      "expected_dates": null,
+      "expected_direction": "none",
+      "difficulty": "easy",
+      "rationale": "Technical how-does-it-work question. No temporal reference. Parser must return null/empty."
+    },
+    {
+      "id": "N03",
+      "category": "no_temporal_intent",
+      "query": "show me all blocks with category infrastructure",
+      "expected_dates": null,
+      "expected_direction": "none",
+      "difficulty": "easy",
+      "rationale": "Pure listing/filter query. No temporal reference. Parser must return null/empty."
+    },
+    {
+      "id": "N04",
+      "category": "no_temporal_intent",
+      "query": "welche Modelle wurden evaluiert?",
+      "expected_dates": null,
+      "expected_direction": "none",
+      "difficulty": "medium",
+      "rationale": "'wurden' is past tense but the query asks about historical facts, not a specific time period. Parser should not infer temporal bounds from generic past tense."
+    },
+    {
+      "id": "N05",
+      "category": "no_temporal_intent",
+      "query": "was ist der Unterschied zwischen shared und private scope?",
+      "expected_dates": null,
+      "expected_direction": "none",
+      "difficulty": "easy",
+      "rationale": "Conceptual comparison question. No temporal reference. Parser must return null/empty."
+    },
+    {
+      "id": "E01",
+      "category": "edge_cases",
+      "query": "heute und morgen habe ich frei",
+      "expected_dates": ["2026-03-29", "2026-03-30"],
+      "expected_direction": "range",
+      "difficulty": "medium",
+      "rationale": "Two temporal keywords in one query. Both must resolve: heute=2026-03-29, morgen=2026-03-30. Tests multi-keyword extraction."
+    },
+    {
+      "id": "E02",
+      "category": "edge_cases",
+      "query": "von gestern bis übermorgen läuft der Test",
+      "expected_dates": ["2026-03-28", "2026-03-31"],
+      "expected_direction": "range",
+      "difficulty": "hard",
+      "rationale": "'von gestern bis übermorgen' = explicit range using two relative keywords. 2026-03-28 to 2026-03-31. Tests range from relative-to-relative."
+    },
+    {
+      "id": "E03",
+      "category": "edge_cases",
+      "query": "todya I need to fix the temporal parser",
+      "expected_dates": ["2026-03-29"],
+      "expected_direction": "today",
+      "difficulty": "medium",
+      "rationale": "Typo: 'todya' → 'today' (Levenshtein distance 2, within tolerance for 5-char word). Tests English typo tolerance at boundary."
+    },
+    {
+      "id": "E04",
+      "category": "edge_cases",
+      "query": "Mittwoch Morgen findet das Meeting statt",
+      "expected_dates": ["2026-04-01"],
+      "expected_direction": "future",
+      "difficulty": "hard",
+      "rationale": "'Morgen' as time-of-day (morning) must NOT be confused with 'morgen' (tomorrow). Case-insensitive parser must use context ('Mittwoch Morgen' = Wednesday morning). Tests false-positive avoidance."
+    },
+    {
+      "id": "E05",
+      "category": "edge_cases",
+      "query": "der Montag-Morgen-Call fällt aus",
+      "expected_dates": ["2026-03-30"],
+      "expected_direction": "future",
+      "difficulty": "hard",
+      "rationale": "Weekday embedded in compound noun with hyphens. Parser must extract 'Montag' from 'Montag-Morgen-Call'. Tests tokenization of hyphenated compounds."
+    },
+    {
+      "id": "E06",
+      "category": "edge_cases",
+      "query": "2026-03-25 hatte ich das deployed",
+      "expected_dates": ["2026-03-25"],
+      "expected_direction": "past",
+      "difficulty": "medium",
+      "rationale": "Explicit ISO date in query text. Parser should recognize and extract ISO date literals directly."
+    },
+    {
+      "id": "E07",
+      "category": "edge_cases",
+      "query": "gestern und vorgestern waren Deployments",
+      "expected_dates": ["2026-03-27", "2026-03-28"],
+      "expected_direction": "past",
+      "difficulty": "medium",
+      "rationale": "Two distinct past-relative keywords joined with 'und'. Both must resolve independently. Tests multi-keyword past extraction."
+    },
+    {
+      "id": "E08",
+      "category": "edge_cases",
+      "query": "",
+      "expected_dates": null,
+      "expected_direction": "none",
+      "difficulty": "easy",
+      "rationale": "Empty query string. Parser must handle gracefully and return null/empty without panic."
+    },
+    {
+      "id": "E09",
+      "category": "edge_cases",
+      "query": "heute heute heute",
+      "expected_dates": ["2026-03-29"],
+      "expected_direction": "today",
+      "difficulty": "easy",
+      "rationale": "Repeated keyword. Must deduplicate — only one date in result, not three. Tests idempotent deduplication."
+    },
+    {
+      "id": "E10",
+      "category": "edge_cases",
+      "query": "vor 0 Tagen gab es ein Problem",
+      "expected_dates": ["2026-03-29"],
+      "expected_direction": "today",
+      "difficulty": "medium",
+      "rationale": "'vor 0 Tagen' is technically today. Edge case in numeric parsing: zero offset must work and equal today."
+    }
+  ]
+}

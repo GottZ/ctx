@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 )
 
 const (
@@ -136,8 +137,29 @@ func LostInMiddleReorder(sources []Source) []Source {
 // BuildPrompt constructs the system and user prompts for LLM synthesis.
 // Sources should already be filtered and scored. The originalQuery is used
 // (possibly German) so the LLM answers in the user's language.
-func BuildPrompt(originalQuery string, sources []Source) (systemPrompt, userPrompt string) {
+// The current time is injected so the LLM can resolve relative time references.
+func BuildPrompt(originalQuery string, sources []Source, temporalDates []TemporalDate) (systemPrompt, userPrompt string) {
 	systemPrompt = systemPromptV52
+
+	// Conditional date injection — only when the query has temporal references.
+	// Avoids polluting the prompt for non-temporal queries (fixes S08/M05 regressions).
+	if len(temporalDates) > 0 {
+		now := time.Now()
+		systemPrompt += fmt.Sprintf(
+			"\n\n<context>Current date: %s. The user's query references these dates: ",
+			now.Format("2006-01-02 (Monday)"),
+		)
+		for i, d := range temporalDates {
+			if i > 0 {
+				systemPrompt += ", "
+			}
+			systemPrompt += fmt.Sprintf("%s = %s", d.Ref, d.Date)
+			if d.End != nil {
+				systemPrompt += " to " + *d.End
+			}
+		}
+		systemPrompt += ". Use this to interpret temporal references in the question and sources.</context>"
+	}
 
 	var sb strings.Builder
 	sb.WriteString("<question>")
@@ -171,7 +193,8 @@ func BuildPrompt(originalQuery string, sources []Source) (systemPrompt, userProm
 
 // Synthesize runs the full LLM synthesis pipeline:
 // filter -> confidence -> low-confidence limiting -> reorder -> prompt -> chat.
-func Synthesize(ctx context.Context, host, model, originalQuery string, sources []Source) (*SynthesisResult, error) {
+// temporalDates is nil for non-temporal queries (date context omitted from prompt).
+func Synthesize(ctx context.Context, host, model, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources)
 	if len(filtered) == 0 {
@@ -210,7 +233,7 @@ func Synthesize(ctx context.Context, host, model, originalQuery string, sources 
 	llmSources = LostInMiddleReorder(llmSources)
 
 	// Step 6: Build prompt.
-	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources)
+	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates)
 
 	// Step 7: Call LLM.
 	resp, err := Chat(ctx, host, model, systemPrompt, userPrompt, SynthesisOptions(), ChatTimeout)
