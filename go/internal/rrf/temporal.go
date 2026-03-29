@@ -1,3 +1,14 @@
+// Package rrf — Temporal Expansion (rule-based fallback)
+// Part of ctx by GottZ — The memory your LLM pretends to have.
+//
+// Rule-based temporal expansion as fallback when LLM normalization
+// (GottZ Temporal Gravity) is unavailable. Detects temporal keywords
+// with Levenshtein fuzzy matching and expands to concrete dates.
+//
+// For the primary LLM-based approach, see internal/llm/temporal.go
+// (GottZ Temporal Gravity + GottZ Cyclic Phase Model).
+//
+// Source: https://github.com/GottZ/ctx
 package rrf
 
 import (

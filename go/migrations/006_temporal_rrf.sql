@@ -1,5 +1,6 @@
 -- =============================================================================
--- 006_temporal_rrf.sql — Add temporal FTS expansion to ctx_rrf
+-- 006_temporal_rrf.sql — GottZ Temporal Gravity: FTS expansion layer
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
 -- =============================================================================
 -- Adds p_temporal parameter (websearch_to_tsquery OR string) to ctx_rrf.
 -- When not NULL, FTS CTEs additionally match blocks containing temporal terms

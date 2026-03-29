@@ -200,8 +200,24 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Step 5: Hyphen preprocessing for FTS.
 	querySpaced := strings.ReplaceAll(searchQuery, "-", " ")
 
+	// Step 5b: Build gravity params from temporal normalization (BUG-7 fix).
+	var gravityParams *rrf.TemporalGravityParams
+	if temporalResult != nil && len(temporalResult.Dates) > 0 {
+		// Use the first resolved date for the gravity channel.
+		d := temporalResult.Dates[0]
+		cutoff := 14 // default: weekday-level
+		if d.End != nil {
+			cutoff = 60 // range query: wider cutoff
+		}
+		gravityParams = &rrf.TemporalGravityParams{
+			Date:      d.Date,
+			Direction: d.Dir,
+			Cutoff:    cutoff,
+		}
+	}
+
 	// Step 6: RRF Search via PG function.
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, limit, temporal)
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, limit, temporal, gravityParams)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,

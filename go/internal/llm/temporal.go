@@ -1,3 +1,20 @@
+// Package llm — Temporal Normalization
+// Part of ctx by GottZ — The memory your LLM pretends to have.
+//
+// GottZ Temporal Gravity: Physics-inspired temporal scoring where knowledge
+// blocks are masses in time-space with gravitational fields. Novel approach
+// combining asymmetric Gaussian decay, cognitive-science-calibrated windows
+// (Rubin & Baddeley 0.4d/d), specificity-weighted mass, and semantic coupling.
+// No prior art combines all dimensions — confirmed via 22-agent literature review.
+//
+// GottZ Cyclic Phase Model: Multi-dimensional temporal retrieval where each
+// cyclic time structure (weekday, month, quarter, year, daily) is an independent
+// dimension with normalized phase [0,1) and Gaussian decay. Queries activate
+// specific dimensions — "immer dienstags" activates weekday:1.0 while
+// "am letzten Dienstag" activates linear:0.6 + weekday:0.4.
+//
+// Source: https://github.com/GottZ/ctx
+// Contributors: https://github.com/GottZ/ctx/graphs/contributors
 package llm
 
 import (
@@ -42,15 +59,16 @@ const temporalPromptTemplate = `You are a temporal reference resolver. Output ra
 
 %s
 
-DIRECTION RULES:
-- Past verbs (war/ging/hatte/wollte/habe..gemacht/bin..gewesen): BACKWARD
-- Future verbs (will/werde/gehe/mache/muss/soll): FORWARD
-- bis/until/by/deadline/frist = ALWAYS FORWARD
-- seit/since = start in past, end=today
-- letzten/last = BACKWARD. nächsten/next = FORWARD.
-- Bare weekday + future from weekend → nearest forward occurrence.
-- If the query has NO temporal reference (no dates, no time words, no relative references), return empty dates.
-- Vague memory references (nochmal, irgendwann, damals) without specific time → empty dates.
+DIRECTION RULES (in priority order):
+1. VERB TENSE always wins over defaults:
+   Past (war/ging/hatte/wollte/habe..gemacht/bin..gewesen/musste) → BACKWARD
+   Future (will/werde/gehe/mache/muss/soll) → FORWARD
+2. Explicit markers override tense: letzten/last → BACKWARD, nächsten/next → FORWARD
+3. bis/until/by/deadline/frist = ALWAYS FORWARD
+4. seit/since = start in past, end=today
+5. ONLY when NO verb tense AND NO explicit marker: bare weekday → nearest forward occurrence.
+6. No temporal reference at all → empty dates.
+7. Vague memory (nochmal, irgendwann, damals) without specific time → empty dates.
 
 JSON: {"dates":[{"ref":"matched text","date":"YYYY-MM-DD","end":"YYYY-MM-DD or null","dir":"past|future|today|range"}],"query":"original with dates inserted"}`
 
@@ -126,6 +144,9 @@ var temporalIntentWords = []string{
 	"letzten", "nächsten", "vorigen", "kommenden",
 	"seit", "bis", "vor", "anfang", "ende", "mitte",
 	"heut", "abend",
+	// German months (BUG-5: "im März" was missed)
+	"januar", "februar", "märz", "maerz", "april", "mai", "juni",
+	"juli", "august", "september", "oktober", "november", "dezember",
 	// English
 	"today", "yesterday", "tomorrow",
 	"week", "month", "year",
@@ -133,9 +154,16 @@ var temporalIntentWords = []string{
 	"weekend", "recently", "soon", "last", "next", "ago", "since", "until", "by",
 }
 
+// isoDateRe detects ISO dates in queries (BUG-1 fix).
+var isoDateRe = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}\b`)
+
 // HasTemporalIntent returns true if the query likely contains temporal references.
 // This is a cheap pre-filter — false positives are OK (the LLM will return empty dates).
 func HasTemporalIntent(query string) bool {
+	// Check for ISO dates first (BUG-1: "was war am 2026-03-27?" was missed).
+	if isoDateRe.MatchString(query) {
+		return true
+	}
 	lower := strings.ToLower(query)
 	for _, w := range temporalIntentWords {
 		if strings.Contains(lower, w) {
