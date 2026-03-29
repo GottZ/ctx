@@ -78,6 +78,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Backfill temporal dimensions for blocks missing from context_temporal.
+	if n, err := store.BackfillTemporal(ctx, pool); err != nil {
+		slog.Error("temporal backfill failed", "error", err)
+	} else if n > 0 {
+		slog.Info("temporal backfill complete", "blocks_processed", n)
+	}
+
 	// Scheduler for background guard + digest
 	schedulerConfig := &events.Config{
 		DSN:        cfg.DSN(),

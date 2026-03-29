@@ -261,6 +261,19 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
+	// Re-extract temporal data when content changes.
+	if data.Content != nil {
+		dates := store.ExtractDates(block.Content)
+		if err := store.UpdateContentDates(ctx, h.pool, block.ID, dates); err != nil {
+			slog.Error("manage: content_dates update failed", "error", err, "block_id", block.ID, "request_id", reqID)
+		}
+		if len(dates) > 0 {
+			if err := store.PopulateTemporal(ctx, h.pool, block.ID, dates); err != nil {
+				slog.Error("manage: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
+			}
+		}
+	}
+
 	// Re-embed if content or title changed.
 	if needsReEmbed {
 		embedText := block.Title + "\n\n" + block.Content

@@ -158,6 +158,21 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Enrich temporal data (fire-and-forget).
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		dates := store.ExtractDates(block.Content)
+		if err := store.UpdateContentDates(bgCtx, h.pool, block.ID, dates); err != nil {
+			slog.Error("store: content_dates update failed", "error", err, "block_id", block.ID, "request_id", reqID)
+		}
+		if len(dates) > 0 {
+			if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, dates); err != nil {
+				slog.Error("store: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
+			}
+		}
+	}()
+
 	// Generate embedding (document prefix): title + "\n\n" + content.
 	embedText := block.Title + "\n\n" + block.Content
 	vec, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedText, embed.PrefixDocument)

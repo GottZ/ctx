@@ -13,6 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -209,24 +210,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Step 5: Hyphen preprocessing for FTS.
 	querySpaced := strings.ReplaceAll(searchQuery, "-", " ")
 
-	// Step 5b: Build gravity params from temporal normalization (BUG-7 fix).
-	var gravityParams *rrf.TemporalGravityParams
-	if temporalResult != nil && len(temporalResult.Dates) > 0 {
-		// Use the first resolved date for the gravity channel.
-		d := temporalResult.Dates[0]
-		cutoff := 14 // default: weekday-level
-		if d.End != nil {
-			cutoff = 60 // range query: wider cutoff
-		}
-		gravityParams = &rrf.TemporalGravityParams{
-			Date:      d.Date,
-			Direction: d.Dir,
-			Cutoff:    cutoff,
-		}
+	// Step 6: RRF Search via PG function.
+	// Internal limit: fetch 200 candidates so the Go-side gravity reranker
+	// and LLM reranker can re-score a broad set before truncation.
+	internalLimit := 200
+	if limit > internalLimit {
+		internalLimit = limit // respect explicit large limits
 	}
 
-	// Step 6: RRF Search via PG function.
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, limit, temporal, gravityParams)
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, nil)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,
@@ -238,10 +230,51 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("rrf search complete",
 		"result_count", len(results),
+		"internal_limit", internalLimit,
+		"user_limit", limit,
 		"request_id", requestID,
 	)
 
+	// Step 6a: Post-RRF temporal gravity boost.
+	if temporalResult != nil && len(temporalResult.Dates) > 0 {
+		gravStart := time.Now()
+		d := temporalResult.Dates[0]
+		target, _ := time.Parse("2006-01-02", d.Date)
+		cutoff := 14
+		if d.End != nil {
+			cutoff = 60
+		}
+
+		// Fetch content_dates for result blocks
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.ID
+		}
+		blockDates, err := store.FetchContentDates(ctx, h.pool, ids)
+		if err != nil {
+			slog.Warn("gravity: fetch dates failed, skipping",
+				"error", err,
+				"request_id", requestID,
+			)
+		} else {
+			results = rrf.ApplyGravityBoost(results, blockDates, rrf.GravityParams{
+				TargetDate:  target,
+				Direction:   d.Dir,
+				Cutoff:      cutoff,
+				Power:       1.5,
+				BoostWeight: 0.30,
+			})
+			slog.Info("gravity scoring",
+				"gravity_active", true,
+				"blocks_with_temporal", len(blockDates),
+				"gravity_latency_ms", float64(time.Since(gravStart).Milliseconds()),
+				"request_id", requestID,
+			)
+		}
+	}
+
 	// Step 6b: Rerank via LLM (skipped if disabled or fewer than 3 results).
+	// The reranker sees up to RerankMaxDocs (15) from the broader candidate set.
 	if h.rerankEnabled {
 		results, err = rrf.Rerank(ctx, h.ollamaHost, h.chatModel, originalQuery, results)
 		if err != nil {
@@ -250,6 +283,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				"request_id", requestID,
 			)
 		}
+	}
+
+	// Step 6c: Truncate to user-facing limit after reranking.
+	if len(results) > limit {
+		results = results[:limit]
 	}
 
 	// Step 7: Convert RRF results to LLM source format.

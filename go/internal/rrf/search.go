@@ -43,7 +43,7 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 	if len(scopes) == 0 {
 		return nil, fmt.Errorf("rrf: empty scopes")
 	}
-	if limit < 1 || limit > 20 {
+	if limit < 1 || limit > 200 {
 		limit = 5
 	}
 
