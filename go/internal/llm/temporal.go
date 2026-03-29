@@ -53,22 +53,26 @@ func TemporalOptions() Options {
 	}
 }
 
-// temporalPromptTemplate is the system prompt for temporal normalization.
-// The %s placeholder is filled with the dynamic calendar.
+// temporalPromptTemplate is the system prompt for temporal normalization (LLM fallback).
+// The %s placeholder is filled with the dynamic V2 calendar.
+// This is only called when the rule-based parser (NormalizeTemporalRules) returns nil.
 const temporalPromptTemplate = `You are a temporal reference resolver. Output raw JSON only — no markdown, no code fences, no explanation.
 
 %s
 
-DIRECTION RULES (in priority order):
-1. VERB TENSE always wins over defaults:
-   Past (war/ging/hatte/wollte/habe..gemacht/bin..gewesen/musste) → BACKWARD
-   Future (will/werde/gehe/mache/muss/soll) → FORWARD
-2. Explicit markers override tense: letzten/last → BACKWARD, nächsten/next → FORWARD
-3. bis/until/by/deadline/frist = ALWAYS FORWARD
-4. seit/since = start in past, end=today
-5. ONLY when NO verb tense AND NO explicit marker: bare weekday → nearest forward occurrence.
-6. No temporal reference at all → empty dates.
-7. Vague memory (nochmal, irgendwann, damals) without specific time → empty dates.
+DIRECTION RULES (strict priority):
+1. EXPLICIT MARKERS always win: letzten/last → BACKWARD, nächsten/next → FORWARD
+2. VERB TENSE disambiguates when no explicit marker:
+   PAST (war/ging/hatte/musste/konnte/wurde/habe..gemacht/bin..gewesen) → use LAST from table
+   FUTURE (will/werde/soll/muss/treffe/steht..an/fällt..aus/findet..statt) → use NEXT from table
+   STATE-PLAN (habe frei/bin unterwegs/habe Urlaub) → use NEXT from table
+3. bis/until/by/deadline/frist = ALWAYS FORWARD (range from today)
+4. seit/since = start in past, end=today (range)
+5. Bare weekday (no tense, no marker) → use NEXT from WEEKDAY REFERENCE TABLE.
+6. No temporal reference → empty dates.
+7. Vague (neulich/bald/irgendwann/damals) without anchor → empty dates.
+
+Use the WEEKDAY REFERENCE TABLE above to look up dates. Do NOT calculate — just pick LAST or NEXT.
 
 JSON: {"dates":[{"ref":"matched text","date":"YYYY-MM-DD","end":"YYYY-MM-DD or null","dir":"past|future|today|range"}],"query":"original with dates inserted"}`
 
@@ -78,59 +82,65 @@ var weekdayNameDE = [7]string{"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donn
 // weekdayEN maps Go's time.Weekday to English weekday names.
 var weekdayNameEN = [7]string{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"}
 
-// buildCalendar generates the dynamic calendar section for the temporal prompt.
+// buildCalendar generates the V2 calendar with explicit LAST/NEXT per weekday.
+// The LLM only needs to look up, not calculate. Eliminates calendar arithmetic errors.
 func buildCalendar(now time.Time) string {
-	// Find Monday of this week (ISO: Mon=1).
+	var b strings.Builder
+
+	wdEN := weekdayNameEN[now.Weekday()]
+	wdDE := weekdayNameDE[now.Weekday()]
+	b.WriteString(fmt.Sprintf("TODAY: %s/%s %s\n\n", wdEN, wdDE, now.Format("2006-01-02")))
+
+	fDE := func(t time.Time) string {
+		return weekdayNameDE[t.Weekday()] + " " + t.Format("2006-01-02")
+	}
+	b.WriteString("RELATIVE DAYS:\n")
+	b.WriteString(fmt.Sprintf("  vorgestern/day-before-yesterday: %s\n", fDE(now.AddDate(0, 0, -2))))
+	b.WriteString(fmt.Sprintf("  gestern/yesterday:               %s\n", fDE(now.AddDate(0, 0, -1))))
+	b.WriteString(fmt.Sprintf("  heute/today:                     %s\n", fDE(now)))
+	b.WriteString(fmt.Sprintf("  morgen/tomorrow:                 %s\n", fDE(now.AddDate(0, 0, 1))))
+	b.WriteString(fmt.Sprintf("  übermorgen/day-after-tomorrow:   %s\n", fDE(now.AddDate(0, 0, 2))))
+
+	// Weekday reference table: LAST and NEXT for each weekday (no arithmetic needed).
+	b.WriteString(fmt.Sprintf("\nWEEKDAY REFERENCE TABLE (today = %s %s):\n", wdEN, now.Format("2006-01-02")))
+	isoOrder := []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday, time.Saturday, time.Sunday}
+	for _, targetWD := range isoOrder {
+		daysForward := (int(targetWD) - int(now.Weekday()) + 7) % 7
+		if daysForward == 0 {
+			daysForward = 7
+		}
+		nextDate := now.AddDate(0, 0, daysForward)
+		daysBack := (int(now.Weekday()) - int(targetWD) + 7) % 7
+		if daysBack == 0 {
+			daysBack = 7
+		}
+		lastDate := now.AddDate(0, 0, -daysBack)
+		b.WriteString(fmt.Sprintf("  %-10s  LAST = %s (%d days ago) | NEXT = %s (in %d days)\n",
+			weekdayNameEN[targetWD]+":", lastDate.Format("2006-01-02"), daysBack,
+			nextDate.Format("2006-01-02"), daysForward))
+	}
+
+	// Week ranges
 	wd := int(now.Weekday())
 	if wd == 0 {
 		wd = 7
 	}
 	thisMonday := now.AddDate(0, 0, -(wd - 1))
-	lastMonday := thisMonday.AddDate(0, 0, -7)
-	nextMonday := thisMonday.AddDate(0, 0, 7)
-	weekAfterMonday := thisMonday.AddDate(0, 0, 14)
+	f := func(t time.Time) string { return t.Format("2006-01-02") }
+	b.WriteString(fmt.Sprintf("\nWEEK RANGES:\n"))
+	b.WriteString(fmt.Sprintf("  Last week:       %s to %s\n", f(thisMonday.AddDate(0, 0, -7)), f(thisMonday.AddDate(0, 0, -1))))
+	b.WriteString(fmt.Sprintf("  This week:       %s to %s\n", f(thisMonday), f(thisMonday.AddDate(0, 0, 6))))
+	b.WriteString(fmt.Sprintf("  Next week:       %s to %s\n", f(thisMonday.AddDate(0, 0, 7)), f(thisMonday.AddDate(0, 0, 13))))
+	b.WriteString(fmt.Sprintf("  Week after next: %s to %s\n", f(thisMonday.AddDate(0, 0, 14)), f(thisMonday.AddDate(0, 0, 20))))
 
-	f := func(t time.Time) string { return t.Format("Mon 2006-01-02") }
-	fDE := func(t time.Time) string {
-		return weekdayNameDE[t.Weekday()] + " " + t.Format("2006-01-02")
-	}
+	// Weekends
+	lastSat := thisMonday.AddDate(0, 0, -2)
+	b.WriteString(fmt.Sprintf("\nWEEKENDS:\n"))
+	b.WriteString(fmt.Sprintf("  Last weekend:    %s + %s\n", f(lastSat), f(lastSat.AddDate(0, 0, 1))))
+	b.WriteString(fmt.Sprintf("  This weekend:    %s + %s\n", f(thisMonday.AddDate(0, 0, 5)), f(thisMonday.AddDate(0, 0, 6))))
+	b.WriteString(fmt.Sprintf("  Next weekend:    %s + %s\n", f(thisMonday.AddDate(0, 0, 12)), f(thisMonday.AddDate(0, 0, 13))))
 
-	// Last/this/next weekend (Sat+Sun)
-	thisSat := thisMonday.AddDate(0, 0, 5)
-	thisSun := thisMonday.AddDate(0, 0, 6)
-	lastSat := lastMonday.AddDate(0, 0, 5)
-	lastSun := lastMonday.AddDate(0, 0, 6)
-	nextSat := nextMonday.AddDate(0, 0, 5)
-	nextSun := nextMonday.AddDate(0, 0, 6)
-
-	return fmt.Sprintf(`TODAY: %s %s.
-CALENDAR:
-  vorgestern/day-before-yesterday: %s
-  gestern/yesterday: %s
-  heute/today: %s
-  morgen/tomorrow: %s
-  übermorgen/day-after-tomorrow: %s
-  Last week:    %s .. %s
-  This week:    %s .. %s
-  Next week:    %s .. %s
-  Week after:   %s .. %s
-  Last weekend: %s + %s
-  This weekend: %s + %s
-  Next weekend: %s + %s`,
-		weekdayNameEN[now.Weekday()], now.Format("2006-01-02"),
-		fDE(now.AddDate(0, 0, -2)),
-		fDE(now.AddDate(0, 0, -1)),
-		fDE(now),
-		fDE(now.AddDate(0, 0, 1)),
-		fDE(now.AddDate(0, 0, 2)),
-		f(lastMonday), f(lastMonday.AddDate(0, 0, 6)),
-		f(thisMonday), f(thisMonday.AddDate(0, 0, 6)),
-		f(nextMonday), f(nextMonday.AddDate(0, 0, 6)),
-		f(weekAfterMonday), f(weekAfterMonday.AddDate(0, 0, 6)),
-		f(lastSat), f(lastSun),
-		f(thisSat), f(thisSun),
-		f(nextSat), f(nextSun),
-	)
+	return b.String()
 }
 
 // temporalIntentWords are words that indicate a query has temporal intent.
@@ -144,6 +154,7 @@ var temporalIntentWords = []string{
 	"letzten", "nächsten", "vorigen", "kommenden",
 	"seit", "bis", "vor", "anfang", "ende", "mitte",
 	"heut", "abend",
+	"damals", "vorhin",
 	// German months (BUG-5: "im März" was missed)
 	"januar", "februar", "märz", "maerz", "april", "mai", "juni",
 	"juli", "august", "september", "oktober", "november", "dezember",
@@ -207,50 +218,126 @@ func NormalizeTemporal(ctx context.Context, host, model, query string, now time.
 	return &result, nil
 }
 
+// maxFTSDates caps the number of unique dates expanded into FTS OR-terms.
+// At 1M+ blocks, each OR-term triggers a GIN posting-list scan. 10 dates ×
+// ~7 terms = ~70 OR-terms — safe for GIN. Month names and KW numbers are
+// always added deduplicated regardless of the cap.
+const maxFTSDates = 10
+
 // TemporalToFTSExpansion converts resolved dates to a websearch_to_tsquery OR string.
+// Enhanced: includes month names (DE+EN), YYYY-MM prefix, and ISO week numbers.
+// Scale-capped: only the first and last maxFTSDates/2 unique dates get full
+// per-day expansion. Months and ISO weeks from ALL dates are still included.
 func TemporalToFTSExpansion(dates []TemporalDate) string {
 	if len(dates) == 0 {
 		return ""
 	}
 
-	seen := make(map[string]bool)
-	var terms []string
-
-	addDate := func(isoDate string) {
-		t, err := time.Parse("2006-01-02", isoDate)
+	// Phase 1: collect all unique ISO dates in order.
+	seenCollect := make(map[string]bool)
+	var allDates []time.Time
+	collectDate := func(iso string) {
+		t, err := time.Parse("2006-01-02", iso)
 		if err != nil {
 			return
 		}
 		key := t.Format("2006-01-02")
-		if seen[key] {
+		if seenCollect[key] {
 			return
 		}
-		seen[key] = true
-		terms = append(terms,
-			weekdayNameDE[t.Weekday()],
-			weekdayNameEN[t.Weekday()],
-			key,
-		)
+		seenCollect[key] = true
+		allDates = append(allDates, t)
+	}
+	for _, d := range dates {
+		collectDate(d.Date)
+		if d.End != nil {
+			collectDate(*d.End)
+		}
+	}
+	if len(allDates) == 0 {
+		return ""
 	}
 
-	for _, d := range dates {
-		addDate(d.Date)
-		if d.End != nil {
-			addDate(*d.End)
+	// Phase 2: determine which dates get full per-day expansion (core terms).
+	// If more than maxFTSDates unique dates, keep first half and last half.
+	expandSet := make(map[string]bool)
+	if len(allDates) <= maxFTSDates {
+		for _, t := range allDates {
+			expandSet[t.Format("2006-01-02")] = true
+		}
+	} else {
+		half := maxFTSDates / 2
+		for _, t := range allDates[:half] {
+			expandSet[t.Format("2006-01-02")] = true
+		}
+		for _, t := range allDates[len(allDates)-half:] {
+			expandSet[t.Format("2006-01-02")] = true
+		}
+	}
+
+	// Phase 3: build terms. Core terms only for expandSet dates.
+	// Month and KW terms from ALL dates (deduplicated).
+	seenMonths := make(map[int]bool)
+	seenWeeks := make(map[int]bool)
+	var terms []string
+
+	for _, t := range allDates {
+		key := t.Format("2006-01-02")
+
+		if expandSet[key] {
+			// Core: weekday DE, weekday EN, ISO date
+			terms = append(terms,
+				weekdayNameDE[t.Weekday()],
+				weekdayNameEN[t.Weekday()],
+				key,
+			)
+		}
+
+		// Month expansion from ALL dates (once per unique month)
+		m := int(t.Month())
+		if !seenMonths[m] {
+			seenMonths[m] = true
+			terms = append(terms, monthNameDE[m], monthNameEN[m])
+			terms = append(terms, t.Format("2006-01")) // YYYY-MM prefix
+		}
+
+		// ISO week number from ALL dates (once per unique week)
+		_, isoWeek := t.ISOWeek()
+		if !seenWeeks[isoWeek] {
+			seenWeeks[isoWeek] = true
+			terms = append(terms, fmt.Sprintf("KW%d", isoWeek))
 		}
 	}
 
 	return strings.Join(terms, " OR ")
 }
 
-// TemporalToEmbedPrefix builds a compact date prefix for embedding augmentation.
+// monthNameDE maps month numbers to German month names.
+var monthNameDE = [13]string{"", "Januar", "Februar", "März", "April", "Mai", "Juni",
+	"Juli", "August", "September", "Oktober", "November", "Dezember"}
+
+// monthNameEN maps month numbers to English month names.
+var monthNameEN = [13]string{"", "January", "February", "March", "April", "May", "June",
+	"July", "August", "September", "October", "November", "December"}
+
+// maxEmbedPrefixLen caps the embed prefix length. At 1M+ blocks, a long prefix
+// shifts the embedding centroid away from the actual query. 150 chars fits
+// ~2 full date entries comfortably while preserving query signal.
+const maxEmbedPrefixLen = 150
+
+// TemporalToEmbedPrefix builds an enriched date prefix for embedding augmentation.
+// Includes weekday, ISO date, month (DE+EN), year, and ISO week number.
+// Scale-capped: if the full prefix exceeds maxEmbedPrefixLen and there are
+// multiple dates, it collapses to a compact "Start..End, Month YYYY, KWn" summary.
 func TemporalToEmbedPrefix(dates []TemporalDate) string {
 	if len(dates) == 0 {
 		return ""
 	}
 
 	seen := make(map[string]bool)
+	seenMonths := make(map[int]bool)
 	var parts []string
+	var parsedDates []time.Time
 
 	for _, d := range dates {
 		t, err := time.Parse("2006-01-02", d.Date)
@@ -262,11 +349,66 @@ func TemporalToEmbedPrefix(dates []TemporalDate) string {
 			continue
 		}
 		seen[key] = true
-		parts = append(parts, fmt.Sprintf("%s %s", weekdayNameDE[t.Weekday()], key))
+		parsedDates = append(parsedDates, t)
+
+		m := int(t.Month())
+		_, isoWeek := t.ISOWeek()
+
+		// "Montag 2026-03-23, März 2026, KW13"
+		parts = append(parts, fmt.Sprintf("%s %s, %s %d, KW%d",
+			weekdayNameDE[t.Weekday()], key, monthNameDE[m], t.Year(), isoWeek))
+
+		// English month (once per unique month)
+		if !seenMonths[m] {
+			seenMonths[m] = true
+			if monthNameDE[m] != monthNameEN[m] {
+				parts = append(parts, monthNameEN[m])
+			}
+		}
 	}
 
 	if len(parts) == 0 {
 		return ""
 	}
-	return strings.Join(parts, ", ") + "."
+
+	joined := strings.Join(parts, ". ") + "."
+
+	// Cap: if prefix is too long and we have multiple dates, collapse to summary.
+	// Compact format: "Weekday YYYY-MM-DD..Weekday YYYY-MM-DD, Month/Month, KWn..KWm."
+	if len(joined) > maxEmbedPrefixLen && len(parsedDates) > 1 {
+		first := parsedDates[0]
+		last := parsedDates[len(parsedDates)-1]
+		fKey := first.Format("2006-01-02")
+		lKey := last.Format("2006-01-02")
+
+		_, kwFirst := first.ISOWeek()
+		_, kwLast := last.ISOWeek()
+
+		// Collect unique months (compact — no KW enumeration)
+		monthSeen := make(map[int]bool)
+		var monthList []string
+		for _, t := range parsedDates {
+			m := int(t.Month())
+			if !monthSeen[m] {
+				monthSeen[m] = true
+				monthList = append(monthList, monthNameDE[m])
+			}
+		}
+
+		var kwStr string
+		if kwFirst == kwLast {
+			kwStr = fmt.Sprintf("KW%d", kwFirst)
+		} else {
+			kwStr = fmt.Sprintf("KW%d..KW%d", kwFirst, kwLast)
+		}
+
+		summary := fmt.Sprintf("%s %s..%s %s, %s, %s.",
+			weekdayNameDE[first.Weekday()], fKey,
+			weekdayNameDE[last.Weekday()], lKey,
+			strings.Join(monthList, "/"),
+			kwStr)
+		return summary
+	}
+
+	return joined
 }

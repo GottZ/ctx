@@ -146,26 +146,35 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 3b: LLM temporal normalization.
-	// Uses originalQuery to catch German temporal terms before translation.
+	// Step 3b: Temporal normalization.
+	// PRIMARY: deterministic rule-based parser (0ms, no LLM call).
+	// FALLBACK: LLM normalization (only when rules return nil but query has temporal intent).
 	var temporal string
 	var temporalResult *llm.TemporalResult
-	isTemporal := llm.HasTemporalIntent(originalQuery)
 
-	if isTemporal {
-		now := time.Now()
+	now := time.Now()
+	temporalResult = llm.NormalizeTemporalRules(originalQuery, now)
+
+	if temporalResult != nil {
+		temporal = llm.TemporalToFTSExpansion(temporalResult.Dates)
+		slog.Info("temporal normalization (rule-based)",
+			"dates", temporalResult.Dates,
+			"fts_terms", temporal,
+			"request_id", requestID,
+		)
+	} else if llm.HasTemporalIntent(originalQuery) {
+		// LLM fallback: query seems temporal but rules couldn't parse it.
 		var err error
 		temporalResult, err = llm.NormalizeTemporal(ctx, h.ollamaHost, h.chatModel, originalQuery, now)
 		if err != nil {
-			slog.Warn("temporal normalization failed, falling back to rule-based",
+			slog.Warn("temporal LLM fallback failed, using rule-based expansion",
 				"error", err,
 				"request_id", requestID,
 			)
-			// Fallback: rule-based expansion from rrf package.
 			temporal = rrf.ExpandTemporal(originalQuery, now)
 		} else if temporalResult != nil {
 			temporal = llm.TemporalToFTSExpansion(temporalResult.Dates)
-			slog.Info("temporal normalization",
+			slog.Info("temporal normalization (LLM fallback)",
 				"dates", temporalResult.Dates,
 				"fts_terms", temporal,
 				"request_id", requestID,
@@ -244,7 +253,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 7: Convert RRF results to LLM source format.
-	now := time.Now()
+	now = time.Now()
 	sources := make([]llm.Source, len(results))
 	for i, r := range results {
 		ageDays := int(math.Floor(now.Sub(r.UpdatedAt).Hours() / 24))
