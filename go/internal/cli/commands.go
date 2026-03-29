@@ -36,6 +36,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(guardCmd(getClient))
 	root.AddCommand(manageCmd(getClient))
 	root.AddCommand(healthCmd(getClient))
+	root.AddCommand(IngestCmd(getClient))
 }
 
 // ── query ────────────────────────────────────────────────────────────

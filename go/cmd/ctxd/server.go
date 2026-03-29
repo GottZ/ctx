@@ -10,6 +10,8 @@ import (
 const (
 	// DefaultMaxBodySize is the default body size limit for all endpoints (1 MB).
 	DefaultMaxBodySize = 1 << 20 // 1 MB
+	// IngestMaxBodySize is the body size limit for /api/ingest (10 MB for bulk chunks).
+	IngestMaxBodySize = 10 << 20 // 10 MB
 	// BlobMaxBodySize is the body size limit for blob-store (75 MB: 50MB binary + base64 overhead).
 	BlobMaxBodySize = 75 << 20 // 75 MB
 )
@@ -59,6 +61,14 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 
 		// Digest — Topic map generation
 		r.Post("/webhook/context-digest", digestH.HandleDigest)
+	})
+
+	// Ingest API — larger body limit (10 MB for bulk chunk import, no rate-limit)
+	ingestH := handler.NewIngestHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel)
+	r.Group(func(r chi.Router) {
+		r.Use(handler.Auth(pool))
+		r.Use(handler.MaxBodySize(IngestMaxBodySize))
+		r.Post("/api/ingest", ingestH.HandleIngest)
 	})
 
 	// Blob Store — larger body limit (75 MB for base64-encoded files)

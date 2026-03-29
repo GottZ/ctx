@@ -50,6 +50,7 @@ type ChatRequest struct {
 	Messages []Message `json:"messages"`
 	Stream   bool      `json:"stream"`
 	Think    *bool     `json:"think,omitempty"`
+	Format   string    `json:"format,omitempty"` // "json" for structured output
 	Options  Options   `json:"options"`
 }
 
@@ -75,6 +76,55 @@ func Chat(ctx context.Context, host, model, systemPrompt, userPrompt string, opt
 		},
 		Stream:  false,
 		Think:   ThinkMode,
+		Options: opts,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("llm: marshal request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("llm: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("llm: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("llm: unexpected status %d: %s", resp.StatusCode, string(errBody))
+	}
+
+	var result ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("llm: decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// ChatJSON sends a non-streaming chat request to Ollama with JSON-mode enabled.
+// Ollama's format:"json" constrains the model to output valid JSON.
+// The timeout parameter controls the HTTP client timeout.
+func ChatJSON(ctx context.Context, host, model, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+	reqBody := ChatRequest{
+		Model: model,
+		Messages: []Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		Stream:  false,
+		Think:   ThinkMode,
+		Format:  "json",
 		Options: opts,
 	}
 
