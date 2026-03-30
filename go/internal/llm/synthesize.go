@@ -174,14 +174,14 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 			content = content[:MaxBlockChars] + "[... truncated]"
 		}
 
-		sb.WriteString(fmt.Sprintf(
+		fmt.Fprintf(&sb,
 			`<source id="%d" title="%s" category="%s" score="%.4f" age_days="%d">`,
 			i+1,
 			EscapeXml(src.Title),
 			EscapeXml(src.Category),
 			src.Score,
 			src.AgeDays,
-		))
+		)
 		sb.WriteString("\n")
 		sb.WriteString(EscapeXml(content))
 		sb.WriteString("\n</source>\n")

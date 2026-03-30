@@ -443,7 +443,7 @@ func postIngest(c *Client, url string, req ingestRequestPayload) (*ingestRespons
 	if err != nil {
 		return nil, fmt.Errorf("request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ingestResponsePayload
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

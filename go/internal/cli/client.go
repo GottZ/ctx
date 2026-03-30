@@ -51,7 +51,7 @@ func (c *Client) Post(endpoint string, body any) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request to %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
@@ -74,7 +74,7 @@ func (c *Client) Get(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request to %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {

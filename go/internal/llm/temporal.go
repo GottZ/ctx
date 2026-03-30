@@ -91,17 +91,17 @@ func buildCalendar(now time.Time) string {
 
 	wdEN := weekdayNameEN[now.Weekday()]
 	wdDE := weekdayNameDE[now.Weekday()]
-	b.WriteString(fmt.Sprintf("TODAY: %s/%s %s\n\n", wdEN, wdDE, now.Format("2006-01-02")))
+	fmt.Fprintf(&b, "TODAY: %s/%s %s\n\n", wdEN, wdDE, now.Format("2006-01-02"))
 
 	fDE := func(t time.Time) string {
 		return weekdayNameDE[t.Weekday()] + " " + t.Format("2006-01-02")
 	}
 	b.WriteString("RELATIVE DAYS:\n")
-	b.WriteString(fmt.Sprintf("  vorgestern/day-before-yesterday: %s\n", fDE(now.AddDate(0, 0, -2))))
-	b.WriteString(fmt.Sprintf("  gestern/yesterday:               %s\n", fDE(now.AddDate(0, 0, -1))))
-	b.WriteString(fmt.Sprintf("  heute/today:                     %s\n", fDE(now)))
-	b.WriteString(fmt.Sprintf("  morgen/tomorrow:                 %s\n", fDE(now.AddDate(0, 0, 1))))
-	b.WriteString(fmt.Sprintf("  übermorgen/day-after-tomorrow:   %s\n", fDE(now.AddDate(0, 0, 2))))
+	fmt.Fprintf(&b, "  vorgestern/day-before-yesterday: %s\n", fDE(now.AddDate(0, 0, -2)))
+	fmt.Fprintf(&b, "  gestern/yesterday:               %s\n", fDE(now.AddDate(0, 0, -1)))
+	fmt.Fprintf(&b, "  heute/today:                     %s\n", fDE(now))
+	fmt.Fprintf(&b, "  morgen/tomorrow:                 %s\n", fDE(now.AddDate(0, 0, 1)))
+	fmt.Fprintf(&b, "  übermorgen/day-after-tomorrow:   %s\n", fDE(now.AddDate(0, 0, 2)))
 
 	// Weekday reference table: LAST and NEXT for each weekday (no arithmetic needed).
 	b.WriteString(fmt.Sprintf("\nWEEKDAY REFERENCE TABLE (today = %s %s):\n", wdEN, now.Format("2006-01-02")))

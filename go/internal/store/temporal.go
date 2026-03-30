@@ -106,10 +106,7 @@ func BuildTemporalBatch(blockID string, dates []time.Time, links ...[]string) (*
 		queryCount++
 	}
 
-	// Sentinel if only links, no dates (block still needs temporal entry for backfill)
-	if len(dates) == 0 && len(linkTargets) > 0 {
-		// Links are already inserted, no sentinel needed — block exists in context_temporal
-	}
+	// Links are already inserted above; no sentinel needed when only links, no dates.
 
 	return batch, queryCount
 }
