@@ -27,7 +27,7 @@ fi
 # =============================================================================
 # SECTION 1: Context Store Database + User (requires superuser)
 # =============================================================================
-echo "SETUP [1/2]: Creating context_store database and user..."
+echo "SETUP [1/3]: Creating context_store database and user..."
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
 	SELECT 'CREATE DATABASE ${CONTEXT_DB}'
@@ -44,12 +44,12 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
 	GRANT ALL PRIVILEGES ON DATABASE ${CONTEXT_DB} TO ${CONTEXT_DB_USER};
 EOSQL
 
-echo "SETUP [1/2]: Database and user ready."
+echo "SETUP [1/3]: Database and user ready."
 
 # =============================================================================
 # SECTION 2: Extensions (as superuser, on context_store DB)
 # =============================================================================
-echo "SETUP [2/2]: Creating extensions..."
+echo "SETUP [2/3]: Creating extensions..."
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "${CONTEXT_DB}" <<-EOSQL
 	GRANT CREATE ON SCHEMA public TO ${CONTEXT_DB_USER};
@@ -60,7 +60,31 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "${CONTEXT_DB}" <<-
 	CREATE EXTENSION IF NOT EXISTS pg_trgm;
 EOSQL
 
-echo "SETUP [2/2]: Extensions ready (vector, timescaledb, pgcrypto, pg_trgm)."
+echo "SETUP [2/3]: Extensions ready (vector, timescaledb, pgcrypto, pg_trgm)."
+
+# =============================================================================
+# SECTION 3: Cross-Database Isolation (Security Hardening)
+# =============================================================================
+# Revoke PUBLIC connect on both databases to prevent cross-tenant access.
+# context_user can only access context_store, n8n user can only access n8n.
+echo "SETUP [3/3]: Establishing cross-database isolation..."
+
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<-EOSQL
+    REVOKE CONNECT ON DATABASE ${CONTEXT_DB} FROM PUBLIC;
+    REVOKE CONNECT ON DATABASE ${POSTGRES_DB} FROM PUBLIC;
+    GRANT CONNECT ON DATABASE ${CONTEXT_DB} TO ${CONTEXT_DB_USER};
+    GRANT CONNECT ON DATABASE ${POSTGRES_DB} TO ${POSTGRES_USER};
+EOSQL
+
+# Grant CONNECT to non-root n8n user if configured
+if [ -n "${POSTGRES_NON_ROOT_USER:-}" ]; then
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<-EOSQL
+        GRANT CONNECT ON DATABASE ${POSTGRES_DB} TO ${POSTGRES_NON_ROOT_USER};
+EOSQL
+    echo "SETUP [3/3]: CONNECT granted to non-root user ${POSTGRES_NON_ROOT_USER}."
+fi
+
+echo "SETUP [3/3]: Cross-database isolation established."
 
 # =============================================================================
 # DONE — Schema is handled by ctx Go server (embedded migrations)

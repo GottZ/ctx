@@ -270,7 +270,8 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		args = append(args, *data.Title)
 		argIdx++
 	}
-	if data.Content != nil {
+	contentChanged := data.Content != nil
+	if contentChanged {
 		setClauses = append(setClauses, fmt.Sprintf("content = $%d", argIdx))
 		args = append(args, *data.Content)
 		argIdx++
@@ -281,9 +282,17 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		argIdx++
 	}
 	if data.Metadata != nil {
-		setClauses = append(setClauses, fmt.Sprintf("metadata = $%d", argIdx))
+		if contentChanged {
+			// Merge provided metadata AND strip guard_checked_at in one expression.
+			setClauses = append(setClauses, fmt.Sprintf("metadata = $%d::jsonb - 'guard_checked_at'", argIdx))
+		} else {
+			setClauses = append(setClauses, fmt.Sprintf("metadata = $%d", argIdx))
+		}
 		args = append(args, data.Metadata)
 		argIdx++
+	} else if contentChanged {
+		// No explicit metadata update — strip guard_checked_at from existing metadata.
+		setClauses = append(setClauses, "metadata = metadata - 'guard_checked_at'")
 	}
 	if data.Scope != nil {
 		setClauses = append(setClauses, fmt.Sprintf("scope = $%d", argIdx))
@@ -322,7 +331,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		return nil, false, fmt.Errorf("store: update block: %w", err)
 	}
 
-	needsReEmbed := data.Content != nil || data.Title != nil
+	needsReEmbed := contentChanged || data.Title != nil
 	return b, needsReEmbed, nil
 }
 

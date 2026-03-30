@@ -9,6 +9,7 @@
 package ingest
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -365,13 +366,15 @@ func replaceInlineTags(text string) string {
 }
 
 // placeholderBlock returns a code block placeholder.
+// Uses null-byte delimiters + numeric index so it works for any idx value.
 func placeholderBlock(idx int) string {
-	return "\x00CB" + string(rune(idx+'0')) + "\x00"
+	return fmt.Sprintf("\x00CB%d\x00", idx)
 }
 
 // placeholderSpan returns a code span placeholder.
+// Uses null-byte delimiters + numeric index so it works for any idx value.
 func placeholderSpan(idx int) string {
-	return "\x00CS" + string(rune(idx+'0')) + "\x00"
+	return fmt.Sprintf("\x00CS%d\x00", idx)
 }
 
 // appendUnique adds s to slice only if not already present.

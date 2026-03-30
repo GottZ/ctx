@@ -524,52 +524,128 @@ func TestRequestIDMiddleware_GeneratesID(t *testing.T) {
 	}
 }
 
-// SECURITY PROPERTY: Client-provided request IDs are passed through, enabling
-// end-to-end tracing. But verify the value is faithfully preserved.
+// SECURITY PROPERTY: Valid client-provided request IDs (hex + hyphens, <= 64 chars)
+// are passed through, enabling end-to-end tracing.
 func TestRequestIDMiddleware_ClientProvided(t *testing.T) {
+	const validID = "abcdef01-2345-6789-abcd-ef0123456789"
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := RequestIDFromContext(r.Context())
-		if id != "client-id-123" {
-			t.Errorf("context request ID = %q, want %q", id, "client-id-123")
+		if id != validID {
+			t.Errorf("context request ID = %q, want %q", id, validID)
 		}
 		w.WriteHeader(http.StatusOK)
 	})
 
 	handler := RequestID(inner)
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("X-Request-ID", "client-id-123")
+	req.Header.Set("X-Request-ID", validID)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
 	respID := w.Header().Get("X-Request-ID")
-	if respID != "client-id-123" {
-		t.Errorf("X-Request-ID response = %q, want %q", respID, "client-id-123")
+	if respID != validID {
+		t.Errorf("X-Request-ID response = %q, want %q", respID, validID)
 	}
 }
 
-// SECURITY PROPERTY: Client-provided request IDs with injection characters
-// (CRLF, null bytes) are passed through as-is by the middleware. The HTTP
-// framework handles header safety. Verify no panic occurs.
+// SECURITY PROPERTY: Client-provided request IDs with invalid characters,
+// injection payloads, or excessive length are rejected and replaced with
+// a server-generated ID. The adversarial value must never appear in the response.
 func TestRequestIDMiddleware_InjectionAttempt(t *testing.T) {
 	adversarial := []string{
 		"id\r\nX-Injected: true",
 		"id\x00null",
 		"id<script>alert(1)</script>",
-		strings.Repeat("a", 10000), // very long ID
+		strings.Repeat("a", 10000),  // very long ID (exceeds 64 char limit)
+		strings.Repeat("a", 65),     // exactly one over the limit
+		"valid-hex-but-has-GHIJKL",  // non-hex letters
+		"abc 123",                   // space
+		"abc/def",                   // slash
 	}
 
-	for _, id := range adversarial {
+	for _, adversarialID := range adversarial {
 		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Just verify it does not panic.
-			_ = RequestIDFromContext(r.Context())
 			w.WriteHeader(http.StatusOK)
 		})
 		handler := RequestID(inner)
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		req.Header.Set("X-Request-ID", id)
+		req.Header.Set("X-Request-ID", adversarialID)
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
-		// No panic = pass.
+
+		respID := w.Header().Get("X-Request-ID")
+		// Must be a server-generated 16-char hex ID, not the adversarial input.
+		if len(respID) != 16 {
+			t.Errorf("adversarial ID %q: response ID length = %d, want 16 (server-generated)", adversarialID, len(respID))
+		}
+		if !validRequestID.MatchString(respID) {
+			t.Errorf("adversarial ID %q: response ID %q is not valid hex", adversarialID, respID)
+		}
+	}
+}
+
+// SECURITY PROPERTY: Request IDs at the boundary of the max length (64 chars)
+// are accepted when valid, and rejected when exactly one over.
+func TestRequestIDMiddleware_MaxLength(t *testing.T) {
+	// Exactly 64 hex chars — should be accepted.
+	exactly64 := strings.Repeat("ab", 32) // 64 chars
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := RequestID(inner)
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("X-Request-ID", exactly64)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Header().Get("X-Request-ID") != exactly64 {
+		t.Errorf("64-char valid ID was rejected, got %q", w.Header().Get("X-Request-ID"))
+	}
+
+	// 65 hex chars — should be rejected.
+	tooLong := strings.Repeat("ab", 32) + "c" // 65 chars
+	req2 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req2.Header.Set("X-Request-ID", tooLong)
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+	if w2.Header().Get("X-Request-ID") == tooLong {
+		t.Error("65-char ID should have been rejected")
+	}
+}
+
+// SECURITY PROPERTY: isValidRequestID unit tests cover edge cases.
+func TestIsValidRequestID(t *testing.T) {
+	cases := []struct {
+		name  string
+		id    string
+		valid bool
+	}{
+		{"empty", "", false},
+		{"hex only", "abcdef0123456789", true},
+		{"uppercase hex", "ABCDEF0123456789", true},
+		{"mixed case hex", "aAbBcCdDeEfF", true},
+		{"with hyphens", "abcd-ef01-2345", true},
+		{"UUID format", "550e8400-e29b-41d4-a716-446655440000", true},
+		{"only hyphens", "---", true},
+		{"single char", "a", true},
+		{"non-hex letter g", "abcg", false},
+		{"non-hex letter z", "abcz", false},
+		{"space", "abc def", false},
+		{"underscore", "abc_def", false},
+		{"dot", "abc.def", false},
+		{"slash", "abc/def", false},
+		{"newline", "abc\ndef", false},
+		{"null byte", "abc\x00def", false},
+		{"exactly 64", strings.Repeat("a", 64), true},
+		{"65 chars", strings.Repeat("a", 65), false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isValidRequestID(tc.id)
+			if got != tc.valid {
+				t.Errorf("isValidRequestID(%q) = %v, want %v", tc.id, got, tc.valid)
+			}
+		})
 	}
 }
 

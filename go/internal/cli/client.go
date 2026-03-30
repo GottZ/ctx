@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// maxResponseSize is the maximum number of bytes read from API responses (10 MB).
+const maxResponseSize = 10 * 1024 * 1024
+
 // Client is the HTTP client for the context store API.
 type Client struct {
 	BaseURL    string
@@ -50,7 +53,7 @@ func (c *Client) Post(endpoint string, body any) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -73,7 +76,7 @@ func (c *Client) Get(path string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

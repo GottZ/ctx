@@ -21,6 +21,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	r := chi.NewRouter()
 
 	// Global middleware
+	r.Use(handler.SecurityHeaders)
 	r.Use(handler.RequestID)
 	r.Use(handler.Logger)
 	r.Use(handler.Recovery)

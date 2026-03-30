@@ -12,6 +12,10 @@ db-backup-pg17/
 backups/
 backup-*.sql
 
+# Build artifacts
+go/ctx
+go/dist/
+
 # Misc
 progress.md
 prompt.md

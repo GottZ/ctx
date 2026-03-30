@@ -27,9 +27,13 @@ type WriteHandler struct {
 
 // HandleNotification is called by pgxlisten for each NOTIFY on ctx_block_write.
 func (h *WriteHandler) HandleNotification(ctx context.Context, notification *pgconn.Notification, conn *pgx.Conn) error {
+	payload := notification.Payload
+	if len(payload) > 200 {
+		payload = payload[:200] + "..."
+	}
 	slog.Debug("listener: received notification",
 		"channel", notification.Channel,
-		"payload", notification.Payload,
+		"payload", payload,
 	)
 	h.scheduler.NotifyWrite()
 	return nil

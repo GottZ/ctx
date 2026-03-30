@@ -6,12 +6,18 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"runtime/debug"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// validRequestID matches only hex characters and hyphens.
+var validRequestID = regexp.MustCompile(`^[0-9a-fA-F-]+$`)
+
+const maxRequestIDLen = 64
 
 // SchedulerNotifier is the interface the scheduler must implement for demand signaling.
 type SchedulerNotifier interface {
@@ -54,11 +60,19 @@ func AuthResultFromContext(ctx context.Context) *auth.AuthResult {
 	return nil
 }
 
+// isValidRequestID checks that a client-supplied request ID contains only
+// hex characters (0-9, a-f, A-F) and hyphens, and is at most 64 characters.
+func isValidRequestID(id string) bool {
+	return len(id) > 0 && len(id) <= maxRequestIDLen && validRequestID.MatchString(id)
+}
+
 // RequestID assigns a unique ID to each request and adds it to the context and response header.
+// Client-supplied IDs are accepted only if they contain hex characters and hyphens
+// and are at most 64 characters long; otherwise a server-generated ID is used.
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")
-		if id == "" {
+		if !isValidRequestID(id) {
 			b := make([]byte, 8)
 			if _, err := rand.Read(b); err != nil {
 				slog.Error("failed to generate request ID", "error", err)
@@ -150,6 +164,16 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// SecurityHeaders adds security-related response headers to every request.
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // MaxBodySize limits the request body to maxBytes. Returns 413 if exceeded.

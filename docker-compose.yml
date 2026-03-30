@@ -36,12 +36,21 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    read_only: true
     deploy:
       resources:
         limits:
           memory: 256M
         reservations:
           memory: 32M
+    logging:
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   db:
     build: ./db-image

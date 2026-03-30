@@ -7,7 +7,8 @@ RUN CGO_ENABLED=0 go build -o /ctx ./cmd/ctxd
 
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /ctx /ctx
-ENV GOMEMLIMIT=48GiB
+ENV GOMEMLIMIT=200MiB
 ENV GOGC=100
+USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/ctx"]

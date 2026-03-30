@@ -14,6 +14,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// maxStatuslineResponse is the maximum bytes read from backend responses (1 MB).
+const maxStatuslineResponse = 1 * 1024 * 1024
+
 // ── statusline input schema (Claude Code stdin) ─────────────────────
 
 type statusInput struct {
@@ -217,7 +220,7 @@ func fetchBackendData(cfg Config) *statusCache {
 		var h struct {
 			Status string `json:"status"`
 		}
-		if body, err := io.ReadAll(resp.Body); err == nil {
+		if body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatuslineResponse)); err == nil {
 			if json.Unmarshal(body, &h) == nil {
 				result.Health = h.Status
 			}
@@ -233,7 +236,7 @@ func fetchBackendData(cfg Config) *statusCache {
 		if resp, err := fast.Do(req); err == nil {
 			defer resp.Body.Close()
 			var s map[string]any
-			if body, err := io.ReadAll(resp.Body); err == nil {
+			if body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatuslineResponse)); err == nil {
 				if json.Unmarshal(body, &s) == nil {
 					if stats, ok := s["stats"].(map[string]any); ok {
 						if n, ok := stats["total_blocks"].(float64); ok {
@@ -312,7 +315,7 @@ PROTOCOL:
 			// Read JSON from stdin with timeout
 			inputCh := make(chan []byte, 1)
 			go func() {
-				data, _ := io.ReadAll(os.Stdin)
+				data, _ := io.ReadAll(io.LimitReader(os.Stdin, maxStatuslineResponse))
 				inputCh <- data
 			}()
 

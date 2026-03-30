@@ -42,6 +42,7 @@ N8N_USER="${POSTGRES_NON_ROOT_USER:-n8n}"
 N8N_PASS="${POSTGRES_NON_ROOT_PASSWORD:-$POSTGRES_PASSWORD}"
 
 mkdir -p "$BACKUP_DIR"
+umask 077
 
 echo "==========================================================================="
 echo "[INFO]  $(date -Iseconds) — Backup started"
