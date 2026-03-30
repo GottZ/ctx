@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -29,9 +30,18 @@ func RunGuardBatch(ctx context.Context, pool *pgxpool.Pool, limit int) (int, err
 		limit = 100
 	}
 
+	// Wrap entire batch in a transaction so FOR UPDATE SKIP LOCKED row locks
+	// are held until all blocks are processed, preventing race conditions.
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("guard: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+
 	// Fetch pending blocks (unchecked, not archived, not index, has embedding).
 	// FOR UPDATE SKIP LOCKED prevents concurrent guard runs from processing the same blocks.
-	rows, err := pool.Query(ctx,
+	// Row locks are held for the duration of the transaction.
+	rows, err := tx.Query(ctx,
 		`SELECT id FROM context_blocks
 		WHERE NOT is_archived
 		  AND (metadata->>'guard_checked_at') IS NULL
@@ -63,14 +73,14 @@ func RunGuardBatch(ctx context.Context, pool *pgxpool.Pool, limit int) (int, err
 
 	if len(blockIDs) == 0 {
 		// No pending blocks. Clear dirty state.
-		_, _ = pool.Exec(ctx,
+		_, _ = tx.Exec(ctx,
 			`UPDATE context_guard_state SET
 				last_guard_at = now(),
 				dirty_since = NULL,
 				pending_count = 0
 			WHERE id = true`,
 		)
-		return 0, nil
+		return 0, tx.Commit(ctx)
 	}
 
 	processed := 0
@@ -83,18 +93,18 @@ func RunGuardBatch(ctx context.Context, pool *pgxpool.Pool, limit int) (int, err
 		default:
 		}
 
-		result, err := checkBlock(ctx, pool, blockID)
+		result, err := checkBlock(ctx, tx, blockID)
 		if err != nil {
 			slog.Error("guard: check block failed", "block_id", blockID, "error", err)
 			continue
 		}
 
-		if err := applyDecision(ctx, pool, blockID, result); err != nil {
+		if err := applyDecision(ctx, tx, blockID, result); err != nil {
 			slog.Error("guard: apply decision failed", "block_id", blockID, "error", err)
 			continue
 		}
 
-		if err := writeAuditLog(ctx, pool, blockID, result); err != nil {
+		if err := writeAuditLog(ctx, tx, blockID, result); err != nil {
 			slog.Error("guard: audit log failed", "block_id", blockID, "error", err)
 		}
 
@@ -107,7 +117,7 @@ func RunGuardBatch(ctx context.Context, pool *pgxpool.Pool, limit int) (int, err
 	}
 
 	// Update guard state.
-	_, err = pool.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`UPDATE context_guard_state SET
 			last_guard_at = now(),
 			dirty_since = CASE
@@ -133,12 +143,16 @@ func RunGuardBatch(ctx context.Context, pool *pgxpool.Pool, limit int) (int, err
 		slog.Error("guard: update state failed", "error", err)
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return processed, fmt.Errorf("guard: commit tx: %w", err)
+	}
+
 	slog.Info("guard: batch complete", "processed", processed, "total_pending", len(blockIDs))
 	return processed, nil
 }
 
 // checkBlock calls the ctx_guard_check PG function for a single block.
-func checkBlock(ctx context.Context, pool *pgxpool.Pool, blockID string) (*GuardResult, error) {
+func checkBlock(ctx context.Context, tx pgx.Tx, blockID string) (*GuardResult, error) {
 	var (
 		decision      string
 		topSimilarity float64
@@ -148,7 +162,7 @@ func checkBlock(ctx context.Context, pool *pgxpool.Pool, blockID string) (*Guard
 		isCrossScope  bool
 	)
 
-	err := pool.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT decision, top_similarity, matched_id::text, matched_title, matched_scope, is_cross_scope
 		FROM ctx_guard_check($1::uuid)`,
 		blockID,
@@ -168,7 +182,7 @@ func checkBlock(ctx context.Context, pool *pgxpool.Pool, blockID string) (*Guard
 }
 
 // applyDecision updates the block based on the guard decision.
-func applyDecision(ctx context.Context, pool *pgxpool.Pool, blockID string, result *GuardResult) error {
+func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *GuardResult) error {
 	checkedAt := time.Now().UTC().Format(time.RFC3339)
 
 	matchedIDVal := ""
@@ -178,7 +192,7 @@ func applyDecision(ctx context.Context, pool *pgxpool.Pool, blockID string, resu
 
 	if result.Decision == "near_duplicate" {
 		// Auto-archive near duplicates.
-		_, err := pool.Exec(ctx,
+		_, err := tx.Exec(ctx,
 			`UPDATE context_blocks SET
 				is_archived = true,
 				guard_status = 'archived_dup',
@@ -198,7 +212,7 @@ func applyDecision(ctx context.Context, pool *pgxpool.Pool, blockID string, resu
 		}
 	} else {
 		// Mark as checked (needs_review or clean).
-		_, err := pool.Exec(ctx,
+		_, err := tx.Exec(ctx,
 			`UPDATE context_blocks SET
 				guard_status = $2,
 				metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
@@ -223,10 +237,10 @@ func applyDecision(ctx context.Context, pool *pgxpool.Pool, blockID string, resu
 }
 
 // writeAuditLog inserts a guard audit entry into context_write_log.
-func writeAuditLog(ctx context.Context, pool *pgxpool.Pool, blockID string, result *GuardResult) error {
+func writeAuditLog(ctx context.Context, tx pgx.Tx, blockID string, result *GuardResult) error {
 	// Get block title, category, scope for the audit log.
 	var title, category, scope string
-	err := pool.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT title, category, scope FROM context_blocks WHERE id = $1`,
 		blockID,
 	).Scan(&title, &category, &scope)
@@ -239,7 +253,7 @@ func writeAuditLog(ctx context.Context, pool *pgxpool.Pool, blockID string, resu
 		matchedIDArg = *result.MatchedID
 	}
 
-	_, err = pool.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`INSERT INTO context_write_log
 			(block_id, matched_block_id, decision, similarity, scope, block_title, block_category, metadata)
 		VALUES (

@@ -14,62 +14,58 @@ on:
     branches: [root]
   workflow_dispatch:
 
-# Ein concurrent Run pro Branch/PR — neuerer Run cancelt älteren.
-# Deploy-Jobs sind davon ausgenommen (concurrency-group ohne cancel).
+# Deny-all default — jeder Job deklariert eigene Permissions.
+permissions: {}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   GO_VERSION: "1.25"
-  # Registry: GitHub Container Registry (ghcr.io)
   REGISTRY: ghcr.io
   IMAGE_NAME: ghcr.io/gottz/ctx
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Stage 1: Lint
-  # golangci-lint mit der .golangci.yml aus dem Repo (Fallback: Default-Config).
-  # Läuft auf: alle Trigger. Kein Netzwerk, kein Docker.
-  # ─────────────────────────────────────────────────────────────────────────────
+  # ─── Stage 1: Lint ────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
           cache-dependency-path: go/go.sum
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
         with:
           version: latest
           working-directory: go
           args: --timeout=5m
           only-new-issues: ${{ github.event_name == 'pull_request' }}
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Stage 2: Unit Tests
-  # go test ./... -short — kein Docker, kein Netzwerk, rein deterministisch.
-  # Läuft auf: alle Trigger. Race-Detector aktiviert.
-  # ─────────────────────────────────────────────────────────────────────────────
+  # ─── Stage 2: Unit Tests ──────────────────────────────────────────────────────
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -89,48 +85,41 @@ jobs:
             ./...
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: coverage-unit
           path: go/coverage.out
           retention-days: 7
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Stage 3: Integration Tests
-  # Testcontainers mit pgvector/pgvector:pg17.
-  # Build-Tag: integration. Braucht Docker-in-Docker (ubuntu-latest hat Docker).
-  # Image-Caching via TESTCONTAINERS_PULL_POLICY + GitHub Actions Cache.
-  # ─────────────────────────────────────────────────────────────────────────────
+  # ─── Stage 3: Integration Tests ───────────────────────────────────────────────
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [unit-tests]
+    permissions:
+      contents: read
 
     env:
-      # Testcontainers: Ryuk (Cleanup-Container) muss im CI-Kontext erreichbar sein.
       TESTCONTAINERS_RYUK_DISABLED: "false"
-      # Nicht bei jedem Pull versuchen — nutze lokalen Cache falls vorhanden.
       TESTCONTAINERS_PULL_POLICY: "default"
-      # Für init-data.sh im Testcontainer
       CONTEXT_DB: context_store
       CONTEXT_DB_USER: context_user
       CONTEXT_DB_PASSWORD: testpassword
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
           cache-dependency-path: go/go.sum
 
-      # Docker Layer Cache für testcontainers Images.
       - name: Cache testcontainers Docker images
-        uses: ScribeMD/docker-cache@0.5.0
+        uses: ScribeMD/docker-cache@fb28c93772363301b8d0a6072ce850224b73f74e # 0.5.0
         with:
           key: docker-testcontainers-pgvector-pg17-${{ runner.os }}
 
@@ -147,31 +136,27 @@ jobs:
             ./...
 
       - name: Upload integration coverage
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: coverage-integration
           path: go/coverage-integration.out
           retention-days: 7
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Stage 4: Build Binary
-  # CGO_ENABLED=0, linux/amd64, statisch gelinkt.
-  # Artifact wird an Docker-Stage übergeben — kein doppelter Build.
-  # ─────────────────────────────────────────────────────────────────────────────
+  # ─── Stage 4: Build Binary ────────────────────────────────────────────────────
   build:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [lint, unit-tests]
-    # Integration Tests sind optional für den Build (laufen parallel).
-    # Docker-Push wartet auf integration-tests.
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -199,65 +184,51 @@ jobs:
           ./ctxd --version 2>/dev/null || ./ctxd version 2>/dev/null || true
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ctxd-linux-amd64
           path: ctxd
           retention-days: 1
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Stage 5: Docker Build + Push
-  # ghcr.io/gottz/ctx — GitHub Container Registry.
-  # Multi-Layer-Cache: GitHub Actions Cache + inline Registry Cache.
-  # Tags: root-branch → :latest + :sha-SHORT + :YYYY-MM-DD
-  # Nur auf root-Branch und workflow_dispatch — nicht auf PRs.
-  # ─────────────────────────────────────────────────────────────────────────────
+  # ─── Stage 5: Docker Build + Push ─────────────────────────────────────────────
   docker:
     name: Docker Build + Push
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [build, integration-tests]
-    # PRs builden das Image (Smoke Test), pushen aber nicht.
-    # Push nur auf root-Branch oder manuellem Dispatch.
     if: >-
       github.ref == 'refs/heads/root' ||
       github.event_name == 'workflow_dispatch'
 
     permissions:
       contents: read
-      packages: write  # Pflicht für ghcr.io Push
+      packages: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Download binary artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ctxd-linux-amd64
 
       - name: Make binary executable
         run: chmod +x ctxd
 
-      # Docker Buildx für Cache-Export-Support
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          # GITHUB_TOKEN hat automatisch packages:write auf dem eigenen Repo.
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Meta: Tags + Labels nach OCI-Standard generieren.
-      # :latest   — root-Branch
-      # :sha-XXXX — deterministische Referenz für Rollback
-      # :YYYY-MM-DD — human-readable Datum
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -270,14 +241,10 @@ jobs:
             org.opencontainers.image.url=https://github.com/GottZ/ctx
             org.opencontainers.image.source=https://github.com/GottZ/ctx
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=MPL-2.0
 
-      # Docker Layer Cache:
-      # - cache-from: Registry Cache (persistiert zwischen Runs)
-      # - cache-to:   Registry Cache (exportiert nach erfolgreichem Build)
-      # Fallback: GitHub Actions Cache (type=gha) als sekundärer Cache.
       - name: Build and push Docker image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: ./go
           file: ./go/Dockerfile
@@ -285,20 +252,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Inline Registry Cache: kein separater Cache-Manifest nötig
           cache-from: |
             type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
             type=gha
           cache-to: |
             type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
             type=gha,mode=max
-          # Binary aus Stage 4 — kein Go-Build im Dockerfile nötig
-          build-args: |
-            VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
-
-      - name: Image digest
-        run: echo "Pushed ${{ env.IMAGE_NAME }} — digest ${{ steps.docker_build.outputs.digest }}"
-
-  # Stage 6: Deploy — entfernt. Lokaler Build via docker compose.
-  # Zukünftig: Webhook-basiertes Deploy (kein SSH nach extern).
