@@ -8,7 +8,7 @@ import (
 // These tests supplement the existing tests in llm_test.go with boundary
 // values, unusual inputs, and encoding edge cases for translate functions.
 
-// --- DetectGerman edge cases ---
+// --- DetectGerman edge cases ---.
 
 func TestDetectGerman_NullByte(t *testing.T) {
 	if DetectGerman("\x00") {
@@ -88,7 +88,7 @@ func TestDetectGerman_TechTermCaseSensitivity(t *testing.T) {
 	}
 }
 
-// --- validateTranslation edge cases ---
+// --- validateTranslation edge cases ---.
 
 func TestValidateTranslation_EmptyBothStrings(t *testing.T) {
 	if validateTranslation("", "") {

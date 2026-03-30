@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// Fixed reference time: Wednesday, 2026-03-25 15:30:00 UTC
+// Fixed reference time: Wednesday, 2026-03-25 15:30:00 UTC.
 var pessimistRef = time.Date(2026, 3, 25, 15, 30, 0, 0, time.UTC)
 
-// ─── levenshtein ────────────────────────────────────────────────────────────
+// ─── levenshtein ────────────────────────────────────────────────────────────.
 
 func TestPessimist_Levenshtein_BothEmpty_ReturnsZeroNotPanic(t *testing.T) {
 	if d := levenshtein("", ""); d != 0 {
@@ -102,7 +102,7 @@ func TestPessimist_Levenshtein_CaseInsensitive_UpperLowerSame(t *testing.T) {
 	}
 }
 
-// ─── maxEditDistance ────────────────────────────────────────────────────────
+// ─── maxEditDistance ────────────────────────────────────────────────────────.
 
 func TestPessimist_MaxEditDistance_EmptyString_ZeroTolerance(t *testing.T) {
 	if d := maxEditDistance(""); d != 0 {
@@ -167,7 +167,7 @@ func TestPessimist_MaxEditDistance_BoundaryAt6_ExactlySixRunesGetsTwo(t *testing
 	}
 }
 
-// ─── ExpandTemporal ─────────────────────────────────────────────────────────
+// ─── ExpandTemporal ─────────────────────────────────────────────────────────.
 
 func TestPessimist_ExpandTemporal_EmptyQuery_ReturnsEmptyNotPanic(t *testing.T) {
 	result := ExpandTemporal("", pessimistRef)
@@ -389,7 +389,7 @@ func TestPessimist_ExpandTemporal_HeuteMorgenProduceTwoDates(t *testing.T) {
 	}
 }
 
-// ─── weekdayDE ──────────────────────────────────────────────────────────────
+// ─── weekdayDE ──────────────────────────────────────────────────────────────.
 
 func TestPessimist_WeekdayDE_AllSevenCorrectGermanNames(t *testing.T) {
 	expected := [7]string{"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"}

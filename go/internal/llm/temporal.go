@@ -104,7 +104,7 @@ func buildCalendar(now time.Time) string {
 	fmt.Fprintf(&b, "  übermorgen/day-after-tomorrow:   %s\n", fDE(now.AddDate(0, 0, 2)))
 
 	// Weekday reference table: LAST and NEXT for each weekday (no arithmetic needed).
-	b.WriteString(fmt.Sprintf("\nWEEKDAY REFERENCE TABLE (today = %s %s):\n", wdEN, now.Format("2006-01-02")))
+	fmt.Fprintf(&b, "\nWEEKDAY REFERENCE TABLE (today = %s %s):\n", wdEN, now.Format("2006-01-02"))
 	isoOrder := []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday, time.Saturday, time.Sunday}
 	for _, targetWD := range isoOrder {
 		daysForward := (int(targetWD) - int(now.Weekday()) + 7) % 7
@@ -117,9 +117,9 @@ func buildCalendar(now time.Time) string {
 			daysBack = 7
 		}
 		lastDate := now.AddDate(0, 0, -daysBack)
-		b.WriteString(fmt.Sprintf("  %-10s  LAST = %s (%d days ago) | NEXT = %s (in %d days)\n",
+		fmt.Fprintf(&b, "  %-10s  LAST = %s (%d days ago) | NEXT = %s (in %d days)\n",
 			weekdayNameEN[targetWD]+":", lastDate.Format("2006-01-02"), daysBack,
-			nextDate.Format("2006-01-02"), daysForward))
+			nextDate.Format("2006-01-02"), daysForward)
 	}
 
 	// Week ranges
@@ -130,17 +130,17 @@ func buildCalendar(now time.Time) string {
 	thisMonday := now.AddDate(0, 0, -(wd - 1))
 	f := func(t time.Time) string { return t.Format("2006-01-02") }
 	b.WriteString("\nWEEK RANGES:\n")
-	b.WriteString(fmt.Sprintf("  Last week:       %s to %s\n", f(thisMonday.AddDate(0, 0, -7)), f(thisMonday.AddDate(0, 0, -1))))
-	b.WriteString(fmt.Sprintf("  This week:       %s to %s\n", f(thisMonday), f(thisMonday.AddDate(0, 0, 6))))
-	b.WriteString(fmt.Sprintf("  Next week:       %s to %s\n", f(thisMonday.AddDate(0, 0, 7)), f(thisMonday.AddDate(0, 0, 13))))
-	b.WriteString(fmt.Sprintf("  Week after next: %s to %s\n", f(thisMonday.AddDate(0, 0, 14)), f(thisMonday.AddDate(0, 0, 20))))
+	fmt.Fprintf(&b, "  Last week:       %s to %s\n", f(thisMonday.AddDate(0, 0, -7)), f(thisMonday.AddDate(0, 0, -1)))
+	fmt.Fprintf(&b, "  This week:       %s to %s\n", f(thisMonday), f(thisMonday.AddDate(0, 0, 6)))
+	fmt.Fprintf(&b, "  Next week:       %s to %s\n", f(thisMonday.AddDate(0, 0, 7)), f(thisMonday.AddDate(0, 0, 13)))
+	fmt.Fprintf(&b, "  Week after next: %s to %s\n", f(thisMonday.AddDate(0, 0, 14)), f(thisMonday.AddDate(0, 0, 20)))
 
 	// Weekends
 	lastSat := thisMonday.AddDate(0, 0, -2)
 	b.WriteString("\nWEEKENDS:\n")
-	b.WriteString(fmt.Sprintf("  Last weekend:    %s + %s\n", f(lastSat), f(lastSat.AddDate(0, 0, 1))))
-	b.WriteString(fmt.Sprintf("  This weekend:    %s + %s\n", f(thisMonday.AddDate(0, 0, 5)), f(thisMonday.AddDate(0, 0, 6))))
-	b.WriteString(fmt.Sprintf("  Next weekend:    %s + %s\n", f(thisMonday.AddDate(0, 0, 12)), f(thisMonday.AddDate(0, 0, 13))))
+	fmt.Fprintf(&b, "  Last weekend:    %s + %s\n", f(lastSat), f(lastSat.AddDate(0, 0, 1)))
+	fmt.Fprintf(&b, "  This weekend:    %s + %s\n", f(thisMonday.AddDate(0, 0, 5)), f(thisMonday.AddDate(0, 0, 6)))
+	fmt.Fprintf(&b, "  Next weekend:    %s + %s\n", f(thisMonday.AddDate(0, 0, 12)), f(thisMonday.AddDate(0, 0, 13)))
 
 	return b.String()
 }

@@ -9,7 +9,7 @@ import (
 // These tests supplement the existing tests in llm_test.go with boundary
 // values, unusual inputs, and encoding edge cases for the synthesize functions.
 
-// --- EscapeXml edge cases ---
+// --- EscapeXml edge cases ---.
 
 func TestEscapeXml_NullByte(t *testing.T) {
 	input := "before\x00after"
@@ -58,7 +58,7 @@ func TestEscapeXml_AllSpecialMixed(t *testing.T) {
 	}
 }
 
-// --- ClassifyConfidence edge cases ---
+// --- ClassifyConfidence edge cases ---.
 
 func TestClassifyConfidence_NaN(t *testing.T) {
 	got := ClassifyConfidence(math.NaN())
@@ -97,7 +97,7 @@ func TestClassifyConfidence_MaxFloat64(t *testing.T) {
 	}
 }
 
-// --- FilterByScore edge cases ---
+// --- FilterByScore edge cases ---.
 
 func TestFilterByScore_PreservesInputOrder(t *testing.T) {
 	sources := []Source{
@@ -153,7 +153,7 @@ func TestFilterByScore_NegativeScore(t *testing.T) {
 	}
 }
 
-// --- LostInMiddleReorder edge cases ---
+// --- LostInMiddleReorder edge cases ---.
 
 func TestLostInMiddleReorder_NilInput(t *testing.T) {
 	result := LostInMiddleReorder(nil)
@@ -180,7 +180,7 @@ func TestLostInMiddleReorder_LargeSlice(t *testing.T) {
 	}
 }
 
-// --- FormatAnswer edge cases ---
+// --- FormatAnswer edge cases ---.
 
 func TestFormatAnswer_NoRelevantMiddle(t *testing.T) {
 	// NO_RELEVANT_SOURCES in the middle should be partially preserved.
@@ -214,7 +214,7 @@ func TestFormatAnswer_VeryLong(t *testing.T) {
 	}
 }
 
-// --- BuildPrompt edge cases ---
+// --- BuildPrompt edge cases ---.
 
 func TestBuildPrompt_EmptyQuery(t *testing.T) {
 	_, user := BuildPrompt("", nil, nil)

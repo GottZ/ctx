@@ -1,0 +1,57 @@
+# golangci-lint v2 Konfiguration für ctx
+# github.com/GottZ/ctx — GottZ 4-Way RRF | GottZ Scope Model | GottZ Guard
+#
+# Philosophie: Fehler finden, die Go vet nicht findet — keine Style-Polizei.
+# Linter-Auswahl: sicherheitskritisch (errcheck, gosec) + Qualität (gocritic)
+# + Korrektheit (staticcheck). Ausdrücklich KEIN gofmt/goimports-Zwang im CI
+# (das macht der IDE-Save, nicht der CI-Block).
+
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - staticcheck
+    - gosec
+    - govet
+    - ineffassign
+    - cyclop
+    - nilerr
+    - errorlint
+    - godot
+
+  settings:
+    cyclop:
+      max-complexity: 25
+
+    gosec:
+      excludes:
+        - G115
+        - G304
+        - G118
+        - G706
+
+    errcheck:
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - (*net/http.Response).Body.Close
+
+    godot:
+      scope: toplevel
+      period: true
+
+  exclusions:
+    rules:
+      - path: "_test\\.go$"
+        linters:
+          - gosec
+          - errcheck
+          - cyclop
+      - path: "testutil/"
+        linters:
+          - gosec
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

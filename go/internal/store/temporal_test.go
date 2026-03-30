@@ -182,7 +182,7 @@ func TestPopulateTemporal_SentinelPath(t *testing.T) {
 	}
 }
 
-// --- Link Dimension Tests ---
+// --- Link Dimension Tests ---.
 
 func TestBuildTemporalBatch_WithLinks(t *testing.T) {
 	// 1 date (5 dims) + 2 links = 1 DELETE + 5 + 2 = 8

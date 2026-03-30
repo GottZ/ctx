@@ -70,6 +70,8 @@ type sourceResponse struct {
 // HandleQuery orchestrates the full query pipeline:
 // parse -> auth -> detect language -> translate -> embed -> RRF search ->
 // filter -> confidence -> reorder -> synthesize -> access log -> respond.
+//
+//nolint:cyclop // complex HTTP handler with sequential pipeline stages
 func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	requestID := RequestIDFromContext(ctx)

@@ -60,7 +60,7 @@ func Rerank(ctx context.Context, host, model, query string, results []SearchResu
 		if len(content) > RerankContentLimit {
 			content = content[:RerankContentLimit]
 		}
-		sb.WriteString(fmt.Sprintf("Doc %d [%s/%s]: %s\n\n", i+1, llm.EscapeXml(r.Category), llm.EscapeXml(r.Title), llm.EscapeXml(content)))
+		fmt.Fprintf(&sb, "Doc %d [%s/%s]: %s\n\n", i+1, llm.EscapeXml(r.Category), llm.EscapeXml(r.Title), llm.EscapeXml(content))
 	}
 
 	// Call the LLM.

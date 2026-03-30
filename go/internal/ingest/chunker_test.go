@@ -18,7 +18,7 @@ func fillTo(s string, n int) string {
 	return result
 }
 
-// --- Whole-Document (no split needed) ---
+// --- Whole-Document (no split needed) ---.
 
 func TestChunk_ShortDoc_SingleChunk(t *testing.T) {
 	content := fillTo("Some filler text for a short document. ", 500)
@@ -60,7 +60,7 @@ func TestChunk_EmptyContent(t *testing.T) {
 	}
 }
 
-// --- Heading-Split ---
+// --- Heading-Split ---.
 
 func TestChunk_H1Split(t *testing.T) {
 	// Two H1 sections, each ~4000 chars → total ~8000 > MaxChunkChars → must split
@@ -130,7 +130,7 @@ func TestChunk_LongSectionFallback(t *testing.T) {
 	}
 }
 
-// --- Context-Header ---
+// --- Context-Header ---.
 
 func TestChunk_HeaderFormat_Short(t *testing.T) {
 	content := fillTo("Short content for header test. ", 300)
@@ -211,7 +211,7 @@ func TestChunk_HeaderFormat_Long(t *testing.T) {
 	}
 }
 
-// --- Chunk-Metadata ---
+// --- Chunk-Metadata ---.
 
 func TestChunk_IndexAssignment(t *testing.T) {
 	sec := fillTo("Index test content for chunk metadata. ", 4000)
@@ -259,7 +259,7 @@ func TestChunk_TitleGeneration(t *testing.T) {
 	}
 }
 
-// --- Edge Cases ---
+// --- Edge Cases ---.
 
 func TestChunk_NoHeadings_LongDoc(t *testing.T) {
 	// 10000+ chars without headings → should paragraph-split

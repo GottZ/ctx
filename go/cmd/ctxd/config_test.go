@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// --- getEnv ---
+// --- getEnv ---.
 
 func TestGetEnv_FallbackOnMissing(t *testing.T) {
 	// Use a key that definitely does not exist.
@@ -50,7 +50,7 @@ func TestGetEnv_EmptyFallback(t *testing.T) {
 	}
 }
 
-// --- getEnvInt ---
+// --- getEnvInt ---.
 
 func TestGetEnvInt_FallbackOnMissing(t *testing.T) {
 	key := "CTX_TEST_GETENVINT_MISSING_48291"
@@ -172,7 +172,7 @@ func TestGetEnvInt_Overflow(t *testing.T) {
 	}
 }
 
-// --- Config.DSN ---
+// --- Config.DSN ---.
 
 func TestConfig_DSN_Basic(t *testing.T) {
 	cfg := Config{
@@ -289,7 +289,7 @@ func TestConfig_DSN_UnicodePassword(t *testing.T) {
 	}
 }
 
-// --- LoadConfig ---
+// --- LoadConfig ---.
 
 func TestLoadConfig_MissingPassword(t *testing.T) {
 	// Clear all relevant env vars, especially the password.

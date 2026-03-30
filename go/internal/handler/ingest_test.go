@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-// =============================================================================
+// ===.
 // IngestRequest validation tests (TDD — written before implementation)
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: Empty chunks array is rejected with 400 Bad Request.
 // An ingest request without chunks is semantically invalid — there is nothing to ingest.

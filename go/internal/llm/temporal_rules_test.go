@@ -196,7 +196,7 @@ func TestResolveWeekdayDate(t *testing.T) {
 	}
 }
 
-// --- Isolated Matcher Tests: seit/bis/von..bis + resolvePhrase ---
+// --- Isolated Matcher Tests: seit/bis/von..bis + resolvePhrase ---.
 
 func TestResolvePhrase(t *testing.T) {
 	ref := time.Date(2026, 3, 29, 12, 0, 0, 0, time.UTC) // Sunday

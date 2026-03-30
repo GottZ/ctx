@@ -4,9 +4,7 @@ import (
 	"testing"
 )
 
-// =============================================================================
-// SanitizeKey tests
-// =============================================================================
+// SanitizeKey tests.
 
 // SECURITY PROPERTY: API keys containing injection characters (newlines, null
 // bytes, SQL metacharacters, HTTP header separators) are stripped to hex-only,
@@ -141,9 +139,7 @@ func TestSanitizeKey_OutputIsHexOnly(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// AuthResult tests
-// =============================================================================
+// AuthResult tests.
 
 // SECURITY PROPERTY: A default AuthResult (zero value) must have IsValid=false,
 // ensuring that uninitialized auth state defaults to deny.

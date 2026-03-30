@@ -15,7 +15,7 @@ func mustDate(s string) time.Time {
 	return t
 }
 
-// --- ComputeGravity Tests (10) ---
+// --- ComputeGravity Tests (10) ---.
 
 func TestComputeGravity_ExactDateMatch(t *testing.T) {
 	// source_date == target → dist clamped to 0.5, gives max score
@@ -205,7 +205,7 @@ func TestComputeGravity_MinDistance(t *testing.T) {
 	}
 }
 
-// --- ApplyGravityBoost Tests (7) ---
+// --- ApplyGravityBoost Tests (7) ---.
 
 func makeResults(ids ...string) []SearchResult {
 	results := make([]SearchResult, len(ids))

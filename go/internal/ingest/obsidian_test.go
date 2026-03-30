@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// --- helpers ---
+// --- helpers ---.
 
 func assertStringEqual(t *testing.T, field, got, want string) {
 	t.Helper()
@@ -60,9 +60,9 @@ func sortedCopy(s []string) []string {
 	return c
 }
 
-// =============================================================================
+// ===.
 // Frontmatter
-// =============================================================================
+// ===.
 
 func TestParse_Frontmatter_Tags(t *testing.T) {
 	input := "---\ntags: [alpha, beta]\n---\nSome content."
@@ -114,14 +114,14 @@ func TestParse_NoFrontmatter(t *testing.T) {
 	assertStringEqual(t, "Title", r.Title, "note")
 }
 
-// Frontmatter: dash-list format for tags
+// Frontmatter: dash-list format for tags.
 func TestParse_Frontmatter_Tags_DashList(t *testing.T) {
 	input := "---\ntags:\n- alpha\n- beta\n---\nContent."
 	r := Parse("note", []byte(input), "notes/note.md")
 	assertStringSlice(t, "Tags", sortedCopy(r.Tags), []string{"alpha", "beta"})
 }
 
-// Frontmatter: created field as date source
+// Frontmatter: created field as date source.
 func TestParse_Frontmatter_CreatedDate(t *testing.T) {
 	input := "---\ncreated: 2026-01-10\n---\nContent."
 	r := Parse("note", []byte(input), "notes/note.md")
@@ -136,9 +136,9 @@ func TestParse_Frontmatter_CreatedDate(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // Wikilinks
-// =============================================================================
+// ===.
 
 func TestParse_Wikilinks(t *testing.T) {
 	input := "See [[Some Page]] for details."
@@ -177,9 +177,9 @@ func TestParse_Wikilinks_InCodeBlock(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // Tags
-// =============================================================================
+// ===.
 
 func TestParse_InlineTags(t *testing.T) {
 	input := "Some text #tag1 more text #tag2 end."
@@ -210,9 +210,9 @@ func TestParse_Tags_Merged(t *testing.T) {
 	assertStringSlice(t, "Tags", sorted, []string{"alpha", "beta", "gamma"})
 }
 
-// =============================================================================
+// ===.
 // Cleanup
-// =============================================================================
+// ===.
 
 func TestParse_Comments_Removed(t *testing.T) {
 	input := "Before %%hidden comment%% after."
@@ -252,9 +252,9 @@ func TestParse_Callout_Preserved(t *testing.T) {
 	assertContains(t, "Content", r.Content, "Second line")
 }
 
-// =============================================================================
+// ===.
 // Edge Cases
-// =============================================================================
+// ===.
 
 func TestParse_EmptyContent(t *testing.T) {
 	r := Parse("empty", []byte(""), "notes/empty.md")
@@ -292,9 +292,9 @@ func TestParse_CategoryFromPath_RootFile(t *testing.T) {
 	assertStringEqual(t, "Category", r.Category, "uncategorized")
 }
 
-// =============================================================================
+// ===.
 // Dates
-// =============================================================================
+// ===.
 
 func TestParse_DatesFromContent(t *testing.T) {
 	input := "Am 2026-03-15 passierte etwas wichtiges."
@@ -317,9 +317,9 @@ func TestParse_DatesFromFrontmatter(t *testing.T) {
 	assertStringSlice(t, "Dates", sorted, []string{"2026-01-01", "2026-02-15"})
 }
 
-// =============================================================================
+// ===.
 // Additional edge cases
-// =============================================================================
+// ===.
 
 func TestParse_MultipleWikilinks(t *testing.T) {
 	input := "See [[Page A]] and [[Page B]] and [[Page A]] again."

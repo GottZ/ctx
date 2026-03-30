@@ -24,7 +24,7 @@ type TestSuite struct {
 	Tests []TestCase      `json:"tests"`
 }
 
-// Reference date for all tests: Sunday 2026-03-29
+// Reference date for all tests: Sunday 2026-03-29.
 var refTime = time.Date(2026, 3, 29, 12, 0, 0, 0, time.UTC)
 
 func loadTestCases(t *testing.T) []TestCase {

@@ -31,7 +31,7 @@ type ParseResult struct {
 	IsTemplate bool           // Templater-Detection (>3x <%)
 }
 
-// Compiled patterns
+// Compiled patterns.
 var (
 	frontmatterRe = regexp.MustCompile(`(?s)\A---\n(.*?)\n---\n?`)
 	embedRe       = regexp.MustCompile(`!\[\[([^\]]+)\]\]`)
@@ -51,7 +51,7 @@ var (
 // Parse extracts metadata from an Obsidian Markdown file.
 // filename: basename ohne .md Extension
 // content: raw file bytes
-// vaultPath: relativer Pfad im Vault (z.B. "projects/ctx/note.md")
+// vaultPath: relativer Pfad im Vault (z.B. "projects/ctx/note.md").
 func Parse(filename string, content []byte, vaultPath string) *ParseResult {
 	r := &ParseResult{
 		Title:     filename,

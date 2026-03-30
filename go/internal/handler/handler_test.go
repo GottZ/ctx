@@ -17,9 +17,9 @@ import (
 // context lookups are type-safe (SA1029: avoid bare string as context key).
 type wrongKeyType string
 
-// =============================================================================
+// ===.
 // RequestIDFromContext tests
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: Extracting a request ID from a nil-value context returns
 // empty string, not a panic. Prevents nil-pointer crashes in error paths where
@@ -63,9 +63,9 @@ func TestRequestIDFromContext_WrongValueType(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // AuthResultFromContext tests
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: Missing auth result returns nil (deny by default), not a
 // panic. Callers must check for nil before accessing fields.
@@ -124,9 +124,9 @@ func TestAuthResultFromContext_ValueTypeNotPointer(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // writeJSON tests
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: writeJSON always sets Content-Type to application/json,
 // preventing browsers from sniffing the response as HTML and executing XSS.
@@ -204,9 +204,9 @@ func TestWriteJSON_NilData(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // Request size limit tests (MaxBodySize middleware + query handler)
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: The MaxBodySize middleware limits request body size,
 // preventing denial-of-service via oversized payloads. A body exceeding the
@@ -287,9 +287,9 @@ func TestQuerySizeLimit_10KB(t *testing.T) {
 	})
 }
 
-// =============================================================================
+// ===.
 // Request parsing tests (queryRequest JSON)
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: Malformed JSON is rejected, preventing JSON deserialization
 // attacks and ensuring the handler never operates on garbage data.
@@ -449,9 +449,9 @@ func TestQueryRequestParsing_DuplicateKeys(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // Limit clamping tests
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: The limit parameter is clamped to [1, 20], preventing
 // resource exhaustion via extremely high limits (unbounded DB queries) and
@@ -498,9 +498,9 @@ func intPtr(n int) *int {
 	return &n
 }
 
-// =============================================================================
+// ===.
 // RequestID middleware tests
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: The RequestID middleware generates an ID when none is
 // provided, ensuring every request can be traced in logs for forensic analysis.
@@ -653,9 +653,9 @@ func TestIsValidRequestID(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // Recovery middleware tests
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: The Recovery middleware catches panics and returns 500
 // without leaking stack traces or internal details to the client.
@@ -700,9 +700,9 @@ func TestRecoveryMiddleware_NoPanic(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // WithScheduler tests
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: WithScheduler with nil notifier passes through directly
 // without panicking, ensuring resilient operation when scheduler is not configured.
@@ -775,9 +775,9 @@ func TestWithScheduler_QueryEndOnPanic(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // contains helper tests
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: The contains helper is used in scope checks. It must
 // correctly match and reject values to prevent scope bypass.
@@ -809,9 +809,9 @@ func TestContains(t *testing.T) {
 	}
 }
 
-// =============================================================================
+// ===.
 // responseWriter tests
-// =============================================================================
+// ===.
 
 // SECURITY PROPERTY: The responseWriter wrapper correctly captures status codes,
 // ensuring the Logger middleware logs the actual response status (not always 200).

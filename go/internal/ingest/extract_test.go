@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// --- ParseExtractionResult ---
+// --- ParseExtractionResult ---.
 
 func TestParseExtraction_ValidJSON(t *testing.T) {
 	input := `{"description":"How to configure PostgreSQL connection pooling","tags":["postgresql","connection-pool","pgbouncer"],"language":"en","quality":0.85}`
@@ -144,7 +144,7 @@ func TestParseExtraction_MissingFields(t *testing.T) {
 	}
 }
 
-// --- BuildExtractionPrompt ---
+// --- BuildExtractionPrompt ---.
 
 func TestBuildPrompt_ContainsContent(t *testing.T) {
 	content := "PostgreSQL connection pooling with pgbouncer requires careful tuning."
@@ -192,7 +192,7 @@ func TestBuildPrompt_ShortContentNotTruncated(t *testing.T) {
 	}
 }
 
-// --- MergeExtraction ---
+// --- MergeExtraction ---.
 
 func TestMergeExtraction_TagsMerged(t *testing.T) {
 	parsed := &ParseResult{
@@ -382,7 +382,7 @@ func TestMergeExtraction_ParserDatesPreserved(t *testing.T) {
 	}
 }
 
-// --- BuildExtractionPrompt: Boundary Nonce ---
+// --- BuildExtractionPrompt: Boundary Nonce ---.
 
 func TestBuildPrompt_BoundaryNonce(t *testing.T) {
 	content := "Some document content here."
@@ -427,7 +427,7 @@ func TestBuildPrompt_SecurityTag(t *testing.T) {
 	}
 }
 
-// --- DetectInjection ---
+// --- DetectInjection ---.
 
 func TestDetectInjection_CleanContent(t *testing.T) {
 	content := "PostgreSQL uses a process-per-connection model. Each backend process handles one client connection. The postmaster process listens for new connections."

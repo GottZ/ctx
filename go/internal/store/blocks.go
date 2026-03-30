@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -123,7 +124,7 @@ func HashNOOPCheck(ctx context.Context, pool *pgxpool.Pool, content, scope, cate
 		 LIMIT 1`,
 		content, scope, category, title,
 	).Scan(&id)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
@@ -215,7 +216,7 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []s
 		 LIMIT 1`,
 		id, readScopes,
 	).Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -233,7 +234,7 @@ func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id, homeScope string) 
 		 RETURNING id, category, title, scope, created_at, updated_at`,
 		id, homeScope,
 	).Scan(&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -324,7 +325,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	err := pool.QueryRow(ctx, query, args...).Scan(
 		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope, &b.CreatedAt, &b.UpdatedAt,
 	)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, nil
 	}
 	if err != nil {
@@ -656,7 +657,7 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution, homeS
 	err := pool.QueryRow(ctx, query, id, homeScope).Scan(
 		&b.ID, &b.Title, &b.Category, &b.Scope, &b.GuardStatus, &b.CreatedAt, &b.UpdatedAt,
 	)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

@@ -16,16 +16,16 @@ import (
 )
 
 var (
-	// ISO dates: 2026-03-29
+	// ISO dates: 2026-03-29.
 	isoDateExtract = regexp.MustCompile(`\b(20[2-3]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b`)
 
-	// German dot-format: 29.03.2026
+	// German dot-format: 29.03.2026.
 	dotDateExtract = regexp.MustCompile(`\b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-3]\d)\b`)
 
-	// German month+year: "März 2026"
+	// German month+year: "März 2026".
 	deMonthYearExtract = regexp.MustCompile(`(?i)\b(januar|februar|m[aä]rz|april|mai|juni|juli|august|september|oktober|november|dezember)\s+(20[2-3]\d)\b`)
 
-	// English month+year: "March 2026"
+	// English month+year: "March 2026".
 	enMonthYearExtract = regexp.MustCompile(`(?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(20[2-3]\d)\b`)
 )
 

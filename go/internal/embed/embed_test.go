@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// --- Prefix.text() ---
+// --- Prefix.text() ---.
 
 func TestPrefix_Text_Query(t *testing.T) {
 	got := PrefixQuery.text()
@@ -44,7 +44,7 @@ func TestPrefix_Text_MaxInt(t *testing.T) {
 	}
 }
 
-// --- l2Normalize ---
+// --- l2Normalize ---.
 
 func TestL2Normalize_UnitVector(t *testing.T) {
 	// A simple unit vector along one axis should remain unchanged.
@@ -190,7 +190,7 @@ func TestL2Normalize_Float32Precision(t *testing.T) {
 	}
 }
 
-// --- qualityGate ---
+// --- qualityGate ---.
 
 func TestQualityGate_ValidVector(t *testing.T) {
 	// Build a 1024-dim normalized vector with good variance.
@@ -400,7 +400,7 @@ func TestQualityGate_DimensionOneMoreThanTarget(t *testing.T) {
 	}
 }
 
-// --- TargetDims constant ---
+// --- TargetDims constant ---.
 
 func TestTargetDims(t *testing.T) {
 	if TargetDims != 1024 {

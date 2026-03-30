@@ -2,7 +2,7 @@ package store
 
 import "testing"
 
-// --- Integration test skeletons for DB-dependent functions ---
+// --- Integration test skeletons for DB-dependent functions ---.
 // These require a live database and are skipped in -short / CI.
 
 func TestUpsertSource_RequiresDB(t *testing.T) {

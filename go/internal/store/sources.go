@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -74,7 +75,7 @@ func GetSourceByPath(ctx context.Context, pool *pgxpool.Pool, filePath, scope st
 		&s.ChunkCount, &s.Status, &s.ErrorMessage, &s.Scope,
 		&s.Metadata, &s.CreatedAt, &s.UpdatedAt,
 	)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

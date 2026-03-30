@@ -40,7 +40,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(statuslineCmd(getClient))
 }
 
-// ── query ────────────────────────────────────────────────────────────
+// ── query ────────────────────────────────────────────────────────────.
 
 func queryCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -80,7 +80,7 @@ func queryCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── save ─────────────────────────────────────────────────────────────
+// ── save ─────────────────────────────────────────────────────────────.
 
 func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 	var shared bool
@@ -162,7 +162,7 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 	return cmd
 }
 
-// ── search ───────────────────────────────────────────────────────────
+// ── search ───────────────────────────────────────────────────────────.
 
 func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -211,7 +211,7 @@ func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── stats ────────────────────────────────────────────────────────────
+// ── stats ────────────────────────────────────────────────────────────.
 
 func statsCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -233,7 +233,7 @@ func statsCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── categories ───────────────────────────────────────────────────────
+// ── categories ───────────────────────────────────────────────────────.
 
 func categoriesCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -255,7 +255,7 @@ func categoriesCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── get ──────────────────────────────────────────────────────────────
+// ── get ──────────────────────────────────────────────────────────────.
 
 func getCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -281,7 +281,7 @@ func getCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── delete ───────────────────────────────────────────────────────────
+// ── delete ───────────────────────────────────────────────────────────.
 
 func deleteCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -307,7 +307,7 @@ func deleteCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── list-meta ────────────────────────────────────────────────────────
+// ── list-meta ────────────────────────────────────────────────────────.
 
 func listMetaCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -329,7 +329,7 @@ func listMetaCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── digest ───────────────────────────────────────────────────────────
+// ── digest ───────────────────────────────────────────────────────────.
 
 func digestCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -351,7 +351,7 @@ func digestCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── guard ────────────────────────────────────────────────────────────
+// ── guard ────────────────────────────────────────────────────────────.
 
 func guardCmd(getClient func() (*Client, error)) *cobra.Command {
 	cmd := &cobra.Command{
@@ -398,7 +398,7 @@ func guardListRun(getClient func() (*Client, error)) error {
 	var data map[string]any
 	if err := json.Unmarshal(resp, &data); err != nil {
 		PrintRaw(resp)
-		return nil
+		return nil //nolint:nilerr // raw response already printed above
 	}
 
 	if success, _ := data["success"].(bool); !success {
@@ -461,7 +461,7 @@ func guardStatsCmd(getClient func() (*Client, error)) *cobra.Command {
 			var d map[string]any
 			if err := json.Unmarshal(resp, &d); err != nil {
 				PrintRaw(resp)
-				return nil
+				return nil //nolint:nilerr // raw response already printed above
 			}
 
 			if success, _ := d["success"].(bool); !success {
@@ -532,7 +532,7 @@ func guardResolveCmd(getClient func() (*Client, error)) *cobra.Command {
 			var d map[string]any
 			if err := json.Unmarshal(resp, &d); err != nil {
 				PrintRaw(resp)
-				return nil
+				return nil //nolint:nilerr // raw response already printed above
 			}
 
 			if success, _ := d["success"].(bool); success {
@@ -556,7 +556,7 @@ func guardResolveCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── manage ───────────────────────────────────────────────────────────
+// ── manage ───────────────────────────────────────────────────────────.
 
 func manageCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -602,7 +602,7 @@ func manageCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
-// ── health ───────────────────────────────────────────────────────────
+// ── health ───────────────────────────────────────────────────────────.
 
 func healthCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{

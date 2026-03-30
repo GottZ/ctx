@@ -20,7 +20,7 @@ import (
 	"unicode/utf8"
 )
 
-// --- Tokenizer ---
+// --- Tokenizer ---.
 
 // ruleTokenize splits query on whitespace and hyphens, trims punctuation, lowercases.
 func ruleTokenize(query string) []string {
@@ -37,7 +37,7 @@ func ruleTokenize(query string) []string {
 	return out
 }
 
-// --- Levenshtein (lightweight) ---
+// --- Levenshtein (lightweight) ---.
 
 func editDistance(a, b string) int {
 	ra := []rune(a)
@@ -81,7 +81,7 @@ func maxEditDist(word string) int {
 	return 2
 }
 
-// --- Weekday Maps ---
+// --- Weekday Maps ---.
 
 var weekdayMapDE = map[string]time.Weekday{
 	"montag": time.Monday, "dienstag": time.Tuesday, "mittwoch": time.Wednesday,
@@ -106,7 +106,7 @@ func findWeekday(tokens []string) (time.Weekday, int, bool) {
 	return 0, -1, false
 }
 
-// --- Verb Tense Detection ---
+// --- Verb Tense Detection ---.
 
 var pastVerbSet = toWordSet(
 	"war", "ging", "hatte", "wollte", "musste", "wurde", "konnte", "sollte",
@@ -268,7 +268,7 @@ func hasPerfektForm(tokens []string) bool {
 	return false
 }
 
-// --- Date Computation ---
+// --- Date Computation ---.
 
 // resolveWeekdayDate finds the last or next occurrence of a weekday.
 func resolveWeekdayDate(wd time.Weekday, backward bool, now time.Time) time.Time {
@@ -318,7 +318,7 @@ func ptrStr(s string) *string {
 	return &s
 }
 
-// --- Simple Keyword Table ---
+// --- Simple Keyword Table ---.
 
 type simpleKW struct {
 	word    string
@@ -337,7 +337,7 @@ var simpleKeywords = []simpleKW{
 	{"übermorgen", func(now time.Time) time.Time { return now.AddDate(0, 0, 2) }, "future"},
 }
 
-// --- Regex Patterns ---
+// --- Regex Patterns ---.
 
 var (
 	reVorNTagen       = regexp.MustCompile(`(?i)vor\s+(\d+)\s+tag(?:en)?`)
@@ -368,7 +368,7 @@ var (
 	reNextWDThrough   = regexp.MustCompile(`(?i)next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+through\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)`)
 )
 
-// --- Result Helpers ---
+// --- Result Helpers ---.
 
 func singleResult(ref, date, dir string) *TemporalResult {
 	return &TemporalResult{
@@ -386,7 +386,7 @@ func multiResult(dates []TemporalDate) *TemporalResult {
 	return &TemporalResult{Dates: dates}
 }
 
-// --- Pattern Matchers ---
+// --- Pattern Matchers ---.
 
 func matchISODate(query string) *TemporalResult {
 	m := reISODatePat.FindString(query)
@@ -788,7 +788,7 @@ func resolveToken(tok string, backward bool, now time.Time) time.Time {
 	return time.Time{} // zero = unresolved
 }
 
-// --- Main Entry Point ---
+// --- Main Entry Point ---.
 
 // NormalizeTemporalRules performs deterministic temporal resolution.
 // Returns nil if no temporal references are found.
@@ -872,7 +872,7 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	return nil
 }
 
-// --- Helpers ---
+// --- Helpers ---.
 
 func toWordSet(words ...string) map[string]bool {
 	m := make(map[string]bool, len(words))

@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// ---------------------------------------------------------------------------
+// ---.
 // HasTemporalIntent — Injection & Malicious Input Tests
-// ---------------------------------------------------------------------------
+// ---.
 
 func TestAttacker_HasTemporalIntent_SQLInjection(t *testing.T) {
 	// ATTACK: SQL injection payload containing a temporal keyword.
@@ -251,9 +251,9 @@ func TestAttacker_HasTemporalIntent_SubstringFalsePositives(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
+// ---.
 // TemporalToFTSExpansion — Malicious Date Structs
-// ---------------------------------------------------------------------------
+// ---.
 
 func TestAttacker_TemporalToFTSExpansion_SQLInjectionInRef(t *testing.T) {
 	// ATTACK: SQL injection payload in the Ref field.
@@ -452,9 +452,9 @@ func TestAttacker_TemporalToFTSExpansion_MixedValidInvalid(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
+// ---.
 // TemporalToEmbedPrefix — Malicious Inputs
-// ---------------------------------------------------------------------------
+// ---.
 
 func TestAttacker_TemporalToEmbedPrefix_EmptyDates(t *testing.T) {
 	result := TemporalToEmbedPrefix([]TemporalDate{})
@@ -579,9 +579,9 @@ func TestAttacker_TemporalToEmbedPrefix_MassiveDateCount(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
+// ---.
 // buildCalendar — Boundary Dates & Edge Cases
-// ---------------------------------------------------------------------------
+// ---.
 
 func TestAttacker_BuildCalendar_January1YearBoundary(t *testing.T) {
 	// BOUNDARY: January 1 — year boundary. "Last week" crosses into previous year.
@@ -762,9 +762,9 @@ func TestAttacker_BuildCalendar_GermanWeekdayPresent(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
+// ---.
 // TemporalDate struct edge cases
-// ---------------------------------------------------------------------------
+// ---.
 
 func TestAttacker_TemporalDate_EmptyFields(t *testing.T) {
 	// ATTACK: All fields empty.
@@ -816,9 +816,9 @@ func TestAttacker_TemporalToEmbedPrefix_WeekdayCorrectness(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
+// ---.
 // Regex edge cases
-// ---------------------------------------------------------------------------
+// ---.
 
 func TestAttacker_ISODateRegex_ReDoS(t *testing.T) {
 	// ATTACK: ReDoS attempt — long string of digits that could cause catastrophic backtracking.
@@ -879,9 +879,9 @@ func TestAttacker_JsonFenceRegex_NestedFences(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
+// ---.
 // Scale-Capping Tests (Wave 2: T03 + T05)
-// ---------------------------------------------------------------------------
+// ---.
 
 func TestTemporalToFTSExpansion_RangeCapping(t *testing.T) {
 	// Range "diese Woche" = 1 TemporalDate with Date+End → 2 unique dates → ≤20 terms.

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// --- ClampLimit ---
+// --- ClampLimit ---.
 
 func TestClampLimit_ZeroReturnsDefault(t *testing.T) {
 	if got := ClampLimit(0, 10, 50); got != 10 {
@@ -82,7 +82,7 @@ func TestClampLimit_LimitEqualsDefault(t *testing.T) {
 	}
 }
 
-// --- Integration test skeletons for DB-dependent functions ---
+// --- Integration test skeletons for DB-dependent functions ---.
 
 func TestHashNOOPCheck_RequiresDB(t *testing.T) {
 	t.Skip("requires database connection")

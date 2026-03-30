@@ -17,7 +17,7 @@ import (
 // maxStatuslineResponse is the maximum bytes read from backend responses (1 MB).
 const maxStatuslineResponse = 1 * 1024 * 1024
 
-// ── statusline input schema (Claude Code stdin) ─────────────────────
+// ── statusline input schema (Claude Code stdin) ─────────────────────.
 
 type statusInput struct {
 	Model         *statusModel      `json:"model"`
@@ -58,14 +58,14 @@ type statusCost struct {
 	TotalCostUSD float64 `json:"total_cost_usd"`
 }
 
-// ── backend data ────────────────────────────────────────────────────
+// ── backend data ────────────────────────────────────────────────────.
 
 type statusCache struct {
 	Health     string  // ok, degraded, unhealthy, error
 	BlockCount float64 // from stats
 }
 
-// ── ANSI helpers ────────────────────────────────────────────────────
+// ── ANSI helpers ────────────────────────────────────────────────────.
 
 const (
 	ansiReset   = "\x1b[0m"
@@ -79,9 +79,9 @@ const (
 	ansiDimCyan = "\x1b[2;36m"
 )
 
-// ── Unicode smooth progress bar ─────────────────────────────────────
+// ── Unicode smooth progress bar ─────────────────────────────────────.
 
-// Block characters for 1/8th resolution: index 0 = empty, 8 = full
+// Block characters for 1/8th resolution: index 0 = empty, 8 = full.
 var barBlocks = [9]rune{' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'}
 
 const ansiBgDark = "\x1b[48;5;236m" // dark gray background
@@ -190,7 +190,7 @@ func rateColor(pct float64) string {
 	}
 }
 
-// ── health indicator ────────────────────────────────────────────────
+// ── health indicator ────────────────────────────────────────────────.
 
 func healthIndicator(status string) string {
 	switch status {
@@ -203,7 +203,7 @@ func healthIndicator(status string) string {
 	}
 }
 
-// ── fetch backend data ──────────────────────────────────────────────
+// ── fetch backend data ──────────────────────────────────────────────.
 
 func fetchBackendData(cfg Config) *statusCache {
 	result := &statusCache{Health: "error", BlockCount: 0}
@@ -216,7 +216,7 @@ func fetchBackendData(cfg Config) *statusCache {
 
 	// Health check
 	if resp, err := fast.Get(baseURL + "/health"); err == nil {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		var h struct {
 			Status string `json:"status"`
 		}
@@ -234,7 +234,7 @@ func fetchBackendData(cfg Config) *statusCache {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Context-Key", cfg.Key)
 		if resp, err := fast.Do(req); err == nil {
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			var s map[string]any
 			if body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatuslineResponse)); err == nil {
 				if json.Unmarshal(body, &s) == nil {
@@ -251,7 +251,7 @@ func fetchBackendData(cfg Config) *statusCache {
 	return result
 }
 
-// ── command ─────────────────────────────────────────────────────────
+// ── command ─────────────────────────────────────────────────────────.
 
 func statuslineCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -328,7 +328,7 @@ PROTOCOL:
 
 			var input statusInput
 			if err := json.Unmarshal(rawInput, &input); err != nil {
-				return nil // Silent fail
+				return nil //nolint:nilerr // silent fail, statusline must not crash
 			}
 
 			// Load config (best effort — statusline should not crash)

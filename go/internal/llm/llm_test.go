@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// --- EscapeXml ---
+// --- EscapeXml ---.
 
 func TestEscapeXml(t *testing.T) {
 	tests := []struct {
@@ -34,7 +34,7 @@ func TestEscapeXml(t *testing.T) {
 	}
 }
 
-// --- ClassifyConfidence ---
+// --- ClassifyConfidence ---.
 
 func TestClassifyConfidence(t *testing.T) {
 	tests := []struct {
@@ -61,7 +61,7 @@ func TestClassifyConfidence(t *testing.T) {
 	}
 }
 
-// --- FilterByScore ---
+// --- FilterByScore ---.
 
 func TestFilterByScore(t *testing.T) {
 	tests := []struct {
@@ -133,7 +133,7 @@ func TestFilterByScore(t *testing.T) {
 	}
 }
 
-// --- LostInMiddleReorder ---
+// --- LostInMiddleReorder ---.
 
 func TestLostInMiddleReorder(t *testing.T) {
 	mkSources := func(ids ...string) []Source {
@@ -210,7 +210,7 @@ func TestLostInMiddleReorder(t *testing.T) {
 	})
 }
 
-// --- FormatAnswer ---
+// --- FormatAnswer ---.
 
 func TestFormatAnswer(t *testing.T) {
 	tests := []struct {
@@ -247,7 +247,7 @@ func TestFormatAnswer(t *testing.T) {
 	}
 }
 
-// --- BuildPrompt ---
+// --- BuildPrompt ---.
 
 func TestBuildPrompt(t *testing.T) {
 	t.Run("system prompt contains v5.2 text", func(t *testing.T) {
@@ -368,7 +368,7 @@ func TestBuildPrompt(t *testing.T) {
 	})
 }
 
-// --- DetectGerman ---
+// --- DetectGerman ---.
 
 func TestDetectGerman(t *testing.T) {
 	tests := []struct {
@@ -402,7 +402,7 @@ func TestDetectGerman(t *testing.T) {
 	}
 }
 
-// --- validateTranslation ---
+// --- validateTranslation ---.
 
 func TestValidateTranslation(t *testing.T) {
 	tests := []struct {

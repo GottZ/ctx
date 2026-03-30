@@ -23,7 +23,7 @@ func NewBlobHandler(pool *pgxpool.Pool) *BlobHandler {
 	return &BlobHandler{pool: pool}
 }
 
-// -- blob-store --
+// -- blob-store --.
 
 type blobStoreRequest struct {
 	File     string         `json:"file"`     // base64 encoded data
@@ -160,7 +160,7 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// -- blob-fetch --
+// -- blob-fetch --.
 
 type blobFetchRequest struct {
 	ID       string `json:"id"`
@@ -242,7 +242,7 @@ func (h *BlobHandler) HandleBlobFetch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// -- blob-search --
+// -- blob-search --.
 
 type blobSearchRequest struct {
 	Category string   `json:"category"`
@@ -287,7 +287,7 @@ func (h *BlobHandler) HandleBlobSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// -- blob-manage --
+// -- blob-manage --.
 
 type blobManageRequest struct {
 	Action string `json:"action"`

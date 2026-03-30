@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -112,7 +113,7 @@ func GetBlobByID(ctx context.Context, pool *pgxpool.Pool, id string, readScopes 
 			&b.FileSize, &b.Checksum, &b.StorageType, &b.Tags, &b.Metadata,
 			&b.Scope, &b.CreatedAt, &b.UpdatedAt,
 		)
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		if err != nil {
@@ -130,7 +131,7 @@ func GetBlobByID(ctx context.Context, pool *pgxpool.Pool, id string, readScopes 
 			&b.FileSize, &b.Checksum, &b.StorageType, &b.Data, &b.Tags, &b.Metadata,
 			&b.Scope, &b.CreatedAt, &b.UpdatedAt,
 		)
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		if err != nil {
@@ -157,7 +158,7 @@ func GetBlobByCategoryTitle(ctx context.Context, pool *pgxpool.Pool, category, t
 			&b.FileSize, &b.Checksum, &b.StorageType, &b.Tags, &b.Metadata,
 			&b.Scope, &b.CreatedAt, &b.UpdatedAt,
 		)
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		if err != nil {
@@ -175,7 +176,7 @@ func GetBlobByCategoryTitle(ctx context.Context, pool *pgxpool.Pool, category, t
 			&b.FileSize, &b.Checksum, &b.StorageType, &b.Data, &b.Tags, &b.Metadata,
 			&b.Scope, &b.CreatedAt, &b.UpdatedAt,
 		)
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		if err != nil {
@@ -281,7 +282,7 @@ func DeleteBlob(ctx context.Context, pool *pgxpool.Pool, id, homeScope string) (
 		&bm.FileSize, &bm.Checksum, &bm.StorageType, &bm.Tags, &bm.Metadata,
 		&bm.Scope, &bm.CreatedAt, &bm.UpdatedAt,
 	)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

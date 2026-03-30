@@ -17,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// ── ingest types ─────────────────────────────────────────────────────
+// ── ingest types ─────────────────────────────────────────────────────.
 
 // ingestChunkPayload is a single chunk sent to the server.
 type ingestChunkPayload struct {
@@ -75,9 +75,11 @@ type ingestError struct {
 	Error string `json:"error"`
 }
 
-// ── command ──────────────────────────────────────────────────────────
+// ── command ──────────────────────────────────────────────────────────.
 
 // IngestCmd creates the `ctx ingest` Cobra command.
+//
+//nolint:cyclop // complex CLI command with many flags and validation paths
 func IngestCmd(getClient func() (*Client, error)) *cobra.Command {
 	var (
 		dryRun   bool
@@ -383,7 +385,7 @@ Use --dry-run to preview what would be uploaded without sending anything.`,
 	return cmd
 }
 
-// ── helpers ──────────────────────────────────────────────────────────
+// ── helpers ──────────────────────────────────────────────────────────.
 
 // collectMarkdownFiles walks a directory and returns all .md files,
 // skipping .obsidian/, dot-directories, and node_modules.
@@ -391,7 +393,7 @@ func collectMarkdownFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // skip unreadable entries
+			return nil //nolint:nilerr // skip unreadable entries
 		}
 		if d.IsDir() {
 			name := d.Name()
