@@ -182,6 +182,63 @@ func TestPopulateTemporal_SentinelPath(t *testing.T) {
 	}
 }
 
+// --- Link Dimension Tests ---
+
+func TestBuildTemporalBatch_WithLinks(t *testing.T) {
+	// 1 date (5 dims) + 2 links = 1 DELETE + 5 + 2 = 8
+	dates := []time.Time{time.Date(2026, 3, 29, 0, 0, 0, 0, time.UTC)}
+	links := []string{"Projektnotiz", "Architecture"}
+	batch, count := BuildTemporalBatch("block-link", dates, links)
+
+	want := 8 // 1 DELETE + 5 temporal + 2 links
+	if count != want {
+		t.Fatalf("expected %d queries, got %d", want, count)
+	}
+	if batch.Len() != want {
+		t.Fatalf("expected batch len %d, got %d", want, batch.Len())
+	}
+}
+
+func TestBuildTemporalBatch_LinksOnly(t *testing.T) {
+	// 0 dates + 3 links = 1 DELETE + 3 links = 4
+	links := []string{"A", "B", "C"}
+	batch, count := BuildTemporalBatch("block-links-only", nil, links)
+
+	want := 4 // 1 DELETE + 3 links
+	if count != want {
+		t.Fatalf("expected %d queries, got %d", want, count)
+	}
+	if batch.Len() != want {
+		t.Fatalf("expected batch len %d, got %d", want, batch.Len())
+	}
+}
+
+func TestBuildTemporalBatch_EmptyLinks(t *testing.T) {
+	// 0 dates + 0 links = sentinel (2 queries)
+	batch, count := BuildTemporalBatch("block-empty", nil, []string{})
+
+	if count != 2 {
+		t.Fatalf("expected sentinel (2 queries), got %d", count)
+	}
+	if batch.Len() != 2 {
+		t.Fatalf("expected batch len 2, got %d", batch.Len())
+	}
+}
+
+func TestBuildTemporalBatch_LinksSkipEmpty(t *testing.T) {
+	// Empty strings in links should be skipped
+	links := []string{"Valid", "", "Also Valid", ""}
+	batch, count := BuildTemporalBatch("block-skip", nil, links)
+
+	want := 3 // 1 DELETE + 2 valid links
+	if count != want {
+		t.Fatalf("expected %d queries, got %d", want, count)
+	}
+	if batch.Len() != want {
+		t.Fatalf("expected batch len %d, got %d", want, batch.Len())
+	}
+}
+
 func TestExpandDimensions_ISOWeekEdge(t *testing.T) {
 	// Jan 1, 2026 is a Thursday → ISO week 1
 	d := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

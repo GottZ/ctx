@@ -52,14 +52,20 @@ func ExpandDimensions(d time.Time) []TemporalDimension {
 // BuildTemporalBatch creates the pgx.Batch for PopulateTemporal.
 // Returns the batch and the expected query count.
 // Exported for testing — no DB access.
-func BuildTemporalBatch(blockID string, dates []time.Time) (*pgx.Batch, int) {
+func BuildTemporalBatch(blockID string, dates []time.Time, links ...[]string) (*pgx.Batch, int) {
 	batch := &pgx.Batch{}
 
 	// Delete existing dimensions for this block
 	batch.Queue(`DELETE FROM context_temporal WHERE block_id = $1`, blockID)
 
-	// Sentinel for blocks without dates — ensures NOT EXISTS returns false in backfill.
-	if len(dates) == 0 {
+	// Collect link targets (variadic for backward compatibility)
+	var linkTargets []string
+	if len(links) > 0 {
+		linkTargets = links[0]
+	}
+
+	// Sentinel for blocks without dates AND without links
+	if len(dates) == 0 && len(linkTargets) == 0 {
 		batch.Queue(
 			`INSERT INTO context_temporal (block_id, dimension, value, source_date)
 			 VALUES ($1, '_none', '', '1970-01-01'::date)
@@ -69,7 +75,9 @@ func BuildTemporalBatch(blockID string, dates []time.Time) (*pgx.Batch, int) {
 		return batch, 2
 	}
 
-	// Insert new dimensions for each date
+	queryCount := 1 // DELETE
+
+	// Insert temporal dimensions for each date
 	for _, d := range dates {
 		dims := ExpandDimensions(d)
 		sourceDate := d.Format("2006-01-02")
@@ -80,10 +88,30 @@ func BuildTemporalBatch(blockID string, dates []time.Time) (*pgx.Batch, int) {
 				 ON CONFLICT DO NOTHING`,
 				blockID, dim.Dimension, dim.Value, sourceDate,
 			)
+			queryCount++
 		}
 	}
 
-	return batch, 1 + len(dates)*5 // 1 DELETE + N dates * 5 dimensions
+	// Insert link dimensions (graph associations)
+	for _, target := range linkTargets {
+		if target == "" {
+			continue
+		}
+		batch.Queue(
+			`INSERT INTO context_temporal (block_id, dimension, value, source_date)
+			 VALUES ($1, 'link', $2, '1970-01-01'::date)
+			 ON CONFLICT DO NOTHING`,
+			blockID, target,
+		)
+		queryCount++
+	}
+
+	// Sentinel if only links, no dates (block still needs temporal entry for backfill)
+	if len(dates) == 0 && len(linkTargets) > 0 {
+		// Links are already inserted, no sentinel needed — block exists in context_temporal
+	}
+
+	return batch, queryCount
 }
 
 // PopulateTemporal replaces all temporal dimensions for a block.
