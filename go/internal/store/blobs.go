@@ -72,7 +72,7 @@ func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filena
 	err := pool.QueryRow(ctx,
 		`INSERT INTO context_blobs (category, title, filename, mime_type, file_size, data, checksum, tags, metadata, scope)
 		VALUES ($1, $2, $3, $4, $5, $6, encode(digest($6, 'sha256'), 'hex'), $7, $8, $9)
-		ON CONFLICT (category, title) DO UPDATE SET
+		ON CONFLICT (category, title, scope) DO UPDATE SET
 			filename = EXCLUDED.filename,
 			mime_type = EXCLUDED.mime_type,
 			file_size = EXCLUDED.file_size,

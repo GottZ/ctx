@@ -13,11 +13,6 @@ on:
   pull_request:
     branches: [root]
   workflow_dispatch:
-    inputs:
-      skip_deploy:
-        description: "Skip deploy stage (true/false)"
-        required: false
-        default: "false"
 
 # Ein concurrent Run pro Branch/PR — neuerer Run cancelt älteren.
 # Deploy-Jobs sind davon ausgenommen (concurrency-group ohne cancel).
@@ -305,90 +300,5 @@ jobs:
       - name: Image digest
         run: echo "Pushed ${{ env.IMAGE_NAME }} — digest ${{ steps.docker_build.outputs.digest }}"
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Stage 6: Deploy
-  # SSH-basiert: docker compose pull + up -d auf dem Remote-Host.
-  # Nur nach erfolgreichem Docker-Push auf root-Branch.
-  # Skip via workflow_dispatch input oder SKIP_DEPLOY Secret.
-  # ─────────────────────────────────────────────────────────────────────────────
-  deploy:
-    name: Deploy
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [docker]
-    # Deploy nur auf root-Branch, nicht auf PRs oder manuellen Skips.
-    if: >-
-      github.ref == 'refs/heads/root' &&
-      github.event.inputs.skip_deploy != 'true'
-
-    # Keine concurrency-cancel beim Deploy — kein Deployment-Split-Brain.
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false
-
-    environment:
-      name: production
-      url: ${{ vars.CTX_BASE_URL }}
-
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.3
-        with:
-          host: ${{ secrets.DEPLOY_SSH_HOST }}
-          username: ${{ secrets.DEPLOY_SSH_USER }}
-          # Ed25519 Key empfohlen. Im Repo-Secret als PEM gespeichert.
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
-          # Timeout für den SSH-Command selbst (nicht für die GitHub-Action)
-          command_timeout: 5m
-          script: |
-            set -euo pipefail
-
-            # Wechsle ins Deploy-Verzeichnis
-            cd ${{ vars.DEPLOY_DIR || '/compose/n8n' }}
-
-            # Aktuelles Image pullen
-            docker compose pull
-
-            # Rolling Update: kein Downtime bei n8n (healthcheck-abhängig)
-            docker compose up -d --remove-orphans
-
-            # Verifikation: Container läuft und ist healthy
-            echo "Waiting for health check..."
-            timeout 60 bash -c '
-              until docker compose ps --format json | python3 -c "
-            import sys, json
-            services = [json.loads(l) for l in sys.stdin if l.strip()]
-            unhealthy = [s for s in services if s.get(\"Health\") not in (\"healthy\", \"\", None)]
-            sys.exit(len(unhealthy))
-            "; do
-                sleep 5
-              done
-            '
-
-            echo "Deploy successful: $(docker compose ps --format 'table {{.Name}}\t{{.Status}}')"
-
-      - name: Smoke test (post-deploy)
-        uses: appleboy/ssh-action@v1.2.3
-        with:
-          host: ${{ secrets.DEPLOY_SSH_HOST }}
-          username: ${{ secrets.DEPLOY_SSH_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
-          command_timeout: 2m
-          script: |
-            set -euo pipefail
-            cd ${{ vars.DEPLOY_DIR || '/compose/n8n' }}
-
-            # Health-Endpoint prüfen (interner Port, kein SSL erforderlich)
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 10 \
-              http://localhost:5678/healthz 2>/dev/null || echo "000")
-
-            if [ "$HTTP_STATUS" != "200" ]; then
-              echo "Health check failed: HTTP $HTTP_STATUS"
-              docker compose logs --tail=50 n8n
-              exit 1
-            fi
-
-            echo "Smoke test PASS: HTTP $HTTP_STATUS"
+  # Stage 6: Deploy — entfernt. Lokaler Build via docker compose.
+  # Zukünftig: Webhook-basiertes Deploy (kein SSH nach extern).
