@@ -1,10 +1,10 @@
 module github.com/GottZ/ctx
 
-go 1.24.0
+go 1.25.0
 
 require (
-	github.com/go-chi/chi/v5 v5.2.2
-	github.com/jackc/pgx/v5 v5.7.5
+	github.com/go-chi/chi/v5 v5.2.5
+	github.com/jackc/pgx/v5 v5.9.1
 	github.com/jackc/pgxlisten v0.0.0-20250802141604-12b92425684c
 	github.com/pgvector/pgvector-go v0.3.0
 	github.com/spf13/cobra v1.10.2

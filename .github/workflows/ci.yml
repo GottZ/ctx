@@ -43,23 +43,21 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
-          # Go module cache wird von actions/setup-go automatisch gecacht.
-          # Key: go-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           cache: true
+          cache-dependency-path: go/go.sum
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
-          # Cache für golangci-lint selbst + Analyse-Ergebnisse
+          working-directory: go
           args: --timeout=5m
-          # Nur geänderte Files bei PRs (schneller, weniger Noise)
           only-new-issues: ${{ github.event_name == 'pull_request' }}
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -73,15 +71,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+          cache-dependency-path: go/go.sum
 
       - name: Run unit tests
+        working-directory: go
         run: |
           go test \
             -v \
@@ -94,10 +94,10 @@ jobs:
             ./...
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-unit
-          path: coverage.out
+          path: go/coverage.out
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -124,22 +124,23 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+          cache-dependency-path: go/go.sum
 
       # Docker Layer Cache für testcontainers Images.
-      # Key: pgvector:pg17-Image-Hash (ändert sich selten → hohe Hit-Rate).
       - name: Cache testcontainers Docker images
         uses: ScribeMD/docker-cache@0.5.0
         with:
           key: docker-testcontainers-pgvector-pg17-${{ runner.os }}
 
       - name: Run integration tests
+        working-directory: go
         run: |
           go test \
             -v \
@@ -151,10 +152,10 @@ jobs:
             ./...
 
       - name: Upload integration coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-integration
-          path: coverage-integration.out
+          path: go/coverage-integration.out
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -172,15 +173,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+          cache-dependency-path: go/go.sum
 
       - name: Build binary
+        working-directory: go
         env:
           CGO_ENABLED: "0"
           GOOS: linux
@@ -192,8 +195,8 @@ jobs:
               -X main.Version=${{ github.ref_name }} \
               -X main.Commit=${{ github.sha }} \
               -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -o ctxd \
-            ./go/cmd/ctxd/
+            -o ../ctxd \
+            ./cmd/ctxd/
 
       - name: Verify binary
         run: |
@@ -201,7 +204,7 @@ jobs:
           ./ctxd --version 2>/dev/null || ./ctxd version 2>/dev/null || true
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ctxd-linux-amd64
           path: ctxd
@@ -231,10 +234,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download binary artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ctxd-linux-amd64
 
@@ -243,10 +246,10 @@ jobs:
 
       # Docker Buildx für Cache-Export-Support
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -259,7 +262,7 @@ jobs:
       # :YYYY-MM-DD — human-readable Datum
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -279,7 +282,7 @@ jobs:
       # - cache-to:   Registry Cache (exportiert nach erfolgreichem Build)
       # Fallback: GitHub Actions Cache (type=gha) als sekundärer Cache.
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -329,7 +332,7 @@ jobs:
 
     steps:
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.3
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
@@ -366,7 +369,7 @@ jobs:
             echo "Deploy successful: $(docker compose ps --format 'table {{.Name}}\t{{.Status}}')"
 
       - name: Smoke test (post-deploy)
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.3
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
           username: ${{ secrets.DEPLOY_SSH_USER }}

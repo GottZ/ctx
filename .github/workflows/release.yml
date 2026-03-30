@@ -43,13 +43,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+          cache-dependency-path: go/go.sum
 
       - name: Determine version
         id: version
@@ -59,12 +60,13 @@ jobs:
           echo "Building version: ${TAG}"
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        working-directory: go
         env:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          BINARY="ctx-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          BINARY="../ctx-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           go build \
             -trimpath \
             -ldflags="-s -w \
@@ -72,11 +74,11 @@ jobs:
               -X main.commit=${{ github.sha }} \
               -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -o "${BINARY}" \
-            ./go/cmd/ctx/
+            ./cmd/ctx/
           echo "Built: ${BINARY} ($(du -h "${BINARY}" | cut -f1))"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ctx-${{ matrix.goos }}-${{ matrix.goarch }}
           path: ctx-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
@@ -91,7 +93,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist/
           merge-multiple: true
