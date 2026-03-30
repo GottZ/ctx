@@ -177,21 +177,3 @@ func TestHealthIndicator(t *testing.T) {
 	}
 }
 
-func TestCacheRoundtrip(t *testing.T) {
-	c := &statusCache{
-		Health:     "ok",
-		BlockCount: 401,
-	}
-	saveCache(c)
-
-	loaded := loadCache()
-	if loaded == nil {
-		t.Fatal("loadCache returned nil")
-	}
-	if loaded.Health != "ok" {
-		t.Errorf("health = %q, want ok", loaded.Health)
-	}
-	if loaded.BlockCount != 401 {
-		t.Errorf("block_count = %v, want 401", loaded.BlockCount)
-	}
-}

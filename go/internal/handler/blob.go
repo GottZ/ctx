@@ -36,7 +36,7 @@ type blobStoreRequest struct {
 	Scope    string         `json:"scope"`
 }
 
-// HandleBlobStore processes POST /webhook/blob-store.
+// HandleBlobStore processes POST /api/blob/store.
 func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
@@ -169,7 +169,7 @@ type blobFetchRequest struct {
 	MetaOnly bool   `json:"meta_only"`
 }
 
-// HandleBlobFetch processes POST /webhook/blob-fetch.
+// HandleBlobFetch processes POST /api/blob/fetch.
 func (h *BlobHandler) HandleBlobFetch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
@@ -251,7 +251,7 @@ type blobSearchRequest struct {
 	Limit    int      `json:"limit"`
 }
 
-// HandleBlobSearch processes POST /webhook/blob-search.
+// HandleBlobSearch processes POST /api/blob/search.
 func (h *BlobHandler) HandleBlobSearch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
@@ -295,7 +295,7 @@ type blobManageRequest struct {
 	Limit  int    `json:"limit"`
 }
 
-// HandleBlobManage processes POST /webhook/blob-manage.
+// HandleBlobManage processes POST /api/blob/manage.
 func (h *BlobHandler) HandleBlobManage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)

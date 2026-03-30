@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -28,14 +29,14 @@ func NewClient(cfg Config) *Client {
 }
 
 // Post sends a POST request to BaseURL/endpoint with JSON body.
-// BaseURL already includes /webhook, so endpoint is e.g. "context-agent".
+// BaseURL points to the API root, endpoint is e.g. "query", "store".
 func (c *Client) Post(endpoint string, body any) ([]byte, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal body: %w", err)
 	}
 
-	url := c.BaseURL + "/" + endpoint
+	url := strings.TrimSuffix(c.BaseURL, "/") + "/api/" + endpoint
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -57,9 +58,8 @@ func (c *Client) Post(endpoint string, body any) ([]byte, error) {
 	return respBody, nil
 }
 
-// Get sends a GET request to BaseURL (with path override for non-webhook endpoints).
+// Get sends a GET request to the given path URL.
 func (c *Client) Get(path string) ([]byte, error) {
-	// For health endpoint, we strip /webhook from BaseURL and use the raw path
 	url := path
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {

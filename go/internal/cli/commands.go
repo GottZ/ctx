@@ -70,7 +70,7 @@ func queryCmd(getClient func() (*Client, error)) *cobra.Command {
 				"query": query,
 				"limit": 5,
 			}
-			resp, err := c.Post("context-agent", body)
+			resp, err := c.Post("query", body)
 			if err != nil {
 				return err
 			}
@@ -86,13 +86,14 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 	var shared bool
 
 	cmd := &cobra.Command{
-		Use:     "save [--shared] <category> <title> - <content>",
+		Use:     "save [--shared] <category> <title> [content...]",
 		Aliases: []string{"s"},
 		Short:   "Upsert block (--shared = cross-tenant)",
-		Long:    "Save a knowledge block to the context store. Upserts by category+title.",
-		Example: `  ctx save infrastructure "My Title" - "Content here"
+		Long:    "Save a knowledge block to the context store. Upserts by category+title.\nContent can be inline args, piped via stdin, or separated with '-'.",
+		Example: `  ctx save infrastructure "My Title" Content goes here
+  ctx save decisions "My Decision" - Also works with dash
   cat file.md | ctx save docs "My Doc"
-  ctx save --shared reference "Shared Block" - "Visible to all tenants"`,
+  ctx save --shared reference "Shared Block" Visible to all tenants`,
 		DisableFlagParsing: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient()
@@ -101,7 +102,7 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 			}
 
 			if len(args) < 2 {
-				return fmt.Errorf("usage: ctx save [--shared] <category> <title> - <content>")
+				return fmt.Errorf("usage: ctx save [--shared] <category> <title> [content...]")
 			}
 
 			category := args[0]
@@ -109,29 +110,33 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 
 			var title, content string
 
-			// Find the " - " separator in args
+			// Find optional "-" or "--" separator in args (backward compat)
 			sepIdx := -1
 			for i, a := range rest {
-				if a == "-" {
+				if a == "-" || a == "--" {
 					sepIdx = i
 					break
 				}
 			}
 
 			if sepIdx >= 0 {
-				// title is everything before separator, content everything after
+				// Explicit separator: title before, content after
 				title = strings.Join(rest[:sepIdx], " ")
 				content = strings.Join(rest[sepIdx+1:], " ")
+			} else if len(rest) >= 2 {
+				// No separator: first arg is title, rest is content
+				title = rest[0]
+				content = strings.Join(rest[1:], " ")
 			} else {
-				// No separator — title is all remaining args, content from stdin
-				title = strings.Join(rest, " ")
+				// Single arg: title only, content from stdin
+				title = rest[0]
 				if stdin, ok := ReadStdin(); ok {
 					content = stdin
 				}
 			}
 
 			if category == "" || title == "" || content == "" {
-				return fmt.Errorf("usage: ctx save [--shared] <category> <title> - <content>")
+				return fmt.Errorf("usage: ctx save [--shared] <category> <title> [content...]")
 			}
 
 			body := map[string]any{
@@ -145,7 +150,7 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 				body["scope"] = "shared"
 			}
 
-			resp, err := c.Post("context-store", body)
+			resp, err := c.Post("store", body)
 			if err != nil {
 				return err
 			}
@@ -196,7 +201,7 @@ func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 				}
 			}
 
-			resp, err := c.Post("context-search", body)
+			resp, err := c.Post("search", body)
 			if err != nil {
 				return err
 			}
@@ -218,7 +223,7 @@ func statsCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := c.Post("context-manage", map[string]any{"action": "stats"})
+			resp, err := c.Post("manage", map[string]any{"action": "stats"})
 			if err != nil {
 				return err
 			}
@@ -240,7 +245,7 @@ func categoriesCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := c.Post("context-manage", map[string]any{"action": "list-categories"})
+			resp, err := c.Post("manage", map[string]any{"action": "list-categories"})
 			if err != nil {
 				return err
 			}
@@ -263,7 +268,7 @@ func getCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := c.Post("context-manage", map[string]any{
+			resp, err := c.Post("manage", map[string]any{
 				"action": "get",
 				"id":     args[0],
 			})
@@ -289,7 +294,7 @@ func deleteCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := c.Post("context-manage", map[string]any{
+			resp, err := c.Post("manage", map[string]any{
 				"action": "delete",
 				"id":     args[0],
 			})
@@ -314,7 +319,7 @@ func listMetaCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := c.Post("context-manage", map[string]any{"action": "list-meta"})
+			resp, err := c.Post("manage", map[string]any{"action": "list-meta"})
 			if err != nil {
 				return err
 			}
@@ -336,7 +341,7 @@ func digestCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := c.Post("context-digest", map[string]any{"trigger": "manual"})
+			resp, err := c.Post("digest", map[string]any{"trigger": "manual"})
 			if err != nil {
 				return err
 			}
@@ -384,7 +389,7 @@ func guardListRun(getClient func() (*Client, error)) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.Post("context-manage", map[string]any{"action": "guard-list"})
+	resp, err := c.Post("manage", map[string]any{"action": "guard-list"})
 	if err != nil {
 		return err
 	}
@@ -448,7 +453,7 @@ func guardStatsCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := c.Post("context-manage", map[string]any{"action": "guard-stats"})
+			resp, err := c.Post("manage", map[string]any{"action": "guard-stats"})
 			if err != nil {
 				return err
 			}
@@ -515,7 +520,7 @@ func guardResolveCmd(getClient func() (*Client, error)) *cobra.Command {
 				return err
 			}
 
-			resp, err := c.Post("context-manage", map[string]any{
+			resp, err := c.Post("manage", map[string]any{
 				"action": "guard-resolve",
 				"id":     blockID,
 				"data":   map[string]string{"resolution": resolution},
@@ -587,7 +592,7 @@ func manageCmd(getClient func() (*Client, error)) *cobra.Command {
 				}
 			}
 
-			resp, err := c.Post("context-manage", body)
+			resp, err := c.Post("manage", body)
 			if err != nil {
 				return err
 			}
@@ -609,13 +614,7 @@ func healthCmd(getClient func() (*Client, error)) *cobra.Command {
 				return err
 			}
 
-			// Health endpoint is GET /health, not under /webhook/
-			// BaseURL is like https://ctx.janetzky.cloud/webhook
-			// We need https://ctx.janetzky.cloud/health
-			baseURL := c.BaseURL
-			baseURL = strings.TrimSuffix(baseURL, "/webhook")
-			baseURL = strings.TrimSuffix(baseURL, "/")
-
+			baseURL := strings.TrimSuffix(c.BaseURL, "/")
 			resp, err := c.Get(baseURL + "/health")
 			if err != nil {
 				return err

@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// SearchHandler handles POST /webhook/context-search.
+// SearchHandler handles POST /api/search.
 type SearchHandler struct {
 	pool *pgxpool.Pool
 }

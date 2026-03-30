@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// StoreHandler handles POST /webhook/context-store.
+// StoreHandler handles POST /api/store.
 type StoreHandler struct {
 	pool       *pgxpool.Pool
 	ollamaHost string

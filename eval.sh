@@ -23,7 +23,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 set -a; source "$ENV_FILE"; set +a
 
-WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost/webhook}"
+WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost}"
 KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}"
 BASELINE_FILE="/compose/n8n/.eval-baseline.json"
 RESULTS_FILE="/tmp/eval-results-$(date +%s).json"
@@ -73,7 +73,7 @@ except:
 #
 # Format: ID|TYPE|QUERY|EXPECTED_CONFIDENCE|KEYWORDS(comma-sep)|DESCRIPTION
 #
-# TYPE: retrieval = context-search (no LLM), synthesis = context-agent (LLM)
+# TYPE: retrieval = api/search (no LLM), synthesis = api/query (LLM)
 # EXPECTED_CONFIDENCE: confident|low|none|any (for retrieval tests)
 # KEYWORDS: comma-separated strings that MUST appear in the answer (case-insensitive)
 #           For retrieval tests: keywords that must appear in result titles/previews
@@ -130,7 +130,7 @@ I06|synthesis|Show me how auth works in the context store|confident|key,hash,sco
 I07|synthesis|Liste alle Kategorien im Context Store auf|confident|infrastructure,learnings|DE imperative, categories
 I08|synthesis|Explain the blob storage authentication|confident|key,hash,blob|EN imperative, blob auth
 
-# --- RETRIEVAL QUALITY (context-search, no LLM — tests vector+FTS ranking) ---
+# --- RETRIEVAL QUALITY (api/search, no LLM — tests vector+FTS ranking) ---
 R01|retrieval|Write Guard|any|write guard|Top result relevance
 R02|retrieval|embedding model|any|embedding|Embedding-related blocks
 R03|retrieval|blob storage|any|blob|Blob-related blocks
@@ -157,7 +157,7 @@ run_synthesis_test() {
   t_start=$(date +%s%3N)
   local escaped_query
   escaped_query=$(printf '%s' "$query" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-  resp=$(api "$WEBHOOK/context-agent" "{\"query\":$escaped_query}" 120)
+  resp=$(api "$WEBHOOK/api/query" "{\"query\":$escaped_query}" 120)
   t_end=$(date +%s%3N)
   latency_ms=$(( t_end - t_start ))
 
@@ -245,7 +245,7 @@ run_retrieval_test() {
   t_start=$(date +%s%3N)
   local escaped_query
   escaped_query=$(printf '%s' "$query" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-  resp=$(api "$WEBHOOK/context-search" "{\"query\":$escaped_query}" 30)
+  resp=$(api "$WEBHOOK/api/search" "{\"query\":$escaped_query}" 30)
   t_end=$(date +%s%3N)
   latency_ms=$(( t_end - t_start ))
 
@@ -325,7 +325,7 @@ echo ""
 
 # Preflight: verify connectivity
 echo "--- Preflight ---"
-preflight=$(api "$WEBHOOK/context-manage" '{"action":"stats"}' 15)
+preflight=$(api "$WEBHOOK/api/manage" '{"action":"stats"}' 15)
 total_blocks=$(echo "$preflight" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null || echo "0")
 if (( total_blocks < 100 )); then
   echo "ABORT: Context store has only $total_blocks blocks (expected 100+). Is the system up?"
@@ -335,7 +335,7 @@ echo "Store OK: $total_blocks blocks"
 echo ""
 
 # --- Retrieval Tests ---
-echo "--- Retrieval Tests (context-search, no LLM) ---"
+echo "--- Retrieval Tests (api/search, no LLM) ---"
 echo ""
 
 while IFS='|' read -r id type query expected_conf keywords desc; do
@@ -348,7 +348,7 @@ done < <(define_test_cases)
 
 if ! $RETRIEVAL_ONLY; then
   echo ""
-  echo "--- Synthesis Tests (context-agent, LLM) ---"
+  echo "--- Synthesis Tests (api/query, LLM) ---"
   echo ""
 
   # Confident

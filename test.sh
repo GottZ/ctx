@@ -17,7 +17,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 set -a; source "$ENV_FILE"; set +a
 
-WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost/webhook}"
+WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost}"
 KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}"
 KEY_WORK="${CONTEXT_API_KEY_WORK:?CONTEXT_API_KEY_WORK not set in .env}"
 KEY_INVALID="deadbeef_invalid_key_0000000000000000000000000000000000000000"
@@ -57,7 +57,7 @@ api() {
 # Cleanup trap: always delete temp block
 cleanup() {
   if [[ -n "$CLEANUP_ID" ]]; then
-    api "$WEBHOOK/context-manage" "$KEY_PRIVATE" \
+    api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
       "{\"action\":\"delete\",\"id\":\"$CLEANUP_ID\"}" 10 >/dev/null 2>&1
   fi
 }
@@ -85,7 +85,7 @@ echo ""
 
 # T01 AUTH_REJECT
 T="T01 AUTH_REJECT"
-resp=$(api "$WEBHOOK/context-manage" "$KEY_INVALID" '{"action":"stats"}')
+resp=$(api "$WEBHOOK/api/manage" "$KEY_INVALID" '{"action":"stats"}')
 if echo "$resp" | grep -qi "unauthorized\|\"success\":false"; then
   pass "$T"
 else
@@ -94,7 +94,7 @@ fi
 
 # T02 AUTH_PRIVATE
 T="T02 AUTH_PRIVATE"
-resp=$(api "$WEBHOOK/context-manage" "$KEY_PRIVATE" '{"action":"stats"}')
+resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"stats"}')
 total=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
 if [[ -n "$total" ]] && (( total >= 180 )); then
   pass "$T (total_blocks=$total)"
@@ -104,7 +104,7 @@ fi
 
 # T03 AUTH_WORK
 T="T03 AUTH_WORK"
-resp=$(api "$WEBHOOK/context-manage" "$KEY_WORK" '{"action":"stats"}')
+resp=$(api "$WEBHOOK/api/manage" "$KEY_WORK" '{"action":"stats"}')
 total=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
 if [[ -n "$total" ]] && (( total < 30 )); then
   pass "$T (total_blocks=$total)"
@@ -114,7 +114,7 @@ fi
 
 # T04 SCOPE_ISOLATION
 T="T04 SCOPE_ISOLATION"
-resp=$(api "$WEBHOOK/context-manage" "$KEY_WORK" '{"action":"guard-list"}')
+resp=$(api "$WEBHOOK/api/manage" "$KEY_WORK" '{"action":"guard-list"}')
 if [[ -z "$resp" ]]; then
   # Empty response = no blocks visible (scope isolation working)
   pass "$T (empty response, no private blocks leaked)"
@@ -139,7 +139,7 @@ t05_ok=true
 t05_msg=""
 
 # Save
-resp=$(api "$WEBHOOK/context-store" "$KEY_PRIVATE" \
+resp=$(api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
   "{\"category\":\"test\",\"title\":\"$TEST_TITLE\",\"content\":\"benchmark crud test content $(date +%s)\",\"tags\":[\"benchmark\"]}")
 if ! echo "$resp" | grep -q '"success":true'; then
   t05_ok=false; t05_msg="save failed: ${resp:0:100}"
@@ -148,7 +148,7 @@ fi
 # Search to get ID
 if $t05_ok; then
   sleep 1
-  resp=$(api "$WEBHOOK/context-search" "$KEY_PRIVATE" \
+  resp=$(api "$WEBHOOK/api/search" "$KEY_PRIVATE" \
     "{\"query\":\"$TEST_TITLE\"}")
   CLEANUP_ID=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['results'][0]['id'])" 2>/dev/null)
   if [[ -z "$CLEANUP_ID" ]]; then
@@ -158,7 +158,7 @@ fi
 
 # Get by ID
 if $t05_ok; then
-  resp=$(api "$WEBHOOK/context-manage" "$KEY_PRIVATE" \
+  resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
     "{\"action\":\"get\",\"id\":\"$CLEANUP_ID\"}")
   got_title=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['block']['title'])" 2>/dev/null)
   if [[ "$got_title" != "$TEST_TITLE" ]]; then
@@ -168,7 +168,7 @@ fi
 
 # Delete
 if $t05_ok; then
-  resp=$(api "$WEBHOOK/context-manage" "$KEY_PRIVATE" \
+  resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
     "{\"action\":\"delete\",\"id\":\"$CLEANUP_ID\"}")
   if echo "$resp" | grep -q '"success":true'; then
     CLEANUP_ID=""  # already cleaned up
@@ -191,7 +191,7 @@ t06_msg=""
 t06_id=""
 
 # First save
-resp=$(api "$WEBHOOK/context-store" "$KEY_PRIVATE" \
+resp=$(api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
   "{\"category\":\"test\",\"title\":\"$t06_title\",\"content\":\"upsert noop test content\",\"tags\":[\"benchmark\"]}")
 if ! echo "$resp" | grep -q '"success":true'; then
   t06_ok=false; t06_msg="first save failed: ${resp:0:100}"
@@ -199,7 +199,7 @@ fi
 
 # Second save (identical content)
 if $t06_ok; then
-  resp=$(api "$WEBHOOK/context-store" "$KEY_PRIVATE" \
+  resp=$(api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
     "{\"category\":\"test\",\"title\":\"$t06_title\",\"content\":\"upsert noop test content\",\"tags\":[\"benchmark\"]}")
   action=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('action',''))" 2>/dev/null)
   t06_id=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('existing_id',''))" 2>/dev/null)
@@ -212,14 +212,14 @@ fi
 
 # Cleanup
 if [[ -n "$t06_id" ]]; then
-  api "$WEBHOOK/context-manage" "$KEY_PRIVATE" \
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
     "{\"action\":\"delete\",\"id\":\"$t06_id\"}" 10 >/dev/null 2>&1
 else
   # Try to find and delete by search
   sleep 1
-  resp=$(api "$WEBHOOK/context-search" "$KEY_PRIVATE" "{\"query\":\"$t06_title\"}")
+  resp=$(api "$WEBHOOK/api/search" "$KEY_PRIVATE" "{\"query\":\"$t06_title\"}")
   found_id=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin).get('results',[]); print(r[0]['id'] if r else '')" 2>/dev/null)
-  [[ -n "$found_id" ]] && api "$WEBHOOK/context-manage" "$KEY_PRIVATE" \
+  [[ -n "$found_id" ]] && api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
     "{\"action\":\"delete\",\"id\":\"$found_id\"}" 10 >/dev/null 2>&1
 fi
 
@@ -239,7 +239,7 @@ fi
 
 # T08 GUARD_STATS
 T="T08 GUARD_STATS"
-resp=$(api "$WEBHOOK/context-manage" "$KEY_PRIVATE" '{"action":"guard-stats"}')
+resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"guard-stats"}')
 if echo "$resp" | grep -q '"success":true'; then
   pass "$T"
 else
@@ -248,7 +248,7 @@ fi
 
 # T09 GUARD_LIST_FILTER
 T="T09 GUARD_LIST_FILTER"
-resp=$(api "$WEBHOOK/context-manage" "$KEY_PRIVATE" '{"action":"guard-list","status":"clean"}')
+resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"guard-list","status":"clean"}')
 non_clean=$(echo "$resp" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -283,7 +283,7 @@ if $WITH_OLLAMA; then
 
   # T11 SEARCH_BASIC
   T="T11 SEARCH_BASIC"
-  resp=$(api "$WEBHOOK/context-search" "$KEY_PRIVATE" \
+  resp=$(api "$WEBHOOK/api/search" "$KEY_PRIVATE" \
     '{"query":"Write Guard"}' 120)
   count=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
   if [[ -n "$count" ]] && (( count >= 1 )); then
@@ -294,7 +294,7 @@ if $WITH_OLLAMA; then
 
   # T12 AGENT_CONFIDENT
   T="T12 AGENT_CONFIDENT"
-  resp=$(api "$WEBHOOK/context-agent" "$KEY_PRIVATE" \
+  resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
     '{"query":"How does the Write Guard work?"}' 120)
   confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
   answer=$(echo "$resp" | python3 -c "import sys,json; a=json.load(sys.stdin).get('answer',''); print('nonempty' if len(a)>10 else 'empty')" 2>/dev/null)
@@ -306,7 +306,7 @@ if $WITH_OLLAMA; then
 
   # T13 AGENT_NEGATIVE
   T="T13 AGENT_NEGATIVE"
-  resp=$(api "$WEBHOOK/context-agent" "$KEY_PRIVATE" \
+  resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
     '{"query":"Rezept fuer Kartoffelsuppe"}' 120)
   answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer',''))" 2>/dev/null)
   confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
@@ -320,7 +320,7 @@ if $WITH_OLLAMA; then
 
   # T14 AGENT_BILINGUAL
   T="T14 AGENT_BILINGUAL"
-  resp=$(api "$WEBHOOK/context-agent" "$KEY_PRIVATE" \
+  resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
     '{"query":"PostgreSQL Mount-Pfad"}' 120)
   answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer','').lower())" 2>/dev/null)
   if echo "$answer" | grep -qi "postgresql\|mount\|/var/lib"; then

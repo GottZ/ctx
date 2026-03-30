@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ManageHandler handles POST /webhook/context-manage.
+// ManageHandler handles POST /api/manage.
 type ManageHandler struct {
 	pool       *pgxpool.Pool
 	ollamaHost string

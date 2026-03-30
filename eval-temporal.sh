@@ -6,13 +6,13 @@
 # Hypothesis: Expanding the temporal search window proportional to the cycle
 # length (weekday ±7d, month ±30d) improves recall without hurting precision.
 #
-# Usage: bash eval-temporal.sh              — full eval (~8 min, 10 blocks, context-agent + RRF)
-#        bash eval-temporal.sh --search-only — fast mode (~1 min, 20 blocks, context-search FTS only)
+# Usage: bash eval-temporal.sh              — full eval (~8 min, 10 blocks, api/query + RRF)
+#        bash eval-temporal.sh --search-only — fast mode (~1 min, 20 blocks, api/search FTS only)
 #        bash eval-temporal.sh --dry-run     — show test cases without execution
 #
-# NOTE: --search-only uses context-search which is FTS-only (no embeddings).
+# NOTE: --search-only uses api/search which is FTS-only (no embeddings).
 # Temporal queries with shifted dates will score poorly there by design.
-# The full mode (context-agent) is the meaningful test because it uses the
+# The full mode (api/query) is the meaningful test because it uses the
 # complete RRF pipeline: semantic + DE-FTS + EN-FTS + trigram + temporal expansion.
 #
 # Metrics: Recall@5, MRR, Precision@5 (at each temporal offset category)
@@ -30,7 +30,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 set -a; source "$ENV_FILE"; set +a
 
-WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost/webhook}"
+WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost}"
 KEY="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}"
 
 SEARCH_ONLY=false
@@ -260,11 +260,11 @@ echo ""
 
 # Choose endpoint based on mode
 if $SEARCH_ONLY; then
-    ENDPOINT="context-search"
-    echo "Mode: search-only (context-search, no LLM, ~2-4s per test)"
+    ENDPOINT="api/search"
+    echo "Mode: search-only (api/search, no LLM, ~2-4s per test)"
 else
-    ENDPOINT="context-agent"
-    echo "Mode: full (context-agent, with LLM synthesis, ~5-10s per test)"
+    ENDPOINT="api/query"
+    echo "Mode: full (api/query, with LLM synthesis, ~5-10s per test)"
 fi
 echo ""
 

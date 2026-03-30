@@ -280,10 +280,7 @@ Use --dry-run to preview what would be uploaded without sending anything.`,
 				return err
 			}
 
-			// Build API base URL (strip /webhook suffix)
-			apiBase := c.BaseURL
-			apiBase = strings.TrimSuffix(apiBase, "/webhook")
-			apiBase = strings.TrimSuffix(apiBase, "/")
+			apiBase := strings.TrimSuffix(c.BaseURL, "/")
 
 			Errorf("\nctx ingest: uploading %d chunks to %s", len(allChunks), apiBase)
 

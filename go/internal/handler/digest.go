@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// DigestHandler handles POST /webhook/context-digest.
+// DigestHandler handles POST /api/digest.
 type DigestHandler struct {
 	pool *pgxpool.Pool
 }

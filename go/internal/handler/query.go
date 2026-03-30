@@ -17,7 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// QueryHandler handles POST /api/query and /webhook/context-agent.
+// QueryHandler handles POST /api/query.
 type QueryHandler struct {
 	pool           *pgxpool.Pool
 	ollamaHost     string

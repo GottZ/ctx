@@ -55,15 +55,12 @@ type statusCost struct {
 	TotalCostUSD float64 `json:"total_cost_usd"`
 }
 
-// ── cached backend data ─────────────────────────────────────────────
+// ── backend data ────────────────────────────────────────────────────
 
 type statusCache struct {
-	Health     string  `json:"health"`      // ok, degraded, unhealthy, error
-	BlockCount float64 `json:"block_count"` // from stats
-	FetchedAt  int64   `json:"fetched_at"`
+	Health     string  // ok, degraded, unhealthy, error
+	BlockCount float64 // from stats
 }
-
-const cacheTTL = 30 * time.Second
 
 // ── ANSI helpers ────────────────────────────────────────────────────
 
@@ -203,51 +200,15 @@ func healthIndicator(status string) string {
 	}
 }
 
-// ── cache file ──────────────────────────────────────────────────────
-
-func cachePath() string {
-	return filepath.Join(os.TempDir(), "ctx-statusline-cache.json")
-}
-
-func loadCache() *statusCache {
-	data, err := os.ReadFile(cachePath())
-	if err != nil {
-		return nil
-	}
-	var c statusCache
-	if json.Unmarshal(data, &c) != nil {
-		return nil
-	}
-	if time.Since(time.Unix(c.FetchedAt, 0)) > cacheTTL {
-		return nil
-	}
-	return &c
-}
-
-func saveCache(c *statusCache) {
-	c.FetchedAt = time.Now().Unix()
-	data, err := json.Marshal(c)
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(cachePath(), data, 0644)
-}
-
 // ── fetch backend data ──────────────────────────────────────────────
 
 func fetchBackendData(cfg Config) *statusCache {
-	// Try cache first
-	if c := loadCache(); c != nil {
-		return c
-	}
-
 	result := &statusCache{Health: "error", BlockCount: 0}
 
 	// Fast HTTP client for statusline (500ms timeout)
 	fast := &http.Client{Timeout: 500 * time.Millisecond}
 
 	baseURL := cfg.BaseURL
-	baseURL = strings.TrimSuffix(baseURL, "/webhook")
 	baseURL = strings.TrimSuffix(baseURL, "/")
 
 	// Health check
@@ -265,7 +226,7 @@ func fetchBackendData(cfg Config) *statusCache {
 
 	// Block count via stats
 	statsBody, _ := json.Marshal(map[string]any{"action": "stats"})
-	req, err := http.NewRequest("POST", cfg.BaseURL+"/context-manage", strings.NewReader(string(statsBody)))
+	req, err := http.NewRequest("POST", strings.TrimSuffix(cfg.BaseURL, "/")+"/api/manage", strings.NewReader(string(statsBody)))
 	if err == nil {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Context-Key", cfg.Key)
@@ -284,7 +245,6 @@ func fetchBackendData(cfg Config) *statusCache {
 		}
 	}
 
-	saveCache(result)
 	return result
 }
 
@@ -309,10 +269,10 @@ SETUP (add to ~/.claude/settings.json):
 
 REQUIRED CONFIG (~/.config/ctx/config or %APPDATA%\ctx\config on Windows):
 
-  CTX_BASE_URL=https://your-ctx-host.example/webhook
+  CTX_BASE_URL=https://your-ctx-host.example
   CTX_KEY=your-api-key-here
 
-  CTX_BASE_URL must point to the ctx webhook endpoint (reverse proxy or direct).
+  CTX_BASE_URL must point to the ctx API root (reverse proxy or direct).
   CTX_KEY is the API key from the context_api_keys table in your context_store DB.
 
 OPTIONAL (add to ~/.claude/settings.json to disable autocompact):
@@ -341,8 +301,7 @@ DISPLAY COMPONENTS:
 PROTOCOL:
 
   Reads Claude Code JSON from stdin (context_window, rate_limits, model, etc).
-  Pings ctx /health endpoint and /webhook/context-manage stats (500ms timeout).
-  Results cached 30s in /tmp/ctx-statusline-cache.json.
+  Pings ctx /health endpoint and /api/manage stats (500ms timeout).
   Outputs ANSI-colored text to stdout. Silent on errors.`,
 		Example: `  # Test with mock data:
   echo '{"model":{"display_name":"Opus"},"context_window":{"remaining_percentage":70}}' | ctx statusline

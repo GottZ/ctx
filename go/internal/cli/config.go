@@ -10,7 +10,7 @@ import (
 
 // Config holds the CLI configuration.
 type Config struct {
-	BaseURL string // CTX_BASE_URL (includes /webhook suffix)
+	BaseURL string // CTX_BASE_URL
 	Key     string // CTX_KEY
 }
 

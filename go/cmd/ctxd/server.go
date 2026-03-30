@@ -37,33 +37,28 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	blobH := handler.NewBlobHandler(pool)
 	digestH := handler.NewDigestHandler(pool)
 
+	// ── API routes (canonical) ──────────────────────────────────────
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
 		r.Use(handler.MaxBodySize(DefaultMaxBodySize))
 
-		// Context Agent — Query pipeline (RRF + LLM synthesis)
+		// Query — RRF + LLM synthesis
 		r.Post("/api/query", handler.WithScheduler(scheduler, queryHandler.HandleQuery))
-		r.Post("/webhook/context-agent", handler.WithScheduler(scheduler, queryHandler.HandleQuery))
-
-		// Context Store — Upsert + Auto-Embedding
-		r.Post("/webhook/context-store", storeH.HandleStore)
-
-		// Context Search — Lightweight FTS (no LLM)
-		r.Post("/webhook/context-search", searchH.HandleSearch)
-
-		// Context Manage — CRUD + Guard API
-		r.Post("/webhook/context-manage", manageH.HandleManage)
-
-		// Blob Storage — fetch, search, manage (default body limit)
-		r.Post("/webhook/blob-fetch", blobH.HandleBlobFetch)
-		r.Post("/webhook/blob-search", blobH.HandleBlobSearch)
-		r.Post("/webhook/blob-manage", blobH.HandleBlobManage)
-
+		// Store — Upsert + Auto-Embedding
+		r.Post("/api/store", storeH.HandleStore)
+		// Search — Lightweight FTS (no LLM)
+		r.Post("/api/search", searchH.HandleSearch)
+		// Manage — CRUD + Guard API
+		r.Post("/api/manage", manageH.HandleManage)
 		// Digest — Topic map generation
-		r.Post("/webhook/context-digest", digestH.HandleDigest)
+		r.Post("/api/digest", digestH.HandleDigest)
+		// Blob — fetch, search, manage
+		r.Post("/api/blob/fetch", blobH.HandleBlobFetch)
+		r.Post("/api/blob/search", blobH.HandleBlobSearch)
+		r.Post("/api/blob/manage", blobH.HandleBlobManage)
 	})
 
-	// Ingest API — larger body limit (10 MB for bulk chunk import, no rate-limit)
+	// Ingest — larger body limit (10 MB for bulk chunk import)
 	ingestH := handler.NewIngestHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
@@ -75,7 +70,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
 		r.Use(handler.MaxBodySize(BlobMaxBodySize))
-		r.Post("/webhook/blob-store", blobH.HandleBlobStore)
+		r.Post("/api/blob/store", blobH.HandleBlobStore)
 	})
 
 	return r

@@ -75,8 +75,7 @@ Kanonische Referenz: Block `019d25d8-b8aa-7f02-8ad0-e0bba7b7cfcf` (infrastructur
 
 | Container | Image | Purpose |
 |-----------|-------|---------|
-| `ctx` | `n8n-ctx` (local build from `go/`) | Go-Server: API, Guard, Digest (port 8080 intern, via Reverse-Proxy) |
-| `n8n` | `docker.n8n.io/n8nio/n8n` | Workflow engine (legacy, wird abgeschaltet) |
+| `ctx` | `n8n-ctx` (local build from `go/`, binary: ctxd) | Go-Server: API, Guard, Digest (port 8080 intern, via Reverse-Proxy) |
 | `n8n-db-1` | `pgvector-timescaledb:pg18` (custom build) | PostgreSQL 18.3 + pgvector 0.8.2 + TimescaleDB 2.26.0 |
 
 ## Database Access
@@ -87,15 +86,6 @@ Kanonische Referenz: Block `019d25d8-b8aa-7f02-8ad0-e0bba7b7cfcf` (infrastructur
 docker exec n8n-db-1 psql -U n8n -d n8n                    # n8n DB
 docker exec n8n-db-1 psql -U admin -d n8n                   # superuser
 docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB"
-```
-
-## n8n REST API (temporärer Key)
-
-```bash
-API_KEY="n8n_api_$(openssl rand -hex 20)"
-docker exec n8n-db-1 psql -U n8n -d n8n -c "INSERT INTO user_api_keys (id,\"userId\",label,\"apiKey\",\"createdAt\",\"updatedAt\") VALUES (gen_random_uuid(),'5cf229d8-79e8-4887-907d-54af31a25bbc','temp-claude','$API_KEY',now(),now());"
-# Nutzen, dann aufräumen:
-docker exec n8n-db-1 psql -U n8n -d n8n -c "DELETE FROM user_api_keys WHERE label='temp-claude';"
 ```
 
 ## Context Store & Blob API
@@ -113,19 +103,21 @@ Scope-Werte: `private`, `work`, `shared`
 - Schreiben: Default = `home_scope`, optional `scope: "shared"` im Body
 - Key-Verwaltung: Tabelle `context_api_keys` in DB `context_store`
 
-Base-URL: `$WEBHOOK_BASE_URL` (see .env, Reverse-Proxy → ctx Container)
+Base-URL: `https://ctx.janetzky.cloud` (Reverse-Proxy → ctx Container)
 
 | Endpoint | Zweck |
 |----------|-------|
-| `POST /webhook/context-agent` | **Primary**: Weighted RRF + LLM synthesis (Prompt v5.2) |
-| `POST /webhook/context-store` | Upsert (category+title+scope) + auto-embedding |
-| `POST /webhook/context-search` | Compact search (content_preview 200 chars, limit 10) |
-| `POST /webhook/context-manage` | stats, get, list-categories, list-meta, update, delete |
-| `POST /webhook/context-manage` (action: guard-*) | Guard: flagged blocks, stats, resolve |
-| `POST /webhook/blob-store` | Binary speichern (base64, upsert) |
-| `POST /webhook/blob-fetch` | Blob abrufen (id oder category+title, meta_only) |
-| `POST /webhook/blob-search` | Blobs suchen (category, tags, mime_type) |
-| `POST /webhook/blob-manage` | stats, get, list, delete |
+| `POST /api/query` | **Primary**: Weighted RRF + LLM synthesis (Prompt v5.2) |
+| `POST /api/store` | Upsert (category+title+scope) + auto-embedding |
+| `POST /api/search` | Compact search (content_preview 200 chars, limit 10) |
+| `POST /api/manage` | stats, get, list-categories, list-meta, update, delete |
+| `POST /api/manage` (action: guard-*) | Guard: flagged blocks, stats, resolve |
+| `POST /api/blob/store` | Binary speichern (base64, upsert) |
+| `POST /api/blob/fetch` | Blob abrufen (id oder category+title, meta_only) |
+| `POST /api/blob/search` | Blobs suchen (category, tags, mime_type) |
+| `POST /api/blob/manage` | stats, get, list, delete |
+| `POST /api/digest` | Topic map generation |
+| `POST /api/ingest` | Obsidian vault ingestion |
 | `GET /health` | Healthcheck (DB + Ollama connectivity) |
 
 ## Write Guard
