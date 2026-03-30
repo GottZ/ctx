@@ -56,6 +56,11 @@ func configFilePath() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "ctx", "config")
 	}
+	// Windows: %APPDATA%\ctx\config
+	if appdata := os.Getenv("APPDATA"); appdata != "" {
+		return filepath.Join(appdata, "ctx", "config")
+	}
+	// Unix: ~/.config/ctx/config
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(os.Getenv("HOME"), ".config", "ctx", "config")
