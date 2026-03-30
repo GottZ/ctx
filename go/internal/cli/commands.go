@@ -406,7 +406,7 @@ func guardListRun(getClient func() (*Client, error)) error {
 		if errMsg == "" {
 			errMsg = "unknown"
 		}
-		return fmt.Errorf("Error: %s", errMsg)
+		return fmt.Errorf("error: %s", errMsg)
 	}
 
 	blocks, _ := data["blocks"].([]any)
@@ -469,7 +469,7 @@ func guardStatsCmd(getClient func() (*Client, error)) *cobra.Command {
 				if errMsg == "" {
 					errMsg = "unknown"
 				}
-				return fmt.Errorf("Error: %s", errMsg)
+				return fmt.Errorf("error: %s", errMsg)
 			}
 
 			fmtVal := func(key string) any {
@@ -549,7 +549,7 @@ func guardResolveCmd(getClient func() (*Client, error)) *cobra.Command {
 				if errMsg == "" {
 					errMsg = "unknown"
 				}
-				return fmt.Errorf("Error: %s", errMsg)
+				return fmt.Errorf("error: %s", errMsg)
 			}
 			return nil
 		},

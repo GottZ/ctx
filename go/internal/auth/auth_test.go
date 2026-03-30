@@ -134,7 +134,7 @@ func TestSanitizeKey_OutputIsHexOnly(t *testing.T) {
 	for _, input := range adversarial {
 		got := SanitizeKey(input)
 		for i, c := range got {
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 				t.Errorf("SanitizeKey(%q) contains non-hex char %q at index %d", input, string(c), i)
 			}
 		}

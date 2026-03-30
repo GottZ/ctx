@@ -97,7 +97,7 @@ func Chat(ctx context.Context, host, model, systemPrompt, userPrompt string, opt
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -146,7 +146,7 @@ func ChatJSON(ctx context.Context, host, model, systemPrompt, userPrompt string,
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

@@ -57,9 +57,6 @@ type BlobStats struct {
 	DBSize          string `json:"db_size"`
 }
 
-// maxBlobSize is the maximum allowed blob data size (50 MB).
-const maxBlobSize = 50 * 1024 * 1024
-
 // UpsertBlob inserts or updates a blob by (category, title, scope).
 // SHA-256 checksum is computed via pgcrypto.
 func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filename, mimeType, scope string, data []byte, tags []string, metadata map[string]any) (*BlobMeta, error) {

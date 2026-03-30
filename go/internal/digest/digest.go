@@ -44,10 +44,10 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readSc
 
 	// Build the compact index text.
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(
+	fmt.Fprintf(&sb,
 		"Context Store Index | scope:%s | %d blocks | %d categories | %s\n",
 		homeScope, len(blocks), len(catNames), time.Now().UTC().Format("2006-01-02"),
-	))
+	)
 
 	for _, cat := range catNames {
 		catBlocks := categories[cat]
@@ -56,7 +56,7 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readSc
 			return catBlocks[i].Title < catBlocks[j].Title
 		})
 
-		sb.WriteString(fmt.Sprintf("\n%s (%d)\n", cat, len(catBlocks)))
+		fmt.Fprintf(&sb, "\n%s (%d)\n", cat, len(catBlocks))
 		for _, b := range catBlocks {
 			// ID prefix: first 8 chars.
 			idPrefix := b.ID
@@ -76,7 +76,7 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readSc
 				scopeAnnotation = " [" + b.Scope + "]"
 			}
 
-			sb.WriteString(fmt.Sprintf("  %s %s%s\n", idPrefix, title, scopeAnnotation))
+			fmt.Fprintf(&sb, "  %s %s%s\n", idPrefix, title, scopeAnnotation)
 		}
 	}
 

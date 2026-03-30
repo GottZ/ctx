@@ -238,7 +238,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 	// Scope write restriction on update.
 	if data.Scope != nil {
 		scope := *data.Scope
-		if scope != ar.HomeScope && !(scope == "shared" && contains(ar.AllowedScopes, "shared")) {
+		if scope != ar.HomeScope && (scope != "shared" || !contains(ar.AllowedScopes, "shared")) {
 			writeJSON(w, http.StatusForbidden, map[string]any{
 				"success": false, "error": "Cannot set scope to requested value",
 			})

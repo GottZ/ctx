@@ -5,11 +5,6 @@ import (
 	"testing"
 )
 
-// helper: repeat a string n times.
-func repeatN(s string, n int) string {
-	return strings.Repeat(s, n)
-}
-
 // helper: build a string of approximately n characters by repeating s.
 func fillTo(s string, n int) string {
 	if len(s) == 0 || n <= 0 {

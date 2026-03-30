@@ -13,6 +13,10 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 )
 
+// wrongKeyType is a distinct type from contextKey, used to verify that
+// context lookups are type-safe (SA1029: avoid bare string as context key).
+type wrongKeyType string
+
 // =============================================================================
 // RequestIDFromContext tests
 // =============================================================================
@@ -41,8 +45,8 @@ func TestRequestIDFromContext_ValidValue(t *testing.T) {
 // SECURITY PROPERTY: Using a plain string key (not the typed contextKey) does
 // NOT retrieve a value, preventing context key collisions across packages.
 func TestRequestIDFromContext_WrongKeyType(t *testing.T) {
-	// Use a plain string key instead of the typed contextKey — must not match.
-	ctx := context.WithValue(context.Background(), "request_id", "injected")
+	// Use a different named type instead of the typed contextKey — must not match.
+	ctx := context.WithValue(context.Background(), wrongKeyType("request_id"), "injected")
 	got := RequestIDFromContext(ctx)
 	if got != "" {
 		t.Errorf("RequestIDFromContext with wrong key type = %q, want empty (type safety)", got)
@@ -102,7 +106,7 @@ func TestAuthResultFromContext_ValidValue(t *testing.T) {
 // the typed contextKey, preventing cross-package key injection.
 func TestAuthResultFromContext_WrongKeyType(t *testing.T) {
 	ar := &auth.AuthResult{IsValid: true, HomeScope: "private"}
-	ctx := context.WithValue(context.Background(), "auth_result", ar)
+	ctx := context.WithValue(context.Background(), wrongKeyType("auth_result"), ar)
 	got := AuthResultFromContext(ctx)
 	if got != nil {
 		t.Errorf("AuthResultFromContext with wrong key type = %+v, want nil", got)
@@ -683,7 +687,7 @@ func TestRecoveryMiddleware_CatchesPanic(t *testing.T) {
 func TestRecoveryMiddleware_NoPanic(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 
 	handler := Recovery(inner)

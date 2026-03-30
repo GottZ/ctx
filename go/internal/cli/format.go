@@ -14,16 +14,16 @@ func PrintJSON(data []byte) {
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, data, "", "  "); err != nil {
 		// Not valid JSON, write raw
-		os.Stdout.Write(data)
+		_, _ = os.Stdout.Write(data)
 		return
 	}
 	buf.WriteByte('\n')
-	os.Stdout.Write(buf.Bytes())
+	_, _ = os.Stdout.Write(buf.Bytes())
 }
 
 // PrintRaw writes raw bytes to stdout.
 func PrintRaw(data []byte) {
-	os.Stdout.Write(data)
+	_, _ = os.Stdout.Write(data)
 	// Ensure trailing newline
 	if len(data) > 0 && data[len(data)-1] != '\n' {
 		fmt.Println()

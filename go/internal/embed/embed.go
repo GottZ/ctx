@@ -96,7 +96,7 @@ func Embed(ctx context.Context, host, model, text string, prefix Prefix) ([]floa
 	if err != nil {
 		return nil, fmt.Errorf("embed: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

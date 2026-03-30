@@ -134,12 +134,10 @@ func TestValidateTranslation_CarriageReturn(t *testing.T) {
 func TestValidateTranslation_UnicodeSpace(t *testing.T) {
 	// Unicode non-breaking space U+00A0 is NOT in ASCII safePattern [a-zA-Z0-9\s\-.,()!?].
 	// Actually \s in Go regex matches Unicode whitespace. Let's verify.
-	if validateTranslation("hello\u00a0world", "original text that is long enough for this") {
-		// If this passes, \s in Go regex matches non-breaking space.
-		// This is acceptable behavior.
-	}
-	// Document the behavior either way — not asserting because Go regex \s
-	// behavior with Unicode whitespace may vary.
+	// validateTranslation with non-breaking space — documenting behavior.
+	// Go regex \s matches Unicode whitespace including U+00A0.
+	// Not asserting because behavior may vary; this test just ensures no panic.
+	_ = validateTranslation("hello\u00a0world", "original text that is long enough for this")
 }
 
 func TestValidateTranslation_MaxLengthBoundary(t *testing.T) {

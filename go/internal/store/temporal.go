@@ -120,7 +120,7 @@ func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID string, d
 	batch, queryCount := BuildTemporalBatch(blockID, dates)
 
 	br := pool.SendBatch(ctx, batch)
-	defer br.Close()
+	defer func() { _ = br.Close() }()
 
 	for i := 0; i < queryCount; i++ {
 		if _, err := br.Exec(); err != nil {

@@ -106,23 +106,6 @@ func findWeekday(tokens []string) (time.Weekday, int, bool) {
 	return 0, -1, false
 }
 
-// findAllWeekdays returns all weekdays found in tokens.
-func findAllWeekdays(tokens []string) []time.Weekday {
-	var wds []time.Weekday
-	seen := make(map[time.Weekday]bool)
-	for _, tok := range tokens {
-		if wd, ok := weekdayMapDE[tok]; ok && !seen[wd] {
-			wds = append(wds, wd)
-			seen[wd] = true
-		}
-		if wd, ok := weekdayMapEN[tok]; ok && !seen[wd] {
-			wds = append(wds, wd)
-			seen[wd] = true
-		}
-	}
-	return wds
-}
-
 // --- Verb Tense Detection ---
 
 var pastVerbSet = toWordSet(
@@ -689,9 +672,7 @@ func matchWeekday(query string, tokens []string, now time.Time) *TemporalResult 
 
 	// Disambiguate "Morgen" as time-of-day vs "morgen" as tomorrow.
 	// If a weekday precedes "morgen", it's morning, not tomorrow.
-	if wdIdx+1 < len(tokens) && tokens[wdIdx+1] == "morgen" {
-		// "Mittwoch Morgen" — morgen is morning, skip it as temporal keyword
-	}
+	// "Mittwoch Morgen" — morgen is morning; no action needed here.
 
 	tense := DetectVerbTense(query)
 	backward := tense == "past"

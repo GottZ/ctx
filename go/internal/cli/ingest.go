@@ -317,10 +317,8 @@ Use --dry-run to preview what would be uploaded without sending anything.`,
 							Scope:  scope,
 							Chunks: batchChunks,
 						}
-						if extract {
-							// Signal server to enable LLM extraction
-							// (handled via source field or separate flag in future)
-						}
+						// TODO: if extract, signal server to enable LLM extraction
+						// (handled via source field or separate flag in future)
 
 						resp, err := postIngest(c, apiBase+"/api/ingest", req)
 						batchSize := int64(len(batchChunks))

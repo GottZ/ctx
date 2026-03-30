@@ -10,7 +10,7 @@ import (
 func TestGetEnv_FallbackOnMissing(t *testing.T) {
 	// Use a key that definitely does not exist.
 	key := "CTX_TEST_GETENV_MISSING_KEY_48291"
-	os.Unsetenv(key)
+	_ = os.Unsetenv(key)
 	if got := getEnv(key, "default"); got != "default" {
 		t.Errorf("getEnv(%q, %q) = %q, want %q", key, "default", got, "default")
 	}
@@ -44,7 +44,7 @@ func TestGetEnv_WhitespaceIsNotEmpty(t *testing.T) {
 
 func TestGetEnv_EmptyFallback(t *testing.T) {
 	key := "CTX_TEST_GETENV_EMPTY_FALLBACK_48291"
-	os.Unsetenv(key)
+	_ = os.Unsetenv(key)
 	if got := getEnv(key, ""); got != "" {
 		t.Errorf("getEnv(%q, %q) = %q, want empty", key, "", got)
 	}
@@ -54,7 +54,7 @@ func TestGetEnv_EmptyFallback(t *testing.T) {
 
 func TestGetEnvInt_FallbackOnMissing(t *testing.T) {
 	key := "CTX_TEST_GETENVINT_MISSING_48291"
-	os.Unsetenv(key)
+	_ = os.Unsetenv(key)
 	got, err := getEnvInt(key, 42)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

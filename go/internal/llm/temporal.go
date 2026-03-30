@@ -129,7 +129,7 @@ func buildCalendar(now time.Time) string {
 	}
 	thisMonday := now.AddDate(0, 0, -(wd - 1))
 	f := func(t time.Time) string { return t.Format("2006-01-02") }
-	b.WriteString(fmt.Sprintf("\nWEEK RANGES:\n"))
+	b.WriteString("\nWEEK RANGES:\n")
 	b.WriteString(fmt.Sprintf("  Last week:       %s to %s\n", f(thisMonday.AddDate(0, 0, -7)), f(thisMonday.AddDate(0, 0, -1))))
 	b.WriteString(fmt.Sprintf("  This week:       %s to %s\n", f(thisMonday), f(thisMonday.AddDate(0, 0, 6))))
 	b.WriteString(fmt.Sprintf("  Next week:       %s to %s\n", f(thisMonday.AddDate(0, 0, 7)), f(thisMonday.AddDate(0, 0, 13))))
@@ -137,7 +137,7 @@ func buildCalendar(now time.Time) string {
 
 	// Weekends
 	lastSat := thisMonday.AddDate(0, 0, -2)
-	b.WriteString(fmt.Sprintf("\nWEEKENDS:\n"))
+	b.WriteString("\nWEEKENDS:\n")
 	b.WriteString(fmt.Sprintf("  Last weekend:    %s + %s\n", f(lastSat), f(lastSat.AddDate(0, 0, 1))))
 	b.WriteString(fmt.Sprintf("  This weekend:    %s + %s\n", f(thisMonday.AddDate(0, 0, 5)), f(thisMonday.AddDate(0, 0, 6))))
 	b.WriteString(fmt.Sprintf("  Next weekend:    %s + %s\n", f(thisMonday.AddDate(0, 0, 12)), f(thisMonday.AddDate(0, 0, 13))))
