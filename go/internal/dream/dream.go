@@ -38,9 +38,15 @@ type BlockInfo struct {
 	Embedding    []float32
 }
 
+// CycleTimeout is the maximum duration for a single dream cycle.
+// Prevents cascading Ollama timeouts from blocking the scheduler.
+const CycleTimeout = 90 * time.Second
+
 // RunDreamCycle executes one dream cycle: pick → keywords → search → evaluate → link.
 // Returns the number of links created, or 0 if no block was available.
 func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, ollamaHost, embedModel, chatModel string, readScopes []string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, CycleTimeout)
+	defer cancel()
 	// Step 1: Pick a block.
 	block, err := PickBlock(ctx, pool)
 	if err != nil {
@@ -158,12 +164,18 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, ollamaHost, embed
 	seen := make(map[string]bool)
 	seen[sourceID] = true // Exclude source block.
 	var candidates []BlockInfo
+	embedFailures := 0
 
 	for _, kw := range keywords {
 		// Embed the keyword for semantic search.
 		kwEmbedding, err := embed.Embed(ctx, ollamaHost, embedModel, kw, embed.PrefixQuery)
 		if err != nil {
+			embedFailures++
 			slog.Debug("dream: embed keyword failed", "keyword", kw, "error", err)
+			// Fail fast if majority of embeddings fail (Ollama likely down).
+			if embedFailures > len(keywords)/2 {
+				return nil, fmt.Errorf("dream: too many embedding failures (%d/%d)", embedFailures, len(keywords))
+			}
 			continue
 		}
 

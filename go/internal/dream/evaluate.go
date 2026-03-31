@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +14,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// uuidPattern validates UUID format for target_id fields.
+var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 const (
 	// DreamTimeout is the HTTP timeout for dream LLM calls.
@@ -89,13 +94,16 @@ func EvaluateRelationships(ctx context.Context, host, model string, source Block
 
 	var valid []Link
 	for _, l := range links {
+		if !uuidPattern.MatchString(l.TargetID) {
+			continue
+		}
 		if !candidateIDs[l.TargetID] {
 			continue
 		}
 		if !validRelationships[l.Relationship] {
 			continue
 		}
-		if l.Confidence < 0.5 || l.Confidence > 1.0 {
+		if l.Confidence < 0.5 || l.Confidence > 1.0 || math.IsNaN(l.Confidence) || math.IsInf(l.Confidence, 0) {
 			continue
 		}
 		valid = append(valid, l)
@@ -145,6 +153,9 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 
 		// Weighted confidence: relationship_strength × source_quality × target_quality.
 		weightedConfidence := link.Confidence * sourceQuality * targetQuality
+		if math.IsNaN(weightedConfidence) || math.IsInf(weightedConfidence, 0) {
+			weightedConfidence = 0.5
+		}
 
 		_, err = tx.Exec(ctx,
 			`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, scope, metadata)
