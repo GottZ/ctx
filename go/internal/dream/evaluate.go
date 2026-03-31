@@ -129,16 +129,28 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	// Fetch source block metadata for supersedes structural checks.
+	var srcCategory string
+	var srcUpdatedAt time.Time
+	var srcTitle string
+	_ = tx.QueryRow(ctx,
+		`SELECT category, updated_at, title FROM context_blocks WHERE id = $1`,
+		sourceID,
+	).Scan(&srcCategory, &srcUpdatedAt, &srcTitle)
+
 	written := 0
 	for _, link := range links {
-		// Fetch target block scope + archived status.
+		// Fetch target block scope + archived status + metadata for structural checks.
 		var targetScope string
 		var targetArchived bool
 		var targetQuality float64
+		var targetCategory string
+		var targetUpdatedAt time.Time
+		var targetTitle string
 		err := tx.QueryRow(ctx,
-			`SELECT scope, is_archived, quality_score FROM context_blocks WHERE id = $1`,
+			`SELECT scope, is_archived, quality_score, category, updated_at, title FROM context_blocks WHERE id = $1`,
 			link.TargetID,
-		).Scan(&targetScope, &targetArchived, &targetQuality)
+		).Scan(&targetScope, &targetArchived, &targetQuality, &targetCategory, &targetUpdatedAt, &targetTitle)
 		if err != nil {
 			slog.Warn("dream: target block not found", "target_id", link.TargetID)
 			continue
@@ -152,6 +164,32 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 		// V5: Same-scope rule — no cross-scope links.
 		if targetScope != sourceScope {
 			continue
+		}
+
+		// V8: Structural check for supersedes — 9B can't distinguish "complementary" from "replaces".
+		// Deterministic pre-filter: same category + source older than target.
+		if link.Relationship == "supersedes" {
+			if srcCategory != targetCategory {
+				slog.Debug("dream: supersedes rejected (different category)",
+					"source_cat", srcCategory, "target_cat", targetCategory)
+				continue
+			}
+			if !srcUpdatedAt.Before(targetUpdatedAt) {
+				slog.Debug("dream: supersedes rejected (source not older)",
+					"source_updated", srcUpdatedAt.Format("2006-01-02"),
+					"target_updated", targetUpdatedAt.Format("2006-01-02"))
+				continue
+			}
+			// Title similarity check via pg_trgm.
+			var sim float64
+			_ = tx.QueryRow(ctx,
+				`SELECT similarity($1, $2)`, srcTitle, targetTitle,
+			).Scan(&sim)
+			if sim < 0.25 {
+				slog.Debug("dream: supersedes rejected (low title similarity)",
+					"similarity", sim, "source_title", srcTitle, "target_title", targetTitle)
+				continue
+			}
 		}
 
 		// Weighted confidence: relationship_strength × source_quality × target_quality.
