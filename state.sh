@@ -43,7 +43,9 @@ go_test_funcs=$(grep -r 'func Test' "$SCRIPT_DIR/go/" --include='*.go' 2>/dev/nu
 go_binaries=$(ls "$SCRIPT_DIR"/go/cmd/ 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
 
 # --- CLI ---
-cli_commands=$(grep -c '&cobra.Command{' "$SCRIPT_DIR/go/internal/cli/commands.go" 2>/dev/null || echo "?")
+cli_register=$(grep -c 'root\.AddCommand' "$SCRIPT_DIR/go/internal/cli/commands.go" 2>/dev/null || echo 0)
+cli_main=$(grep -c 'AddCommand' "$SCRIPT_DIR/go/cmd/ctx/main.go" 2>/dev/null || echo 0)
+cli_commands=$((cli_register + cli_main))
 
 # --- Containers ---
 ctx_status=$(docker inspect --format='{{.State.Health.Status}}' ctx 2>/dev/null || echo "not running")

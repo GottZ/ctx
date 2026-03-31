@@ -39,6 +39,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(IngestCmd(getClient))
 	root.AddCommand(statuslineCmd(getClient))
 	root.AddCommand(dreamCmd(getClient))
+	root.AddCommand(briefCmd(getClient))
 }
 
 // ── query ────────────────────────────────────────────────────────────.
@@ -84,17 +85,21 @@ func queryCmd(getClient func() (*Client, error)) *cobra.Command {
 // ── save ─────────────────────────────────────────────────────────────.
 
 func saveCmd(getClient func() (*Client, error)) *cobra.Command {
-	var shared bool
+	var (
+		shared bool
+		tags   []string
+	)
 
 	cmd := &cobra.Command{
-		Use:     "save [--shared] <category> <title> [content...]",
+		Use:     "save [--shared] [--tag TAG]... <category> <title> [content...]",
 		Aliases: []string{"s"},
 		Short:   "Upsert block (--shared = cross-tenant)",
 		Long:    "Save a knowledge block to the context store. Upserts by category+title.\nContent can be inline args, piped via stdin, or separated with '-'.",
 		Example: `  ctx save infrastructure "My Title" Content goes here
   ctx save decisions "My Decision" - Also works with dash
   cat file.md | ctx save docs "My Doc"
-  ctx save --shared reference "Shared Block" Visible to all tenants`,
+  ctx save --shared reference "Shared Block" Visible to all tenants
+  ctx save --tag /compose/n8n agent-briefing "Briefing" Project context`,
 		DisableFlagParsing: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient()
@@ -140,11 +145,14 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 				return fmt.Errorf("usage: ctx save [--shared] <category> <title> [content...]")
 			}
 
+			if tags == nil {
+				tags = []string{}
+			}
 			body := map[string]any{
 				"category": category,
 				"title":    title,
 				"content":  content,
-				"tags":     []string{},
+				"tags":     tags,
 				"metadata": map[string]string{"source": "claude-session"},
 			}
 			if shared {
@@ -160,6 +168,7 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&shared, "shared", false, "Set scope to shared (cross-tenant)")
+	cmd.Flags().StringArrayVar(&tags, "tag", nil, "Add tag (repeatable)")
 	return cmd
 }
 
