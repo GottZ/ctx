@@ -71,30 +71,33 @@ except:
 # Test Case Definitions
 # =====================================================================
 #
-# Format: ID|TYPE|QUERY|EXPECTED_CONFIDENCE|KEYWORDS(comma-sep)|DESCRIPTION
+# Format: ID|TYPE|QUERY|EXPECTED_CONFIDENCE|KEYWORDS(comma-sep)|DESCRIPTION|SOURCE_TITLES(optional)
 #
 # TYPE: retrieval = api/search (no LLM), synthesis = api/query (LLM)
 # EXPECTED_CONFIDENCE: confident|low|none|any (for retrieval tests)
 # KEYWORDS: comma-separated strings that MUST appear in the answer (case-insensitive)
+#           OR-alternatives: use ~ separator (e.g. "german~deutsch" matches either)
 #           For retrieval tests: keywords that must appear in result titles/previews
+# SOURCE_TITLES: comma-separated substrings that must appear in at least one source title
+#                (case-insensitive, INFORMATIONAL only — does not affect PASS/FAIL)
 
 define_test_cases() {
 cat <<'CASES'
 # --- CONFIDENT SYNTHESIS (known facts, should return confident) ---
-S01|synthesis|What embedding model does the context store use?|confident|qwen3,embedding|Core infrastructure fact
-S02|synthesis|How does the Write Guard detect duplicates?|confident|hash,similarity,async|Architecture knowledge
-S03|synthesis|What are the scope values in the multi-tenant system?|confident|private,work,shared|Scope enum values
-S04|synthesis|What is the PostgreSQL version and what extension is used for vectors?|confident|18,pgvector|DB stack
-S05|synthesis|What LLM model is used for synthesis in the context-agent?|confident|qwen3,9b|Model config
-S06|synthesis|How does the blob storage authenticate requests?|confident|key,hash,sha|Auth mechanism
-S07|synthesis|What is the RRF fusion strategy used in retrieval?|confident|rrf,fusion|Retrieval architecture
-S08|synthesis|What are the Write Guard similarity thresholds?|confident|0.98,0.92|Threshold values
-S09|synthesis|What happened with the qwen3.5:9b model evaluation?|confident|death,spiral,thinking,token|Known failure case
-S10|synthesis|What is the Matryoshka truncation dimension for embeddings?|confident|1024|Embedding dimension
+S01|synthesis|What embedding model does the context store use?|confident|qwen3,embedding|Core infrastructure fact|Embedding-Strategie,Aktive Modelle
+S02|synthesis|How does the Write Guard detect duplicates?|confident|hash,similarity,async|Architecture knowledge|Write Guard Architecture
+S03|synthesis|What are the scope values in the multi-tenant system?|confident|private,work,shared|Scope enum values|Scope-Architektur
+S04|synthesis|What is the PostgreSQL version and what extension is used for vectors?|confident|18,pgvector|DB stack|pgvector
+S05|synthesis|What LLM model is used for synthesis in the context-agent?|confident|qwen3,9b|Model config|Aktive Modelle
+S06|synthesis|How does the blob storage authenticate requests?|confident|key,hash,sha|Auth mechanism|
+S07|synthesis|What is the RRF fusion strategy used in retrieval?|confident|rrf,fusion|Retrieval architecture|RRF
+S08|synthesis|What are the Write Guard similarity thresholds?|confident|0.98,0.92|Threshold values|Write Guard Architecture
+S09|synthesis|What happened with the qwen3.5:9b model evaluation?|confident|death,spiral,thinking,token|Known failure case|
+S10|synthesis|What is the Matryoshka truncation dimension for embeddings?|confident|1024|Embedding dimension|Embedding Dimension,Embedding-Strategie
 
 # --- BILINGUAL (German queries about English-titled content) ---
-B01|synthesis|Welches Embedding-Modell wird verwendet?|confident|qwen3,embedding|DE query, EN content
-B02|synthesis|Wie funktioniert der Write Guard?|confident|hash,similarity|DE query about guard
+B01|synthesis|Welches Embedding-Modell wird verwendet?|confident|qwen3,embedding|DE query, EN content|Embedding-Strategie
+B02|synthesis|Wie funktioniert der Write Guard?|confident|hash,similarity~ähnlichkeit|DE query about guard|Write Guard
 B03|synthesis|Was ist der PostgreSQL Mount-Pfad?|confident|postgresql,var/lib|DE query, infra fact
 B04|synthesis|Welche Scope-Werte gibt es im Multi-Tenant-System?|confident|private,work,shared|DE enum values
 B05|synthesis|Was ist das Problem mit qwen3.5:9b?|confident|thinking,token|DE about model failure
@@ -118,7 +121,7 @@ M01|synthesis|Why was qwen3:4b-instruct chosen over qwen3.5:9b and what are the 
 M02|synthesis|What is the full auth flow from API key to scope filtering?|confident|key,hash,scope|Auth pipeline
 M03|synthesis|How do Write Guard thresholds differ for temporal content vs normal content?|confident|temporal,0.98,0.92|Specialized thresholds
 M04|synthesis|What are the differences between context-search and context-agent?|confident|search,agent,llm,compact|Endpoint comparison
-M05|synthesis|How does the bilingual retrieval gap affect German queries and what is the fix?|confident|german,translation,retrieval|Problem + solution
+M05|synthesis|How does the bilingual retrieval gap affect German queries and what is the fix?|confident|german~deutsch~deutschen,translation~uebersetzung~übersetzung,retrieval|Problem + solution
 
 # --- IMPERATIVE (command-style queries, should NOT be confused with keywords) ---
 I01|synthesis|Zeig mir die Write Guard Thresholds|confident|0.98,0.92|DE imperative, known thresholds
@@ -147,11 +150,15 @@ PASS=0
 FAIL=0
 SKIP=0
 TOTAL=0
+SOURCE_CHECKS=0
+SOURCE_HITS=0
+SOURCE_MISSES=0
 declare -a RESULTS_JSON=()
 START_TIME=$(date +%s)
 
 run_synthesis_test() {
   local id="$1" query="$2" expected_conf="$3" keywords="$4" desc="$5"
+  local expected_sources="${6:-}"
   local t_start t_end latency_ms resp answer confidence sources_count keyword_hits keyword_total keyword_pct verdict detail
 
   t_start=$(date +%s%3N)
@@ -162,6 +169,7 @@ run_synthesis_test() {
   latency_ms=$(( t_end - t_start ))
 
   # Parse response — handle timeouts and error responses
+  local source_titles_raw=""
   if [[ -z "$resp" ]]; then
     answer=""
     confidence="timeout"
@@ -170,6 +178,13 @@ run_synthesis_test() {
     answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer','').lower())" 2>/dev/null || echo "")
     confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence','error'))" 2>/dev/null || echo "error")
     sources_count=$(echo "$resp" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('sources',[])))" 2>/dev/null || echo "0")
+    # Extract source titles (newline-separated, lowercased)
+    source_titles_raw=$(echo "$resp" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for s in d.get('sources',[]):
+    print(s.get('title','').lower())
+" 2>/dev/null || echo "")
   fi
 
   # Check confidence
@@ -193,8 +208,16 @@ run_synthesis_test() {
   if [[ -n "$keywords" ]]; then
     IFS=',' read -ra KW_ARRAY <<< "$keywords"
     keyword_total=${#KW_ARRAY[@]}
-    for kw in "${KW_ARRAY[@]}"; do
-      if echo "$answer" | grep -qiF "$kw"; then
+    for kw_group in "${KW_ARRAY[@]}"; do
+      IFS='~' read -ra KW_ALTS <<< "$kw_group"
+      local found=false
+      for alt in "${KW_ALTS[@]}"; do
+        if echo "$answer" | grep -qiF "$alt"; then
+          found=true
+          break
+        fi
+      done
+      if $found; then
         keyword_hits=$(( keyword_hits + 1 ))
       fi
     done
@@ -206,7 +229,32 @@ run_synthesis_test() {
     keyword_pct=100  # no keywords to check = pass
   fi
 
-  # Verdict
+  # Check source titles (INFORMATIONAL — does not affect verdict)
+  local src_hits=0 src_total=0 src_verdict="" src_missing=""
+  if [[ -n "$expected_sources" ]]; then
+    IFS=',' read -ra SRC_ARRAY <<< "$expected_sources"
+    src_total=${#SRC_ARRAY[@]}
+    for src_pattern in "${SRC_ARRAY[@]}"; do
+      local src_lower
+      src_lower=$(echo "$src_pattern" | tr '[:upper:]' '[:lower:]')
+      if echo "$source_titles_raw" | grep -qiF "$src_lower"; then
+        src_hits=$(( src_hits + 1 ))
+      else
+        [[ -n "$src_missing" ]] && src_missing="$src_missing, "
+        src_missing="${src_missing}${src_pattern}"
+      fi
+    done
+    SOURCE_CHECKS=$(( SOURCE_CHECKS + 1 ))
+    if (( src_hits == src_total )); then
+      SOURCE_HITS=$(( SOURCE_HITS + 1 ))
+      src_verdict="OK"
+    else
+      SOURCE_MISSES=$(( SOURCE_MISSES + 1 ))
+      src_verdict="MISS"
+    fi
+  fi
+
+  # Verdict (source check is informational, does NOT affect pass/fail)
   if $conf_ok && (( keyword_pct >= 50 )); then
     verdict="PASS"
     PASS=$(( PASS + 1 ))
@@ -229,13 +277,21 @@ run_synthesis_test() {
   # Output
   local status_icon
   [[ "$verdict" == "PASS" ]] && status_icon="[OK]  " || status_icon="[FAIL]"
-  printf "%s %-4s %-50s conf=%-10s kw=%d/%d  %5dms" \
-    "$status_icon" "$id" "${desc:0:50}" "$confidence" "$keyword_hits" "$keyword_total" "$latency_ms"
+  printf "%s %-4s %-50s conf=%-10s kw=%d/%d" \
+    "$status_icon" "$id" "${desc:0:50}" "$confidence" "$keyword_hits" "$keyword_total"
+  if (( src_total > 0 )); then
+    printf "  src=%d/%d" "$src_hits" "$src_total"
+  fi
+  printf "  %5dms" "$latency_ms"
   [[ -n "$detail" ]] && printf "  !! %s" "$detail"
+  if [[ "$src_verdict" == "MISS" ]]; then
+    printf "  ?? src-miss: %s" "$src_missing"
+  fi
   echo ""
 
-  # Store result as JSON line
-  RESULTS_JSON+=("{\"id\":\"$id\",\"type\":\"synthesis\",\"verdict\":\"$verdict\",\"confidence\":\"$confidence\",\"expected_confidence\":\"$expected_conf\",\"keyword_hits\":$keyword_hits,\"keyword_total\":$keyword_total,\"keyword_pct\":$keyword_pct,\"latency_ms\":$latency_ms,\"sources\":$sources_count,\"desc\":\"$desc\"}")
+  # Store result as JSON line (include source check data)
+  local src_json="\"source_hits\":$src_hits,\"source_total\":$src_total"
+  RESULTS_JSON+=("{\"id\":\"$id\",\"type\":\"synthesis\",\"verdict\":\"$verdict\",\"confidence\":\"$confidence\",\"expected_confidence\":\"$expected_conf\",\"keyword_hits\":$keyword_hits,\"keyword_total\":$keyword_total,\"keyword_pct\":$keyword_pct,$src_json,\"latency_ms\":$latency_ms,\"sources\":$sources_count,\"desc\":\"$desc\"}")
 }
 
 run_retrieval_test() {
@@ -264,8 +320,16 @@ print(text)
   if [[ -n "$keywords" ]]; then
     IFS=',' read -ra KW_ARRAY <<< "$keywords"
     keyword_total=${#KW_ARRAY[@]}
-    for kw in "${KW_ARRAY[@]}"; do
-      if echo "$titles" | grep -qiF "$kw"; then
+    for kw_group in "${KW_ARRAY[@]}"; do
+      IFS='~' read -ra KW_ALTS <<< "$kw_group"
+      local found=false
+      for alt in "${KW_ALTS[@]}"; do
+        if echo "$titles" | grep -qiF "$alt"; then
+          found=true
+          break
+        fi
+      done
+      if $found; then
         keyword_hits=$(( keyword_hits + 1 ))
       fi
     done
