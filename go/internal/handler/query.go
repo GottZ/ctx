@@ -213,6 +213,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Step 5: Hyphen preprocessing for FTS.
 	querySpaced := strings.ReplaceAll(searchQuery, "-", " ")
+	// OR query for broader FTS recall — infrastructure ready (Migration 018, BuildORQuery),
+	// but disabled at 440 blocks: empirical dead weight is 20% (not 68%), OR matching
+	// changes RRF score distribution and causes LLM synthesis regressions.
+	// Activate when FTS dead weight exceeds 40% or scale reaches 10K+ blocks.
+	queryOR := ""
 
 	// Step 6: RRF Search via PG function.
 	// Internal limit: fetch 200 candidates so the Go-side gravity reranker
@@ -222,7 +227,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		internalLimit = limit // respect explicit large limits
 	}
 
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, nil)
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, nil, queryOR)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,
@@ -289,12 +294,8 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 6c: Truncate to user-facing limit after reranking.
-	if len(results) > limit {
-		results = results[:limit]
-	}
-
-	// Step 6d: Supersedes enrichment — look up which result blocks have been superseded.
+	// Step 6c: Supersedes enrichment — look up which result blocks have been superseded.
+	// Done before truncation so filterSuperseded can check the full result set.
 	resultIDs := make([]string, len(results))
 	for i, r := range results {
 		resultIDs[i] = r.ID
@@ -303,6 +304,18 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Warn("supersedes lookup failed, skipping", "error", err, "request_id", requestID)
 		supersedesMap = nil
+	}
+
+	// Step 6d: Filter superseded blocks from results.
+	// Gate: only for non-temporal queries (temporal queries need historical blocks).
+	// Safety: a superseded block is only removed if its superseder is also in results.
+	if supersedesMap != nil && (temporalResult == nil || len(temporalResult.Dates) == 0) {
+		results = filterSuperseded(results, supersedesMap)
+	}
+
+	// Step 6e: Truncate to user-facing limit after reranking and filtering.
+	if len(results) > limit {
+		results = results[:limit]
 	}
 
 	// Step 7: Convert RRF results to LLM source format.
@@ -358,8 +371,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			RRFScoreOriginal: s.RRFScoreOriginal,
 		}
 		if supersedesMap != nil {
-			if supersededBy, ok := supersedesMap[s.ID]; ok {
-				respSources[i].SupersededBy = &supersededBy
+			if supersededByList, ok := supersedesMap[s.ID]; ok && len(supersededByList) > 0 {
+				first := supersededByList[0]
+				respSources[i].SupersededBy = &first
 			}
 		}
 	}
@@ -429,4 +443,47 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 			)
 		}
 	}
+}
+
+// filterSuperseded removes blocks from results that are superseded by another block
+// also present in the results. This ensures the LLM sees current information.
+// Safety rule: a superseded block is only removed if its superseder is in the result set.
+// Preserves RRF score ordering.
+func filterSuperseded(results []rrf.SearchResult, supersedesMap map[string][]string) []rrf.SearchResult {
+	if len(supersedesMap) == 0 {
+		return results
+	}
+
+	// Build set of all result IDs for O(1) lookup.
+	resultSet := make(map[string]bool, len(results))
+	for _, r := range results {
+		resultSet[r.ID] = true
+	}
+
+	filtered := make([]rrf.SearchResult, 0, len(results))
+	for _, r := range results {
+		supersederIDs, isSuperseded := supersedesMap[r.ID]
+		if !isSuperseded {
+			filtered = append(filtered, r)
+			continue
+		}
+
+		// Only remove if at least one superseder is also in the results.
+		supersederPresent := false
+		for _, sid := range supersederIDs {
+			if resultSet[sid] {
+				supersederPresent = true
+				break
+			}
+		}
+		if supersederPresent {
+			slog.Info("filterSuperseded: removed",
+				"block_id", r.ID,
+				"superseded_by", supersederIDs,
+			)
+		} else {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
 }

@@ -36,7 +36,8 @@ type TemporalGravityParams struct {
 // scopes for scope filtering, and optional category/tags/limit/temporal.
 // temporal is a websearch_to_tsquery OR string for date expansion (may be empty).
 // gravity is optional temporal gravity parameters for the 5th RRF channel.
-func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, gravity *TemporalGravityParams) ([]SearchResult, error) {
+// queryOR is an OR-joined query for broader FTS recall (may be empty).
+func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, gravity *TemporalGravityParams, queryOR string) ([]SearchResult, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("rrf: empty embedding")
 	}
@@ -71,11 +72,17 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 		gravCutoff = gravity.Cutoff
 	}
 
+	// Pass queryOR as NULL if empty (PG function default).
+	var queryORParam interface{}
+	if queryOR != "" {
+		queryORParam = queryOR
+	}
+
 	rows, err := pool.Query(ctx,
 		`SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at
-		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9::date, $10, $11::int)`,
+		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9::date, $10, $11::int, $12)`,
 		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam,
-		gravDate, gravDir, gravCutoff,
+		gravDate, gravDir, gravCutoff, queryORParam,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: query ctx_rrf: %w", err)

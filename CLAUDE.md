@@ -135,7 +135,7 @@ CLI: `ctx guard [list|stats|resolve <id> archive|keep]`
 
 - 11 Tabellen: context_blocks, context_api_keys, context_blobs, context_digest_state, context_dream_links, context_guard_state, context_access_log, context_write_log, context_sources, context_temporal, _migrations
 - 30 Spalten auf context_blocks (inkl. Scale-Spalten: source_id, parent_id, block_type, chunk_index, quality_score, embed_status, description, auto_tags, language, content_dates, dream_checked_at, dream_cooldown_until)
-- 17 SQL-Migrationen in go/migrations/ (001–017)
+- 18 SQL-Migrationen in go/migrations/ (001–018)
 - PG-Tuning: shared_buffers=8GB, maintenance_work_mem=4GB, work_mem=64MB, effective_cache_size=48GB
 
 ## Security (Session 5)

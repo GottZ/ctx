@@ -47,8 +47,7 @@ const systemPromptV52 = `<role>You are a fact extraction engine for a technical 
 4. Cite sources inline using [1], [2], [3] matching source id attributes.
 5. Extract only facts that directly answer the question. Ignore unrelated source content.
 6. Answer in the same language as the user's question.
-7. Sources may describe planned or historical states. Only present information as current fact if the source confirms it is implemented.
-8. If no source relates to the question at all, respond with exactly: NO_RELEVANT_SOURCES
+7. If no source relates to the question at all, respond with exactly: NO_RELEVANT_SOURCES
 </constraints>
 
 <example>
