@@ -1,25 +1,34 @@
 # ctx — The memory your LLM pretends to have.
 
-Knowledge store with weighted 4-way RRF retrieval, multi-tenant scope isolation, and temporal awareness. Built for AI workflows.
+> Knowledge store with weighted 4-way RRF retrieval, multi-tenant scope isolation, temporal awareness, and autonomous cross-referencing. Built for AI workflows that need to remember.
+
+[![Release](https://img.shields.io/github/v/release/GottZ/ctx)](https://github.com/GottZ/ctx/releases)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8)](https://go.dev)
+[![License](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791)](https://www.postgresql.org)
+
+## What it does
+
+ctx gives your LLM a persistent, searchable memory. Store knowledge blocks, query them with hybrid retrieval (semantic + fulltext + trigram + temporal gravity), and get synthesized answers with source citations.
+
+**Dream Mode** runs in the background — autonomously discovering relationships between blocks, marking outdated information, and promoting high-quality content. Your knowledge base grows, self-organizes, and stays current.
 
 ## Quick Install
 
 ```bash
-# One-liner: install latest release binary
+# Binary (Linux/macOS/Windows)
 curl -fsSL https://github.com/GottZ/ctx/releases/latest/download/ctx-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/ctx && chmod +x /usr/local/bin/ctx
-```
 
-Or with Go:
-```bash
+# Or with Go
 go install github.com/GottZ/ctx/cmd/ctx@latest
 ```
 
 ## Setup
 
-### 1. Configure ctx endpoint
+### 1. Configure endpoint
 
-Linux/macOS:
 ```bash
+# Linux/macOS
 mkdir -p ~/.config/ctx
 cat > ~/.config/ctx/config << 'EOF'
 CTX_BASE_URL=https://your-ctx-host.example
@@ -27,7 +36,9 @@ CTX_KEY=your-api-key-here
 EOF
 ```
 
-Windows (PowerShell):
+<details>
+<summary>Windows (PowerShell)</summary>
+
 ```powershell
 New-Item -ItemType Directory -Force "$env:APPDATA\ctx"
 @"
@@ -35,91 +46,91 @@ CTX_BASE_URL=https://your-ctx-host.example
 CTX_KEY=your-api-key-here
 "@ | Set-Content "$env:APPDATA\ctx\config"
 ```
+</details>
 
-### 2. Verify connection
+### 2. Verify
 
 ```bash
-ctx health
-ctx stats
+ctx health    # DB + Ollama connectivity
+ctx stats     # Block count, categories, storage
 ```
 
-### 3. Claude Code statusline (optional)
+### 3. Claude Code integration (optional)
 
-Add to `~/.claude/settings.json`:
-
+**Statusline** — live block count, health, and rate limits:
 ```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "ctx statusline"
-  }
-}
+{ "statusLine": { "type": "command", "command": "ctx statusline" } }
 ```
 
-For full setup details including autocompact configuration:
-```bash
-ctx statusline --help
-```
-
-### 4. Claude Code slash commands (optional)
-
-Add to `~/.claude/settings.json` or project `.claude/settings.json`:
-
+**Slash commands** — add to `~/.claude/settings.json`:
 ```json
 {
   "customSlashCommands": [
-    {
-      "name": "ctx",
-      "description": "Query the Context Store",
-      "command": "ctx query \"$PROMPT\""
-    },
-    {
-      "name": "ctx-save",
-      "description": "Save to Context Store",
-      "command": "ctx save $PROMPT"
-    },
-    {
-      "name": "ctx-browse",
-      "description": "Browse Context Store",
-      "command": "ctx search $PROMPT"
-    },
-    {
-      "name": "ctx-stats",
-      "description": "Context Store statistics",
-      "command": "ctx stats"
-    }
+    { "name": "ctx",        "command": "ctx query \"$PROMPT\"" },
+    { "name": "ctx-save",   "command": "ctx save $PROMPT" },
+    { "name": "ctx-browse", "command": "ctx search $PROMPT" },
+    { "name": "ctx-stats",  "command": "ctx stats" }
   ]
 }
 ```
 
-## CLI Commands
+**Agent hooks** — automatic project briefing for subagents:
+```json
+{
+  "hooks": {
+    "SubagentStart": [{ "type": "command", "command": "ctx brief --hook" }],
+    "SubagentStop":  [{ "type": "command", "command": "ctx persist --hook" }]
+  }
+}
+```
+
+## CLI
 
 | Command | Description |
 |---------|-------------|
 | `ctx query "question"` | Hybrid search + LLM synthesis |
-| `ctx save <category> <title> - <content>` | Upsert knowledge block |
+| `ctx save <cat> <title> - <content>` | Upsert knowledge block |
+| `ctx save --tag tag1,tag2 <cat> <title>` | Upsert with tags |
 | `ctx search [category] [query:text]` | Compact search (no LLM) |
-| `ctx stats` | Database statistics |
-| `ctx health` | Healthcheck (DB + Ollama) |
-| `ctx guard [list\|stats\|resolve]` | Write Guard management |
-| `ctx categories` | List categories |
 | `ctx get <id>` | Fetch full block |
-| `ctx delete <id>` | Delete block |
-| `ctx statusline` | Claude Code status bar |
+| `ctx delete <id>` | Soft-delete (archive) |
+| `ctx categories` | List all categories |
+| `ctx stats` | Database statistics |
+| `ctx health` | Healthcheck |
+| `ctx guard [list\|stats\|resolve]` | Write Guard management |
+| `ctx dream [stats\|review]` | Dream Mode stats + link review |
+| `ctx brief` | Project briefing from store |
+| `ctx persist` | Persist `[PERSIST:cat:title]` markers |
 | `ctx ingest <path>` | Ingest Obsidian vault |
-| `ctx dream [stats\|review]` | Dream Mode stats + review |
+| `ctx digest` | Rebuild topic map |
+| `ctx statusline` | Claude Code status bar |
+| `ctx version` | Print version |
 
 ## Architecture
 
-- **Go 1.25** — `ctx` CLI + `ctxd` daemon, chi router, pgx v5 + pgvector-go
-- **PostgreSQL 18** + pgvector 0.8.2 + TimescaleDB 2.26.0
-- **Ollama** — qwen3-embedding:8b (1024d Matryoshka) + qwen3.5:9b (synthesis)
-- **4-Way RRF** — Semantic (0.45) + EN-FTS (0.25) + DE-FTS (0.20) + Trigram (0.10)
-- **Multi-Tenant** — scope isolation (private/work/shared) via API key
-- **Write Guard** — async dedup via PG LISTEN/NOTIFY + HNSW similarity
-- **Temporal** — EAV dimension table, deterministic parser (59/60 cases), LLM fallback
-- **Gravity Reranker** — physics-inspired temporal scoring, post-RRF on Top-200
-- **Dream Mode** — async cross-reference engine (keyword extraction → RRF search → LLM evaluation → typed links)
+```
+Query ──► Embed ──► 4-Way RRF ──► Temporal Gravity ──► filterSuperseded ──► LLM Synthesis
+                    ├─ Semantic (0.45)
+                    ├─ EN-FTS   (0.25)    ┌─────────────────────────┐
+                    ├─ DE-FTS   (0.20)    │  Dream Mode (async)     │
+                    └─ Trigram  (0.10)    │  Pick → Keywords → RRF  │
+                                          │  → LLM Eval → Links     │
+Store ──► Hash NOOP ──► Embed ──►         │  → ApplySupersedes      │
+          Guard (async, 60s) ◄────────────│  → PromoteToCanonical   │
+          ├─ ≥0.98: auto-archive          └─────────────────────────┘
+          ├─ 0.92-0.98: flag
+          └─ <0.92: clean
+```
+
+**Stack:** Go 1.25, PostgreSQL 18 + pgvector 0.8.2, Ollama (qwen3-embedding:8b + qwen3.5:9b)
+
+**Key features:**
+- **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels
+- **GottZ Scope Model** — multi-tenant isolation (private/work/shared) via API key scoping
+- **GottZ Guard** — async deduplication via PG LISTEN/NOTIFY + HNSW similarity
+- **GottZ Temporal Dimension Table** — EAV temporal indexing with deterministic parser (59/60 cases in 0ms)
+- **Dream Mode** — autonomous cross-referencing with adaptive cooldown and supersedes detection
+- **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results
 
 ## API
 
@@ -127,10 +138,10 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header.
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/query` | RRF + LLM synthesis |
+| `POST /api/query` | 4-Way RRF + LLM synthesis |
 | `POST /api/store` | Upsert + auto-embedding |
-| `POST /api/search` | Lightweight FTS (no LLM) |
-| `POST /api/manage` | CRUD + Guard API |
+| `POST /api/search` | Lightweight search (no LLM) |
+| `POST /api/manage` | CRUD, Guard API, stats |
 | `POST /api/digest` | Topic map generation |
 | `POST /api/ingest` | Obsidian vault ingestion |
 | `POST /api/blob/*` | Binary storage (store/fetch/search/manage) |
@@ -139,14 +150,11 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header.
 ## Building
 
 ```bash
-# Local build
-go build -o ctx ./cmd/ctx/
-
-# Cross-compile all platforms
-./build.sh v0.1.0
-
-# Install locally
-./install.sh
+go build -o ctx ./cmd/ctx/           # CLI
+go build -o ctxd ./cmd/ctxd/         # Daemon
+go test ./... -short                  # Unit tests
 ```
 
-## By GottZ
+## License
+
+[MPL-2.0](LICENSE) — By [GottZ](https://github.com/GottZ)

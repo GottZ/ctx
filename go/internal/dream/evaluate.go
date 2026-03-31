@@ -179,7 +179,8 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 
 		// ApplySupersedes: mark source block as snapshot when superseded.
 		// Source is the OLD block (Dream Rule 6: "target block is a newer version").
-		if link.Relationship == "supersedes" {
+		// Only apply at high confidence to prevent false-positive snapshot marking.
+		if link.Relationship == "supersedes" && weightedConfidence >= 0.7 {
 			_, err = tx.Exec(ctx,
 				`UPDATE context_blocks SET block_type = 'snapshot', superseded_by = $2::uuid
 				WHERE id = $1::uuid AND block_type != 'snapshot'`,

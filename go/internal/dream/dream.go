@@ -313,6 +313,7 @@ func UpdateQualityScore(ctx context.Context, pool *pgxpool.Pool, blockID string)
 
 // SupersedesMap returns a map of block_id → []superseded_by_ids for the given block IDs.
 // A block can be superseded by multiple newer blocks, hence the slice value.
+// Only returns links with confidence >= 0.7 to prevent false-positive filtering.
 // Used by the query handler to enrich responses and for filterSuperseded.
 func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (map[string][]string, error) {
 	if len(blockIDs) == 0 {
@@ -323,6 +324,7 @@ func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (
 		`SELECT source_block_id::text, target_block_id::text
 		FROM context_dream_links
 		WHERE relationship = 'supersedes'
+		  AND confidence >= 0.7
 		  AND source_block_id = ANY($1::uuid[])`,
 		blockIDs,
 	)

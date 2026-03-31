@@ -61,9 +61,10 @@ Kanonische Referenz: Block `019d25d8-b8aa-7f02-8ad0-e0bba7b7cfcf` (infrastructur
 - **Semantic LIMIT 75**, Fulltext über precomputed `ts_de`/`ts_en` mit GIN-Indizes
 - **Hyphen-OR**: Terme wie `SHA-256` werden mit und ohne Bindestrich gesucht
 - **RRF-Thresholds**: 0.005 (no_relevant), 0.008 (confident) — kalibriert für Weighted RRF (Summe=1.0)
-- **Prompt v5.2**: Role "fact extraction engine", 8 Constraints (inkl. Design-Doc-Schutz), 2 Beispiele
+- **Prompt v5.3**: Role "fact extraction engine", 7 Constraints (Design-Doc-Schutz entfernt, filterSuperseded übernimmt), 2 Beispiele
 - **Sampling**: temperature=0.1, repeat_penalty=1.1, num_predict=500
-- **Confidence/LLM Override**: Wenn LLM NO_RELEVANT_SOURCES sagt, wird confidence auf no_relevant_blocks_found überschrieben
+- **Confidence/LLM Override**: RRF-confident + LLM-rejects → low_confidence (nicht no_relevant). Schützt vor LLM-Fehleinschätzungen bei starkem RRF-Signal
+- **filterSuperseded**: Temporal-gated (nur wenn temporalResult==nil). Entfernt superseded Blöcke wenn der Superseder auch in den Results ist
 - **Query-Translation**: DE→EN mit Domain-Glossar (Schreibschutz→Write Guard, etc.)
 - **low_confidence**: Top-2 Sources statt Top-1 (breite Fragen brauchen mehr Kontext)
 - **Session 5 Workflow-Fixes**: Explain-Prefix entfernt (empirisch null Nutzen), isKwQuery entfernt (Reranker übernimmt), think:false in Synthesis+Reranker, escapeXml() für Content-Sanitization, parameterized SQL queries
@@ -104,7 +105,7 @@ Base-URL: `https://ctx.janetzky.cloud` (Reverse-Proxy → ctx Container)
 
 | Endpoint | Zweck |
 |----------|-------|
-| `POST /api/query` | **Primary**: Weighted RRF + LLM synthesis (Prompt v5.2) |
+| `POST /api/query` | **Primary**: Weighted RRF + LLM synthesis (Prompt v5.3) |
 | `POST /api/store` | Upsert (category+title+scope) + auto-embedding |
 | `POST /api/search` | Compact search (content_preview 200 chars, limit 10) |
 | `POST /api/manage` | stats, get, list-categories, list-meta, update, delete |
@@ -161,7 +162,7 @@ Host: `$OLLAMA_HOST (see .env)` (Quadro RTX 6000, 24GB VRAM, primäre GPU mit DW
 
 VRAM-Budget: Embedding 5.3 + Synthese 9.0 = 14.3 GB → 9.7 GB Headroom. `OLLAMA_MAX_LOADED_MODELS=2` auf dem Host damit beide permanent geladen bleiben.
 
-**qwen3.5:9b**: Aktuelles Synthese-Modell (Session 5). Death-Spiral-Problem war API-Bug (#14793), gelöst via /api/chat mit think:false. 42/43 eval PASS (97.7%), +10% KW vs qwen3:4b-instruct, bessere Constraint-#7-Einhaltung. 9.0 GB VRAM.
+**qwen3.5:9b**: Aktuelles Synthese-Modell (Session 5). Death-Spiral-Problem war API-Bug (#14793), gelöst via /api/chat mit think:false. 43/43 eval PASS (100%), +10% KW vs qwen3:4b-instruct. 9.0 GB VRAM.
 
 **Session 3 Modell-Evaluation**: 11 Modelle getestet (4B-22B), Q4_K_M > Q8_0 für RAG (höhere Präzision → mehr Paraphrasierung → weniger KW-Treffer), IFEval korreliert nicht mit RAG-Qualität. Details: `memory/session3_model_evaluation.md`
 
