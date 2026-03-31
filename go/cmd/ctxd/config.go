@@ -32,6 +32,9 @@ type Config struct {
 	// Reranker
 	RerankEnabled bool
 
+	// Dream Mode
+	DreamEnabled bool
+
 	// HTTP Server
 	ListenAddr string
 }
@@ -64,6 +67,8 @@ func LoadConfig() (Config, error) {
 		OllamaThink: getEnv("OLLAMA_THINK", "false"),
 
 		RerankEnabled: getEnv("CTX_RERANK_ENABLED", "false") == "true",
+
+		DreamEnabled: getEnv("CTX_DREAM_ENABLED", "false") == "true",
 
 		ListenAddr: getEnv("LISTEN_ADDR", defaultListenAddr),
 	}

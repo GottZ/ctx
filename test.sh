@@ -231,10 +231,10 @@ fi
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "10" ]] && [[ "$col_count" == "28" ]]; then
+if [[ "$table_count" == "11" ]] && [[ "$col_count" == "30" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 10 tables + 28 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 11 tables + 30 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS

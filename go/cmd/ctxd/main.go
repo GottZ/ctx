@@ -85,11 +85,15 @@ func main() {
 		slog.Info("temporal backfill complete", "blocks_processed", n)
 	}
 
-	// Scheduler for background guard + digest
+	// Scheduler for background guard + digest + dream
 	schedulerConfig := &events.Config{
-		DSN:        cfg.DSN(),
-		HomeScope:  "private",
-		ReadScopes: []string{"private", "shared", "work"},
+		DSN:          cfg.DSN(),
+		HomeScope:    "private",
+		ReadScopes:   []string{"private", "shared", "work"},
+		DreamEnabled: cfg.DreamEnabled,
+		OllamaHost:   cfg.OllamaHost,
+		EmbedModel:   cfg.OllamaEmbedModel,
+		ChatModel:    cfg.OllamaChatModel,
 	}
 	scheduler := events.NewScheduler(pool, schedulerConfig)
 	go scheduler.Run(ctx)

@@ -1,4 +1,4 @@
-// Package events implements the background scheduler for guard and digest jobs.
+// Package events implements the background scheduler for guard, digest, and dream jobs.
 // Uses pgxlisten for PG LISTEN/NOTIFY with auto-reconnect, backlog handling,
 // and demand interruption (query priority over background work).
 package events
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/digest"
+	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -23,6 +24,9 @@ const (
 	// digestDebounce is the debounce duration after last write before running digest.
 	digestDebounce = 60 * time.Second
 
+	// dreamInterval is the interval for dream cross-reference cycles.
+	dreamInterval = 120 * time.Second
+
 	// guardBatchLimit is the max blocks per guard cycle.
 	guardBatchLimit = 100
 )
@@ -33,6 +37,10 @@ type Config struct {
 	HomeScope      string
 	ReadScopes     []string
 	ReconnectDelay time.Duration // pgxlisten reconnect delay (0 = 5s default)
+	DreamEnabled   bool          // Enable dream cross-reference engine
+	OllamaHost     string        // Ollama API base URL (for dream)
+	EmbedModel     string        // Embedding model name (for dream)
+	ChatModel      string        // Chat model name (for dream)
 }
 
 // Scheduler orchestrates Guard + Digest as background jobs.
@@ -99,6 +107,20 @@ func (s *Scheduler) Run(ctx context.Context) {
 	digestTicker := time.NewTicker(5 * time.Second) // Check digest debounce every 5s.
 	defer digestTicker.Stop()
 
+	// Dream ticker (only active if enabled).
+	var dreamTicker *time.Ticker
+	if s.config.DreamEnabled {
+		dreamTicker = time.NewTicker(dreamInterval)
+		defer dreamTicker.Stop()
+		slog.Info("scheduler: dream mode enabled", "interval", dreamInterval)
+	}
+
+	// Dream channel (nil if disabled — select on nil channel blocks forever, effectively disabling).
+	var dreamCh <-chan time.Time
+	if dreamTicker != nil {
+		dreamCh = dreamTicker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -123,6 +145,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 			if pending && !lastWrite.IsZero() && time.Since(lastWrite) >= digestDebounce {
 				s.runDigest(ctx)
 			}
+
+		case <-dreamCh:
+			s.runDream(ctx)
 		}
 	}
 }
@@ -159,6 +184,38 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 	s.mu.Unlock()
 
 	slog.Info("scheduler: guard batch complete", "processed", processed)
+}
+
+// runDream executes one dream cross-reference cycle, yielding if queries are active.
+func (s *Scheduler) runDream(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in dream", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+
+	// Demand interruption: yield if queries are active.
+	if s.activeQueries.Load() > 0 {
+		slog.Debug("scheduler: dream deferred, active queries", "count", s.activeQueries.Load())
+		return
+	}
+
+	slog.Info("scheduler: running dream cycle")
+
+	linksCreated, err := dream.RunDreamCycle(
+		ctx, s.pool,
+		s.config.OllamaHost, s.config.EmbedModel, s.config.ChatModel,
+		s.config.ReadScopes,
+	)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Error("scheduler: dream cycle error", "error", err)
+		return
+	}
+
+	slog.Info("scheduler: dream cycle complete", "links_created", linksCreated)
 }
 
 // runDigest executes the digest, yielding if queries are active.
