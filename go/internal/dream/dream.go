@@ -225,34 +225,18 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, ollamaHost, embed
 	return candidates, nil
 }
 
-// Stats returns dream processing statistics.
-func Stats(ctx context.Context, pool *pgxpool.Pool) (total, checked, linked int, err error) {
+// Stats returns dream processing statistics, filtered by scope.
+func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, checked, linked int, err error) {
 	err = pool.QueryRow(ctx,
 		`SELECT
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL)::int,
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL)::int,
-			(SELECT count(*) FROM context_dream_links)::int`,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND scope = ANY($1))::int,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND scope = ANY($1))::int,
+			(SELECT count(*) FROM context_dream_links WHERE scope = ANY($1))::int`,
+		scopes,
 	).Scan(&total, &checked, &linked)
 	return
 }
 
-// SetDreamCooldownTx marks a block as dream-checked within an existing transaction.
-func SetDreamCooldownTx(ctx context.Context, tx pgx.Tx, blockID string) error {
-	_, err := tx.Exec(ctx,
-		`UPDATE context_blocks SET
-			dream_checked_at = now(),
-			dream_cooldown_until = now() + interval '1 day' * $2
-		WHERE id = $1`,
-		blockID, CooldownDays,
-	)
-	return err
-}
-
-// PickBlockTx is like PickBlock but avoids transaction nesting issues.
-// For the scheduler, we do NOT wrap in a transaction since SKIP LOCKED
-// only needs a short lock, and the full cycle (search + LLM) is too long
-// to hold a transaction open.
-var _ = PickBlock // verify PickBlock exists
 
 // CleanupDanglingLinks removes links pointing to archived blocks.
 func CleanupDanglingLinks(ctx context.Context, pool *pgxpool.Pool) (int, error) {

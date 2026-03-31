@@ -81,7 +81,7 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 	case "guard-resolve":
 		h.handleGuardResolve(w, r, authResult, req)
 	case "dream-stats":
-		h.handleDreamStats(w, r)
+		h.handleDreamStats(w, r, authResult)
 	case "dream-review":
 		h.handleDreamReview(w, r, authResult)
 	default:
@@ -457,9 +457,9 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request) {
+func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
 	ctx := r.Context()
-	total, checked, linked, err := dream.Stats(ctx, h.pool)
+	total, checked, linked, err := dream.Stats(ctx, h.pool, ar.ReadScopes)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream stats failed",
@@ -481,7 +481,7 @@ func (h *ManageHandler) handleDreamReview(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 
 	// 1. Stats overview.
-	total, checked, linked, err := dream.Stats(ctx, h.pool)
+	total, checked, linked, err := dream.Stats(ctx, h.pool, ar.ReadScopes)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream review failed",
@@ -599,13 +599,20 @@ func (h *ManageHandler) fetchSupersedesPairs(ctx context.Context, ar *auth.AuthR
 
 func (h *ManageHandler) fetchRecentDreamBlocks(ctx context.Context, ar *auth.AuthResult) ([]map[string]any, error) {
 	rows, err := h.pool.Query(ctx,
-		`SELECT id::text, title, category, quality_score, dream_checked_at,
-			(SELECT count(*) FROM context_dream_links WHERE source_block_id = cb.id OR target_block_id = cb.id) AS link_count
+		`SELECT cb.id::text, cb.title, cb.category, cb.quality_score, cb.dream_checked_at,
+			COALESCE(lc.cnt, 0)::int AS link_count
 		FROM context_blocks cb
-		WHERE dream_checked_at IS NOT NULL
-		  AND NOT is_archived
-		  AND scope = ANY($1)
-		ORDER BY dream_checked_at DESC
+		LEFT JOIN (
+			SELECT block_id, count(*) AS cnt FROM (
+				SELECT source_block_id AS block_id FROM context_dream_links
+				UNION ALL
+				SELECT target_block_id AS block_id FROM context_dream_links
+			) sub GROUP BY block_id
+		) lc ON lc.block_id = cb.id
+		WHERE cb.dream_checked_at IS NOT NULL
+		  AND NOT cb.is_archived
+		  AND cb.scope = ANY($1)
+		ORDER BY cb.dream_checked_at DESC
 		LIMIT 10`,
 		ar.ReadScopes,
 	)

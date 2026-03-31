@@ -198,15 +198,15 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 func buildEvalPrompt(source BlockInfo, candidates []BlockInfo) string {
 	var b strings.Builder
 	b.WriteString("<source>\n")
-	fmt.Fprintf(&b, "ID: %s\nTitle: %s\nCategory: %s\n", source.ID, escapeXml(source.Title), source.Category)
+	fmt.Fprintf(&b, "ID: %s\nTitle: %s\nCategory: %s\n", source.ID, llm.EscapeXml(source.Title), source.Category)
 	b.WriteString("Content: ")
-	b.WriteString(escapeXml(truncate(source.Content, maxContentLen)))
+	b.WriteString(llm.EscapeXml(truncate(source.Content, maxContentLen)))
 	b.WriteString("\n</source>\n\n<candidates>\n")
 
 	for _, c := range candidates {
 		fmt.Fprintf(&b, "<block id=\"%s\" title=\"%s\" category=\"%s\">\n",
-			c.ID, escapeXml(c.Title), c.Category)
-		b.WriteString(escapeXml(truncate(c.Content, maxContentLen/2)))
+			c.ID, llm.EscapeXml(c.Title), c.Category)
+		b.WriteString(llm.EscapeXml(truncate(c.Content, maxContentLen/2)))
 		b.WriteString("\n</block>\n")
 	}
 	b.WriteString("</candidates>")
@@ -238,14 +238,4 @@ func truncate(s string, n int) string {
 		cut = n
 	}
 	return s[:cut]
-}
-
-// escapeXml escapes XML special characters to prevent prompt injection.
-func escapeXml(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	s = strings.ReplaceAll(s, "\"", "&quot;")
-	s = strings.ReplaceAll(s, "'", "&apos;")
-	return s
 }

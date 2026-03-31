@@ -224,25 +224,7 @@ func TestTruncate_LongString(t *testing.T) {
 	}
 }
 
-// --- escapeXml Tests ---.
-
-func TestEscapeXml_SpecialChars(t *testing.T) {
-	cases := []struct {
-		input, want string
-	}{
-		{"<script>", "&lt;script&gt;"},
-		{"a & b", "a &amp; b"},
-		{`"quoted"`, "&quot;quoted&quot;"},
-		{"it's", "it&apos;s"},
-		{"normal text", "normal text"},
-	}
-	for _, tc := range cases {
-		got := escapeXml(tc.input)
-		if got != tc.want {
-			t.Errorf("escapeXml(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
+// escapeXml tests are in llm/llm_test.go (canonical implementation).
 
 // --- buildEvalPrompt Tests ---.
 
