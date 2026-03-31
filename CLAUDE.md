@@ -37,7 +37,7 @@ Für größere Änderungen:
 3. **Team-Lead Agent** — destilliert Ergebnisse, identifiziert kreative Ausreißer, nicht nur Konsens
 4. **Contrarian-Agents** — hinterfragen jede Entscheidung mit Paradigmen-Diversity (Skeptiker, Ökonom, Angreifer, Dissident)
 5. **Implementieren.** Offensichtliche Entscheidungen direkt umsetzen. Preparation nach `/tmp/`, dann Live-System.
-6. **Verifizieren** — `bash test.sh --with-ollama` (14 Tests) + `bash eval.sh` (43 Tests) nach jeder Änderung
+6. **Verifizieren** — `bash test.sh --with-ollama` (16 Tests) + `bash eval.sh` (43 Tests) nach jeder Änderung
 
 ### Technische Constraints
 
@@ -133,9 +133,9 @@ CLI: `ctx guard [list|stats|resolve <id> archive|keep]`
 
 ## Schema (context_store DB)
 
-- 10 Tabellen: context_blocks, context_api_keys, context_blobs, context_digest_state, context_guard_state, context_access_log, context_write_log, context_sources, context_temporal, _migrations
-- 28 Spalten auf context_blocks (inkl. Scale-Spalten: source_id, parent_id, block_type, chunk_index, quality_score, embed_status, description, auto_tags, language, content_dates)
-- 13 SQL-Migrationen in go/migrations/ (001–013)
+- 11 Tabellen: context_blocks, context_api_keys, context_blobs, context_digest_state, context_dream_links, context_guard_state, context_access_log, context_write_log, context_sources, context_temporal, _migrations
+- 30 Spalten auf context_blocks (inkl. Scale-Spalten: source_id, parent_id, block_type, chunk_index, quality_score, embed_status, description, auto_tags, language, content_dates, dream_checked_at, dream_cooldown_until)
+- 17 SQL-Migrationen in go/migrations/ (001–017)
 - PG-Tuning: shared_buffers=8GB, maintenance_work_mem=4GB, work_mem=64MB, effective_cache_size=48GB
 
 ## Security (Session 5)
@@ -178,7 +178,7 @@ docker compose down && docker compose up -d   # Full restart
 
 ```bash
 bash /compose/n8n/state.sh                   # Live-Systemzustand (bei Session-Start)
-bash /compose/n8n/test.sh --with-ollama      # 14 Tests (10 System + 4 Retrieval)
+bash /compose/n8n/test.sh --with-ollama      # 16 Tests (12 System + 4 Retrieval)
 bash /compose/n8n/eval.sh                    # 43 Tests (Confident, Bilingual, Negative, Keyword, Imperative, Multi-hop, Retrieval)
 bash /compose/n8n/eval.sh --update-baseline  # Neue Baseline setzen nach validierter Änderung
 ```
