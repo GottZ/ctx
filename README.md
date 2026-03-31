@@ -107,10 +107,11 @@ Add to `~/.claude/settings.json` or project `.claude/settings.json`:
 | `ctx delete <id>` | Delete block |
 | `ctx statusline` | Claude Code status bar |
 | `ctx ingest <path>` | Ingest Obsidian vault |
+| `ctx dream [stats\|review]` | Dream Mode stats + review |
 
 ## Architecture
 
-- **Go 1.24** — `ctx` CLI + `ctxd` daemon, chi router, pgx v5 + pgvector-go
+- **Go 1.25** — `ctx` CLI + `ctxd` daemon, chi router, pgx v5 + pgvector-go
 - **PostgreSQL 18** + pgvector 0.8.2 + TimescaleDB 2.26.0
 - **Ollama** — qwen3-embedding:8b (1024d Matryoshka) + qwen3.5:9b (synthesis)
 - **4-Way RRF** — Semantic (0.45) + EN-FTS (0.25) + DE-FTS (0.20) + Trigram (0.10)
@@ -118,7 +119,7 @@ Add to `~/.claude/settings.json` or project `.claude/settings.json`:
 - **Write Guard** — async dedup via PG LISTEN/NOTIFY + HNSW similarity
 - **Temporal** — EAV dimension table, deterministic parser (59/60 cases), LLM fallback
 - **Gravity Reranker** — physics-inspired temporal scoring, post-RRF on Top-200
-- **Dream Mode** (planned) — async quality assessment, knowledge graph ops, draft layer
+- **Dream Mode** — async cross-reference engine (keyword extraction → RRF search → LLM evaluation → typed links)
 
 ## API
 
