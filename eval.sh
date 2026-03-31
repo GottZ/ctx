@@ -417,62 +417,62 @@ if ! $RETRIEVAL_ONLY; then
 
   # Confident
   echo "  -- Confident (known facts) --"
-  while IFS='|' read -r id type query expected_conf keywords desc; do
+  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
     [[ "$id" =~ ^#.*$ ]] && continue
     [[ -z "$id" ]] && continue
     [[ "$type" != "synthesis" ]] && continue
     [[ ! "$id" =~ ^S ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc"
+    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
   done < <(define_test_cases)
 
   echo ""
   echo "  -- Bilingual (DE query, EN content) --"
-  while IFS='|' read -r id type query expected_conf keywords desc; do
+  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
     [[ "$id" =~ ^#.*$ ]] && continue
     [[ -z "$id" ]] && continue
     [[ "$type" != "synthesis" ]] && continue
     [[ ! "$id" =~ ^B ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc"
+    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
   done < <(define_test_cases)
 
   echo ""
   echo "  -- Negative (should reject) --"
-  while IFS='|' read -r id type query expected_conf keywords desc; do
+  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
     [[ "$id" =~ ^#.*$ ]] && continue
     [[ -z "$id" ]] && continue
     [[ "$type" != "synthesis" ]] && continue
     [[ ! "$id" =~ ^N ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc"
+    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
   done < <(define_test_cases)
 
   echo ""
   echo "  -- Keyword / Specific Facts --"
-  while IFS='|' read -r id type query expected_conf keywords desc; do
+  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
     [[ "$id" =~ ^#.*$ ]] && continue
     [[ -z "$id" ]] && continue
     [[ "$type" != "synthesis" ]] && continue
     [[ ! "$id" =~ ^K ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc"
+    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
   done < <(define_test_cases)
 
   echo ""
   echo "  -- Imperative (command-style queries) --"
-  while IFS='|' read -r id type query expected_conf keywords desc; do
+  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
     [[ "$id" =~ ^#.*$ ]] && continue
     [[ -z "$id" ]] && continue
     [[ "$type" != "synthesis" ]] && continue
     [[ ! "$id" =~ ^I ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc"
+    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
   done < <(define_test_cases)
 
   echo ""
   echo "  -- Multi-hop (cross-block reasoning) --"
-  while IFS='|' read -r id type query expected_conf keywords desc; do
+  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
     [[ "$id" =~ ^#.*$ ]] && continue
     [[ -z "$id" ]] && continue
     [[ "$type" != "synthesis" ]] && continue
     [[ ! "$id" =~ ^M ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc"
+    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
   done < <(define_test_cases)
 fi
 
@@ -544,6 +544,13 @@ neg_tests = [r for r in results if r['id'].startswith('N')]
 false_positives = sum(1 for r in neg_tests if r.get('confidence') == 'confident')
 fp_rate = round(false_positives / len(neg_tests) * 100, 1) if neg_tests else 0
 
+# Source-level assertion stats
+src_checked = [r for r in results if r.get('source_total', 0) > 0]
+src_total_patterns = sum(r['source_total'] for r in src_checked)
+src_total_hits = sum(r['source_hits'] for r in src_checked)
+src_tests_pass = sum(1 for r in src_checked if r['source_hits'] == r['source_total'])
+src_hit_rate = round(src_total_hits / src_total_patterns * 100, 1) if src_total_patterns else 0
+
 output = {
     'timestamp': timestamp,
     'total_blocks': $total_blocks,
@@ -555,6 +562,8 @@ output = {
         'pass_rate': round(passed / total * 100, 1) if total else 0,
         'keyword_hit_rate': keyword_hit_rate,
         'false_positive_rate': fp_rate,
+        'source_checks': len(src_checked),
+        'source_hit_rate': src_hit_rate,
     },
     'by_type': by_type,
     'by_category': {k: {'pass': v['pass'], 'fail': v['fail'], 'total': v['pass']+v['fail']} for k, v in categories.items()},
@@ -590,6 +599,8 @@ print(f'  Failed:             {s[\"failed\"]}')
 print(f'  Pass rate:          {s[\"pass_rate\"]}%')
 print(f'  Keyword hit rate:   {s[\"keyword_hit_rate\"]}%')
 print(f'  False positive rate:{s[\"false_positive_rate\"]}%')
+if s.get('source_checks', 0) > 0:
+    print(f'  Source checks:      {s[\"source_checks\"]} tests, {s[\"source_hit_rate\"]}% pattern hit rate')
 print(f'  Elapsed:            {data[\"elapsed_seconds\"]}s')
 print()
 
@@ -624,6 +635,14 @@ if failures:
         if f.get('keyword_total', 0) > 0:
             detail += f' kw={f[\"keyword_hits\"]}/{f[\"keyword_total\"]}'
         print(f'    - {detail}')
+    print()
+
+# Source misses (informational)
+src_misses = [r for r in data['results'] if r.get('source_total', 0) > 0 and r['source_hits'] < r['source_total']]
+if src_misses:
+    print('  SOURCE MISSES (informational):')
+    for r in src_misses:
+        print(f'    ?? {r[\"id\"]}: {r[\"desc\"]} (src={r[\"source_hits\"]}/{r[\"source_total\"]})')
     print()
 " 2>/dev/null
 
