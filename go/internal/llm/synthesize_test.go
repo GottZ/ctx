@@ -279,3 +279,48 @@ func TestBuildPrompt_NegativeAgeDays(t *testing.T) {
 		t.Error("negative age_days should appear in output")
 	}
 }
+
+// --- ApplyConfidenceOverride ---.
+
+func TestConfidenceOverride_ConfidentRRF_LLMRejects(t *testing.T) {
+	// When RRF says confident (maxScore >= 0.008) but LLM says NO_RELEVANT_SOURCES,
+	// confidence should be downgraded to "low_confidence", NOT "no_relevant_blocks_found".
+	// This preserves the RRF signal while noting LLM disagreement.
+	answer := FormatAnswer("NO_RELEVANT_SOURCES")
+	confidence := ClassifyConfidence(0.01) // confident
+	newConf, rejected := ApplyConfidenceOverride(answer, confidence)
+	if newConf != ConfidenceLow {
+		t.Errorf("confident RRF + LLM rejection: got confidence %q, want %q", newConf, ConfidenceLow)
+	}
+	if !rejected {
+		t.Error("LLMRejected should be true when LLM returns NO_RELEVANT_SOURCES")
+	}
+}
+
+func TestConfidenceOverride_LowRRF_LLMRejects(t *testing.T) {
+	// When RRF says low_confidence (maxScore < 0.008) and LLM says NO_RELEVANT,
+	// confidence should be "no_relevant_blocks_found" (current behavior preserved).
+	answer := FormatAnswer("NO_RELEVANT_SOURCES")
+	confidence := ClassifyConfidence(0.006) // low_confidence
+	newConf, rejected := ApplyConfidenceOverride(answer, confidence)
+	if newConf != ConfidenceNoRelevant {
+		t.Errorf("low RRF + LLM rejection: got confidence %q, want %q", newConf, ConfidenceNoRelevant)
+	}
+	if !rejected {
+		t.Error("LLMRejected should be true when LLM returns NO_RELEVANT_SOURCES")
+	}
+}
+
+func TestConfidenceOverride_ConfidentRRF_LLMAccepts(t *testing.T) {
+	// When LLM returns a normal answer, confidence stays "confident"
+	// (no override happens).
+	answer := FormatAnswer("The service runs on port 443 [1].")
+	confidence := ClassifyConfidence(0.01) // confident
+	newConf, rejected := ApplyConfidenceOverride(answer, confidence)
+	if newConf != ConfidenceConfident {
+		t.Errorf("confident RRF + LLM accepts: got confidence %q, want %q", newConf, ConfidenceConfident)
+	}
+	if rejected {
+		t.Error("LLMRejected should be false when LLM returns a normal answer")
+	}
+}

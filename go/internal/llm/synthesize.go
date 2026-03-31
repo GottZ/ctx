@@ -78,12 +78,13 @@ type Source struct {
 
 // SynthesisResult holds the outcome of the LLM synthesis step.
 type SynthesisResult struct {
-	Answer     string   `json:"answer"`
-	Sources    []Source `json:"sources"`
-	Confidence string   `json:"confidence"`
-	Model      string   `json:"model"`
-	EvalCount  int      `json:"eval_count"`
-	SkipLLM    bool     `json:"-"`
+	Answer      string   `json:"answer"`
+	Sources     []Source `json:"sources"`
+	Confidence  string   `json:"confidence"`
+	LLMRejected bool     `json:"llm_rejected,omitempty"`
+	Model       string   `json:"model"`
+	EvalCount   int      `json:"eval_count"`
+	SkipLLM     bool     `json:"-"`
 }
 
 // EscapeXml replaces XML special characters with their entity references.
@@ -245,17 +246,31 @@ func Synthesize(ctx context.Context, host, model, originalQuery string, sources 
 
 	// Step 8: Format response with confidence override.
 	answer := FormatAnswer(resp.Message.Content)
-	if strings.HasPrefix(answer, "Die verfuegbaren Quellen") {
-		confidence = ConfidenceNoRelevant
-	}
+	confidence, llmRejected := ApplyConfidenceOverride(answer, confidence)
 
 	return &SynthesisResult{
-		Answer:     answer,
-		Sources:    responseSources,
-		Confidence: confidence,
-		Model:      model,
-		EvalCount:  resp.EvalCount,
+		Answer:      answer,
+		Sources:     responseSources,
+		Confidence:  confidence,
+		LLMRejected: llmRejected,
+		Model:       model,
+		EvalCount:   resp.EvalCount,
 	}, nil
+}
+
+// ApplyConfidenceOverride adjusts confidence when the LLM rejects the sources.
+// If the LLM says NO_RELEVANT_SOURCES but RRF was confident, downgrade to
+// low_confidence instead of no_relevant_blocks_found — preserving the RRF signal.
+// Returns the adjusted confidence and whether the LLM rejected.
+func ApplyConfidenceOverride(answer, confidence string) (string, bool) {
+	if !strings.HasPrefix(answer, "Die verfuegbaren Quellen") {
+		return confidence, false
+	}
+	// LLM rejected. Only override to no_relevant if RRF wasn't confident.
+	if confidence == ConfidenceConfident {
+		return ConfidenceLow, true
+	}
+	return ConfidenceNoRelevant, true
 }
 
 // FormatAnswer processes the raw LLM output:
