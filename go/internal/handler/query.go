@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
@@ -65,6 +66,7 @@ type sourceResponse struct {
 	AgeDays          int      `json:"age_days"`
 	RerankScore      *float64 `json:"rerank_score,omitempty"`
 	RRFScoreOriginal *float64 `json:"rrf_score_original,omitempty"`
+	SupersededBy     *string  `json:"superseded_by,omitempty"`
 }
 
 // HandleQuery orchestrates the full query pipeline:
@@ -292,6 +294,17 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		results = results[:limit]
 	}
 
+	// Step 6d: Supersedes enrichment — look up which result blocks have been superseded.
+	resultIDs := make([]string, len(results))
+	for i, r := range results {
+		resultIDs[i] = r.ID
+	}
+	supersedesMap, err := dream.SupersedesMap(ctx, h.pool, resultIDs)
+	if err != nil {
+		slog.Warn("supersedes lookup failed, skipping", "error", err, "request_id", requestID)
+		supersedesMap = nil
+	}
+
 	// Step 7: Convert RRF results to LLM source format.
 	now = time.Now()
 	sources := make([]llm.Source, len(results))
@@ -343,6 +356,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			AgeDays:          s.AgeDays,
 			RerankScore:      s.RerankScore,
 			RRFScoreOriginal: s.RRFScoreOriginal,
+		}
+		if supersedesMap != nil {
+			if supersededBy, ok := supersedesMap[s.ID]; ok {
+				respSources[i].SupersededBy = &supersededBy
+			}
 		}
 	}
 

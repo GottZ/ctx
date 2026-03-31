@@ -108,7 +108,19 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, ollamaHost, embedMod
 		slog.Warn("dream: write links failed", "block_id", block.ID, "error", err)
 	}
 
-	// Step 6: Set cooldown (regardless of whether links were written).
+	// Step 6: Update quality scores for source and linked blocks.
+	if written > 0 {
+		if err := UpdateQualityScore(ctx, pool, block.ID); err != nil {
+			slog.Warn("dream: update quality score failed", "block_id", block.ID, "error", err)
+		}
+		for _, link := range links {
+			if err := UpdateQualityScore(ctx, pool, link.TargetID); err != nil {
+				slog.Debug("dream: update target quality score failed", "target_id", link.TargetID, "error", err)
+			}
+		}
+	}
+
+	// Step 7: Set cooldown (regardless of whether links were written).
 	_ = SetDreamCooldown(ctx, pool, block.ID)
 
 	slog.Info("dream: cycle complete",
@@ -273,9 +285,32 @@ func UpdateQualityScore(ctx context.Context, pool *pgxpool.Pool, blockID string)
 	return err
 }
 
-// nolint:unused
-func init() {
-	// Ensure compile-time type checks.
-	_ = time.Duration(0)
-	_ = fmt.Sprintf
+// SupersedesMap returns a map of block_id → superseded_by_id for the given block IDs.
+// Used by the query handler to enrich responses with supersede information.
+func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (map[string]string, error) {
+	if len(blockIDs) == 0 {
+		return nil, nil
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT source_block_id::text, target_block_id::text
+		FROM context_dream_links
+		WHERE relationship = 'supersedes'
+		  AND source_block_id = ANY($1::uuid[])`,
+		blockIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("dream: supersedes map: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var sourceID, targetID string
+		if err := rows.Scan(&sourceID, &targetID); err != nil {
+			return nil, fmt.Errorf("dream: scan supersedes: %w", err)
+		}
+		result[sourceID] = targetID
+	}
+	return result, rows.Err()
 }

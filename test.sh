@@ -273,6 +273,26 @@ else
   fail "$T" "no .dump file younger than 25h in /compose/n8n/backups/"
 fi
 
+# T11 DREAM_STATS
+T="T11 DREAM_STATS"
+resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"dream-stats"}')
+if echo "$resp" | grep -q '"success":true'; then
+  checked=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('dream_checked',0))" 2>/dev/null)
+  links=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('dream_links',0))" 2>/dev/null)
+  pass "$T (checked=$checked, links=$links)"
+else
+  fail "$T" "dream-stats failed"
+fi
+
+# T12 DREAM_REVIEW
+T="T12 DREAM_REVIEW"
+resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"dream-review"}')
+if echo "$resp" | grep -q '"success":true'; then
+  pass "$T"
+else
+  fail "$T" "dream-review failed"
+fi
+
 # =====================================================================
 # PART 2: Retrieval Tests (Ollama required)
 # =====================================================================
@@ -281,8 +301,8 @@ if $WITH_OLLAMA; then
   echo "--- Part 2: Retrieval Tests (Ollama) ---"
   echo ""
 
-  # T11 SEARCH_BASIC
-  T="T11 SEARCH_BASIC"
+  # T13 SEARCH_BASIC
+  T="T13 SEARCH_BASIC"
   resp=$(api "$WEBHOOK/api/search" "$KEY_PRIVATE" \
     '{"query":"Write Guard"}' 120)
   count=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
@@ -292,8 +312,8 @@ if $WITH_OLLAMA; then
     fail "$T" "expected >= 1 result, got count=$count"
   fi
 
-  # T12 AGENT_CONFIDENT
-  T="T12 AGENT_CONFIDENT"
+  # T14 AGENT_CONFIDENT
+  T="T14 AGENT_CONFIDENT"
   resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
     '{"query":"How does the Write Guard work?"}' 120)
   confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
@@ -304,8 +324,8 @@ if $WITH_OLLAMA; then
     fail "$T" "expected confidence=confident + nonempty answer, got confidence=$confidence answer=$answer"
   fi
 
-  # T13 AGENT_NEGATIVE
-  T="T13 AGENT_NEGATIVE"
+  # T15 AGENT_NEGATIVE
+  T="T15 AGENT_NEGATIVE"
   resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
     '{"query":"Rezept fuer Kartoffelsuppe"}' 120)
   answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer',''))" 2>/dev/null)
@@ -318,8 +338,8 @@ if $WITH_OLLAMA; then
     fail "$T" "expected rejection, got confidence=$confidence answer=${answer:0:80}"
   fi
 
-  # T14 AGENT_BILINGUAL
-  T="T14 AGENT_BILINGUAL"
+  # T16 AGENT_BILINGUAL
+  T="T16 AGENT_BILINGUAL"
   resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
     '{"query":"PostgreSQL Mount-Pfad"}' 120)
   answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer','').lower())" 2>/dev/null)

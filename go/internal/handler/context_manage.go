@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -79,6 +80,10 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.handleGuardStats(w, r, authResult)
 	case "guard-resolve":
 		h.handleGuardResolve(w, r, authResult, req)
+	case "dream-stats":
+		h.handleDreamStats(w, r)
+	case "dream-review":
+		h.handleDreamReview(w, r, authResult)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
@@ -450,4 +455,182 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 		"resolved":   block,
 		"resolution": resolution,
 	})
+}
+
+func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	total, checked, linked, err := dream.Stats(ctx, h.pool)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "dream stats failed",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"action":         "dream-stats",
+		"success":        true,
+		"total_blocks":   total,
+		"dream_checked":  checked,
+		"dream_links":    linked,
+		"coverage_pct":   float64(checked) / float64(max(total, 1)) * 100,
+		"unchecked":      total - checked,
+	})
+}
+
+func (h *ManageHandler) handleDreamReview(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
+	ctx := r.Context()
+
+	// 1. Stats overview.
+	total, checked, linked, err := dream.Stats(ctx, h.pool)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "dream review failed",
+		})
+		return
+	}
+
+	// 2. Low-confidence links (candidates for human review).
+	lowConfLinks, err := h.fetchLowConfidenceLinks(ctx, ar)
+	if err != nil {
+		slog.Warn("dream-review: low confidence fetch failed", "error", err)
+	}
+
+	// 3. Supersedes pairs.
+	supersedesPairs, err := h.fetchSupersedesPairs(ctx, ar)
+	if err != nil {
+		slog.Warn("dream-review: supersedes fetch failed", "error", err)
+	}
+
+	// 4. Recently checked blocks (last 10).
+	recentBlocks, err := h.fetchRecentDreamBlocks(ctx, ar)
+	if err != nil {
+		slog.Warn("dream-review: recent blocks fetch failed", "error", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"action":            "dream-review",
+		"success":           true,
+		"total_blocks":      total,
+		"dream_checked":     checked,
+		"dream_links":       linked,
+		"low_confidence":    lowConfLinks,
+		"supersedes_pairs":  supersedesPairs,
+		"recent_checked":    recentBlocks,
+	})
+}
+
+func (h *ManageHandler) fetchLowConfidenceLinks(ctx context.Context, ar *auth.AuthResult) ([]map[string]any, error) {
+	rows, err := h.pool.Query(ctx,
+		`SELECT dl.source_block_id::text, dl.target_block_id::text, dl.relationship,
+			dl.confidence, dl.scope,
+			s.title AS source_title, t.title AS target_title
+		FROM context_dream_links dl
+		JOIN context_blocks s ON s.id = dl.source_block_id
+		JOIN context_blocks t ON t.id = dl.target_block_id
+		WHERE dl.confidence < 0.7
+		  AND dl.scope = ANY($1)
+		ORDER BY dl.confidence ASC
+		LIMIT 20`,
+		ar.ReadScopes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []map[string]any
+	for rows.Next() {
+		var sourceID, targetID, rel, scope, sourceTitle, targetTitle string
+		var confidence float64
+		if err := rows.Scan(&sourceID, &targetID, &rel, &confidence, &scope, &sourceTitle, &targetTitle); err != nil {
+			return nil, err
+		}
+		results = append(results, map[string]any{
+			"source_id":    sourceID,
+			"target_id":    targetID,
+			"relationship": rel,
+			"confidence":   confidence,
+			"source_title": sourceTitle,
+			"target_title": targetTitle,
+		})
+	}
+	return results, rows.Err()
+}
+
+func (h *ManageHandler) fetchSupersedesPairs(ctx context.Context, ar *auth.AuthResult) ([]map[string]any, error) {
+	rows, err := h.pool.Query(ctx,
+		`SELECT dl.source_block_id::text, dl.target_block_id::text,
+			dl.confidence,
+			s.title AS source_title, s.quality_score AS source_quality,
+			t.title AS target_title, t.quality_score AS target_quality
+		FROM context_dream_links dl
+		JOIN context_blocks s ON s.id = dl.source_block_id
+		JOIN context_blocks t ON t.id = dl.target_block_id
+		WHERE dl.relationship = 'supersedes'
+		  AND dl.scope = ANY($1)
+		ORDER BY dl.confidence DESC
+		LIMIT 20`,
+		ar.ReadScopes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []map[string]any
+	for rows.Next() {
+		var sourceID, targetID, sourceTitle, targetTitle string
+		var confidence, sourceQuality, targetQuality float64
+		if err := rows.Scan(&sourceID, &targetID, &confidence, &sourceTitle, &sourceQuality, &targetTitle, &targetQuality); err != nil {
+			return nil, err
+		}
+		results = append(results, map[string]any{
+			"old_block_id":    sourceID,
+			"old_title":       sourceTitle,
+			"old_quality":     sourceQuality,
+			"new_block_id":    targetID,
+			"new_title":       targetTitle,
+			"new_quality":     targetQuality,
+			"confidence":      confidence,
+		})
+	}
+	return results, rows.Err()
+}
+
+func (h *ManageHandler) fetchRecentDreamBlocks(ctx context.Context, ar *auth.AuthResult) ([]map[string]any, error) {
+	rows, err := h.pool.Query(ctx,
+		`SELECT id::text, title, category, quality_score, dream_checked_at,
+			(SELECT count(*) FROM context_dream_links WHERE source_block_id = cb.id OR target_block_id = cb.id) AS link_count
+		FROM context_blocks cb
+		WHERE dream_checked_at IS NOT NULL
+		  AND NOT is_archived
+		  AND scope = ANY($1)
+		ORDER BY dream_checked_at DESC
+		LIMIT 10`,
+		ar.ReadScopes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []map[string]any
+	for rows.Next() {
+		var id, title, category string
+		var quality float64
+		var checkedAt time.Time
+		var linkCount int
+		if err := rows.Scan(&id, &title, &category, &quality, &checkedAt, &linkCount); err != nil {
+			return nil, err
+		}
+		results = append(results, map[string]any{
+			"id":             id,
+			"title":          title,
+			"category":       category,
+			"quality_score":  quality,
+			"dream_checked":  checkedAt.Format(time.RFC3339),
+			"link_count":     linkCount,
+		})
+	}
+	return results, rows.Err()
 }

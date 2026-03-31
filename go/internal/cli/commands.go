@@ -38,6 +38,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(healthCmd(getClient))
 	root.AddCommand(IngestCmd(getClient))
 	root.AddCommand(statuslineCmd(getClient))
+	root.AddCommand(dreamCmd(getClient))
 }
 
 // ── query ────────────────────────────────────────────────────────────.
@@ -616,6 +617,69 @@ func healthCmd(getClient func() (*Client, error)) *cobra.Command {
 
 			baseURL := strings.TrimSuffix(c.BaseURL, "/")
 			resp, err := c.Get(baseURL + "/health")
+			if err != nil {
+				return err
+			}
+			PrintJSON(resp)
+			return nil
+		},
+	}
+}
+
+func dreamCmd(getClient func() (*Client, error)) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "dream [stats|review]",
+		Aliases: []string{"dr"},
+		Short:   "Dream Mode — cross-reference engine",
+		Long:    "View Dream Mode statistics or review links for quality assessment.",
+	}
+
+	cmd.AddCommand(dreamStatsCmd(getClient))
+	cmd.AddCommand(dreamReviewCmd(getClient))
+
+	// Default to stats if no subcommand given.
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return dreamStatsRun(getClient)
+	}
+
+	return cmd
+}
+
+func dreamStatsCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:     "stats",
+		Aliases: []string{"st"},
+		Short:   "Show Dream Mode statistics",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return dreamStatsRun(getClient)
+		},
+	}
+}
+
+func dreamStatsRun(getClient func() (*Client, error)) error {
+	c, err := getClient()
+	if err != nil {
+		return err
+	}
+	resp, err := c.Post("manage", map[string]any{"action": "dream-stats"})
+	if err != nil {
+		return err
+	}
+	PrintJSON(resp)
+	return nil
+}
+
+func dreamReviewCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:     "review",
+		Aliases: []string{"rv"},
+		Short:   "Review Dream links (low confidence, supersedes, recent)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			resp, err := c.Post("manage", map[string]any{"action": "dream-review"})
 			if err != nil {
 				return err
 			}
