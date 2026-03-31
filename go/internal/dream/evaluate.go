@@ -159,7 +159,7 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 
 		_, err = tx.Exec(ctx,
 			`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, scope, metadata)
-			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb)
 			ON CONFLICT (source_block_id, target_block_id) DO UPDATE SET
 				relationship = EXCLUDED.relationship,
 				confidence = EXCLUDED.confidence,
@@ -170,14 +170,18 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 		)
 		if err != nil {
 			slog.Warn("dream: write link failed", "source", sourceID, "target", link.TargetID, "error", err)
-			continue
+			break // TX is in failed state after PG error — cannot continue.
 		}
 		written++
 	}
 
-	// Audit log.
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("dream: commit links: %w", err)
+	}
+
+	// Audit log outside TX — failure here doesn't roll back links.
 	if written > 0 {
-		_, _ = tx.Exec(ctx,
+		_, _ = pool.Exec(ctx,
 			`INSERT INTO context_write_log
 				(block_id, decision, similarity, scope, block_title, block_category, metadata)
 			SELECT $1::uuid, 'dream_link', 0, scope, title, category,
@@ -187,7 +191,7 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 		)
 	}
 
-	return written, tx.Commit(ctx)
+	return written, nil
 }
 
 // buildEvalPrompt constructs the user prompt for relationship evaluation.

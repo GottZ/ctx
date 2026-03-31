@@ -24,6 +24,7 @@ services:
       OLLAMA_EMBED_DIMS: ${OLLAMA_EMBED_DIMS}
       OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL}
       OLLAMA_THINK: ${OLLAMA_THINK:-false}
+      CTX_DREAM_ENABLED: ${CTX_DREAM_ENABLED:-false}
       LISTEN_ADDR: ":8080"
     networks:
       - n8nintern
