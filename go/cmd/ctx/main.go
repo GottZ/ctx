@@ -22,6 +22,7 @@ func main() {
 		Long:  "ctx — The memory your LLM pretends to have. By GottZ.",
 	}
 
+	cli.Version = version
 	cli.RegisterCommands(root)
 
 	root.AddCommand(&cobra.Command{

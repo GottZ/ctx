@@ -41,6 +41,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(dreamCmd(getClient))
 	root.AddCommand(briefCmd(getClient))
 	root.AddCommand(persistCmd(getClient))
+	root.AddCommand(initCmd())
 }
 
 // ── query ────────────────────────────────────────────────────────────.
