@@ -295,17 +295,18 @@ func CleanupDanglingLinks(ctx context.Context, pool *pgxpool.Pool) (int, error) 
 
 // UpdateQualityScore adjusts a block's quality_score based on its dream link profile.
 // Formula: min(1.0, base + inbound_factor + outbound_factor + diversity_bonus).
-// Blocks without links keep their current score.
+// Only counts links with confidence >= 0.5 to prevent noise from inflating scores.
+// Blocks without qualifying links keep their current score.
 func UpdateQualityScore(ctx context.Context, pool *pgxpool.Pool, blockID string) error {
 	_, err := pool.Exec(ctx,
 		`UPDATE context_blocks SET quality_score = LEAST(1.0,
 			0.3
-			+ 0.1 * LEAST((SELECT count(*) FROM context_dream_links WHERE target_block_id = $1), 5)
-			+ 0.05 * LEAST((SELECT count(*) FROM context_dream_links WHERE source_block_id = $1), 5)
-			+ 0.15 * LEAST((SELECT count(DISTINCT relationship) FROM context_dream_links WHERE source_block_id = $1 OR target_block_id = $1), 4)
+			+ 0.1 * LEAST((SELECT count(*) FROM context_dream_links WHERE target_block_id = $1 AND confidence >= 0.5), 5)
+			+ 0.05 * LEAST((SELECT count(*) FROM context_dream_links WHERE source_block_id = $1 AND confidence >= 0.5), 5)
+			+ 0.15 * LEAST((SELECT count(DISTINCT relationship) FROM context_dream_links WHERE (source_block_id = $1 OR target_block_id = $1) AND confidence >= 0.5), 4)
 		)
 		WHERE id = $1
-		  AND EXISTS (SELECT 1 FROM context_dream_links WHERE source_block_id = $1 OR target_block_id = $1)`,
+		  AND EXISTS (SELECT 1 FROM context_dream_links WHERE (source_block_id = $1 OR target_block_id = $1) AND confidence >= 0.5)`,
 		blockID,
 	)
 	return err
