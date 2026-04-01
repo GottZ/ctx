@@ -139,8 +139,10 @@ func main() {
 		slog.Error("HTTP server shutdown error", "error", err)
 	}
 
-	// Scheduler is cancelled via the root context (ctx) above.
-	// Pool is closed via defer above.
+	// Wait for scheduler to finish (drains active dream cycle before pool closes).
+	slog.Info("waiting for scheduler shutdown")
+	scheduler.Wait()
 
+	// Pool is closed via defer above.
 	slog.Info("shutdown complete")
 }

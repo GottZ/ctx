@@ -25,7 +25,7 @@ const (
 	digestDebounce = 60 * time.Second
 
 	// dreamInterval is the interval for dream cross-reference cycles.
-	dreamInterval = 120 * time.Second
+	dreamInterval = 10 * time.Second
 
 	// guardBatchLimit is the max blocks per guard cycle.
 	guardBatchLimit = 100
@@ -55,14 +55,24 @@ type Scheduler struct {
 	lastWriteAt   time.Time
 	guardPending  bool
 	digestPending bool
+
+	// Graceful shutdown: tracks running dream cycles and scheduler lifecycle.
+	dreamWg sync.WaitGroup
+	runDone chan struct{}
 }
 
 // NewScheduler creates a new Scheduler.
 func NewScheduler(pool *pgxpool.Pool, config *Config) *Scheduler {
 	return &Scheduler{
-		pool:   pool,
-		config: config,
+		pool:    pool,
+		config:  config,
+		runDone: make(chan struct{}),
 	}
+}
+
+// Wait blocks until Run() has fully returned (including dream cycle drain).
+func (s *Scheduler) Wait() {
+	<-s.runDone
 }
 
 // QueryStart increments the active query counter. Called by query handlers.
@@ -88,6 +98,7 @@ func (s *Scheduler) NotifyWrite() {
 // Launches pgxlisten in a goroutine for LISTEN/NOTIFY and runs
 // guard/digest on timer-based fallback ticks.
 func (s *Scheduler) Run(ctx context.Context) {
+	defer close(s.runDone)
 	slog.Info("scheduler: starting background scheduler",
 		"guard_interval", guardInterval,
 		"digest_debounce", digestDebounce,
@@ -124,7 +135,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("scheduler: shutting down")
+			slog.Info("scheduler: shutting down, waiting for active dream cycle...")
+			s.dreamWg.Wait()
+			slog.Info("scheduler: shutdown complete")
 			return
 
 		case <-guardTicker.C:
@@ -187,6 +200,7 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 }
 
 // runDream executes one dream cross-reference cycle, yielding if queries are active.
+// Uses a separate context so the cycle can finish during graceful shutdown.
 func (s *Scheduler) runDream(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -200,17 +214,25 @@ func (s *Scheduler) runDream(ctx context.Context) {
 		return
 	}
 
-	slog.Info("scheduler: running dream cycle")
+	// Don't start new cycles during shutdown.
+	if ctx.Err() != nil {
+		return
+	}
+
+	s.dreamWg.Add(1)
+	defer s.dreamWg.Done()
+
+	// Dream gets its own context with the cycle timeout, independent of parent ctx.
+	// This allows the cycle to complete during graceful shutdown.
+	dreamCtx, cancel := context.WithTimeout(context.Background(), dream.CycleTimeout)
+	defer cancel()
 
 	linksCreated, err := dream.RunDreamCycle(
-		ctx, s.pool,
+		dreamCtx, s.pool,
 		s.config.OllamaHost, s.config.EmbedModel, s.config.ChatModel,
 		s.config.ReadScopes,
 	)
 	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
 		slog.Error("scheduler: dream cycle error", "error", err)
 		return
 	}
