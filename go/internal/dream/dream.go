@@ -183,7 +183,7 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 		FROM context_blocks
 		WHERE NOT is_archived
 		  AND embedding IS NOT NULL
-		  AND (block_type IS NULL OR block_type IN ('knowledge', 'source'))
+		  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
 		  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
 		ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
 		LIMIT 1

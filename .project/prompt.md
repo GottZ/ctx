@@ -1,6 +1,6 @@
 # ctx — Implementierungs-Prompt
 
-> **Zuletzt aktualisiert:** 2026-03-31 (Session 17 — Claude Code Source-Analyse, ctx brief, SubagentStart Hook, -p Armada)
+> **Zuletzt aktualisiert:** 2026-04-01 (Session 18 — v1 Bonsai komplett, Dream in Production, Store Hygiene, 4 Releases)
 
 ## Wer du bist
 
@@ -47,9 +47,11 @@ Schwächen durch externe Werkzeuge kompensieren: `test.sh --with-ollama` nach Ä
 - XML-Source-Wrapping, Lost-in-Middle Reordering, NO_RELEVANT_SOURCES Marker
 - Bilingual Fulltext: GENERATED COLUMNS ts_de + ts_en mit GIN-Indizes
 - HNSW Scope-Problem gelöst: `iterative_scan = relaxed_order` in ctx_rrf PG Function
-- **Synthese-Modell**: qwen3.5:9b (9.0 GB VRAM, think:false, 97.7% eval, +10% KW vs 4b)
+- **Synthese-Modell**: qwen3.5:9b (9.0 GB VRAM, think:false, 43/43 eval 100%, +10% KW vs 4b)
 - **Embedding**: qwen3-embedding:8b-ctx2k (1024d Matryoshka, num_ctx=2048, 5.3 GB)
-- **Prompt v5.2**: "fact extraction engine", 8 Constraints, temperature=0.1, repeat_penalty=1.1
+- **Prompt v5.3**: "fact extraction engine", 7 Constraints (Constraint #7 entfernt — filterSuperseded übernimmt), temperature=0.1, repeat_penalty=1.1
+- **filterSuperseded**: Temporal-gated (temporalResult==nil). Entfernt superseded Blöcke aus Results wenn Superseder auch präsent. Confidence-Gate ≥0.7
+- **FTS OR-Matching**: Infrastructure bereit (Migration 018, BuildORQuery), deaktiviert bei 420 Blöcken (20% Dead Weight, nicht 68%)
 
 ### Temporal Pipeline (Session 9-10)
 
@@ -62,19 +64,23 @@ Schwächen durch externe Werkzeuge kompensieren: `test.sh --with-ollama` nach Ä
 - **GottZ Temporal Dimension Table** (Migration 009): `context_temporal` mit partiellen B-Tree-Indizes, O(log n). Ersetzt Cyclic Phase Model.
 - Graph Association via 'link' Dimension (Migration 013)
 
-## Dream Mode (Session 15, async Cross-Reference Engine)
+## Dream Mode (Session 15+18, async Cross-Reference Engine, LIVE)
 
-- **Pipeline**: Pick Block → Extract Keywords → RRF Search per Keyword → LLM Evaluate → Write Links
+- **Pipeline**: Pick Block → Extract Keywords → RRF Search per Keyword → LLM Evaluate → Write Links → ApplySupersedes → PromoteToCanonical
 - **Picker**: Priority Queue (`dream_checked_at ASC NULLS FIRST, quality_score ASC`), `FOR UPDATE SKIP LOCKED`
 - **Keywords**: Deterministisch (Stoppwort-Filter + Scoring-Heuristik, Top-5), kein LLM
 - **Search**: 5 separate RRF-Calls (eine pro Keyword), existierende Pipeline
-- **Evaluation**: qwen3.5:9b, JSON-only, 4 Typen (topical/factual/causal/supersedes)
+- **Evaluation**: qwen3.5:9b, JSON-only, 4 Typen (topical/factual/causal/supersedes), Rules 12+13 (outdated facts, removed systems), updated_at im Prompt
 - **Link-Gewichtung**: `confidence × source_quality × target_quality`
-- **Gravity SKIP**: Gleichwertige Blöcke verschiedenen Datums → kein Link, Gravity löst das
+- **Supersedes Structural Check (V8)**: Same category + source älter als target + title similarity ≥ 0.25. 9B kann "komplementär" nicht von "ersetzt" unterscheiden — deterministisch in Go gelöst.
+- **ApplySupersedes**: Bei supersedes + weighted confidence ≥ 0.7 → block_type='snapshot', superseded_by gesetzt
+- **PromoteToCanonical**: quality_score ≥ 0.8 + keine inbound supersedes + block_type='knowledge' → 'canonical'
+- **Adaptive Cooldown**: Links geschrieben → 3 Tage, keine Links → 14 Tage
+- **Graceful Shutdown**: WaitGroup für laufende Zyklen, eigener Context (nicht an Parent-Cancel gebunden)
 - **Security**: Same-scope Links only (V5), is_archived Check (V6), UUID-Validierung, NaN-Guard, XML-Escaping, 90s Cycle-Timeout, Fail-fast bei Ollama-Ausfall
-- **Scheduler**: time.Ticker 120s, Demand-Interruption, CTX_DREAM_ENABLED Feature-Flag
+- **Scheduler**: time.Ticker 10s, Demand-Interruption, CTX_DREAM_ENABLED=true
 - **Schema**: Migration 016 (dream_checked_at, dream_cooldown_until auf context_blocks, context_dream_links Tabelle)
-- **Cooldown**: 7 Tage pro Block
+- **Erster autonomer Bonsai-Schnitt**: "Model A/B Testing Methodology" → Snapshot, superseded by "Future Model Testing" (conf 0.95, V8-validiert)
 
 ## Agent Briefing + SubagentStart Hook (Session 17)
 
@@ -133,32 +139,34 @@ Ergebnisse aus 11 Modell-Evaluationen (Session 3), Live-A/B-Tests (Session 5), 7
 - **6 von 10 Industrie-Empfehlungen widerlegt** bei empirischer Validierung auf echtem Korpus
 - **Cosine Pre-Filter schadet**: 3 Bugs (NaN, LIMIT, modellspezifisch), entfernt in Session 3
 - **Guard-Schwellen 0.95/0.85 hatten 80% False-Positive-Rate**: Auf 0.98/0.92 angehoben
+- **FTS Dead Weight 68% war falsch**: Empirisch 20% (Session 18, 15-Query-Stichprobe). OR-Matching bringt 4.5x Expansion aber verursacht LLM-Regressions bei 420 Blöcken.
+- **Dream 9B supersedes systematisch falsch**: Verwechselt "komplementär" mit "ersetzt". Struktureller Pre-Check (V8) in Go löst das. Prompt-Änderungen helfen nicht.
+- **1/8 Reconnaissance-Agents sachlich falsch** (Session 18): SQL-Inversions-Behauptung — Agent-Claims immer gegen Code verifizieren.
 
 Vollständige Modell-Evaluation: `memory/session3_model_evaluation.md`
 
-## Offene Arbeit (unumstritten)
+## Offene Arbeit
 
 ### P0 — Muss passieren
 
-- **v1 Bonsai Roadmap**: `.project/v1-roadmap.md` — 7 Phasen (Eval Evolution, Confidence Fix, Supersedes Filtering, FTS OR-Matching, Store Hygiene, Dream Bonsai, Prompt Reduktion). TDD-First.
-- **Session-10 Todos**: `.project/session-10-todos.md` — 30 Items (5 P0, 9 P1, 16 P2), teilweise erledigt durch Waves. Kritischste: seit/bis Multi-Token Regex (T02), FTS-Expansion Capping (T03), Embed-Prefix Capping (T05).
+- **Session-10 Todos**: `.project/session-10-todos.md` — 30 Items (5 P0, 9 P1, 16 P2), teilweise erledigt. Kritischste: seit/bis Multi-Token Regex (T02), FTS-Expansion Capping (T03), Embed-Prefix Capping (T05).
+- **B05 Eval flaky fixen**: Death-Spiral-Info nach Archivierung dünn. Block nachpflegen oder Test anpassen.
 
 ### P1 — Sollte bald passieren
 
-- **Dream Mode Phase 3**: Generative Synthese (Tages-/Wochenberichte), Draft Layer, Knowledge Graph Ops (Split/Supersede)
+- **Dream Mode Phase 3**: Generative Synthese (Tages-/Wochenberichte), Draft Layer, Knowledge Graph Ops (Split)
+- **FTS OR-Matching aktivieren**: Infrastructure bereit (M018), deaktiviert bei 420 Blöcken. Aktivieren bei >10K oder >40% Dead Weight.
+- **Dream Scale**: 10s Interval reicht für ~420. Batch-Processing (PickBlocks(n)) für 10K+ (v1.1).
 - **Ingestion Quality Gate**: Dirty Flag + Dream Promotion vor Obsidian-Import
-- **Gravity-Tuning**: Weight-Shift + Post-RRF Boost — SQL deployed (Migration 007), Go-Code NICHT verdrahtet. Erst sinnvoll nach content_dates >80% Abdeckung.
-- **Enhanced Embed-Prefix A/B-Test** (T06): Neuer Prefix 2.7x länger, nie gegen alten gemessen.
-- **FTS False-Positive-Rate messen** (T07): Monats-Terme matchen potenziell hunderte Blöcke.
+- **Gravity-Tuning**: Post-RRF Boost verdrahtet (Distance-only). 5th RRF Channel NICHT verdrahtet.
 
 ### P2 — Planen
 
+- **PromoteToCanonical Unit-Tests** (W10): SQL-only, niedrig-riskant, aber untested.
 - **Observability**: pprof, Pool-Stats, Ollama-Latenz-Logging
-- **Digest Category-Split**: Bricht bei ~1000 Blöcken (FATAL bei Scale)
-- **content_dates Erweiterung**: GENERATED Column extrahiert nur ISO-Daten, Monatsnamen brauchen Trigger
-- **OpenClaw ContextEngine-Plugin**: ctx Block 019d3ee3 (Backlog)
+- **Digest Category-Split**: Bricht bei ~1000 Blöcken
 - **Reranker evaluieren**: bge-reranker-v2-m3 oder Ollama /api/rerank
-- 16 weitere P2-Items in session-10-todos.md (Dead Code, Variable Naming, Edge Cases)
+- 16 weitere P2-Items in session-10-todos.md
 
 ## Bewusst verworfen
 
@@ -186,7 +194,8 @@ Vollständige Modell-Evaluation: `memory/session3_model_evaluation.md`
 4. `bash state.sh` — **Live-Systemzustand** (ersetzen statische Zahlen in Dokumenten)
 5. `cd go && go test ./... -short` — Unit-Tests (PASS erwartet)
 6. `bash test.sh --with-ollama` — 16/16 PASS erwartet, Config-Header prüfen
-7. `bash eval.sh` — 43/43 PASS erwartet (Baseline 2026-03-31, OR-Keywords + Source-Assertions aktiv)
-8. `ctx guard stats` — Guard-Zustand prüfen
-9. `ctx query "Warning 6 8 RLHF Bias"` — persistentes Muster, AKTIV kompensieren
-10. `git log --oneline -5` — Repo-Status (Branch: root, Remote: github.com/GottZ/ctx)
+7. `bash eval.sh` — 43/43 PASS erwartet (Baseline 2026-04-01, B05 flaky). Dream verändert den Store — bei neuen Failures prüfen ob Dream Blöcke als Snapshot markiert hat.
+8. `ctx dream stats` — Dream Coverage + Links prüfen (68% Coverage bei Session-18-Ende)
+9. `ctx guard stats` — Guard-Zustand prüfen
+10. `ctx query "Warning 6 8 RLHF Bias"` — persistentes Muster, AKTIV kompensieren
+11. `git log --oneline -5` — Repo-Status (Branch: root, Remote: github.com/GottZ/ctx)
