@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -167,19 +168,40 @@ var temporalIntentWords = []string{
 	"weekend", "recently", "soon", "last", "next", "ago", "since", "until", "by",
 }
 
+// temporalIntentSet is a pre-built set of temporalIntentWords for O(1) token lookup.
+var temporalIntentSet = func() map[string]bool {
+	m := make(map[string]bool, len(temporalIntentWords))
+	for _, w := range temporalIntentWords {
+		m[w] = true
+	}
+	return m
+}()
+
 // isoDateRe detects ISO dates in queries (BUG-1 fix).
 var isoDateRe = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}\b`)
 
 // HasTemporalIntent returns true if the query likely contains temporal references.
-// This is a cheap pre-filter — false positives are OK (the LLM will return empty dates).
+// This is a cheap pre-filter — false positives are acceptable, but T11 fixes
+// substring false positives ("Vorteil", "bevor", "Seite", "Bison", "context")
+// by using whole-token matching instead of strings.Contains.
 func HasTemporalIntent(query string) bool {
 	// Check for ISO dates first (BUG-1: "was war am 2026-03-27?" was missed).
 	if isoDateRe.MatchString(query) {
 		return true
 	}
 	lower := strings.ToLower(query)
-	for _, w := range temporalIntentWords {
-		if strings.Contains(lower, w) {
+	// T11: tokenize on whitespace and strip surrounding punctuation/symbols from
+	// each token before set lookup. This prevents "Vorteil" matching "vor",
+	// "context" matching "next", "Seite" matching "seit", etc.
+	for _, tok := range strings.Fields(lower) {
+		// Strip leading/trailing non-letter, non-digit runes (punctuation, brackets, quotes).
+		tok = strings.TrimFunc(tok, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		})
+		if tok == "" {
+			continue
+		}
+		if temporalIntentSet[tok] {
 			return true
 		}
 	}
@@ -220,16 +242,22 @@ func NormalizeTemporal(ctx context.Context, host, model, query string, now time.
 	return &result, nil
 }
 
-// maxFTSDates caps the number of unique dates expanded into FTS OR-terms.
-// At 1M+ blocks, each OR-term triggers a GIN posting-list scan. 10 dates ×
-// ~7 terms = ~70 OR-terms — safe for GIN. Month names and KW numbers are
-// always added deduplicated regardless of the cap.
-const maxFTSDates = 10
+// maxFTSDates caps the number of unique dates that get full per-day FTS expansion
+// (weekday DE/EN + ISO date = 3 terms each). At 1M+ blocks, each OR-term
+// triggers a GIN posting-list scan. A 30-day range with uncapped expansion
+// produces ~150 OR-terms — too many for GIN at scale.
+// 7 dates × 3 terms = 21 core terms + deduplicated months/KWs. Covers full calendar week without GIN pressure at 1M+ blocks.
+// Month names and ISO week numbers from ALL dates are always included.
+const maxFTSDates = 7
 
 // TemporalToFTSExpansion converts resolved dates to a websearch_to_tsquery OR string.
 // Enhanced: includes month names (DE+EN), YYYY-MM prefix, and ISO week numbers.
-// Scale-capped: only the first and last maxFTSDates/2 unique dates get full
-// per-day expansion. Months and ISO weeks from ALL dates are still included.
+//
+// Scale-capped (T03): at 1M+ blocks, GIN posting-list scans are expensive.
+// When >maxFTSDates unique dates, only start-date and end-date get full
+// per-day expansion (weekday DE/EN + ISO date). Months and ISO weeks from
+// ALL dates are still included (deduplicated). A 30-day range thus produces
+// ~9 core terms + ~6 month/KW terms instead of ~150 uncapped OR-terms.
 func TemporalToFTSExpansion(dates []TemporalDate) string {
 	if len(dates) == 0 {
 		return ""
@@ -327,10 +355,20 @@ var monthNameEN = [13]string{"", "January", "February", "March", "April", "May",
 // ~2 full date entries comfortably while preserving query signal.
 const maxEmbedPrefixLen = 150
 
+// maxEmbedPrefixDates is the date-count threshold for embed prefix collapsing.
+// At 1M+ blocks, a 7-day range with full per-date entries produces ~300 chars,
+// shifting the embedding centroid away from the actual query intent.
+// With >3 dates, the prefix collapses to "Start..End, Month, KWn" format
+// regardless of length — keeping the embedding focused on query semantics.
+const maxEmbedPrefixDates = 3
+
 // TemporalToEmbedPrefix builds an enriched date prefix for embedding augmentation.
 // Includes weekday, ISO date, month (DE+EN), year, and ISO week number.
-// Scale-capped: if the full prefix exceeds maxEmbedPrefixLen and there are
-// multiple dates, it collapses to a compact "Start..End, Month YYYY, KWn" summary.
+//
+// Scale-capped (T05): when >maxEmbedPrefixDates unique dates OR the full prefix
+// exceeds maxEmbedPrefixLen, it collapses to a compact
+// "Weekday YYYY-MM-DD..Weekday YYYY-MM-DD, Month, KWn..KWm" summary.
+// This prevents long date enumerations from shifting the embedding centroid.
 func TemporalToEmbedPrefix(dates []TemporalDate) string {
 	if len(dates) == 0 {
 		return ""
@@ -375,9 +413,10 @@ func TemporalToEmbedPrefix(dates []TemporalDate) string {
 
 	joined := strings.Join(parts, ". ") + "."
 
-	// Cap: if prefix is too long and we have multiple dates, collapse to summary.
+	// Cap (T05): collapse to summary when too many dates OR prefix too long.
+	// At 1M+ blocks, every extra character shifts the embedding centroid.
 	// Compact format: "Weekday YYYY-MM-DD..Weekday YYYY-MM-DD, Month/Month, KWn..KWm."
-	if len(joined) > maxEmbedPrefixLen && len(parsedDates) > 1 {
+	if len(parsedDates) > maxEmbedPrefixDates || (len(joined) > maxEmbedPrefixLen && len(parsedDates) > 1) {
 		first := parsedDates[0]
 		last := parsedDates[len(parsedDates)-1]
 		fKey := first.Format("2006-01-02")

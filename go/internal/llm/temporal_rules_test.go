@@ -223,6 +223,37 @@ func TestResolvePhrase(t *testing.T) {
 
 		// Two words where modifier is NOT a direction modifier → fallback to first word
 		{"Montag arbeite", true, "2026-03-23"}, // "arbeite" not temporal → uses "Montag"
+
+		// Month names: bare month resolves to 1st of that month
+		{"März", true, "2026-03-01"},       // current month, backward → same year
+		{"April", false, "2026-04-01"},     // next month, forward → same year
+		{"Februar", true, "2026-02-01"},    // past month, backward → same year
+		{"January", true, "2026-01-01"},    // English month name
+		{"December", false, "2026-12-01"},  // English, forward → same year
+
+		// Month position modifiers: Anfang/Mitte/Ende + month
+		{"Anfang März", true, "2026-03-01"},     // start of March
+		{"Mitte April", false, "2026-04-15"},    // mid April
+		{"Ende Februar", true, "2026-02-28"},    // end of February (2026 is not a leap year)
+		{"Ende März", true, "2026-03-31"},       // end of March = 31st
+		{"Anfang Januar", true, "2026-01-01"},   // start of January
+		{"Beginn Juni", false, "2026-06-01"},    // "Beginn" synonym for "Anfang"
+
+		// Month + Year: explicit year overrides direction logic
+		{"August 2024", true, "2024-08-01"},     // past year, explicit
+		{"August 2024", false, "2024-08-01"},    // direction irrelevant with explicit year
+		{"März 2025", true, "2025-03-01"},       // German month + year
+		{"January 2026", false, "2026-01-01"},   // English month + year
+		{"Dezember 2030", true, "2030-12-01"},   // future year, explicit
+
+		// Year + Month: reversed order
+		{"2024 August", true, "2024-08-01"},     // year first
+		{"2025 März", false, "2025-03-01"},      // year first, German
+
+		// Position + Month + Year (3 tokens)
+		{"Ende März 2025", true, "2025-03-31"},     // end of March 2025
+		{"Anfang Januar 2024", true, "2024-01-01"}, // start of January 2024
+		{"Mitte Juni 2025", false, "2025-06-15"},   // mid June 2025
 	}
 
 	for _, tt := range tests {
@@ -263,6 +294,21 @@ func TestMatchSeit(t *testing.T) {
 		{"seit letztem Montag arbeite ich daran", "2026-03-23", today},
 		{"seit letztem Freitag läuft das", "2026-03-27", today},
 		{"seit vorigem Dienstag kein Update", "2026-03-24", today},
+
+		// Month references after "seit"
+		{"seit Anfang März ist alles anders", "2026-03-01", today},
+		{"seit Mitte Februar kein Deploy", "2026-02-15", today},
+		{"seit Ende Januar läuft der Test", "2026-01-31", today},
+		{"seit März gibt es Probleme", "2026-03-01", today},
+
+		// Month + Year after "seit" (the "seit August 2024" bug)
+		{"seit August 2024 kein Deployment", "2024-08-01", today},
+		{"seit März 2025 läuft der Test", "2025-03-01", today},
+		{"seit January 2026 ist alles anders", "2026-01-01", today},
+
+		// Position + Month + Year after "seit" (3 tokens)
+		{"seit Ende März 2025 ist alles anders", "2025-03-31", today},
+		{"seit Anfang Januar 2024 kein Deploy", "2024-01-01", today},
 	}
 
 	for _, tt := range tests {
@@ -305,6 +351,15 @@ func TestMatchBis(t *testing.T) {
 		{"bis nächsten Freitag muss das fertig sein", today, "2026-04-03"},
 		{"bis nächsten Mittwoch brauche ich das", today, "2026-04-01"},
 		{"bis kommenden Donnerstag", today, "2026-04-02"},
+
+		// Month references after "bis"
+		{"bis Ende April muss das fertig sein", today, "2026-04-30"},
+		{"bis Anfang Mai brauche ich das", today, "2026-05-01"},
+		{"bis Mitte Juni", today, "2026-06-15"},
+
+		// Position + Month + Year after "bis" (3 tokens)
+		{"bis Ende März 2025 muss das fertig sein", today, "2025-03-31"},
+		{"bis Anfang Mai 2026 brauche ich das", today, "2026-05-01"},
 	}
 
 	for _, tt := range tests {
@@ -397,4 +452,353 @@ func datesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestDetectVerbTense_T13_Worden verifies that "worden" (Passiv-Perfekt Hilfsverb)
+// in constructions like "ist deployed worden" is recognised as past tense (T13).
+func TestDetectVerbTense_T13_Worden(t *testing.T) {
+	tests := []struct {
+		query    string
+		expected string
+	}{
+		{"ist deployed worden", "past"},
+		{"das Feature ist am Dienstag deployed worden", "past"},
+		{"der Service ist gestern gestartet worden", "past"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			got := DetectVerbTense(tt.query)
+			if got != tt.expected {
+				t.Errorf("DetectVerbTense(%q) = %q, want %q", tt.query, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestDetectVerbTense_T12_SeparableParticiples verifies that past participles of
+// separable verbs (prefix + ge + stem) are recognised as past tense (T12).
+func TestDetectVerbTense_T12_SeparableParticiples(t *testing.T) {
+	tests := []struct {
+		query    string
+		expected string
+	}{
+		{"das Meeting wurde abgesagt", "past"},
+		{"der Dienst wurde eingestellt", "past"},
+		{"das System wurde aufgesetzt", "past"},
+		{"die Config wurde umgestellt", "past"},
+		{"der Report wurde vorgelegt", "past"},
+		{"hat das Meeting abgesagt", "past"},
+		{"hat den Service eingestellt", "past"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			got := DetectVerbTense(tt.query)
+			if got != tt.expected {
+				t.Errorf("DetectVerbTense(%q) = %q, want %q", tt.query, got, tt.expected)
+			}
+		})
+	}
+}
+
+// --- T08: matchISODate multi-date support ---.
+
+func TestMatchISODate_T08_MultiDate(t *testing.T) {
+	tests := []struct {
+		name      string
+		query     string
+		wantDates []string // expected Date fields (sorted)
+		wantEnd   string   // if non-empty, expected End on first entry (range)
+		wantDir   string
+	}{
+		{
+			name:      "single ISO date",
+			query:     "was war am 2026-03-20?",
+			wantDates: []string{"2026-03-20"},
+			wantDir:   "past",
+		},
+		{
+			name:      "range with bis",
+			query:     "2026-03-20 bis 2026-03-25",
+			wantDates: []string{"2026-03-20"},
+			wantEnd:   "2026-03-25",
+			wantDir:   "range",
+		},
+		{
+			name:      "range with to",
+			query:     "from 2026-03-20 to 2026-03-25",
+			wantDates: []string{"2026-03-20"},
+			wantEnd:   "2026-03-25",
+			wantDir:   "range",
+		},
+		{
+			name:      "range with through",
+			query:     "2026-03-20 through 2026-03-25",
+			wantDates: []string{"2026-03-20"},
+			wantEnd:   "2026-03-25",
+			wantDir:   "range",
+		},
+		{
+			name:      "range with en-dash",
+			query:     "2026-03-20 – 2026-03-25",
+			wantDates: []string{"2026-03-20"},
+			wantEnd:   "2026-03-25",
+			wantDir:   "range",
+		},
+		{
+			name:      "range with em-dash",
+			query:     "2026-03-20 — 2026-03-25",
+			wantDates: []string{"2026-03-20"},
+			wantEnd:   "2026-03-25",
+			wantDir:   "range",
+		},
+		{
+			name:      "two dates without range indicator",
+			query:     "am 2026-03-20 und am 2026-03-25 war ich da",
+			wantDates: []string{"2026-03-20", "2026-03-25"},
+			wantDir:   "past",
+		},
+		{
+			name:      "three dates",
+			query:     "2026-03-20, 2026-03-22, 2026-03-25",
+			wantDates: []string{"2026-03-20", "2026-03-22", "2026-03-25"},
+			wantDir:   "past",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchISODate(tt.query)
+			if result == nil {
+				t.Fatalf("matchISODate(%q) returned nil", tt.query)
+			}
+
+			var gotDates []string
+			for _, d := range result.Dates {
+				gotDates = append(gotDates, d.Date)
+			}
+			sort.Strings(gotDates)
+			sort.Strings(tt.wantDates)
+
+			if !datesEqual(gotDates, tt.wantDates) {
+				t.Errorf("dates mismatch: got %v, want %v", gotDates, tt.wantDates)
+			}
+
+			if tt.wantEnd != "" {
+				if len(result.Dates) != 1 {
+					t.Fatalf("expected 1 range entry, got %d", len(result.Dates))
+				}
+				if result.Dates[0].End == nil {
+					t.Fatalf("expected End date, got nil")
+				}
+				if *result.Dates[0].End != tt.wantEnd {
+					t.Errorf("End: got %s, want %s", *result.Dates[0].End, tt.wantEnd)
+				}
+			}
+
+			if tt.wantDir != "" {
+				if result.Dates[0].Dir != tt.wantDir {
+					t.Errorf("Dir: got %s, want %s", result.Dates[0].Dir, tt.wantDir)
+				}
+			}
+		})
+	}
+}
+
+func TestMatchISODate_T08_NoMatch(t *testing.T) {
+	tests := []string{
+		"was ist der RRF-Score?",
+		"wie funktioniert der Guard?",
+		"show me all blocks",
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchISODate(q)
+			if result != nil {
+				t.Errorf("matchISODate(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+// --- T09: Weekday disjunction support in matchMultiKeyword ---.
+
+func TestMatchMultiKeyword_T09_WeekdayDisjunction(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+	tests := []struct {
+		name       string
+		query      string
+		wantCount  int // expected number of TemporalDate entries
+		wantRefs   []string
+	}{
+		{
+			name:      "Montag oder Dienstag (DE)",
+			query:     "Montag oder Dienstag",
+			wantCount: 2,
+			wantRefs:  []string{"Montag", "Dienstag"},
+		},
+		{
+			name:      "Monday or Tuesday (EN)",
+			query:     "Monday or Tuesday",
+			wantCount: 2,
+			wantRefs:  []string{"Monday", "Tuesday"},
+		},
+		{
+			name:      "drei Wochentage mit oder",
+			query:     "Montag oder Mittwoch oder Freitag",
+			wantCount: 3,
+			wantRefs:  []string{"Montag", "Mittwoch", "Freitag"},
+		},
+		{
+			name:      "Wochentage mit und",
+			query:     "Montag und Freitag",
+			wantCount: 2,
+			wantRefs:  []string{"Montag", "Freitag"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchMultiKeyword(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchMultiKeyword(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != tt.wantCount {
+				t.Fatalf("expected %d date entries, got %d: %+v", tt.wantCount, len(result.Dates), result.Dates)
+			}
+			for i, wantRef := range tt.wantRefs {
+				if result.Dates[i].Ref != wantRef {
+					t.Errorf("Dates[%d].Ref = %q, want %q", i, result.Dates[i].Ref, wantRef)
+				}
+			}
+		})
+	}
+}
+
+func TestMatchMultiKeyword_T09_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"was ist am Montag passiert?",   // single weekday, no conjunction
+		"wie funktioniert der Guard?",   // no temporal content
+		"show me all blocks",            // no conjunction
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchMultiKeyword(q, now)
+			if result != nil {
+				t.Errorf("matchMultiKeyword(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+// TestNormalizeTemporalRules_T09_Integration tests weekday disjunction through the main entry point.
+func TestNormalizeTemporalRules_T09_Integration(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+	result := NormalizeTemporalRules("Montag oder Dienstag", now)
+	if result == nil {
+		t.Fatal("NormalizeTemporalRules returned nil for weekday disjunction")
+	}
+	if len(result.Dates) != 2 {
+		t.Fatalf("expected 2 date entries, got %d", len(result.Dates))
+	}
+}
+
+// --- T20: separableVerbPairs token-order + article filter ---.
+
+func TestDetectVerbTense_T20_SeparableVerbFilter(t *testing.T) {
+	tests := []struct {
+		query    string
+		expected string
+	}{
+		// Genuine separable verbs → future intent
+		{"was steht Freitag an?", "future"},
+		{"das Meeting fällt morgen aus", "future"},
+		{"die Demo findet Dienstag statt", "future"},
+
+		// T20: "steht an der/dem/den..." → preposition, NOT separable verb
+		{"steht an der richtigen Position", "neutral"},
+		{"steht an dem Platz", "neutral"},
+		{"steht an einer Stelle", "neutral"},
+
+		// "steht an" without article → still future (genuine separable verb)
+		{"was steht an?", "future"},
+		{"steht morgen etwas an", "future"},
+
+		// prefix before stem → not matched by stem-before-prefix rule
+		{"an der Stelle steht ein Wert", "neutral"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			got := DetectVerbTense(tt.query)
+			if got != tt.expected {
+				t.Errorf("DetectVerbTense(%q) = %q, want %q", tt.query, got, tt.expected)
+			}
+		})
+	}
+}
+
+// --- T30: Levenshtein false positive prevention ---.
+
+func TestMaxEditDist_T30(t *testing.T) {
+	tests := []struct {
+		word     string
+		expected int
+	}{
+		{"vor", 0},        // 3 chars → 0
+		{"seit", 1},       // 4 chars → 1
+		{"heute", 1},      // 5 chars → 1
+		{"gestern", 1},    // 7 chars → 1 (T30: was 2)
+		{"morgen", 1},     // 6 chars → 1 (T30: was 2)
+		{"vorgestern", 1}, // 10 chars → 1 (T30: was 2)
+	}
+	for _, tt := range tests {
+		t.Run(tt.word, func(t *testing.T) {
+			got := maxEditDist(tt.word)
+			if got != tt.expected {
+				t.Errorf("maxEditDist(%q) = %d, want %d", tt.word, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFuzzyMatch_T30(t *testing.T) {
+	tests := []struct {
+		tok, target string
+		wantMatch   bool
+	}{
+		// T30: "western" ↔ "gestern" — same length, edit distance 1, different first char → NO match
+		{"western", "gestern", false},
+		// Genuine typo: same first char, edit distance 1 → match
+		{"gesterb", "gestern", true},
+		// Exact match → always match
+		{"gestern", "gestern", true},
+		// Short words: first-char rule not applied (< 6 chars)
+		{"mor", "vor", false}, // edit distance 1, but maxEditDist("vor")=0
+		{"vorr", "vor", false}, // 4 chars vs 3 chars target
+		{"heuze", "heute", true}, // edit distance 1, 5 chars target → OK (< 6)
+		// Long words with matching first char
+		{"vorgestern", "vorgestern", true}, // exact match
+		{"vorgestera", "vorgestern", true}, // edit distance 1, same prefix
+		// Long words with different first char
+		{"borgestern", "vorgestern", false}, // edit distance 1, different first char
+	}
+	for _, tt := range tests {
+		t.Run(tt.tok+"_vs_"+tt.target, func(t *testing.T) {
+			got := fuzzyMatch(tt.tok, tt.target)
+			if got != tt.wantMatch {
+				t.Errorf("fuzzyMatch(%q, %q) = %v, want %v (editDist=%d, maxDist=%d)",
+					tt.tok, tt.target, got, tt.wantMatch,
+					editDistance(tt.tok, tt.target), maxEditDist(tt.target))
+			}
+		})
+	}
+}
+
+func TestMatchSimpleKeywords_T30_WesternNoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	// "western" should NOT resolve as "gestern" via fuzzy matching
+	result := matchSimpleKeywords("western movies are great", now)
+	if result != nil {
+		t.Errorf("matchSimpleKeywords should return nil for 'western', got dates: %+v", result.Dates)
+	}
 }

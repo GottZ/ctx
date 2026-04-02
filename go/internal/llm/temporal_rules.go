@@ -78,7 +78,88 @@ func maxEditDist(word string) int {
 	if n <= 5 {
 		return 1
 	}
-	return 2
+	// T30: For 6+ char words, allow edit distance 1 but with first-char guard
+	// (see fuzzyMatch). Previous threshold of 2 caused false positives.
+	return 1
+}
+
+// fuzzyMatch returns true if tok is a plausible typo of target.
+// T30: For words >= 6 chars, requires the first rune to match, preventing
+// false positives like "western" ↔ "gestern" (edit distance 1, different initial).
+func fuzzyMatch(tok, target string) bool {
+	dist := editDistance(tok, target)
+	maxDist := maxEditDist(target)
+	if dist > maxDist {
+		return false
+	}
+	if dist == 0 {
+		return true
+	}
+	// T30: For 6+ char words, require first character match to eliminate
+	// unrelated words that happen to be 1 edit away.
+	n := utf8.RuneCountInString(target)
+	if n >= 6 {
+		rTok := []rune(tok)
+		rTarget := []rune(target)
+		if len(rTok) == 0 || len(rTarget) == 0 {
+			return false
+		}
+		if rTok[0] != rTarget[0] {
+			return false
+		}
+	}
+	return true
+}
+
+// --- Month Maps ---.
+
+var monthMapDE = map[string]time.Month{
+	"januar": time.January, "februar": time.February, "märz": time.March, "maerz": time.March,
+	"april": time.April, "mai": time.May, "juni": time.June,
+	"juli": time.July, "august": time.August, "september": time.September,
+	"oktober": time.October, "november": time.November, "dezember": time.December,
+}
+
+var monthMapEN = map[string]time.Month{
+	"january": time.January, "february": time.February, "march": time.March,
+	"april": time.April, "may": time.May, "june": time.June,
+	"july": time.July, "august": time.August, "september": time.September,
+	"october": time.October, "november": time.November, "december": time.December,
+}
+
+// lookupMonth returns the month for a German or English month name (lowercased).
+func lookupMonth(tok string) (time.Month, bool) {
+	if m, ok := monthMapDE[tok]; ok {
+		return m, true
+	}
+	if m, ok := monthMapEN[tok]; ok {
+		return m, true
+	}
+	return 0, false
+}
+
+// resolveMonthDate returns the 1st of the given month, picking the nearest occurrence
+// based on backward/forward direction. If backward: same or previous year. If forward: same or next year.
+func resolveMonthDate(m time.Month, backward bool, now time.Time) time.Time {
+	y := now.Year()
+	candidate := time.Date(y, m, 1, 0, 0, 0, 0, now.Location())
+	if backward {
+		if candidate.After(now) {
+			candidate = candidate.AddDate(-1, 0, 0)
+		}
+	} else {
+		if candidate.Before(now) {
+			candidate = candidate.AddDate(1, 0, 0)
+		}
+	}
+	return candidate
+}
+
+// monthPositionModifiers: "anfang" → 1st, "mitte" → 15th, "ende" → last day.
+var monthPositionModifiers = map[string]string{
+	"anfang": "start", "beginn": "start",
+	"mitte": "mid",
+	"ende": "end",
 }
 
 // --- Weekday Maps ---.
@@ -144,7 +225,7 @@ var explicitFutureSet = toWordSet(
 
 var perfektAux = toWordSet("habe", "hab", "hat", "haben", "hatte", "hatten", "bin", "ist", "sind")
 
-var perfektParticiplePat = regexp.MustCompile(`^ge\w+(t|en)$`)
+var perfektParticiplePat = regexp.MustCompile(`^(ab|an|auf|aus|bei|ein|mit|nach|um|vor|weg|zu|über|unter)?ge\w+(t|en)$`)
 
 var knownParticiples = toWordSet(
 	"gewesen", "gemacht", "gegangen", "gehabt", "gewollt", "gemusst",
@@ -174,6 +255,15 @@ var separableVerbPairs = [][2]string{
 	{"fällt", "aus"}, {"faellt", "aus"},
 	{"findet", "statt"},
 }
+
+// separableArticleSet contains German articles/demonstratives. When a separable verb prefix
+// is followed by one of these, it's a preposition phrase, not a separable verb (T20).
+// E.g., "steht an der Stelle" = preposition "an" + article "der", NOT "anstehen".
+var separableArticleSet = toWordSet(
+	"der", "die", "das", "dem", "den", "des",
+	"einer", "einem", "einen", "eine", "eines",
+	"dieser", "diesem", "diesen", "diese", "dieses",
+)
 
 // DetectVerbTense returns "past", "future", or "neutral" based on deterministic verb analysis.
 func DetectVerbTense(query string) string {
@@ -222,6 +312,8 @@ func DetectVerbTense(query string) string {
 
 	// Separable verbs: "steht...an", "fällt...aus", "findet...statt"
 	// Stem must appear BEFORE prefix in token order.
+	// T20: Filter false positives where the "prefix" is actually a preposition
+	// followed by an article (e.g., "steht an der Stelle" — "an" + article = preposition).
 	for _, pair := range separableVerbPairs {
 		stemIdx, prefixIdx := -1, -1
 		for i, tok := range tokens {
@@ -233,6 +325,11 @@ func DetectVerbTense(query string) string {
 			}
 		}
 		if stemIdx >= 0 && prefixIdx > stemIdx {
+			// T20: if the token after the prefix is an article, this is a
+			// preposition phrase, not a separable verb — skip.
+			if prefixIdx+1 < len(tokens) && separableArticleSet[tokens[prefixIdx+1]] {
+				continue
+			}
 			futureScore += 2
 			break
 		}
@@ -354,9 +451,9 @@ var (
 	reNextWeek        = regexp.MustCompile(`(?i)next\s+week`)
 	reLastMonth       = regexp.MustCompile(`(?i)last\s+month(?:'s)?`)
 	reThisMonth       = regexp.MustCompile(`(?i)this\s+month`)
-	reSeit            = regexp.MustCompile(`(?i)\bseit\s+((?:\S+\s+)?\S+)`)
-	reBis             = regexp.MustCompile(`(?i)\bbis\s+((?:\S+\s+)?\S+)`)
-	reVonBis          = regexp.MustCompile(`(?i)von\s+((?:\S+\s+)?\S+)\s+bis\s+((?:\S+\s+)?\S+)`)
+	reSeit            = regexp.MustCompile(`(?i)\bseit\s+((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	reBis             = regexp.MustCompile(`(?i)\bbis\s+((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	reVonBis          = regexp.MustCompile(`(?i)von\s+((?:\S+\s+)?(?:\S+\s+)?\S+)\s+bis\s+((?:\S+\s+)?(?:\S+\s+)?\S+)`)
 	reThrough         = regexp.MustCompile(`(?i)(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+through\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)`)
 	reAnfangWoche     = regexp.MustCompile(`(?i)anfang\s+(?:der|dieser)\s+woche`)
 	reEndeWoche       = regexp.MustCompile(`(?i)ende\s+(?:n[äa]chster|dieser|der)?\s*woche`)
@@ -388,9 +485,12 @@ func multiResult(dates []TemporalDate) *TemporalResult {
 
 // --- Pattern Matchers ---.
 
+// reISODateRangeIndicator matches range words between two ISO dates.
+var reISODateRangeIndicator = regexp.MustCompile(`(?i)\s*(?:bis|to|through|–|—)\s*`)
+
 func matchISODate(query string) *TemporalResult {
-	m := reISODatePat.FindString(query)
-	if m == "" {
+	matches := reISODatePat.FindAllString(query, -1)
+	if len(matches) == 0 {
 		return nil
 	}
 	tense := DetectVerbTense(query)
@@ -398,7 +498,36 @@ func matchISODate(query string) *TemporalResult {
 	if tense == "future" {
 		dir = "future"
 	}
-	return singleResult(m, m, dir)
+
+	if len(matches) == 1 {
+		return singleResult(matches[0], matches[0], dir)
+	}
+
+	// Two ISO dates: check for range indicator between them
+	if len(matches) == 2 {
+		idx1 := strings.Index(query, matches[0])
+		afterFirst := idx1 + len(matches[0])
+		idx2 := strings.Index(query[afterFirst:], matches[1])
+		if idx2 >= 0 {
+			between := query[afterFirst : afterFirst+idx2]
+			if reISODateRangeIndicator.MatchString(between) {
+				return rangeResult(matches[0]+" – "+matches[1], matches[0], matches[1], "range")
+			}
+		}
+		// Two dates without range indicator → multiple single entries
+		var dates []TemporalDate
+		for _, m := range matches {
+			dates = append(dates, TemporalDate{Ref: m, Date: m, Dir: dir})
+		}
+		return multiResult(dates)
+	}
+
+	// 3+ ISO dates → multiple single entries
+	var dates []TemporalDate
+	for _, m := range matches {
+		dates = append(dates, TemporalDate{Ref: m, Date: m, Dir: dir})
+	}
+	return multiResult(dates)
 }
 
 func matchVonBis(query string, now time.Time) *TemporalResult {
@@ -629,12 +758,73 @@ func matchWeekend(query string, now time.Time) *TemporalResult {
 	return rangeResult("am Wochenende", fmtDate(nextSat), fmtDate(nextSun), "future")
 }
 
+// findAllWeekdays returns all weekday tokens found in the query with their positions.
+func findAllWeekdays(tokens []string) []struct {
+	wd  time.Weekday
+	idx int
+	ref string
+} {
+	var results []struct {
+		wd  time.Weekday
+		idx int
+		ref string
+	}
+	for i, tok := range tokens {
+		if wd, ok := weekdayMapDE[tok]; ok {
+			results = append(results, struct {
+				wd  time.Weekday
+				idx int
+				ref string
+			}{wd, i, weekdayNameDE[wd]})
+		} else if wd, ok := weekdayMapEN[tok]; ok {
+			results = append(results, struct {
+				wd  time.Weekday
+				idx int
+				ref string
+			}{wd, i, weekdayNameEN[wd]})
+		}
+	}
+	return results
+}
+
 func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
-	// Check for "X und Y" pattern with two temporal keywords.
-	if !strings.Contains(lower, " und ") && !strings.Contains(lower, " and ") {
+	tokens := ruleTokenize(query)
+
+	hasConjunction := strings.Contains(lower, " und ") || strings.Contains(lower, " and ")
+	hasDisjunction := strings.Contains(lower, " oder ") || strings.Contains(lower, " or ")
+
+	if !hasConjunction && !hasDisjunction {
 		return nil
 	}
+
+	// First: check for weekday disjunction/conjunction ("Montag oder Dienstag", "Monday or Tuesday")
+	weekdays := findAllWeekdays(tokens)
+	if len(weekdays) >= 2 {
+		tense := DetectVerbTense(query)
+		backward := tense == "past"
+		dir := "future"
+		if backward {
+			dir = "past"
+		}
+		var dates []TemporalDate
+		seen := make(map[string]bool)
+		for _, w := range weekdays {
+			d := resolveWeekdayDate(w.wd, backward, now)
+			key := fmtDate(d)
+			if !seen[key] {
+				seen[key] = true
+				dates = append(dates, TemporalDate{
+					Ref: w.ref, Date: key, Dir: dir,
+				})
+			}
+		}
+		if len(dates) >= 2 {
+			return multiResult(dates)
+		}
+	}
+
+	// Then: simple keyword conjunction/disjunction (heute und morgen, etc.)
 	var dates []TemporalDate
 	seen := make(map[string]bool)
 	for _, kw := range simpleKeywords {
@@ -697,8 +887,7 @@ func matchSimpleKeywords(query string, now time.Time) *TemporalResult {
 
 	for _, tok := range tokens {
 		for _, kw := range simpleKeywords {
-			dist := editDistance(tok, kw.word)
-			if dist <= maxEditDist(kw.word) {
+			if fuzzyMatch(tok, kw.word) {
 				d := truncDate(kw.resolve(now))
 				key := fmtDate(d)
 				if !seen[key] {
@@ -728,8 +917,62 @@ func matchSimpleKeywords(query string, now time.Time) *TemporalResult {
 	return multiResult(dates)
 }
 
-// resolvePhrase resolves a 1-2 word temporal phrase like "letztem Montag", "nächsten Freitag", "vorgestern".
-// For 2-word phrases, tries modifier+keyword first, then falls back to first word only.
+// isYear returns true if tok is a 4-digit year between 1900 and 2100.
+func isYear(tok string) (int, bool) {
+	if len(tok) != 4 {
+		return 0, false
+	}
+	y, err := strconv.Atoi(tok)
+	if err != nil {
+		return 0, false
+	}
+	if y >= 1900 && y <= 2100 {
+		return y, true
+	}
+	return 0, false
+}
+
+// resolveMonthYear returns the 1st of the given month in the explicit year.
+func resolveMonthYear(m time.Month, year int, now time.Time) time.Time {
+	return time.Date(year, m, 1, 0, 0, 0, 0, now.Location())
+}
+
+// resolveMonthPosition applies a position modifier (start/mid/end) to a month date.
+func resolveMonthPosition(pos string, year int, m time.Month, loc *time.Location) time.Time {
+	switch pos {
+	case "mid":
+		return time.Date(year, m, 15, 0, 0, 0, 0, loc)
+	case "end":
+		return time.Date(year, m+1, 0, 0, 0, 0, 0, loc) // last day
+	default: // "start"
+		return time.Date(year, m, 1, 0, 0, 0, 0, loc)
+	}
+}
+
+// resolveThreeWordPhrase handles 3-token patterns: "Ende März 2025", "letzten August 2024".
+func resolveThreeWordPhrase(words []string, now time.Time) (time.Time, bool) {
+	// Position + Month + Year: "Ende März 2025" → last day of March 2025
+	if pos, ok := monthPositionModifiers[words[0]]; ok {
+		if m, mOk := lookupMonth(words[1]); mOk {
+			if y, yOk := isYear(words[2]); yOk {
+				return resolveMonthPosition(pos, y, m, now.Location()), true
+			}
+		}
+	}
+	// Modifier + Month + Year: "letzten August 2024" — modifier is redundant with explicit year
+	if explicitPastSet[words[0]] || explicitFutureSet[words[0]] {
+		if m, mOk := lookupMonth(words[1]); mOk {
+			if y, yOk := isYear(words[2]); yOk {
+				return resolveMonthYear(m, y, now), true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+// resolvePhrase resolves a 1-3 word temporal phrase like "letztem Montag", "nächsten Freitag",
+// "vorgestern", "August 2024", "Ende März 2025".
+// For multi-word phrases, tries specific patterns first, then falls back to fewer words.
 func resolvePhrase(phrase string, defaultBackward bool, now time.Time) time.Time {
 	words := strings.Fields(strings.ToLower(strings.Trim(phrase, ".,;:!?")))
 	if len(words) == 0 {
@@ -741,24 +984,44 @@ func resolvePhrase(phrase string, defaultBackward bool, now time.Time) time.Time
 		return resolveToken(words[0], defaultBackward, now)
 	}
 
-	// Two words: modifier + keyword
-	modifier := words[0]
-	keyword := words[1]
-
-	// Check if first word is a direction modifier and second word is a resolvable token
-	isModifier := explicitPastSet[modifier] || explicitFutureSet[modifier]
-	keywordResolvable := !resolveToken(keyword, defaultBackward, now).IsZero()
-
-	if isModifier && keywordResolvable {
-		// Determine direction from modifier
-		backward := defaultBackward
-		if explicitPastSet[modifier] {
-			backward = true
+	// --- 3-word patterns ---
+	if len(words) >= 3 {
+		if t, ok := resolveThreeWordPhrase(words[:3], now); ok {
+			return t
 		}
-		if explicitFutureSet[modifier] {
-			backward = false
+	}
+
+	// --- 2-word patterns ---
+	w0, w1 := words[0], words[1]
+
+	// Month + Year: "August 2024" → 2024-08-01 (explicit year, no direction guessing)
+	if m, mOk := lookupMonth(w0); mOk {
+		if y, yOk := isYear(w1); yOk {
+			return resolveMonthYear(m, y, now)
 		}
-		return resolveToken(keyword, backward, now)
+	}
+
+	// Year + Month: "2024 August" → 2024-08-01
+	if y, yOk := isYear(w0); yOk {
+		if m, mOk := lookupMonth(w1); mOk {
+			return resolveMonthYear(m, y, now)
+		}
+	}
+
+	// Direction modifier + keyword: "letztem Montag", "nächsten Freitag"
+	if explicitPastSet[w0] || explicitFutureSet[w0] {
+		if !resolveToken(w1, defaultBackward, now).IsZero() {
+			backward := explicitPastSet[w0]
+			return resolveToken(w1, backward, now)
+		}
+	}
+
+	// Month position modifier: "Anfang März" → 1st March, "Mitte April" → 15th, "Ende Februar" → last day
+	if pos, ok := monthPositionModifiers[w0]; ok {
+		if m, mOk := lookupMonth(w1); mOk {
+			base := resolveMonthDate(m, defaultBackward, now)
+			return resolveMonthPosition(pos, base.Year(), base.Month(), base.Location())
+		}
 	}
 
 	// Fallback: try first word as standalone token (greedy regex captured a non-temporal second word)
@@ -770,7 +1033,7 @@ func resolveToken(tok string, backward bool, now time.Time) time.Time {
 	tok = strings.ToLower(strings.Trim(tok, ".,;:!?"))
 	// Simple keywords
 	for _, kw := range simpleKeywords {
-		if tok == kw.word || editDistance(tok, kw.word) <= maxEditDist(kw.word) {
+		if fuzzyMatch(tok, kw.word) {
 			return truncDate(kw.resolve(now))
 		}
 	}
@@ -780,6 +1043,10 @@ func resolveToken(tok string, backward bool, now time.Time) time.Time {
 	}
 	if wd, ok := weekdayMapEN[tok]; ok {
 		return resolveWeekdayDate(wd, backward, now)
+	}
+	// Month names
+	if m, ok := lookupMonth(tok); ok {
+		return resolveMonthDate(m, backward, now)
 	}
 	// ISO date
 	if t, err := time.Parse("2006-01-02", tok); err == nil {

@@ -119,7 +119,7 @@ K05|synthesis|What is the native embedding dimension before Matryoshka truncatio
 # --- MULTI-HOP (requires synthesizing across multiple blocks) ---
 M01|synthesis|Why was qwen3:4b-instruct chosen over qwen3.5:9b and what are the token differences?|confident|death,spiral,instruct,token|Cross-block reasoning
 M02|synthesis|What is the full auth flow from API key to scope filtering?|confident|key,hash,scope|Auth pipeline
-M03|synthesis|How do Write Guard thresholds differ for temporal content vs normal content?|confident|temporal,0.98,0.92|Specialized thresholds
+M03|synthesis|What are the Write Guard similarity thresholds and what action happens at each level?|confident|0.98,0.92,archive~auto-archive,review~needs_review~flag|Guard threshold actions
 M04|synthesis|What are the differences between context-search and context-agent?|confident|search,agent,llm,compact|Endpoint comparison
 M05|synthesis|How does the bilingual retrieval gap affect German queries and what is the fix?|confident|german~deutsch~deutschen,translation~uebersetzung~übersetzung,retrieval|Problem + solution
 

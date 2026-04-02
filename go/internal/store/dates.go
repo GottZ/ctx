@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,9 +63,13 @@ func ExtractDates(content string) []time.Time {
 	}
 
 	// 1. ISO dates
+	// T25: time.Parse normalizes invalid dates silently (e.g., Feb 30 → Mar 2).
+	// After parsing, verify that the parsed day/month matches the input to reject invalid dates.
 	for _, m := range isoDateExtract.FindAllString(content, -1) {
 		if t, err := time.Parse("2006-01-02", m); err == nil {
-			add(t)
+			if !isDateNormalized(m, t) {
+				add(t)
+			}
 		}
 	}
 
@@ -73,7 +78,9 @@ func ExtractDates(content string) []time.Time {
 		if len(m) == 4 {
 			ds := m[3] + "-" + m[2] + "-" + m[1]
 			if t, err := time.Parse("2006-01-02", ds); err == nil {
-				add(t)
+				if !isDateNormalized(ds, t) {
+					add(t)
+				}
 			}
 		}
 	}
@@ -109,6 +116,23 @@ func ExtractDates(content string) []time.Time {
 	})
 
 	return dates
+}
+
+// isDateNormalized returns true if Go's time.Parse silently normalized the date
+// (e.g., "2026-02-30" parsed as 2026-03-02). Compares the parsed day/month against
+// the input string's day/month components. T25: prevents silent invalid-date acceptance.
+func isDateNormalized(isoInput string, parsed time.Time) bool {
+	// isoInput is "YYYY-MM-DD" format
+	parts := strings.Split(isoInput, "-")
+	if len(parts) != 3 {
+		return false
+	}
+	inputMonth, err1 := strconv.Atoi(parts[1])
+	inputDay, err2 := strconv.Atoi(parts[2])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return int(parsed.Month()) != inputMonth || parsed.Day() != inputDay
 }
 
 // ExtractDateStrings is a convenience wrapper that returns ISO date strings.

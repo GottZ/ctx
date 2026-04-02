@@ -32,10 +32,18 @@ func TestAttacker_HasTemporalIntent_SQLInjection_NoKeyword(t *testing.T) {
 }
 
 func TestAttacker_HasTemporalIntent_XSSPayload(t *testing.T) {
-	// ATTACK: XSS with temporal keyword embedded in script tag.
+	// ATTACK: XSS with temporal keyword embedded inside a script tag without spaces.
+	// T11 uses whole-token matching: "<script>alert('heute')</script>" is a single
+	// whitespace-free token. TrimFunc strips only the outermost non-letter chars,
+	// leaving "script>alert('heute')</script" — not a temporal keyword.
+	// Acceptable trade-off: XSS payloads are not real temporal queries.
 	input := "<script>alert('heute')</script>"
-	if !HasTemporalIntent(input) {
-		t.Error("should detect 'heute' inside XSS payload")
+	got := HasTemporalIntent(input)
+	t.Logf("XSS without whitespace separation detected: %v (T11: whole-token matching)", got)
+	// When the keyword is whitespace-separated (realistic user input), it still matches.
+	inputWithSpaces := "<script> heute </script>"
+	if !HasTemporalIntent(inputWithSpaces) {
+		t.Error("should detect 'heute' when separated by whitespace inside XSS payload")
 	}
 }
 
@@ -105,10 +113,12 @@ func TestAttacker_HasTemporalIntent_ExtremelyLongQuery(t *testing.T) {
 }
 
 func TestAttacker_HasTemporalIntent_ExtremelyLongQueryWithKeyword(t *testing.T) {
-	// ATTACK: 100KB query with temporal keyword buried at the end.
-	bigQuery := strings.Repeat("a", 100*1024) + "heute"
+	// ATTACK: Very long query with temporal keyword as a standalone token.
+	// T11: Fields-tokenization requires whitespace separation — "aaaa...heute" without
+	// a space is one token and won't match. Real queries always have whitespace.
+	bigQuery := strings.Repeat("word ", 50000) + "heute"
 	if !HasTemporalIntent(bigQuery) {
-		t.Error("should find 'heute' even at end of 100KB string")
+		t.Error("should find 'heute' as a standalone token in a long query")
 	}
 }
 
@@ -224,21 +234,28 @@ func TestAttacker_HasTemporalIntent_ISODateBoundaryBreak(t *testing.T) {
 }
 
 func TestAttacker_HasTemporalIntent_SubstringFalsePositives(t *testing.T) {
-	// ATTACK: Words that CONTAIN temporal keywords as substrings.
-	// "vor" is a temporal keyword — it will match inside "Vorschlag".
-	// "bis" is a keyword — it will match inside "Bison".
-	// Document these known false positives.
+	// T11 fix: whole-token matching eliminates the substring false positives that
+	// previously caused unnecessary LLM fallback calls.
 	inputs := []struct {
 		input    string
 		expected bool
 		note     string
 	}{
-		{"Vorschlag", true, "'vor' is substring — known false positive (pre-filter allows FP)"},
-		{"Bison", true, "'bis' is substring — known false positive"},
-		{"Jubiläum", false, "'juli' NOT substring of 'jubiläum' (j-u-b-i-l-ä-u-m)"},
-		{"Augenblick", false, "no temporal keyword substring"},
-		{"Maiwetter", true, "'mai' is substring — known false positive"},
+		{"Vorschlag", false, "T11: 'vor' no longer matches inside 'vorschlag' (whole-token)"},
+		{"Vorteil", false, "T11: 'vor' no longer matches inside 'vorteil'"},
+		{"bevor", false, "T11: 'vor' no longer matches inside 'bevor'"},
+		{"Bison", false, "T11: 'bis' no longer matches inside 'bison'"},
+		{"Seite", false, "T11: 'seit' no longer matches inside 'seite'"},
+		{"Maiwetter", false, "T11: 'mai' no longer matches inside 'maiwetter'"},
+		{"context", false, "T11: 'next' no longer matches inside 'context'"},
+		{"Jubiläum", false, "'juli' is not a substring of 'jubiläum' (j-u-b-i-l-ä-u-m)"},
+		{"Augenblick", false, "no temporal keyword is a substring"},
 		{"Sonnenbrand", false, "no temporal keyword is a substring of 'sonnenbrand'"},
+		// Positive cases: standalone temporal words still match.
+		{"vor 3 Tagen", true, "'vor' as standalone token"},
+		{"seit gestern", true, "'seit' and 'gestern' as standalone tokens"},
+		{"Maiwetter im Mai", true, "'mai' as standalone token after whitespace"},
+		{"was ist next week?", true, "'next' and 'week' as standalone tokens"},
 	}
 	for _, tc := range inputs {
 		t.Run(tc.input, func(t *testing.T) {
@@ -246,6 +263,50 @@ func TestAttacker_HasTemporalIntent_SubstringFalsePositives(t *testing.T) {
 			if got != tc.expected {
 				t.Logf("note: %s", tc.note)
 				t.Errorf("HasTemporalIntent(%q) = %v, want %v", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
+// ---.
+// T11 — HasTemporalIntent whole-token matching (regression suite)
+// ---.
+
+func TestT11_HasTemporalIntent_WordBoundary(t *testing.T) {
+	// Regression suite for T11: substring false positives fixed by whole-token matching.
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		// Must NOT trigger (were false-positives before T11)
+		{"Vorteil", false},
+		{"Vorschlag", false},
+		{"bevor", false},
+		{"Seite", false},
+		{"Bison", false},
+		{"Maiwetter", false},
+		{"context", false},
+		{"elasticSearch", false}, // "last" is NOT a substring match — different word entirely
+		// Must still trigger (genuine temporal words as whole tokens)
+		{"vor 3 Tagen", true},
+		{"seit gestern", true},
+		{"Maiwetter im Mai", true},
+		{"bis morgen", true},
+		{"was passierte letzten Montag?", true},
+		{"next week", true},
+		{"last year", true},
+		{"ago", true},
+		// Punctuation stripped correctly
+		{"(heute)", true},
+		{"gestern,", true},
+		{"morgen!", true},
+		{"\"vor\" kurzer Zeit", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := HasTemporalIntent(tt.input)
+			if got != tt.expected {
+				t.Errorf("HasTemporalIntent(%q) = %v, want %v", tt.input, got, tt.expected)
 			}
 		})
 	}
@@ -940,7 +1001,8 @@ func TestTemporalToFTSExpansion_SingleDate(t *testing.T) {
 }
 
 func TestTemporalToFTSExpansion_CappingPreservesMonthsAndKWs(t *testing.T) {
-	// 20 dates spanning 2 months — capped to 10, but both months should appear.
+	// 20 dates spanning 2 months — capped to maxFTSDates (3), but both months should appear.
+	// T03: At 1M+ blocks, only start+end dates get core expansion.
 	dates := make([]TemporalDate, 20)
 	for i := 0; i < 20; i++ {
 		d := time.Date(2026, 3, 20+i, 0, 0, 0, 0, time.UTC) // March 20 through April 8
@@ -954,8 +1016,8 @@ func TestTemporalToFTSExpansion_CappingPreservesMonthsAndKWs(t *testing.T) {
 	if !strings.Contains(result, "April") {
 		t.Error("April should be present in capped FTS expansion")
 	}
-	// Core terms should be capped: only 10 dates get weekday+ISO → 30 core terms.
-	// Count ISO dates in output.
+	// Core terms should be capped: only maxFTSDates dates get weekday+ISO.
+	// With maxFTSDates=3, half=1, so first 1 + last 1 = 2 dates expanded.
 	isoCount := 0
 	for i := 0; i < 20; i++ {
 		d := time.Date(2026, 3, 20+i, 0, 0, 0, 0, time.UTC)
@@ -1050,5 +1112,189 @@ func TestTemporalToEmbedPrefix_TwoDatesUnderCap(t *testing.T) {
 	if len(result) > maxEmbedPrefixLen {
 		t.Logf("two same-month dates triggered capping at %d chars (threshold %d): %s",
 			len(result), maxEmbedPrefixLen, result)
+	}
+}
+
+// --- T03 Capping Tests ---.
+
+func TestT03_FTSExpansion_ThreeDatesNotCapped(t *testing.T) {
+	// 3 unique dates < maxFTSDates(7) → all get core expansion (not capped).
+	dates := []TemporalDate{
+		{Ref: "a", Date: "2026-03-23", Dir: "past"},
+		{Ref: "b", Date: "2026-03-25", Dir: "past"},
+		{Ref: "c", Date: "2026-03-27", Dir: "past"},
+	}
+	result := TemporalToFTSExpansion(dates)
+	// All 3 dates should have core terms (weekday DE/EN + ISO).
+	for _, d := range []string{"2026-03-23", "2026-03-25", "2026-03-27"} {
+		if !strings.Contains(result, d) {
+			t.Errorf("date %s should be in uncapped output, got: %s", d, result)
+		}
+	}
+	// 3 dates × 3 core + 1 month (DE/EN/YYYY-MM) + 1 KW = 3*3 + 3 + 1 = 13 terms
+	termCount := strings.Count(result, " OR ") + 1
+	if termCount < 9 {
+		t.Errorf("3 dates should produce at least 9 core terms, got %d: %s", termCount, result)
+	}
+}
+
+func TestT03_FTSExpansion_FourDatesCapped(t *testing.T) {
+	// 4 unique dates < maxFTSDates(7) → NOT capped, all 4 get full core expansion.
+	dates := []TemporalDate{
+		{Ref: "a", Date: "2026-03-23", Dir: "past"},
+		{Ref: "b", Date: "2026-03-24", Dir: "past"},
+		{Ref: "c", Date: "2026-03-25", Dir: "past"},
+		{Ref: "d", Date: "2026-03-26", Dir: "past"},
+	}
+	result := TemporalToFTSExpansion(dates)
+	// All 4 dates must have core terms (weekday DE/EN + ISO).
+	for _, d := range []string{"2026-03-23", "2026-03-24", "2026-03-25", "2026-03-26"} {
+		if !strings.Contains(result, d) {
+			t.Errorf("date %s should be in uncapped output, got: %s", d, result)
+		}
+	}
+	// Month and KW from ALL dates should still be present.
+	if !strings.Contains(result, "März") {
+		t.Error("month name should always be present")
+	}
+}
+
+func TestT03_FTSExpansion_30DayRange(t *testing.T) {
+	// T03 core scenario: 30-day range should NOT produce ~150 OR-terms.
+	dates := make([]TemporalDate, 30)
+	for i := 0; i < 30; i++ {
+		d := time.Date(2026, 3, 1+i, 0, 0, 0, 0, time.UTC)
+		dates[i] = TemporalDate{Ref: "test", Date: d.Format("2006-01-02"), Dir: "past"}
+	}
+	result := TemporalToFTSExpansion(dates)
+	termCount := strings.Count(result, " OR ") + 1
+	// maxFTSDates=7, half=3: first 3 + last 3 = 6 core dates × 3 terms = 18 core terms
+	// + 2 months (März + April with DE/EN/prefix) + ~5 KWs = ~29 terms max.
+	if termCount > 35 {
+		t.Errorf("30-day range should produce ≤35 OR-terms (capped), got %d: %s", termCount, result)
+	}
+	// Start and end dates must be present.
+	if !strings.Contains(result, "2026-03-01") {
+		t.Error("first date 2026-03-01 should be in output")
+	}
+	if !strings.Contains(result, "2026-03-30") {
+		t.Error("last date 2026-03-30 should be in output")
+	}
+}
+
+func TestT03_FTSExpansion_EightDatesCapped(t *testing.T) {
+	// 8 unique dates > maxFTSDates(7) → capping kicks in.
+	// half = maxFTSDates/2 = 3: first 3 + last 3 = 6 dates get core expansion.
+	// Middle dates 2026-03-24..2026-03-27 (4 dates) are dropped from core terms.
+	dates := []TemporalDate{
+		{Ref: "a", Date: "2026-03-21", Dir: "past"},
+		{Ref: "b", Date: "2026-03-22", Dir: "past"},
+		{Ref: "c", Date: "2026-03-23", Dir: "past"},
+		{Ref: "d", Date: "2026-03-24", Dir: "past"},
+		{Ref: "e", Date: "2026-03-25", Dir: "past"},
+		{Ref: "f", Date: "2026-03-26", Dir: "past"},
+		{Ref: "g", Date: "2026-03-27", Dir: "past"},
+		{Ref: "h", Date: "2026-03-28", Dir: "past"},
+	}
+	result := TemporalToFTSExpansion(dates)
+	// First 3 and last 3 must have core terms (ISO date present).
+	for _, d := range []string{"2026-03-21", "2026-03-22", "2026-03-23", "2026-03-26", "2026-03-27", "2026-03-28"} {
+		if !strings.Contains(result, d) {
+			t.Errorf("boundary date %s should be in capped output, got: %s", d, result)
+		}
+	}
+	// Middle dates should NOT have ISO date core terms.
+	for _, d := range []string{"2026-03-24", "2026-03-25"} {
+		if strings.Contains(result, d) {
+			t.Errorf("middle date %s should NOT have core terms in capped output, got: %s", d, result)
+		}
+	}
+	// Month and KW from ALL dates should still be present.
+	if !strings.Contains(result, "März") {
+		t.Error("month name März should always be present")
+	}
+}
+
+// --- T05 Capping Tests ---.
+
+func TestT05_EmbedPrefix_ThreeDatesFullFormat(t *testing.T) {
+	// Exactly 3 dates = maxEmbedPrefixDates → full format (not collapsed).
+	dates := []TemporalDate{
+		{Ref: "a", Date: "2026-03-23", Dir: "past"},
+		{Ref: "b", Date: "2026-03-25", Dir: "past"},
+		{Ref: "c", Date: "2026-03-27", Dir: "past"},
+	}
+	result := TemporalToEmbedPrefix(dates)
+	// Full format includes individual entries separated by ". "
+	if !strings.Contains(result, "Montag 2026-03-23") {
+		t.Errorf("3 dates should use full format with weekday+date, got: %q", result)
+	}
+	if !strings.Contains(result, "Mittwoch 2026-03-25") {
+		t.Errorf("3 dates should use full format with weekday+date, got: %q", result)
+	}
+	if !strings.Contains(result, "Freitag 2026-03-27") {
+		t.Errorf("3 dates should use full format with weekday+date, got: %q", result)
+	}
+}
+
+func TestT05_EmbedPrefix_FourDatesCollapsed(t *testing.T) {
+	// 4 dates > maxEmbedPrefixDates(3) → always collapsed to summary.
+	dates := []TemporalDate{
+		{Ref: "a", Date: "2026-03-23", Dir: "past"},
+		{Ref: "b", Date: "2026-03-24", Dir: "past"},
+		{Ref: "c", Date: "2026-03-25", Dir: "past"},
+		{Ref: "d", Date: "2026-03-26", Dir: "past"},
+	}
+	result := TemporalToEmbedPrefix(dates)
+	// Should be compact "Start..End" format.
+	if !strings.Contains(result, "..") {
+		t.Errorf("4 dates should use collapsed format with '..', got: %q", result)
+	}
+	// Should contain start and end weekday+date.
+	if !strings.Contains(result, "Montag 2026-03-23") {
+		t.Errorf("collapsed format should contain start date, got: %q", result)
+	}
+	if !strings.Contains(result, "Donnerstag 2026-03-26") {
+		t.Errorf("collapsed format should contain end date, got: %q", result)
+	}
+	if !strings.HasSuffix(result, ".") {
+		t.Errorf("collapsed format should end with '.', got: %q", result)
+	}
+}
+
+func TestT05_EmbedPrefix_7DayRangeCompact(t *testing.T) {
+	// T05 core scenario: 7-day range should NOT produce ~300 chars.
+	dates := make([]TemporalDate, 7)
+	for i := 0; i < 7; i++ {
+		d := time.Date(2026, 3, 23+i, 0, 0, 0, 0, time.UTC) // Mon-Sun
+		dates[i] = TemporalDate{Ref: "test", Date: d.Format("2006-01-02"), Dir: "range"}
+	}
+	result := TemporalToEmbedPrefix(dates)
+	// 7 dates > maxEmbedPrefixDates(3) → must be collapsed.
+	if !strings.Contains(result, "..") {
+		t.Errorf("7 dates should use collapsed format, got: %q", result)
+	}
+	// "Montag 2026-03-23..Sonntag 2026-03-29, März, KW13."
+	if !strings.Contains(result, "Montag 2026-03-23") {
+		t.Errorf("should start with Monday, got: %q", result)
+	}
+	if !strings.Contains(result, "Sonntag 2026-03-29") {
+		t.Errorf("should end with Sunday, got: %q", result)
+	}
+	// Length must be well under 300 chars (the original problem).
+	if len(result) > 150 {
+		t.Errorf("7-day compact prefix should be ≤150 chars, got %d: %q", len(result), result)
+	}
+}
+
+func TestT05_EmbedPrefix_SingleDateNotCollapsed(t *testing.T) {
+	// 1 date ≤ maxEmbedPrefixDates → full format.
+	dates := []TemporalDate{{Ref: "heute", Date: "2026-03-25", Dir: "today"}}
+	result := TemporalToEmbedPrefix(dates)
+	if strings.Contains(result, "..") {
+		t.Errorf("single date should not use collapsed format, got: %q", result)
+	}
+	if !strings.Contains(result, "Mittwoch 2026-03-25") {
+		t.Errorf("single date should have full weekday+date, got: %q", result)
 	}
 }

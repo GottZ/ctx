@@ -172,11 +172,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		var err error
 		temporalResult, err = llm.NormalizeTemporal(ctx, h.ollamaHost, h.chatModel, originalQuery, now)
 		if err != nil {
-			slog.Warn("temporal LLM fallback failed, using rule-based expansion",
+			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,
 				"request_id", requestID,
 			)
-			temporal = rrf.ExpandTemporal(originalQuery, now)
 		} else if temporalResult != nil {
 			temporal = llm.TemporalToFTSExpansion(temporalResult.Dates)
 			slog.Info("temporal normalization (LLM fallback)",
@@ -187,18 +186,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 3c: Temporal prefix for embedding augmentation.
+	// Step 3c: Temporal prefix for embedding augmentation — DISABLED.
+	// T06: Embed prefix empirically worsens 4/5 queries (33% centroid shift).
+	// Temporal relevance handled by FTS expansion, Dimension Table, and Gravity Boost.
 	embedQuery := searchQuery
-	if temporalResult != nil {
-		prefix := llm.TemporalToEmbedPrefix(temporalResult.Dates)
-		if prefix != "" {
-			embedQuery = prefix + " " + searchQuery
-			slog.Info("temporal embed prefix",
-				"prefix", prefix,
-				"request_id", requestID,
-			)
-		}
-	}
 
 	// Step 4: Embed the search query with query prefix.
 	embedding, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedQuery, embed.PrefixQuery)
