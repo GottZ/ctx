@@ -41,9 +41,21 @@ type TemporalDate struct {
 }
 
 // TemporalResult is the output of LLM temporal normalization.
+//
+// DimensionWeights (GottZ Cyclic Phase Model): maps dimension name to query weight.
+// Dimensions: "linear" (absolute date distance), "weekday", "month", "week", "quarter", "year".
+// Sum should be ~1.0. Empty/nil means no cyclic gravity, linear-only scoring.
+//
+// Examples:
+//   "am 2026-03-27"    → {"linear": 1.0}
+//   "am Dienstag"      → {"linear": 0.6, "weekday": 0.4}
+//   "immer dienstags"  → {"weekday": 1.0}
+//   "Q1 Reviews"       → {"quarter": 1.0}
+//   "im März"          → {"linear": 0.5, "month": 0.5}
 type TemporalResult struct {
-	Dates []TemporalDate `json:"dates"`
-	Query string         `json:"query"`
+	Dates            []TemporalDate     `json:"dates"`
+	Query            string             `json:"query"`
+	DimensionWeights map[string]float64 `json:"dimension_weights,omitempty"`
 }
 
 // TemporalOptions returns Ollama options for temporal normalization.

@@ -393,3 +393,317 @@ func TestApplyGravityBoost_OriginalScorePreserved(t *testing.T) {
 		}
 	}
 }
+
+// --- Cyclic Gravity Tests (GottZ Cyclic Phase Model) ---.
+
+func TestCyclicDistance(t *testing.T) {
+	tests := []struct {
+		name     string
+		a, b     float64
+		expected float64
+	}{
+		{"identical", 0.5, 0.5, 0.0},
+		{"small_direct", 0.1, 0.2, 0.1},
+		{"large_wraps", 0.9, 0.1, 0.2},   // direct 0.8, wrapped 0.2
+		{"opposite", 0.0, 0.5, 0.5},      // maximum distance
+		{"monday_sunday", 0.0, 6.0 / 7.0, 1.0 / 7.0}, // they're neighbors
+		{"monday_wednesday", 0.0, 2.0 / 7.0, 2.0 / 7.0},
+		{"december_february", 11.0 / 12.0, 1.0 / 12.0, 2.0 / 12.0}, // month wrap
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CyclicDistance(tt.a, tt.b)
+			if math.Abs(got-tt.expected) > 1e-9 {
+				t.Errorf("CyclicDistance(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGaussianDecay(t *testing.T) {
+	tests := []struct {
+		name      string
+		distance  float64
+		sigma     float64
+		expected  float64 // approximate
+		tolerance float64
+	}{
+		{"zero_distance", 0.0, 0.07, 1.0, 1e-9},
+		{"one_sigma", 0.07, 0.07, 0.6065, 1e-3},                    // exp(-0.5)
+		{"two_sigma", 0.14, 0.07, 0.1353, 1e-3},                    // exp(-2)
+		{"weekday_adjacent", 1.0 / 7.0, 0.07, 0.128, 1e-2},         // ~0.128
+		{"weekday_two_apart", 2.0 / 7.0, 0.07, 2.7e-4, 5e-4},       // ~0.00027
+		{"zero_sigma_guard", 0.1, 0.0, 0.0, 1e-9},                  // guard against div0
+		{"opposite_cycle", 0.5, 0.07, 1.3e-11, 1e-10},              // ~0
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GaussianDecay(tt.distance, tt.sigma)
+			if math.Abs(got-tt.expected) > tt.tolerance {
+				t.Errorf("GaussianDecay(%v, %v) = %v, want ≈%v (tol %v)",
+					tt.distance, tt.sigma, got, tt.expected, tt.tolerance)
+			}
+		})
+	}
+}
+
+func TestDimensionPhase(t *testing.T) {
+	tests := []struct {
+		dim, val string
+		want     float64
+		wantErr  bool
+	}{
+		{"weekday", "1", 0.0, false},            // Monday
+		{"weekday", "2", 1.0 / 7.0, false},      // Tuesday
+		{"weekday", "7", 6.0 / 7.0, false},      // Sunday
+		{"month", "1", 0.0, false},              // January
+		{"month", "12", 11.0 / 12.0, false},     // December
+		{"quarter", "1", 0.0, false},
+		{"quarter", "4", 0.75, false},
+		{"week", "1", 0.0, false},
+		{"week", "13", 12.0 / 52.0, false},
+		// Errors
+		{"weekday", "0", 0.0, true},
+		{"weekday", "8", 0.0, true},
+		{"month", "13", 0.0, true},
+		{"year", "2026", 0.0, true}, // not cyclic
+		{"unknown", "1", 0.0, true},
+		{"weekday", "abc", 0.0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dim+"_"+tt.val, func(t *testing.T) {
+			got, err := DimensionPhase(tt.dim, tt.val)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("DimensionPhase(%q, %q) expected error, got %v", tt.dim, tt.val, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("DimensionPhase(%q, %q) unexpected error: %v", tt.dim, tt.val, err)
+			}
+			if math.Abs(got-tt.want) > 1e-9 {
+				t.Errorf("DimensionPhase(%q, %q) = %v, want %v", tt.dim, tt.val, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQueryPhase(t *testing.T) {
+	// Tuesday, 2026-03-31, March, Q1, ISO week 14
+	tuesday := mustDate("2026-03-31")
+	tests := []struct {
+		dim  string
+		want float64
+	}{
+		{"weekday", 1.0 / 7.0},  // ISO Tuesday=2 → (2-1)/7
+		{"month", 2.0 / 12.0},   // March=3 → 2/12
+		{"quarter", 0.0},        // Q1 → (1-1)/4
+		{"week", 13.0 / 52.0},   // week 14 → 13/52
+	}
+	for _, tt := range tests {
+		t.Run(tt.dim, func(t *testing.T) {
+			got, err := QueryPhase(tt.dim, tuesday)
+			if err != nil {
+				t.Fatalf("QueryPhase(%q) error: %v", tt.dim, err)
+			}
+			if math.Abs(got-tt.want) > 1e-9 {
+				t.Errorf("QueryPhase(%q, Tuesday) = %v, want %v", tt.dim, got, tt.want)
+			}
+		})
+	}
+
+	// Sunday ISO=7 edge case
+	sunday := mustDate("2026-03-29")
+	p, _ := QueryPhase("weekday", sunday)
+	if math.Abs(p-6.0/7.0) > 1e-9 {
+		t.Errorf("Sunday weekday phase = %v, want %v", p, 6.0/7.0)
+	}
+}
+
+func TestComputeCyclicGravity_WalkThrough(t *testing.T) {
+	// Walk-through from the vision spec: "immer dienstags" query, target=Tuesday.
+	// Tuesday block → gravity ≈ 1.0
+	// Wednesday block → gravity ≈ 0.128
+	// Saturday block → gravity ≈ ~0 (almost opposite on the 7-cycle)
+
+	tuesday := mustDate("2026-03-31")
+	dimWeights := map[string]float64{"weekday": 1.0}
+
+	tests := []struct {
+		name     string
+		dims     []TemporalDim
+		expected float64
+		tolerance float64
+	}{
+		{
+			name:      "tuesday_block_exact_match",
+			dims:      []TemporalDim{{"weekday", "2"}, {"month", "3"}},
+			expected:  1.0,
+			tolerance: 1e-9,
+		},
+		{
+			name:      "wednesday_block_adjacent",
+			dims:      []TemporalDim{{"weekday", "3"}, {"month", "3"}},
+			expected:  0.128,
+			tolerance: 0.005,
+		},
+		{
+			name:      "monday_block_adjacent",
+			dims:      []TemporalDim{{"weekday", "1"}},
+			expected:  0.128, // same distance as Wednesday (1/7)
+			tolerance: 0.005,
+		},
+		{
+			name:      "thursday_block_two_apart",
+			dims:      []TemporalDim{{"weekday", "4"}},
+			expected:  0.000268, // GaussianDecay(2/7, 0.07) ≈ 0.000268
+			tolerance: 1e-4,
+		},
+		{
+			name: "saturday_block_far",
+			dims: []TemporalDim{{"weekday", "6"}},
+			// Tue phase=1/7, Sat phase=5/7 → dist = min(4/7, 3/7) = 3/7 ≈ 0.4286
+			// GaussianDecay(3/7, 0.07) = exp(-18.74) ≈ 7.25e-9
+			// Demonstrates sharp sigma=0.07 cutoff: ≥3 weekdays away = effectively zero.
+			expected:  7.25e-9,
+			tolerance: 1e-8,
+		},
+		{
+			name:      "no_weekday_dim",
+			dims:      []TemporalDim{{"month", "3"}},
+			expected:  0.0, // no weekday match
+			tolerance: 1e-9,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ComputeCyclicGravity(dimWeights, tt.dims, tuesday)
+			if math.Abs(got-tt.expected) > tt.tolerance {
+				t.Errorf("ComputeCyclicGravity() = %v, want %v ± %v", got, tt.expected, tt.tolerance)
+			}
+		})
+	}
+}
+
+func TestComputeCyclicGravity_MultiDim(t *testing.T) {
+	// "am Dienstag im März" → {"linear": 0.5, "weekday": 0.3, "month": 0.2}
+	// target: Tuesday 2026-03-31 (March)
+	tuesday := mustDate("2026-03-31")
+	dimWeights := map[string]float64{
+		"linear":  0.5, // ignored by ComputeCyclicGravity
+		"weekday": 0.3,
+		"month":   0.2,
+	}
+
+	// Block: Tuesday in March → both match exactly
+	// gravity = 0.3 * 1.0 + 0.2 * 1.0 = 0.5
+	dims := []TemporalDim{{"weekday", "2"}, {"month", "3"}}
+	got := ComputeCyclicGravity(dimWeights, dims, tuesday)
+	if math.Abs(got-0.5) > 1e-9 {
+		t.Errorf("full match: got %v, want 0.5", got)
+	}
+
+	// Block: Tuesday in September → weekday matches, month off by 6
+	dims2 := []TemporalDim{{"weekday", "2"}, {"month", "9"}}
+	got2 := ComputeCyclicGravity(dimWeights, dims2, tuesday)
+	// weekday contributes 0.3 * 1.0 = 0.3
+	// month: dist = min(|2/12-8/12|, 1 - |...|) = min(0.5, 0.5) = 0.5
+	//        decay = GaussianDecay(0.5, 0.10) ≈ e^-12.5 ≈ 3.7e-6
+	// total ≈ 0.3
+	if math.Abs(got2-0.3) > 1e-3 {
+		t.Errorf("weekday-match, month-far: got %v, want ≈0.3", got2)
+	}
+}
+
+func TestComputeCyclicGravity_BestMatchPerDimension(t *testing.T) {
+	// Block has MULTIPLE weekday entries (meeting Mon + result Tue).
+	// Query "immer dienstags" → should take BEST match (Tue), not sum.
+	tuesday := mustDate("2026-03-31")
+	dimWeights := map[string]float64{"weekday": 1.0}
+	dims := []TemporalDim{
+		{"weekday", "1"}, // Monday
+		{"weekday", "2"}, // Tuesday — best match
+		{"weekday", "4"}, // Thursday
+	}
+	got := ComputeCyclicGravity(dimWeights, dims, tuesday)
+	if math.Abs(got-1.0) > 1e-9 {
+		t.Errorf("best-match: got %v, want 1.0 (Tuesday best)", got)
+	}
+}
+
+func TestComputeCyclicGravity_LinearOnly(t *testing.T) {
+	// When dimWeights only has "linear", cyclic gravity returns 0
+	// (linear is handled by ApplyGravityBoost, not this function).
+	dimWeights := map[string]float64{"linear": 1.0}
+	dims := []TemporalDim{{"weekday", "2"}, {"month", "3"}}
+	got := ComputeCyclicGravity(dimWeights, dims, mustDate("2026-03-31"))
+	if got != 0 {
+		t.Errorf("linear-only: got %v, want 0", got)
+	}
+}
+
+func TestComputeCyclicGravity_EmptyInputs(t *testing.T) {
+	now := mustDate("2026-03-31")
+	// Empty weights
+	if g := ComputeCyclicGravity(nil, []TemporalDim{{"weekday", "2"}}, now); g != 0 {
+		t.Errorf("nil weights: got %v, want 0", g)
+	}
+	// Empty dims
+	if g := ComputeCyclicGravity(map[string]float64{"weekday": 1.0}, nil, now); g != 0 {
+		t.Errorf("nil dims: got %v, want 0", g)
+	}
+}
+
+func TestApplyCyclicGravityBoost(t *testing.T) {
+	// 3 blocks: Tuesday block (strong match), Wednesday block (weak), no-dim block (neutral).
+	tuesday := mustDate("2026-03-31")
+	dimWeights := map[string]float64{"weekday": 1.0}
+
+	results := []SearchResult{
+		{ID: "no-dim", RRFScore: 0.100},
+		{ID: "tue-block", RRFScore: 0.080},
+		{ID: "wed-block", RRFScore: 0.090},
+	}
+	blockDims := map[string][]TemporalDim{
+		"tue-block": {{"weekday", "2"}},
+		"wed-block": {{"weekday", "3"}},
+		// no-dim has no entry
+	}
+
+	boosted := ApplyCyclicGravityBoost(results, blockDims, dimWeights, tuesday, 0.30)
+
+	// Expected ordering: Tuesday block should rise above Wednesday block and no-dim
+	// tue-block: 0.080 * (1 + 0.30 * 1.0/1.0) = 0.104
+	// wed-block: 0.090 * (1 + 0.30 * 0.128/1.0) ≈ 0.0935
+	// no-dim: 0.100 * (1 + 0.30 * 0/1.0) = 0.100
+	if boosted[0].ID != "tue-block" {
+		t.Errorf("expected tue-block first, got %s", boosted[0].ID)
+	}
+	if boosted[2].ID != "wed-block" {
+		t.Errorf("expected wed-block last, got %s (order: %s, %s, %s)",
+			boosted[2].ID, boosted[0].ID, boosted[1].ID, boosted[2].ID)
+	}
+
+	// Original scores preserved
+	for _, r := range boosted {
+		if r.RRFScoreOriginal == nil {
+			t.Errorf("RRFScoreOriginal not set for %s", r.ID)
+		}
+	}
+}
+
+func TestApplyCyclicGravityBoost_NoOp(t *testing.T) {
+	results := []SearchResult{{ID: "a", RRFScore: 0.1}}
+	// Zero boost weight → no change
+	boosted := ApplyCyclicGravityBoost(results, nil, map[string]float64{"weekday": 1.0}, mustDate("2026-03-31"), 0.0)
+	if len(boosted) != 1 || boosted[0].RRFScore != 0.1 {
+		t.Errorf("zero boost weight should no-op")
+	}
+	// Empty results
+	empty := ApplyCyclicGravityBoost(nil, nil, map[string]float64{"weekday": 1.0}, mustDate("2026-03-31"), 0.3)
+	if len(empty) != 0 {
+		t.Errorf("empty results should return empty")
+	}
+}

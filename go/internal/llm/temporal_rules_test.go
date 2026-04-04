@@ -802,3 +802,109 @@ func TestMatchSimpleKeywords_T30_WesternNoMatch(t *testing.T) {
 		t.Errorf("matchSimpleKeywords should return nil for 'western', got dates: %+v", result.Dates)
 	}
 }
+
+// --- DimensionWeights Tests (GottZ Cyclic Phase Model) ---.
+
+func TestDimensionWeights_PerMatcher(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+
+	tests := []struct {
+		name           string
+		query          string
+		expectedWeights map[string]float64
+	}{
+		// ISO dates → pure linear
+		{"iso_date", "was war am 2026-03-27", map[string]float64{"linear": 1.0}},
+		// Recurrence → pure weekday
+		{"immer_dienstags", "immer dienstags passiert das", map[string]float64{"weekday": 1.0}},
+		{"jeden_montag", "jeden Montag standup", map[string]float64{"weekday": 1.0}},
+		{"every_friday", "every friday deployment", map[string]float64{"weekday": 1.0}},
+		{"plural_implies_recur", "was passiert dienstags", map[string]float64{"weekday": 1.0}},
+		// Bare weekday (no recurrence) → linear + weekday mix
+		{"am_dienstag", "was war am Dienstag", map[string]float64{"linear": 0.6, "weekday": 0.4}},
+		{"last_monday", "letzten Montag", map[string]float64{"linear": 0.6, "weekday": 0.4}},
+		// Seit/Bis → linear + month
+		{"seit_maerz", "seit März", map[string]float64{"linear": 0.8, "month": 0.2}},
+		{"bis_freitag", "bis Freitag", map[string]float64{"linear": 0.8, "month": 0.2}},
+		// Relative weeks → linear + week
+		{"letzte_woche", "letzte Woche", map[string]float64{"linear": 0.7, "week": 0.3}},
+		{"anfang_woche", "Anfang der Woche", map[string]float64{"linear": 0.7, "week": 0.3}},
+		// Relative months → linear + month
+		{"letzten_monat", "letzten Monat", map[string]float64{"linear": 0.5, "month": 0.5}},
+		// Relative days → pure linear
+		{"vor_3_tagen", "vor 3 Tagen", map[string]float64{"linear": 1.0}},
+		{"in_5_tagen", "in 5 Tagen", map[string]float64{"linear": 1.0}},
+		// Weekend → pure weekday
+		{"wochenende", "am Wochenende", map[string]float64{"weekday": 1.0}},
+		// Simple keywords → pure linear
+		{"heute", "heute", map[string]float64{"linear": 1.0}},
+		{"gestern", "gestern", map[string]float64{"linear": 1.0}},
+		{"morgen", "morgen", map[string]float64{"linear": 1.0}},
+		// Range patterns → linear + weekday
+		{"von_mo_bis_fr", "von Montag bis Freitag", map[string]float64{"linear": 0.6, "weekday": 0.4}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := NormalizeTemporalRules(tt.query, now)
+			if result == nil {
+				t.Fatalf("NormalizeTemporalRules(%q) returned nil", tt.query)
+			}
+			if result.DimensionWeights == nil {
+				t.Fatalf("DimensionWeights is nil for query %q (matched: %+v)", tt.query, result.Dates)
+			}
+			if !dwEqual(result.DimensionWeights, tt.expectedWeights) {
+				t.Errorf("query=%q\n  got weights: %v\n  want:        %v", tt.query, result.DimensionWeights, tt.expectedWeights)
+			}
+		})
+	}
+}
+
+func TestHasRecurrence(t *testing.T) {
+	tests := []struct {
+		query    string
+		expected bool
+	}{
+		{"immer dienstags", true},
+		{"jeden Montag", true},
+		{"jede Woche", true},
+		{"wöchentlich", true},
+		{"monatlich Routine", true},
+		{"täglich standup", true},
+		{"every tuesday", true},
+		{"weekly review", true},
+		{"dienstags", true},          // plural implies recurrence
+		{"montags meeting", true},    // plural implies recurrence
+		{"am Dienstag", false},       // singular, no recurrence keyword
+		{"letzten Montag", false},    // specific past date
+		{"heute", false},             // no recurrence
+		{"was war gestern", false},   // past event, not recurring
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			tokens := ruleTokenize(tt.query)
+			got := hasRecurrence(tokens)
+			if got != tt.expected {
+				t.Errorf("hasRecurrence(%q) = %v, want %v", tt.query, got, tt.expected)
+			}
+		})
+	}
+}
+
+// dwEqual compares two DimensionWeights maps for equality.
+func dwEqual(a, b map[string]float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		bv, ok := b[k]
+		if !ok {
+			return false
+		}
+		if v != bv {
+			return false
+		}
+	}
+	return true
+}

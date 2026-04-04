@@ -178,6 +178,51 @@ func FetchContentDates(ctx context.Context, pool *pgxpool.Pool, blockIDs []strin
 	return result, nil
 }
 
+// BlockDimension is the (dimension, value) pair returned by FetchBlockDimensions.
+// Keeps the type minimal (no source_date) to match rrf.TemporalDim semantics.
+type BlockDimension struct {
+	Dimension string
+	Value     string
+}
+
+// FetchBlockDimensions retrieves EAV temporal dimensions for multiple blocks.
+// Filters by the requested dimension names (e.g. ["weekday", "month"]).
+// Sentinel "_none" rows are excluded automatically.
+//
+// Returns map[blockID][]BlockDimension for use in cyclic gravity computation.
+// Blocks with no matching dimensions are simply absent from the map.
+func FetchBlockDimensions(ctx context.Context, pool *pgxpool.Pool, blockIDs []string, dimensions []string) (map[string][]BlockDimension, error) {
+	if len(blockIDs) == 0 || len(dimensions) == 0 {
+		return make(map[string][]BlockDimension), nil
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT block_id, dimension, value
+		 FROM context_temporal
+		 WHERE block_id = ANY($1)
+		   AND dimension = ANY($2)
+		   AND dimension != '_none'`,
+		blockIDs, dimensions,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: temporal: fetch block dimensions: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]BlockDimension, len(blockIDs))
+	for rows.Next() {
+		var blockID, dim, val string
+		if err := rows.Scan(&blockID, &dim, &val); err != nil {
+			return nil, fmt.Errorf("store: temporal: fetch block dimensions scan: %w", err)
+		}
+		result[blockID] = append(result[blockID], BlockDimension{Dimension: dim, Value: val})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: temporal: fetch block dimensions rows: %w", err)
+	}
+	return result, nil
+}
+
 // BackfillTemporal populates context_temporal for all blocks that don't have
 // temporal dimensions yet. Processes in batches of 50.
 // Returns the number of blocks processed.

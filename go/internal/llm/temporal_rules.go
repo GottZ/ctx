@@ -167,11 +167,17 @@ var monthPositionModifiers = map[string]string{
 var weekdayMapDE = map[string]time.Weekday{
 	"montag": time.Monday, "dienstag": time.Tuesday, "mittwoch": time.Wednesday,
 	"donnerstag": time.Thursday, "freitag": time.Friday, "samstag": time.Saturday, "sonntag": time.Sunday,
+	// Plural forms signal recurrence ("immer dienstags") — same weekday, handled by hasRecurrence
+	"montags": time.Monday, "dienstags": time.Tuesday, "mittwochs": time.Wednesday,
+	"donnerstags": time.Thursday, "freitags": time.Friday, "samstags": time.Saturday, "sonntags": time.Sunday,
 }
 
 var weekdayMapEN = map[string]time.Weekday{
 	"monday": time.Monday, "tuesday": time.Tuesday, "wednesday": time.Wednesday,
 	"thursday": time.Thursday, "friday": time.Friday, "saturday": time.Saturday, "sunday": time.Sunday,
+	// Plural forms for recurrence ("every Tuesdays", "on Mondays")
+	"mondays": time.Monday, "tuesdays": time.Tuesday, "wednesdays": time.Wednesday,
+	"thursdays": time.Thursday, "fridays": time.Friday, "saturdays": time.Saturday, "sundays": time.Sunday,
 }
 
 // findWeekday returns the first weekday found in tokens.
@@ -465,6 +471,82 @@ var (
 	reNextWDThrough   = regexp.MustCompile(`(?i)next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+through\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)`)
 )
 
+// --- Recurrence Detection (GottZ Cyclic Phase Model) ---.
+
+// recurrenceKeywords signal that a query is about a cyclic pattern rather than
+// a specific date. "immer dienstags" vs "am Dienstag" — the former activates
+// pure weekday dimension, the latter mixes linear + weekday.
+var recurrenceKeywords = map[string]bool{
+	// German
+	"immer": true, "jeden": true, "jede": true, "jedes": true,
+	"regelmäßig": true, "regelmaessig": true,
+	"wöchentlich": true, "woechentlich": true,
+	"monatlich": true, "täglich": true, "taeglich": true,
+	"jährlich": true, "jaehrlich": true, "quartalsweise": true,
+	// Common plural -s suffix: "dienstags", "montags" — handled by hasRecurrenceSuffix
+	// English
+	"always": true, "every": true, "each": true,
+	"weekly": true, "monthly": true, "daily": true,
+	"yearly": true, "quarterly": true,
+}
+
+// hasRecurrence returns true if any token signals cyclic/recurring intent.
+// Catches explicit keywords (immer, jeden, every) AND German weekday -s suffix
+// (dienstags, montags) which implies "on Tuesdays" = recurring.
+func hasRecurrence(tokens []string) bool {
+	for _, tok := range tokens {
+		if recurrenceKeywords[tok] {
+			return true
+		}
+		// German weekday plural: "dienstags", "montags" etc.
+		if isWeekdayPlural(tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// isWeekdayPlural returns true for German weekday names with -s suffix
+// (dienstags, montags, mittwochs, donnerstags, freitags, samstags, sonntags).
+func isWeekdayPlural(tok string) bool {
+	switch tok {
+	case "montags", "dienstags", "mittwochs", "donnerstags",
+		"freitags", "samstags", "sonntags":
+		return true
+	}
+	return false
+}
+
+// --- DimensionWeights Factories ---.
+
+func dwLinear() map[string]float64 {
+	return map[string]float64{"linear": 1.0}
+}
+
+func dwLinearWeekday() map[string]float64 {
+	return map[string]float64{"linear": 0.6, "weekday": 0.4}
+}
+
+func dwWeekday() map[string]float64 {
+	return map[string]float64{"weekday": 1.0}
+}
+
+func dwLinearWeek() map[string]float64 {
+	return map[string]float64{"linear": 0.7, "week": 0.3}
+}
+
+func dwLinearMonth() map[string]float64 {
+	return map[string]float64{"linear": 0.5, "month": 0.5}
+}
+
+func dwLinearMonthSeit() map[string]float64 {
+	return map[string]float64{"linear": 0.8, "month": 0.2}
+}
+
+func dwLinearRange() map[string]float64 {
+	return map[string]float64{"linear": 0.6, "weekday": 0.4}
+}
+
 // --- Result Helpers ---.
 
 func singleResult(ref, date, dir string) *TemporalResult {
@@ -473,9 +555,23 @@ func singleResult(ref, date, dir string) *TemporalResult {
 	}
 }
 
+func singleResultDW(ref, date, dir string, dw map[string]float64) *TemporalResult {
+	return &TemporalResult{
+		Dates:            []TemporalDate{{Ref: ref, Date: date, Dir: dir}},
+		DimensionWeights: dw,
+	}
+}
+
 func rangeResult(ref, start, end, dir string) *TemporalResult {
 	return &TemporalResult{
 		Dates: []TemporalDate{{Ref: ref, Date: start, End: ptrStr(end), Dir: dir}},
+	}
+}
+
+func rangeResultDW(ref, start, end, dir string, dw map[string]float64) *TemporalResult {
+	return &TemporalResult{
+		Dates:            []TemporalDate{{Ref: ref, Date: start, End: ptrStr(end), Dir: dir}},
+		DimensionWeights: dw,
 	}
 }
 
@@ -1060,79 +1156,103 @@ func resolveToken(tok string, backward bool, now time.Time) time.Time {
 // NormalizeTemporalRules performs deterministic temporal resolution.
 // Returns nil if no temporal references are found.
 // This is the PRIMARY path — LLM (NormalizeTemporal) is fallback only.
+//
+// Each matcher returns dates; this function tags the result with DimensionWeights
+// based on which matcher fired (GottZ Cyclic Phase Model). Recurrence keywords
+// ("immer", "jeden", "dienstags") upgrade weekday-matchers to pure-weekday weights.
 func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	if strings.TrimSpace(query) == "" {
 		return nil
 	}
 	now = truncDate(now)
 	tokens := ruleTokenize(query)
+	recur := hasRecurrence(tokens)
 
-	// Priority 1: ISO dates (most specific)
+	// Priority 1: ISO dates (most specific) — pure linear
 	if r := matchISODate(query); r != nil {
+		r.DimensionWeights = dwLinear()
 		return r
 	}
 
-	// Priority 2: Compound range patterns
+	// Priority 2: Compound range patterns — linear + weekday (range endpoints)
 	if r := matchLetztenWDBis(query, now); r != nil {
+		r.DimensionWeights = dwLinearRange()
 		return r
 	}
 	if r := matchNextThrough(query, now); r != nil {
+		r.DimensionWeights = dwLinearRange()
 		return r
 	}
 	if r := matchVonBis(query, now); r != nil {
+		r.DimensionWeights = dwLinearRange()
 		return r
 	}
 
-	// Priority 3: Seit/Bis
+	// Priority 3: Seit/Bis — linear-dominant + month (spans weeks/months)
 	if r := matchSeit(query, now); r != nil {
+		r.DimensionWeights = dwLinearMonthSeit()
 		return r
 	}
 	if r := matchBis(query, now); r != nil {
+		r.DimensionWeights = dwLinearMonthSeit()
 		return r
 	}
 
-	// Priority 4: Week segments
+	// Priority 4: Week segments — linear + week
 	if r := matchWeekSegment(query, now); r != nil {
+		r.DimensionWeights = dwLinearWeek()
 		return r
 	}
 
-	// Priority 5: Relative weeks
+	// Priority 5: Relative weeks — linear + week
 	if r := matchRelativeWeek(query, now); r != nil {
+		r.DimensionWeights = dwLinearWeek()
 		return r
 	}
 
-	// Priority 6: Relative months
+	// Priority 6: Relative months — linear + month
 	if r := matchRelativeMonth(query, now); r != nil {
+		r.DimensionWeights = dwLinearMonth()
 		return r
 	}
 
-	// Priority 7: Weekday in einer Woche (BEFORE relative days — "Montag in einer Woche" != "in einer Woche")
+	// Priority 7: Weekday in einer Woche (BEFORE relative days)
 	if r := matchWDInWoche(query, now); r != nil {
+		r.DimensionWeights = dwLinearWeekday()
 		return r
 	}
 
-	// Priority 8: Relative days (vor N Tagen, in N Tagen)
+	// Priority 8: Relative days (vor N Tagen, in N Tagen) — pure linear
 	if r := matchRelativeDays(query, now); r != nil {
+		r.DimensionWeights = dwLinear()
 		return r
 	}
 
-	// Priority 9: Weekend
+	// Priority 9: Weekend — weekday-dominant (Sat+Sun are THE weekend)
 	if r := matchWeekend(query, now); r != nil {
+		r.DimensionWeights = dwWeekday()
 		return r
 	}
 
-	// Priority 10: Multi-keyword (heute und morgen)
+	// Priority 10: Multi-keyword (heute und morgen) — linear
 	if r := matchMultiKeyword(query, now); r != nil {
+		r.DimensionWeights = dwLinear()
 		return r
 	}
 
-	// Priority 11: Weekday + tense
+	// Priority 11: Weekday + tense — cyclic if recurrence detected
 	if r := matchWeekday(query, tokens, now); r != nil {
+		if recur {
+			r.DimensionWeights = dwWeekday()
+		} else {
+			r.DimensionWeights = dwLinearWeekday()
+		}
 		return r
 	}
 
-	// Priority 12: Simple keywords (heute/gestern/morgen + typos)
+	// Priority 12: Simple keywords (heute/gestern/morgen + typos) — pure linear
 	if r := matchSimpleKeywords(query, now); r != nil {
+		r.DimensionWeights = dwLinear()
 		return r
 	}
 

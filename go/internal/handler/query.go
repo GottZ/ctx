@@ -235,7 +235,13 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		"request_id", requestID,
 	)
 
-	// Step 6a: Post-RRF temporal gravity boost.
+	// Step 6a: Post-RRF temporal gravity boost (GottZ Cyclic Phase Model).
+	//
+	// Two paths based on TemporalResult.DimensionWeights:
+	//  - Linear: Distance-only gravity on content_dates (existing path).
+	//  - Cyclic: Multi-dimensional Gaussian decay on EAV context_temporal rows.
+	// Mixed weights (e.g. "am Dienstag" = {linear:0.6, weekday:0.4}) run both,
+	// each scaled by its weight so total boost stays ≤0.30.
 	if temporalResult != nil && len(temporalResult.Dates) > 0 {
 		gravStart := time.Now()
 		d := temporalResult.Dates[0]
@@ -245,31 +251,79 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			cutoff = 60
 		}
 
-		// Fetch content_dates for result blocks
+		// Collect dimension weights (linear vs cyclic).
+		dimWeights := temporalResult.DimensionWeights
+		linearWeight := 1.0 // backward-compat: if no DimensionWeights, assume pure linear
+		cyclicDims := []string{}
+		cyclicWeightSum := 0.0
+		if dimWeights != nil {
+			linearWeight = dimWeights["linear"]
+			for dim, w := range dimWeights {
+				if dim != "linear" && w > 0 {
+					cyclicDims = append(cyclicDims, dim)
+					cyclicWeightSum += w
+				}
+			}
+		}
+
 		ids := make([]string, len(results))
 		for i, r := range results {
 			ids[i] = r.ID
 		}
-		blockDates, err := store.FetchContentDates(ctx, h.pool, ids)
-		if err != nil {
-			slog.Warn("gravity: fetch dates failed, skipping",
-				"error", err,
-				"request_id", requestID,
-			)
-		} else {
-			results = rrf.ApplyGravityBoost(results, blockDates, rrf.GravityParams{
-				TargetDate:  target,
-				Direction:   d.Dir,
-				Cutoff:      cutoff,
-				Power:       1.5,
-				BoostWeight: 0.30,
-			})
-			slog.Info("gravity scoring",
-				"gravity_active", true,
-				"blocks_with_temporal", len(blockDates),
-				"gravity_latency_ms", float64(time.Since(gravStart).Milliseconds()),
-				"request_id", requestID,
-			)
+
+		const maxBoost = 0.30
+
+		// Cyclic path: fetch EAV dimensions and apply multi-dim Gaussian decay.
+		if len(cyclicDims) > 0 {
+			blockDims, err := store.FetchBlockDimensions(ctx, h.pool, ids, cyclicDims)
+			if err != nil {
+				slog.Warn("cyclic gravity: fetch dimensions failed, skipping",
+					"error", err,
+					"request_id", requestID,
+				)
+			} else {
+				// Convert store.BlockDimension → rrf.TemporalDim
+				rrfDims := make(map[string][]rrf.TemporalDim, len(blockDims))
+				for blockID, dims := range blockDims {
+					td := make([]rrf.TemporalDim, len(dims))
+					for i, bd := range dims {
+						td[i] = rrf.TemporalDim{Dimension: bd.Dimension, Value: bd.Value}
+					}
+					rrfDims[blockID] = td
+				}
+				results = rrf.ApplyCyclicGravityBoost(results, rrfDims, dimWeights, target, maxBoost*cyclicWeightSum)
+				slog.Info("cyclic gravity scoring",
+					"cyclic_dims", cyclicDims,
+					"cyclic_weight_sum", cyclicWeightSum,
+					"blocks_with_dims", len(blockDims),
+					"gravity_latency_ms", float64(time.Since(gravStart).Milliseconds()),
+					"request_id", requestID,
+				)
+			}
+		}
+
+		// Linear path: distance-only gravity on content_dates.
+		if linearWeight > 0 {
+			blockDates, err := store.FetchContentDates(ctx, h.pool, ids)
+			if err != nil {
+				slog.Warn("linear gravity: fetch dates failed, skipping",
+					"error", err,
+					"request_id", requestID,
+				)
+			} else {
+				results = rrf.ApplyGravityBoost(results, blockDates, rrf.GravityParams{
+					TargetDate:  target,
+					Direction:   d.Dir,
+					Cutoff:      cutoff,
+					Power:       1.5,
+					BoostWeight: maxBoost * linearWeight,
+				})
+				slog.Info("linear gravity scoring",
+					"linear_weight", linearWeight,
+					"blocks_with_dates", len(blockDates),
+					"request_id", requestID,
+				)
+			}
 		}
 	}
 
