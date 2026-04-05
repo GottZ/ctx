@@ -260,11 +260,10 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 			slog.Error("ingest: content_times update failed",
 				"error", err, "block_id", block.ID, "request_id", reqID)
 		}
-		if len(times) > 0 {
-			if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, times); err != nil {
-				slog.Error("ingest: temporal populate failed",
-					"error", err, "block_id", block.ID, "request_id", reqID)
-			}
+		// Always populate: createdAt is included as meta-anchor even without content times.
+		if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, times, block.CreatedAt); err != nil {
+			slog.Error("ingest: temporal populate failed",
+				"error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}()
 

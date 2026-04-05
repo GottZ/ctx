@@ -125,9 +125,26 @@ func BuildTemporalBatch(blockID string, times []time.Time, links ...[]string) (*
 }
 
 // PopulateTemporal replaces all temporal dimensions for a block.
-// Deletes existing rows, then batch-inserts new dimensions for each timestamp.
-func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID string, times []time.Time) error {
-	batch, queryCount := BuildTemporalBatch(blockID, times)
+// Deletes existing rows, then batch-inserts new dimensions.
+//
+// A block can have multiple temporal anchors simultaneously:
+//   - contentTimes: timestamps mentioned/extracted from block content (semantic)
+//   - createdAt: the block's creation timestamp (meta anchor)
+//
+// Both sources contribute INDEPENDENT dimensions. A block created on Friday
+// whose content says "Meeting am Dienstag" gets weekday=2 (content) AND
+// weekday=5 (meta) — enables retrieval for both signals. SQL-level dedup
+// via ON CONFLICT handles timestamp overlap between sources.
+//
+// If createdAt is zero, only contentTimes is used (defensive fallback).
+func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID string, contentTimes []time.Time, createdAt time.Time) error {
+	allTimes := contentTimes
+	if !createdAt.IsZero() {
+		allTimes = make([]time.Time, 0, len(contentTimes)+1)
+		allTimes = append(allTimes, createdAt)
+		allTimes = append(allTimes, contentTimes...)
+	}
+	batch, queryCount := BuildTemporalBatch(blockID, allTimes)
 
 	br := pool.SendBatch(ctx, batch)
 	defer func() { _ = br.Close() }()
@@ -240,7 +257,7 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 
 	for {
 		rows, err := pool.Query(ctx,
-			`SELECT cb.id, cb.content
+			`SELECT cb.id, cb.content, cb.created_at
 			 FROM context_blocks cb
 			 WHERE NOT cb.is_archived
 			   AND NOT EXISTS (SELECT 1 FROM context_temporal ct WHERE ct.block_id = cb.id)
@@ -252,13 +269,14 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		}
 
 		type blockRow struct {
-			ID      string
-			Content string
+			ID        string
+			Content   string
+			CreatedAt time.Time
 		}
 		var blocks []blockRow
 		for rows.Next() {
 			var b blockRow
-			if err := rows.Scan(&b.ID, &b.Content); err != nil {
+			if err := rows.Scan(&b.ID, &b.Content, &b.CreatedAt); err != nil {
 				rows.Close()
 				return processed, fmt.Errorf("store: temporal: backfill scan: %w", err)
 			}
@@ -282,9 +300,9 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 				continue
 			}
 
-			// Always populate temporal — for blocks without times this inserts
-			// a sentinel (_none) so NOT EXISTS doesn't re-select them.
-			if err := PopulateTemporal(ctx, pool, b.ID, times); err != nil {
+			// Always populate temporal — createdAt is passed as meta-anchor.
+			// Blocks without content times still get dimensions from their creation time.
+			if err := PopulateTemporal(ctx, pool, b.ID, times, b.CreatedAt); err != nil {
 				slog.Warn("backfill: populate temporal failed",
 					"block_id", b.ID, "error", err)
 				continue

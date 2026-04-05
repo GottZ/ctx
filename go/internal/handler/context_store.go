@@ -166,10 +166,9 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		if err := store.UpdateContentTimes(bgCtx, h.pool, block.ID, times); err != nil {
 			slog.Error("store: content_times update failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
-		if len(times) > 0 {
-			if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, times); err != nil {
-				slog.Error("store: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
-			}
+		// Always populate: createdAt is included as meta-anchor even without content times.
+		if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, times, block.CreatedAt); err != nil {
+			slog.Error("store: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}()
 
