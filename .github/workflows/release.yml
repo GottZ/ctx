@@ -94,6 +94,12 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout (with tags)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -106,29 +112,40 @@ jobs:
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
+      - name: Extract tag annotation as release body
+        id: notes
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          # Extract tag annotation (strips signature block, keeps message body)
+          TAG_MSG=$(git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG")
+          if [ -z "$TAG_MSG" ] || [ "$TAG_MSG" = $'\n\n' ]; then
+            TAG_MSG="Release $TAG"
+          fi
+          {
+            echo "body<<RELEASE_NOTES_EOF"
+            echo "$TAG_MSG"
+            echo ""
+            echo "## Installation"
+            echo ""
+            echo "**With Go:**"
+            echo '```bash'
+            echo "go install github.com/GottZ/ctx/cmd/ctx@${TAG}"
+            echo '```'
+            echo ""
+            echo "**Binary download:**"
+            echo "Download the binary for your platform, make it executable, move to PATH:"
+            echo '```bash'
+            echo "chmod +x ctx-*"
+            echo "sudo mv ctx-* /usr/local/bin/ctx"
+            echo '```'
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ctx ${{ steps.version.outputs.tag }}
-          generate_release_notes: true
+          generate_release_notes: false
           files: dist/*
-          body: |
-            ## Installation
-
-            **With Go:**
-            ```bash
-            go install github.com/GottZ/ctx/cmd/ctx@${{ steps.version.outputs.tag }}
-            ```
-
-            **Binary download:**
-            Download the binary for your platform, make it executable, move to PATH:
-            ```bash
-            chmod +x ctx-*
-            sudo mv ctx-* /usr/local/bin/ctx
-            ```
-
-            **Claude Code statusline setup:**
-            ```bash
-            ctx statusline --help
-            ```
+          body: ${{ steps.notes.outputs.body }}

@@ -211,6 +211,32 @@ docker compose logs -f ctx          # Logs
 docker compose down && docker compose up -d   # Full restart
 ```
 
+## Releases (Pflicht-Konvention)
+
+Release-Body = Git Tag Annotation. Die GitHub Actions Pipeline (`.github/workflows/release.yml`) extrahiert die Tag-Message und nutzt sie als GitHub Release Body. **Folge: jede Tag-Annotation ist die Release-Note.**
+
+**Pflicht beim Taggen:**
+```bash
+git tag -a v0.X.Y -m "$(cat <<'EOF'
+vX.Y.Z — Kurzer Titel (eine Zeile)
+
+Was ist neu (2-3 Saetze). Kontext und Motivation.
+
+Technische Details:
+- Bullet 1
+- Bullet 2
+
+Walk-Through / Beispiele wenn relevant.
+
+Tests/Migration-Hinweise wenn relevant.
+EOF
+)"
+```
+
+**Nicht erlaubt:** `git tag v0.X.Y` (lightweight tag ohne Annotation) → Pipeline schreibt nur "Release v0.X.Y" als Fallback-Body.
+
+**Folge-Workflow:** `git push origin vX.Y.Z` → CI baut 5 Binaries, erzeugt Release mit Tag-Annotation + Install-Template als Body. Keine manuelle `gh release edit` Nachbearbeitung nötig wenn Tag-Annotation gut ist.
+
 ## Verifikation
 
 ```bash
