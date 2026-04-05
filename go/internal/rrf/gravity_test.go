@@ -468,6 +468,9 @@ func TestDimensionPhase(t *testing.T) {
 		{"seasonal", "1", 0.0, false},            // Jan 1
 		{"seasonal", "365", 364.0 / 365.0, false}, // Dec 31 non-leap
 		{"seasonal", "366", 1.0, false}, // Dec 31 leap (365/365)
+		{"daily", "0", 0.0, false},       // midnight
+		{"daily", "12", 0.5, false},      // noon
+		{"daily", "23", 23.0 / 24.0, false}, // 11pm
 		// Errors
 		{"weekday", "0", 0.0, true},
 		{"weekday", "8", 0.0, true},
@@ -476,6 +479,8 @@ func TestDimensionPhase(t *testing.T) {
 		{"monthday", "32", 0.0, true},
 		{"seasonal", "0", 0.0, true},
 		{"seasonal", "367", 0.0, true},
+		{"daily", "-1", 0.0, true},
+		{"daily", "24", 0.0, true},
 		{"year", "2026", 0.0, true}, // not cyclic
 		{"unknown", "1", 0.0, true},
 		{"weekday", "abc", 0.0, true},
@@ -510,7 +515,7 @@ func TestQueryPhase(t *testing.T) {
 		{"month", 2.0 / 12.0},    // March=3 → 2/12
 		{"quarter", 0.0},         // Q1 → (1-1)/4
 		{"week", 13.0 / 52.0},    // week 14 → 13/52
-		{"monthday", 1.0},        // day 31 → 30/30
+		{"monthday", 1.0},          // day 31 → 30/30
 		{"seasonal", 89.0 / 365.0}, // day-of-year 90 → 89/365
 	}
 	for _, tt := range tests {
@@ -523,6 +528,12 @@ func TestQueryPhase(t *testing.T) {
 				t.Errorf("QueryPhase(%q, Tuesday) = %v, want %v", tt.dim, got, tt.want)
 			}
 		})
+	}
+
+	// Daily dimension requires hour info
+	tueAfternoon := time.Date(2026, 3, 31, 14, 30, 0, 0, time.UTC)
+	if p, _ := QueryPhase("daily", tueAfternoon); math.Abs(p-14.0/24.0) > 1e-9 {
+		t.Errorf("daily phase 14:30 = %v, want %v", p, 14.0/24.0)
 	}
 
 	// Sunday ISO=7 edge case

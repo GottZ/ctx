@@ -33,11 +33,14 @@ const (
 )
 
 // TemporalDate is a single resolved temporal reference.
+// Hour is optional — set by time-of-day matchers (morgens/abends/etc.) for
+// daily dimension phase calculation. nil Hour means "date only, midnight".
 type TemporalDate struct {
 	Ref  string  `json:"ref"`
 	Date string  `json:"date"`
 	End  *string `json:"end"`
 	Dir  string  `json:"dir"`
+	Hour *int    `json:"hour,omitempty"`
 }
 
 // TemporalResult is the output of LLM temporal normalization.
@@ -170,6 +173,9 @@ var temporalIntentWords = []string{
 	"seit", "bis", "vor", "anfang", "ende", "mitte",
 	"heut", "abend",
 	"damals", "vorhin",
+	// Time-of-day (daily dimension)
+	"morgens", "mittags", "abends", "nachts", "vormittags", "nachmittags",
+	"früh", "spät",
 	// German months (BUG-5: "im März" was missed)
 	"januar", "februar", "märz", "maerz", "april", "mai", "juni",
 	"juli", "august", "september", "oktober", "november", "dezember",

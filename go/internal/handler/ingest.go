@@ -255,13 +255,13 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		dates := store.ExtractDates(block.Content)
-		if err := store.UpdateContentDates(bgCtx, h.pool, block.ID, dates); err != nil {
-			slog.Error("ingest: content_dates update failed",
+		times := store.ExtractDates(block.Content)
+		if err := store.UpdateContentTimes(bgCtx, h.pool, block.ID, times); err != nil {
+			slog.Error("ingest: content_times update failed",
 				"error", err, "block_id", block.ID, "request_id", reqID)
 		}
-		if len(dates) > 0 {
-			if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, dates); err != nil {
+		if len(times) > 0 {
+			if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, times); err != nil {
 				slog.Error("ingest: temporal populate failed",
 					"error", err, "block_id", block.ID, "request_id", reqID)
 			}

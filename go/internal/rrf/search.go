@@ -24,20 +24,16 @@ type SearchResult struct {
 	RRFScoreOriginal *float64  `json:"rrf_score_original,omitempty"`
 }
 
-// TemporalGravityParams holds parameters for the 5th RRF temporal gravity channel.
-type TemporalGravityParams struct {
-	Date      string // ISO date, e.g. "2026-03-28"
-	Direction string // "past", "future", "both"
-	Cutoff    int    // days, e.g. 14 for weekday, 60 for month
-}
-
 // Search executes the ctx_rrf PG function with a single SQL call.
 // The embedding is passed as pgvector HalfVector, query/querySpaced for FTS,
 // scopes for scope filtering, and optional category/tags/limit/temporal.
 // temporal is a websearch_to_tsquery OR string for date expansion (may be empty).
-// gravity is optional temporal gravity parameters for the 5th RRF channel.
 // queryOR is an OR-joined query for broader FTS recall (may be empty).
-func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, gravity *TemporalGravityParams, queryOR string) ([]SearchResult, error) {
+//
+// Temporal gravity is applied Post-RRF in the handler layer via
+// ApplyGravityBoost (linear) and ApplyCyclicGravityBoost (multi-dim cyclic).
+// The 5th RRF channel was removed in M020 (never activated from Go).
+func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string) ([]SearchResult, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("rrf: empty embedding")
 	}
@@ -63,15 +59,6 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 		temporalParam = temporal
 	}
 
-	// Pass gravity params (BUG-7 fix: wire 5th RRF channel).
-	var gravDate, gravDir interface{}
-	var gravCutoff interface{}
-	if gravity != nil {
-		gravDate = gravity.Date
-		gravDir = gravity.Direction
-		gravCutoff = gravity.Cutoff
-	}
-
 	// Pass queryOR as NULL if empty (PG function default).
 	var queryORParam interface{}
 	if queryOR != "" {
@@ -80,9 +67,8 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 
 	rows, err := pool.Query(ctx,
 		`SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at
-		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9::date, $10, $11::int, $12)`,
-		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam,
-		gravDate, gravDir, gravCutoff, queryORParam,
+		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9)`,
+		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: query ctx_rrf: %w", err)

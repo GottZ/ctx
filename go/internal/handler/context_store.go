@@ -162,12 +162,12 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		dates := store.ExtractDates(block.Content)
-		if err := store.UpdateContentDates(bgCtx, h.pool, block.ID, dates); err != nil {
-			slog.Error("store: content_dates update failed", "error", err, "block_id", block.ID, "request_id", reqID)
+		times := store.ExtractDates(block.Content)
+		if err := store.UpdateContentTimes(bgCtx, h.pool, block.ID, times); err != nil {
+			slog.Error("store: content_times update failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
-		if len(dates) > 0 {
-			if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, dates); err != nil {
+		if len(times) > 0 {
+			if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, times); err != nil {
 				slog.Error("store: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
 			}
 		}

@@ -135,6 +135,7 @@ var DimensionSigma = map[string]float64{
 	"week":     0.08, // ISO week-of-year 52-cycle
 	"monthday": 0.10, // day-of-month ~30-cycle (Monatsanfang/-ende patterns)
 	"seasonal": 0.08, // day-of-year 365-cycle (annual seasonal patterns)
+	"daily":    0.08, // hour-of-day 24-cycle (morgens/abends patterns)
 }
 
 // CyclicDistance returns the minimum wrap-around distance between two phases
@@ -217,6 +218,11 @@ func DimensionPhase(dimension, value string) (float64, error) {
 			return 0, fmt.Errorf("rrf: seasonal value out of range: %d", v)
 		}
 		return float64(v-1) / 365.0, nil
+	case "daily":
+		if v < 0 || v > 23 {
+			return 0, fmt.Errorf("rrf: daily value out of range: %d", v)
+		}
+		return float64(v) / 24.0, nil
 	case "year":
 		// Year is not a cyclic dimension in the [0,1) sense — it monotonically
 		// increases. Use linear gravity for year-distance scoring.
@@ -255,6 +261,8 @@ func QueryPhase(dimension string, t time.Time) (float64, error) {
 		return float64(t.Day()-1) / 30.0, nil
 	case "seasonal":
 		return float64(t.YearDay()-1) / 365.0, nil
+	case "daily":
+		return float64(t.Hour()) / 24.0, nil
 	}
 	return 0, fmt.Errorf("rrf: unknown dimension: %s", dimension)
 }

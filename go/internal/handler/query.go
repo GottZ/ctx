@@ -218,7 +218,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		internalLimit = limit // respect explicit large limits
 	}
 
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, nil, queryOR)
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,
@@ -238,7 +238,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Step 6a: Post-RRF temporal gravity boost (GottZ Cyclic Phase Model).
 	//
 	// Two paths based on TemporalResult.DimensionWeights:
-	//  - Linear: Distance-only gravity on content_dates (existing path).
+	//  - Linear: Distance-only gravity on content_times (existing path).
 	//  - Cyclic: Multi-dimensional Gaussian decay on EAV context_temporal rows.
 	// Mixed weights (e.g. "am Dienstag" = {linear:0.6, weekday:0.4}) run both,
 	// each scaled by its weight so total boost stays ≤0.30.
@@ -246,6 +246,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		gravStart := time.Now()
 		d := temporalResult.Dates[0]
 		target, _ := time.Parse("2006-01-02", d.Date)
+		// Time-of-day matchers (morgens/abends/etc.) set Hour for daily dimension phase.
+		if d.Hour != nil {
+			target = time.Date(target.Year(), target.Month(), target.Day(), *d.Hour, 0, 0, 0, target.Location())
+		}
 		cutoff := 14
 		if d.End != nil {
 			cutoff = 60
@@ -302,9 +306,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Linear path: distance-only gravity on content_dates.
+		// Linear path: distance-only gravity on content_times.
 		if linearWeight > 0 {
-			blockDates, err := store.FetchContentDates(ctx, h.pool, ids)
+			blockDates, err := store.FetchContentTimes(ctx, h.pool, ids)
 			if err != nil {
 				slog.Warn("linear gravity: fetch dates failed, skipping",
 					"error", err,

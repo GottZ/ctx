@@ -6,12 +6,12 @@ import (
 )
 
 func TestExpandDimensions(t *testing.T) {
-	// 2026-03-29 is a Sunday, ISO week 13, Q1, day 29, day-of-year 88
-	d := time.Date(2026, 3, 29, 0, 0, 0, 0, time.UTC)
+	// 2026-03-29 14:30 UTC — Sunday, ISO week 13, Q1, day 29, day-of-year 88, hour 14
+	d := time.Date(2026, 3, 29, 14, 30, 0, 0, time.UTC)
 	dims := ExpandDimensions(d)
 
-	if len(dims) != 7 {
-		t.Fatalf("expected 7 dimensions, got %d", len(dims))
+	if len(dims) != 8 {
+		t.Fatalf("expected 8 dimensions, got %d", len(dims))
 	}
 
 	expected := map[string]string{
@@ -22,6 +22,7 @@ func TestExpandDimensions(t *testing.T) {
 		"quarter":  "1",
 		"monthday": "29",
 		"seasonal": "88", // 31 (Jan) + 28 (Feb 2026 non-leap) + 29 (Mar) = 88
+		"daily":    "14",
 	}
 
 	for _, dim := range dims {
@@ -33,8 +34,8 @@ func TestExpandDimensions(t *testing.T) {
 		if dim.Value != want {
 			t.Errorf("dimension %q: got %q, want %q", dim.Dimension, dim.Value, want)
 		}
-		if !dim.SourceDate.Equal(d) {
-			t.Errorf("dimension %q: source date mismatch", dim.Dimension)
+		if !dim.SourceTime.Equal(d) {
+			t.Errorf("dimension %q: source time mismatch", dim.Dimension)
 		}
 		delete(expected, dim.Dimension)
 	}
@@ -131,18 +132,18 @@ func TestBuildTemporalBatch_WithDates(t *testing.T) {
 		wantCount int
 	}{
 		{
-			name:      "1 date = 1 DELETE + 7 INSERTs",
+			name:      "1 date = 1 DELETE + 8 INSERTs",
 			dates:     []time.Time{time.Date(2026, 3, 29, 0, 0, 0, 0, time.UTC)},
-			wantCount: 8,
+			wantCount: 9,
 		},
 		{
-			name: "3 dates = 1 DELETE + 21 INSERTs",
+			name: "3 dates = 1 DELETE + 24 INSERTs",
 			dates: []time.Time{
 				time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
 				time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC),
 				time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
 			},
-			wantCount: 22,
+			wantCount: 25,
 		},
 	}
 
@@ -187,12 +188,12 @@ func TestPopulateTemporal_SentinelPath(t *testing.T) {
 // --- Link Dimension Tests ---.
 
 func TestBuildTemporalBatch_WithLinks(t *testing.T) {
-	// 1 date (7 dims) + 2 links = 1 DELETE + 7 + 2 = 10
+	// 1 date (8 dims) + 2 links = 1 DELETE + 8 + 2 = 11
 	dates := []time.Time{time.Date(2026, 3, 29, 0, 0, 0, 0, time.UTC)}
 	links := []string{"Projektnotiz", "Architecture"}
 	batch, count := BuildTemporalBatch("block-link", dates, links)
 
-	want := 10 // 1 DELETE + 7 temporal + 2 links
+	want := 11 // 1 DELETE + 8 temporal + 2 links
 	if count != want {
 		t.Fatalf("expected %d queries, got %d", want, count)
 	}

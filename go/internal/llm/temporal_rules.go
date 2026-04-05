@@ -569,6 +569,10 @@ func dwHoliday() map[string]float64 {
 	return map[string]float64{"month": 0.4, "seasonal": 0.6}
 }
 
+func dwDaily() map[string]float64 {
+	return map[string]float64{"daily": 1.0}
+}
+
 // --- Result Helpers ---.
 
 func singleResult(ref, date, dir string) *TemporalResult {
@@ -844,6 +848,45 @@ func matchAnnualHoliday(query string, now time.Time) *TemporalResult {
 		return singleResult("Silvester", fmt.Sprintf("%d-12-31", year), "range")
 	case reNeujahr.MatchString(lower):
 		return singleResult("Neujahr", fmt.Sprintf("%d-01-01", year), "range")
+	}
+	return nil
+}
+
+// matchTimeOfDay detects time-of-day patterns: morgens, mittags, abends, nachts.
+// Returns a reference date at today with the appropriate hour. The daily
+// dimension uses hour-of-day for cyclic matching.
+var (
+	reMorgens     = regexp.MustCompile(`(?i)\b(morgens|fr[üu]h|morning|early)\b`)
+	reVormittags  = regexp.MustCompile(`(?i)\b(vormittags|late\s*morning)\b`)
+	reMittags     = regexp.MustCompile(`(?i)\b(mittags|noon|midday|lunchtime)\b`)
+	reNachmittags = regexp.MustCompile(`(?i)\b(nachmittags|afternoon)\b`)
+	reAbends      = regexp.MustCompile(`(?i)\b(abends|evening)\b`)
+	reNachts      = regexp.MustCompile(`(?i)\b(nachts|night|sp[äa]t|late)\b`)
+)
+
+func matchTimeOfDay(query string, now time.Time) *TemporalResult {
+	lower := strings.ToLower(query)
+	today := now.Format("2006-01-02")
+	// Reference hour per pattern (middle of each daypart).
+	mk := func(ref string, hour int) *TemporalResult {
+		h := hour
+		return &TemporalResult{
+			Dates: []TemporalDate{{Ref: ref, Date: today, Dir: "today", Hour: &h}},
+		}
+	}
+	switch {
+	case reMorgens.MatchString(lower):
+		return mk("morgens", 8) // 07:00-10:00
+	case reVormittags.MatchString(lower):
+		return mk("vormittags", 10) // 10:00-12:00
+	case reMittags.MatchString(lower):
+		return mk("mittags", 12) // 12:00-14:00
+	case reNachmittags.MatchString(lower):
+		return mk("nachmittags", 15) // 14:00-17:00
+	case reAbends.MatchString(lower):
+		return mk("abends", 19) // 17:00-22:00
+	case reNachts.MatchString(lower):
+		return mk("nachts", 23) // 22:00-06:00
 	}
 	return nil
 }
@@ -1313,6 +1356,12 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	// Priority 8b: Month segments (Monatsanfang/Monatsende/Monatsmitte) — monthday
 	if r := matchMonthSegment(query); r != nil {
 		r.DimensionWeights = dwMonthday()
+		return r
+	}
+
+	// Priority 8c: Time-of-day (morgens/abends/nachts) — daily dimension
+	if r := matchTimeOfDay(query, now); r != nil {
+		r.DimensionWeights = dwDaily()
 		return r
 	}
 

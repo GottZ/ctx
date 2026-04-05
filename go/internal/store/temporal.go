@@ -1,7 +1,7 @@
 // Package store — Temporal EAV Dimension Functions
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
-// Manages the context_temporal table (block_id, dimension, value, source_date)
+// Manages the context_temporal table (block_id, dimension, value, source_time)
 // for O(log n) temporal queries via partial B-Tree indexes.
 //
 // Source: https://github.com/GottZ/ctx
@@ -18,14 +18,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TemporalDimension represents a single dimension extracted from a date.
+// TemporalDimension represents a single dimension extracted from a timestamp.
 type TemporalDimension struct {
-	Dimension  string    // "year", "month", "week", "weekday", "quarter"
-	Value      string    // e.g. "2026", "3", "13", "1", "1"
-	SourceDate time.Time // the original date this dimension was extracted from
+	Dimension  string    // "year", "month", "week", "weekday", "quarter", "monthday", "seasonal", "daily"
+	Value      string    // e.g. "2026", "3", "13", "1", "1", "29", "88", "14"
+	SourceTime time.Time // the original timestamp this dimension was extracted from
 }
 
-// ExpandDimensions returns the 7 temporal dimensions for a given date.
+// ExpandDimensions returns the 8 temporal dimensions for a given timestamp.
 // Pure function, no DB access.
 //
 // Dimensions (all cyclic except year):
@@ -36,34 +36,36 @@ type TemporalDimension struct {
 //   - quarter:  quarter-of-year (1-4, 4-cycle)
 //   - monthday: day-of-month (1-31, ~30-cycle)
 //   - seasonal: day-of-year (1-366, 365-cycle)
-func ExpandDimensions(d time.Time) []TemporalDimension {
-	_, isoWeek := d.ISOWeek()
+//   - daily:    hour-of-day (0-23, 24-cycle)
+func ExpandDimensions(t time.Time) []TemporalDimension {
+	_, isoWeek := t.ISOWeek()
 
 	// Go Weekday: 0=Sunday .. 6=Saturday
 	// ISO weekday: 1=Monday .. 7=Sunday
-	goWd := d.Weekday()
+	goWd := t.Weekday()
 	isoWd := int(goWd)
 	if isoWd == 0 {
 		isoWd = 7 // Sunday: Go=0 → ISO=7
 	}
 
-	quarter := (int(d.Month()) - 1) / 3 + 1
+	quarter := (int(t.Month()) - 1) / 3 + 1
 
 	return []TemporalDimension{
-		{Dimension: "year", Value: strconv.Itoa(d.Year()), SourceDate: d},
-		{Dimension: "month", Value: strconv.Itoa(int(d.Month())), SourceDate: d},
-		{Dimension: "week", Value: strconv.Itoa(isoWeek), SourceDate: d},
-		{Dimension: "weekday", Value: strconv.Itoa(isoWd), SourceDate: d},
-		{Dimension: "quarter", Value: strconv.Itoa(quarter), SourceDate: d},
-		{Dimension: "monthday", Value: strconv.Itoa(d.Day()), SourceDate: d},
-		{Dimension: "seasonal", Value: strconv.Itoa(d.YearDay()), SourceDate: d},
+		{Dimension: "year", Value: strconv.Itoa(t.Year()), SourceTime: t},
+		{Dimension: "month", Value: strconv.Itoa(int(t.Month())), SourceTime: t},
+		{Dimension: "week", Value: strconv.Itoa(isoWeek), SourceTime: t},
+		{Dimension: "weekday", Value: strconv.Itoa(isoWd), SourceTime: t},
+		{Dimension: "quarter", Value: strconv.Itoa(quarter), SourceTime: t},
+		{Dimension: "monthday", Value: strconv.Itoa(t.Day()), SourceTime: t},
+		{Dimension: "seasonal", Value: strconv.Itoa(t.YearDay()), SourceTime: t},
+		{Dimension: "daily", Value: strconv.Itoa(t.Hour()), SourceTime: t},
 	}
 }
 
 // BuildTemporalBatch creates the pgx.Batch for PopulateTemporal.
 // Returns the batch and the expected query count.
 // Exported for testing — no DB access.
-func BuildTemporalBatch(blockID string, dates []time.Time, links ...[]string) (*pgx.Batch, int) {
+func BuildTemporalBatch(blockID string, times []time.Time, links ...[]string) (*pgx.Batch, int) {
 	batch := &pgx.Batch{}
 
 	// Delete existing dimensions for this block
@@ -75,29 +77,29 @@ func BuildTemporalBatch(blockID string, dates []time.Time, links ...[]string) (*
 		linkTargets = links[0]
 	}
 
-	// Sentinel for blocks without dates AND without links
-	if len(dates) == 0 && len(linkTargets) == 0 {
+	// Sentinel for blocks without times AND without links
+	sentinel := time.Unix(0, 0).UTC() // 1970-01-01 00:00:00 UTC
+	if len(times) == 0 && len(linkTargets) == 0 {
 		batch.Queue(
-			`INSERT INTO context_temporal (block_id, dimension, value, source_date)
-			 VALUES ($1, '_none', '', '1970-01-01'::date)
+			`INSERT INTO context_temporal (block_id, dimension, value, source_time)
+			 VALUES ($1, '_none', '', $2)
 			 ON CONFLICT DO NOTHING`,
-			blockID,
+			blockID, sentinel,
 		)
 		return batch, 2
 	}
 
 	queryCount := 1 // DELETE
 
-	// Insert temporal dimensions for each date
-	for _, d := range dates {
-		dims := ExpandDimensions(d)
-		sourceDate := d.Format("2006-01-02")
+	// Insert temporal dimensions for each timestamp
+	for _, t := range times {
+		dims := ExpandDimensions(t)
 		for _, dim := range dims {
 			batch.Queue(
-				`INSERT INTO context_temporal (block_id, dimension, value, source_date)
-				 VALUES ($1, $2, $3, $4::date)
+				`INSERT INTO context_temporal (block_id, dimension, value, source_time)
+				 VALUES ($1, $2, $3, $4)
 				 ON CONFLICT DO NOTHING`,
-				blockID, dim.Dimension, dim.Value, sourceDate,
+				blockID, dim.Dimension, dim.Value, t,
 			)
 			queryCount++
 		}
@@ -109,10 +111,10 @@ func BuildTemporalBatch(blockID string, dates []time.Time, links ...[]string) (*
 			continue
 		}
 		batch.Queue(
-			`INSERT INTO context_temporal (block_id, dimension, value, source_date)
-			 VALUES ($1, 'link', $2, '1970-01-01'::date)
+			`INSERT INTO context_temporal (block_id, dimension, value, source_time)
+			 VALUES ($1, 'link', $2, $3)
 			 ON CONFLICT DO NOTHING`,
-			blockID, target,
+			blockID, target, sentinel,
 		)
 		queryCount++
 	}
@@ -123,9 +125,9 @@ func BuildTemporalBatch(blockID string, dates []time.Time, links ...[]string) (*
 }
 
 // PopulateTemporal replaces all temporal dimensions for a block.
-// Deletes existing rows, then batch-inserts new dimensions for each date.
-func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID string, dates []time.Time) error {
-	batch, queryCount := BuildTemporalBatch(blockID, dates)
+// Deletes existing rows, then batch-inserts new dimensions for each timestamp.
+func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID string, times []time.Time) error {
+	batch, queryCount := BuildTemporalBatch(blockID, times)
 
 	br := pool.SendBatch(ctx, batch)
 	defer func() { _ = br.Close() }()
@@ -139,58 +141,53 @@ func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID string, d
 	return nil
 }
 
-// UpdateContentDates sets the content_dates array on a block.
-func UpdateContentDates(ctx context.Context, pool *pgxpool.Pool, blockID string, dates []time.Time) error {
-	isoStrings := make([]string, len(dates))
-	for i, d := range dates {
-		isoStrings[i] = d.Format("2006-01-02")
-	}
-
+// UpdateContentTimes sets the content_times array on a block.
+func UpdateContentTimes(ctx context.Context, pool *pgxpool.Pool, blockID string, times []time.Time) error {
 	_, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET content_dates = $1::date[] WHERE id = $2`,
-		isoStrings, blockID,
+		`UPDATE context_blocks SET content_times = $1::timestamptz[] WHERE id = $2`,
+		times, blockID,
 	)
 	if err != nil {
-		return fmt.Errorf("store: temporal: update content_dates: %w", err)
+		return fmt.Errorf("store: temporal: update content_times: %w", err)
 	}
 	return nil
 }
 
-// FetchContentDates retrieves content_dates for multiple blocks.
-// Returns a map from block ID to parsed dates.
-func FetchContentDates(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (map[string][]time.Time, error) {
+// FetchContentTimes retrieves content_times for multiple blocks.
+// Returns a map from block ID to parsed timestamps.
+func FetchContentTimes(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (map[string][]time.Time, error) {
 	if len(blockIDs) == 0 {
 		return make(map[string][]time.Time), nil
 	}
 
 	rows, err := pool.Query(ctx,
-		`SELECT id, content_dates FROM context_blocks WHERE id = ANY($1)`,
+		`SELECT id, content_times FROM context_blocks WHERE id = ANY($1)`,
 		blockIDs,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("store: temporal: fetch content_dates: %w", err)
+		return nil, fmt.Errorf("store: temporal: fetch content_times: %w", err)
 	}
 	defer rows.Close()
 
 	result := make(map[string][]time.Time, len(blockIDs))
 	for rows.Next() {
 		var id string
-		var dates []time.Time
-		if err := rows.Scan(&id, &dates); err != nil {
-			return nil, fmt.Errorf("store: temporal: fetch content_dates scan: %w", err)
+		var times []time.Time
+		if err := rows.Scan(&id, &times); err != nil {
+			return nil, fmt.Errorf("store: temporal: fetch content_times scan: %w", err)
 		}
-		if dates != nil {
-			result[id] = dates
+		if times != nil {
+			result[id] = times
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: temporal: fetch content_dates rows: %w", err)
+		return nil, fmt.Errorf("store: temporal: fetch content_times rows: %w", err)
 	}
 	return result, nil
 }
 
 // BlockDimension is the (dimension, value) pair returned by FetchBlockDimensions.
-// Keeps the type minimal (no source_date) to match rrf.TemporalDim semantics.
+// Keeps the type minimal (no source_time) to match rrf.TemporalDim semantics.
 type BlockDimension struct {
 	Dimension string
 	Value     string
@@ -277,17 +274,17 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		}
 
 		for _, b := range blocks {
-			dates := ExtractDates(b.Content)
+			times := ExtractDates(b.Content)
 
-			if err := UpdateContentDates(ctx, pool, b.ID, dates); err != nil {
-				slog.Warn("backfill: update content_dates failed",
+			if err := UpdateContentTimes(ctx, pool, b.ID, times); err != nil {
+				slog.Warn("backfill: update content_times failed",
 					"block_id", b.ID, "error", err)
 				continue
 			}
 
-			// Always populate temporal — for blocks without dates this inserts
+			// Always populate temporal — for blocks without times this inserts
 			// a sentinel (_none) so NOT EXISTS doesn't re-select them.
-			if err := PopulateTemporal(ctx, pool, b.ID, dates); err != nil {
+			if err := PopulateTemporal(ctx, pool, b.ID, times); err != nil {
 				slog.Warn("backfill: populate temporal failed",
 					"block_id", b.ID, "error", err)
 				continue

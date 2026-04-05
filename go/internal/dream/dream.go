@@ -233,7 +233,7 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, ollamaHost, embed
 		}
 
 		// RRF search with keyword as query.
-		results, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", nil, "")
+		results, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "")
 		if err != nil {
 			slog.Debug("dream: rrf search failed", "keyword", kw, "error", err)
 			continue

@@ -17,11 +17,11 @@ import (
 )
 
 var (
-	// ISO dates: 2026-03-29.
-	isoDateExtract = regexp.MustCompile(`\b(20[2-3]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b`)
+	// ISO dates with optional time: 2026-03-29, 2026-03-29 14:30, 2026-03-29T14:30, 2026-03-29T14:30:00Z.
+	isoDateExtract = regexp.MustCompile(`\b(20[2-3]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:[T\s]+([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?Z?)?\b`)
 
-	// German dot-format: 29.03.2026.
-	dotDateExtract = regexp.MustCompile(`\b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-3]\d)\b`)
+	// German dot-format with optional time: 29.03.2026, 29.03.2026 14:30.
+	dotDateExtract = regexp.MustCompile(`\b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-3]\d)(?:\s+([01]\d|2[0-3]):([0-5]\d))?\b`)
 
 	// German month+year: "März 2026".
 	deMonthYearExtract = regexp.MustCompile(`(?i)\b(januar|februar|m[aä]rz|april|mai|juni|juli|august|september|oktober|november|dezember)\s+(20[2-3]\d)\b`)
@@ -45,8 +45,10 @@ var enMonthMap = map[string]time.Month{
 	"october": time.October, "november": time.November, "december": time.December,
 }
 
-// ExtractDates extracts all recognizable dates from text content.
-// Returns deduplicated, sorted dates. Rejects dates before 2020 or after 2030.
+// ExtractDates extracts all recognizable timestamps from text content.
+// Parses ISO dates (with optional HH:MM time) and German dot-format dates.
+// Returns deduplicated, sorted timestamps at UTC. Rejects dates before 2020 or after 2030.
+// Timestamps without explicit time default to midnight UTC.
 func ExtractDates(content string) []time.Time {
 	seen := make(map[string]bool)
 	var dates []time.Time
@@ -55,34 +57,49 @@ func ExtractDates(content string) []time.Time {
 		if t.Year() < 2020 || t.Year() > 2030 {
 			return
 		}
-		key := t.Format("2006-01-02")
+		// Key by full timestamp (incl. hour+minute) so same-day different-hour are kept distinct.
+		key := t.Format("2006-01-02T15:04")
 		if !seen[key] {
 			seen[key] = true
 			dates = append(dates, t)
 		}
 	}
 
-	// 1. ISO dates
+	// 1. ISO dates (with optional HH:MM time).
 	// T25: time.Parse normalizes invalid dates silently (e.g., Feb 30 → Mar 2).
 	// After parsing, verify that the parsed day/month matches the input to reject invalid dates.
-	for _, m := range isoDateExtract.FindAllString(content, -1) {
-		if t, err := time.Parse("2006-01-02", m); err == nil {
-			if !isDateNormalized(m, t) {
-				add(t)
-			}
+	for _, m := range isoDateExtract.FindAllStringSubmatch(content, -1) {
+		dateStr := m[1]
+		t, err := time.Parse("2006-01-02", dateStr)
+		if err != nil || isDateNormalized(dateStr, t) {
+			continue
 		}
+		// Apply hour/minute if present.
+		if len(m) >= 4 && m[2] != "" && m[3] != "" {
+			hour, _ := strconv.Atoi(m[2])
+			minute, _ := strconv.Atoi(m[3])
+			t = time.Date(t.Year(), t.Month(), t.Day(), hour, minute, 0, 0, time.UTC)
+		}
+		add(t)
 	}
 
-	// 2. German dot-format: DD.MM.YYYY
+	// 2. German dot-format: DD.MM.YYYY (with optional HH:MM time).
 	for _, m := range dotDateExtract.FindAllStringSubmatch(content, -1) {
-		if len(m) == 4 {
-			ds := m[3] + "-" + m[2] + "-" + m[1]
-			if t, err := time.Parse("2006-01-02", ds); err == nil {
-				if !isDateNormalized(ds, t) {
-					add(t)
-				}
-			}
+		if len(m) < 4 {
+			continue
 		}
+		ds := m[3] + "-" + m[2] + "-" + m[1]
+		t, err := time.Parse("2006-01-02", ds)
+		if err != nil || isDateNormalized(ds, t) {
+			continue
+		}
+		// Apply hour/minute if present (groups 4, 5).
+		if len(m) >= 6 && m[4] != "" && m[5] != "" {
+			hour, _ := strconv.Atoi(m[4])
+			minute, _ := strconv.Atoi(m[5])
+			t = time.Date(t.Year(), t.Month(), t.Day(), hour, minute, 0, 0, time.UTC)
+		}
+		add(t)
 	}
 
 	// 3. German month+year → 1st of month
