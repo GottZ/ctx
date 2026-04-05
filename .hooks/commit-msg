@@ -1,0 +1,60 @@
+#!/bin/sh
+# Commit-msg hook: enforce README review for feat-commits + migration changes.
+#
+# Rule: if commit is a feat-commit OR modifies go/migrations/, then README.md
+# MUST be staged (reviewed). Rationale: features and schema changes are user-
+# visible and the README should always reflect current capabilities.
+#
+# Override: git commit --no-verify (bypasses ALL hooks)
+#
+# Setup: git config core.hooksPath .hooks
+
+MSG_FILE=$1
+FIRST_LINE=$(head -n1 "$MSG_FILE")
+STAGED=$(git diff --cached --name-only)
+
+# Detect trigger conditions.
+IS_FEAT=false
+HAS_MIGRATION=false
+
+if echo "$FIRST_LINE" | grep -qE '^feat[(:]'; then
+    IS_FEAT=true
+fi
+
+if echo "$STAGED" | grep -qE '^go/migrations/'; then
+    HAS_MIGRATION=true
+fi
+
+# Skip check if neither condition applies.
+if [ "$IS_FEAT" = false ] && [ "$HAS_MIGRATION" = false ]; then
+    exit 0
+fi
+
+# Check if README.md is in staged files.
+if echo "$STAGED" | grep -qE '^README\.md$'; then
+    exit 0
+fi
+
+# README not staged — block with clear message.
+echo ""
+echo "commit-msg: README.md review required"
+echo ""
+if [ "$IS_FEAT" = true ]; then
+    echo "  Trigger: feat-commit ($FIRST_LINE)"
+fi
+if [ "$HAS_MIGRATION" = true ]; then
+    echo "  Trigger: migration change (go/migrations/)"
+fi
+echo ""
+echo "  feat-commits and schema migrations are user-visible changes."
+echo "  README.md must be reviewed and updated if needed."
+echo ""
+echo "  If README is already current:"
+echo "    1. Open README.md and verify it reflects this change"
+echo "    2. Touch README.md (stage it with: git add README.md)"
+echo "    3. Re-commit"
+echo ""
+echo "  To bypass this check (use sparingly, not the default):"
+echo "    git commit --no-verify"
+echo ""
+exit 1

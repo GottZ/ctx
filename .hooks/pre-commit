@@ -1,0 +1,28 @@
+#!/bin/sh
+# Pre-commit hook: run golangci-lint on staged Go files.
+#
+# Setup: git config core.hooksPath .hooks
+
+# Check if any Go files are staged.
+STAGED_GO=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
+if [ -z "$STAGED_GO" ]; then
+    exit 0
+fi
+
+echo "pre-commit: running golangci-lint..."
+cd go || exit 0
+
+if ! command -v golangci-lint >/dev/null 2>&1; then
+    echo "pre-commit: golangci-lint not found, skipping lint"
+    exit 0
+fi
+
+golangci-lint run --timeout=2m
+RESULT=$?
+
+if [ $RESULT -ne 0 ]; then
+    echo ""
+    echo "pre-commit: lint failed. Fix issues or commit with --no-verify to skip."
+fi
+
+exit $RESULT

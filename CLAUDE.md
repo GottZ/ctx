@@ -213,6 +213,29 @@ docker compose logs -f ctx          # Logs
 docker compose down && docker compose up -d   # Full restart
 ```
 
+## Git Hooks (Pflicht-Setup)
+
+Repo-tracked Hooks in `.hooks/`. Einmalig aktivieren:
+
+```bash
+git config core.hooksPath .hooks
+```
+
+**pre-commit** (`.hooks/pre-commit`): golangci-lint auf gestagte Go-Dateien. Blockt Commit wenn Lint fehlschlägt.
+
+**commit-msg** (`.hooks/commit-msg`): erzwingt README-Review bei:
+- `feat(...)` oder `feat:` Commits
+- Commits die `go/migrations/*.sql` verändern
+
+Regel: wenn Trigger zutrifft UND `README.md` NICHT gestagt ist → Commit wird geblockt. Begründung: Features und Schema-Migrationen sind User-sichtbare Änderungen. README muss den aktuellen Funktionsstand reflektieren.
+
+**Workflow bei Block:**
+1. README.md öffnen, prüfen ob Änderung dokumentiert werden muss
+2. README.md updaten ODER (wenn wirklich nichts zu ändern ist) per `touch README.md` berühren
+3. `git add README.md` und erneut commiten
+
+**Bypass:** `git commit --no-verify` — sparsam nutzen, nicht als Default.
+
 ## Releases (Pflicht-Konvention)
 
 Release-Body = Git Tag Annotation. Die GitHub Actions Pipeline (`.github/workflows/release.yml`) extrahiert die Tag-Message und nutzt sie als GitHub Release Body. **Folge: jede Tag-Annotation ist die Release-Note.**
