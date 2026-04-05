@@ -6,20 +6,22 @@ import (
 )
 
 func TestExpandDimensions(t *testing.T) {
-	// 2026-03-29 is a Sunday, ISO week 13, Q1
+	// 2026-03-29 is a Sunday, ISO week 13, Q1, day 29, day-of-year 88
 	d := time.Date(2026, 3, 29, 0, 0, 0, 0, time.UTC)
 	dims := ExpandDimensions(d)
 
-	if len(dims) != 5 {
-		t.Fatalf("expected 5 dimensions, got %d", len(dims))
+	if len(dims) != 7 {
+		t.Fatalf("expected 7 dimensions, got %d", len(dims))
 	}
 
 	expected := map[string]string{
-		"year":    "2026",
-		"month":   "3",
-		"week":    "13",
-		"weekday": "7", // Sunday = ISO 7
-		"quarter": "1",
+		"year":     "2026",
+		"month":    "3",
+		"week":     "13",
+		"weekday":  "7", // Sunday = ISO 7
+		"quarter":  "1",
+		"monthday": "29",
+		"seasonal": "88", // 31 (Jan) + 28 (Feb 2026 non-leap) + 29 (Mar) = 88
 	}
 
 	for _, dim := range dims {
@@ -129,18 +131,18 @@ func TestBuildTemporalBatch_WithDates(t *testing.T) {
 		wantCount int
 	}{
 		{
-			name:      "1 date = 1 DELETE + 5 INSERTs",
+			name:      "1 date = 1 DELETE + 7 INSERTs",
 			dates:     []time.Time{time.Date(2026, 3, 29, 0, 0, 0, 0, time.UTC)},
-			wantCount: 6,
+			wantCount: 8,
 		},
 		{
-			name: "3 dates = 1 DELETE + 15 INSERTs",
+			name: "3 dates = 1 DELETE + 21 INSERTs",
 			dates: []time.Time{
 				time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
 				time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC),
 				time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
 			},
-			wantCount: 16,
+			wantCount: 22,
 		},
 	}
 
@@ -185,12 +187,12 @@ func TestPopulateTemporal_SentinelPath(t *testing.T) {
 // --- Link Dimension Tests ---.
 
 func TestBuildTemporalBatch_WithLinks(t *testing.T) {
-	// 1 date (5 dims) + 2 links = 1 DELETE + 5 + 2 = 8
+	// 1 date (7 dims) + 2 links = 1 DELETE + 7 + 2 = 10
 	dates := []time.Time{time.Date(2026, 3, 29, 0, 0, 0, 0, time.UTC)}
 	links := []string{"Projektnotiz", "Architecture"}
 	batch, count := BuildTemporalBatch("block-link", dates, links)
 
-	want := 8 // 1 DELETE + 5 temporal + 2 links
+	want := 10 // 1 DELETE + 7 temporal + 2 links
 	if count != want {
 		t.Fatalf("expected %d queries, got %d", want, count)
 	}
@@ -275,5 +277,40 @@ func TestExpandDimensions_ISOWeekEdge(t *testing.T) {
 	// Dec 31, 2026 is Thursday → ISO week 53 of 2026
 	if weekDim2.Value != "53" {
 		t.Errorf("Dec 31 2026 ISO week: got %s, want 53", weekDim2.Value)
+	}
+}
+
+func TestExpandDimensions_MonthdayAndSeasonal(t *testing.T) {
+	tests := []struct {
+		date            time.Time
+		wantMonthday    string
+		wantSeasonal    string
+	}{
+		// First day of year
+		{time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), "1", "1"},
+		// Leap year Feb 29
+		{time.Date(2024, 2, 29, 0, 0, 0, 0, time.UTC), "29", "60"},
+		// Dec 31 non-leap
+		{time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC), "31", "365"},
+		// Dec 31 leap year
+		{time.Date(2024, 12, 31, 0, 0, 0, 0, time.UTC), "31", "366"},
+		// Christmas 2026
+		{time.Date(2026, 12, 25, 0, 0, 0, 0, time.UTC), "25", "359"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.date.Format("2006-01-02"), func(t *testing.T) {
+			dims := ExpandDimensions(tt.date)
+			got := map[string]string{}
+			for _, d := range dims {
+				got[d.Dimension] = d.Value
+			}
+			if got["monthday"] != tt.wantMonthday {
+				t.Errorf("monthday: got %q, want %q", got["monthday"], tt.wantMonthday)
+			}
+			if got["seasonal"] != tt.wantSeasonal {
+				t.Errorf("seasonal: got %q, want %q", got["seasonal"], tt.wantSeasonal)
+			}
+		})
 	}
 }

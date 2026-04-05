@@ -462,10 +462,20 @@ func TestDimensionPhase(t *testing.T) {
 		{"quarter", "4", 0.75, false},
 		{"week", "1", 0.0, false},
 		{"week", "13", 12.0 / 52.0, false},
+		{"monthday", "1", 0.0, false},
+		{"monthday", "15", 14.0 / 30.0, false},  // mid-month
+		{"monthday", "31", 1.0, false}, // end (30/30)
+		{"seasonal", "1", 0.0, false},            // Jan 1
+		{"seasonal", "365", 364.0 / 365.0, false}, // Dec 31 non-leap
+		{"seasonal", "366", 1.0, false}, // Dec 31 leap (365/365)
 		// Errors
 		{"weekday", "0", 0.0, true},
 		{"weekday", "8", 0.0, true},
 		{"month", "13", 0.0, true},
+		{"monthday", "0", 0.0, true},
+		{"monthday", "32", 0.0, true},
+		{"seasonal", "0", 0.0, true},
+		{"seasonal", "367", 0.0, true},
 		{"year", "2026", 0.0, true}, // not cyclic
 		{"unknown", "1", 0.0, true},
 		{"weekday", "abc", 0.0, true},
@@ -490,16 +500,18 @@ func TestDimensionPhase(t *testing.T) {
 }
 
 func TestQueryPhase(t *testing.T) {
-	// Tuesday, 2026-03-31, March, Q1, ISO week 14
+	// Tuesday, 2026-03-31, March, Q1, ISO week 14, day 31, day-of-year 90
 	tuesday := mustDate("2026-03-31")
 	tests := []struct {
 		dim  string
 		want float64
 	}{
-		{"weekday", 1.0 / 7.0},  // ISO Tuesday=2 → (2-1)/7
-		{"month", 2.0 / 12.0},   // March=3 → 2/12
-		{"quarter", 0.0},        // Q1 → (1-1)/4
-		{"week", 13.0 / 52.0},   // week 14 → 13/52
+		{"weekday", 1.0 / 7.0},   // ISO Tuesday=2 → (2-1)/7
+		{"month", 2.0 / 12.0},    // March=3 → 2/12
+		{"quarter", 0.0},         // Q1 → (1-1)/4
+		{"week", 13.0 / 52.0},    // week 14 → 13/52
+		{"monthday", 1.0},        // day 31 → 30/30
+		{"seasonal", 89.0 / 365.0}, // day-of-year 90 → 89/365
 	}
 	for _, tt := range tests {
 		t.Run(tt.dim, func(t *testing.T) {

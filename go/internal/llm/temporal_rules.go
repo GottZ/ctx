@@ -13,6 +13,7 @@
 package llm
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -547,6 +548,27 @@ func dwLinearRange() map[string]float64 {
 	return map[string]float64{"linear": 0.6, "weekday": 0.4}
 }
 
+func dwMonthday() map[string]float64 {
+	return map[string]float64{"monthday": 1.0}
+}
+
+func dwLinearMonthday() map[string]float64 {
+	return map[string]float64{"linear": 0.5, "monthday": 0.5}
+}
+
+func dwSeasonal() map[string]float64 {
+	return map[string]float64{"seasonal": 1.0}
+}
+
+func dwLinearSeasonal() map[string]float64 {
+	return map[string]float64{"linear": 0.5, "seasonal": 0.5}
+}
+
+func dwHoliday() map[string]float64 {
+	// Annual holidays combine month (coarse) + seasonal (fine) for dual-anchor matching.
+	return map[string]float64{"month": 0.4, "seasonal": 0.6}
+}
+
 // --- Result Helpers ---.
 
 func singleResult(ref, date, dir string) *TemporalResult {
@@ -768,6 +790,60 @@ func matchRelativeMonth(query string, now time.Time) *TemporalResult {
 	if reThisMonthDE.MatchString(lower) || reThisMonth.MatchString(lower) {
 		first, last := monthBounds(now, 0)
 		return rangeResult("diesen Monat", fmtDate(first), fmtDate(last), "range")
+	}
+	return nil
+}
+
+// matchMonthSegment detects day-of-month patterns: Monatsanfang, Monatsmitte,
+// Monatsende. Returns a reference date within the current month for monthday
+// phase calculation. Pure monthday dimension (no linear component) because
+// "Monatsanfang" is cyclical across months.
+var (
+	reMonthStart = regexp.MustCompile(`(?i)\b(monatsanfang|anfang\s+des\s+monats|zum\s+(?:monats)?ersten|beginning\s+of\s+(?:the\s+)?month|start\s+of\s+(?:the\s+)?month|month[- ]?start)\b`)
+	reMonthEnd   = regexp.MustCompile(`(?i)\b(monatsende|ende\s+des\s+monats|end\s+of\s+(?:the\s+)?month|month[- ]?end)\b`)
+	reMonthMid   = regexp.MustCompile(`(?i)\b(monatsmitte|mitte\s+des\s+monats|mid[- ]?month)\b`)
+)
+
+func matchMonthSegment(query string) *TemporalResult {
+	lower := strings.ToLower(query)
+	switch {
+	case reMonthStart.MatchString(lower):
+		// Reference: day 3 (middle of first week of month)
+		return &TemporalResult{
+			Dates: []TemporalDate{{Ref: "Monatsanfang", Date: "2026-01-03", Dir: "range"}},
+		}
+	case reMonthEnd.MatchString(lower):
+		// Reference: day 29 (last few days)
+		return &TemporalResult{
+			Dates: []TemporalDate{{Ref: "Monatsende", Date: "2026-01-29", Dir: "range"}},
+		}
+	case reMonthMid.MatchString(lower):
+		return &TemporalResult{
+			Dates: []TemporalDate{{Ref: "Monatsmitte", Date: "2026-01-15", Dir: "range"}},
+		}
+	}
+	return nil
+}
+
+// matchAnnualHoliday detects fixed-date annual holidays. Returns a reference
+// date with month + seasonal dimensions. Phase calculation uses day-of-year
+// so the same date in any year matches.
+var (
+	reWeihnachten = regexp.MustCompile(`(?i)\b(weihnachten|heiligabend|christmas|xmas)\b`)
+	reSilvester   = regexp.MustCompile(`(?i)\b(silvester|new\s*year'?s?\s*eve|nye)\b`)
+	reNeujahr     = regexp.MustCompile(`(?i)\b(neujahr|new\s*year(?:'?s(?:\s*day)?)?)\b`)
+)
+
+func matchAnnualHoliday(query string, now time.Time) *TemporalResult {
+	lower := strings.ToLower(query)
+	year := now.Year()
+	switch {
+	case reWeihnachten.MatchString(lower):
+		return singleResult("Weihnachten", fmt.Sprintf("%d-12-25", year), "range")
+	case reSilvester.MatchString(lower):
+		return singleResult("Silvester", fmt.Sprintf("%d-12-31", year), "range")
+	case reNeujahr.MatchString(lower):
+		return singleResult("Neujahr", fmt.Sprintf("%d-01-01", year), "range")
 	}
 	return nil
 }
@@ -1225,6 +1301,18 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	// Priority 8: Relative days (vor N Tagen, in N Tagen) — pure linear
 	if r := matchRelativeDays(query, now); r != nil {
 		r.DimensionWeights = dwLinear()
+		return r
+	}
+
+	// Priority 8a: Annual holidays — month+seasonal (fixed-date recurring)
+	if r := matchAnnualHoliday(query, now); r != nil {
+		r.DimensionWeights = dwHoliday()
+		return r
+	}
+
+	// Priority 8b: Month segments (Monatsanfang/Monatsende/Monatsmitte) — monthday
+	if r := matchMonthSegment(query); r != nil {
+		r.DimensionWeights = dwMonthday()
 		return r
 	}
 

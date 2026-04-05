@@ -125,12 +125,16 @@ func ApplyGravityBoost(results []SearchResult, blockDates map[string][]time.Time
 // Smaller sigma = tighter gravity well (less forgiving of phase mismatch).
 // weekday 0.07: Monday→Wednesday (dist 2/7 ≈ 0.286) decays to ~1e-4 — effectively zero.
 // weekday 0.07: Monday→Tuesday (dist 1/7 ≈ 0.143) decays to ~0.13 — weak but non-zero.
+//
+// All dimensions listed here are cyclic. "year" is explicitly NOT in this map —
+// it is monotonic/linear.
 var DimensionSigma = map[string]float64{
-	"weekday": 0.07, // 7-day cycle, adjacent-day decay ~0.13
-	"month":   0.10, // 12-month cycle
-	"quarter": 0.12, // 4-quarter cycle (wider — quarters are imprecise)
-	"week":    0.08, // 52-week cycle (ISO week)
-	"year":    0.08, // annual cycle
+	"weekday":  0.07, // 7-day cycle, adjacent-day decay ~0.13
+	"month":    0.10, // month-of-year 12-cycle
+	"quarter":  0.12, // 4-quarter cycle (wider — quarters are imprecise)
+	"week":     0.08, // ISO week-of-year 52-cycle
+	"monthday": 0.10, // day-of-month ~30-cycle (Monatsanfang/-ende patterns)
+	"seasonal": 0.08, // day-of-year 365-cycle (annual seasonal patterns)
 }
 
 // CyclicDistance returns the minimum wrap-around distance between two phases
@@ -201,6 +205,18 @@ func DimensionPhase(dimension, value string) (float64, error) {
 			return 0, fmt.Errorf("rrf: week value out of range: %d", v)
 		}
 		return float64(v-1) / 52.0, nil
+	case "monthday":
+		if v < 1 || v > 31 {
+			return 0, fmt.Errorf("rrf: monthday value out of range: %d", v)
+		}
+		// Use 30-day reference cycle — most months fit, Feb and 31-day months
+		// introduce minor asymmetry but the Gaussian σ=0.10 absorbs it.
+		return float64(v-1) / 30.0, nil
+	case "seasonal":
+		if v < 1 || v > 366 {
+			return 0, fmt.Errorf("rrf: seasonal value out of range: %d", v)
+		}
+		return float64(v-1) / 365.0, nil
 	case "year":
 		// Year is not a cyclic dimension in the [0,1) sense — it monotonically
 		// increases. Use linear gravity for year-distance scoring.
@@ -235,6 +251,10 @@ func QueryPhase(dimension string, t time.Time) (float64, error) {
 	case "week":
 		_, iso := t.ISOWeek()
 		return float64(iso-1) / 52.0, nil
+	case "monthday":
+		return float64(t.Day()-1) / 30.0, nil
+	case "seasonal":
+		return float64(t.YearDay()-1) / 365.0, nil
 	}
 	return 0, fmt.Errorf("rrf: unknown dimension: %s", dimension)
 }

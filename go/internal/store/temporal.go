@@ -25,8 +25,17 @@ type TemporalDimension struct {
 	SourceDate time.Time // the original date this dimension was extracted from
 }
 
-// ExpandDimensions returns the 5 temporal dimensions for a given date.
+// ExpandDimensions returns the 7 temporal dimensions for a given date.
 // Pure function, no DB access.
+//
+// Dimensions (all cyclic except year):
+//   - year:     linear, monotonic (NOT cyclic)
+//   - month:    month-of-year (1-12, 12-cycle)
+//   - week:     ISO week-of-year (1-53, 52-cycle)
+//   - weekday:  day-of-week (ISO 1-7, 7-cycle)
+//   - quarter:  quarter-of-year (1-4, 4-cycle)
+//   - monthday: day-of-month (1-31, ~30-cycle)
+//   - seasonal: day-of-year (1-366, 365-cycle)
 func ExpandDimensions(d time.Time) []TemporalDimension {
 	_, isoWeek := d.ISOWeek()
 
@@ -46,6 +55,8 @@ func ExpandDimensions(d time.Time) []TemporalDimension {
 		{Dimension: "week", Value: strconv.Itoa(isoWeek), SourceDate: d},
 		{Dimension: "weekday", Value: strconv.Itoa(isoWd), SourceDate: d},
 		{Dimension: "quarter", Value: strconv.Itoa(quarter), SourceDate: d},
+		{Dimension: "monthday", Value: strconv.Itoa(d.Day()), SourceDate: d},
+		{Dimension: "seasonal", Value: strconv.Itoa(d.YearDay()), SourceDate: d},
 	}
 }
 
