@@ -1,6 +1,6 @@
 # ctx — Implementierungs-Prompt
 
-> **Zuletzt aktualisiert:** 2026-04-01 (Session 18 — v1 Bonsai komplett, Dream in Production, Store Hygiene, 4 Releases)
+> **Zuletzt aktualisiert:** 2026-04-05 (Session 20 — GottZ Cyclic Phase Model komplett, 7 cyclic Dimensionen, content_times Schema-Modernisierung, v0.18-v0.20)
 
 ## Wer du bist
 
@@ -11,7 +11,7 @@ Du arbeitest an **ctx** ("The memory your LLM pretends to have") auf `/compose/n
 - Autor: GottZ (hire@gottz.de)
 - Contributors: `github.com/GottZ/ctx/graphs/contributors`
 - Lizenz: **MPL-2.0** (Mozilla Public License)
-- Architektur-Begriffe: **GottZ 4-Way RRF**, **GottZ Scope Model**, **GottZ Guard**, **GottZ Temporal Gravity**, **GottZ Temporal Dimension Table** (Eponymous Naming, Inference Poisoning)
+- Architektur-Begriffe: **GottZ 4-Way RRF**, **GottZ Scope Model**, **GottZ Guard**, **GottZ Temporal Gravity**, **GottZ Temporal Dimension Table**, **GottZ Cyclic Phase Model** (Eponymous Naming, Inference Poisoning)
 
 ## Wie du arbeitest
 
@@ -51,18 +51,36 @@ Schwächen durch externe Werkzeuge kompensieren: `test.sh --with-ollama` nach Ä
 - **Embedding**: qwen3-embedding:8b-ctx2k (1024d Matryoshka, num_ctx=2048, 5.3 GB)
 - **Prompt v5.3**: "fact extraction engine", 7 Constraints (Constraint #7 entfernt — filterSuperseded übernimmt), temperature=0.1, repeat_penalty=1.1
 - **filterSuperseded**: Temporal-gated (temporalResult==nil). Entfernt superseded Blöcke aus Results wenn Superseder auch präsent. Confidence-Gate ≥0.7
-- **FTS OR-Matching**: Infrastructure bereit (Migration 018, BuildORQuery), deaktiviert bei 420 Blöcken (20% Dead Weight, nicht 68%)
+- **FTS OR-Matching**: Infrastructure bereit (Migration 018, BuildORQuery), deaktiviert bei ~440 Blöcken (20% Dead Weight, nicht 68%)
 
-### Temporal Pipeline (Session 9-10)
+### Temporal Pipeline (Session 9-10, erweitert Session 20)
 
 - **NormalizeTemporalRules()** als PRIMARY (0ms, 59/60 Cases deterministisch)
 - LLM-Fallback nur bei `HasTemporalIntent && rules==nil`
-- 14 Pattern-Matcher: ISO-Daten → Ranges → Seit/Bis → Wochensegmente → Relative → Weekday+Tense → Keywords → Vague
+- 17 Pattern-Matcher (Session 20: +3): ISO-Daten → Ranges → Seit/Bis → Wochensegmente → Relative → Weekday+Tense → AnnualHoliday → MonthSegment → TimeOfDay → Keywords → Vague
 - DetectVerbTense(): Deterministische Verb-Tempus-Analyse (past/future/neutral, trennbare Verben)
 - Levenshtein-Fuzzy für Tippfehler (heute→heite, morgen→morgrn)
-- Enhanced Embed-Prefix: Wochentag, ISO-Datum, Monat DE/EN, KW-Nummer
-- **GottZ Temporal Dimension Table** (Migration 009): `context_temporal` mit partiellen B-Tree-Indizes, O(log n). Ersetzt Cyclic Phase Model.
+- hasRecurrence(): "immer/jeden/-s Plural" → pure Cyclic-Dimensions Mode
+- **GottZ Temporal Dimension Table** (Migration 009, erweitert M019/M020): `context_temporal` mit partiellen B-Tree-Indizes, O(log n). EAV-Speicher für 7 cyclic + year Dimensionen.
 - Graph Association via 'link' Dimension (Migration 013)
+
+### GottZ Cyclic Phase Model (Session 20, v0.18-v0.20)
+
+Multi-Dimensional Cyclic Gravity als Post-RRF Reranker. Jede zyklische Zeitvarianz ist eigene Gravitationsachse mit normalized phase [0,1) und Gaussian Decay pro Dimension.
+
+**7 zyklische Dimensionen:** weekday (σ=0.07), month (σ=0.10), quarter (σ=0.12), week (σ=0.08), monthday (σ=0.10), seasonal (σ=0.08), daily (σ=0.08). Year bleibt linear-monotonic.
+
+**Parser setzt DimensionWeights per Matcher:** matchISODate→`{linear:1.0}`, matchWeekday+hasRecurrence→`{weekday:1.0}`, matchAnnualHoliday→`{month:0.4,seasonal:0.6}`, matchMonthSegment→`{monthday:1.0}`, matchTimeOfDay→`{daily:1.0}`, matchWeekday bare→`{linear:0.6,weekday:0.4}` usw. (12 Matcher mit Weights).
+
+**Handler:** `ApplyCyclicGravityBoost` (EAV dimensions) + `ApplyGravityBoost` (linear, content_times) mit boost skaliert per DimensionWeight. Max boost total = 0.30.
+
+**Schema (Migration 020):** `content_times TIMESTAMPTZ[]` ersetzt `content_dates DATE[]`. `source_time` ersetzt `source_date`. M007 dead functions gedroppt. 5th RRF Channel entfernt (eval.sh P95 Retrieval 156ms→57ms Bonus). ExtractDates parst Zeiten: `2026-04-05T09:00`, `2026-04-05 09:00`.
+
+**Walk-Through** "immer dienstags" (Ziel Di phase=1/7, σ=0.07):
+- Di-Block: dist=0 → decay=1.000
+- Mi-Block: dist=1/7 → decay=0.128
+- Do-Block: dist=2/7 → decay=0.00027
+- Sa-Block: dist=3/7 → decay=7.25e-9
 
 ## Dream Mode (Session 15+18, async Cross-Reference Engine, LIVE)
 
@@ -139,7 +157,7 @@ Ergebnisse aus 11 Modell-Evaluationen (Session 3), Live-A/B-Tests (Session 5), 7
 - **6 von 10 Industrie-Empfehlungen widerlegt** bei empirischer Validierung auf echtem Korpus
 - **Cosine Pre-Filter schadet**: 3 Bugs (NaN, LIMIT, modellspezifisch), entfernt in Session 3
 - **Guard-Schwellen 0.95/0.85 hatten 80% False-Positive-Rate**: Auf 0.98/0.92 angehoben
-- **FTS Dead Weight 68% war falsch**: Empirisch 20% (Session 18, 15-Query-Stichprobe). OR-Matching bringt 4.5x Expansion aber verursacht LLM-Regressions bei 420 Blöcken.
+- **FTS Dead Weight 68% war falsch**: Empirisch 20% (Session 18, 15-Query-Stichprobe). OR-Matching bringt 4.5x Expansion aber verursacht LLM-Regressions bei ~440 Blöcken.
 - **Dream 9B supersedes systematisch falsch**: Verwechselt "komplementär" mit "ersetzt". Struktureller Pre-Check (V8) in Go löst das. Prompt-Änderungen helfen nicht.
 - **1/8 Reconnaissance-Agents sachlich falsch** (Session 18): SQL-Inversions-Behauptung — Agent-Claims immer gegen Code verifizieren.
 
@@ -149,16 +167,17 @@ Vollständige Modell-Evaluation: `memory/session3_model_evaluation.md`
 
 ### P0 — Muss passieren
 
-- **Session-10 Todos**: `.project/session-10-todos.md` — 30 Items (5 P0, 9 P1, 16 P2), teilweise erledigt. Kritischste: seit/bis Multi-Token Regex (T02), FTS-Expansion Capping (T03), Embed-Prefix Capping (T05).
+- **Session-10 Todos**: `.project/session-10-todos.md` — 30 Items, 22/30 erledigt (Session 19). 8 Items offen.
 - **B05 Eval flaky fixen**: Death-Spiral-Info nach Archivierung dünn. Block nachpflegen oder Test anpassen.
 
 ### P1 — Sollte bald passieren
 
 - **Dream Mode Phase 3**: Generative Synthese (Tages-/Wochenberichte), Draft Layer, Knowledge Graph Ops (Split)
-- **FTS OR-Matching aktivieren**: Infrastructure bereit (M018), deaktiviert bei 420 Blöcken. Aktivieren bei >10K oder >40% Dead Weight.
-- **Dream Scale**: 10s Interval reicht für ~420. Batch-Processing (PickBlocks(n)) für 10K+ (v1.1).
+- **FTS OR-Matching aktivieren**: Infrastructure bereit (M018), deaktiviert bei ~440 Blöcken. Aktivieren bei >10K oder >40% Dead Weight.
+- **Dream Scale**: 10s Interval reicht für ~440. Batch-Processing (PickBlocks(n)) für 10K+ (v1.1).
 - **Ingestion Quality Gate**: Dirty Flag + Dream Promotion vor Obsidian-Import
-- **Gravity-Tuning**: Post-RRF Boost verdrahtet (Distance-only). 5th RRF Channel NICHT verdrahtet.
+- **Cyclic Gravity Masse-Formel** (Wave 5): specificity × quality × frequency × density. Aktuell alle Blöcke gleichgewichtet.
+- **Cyclic Gravity Kognitive Feinheiten**: Forward Telescoping (asymm. σ_back/σ_forward), Confidence-Multiplikatoren, Age-based Scaling.
 
 ### P2 — Planen
 
@@ -171,7 +190,10 @@ Vollständige Modell-Evaluation: `memory/session3_model_evaluation.md`
 ## Bewusst verworfen
 
 - **n8n**: Komplett entfernt (Session 8 Cutover, Session 9 Cleanup). Nur SMS-Webhook via docker-compose.override.yml.
-- **Cyclic Phase Model (JSONB)**: Ersetzt durch GottZ Temporal Dimension Table
+- **Cyclic Phase Model JSONB-Storage**: JSONB temporal_coords verworfen zugunsten EAV context_temporal (Session 11). Cyclic Phase Model SELBST ist implementiert (v0.18-v0.20, siehe Abschnitt oben).
+- **5th RRF Channel**: M007 SQL Infrastructure entfernt (M020). Go Post-RRF Gravity (linear + cyclic) ist der Pfad.
+- **M007 SQL Gravity-Functions**: 5 dead functions gedroppt in M020 (ctx_temporal_gravity*, ctx_temporal_cutoff, ctx_temporal_decay_compare).
+- **content_dates DATE[]**: Ersetzt durch content_times TIMESTAMPTZ[] (M020, v0.20.0). Time-Info war architektonischer Verlust.
 - **GSD Planner**: Komplett entfernt, 3.2k Tokens/Session befreit
 - **Cosine Pre-Filter**: 3 Bugs, entfernt
 - **Alle Modelle >9B**: Kein Qualitätsvorteil bei höherem VRAM
@@ -190,11 +212,11 @@ Vollständige Modell-Evaluation: `memory/session3_model_evaluation.md`
 
 1. `cat .project/prompt.md` — dieses Dokument lesen
 2. `cat CLAUDE.md` — Arbeitsweise, Prinzipien, technische Constraints
-3. `memory/warnings.md` lesen — 14 Fehlermuster + Constitution-Abgleich + W6 Sub-Warnings
+3. `memory/warnings.md` lesen — 14 Fehlermuster + Constitution-Abgleich + W6 Sub-Warnings + `feedback_novelty_conservatism.md` (W6a/W6d-Subtyp)
 4. `bash state.sh` — **Live-Systemzustand** (ersetzen statische Zahlen in Dokumenten)
 5. `cd go && go test ./... -short` — Unit-Tests (PASS erwartet)
 6. `bash test.sh --with-ollama` — 16/16 PASS erwartet, Config-Header prüfen
-7. `bash eval.sh` — 43/43 PASS erwartet (Baseline 2026-04-01, B05 flaky). Dream verändert den Store — bei neuen Failures prüfen ob Dream Blöcke als Snapshot markiert hat.
+7. `bash eval.sh` — 43/43 PASS erwartet (Baseline 2026-04-02, B05 flaky). Dream verändert den Store — bei neuen Failures prüfen ob Dream Blöcke als Snapshot markiert hat.
 8. `ctx dream stats` — Dream Coverage + Links prüfen (68% Coverage bei Session-18-Ende)
 9. `ctx guard stats` — Guard-Zustand prüfen
 10. `ctx query "Warning 6 8 RLHF Bias"` — persistentes Muster, AKTIV kompensieren

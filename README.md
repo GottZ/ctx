@@ -1,6 +1,6 @@
 # ctx — The memory your LLM pretends to have.
 
-> Knowledge store with weighted 4-way RRF retrieval, multi-tenant scope isolation, temporal awareness, and autonomous cross-referencing. Built for AI workflows that need to remember.
+> Knowledge store with weighted 4-way RRF retrieval, multi-tenant scope isolation, multi-dimensional cyclic temporal gravity, and autonomous cross-referencing. Built for AI workflows that need to remember.
 
 [![Release](https://img.shields.io/github/v/release/GottZ/ctx)](https://github.com/GottZ/ctx/releases)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8)](https://go.dev)
@@ -9,7 +9,7 @@
 
 ## What it does
 
-ctx gives your LLM a persistent, searchable memory. Store knowledge blocks, query them with hybrid retrieval (semantic + fulltext + trigram + temporal gravity), and get synthesized answers with source citations.
+ctx gives your LLM a persistent, searchable memory. Store knowledge blocks, query them with hybrid retrieval (semantic + bilingual fulltext + trigram), then rerank with multi-dimensional cyclic gravity — each temporal cycle (weekday, month, quarter, week, monthday, seasonal, daily) scored as its own Gaussian field. Queries like "immer dienstags" or "Weihnachten" activate specific dimensions; "Meeting am Dienstag, Ergebnis am Mittwoch" still pulls the Wednesday block (just weaker).
 
 **Dream Mode** runs in the background — autonomously discovering relationships between blocks, marking outdated information, and promoting high-quality content. Your knowledge base grows, self-organizes, and stays current.
 
@@ -109,17 +109,22 @@ ctx stats     # Block count, categories, storage
 ## Architecture
 
 ```
-Query ──► Embed ──► 4-Way RRF ──► Temporal Gravity ──► filterSuperseded ──► LLM Synthesis
-                    ├─ Semantic (0.45)
-                    ├─ EN-FTS   (0.25)    ┌─────────────────────────┐
-                    ├─ DE-FTS   (0.20)    │  Dream Mode (async)     │
-                    └─ Trigram  (0.10)    │  Pick → Keywords → RRF  │
-                                          │  → LLM Eval → Links     │
-Store ──► Hash NOOP ──► Embed ──►         │  → ApplySupersedes      │
-          Guard (async, 60s) ◄────────────│  → PromoteToCanonical   │
-          ├─ ≥0.98: auto-archive          └─────────────────────────┘
-          ├─ 0.92-0.98: flag
-          └─ <0.92: clean
+Query ──► Parse Temporal ──► Embed ──► 4-Way RRF ──► Gravity Boost ──► filterSuperseded ──► LLM Synthesis
+          │                            ├─ Semantic (0.45)    │
+          │                            ├─ EN-FTS   (0.25)    ├─ Linear (Power-Law, content_times)
+          │                            ├─ DE-FTS   (0.20)    └─ Cyclic (Gaussian, EAV dimensions)
+          │                            └─ Trigram  (0.10)       ├─ weekday σ=0.07  ┌─────────────────────────┐
+          │                                                     ├─ month   σ=0.10  │  Dream Mode (async)     │
+          └─► DimensionWeights                                  ├─ quarter σ=0.12  │  Pick → Keywords → RRF  │
+              {weekday:1.0}  "immer dienstags"                  ├─ week    σ=0.08  │  → LLM Eval → Links     │
+              {month:0.4, seasonal:0.6}  "Weihnachten"          ├─ monthday σ=0.10 │  → ApplySupersedes      │
+              {monthday:1.0}  "Monatsanfang"                    ├─ seasonal σ=0.08 │  → PromoteToCanonical   │
+              {daily:1.0}    "morgens"                          └─ daily   σ=0.08  └─────────────────────────┘
+
+Store ──► Extract Times ──► Hash NOOP ──► Embed ──► Guard (async, 60s)
+          (ISO date+time)                           ├─ ≥0.98: auto-archive
+                                                    ├─ 0.92-0.98: flag needs_review
+                                                    └─ <0.92: clean
 ```
 
 **Stack:** Go 1.25, PostgreSQL 18 + pgvector 0.8.2, Ollama (qwen3-embedding:8b + qwen3.5:9b)
@@ -128,7 +133,8 @@ Store ──► Hash NOOP ──► Embed ──►         │  → ApplySupers
 - **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels
 - **GottZ Scope Model** — multi-tenant isolation (private/work/shared) via API key scoping
 - **GottZ Guard** — async deduplication via PG LISTEN/NOTIFY + HNSW similarity
-- **GottZ Temporal Dimension Table** — EAV temporal indexing with deterministic parser (59/60 cases in 0ms)
+- **GottZ Cyclic Phase Model** — 7 cyclic temporal dimensions (weekday/month/quarter/week/monthday/seasonal/daily) with normalized phase [0,1) and per-dimension Gaussian decay. Queries route to dimensions via parser (12-matcher deterministic engine, 59/60 cases in 0ms).
+- **GottZ Temporal Dimension Table** — EAV storage with partial B-Tree indexes, O(log n) dimension lookups at 1M+ scale
 - **Dream Mode** — autonomous cross-referencing with adaptive cooldown and supersedes detection
 - **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results
 
