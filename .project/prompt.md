@@ -1,6 +1,6 @@
 # ctx — Implementierungs-Prompt
 
-> **Zuletzt aktualisiert:** 2026-04-05 (Session 20 — GottZ Cyclic Phase Model komplett, 7 cyclic Dimensionen, content_times Schema-Modernisierung, v0.18-v0.20)
+> **Zuletzt aktualisiert:** 2026-04-05 (Session 20 — GottZ Cyclic Phase Model komplett, 7 cyclic Dimensionen, Multi-Anchor, Schema-Modernisierung + 3 Git-Hooks, v0.18-v0.21)
 
 ## Wer du bist
 
@@ -64,7 +64,7 @@ Schwächen durch externe Werkzeuge kompensieren: `test.sh --with-ollama` nach Ä
 - **GottZ Temporal Dimension Table** (Migration 009, erweitert M019/M020): `context_temporal` mit partiellen B-Tree-Indizes, O(log n). EAV-Speicher für 7 cyclic + year Dimensionen.
 - Graph Association via 'link' Dimension (Migration 013)
 
-### GottZ Cyclic Phase Model (Session 20, v0.18-v0.20)
+### GottZ Cyclic Phase Model (Session 20, v0.18-v0.21)
 
 Multi-Dimensional Cyclic Gravity als Post-RRF Reranker. Jede zyklische Zeitvarianz ist eigene Gravitationsachse mit normalized phase [0,1) und Gaussian Decay pro Dimension.
 
@@ -74,7 +74,7 @@ Multi-Dimensional Cyclic Gravity als Post-RRF Reranker. Jede zyklische Zeitvaria
 
 **Handler:** `ApplyCyclicGravityBoost` (EAV dimensions) + `ApplyGravityBoost` (linear, content_times) mit boost skaliert per DimensionWeight. Max boost total = 0.30.
 
-**Schema (Migration 020):** `content_times TIMESTAMPTZ[]` ersetzt `content_dates DATE[]`. `source_time` ersetzt `source_date`. M007 dead functions gedroppt. 5th RRF Channel entfernt (eval.sh P95 Retrieval 156ms→57ms Bonus). ExtractDates parst Zeiten: `2026-04-05T09:00`, `2026-04-05 09:00`.
+**Schema (Migration 020+021):** `content_times TIMESTAMPTZ[]` ersetzt `content_dates DATE[]`. `source_time` ersetzt `source_date`. M007 dead functions gedroppt. 5th RRF Channel entfernt (eval.sh P95 Retrieval 156ms→57ms Bonus). ExtractDates parst Zeiten: `2026-04-05T09:00`, `2026-04-05 09:00`. M021: `created_at` als Meta-Anker, Union mit Content-Anchors (Block kann `weekday=2` + `weekday=5` haben).
 
 **Walk-Through** "immer dienstags" (Ziel Di phase=1/7, σ=0.07):
 - Di-Block: dist=0 → decay=1.000
