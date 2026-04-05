@@ -234,7 +234,13 @@ Regel: wenn Trigger zutrifft UND `README.md` NICHT gestagt ist → Commit wird g
 2. README.md updaten ODER (wenn wirklich nichts zu ändern ist) per `touch README.md` berühren
 3. `git add README.md` und erneut commiten
 
-**Bypass:** `git commit --no-verify` — sparsam nutzen, nicht als Default.
+**pre-push** (`.hooks/pre-push`): erzwingt annotated Tags bei Version-Push:
+- Lightweight-Tags `vX.Y.Z` werden abgelehnt (kein Release-Body verfügbar)
+- Annotated-Tags mit Subject+Body < 80 chars werden abgelehnt (triviale Release-Notes)
+
+Regel: nur Tags matching `refs/tags/v*` werden geprüft. Andere Tags und Branch-Pushes passieren frei. Signatur-Block wird bei der Längenmessung ausgeschlossen (nur `%(contents:subject)` + `%(contents:body)`).
+
+**Bypass (alle Hooks):** `git commit --no-verify` / `git push --no-verify` — sparsam nutzen, nicht als Default.
 
 ## Releases (Pflicht-Konvention)
 

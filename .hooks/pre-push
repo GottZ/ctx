@@ -1,0 +1,77 @@
+#!/bin/sh
+# Pre-push hook: enforce annotated tags with real messages for version tags.
+#
+# Version tags (refs/tags/v*) become GitHub Releases via CI. The release body
+# is extracted from the tag annotation. Lightweight tags have no annotation →
+# fallback "Release vX.Y.Z" body (useless). Trivially short annotations also
+# produce useless release notes.
+#
+# Rule: pushed version tags MUST be annotated AND message body must be
+# substantial (>= 80 chars, typically multi-line with technical details).
+#
+# Bypass: git push --no-verify
+
+MIN_MSG_LENGTH=80
+REJECTED=0
+
+# Read refs from stdin (git passes: local_ref local_sha remote_ref remote_sha)
+while read local_ref local_sha remote_ref remote_sha; do
+    # Only check tag pushes matching version pattern.
+    case "$remote_ref" in
+        refs/tags/v*)
+            TAG_NAME=$(echo "$remote_ref" | sed 's|refs/tags/||')
+
+            # Check object type: annotated tags are 'tag' objects, lightweight
+            # are 'commit' objects (they point directly to a commit).
+            OBJ_TYPE=$(git cat-file -t "$local_sha" 2>/dev/null)
+            if [ "$OBJ_TYPE" != "tag" ]; then
+                echo ""
+                echo "pre-push: REJECTED — lightweight tag $TAG_NAME"
+                echo ""
+                echo "  Version tags must be annotated (carries release notes)."
+                echo "  Lightweight tags produce fallback release bodies."
+                echo ""
+                echo "  Recreate:"
+                echo "    git tag -d $TAG_NAME"
+                echo '    git tag -a '"$TAG_NAME"' -m "\$(cat <<EOF'
+                echo "$TAG_NAME — Kurzer Titel"
+                echo ""
+                echo "    Was ist neu (2-3 Saetze). Technische Details."
+                echo "    EOF"
+                echo "    )\""
+                echo ""
+                REJECTED=1
+                continue
+            fi
+
+            # Check annotation length (subject + body, excluding signature).
+            MSG=$(git tag -l --format='%(contents:subject)%0a%(contents:body)' "$TAG_NAME")
+            MSG_LENGTH=$(printf '%s' "$MSG" | wc -c)
+
+            if [ "$MSG_LENGTH" -lt "$MIN_MSG_LENGTH" ]; then
+                echo ""
+                echo "pre-push: REJECTED — tag $TAG_NAME annotation too short"
+                echo ""
+                echo "  Annotation length: $MSG_LENGTH chars (min: $MIN_MSG_LENGTH)"
+                echo "  Release notes would be insufficient. Write a real annotation."
+                echo ""
+                echo "  Current annotation:"
+                echo "  ---"
+                printf '%s' "$MSG" | sed 's/^/    /'
+                echo ""
+                echo "  ---"
+                echo ""
+                REJECTED=1
+                continue
+            fi
+            ;;
+    esac
+done
+
+if [ "$REJECTED" -eq 1 ]; then
+    echo "pre-push: push blocked. Use --no-verify to bypass (use sparingly)."
+    echo ""
+    exit 1
+fi
+
+exit 0
