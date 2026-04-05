@@ -105,6 +105,8 @@ Year bleibt linear-monotonic (explicit nicht zyklisch).
 
 **Zeit-Extraktion:** `ExtractDates` parst jetzt `2026-04-05T09:00` und `2026-04-05 09:00`. Dedup per `YYYY-MM-DDTHH:MM`. Time-of-day Keywords in `temporalIntentWords`.
 
+**Multiple Anchors per Block (v0.21.0):** Jeder Block hat Content-Anchors (Times aus Text-Extraktion) UND Meta-Anchor (`created_at`). Beide Quellen tragen unabhängige Dimensionen bei. Block "Meeting am Dienstag" erstellt am Freitag → weekday=2 (content) + weekday=5 (meta). PopulateTemporal akzeptiert `createdAt` als Pflicht-Parameter. Migration 021 backfillt created_at-Dimensionen für alle aktiven Blöcke (+281% Dimension-Coverage).
+
 ## Containers
 
 | Container | Image | Purpose |
@@ -172,7 +174,7 @@ CLI: `ctx guard [list|stats|resolve <id> archive|keep]`
 
 - 11 Tabellen: context_blocks, context_api_keys, context_blobs, context_digest_state, context_dream_links, context_guard_state, context_access_log, context_write_log, context_sources, context_temporal, _migrations
 - 30 Spalten auf context_blocks (inkl. Scale-Spalten: source_id, parent_id, block_type, chunk_index, quality_score, embed_status, description, auto_tags, language, content_times, dream_checked_at, dream_cooldown_until)
-- 20 SQL-Migrationen in go/migrations/ (001–020)
+- 21 SQL-Migrationen in go/migrations/ (001–021)
 - PG-Tuning: shared_buffers=8GB, maintenance_work_mem=4GB, work_mem=64MB, effective_cache_size=48GB
 
 ## Security (Session 5)
