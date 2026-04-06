@@ -57,10 +57,16 @@ func (p Prefix) text() string {
 	}
 }
 
+// EmbedOptions holds Ollama options for embedding requests.
+type EmbedOptions struct {
+	NumCtx int `json:"num_ctx,omitempty"` // 0 = model default
+}
+
 // EmbedRequest is the Ollama /api/embed request body.
 type EmbedRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
+	Model   string        `json:"model"`
+	Input   string        `json:"input"`
+	Options *EmbedOptions `json:"options,omitempty"`
 }
 
 // EmbedResponse is the Ollama /api/embed response body.
@@ -70,12 +76,16 @@ type EmbedResponse struct {
 
 // Embed generates an embedding via Ollama, truncates to 1024d, and L2-normalizes.
 // The prefix parameter controls the asymmetric instruction prefix (query vs document).
-func Embed(ctx context.Context, host, model, text string, prefix Prefix) ([]float32, error) {
+// numCtx controls the context size (0 = model default).
+func Embed(ctx context.Context, host, model, text string, prefix Prefix, numCtx int) ([]float32, error) {
 	input := prefix.text() + text
 
 	reqBody := EmbedRequest{
 		Model: model,
 		Input: input,
+	}
+	if numCtx > 0 {
+		reqBody.Options = &EmbedOptions{NumCtx: numCtx}
 	}
 
 	body, err := json.Marshal(reqBody)

@@ -23,9 +23,10 @@ type Config struct {
 	// Ollama
 	OllamaHost       string
 	OllamaEmbedModel string
-	OllamaEmbedDims  int
-	OllamaChatModel  string
-	OllamaChatNumCtx int
+	OllamaEmbedDims   int
+	OllamaEmbedNumCtx int
+	OllamaChatModel   string
+	OllamaChatNumCtx  int
 
 	// Ollama LLM behavior
 	OllamaThink string // "true", "false", or "" (omit from request)
@@ -55,6 +56,11 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("parsing OLLAMA_EMBED_DIMS: %w", err)
 	}
 
+	embedNumCtx, err := getEnvInt("OLLAMA_EMBED_NUM_CTX", 0)
+	if err != nil {
+		return Config{}, fmt.Errorf("parsing OLLAMA_EMBED_NUM_CTX: %w", err)
+	}
+
 	chatNumCtx, err := getEnvInt("OLLAMA_CHAT_NUM_CTX", 0)
 	if err != nil {
 		return Config{}, fmt.Errorf("parsing OLLAMA_CHAT_NUM_CTX: %w", err)
@@ -77,9 +83,10 @@ func LoadConfig() (Config, error) {
 
 		OllamaHost:       getEnv("OLLAMA_HOST", "http://localhost:11434"),
 		OllamaEmbedModel: getEnv("OLLAMA_EMBED_MODEL", "qwen3-embedding:8b"),
-		OllamaEmbedDims:  embedDims,
-		OllamaChatModel:  getEnv("OLLAMA_CHAT_MODEL", "qwen3.5:9b"),
-		OllamaChatNumCtx: chatNumCtx,
+		OllamaEmbedDims:   embedDims,
+		OllamaEmbedNumCtx: embedNumCtx,
+		OllamaChatModel:   getEnv("OLLAMA_CHAT_MODEL", "qwen3.5:9b"),
+		OllamaChatNumCtx:  chatNumCtx,
 
 		OllamaThink: getEnv("OLLAMA_THINK", "false"),
 

@@ -223,7 +223,7 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, ollamaHost, embed
 
 	for _, kw := range keywords {
 		// Embed the keyword for semantic search.
-		kwEmbedding, err := embed.Embed(ctx, ollamaHost, embedModel, kw, embed.PrefixQuery)
+		kwEmbedding, err := embed.Embed(ctx, ollamaHost, embedModel, kw, embed.PrefixQuery, 0)
 		if err != nil {
 			embedFailures++
 			slog.Debug("dream: embed keyword failed", "keyword", kw, "error", err)

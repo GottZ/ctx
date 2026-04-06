@@ -16,17 +16,19 @@ import (
 
 // ManageHandler handles POST /api/manage.
 type ManageHandler struct {
-	pool       *pgxpool.Pool
-	ollamaHost string
-	embedModel string
+	pool        *pgxpool.Pool
+	ollamaHost  string
+	embedModel  string
+	embedNumCtx int
 }
 
 // NewManageHandler creates a new ManageHandler.
-func NewManageHandler(pool *pgxpool.Pool, ollamaHost, embedModel string) *ManageHandler {
+func NewManageHandler(pool *pgxpool.Pool, ollamaHost, embedModel string, embedNumCtx int) *ManageHandler {
 	return &ManageHandler{
-		pool:       pool,
-		ollamaHost: ollamaHost,
-		embedModel: embedModel,
+		pool:        pool,
+		ollamaHost:  ollamaHost,
+		embedModel:  embedModel,
+		embedNumCtx: embedNumCtx,
 	}
 }
 
@@ -281,7 +283,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 	// Re-embed if content or title changed.
 	if needsReEmbed {
 		embedText := block.Title + "\n\n" + block.Content
-		vec, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedText, embed.PrefixDocument)
+		vec, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedText, embed.PrefixDocument, h.embedNumCtx)
 		if err != nil {
 			slog.Error("manage: re-embed failed", "error", err, "block_id", block.ID, "request_id", reqID)
 			// Return success but with warning.

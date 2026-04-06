@@ -23,17 +23,19 @@ type QueryHandler struct {
 	pool           *pgxpool.Pool
 	ollamaHost     string
 	embedModel     string
+	embedNumCtx    int
 	chatModel      string
 	chatThink      *bool
 	rerankEnabled  bool
 }
 
 // NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, ollamaHost, embedModel, chatModel string, chatThink *bool, rerankEnabled bool) *QueryHandler {
+func NewQueryHandler(pool *pgxpool.Pool, ollamaHost, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, rerankEnabled bool) *QueryHandler {
 	return &QueryHandler{
 		pool:          pool,
 		ollamaHost:    ollamaHost,
 		embedModel:    embedModel,
+		embedNumCtx:   embedNumCtx,
 		chatModel:     chatModel,
 		chatThink:     chatThink,
 		rerankEnabled: rerankEnabled,
@@ -194,7 +196,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	embedQuery := searchQuery
 
 	// Step 4: Embed the search query with query prefix.
-	embedding, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedQuery, embed.PrefixQuery)
+	embedding, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedQuery, embed.PrefixQuery, h.embedNumCtx)
 	if err != nil {
 		slog.Error("embedding failed",
 			"error", err,

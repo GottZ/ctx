@@ -14,17 +14,19 @@ import (
 
 // StoreHandler handles POST /api/store.
 type StoreHandler struct {
-	pool       *pgxpool.Pool
-	ollamaHost string
-	embedModel string
+	pool        *pgxpool.Pool
+	ollamaHost  string
+	embedModel  string
+	embedNumCtx int
 }
 
 // NewStoreHandler creates a new StoreHandler.
-func NewStoreHandler(pool *pgxpool.Pool, ollamaHost, embedModel string) *StoreHandler {
+func NewStoreHandler(pool *pgxpool.Pool, ollamaHost, embedModel string, embedNumCtx int) *StoreHandler {
 	return &StoreHandler{
-		pool:       pool,
-		ollamaHost: ollamaHost,
-		embedModel: embedModel,
+		pool:        pool,
+		ollamaHost:  ollamaHost,
+		embedModel:  embedModel,
+		embedNumCtx: embedNumCtx,
 	}
 }
 
@@ -174,7 +176,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 
 	// Generate embedding (document prefix): title + "\n\n" + content.
 	embedText := block.Title + "\n\n" + block.Content
-	vec, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedText, embed.PrefixDocument)
+	vec, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedText, embed.PrefixDocument, h.embedNumCtx)
 	if err != nil {
 		slog.Error("store: embedding generation failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		// Block is stored but without embedding. Still return success.
