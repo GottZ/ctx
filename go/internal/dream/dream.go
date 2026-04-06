@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/embed"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,11 +44,12 @@ type BlockInfo struct {
 
 // CycleTimeout is the maximum duration for a single dream cycle.
 // Prevents cascading Ollama timeouts from blocking the scheduler.
-const CycleTimeout = 90 * time.Second
+// 180s to accommodate large model cold-starts with Ollama model swapping.
+const CycleTimeout = 180 * time.Second
 
 // RunDreamCycle executes one dream cycle: pick → keywords → search → evaluate → link.
 // Returns the number of links created, or 0 if no block was available.
-func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, ollamaHost, embedModel, chatModel string, readScopes []string) (int, error) {
+func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, ollamaHost, embedModel, chatModel string, think *bool, opts llm.Options, readScopes []string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, CycleTimeout)
 	defer cancel()
 	// Step 1: Pick a block.
@@ -98,7 +100,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, ollamaHost, embedMod
 	)
 
 	// Step 4: LLM evaluation.
-	links, err := EvaluateRelationships(ctx, ollamaHost, chatModel, *block, candidates)
+	links, err := EvaluateRelationships(ctx, ollamaHost, chatModel, think, opts, *block, candidates)
 	if err != nil {
 		slog.Warn("dream: evaluation failed", "block_id", block.ID, "error", err)
 		_ = SetDreamCooldown(ctx, pool, block.ID, CooldownInertDays)

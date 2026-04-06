@@ -20,7 +20,8 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 
 const (
 	// DreamTimeout is the HTTP timeout for dream LLM calls.
-	DreamTimeout = 30 * time.Second
+	// 120s to accommodate large model cold-starts with Ollama model swapping.
+	DreamTimeout = 120 * time.Second
 
 	// maxContentLen limits content passed to LLM to reduce prompt injection surface.
 	maxContentLen = 800
@@ -71,14 +72,14 @@ var validRelationships = map[string]bool{
 
 // EvaluateRelationships asks the LLM to classify relationships between a source block
 // and candidate blocks found via keyword search. Returns validated links.
-func EvaluateRelationships(ctx context.Context, host, model string, source BlockInfo, candidates []BlockInfo) ([]Link, error) {
+func EvaluateRelationships(ctx context.Context, host, model string, think *bool, opts llm.Options, source BlockInfo, candidates []BlockInfo) ([]Link, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
 
 	userPrompt := buildEvalPrompt(source, candidates)
 
-	resp, err := llm.ChatJSON(ctx, host, model, dreamSystemPrompt, userPrompt, DreamOptions(), DreamTimeout)
+	resp, err := llm.ChatJSON(ctx, host, model, think, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("dream: evaluate: %w", err)
 	}

@@ -193,7 +193,7 @@ func Extract(ctx context.Context, ollamaHost, model, content string) (*Extractio
 
 	system, user, _ := BuildExtractionPrompt(content)
 
-	resp, err := llm.ChatJSON(ctx, ollamaHost, model, system, user, ExtractionOptions(), ExtractionTimeout)
+	resp, err := llm.ChatJSON(ctx, ollamaHost, model, nil, system, user, ExtractionOptions(), ExtractionTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("extract: llm call failed: %w", err)
 	}

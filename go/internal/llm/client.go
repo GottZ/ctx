@@ -42,6 +42,7 @@ type Options struct {
 	Temperature   float64 `json:"temperature"`
 	RepeatPenalty float64 `json:"repeat_penalty,omitempty"`
 	NumPredict    int     `json:"num_predict,omitempty"`
+	NumCtx        int     `json:"num_ctx,omitempty"` // 0 = model default
 }
 
 // ChatRequest is the Ollama /api/chat request body.
@@ -60,14 +61,9 @@ type ChatResponse struct {
 	EvalCount int     `json:"eval_count"`
 }
 
-// ThinkMode controls whether the LLM should use chain-of-thought reasoning.
-// Some models (e.g. qwen3.5) default to thinking mode and need explicit think:false
-// to avoid death-spiral behavior. Other models ignore this parameter.
-var ThinkMode *bool
-
 // Chat sends a non-streaming chat request to Ollama and returns the response content.
-// The timeout parameter controls the HTTP client timeout.
-func Chat(ctx context.Context, host, model, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+// think controls chain-of-thought reasoning (nil = omit, model decides).
+func Chat(ctx context.Context, host, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
 	reqBody := ChatRequest{
 		Model: model,
 		Messages: []Message{
@@ -75,7 +71,7 @@ func Chat(ctx context.Context, host, model, systemPrompt, userPrompt string, opt
 			{Role: "user", Content: userPrompt},
 		},
 		Stream:  false,
-		Think:   ThinkMode,
+		Think:   think,
 		Options: opts,
 	}
 
@@ -114,8 +110,8 @@ func Chat(ctx context.Context, host, model, systemPrompt, userPrompt string, opt
 
 // ChatJSON sends a non-streaming chat request to Ollama with JSON-mode enabled.
 // Ollama's format:"json" constrains the model to output valid JSON.
-// The timeout parameter controls the HTTP client timeout.
-func ChatJSON(ctx context.Context, host, model, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+// think controls chain-of-thought reasoning (nil = omit, model decides).
+func ChatJSON(ctx context.Context, host, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
 	reqBody := ChatRequest{
 		Model: model,
 		Messages: []Message{
@@ -123,7 +119,7 @@ func ChatJSON(ctx context.Context, host, model, systemPrompt, userPrompt string,
 			{Role: "user", Content: userPrompt},
 		},
 		Stream:  false,
-		Think:   ThinkMode,
+		Think:   think,
 		Format:  "json",
 		Options: opts,
 	}

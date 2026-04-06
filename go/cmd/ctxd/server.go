@@ -31,7 +31,8 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	r.Get("/health", h.Health)
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
-	queryHandler := handler.NewQueryHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaChatModel, cfg.RerankEnabled)
+	chatThink := parseThinkMode(cfg.OllamaThink)
+	queryHandler := handler.NewQueryHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaChatModel, chatThink, cfg.RerankEnabled)
 	storeH := handler.NewStoreHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel)
 	searchH := handler.NewSearchHandler(pool)
 	manageH := handler.NewManageHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel)

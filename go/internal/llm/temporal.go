@@ -231,11 +231,11 @@ var jsonFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?})\\s*```")
 
 // NormalizeTemporal uses the LLM to resolve temporal references in a query.
 // Returns nil if no temporal references are found or if the LLM call fails.
-func NormalizeTemporal(ctx context.Context, host, model, query string, now time.Time) (*TemporalResult, error) {
+func NormalizeTemporal(ctx context.Context, host, model string, think *bool, query string, now time.Time) (*TemporalResult, error) {
 	calendar := buildCalendar(now)
 	systemPrompt := fmt.Sprintf(temporalPromptTemplate, calendar)
 
-	resp, err := Chat(ctx, host, model, systemPrompt, query, TemporalOptions(), TemporalTimeout)
+	resp, err := Chat(ctx, host, model, think, systemPrompt, query, TemporalOptions(), TemporalTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("llm: temporal: %w", err)
 	}

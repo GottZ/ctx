@@ -14,6 +14,7 @@ import (
 	"github.com/GottZ/ctx/internal/digest"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/guard"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,8 +25,11 @@ const (
 	// digestDebounce is the debounce duration after last write before running digest.
 	digestDebounce = 60 * time.Second
 
-	// dreamInterval is the interval for dream cross-reference cycles.
-	dreamInterval = 10 * time.Second
+	// dreamIdleWait is the wait duration when dream has no blocks to process.
+	dreamIdleWait = 120 * time.Second
+
+	// dreamYieldWait is the wait duration when dream yields to active queries.
+	dreamYieldWait = 2 * time.Second
 
 	// guardBatchLimit is the max blocks per guard cycle.
 	guardBatchLimit = 100
@@ -40,7 +44,10 @@ type Config struct {
 	DreamEnabled   bool          // Enable dream cross-reference engine
 	OllamaHost     string        // Ollama API base URL (for dream)
 	EmbedModel     string        // Embedding model name (for dream)
-	ChatModel      string        // Chat model name (for dream)
+	ChatModel      string        // Chat model name (for synthesis)
+	DreamModel     string        // Dream model name (fallback: ChatModel)
+	DreamThink     *bool         // Think mode for dream (nil = omit)
+	DreamNumCtx    int           // num_ctx for dream (0 = model default)
 }
 
 // Scheduler orchestrates Guard + Digest as background jobs.
@@ -118,18 +125,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 	digestTicker := time.NewTicker(5 * time.Second) // Check digest debounce every 5s.
 	defer digestTicker.Stop()
 
-	// Dream ticker (only active if enabled).
-	var dreamTicker *time.Ticker
+	// Dream runs in its own goroutine as a continuous loop.
 	if s.config.DreamEnabled {
-		dreamTicker = time.NewTicker(dreamInterval)
-		defer dreamTicker.Stop()
-		slog.Info("scheduler: dream mode enabled", "interval", dreamInterval)
-	}
-
-	// Dream channel (nil if disabled — select on nil channel blocks forever, effectively disabling).
-	var dreamCh <-chan time.Time
-	if dreamTicker != nil {
-		dreamCh = dreamTicker.C
+		slog.Info("scheduler: dream mode enabled (continuous)")
+		go s.runDreamLoop(ctx)
 	}
 
 	for {
@@ -158,9 +157,6 @@ func (s *Scheduler) Run(ctx context.Context) {
 			if pending && !lastWrite.IsZero() && time.Since(lastWrite) >= digestDebounce {
 				s.runDigest(ctx)
 			}
-
-		case <-dreamCh:
-			s.runDream(ctx)
 		}
 	}
 }
@@ -199,45 +195,86 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 	slog.Info("scheduler: guard batch complete", "processed", processed)
 }
 
-// runDream executes one dream cross-reference cycle, yielding if queries are active.
-// Uses a separate context so the cycle can finish during graceful shutdown.
-func (s *Scheduler) runDream(ctx context.Context) {
+// runDreamLoop runs dream cycles continuously in its own goroutine.
+// When blocks are available, processes them back-to-back. When idle, waits dreamIdleWait.
+// Yields to active queries and respects graceful shutdown.
+func (s *Scheduler) runDreamLoop(ctx context.Context) {
+	dreamModel := s.config.DreamModel
+	if dreamModel == "" {
+		dreamModel = s.config.ChatModel
+	}
+
+	dreamOpts := dream.DreamOptions()
+	if s.config.DreamNumCtx > 0 {
+		dreamOpts.NumCtx = s.config.DreamNumCtx
+	}
+
+	for {
+		// Shutdown check.
+		if ctx.Err() != nil {
+			return
+		}
+
+		// Demand interruption: yield to active queries.
+		if s.activeQueries.Load() > 0 {
+			slog.Debug("scheduler: dream yielding to queries", "count", s.activeQueries.Load())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(dreamYieldWait):
+			}
+			continue
+		}
+
+		linksCreated, err := s.runDreamCycle(dreamModel, dreamOpts)
+		if err != nil {
+			slog.Error("scheduler: dream cycle error", "error", err)
+			// Brief pause on error to avoid tight error loops.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
+			continue
+		}
+
+		if linksCreated == 0 {
+			// No block available or no links created — idle wait.
+			slog.Debug("scheduler: dream idle, waiting", "duration", dreamIdleWait)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(dreamIdleWait):
+			}
+			continue
+		}
+
+		// Links created — immediately continue to next block.
+		slog.Info("scheduler: dream cycle complete", "links_created", linksCreated)
+	}
+}
+
+// runDreamCycle executes one dream cycle with graceful shutdown support.
+func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int, error) {
+	s.dreamWg.Add(1)
+	defer s.dreamWg.Done()
+
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("scheduler: panic in dream", "error", r, "stack", string(debug.Stack()))
 		}
 	}()
 
-	// Demand interruption: yield if queries are active.
-	if s.activeQueries.Load() > 0 {
-		slog.Debug("scheduler: dream deferred, active queries", "count", s.activeQueries.Load())
-		return
-	}
-
-	// Don't start new cycles during shutdown.
-	if ctx.Err() != nil {
-		return
-	}
-
-	s.dreamWg.Add(1)
-	defer s.dreamWg.Done()
-
 	// Dream gets its own context with the cycle timeout, independent of parent ctx.
-	// This allows the cycle to complete during graceful shutdown.
 	dreamCtx, cancel := context.WithTimeout(context.Background(), dream.CycleTimeout)
 	defer cancel()
 
-	linksCreated, err := dream.RunDreamCycle(
+	return dream.RunDreamCycle(
 		dreamCtx, s.pool,
-		s.config.OllamaHost, s.config.EmbedModel, s.config.ChatModel,
+		s.config.OllamaHost, s.config.EmbedModel, dreamModel,
+		s.config.DreamThink, dreamOpts,
 		s.config.ReadScopes,
 	)
-	if err != nil {
-		slog.Error("scheduler: dream cycle error", "error", err)
-		return
-	}
-
-	slog.Info("scheduler: dream cycle complete", "links_created", linksCreated)
 }
 
 // runDigest executes the digest, yielding if queries are active.

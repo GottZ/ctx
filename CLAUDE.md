@@ -40,6 +40,20 @@ Für größere Änderungen:
 5. **Implementieren.** Offensichtliche Entscheidungen direkt umsetzen. Preparation nach `/tmp/`, dann Live-System.
 6. **Verifizieren** — `bash test.sh --with-ollama` (16 Tests) + `bash eval.sh` (43 Tests) nach jeder Änderung
 
+### Persistenz-Hierarchie
+
+ctx ist der kanonische Persistenz-Layer. MEMORY.md ist Bootstrap-Index, kein Wissensspeicher.
+
+| Was | Wohin | Warum |
+|-----|-------|-------|
+| Architektur, Erkenntnisse, Bugs, Config | `ctx save` | Persistentes Wissen, cross-session, cross-tenant |
+| Feedback, User-Prefs, Warnings, Agent-Types | Memory-Files (memory/) | Verhaltenssteuerung, muss im System-Prompt geladen sein |
+| Projekt-Status, Pointer | MEMORY.md | Bootstrap-Index für Session-Start |
+
+**Regel:** Information lebt an genau einem Ort. ctx-Block → kein Memory-File. Memory-File → kein ctx-Block. Duplikate sind Rauschen.
+
+**Crowding-Out:** Bei ctx-Writes im selben Turn auch einen Memory-File updaten — unterdrückt den CC Background Extraction Agent (`hasMemoryWritesSince`), der sonst redundant ins Built-in speichert.
+
 ### Technische Constraints
 
 - Background-Agents können keine interaktiven Bash-Permissions bekommen
@@ -196,13 +210,20 @@ Host: `$OLLAMA_HOST (see .env)` (Quadro RTX 6000, 24GB VRAM, primäre GPU mit DW
 |----------|-------|---------|
 | `OLLAMA_HOST` | `$OLLAMA_HOST (see .env)` | API base URL |
 | `OLLAMA_EMBED_MODEL` | `qwen3-embedding:8b-ctx2k` | Embeddings (native 4096d, Matryoshka-truncated to 1024d, num_ctx=2048 via Modelfile → 5.7 GB statt 13.3 GB VRAM) |
-| `OLLAMA_CHAT_MODEL` | `qwen3.5:9b` | LLM synthesis (9B, 9.0 GB VRAM, 97.7% eval pass rate, Session 5: ersetzt qwen3:4b-instruct) |
+| `OLLAMA_CHAT_MODEL` | `qwen3.5:9b` | LLM synthesis (9B, 9.0 GB VRAM, 95% KW, Session 5: ersetzt qwen3:4b-instruct) |
+| `OLLAMA_DREAM_MODEL` | `qwen3.5:27b` | Dream evaluation (27B, 20.6 GB VRAM, 4/4 Dream, num_ctx=16384, think:false) |
 
-VRAM-Budget: Embedding 5.3 + Synthese 9.0 = 14.3 GB → 9.7 GB Headroom. `OLLAMA_MAX_LOADED_MODELS=2` auf dem Host damit beide permanent geladen bleiben.
+VRAM-Budget: Embedding 5.3 + Synthese 9.0 = 14.3 GB → 9.7 GB Headroom (Query-Pfad). Dream-Modell (20.6 GB) swappt via Ollama — passt nicht neben Embedding. `OLLAMA_MAX_LOADED_MODELS=2` auf dem Host.
 
-**qwen3.5:9b**: Aktuelles Synthese-Modell (Session 5). Death-Spiral-Problem war API-Bug (#14793), gelöst via /api/chat mit think:false. 43/43 eval PASS (100%), +10% KW vs qwen3:4b-instruct. 9.0 GB VRAM.
+**qwen3.5:9b**: Synthese-Modell (Session 5). Death-Spiral-Problem war API-Bug (#14793), gelöst via /api/chat mit think:false. 43/43 eval PASS (100%), +10% KW vs qwen3:4b-instruct. 9.0 GB VRAM.
+
+**qwen3.5:27b**: Dream-Modell (Session 21). 4/4 Dream-Tests (einziges Modell das Causal besteht). 95% Synthese-KW. 20.6 GB VRAM (passt nicht neben Embedding, Ollama swappt bei Bedarf). think:false Pflicht (Thinking frisst Token-Budget). num_ctx=16384 (Dream-Prompts ≤4K Tokens). Evaluiert gegen 10 Gemma-Modelle — keines schlägt qwen3.5.
+
+**Dual-Model Architektur (Session 21)**: Synthese nutzt qwen3.5:9b (koexistiert mit Embedding), Dream nutzt qwen3.5:27b (via `OLLAMA_DREAM_MODEL`). Per-function `think` und `num_ctx` konfigurierbar. Globales `ThinkMode` entfernt. Dream läuft als kontinuierlicher Loop (nicht Ticker-basiert): Block→Block wenn verfügbar, 120s Idle-Wait wenn leer, 2s Yield bei aktiven Queries.
 
 **Session 3 Modell-Evaluation**: 11 Modelle getestet (4B-22B), Q4_K_M > Q8_0 für RAG (höhere Präzision → mehr Paraphrasierung → weniger KW-Treffer), IFEval korreliert nicht mit RAG-Qualität. Details: `memory/session3_model_evaluation.md`
+
+**Session 21 Gemma-Evaluation**: 10 Gemma-Modelle (gemma3 3x, gemma3n 2x, gemma4 4x, embeddinggemma 1x). Kein Kandidat schlägt qwen3.5:9b bei Synthese (95% KW) oder Dream (3/4). gemma4:e2b einziges Gemma mit 3/4 Dream aber nur 80% KW. Größere Modelle systematisch schlechter (gemma3:12b 80% KW 0/4 Dream, gemma4:31b 0/4 kein valides JSON). Erkenntnis bestätigt: "Größere Modelle extrahieren nicht besser."
 
 ## Docker
 

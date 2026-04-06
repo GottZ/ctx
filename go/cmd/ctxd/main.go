@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/events"
-	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -60,16 +59,11 @@ func main() {
 
 	slog.Info("database pool created", "host", cfg.ContextDBHost, "db", cfg.ContextDB)
 
-	// Set LLM think mode from config
-	switch cfg.OllamaThink {
-	case "true":
-		t := true
-		llm.ThinkMode = &t
-	case "false":
-		t := false
-		llm.ThinkMode = &t
-	default:
-		llm.ThinkMode = nil // omit from request
+	// Parse think modes.
+	chatThink := parseThinkMode(cfg.OllamaThink)
+	dreamThink := parseThinkMode(cfg.OllamaDreamThink)
+	if cfg.OllamaDreamThink == "" {
+		dreamThink = chatThink // fallback to chat think mode
 	}
 
 	// Run database migrations
@@ -94,6 +88,9 @@ func main() {
 		OllamaHost:   cfg.OllamaHost,
 		EmbedModel:   cfg.OllamaEmbedModel,
 		ChatModel:    cfg.OllamaChatModel,
+		DreamModel:   cfg.OllamaDreamModel,
+		DreamThink:   dreamThink,
+		DreamNumCtx:  cfg.OllamaDreamNumCtx,
 	}
 	scheduler := events.NewScheduler(pool, schedulerConfig)
 	go scheduler.Run(ctx)

@@ -13,7 +13,7 @@ ctx gives your LLM a persistent, searchable memory. Store knowledge blocks, quer
 
 **Multiple anchors per block:** every block carries dimensions from both its content (dates mentioned in text) AND its `created_at` timestamp. A block about "Meeting am Dienstag" written on a Friday gets `weekday=2` (content anchor) AND `weekday=5` (meta anchor). Both signals contribute independently — "immer dienstags" queries find the content anchor; "Freitags-Arbeit" finds the meta anchor. Same principle for monthday, seasonal, daily, etc.
 
-**Dream Mode** runs in the background — autonomously discovering relationships between blocks, marking outdated information, and promoting high-quality content. Your knowledge base grows, self-organizes, and stays current.
+**Dream Mode** runs as a continuous background loop — autonomously discovering relationships between blocks, marking outdated information, and promoting high-quality content. Supports a separate model for evaluation (e.g. a larger model for better causal/supersedes reasoning). Your knowledge base grows, self-organizes, and stays current.
 
 ## Quick Install
 
@@ -116,7 +116,7 @@ Query ──► Parse Temporal ──► Embed ──► 4-Way RRF ──► Gra
           │                            ├─ EN-FTS   (0.25)    ├─ Linear (Power-Law, content_times)
           │                            ├─ DE-FTS   (0.20)    └─ Cyclic (Gaussian, EAV dimensions)
           │                            └─ Trigram  (0.10)       ├─ weekday σ=0.07  ┌─────────────────────────┐
-          │                                                     ├─ month   σ=0.10  │  Dream Mode (async)     │
+          │                                                     ├─ month   σ=0.10  │  Dream Mode (continuous) │
           └─► DimensionWeights                                  ├─ quarter σ=0.12  │  Pick → Keywords → RRF  │
               {weekday:1.0}  "immer dienstags"                  ├─ week    σ=0.08  │  → LLM Eval → Links     │
               {month:0.4, seasonal:0.6}  "Weihnachten"          ├─ monthday σ=0.10 │  → ApplySupersedes      │
@@ -133,7 +133,7 @@ Store ──► Extract Times ──► Hash NOOP ──► Embed ──► Guar
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.25, PostgreSQL 18 + pgvector 0.8.2, Ollama (qwen3-embedding:8b + qwen3.5:9b)
+**Stack:** Go 1.25, PostgreSQL 18 + pgvector 0.8.2, Ollama (qwen3-embedding:8b for embeddings, qwen3.5:9b for synthesis, optional separate dream model e.g. qwen3.5:27b)
 
 **Key features:**
 - **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels
@@ -141,7 +141,7 @@ Store ──► Extract Times ──► Hash NOOP ──► Embed ──► Guar
 - **GottZ Guard** — async deduplication via PG LISTEN/NOTIFY + HNSW similarity
 - **GottZ Cyclic Phase Model** — 7 cyclic temporal dimensions (weekday/month/quarter/week/monthday/seasonal/daily) with normalized phase [0,1) and per-dimension Gaussian decay. Queries route to dimensions via parser (15-matcher deterministic engine, 59/60 cases in 0ms).
 - **GottZ Temporal Dimension Table** — EAV storage with partial B-Tree indexes, O(log n) dimension lookups at 1M+ scale. Every block carries multiple anchors: content-mentioned times (semantic) + `created_at` (meta) as independent signals.
-- **Dream Mode** — autonomous cross-referencing with adaptive cooldown and supersedes detection
+- **Dream Mode** — continuous autonomous cross-referencing with dual-model support, adaptive cooldown, and supersedes detection
 - **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results
 
 ## API
