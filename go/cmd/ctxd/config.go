@@ -22,18 +22,20 @@ type Config struct {
 	ContextDBSSL    string
 
 	// Embedding pipeline
-	EmbedHost   string
-	EmbedAPIKey string
-	EmbedModel  string
-	EmbedDims   int
-	EmbedNumCtx int
+	EmbedHost     string
+	EmbedAPIKey   string
+	EmbedProtocol string // "ollama" (default) or "openai"
+	EmbedModel    string
+	EmbedDims     int
+	EmbedNumCtx   int
 
 	// Synthesis (Chat) pipeline
-	ChatHost   string
-	ChatAPIKey string
-	ChatModel  string
-	ChatNumCtx int
-	ChatThink  string // "true", "false", or "" (omit from request)
+	ChatHost     string
+	ChatAPIKey   string
+	ChatProtocol string // "ollama" (default) or "openai"
+	ChatModel    string
+	ChatNumCtx   int
+	ChatThink    string // "true", "false", or "" (omit from request)
 
 	// Reranker
 	RerankEnabled bool
@@ -42,6 +44,7 @@ type Config struct {
 	DreamEnabled     bool
 	DreamHost        string
 	DreamAPIKey      string
+	DreamProtocol    string // "ollama" (default) or "openai"
 	DreamModel       string
 	DreamNumCtx      int
 	DreamThink       string // "true", "false", or "" (fallback: ChatThink)
@@ -117,24 +120,27 @@ func LoadConfig() (Config, error) {
 		ContextDBPort: port,
 		ContextDBSSL:  getEnv("CONTEXT_DB_SSLMODE", "disable"),
 
-		EmbedHost:   getEnv("CTX_EMBED_HOST", "http://localhost:11434"),
-		EmbedAPIKey: getEnv("CTX_EMBED_API_KEY", ""),
-		EmbedModel:  getEnv("CTX_EMBED_MODEL", "qwen3-embedding:8b"),
-		EmbedDims:   embedDims,
-		EmbedNumCtx: embedNumCtx,
+		EmbedHost:     getEnv("CTX_EMBED_HOST", "http://localhost:11434"),
+		EmbedAPIKey:   getEnv("CTX_EMBED_API_KEY", ""),
+		EmbedProtocol: getEnv("CTX_EMBED_PROTOCOL", "ollama"),
+		EmbedModel:    getEnv("CTX_EMBED_MODEL", "qwen3-embedding:8b"),
+		EmbedDims:     embedDims,
+		EmbedNumCtx:   embedNumCtx,
 
-		ChatHost:   getEnv("CTX_CHAT_HOST", "http://localhost:11434"),
-		ChatAPIKey: getEnv("CTX_CHAT_API_KEY", ""),
-		ChatModel:  getEnv("CTX_CHAT_MODEL", "qwen3.5:9b"),
-		ChatNumCtx: chatNumCtx,
-		ChatThink:  getEnv("CTX_CHAT_THINK", "false"),
+		ChatHost:     getEnv("CTX_CHAT_HOST", "http://localhost:11434"),
+		ChatAPIKey:   getEnv("CTX_CHAT_API_KEY", ""),
+		ChatProtocol: getEnv("CTX_CHAT_PROTOCOL", "ollama"),
+		ChatModel:    getEnv("CTX_CHAT_MODEL", "qwen3.5:9b"),
+		ChatNumCtx:   chatNumCtx,
+		ChatThink:    getEnv("CTX_CHAT_THINK", "false"),
 
 		RerankEnabled: getEnv("CTX_RERANK_ENABLED", "false") == "true",
 
 		DreamEnabled: getEnv("CTX_DREAM_ENABLED", "false") == "true",
-		DreamHost:    getEnv("CTX_DREAM_HOST", "http://localhost:11434"),
-		DreamAPIKey:  getEnv("CTX_DREAM_API_KEY", ""),
-		DreamModel:   getEnv("CTX_DREAM_MODEL", ""),
+		DreamHost:     getEnv("CTX_DREAM_HOST", "http://localhost:11434"),
+		DreamAPIKey:   getEnv("CTX_DREAM_API_KEY", ""),
+		DreamProtocol: getEnv("CTX_DREAM_PROTOCOL", "ollama"),
+		DreamModel:    getEnv("CTX_DREAM_MODEL", ""),
 		DreamNumCtx:  dreamNumCtx,
 		DreamThink:       getEnv("CTX_DREAM_THINK", ""),
 		DreamEmbedHost:   getEnv("CTX_DREAM_EMBED_HOST", ""),

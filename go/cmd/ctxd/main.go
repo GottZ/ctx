@@ -11,7 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -58,6 +60,10 @@ func main() {
 	defer pool.Close()
 
 	slog.Info("database pool created", "host", cfg.ContextDBHost, "db", cfg.ContextDB)
+
+	// Set wire protocol defaults from config.
+	llm.DefaultProtocol = cfg.ChatProtocol
+	embed.DefaultProtocol = cfg.EmbedProtocol
 
 	// Think modes are parsed per pipeline in server.go (chatThink) and scheduler config (dreamThink).
 	// Dream think falls back to chat think if not explicitly set.
