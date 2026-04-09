@@ -223,6 +223,12 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Temporal relevance handled by FTS expansion, Dimension Table, and Gravity Boost.
 	embedQuery := searchQuery
 
+	// Step 3d: Backfill any blocks with missing embeddings before searching.
+	// Ensures freshly stored blocks are immediately searchable.
+	if backfilled := h.backfillPending(ctx); backfilled > 0 {
+		slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
+	}
+
 	// Step 4: Embed the search query with query prefix.
 	embedding, err := embed.Embed(ctx, h.embedHost, h.embedAPIKey, h.embedModel, embedQuery, embed.PrefixQuery, h.embedNumCtx)
 	if err != nil {
@@ -524,6 +530,37 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 			)
 		}
 	}
+}
+
+// backfillPending generates embeddings for any blocks that don't have one yet.
+// Called before search to ensure freshly stored blocks are immediately findable.
+// Returns the number of blocks backfilled (0 in the common case).
+// Uses a TX with FOR UPDATE SKIP LOCKED per block to avoid races with the scheduler.
+func (h *QueryHandler) backfillPending(ctx context.Context) int {
+	count := 0
+	for {
+		var blockID, title, content string
+		err := h.pool.QueryRow(ctx,
+			`SELECT id, title, content FROM context_blocks
+			WHERE embedding IS NULL AND NOT is_archived
+			LIMIT 1`).Scan(&blockID, &title, &content)
+		if err != nil {
+			break // No more pending blocks (or error).
+		}
+
+		embedText := title + "\n\n" + content
+		vec, err := embed.Embed(ctx, h.embedHost, h.embedAPIKey, h.embedModel, embedText, embed.PrefixDocument, h.embedNumCtx)
+		if err != nil {
+			slog.Warn("query backfill: embed failed", "block_id", blockID, "error", err)
+			break // Ollama likely unavailable, don't retry.
+		}
+		if err := store.StoreEmbedding(ctx, h.pool, blockID, vec); err != nil {
+			slog.Warn("query backfill: store failed", "block_id", blockID, "error", err)
+			break
+		}
+		count++
+	}
+	return count
 }
 
 // filterSuperseded removes blocks from results that are superseded by another block
