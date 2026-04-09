@@ -774,9 +774,9 @@ func dreamThrottleCmd(getClient func() (*Client, error)) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			data := map[string]any{"mode": "throttled"}
 			if len(args) == 1 {
-				d, err := time.ParseDuration(args[0])
+				d, err := parseDuration(args[0])
 				if err != nil {
-					return fmt.Errorf("invalid duration %q: %w", args[0], err)
+					return err
 				}
 				data["interval"] = int(d.Seconds())
 			}
@@ -795,4 +795,16 @@ func dreamThrottleCmd(getClient func() (*Client, error)) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// parseDuration parses a duration string. Bare integers are treated as seconds.
+func parseDuration(s string) (time.Duration, error) {
+	if n, err := strconv.Atoi(s); err == nil {
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q: use e.g. 20, 30s, 1m", s)
+	}
+	return d, nil
 }
