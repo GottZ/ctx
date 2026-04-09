@@ -101,7 +101,7 @@ ctx stats     # Block count, categories, storage
 | `ctx health` | Healthcheck |
 | `ctx guard [list\|stats\|resolve]` | Write Guard management |
 | `ctx dream [stats\|review]` | Dream Mode stats (incl. mode) + link review |
-| `ctx dream enable\|disable\|throttle` | Runtime dream mode control (on/off/silent) |
+| `ctx dream enable\|disable\|throttle` | Runtime dream mode control (on/off/throttled) |
 | `ctx brief` | Project briefing from store |
 | `ctx persist` | Persist `[PERSIST:cat:title]` markers |
 | `ctx ingest <path>` | Ingest Obsidian vault |
@@ -143,7 +143,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 - **GottZ Guard** — async deduplication via PG LISTEN/NOTIFY + HNSW similarity
 - **GottZ Cyclic Phase Model** — 7 cyclic temporal dimensions (weekday/month/quarter/week/monthday/seasonal/daily) with normalized phase [0,1) and per-dimension Gaussian decay. Queries route to dimensions via parser (18-matcher deterministic engine). Timezone-aware via `CTX_TIMEZONE`.
 - **GottZ Temporal Dimension Table** — EAV storage with partial B-Tree indexes, O(log n) dimension lookups at 1M+ scale. Every block carries multiple anchors: content-mentioned times (semantic) + `created_at` (meta) as independent signals.
-- **Dream Mode** — continuous autonomous cross-referencing with dual-model support, adaptive cooldown, supersedes detection, temporal validation, and runtime mode control (on/silent/off via API). Silent mode throttles between GPU-intensive steps for thermal management. Config: `CTX_DREAM_IDLE_WAIT` (seconds, default 20)
+- **Dream Mode** — continuous autonomous cross-referencing with dual-model support, adaptive cooldown, supersedes detection, temporal validation, and runtime mode control (on/throttled/off via API). Throttled mode pauses between GPU-intensive steps for thermal management. Config: `CTX_DREAM_IDLE_WAIT` (seconds, default 20)
 - **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results
 
 ## API

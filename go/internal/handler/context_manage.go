@@ -15,8 +15,8 @@ import (
 
 // DreamController is the interface for controlling dream mode from the manage handler.
 type DreamController interface {
-	SetDreamMode(mode int32, silentInterval time.Duration)
-	GetDreamMode() (mode int32, silentInterval time.Duration)
+	SetDreamMode(mode int32, throttleInterval time.Duration)
+	GetDreamMode() (mode int32, throttleInterval time.Duration)
 }
 
 // ManageHandler handles POST /api/manage.
@@ -664,13 +664,13 @@ func (h *ManageHandler) handleDreamMode(w http.ResponseWriter, _ *http.Request, 
 	switch data.Mode {
 	case "on":
 		mode = 0 // DreamModeOn
-	case "silent":
-		mode = 1 // DreamModeSilent
+	case "throttled":
+		mode = 1 // DreamModeThrottled
 	case "off":
 		mode = 2 // DreamModeOff
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false, "error": "Invalid mode: use on, silent, or off",
+			"success": false, "error": "Invalid mode: use on, throttled, or off",
 		})
 		return
 	}
@@ -693,7 +693,7 @@ func (h *ManageHandler) handleDreamMode(w http.ResponseWriter, _ *http.Request, 
 func dreamModeStr(mode int32) string {
 	switch mode {
 	case 1:
-		return "silent"
+		return "throttled"
 	case 2:
 		return "off"
 	default:

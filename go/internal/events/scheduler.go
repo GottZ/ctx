@@ -41,13 +41,13 @@ const (
 
 	// DreamModeOn runs dream cycles back-to-back (full throttle).
 	DreamModeOn int32 = 0
-	// DreamModeSilent runs one cycle per interval (GPU cooldown).
-	DreamModeSilent int32 = 1
+	// DreamModeThrottled throttles between GPU-intensive steps (cooldown).
+	DreamModeThrottled int32 = 1
 	// DreamModeOff disables dream completely (maintenance/dev).
 	DreamModeOff int32 = 2
 
-	// dreamSilentDefault is the default interval for silent mode.
-	dreamSilentDefault = 20 * time.Second
+	// dreamThrottleDefault is the default interval for throttled mode.
+	dreamThrottleDefault = 20 * time.Second
 )
 
 // Config holds scheduler configuration.
@@ -84,8 +84,8 @@ type Scheduler struct {
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
 
 	// Dream mode control (atomic for lock-free reads in hot loop).
-	dreamMode           atomic.Int32 // DreamModeOn | DreamModeSilent | DreamModeOff
-	dreamSilentInterval atomic.Int64 // nanoseconds; 0 = dreamSilentDefault
+	dreamMode           atomic.Int32 // DreamModeOn | DreamModeThrottled | DreamModeOff
+	dreamThrottleInterval atomic.Int64 // nanoseconds; 0 = dreamThrottleDefault
 
 	// Internal state.
 	mu            sync.Mutex
@@ -99,24 +99,24 @@ type Scheduler struct {
 }
 
 // SetDreamMode sets the dream operating mode and optional silent interval.
-func (s *Scheduler) SetDreamMode(mode int32, silentInterval time.Duration) {
+func (s *Scheduler) SetDreamMode(mode int32, throttleInterval time.Duration) {
 	s.dreamMode.Store(mode)
-	if silentInterval > 0 {
-		s.dreamSilentInterval.Store(int64(silentInterval))
+	if throttleInterval > 0 {
+		s.dreamThrottleInterval.Store(int64(throttleInterval))
 	}
 	modeStr := "on"
 	switch mode {
-	case DreamModeSilent:
-		modeStr = "silent"
+	case DreamModeThrottled:
+		modeStr = "throttled"
 	case DreamModeOff:
 		modeStr = "off"
 	}
-	slog.Info("scheduler: dream mode changed", "mode", modeStr, "silent_interval", s.getDreamSilentInterval())
+	slog.Info("scheduler: dream mode changed", "mode", modeStr, "silent_interval", s.getDreamThrottleInterval())
 }
 
 // GetDreamMode returns the current dream mode and silent interval.
-func (s *Scheduler) GetDreamMode() (mode int32, silentInterval time.Duration) {
-	return s.dreamMode.Load(), s.getDreamSilentInterval()
+func (s *Scheduler) GetDreamMode() (mode int32, throttleInterval time.Duration) {
+	return s.dreamMode.Load(), s.getDreamThrottleInterval()
 }
 
 func (s *Scheduler) getDreamIdleWait() time.Duration {
@@ -126,10 +126,10 @@ func (s *Scheduler) getDreamIdleWait() time.Duration {
 	return dreamIdleWaitDefault
 }
 
-func (s *Scheduler) getDreamSilentInterval() time.Duration {
-	ns := s.dreamSilentInterval.Load()
+func (s *Scheduler) getDreamThrottleInterval() time.Duration {
+	ns := s.dreamThrottleInterval.Load()
 	if ns <= 0 {
-		return dreamSilentDefault
+		return dreamThrottleDefault
 	}
 	return time.Duration(ns)
 }
@@ -378,8 +378,8 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 
 	// Build throttle function based on current dream mode.
 	throttle := dream.NoThrottle
-	if s.dreamMode.Load() == DreamModeSilent {
-		interval := s.getDreamSilentInterval()
+	if s.dreamMode.Load() == DreamModeThrottled {
+		interval := s.getDreamThrottleInterval()
 		throttle = func(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
