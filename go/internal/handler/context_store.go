@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -14,21 +15,23 @@ import (
 
 // StoreHandler handles POST /api/store.
 type StoreHandler struct {
-	pool        *pgxpool.Pool
-	embedHost   string
-	embedAPIKey string
-	embedModel  string
-	embedNumCtx int
+	pool           *pgxpool.Pool
+	embedHost      string
+	embedAPIKey    string
+	embedModel     string
+	embedNumCtx    int
+	rateLimitWrite int // 0 = disabled
 }
 
 // NewStoreHandler creates a new StoreHandler.
-func NewStoreHandler(pool *pgxpool.Pool, embedHost, embedAPIKey, embedModel string, embedNumCtx int) *StoreHandler {
+func NewStoreHandler(pool *pgxpool.Pool, embedHost, embedAPIKey, embedModel string, embedNumCtx, rateLimitWrite int) *StoreHandler {
 	return &StoreHandler{
-		pool:        pool,
-		embedHost:   embedHost,
-		embedAPIKey: embedAPIKey,
-		embedModel:  embedModel,
-		embedNumCtx: embedNumCtx,
+		pool:           pool,
+		embedHost:      embedHost,
+		embedAPIKey:    embedAPIKey,
+		embedModel:     embedModel,
+		embedNumCtx:    embedNumCtx,
+		rateLimitWrite: rateLimitWrite,
 	}
 }
 
@@ -108,20 +111,22 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Rate limit check (100 writes/min).
-	writeCount, err := store.CheckRateLimit(ctx, h.pool, authResult.ApiKeyID)
-	if err != nil {
-		slog.Error("store: rate limit check error", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Internal server error",
-		})
-		return
-	}
-	if writeCount >= 100 {
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{
-			"success": false, "error": "Rate limit exceeded: max 100 writes per 60 seconds",
-		})
-		return
+	// Rate limit check (writes/min, 0 = disabled).
+	if h.rateLimitWrite > 0 {
+		writeCount, err := store.CheckRateLimit(ctx, h.pool, authResult.ApiKeyID)
+		if err != nil {
+			slog.Error("store: rate limit check error", "error", err, "request_id", reqID)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false, "error": "Internal server error",
+			})
+			return
+		}
+		if writeCount >= h.rateLimitWrite {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"success": false, "error": fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", h.rateLimitWrite),
+			})
+			return
+		}
 	}
 
 	// Hash NOOP check: skip if identical content already exists.

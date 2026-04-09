@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -31,10 +32,11 @@ type QueryHandler struct {
 	chatThink     *bool
 	rerankEnabled bool
 	timezone      *time.Location
+	rateLimitRead int // 0 = disabled
 }
 
 // NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, rerankEnabled bool, timezone *time.Location) *QueryHandler {
+func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, rerankEnabled bool, timezone *time.Location, rateLimitRead int) *QueryHandler {
 	return &QueryHandler{
 		pool:          pool,
 		chatHost:      chatHost,
@@ -47,6 +49,7 @@ func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedA
 		chatThink:     chatThink,
 		rerankEnabled: rerankEnabled,
 		timezone:      timezone,
+		rateLimitRead: rateLimitRead,
 	}
 }
 
@@ -118,6 +121,23 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if ar == nil || !ar.IsValid {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
+	}
+
+	// Read rate limit check (0 = disabled).
+	if h.rateLimitRead > 0 {
+		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, ar.ApiKeyID, "query")
+		if err != nil {
+			slog.Error("query: read rate limit check error", "error", err, "request_id", requestID)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
+			return
+		}
+		if readCount >= h.rateLimitRead {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Rate limit exceeded: max %d reads per 60 seconds", h.rateLimitRead),
+			})
+			return
+		}
 	}
 
 	// Clamp limit: 1-20, default 5.

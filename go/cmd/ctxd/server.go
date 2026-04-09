@@ -27,16 +27,16 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	r.Use(handler.Recovery)
 
 	// Health check (no auth, no body)
-	h := handler.NewHealthHandler(pool, cfg.EmbedHost)
+	h := handler.NewHealthHandler(pool, cfg.EmbedHost, cfg.ChatHost, cfg.DreamHost)
 	r.Get("/health", h.Health)
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
 	chatThink := parseThinkMode(cfg.ChatThink)
-	queryHandler := handler.NewQueryHandler(pool, cfg.ChatHost, cfg.ChatAPIKey, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.ChatModel, chatThink, cfg.RerankEnabled, cfg.Timezone)
-	storeH := handler.NewStoreHandler(pool, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx)
-	searchH := handler.NewSearchHandler(pool)
+	queryHandler := handler.NewQueryHandler(pool, cfg.ChatHost, cfg.ChatAPIKey, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.ChatModel, chatThink, cfg.RerankEnabled, cfg.Timezone, cfg.RateLimitRead)
+	storeH := handler.NewStoreHandler(pool, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.RateLimitWrite)
+	searchH := handler.NewSearchHandler(pool, cfg.RateLimitRead)
 	manageH := handler.NewManageHandler(pool, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx)
-	blobH := handler.NewBlobHandler(pool)
+	blobH := handler.NewBlobHandler(pool, cfg.RateLimitWrite)
 	digestH := handler.NewDigestHandler(pool)
 
 	// ── API routes (canonical) ──────────────────────────────────────

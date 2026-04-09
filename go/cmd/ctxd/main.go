@@ -88,6 +88,7 @@ func main() {
 		EmbedHost:    cfg.EmbedHost,
 		EmbedAPIKey:  cfg.EmbedAPIKey,
 		EmbedModel:   cfg.EmbedModel,
+		EmbedNumCtx:  cfg.EmbedNumCtx,
 		DreamHost:    cfg.DreamHost,
 		DreamAPIKey:  cfg.DreamAPIKey,
 		ChatModel:    cfg.ChatModel,

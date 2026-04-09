@@ -50,6 +50,11 @@ type Config struct {
 	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
 	Timezone *time.Location
 
+	// Rate limiting (per API key, per 60 seconds).
+	// 0 = disabled.
+	RateLimitWrite int // default 100
+	RateLimitRead  int // default 0 (reverse proxy handles read limiting)
+
 	// HTTP Server
 	ListenAddr string
 }
@@ -79,6 +84,16 @@ func LoadConfig() (Config, error) {
 	dreamNumCtx, err := getEnvInt("CTX_DREAM_NUM_CTX", 0)
 	if err != nil {
 		return Config{}, fmt.Errorf("parsing CTX_DREAM_NUM_CTX: %w", err)
+	}
+
+	rateLimitWrite, err := getEnvInt("CTX_RATE_LIMIT_WRITE", 100)
+	if err != nil {
+		return Config{}, fmt.Errorf("parsing CTX_RATE_LIMIT_WRITE: %w", err)
+	}
+
+	rateLimitRead, err := getEnvInt("CTX_RATE_LIMIT_READ", 0)
+	if err != nil {
+		return Config{}, fmt.Errorf("parsing CTX_RATE_LIMIT_READ: %w", err)
 	}
 
 	tz := time.UTC
@@ -120,6 +135,9 @@ func LoadConfig() (Config, error) {
 		DreamThink:   getEnv("CTX_DREAM_THINK", ""),
 
 		Timezone: tz,
+
+		RateLimitWrite: rateLimitWrite,
+		RateLimitRead:  rateLimitRead,
 
 		ListenAddr: getEnv("LISTEN_ADDR", defaultListenAddr),
 	}

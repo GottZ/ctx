@@ -45,6 +45,7 @@ type Config struct {
 	EmbedHost      string        // Embedding provider host
 	EmbedAPIKey    string        // Embedding provider API key (empty = no auth)
 	EmbedModel     string        // Embedding model name
+	EmbedNumCtx    int           // Embedding num_ctx (0 = model default)
 	DreamHost      string        // Dream LLM provider host
 	DreamAPIKey    string        // Dream LLM provider API key (empty = no auth)
 	ChatModel      string        // Chat model name (fallback for dream)
@@ -274,7 +275,7 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 
 	return dream.RunDreamCycle(
 		dreamCtx, s.pool,
-		s.config.EmbedHost, s.config.EmbedAPIKey, s.config.EmbedModel,
+		s.config.EmbedHost, s.config.EmbedAPIKey, s.config.EmbedModel, s.config.EmbedNumCtx,
 		s.config.DreamHost, s.config.DreamAPIKey, dreamModel,
 		s.config.DreamThink, dreamOpts,
 		s.config.ReadScopes,

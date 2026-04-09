@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -15,12 +16,13 @@ import (
 
 // BlobHandler handles all blob storage endpoints.
 type BlobHandler struct {
-	pool *pgxpool.Pool
+	pool           *pgxpool.Pool
+	rateLimitWrite int // 0 = disabled
 }
 
 // NewBlobHandler creates a new BlobHandler.
-func NewBlobHandler(pool *pgxpool.Pool) *BlobHandler {
-	return &BlobHandler{pool: pool}
+func NewBlobHandler(pool *pgxpool.Pool, rateLimitWrite int) *BlobHandler {
+	return &BlobHandler{pool: pool, rateLimitWrite: rateLimitWrite}
 }
 
 // -- blob-store --.
@@ -119,20 +121,22 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Rate limit check (100 writes/min).
-	writeCount, err := store.CheckRateLimit(ctx, h.pool, authResult.ApiKeyID)
-	if err != nil {
-		slog.Error("blob-store: rate limit check error", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Internal server error",
-		})
-		return
-	}
-	if writeCount >= 100 {
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{
-			"success": false, "error": "Rate limit exceeded: max 100 writes per 60 seconds",
-		})
-		return
+	// Rate limit check (writes/min, 0 = disabled).
+	if h.rateLimitWrite > 0 {
+		writeCount, err := store.CheckRateLimit(ctx, h.pool, authResult.ApiKeyID)
+		if err != nil {
+			slog.Error("blob-store: rate limit check error", "error", err, "request_id", reqID)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false, "error": "Internal server error",
+			})
+			return
+		}
+		if writeCount >= h.rateLimitWrite {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"success": false, "error": fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", h.rateLimitWrite),
+			})
+			return
+		}
 	}
 
 	// Execute upsert.

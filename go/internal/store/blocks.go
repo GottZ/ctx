@@ -192,16 +192,22 @@ func StoreEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string, vec
 // CheckRateLimit returns the number of write operations in the last 60 seconds
 // for a given API key.
 func CheckRateLimit(ctx context.Context, pool *pgxpool.Pool, apiKeyID string) (int, error) {
+	return CheckRateLimitByAction(ctx, pool, apiKeyID, "write")
+}
+
+// CheckRateLimitByAction returns the number of operations with the given action
+// in the last 60 seconds for a given API key.
+func CheckRateLimitByAction(ctx context.Context, pool *pgxpool.Pool, apiKeyID, action string) (int, error) {
 	var count int
 	err := pool.QueryRow(ctx,
 		`SELECT count(*)::int FROM context_access_log
 		 WHERE api_key_id = $1::uuid
-		   AND action = 'write'
+		   AND action = $2
 		   AND created_at > now() - INTERVAL '60 seconds'`,
-		apiKeyID,
+		apiKeyID, action,
 	).Scan(&count)
 	if err != nil {
-		return 0, fmt.Errorf("store: check rate limit: %w", err)
+		return 0, fmt.Errorf("store: check rate limit (%s): %w", action, err)
 	}
 	return count, nil
 }
@@ -482,7 +488,8 @@ func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string) ([]B
 		`SELECT id, title, category, tags, scope, updated_at
 		 FROM context_blocks
 		 WHERE scope = ANY($1) AND NOT is_archived
-		 ORDER BY category, title`,
+		 ORDER BY category, title
+		 LIMIT 10000`,
 		readScopes,
 	)
 	if err != nil {

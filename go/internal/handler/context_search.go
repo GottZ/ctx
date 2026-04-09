@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -11,12 +12,13 @@ import (
 
 // SearchHandler handles POST /api/search.
 type SearchHandler struct {
-	pool *pgxpool.Pool
+	pool          *pgxpool.Pool
+	rateLimitRead int // 0 = disabled
 }
 
 // NewSearchHandler creates a new SearchHandler.
-func NewSearchHandler(pool *pgxpool.Pool) *SearchHandler {
-	return &SearchHandler{pool: pool}
+func NewSearchHandler(pool *pgxpool.Pool, rateLimitRead int) *SearchHandler {
+	return &SearchHandler{pool: pool, rateLimitRead: rateLimitRead}
 }
 
 type searchRequest struct {
@@ -37,6 +39,23 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	if authResult == nil || !authResult.IsValid {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
 		return
+	}
+
+	// Read rate limit check (0 = disabled).
+	if h.rateLimitRead > 0 {
+		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "query")
+		if err != nil {
+			slog.Error("search: read rate limit check error", "error", err, "request_id", reqID)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
+			return
+		}
+		if readCount >= h.rateLimitRead {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Rate limit exceeded: max %d reads per 60 seconds", h.rateLimitRead),
+			})
+			return
+		}
 	}
 
 	// Parse body.

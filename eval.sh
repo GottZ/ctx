@@ -137,6 +137,7 @@ I08|synthesis|Explain the blob storage authentication|confident|key,hash,blob|EN
 T01|synthesis|Was wurde letzte Woche im Context Store geändert?|confident|block~store~context|Relative week reference
 T02|synthesis|Welche Architektur-Entscheidungen wurden im März 2026 getroffen?|confident|rrf~guard~embedding~scope|Month+year reference
 T03|synthesis|What embedding changes happened recently?|confident|embedding~embed|EN temporal, recent
+T04|synthesis|What happened at night during the infrastructure work?|confident|infrastructure~infra|LLM fallback: night triggers intent but escapes all matchers
 
 # --- RETRIEVAL QUALITY (api/search, no LLM — tests vector+FTS ranking) ---
 R01|retrieval|Write Guard|any|write guard|Top result relevance
