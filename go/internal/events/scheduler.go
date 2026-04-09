@@ -325,7 +325,7 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 		if linksCreated == 0 {
 			// No block available or no links created — idle wait.
 			idle := s.getDreamIdleWait()
-			slog.Debug("scheduler: dream idle, waiting", "duration", idle)
+			slog.Info("scheduler: dream idle, waiting", "duration", idle)
 			select {
 			case <-ctx.Done():
 				return

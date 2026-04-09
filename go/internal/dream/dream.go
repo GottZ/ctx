@@ -296,8 +296,8 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedHost, embedA
 func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, checked, linked int, err error) {
 	err = pool.QueryRow(ctx,
 		`SELECT
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND scope = ANY($1))::int,
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND scope = ANY($1))::int,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND scope = ANY($1))::int,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND scope = ANY($1))::int,
 			(SELECT count(*) FROM context_dream_links WHERE scope = ANY($1))::int`,
 		scopes,
 	).Scan(&total, &checked, &linked)
