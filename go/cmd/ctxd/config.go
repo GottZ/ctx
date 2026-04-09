@@ -21,25 +21,30 @@ type Config struct {
 	ContextDBPort   int
 	ContextDBSSL    string
 
-	// Ollama
-	OllamaHost       string
-	OllamaEmbedModel string
-	OllamaEmbedDims   int
-	OllamaEmbedNumCtx int
-	OllamaChatModel   string
-	OllamaChatNumCtx  int
+	// Embedding pipeline
+	EmbedHost   string
+	EmbedAPIKey string
+	EmbedModel  string
+	EmbedDims   int
+	EmbedNumCtx int
 
-	// Ollama LLM behavior
-	OllamaThink string // "true", "false", or "" (omit from request)
+	// Synthesis (Chat) pipeline
+	ChatHost   string
+	ChatAPIKey string
+	ChatModel  string
+	ChatNumCtx int
+	ChatThink  string // "true", "false", or "" (omit from request)
 
 	// Reranker
 	RerankEnabled bool
 
-	// Dream Mode
-	DreamEnabled      bool
-	OllamaDreamModel  string
-	OllamaDreamNumCtx int
-	OllamaDreamThink  string // "true", "false", or "" (fallback: OllamaThink)
+	// Dream pipeline
+	DreamEnabled bool
+	DreamHost    string
+	DreamAPIKey  string
+	DreamModel   string
+	DreamNumCtx  int
+	DreamThink   string // "true", "false", or "" (fallback: ChatThink)
 
 	// Timezone for temporal resolution (e.g. "Europe/Berlin").
 	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
@@ -55,6 +60,9 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parsing CONTEXT_DB_PORT: %w", err)
 	}
+
+	// Shared Ollama host as fallback for per-pipeline hosts.
+	ollamaHost := getEnv("OLLAMA_HOST", "http://localhost:11434")
 
 	embedDims, err := getEnvInt("OLLAMA_EMBED_DIMS", 4096)
 	if err != nil {
@@ -76,6 +84,8 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("parsing OLLAMA_DREAM_NUM_CTX: %w", err)
 	}
 
+	// Per-pipeline think mode. OLLAMA_THINK is the shared default.
+	chatThink := getEnv("OLLAMA_THINK", "false")
 	dreamThink := getEnv("OLLAMA_DREAM_THINK", "")
 
 	tz := time.UTC
@@ -95,21 +105,29 @@ func LoadConfig() (Config, error) {
 		ContextDBPort: port,
 		ContextDBSSL:  getEnv("CONTEXT_DB_SSLMODE", "disable"),
 
-		OllamaHost:       getEnv("OLLAMA_HOST", "http://localhost:11434"),
-		OllamaEmbedModel: getEnv("OLLAMA_EMBED_MODEL", "qwen3-embedding:8b"),
-		OllamaEmbedDims:   embedDims,
-		OllamaEmbedNumCtx: embedNumCtx,
-		OllamaChatModel:   getEnv("OLLAMA_CHAT_MODEL", "qwen3.5:9b"),
-		OllamaChatNumCtx:  chatNumCtx,
+		// Embedding pipeline: CTX_EMBED_* overrides, fallback to OLLAMA_*
+		EmbedHost:   getEnv("CTX_EMBED_HOST", ollamaHost),
+		EmbedAPIKey: getEnv("CTX_EMBED_API_KEY", ""),
+		EmbedModel:  getEnv("CTX_EMBED_MODEL", getEnv("OLLAMA_EMBED_MODEL", "qwen3-embedding:8b")),
+		EmbedDims:   embedDims,
+		EmbedNumCtx: embedNumCtx,
 
-		OllamaThink: getEnv("OLLAMA_THINK", "false"),
+		// Synthesis pipeline: CTX_CHAT_* overrides, fallback to OLLAMA_*
+		ChatHost:   getEnv("CTX_CHAT_HOST", ollamaHost),
+		ChatAPIKey: getEnv("CTX_CHAT_API_KEY", ""),
+		ChatModel:  getEnv("CTX_CHAT_MODEL", getEnv("OLLAMA_CHAT_MODEL", "qwen3.5:9b")),
+		ChatNumCtx: chatNumCtx,
+		ChatThink:  getEnv("CTX_CHAT_THINK", chatThink),
 
 		RerankEnabled: getEnv("CTX_RERANK_ENABLED", "false") == "true",
 
-		DreamEnabled:      getEnv("CTX_DREAM_ENABLED", "false") == "true",
-		OllamaDreamModel:  getEnv("OLLAMA_DREAM_MODEL", ""),
-		OllamaDreamNumCtx: dreamNumCtx,
-		OllamaDreamThink:  dreamThink,
+		// Dream pipeline: CTX_DREAM_* overrides, fallback to OLLAMA_*
+		DreamEnabled: getEnv("CTX_DREAM_ENABLED", "false") == "true",
+		DreamHost:    getEnv("CTX_DREAM_HOST", ollamaHost),
+		DreamAPIKey:  getEnv("CTX_DREAM_API_KEY", ""),
+		DreamModel:   getEnv("CTX_DREAM_MODEL", getEnv("OLLAMA_DREAM_MODEL", "")),
+		DreamNumCtx:  dreamNumCtx,
+		DreamThink:   getEnv("CTX_DREAM_THINK", dreamThink),
 
 		Timezone: tz,
 

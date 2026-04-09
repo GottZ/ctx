@@ -97,8 +97,8 @@ func DetectGerman(query string) bool {
 
 // TranslateQuery translates a German query to English using Ollama.
 // Returns the original query unchanged if translation fails validation.
-func TranslateQuery(ctx context.Context, host, model string, think *bool, query string) (string, error) {
-	resp, err := Chat(ctx, host, model, think, translationSystemPrompt, query, TranslateOptions(), TranslateTimeout)
+func TranslateQuery(ctx context.Context, host, apiKey, model string, think *bool, query string) (string, error) {
+	resp, err := Chat(ctx, host, apiKey, model, think, translationSystemPrompt, query, TranslateOptions(), TranslateTimeout)
 	if err != nil {
 		return query, fmt.Errorf("llm: translate: %w", err)
 	}

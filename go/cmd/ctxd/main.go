@@ -59,11 +59,11 @@ func main() {
 
 	slog.Info("database pool created", "host", cfg.ContextDBHost, "db", cfg.ContextDB)
 
-	// Parse think modes.
-	chatThink := parseThinkMode(cfg.OllamaThink)
-	dreamThink := parseThinkMode(cfg.OllamaDreamThink)
-	if cfg.OllamaDreamThink == "" {
-		dreamThink = chatThink // fallback to chat think mode
+	// Think modes are parsed per pipeline in server.go (chatThink) and scheduler config (dreamThink).
+	// Dream think falls back to chat think if not explicitly set.
+	dreamThink := parseThinkMode(cfg.DreamThink)
+	if cfg.DreamThink == "" {
+		dreamThink = parseThinkMode(cfg.ChatThink)
 	}
 
 	// Run database migrations
@@ -85,12 +85,15 @@ func main() {
 		HomeScope:    "private",
 		ReadScopes:   []string{"private", "shared", "work"},
 		DreamEnabled: cfg.DreamEnabled,
-		OllamaHost:   cfg.OllamaHost,
-		EmbedModel:   cfg.OllamaEmbedModel,
-		ChatModel:    cfg.OllamaChatModel,
-		DreamModel:   cfg.OllamaDreamModel,
+		EmbedHost:    cfg.EmbedHost,
+		EmbedAPIKey:  cfg.EmbedAPIKey,
+		EmbedModel:   cfg.EmbedModel,
+		DreamHost:    cfg.DreamHost,
+		DreamAPIKey:  cfg.DreamAPIKey,
+		ChatModel:    cfg.ChatModel,
+		DreamModel:   cfg.DreamModel,
 		DreamThink:   dreamThink,
-		DreamNumCtx:  cfg.OllamaDreamNumCtx,
+		DreamNumCtx:  cfg.DreamNumCtx,
 	}
 	scheduler := events.NewScheduler(pool, schedulerConfig)
 	go scheduler.Run(ctx)

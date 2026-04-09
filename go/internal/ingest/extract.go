@@ -187,13 +187,13 @@ func ExtractionOptions() llm.Options {
 // This is the integration function — calls Ollama Chat with JSON-mode.
 // Pure extraction functions above are unit-testable without Ollama.
 // Runs injection detection before extraction and attaches flags to the result.
-func Extract(ctx context.Context, ollamaHost, model, content string) (*ExtractionResult, error) {
+func Extract(ctx context.Context, host, apiKey, model, content string) (*ExtractionResult, error) {
 	// Detect injection patterns before sending to LLM
 	injectionFlags := DetectInjection(content)
 
 	system, user, _ := BuildExtractionPrompt(content)
 
-	resp, err := llm.ChatJSON(ctx, ollamaHost, model, nil, system, user, ExtractionOptions(), ExtractionTimeout)
+	resp, err := llm.ChatJSON(ctx, host, apiKey, model, nil, system, user, ExtractionOptions(), ExtractionTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("extract: llm call failed: %w", err)
 	}

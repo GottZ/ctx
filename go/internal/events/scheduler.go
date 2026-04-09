@@ -42,9 +42,12 @@ type Config struct {
 	ReadScopes     []string
 	ReconnectDelay time.Duration // pgxlisten reconnect delay (0 = 5s default)
 	DreamEnabled   bool          // Enable dream cross-reference engine
-	OllamaHost     string        // Ollama API base URL (for dream)
-	EmbedModel     string        // Embedding model name (for dream)
-	ChatModel      string        // Chat model name (for synthesis)
+	EmbedHost      string        // Embedding provider host
+	EmbedAPIKey    string        // Embedding provider API key (empty = no auth)
+	EmbedModel     string        // Embedding model name
+	DreamHost      string        // Dream LLM provider host
+	DreamAPIKey    string        // Dream LLM provider API key (empty = no auth)
+	ChatModel      string        // Chat model name (fallback for dream)
 	DreamModel     string        // Dream model name (fallback: ChatModel)
 	DreamThink     *bool         // Think mode for dream (nil = omit)
 	DreamNumCtx    int           // num_ctx for dream (0 = model default)
@@ -271,7 +274,8 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 
 	return dream.RunDreamCycle(
 		dreamCtx, s.pool,
-		s.config.OllamaHost, s.config.EmbedModel, dreamModel,
+		s.config.EmbedHost, s.config.EmbedAPIKey, s.config.EmbedModel,
+		s.config.DreamHost, s.config.DreamAPIKey, dreamModel,
 		s.config.DreamThink, dreamOpts,
 		s.config.ReadScopes,
 	)

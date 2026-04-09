@@ -136,7 +136,7 @@ I08|synthesis|Explain the blob storage authentication|confident|key,hash,blob|EN
 # --- TEMPORAL (queries with temporal references — tests FTS expansion + Gravity Boost) ---
 T01|synthesis|Was wurde letzte Woche im Context Store geändert?|confident|block~store~context|Relative week reference
 T02|synthesis|Welche Architektur-Entscheidungen wurden im März 2026 getroffen?|confident|rrf~guard~embedding~scope|Month+year reference
-T03|synthesis|What embedding changes happened recently?|confident|qwen3~embedding~matryoshka~1024|EN temporal, recent
+T03|synthesis|What embedding changes happened recently?|confident|embedding~embed|EN temporal, recent
 
 # --- RETRIEVAL QUALITY (api/search, no LLM — tests vector+FTS ranking) ---
 R01|retrieval|Write Guard|any|write guard|Top result relevance

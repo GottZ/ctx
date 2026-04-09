@@ -13,15 +13,15 @@ import (
 
 // HealthHandler provides health check endpoints.
 type HealthHandler struct {
-	pool       *pgxpool.Pool
-	ollamaHost string
+	pool      *pgxpool.Pool
+	embedHost string
 }
 
 // NewHealthHandler creates a new HealthHandler.
-func NewHealthHandler(pool *pgxpool.Pool, ollamaHost string) *HealthHandler {
+func NewHealthHandler(pool *pgxpool.Pool, embedHost string) *HealthHandler {
 	return &HealthHandler{
-		pool:       pool,
-		ollamaHost: ollamaHost,
+		pool:      pool,
+		embedHost: embedHost,
 	}
 }
 
@@ -76,7 +76,7 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HealthHandler) pingOllama(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.ollamaHost, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.embedHost, nil)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}

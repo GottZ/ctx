@@ -77,7 +77,8 @@ type EmbedResponse struct {
 // Embed generates an embedding via Ollama, truncates to 1024d, and L2-normalizes.
 // The prefix parameter controls the asymmetric instruction prefix (query vs document).
 // numCtx controls the context size (0 = model default).
-func Embed(ctx context.Context, host, model, text string, prefix Prefix, numCtx int) ([]float32, error) {
+// apiKey is optional: if non-empty, sets Authorization Bearer header (for cloud providers).
+func Embed(ctx context.Context, host, apiKey, model, text string, prefix Prefix, numCtx int) ([]float32, error) {
 	input := prefix.text() + text
 
 	reqBody := EmbedRequest{
@@ -101,6 +102,9 @@ func Embed(ctx context.Context, host, model, text string, prefix Prefix, numCtx 
 		return nil, fmt.Errorf("embed: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

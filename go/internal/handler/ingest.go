@@ -39,16 +39,18 @@ const (
 // IngestHandler handles POST /api/ingest.
 type IngestHandler struct {
 	pool        *pgxpool.Pool
-	ollamaHost  string
+	embedHost   string
+	embedAPIKey string
 	embedModel  string
 	embedNumCtx int
 }
 
 // NewIngestHandler creates a new IngestHandler.
-func NewIngestHandler(pool *pgxpool.Pool, ollamaHost, embedModel string, embedNumCtx int) *IngestHandler {
+func NewIngestHandler(pool *pgxpool.Pool, embedHost, embedAPIKey, embedModel string, embedNumCtx int) *IngestHandler {
 	return &IngestHandler{
 		pool:        pool,
-		ollamaHost:  ollamaHost,
+		embedHost:   embedHost,
+		embedAPIKey: embedAPIKey,
 		embedModel:  embedModel,
 		embedNumCtx: embedNumCtx,
 	}
@@ -271,7 +273,7 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 
 	// 5. Generate embedding (single, not batch — batch comes in Phase 4).
 	embedText := block.Title + "\n\n" + block.Content
-	vec, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedText, embed.PrefixDocument, h.embedNumCtx)
+	vec, err := embed.Embed(ctx, h.embedHost, h.embedAPIKey, h.embedModel, embedText, embed.PrefixDocument, h.embedNumCtx)
 	if err != nil {
 		slog.Error("ingest: embedding generation failed",
 			"error", err, "block_id", block.ID, "index", index, "request_id", reqID)

@@ -34,7 +34,7 @@ var jsonArrayPattern = regexp.MustCompile(`\[\s*[\d\s,]+\]`)
 // Rerank takes RRF search results and uses an LLM to re-score them by relevance.
 // Returns the results re-sorted by blended score (0.6*rerank_norm + 0.4*rrf_norm).
 // If fewer than RerankMinResults, returns results unchanged.
-func Rerank(ctx context.Context, host, model string, think *bool, query string, results []SearchResult) ([]SearchResult, error) {
+func Rerank(ctx context.Context, host, apiKey, model string, think *bool, query string, results []SearchResult) ([]SearchResult, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("rerank: skipping, fewer than min results",
 			"result_count", len(results),
@@ -64,7 +64,7 @@ func Rerank(ctx context.Context, host, model string, think *bool, query string, 
 	}
 
 	// Call the LLM.
-	resp, err := llm.Chat(ctx, host, model, think, rerankSystemPrompt, sb.String(), llm.RerankOptions(), llm.RerankTimeout)
+	resp, err := llm.Chat(ctx, host, apiKey, model, think, rerankSystemPrompt, sb.String(), llm.RerankOptions(), llm.RerankTimeout)
 	if err != nil {
 		slog.Warn("rerank: LLM call failed, returning original order", "error", err)
 		return results, nil

@@ -196,7 +196,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // Synthesize runs the full LLM synthesis pipeline:
 // filter -> confidence -> low-confidence limiting -> reorder -> prompt -> chat.
 // temporalDates is nil for non-temporal queries (date context omitted from prompt).
-func Synthesize(ctx context.Context, host, model string, think *bool, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
+func Synthesize(ctx context.Context, host, apiKey, model string, think *bool, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources)
 	if len(filtered) == 0 {
@@ -238,7 +238,7 @@ func Synthesize(ctx context.Context, host, model string, think *bool, originalQu
 	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates)
 
 	// Step 7: Call LLM.
-	resp, err := Chat(ctx, host, model, think, systemPrompt, userPrompt, SynthesisOptions(), ChatTimeout)
+	resp, err := Chat(ctx, host, apiKey, model, think, systemPrompt, userPrompt, SynthesisOptions(), ChatTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("llm: synthesize: %w", err)
 	}

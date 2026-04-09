@@ -63,7 +63,8 @@ type ChatResponse struct {
 
 // Chat sends a non-streaming chat request to Ollama and returns the response content.
 // think controls chain-of-thought reasoning (nil = omit, model decides).
-func Chat(ctx context.Context, host, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+// apiKey is optional: if non-empty, sets Authorization Bearer header (for cloud providers).
+func Chat(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
 	reqBody := ChatRequest{
 		Model: model,
 		Messages: []Message{
@@ -88,6 +89,9 @@ func Chat(ctx context.Context, host, model string, think *bool, systemPrompt, us
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -111,7 +115,8 @@ func Chat(ctx context.Context, host, model string, think *bool, systemPrompt, us
 // ChatJSON sends a non-streaming chat request to Ollama with JSON-mode enabled.
 // Ollama's format:"json" constrains the model to output valid JSON.
 // think controls chain-of-thought reasoning (nil = omit, model decides).
-func ChatJSON(ctx context.Context, host, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+// apiKey is optional: if non-empty, sets Authorization Bearer header.
+func ChatJSON(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
 	reqBody := ChatRequest{
 		Model: model,
 		Messages: []Message{
@@ -137,6 +142,9 @@ func ChatJSON(ctx context.Context, host, model string, think *bool, systemPrompt
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

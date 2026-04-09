@@ -27,15 +27,15 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	r.Use(handler.Recovery)
 
 	// Health check (no auth, no body)
-	h := handler.NewHealthHandler(pool, cfg.OllamaHost)
+	h := handler.NewHealthHandler(pool, cfg.EmbedHost)
 	r.Get("/health", h.Health)
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
-	chatThink := parseThinkMode(cfg.OllamaThink)
-	queryHandler := handler.NewQueryHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaEmbedNumCtx, cfg.OllamaChatModel, chatThink, cfg.RerankEnabled, cfg.Timezone)
-	storeH := handler.NewStoreHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaEmbedNumCtx)
+	chatThink := parseThinkMode(cfg.ChatThink)
+	queryHandler := handler.NewQueryHandler(pool, cfg.ChatHost, cfg.ChatAPIKey, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.ChatModel, chatThink, cfg.RerankEnabled, cfg.Timezone)
+	storeH := handler.NewStoreHandler(pool, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx)
 	searchH := handler.NewSearchHandler(pool)
-	manageH := handler.NewManageHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaEmbedNumCtx)
+	manageH := handler.NewManageHandler(pool, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx)
 	blobH := handler.NewBlobHandler(pool)
 	digestH := handler.NewDigestHandler(pool)
 
@@ -61,7 +61,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	})
 
 	// Ingest — larger body limit (10 MB for bulk chunk import)
-	ingestH := handler.NewIngestHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaEmbedNumCtx)
+	ingestH := handler.NewIngestHandler(pool, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
 		r.Use(handler.MaxBodySize(IngestMaxBodySize))

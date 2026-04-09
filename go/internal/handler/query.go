@@ -20,21 +20,27 @@ import (
 
 // QueryHandler handles POST /api/query.
 type QueryHandler struct {
-	pool           *pgxpool.Pool
-	ollamaHost     string
-	embedModel     string
-	embedNumCtx    int
-	chatModel      string
-	chatThink      *bool
-	rerankEnabled  bool
-	timezone       *time.Location
+	pool          *pgxpool.Pool
+	chatHost      string
+	chatAPIKey    string
+	embedHost     string
+	embedAPIKey   string
+	embedModel    string
+	embedNumCtx   int
+	chatModel     string
+	chatThink     *bool
+	rerankEnabled bool
+	timezone      *time.Location
 }
 
 // NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, ollamaHost, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, rerankEnabled bool, timezone *time.Location) *QueryHandler {
+func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, rerankEnabled bool, timezone *time.Location) *QueryHandler {
 	return &QueryHandler{
 		pool:          pool,
-		ollamaHost:    ollamaHost,
+		chatHost:      chatHost,
+		chatAPIKey:    chatAPIKey,
+		embedHost:     embedHost,
+		embedAPIKey:   embedAPIKey,
 		embedModel:    embedModel,
 		embedNumCtx:   embedNumCtx,
 		chatModel:     chatModel,
@@ -140,7 +146,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("german detected, translating",
 			"request_id", requestID,
 		)
-		translatedQuery, err := llm.TranslateQuery(ctx, h.ollamaHost, h.chatModel, h.chatThink, query)
+		translatedQuery, err := llm.TranslateQuery(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, query)
 		if err != nil {
 			slog.Warn("translation failed, using original",
 				"error", err,
@@ -176,7 +182,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	} else if llm.HasTemporalIntent(originalQuery) {
 		// LLM fallback: query seems temporal but rules couldn't parse it.
 		var err error
-		temporalResult, err = llm.NormalizeTemporal(ctx, h.ollamaHost, h.chatModel, h.chatThink, originalQuery, now)
+		temporalResult, err = llm.NormalizeTemporal(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, originalQuery, now)
 		if err != nil {
 			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,
@@ -198,7 +204,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	embedQuery := searchQuery
 
 	// Step 4: Embed the search query with query prefix.
-	embedding, err := embed.Embed(ctx, h.ollamaHost, h.embedModel, embedQuery, embed.PrefixQuery, h.embedNumCtx)
+	embedding, err := embed.Embed(ctx, h.embedHost, h.embedAPIKey, h.embedModel, embedQuery, embed.PrefixQuery, h.embedNumCtx)
 	if err != nil {
 		slog.Error("embedding failed",
 			"error", err,
@@ -340,7 +346,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Step 6b: Rerank via LLM (skipped if disabled or fewer than 3 results).
 	// The reranker sees up to RerankMaxDocs (15) from the broader candidate set.
 	if h.rerankEnabled {
-		results, err = rrf.Rerank(ctx, h.ollamaHost, h.chatModel, h.chatThink, originalQuery, results)
+		results, err = rrf.Rerank(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, originalQuery, results)
 		if err != nil {
 			slog.Warn("rerank failed, using original order",
 				"error", err,
@@ -400,7 +406,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.ollamaHost, h.chatModel, h.chatThink, originalQuery, sources, temporalDates)
+	synthResult, err := llm.Synthesize(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, originalQuery, sources, temporalDates)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,

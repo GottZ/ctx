@@ -72,14 +72,14 @@ var validRelationships = map[string]bool{
 
 // EvaluateRelationships asks the LLM to classify relationships between a source block
 // and candidate blocks found via keyword search. Returns validated links.
-func EvaluateRelationships(ctx context.Context, host, model string, think *bool, opts llm.Options, source BlockInfo, candidates []BlockInfo) ([]Link, error) {
+func EvaluateRelationships(ctx context.Context, host, apiKey, model string, think *bool, opts llm.Options, source BlockInfo, candidates []BlockInfo) ([]Link, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
 
 	userPrompt := buildEvalPrompt(source, candidates)
 
-	resp, err := llm.ChatJSON(ctx, host, model, think, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
+	resp, err := llm.ChatJSON(ctx, host, apiKey, model, think, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("dream: evaluate: %w", err)
 	}

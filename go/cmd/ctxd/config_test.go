@@ -342,20 +342,29 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.ContextDBSSL != "disable" {
 		t.Errorf("ContextDBSSL default = %q, want %q", cfg.ContextDBSSL, "disable")
 	}
-	if cfg.OllamaHost != "http://localhost:11434" {
-		t.Errorf("OllamaHost default = %q, want %q", cfg.OllamaHost, "http://localhost:11434")
+	if cfg.EmbedHost != "http://localhost:11434" {
+		t.Errorf("EmbedHost default = %q, want %q", cfg.EmbedHost, "http://localhost:11434")
 	}
-	if cfg.OllamaEmbedModel != "qwen3-embedding:8b" {
-		t.Errorf("OllamaEmbedModel default = %q, want %q", cfg.OllamaEmbedModel, "qwen3-embedding:8b")
+	if cfg.ChatHost != "http://localhost:11434" {
+		t.Errorf("ChatHost default = %q, want %q", cfg.ChatHost, "http://localhost:11434")
 	}
-	if cfg.OllamaEmbedDims != 4096 {
-		t.Errorf("OllamaEmbedDims default = %d, want 4096", cfg.OllamaEmbedDims)
+	if cfg.EmbedModel != "qwen3-embedding:8b" {
+		t.Errorf("EmbedModel default = %q, want %q", cfg.EmbedModel, "qwen3-embedding:8b")
 	}
-	if cfg.OllamaChatModel != "qwen3.5:9b" {
-		t.Errorf("OllamaChatModel default = %q, want %q", cfg.OllamaChatModel, "qwen3.5:9b")
+	if cfg.EmbedDims != 4096 {
+		t.Errorf("EmbedDims default = %d, want 4096", cfg.EmbedDims)
 	}
-	if cfg.OllamaThink != "false" {
-		t.Errorf("OllamaThink default = %q, want %q", cfg.OllamaThink, "false")
+	if cfg.ChatModel != "qwen3.5:9b" {
+		t.Errorf("ChatModel default = %q, want %q", cfg.ChatModel, "qwen3.5:9b")
+	}
+	if cfg.ChatThink != "false" {
+		t.Errorf("ChatThink default = %q, want %q", cfg.ChatThink, "false")
+	}
+	if cfg.EmbedAPIKey != "" {
+		t.Errorf("EmbedAPIKey default = %q, want empty", cfg.EmbedAPIKey)
+	}
+	if cfg.ChatAPIKey != "" {
+		t.Errorf("ChatAPIKey default = %q, want empty", cfg.ChatAPIKey)
 	}
 	if cfg.RerankEnabled != false {
 		t.Errorf("RerankEnabled default = %v, want false", cfg.RerankEnabled)
