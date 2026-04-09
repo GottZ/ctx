@@ -10,7 +10,20 @@
 
 Go-Monolith (ctx CLI + ctxd Daemon), PostgreSQL 18 + pgvector, Custom Context Store, Ollama. MPL-2.0 Lizenz.
 
-**Zuerst `.project/prompt.md` lesen** — enthält Arbeitsweise, Architektur, Entscheidungen, Roadmap, Session-Übergabe. `.project/` ist ein privates Submodule (`GottZ/ctx-project`).
+**Zuerst `.project/prompt.md` lesen** — Arbeitsweise, Architektur, Session-Übergabe. `.project/` ist ein privates Submodule (`GottZ/ctx-project`).
+
+## Workspace
+
+```
+/compose/n8n/
+├── CLAUDE.md                    ← Dieses Dokument
+├── .project/                    ← Privates Submodule (prompt.md, todos.md, Research)
+├── go/                          ← Go-Monolith (cmd/, internal/, migrations/)
+├── .hooks/                      ← Git Hooks (pre-commit, commit-msg, pre-push)
+├── docker-compose.yml           ← Container-Orchestrierung
+├── state.sh / test.sh / eval.sh ← Verifikation
+└── .env                         ← Credentials (nicht im Repo)
+```
 
 ## Build & Run
 
