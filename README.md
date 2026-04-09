@@ -100,7 +100,8 @@ ctx stats     # Block count, categories, storage
 | `ctx stats` | Database statistics |
 | `ctx health` | Healthcheck |
 | `ctx guard [list\|stats\|resolve]` | Write Guard management |
-| `ctx dream [stats\|review]` | Dream Mode stats + link review |
+| `ctx dream [stats\|review]` | Dream Mode stats (incl. mode) + link review |
+| `ctx dream enable\|disable\|throttle` | Runtime dream mode control (on/off/silent) |
 | `ctx brief` | Project briefing from store |
 | `ctx persist` | Persist `[PERSIST:cat:title]` markers |
 | `ctx ingest <path>` | Ingest Obsidian vault |

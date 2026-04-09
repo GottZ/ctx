@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -647,6 +648,9 @@ func dreamCmd(getClient func() (*Client, error)) *cobra.Command {
 
 	cmd.AddCommand(dreamStatsCmd(getClient))
 	cmd.AddCommand(dreamReviewCmd(getClient))
+	cmd.AddCommand(dreamEnableCmd(getClient))
+	cmd.AddCommand(dreamDisableCmd(getClient))
+	cmd.AddCommand(dreamThrottleCmd(getClient))
 
 	// Default to stats if no subcommand given.
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -672,11 +676,25 @@ func dreamStatsRun(getClient func() (*Client, error)) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.Post("manage", map[string]any{"action": "dream-stats"})
+	statsRaw, err := c.Post("manage", map[string]any{"action": "dream-stats"})
 	if err != nil {
 		return err
 	}
-	PrintJSON(resp)
+	var merged map[string]any
+	if err := json.Unmarshal(statsRaw, &merged); err != nil {
+		PrintJSON(statsRaw)
+		return err
+	}
+	modeRaw, err := c.Post("manage", map[string]any{"action": "dream-mode"})
+	if err == nil {
+		var modeMap map[string]any
+		if err := json.Unmarshal(modeRaw, &modeMap); err == nil {
+			merged["dream_mode"] = modeMap["mode"]
+			merged["dream_interval"] = modeMap["interval"]
+		}
+	}
+	out, _ := json.MarshalIndent(merged, "", "  ")
+	fmt.Println(string(out))
 	return nil
 }
 
@@ -691,6 +709,84 @@ func dreamReviewCmd(getClient func() (*Client, error)) *cobra.Command {
 				return err
 			}
 			resp, err := c.Post("manage", map[string]any{"action": "dream-review"})
+			if err != nil {
+				return err
+			}
+			PrintJSON(resp)
+			return nil
+		},
+	}
+}
+
+func dreamEnableCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:     "enable",
+		Aliases: []string{"on"},
+		Short:   "Enable Dream Mode (full throttle)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			resp, err := c.Post("manage", map[string]any{
+				"action": "dream-mode",
+				"data":   map[string]any{"mode": "on"},
+			})
+			if err != nil {
+				return err
+			}
+			PrintJSON(resp)
+			return nil
+		},
+	}
+}
+
+func dreamDisableCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:     "disable",
+		Aliases: []string{"off"},
+		Short:   "Disable Dream Mode (maintenance/dev)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			resp, err := c.Post("manage", map[string]any{
+				"action": "dream-mode",
+				"data":   map[string]any{"mode": "off"},
+			})
+			if err != nil {
+				return err
+			}
+			PrintJSON(resp)
+			return nil
+		},
+	}
+}
+
+func dreamThrottleCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:   "throttle [duration]",
+		Short: "Silent mode — GPU cooldown between LLM calls (default 20s)",
+		Long:  "Sets Dream to silent mode with optional interval. Examples: ctx dream throttle, ctx dream throttle 60s",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			data := map[string]any{"mode": "silent"}
+			if len(args) == 1 {
+				d, err := time.ParseDuration(args[0])
+				if err != nil {
+					return fmt.Errorf("invalid duration %q: %w", args[0], err)
+				}
+				data["interval"] = int(d.Seconds())
+			}
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			resp, err := c.Post("manage", map[string]any{
+				"action": "dream-mode",
+				"data":   data,
+			})
 			if err != nil {
 				return err
 			}
