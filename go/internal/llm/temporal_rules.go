@@ -1371,9 +1371,17 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 		return r
 	}
 
-	// Priority 10: Multi-keyword (heute und morgen) — linear
+	// Priority 10: Multi-keyword (heute und morgen, Montag oder Dienstag)
 	if r := matchMultiKeyword(query, now); r != nil {
-		r.DimensionWeights = dwLinear()
+		if len(findAllWeekdays(tokens)) >= 2 {
+			if recur {
+				r.DimensionWeights = dwWeekday()
+			} else {
+				r.DimensionWeights = dwLinearWeekday()
+			}
+		} else {
+			r.DimensionWeights = dwLinear()
+		}
 		return r
 	}
 

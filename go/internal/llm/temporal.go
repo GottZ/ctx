@@ -260,22 +260,28 @@ func NormalizeTemporal(ctx context.Context, host, model string, think *bool, que
 	return &result, nil
 }
 
-// maxFTSDates caps the number of unique dates that get full per-day FTS expansion
-// (weekday DE/EN + ISO date = 3 terms each). At 1M+ blocks, each OR-term
-// triggers a GIN posting-list scan. A 30-day range with uncapped expansion
-// produces ~150 OR-terms — too many for GIN at scale.
-// 7 dates × 3 terms = 21 core terms + deduplicated months/KWs. Covers full calendar week without GIN pressure at 1M+ blocks.
-// Month names and ISO week numbers from ALL dates are always included.
+// maxFTSDates caps the number of unique dates that get per-day FTS expansion
+// (ISO date + YYYY-MM prefix). At 1M+ blocks, each OR-term triggers a GIN
+// posting-list scan. Keep conservative for scale.
 const maxFTSDates = 7
 
+// maxFTSTermsTotal is a secondary safety cap on the total number of OR-terms
+// passed to websearch_to_tsquery. At 1M+ blocks, GIN cost scales linearly
+// with term count × 2 FTS channels (DE+EN).
+const maxFTSTermsTotal = 20
+
 // TemporalToFTSExpansion converts resolved dates to a websearch_to_tsquery OR string.
-// Enhanced: includes month names (DE+EN), YYYY-MM prefix, and ISO week numbers.
 //
-// Scale-capped (T03): at 1M+ blocks, GIN posting-list scans are expensive.
-// When >maxFTSDates unique dates, only start-date and end-date get full
-// per-day expansion (weekday DE/EN + ISO date). Months and ISO weeks from
-// ALL dates are still included (deduplicated). A 30-day range thus produces
-// ~9 core terms + ~6 month/KW terms instead of ~150 uncapped OR-terms.
+// T07 empirical finding (Session 22): weekday names, month names, and KW numbers
+// cause 75% False-Positive-Rate in Top-5 results. They match any block that
+// happens to mention the word, not blocks temporally related to the query.
+// Real temporal filtering runs in the Post-RRF Gravity Boost (context_temporal).
+//
+// FTS terms are now limited to high-precision identifiers:
+//   - ISO date (2026-03-23) — unique, no ambiguity
+//   - YYYY-MM prefix (2026-03) — month-scoped, still precise
+//
+// At 1M+ blocks: 2 terms per date × 2 FTS channels = 4 GIN scans per date.
 func TemporalToFTSExpansion(dates []TemporalDate) string {
 	if len(dates) == 0 {
 		return ""
@@ -306,7 +312,7 @@ func TemporalToFTSExpansion(dates []TemporalDate) string {
 		return ""
 	}
 
-	// Phase 2: determine which dates get full per-day expansion (core terms).
+	// Phase 2: determine which dates get per-day expansion.
 	// If more than maxFTSDates unique dates, keep first half and last half.
 	expandSet := make(map[string]bool)
 	if len(allDates) <= maxFTSDates {
@@ -323,38 +329,30 @@ func TemporalToFTSExpansion(dates []TemporalDate) string {
 		}
 	}
 
-	// Phase 3: build terms. Core terms only for expandSet dates.
-	// Month and KW terms from ALL dates (deduplicated).
-	seenMonths := make(map[int]bool)
-	seenWeeks := make(map[int]bool)
+	// Phase 3: build terms — ISO dates + YYYY-MM prefixes only.
+	// Weekday names, month names, and KW numbers removed (T07: 75% FP rate).
+	// Temporal relevance handled by Post-RRF Gravity Boost (context_temporal EAV).
+	seenMonths := make(map[string]bool)
 	var terms []string
 
 	for _, t := range allDates {
 		key := t.Format("2006-01-02")
 
 		if expandSet[key] {
-			// Core: weekday DE, weekday EN, ISO date
-			terms = append(terms,
-				weekdayNameDE[t.Weekday()],
-				weekdayNameEN[t.Weekday()],
-				key,
-			)
+			terms = append(terms, key)
 		}
 
-		// Month expansion from ALL dates (once per unique month)
-		m := int(t.Month())
-		if !seenMonths[m] {
-			seenMonths[m] = true
-			terms = append(terms, monthNameDE[m], monthNameEN[m])
-			terms = append(terms, t.Format("2006-01")) // YYYY-MM prefix
+		// YYYY-MM prefix from ALL dates (once per unique month)
+		ym := t.Format("2006-01")
+		if !seenMonths[ym] {
+			seenMonths[ym] = true
+			terms = append(terms, ym)
 		}
+	}
 
-		// ISO week number from ALL dates (once per unique week)
-		_, isoWeek := t.ISOWeek()
-		if !seenWeeks[isoWeek] {
-			seenWeeks[isoWeek] = true
-			terms = append(terms, fmt.Sprintf("KW%d", isoWeek))
-		}
+	// Phase 4: Secondary total-terms cap (safety net for 1M+ blocks).
+	if len(terms) > maxFTSTermsTotal {
+		terms = terms[:maxFTSTermsTotal]
 	}
 
 	return strings.Join(terms, " OR ")

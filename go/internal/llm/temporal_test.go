@@ -468,19 +468,17 @@ func TestAttacker_TemporalToFTSExpansion_MassiveDateCount(t *testing.T) {
 		t.Error("1000 valid dates should produce non-empty output")
 	}
 	termCount := strings.Count(result, " OR ") + 1
-	// Capped: 10 dates × 3 core terms = 30, + deduplicated months (~34 × 3)
-	// + deduplicated KWs (~143). Total ~200-300 terms, NOT 3000+.
-	// Must be >30 (core terms exist) and <500 (capped, not 3000+).
-	if termCount < 30 {
-		t.Errorf("expected at least 30 core terms from capped dates, got %d", termCount)
+	// T07: Only ISO dates + YYYY-MM. 6 ISO dates (capped) + ~34 YYYY-MM prefixes.
+	// maxFTSTermsTotal (20) caps the total.
+	if termCount > maxFTSTermsTotal {
+		t.Errorf("expected ≤%d total terms (secondary cap), got %d", maxFTSTermsTotal, termCount)
 	}
-	if termCount > 500 {
-		t.Errorf("expected capped term count <500, got %d (capping may be broken)", termCount)
+	if termCount < 4 {
+		t.Errorf("expected at least 4 terms (core dates + YYYY-MM), got %d", termCount)
 	}
-	// Verify months from ALL dates are present (not just capped ones).
-	// 1000 days from 2020-01-01 spans ~34 months. Check a mid-range month.
-	if !strings.Contains(result, "Juli") {
-		t.Error("month 'Juli' from mid-range dates should be present despite capping")
+	// First date should always be present (it's in expandSet).
+	if !strings.Contains(result, "2020-01-01") {
+		t.Error("first date should be in output")
 	}
 }
 
@@ -851,16 +849,20 @@ func TestAttacker_TemporalDate_EndPointsToEmptyString(t *testing.T) {
 	}
 }
 
-func TestAttacker_TemporalToFTSExpansion_WeekdayCorrectness(t *testing.T) {
-	// VERIFICATION: Check that the weekday names in the output actually match the date.
+func TestAttacker_TemporalToFTSExpansion_ISODateCorrectness(t *testing.T) {
+	// VERIFICATION: FTS expansion contains ISO date and YYYY-MM, not weekday names (T07).
 	// 2026-03-28 is a Saturday.
 	dates := []TemporalDate{{Ref: "test", Date: "2026-03-28", Dir: "today"}}
 	result := TemporalToFTSExpansion(dates)
-	if !strings.Contains(result, "Samstag") {
-		t.Errorf("2026-03-28 (Saturday) should produce 'Samstag', got: %q", result)
+	if !strings.Contains(result, "2026-03-28") {
+		t.Errorf("should contain ISO date, got: %q", result)
 	}
-	if !strings.Contains(result, "Saturday") {
-		t.Errorf("2026-03-28 (Saturday) should produce 'Saturday', got: %q", result)
+	if !strings.Contains(result, "2026-03") {
+		t.Errorf("should contain YYYY-MM prefix, got: %q", result)
+	}
+	// T07: No weekday names in FTS (75% FP rate empirically measured).
+	if strings.Contains(result, "Samstag") || strings.Contains(result, "Saturday") {
+		t.Errorf("weekday names should not be in FTS expansion (T07), got: %q", result)
 	}
 }
 
@@ -945,7 +947,8 @@ func TestAttacker_JsonFenceRegex_NestedFences(t *testing.T) {
 // ---.
 
 func TestTemporalToFTSExpansion_RangeCapping(t *testing.T) {
-	// Range "diese Woche" = 1 TemporalDate with Date+End → 2 unique dates → ≤20 terms.
+	// Range "diese Woche" = 1 TemporalDate with Date+End → 2 unique dates.
+	// T07: Only ISO dates + YYYY-MM prefix (no weekday/month names/KW).
 	end := "2026-03-29"
 	dates := []TemporalDate{{
 		Ref:  "diese Woche",
@@ -955,11 +958,12 @@ func TestTemporalToFTSExpansion_RangeCapping(t *testing.T) {
 	}}
 	result := TemporalToFTSExpansion(dates)
 	termCount := strings.Count(result, " OR ") + 1
-	if termCount > 20 {
-		t.Errorf("week range should produce ≤20 OR-terms, got %d: %s", termCount, result)
+	// 2 dates: 2 ISO dates + 1 YYYY-MM = 3 terms
+	if termCount > 10 {
+		t.Errorf("week range should produce ≤10 OR-terms, got %d: %s", termCount, result)
 	}
-	if termCount < 6 {
-		t.Errorf("week range should produce at least 6 terms (2 dates × 3 core), got %d", termCount)
+	if termCount < 2 {
+		t.Errorf("week range should produce at least 2 terms (2 ISO dates), got %d", termCount)
 	}
 	// Verify both start and end dates are present.
 	if !strings.Contains(result, "2026-03-23") {
@@ -968,10 +972,22 @@ func TestTemporalToFTSExpansion_RangeCapping(t *testing.T) {
 	if !strings.Contains(result, "2026-03-29") {
 		t.Error("end date 2026-03-29 should be in FTS expansion")
 	}
+	// YYYY-MM prefix should be present.
+	if !strings.Contains(result, "2026-03") {
+		t.Error("YYYY-MM prefix should be in FTS expansion")
+	}
+	// Weekday/month names should NOT be present (T07: 75% FP rate).
+	if strings.Contains(result, "Montag") || strings.Contains(result, "Monday") {
+		t.Error("weekday names should not be in FTS expansion (T07)")
+	}
+	if strings.Contains(result, "März") || strings.Contains(result, "March") {
+		t.Error("month names should not be in FTS expansion (T07)")
+	}
 }
 
 func TestTemporalToFTSExpansion_SingleDate(t *testing.T) {
 	// Single date: "heute" = 1 TemporalDate, no End.
+	// T07: Only ISO date + YYYY-MM prefix.
 	dates := []TemporalDate{{
 		Ref:  "heute",
 		Date: "2026-03-29",
@@ -979,45 +995,48 @@ func TestTemporalToFTSExpansion_SingleDate(t *testing.T) {
 	}}
 	result := TemporalToFTSExpansion(dates)
 	termCount := strings.Count(result, " OR ") + 1
-	// 1 date: 3 core (weekday DE/EN + ISO) + 3 month (DE/EN + YYYY-MM) + 1 KW = 7
-	if termCount != 7 {
-		t.Errorf("single date should produce exactly 7 terms, got %d: %s", termCount, result)
-	}
-	if !strings.Contains(result, "Sonntag") {
-		t.Error("2026-03-29 is a Sunday, should contain 'Sonntag'")
-	}
-	if !strings.Contains(result, "Sunday") {
-		t.Error("2026-03-29 is a Sunday, should contain 'Sunday'")
+	// 1 date: 1 ISO date + 1 YYYY-MM = 2 terms
+	if termCount != 2 {
+		t.Errorf("single date should produce exactly 2 terms, got %d: %s", termCount, result)
 	}
 	if !strings.Contains(result, "2026-03-29") {
 		t.Error("should contain ISO date")
 	}
-	if !strings.Contains(result, "März") {
-		t.Error("should contain German month name")
+	if !strings.Contains(result, "2026-03") {
+		t.Error("should contain YYYY-MM prefix")
 	}
-	if !strings.Contains(result, "KW13") {
-		t.Error("2026-03-29 is KW13, should contain 'KW13'")
+	// No weekday/month names (T07).
+	if strings.Contains(result, "Sonntag") || strings.Contains(result, "Sunday") {
+		t.Error("weekday names should not be in FTS expansion")
 	}
 }
 
-func TestTemporalToFTSExpansion_CappingPreservesMonthsAndKWs(t *testing.T) {
-	// 20 dates spanning 2 months — capped to maxFTSDates (3), but both months should appear.
-	// T03: At 1M+ blocks, only start+end dates get core expansion.
+func TestTemporalToFTSExpansion_CappingPreservesYYYYMM(t *testing.T) {
+	// 20 dates spanning 2 months — capped to maxFTSDates, but both YYYY-MM prefixes appear.
+	// T07: No month names, only YYYY-MM prefixes and ISO dates.
 	dates := make([]TemporalDate, 20)
 	for i := 0; i < 20; i++ {
 		d := time.Date(2026, 3, 20+i, 0, 0, 0, 0, time.UTC) // March 20 through April 8
 		dates[i] = TemporalDate{Ref: "test", Date: d.Format("2006-01-02"), Dir: "past"}
 	}
 	result := TemporalToFTSExpansion(dates)
-	// Both months should be present despite capping.
-	if !strings.Contains(result, "März") {
-		t.Error("March should be present in capped FTS expansion")
+	// Both YYYY-MM prefixes should be present despite capping.
+	if !strings.Contains(result, "2026-03") {
+		t.Error("2026-03 should be present in capped FTS expansion")
 	}
-	if !strings.Contains(result, "April") {
-		t.Error("April should be present in capped FTS expansion")
+	if !strings.Contains(result, "2026-04") {
+		t.Error("2026-04 should be present in capped FTS expansion")
 	}
-	// Core terms should be capped: only maxFTSDates dates get weekday+ISO.
-	// With maxFTSDates=3, half=1, so first 1 + last 1 = 2 dates expanded.
+	// No month names (T07).
+	if strings.Contains(result, "März") || strings.Contains(result, "April") {
+		// "April" as month name vs "2026-04" prefix — check it's only the prefix
+		for _, term := range strings.Split(result, " OR ") {
+			if term == "März" || term == "March" || term == "April" {
+				t.Errorf("month name %q should not be in FTS expansion (T07)", term)
+			}
+		}
+	}
+	// ISO date capping should still work.
 	isoCount := 0
 	for i := 0; i < 20; i++ {
 		d := time.Date(2026, 3, 20+i, 0, 0, 0, 0, time.UTC)
@@ -1028,12 +1047,11 @@ func TestTemporalToFTSExpansion_CappingPreservesMonthsAndKWs(t *testing.T) {
 	if isoCount > maxFTSDates {
 		t.Errorf("expected at most %d ISO dates in output (capped), got %d", maxFTSDates, isoCount)
 	}
-	// First and last dates should always be present (start/end of range).
 	if !strings.Contains(result, "2026-03-20") {
-		t.Error("first date 2026-03-20 should always be in capped output")
+		t.Error("first date should always be in capped output")
 	}
 	if !strings.Contains(result, "2026-04-08") {
-		t.Error("last date 2026-04-08 should always be in capped output")
+		t.Error("last date should always be in capped output")
 	}
 }
 
@@ -1055,6 +1073,29 @@ func TestTemporalToFTSExpansion_ExactlyMaxDates(t *testing.T) {
 	}
 	if isoCount != maxFTSDates {
 		t.Errorf("exactly maxFTSDates dates: all %d should have core terms, got %d", maxFTSDates, isoCount)
+	}
+}
+
+func TestTemporalToFTSExpansion_TotalTermsCap(t *testing.T) {
+	// 90 individual dates spanning 3+ months.
+	// T07: Only ISO dates + YYYY-MM. 6 ISO dates (capped) + 4 YYYY-MM = 10 terms.
+	// Well within maxFTSTermsTotal.
+	dates := make([]TemporalDate, 90)
+	for i := 0; i < 90; i++ {
+		d := time.Date(2026, 1, 1+i, 0, 0, 0, 0, time.UTC)
+		dates[i] = TemporalDate{Ref: "test", Date: d.Format("2006-01-02"), Dir: "past"}
+	}
+	result := TemporalToFTSExpansion(dates)
+	termCount := strings.Count(result, " OR ") + 1
+	if termCount > maxFTSTermsTotal {
+		t.Errorf("90 dates should be capped to ≤%d total terms, got %d", maxFTSTermsTotal, termCount)
+	}
+	if !strings.Contains(result, "2026-01-01") {
+		t.Error("first date should be in output")
+	}
+	// No month names or KW numbers (T07).
+	if strings.Contains(result, "Januar") || strings.Contains(result, "KW") {
+		t.Error("month names and KW numbers should not be in FTS expansion (T07)")
 	}
 }
 
@@ -1118,28 +1159,29 @@ func TestTemporalToEmbedPrefix_TwoDatesUnderCap(t *testing.T) {
 // --- T03 Capping Tests ---.
 
 func TestT03_FTSExpansion_ThreeDatesNotCapped(t *testing.T) {
-	// 3 unique dates < maxFTSDates(7) → all get core expansion (not capped).
+	// 3 unique dates < maxFTSDates(7) → all get ISO expansion (not capped).
+	// T07: Only ISO dates + YYYY-MM prefix.
 	dates := []TemporalDate{
 		{Ref: "a", Date: "2026-03-23", Dir: "past"},
 		{Ref: "b", Date: "2026-03-25", Dir: "past"},
 		{Ref: "c", Date: "2026-03-27", Dir: "past"},
 	}
 	result := TemporalToFTSExpansion(dates)
-	// All 3 dates should have core terms (weekday DE/EN + ISO).
+	// All 3 ISO dates should be present.
 	for _, d := range []string{"2026-03-23", "2026-03-25", "2026-03-27"} {
 		if !strings.Contains(result, d) {
 			t.Errorf("date %s should be in uncapped output, got: %s", d, result)
 		}
 	}
-	// 3 dates × 3 core + 1 month (DE/EN/YYYY-MM) + 1 KW = 3*3 + 3 + 1 = 13 terms
+	// 3 ISO dates + 1 YYYY-MM = 4 terms
 	termCount := strings.Count(result, " OR ") + 1
-	if termCount < 9 {
-		t.Errorf("3 dates should produce at least 9 core terms, got %d: %s", termCount, result)
+	if termCount != 4 {
+		t.Errorf("3 dates should produce 4 terms (3 ISO + 1 YYYY-MM), got %d: %s", termCount, result)
 	}
 }
 
 func TestT03_FTSExpansion_FourDatesCapped(t *testing.T) {
-	// 4 unique dates < maxFTSDates(7) → NOT capped, all 4 get full core expansion.
+	// 4 unique dates < maxFTSDates(7) → NOT capped, all 4 get ISO expansion.
 	dates := []TemporalDate{
 		{Ref: "a", Date: "2026-03-23", Dir: "past"},
 		{Ref: "b", Date: "2026-03-24", Dir: "past"},
@@ -1147,20 +1189,20 @@ func TestT03_FTSExpansion_FourDatesCapped(t *testing.T) {
 		{Ref: "d", Date: "2026-03-26", Dir: "past"},
 	}
 	result := TemporalToFTSExpansion(dates)
-	// All 4 dates must have core terms (weekday DE/EN + ISO).
+	// All 4 ISO dates must be present.
 	for _, d := range []string{"2026-03-23", "2026-03-24", "2026-03-25", "2026-03-26"} {
 		if !strings.Contains(result, d) {
 			t.Errorf("date %s should be in uncapped output, got: %s", d, result)
 		}
 	}
-	// Month and KW from ALL dates should still be present.
-	if !strings.Contains(result, "März") {
-		t.Error("month name should always be present")
+	// YYYY-MM prefix should be present.
+	if !strings.Contains(result, "2026-03") {
+		t.Error("YYYY-MM prefix should be present")
 	}
 }
 
 func TestT03_FTSExpansion_30DayRange(t *testing.T) {
-	// T03 core scenario: 30-day range should NOT produce ~150 OR-terms.
+	// T03 core scenario: 30-day range with T07 precision terms only.
 	dates := make([]TemporalDate, 30)
 	for i := 0; i < 30; i++ {
 		d := time.Date(2026, 3, 1+i, 0, 0, 0, 0, time.UTC)
@@ -1168,24 +1210,21 @@ func TestT03_FTSExpansion_30DayRange(t *testing.T) {
 	}
 	result := TemporalToFTSExpansion(dates)
 	termCount := strings.Count(result, " OR ") + 1
-	// maxFTSDates=7, half=3: first 3 + last 3 = 6 core dates × 3 terms = 18 core terms
-	// + 2 months (März + April with DE/EN/prefix) + ~5 KWs = ~29 terms max.
-	if termCount > 35 {
-		t.Errorf("30-day range should produce ≤35 OR-terms (capped), got %d: %s", termCount, result)
+	// maxFTSDates=7, half=3: 6 ISO dates + 2 YYYY-MM = 8 terms
+	if termCount > maxFTSTermsTotal {
+		t.Errorf("30-day range should produce ≤%d terms, got %d: %s", maxFTSTermsTotal, termCount, result)
 	}
-	// Start and end dates must be present.
 	if !strings.Contains(result, "2026-03-01") {
-		t.Error("first date 2026-03-01 should be in output")
+		t.Error("first date should be in output")
 	}
 	if !strings.Contains(result, "2026-03-30") {
-		t.Error("last date 2026-03-30 should be in output")
+		t.Error("last date should be in output")
 	}
 }
 
 func TestT03_FTSExpansion_EightDatesCapped(t *testing.T) {
 	// 8 unique dates > maxFTSDates(7) → capping kicks in.
-	// half = maxFTSDates/2 = 3: first 3 + last 3 = 6 dates get core expansion.
-	// Middle dates 2026-03-24..2026-03-27 (4 dates) are dropped from core terms.
+	// T07: Only ISO dates + YYYY-MM. half=3: first 3 + last 3 = 6 ISO dates + 1 YYYY-MM.
 	dates := []TemporalDate{
 		{Ref: "a", Date: "2026-03-21", Dir: "past"},
 		{Ref: "b", Date: "2026-03-22", Dir: "past"},
@@ -1197,21 +1236,21 @@ func TestT03_FTSExpansion_EightDatesCapped(t *testing.T) {
 		{Ref: "h", Date: "2026-03-28", Dir: "past"},
 	}
 	result := TemporalToFTSExpansion(dates)
-	// First 3 and last 3 must have core terms (ISO date present).
+	// First 3 and last 3 must have ISO dates.
 	for _, d := range []string{"2026-03-21", "2026-03-22", "2026-03-23", "2026-03-26", "2026-03-27", "2026-03-28"} {
 		if !strings.Contains(result, d) {
 			t.Errorf("boundary date %s should be in capped output, got: %s", d, result)
 		}
 	}
-	// Middle dates should NOT have ISO date core terms.
+	// Middle dates should NOT be present.
 	for _, d := range []string{"2026-03-24", "2026-03-25"} {
 		if strings.Contains(result, d) {
-			t.Errorf("middle date %s should NOT have core terms in capped output, got: %s", d, result)
+			t.Errorf("middle date %s should NOT be in capped output, got: %s", d, result)
 		}
 	}
-	// Month and KW from ALL dates should still be present.
-	if !strings.Contains(result, "März") {
-		t.Error("month name März should always be present")
+	// YYYY-MM prefix should be present, not month names.
+	if !strings.Contains(result, "2026-03") {
+		t.Error("YYYY-MM prefix should be present")
 	}
 }
 

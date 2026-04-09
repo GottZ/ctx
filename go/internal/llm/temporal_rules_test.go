@@ -701,6 +701,25 @@ func TestNormalizeTemporalRules_T09_Integration(t *testing.T) {
 	if len(result.Dates) != 2 {
 		t.Fatalf("expected 2 date entries, got %d", len(result.Dates))
 	}
+	// DimensionWeights: weekday disjunction should get weekday weights for Cyclic Phase Model
+	if result.DimensionWeights == nil {
+		t.Fatal("expected DimensionWeights to be set")
+	}
+	if _, ok := result.DimensionWeights["weekday"]; !ok {
+		t.Errorf("weekday disjunction should have weekday dimension weight, got %v", result.DimensionWeights)
+	}
+}
+
+func TestNormalizeTemporalRules_T09_WeekdayRecurrence(t *testing.T) {
+	now := truncDate(referenceDate)
+	result := NormalizeTemporalRules("immer Montag oder Dienstag", now)
+	if result == nil {
+		t.Fatal("NormalizeTemporalRules returned nil for recurrent weekday disjunction")
+	}
+	// With recurrence, should be pure weekday weight (1.0)
+	if w, ok := result.DimensionWeights["weekday"]; !ok || w != 1.0 {
+		t.Errorf("recurrent weekday disjunction should have weekday=1.0, got %v", result.DimensionWeights)
+	}
 }
 
 // --- T20: separableVerbPairs token-order + article filter ---.
@@ -892,6 +911,165 @@ func TestHasRecurrence(t *testing.T) {
 	}
 }
 
+// --- matchRelativeWeek Tests ---.
+
+func TestMatchRelativeWeek_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+	tests := []struct {
+		query     string
+		wantStart string
+		wantEnd   string
+	}{
+		{"letzte Woche war gut", "2026-03-16", "2026-03-22"},
+		{"nächste Woche habe ich frei", "2026-03-30", "2026-04-05"},
+		{"diese Woche", "2026-03-23", "2026-03-29"},
+		{"next week", "2026-03-30", "2026-04-05"},
+		{"übernächste Woche wird spannend", "2026-04-06", "2026-04-12"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			result := matchRelativeWeek(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchRelativeWeek(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date entry, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.wantStart {
+				t.Errorf("start date: got %s, want %s", d.Date, tt.wantStart)
+			}
+			if d.End == nil {
+				t.Fatalf("expected end date, got nil")
+			}
+			if *d.End != tt.wantEnd {
+				t.Errorf("end date: got %s, want %s", *d.End, tt.wantEnd)
+			}
+		})
+	}
+}
+
+func TestMatchRelativeWeek_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"die Woche war lang",
+		"wöchentlich standup",
+		"Wochenende ist super",
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchRelativeWeek(q, now)
+			if result != nil {
+				t.Errorf("matchRelativeWeek(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+// --- matchRelativeMonth Tests ---.
+
+func TestMatchRelativeMonth_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+	tests := []struct {
+		query     string
+		wantStart string
+		wantEnd   string
+	}{
+		{"letzten Monat war viel los", "2026-02-01", "2026-02-28"},
+		{"diesen Monat", "2026-03-01", "2026-03-31"},
+		{"last month", "2026-02-01", "2026-02-28"},
+		{"this month", "2026-03-01", "2026-03-31"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			result := matchRelativeMonth(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchRelativeMonth(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date entry, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.wantStart {
+				t.Errorf("start date: got %s, want %s", d.Date, tt.wantStart)
+			}
+			if d.End == nil {
+				t.Fatalf("expected end date, got nil")
+			}
+			if *d.End != tt.wantEnd {
+				t.Errorf("end date: got %s, want %s", *d.End, tt.wantEnd)
+			}
+		})
+	}
+}
+
+func TestMatchRelativeMonth_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"der Monat ist fast vorbei",
+		"monatlich Routine",
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchRelativeMonth(q, now)
+			if result != nil {
+				t.Errorf("matchRelativeMonth(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+// --- matchRelativeDays Tests ---.
+
+func TestMatchRelativeDays_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+	tests := []struct {
+		query    string
+		wantDate string
+		wantDir  string
+	}{
+		{"vor 3 Tagen passierte das", "2026-03-26", "past"},
+		{"in 5 Tagen ist Deadline", "2026-04-03", "future"},
+		{"3 days ago", "2026-03-26", "past"},
+		{"in 2 Tagen geht es los", "2026-03-31", "future"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			result := matchRelativeDays(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchRelativeDays(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date entry, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.wantDate {
+				t.Errorf("date: got %s, want %s", d.Date, tt.wantDate)
+			}
+			if d.Dir != tt.wantDir {
+				t.Errorf("dir: got %s, want %s", d.Dir, tt.wantDir)
+			}
+		})
+	}
+}
+
+func TestMatchRelativeDays_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"das war ein guter Tag",
+		"in einer Stunde fertig",
+		"days like these",
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchRelativeDays(q, now)
+			if result != nil {
+				t.Errorf("matchRelativeDays(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
 // dwEqual compares two DimensionWeights maps for equality.
 func dwEqual(a, b map[string]float64) bool {
 	if len(a) != len(b) {
@@ -907,4 +1085,619 @@ func dwEqual(a, b map[string]float64) bool {
 		}
 	}
 	return true
+}
+
+// --- Isolated Matcher Tests: matchMonthSegment, matchAnnualHoliday, matchTimeOfDay ---.
+
+func TestMatchMonthSegment_Positive(t *testing.T) {
+	tests := []struct {
+		name         string
+		query        string
+		expectedDate string
+		expectedRef  string
+	}{
+		{"Monatsanfang", "Am Monatsanfang wird abgerechnet", "2026-01-03", "Monatsanfang"},
+		{"Monatsmitte", "Zur Monatsmitte prüfen wir die Zahlen", "2026-01-15", "Monatsmitte"},
+		{"Monatsende", "Das Monatsende ist kritisch", "2026-01-29", "Monatsende"},
+		{"Anfang_des_Monats", "am Anfang des Monats läuft der Job", "2026-01-03", "Monatsanfang"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchMonthSegment(tt.query)
+			if result == nil {
+				t.Fatalf("matchMonthSegment(%q) returned nil, want result", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date, got %d", len(result.Dates))
+			}
+			if result.Dates[0].Date != tt.expectedDate {
+				t.Errorf("date = %q, want %q", result.Dates[0].Date, tt.expectedDate)
+			}
+			if result.Dates[0].Ref != tt.expectedRef {
+				t.Errorf("ref = %q, want %q", result.Dates[0].Ref, tt.expectedRef)
+			}
+			if result.Dates[0].Dir != "range" {
+				t.Errorf("dir = %q, want %q", result.Dates[0].Dir, "range")
+			}
+		})
+	}
+}
+
+func TestMatchMonthSegment_NoMatch(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{"no_temporal", "der Server läuft stabil"},
+		{"month_name_only", "im März war es kalt"},
+		{"partial_word", "Monatsbudget ist aufgebraucht"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchMonthSegment(tt.query)
+			if result != nil {
+				t.Errorf("matchMonthSegment(%q) = %v, want nil", tt.query, result)
+			}
+		})
+	}
+}
+
+func TestMatchAnnualHoliday_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29
+	tests := []struct {
+		name         string
+		query        string
+		expectedDate string
+		expectedRef  string
+	}{
+		{"Weihnachten", "an Weihnachten 2025 war viel los", "2026-12-25", "Weihnachten"},
+		{"Silvester", "Silvester war toll", "2026-12-31", "Silvester"},
+		{"Neujahr", "Neujahr feiern wir immer", "2026-01-01", "Neujahr"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchAnnualHoliday(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchAnnualHoliday(%q) returned nil, want result", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date, got %d", len(result.Dates))
+			}
+			if result.Dates[0].Date != tt.expectedDate {
+				t.Errorf("date = %q, want %q", result.Dates[0].Date, tt.expectedDate)
+			}
+			if result.Dates[0].Ref != tt.expectedRef {
+				t.Errorf("ref = %q, want %q", result.Dates[0].Ref, tt.expectedRef)
+			}
+			if result.Dates[0].Dir != "range" {
+				t.Errorf("dir = %q, want %q", result.Dates[0].Dir, "range")
+			}
+		})
+	}
+}
+
+func TestMatchAnnualHoliday_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{"no_holiday", "der Server läuft stabil"},
+		{"partial_word", "Neujahrsvorsätze sind schwer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchAnnualHoliday(tt.query, now)
+			if result != nil {
+				t.Errorf("matchAnnualHoliday(%q) = %v, want nil", tt.query, result)
+			}
+		})
+	}
+}
+
+func TestMatchTimeOfDay_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29
+	tests := []struct {
+		name         string
+		query        string
+		expectedDate string
+		expectedRef  string
+		expectedHour int
+	}{
+		{"morgens", "morgens um 8 checke ich die Logs", "2026-03-29", "morgens", 8},
+		{"mittags", "mittags gibt es Standup", "2026-03-29", "mittags", 12},
+		{"abends", "abends gibt es Probleme", "2026-03-29", "abends", 19},
+		{"nachts", "nachts läuft der Batch", "2026-03-29", "nachts", 23},
+		{"vormittags", "vormittags ist die Last hoch", "2026-03-29", "vormittags", 10},
+		{"nachmittags", "nachmittags deployen wir", "2026-03-29", "nachmittags", 15},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchTimeOfDay(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchTimeOfDay(%q) returned nil, want result", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.expectedDate {
+				t.Errorf("date = %q, want %q", d.Date, tt.expectedDate)
+			}
+			if d.Ref != tt.expectedRef {
+				t.Errorf("ref = %q, want %q", d.Ref, tt.expectedRef)
+			}
+			if d.Dir != "today" {
+				t.Errorf("dir = %q, want %q", d.Dir, "today")
+			}
+			if d.Hour == nil {
+				t.Fatalf("hour is nil, want %d", tt.expectedHour)
+			}
+			if *d.Hour != tt.expectedHour {
+				t.Errorf("hour = %d, want %d", *d.Hour, tt.expectedHour)
+			}
+		})
+	}
+}
+
+func TestMatchTimeOfDay_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{"no_temporal", "der Server läuft stabil"},
+		{"time_as_number", "um 14 Uhr ist Meeting"},
+		{"partial_word", "Abendsonne über dem Rechenzentrum"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchTimeOfDay(tt.query, now)
+			if result != nil {
+				t.Errorf("matchTimeOfDay(%q) = %v, want nil", tt.query, result)
+			}
+		})
+	}
+}
+
+// --- matchLetztenWDBis tests ---.
+
+func TestMatchLetztenWDBis_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29, Sunday
+	tests := []struct {
+		query     string
+		wantStart string
+		wantEnd   string
+	}{
+		// Mon backward from Sun: (0-1+7)%7=6 → 2026-03-23; Wed: (0-3+7)%7=4 → 2026-03-25
+		{"letzten Montag bis Mittwoch", "2026-03-23", "2026-03-25"},
+		// Tue: (0-2+7)%7=5 → 2026-03-24; Fri: (0-5+7)%7=2 → 2026-03-27
+		{"letzten Dienstag bis Freitag", "2026-03-24", "2026-03-27"},
+		// Sun backward from Sun: (0-0+7)%7=0 → diff=7 → 2026-03-22; same for end
+		{"letzten Sonntag bis Sonntag", "2026-03-22", "2026-03-22"},
+		// "letzte" variant (without trailing n)
+		{"letzte Montag bis Freitag", "2026-03-23", "2026-03-27"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			result := matchLetztenWDBis(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchLetztenWDBis(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date entry, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.wantStart {
+				t.Errorf("start date: got %s, want %s", d.Date, tt.wantStart)
+			}
+			if d.End == nil {
+				t.Fatalf("expected end date, got nil")
+			}
+			if *d.End != tt.wantEnd {
+				t.Errorf("end date: got %s, want %s", *d.End, tt.wantEnd)
+			}
+		})
+	}
+}
+
+func TestMatchLetztenWDBis_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"letzten Montag war gut",       // no "bis" → no range
+		"von Montag bis Mittwoch",      // "von...bis" not "letzten...bis"
+		"nächsten Montag bis Mittwoch", // "nächsten" not "letzten"
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchLetztenWDBis(q, now)
+			if result != nil {
+				t.Errorf("matchLetztenWDBis(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+// --- matchNextThrough tests ---.
+
+func TestMatchNextThrough_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29, Sunday
+	tests := []struct {
+		query     string
+		wantStart string
+		wantEnd   string
+	}{
+		// "next" prefix: forward resolution
+		// Mon forward from Sun: (1-0+7)%7=1 → 2026-03-30; Fri: (5-0+7)%7=5 → 2026-04-03
+		{"next Monday through Friday", "2026-03-30", "2026-04-03"},
+		// Bare form, no past tense → forward
+		// Tue: (2-0+7)%7=2 → 2026-03-31; Thu: (4-0+7)%7=4 → 2026-04-02
+		{"Tuesday through Thursday", "2026-03-31", "2026-04-02"},
+		// Bare form with future context → forward
+		{"I'll work Monday through Friday", "2026-03-30", "2026-04-03"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			result := matchNextThrough(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchNextThrough(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date entry, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.wantStart {
+				t.Errorf("start date: got %s, want %s", d.Date, tt.wantStart)
+			}
+			if d.End == nil {
+				t.Fatalf("expected end date, got nil")
+			}
+			if *d.End != tt.wantEnd {
+				t.Errorf("end date: got %s, want %s", *d.End, tt.wantEnd)
+			}
+		})
+	}
+}
+
+func TestMatchNextThrough_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"next week is busy",                 // no weekday through weekday
+		"I went through the list on Monday", // "through" not between weekdays
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchNextThrough(q, now)
+			if result != nil {
+				t.Errorf("matchNextThrough(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+// --- matchWeekSegment tests ---.
+
+func TestMatchWeekSegment_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29, Sunday
+	// isoWeekBounds(now, 0): wd=7(Sun), mon = 2026-03-29 - 6 = 2026-03-23, sun = 2026-03-29
+	// isoWeekBounds(now, 1): mon = 2026-03-30, sun = 2026-04-05
+	tests := []struct {
+		query     string
+		wantStart string
+		wantEnd   string
+	}{
+		// Anfang der Woche: mon..tue of current week
+		{"Anfang der Woche", "2026-03-23", "2026-03-24"},
+		// Ende der Woche: fri..sun of current week
+		{"Ende der Woche", "2026-03-27", "2026-03-29"},
+		// Ende nächster Woche: fri..sun of next week
+		{"Ende nächster Woche", "2026-04-03", "2026-04-05"},
+		// "dieser" variant
+		{"Anfang dieser Woche", "2026-03-23", "2026-03-24"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			result := matchWeekSegment(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchWeekSegment(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date entry, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.wantStart {
+				t.Errorf("start date: got %s, want %s", d.Date, tt.wantStart)
+			}
+			if d.End == nil {
+				t.Fatalf("expected end date, got nil")
+			}
+			if *d.End != tt.wantEnd {
+				t.Errorf("end date: got %s, want %s", *d.End, tt.wantEnd)
+			}
+		})
+	}
+}
+
+func TestMatchWeekSegment_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"die Woche war gut",      // no "Anfang/Ende" prefix
+		"nächste Woche ist voll", // "nächste Woche" without "Ende/Anfang"
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchWeekSegment(q, now)
+			if result != nil {
+				t.Errorf("matchWeekSegment(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+// --- Isolated Matcher Tests: matchWDInWoche ---.
+
+func TestMatchWDInWoche_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+	tests := []struct {
+		name     string
+		query    string
+		wantDate string
+	}{
+		{
+			name:     "Montag in einer Woche",
+			query:    "Montag in einer Woche",
+			wantDate: "2026-04-06", // next Monday (03-30) + 7 = 04-06
+		},
+		{
+			name:     "Freitag in einer Woche",
+			query:    "Freitag in einer Woche",
+			wantDate: "2026-04-10", // next Friday (04-03) + 7 = 04-10
+		},
+		{
+			name:     "embedded in sentence",
+			query:    "das Meeting ist Mittwoch in einer Woche",
+			wantDate: "2026-04-08", // next Wednesday (04-01) + 7 = 04-08
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchWDInWoche(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchWDInWoche(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date, got %d", len(result.Dates))
+			}
+			if result.Dates[0].Date != tt.wantDate {
+				t.Errorf("date: got %s, want %s", result.Dates[0].Date, tt.wantDate)
+			}
+			if result.Dates[0].Dir != "future" {
+				t.Errorf("dir: got %s, want future", result.Dates[0].Dir)
+			}
+		})
+	}
+}
+
+func TestMatchWDInWoche_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"nächsten Montag",         // different pattern (no "in einer Woche")
+		"Montag in zwei Wochen",   // "zwei" not "einer"
+		"in einer Woche",          // no weekday prefix
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchWDInWoche(q, now)
+			if result != nil {
+				t.Errorf("matchWDInWoche(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+// --- Isolated Matcher Tests: matchWeekend ---.
+
+func TestMatchWeekend_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+	tests := []struct {
+		name      string
+		query     string
+		wantStart string
+		wantEnd   string
+		wantDir   string
+	}{
+		{
+			name:      "past tense on weekend day",
+			query:     "am Wochenende war es schön",
+			wantStart: "2026-03-28", // this Saturday (past, currently on weekend)
+			wantEnd:   "2026-03-29", // this Sunday
+			wantDir:   "past",
+		},
+		{
+			name:      "explicit future",
+			query:     "nächstes Wochenende",
+			wantStart: "2026-04-04", // next Saturday
+			wantEnd:   "2026-04-05", // next Sunday
+			wantDir:   "future",
+		},
+		{
+			name:      "neutral on weekend day defaults to future",
+			query:     "am Wochenende",
+			wantStart: "2026-04-04", // next Saturday (skip current weekend)
+			wantEnd:   "2026-04-05",
+			wantDir:   "future",
+		},
+		{
+			name:      "english weekend keyword",
+			query:     "what happened on the weekend",
+			wantStart: "2026-03-28", // past tense ("happened")
+			wantEnd:   "2026-03-29",
+			wantDir:   "past",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchWeekend(tt.query, now)
+			if result == nil {
+				t.Fatalf("matchWeekend(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date entry, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.wantStart {
+				t.Errorf("start date: got %s, want %s", d.Date, tt.wantStart)
+			}
+			if d.End == nil {
+				t.Fatalf("expected end date, got nil")
+			}
+			if *d.End != tt.wantEnd {
+				t.Errorf("end date: got %s, want %s", *d.End, tt.wantEnd)
+			}
+			if d.Dir != tt.wantDir {
+				t.Errorf("dir: got %s, want %s", d.Dir, tt.wantDir)
+			}
+		})
+	}
+}
+
+func TestMatchWeekend_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"am Montag ist Meeting",   // no weekend keyword
+		"am Freitag war es schön", // Friday is not weekend
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			result := matchWeekend(q, now)
+			if result != nil {
+				t.Errorf("matchWeekend(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+// --- Isolated Matcher Tests: matchWeekday ---.
+
+func TestMatchWeekday_Positive(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+	tests := []struct {
+		name     string
+		query    string
+		wantDate string
+		wantDir  string
+	}{
+		{
+			name:     "past tense German",
+			query:    "was war am Montag?",
+			wantDate: "2026-03-23", // last Monday (past: "war")
+			wantDir:  "past",
+		},
+		{
+			name:     "neutral tense defaults to future",
+			query:    "am Freitag ist Meeting",
+			wantDate: "2026-04-03", // next Friday (neutral → forward)
+			wantDir:  "future",
+		},
+		{
+			name:     "English next",
+			query:    "next Tuesday",
+			wantDate: "2026-03-31", // next Tuesday (explicit future)
+			wantDir:  "future",
+		},
+		{
+			name:     "English last",
+			query:    "last Wednesday",
+			wantDate: "2026-03-25", // last Wednesday (explicit past)
+			wantDir:  "past",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens := ruleTokenize(tt.query)
+			result := matchWeekday(tt.query, tokens, now)
+			if result == nil {
+				t.Fatalf("matchWeekday(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.wantDate {
+				t.Errorf("date: got %s, want %s", d.Date, tt.wantDate)
+			}
+			if d.Dir != tt.wantDir {
+				t.Errorf("dir: got %s, want %s", d.Dir, tt.wantDir)
+			}
+		})
+	}
+}
+
+func TestMatchWeekday_NoMatch(t *testing.T) {
+	now := truncDate(referenceDate)
+	tests := []string{
+		"was ist der RRF-Score?",                  // no weekday token
+		"gestern war es schön",                    // "gestern" is not a weekday
+		"show me all blocks with category infra",  // no weekday
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			tokens := ruleTokenize(q)
+			result := matchWeekday(q, tokens, now)
+			if result != nil {
+				t.Errorf("matchWeekday(%q) should return nil, got %+v", q, result.Dates)
+			}
+		})
+	}
+}
+
+func TestMatchWeekday_TenseDirection(t *testing.T) {
+	now := truncDate(referenceDate) // 2026-03-29 (Sunday)
+	tests := []struct {
+		name     string
+		query    string
+		wantDate string
+		wantDir  string
+	}{
+		{
+			name:     "past: letzten Freitag",
+			query:    "letzten Freitag passierte das",
+			wantDate: "2026-03-27", // last Friday (explicit past + past verb)
+			wantDir:  "past",
+		},
+		{
+			name:     "future: am Donnerstag muss ich",
+			query:    "am Donnerstag muss ich den Report abgeben",
+			wantDate: "2026-04-02", // next Thursday (future: "muss")
+			wantDir:  "future",
+		},
+		{
+			name:     "past: on Wednesday I deployed",
+			query:    "on Wednesday I deployed the fix",
+			wantDate: "2026-03-25", // last Wednesday (past: "deployed")
+			wantDir:  "past",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens := ruleTokenize(tt.query)
+			result := matchWeekday(tt.query, tokens, now)
+			if result == nil {
+				t.Fatalf("matchWeekday(%q) returned nil", tt.query)
+			}
+			if len(result.Dates) != 1 {
+				t.Fatalf("expected 1 date, got %d", len(result.Dates))
+			}
+			d := result.Dates[0]
+			if d.Date != tt.wantDate {
+				t.Errorf("date: got %s, want %s", d.Date, tt.wantDate)
+			}
+			if d.Dir != tt.wantDir {
+				t.Errorf("dir: got %s, want %s", d.Dir, tt.wantDir)
+			}
+		})
+	}
 }
