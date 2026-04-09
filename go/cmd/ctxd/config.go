@@ -48,10 +48,11 @@ type Config struct {
 	DreamModel       string
 	DreamNumCtx      int
 	DreamThink       string // "true", "false", or "" (fallback: ChatThink)
-	DreamEmbedHost   string // Separate embed host for Dream (empty = EmbedHost)
-	DreamEmbedAPIKey string
-	DreamEmbedModel  string
-	DreamEmbedNumCtx int
+	DreamEmbedHost     string // Separate embed host for Dream (empty = EmbedHost)
+	DreamEmbedAPIKey   string
+	DreamEmbedProtocol string // "ollama" or "openai" (empty = EmbedProtocol)
+	DreamEmbedModel    string
+	DreamEmbedNumCtx   int
 
 	// Timezone for temporal resolution (e.g. "Europe/Berlin").
 	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
@@ -143,10 +144,11 @@ func LoadConfig() (Config, error) {
 		DreamModel:    getEnv("CTX_DREAM_MODEL", ""),
 		DreamNumCtx:  dreamNumCtx,
 		DreamThink:       getEnv("CTX_DREAM_THINK", ""),
-		DreamEmbedHost:   getEnv("CTX_DREAM_EMBED_HOST", ""),
-		DreamEmbedAPIKey: getEnv("CTX_DREAM_EMBED_API_KEY", ""),
-		DreamEmbedModel:  getEnv("CTX_DREAM_EMBED_MODEL", ""),
-		DreamEmbedNumCtx: getEnvIntSafe("CTX_DREAM_EMBED_NUM_CTX", 0),
+		DreamEmbedHost:     getEnv("CTX_DREAM_EMBED_HOST", ""),
+		DreamEmbedAPIKey:   getEnv("CTX_DREAM_EMBED_API_KEY", ""),
+		DreamEmbedProtocol: getEnv("CTX_DREAM_EMBED_PROTOCOL", ""),
+		DreamEmbedModel:    getEnv("CTX_DREAM_EMBED_MODEL", ""),
+		DreamEmbedNumCtx:   getEnvIntSafe("CTX_DREAM_EMBED_NUM_CTX", 0),
 
 		Timezone: tz,
 

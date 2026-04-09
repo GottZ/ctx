@@ -109,7 +109,7 @@ services:
   #   volumes:
   #     - /opt/models:/models:ro
   #   command: >
-  #     --model /models/qwen3-embedding-8b.gguf
+  #     --model /models/Qwen3-Embedding-8B-Q4_K_M.gguf
   #     --embedding
   #     --pooling last
   #     --port 8081

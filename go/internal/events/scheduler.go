@@ -46,10 +46,12 @@ type Config struct {
 	EmbedAPIKey    string        // Embedding provider API key (query path)
 	EmbedModel     string        // Embedding model name (query path)
 	EmbedNumCtx    int           // Embedding num_ctx (query path)
-	DreamEmbedHost   string      // Dream embedding host (empty = EmbedHost)
-	DreamEmbedAPIKey string      // Dream embedding API key (empty = EmbedAPIKey)
-	DreamEmbedModel  string      // Dream embedding model (empty = EmbedModel)
-	DreamEmbedNumCtx int         // Dream embedding num_ctx (0 = EmbedNumCtx)
+	DreamEmbedHost     string    // Dream embedding host (empty = EmbedHost)
+	DreamEmbedAPIKey   string    // Dream embedding API key (empty = EmbedAPIKey)
+	DreamEmbedProtocol string    // Dream embedding protocol (empty = EmbedProtocol)
+	DreamEmbedModel    string    // Dream embedding model (empty = EmbedModel)
+	DreamEmbedNumCtx   int       // Dream embedding num_ctx (0 = EmbedNumCtx)
+	EmbedProtocol      string    // Query-path embed protocol ("ollama" or "openai")
 	DreamHost      string        // Dream LLM provider host
 	DreamAPIKey    string        // Dream LLM provider API key (empty = no auth)
 	ChatModel      string        // Chat model name (fallback for dream)
@@ -286,6 +288,10 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 	if embedAPIKey == "" {
 		embedAPIKey = s.config.EmbedAPIKey
 	}
+	embedProtocol := s.config.DreamEmbedProtocol
+	if embedProtocol == "" {
+		embedProtocol = s.config.EmbedProtocol
+	}
 	embedModel := s.config.DreamEmbedModel
 	if embedModel == "" {
 		embedModel = s.config.EmbedModel
@@ -297,7 +303,7 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 
 	return dream.RunDreamCycle(
 		dreamCtx, s.pool,
-		embedHost, embedAPIKey, embedModel, embedNumCtx,
+		embedHost, embedAPIKey, embedProtocol, embedModel, embedNumCtx,
 		s.config.DreamHost, s.config.DreamAPIKey, dreamModel,
 		s.config.DreamThink, dreamOpts,
 		s.config.ReadScopes,
