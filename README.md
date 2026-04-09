@@ -90,7 +90,7 @@ ctx stats     # Block count, categories, storage
 
 | Command | Description |
 |---------|-------------|
-| `ctx query "question"` | Hybrid search + LLM synthesis |
+| `ctx query question` | Hybrid search + LLM synthesis (formatted, `--json` for raw) |
 | `ctx save <cat> <title> - <content>` | Upsert knowledge block |
 | `ctx save --tag tag1,tag2 <cat> <title>` | Upsert with tags |
 | `ctx search [category] [query:text]` | Compact search (no LLM) |

@@ -48,13 +48,16 @@ func RegisterCommands(root *cobra.Command) {
 // ── query ────────────────────────────────────────────────────────────.
 
 func queryCmd(getClient func() (*Client, error)) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:     "query [question]",
 		Aliases: []string{"q"},
 		Short:   "Hybrid search + LLM synthesis",
 		Long:    "Query the context store with hybrid semantic + fulltext search and LLM synthesis.",
-		Example: `  ctx query "What embedding model is used?"
-  echo "question" | ctx query`,
+		Example: `  ctx q What embedding model is used
+  ctx query welche modelle werden verwendet
+  echo "question" | ctx query
+  ctx q --json What models are configured`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient()
 			if err != nil {
@@ -79,10 +82,48 @@ func queryCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			PrintJSON(resp)
+
+			if jsonOutput {
+				PrintJSON(resp)
+				return nil
+			}
+
+			var result queryResult
+			if err := json.Unmarshal(resp, &result); err != nil {
+				PrintJSON(resp) // Fallback to raw JSON on parse error.
+				return err
+			}
+
+			if !result.Success {
+				return fmt.Errorf("query failed: %s", result.Error)
+			}
+
+			// Formatted output: answer + sources.
+			fmt.Println(result.Answer)
+			if len(result.Sources) > 0 {
+				fmt.Printf("\n  Sources (%s):\n", result.Confidence)
+				for i, s := range result.Sources {
+					fmt.Printf("  [%d] %s (%s, %dd ago)\n", i+1, s.Title, s.Category, s.AgeDays)
+				}
+			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output raw JSON instead of formatted text")
+	return cmd
+}
+
+type queryResult struct {
+	Success    bool   `json:"success"`
+	Error      string `json:"error"`
+	Answer     string `json:"answer"`
+	Confidence string `json:"confidence"`
+	Sources    []struct {
+		Title    string  `json:"title"`
+		Category string  `json:"category"`
+		Score    float64 `json:"score"`
+		AgeDays  int     `json:"age_days"`
+	} `json:"sources"`
 }
 
 // ── save ─────────────────────────────────────────────────────────────.
