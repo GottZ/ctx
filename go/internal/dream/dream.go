@@ -40,6 +40,7 @@ type BlockInfo struct {
 	QualityScore float64
 	Embedding    []float32
 	UpdatedAt    time.Time
+	CreatedAt    time.Time
 }
 
 // CycleTimeout is the maximum duration for a single dream cycle.
@@ -66,6 +67,11 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 		"title", block.Title,
 		"quality_score", block.QualityScore,
 	)
+
+	// Step 1b: Validate temporal dimensions (deterministic + LLM).
+	if err := ValidateTemporal(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts, block); err != nil {
+		slog.Warn("dream: temporal validation failed (non-fatal)", "block_id", block.ID, "error", err)
+	}
 
 	// Step 2: Extract keywords.
 	keywords := ExtractKeywords(block.Title, block.Content, MaxKeywords)
@@ -181,7 +187,7 @@ func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string)
 func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 	var block BlockInfo
 	err := pool.QueryRow(ctx,
-		`SELECT id, title, category, content, scope, quality_score, updated_at
+		`SELECT id, title, category, content, scope, quality_score, updated_at, created_at
 		FROM context_blocks
 		WHERE NOT is_archived
 		  AND embedding IS NOT NULL
@@ -190,7 +196,7 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 		ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED`,
-	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.QualityScore, &block.UpdatedAt)
+	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
