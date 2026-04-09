@@ -766,8 +766,9 @@ func dreamDisableCmd(getClient func() (*Client, error)) *cobra.Command {
 
 func dreamThrottleCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
-		Use:   "throttle [duration]",
-		Short: "Throttled mode — GPU cooldown between LLM calls (default 20s)",
+		Use:     "throttle [duration]",
+		Aliases: []string{"tr"},
+		Short:   "Throttled mode — GPU cooldown between LLM calls (default 20s)",
 		Long:  "Sets Dream to throttled mode with optional interval. Examples: ctx dream throttle, ctx dream throttle 60s",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
