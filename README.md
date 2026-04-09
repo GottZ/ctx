@@ -107,6 +107,7 @@ ctx stats     # Block count, categories, storage
 | `ctx ingest <path>` | Ingest Obsidian vault |
 | `ctx digest` | Rebuild topic map |
 | `ctx statusline` | Claude Code status bar |
+| `ctx mcp [add\|list\|delete]` | Manage MCP OAuth client registrations |
 | `ctx version` | Print version |
 
 ## Architecture
@@ -135,7 +136,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.25, PostgreSQL 18 + pgvector 0.8.2, 22 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars
+**Stack:** Go 1.25, PostgreSQL 18 + pgvector 0.8.2, 23 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars
 
 **Key features:**
 - **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels
@@ -145,10 +146,11 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 - **GottZ Temporal Dimension Table** — EAV storage with partial B-Tree indexes, O(log n) dimension lookups at 1M+ scale. Every block carries multiple anchors: content-mentioned times (semantic) + `created_at` (meta) as independent signals.
 - **Dream Mode** — continuous autonomous cross-referencing with dual-model support, adaptive cooldown, supersedes detection, temporal validation, and runtime mode control (on/throttled/off via API). Throttled mode pauses between GPU-intensive steps for thermal management. Config: `CTX_DREAM_IDLE_WAIT` (seconds, default 20)
 - **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results
+- **MCP Remote** — Streamable HTTP transport with OAuth 2.1 PKCE for claude.ai/Claude Code integration. Tools: query, store, search, get, recent. Client registration via `ctx mcp add`
 
 ## API
 
-All endpoints under `/api/*`. Auth via `X-Context-Key` header.
+All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization: Bearer` token.
 
 | Endpoint | Description |
 |----------|-------------|
@@ -160,6 +162,9 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header.
 | `POST /api/ingest` | Obsidian vault ingestion |
 | `POST /api/blob/*` | Binary storage (store/fetch/search/manage) |
 | `GET /health` | DB + Ollama connectivity |
+| `POST\|GET\|DELETE /mcp` | MCP Streamable HTTP (remote tool server) |
+| `GET /authorize` | OAuth 2.1 authorization (PKCE) |
+| `POST /token` | OAuth 2.1 token exchange |
 
 ## Building
 

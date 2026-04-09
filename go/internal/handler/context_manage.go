@@ -86,6 +86,12 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.handleDreamReview(w, r, authResult)
 	case "dream-mode":
 		h.handleDreamMode(w, r, req)
+	case "mcp-client-create":
+		h.handleMCPClientCreate(w, r, authResult, req)
+	case "mcp-client-list":
+		h.handleMCPClientList(w, r)
+	case "mcp-client-delete":
+		h.handleMCPClientDelete(w, r, req)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
@@ -699,4 +705,66 @@ func dreamModeStr(mode int32) string {
 	default:
 		return "on"
 	}
+}
+
+func (h *ManageHandler) handleMCPClientCreate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+	var data struct {
+		Label string `json:"label"`
+	}
+	if len(req.Data) > 0 {
+		_ = json.Unmarshal(req.Data, &data)
+	}
+	if data.Label == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "label is required"})
+		return
+	}
+
+	client, secret, err := store.CreateOAuthClient(r.Context(), h.pool, data.Label, ar.ApiKeyID)
+	if err != nil {
+		slog.Error("manage: create oauth client failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":       true,
+		"client_id":     client.ClientID,
+		"client_secret": secret, // Shown once.
+		"label":         client.Label,
+	})
+}
+
+func (h *ManageHandler) handleMCPClientList(w http.ResponseWriter, r *http.Request) {
+	clients, err := store.ListOAuthClients(r.Context(), h.pool)
+	if err != nil {
+		slog.Error("manage: list oauth clients failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "clients": clients})
+}
+
+func (h *ManageHandler) handleMCPClientDelete(w http.ResponseWriter, r *http.Request, req manageRequest) {
+	var data struct {
+		ClientID string `json:"client_id"`
+	}
+	if len(req.Data) > 0 {
+		_ = json.Unmarshal(req.Data, &data)
+	}
+	if data.ClientID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "client_id is required"})
+		return
+	}
+
+	deleted, err := store.DeleteOAuthClient(r.Context(), h.pool, data.ClientID)
+	if err != nil {
+		slog.Error("manage: delete oauth client failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusOK, map[string]any{"success": false, "error": "client not found or already inactive"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": data.ClientID})
 }

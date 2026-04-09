@@ -40,6 +40,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(IngestCmd(getClient))
 	root.AddCommand(statuslineCmd(getClient))
 	root.AddCommand(dreamCmd(getClient))
+	root.AddCommand(mcpCmd(getClient))
 	root.AddCommand(briefCmd(getClient))
 	root.AddCommand(persistCmd(getClient))
 	root.AddCommand(initCmd())
@@ -103,7 +104,7 @@ func queryCmd(getClient func() (*Client, error)) *cobra.Command {
 			if len(result.Sources) > 0 {
 				fmt.Printf("\n  Sources (%s):\n", result.Confidence)
 				for i, s := range result.Sources {
-					fmt.Printf("  [%d] %s (%s, %dd ago)\n", i+1, s.Title, s.Category, s.AgeDays)
+					fmt.Printf("  [%d] %s (%s, %dd ago) id:%s\n", i+1, s.Title, s.Category, s.AgeDays, s.ID)
 				}
 			}
 			return nil
@@ -119,6 +120,7 @@ type queryResult struct {
 	Answer     string `json:"answer"`
 	Confidence string `json:"confidence"`
 	Sources    []struct {
+		ID       string  `json:"id"`
 		Title    string  `json:"title"`
 		Category string  `json:"category"`
 		Score    float64 `json:"score"`
@@ -828,6 +830,141 @@ func dreamThrottleCmd(getClient func() (*Client, error)) *cobra.Command {
 			resp, err := c.Post("manage", map[string]any{
 				"action": "dream-mode",
 				"data":   data,
+			})
+			if err != nil {
+				return err
+			}
+			PrintJSON(resp)
+			return nil
+		},
+	}
+}
+
+// ── mcp ──────────────────────────────────────────────────────────────.
+
+func mcpCmd(getClient func() (*Client, error)) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "mcp",
+		Short: "Manage MCP OAuth clients",
+		Long:  "Create, list, and delete OAuth client registrations for MCP remote access.",
+	}
+
+	cmd.AddCommand(mcpAddCmd(getClient))
+	cmd.AddCommand(mcpListCmd(getClient))
+	cmd.AddCommand(mcpDeleteCmd(getClient))
+
+	// Default to list.
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return mcpListRun(getClient)
+	}
+
+	return cmd
+}
+
+func mcpAddCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:   "add <label>",
+		Short: "Register a new MCP OAuth client",
+		Example: `  ctx mcp add "Claude AI"
+  ctx mcp add "Claude Code Desktop"`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			label := strings.Join(args, " ")
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			resp, err := c.Post("manage", map[string]any{
+				"action": "mcp-client-create",
+				"data":   map[string]any{"label": label},
+			})
+			if err != nil {
+				return err
+			}
+			var result struct {
+				Success      bool   `json:"success"`
+				ClientID     string `json:"client_id"`
+				ClientSecret string `json:"client_secret"`
+				Label        string `json:"label"`
+				Error        string `json:"error"`
+			}
+			if err := json.Unmarshal(resp, &result); err != nil {
+				PrintJSON(resp)
+				return err
+			}
+			if !result.Success {
+				return fmt.Errorf("failed: %s", result.Error)
+			}
+
+			fmt.Printf("MCP Client registered: %s\n\n", result.Label)
+			fmt.Printf("  client_id:     %s\n", result.ClientID)
+			fmt.Printf("  client_secret: %s\n", result.ClientSecret)
+			fmt.Printf("\n  Save the secret now — it cannot be retrieved later.\n")
+			return nil
+		},
+	}
+}
+
+func mcpListCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List registered MCP OAuth clients",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return mcpListRun(getClient)
+		},
+	}
+}
+
+func mcpListRun(getClient func() (*Client, error)) error {
+	c, err := getClient()
+	if err != nil {
+		return err
+	}
+	resp, err := c.Post("manage", map[string]any{"action": "mcp-client-list"})
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Success bool `json:"success"`
+		Clients []struct {
+			ClientID  string `json:"client_id"`
+			Label     string `json:"label"`
+			Active    bool   `json:"active"`
+			CreatedAt string `json:"created_at"`
+		} `json:"clients"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		PrintJSON(resp)
+		return err
+	}
+	if len(result.Clients) == 0 {
+		fmt.Println("No MCP clients registered. Use: ctx mcp add <label>")
+		return nil
+	}
+	for _, cl := range result.Clients {
+		status := "active"
+		if !cl.Active {
+			status = "revoked"
+		}
+		fmt.Printf("  %s  %s  [%s]  %s\n", cl.ClientID, cl.Label, status, cl.CreatedAt[:10])
+	}
+	return nil
+}
+
+func mcpDeleteCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <client_id>",
+		Short: "Revoke an MCP OAuth client",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			resp, err := c.Post("manage", map[string]any{
+				"action": "mcp-client-delete",
+				"data":   map[string]any{"client_id": args[0]},
 			})
 			if err != nil {
 				return err

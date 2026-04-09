@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/go-chi/chi/v5"
@@ -30,6 +32,13 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	h := handler.NewHealthHandler(pool, cfg.EmbedHost, cfg.ChatHost, cfg.DreamHost)
 	r.Get("/health", h.Health)
 
+	// OAuth 2.1 endpoints for MCP remote auth (no auth middleware — these ARE the auth flow).
+	oauthH := handler.NewOAuthHandler(pool)
+	r.Get("/.well-known/oauth-authorization-server", oauthH.Metadata)
+	r.Get("/.well-known/oauth-protected-resource", oauthH.ProtectedResource)
+	r.HandleFunc("/authorize", oauthH.Authorize) // GET = form, POST = submit
+	r.Post("/token", oauthH.Token)
+
 	// All authenticated routes in a single group with Auth middleware as first defense line.
 	chatThink := parseThinkMode(cfg.ChatThink)
 	queryHandler := handler.NewQueryHandler(pool, cfg.ChatHost, cfg.ChatAPIKey, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.ChatModel, chatThink, cfg.RerankEnabled, cfg.Timezone, cfg.RateLimitRead)
@@ -39,13 +48,34 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	blobH := handler.NewBlobHandler(pool, cfg.RateLimitWrite)
 	digestH := handler.NewDigestHandler(pool)
 
+	// ── MCP endpoint (Streamable HTTP, authenticated) ──────────────
+	queryHTTPHandler := handler.WithScheduler(scheduler, queryHandler.HandleQuery)
+	mcpH := handler.NewMCPHandler(handler.MCPConfig{
+		Pool:         pool,
+		EmbedHost:    cfg.EmbedHost,
+		EmbedAPIKey:  cfg.EmbedAPIKey,
+		EmbedModel:   cfg.EmbedModel,
+		EmbedNumCtx:  cfg.EmbedNumCtx,
+		ChatHost:     cfg.ChatHost,
+		ChatAPIKey:   cfg.ChatAPIKey,
+		ChatModel:    cfg.ChatModel,
+		ChatThink:    chatThink,
+		Timezone:     cfg.Timezone,
+		QueryHandler: http.HandlerFunc(queryHTTPHandler),
+	})
+	// MCP endpoint — auth middleware injects AuthResult into context.
+	r.Group(func(r chi.Router) {
+		r.Use(handler.Auth(pool))
+		r.Handle("/mcp", mcpH)
+	})
+
 	// ── API routes (canonical) ──────────────────────────────────────
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
 		r.Use(handler.MaxBodySize(DefaultMaxBodySize))
 
 		// Query — RRF + LLM synthesis
-		r.Post("/api/query", handler.WithScheduler(scheduler, queryHandler.HandleQuery))
+		r.Post("/api/query", queryHTTPHandler)
 		// Store — Upsert + Auto-Embedding
 		r.Post("/api/store", storeH.HandleStore)
 		// Search — Lightweight FTS (no LLM)

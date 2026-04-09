@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -136,13 +137,17 @@ func Recovery(next http.Handler) http.Handler {
 	})
 }
 
-// Auth creates middleware that authenticates requests via X-Context-Key header.
-// It extracts the key, sanitizes it, calls auth.Authenticate, and stores the
-// result in context. Returns 401 on invalid key.
+// Auth creates middleware that authenticates requests via X-Context-Key header
+// or Authorization: Bearer token. Bearer tokens are treated as API keys.
 func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rawKey := r.Header.Get("X-Context-Key")
+			if rawKey == "" {
+				if bearer := r.Header.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
+					rawKey = strings.TrimPrefix(bearer, "Bearer ")
+				}
+			}
 			apiKey := auth.SanitizeKey(rawKey)
 
 			result, err := auth.Authenticate(r.Context(), pool, apiKey)

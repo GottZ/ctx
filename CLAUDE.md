@@ -37,7 +37,7 @@ docker compose logs -f ctx          # Logs
 
 | Container | Image | Purpose |
 |-----------|-------|---------|
-| `ctx` | `n8n-ctx` (local build from `go/`) | Go-Server: API, Guard, Dream, Digest |
+| `ctx` | `n8n-ctx` (local build from `go/`) | Go-Server: API, Guard, Dream, Digest, MCP |
 | `n8n-db-1` | `pgvector-timescaledb:pg18` | PostgreSQL 18 + pgvector + TimescaleDB |
 
 ## Database Access
