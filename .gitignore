@@ -1,7 +1,9 @@
 # Ignore all dotfiles/dotdirs (.env, .n8n/, .claude/, .project/, .eval-baseline.json, ...)
 .*
 !.gitignore
+!.gitmodules
 !.env.example
+!.project
 
 # Local overrides
 docker-compose.override.yml
