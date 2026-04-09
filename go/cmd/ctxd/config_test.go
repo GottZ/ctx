@@ -436,10 +436,10 @@ func TestLoadConfig_InvalidPort(t *testing.T) {
 func TestLoadConfig_InvalidEmbedDims(t *testing.T) {
 	t.Setenv("CONTEXT_DB_PASSWORD", "secret")
 	t.Setenv("CONTEXT_DB_PORT", "")
-	t.Setenv("OLLAMA_EMBED_DIMS", "abc")
+	t.Setenv("CTX_EMBED_DIMS", "abc")
 
 	_, err := LoadConfig()
 	if err == nil {
-		t.Error("expected error for invalid OLLAMA_EMBED_DIMS, got nil")
+		t.Error("expected error for invalid CTX_EMBED_DIMS, got nil")
 	}
 }
