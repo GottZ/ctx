@@ -133,6 +133,11 @@ I06|synthesis|Show me how auth works in the context store|confident|key,hash,sco
 I07|synthesis|Liste alle Kategorien im Context Store auf|confident|infrastructure,learnings|DE imperative, categories
 I08|synthesis|Explain the blob storage authentication|confident|key,hash,blob|EN imperative, blob auth
 
+# --- TEMPORAL (queries with temporal references — tests FTS expansion + Gravity Boost) ---
+T01|synthesis|Was wurde letzte Woche im Context Store geändert?|confident|block~store~context|Relative week reference
+T02|synthesis|Welche Architektur-Entscheidungen wurden im März 2026 getroffen?|confident|rrf~guard~embedding~scope|Month+year reference
+T03|synthesis|What embedding changes happened recently?|confident|qwen3~embedding~matryoshka~1024|EN temporal, recent
+
 # --- RETRIEVAL QUALITY (api/search, no LLM — tests vector+FTS ranking) ---
 R01|retrieval|Write Guard|any|write guard|Top result relevance
 R02|retrieval|embedding model|any|embedding|Embedding-related blocks
@@ -474,6 +479,16 @@ if ! $RETRIEVAL_ONLY; then
     [[ ! "$id" =~ ^M ]] && continue
     run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
   done < <(define_test_cases)
+
+  echo ""
+  echo "  -- Temporal (temporal references) --"
+  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
+    [[ "$id" =~ ^#.*$ ]] && continue
+    [[ -z "$id" ]] && continue
+    [[ "$type" != "synthesis" ]] && continue
+    [[ ! "$id" =~ ^T ]] && continue
+    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
+  done < <(define_test_cases)
 fi
 
 END_TIME=$(date +%s)
@@ -515,7 +530,7 @@ for t in by_type:
     by_type[t]['latency_mean'] = sum(lats) // n if n else 0
     del by_type[t]['latencies']
 
-# By category (S=confident, B=bilingual, N=negative, K=keyword, M=multihop, R=retrieval)
+# By category (S=confident, B=bilingual, N=negative, K=keyword, M=multihop, T=temporal, R=retrieval)
 categories = {
     'confident': {'prefix': 'S', 'pass': 0, 'fail': 0},
     'bilingual': {'prefix': 'B', 'pass': 0, 'fail': 0},
@@ -523,6 +538,7 @@ categories = {
     'keyword':   {'prefix': 'K', 'pass': 0, 'fail': 0},
     'imperative': {'prefix': 'I', 'pass': 0, 'fail': 0},
     'multihop':  {'prefix': 'M', 'pass': 0, 'fail': 0},
+    'temporal':  {'prefix': 'T', 'pass': 0, 'fail': 0},
     'retrieval': {'prefix': 'R', 'pass': 0, 'fail': 0},
 }
 for r in results:
@@ -607,7 +623,7 @@ print()
 # Category breakdown
 print('  Category        Pass  Fail  Total  Rate')
 print('  ' + '-' * 46)
-for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'multihop', 'retrieval']:
+for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'multihop', 'temporal', 'retrieval']:
     c = data['by_category'].get(cat, {'pass':0,'fail':0,'total':0})
     if c['total'] == 0:
         continue
@@ -687,7 +703,7 @@ elif cs['false_positive_rate'] < bs['false_positive_rate'] - 10:
     improvements.append(f'False positive rate: {bs[\"false_positive_rate\"]}% -> {cs[\"false_positive_rate\"]}% (IMPROVED)')
 
 # Per-category regressions
-for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'multihop', 'retrieval']:
+for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'multihop', 'temporal', 'retrieval']:
     cc = current['by_category'].get(cat, {'pass':0, 'total':0})
     bc = baseline['by_category'].get(cat, {'pass':0, 'total':0})
     if bc['total'] == 0 or cc['total'] == 0:

@@ -27,10 +27,11 @@ type QueryHandler struct {
 	chatModel      string
 	chatThink      *bool
 	rerankEnabled  bool
+	timezone       *time.Location
 }
 
 // NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, ollamaHost, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, rerankEnabled bool) *QueryHandler {
+func NewQueryHandler(pool *pgxpool.Pool, ollamaHost, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, rerankEnabled bool, timezone *time.Location) *QueryHandler {
 	return &QueryHandler{
 		pool:          pool,
 		ollamaHost:    ollamaHost,
@@ -39,6 +40,7 @@ func NewQueryHandler(pool *pgxpool.Pool, ollamaHost, embedModel string, embedNum
 		chatModel:     chatModel,
 		chatThink:     chatThink,
 		rerankEnabled: rerankEnabled,
+		timezone:      timezone,
 	}
 }
 
@@ -161,7 +163,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	var temporal string
 	var temporalResult *llm.TemporalResult
 
-	now := time.Now()
+	now := time.Now().In(h.timezone)
 	temporalResult = llm.NormalizeTemporalRules(originalQuery, now)
 
 	if temporalResult != nil {

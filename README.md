@@ -139,7 +139,7 @@ Store ──► Extract Times ──► Hash NOOP ──► Embed ──► Guar
 - **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels
 - **GottZ Scope Model** — multi-tenant isolation (private/work/shared) via API key scoping
 - **GottZ Guard** — async deduplication via PG LISTEN/NOTIFY + HNSW similarity
-- **GottZ Cyclic Phase Model** — 7 cyclic temporal dimensions (weekday/month/quarter/week/monthday/seasonal/daily) with normalized phase [0,1) and per-dimension Gaussian decay. Queries route to dimensions via parser (15-matcher deterministic engine, 59/60 cases in 0ms).
+- **GottZ Cyclic Phase Model** — 7 cyclic temporal dimensions (weekday/month/quarter/week/monthday/seasonal/daily) with normalized phase [0,1) and per-dimension Gaussian decay. Queries route to dimensions via parser (18-matcher deterministic engine). Timezone-aware via `CTX_TIMEZONE`.
 - **GottZ Temporal Dimension Table** — EAV storage with partial B-Tree indexes, O(log n) dimension lookups at 1M+ scale. Every block carries multiple anchors: content-mentioned times (semantic) + `created_at` (meta) as independent signals.
 - **Dream Mode** — continuous autonomous cross-referencing with dual-model support, adaptive cooldown, and supersedes detection
 - **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results

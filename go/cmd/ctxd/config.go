@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 )
 
 // defaultListenAddr is the default HTTP listen address.
@@ -40,6 +41,10 @@ type Config struct {
 	OllamaDreamNumCtx int
 	OllamaDreamThink  string // "true", "false", or "" (fallback: OllamaThink)
 
+	// Timezone for temporal resolution (e.g. "Europe/Berlin").
+	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
+	Timezone *time.Location
+
 	// HTTP Server
 	ListenAddr string
 }
@@ -73,6 +78,15 @@ func LoadConfig() (Config, error) {
 
 	dreamThink := getEnv("OLLAMA_DREAM_THINK", "")
 
+	tz := time.UTC
+	if tzName := getEnv("CTX_TIMEZONE", ""); tzName != "" {
+		loc, err := time.LoadLocation(tzName)
+		if err != nil {
+			return Config{}, fmt.Errorf("parsing CTX_TIMEZONE %q: %w", tzName, err)
+		}
+		tz = loc
+	}
+
 	cfg := Config{
 		ContextDB:     getEnv("CONTEXT_DB", "context_store"),
 		ContextDBUser: getEnv("CONTEXT_DB_USER", "context_user"),
@@ -96,6 +110,8 @@ func LoadConfig() (Config, error) {
 		OllamaDreamModel:  getEnv("OLLAMA_DREAM_MODEL", ""),
 		OllamaDreamNumCtx: dreamNumCtx,
 		OllamaDreamThink:  dreamThink,
+
+		Timezone: tz,
 
 		ListenAddr: getEnv("LISTEN_ADDR", defaultListenAddr),
 	}

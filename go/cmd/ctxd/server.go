@@ -32,7 +32,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
 	chatThink := parseThinkMode(cfg.OllamaThink)
-	queryHandler := handler.NewQueryHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaEmbedNumCtx, cfg.OllamaChatModel, chatThink, cfg.RerankEnabled)
+	queryHandler := handler.NewQueryHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaEmbedNumCtx, cfg.OllamaChatModel, chatThink, cfg.RerankEnabled, cfg.Timezone)
 	storeH := handler.NewStoreHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaEmbedNumCtx)
 	searchH := handler.NewSearchHandler(pool)
 	manageH := handler.NewManageHandler(pool, cfg.OllamaHost, cfg.OllamaEmbedModel, cfg.OllamaEmbedNumCtx)
