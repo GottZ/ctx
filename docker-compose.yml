@@ -38,6 +38,13 @@ services:
       CTX_DREAM_MODEL: ${CTX_DREAM_MODEL:-}
       CTX_DREAM_NUM_CTX: ${CTX_DREAM_NUM_CTX:-0}
       CTX_DREAM_THINK: ${CTX_DREAM_THINK:-}
+      CTX_DREAM_EMBED_HOST: ${CTX_DREAM_EMBED_HOST:-}
+      CTX_DREAM_EMBED_API_KEY: ${CTX_DREAM_EMBED_API_KEY:-}
+      CTX_DREAM_EMBED_PROTOCOL: ${CTX_DREAM_EMBED_PROTOCOL:-}
+      CTX_DREAM_EMBED_MODEL: ${CTX_DREAM_EMBED_MODEL:-}
+      CTX_DREAM_EMBED_NUM_CTX: ${CTX_DREAM_EMBED_NUM_CTX:-0}
+      CTX_RATE_LIMIT_WRITE: ${CTX_RATE_LIMIT_WRITE:-100}
+      CTX_RATE_LIMIT_READ: ${CTX_RATE_LIMIT_READ:-0}
       CTX_TIMEZONE: ${CTX_TIMEZONE:-}
       LISTEN_ADDR: ":8080"
     networks:
@@ -88,6 +95,34 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Optional: llama.cpp CPU-only inference sidecar.
+  # Useful for Dream embedding on CPU (frees GPU for query-path).
+  # Mount your GGUF models into /models.
+  # Example .env: CTX_DREAM_EMBED_HOST=http://llama-embed:8081
+  #               CTX_DREAM_EMBED_PROTOCOL=openai
+  #
+  # llama-embed:
+  #   image: ghcr.io/ggml-org/llama.cpp:server
+  #   container_name: llama-embed
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /opt/models:/models:ro
+  #   command: >
+  #     --model /models/qwen3-embedding-8b.gguf
+  #     --embedding
+  #     --pooling last
+  #     --port 8081
+  #     --ctx-size 2048
+  #     --n-gpu-layers 0
+  #   networks:
+  #     - n8nintern
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-sf", "http://localhost:8081/health"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+  #     start_period: 15s
 
 networks:
   n8nintern:
