@@ -242,13 +242,26 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 
 	// Audit log outside TX — failure here doesn't roll back links.
 	if written > 0 {
+		type auditLink struct {
+			TargetID     string  `json:"target_id"`
+			Relationship string  `json:"relationship"`
+			Confidence   float64 `json:"confidence"`
+		}
+		auditLinks := make([]auditLink, 0, written)
+		for _, l := range links {
+			auditLinks = append(auditLinks, auditLink(l))
+		}
+		meta, _ := json.Marshal(map[string]any{
+			"source":        "dream_v1",
+			"links_created": written,
+			"links":         auditLinks,
+		})
 		_, _ = pool.Exec(ctx,
 			`INSERT INTO context_write_log
 				(block_id, decision, similarity, scope, block_title, block_category, metadata)
-			SELECT $1::uuid, 'dream_link', 0, scope, title, category,
-				jsonb_build_object('links_created', $2, 'source', 'dream_v1')
+			SELECT $1::uuid, 'dream_link', 0, scope, title, category, $2::jsonb
 			FROM context_blocks WHERE id = $1`,
-			sourceID, written,
+			sourceID, meta,
 		)
 	}
 

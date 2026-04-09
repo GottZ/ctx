@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -16,21 +15,13 @@ import (
 // StoreHandler handles POST /api/store.
 type StoreHandler struct {
 	pool           *pgxpool.Pool
-	embedHost      string
-	embedAPIKey    string
-	embedModel     string
-	embedNumCtx    int
 	rateLimitWrite int // 0 = disabled
 }
 
 // NewStoreHandler creates a new StoreHandler.
-func NewStoreHandler(pool *pgxpool.Pool, embedHost, embedAPIKey, embedModel string, embedNumCtx, rateLimitWrite int) *StoreHandler {
+func NewStoreHandler(pool *pgxpool.Pool, rateLimitWrite int) *StoreHandler {
 	return &StoreHandler{
 		pool:           pool,
-		embedHost:      embedHost,
-		embedAPIKey:    embedAPIKey,
-		embedModel:     embedModel,
-		embedNumCtx:    embedNumCtx,
 		rateLimitWrite: rateLimitWrite,
 	}
 }
@@ -181,32 +172,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Generate embedding (document prefix): title + "\n\n" + content.
-	embedText := block.Title + "\n\n" + block.Content
-	vec, err := embed.Embed(ctx, h.embedHost, h.embedAPIKey, h.embedModel, embedText, embed.PrefixDocument, h.embedNumCtx)
-	if err != nil {
-		slog.Error("store: embedding generation failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		// Block is stored but without embedding. Still return success.
-		writeJSON(w, http.StatusOK, map[string]any{
-			"success": true,
-			"block":   block,
-			"warning": "Embedding generation failed",
-		})
-		return
-	}
-
-	// Store embedding.
-	if err := store.StoreEmbedding(ctx, h.pool, block.ID, vec); err != nil {
-		slog.Error("store: embedding storage failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"success": true,
-			"block":   block,
-			"warning": "Embedding storage failed",
-		})
-		return
-	}
-
-	// Success.
+	// Embedding generated async by scheduler backfill loop.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"block":   block,

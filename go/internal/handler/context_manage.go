@@ -9,29 +9,25 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/dream"
-	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// DreamController is the interface for controlling dream mode from the manage handler.
+type DreamController interface {
+	SetDreamMode(mode int32, silentInterval time.Duration)
+	GetDreamMode() (mode int32, silentInterval time.Duration)
+}
+
 // ManageHandler handles POST /api/manage.
 type ManageHandler struct {
-	pool        *pgxpool.Pool
-	embedHost   string
-	embedAPIKey string
-	embedModel  string
-	embedNumCtx int
+	pool            *pgxpool.Pool
+	dreamController DreamController
 }
 
 // NewManageHandler creates a new ManageHandler.
-func NewManageHandler(pool *pgxpool.Pool, embedHost, embedAPIKey, embedModel string, embedNumCtx int) *ManageHandler {
-	return &ManageHandler{
-		pool:        pool,
-		embedHost:   embedHost,
-		embedAPIKey: embedAPIKey,
-		embedModel:  embedModel,
-		embedNumCtx: embedNumCtx,
-	}
+func NewManageHandler(pool *pgxpool.Pool, dreamController DreamController) *ManageHandler {
+	return &ManageHandler{pool: pool, dreamController: dreamController}
 }
 
 type manageRequest struct {
@@ -88,6 +84,8 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.handleDreamStats(w, r, authResult)
 	case "dream-review":
 		h.handleDreamReview(w, r, authResult)
+	case "dream-mode":
+		h.handleDreamMode(w, r, req)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
@@ -282,23 +280,10 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		}
 	}
 
-	// Re-embed if content or title changed.
+	// Clear embedding so scheduler backfill regenerates it.
 	if needsReEmbed {
-		embedText := block.Title + "\n\n" + block.Content
-		vec, err := embed.Embed(ctx, h.embedHost, h.embedAPIKey, h.embedModel, embedText, embed.PrefixDocument, h.embedNumCtx)
-		if err != nil {
-			slog.Error("manage: re-embed failed", "error", err, "block_id", block.ID, "request_id", reqID)
-			// Return success but with warning.
-			writeJSON(w, http.StatusOK, map[string]any{
-				"action":  "update",
-				"success": true,
-				"block":   block,
-				"warning": "Re-embedding failed",
-			})
-			return
-		}
-		if err := store.StoreEmbedding(ctx, h.pool, block.ID, vec); err != nil {
-			slog.Error("manage: re-embed store failed", "error", err, "block_id", block.ID, "request_id", reqID)
+		if err := store.ClearEmbedding(ctx, h.pool, block.ID); err != nil {
+			slog.Error("manage: clear embedding failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}
 
@@ -643,4 +628,75 @@ func (h *ManageHandler) fetchRecentDreamBlocks(ctx context.Context, ar *auth.Aut
 		})
 	}
 	return results, rows.Err()
+}
+
+func (h *ManageHandler) handleDreamMode(w http.ResponseWriter, _ *http.Request, req manageRequest) {
+	if h.dreamController == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"success": false, "error": "Dream not enabled",
+		})
+		return
+	}
+
+	// No data = return current mode.
+	if len(req.Data) == 0 || string(req.Data) == "null" {
+		mode, interval := h.dreamController.GetDreamMode()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success":  true,
+			"mode":     dreamModeStr(mode),
+			"interval": interval.Seconds(),
+		})
+		return
+	}
+
+	var data struct {
+		Mode     string `json:"mode"`
+		Interval int    `json:"interval"` // seconds, 0 = default
+	}
+	if err := json.Unmarshal(req.Data, &data); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": "Invalid data: expected {mode, interval}",
+		})
+		return
+	}
+
+	var mode int32
+	switch data.Mode {
+	case "on":
+		mode = 0 // DreamModeOn
+	case "silent":
+		mode = 1 // DreamModeSilent
+	case "off":
+		mode = 2 // DreamModeOff
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": "Invalid mode: use on, silent, or off",
+		})
+		return
+	}
+
+	var interval time.Duration
+	if data.Interval > 0 {
+		interval = time.Duration(data.Interval) * time.Second
+	}
+
+	h.dreamController.SetDreamMode(mode, interval)
+	_, currentInterval := h.dreamController.GetDreamMode()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"mode":     data.Mode,
+		"interval": currentInterval.Seconds(),
+	})
+}
+
+func dreamModeStr(mode int32) string {
+	switch mode {
+	case 1:
+		return "silent"
+	case 2:
+		return "off"
+	default:
+		return "on"
+	}
 }

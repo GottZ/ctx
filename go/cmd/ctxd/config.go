@@ -53,6 +53,7 @@ type Config struct {
 	DreamEmbedProtocol string // "ollama" or "openai" (empty = EmbedProtocol)
 	DreamEmbedModel    string
 	DreamEmbedNumCtx   int
+	DreamIdleWait      int    // seconds between dream cycles when idle (default 20)
 
 	// Timezone for temporal resolution (e.g. "Europe/Berlin").
 	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
@@ -149,6 +150,7 @@ func LoadConfig() (Config, error) {
 		DreamEmbedProtocol: getEnv("CTX_DREAM_EMBED_PROTOCOL", ""),
 		DreamEmbedModel:    getEnv("CTX_DREAM_EMBED_MODEL", ""),
 		DreamEmbedNumCtx:   getEnvIntSafe("CTX_DREAM_EMBED_NUM_CTX", 0),
+		DreamIdleWait:      getEnvIntSafe("CTX_DREAM_IDLE_WAIT", 20),
 
 		Timezone: tz,
 

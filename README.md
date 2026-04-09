@@ -123,10 +123,11 @@ Query ──► Parse Temporal ──► Embed ──► 4-Way RRF ──► Gra
               {monthday:1.0}  "Monatsanfang"                    ├─ seasonal σ=0.08 │  → PromoteToCanonical   │
               {daily:1.0}    "morgens"                          └─ daily   σ=0.08  └─────────────────────────┘
 
-Store ──► Extract Times ──► Hash NOOP ──► Embed ──► Guard (async, 60s)
-          (content + created_at)                    ├─ ≥0.98: auto-archive
-          │                                         ├─ 0.92-0.98: flag needs_review
-          │                                         └─ <0.92: clean
+Store ──► Extract Times ──► Hash NOOP ──────────────► Guard (async, 60s)
+          (content + created_at)          │           ├─ ≥0.98: auto-archive
+          │                               │           ├─ 0.92-0.98: flag needs_review
+          │                               │           └─ <0.92: clean
+          │                               └─► Embed (async, scheduler backfill)
           └─► Dimensions = Union(content anchors ∪ meta anchor)
               • Content: dates mentioned in text (semantic)
               • Meta: created_at timestamp (every block, always)
@@ -141,7 +142,7 @@ Store ──► Extract Times ──► Hash NOOP ──► Embed ──► Guar
 - **GottZ Guard** — async deduplication via PG LISTEN/NOTIFY + HNSW similarity
 - **GottZ Cyclic Phase Model** — 7 cyclic temporal dimensions (weekday/month/quarter/week/monthday/seasonal/daily) with normalized phase [0,1) and per-dimension Gaussian decay. Queries route to dimensions via parser (18-matcher deterministic engine). Timezone-aware via `CTX_TIMEZONE`.
 - **GottZ Temporal Dimension Table** — EAV storage with partial B-Tree indexes, O(log n) dimension lookups at 1M+ scale. Every block carries multiple anchors: content-mentioned times (semantic) + `created_at` (meta) as independent signals.
-- **Dream Mode** — continuous autonomous cross-referencing with dual-model support, adaptive cooldown, supersedes detection, and temporal validation (deterministic + LLM review for implicit time references)
+- **Dream Mode** — continuous autonomous cross-referencing with dual-model support, adaptive cooldown, supersedes detection, temporal validation, and runtime mode control (on/silent/off via API). Silent mode throttles between GPU-intensive steps for thermal management. Config: `CTX_DREAM_IDLE_WAIT` (seconds, default 20)
 - **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results
 
 ## API
@@ -151,7 +152,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header.
 | Endpoint | Description |
 |----------|-------------|
 | `POST /api/query` | 4-Way RRF + LLM synthesis |
-| `POST /api/store` | Upsert + auto-embedding |
+| `POST /api/store` | Upsert (embedding async) |
 | `POST /api/search` | Lightweight search (no LLM) |
 | `POST /api/manage` | CRUD, Guard API, stats |
 | `POST /api/digest` | Topic map generation |

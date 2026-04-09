@@ -33,9 +33,9 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	// All authenticated routes in a single group with Auth middleware as first defense line.
 	chatThink := parseThinkMode(cfg.ChatThink)
 	queryHandler := handler.NewQueryHandler(pool, cfg.ChatHost, cfg.ChatAPIKey, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.ChatModel, chatThink, cfg.RerankEnabled, cfg.Timezone, cfg.RateLimitRead)
-	storeH := handler.NewStoreHandler(pool, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.RateLimitWrite)
+	storeH := handler.NewStoreHandler(pool, cfg.RateLimitWrite)
 	searchH := handler.NewSearchHandler(pool, cfg.RateLimitRead)
-	manageH := handler.NewManageHandler(pool, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx)
+	manageH := handler.NewManageHandler(pool, scheduler)
 	blobH := handler.NewBlobHandler(pool, cfg.RateLimitWrite)
 	digestH := handler.NewDigestHandler(pool)
 
@@ -61,7 +61,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	})
 
 	// Ingest — larger body limit (10 MB for bulk chunk import)
-	ingestH := handler.NewIngestHandler(pool, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx)
+	ingestH := handler.NewIngestHandler(pool)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
 		r.Use(handler.MaxBodySize(IngestMaxBodySize))

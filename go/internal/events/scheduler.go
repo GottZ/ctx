@@ -5,6 +5,8 @@ package events
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"runtime/debug"
 	"sync"
@@ -13,8 +15,11 @@ import (
 
 	"github.com/GottZ/ctx/internal/digest"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -25,14 +30,24 @@ const (
 	// digestDebounce is the debounce duration after last write before running digest.
 	digestDebounce = 60 * time.Second
 
-	// dreamIdleWait is the wait duration when dream has no blocks to process.
-	dreamIdleWait = 120 * time.Second
+	// dreamIdleWaitDefault is the default wait duration when dream has no blocks to process.
+	dreamIdleWaitDefault = 20 * time.Second
 
 	// dreamYieldWait is the wait duration when dream yields to active queries.
 	dreamYieldWait = 2 * time.Second
 
 	// guardBatchLimit is the max blocks per guard cycle.
 	guardBatchLimit = 100
+
+	// DreamModeOn runs dream cycles back-to-back (full throttle).
+	DreamModeOn int32 = 0
+	// DreamModeSilent runs one cycle per interval (GPU cooldown).
+	DreamModeSilent int32 = 1
+	// DreamModeOff disables dream completely (maintenance/dev).
+	DreamModeOff int32 = 2
+
+	// dreamSilentDefault is the default interval for silent mode.
+	dreamSilentDefault = 20 * time.Second
 )
 
 // Config holds scheduler configuration.
@@ -58,6 +73,7 @@ type Config struct {
 	DreamModel     string        // Dream model name (fallback: ChatModel)
 	DreamThink     *bool         // Think mode for dream (nil = omit)
 	DreamNumCtx    int           // num_ctx for dream (0 = model default)
+	DreamIdleWait  int           // seconds between dream cycles when idle (0 = default 20s)
 }
 
 // Scheduler orchestrates Guard + Digest as background jobs.
@@ -66,6 +82,10 @@ type Scheduler struct {
 	pool          *pgxpool.Pool
 	config        *Config
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
+
+	// Dream mode control (atomic for lock-free reads in hot loop).
+	dreamMode           atomic.Int32 // DreamModeOn | DreamModeSilent | DreamModeOff
+	dreamSilentInterval atomic.Int64 // nanoseconds; 0 = dreamSilentDefault
 
 	// Internal state.
 	mu            sync.Mutex
@@ -76,6 +96,42 @@ type Scheduler struct {
 	// Graceful shutdown: tracks running dream cycles and scheduler lifecycle.
 	dreamWg sync.WaitGroup
 	runDone chan struct{}
+}
+
+// SetDreamMode sets the dream operating mode and optional silent interval.
+func (s *Scheduler) SetDreamMode(mode int32, silentInterval time.Duration) {
+	s.dreamMode.Store(mode)
+	if silentInterval > 0 {
+		s.dreamSilentInterval.Store(int64(silentInterval))
+	}
+	modeStr := "on"
+	switch mode {
+	case DreamModeSilent:
+		modeStr = "silent"
+	case DreamModeOff:
+		modeStr = "off"
+	}
+	slog.Info("scheduler: dream mode changed", "mode", modeStr, "silent_interval", s.getDreamSilentInterval())
+}
+
+// GetDreamMode returns the current dream mode and silent interval.
+func (s *Scheduler) GetDreamMode() (mode int32, silentInterval time.Duration) {
+	return s.dreamMode.Load(), s.getDreamSilentInterval()
+}
+
+func (s *Scheduler) getDreamIdleWait() time.Duration {
+	if s.config.DreamIdleWait > 0 {
+		return time.Duration(s.config.DreamIdleWait) * time.Second
+	}
+	return dreamIdleWaitDefault
+}
+
+func (s *Scheduler) getDreamSilentInterval() time.Duration {
+	ns := s.dreamSilentInterval.Load()
+	if ns <= 0 {
+		return dreamSilentDefault
+	}
+	return time.Duration(ns)
 }
 
 // NewScheduler creates a new Scheduler.
@@ -225,6 +281,17 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 			return
 		}
 
+		// Dream mode control.
+		mode := s.dreamMode.Load()
+		if mode == DreamModeOff {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second): // Poll for mode change.
+			}
+			continue
+		}
+
 		// Demand interruption: yield to active queries.
 		if s.activeQueries.Load() > 0 {
 			slog.Debug("scheduler: dream yielding to queries", "count", s.activeQueries.Load())
@@ -234,6 +301,13 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 			case <-time.After(dreamYieldWait):
 			}
 			continue
+		}
+
+		// Top priority: backfill blocks with missing embeddings.
+		if backfilled, err := s.backfillOneEmbedding(ctx); err != nil {
+			slog.Error("scheduler: embed backfill error", "error", err)
+		} else if backfilled {
+			continue // Loop immediately to backfill more before dream runs.
 		}
 
 		linksCreated, err := s.runDreamCycle(dreamModel, dreamOpts)
@@ -250,16 +324,17 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 
 		if linksCreated == 0 {
 			// No block available or no links created — idle wait.
-			slog.Debug("scheduler: dream idle, waiting", "duration", dreamIdleWait)
+			idle := s.getDreamIdleWait()
+			slog.Debug("scheduler: dream idle, waiting", "duration", idle)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(dreamIdleWait):
+			case <-time.After(idle):
 			}
 			continue
 		}
 
-		// Links created — immediately continue to next block.
+		// Links created.
 		slog.Info("scheduler: dream cycle complete", "links_created", linksCreated)
 	}
 }
@@ -301,12 +376,27 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 		embedNumCtx = s.config.EmbedNumCtx
 	}
 
+	// Build throttle function based on current dream mode.
+	throttle := dream.NoThrottle
+	if s.dreamMode.Load() == DreamModeSilent {
+		interval := s.getDreamSilentInterval()
+		throttle = func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(interval):
+				return nil
+			}
+		}
+	}
+
 	return dream.RunDreamCycle(
 		dreamCtx, s.pool,
 		embedHost, embedAPIKey, embedProtocol, embedModel, embedNumCtx,
 		s.config.DreamHost, s.config.DreamAPIKey, dreamModel,
 		s.config.DreamThink, dreamOpts,
 		s.config.ReadScopes,
+		throttle,
 	)
 }
 
@@ -337,4 +427,44 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 	s.mu.Unlock()
 
 	slog.Info("scheduler: digest complete")
+}
+
+// backfillOneEmbedding finds one block with missing embedding, generates it, and stores it.
+// Returns true if a block was backfilled, false if none needed.
+func (s *Scheduler) backfillOneEmbedding(ctx context.Context) (bool, error) {
+	var blockID, title, content string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, title, content FROM context_blocks
+		WHERE embedding IS NULL AND NOT is_archived
+		ORDER BY created_at ASC
+		LIMIT 1
+		FOR UPDATE SKIP LOCKED`,
+	).Scan(&blockID, &title, &content)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("backfill: pick: %w", err)
+	}
+
+	slog.Info("scheduler: backfilling embedding", "block_id", blockID, "title", title)
+
+	embedHost := s.config.EmbedHost
+	embedAPIKey := s.config.EmbedAPIKey
+	embedProtocol := s.config.EmbedProtocol
+	embedModel := s.config.EmbedModel
+	embedNumCtx := s.config.EmbedNumCtx
+
+	embedText := title + "\n\n" + content
+	vec, err := embed.EmbedWithProtocol(ctx, embedProtocol, embedHost, embedAPIKey, embedModel, embedText, embed.PrefixDocument, embedNumCtx)
+	if err != nil {
+		return false, fmt.Errorf("backfill: embed: %w", err)
+	}
+
+	if err := store.StoreEmbedding(ctx, s.pool, blockID, vec); err != nil {
+		return false, fmt.Errorf("backfill: store: %w", err)
+	}
+
+	slog.Info("scheduler: embedding backfilled", "block_id", blockID, "title", title)
+	return true, nil
 }

@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -38,22 +37,12 @@ const (
 
 // IngestHandler handles POST /api/ingest.
 type IngestHandler struct {
-	pool        *pgxpool.Pool
-	embedHost   string
-	embedAPIKey string
-	embedModel  string
-	embedNumCtx int
+	pool *pgxpool.Pool
 }
 
 // NewIngestHandler creates a new IngestHandler.
-func NewIngestHandler(pool *pgxpool.Pool, embedHost, embedAPIKey, embedModel string, embedNumCtx int) *IngestHandler {
-	return &IngestHandler{
-		pool:        pool,
-		embedHost:   embedHost,
-		embedAPIKey: embedAPIKey,
-		embedModel:  embedModel,
-		embedNumCtx: embedNumCtx,
-	}
+func NewIngestHandler(pool *pgxpool.Pool) *IngestHandler {
+	return &IngestHandler{pool: pool}
 }
 
 // IngestRequest is the JSON body for POST /api/ingest.
@@ -271,22 +260,6 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 		}
 	}()
 
-	// 5. Generate embedding (single, not batch — batch comes in Phase 4).
-	embedText := block.Title + "\n\n" + block.Content
-	vec, err := embed.Embed(ctx, h.embedHost, h.embedAPIKey, h.embedModel, embedText, embed.PrefixDocument, h.embedNumCtx)
-	if err != nil {
-		slog.Error("ingest: embedding generation failed",
-			"error", err, "block_id", block.ID, "index", index, "request_id", reqID)
-		// Block is stored but without embedding — still counts as success.
-		return IngestResult{Index: index, ID: block.ID, Status: action}
-	}
-
-	// 6. Store embedding.
-	if err := store.StoreEmbedding(ctx, h.pool, block.ID, vec); err != nil {
-		slog.Error("ingest: embedding storage failed",
-			"error", err, "block_id", block.ID, "index", index, "request_id", reqID)
-		return IngestResult{Index: index, ID: block.ID, Status: action}
-	}
-
+	// Embedding generated async by scheduler backfill loop.
 	return IngestResult{Index: index, ID: block.ID, Status: action}
 }

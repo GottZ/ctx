@@ -48,9 +48,16 @@ type BlockInfo struct {
 // 180s to accommodate large model cold-starts with Ollama model swapping.
 const CycleTimeout = 180 * time.Second
 
+// Throttle is called between GPU-intensive steps to allow cooldown.
+// Returns an error if the context was cancelled during the wait.
+type Throttle func(ctx context.Context) error
+
+// NoThrottle is a no-op throttle for full-speed mode.
+func NoThrottle(_ context.Context) error { return nil }
+
 // RunDreamCycle executes one dream cycle: pick → keywords → search → evaluate → link.
 // Returns the number of links created, or 0 if no block was available.
-func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIKey, embedProtocol, embedModel string, embedNumCtx int, chatHost, chatAPIKey, chatModel string, think *bool, opts llm.Options, readScopes []string) (int, error) {
+func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIKey, embedProtocol, embedModel string, embedNumCtx int, chatHost, chatAPIKey, chatModel string, think *bool, opts llm.Options, readScopes []string, throttle Throttle) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, CycleTimeout)
 	defer cancel()
 	// Step 1: Pick a block.
@@ -71,6 +78,11 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 	// Step 1b: Validate temporal dimensions (deterministic + LLM).
 	if err := ValidateTemporal(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts, block); err != nil {
 		slog.Warn("dream: temporal validation failed (non-fatal)", "block_id", block.ID, "error", err)
+	}
+
+	// Throttle: after LLM (temporal) → before embed (keywords).
+	if err := throttle(ctx); err != nil {
+		return 0, err
 	}
 
 	// Step 2: Extract keywords.
@@ -104,6 +116,11 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 		"block_id", block.ID,
 		"candidate_count", len(candidates),
 	)
+
+	// Throttle: after embed (keywords) → before LLM (evaluation).
+	if err := throttle(ctx); err != nil {
+		return 0, err
+	}
 
 	// Step 4: LLM evaluation.
 	links, err := EvaluateRelationships(ctx, chatHost, chatAPIKey, chatModel, think, opts, *block, candidates)

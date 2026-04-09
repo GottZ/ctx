@@ -189,6 +189,18 @@ func StoreEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string, vec
 }
 
 
+// ClearEmbedding sets the embedding to NULL so the scheduler backfill regenerates it.
+func ClearEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE context_blocks SET embedding = NULL WHERE id = $1`,
+		blockID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: clear embedding: %w", err)
+	}
+	return nil
+}
+
 // CheckRateLimit returns the number of write operations in the last 60 seconds
 // for a given API key.
 func CheckRateLimit(ctx context.Context, pool *pgxpool.Pool, apiKeyID string) (int, error) {
