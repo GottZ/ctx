@@ -42,10 +42,14 @@ type Config struct {
 	ReadScopes     []string
 	ReconnectDelay time.Duration // pgxlisten reconnect delay (0 = 5s default)
 	DreamEnabled   bool          // Enable dream cross-reference engine
-	EmbedHost      string        // Embedding provider host
-	EmbedAPIKey    string        // Embedding provider API key (empty = no auth)
-	EmbedModel     string        // Embedding model name
-	EmbedNumCtx    int           // Embedding num_ctx (0 = model default)
+	EmbedHost      string        // Embedding provider host (query path)
+	EmbedAPIKey    string        // Embedding provider API key (query path)
+	EmbedModel     string        // Embedding model name (query path)
+	EmbedNumCtx    int           // Embedding num_ctx (query path)
+	DreamEmbedHost   string      // Dream embedding host (empty = EmbedHost)
+	DreamEmbedAPIKey string      // Dream embedding API key (empty = EmbedAPIKey)
+	DreamEmbedModel  string      // Dream embedding model (empty = EmbedModel)
+	DreamEmbedNumCtx int         // Dream embedding num_ctx (0 = EmbedNumCtx)
 	DreamHost      string        // Dream LLM provider host
 	DreamAPIKey    string        // Dream LLM provider API key (empty = no auth)
 	ChatModel      string        // Chat model name (fallback for dream)
@@ -273,9 +277,27 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 	dreamCtx, cancel := context.WithTimeout(context.Background(), dream.CycleTimeout)
 	defer cancel()
 
+	// Dream uses its own embed config if set, falls back to query-path embed config.
+	embedHost := s.config.DreamEmbedHost
+	if embedHost == "" {
+		embedHost = s.config.EmbedHost
+	}
+	embedAPIKey := s.config.DreamEmbedAPIKey
+	if embedAPIKey == "" {
+		embedAPIKey = s.config.EmbedAPIKey
+	}
+	embedModel := s.config.DreamEmbedModel
+	if embedModel == "" {
+		embedModel = s.config.EmbedModel
+	}
+	embedNumCtx := s.config.DreamEmbedNumCtx
+	if embedNumCtx == 0 {
+		embedNumCtx = s.config.EmbedNumCtx
+	}
+
 	return dream.RunDreamCycle(
 		dreamCtx, s.pool,
-		s.config.EmbedHost, s.config.EmbedAPIKey, s.config.EmbedModel, s.config.EmbedNumCtx,
+		embedHost, embedAPIKey, embedModel, embedNumCtx,
 		s.config.DreamHost, s.config.DreamAPIKey, dreamModel,
 		s.config.DreamThink, dreamOpts,
 		s.config.ReadScopes,

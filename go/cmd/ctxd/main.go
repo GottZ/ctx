@@ -93,8 +93,12 @@ func main() {
 		DreamAPIKey:  cfg.DreamAPIKey,
 		ChatModel:    cfg.ChatModel,
 		DreamModel:   cfg.DreamModel,
-		DreamThink:   dreamThink,
-		DreamNumCtx:  cfg.DreamNumCtx,
+		DreamThink:       dreamThink,
+		DreamNumCtx:      cfg.DreamNumCtx,
+		DreamEmbedHost:   cfg.DreamEmbedHost,
+		DreamEmbedAPIKey: cfg.DreamEmbedAPIKey,
+		DreamEmbedModel:  cfg.DreamEmbedModel,
+		DreamEmbedNumCtx: cfg.DreamEmbedNumCtx,
 	}
 	scheduler := events.NewScheduler(pool, schedulerConfig)
 	go scheduler.Run(ctx)

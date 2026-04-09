@@ -39,12 +39,16 @@ type Config struct {
 	RerankEnabled bool
 
 	// Dream pipeline
-	DreamEnabled bool
-	DreamHost    string
-	DreamAPIKey  string
-	DreamModel   string
-	DreamNumCtx  int
-	DreamThink   string // "true", "false", or "" (fallback: ChatThink)
+	DreamEnabled     bool
+	DreamHost        string
+	DreamAPIKey      string
+	DreamModel       string
+	DreamNumCtx      int
+	DreamThink       string // "true", "false", or "" (fallback: ChatThink)
+	DreamEmbedHost   string // Separate embed host for Dream (empty = EmbedHost)
+	DreamEmbedAPIKey string
+	DreamEmbedModel  string
+	DreamEmbedNumCtx int
 
 	// Timezone for temporal resolution (e.g. "Europe/Berlin").
 	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
@@ -132,7 +136,11 @@ func LoadConfig() (Config, error) {
 		DreamAPIKey:  getEnv("CTX_DREAM_API_KEY", ""),
 		DreamModel:   getEnv("CTX_DREAM_MODEL", ""),
 		DreamNumCtx:  dreamNumCtx,
-		DreamThink:   getEnv("CTX_DREAM_THINK", ""),
+		DreamThink:       getEnv("CTX_DREAM_THINK", ""),
+		DreamEmbedHost:   getEnv("CTX_DREAM_EMBED_HOST", ""),
+		DreamEmbedAPIKey: getEnv("CTX_DREAM_EMBED_API_KEY", ""),
+		DreamEmbedModel:  getEnv("CTX_DREAM_EMBED_MODEL", ""),
+		DreamEmbedNumCtx: getEnvIntSafe("CTX_DREAM_EMBED_NUM_CTX", 0),
 
 		Timezone: tz,
 
@@ -183,6 +191,18 @@ func parseThinkMode(s string) *bool {
 	default:
 		return nil
 	}
+}
+
+func getEnvIntSafe(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 func getEnvInt(key string, fallback int) (int, error) {
