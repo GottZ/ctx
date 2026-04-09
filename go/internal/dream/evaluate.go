@@ -87,7 +87,7 @@ func EvaluateRelationships(ctx context.Context, host, apiKey, model string, thin
 	links, err := parseLinks(resp.Message.Content)
 	if err != nil {
 		slog.Warn("dream: failed to parse LLM response", "error", err, "raw", resp.Message.Content)
-		return nil, nil // Don't error — bad parse is a skip, not a failure.
+		return nil, fmt.Errorf("dream: parse links: %w", err)
 	}
 
 	// Filter to valid candidates only (prevent LLM hallucinating target IDs).

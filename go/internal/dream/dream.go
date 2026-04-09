@@ -109,7 +109,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 	links, err := EvaluateRelationships(ctx, chatHost, chatAPIKey, chatModel, think, opts, *block, candidates)
 	if err != nil {
 		slog.Warn("dream: evaluation failed", "block_id", block.ID, "error", err)
-		_ = SetDreamCooldown(ctx, pool, block.ID, CooldownInertDays)
+		_ = SetDreamCooldown(ctx, pool, block.ID, 1) // Short retry — LLM errors are transient
 		return 0, err
 	}
 
