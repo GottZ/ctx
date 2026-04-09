@@ -62,20 +62,23 @@ func TestContainsDate(t *testing.T) {
 }
 
 func TestTemporalReviewParse(t *testing.T) {
-	raw := `{"dates":[{"date":"2026-03-15","source":"explicit"},{"date":"2026-01-01","source":"implicit","note":"Q1 reference"}],"false_positives":["v2026.03 is a version number"]}`
+	raw := `{"dates":[{"date":"2026-03-15","source":"explicit"}],"directions":[{"direction":"past","note":"after the Go refactor"}],"false_positives":["v2026.03 is a version number"]}`
 
 	var review TemporalReview
 	if err := json.Unmarshal([]byte(raw), &review); err != nil {
 		t.Fatalf("failed to parse review: %v", err)
 	}
-	if len(review.Dates) != 2 {
-		t.Errorf("expected 2 dates, got %d", len(review.Dates))
+	if len(review.Dates) != 1 {
+		t.Errorf("expected 1 date, got %d", len(review.Dates))
 	}
 	if review.Dates[0].Source != "explicit" {
-		t.Errorf("first date source = %q, want 'explicit'", review.Dates[0].Source)
+		t.Errorf("date source = %q, want 'explicit'", review.Dates[0].Source)
 	}
-	if review.Dates[1].Note != "Q1 reference" {
-		t.Errorf("second date note = %q, want 'Q1 reference'", review.Dates[1].Note)
+	if len(review.Directions) != 1 {
+		t.Errorf("expected 1 direction, got %d", len(review.Directions))
+	}
+	if review.Directions[0].Direction != "past" {
+		t.Errorf("direction = %q, want 'past'", review.Directions[0].Direction)
 	}
 	if len(review.FalsePositives) != 1 {
 		t.Errorf("expected 1 false positive, got %d", len(review.FalsePositives))

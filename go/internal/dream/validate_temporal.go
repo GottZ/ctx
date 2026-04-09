@@ -28,29 +28,37 @@ const (
 )
 
 // temporalValidationPrompt is the system prompt for LLM temporal review.
-const temporalValidationPrompt = `You are a temporal reference extractor. Given a knowledge block's title and content, extract ALL temporal references — explicit and implicit.
+const temporalValidationPrompt = `You are a temporal reference extractor. Given a knowledge block's title and content, extract temporal references.
 
 Rules:
-1. Extract ISO dates (2026-03-15), month+year (März 2026, March 2026), quarters (Q1 2026), seasons.
-2. Extract implicit temporal references: "after the Go refactor", "last quarter", "beginning of the month".
-3. For implicit references, estimate a plausible ISO date based on context clues and the block's creation date.
-4. Flag false positives: version numbers (v2026.03), identifiers, or non-temporal numeric patterns.
+1. Extract ONLY dates that are explicitly stated or directly resolvable: ISO dates (2026-03-15), month+year (März 2026, March 2026), quarters (Q1 2026 = 2026-01-01).
+2. Do NOT estimate or guess dates for vague references ("after the refactor", "recently", "last time"). These are directional signals, not dates.
+3. For implicit direction references, return them as directions only: {"direction":"past","note":"after the Go refactor"} — no date field.
+4. Flag false positives: version numbers (v2026.03), identifiers, percentages, currency amounts, or non-temporal numeric patterns.
 5. Return ONLY valid JSON. No explanation.
 
 Output format:
-{"dates":[{"date":"2026-03-15","source":"explicit"},{"date":"2026-01-01","source":"implicit","note":"Q1 reference"}],"false_positives":["2026-03 is a version number, not a date"]}`
+{"dates":[{"date":"2026-03-15","source":"explicit"}],"directions":[{"direction":"past","note":"after the Go refactor"}],"false_positives":["2026-03 is a version number, not a date"]}`
 
 // TemporalFinding is a single date found by the LLM.
 type TemporalFinding struct {
 	Date   string `json:"date"`
-	Source string `json:"source"` // "explicit" or "implicit"
+	Source string `json:"source"` // "explicit" only
 	Note   string `json:"note,omitempty"`
+}
+
+// TemporalDirection is an implicit directional reference (no concrete date).
+// Stored for future gravity direction weighting, not for dimension population.
+type TemporalDirection struct {
+	Direction string `json:"direction"` // "past" or "future"
+	Note      string `json:"note,omitempty"`
 }
 
 // TemporalReview is the LLM's temporal validation response.
 type TemporalReview struct {
-	Dates          []TemporalFinding `json:"dates"`
-	FalsePositives []string          `json:"false_positives,omitempty"`
+	Dates          []TemporalFinding   `json:"dates"`
+	Directions     []TemporalDirection `json:"directions,omitempty"`
+	FalsePositives []string            `json:"false_positives,omitempty"`
 }
 
 // ValidateTemporal runs the two-phase temporal validation for a block.
@@ -136,6 +144,14 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPI
 		if err := store.PopulateTemporal(ctx, pool, block.ID, merged, block.CreatedAt); err != nil {
 			return fmt.Errorf("validate temporal: merge populate: %w", err)
 		}
+	}
+
+	// Log directions (future: gravity direction weighting).
+	if len(review.Directions) > 0 {
+		slog.Info("dream: temporal phase2 — directional references (not stored as dates)",
+			"block_id", block.ID,
+			"directions", len(review.Directions),
+		)
 	}
 
 	if len(review.FalsePositives) > 0 {
