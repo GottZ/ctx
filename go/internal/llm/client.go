@@ -37,6 +37,9 @@ type Message struct {
 // Options holds sampling parameters.
 type Options struct {
 	Temperature   float64 `json:"temperature"`
+	TopP          float64 `json:"top_p,omitempty"`
+	TopK          int     `json:"top_k,omitempty"`
+	MinP          float64 `json:"min_p,omitempty"`
 	RepeatPenalty float64 `json:"repeat_penalty,omitempty"`
 	NumPredict    int     `json:"num_predict,omitempty"`
 	NumCtx        int     `json:"num_ctx,omitempty"`

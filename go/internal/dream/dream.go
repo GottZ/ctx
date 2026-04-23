@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/embed"
+	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
 	"github.com/jackc/pgx/v5"
@@ -15,10 +16,23 @@ import (
 )
 
 const (
+	// Version marks the Dream pipeline generation. Persisted with every link.
+	// v1 = Pre-Reset (weighted-gate era, Pre-Reset-Audit 2026-04-20: 53% CORRECT at raw>=0.7).
+	// v2 = Post-Reset Ideallinie: raw_confidence column, per-type raw thresholds
+	//      (factual>=0.9), causal-temporal-check, topic-map-exclude, ApplySupersedes on raw.
+	// v3 = Session 24 (2026-04-23): qwen3.6:27b + V5 prompt (topical-as-fallback,
+	//      supersedes VERY RARE, causal accepts decision→implementation),
+	//      factual threshold 0.9→0.7. Benchmark: 62.3% accuracy on stable gold (+19.7pp).
+	Version = 3
+
 	// CooldownActiveDays is how long Dream waits for blocks that produced links (re-check sooner).
 	CooldownActiveDays = 3
 	// CooldownInertDays is how long Dream waits for blocks that produced no links.
 	CooldownInertDays = 14
+	// CooldownTransientMinutes is for transient system errors (LLM timeout, Ollama restart).
+	// Short enough that a recovered GPU continues the pass promptly, long enough that a
+	// persistent outage doesn't spin-retry every 20s.
+	CooldownTransientMinutes = 5
 
 	// MaxKeywords is the number of keywords extracted per block.
 	MaxKeywords = 5
@@ -32,21 +46,23 @@ const (
 
 // BlockInfo holds the fields Dream needs from a block.
 type BlockInfo struct {
-	ID           string
-	Title        string
-	Category     string
-	Content      string
-	Scope        string
-	QualityScore float64
-	Embedding    []float32
-	UpdatedAt    time.Time
-	CreatedAt    time.Time
+	ID                       string
+	Title                    string
+	Category                 string
+	Content                  string
+	Scope                    string
+	QualityScore             float64
+	Embedding                []float32
+	UpdatedAt                time.Time
+	CreatedAt                time.Time
+	DreamKeywords            []string   // nil when not yet generated — RunDreamCycle will invoke the LLM
+	DreamTemporalValidatedAt *time.Time // nil = never validated; UpdatedAt > this = re-validate
 }
 
 // CycleTimeout is the maximum duration for a single dream cycle.
 // Prevents cascading Ollama timeouts from blocking the scheduler.
-// 180s to accommodate large model cold-starts with Ollama model swapping.
-const CycleTimeout = 180 * time.Second
+// Must exceed DreamTimeout (evaluate call) + keyword-embed + RRF overhead.
+const CycleTimeout = 700 * time.Second
 
 // Throttle is called between GPU-intensive steps to allow cooldown.
 // Returns an error if the context was cancelled during the wait.
@@ -57,6 +73,10 @@ func NoThrottle(_ context.Context) error { return nil }
 
 // RunDreamCycle executes one dream cycle: pick → keywords → search → evaluate → link.
 // Returns the number of links created, or 0 if no block was available.
+// Cyclop threshold exceeded by 1 due to sequential error/skip branches per pipeline step;
+// extracting helpers would obscure the linear flow without reducing real complexity.
+//
+//nolint:cyclop // pipeline function with linear step sequence
 func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIKey, embedProtocol, embedModel string, embedNumCtx int, chatHost, chatAPIKey, chatModel string, think *bool, opts llm.Options, readScopes []string, throttle Throttle) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, CycleTimeout)
 	defer cancel()
@@ -76,8 +96,24 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 	)
 
 	// Step 1b: Validate temporal dimensions (deterministic + LLM).
-	if err := ValidateTemporal(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts, block); err != nil {
-		slog.Warn("dream: temporal validation failed (non-fatal)", "block_id", block.ID, "error", err)
+	// Once per block-version: if dream_temporal_validated_at is NULL or older than
+	// block.updated_at, run validation and mark it done. Repeated cooldown-rechecks
+	// of unchanged blocks skip this step — context_temporal already holds findings.
+	needsTemporal := block.DreamTemporalValidatedAt == nil ||
+		block.UpdatedAt.After(*block.DreamTemporalValidatedAt)
+	if needsTemporal {
+		if err := ValidateTemporal(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts, block); err != nil {
+			slog.Warn("dream: temporal validation failed (non-fatal)", "block_id", block.ID, "error", err)
+		}
+		// Mark validated even on non-fatal LLM failure — Phase 1 (deterministic)
+		// always ran and produced baseline findings. Next block-update will re-trigger.
+		if _, err := pool.Exec(ctx,
+			`UPDATE context_blocks SET dream_temporal_validated_at = now() WHERE id = $1`,
+			block.ID,
+		); err != nil {
+			slog.Warn("dream: temporal validation marker failed (non-fatal)",
+				"block_id", block.ID, "error", err)
+		}
 	}
 
 	// Throttle: after LLM (temporal) → before embed (keywords).
@@ -85,24 +121,50 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 		return 0, err
 	}
 
-	// Step 2: Extract keywords.
-	keywords := ExtractKeywords(block.Title, block.Content, MaxKeywords)
+	// Step 2: Get keywords — LLM-generated and persisted per block.
+	// Reuse stored keywords on subsequent cooldown-rechecks; generate once per block
+	// via the Dream model (retries on timeout/parse/count-too-low handled inside
+	// GenerateKeywords). On final failure: cool the block and try again next pass —
+	// no fallback to deterministic extraction, which produces code-syntax noise.
+	keywords := block.DreamKeywords
 	if len(keywords) == 0 {
-		slog.Info("dream: no keywords extracted, setting cooldown", "block_id", block.ID)
-		_ = SetDreamCooldown(ctx, pool, block.ID, CooldownInertDays)
-		return 0, nil
+		generated, genErr := GenerateKeywords(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts.NumCtx, block.ID, block.Title, block.Content)
+		if genErr != nil {
+			slog.Warn("dream: LLM keyword generation exhausted retries, transient cooldown",
+				"block_id", block.ID, "error", genErr)
+			_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
+			return 0, fmt.Errorf("dream: keyword generation: %w", genErr)
+		}
+		slog.Info("dream: keywords generated by LLM",
+			"block_id", block.ID, "count", len(generated))
+		// Persist so future cycles reuse. Failure is non-fatal — we still have them in memory.
+		if _, persistErr := pool.Exec(ctx,
+			`UPDATE context_blocks
+			SET dream_keywords = $2, dream_keywords_generated_at = now()
+			WHERE id = $1`,
+			block.ID, generated,
+		); persistErr != nil {
+			slog.Warn("dream: keyword persistence failed (non-fatal)",
+				"block_id", block.ID, "error", persistErr)
+		}
+		keywords = generated
 	}
 
-	slog.Info("dream: keywords extracted",
+	slog.Info("dream: keywords ready",
 		"block_id", block.ID,
 		"keywords", keywords,
 	)
+
+	// Throttle after (potential) LLM keyword call → before embed.
+	if err := throttle(ctx); err != nil {
+		return 0, err
+	}
 
 	// Step 3: Search per keyword via RRF.
 	candidates, err := searchByKeywords(ctx, pool, embedHost, embedAPIKey, embedProtocol, embedModel, embedNumCtx, keywords, readScopes, block.ID, block.Scope)
 	if err != nil {
 		slog.Warn("dream: keyword search failed", "block_id", block.ID, "error", err)
-		_ = SetDreamCooldown(ctx, pool, block.ID, CooldownInertDays)
+		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
 		return 0, err
 	}
 
@@ -123,10 +185,10 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 	}
 
 	// Step 4: LLM evaluation.
-	links, err := EvaluateRelationships(ctx, chatHost, chatAPIKey, chatModel, think, opts, *block, candidates)
+	links, err := EvaluateRelationships(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts, *block, candidates)
 	if err != nil {
 		slog.Warn("dream: evaluation failed", "block_id", block.ID, "error", err)
-		_ = SetDreamCooldown(ctx, pool, block.ID, 1) // Short retry — LLM errors are transient
+		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
 		return 0, err
 	}
 
@@ -201,19 +263,23 @@ func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string)
 // PickBlock selects the next block for Dream processing.
 // Priority: unchecked blocks first, then oldest-checked with expired cooldown.
 // Uses FOR UPDATE SKIP LOCKED to prevent concurrent processing.
+// Excludes is_meta blocks — Post-Reset-Audit 2026-04-20 validated that meta blocks
+// (Origin-Stories, CV, Compound-Loop, Agent-Briefing, index) cause 85% of NO_REL noise
+// without producing any valid relationships. Filter empirically clean (0% FN-Rate).
 func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 	var block BlockInfo
 	err := pool.QueryRow(ctx,
-		`SELECT id, title, category, content, scope, quality_score, updated_at, created_at
+		`SELECT id, title, category, content, scope, quality_score, updated_at, created_at, dream_keywords, dream_temporal_validated_at
 		FROM context_blocks
 		WHERE NOT is_archived
 		  AND embedding IS NOT NULL
 		  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
+		  AND NOT is_meta
 		  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
 		ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED`,
-	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt)
+	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt, &block.DreamKeywords, &block.DreamTemporalValidatedAt)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -224,7 +290,10 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 	return &block, nil
 }
 
-// SetDreamCooldown marks a block as dream-checked with a cooldown period.
+// SetDreamCooldown marks a block as dream-checked with a cooldown period in days.
+// Use for outcome-based cooldowns (CooldownActiveDays, CooldownInertDays) that
+// reflect a property of the block (linked / not linked). For transient system
+// failures use SetDreamCooldownMinutes instead.
 func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, days int) error {
 	_, err := pool.Exec(ctx,
 		`UPDATE context_blocks SET
@@ -232,6 +301,20 @@ func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, d
 			dream_cooldown_until = now() + interval '1 day' * $2
 		WHERE id = $1`,
 		blockID, days,
+	)
+	return err
+}
+
+// SetDreamCooldownMinutes is the transient-error variant. Blocks retry quickly
+// once the underlying system (GPU, Ollama, network) recovers. dream_checked_at
+// is set so the block does not jump ahead of the unchecked queue.
+func SetDreamCooldownMinutes(ctx context.Context, pool *pgxpool.Pool, blockID string, minutes int) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE context_blocks SET
+			dream_checked_at = now(),
+			dream_cooldown_until = now() + interval '1 minute' * $2
+		WHERE id = $1`,
+		blockID, minutes,
 	)
 	return err
 }
@@ -245,8 +328,9 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedHost, embedA
 	embedFailures := 0
 
 	for _, kw := range keywords {
-		// Embed the keyword for semantic search.
-		kwEmbedding, err := embed.EmbedWithProtocol(ctx, embedProtocol, embedHost, embedAPIKey, embedModel, kw, embed.PrefixQuery, embedNumCtx)
+		// Embed the keyword for semantic search. Cached by (hash(prefix||kw), model) —
+		// Dream keywords repeat heavily across cycles (domain vocabulary, proper nouns).
+		kwEmbedding, err := embedcache.Embed(ctx, pool, embedProtocol, embedHost, embedAPIKey, embedModel, kw, embed.PrefixQuery, embedNumCtx)
 		if err != nil {
 			embedFailures++
 			slog.Debug("dream: embed keyword failed", "keyword", kw, "error", err)
@@ -272,6 +356,10 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedHost, embedA
 			if r.Scope != sourceScope {
 				continue
 			}
+			// Exclude index blocks as candidates — structural listings, not content.
+			if r.Category == "index" {
+				continue
+			}
 			seen[r.ID] = true
 			candidates = append(candidates, BlockInfo{
 				ID:        r.ID,
@@ -289,18 +377,66 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedHost, embedA
 		}
 	}
 
+	// Meta-Block filter: one batch-query to prune candidates flagged is_meta=true.
+	// Post-Reset-Audit 2026-04-20 showed meta blocks (Origin-Story, CV, Agent-Briefing,
+	// Compound-Loop, index) generate 85% of NO_REL noise without valid relationships.
+	if len(candidates) > 0 {
+		ids := make([]string, 0, len(candidates))
+		for _, c := range candidates {
+			ids = append(ids, c.ID)
+		}
+		rows, err := pool.Query(ctx,
+			`SELECT id::text FROM context_blocks WHERE id = ANY($1::uuid[]) AND is_meta`,
+			ids,
+		)
+		if err == nil {
+			metaIDs := make(map[string]bool)
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err == nil {
+					metaIDs[id] = true
+				}
+			}
+			rows.Close()
+			if len(metaIDs) > 0 {
+				filtered := candidates[:0]
+				for _, c := range candidates {
+					if !metaIDs[c.ID] {
+						filtered = append(filtered, c)
+					}
+				}
+				candidates = filtered
+			}
+		}
+	}
+
 	return candidates, nil
 }
 
 // Stats returns dream processing statistics, filtered by scope.
-func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, checked, linked int, err error) {
+// Eligibility criteria mirror PickBlock: not archived, has embedding, knowledge/source/canonical, not index.
+//
+// Returned counters:
+//   - total:          all eligible blocks
+//   - checked:        blocks that have been through at least one Dream cycle
+//   - linked:         total links in the graph (scope-filtered)
+//   - pendingRecheck: already-checked blocks whose cooldown has expired (ready for re-dream)
+func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, checked, linked, pendingRecheck int, err error) {
 	err = pool.QueryRow(ctx,
 		`SELECT
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND scope = ANY($1))::int,
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND scope = ANY($1))::int,
-			(SELECT count(*) FROM context_dream_links WHERE scope = ANY($1))::int`,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND NOT is_meta AND scope = ANY($1))::int,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND NOT is_meta AND scope = ANY($1))::int,
+			(SELECT count(*) FROM context_dream_links WHERE scope = ANY($1))::int,
+			(SELECT count(*) FROM context_blocks
+				WHERE NOT is_archived
+				  AND embedding IS NOT NULL
+				  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
+				  AND category != 'index'
+				  AND dream_checked_at IS NOT NULL
+				  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
+				  AND scope = ANY($1))::int`,
 		scopes,
-	).Scan(&total, &checked, &linked)
+	).Scan(&total, &checked, &linked, &pendingRecheck)
 	return
 }
 
@@ -320,18 +456,21 @@ func CleanupDanglingLinks(ctx context.Context, pool *pgxpool.Pool) (int, error) 
 
 // UpdateQualityScore adjusts a block's quality_score based on its dream link profile.
 // Formula: min(1.0, base + inbound_factor + outbound_factor + diversity_bonus).
-// Only counts links with confidence >= 0.5 to prevent noise from inflating scores.
+// Counts only links with raw_confidence >= 0.7 (LLM self-assessment, not weighted).
+// Pre-Reset-Audit 2026-04-20: gating on weighted created a Cold-Start-Lock because
+// quality_score ≈ 0.5 drove weighted below 0.5 → UpdateQualityScore skipped → scores
+// stayed frozen. Gating on raw breaks the loop and lets quality drift upward organically.
 // Blocks without qualifying links keep their current score.
 func UpdateQualityScore(ctx context.Context, pool *pgxpool.Pool, blockID string) error {
 	_, err := pool.Exec(ctx,
 		`UPDATE context_blocks SET quality_score = LEAST(1.0,
 			0.3
-			+ 0.1 * LEAST((SELECT count(*) FROM context_dream_links WHERE target_block_id = $1 AND confidence >= 0.5), 5)
-			+ 0.05 * LEAST((SELECT count(*) FROM context_dream_links WHERE source_block_id = $1 AND confidence >= 0.5), 5)
-			+ 0.15 * LEAST((SELECT count(DISTINCT relationship) FROM context_dream_links WHERE (source_block_id = $1 OR target_block_id = $1) AND confidence >= 0.5), 4)
+			+ 0.1 * LEAST((SELECT count(*) FROM context_dream_links WHERE target_block_id = $1 AND raw_confidence >= 0.7), 5)
+			+ 0.05 * LEAST((SELECT count(*) FROM context_dream_links WHERE source_block_id = $1 AND raw_confidence >= 0.7), 5)
+			+ 0.15 * LEAST((SELECT count(DISTINCT relationship) FROM context_dream_links WHERE (source_block_id = $1 OR target_block_id = $1) AND raw_confidence >= 0.7), 4)
 		)
 		WHERE id = $1
-		  AND EXISTS (SELECT 1 FROM context_dream_links WHERE (source_block_id = $1 OR target_block_id = $1) AND confidence >= 0.5)`,
+		  AND EXISTS (SELECT 1 FROM context_dream_links WHERE (source_block_id = $1 OR target_block_id = $1) AND raw_confidence >= 0.7)`,
 		blockID,
 	)
 	return err
@@ -339,7 +478,7 @@ func UpdateQualityScore(ctx context.Context, pool *pgxpool.Pool, blockID string)
 
 // SupersedesMap returns a map of block_id → []superseded_by_ids for the given block IDs.
 // A block can be superseded by multiple newer blocks, hence the slice value.
-// Only returns links with confidence >= 0.7 to prevent false-positive filtering.
+// Gates on raw_confidence >= 0.7 (LLM self-assessment). weighted is a ranking signal, not a gate.
 // Used by the query handler to enrich responses and for filterSuperseded.
 func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (map[string][]string, error) {
 	if len(blockIDs) == 0 {
@@ -350,7 +489,7 @@ func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (
 		`SELECT source_block_id::text, target_block_id::text
 		FROM context_dream_links
 		WHERE relationship = 'supersedes'
-		  AND confidence >= 0.7
+		  AND raw_confidence >= 0.7
 		  AND source_block_id = ANY($1::uuid[])`,
 		blockIDs,
 	)
