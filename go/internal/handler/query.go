@@ -13,6 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
+	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
 	"github.com/GottZ/ctx/internal/store"
@@ -229,8 +230,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
 	}
 
-	// Step 4: Embed the search query with query prefix.
-	embedding, err := embed.Embed(ctx, h.embedHost, h.embedAPIKey, h.embedModel, embedQuery, embed.PrefixQuery, h.embedNumCtx)
+	// Step 4: Embed the search query with query prefix. Cached by (hash(prefix||text), model) —
+	// repeated queries (debug sessions, recurring lookups) serve from cache in a single UPDATE.
+	embedding, err := embedcache.Embed(ctx, h.pool, embed.DefaultProtocol, h.embedHost, h.embedAPIKey, h.embedModel, embedQuery, embed.PrefixQuery, h.embedNumCtx)
 	if err != nil {
 		slog.Error("embedding failed",
 			"error", err,
@@ -432,7 +434,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, originalQuery, sources, temporalDates)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, originalQuery, sources, temporalDates)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,

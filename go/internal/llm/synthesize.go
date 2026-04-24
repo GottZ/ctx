@@ -6,6 +6,9 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -196,7 +199,8 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // Synthesize runs the full LLM synthesis pipeline:
 // filter -> confidence -> low-confidence limiting -> reorder -> prompt -> chat.
 // temporalDates is nil for non-temporal queries (date context omitted from prompt).
-func Synthesize(ctx context.Context, host, apiKey, model string, think *bool, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
+// pool may be nil — if provided, the LLM request/response is logged via llmlog.
+func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources)
 	if len(filtered) == 0 {
@@ -238,7 +242,30 @@ func Synthesize(ctx context.Context, host, apiKey, model string, think *bool, or
 	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates)
 
 	// Step 7: Call LLM.
+	start := time.Now()
 	resp, err := Chat(ctx, host, apiKey, model, think, systemPrompt, userPrompt, SynthesisOptions(), ChatTimeout)
+	duration := time.Since(start)
+
+	blockIDs := make([]string, 0, len(llmSources))
+	for _, s := range llmSources {
+		blockIDs = append(blockIDs, s.ID)
+	}
+	entry := llmlog.Entry{
+		Pipeline:      "query-synthesize",
+		Model:         model,
+		Host:          host,
+		Duration:      duration,
+		Err:           err,
+		RequestSystem: systemPrompt,
+		RequestUser:   userPrompt,
+		BlockIDs:      blockIDs,
+	}
+	if resp != nil {
+		entry.ResponseContent = resp.Message.Content
+		entry.CompletionTokens = resp.EvalCount
+	}
+	llmlog.Record(pool, entry)
+
 	if err != nil {
 		return nil, fmt.Errorf("llm: synthesize: %w", err)
 	}

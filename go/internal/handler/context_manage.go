@@ -453,7 +453,7 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 
 func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
 	ctx := r.Context()
-	total, checked, linked, err := dream.Stats(ctx, h.pool, ar.ReadScopes)
+	total, checked, linked, pendingRecheck, err := dream.Stats(ctx, h.pool, ar.ReadScopes)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream stats failed",
@@ -461,13 +461,14 @@ func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"action":         "dream-stats",
-		"success":        true,
-		"total_blocks":   total,
-		"dream_checked":  checked,
-		"dream_links":    linked,
-		"coverage_pct":   float64(checked) / float64(max(total, 1)) * 100,
-		"unchecked":      total - checked,
+		"action":          "dream-stats",
+		"success":         true,
+		"total_blocks":    total,
+		"dream_checked":   checked,
+		"dream_links":     linked,
+		"coverage_pct":    float64(checked) / float64(max(total, 1)) * 100,
+		"unchecked":       total - checked,
+		"pending_recheck": pendingRecheck,
 	})
 }
 
@@ -475,7 +476,7 @@ func (h *ManageHandler) handleDreamReview(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 
 	// 1. Stats overview.
-	total, checked, linked, err := dream.Stats(ctx, h.pool, ar.ReadScopes)
+	total, checked, linked, pendingRecheck, err := dream.Stats(ctx, h.pool, ar.ReadScopes)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream review failed",
@@ -502,28 +503,29 @@ func (h *ManageHandler) handleDreamReview(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"action":            "dream-review",
-		"success":           true,
-		"total_blocks":      total,
-		"dream_checked":     checked,
-		"dream_links":       linked,
-		"low_confidence":    lowConfLinks,
-		"supersedes_pairs":  supersedesPairs,
-		"recent_checked":    recentBlocks,
+		"action":           "dream-review",
+		"success":          true,
+		"total_blocks":     total,
+		"dream_checked":    checked,
+		"dream_links":      linked,
+		"pending_recheck":  pendingRecheck,
+		"low_confidence":   lowConfLinks,
+		"supersedes_pairs": supersedesPairs,
+		"recent_checked":   recentBlocks,
 	})
 }
 
 func (h *ManageHandler) fetchLowConfidenceLinks(ctx context.Context, ar *auth.AuthResult) ([]map[string]any, error) {
 	rows, err := h.pool.Query(ctx,
 		`SELECT dl.source_block_id::text, dl.target_block_id::text, dl.relationship,
-			dl.confidence, dl.scope,
+			dl.raw_confidence, dl.confidence, dl.scope,
 			s.title AS source_title, t.title AS target_title
 		FROM context_dream_links dl
 		JOIN context_blocks s ON s.id = dl.source_block_id
 		JOIN context_blocks t ON t.id = dl.target_block_id
-		WHERE dl.confidence < 0.7
+		WHERE dl.raw_confidence < 0.7
 		  AND dl.scope = ANY($1)
-		ORDER BY dl.confidence ASC
+		ORDER BY dl.raw_confidence ASC
 		LIMIT 20`,
 		ar.ReadScopes,
 	)
@@ -535,17 +537,18 @@ func (h *ManageHandler) fetchLowConfidenceLinks(ctx context.Context, ar *auth.Au
 	var results []map[string]any
 	for rows.Next() {
 		var sourceID, targetID, rel, scope, sourceTitle, targetTitle string
-		var confidence float64
-		if err := rows.Scan(&sourceID, &targetID, &rel, &confidence, &scope, &sourceTitle, &targetTitle); err != nil {
+		var rawConfidence, confidence float64
+		if err := rows.Scan(&sourceID, &targetID, &rel, &rawConfidence, &confidence, &scope, &sourceTitle, &targetTitle); err != nil {
 			return nil, err
 		}
 		results = append(results, map[string]any{
-			"source_id":    sourceID,
-			"target_id":    targetID,
-			"relationship": rel,
-			"confidence":   confidence,
-			"source_title": sourceTitle,
-			"target_title": targetTitle,
+			"source_id":      sourceID,
+			"target_id":      targetID,
+			"relationship":   rel,
+			"raw_confidence": rawConfidence,
+			"confidence":     confidence,
+			"source_title":   sourceTitle,
+			"target_title":   targetTitle,
 		})
 	}
 	return results, rows.Err()

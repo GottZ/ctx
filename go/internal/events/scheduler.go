@@ -16,6 +16,7 @@ import (
 	"github.com/GottZ/ctx/internal/digest"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
+	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/store"
@@ -32,6 +33,13 @@ const (
 
 	// dreamIdleWaitDefault is the default wait duration when dream has no blocks to process.
 	dreamIdleWaitDefault = 20 * time.Second
+
+	// embedCacheEvictInterval is how often the embed cache is pruned.
+	embedCacheEvictInterval = 6 * time.Hour
+	// embedCacheTTLDays: entries not accessed within this window are evicted.
+	embedCacheTTLDays = 30
+	// embedCacheMaxRows: size cap — oldest rows above this are pruned.
+	embedCacheMaxRows = 50000
 
 	// dreamYieldWait is the wait duration when dream yields to active queries.
 	dreamYieldWait = 2 * time.Second
@@ -96,9 +104,18 @@ type Scheduler struct {
 	// Graceful shutdown: tracks running dream cycles and scheduler lifecycle.
 	dreamWg sync.WaitGroup
 	runDone chan struct{}
+
+	// dreamCycleCancel cancels the currently-running dream cycle (nil when idle).
+	// Guarded by dreamCycleMu. SetDreamMode(Off) calls it to abort in-flight work
+	// instead of waiting for the natural CycleTimeout.
+	dreamCycleMu     sync.Mutex
+	dreamCycleCancel context.CancelFunc
 }
 
 // SetDreamMode sets the dream operating mode and optional silent interval.
+// When switching to DreamModeOff, the in-flight cycle (if any) is cancelled
+// rather than allowed to run to its natural CycleTimeout — callers expect a
+// prompt release of GPU/LLM resources when disabling Dream.
 func (s *Scheduler) SetDreamMode(mode int32, throttleInterval time.Duration) {
 	s.dreamMode.Store(mode)
 	if throttleInterval > 0 {
@@ -110,6 +127,14 @@ func (s *Scheduler) SetDreamMode(mode int32, throttleInterval time.Duration) {
 		modeStr = "throttled"
 	case DreamModeOff:
 		modeStr = "off"
+	}
+	if mode == DreamModeOff {
+		s.dreamCycleMu.Lock()
+		if s.dreamCycleCancel != nil {
+			s.dreamCycleCancel()
+			slog.Info("scheduler: dream disable cancelled in-flight cycle")
+		}
+		s.dreamCycleMu.Unlock()
 	}
 	slog.Info("scheduler: dream mode changed", "mode", modeStr, "silent_interval", s.getDreamThrottleInterval())
 }
@@ -191,6 +216,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 	digestTicker := time.NewTicker(5 * time.Second) // Check digest debounce every 5s.
 	defer digestTicker.Stop()
 
+	embedCacheTicker := time.NewTicker(embedCacheEvictInterval)
+	defer embedCacheTicker.Stop()
+
 	// Dream runs in its own goroutine as a continuous loop.
 	if s.config.DreamEnabled {
 		slog.Info("scheduler: dream mode enabled (continuous)")
@@ -223,7 +251,30 @@ func (s *Scheduler) Run(ctx context.Context) {
 			if pending && !lastWrite.IsZero() && time.Since(lastWrite) >= digestDebounce {
 				s.runDigest(ctx)
 			}
+
+		case <-embedCacheTicker.C:
+			s.runEmbedCacheEviction(ctx)
 		}
+	}
+}
+
+// runEmbedCacheEviction prunes the embed cache on a fixed interval. Combines TTL
+// (entries not accessed within embedCacheTTLDays) with a size cap (oldest rows
+// above embedCacheMaxRows). Runs every embedCacheEvictInterval; failures log but
+// never propagate — cache is an optimisation, not load-bearing.
+func (s *Scheduler) runEmbedCacheEviction(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in embed cache eviction", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+	removed, err := embedcache.Evict(ctx, s.pool, embedCacheTTLDays, embedCacheMaxRows)
+	if err != nil {
+		slog.Warn("scheduler: embed cache eviction failed", "error", err)
+		return
+	}
+	if removed > 0 {
+		slog.Info("scheduler: embed cache evicted", "rows", removed)
 	}
 }
 
@@ -351,8 +402,17 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 	}()
 
 	// Dream gets its own context with the cycle timeout, independent of parent ctx.
+	// Register the cancel fn so SetDreamMode(Off) can abort in-flight work.
 	dreamCtx, cancel := context.WithTimeout(context.Background(), dream.CycleTimeout)
-	defer cancel()
+	s.dreamCycleMu.Lock()
+	s.dreamCycleCancel = cancel
+	s.dreamCycleMu.Unlock()
+	defer func() {
+		s.dreamCycleMu.Lock()
+		s.dreamCycleCancel = nil
+		s.dreamCycleMu.Unlock()
+		cancel()
+	}()
 
 	// Dream uses its own embed config if set, falls back to query-path embed config.
 	embedHost := s.config.DreamEmbedHost
@@ -449,11 +509,29 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context) (bool, error) {
 
 	slog.Info("scheduler: backfilling embedding", "block_id", blockID, "title", title)
 
-	embedHost := s.config.EmbedHost
-	embedAPIKey := s.config.EmbedAPIKey
-	embedProtocol := s.config.EmbedProtocol
-	embedModel := s.config.EmbedModel
-	embedNumCtx := s.config.EmbedNumCtx
+	// Backfill prefers the dream embed host (e.g. CPU-based llama-embed), falls back to the
+	// query embed host. Rationale: Backfill has no latency SLA and should not compete with
+	// Dream's chat model for shared GPU VRAM via the query embedding backend.
+	embedHost := s.config.DreamEmbedHost
+	if embedHost == "" {
+		embedHost = s.config.EmbedHost
+	}
+	embedAPIKey := s.config.DreamEmbedAPIKey
+	if embedAPIKey == "" {
+		embedAPIKey = s.config.EmbedAPIKey
+	}
+	embedProtocol := s.config.DreamEmbedProtocol
+	if embedProtocol == "" {
+		embedProtocol = s.config.EmbedProtocol
+	}
+	embedModel := s.config.DreamEmbedModel
+	if embedModel == "" {
+		embedModel = s.config.EmbedModel
+	}
+	embedNumCtx := s.config.DreamEmbedNumCtx
+	if embedNumCtx == 0 {
+		embedNumCtx = s.config.EmbedNumCtx
+	}
 
 	embedText := title + "\n\n" + content
 	vec, err := embed.EmbedWithProtocol(ctx, embedProtocol, embedHost, embedAPIKey, embedModel, embedText, embed.PrefixDocument, embedNumCtx)
