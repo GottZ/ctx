@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Context Store Benchmark Test Suite
-# Usage: ./test.sh              — runs T01-T10 (system tests only)
-#        ./test.sh --with-ollama — runs T01-T14 (includes retrieval tests)
+# Usage: ./test.sh              — runs T01-T12 (system tests only)
+#        ./test.sh --with-ollama — runs T01-T18 (includes retrieval + MCP tests)
 #
 # ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
 # Implements GottZ 4-Way RRF verification and GottZ Scope Model tests.
@@ -227,14 +227,15 @@ if ! $t06_ok; then
   fail "$T" "$t06_msg"
 fi
 
-# T07 SCHEMA_INTEGRITY
+# T07 SCHEMA_INTEGRITY — counts exclude manual snapshot tables (name pattern "*_snapshot_*")
+# which accumulate over time (e.g. context_dream_links_snapshot_20260423_prev5).
 T="T07 SCHEMA_INTEGRITY"
-table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null | tr -d '[:space:]')
+table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "12" ]] && [[ "$col_count" == "30" ]]; then
+if [[ "$table_count" == "14" ]] && [[ "$col_count" == "34" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 12 tables + 30 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 14 tables + 34 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
@@ -347,6 +348,37 @@ if $WITH_OLLAMA; then
     pass "$T"
   else
     fail "$T" "expected answer containing postgresql/mount, got: ${answer:0:80}"
+  fi
+
+  # T17 MCP_TOOLS_LIST — /mcp endpoint returns all 5 registered tools.
+  # Added after Session 24 bug: noOutput struct{} triggered outputSchema generation,
+  # making clients show empty {} instead of Content[].text. Fixed in v0.27.1.
+  T="T17 MCP_TOOLS_LIST"
+  mcp_resp=$(curl -sS -X POST "$WEBHOOK/mcp" \
+    -H "Authorization: Bearer $KEY_PRIVATE" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>/dev/null)
+  tool_count=$(echo "$mcp_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('result',{}).get('tools',[])))" 2>/dev/null)
+  if [[ "$tool_count" == "5" ]]; then
+    pass "$T (tools=$tool_count)"
+  else
+    fail "$T" "expected 5 tools, got: $tool_count (resp: ${mcp_resp:0:200})"
+  fi
+
+  # T18 MCP_TOOL_CALL — recent tool returns actual text content (not empty {}).
+  # Guards against regression of v0.27.1 MCP structuredContent bug.
+  T="T18 MCP_TOOL_CALL"
+  mcp_call=$(curl -sS -X POST "$WEBHOOK/mcp" \
+    -H "Authorization: Bearer $KEY_PRIVATE" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"recent","arguments":{"limit":1}}}' 2>/dev/null)
+  content_text=$(echo "$mcp_call" | python3 -c "import sys,json; d=json.load(sys.stdin); c=d.get('result',{}).get('content',[]); print(c[0].get('text','') if c else '')" 2>/dev/null)
+  if [[ -n "$content_text" ]] && [[ "$content_text" != "{}" ]]; then
+    pass "$T (got content, ${#content_text} chars)"
+  else
+    fail "$T" "expected non-empty content, got: '${content_text:0:100}' (resp: ${mcp_call:0:200})"
   fi
 else
   echo ""
