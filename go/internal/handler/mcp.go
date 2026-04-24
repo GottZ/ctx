@@ -91,7 +91,6 @@ type recentInput struct {
 	Category string `json:"category,omitempty" jsonschema:"filter by category"`
 }
 
-type noOutput struct{}
 
 func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// query
@@ -131,10 +130,10 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 
 // Tool handlers.
 
-func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, noOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input queryInput) (*mcp.CallToolResult, noOutput, error) {
+func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input queryInput) (*mcp.CallToolResult, any, error) {
 		if input.Question == "" {
-			return errResult("question is required"), noOutput{}, nil
+			return errResult("question is required"), nil, nil
 		}
 		limit := input.Limit
 		if limit <= 0 {
@@ -162,10 +161,10 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, noOutput] {
 			Error string `json:"error"`
 		}
 		if err := json.Unmarshal(rec.body, &qr); err != nil {
-			return errResult("failed to parse query response"), noOutput{}, err
+			return errResult("failed to parse query response"), nil, err
 		}
 		if qr.Error != "" {
-			return errResult(qr.Error), noOutput{}, nil
+			return errResult(qr.Error), nil, nil
 		}
 
 		var sb strings.Builder
@@ -179,14 +178,14 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, noOutput] {
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(sb.String())},
-		}, noOutput{}, nil
+		}, nil, nil
 	}
 }
 
-func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, noOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input storeInput) (*mcp.CallToolResult, noOutput, error) {
+func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input storeInput) (*mcp.CallToolResult, any, error) {
 		if input.Category == "" || input.Title == "" || input.Content == "" {
-			return errResult("category, title, and content are required"), noOutput{}, nil
+			return errResult("category, title, and content are required"), nil, nil
 		}
 
 		ar := AuthResultFromContext(ctx)
@@ -200,13 +199,13 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, noOutput] {
 		if err == nil && existingID != "" {
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{textContent(fmt.Sprintf("No change needed — identical content already exists (id: %s)", existingID))},
-			}, noOutput{}, nil
+			}, nil, nil
 		}
 
 		// Upsert.
 		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, input.Metadata, scope, false)
 		if err != nil {
-			return errResult(fmt.Sprintf("store failed: %v", err)), noOutput{}, nil
+			return errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
 		}
 
 		// Temporal enrichment (inline, not async — MCP calls are not latency-sensitive).
@@ -216,12 +215,12 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, noOutput] {
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(fmt.Sprintf("Stored: %s (id: %s, category: %s)", block.Title, block.ID, block.Category))},
-		}, noOutput{}, nil
+		}, nil, nil
 	}
 }
 
-func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, noOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input searchInput) (*mcp.CallToolResult, noOutput, error) {
+func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input searchInput) (*mcp.CallToolResult, any, error) {
 		ar := AuthResultFromContext(ctx)
 		scopes := []string{"private"}
 		if ar != nil {
@@ -235,20 +234,20 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, noOutput] {
 
 		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true)
 		if err != nil {
-			return errResult(fmt.Sprintf("search failed: %v", err)), noOutput{}, nil
+			return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
 		}
 
 		data, _ := json.MarshalIndent(results, "", "  ")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(string(data))},
-		}, noOutput{}, nil
+		}, nil, nil
 	}
 }
 
-func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, noOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input getInput) (*mcp.CallToolResult, noOutput, error) {
+func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input getInput) (*mcp.CallToolResult, any, error) {
 		if input.ID == "" {
-			return errResult("id is required"), noOutput{}, nil
+			return errResult("id is required"), nil, nil
 		}
 
 		ar := AuthResultFromContext(ctx)
@@ -259,18 +258,18 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, noOutput] {
 
 		block, err := store.GetBlock(ctx, cfg.Pool, input.ID, scopes)
 		if err != nil {
-			return errResult(fmt.Sprintf("get failed: %v", err)), noOutput{}, nil
+			return errResult(fmt.Sprintf("get failed: %v", err)), nil, nil
 		}
 
 		data, _ := json.MarshalIndent(block, "", "  ")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(string(data))},
-		}, noOutput{}, nil
+		}, nil, nil
 	}
 }
 
-func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, noOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input recentInput) (*mcp.CallToolResult, noOutput, error) {
+func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input recentInput) (*mcp.CallToolResult, any, error) {
 		ar := AuthResultFromContext(ctx)
 		scopes := []string{"private"}
 		if ar != nil {
@@ -298,7 +297,7 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, noOutput] {
 
 		rows, err := cfg.Pool.Query(ctx, query, args...)
 		if err != nil {
-			return errResult(fmt.Sprintf("recent failed: %v", err)), noOutput{}, nil
+			return errResult(fmt.Sprintf("recent failed: %v", err)), nil, nil
 		}
 		defer rows.Close()
 
@@ -317,12 +316,12 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, noOutput] {
 		if i == 0 {
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{textContent("No blocks found.")},
-			}, noOutput{}, nil
+			}, nil, nil
 		}
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(sb.String())},
-		}, noOutput{}, nil
+		}, nil, nil
 	}
 }
 
