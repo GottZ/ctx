@@ -17,13 +17,17 @@ Go-Monolith (ctx CLI + ctxd Daemon), PostgreSQL 18 + pgvector, Custom Context St
 ```
 /compose/n8n/
 ├── CLAUDE.md                    ← Dieses Dokument
-├── .project/                    ← Privates Submodule (prompt.md, todos.md, Research)
+├── .project/                    ← Privates Submodule (prompt.md, todos.md, bench-session-*, Research)
 ├── go/                          ← Go-Monolith (cmd/, internal/, migrations/)
 ├── .hooks/                      ← Git Hooks (pre-commit, commit-msg, pre-push)
 ├── docker-compose.yml           ← Container-Orchestrierung
 ├── state.sh / test.sh / eval.sh ← Verifikation
 └── .env                         ← Credentials (nicht im Repo)
 ```
+
+**Experimentelle Daten (Bench, Prompts, LLM-Responses, private Block-Content)
+NICHT unter `/tmp` ablegen** — welt-lesbar und jederzeit anderen Prozessen exposed.
+Bevorzugter Ort: `.project/bench-session-<N>/` (submodule, root-only permissions).
 
 ## Build & Run
 
