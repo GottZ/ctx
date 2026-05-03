@@ -189,6 +189,135 @@ func TestParseLinks_MultipleLinks(t *testing.T) {
 	}
 }
 
+// --- parseLinks Object-Form Drift Tests (audit S25, 2026-05-03) ---.
+
+func TestParseLinks_ObjectForm_FloatConfidence(t *testing.T) {
+	raw := `{"019d-aaaa":{"type":"topical","confidence":0.9}}`
+	links, err := parseLinks(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(links) != 1 || links[0].TargetID != "019d-aaaa" ||
+		links[0].Relationship != "topical" || links[0].Confidence != 0.9 {
+		t.Fatalf("got %+v", links)
+	}
+}
+
+func TestParseLinks_ObjectForm_StringConfidence(t *testing.T) {
+	raw := `{"a":{"type":"supersedes","confidence":"high"},"b":{"type":"topical","confidence":"medium"},"c":{"type":"factual","confidence":"low"}}`
+	links, err := parseLinks(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(links) != 3 {
+		t.Fatalf("want 3 links, got %d", len(links))
+	}
+	want := map[string]float64{"a": 0.9, "b": 0.6, "c": 0.3}
+	for _, l := range links {
+		if l.Confidence != want[l.TargetID] {
+			t.Errorf("%s: want %.2f, got %.2f", l.TargetID, want[l.TargetID], l.Confidence)
+		}
+	}
+}
+
+func TestParseLinks_ObjectForm_Mixed(t *testing.T) {
+	raw := `{"a":{"type":"topical","confidence":0.85},"b":{"type":"causal","confidence":"high"}}`
+	links, err := parseLinks(raw)
+	if err != nil || len(links) != 2 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	seen := map[string]float64{}
+	for _, l := range links {
+		seen[l.TargetID] = l.Confidence
+	}
+	if seen["a"] != 0.85 || seen["b"] != 0.9 {
+		t.Errorf("got %v", seen)
+	}
+}
+
+func TestParseLinks_ObjectForm_GarbageKey(t *testing.T) {
+	raw := `{"not-a-uuid":{"type":"topical","confidence":0.8}}`
+	links, err := parseLinks(raw)
+	if err != nil {
+		t.Fatalf("non-UUID keys must pass parser (downstream filters): %v", err)
+	}
+	if len(links) != 1 || links[0].TargetID != "not-a-uuid" {
+		t.Fatalf("want passthrough, got %+v", links)
+	}
+}
+
+func TestParseLinks_ObjectForm_UnknownStringConf(t *testing.T) {
+	raw := `{"id":{"type":"topical","confidence":"vibes"}}`
+	links, err := parseLinks(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("unparseable confidence must drop entry, got %+v", links)
+	}
+}
+
+func TestParseLinks_EmptyObject(t *testing.T) {
+	links, err := parseLinks("{}")
+	if err != nil || len(links) != 0 {
+		t.Fatalf("got %v err=%v", links, err)
+	}
+}
+
+func TestParseLinks_ObjectForm_DeterministicOrder(t *testing.T) {
+	raw := `{"c-3":{"type":"topical","confidence":0.7},"a-1":{"type":"topical","confidence":0.7},"b-2":{"type":"topical","confidence":0.7}}`
+	for i := 0; i < 20; i++ {
+		links, err := parseLinks(raw)
+		if err != nil || len(links) != 3 {
+			t.Fatalf("iter %d: err=%v len=%d", i, err, len(links))
+		}
+		if links[0].TargetID != "a-1" || links[1].TargetID != "b-2" || links[2].TargetID != "c-3" {
+			t.Fatalf("iter %d: order not lex-sorted: %+v", i, links)
+		}
+	}
+}
+
+func TestParseLinks_CodeFenceArray(t *testing.T) {
+	raw := "```json\n[{\"target_id\":\"id-1\",\"type\":\"factual\",\"confidence\":0.9}]\n```"
+	links, err := parseLinks(raw)
+	if err != nil || len(links) != 1 || links[0].TargetID != "id-1" {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+}
+
+func TestParseLinks_CodeFenceObject(t *testing.T) {
+	raw := "```\n{\"id\":{\"type\":\"causal\",\"confidence\":\"high\"}}\n```"
+	links, err := parseLinks(raw)
+	if err != nil || len(links) != 1 || links[0].Confidence != 0.9 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+}
+
+func TestCoerceConfidence(t *testing.T) {
+	cases := []struct {
+		raw    string
+		want   float64
+		wantOk bool
+	}{
+		{"0.85", 0.85, true},
+		{"1.0", 1.0, true},
+		{`"high"`, 0.9, true},
+		{`"HIGH"`, 0.9, true},
+		{`"medium"`, 0.6, true},
+		{`"low"`, 0.3, true},
+		{`"vibes"`, 0, false},
+		{`""`, 0, false},
+		{"null", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := coerceConfidence(json.RawMessage(c.raw))
+		if got != c.want || ok != c.wantOk {
+			t.Errorf("coerceConfidence(%q): got=(%v,%v), want=(%v,%v)", c.raw, got, ok, c.want, c.wantOk)
+		}
+	}
+}
+
 // --- Link validation Tests ---.
 
 func TestValidRelationships(t *testing.T) {

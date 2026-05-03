@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -367,17 +368,90 @@ func buildEvalPrompt(source BlockInfo, candidates []BlockInfo) string {
 }
 
 // parseLinks parses the LLM JSON response into Link structs.
+// Tolerates two qwen3.6:27b drift patterns observed in V3 production
+// (audit S25, 2026-05-03):
+//   - Object-map form: {"<uuid>": {"type": "...", "confidence": <float|string>}, ...}
+//   - String-encoded confidence labels: "high"|"medium"|"low" → 0.9/0.6/0.3
+//
+// Strips a leading ```json fence if present (43/1481 historical cases).
+// Map→slice conversion sorts by TargetID for deterministic downstream behavior.
 func parseLinks(raw string) ([]Link, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "[]" {
+	raw = stripCodeFence(strings.TrimSpace(raw))
+	if raw == "" || raw == "[]" || raw == "{}" {
 		return nil, nil
 	}
 
 	var links []Link
-	if err := json.Unmarshal([]byte(raw), &links); err != nil {
-		return nil, fmt.Errorf("parse links: %w", err)
+	arrErr := json.Unmarshal([]byte(raw), &links)
+	if arrErr == nil {
+		return links, nil
 	}
-	return links, nil
+
+	if strings.HasPrefix(raw, "{") {
+		var obj map[string]struct {
+			Type       string          `json:"type"`
+			Confidence json.RawMessage `json:"confidence"`
+		}
+		if err := json.Unmarshal([]byte(raw), &obj); err == nil {
+			ids := make([]string, 0, len(obj))
+			for id := range obj {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			out := make([]Link, 0, len(obj))
+			for _, id := range ids {
+				v := obj[id]
+				conf, ok := coerceConfidence(v.Confidence)
+				if !ok {
+					continue
+				}
+				out = append(out, Link{TargetID: id, Relationship: v.Type, Confidence: conf})
+			}
+			return out, nil
+		}
+	}
+
+	return nil, fmt.Errorf("parse links: %w", arrErr)
+}
+
+// stripCodeFence removes a leading ```json (or ```) fence and trailing ```
+// from LLM responses that wrap their JSON output. Idempotent on plain JSON.
+func stripCodeFence(raw string) string {
+	if !strings.HasPrefix(raw, "```") {
+		return raw
+	}
+	raw = strings.TrimPrefix(raw, "```json")
+	raw = strings.TrimPrefix(raw, "```")
+	raw = strings.TrimSuffix(raw, "```")
+	return strings.TrimSpace(raw)
+}
+
+// coerceConfidence accepts a json.RawMessage and returns a float64 confidence.
+// Tolerates float (canonical) and string labels emitted under format drift.
+// Mapping: "high"=0.9, "medium"=0.6, "low"=0.3 — chosen so that "medium"/"low"
+// land below the 0.7 minRawConfidence gate and get dropped downstream rather
+// than synthesising a bogus pass-through value. Unparseable input returns
+// ok=false so the caller can drop the entry.
+func coerceConfidence(raw json.RawMessage) (float64, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return f, true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "high":
+			return 0.9, true
+		case "medium":
+			return 0.6, true
+		case "low":
+			return 0.3, true
+		}
+	}
+	return 0, false
 }
 
 // truncate limits string length to n bytes, cutting at word boundary.
