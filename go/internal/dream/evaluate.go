@@ -96,35 +96,38 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 	}
 
 	userPrompt := buildEvalPrompt(source, candidates)
-
-	start := time.Now()
-	resp, err := llm.ChatJSON(ctx, host, apiKey, model, think, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
-	duration := time.Since(start)
-
-	// Log the call (async) regardless of error. block_ids: source + all candidates.
 	blockIDs := make([]string, 0, 1+len(candidates))
 	blockIDs = append(blockIDs, source.ID)
 	for _, c := range candidates {
 		blockIDs = append(blockIDs, c.ID)
 	}
 	dreamVer := int16(Version)
-	entry := llmlog.Entry{
+
+	// Log entry mutated through the function; deferred Record (closure deref at
+	// trigger time) captures final state including parse errors that surface
+	// after the LLM call. Registered AFTER the empty-candidates early-return so
+	// no zero-duration no-op rows pollute the log.
+	entry := &llmlog.Entry{
 		Pipeline:      "dream-eval",
 		Model:         model,
 		Host:          host,
-		Duration:      duration,
-		Err:           err,
 		RequestSystem: dreamSystemPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      blockIDs,
 		DreamVersion:  &dreamVer,
 	}
+	defer func() { llmlog.Record(pool, *entry) }()
+
+	start := time.Now()
+	resp, err := llm.ChatJSON(ctx, host, apiKey, model, think, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
+	entry.Duration = time.Since(start)
+	entry.Err = err
+
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
 	}
-	llmlog.Record(pool, entry)
 
 	if err != nil {
 		return nil, fmt.Errorf("dream: evaluate: %w", err)
@@ -132,6 +135,7 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 
 	links, err := parseLinks(resp.Message.Content)
 	if err != nil {
+		entry.Err = fmt.Errorf("parse: %w", err)
 		slog.Warn("dream: failed to parse LLM response", "error", err, "raw", resp.Message.Content)
 		return nil, fmt.Errorf("dream: parse links: %w", err)
 	}
