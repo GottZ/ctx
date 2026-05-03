@@ -46,9 +46,13 @@ type Options struct {
 }
 
 // ChatResponse is the unified response from any provider.
+// EvalCount is the completion (output) token count.
+// PromptTokens is the input token count — 0 when the provider does not report it
+// (older Ollama, some OpenAI-compatibles), or when a cached prefill returns 0.
 type ChatResponse struct {
-	Message   Message
-	EvalCount int
+	Message      Message
+	EvalCount    int
+	PromptTokens int
 }
 
 // --- Ollama wire format ---.
@@ -63,8 +67,9 @@ type ollamaChatRequest struct {
 }
 
 type ollamaChatResponse struct {
-	Message   Message `json:"message"`
-	EvalCount int     `json:"eval_count"`
+	Message         Message `json:"message"`
+	EvalCount       int     `json:"eval_count"`
+	PromptEvalCount int     `json:"prompt_eval_count"`
 }
 
 // --- OpenAI wire format ---.
@@ -93,6 +98,7 @@ type openAIChatResponse struct {
 	} `json:"choices"`
 	Usage struct {
 		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens     int `json:"prompt_tokens"`
 	} `json:"usage"`
 }
 
@@ -182,8 +188,9 @@ func chatOllama(ctx context.Context, host, apiKey, model string, think *bool, sy
 	}
 
 	return &ChatResponse{
-		Message:   result.Message,
-		EvalCount: result.EvalCount,
+		Message:      result.Message,
+		EvalCount:    result.EvalCount,
+		PromptTokens: result.PromptEvalCount,
 	}, nil
 }
 
@@ -249,8 +256,9 @@ func chatOpenAI(ctx context.Context, host, apiKey, model, systemPrompt, userProm
 	}
 
 	return &ChatResponse{
-		Message:   Message{Role: choice.Role, Content: content},
-		EvalCount: result.Usage.CompletionTokens,
+		Message:      Message{Role: choice.Role, Content: content},
+		EvalCount:    result.Usage.CompletionTokens,
+		PromptTokens: result.Usage.PromptTokens,
 	}, nil
 }
 

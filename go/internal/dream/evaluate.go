@@ -122,6 +122,7 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount
+		entry.PromptTokens = resp.PromptTokens
 	}
 	llmlog.Record(pool, entry)
 
