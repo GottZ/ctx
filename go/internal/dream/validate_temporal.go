@@ -113,6 +113,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPI
 	resp, err := llm.ChatJSON(ctx, chatHost, chatAPIKey, chatModel, think, temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
 	duration := time.Since(start)
 
+	dreamVer := int16(Version)
 	entry := llmlog.Entry{
 		Pipeline:      "dream-temporal",
 		Model:         chatModel,
@@ -122,6 +123,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPI
 		RequestSystem: temporalValidationPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      []string{block.ID},
+		DreamVersion:  &dreamVer,
 	}
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
