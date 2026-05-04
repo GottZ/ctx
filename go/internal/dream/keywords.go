@@ -91,7 +91,7 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, host, apiKey, mod
 		duration := time.Since(start)
 
 		dreamVer := int16(Version)
-		entry := llmlog.Entry{
+		entry := &llmlog.Entry{
 			Pipeline:      "dream-keywords",
 			Model:         model,
 			Host:          host,
@@ -108,26 +108,29 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, host, apiKey, mod
 			entry.CompletionTokens = resp.EvalCount
 			entry.PromptTokens = resp.PromptTokens
 		}
-		llmlog.Record(pool, entry)
-
-		if err != nil {
-			lastErr = err
-			slog.Warn("dream: keyword generation attempt failed",
-				"block_id", blockID, "attempt", attempt, "error", err)
-			continue
-		}
-
-		keywords, parseErr := parseKeywords(resp.Message.Content)
-		if parseErr != nil {
-			lastErr = parseErr
-			slog.Warn("dream: keyword parse failed",
-				"block_id", blockID, "attempt", attempt, "error", parseErr)
-			continue
-		}
-		if len(keywords) < MinKeywords {
-			lastErr = fmt.Errorf("dream: keywords too few (%d)", len(keywords))
-			slog.Warn("dream: keyword count below minimum",
-				"block_id", blockID, "attempt", attempt, "count", len(keywords))
+		// Closure-scoped defer so parse/count failures land in entry.Err
+		// before Record fires (analogous to evaluate.go and validate_temporal.go).
+		keywords, iterErr := func() ([]string, error) {
+			defer llmlog.Record(pool, *entry)
+			if err != nil {
+				return nil, err
+			}
+			kws, parseErr := parseKeywords(resp.Message.Content)
+			if parseErr != nil {
+				entry.Err = fmt.Errorf("parse: %w", parseErr)
+				return nil, parseErr
+			}
+			if len(kws) < MinKeywords {
+				countErr := fmt.Errorf("dream: keywords too few (%d)", len(kws))
+				entry.Err = countErr
+				return nil, countErr
+			}
+			return kws, nil
+		}()
+		if iterErr != nil {
+			lastErr = iterErr
+			slog.Warn("dream: keyword attempt failed",
+				"block_id", blockID, "attempt", attempt, "error", iterErr)
 			continue
 		}
 		return keywords, nil
