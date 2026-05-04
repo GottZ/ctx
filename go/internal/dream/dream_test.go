@@ -3,6 +3,7 @@ package dream
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 // --- ExtractKeywords Tests ---.
@@ -473,6 +474,115 @@ func TestApplyHardCap_Deterministic(t *testing.T) {
 				t.Errorf("iter %d pos %d: %s vs %s", i, j, out[j].TargetID, first[j].TargetID)
 			}
 		}
+	}
+}
+
+// --- Structural Filter Tests (S25 Welle 8 — V5/V6/V8/V9/V10) ---.
+
+func TestAcceptScopeAndArchived(t *testing.T) {
+	cases := []struct {
+		name           string
+		targetScope    string
+		sourceScope    string
+		targetArchived bool
+		wantAccepted   bool
+		wantReason     string
+	}{
+		{"same scope alive", "private", "private", false, true, ""},
+		{"same scope archived", "private", "private", true, false, "target archived"},
+		{"cross scope alive", "shared", "private", false, false, "cross-scope"},
+		{"cross scope archived", "shared", "private", true, false, "target archived"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ok, reason := acceptScopeAndArchived(c.targetScope, c.sourceScope, c.targetArchived)
+			if ok != c.wantAccepted || reason != c.wantReason {
+				t.Errorf("got (%v, %q), want (%v, %q)", ok, reason, c.wantAccepted, c.wantReason)
+			}
+		})
+	}
+}
+
+func TestCoerceCategoryFactual(t *testing.T) {
+	cases := []struct {
+		name   string
+		rel    string
+		srcCat string
+		tgtCat string
+		want   string
+	}{
+		{"factual same cat → topical", "factual", "decisions", "decisions", "topical"},
+		{"factual different cat → unchanged", "factual", "decisions", "projects", "factual"},
+		{"causal same cat → unchanged", "causal", "decisions", "decisions", "causal"},
+		{"topical same cat → unchanged", "topical", "decisions", "decisions", "topical"},
+		{"supersedes same cat → unchanged", "supersedes", "decisions", "decisions", "supersedes"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := coerceCategoryFactual(c.rel, c.srcCat, c.tgtCat)
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestAcceptSupersedes(t *testing.T) {
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	same := older
+	cases := []struct {
+		name         string
+		srcCat       string
+		tgtCat       string
+		srcUpdated   time.Time
+		tgtUpdated   time.Time
+		titleSim     float64
+		wantAccepted bool
+		wantReason   string
+	}{
+		{"all conditions met", "decisions", "decisions", older, newer, 0.5, true, ""},
+		{"different category", "decisions", "projects", older, newer, 0.5, false, "different category"},
+		{"source not older", "decisions", "decisions", newer, older, 0.5, false, "source not older"},
+		{"source same updated_at", "decisions", "decisions", same, same, 0.5, false, "source not older"},
+		{"low title similarity", "decisions", "decisions", older, newer, 0.20, false, "low title similarity"},
+		{"exact threshold", "decisions", "decisions", older, newer, 0.25, true, ""},
+		{"just below threshold", "decisions", "decisions", older, newer, 0.249, false, "low title similarity"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ok, reason := acceptSupersedes(c.srcCat, c.tgtCat, c.srcUpdated, c.tgtUpdated, c.titleSim)
+			if ok != c.wantAccepted || reason != c.wantReason {
+				t.Errorf("got (%v, %q), want (%v, %q)", ok, reason, c.wantAccepted, c.wantReason)
+			}
+		})
+	}
+}
+
+func TestAcceptCausal(t *testing.T) {
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	same := older
+	cases := []struct {
+		name         string
+		srcCreated   time.Time
+		tgtCreated   time.Time
+		wantAccepted bool
+		wantReason   string
+	}{
+		{"src older than tgt", older, newer, true, ""},
+		{"src equal to tgt", same, same, false, "source not older"},
+		{"src newer than tgt", newer, older, false, "source not older"},
+		// Even 1 nanosecond before is acceptable — semantic check is delegated to V6 prompt.
+		{"src 1ns older", older, older.Add(1), true, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ok, reason := acceptCausal(c.srcCreated, c.tgtCreated)
+			if ok != c.wantAccepted || reason != c.wantReason {
+				t.Errorf("got (%v, %q), want (%v, %q)", ok, reason, c.wantAccepted, c.wantReason)
+			}
+		})
 	}
 }
 

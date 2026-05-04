@@ -269,6 +269,61 @@ func applyHardCap(links []Link, max int) ([]Link, int) {
 	return out, len(links) - len(out)
 }
 
+// V5/V6 check: drop links to archived targets or different-scope targets.
+// Returns (accepted, reason) — reason populated only when not accepted.
+func acceptScopeAndArchived(targetScope, sourceScope string, targetArchived bool) (bool, string) {
+	if targetArchived {
+		return false, "target archived"
+	}
+	if targetScope != sourceScope {
+		return false, "cross-scope"
+	}
+	return true, ""
+}
+
+// V10 coerce: factual edges between same-category blocks are nearly always
+// topical ties (Bulk-test 2026-04-21, n=100, 10 iters: +10pp accuracy when
+// coerced). factual semantics require SPEC→IMPL direction across categories
+// (spec in decisions/reference, impl in projects).
+// Returns the (possibly mutated) link relationship.
+func coerceCategoryFactual(rel, srcCat, tgtCat string) string {
+	if rel == "factual" && srcCat == tgtCat {
+		return "topical"
+	}
+	return rel
+}
+
+// V8 check: supersedes requires same category, source meaningfully older than
+// target, and title similarity ≥ titleSimThreshold (caller computes via pg_trgm).
+// Pre-Reset-Audit 2026-04-20 motivation: 9B model can't distinguish
+// "complementary" from "replaces", deterministic pre-filter.
+func acceptSupersedes(srcCat, tgtCat string, srcUpdated, tgtUpdated time.Time, titleSim float64) (bool, string) {
+	if srcCat != tgtCat {
+		return false, "different category"
+	}
+	if !srcUpdated.Before(tgtUpdated) {
+		return false, "source not older"
+	}
+	if titleSim < supersedesTitleSimThreshold {
+		return false, "low title similarity"
+	}
+	return true, ""
+}
+
+// V9 check: causal requires source predates target by created_at.
+// Pre-Reset-Audit 2026-04-20: LLM invents wrong-direction causal links
+// (28% causal-reciprocity in Graph-Topology). Live post-V9: 0% reciprocity,
+// 7% wrong-direction (down from 34%).
+func acceptCausal(srcCreated, tgtCreated time.Time) (bool, string) {
+	if !srcCreated.Before(tgtCreated) {
+		return false, "source not older"
+	}
+	return true, ""
+}
+
+// supersedesTitleSimThreshold is the pg_trgm similarity floor for V8.
+const supersedesTitleSimThreshold = 0.25
+
 // deletedLink captures what a stale-link DELETE returned, so the caller can
 // revert side-effects (e.g. block_type='snapshot' set by ApplySupersedes when
 // the supersedes-link was first written).
@@ -400,61 +455,35 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 			continue
 		}
 
-		// V6: Skip archived targets.
-		if targetArchived {
+		// V5/V6: scope + archived gate.
+		if ok, reason := acceptScopeAndArchived(targetScope, sourceScope, targetArchived); !ok {
+			slog.Debug("dream: link rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason)
 			continue
 		}
 
-		// V5: Same-scope rule — no cross-scope links.
-		if targetScope != sourceScope {
-			continue
-		}
-
-		// V10: Category-Cross coerce — LLM overextends factual to sibling blocks of the same category.
-		// Bulk-test 2026-04-21 (n=100, 10 iters): coercing factual→topical when src_cat == tgt_cat
-		// delivered +10pp accuracy (69→79%). factual semantics require spec→impl direction, which
-		// virtually always crosses categories (spec in decisions/reference, impl in projects).
-		// Same-category factual claims are near-uniformly mislabelled topical ties.
-		if link.Relationship == "factual" && srcCategory == targetCategory {
+		// V10: factual same-category coerce → topical.
+		if newRel := coerceCategoryFactual(link.Relationship, srcCategory, targetCategory); newRel != link.Relationship {
 			slog.Debug("dream: factual coerced to topical (same-category sibling)",
 				"category", srcCategory, "src", sourceID, "tgt", link.TargetID)
-			link.Relationship = "topical"
+			link.Relationship = newRel
 		}
 
-		// V8: Structural check for supersedes — 9B can't distinguish "complementary" from "replaces".
-		// Deterministic pre-filter: same category + source older than target.
+		// V8: supersedes structural pre-filter (same cat + src older + title sim).
 		if link.Relationship == "supersedes" {
-			if srcCategory != targetCategory {
-				slog.Debug("dream: supersedes rejected (different category)",
-					"source_cat", srcCategory, "target_cat", targetCategory)
-				continue
-			}
-			if !srcUpdatedAt.Before(targetUpdatedAt) {
-				slog.Debug("dream: supersedes rejected (source not older)",
-					"source_updated", srcUpdatedAt.Format("2006-01-02"),
-					"target_updated", targetUpdatedAt.Format("2006-01-02"))
-				continue
-			}
-			// Title similarity check via pg_trgm.
 			var sim float64
-			_ = tx.QueryRow(ctx,
-				`SELECT similarity($1, $2)`, srcTitle, targetTitle,
-			).Scan(&sim)
-			if sim < 0.25 {
-				slog.Debug("dream: supersedes rejected (low title similarity)",
-					"similarity", sim, "source_title", srcTitle, "target_title", targetTitle)
+			_ = tx.QueryRow(ctx, `SELECT similarity($1, $2)`, srcTitle, targetTitle).Scan(&sim)
+			if ok, reason := acceptSupersedes(srcCategory, targetCategory, srcUpdatedAt, targetUpdatedAt, sim); !ok {
+				slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason, "similarity", sim)
 				continue
 			}
 		}
 
-		// V9: Causal-temporal check — causal implies source precedes target in time.
-		// Pre-Reset-Audit 2026-04-20: LLM invents causal links with wrong direction
-		// (Graph-Topologe: 28% causal-reciprocity). Enforce src.created_at < target.created_at.
-		if link.Relationship == "causal" && !srcCreatedAt.Before(targetCreatedAt) {
-			slog.Debug("dream: causal rejected (source not older than target)",
-				"source_created", srcCreatedAt.Format("2006-01-02"),
-				"target_created", targetCreatedAt.Format("2006-01-02"))
-			continue
+		// V9: causal predates check (created_at).
+		if link.Relationship == "causal" {
+			if ok, reason := acceptCausal(srcCreatedAt, targetCreatedAt); !ok {
+				slog.Debug("dream: causal rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason)
+				continue
+			}
 		}
 
 		// Weighted confidence: relationship_strength × source_quality × target_quality.
