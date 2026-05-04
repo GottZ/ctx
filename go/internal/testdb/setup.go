@@ -73,6 +73,14 @@ func SetupTestDB(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
+	// Provision the extensions that production's init-data.sh creates as
+	// superuser before migrations run. Migration 001 already enables
+	// vector/pg_trgm/pgcrypto, but timescaledb has no CREATE EXTENSION in
+	// any migration — production relies on the bootstrap script.
+	if _, err := pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb"); err != nil {
+		t.Fatalf("testdb: enable timescaledb: %v", err)
+	}
+
 	if err := store.RunMigrations(ctx, pool); err != nil {
 		t.Fatalf("testdb: apply migrations: %v", err)
 	}
