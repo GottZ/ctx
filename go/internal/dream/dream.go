@@ -23,12 +23,12 @@ const (
 	// v3 = Session 24 (2026-04-23): qwen3.6:27b + V5 prompt (topical-as-fallback,
 	//      supersedes VERY RARE, causal accepts decision→implementation),
 	//      factual threshold 0.9→0.7. Benchmark: 62.3% accuracy on stable gold (+19.7pp).
-	// v4 = Session 25 (2026-05-04): V6 prompt with explicit causal anti-pattern
-	//      clauses (parallel investigation, audit-thing, knowledge-not-cause,
-	//      token-match). Bench on 30-sample audit-truth: recall 0.47→0.71,
-	//      accuracy 0.57→0.70 vs V5. Hard-cap 5 with type-diversity tie-break,
+	// v4 = Session 25 (2026-05-04): hard-cap 5 with type-diversity tie-break,
 	//      drift-format counter in metadata, prompt_tokens persistence,
-	//      parseLinks tolerates object-form drift.
+	//      parseLinks tolerates object-form drift, replace-semantics with
+	//      snapshot revert. Prompt remains V5 — V6 was attempted (commit 6b37662)
+	//      but reverted: stable-gold n=122 showed V6 net-worse than V5 (54.1%
+	//      vs 57.4%, topical-recall 76→63%). V7 prompt iteration is open work.
 	Version = 4
 
 	// CooldownActiveDays is how long Dream waits for blocks that produced links (re-check sooner).
