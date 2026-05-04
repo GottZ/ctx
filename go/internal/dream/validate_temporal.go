@@ -109,28 +109,28 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPI
 		validateOpts.NumCtx = opts.NumCtx
 	}
 
-	start := time.Now()
-	resp, err := llm.ChatJSON(ctx, chatHost, chatAPIKey, chatModel, think, temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
-	duration := time.Since(start)
-
 	dreamVer := int16(Version)
-	entry := llmlog.Entry{
+	entry := &llmlog.Entry{
 		Pipeline:      "dream-temporal",
 		Model:         chatModel,
 		Host:          chatHost,
-		Duration:      duration,
-		Err:           err,
 		RequestSystem: temporalValidationPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      []string{block.ID},
 		DreamVersion:  &dreamVer,
 	}
+	defer func() { llmlog.Record(pool, *entry) }()
+
+	start := time.Now()
+	resp, err := llm.ChatJSON(ctx, chatHost, chatAPIKey, chatModel, think, temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
+	entry.Duration = time.Since(start)
+	entry.Err = err
+
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
 	}
-	llmlog.Record(pool, entry)
 
 	if err != nil {
 		// LLM failure is non-fatal — phase 1 already ran.
@@ -140,6 +140,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPI
 
 	var review TemporalReview
 	if err := json.Unmarshal([]byte(resp.Message.Content), &review); err != nil {
+		entry.Err = fmt.Errorf("parse: %w", err)
 		slog.Warn("dream: temporal phase2 parse failed", "block_id", block.ID, "error", err, "raw", resp.Message.Content)
 		return nil
 	}
