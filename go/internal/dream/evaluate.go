@@ -155,12 +155,34 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 		return nil, fmt.Errorf("dream: parse links: %w", err)
 	}
 
-	// Filter to valid candidates only (prevent LLM hallucinating target IDs).
 	candidateIDs := make(map[string]bool)
 	for _, c := range candidates {
 		candidateIDs[c.ID] = true
 	}
+	valid := filterValidCandidates(links, candidateIDs)
 
+	if capped, dropped := applyHardCap(valid, MaxLinksPerCycle); dropped > 0 {
+		if entry.Metadata == nil {
+			entry.Metadata = map[string]any{}
+		}
+		entry.Metadata["links_capped"] = dropped
+		valid = capped
+	}
+
+	return valid, nil
+}
+
+// filterValidCandidates rejects LLM links that fail any of:
+//   - target_id not in UUID format (LLM emitted free-text)
+//   - target_id not present in the candidate set (LLM hallucinated an ID)
+//   - relationship not in validRelationships
+//   - confidence > 1.0 or NaN or ±Inf (defensive — JSON unmarshalling never
+//     yields NaN/Inf, but malformed Link slices from non-LLM sources are
+//     still rejected)
+//   - confidence below the per-type minRawConfidence floor
+//
+// Pure function — no I/O, no shared state.
+func filterValidCandidates(links []Link, candidateIDs map[string]bool) []Link {
 	var valid []Link
 	for _, l := range links {
 		if !uuidPattern.MatchString(l.TargetID) {
@@ -180,16 +202,7 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 		}
 		valid = append(valid, l)
 	}
-
-	if capped, dropped := applyHardCap(valid, MaxLinksPerCycle); dropped > 0 {
-		if entry.Metadata == nil {
-			entry.Metadata = map[string]any{}
-		}
-		entry.Metadata["links_capped"] = dropped
-		valid = capped
-	}
-
-	return valid, nil
+	return valid
 }
 
 // applyHardCap caps a link slice to max entries with tier-local
