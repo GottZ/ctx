@@ -103,7 +103,14 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPI
 	userPrompt := buildTemporalReviewPrompt(block)
 	validateOpts := llm.Options{
 		Temperature: 0.1,
-		NumPredict:  300,
+		// NumPredict 1000 (was 300). Live-audit 2026-05-04 found 7.8% (63/804)
+		// of dream-temporal calls hit the 300 ceiling and produced truncated
+		// JSON that parseTemporalReview silently rejected (visible only after
+		// 2cb903f added defer-Record). Successful responses average 115 tokens
+		// (p50=88, p95<300 is unknown — censored at the cap), so 1000 leaves
+		// 8x headroom while keeping cost negligible: ~10/day truncated × 700
+		// extra tokens ≈ 7k tokens/day at qwen3.6:27b.
+		NumPredict: 1000,
 	}
 	if opts.NumCtx > 0 {
 		validateOpts.NumCtx = opts.NumCtx
