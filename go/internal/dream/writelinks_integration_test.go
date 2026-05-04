@@ -4,6 +4,7 @@ package dream_test
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -98,4 +99,266 @@ func TestWriteLinks_TxAbort_BehaviourMatchesContract(t *testing.T) {
 	if got := countLinks(t, pool, icSourceID); got != 0 {
 		t.Errorf("persisted %d links after CHECK-rejected INSERT, want 0 (TX must roll back)", got)
 	}
+}
+
+// TestWriteLinks_Supersedes_RealSimilarity_BehaviourMatchesContract verifies
+// that V8's supersedes structural pre-filter uses pg_trgm `similarity()`
+// against the real extension. Two cases:
+//
+//   - similar titles (sim ≥ 0.25): link inserted.
+//   - dissimilar titles (sim < 0.25): link rejected, no row written.
+//
+// pgxmock can stub the similarity return value directly but cannot exercise
+// pg_trgm itself, so a real-PG layer is the only way to catch a regression
+// where the SQL changes (column order, function name, threshold const) but
+// still parses as a valid query.
+func TestWriteLinks_Supersedes_RealSimilarity_BehaviourMatchesContract(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	tEarly := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tLate := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	insertBlock(t, pool, icSourceID, "private", "decisions", "Authentication strategy", tEarly, tEarly)
+	insertBlock(t, pool, icTargetID, "private", "decisions", "Authentication strategy v2", tLate, tLate)
+
+	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+		[]dream.Link{{TargetID: icTargetID, Relationship: "supersedes", Confidence: 0.95}})
+	if err != nil {
+		t.Fatalf("similar-title supersedes: unexpected error: %v", err)
+	}
+	if written != 1 {
+		t.Errorf("similar-title supersedes: got written=%d, want 1", written)
+	}
+	if got := countLinks(t, pool, icSourceID); got != 1 {
+		t.Errorf("similar-title supersedes: got %d persisted, want 1", got)
+	}
+
+	// Reset: drop the link so the next sub-case starts clean. Direct DELETE,
+	// not via WriteLinks (we want to test the dissimilar path standalone).
+	if _, err := pool.Exec(ctx, `DELETE FROM context_dream_links WHERE source_block_id = $1::uuid`, icSourceID); err != nil {
+		t.Fatalf("reset links: %v", err)
+	}
+	// Also revert the snapshot side-effect from the supersedes write.
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET block_type = 'knowledge', superseded_by = NULL WHERE id = $1::uuid`, icSourceID); err != nil {
+		t.Fatalf("reset block_type: %v", err)
+	}
+
+	// Dissimilar-title sibling — same category, source older, but no trigram
+	// overlap above the 0.25 threshold.
+	insertBlock(t, pool, icOtherID, "private", "decisions", "completely unrelated topic xyzzy", tLate, tLate)
+
+	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+		[]dream.Link{{TargetID: icOtherID, Relationship: "supersedes", Confidence: 0.95}})
+	if err != nil {
+		t.Fatalf("dissimilar-title supersedes: unexpected error: %v", err)
+	}
+	if written != 0 {
+		t.Errorf("dissimilar-title supersedes: got written=%d, want 0 (V8 sim<0.25 must reject)", written)
+	}
+	if got := countLinks(t, pool, icSourceID); got != 0 {
+		t.Errorf("dissimilar-title supersedes: got %d persisted, want 0", got)
+	}
+}
+
+// TestWriteLinks_OnConflictUpsert_BehaviourMatchesContract verifies that a
+// second WriteLinks run for the same (source, target) pair updates the row
+// instead of duplicating it (PRIMARY KEY would otherwise fail). Confirms
+// the ON CONFLICT DO UPDATE clause refreshes confidence and dream_version.
+func TestWriteLinks_OnConflictUpsert_BehaviourMatchesContract(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	tEarly := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tLate := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	insertBlock(t, pool, icSourceID, "private", "topic", "src", tEarly, tEarly)
+	insertBlock(t, pool, icTargetID, "private", "topic", "tgt", tLate, tLate)
+
+	// First run: write with confidence 0.7.
+	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+		[]dream.Link{{TargetID: icTargetID, Relationship: "topical", Confidence: 0.7}})
+	if err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("first write: got written=%d, want 1", written)
+	}
+
+	// Second run: same (source, target) pair, higher confidence. Must
+	// upsert into the existing row, not insert a duplicate.
+	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+		[]dream.Link{{TargetID: icTargetID, Relationship: "topical", Confidence: 0.95}})
+	if err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if written != 1 {
+		t.Errorf("second write: got written=%d, want 1", written)
+	}
+
+	if got := countLinks(t, pool, icSourceID); got != 1 {
+		t.Errorf("after upsert: got %d persisted, want 1 (ON CONFLICT must update, not duplicate)", got)
+	}
+
+	var conf, rawConf float64
+	if err := pool.QueryRow(ctx,
+		`SELECT confidence, raw_confidence FROM context_dream_links
+		WHERE source_block_id=$1::uuid AND target_block_id=$2::uuid`,
+		icSourceID, icTargetID,
+	).Scan(&conf, &rawConf); err != nil {
+		t.Fatalf("read upserted row: %v", err)
+	}
+	// weighted = raw * sourceQuality(1.0) * targetQuality(1.0) = raw
+	if math.Abs(conf-0.95) > 0.01 {
+		t.Errorf("upsert did not refresh confidence: got %f, want ~0.95", conf)
+	}
+	if math.Abs(rawConf-0.95) > 0.01 {
+		t.Errorf("upsert did not refresh raw_confidence: got %f, want ~0.95", rawConf)
+	}
+}
+
+// TestWriteLinks_ReplaceSemantics_RealUUIDs_BehaviourMatchesContract verifies
+// the stale-DELETE clause `target_block_id != ALL($2::uuid[])` against real
+// UUID arrays. Two-run scenario: first run writes two links, second run
+// kept-targets contains only one — the other must be deleted in-TX.
+func TestWriteLinks_ReplaceSemantics_RealUUIDs_BehaviourMatchesContract(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	tEarly := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tLate := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	insertBlock(t, pool, icSourceID, "private", "topic", "src", tEarly, tEarly)
+	insertBlock(t, pool, icTargetID, "private", "topic", "tgt1", tLate, tLate)
+	insertBlock(t, pool, icOtherID, "private", "topic", "tgt2", tLate, tLate)
+
+	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+		[]dream.Link{
+			{TargetID: icTargetID, Relationship: "topical", Confidence: 0.8},
+			{TargetID: icOtherID, Relationship: "topical", Confidence: 0.8},
+		})
+	if err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if written != 2 {
+		t.Fatalf("first write: got written=%d, want 2", written)
+	}
+	if got := countLinks(t, pool, icSourceID); got != 2 {
+		t.Fatalf("after first write: got %d, want 2", got)
+	}
+
+	// Second run with only icTargetID — replace-semantics must delete
+	// the orphaned icOtherID via the != ALL clause.
+	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+		[]dream.Link{{TargetID: icTargetID, Relationship: "topical", Confidence: 0.9}})
+	if err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if written != 1 {
+		t.Errorf("second write: got written=%d, want 1", written)
+	}
+
+	if got := countLinks(t, pool, icSourceID); got != 1 {
+		t.Errorf("after replace: got %d, want 1 (ALL-bounds DELETE must drop the orphan)", got)
+	}
+
+	var survivor string
+	if err := pool.QueryRow(ctx,
+		`SELECT target_block_id::text FROM context_dream_links WHERE source_block_id=$1::uuid`,
+		icSourceID,
+	).Scan(&survivor); err != nil {
+		t.Fatalf("read survivor: %v", err)
+	}
+	if survivor != icTargetID {
+		t.Errorf("wrong survivor after replace: got %s, want %s (kept-target must survive)", survivor, icTargetID)
+	}
+}
+
+// TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract verifies
+// the full ApplySupersedes lifecycle against real PG:
+//
+//  1. supersedes link writes block_type='snapshot' on source.
+//  2. Idempotent re-write of the same supersedes link does not drift.
+//  3. Subsequent write that drops the supersedes link reverts block_type
+//     and superseded_by to NULL via replaceStaleLinks.
+func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	tEarly := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tLate := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	insertBlock(t, pool, icSourceID, "private", "decisions", "auth strategy", tEarly, tEarly)
+	insertBlock(t, pool, icTargetID, "private", "decisions", "auth strategy v2", tLate, tLate)
+
+	// Step 1: write supersedes link.
+	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+		[]dream.Link{{TargetID: icTargetID, Relationship: "supersedes", Confidence: 0.95}})
+	if err != nil {
+		t.Fatalf("step 1 write: %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("step 1: got written=%d, want 1", written)
+	}
+
+	bt, sb := readSnapshotState(t, pool, icSourceID)
+	if bt != "snapshot" || sb != icTargetID {
+		t.Errorf("step 1: got block_type=%q superseded_by=%q, want snapshot/%s", bt, sb, icTargetID)
+	}
+
+	// Step 2: idempotent re-write — same input, no drift.
+	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+		[]dream.Link{{TargetID: icTargetID, Relationship: "supersedes", Confidence: 0.95}})
+	if err != nil {
+		t.Fatalf("step 2 write: %v", err)
+	}
+	if written != 1 {
+		t.Errorf("step 2: got written=%d, want 1", written)
+	}
+
+	bt, sb = readSnapshotState(t, pool, icSourceID)
+	if bt != "snapshot" || sb != icTargetID {
+		t.Errorf("step 2 drift: got block_type=%q superseded_by=%q, want snapshot/%s", bt, sb, icTargetID)
+	}
+
+	// Step 3: write a non-supersedes link to a different target → replaceStale
+	// drops the old supersedes row and reverts block_type.
+	insertBlock(t, pool, icOtherID, "private", "decisions", "unrelated decision", tLate, tLate)
+
+	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+		[]dream.Link{{TargetID: icOtherID, Relationship: "topical", Confidence: 0.8}})
+	if err != nil {
+		t.Fatalf("step 3 write: %v", err)
+	}
+	if written != 1 {
+		t.Errorf("step 3: got written=%d, want 1", written)
+	}
+
+	bt, sb = readSnapshotState(t, pool, icSourceID)
+	if bt != "" || sb != "" {
+		t.Errorf("step 3 revert: got block_type=%q superseded_by=%q, want NULL/NULL", bt, sb)
+	}
+}
+
+// readSnapshotState fetches block_type and superseded_by for the given block,
+// returning empty strings when the column is NULL.
+func readSnapshotState(t *testing.T, pool *pgxpool.Pool, id string) (blockType, supersededBy string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var bt, sb *string
+	err := pool.QueryRow(ctx,
+		`SELECT block_type, superseded_by::text FROM context_blocks WHERE id=$1::uuid`,
+		id,
+	).Scan(&bt, &sb)
+	if err != nil {
+		t.Fatalf("read snapshot state: %v", err)
+	}
+	if bt != nil {
+		blockType = *bt
+	}
+	if sb != nil {
+		supersededBy = *sb
+	}
+	return
 }
