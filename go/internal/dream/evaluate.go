@@ -269,9 +269,98 @@ func applyHardCap(links []Link, max int) ([]Link, int) {
 	return out, len(links) - len(out)
 }
 
+// deletedLink captures what a stale-link DELETE returned, so the caller can
+// revert side-effects (e.g. block_type='snapshot' set by ApplySupersedes when
+// the supersedes-link was first written).
+type deletedLink struct {
+	TargetID     string
+	Relationship string
+}
+
+// deleteStaleLinks removes context_dream_links rows for sourceID whose
+// target_block_id is not in keptTargets. If keptTargets is empty, ALL rows
+// for sourceID are deleted (caller must guard against this when the empty
+// state is a transient LLM failure rather than a deliberate clear-out).
+// Returns the rows that were deleted so the caller can run targeted reverse
+// effects (snapshot revert).
+func deleteStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTargets []string) ([]deletedLink, error) {
+	var rows pgx.Rows
+	var err error
+	if len(keptTargets) == 0 {
+		rows, err = tx.Query(ctx,
+			`DELETE FROM context_dream_links
+			WHERE source_block_id = $1::uuid
+			RETURNING target_block_id::text, relationship`,
+			sourceID)
+	} else {
+		rows, err = tx.Query(ctx,
+			`DELETE FROM context_dream_links
+			WHERE source_block_id = $1::uuid
+			  AND target_block_id != ALL($2::uuid[])
+			RETURNING target_block_id::text, relationship`,
+			sourceID, keptTargets)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("delete stale: %w", err)
+	}
+	defer rows.Close()
+
+	var deleted []deletedLink
+	for rows.Next() {
+		var d deletedLink
+		if err := rows.Scan(&d.TargetID, &d.Relationship); err != nil {
+			return nil, fmt.Errorf("scan deleted: %w", err)
+		}
+		deleted = append(deleted, d)
+	}
+	return deleted, rows.Err()
+}
+
+// replaceStaleLinks deletes context_dream_links for sourceID that are not in
+// keptTargets and reverts ApplySupersedes-side-effects for any deleted
+// supersedes-links (block_type='snapshot' → NULL when superseded_by matched
+// the deleted target).
+func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTargets []string) error {
+	deleted, err := deleteStaleLinks(ctx, tx, sourceID, keptTargets)
+	if err != nil {
+		return fmt.Errorf("dream: delete stale links: %w", err)
+	}
+	for _, d := range deleted {
+		if d.Relationship != "supersedes" {
+			continue
+		}
+		_, revertErr := tx.Exec(ctx,
+			`UPDATE context_blocks
+			SET block_type = NULL, superseded_by = NULL
+			WHERE id = $1::uuid
+			  AND block_type = 'snapshot'
+			  AND superseded_by = $2::uuid`,
+			sourceID, d.TargetID)
+		if revertErr != nil {
+			slog.Warn("dream: snapshot revert failed (non-fatal)",
+				"source", sourceID, "target", d.TargetID, "error", revertErr)
+		}
+	}
+	return nil
+}
+
 // WriteLinks persists dream links to the database within a transaction.
 // Enforces same-scope rule: only creates links between blocks of the same scope.
 // Checks is_archived on target blocks (Race condition mitigation V6).
+//
+// Replace-Semantik (S25 Welle 7): when the cycle produces at least one
+// successfully-written link, stale links for the same source are removed
+// inside the same transaction. ApplySupersedes-side-effects on previously
+// snapshot-marked blocks are reverted when the supersedes-link is deleted.
+// 0-written cycles do NOT trigger replace — that path is reserved for
+// transient LLM failures (Pessimist M1: stochastic empty responses must
+// not be destructive).
+//
+// Cyclomatic complexity 26 vs lint cap 25: V5/V6/V8/V9/V10 structural
+// checks form a linear filter chain in one loop body — extracting them
+// would obscure the per-link decision flow without reducing real complexity.
+//
+//nolint:cyclop // pipeline function with linear V5/V6/V8/V9/V10 filter chain
 func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope string, sourceQuality float64, links []Link) (int, error) {
 	if len(links) == 0 {
 		return 0, nil
@@ -293,6 +382,7 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 	).Scan(&srcCategory, &srcUpdatedAt, &srcCreatedAt, &srcTitle)
 
 	written := 0
+	keptTargets := make([]string, 0, len(links))
 	for _, link := range links {
 		// Fetch target block scope + archived status + metadata for structural checks.
 		var targetScope string
@@ -393,6 +483,7 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 			break // TX is in failed state after PG error — cannot continue.
 		}
 		written++
+		keptTargets = append(keptTargets, link.TargetID)
 
 		// ApplySupersedes: mark source block as snapshot when superseded.
 		// Source is the OLD block (Dream Rule 6: "target block is a newer version").
@@ -411,6 +502,15 @@ func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope s
 				"block_id", sourceID,
 				"superseded_by", link.TargetID,
 			)
+		}
+	}
+
+	// Replace-Semantik: only when at least one link was successfully written.
+	// 0-written cycles preserve old links (LLM stochastic empty/all-filtered must
+	// not be destructive — see Pessimist M1).
+	if written > 0 {
+		if err := replaceStaleLinks(ctx, tx, sourceID, keptTargets); err != nil {
+			return 0, err
 		}
 	}
 
