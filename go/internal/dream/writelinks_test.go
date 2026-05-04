@@ -261,8 +261,15 @@ func TestWriteLinks_Causal_SrcNotOlder_Reject(t *testing.T) {
 	}
 }
 
-func TestWriteLinks_InsertError_TxRollback(t *testing.T) {
-	// PG returning INSERT error → break out of loop, TX rolls back, written=0.
+func TestWriteLinks_InsertError_LoopBreaksZeroWritten(t *testing.T) {
+	// PG returning an INSERT error breaks out of the loop and yields
+	// written=0. The test is intentionally narrow: it verifies the SQL-flow
+	// contract (loop breaks, replace-semantics is skipped, Commit is
+	// reached, return value is (0, nil)) but NOT that the transaction
+	// actually rolls back on a real database — pgxmock cannot model PG
+	// rejecting a Commit on an aborted TX. The real-PG behaviour is
+	// covered by TestWriteLinks_TxAbort_BehaviourMatchesContract in the
+	// integration test file.
 	mock := newPool(t)
 	defer mock.Close()
 
@@ -272,17 +279,11 @@ func TestWriteLinks_InsertError_TxRollback(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO context_dream_links`).
 		WithArgs(anyArgs(8)...).
 		WillReturnError(errors.New("constraint violation"))
-	// Loop breaks on PG error → written=0 → no replace-semantics → Commit
-	// fires (deferred Rollback is a no-op afterwards). Real PG would reject
-	// the commit on an aborted TX, but pgxmock cannot model that — verified
-	// instead via written=0 assertion below.
+	// Loop breaks → written=0 → replace-semantics skipped → Commit reached.
 	mock.ExpectCommit()
 
 	written, err := WriteLinks(context.Background(), mock, sourceID, "private", 1.0,
 		[]Link{{TargetID: targetID, Relationship: "topical", Confidence: 0.9}})
-	// INSERT-error is logged (slog.Warn) and the loop breaks; current
-	// implementation returns (0, nil) — written=0 means the audit-log path
-	// is also skipped, which matches expectations.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
