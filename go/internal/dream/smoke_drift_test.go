@@ -51,7 +51,7 @@ func TestParseLinks_RealHistoricalDrift(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			links, err := parseLinks(c.raw)
+			links, _, err := parseLinks(c.raw)
 			if err != nil {
 				t.Fatalf("parse failed: %v", err)
 			}

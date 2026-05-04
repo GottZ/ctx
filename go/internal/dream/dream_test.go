@@ -129,7 +129,7 @@ func TestTokenize_Empty(t *testing.T) {
 
 func TestParseLinks_ValidJSON(t *testing.T) {
 	raw := `[{"target_id":"abc-123","type":"factual","confidence":0.85}]`
-	links, err := parseLinks(raw)
+	links, _, err := parseLinks(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestParseLinks_ValidJSON(t *testing.T) {
 }
 
 func TestParseLinks_EmptyArray(t *testing.T) {
-	links, err := parseLinks("[]")
+	links, _, err := parseLinks("[]")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestParseLinks_EmptyArray(t *testing.T) {
 }
 
 func TestParseLinks_EmptyString(t *testing.T) {
-	links, err := parseLinks("")
+	links, _, err := parseLinks("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestParseLinks_EmptyString(t *testing.T) {
 }
 
 func TestParseLinks_InvalidJSON(t *testing.T) {
-	_, err := parseLinks("not json")
+	_, _, err := parseLinks("not json")
 	if err == nil {
 		t.Error("expected error for invalid JSON")
 	}
@@ -180,7 +180,7 @@ func TestParseLinks_MultipleLinks(t *testing.T) {
 		{"target_id":"b","type":"causal","confidence":0.9},
 		{"target_id":"c","type":"supersedes","confidence":0.95}
 	]`
-	links, err := parseLinks(raw)
+	links, _, err := parseLinks(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestParseLinks_MultipleLinks(t *testing.T) {
 
 func TestParseLinks_ObjectForm_FloatConfidence(t *testing.T) {
 	raw := `{"019d-aaaa":{"type":"topical","confidence":0.9}}`
-	links, err := parseLinks(raw)
+	links, _, err := parseLinks(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestParseLinks_ObjectForm_FloatConfidence(t *testing.T) {
 
 func TestParseLinks_ObjectForm_StringConfidence(t *testing.T) {
 	raw := `{"a":{"type":"supersedes","confidence":"high"},"b":{"type":"topical","confidence":"medium"},"c":{"type":"factual","confidence":"low"}}`
-	links, err := parseLinks(raw)
+	links, _, err := parseLinks(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestParseLinks_ObjectForm_StringConfidence(t *testing.T) {
 
 func TestParseLinks_ObjectForm_Mixed(t *testing.T) {
 	raw := `{"a":{"type":"topical","confidence":0.85},"b":{"type":"causal","confidence":"high"}}`
-	links, err := parseLinks(raw)
+	links, _, err := parseLinks(raw)
 	if err != nil || len(links) != 2 {
 		t.Fatalf("err=%v links=%+v", err, links)
 	}
@@ -237,7 +237,7 @@ func TestParseLinks_ObjectForm_Mixed(t *testing.T) {
 
 func TestParseLinks_ObjectForm_GarbageKey(t *testing.T) {
 	raw := `{"not-a-uuid":{"type":"topical","confidence":0.8}}`
-	links, err := parseLinks(raw)
+	links, _, err := parseLinks(raw)
 	if err != nil {
 		t.Fatalf("non-UUID keys must pass parser (downstream filters): %v", err)
 	}
@@ -248,7 +248,7 @@ func TestParseLinks_ObjectForm_GarbageKey(t *testing.T) {
 
 func TestParseLinks_ObjectForm_UnknownStringConf(t *testing.T) {
 	raw := `{"id":{"type":"topical","confidence":"vibes"}}`
-	links, err := parseLinks(raw)
+	links, _, err := parseLinks(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestParseLinks_ObjectForm_UnknownStringConf(t *testing.T) {
 }
 
 func TestParseLinks_EmptyObject(t *testing.T) {
-	links, err := parseLinks("{}")
+	links, _, err := parseLinks("{}")
 	if err != nil || len(links) != 0 {
 		t.Fatalf("got %v err=%v", links, err)
 	}
@@ -267,7 +267,7 @@ func TestParseLinks_EmptyObject(t *testing.T) {
 func TestParseLinks_ObjectForm_DeterministicOrder(t *testing.T) {
 	raw := `{"c-3":{"type":"topical","confidence":0.7},"a-1":{"type":"topical","confidence":0.7},"b-2":{"type":"topical","confidence":0.7}}`
 	for i := 0; i < 20; i++ {
-		links, err := parseLinks(raw)
+		links, _, err := parseLinks(raw)
 		if err != nil || len(links) != 3 {
 			t.Fatalf("iter %d: err=%v len=%d", i, err, len(links))
 		}
@@ -279,7 +279,7 @@ func TestParseLinks_ObjectForm_DeterministicOrder(t *testing.T) {
 
 func TestParseLinks_CodeFenceArray(t *testing.T) {
 	raw := "```json\n[{\"target_id\":\"id-1\",\"type\":\"factual\",\"confidence\":0.9}]\n```"
-	links, err := parseLinks(raw)
+	links, _, err := parseLinks(raw)
 	if err != nil || len(links) != 1 || links[0].TargetID != "id-1" {
 		t.Fatalf("err=%v links=%+v", err, links)
 	}
@@ -287,7 +287,7 @@ func TestParseLinks_CodeFenceArray(t *testing.T) {
 
 func TestParseLinks_CodeFenceObject(t *testing.T) {
 	raw := "```\n{\"id\":{\"type\":\"causal\",\"confidence\":\"high\"}}\n```"
-	links, err := parseLinks(raw)
+	links, _, err := parseLinks(raw)
 	if err != nil || len(links) != 1 || links[0].Confidence != 0.9 {
 		t.Fatalf("err=%v links=%+v", err, links)
 	}
@@ -315,6 +315,33 @@ func TestCoerceConfidence(t *testing.T) {
 		if got != c.want || ok != c.wantOk {
 			t.Errorf("coerceConfidence(%q): got=(%v,%v), want=(%v,%v)", c.raw, got, ok, c.want, c.wantOk)
 		}
+	}
+}
+
+// --- parseLinks Format-Tag Tests (S25 drift-counter) ---.
+
+func TestParseLinks_FormatTag(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"array", `[{"target_id":"a","type":"factual","confidence":0.9}]`, "array"},
+		{"fenced-array", "```json\n[{\"target_id\":\"a\",\"type\":\"factual\",\"confidence\":0.9}]\n```", "fenced-array"},
+		{"object", `{"a":{"type":"topical","confidence":0.9}}`, "object"},
+		{"fenced-object", "```\n{\"a\":{\"type\":\"causal\",\"confidence\":\"high\"}}\n```", "fenced-object"},
+		{"empty-array", "[]", ""},
+		{"empty-object", "{}", ""},
+		{"empty-string", "", ""},
+		{"parse-error", "not json", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, format, _ := parseLinks(c.raw)
+			if format != c.want {
+				t.Errorf("got %q, want %q", format, c.want)
+			}
+		})
 	}
 }
 

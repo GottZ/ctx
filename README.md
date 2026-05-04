@@ -147,7 +147,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 - **Dream Mode** — continuous autonomous cross-referencing with dual-model support (v3 prompt tuned for qwen3.6:27b non-thinking sampler), adaptive cooldown, supersedes detection, temporal validation, and runtime mode control (on/throttled/off via API). Throttled mode pauses between GPU-intensive steps for thermal management. Config: `CTX_DREAM_IDLE_WAIT` (seconds, default 20)
 - **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results
 - **Embed Cache** — content-hash-keyed embedding cache (`context_embed_cache`) to avoid re-embedding identical text across pipelines
-- **LLM Log** — per-call request/response capture (`context_llm_log`) with input/output token counts (Ollama + OpenAI) and dream-pipeline version tagging, for pipeline debugging + offline benchmark replay
+- **LLM Log** — per-call request/response capture (`context_llm_log`) with input/output token counts (Ollama + OpenAI), dream-pipeline version tagging, and parse-format drift tagging (`metadata.parse_format`: array | object | fenced-array | fenced-object) for pipeline debugging + offline benchmark replay
 - **MCP Remote** — Streamable HTTP transport with OAuth 2.1 PKCE for claude.ai/Claude Code integration. Tools: query, store, search, get, recent. Client registration via `ctx mcp add`. Tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18
 
 ## API

@@ -134,7 +134,13 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 		return nil, fmt.Errorf("dream: evaluate: %w", err)
 	}
 
-	links, err := parseLinks(resp.Message.Content)
+	links, format, err := parseLinks(resp.Message.Content)
+	if format != "" {
+		if entry.Metadata == nil {
+			entry.Metadata = map[string]any{}
+		}
+		entry.Metadata["parse_format"] = format
+	}
 	if err != nil {
 		entry.Err = fmt.Errorf("parse: %w", err)
 		slog.Warn("dream: failed to parse LLM response", "error", err, "raw", resp.Message.Content)
@@ -367,32 +373,53 @@ func buildEvalPrompt(source BlockInfo, candidates []BlockInfo) string {
 	return b.String()
 }
 
+// Format tokens for parseLinks, persisted in context_llm_log.metadata.parse_format
+// to track LLM drift patterns over time. Empty string means "no parseable shape"
+// (parse error or empty/sentinel input — distinguishable via the returned error).
+const (
+	formatArray        = "array"
+	formatObject       = "object"
+	formatFencedArray  = "fenced-array"
+	formatFencedObject = "fenced-object"
+)
+
 // parseLinks parses the LLM JSON response into Link structs.
 // Tolerates two qwen3.6:27b drift patterns observed in V3 production
 // (audit S25, 2026-05-03):
 //   - Object-map form: {"<uuid>": {"type": "...", "confidence": <float|string>}, ...}
 //   - String-encoded confidence labels: "high"|"medium"|"low" → 0.9/0.6/0.3
 //
-// Strips a leading ```json fence if present (43/1481 historical cases).
-// Map→slice conversion sorts by TargetID for deterministic downstream behavior.
-func parseLinks(raw string) ([]Link, error) {
-	raw = stripCodeFence(strings.TrimSpace(raw))
-	if raw == "" || raw == "[]" || raw == "{}" {
-		return nil, nil
+// Strips a leading ```json fence if present (43/1481 historical cases). The fence
+// presence is detected BEFORE stripping so "fenced-X" / "X" can be distinguished
+// in the returned format token.
+//
+// Returns (links, format, err). format is one of formatArray | formatObject |
+// formatFencedArray | formatFencedObject; empty for empty/sentinel inputs and
+// for parse errors. Map→slice conversion sorts by TargetID for deterministic
+// downstream behavior.
+func parseLinks(raw string) ([]Link, string, error) {
+	trimmed := strings.TrimSpace(raw)
+	wasFenced := strings.HasPrefix(trimmed, "```")
+	body := stripCodeFence(trimmed)
+	if body == "" || body == "[]" || body == "{}" {
+		return nil, "", nil
 	}
 
 	var links []Link
-	arrErr := json.Unmarshal([]byte(raw), &links)
+	arrErr := json.Unmarshal([]byte(body), &links)
 	if arrErr == nil {
-		return links, nil
+		if wasFenced {
+			return links, formatFencedArray, nil
+		}
+		return links, formatArray, nil
 	}
 
-	if strings.HasPrefix(raw, "{") {
+	if strings.HasPrefix(body, "{") {
 		var obj map[string]struct {
 			Type       string          `json:"type"`
 			Confidence json.RawMessage `json:"confidence"`
 		}
-		if err := json.Unmarshal([]byte(raw), &obj); err == nil {
+		if err := json.Unmarshal([]byte(body), &obj); err == nil {
 			ids := make([]string, 0, len(obj))
 			for id := range obj {
 				ids = append(ids, id)
@@ -407,11 +434,14 @@ func parseLinks(raw string) ([]Link, error) {
 				}
 				out = append(out, Link{TargetID: id, Relationship: v.Type, Confidence: conf})
 			}
-			return out, nil
+			if wasFenced {
+				return out, formatFencedObject, nil
+			}
+			return out, formatObject, nil
 		}
 	}
 
-	return nil, fmt.Errorf("parse links: %w", arrErr)
+	return nil, "", fmt.Errorf("parse links: %w", arrErr)
 }
 
 // stripCodeFence removes a leading ```json (or ```) fence and trailing ```
