@@ -128,7 +128,7 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 	defer func() { llmlog.Record(pool, *entry) }()
 
 	start := time.Now()
-	resp, err := llm.ChatJSON(ctx, host, apiKey, model, think, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
+	resp, err := chatJSON(ctx, host, apiKey, model, think, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 

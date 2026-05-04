@@ -129,7 +129,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPI
 	defer func() { llmlog.Record(pool, *entry) }()
 
 	start := time.Now()
-	resp, err := llm.ChatJSON(ctx, chatHost, chatAPIKey, chatModel, think, temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
+	resp, err := chatJSON(ctx, chatHost, chatAPIKey, chatModel, think, temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 

@@ -15,6 +15,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// chatJSON is the seam through which the dream pipeline calls the LLM.
+// Tests override this to inject canned ChatResponse values without touching
+// llm.ChatJSON's HTTP transport. Production callers (evaluate, keywords,
+// validate_temporal) use it identically to llm.ChatJSON.
+var chatJSON = llm.ChatJSON
+
 const (
 	// Version marks the Dream pipeline generation. Persisted with every link.
 	// v1 = Pre-Reset (weighted-gate era, Pre-Reset-Audit 2026-04-20: 53% CORRECT at raw>=0.7).

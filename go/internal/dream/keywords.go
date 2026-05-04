@@ -87,7 +87,7 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, host, apiKey, mod
 		}
 
 		start := time.Now()
-		resp, err := llm.ChatJSON(ctx, host, apiKey, model, think, keywordSystemPrompt, userPrompt, opts, KeywordsTimeout)
+		resp, err := chatJSON(ctx, host, apiKey, model, think, keywordSystemPrompt, userPrompt, opts, KeywordsTimeout)
 		duration := time.Since(start)
 
 		dreamVer := int16(Version)
