@@ -31,9 +31,13 @@ const (
 	maxContentLen = 800
 
 	// dreamSystemPrompt instructs the LLM how to evaluate block relationships.
-	// Session 24 (2026-04-23): V5 prompt — topical-as-fallback default, supersedes hard-tightened,
-	// causal liberalised to accept decision→implementation chains. Validated on top-50 hardest
-	// benchmark vs double-judge stable gold: 62.3% accuracy (+19.7pp over baseline 42.6%).
+	// Session 25 (2026-05-04): V6 prompt — adds explicit anti-pattern clauses
+	// to the causal definition to address the 37% NOT-CAUSAL rate found in
+	// 30-sample Sub-Agent audit on V5 production output. Bench against the
+	// audit truth set (binary-judge variant): V6 vs V5 — recall 0.71 vs 0.47,
+	// accuracy 0.70 vs 0.57, FP unchanged at 4 (of which 2 are wrong-direction
+	// dropped by the V9 created_at filter downstream). V5 history: Session 24
+	// validated 62.3% on top-50-hardest stable gold (+19.7pp over baseline 42.6%).
 	dreamSystemPrompt = `Classify relationships between a source block and candidate blocks.
 
 For each candidate, decide which type applies — or skip it.
@@ -41,10 +45,31 @@ For each candidate, decide which type applies — or skip it.
 Default: if a candidate shares meaningful content with source but doesn't clearly fit a stronger type, use "topical".
 
 Types:
+
 - supersedes: source contains a concrete specific fact that target explicitly corrects or replaces. VERY RARE — requires the source fact to be concretely wrong/obsolete AND target to state the authoritative replacement. Thematic update, newer timestamp, or general progress is NOT supersedes.
-- causal: source describes a concrete event, decision, or change whose occurrence enabled target to exist or take its current form. Source must meaningfully predate target. A decision followed by its implementation qualifies. Parallel activity or shared timeline alone does NOT.
+
+- causal: source describes a concrete event, decision, or change whose occurrence ENABLED target to exist or take its current form. ALL of these must hold:
+  1. Source meaningfully predates target in content (not just timestamp).
+  2. Source contains decision/event/change language: "we decided", "after X", "the audit found", "this triggered".
+  3. Target directly implements, executes, or reacts to source's specific content. Target should be the natural follow-up step that source describes or implies.
+
+  REJECT (classify as topical instead) when ANY of these apply:
+  - Both blocks investigate the same problem in parallel — shared focus is not causality.
+  - Both blocks share a domain, technology, or mechanism without one causing the other.
+  - Source provides knowledge that target USES but does not COMPEL target's existence.
+  - Token-match alone: "ssh" in both, "n8n" in both — common vocabulary is not causality.
+  - Audit/discovery and the thing audited — the audit reacts to the system, not vice versa.
+  - Same-session research and a downstream decision — both are responses to the same problem, not cause and effect.
+
+  Examples:
+  ✓ "We will migrate to Go" → "Go migration completed" (decision → implementation)
+  ✓ "Audit found SSH weakness" → "SSH hardening applied" (finding → fix)
+  ✗ "qwen3.5 setup" → "qwen3.5 bug discovered" (parallel observations of same system)
+  ✗ "Translation feature implemented" → "Bilingual gap root cause analysis" (parallel investigation)
+
 - factual: source SPECIFIES a concrete thing (parameter, rule, config, contract, spec) that target directly implements or uses. One-way SPEC→IMPL direction required. Peer-level blocks at the same abstraction are NOT factual — they are topical.
-- topical: both blocks treat the same specific topic substantively. This is the common case for genuinely related blocks that aren't in a spec→impl or cause→effect relationship.
+
+- topical: both blocks treat the same specific topic substantively. This is the common case for genuinely related blocks that aren't in a spec→impl or cause→effect relationship. When in doubt between causal and topical: topical.
 
 Output a JSON array of {target_id, type, confidence}. Empty [] when no candidate relates. Maximum 5 entries.`
 )
