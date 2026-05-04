@@ -14,8 +14,17 @@ import (
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// linkPool is the minimum *pgxpool.Pool surface that WriteLinks needs.
+// The interface lets tests pass a pgxmock-backed pool without exercising a
+// real database. *pgxpool.Pool implicitly satisfies it.
+type linkPool interface {
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // uuidPattern validates UUID format for target_id fields.
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -412,7 +421,7 @@ func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarg
 // would obscure the per-link decision flow without reducing real complexity.
 //
 //nolint:cyclop // pipeline function with linear V5/V6/V8/V9/V10 filter chain
-func WriteLinks(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceScope string, sourceQuality float64, links []Link) (int, error) {
+func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string, sourceQuality float64, links []Link) (int, error) {
 	if len(links) == 0 {
 		return 0, nil
 	}
