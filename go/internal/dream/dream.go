@@ -40,8 +40,10 @@ const (
 	// MaxCandidatesPerKeyword limits RRF results per keyword search.
 	MaxCandidatesPerKeyword = 5
 
-	// MaxLinks caps the number of links created per cycle.
-	MaxLinks = 5
+	// MaxLinksPerCycle caps the number of links created per cycle.
+	// Enforced in EvaluateRelationships after confidence filtering, sorted by
+	// confidence DESC with type-diversity tie-break.
+	MaxLinksPerCycle = 5
 )
 
 // BlockInfo holds the fields Dream needs from a block.

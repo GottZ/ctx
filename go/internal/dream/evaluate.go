@@ -173,7 +173,75 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 		valid = append(valid, l)
 	}
 
+	if capped, dropped := applyHardCap(valid, MaxLinksPerCycle); dropped > 0 {
+		if entry.Metadata == nil {
+			entry.Metadata = map[string]any{}
+		}
+		entry.Metadata["links_capped"] = dropped
+		valid = capped
+	}
+
 	return valid, nil
+}
+
+// applyHardCap caps a link slice to max entries with tier-local
+// type-diversity tie-break. Returns the (possibly trimmed) slice and the
+// number of dropped entries. Output is confidence-DESC sorted.
+//
+// Algorithm:
+//  1. Sort stable by Confidence DESC.
+//  2. Walk equal-confidence tiers. Within each tier, prefer types not yet
+//     present in the output, then duplicates of already-picked types. The
+//     "seen" set is rebuilt PER TIER from the output — diversity preference
+//     applies only at the tie-break boundary; a higher-confidence link is
+//     never displaced by a lower-confidence link from a different type.
+//  3. Stop when cap is reached.
+//
+// This addresses the V3 topical-monoculture (86% live) at quantisation tiers
+// (qwen3.6 emits {0.7, 0.75, 0.8, 0.85, 0.9, 0.95}) without sacrificing
+// confidence ordering. Below cap: input returned untouched.
+func applyHardCap(links []Link, max int) ([]Link, int) {
+	if len(links) <= max {
+		return links, 0
+	}
+	sort.SliceStable(links, func(i, j int) bool {
+		return links[i].Confidence > links[j].Confidence
+	})
+	out := make([]Link, 0, max)
+	i := 0
+	for i < len(links) && len(out) < max {
+		tierEnd := i + 1
+		for tierEnd < len(links) && links[tierEnd].Confidence == links[i].Confidence {
+			tierEnd++
+		}
+		seen := make(map[string]bool, len(out))
+		for _, l := range out {
+			seen[l.Relationship] = true
+		}
+		var novel, dup []Link
+		for _, l := range links[i:tierEnd] {
+			if !seen[l.Relationship] {
+				novel = append(novel, l)
+				seen[l.Relationship] = true
+			} else {
+				dup = append(dup, l)
+			}
+		}
+		for _, l := range novel {
+			if len(out) >= max {
+				break
+			}
+			out = append(out, l)
+		}
+		for _, l := range dup {
+			if len(out) >= max {
+				break
+			}
+			out = append(out, l)
+		}
+		i = tierEnd
+	}
+	return out, len(links) - len(out)
 }
 
 // WriteLinks persists dream links to the database within a transaction.

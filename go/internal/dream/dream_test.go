@@ -345,6 +345,137 @@ func TestParseLinks_FormatTag(t *testing.T) {
 	}
 }
 
+// --- applyHardCap Tests (S25 Welle 4 — Hard-Cap with Type-Diversity Tie-Break) ---.
+
+func TestApplyHardCap_NoOpUnderCap(t *testing.T) {
+	in := []Link{
+		{TargetID: "a", Relationship: "topical", Confidence: 0.7},
+		{TargetID: "b", Relationship: "factual", Confidence: 0.95},
+		{TargetID: "c", Relationship: "topical", Confidence: 0.8},
+	}
+	out, dropped := applyHardCap(in, 5)
+	if dropped != 0 {
+		t.Errorf("under cap: dropped=%d, want 0", dropped)
+	}
+	if len(out) != 3 {
+		t.Errorf("under cap: len=%d, want 3", len(out))
+	}
+	if out[0].TargetID != "a" || out[1].TargetID != "b" || out[2].TargetID != "c" {
+		t.Errorf("under cap: order changed: %+v", out)
+	}
+}
+
+func TestApplyHardCap_TrimsByConfidence(t *testing.T) {
+	in := []Link{
+		{TargetID: "low1", Relationship: "topical", Confidence: 0.71},
+		{TargetID: "high1", Relationship: "topical", Confidence: 0.95},
+		{TargetID: "mid1", Relationship: "topical", Confidence: 0.80},
+		{TargetID: "low2", Relationship: "topical", Confidence: 0.72},
+		{TargetID: "mid2", Relationship: "topical", Confidence: 0.88},
+		{TargetID: "high2", Relationship: "topical", Confidence: 0.99},
+		{TargetID: "low3", Relationship: "topical", Confidence: 0.75},
+		{TargetID: "mid3", Relationship: "topical", Confidence: 0.91},
+	}
+	out, dropped := applyHardCap(in, 5)
+	if dropped != 3 {
+		t.Errorf("dropped=%d, want 3", dropped)
+	}
+	if len(out) != 5 {
+		t.Fatalf("len=%d, want 5", len(out))
+	}
+	wantConfs := []float64{0.99, 0.95, 0.91, 0.88, 0.80}
+	for i, l := range out {
+		if l.Confidence != wantConfs[i] {
+			t.Errorf("pos %d: conf=%v, want %v", i, l.Confidence, wantConfs[i])
+		}
+	}
+}
+
+func TestApplyHardCap_TypeDiversityWithinTier(t *testing.T) {
+	// 6 Links all at conf=0.9; one of each non-topical type, three topical.
+	// Diversity tie-break must pick one of each type before second topical.
+	in := []Link{
+		{TargetID: "t1", Relationship: "topical", Confidence: 0.9},
+		{TargetID: "t2", Relationship: "topical", Confidence: 0.9},
+		{TargetID: "t3", Relationship: "topical", Confidence: 0.9},
+		{TargetID: "f1", Relationship: "factual", Confidence: 0.9},
+		{TargetID: "c1", Relationship: "causal", Confidence: 0.9},
+		{TargetID: "s1", Relationship: "supersedes", Confidence: 0.9},
+	}
+	out, dropped := applyHardCap(in, 5)
+	if dropped != 1 {
+		t.Errorf("dropped=%d, want 1", dropped)
+	}
+	if len(out) != 5 {
+		t.Fatalf("len=%d, want 5", len(out))
+	}
+	typeCounts := map[string]int{}
+	for _, l := range out {
+		typeCounts[l.Relationship]++
+	}
+	for _, typ := range []string{"topical", "factual", "causal", "supersedes"} {
+		if typeCounts[typ] < 1 {
+			t.Errorf("type %q missing in cap output: %v", typ, typeCounts)
+		}
+	}
+	if typeCounts["topical"] != 2 {
+		t.Errorf("topical count=%d, want 2 (filling 5th slot)", typeCounts["topical"])
+	}
+}
+
+func TestApplyHardCap_DiversityRespectsTierBoundary(t *testing.T) {
+	// High-conf topicals must not be displaced by lower-conf factual just for
+	// diversity sake. Tier 0.95: 4× topical → take all 4 (no other type at this conf).
+	// Tier 0.80: 2× factual → 5th slot goes to one factual (any).
+	in := []Link{
+		{TargetID: "t1", Relationship: "topical", Confidence: 0.95},
+		{TargetID: "t2", Relationship: "topical", Confidence: 0.95},
+		{TargetID: "t3", Relationship: "topical", Confidence: 0.95},
+		{TargetID: "t4", Relationship: "topical", Confidence: 0.95},
+		{TargetID: "f1", Relationship: "factual", Confidence: 0.80},
+		{TargetID: "f2", Relationship: "factual", Confidence: 0.80},
+	}
+	out, dropped := applyHardCap(in, 5)
+	if dropped != 1 {
+		t.Errorf("dropped=%d, want 1", dropped)
+	}
+	if len(out) != 5 {
+		t.Fatalf("len=%d, want 5", len(out))
+	}
+	// First 4 are 0.95 topicals; 5th is one of the 0.80 factuals.
+	for i := 0; i < 4; i++ {
+		if out[i].Confidence != 0.95 || out[i].Relationship != "topical" {
+			t.Errorf("pos %d: %+v, want 0.95 topical", i, out[i])
+		}
+	}
+	if out[4].Confidence != 0.80 || out[4].Relationship != "factual" {
+		t.Errorf("pos 4: %+v, want 0.80 factual", out[4])
+	}
+}
+
+func TestApplyHardCap_Deterministic(t *testing.T) {
+	in := []Link{
+		{TargetID: "a", Relationship: "topical", Confidence: 0.9},
+		{TargetID: "b", Relationship: "topical", Confidence: 0.9},
+		{TargetID: "c", Relationship: "topical", Confidence: 0.9},
+		{TargetID: "d", Relationship: "factual", Confidence: 0.9},
+		{TargetID: "e", Relationship: "causal", Confidence: 0.9},
+		{TargetID: "f", Relationship: "supersedes", Confidence: 0.9},
+	}
+	first, _ := applyHardCap(append([]Link(nil), in...), 5)
+	for i := 0; i < 50; i++ {
+		out, _ := applyHardCap(append([]Link(nil), in...), 5)
+		if len(out) != len(first) {
+			t.Fatalf("iter %d: len differs: %d vs %d", i, len(out), len(first))
+		}
+		for j := range out {
+			if out[j].TargetID != first[j].TargetID {
+				t.Errorf("iter %d pos %d: %s vs %s", i, j, out[j].TargetID, first[j].TargetID)
+			}
+		}
+	}
+}
+
 // --- Link validation Tests ---.
 
 func TestValidRelationships(t *testing.T) {
