@@ -177,66 +177,14 @@ func TestWriteLinks_FactualSameCategory_CoercedToTopical(t *testing.T) {
 	}
 }
 
-func TestWriteLinks_Supersedes_GatePass_InsertsAndMarksSnapshot(t *testing.T) {
-	// V8 supersedes pass: same cat + src older + similarity ≥ 0.25
-	// → INSERT + UPDATE block_type='snapshot'.
-	mock := newPool(t)
-	defer mock.Close()
-
-	mock.ExpectBegin()
-	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "old title")
-	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "old title v2")
-	// V8 similarity probe.
-	mock.ExpectQuery(`SELECT similarity\(\$1, \$2\)`).
-		WithArgs("old title", "old title v2").
-		WillReturnRows(mock.NewRows([]string{"similarity"}).AddRow(0.7))
-	expectInsertLink(mock)
-	// ApplySupersedes UPDATE (raw conf 0.95 * 1.0 * 1.0 ≥ 0.7).
-	mock.ExpectExec(`UPDATE context_blocks SET block_type = 'snapshot'`).
-		WithArgs(sourceID, targetID).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	expectDeleteStaleNonEmpty(mock)
-	mock.ExpectCommit()
-	expectAuditLog(mock)
-
-	written, err := WriteLinks(context.Background(), mock, sourceID, "private", 1.0,
-		[]Link{{TargetID: targetID, Relationship: "supersedes", Confidence: 0.95}})
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	if written != 1 {
-		t.Errorf("got written=%d, want 1", written)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("expectations: %v", err)
-	}
-}
-
-func TestWriteLinks_Supersedes_LowSimilarity_Reject(t *testing.T) {
-	// V8 reject path: similarity below 0.25 floor.
-	mock := newPool(t)
-	defer mock.Close()
-
-	mock.ExpectBegin()
-	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
-	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
-	mock.ExpectQuery(`SELECT similarity`).
-		WithArgs(anyArgs(2)...).
-		WillReturnRows(mock.NewRows([]string{"similarity"}).AddRow(0.10))
-	mock.ExpectCommit()
-
-	written, err := WriteLinks(context.Background(), mock, sourceID, "private", 1.0,
-		[]Link{{TargetID: targetID, Relationship: "supersedes", Confidence: 0.9}})
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	if written != 0 {
-		t.Errorf("low-similarity supersedes must not write, got %d", written)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("expectations: %v", err)
-	}
-}
+// V8 supersedes-gate behaviour (similarity ≥ 0.25 → insert; < 0.25 → reject)
+// is now covered by TestWriteLinks_Supersedes_RealSimilarity_BehaviourMatchesContract
+// in writelinks_integration_test.go, which exercises the real pg_trgm
+// extension instead of stubbing similarity() returns. The pgxmock-layer
+// equivalents (TestWriteLinks_Supersedes_GatePass_InsertsAndMarksSnapshot,
+// TestWriteLinks_Supersedes_LowSimilarity_Reject) were removed — pgxmock
+// cannot tell us whether similarity() works against real text, only
+// whether WriteLinks calls it with the expected arguments.
 
 func TestWriteLinks_Causal_SrcNotOlder_Reject(t *testing.T) {
 	// V9 reject path: source created_at NOT before target.
@@ -295,37 +243,13 @@ func TestWriteLinks_InsertError_LoopBreaksZeroWritten(t *testing.T) {
 	}
 }
 
-func TestWriteLinks_ReplaceSemantics_StaleDeleted_OnSuccess(t *testing.T) {
-	// On written>0: DELETE removes context_dream_links rows for sourceID
-	// not in keptTargets. Verified via WithArgs + non-empty stale return.
-	mock := newPool(t)
-	defer mock.Close()
-
-	mock.ExpectBegin()
-	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
-	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
-	expectInsertLink(mock)
-	// DELETE returns one stale topical row → no snapshot revert needed.
-	staleRows := mock.NewRows([]string{"target_block_id", "relationship"}).
-		AddRow(otherID, "topical")
-	mock.ExpectQuery(`DELETE FROM context_dream_links`).
-		WithArgs(anyArgs(2)...).
-		WillReturnRows(staleRows)
-	mock.ExpectCommit()
-	expectAuditLog(mock)
-
-	written, err := WriteLinks(context.Background(), mock, sourceID, "private", 1.0,
-		[]Link{{TargetID: targetID, Relationship: "topical", Confidence: 0.9}})
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	if written != 1 {
-		t.Errorf("got %d, want 1", written)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("expectations: %v", err)
-	}
-}
+// Replace-semantics on success (DELETE with != ALL($2::uuid[]) clause + the
+// kept-targets array) is now covered by
+// TestWriteLinks_ReplaceSemantics_RealUUIDs_BehaviourMatchesContract in
+// writelinks_integration_test.go, which checks the surviving row against
+// real UUID arrays. The pgxmock variant
+// (TestWriteLinks_ReplaceSemantics_StaleDeleted_OnSuccess) was removed —
+// pgxmock matches the SQL string but cannot evaluate UUID-array semantics.
 
 func TestWriteLinks_ReplaceSemantics_NotTriggered_OnZeroWritten(t *testing.T) {
 	// 0-written cycle (e.g. all rejected by gates) MUST NOT delete stale
@@ -352,40 +276,14 @@ func TestWriteLinks_ReplaceSemantics_NotTriggered_OnZeroWritten(t *testing.T) {
 	}
 }
 
-func TestWriteLinks_SnapshotRevert_OnDeletedSupersedesLink(t *testing.T) {
-	// When the DELETE returns a stale supersedes row, replaceStaleLinks
-	// must also UPDATE context_blocks to revert block_type='snapshot'.
-	mock := newPool(t)
-	defer mock.Close()
-
-	mock.ExpectBegin()
-	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
-	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
-	expectInsertLink(mock)
-	// DELETE returns a stale supersedes row → triggers revert UPDATE.
-	staleRows := mock.NewRows([]string{"target_block_id", "relationship"}).
-		AddRow(otherID, "supersedes")
-	mock.ExpectQuery(`DELETE FROM context_dream_links`).
-		WithArgs(anyArgs(2)...).
-		WillReturnRows(staleRows)
-	mock.ExpectExec(`UPDATE context_blocks\s+SET block_type = NULL, superseded_by = NULL`).
-		WithArgs(sourceID, otherID).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectCommit()
-	expectAuditLog(mock)
-
-	written, err := WriteLinks(context.Background(), mock, sourceID, "private", 1.0,
-		[]Link{{TargetID: targetID, Relationship: "topical", Confidence: 0.9}})
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	if written != 1 {
-		t.Errorf("got %d, want 1", written)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("expectations: %v", err)
-	}
-}
+// Snapshot-revert lifecycle (write → idempotent re-write → revert on next
+// non-supersedes write) is now covered by
+// TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract in
+// writelinks_integration_test.go, which exercises the full sequence
+// against real PG. The pgxmock variant
+// (TestWriteLinks_SnapshotRevert_OnDeletedSupersedesLink) was removed —
+// it matched the SQL strings but couldn't verify real WHERE-clause
+// semantics across rows or the no-drift property of the idempotent step.
 
 func TestWriteLinks_BeginTxError_PropagatesWrapped(t *testing.T) {
 	mock := newPool(t)
