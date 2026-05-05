@@ -121,7 +121,7 @@ jobs:
       - name: Cache testcontainers Docker images
         uses: ScribeMD/docker-cache@fb28c93772363301b8d0a6072ce850224b73f74e # 0.5.0
         with:
-          key: docker-testcontainers-pgvector-pg17-${{ runner.os }}
+          key: docker-testcontainers-timescale-pg18-${{ runner.os }}
 
       - name: Run integration tests
         working-directory: go

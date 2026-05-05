@@ -19,9 +19,12 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 )
 
-// defaultImage is the production-identical Postgres image (pgvector +
-// TimescaleDB on PG18). Override via CTX_TEST_PG_IMAGE for CI portability.
-const defaultImage = "pgvector-timescaledb:pg18"
+// defaultImage is a publicly pullable Postgres image with TimescaleDB and
+// pgvector pre-installed (timescale/timescaledb-ha tracks both). Production
+// uses a locally built `pgvector-timescaledb:pg18` image with the same
+// extension set; override via CTX_TEST_PG_IMAGE to test against that image
+// when running locally.
+const defaultImage = "timescale/timescaledb-ha:pg18"
 
 // SetupTestDB starts a fresh Postgres container with all ctx migrations
 // applied and returns a connected pgxpool.Pool. The container is stopped
