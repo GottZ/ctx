@@ -187,6 +187,83 @@ func TestComputeGravity_MultipleDates(t *testing.T) {
 	}
 }
 
+func TestComputeGravity_BackwardPowerScalesWithAge(t *testing.T) {
+	// Forward Telescoping (Branch Y / B4 #2): older blocks get wider decay,
+	// so a single past-date scoring increases with age (within cutoff).
+	// power(30d) = 1.5 / (1 + 0.3*ln(1+1)) = 1.5 / 1.208 ≈ 1.241
+	// power(180d) = 1.5 / (1 + 0.3*ln(7)) = 1.5 / 1.583 ≈ 0.948
+	target := mustDate("2026-03-29")
+	params := GravityParams{
+		TargetDate: target,
+		Direction:  "past",
+		Cutoff:     365,
+		Power:      1.5,
+	}
+
+	cases := []struct {
+		name      string
+		date      time.Time
+		minPower  float64 // assert effPower below this
+		maxPower  float64 // assert effPower above this
+	}{
+		{"30d", target.Add(-30 * 24 * time.Hour), 1.20, 1.30},
+		{"180d", target.Add(-180 * 24 * time.Hour), 0.92, 1.00},
+		{"365d", target.Add(-365 * 24 * time.Hour), 0.83, 0.92},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			score := ComputeGravity([]time.Time{c.date}, params)
+			// Reverse-engineer the effective power from the score.
+			// score = 1 / dist^p → p = -log(score) / log(dist)
+			distDays := -c.date.Sub(target).Hours() / 24.0
+			expectedP := -math.Log(score) / math.Log(distDays)
+			if expectedP < c.minPower || expectedP > c.maxPower {
+				t.Errorf("%s effPower=%v not in [%v, %v] (score=%v)",
+					c.name, expectedP, c.minPower, c.maxPower, score)
+			}
+		})
+	}
+}
+
+func TestComputeGravity_OlderBoostedMoreThanLinear(t *testing.T) {
+	// 90-day-old block under power-only=1.5 vs Branch-Y age-scaled.
+	// Pre-Y:  score = 1 / 90^1.5  ≈ 0.00117
+	// Post-Y: power(90d) = 1.5 / (1 + 0.3*ln(4)) = 1.5 / 1.416 ≈ 1.060
+	//         score = 1 / 90^1.060 ≈ 0.00919
+	// Both correctly under cutoff=365.
+	target := mustDate("2026-03-29")
+	dates := []time.Time{target.Add(-90 * 24 * time.Hour)}
+	params := GravityParams{
+		TargetDate: target,
+		Direction:  "past",
+		Cutoff:     365,
+		Power:      1.5,
+	}
+	score := ComputeGravity(dates, params)
+	// Old code would give 1/90^1.5 ≈ 0.00117 — Branch Y must be higher.
+	if score < 0.005 {
+		t.Errorf("90d-old block gravity=%v, expected >0.005 (forward telescoping should boost older)", score)
+	}
+}
+
+func TestComputeGravity_ForwardUnchangedFromBranchY(t *testing.T) {
+	// Branch Y only modifies backward decay. Forward keeps power*1.2 = 1.8.
+	target := mustDate("2026-03-29")
+	dates := []time.Time{target.Add(10 * 24 * time.Hour)} // 10d future
+	params := GravityParams{
+		TargetDate: target,
+		Direction:  "future",
+		Cutoff:     60,
+		Power:      1.5,
+	}
+	score := ComputeGravity(dates, params)
+	expected := 1.0 / math.Pow(10, 1.8) // ≈ 0.01585
+	if math.Abs(score-expected) > 1e-4 {
+		t.Errorf("forward 10d gravity=%v, want %v (1/10^1.8 unchanged)", score, expected)
+	}
+}
+
 func TestComputeGravity_MinDistance(t *testing.T) {
 	target := mustDate("2026-03-29")
 	// Same date → distance 0, clamped to 0.5

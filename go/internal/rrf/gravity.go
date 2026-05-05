@@ -35,6 +35,19 @@ type GravityParams struct {
 // ComputeGravity returns the total gravitational score for a set of dates
 // relative to a target date. Distance-only formula (no mass).
 // Pure function, no DB access.
+//
+// Forward Telescoping (B4 #2 / B5): older memories are coarser. The backward
+// power is scaled down by 1 + 0.3*ln(1 + age_days/30) so older blocks get a
+// wider gravitational well — matches Rubin & Baddeley 1989's age-dependent
+// imprecision. Forward dates keep the 1.2× sharper cutoff (no telescoping
+// of the future).
+//
+// Power profile by age (backward only, base power=1.5):
+//
+//	age=1d    → power=1.49 (≈unchanged)
+//	age=30d   → power=1.24
+//	age=180d  → power=0.97
+//	age=365d  → power=0.86
 func ComputeGravity(dates []time.Time, params GravityParams) float64 {
 	if len(dates) == 0 {
 		return 0
@@ -60,10 +73,15 @@ func ComputeGravity(dates []time.Time, params GravityParams) float64 {
 			continue
 		}
 
-		// Asymmetric power: future decays 20% faster
-		effPower := params.Power
+		// Asymmetric power:
+		//   future (distDays >= 0): 1.2× sharper cutoff (existing behavior)
+		//   backward: age-scaled wider decay (Branch Y Forward Telescoping)
+		var effPower float64
 		if distDays >= 0 {
 			effPower = params.Power * 1.2
+		} else {
+			age := -distDays // positive number of days into the past
+			effPower = params.Power / (1.0 + 0.3*math.Log1p(age/30.0))
 		}
 
 		// Minimum distance 0.5 days to avoid singularity
