@@ -4,6 +4,7 @@
 # Usage: bash eval.sh                  — full eval (retrieval + synthesis)
 #        bash eval.sh --retrieval-only  — skip synthesis tests (faster)
 #        bash eval.sh --update-baseline — run + save results as new baseline
+#        bash eval.sh --internal        — bypass reverse-proxy (use ctx container IP)
 #
 # Requires: curl, python3, jq (optional, python3 fallback)
 # Runtime: ~3-5 minutes (Ollama on-prem, sequential queries)
@@ -23,19 +24,30 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 set -a; source "$ENV_FILE"; set +a
 
-WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost}"
 KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}"
 BASELINE_FILE="/compose/n8n/.eval-baseline.json"
 RESULTS_FILE="/tmp/eval-results-$(date +%s).json"
 
 RETRIEVAL_ONLY=false
 UPDATE_BASELINE=false
+INTERNAL=false
 for arg in "$@"; do
   case "$arg" in
     --retrieval-only) RETRIEVAL_ONLY=true ;;
     --update-baseline) UPDATE_BASELINE=true ;;
+    --internal) INTERNAL=true ;;
   esac
 done
+
+# Webhook selection: --internal bypasses the reverse-proxy that drops 22-67% of
+# LLM responses (Welle 35). 172.32.16.4 is the ctx container IP — valid in the
+# n8nintern compose network. Verify via:
+#   docker inspect ctx --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+if $INTERNAL; then
+  WEBHOOK="http://172.32.16.4:8080"
+else
+  WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost}"
+fi
 
 # =====================================================================
 # Helpers

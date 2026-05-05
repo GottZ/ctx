@@ -6,6 +6,7 @@
 #        bash eval-cyclic.sh --gold <path>         — alternatives Gold-File
 #        bash eval-cyclic.sh --reference-date YYYY-MM-DD — frozen reference date
 #        bash eval-cyclic.sh --branch <name>       — overrides git-branch im Output
+#        bash eval-cyclic.sh --internal            — bypass reverse-proxy (use ctx container IP)
 #
 # Misst Top-K-Overlap (k=5) gegen .eval-cyclic-gold.json.
 # Bewertungs-Methodologie: .project/eval-cyclic-methodology.md
@@ -22,6 +23,7 @@ TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 REFERENCE_DATE=""
 WRITE_BASELINE=false
 BRANCH_OVERRIDE=""
+INTERNAL=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -29,7 +31,8 @@ while [[ $# -gt 0 ]]; do
     --gold) GOLD_FILE="$2"; shift 2 ;;
     --reference-date) REFERENCE_DATE="$2"; shift 2 ;;
     --branch) BRANCH_OVERRIDE="$2"; shift 2 ;;
-    -h|--help) sed -n '1,15p' "$0"; exit 0 ;;
+    --internal) INTERNAL=true; shift ;;
+    -h|--help) sed -n '1,16p' "$0"; exit 0 ;;
     *) echo "[FATAL] unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -45,7 +48,15 @@ if [[ ! -f "$GOLD_FILE" ]]; then
   exit 1
 fi
 
-WEBHOOK="${WEBHOOK_BASE_URL:?WEBHOOK_BASE_URL not in .env}"
+# Webhook selection: --internal bypasses the reverse-proxy that drops 22-67% of
+# LLM responses (Welle 35). 172.32.16.4 is the ctx container IP — valid in the
+# n8nintern compose network. Verify via:
+#   docker inspect ctx --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+if $INTERNAL; then
+  WEBHOOK="http://172.32.16.4:8080"
+else
+  WEBHOOK="${WEBHOOK_BASE_URL:?WEBHOOK_BASE_URL not in .env}"
+fi
 KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not in .env}"
 GIT_REF="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 BRANCH="${BRANCH_OVERRIDE:-$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)}"
