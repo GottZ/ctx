@@ -3,7 +3,10 @@ package llm
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,12 +18,6 @@ const (
 	// MaxBlockChars is the maximum content length per source in the LLM prompt.
 	MaxBlockChars = 1500
 
-	// ScoreThreshold is the minimum RRF score for a source to be included.
-	ScoreThreshold = 0.005
-
-	// ConfidentThreshold is the minimum RRF score for "confident" classification.
-	ConfidentThreshold = 0.008
-
 	// LowConfidenceMaxSources limits sources for low-confidence queries.
 	LowConfidenceMaxSources = 2
 
@@ -30,6 +27,31 @@ const (
 	// noRelevantReplacement is the German replacement text for rejected queries.
 	noRelevantReplacement = "Die verfuegbaren Quellen enthalten keine Antwort auf diese Frage."
 )
+
+// ScoreThreshold is the minimum RRF score for a source to be included.
+// Overridable via env CTX_SCORE_THRESHOLD (default: 0.005).
+var ScoreThreshold = 0.005
+
+// ConfidentThreshold is the minimum RRF score for "confident" classification.
+// Overridable via env CTX_CONFIDENT_THRESHOLD (default: 0.008).
+var ConfidentThreshold = 0.008
+
+func init() {
+	if v, ok := os.LookupEnv("CTX_SCORE_THRESHOLD"); ok && v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			ScoreThreshold = parsed
+		} else {
+			log.Printf("synthesize: invalid CTX_SCORE_THRESHOLD=%q (%v), using fallback %v", v, err, ScoreThreshold)
+		}
+	}
+	if v, ok := os.LookupEnv("CTX_CONFIDENT_THRESHOLD"); ok && v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			ConfidentThreshold = parsed
+		} else {
+			log.Printf("synthesize: invalid CTX_CONFIDENT_THRESHOLD=%q (%v), using fallback %v", v, err, ConfidentThreshold)
+		}
+	}
+}
 
 // Confidence levels for query results.
 const (
