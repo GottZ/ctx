@@ -41,7 +41,12 @@ func SetupTestDB(t *testing.T) *pgxpool.Pool {
 		image = v
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	// Generous bounds: GitHub Actions pulls the timescale-ha image cold on a
+	// cache miss (~1.2 GB), which dominates the per-test budget. Local runs
+	// with a warm cache use <5s of this. The startup-log wait is also
+	// extended because timescaledb-ha runs additional bootstrapping between
+	// initdb and the second ready-log compared to plain pgvector/pgvector.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	container, err := tcpostgres.Run(ctx, image,
@@ -51,7 +56,7 @@ func SetupTestDB(t *testing.T) *pgxpool.Pool {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second),
+				WithStartupTimeout(3*time.Minute),
 		),
 	)
 	if err != nil {
