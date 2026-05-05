@@ -1,22 +1,46 @@
 #!/bin/sh
-# Pre-push hook: enforce annotated tags with real messages for version tags.
+# Pre-push hook — enforces two release-discipline rules:
 #
-# Version tags (refs/tags/v*) become GitHub Releases via CI. The release body
-# is extracted from the tag annotation. Lightweight tags have no annotation →
-# fallback "Release vX.Y.Z" body (useless). Trivially short annotations also
-# produce useless release notes.
+#   1. Branch pushes (refs/heads/*) require an annotated v* tag pointing at
+#      the pushed HEAD. Either the tag already exists on origin (no-op for
+#      the tag, just the branch moves) or it is part of the same `git push`.
+#      Without this, fix-commits land on origin without ever appearing in a
+#      release — exactly the regression that produced commits past v1.0.2
+#      with no v1.0.3 tag.
 #
-# Rule: pushed version tags MUST be annotated AND message body must be
-# substantial (>= 80 chars, typically multi-line with technical details).
+#   2. Pushed version tags (refs/tags/v*) must be annotated AND carry a
+#      substantial body (>= 80 chars). GitHub Releases inline the tag
+#      annotation; lightweight or terse tags become useless release notes.
 #
-# Bypass: git push --no-verify
+# Bypass: `git push --no-verify` — use sparingly, and only when an emergency
+# revert needs to land before tagging is feasible. Routine work tags first.
 
 MIN_MSG_LENGTH=80
 REJECTED=0
 
-# Read refs from stdin (git passes: local_ref local_sha remote_ref remote_sha)
+# First pass: collect all refs being pushed in this invocation. We need the
+# tag set to know whether a branch push is paired with its tag.
+TMP_REFS=$(mktemp)
+trap 'rm -f "$TMP_REFS"' EXIT
+
 while read local_ref local_sha remote_ref remote_sha; do
-    # Only check tag pushes matching version pattern.
+    printf '%s %s %s %s\n' "$local_ref" "$local_sha" "$remote_ref" "$remote_sha" >> "$TMP_REFS"
+done
+
+# Build a list of v* tag SHAs being pushed, so the branch check can credit
+# them even if `git tag --points-at` doesn't see the tag yet on origin.
+PUSHED_TAG_TARGETS=$(awk '
+    $3 ~ /^refs\/tags\/v/ {
+        # local_sha is either the tag object (annotated) or the commit it
+        # points at (lightweight). Resolve to the underlying commit.
+        cmd = "git rev-parse " $2 "^{commit} 2>/dev/null"
+        cmd | getline target
+        close(cmd)
+        if (target != "") print target
+    }
+' "$TMP_REFS")
+
+while read local_ref local_sha remote_ref remote_sha; do
     case "$remote_ref" in
         refs/tags/v*)
             TAG_NAME=$(echo "$remote_ref" | sed 's|refs/tags/||')
@@ -65,8 +89,52 @@ while read local_ref local_sha remote_ref remote_sha; do
                 continue
             fi
             ;;
+
+        refs/heads/*)
+            BRANCH_NAME=$(echo "$remote_ref" | sed 's|refs/heads/||')
+
+            # Skip branch-deletion pushes (local_sha is all-zeros).
+            case "$local_sha" in
+                0000000000000000000000000000000000000000) continue ;;
+            esac
+
+            # Resolve HEAD to a commit SHA for tag lookup.
+            HEAD_COMMIT=$(git rev-parse "$local_sha^{commit}" 2>/dev/null)
+            [ -z "$HEAD_COMMIT" ] && continue
+
+            # Tag credit: any local v* tag pointing at HEAD, OR any v* tag
+            # being pushed in the same invocation whose target equals HEAD.
+            LOCAL_TAG=$(git tag --points-at "$HEAD_COMMIT" --list 'v*' 2>/dev/null | head -1)
+            SAME_PUSH_TAG=$(printf '%s\n' "$PUSHED_TAG_TARGETS" | grep -Fx "$HEAD_COMMIT" | head -1)
+
+            if [ -z "$LOCAL_TAG" ] && [ -z "$SAME_PUSH_TAG" ]; then
+                SHORT=$(git rev-parse --short "$HEAD_COMMIT")
+                LAST_TAG=$(git describe --tags --abbrev=0 "$HEAD_COMMIT" 2>/dev/null || echo "<none>")
+                AHEAD=$(git rev-list --count "${LAST_TAG}..${HEAD_COMMIT}" 2>/dev/null || echo "?")
+                echo ""
+                echo "pre-push: REJECTED — branch $BRANCH_NAME HEAD ($SHORT) carries no v* tag"
+                echo ""
+                echo "  Last tag reachable: $LAST_TAG ($AHEAD commit(s) behind HEAD)"
+                echo ""
+                echo "  Every commit that lands on origin must be part of a release."
+                echo "  Tag the HEAD before pushing, then push branch and tag together:"
+                echo ""
+                echo "    git tag -a vX.Y.Z -m \"\$(cat <<EOF"
+                echo "    vX.Y.Z — Kurzer Titel"
+                echo ""
+                echo "    Was ist neu (2-3 Saetze, technische Details, mind. 80 Zeichen)."
+                echo "    EOF"
+                echo "    )\""
+                echo "    git push origin $BRANCH_NAME vX.Y.Z"
+                echo ""
+                echo "  Bypass for emergency reverts only: git push --no-verify"
+                echo ""
+                REJECTED=1
+                continue
+            fi
+            ;;
     esac
-done
+done < "$TMP_REFS"
 
 if [ "$REJECTED" -eq 1 ]; then
     echo "pre-push: push blocked. Use --no-verify to bypass (use sparingly)."
