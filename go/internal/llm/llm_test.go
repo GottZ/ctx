@@ -47,7 +47,7 @@ func TestClassifyConfidence(t *testing.T) {
 		{"just below confident", 0.0079, ConfidenceLow},
 		{"mid low confidence", 0.006, ConfidenceLow},
 		{"exactly score threshold", ScoreThreshold, ConfidenceLow},
-		{"just below score threshold", 0.0049, ConfidenceNoRelevant},
+		{"just below score threshold", 0.0009, ConfidenceNoRelevant},
 		{"zero score", 0.0, ConfidenceNoRelevant},
 		{"high score", 1.0, ConfidenceConfident},
 	}
@@ -82,17 +82,17 @@ func TestFilterByScore(t *testing.T) {
 		{
 			"mixed scores",
 			[]Source{
-				{ID: "1", Score: 0.001},
+				{ID: "1", Score: 0.0005},
 				{ID: "2", Score: 0.01},
-				{ID: "3", Score: 0.003},
+				{ID: "3", Score: 0.0008},
 			},
 			1, 0.01,
 		},
 		{
 			"all below threshold",
 			[]Source{
-				{ID: "1", Score: 0.001},
-				{ID: "2", Score: 0.002},
+				{ID: "1", Score: 0.0001},
+				{ID: "2", Score: 0.0008},
 			},
 			0, 0.0,
 		},

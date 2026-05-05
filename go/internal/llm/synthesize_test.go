@@ -102,7 +102,7 @@ func TestClassifyConfidence_MaxFloat64(t *testing.T) {
 func TestFilterByScore_PreservesInputOrder(t *testing.T) {
 	sources := []Source{
 		{ID: "c", Score: 0.02},
-		{ID: "a", Score: 0.001},
+		{ID: "a", Score: 0.0005},
 		{ID: "b", Score: 0.01},
 	}
 	filtered, _ := FilterByScore(sources)

@@ -29,8 +29,12 @@ const (
 )
 
 // ScoreThreshold is the minimum RRF score for a source to be included.
-// Overridable via env CTX_SCORE_THRESHOLD (default: 0.005).
-var ScoreThreshold = 0.005
+// Overridable via env CTX_SCORE_THRESHOLD (default: 0.001).
+//
+// Welle 37 (2026-05-06): default 0.005 → 0.001 weil M030 mass-im-RRF-score
+// Mega-blocks unter 0.005 dämpft. Niedriger Threshold erhält Architecture-
+// Kontext im Synthesizer ohne N-Bucket-Negativ-Regression.
+var ScoreThreshold = 0.001
 
 // ConfidentThreshold is the minimum RRF score for "confident" classification.
 // Overridable via env CTX_CONFIDENT_THRESHOLD (default: 0.008).
