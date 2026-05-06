@@ -16,6 +16,7 @@ var validRelationships = map[string]bool{
 	"factual":    true,
 	"causal":     true,
 	"supersedes": true,
+	"recurrent":  true,
 }
 
 // minRawConfidence is the per-type minimum raw (unweighted) LLM confidence.
@@ -23,11 +24,16 @@ var validRelationships = map[string]bool{
 // qwen3.6:27b produces uncalibrated confidence (full_agree mean 0.87 vs wrong_type mean 0.85 —
 // gap 0.02). The 0.9 factual gate was a legacy workaround for qwen3.5; on V5+3.6 it dropped
 // 2 correct links and 0 wrong types (net-negative).
+//
+// Welle 38b (2026-05-06): 'recurrent' added with 0.8 floor — Phase-2 LLM-classification
+// has more error-modes (false-positive weekly vs sessional) than topical/factual/causal,
+// so the gate is one quantisation step above the others.
 var minRawConfidence = map[string]float64{
 	"topical":    0.7,
 	"factual":    0.7,
 	"causal":     0.7,
 	"supersedes": 0.7,
+	"recurrent":  0.8,
 }
 
 // supersedesTitleSimThreshold is the pg_trgm similarity floor for V8.
