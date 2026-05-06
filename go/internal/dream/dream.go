@@ -35,7 +35,16 @@ const (
 	//      snapshot revert. Prompt remains V5 — V6 was attempted (commit 6b37662)
 	//      but reverted: stable-gold n=122 showed V6 net-worse than V5 (54.1%
 	//      vs 57.4%, topical-recall 76→63%). V7 prompt iteration is open work.
-	Version = 4
+	// v5 = Welle 38b (2026-05-06): adds 'recurrent' relationship class detected
+	//      by a separate Phase-1 (same dim+value in context_temporal AND
+	//      title-similarity > 0.5) + Phase-2 (LLM-confirm) pass, run after the
+	//      main evaluate so recurrent wins over topical for the same pair.
+	//      Pre-Empirie audit-w38b-results.json: 27 Phase-1 candidates → 18
+	//      RECURRENT + 2 SUPERSEDES + 7 NEITHER (74% precision). 'recurrent'
+	//      raw_confidence floor is 0.8 (one quantisation step above the others).
+	//      Welle 38a (massFactor in writelinks) was rejected by Pre-Empirie —
+	//      target_q is flat across num_dates, no num_dates × quality damping.
+	Version = 5
 
 	// CooldownActiveDays is how long Dream waits for blocks that produced links (re-check sooner).
 	CooldownActiveDays = 3
@@ -210,6 +219,25 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 	written, err := WriteLinks(ctx, pool, block.ID, block.Scope, block.QualityScore, links)
 	if err != nil {
 		slog.Warn("dream: write links failed", "block_id", block.ID, "error", err)
+	}
+
+	// Step 5b (Welle 38b, v5): detect recurrent pairs via temporal+title overlap and confirm
+	// per-pair via LLM. Runs AFTER main eval so 'recurrent' overwrites a 'topical' that
+	// EvaluateRelationships may have written for the same pair — recurrent is the more
+	// specific classification. Non-fatal on error: dream cycle continues.
+	recurrentLinks, recErr := DetectRecurrence(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts, *block)
+	if recErr != nil {
+		slog.Warn("dream: recurrence detection failed (non-fatal)", "block_id", block.ID, "error", recErr)
+	} else if len(recurrentLinks) > 0 {
+		rWritten, rwErr := WriteLinks(ctx, pool, block.ID, block.Scope, block.QualityScore, recurrentLinks)
+		if rwErr != nil {
+			slog.Warn("dream: recurrent write failed (non-fatal)", "block_id", block.ID, "error", rwErr)
+		} else {
+			slog.Info("dream: recurrent links written",
+				"block_id", block.ID, "candidates", len(recurrentLinks), "written", rWritten)
+			written += rWritten
+			links = append(links, recurrentLinks...)
+		}
 	}
 
 	// Step 6: Update quality scores for source and linked blocks.
