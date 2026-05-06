@@ -113,13 +113,13 @@ Empfohlen:
 4. **synthesis-blocks als is_meta=TRUE** schützen vor W11 (Korpus-Drift in Retrieval-Bench).
 5. **Sub-Agent-Audit-Pattern aus S25** wiederverwenden: stratifiziert (per-relationship, per-confidence-bucket), n=30, reproducible-seed.
 
-## Was NICHT in Folge-Wellen
+## Welle-Scope-Klärung (was bleibt stabil)
 
-- Pick-Logik mass-aware machen (Empirie zeigt: Mega-blocks sind schon is_meta-excluded, kein neuer Filter nötig)
-- raw_confidence ändern (LLM-output, nicht code-side)
-- ScoreThreshold weiter senken (0.001 ist bereits aggressive, N-Bucket 100% intakt)
-- Mass-Definition ändern auf log/cap (Welle-37-Empirie hat 1/sqrt + ScoreThreshold=0.001 als clean promote validiert)
-- "Aggregierte Dream-Quality-Score"-Metrik (per-relationship-breakdown ist informativer)
+- **Pick-Logik bleibt is_meta-basiert** — Empirie zeigt: Mega-blocks sind schon is_meta-excluded, kein zusätzlicher mass-Filter nötig. Mass wirkt nur in der Confidence-Formel (38a).
+- **raw_confidence bleibt LLM-Output** — nur final-confidence (writelinks.go:188) ist code-side modifizierbar.
+- **ScoreThreshold bleibt 0.001** — Welle-37-Empirie hat den Wert als clean promote validiert, N-Bucket bleibt bei 100%.
+- **Mass-Definition bleibt 1/sqrt(N)** — Welle-37 hat das als production-ready bestätigt; Variants (log/cap) sind nicht in Welle-38-Scope.
+- **Bench-Output bleibt per-relationship-breakdown** — granular-detection ist informativer als aggregierte single-score-Metrik.
 
 ## Pointer-Sammlung
 
