@@ -94,8 +94,11 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("executing migration %d (%s): %w", m.version, m.filename, err)
 		}
 
+		// ON CONFLICT DO NOTHING tolerates migrations that record themselves
+		// in the file body (M031+ pattern). Without it, the file's INSERT and
+		// this INSERT collide on the version primary key.
 		if _, err := tx.Exec(ctx,
-			"INSERT INTO _migrations (version, filename) VALUES ($1, $2)",
+			"INSERT INTO _migrations (version, filename) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
 			m.version, m.filename,
 		); err != nil {
 			_ = tx.Rollback(ctx)
