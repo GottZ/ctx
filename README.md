@@ -136,7 +136,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 34 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars
+**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 36 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars
 
 **Key features:**
 - **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels
