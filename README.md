@@ -139,7 +139,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 **Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 38 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars
 
 **Key features:**
-- **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels; block_role-aware (system-meta hard-excluded, audit-trail/reference/knowledge full-pass — Welle 40 HOLD: query-aware damping deferred to Folge-Welle 41+)
+- **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels; block_role-aware (4-class enum: system-meta hard-excluded, audit-trail/reference/knowledge full-pass — uniform damping shown ineffective in Welle 40, query-aware damping pending Folge-Welle 41+)
 - **GottZ Scope Model** — multi-tenant isolation (private/work/shared) via API key scoping
 - **GottZ Guard** — async deduplication via PG LISTEN/NOTIFY + HNSW similarity
 - **GottZ Cyclic Phase Model** — 7 cyclic temporal dimensions (weekday/month/quarter/week/monthday/seasonal/daily) with normalized phase [0,1) and per-dimension Gaussian decay. Queries route to dimensions via parser (18-matcher deterministic engine). Timezone-aware via `CTX_TIMEZONE`.
