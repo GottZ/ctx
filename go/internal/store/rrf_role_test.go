@@ -39,19 +39,24 @@ func insertRoleTestBlock(t *testing.T, pool *pgxpool.Pool, id string, embedding 
 	}
 }
 
-// TestCtxRrf_BlockRole_BehaviourMatchesContract verifies M036 (Welle 40):
-// ctx_rrf is block_role-aware. system-meta is hard-excluded, audit-trail is
-// score-damped by 0.3, knowledge and reference both pass through unchanged.
+// TestCtxRrf_BlockRole_BehaviourMatchesContract verifies M038 (Welle 40 HOLD):
+// ctx_rrf is block_role-aware. system-meta is hard-excluded; knowledge,
+// audit-trail and reference all full-pass with role_factor=1.0.
+//
+// Background: M036 (Welle 40 it.2) introduced damping=0.3 for audit-trail.
+// Iter-3 + Iter-4 bench (damping 0.3 / 0.5) both regressed -7pp identically
+// (5 NEG flips at explicit-audit-trail-target queries). M038 reverts damping
+// to 1.0 (no-op) while keeping the block_role schema for forwards-compat.
+// Folge-Welle 41+ shall implement query-aware damping.
 //
 // Four test blocks share identical embedding/content_times — so mass_factor
-// is constant (=1.0 for all) and role_factor is the differentiating signal
-// modulo per-block ROW_NUMBER tie-break in the semantic CTE (ranks 1..3 for
-// the three retrievable blocks, exact assignment is non-deterministic).
+// is constant (=1.0 for all) and the only differentiating signal is whether
+// the block is hard-excluded (system-meta) or retained.
 //
 // Contract:
 //
 //	A: block_role='knowledge'    → role_factor = 1.0 (full-pass)
-//	B: block_role='audit-trail'  → role_factor = 0.3 (damped)
+//	B: block_role='audit-trail'  → role_factor = 1.0 (M038 HOLD: no damping)
 //	C: block_role='reference'    → role_factor = 1.0 (full-pass)
 //	D: block_role='system-meta'  → hard-excluded (must NOT appear in result)
 //
@@ -59,11 +64,7 @@ func insertRoleTestBlock(t *testing.T, pool *pgxpool.Pool, id string, embedding 
 //
 //	D not in scores map.
 //	A, B, C all in scores map.
-//	B < min(A, C) by a wide margin (audit-trail damped well below knowledge/
-//	    reference even at the worst-case ROW_NUMBER assignment).
-//	B / max(A, C) ≈ 0.3 within 0.05 (damping factor 0.3 confirmed; using max
-//	    for the denominator gives a conservative ratio that is independent of
-//	    the per-block rank assignment).
+//	B / max(A, C) ≈ 1.0 within 0.1 (no damping in HOLD state).
 func TestCtxRrf_BlockRole_BehaviourMatchesContract(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -148,25 +149,17 @@ func TestCtxRrf_BlockRole_BehaviourMatchesContract(t *testing.T) {
 		}
 	}
 
-	// Contract 3: B (audit-trail) is damped below both A (knowledge) and C
-	// (reference). Use min(A, C) as the conservative ceiling — even at the
-	// worst-case ROW_NUMBER tie-break (B got rank 1, A/C got rank 3), the
-	// 0.3 damping must still pull B below the higher-ranked role=1.0 block.
-	minAC := math.Min(scores[idA], scores[idC])
-	if scores[idB] >= minAC {
-		t.Errorf("audit-trail not damped: B(audit-trail)=%g must be < min(A,C)=%g (A=%g, C=%g)",
-			scores[idB], minAC, scores[idA], scores[idC])
-	}
-
-	// Contract 4: damping factor ≈ 0.3 within 0.05. B/max(A,C) is the
-	// conservative ratio (max as denominator gives smallest ratio, which
-	// corresponds to the rank-1 case for A or C). The expected damping is
-	// 0.3 directly when ranks are equal; rank-tie-break shifts it slightly.
+	// Contract 3: M038 HOLD — no damping. B(audit-trail) must be in the same
+	// score-band as A(knowledge) and C(reference). With identical mass_factor
+	// and role_factor=1.0 across all retained blocks, the only differentiator
+	// is the per-block ROW_NUMBER tie-break in the semantic CTE (ranks 1..3).
+	// B/max(A,C) ≈ 1.0 within 0.1 — the 0.1 tolerance covers the worst-case
+	// rank-1-vs-rank-3 differential (~ 1/61 vs 1/63 = 0.969).
 	maxAC := math.Max(scores[idA], scores[idC])
-	const expectedRatio = 0.3
+	const expectedRatio = 1.0
 	gotRatio := scores[idB] / maxAC
-	if math.Abs(gotRatio-expectedRatio) > 0.05 {
-		t.Errorf("ratio B/max(A,C) drifted: got=%g, want≈%g (damping=0.3); A=%g, B=%g, C=%g",
+	if math.Abs(gotRatio-expectedRatio) > 0.1 {
+		t.Errorf("M038 HOLD: ratio B/max(A,C) drifted: got=%g, want≈%g (no damping); A=%g, B=%g, C=%g",
 			gotRatio, expectedRatio, scores[idA], scores[idB], scores[idC])
 	}
 }
