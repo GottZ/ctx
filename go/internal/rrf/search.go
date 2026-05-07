@@ -29,11 +29,13 @@ type SearchResult struct {
 // scopes for scope filtering, and optional category/tags/limit/temporal.
 // temporal is a websearch_to_tsquery OR string for date expansion (may be empty).
 // queryOR is an OR-joined query for broader FTS recall (may be empty).
+// auditTrailFactor controls audit-trail damping (Welle 41 M039): pass 1.0
+// for no damping (audit-target queries), 0.3 for generic queries.
 //
 // Temporal gravity is applied Post-RRF in the handler layer via
 // ApplyGravityBoost (linear) and ApplyCyclicGravityBoost (multi-dim cyclic).
 // The 5th RRF channel was removed in M020 (never activated from Go).
-func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string) ([]SearchResult, error) {
+func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, auditTrailFactor float64) ([]SearchResult, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("rrf: empty embedding")
 	}
@@ -67,8 +69,8 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 
 	rows, err := pool.Query(ctx,
 		`SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at
-		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9)`,
-		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam,
+		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10)`,
+		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam, auditTrailFactor,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: query ctx_rrf: %w", err)

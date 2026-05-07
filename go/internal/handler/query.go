@@ -258,7 +258,12 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		internalLimit = limit // respect explicit large limits
 	}
 
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR)
+	// Welle 41 M039: query-aware audit-trail damping. Pattern-Detection in
+	// rrf.AuditTrailFactor returns 1.0 for explicit-target queries (session/
+	// welle/audit/recurrent/handover/self-audit), 0.3 for generic queries.
+	auditTrailFactor := rrf.AuditTrailFactor(req.Query)
+
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, auditTrailFactor)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,
