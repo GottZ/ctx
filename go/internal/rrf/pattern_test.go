@@ -15,7 +15,7 @@ func TestHasAuditTrailIntent(t *testing.T) {
 		// True negatives — generic queries.
 		{"What embedding changes happened recently?", false},
 		{"ddstatus mariadb donnerstags", false},
-		{"dream v3 performance letzte woche", false}, // Welle 41 known FN
+		{"dream v3 performance letzte woche", true}, // Welle 41 Iter 4: "dream v" + "performance" pattern
 		// Case-insensitive.
 		{"SESSION 27", true},
 		{"Self-Audit gegen Warnings", true},

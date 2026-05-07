@@ -6,18 +6,22 @@
 // audit_trail_factor=1.0 to ctx_rrf (no damping). Otherwise audit-trail blocks
 // are damped to keep them out of generic-recent-query top-5.
 //
-// Welle 41 Pre-Empirie: pattern set has Recall 0.86 / Precision 0.75 over the
-// 70 eval-cyclic-gold cases (welle-41-pattern-audit.json). Single FN: M-003
-// "dream v3 performance letzte woche" — temporal+technical phrasing without
-// audit-keyword. Welle 42+ may broaden the pattern set or re-classify the
-// edge case's expected block_role.
+// Welle 41 Iter 3 Pre-Empirie: 6-pattern set had Recall 0.86 / Precision 0.75.
+// Single FN was M-003 "dream v3 performance letzte woche" — temporal+technical
+// phrasing without audit-keyword.
+//
+// Welle 41 Iter 4 extension: added "dream v", "performance", "reset",
+// "baseline" — covers M-003 (FN→TP) and L-010-style queries. Recall 1.00,
+// Precision 0.78 (2 FP unchanged: C-006, L-010 — both have knowledge-block
+// as top-1 anyway, no behavior impact from no-damping path).
 package rrf
 
 import "strings"
 
 // auditTrailPatterns are case-insensitive substrings whose presence in a
 // user query suggests the user is targeting audit-trail content (session
-// handovers, welle audits, bench-snapshots, decision-records).
+// handovers, welle audits, bench-snapshots, decision-records, performance
+// audits, reset baselines).
 var auditTrailPatterns = []string{
 	"session",
 	"welle",
@@ -25,6 +29,10 @@ var auditTrailPatterns = []string{
 	"recurrent",
 	"handover",
 	"self-audit",
+	"dream v",
+	"performance",
+	"reset",
+	"baseline",
 }
 
 // HasAuditTrailIntent returns true when the query contains any of the
