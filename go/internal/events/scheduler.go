@@ -225,6 +225,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 		go s.runDreamLoop(ctx)
 	}
 
+	// Welle 42: daily synthesis at 03:00 local (single goroutine, idempotent
+	// timer-loop). Decoupled from runDreamLoop so a busy dream-cycle never
+	// blocks the daily-summary cadence.
+	go s.runDailySynthesis(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -256,6 +261,71 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.runEmbedCacheEviction(ctx)
 		}
 	}
+}
+
+// dailySynthesisHour is the local-time hour at which the daily synthesis
+// fires (24h cadence). 03:00 keeps the LLM call off-peak — most users are not
+// querying, so the dream backend has GPU headroom for the 200-400-word output.
+const dailySynthesisHour = 3
+
+// runDailySynthesis fires dream.GenerateDailyReport once per day at
+// dailySynthesisHour local. The first tick lines up with the next 03:00
+// boundary, then sleeps a fixed 24h. On error: log + retry next day (no
+// in-day retry to avoid double-summary on transient Ollama hiccups).
+func (s *Scheduler) runDailySynthesis(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in daily synthesis", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+
+	dreamModel := s.config.DreamModel
+	if dreamModel == "" {
+		dreamModel = s.config.ChatModel
+	}
+	dreamOpts := dream.DreamOptions()
+	if s.config.DreamNumCtx > 0 {
+		dreamOpts.NumCtx = s.config.DreamNumCtx
+	}
+	scope := s.config.HomeScope
+	if scope == "" {
+		scope = "private"
+	}
+
+	for {
+		wait := timeUntilNextDailySynthesis(time.Now())
+		slog.Info("scheduler: daily synthesis scheduled", "wait", wait, "scope", scope)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+
+		slog.Info("scheduler: daily synthesis started", "scope", scope, "model", dreamModel)
+		blockID, err := dream.GenerateDailyReport(ctx, s.pool, s.config.DreamHost, s.config.DreamAPIKey, dreamModel, s.config.DreamThink, dreamOpts, scope)
+		if err != nil {
+			slog.Error("scheduler: daily synthesis failed", "error", err, "scope", scope)
+			continue
+		}
+		if blockID == "" {
+			slog.Info("scheduler: daily synthesis skipped (no activity)", "scope", scope)
+			continue
+		}
+		slog.Info("scheduler: daily synthesis completed", "block_id", blockID, "scope", scope)
+	}
+}
+
+// timeUntilNextDailySynthesis returns the duration from now until the next
+// dailySynthesisHour boundary in the local timezone. If now is exactly at or
+// before the trigger hour today, the duration is to today's trigger; otherwise
+// to tomorrow's.
+func timeUntilNextDailySynthesis(now time.Time) time.Duration {
+	loc := now.Location()
+	target := time.Date(now.Year(), now.Month(), now.Day(), dailySynthesisHour, 0, 0, 0, loc)
+	if !target.After(now) {
+		target = target.Add(24 * time.Hour)
+	}
+	return target.Sub(now)
 }
 
 // runEmbedCacheEviction prunes the embed cache on a fixed interval. Combines TTL
