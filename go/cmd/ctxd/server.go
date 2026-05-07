@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 
+	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/go-chi/chi/v5"
@@ -47,6 +48,22 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	manageH := handler.NewManageHandler(pool, scheduler)
 	blobH := handler.NewBlobHandler(pool, cfg.RateLimitWrite)
 	digestH := handler.NewDigestHandler(pool)
+	// Welle 42: daily synthesis manual trigger. Uses the dream model + dream
+	// chat host so the trigger and the scheduled 03:00-local goroutine share
+	// one Ollama backend. Falls back to ChatModel when DreamModel is empty.
+	dreamThink := parseThinkMode(cfg.DreamThink)
+	if cfg.DreamThink == "" {
+		dreamThink = parseThinkMode(cfg.ChatThink)
+	}
+	dreamModel := cfg.DreamModel
+	if dreamModel == "" {
+		dreamModel = cfg.ChatModel
+	}
+	dreamOpts := dream.DreamOptions()
+	if cfg.DreamNumCtx > 0 {
+		dreamOpts.NumCtx = cfg.DreamNumCtx
+	}
+	synthH := handler.NewSynthesizeHandler(pool, cfg.DreamHost, cfg.DreamAPIKey, dreamModel, dreamThink, dreamOpts)
 
 	// ── MCP endpoint (Streamable HTTP, authenticated) ──────────────
 	queryHTTPHandler := handler.WithScheduler(scheduler, queryHandler.HandleQuery)
@@ -84,6 +101,8 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 		r.Post("/api/manage", manageH.HandleManage)
 		// Digest — Topic map generation
 		r.Post("/api/digest", digestH.HandleDigest)
+		// Synthesize — manual daily synthesis trigger (Welle 42)
+		r.Post("/api/synthesize/daily", synthH.HandleDaily)
 		// Blob — fetch, search, manage
 		r.Post("/api/blob/fetch", blobH.HandleBlobFetch)
 		r.Post("/api/blob/search", blobH.HandleBlobSearch)
