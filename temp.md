@@ -1,115 +1,90 @@
-# Session-Übergabe — Autonom-Welle 41+ (post-Welle-40-HOLD)
+# Session-Übergabe — Autonom-Welle 42+ (post-Welle-41-PROMOTE-v1.3.0)
 
 **Diese Datei nach dem Lesen löschen** (`rm /compose/n8n/temp.md`).
 
-Drift-resistent. Pflicht-Lesen + State-Snapshot + Welle-40-HOLD-Status + Folge-Welle-41-Plan + Closure-Pflicht.
+Drift-resistent. Pflicht-Lesen + State-Snapshot + Welle-42-Plan + Closure-Pflicht.
 
 ## Pflicht-Lesen (in dieser Reihenfolge, vor erster Welle)
 
 1. **Warnings** — `/root/.claude/projects/-compose-n8n/memory/warnings.md`
-   - W3, W6a-d, W9, W10, W11, W12, W13, W14
-   - 14-Punkt-Self-Audit nach jeder Welle
-2. **MEMORY.md** — `/root/.claude/projects/-compose-n8n/memory/MEMORY.md` — "Aktueller Stand" S36 → S35
+2. **MEMORY.md** — `/root/.claude/projects/-compose-n8n/memory/MEMORY.md` — "Aktueller Stand" S36
 3. **ctx-Blöcke (in dieser Reihenfolge)**:
-   - `019dff8b-f05e-799b-9721-1a2cadc337b7` — Welle 40 HOLD (jüngste, is_meta=TRUE)
+   - `019e0140-102e-7632-ac7c-92ef7b11586e` — Welle 41 PROMOTE v1.3.0 (jüngste, is_meta=TRUE)
+   - `019dff8b-f05e-799b-9721-1a2cadc337b7` — Welle 40 HOLD (Architektur-Schuld-Doku)
    - `019dff4b-5849-79a3-ac23-1de0408eec8e` — Welle 39 + 38b PROMOTE v1.2.0
-   - `019dfeca-15f6-7534-b752-fd00b907e304` — Welle 38b implementiert
-   - `019d3f5a-0f6a-72f4-9ac3-3be356abee47` — S12 Generative-Synthese-Design (Welle 38c, jetzt machbar)
-4. **Welle-40-Artefakte**: `.project/bench-dream-phase0/`
-   - `BRANCH-HYPOTHESIS-Welle-40-Klassifikation.md` (Architektur C Decision)
-   - `welle-40-sql-audit.json` + `welle-40-classification-audit.json` (Pre-Empirie)
-   - `eval-cyclic-w40-it3-damping03.json` + `it4-damping05.json` + `it5-damping10.json`
-   - `welle-40-self-audit.md` (14-Warning Self-Audit)
+   - `019d3f5a-0f6a-72f4-9ac3-3be356abee47` — S12 Generative-Synthese-Design (für Welle 38c)
+4. **Welle-41-Artefakte**: `.project/bench-dream-phase0/`
+   - `welle-41-pattern-audit.json` (Iter 0, 6 Pattern, Recall 0.86)
+   - `welle-41-pattern-audit-extended.json` (Iter 4, 10 Pattern, Recall 1.00)
+   - `eval-cyclic-w41-it3.json` (Iter 3, 0.9261 mit 6 Pattern)
+   - `eval-cyclic-w41-it4.json` (Iter 4, 0.9428 mit 10 Pattern == PROMOTE)
+   - `eval-w41-it4-pattern10.log` (eval.sh 46/47)
+   - `welle-41-self-audit.md` (14-Warning Self-Audit)
 
-## Production-State-Snapshot (verifiziert 2026-05-07 ~01:08 CEST)
-
-**Re-verifizieren wenn > 7 Tage Abstand ODER > 10 Block-Differenz** (Trigger unten).
+## Production-State-Snapshot (verifiziert 2026-05-07 ~09:05 CEST)
 
 | Komponente | Stand |
 |---|---|
-| Hauptrepo HEAD | `d121df5` (7 Welle-40-Commits ahead von 00126cd, KEIN Tag) |
+| Hauptrepo HEAD | post-v1.3.0-tag (12 Welle-40+41 Commits ahead von 00126cd, jetzt mit annotated v1.3.0) |
 | Branch | `root` |
-| Letzter Tag | **v1.2.0** annotated (Welle 39, unverändert) |
-| Submodule .project | post-update (siehe Submodule pointer commit) |
-| DB Migrations | **38** (M035 schema + M036/M037/M038 ctx_rrf-iter) |
-| Dream Version | **5** (recurrent-Klasse aktiv) |
-| Active blocks | **449** (297 knowledge + 121 reference + 19 system-meta + 12 audit-trail) |
-| Hooks-Pfad | `/compose/n8n/.hooks` (aktiv) |
-| Production-Performance | identisch zu v1.2.0 (verified Iter-5 mean_pass=0.9428) |
+| Letzter Tag | **v1.3.0** annotated, gepusht origin |
+| Submodule .project | post-Welle-41-Bench-Logs (gepusht origin) |
+| DB Migrations | **39** (M035 schema + M036/M037/M038 Welle-40-iter + M039 Welle-41) |
+| Dream Version | **5** |
+| Active blocks | **450** (297 knowledge + 121 reference + 20 system-meta + 12 audit-trail) |
+| Hooks-Pfad | `/compose/n8n/.hooks` (aktiv, pre-push validiert annotated tags) |
+| Production-Performance | T03 fixed (Welle-40-Hauptziel), eval-cyclic == v1.2.0 |
 
-**Re-Verifikations-Trigger** (eines davon → state.sh + diff against snapshot):
-- Tag-Push seit v1.2.0
-- DB-Migration-Count > 38
-- > 10 Block-Differenz vs aktueller 449 active
-
-## Welle 40 Endstand: HOLD
-
-**Outcome**: kein v1.3.0-Tag. Production-Performance unverändert. Architektur-Schema deployed.
+## Welle 41 v1.3.0 Endstand
 
 **Was deployed ist**:
-- M035: block_role 4-Klassen-Enum + Backfill (system-meta=is_meta-state, reference=cat=reference, audit-trail=12 hardcoded IDs Sub-Agent-B-confirmed, rest=knowledge)
-- M036/M037/M038: ctx_rrf iterations (damping 0.3 → 0.5 → 1.0). M038 = current (no-op damping)
-- Filter via `block_role != 'system-meta'` (semantisch identisch zu Welle 39 M033 `NOT is_meta` nach M035-Backfill)
+- M035: block_role 4-Klassen-Enum + Backfill (Welle 40)
+- M036/M037/M038: ctx_rrf damping iterations (Welle 40 Audit-Trail; M038 = no-op state-restoration)
+- M039: ctx_rrf signature mit `p_audit_trail_factor DOUBLE PRECISION DEFAULT 1.0` (Welle 41)
+- Go-side: `internal/rrf/pattern.go` (10 Pattern: session/welle/audit/recurrent/handover/self-audit/dream v/performance/reset/baseline)
+- Go-side: `handler/query.go` Pattern-aware Caller (`rrf.AuditTrailFactor(query)`)
+- Go-side: `dream/dream.go` hardcoded 1.0 (no damping in dream-cycle)
 
-**Was rejected wurde**: Uniform damping (0.3, 0.5) führt -7pp regression durch 5 NEG flips bei explicit-audit-trail-target queries. 0/70 cases mit unterschiedlichem top5 zwischen 0.3 und 0.5 → Damping-Faktor-Tuning ist nicht der Hebel.
+**Architektur-Lehre** (Welle 40 → Welle 41 evolution):
+1. Schema-First: M035 block_role-enum war forwards-kompatibles Architecture-Investment. Welle 41 baute darauf, M039 ist nur signature-extension.
+2. Uniform damping ineffektiv (Welle 40): 0.3 vs 0.5 → 0/70 cases-Differenz. Mechanismus nicht-Hebel.
+3. Query-aware damping ist der wirksame Hebel (Welle 41): Pattern-Recall 0.86 (6 Pattern) → -1.7pp regression. Pattern-Recall 1.00 (10 Pattern) → 0.0pp regression + T03 fix.
 
-**Pre-existing Bug gefixt**: M031+ Migrations recordeten sich selbst, Apply-Code machte 2. INSERT ohne ON CONFLICT → duplicate-key in testdb. Fix: ON CONFLICT (version) DO NOTHING im Apply-Code (commit 9eb5bc9). Production unverändert.
+## Folge-Welle 42+ Plan
 
-## Folge-Welle 41+ Plan
+### Welle 42 — Welle 38c Generative Tagesbericht (S12 Phase 1)
 
-### Welle 41 — Query-aware Damping (PRIMÄRES Ziel)
+Jetzt mit clean Welle-41-Architecture machbar:
+1. Schema check: block_type='synthesis' Wert (kein CHECK constraint nötig, VARCHAR(30))
+2. Code: dream/synthesize_report.go — function `GenerateDailyReport(ctx, pool, llm-config)` analog evaluate.go pattern (LLM-prompt für Tagesbericht aus context_write_log + recent activity)
+3. Scheduler: 1× täglich (z.B. 03:00 lokal) in events/scheduler.go
+4. block_role='audit-trail' bei Erstellung — query-aware damping handhabt naturgemäß
+5. Tests: writes_synthesis_test.go
+6. Live-Test: API-Trigger → 1 synthesis-block → MCP-Query "Was wurde heute gemacht" → check confident response
+7. Bench: orthogonal sein (kein regression)
 
-**Anlass**: Welle 40 HOLD-Lehre — uniform damping ist fundamental ineffektiv. Bei den 5 lost cases (L-002/L-009/M-003/M-004/M-015) ist audit-trail-rank 1 und knowledge-rank 2-5; selbst 0.5x-damping dämpft audit-trail unter knowledge.
+### Welle 43 — Audit-Trail-Klassifikation erweitern
 
-**Hypothese**: damping abhängig von query-content. Wenn query enthält Pattern wie "session"/"welle"/"audit" als terms → kein damping (audit-trail erscheint normal). Sonst damping (audit-trail unter knowledge).
+35+ unaudited audit-trail-Kandidaten aus Sub-Agent-A 47-pool (Welle 40 Iter 0). Sub-Agent-Audit n=35 mit gleicher 4-Klassen-Taxonomie. Backfill als M0NN.
 
-**Pre-Empirie-Pflicht (W3)**:
-1. Query-Pattern-Audit: welche der 70 eval-cyclic-cases haben "session"/"welle"/"audit" als query-tokens?
-2. Sub-Agent-Klassifikation: welche cases sind "explicit-audit-target" (expected ist audit-trail) vs "generic-content" (expected ist knowledge)?
-3. Cross-check: Match Pattern-Detection mit expected-class. Wenn Pattern-Detection = expected-class für ≥80% der cases → Pattern-Match-Heuristik valid.
+### Welle 44 — ctx_save MCP-Hook für Auto-Klassifikation
 
-**Architektur-Optionen**:
-- A. SQL-side Pattern-Match: ctx_rrf bekommt zusätzlichen Parameter `p_target_audit_trail` (boolean). Wenn TRUE → role_factor=1.0 für audit-trail. Sonst → role_factor=0.3.
-- B. Go-side Pattern-Detection: synthesize.go macht Pattern-Match auf query-string, setzt Parameter beim Aufruf.
-- C. LLM-side Intent-Klassifikation: leichter LLM-call vor RRF, klassifiziert query-intent → Damping-Parameter.
+Auto-block_role-Zuweisung für synthesis/audit/welle/session blocks bei Erstellung. Verhindert manuelle UPDATE wie aktuell.
 
-Empfehlung: **A + B (kombiniert)** — SQL-Function flexibel, Go-side macht Pattern-Detection.
+### Pre-existing Bug Backlog
 
-### Welle 42 — Audit-Trail-Klassifikation erweitern
-
-35+ unaudited audit-trail-Kandidaten (aus Sub-Agent-A 47-Pool). Sub-Agent-Audit n=35 mit gleicher Taxonomie. Backfill als M0NN.
-
-### Welle 38c — Generative Tagesbericht (S12 Phase 1)
-
-Jetzt machbar mit cleaner block_role-Architecture. synthesis-blocks bekommen block_role='audit-trail' bei Erstellung.
-
-Abhängigkeit: Welle 41 (query-aware damping) sollte ZUERST gemacht sein, sonst ist audit-trail-Damping immer noch broken — neue synthesis-blocks würden gleiche regressions verursachen.
-
-Schritte (siehe ctx 019d3f5a):
-1. WriteSynthesisBlock + GenerateDailyReport (LLM-prompt analog evaluate.go)
-2. Scheduler: 1× täglich (z.B. 03:00 lokal)
-3. block_role='audit-trail' bei Erstellung
-4. Tests + Live-Test
-5. Bench: orthogonal sein, kein regression
-
-### Welle 43 — ctx_save MCP-Hook für Auto-Klassifikation
-
-Auto-block_role-Zuweisung für synthesis/audit/welle/session blocks bei Erstellung. Verhindert manuelle UPDATE wie aktuell (siehe Welle-39 M032/M034 + Welle-40 M035 hardcoded list).
-
-## Pre-existing Bugs (Backlog)
-
-1. **rrf_mass_test.go**: pre-existing duplicate-key durch unique constraint M005. Helper `insertEmbeddedBlock` benutzt identische titles für 4 blocks. Fix-Pattern: `insertRoleTestBlock` aus rrf_role_test.go (per-id-unique title via fmt.Sprintf).
-2. **eval.sh baseline veraltet**: 2026-04-09 baseline (46 tests, 100%) vs current 47 tests + T01 stable-fail. False-positive REGRESSION-Verdict. Fix: `bash eval.sh --update-baseline` post-Welle-41 promote.
-3. **parseLinks string-confidence**: dream/parse.go tolerates object-form-drift, aber nicht `"confidence":"high"|"medium"|"low"`. Map "high"→0.9, "medium"→0.7, "low"→0.5.
+1. **rrf_mass_test.go**: pre-existing duplicate-key durch unique constraint M005 (uq_context_category_title_scope). Fix-Pattern: rrf_role_test.go's `insertRoleTestBlock` mit per-id-unique title.
+2. **eval.sh baseline veraltet**: 2026-04-09 baseline (46 tests, 100%) vs current 47 tests. False-positive REGRESSION-Verdict. Fix: `bash eval.sh --update-baseline` post-v1.3.0-promote.
+3. **parseLinks string-confidence**: dream/parse.go tolerates object-form-drift, aber nicht "high"|"medium"|"low" string. Map "high"→0.9, etc.
 4. **guard SQLSTATE 42P08 für is_meta-blocks**: parameter-type-cast issue.
-5. **synthesis P95 latency drift**: bei parallel-bench (eval.sh + eval-cyclic gleichzeitig) P95 4730→10551ms. Sequenzielle bench-Methodology obligatorisch.
+5. **synthesis P95 latency drift bei parallel-bench**: sequenziell isoliert obligatorisch.
 
-## Closure-Pflicht (vor 06:30 Hard-Stop)
+## Closure-Pflicht (vor 06:30 Hard-Stop bei autonom-Welle)
 
 **MUSS gemacht werden, egal welcher Welle-Stand**:
 
-1. ctx-Audit-Block(s) speichern für aktuelle Welle MIT `is_meta=TRUE` (W11-Drift-Schutz, sofort beim store + via SQL nachreichen)
-2. MEMORY.md aktuelle Stand-Eintrag ergänzen
+1. ctx-Audit-Block(s) speichern für aktuelle Welle MIT `is_meta=TRUE` (W11) — direkt nach store via SQL UPDATE (metadata.is_meta wird NICHT in is_meta-Spalte übersetzt durch MCP)
+2. MEMORY.md aktuelle Stand-Eintrag ergänzen (max 200 Zeilen)
 3. Folge-temp.md anlegen (überschreibt diese)
 4. Submodule .project commit + push
 5. Hauptrepo commit + push (Migration + Code) — **nur mit annotated tag wenn Bench grün**
@@ -117,48 +92,39 @@ Auto-block_role-Zuweisung für synthesis/audit/welle/session blocks bei Erstellu
 7. Cron deleten falls erstellt
 8. State-Verifikation: `bash state.sh` — diff gegen Snapshot oben
 
-## Drift-Disziplin (W11 weiter zentral)
+## Drift-Disziplin (W11)
 
 1. **ctx_save für audit-blocks**: IMMER metadata.is_meta=TRUE direkt + UPDATE context_blocks SET is_meta=TRUE + block_role='system-meta' direkt nach store. Beachte: metadata.is_meta wird NICHT in SQL is_meta-Spalte übersetzt durch MCP store — manuelle UPDATE PFLICHT.
-2. **Bench-Confounding vermeiden**: separate code-only-changes vs Korpus-state-changes. Strict-Attribution via isolated bench.
+2. **Bench-Confounding vermeiden**: separate code-only-changes vs Korpus-state-changes.
 3. **Re-Baseline obligatorisch** vor Welle-Δ-Bewertung.
-4. **Eval-Bench-Methodology**: sequenziell isoliert (eval.sh fertig → eval-cyclic.sh, NIE parallel — Welle 35-Lehre, Welle-40-Iter-3-violation).
-5. **Self-Audit ohne IKEA-Bias**: Sub-Agent-Audit-VALID-rates nicht als Code-Quality-Beweis missdeuten. Bench ist primär. Live-Audit ist Sekundär.
+4. **Eval-Bench-Methodology**: sequenziell isoliert (eval.sh fertig → eval-cyclic.sh, NIE parallel — Welle 35-Lehre, Session-36-Iter-3-violation).
+5. **Self-Audit ohne IKEA-Bias**.
+6. **Wall-Clock-Cross-Check**: regelmäßig date+TZ prüfen, mindestens 1× pro Stunde. Session-36-Lehre (cumulative time-tracking-Drift +6h).
 
-## Methodische Cross-Reference (Warnings spezifisch für Welle 41)
+## Methodische Cross-Reference (Warnings spezifisch für Folge-Welle)
 
-- **W3**: Pre-Empirie-Pflicht für Query-Pattern-Audit + expected-class-Cross-check.
-- **W6a (konservativer Anker)**: Re-Baseline ist Welle-41-Anker. Welle 40 HOLD ist NICHT die neue Baseline (DB-Performance == v1.2.0).
-- **W6b (Kreativität)**: query-aware damping ist NEUER ansatz, nicht "M037 mit kleinem Tweak".
-- **W9 (Armada-Konsens)**: Sub-Agent NUR für Klassifikations-Audit + Pattern-Match-Audit. Bench LIVE im Orchestrator.
-- **W11 (Drift)**: jeder neue audit-block sofort is_meta=TRUE + block_role=system-meta markieren. Auto-Hook bei ctx_save fehlt noch (Welle 43 backlog).
-- **W12 (Wave-Pattern)**: 1 logische Änderung pro Commit. Migration + Code + Tests = mind. 3 Commits pro Iteration.
-- **W13 (Agent-Kontext)**: Sub-Agent-Prompts self-contained mit Pfaden, line-numbers, Block-IDs.
-- **W14 (Polling)**: Bench-Wartezeiten via Monitor + until-loop. Cron-Self-Ping wie Session 36 (z.B. "13,43 * * * *", off-clock).
+- **W3**: Pre-Empirie-Pflicht für jede Iter-1-Decision. Welle 38c: prompt-template + write-flow Pre-Empirie nötig.
+- **W6a**: Re-Baseline ist Welle-Anker.
+- **W6c**: bei klarem Plan direkt Code (Welle 41 Iter-4-Korrektur war diese Lehre).
+- **W9**: Sub-Agent für Klassifikation, Bench LIVE im Orchestrator.
+- **W11**: jeder neue ctx-Block sofort is_meta=TRUE + block_role=system-meta.
+- **W12**: 1 logische Änderung pro Commit. Welle 41 hatte 4 Commits W12.
+- **W13**: Sub-Agent-Prompts self-contained.
 
 ## Self-Ping-Cron (failsafe)
 
-Empfehlung: `CronCreate` alle 30 min mit Hard-Stop-Check (z.B. cron `*/30 * * * *` zwischen 00:30-06:30, dann delete). Pattern aus Session 36 c5a7b48b.
+Empfehlung: `CronCreate` alle 30 min mit Hard-Stop-Check (z.B. cron `*/30 * * * *` oder off-clock `13,43 * * * *`). Pattern aus Session 36 c5a7b48b/8d9206f9.
 
 ## Pointer-Sammlung
 
-- v1.2.0 Detail-Audit ctx: `019dff4b` (is_meta=TRUE)
-- Welle 40 HOLD ctx: `019dff8b` (is_meta=TRUE) — diese Session
+- v1.3.0 Welle 41 ctx: `019e0140` (is_meta=TRUE)
+- Welle 40 HOLD ctx: `019dff8b` (is_meta=TRUE)
+- v1.2.0 Welle 39 ctx: `019dff4b` (is_meta=TRUE)
 - 38b implementiert ctx: `019dfeca`
-- 38a NULL-RESULT ctx: `019dfe9e`
 - S12-Generative-Design ctx: `019d3f5a`
-- writelinks.go:188 — Confidence-Formel
-- linkfilters.go:21-32 — minRawConfidence map
-- recurrence.go:DetectRecurrence — Phase 1 + Phase 2
-- 035_block_role_classification.sql — Welle 40 Schema
-- 038_rrf_role_damping_revert.sql — Welle 40 HOLD state
-- BRANCH-HYPOTHESIS-Welle-40-Klassifikation.md — Decision-Doku
+- M039 (query-aware damping): `go/migrations/039_rrf_query_aware_damping.sql`
+- pattern.go: `go/internal/rrf/pattern.go` (10-Pattern set)
+- handler/query.go: rrf.AuditTrailFactor caller
 - 14-Warnings: `/root/.claude/projects/-compose-n8n/memory/warnings.md`
 
-## Hard-Stop-Disziplin
-
-- **Ab 06:00**: aktuelle Iteration zu Ende, KEINE neue Iteration starten
-- **Ab 06:30**: nur noch Closure-Sequenz, keine Code-Änderungen
-- **Bis 07:00**: alle commits + push + ctx-Audit + MEMORY.md + Folge-temp.md + Self-Audit + Cron-Delete
-
-Die nächste Session liest Pflicht-Lesen-Reihenfolge → prüft Re-Verifikations-Trigger → liest Welle-40-HOLD-Status + Welle-41-Plan → wählt Folge-Welle (recommend Welle 41) → löscht diese Datei nach dem Lesen.
+Die nächste Session liest Pflicht-Lesen-Reihenfolge → prüft Re-Verifikations-Trigger (Tag-Push seit v1.3.0 / DB-Migration > 39 / >10 Block-Differenz vs 450) → liest Welle-41-PROMOTE-Status + Welle-42-Plan (Welle 38c Generative) → wählt Folge-Welle → löscht diese Datei nach dem Lesen.
