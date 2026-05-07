@@ -149,6 +149,13 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Welle 44: Auto-classify block_role + is_meta from metadata + title.
+	// metadata.is_meta=true → system-meta. dream-source or audit-pattern in
+	// title → audit-trail. Otherwise no-op (default 'knowledge').
+	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, block.ID, block.Title, block.Metadata); err != nil {
+		slog.Warn("store: auto-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
+	}
+
 	// Log write (fire-and-forget in background).
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
