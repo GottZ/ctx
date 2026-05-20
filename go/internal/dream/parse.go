@@ -39,13 +39,25 @@ func parseLinks(raw string) ([]Link, string, error) {
 		return nil, "", nil
 	}
 
-	var links []Link
-	arrErr := json.Unmarshal([]byte(body), &links)
+	var rawArr []struct {
+		TargetID   string          `json:"target_id"`
+		Type       string          `json:"type"`
+		Confidence json.RawMessage `json:"confidence"`
+	}
+	arrErr := json.Unmarshal([]byte(body), &rawArr)
 	if arrErr == nil {
-		if wasFenced {
-			return links, formatFencedArray, nil
+		out := make([]Link, 0, len(rawArr))
+		for _, r := range rawArr {
+			conf, ok := coerceConfidence(r.Confidence)
+			if !ok {
+				continue
+			}
+			out = append(out, Link{TargetID: r.TargetID, Relationship: r.Type, Confidence: conf})
 		}
-		return links, formatArray, nil
+		if wasFenced {
+			return out, formatFencedArray, nil
+		}
+		return out, formatArray, nil
 	}
 
 	if strings.HasPrefix(body, "{") {

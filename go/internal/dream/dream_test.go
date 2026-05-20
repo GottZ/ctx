@@ -190,6 +190,55 @@ func TestParseLinks_MultipleLinks(t *testing.T) {
 	}
 }
 
+// --- parseLinks Array-Form String-Confidence Drift Tests (S37 prod drift, 2026-05-20) ---.
+
+func TestParseLinks_ArrayForm_StringConfidence(t *testing.T) {
+	raw := `[
+		{"target_id":"019d-aaaa","type":"topical","confidence":"high"},
+		{"target_id":"019d-bbbb","type":"topical","confidence":"medium"},
+		{"target_id":"019d-cccc","type":"factual","confidence":"low"}
+	]`
+	links, _, err := parseLinks(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(links) != 3 {
+		t.Fatalf("want 3 links, got %d", len(links))
+	}
+	want := map[string]float64{"019d-aaaa": 0.9, "019d-bbbb": 0.6, "019d-cccc": 0.3}
+	for _, l := range links {
+		if l.Confidence != want[l.TargetID] {
+			t.Errorf("%s: want %.2f, got %.2f", l.TargetID, want[l.TargetID], l.Confidence)
+		}
+	}
+}
+
+func TestParseLinks_ArrayForm_MixedConfidence(t *testing.T) {
+	raw := `[{"target_id":"a","type":"topical","confidence":0.85},{"target_id":"b","type":"causal","confidence":"high"}]`
+	links, _, err := parseLinks(raw)
+	if err != nil || len(links) != 2 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	seen := map[string]float64{}
+	for _, l := range links {
+		seen[l.TargetID] = l.Confidence
+	}
+	if seen["a"] != 0.85 || seen["b"] != 0.9 {
+		t.Errorf("got %v", seen)
+	}
+}
+
+func TestParseLinks_ArrayForm_UnknownStringConfDropped(t *testing.T) {
+	raw := `[{"target_id":"a","type":"topical","confidence":"vibes"},{"target_id":"b","type":"topical","confidence":0.8}]`
+	links, _, err := parseLinks(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(links) != 1 || links[0].TargetID != "b" {
+		t.Fatalf("want vibes-entry dropped, got %+v", links)
+	}
+}
+
 // --- parseLinks Object-Form Drift Tests (audit S25, 2026-05-03) ---.
 
 func TestParseLinks_ObjectForm_FloatConfidence(t *testing.T) {
