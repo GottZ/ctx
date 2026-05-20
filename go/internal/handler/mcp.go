@@ -6,6 +6,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -261,7 +262,23 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 			scopes = ar.ReadScopes
 		}
 
-		block, err := store.GetBlock(ctx, cfg.Pool, input.ID, scopes)
+		resolvedID, matches, err := store.ResolveBlockID(ctx, cfg.Pool, input.ID, scopes)
+		if err != nil {
+			if errors.Is(err, store.ErrAmbiguousID) {
+				body := map[string]any{
+					"error":   "Ambiguous id prefix — re-specify with a longer prefix or full id",
+					"matches": matches,
+				}
+				data, _ := json.MarshalIndent(body, "", "  ")
+				return errResult(string(data)), nil, nil
+			}
+			return errResult(fmt.Sprintf("resolve failed: %v", err)), nil, nil
+		}
+		if resolvedID == "" {
+			return errResult("block not found"), nil, nil
+		}
+
+		block, err := store.GetBlock(ctx, cfg.Pool, resolvedID, scopes)
 		if err != nil {
 			return errResult(fmt.Sprintf("get failed: %v", err)), nil, nil
 		}

@@ -224,6 +224,80 @@ func CheckRateLimitByAction(ctx context.Context, pool *pgxpool.Pool, apiKeyID, a
 	return count, nil
 }
 
+// MinIDPrefixLen is the minimum length for prefix-based ID resolution.
+// Set to 8 to prevent accidental wide matches; UUIDv7 timestamp prefixes
+// give birthday-collision space well below 8 chars even at 10⁶ blocks.
+const MinIDPrefixLen = 8
+
+// ErrAmbiguousID is returned by ResolveBlockID when a prefix matches more than
+// one block. The accompanying []BlockPreview contains the candidates.
+var ErrAmbiguousID = errors.New("store: ambiguous block id prefix")
+
+// IsFullUUID returns true if s has the canonical 36-char UUID shape (8-4-4-4-12
+// with dashes at the expected positions). No charset validation — Postgres will
+// reject malformed hex on actual lookup. Cheap pre-check to skip prefix-mode
+// when the caller already has a full ID.
+func IsFullUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	return s[8] == '-' && s[13] == '-' && s[18] == '-' && s[23] == '-'
+}
+
+// ResolveBlockID maps an ID prefix (≥MinIDPrefixLen chars) to exactly one block
+// ID. Full UUIDs (36 chars) skip the prefix path. Returns:
+//   - (id, single-element matches, nil) on unique match
+//   - ("", nil, nil) on zero matches (caller treats as "not found")
+//   - ("", matches, ErrAmbiguousID) on multiple matches — caller surfaces the
+//     candidate list so the user can re-specify
+//
+// Scope-filtered identically to GetBlock; archived blocks excluded.
+func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, readScopes []string) (string, []BlockMeta, error) {
+	if IsFullUUID(idOrPrefix) {
+		return idOrPrefix, nil, nil
+	}
+	if len(idOrPrefix) < MinIDPrefixLen {
+		return "", nil, fmt.Errorf("store: id prefix must be at least %d characters (got %d)", MinIDPrefixLen, len(idOrPrefix))
+	}
+
+	// Cap candidates at 11: anything ≥10 is too ambiguous to surface usefully,
+	// and the extra row tells the caller "≥10, narrow further" without paging.
+	const maxCandidates = 11
+	rows, err := pool.Query(ctx,
+		`SELECT id, title, category, tags, scope, updated_at
+		 FROM context_blocks
+		 WHERE id::text LIKE $1 || '%' AND scope = ANY($2) AND NOT is_archived
+		 ORDER BY updated_at DESC
+		 LIMIT $3`,
+		idOrPrefix, readScopes, maxCandidates,
+	)
+	if err != nil {
+		return "", nil, fmt.Errorf("store: resolve id prefix: %w", err)
+	}
+	defer rows.Close()
+
+	matches := make([]BlockMeta, 0, 2)
+	for rows.Next() {
+		var m BlockMeta
+		if err := rows.Scan(&m.ID, &m.Title, &m.Category, &m.Tags, &m.Scope, &m.UpdatedAt); err != nil {
+			return "", nil, fmt.Errorf("store: resolve id prefix scan: %w", err)
+		}
+		matches = append(matches, m)
+	}
+	if err := rows.Err(); err != nil {
+		return "", nil, fmt.Errorf("store: resolve id prefix rows: %w", err)
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", nil, nil
+	case 1:
+		return matches[0].ID, matches, nil
+	default:
+		return "", matches, ErrAmbiguousID
+	}
+}
+
 // GetBlock retrieves a single block by ID, filtered by allowed scopes.
 func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []string) (*Block, error) {
 	b := &Block{}

@@ -3,8 +3,10 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -131,16 +133,47 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		return
 	}
 
-	// Log access.
+	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, ar.ReadScopes)
+	if err != nil {
+		if errors.Is(err, store.ErrAmbiguousID) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"action":  "get",
+				"success": false,
+				"error":   "Ambiguous id prefix",
+				"matches": matches,
+			})
+			return
+		}
+		// Prefix-too-short and other validation errors → 400.
+		if strings.Contains(err.Error(), "prefix must be at least") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false, "error": err.Error(),
+			})
+			return
+		}
+		slog.Error("manage: resolve id error", "error", err, "request_id", reqID)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "Internal server error",
+		})
+		return
+	}
+	if resolvedID == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success": false, "error": "Block not found",
+		})
+		return
+	}
+
+	// Log access against the resolved ID, not the user-supplied prefix.
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := store.LogAccess(bgCtx, h.pool, ar.ApiKeyID, req.ID, "manage-get"); err != nil {
+		if err := store.LogAccess(bgCtx, h.pool, ar.ApiKeyID, resolvedID, "manage-get"); err != nil {
 			slog.Error("manage: access log error", "error", err, "request_id", reqID)
 		}
 	}()
 
-	block, err := store.GetBlock(ctx, h.pool, req.ID, ar.ReadScopes)
+	block, err := store.GetBlock(ctx, h.pool, resolvedID, ar.ReadScopes)
 	if err != nil {
 		slog.Error("manage: get error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -259,7 +292,39 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		}
 	}
 
-	block, needsReEmbed, err := store.UpdateBlock(ctx, h.pool, req.ID, data, ar.HomeScope)
+	// Prefix-resolve within HomeScope only — writes are scope-restricted, so the
+	// candidate set must be too.
+	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, []string{ar.HomeScope})
+	if err != nil {
+		if errors.Is(err, store.ErrAmbiguousID) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"action":  "update",
+				"success": false,
+				"error":   "Ambiguous id prefix — re-specify with a longer prefix or full id",
+				"matches": matches,
+			})
+			return
+		}
+		if strings.Contains(err.Error(), "prefix must be at least") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false, "error": err.Error(),
+			})
+			return
+		}
+		slog.Error("manage: resolve id error", "error", err, "request_id", reqID)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "Internal server error",
+		})
+		return
+	}
+	if resolvedID == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success": false, "error": "Block not found",
+		})
+		return
+	}
+
+	block, needsReEmbed, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, ar.HomeScope)
 	if err != nil {
 		slog.Error("manage: update error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -311,7 +376,38 @@ func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	block, err := store.DeleteBlock(ctx, h.pool, req.ID, ar.HomeScope)
+	// Prefix-resolve within HomeScope only — see handleUpdate for rationale.
+	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, []string{ar.HomeScope})
+	if err != nil {
+		if errors.Is(err, store.ErrAmbiguousID) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"action":  "delete",
+				"success": false,
+				"error":   "Ambiguous id prefix — re-specify with a longer prefix or full id",
+				"matches": matches,
+			})
+			return
+		}
+		if strings.Contains(err.Error(), "prefix must be at least") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false, "error": err.Error(),
+			})
+			return
+		}
+		slog.Error("manage: resolve id error", "error", err, "request_id", reqID)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "Internal server error",
+		})
+		return
+	}
+	if resolvedID == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success": false, "error": "Block not found",
+		})
+		return
+	}
+
+	block, err := store.DeleteBlock(ctx, h.pool, resolvedID, ar.HomeScope)
 	if err != nil {
 		slog.Error("manage: delete error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
