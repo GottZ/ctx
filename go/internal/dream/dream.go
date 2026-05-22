@@ -475,7 +475,7 @@ func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, che
 				WHERE NOT is_archived
 				  AND embedding IS NOT NULL
 				  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
-				  AND category != 'index'
+				  AND NOT is_meta
 				  AND dream_checked_at IS NOT NULL
 				  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
 				  AND scope = ANY($1))::int`,
