@@ -140,19 +140,23 @@ func TestCtxRrf_MassFactor_BehaviourMatchesContract(t *testing.T) {
 }
 
 // insertEmbeddedBlock writes a context_blocks row with a real embedding.
-// Title/content/category match across all four blocks so FTS+trigram channels
-// score identically — only content_times can differentiate.
+// Title varies by last-char of id to avoid the uq_context_category_title_scope
+// unique constraint; content/category stay identical so FTS+trigram channels
+// score identically across blocks — only content_times can differentiate.
+// The trigram channel is gated similarity > 0.05, so the per-block suffix
+// keeps trigram-rank identical for the title-based query.
 func insertEmbeddedBlock(t *testing.T, pool *pgxpool.Pool, id string, embedding []float32, ts time.Time) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	vec := pgvec.NewVector(embedding)
+	title := fmt.Sprintf("rrf-mass-test-title-%s", id[len(id)-1:])
 	_, err := pool.Exec(ctx,
 		`INSERT INTO context_blocks
 			(id, category, title, content, scope, embedding, created_at, updated_at)
 		 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $7)`,
-		id, "test_mass", "rrf-mass-test-title", "rrf-mass-test-content",
+		id, "test_mass", title, "rrf-mass-test-content",
 		"private", vec, ts,
 	)
 	if err != nil {
