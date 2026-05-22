@@ -193,34 +193,39 @@ func generateDates(n int, base time.Time) []time.Time {
 // array-states the test relies on (1, 10, NULL, 0). Failing this means a
 // preceding INSERT/UPDATE silently coerced a value, which would invalidate
 // the rest of the test.
+//
+// Postgres semantics: array_length(arr, 1) returns NULL for both NULL arrays
+// AND empty arrays — we cannot use it alone to distinguish C from D. We
+// query `content_times IS NULL` alongside for the unambiguous null-check.
 func verifyContentTimesShapes(t *testing.T, pool *pgxpool.Pool, idA, idB, idC, idD string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	expectations := []struct {
 		id       string
-		wantLen  *int
-		wantNull bool
+		wantLen  *int // expected array_length; nil = empty-or-null array
+		wantNull bool // explicit IS NULL check
 	}{
 		{idA, intPtr(1), false},
 		{idB, intPtr(10), false},
-		{idC, nil, true},
-		{idD, intPtr(0), false},
+		{idC, nil, true},  // explicit NULL
+		{idD, nil, false}, // empty array '{}' — non-NULL but array_length=NULL
 	}
 	for _, e := range expectations {
 		var arrLen *int
+		var isNull bool
 		err := pool.QueryRow(ctx,
-			`SELECT array_length(content_times, 1) FROM context_blocks WHERE id = $1::uuid`,
+			`SELECT array_length(content_times, 1), content_times IS NULL FROM context_blocks WHERE id = $1::uuid`,
 			e.id,
-		).Scan(&arrLen)
+		).Scan(&arrLen, &isNull)
 		if err != nil {
 			t.Fatalf("verify shape %s: %v", e.id, err)
 		}
-		got := describeShape(arrLen)
-		want := describeShape(nil)
-		if !e.wantNull {
-			want = describeShape(e.wantLen)
+		if isNull != e.wantNull {
+			t.Fatalf("block %s content_times IS NULL: got %v, want %v", e.id, isNull, e.wantNull)
 		}
+		got := describeShape(arrLen)
+		want := describeShape(e.wantLen)
 		if got != want {
 			t.Fatalf("block %s content_times shape: got %s, want %s", e.id, got, want)
 		}
