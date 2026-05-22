@@ -577,6 +577,9 @@ func TestCoerceCategoryFactual(t *testing.T) {
 }
 
 func TestAcceptSupersedes(t *testing.T) {
+	// Welle 46 (2026-05-22): direction inverted — source MUST be newer than
+	// target. Variable names below follow created_at semantics (older = earlier
+	// created_at, newer = later created_at).
 	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	same := older
@@ -584,23 +587,23 @@ func TestAcceptSupersedes(t *testing.T) {
 		name         string
 		srcCat       string
 		tgtCat       string
-		srcUpdated   time.Time
-		tgtUpdated   time.Time
+		srcCreated   time.Time
+		tgtCreated   time.Time
 		titleSim     float64
 		wantAccepted bool
 		wantReason   string
 	}{
-		{"all conditions met", "decisions", "decisions", older, newer, 0.5, true, ""},
-		{"different category", "decisions", "projects", older, newer, 0.5, false, "different category"},
-		{"source not older", "decisions", "decisions", newer, older, 0.5, false, "source not older"},
-		{"source same updated_at", "decisions", "decisions", same, same, 0.5, false, "source not older"},
-		{"low title similarity", "decisions", "decisions", older, newer, 0.20, false, "low title similarity"},
-		{"exact threshold", "decisions", "decisions", older, newer, 0.25, true, ""},
-		{"just below threshold", "decisions", "decisions", older, newer, 0.249, false, "low title similarity"},
+		{"all conditions met (src newer)", "decisions", "decisions", newer, older, 0.5, true, ""},
+		{"different category", "decisions", "projects", newer, older, 0.5, false, "different category"},
+		{"source not newer", "decisions", "decisions", older, newer, 0.5, false, "source not newer"},
+		{"source same created_at", "decisions", "decisions", same, same, 0.5, false, "source not newer"},
+		{"low title similarity", "decisions", "decisions", newer, older, 0.20, false, "low title similarity"},
+		{"exact threshold", "decisions", "decisions", newer, older, 0.25, true, ""},
+		{"just below threshold", "decisions", "decisions", newer, older, 0.249, false, "low title similarity"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ok, reason := acceptSupersedes(c.srcCat, c.tgtCat, c.srcUpdated, c.tgtUpdated, c.titleSim)
+			ok, reason := acceptSupersedes(c.srcCat, c.tgtCat, c.srcCreated, c.tgtCreated, c.titleSim)
 			if ok != c.wantAccepted || reason != c.wantReason {
 				t.Errorf("got (%v, %q), want (%v, %q)", ok, reason, c.wantAccepted, c.wantReason)
 			}
@@ -633,6 +636,130 @@ func TestAcceptCausal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- enforceSupersedesDirection Tests ---.
+
+// TestEnforceSupersedesDirection_DowngradesInverted verifies that supersedes
+// links with inverted direction (candidate UpdatedAt >= source CreatedAt)
+// are downgraded to 'topical' rather than dropped. Welle 46 Convention-Switch
+// (2026-05-22): the LLM-emitted relation between two related blocks is
+// preserved as an edge, but the directional spec-claim is discarded.
+func TestEnforceSupersedesDirection_DowngradesInverted(t *testing.T) {
+	tOlder := time.Date(2026, 3, 25, 0, 0, 0, 0, time.UTC)
+	tNewer := time.Date(2026, 3, 26, 0, 0, 0, 0, time.UTC)
+
+	srcCreated := tNewer
+	candidates := []BlockInfo{
+		{ID: "tgt-correct", UpdatedAt: tOlder}, // source newer — keep supersedes
+		{ID: "tgt-invert", UpdatedAt: tNewer},  // source NOT newer — downgrade to topical
+		{ID: "tgt-same", UpdatedAt: tNewer},    // source equal — downgrade to topical
+	}
+
+	links := []Link{
+		{TargetID: "tgt-correct", Relationship: "supersedes", Confidence: 0.9},
+		{TargetID: "tgt-invert", Relationship: "supersedes", Confidence: 0.9},
+		{TargetID: "tgt-same", Relationship: "supersedes", Confidence: 0.9},
+		{TargetID: "tgt-correct", Relationship: "topical", Confidence: 0.8},
+		{TargetID: "tgt-invert", Relationship: "causal", Confidence: 0.8},
+	}
+
+	out := enforceSupersedesDirection(links, srcCreated, candidates)
+
+	// All 5 input links must survive — none are dropped.
+	if len(out) != 5 {
+		t.Fatalf("got %d kept, want 5 (downgrade, never drop)", len(out))
+	}
+
+	// Correctly oriented supersedes stays as supersedes.
+	if rel := findRel(out, "tgt-correct", 0.9); rel != "supersedes" {
+		t.Errorf("correctly oriented supersedes: got %q, want supersedes", rel)
+	}
+	// Inverted supersedes downgraded to topical.
+	if rel := findRel(out, "tgt-invert", 0.9); rel != "topical" {
+		t.Errorf("inverted supersedes: got %q, want topical (downgrade)", rel)
+	}
+	// Equal-timestamp supersedes downgraded to topical (must be STRICTLY newer).
+	if rel := findRel(out, "tgt-same", 0.9); rel != "topical" {
+		t.Errorf("equal-timestamp supersedes: got %q, want topical (downgrade)", rel)
+	}
+	// Pre-existing topical/causal links untouched.
+	if rel := findRel(out, "tgt-correct", 0.8); rel != "topical" {
+		t.Errorf("pre-existing topical changed: got %q", rel)
+	}
+	if rel := findRel(out, "tgt-invert", 0.8); rel != "causal" {
+		t.Errorf("pre-existing causal touched by direction filter: got %q", rel)
+	}
+}
+
+// TestEnforceSupersedesDirection_KeepsCorrect verifies correctly oriented
+// supersedes-links (source strictly newer than target) are kept verbatim.
+func TestEnforceSupersedesDirection_KeepsCorrect(t *testing.T) {
+	tOlder := time.Date(2026, 3, 25, 0, 0, 0, 0, time.UTC)
+	tNewer := time.Date(2026, 3, 26, 0, 0, 0, 0, time.UTC)
+
+	srcCreated := tNewer
+	candidates := []BlockInfo{
+		{ID: "tgt", UpdatedAt: tOlder},
+	}
+	links := []Link{
+		{TargetID: "tgt", Relationship: "supersedes", Confidence: 0.92},
+	}
+
+	out := enforceSupersedesDirection(links, srcCreated, candidates)
+	if len(out) != 1 {
+		t.Fatalf("got %d, want 1", len(out))
+	}
+	if out[0].Relationship != "supersedes" {
+		t.Errorf("relationship changed: got %q, want supersedes", out[0].Relationship)
+	}
+	if out[0].Confidence != 0.92 {
+		t.Errorf("confidence changed: got %f, want 0.92", out[0].Confidence)
+	}
+}
+
+// TestEnforceSupersedesDirection_UnknownTargetPassThrough verifies that a
+// supersedes-link whose target is not in the candidates set passes through
+// the direction filter (filterValidCandidates will drop it downstream).
+func TestEnforceSupersedesDirection_UnknownTargetPassThrough(t *testing.T) {
+	srcCreated := time.Date(2026, 3, 26, 0, 0, 0, 0, time.UTC)
+	candidates := []BlockInfo{
+		{ID: "tgt-known", UpdatedAt: srcCreated.Add(-time.Hour)},
+	}
+	links := []Link{
+		{TargetID: "tgt-unknown", Relationship: "supersedes", Confidence: 0.9},
+	}
+	out := enforceSupersedesDirection(links, srcCreated, candidates)
+	if len(out) != 1 {
+		t.Fatalf("unknown-target supersedes was dropped by direction filter (must defer to filterValidCandidates)")
+	}
+	if out[0].Relationship != "supersedes" {
+		t.Errorf("unknown-target supersedes was relabeled: got %q", out[0].Relationship)
+	}
+}
+
+// TestEnforceSupersedesDirection_EmptyInput verifies the filter handles nil
+// and empty inputs without panicking.
+func TestEnforceSupersedesDirection_EmptyInput(t *testing.T) {
+	out := enforceSupersedesDirection(nil, time.Now(), nil)
+	if len(out) != 0 {
+		t.Errorf("got %v, want empty/nil", out)
+	}
+	out = enforceSupersedesDirection([]Link{}, time.Now(), []BlockInfo{})
+	if len(out) != 0 {
+		t.Errorf("got %d links, want 0", len(out))
+	}
+}
+
+// findRel returns the relationship label of the first link in links matching
+// (target, confidence). Returns "" if no match.
+func findRel(links []Link, target string, conf float64) string {
+	for _, l := range links {
+		if l.TargetID == target && l.Confidence == conf {
+			return l.Relationship
+		}
+	}
+	return ""
 }
 
 // --- Link validation Tests ---.

@@ -574,6 +574,12 @@ func (h *QueryHandler) backfillPending(ctx context.Context) int {
 // also present in the results. This ensures the LLM sees current information.
 // Safety rule: a superseded block is only removed if its superseder is in the result set.
 // Preserves RRF score ordering.
+//
+// Welle 46 Convention-Switch (2026-05-22): supersedesMap is now keyed by the
+// OUTDATED block id with values = newer source ids that supersede it (English
+// "A supersedes B" → key=B, value=[A]). The body of this function does not
+// change because it already operated on the abstract "id → []supersederIDs"
+// shape; the inversion lives in dream.SupersedesMap.
 func filterSuperseded(results []rrf.SearchResult, supersedesMap map[string][]string) []rrf.SearchResult {
 	if len(supersedesMap) == 0 {
 		return results

@@ -116,11 +116,13 @@ func TestWriteLinks_Supersedes_RealSimilarity_BehaviourMatchesContract(t *testin
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 
+	// Welle 46 Convention-Switch (2026-05-22): "A supersedes B" → A=source=newer,
+	// B=target=older. Setup: source = tLate (newer), target = tEarly (older).
 	tEarly := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tLate := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
-	insertBlock(t, pool, icSourceID, "private", "decisions", "Authentication strategy", tEarly, tEarly)
-	insertBlock(t, pool, icTargetID, "private", "decisions", "Authentication strategy v2", tLate, tLate)
+	insertBlock(t, pool, icSourceID, "private", "decisions", "Authentication strategy v2", tLate, tLate)
+	insertBlock(t, pool, icTargetID, "private", "decisions", "Authentication strategy", tEarly, tEarly)
 
 	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "supersedes", Confidence: 0.95}})
@@ -139,14 +141,14 @@ func TestWriteLinks_Supersedes_RealSimilarity_BehaviourMatchesContract(t *testin
 	if _, err := pool.Exec(ctx, `DELETE FROM context_dream_links WHERE source_block_id = $1::uuid`, icSourceID); err != nil {
 		t.Fatalf("reset links: %v", err)
 	}
-	// Also revert the snapshot side-effect from the supersedes write.
-	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET block_type = 'knowledge', superseded_by = NULL WHERE id = $1::uuid`, icSourceID); err != nil {
+	// Welle 46: snapshot side-effect is on the TARGET (the older block); revert it.
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET block_type = 'knowledge', superseded_by = NULL WHERE id = $1::uuid`, icTargetID); err != nil {
 		t.Fatalf("reset block_type: %v", err)
 	}
 
-	// Dissimilar-title sibling — same category, source older, but no trigram
-	// overlap above the 0.25 threshold.
-	insertBlock(t, pool, icOtherID, "private", "decisions", "completely unrelated topic xyzzy", tLate, tLate)
+	// Dissimilar-title sibling — same category, source NEWER than target, but
+	// no trigram overlap above the 0.25 threshold.
+	insertBlock(t, pool, icOtherID, "private", "decisions", "completely unrelated topic xyzzy", tEarly, tEarly)
 
 	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icOtherID, Relationship: "supersedes", Confidence: 0.95}})
@@ -277,10 +279,13 @@ func TestWriteLinks_ReplaceSemantics_RealUUIDs_BehaviourMatchesContract(t *testi
 // TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract verifies
 // the full ApplySupersedes lifecycle against real PG:
 //
-//  1. supersedes link writes block_type='snapshot' on source.
+//  1. supersedes link writes block_type='snapshot' on TARGET (older block).
 //  2. Idempotent re-write of the same supersedes link does not drift.
 //  3. Subsequent write that drops the supersedes link reverts block_type
 //     and superseded_by to NULL via replaceStaleLinks.
+//
+// Welle 46 Convention-Switch (2026-05-22): under "A supersedes B" → A=source=
+// newer, B=target=outdated, the TARGET is the block that becomes a snapshot.
 func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -288,10 +293,12 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 	tEarly := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tLate := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
-	insertBlock(t, pool, icSourceID, "private", "decisions", "auth strategy", tEarly, tEarly)
-	insertBlock(t, pool, icTargetID, "private", "decisions", "auth strategy v2", tLate, tLate)
+	// Source = tLate (newer), Target = tEarly (older). Snapshot marker lands on
+	// the target.
+	insertBlock(t, pool, icSourceID, "private", "decisions", "auth strategy v2", tLate, tLate)
+	insertBlock(t, pool, icTargetID, "private", "decisions", "auth strategy", tEarly, tEarly)
 
-	// Step 1: write supersedes link.
+	// Step 1: write supersedes link → target becomes snapshot, superseded_by=source.
 	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "supersedes", Confidence: 0.95}})
 	if err != nil {
@@ -301,12 +308,16 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 		t.Fatalf("step 1: got written=%d, want 1", written)
 	}
 
-	bt, sb := readSnapshotState(t, pool, icSourceID)
-	if bt != "snapshot" || sb != icTargetID {
-		t.Errorf("step 1: got block_type=%q superseded_by=%q, want snapshot/%s", bt, sb, icTargetID)
+	bt, sb := readSnapshotState(t, pool, icTargetID)
+	if bt != "snapshot" || sb != icSourceID {
+		t.Errorf("step 1: got block_type=%q superseded_by=%q on target, want snapshot/%s", bt, sb, icSourceID)
+	}
+	// Source must NOT be snapshotted.
+	if btSrc, sbSrc := readSnapshotState(t, pool, icSourceID); btSrc == "snapshot" || sbSrc != "" {
+		t.Errorf("step 1: source incorrectly marked: block_type=%q superseded_by=%q", btSrc, sbSrc)
 	}
 
-	// Step 2: idempotent re-write — same input, no drift.
+	// Step 2: idempotent re-write — same input, no drift on target.
 	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "supersedes", Confidence: 0.95}})
 	if err != nil {
@@ -316,13 +327,13 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 		t.Errorf("step 2: got written=%d, want 1", written)
 	}
 
-	bt, sb = readSnapshotState(t, pool, icSourceID)
-	if bt != "snapshot" || sb != icTargetID {
-		t.Errorf("step 2 drift: got block_type=%q superseded_by=%q, want snapshot/%s", bt, sb, icTargetID)
+	bt, sb = readSnapshotState(t, pool, icTargetID)
+	if bt != "snapshot" || sb != icSourceID {
+		t.Errorf("step 2 drift: got block_type=%q superseded_by=%q on target, want snapshot/%s", bt, sb, icSourceID)
 	}
 
 	// Step 3: write a non-supersedes link to a different target → replaceStale
-	// drops the old supersedes row and reverts block_type.
+	// drops the old supersedes row and reverts the original target's block_type.
 	insertBlock(t, pool, icOtherID, "private", "decisions", "unrelated decision", tLate, tLate)
 
 	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
@@ -334,9 +345,9 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 		t.Errorf("step 3: got written=%d, want 1", written)
 	}
 
-	bt, sb = readSnapshotState(t, pool, icSourceID)
+	bt, sb = readSnapshotState(t, pool, icTargetID)
 	if bt != "" || sb != "" {
-		t.Errorf("step 3 revert: got block_type=%q superseded_by=%q, want NULL/NULL", bt, sb)
+		t.Errorf("step 3 revert (target): got block_type=%q superseded_by=%q, want NULL/NULL", bt, sb)
 	}
 }
 

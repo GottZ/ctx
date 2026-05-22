@@ -260,13 +260,26 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 	_ = SetDreamCooldown(ctx, pool, block.ID, cooldownDays)
 
 	// Step 8: Promote eligible blocks to canonical.
-	// Targets of newly written links may now qualify (quality boosted in step 6).
+	// Welle 46 Convention-Switch (2026-05-22): under "A supersedes B" → A=source=newer,
+	// the SOURCE (current dream block) is the authoritative replacement. If the
+	// cycle wrote at least one supersedes-link, the source is the promotion candidate
+	// (quality boosted in step 6, no inbound supersedes). Pre-Welle-46 logic promoted
+	// targets — under the old convention they were the newer block. With the
+	// convention reversed and only the source side being the dream-block-of-cycle,
+	// the promote check now runs once on block.ID.
 	if written > 0 {
+		hasSupersedes := false
 		for _, link := range links {
-			if promoted, err := PromoteToCanonical(ctx, pool, link.TargetID); err != nil {
-				slog.Debug("dream: promote check failed", "block_id", link.TargetID, "error", err)
+			if link.Relationship == "supersedes" {
+				hasSupersedes = true
+				break
+			}
+		}
+		if hasSupersedes {
+			if promoted, err := PromoteToCanonical(ctx, pool, block.ID); err != nil {
+				slog.Debug("dream: promote check failed", "block_id", block.ID, "error", err)
 			} else if promoted {
-				slog.Info("dream: promoted to canonical", "block_id", link.TargetID)
+				slog.Info("dream: promoted to canonical", "block_id", block.ID)
 			}
 		}
 	}
@@ -282,6 +295,12 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 
 // PromoteToCanonical upgrades a block to 'canonical' if it meets all criteria:
 // quality_score >= 0.8, no inbound supersedes, block_type = 'knowledge' or NULL.
+//
+// Welle 46 Convention-Switch (2026-05-22): under the English convention
+// "A supersedes B" → A=source=newer, B=target=outdated. A block is OUTDATED
+// (and must not become canonical) when it appears as the TARGET of a
+// supersedes-link — something newer (the source) has replaced it. The NOT
+// EXISTS clause was inverted from source_block_id=$1 to target_block_id=$1.
 // Returns true if the block was promoted.
 func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string) (bool, error) {
 	tag, err := pool.Exec(ctx,
@@ -292,7 +311,7 @@ func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string)
 		  AND (block_type IS NULL OR block_type = 'knowledge')
 		  AND NOT EXISTS (
 			SELECT 1 FROM context_dream_links
-			WHERE source_block_id = $1 AND relationship = 'supersedes'
+			WHERE target_block_id = $1 AND relationship = 'supersedes'
 		  )`,
 		blockID,
 	)
@@ -521,10 +540,21 @@ func UpdateQualityScore(ctx context.Context, pool *pgxpool.Pool, blockID string)
 	return err
 }
 
-// SupersedesMap returns a map of block_id → []superseded_by_ids for the given block IDs.
-// A block can be superseded by multiple newer blocks, hence the slice value.
-// Gates on raw_confidence >= 0.7 (LLM self-assessment). weighted is a ranking signal, not a gate.
-// Used by the query handler to enrich responses and for filterSuperseded.
+// SupersedesMap returns a map of outdated_block_id → []newer_block_ids that
+// supersede it. A block can be superseded by multiple newer blocks, hence
+// the slice value.
+//
+// Welle 46 Convention-Switch (2026-05-22): under the English convention
+// "A supersedes B" → A=source=newer, B=target=outdated. The map is keyed by
+// the OUTDATED block (target side of the link); the slice values are the
+// newer source IDs that are the canonical replacements. Pre-Welle-46 the
+// SQL filtered source_block_id and keyed the map by source — the inversion
+// is therefore both at the WHERE clause (target_block_id = ANY) and at the
+// scan/append (key = targetID, value = sourceID).
+//
+// Gates on raw_confidence >= 0.7 (LLM self-assessment). weighted is a ranking
+// signal, not a gate. Used by the query handler to enrich responses and for
+// filterSuperseded (which still treats map[id] = "ids that supersede id").
 func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (map[string][]string, error) {
 	if len(blockIDs) == 0 {
 		return nil, nil
@@ -535,7 +565,7 @@ func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (
 		FROM context_dream_links
 		WHERE relationship = 'supersedes'
 		  AND raw_confidence >= 0.7
-		  AND source_block_id = ANY($1::uuid[])`,
+		  AND target_block_id = ANY($1::uuid[])`,
 		blockIDs,
 	)
 	if err != nil {
@@ -549,7 +579,8 @@ func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (
 		if err := rows.Scan(&sourceID, &targetID); err != nil {
 			return nil, fmt.Errorf("dream: scan supersedes: %w", err)
 		}
-		result[sourceID] = append(result[sourceID], targetID)
+		// Key = outdated target, value = newer source(s) that replace it.
+		result[targetID] = append(result[targetID], sourceID)
 	}
 	return result, rows.Err()
 }

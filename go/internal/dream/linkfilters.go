@@ -1,6 +1,7 @@
 package dream
 
 import (
+	"log/slog"
 	"math"
 	"regexp"
 	"sort"
@@ -156,21 +157,88 @@ func coerceCategoryFactual(rel, srcCat, tgtCat string) string {
 	return rel
 }
 
-// V8 check: supersedes requires same category, source meaningfully older than
-// target, and title similarity ≥ titleSimThreshold (caller computes via pg_trgm).
-// Pre-Reset-Audit 2026-04-20 motivation: 9B model can't distinguish
-// "complementary" from "replaces", deterministic pre-filter.
-func acceptSupersedes(srcCat, tgtCat string, srcUpdated, tgtUpdated time.Time, titleSim float64) (bool, string) {
+// V8 check: supersedes requires same category, source meaningfully NEWER than
+// target (source = the authoritative replacement), and title similarity ≥
+// titleSimThreshold (caller computes via pg_trgm).
+//
+// Welle 46 Convention-Switch (2026-05-22): direction inverted from
+// "source older than target" to "source newer than target", and switched from
+// updated_at to created_at. Audit (Sub-Agent 2 Semantic-Stichprobe) found ALL
+// 15 supersedes-Links in production inverted relative to natural-language
+// semantics ("A supersedes B" → A is the newer authoritative version).
+// Migration 042 truncates context_dream_links + resets dream_checked_at; the
+// Re-Dream-Pass writes the new corpus under the English convention.
+// Downstream consumers (SupersedesMap, filterSuperseded, ApplySupersedes,
+// PromoteToCanonical) were aligned with this filter in Welle 46.
+func acceptSupersedes(srcCat, tgtCat string, srcCreated, tgtCreated time.Time, titleSim float64) (bool, string) {
 	if srcCat != tgtCat {
 		return false, "different category"
 	}
-	if !srcUpdated.Before(tgtUpdated) {
-		return false, "source not older"
+	if !srcCreated.After(tgtCreated) {
+		return false, "source not newer"
 	}
 	if titleSim < supersedesTitleSimThreshold {
 		return false, "low title similarity"
 	}
 	return true, ""
+}
+
+// enforceSupersedesDirection is the post-parse hard-constraint that runs
+// after parseLinks but before filterValidCandidates. For every link with
+// relationship='supersedes', it requires that the source candidate's timestamp
+// is strictly after the target candidate's timestamp.
+//
+// Welle 46 (2026-05-22): inverted links are DOWNGRADED to 'topical' instead
+// of dropped. The reasoning: the LLM emitted a supersedes claim between two
+// blocks A and B that ARE related — the relation label is just directionally
+// wrong relative to created_at. A swap to "B supersedes A" is not possible at
+// this layer because Link only carries TargetID (source is the current dream
+// block, fixed by the caller). Dropping the link discards the information
+// that A and B are topically connected. Downgrading to 'topical' preserves
+// the edge in the graph at the conservative cost of one relationship class:
+// 'topical' is the documented fallback per V5 prompt ("when in doubt: topical")
+// and matches what coerceCategoryFactual does for same-category factual links.
+// Audit-Trail: entry.Metadata["supersedes_direction_downgraded"] is set by
+// the caller (evaluate.go) so the rate of inversion stays observable.
+//
+// candidates[].UpdatedAt is used as approximation for CreatedAt because the
+// rrf.SearchResult struct only carries UpdatedAt. For the Dream corpus,
+// UpdatedAt >= CreatedAt; a link inverted by UpdatedAt is also inverted by
+// CreatedAt (exception: blocks updated after creation can flip the inequality;
+// rare and conservative). The final created_at check in acceptSupersedes
+// (writelinks.go) is the authoritative gate — this is defense in depth.
+func enforceSupersedesDirection(links []Link, sourceCreated time.Time, candidates []BlockInfo) []Link {
+	if len(links) == 0 {
+		return links
+	}
+	candByID := make(map[string]time.Time, len(candidates))
+	for _, c := range candidates {
+		candByID[c.ID] = c.UpdatedAt
+	}
+	out := make([]Link, 0, len(links))
+	for _, l := range links {
+		if l.Relationship == "supersedes" {
+			tgtTS, ok := candByID[l.TargetID]
+			if !ok {
+				// Target not in candidates — filterValidCandidates will drop it later.
+				out = append(out, l)
+				continue
+			}
+			if !sourceCreated.After(tgtTS) {
+				// Inverted direction → downgrade to topical (conservative: preserves
+				// the edge, discards the directional spec-claim). Sub-Agent-2 Audit
+				// 2026-05-22 found this is the dominant LLM-error pattern.
+				slog.Debug("dream: supersedes downgraded to topical (inverted direction)",
+					"target_id", l.TargetID,
+					"source_created", sourceCreated,
+					"target_updated", tgtTS,
+				)
+				l.Relationship = "topical"
+			}
+		}
+		out = append(out, l)
+	}
+	return out
 }
 
 // V9 check: causal requires source predates target by created_at.

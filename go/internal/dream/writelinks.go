@@ -69,8 +69,13 @@ func deleteStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarge
 
 // replaceStaleLinks deletes context_dream_links for sourceID that are not in
 // keptTargets and reverts ApplySupersedes-side-effects for any deleted
-// supersedes-links (block_type='snapshot' → NULL when superseded_by matched
-// the deleted target).
+// supersedes-links.
+//
+// Welle 46 Convention-Switch (2026-05-22): under the English convention
+// "A supersedes B" → A=source=newer, B=target=outdated. ApplySupersedes
+// therefore marks the TARGET as snapshot with superseded_by=source. The
+// revert here mirrors that: the deleted target's snapshot status (set when
+// the supersedes-link was first written) is undone when the link goes away.
 func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTargets []string) error {
 	deleted, err := deleteStaleLinks(ctx, tx, sourceID, keptTargets)
 	if err != nil {
@@ -86,7 +91,7 @@ func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarg
 			WHERE id = $1::uuid
 			  AND block_type = 'snapshot'
 			  AND superseded_by = $2::uuid`,
-			sourceID, d.TargetID)
+			d.TargetID, sourceID)
 		if revertErr != nil {
 			slog.Warn("dream: snapshot revert failed (non-fatal)",
 				"source", sourceID, "target", d.TargetID, "error", revertErr)
@@ -123,7 +128,9 @@ func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Fetch source block metadata for structural checks.
+	// Fetch source block metadata for structural checks. updated_at is no
+	// longer consulted (Welle 46: supersedes uses created_at, causal uses
+	// created_at) — kept in the SELECT for column-stability but discarded.
 	var srcCategory string
 	var srcUpdatedAt, srcCreatedAt time.Time
 	var srcTitle string
@@ -131,11 +138,14 @@ func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string
 		`SELECT category, updated_at, created_at, title FROM context_blocks WHERE id = $1`,
 		sourceID,
 	).Scan(&srcCategory, &srcUpdatedAt, &srcCreatedAt, &srcTitle)
+	_ = srcUpdatedAt
 
 	written := 0
 	keptTargets := make([]string, 0, len(links))
 	for _, link := range links {
 		// Fetch target block scope + archived status + metadata for structural checks.
+		// updated_at is no longer consulted (Welle 46: supersedes/causal use
+		// created_at) — kept in the SELECT for column-stability but discarded.
 		var targetScope string
 		var targetArchived bool
 		var targetQuality float64
@@ -150,6 +160,7 @@ func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string
 			slog.Warn("dream: target block not found", "target_id", link.TargetID)
 			continue
 		}
+		_ = targetUpdatedAt
 
 		// V5/V6: scope + archived gate.
 		if ok, reason := acceptScopeAndArchived(targetScope, sourceScope, targetArchived); !ok {
@@ -164,11 +175,16 @@ func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string
 			link.Relationship = newRel
 		}
 
-		// V8: supersedes structural pre-filter (same cat + src older + title sim).
+		// V8 / Welle 46 (2026-05-22): supersedes structural pre-filter (same cat +
+		// src NEWER than tgt by created_at + title sim). Direction inverted from
+		// pre-Welle-46 ("src older") based on Sub-Agent 2 Semantic-Stichprobe:
+		// natural-language "A supersedes B" requires A to be the authoritative
+		// replacement (newer). Migration 043 swapped the persisted 15 inverted
+		// records; this filter prevents new ones.
 		if link.Relationship == "supersedes" {
 			var sim float64
 			_ = tx.QueryRow(ctx, `SELECT similarity($1, $2)`, srcTitle, targetTitle).Scan(&sim)
-			if ok, reason := acceptSupersedes(srcCategory, targetCategory, srcUpdatedAt, targetUpdatedAt, sim); !ok {
+			if ok, reason := acceptSupersedes(srcCategory, targetCategory, srcCreatedAt, targetCreatedAt, sim); !ok {
 				slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason, "similarity", sim)
 				continue
 			}
@@ -210,22 +226,24 @@ func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string
 		written++
 		keptTargets = append(keptTargets, link.TargetID)
 
-		// ApplySupersedes: mark source block as snapshot when superseded.
-		// Source is the OLD block (Dream Rule 6: "target block is a newer version").
+		// ApplySupersedes: mark target block as snapshot — source supersedes target.
+		// Welle 46 Convention-Switch (2026-05-22): "A supersedes B" → A=source=newer
+		// authoritative, B=target=outdated. The TARGET is the block to retire as
+		// snapshot, with superseded_by pointing to the source (the replacement).
 		// Only apply at high confidence to prevent false-positive snapshot marking.
 		if link.Relationship == "supersedes" && weightedConfidence >= 0.7 {
 			_, err = tx.Exec(ctx,
-				`UPDATE context_blocks SET block_type = 'snapshot', superseded_by = $2::uuid
-				WHERE id = $1::uuid AND block_type != 'snapshot'`,
+				`UPDATE context_blocks SET block_type = 'snapshot', superseded_by = $1::uuid
+				WHERE id = $2::uuid AND block_type != 'snapshot'`,
 				sourceID, link.TargetID,
 			)
 			if err != nil {
 				slog.Warn("dream: apply supersedes failed", "source", sourceID, "target", link.TargetID, "error", err)
 				break
 			}
-			slog.Info("dream: marked block as snapshot",
-				"block_id", sourceID,
-				"superseded_by", link.TargetID,
+			slog.Info("dream: marked target block as snapshot",
+				"target_block_id", link.TargetID,
+				"superseded_by_source", sourceID,
 			)
 		}
 	}

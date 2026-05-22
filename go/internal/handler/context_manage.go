@@ -677,14 +677,16 @@ func (h *ManageHandler) fetchSupersedesPairs(ctx context.Context, ar *auth.AuthR
 		if err := rows.Scan(&sourceID, &targetID, &confidence, &sourceTitle, &sourceQuality, &targetTitle, &targetQuality); err != nil {
 			return nil, err
 		}
+		// Welle 46 Convention-Switch (2026-05-22): "A supersedes B" → A=source=newer,
+		// B=target=outdated. Source is the new replacement, target is the retired block.
 		results = append(results, map[string]any{
-			"old_block_id":    sourceID,
-			"old_title":       sourceTitle,
-			"old_quality":     sourceQuality,
-			"new_block_id":    targetID,
-			"new_title":       targetTitle,
-			"new_quality":     targetQuality,
-			"confidence":      confidence,
+			"new_block_id": sourceID,
+			"new_title":    sourceTitle,
+			"new_quality":  sourceQuality,
+			"old_block_id": targetID,
+			"old_title":    targetTitle,
+			"old_quality":  targetQuality,
+			"confidence":   confidence,
 		})
 	}
 	return results, rows.Err()
