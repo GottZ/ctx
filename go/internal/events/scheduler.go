@@ -302,6 +302,16 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 		}
 
 		slog.Info("scheduler: daily synthesis started", "scope", scope, "model", dreamModel)
+
+		// Welle 45: hygiene pass before synthesis — remove dream_links pointing
+		// to or from archived blocks. Cheap DELETE, runs once per day. Decoupled
+		// errors: log but do not abort synthesis.
+		if n, cleanupErr := dream.CleanupDanglingLinks(ctx, s.pool); cleanupErr != nil {
+			slog.Error("scheduler: dangling-link cleanup failed", "error", cleanupErr)
+		} else if n > 0 {
+			slog.Info("scheduler: dangling-link cleanup", "removed", n)
+		}
+
 		blockID, err := dream.GenerateDailyReport(ctx, s.pool, s.config.DreamHost, s.config.DreamAPIKey, dreamModel, s.config.DreamThink, dreamOpts, scope)
 		if err != nil {
 			slog.Error("scheduler: daily synthesis failed", "error", err, "scope", scope)

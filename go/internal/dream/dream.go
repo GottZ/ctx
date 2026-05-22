@@ -485,13 +485,14 @@ func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, che
 }
 
 
-// CleanupDanglingLinks removes links pointing to archived blocks.
+// CleanupDanglingLinks removes links whose source or target block is archived.
+// Welle 45: extended from target-only to both sides — Audit (2026-05-22)
+// uncovered 2 links where both endpoints were archived but never cleaned up.
 func CleanupDanglingLinks(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	tag, err := pool.Exec(ctx,
 		`DELETE FROM context_dream_links
-		WHERE target_block_id IN (
-			SELECT id FROM context_blocks WHERE is_archived
-		)`)
+		WHERE source_block_id IN (SELECT id FROM context_blocks WHERE is_archived)
+		   OR target_block_id IN (SELECT id FROM context_blocks WHERE is_archived)`)
 	if err != nil {
 		return 0, fmt.Errorf("dream: cleanup dangling links: %w", err)
 	}
