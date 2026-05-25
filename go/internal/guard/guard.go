@@ -192,16 +192,18 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 
 	if result.Decision == "near_duplicate" {
 		// Auto-archive near duplicates.
+		// Explicit casts inside jsonb_build_object: VARIADIC "any" can't infer
+		// types under pgx extended protocol on PG18 → 42P08 at PREPARE time.
 		_, err := tx.Exec(ctx,
 			`UPDATE context_blocks SET
 				is_archived = true,
 				guard_status = 'archived_dup',
 				metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-					'guard_status', $2,
-					'guard_checked_at', $3,
-					'guard_similarity', $4,
-					'guard_matched_id', $5,
-					'guard_is_cross_scope', $6
+					'guard_status', $2::text,
+					'guard_checked_at', $3::text,
+					'guard_similarity', $4::float8,
+					'guard_matched_id', $5::text,
+					'guard_is_cross_scope', $6::bool
 				),
 				updated_at = now()
 			WHERE id = $1`,
@@ -212,15 +214,17 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 		}
 	} else {
 		// Mark as checked (needs_review or clean).
+		// $2::text on the column assignment too: PG18 rejects mixed deductions
+		// (varchar from column vs text from jsonb_build_object cast).
 		_, err := tx.Exec(ctx,
 			`UPDATE context_blocks SET
-				guard_status = $2,
+				guard_status = $2::text,
 				metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-					'guard_status', $2,
-					'guard_checked_at', $3,
-					'guard_similarity', $4,
-					'guard_matched_id', $5,
-					'guard_is_cross_scope', $6,
+					'guard_status', $2::text,
+					'guard_checked_at', $3::text,
+					'guard_similarity', $4::float8,
+					'guard_matched_id', $5::text,
+					'guard_is_cross_scope', $6::bool,
 					'guard_threshold_duplicate', 0.98,
 					'guard_threshold_review', 0.92
 				),
