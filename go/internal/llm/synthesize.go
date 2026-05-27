@@ -24,8 +24,18 @@ const (
 	// NoRelevantResponse is the LLM's rejection marker.
 	NoRelevantResponse = "NO_RELEVANT_SOURCES"
 
-	// noRelevantReplacement is the German replacement text for rejected queries.
-	noRelevantReplacement = "Die verfuegbaren Quellen enthalten keine Antwort auf diese Frage."
+	// noRelevantReplacement is the user-facing rejection text emitted when the LLM
+	// returns NO_RELEVANT_SOURCES. Kept English so the exact substring "I don't know"
+	// matches CRAG-style judge regexes and stays locale-agnostic across mixed-language
+	// corpora. (Welle-47 P2 / v2.0.0 C4 — replaces previous German phrasing that
+	// caused CRAG-Judge mis-classifications: 3/10 refusals scored as hallucinations
+	// instead of missing.)
+	noRelevantReplacement = "I don't know based on the available sources."
+
+	// noResultsTemplate is the user-facing text emitted when the score filter
+	// removes all sources before the LLM is called. Kept English for the same
+	// reason as noRelevantReplacement.
+	noResultsTemplate = "I don't know based on the available sources for: %s"
 )
 
 // ScoreThreshold is the minimum RRF score for a source to be included.
@@ -231,7 +241,7 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model str
 	filtered, maxScore := FilterByScore(sources)
 	if len(filtered) == 0 {
 		return &SynthesisResult{
-			Answer:     fmt.Sprintf("Keine relevanten Ergebnisse gefunden fuer: %s", originalQuery),
+			Answer:     fmt.Sprintf(noResultsTemplate, originalQuery),
 			Sources:    []Source{},
 			Confidence: ConfidenceNoRelevant,
 			SkipLLM:    true,
@@ -316,7 +326,7 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model str
 // low_confidence instead of no_relevant_blocks_found — preserving the RRF signal.
 // Returns the adjusted confidence and whether the LLM rejected.
 func ApplyConfidenceOverride(answer, confidence string) (string, bool) {
-	if !strings.HasPrefix(answer, "Die verfuegbaren Quellen") {
+	if !strings.HasPrefix(answer, noRelevantReplacement) {
 		return confidence, false
 	}
 	// LLM rejected. Only override to no_relevant if RRF wasn't confident.
@@ -327,7 +337,10 @@ func ApplyConfidenceOverride(answer, confidence string) (string, bool) {
 }
 
 // FormatAnswer processes the raw LLM output:
-//   - Detects NO_RELEVANT_SOURCES and replaces with German rejection text
+//   - Detects NO_RELEVANT_SOURCES and replaces with the English rejection text
+//     ("I don't know based on the available sources.") so downstream judges
+//     (e.g. CRAG local_evaluation.py regex) classify the response as missing
+//     rather than hallucination.
 //   - Strips trailing NO_RELEVANT_SOURCES markers
 //   - Trims whitespace
 func FormatAnswer(raw string) string {

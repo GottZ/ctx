@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -322,5 +323,76 @@ func TestConfidenceOverride_ConfidentRRF_LLMAccepts(t *testing.T) {
 	}
 	if rejected {
 		t.Error("LLMRejected should be false when LLM returns a normal answer")
+	}
+}
+
+// --- IDK-Locale-Normalisierung (v2.0.0 C4 / Welle-47 P2) ---.
+//
+// Regression-Gate: the LLM rejection replacement MUST contain the lowercase
+// substring "i don't know" so CRAG-style judge regexes classify the response
+// as `missing` (score 0) rather than `incorrect` (score -1). See
+// .project/bench-session-crag/docs/SYNTHESIS.md observation O9.
+
+func TestNoRelevantReplacement_ContainsCRAGSentinel(t *testing.T) {
+	// CRAG local_evaluation.py matches IDK refusals on the lowercase substring
+	// "i don't know". Any future re-wording MUST preserve this anchor — or
+	// update every downstream judge in lockstep. Don't break the contract silently.
+	if !strings.Contains(strings.ToLower(noRelevantReplacement), "i don't know") {
+		t.Errorf(
+			"noRelevantReplacement = %q must contain lowercased substring %q for CRAG judge compatibility",
+			noRelevantReplacement, "i don't know",
+		)
+	}
+}
+
+func TestNoRelevantReplacement_IsASCII(t *testing.T) {
+	// Pure ASCII keeps the refusal locale-agnostic and avoids the umlaut
+	// transliteration surface area that produced the prior "verfuegbaren"
+	// (no-ä keyboard) artefact. If a future locale-aware variant is added,
+	// gate it behind an explicit OutputLanguage signal — not a string toggle.
+	for i, r := range noRelevantReplacement {
+		if r > 127 {
+			t.Errorf("noRelevantReplacement contains non-ASCII rune %q at byte %d", r, i)
+		}
+	}
+}
+
+func TestFormatAnswer_RejectionEmitsEnglishIDK(t *testing.T) {
+	got := FormatAnswer(NoRelevantResponse)
+	if !strings.Contains(strings.ToLower(got), "i don't know") {
+		t.Errorf("FormatAnswer(%q) = %q, want substring %q (CRAG judge compatibility)",
+			NoRelevantResponse, got, "i don't know")
+	}
+	// Negative-control: no leftover German artefacts from the pre-v2 string.
+	if strings.Contains(got, "verfuegbaren") || strings.Contains(got, "verfügbaren") {
+		t.Errorf("FormatAnswer leaked German rejection text: %q", got)
+	}
+}
+
+func TestSynthesize_NoResultsTemplateEmitsEnglishIDK(t *testing.T) {
+	// The no-sources early-exit path bypasses the LLM. Its user-facing string
+	// also needs to clear the CRAG sentinel so bench runs against this code
+	// path don't get mis-scored.
+	emitted := fmt.Sprintf(noResultsTemplate, "what port does the service use?")
+	if !strings.Contains(strings.ToLower(emitted), "i don't know") {
+		t.Errorf("noResultsTemplate emit = %q, want substring %q", emitted, "i don't know")
+	}
+	if strings.Contains(emitted, "Keine relevanten") || strings.Contains(emitted, "fuer:") {
+		t.Errorf("noResultsTemplate leaked German rejection text: %q", emitted)
+	}
+}
+
+func TestConfidenceOverride_DetectsEnglishRejectionPrefix(t *testing.T) {
+	// ApplyConfidenceOverride relies on the answer-prefix to detect rejection.
+	// After v2.0.0 C4 the prefix is English — the override logic must continue
+	// to fire on the new wording, otherwise LLMRejected is silently dropped.
+	answer := FormatAnswer(NoRelevantResponse) // → noRelevantReplacement
+	newConf, rejected := ApplyConfidenceOverride(answer, ConfidenceConfident)
+	if !rejected {
+		t.Errorf("ApplyConfidenceOverride on English IDK reply: rejected=false, want true (answer=%q)", answer)
+	}
+	if newConf != ConfidenceLow {
+		t.Errorf("ApplyConfidenceOverride on English IDK with confident RRF: got %q, want %q",
+			newConf, ConfidenceLow)
 	}
 }
