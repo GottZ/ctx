@@ -80,6 +80,48 @@ func TestTruncateRunes_NeverInvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestTruncateRunesWithSuffix(t *testing.T) {
+	tests := []struct {
+		name   string
+		in     string
+		suffix string
+		n      int
+		want   string
+	}{
+		{"empty", "", "...", 10, ""},
+		{"under_limit_ascii", "hello", "...", 10, "hello"},
+		{"exact_limit_ascii", "helloworld", "...", 10, "helloworld"},
+		{"one_over_limit_ascii", "helloworld!", "...", 10, "helloworld..."},
+		{"emdash_at_boundary",
+			strings.Repeat("a", 66) + "—long tail well past seventy bytes",
+			"...",
+			70,
+			strings.Repeat("a", 66) + "—lon...",
+		},
+		{"long_suffix",
+			strings.Repeat("x", 1501),
+			"[... truncated]",
+			1500,
+			strings.Repeat("x", 1500) + "[... truncated]",
+		},
+		{"multi_byte_under_limit", "中文测试", "...", 10, "中文测试"},
+		{"negative_n", "hello", "...", -5, "..."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TruncateRunesWithSuffix(tt.in, tt.suffix, tt.n)
+			if got != tt.want {
+				t.Errorf("TruncateRunesWithSuffix(%q, %q, %d) = %q, want %q",
+					tt.in, tt.suffix, tt.n, got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("TruncateRunesWithSuffix(%q, %q, %d) = %q: invalid UTF-8",
+					tt.in, tt.suffix, tt.n, got)
+			}
+		})
+	}
+}
+
 func TestTruncateRunesSuffix(t *testing.T) {
 	tests := []struct {
 		name   string

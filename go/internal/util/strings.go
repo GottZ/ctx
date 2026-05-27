@@ -48,3 +48,22 @@ func TruncateRunesSuffix(s, suffix string, n int) string {
 	}
 	return string([]rune(s)[:n-suffixRunes]) + suffix
 }
+
+// TruncateRunesWithSuffix is a thin replacement for the common idiom
+//
+//	if len(s) > n { s = s[:n] + suffix }
+//
+// where n is the max prefix length BEFORE the suffix (not the total). This
+// mirrors the byte-slice form that was scattered through the codebase before
+// Issue #4 and lets sites swap in a rune-safe call without changing their
+// trigger threshold or output budget. The total output length on truncation
+// is n + len([]rune(suffix)) runes; short inputs are returned unchanged.
+func TruncateRunesWithSuffix(s, suffix string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n]) + suffix
+}

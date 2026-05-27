@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgxlisten"
@@ -27,10 +28,10 @@ type WriteHandler struct {
 
 // HandleNotification is called by pgxlisten for each NOTIFY on ctx_block_write.
 func (h *WriteHandler) HandleNotification(ctx context.Context, notification *pgconn.Notification, conn *pgx.Conn) error {
-	payload := notification.Payload
-	if len(payload) > 200 {
-		payload = payload[:200] + "..."
-	}
+	// Rune-aware payload truncation for the debug log (Issue #4 defensive —
+	// invalid UTF-8 in slog output isn't a crash today but is a latent issue
+	// if the log sink ever parses strict UTF-8).
+	payload := util.TruncateRunesWithSuffix(notification.Payload, "...", 200)
 	slog.Debug("listener: received notification",
 		"channel", notification.Channel,
 		"payload", payload,
