@@ -61,6 +61,26 @@ func parseLinks(raw string) ([]Link, string, error) {
 	}
 
 	if strings.HasPrefix(body, "{") {
+		// Drift form 1 (Welle-49, qwen3.6:27b via OpenRouter): single flat
+		// object with top-level target_id/type/confidence fields. LLM emits
+		// this when there's exactly one link instead of wrapping it in an
+		// array. Try this first because format-detection by the wrapper-map
+		// path (next block) would mis-interpret `target_id`/`type`/`confidence`
+		// as map-keys pointing at nested structs.
+		var single struct {
+			TargetID   string          `json:"target_id"`
+			Type       string          `json:"type"`
+			Confidence json.RawMessage `json:"confidence"`
+		}
+		if err := json.Unmarshal([]byte(body), &single); err == nil && single.TargetID != "" && single.Type != "" {
+			conf, ok := coerceConfidence(single.Confidence)
+			if !ok {
+				return nil, "", nil
+			}
+			return []Link{{TargetID: single.TargetID, Relationship: single.Type, Confidence: conf}}, formatObject, nil
+		}
+
+		// Drift form 2 (Welle-25, qwen3.6:27b ollama): wrapper-map with IDs as keys.
 		var obj map[string]struct {
 			Type       string          `json:"type"`
 			Confidence json.RawMessage `json:"confidence"`

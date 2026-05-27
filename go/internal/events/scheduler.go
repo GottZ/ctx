@@ -82,6 +82,7 @@ type Config struct {
 	DreamThink     *bool         // Think mode for dream (nil = omit)
 	DreamNumCtx    int           // num_ctx for dream (0 = model default)
 	DreamIdleWait  int           // seconds between dream cycles when idle (0 = default 20s)
+	DreamParallelism int         // concurrent dream-cycle workers (0/1 = single-thread, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide on the same block.
 }
 
 // Scheduler orchestrates Guard + Digest as background jobs.
@@ -219,10 +220,22 @@ func (s *Scheduler) Run(ctx context.Context) {
 	embedCacheTicker := time.NewTicker(embedCacheEvictInterval)
 	defer embedCacheTicker.Stop()
 
-	// Dream runs in its own goroutine as a continuous loop.
+	// Dream runs in its own goroutine(s) as continuous loop(s).
+	// DreamParallelism workers all share the same DB; PickBlock's FOR UPDATE
+	// SKIP LOCKED ensures distinct blocks per worker. Backfill stays single-
+	// threaded (one worker handles it before its own dream cycle).
 	if s.config.DreamEnabled {
-		slog.Info("scheduler: dream mode enabled (continuous)")
-		go s.runDreamLoop(ctx)
+		workers := s.config.DreamParallelism
+		if workers < 1 {
+			workers = 1
+		}
+		if workers > 16 {
+			workers = 16
+		}
+		slog.Info("scheduler: dream mode enabled (continuous)", "workers", workers)
+		for i := 0; i < workers; i++ {
+			go s.runDreamLoop(ctx)
+		}
 	}
 
 	// Welle 42: daily synthesis at 03:00 local (single goroutine, idempotent

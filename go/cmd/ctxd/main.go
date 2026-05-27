@@ -107,6 +107,7 @@ func main() {
 		DreamThink:       dreamThink,
 		DreamNumCtx:      cfg.DreamNumCtx,
 		DreamIdleWait:    cfg.DreamIdleWait,
+		DreamParallelism: cfg.DreamParallelism,
 		DreamEmbedHost:     cfg.DreamEmbedHost,
 		DreamEmbedAPIKey:   cfg.DreamEmbedAPIKey,
 		DreamEmbedProtocol: cfg.DreamEmbedProtocol,

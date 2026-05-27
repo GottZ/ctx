@@ -55,6 +55,7 @@ type Config struct {
 	DreamEmbedModel    string
 	DreamEmbedNumCtx   int
 	DreamIdleWait      int    // seconds between dream cycles when idle (default 20)
+	DreamParallelism   int    // concurrent dream cycles (default 1, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide.
 
 	// Timezone for temporal resolution (e.g. "Europe/Berlin").
 	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
@@ -152,6 +153,7 @@ func LoadConfig() (Config, error) {
 		DreamEmbedModel:    getEnv("CTX_DREAM_EMBED_MODEL", ""),
 		DreamEmbedNumCtx:   getEnvIntSafe("CTX_DREAM_EMBED_NUM_CTX", 0),
 		DreamIdleWait:      getEnvIntSafe("CTX_DREAM_IDLE_WAIT", 20),
+		DreamParallelism:   getEnvIntSafe("CTX_DREAM_PARALLELISM", 1),
 
 		Timezone: tz,
 
