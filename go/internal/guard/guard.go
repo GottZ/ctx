@@ -6,26 +6,43 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // GuardResult holds the outcome of processing a single block.
 type GuardResult struct {
-	BlockID       string
-	Decision      string
-	Similarity    float64
-	MatchedID     *string
-	MatchedTitle  *string
-	IsCrossScope  bool
+	BlockID      string
+	Decision     string
+	Similarity   float64
+	MatchedID    *string
+	MatchedTitle *string
+	IsCrossScope bool
+}
+
+// guardPool is the minimum *pgxpool.Pool surface that RunGuardBatch needs.
+// The interface lets tests pass a pgxmock-backed pool without exercising a
+// real database. *pgxpool.Pool implicitly satisfies it.
+type guardPool interface {
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
 // RunGuardBatch processes pending blocks through the duplicate detection guard.
 // Uses the ctx_guard_check PG function for each block.
 // Returns the number of blocks processed and any error.
-func RunGuardBatch(ctx context.Context, pool *pgxpool.Pool, limit int) (int, error) {
+//
+// Tx-Abort-Kaskade fix (W47-02): Each block is wrapped in a SAVEPOINT so a
+// failed block (SQL error in checkBlock/applyDecision/writeAuditLog) does not
+// poison the surrounding transaction. Without the savepoint, the first error
+// puts the tx into the "aborted" state (PG error 25P02) and every subsequent
+// statement fails — losing all later block updates. With per-block savepoints,
+// a failure is ROLLBACK'd back to its savepoint, the outer tx stays clean, and
+// the loop continues to the next block.
+func RunGuardBatch(ctx context.Context, pool guardPool, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -93,27 +110,9 @@ func RunGuardBatch(ctx context.Context, pool *pgxpool.Pool, limit int) (int, err
 		default:
 		}
 
-		result, err := checkBlock(ctx, tx, blockID)
-		if err != nil {
-			slog.Error("guard: check block failed", "block_id", blockID, "error", err)
-			continue
+		if processBlock(ctx, tx, blockID) {
+			processed++
 		}
-
-		if err := applyDecision(ctx, tx, blockID, result); err != nil {
-			slog.Error("guard: apply decision failed", "block_id", blockID, "error", err)
-			continue
-		}
-
-		if err := writeAuditLog(ctx, tx, blockID, result); err != nil {
-			slog.Error("guard: audit log failed", "block_id", blockID, "error", err)
-		}
-
-		processed++
-		slog.Debug("guard: block processed",
-			"block_id", blockID,
-			"decision", result.Decision,
-			"similarity", result.Similarity,
-		)
 	}
 
 	// Update guard state.
@@ -149,6 +148,75 @@ func RunGuardBatch(ctx context.Context, pool *pgxpool.Pool, limit int) (int, err
 
 	slog.Info("guard: batch complete", "processed", processed, "total_pending", len(blockIDs))
 	return processed, nil
+}
+
+// savepointName builds a PG-safe SAVEPOINT identifier from a block UUID.
+// PG identifiers must start with a letter/underscore, can contain letters,
+// digits, and underscores. UUIDs contain hyphens which are not allowed, so
+// we replace them with underscores and prepend "block_" to guarantee a
+// letter-first start. UUID length without hyphens is 32 chars; with the
+// prefix the result is 38 chars, well under NAMEDATALEN's 63-byte limit.
+func savepointName(blockID string) string {
+	return "block_" + strings.ReplaceAll(blockID, "-", "_")
+}
+
+// processBlock runs checkBlock + applyDecision + writeAuditLog for a single
+// block inside its own SAVEPOINT. Returns true iff all three steps succeeded.
+// On any error the savepoint is rolled back so the surrounding transaction
+// stays usable for the next block.
+//
+// The atomic-per-block semantic means an audit-log failure rolls the
+// decision back too. That is acceptable: the block stays pending and will be
+// picked up on the next guard cycle, where it can succeed cleanly or, if the
+// underlying failure persists, fail again without poisoning the batch.
+func processBlock(ctx context.Context, tx pgx.Tx, blockID string) bool {
+	sp := savepointName(blockID)
+	if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
+		slog.Error("guard: savepoint create failed", "block_id", blockID, "error", err)
+		return false
+	}
+
+	result, err := checkBlock(ctx, tx, blockID)
+	if err != nil {
+		slog.Error("guard: check block failed", "block_id", blockID, "error", err)
+		rollbackToSavepoint(ctx, tx, sp)
+		return false
+	}
+
+	if err := applyDecision(ctx, tx, blockID, result); err != nil {
+		slog.Error("guard: apply decision failed", "block_id", blockID, "error", err)
+		rollbackToSavepoint(ctx, tx, sp)
+		return false
+	}
+
+	if err := writeAuditLog(ctx, tx, blockID, result); err != nil {
+		slog.Error("guard: audit log failed", "block_id", blockID, "error", err)
+		rollbackToSavepoint(ctx, tx, sp)
+		return false
+	}
+
+	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
+		// RELEASE failure is unusual but non-fatal — the work is already
+		// part of the outer tx. Log and continue.
+		slog.Warn("guard: savepoint release failed", "block_id", blockID, "error", err)
+	}
+
+	slog.Debug("guard: block processed",
+		"block_id", blockID,
+		"decision", result.Decision,
+		"similarity", result.Similarity,
+	)
+	return true
+}
+
+// rollbackToSavepoint rolls the tx back to the given savepoint. After
+// ROLLBACK TO SAVEPOINT the surrounding tx is usable again. A failure here
+// is logged but not propagated — the caller has already decided to abandon
+// the block.
+func rollbackToSavepoint(ctx context.Context, tx pgx.Tx, sp string) {
+	if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); err != nil {
+		slog.Error("guard: savepoint rollback failed", "savepoint", sp, "error", err)
+	}
 }
 
 // checkBlock calls the ctx_guard_check PG function for a single block.
