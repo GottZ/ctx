@@ -94,6 +94,12 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.handleMCPClientList(w, r)
 	case "mcp-client-delete":
 		h.handleMCPClientDelete(w, r, req)
+	case "api-key-create":
+		h.handleApiKeyCreate(w, r, req)
+	case "api-key-list":
+		h.handleApiKeyList(w, r)
+	case "api-key-delete":
+		h.handleApiKeyDelete(w, r, req)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
@@ -868,4 +874,88 @@ func (h *ManageHandler) handleMCPClientDelete(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": data.ClientID})
+}
+
+// apiKeyCreateRequest is the JSON shape under req.Data for api-key-create.
+// home_scope is REQUIRED as of v2.0.0 — empty values yield 400.
+type apiKeyCreateRequest struct {
+	Label         string   `json:"label"`
+	HomeScope     string   `json:"home_scope"`
+	AllowedScopes []string `json:"allowed_scopes,omitempty"`
+}
+
+func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Request, req manageRequest) {
+	var data apiKeyCreateRequest
+	if len(req.Data) > 0 {
+		if err := json.Unmarshal(req.Data, &data); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false, "error": "Invalid data: expected {label, home_scope, allowed_scopes?}",
+			})
+			return
+		}
+	}
+
+	if data.Label == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "label is required"})
+		return
+	}
+	// v2.0.0 breaking change: home_scope must be explicit. No default to
+	// 'private' — callers must declare the tenant boundary at creation time.
+	if data.HomeScope == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "home_scope is required",
+		})
+		return
+	}
+
+	key, plaintext, err := store.CreateApiKey(r.Context(), h.pool, data.Label, data.HomeScope, data.AllowedScopes)
+	if err != nil {
+		slog.Error("manage: create api key failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":        true,
+		"id":             key.ID,
+		"label":          key.Label,
+		"home_scope":     key.HomeScope,
+		"allowed_scopes": key.AllowedScopes,
+		"api_key":        plaintext, // Shown once.
+	})
+}
+
+func (h *ManageHandler) handleApiKeyList(w http.ResponseWriter, r *http.Request) {
+	keys, err := store.ListApiKeys(r.Context(), h.pool)
+	if err != nil {
+		slog.Error("manage: list api keys failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "keys": keys})
+}
+
+func (h *ManageHandler) handleApiKeyDelete(w http.ResponseWriter, r *http.Request, req manageRequest) {
+	var data struct {
+		ID string `json:"id"`
+	}
+	if len(req.Data) > 0 {
+		_ = json.Unmarshal(req.Data, &data)
+	}
+	if data.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id is required"})
+		return
+	}
+	deleted, err := store.DeleteApiKey(r.Context(), h.pool, data.ID)
+	if err != nil {
+		slog.Error("manage: delete api key failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusOK, map[string]any{"success": false, "error": "key not found or already inactive"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": data.ID})
 }
