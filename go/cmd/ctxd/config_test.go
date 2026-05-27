@@ -443,3 +443,89 @@ func TestLoadConfig_InvalidEmbedDims(t *testing.T) {
 		t.Error("expected error for invalid CTX_EMBED_DIMS, got nil")
 	}
 }
+
+// --- parseScopes (v2.0.0 C1: CTX_READ_SCOPES) ---.
+
+func TestParseScopes_EmptyReturnsDefault(t *testing.T) {
+	def := []string{"private", "shared", "work"}
+	got := parseScopes("", def)
+	if !equalStringSlices(got, def) {
+		t.Errorf("parseScopes(%q, %v) = %v, want %v", "", def, got, def)
+	}
+}
+
+func TestParseScopes_SingleValue(t *testing.T) {
+	got := parseScopes("crag", []string{"private"})
+	want := []string{"crag"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("parseScopes(%q) = %v, want %v", "crag", got, want)
+	}
+}
+
+func TestParseScopes_MultiComma(t *testing.T) {
+	got := parseScopes("private,shared,work,crag", []string{"private"})
+	want := []string{"private", "shared", "work", "crag"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("parseScopes multi = %v, want %v", got, want)
+	}
+}
+
+func TestParseScopes_WhitespaceTrim(t *testing.T) {
+	// Whitespace around values should be trimmed.
+	got := parseScopes("  private , shared  , work  ", []string{"private"})
+	want := []string{"private", "shared", "work"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("parseScopes whitespace = %v, want %v", got, want)
+	}
+}
+
+func TestParseScopes_AllEmptyReturnsDefault(t *testing.T) {
+	// Only commas + whitespace → no non-empty parts → fallback to default.
+	def := []string{"private", "shared", "work"}
+	got := parseScopes(" , , , ", def)
+	if !equalStringSlices(got, def) {
+		t.Errorf("parseScopes all-empty = %v, want default %v", got, def)
+	}
+}
+
+func TestParseScopes_EmptyPartsFiltered(t *testing.T) {
+	// "a,,b" → ["a", "b"] — empty parts are dropped.
+	got := parseScopes("a,,b,,,c", []string{"private"})
+	want := []string{"a", "b", "c"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("parseScopes empty-parts = %v, want %v", got, want)
+	}
+}
+
+func TestParseScopes_DefaultPreservedOnEmpty(t *testing.T) {
+	// Default slice should be returned by-reference (or value-equal); confirm
+	// callers get the exact backwards-compat default.
+	def := []string{"private", "shared", "work"}
+	got := parseScopes("", def)
+	if len(got) != 3 || got[0] != "private" || got[1] != "shared" || got[2] != "work" {
+		t.Errorf("parseScopes empty fallback = %v, want exact v1.x default", got)
+	}
+}
+
+func TestParseScopes_CustomScopeNames(t *testing.T) {
+	// v2.0.0 M045 dropped chk_scope: any string is a valid scope here.
+	got := parseScopes("hth,crag,project-x,team_alpha", []string{"private"})
+	want := []string{"hth", "crag", "project-x", "team_alpha"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("parseScopes custom-names = %v, want %v", got, want)
+	}
+}
+
+// equalStringSlices returns true if a and b have the same length and elements
+// in the same order.
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
