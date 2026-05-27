@@ -396,3 +396,116 @@ func TestConfidenceOverride_DetectsEnglishRejectionPrefix(t *testing.T) {
 			newConf, ConfidenceLow)
 	}
 }
+
+// --- Welle-48 W48-01: V6 Prompt-Version Toggle ---.
+//
+// PromptVersion is init-time, env-driven; switching at runtime would require
+// re-reading the env or a setter. These tests cover:
+//   - The V6 constant exists and is non-empty.
+//   - V6 differs from V5.2 (else the toggle is a no-op).
+//   - The V6 constant declares the three response modes (DIRECT / INFERRED /
+//     REFUSAL) and references the NO_RELEVANT_SOURCES marker.
+//   - selectSystemPrompt() honours PromptVersion.
+//   - Default PromptVersion is "v5.2" (zero behavior change in prod when
+//     CTX_PROMPT_VERSION is unset).
+//   - V6 keeps the NO_RELEVANT_SOURCES sentinel anchor (refusal still works,
+//     CRAG-judge compatibility preserved).
+
+func TestSystemPromptV6_Exists(t *testing.T) {
+	if systemPromptV6 == "" {
+		t.Fatal("systemPromptV6 must not be empty")
+	}
+	if systemPromptV6 == systemPromptV52 {
+		t.Error("systemPromptV6 must differ from systemPromptV52 (toggle would be a no-op)")
+	}
+}
+
+func TestSystemPromptV6_DeclaresThreeModes(t *testing.T) {
+	// V6 spec: three explicit response modes. Without the mode-keywords the
+	// LLM can't tell which disposition to use; collapse to V5.2 strict-refusal
+	// behavior — a silent regression of the W48-01 fix.
+	for _, marker := range []string{"DIRECT", "INFERRED", "REFUSAL"} {
+		if !strings.Contains(systemPromptV6, marker) {
+			t.Errorf("systemPromptV6 missing required mode marker %q", marker)
+		}
+	}
+}
+
+func TestSystemPromptV6_KeepsRefusalSentinel(t *testing.T) {
+	// The CRAG judge compatibility depends on the LLM emitting the literal
+	// NO_RELEVANT_SOURCES string in refusal mode; if V6 drops it, FormatAnswer
+	// won't normalise into the English IDK and downstream judges score it as
+	// hallucination instead of missing.
+	if !strings.Contains(systemPromptV6, NoRelevantResponse) {
+		t.Errorf("systemPromptV6 must reference %q sentinel for FormatAnswer pipeline", NoRelevantResponse)
+	}
+}
+
+func TestSelectSystemPrompt_DefaultIsV52(t *testing.T) {
+	orig := PromptVersion
+	defer func() { PromptVersion = orig }()
+
+	PromptVersion = PromptVersionV52
+	if got := selectSystemPrompt(); got != systemPromptV52 {
+		t.Errorf("selectSystemPrompt() with PromptVersion=v5.2 = wrong prompt (len %d)", len(got))
+	}
+}
+
+func TestSelectSystemPrompt_V6Selected(t *testing.T) {
+	orig := PromptVersion
+	defer func() { PromptVersion = orig }()
+
+	PromptVersion = PromptVersionV6
+	if got := selectSystemPrompt(); got != systemPromptV6 {
+		t.Errorf("selectSystemPrompt() with PromptVersion=v6 = wrong prompt (len %d)", len(got))
+	}
+}
+
+func TestSelectSystemPrompt_UnknownFallsBackToV52(t *testing.T) {
+	// Defensive: init() rejects unknown CTX_PROMPT_VERSION values, but if
+	// callers mutate PromptVersion at runtime to something unexpected,
+	// selectSystemPrompt should default to V5.2 rather than panic / return
+	// an empty string.
+	orig := PromptVersion
+	defer func() { PromptVersion = orig }()
+
+	PromptVersion = "v999"
+	if got := selectSystemPrompt(); got != systemPromptV52 {
+		t.Errorf("selectSystemPrompt() with unknown PromptVersion must fall back to V5.2, got len %d", len(got))
+	}
+}
+
+func TestPromptVersion_DefaultIsV52(t *testing.T) {
+	// init() must default to v5.2 when CTX_PROMPT_VERSION is unset. Tests run
+	// without that env (verified by the test harness; CI runs go test without
+	// production env), so the package-init state must be V5.2.
+	if PromptVersion != PromptVersionV52 {
+		t.Errorf("PromptVersion default = %q, want %q (prod-safe default)", PromptVersion, PromptVersionV52)
+	}
+}
+
+func TestBuildPrompt_RespectsPromptVersion(t *testing.T) {
+	// BuildPrompt -> selectSystemPrompt path. Mutate PromptVersion and verify
+	// the system prompt string changes.
+	orig := PromptVersion
+	defer func() { PromptVersion = orig }()
+
+	src := []Source{{ID: "1", Title: "T", Category: "C", Content: "c", Score: 0.01}}
+
+	PromptVersion = PromptVersionV52
+	sysV52, _ := BuildPrompt("q", src, nil)
+	PromptVersion = PromptVersionV6
+	sysV6, _ := BuildPrompt("q", src, nil)
+
+	if sysV52 == sysV6 {
+		t.Error("BuildPrompt returned identical system prompt for V5.2 and V6 — toggle ineffective")
+	}
+	if !strings.Contains(sysV6, "DIRECT") {
+		t.Error("BuildPrompt under V6 did not include the DIRECT mode marker")
+	}
+	if strings.Contains(sysV52, "INFERRED") {
+		// Regression guard: if INFERRED appears in V5.2 we accidentally crossed
+		// the prompts.
+		t.Error("systemPromptV52 unexpectedly contains INFERRED marker")
+	}
+}
