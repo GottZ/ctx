@@ -129,7 +129,7 @@ func fetchBlockMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string
 	rows, err := pool.Query(ctx,
 		`SELECT id, title, category, tags, scope, updated_at
 		FROM context_blocks
-		WHERE scope = ANY($1) AND NOT is_archived
+		WHERE scope = ANY($1::text[]) AND NOT is_archived
 		ORDER BY category, title`,
 		readScopes,
 	)

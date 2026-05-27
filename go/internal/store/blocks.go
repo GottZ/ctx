@@ -266,7 +266,7 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 	rows, err := pool.Query(ctx,
 		`SELECT id, title, category, tags, scope, updated_at
 		 FROM context_blocks
-		 WHERE id::text LIKE $1 || '%' AND scope = ANY($2) AND NOT is_archived
+		 WHERE id::text LIKE $1 || '%' AND scope = ANY($2::text[]) AND NOT is_archived
 		 ORDER BY updated_at DESC
 		 LIMIT $3`,
 		idOrPrefix, readScopes, maxCandidates,
@@ -304,7 +304,7 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []s
 	err := pool.QueryRow(ctx,
 		`SELECT id, category, tags, title, content, metadata, scope, created_at, updated_at
 		 FROM context_blocks
-		 WHERE id = $1 AND scope = ANY($2) AND NOT is_archived
+		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
 		 LIMIT 1`,
 		id, readScopes,
 	).Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
@@ -433,7 +433,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool) ([]BlockPreview, error) {
 	limit = ClampLimit(limit, 10, 50)
 
-	whereClauses := []string{"scope = ANY($1)", "NOT is_archived"}
+	whereClauses := []string{"scope = ANY($1::text[])", "NOT is_archived"}
 	args := []any{readScopes}
 	argIdx := 2
 
@@ -526,7 +526,7 @@ func ListCategories(ctx context.Context, pool *pgxpool.Pool, readScopes []string
 	rows, err := pool.Query(ctx,
 		`SELECT category, count(*)::int AS count
 		 FROM context_blocks
-		 WHERE scope = ANY($1) AND NOT is_archived
+		 WHERE scope = ANY($1::text[]) AND NOT is_archived
 		 GROUP BY category
 		 ORDER BY count DESC`,
 		readScopes,
@@ -555,10 +555,10 @@ func GetStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (*St
 	s := &Stats{}
 	err := pool.QueryRow(ctx,
 		`SELECT
-			(SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived) AS total_blocks,
-			(SELECT count(DISTINCT category)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived) AS total_categories,
-			(SELECT min(created_at) FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived) AS oldest_entry,
-			(SELECT max(created_at) FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived) AS newest_entry,
+			(SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived) AS total_blocks,
+			(SELECT count(DISTINCT category)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived) AS total_categories,
+			(SELECT min(created_at) FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived) AS oldest_entry,
+			(SELECT max(created_at) FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived) AS newest_entry,
 			(SELECT pg_size_pretty(pg_total_relation_size('context_blocks'))) AS db_size`,
 		readScopes,
 	).Scan(&s.TotalBlocks, &s.TotalCategories, &s.OldestEntry, &s.NewestEntry, &s.DBSize)
@@ -573,7 +573,7 @@ func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string) ([]B
 	rows, err := pool.Query(ctx,
 		`SELECT id, title, category, tags, scope, updated_at
 		 FROM context_blocks
-		 WHERE scope = ANY($1) AND NOT is_archived
+		 WHERE scope = ANY($1::text[]) AND NOT is_archived
 		 ORDER BY category, title
 		 LIMIT 10000`,
 		readScopes,
@@ -616,7 +616,7 @@ func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, cat
 
 	whereClauses := []string{
 		"NOT b.is_archived",
-		"b.scope = ANY($1)",
+		"b.scope = ANY($1::text[])",
 	}
 	args := []any{readScopes}
 	argIdx := 2
@@ -693,13 +693,13 @@ func GetGuardStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string)
 	gs := &GuardStats{}
 	err := pool.QueryRow(ctx,
 		`SELECT
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived AND guard_status = 'active'), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived AND guard_status = 'clean'), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived AND guard_status = 'needs_review'), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived AND guard_status = 'near_duplicate'), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived AND guard_status IS NULL), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1) AND guard_status = 'archived_dup'), 0),
+			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived), 0),
+			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status = 'active'), 0),
+			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status = 'clean'), 0),
+			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status = 'needs_review'), 0),
+			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status = 'near_duplicate'), 0),
+			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status IS NULL), 0),
+			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND guard_status = 'archived_dup'), 0),
 			COALESCE((SELECT count(*)::int FROM context_write_log), 0),
 			(SELECT dirty_since FROM context_guard_state WHERE id = true),
 			(SELECT last_guard_at FROM context_guard_state WHERE id = true),

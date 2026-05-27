@@ -45,8 +45,8 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 	var contentLength int
 	_ = h.pool.QueryRow(ctx,
 		`SELECT
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived), 0),
-			COALESCE((SELECT count(DISTINCT category)::int FROM context_blocks WHERE scope = ANY($1) AND NOT is_archived), 0),
+			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived), 0),
+			COALESCE((SELECT count(DISTINCT category)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived), 0),
 			COALESCE((SELECT length(content)::int FROM context_blocks WHERE category = 'index' AND title = 'topic-map-' || $2 AND NOT is_archived LIMIT 1), 0)`,
 		authResult.ReadScopes, authResult.HomeScope,
 	).Scan(&blockCount, &categoryCount, &contentLength)

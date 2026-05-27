@@ -105,7 +105,7 @@ func GetBlobByID(ctx context.Context, pool *pgxpool.Pool, id string, readScopes 
 		query = `SELECT id, context_block_id, category, title, filename, mime_type, file_size,
 			COALESCE(checksum, ''), storage_type, tags, metadata, scope, created_at, updated_at
 		FROM context_blobs
-		WHERE id = $1 AND scope = ANY($2)
+		WHERE id = $1 AND scope = ANY($2::text[])
 		LIMIT 1`
 
 		err := pool.QueryRow(ctx, query, id, readScopes).Scan(
@@ -123,7 +123,7 @@ func GetBlobByID(ctx context.Context, pool *pgxpool.Pool, id string, readScopes 
 		query = `SELECT id, context_block_id, category, title, filename, mime_type, file_size,
 			COALESCE(checksum, ''), storage_type, data, tags, metadata, scope, created_at, updated_at
 		FROM context_blobs
-		WHERE id = $1 AND scope = ANY($2)
+		WHERE id = $1 AND scope = ANY($2::text[])
 		LIMIT 1`
 
 		err := pool.QueryRow(ctx, query, id, readScopes).Scan(
@@ -150,7 +150,7 @@ func GetBlobByCategoryTitle(ctx context.Context, pool *pgxpool.Pool, category, t
 		query = `SELECT id, context_block_id, category, title, filename, mime_type, file_size,
 			COALESCE(checksum, ''), storage_type, tags, metadata, scope, created_at, updated_at
 		FROM context_blobs
-		WHERE category = $1 AND title = $2 AND scope = ANY($3)
+		WHERE category = $1 AND title = $2 AND scope = ANY($3::text[])
 		LIMIT 1`
 
 		err := pool.QueryRow(ctx, query, category, title, readScopes).Scan(
@@ -168,7 +168,7 @@ func GetBlobByCategoryTitle(ctx context.Context, pool *pgxpool.Pool, category, t
 		query = `SELECT id, context_block_id, category, title, filename, mime_type, file_size,
 			COALESCE(checksum, ''), storage_type, data, tags, metadata, scope, created_at, updated_at
 		FROM context_blobs
-		WHERE category = $1 AND title = $2 AND scope = ANY($3)
+		WHERE category = $1 AND title = $2 AND scope = ANY($3::text[])
 		LIMIT 1`
 
 		err := pool.QueryRow(ctx, query, category, title, readScopes).Scan(
@@ -190,7 +190,7 @@ func GetBlobByCategoryTitle(ctx context.Context, pool *pgxpool.Pool, category, t
 func SearchBlobs(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category string, tags []string, mimeType string, limit int) ([]BlobMeta, error) {
 	limit = ClampLimit(limit, 10, 100)
 
-	whereClauses := []string{"scope = ANY($1)"}
+	whereClauses := []string{"scope = ANY($1::text[])"}
 	args := []any{readScopes}
 	argIdx := 2
 
@@ -256,10 +256,10 @@ func GetBlobStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) 
 	s := &BlobStats{}
 	err := pool.QueryRow(ctx,
 		`SELECT
-			COALESCE((SELECT count(*)::int FROM context_blobs WHERE scope = ANY($1)), 0),
-			COALESCE((SELECT count(DISTINCT category)::int FROM context_blobs WHERE scope = ANY($1)), 0),
-			COALESCE((SELECT sum(file_size)::bigint FROM context_blobs WHERE scope = ANY($1)), 0),
-			COALESCE((SELECT pg_size_pretty(COALESCE(sum(file_size), 0)::bigint) FROM context_blobs WHERE scope = ANY($1)), '0 bytes'),
+			COALESCE((SELECT count(*)::int FROM context_blobs WHERE scope = ANY($1::text[])), 0),
+			COALESCE((SELECT count(DISTINCT category)::int FROM context_blobs WHERE scope = ANY($1::text[])), 0),
+			COALESCE((SELECT sum(file_size)::bigint FROM context_blobs WHERE scope = ANY($1::text[])), 0),
+			COALESCE((SELECT pg_size_pretty(COALESCE(sum(file_size), 0)::bigint) FROM context_blobs WHERE scope = ANY($1::text[])), '0 bytes'),
 			(SELECT pg_size_pretty(pg_total_relation_size('context_blobs')))`,
 		readScopes,
 	).Scan(&s.TotalBlobs, &s.TotalCategories, &s.TotalSize, &s.TotalSizePretty, &s.DBSize)
@@ -299,7 +299,7 @@ func ListBlobs(ctx context.Context, pool *pgxpool.Pool, readScopes []string, lim
 		`SELECT id, context_block_id, category, title, filename, mime_type, file_size,
 			COALESCE(checksum, ''), storage_type, tags, metadata, scope, created_at, updated_at
 		FROM context_blobs
-		WHERE scope = ANY($1)
+		WHERE scope = ANY($1::text[])
 		ORDER BY updated_at DESC
 		LIMIT $2`,
 		readScopes, limit,

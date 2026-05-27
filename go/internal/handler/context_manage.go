@@ -626,7 +626,7 @@ func (h *ManageHandler) fetchLowConfidenceLinks(ctx context.Context, ar *auth.Au
 		JOIN context_blocks s ON s.id = dl.source_block_id
 		JOIN context_blocks t ON t.id = dl.target_block_id
 		WHERE dl.raw_confidence < 0.7
-		  AND dl.scope = ANY($1)
+		  AND dl.scope = ANY($1::text[])
 		ORDER BY dl.raw_confidence ASC
 		LIMIT 20`,
 		ar.ReadScopes,
@@ -666,7 +666,7 @@ func (h *ManageHandler) fetchSupersedesPairs(ctx context.Context, ar *auth.AuthR
 		JOIN context_blocks s ON s.id = dl.source_block_id
 		JOIN context_blocks t ON t.id = dl.target_block_id
 		WHERE dl.relationship = 'supersedes'
-		  AND dl.scope = ANY($1)
+		  AND dl.scope = ANY($1::text[])
 		ORDER BY dl.confidence DESC
 		LIMIT 20`,
 		ar.ReadScopes,
@@ -712,7 +712,7 @@ func (h *ManageHandler) fetchRecentDreamBlocks(ctx context.Context, ar *auth.Aut
 		) lc ON lc.block_id = cb.id
 		WHERE cb.dream_checked_at IS NOT NULL
 		  AND NOT cb.is_archived
-		  AND cb.scope = ANY($1)
+		  AND cb.scope = ANY($1::text[])
 		ORDER BY cb.dream_checked_at DESC
 		LIMIT 10`,
 		ar.ReadScopes,

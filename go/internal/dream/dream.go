@@ -488,9 +488,9 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedHost, embedA
 func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, checked, linked, pendingRecheck int, err error) {
 	err = pool.QueryRow(ctx,
 		`SELECT
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND NOT is_meta AND scope = ANY($1))::int,
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND NOT is_meta AND scope = ANY($1))::int,
-			(SELECT count(*) FROM context_dream_links WHERE scope = ANY($1))::int,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND NOT is_meta AND scope = ANY($1::text[]))::int,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND NOT is_meta AND scope = ANY($1::text[]))::int,
+			(SELECT count(*) FROM context_dream_links WHERE scope = ANY($1::text[]))::int,
 			(SELECT count(*) FROM context_blocks
 				WHERE NOT is_archived
 				  AND embedding IS NOT NULL
@@ -498,7 +498,7 @@ func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, che
 				  AND NOT is_meta
 				  AND dream_checked_at IS NOT NULL
 				  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
-				  AND scope = ANY($1))::int`,
+				  AND scope = ANY($1::text[]))::int`,
 		scopes,
 	).Scan(&total, &checked, &linked, &pendingRecheck)
 	return
