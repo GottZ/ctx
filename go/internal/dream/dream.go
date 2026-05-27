@@ -323,23 +323,37 @@ func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string)
 
 // PickBlock selects the next block for Dream processing.
 // Priority: unchecked blocks first, then oldest-checked with expired cooldown.
-// Uses FOR UPDATE SKIP LOCKED to prevent concurrent processing.
 // Excludes is_meta blocks — Post-Reset-Audit 2026-04-20 validated that meta blocks
 // (Origin-Stories, CV, Compound-Loop, Agent-Briefing, index) cause 85% of NO_REL noise
 // without producing any valid relationships. Filter empirically clean (0% FN-Rate).
+//
+// Atomic claim-with-TTL (Welle-49, parallelism-bug-fix): a plain
+// pool.QueryRow(... FOR UPDATE SKIP LOCKED) releases the row lock as soon as
+// the statement returns, so a multi-second RunDreamCycle that followed had no
+// protection from a sibling worker picking the same block. Fix: UPDATE … FROM
+// subquery sets a transient cooldown (CooldownTransientMinutes) atomically with
+// the pick, so other workers see the cooldown active and SKIP. On successful
+// cycle completion the caller overrides with the real outcome cooldown
+// (CooldownActiveDays / CooldownInertDays). On crash the transient claim
+// expires after 5 min and the block re-enters the queue.
 func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 	var block BlockInfo
 	err := pool.QueryRow(ctx,
-		`SELECT id, title, category, content, scope, quality_score, updated_at, created_at, dream_keywords, dream_temporal_validated_at
-		FROM context_blocks
-		WHERE NOT is_archived
-		  AND embedding IS NOT NULL
-		  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
-		  AND NOT is_meta
-		  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
-		ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED`,
+		`UPDATE context_blocks
+		SET dream_cooldown_until = now() + ($1 * interval '1 minute')
+		WHERE id = (
+			SELECT id FROM context_blocks
+			WHERE NOT is_archived
+			  AND embedding IS NOT NULL
+			  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
+			  AND NOT is_meta
+			  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
+			ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, title, category, content, scope, quality_score, updated_at, created_at, dream_keywords, dream_temporal_validated_at`,
+		CooldownTransientMinutes,
 	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt, &block.DreamKeywords, &block.DreamTemporalValidatedAt)
 
 	if errors.Is(err, pgx.ErrNoRows) {

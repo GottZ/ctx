@@ -25,7 +25,6 @@ var httpClient = &http.Client{
 
 const (
 	TargetDims   = 1024
-	embedTimeout = 30 * time.Second
 	minNorm      = 0.99
 	maxNorm      = 1.01
 	minVariance  = 0.0001
@@ -127,9 +126,10 @@ func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx 
 		return nil, fmt.Errorf("embed: marshal: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, embedTimeout)
-	defer cancel()
-
+	// No artificial deadline: embed-call latency is data-dependent (chunk-size,
+	// queue-depth on shared GPU at high parallelism). Parent ctx provides the
+	// real timeout (cycle-timeout for backfill, request-timeout for query path).
+	// Was: WithTimeout(ctx, 30s) — fired under parallel=16 pressure (Welle-49).
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/api/embed", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("embed: create request: %w", err)
@@ -170,9 +170,7 @@ func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]floa
 		return nil, fmt.Errorf("embed: marshal: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, embedTimeout)
-	defer cancel()
-
+	// No artificial deadline (see Ollama-path note above).
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/v1/embeddings", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("embed: create request: %w", err)
