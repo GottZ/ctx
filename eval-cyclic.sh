@@ -6,7 +6,7 @@
 #        bash eval-cyclic.sh --gold <path>         — alternatives Gold-File
 #        bash eval-cyclic.sh --reference-date YYYY-MM-DD — frozen reference date
 #        bash eval-cyclic.sh --branch <name>       — overrides git-branch im Output
-#        bash eval-cyclic.sh --internal            — bypass reverse-proxy (use ctx container IP)
+#        bash eval-cyclic.sh --internal            — bypass reverse-proxy (uses http://ctx:8080 from n8nintern network; override via CTX_INTERNAL_URL)
 #
 # Misst Top-K-Overlap (k=5) gegen .eval-cyclic-gold.json.
 # Bewertungs-Methodologie: .project/eval-cyclic-methodology.md
@@ -49,11 +49,13 @@ if [[ ! -f "$GOLD_FILE" ]]; then
 fi
 
 # Webhook selection: --internal bypasses the reverse-proxy that drops 22-67% of
-# LLM responses (Welle 35). 172.32.16.4 is the ctx container IP — valid in the
-# n8nintern compose network. Verify via:
-#   docker inspect ctx --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+# LLM responses (Welle 35). Uses the ctx container DNS-name resolvable from the
+# n8nintern compose network. Override with CTX_INTERNAL_URL if needed. Caller
+# must run from inside the n8nintern network (e.g. `docker run --rm --network
+# n8nintern …` or from another container attached to n8nintern). Container-IPs
+# are unstable across restarts (W47-NEU-F), DNS-name is stable.
 if $INTERNAL; then
-  WEBHOOK="http://172.32.16.4:8080"
+  WEBHOOK="${CTX_INTERNAL_URL:-http://ctx:8080}"
 else
   WEBHOOK="${WEBHOOK_BASE_URL:?WEBHOOK_BASE_URL not in .env}"
 fi
