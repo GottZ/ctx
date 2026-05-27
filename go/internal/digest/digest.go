@@ -83,19 +83,35 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readSc
 	indexContent := sb.String()
 
 	// Upsert as block: category=index, title=topic-map-{scope}.
+	// Welle 47 (W47-NEU-A): metadata.is_meta=true plus a ClassifyBlockAfterUpsert
+	// call route the topic-map through the Welle-44 hook → block_role='system-meta'
+	// + is_meta=TRUE. This makes ctx_rrf hard-exclude the topic-map (M036/M048
+	// `cb.block_role != 'system-meta'` filter) instead of letting it slot-steal
+	// retrieval candidates (CRAG Phase 6 found 5/10 movie queries pulled
+	// topic-map-private into top-5).
 	indexTitle := "topic-map-" + homeScope
 	indexTags := []string{"index", "topic-map", homeScope, "auto-generated"}
 	indexMetadata := map[string]any{
 		"source":         "context-digest",
+		"is_meta":        true,
 		"generated_at":   time.Now().UTC().Format("2006-01-02"),
 		"scope":          homeScope,
 		"block_count":    len(blocks),
 		"category_count": len(catNames),
 	}
 
-	_, err = store.UpsertBlock(ctx, pool, "index", indexTitle, indexContent, indexTags, indexMetadata, homeScope, true)
+	block, err := store.UpsertBlock(ctx, pool, "index", indexTitle, indexContent, indexTags, indexMetadata, homeScope, true)
 	if err != nil {
 		return fmt.Errorf("digest: upsert topic map: %w", err)
+	}
+
+	// Welle 44 hook: classify block_role + is_meta. Topic-map metadata sets
+	// is_meta=true so branch 1 (system-meta) fires. Idempotent — re-runs of
+	// RunDigest are no-ops at this layer.
+	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, block.ID, block.Title, block.Metadata); err != nil {
+		// Non-fatal: the topic-map block exists, classification can be retried
+		// next cycle. Log + continue rather than fail the whole digest.
+		slog.Warn("digest: topic map auto-classify failed", "error", err, "block_id", block.ID)
 	}
 
 	slog.Info("digest: topic map updated",
