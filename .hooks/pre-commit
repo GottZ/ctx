@@ -1,9 +1,118 @@
 #!/bin/sh
-# Pre-commit hook: run golangci-lint on staged Go files.
+# Pre-commit hook — runs two gates:
+#
+#   1. Sanity check on newly-added files: blocks accidental commits of
+#      sensitive/private content into the public main-repo. Triggered by
+#      a W47-NEU-B sub-agent (2026-05-27) that committed
+#      .eval-cyclic-gold.json with private corpus block-IDs into the
+#      public repo, requiring a full git-history rewrite to remove.
+#      This hook makes that class of mistake hard to repeat.
+#
+#   2. golangci-lint on staged Go files (existing gate).
 #
 # Setup: git config core.hooksPath .hooks
+# Bypass: git commit --no-verify — use sparingly.
 
-# Check if any Go files are staged.
+set -u
+
+# ============================================================
+# Gate 1: Sensitive new-file pattern check
+# ============================================================
+#
+# Patterns match newly-added (status A) files only. Modifications to
+# already-tracked files are not re-checked — once a file is in, the
+# decision was made.
+#
+# To allow a legitimate match, either:
+#   - place the file under .project/ (private submodule)
+#   - add an explicit !whitelist entry in .gitignore
+#   - run `git commit --no-verify` (logged in commit metadata)
+
+NEW_FILES=$(git diff --cached --name-only --diff-filter=A 2>/dev/null)
+
+if [ -n "$NEW_FILES" ]; then
+    BLOCKED=""
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        base=$(basename "$f")
+
+        # Tier-1 hard block: credentials, keys, env, dump files
+        case "$base" in
+            *.example|*.template)
+                # Templates are safe by convention — skip all other checks
+                continue
+                ;;
+        esac
+
+        case "$base" in
+            .env|.env.*)
+                BLOCKED="$BLOCKED\n  $f  [env file — credentials risk]"
+                ;;
+            *secret*|*credentials*|*passwd*|*password*)
+                BLOCKED="$BLOCKED\n  $f  [secret/credentials in filename]"
+                ;;
+            *.key|*.pem|*.p12|*.pfx|id_rsa|id_ed25519)
+                BLOCKED="$BLOCKED\n  $f  [private key file]"
+                ;;
+            backup-*.sql|backup-*.dump|*-pre-v*.sql|*-pre-v*.dump)
+                BLOCKED="$BLOCKED\n  $f  [DB dump — likely private corpus]"
+                ;;
+        esac
+
+        # Tier-1 hard block: bench/eval gold/baseline files (corpus-specific)
+        case "$base" in
+            .eval-baseline.json|.eval-cyclic-baseline.json|.eval-cyclic-gold.json|eval-cyclic-gold*.json|eval-cyclic-results*.json|eval-baseline*.json)
+                BLOCKED="$BLOCKED\n  $f  [bench gold/baseline — corpus-specific, belongs in .project submodule]"
+                ;;
+        esac
+
+        # Tier-2 content heuristic: large new JSON in repo-root with corpus markers
+        case "$f" in
+            */*) ;;  # nested — skip (caller probably scoped correctly)
+            *.json|*.jsonl)
+                size=$(wc -c < "$f" 2>/dev/null || echo 0)
+                if [ "$size" -gt 20000 ]; then
+                    # Sample for corpus-specific markers
+                    if grep -qE '"expected_top_k_block_ids"|"interaction_id"|"block_id":[[:space:]]*"019[a-f0-9]' "$f" 2>/dev/null; then
+                        BLOCKED="$BLOCKED\n  $f  [large root-level JSON with corpus block-IDs — likely private bench data]"
+                    fi
+                fi
+                ;;
+        esac
+    done <<EOF
+$NEW_FILES
+EOF
+
+    if [ -n "$BLOCKED" ]; then
+        printf '\n'
+        printf 'pre-commit: REJECTED — new files match sensitive patterns:\n'
+        printf '%b\n' "$BLOCKED"
+        printf '\n'
+        printf 'Resolutions in order of preference:\n'
+        printf '  1. Move to .project/ submodule (private):\n'
+        printf '       mv <file> .project/<file>\n'
+        printf '       git rm --cached <file>\n'
+        printf '       (cd .project && git add <file> && git commit && git push)\n'
+        printf '       git commit --amend  # update submodule pointer\n'
+        printf '\n'
+        printf '  2. Whitelist a known-safe template (.example/.template suffix):\n'
+        printf '       mv <file> <file>.example  # if it is actually a template\n'
+        printf '\n'
+        printf '  3. Emergency bypass (logged in commit metadata):\n'
+        printf '       git commit --no-verify\n'
+        printf '\n'
+        printf 'Background: W47-NEU-B-Sub-Agent (2026-05-27) committed\n'
+        printf '.eval-cyclic-gold.json with private corpus block-IDs into the public\n'
+        printf 'repo, requiring a full git-history rewrite to remove. This gate\n'
+        printf 'prevents that class of mistake.\n'
+        exit 1
+    fi
+fi
+
+# ============================================================
+# Gate 2: golangci-lint on staged Go files
+# ============================================================
+
 STAGED_GO=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
 if [ -z "$STAGED_GO" ]; then
     exit 0
