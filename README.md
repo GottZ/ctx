@@ -179,6 +179,36 @@ go build -o ctxd ./cmd/ctxd/         # Daemon
 go test ./... -short                  # Unit tests
 ```
 
+## CRAG-Bench Test Instance
+
+Optional, profile-gated isolated ctx instance for the CRAG retrieval benchmark.
+Reuses the prod `n8n-ctx` image, runs against a separate test DB
+(`ctx_crag_test`), and binds to `127.0.0.1:18080` only.
+
+```bash
+# 1. Provision env file (NEVER commit the real .env.crag)
+cp .env.crag.example .env.crag
+# edit: openssl rand -hex 32 for CONTEXT_DB_PASSWORD and CRAG_API_KEY
+
+# 2. Bootstrap the test DB (one-shot)
+docker exec \
+  -e POSTGRES_USER=admin -e POSTGRES_DB=n8n -e POSTGRES_PASSWORD=<admin> \
+  -e CONTEXT_DB=ctx_crag_test \
+  -e CONTEXT_DB_USER=crag_user \
+  -e CONTEXT_DB_PASSWORD=<from .env.crag> \
+  n8n-db-1 bash /docker-entrypoint-initdb.d/init-data.sh
+
+# 3. Start the profile-gated service
+docker compose --profile crag --env-file .env.crag up -d ctx-crag
+docker compose --profile crag --env-file .env.crag logs -f ctx-crag
+
+# 4. Verify
+curl -sf http://127.0.0.1:18080/health
+```
+
+The default `docker compose up -d` ignores profile-gated services — prod ctx
+is unaffected.
+
 ## License
 
 [MPL-2.0](LICENSE) — By [GottZ](https://github.com/GottZ)

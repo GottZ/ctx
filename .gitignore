@@ -3,6 +3,7 @@
 !.gitignore
 !.gitmodules
 !.env.example
+!.env.crag.example
 !.project
 
 # Local overrides
