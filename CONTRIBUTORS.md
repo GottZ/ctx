@@ -19,6 +19,13 @@ else's environment — that led to a fix landing in the repository.
   parameters under pgx extended protocol on PostgreSQL 18). Reproduction,
   diagnosis, fix proposal, and in-repo precedent identification all delivered
   in one issue — went straight to the patch.
+- **Damien Moon** ([@DamieMoon](https://github.com/DamieMoon)) —
+  [#4](https://github.com/GottZ/ctx/issues/4): root-cause analysis of the
+  digest scheduler's `22021` failure (byte-slice title truncation in
+  `RunDigest` splits a multi-byte UTF-8 rune, leaving a dangling lead byte
+  that PostgreSQL rejects). Standalone deterministic Go reproduction, live
+  daemon symptom capture, fix diff, and identification of four latent sites
+  with the same byte-slice idiom — all in one issue.
 
 ## How to be listed
 

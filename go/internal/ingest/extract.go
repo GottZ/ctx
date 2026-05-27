@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/util"
 )
 
 // MaxExtractionContent is the maximum content length sent to the LLM.
@@ -64,10 +65,10 @@ func BuildExtractionPrompt(content string) (system, user, nonce string) {
 	system = extractionSystemPrompt
 	nonce = generateNonce()
 
-	// Truncate content if too long
-	if len(content) > MaxExtractionContent {
-		content = content[:MaxExtractionContent] + "..."
-	}
+	// Truncate content if too long. Rune-aware to avoid emitting invalid UTF-8
+	// into the LLM prompt (Issue #4 defensive — not a crash here today but
+	// the same byte-slice bug pattern as digest.go was).
+	content = util.TruncateRunesWithSuffix(content, "...", MaxExtractionContent)
 
 	user = fmt.Sprintf("===CONTENT_%s===\n%s\n===END_%s===", nonce, content, nonce)
 	return system, user, nonce
@@ -111,13 +112,11 @@ func DetectInjection(content string) []string {
 	}
 
 	// Special case: "IMPORTANT:" followed by instruction-like text
-	// Look for "important:" then check the rest of the line for imperative verbs
+	// Look for "important:" then check the rest of the line for imperative verbs.
+	// Rune-aware substring cap with empty suffix (Issue #4 defensive — no
+	// "..." injected into the search target).
 	if idx := strings.Index(lower, "important:"); idx != -1 {
-		// Grab up to 200 chars after "important:"
-		after := lower[idx+len("important:"):]
-		if len(after) > 200 {
-			after = after[:200]
-		}
+		after := util.TruncateRunesSuffix(lower[idx+len("important:"):], "", 200)
 		imperatives := []string{"you must", "you should", "you need to", "always ", "never ", "do not", "don't", "ignore", "forget", "follow these"}
 		for _, imp := range imperatives {
 			if strings.Contains(after, imp) {

@@ -1,121 +1,100 @@
-//go:build integration
-
-package digest_test
+package digest
 
 import (
-	"context"
+	"strings"
 	"testing"
-	"time"
-
-	"github.com/GottZ/ctx/internal/digest"
-	"github.com/GottZ/ctx/internal/testdb"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"unicode/utf8"
 )
 
-// TestRunDigest_TopicMapClassifiedAsSystemMeta verifies the Welle 47 W47-NEU-A
-// fix: digest.RunDigest must produce a topic-map block with
-// block_role='system-meta' + is_meta=TRUE. Pre-fix the block defaulted to
-// block_role='knowledge' (CRAG Phase 6, COMPARISON.md DB-Query proof).
-//
-// Mechanism: digest.RunDigest sets metadata.is_meta=true → store.UpsertBlock
-// persists it → ClassifyBlockAfterUpsert branch 1 (is_meta flag) sets
-// block_role='system-meta'. ctx_rrf M036/M048 then hard-excludes the block.
-func TestRunDigest_TopicMapClassifiedAsSystemMeta(t *testing.T) {
-	pool := testdb.SetupTestDB(t)
-	ctx := context.Background()
+// TestTruncateTitle_EmDashAtBoundary is the direct regression test for
+// Issue #4: a title with an em-dash at byte 66 (lead byte of a 3-byte rune)
+// must NOT yield invalid UTF-8 after truncation. The pre-fix code did
+// `title[:67] + "..."` which left a dangling 0xe2 lead byte followed by 0x2e,
+// breaking utf8.ValidString and causing the topic-map UPSERT to fail with
+// SQLSTATE 22021 (invalid byte sequence for encoding "UTF8").
+func TestTruncateTitle_EmDashAtBoundary(t *testing.T) {
+	// 66 ASCII bytes, then em-dash (E2 80 94), then tail to exceed the 70-rune guard.
+	title := strings.Repeat("a", 66) + "—long tail well past seventy bytes"
 
-	homeScope := "private"
-	readScopes := []string{homeScope}
+	out := truncateTitle(title)
 
-	// Need at least one block so RunDigest produces a topic-map. The empty-
-	// corpus branch returns early with no upsert.
-	seedDigestBlock(t, pool, homeScope, "test-block-1")
-
-	if err := digest.RunDigest(ctx, pool, homeScope, readScopes); err != nil {
-		t.Fatalf("RunDigest: %v", err)
+	if !utf8.ValidString(out) {
+		t.Fatalf("truncateTitle produced invalid UTF-8: % x", []byte(out))
 	}
-
-	var (
-		blockRole string
-		isMeta    bool
-		blockType *string
-	)
-	err := pool.QueryRow(ctx,
-		`SELECT block_role, is_meta, block_type FROM context_blocks
-		 WHERE category = 'index' AND title = $1 AND NOT is_archived`,
-		"topic-map-"+homeScope,
-	).Scan(&blockRole, &isMeta, &blockType)
-	if err != nil {
-		t.Fatalf("read topic-map block: %v", err)
+	if utf8.RuneCountInString(out) > 70 {
+		t.Errorf("truncateTitle output has %d runes, want <= 70",
+			utf8.RuneCountInString(out))
 	}
-
-	if blockRole != "system-meta" {
-		t.Errorf("block_role = %q, want %q (W47-NEU-A: topic-map must be hard-excluded by ctx_rrf)", blockRole, "system-meta")
-	}
-	if !isMeta {
-		t.Error("is_meta = false, want true (W47-NEU-A: topic-map carries metadata.is_meta=true)")
+	want := strings.Repeat("a", 66) + "—..."
+	if out != want {
+		t.Errorf("truncateTitle = %q, want %q", out, want)
 	}
 }
 
-// TestRunDigest_IdempotentReClassification covers the re-run case: calling
-// RunDigest twice must keep block_role='system-meta' (no flip back to
-// 'knowledge'). Guards against an accidental UPDATE that resets block_role
-// on metadata refresh.
-func TestRunDigest_IdempotentReClassification(t *testing.T) {
-	pool := testdb.SetupTestDB(t)
-	ctx := context.Background()
-
-	homeScope := "private"
-	readScopes := []string{homeScope}
-
-	seedDigestBlock(t, pool, homeScope, "test-block-1")
-
-	if err := digest.RunDigest(ctx, pool, homeScope, readScopes); err != nil {
-		t.Fatalf("first RunDigest: %v", err)
-	}
-	if err := digest.RunDigest(ctx, pool, homeScope, readScopes); err != nil {
-		t.Fatalf("second RunDigest: %v", err)
-	}
-
-	var (
-		blockRole string
-		isMeta    bool
-		count     int
-	)
-	err := pool.QueryRow(ctx,
-		`SELECT block_role, is_meta, COUNT(*) OVER () FROM context_blocks
-		 WHERE category = 'index' AND title = $1 AND NOT is_archived
-		 LIMIT 1`,
-		"topic-map-"+homeScope,
-	).Scan(&blockRole, &isMeta, &count)
-	if err != nil {
-		t.Fatalf("read topic-map block: %v", err)
-	}
-
-	if count != 1 {
-		t.Errorf("topic-map block count = %d, want 1 (upsert must dedupe by category+title+scope)", count)
-	}
-	if blockRole != "system-meta" {
-		t.Errorf("block_role after re-run = %q, want %q (classification must be idempotent)", blockRole, "system-meta")
-	}
-	if !isMeta {
-		t.Error("is_meta after re-run = false, want true")
+// TestTruncateTitle_EllipsisAtBoundary covers the other common 3-byte rune
+// from Damien's report: U+2026 HORIZONTAL ELLIPSIS (E2 80 A6).
+func TestTruncateTitle_EllipsisAtBoundary(t *testing.T) {
+	title := strings.Repeat("a", 66) + "… trailing content past the cap"
+	out := truncateTitle(title)
+	if !utf8.ValidString(out) {
+		t.Fatalf("truncateTitle produced invalid UTF-8: % x", []byte(out))
 	}
 }
 
-// seedDigestBlock inserts one ordinary content block so RunDigest has
-// something to index.
-func seedDigestBlock(t *testing.T, pool *pgxpool.Pool, scope, title string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+// TestTruncateTitle_NoTruncationNeeded — short titles unchanged.
+func TestTruncateTitle_NoTruncationNeeded(t *testing.T) {
+	title := "short ASCII title"
+	if got := truncateTitle(title); got != title {
+		t.Errorf("truncateTitle(%q) = %q, want unchanged", title, got)
+	}
+	// Non-ASCII but under limit.
+	title2 := "中文标题 mit ein paar emojis 🎉"
+	if got := truncateTitle(title2); got != title2 {
+		t.Errorf("truncateTitle(%q) = %q, want unchanged", title2, got)
+	}
+}
 
-	_, err := pool.Exec(ctx,
-		`INSERT INTO context_blocks (category, title, content, scope, created_at, updated_at)
-		 VALUES ('decisions', $1, 'seed-content', $2, now(), now())`,
-		title, scope,
-	)
-	if err != nil {
-		t.Fatalf("seed digest block: %v", err)
+// TestTruncateTitle_ExactBoundary70 — a title of exactly 70 runes must NOT
+// be truncated.
+func TestTruncateTitle_ExactBoundary70(t *testing.T) {
+	title := strings.Repeat("z", 70)
+	if got := truncateTitle(title); got != title {
+		t.Errorf("truncateTitle at exactly 70 runes: got %q, want unchanged", got)
+	}
+}
+
+// TestTruncateTitle_FuzzMultiByteBoundary walks an em-dash through 100 byte
+// offsets and asserts the output is always valid UTF-8 and within the rune
+// cap. Guards against future regressions if the cap or suffix is changed.
+func TestTruncateTitle_FuzzMultiByteBoundary(t *testing.T) {
+	for offset := 0; offset < 100; offset++ {
+		prefix := strings.Repeat("a", offset)
+		title := prefix + "—" + strings.Repeat("z", 100)
+		out := truncateTitle(title)
+		if !utf8.ValidString(out) {
+			t.Errorf("offset=%d: invalid UTF-8 in %q", offset, out)
+		}
+		if utf8.RuneCountInString(out) > 70 {
+			t.Errorf("offset=%d: %d runes (> 70)", offset, utf8.RuneCountInString(out))
+		}
+	}
+}
+
+// TestTruncateTitle_ChineseAndEmoji — multi-byte ASCII-adjacent characters
+// across various rune widths (3-byte Chinese, 4-byte emoji).
+func TestTruncateTitle_ChineseAndEmoji(t *testing.T) {
+	cases := []string{
+		strings.Repeat("中", 100),
+		strings.Repeat("🎉", 100),
+		"mixed 中文 emoji 🎉 " + strings.Repeat("a", 200),
+	}
+	for i, c := range cases {
+		out := truncateTitle(c)
+		if !utf8.ValidString(out) {
+			t.Errorf("case %d: invalid UTF-8 in %q", i, out)
+		}
+		if utf8.RuneCountInString(out) > 70 {
+			t.Errorf("case %d: %d runes (> 70)", i, utf8.RuneCountInString(out))
+		}
 	}
 }

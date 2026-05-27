@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -208,10 +209,11 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 	sb.WriteString("</question>\n\n<sources>\n")
 
 	for i, src := range sources {
-		content := src.Content
-		if len(content) > MaxBlockChars {
-			content = content[:MaxBlockChars] + "[... truncated]"
-		}
+		// Rune-aware truncation: a byte slice can split a multi-byte rune and
+		// emit invalid UTF-8 into the LLM prompt (see Issue #4 — latent here,
+		// not a crash today because this output is not persisted to PG, but
+		// defensive to keep prompt encoding clean across the codebase).
+		content := util.TruncateRunesWithSuffix(src.Content, "[... truncated]", MaxBlockChars)
 
 		fmt.Fprintf(&sb,
 			`<source id="%d" title="%s" category="%s" score="%.4f" age_days="%d">`,
