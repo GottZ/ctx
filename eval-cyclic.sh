@@ -8,7 +8,7 @@
 #        bash eval-cyclic.sh --branch <name>       — overrides git-branch im Output
 #        bash eval-cyclic.sh --internal            — bypass reverse-proxy (uses http://ctx:8080 from n8nintern network; override via CTX_INTERNAL_URL)
 #
-# Misst Top-K-Overlap (k=5) gegen .eval-cyclic-gold.json.
+# Misst Top-K-Overlap (k=5) gegen .project/eval-cyclic-gold.json (default, korpus-spezifisch im privaten Submodule).
 # Bewertungs-Methodologie: .project/eval-cyclic-methodology.md
 #
 # Source: https://github.com/GottZ/ctx
@@ -17,7 +17,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
-GOLD_FILE="${SCRIPT_DIR}/.eval-cyclic-gold.json"
+GOLD_FILE="${SCRIPT_DIR}/.project/eval-cyclic-gold.json"
 BASELINE_FILE="${SCRIPT_DIR}/.eval-cyclic-baseline.json"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 REFERENCE_DATE=""
