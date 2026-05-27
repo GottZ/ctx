@@ -60,6 +60,11 @@ type queryRequest struct {
 	Category *string  `json:"category,omitempty"`
 	Tags     []string `json:"tags,omitempty"`
 	Limit    *int     `json:"limit,omitempty"`
+	// v2.0.0 C2 (M048): optional exclude-lists. Trigger: CRAG-Bench
+	// topic-map-private slot-stealing in 4/10 Variant-A movie queries
+	// (Session 38c). Empty slice / omitted = no exclude.
+	CategoriesExclude []string `json:"categories_exclude,omitempty"`
+	BlockRolesExclude []string `json:"block_roles_exclude,omitempty"`
 }
 
 // queryResponse is the JSON response from the query endpoint.
@@ -263,7 +268,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// welle/audit/recurrent/handover/self-audit), 0.3 for generic queries.
 	auditTrailFactor := rrf.AuditTrailFactor(req.Query)
 
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, auditTrailFactor)
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, auditTrailFactor, req.CategoriesExclude, req.BlockRolesExclude)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,

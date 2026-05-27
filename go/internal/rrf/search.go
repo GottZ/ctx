@@ -31,11 +31,14 @@ type SearchResult struct {
 // queryOR is an OR-joined query for broader FTS recall (may be empty).
 // auditTrailFactor controls audit-trail damping (Welle 41 M039): pass 1.0
 // for no damping (audit-target queries), 0.3 for generic queries.
+// categoriesExclude / blockRolesExclude (v2.0.0 C2 / M048): optional
+// exclude-lists. Empty slice = no-op (NULL passed to SQL). Trigger: CRAG
+// Bench Session 38c topic-map-private slot-stealing in 4/10 movie queries.
 //
 // Temporal gravity is applied Post-RRF in the handler layer via
 // ApplyGravityBoost (linear) and ApplyCyclicGravityBoost (multi-dim cyclic).
 // The 5th RRF channel was removed in M020 (never activated from Go).
-func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, auditTrailFactor float64) ([]SearchResult, error) {
+func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, auditTrailFactor float64, categoriesExclude []string, blockRolesExclude []string) ([]SearchResult, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("rrf: empty embedding")
 	}
@@ -67,10 +70,20 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 		queryORParam = queryOR
 	}
 
+	// v2.0.0 C2 (M048): empty slice → NULL (SQL default = no-op exclude).
+	var categoriesExcludeParam interface{}
+	if len(categoriesExclude) > 0 {
+		categoriesExcludeParam = categoriesExclude
+	}
+	var blockRolesExcludeParam interface{}
+	if len(blockRolesExclude) > 0 {
+		blockRolesExcludeParam = blockRolesExclude
+	}
+
 	rows, err := pool.Query(ctx,
 		`SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at
-		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10)`,
-		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam, auditTrailFactor,
+		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10, $11::text[], $12::text[])`,
+		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam, auditTrailFactor, categoriesExcludeParam, blockRolesExcludeParam,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: query ctx_rrf: %w", err)

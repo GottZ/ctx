@@ -434,6 +434,100 @@ func TestQueryRequestParsing_TypeConfusion(t *testing.T) {
 	}
 }
 
+// v2.0.0 C2 (M048): categories_exclude + block_roles_exclude request fields.
+// These are optional and default to empty slices when omitted, exactly like
+// Tags. Decoding must populate them for the rrf.Search call site.
+func TestQueryRequestParsing_ExcludeParams(t *testing.T) {
+	cases := []struct {
+		name              string
+		body              string
+		wantCatExclude    []string
+		wantRoleExclude   []string
+		shouldExpectError bool
+	}{
+		{
+			name:            "omitted defaults to nil",
+			body:            `{"query": "hello"}`,
+			wantCatExclude:  nil,
+			wantRoleExclude: nil,
+		},
+		{
+			name:            "categories_exclude only",
+			body:            `{"query": "hello", "categories_exclude": ["index"]}`,
+			wantCatExclude:  []string{"index"},
+			wantRoleExclude: nil,
+		},
+		{
+			name:            "block_roles_exclude only",
+			body:            `{"query": "hello", "block_roles_exclude": ["audit-trail", "synthesis"]}`,
+			wantCatExclude:  nil,
+			wantRoleExclude: []string{"audit-trail", "synthesis"},
+		},
+		{
+			name:            "both lists provided",
+			body:            `{"query": "hello", "categories_exclude": ["index"], "block_roles_exclude": ["audit-trail"]}`,
+			wantCatExclude:  []string{"index"},
+			wantRoleExclude: []string{"audit-trail"},
+		},
+		{
+			name:            "empty arrays decoded as empty (not nil)",
+			body:            `{"query": "hello", "categories_exclude": [], "block_roles_exclude": []}`,
+			wantCatExclude:  []string{},
+			wantRoleExclude: []string{},
+		},
+		{
+			name:              "categories_exclude as string (type confusion)",
+			body:              `{"query": "hello", "categories_exclude": "index"}`,
+			shouldExpectError: true,
+		},
+		{
+			name:              "block_roles_exclude as number",
+			body:              `{"query": "hello", "block_roles_exclude": 42}`,
+			shouldExpectError: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var req queryRequest
+			err := json.NewDecoder(strings.NewReader(tc.body)).Decode(&req)
+			if tc.shouldExpectError {
+				if err == nil {
+					t.Errorf("expected decode error for %s, got nil (req=%+v)", tc.name, req)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("JSON decode failed: %v", err)
+			}
+			if !equalStringSlice(req.CategoriesExclude, tc.wantCatExclude) {
+				t.Errorf("CategoriesExclude = %#v, want %#v", req.CategoriesExclude, tc.wantCatExclude)
+			}
+			if !equalStringSlice(req.BlockRolesExclude, tc.wantRoleExclude) {
+				t.Errorf("BlockRolesExclude = %#v, want %#v", req.BlockRolesExclude, tc.wantRoleExclude)
+			}
+		})
+	}
+}
+
+// equalStringSlice returns true for both-nil, both-empty, and equal-content.
+// Distinguishes nil from non-nil-empty by comparing lengths and elements.
+func equalStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	// Both nil or both empty → equal length 0 — but also distinguish nil/[].
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // SECURITY PROPERTY: Duplicate JSON keys — Go's encoding/json uses last-wins
 // semantics. Verify this behavior is consistent and an attacker cannot exploit
 // parser differentials by sending duplicate keys.

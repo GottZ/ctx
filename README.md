@@ -157,7 +157,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings) |
+| `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings; optional `categories_exclude` / `block_roles_exclude` arrays filter slot-stealers) |
 | `POST /api/store` | Upsert (embedding async via scheduler) |
 | `POST /api/search` | Lightweight search (no LLM) |
 | `POST /api/manage` | CRUD, Guard API, stats |
