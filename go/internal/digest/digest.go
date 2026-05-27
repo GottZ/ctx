@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -64,11 +65,9 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readSc
 				idPrefix = idPrefix[:8]
 			}
 
-			// Title truncation: max 70 chars.
-			title := b.Title
-			if len(title) > 70 {
-				title = title[:67] + "..."
-			}
+			// Title truncation: max 70 runes (rune-aware — a byte slice can split
+			// a multi-byte char, leaving invalid UTF-8 that fails the upsert: 22021).
+			title := truncateTitle(b.Title)
 
 			// Scope annotation: append [scope] if different from homeScope.
 			scopeAnnotation := ""
@@ -106,6 +105,18 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readSc
 	)
 
 	return nil
+}
+
+// truncateTitle caps a topic-map row title at 70 runes (rune-aware). A byte
+// slice can split a multi-byte rune (em-dash, ellipsis, CJK, emoji), leaving
+// invalid UTF-8 that PostgreSQL rejects on upsert with SQLSTATE 22021 —
+// regression target of Issue #4. Re-uses the shared util.TruncateRunes via
+// an inline path so this package stays free of additional internal deps.
+func truncateTitle(title string) string {
+	if utf8.RuneCountInString(title) > 70 {
+		return string([]rune(title)[:67]) + "..."
+	}
+	return title
 }
 
 // fetchBlockMeta retrieves all non-archived block metadata for the given scopes.
