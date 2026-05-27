@@ -75,13 +75,22 @@ type ollamaChatResponse struct {
 // --- OpenAI wire format ---.
 
 type openAIChatRequest struct {
-	Model            string      `json:"model"`
-	Messages         []Message   `json:"messages"`
-	Stream           bool        `json:"stream"`
-	MaxTokens        int         `json:"max_tokens,omitempty"`
-	Temperature      float64     `json:"temperature"`
-	FrequencyPenalty float64     `json:"frequency_penalty,omitempty"`
-	ResponseFormat   *respFormat `json:"response_format,omitempty"`
+	Model            string             `json:"model"`
+	Messages         []Message          `json:"messages"`
+	Stream           bool               `json:"stream"`
+	MaxTokens        int                `json:"max_tokens,omitempty"`
+	Temperature      float64            `json:"temperature"`
+	FrequencyPenalty float64            `json:"frequency_penalty,omitempty"`
+	ResponseFormat   *respFormat        `json:"response_format,omitempty"`
+	Reasoning        *reasoningOption   `json:"reasoning,omitempty"`
+}
+
+// reasoningOption — OpenRouter-extension to disable thinking/reasoning models
+// from emitting chain-of-thought traces. When think=false: enabled=false,
+// exclude=true → content-only output, fast, no reasoning tokens billed.
+type reasoningOption struct {
+	Enabled bool `json:"enabled"`
+	Exclude bool `json:"exclude"`
 }
 
 type respFormat struct {
@@ -136,7 +145,7 @@ func chatDispatch(ctx context.Context, host, apiKey, model string, think *bool, 
 
 func chatWithFormat(ctx context.Context, protocol, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
 	if protocol == "openai" {
-		return chatOpenAI(ctx, host, apiKey, model, systemPrompt, userPrompt, opts, format, timeout)
+		return chatOpenAI(ctx, host, apiKey, model, think, systemPrompt, userPrompt, opts, format, timeout)
 	}
 	return chatOllama(ctx, host, apiKey, model, think, systemPrompt, userPrompt, opts, format, timeout)
 }
@@ -194,7 +203,7 @@ func chatOllama(ctx context.Context, host, apiKey, model string, think *bool, sy
 	}, nil
 }
 
-func chatOpenAI(ctx context.Context, host, apiKey, model, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
+func chatOpenAI(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
 	reqBody := openAIChatRequest{
 		Model: model,
 		Messages: []Message{
@@ -210,6 +219,13 @@ func chatOpenAI(ctx context.Context, host, apiKey, model, systemPrompt, userProm
 	}
 	if format == "json" {
 		reqBody.ResponseFormat = &respFormat{Type: "json_object"}
+	}
+	// OpenRouter no-think: when think=false, disable reasoning + exclude reasoning
+	// tokens from response. Saves cost (reasoning tokens billed at completion rate)
+	// and avoids JSON-parse-errors when the model emits CoT in the reasoning field
+	// while leaving content empty/truncated.
+	if think != nil && !*think {
+		reqBody.Reasoning = &reasoningOption{Enabled: false, Exclude: true}
 	}
 
 	body, err := json.Marshal(reqBody)
