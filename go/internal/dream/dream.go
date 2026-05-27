@@ -405,7 +405,8 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedHost, embedA
 		// RRF search with keyword as query. Welle 41 M039: audit-trail-factor
 		// 1.0 (no damping) — dream-cycle keyword search needs full retrieval
 		// pool, user-query pattern-aware damping is handler-layer only.
-		results, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", 1.0)
+		// v2.0.0 C2 (M048): no exclude-lists for dream — dream sees everything.
+		results, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", 1.0, nil, nil)
 		if err != nil {
 			slog.Debug("dream: rrf search failed", "keyword", kw, "error", err)
 			continue

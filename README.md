@@ -136,7 +136,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 47 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars
+**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 48 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars
 
 **Key features:**
 - **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels; block_role-aware (4-class enum: system-meta hard-excluded, audit-trail/reference/knowledge full-pass — uniform damping shown ineffective in Welle 40, query-aware damping pending Folge-Welle 41+)
@@ -157,7 +157,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings) |
+| `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings; optional `categories_exclude` / `block_roles_exclude` arrays filter slot-stealers) |
 | `POST /api/store` | Upsert (embedding async via scheduler) |
 | `POST /api/search` | Lightweight search (no LLM) |
 | `POST /api/manage` | CRUD, Guard API, stats |
