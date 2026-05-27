@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -225,4 +226,27 @@ func getEnvInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("invalid integer %q for %s: %w", v, key, err)
 	}
 	return n, nil
+}
+
+// parseScopes parses a comma-separated scope list from an environment variable.
+// Empty input or all-whitespace input falls back to defaultVal. Each scope is
+// trim-whitespaced and empty parts are filtered out (e.g. "a,,b" → ["a","b"]).
+// No further validation — v2.0.0 M045 dropped chk_scope so any non-empty
+// string is a valid scope. Used by main.go to populate Scheduler.ReadScopes
+// from CTX_READ_SCOPES.
+func parseScopes(envVal string, defaultVal []string) []string {
+	if envVal == "" {
+		return defaultVal
+	}
+	parts := strings.Split(envVal, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	if len(result) == 0 {
+		return defaultVal
+	}
+	return result
 }

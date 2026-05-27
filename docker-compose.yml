@@ -48,6 +48,10 @@ services:
       CTX_TIMEZONE: ${CTX_TIMEZONE:-}
       CTX_SCORE_THRESHOLD: ${CTX_SCORE_THRESHOLD:-0.001}
       CTX_CONFIDENT_THRESHOLD: ${CTX_CONFIDENT_THRESHOLD:-0.008}
+      # Scheduler ReadScopes (comma-separated). Background guard/digest/dream
+      # operate on these scopes. Default = v1.x backwards-compat. v2.0.0 M045
+      # dropped chk_scope, so any scope name is valid (no schema validation).
+      CTX_READ_SCOPES: ${CTX_READ_SCOPES:-private,shared,work}
       LISTEN_ADDR: ":8080"
     networks:
       - n8nintern

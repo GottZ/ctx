@@ -85,11 +85,15 @@ func main() {
 		slog.Info("temporal backfill complete", "blocks_processed", n)
 	}
 
-	// Scheduler for background guard + digest + dream
+	// Scheduler for background guard + digest + dream.
+	// CTX_READ_SCOPES is comma-separated; empty/missing falls back to the
+	// v1.x default ("private,shared,work") for backwards-compat. v2.0.0 M045
+	// dropped chk_scope, so any non-empty string is a valid scope.
+	readScopes := parseScopes(os.Getenv("CTX_READ_SCOPES"), []string{"private", "shared", "work"})
 	schedulerConfig := &events.Config{
 		DSN:          cfg.DSN(),
 		HomeScope:    "private",
-		ReadScopes:   []string{"private", "shared", "work"},
+		ReadScopes:   readScopes,
 		DreamEnabled: cfg.DreamEnabled,
 		EmbedHost:    cfg.EmbedHost,
 		EmbedAPIKey:  cfg.EmbedAPIKey,
