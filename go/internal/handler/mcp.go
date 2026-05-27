@@ -308,7 +308,7 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 
 		query := `SELECT id, title, category, LEFT(content, 200) AS preview, updated_at
 			FROM context_blocks
-			WHERE NOT is_archived AND scope = ANY($1)`
+			WHERE NOT is_archived AND scope = ANY($1::text[])`
 		args := []any{scopes}
 
 		if input.Category != "" {
