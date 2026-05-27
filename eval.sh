@@ -4,7 +4,7 @@
 # Usage: bash eval.sh                  — full eval (retrieval + synthesis)
 #        bash eval.sh --retrieval-only  — skip synthesis tests (faster)
 #        bash eval.sh --update-baseline — run + save results as new baseline
-#        bash eval.sh --internal        — bypass reverse-proxy (use ctx container IP)
+#        bash eval.sh --internal        — bypass reverse-proxy (uses http://ctx:8080 from n8nintern network; override via CTX_INTERNAL_URL)
 #
 # Requires: curl, python3, jq (optional, python3 fallback)
 # Runtime: ~3-5 minutes (Ollama on-prem, sequential queries)
@@ -40,11 +40,13 @@ for arg in "$@"; do
 done
 
 # Webhook selection: --internal bypasses the reverse-proxy that drops 22-67% of
-# LLM responses (Welle 35). 172.32.16.4 is the ctx container IP — valid in the
-# n8nintern compose network. Verify via:
-#   docker inspect ctx --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+# LLM responses (Welle 35). Uses the ctx container DNS-name resolvable from the
+# n8nintern compose network. Override with CTX_INTERNAL_URL if needed. Caller
+# must run from inside the n8nintern network (e.g. `docker run --rm --network
+# n8nintern …` or from another container attached to n8nintern). Container-IPs
+# are unstable across restarts (W47-NEU-F), DNS-name is stable.
 if $INTERNAL; then
-  WEBHOOK="http://172.32.16.4:8080"
+  WEBHOOK="${CTX_INTERNAL_URL:-http://ctx:8080}"
 else
   WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost}"
 fi
