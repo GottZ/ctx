@@ -1,0 +1,809 @@
+{
+  "version": "0.4-w47-refresh",
+  "reference_date": "2026-05-05",
+  "methodology": ".project/eval-cyclic-methodology.md",
+  "notes": "Phase-0.1 Iter 2 — 60 Cases. Mix aus 'easy' (baseline-pass, regression-detector) und 'hard' (branch-relevant, baseline ggf. fail). Branch-Tags pro Case: target_branch ∈ {X, Y, Z, W, baseline}. Cases ohne target_branch sind general/regression.",
+  "cases": [
+    {
+      "id": "C-001",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "ddstatus mariadb donnerstags",
+      "expected_top_k_block_ids": [
+        "019defaf-b04f-7071-966e-c5fba8abc704"
+      ],
+      "or_semantic": false,
+      "rationale": "Easy Cyclic: Block 2026-04-30 (Do), Anker 'ddstatus mariadb' im Title."
+    },
+    {
+      "id": "C-002",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "pekora backup donnerstags",
+      "expected_top_k_block_ids": [
+        "019d982a-bbd2-7def-9856-01580672e238"
+      ],
+      "or_semantic": false,
+      "rationale": "Easy: pekora-Backup 2026-04-16 (Do)."
+    },
+    {
+      "id": "C-003",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "ctx motivation am wochenende",
+      "expected_top_k_block_ids": [
+        "019d7c3b-7f87-766a-95e0-65313d89fb7a"
+      ],
+      "or_semantic": false,
+      "rationale": "Easy Cyclic-Wochenende: ctx-Motivation 2026-04-11 (Sa)."
+    },
+    {
+      "id": "C-004",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "qemu decrypt am wochenende",
+      "expected_top_k_block_ids": [
+        "019d83a3-29f7-7a01-aa74-cdc7bac9ce50"
+      ],
+      "or_semantic": false,
+      "rationale": "Easy: qemu-test-decrypt 2026-04-12 (So)."
+    },
+    {
+      "id": "C-005",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "scale architecture an einem sonntag",
+      "expected_top_k_block_ids": [
+        "019d3919-4d65-7080-80ea-a13a474da51f"
+      ],
+      "or_semantic": false,
+      "rationale": "Scale Architecture 2026-03-29 (So)."
+    },
+    {
+      "id": "C-006",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "session 7 go migration samstags",
+      "expected_top_k_block_ids": [
+        "019d33fd-423a-7e48-a6df-1eca3a156938"
+      ],
+      "or_semantic": false,
+      "rationale": "Session 7 Go Migration 2026-03-28 (Sa)."
+    },
+    {
+      "id": "C-007",
+      "bucket": "C",
+      "target_branch": "X",
+      "query": "ddstatus donnerstags",
+      "expected_top_k_block_ids": [
+        "019defaf-b04f-7071-966e-c5fba8abc704",
+        "019defaf-2371-7dd8-b0a7-c777f45e3cb7",
+        "019defb0-46e9-7a9c-b890-ebeea0c452d6"
+      ],
+      "or_semantic": true,
+      "rationale": "X-Test: 6 ddstatus-Blöcke alle 2026-04-30 (Do). Mega-Block-Konkurrenz testet Mass-Formel: single-date 'ddstatus' Blöcke sollten Mega-Blöcke verdrängen."
+    },
+    {
+      "id": "C-008",
+      "bucket": "C",
+      "target_branch": "X",
+      "query": "matrix synapse postgres mittwochs",
+      "expected_top_k_block_ids": [
+        "019db565-ab1e-7f22-84fc-380644546074"
+      ],
+      "or_semantic": false,
+      "rationale": "Synapse+Postgres18 Tuning 2026-04-01 (Mi). Anker 'matrix synapse postgres'."
+    },
+    {
+      "id": "C-009",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "ollama think:false donnerstags",
+      "expected_top_k_block_ids": [
+        "019d7337-17f5-78f9-a558-dfd61cfa79fb"
+      ],
+      "or_semantic": false,
+      "rationale": "Ollama OpenAI think:false 2026-04-09 (Do)."
+    },
+    {
+      "id": "C-010",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "matrix push rules am mittwoch",
+      "expected_top_k_block_ids": [
+        "019db567-5ace-77cf-97cb-468e13f37a11"
+      ],
+      "or_semantic": false,
+      "rationale": "Matrix Push-Rules 2026-04-01 (Mi)."
+    },
+    {
+      "id": "C-011",
+      "bucket": "C",
+      "target_branch": "X",
+      "query": "embedding strategie qwen mittwochs",
+      "expected_top_k_block_ids": [
+        "019d28e1-6193-7e1d-bad0-02fb829fea27"
+      ],
+      "or_semantic": false,
+      "rationale": "Embedding-Strategie Qwen3 ist 2026-03-25 (Mi). Mittwoch-Cluster mit 21 Blöcken — Mass-Test: spezifischer Block sollte gewinnen."
+    },
+    {
+      "id": "C-012",
+      "bucket": "C",
+      "target_branch": "X",
+      "query": "score gap autocut algorithm donnerstags",
+      "expected_top_k_block_ids": [
+        "019d2a51-4e23-7fb7-bee3-09614c773e69"
+      ],
+      "or_semantic": false,
+      "rationale": "ScoreGap AutoCut 2026-03-26 (Do). Konkurrenz: ddstatus-Donnerstags-Cluster."
+    },
+    {
+      "id": "C-013",
+      "bucket": "C",
+      "target_branch": "W",
+      "query": "ddstatus stuff thursdays",
+      "expected_top_k_block_ids": [
+        "019defaf-b04f-7071-966e-c5fba8abc704",
+        "019defaf-2371-7dd8-b0a7-c777f45e3cb7",
+        "019defb1-8817-7c84-be8e-5096727e6cd0",
+        "019defb0-bfbf-7af7-9e74-b2b61b620b10",
+        "019defb0-0676-7352-aee5-b6261a03f949"
+      ],
+      "or_semantic": true,
+      "rationale": "W-Test: englische Phrasing 'thursdays' für LLM-Fallback weekday=4. Expanded post-Welle-46 zu ddstatus-Cluster (5 Blöcke alle 2026-05-03 created, content_times Do 2026-04-30) — 'stuff' ist generisch, alle ddstatus-Blöcke sind legitime Antworten. Refresh 2026-05-27: W42-Tagesberichte verdrängten die originalen 2 in Top-5."
+    },
+    {
+      "id": "C-014",
+      "bucket": "C",
+      "target_branch": "W",
+      "query": "qemu test decrypt am weekend",
+      "expected_top_k_block_ids": [
+        "019d83a3-29f7-7a01-aa74-cdc7bac9ce50"
+      ],
+      "or_semantic": false,
+      "rationale": "W-Test: 'weekend' englisch, möglicherweise rule-based gap."
+    },
+    {
+      "id": "C-015",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "wezterm ssh PR an einem dienstag",
+      "expected_top_k_block_ids": [
+        "019d8ca2-0770-7f08-9c7a-4ff378da187e"
+      ],
+      "or_semantic": false,
+      "rationale": "wezterm SSH PR 2026-04-14 (Di). Anker dominant."
+    },
+    {
+      "id": "C-016",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "compliance NIS2 systemhaus im dezember",
+      "expected_top_k_block_ids": [
+        "019d28e7-fd83-7abc-8599-5b928848ac08"
+      ],
+      "or_semantic": false,
+      "rationale": "Compliance NIS2 ist 2025-12-06 (einziger Single-Date-Block im Dez). Test month=12."
+    },
+    {
+      "id": "C-017",
+      "bucket": "C",
+      "target_branch": "X",
+      "query": "session 24 dream deployment donnerstags",
+      "expected_top_k_block_ids": [
+        "019dc04b-9024-7fdd-8ed7-e6465b5d54dc"
+      ],
+      "or_semantic": false,
+      "rationale": "Session 24 ist 2026-04-23 (Do). Konkurrenz mit ddstatus-Cluster."
+    },
+    {
+      "id": "C-018",
+      "bucket": "C",
+      "target_branch": "baseline",
+      "query": "intuition bewertung am samstag",
+      "expected_top_k_block_ids": [
+        "019d7c3f-b43b-74bb-8d2b-4af380de36db"
+      ],
+      "or_semantic": false,
+      "rationale": "Intuition als Bewertungsgrenze 2026-04-11 (Sa). Anker 'intuition bewertung'."
+    },
+    {
+      "id": "M-001",
+      "bucket": "M",
+      "target_branch": "baseline",
+      "query": "ddstatus issues am letzten donnerstag",
+      "expected_top_k_block_ids": [
+        "019defaf-b04f-7071-966e-c5fba8abc704",
+        "019defaf-2371-7dd8-b0a7-c777f45e3cb7",
+        "019defb0-46e9-7a9c-b890-ebeea0c452d6",
+        "019defb0-bfbf-7af7-9e74-b2b61b620b10",
+        "019defb0-757a-7105-a0eb-1bcdc7bc5af5",
+        "019defb0-0676-7352-aee5-b6261a03f949"
+      ],
+      "or_semantic": true,
+      "rationale": "Mixed: 'letzten Donnerstag' parst als linear+weekday. ddstatus-Cluster 30.04 Top-K-tauglich."
+    },
+    {
+      "id": "M-002",
+      "bucket": "M",
+      "target_branch": "baseline",
+      "query": "messagebroker letzte woche",
+      "expected_top_k_block_ids": [
+        "019dd459-2c2e-700d-ae45-10618d401274",
+        "019dd44c-d1ef-7778-b6fc-8f07fb0379ea",
+        "019dd4bb-6612-704a-a68a-8f6a9e444a46"
+      ],
+      "or_semantic": true,
+      "rationale": "MessageBroker 2026-04-28 in 'letzte Woche' bei ref=2026-05-05."
+    },
+    {
+      "id": "M-003",
+      "bucket": "M",
+      "target_branch": "baseline",
+      "query": "dream v3 performance letzte woche",
+      "expected_top_k_block_ids": [
+        "019defa4-c0f6-7c09-8e67-618f4d2af081"
+      ],
+      "or_semantic": false,
+      "rationale": "Dream V3 Audit 2026-05-03 (in letzte Woche)."
+    },
+    {
+      "id": "M-004",
+      "bucket": "M",
+      "target_branch": "baseline",
+      "query": "session 24 dream ende april",
+      "expected_top_k_block_ids": [
+        "019dc04b-9024-7fdd-8ed7-e6465b5d54dc"
+      ],
+      "or_semantic": false,
+      "rationale": "Session 24 = 2026-04-23 (Ende April). Refresh 2026-05-27: Original query 'vor 2 wochen' war reference-date-dependent (Methodology-Verstoß). Ersetzt durch frozen-date-Variante 'ende april'."
+    },
+    {
+      "id": "M-005",
+      "bucket": "M",
+      "target_branch": "baseline",
+      "query": "ollama think:false letzten donnerstag",
+      "expected_top_k_block_ids": [
+        "019d7337-17f5-78f9-a558-dfd61cfa79fb"
+      ],
+      "or_semantic": false,
+      "rationale": "Block ist 2026-04-09 (Do). 'letzten Donnerstag' bei ref=2026-05-05 = 2026-04-30, NICHT 04-09. Aber weekday-Gewichtung kann den Block trotzdem hochboosten."
+    },
+    {
+      "id": "M-006",
+      "bucket": "M",
+      "target_branch": "X",
+      "query": "matrix stack architektur anfang april",
+      "expected_top_k_block_ids": [
+        "019db565-472a-71de-a568-08efb089ed5c",
+        "019db567-c373-75b8-8c5b-848495ee5270",
+        "019db565-ab1e-7f22-84fc-380644546074",
+        "019db566-ee55-7ec4-9a37-a53c45599423"
+      ],
+      "or_semantic": true,
+      "rationale": "X-Test Matrix-Stack-Cluster: Original-Expected 019db565-472a hat post-Welle-46 content_time=2026-05-01 (durch Dream-Re-Run), Sibling-Blöcke 2026-04-01. or_semantic erweitert um Matrix-April-Cluster. Mass-Formel sollte single-date-Blöcke gegen Mega-Blöcke schützen."
+    },
+    {
+      "id": "M-007",
+      "bucket": "M",
+      "target_branch": "Y",
+      "query": "pekora stack vor 3 wochen",
+      "expected_top_k_block_ids": [
+        "019d9829-fbfb-7e5e-82bb-79044010e36d",
+        "019d982a-bbd2-7def-9856-01580672e238"
+      ],
+      "or_semantic": true,
+      "rationale": "pekora-Cluster 2026-04-16 = 19d zurück bei ref=2026-05-05. ~3 Wochen."
+    },
+    {
+      "id": "M-008",
+      "bucket": "M",
+      "target_branch": "X",
+      "query": "dream mode generative am letzten montag im märz",
+      "expected_top_k_block_ids": [
+        "019d3f5a-0f6a-72f4-9ac3-3be356abee47"
+      ],
+      "or_semantic": false,
+      "rationale": "X-Test: Dream Mode Generative 2026-03-30 (Mo, letzter Mo im März). Konkurrenz mit anderen Dream-Mode-Blöcken."
+    },
+    {
+      "id": "M-009",
+      "bucket": "M",
+      "target_branch": "Y",
+      "query": "bench setup qwen letzte woche",
+      "expected_top_k_block_ids": [
+        "019df23d-149a-7439-87f8-dcd3a0be47bb"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test: Bench-Setup für qwen3.6:27b ist 2026-05-04 (Mo, in letzte Woche)."
+    },
+    {
+      "id": "M-010",
+      "bucket": "M",
+      "target_branch": "Y",
+      "query": "session 27 testcontainer vor einer woche",
+      "expected_top_k_block_ids": [
+        "019df858-e16e-7c7b-abb0-b119f3853a66"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test: Session 27 ist 2026-05-04 (in letzte Woche). Forward-telescoping würde recent-blocks bevorzugen."
+    },
+    {
+      "id": "M-011",
+      "bucket": "M",
+      "target_branch": "W",
+      "query": "what happened at the end of march",
+      "expected_top_k_block_ids": [
+        "019d3f62-dae6-75c6-9ce2-9c5775017d8e",
+        "019d3f5a-0f6a-72f4-9ac3-3be356abee47",
+        "019d41c4-d2ff-7023-9087-947f2e1272ab"
+      ],
+      "or_semantic": true,
+      "rationale": "W-Test: englische Phrase 'end of march'. Rule-based-parser möglicherweise nicht. Mehrere Dream-Mode-Blöcke 30/31. März."
+    },
+    {
+      "id": "M-012",
+      "bucket": "M",
+      "target_branch": "W",
+      "query": "serviceportal in early april",
+      "expected_top_k_block_ids": [
+        "019d4ae4-f503-79b5-b8a8-e30cf1a2e88b",
+        "019d49ef-086a-7655-80cf-8773a6a48cd5",
+        "019d49ac-c82b-7e26-be97-ae7be4f74225",
+        "019d4ac7-20de-7539-be33-e6cd1c0b8000",
+        "019d4da5-4187-7c5c-9285-576bcef9cbfb"
+      ],
+      "or_semantic": true,
+      "rationale": "W-Test: 'in early april' englisch. Serviceportal-Cluster 2026-04-01–2026-04-02. Refresh 2026-05-27: Original 4 noch in Top-20 (Ranks 11-17), W42-Tagesberichte verdrängten sie aus Top-5. Hinzugefügt: 019d4da5 (Session Handover, content_time 2026-04-02) — in aktuellem Top-5 vorhanden, schließt early-April-Session ab."
+    },
+    {
+      "id": "M-013",
+      "bucket": "M",
+      "target_branch": "baseline",
+      "query": "go migration ende märz",
+      "expected_top_k_block_ids": [
+        "019d33e0-2d90-7321-b738-772d9215f138",
+        "019d33fd-423a-7e48-a6df-1eca3a156938"
+      ],
+      "or_semantic": true,
+      "rationale": "Go Migration Audit + Session 7 Go Migration 2026-03-28."
+    },
+    {
+      "id": "M-014",
+      "bucket": "M",
+      "target_branch": "X",
+      "query": "v4 architektur entscheidungen am 25 märz",
+      "expected_top_k_block_ids": [
+        "019d26bf-46dd-72f7-bda5-b69ee58be7dd"
+      ],
+      "or_semantic": false,
+      "rationale": "X-Test: Context Store v4 Architektur-Entscheidungen 2026-03-25. Konkurrenz mit 21-Block-Cluster vom 25.03 (Mass-Formel-Differenzierung)."
+    },
+    {
+      "id": "M-015",
+      "bucket": "M",
+      "target_branch": "Y",
+      "query": "ctx security audit anfang april 2026",
+      "expected_top_k_block_ids": [
+        "019d74a6-f1ec-7894-93eb-438bafc5d303"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test: ctx Security Audit 2026-04-10 (Fr). 'Anfang April' triggert monthday + linear; Block ist Tag 10, näher an Mitte als Anfang."
+    },
+    {
+      "id": "L-001",
+      "bucket": "L",
+      "target_branch": "baseline",
+      "query": "ddstatus mariadb env yaml",
+      "expected_top_k_block_ids": [
+        "019defaf-b04f-7071-966e-c5fba8abc704"
+      ],
+      "or_semantic": false,
+      "rationale": "Pure semantic — Title-Match dominant."
+    },
+    {
+      "id": "L-002",
+      "bucket": "L",
+      "target_branch": "baseline",
+      "query": "session 27 testcontainer behaviour",
+      "expected_top_k_block_ids": [
+        "019df858-e16e-7c7b-abb0-b119f3853a66"
+      ],
+      "or_semantic": false,
+      "rationale": "Pure semantic."
+    },
+    {
+      "id": "L-003",
+      "bucket": "L",
+      "target_branch": "baseline",
+      "query": "matrix stack architektur gottz.de",
+      "expected_top_k_block_ids": [
+        "019db565-472a-71de-a568-08efb089ed5c"
+      ],
+      "or_semantic": false,
+      "rationale": "Pure semantic."
+    },
+    {
+      "id": "L-004",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "ddstatus 30 april 2026",
+      "expected_top_k_block_ids": [
+        "019defaf-b04f-7071-966e-c5fba8abc704",
+        "019defaf-2371-7dd8-b0a7-c777f45e3cb7",
+        "019defb0-46e9-7a9c-b890-ebeea0c452d6",
+        "019defb0-bfbf-7af7-9e74-b2b61b620b10",
+        "019defb0-757a-7105-a0eb-1bcdc7bc5af5",
+        "019defb0-0676-7352-aee5-b6261a03f949"
+      ],
+      "or_semantic": true,
+      "rationale": "Y-Test: ddstatus-Cluster 30.04 (semantic+linear). Forward Telescoping würde recent-Date stark boosten."
+    },
+    {
+      "id": "L-005",
+      "bucket": "L",
+      "target_branch": "baseline",
+      "query": "scale architecture 1M roadmap",
+      "expected_top_k_block_ids": [
+        "019d3919-4d65-7080-80ea-a13a474da51f"
+      ],
+      "or_semantic": false,
+      "rationale": "Pure semantic."
+    },
+    {
+      "id": "L-006",
+      "bucket": "L",
+      "target_branch": "baseline",
+      "query": "dream mode draft layer",
+      "expected_top_k_block_ids": [
+        "019d3f62-dae6-75c6-9ce2-9c5775017d8e"
+      ],
+      "or_semantic": false,
+      "rationale": "Dream Mode Draft Layer 2026-03-30. Title-Match."
+    },
+    {
+      "id": "L-007",
+      "bucket": "L",
+      "target_branch": "baseline",
+      "query": "serviceportal v2 phase 4",
+      "expected_top_k_block_ids": [
+        "019d4abb-781b-7aee-9d1f-4f5d057ebb23",
+        "019d4ac7-20de-7539-be33-e6cd1c0b8000",
+        "019d4ad4-e14f-7b1f-996d-f9abd33a9df2",
+        "019d4ae4-f503-79b5-b8a8-e30cf1a2e88b",
+        "019d49ef-086a-7655-80cf-8773a6a48cd5",
+        "019d4a20-8534-778f-a2f0-c57795e1e1dc"
+      ],
+      "or_semantic": true,
+      "rationale": "Serviceportal v2 Phase-4-Abschluss-Cluster 2026-04-01. Refresh 2026-05-27: Original-Expected 019d4aaf 'Phase 4 Complete' wurde post-Welle-46 als superseded markiert (Successor 019d4abb 'ALL TESTS GREEN'). filterSuperseded entfernt 019d4aaf by-design aus Top-K. or_semantic mit Successor + 5 Phase-4-Concluding-Sibling-Blocks."
+    },
+    {
+      "id": "L-008",
+      "bucket": "L",
+      "target_branch": "baseline",
+      "query": "ollama sampling parameters deep dive",
+      "expected_top_k_block_ids": [
+        "019d2a10-30f6-72fe-bb0b-d60d69a300e7"
+      ],
+      "or_semantic": false,
+      "rationale": "Ollama Sampling Deep Dive 2026-03-26. Title-Match."
+    },
+    {
+      "id": "L-009",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "session 22 audit ergebnis",
+      "expected_top_k_block_ids": [
+        "019d6f2c-cfe3-7a2a-8ea1-03727c5fdec0"
+      ],
+      "or_semantic": false,
+      "rationale": "Session 22 Audit 2026-04-09. Konkurrenz: Provider-Eval Session 22 (2026-03-01)."
+    },
+    {
+      "id": "L-010",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "dream reset audit baseline",
+      "expected_top_k_block_ids": [
+        "019daad1-f517-7f59-8bd6-8b04607b971d"
+      ],
+      "or_semantic": false,
+      "rationale": "Dream Reset Pre-Reset Audit 2026-04-20."
+    },
+    {
+      "id": "L-011",
+      "bucket": "L",
+      "target_branch": "X",
+      "query": "embedding strategie",
+      "expected_top_k_block_ids": [
+        "019d28e1-6193-7e1d-bad0-02fb829fea27"
+      ],
+      "or_semantic": false,
+      "rationale": "X-Test: Konkurrenz mit Mega-Block 'topic-map-private' (10 dates). Mass-Formel sollte single-date Embedding-Strategie hochheben."
+    },
+    {
+      "id": "L-012",
+      "bucket": "L",
+      "target_branch": "X",
+      "query": "write guard race conditions",
+      "expected_top_k_block_ids": [
+        "019d28e2-ba4b-72e1-83df-122cad69d47d"
+      ],
+      "or_semantic": false,
+      "rationale": "Write Guard Race Conditions 2026-03-25. Title-Match."
+    },
+    {
+      "id": "L-013",
+      "bucket": "L",
+      "target_branch": "X",
+      "query": "v4 plan phasen übersicht",
+      "expected_top_k_block_ids": [
+        "019d28e0-d428-7d54-8004-9ae8ee53b3ce"
+      ],
+      "or_semantic": false,
+      "rationale": "v4-Plan Phasen-Übersicht 2026-03-25."
+    },
+    {
+      "id": "L-014",
+      "bucket": "L",
+      "target_branch": "baseline",
+      "query": "ip schutz bewerbungsgespräch",
+      "expected_top_k_block_ids": [
+        "019d3b48-71bc-7522-9347-77fc43de0071"
+      ],
+      "or_semantic": false,
+      "rationale": "IP-Schutz Bewerbungsgespräch 2025-10-01."
+    },
+    {
+      "id": "L-015",
+      "bucket": "L",
+      "target_branch": "baseline",
+      "query": "bench falle endogenes sampling",
+      "expected_top_k_block_ids": [
+        "019df3e4-253a-7f0f-86e2-bc0eba4a6539"
+      ],
+      "or_semantic": false,
+      "rationale": "Bench-Falle endogenes Sampling 2026-05-04 (recent)."
+    },
+    {
+      "id": "N-001",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "Welches Embedding-Modell wird verwendet",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage."
+    },
+    {
+      "id": "N-002",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "Wie funktioniert der Write Guard",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage."
+    },
+    {
+      "id": "N-003",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "RRF fusion strategy retrieval",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage englisch."
+    },
+    {
+      "id": "N-004",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "ScoreGap AutoCut Algorithm",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage."
+    },
+    {
+      "id": "N-005",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "pgvector skalierungslimits halfvec",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage."
+    },
+    {
+      "id": "N-006",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "Welche scope values gibt es im Multi-Tenant",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage."
+    },
+    {
+      "id": "N-007",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "blob storage authentication header",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage."
+    },
+    {
+      "id": "N-008",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "matryoshka truncation embedding dimensions",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage."
+    },
+    {
+      "id": "N-009",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "What is the postgres version and pgvector",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage englisch."
+    },
+    {
+      "id": "N-010",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "hybrid search rrf vs weighted sum",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage."
+    },
+    {
+      "id": "N-011",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "bun hono migrationspfad caddy",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage."
+    },
+    {
+      "id": "N-012",
+      "bucket": "N",
+      "target_branch": "baseline",
+      "query": "qwen3 death spiral ollama bug",
+      "expected_top_k_block_ids": [],
+      "or_semantic": false,
+      "rationale": "Domain-Frage. Hat zwar Datum (Block 2026-03-27) aber Query ist semantisch — Cyclic-Aktivierung soll NICHT triggern."
+    },
+    {
+      "id": "L-016",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "powertoys architektur internals 2022",
+      "expected_top_k_block_ids": [
+        "019c5159-98d3-7c61-a4ef-f26d47509d2d"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 4y): PowerToys Block 2022-05-01. 'Architektur' konkurriert semantisch mit Matrix Stack / Serviceportal-Architektur (recent). Year=2022 trigger."
+    },
+    {
+      "id": "L-017",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "buchner partner firmenanalyse 2024",
+      "expected_top_k_block_ids": [
+        "019c5707-ed10-798b-9297-d0e67c101f38"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 2y): Buchner-Block 2024-01-01. 'Buchner' eindeutig semantisch."
+    },
+    {
+      "id": "L-018",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "gottz cv berufserfahrung 2021",
+      "expected_top_k_block_ids": [
+        "019c4a34-835d-743a-ae53-5b89e260295d"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 5y): GottZ CV Berufserfahrung 2021-05-01. 'CV' konkurriert mit GottZ CV Projekte (auch 2021)."
+    },
+    {
+      "id": "L-019",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "epc qr code dkb girocode 2024",
+      "expected_top_k_block_ids": [
+        "019c7c2a-2b02-7668-af8e-ce619021c6cb"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 2y): EPC QR Code DKB 2024-03-01. 'QR Code' konkurriert mit SEPA QR-Codes-Block (auch 2024-03-01)."
+    },
+    {
+      "id": "L-020",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "mcp remote server go implementation research 2024",
+      "expected_top_k_block_ids": [
+        "019d740a-5839-7108-bd8e-1ae56c6fc6e5"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 1.5y): MCP Remote Server Block 2024-11-05. 'MCP remote' konkurriert mit MCP-Bezügen in recent Blocks (Session 23/24)."
+    },
+    {
+      "id": "L-021",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "ui framework vergleich wpf wpfui winui3",
+      "expected_top_k_block_ids": [
+        "019c515a-0eb0-7699-9e05-5cae96288f12"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 4y, KEIN temporal trigger im Query): UI Framework Block 2022-06-01. Pure semantic. Branch Y dürfte NICHT triggern (linearWeight=0)."
+    },
+    {
+      "id": "L-022",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "in den letzten jahren context agent vektor-suche temporale queries",
+      "expected_top_k_block_ids": [
+        "019c4a3a-9ff7-7032-a1bd-944de994e876"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 5y): Context Agent Quirk Block 2021-05-01. 'in den letzten jahren' triggert range-linear, target NOW-N. Backward decay scaling sollte aged Block boosten."
+    },
+    {
+      "id": "L-023",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "ddstatus mediawiki migration februar 2025",
+      "expected_top_k_block_ids": [
+        "019defb1-8817-7c84-be8e-5096727e6cd0"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 1.25y): ddstatus mediawiki Migration 2025-02-10. Konkurrenz mit recent ddstatus 2026-04-30 (6 Stk). Branch Y boostet aged > recent für 'februar 2025'."
+    },
+    {
+      "id": "L-024",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "blasig hth person christoph",
+      "expected_top_k_block_ids": [
+        "019c3a4e-0ae2-7ecc-8913-77a4ce8db924"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 6y, oldest block in production, KEIN temporal trigger): HTH Person Block 2020-07-01. Branch Y inaktiv ohne linear-trigger — Regressions-Detektor."
+    },
+    {
+      "id": "L-025",
+      "bucket": "L",
+      "target_branch": "Y",
+      "query": "sepa qr standards vergleich epc069-12 2024",
+      "expected_top_k_block_ids": [
+        "019c7c6a-5124-7a51-a559-057439a3aeee"
+      ],
+      "or_semantic": false,
+      "rationale": "Y-Test (aged 2y): SEPA QR Standards Block 2024-03-01."
+    }
+  ],
+  "refresh_history": [
+    {
+      "date": "2026-05-27",
+      "welle": "W47-NEU-B",
+      "branch": "v2/w47-gold",
+      "trigger": "v2-E-DRIFT-INVESTIGATION.md — 5 new-fails post-Welle-42/46",
+      "updated_cases": [
+        "C-013",
+        "M-004",
+        "M-006",
+        "M-012",
+        "L-007"
+      ],
+      "kept_baseline_fails": [
+        "C-017",
+        "M-011",
+        "L-023"
+      ],
+      "rationale": "Post-v2.0.0 corpus drift (+125 retrievable blocks) + Welle-46 dream-direction-swap (M042/M043). Per-case decisions documented in case rationales."
+    }
+  ]
+}
