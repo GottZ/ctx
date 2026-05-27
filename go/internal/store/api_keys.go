@@ -46,14 +46,13 @@ func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope stri
 	h := sha256.Sum256([]byte(plaintext))
 	keyHash := hex.EncodeToString(h[:])
 
-	// api_key (legacy plaintext column, kept for migration compat) gets the
-	// SHA-256 hash as well — production uses key_hash for lookups (see
-	// migration 014_security_hardening.sql which dropped the unique
-	// constraint on api_key and made key_hash unique).
+	// Migration 014_security_hardening.sql dropped the plaintext api_key
+	// column; key_hash is now NOT NULL UNIQUE and the sole identifier for
+	// ctx_auth lookups.
 	row := &ApiKey{}
 	err := pool.QueryRow(ctx,
-		`INSERT INTO context_api_keys (label, key_hash, api_key, home_scope, allowed_scopes, active)
-		 VALUES ($1, $2, $2, $3, COALESCE($4::text[], '{shared}'::text[]), true)
+		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active)
+		 VALUES ($1, $2, $3, COALESCE($4::text[], '{shared}'::text[]), true)
 		 RETURNING id, label, home_scope, allowed_scopes, active, last_used_at, created_at`,
 		label, keyHash, homeScope, allowedScopes,
 	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.Active, &row.LastUsedAt, &row.CreatedAt)
