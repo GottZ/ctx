@@ -5,6 +5,7 @@
 !.env.example
 !.env.crag.example
 !.project
+!.eval-cyclic-gold.json
 
 # Local overrides
 docker-compose.override.yml
