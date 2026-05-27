@@ -19,9 +19,9 @@ import (
 	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
-	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgvec "github.com/pgvector/pgvector-go"
 )
 
 const (
@@ -584,9 +584,23 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 
 // backfillOneEmbedding finds one block with missing embedding, generates it, and stores it.
 // Returns true if a block was backfilled, false if none needed.
+//
+// Tx-wrap (Welle-49, parallelism-bug): SELECT FOR UPDATE SKIP LOCKED on a
+// pool-bound QueryRow releases the row lock as soon as the statement returns
+// — useless for the multi-second embed call that follows. With DreamParallelism>1
+// every worker picked the SAME oldest pending block, redundantly re-embedded
+// it, and only the last UPDATE won. Wrapping the whole pick→embed→store in a
+// single tx holds the row lock for the duration so other workers SKIP LOCKED
+// onto distinct blocks.
 func (s *Scheduler) backfillOneEmbedding(ctx context.Context) (bool, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("backfill: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+
 	var blockID, title, content string
-	err := s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT id, title, content FROM context_blocks
 		WHERE embedding IS NULL AND NOT is_archived
 		ORDER BY created_at ASC
@@ -632,8 +646,17 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("backfill: embed: %w", err)
 	}
 
-	if err := store.StoreEmbedding(ctx, s.pool, blockID, vec); err != nil {
+	// Inline UPDATE within tx (store.StoreEmbedding takes *pgxpool.Pool, not tx).
+	// Atomic with the FOR UPDATE SKIP LOCKED pick: lock holds until commit.
+	if _, err := tx.Exec(ctx,
+		`UPDATE context_blocks SET embedding = $1 WHERE id = $2`,
+		pgvec.NewVector(vec), blockID,
+	); err != nil {
 		return false, fmt.Errorf("backfill: store: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("backfill: commit: %w", err)
 	}
 
 	slog.Info("scheduler: embedding backfilled", "block_id", blockID, "title", title)
