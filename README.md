@@ -108,6 +108,8 @@ ctx stats     # Block count, categories, storage
 | `ctx digest` | Rebuild topic map |
 | `ctx statusline` | Claude Code status bar |
 | `ctx mcp [add\|list\|delete]` | Manage MCP OAuth client registrations |
+| `ctx keys create <label> --home <scope>` | Provision API key (v2.0.0: `--home` required, no default scope) |
+| `ctx keys [list\|delete]` | List / revoke provisioned API keys |
 | `ctx version` | Print version |
 
 ## Architecture
@@ -160,7 +162,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings) |
 | `POST /api/store` | Upsert (embedding async via scheduler) |
 | `POST /api/search` | Lightweight search (no LLM) |
-| `POST /api/manage` | CRUD, Guard API, stats |
+| `POST /api/manage` | CRUD, Guard API, stats, API-key management (`api-key-create` requires `home_scope`) |
 | `POST /api/digest` | Topic map generation |
 | `POST /api/ingest` | Obsidian vault ingestion |
 | `POST /api/blob/*` | Binary storage (store/fetch/search/manage) |

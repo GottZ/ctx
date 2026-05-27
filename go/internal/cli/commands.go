@@ -41,6 +41,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(statuslineCmd(getClient))
 	root.AddCommand(dreamCmd(getClient))
 	root.AddCommand(mcpCmd(getClient))
+	root.AddCommand(keysCmd(getClient))
 	root.AddCommand(briefCmd(getClient))
 	root.AddCommand(persistCmd(getClient))
 	root.AddCommand(initCmd())
@@ -985,4 +986,167 @@ func parseDuration(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid duration %q: use e.g. 20, 30s, 1m", s)
 	}
 	return d, nil
+}
+
+// ── keys ─────────────────────────────────────────────────────────────.
+//
+// `ctx keys create <label> --home <scope>` provisions a new API key.
+// home_scope is required (v2.0.0 breaking change) — no default fallback.
+
+func keysCmd(getClient func() (*Client, error)) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "keys",
+		Short: "Manage API keys (create, list, delete)",
+		Long:  "Provision and revoke X-Context-Key API keys. home_scope is required at creation time (v2.0.0).",
+	}
+	cmd.AddCommand(keysCreateCmd(getClient))
+	cmd.AddCommand(keysListCmd(getClient))
+	cmd.AddCommand(keysDeleteCmd(getClient))
+
+	// Default to list.
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return keysListRun(getClient)
+	}
+	return cmd
+}
+
+func keysCreateCmd(getClient func() (*Client, error)) *cobra.Command {
+	var (
+		homeScope     string
+		allowedScopes []string
+	)
+	cmd := &cobra.Command{
+		Use:   "create <label>",
+		Short: "Provision a new API key (home_scope is required)",
+		Example: `  ctx keys create bench-crag --home crag
+  ctx keys create work-key --home work --allowed shared,work
+  ctx keys create temp --home private --allowed shared`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			label := strings.Join(args, " ")
+			if homeScope == "" {
+				return fmt.Errorf("--home is required (e.g. --home crag)")
+			}
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			data := map[string]any{
+				"label":      label,
+				"home_scope": homeScope,
+			}
+			if len(allowedScopes) > 0 {
+				data["allowed_scopes"] = allowedScopes
+			}
+			resp, err := c.Post("manage", map[string]any{
+				"action": "api-key-create",
+				"data":   data,
+			})
+			if err != nil {
+				return err
+			}
+			var result struct {
+				Success       bool     `json:"success"`
+				ID            string   `json:"id"`
+				Label         string   `json:"label"`
+				HomeScope     string   `json:"home_scope"`
+				AllowedScopes []string `json:"allowed_scopes"`
+				ApiKey        string   `json:"api_key"`
+				Error         string   `json:"error"`
+			}
+			if err := json.Unmarshal(resp, &result); err != nil {
+				PrintJSON(resp)
+				return err
+			}
+			if !result.Success {
+				return fmt.Errorf("failed: %s", result.Error)
+			}
+			fmt.Printf("API Key created: %s\n\n", result.Label)
+			fmt.Printf("  id:             %s\n", result.ID)
+			fmt.Printf("  home_scope:     %s\n", result.HomeScope)
+			fmt.Printf("  allowed_scopes: %v\n", result.AllowedScopes)
+			fmt.Printf("  api_key:        %s\n", result.ApiKey)
+			fmt.Printf("\n  Save the key now — it cannot be retrieved later.\n")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&homeScope, "home", "", "home_scope for the new key (REQUIRED, e.g. 'private', 'work', 'crag')")
+	cmd.Flags().StringSliceVar(&allowedScopes, "allowed", nil, "additional allowed read scopes (comma-separated, default: shared)")
+	return cmd
+}
+
+func keysListCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List provisioned API keys",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return keysListRun(getClient)
+		},
+	}
+}
+
+func keysListRun(getClient func() (*Client, error)) error {
+	c, err := getClient()
+	if err != nil {
+		return err
+	}
+	resp, err := c.Post("manage", map[string]any{"action": "api-key-list"})
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Success bool `json:"success"`
+		Keys    []struct {
+			ID            string   `json:"id"`
+			Label         string   `json:"label"`
+			HomeScope     string   `json:"home_scope"`
+			AllowedScopes []string `json:"allowed_scopes"`
+			Active        bool     `json:"active"`
+			CreatedAt     string   `json:"created_at"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		PrintJSON(resp)
+		return err
+	}
+	if len(result.Keys) == 0 {
+		fmt.Println("No API keys provisioned. Use: ctx keys create <label> --home <scope>")
+		return nil
+	}
+	for _, k := range result.Keys {
+		status := "active"
+		if !k.Active {
+			status = "revoked"
+		}
+		created := k.CreatedAt
+		if len(created) >= 10 {
+			created = created[:10]
+		}
+		fmt.Printf("  %s  %s  home=%s  [%s]  %s\n", k.ID, k.Label, k.HomeScope, status, created)
+	}
+	return nil
+}
+
+func keysDeleteCmd(getClient func() (*Client, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <id>",
+		Short: "Revoke an API key (soft delete; sets active=false)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			resp, err := c.Post("manage", map[string]any{
+				"action": "api-key-delete",
+				"data":   map[string]any{"id": args[0]},
+			})
+			if err != nil {
+				return err
+			}
+			PrintJSON(resp)
+			return nil
+		},
+	}
 }
