@@ -118,10 +118,21 @@ jobs:
           cache: true
           cache-dependency-path: go/go.sum
 
-      - name: Cache testcontainers Docker images
-        uses: ScribeMD/docker-cache@fb28c93772363301b8d0a6072ce850224b73f74e # 0.5.0
+      - name: Cache testcontainers Docker image
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
+          path: ~/.cache/docker-images
           key: docker-testcontainers-timescale-pg18-${{ runner.os }}
+
+      - name: Load or pull testcontainers Docker image
+        run: |
+          if [ -f ~/.cache/docker-images/timescaledb-ha-pg18.tar ]; then
+            docker load -i ~/.cache/docker-images/timescaledb-ha-pg18.tar
+          else
+            docker pull timescale/timescaledb-ha:pg18
+            mkdir -p ~/.cache/docker-images
+            docker save timescale/timescaledb-ha:pg18 -o ~/.cache/docker-images/timescaledb-ha-pg18.tar
+          fi
 
       - name: Run integration tests
         working-directory: go
