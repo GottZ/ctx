@@ -14,10 +14,14 @@ import (
 
 const (
 	// DreamTimeout is the HTTP timeout for dream LLM calls.
-	// 600s handles cold-start loads (observed ~130s after Ollama updates), Ollama request
-	// queueing when prior cycles were client-cancelled, and long prompts on 27B+ models.
-	// Combined with CycleTimeout (shared parent), the practical budget for one evaluate call.
-	DreamTimeout = 600 * time.Second
+	// Empirically tuned from 5878 successful prod dream-eval calls (2026-04-20..05-28):
+	// p50=23s, p90=30s, p99=156s — the entire success distribution lives under 156s,
+	// covering cold-start (~130s after Ollama updates) and long 27B prompts. 180s adds
+	// a safety margin over p99 while reclaiming the dead overhang: at the old 600s, 43
+	// stuck calls burned ~7.2 GPU-hours of pure timeout wait, each blocking the workers=1
+	// loop for a full 10 minutes. At 180s a stuck call fails 3.3× faster, costing only
+	// ~0.71% of legitimate calls a re-queue (the 42 successes that ran 180-600s).
+	DreamTimeout = 180 * time.Second
 
 	// maxContentLen limits content passed to LLM to reduce prompt injection surface.
 	maxContentLen = 800
