@@ -129,10 +129,10 @@ ctx stats     # Block count, categories, storage
 | `ctx get <id>` | Fetch full block |
 | `ctx delete <id>` | Soft-delete (archive) |
 | `ctx categories` | List all categories |
-| `ctx stats` | Database statistics |
+| `ctx stats` | Database statistics + Dream backlog (`dream_queue`: pickable/cooldown/never-dreamed/awaiting-embed) |
 | `ctx health` | Healthcheck |
 | `ctx guard [list\|stats\|resolve]` | Write Guard management |
-| `ctx dream [stats\|review]` | Dream Mode stats (incl. mode) + link review |
+| `ctx dream [stats\|review]` | Dream Mode stats (incl. mode + `queue` backlog: what the scheduler does next) + link review |
 | `ctx dream enable\|disable\|throttle` | Runtime dream mode control (on/off/throttled) |
 | `ctx brief` | Project briefing from store |
 | `ctx persist` | Persist `[PERSIST:cat:title]` markers |
