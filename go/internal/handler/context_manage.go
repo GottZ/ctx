@@ -127,16 +127,11 @@ func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *
 		"stats":   stats,
 	}
 
-	// Dream backlog at a glance — surfaces whether the GPU is busy because the
-	// scheduler still has work to chew through. Non-fatal: stats stand on their
-	// own if the dream queue probe fails.
-	if pickableNow, inCooldown, neverDreamed, awaitingEmbed, derr := dream.QueueDepth(ctx, h.pool, ar.ReadScopes); derr == nil {
-		resp["dream_queue"] = map[string]any{
-			"pickable_now":   pickableNow,
-			"in_cooldown":    inCooldown,
-			"never_dreamed":  neverDreamed,
-			"awaiting_embed": awaitingEmbed,
-		}
+	// Dream backlog + incoming forecast at a glance — surfaces whether the GPU
+	// is busy now and how much load is queued to drop out of cooldown soon.
+	// Non-fatal: stats stand on their own if the dream queue probe fails.
+	if queue, derr := dream.QueueDepth(ctx, h.pool, ar.ReadScopes); derr == nil {
+		resp["dream_queue"] = queue
 	} else {
 		slog.Warn("manage: dream queue probe failed", "error", derr, "request_id", reqID)
 	}
@@ -578,7 +573,7 @@ func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request,
 		})
 		return
 	}
-	pickableNow, inCooldown, neverDreamed, awaitingEmbed, err := dream.QueueDepth(ctx, h.pool, ar.ReadScopes)
+	queue, err := dream.QueueDepth(ctx, h.pool, ar.ReadScopes)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream queue depth failed",
@@ -594,13 +589,8 @@ func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request,
 		"coverage_pct":    float64(checked) / float64(max(total, 1)) * 100,
 		"unchecked":       total - checked,
 		"pending_recheck": pendingRecheck,
-		// Actionable backlog (PickBlock eligibility): what the scheduler does next.
-		"queue": map[string]any{
-			"pickable_now":   pickableNow,
-			"in_cooldown":    inCooldown,
-			"never_dreamed":  neverDreamed,
-			"awaiting_embed": awaitingEmbed,
-		},
+		// Actionable backlog (PickBlock eligibility) + incoming-load forecast.
+		"queue": queue,
 	})
 }
 

@@ -518,37 +518,45 @@ func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, che
 	return
 }
 
-// QueueDepth reports the actionable Dream backlog using the exact eligibility
-// predicate of PickBlock. pickableNow is what the scheduler will process next
-// (never-dreamed first, then cooldown-expired re-evaluations); inCooldown is
-// waiting out its cooldown window; neverDreamed is the subset of pickableNow
-// that has never completed a cycle; awaitingEmbed is eligible-by-type but
-// still missing an embedding (blocked on the embed backfill, not yet dreamable).
-func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes []string) (pickableNow, inCooldown, neverDreamed, awaitingEmbed int, err error) {
-	err = pool.QueryRow(ctx,
-		`SELECT
-			(SELECT count(*) FROM context_blocks
-				WHERE NOT is_archived AND embedding IS NOT NULL
-				  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
-				  AND NOT is_meta AND scope = ANY($1::text[])
-				  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now()))::int,
-			(SELECT count(*) FROM context_blocks
-				WHERE NOT is_archived AND embedding IS NOT NULL
-				  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
-				  AND NOT is_meta AND scope = ANY($1::text[])
-				  AND dream_cooldown_until >= now())::int,
-			(SELECT count(*) FROM context_blocks
-				WHERE NOT is_archived AND embedding IS NOT NULL
-				  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
-				  AND NOT is_meta AND scope = ANY($1::text[])
-				  AND dream_checked_at IS NULL)::int,
-			(SELECT count(*) FROM context_blocks
-				WHERE NOT is_archived AND embedding IS NULL
-				  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
-				  AND NOT is_meta AND scope = ANY($1::text[]))::int`,
+// QueueStats is the actionable Dream backlog plus the incoming-load forecast.
+type QueueStats struct {
+	PickableNow   int        `json:"pickable_now"`   // eligible + cooldown expired/null — scheduler's next picks
+	InCooldown    int        `json:"in_cooldown"`    // eligible but waiting out its cooldown window
+	NeverDreamed  int        `json:"never_dreamed"`  // subset of pickable that never completed a cycle
+	AwaitingEmbed int        `json:"awaiting_embed"` // eligible-by-type but embedding still pending
+	Incoming1h    int        `json:"incoming_1h"`    // in cooldown now, expiring within the next hour
+	Incoming6h    int        `json:"incoming_6h"`    // in cooldown now, expiring within the next 6 hours
+	NextPendingAt *time.Time `json:"next_pending_at"`// exact timestamp the next cooldown expires (nil if none)
+}
+
+// QueueDepth reports the Dream backlog using the exact eligibility predicate of
+// PickBlock, plus a forward-looking forecast: how many cooldowns expire in the
+// next hour / 6 hours and the exact timestamp of the next one. The forecast lets
+// operators anticipate GPU load instead of only seeing the current backlog.
+func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*QueueStats, error) {
+	var q QueueStats
+	err := pool.QueryRow(ctx,
+		`WITH eligible AS (
+			SELECT dream_cooldown_until AS cd, dream_checked_at AS chk, embedding IS NULL AS no_embed
+			FROM context_blocks
+			WHERE NOT is_archived
+			  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
+			  AND NOT is_meta AND scope = ANY($1::text[])
+		)
+		SELECT
+			(SELECT count(*) FROM eligible WHERE NOT no_embed AND (cd IS NULL OR cd < now()))::int,
+			(SELECT count(*) FROM eligible WHERE NOT no_embed AND cd >= now())::int,
+			(SELECT count(*) FROM eligible WHERE NOT no_embed AND chk IS NULL)::int,
+			(SELECT count(*) FROM eligible WHERE no_embed)::int,
+			(SELECT count(*) FROM eligible WHERE NOT no_embed AND cd > now() AND cd <= now() + interval '1 hour')::int,
+			(SELECT count(*) FROM eligible WHERE NOT no_embed AND cd > now() AND cd <= now() + interval '6 hours')::int,
+			(SELECT min(cd) FROM eligible WHERE NOT no_embed AND cd > now())`,
 		scopes,
-	).Scan(&pickableNow, &inCooldown, &neverDreamed, &awaitingEmbed)
-	return
+	).Scan(&q.PickableNow, &q.InCooldown, &q.NeverDreamed, &q.AwaitingEmbed, &q.Incoming1h, &q.Incoming6h, &q.NextPendingAt)
+	if err != nil {
+		return nil, err
+	}
+	return &q, nil
 }
 
 
