@@ -87,19 +87,47 @@ func TestDisplayConfigPath(t *testing.T) {
 }
 
 func TestHasHookEntry(t *testing.T) {
-	hooks := []any{
+	// legacy flat form (still detected for backward compatibility)
+	flat := []any{
 		map[string]any{"type": "command", "command": "ctx brief --hook"},
 		map[string]any{"type": "command", "command": "some-other-cmd"},
 	}
 
-	if !hasHookEntry(hooks, "ctx brief") {
-		t.Error("should find 'ctx brief' in hooks")
+	if !hasHookEntry(flat, "ctx brief") {
+		t.Error("should find 'ctx brief' in flat hooks")
 	}
-	if hasHookEntry(hooks, "ctx persist") {
-		t.Error("should not find 'ctx persist' in hooks")
+	if hasHookEntry(flat, "ctx persist") {
+		t.Error("should not find 'ctx persist' in flat hooks")
 	}
 	if hasHookEntry(nil, "anything") {
 		t.Error("nil hooks should return false")
+	}
+
+	// current nested matcher-group form
+	nested := []any{newHookGroup("ctx persist --hook")}
+	if !hasHookEntry(nested, "ctx persist") {
+		t.Error("should find 'ctx persist' in nested matcher-group hooks")
+	}
+	if hasHookEntry(nested, "ctx brief") {
+		t.Error("should not find 'ctx brief' in nested hooks")
+	}
+}
+
+func TestNewHookGroup(t *testing.T) {
+	g := newHookGroup("ctx brief --hook")
+	inner, ok := g["hooks"].([]any)
+	if !ok || len(inner) != 1 {
+		t.Fatalf("newHookGroup should wrap one entry under \"hooks\", got %#v", g)
+	}
+	entry, ok := inner[0].(map[string]any)
+	if !ok {
+		t.Fatalf("inner entry should be a map, got %#v", inner[0])
+	}
+	if entry["type"] != "command" || entry["command"] != "ctx brief --hook" {
+		t.Errorf("unexpected inner entry: %#v", entry)
+	}
+	if !hasHookEntry([]any{g}, "ctx brief") {
+		t.Error("hasHookEntry should detect a newHookGroup entry")
 	}
 }
 
@@ -127,7 +155,7 @@ func TestLoadSettings_ExistingFile(t *testing.T) {
 	content := `{
   "customSlashCommands": [{"name": "test"}],
   "hooks": {
-    "SubagentStart": [{"type": "command", "command": "existing-cmd"}]
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "existing-cmd"}]}]
   }
 }`
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -185,9 +213,7 @@ func TestSettingsSave_PreservesExisting(t *testing.T) {
 
 	// Add hooks
 	hooks := s.getHooksMap()
-	hooks["SubagentStart"] = []any{
-		map[string]any{"type": "command", "command": hookCmdBrief},
-	}
+	hooks["SubagentStart"] = []any{newHookGroup(hookCmdBrief)}
 
 	if err := s.save(path); err != nil {
 		t.Fatal(err)
@@ -249,12 +275,22 @@ func TestGetHooksMap_CreatesIfMissing(t *testing.T) {
 }
 
 func TestClaudeSettingsPath(t *testing.T) {
+	// Default (no CLAUDE_CONFIG_DIR): home-relative ~/.claude/settings.json.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	path := claudeSettingsPath()
 	if path == "" {
 		t.Error("claudeSettingsPath() returned empty string")
 	}
 	if !contains(path, ".claude") || !contains(path, "settings.json") {
 		t.Errorf("claudeSettingsPath() = %q, expected .claude/settings.json", path)
+	}
+
+	// CLAUDE_CONFIG_DIR set: settings live directly under it (no ~/.claude).
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	want := filepath.Join(dir, "settings.json")
+	if got := claudeSettingsPath(); got != want {
+		t.Errorf("claudeSettingsPath() = %q, want %q", got, want)
 	}
 }
 

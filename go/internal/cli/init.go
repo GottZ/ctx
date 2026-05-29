@@ -80,6 +80,12 @@ func promptYesNo(question string) bool {
 // ── Claude settings.json path ──────────────────────────────────────.
 
 func claudeSettingsPath() string {
+	// CLAUDE_CONFIG_DIR relocates Claude Code's entire config directory; when it
+	// is set, the live settings file is $CLAUDE_CONFIG_DIR/settings.json and
+	// ~/.claude/settings.json is not read. Honor it before any home-relative path.
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return filepath.Join(dir, "settings.json")
+	}
 	if runtime.GOOS == "windows" {
 		if profile := os.Getenv("USERPROFILE"); profile != "" {
 			return filepath.Join(profile, ".claude", "settings.json")
@@ -276,16 +282,22 @@ func (s *settingsJSON) save(path string) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-// hasHookEntry checks if any entry in the hook array contains the given command substring.
+// hasHookEntry reports whether any entry in the hook array contains the given
+// command substring. It handles both the legacy flat form
+// {"type":"command","command":…} and the current nested matcher-group form
+// {"hooks":[{"type":"command","command":…}]}, so detection stays idempotent
+// against either shape and re-running init does not append duplicates.
 func hasHookEntry(hooks []any, cmdSubstr string) bool {
 	for _, entry := range hooks {
 		m, ok := entry.(map[string]any)
 		if !ok {
 			continue
 		}
-		cmd, _ := m["command"].(string)
-		if strings.Contains(cmd, cmdSubstr) {
-			return true
+		if cmd, _ := m["command"].(string); strings.Contains(cmd, cmdSubstr) {
+			return true // legacy flat form
+		}
+		if inner, ok := m["hooks"].([]any); ok && hasHookEntry(inner, cmdSubstr) {
+			return true // nested matcher-group form
 		}
 	}
 	return false
@@ -308,6 +320,18 @@ func getHookArray(hooks map[string]any, event string) []any {
 		return nil
 	}
 	return arr
+}
+
+// newHookGroup builds the nested matcher-group form Claude Code requires for a
+// hook event: {"hooks":[{"type":"command","command":cmd}]}. The "matcher" key is
+// omitted on purpose — SubagentStart/SubagentStop are not tool-scoped events. A
+// bare {"type":"command",…} without this wrapper is silently ignored.
+func newHookGroup(cmd string) map[string]any {
+	return map[string]any{
+		"hooks": []any{
+			map[string]any{"type": "command", "command": cmd},
+		},
+	}
 }
 
 func stepHooks() bool {
@@ -345,21 +369,13 @@ func stepHooks() bool {
 		return false
 	}
 
-	// Add missing hooks
+	// Add missing hooks in the nested matcher-group form (see newHookGroup).
 	if !hasStart {
-		entry := map[string]any{
-			"type":    "command",
-			"command": hookCmdBrief,
-		}
-		startArr = append(startArr, entry)
+		startArr = append(startArr, newHookGroup(hookCmdBrief))
 		hooksMap["SubagentStart"] = startArr
 	}
 	if !hasStop {
-		entry := map[string]any{
-			"type":    "command",
-			"command": hookCmdPersist,
-		}
-		stopArr = append(stopArr, entry)
+		stopArr = append(stopArr, newHookGroup(hookCmdPersist))
 		hooksMap["SubagentStop"] = stopArr
 	}
 

@@ -65,7 +65,7 @@ Setup (add to ~/.claude/settings.json):
   {
     "hooks": {
       "SubagentStart": [
-        { "type": "command", "command": "ctx brief --hook" }
+        { "hooks": [ { "type": "command", "command": "ctx brief --hook" } ] }
       ]
     }
   }`,

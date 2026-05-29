@@ -112,8 +112,8 @@ ctx stats     # Block count, categories, storage
 ```json
 {
   "hooks": {
-    "SubagentStart": [{ "type": "command", "command": "ctx brief --hook" }],
-    "SubagentStop":  [{ "type": "command", "command": "ctx persist --hook" }]
+    "SubagentStart": [{ "hooks": [{ "type": "command", "command": "ctx brief --hook" }] }],
+    "SubagentStop":  [{ "hooks": [{ "type": "command", "command": "ctx persist --hook" }] }]
   }
 }
 ```
