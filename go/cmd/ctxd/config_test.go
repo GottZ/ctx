@@ -529,3 +529,54 @@ func equalStringSlices(a, b []string) bool {
 	}
 	return true
 }
+
+// --- parseCooldownHours ---.
+
+func TestParseCooldownHours(t *testing.T) {
+	cases := []struct {
+		in    string
+		want  float64
+		valid bool
+	}{
+		{"12h", 12, true},
+		{"45d", 45 * 24, true},
+		{"1w", 7 * 24, true},
+		{"1m", 30 * 24, true},  // month = 30d
+		{"1y", 365 * 24, true}, // year = 365d
+		{"2D", 2 * 24, true},   // uppercase suffix accepted
+		{"36", 36, true},       // bare number = hours
+		{"1.5d", 1.5 * 24, true},
+		{" 12h ", 12, true},  // surrounding space tolerated
+		{"", 0, false},       // empty → invalid (caller uses default)
+		{"12x", 0, false},    // unknown suffix
+		{"-5d", 0, false},    // negative rejected
+		{"abc", 0, false},    // non-numeric
+		{"12m30s", 0, false}, // Go-duration syntax NOT accepted (no minutes/seconds)
+	}
+	for _, c := range cases {
+		got, ok := parseCooldownHours(c.in)
+		if ok != c.valid {
+			t.Errorf("parseCooldownHours(%q) valid=%v, want %v", c.in, ok, c.valid)
+			continue
+		}
+		if ok && got != c.want {
+			t.Errorf("parseCooldownHours(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestGetEnvCooldownHours_FallbackAndParse(t *testing.T) {
+	const key = "CTX_TEST_COOLDOWN_DUR"
+	t.Setenv(key, "")
+	if got := getEnvCooldownHours(key, 99); got != 99 {
+		t.Errorf("empty env → %v, want fallback 99", got)
+	}
+	t.Setenv(key, "2d")
+	if got := getEnvCooldownHours(key, 99); got != 48 {
+		t.Errorf("2d → %v, want 48", got)
+	}
+	t.Setenv(key, "garbage")
+	if got := getEnvCooldownHours(key, 99); got != 99 {
+		t.Errorf("malformed env → %v, want fallback 99", got)
+	}
+}

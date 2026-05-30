@@ -119,11 +119,11 @@ func renderDreamStatsHuman(d map[string]any) string {
 
 	// Back-off policy + per-eval-count maturity distribution.
 	if bo, ok := d["backoff"].(map[string]any); ok {
-		fmt.Fprintf(&sb, "\n%s  mode=%v factor=%v min=%s grace=%v cap=%vd  %s\n",
+		fmt.Fprintf(&sb, "\n%s  mode=%v factor=%v min=%s grace=%v cap=%s  %s\n",
 			bold("Re-dream back-off"),
 			valOr(bo["mode"], "?"), valOr(bo["factor"], "?"),
 			fmtDuration(flt(bo["min_hours"])),
-			valOr(bo["grace"], "?"), valOr(bo["cap_days"], "?"),
+			valOr(bo["grace"], "?"), fmtDuration(flt(bo["cap_hours"])),
 			dim(fmt.Sprintf("(cooldown by eval count; inert +%d)", num(bo["inert_offset"]))))
 
 		levels, _ := bo["levels"].([]any)

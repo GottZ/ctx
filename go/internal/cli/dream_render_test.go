@@ -73,7 +73,7 @@ func TestRenderDreamStatsHumanBackoff(t *testing.T) {
 		"unchecked":      float64(0),
 		"backoff": map[string]any{
 			"mode": "log", "factor": float64(2.5), "grace": float64(3),
-			"cap_days": float64(45), "max_eval_count": float64(21), "truncated": false,
+			"cap_hours": float64(45 * 24), "max_eval_count": float64(21), "truncated": false,
 			"min_hours": float64(12), "inert_offset": float64(7),
 			"levels": []any{
 				map[string]any{"eval_count": float64(0), "blocks": float64(1), "cooldown_hours": float64(12)},

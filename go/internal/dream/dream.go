@@ -378,7 +378,7 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 // n = dream_eval_count BEFORE this increment (so a block dreamed once gets the n=1
 // step, a fresh block n=0). off = backoffInertOffset when the cycle produced NO
 // links (inert) — an inert block starts further up the SAME curve instead of from a
-// separate base. Result floored at 1h and capped at backoffCapDays. Back-off only
+// separate base. Result floored at 1h and capped at backoffCapHours. Back-off only
 // DELAYS a re-dream, never stops it, so a link missed in a skipped cycle is
 // recovered on the next accepted pull (no permanent recall loss). Defaults
 // (exp/1.6/min12h/grace0/cap45/inert+7) validated on real pull history
@@ -389,14 +389,14 @@ var (
 	backoffFactor      = 1.6
 	backoffGrace       = 0
 	backoffMinHours    = 12.0
-	backoffCapDays     = 45
+	backoffCapHours    = 45.0 * 24
 	backoffInertOffset = 7
 )
 
 // SetBackoffConfig overrides the Dream back-off parameters at startup. mode must be
 // one of exp|log|linear|off (anything else is ignored, keeping the default). factor,
-// grace, minHours, inertOffset < 0 and capDays <= 0 are ignored.
-func SetBackoffConfig(mode string, factor float64, grace, capDays int, minHours float64, inertOffset int) {
+// grace, minHours, inertOffset < 0 and capHours <= 0 are ignored.
+func SetBackoffConfig(mode string, factor float64, grace int, capHours, minHours float64, inertOffset int) {
 	switch mode {
 	case "exp", "log", "linear", "off":
 		backoffMode = mode
@@ -407,8 +407,8 @@ func SetBackoffConfig(mode string, factor float64, grace, capDays int, minHours 
 	if grace >= 0 {
 		backoffGrace = grace
 	}
-	if capDays > 0 {
-		backoffCapDays = capDays
+	if capHours > 0 {
+		backoffCapHours = capHours
 	}
 	if minHours >= 0 {
 		backoffMinHours = minHours
@@ -445,8 +445,8 @@ func effectiveCooldownHours(n int, inert bool) float64 {
 	case "linear":
 		h = backoffMinHours + backoffFactor*24*x
 	}
-	if capH := float64(backoffCapDays) * 24; h > capH {
-		h = capH
+	if h > backoffCapHours {
+		h = backoffCapHours
 	}
 	if h < 1 {
 		h = 1
@@ -464,7 +464,7 @@ type BackoffStats struct {
 	Factor      float64        `json:"factor"`         // growth (exp) / k (log) / slope-per-day (linear)
 	Grace       int            `json:"grace"`          // free cycles before growth (0 = grow from n=0)
 	MinHours    float64        `json:"min_hours"`      // floor: cooldown at n=0 (active)
-	CapDays     int            `json:"cap_days"`       // ceiling
+	CapHours    float64        `json:"cap_hours"`      // ceiling (hours)
 	InertOffset int            `json:"inert_offset"`   // extra curve steps when a cycle finds no links
 	MaxEval     int            `json:"max_eval_count"` // highest dream_eval_count in the corpus (growth cut-off)
 	Truncated   bool           `json:"truncated"`      // level list capped at maxBackoffLevels
@@ -491,7 +491,7 @@ const maxBackoffLevels = 100
 // the final row shows the true maximum, not a floor.
 func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*BackoffStats, error) {
 	out := &BackoffStats{
-		Mode: backoffMode, Factor: backoffFactor, Grace: backoffGrace, CapDays: backoffCapDays,
+		Mode: backoffMode, Factor: backoffFactor, Grace: backoffGrace, CapHours: backoffCapHours,
 		MinHours: backoffMinHours, InertOffset: backoffInertOffset,
 		Levels: make([]BackoffLevel, 0, 32),
 	}
@@ -552,7 +552,7 @@ func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, i
 		`UPDATE context_blocks SET
 			dream_eval_count = dream_eval_count + 1,
 			dream_checked_at = now(),
-			dream_cooldown_until = now() + GREATEST(1.0, LEAST($5::float8 * 24.0,
+			dream_cooldown_until = now() + GREATEST(1.0, LEAST($5::float8,
 				CASE $6::text
 					WHEN 'exp'    THEN $2::float8 * power($3::float8, GREATEST(0, (dream_eval_count + 1) - $4 + $7)::float8)
 					WHEN 'log'    THEN $2::float8 * (1 + $3::float8 * ln(1 + GREATEST(0, (dream_eval_count + 1) - $4 + $7)::float8))
@@ -561,7 +561,7 @@ func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, i
 				END
 			)) * interval '1 hour'
 		WHERE id = $1`,
-		blockID, backoffMinHours, backoffFactor, backoffGrace, backoffCapDays, backoffMode,
+		blockID, backoffMinHours, backoffFactor, backoffGrace, backoffCapHours, backoffMode,
 		off, inert, float64(CooldownInertDays), float64(CooldownActiveDays),
 	)
 	return err

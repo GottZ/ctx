@@ -86,7 +86,7 @@ type Config struct {
 	DreamBackoffMode        string        // re-dream back-off curve: exp|log|linear|off
 	DreamBackoffFactor      float64       // growth (exp) / k (log) / slope-per-day (linear)
 	DreamBackoffGrace       int           // free cycles before growth (0 = grow from n=0)
-	DreamBackoffCapDays     int           // ceiling (days)
+	DreamBackoffCapHours    float64       // ceiling (hours)
 	DreamBackoffMinHours    float64       // floor at n=0 (active, hours)
 	DreamBackoffInertOffset int           // extra curve steps when no links found
 }
@@ -169,7 +169,7 @@ func (s *Scheduler) getDreamThrottleInterval() time.Duration {
 // NewScheduler creates a new Scheduler.
 func NewScheduler(pool *pgxpool.Pool, config *Config) *Scheduler {
 	dream.SetBackoffConfig(config.DreamBackoffMode, config.DreamBackoffFactor,
-		config.DreamBackoffGrace, config.DreamBackoffCapDays,
+		config.DreamBackoffGrace, config.DreamBackoffCapHours,
 		config.DreamBackoffMinHours, config.DreamBackoffInertOffset)
 	return &Scheduler{
 		pool:    pool,

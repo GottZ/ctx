@@ -111,7 +111,7 @@ func main() {
 		DreamBackoffMode:        cfg.DreamBackoffMode,
 		DreamBackoffFactor:      cfg.DreamBackoffFactor,
 		DreamBackoffGrace:       cfg.DreamBackoffGrace,
-		DreamBackoffCapDays:     cfg.DreamBackoffCapDays,
+		DreamBackoffCapHours:    cfg.DreamBackoffCapHours,
 		DreamBackoffMinHours:    cfg.DreamBackoffMinHours,
 		DreamBackoffInertOffset: cfg.DreamBackoffInertOffset,
 		DreamEmbedHost:          cfg.DreamEmbedHost,

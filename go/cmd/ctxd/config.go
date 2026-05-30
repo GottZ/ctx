@@ -59,8 +59,8 @@ type Config struct {
 	DreamBackoffMode        string  // CTX_DREAM_BACKOFF_MODE: exp|log|linear|off
 	DreamBackoffFactor      float64 // CTX_DREAM_BACKOFF_FACTOR
 	DreamBackoffGrace       int     // CTX_DREAM_BACKOFF_GRACE
-	DreamBackoffCapDays     int     // CTX_DREAM_BACKOFF_CAP_DAYS
-	DreamBackoffMinHours    float64 // CTX_DREAM_BACKOFF_MIN_HOURS
+	DreamBackoffCapHours    float64 // CTX_DREAM_BACKOFF_CAP (h|d|w|m|y, e.g. 45d)
+	DreamBackoffMinHours    float64 // CTX_DREAM_BACKOFF_MIN (h|d|w|m|y, e.g. 12h)
 	DreamBackoffInertOffset int     // CTX_DREAM_BACKOFF_INERT_OFFSET
 
 	// Timezone for temporal resolution (e.g. "Europe/Berlin").
@@ -163,8 +163,8 @@ func LoadConfig() (Config, error) {
 		DreamBackoffMode:        getEnv("CTX_DREAM_BACKOFF_MODE", "exp"),
 		DreamBackoffFactor:      getEnvFloatSafe("CTX_DREAM_BACKOFF_FACTOR", 1.6),
 		DreamBackoffGrace:       getEnvIntSafe("CTX_DREAM_BACKOFF_GRACE", 0),
-		DreamBackoffCapDays:     getEnvIntSafe("CTX_DREAM_BACKOFF_CAP_DAYS", 45),
-		DreamBackoffMinHours:    getEnvFloatSafe("CTX_DREAM_BACKOFF_MIN_HOURS", 12),
+		DreamBackoffCapHours:    getEnvCooldownHours("CTX_DREAM_BACKOFF_CAP", 45*24),
+		DreamBackoffMinHours:    getEnvCooldownHours("CTX_DREAM_BACKOFF_MIN", 12),
 		DreamBackoffInertOffset: getEnvIntSafe("CTX_DREAM_BACKOFF_INERT_OFFSET", 7),
 
 		Timezone: tz,
@@ -228,6 +228,52 @@ func getEnvFloatSafe(key string, fallback float64) float64 {
 		return fallback
 	}
 	return f
+}
+
+// cooldownUnitHours maps the domain duration suffixes to hours. Deliberately
+// NOT Go's time.ParseDuration: that uses m=minutes / s=seconds (meaningless for
+// re-dream intervals, and m=minutes is a months trap). Here the units are the
+// ones that make sense for cooldowns — h/d/w/m/y — with m = month (30d).
+var cooldownUnitHours = map[byte]float64{
+	'h': 1,
+	'd': 24,
+	'w': 24 * 7,
+	'm': 24 * 30,
+	'y': 24 * 365,
+}
+
+// parseCooldownHours parses a cooldown duration to hours. Accepts a unit suffix
+// h|d|w|m|y (e.g. "12h", "45d", "1w", "1m", "1y") or a bare number (interpreted
+// as hours). Returns (hours, true) on success; (0, false) on a malformed value
+// so callers fall back to their default.
+func parseCooldownHours(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	last := s[len(s)-1]
+	if mult, ok := cooldownUnitHours[last|0x20]; ok { // |0x20 lowercases ASCII letter
+		n, err := strconv.ParseFloat(strings.TrimSpace(s[:len(s)-1]), 64)
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		return n * mult, true
+	}
+	// No recognized suffix → bare number is hours.
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// getEnvCooldownHours reads a duration env var (h|d|w|m|y suffix, or bare hours)
+// and returns it in hours, falling back on empty/malformed input.
+func getEnvCooldownHours(key string, fallbackHours float64) float64 {
+	if h, ok := parseCooldownHours(os.Getenv(key)); ok {
+		return h
+	}
+	return fallbackHours
 }
 
 func getEnvIntSafe(key string, fallback int) int {
