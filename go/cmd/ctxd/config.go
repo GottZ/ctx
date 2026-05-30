@@ -42,20 +42,26 @@ type Config struct {
 	RerankEnabled bool
 
 	// Dream pipeline
-	DreamEnabled       bool
-	DreamHost          string
-	DreamAPIKey        string
-	DreamProtocol      string // "ollama" (default) or "openai"
-	DreamModel         string
-	DreamNumCtx        int
-	DreamThink         string // "true", "false", or "" (fallback: ChatThink)
-	DreamEmbedHost     string // Separate embed host for Dream (empty = EmbedHost)
-	DreamEmbedAPIKey   string
-	DreamEmbedProtocol string // "ollama" or "openai" (empty = EmbedProtocol)
-	DreamEmbedModel    string
-	DreamEmbedNumCtx   int
-	DreamIdleWait      int // seconds between dream cycles when idle (default 20)
-	DreamParallelism   int // concurrent dream cycles (default 1, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide.
+	DreamEnabled            bool
+	DreamHost               string
+	DreamAPIKey             string
+	DreamProtocol           string // "ollama" (default) or "openai"
+	DreamModel              string
+	DreamNumCtx             int
+	DreamThink              string // "true", "false", or "" (fallback: ChatThink)
+	DreamEmbedHost          string // Separate embed host for Dream (empty = EmbedHost)
+	DreamEmbedAPIKey        string
+	DreamEmbedProtocol      string // "ollama" or "openai" (empty = EmbedProtocol)
+	DreamEmbedModel         string
+	DreamEmbedNumCtx        int
+	DreamIdleWait           int     // seconds between dream cycles when idle (default 20)
+	DreamParallelism        int     // concurrent dream cycles (default 1, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide.
+	DreamBackoffMode        string  // CTX_DREAM_BACKOFF_MODE: exp|log|linear|off
+	DreamBackoffFactor      float64 // CTX_DREAM_BACKOFF_FACTOR
+	DreamBackoffGrace       int     // CTX_DREAM_BACKOFF_GRACE
+	DreamBackoffCapDays     int     // CTX_DREAM_BACKOFF_CAP_DAYS
+	DreamBackoffMinHours    float64 // CTX_DREAM_BACKOFF_MIN_HOURS
+	DreamBackoffInertOffset int     // CTX_DREAM_BACKOFF_INERT_OFFSET
 
 	// Timezone for temporal resolution (e.g. "Europe/Berlin").
 	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
@@ -140,20 +146,26 @@ func LoadConfig() (Config, error) {
 
 		RerankEnabled: getEnv("CTX_RERANK_ENABLED", "false") == "true",
 
-		DreamEnabled:       getEnv("CTX_DREAM_ENABLED", "false") == "true",
-		DreamHost:          getEnv("CTX_DREAM_HOST", "http://localhost:11434"),
-		DreamAPIKey:        getEnv("CTX_DREAM_API_KEY", ""),
-		DreamProtocol:      getEnv("CTX_DREAM_PROTOCOL", "ollama"),
-		DreamModel:         getEnv("CTX_DREAM_MODEL", ""),
-		DreamNumCtx:        dreamNumCtx,
-		DreamThink:         getEnv("CTX_DREAM_THINK", ""),
-		DreamEmbedHost:     getEnv("CTX_DREAM_EMBED_HOST", ""),
-		DreamEmbedAPIKey:   getEnv("CTX_DREAM_EMBED_API_KEY", ""),
-		DreamEmbedProtocol: getEnv("CTX_DREAM_EMBED_PROTOCOL", ""),
-		DreamEmbedModel:    getEnv("CTX_DREAM_EMBED_MODEL", ""),
-		DreamEmbedNumCtx:   getEnvIntSafe("CTX_DREAM_EMBED_NUM_CTX", 0),
-		DreamIdleWait:      getEnvIntSafe("CTX_DREAM_IDLE_WAIT", 20),
-		DreamParallelism:   getEnvIntSafe("CTX_DREAM_PARALLELISM", 1),
+		DreamEnabled:            getEnv("CTX_DREAM_ENABLED", "false") == "true",
+		DreamHost:               getEnv("CTX_DREAM_HOST", "http://localhost:11434"),
+		DreamAPIKey:             getEnv("CTX_DREAM_API_KEY", ""),
+		DreamProtocol:           getEnv("CTX_DREAM_PROTOCOL", "ollama"),
+		DreamModel:              getEnv("CTX_DREAM_MODEL", ""),
+		DreamNumCtx:             dreamNumCtx,
+		DreamThink:              getEnv("CTX_DREAM_THINK", ""),
+		DreamEmbedHost:          getEnv("CTX_DREAM_EMBED_HOST", ""),
+		DreamEmbedAPIKey:        getEnv("CTX_DREAM_EMBED_API_KEY", ""),
+		DreamEmbedProtocol:      getEnv("CTX_DREAM_EMBED_PROTOCOL", ""),
+		DreamEmbedModel:         getEnv("CTX_DREAM_EMBED_MODEL", ""),
+		DreamEmbedNumCtx:        getEnvIntSafe("CTX_DREAM_EMBED_NUM_CTX", 0),
+		DreamIdleWait:           getEnvIntSafe("CTX_DREAM_IDLE_WAIT", 20),
+		DreamParallelism:        getEnvIntSafe("CTX_DREAM_PARALLELISM", 1),
+		DreamBackoffMode:        getEnv("CTX_DREAM_BACKOFF_MODE", "exp"),
+		DreamBackoffFactor:      getEnvFloatSafe("CTX_DREAM_BACKOFF_FACTOR", 1.6),
+		DreamBackoffGrace:       getEnvIntSafe("CTX_DREAM_BACKOFF_GRACE", 0),
+		DreamBackoffCapDays:     getEnvIntSafe("CTX_DREAM_BACKOFF_CAP_DAYS", 45),
+		DreamBackoffMinHours:    getEnvFloatSafe("CTX_DREAM_BACKOFF_MIN_HOURS", 12),
+		DreamBackoffInertOffset: getEnvIntSafe("CTX_DREAM_BACKOFF_INERT_OFFSET", 7),
 
 		Timezone: tz,
 
@@ -204,6 +216,18 @@ func parseThinkMode(s string) *bool {
 	default:
 		return nil
 	}
+}
+
+func getEnvFloatSafe(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
 }
 
 func getEnvIntSafe(key string, fallback int) int {

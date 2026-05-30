@@ -74,15 +74,16 @@ func TestRenderDreamStatsHumanBackoff(t *testing.T) {
 		"backoff": map[string]any{
 			"mode": "log", "factor": float64(2.5), "grace": float64(3),
 			"cap_days": float64(45), "max_eval_count": float64(21), "truncated": false,
+			"min_hours": float64(12), "inert_offset": float64(7),
 			"levels": []any{
-				map[string]any{"eval_count": float64(0), "blocks": float64(1), "cooldown_days": float64(3)},
-				map[string]any{"eval_count": float64(14), "blocks": float64(131), "cooldown_days": float64(22)},
-				map[string]any{"eval_count": float64(21), "blocks": float64(1), "cooldown_days": float64(25)},
+				map[string]any{"eval_count": float64(0), "blocks": float64(1), "cooldown_hours": float64(12)},
+				map[string]any{"eval_count": float64(7), "blocks": float64(131), "cooldown_hours": float64(316)},
+				map[string]any{"eval_count": float64(21), "blocks": float64(1), "cooldown_hours": float64(1080)},
 			},
 		},
 	}
 	out := renderDreamStatsHuman(d)
-	for _, want := range []string{"Re-dream back-off", "mode=log", "n=0", "n=14", "n=21", "grace", "25d"} {
+	for _, want := range []string{"Re-dream back-off", "mode=log", "n=0", "n=7", "n=21", "12h", "45d"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q\n---\n%s", want, out)
 		}

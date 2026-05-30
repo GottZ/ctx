@@ -60,29 +60,35 @@ const (
 
 // Config holds scheduler configuration.
 type Config struct {
-	DSN                string // Connection string for dedicated pgxlisten connection
-	HomeScope          string
-	ReadScopes         []string
-	ReconnectDelay     time.Duration // pgxlisten reconnect delay (0 = 5s default)
-	DreamEnabled       bool          // Enable dream cross-reference engine
-	EmbedHost          string        // Embedding provider host (query path)
-	EmbedAPIKey        string        // Embedding provider API key (query path)
-	EmbedModel         string        // Embedding model name (query path)
-	EmbedNumCtx        int           // Embedding num_ctx (query path)
-	DreamEmbedHost     string        // Dream embedding host (empty = EmbedHost)
-	DreamEmbedAPIKey   string        // Dream embedding API key (empty = EmbedAPIKey)
-	DreamEmbedProtocol string        // Dream embedding protocol (empty = EmbedProtocol)
-	DreamEmbedModel    string        // Dream embedding model (empty = EmbedModel)
-	DreamEmbedNumCtx   int           // Dream embedding num_ctx (0 = EmbedNumCtx)
-	EmbedProtocol      string        // Query-path embed protocol ("ollama" or "openai")
-	DreamHost          string        // Dream LLM provider host
-	DreamAPIKey        string        // Dream LLM provider API key (empty = no auth)
-	ChatModel          string        // Chat model name (fallback for dream)
-	DreamModel         string        // Dream model name (fallback: ChatModel)
-	DreamThink         *bool         // Think mode for dream (nil = omit)
-	DreamNumCtx        int           // num_ctx for dream (0 = model default)
-	DreamIdleWait      int           // seconds between dream cycles when idle (0 = default 20s)
-	DreamParallelism   int           // concurrent dream-cycle workers (0/1 = single-thread, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide on the same block.
+	DSN                     string // Connection string for dedicated pgxlisten connection
+	HomeScope               string
+	ReadScopes              []string
+	ReconnectDelay          time.Duration // pgxlisten reconnect delay (0 = 5s default)
+	DreamEnabled            bool          // Enable dream cross-reference engine
+	EmbedHost               string        // Embedding provider host (query path)
+	EmbedAPIKey             string        // Embedding provider API key (query path)
+	EmbedModel              string        // Embedding model name (query path)
+	EmbedNumCtx             int           // Embedding num_ctx (query path)
+	DreamEmbedHost          string        // Dream embedding host (empty = EmbedHost)
+	DreamEmbedAPIKey        string        // Dream embedding API key (empty = EmbedAPIKey)
+	DreamEmbedProtocol      string        // Dream embedding protocol (empty = EmbedProtocol)
+	DreamEmbedModel         string        // Dream embedding model (empty = EmbedModel)
+	DreamEmbedNumCtx        int           // Dream embedding num_ctx (0 = EmbedNumCtx)
+	EmbedProtocol           string        // Query-path embed protocol ("ollama" or "openai")
+	DreamHost               string        // Dream LLM provider host
+	DreamAPIKey             string        // Dream LLM provider API key (empty = no auth)
+	ChatModel               string        // Chat model name (fallback for dream)
+	DreamModel              string        // Dream model name (fallback: ChatModel)
+	DreamThink              *bool         // Think mode for dream (nil = omit)
+	DreamNumCtx             int           // num_ctx for dream (0 = model default)
+	DreamIdleWait           int           // seconds between dream cycles when idle (0 = default 20s)
+	DreamParallelism        int           // concurrent dream-cycle workers (0/1 = single-thread, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide on the same block.
+	DreamBackoffMode        string        // re-dream back-off curve: exp|log|linear|off
+	DreamBackoffFactor      float64       // growth (exp) / k (log) / slope-per-day (linear)
+	DreamBackoffGrace       int           // free cycles before growth (0 = grow from n=0)
+	DreamBackoffCapDays     int           // ceiling (days)
+	DreamBackoffMinHours    float64       // floor at n=0 (active, hours)
+	DreamBackoffInertOffset int           // extra curve steps when no links found
 }
 
 // Scheduler orchestrates Guard + Digest as background jobs.
@@ -162,6 +168,9 @@ func (s *Scheduler) getDreamThrottleInterval() time.Duration {
 
 // NewScheduler creates a new Scheduler.
 func NewScheduler(pool *pgxpool.Pool, config *Config) *Scheduler {
+	dream.SetBackoffConfig(config.DreamBackoffMode, config.DreamBackoffFactor,
+		config.DreamBackoffGrace, config.DreamBackoffCapDays,
+		config.DreamBackoffMinHours, config.DreamBackoffInertOffset)
 	return &Scheduler{
 		pool:    pool,
 		config:  config,

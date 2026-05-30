@@ -194,7 +194,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 
 	if len(candidates) == 0 {
 		slog.Info("dream: no candidates found", "block_id", block.ID)
-		_ = SetDreamCooldown(ctx, pool, block.ID, CooldownInertDays)
+		_ = SetDreamCooldown(ctx, pool, block.ID, true /* inert: no candidates */)
 		return 0, nil
 	}
 
@@ -253,12 +253,9 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 		}
 	}
 
-	// Step 7: Set adaptive cooldown — active blocks re-checked sooner.
-	cooldownDays := CooldownInertDays
-	if written > 0 {
-		cooldownDays = CooldownActiveDays
-	}
-	_ = SetDreamCooldown(ctx, pool, block.ID, cooldownDays)
+	// Step 7: Set adaptive back-off cooldown. inert = no links written this cycle,
+	// which starts the block further up the curve (backoffInertOffset).
+	_ = SetDreamCooldown(ctx, pool, block.ID, written == 0)
 
 	// Step 8: Promote eligible blocks to canonical.
 	// Welle 46 Convention-Switch (2026-05-22): under "A supersedes B" → A=source=newer,
@@ -366,37 +363,40 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 	return &block, nil
 }
 
-// Back-off cooldown (Wave-2, W49c): the effective re-dream interval grows with a
-// block's completed eval-cycle count (dream_eval_count), so mature blocks are
-// pulled progressively less often while new blocks (count <= grace) catch up at
-// the base rate. The base is the existing outcome cooldown (CooldownActiveDays
-// when links were written, CooldownInertDays when not), so a block that stops
-// producing links naturally backs off from the larger 14d base.
+// Back-off cooldown (Wave-2, W49c; recalibrated W49c-2): the effective re-dream
+// interval grows with a block's completed eval count (dream_eval_count), so mature
+// blocks are pulled progressively less often while fresh blocks re-dream quickly to
+// catch links to newly-inserted related blocks. The curve is in HOURS from a small
+// minimum (default 12h) — early dreams are cheap and quality rises fastest then, so
+// there is NO grace plateau (grace=0): growth starts at n=0.
 //
-//	exp:    base * factor^max(0, n-grace)
-//	log:    base * (1 + factor*ln(1 + max(0, n-grace)))   [default — gentlest ramp]
-//	linear: base + factor*max(0, n-grace)
-//	off:    base                                          [disabled]
+//	exp:    minHours * factor^max(0, n-grace+off)        [default — 12h→cap by n~10]
+//	log:    minHours * (1 + factor*ln(1 + max(0,n-grace+off)))
+//	linear: minHours + factor*24*max(0, n-grace+off)
+//	off:    CooldownActiveDays / CooldownInertDays (days) [back-off disabled]
 //
-// where n = dream_eval_count after this cycle. Result is floored at 1 day and
-// capped at backoffCapDays. The W49c curve-shape simulation
-// (.project/bench-session-w49c/backoff_curves.py) showed the efficiency frontier
-// (GPU saved vs links delayed) is shape-independent, but the log curve crosses
-// the productive mid-life zone (eval counts 7-14, where ~half of blocks still
-// surface new links) most gradually — hence the default. Back-off only DELAYS a
-// re-dream, never stops it, so a link missed in a skipped cycle is recovered on
-// the next accepted pull (no permanent recall loss).
+// n = dream_eval_count BEFORE this increment (so a block dreamed once gets the n=1
+// step, a fresh block n=0). off = backoffInertOffset when the cycle produced NO
+// links (inert) — an inert block starts further up the SAME curve instead of from a
+// separate base. Result floored at 1h and capped at backoffCapDays. Back-off only
+// DELAYS a re-dream, never stops it, so a link missed in a skipped cycle is
+// recovered on the next accepted pull (no permanent recall loss). Defaults
+// (exp/1.6/min12h/grace0/cap45/inert+7) validated on real pull history
+// (.project/bench-session-w49c/backoff_curves.py): ~48% of dream-eval GPU saved at
+// lower link-loss than the prior log/3d curve, with fresh blocks re-dreaming sub-day.
 var (
-	backoffMode    = "log"
-	backoffFactor  = 2.5
-	backoffGrace   = 3
-	backoffCapDays = 45
+	backoffMode        = "exp"
+	backoffFactor      = 1.6
+	backoffGrace       = 0
+	backoffMinHours    = 12.0
+	backoffCapDays     = 45
+	backoffInertOffset = 7
 )
 
-// SetBackoffConfig overrides the Dream back-off parameters at startup. mode must
-// be one of exp|log|linear|off (anything else, or "off", disables back-off →
-// base cooldown). factor < 0 and grace < 0 are ignored; capDays <= 0 is ignored.
-func SetBackoffConfig(mode string, factor float64, grace, capDays int) {
+// SetBackoffConfig overrides the Dream back-off parameters at startup. mode must be
+// one of exp|log|linear|off (anything else is ignored, keeping the default). factor,
+// grace, minHours, inertOffset < 0 and capDays <= 0 are ignored.
+func SetBackoffConfig(mode string, factor float64, grace, capDays int, minHours float64, inertOffset int) {
 	switch mode {
 	case "exp", "log", "linear", "off":
 		backoffMode = mode
@@ -410,34 +410,48 @@ func SetBackoffConfig(mode string, factor float64, grace, capDays int) {
 	if capDays > 0 {
 		backoffCapDays = capDays
 	}
+	if minHours >= 0 {
+		backoffMinHours = minHours
+	}
+	if inertOffset >= 0 {
+		backoffInertOffset = inertOffset
+	}
 }
 
-// effectiveCooldownDays returns the back-off cooldown (days) for a block at the
-// given eval count n and base cooldown, using the active backoff config. It is the
-// Go mirror of the SQL CASE in SetDreamCooldown — keep the two in sync. Used by
-// BackoffStats so the reported per-bucket cooldown matches what the loop applies.
-func effectiveCooldownDays(base, n int) int {
-	d := float64(base)
+// effectiveCooldownHours returns the back-off cooldown in HOURS for a block at the
+// given pre-increment eval count n, using the active config. inert applies the
+// inert-offset (no links found this cycle). It is the Go mirror of the SQL in
+// SetDreamCooldown — keep the two in sync. Used by BackoffStats and tests.
+func effectiveCooldownHours(n int, inert bool) float64 {
+	if backoffMode == "off" {
+		if inert {
+			return float64(CooldownInertDays) * 24
+		}
+		return float64(CooldownActiveDays) * 24
+	}
 	x := float64(n - backoffGrace)
+	if inert {
+		x += float64(backoffInertOffset)
+	}
 	if x < 0 {
 		x = 0
 	}
+	h := backoffMinHours
 	switch backoffMode {
 	case "exp":
-		d = float64(base) * math.Pow(backoffFactor, x)
+		h = backoffMinHours * math.Pow(backoffFactor, x)
 	case "log":
-		d = float64(base) * (1 + backoffFactor*math.Log(1+x))
+		h = backoffMinHours * (1 + backoffFactor*math.Log(1+x))
 	case "linear":
-		d = float64(base) + backoffFactor*x
+		h = backoffMinHours + backoffFactor*24*x
 	}
-	if d > float64(backoffCapDays) {
-		d = float64(backoffCapDays)
+	if capH := float64(backoffCapDays) * 24; h > capH {
+		h = capH
 	}
-	r := int(math.Round(d))
-	if r < 1 {
-		r = 1
+	if h < 1 {
+		h = 1
 	}
-	return r
+	return h
 }
 
 // BackoffStats is the current back-off policy plus the corpus maturity
@@ -446,20 +460,22 @@ func effectiveCooldownDays(base, n int) int {
 // CooldownActiveDays). Lets operators see how far the corpus has cooled off and
 // the actual per-level growth of the re-dream interval.
 type BackoffStats struct {
-	Mode      string         `json:"mode"`           // exp|log|linear|off
-	Factor    float64        `json:"factor"`         // k (log) / growth (exp) / slope-per-day (linear)
-	Grace     int            `json:"grace"`          // free cycles at base rate
-	CapDays   int            `json:"cap_days"`       // ceiling
-	MaxEval   int            `json:"max_eval_count"` // highest dream_eval_count in the corpus (growth cut-off)
-	Truncated bool           `json:"truncated"`      // level list capped at maxBackoffLevels
-	Levels    []BackoffLevel `json:"levels"`         // per eval-count, ascending up to MaxEval
+	Mode        string         `json:"mode"`           // exp|log|linear|off
+	Factor      float64        `json:"factor"`         // growth (exp) / k (log) / slope-per-day (linear)
+	Grace       int            `json:"grace"`          // free cycles before growth (0 = grow from n=0)
+	MinHours    float64        `json:"min_hours"`      // floor: cooldown at n=0 (active)
+	CapDays     int            `json:"cap_days"`       // ceiling
+	InertOffset int            `json:"inert_offset"`   // extra curve steps when a cycle finds no links
+	MaxEval     int            `json:"max_eval_count"` // highest dream_eval_count in the corpus (growth cut-off)
+	Truncated   bool           `json:"truncated"`      // level list capped at maxBackoffLevels
+	Levels      []BackoffLevel `json:"levels"`         // per eval-count, ascending up to MaxEval
 }
 
 // BackoffLevel is one dream_eval_count value of the maturity distribution.
 type BackoffLevel struct {
-	EvalCount int `json:"eval_count"`    // completed eval cycles
-	Blocks    int `json:"blocks"`        // eligible blocks at this exact count
-	CooldownD int `json:"cooldown_days"` // effective cooldown this count yields (active base)
+	EvalCount int     `json:"eval_count"`     // completed eval cycles
+	Blocks    int     `json:"blocks"`         // eligible blocks at this exact count
+	CooldownH float64 `json:"cooldown_hours"` // effective cooldown this count yields (active, hours)
 }
 
 // maxBackoffLevels caps the per-level distribution so a pathologically old corpus
@@ -476,6 +492,7 @@ const maxBackoffLevels = 100
 func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*BackoffStats, error) {
 	out := &BackoffStats{
 		Mode: backoffMode, Factor: backoffFactor, Grace: backoffGrace, CapDays: backoffCapDays,
+		MinHours: backoffMinHours, InertOffset: backoffInertOffset,
 		Levels: make([]BackoffLevel, 0, 32),
 	}
 	if err := pool.QueryRow(ctx,
@@ -510,7 +527,7 @@ func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []strin
 		out.Levels = append(out.Levels, BackoffLevel{
 			EvalCount: n,
 			Blocks:    blocks,
-			CooldownD: effectiveCooldownDays(CooldownActiveDays, n),
+			CooldownH: effectiveCooldownHours(n, false),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -520,25 +537,32 @@ func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []strin
 }
 
 // SetDreamCooldown marks a block as dream-checked, increments its completed-cycle
-// counter, and sets the back-off cooldown derived from the new count and the
-// given base (CooldownActiveDays / CooldownInertDays). For transient system
-// failures use SetDreamCooldownMinutes instead — that path does NOT increment the
-// counter, so the back-off reflects real completed work only.
-func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, days int) error {
+// counter, and sets the back-off cooldown (in hours) derived from the new count.
+// inert=true (no links found this cycle) applies the inert offset so the block
+// starts further up the curve. The CASE mirrors effectiveCooldownHours exactly.
+// x = (dream_eval_count + 1) - grace + (inert ? inertOffset : 0). For transient
+// system failures use SetDreamCooldownMinutes instead — that path does NOT
+// increment the counter, so the back-off reflects real completed work only.
+func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, inert bool) error {
+	off := 0
+	if inert {
+		off = backoffInertOffset
+	}
 	_, err := pool.Exec(ctx,
 		`UPDATE context_blocks SET
 			dream_eval_count = dream_eval_count + 1,
 			dream_checked_at = now(),
-			dream_cooldown_until = now() + GREATEST(1, round(LEAST($5::float8,
+			dream_cooldown_until = now() + GREATEST(1.0, LEAST($5::float8 * 24.0,
 				CASE $6::text
-					WHEN 'exp'    THEN $2::float8 * power($3::float8, GREATEST(0, (dream_eval_count + 1) - $4)::float8)
-					WHEN 'log'    THEN $2::float8 * (1 + $3::float8 * ln(1 + GREATEST(0, (dream_eval_count + 1) - $4)::float8))
-					WHEN 'linear' THEN $2::float8 + $3::float8 * GREATEST(0, (dream_eval_count + 1) - $4)::float8
-					ELSE $2::float8
+					WHEN 'exp'    THEN $2::float8 * power($3::float8, GREATEST(0, (dream_eval_count + 1) - $4 + $7)::float8)
+					WHEN 'log'    THEN $2::float8 * (1 + $3::float8 * ln(1 + GREATEST(0, (dream_eval_count + 1) - $4 + $7)::float8))
+					WHEN 'linear' THEN $2::float8 + $3::float8 * 24.0 * GREATEST(0, (dream_eval_count + 1) - $4 + $7)::float8
+					ELSE (CASE WHEN $8::bool THEN $9::float8 ELSE $10::float8 END) * 24.0
 				END
-			))::int) * interval '1 day'
+			)) * interval '1 hour'
 		WHERE id = $1`,
-		blockID, days, backoffFactor, backoffGrace, backoffCapDays, backoffMode,
+		blockID, backoffMinHours, backoffFactor, backoffGrace, backoffCapDays, backoffMode,
+		off, inert, float64(CooldownInertDays), float64(CooldownActiveDays),
 	)
 	return err
 }

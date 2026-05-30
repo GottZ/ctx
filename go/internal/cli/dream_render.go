@@ -29,6 +29,27 @@ func num(v any) int {
 	return 0
 }
 
+// flt coerces a JSON number to float64 (0 on miss).
+func flt(v any) float64 {
+	if f, ok := v.(float64); ok {
+		return f
+	}
+	return 0
+}
+
+// fmtDuration renders an hours value compactly: <24h as "Nh", <10d as "N.Nd",
+// else "Nd". Keeps the back-off table readable across the 12h→45d range.
+func fmtDuration(hours float64) string {
+	if hours < 24 {
+		return fmt.Sprintf("%dh", int(hours+0.5))
+	}
+	days := hours / 24
+	if days < 10 {
+		return fmt.Sprintf("%.1fd", days)
+	}
+	return fmt.Sprintf("%dd", int(days+0.5))
+}
+
 // bar renders a proportional bar of width cols for value/max, reusing the
 // statusline's eighth-block palette (barBlocks: ' ▏▎▍▌▋▊▉█') for sub-character
 // resolution — partial blocks give smooth sub-steps instead of whole-cell jumps.
@@ -98,11 +119,12 @@ func renderDreamStatsHuman(d map[string]any) string {
 
 	// Back-off policy + per-eval-count maturity distribution.
 	if bo, ok := d["backoff"].(map[string]any); ok {
-		fmt.Fprintf(&sb, "\n%s  mode=%v factor=%v grace=%v cap=%vd  %s\n",
+		fmt.Fprintf(&sb, "\n%s  mode=%v factor=%v min=%s grace=%v cap=%vd  %s\n",
 			bold("Re-dream back-off"),
 			valOr(bo["mode"], "?"), valOr(bo["factor"], "?"),
+			fmtDuration(flt(bo["min_hours"])),
 			valOr(bo["grace"], "?"), valOr(bo["cap_days"], "?"),
-			dim("(cooldown at active base)"))
+			dim(fmt.Sprintf("(cooldown by eval count; inert +%d)", num(bo["inert_offset"]))))
 
 		levels, _ := bo["levels"].([]any)
 		maxBlocks := 0
@@ -113,7 +135,6 @@ func renderDreamStatsHuman(d map[string]any) string {
 				}
 			}
 		}
-		grace := num(bo["grace"])
 		for _, li := range levels {
 			l, ok := li.(map[string]any)
 			if !ok {
@@ -121,14 +142,10 @@ func renderDreamStatsHuman(d map[string]any) string {
 			}
 			n := num(l["eval_count"])
 			blocks := num(l["blocks"])
-			cd := num(l["cooldown_days"])
-			tag := ""
-			if n <= grace {
-				tag = "  grace"
-			}
-			fmt.Fprintf(&sb, "  n=%-3d %4d  %-24s %s%s\n",
+			ch := flt(l["cooldown_hours"])
+			fmt.Fprintf(&sb, "  n=%-3d %4d  %-24s %s\n",
 				n, blocks, bar(blocks, maxBlocks, 24),
-				dim(fmt.Sprintf("\u2192 %dd", cd)), dim(tag))
+				dim("\u2192 "+fmtDuration(ch)))
 		}
 		if t, _ := bo["truncated"].(bool); t {
 			fmt.Fprintf(&sb, "  %s\n",

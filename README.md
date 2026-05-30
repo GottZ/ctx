@@ -187,7 +187,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 | `CTX_DREAM_HOST` / `_PROTOCOL` / `_MODEL` / `_NUM_CTX` | inherits chat | Separate Dream model (e.g. larger, slower) |
 | `CTX_DREAM_EMBED_*` | inherits embed | Separate embedding endpoint for Dream (e.g. CPU sidecar) |
 | `CTX_DREAM_IDLE_WAIT` | `20` (s) | Backoff when no pending blocks |
-| `CTX_DREAM_BACKOFF_MODE` / `_FACTOR` / `_GRACE` / `_CAP_DAYS` | `log` / `2.5` / `3` / `45` | Re-dream back-off by eval count (`log`/`exp`/`linear`/`off`); mature blocks pulled less, new blocks unaffected |
+| `CTX_DREAM_BACKOFF_MODE` / `_FACTOR` / `_MIN_HOURS` / `_GRACE` / `_CAP_DAYS` / `_INERT_OFFSET` | `exp` / `1.6` / `12` / `0` / `45` / `7` | Re-dream back-off by eval count (`exp`/`log`/`linear`/`off`). Cooldown grows from `MIN_HOURS` (n=0) to `CAP_DAYS`: fresh blocks re-dream sub-day to catch new links, mature blocks back off to the cap. `INERT_OFFSET` starts a no-links cycle further up the curve |
 | `CTX_PROMPT_VERSION` | `v5.2` | Generator-prompt version (`v5.2` default, `v6` opt-in graded confidence) |
 | `CTX_TIMEZONE` | `Europe/Berlin` | Cyclic-temporal phase calculation |
 | `CTX_CONFIDENT_THRESHOLD` | `0.008` | Generator-side refusal threshold (RRF score below → "I don't know") |
