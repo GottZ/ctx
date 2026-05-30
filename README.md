@@ -132,7 +132,7 @@ ctx stats     # Block count, categories, storage
 | `ctx stats` | Database statistics + Dream backlog (`dream_queue`: pickable/cooldown/incoming-forecast) |
 | `ctx health` | Healthcheck |
 | `ctx guard [list\|stats\|resolve]` | Write Guard management |
-| `ctx dream [stats\|review]` | Dream Mode stats (mode + `queue`: backlog + incoming-load forecast `incoming_1h`/`incoming_6h`/`next_pending_at`) + link review |
+| `ctx dream [stats\|review]` | Dream Mode stats — mode, `queue` (backlog + incoming forecast), `backoff` (per-eval-count maturity distribution: how far each block has cooled off + effective cooldown); human-readable on a TTY, JSON when piped + link review |
 | `ctx dream enable\|disable\|throttle` | Runtime dream mode control (on/off/throttled) |
 | `ctx brief` | Project briefing from store |
 | `ctx persist` | Persist `[PERSIST:cat:title]` markers |

@@ -486,19 +486,19 @@ func (h *ManageHandler) handleGuardStats(w http.ResponseWriter, r *http.Request,
 	}
 
 	resp := map[string]any{
-		"action":           "guard-stats",
-		"success":          true,
-		"total_blocks":     stats.TotalBlocks,
-		"active":           stats.Active,
-		"clean":            stats.Clean,
-		"needs_review":     stats.NeedsReview,
-		"near_duplicate":   stats.NearDuplicate,
-		"unchecked":        stats.Unchecked,
-		"archived_dups":    stats.ArchivedDups,
+		"action":            "guard-stats",
+		"success":           true,
+		"total_blocks":      stats.TotalBlocks,
+		"active":            stats.Active,
+		"clean":             stats.Clean,
+		"needs_review":      stats.NeedsReview,
+		"near_duplicate":    stats.NearDuplicate,
+		"unchecked":         stats.Unchecked,
+		"archived_dups":     stats.ArchivedDups,
 		"write_log_entries": stats.WriteLogEntries,
-		"dirty_since":      stats.DirtySince,
-		"last_guard_at":    stats.LastGuardAt,
-		"pending_count":    stats.PendingCount,
+		"dirty_since":       stats.DirtySince,
+		"last_guard_at":     stats.LastGuardAt,
+		"pending_count":     stats.PendingCount,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -580,6 +580,13 @@ func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request,
 		})
 		return
 	}
+	backoff, err := dream.ComputeBackoffStats(ctx, h.pool, ar.ReadScopes)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "dream backoff stats failed",
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"action":          "dream-stats",
 		"success":         true,
@@ -591,6 +598,8 @@ func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request,
 		"pending_recheck": pendingRecheck,
 		// Actionable backlog (PickBlock eligibility) + incoming-load forecast.
 		"queue": queue,
+		// Active back-off policy + corpus maturity distribution (how far blocks have cooled off).
+		"backoff": backoff,
 	})
 }
 
@@ -752,12 +761,12 @@ func (h *ManageHandler) fetchRecentDreamBlocks(ctx context.Context, ar *auth.Aut
 			return nil, err
 		}
 		results = append(results, map[string]any{
-			"id":             id,
-			"title":          title,
-			"category":       category,
-			"quality_score":  quality,
-			"dream_checked":  checkedAt.Format(time.RFC3339),
-			"link_count":     linkCount,
+			"id":            id,
+			"title":         title,
+			"category":      category,
+			"quality_score": quality,
+			"dream_checked": checkedAt.Format(time.RFC3339),
+			"link_count":    linkCount,
 		})
 	}
 	return results, rows.Err()

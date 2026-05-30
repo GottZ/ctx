@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/GottZ/ctx/internal/embed"
@@ -409,6 +410,113 @@ func SetBackoffConfig(mode string, factor float64, grace, capDays int) {
 	if capDays > 0 {
 		backoffCapDays = capDays
 	}
+}
+
+// effectiveCooldownDays returns the back-off cooldown (days) for a block at the
+// given eval count n and base cooldown, using the active backoff config. It is the
+// Go mirror of the SQL CASE in SetDreamCooldown — keep the two in sync. Used by
+// BackoffStats so the reported per-bucket cooldown matches what the loop applies.
+func effectiveCooldownDays(base, n int) int {
+	d := float64(base)
+	x := float64(n - backoffGrace)
+	if x < 0 {
+		x = 0
+	}
+	switch backoffMode {
+	case "exp":
+		d = float64(base) * math.Pow(backoffFactor, x)
+	case "log":
+		d = float64(base) * (1 + backoffFactor*math.Log(1+x))
+	case "linear":
+		d = float64(base) + backoffFactor*x
+	}
+	if d > float64(backoffCapDays) {
+		d = float64(backoffCapDays)
+	}
+	r := int(math.Round(d))
+	if r < 1 {
+		r = 1
+	}
+	return r
+}
+
+// BackoffStats is the current back-off policy plus the corpus maturity
+// distribution: one entry per occupied dream_eval_count level, with the effective
+// re-dream cooldown that level now yields (at the active-links base,
+// CooldownActiveDays). Lets operators see how far the corpus has cooled off and
+// the actual per-level growth of the re-dream interval.
+type BackoffStats struct {
+	Mode      string         `json:"mode"`           // exp|log|linear|off
+	Factor    float64        `json:"factor"`         // k (log) / growth (exp) / slope-per-day (linear)
+	Grace     int            `json:"grace"`          // free cycles at base rate
+	CapDays   int            `json:"cap_days"`       // ceiling
+	MaxEval   int            `json:"max_eval_count"` // highest dream_eval_count in the corpus (growth cut-off)
+	Truncated bool           `json:"truncated"`      // level list capped at maxBackoffLevels
+	Levels    []BackoffLevel `json:"levels"`         // per eval-count, ascending up to MaxEval
+}
+
+// BackoffLevel is one dream_eval_count value of the maturity distribution.
+type BackoffLevel struct {
+	EvalCount int `json:"eval_count"`    // completed eval cycles
+	Blocks    int `json:"blocks"`        // eligible blocks at this exact count
+	CooldownD int `json:"cooldown_days"` // effective cooldown this count yields (active base)
+}
+
+// maxBackoffLevels caps the per-level distribution so a pathologically old corpus
+// cannot emit thousands of rows. 100 covers years of back-off growth in practice.
+const maxBackoffLevels = 100
+
+// ComputeBackoffStats reports the active back-off policy and a per-eval-count
+// maturity distribution: how many eligible blocks sit at each completed-cycle
+// count and the effective re-dream cooldown that count yields (active base). One
+// row per occupied level, ascending, up to the corpus max (the growth cut-off —
+// beyond it no blocks exist), capped at maxBackoffLevels rows. The per-level
+// cooldown uses the exact count (not a bucket edge), so the growth is visible and
+// the final row shows the true maximum, not a floor.
+func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*BackoffStats, error) {
+	out := &BackoffStats{
+		Mode: backoffMode, Factor: backoffFactor, Grace: backoffGrace, CapDays: backoffCapDays,
+		Levels: make([]BackoffLevel, 0, 32),
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(max(dream_eval_count), 0)::int FROM context_blocks
+		 WHERE NOT is_archived AND embedding IS NOT NULL
+		   AND (block_type IS NULL OR block_type IN ('knowledge','source','canonical'))
+		   AND NOT is_meta AND scope = ANY($1::text[])`,
+		scopes).Scan(&out.MaxEval); err != nil {
+		return nil, fmt.Errorf("dream: backoff max eval: %w", err)
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT dream_eval_count::int, count(*)::int FROM context_blocks
+		 WHERE NOT is_archived AND embedding IS NOT NULL
+		   AND (block_type IS NULL OR block_type IN ('knowledge','source','canonical'))
+		   AND NOT is_meta AND scope = ANY($1::text[])
+		 GROUP BY dream_eval_count ORDER BY dream_eval_count
+		 LIMIT $2`,
+		scopes, maxBackoffLevels+1)
+	if err != nil {
+		return nil, fmt.Errorf("dream: backoff stats: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if len(out.Levels) >= maxBackoffLevels {
+			out.Truncated = true
+			break
+		}
+		var n, blocks int
+		if err := rows.Scan(&n, &blocks); err != nil {
+			return nil, fmt.Errorf("dream: backoff scan: %w", err)
+		}
+		out.Levels = append(out.Levels, BackoffLevel{
+			EvalCount: n,
+			Blocks:    blocks,
+			CooldownD: effectiveCooldownDays(CooldownActiveDays, n),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("dream: backoff rows: %w", err)
+	}
+	return out, nil
 }
 
 // SetDreamCooldown marks a block as dream-checked, increments its completed-cycle

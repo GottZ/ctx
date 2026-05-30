@@ -8,6 +8,18 @@ import (
 	"os"
 )
 
+// StdoutIsTTY reports whether stdout is an interactive terminal (not piped or
+// redirected). Mirrors ReadStdin's stdin probe via os.ModeCharDevice — stdlib
+// only, no x/term dependency. Used to switch between human-readable rendering
+// (TTY) and machine-readable JSON (pipe), so `ctx dream stats` stays scriptable.
+func StdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
 // PrintJSON writes raw JSON to stdout with optional pretty-printing.
 // If the data is valid JSON, it pretty-prints it; otherwise writes raw.
 func PrintJSON(data []byte) {
