@@ -29,16 +29,39 @@ func num(v any) int {
 	return 0
 }
 
-// bar renders a proportional unicode bar of width cols for value/max.
+// bar renders a proportional bar of width cols for value/max, reusing the
+// statusline's eighth-block palette (barBlocks: ' ▏▎▍▌▋▊▉█') for sub-character
+// resolution — partial blocks give smooth sub-steps instead of whole-cell jumps.
+// A non-zero value always shows at least a one-eighth sliver; the bar is padded
+// with spaces to exactly cols runes so columns stay aligned.
 func bar(value, max, cols int) string {
-	if max <= 0 || value <= 0 {
+	if cols <= 0 {
 		return ""
 	}
-	n := value * cols / max
-	if n == 0 && value > 0 {
-		n = 1 // always show at least a sliver for a non-zero bucket
+	eighths := 0
+	if max > 0 && value > 0 {
+		eighths = value * cols * 8 / max
+		if eighths == 0 {
+			eighths = 1 // guarantee a visible sliver for any non-zero bucket
+		}
+		if eighths > cols*8 {
+			eighths = cols * 8
+		}
 	}
-	return strings.Repeat("█", n)
+	var b strings.Builder
+	full := eighths / 8
+	for i := 0; i < full; i++ {
+		b.WriteRune('█')
+	}
+	used := full
+	if rem := eighths % 8; rem > 0 {
+		b.WriteRune(barBlocks[rem]) // partial cell (barBlocks[1..7] = ▏▎▍▌▋▊▉)
+		used++
+	}
+	for i := used; i < cols; i++ {
+		b.WriteByte(' ') // pad to full width for column alignment
+	}
+	return b.String()
 }
 
 // renderDreamStatsHuman renders the dream-stats JSON map as a human-readable
