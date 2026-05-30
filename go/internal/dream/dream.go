@@ -365,17 +365,72 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 	return &block, nil
 }
 
-// SetDreamCooldown marks a block as dream-checked with a cooldown period in days.
-// Use for outcome-based cooldowns (CooldownActiveDays, CooldownInertDays) that
-// reflect a property of the block (linked / not linked). For transient system
-// failures use SetDreamCooldownMinutes instead.
+// Back-off cooldown (Wave-2, W49c): the effective re-dream interval grows with a
+// block's completed eval-cycle count (dream_eval_count), so mature blocks are
+// pulled progressively less often while new blocks (count <= grace) catch up at
+// the base rate. The base is the existing outcome cooldown (CooldownActiveDays
+// when links were written, CooldownInertDays when not), so a block that stops
+// producing links naturally backs off from the larger 14d base.
+//
+//	exp:    base * factor^max(0, n-grace)
+//	log:    base * (1 + factor*ln(1 + max(0, n-grace)))   [default — gentlest ramp]
+//	linear: base + factor*max(0, n-grace)
+//	off:    base                                          [disabled]
+//
+// where n = dream_eval_count after this cycle. Result is floored at 1 day and
+// capped at backoffCapDays. The W49c curve-shape simulation
+// (.project/bench-session-w49c/backoff_curves.py) showed the efficiency frontier
+// (GPU saved vs links delayed) is shape-independent, but the log curve crosses
+// the productive mid-life zone (eval counts 7-14, where ~half of blocks still
+// surface new links) most gradually — hence the default. Back-off only DELAYS a
+// re-dream, never stops it, so a link missed in a skipped cycle is recovered on
+// the next accepted pull (no permanent recall loss).
+var (
+	backoffMode    = "log"
+	backoffFactor  = 2.5
+	backoffGrace   = 3
+	backoffCapDays = 45
+)
+
+// SetBackoffConfig overrides the Dream back-off parameters at startup. mode must
+// be one of exp|log|linear|off (anything else, or "off", disables back-off →
+// base cooldown). factor < 0 and grace < 0 are ignored; capDays <= 0 is ignored.
+func SetBackoffConfig(mode string, factor float64, grace, capDays int) {
+	switch mode {
+	case "exp", "log", "linear", "off":
+		backoffMode = mode
+	}
+	if factor >= 0 {
+		backoffFactor = factor
+	}
+	if grace >= 0 {
+		backoffGrace = grace
+	}
+	if capDays > 0 {
+		backoffCapDays = capDays
+	}
+}
+
+// SetDreamCooldown marks a block as dream-checked, increments its completed-cycle
+// counter, and sets the back-off cooldown derived from the new count and the
+// given base (CooldownActiveDays / CooldownInertDays). For transient system
+// failures use SetDreamCooldownMinutes instead — that path does NOT increment the
+// counter, so the back-off reflects real completed work only.
 func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, days int) error {
 	_, err := pool.Exec(ctx,
 		`UPDATE context_blocks SET
+			dream_eval_count = dream_eval_count + 1,
 			dream_checked_at = now(),
-			dream_cooldown_until = now() + interval '1 day' * $2
+			dream_cooldown_until = now() + GREATEST(1, round(LEAST($5::float8,
+				CASE $6::text
+					WHEN 'exp'    THEN $2::float8 * power($3::float8, GREATEST(0, (dream_eval_count + 1) - $4)::float8)
+					WHEN 'log'    THEN $2::float8 * (1 + $3::float8 * ln(1 + GREATEST(0, (dream_eval_count + 1) - $4)::float8))
+					WHEN 'linear' THEN $2::float8 + $3::float8 * GREATEST(0, (dream_eval_count + 1) - $4)::float8
+					ELSE $2::float8
+				END
+			))::int) * interval '1 day'
 		WHERE id = $1`,
-		blockID, days,
+		blockID, days, backoffFactor, backoffGrace, backoffCapDays, backoffMode,
 	)
 	return err
 }
@@ -520,13 +575,13 @@ func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, che
 
 // QueueStats is the actionable Dream backlog plus the incoming-load forecast.
 type QueueStats struct {
-	PickableNow   int        `json:"pickable_now"`   // eligible + cooldown expired/null — scheduler's next picks
-	InCooldown    int        `json:"in_cooldown"`    // eligible but waiting out its cooldown window
-	NeverDreamed  int        `json:"never_dreamed"`  // subset of pickable that never completed a cycle
-	AwaitingEmbed int        `json:"awaiting_embed"` // eligible-by-type but embedding still pending
-	Incoming1h    int        `json:"incoming_1h"`    // in cooldown now, expiring within the next hour
-	Incoming6h    int        `json:"incoming_6h"`    // in cooldown now, expiring within the next 6 hours
-	NextPendingAt *time.Time `json:"next_pending_at"`// exact timestamp the next cooldown expires (nil if none)
+	PickableNow   int        `json:"pickable_now"`    // eligible + cooldown expired/null — scheduler's next picks
+	InCooldown    int        `json:"in_cooldown"`     // eligible but waiting out its cooldown window
+	NeverDreamed  int        `json:"never_dreamed"`   // subset of pickable that never completed a cycle
+	AwaitingEmbed int        `json:"awaiting_embed"`  // eligible-by-type but embedding still pending
+	Incoming1h    int        `json:"incoming_1h"`     // in cooldown now, expiring within the next hour
+	Incoming6h    int        `json:"incoming_6h"`     // in cooldown now, expiring within the next 6 hours
+	NextPendingAt *time.Time `json:"next_pending_at"` // exact timestamp the next cooldown expires (nil if none)
 }
 
 // QueueDepth reports the Dream backlog using the exact eligibility predicate of
@@ -558,7 +613,6 @@ func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*Queu
 	}
 	return &q, nil
 }
-
 
 // CleanupDanglingLinks removes links whose source or target block is archived.
 // Welle 45: extended from target-only to both sides — Audit (2026-05-22)

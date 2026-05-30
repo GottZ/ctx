@@ -60,29 +60,29 @@ const (
 
 // Config holds scheduler configuration.
 type Config struct {
-	DSN            string        // Connection string for dedicated pgxlisten connection
-	HomeScope      string
-	ReadScopes     []string
-	ReconnectDelay time.Duration // pgxlisten reconnect delay (0 = 5s default)
-	DreamEnabled   bool          // Enable dream cross-reference engine
-	EmbedHost      string        // Embedding provider host (query path)
-	EmbedAPIKey    string        // Embedding provider API key (query path)
-	EmbedModel     string        // Embedding model name (query path)
-	EmbedNumCtx    int           // Embedding num_ctx (query path)
-	DreamEmbedHost     string    // Dream embedding host (empty = EmbedHost)
-	DreamEmbedAPIKey   string    // Dream embedding API key (empty = EmbedAPIKey)
-	DreamEmbedProtocol string    // Dream embedding protocol (empty = EmbedProtocol)
-	DreamEmbedModel    string    // Dream embedding model (empty = EmbedModel)
-	DreamEmbedNumCtx   int       // Dream embedding num_ctx (0 = EmbedNumCtx)
-	EmbedProtocol      string    // Query-path embed protocol ("ollama" or "openai")
-	DreamHost      string        // Dream LLM provider host
-	DreamAPIKey    string        // Dream LLM provider API key (empty = no auth)
-	ChatModel      string        // Chat model name (fallback for dream)
-	DreamModel     string        // Dream model name (fallback: ChatModel)
-	DreamThink     *bool         // Think mode for dream (nil = omit)
-	DreamNumCtx    int           // num_ctx for dream (0 = model default)
-	DreamIdleWait  int           // seconds between dream cycles when idle (0 = default 20s)
-	DreamParallelism int         // concurrent dream-cycle workers (0/1 = single-thread, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide on the same block.
+	DSN                string // Connection string for dedicated pgxlisten connection
+	HomeScope          string
+	ReadScopes         []string
+	ReconnectDelay     time.Duration // pgxlisten reconnect delay (0 = 5s default)
+	DreamEnabled       bool          // Enable dream cross-reference engine
+	EmbedHost          string        // Embedding provider host (query path)
+	EmbedAPIKey        string        // Embedding provider API key (query path)
+	EmbedModel         string        // Embedding model name (query path)
+	EmbedNumCtx        int           // Embedding num_ctx (query path)
+	DreamEmbedHost     string        // Dream embedding host (empty = EmbedHost)
+	DreamEmbedAPIKey   string        // Dream embedding API key (empty = EmbedAPIKey)
+	DreamEmbedProtocol string        // Dream embedding protocol (empty = EmbedProtocol)
+	DreamEmbedModel    string        // Dream embedding model (empty = EmbedModel)
+	DreamEmbedNumCtx   int           // Dream embedding num_ctx (0 = EmbedNumCtx)
+	EmbedProtocol      string        // Query-path embed protocol ("ollama" or "openai")
+	DreamHost          string        // Dream LLM provider host
+	DreamAPIKey        string        // Dream LLM provider API key (empty = no auth)
+	ChatModel          string        // Chat model name (fallback for dream)
+	DreamModel         string        // Dream model name (fallback: ChatModel)
+	DreamThink         *bool         // Think mode for dream (nil = omit)
+	DreamNumCtx        int           // num_ctx for dream (0 = model default)
+	DreamIdleWait      int           // seconds between dream cycles when idle (0 = default 20s)
+	DreamParallelism   int           // concurrent dream-cycle workers (0/1 = single-thread, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide on the same block.
 }
 
 // Scheduler orchestrates Guard + Digest as background jobs.
@@ -93,7 +93,7 @@ type Scheduler struct {
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
 
 	// Dream mode control (atomic for lock-free reads in hot loop).
-	dreamMode           atomic.Int32 // DreamModeOn | DreamModeThrottled | DreamModeOff
+	dreamMode             atomic.Int32 // DreamModeOn | DreamModeThrottled | DreamModeOff
 	dreamThrottleInterval atomic.Int64 // nanoseconds; 0 = dreamThrottleDefault
 
 	// Internal state.

@@ -15,12 +15,12 @@ const defaultListenAddr = ":8080"
 // Config holds all application configuration loaded from environment variables.
 type Config struct {
 	// PostgreSQL — Context Store
-	ContextDB       string
-	ContextDBUser   string
-	ContextDBPass   string
-	ContextDBHost   string
-	ContextDBPort   int
-	ContextDBSSL    string
+	ContextDB     string
+	ContextDBUser string
+	ContextDBPass string
+	ContextDBHost string
+	ContextDBPort int
+	ContextDBSSL  string
 
 	// Embedding pipeline
 	EmbedHost     string
@@ -42,20 +42,20 @@ type Config struct {
 	RerankEnabled bool
 
 	// Dream pipeline
-	DreamEnabled     bool
-	DreamHost        string
-	DreamAPIKey      string
-	DreamProtocol    string // "ollama" (default) or "openai"
-	DreamModel       string
-	DreamNumCtx      int
-	DreamThink       string // "true", "false", or "" (fallback: ChatThink)
+	DreamEnabled       bool
+	DreamHost          string
+	DreamAPIKey        string
+	DreamProtocol      string // "ollama" (default) or "openai"
+	DreamModel         string
+	DreamNumCtx        int
+	DreamThink         string // "true", "false", or "" (fallback: ChatThink)
 	DreamEmbedHost     string // Separate embed host for Dream (empty = EmbedHost)
 	DreamEmbedAPIKey   string
 	DreamEmbedProtocol string // "ollama" or "openai" (empty = EmbedProtocol)
 	DreamEmbedModel    string
 	DreamEmbedNumCtx   int
-	DreamIdleWait      int    // seconds between dream cycles when idle (default 20)
-	DreamParallelism   int    // concurrent dream cycles (default 1, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide.
+	DreamIdleWait      int // seconds between dream cycles when idle (default 20)
+	DreamParallelism   int // concurrent dream cycles (default 1, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide.
 
 	// Timezone for temporal resolution (e.g. "Europe/Berlin").
 	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
@@ -140,13 +140,13 @@ func LoadConfig() (Config, error) {
 
 		RerankEnabled: getEnv("CTX_RERANK_ENABLED", "false") == "true",
 
-		DreamEnabled: getEnv("CTX_DREAM_ENABLED", "false") == "true",
-		DreamHost:     getEnv("CTX_DREAM_HOST", "http://localhost:11434"),
-		DreamAPIKey:   getEnv("CTX_DREAM_API_KEY", ""),
-		DreamProtocol: getEnv("CTX_DREAM_PROTOCOL", "ollama"),
-		DreamModel:    getEnv("CTX_DREAM_MODEL", ""),
-		DreamNumCtx:  dreamNumCtx,
-		DreamThink:       getEnv("CTX_DREAM_THINK", ""),
+		DreamEnabled:       getEnv("CTX_DREAM_ENABLED", "false") == "true",
+		DreamHost:          getEnv("CTX_DREAM_HOST", "http://localhost:11434"),
+		DreamAPIKey:        getEnv("CTX_DREAM_API_KEY", ""),
+		DreamProtocol:      getEnv("CTX_DREAM_PROTOCOL", "ollama"),
+		DreamModel:         getEnv("CTX_DREAM_MODEL", ""),
+		DreamNumCtx:        dreamNumCtx,
+		DreamThink:         getEnv("CTX_DREAM_THINK", ""),
 		DreamEmbedHost:     getEnv("CTX_DREAM_EMBED_HOST", ""),
 		DreamEmbedAPIKey:   getEnv("CTX_DREAM_EMBED_API_KEY", ""),
 		DreamEmbedProtocol: getEnv("CTX_DREAM_EMBED_PROTOCOL", ""),

@@ -187,6 +187,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 | `CTX_DREAM_HOST` / `_PROTOCOL` / `_MODEL` / `_NUM_CTX` | inherits chat | Separate Dream model (e.g. larger, slower) |
 | `CTX_DREAM_EMBED_*` | inherits embed | Separate embedding endpoint for Dream (e.g. CPU sidecar) |
 | `CTX_DREAM_IDLE_WAIT` | `20` (s) | Backoff when no pending blocks |
+| `CTX_DREAM_BACKOFF_MODE` / `_FACTOR` / `_GRACE` / `_CAP_DAYS` | `log` / `2.5` / `3` / `45` | Re-dream back-off by eval count (`log`/`exp`/`linear`/`off`); mature blocks pulled less, new blocks unaffected |
 | `CTX_PROMPT_VERSION` | `v5.2` | Generator-prompt version (`v5.2` default, `v6` opt-in graded confidence) |
 | `CTX_TIMEZONE` | `Europe/Berlin` | Cyclic-temporal phase calculation |
 | `CTX_CONFIDENT_THRESHOLD` | `0.008` | Generator-side refusal threshold (RRF score below → "I don't know") |
