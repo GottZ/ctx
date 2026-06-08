@@ -110,7 +110,57 @@ EOF
 fi
 
 # ============================================================
-# Gate 2: golangci-lint on staged Go files
+# Gate 2: .env secret-value leak check
+# ============================================================
+#
+# Blocks committing any file whose staged content contains a *value* of a
+# secret-named variable (PASSWORD/PASSWD/SECRET/TOKEN/_KEY/API_KEY/
+# CREDENTIAL/_PW) from .env. External signal against re-leaking a rotated
+# credential into the repo (the hardcoded-PGPASSWORD class of mistake).
+# Values are never printed — only the env KEY name and the offending file.
+# Override the env path via CTX_ENV_FILE; bypass with git commit --no-verify.
+
+ENV_FILE="${CTX_ENV_FILE:-.env}"
+if [ -f "$ENV_FILE" ]; then
+    STAGED=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null)
+    if [ -n "$STAGED" ]; then
+        ENV_LEAKS=$(
+            grep -E '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | while IFS= read -r line; do
+                key=${line#*export }
+                key=${key%%=*}
+                key=$(printf '%s' "$key" | tr -d '[:space:]')
+                val=${line#*=}
+                val=${val%\"}; val=${val#\"}
+                val=${val%\'}; val=${val#\'}
+                case "$key" in
+                    *PASSWORD*|*PASSWD*|*SECRET*|*TOKEN*|*API_KEY*|*APIKEY*|*_KEY|*CREDENTIAL*|*_PW) : ;;
+                    *) continue ;;
+                esac
+                [ "${#val}" -ge 8 ] || continue
+                printf '%s\n' "$STAGED" | while IFS= read -r f; do
+                    [ -z "$f" ] && continue
+                    if git show ":$f" 2>/dev/null | grep -qF -- "$val"; then
+                        printf '  [$%s] leaked in %s\n' "$key" "$f"
+                    fi
+                done
+            done
+        )
+        if [ -n "$ENV_LEAKS" ]; then
+            printf '\n'
+            printf 'pre-commit: REJECTED — staged content contains a secret VALUE from %s:\n' "$ENV_FILE"
+            printf '%s\n' "$ENV_LEAKS"
+            printf '\n'
+            printf 'Do NOT hardcode credentials — read them from the environment, e.g.\n'
+            printf '  PGPASSWORD="$CONTEXT_DB_PASSWORD" psql ...   (or source .env at runtime)\n'
+            printf 'If the value is already rotated/dead, bypass with: git commit --no-verify\n'
+            printf '\n'
+            exit 1
+        fi
+    fi
+fi
+
+# ============================================================
+# Gate 3: golangci-lint on staged Go files
 # ============================================================
 
 STAGED_GO=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
