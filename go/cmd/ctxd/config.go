@@ -40,8 +40,15 @@ type Config struct {
 	ChatNumCtx   int
 	ChatThink    string // "true", "false", or "" (omit from request)
 
-	// Reranker
-	RerankEnabled bool
+	// Reranker. RerankEnabled is the master gate for both paths. RerankHost
+	// dispatches: empty => LLM-as-judge on the chat model; set => local
+	// cross-encoder sidecar (Wave 2). The cross-encoder fields are sweep knobs.
+	RerankEnabled     bool
+	RerankHost        string
+	RerankAPIKey      string
+	RerankModel       string
+	RerankMaxDocs     int
+	RerankBlendWeight float64
 
 	// Dream-graph expansion (GottZ Graph Expansion, Wave 1). Post-RRF stage that
 	// 1-hop-expands the top RRF seeds along the positive Dream link types.
@@ -61,6 +68,7 @@ type Config struct {
 	GraphWeightFactual          float64
 	GraphWeightCausal           float64
 	GraphWeightRecurrent        float64
+	GraphNewPlacementFrac       float64
 
 	// Dream pipeline
 	DreamEnabled            bool
@@ -165,7 +173,12 @@ func LoadConfig() (Config, error) {
 		ChatNumCtx:   chatNumCtx,
 		ChatThink:    getEnv("CTX_CHAT_THINK", "false"),
 
-		RerankEnabled: getEnv("CTX_RERANK_ENABLED", "false") == "true",
+		RerankEnabled:     getEnv("CTX_RERANK_ENABLED", "false") == "true",
+		RerankHost:        getEnv("CTX_RERANK_HOST", ""),
+		RerankAPIKey:      getEnv("CTX_RERANK_API_KEY", ""),
+		RerankModel:       getEnv("CTX_RERANK_MODEL", ""),
+		RerankMaxDocs:     getEnvIntSafe("CTX_RERANK_MAX_DOCS", 50),
+		RerankBlendWeight: getEnvFloatSafe("CTX_RERANK_BLEND_WEIGHT", 1.0),
 
 		// Dream-graph expansion (Wave 1). Defaults = OFF and the calibration
 		// from the Wave-1 design; every value is an env-overridable sweep knob.
@@ -184,6 +197,7 @@ func LoadConfig() (Config, error) {
 		GraphWeightFactual:          getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_FACTUAL", 0.9),
 		GraphWeightCausal:           getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_CAUSAL", 0.9),
 		GraphWeightRecurrent:        getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_RECURRENT", 1.0),
+		GraphNewPlacementFrac:       getEnvFloatSafe("CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC", 0.6),
 
 		DreamEnabled:            getEnv("CTX_DREAM_ENABLED", "false") == "true",
 		DreamHost:               getEnv("CTX_DREAM_HOST", "http://localhost:11434"),
@@ -240,6 +254,20 @@ func (c Config) GraphConfig() rrf.GraphConfig {
 		WeightFactual:          c.GraphWeightFactual,
 		WeightCausal:           c.GraphWeightCausal,
 		WeightRecurrent:        c.GraphWeightRecurrent,
+		NewPlacementFrac:       c.GraphNewPlacementFrac,
+	}
+}
+
+// RerankConfig builds the rrf.RerankConfig for the post-RRF rerank stage from
+// the loaded Rerank* env values.
+func (c Config) RerankConfig() rrf.RerankConfig {
+	return rrf.RerankConfig{
+		Enabled:     c.RerankEnabled,
+		Host:        c.RerankHost,
+		APIKey:      c.RerankAPIKey,
+		Model:       c.RerankModel,
+		MaxDocs:     c.RerankMaxDocs,
+		BlendWeight: c.RerankBlendWeight,
 	}
 }
 

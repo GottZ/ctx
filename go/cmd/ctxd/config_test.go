@@ -384,7 +384,8 @@ func TestLoadConfig_GraphExpandDefaults(t *testing.T) {
 		"CTX_GRAPH_EXPAND_MIN_CONFIDENCE_RECURRENT", "CTX_GRAPH_EXPAND_BOOST_WEIGHT",
 		"CTX_GRAPH_EXPAND_HUB_DAMPING", "CTX_GRAPH_EXPAND_WEIGHT_TOPICAL",
 		"CTX_GRAPH_EXPAND_WEIGHT_FACTUAL", "CTX_GRAPH_EXPAND_WEIGHT_CAUSAL",
-		"CTX_GRAPH_EXPAND_WEIGHT_RECURRENT", "CONTEXT_DB_PORT", "CTX_EMBED_DIMS",
+		"CTX_GRAPH_EXPAND_WEIGHT_RECURRENT", "CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC",
+		"CONTEXT_DB_PORT", "CTX_EMBED_DIMS",
 	} {
 		t.Setenv(key, "")
 	}
@@ -441,6 +442,9 @@ func TestLoadConfig_GraphExpandDefaults(t *testing.T) {
 	if cfg.GraphWeightRecurrent != 1.0 {
 		t.Errorf("GraphWeightRecurrent default = %v, want 1.0", cfg.GraphWeightRecurrent)
 	}
+	if cfg.GraphNewPlacementFrac != 0.6 {
+		t.Errorf("GraphNewPlacementFrac default = %v, want 0.6", cfg.GraphNewPlacementFrac)
+	}
 
 	// GraphConfig() must mirror the loaded values 1:1.
 	gc := cfg.GraphConfig()
@@ -451,7 +455,7 @@ func TestLoadConfig_GraphExpandDefaults(t *testing.T) {
 		gc.MinConfidenceRecurrent != cfg.GraphMinConfidenceRecurrent || gc.BoostWeight != cfg.GraphBoostWeight ||
 		gc.HubDamping != cfg.GraphHubDamping || gc.WeightTopical != cfg.GraphWeightTopical ||
 		gc.WeightFactual != cfg.GraphWeightFactual || gc.WeightCausal != cfg.GraphWeightCausal ||
-		gc.WeightRecurrent != cfg.GraphWeightRecurrent {
+		gc.WeightRecurrent != cfg.GraphWeightRecurrent || gc.NewPlacementFrac != cfg.GraphNewPlacementFrac {
 		t.Errorf("GraphConfig() does not mirror loaded Config: %+v", gc)
 	}
 }
@@ -520,6 +524,41 @@ func TestLoadConfig_RerankEnabled_TrueUppercase(t *testing.T) {
 	}
 	if cfg.RerankEnabled {
 		t.Error("RerankEnabled should be false when CTX_RERANK_ENABLED=TRUE (case-sensitive)")
+	}
+}
+
+func TestLoadConfig_RerankConfigDefaults(t *testing.T) {
+	for _, key := range []string{
+		"CTX_RERANK_ENABLED", "CTX_RERANK_HOST", "CTX_RERANK_API_KEY",
+		"CTX_RERANK_MODEL", "CTX_RERANK_MAX_DOCS", "CTX_RERANK_BLEND_WEIGHT",
+		"CONTEXT_DB_PORT", "CTX_EMBED_DIMS",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("CONTEXT_DB_PASSWORD", "secret")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Host empty by default → dispatch stays on the LLM judge (no cross-encoder).
+	if cfg.RerankHost != "" {
+		t.Errorf("RerankHost default = %q, want empty", cfg.RerankHost)
+	}
+	if cfg.RerankMaxDocs != 50 {
+		t.Errorf("RerankMaxDocs default = %d, want 50", cfg.RerankMaxDocs)
+	}
+	if cfg.RerankBlendWeight != 1.0 {
+		t.Errorf("RerankBlendWeight default = %v, want 1.0", cfg.RerankBlendWeight)
+	}
+
+	// RerankConfig() must mirror the loaded values 1:1.
+	rc := cfg.RerankConfig()
+	if rc.Enabled != cfg.RerankEnabled || rc.Host != cfg.RerankHost ||
+		rc.APIKey != cfg.RerankAPIKey || rc.Model != cfg.RerankModel ||
+		rc.MaxDocs != cfg.RerankMaxDocs || rc.BlendWeight != cfg.RerankBlendWeight {
+		t.Errorf("RerankConfig() does not mirror loaded Config: %+v", rc)
 	}
 }
 

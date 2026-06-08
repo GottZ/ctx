@@ -104,6 +104,14 @@ type GraphConfig struct {
 	WeightFactual   float64
 	WeightCausal    float64
 	WeightRecurrent float64
+
+	// NewPlacementFrac: a NEW (not-yet-present) neighbor is appended at
+	// topScore * NewPlacementFrac * injection — a fraction of the current top
+	// hit's score scaled by its endorsement. Keeps a strongly-endorsed neighbor
+	// inside the reranker's candidate window (promotable) while still below the
+	// native top hits. Scaling off topScore (not the tiny absolute seed score)
+	// keeps placement meaningful at ctx's RRF scale. Sweep knob (default 0.6).
+	NewPlacementFrac float64
 }
 
 // typeWeight returns the configured weight for a relationship type. Unknown
@@ -530,10 +538,8 @@ func fuseNeighbors(results []SearchResult, edges []graphEdge, cfg GraphConfig) [
 		// inside the reranker's candidate window (promotable) while still sitting
 		// below the native top hits. Scaling off topScore (not the tiny absolute
 		// seed score) keeps the placement meaningful at ctx's RRF scale.
-		// newPlacementFrac is fixed at 0.6 here; it becomes a CTX_GRAPH_EXPAND_*
-		// sweep knob in the reranker-config pass (Wave 2).
-		const newPlacementFrac = 0.6
-		nb.RRFScore = topScore * newPlacementFrac * n.inj
+		// cfg.NewPlacementFrac is the sweep knob (default 0.6).
+		nb.RRFScore = topScore * cfg.NewPlacementFrac * n.inj
 		nb.RRFScoreOriginal = nil
 		nb.RerankScore = nil
 		nb.CosineSim = nil

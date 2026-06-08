@@ -26,6 +26,7 @@ func defaultGraphCfg() GraphConfig {
 		WeightFactual:          0.9,
 		WeightCausal:           0.9,
 		WeightRecurrent:        1.0,
+		NewPlacementFrac:       0.6,
 	}
 }
 

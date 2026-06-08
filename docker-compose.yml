@@ -43,8 +43,17 @@ services:
       CTX_DREAM_EMBED_PROTOCOL: ${CTX_DREAM_EMBED_PROTOCOL:-}
       CTX_DREAM_EMBED_MODEL: ${CTX_DREAM_EMBED_MODEL:-}
       CTX_DREAM_EMBED_NUM_CTX: ${CTX_DREAM_EMBED_NUM_CTX:-0}
-      # Reranker (post-RRF LLM re-score). Default off.
+      # Reranker (post-RRF re-score). Default off. RERANK_HOST dispatches:
+      # empty => LLM-as-judge on the chat model; set => local cross-encoder
+      # sidecar (Wave 2, e.g. http://ctx-rerank:8082). BLEND_WEIGHT/MAX_DOCS
+      # are cross-encoder sweep knobs. MAX_DOCS default 20 keeps CPU rerank
+      # latency (~1s/doc) within the client timeout; raise it on a faster host.
       CTX_RERANK_ENABLED: ${CTX_RERANK_ENABLED:-false}
+      CTX_RERANK_HOST: ${CTX_RERANK_HOST:-}
+      CTX_RERANK_API_KEY: ${CTX_RERANK_API_KEY:-}
+      CTX_RERANK_MODEL: ${CTX_RERANK_MODEL:-}
+      CTX_RERANK_MAX_DOCS: ${CTX_RERANK_MAX_DOCS:-20}
+      CTX_RERANK_BLEND_WEIGHT: ${CTX_RERANK_BLEND_WEIGHT:-1.0}
       # Dream-graph expansion (Wave 1). Post-RRF stage that 1-hop-expands the
       # top RRF seeds along the positive Dream link types. Default OFF; every
       # value is a runtime sweep knob (:- default = off/calibrated absence).
@@ -63,6 +72,7 @@ services:
       CTX_GRAPH_EXPAND_WEIGHT_FACTUAL: ${CTX_GRAPH_EXPAND_WEIGHT_FACTUAL:-0.9}
       CTX_GRAPH_EXPAND_WEIGHT_CAUSAL: ${CTX_GRAPH_EXPAND_WEIGHT_CAUSAL:-0.9}
       CTX_GRAPH_EXPAND_WEIGHT_RECURRENT: ${CTX_GRAPH_EXPAND_WEIGHT_RECURRENT:-1.0}
+      CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC: ${CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC:-0.6}
       CTX_RATE_LIMIT_WRITE: ${CTX_RATE_LIMIT_WRITE:-100}
       CTX_RATE_LIMIT_READ: ${CTX_RATE_LIMIT_READ:-0}
       CTX_TIMEZONE: ${CTX_TIMEZONE:-}
@@ -149,6 +159,44 @@ services:
   #     timeout: 5s
   #     retries: 3
   #     start_period: 15s
+
+  # Optional: llama.cpp CPU-only cross-encoder reranker sidecar (Wave 2).
+  # Replaces the LLM-as-judge reranker with a real cross-encoder over the
+  # cohere-style /v1/rerank endpoint. bge-reranker-v2-m3 is the llama.cpp
+  # reference reranker (multilingual de+en). Activate with:
+  #   CTX_RERANK_ENABLED=true
+  #   CTX_RERANK_HOST=http://ctx-rerank:8082
+  #   CTX_RERANK_MODEL=bge-reranker-v2-m3
+  # ctx-size/batch (-b == -ub) must stay >= ctx's per-doc clamp in tokens
+  # (rrf.RerankCrossEncoderContentLimit ~2048 chars); an oversized pair kills the
+  # server process. Keep the batch small (compute buffer) — 8192 OOMs at <4g.
+  #
+  # ctx-rerank:
+  #   image: ghcr.io/ggml-org/llama.cpp:server
+  #   container_name: ctx-rerank
+  #   restart: unless-stopped
+  #   mem_limit: 4g
+  #   volumes:
+  #     - /opt/models:/models:ro
+  #   command: >
+  #     --model /models/bge-reranker-v2-m3-Q8_0.gguf
+  #     --reranking
+  #     --pooling rank
+  #     --port 8082
+  #     --ctx-size 2048
+  #     --batch-size 2048
+  #     --ubatch-size 2048
+  #     --parallel 4
+  #     --threads 12
+  #     --n-gpu-layers 0
+  #   networks:
+  #     - n8nintern
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-sf", "http://localhost:8082/health"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+  #     start_period: 30s
 
 networks:
   n8nintern:

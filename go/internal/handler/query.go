@@ -32,14 +32,14 @@ type QueryHandler struct {
 	chatModel     string
 	chatThink     *bool
 	chatNumCtx    int
-	rerankEnabled bool
+	rerankCfg     rrf.RerankConfig
 	graphCfg      rrf.GraphConfig
 	timezone      *time.Location
 	rateLimitRead int // 0 = disabled
 }
 
 // NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, chatNumCtx int, rerankEnabled bool, graphCfg rrf.GraphConfig, timezone *time.Location, rateLimitRead int) *QueryHandler {
+func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, chatNumCtx int, rerankCfg rrf.RerankConfig, graphCfg rrf.GraphConfig, timezone *time.Location, rateLimitRead int) *QueryHandler {
 	return &QueryHandler{
 		pool:          pool,
 		chatHost:      chatHost,
@@ -51,7 +51,7 @@ func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedA
 		chatModel:     chatModel,
 		chatThink:     chatThink,
 		chatNumCtx:    chatNumCtx,
-		rerankEnabled: rerankEnabled,
+		rerankCfg:     rerankCfg,
 		graphCfg:      graphCfg,
 		timezone:      timezone,
 		rateLimitRead: rateLimitRead,
@@ -397,7 +397,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// on but the reranker is off there is no LLM noise-filter behind the
 	// synthetic neighbors — warn once, then proceed.
 	if h.graphCfg.Enabled {
-		if !h.rerankEnabled {
+		if !h.rerankCfg.Enabled {
 			slog.Warn("graph expansion active without reranker noise-filter",
 				"request_id", requestID,
 			)
@@ -412,10 +412,17 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 6b: Rerank via LLM (skipped if disabled or fewer than 3 results).
-	// The reranker sees up to RerankMaxDocs (15) from the broader candidate set.
-	if h.rerankEnabled {
-		results, err = rrf.Rerank(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, originalQuery, results)
+	// Step 6b: Rerank (skipped if disabled or fewer than 3 results). Dispatch on
+	// RerankCfg.Host: set => the local cross-encoder sidecar (Wave 2, up to
+	// MaxDocs=50 candidates, the final arbiter of graph-injected neighbors);
+	// empty => the LLM-as-judge on the chat model (up to 15). Both fail open —
+	// on error the pre-rerank order is kept.
+	if h.rerankCfg.Enabled {
+		if h.rerankCfg.Host != "" {
+			results, err = rrf.RerankCrossEncoder(ctx, h.rerankCfg.Host, h.rerankCfg.APIKey, h.rerankCfg.Model, h.rerankCfg.MaxDocs, h.rerankCfg.BlendWeight, originalQuery, results)
+		} else {
+			results, err = rrf.Rerank(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, originalQuery, results)
+		}
 		if err != nil {
 			slog.Warn("rerank failed, using original order",
 				"error", err,

@@ -31,7 +31,6 @@ type MCPConfig struct {
 	ChatAPIKey    string
 	ChatModel     string
 	ChatThink     *bool
-	RerankEnabled bool
 	Timezone      *time.Location
 	QueryHandler  http.Handler // The full /api/query handler (with scheduler wiring).
 }
