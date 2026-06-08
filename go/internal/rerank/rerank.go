@@ -37,11 +37,11 @@ var httpClient = &http.Client{
 }
 
 // Timeout caps a single rerank round-trip. A CPU cross-encoder costs roughly
-// ~1s per query+document pair, so a full window (MAX_DOCS) can take tens of
-// seconds; this is a fail-open safety net (a stuck/oversized request degrades to
-// the pre-rerank order), NOT the target latency. Keep MAX_DOCS sized so the
-// typical rerank finishes well within this bound.
-const Timeout = 60 * time.Second
+// ~1s per query+document pair, so a full window (MAX_DOCS) runs tens of seconds;
+// query latency is deliberately not a constraint here. This is purely a
+// fail-open safety net (a genuinely stuck/oversized request degrades to the
+// pre-rerank order) — set well above the worst-case full-window time.
+const Timeout = 180 * time.Second
 
 // rerankRequest is the cohere/llama.cpp request body. Sending "documents"
 // (not "texts") + "query" selects the Jina/cohere response path, whose score

@@ -46,13 +46,13 @@ services:
       # Reranker (post-RRF re-score). Default off. RERANK_HOST dispatches:
       # empty => LLM-as-judge on the chat model; set => local cross-encoder
       # sidecar (Wave 2, e.g. http://ctx-rerank:8082). BLEND_WEIGHT/MAX_DOCS
-      # are cross-encoder sweep knobs. MAX_DOCS default 20 keeps CPU rerank
-      # latency (~1s/doc) within the client timeout; raise it on a faster host.
+      # are cross-encoder sweep knobs (quality, not latency — CPU rerank ~1s/doc
+      # is intentionally not a constraint; the client timeout is sized for 50).
       CTX_RERANK_ENABLED: ${CTX_RERANK_ENABLED:-false}
       CTX_RERANK_HOST: ${CTX_RERANK_HOST:-}
       CTX_RERANK_API_KEY: ${CTX_RERANK_API_KEY:-}
       CTX_RERANK_MODEL: ${CTX_RERANK_MODEL:-}
-      CTX_RERANK_MAX_DOCS: ${CTX_RERANK_MAX_DOCS:-20}
+      CTX_RERANK_MAX_DOCS: ${CTX_RERANK_MAX_DOCS:-50}
       CTX_RERANK_BLEND_WEIGHT: ${CTX_RERANK_BLEND_WEIGHT:-1.0}
       # Dream-graph expansion (Wave 1). Post-RRF stage that 1-hop-expands the
       # top RRF seeds along the positive Dream link types. Default OFF; every

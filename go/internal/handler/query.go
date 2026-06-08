@@ -69,6 +69,10 @@ type queryRequest struct {
 	// (Session 38c). Empty slice / omitted = no exclude.
 	CategoriesExclude []string `json:"categories_exclude,omitempty"`
 	BlockRolesExclude []string `json:"block_roles_exclude,omitempty"`
+	// Synthesize gates the LLM answer step. nil/true = full pipeline (default);
+	// false = retrieval-only: return the post-rerank sources without the LLM
+	// synthesis call. Deterministic + fast, for the A/B sweep / eval harness.
+	Synthesize *bool `json:"synthesize,omitempty"`
 }
 
 // queryResponse is the JSON response from the query endpoint.
@@ -92,6 +96,31 @@ type sourceResponse struct {
 	RerankScore      *float64 `json:"rerank_score,omitempty"`
 	RRFScoreOriginal *float64 `json:"rrf_score_original,omitempty"`
 	SupersededBy     *string  `json:"superseded_by,omitempty"`
+}
+
+// buildSourceResponses maps retrieval sources to the API response shape,
+// attaching superseded_by where the supersedes map has an entry. Shared by the
+// full-synthesis path (Step 10) and the retrieval-only path (Step 7b).
+func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]string) []sourceResponse {
+	out := make([]sourceResponse, len(sources))
+	for i, s := range sources {
+		out[i] = sourceResponse{
+			ID:               s.ID,
+			Title:            s.Title,
+			Category:         s.Category,
+			Score:            s.Score,
+			AgeDays:          s.AgeDays,
+			RerankScore:      s.RerankScore,
+			RRFScoreOriginal: s.RRFScoreOriginal,
+		}
+		if supersedesMap != nil {
+			if sl, ok := supersedesMap[s.ID]; ok && len(sl) > 0 {
+				first := sl[0]
+				out[i].SupersededBy = &first
+			}
+		}
+	}
+	return out
 }
 
 // HandleQuery orchestrates the full query pipeline:
@@ -475,6 +504,37 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Step 7b: Retrieval-only mode (eval / sweep) — skip the LLM synthesis
+	// (Steps 8-10) and return the post-rerank sources directly. Deterministic +
+	// fast so an A/B sweep can score retrieval in isolation from synthesis
+	// variance. Confidence is classified from the max RAW RRF score (the
+	// threshold's scale), preferring RRFScoreOriginal where the reranker set it.
+	if req.Synthesize != nil && !*req.Synthesize {
+		maxScore := 0.0
+		for _, s := range sources {
+			raw := s.Score
+			if s.RRFScoreOriginal != nil {
+				raw = *s.RRFScoreOriginal
+			}
+			if raw > maxScore {
+				maxScore = raw
+			}
+		}
+		go h.logAccess(ar, results, query)
+		slog.Info("query pipeline complete (retrieval-only)",
+			"source_count", len(sources),
+			"translated", translated,
+			"request_id", requestID,
+		)
+		writeJSON(w, http.StatusOK, queryResponse{
+			Success:    true,
+			Sources:    buildSourceResponses(sources, supersedesMap),
+			Confidence: llm.ClassifyConfidence(maxScore),
+			Translated: translated,
+		})
+		return
+	}
+
 	// Step 8: Synthesize (filter, confidence, reorder, LLM call).
 	// Uses originalQuery so the LLM answers in the user's language.
 	// Temporal dates are passed for conditional date context in the synthesis prompt.
@@ -496,24 +556,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	go h.logAccess(ar, results, query)
 
 	// Step 10: Build response.
-	respSources := make([]sourceResponse, len(synthResult.Sources))
-	for i, s := range synthResult.Sources {
-		respSources[i] = sourceResponse{
-			ID:               s.ID,
-			Title:            s.Title,
-			Category:         s.Category,
-			Score:            s.Score,
-			AgeDays:          s.AgeDays,
-			RerankScore:      s.RerankScore,
-			RRFScoreOriginal: s.RRFScoreOriginal,
-		}
-		if supersedesMap != nil {
-			if supersededByList, ok := supersedesMap[s.ID]; ok && len(supersededByList) > 0 {
-				first := supersededByList[0]
-				respSources[i].SupersededBy = &first
-			}
-		}
-	}
+	respSources := buildSourceResponses(synthResult.Sources, supersedesMap)
 
 	resp := queryResponse{
 		Success:    true,
