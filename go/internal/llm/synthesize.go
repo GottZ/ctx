@@ -350,7 +350,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // filter -> confidence -> low-confidence limiting -> reorder -> prompt -> chat.
 // temporalDates is nil for non-temporal queries (date context omitted from prompt).
 // pool may be nil — if provided, the LLM request/response is logged via llmlog.
-func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
+func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, numCtx int, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources)
 	if len(filtered) == 0 {
@@ -393,7 +393,7 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model str
 
 	// Step 7: Call LLM.
 	start := time.Now()
-	resp, err := Chat(ctx, host, apiKey, model, think, systemPrompt, userPrompt, SynthesisOptions(), ChatTimeout)
+	resp, err := Chat(ctx, host, apiKey, model, think, systemPrompt, userPrompt, SynthesisOptions(numCtx), ChatTimeout)
 	duration := time.Since(start)
 
 	blockIDs := make([]string, 0, len(llmSources))

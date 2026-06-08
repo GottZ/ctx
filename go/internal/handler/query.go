@@ -31,13 +31,15 @@ type QueryHandler struct {
 	embedNumCtx   int
 	chatModel     string
 	chatThink     *bool
+	chatNumCtx    int
 	rerankEnabled bool
+	graphCfg      rrf.GraphConfig
 	timezone      *time.Location
 	rateLimitRead int // 0 = disabled
 }
 
 // NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, rerankEnabled bool, timezone *time.Location, rateLimitRead int) *QueryHandler {
+func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, chatNumCtx int, rerankEnabled bool, graphCfg rrf.GraphConfig, timezone *time.Location, rateLimitRead int) *QueryHandler {
 	return &QueryHandler{
 		pool:          pool,
 		chatHost:      chatHost,
@@ -48,7 +50,9 @@ func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedA
 		embedNumCtx:   embedNumCtx,
 		chatModel:     chatModel,
 		chatThink:     chatThink,
+		chatNumCtx:    chatNumCtx,
 		rerankEnabled: rerankEnabled,
+		graphCfg:      graphCfg,
 		timezone:      timezone,
 		rateLimitRead: rateLimitRead,
 	}
@@ -172,7 +176,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("german detected, translating",
 			"request_id", requestID,
 		)
-		translatedQuery, err := llm.TranslateQuery(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, query)
+		translatedQuery, err := llm.TranslateQuery(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, query)
 		if err != nil {
 			slog.Warn("translation failed, using original",
 				"error", err,
@@ -208,7 +212,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	} else if llm.HasTemporalIntent(originalQuery) {
 		// LLM fallback: query seems temporal but rules couldn't parse it.
 		var err error
-		temporalResult, err = llm.NormalizeTemporal(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, originalQuery, now)
+		temporalResult, err = llm.NormalizeTemporal(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, originalQuery, now)
 		if err != nil {
 			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,
@@ -381,10 +385,37 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Step 6a-graph: Dream-graph expansion (GottZ Graph Expansion, Wave 1).
+	// Post-RRF, post-gravity (so seeds enter sorted by boosted RRFScore) and
+	// PRE-rerank (so the reranker is the final arbiter of any graph-introduced
+	// neighbor). 1-hop-expands the top RRF seeds along the positive Dream link
+	// types and fuses neighbors via a Go boost. Gated default-OFF; fail-open
+	// (any error keeps the pre-expansion results).
+	//
+	// Independence: graph runs whether or not the reranker is on, so an A/B
+	// sweep can isolate the graph effect from the rerank effect. When graph is
+	// on but the reranker is off there is no LLM noise-filter behind the
+	// synthetic neighbors — warn once, then proceed.
+	if h.graphCfg.Enabled {
+		if !h.rerankEnabled {
+			slog.Warn("graph expansion active without reranker noise-filter",
+				"request_id", requestID,
+			)
+		}
+		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, h.graphCfg); gerr != nil {
+			slog.Warn("graph expand failed; using pre-expansion results",
+				"error", gerr,
+				"request_id", requestID,
+			)
+		} else {
+			results = expanded
+		}
+	}
+
 	// Step 6b: Rerank via LLM (skipped if disabled or fewer than 3 results).
 	// The reranker sees up to RerankMaxDocs (15) from the broader candidate set.
 	if h.rerankEnabled {
-		results, err = rrf.Rerank(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, originalQuery, results)
+		results, err = rrf.Rerank(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, originalQuery, results)
 		if err != nil {
 			slog.Warn("rerank failed, using original order",
 				"error", err,
@@ -444,7 +475,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, originalQuery, sources, temporalDates)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, originalQuery, sources, temporalDates)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,

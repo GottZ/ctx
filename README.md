@@ -177,7 +177,7 @@ ctx stats     # Block count, categories, storage
 ## Architecture
 
 ```
-Query ──► Parse Temporal ──► Embed ──► 4-Way RRF ──► Gravity Boost ──► filterSuperseded ──► LLM Synthesis
+Query ──► Parse Temporal ──► Embed ──► 4-Way RRF ──► Gravity Boost ──► Graph Expand ──► filterSuperseded ──► LLM Synthesis
           │                            ├─ Semantic (0.45)    │
           │                            ├─ EN-FTS   (0.25)    ├─ Linear (Power-Law, content_times)
           │                            ├─ DE-FTS   (0.20)    └─ Cyclic (Gaussian, EAV dimensions)
@@ -202,7 +202,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 48 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
+**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 50 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
 
 ### Key environment variables
 
@@ -211,7 +211,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 | `CTX_BASE_URL` / `CTX_KEY` | – | CLI client config (`~/.config/ctx/config`) |
 | `CONTEXT_DB` / `CONTEXT_DB_USER` / `CONTEXT_DB_PASSWORD` | – | Database (separate from inference) |
 | `CTX_EMBED_HOST` / `_PROTOCOL` / `_MODEL` / `_DIMS` | `ollama` / – / `1024` | Embedding pipeline (e.g. qwen3-embedding:8b) |
-| `CTX_CHAT_HOST` / `_PROTOCOL` / `_MODEL` / `_THINK` | `ollama` / – / `false` | Generator pipeline (RRF synthesis) |
+| `CTX_CHAT_HOST` / `_PROTOCOL` / `_MODEL` / `_THINK` / `_NUM_CTX` | `ollama` / – / `false` / `0` | Generator pipeline (RRF synthesis); `_NUM_CTX` (`0`=model default) applies to *all* chat-model calls (translate / temporal-fallback / rerank / synthesis) — set equal to the dream `_NUM_CTX` to share a single Ollama runner |
 | `CTX_DREAM_ENABLED` | `false` | Toggle continuous Dream loop |
 | `CTX_DREAM_PARALLELISM` | `1` | Concurrent Dream workers — race-safe via atomic claim |
 | `CTX_DREAM_HOST` / `_PROTOCOL` / `_MODEL` / `_NUM_CTX` | inherits chat | Separate Dream model (e.g. larger, slower) |
@@ -222,6 +222,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 | `CTX_TIMEZONE` | `Europe/Berlin` | Cyclic-temporal phase calculation |
 | `CTX_CONFIDENT_THRESHOLD` | `0.008` | Generator-side refusal threshold (RRF score below → "I don't know") |
 | `CTX_READ_SCOPES` | scope-derived | API key's effective read-scope set (v2.0.0+ scheduler config) |
+| `CTX_GRAPH_EXPAND_ENABLED` / `_*` | `false` | Query-time Dream-graph traversal (Wave 1): 1-hop confidence/type-gated expansion of inferred links, fused post-gravity / pre-rerank. Default-off, fail-open. Knobs: `_DIRECTED` / `_HOP_DEPTH` / `_SEED_COUNT` / `_SEED_SCORE_FLOOR` / `_PER_SEED_CAP` / `_MAX_INJECTED` / `_MIN_CONFIDENCE`(`_RECURRENT`) / `_BOOST_WEIGHT` / `_HUB_DAMPING` / `_WEIGHT_{TOPICAL,FACTUAL,CAUSAL,RECURRENT}` |
 
 **Key features:**
 - **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels; block_role-aware (4-class enum: system-meta hard-excluded incl. digest-generated topic-maps via Welle-44 hook, audit-trail/reference/knowledge full-pass — uniform damping shown ineffective in Welle 40, query-aware damping pending Folge-Welle 41+)
@@ -232,6 +233,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 - **GottZ Temporal Dimension Table** — EAV storage with partial B-Tree indexes, O(log n) dimension lookups at 1M+ scale. Every block carries multiple anchors: content-mentioned times (semantic) + `created_at` (meta) as independent signals.
 - **Dream Mode** — continuous autonomous cross-referencing with dual-model support (v5 prompt for qwen3.6:27b non-thinking sampler, dream pipeline version 5 with `recurrent` relationship class detected via context_temporal+title-similarity Phase 1 + LLM Phase 2), adaptive cooldown, supersedes detection, temporal validation, hard-cap of 5 links per cycle with type-diversity tie-break, replace-semantics with snapshot revert, and runtime mode control (on/throttled/off via API). Throttled mode pauses between GPU-intensive steps for thermal management. **Parallel workers** (`CTX_DREAM_PARALLELISM`, default 1) using atomic `FOR UPDATE SKIP LOCKED` block-claim — race-condition-safe under contention. **Robust LLM-output parsing**: tolerates array-form, single-object, fenced-array, and compact-multi-key-object link formats from heterogeneous LLM outputs. Config: `CTX_DREAM_IDLE_WAIT` (seconds, default 20)
 - **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results
+- **Dream-Graph Traversal** (Wave 1, default-off via `CTX_GRAPH_EXPAND_ENABLED`) — query-time 1-hop expansion of the Dream-inferred link graph (topical/factual/causal/recurrent), confidence/type-gated + hub-damped, fused as a scale-invariant post-gravity boost before rerank. Turns the inferred links into positive recall instead of write-only metadata; fully parameterized for A/B sweeps, fail-open
 - **Embed Cache** — content-hash-keyed embedding cache (`context_embed_cache`) to avoid re-embedding identical text across pipelines
 - **LLM Log** — per-call request/response capture (`context_llm_log`) with input/output token counts (Ollama + OpenAI), dream-pipeline version tagging, and parse-format drift tagging (`metadata.parse_format`: array | object | fenced-array | fenced-object) for pipeline debugging + offline benchmark replay
 - **MCP Remote** — Streamable HTTP transport with OAuth 2.1 PKCE for claude.ai/Claude Code integration. Tools: query, store, search, get, recent. Client registration via `ctx mcp add`. Tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18

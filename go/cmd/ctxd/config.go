@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GottZ/ctx/internal/rrf"
 )
 
 // defaultListenAddr is the default HTTP listen address.
@@ -40,6 +42,25 @@ type Config struct {
 
 	// Reranker
 	RerankEnabled bool
+
+	// Dream-graph expansion (GottZ Graph Expansion, Wave 1). Post-RRF stage that
+	// 1-hop-expands the top RRF seeds along the positive Dream link types.
+	// All fields are runtime knobs (the A/B sweep surface). Default = off.
+	GraphExpandEnabled          bool
+	GraphDirected               bool
+	GraphHopDepth               int
+	GraphSeedCount              int
+	GraphSeedScoreFloor         float64
+	GraphPerSeedCap             int
+	GraphMaxInjected            int
+	GraphMinConfidence          float64
+	GraphMinConfidenceRecurrent float64
+	GraphBoostWeight            float64
+	GraphHubDamping             bool
+	GraphWeightTopical          float64
+	GraphWeightFactual          float64
+	GraphWeightCausal           float64
+	GraphWeightRecurrent        float64
 
 	// Dream pipeline
 	DreamEnabled            bool
@@ -146,6 +167,24 @@ func LoadConfig() (Config, error) {
 
 		RerankEnabled: getEnv("CTX_RERANK_ENABLED", "false") == "true",
 
+		// Dream-graph expansion (Wave 1). Defaults = OFF and the calibration
+		// from the Wave-1 design; every value is an env-overridable sweep knob.
+		GraphExpandEnabled:          getEnv("CTX_GRAPH_EXPAND_ENABLED", "false") == "true",
+		GraphDirected:               getEnv("CTX_GRAPH_EXPAND_DIRECTED", "true") == "true",
+		GraphHopDepth:               getEnvIntSafe("CTX_GRAPH_EXPAND_HOP_DEPTH", 1),
+		GraphSeedCount:              getEnvIntSafe("CTX_GRAPH_EXPAND_SEED_COUNT", 5),
+		GraphSeedScoreFloor:         getEnvFloatSafe("CTX_GRAPH_EXPAND_SEED_SCORE_FLOOR", 0.5),
+		GraphPerSeedCap:             getEnvIntSafe("CTX_GRAPH_EXPAND_PER_SEED_CAP", 3),
+		GraphMaxInjected:            getEnvIntSafe("CTX_GRAPH_EXPAND_MAX_INJECTED", 10),
+		GraphMinConfidence:          getEnvFloatSafe("CTX_GRAPH_EXPAND_MIN_CONFIDENCE", 0.75),
+		GraphMinConfidenceRecurrent: getEnvFloatSafe("CTX_GRAPH_EXPAND_MIN_CONFIDENCE_RECURRENT", 0.8),
+		GraphBoostWeight:            getEnvFloatSafe("CTX_GRAPH_EXPAND_BOOST_WEIGHT", 0.20),
+		GraphHubDamping:             getEnv("CTX_GRAPH_EXPAND_HUB_DAMPING", "true") == "true",
+		GraphWeightTopical:          getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_TOPICAL", 0.5),
+		GraphWeightFactual:          getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_FACTUAL", 0.9),
+		GraphWeightCausal:           getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_CAUSAL", 0.9),
+		GraphWeightRecurrent:        getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_RECURRENT", 1.0),
+
 		DreamEnabled:            getEnv("CTX_DREAM_ENABLED", "false") == "true",
 		DreamHost:               getEnv("CTX_DREAM_HOST", "http://localhost:11434"),
 		DreamAPIKey:             getEnv("CTX_DREAM_API_KEY", ""),
@@ -180,6 +219,28 @@ func LoadConfig() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// GraphConfig builds the rrf.GraphConfig for the Dream-graph expansion stage
+// from the loaded Graph* env values.
+func (c Config) GraphConfig() rrf.GraphConfig {
+	return rrf.GraphConfig{
+		Enabled:                c.GraphExpandEnabled,
+		Directed:               c.GraphDirected,
+		HopDepth:               c.GraphHopDepth,
+		SeedCount:              c.GraphSeedCount,
+		SeedScoreFloor:         c.GraphSeedScoreFloor,
+		PerSeedCap:             c.GraphPerSeedCap,
+		MaxInjected:            c.GraphMaxInjected,
+		MinConfidence:          c.GraphMinConfidence,
+		MinConfidenceRecurrent: c.GraphMinConfidenceRecurrent,
+		BoostWeight:            c.GraphBoostWeight,
+		HubDamping:             c.GraphHubDamping,
+		WeightTopical:          c.GraphWeightTopical,
+		WeightFactual:          c.GraphWeightFactual,
+		WeightCausal:           c.GraphWeightCausal,
+		WeightRecurrent:        c.GraphWeightRecurrent,
+	}
 }
 
 // DSN returns a PostgreSQL connection string for the context store database.

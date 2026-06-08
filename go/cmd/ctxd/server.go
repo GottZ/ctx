@@ -42,7 +42,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
 	chatThink := parseThinkMode(cfg.ChatThink)
-	queryHandler := handler.NewQueryHandler(pool, cfg.ChatHost, cfg.ChatAPIKey, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.ChatModel, chatThink, cfg.RerankEnabled, cfg.Timezone, cfg.RateLimitRead)
+	queryHandler := handler.NewQueryHandler(pool, cfg.ChatHost, cfg.ChatAPIKey, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.ChatModel, chatThink, cfg.ChatNumCtx, cfg.RerankEnabled, cfg.GraphConfig(), cfg.Timezone, cfg.RateLimitRead)
 	storeH := handler.NewStoreHandler(pool, cfg.RateLimitWrite)
 	searchH := handler.NewSearchHandler(pool, cfg.RateLimitRead)
 	manageH := handler.NewManageHandler(pool, scheduler)
@@ -62,6 +62,12 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	dreamOpts := dream.DreamOptions()
 	if cfg.DreamNumCtx > 0 {
 		dreamOpts.NumCtx = cfg.DreamNumCtx
+	} else if cfg.ChatNumCtx > 0 {
+		// Consistency: chat and dream share one Ollama model (same 27B). When no
+		// dedicated DreamNumCtx is set, the daily-synthesis chat-model request
+		// must carry the same num_ctx as every other chat-model call site so
+		// Ollama keeps a single runner (distinct num_ctx → extra runner → VRAM OOM).
+		dreamOpts.NumCtx = cfg.ChatNumCtx
 	}
 	synthH := handler.NewSynthesizeHandler(pool, cfg.DreamHost, cfg.DreamAPIKey, dreamModel, dreamThink, dreamOpts)
 

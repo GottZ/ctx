@@ -62,11 +62,16 @@ type TemporalResult struct {
 }
 
 // TemporalOptions returns Ollama options for temporal normalization.
-func TemporalOptions() Options {
-	return Options{
+// numCtx sets the model context window (0 = omit → model default).
+func TemporalOptions(numCtx int) Options {
+	opts := Options{
 		Temperature: 0.1,
 		NumPredict:  300,
 	}
+	if numCtx > 0 {
+		opts.NumCtx = numCtx
+	}
+	return opts
 }
 
 // temporalPromptTemplate is the system prompt for temporal normalization (LLM fallback).
@@ -231,11 +236,11 @@ var jsonFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?})\\s*```")
 
 // NormalizeTemporal uses the LLM to resolve temporal references in a query.
 // Returns nil if no temporal references are found or if the LLM call fails.
-func NormalizeTemporal(ctx context.Context, host, apiKey, model string, think *bool, query string, now time.Time) (*TemporalResult, error) {
+func NormalizeTemporal(ctx context.Context, host, apiKey, model string, think *bool, numCtx int, query string, now time.Time) (*TemporalResult, error) {
 	calendar := buildCalendar(now)
 	systemPrompt := fmt.Sprintf(temporalPromptTemplate, calendar)
 
-	resp, err := Chat(ctx, host, apiKey, model, think, systemPrompt, query, TemporalOptions(), TemporalTimeout)
+	resp, err := Chat(ctx, host, apiKey, model, think, systemPrompt, query, TemporalOptions(numCtx), TemporalTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("llm: temporal: %w", err)
 	}

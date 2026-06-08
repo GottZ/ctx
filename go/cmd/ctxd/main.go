@@ -103,6 +103,7 @@ func main() {
 		DreamHost:               cfg.DreamHost,
 		DreamAPIKey:             cfg.DreamAPIKey,
 		ChatModel:               cfg.ChatModel,
+		ChatNumCtx:              cfg.ChatNumCtx,
 		DreamModel:              cfg.DreamModel,
 		DreamThink:              dreamThink,
 		DreamNumCtx:             cfg.DreamNumCtx,

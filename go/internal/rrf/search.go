@@ -22,6 +22,18 @@ type SearchResult struct {
 	CosineSim        *float64  `json:"cosine_sim,omitempty"`
 	RerankScore      *float64  `json:"rerank_score,omitempty"`
 	RRFScoreOriginal *float64  `json:"rrf_score_original,omitempty"`
+
+	// Graph-expansion provenance (GottZ Graph Expansion, Wave 1). All fields
+	// are zero-valued for native RRF hits and omitted from JSON (omitempty), so
+	// the wire format is byte-identical to pre-Wave-1 when the graph stage is
+	// off. ViaGraph is true only for a neighbor that was NEWLY introduced by the
+	// traversal (a block RRF did not already return); a native hit that merely
+	// got reinforced by a graph edge keeps ViaGraph=false. GraphSeedID /
+	// GraphRelationship record which seed edge introduced the neighbor (the
+	// highest-injection one when several seeds point at it).
+	ViaGraph          bool   `json:"via_graph,omitempty"`
+	GraphSeedID       string `json:"graph_seed_id,omitempty"`
+	GraphRelationship string `json:"graph_relationship,omitempty"`
 }
 
 // Search executes the ctx_rrf PG function with a single SQL call.

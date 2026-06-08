@@ -78,6 +78,7 @@ type Config struct {
 	DreamHost               string        // Dream LLM provider host
 	DreamAPIKey             string        // Dream LLM provider API key (empty = no auth)
 	ChatModel               string        // Chat model name (fallback for dream)
+	ChatNumCtx              int           // chat num_ctx (fallback for daily synthesis when DreamNumCtx unset)
 	DreamModel              string        // Dream model name (fallback: ChatModel)
 	DreamThink              *bool         // Think mode for dream (nil = omit)
 	DreamNumCtx             int           // num_ctx for dream (0 = model default)
@@ -308,6 +309,13 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 	dreamOpts := dream.DreamOptions()
 	if s.config.DreamNumCtx > 0 {
 		dreamOpts.NumCtx = s.config.DreamNumCtx
+	} else if s.config.ChatNumCtx > 0 {
+		// Consistency: when no dedicated DreamNumCtx is set, the daily-synthesis
+		// chat-model request must carry the same num_ctx as the query chat-model
+		// call sites so Ollama keeps a single shared runner (distinct num_ctx →
+		// extra 27B runner → VRAM OOM). Mirrors the manual /api/synthesize/daily
+		// handler wiring in cmd/ctxd/server.go.
+		dreamOpts.NumCtx = s.config.ChatNumCtx
 	}
 	scope := s.config.HomeScope
 	if scope == "" {

@@ -279,26 +279,42 @@ func chatOpenAI(ctx context.Context, host, apiKey, model string, think *bool, sy
 }
 
 // SynthesisOptions returns default options for LLM synthesis.
-func SynthesisOptions() Options {
-	return Options{
+// numCtx sets the model context window (0 = omit → model default). All chat-model
+// call sites must pass the SAME ChatNumCtx so Ollama loads a single 27B runner.
+func SynthesisOptions(numCtx int) Options {
+	opts := Options{
 		Temperature:   0.1,
 		RepeatPenalty: 1.1,
 		NumPredict:    500,
 	}
+	if numCtx > 0 {
+		opts.NumCtx = numCtx
+	}
+	return opts
 }
 
 // TranslateOptions returns default options for query translation.
-func TranslateOptions() Options {
-	return Options{
+// numCtx sets the model context window (0 = omit → model default).
+func TranslateOptions(numCtx int) Options {
+	opts := Options{
 		Temperature: 0,
 		NumPredict:  100,
 	}
+	if numCtx > 0 {
+		opts.NumCtx = numCtx
+	}
+	return opts
 }
 
 // RerankOptions returns default options for reranking.
-func RerankOptions() Options {
-	return Options{
+// numCtx sets the model context window (0 = omit → model default).
+func RerankOptions(numCtx int) Options {
+	opts := Options{
 		Temperature: 0,
 		NumPredict:  80,
 	}
+	if numCtx > 0 {
+		opts.NumCtx = numCtx
+	}
+	return opts
 }

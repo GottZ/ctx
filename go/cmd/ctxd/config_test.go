@@ -374,6 +374,107 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_GraphExpandDefaults(t *testing.T) {
+	// Clear all graph env vars + required password so defaults apply.
+	for _, key := range []string{
+		"CTX_GRAPH_EXPAND_ENABLED", "CTX_GRAPH_EXPAND_DIRECTED",
+		"CTX_GRAPH_EXPAND_HOP_DEPTH", "CTX_GRAPH_EXPAND_SEED_COUNT",
+		"CTX_GRAPH_EXPAND_SEED_SCORE_FLOOR", "CTX_GRAPH_EXPAND_PER_SEED_CAP",
+		"CTX_GRAPH_EXPAND_MAX_INJECTED", "CTX_GRAPH_EXPAND_MIN_CONFIDENCE",
+		"CTX_GRAPH_EXPAND_MIN_CONFIDENCE_RECURRENT", "CTX_GRAPH_EXPAND_BOOST_WEIGHT",
+		"CTX_GRAPH_EXPAND_HUB_DAMPING", "CTX_GRAPH_EXPAND_WEIGHT_TOPICAL",
+		"CTX_GRAPH_EXPAND_WEIGHT_FACTUAL", "CTX_GRAPH_EXPAND_WEIGHT_CAUSAL",
+		"CTX_GRAPH_EXPAND_WEIGHT_RECURRENT", "CONTEXT_DB_PORT", "CTX_EMBED_DIMS",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("CONTEXT_DB_PASSWORD", "secret")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Stage off by default — byte-identical pipeline when unset.
+	if cfg.GraphExpandEnabled {
+		t.Error("GraphExpandEnabled default = true, want false")
+	}
+	if !cfg.GraphDirected {
+		t.Error("GraphDirected default = false, want true")
+	}
+	if cfg.GraphHopDepth != 1 {
+		t.Errorf("GraphHopDepth default = %d, want 1", cfg.GraphHopDepth)
+	}
+	if cfg.GraphSeedCount != 5 {
+		t.Errorf("GraphSeedCount default = %d, want 5", cfg.GraphSeedCount)
+	}
+	if cfg.GraphSeedScoreFloor != 0.5 {
+		t.Errorf("GraphSeedScoreFloor default = %v, want 0.5", cfg.GraphSeedScoreFloor)
+	}
+	if cfg.GraphPerSeedCap != 3 {
+		t.Errorf("GraphPerSeedCap default = %d, want 3", cfg.GraphPerSeedCap)
+	}
+	if cfg.GraphMaxInjected != 10 {
+		t.Errorf("GraphMaxInjected default = %d, want 10", cfg.GraphMaxInjected)
+	}
+	if cfg.GraphMinConfidence != 0.75 {
+		t.Errorf("GraphMinConfidence default = %v, want 0.75", cfg.GraphMinConfidence)
+	}
+	if cfg.GraphMinConfidenceRecurrent != 0.8 {
+		t.Errorf("GraphMinConfidenceRecurrent default = %v, want 0.8", cfg.GraphMinConfidenceRecurrent)
+	}
+	if cfg.GraphBoostWeight != 0.20 {
+		t.Errorf("GraphBoostWeight default = %v, want 0.20", cfg.GraphBoostWeight)
+	}
+	if !cfg.GraphHubDamping {
+		t.Error("GraphHubDamping default = false, want true")
+	}
+	if cfg.GraphWeightTopical != 0.5 {
+		t.Errorf("GraphWeightTopical default = %v, want 0.5", cfg.GraphWeightTopical)
+	}
+	if cfg.GraphWeightFactual != 0.9 {
+		t.Errorf("GraphWeightFactual default = %v, want 0.9", cfg.GraphWeightFactual)
+	}
+	if cfg.GraphWeightCausal != 0.9 {
+		t.Errorf("GraphWeightCausal default = %v, want 0.9", cfg.GraphWeightCausal)
+	}
+	if cfg.GraphWeightRecurrent != 1.0 {
+		t.Errorf("GraphWeightRecurrent default = %v, want 1.0", cfg.GraphWeightRecurrent)
+	}
+
+	// GraphConfig() must mirror the loaded values 1:1.
+	gc := cfg.GraphConfig()
+	if gc.Enabled != cfg.GraphExpandEnabled || gc.Directed != cfg.GraphDirected ||
+		gc.HopDepth != cfg.GraphHopDepth || gc.SeedCount != cfg.GraphSeedCount ||
+		gc.SeedScoreFloor != cfg.GraphSeedScoreFloor || gc.PerSeedCap != cfg.GraphPerSeedCap ||
+		gc.MaxInjected != cfg.GraphMaxInjected || gc.MinConfidence != cfg.GraphMinConfidence ||
+		gc.MinConfidenceRecurrent != cfg.GraphMinConfidenceRecurrent || gc.BoostWeight != cfg.GraphBoostWeight ||
+		gc.HubDamping != cfg.GraphHubDamping || gc.WeightTopical != cfg.GraphWeightTopical ||
+		gc.WeightFactual != cfg.GraphWeightFactual || gc.WeightCausal != cfg.GraphWeightCausal ||
+		gc.WeightRecurrent != cfg.GraphWeightRecurrent {
+		t.Errorf("GraphConfig() does not mirror loaded Config: %+v", gc)
+	}
+}
+
+func TestLoadConfig_GraphExpandEnabled_True(t *testing.T) {
+	t.Setenv("CONTEXT_DB_PASSWORD", "secret")
+	t.Setenv("CONTEXT_DB_PORT", "")
+	t.Setenv("CTX_EMBED_DIMS", "")
+	t.Setenv("CTX_GRAPH_EXPAND_ENABLED", "true")
+	t.Setenv("CTX_GRAPH_EXPAND_DIRECTED", "false")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.GraphExpandEnabled {
+		t.Error("GraphExpandEnabled should be true when CTX_GRAPH_EXPAND_ENABLED=true")
+	}
+	if cfg.GraphDirected {
+		t.Error("GraphDirected should be false when CTX_GRAPH_EXPAND_DIRECTED=false")
+	}
+}
+
 func TestLoadConfig_RerankEnabled_True(t *testing.T) {
 	t.Setenv("CONTEXT_DB_PASSWORD", "secret")
 	t.Setenv("CTX_RERANK_ENABLED", "true")
