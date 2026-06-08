@@ -80,54 +80,6 @@ services:
         max-size: "50m"
         max-file: "3"
 
-  # Opt-in CRAG-Bench test instance. Started only via `--profile crag`.
-  # Reuses prod n8n-ctx image (no rebuild needed). Test DB must be bootstrapped
-  # separately (see .env.crag.example). Loopback-only port 18080 to avoid
-  # accidental exposure. CTX_READ_SCOPES defaults to private,shared,work,crag
-  # so bench API keys with home_scope=private see crag-scoped blocks too.
-  ctx-crag:
-    image: n8n-ctx
-    container_name: ctx-crag
-    profiles:
-      - crag
-    restart: "no"
-    env_file:
-      - path: .env.crag
-        required: false
-    environment:
-      CONTEXT_DB_HOST: db
-      CONTEXT_DB_PORT: 5432
-      CTX_READ_SCOPES: ${CTX_READ_SCOPES:-private,shared,work,crag}
-      LISTEN_ADDR: ":8080"
-    ports:
-      - "127.0.0.1:18080:8080"
-    networks:
-      - n8nintern
-    depends_on:
-      db:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "/ctx", "-health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    security_opt:
-      - "no-new-privileges:true"
-    cap_drop:
-      - ALL
-    read_only: true
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 32M
-    logging:
-      options:
-        max-size: "50m"
-        max-file: "3"
-
   db:
     build: ./db-image
     image: pgvector-timescaledb:pg18
