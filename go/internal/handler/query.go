@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -121,6 +123,87 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 		}
 	}
 	return out
+}
+
+// queryHeartbeat keeps a long-running query alive through a buffering reverse
+// proxy. With the cross-encoder reranker engaged a query runs ~80s, past a
+// typical 60s proxy_read_timeout -> 504. 1xx informational responses do NOT
+// survive nginx (proxy_buffering swallows them, the body is lost — measured); a
+// chunked body heartbeat does: each flushed byte is a real upstream read that
+// resets the timeout. We commit the 200 header up front and emit one space every
+// ~25s (leading whitespace is valid JSON per RFC 8259, so the final body still
+// decodes) until finish() writes the real payload. Gated to the slow rerank path
+// only; the fast path keeps plain writeJSON and its non-200 error statuses.
+// heartbeatInterval is the keepalive cadence — well under a typical 60s proxy
+// read timeout. A package var so tests can shrink it.
+var heartbeatInterval = 25 * time.Second
+
+type queryHeartbeat struct {
+	w      http.ResponseWriter
+	rc     *http.ResponseController
+	mu     sync.Mutex
+	done   bool
+	active bool
+}
+
+// startHeartbeat commits the 200 header and (when active) starts the keepalive
+// goroutine. Call exactly one finish() afterwards.
+func startHeartbeat(w http.ResponseWriter, active bool) *queryHeartbeat {
+	hb := &queryHeartbeat{w: w, active: active}
+	if !active {
+		return hb
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	hb.rc = http.NewResponseController(w)
+	if err := hb.rc.Flush(); err != nil {
+		// Streaming is broken — likely a middleware ResponseWriter wrapper
+		// without Unwrap(), so the controller cannot reach the real Flusher.
+		// The heartbeat then buffers to the end of the response and a reverse
+		// proxy will still 504. Loud here so the regression shows up in logs
+		// instead of as silent buffering.
+		slog.Warn("query heartbeat: response writer not flushable, keepalive ineffective",
+			"error", err)
+	}
+	go hb.run()
+	return hb
+}
+
+func (hb *queryHeartbeat) run() {
+	t := time.NewTicker(heartbeatInterval)
+	defer t.Stop()
+	for range t.C {
+		hb.mu.Lock()
+		if hb.done {
+			hb.mu.Unlock()
+			return
+		}
+		_, err := io.WriteString(hb.w, " ")
+		if err == nil {
+			_ = hb.rc.Flush()
+		}
+		hb.mu.Unlock()
+		if err != nil {
+			return
+		}
+	}
+}
+
+// finish writes the final response exactly once. In heartbeat mode the 200 header
+// is already committed, so status is ignored and v is encoded into the
+// (whitespace-prefixed) body — a late failure can only carry success:false there.
+// Without heartbeat it is a plain writeJSON(status, v). Mutex-serialized against
+// the keepalive writes.
+func (hb *queryHeartbeat) finish(status int, v any) {
+	if !hb.active {
+		writeJSON(hb.w, status, v)
+		return
+	}
+	hb.mu.Lock()
+	defer hb.mu.Unlock()
+	hb.done = true
+	_ = json.NewEncoder(hb.w).Encode(v)
+	_ = hb.rc.Flush()
 }
 
 // HandleQuery orchestrates the full query pipeline:
@@ -317,6 +400,13 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		"user_limit", limit,
 		"request_id", requestID,
 	)
+
+	// RRF (the last 500-capable stage) has succeeded. From here, when the
+	// cross-encoder reranker is engaged the query runs ~80s — start the keepalive
+	// heartbeat so a buffering reverse proxy doesn't time out. It commits the 200
+	// header now; every later return goes through hb.finish (no more status codes).
+	useHeartbeat := h.rerankCfg.Enabled && h.rerankCfg.Host != ""
+	hb := startHeartbeat(w, useHeartbeat)
 
 	// Step 6a: Post-RRF temporal gravity boost (GottZ Cyclic Phase Model).
 	//
@@ -526,7 +616,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"translated", translated,
 			"request_id", requestID,
 		)
-		writeJSON(w, http.StatusOK, queryResponse{
+		hb.finish(http.StatusOK, queryResponse{
 			Success:    true,
 			Sources:    buildSourceResponses(sources, supersedesMap),
 			Confidence: llm.ClassifyConfidence(maxScore),
@@ -548,7 +638,8 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"error", err,
 			"request_id", requestID,
 		)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "synthesis failed"})
+		// In heartbeat mode the 200 is already committed -> success:false in body.
+		hb.finish(http.StatusInternalServerError, map[string]any{"success": false, "error": "synthesis failed"})
 		return
 	}
 
@@ -581,7 +672,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		"request_id", requestID,
 	)
 
-	writeJSON(w, http.StatusOK, resp)
+	hb.finish(http.StatusOK, resp)
 }
 
 // logAccess inserts access log entries asynchronously.

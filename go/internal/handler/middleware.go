@@ -100,6 +100,14 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap exposes the underlying ResponseWriter so http.NewResponseController can
+// reach Flush/Hijack through this status-capturing wrapper. Without it the
+// controller stops here and the query heartbeat's flushes are buffered to the
+// end of the response (no streaming -> reverse-proxy read-timeout 504).
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
 // Logger logs each HTTP request with method, path, status, and duration.
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

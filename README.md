@@ -245,7 +245,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings; optional `categories_exclude` / `block_roles_exclude` arrays filter slot-stealers) |
+| `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings; optional `categories_exclude` / `block_roles_exclude` arrays filter slot-stealers). With the cross-encoder reranker engaged (~80s/query) the response commits `200` up front and streams a whitespace keepalive every 25s so buffering reverse proxies don't hit their read timeout; the body stays valid JSON (leading whitespace, RFC 8259) and a late synthesis failure reports `success:false` inside the 200 body |
 | `POST /api/store` | Upsert (embedding async via scheduler) |
 | `POST /api/search` | Lightweight search (no LLM) |
 | `POST /api/manage` | CRUD, Guard API, stats, API-key management (`api-key-create` requires `home_scope`) |

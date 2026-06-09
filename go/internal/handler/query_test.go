@@ -1,10 +1,115 @@
 package handler
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/llm"
 )
+
+// In heartbeat mode the 200 header commits up front, the keepalive emits leading
+// whitespace, and the final body must still decode as JSON (RFC 8259 allows
+// leading whitespace).
+func TestQueryHeartbeat_WhitespaceThenValidJSON(t *testing.T) {
+	old := heartbeatInterval
+	heartbeatInterval = 5 * time.Millisecond
+	defer func() { heartbeatInterval = old }()
+
+	rec := httptest.NewRecorder()
+	hb := startHeartbeat(rec, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("200 header not committed up front: code=%d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	time.Sleep(40 * time.Millisecond) // let a few heartbeats fire
+	hb.finish(http.StatusOK, queryResponse{Success: true, Answer: "ok", Confidence: "confident"})
+
+	body := rec.Body.String()
+	if !strings.HasPrefix(body, " ") {
+		t.Errorf("expected leading heartbeat whitespace, got prefix %q", body[:min(20, len(body))])
+	}
+	var resp queryResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("body not valid JSON despite leading whitespace: %v | body=%q", err, body)
+	}
+	if !resp.Success || resp.Answer != "ok" {
+		t.Errorf("decoded response wrong: %+v", resp)
+	}
+}
+
+// Inactive (fast path) = plain writeJSON: honours the status code, no whitespace.
+func TestQueryHeartbeat_InactivePlainWriteJSON(t *testing.T) {
+	rec := httptest.NewRecorder()
+	hb := startHeartbeat(rec, false)
+	hb.finish(http.StatusInternalServerError, map[string]any{"success": false, "error": "boom"})
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("inactive code = %d, want 500", rec.Code)
+	}
+	if strings.HasPrefix(rec.Body.String(), " ") {
+		t.Error("inactive path must not emit heartbeat whitespace")
+	}
+}
+
+// Regression for the first live 504: the Logger middleware's responseWriter
+// wrapper had no Unwrap(), so http.NewResponseController could not reach the
+// real Flusher and every heartbeat flush buffered until the handler returned —
+// no streaming, the proxy read timeout fired anyway. Run the heartbeat under
+// the real global middleware stack (server.go order) on a real TCP server and
+// require the first body byte to arrive while the handler is still inside its
+// slow stage.
+func TestQueryHeartbeat_StreamsThroughMiddlewareStack(t *testing.T) {
+	old := heartbeatInterval
+	heartbeatInterval = 10 * time.Millisecond
+	defer func() { heartbeatInterval = old }()
+
+	const handlerWork = 300 * time.Millisecond
+	h := SecurityHeaders(RequestID(Logger(Recovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hb := startHeartbeat(w, true)
+		time.Sleep(handlerWork) // stands in for the slow rerank stage
+		hb.finish(http.StatusOK, queryResponse{Success: true, Answer: "done", Confidence: "confident"})
+	})))))
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	start := time.Now()
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// http.Get returns once headers are in; the streaming proof is the first
+	// BODY byte (a heartbeat space) arriving well before the handler finishes.
+	buf := make([]byte, 1)
+	n, err := resp.Body.Read(buf)
+	firstByteAfter := time.Since(start)
+	if err != nil || n != 1 {
+		t.Fatalf("first body read: n=%d err=%v", n, err)
+	}
+	if firstByteAfter >= handlerWork {
+		t.Fatalf("first body byte after %v (handler works for %v) — flushes are buffered, not streamed (Unwrap regression?)",
+			firstByteAfter, handlerWork)
+	}
+
+	rest, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var qr queryResponse
+	if err := json.Unmarshal(append(buf[:n], rest...), &qr); err != nil {
+		t.Fatalf("streamed body not valid JSON: %v", err)
+	}
+	if !qr.Success || qr.Answer != "done" {
+		t.Errorf("decoded response wrong: %+v", qr)
+	}
+}
 
 func TestBuildSourceResponses(t *testing.T) {
 	rs := 0.5
