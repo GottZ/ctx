@@ -222,7 +222,10 @@ for s in d.get('sources',[]):
     conf_ok=true
   fi
 
-  # Check keywords
+  # Check keywords. Decimal commas are normalized to dots first: German answers
+  # write "0,98" for 0.98, which silently misses numeric keywords (I01).
+  local answer_kw
+  answer_kw=$(echo "$answer" | sed -E 's/([0-9]),([0-9])/\1.\2/g')
   keyword_hits=0
   keyword_total=0
   if [[ -n "$keywords" ]]; then
@@ -232,7 +235,7 @@ for s in d.get('sources',[]):
       IFS='~' read -ra KW_ALTS <<< "$kw_group"
       local found=false
       for alt in "${KW_ALTS[@]}"; do
-        if echo "$answer" | grep -qiF "$alt"; then
+        if echo "$answer_kw" | grep -qiF "$alt"; then
           found=true
           break
         fi
