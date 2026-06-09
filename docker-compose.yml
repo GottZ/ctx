@@ -53,11 +53,21 @@ services:
       CTX_RERANK_API_KEY: ${CTX_RERANK_API_KEY:-}
       CTX_RERANK_MODEL: ${CTX_RERANK_MODEL:-}
       CTX_RERANK_MAX_DOCS: ${CTX_RERANK_MAX_DOCS:-50}
-      CTX_RERANK_BLEND_WEIGHT: ${CTX_RERANK_BLEND_WEIGHT:-1.0}
-      # Dream-graph expansion (Wave 1). Post-RRF stage that 1-hop-expands the
-      # top RRF seeds along the positive Dream link types. Default OFF; every
-      # value is a runtime sweep knob (:- default = off/calibrated absence).
-      CTX_GRAPH_EXPAND_ENABLED: ${CTX_GRAPH_EXPAND_ENABLED:-false}
+      # BLEND_WEIGHT default 0.5 (not 1.0): the Wave-3 sweep showed pure
+      # cross-encoder (bw1.0) discards the RRF prior and re-ranks latent neighbors
+      # down — and as final arbiter over graph-injected neighbors it is destructive
+      # (R@10 0.715->0.571). bw0.5 keeps RRF/graph and is the only setting that
+      # didn't hurt (graph+ce-bw0.5 R@20 0.811, best overall).
+      CTX_RERANK_BLEND_WEIGHT: ${CTX_RERANK_BLEND_WEIGHT:-0.5}
+      # Dream-graph expansion (Wave 1). Post-RRF stage that 1-hop-expands the top
+      # RRF seeds along the positive Dream link types. Default ON since Wave 3: the
+      # only arm that moves the recall ceiling (R@20 0.763 vs 0.625 for every
+      # reorderer; a reorderer structurally cannot surface what RRF didn't return),
+      # ~0s deterministic = zero latency cost. Caveat: the +31% R@10 magnitude is
+      # partly circular (the eval gold is derived from these same Dream links);
+      # the non-circular floor (graph surfaces link-gold RRF never finds) is what
+      # justifies ON. Every value is a runtime knob.
+      CTX_GRAPH_EXPAND_ENABLED: ${CTX_GRAPH_EXPAND_ENABLED:-true}
       CTX_GRAPH_EXPAND_DIRECTED: ${CTX_GRAPH_EXPAND_DIRECTED:-true}
       CTX_GRAPH_EXPAND_HOP_DEPTH: ${CTX_GRAPH_EXPAND_HOP_DEPTH:-1}
       CTX_GRAPH_EXPAND_SEED_COUNT: ${CTX_GRAPH_EXPAND_SEED_COUNT:-5}
