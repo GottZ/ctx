@@ -43,15 +43,20 @@ services:
       CTX_DREAM_EMBED_PROTOCOL: ${CTX_DREAM_EMBED_PROTOCOL:-}
       CTX_DREAM_EMBED_MODEL: ${CTX_DREAM_EMBED_MODEL:-}
       CTX_DREAM_EMBED_NUM_CTX: ${CTX_DREAM_EMBED_NUM_CTX:-0}
-      # Reranker (post-RRF re-score). Default off. RERANK_HOST dispatches:
-      # empty => LLM-as-judge on the chat model; set => local cross-encoder
-      # sidecar (Wave 2, e.g. http://ctx-rerank:8082). BLEND_WEIGHT/MAX_DOCS
-      # are cross-encoder sweep knobs (quality, not latency — CPU rerank ~1s/doc
+      # Reranker (post-RRF re-score). Default ON since Wave 3.5: the surface-gold
+      # counter-probe showed the cross-encoder earns its keep on real-user
+      # queries (nDCG@10 +0.164, MRR +0.169 on judge-annotated answer gold)
+      # while blend 0.5 keeps it neutral on latent gold — graph+ce-bw0.5 is the
+      # best arm on BOTH gold sets. The ~80-90s/query path stays proxy-safe via
+      # the query body-heartbeat. Disable with CTX_RERANK_ENABLED=false.
+      # RERANK_HOST dispatches: empty => LLM-as-judge on the chat model; set =>
+      # local cross-encoder sidecar (service below). BLEND_WEIGHT/MAX_DOCS are
+      # cross-encoder sweep knobs (quality, not latency — CPU rerank ~1s/doc
       # is intentionally not a constraint; the client timeout is sized for 50).
-      CTX_RERANK_ENABLED: ${CTX_RERANK_ENABLED:-false}
-      CTX_RERANK_HOST: ${CTX_RERANK_HOST:-}
+      CTX_RERANK_ENABLED: ${CTX_RERANK_ENABLED:-true}
+      CTX_RERANK_HOST: ${CTX_RERANK_HOST:-http://ctx-rerank:8082}
       CTX_RERANK_API_KEY: ${CTX_RERANK_API_KEY:-}
-      CTX_RERANK_MODEL: ${CTX_RERANK_MODEL:-}
+      CTX_RERANK_MODEL: ${CTX_RERANK_MODEL:-bge-reranker-v2-m3}
       CTX_RERANK_MAX_DOCS: ${CTX_RERANK_MAX_DOCS:-50}
       # BLEND_WEIGHT default 0.5 (not 1.0): the Wave-3 sweep showed pure
       # cross-encoder (bw1.0) discards the RRF prior and re-ranks latent neighbors
@@ -170,43 +175,49 @@ services:
   #     retries: 3
   #     start_period: 15s
 
-  # Optional: llama.cpp CPU-only cross-encoder reranker sidecar (Wave 2).
-  # Replaces the LLM-as-judge reranker with a real cross-encoder over the
-  # cohere-style /v1/rerank endpoint. bge-reranker-v2-m3 is the llama.cpp
-  # reference reranker (multilingual de+en). Activate with:
-  #   CTX_RERANK_ENABLED=true
-  #   CTX_RERANK_HOST=http://ctx-rerank:8082
-  #   CTX_RERANK_MODEL=bge-reranker-v2-m3
-  # ctx-size/batch (-b == -ub) must stay >= ctx's per-doc clamp in tokens
-  # (rrf.RerankCrossEncoderContentLimit ~2048 chars); an oversized pair kills the
-  # server process. Keep the batch small (compute buffer) — 8192 OOMs at <4g.
-  #
-  # ctx-rerank:
-  #   image: ghcr.io/ggml-org/llama.cpp:server
-  #   container_name: ctx-rerank
-  #   restart: unless-stopped
-  #   mem_limit: 4g
-  #   volumes:
-  #     - /opt/models:/models:ro
-  #   command: >
-  #     --model /models/bge-reranker-v2-m3-Q8_0.gguf
-  #     --reranking
-  #     --pooling rank
-  #     --port 8082
-  #     --ctx-size 2048
-  #     --batch-size 2048
-  #     --ubatch-size 2048
-  #     --parallel 4
-  #     --threads 12
-  #     --n-gpu-layers 0
-  #   networks:
-  #     - n8nintern
-  #   healthcheck:
-  #     test: ["CMD", "curl", "-sf", "http://localhost:8082/health"]
-  #     interval: 30s
-  #     timeout: 5s
-  #     retries: 3
-  #     start_period: 30s
+  # llama.cpp CPU-only cross-encoder reranker sidecar (Wave 2, default-on
+  # since Wave 3.5 — see the CTX_RERANK_* block above). bge-reranker-v2-m3
+  # (XLM-RoBERTa, multilingual de+en) over the cohere-style /v1/rerank
+  # endpoint; ctx reaches it at http://ctx-rerank:8082; all-local, $0. The
+  # real oversized-input guard is ctx's app-side per-doc clamp
+  # (rrf.RerankCrossEncoderContentLimit, ~2048 chars): a single query+doc
+  # pair longer than the batch kills the server PROCESS (not a graceful
+  # error), so ctx-size/batch must stay >= that clamp in tokens.
+  ctx-rerank:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: ctx-rerank
+    restart: unless-stopped
+    mem_limit: 4g
+    volumes:
+      - /opt/models:/models:ro
+    # --reranking implies embedding pooling internally; --pooling rank is the
+    # documented activation. KEY: llama.cpp splits --ctx-size across --parallel
+    # slots, so per-slot context = 4096/4 = 1024 tokens — must exceed the
+    # longest query+doc pair (~750 tokens for a 2048-char German doc; a
+    # 2048/4=512 slot rejected pairs with HTTP 400 exceed_context_size).
+    # --batch (compute buffer, NOT divided) stays at 2048 to bound memory; an
+    # 8192 batch OOM-killed at 2g. --threads 12 = all host cores. CPU rerank
+    # costs ~0.85s/doc — the query body-heartbeat keeps reverse proxies from
+    # timing out on the ~80-90s path.
+    command: >
+      --model /models/bge-reranker-v2-m3-Q8_0.gguf
+      --reranking
+      --pooling rank
+      --port 8082
+      --ctx-size 4096
+      --batch-size 2048
+      --ubatch-size 2048
+      --parallel 4
+      --threads 12
+      --n-gpu-layers 0
+    networks:
+      - n8nintern
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 networks:
   n8nintern:
