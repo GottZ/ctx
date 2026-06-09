@@ -229,10 +229,12 @@ fi
 
 # T07 SCHEMA_INTEGRITY — counts exclude manual snapshot tables (name pattern "*_snapshot_*")
 # which accumulate over time (e.g. context_dream_links_snapshot_20260423_prev5).
+# 36 columns since M044 (ts_de/ts_en bilingual generated tsvectors) + M049
+# (dream_eval_count back-off counter).
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "14" ]] && [[ "$col_count" == "34" ]]; then
+if [[ "$table_count" == "14" ]] && [[ "$col_count" == "36" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
   fail "$T" "expected 14 tables + 34 columns, got tables=$table_count columns=$col_count"
@@ -331,9 +333,14 @@ if $WITH_OLLAMA; then
     '{"query":"Rezept fuer Kartoffelsuppe"}' 120)
   answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer',''))" 2>/dev/null)
   confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
-  if echo "$answer" | grep -qi "no_relevant_blocks_found\|keine antwort\|keine relevanten\|nicht relevant\|no relevant\|cannot answer\|kann.*nicht"; then
+  # The test goal is "no hallucinated answer". Accepted shapes: an explicit
+  # refusal string, or a non-confident classification. "low_confidence" is the
+  # actual ClassifyConfidence constant (was never "low"); with the rerank blend
+  # default-on a no-hit query can land just above ScoreThreshold and classify
+  # as low_confidence instead of no_relevant_blocks_found — still a rejection.
+  if echo "$answer" | grep -qi "no_relevant_blocks_found\|keine antwort\|keine relevanten\|nicht relevant\|no relevant\|cannot answer\|kann.*nicht\|don't know\|weiss.*nicht\|weiß.*nicht"; then
     pass "$T (negative correctly detected)"
-  elif [[ "$confidence" == "none" ]] || [[ "$confidence" == "low" ]] || [[ "$confidence" == "no_relevant_blocks_found" ]]; then
+  elif [[ "$confidence" == "none" ]] || [[ "$confidence" == "low_confidence" ]] || [[ "$confidence" == "no_relevant_blocks_found" ]]; then
     pass "$T (confidence=$confidence)"
   else
     fail "$T" "expected rejection, got confidence=$confidence answer=${answer:0:80}"
