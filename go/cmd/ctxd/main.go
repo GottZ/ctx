@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/llm"
@@ -64,6 +65,7 @@ func main() {
 	// Set wire protocol defaults from config.
 	llm.DefaultProtocol = cfg.ChatProtocol
 	embed.DefaultProtocol = cfg.EmbedProtocol
+	dream.Protocol = cfg.DreamProtocol
 
 	// Think modes are parsed per pipeline in server.go (chatThink) and scheduler config (dreamThink).
 	// Dream think falls back to chat think if not explicitly set.

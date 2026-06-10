@@ -16,11 +16,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Protocol is the wire protocol for dream LLM calls ("ollama" or "openai").
+// Set by main() from CTX_DREAM_PROTOCOL. Without this, dream calls would
+// silently follow llm.DefaultProtocol (= chat protocol) and a split
+// chat/dream protocol configuration would break.
+var Protocol = "ollama"
+
 // chatJSON is the seam through which the dream pipeline calls the LLM.
 // Tests override this to inject canned ChatResponse values without touching
 // llm.ChatJSON's HTTP transport. Production callers (evaluate, keywords,
 // validate_temporal) use it identically to llm.ChatJSON.
-var chatJSON = llm.ChatJSON
+var chatJSON = func(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error) {
+	return llm.ChatJSONWithProtocol(ctx, Protocol, host, apiKey, model, think, systemPrompt, userPrompt, opts, timeout)
+}
 
 const (
 	// Version marks the Dream pipeline generation. Persisted with every link.
