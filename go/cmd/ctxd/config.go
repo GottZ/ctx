@@ -5,16 +5,19 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
 // defaultListenAddr is the default HTTP listen address.
 const defaultListenAddr = ":8080"
 
-// Config holds all application configuration loaded from environment variables.
+// Config is the legacy flat view of the runtime configuration. F1-W1 bridge:
+// it is no longer parsed here — loadConfig maps it from internal/config so
+// every consumer (server.go, scheduler wiring) keeps its shape until the
+// wave-by-wave store adoption (G09–G14); the bridge dies in F1-W7.
 type Config struct {
 	// PostgreSQL — Context Store
 	ContextDB     string
@@ -112,139 +115,124 @@ type Config struct {
 	ListenAddr string
 }
 
-// LoadConfig reads configuration from environment variables with sensible defaults.
-func LoadConfig() (Config, error) {
-	port, err := getEnvInt("CONTEXT_DB_PORT", 5432)
-	if err != nil {
-		return Config{}, fmt.Errorf("parsing CONTEXT_DB_PORT: %w", err)
-	}
+// loadConfig is the boot entry: env → internal/config (FromEnv + Validate) →
+// legacy bridge view. It returns everything main needs — the legacy view for
+// the unchanged consumers, the canonical config for the store + boot dump,
+// and ALL issues (logged before any fail-fast). err is non-nil only for the
+// bridge-local CTX_EMBED_DIMS parse (kept strict until F1-W7, Delta 4);
+// SeverityError issues are the caller's fail-fast signal.
+func loadConfig() (Config, *config.Config, []config.Issue, error) {
+	cc, issues := config.FromEnv()
+	issues = append(issues, config.Validate(cc)...)
+	legacy, err := legacyConfig(cc)
+	return legacy, cc, issues, err
+}
 
+// LoadConfig keeps the original (Config, error) contract on top of the new
+// loader: any SeverityError surfaces as the error, exactly as the old
+// fatal-parse and required-password paths did.
+func LoadConfig() (Config, error) {
+	legacy, _, issues, err := loadConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	for _, is := range issues {
+		if is.Severity == config.SeverityError {
+			return Config{}, fmt.Errorf("config: %s: %s", is.Field, is.Msg)
+		}
+	}
+	return legacy, nil
+}
+
+// legacyConfig maps the canonical config onto the legacy struct. The only
+// remaining direct env read is CTX_EMBED_DIMS: the field is dead (no
+// consumer) and deleted from internal/config, but its strict parse stays
+// fatal here until wave 7 so waves 1-6 boot bit-identically (Delta 4).
+func legacyConfig(cc *config.Config) (Config, error) {
 	embedDims, err := getEnvInt("CTX_EMBED_DIMS", 4096)
 	if err != nil {
 		return Config{}, fmt.Errorf("parsing CTX_EMBED_DIMS: %w", err)
 	}
 
-	embedNumCtx, err := getEnvInt("CTX_EMBED_NUM_CTX", 0)
-	if err != nil {
-		return Config{}, fmt.Errorf("parsing CTX_EMBED_NUM_CTX: %w", err)
-	}
+	return Config{
+		ContextDB:     cc.Server.DB,
+		ContextDBUser: cc.Server.DBUser,
+		ContextDBPass: cc.Server.DBPass,
+		ContextDBHost: cc.Server.DBHost,
+		ContextDBPort: cc.Server.DBPort,
+		ContextDBSSL:  cc.Server.DBSSL,
 
-	chatNumCtx, err := getEnvInt("CTX_CHAT_NUM_CTX", 0)
-	if err != nil {
-		return Config{}, fmt.Errorf("parsing CTX_CHAT_NUM_CTX: %w", err)
-	}
-
-	dreamNumCtx, err := getEnvInt("CTX_DREAM_NUM_CTX", 0)
-	if err != nil {
-		return Config{}, fmt.Errorf("parsing CTX_DREAM_NUM_CTX: %w", err)
-	}
-
-	rateLimitWrite, err := getEnvInt("CTX_RATE_LIMIT_WRITE", 100)
-	if err != nil {
-		return Config{}, fmt.Errorf("parsing CTX_RATE_LIMIT_WRITE: %w", err)
-	}
-
-	rateLimitRead, err := getEnvInt("CTX_RATE_LIMIT_READ", 0)
-	if err != nil {
-		return Config{}, fmt.Errorf("parsing CTX_RATE_LIMIT_READ: %w", err)
-	}
-
-	tz := time.UTC
-	if tzName := getEnv("CTX_TIMEZONE", ""); tzName != "" {
-		loc, err := time.LoadLocation(tzName)
-		if err != nil {
-			return Config{}, fmt.Errorf("parsing CTX_TIMEZONE %q: %w", tzName, err)
-		}
-		tz = loc
-	}
-
-	cfg := Config{
-		ContextDB:     getEnv("CONTEXT_DB", "context_store"),
-		ContextDBUser: getEnv("CONTEXT_DB_USER", "context_user"),
-		ContextDBPass: getEnv("CONTEXT_DB_PASSWORD", ""),
-		ContextDBHost: getEnv("CONTEXT_DB_HOST", "localhost"),
-		ContextDBPort: port,
-		ContextDBSSL:  getEnv("CONTEXT_DB_SSLMODE", "disable"),
-
-		EmbedHost:     getEnv("CTX_EMBED_HOST", "http://localhost:11434"),
-		EmbedAPIKey:   getEnv("CTX_EMBED_API_KEY", ""),
-		EmbedProtocol: getEnv("CTX_EMBED_PROTOCOL", "ollama"),
-		EmbedModel:    getEnv("CTX_EMBED_MODEL", "qwen3-embedding:8b"),
+		EmbedHost:     cc.Embed.Host,
+		EmbedAPIKey:   cc.Embed.APIKey,
+		EmbedProtocol: string(cc.Embed.Protocol),
+		EmbedModel:    cc.Embed.Model,
 		EmbedDims:     embedDims,
-		EmbedNumCtx:   embedNumCtx,
+		EmbedNumCtx:   cc.Embed.NumCtx,
 
-		ChatHost:     getEnv("CTX_CHAT_HOST", "http://localhost:11434"),
-		ChatAPIKey:   getEnv("CTX_CHAT_API_KEY", ""),
-		ChatProtocol: getEnv("CTX_CHAT_PROTOCOL", "ollama"),
-		ChatModel:    getEnv("CTX_CHAT_MODEL", "qwen3.5:9b"),
-		ChatNumCtx:   chatNumCtx,
-		ChatThink:    getEnv("CTX_CHAT_THINK", "false"),
+		ChatHost:     cc.Chat.Host,
+		ChatAPIKey:   cc.Chat.APIKey,
+		ChatProtocol: string(cc.Chat.Protocol),
+		ChatModel:    cc.Chat.Model,
+		ChatNumCtx:   cc.Chat.NumCtx,
+		ChatThink:    string(cc.Chat.Think),
 
-		ChatFallbackHost:     getEnv("CTX_CHAT_FALLBACK_HOST", ""),
-		ChatFallbackAPIKey:   getEnv("CTX_CHAT_FALLBACK_API_KEY", ""),
-		ChatFallbackProtocol: getEnv("CTX_CHAT_FALLBACK_PROTOCOL", "openai"),
-		ChatFallbackTimeoutS: getEnvIntSafe("CTX_CHAT_FALLBACK_TIMEOUT", 420),
+		ChatFallbackHost:     cc.Fallback.Host,
+		ChatFallbackAPIKey:   cc.Fallback.APIKey,
+		ChatFallbackProtocol: string(cc.Fallback.Protocol),
+		ChatFallbackTimeoutS: int(cc.Fallback.Timeout / time.Second),
 
-		RerankEnabled:     getEnv("CTX_RERANK_ENABLED", "false") == "true",
-		RerankHost:        getEnv("CTX_RERANK_HOST", ""),
-		RerankAPIKey:      getEnv("CTX_RERANK_API_KEY", ""),
-		RerankModel:       getEnv("CTX_RERANK_MODEL", ""),
-		RerankMaxDocs:     getEnvIntSafe("CTX_RERANK_MAX_DOCS", 50),
-		RerankBlendWeight: getEnvFloatSafe("CTX_RERANK_BLEND_WEIGHT", 1.0),
+		RerankEnabled:     cc.Rerank.Enabled,
+		RerankHost:        cc.Rerank.Host,
+		RerankAPIKey:      cc.Rerank.APIKey,
+		RerankModel:       cc.Rerank.Model,
+		RerankMaxDocs:     cc.Rerank.MaxDocs,
+		RerankBlendWeight: cc.Rerank.BlendWeight,
 
-		// Dream-graph expansion (Wave 1). Defaults = OFF and the calibration
-		// from the Wave-1 design; every value is an env-overridable sweep knob.
-		GraphExpandEnabled:          getEnv("CTX_GRAPH_EXPAND_ENABLED", "false") == "true",
-		GraphDirected:               getEnv("CTX_GRAPH_EXPAND_DIRECTED", "true") == "true",
-		GraphHopDepth:               getEnvIntSafe("CTX_GRAPH_EXPAND_HOP_DEPTH", 1),
-		GraphSeedCount:              getEnvIntSafe("CTX_GRAPH_EXPAND_SEED_COUNT", 5),
-		GraphSeedScoreFloor:         getEnvFloatSafe("CTX_GRAPH_EXPAND_SEED_SCORE_FLOOR", 0.5),
-		GraphPerSeedCap:             getEnvIntSafe("CTX_GRAPH_EXPAND_PER_SEED_CAP", 3),
-		GraphMaxInjected:            getEnvIntSafe("CTX_GRAPH_EXPAND_MAX_INJECTED", 10),
-		GraphMinConfidence:          getEnvFloatSafe("CTX_GRAPH_EXPAND_MIN_CONFIDENCE", 0.75),
-		GraphMinConfidenceRecurrent: getEnvFloatSafe("CTX_GRAPH_EXPAND_MIN_CONFIDENCE_RECURRENT", 0.8),
-		GraphBoostWeight:            getEnvFloatSafe("CTX_GRAPH_EXPAND_BOOST_WEIGHT", 0.20),
-		GraphHubDamping:             getEnv("CTX_GRAPH_EXPAND_HUB_DAMPING", "true") == "true",
-		GraphWeightTopical:          getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_TOPICAL", 0.5),
-		GraphWeightFactual:          getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_FACTUAL", 0.9),
-		GraphWeightCausal:           getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_CAUSAL", 0.9),
-		GraphWeightRecurrent:        getEnvFloatSafe("CTX_GRAPH_EXPAND_WEIGHT_RECURRENT", 1.0),
-		GraphNewPlacementFrac:       getEnvFloatSafe("CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC", 0.6),
+		GraphExpandEnabled:          cc.Graph.Enabled,
+		GraphDirected:               cc.Graph.Directed,
+		GraphHopDepth:               cc.Graph.HopDepth,
+		GraphSeedCount:              cc.Graph.SeedCount,
+		GraphSeedScoreFloor:         cc.Graph.SeedScoreFloor,
+		GraphPerSeedCap:             cc.Graph.PerSeedCap,
+		GraphMaxInjected:            cc.Graph.MaxInjected,
+		GraphMinConfidence:          cc.Graph.MinConfidence,
+		GraphMinConfidenceRecurrent: cc.Graph.MinConfidenceRecurrent,
+		GraphBoostWeight:            cc.Graph.BoostWeight,
+		GraphHubDamping:             cc.Graph.HubDamping,
+		GraphWeightTopical:          cc.Graph.WeightTopical,
+		GraphWeightFactual:          cc.Graph.WeightFactual,
+		GraphWeightCausal:           cc.Graph.WeightCausal,
+		GraphWeightRecurrent:        cc.Graph.WeightRecurrent,
+		GraphNewPlacementFrac:       cc.Graph.NewPlacementFrac,
 
-		DreamEnabled:            getEnv("CTX_DREAM_ENABLED", "false") == "true",
-		DreamHost:               getEnv("CTX_DREAM_HOST", "http://localhost:11434"),
-		DreamAPIKey:             getEnv("CTX_DREAM_API_KEY", ""),
-		DreamProtocol:           getEnv("CTX_DREAM_PROTOCOL", "ollama"),
-		DreamModel:              getEnv("CTX_DREAM_MODEL", ""),
-		DreamNumCtx:             dreamNumCtx,
-		DreamThink:              getEnv("CTX_DREAM_THINK", ""),
-		DreamEmbedHost:          getEnv("CTX_DREAM_EMBED_HOST", ""),
-		DreamEmbedAPIKey:        getEnv("CTX_DREAM_EMBED_API_KEY", ""),
-		DreamEmbedProtocol:      getEnv("CTX_DREAM_EMBED_PROTOCOL", ""),
-		DreamEmbedModel:         getEnv("CTX_DREAM_EMBED_MODEL", ""),
-		DreamEmbedNumCtx:        getEnvIntSafe("CTX_DREAM_EMBED_NUM_CTX", 0),
-		DreamIdleWait:           getEnvIntSafe("CTX_DREAM_IDLE_WAIT", 20),
-		DreamParallelism:        getEnvIntSafe("CTX_DREAM_PARALLELISM", 1),
-		DreamBackoffMode:        getEnv("CTX_DREAM_BACKOFF_MODE", "exp"),
-		DreamBackoffFactor:      getEnvFloatSafe("CTX_DREAM_BACKOFF_FACTOR", 1.6),
-		DreamBackoffGrace:       getEnvIntSafe("CTX_DREAM_BACKOFF_GRACE", 0),
-		DreamBackoffCapHours:    getEnvCooldownHours("CTX_DREAM_BACKOFF_CAP", 45*24),
-		DreamBackoffMinHours:    getEnvCooldownHours("CTX_DREAM_BACKOFF_MIN", 12),
-		DreamBackoffInertOffset: getEnvIntSafe("CTX_DREAM_BACKOFF_INERT_OFFSET", 7),
+		DreamEnabled:            cc.Dream.Enabled,
+		DreamHost:               cc.Dream.Host,
+		DreamAPIKey:             cc.Dream.APIKey,
+		DreamProtocol:           string(cc.Dream.Protocol),
+		DreamModel:              cc.Dream.Model,
+		DreamNumCtx:             cc.Dream.NumCtx,
+		DreamThink:              string(cc.Dream.Think),
+		DreamEmbedHost:          cc.Dream.Embed.Host,
+		DreamEmbedAPIKey:        cc.Dream.Embed.APIKey,
+		DreamEmbedProtocol:      string(cc.Dream.Embed.Protocol),
+		DreamEmbedModel:         cc.Dream.Embed.Model,
+		DreamEmbedNumCtx:        cc.Dream.Embed.NumCtx,
+		DreamIdleWait:           int(cc.Dream.IdleWait / time.Second),
+		DreamParallelism:        cc.Dream.Parallelism,
+		DreamBackoffMode:        cc.Dream.Backoff.Mode,
+		DreamBackoffFactor:      cc.Dream.Backoff.Factor,
+		DreamBackoffGrace:       cc.Dream.Backoff.Grace,
+		DreamBackoffCapHours:    float64(cc.Dream.Backoff.CapHours),
+		DreamBackoffMinHours:    float64(cc.Dream.Backoff.MinHours),
+		DreamBackoffInertOffset: cc.Dream.Backoff.InertOffset,
 
-		Timezone: tz,
+		Timezone: cc.Query.Timezone,
 
-		RateLimitWrite: rateLimitWrite,
-		RateLimitRead:  rateLimitRead,
+		RateLimitWrite: cc.Query.RateLimitWrite,
+		RateLimitRead:  cc.Query.RateLimitRead,
 
-		ListenAddr: getEnv("LISTEN_ADDR", defaultListenAddr),
-	}
-
-	if cfg.ContextDBPass == "" {
-		return Config{}, fmt.Errorf("CONTEXT_DB_PASSWORD is required")
-	}
-
-	return cfg, nil
+		ListenAddr: cc.Server.ListenAddr,
+	}, nil
 }
 
 // GraphConfig builds the rrf.GraphConfig for the Dream-graph expansion stage
@@ -319,76 +307,6 @@ func parseThinkMode(s string) *bool {
 	}
 }
 
-func getEnvFloatSafe(key string, fallback float64) float64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		return fallback
-	}
-	return f
-}
-
-// cooldownUnitHours maps the domain duration suffixes to hours. Deliberately
-// NOT Go's time.ParseDuration: that uses m=minutes / s=seconds (meaningless for
-// re-dream intervals, and m=minutes is a months trap). Here the units are the
-// ones that make sense for cooldowns — h/d/w/m/y — with m = month (30d).
-var cooldownUnitHours = map[byte]float64{
-	'h': 1,
-	'd': 24,
-	'w': 24 * 7,
-	'm': 24 * 30,
-	'y': 24 * 365,
-}
-
-// parseCooldownHours parses a cooldown duration to hours. Accepts a unit suffix
-// h|d|w|m|y (e.g. "12h", "45d", "1w", "1m", "1y") or a bare number (interpreted
-// as hours). Returns (hours, true) on success; (0, false) on a malformed value
-// so callers fall back to their default.
-func parseCooldownHours(s string) (float64, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, false
-	}
-	last := s[len(s)-1]
-	if mult, ok := cooldownUnitHours[last|0x20]; ok { // |0x20 lowercases ASCII letter
-		n, err := strconv.ParseFloat(strings.TrimSpace(s[:len(s)-1]), 64)
-		if err != nil || n < 0 {
-			return 0, false
-		}
-		return n * mult, true
-	}
-	// No recognized suffix → bare number is hours.
-	n, err := strconv.ParseFloat(s, 64)
-	if err != nil || n < 0 {
-		return 0, false
-	}
-	return n, true
-}
-
-// getEnvCooldownHours reads a duration env var (h|d|w|m|y suffix, or bare hours)
-// and returns it in hours, falling back on empty/malformed input.
-func getEnvCooldownHours(key string, fallbackHours float64) float64 {
-	if h, ok := parseCooldownHours(os.Getenv(key)); ok {
-		return h
-	}
-	return fallbackHours
-}
-
-func getEnvIntSafe(key string, fallback int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return fallback
-	}
-	return n
-}
-
 func getEnvInt(key string, fallback int) (int, error) {
 	v := os.Getenv(key)
 	if v == "" {
@@ -399,27 +317,4 @@ func getEnvInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("invalid integer %q for %s: %w", v, key, err)
 	}
 	return n, nil
-}
-
-// parseScopes parses a comma-separated scope list from an environment variable.
-// Empty input or all-whitespace input falls back to defaultVal. Each scope is
-// trim-whitespaced and empty parts are filtered out (e.g. "a,,b" → ["a","b"]).
-// No further validation — v2.0.0 M045 dropped chk_scope so any non-empty
-// string is a valid scope. Used by main.go to populate Scheduler.ReadScopes
-// from CTX_READ_SCOPES.
-func parseScopes(envVal string, defaultVal []string) []string {
-	if envVal == "" {
-		return defaultVal
-	}
-	parts := strings.Split(envVal, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if trimmed := strings.TrimSpace(p); trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
-	if len(result) == 0 {
-		return defaultVal
-	}
-	return result
 }

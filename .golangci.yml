@@ -20,10 +20,30 @@ linters:
     - nilerr
     - errorlint
     - godot
+    - depguard
 
   settings:
     cyclop:
       max-complexity: 25
+
+    # F1 layering rule (design/01-config-core.md §2.1): internal/config is
+    # consumed ONLY by cmd/**, internal/handler and internal/events. Domain
+    # packages (llm, embed, dream, rrf, rerank, …) stay parameter-pure — they
+    # receive backends.Backend tuples and plain values as arguments. This
+    # kills config import cycles by design and keeps domain packages trivially
+    # testable. Globs match absolute paths; the negations carve out the
+    # allowed consumers (and the package itself, for its tests).
+    depguard:
+      rules:
+        config-layering:
+          files:
+            - "!**/go/cmd/**"
+            - "!**/go/internal/handler/**"
+            - "!**/go/internal/events/**"
+            - "!**/go/internal/config/**"
+          deny:
+            - pkg: "github.com/GottZ/ctx/internal/config"
+              desc: "internal/config may only be imported by cmd/**, internal/handler, internal/events (F1 layering rule — pass values as parameters instead)"
 
     gosec:
       excludes:
