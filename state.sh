@@ -89,6 +89,10 @@ echo "  Packages:           $go_packages"
 echo "  Test functions:     $go_test_funcs"
 echo "  Binaries:           $go_binaries"
 echo "  CLI commands:       $cli_commands"
+# Inventory, not validation: the multi-tenant wave starts from this grep
+# (masterplan E8 convention — every wave marks tenant-relevant spots).
+mt_markers=$(grep -rn "TODO(multi-tenant)" "$SCRIPT_DIR/go" 2>/dev/null | wc -l)
+echo "  TODO(multi-tenant): $mt_markers markers"
 echo ""
 echo "--- Containers ---"
 echo "  ctx:                $ctx_status"
