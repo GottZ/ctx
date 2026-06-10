@@ -6,6 +6,7 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/web"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -129,6 +130,11 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 		r.Use(handler.MaxBodySize(BlobMaxBodySize))
 		r.Post("/api/blob/store", blobH.HandleBlobStore)
 	})
+
+	// Embedded SPA — mounted last: chi matches registered routes first, only
+	// unknown paths fall through (history-API fallback for HTML navigations
+	// only; mistyped API URLs stay 404, known path + wrong method stays 405).
+	r.NotFound(web.Handler().ServeHTTP)
 
 	return r
 }
