@@ -311,6 +311,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST\|GET\|DELETE /mcp` | MCP Streamable HTTP (remote tool server) |
 | `GET /authorize` | OAuth 2.1 authorization (PKCE) |
 | `POST /token` | OAuth 2.1 token exchange |
+| `GET /` (unregistered paths) | Embedded admin SPA (Svelte 5 + Vite, served from the binary). History-API fallback answers HTML navigations (`Accept: text/html`) only — mistyped API URLs stay 404 for JSON clients. Hashed `/assets/*` are immutable-cached and pre-compressed (`.br`/`.gz`); binaries built without the frontend (plain `go install`) serve a 503 placeholder while all APIs stay functional — the Docker image is the channel that ships the real UI |
 
 ## Building
 
@@ -319,6 +320,27 @@ go build -o ctx ./cmd/ctx/           # CLI
 go build -o ctxd ./cmd/ctxd/         # Daemon
 go test ./... -short                  # Unit tests
 ```
+
+### Web UI (Svelte 5 + TypeScript + Vite, Bun)
+
+The admin SPA lives in `go/web/` and is embedded into the ctxd binary via
+`go:embed`. The Docker image builds it in its own stage (`oven/bun:1.3-alpine`,
+`bun install --frozen-lockfile`, `svelte-check` gate) — `docker compose build ctx`
+is the channel that ships the real UI. Plain `go build` / `go install .../cmd/ctxd`
+need no Bun and produce a binary that serves a 503 placeholder instead of the UI;
+the CLI (`cmd/ctx`) never depends on the frontend at all.
+
+```bash
+cd go/web
+bun install                           # once; bun.lock is committed
+bun run dev                           # Vite on :5173, proxies /api → ctxd
+bun run check && bun run build        # typecheck + production build into dist/
+```
+
+The dev proxy targets `http://localhost:8080`; the compose ctx service publishes
+no ports by default — add a local port mapping (see
+`docker-compose.override.yml.example`) and override with
+`CTX_DEV_PROXY=http://127.0.0.1:<port>` if you map a different port.
 
 ## License
 

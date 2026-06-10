@@ -1,0 +1,15 @@
+# Local development overrides — template only.
+#
+# Copy the parts you need into your local docker-compose.override.yml
+# (gitignored; it may already carry private services — merge, don't replace).
+#
+# The ctx service publishes NO ports by default (reverse-proxy labels only).
+# The Vite dev server (go/web: `bun run dev`) proxies /api, /health and /mcp
+# to http://localhost:8080 — this mapping makes ctxd reachable from the host.
+# If host port 8080 is taken (anything else listening on 127.0.0.1:8080),
+# pick another port here and point the dev proxy at it via
+# `CTX_DEV_PROXY=http://127.0.0.1:<port> bun run dev`.
+services:
+  ctx:
+    ports:
+      - "127.0.0.1:8080:8080"

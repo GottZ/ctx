@@ -17,6 +17,13 @@ backup-*.sql
 go/ctx
 go/dist/
 
+# Frontend (Svelte 5 + Vite, bun)
+go/web/node_modules/
+go/web/dist/*
+!go/web/dist/.gitkeep
+!.gitkeep
+!go/.dockerignore
+
 # Misc
 *.swp
 *.swo
