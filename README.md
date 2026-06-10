@@ -202,9 +202,11 @@ Store ──► Extract Times ──► Hash NOOP ──────────
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 50 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
+**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 51 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
 
 ### Key environment variables
+
+Runtime overrides on top of env are provisioned in the DB (`context_settings` + sealed `context_secrets`, migration 051, with a trigger-fed audit trail in `context_settings_audit`) — the settings API/CLI waves activate them; until then env remains the only live source.
 
 | Var | Default | Purpose |
 |-----|---------|---------|
