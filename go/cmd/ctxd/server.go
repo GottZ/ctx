@@ -45,6 +45,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	queryHandler := handler.NewQueryHandler(pool, cfg.ChatHost, cfg.ChatAPIKey, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.ChatModel, chatThink, cfg.ChatNumCtx, cfg.RerankConfig(), cfg.GraphConfig(), cfg.Timezone, cfg.RateLimitRead)
 	storeH := handler.NewStoreHandler(pool, cfg.RateLimitWrite)
 	searchH := handler.NewSearchHandler(pool, cfg.RateLimitRead)
+	graphH := handler.NewGraphHandler(pool, cfg.RateLimitRead)
 	manageH := handler.NewManageHandler(pool, scheduler)
 	blobH := handler.NewBlobHandler(pool, cfg.RateLimitWrite)
 	digestH := handler.NewDigestHandler(pool)
@@ -103,6 +104,8 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 		r.Post("/api/store", storeH.HandleStore)
 		// Search — Lightweight FTS (no LLM)
 		r.Post("/api/search", searchH.HandleSearch)
+		// Graph — scope-filtered k-hop ego subgraph (read-only, no LLM)
+		r.Get("/api/graph/ego", graphH.HandleEgo)
 		// Manage — CRUD + Guard API
 		r.Post("/api/manage", manageH.HandleManage)
 		// Digest — Topic map generation

@@ -251,6 +251,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings; optional `categories_exclude` / `block_roles_exclude` arrays filter slot-stealers). With the cross-encoder reranker engaged (~80s/query) the response commits `200` up front and streams a whitespace keepalive every 25s so buffering reverse proxies don't hit their read timeout; the body stays valid JSON (leading whitespace, RFC 8259) and a late synthesis failure reports `success:false` inside the 200 body |
 | `POST /api/store` | Upsert (embedding async via scheduler) |
 | `POST /api/search` | Lightweight search (no LLM) |
+| `GET /api/graph/ego` | Scope-filtered k-hop ego subgraph over dream links (read-only, no LLM — see [Graph API](#graph-api)) |
 | `POST /api/manage` | CRUD, Guard API, stats, API-key management (`api-key-create` requires `home_scope`) |
 | `POST /api/digest` | Topic map generation |
 | `POST /api/ingest` | Obsidian vault ingestion |
@@ -259,6 +260,33 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST\|GET\|DELETE /mcp` | MCP Streamable HTTP (remote tool server) |
 | `GET /authorize` | OAuth 2.1 authorization (PKCE) |
 | `POST /token` | OAuth 2.1 token exchange |
+
+### Graph API
+
+`GET /api/graph/ego?block=<uuid>` returns the k-hop ego subgraph of a focus block over the dream-link graph — the server side of the graph viewer. Designed for 1M+ blocks: the server only ever ships budgeted subgraphs, never the full graph.
+
+```
+GET /api/graph/ego?block=<uuid>&hops=2&per_node_cap=25&limit=500
+                  &min_confidence=0.5&link_class=topical,causal
+                  &category=learnings&created_after=2026-01-01T00:00:00Z
+                  &edge_limit=4000
+```
+
+| Param | Default | Range | Meaning |
+|-------|---------|-------|---------|
+| `block` | — (required) | full UUID | focus node (hop 0) |
+| `hops` | 1 | 1–3 | BFS depth |
+| `per_node_cap` | 25 | 1–100 | top-N edges per frontier node by `raw_confidence` — slots count only visible, filter-passing edges |
+| `limit` | 500 | 1–5000 | total node budget (truncation: closer hop wins, then higher confidence, then id) |
+| `min_confidence` | 0 | 0–1 | gate on weighted confidence (traversal + displayed edges) |
+| `link_class` | all 5 | topical,factual,causal,recurrent,supersedes | `supersedes` is display-only, never traversed |
+| `category` | all | CSV | filter on neighbor blocks (focus always included) |
+| `created_after` / `created_before` | open | RFC3339 | window on neighbor `created_at` |
+| `edge_limit` | 4000 | 1–20000 | budget for edges within the node set, strongest first |
+
+Out-of-range values are a `400`, never silently clamped. Response: `nodes` (id, title capped at 120 chars, category, scope, visible `degree` — capped at 201, rendered "200+" — and `hop`), `edges` as compact index tuples `[srcIdx, dstIdx, relIdx, confidence]` into `nodes`/`rels`, and `stats` (`nodes`, `edges`, `truncated`, `elapsed_ms`). The payload never contains block `content` (load it lazily via `manage get`).
+
+Security semantics: the visibility triple (not archived, not system-meta, scope readable by the key) is applied inside every hop **and** inside the per-node cap legs — a node reachable only through a foreign private bridge is never delivered, and invisible edges never consume cap slots. `degree` counts only visible neighbors (scan budget 1000 raw edges/direction). "Does not exist" and "not visible" answer with an identical `404` (no existence oracle), and only successful calls write an access-log row (`action='graph'`, `block_id=NULL` — graph browsing never feeds access-count ranking).
 
 ## Building
 
