@@ -138,6 +138,14 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 // read timeout. A package var so tests can shrink it.
 var heartbeatInterval = 25 * time.Second
 
+// heartbeatWriteWindow is the rolling write-deadline budget per tick. The
+// global http.Server WriteTimeout (main.go) is an ABSOLUTE response deadline —
+// it killed the >120s CPU-fallback path mid-flight (context canceled, client
+// got only the tick bytes). While the heartbeat ticks, liveness is proven, so
+// every tick pushes the connection write deadline one window ahead instead.
+// 90s = ~3 missed ticks before the server gives up on a dead connection.
+var heartbeatWriteWindow = 90 * time.Second
+
 type queryHeartbeat struct {
 	w      http.ResponseWriter
 	rc     *http.ResponseController
@@ -165,8 +173,22 @@ func startHeartbeat(w http.ResponseWriter, active bool) *queryHeartbeat {
 		slog.Warn("query heartbeat: response writer not flushable, keepalive ineffective",
 			"error", err)
 	}
+	if err := hb.extendWriteDeadline(); err != nil {
+		// Without deadline extension the server's absolute WriteTimeout caps
+		// the response — long fallback syntheses (>120s) will be cut off.
+		slog.Warn("query heartbeat: cannot extend write deadline, server WriteTimeout caps long responses",
+			"error", err)
+	}
 	go hb.run()
 	return hb
+}
+
+// extendWriteDeadline rolls the connection write deadline one window ahead.
+// While the heartbeat ticks, liveness is proven — the absolute server
+// WriteTimeout would otherwise kill the deliberately long rerank/fallback
+// path mid-flight.
+func (hb *queryHeartbeat) extendWriteDeadline() error {
+	return hb.rc.SetWriteDeadline(time.Now().Add(heartbeatWriteWindow))
 }
 
 func (hb *queryHeartbeat) run() {
@@ -178,6 +200,7 @@ func (hb *queryHeartbeat) run() {
 			hb.mu.Unlock()
 			return
 		}
+		_ = hb.extendWriteDeadline()
 		_, err := io.WriteString(hb.w, " ")
 		if err == nil {
 			_ = hb.rc.Flush()
@@ -202,6 +225,7 @@ func (hb *queryHeartbeat) finish(status int, v any) {
 	hb.mu.Lock()
 	defer hb.mu.Unlock()
 	hb.done = true
+	_ = hb.extendWriteDeadline()
 	_ = json.NewEncoder(hb.w).Encode(v)
 	_ = hb.rc.Flush()
 }
