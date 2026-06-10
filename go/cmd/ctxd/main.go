@@ -37,6 +37,14 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Break-glass decrypt mode: /ctx -secret-decrypt reads one
+	// nonce_b64:ct_b64:name:scope record from stdin and prints the plaintext.
+	// Env-only (CTX_SECRETS_KEY[_PREV]), no DB — see cmd/ctxd/sealbox.go and
+	// break-glass.sh at the repo root.
+	if len(os.Args) > 1 && os.Args[1] == "-secret-decrypt" {
+		os.Exit(runSecretDecrypt(os.Stdin, os.Stdout, os.Stderr))
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))

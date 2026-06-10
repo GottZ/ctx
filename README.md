@@ -66,6 +66,30 @@ docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 \
 
 **Admin-key hygiene:** the OAuth/MCP flow hands the API key ITSELF out as the bearer token — a key used as an MCP remote token circulates through claude.ai/Cloudflare and is stored in external connector storage. Create a **dedicated admin key that is never used as an MCP/OAuth token**; the claude.ai MCP key stays non-admin. Test/eval script keys stay non-admin too (least privilege).
 
+### Sealed secrets & break-glass
+
+Provider credentials live AES-256-GCM-sealed in `context_secrets` (encrypted in Go — never via pgcrypto, the master key must not cross the SQL wire). The AAD binds each ciphertext to its `name`+`scope` row identity, so a ciphertext copied onto another row fails authentication. The secrets API/CLI waves activate the write paths; the crypto, the decrypt mode and the host script ship first so the recovery path exists before the first secret does.
+
+**Master key setup** (one-time):
+
+```bash
+# generate and append to .env:
+echo "CTX_SECRETS_KEY=$(openssl rand -hex 32)" >> .env
+```
+
+**Mandatory: copy `CTX_SECRETS_KEY` into your password manager when you set it.** `backup.sh` archives only the pg_dumps — the ciphertexts are in every dump, the master key is in none (deliberate: the key stays spatially separated from the ciphertexts it opens, so disaster recovery needs both places). **Key loss = total loss of all sealed secrets, by design.** No recovery mechanism; re-enter the provider keys instead.
+
+**Master-key rotation:** generate a new key, move the old value to `CTX_SECRETS_KEY_PREV`, put the new one in `CTX_SECRETS_KEY`, restart ctx. The boot sweep (settings bootstrap wave) re-seals every secret it can open with the previous key (`key_version` bump, log line per name); afterwards remove `CTX_SECRETS_KEY_PREV` from `.env`. Secrets that open with neither key are left untouched (WARN per name, no boot abort).
+
+**Break-glass extraction** (host access; works even when the ctx container crash-loops — the decrypt mode reads ONLY env + stdin, no DB):
+
+```bash
+./break-glass.sh secret <name> [scope]     # prints the plaintext
+./break-glass.sh reset-settings [key]      # factory-reset settings overrides (audited via DB trigger)
+```
+
+`openssl enc` cannot do AES-GCM, so extraction pipes the row through the ctxd binary itself: `psql -At … | docker run --rm -i -e CTX_SECRETS_KEY -e CTX_SECRETS_KEY_PREV n8n-ctx -secret-decrypt`. PostgreSQL's `encode(bytea,'base64')` is MIME (RFC 2045) and wraps every 76 chars — the script strips the wraps SQL-side, and the decrypt mode additionally reads stdin to EOF and strips CR/LF, so every realistic provider-key length survives the pipe (negatively probed: a line-based reader fails on exactly those records).
+
 ## Using ctx effectively
 
 Installing ctx gives an agent memory. Using it *well* takes discipline — because a memory shared across sessions has a failure mode a single chat doesn't: **drift**.
@@ -231,6 +255,7 @@ Runtime overrides on top of env are provisioned in the DB (`context_settings` + 
 |-----|---------|---------|
 | `CTX_BASE_URL` / `CTX_KEY` | – | CLI client config (`~/.config/ctx/config`) |
 | `CONTEXT_DB` / `CONTEXT_DB_USER` / `CONTEXT_DB_PASSWORD` | – | Database (separate from inference) |
+| `CTX_SECRETS_KEY` / `CTX_SECRETS_KEY_PREV` | – | Master key for AES-256-GCM-sealed `context_secrets` (64 hex chars, `openssl rand -hex 32`); `_PREV` only while a rotation sweep is pending. Env-only by design — **copy into your password manager**, key loss = total loss (see Sealed secrets & break-glass) |
 | `CTX_EMBED_HOST` / `_PROTOCOL` / `_MODEL` / `_DIMS` | `ollama` / – / `1024` | Embedding pipeline (e.g. qwen3-embedding:8b) |
 | `CTX_CHAT_HOST` / `_PROTOCOL` / `_MODEL` / `_THINK` / `_NUM_CTX` | `ollama` / – / `false` / `0` | Generator pipeline (RRF synthesis); `_NUM_CTX` (`0`=model default) applies to *all* chat-model calls (translate / temporal-fallback / rerank / synthesis) — set equal to the dream `_NUM_CTX` to share a single Ollama runner |
 | `CTX_CHAT_FALLBACK_HOST` / `_PROTOCOL` / `_API_KEY` / `_TIMEOUT` | empty (off) / `openai` / – / `420` | Emergency chat backend for query-path **synthesis only**, engaged when the primary is unreachable at transport level (host down, connection died) — never on HTTP errors or slow responses. `_TIMEOUT` in seconds, sized for CPU inference (27B ≈ 4.5–5.5 min/answer; the body heartbeat keeps proxies alive). See the `llama-cpu` compose service. Translate stays fail-open, dream waits for its scheduler retry |
