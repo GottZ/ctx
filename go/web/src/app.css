@@ -1,0 +1,26 @@
+/* Design tokens — dark-first, dense admin surface. Extended in G20+. */
+:root {
+  --surface-0: #101014;
+  --surface-1: #1a1a22;
+  --text: #d8dae5;
+  --text-dim: #8a8d9c;
+  --accent: #7aa2f7;
+  --font-mono: ui-monospace, 'JetBrains Mono', 'Fira Code', monospace;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 1rem;
+
+  color-scheme: dark;
+}
+
+html {
+  background: var(--surface-0);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  line-height: 1.5;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
