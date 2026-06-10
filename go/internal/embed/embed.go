@@ -13,6 +13,8 @@ import (
 	"math"
 	"net/http"
 	"time"
+
+	"github.com/GottZ/ctx/internal/httpx"
 )
 
 var httpClient = &http.Client{
@@ -139,7 +141,7 @@ func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx 
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
 		return nil, fmt.Errorf("embed: request failed: %w", err)
 	}
@@ -180,7 +182,7 @@ func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]floa
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
 		return nil, fmt.Errorf("embed: request failed: %w", err)
 	}

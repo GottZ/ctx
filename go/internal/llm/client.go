@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/GottZ/ctx/internal/httpx"
 )
 
 var httpClient = &http.Client{
@@ -180,7 +182,7 @@ func chatOllama(ctx context.Context, host, apiKey, model string, think *bool, sy
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
@@ -245,7 +247,7 @@ func chatOpenAI(ctx context.Context, host, apiKey, model string, think *bool, sy
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}

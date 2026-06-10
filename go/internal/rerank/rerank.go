@@ -26,6 +26,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/GottZ/ctx/internal/httpx"
 )
 
 var httpClient = &http.Client{
@@ -91,7 +93,7 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
 		return nil, fmt.Errorf("rerank: request failed: %w", err)
 	}
