@@ -233,14 +233,15 @@ fi
 # T07 SCHEMA_INTEGRITY — counts exclude manual snapshot tables (name pattern "*_snapshot_*")
 # which accumulate over time (e.g. context_dream_links_snapshot_20260423_prev5).
 # 36 columns since M044 (ts_de/ts_en bilingual generated tsvectors) + M049
-# (dream_eval_count back-off counter).
+# (dream_eval_count back-off counter). 17 tables since M051/M052
+# (context_settings, context_settings_audit, context_secrets).
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "14" ]] && [[ "$col_count" == "36" ]]; then
+if [[ "$table_count" == "17" ]] && [[ "$col_count" == "36" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 14 tables + 34 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 17 tables + 36 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
