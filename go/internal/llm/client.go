@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -130,6 +131,39 @@ func ChatJSON(ctx context.Context, host, apiKey, model string, think *bool, syst
 // DefaultProtocol is the wire protocol. Set by main() from config.
 // Per-pipeline protocol is passed via the ChatWithProtocol/EmbedWithProtocol functions.
 var DefaultProtocol = "ollama"
+
+// FallbackBackend is the emergency chat backend for the query path (synthesis
+// only — translate stays fail-open, dream waits for the scheduler retry).
+// Empty Host disables the fallback. Set by main() from CTX_CHAT_FALLBACK_*.
+type FallbackBackend struct {
+	Host     string
+	APIKey   string
+	Protocol string
+	Timeout  time.Duration
+}
+
+// ChatFallback is consulted by chatWithFallback when the primary chat backend
+// is unreachable at transport level (host down, connection died) — never on
+// HTTP status errors or deadlines: a slow-but-alive primary keeps the request.
+var ChatFallback FallbackBackend
+
+// chatWithFallback runs a chat call against the primary backend and, when the
+// primary is unreachable (httpx.IsBackendUnavailable) and a fallback is
+// configured, replays the identical prompt against the fallback with its own
+// (longer) timeout — sized for CPU inference, where a 27B synthesis takes
+// minutes; the response-body heartbeat keeps the client connection alive.
+// Returns usedFallback for logging/metrics.
+func chatWithFallback(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (resp *ChatResponse, usedFallback bool, err error) {
+	resp, err = Chat(ctx, host, apiKey, model, think, systemPrompt, userPrompt, opts, timeout)
+	if err == nil || ChatFallback.Host == "" || !httpx.IsBackendUnavailable(err) || ctx.Err() != nil {
+		return resp, false, err
+	}
+	slog.Warn("llm: primary chat backend unavailable, using fallback",
+		"primary", host, "fallback", ChatFallback.Host, "error", err)
+	resp, err = ChatWithProtocol(ctx, ChatFallback.Protocol, ChatFallback.Host, ChatFallback.APIKey,
+		model, think, systemPrompt, userPrompt, opts, ChatFallback.Timeout)
+	return resp, true, err
+}
 
 // ChatWithProtocol sends a chat request using the specified protocol.
 func ChatWithProtocol(ctx context.Context, protocol, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {

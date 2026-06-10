@@ -31,6 +31,10 @@ services:
       CTX_CHAT_MODEL: ${CTX_CHAT_MODEL}
       CTX_CHAT_THINK: ${CTX_CHAT_THINK:-false}
       CTX_CHAT_NUM_CTX: ${CTX_CHAT_NUM_CTX:-0}
+      CTX_CHAT_FALLBACK_HOST: ${CTX_CHAT_FALLBACK_HOST:-}
+      CTX_CHAT_FALLBACK_API_KEY: ${CTX_CHAT_FALLBACK_API_KEY:-}
+      CTX_CHAT_FALLBACK_PROTOCOL: ${CTX_CHAT_FALLBACK_PROTOCOL:-openai}
+      CTX_CHAT_FALLBACK_TIMEOUT: ${CTX_CHAT_FALLBACK_TIMEOUT:-420}
       CTX_DREAM_ENABLED: ${CTX_DREAM_ENABLED:-false}
       CTX_DREAM_HOST: ${CTX_DREAM_HOST:-}
       CTX_DREAM_API_KEY: ${CTX_DREAM_API_KEY:-}
@@ -218,6 +222,43 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # llama.cpp CPU emergency fallback for the query path (synthesis only).
+  # Engaged by ctx via CTX_CHAT_FALLBACK_HOST when the primary GPU chat
+  # backend is unreachable at transport level (host down/Gaming-Mode) — never
+  # on HTTP errors or slow responses. Same MTP-GGUF as production → identical
+  # answer quality at CPU speed (~2.25 tok/s tg, 74 tok/s pp ⇒ a 500-token
+  # synthesis takes 4.5-5.5 min; the response-body heartbeat keeps buffering
+  # reverse proxies alive). ctx-size 32k suffices: the openai path never sends
+  # num_ctx, query prompts are ≤10k tokens. --threads 10 leaves headroom for
+  # PG + ctx on the 12-thread host. Idle cost ≈ 0 (mmap'd weights, no compute).
+  llama-cpu:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: llama-cpu
+    restart: unless-stopped
+    volumes:
+      - /opt/models:/models:ro
+    command: >
+      --model /models/Qwen3.6-27B-MTP-Q4_K_M.gguf
+      --host 0.0.0.0
+      --port 8090
+      --ctx-size 32768
+      --n-gpu-layers 0
+      --threads 10
+      --jinja
+      --reasoning off
+      --top-k 20
+      --top-p 0.95
+      --min-p 0
+      --presence-penalty 1.5
+    networks:
+      - n8nintern
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
 
 networks:
   n8nintern:

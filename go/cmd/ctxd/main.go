@@ -66,6 +66,12 @@ func main() {
 	llm.DefaultProtocol = cfg.ChatProtocol
 	embed.DefaultProtocol = cfg.EmbedProtocol
 	dream.Protocol = cfg.DreamProtocol
+	llm.ChatFallback = llm.FallbackBackend{
+		Host:     cfg.ChatFallbackHost,
+		APIKey:   cfg.ChatFallbackAPIKey,
+		Protocol: cfg.ChatFallbackProtocol,
+		Timeout:  time.Duration(cfg.ChatFallbackTimeoutS) * time.Second,
+	}
 
 	// Think modes are parsed per pipeline in server.go (chatThink) and scheduler config (dreamThink).
 	// Dream think falls back to chat think if not explicitly set.

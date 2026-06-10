@@ -15,6 +15,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"syscall"
@@ -37,6 +38,33 @@ func IsTransientNetErr(err error) bool {
 	return strings.Contains(s, "connection reset by peer") ||
 		strings.Contains(s, "broken pipe") ||
 		strings.Contains(s, "server closed idle connection")
+}
+
+// IsBackendUnavailable reports whether err indicates the backend could not be
+// reached at transport level: a transient mid-flight failure (IsTransientNetErr)
+// or the host being down (dial refused/timeout, no route, DNS failure). A slow
+// but alive backend (context deadline during read) does NOT count — failing
+// over from a busy server to a slower one helps nobody.
+func IsBackendUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if IsTransientNetErr(err) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "connection refused") || strings.Contains(s, "no route to host")
 }
 
 // DoRetryOnce executes req and retries exactly once on a transient transport

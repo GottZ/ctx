@@ -40,6 +40,13 @@ type Config struct {
 	ChatNumCtx   int
 	ChatThink    string // "true", "false", or "" (omit from request)
 
+	// Emergency chat fallback for the query path (synthesis only) when the
+	// primary chat backend is unreachable at transport level. Empty host = off.
+	ChatFallbackHost     string
+	ChatFallbackAPIKey   string
+	ChatFallbackProtocol string // default "openai" (llama.cpp CPU sidecar)
+	ChatFallbackTimeoutS int    // seconds; CPU-27B synthesis runs 4.5-5.5 min
+
 	// Reranker. RerankEnabled is the master gate for both paths. RerankHost
 	// dispatches: empty => LLM-as-judge on the chat model; set => local
 	// cross-encoder sidecar (Wave 2). The cross-encoder fields are sweep knobs.
@@ -172,6 +179,11 @@ func LoadConfig() (Config, error) {
 		ChatModel:    getEnv("CTX_CHAT_MODEL", "qwen3.5:9b"),
 		ChatNumCtx:   chatNumCtx,
 		ChatThink:    getEnv("CTX_CHAT_THINK", "false"),
+
+		ChatFallbackHost:     getEnv("CTX_CHAT_FALLBACK_HOST", ""),
+		ChatFallbackAPIKey:   getEnv("CTX_CHAT_FALLBACK_API_KEY", ""),
+		ChatFallbackProtocol: getEnv("CTX_CHAT_FALLBACK_PROTOCOL", "openai"),
+		ChatFallbackTimeoutS: getEnvIntSafe("CTX_CHAT_FALLBACK_TIMEOUT", 420),
 
 		RerankEnabled:     getEnv("CTX_RERANK_ENABLED", "false") == "true",
 		RerankHost:        getEnv("CTX_RERANK_HOST", ""),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"os"
 	"strconv"
@@ -391,10 +392,14 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model str
 	// Step 6: Build prompt.
 	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates)
 
-	// Step 7: Call LLM.
+	// Step 7: Call LLM. Falls back to ChatFallback (CPU backend) when the
+	// primary is unreachable — "es sollte immer ein Weg zu finden sein".
 	start := time.Now()
-	resp, err := Chat(ctx, host, apiKey, model, think, systemPrompt, userPrompt, SynthesisOptions(numCtx), ChatTimeout)
+	resp, usedFallback, err := chatWithFallback(ctx, host, apiKey, model, think, systemPrompt, userPrompt, SynthesisOptions(numCtx), ChatTimeout)
 	duration := time.Since(start)
+	if usedFallback && err == nil {
+		slog.Info("synthesis served by fallback backend", "duration", duration.Round(time.Millisecond))
+	}
 
 	blockIDs := make([]string, 0, len(llmSources))
 	for _, s := range llmSources {
