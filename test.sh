@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 #
 # Context Store Benchmark Test Suite
-# Usage: ./test.sh              — runs T01-T12 (system tests only)
-#        ./test.sh --with-ollama — runs T01-T18 (includes retrieval + MCP tests)
+# Usage: ./test.sh              — runs T01-T12 + T19 (system tests only)
+#        ./test.sh --with-ollama — runs all tests (adds T13-T18 retrieval + MCP)
+#
+# Test IDs are append-only: T19 (graph) lives in Part 1 because the graph
+# endpoint needs no LLM — T13-T18 predate it inside the --with-ollama block.
 #
 # ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
 # Implements GottZ 4-Way RRF verification and GottZ Scope Model tests.
@@ -294,6 +297,55 @@ if echo "$resp" | grep -q '"success":true'; then
   pass "$T"
 else
   fail "$T" "dream-review failed"
+fi
+
+# T19 GRAPH_EGO — GET /api/graph/ego (G07/F5-W1). Four assertions per the
+# wave gate: node/edge counts > 0, NO content field anywhere in the payload,
+# stats.truncated present, and 404-equality (invisible private block vs
+# nonexistent UUID must answer byte-identically — no existence oracle).
+T="T19 GRAPH_EGO"
+# Focus: the highest-degree non-archived private/shared block (visible to
+# KEY_PRIVATE, guaranteed >= 1 edge so the edge-count assertion is meaningful).
+t19_focus=$($DB_CMD -c "SELECT b.id FROM context_blocks b
+  JOIN context_dream_links l ON l.source_block_id = b.id OR l.target_block_id = b.id
+  WHERE NOT b.is_archived AND b.block_role <> 'system-meta' AND b.scope IN ('private','shared')
+  GROUP BY b.id ORDER BY count(*) DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
+if [[ -z "$t19_focus" ]]; then
+  fail "$T" "no linked block found to use as focus"
+else
+  resp=$(curl -s --max-time 15 "$WEBHOOK/api/graph/ego?block=$t19_focus&hops=2" \
+    -H "X-Context-Key: $KEY_PRIVATE" 2>/dev/null)
+  t19_check=$(echo "$resp" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+stats = d.get('stats', {})
+problems = []
+if not d.get('success'): problems.append('success!=true')
+if stats.get('nodes', 0) < 1: problems.append('nodes=0')
+if stats.get('edges', 0) < 1: problems.append('edges=0')
+if 'truncated' not in stats: problems.append('stats.truncated missing')
+if any('content' in n for n in d.get('nodes', [])): problems.append('content field leaked')
+print(';'.join(problems) if problems else 'OK ' + str(stats.get('nodes')) + ' nodes ' + str(stats.get('edges')) + ' edges')
+" 2>/dev/null)
+  if [[ "$t19_check" != OK* ]]; then
+    fail "$T" "payload check: ${t19_check:-unparseable response: ${resp:0:100}}"
+  else
+    # 404-equality: a private block (invisible to KEY_WORK) and a nonexistent
+    # UUID must produce byte-identical 404 bodies.
+    t19_priv=$($DB_CMD -c "SELECT id FROM context_blocks WHERE scope='private' AND NOT is_archived LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
+    t19_missing="00000000-0000-7000-8000-000000000000"
+    t19_b1=$(curl -s --max-time 10 -w '\n%{http_code}' "$WEBHOOK/api/graph/ego?block=$t19_priv" \
+      -H "X-Context-Key: $KEY_WORK" 2>/dev/null)
+    t19_b2=$(curl -s --max-time 10 -w '\n%{http_code}' "$WEBHOOK/api/graph/ego?block=$t19_missing" \
+      -H "X-Context-Key: $KEY_WORK" 2>/dev/null)
+    t19_code1="${t19_b1##*$'\n'}"; t19_body1="${t19_b1%$'\n'*}"
+    t19_code2="${t19_b2##*$'\n'}"; t19_body2="${t19_b2%$'\n'*}"
+    if [[ "$t19_code1" == "404" && "$t19_code2" == "404" && "$t19_body1" == "$t19_body2" ]]; then
+      pass "$T (${t19_check#OK }, 404-equality holds)"
+    else
+      fail "$T" "404-oracle: invisible=$t19_code1 missing=$t19_code2 bodies_equal=$([[ "$t19_body1" == "$t19_body2" ]] && echo yes || echo no)"
+    fi
+  fi
 fi
 
 # =====================================================================
