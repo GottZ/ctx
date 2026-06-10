@@ -63,6 +63,13 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// K2 (G03): key/MCP-client management and mutating dream-mode are
+	// admin-only (BREAKING for non-admin keys). Single gate before dispatch;
+	// actionRequiresAdmin lists the gated actions.
+	if actionRequiresAdmin(req) && !requireAdminAction(w, authResult) {
+		return
+	}
+
 	switch req.Action {
 	case "stats":
 		h.handleStats(w, r, authResult)
@@ -106,6 +113,46 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 			"error":   "Unknown action",
 		})
 	}
+}
+
+// actionRequiresAdmin reports whether a manage action is gated on the admin
+// tier (052, K2/G03). dream-mode is special-cased: only the mutating shape
+// (non-empty data) is gated; reading the current mode stays open to every
+// valid key.
+func actionRequiresAdmin(req manageRequest) bool {
+	switch req.Action {
+	case "api-key-create", "api-key-list", "api-key-delete",
+		"mcp-client-create", "mcp-client-list", "mcp-client-delete":
+		return true
+	case "dream-mode":
+		return isDreamModeMutation(req)
+	default:
+		return false
+	}
+}
+
+// requireAdminAction gates the key/MCP/dream-mode management actions on the
+// admin tier (052, K2/G03 — BREAKING for non-admin keys). Before this gate,
+// EVERY valid key of any home_scope could mint keys for arbitrary scopes
+// (read access to foreign tenants), revoke keys, and manage MCP clients —
+// negatively probed red on 2026-06-10 (see admin_gate_test.go).
+//
+// TODO(multi-tenant): is_admin is server-global; a per-tenant admin notion
+// (manage keys of your own tenant only) needs a finer cut than this.
+func requireAdminAction(w http.ResponseWriter, ar *auth.AuthResult) bool {
+	if ar == nil || !ar.IsValid || !ar.IsAdmin {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"success": false, "error": "admin key required",
+		})
+		return false
+	}
+	return true
+}
+
+// isDreamModeMutation reports whether a dream-mode request changes state
+// (non-empty data payload) as opposed to reading the current mode.
+func isDreamModeMutation(req manageRequest) bool {
+	return len(req.Data) > 0 && string(req.Data) != "null"
 }
 
 func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
@@ -905,6 +952,21 @@ func (h *ManageHandler) handleMCPClientDelete(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": data.ClientID})
 }
 
+// firstReservedScope returns the first '_'-prefixed scope among homeScope
+// and allowedScopes, or "" if none. The underscore namespace is reserved for
+// system sentinels ('_global', migration 051).
+func firstReservedScope(homeScope string, allowedScopes []string) string {
+	if strings.HasPrefix(homeScope, "_") {
+		return homeScope
+	}
+	for _, s := range allowedScopes {
+		if strings.HasPrefix(s, "_") {
+			return s
+		}
+	}
+	return ""
+}
+
 // apiKeyCreateRequest is the JSON shape under req.Data for api-key-create.
 // home_scope is REQUIRED as of v2.0.0 — empty values yield 400.
 type apiKeyCreateRequest struct {
@@ -934,6 +996,18 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
 			"error":   "home_scope is required",
+		})
+		return
+	}
+	// Scope-format gate (G03): the '_' prefix is SYSTEM-RESERVED ('_global'
+	// is the settings identity sentinel, 051). A key carrying '_global'
+	// would collide with the global settings row identity once per-tenant
+	// resolution lands. Go-side validation, no DB CHECK (v2.0.0 line).
+	// Negatively probed red before the gate (admin_gate_test.go).
+	if reserved := firstReservedScope(data.HomeScope, data.AllowedScopes); reserved != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "scope names starting with '_' are reserved: " + reserved,
 		})
 		return
 	}

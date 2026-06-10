@@ -39,3 +39,23 @@ func TestCreateApiKey_BothEmpty(t *testing.T) {
 		t.Errorf("expected label error (validated first), got: %v", err)
 	}
 }
+
+// Scope-format gate (G03): '_'-prefixed scopes are SYSTEM-RESERVED
+// ('_global' settings sentinel, 051). Negative probe 2026-06-10: before the
+// gate these inputs fell through to the INSERT (nil-pool panic in tests).
+
+func TestCreateApiKey_ReservedHomeScope(t *testing.T) {
+	for _, scope := range []string{"_global", "_x"} {
+		_, _, err := CreateApiKey(context.Background(), nil, "label", scope, nil)
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("home_scope %q: expected 'reserved' error, got: %v", scope, err)
+		}
+	}
+}
+
+func TestCreateApiKey_ReservedAllowedScope(t *testing.T) {
+	_, _, err := CreateApiKey(context.Background(), nil, "label", "tenant-a", []string{"shared", "_global"})
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("expected 'reserved' error for '_global' in allowed_scopes, got: %v", err)
+	}
+}

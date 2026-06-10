@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -36,6 +37,17 @@ func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope stri
 	}
 	if homeScope == "" {
 		return nil, "", fmt.Errorf("api_keys: home_scope is required")
+	}
+	// Scope-format gate (G03): '_'-prefixed scopes are SYSTEM-RESERVED
+	// ('_global' = settings identity sentinel, 051). Enforced here as well
+	// as in the handler — the store is the last line before the row exists.
+	if strings.HasPrefix(homeScope, "_") {
+		return nil, "", fmt.Errorf("api_keys: scope names starting with '_' are reserved: %s", homeScope)
+	}
+	for _, s := range allowedScopes {
+		if strings.HasPrefix(s, "_") {
+			return nil, "", fmt.Errorf("api_keys: scope names starting with '_' are reserved: %s", s)
+		}
 	}
 
 	keyBytes := make([]byte, 32)

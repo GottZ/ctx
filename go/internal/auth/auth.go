@@ -20,6 +20,7 @@ type AuthResult struct {
 	AllowedScopes []string // e.g. ["shared", "work"]
 	ReadScopes    []string // [HomeScope] + AllowedScopes
 	IsValid       bool
+	IsAdmin       bool // admin tier (052): settings/secrets/key management
 }
 
 // SanitizeKey strips all non-hex characters from an API key.
@@ -35,17 +36,18 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Auth
 	}
 
 	var (
-		apiKeyID      *string  // nullable UUID
+		apiKeyID      *string // nullable UUID
 		homeScope     string
 		allowedScopes []string
 		readScopes    []string
 		isValid       bool
+		isAdmin       bool
 	)
 
 	err := pool.QueryRow(ctx,
-		`SELECT api_key_id, home_scope, allowed_scopes, read_scopes, is_valid FROM ctx_auth($1)`,
+		`SELECT api_key_id, home_scope, allowed_scopes, read_scopes, is_valid, is_admin FROM ctx_auth($1)`,
 		apiKey,
-	).Scan(&apiKeyID, &homeScope, &allowedScopes, &readScopes, &isValid)
+	).Scan(&apiKeyID, &homeScope, &allowedScopes, &readScopes, &isValid, &isAdmin)
 	if err != nil {
 		return nil, fmt.Errorf("auth: query ctx_auth: %w", err)
 	}
@@ -55,6 +57,7 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Auth
 		AllowedScopes: allowedScopes,
 		ReadScopes:    readScopes,
 		IsValid:       isValid,
+		IsAdmin:       isAdmin,
 	}
 
 	if apiKeyID != nil {

@@ -179,6 +179,24 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireAdmin gates a route on the admin tier (052). Mount AFTER Auth —
+// it reads the AuthResult from the request context. Non-admin (or missing
+// auth context) yields 403; the response shape matches the API envelope.
+// Negative probe: TestRequireAdmin_NonAdmin403 / TestManageAdminGate_* were
+// red against the ungated chain before this landed (G03, 2026-06-10).
+func RequireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ar := AuthResultFromContext(r.Context())
+		if ar == nil || !ar.IsValid || !ar.IsAdmin {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"success": false, "error": "admin key required",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // SecurityHeaders adds security-related response headers to every request.
 func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

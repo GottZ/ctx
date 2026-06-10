@@ -29,13 +29,17 @@ func makeManageRequest(t *testing.T, body any) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 
-	// Inject a valid auth result so the handler skips the unauth-early-return.
+	// Inject a valid ADMIN auth result so the handler passes the admin gate
+	// (K2/G03) and the unauth-early-return — these tests probe the
+	// validation layer BEHIND the gate. Non-admin 403 behavior is covered
+	// in admin_gate_test.go.
 	ar := &auth.AuthResult{
 		ApiKeyID:      "test-key-id",
 		HomeScope:     "private",
 		AllowedScopes: []string{"shared"},
 		ReadScopes:    []string{"private", "shared"},
 		IsValid:       true,
+		IsAdmin:       true,
 	}
 	ctx := context.WithValue(req.Context(), authResultKey, ar)
 	req = req.WithContext(ctx)
@@ -127,7 +131,7 @@ func TestApiKeyCreate_MalformedData(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	ar := &auth.AuthResult{ApiKeyID: "id", IsValid: true}
+	ar := &auth.AuthResult{ApiKeyID: "id", IsValid: true, IsAdmin: true}
 	ctx := context.WithValue(req.Context(), authResultKey, ar)
 	req = req.WithContext(ctx)
 

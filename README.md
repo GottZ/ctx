@@ -45,7 +45,26 @@ Pick by intent: one fact per block, precise title, tags for cross-cutting. ~1-1.
 - All blocks in `shared` (cross-tenant knowledge layer)
 - Nothing from other tenants' private scopes
 
-API-key provisioning (v2.0.0+): `ctx keys create <label> --home <scope>` — `--home` is required, no implicit default.
+API-key provisioning (v2.0.0+): `ctx keys create <label> --home <scope>` — `--home` is required, no implicit default. Scope names starting with `_` are rejected (the underscore namespace is system-reserved; `_global` anchors the server-global settings identity in `context_settings`).
+
+### Admin tier (BREAKING, migration 052)
+
+Keys carry an `is_admin` flag (default `false`, no key is auto-promoted). The following `/api/manage` actions now require an admin key — **BREAKING for previously-working non-admin keys**: `api-key-create`, `api-key-list`, `api-key-delete`, `mcp-client-create`, `mcp-client-list`, `mcp-client-delete`, and `dream-mode` when mutating (reading the current mode stays open). Rationale: before this gate, ANY valid key of any home_scope could mint keys for arbitrary scopes — read access to foreign tenants — and the upcoming settings/secrets API must not inherit that model.
+
+**Admin bootstrap** (one-time, host access required). Promote by `id`, never by label — `label` has no UNIQUE constraint and an UPDATE by label would escalate every same-named key, including inactive ones:
+
+```bash
+# 1. Inspect candidates:
+docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 \
+  psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" \
+  -c "SELECT id, label, active, home_scope, is_admin FROM context_api_keys;"
+# 2. Promote EXACTLY one key by id:
+docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 \
+  psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" \
+  -c "UPDATE context_api_keys SET is_admin = true WHERE id = '<uuid>';"
+```
+
+**Admin-key hygiene:** the OAuth/MCP flow hands the API key ITSELF out as the bearer token — a key used as an MCP remote token circulates through claude.ai/Cloudflare and is stored in external connector storage. Create a **dedicated admin key that is never used as an MCP/OAuth token**; the claude.ai MCP key stays non-admin. Test/eval script keys stay non-admin too (least privilege).
 
 ## Using ctx effectively
 
@@ -170,8 +189,8 @@ ctx stats     # Block count, categories, storage
 | `ctx digest` | Rebuild topic map |
 | `ctx statusline` | Claude Code status bar |
 | `ctx mcp [add\|list\|delete]` | Manage MCP OAuth client registrations |
-| `ctx keys create <label> --home <scope>` | Provision API key (v2.0.0: `--home` required, no default scope) |
-| `ctx keys [list\|delete]` | List / revoke provisioned API keys |
+| `ctx keys create <label> --home <scope>` | Provision API key (v2.0.0: `--home` required, no default scope; admin key required since 052) |
+| `ctx keys [list\|delete]` | List / revoke provisioned API keys (admin key required since 052) |
 | `ctx version` | Print version |
 
 ## Architecture
@@ -202,7 +221,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 51 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
+**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 52 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
 
 ### Key environment variables
 
@@ -253,7 +272,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings; optional `categories_exclude` / `block_roles_exclude` arrays filter slot-stealers). With the cross-encoder reranker engaged (~80s/query) the response commits `200` up front and streams a whitespace keepalive every 25s so buffering reverse proxies don't hit their read timeout; the body stays valid JSON (leading whitespace, RFC 8259) and a late synthesis failure reports `success:false` inside the 200 body |
 | `POST /api/store` | Upsert (embedding async via scheduler) |
 | `POST /api/search` | Lightweight search (no LLM) |
-| `POST /api/manage` | CRUD, Guard API, stats, API-key management (`api-key-create` requires `home_scope`) |
+| `POST /api/manage` | CRUD, Guard API, stats, API-key management (`api-key-create` requires `home_scope`; key/MCP-client management and mutating `dream-mode` require an **admin key** since 052 — see Admin tier) |
 | `POST /api/digest` | Topic map generation |
 | `POST /api/ingest` | Obsidian vault ingestion |
 | `POST /api/blob/*` | Binary storage (store/fetch/search/manage) |
