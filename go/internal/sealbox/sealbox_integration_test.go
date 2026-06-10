@@ -12,7 +12,7 @@
 //     chars) — asserted, this is the failure source
 //   - RED: a line-based reader on the naked record gets only the first
 //     fragment and fails to decrypt
-//   - GREEN: the exact break-glass.sh SQL (replace(encode(…),E'\n',”)) +
+//   - GREEN: the exact break-glass.sh SQL (replace(encode(…),E'\n','')) +
 //     full-input DecodeLine + Box.Open round-trips the plaintext
 //   - the EOF-reading decoder also survives the naked multi-line record
 //     (CR/LF strip — robustness against consumers without replace())
