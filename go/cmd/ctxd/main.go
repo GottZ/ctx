@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/events"
@@ -42,11 +43,30 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	cfg, err := LoadConfig()
+	// Parse + validate (internal/config), log EVERY issue, then fail fast on
+	// any SeverityError — a misconfigured boot dies with field + reason for
+	// each finding, never with just the first one.
+	cfg, cc, issues, err := loadConfig()
+	for _, is := range issues {
+		if is.Severity == config.SeverityError {
+			slog.Error("config: invalid", "field", is.Field, "msg", is.Msg)
+		} else {
+			slog.Warn("config: issue", "field", is.Field, "msg", is.Msg)
+		}
+	}
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+	if config.HasErrors(issues) {
+		slog.Error("config: refusing to start — fix the fields above in .env and restart")
+		os.Exit(1)
+	}
+
+	// Snapshot store: F1-W1 publishes the validated config; consumers adopt
+	// it wave by wave (G09-G14) and read the legacy bridge view until then.
+	cfgStore := config.NewStore(cc)
+	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), issues)...)
 
 	// Root context cancelled on SIGINT/SIGTERM
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -94,14 +114,15 @@ func main() {
 	}
 
 	// Scheduler for background guard + digest + dream.
-	// CTX_READ_SCOPES is comma-separated; empty/missing falls back to the
-	// v1.x default ("private,shared,work") for backwards-compat. v2.0.0 M045
-	// dropped chk_scope, so any non-empty string is a valid scope.
-	readScopes := parseScopes(os.Getenv("CTX_READ_SCOPES"), []string{"private", "shared", "work"})
+	// Scopes come from the validated snapshot (scheduler.read_scopes parses
+	// CTX_READ_SCOPES with the legacy semantics: comma-separated, empty ⇒
+	// "private,shared,work"; v2.0.0 M045 dropped chk_scope, so any non-empty
+	// string is a valid scope). home_scope has no env knob — default
+	// "private", settings-fillable from F2.
 	schedulerConfig := &events.Config{
 		DSN:                     cfg.DSN(),
-		HomeScope:               "private",
-		ReadScopes:              readScopes,
+		HomeScope:               cc.Scheduler.HomeScope,
+		ReadScopes:              cc.Scheduler.ReadScopes,
 		DreamEnabled:            cfg.DreamEnabled,
 		EmbedHost:               cfg.EmbedHost,
 		EmbedAPIKey:             cfg.EmbedAPIKey,
