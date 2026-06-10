@@ -1,0 +1,5 @@
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-demo-0002","provider":"DemoProvider","model":"qwen/qwen3.6-27b","object":"chat.completion.chunk","created":1781125500,"choices":[{"index":0,"delta":{"role":"assistant","content":"The weather in"},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-demo-0002","provider":"DemoProvider","model":"qwen/qwen3.6-27b","object":"chat.completion.chunk","created":1781125500,"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error","native_finish_reason":"error","logprobs":null}],"error":{"code":502,"message":"Provider returned error","metadata":{"provider_name":"DemoProvider"}}}
