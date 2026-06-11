@@ -3,11 +3,8 @@ package llm
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"math"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -40,72 +37,48 @@ const (
 	noResultsTemplate = "I don't know based on the available sources for: %s"
 )
 
-// ScoreThreshold is the minimum RRF score for a source to be included.
-// Overridable via env CTX_SCORE_THRESHOLD (default: 0.001).
-//
-// Welle 37 (2026-05-06): default 0.005 → 0.001 weil M030 mass-im-RRF-score
-// Mega-blocks unter 0.005 dämpft. Niedriger Threshold erhält Architecture-
-// Kontext im Synthesizer ohne N-Bucket-Negativ-Regression.
-var ScoreThreshold = 0.001
-
-// ConfidentThreshold is the minimum RRF score for "confident" classification.
-// Overridable via env CTX_CONFIDENT_THRESHOLD (default: 0.008).
-var ConfidentThreshold = 0.008
-
-// Prompt-version constants. Used as values for CTX_PROMPT_VERSION and as
-// keys into the systemPrompts lookup. Adding a new prompt: define the const,
-// add the literal to systemPrompts in init() (or var-init), update the case
-// in resolvePromptVersion().
+// Prompt-version constants. Valid values for SynthesisSettings.PromptVersion
+// (env CTX_PROMPT_VERSION via the config registry, key query.prompt_version)
+// and selectors in the selectSystemPrompt switch. Adding a new prompt: define
+// the const, add the prompt literal, extend the switch in selectSystemPrompt,
+// and extend the registry's V5 whitelist (internal/config/validate.go).
 const (
 	PromptVersionV52 = "v5.2"
 	PromptVersionV6  = "v6"
 )
 
-// PromptVersion selects which system prompt is fed to the synthesis LLM.
-// Overridable via env CTX_PROMPT_VERSION. Default "v5.2" preserves prod
-// behavior. Set to "v6" to enable the Welle-48 graded-confidence prompt
-// (direct / inferred-with-caveat / refusal). Unknown values silently fall
-// back to v5.2 with a log line.
-//
-// V6 motivation: CRAG Phase-4 audit identified 3-of-5 wrongs as
-// Generator-Refusals despite gold-facts being in the top-5 sources. V5.2's
-// strict "every fact from sources" + "ALWAYS attempt" combination causes
-// the LLM to default-refuse on year-format / list-vs-ranking ambiguity.
-// V6 splits the disposition into three explicit modes so the LLM has a
-// well-formed shape for partial-evidence cases.
-var PromptVersion = PromptVersionV52
+// SynthesisSettings carries the query-path synthesis tuning values as one
+// explicit parameter. The values are owned by the config registry
+// (query.score_threshold / query.confident_threshold / query.prompt_version —
+// defaults 0.001 / 0.008 / v5.2) and travel through the call chain; the llm
+// package holds no config state (F1-W2 replaced the former package vars and
+// the env-reading init()).
+type SynthesisSettings struct {
+	// ScoreThreshold is the minimum RRF score for a source to be included.
+	//
+	// Welle 37 (2026-05-06): default 0.005 → 0.001 weil M030 mass-im-RRF-score
+	// Mega-blocks unter 0.005 dämpft. Niedriger Threshold erhält Architecture-
+	// Kontext im Synthesizer ohne N-Bucket-Negativ-Regression.
+	ScoreThreshold float64
 
-func init() {
-	if v, ok := os.LookupEnv("CTX_SCORE_THRESHOLD"); ok && v != "" {
-		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
-			ScoreThreshold = parsed
-		} else {
-			log.Printf("synthesize: invalid CTX_SCORE_THRESHOLD=%q (%v), using fallback %v", v, err, ScoreThreshold)
-		}
-	}
-	if v, ok := os.LookupEnv("CTX_CONFIDENT_THRESHOLD"); ok && v != "" {
-		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
-			ConfidentThreshold = parsed
-		} else {
-			log.Printf("synthesize: invalid CTX_CONFIDENT_THRESHOLD=%q (%v), using fallback %v", v, err, ConfidentThreshold)
-		}
-	}
-	if v, ok := os.LookupEnv("CTX_PROMPT_VERSION"); ok && v != "" {
-		switch v {
-		case PromptVersionV52, PromptVersionV6:
-			PromptVersion = v
-		default:
-			log.Printf("synthesize: invalid CTX_PROMPT_VERSION=%q, using fallback %q", v, PromptVersion)
-		}
-	}
-	log.Printf("synthesize: PromptVersion=%q", PromptVersion)
+	// ConfidentThreshold is the minimum RRF score for "confident"
+	// classification.
+	ConfidentThreshold float64
+
+	// PromptVersion selects which system prompt is fed to the synthesis LLM.
+	// PromptVersionV52 preserves prod behavior; PromptVersionV6 enables the
+	// Welle-48 graded-confidence prompt (direct / inferred-with-caveat /
+	// refusal) — see systemPromptV6 for the motivation. Unknown values fall
+	// back to v5.2 in selectSystemPrompt.
+	PromptVersion string
 }
 
-// selectSystemPrompt resolves the active system prompt based on PromptVersion.
-// Unknown values fall back to V5.2 (defensive; CTX_PROMPT_VERSION parse already
-// rejects unknown values at init-time, but this keeps the function total).
-func selectSystemPrompt() string {
-	switch PromptVersion {
+// selectSystemPrompt resolves the active system prompt from the settings.
+// Unknown versions fall back to V5.2 (defensive; the config registry's V5
+// validation already normalizes unknown values at load time, but this keeps
+// the function total).
+func selectSystemPrompt(s SynthesisSettings) string {
+	switch s.PromptVersion {
 	case PromptVersionV6:
 		return systemPromptV6
 	default:
@@ -246,26 +219,26 @@ func EscapeXml(s string) string {
 }
 
 // ClassifyConfidence determines the confidence level from the max RRF score.
-func ClassifyConfidence(maxScore float64) string {
-	if maxScore >= ConfidentThreshold {
+func ClassifyConfidence(maxScore float64, s SynthesisSettings) string {
+	if maxScore >= s.ConfidentThreshold {
 		return ConfidenceConfident
 	}
-	if maxScore >= ScoreThreshold {
+	if maxScore >= s.ScoreThreshold {
 		return ConfidenceLow
 	}
 	return ConfidenceNoRelevant
 }
 
-// FilterByScore filters sources below the RRF score threshold.
+// FilterByScore filters sources below s.ScoreThreshold.
 // Returns the filtered list and the maximum score.
-func FilterByScore(sources []Source) ([]Source, float64) {
+func FilterByScore(sources []Source, s SynthesisSettings) ([]Source, float64) {
 	var filtered []Source
 	maxScore := 0.0
-	for _, s := range sources {
-		if s.Score >= ScoreThreshold {
-			filtered = append(filtered, s)
-			if s.Score > maxScore {
-				maxScore = s.Score
+	for _, src := range sources {
+		if src.Score >= s.ScoreThreshold {
+			filtered = append(filtered, src)
+			if src.Score > maxScore {
+				maxScore = src.Score
 			}
 		}
 	}
@@ -290,11 +263,11 @@ func LostInMiddleReorder(sources []Source) []Source {
 // (possibly German) so the LLM answers in the user's language.
 // The current time is injected so the LLM can resolve relative time references.
 //
-// The system prompt is selected via PromptVersion (init-time, env-driven).
-// Default is v5.2 — see systemPromptV6 for the Welle-48 graded-confidence
-// variant.
-func BuildPrompt(originalQuery string, sources []Source, temporalDates []TemporalDate) (systemPrompt, userPrompt string) {
-	systemPrompt = selectSystemPrompt()
+// The system prompt is selected via s.PromptVersion (config registry, key
+// query.prompt_version). Default is v5.2 — see systemPromptV6 for the
+// Welle-48 graded-confidence variant.
+func BuildPrompt(originalQuery string, sources []Source, temporalDates []TemporalDate, s SynthesisSettings) (systemPrompt, userPrompt string) {
+	systemPrompt = selectSystemPrompt(s)
 
 	// Conditional date injection — only when the query has temporal references.
 	// Avoids polluting the prompt for non-temporal queries (fixes S08/M05 regressions).
@@ -351,9 +324,11 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // filter -> confidence -> low-confidence limiting -> reorder -> prompt -> chat.
 // temporalDates is nil for non-temporal queries (date context omitted from prompt).
 // pool may be nil — if provided, the LLM request/response is logged via llmlog.
-func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, numCtx int, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
+// settings carries the scoring thresholds + prompt version from the config
+// registry (F1-W2: parameter instead of package state).
+func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, numCtx int, settings SynthesisSettings, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
-	filtered, maxScore := FilterByScore(sources)
+	filtered, maxScore := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
 		return &SynthesisResult{
 			Answer:     fmt.Sprintf(noResultsTemplate, originalQuery),
@@ -364,7 +339,7 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model str
 	}
 
 	// Step 2: Classify confidence.
-	confidence := ClassifyConfidence(maxScore)
+	confidence := ClassifyConfidence(maxScore, settings)
 
 	// Step 3: Build sources metadata (without content, for the response).
 	responseSources := make([]Source, len(filtered))
@@ -390,7 +365,7 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model str
 	llmSources = LostInMiddleReorder(llmSources)
 
 	// Step 6: Build prompt.
-	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates)
+	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates, settings)
 
 	// Step 7: Call LLM. Falls back to ChatFallback (CPU backend) when the
 	// primary is unreachable — "es sollte immer ein Weg zu finden sein".
