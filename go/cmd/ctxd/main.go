@@ -99,6 +99,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// §3.6 master-key rotation: while CTX_SECRETS_KEY_PREV is set, re-seal
+	// every prev-key secret with the current key (no-op otherwise, never
+	// fatal). Boot-only — the NOTIFY reload path stays read-only by contract.
+	settings.ReencryptSweep(ctx, pool)
+
 	// F2-W4, §2.1 steps 4–7: overlay the context_settings overrides (DB >
 	// env > default; secret_refs resolve in-memory via the sealbox) onto the
 	// validated env config and publish the EFFECTIVE generation as the

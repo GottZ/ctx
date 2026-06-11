@@ -19,6 +19,12 @@ services:
       CONTEXT_DB_PASSWORD: ${CONTEXT_DB_PASSWORD}
       CONTEXT_DB_HOST: db
       CONTEXT_DB_PORT: 5432
+      # Sealbox master key (env-only by design — the key that unseals DB rows
+      # can never itself live in the DB). _PREV only while a §3.6 rotation
+      # sweep is pending. Without this declaration the secrets API answers
+      # 503 although .env carries the key (compose gap, found live G17).
+      CTX_SECRETS_KEY: ${CTX_SECRETS_KEY:-}
+      CTX_SECRETS_KEY_PREV: ${CTX_SECRETS_KEY_PREV:-}
       CTX_EMBED_HOST: ${CTX_EMBED_HOST}
       CTX_EMBED_API_KEY: ${CTX_EMBED_API_KEY:-}
       CTX_EMBED_PROTOCOL: ${CTX_EMBED_PROTOCOL:-ollama}
