@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
@@ -343,6 +344,18 @@ func (c *Config) GraphRRF() rrf.GraphConfig {
 		WeightCausal:           c.Graph.WeightCausal,
 		WeightRecurrent:        c.Graph.WeightRecurrent,
 		NewPlacementFrac:       c.Graph.NewPlacementFrac,
+	}
+}
+
+// SynthesisSettings converts the query group's scoring surface to the llm
+// synthesis parameter struct (F1-W2 introduced the parameter; F1-W4 moves the
+// derivation onto the snapshot — one source instead of the cmd/ctxd bridge
+// copy).
+func (c *Config) SynthesisSettings() llm.SynthesisSettings {
+	return llm.SynthesisSettings{
+		ScoreThreshold:     c.Query.ScoreThreshold,
+		ConfidentThreshold: c.Query.ConfidentThreshold,
+		PromptVersion:      c.Query.PromptVersion,
 	}
 }
 

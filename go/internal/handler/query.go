@@ -14,6 +14,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
@@ -23,41 +24,27 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// QueryHandler handles POST /api/query.
+// ConfigStore is the snapshot source for request-scoped configuration.
+// *config.Store implements it; tests substitute a counting fake to pin the
+// one-snapshot-per-request invariant.
+type ConfigStore interface {
+	Snapshot() *config.Config
+}
+
+var _ ConfigStore = (*config.Store)(nil)
+
+// QueryHandler handles POST /api/query. It holds no configuration values —
+// every request takes ONE snapshot from the store (F1-W4), so the heartbeat
+// gate, the rerank dispatch and every backend tuple read the same generation
+// by construction, and a config replace is live from the next request on.
 type QueryHandler struct {
 	pool *pgxpool.Pool
-	// chat is the primary chat wire tuple; chatFallback (nil = off) is the
-	// emergency synthesis leg. Both are boot-time copies until the handler
-	// moves onto config.Store snapshots (F1-W4/G11).
-	chat          backends.Backend
-	chatFallback  *backends.Backend
-	embedHost     string
-	embedAPIKey   string
-	embedModel    string
-	embedNumCtx   int
-	synth         llm.SynthesisSettings
-	rerankCfg     rrf.RerankConfig
-	graphCfg      rrf.GraphConfig
-	timezone      *time.Location
-	rateLimitRead int // 0 = disabled
+	cfg  ConfigStore
 }
 
 // NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, chat backends.Backend, chatFallback *backends.Backend, embedHost, embedAPIKey, embedModel string, embedNumCtx int, synth llm.SynthesisSettings, rerankCfg rrf.RerankConfig, graphCfg rrf.GraphConfig, timezone *time.Location, rateLimitRead int) *QueryHandler {
-	return &QueryHandler{
-		pool:          pool,
-		chat:          chat,
-		chatFallback:  chatFallback,
-		embedHost:     embedHost,
-		embedAPIKey:   embedAPIKey,
-		embedModel:    embedModel,
-		embedNumCtx:   embedNumCtx,
-		synth:         synth,
-		rerankCfg:     rerankCfg,
-		graphCfg:      graphCfg,
-		timezone:      timezone,
-		rateLimitRead: rateLimitRead,
-	}
+func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore) *QueryHandler {
+	return &QueryHandler{pool: pool, cfg: cfg}
 }
 
 // queryRequest is the JSON body for the query endpoint.
@@ -236,6 +223,14 @@ func (hb *queryHeartbeat) finish(status int, v any) {
 //
 //nolint:cyclop // complex HTTP handler with sequential pipeline stages
 func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
+	// THE single snapshot of this request (F1-W4). Every stage below derives
+	// from this one frozen generation — heartbeat gate and rerank dispatch can
+	// never see two different config stands within one request.
+	cfg := h.cfg.Snapshot()
+	chat := cfg.ChatBackend()
+	rerankCfg := cfg.RerankRRF()
+	graphCfg := cfg.GraphRRF()
+
 	ctx := r.Context()
 	requestID := RequestIDFromContext(ctx)
 
@@ -270,17 +265,17 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read rate limit check (0 = disabled).
-	if h.rateLimitRead > 0 {
+	if rateLimitRead := cfg.Query.RateLimitRead; rateLimitRead > 0 {
 		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, ar.ApiKeyID, "query")
 		if err != nil {
 			slog.Error("query: read rate limit check error", "error", err, "request_id", requestID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 			return
 		}
-		if readCount >= h.rateLimitRead {
+		if readCount >= rateLimitRead {
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
 				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d reads per 60 seconds", h.rateLimitRead),
+				"error":   fmt.Sprintf("Rate limit exceeded: max %d reads per 60 seconds", rateLimitRead),
 			})
 			return
 		}
@@ -312,7 +307,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("german detected, translating",
 			"request_id", requestID,
 		)
-		translatedQuery, err := llm.TranslateQuery(ctx, h.chat, query)
+		translatedQuery, err := llm.TranslateQuery(ctx, chat, query)
 		if err != nil {
 			slog.Warn("translation failed, using original",
 				"error", err,
@@ -335,7 +330,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	var temporal string
 	var temporalResult *llm.TemporalResult
 
-	now := time.Now().In(h.timezone)
+	now := time.Now().In(cfg.Query.Timezone)
 	temporalResult = llm.NormalizeTemporalRules(originalQuery, now)
 
 	if temporalResult != nil {
@@ -348,7 +343,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	} else if llm.HasTemporalIntent(originalQuery) {
 		// LLM fallback: query seems temporal but rules couldn't parse it.
 		var err error
-		temporalResult, err = llm.NormalizeTemporal(ctx, h.chat, originalQuery, now)
+		temporalResult, err = llm.NormalizeTemporal(ctx, chat, originalQuery, now)
 		if err != nil {
 			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,
@@ -371,13 +366,14 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Step 3d: Backfill any blocks with missing embeddings before searching.
 	// Ensures freshly stored blocks are immediately searchable.
-	if backfilled := h.backfillPending(ctx); backfilled > 0 {
+	embedB := cfg.EmbedBackend()
+	if backfilled := h.backfillPending(ctx, embedB); backfilled > 0 {
 		slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
 	}
 
 	// Step 4: Embed the search query with query prefix. Cached by (hash(prefix||text), model) —
 	// repeated queries (debug sessions, recurring lookups) serve from cache in a single UPDATE.
-	embedding, err := embedcache.Embed(ctx, h.pool, embed.DefaultProtocol, h.embedHost, h.embedAPIKey, h.embedModel, embedQuery, embed.PrefixQuery, h.embedNumCtx)
+	embedding, err := embedcache.Embed(ctx, h.pool, string(embedB.Protocol), embedB.Host, embedB.APIKey, embedB.Model, embedQuery, embed.PrefixQuery, embedB.NumCtx)
 	if err != nil {
 		slog.Error("embedding failed",
 			"error", err,
@@ -429,7 +425,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// cross-encoder reranker is engaged the query runs ~80s — start the keepalive
 	// heartbeat so a buffering reverse proxy doesn't time out. It commits the 200
 	// header now; every later return goes through hb.finish (no more status codes).
-	useHeartbeat := h.rerankCfg.Enabled && h.rerankCfg.Host != ""
+	// Gate and dispatch (Step 6b) read the same rerankCfg local — one snapshot
+	// stand by construction.
+	useHeartbeat := rerankCfg.Enabled && rerankCfg.Host != ""
 	hb := startHeartbeat(w, useHeartbeat)
 
 	// Step 6a: Post-RRF temporal gravity boost (GottZ Cyclic Phase Model).
@@ -539,13 +537,13 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// sweep can isolate the graph effect from the rerank effect. When graph is
 	// on but the reranker is off there is no LLM noise-filter behind the
 	// synthetic neighbors — warn once, then proceed.
-	if h.graphCfg.Enabled {
-		if !h.rerankCfg.Enabled {
+	if graphCfg.Enabled {
+		if !rerankCfg.Enabled {
 			slog.Warn("graph expansion active without reranker noise-filter",
 				"request_id", requestID,
 			)
 		}
-		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, h.graphCfg); gerr != nil {
+		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, graphCfg); gerr != nil {
 			slog.Warn("graph expand failed; using pre-expansion results",
 				"error", gerr,
 				"request_id", requestID,
@@ -560,11 +558,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// MaxDocs=50 candidates, the final arbiter of graph-injected neighbors);
 	// empty => the LLM-as-judge on the chat model (up to 15). Both fail open —
 	// on error the pre-rerank order is kept.
-	if h.rerankCfg.Enabled {
-		if h.rerankCfg.Host != "" {
-			results, err = rrf.RerankCrossEncoder(ctx, h.rerankCfg.Host, h.rerankCfg.APIKey, h.rerankCfg.Model, h.rerankCfg.MaxDocs, h.rerankCfg.BlendWeight, originalQuery, results)
+	if rerankCfg.Enabled {
+		if rerankCfg.Host != "" {
+			results, err = rrf.RerankCrossEncoder(ctx, rerankCfg.Host, rerankCfg.APIKey, rerankCfg.Model, rerankCfg.MaxDocs, rerankCfg.BlendWeight, originalQuery, results)
 		} else {
-			results, err = rrf.Rerank(ctx, h.chat, originalQuery, results)
+			results, err = rrf.Rerank(ctx, chat, originalQuery, results)
 		}
 		if err != nil {
 			slog.Warn("rerank failed, using original order",
@@ -643,7 +641,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		hb.finish(http.StatusOK, queryResponse{
 			Success:    true,
 			Sources:    buildSourceResponses(sources, supersedesMap),
-			Confidence: llm.ClassifyConfidence(maxScore, h.synth),
+			Confidence: llm.ClassifyConfidence(maxScore, cfg.SynthesisSettings()),
 			Translated: translated,
 		})
 		return
@@ -656,7 +654,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.chat, h.chatFallback, h.synth, originalQuery, sources, temporalDates)
+	synthResult, err := llm.Synthesize(ctx, h.pool, chat, cfg.ChatFallbackBackend(), cfg.SynthesisSettings(), originalQuery, sources, temporalDates)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,
@@ -685,7 +683,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Set model even when LLM was skipped (for consistency).
 	if resp.Model == "" {
-		resp.Model = h.chat.Model
+		resp.Model = chat.Model
 	}
 
 	slog.Info("query pipeline complete",
@@ -743,8 +741,9 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // backfillPending generates embeddings for any blocks that don't have one yet.
 // Called before search to ensure freshly stored blocks are immediately findable.
 // Returns the number of blocks backfilled (0 in the common case).
+// The embed tuple comes from the caller's request snapshot (F1-W4).
 // Uses a TX with FOR UPDATE SKIP LOCKED per block to avoid races with the scheduler.
-func (h *QueryHandler) backfillPending(ctx context.Context) int {
+func (h *QueryHandler) backfillPending(ctx context.Context, embedB backends.Backend) int {
 	count := 0
 	for {
 		var blockID, title, content string
@@ -757,10 +756,10 @@ func (h *QueryHandler) backfillPending(ctx context.Context) int {
 		}
 
 		embedText := title + "\n\n" + content
-		vec, err := embed.Embed(ctx, h.embedHost, h.embedAPIKey, h.embedModel, embedText, embed.PrefixDocument, h.embedNumCtx)
+		vec, err := embed.EmbedWithProtocol(ctx, string(embedB.Protocol), embedB.Host, embedB.APIKey, embedB.Model, embedText, embed.PrefixDocument, embedB.NumCtx)
 		if err != nil {
 			slog.Warn("query backfill: embed failed", "block_id", blockID, "error", err)
-			break // Ollama likely unavailable, don't retry.
+			break // Embed backend likely unavailable, don't retry.
 		}
 		if err := store.StoreEmbedding(ctx, h.pool, blockID, vec); err != nil {
 			slog.Warn("query backfill: store failed", "block_id", blockID, "error", err)

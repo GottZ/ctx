@@ -9,30 +9,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// MCPConfig holds the configuration needed for MCP tool handlers.
+// MCPConfig holds the wiring needed for the MCP tool handlers. The tools
+// consume no runtime configuration (F1-W4): the query tool delegates to the
+// QueryHandler, whose per-request config snapshot applies; store/search/get/
+// recent are pure pool operations — block embeddings are generated
+// asynchronously by the scheduler backfill, not here.
 type MCPConfig struct {
-	Pool          *pgxpool.Pool
-	EmbedHost     string
-	EmbedAPIKey   string
-	EmbedModel    string
-	EmbedNumCtx   int
-	ChatHost      string
-	ChatAPIKey    string
-	ChatModel     string
-	ChatThink     *bool
-	Timezone      *time.Location
-	QueryHandler  http.Handler // The full /api/query handler (with scheduler wiring).
+	Pool         *pgxpool.Pool
+	QueryHandler http.Handler // The full /api/query handler (with scheduler wiring).
 }
 
 // NewMCPHandler creates a Streamable HTTP handler for the MCP protocol.
@@ -370,24 +363,3 @@ type responseRecorder struct {
 func (r *responseRecorder) Header() http.Header         { return r.headers }
 func (r *responseRecorder) WriteHeader(code int)         { r.statusCode = code }
 func (r *responseRecorder) Write(b []byte) (int, error)  { r.body = append(r.body, b...); return len(b), nil }
-
-func backfillEmbeddings(ctx context.Context, cfg MCPConfig) {
-	for {
-		var blockID, title, content string
-		err := cfg.Pool.QueryRow(ctx,
-			`SELECT id, title, content FROM context_blocks
-			WHERE embedding IS NULL AND NOT is_archived LIMIT 1`).Scan(&blockID, &title, &content)
-		if err != nil {
-			break
-		}
-		embedText := title + "\n\n" + content
-		vec, err := embed.Embed(ctx, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, embedText, embed.PrefixDocument, cfg.EmbedNumCtx)
-		if err != nil {
-			slog.Warn("mcp backfill: embed failed", "block_id", blockID, "error", err)
-			break
-		}
-		if err := store.StoreEmbedding(ctx, cfg.Pool, blockID, vec); err != nil {
-			break
-		}
-	}
-}

@@ -156,7 +156,7 @@ func main() {
 	go scheduler.Run(ctx)
 
 	// HTTP server
-	router := NewRouter(pool, cfg, scheduler)
+	router := NewRouter(pool, cfg, cfgStore, scheduler)
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           router,
