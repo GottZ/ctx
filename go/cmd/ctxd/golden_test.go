@@ -8,6 +8,11 @@ package main
 // fatal-semantics column: DeepEqual alone cannot prove fatal paths, because
 // in the old fatal case no Config object exists.
 //
+// F1-W2 extension: the synthesis settings (CTX_SCORE_THRESHOLD /
+// CTX_CONFIDENT_THRESHOLD / CTX_PROMPT_VERSION) joined the bridge when llm's
+// env-reading init() died — their reference is the frozen pre-F1 init() logic
+// (internal/llm/synthesize.go:78-102 before W2), see refSynthSettings.
+//
 // The Delta-6 classes (V2, V4, V7-malformed, V9, V12 — plus V1, same class)
 // are deliberately NOT under the equivalence proof: they are pinned as
 // old-boots/new-ERROR fixtures, making the behavior delta explicit
@@ -121,6 +126,32 @@ func refParseScopes(envVal string, defaultVal []string) []string {
 	return result
 }
 
+// refSynthSettings is the frozen pre-F1-W2 llm package-init() logic
+// (synthesize.go:78-102): LookupEnv with empty-as-unset, ParseFloat with
+// keep-fallback-on-error, prompt-version whitelist with keep-fallback-on-
+// unknown. The fallbacks 0.001 / 0.008 / v5.2 are the values the registry
+// defaults MUST reproduce (config-drift gate).
+func refSynthSettings() (score, confident float64, promptVersion string) {
+	score, confident, promptVersion = 0.001, 0.008, "v5.2"
+	if v, ok := os.LookupEnv("CTX_SCORE_THRESHOLD"); ok && v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			score = parsed
+		}
+	}
+	if v, ok := os.LookupEnv("CTX_CONFIDENT_THRESHOLD"); ok && v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			confident = parsed
+		}
+	}
+	if v, ok := os.LookupEnv("CTX_PROMPT_VERSION"); ok && v != "" {
+		switch v {
+		case "v5.2", "v6":
+			promptVersion = v
+		}
+	}
+	return score, confident, promptVersion
+}
+
 func refLoadConfig() (Config, error) {
 	port, err := refGetEnvInt("CONTEXT_DB_PORT", 5432)
 	if err != nil {
@@ -159,6 +190,8 @@ func refLoadConfig() (Config, error) {
 		}
 		tz = loc
 	}
+
+	scoreThreshold, confidentThreshold, promptVersion := refSynthSettings()
 
 	cfg := Config{
 		ContextDB:     refGetEnv("CONTEXT_DB", "context_store"),
@@ -231,6 +264,10 @@ func refLoadConfig() (Config, error) {
 		DreamBackoffCapHours:    refGetEnvCooldownHours("CTX_DREAM_BACKOFF_CAP", 45*24),
 		DreamBackoffMinHours:    refGetEnvCooldownHours("CTX_DREAM_BACKOFF_MIN", 12),
 		DreamBackoffInertOffset: refGetEnvIntSafe("CTX_DREAM_BACKOFF_INERT_OFFSET", 7),
+
+		ScoreThreshold:     scoreThreshold,
+		ConfidentThreshold: confidentThreshold,
+		PromptVersion:      promptVersion,
 
 		Timezone: tz,
 
@@ -360,13 +397,24 @@ func TestGoldenEquivalence(t *testing.T) {
 		"bare seconds": {"CTX_CHAT_FALLBACK_TIMEOUT": "90", "CTX_DREAM_IDLE_WAIT": "45"},
 
 		// Malformed values on safe fields: old = silent default, new = same
-		// value + WARN (Delta 3 — visibility only, value-identical).
+		// value + WARN (Delta 3 — visibility only, value-identical). The W2
+		// synthesis trio pins the former llm-init() fallback semantics:
+		// unparseable float / unknown prompt version ⇒ default, never fatal.
 		"safe malformed": {
 			"CTX_RERANK_MAX_DOCS": "abc", "CTX_RERANK_BLEND_WEIGHT": "xyz",
 			"CTX_DREAM_BACKOFF_FACTOR": "junk", "CTX_DREAM_BACKOFF_GRACE": "g",
 			"CTX_DREAM_IDLE_WAIT": "zz", "CTX_DREAM_PARALLELISM": "pp",
 			"CTX_CHAT_FALLBACK_TIMEOUT": "oops", "CTX_DREAM_EMBED_NUM_CTX": "qq",
 			"CTX_DREAM_BACKOFF_CAP": "garbage", "CTX_DREAM_BACKOFF_MIN": "-5d",
+			"CTX_SCORE_THRESHOLD": "not-a-float", "CTX_CONFIDENT_THRESHOLD": "nope",
+			"CTX_PROMPT_VERSION": "v999",
+		},
+
+		// W2 synthesis settings via env (also part of "full"): values flow
+		// through registry + bridge identically to the old llm-init() parse.
+		"synthesis thresholds": {
+			"CTX_SCORE_THRESHOLD": "0.0005", "CTX_CONFIDENT_THRESHOLD": "0.02",
+			"CTX_PROMPT_VERSION": "v6",
 		},
 
 		// Bool semantics: only the exact literal "true" activates.

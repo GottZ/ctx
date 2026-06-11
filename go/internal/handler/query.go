@@ -34,6 +34,7 @@ type QueryHandler struct {
 	chatModel     string
 	chatThink     *bool
 	chatNumCtx    int
+	synth         llm.SynthesisSettings
 	rerankCfg     rrf.RerankConfig
 	graphCfg      rrf.GraphConfig
 	timezone      *time.Location
@@ -41,7 +42,7 @@ type QueryHandler struct {
 }
 
 // NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, chatNumCtx int, rerankCfg rrf.RerankConfig, graphCfg rrf.GraphConfig, timezone *time.Location, rateLimitRead int) *QueryHandler {
+func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, chatNumCtx int, synth llm.SynthesisSettings, rerankCfg rrf.RerankConfig, graphCfg rrf.GraphConfig, timezone *time.Location, rateLimitRead int) *QueryHandler {
 	return &QueryHandler{
 		pool:          pool,
 		chatHost:      chatHost,
@@ -53,6 +54,7 @@ func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedA
 		chatModel:     chatModel,
 		chatThink:     chatThink,
 		chatNumCtx:    chatNumCtx,
+		synth:         synth,
 		rerankCfg:     rerankCfg,
 		graphCfg:      graphCfg,
 		timezone:      timezone,
@@ -643,7 +645,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		hb.finish(http.StatusOK, queryResponse{
 			Success:    true,
 			Sources:    buildSourceResponses(sources, supersedesMap),
-			Confidence: llm.ClassifyConfidence(maxScore),
+			Confidence: llm.ClassifyConfidence(maxScore, h.synth),
 			Translated: translated,
 		})
 		return
@@ -656,7 +658,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, originalQuery, sources, temporalDates)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, h.synth, originalQuery, sources, temporalDates)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,

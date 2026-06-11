@@ -5,6 +5,17 @@ import (
 	"testing"
 )
 
+// testSettings mirrors the config-registry defaults (query.score_threshold
+// 0.001 / query.confident_threshold 0.008 / prompt v5.2) — the values the
+// former package vars carried when env was unset. Shared by llm_test.go and
+// synthesize_test.go (same package). Tests that prove the parametrization
+// itself build their own divergent settings inline.
+var testSettings = SynthesisSettings{
+	ScoreThreshold:     0.001,
+	ConfidentThreshold: 0.008,
+	PromptVersion:      PromptVersionV52,
+}
+
 // --- EscapeXml ---.
 
 func TestEscapeXml(t *testing.T) {
@@ -43,17 +54,17 @@ func TestClassifyConfidence(t *testing.T) {
 		want     string
 	}{
 		{"well above confident", 0.05, ConfidenceConfident},
-		{"exactly confident threshold", ConfidentThreshold, ConfidenceConfident},
+		{"exactly confident threshold", testSettings.ConfidentThreshold, ConfidenceConfident},
 		{"just below confident", 0.0079, ConfidenceLow},
 		{"mid low confidence", 0.006, ConfidenceLow},
-		{"exactly score threshold", ScoreThreshold, ConfidenceLow},
+		{"exactly score threshold", testSettings.ScoreThreshold, ConfidenceLow},
 		{"just below score threshold", 0.0009, ConfidenceNoRelevant},
 		{"zero score", 0.0, ConfidenceNoRelevant},
 		{"high score", 1.0, ConfidenceConfident},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ClassifyConfidence(tt.maxScore)
+			got := ClassifyConfidence(tt.maxScore, testSettings)
 			if got != tt.want {
 				t.Errorf("ClassifyConfidence(%f) = %q, want %q", tt.maxScore, got, tt.want)
 			}
@@ -109,10 +120,10 @@ func TestFilterByScore(t *testing.T) {
 		{
 			"exactly at threshold",
 			[]Source{
-				{ID: "1", Score: ScoreThreshold},
-				{ID: "2", Score: ScoreThreshold - 0.0001},
+				{ID: "1", Score: testSettings.ScoreThreshold},
+				{ID: "2", Score: testSettings.ScoreThreshold - 0.0001},
 			},
-			1, ScoreThreshold,
+			1, testSettings.ScoreThreshold,
 		},
 		{
 			"single source above",
@@ -122,7 +133,7 @@ func TestFilterByScore(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filtered, maxScore := FilterByScore(tt.sources)
+			filtered, maxScore := FilterByScore(tt.sources, testSettings)
 			if len(filtered) != tt.wantLen {
 				t.Errorf("FilterByScore() returned %d sources, want %d", len(filtered), tt.wantLen)
 			}
@@ -251,7 +262,7 @@ func TestFormatAnswer(t *testing.T) {
 
 func TestBuildPrompt(t *testing.T) {
 	t.Run("system prompt contains v5.2 text", func(t *testing.T) {
-		sys, _ := BuildPrompt("test query", nil, nil)
+		sys, _ := BuildPrompt("test query", nil, nil, testSettings)
 		if !strings.Contains(sys, "fact extraction engine") {
 			t.Error("system prompt missing 'fact extraction engine'")
 		}
@@ -267,7 +278,7 @@ func TestBuildPrompt(t *testing.T) {
 		sources := []Source{
 			{ID: "abc", Title: "My Title", Category: "infra", Content: "Port 443", Score: 0.02, AgeDays: 5},
 		}
-		_, user := BuildPrompt("what port?", sources, nil)
+		_, user := BuildPrompt("what port?", sources, nil, testSettings)
 		if !strings.Contains(user, "<question>what port?</question>") {
 			t.Errorf("user prompt missing question tag, got: %s", user)
 		}
@@ -292,7 +303,7 @@ func TestBuildPrompt(t *testing.T) {
 		dates := []TemporalDate{
 			{Ref: "gestern", Date: "2026-03-27"},
 		}
-		sys, _ := BuildPrompt("was war gestern?", nil, dates)
+		sys, _ := BuildPrompt("was war gestern?", nil, dates, testSettings)
 		if !strings.Contains(sys, "Current date:") {
 			t.Error("system prompt missing 'Current date:'")
 		}
@@ -309,14 +320,14 @@ func TestBuildPrompt(t *testing.T) {
 		dates := []TemporalDate{
 			{Ref: "diese Woche", Date: "2026-03-23", End: &end},
 		}
-		sys, _ := BuildPrompt("was war diese Woche?", nil, dates)
+		sys, _ := BuildPrompt("was war diese Woche?", nil, dates, testSettings)
 		if !strings.Contains(sys, "2026-03-23 to 2026-03-28") {
 			t.Error("system prompt missing date range with 'to'")
 		}
 	})
 
 	t.Run("no temporal dates means no context block", func(t *testing.T) {
-		sys, _ := BuildPrompt("simple query", nil, nil)
+		sys, _ := BuildPrompt("simple query", nil, nil, testSettings)
 		if strings.Contains(sys, "<context>") {
 			t.Error("system prompt should not contain context block without temporal dates")
 		}
@@ -326,7 +337,7 @@ func TestBuildPrompt(t *testing.T) {
 		sources := []Source{
 			{ID: "1", Title: "Tom & Jerry's <Show>", Category: "media", Content: "A < B & C > D", Score: 0.01, AgeDays: 1},
 		}
-		_, user := BuildPrompt("who & what?", sources, nil)
+		_, user := BuildPrompt("who & what?", sources, nil, testSettings)
 		if !strings.Contains(user, "who &amp; what?") {
 			t.Error("query not XML-escaped")
 		}
@@ -343,7 +354,7 @@ func TestBuildPrompt(t *testing.T) {
 		sources := []Source{
 			{ID: "1", Title: "Long", Category: "test", Content: longContent, Score: 0.01, AgeDays: 0},
 		}
-		_, user := BuildPrompt("q", sources, nil)
+		_, user := BuildPrompt("q", sources, nil, testSettings)
 		if !strings.Contains(user, "[... truncated]") {
 			t.Error("long content not truncated")
 		}
@@ -355,7 +366,7 @@ func TestBuildPrompt(t *testing.T) {
 			{ID: "b", Title: "Second", Category: "c", Content: "two", Score: 0.02},
 			{ID: "c", Title: "Third", Category: "c", Content: "three", Score: 0.03},
 		}
-		_, user := BuildPrompt("q", sources, nil)
+		_, user := BuildPrompt("q", sources, nil, testSettings)
 		if !strings.Contains(user, `<source id="1"`) {
 			t.Error("missing source id=1")
 		}

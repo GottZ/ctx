@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
@@ -101,6 +102,14 @@ type Config struct {
 	DreamBackoffCapHours    float64 // CTX_DREAM_BACKOFF_CAP (h|d|w|m|y, e.g. 45d)
 	DreamBackoffMinHours    float64 // CTX_DREAM_BACKOFF_MIN (h|d|w|m|y, e.g. 12h)
 	DreamBackoffInertOffset int     // CTX_DREAM_BACKOFF_INERT_OFFSET
+
+	// Synthesis scoring thresholds + prompt version for the query path.
+	// Pre-F1 these were read by llm's package init() (CTX_SCORE_THRESHOLD /
+	// CTX_CONFIDENT_THRESHOLD / CTX_PROMPT_VERSION); F1-W2 routes them through
+	// the registry (Query group) into llm.SynthesisSettings.
+	ScoreThreshold     float64
+	ConfidentThreshold float64
+	PromptVersion      string
 
 	// Timezone for temporal resolution (e.g. "Europe/Berlin").
 	// Defaults to UTC. Ensures "heute" resolves correctly for the user's timezone.
@@ -226,6 +235,10 @@ func legacyConfig(cc *config.Config) (Config, error) {
 		DreamBackoffMinHours:    float64(cc.Dream.Backoff.MinHours),
 		DreamBackoffInertOffset: cc.Dream.Backoff.InertOffset,
 
+		ScoreThreshold:     cc.Query.ScoreThreshold,
+		ConfidentThreshold: cc.Query.ConfidentThreshold,
+		PromptVersion:      cc.Query.PromptVersion,
+
 		Timezone: cc.Query.Timezone,
 
 		RateLimitWrite: cc.Query.RateLimitWrite,
@@ -268,6 +281,17 @@ func (c Config) RerankConfig() rrf.RerankConfig {
 		Model:       c.RerankModel,
 		MaxDocs:     c.RerankMaxDocs,
 		BlendWeight: c.RerankBlendWeight,
+	}
+}
+
+// SynthesisSettings builds the llm.SynthesisSettings for the query-path
+// synthesis stage from the loaded Query* values (F1-W2: constructor argument
+// instead of llm package vars; moves onto the snapshot in F1-W4).
+func (c Config) SynthesisSettings() llm.SynthesisSettings {
+	return llm.SynthesisSettings{
+		ScoreThreshold:     c.ScoreThreshold,
+		ConfidentThreshold: c.ConfidentThreshold,
+		PromptVersion:      c.PromptVersion,
 	}
 }
 

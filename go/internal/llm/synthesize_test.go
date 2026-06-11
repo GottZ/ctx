@@ -62,38 +62,38 @@ func TestEscapeXml_AllSpecialMixed(t *testing.T) {
 // --- ClassifyConfidence edge cases ---.
 
 func TestClassifyConfidence_NaN(t *testing.T) {
-	got := ClassifyConfidence(math.NaN())
+	got := ClassifyConfidence(math.NaN(), testSettings)
 	if got != ConfidenceNoRelevant {
 		t.Errorf("ClassifyConfidence(NaN) = %q, want %q", got, ConfidenceNoRelevant)
 	}
 }
 
 func TestClassifyConfidence_PosInf(t *testing.T) {
-	if got := ClassifyConfidence(math.Inf(1)); got != ConfidenceConfident {
+	if got := ClassifyConfidence(math.Inf(1), testSettings); got != ConfidenceConfident {
 		t.Errorf("ClassifyConfidence(+Inf) = %q, want %q", got, ConfidenceConfident)
 	}
 }
 
 func TestClassifyConfidence_NegInf(t *testing.T) {
-	if got := ClassifyConfidence(math.Inf(-1)); got != ConfidenceNoRelevant {
+	if got := ClassifyConfidence(math.Inf(-1), testSettings); got != ConfidenceNoRelevant {
 		t.Errorf("ClassifyConfidence(-Inf) = %q, want %q", got, ConfidenceNoRelevant)
 	}
 }
 
 func TestClassifyConfidence_Negative(t *testing.T) {
-	if got := ClassifyConfidence(-1.0); got != ConfidenceNoRelevant {
+	if got := ClassifyConfidence(-1.0, testSettings); got != ConfidenceNoRelevant {
 		t.Errorf("ClassifyConfidence(-1.0) = %q, want %q", got, ConfidenceNoRelevant)
 	}
 }
 
 func TestClassifyConfidence_SmallestPositive(t *testing.T) {
-	if got := ClassifyConfidence(math.SmallestNonzeroFloat64); got != ConfidenceNoRelevant {
+	if got := ClassifyConfidence(math.SmallestNonzeroFloat64, testSettings); got != ConfidenceNoRelevant {
 		t.Errorf("ClassifyConfidence(SmallestNonzero) = %q, want %q", got, ConfidenceNoRelevant)
 	}
 }
 
 func TestClassifyConfidence_MaxFloat64(t *testing.T) {
-	if got := ClassifyConfidence(math.MaxFloat64); got != ConfidenceConfident {
+	if got := ClassifyConfidence(math.MaxFloat64, testSettings); got != ConfidenceConfident {
 		t.Errorf("ClassifyConfidence(MaxFloat64) = %q, want %q", got, ConfidenceConfident)
 	}
 }
@@ -106,7 +106,7 @@ func TestFilterByScore_PreservesInputOrder(t *testing.T) {
 		{ID: "a", Score: 0.0005},
 		{ID: "b", Score: 0.01},
 	}
-	filtered, _ := FilterByScore(sources)
+	filtered, _ := FilterByScore(sources, testSettings)
 	if len(filtered) != 2 {
 		t.Fatalf("expected 2, got %d", len(filtered))
 	}
@@ -116,19 +116,19 @@ func TestFilterByScore_PreservesInputOrder(t *testing.T) {
 }
 
 func TestFilterByScore_SingleAtThreshold(t *testing.T) {
-	sources := []Source{{ID: "x", Score: ScoreThreshold}}
-	filtered, max := FilterByScore(sources)
+	sources := []Source{{ID: "x", Score: testSettings.ScoreThreshold}}
+	filtered, max := FilterByScore(sources, testSettings)
 	if len(filtered) != 1 {
 		t.Errorf("exact threshold should be included, got %d", len(filtered))
 	}
-	if max != ScoreThreshold {
-		t.Errorf("maxScore = %f, want %f", max, ScoreThreshold)
+	if max != testSettings.ScoreThreshold {
+		t.Errorf("maxScore = %f, want %f", max, testSettings.ScoreThreshold)
 	}
 }
 
 func TestFilterByScore_NaNScore(t *testing.T) {
 	sources := []Source{{ID: "nan", Score: math.NaN()}}
-	filtered, _ := FilterByScore(sources)
+	filtered, _ := FilterByScore(sources, testSettings)
 	// NaN >= threshold is false.
 	if len(filtered) != 0 {
 		t.Errorf("NaN score should be filtered out, got %d", len(filtered))
@@ -137,7 +137,7 @@ func TestFilterByScore_NaNScore(t *testing.T) {
 
 func TestFilterByScore_InfScore(t *testing.T) {
 	sources := []Source{{ID: "inf", Score: math.Inf(1)}}
-	filtered, max := FilterByScore(sources)
+	filtered, max := FilterByScore(sources, testSettings)
 	if len(filtered) != 1 {
 		t.Errorf("+Inf score should pass, got %d", len(filtered))
 	}
@@ -148,7 +148,7 @@ func TestFilterByScore_InfScore(t *testing.T) {
 
 func TestFilterByScore_NegativeScore(t *testing.T) {
 	sources := []Source{{ID: "neg", Score: -0.01}}
-	filtered, _ := FilterByScore(sources)
+	filtered, _ := FilterByScore(sources, testSettings)
 	if len(filtered) != 0 {
 		t.Errorf("negative score should be filtered, got %d", len(filtered))
 	}
@@ -218,7 +218,7 @@ func TestFormatAnswer_VeryLong(t *testing.T) {
 // --- BuildPrompt edge cases ---.
 
 func TestBuildPrompt_EmptyQuery(t *testing.T) {
-	_, user := BuildPrompt("", nil, nil)
+	_, user := BuildPrompt("", nil, nil, testSettings)
 	if !strings.Contains(user, "<question></question>") {
 		t.Errorf("empty query should produce empty question tag, got: %s", user)
 	}
@@ -226,7 +226,7 @@ func TestBuildPrompt_EmptyQuery(t *testing.T) {
 
 func TestBuildPrompt_ZeroScoreSource(t *testing.T) {
 	sources := []Source{{ID: "1", Title: "T", Category: "C", Content: "c", Score: 0.0}}
-	_, user := BuildPrompt("q", sources, nil)
+	_, user := BuildPrompt("q", sources, nil, testSettings)
 	if !strings.Contains(user, `score="0.0000"`) {
 		t.Error("zero score should appear formatted as 0.0000")
 	}
@@ -238,7 +238,7 @@ func TestBuildPrompt_MultipleTemporalDates(t *testing.T) {
 		{Ref: "gestern", Date: "2026-03-28"},
 		{Ref: "naechste Woche", Date: "2026-03-30", End: &end},
 	}
-	sys, _ := BuildPrompt("q", nil, dates)
+	sys, _ := BuildPrompt("q", nil, dates, testSettings)
 	if !strings.Contains(sys, "gestern = 2026-03-28") {
 		t.Error("first temporal date missing")
 	}
@@ -250,7 +250,7 @@ func TestBuildPrompt_MultipleTemporalDates(t *testing.T) {
 func TestBuildPrompt_ContentExactlyMaxBlockChars(t *testing.T) {
 	content := strings.Repeat("a", MaxBlockChars)
 	sources := []Source{{ID: "1", Title: "T", Category: "C", Content: content, Score: 0.01}}
-	_, user := BuildPrompt("q", sources, nil)
+	_, user := BuildPrompt("q", sources, nil, testSettings)
 	if strings.Contains(user, "[... truncated]") {
 		t.Error("content at exactly MaxBlockChars should NOT be truncated")
 	}
@@ -259,7 +259,7 @@ func TestBuildPrompt_ContentExactlyMaxBlockChars(t *testing.T) {
 func TestBuildPrompt_ContentOneOverMaxBlockChars(t *testing.T) {
 	content := strings.Repeat("a", MaxBlockChars+1)
 	sources := []Source{{ID: "1", Title: "T", Category: "C", Content: content, Score: 0.01}}
-	_, user := BuildPrompt("q", sources, nil)
+	_, user := BuildPrompt("q", sources, nil, testSettings)
 	if !strings.Contains(user, "[... truncated]") {
 		t.Error("content at MaxBlockChars+1 should be truncated")
 	}
@@ -267,7 +267,7 @@ func TestBuildPrompt_ContentOneOverMaxBlockChars(t *testing.T) {
 
 func TestBuildPrompt_EmptyContentSource(t *testing.T) {
 	sources := []Source{{ID: "1", Title: "T", Category: "C", Content: "", Score: 0.01}}
-	_, user := BuildPrompt("q", sources, nil)
+	_, user := BuildPrompt("q", sources, nil, testSettings)
 	if !strings.Contains(user, "</source>") {
 		t.Error("empty content source should still produce closing tag")
 	}
@@ -275,7 +275,7 @@ func TestBuildPrompt_EmptyContentSource(t *testing.T) {
 
 func TestBuildPrompt_NegativeAgeDays(t *testing.T) {
 	sources := []Source{{ID: "1", Title: "T", Category: "C", Content: "c", Score: 0.01, AgeDays: -5}}
-	_, user := BuildPrompt("q", sources, nil)
+	_, user := BuildPrompt("q", sources, nil, testSettings)
 	if !strings.Contains(user, `age_days="-5"`) {
 		t.Error("negative age_days should appear in output")
 	}
@@ -288,7 +288,7 @@ func TestConfidenceOverride_ConfidentRRF_LLMRejects(t *testing.T) {
 	// confidence should be downgraded to "low_confidence", NOT "no_relevant_blocks_found".
 	// This preserves the RRF signal while noting LLM disagreement.
 	answer := FormatAnswer("NO_RELEVANT_SOURCES")
-	confidence := ClassifyConfidence(0.01) // confident
+	confidence := ClassifyConfidence(0.01, testSettings) // confident
 	newConf, rejected := ApplyConfidenceOverride(answer, confidence)
 	if newConf != ConfidenceLow {
 		t.Errorf("confident RRF + LLM rejection: got confidence %q, want %q", newConf, ConfidenceLow)
@@ -302,7 +302,7 @@ func TestConfidenceOverride_LowRRF_LLMRejects(t *testing.T) {
 	// When RRF says low_confidence (maxScore < 0.008) and LLM says NO_RELEVANT,
 	// confidence should be "no_relevant_blocks_found" (current behavior preserved).
 	answer := FormatAnswer("NO_RELEVANT_SOURCES")
-	confidence := ClassifyConfidence(0.006) // low_confidence
+	confidence := ClassifyConfidence(0.006, testSettings) // low_confidence
 	newConf, rejected := ApplyConfidenceOverride(answer, confidence)
 	if newConf != ConfidenceNoRelevant {
 		t.Errorf("low RRF + LLM rejection: got confidence %q, want %q", newConf, ConfidenceNoRelevant)
@@ -316,7 +316,7 @@ func TestConfidenceOverride_ConfidentRRF_LLMAccepts(t *testing.T) {
 	// When LLM returns a normal answer, confidence stays "confident"
 	// (no override happens).
 	answer := FormatAnswer("The service runs on port 443 [1].")
-	confidence := ClassifyConfidence(0.01) // confident
+	confidence := ClassifyConfidence(0.01, testSettings) // confident
 	newConf, rejected := ApplyConfidenceOverride(answer, confidence)
 	if newConf != ConfidenceConfident {
 		t.Errorf("confident RRF + LLM accepts: got confidence %q, want %q", newConf, ConfidenceConfident)
@@ -399,15 +399,16 @@ func TestConfidenceOverride_DetectsEnglishRejectionPrefix(t *testing.T) {
 
 // --- Welle-48 W48-01: V6 Prompt-Version Toggle ---.
 //
-// PromptVersion is init-time, env-driven; switching at runtime would require
-// re-reading the env or a setter. These tests cover:
+// Since F1-W2 the prompt version travels in SynthesisSettings (config
+// registry, key query.prompt_version) — no package state, no env. The
+// registry default "v5.2" is pinned by the cmd/ctxd golden equivalence test
+// against the frozen pre-F1 init() fallbacks. These tests cover:
 //   - The V6 constant exists and is non-empty.
 //   - V6 differs from V5.2 (else the toggle is a no-op).
 //   - The V6 constant declares the three response modes (DIRECT / INFERRED /
 //     REFUSAL) and references the NO_RELEVANT_SOURCES marker.
-//   - selectSystemPrompt() honours PromptVersion.
-//   - Default PromptVersion is "v5.2" (zero behavior change in prod when
-//     CTX_PROMPT_VERSION is unset).
+//   - selectSystemPrompt() honours settings.PromptVersion — two different
+//     settings values yield two different prompts without any env involved.
 //   - V6 keeps the NO_RELEVANT_SOURCES sentinel anchor (refusal still works,
 //     CRAG-judge compatibility preserved).
 
@@ -441,61 +442,41 @@ func TestSystemPromptV6_KeepsRefusalSentinel(t *testing.T) {
 	}
 }
 
-func TestSelectSystemPrompt_DefaultIsV52(t *testing.T) {
-	orig := PromptVersion
-	defer func() { PromptVersion = orig }()
-
-	PromptVersion = PromptVersionV52
-	if got := selectSystemPrompt(); got != systemPromptV52 {
+func TestSelectSystemPrompt_V52(t *testing.T) {
+	s := SynthesisSettings{PromptVersion: PromptVersionV52}
+	if got := selectSystemPrompt(s); got != systemPromptV52 {
 		t.Errorf("selectSystemPrompt() with PromptVersion=v5.2 = wrong prompt (len %d)", len(got))
 	}
 }
 
 func TestSelectSystemPrompt_V6Selected(t *testing.T) {
-	orig := PromptVersion
-	defer func() { PromptVersion = orig }()
-
-	PromptVersion = PromptVersionV6
-	if got := selectSystemPrompt(); got != systemPromptV6 {
+	s := SynthesisSettings{PromptVersion: PromptVersionV6}
+	if got := selectSystemPrompt(s); got != systemPromptV6 {
 		t.Errorf("selectSystemPrompt() with PromptVersion=v6 = wrong prompt (len %d)", len(got))
 	}
 }
 
 func TestSelectSystemPrompt_UnknownFallsBackToV52(t *testing.T) {
-	// Defensive: init() rejects unknown CTX_PROMPT_VERSION values, but if
-	// callers mutate PromptVersion at runtime to something unexpected,
-	// selectSystemPrompt should default to V5.2 rather than panic / return
-	// an empty string.
-	orig := PromptVersion
-	defer func() { PromptVersion = orig }()
-
-	PromptVersion = "v999"
-	if got := selectSystemPrompt(); got != systemPromptV52 {
-		t.Errorf("selectSystemPrompt() with unknown PromptVersion must fall back to V5.2, got len %d", len(got))
-	}
-}
-
-func TestPromptVersion_DefaultIsV52(t *testing.T) {
-	// init() must default to v5.2 when CTX_PROMPT_VERSION is unset. Tests run
-	// without that env (verified by the test harness; CI runs go test without
-	// production env), so the package-init state must be V5.2.
-	if PromptVersion != PromptVersionV52 {
-		t.Errorf("PromptVersion default = %q, want %q (prod-safe default)", PromptVersion, PromptVersionV52)
+	// Defensive: the config registry's V5 validation normalizes unknown
+	// CTX_PROMPT_VERSION values at load time, but if a caller constructs
+	// settings with an unexpected (or zero-value) version, selectSystemPrompt
+	// should default to V5.2 rather than panic / return an empty string.
+	for _, version := range []string{"v999", ""} {
+		s := SynthesisSettings{PromptVersion: version}
+		if got := selectSystemPrompt(s); got != systemPromptV52 {
+			t.Errorf("selectSystemPrompt() with PromptVersion=%q must fall back to V5.2, got len %d", version, len(got))
+		}
 	}
 }
 
 func TestBuildPrompt_RespectsPromptVersion(t *testing.T) {
-	// BuildPrompt -> selectSystemPrompt path. Mutate PromptVersion and verify
-	// the system prompt string changes.
-	orig := PromptVersion
-	defer func() { PromptVersion = orig }()
-
+	// BuildPrompt -> selectSystemPrompt path: two different settings values
+	// yield two different system prompts — parametrization proof, no env or
+	// package state involved (F1-W2).
 	src := []Source{{ID: "1", Title: "T", Category: "C", Content: "c", Score: 0.01}}
 
-	PromptVersion = PromptVersionV52
-	sysV52, _ := BuildPrompt("q", src, nil)
-	PromptVersion = PromptVersionV6
-	sysV6, _ := BuildPrompt("q", src, nil)
+	sysV52, _ := BuildPrompt("q", src, nil, SynthesisSettings{PromptVersion: PromptVersionV52})
+	sysV6, _ := BuildPrompt("q", src, nil, SynthesisSettings{PromptVersion: PromptVersionV6})
 
 	if sysV52 == sysV6 {
 		t.Error("BuildPrompt returned identical system prompt for V5.2 and V6 — toggle ineffective")
@@ -507,5 +488,52 @@ func TestBuildPrompt_RespectsPromptVersion(t *testing.T) {
 		// Regression guard: if INFERRED appears in V5.2 we accidentally crossed
 		// the prompts.
 		t.Error("systemPromptV52 unexpectedly contains INFERRED marker")
+	}
+}
+
+// --- F1-W2: settings parametrization ---.
+//
+// The wave's behavioral contract: the thresholds travel ONLY in the
+// SynthesisSettings parameter. Same input, two different settings values,
+// two different outcomes — with zero env manipulation and zero package
+// state. Would fail to compile against the old package-var design.
+
+func TestClassifyConfidence_SettingsParametrized(t *testing.T) {
+	const score = 0.5
+	cases := []struct {
+		name string
+		s    SynthesisSettings
+		want string
+	}{
+		{"lenient => confident", SynthesisSettings{ScoreThreshold: 0.001, ConfidentThreshold: 0.008}, ConfidenceConfident},
+		{"mid band => low", SynthesisSettings{ScoreThreshold: 0.4, ConfidentThreshold: 0.9}, ConfidenceLow},
+		{"strict => none", SynthesisSettings{ScoreThreshold: 0.6, ConfidentThreshold: 0.9}, ConfidenceNoRelevant},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClassifyConfidence(score, tt.s); got != tt.want {
+				t.Errorf("ClassifyConfidence(%v, %+v) = %q, want %q", score, tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilterByScore_SettingsParametrized(t *testing.T) {
+	sources := []Source{
+		{ID: "hi", Score: 0.7},
+		{ID: "lo", Score: 0.2},
+	}
+
+	loose, _ := FilterByScore(sources, SynthesisSettings{ScoreThreshold: 0.1})
+	if len(loose) != 2 {
+		t.Errorf("loose threshold: got %d sources, want 2", len(loose))
+	}
+
+	tight, maxScore := FilterByScore(sources, SynthesisSettings{ScoreThreshold: 0.5})
+	if len(tight) != 1 || tight[0].ID != "hi" {
+		t.Errorf("tight threshold: got %v, want only \"hi\"", tight)
+	}
+	if maxScore != 0.7 {
+		t.Errorf("tight threshold maxScore = %v, want 0.7", maxScore)
 	}
 }
