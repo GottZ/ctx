@@ -68,7 +68,7 @@ docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 \
 
 ### Sealed secrets & break-glass
 
-Provider credentials live AES-256-GCM-sealed in `context_secrets` (encrypted in Go — never via pgcrypto, the master key must not cross the SQL wire). The AAD binds each ciphertext to its `name`+`scope` row identity, so a ciphertext copied onto another row fails authentication. The secrets API/CLI waves activate the write paths; the crypto, the decrypt mode and the host script ship first so the recovery path exists before the first secret does.
+Provider credentials live AES-256-GCM-sealed in `context_secrets` (encrypted in Go — never via pgcrypto, the master key must not cross the SQL wire). The AAD binds each ciphertext to its `name`+`scope` row identity, so a ciphertext copied onto another row fails authentication. Writes go through the admin-gated, **write-only** `/api/secrets` (set/rotate/delete — values never appear in any response, list shows metadata + `referenced_by` only, no fingerprints); settings reference a secret by *name* (`secret_ref`), resolved to plaintext exclusively inside the in-memory snapshot. A rotation or revocation reloads the snapshot immediately — no settings write needed, the incident-response path is never silently inert. Deleting a secret that settings still reference is a `409` listing the keys.
 
 **Master key setup** (one-time):
 
@@ -79,7 +79,7 @@ echo "CTX_SECRETS_KEY=$(openssl rand -hex 32)" >> .env
 
 **Mandatory: copy `CTX_SECRETS_KEY` into your password manager when you set it.** `backup.sh` archives only the pg_dumps — the ciphertexts are in every dump, the master key is in none (deliberate: the key stays spatially separated from the ciphertexts it opens, so disaster recovery needs both places). **Key loss = total loss of all sealed secrets, by design.** No recovery mechanism; re-enter the provider keys instead.
 
-**Master-key rotation:** generate a new key, move the old value to `CTX_SECRETS_KEY_PREV`, put the new one in `CTX_SECRETS_KEY`, restart ctx. The boot sweep (settings bootstrap wave) re-seals every secret it can open with the previous key (`key_version` bump, log line per name); afterwards remove `CTX_SECRETS_KEY_PREV` from `.env`. Secrets that open with neither key are left untouched (WARN per name, no boot abort).
+**Master-key rotation:** generate a new key, move the old value to `CTX_SECRETS_KEY_PREV`, put the new one in `CTX_SECRETS_KEY`, restart ctx. The boot sweep re-seals every secret it can open with the previous key (`key_version` bump, log line per name, one transaction per row); it logs a completion line — `re-encrypt sweep complete` means remove `CTX_SECRETS_KEY_PREV` from `.env`, a `finished with failures` WARN means keep it set and investigate. Secrets that open with neither key are left untouched (WARN per name, no boot abort, no data loss). The *value* rotation of a single provider key is `PUT /api/secrets/{name}` (or `ctx secrets rotate`) — no restart, propagates immediately.
 
 **Break-glass extraction** (host access; works even when the ctx container crash-loops — the decrypt mode reads ONLY env + stdin, no DB):
 
@@ -313,6 +313,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `GET /api/whoami` | Calling key's identity: `label`, `home_scope`, `read_scopes`, `admin` tier flag — the SPA login gate probes it and derives its read-only degradation from `admin` |
 | `POST /api/manage` | CRUD, Guard API, stats, API-key management (`api-key-create` requires `home_scope`; key/MCP-client management and mutating `dream-mode` require an **admin key** since 052 — see Admin tier) |
 | `GET\|PUT\|DELETE /api/settings[/{key}]` | Runtime config overrides, **admin-gated incl. reads** (see [Settings API](#settings-api)) |
+| `GET\|PUT\|DELETE /api/secrets[/{name}]` | Write-only sealed credentials, **admin-gated**: PUT creates/rotates (value never returned), GET lists metadata + `referenced_by`, DELETE 409s while referenced (see Sealed secrets & break-glass) |
 | `POST /api/digest` | Topic map generation |
 | `POST /api/ingest` | Obsidian vault ingestion |
 | `POST /api/blob/*` | Binary storage (store/fetch/search/manage) |

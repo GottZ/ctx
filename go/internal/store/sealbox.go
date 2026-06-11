@@ -175,6 +175,63 @@ func ResolveSecret(ctx context.Context, pool *pgxpool.Pool, box *sealbox.Box, na
 	return plaintext, nil
 }
 
+// SealedSecret is the full sealed row, read ONLY by the §3.6 master-key
+// re-encrypt sweep (settings.ReencryptSweep). Every other read surface goes
+// through ListSecretMeta (metadata-only) or ResolveSecret (single row).
+type SealedSecret struct {
+	Name       string
+	Scope      string
+	Nonce      []byte
+	Ciphertext []byte
+	KeyVersion int
+}
+
+// LoadSealedSecrets returns every sealed row across ALL scopes — the sweep
+// must re-seal foreign-tenant rows too (the AAD carries name+scope per row,
+// so cross-scope re-sealing stays identity-bound).
+func LoadSealedSecrets(ctx context.Context, pool *pgxpool.Pool) ([]SealedSecret, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT name, scope, nonce, ciphertext, key_version
+		 FROM context_secrets ORDER BY scope, name`)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: load sealed rows: %w", err)
+	}
+	defer rows.Close()
+
+	var out []SealedSecret
+	for rows.Next() {
+		var s SealedSecret
+		if err := rows.Scan(&s.Name, &s.Scope, &s.Nonce, &s.Ciphertext, &s.KeyVersion); err != nil {
+			return nil, fmt.Errorf("secrets: scan sealed row: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// UpdateSecretSeal replaces nonce/ciphertext and bumps key_version — the
+// re-encrypt sweep's write. Deliberately does NOT stamp rotated_at/rotated_by:
+// the VALUE is unchanged, only the sealing key generation moved. The 051
+// triggers still emit audit (action='rotate', via='sql' — the sweep runs
+// unattributed at boot) and NOTIFY.
+func UpdateSecretSeal(ctx context.Context, tx pgx.Tx, name, scope string, nonce, ciphertext []byte) error {
+	if name == "" || scope == "" {
+		return fmt.Errorf("secrets: name and scope are required")
+	}
+	tag, err := tx.Exec(ctx,
+		`UPDATE context_secrets
+		 SET nonce = $3, ciphertext = $4, key_version = key_version + 1
+		 WHERE name = $1 AND scope = $2`,
+		name, scope, nonce, ciphertext)
+	if err != nil {
+		return fmt.Errorf("secrets: update seal %s: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("secrets: update seal %s: row vanished", name)
+	}
+	return nil
+}
+
 // DeleteSecret removes one sealed secret. Returns found=false when no row
 // matched. Audit (action='delete') + NOTIFY come from the 051 triggers —
 // a revocation must propagate exactly like a rotation.
