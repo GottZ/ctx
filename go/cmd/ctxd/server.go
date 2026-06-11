@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/config"
-	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/web"
@@ -22,10 +21,10 @@ const (
 )
 
 // NewRouter creates the chi router with all routes and middleware. cfgStore
-// is the runtime-config snapshot store (F1-W4): the QueryHandler reads one
-// snapshot per request from it; the remaining handlers still consume the
-// legacy bridge view until their store adoption (F1-W6/W7).
-func NewRouter(pool *pgxpool.Pool, cfg Config, cfgStore *config.Store, scheduler *events.Scheduler) *chi.Mux {
+// is the runtime-config snapshot store: every config-consuming handler reads
+// one snapshot per request from it (F1-W4–W7) — no handler holds a boot copy,
+// so a config replace is live from the next request on.
+func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -35,7 +34,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, cfgStore *config.Store, scheduler
 	r.Use(handler.Recovery)
 
 	// Health check (no auth, no body)
-	h := handler.NewHealthHandler(pool, cfg.EmbedHost, cfg.ChatHost, cfg.DreamHost)
+	h := handler.NewHealthHandler(pool, cfgStore)
 	r.Get("/health", h.Health)
 
 	// OAuth 2.1 endpoints for MCP remote auth (no auth middleware — these ARE the auth flow).
@@ -47,25 +46,17 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, cfgStore *config.Store, scheduler
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
 	queryHandler := handler.NewQueryHandler(pool, cfgStore)
-	storeH := handler.NewStoreHandler(pool, cfg.RateLimitWrite)
-	searchH := handler.NewSearchHandler(pool, cfg.RateLimitRead)
-	graphH := handler.NewGraphHandler(pool, cfg.RateLimitRead)
+	storeH := handler.NewStoreHandler(pool, cfgStore)
+	searchH := handler.NewSearchHandler(pool, cfgStore)
+	graphH := handler.NewGraphHandler(pool, cfgStore)
 	manageH := handler.NewManageHandler(pool, cfgStore, scheduler)
 	whoamiH := handler.NewWhoamiHandler(pool)
-	blobH := handler.NewBlobHandler(pool, cfg.RateLimitWrite)
+	blobH := handler.NewBlobHandler(pool, cfgStore)
 	digestH := handler.NewDigestHandler(pool)
-	// Welle 42: daily synthesis manual trigger. Shares the single dream
-	// derivation with the scheduler — cfg.DreamBackend() resolves the
-	// model/think/num_ctx inheritance from chat, and the chat-num_ctx carry
-	// keeps every chat-model call site on one Ollama runner (distinct num_ctx
-	// → extra 27B runner → VRAM OOM). Boot-time copy of the effective
-	// snapshot until F1-W7 moves the handler onto the store.
-	dreamB := cfgStore.Snapshot().DreamBackend()
-	dreamOpts := dream.DreamOptions()
-	if dreamB.NumCtx > 0 {
-		dreamOpts.NumCtx = dreamB.NumCtx
-	}
-	synthH := handler.NewSynthesizeHandler(pool, dreamB, dreamOpts)
+	// Welle 42: daily synthesis manual trigger. Derives the dream backend per
+	// request from its snapshot (cfg.DreamBackend()) — the same single
+	// derivation as the scheduler's dream loop and daily iteration.
+	synthH := handler.NewSynthesizeHandler(pool, cfgStore)
 
 	// ── MCP endpoint (Streamable HTTP, authenticated) ──────────────
 	queryHTTPHandler := handler.WithScheduler(scheduler, queryHandler.HandleQuery)

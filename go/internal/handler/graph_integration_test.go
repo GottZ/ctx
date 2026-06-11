@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
@@ -78,7 +79,8 @@ func hgAuth(keyID, home string) *auth.AuthResult {
 // hgDo runs HandleEgo with an injected AuthResult and returns the recorder.
 func hgDo(t *testing.T, pool *pgxpool.Pool, ar *auth.AuthResult, query string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := NewGraphHandler(pool, 0)
+	// Zero-valued config: RateLimitRead 0 = disabled, like the old literal 0.
+	h := NewGraphHandler(pool, config.NewStore(&config.Config{}))
 	req := httptest.NewRequest("GET", "/api/graph/ego?"+query, nil)
 	req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))
 	rec := httptest.NewRecorder()

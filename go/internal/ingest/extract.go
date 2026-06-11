@@ -189,6 +189,7 @@ func ExtractionOptions() llm.Options {
 // think=nil, so callers wanting that behavior leave chat.Think empty).
 // Pure extraction functions above are unit-testable without a backend.
 // Runs injection detection before extraction and attaches flags to the result.
+// TODO(ingest-generalization): quellen-agnostischer Caller fehlt (CLI stdin/Datei, /api/ingest, Frontend-Paste); obsidian.go ist Adapter, nicht Kern.
 func Extract(ctx context.Context, chat backends.Backend, content string) (*ExtractionResult, error) {
 	// Detect injection patterns before sending to LLM
 	injectionFlags := DetectInjection(content)
