@@ -50,32 +50,22 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, cfgStore *config.Store, scheduler
 	storeH := handler.NewStoreHandler(pool, cfg.RateLimitWrite)
 	searchH := handler.NewSearchHandler(pool, cfg.RateLimitRead)
 	graphH := handler.NewGraphHandler(pool, cfg.RateLimitRead)
-	manageH := handler.NewManageHandler(pool, scheduler)
+	manageH := handler.NewManageHandler(pool, cfgStore, scheduler)
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfg.RateLimitWrite)
 	digestH := handler.NewDigestHandler(pool)
-	// Welle 42: daily synthesis manual trigger. Uses the dream model + dream
-	// chat host so the trigger and the scheduled 03:00-local goroutine share
-	// one Ollama backend. Falls back to ChatModel when DreamModel is empty.
-	dreamThink := parseThinkMode(cfg.DreamThink)
-	if cfg.DreamThink == "" {
-		dreamThink = parseThinkMode(cfg.ChatThink)
-	}
-	dreamModel := cfg.DreamModel
-	if dreamModel == "" {
-		dreamModel = cfg.ChatModel
-	}
+	// Welle 42: daily synthesis manual trigger. Shares the single dream
+	// derivation with the scheduler — cfg.DreamBackend() resolves the
+	// model/think/num_ctx inheritance from chat, and the chat-num_ctx carry
+	// keeps every chat-model call site on one Ollama runner (distinct num_ctx
+	// → extra 27B runner → VRAM OOM). Boot-time copy of the effective
+	// snapshot until F1-W7 moves the handler onto the store.
+	dreamB := cfgStore.Snapshot().DreamBackend()
 	dreamOpts := dream.DreamOptions()
-	if cfg.DreamNumCtx > 0 {
-		dreamOpts.NumCtx = cfg.DreamNumCtx
-	} else if cfg.ChatNumCtx > 0 {
-		// Consistency: chat and dream share one Ollama model (same 27B). When no
-		// dedicated DreamNumCtx is set, the daily-synthesis chat-model request
-		// must carry the same num_ctx as every other chat-model call site so
-		// Ollama keeps a single runner (distinct num_ctx → extra runner → VRAM OOM).
-		dreamOpts.NumCtx = cfg.ChatNumCtx
+	if dreamB.NumCtx > 0 {
+		dreamOpts.NumCtx = dreamB.NumCtx
 	}
-	synthH := handler.NewSynthesizeHandler(pool, cfg.DreamHost, cfg.DreamAPIKey, dreamModel, dreamThink, dreamOpts)
+	synthH := handler.NewSynthesizeHandler(pool, dreamB, dreamOpts)
 
 	// ── MCP endpoint (Streamable HTTP, authenticated) ──────────────
 	queryHTTPHandler := handler.WithScheduler(scheduler, queryHandler.HandleQuery)

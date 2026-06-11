@@ -160,20 +160,10 @@ func chatWithFallback(ctx context.Context, primary backends.Backend, fallback *b
 	return resp, true, err
 }
 
-// ChatWithProtocol sends a chat request using the specified protocol.
-// Transitional loose-parameter form for the dream pipeline (its chatJSON test
-// seam carries the protocol separately until F1-W6 threads backends.Backend
-// through the dream entry points) — new call sites take Chat(ctx, backend, …).
-func ChatWithProtocol(ctx context.Context, protocol, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
-	return chatWithFormat(ctx, protocol, host, apiKey, model, think, systemPrompt, userPrompt, opts, "", timeout)
-}
-
-// ChatJSONWithProtocol sends a JSON-mode chat request using the specified
-// protocol. Same transitional status as ChatWithProtocol.
-func ChatJSONWithProtocol(ctx context.Context, protocol, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
-	return chatWithFormat(ctx, protocol, host, apiKey, model, think, systemPrompt, userPrompt, opts, "json", timeout)
-}
-
+// chatWithFormat is the protocol dispatch shared by Chat and ChatJSON. The
+// exported loose-parameter forms (ChatWithProtocol/ChatJSONWithProtocol) died
+// in F1-W6 with their last consumer, the dream chatJSON seam — every call
+// site now passes a backends.Backend.
 func chatWithFormat(ctx context.Context, protocol, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
 	if protocol == "openai" {
 		return chatOpenAI(ctx, host, apiKey, model, think, systemPrompt, userPrompt, opts, format, timeout)

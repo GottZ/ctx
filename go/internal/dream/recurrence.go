@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,7 +76,7 @@ type recurrenceCandidate struct {
 //
 // pool may be nil for the Phase-2 llmlog.Record only — Phase 1 always runs
 // against the pool and a nil pool returns no candidates.
-func DetectRecurrence(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, opts llm.Options, source BlockInfo) ([]Link, error) {
+func DetectRecurrence(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, source BlockInfo) ([]Link, error) {
 	if pool == nil {
 		return nil, nil
 	}
@@ -90,7 +91,7 @@ func DetectRecurrence(ctx context.Context, pool *pgxpool.Pool, host, apiKey, mod
 
 	links := make([]Link, 0, len(candidates))
 	for _, c := range candidates {
-		verdict, vErr := confirmRecurrence(ctx, pool, host, apiKey, model, think, opts, source, c)
+		verdict, vErr := confirmRecurrence(ctx, pool, chatB, opts, source, c)
 		if vErr != nil {
 			slog.Warn("dream: recurrence phase 2 failed (non-fatal)",
 				"source", source.ID, "target", c.TargetID, "error", vErr)
@@ -154,14 +155,14 @@ func pickRecurrenceCandidates(ctx context.Context, pool *pgxpool.Pool, sourceID,
 
 // confirmRecurrence is Phase 2 — single LLM-call per pair. Logged via llmlog
 // for audit-trail consistency with EvaluateRelationships.
-func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, opts llm.Options, source BlockInfo, c recurrenceCandidate) (recurrenceVerdict, error) {
+func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, source BlockInfo, c recurrenceCandidate) (recurrenceVerdict, error) {
 	userPrompt := buildRecurrencePrompt(source, c)
 	dreamVer := int16(Version)
 
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-recurrence",
-		Model:         model,
-		Host:          host,
+		Model:         chatB.Model,
+		Host:          chatB.Host,
 		RequestSystem: recurrenceSystemPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      []string{source.ID, c.TargetID},
@@ -170,7 +171,7 @@ func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, host, apiKey, mo
 	defer func() { llmlog.Record(pool, *entry) }()
 
 	start := time.Now()
-	resp, err := chatJSON(ctx, host, apiKey, model, think, recurrenceSystemPrompt, userPrompt, opts, DreamTimeout)
+	resp, err := dreamChatJSON(ctx, chatB, recurrenceSystemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 	if resp != nil {

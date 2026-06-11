@@ -17,19 +17,27 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Protocol is the wire protocol for dream LLM calls ("ollama" or "openai").
-// Set by main() from CTX_DREAM_PROTOCOL. Historically this existed so dream
-// calls would not silently follow the chat protocol (llm.DefaultProtocol,
-// deleted in F1-W3) under a split chat/dream configuration; the var itself
-// dies in F1-W6 when the dream entry points take a backends.Backend.
-var Protocol = "ollama"
+// chatJSON is the test seam through which the dream pipeline calls the LLM.
+// Test files install canned implementations (mockChatJSON in evaluate_test.go,
+// SetChatJSONForTest in export_test.go) to inject ChatResponse values without
+// touching the HTTP transport. The loose (host, apiKey, model, think)
+// signature is deliberately stable across the F1 signature waves so the
+// override closures in every dream test file keep compiling. nil outside
+// tests — dreamChatJSON then takes the production wire path, which is the
+// only place the backend's protocol is read.
+var chatJSON func(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error)
 
-// chatJSON is the seam through which the dream pipeline calls the LLM.
-// Tests override this to inject canned ChatResponse values without touching
-// llm.ChatJSON's HTTP transport. Production callers (evaluate, keywords,
-// validate_temporal) use it identically to llm.ChatJSON.
-var chatJSON = func(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error) {
-	return llm.ChatJSONWithProtocol(ctx, Protocol, host, apiKey, model, think, systemPrompt, userPrompt, opts, timeout)
+// dreamChatJSON routes one dream LLM call. With the chatJSON test seam
+// installed it forwards the backend's loose tuple there; in production it
+// calls llm.ChatJSON with the full backend, whose Protocol selects the wire
+// path (/api/chat vs /v1/chat/completions). The dream.Protocol package var
+// died here in F1-W6: the protocol now arrives only inside the
+// backends.Backend parameter of the public dream entry points.
+func dreamChatJSON(ctx context.Context, chatB backends.Backend, systemPrompt, userPrompt string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error) {
+	if chatJSON != nil {
+		return chatJSON(ctx, chatB.Host, chatB.APIKey, chatB.Model, chatB.Think.Ptr(), systemPrompt, userPrompt, opts, timeout)
+	}
+	return llm.ChatJSON(ctx, chatB, systemPrompt, userPrompt, opts, timeout)
 }
 
 const (
@@ -107,11 +115,16 @@ func NoThrottle(_ context.Context) error { return nil }
 
 // RunDreamCycle executes one dream cycle: pick → keywords → search → evaluate → link.
 // Returns the number of links created, or 0 if no block was available.
+// embedB/chatB are the cycle's backend tuples, backoff its back-off policy —
+// all from ONE config snapshot of the caller (F1-W6), so a settings flip is
+// live on the next cycle. backoff is the only threading chain to the cooldown:
+// SetDreamCooldown/SetDreamCooldownMinutes are called exclusively
+// cycle-internally, never by the scheduler.
 // Cyclop threshold exceeded by 1 due to sequential error/skip branches per pipeline step;
 // extracting helpers would obscure the linear flow without reducing real complexity.
 //
 //nolint:cyclop // pipeline function with linear step sequence
-func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB backends.Backend, chatHost, chatAPIKey, chatModel string, think *bool, opts llm.Options, readScopes []string, throttle Throttle) (int, error) {
+func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backends.Backend, opts llm.Options, backoff BackoffConfig, readScopes []string, throttle Throttle) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, CycleTimeout)
 	defer cancel()
 	// Step 1: Pick a block.
@@ -136,7 +149,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB backends.Back
 	needsTemporal := block.DreamTemporalValidatedAt == nil ||
 		block.UpdatedAt.After(*block.DreamTemporalValidatedAt)
 	if needsTemporal {
-		if err := ValidateTemporal(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts, block); err != nil {
+		if err := ValidateTemporal(ctx, pool, chatB, opts, block); err != nil {
 			slog.Warn("dream: temporal validation failed (non-fatal)", "block_id", block.ID, "error", err)
 		}
 		// Mark validated even on non-fatal LLM failure — Phase 1 (deterministic)
@@ -162,7 +175,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB backends.Back
 	// no fallback to deterministic extraction, which produces code-syntax noise.
 	keywords := block.DreamKeywords
 	if len(keywords) == 0 {
-		generated, genErr := GenerateKeywords(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts.NumCtx, block.ID, block.Title, block.Content)
+		generated, genErr := GenerateKeywords(ctx, pool, chatB, opts.NumCtx, block.ID, block.Title, block.Content)
 		if genErr != nil {
 			slog.Warn("dream: LLM keyword generation exhausted retries, transient cooldown",
 				"block_id", block.ID, "error", genErr)
@@ -204,7 +217,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB backends.Back
 
 	if len(candidates) == 0 {
 		slog.Info("dream: no candidates found", "block_id", block.ID)
-		_ = SetDreamCooldown(ctx, pool, block.ID, true /* inert: no candidates */)
+		_ = SetDreamCooldown(ctx, pool, block.ID, true /* inert: no candidates */, backoff)
 		return 0, nil
 	}
 
@@ -219,7 +232,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB backends.Back
 	}
 
 	// Step 4: LLM evaluation.
-	links, err := EvaluateRelationships(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts, *block, candidates)
+	links, err := EvaluateRelationships(ctx, pool, chatB, opts, *block, candidates)
 	if err != nil {
 		slog.Warn("dream: evaluation failed", "block_id", block.ID, "error", err)
 		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
@@ -236,7 +249,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB backends.Back
 	// per-pair via LLM. Runs AFTER main eval so 'recurrent' overwrites a 'topical' that
 	// EvaluateRelationships may have written for the same pair — recurrent is the more
 	// specific classification. Non-fatal on error: dream cycle continues.
-	recurrentLinks, recErr := DetectRecurrence(ctx, pool, chatHost, chatAPIKey, chatModel, think, opts, *block)
+	recurrentLinks, recErr := DetectRecurrence(ctx, pool, chatB, opts, *block)
 	if recErr != nil {
 		slog.Warn("dream: recurrence detection failed (non-fatal)", "block_id", block.ID, "error", recErr)
 	} else if len(recurrentLinks) > 0 {
@@ -264,8 +277,8 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB backends.Back
 	}
 
 	// Step 7: Set adaptive back-off cooldown. inert = no links written this cycle,
-	// which starts the block further up the curve (backoffInertOffset).
-	_ = SetDreamCooldown(ctx, pool, block.ID, written == 0)
+	// which starts the block further up the curve (backoff.InertOffset).
+	_ = SetDreamCooldown(ctx, pool, block.ID, written == 0, backoff)
 
 	// Step 8: Promote eligible blocks to canonical.
 	// Welle 46 Convention-Switch (2026-05-22): under "A supersedes B" → A=source=newer,
@@ -373,90 +386,74 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 	return &block, nil
 }
 
-// Back-off cooldown (Wave-2, W49c; recalibrated W49c-2): the effective re-dream
-// interval grows with a block's completed eval count (dream_eval_count), so mature
-// blocks are pulled progressively less often while fresh blocks re-dream quickly to
-// catch links to newly-inserted related blocks. The curve is in HOURS from a small
-// minimum (default 12h) — early dreams are cheap and quality rises fastest then, so
+// BackoffConfig is the Dream re-dream back-off policy (Wave-2, W49c;
+// recalibrated W49c-2): the effective re-dream interval grows with a block's
+// completed eval count (dream_eval_count), so mature blocks are pulled
+// progressively less often while fresh blocks re-dream quickly to catch links
+// to newly-inserted related blocks. The curve is in HOURS from a small minimum
+// (default 12h) — early dreams are cheap and quality rises fastest then, so
 // there is NO grace plateau (grace=0): growth starts at n=0.
 //
-//	exp:    minHours * factor^max(0, n-grace+off)        [default — 12h→cap by n~10]
-//	log:    minHours * (1 + factor*ln(1 + max(0,n-grace+off)))
-//	linear: minHours + factor*24*max(0, n-grace+off)
+//	exp:    MinHours * Factor^max(0, n-Grace+off)        [default — 12h→cap by n~10]
+//	log:    MinHours * (1 + Factor*ln(1 + max(0,n-Grace+off)))
+//	linear: MinHours + Factor*24*max(0, n-Grace+off)
 //	off:    CooldownActiveDays / CooldownInertDays (days) [back-off disabled]
 //
-// n = dream_eval_count BEFORE this increment (so a block dreamed once gets the n=1
-// step, a fresh block n=0). off = backoffInertOffset when the cycle produced NO
-// links (inert) — an inert block starts further up the SAME curve instead of from a
-// separate base. Result floored at 1h and capped at backoffCapHours. Back-off only
-// DELAYS a re-dream, never stops it, so a link missed in a skipped cycle is
-// recovered on the next accepted pull (no permanent recall loss). Defaults
+// n = dream_eval_count BEFORE this increment (so a block dreamed once gets the
+// n=1 step, a fresh block n=0). off = InertOffset when the cycle produced NO
+// links (inert) — an inert block starts further up the SAME curve instead of
+// from a separate base. Result floored at 1h and capped at CapHours. Back-off
+// only DELAYS a re-dream, never stops it, so a link missed in a skipped cycle
+// is recovered on the next accepted pull (no permanent recall loss). Defaults
 // (exp/1.6/min12h/grace0/cap45/inert+7) validated on real pull history
-// (.project/bench-session-w49c/backoff_curves.py): ~48% of dream-eval GPU saved at
-// lower link-loss than the prior log/3d curve, with fresh blocks re-dreaming sub-day.
-var (
-	backoffMode        = "exp"
-	backoffFactor      = 1.6
-	backoffGrace       = 0
-	backoffMinHours    = 12.0
-	backoffCapHours    = 45.0 * 24
-	backoffInertOffset = 7
-)
-
-// SetBackoffConfig overrides the Dream back-off parameters at startup. mode must be
-// one of exp|log|linear|off (anything else is ignored, keeping the default). factor,
-// grace, minHours, inertOffset < 0 and capHours <= 0 are ignored.
-func SetBackoffConfig(mode string, factor float64, grace int, capHours, minHours float64, inertOffset int) {
-	switch mode {
-	case "exp", "log", "linear", "off":
-		backoffMode = mode
-	}
-	if factor >= 0 {
-		backoffFactor = factor
-	}
-	if grace >= 0 {
-		backoffGrace = grace
-	}
-	if capHours > 0 {
-		backoffCapHours = capHours
-	}
-	if minHours >= 0 {
-		backoffMinHours = minHours
-	}
-	if inertOffset >= 0 {
-		backoffInertOffset = inertOffset
-	}
+// (.project/bench-session-w49c/backoff_curves.py): ~48% of dream-eval GPU
+// saved at lower link-loss than the prior log/3d curve, with fresh blocks
+// re-dreaming sub-day.
+//
+// The policy travels as a parameter from the caller's config snapshot
+// (config.DreamBackoff) — F1-W6 deleted the 6 package vars + SetBackoffConfig,
+// so a settings flip is live on the next cycle and /api/manage dream-stats
+// render the same generation the scheduler runs. Invalid values never reach
+// here: config validation V6 resets them to the registry defaults (the old
+// SetBackoffConfig ignore-semantics, pulled forward to boot).
+type BackoffConfig struct {
+	Mode        string  // exp|log|linear|off
+	Factor      float64 // growth (exp) / k (log) / slope-per-day (linear)
+	Grace       int     // free cycles before growth (0 = grow from n=0)
+	MinHours    float64 // floor: cooldown at n=0 (active, hours)
+	CapHours    float64 // ceiling (hours)
+	InertOffset int     // extra curve steps when a cycle finds no links
 }
 
-// effectiveCooldownHours returns the back-off cooldown in HOURS for a block at the
-// given pre-increment eval count n, using the active config. inert applies the
-// inert-offset (no links found this cycle). It is the Go mirror of the SQL in
-// SetDreamCooldown — keep the two in sync. Used by BackoffStats and tests.
-func effectiveCooldownHours(n int, inert bool) float64 {
-	if backoffMode == "off" {
+// effectiveCooldownHours returns the back-off cooldown in HOURS for a block at
+// the given pre-increment eval count n. inert applies the inert-offset (no
+// links found this cycle). It is the Go mirror of the SQL in SetDreamCooldown
+// — keep the two in sync. Used by ComputeBackoffStats and tests.
+func (bc BackoffConfig) effectiveCooldownHours(n int, inert bool) float64 {
+	if bc.Mode == "off" {
 		if inert {
 			return float64(CooldownInertDays) * 24
 		}
 		return float64(CooldownActiveDays) * 24
 	}
-	x := float64(n - backoffGrace)
+	x := float64(n - bc.Grace)
 	if inert {
-		x += float64(backoffInertOffset)
+		x += float64(bc.InertOffset)
 	}
 	if x < 0 {
 		x = 0
 	}
-	h := backoffMinHours
-	switch backoffMode {
+	h := bc.MinHours
+	switch bc.Mode {
 	case "exp":
-		h = backoffMinHours * math.Pow(backoffFactor, x)
+		h = bc.MinHours * math.Pow(bc.Factor, x)
 	case "log":
-		h = backoffMinHours * (1 + backoffFactor*math.Log(1+x))
+		h = bc.MinHours * (1 + bc.Factor*math.Log(1+x))
 	case "linear":
-		h = backoffMinHours + backoffFactor*24*x
+		h = bc.MinHours + bc.Factor*24*x
 	}
-	if h > backoffCapHours {
-		h = backoffCapHours
+	if h > bc.CapHours {
+		h = bc.CapHours
 	}
 	if h < 1 {
 		h = 1
@@ -492,17 +489,19 @@ type BackoffLevel struct {
 // cannot emit thousands of rows. 100 covers years of back-off growth in practice.
 const maxBackoffLevels = 100
 
-// ComputeBackoffStats reports the active back-off policy and a per-eval-count
+// ComputeBackoffStats reports the given back-off policy and a per-eval-count
 // maturity distribution: how many eligible blocks sit at each completed-cycle
 // count and the effective re-dream cooldown that count yields (active base). One
 // row per occupied level, ascending, up to the corpus max (the growth cut-off —
 // beyond it no blocks exist), capped at maxBackoffLevels rows. The per-level
 // cooldown uses the exact count (not a bucket edge), so the growth is visible and
-// the final row shows the true maximum, not a floor.
-func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*BackoffStats, error) {
+// the final row shows the true maximum, not a floor. bc comes from the caller's
+// request snapshot (ManageHandler dream-stats), so the rendered policy is the
+// generation currently in effect, not a boot copy.
+func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []string, bc BackoffConfig) (*BackoffStats, error) {
 	out := &BackoffStats{
-		Mode: backoffMode, Factor: backoffFactor, Grace: backoffGrace, CapHours: backoffCapHours,
-		MinHours: backoffMinHours, InertOffset: backoffInertOffset,
+		Mode: bc.Mode, Factor: bc.Factor, Grace: bc.Grace, CapHours: bc.CapHours,
+		MinHours: bc.MinHours, InertOffset: bc.InertOffset,
 		Levels: make([]BackoffLevel, 0, 32),
 	}
 	if err := pool.QueryRow(ctx,
@@ -537,7 +536,7 @@ func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []strin
 		out.Levels = append(out.Levels, BackoffLevel{
 			EvalCount: n,
 			Blocks:    blocks,
-			CooldownH: effectiveCooldownHours(n, false),
+			CooldownH: bc.effectiveCooldownHours(n, false),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -553,10 +552,12 @@ func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []strin
 // x = (dream_eval_count + 1) - grace + (inert ? inertOffset : 0). For transient
 // system failures use SetDreamCooldownMinutes instead — that path does NOT
 // increment the counter, so the back-off reflects real completed work only.
-func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, inert bool) error {
+// bc threads in from RunDreamCycle (cycle-internal callers only — the policy
+// values become SQL parameters of this one statement).
+func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, inert bool, bc BackoffConfig) error {
 	off := 0
 	if inert {
-		off = backoffInertOffset
+		off = bc.InertOffset
 	}
 	_, err := pool.Exec(ctx,
 		`UPDATE context_blocks SET
@@ -571,7 +572,7 @@ func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, i
 				END
 			)) * interval '1 hour'
 		WHERE id = $1`,
-		blockID, backoffMinHours, backoffFactor, backoffGrace, backoffCapHours, backoffMode,
+		blockID, bc.MinHours, bc.Factor, bc.Grace, bc.CapHours, bc.Mode,
 		off, inert, float64(CooldownInertDays), float64(CooldownActiveDays),
 	)
 	return err

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
 )
@@ -345,6 +346,23 @@ func (c *Config) GraphRRF() rrf.GraphConfig {
 		WeightCausal:           c.Graph.WeightCausal,
 		WeightRecurrent:        c.Graph.WeightRecurrent,
 		NewPlacementFrac:       c.Graph.NewPlacementFrac,
+	}
+}
+
+// DreamBackoff converts the dream back-off group to the dream-stage parameter
+// struct (same converter pattern as RerankRRF/GraphRRF). Both consumers — the
+// scheduler per cycle and the ManageHandler dream-stats per request — derive
+// from their snapshot through this one method, so the policy the cycles run
+// and the policy /api/manage renders are always the same generation (F1-W6:
+// the 6 dream package vars + SetBackoffConfig died in favor of this).
+func (c *Config) DreamBackoff() dream.BackoffConfig {
+	return dream.BackoffConfig{
+		Mode:        c.Dream.Backoff.Mode,
+		Factor:      c.Dream.Backoff.Factor,
+		Grace:       c.Dream.Backoff.Grace,
+		MinHours:    float64(c.Dream.Backoff.MinHours),
+		CapHours:    float64(c.Dream.Backoff.CapHours),
+		InertOffset: c.Dream.Backoff.InertOffset,
 	}
 }
 

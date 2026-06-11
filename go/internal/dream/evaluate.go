@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,7 +76,7 @@ type Link struct {
 // EvaluateRelationships asks the LLM to classify relationships between a source block
 // and candidate blocks found via keyword search. Returns validated links.
 // pool may be nil — if provided, the LLM request/response is logged via llmlog.
-func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, opts llm.Options, source BlockInfo, candidates []BlockInfo) ([]Link, error) {
+func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, source BlockInfo, candidates []BlockInfo) ([]Link, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -94,8 +95,8 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 	// no zero-duration no-op rows pollute the log.
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-eval",
-		Model:         model,
-		Host:          host,
+		Model:         chatB.Model,
+		Host:          chatB.Host,
 		RequestSystem: dreamSystemPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      blockIDs,
@@ -104,7 +105,7 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, host, apiKey
 	defer func() { llmlog.Record(pool, *entry) }()
 
 	start := time.Now()
-	resp, err := chatJSON(ctx, host, apiKey, model, think, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
+	resp, err := dreamChatJSON(ctx, chatB, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 

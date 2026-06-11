@@ -7,8 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
 )
+
+// testChatB is the dream chat backend tuple the EvaluateRelationships tests
+// pass in. Host/model never reach the wire — the chatJSON seam intercepts —
+// but they flow into the llmlog entry fields.
+var testChatB = backends.Backend{Host: "h", APIKey: "k", Model: "m"}
 
 // mockChatJSON installs fn as the package-level chatJSON seam for the duration
 // of the test. The original implementation is restored on cleanup.
@@ -74,7 +80,7 @@ func TestEvaluateRelationships_EmptyCandidates_NoLLMCall(t *testing.T) {
 		return nil, nil
 	})
 
-	links, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, srcBlock(uuidA), nil)
+	links, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, srcBlock(uuidA), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -91,7 +97,7 @@ func TestEvaluateRelationships_LLMError_PropagatesWrapped(t *testing.T) {
 		return nil, errors.New("ollama exploded")
 	})
 
-	_, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	_, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -103,7 +109,7 @@ func TestEvaluateRelationships_LLMError_PropagatesWrapped(t *testing.T) {
 func TestEvaluateRelationships_ParseError_PropagatesWrapped(t *testing.T) {
 	mockChatJSON(t, constResp("not json at all"))
 
-	_, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	_, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
 	if err == nil {
 		t.Fatal("want parse error, got nil")
 	}
@@ -115,7 +121,7 @@ func TestEvaluateRelationships_ParseError_PropagatesWrapped(t *testing.T) {
 func TestEvaluateRelationships_HallucinatedUUID_BadFormat_Filtered(t *testing.T) {
 	mockChatJSON(t, constResp(`[{"target_id":"not-a-uuid","type":"topical","confidence":0.9}]`))
 
-	links, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	links, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -128,7 +134,7 @@ func TestEvaluateRelationships_HallucinatedUUID_NotInCandidateSet_Filtered(t *te
 	// LLM emits a syntactically valid UUID that is NOT in the candidate set.
 	mockChatJSON(t, constResp(`[{"target_id":"`+uuidG+`","type":"topical","confidence":0.9}]`))
 
-	links, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	links, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -140,7 +146,7 @@ func TestEvaluateRelationships_HallucinatedUUID_NotInCandidateSet_Filtered(t *te
 func TestEvaluateRelationships_InvalidRelationship_Filtered(t *testing.T) {
 	mockChatJSON(t, constResp(`[{"target_id":"`+uuidB+`","type":"similar","confidence":0.9}]`))
 
-	links, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	links, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,7 +158,7 @@ func TestEvaluateRelationships_InvalidRelationship_Filtered(t *testing.T) {
 func TestEvaluateRelationships_ConfidenceAboveOne_Filtered(t *testing.T) {
 	mockChatJSON(t, constResp(`[{"target_id":"`+uuidB+`","type":"topical","confidence":1.5}]`))
 
-	links, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	links, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,7 +171,7 @@ func TestEvaluateRelationships_BelowThreshold_Filtered(t *testing.T) {
 	// minRawConfidence is 0.7 across all types (S25 audit-confirmed).
 	mockChatJSON(t, constResp(`[{"target_id":"`+uuidB+`","type":"topical","confidence":0.65}]`))
 
-	links, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	links, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,7 +186,7 @@ func TestEvaluateRelationships_HappyPath_PassesThrough(t *testing.T) {
 		{"target_id":"`+uuidC+`","type":"factual","confidence":0.9}
 	]`))
 
-	links, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{},
+	links, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{},
 		srcBlock(uuidA),
 		[]BlockInfo{candBlock(uuidB), candBlock(uuidC)})
 	if err != nil {
@@ -208,7 +214,7 @@ func TestEvaluateRelationships_HardCapEngaged_TrimsToFive(t *testing.T) {
 		candBlock(uuidA), candBlock(uuidB), candBlock(uuidC), candBlock(uuidD),
 		candBlock(uuidE), candBlock(uuidF), candBlock(uuidG),
 	}
-	links, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, source, candidates)
+	links, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, source, candidates)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -221,7 +227,7 @@ func TestEvaluateRelationships_AllCandidatesNone_EmptyResult(t *testing.T) {
 	// LLM legitimately returns "[]" for unrelated blocks — must not error.
 	mockChatJSON(t, constResp(`[]`))
 
-	links, err := EvaluateRelationships(context.Background(), nil, "h", "k", "m", nil, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	links, err := EvaluateRelationships(context.Background(), nil, testChatB, llm.Options{}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

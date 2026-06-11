@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -84,7 +85,7 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 		}, nil
 	})
 
-	blockID, err := dream.GenerateDailyReport(ctx, pool, "h", "k", "m", nil, llm.Options{}, reportScope)
+	blockID, err := dream.GenerateDailyReport(ctx, pool, backends.Backend{Host: "h", APIKey: "k", Model: "m"}, llm.Options{}, reportScope)
 	if err != nil {
 		t.Fatalf("generate report: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestGenerateDailyReport_NoActivity(t *testing.T) {
 		return nil, nil
 	})
 
-	blockID, err := dream.GenerateDailyReport(ctx, pool, "h", "k", "m", nil, llm.Options{}, reportScope)
+	blockID, err := dream.GenerateDailyReport(ctx, pool, backends.Backend{Host: "h", APIKey: "k", Model: "m"}, llm.Options{}, reportScope)
 	if err != nil {
 		t.Fatalf("expected nil error on empty activity, got %v", err)
 	}
@@ -159,7 +160,7 @@ func TestGenerateDailyReport_LLMError(t *testing.T) {
 		return nil, errors.New("ollama exploded")
 	})
 
-	_, err := dream.GenerateDailyReport(ctx, pool, "h", "k", "m", nil, llm.Options{}, reportScope)
+	_, err := dream.GenerateDailyReport(ctx, pool, backends.Backend{Host: "h", APIKey: "k", Model: "m"}, llm.Options{}, reportScope)
 	if err == nil {
 		t.Fatal("want wrapped error, got nil")
 	}

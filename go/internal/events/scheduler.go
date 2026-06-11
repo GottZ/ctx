@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/digest"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
@@ -59,45 +60,43 @@ const (
 	dreamThrottleDefault = 20 * time.Second
 )
 
-// Config holds scheduler configuration.
-type Config struct {
-	DSN                     string // Connection string for dedicated pgxlisten connection
-	HomeScope               string
-	ReadScopes              []string
-	ReconnectDelay          time.Duration // pgxlisten reconnect delay (0 = 5s default)
-	DreamEnabled            bool          // Enable dream cross-reference engine
-	EmbedHost               string        // Embedding provider host (query path)
-	EmbedAPIKey             string        // Embedding provider API key (query path)
-	EmbedModel              string        // Embedding model name (query path)
-	EmbedNumCtx             int           // Embedding num_ctx (query path)
-	DreamEmbedHost          string        // Dream embedding host (empty = EmbedHost)
-	DreamEmbedAPIKey        string        // Dream embedding API key (empty = EmbedAPIKey)
-	DreamEmbedProtocol      string        // Dream embedding protocol (empty = EmbedProtocol)
-	DreamEmbedModel         string        // Dream embedding model (empty = EmbedModel)
-	DreamEmbedNumCtx        int           // Dream embedding num_ctx (0 = EmbedNumCtx)
-	EmbedProtocol           string        // Query-path embed protocol ("ollama" or "openai")
-	DreamHost               string        // Dream LLM provider host
-	DreamAPIKey             string        // Dream LLM provider API key (empty = no auth)
-	ChatModel               string        // Chat model name (fallback for dream)
-	ChatNumCtx              int           // chat num_ctx (fallback for daily synthesis when DreamNumCtx unset)
-	DreamModel              string        // Dream model name (fallback: ChatModel)
-	DreamThink              *bool         // Think mode for dream (nil = omit)
-	DreamNumCtx             int           // num_ctx for dream (0 = model default)
-	DreamIdleWait           int           // seconds between dream cycles when idle (0 = default 20s)
-	DreamParallelism        int           // concurrent dream-cycle workers (0/1 = single-thread, max 16). PickBlock uses FOR UPDATE SKIP LOCKED so workers don't collide on the same block.
-	DreamBackoffMode        string        // re-dream back-off curve: exp|log|linear|off
-	DreamBackoffFactor      float64       // growth (exp) / k (log) / slope-per-day (linear)
-	DreamBackoffGrace       int           // free cycles before growth (0 = grow from n=0)
-	DreamBackoffCapHours    float64       // ceiling (hours)
-	DreamBackoffMinHours    float64       // floor at n=0 (active, hours)
-	DreamBackoffInertOffset int           // extra curve steps when no links found
+// StartupConfig holds the restart-only scheduler parameters. They stay
+// constructor arguments — never snapshot reads — because they cannot take
+// effect without a process restart by nature and must not look hot (§2.3):
+//
+//   - DSN: the dedicated pgxlisten connection is established once per process
+//     and only ever auto-reconnects to the same target; re-pointing it
+//     requires a restart (and must match the pool main built).
+//   - DreamEnabled / DreamParallelism: the dream worker goroutines are
+//     spawned exactly once at the top of Run; their existence and count
+//     cannot change afterwards.
+//   - ReconnectDelay: captured by the pgxlisten listener at construction
+//     (0 = 5s default).
+//
+// Everything hot (scopes, dream/embed backends, idle wait, back-off policy)
+// comes from the config store snapshot per cycle/run — F1-W6 deleted the old
+// events.Config boot copy.
+type StartupConfig struct {
+	DSN              string
+	DreamEnabled     bool
+	DreamParallelism int
+	ReconnectDelay   time.Duration
 }
+
+// dreamCycleFunc is the seam between the scheduler's per-cycle config
+// derivation and the dream pipeline. Production value is dream.RunDreamCycle;
+// the capture regression test swaps it to observe which backend tuples each
+// cycle derived from its snapshot without needing a database for the
+// pick/keyword/RRF stages.
+type dreamCycleFunc func(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backends.Backend, opts llm.Options, backoff dream.BackoffConfig, readScopes []string, throttle dream.Throttle) (int, error)
 
 // Scheduler orchestrates Guard + Digest as background jobs.
 // Reacts to LISTEN/NOTIFY events via pgxlisten and uses time-based fallbacks.
 type Scheduler struct {
 	pool          *pgxpool.Pool
-	config        *Config
+	cfg           *config.Store // hot config: one Snapshot per cycle/run
+	startup       StartupConfig
+	runCycle      dreamCycleFunc
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
 
 	// Dream mode control (atomic for lock-free reads in hot loop).
@@ -153,13 +152,6 @@ func (s *Scheduler) GetDreamMode() (mode int32, throttleInterval time.Duration) 
 	return s.dreamMode.Load(), s.getDreamThrottleInterval()
 }
 
-func (s *Scheduler) getDreamIdleWait() time.Duration {
-	if s.config.DreamIdleWait > 0 {
-		return time.Duration(s.config.DreamIdleWait) * time.Second
-	}
-	return dreamIdleWaitDefault
-}
-
 func (s *Scheduler) getDreamThrottleInterval() time.Duration {
 	ns := s.dreamThrottleInterval.Load()
 	if ns <= 0 {
@@ -168,15 +160,15 @@ func (s *Scheduler) getDreamThrottleInterval() time.Duration {
 	return time.Duration(ns)
 }
 
-// NewScheduler creates a new Scheduler.
-func NewScheduler(pool *pgxpool.Pool, config *Config) *Scheduler {
-	dream.SetBackoffConfig(config.DreamBackoffMode, config.DreamBackoffFactor,
-		config.DreamBackoffGrace, config.DreamBackoffCapHours,
-		config.DreamBackoffMinHours, config.DreamBackoffInertOffset)
+// NewScheduler creates a new Scheduler. store is the runtime-config snapshot
+// source for everything hot; startup carries the restart-only parameters.
+func NewScheduler(pool *pgxpool.Pool, store *config.Store, startup StartupConfig) *Scheduler {
 	return &Scheduler{
-		pool:    pool,
-		config:  config,
-		runDone: make(chan struct{}),
+		pool:     pool,
+		cfg:      store,
+		startup:  startup,
+		runCycle: dream.RunDreamCycle,
+		runDone:  make(chan struct{}),
 	}
 }
 
@@ -215,7 +207,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	)
 
 	// Start pgxlisten in a separate goroutine (auto-reconnect, backlog handler).
-	listener := NewPgxlistenListener(s.config.DSN, s.config.ReconnectDelay, s)
+	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s)
 	go func() {
 		if err := listener.Listen(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("scheduler: pgxlisten fatal error", "error", err)
@@ -235,8 +227,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// DreamParallelism workers all share the same DB; PickBlock's FOR UPDATE
 	// SKIP LOCKED ensures distinct blocks per worker. Backfill stays single-
 	// threaded (one worker handles it before its own dream cycle).
-	if s.config.DreamEnabled {
-		workers := s.config.DreamParallelism
+	if s.startup.DreamEnabled {
+		workers := s.startup.DreamParallelism
 		if workers < 1 {
 			workers = 1
 		}
@@ -303,36 +295,34 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 		}
 	}()
 
-	dreamModel := s.config.DreamModel
-	if dreamModel == "" {
-		dreamModel = s.config.ChatModel
-	}
-	dreamOpts := dream.DreamOptions()
-	if s.config.DreamNumCtx > 0 {
-		dreamOpts.NumCtx = s.config.DreamNumCtx
-	} else if s.config.ChatNumCtx > 0 {
-		// Consistency: when no dedicated DreamNumCtx is set, the daily-synthesis
-		// chat-model request must carry the same num_ctx as the query chat-model
-		// call sites so Ollama keeps a single shared runner (distinct num_ctx →
-		// extra 27B runner → VRAM OOM). Mirrors the manual /api/synthesize/daily
-		// handler wiring in cmd/ctxd/server.go.
-		dreamOpts.NumCtx = s.config.ChatNumCtx
-	}
-	scope := s.config.HomeScope
-	if scope == "" {
-		scope = "private"
-	}
-
 	for {
 		wait := timeUntilNextDailySynthesis(time.Now())
-		slog.Info("scheduler: daily synthesis scheduled", "wait", wait, "scope", scope)
+		slog.Info("scheduler: daily synthesis scheduled", "wait", wait)
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
 		}
 
-		slog.Info("scheduler: daily synthesis started", "scope", scope, "model", dreamModel)
+		// One snapshot per day-iteration (§2.3): taken after the wakeup, so
+		// the 03:00 run uses the config generation current at run time, not a
+		// boot copy. cfg.DreamBackend() resolves the model/think/num_ctx
+		// inheritance from chat — the same single derivation as the dream
+		// loop and the manual /api/synthesize/daily handler. The chat-num_ctx
+		// inheritance keeps the daily request on the single shared Ollama
+		// runner (distinct num_ctx → extra 27B runner → VRAM OOM).
+		cfg := s.cfg.Snapshot()
+		chatB := cfg.DreamBackend()
+		dreamOpts := dream.DreamOptions()
+		if chatB.NumCtx > 0 {
+			dreamOpts.NumCtx = chatB.NumCtx
+		}
+		scope := cfg.Scheduler.HomeScope
+		if scope == "" {
+			scope = "private"
+		}
+
+		slog.Info("scheduler: daily synthesis started", "scope", scope, "model", chatB.Model)
 
 		// Welle 45: hygiene pass before synthesis — remove dream_links pointing
 		// to or from archived blocks. Cheap DELETE, runs once per day. Decoupled
@@ -343,7 +333,7 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 			slog.Info("scheduler: dangling-link cleanup", "removed", n)
 		}
 
-		blockID, err := dream.GenerateDailyReport(ctx, s.pool, s.config.DreamHost, s.config.DreamAPIKey, dreamModel, s.config.DreamThink, dreamOpts, scope)
+		blockID, err := dream.GenerateDailyReport(ctx, s.pool, chatB, dreamOpts, scope)
 		if err != nil {
 			slog.Error("scheduler: daily synthesis failed", "error", err, "scope", scope)
 			continue
@@ -427,16 +417,6 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 // When blocks are available, processes them back-to-back. When idle, waits dreamIdleWait.
 // Yields to active queries and respects graceful shutdown.
 func (s *Scheduler) runDreamLoop(ctx context.Context) {
-	dreamModel := s.config.DreamModel
-	if dreamModel == "" {
-		dreamModel = s.config.ChatModel
-	}
-
-	dreamOpts := dream.DreamOptions()
-	if s.config.DreamNumCtx > 0 {
-		dreamOpts.NumCtx = s.config.DreamNumCtx
-	}
-
 	for {
 		// Shutdown check.
 		if ctx.Err() != nil {
@@ -465,14 +445,22 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 			continue
 		}
 
+		// One snapshot per cycle (§2.3): taken at loop-body start, before
+		// backfill and PickBlock. A store Replace between cycles is fully
+		// visible to the next cycle — the capture regression test pins this
+		// against the old boot-copy behavior. All dream derivations
+		// (DreamBackend/DreamEmbedBackend/DreamBackoff) come from this one
+		// generation, so the tuples within a cycle are consistent.
+		cfg := s.cfg.Snapshot()
+
 		// Top priority: backfill blocks with missing embeddings.
-		if backfilled, err := s.backfillOneEmbedding(ctx); err != nil {
+		if backfilled, err := s.backfillOneEmbedding(ctx, cfg.DreamEmbedBackend()); err != nil {
 			slog.Error("scheduler: embed backfill error", "error", err)
 		} else if backfilled {
 			continue // Loop immediately to backfill more before dream runs.
 		}
 
-		linksCreated, err := s.runDreamCycle(dreamModel, dreamOpts)
+		linksCreated, err := s.runDreamCycle(cfg)
 		if err != nil {
 			slog.Error("scheduler: dream cycle error", "error", err)
 			// Brief pause on error to avoid tight error loops.
@@ -486,7 +474,10 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 
 		if linksCreated == 0 {
 			// No block available or no links created — idle wait.
-			idle := s.getDreamIdleWait()
+			idle := cfg.Dream.IdleWait
+			if idle <= 0 {
+				idle = dreamIdleWaitDefault
+			}
 			slog.Info("scheduler: dream idle, waiting", "duration", idle)
 			select {
 			case <-ctx.Done():
@@ -502,7 +493,12 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 }
 
 // runDreamCycle executes one dream cycle with graceful shutdown support.
-func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int, error) {
+// cfg is the cycle's snapshot from runDreamLoop; the backend tuples and the
+// back-off policy derive from it here — Delta 1 (F1-W6): the dream loop now
+// inherits chat.num_ctx when dream.num_ctx is unset, via cfg.DreamBackend(),
+// exactly like daily synthesis always did (V1 invariant; wire-neutral under
+// openai, single-runner-preserving under ollama).
+func (s *Scheduler) runDreamCycle(cfg *config.Config) (int, error) {
 	s.dreamWg.Add(1)
 	defer s.dreamWg.Done()
 
@@ -525,7 +521,11 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 		cancel()
 	}()
 
-	embedB := s.dreamEmbedBackend()
+	chatB := cfg.DreamBackend()
+	dreamOpts := dream.DreamOptions()
+	if chatB.NumCtx > 0 {
+		dreamOpts.NumCtx = chatB.NumCtx
+	}
 
 	// Build throttle function based on current dream mode.
 	throttle := dream.NoThrottle
@@ -541,44 +541,14 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 		}
 	}
 
-	return dream.RunDreamCycle(
+	return s.runCycle(
 		dreamCtx, s.pool,
-		embedB,
-		s.config.DreamHost, s.config.DreamAPIKey, dreamModel,
-		s.config.DreamThink, dreamOpts,
-		s.config.ReadScopes,
+		cfg.DreamEmbedBackend(), chatB,
+		dreamOpts,
+		cfg.DreamBackoff(),
+		cfg.Scheduler.ReadScopes,
 		throttle,
 	)
-}
-
-// dreamEmbedBackend assembles the dream-embed tuple: dream embed config if
-// set, per-field fallback to the query-path embed config. Values come from
-// the events.Config boot copy — the move to the config store snapshot is
-// F1-W6 (this helper then dies in favor of cfg.DreamEmbedBackend()).
-func (s *Scheduler) dreamEmbedBackend() backends.Backend {
-	b := backends.Backend{
-		Host:     s.config.DreamEmbedHost,
-		APIKey:   s.config.DreamEmbedAPIKey,
-		Protocol: backends.Protocol(s.config.DreamEmbedProtocol),
-		Model:    s.config.DreamEmbedModel,
-		NumCtx:   s.config.DreamEmbedNumCtx,
-	}
-	if b.Host == "" {
-		b.Host = s.config.EmbedHost
-	}
-	if b.APIKey == "" {
-		b.APIKey = s.config.EmbedAPIKey
-	}
-	if b.Protocol == "" {
-		b.Protocol = backends.Protocol(s.config.EmbedProtocol)
-	}
-	if b.Model == "" {
-		b.Model = s.config.EmbedModel
-	}
-	if b.NumCtx == 0 {
-		b.NumCtx = s.config.EmbedNumCtx
-	}
-	return b
 }
 
 // runDigest executes the digest, yielding if queries are active.
@@ -595,9 +565,12 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		return
 	}
 
-	slog.Info("scheduler: running digest", "scope", s.config.HomeScope)
+	// One snapshot per run (§2.3): digest reads HomeScope/ReadScopes fresh.
+	cfg := s.cfg.Snapshot()
 
-	err := digest.RunDigest(ctx, s.pool, s.config.HomeScope, s.config.ReadScopes)
+	slog.Info("scheduler: running digest", "scope", cfg.Scheduler.HomeScope)
+
+	err := digest.RunDigest(ctx, s.pool, cfg.Scheduler.HomeScope, cfg.Scheduler.ReadScopes)
 	if err != nil {
 		slog.Error("scheduler: digest error", "error", err)
 		return
@@ -612,6 +585,8 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 
 // backfillOneEmbedding finds one block with missing embedding, generates it, and stores it.
 // Returns true if a block was backfilled, false if none needed.
+// embedB comes from the dream-loop body's per-cycle snapshot (§2.3: the
+// backfill belongs to the dream loop, its snapshot covers it).
 //
 // Tx-wrap (Welle-49, parallelism-bug): SELECT FOR UPDATE SKIP LOCKED on a
 // pool-bound QueryRow releases the row lock as soon as the statement returns
@@ -620,7 +595,7 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 // it, and only the last UPDATE won. Wrapping the whole pick→embed→store in a
 // single tx holds the row lock for the duration so other workers SKIP LOCKED
 // onto distinct blocks.
-func (s *Scheduler) backfillOneEmbedding(ctx context.Context) (bool, error) {
+func (s *Scheduler) backfillOneEmbedding(ctx context.Context, embedB backends.Backend) (bool, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, fmt.Errorf("backfill: begin tx: %w", err)
@@ -645,10 +620,9 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context) (bool, error) {
 	slog.Info("scheduler: backfilling embedding", "block_id", blockID, "title", title)
 
 	// Backfill prefers the dream embed host (e.g. CPU-based llama-embed), falls back to the
-	// query embed host. Rationale: Backfill has no latency SLA and should not compete with
-	// Dream's chat model for shared GPU VRAM via the query embedding backend.
-	embedB := s.dreamEmbedBackend()
-
+	// query embed host per field (cfg.DreamEmbedBackend()). Rationale: Backfill has no
+	// latency SLA and should not compete with Dream's chat model for shared GPU VRAM via
+	// the query embedding backend.
 	embedText := title + "\n\n" + content
 	vec, err := embed.Embed(ctx, embedB, embedText, embed.PrefixDocument)
 	if err != nil {

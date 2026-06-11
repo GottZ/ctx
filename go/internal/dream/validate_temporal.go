@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
@@ -66,7 +67,7 @@ type TemporalReview struct {
 // ValidateTemporal runs the two-phase temporal validation for a block.
 // Phase 1: deterministic re-extraction. Phase 2: LLM review.
 // Non-fatal — errors are logged but don't stop the dream cycle.
-func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPIKey, chatModel string, think *bool, opts llm.Options, block *BlockInfo) error {
+func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, block *BlockInfo) error {
 	// Phase 1: Deterministic re-extraction.
 	contentTimes := store.ExtractDates(block.Content)
 
@@ -119,8 +120,8 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPI
 	dreamVer := int16(Version)
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-temporal",
-		Model:         chatModel,
-		Host:          chatHost,
+		Model:         chatB.Model,
+		Host:          chatB.Host,
 		RequestSystem: temporalValidationPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      []string{block.ID},
@@ -129,7 +130,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatHost, chatAPI
 	defer func() { llmlog.Record(pool, *entry) }()
 
 	start := time.Now()
-	resp, err := chatJSON(ctx, chatHost, chatAPIKey, chatModel, think, temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
+	resp, err := dreamChatJSON(ctx, chatB, temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 

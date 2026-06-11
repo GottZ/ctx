@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
 )
@@ -219,7 +220,8 @@ func TestPromptRegression_BaselineRun(t *testing.T) {
 		}
 
 		links, err := dream.EvaluateRelationships(
-			ctx, pool, chatHost, "", chatModel, nil,
+			ctx, pool,
+			backends.Backend{Host: chatHost, Model: chatModel, Protocol: backends.ProtocolOllama},
 			llm.Options{Temperature: 0.0, NumCtx: 8192, NumPredict: 400},
 			*src, []dream.BlockInfo{*tgt},
 		)

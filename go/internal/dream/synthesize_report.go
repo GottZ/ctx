@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
@@ -52,7 +53,7 @@ type dailyNewBlock struct {
 // fresh blocks), asks the LLM for a free-text German summary, and persists
 // the result as a synthesis/audit-trail block. Returns the new block_id, or
 // an empty string + nil error when there was zero activity to report.
-func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, opts llm.Options, scope string) (string, error) {
+func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, scope string) (string, error) {
 	decisions, err := fetchDailyDecisions(ctx, pool, scope)
 	if err != nil {
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
@@ -79,8 +80,8 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, host, apiKey, 
 	dreamVer := int16(Version)
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-daily-synthesis",
-		Model:         model,
-		Host:          host,
+		Model:         chatB.Model,
+		Host:          chatB.Host,
 		RequestSystem: dailySynthesisSystemPrompt,
 		RequestUser:   userPrompt,
 		DreamVersion:  &dreamVer,
@@ -88,7 +89,7 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, host, apiKey, 
 	defer func() { llmlog.Record(pool, *entry) }()
 
 	start := time.Now()
-	resp, err := chatJSON(ctx, host, apiKey, model, think, dailySynthesisSystemPrompt, userPrompt, opts, DailySynthesisTimeout)
+	resp, err := dreamChatJSON(ctx, chatB, dailySynthesisSystemPrompt, userPrompt, opts, DailySynthesisTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 

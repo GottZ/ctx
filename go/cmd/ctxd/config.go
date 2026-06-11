@@ -267,21 +267,6 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// parseThinkMode converts a string to a *bool for the Ollama think parameter.
-// "true" → &true, "false" → &false, "" → nil (omit from request).
-func parseThinkMode(s string) *bool {
-	switch s {
-	case "true":
-		t := true
-		return &t
-	case "false":
-		t := false
-		return &t
-	default:
-		return nil
-	}
-}
-
 func getEnvInt(key string, fallback int) (int, error) {
 	v := os.Getenv(key)
 	if v == "" {

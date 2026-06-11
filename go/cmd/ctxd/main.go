@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/config"
-	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
@@ -84,18 +83,6 @@ func main() {
 
 	slog.Info("database pool created", "host", cfg.ContextDBHost, "db", cfg.ContextDB)
 
-	// Set the dream wire protocol from config. Chat (F1-W3) and embed (F1-W5)
-	// travel as backends.Backend parameters; dream still reads package state
-	// until F1-W6.
-	dream.Protocol = cfg.DreamProtocol
-
-	// Think modes are parsed per pipeline in server.go (chatThink) and scheduler config (dreamThink).
-	// Dream think falls back to chat think if not explicitly set.
-	dreamThink := parseThinkMode(cfg.DreamThink)
-	if cfg.DreamThink == "" {
-		dreamThink = parseThinkMode(cfg.ChatThink)
-	}
-
 	// Run database migrations
 	if err := store.RunMigrations(ctx, pool); err != nil {
 		slog.Error("migrations failed", "error", err)
@@ -121,45 +108,20 @@ func main() {
 		slog.Info("temporal backfill complete", "blocks_processed", n)
 	}
 
-	// Scheduler for background guard + digest + dream.
-	// Scopes come from the EFFECTIVE snapshot (scheduler.read_scopes parses
-	// CTX_READ_SCOPES with the legacy semantics: comma-separated, empty ⇒
-	// "private,shared,work"; v2.0.0 M045 dropped chk_scope, so any non-empty
-	// string is a valid scope). home_scope has no env knob — default
-	// "private", overridable via context_settings since F2-W4 (boot-time
-	// only: the scheduler reads its config once).
-	schedulerConfig := &events.Config{
-		DSN:                     cfg.DSN(),
-		HomeScope:               effCfg.Scheduler.HomeScope,
-		ReadScopes:              effCfg.Scheduler.ReadScopes,
-		DreamEnabled:            cfg.DreamEnabled,
-		EmbedHost:               cfg.EmbedHost,
-		EmbedAPIKey:             cfg.EmbedAPIKey,
-		EmbedModel:              cfg.EmbedModel,
-		EmbedNumCtx:             cfg.EmbedNumCtx,
-		EmbedProtocol:           cfg.EmbedProtocol,
-		DreamHost:               cfg.DreamHost,
-		DreamAPIKey:             cfg.DreamAPIKey,
-		ChatModel:               cfg.ChatModel,
-		ChatNumCtx:              cfg.ChatNumCtx,
-		DreamModel:              cfg.DreamModel,
-		DreamThink:              dreamThink,
-		DreamNumCtx:             cfg.DreamNumCtx,
-		DreamIdleWait:           cfg.DreamIdleWait,
-		DreamParallelism:        cfg.DreamParallelism,
-		DreamBackoffMode:        cfg.DreamBackoffMode,
-		DreamBackoffFactor:      cfg.DreamBackoffFactor,
-		DreamBackoffGrace:       cfg.DreamBackoffGrace,
-		DreamBackoffCapHours:    cfg.DreamBackoffCapHours,
-		DreamBackoffMinHours:    cfg.DreamBackoffMinHours,
-		DreamBackoffInertOffset: cfg.DreamBackoffInertOffset,
-		DreamEmbedHost:          cfg.DreamEmbedHost,
-		DreamEmbedAPIKey:        cfg.DreamEmbedAPIKey,
-		DreamEmbedProtocol:      cfg.DreamEmbedProtocol,
-		DreamEmbedModel:         cfg.DreamEmbedModel,
-		DreamEmbedNumCtx:        cfg.DreamEmbedNumCtx,
-	}
-	scheduler := events.NewScheduler(pool, schedulerConfig)
+	// Scheduler for background guard + digest + dream. Everything hot —
+	// scopes, dream/embed backend tuples, idle wait, back-off policy — comes
+	// from the cfgStore snapshot per cycle/run (F1-W6; the old events.Config
+	// boot copy died here). StartupConfig carries only the restart-only
+	// parameters: DSN from the SAME bridge value the pool was built from
+	// (listener and pool must point at one database), DreamEnabled and
+	// DreamParallelism from the effective snapshot (validated + clamped;
+	// both fix the worker-goroutine set once in Run). ReconnectDelay keeps
+	// its zero value = pgxlisten 5s default.
+	scheduler := events.NewScheduler(pool, cfgStore, events.StartupConfig{
+		DSN:              cfg.DSN(),
+		DreamEnabled:     effCfg.Dream.Enabled,
+		DreamParallelism: effCfg.Dream.Parallelism,
+	})
 	go scheduler.Run(ctx)
 
 	// HTTP server

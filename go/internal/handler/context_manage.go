@@ -24,12 +24,16 @@ type DreamController interface {
 // ManageHandler handles POST /api/manage.
 type ManageHandler struct {
 	pool            *pgxpool.Pool
+	cfg             ConfigStore
 	dreamController DreamController
 }
 
-// NewManageHandler creates a new ManageHandler.
-func NewManageHandler(pool *pgxpool.Pool, dreamController DreamController) *ManageHandler {
-	return &ManageHandler{pool: pool, dreamController: dreamController}
+// NewManageHandler creates a new ManageHandler. cfg is the runtime-config
+// snapshot source (F1-W6): dream-stats renders the back-off policy from a
+// per-request snapshot, so /api/manage shows the generation the scheduler
+// actually runs — not a boot copy that would lie after a settings flip.
+func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController) *ManageHandler {
+	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController}
 }
 
 type manageRequest struct {
@@ -627,7 +631,10 @@ func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request,
 		})
 		return
 	}
-	backoff, err := dream.ComputeBackoffStats(ctx, h.pool, ar.ReadScopes)
+	// The request's one config snapshot (§2.3) — dream-stats is the only
+	// manage action that consumes config, so the read lives here, not in the
+	// dispatch. The rendered policy is the generation currently in effect.
+	backoff, err := dream.ComputeBackoffStats(ctx, h.pool, ar.ReadScopes, h.cfg.Snapshot().DreamBackoff())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream backoff stats failed",

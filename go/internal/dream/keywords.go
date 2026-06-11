@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,7 +76,7 @@ func keywordOptions(numCtx int) llm.Options {
 // parsed keyword list on success, or an error after exhausting retries.
 // pool is used only for llmlog persistence; may be nil.
 // numCtx must match the Dream context size to keep the model resident in VRAM.
-func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, numCtx int, blockID, title, content string) ([]string, error) {
+func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, numCtx int, blockID, title, content string) ([]string, error) {
 	userPrompt := buildKeywordPrompt(title, content)
 	opts := keywordOptions(numCtx)
 
@@ -87,14 +88,14 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, host, apiKey, mod
 		}
 
 		start := time.Now()
-		resp, err := chatJSON(ctx, host, apiKey, model, think, keywordSystemPrompt, userPrompt, opts, KeywordsTimeout)
+		resp, err := dreamChatJSON(ctx, chatB, keywordSystemPrompt, userPrompt, opts, KeywordsTimeout)
 		duration := time.Since(start)
 
 		dreamVer := int16(Version)
 		entry := &llmlog.Entry{
 			Pipeline:      "dream-keywords",
-			Model:         model,
-			Host:          host,
+			Model:         chatB.Model,
+			Host:          chatB.Host,
 			Duration:      duration,
 			Err:           err,
 			RequestSystem: keywordSystemPrompt,

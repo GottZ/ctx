@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,24 +15,19 @@ import (
 // the same code path that the daily scheduler goroutine calls at 03:00 local.
 type SynthesizeHandler struct {
 	pool      *pgxpool.Pool
-	dreamHost string
-	dreamKey  string
-	dreamModel string
-	dreamThink *bool
-	dreamOpts  llm.Options
+	dreamB    backends.Backend
+	dreamOpts llm.Options
 }
 
 // NewSynthesizeHandler wires the daily-synthesis trigger handler with the same
-// LLM coordinates the dream loop uses. dreamModel may be empty in which case
-// the caller has already resolved a fallback (e.g. to chat model).
-func NewSynthesizeHandler(pool *pgxpool.Pool, host, apiKey, model string, think *bool, opts llm.Options) *SynthesizeHandler {
+// LLM backend tuple the dream loop uses (cfg.DreamBackend(), inheritance
+// already resolved). Boot-time copy until F1-W7 moves this handler onto the
+// config store.
+func NewSynthesizeHandler(pool *pgxpool.Pool, dreamB backends.Backend, opts llm.Options) *SynthesizeHandler {
 	return &SynthesizeHandler{
-		pool:       pool,
-		dreamHost:  host,
-		dreamKey:   apiKey,
-		dreamModel: model,
-		dreamThink: think,
-		dreamOpts:  opts,
+		pool:      pool,
+		dreamB:    dreamB,
+		dreamOpts: opts,
 	}
 }
 
@@ -54,7 +50,7 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	blockID, err := dream.GenerateDailyReport(ctx, h.pool, h.dreamHost, h.dreamKey, h.dreamModel, h.dreamThink, h.dreamOpts, scope)
+	blockID, err := dream.GenerateDailyReport(ctx, h.pool, h.dreamB, h.dreamOpts, scope)
 	if err != nil {
 		slog.Error("synthesize: daily report failed",
 			"error", err,

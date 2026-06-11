@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dream"
 )
 
 // TestDreamBackendInheritance pins the derivation that replaces the 3×
@@ -75,6 +76,25 @@ func TestDreamEmbedBackendInheritance(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("DreamEmbedBackend() = %+v, want %+v", got, want)
+	}
+}
+
+// TestDreamBackoffConversion pins the converter to the dream-stage parameter
+// struct (F1-W6 — replaces the 6 dream package vars), including the
+// Hours→float64 unit carry of the h|d|w|m|y suffix forms.
+func TestDreamBackoffConversion(t *testing.T) {
+	cfg, _ := cfgFrom(t, map[string]string{
+		"dream.backoff_mode": "linear", "dream.backoff_factor": "2.5",
+		"dream.backoff_grace": "3", "dream.backoff_cap": "10d",
+		"dream.backoff_min": "6h", "dream.backoff_inert_offset": "4",
+	})
+	got := cfg.DreamBackoff()
+	want := dream.BackoffConfig{
+		Mode: "linear", Factor: 2.5, Grace: 3,
+		MinHours: 6, CapHours: 240, InertOffset: 4,
+	}
+	if got != want {
+		t.Errorf("DreamBackoff() = %+v, want %+v", got, want)
 	}
 }
 
