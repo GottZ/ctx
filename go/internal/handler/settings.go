@@ -1,0 +1,520 @@
+// /api/settings — the F2-W5 runtime-settings API (design 02-§3.4).
+//
+// GET    /api/settings        effective configuration, UI-ready (registry
+//                             metadata + value + source per key)
+// GET    /api/settings/{key}  single key + recent audit rows
+// PUT    /api/settings/{key}  set a DB override (validated BEFORE persist)
+// DELETE /api/settings/{key}  remove the override (revert to env/default)
+//
+// All routes are admin-gated (Auth → RequireAdmin, mounted in server.go; the
+// negative probe in settings_test.go was red against the ungated chain).
+//
+// Masking rule (§3.4, generic over ALL response surfaces): every spot that
+// carries the effective value of a sensitive key renders "(set via env)" when
+// the source is env — GET value, PUT previous.value and DELETE value (the
+// post-revert effective value). A DB-sourced sensitive value renders as the
+// secret_ref NAME from the override row, never from the snapshot (the
+// snapshot holds the RESOLVED plaintext). Pinned by the leak-scan tests.
+
+package handler
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/settings"
+	"github.com/GottZ/ctx/internal/store"
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// maskedEnvValue is the §3.4 placeholder for env-sourced sensitive values.
+// The .env plaintext (e.g. CTX_CHAT_API_KEY) must never travel through a
+// settings response — the standard migration flow (PUT secret_ref over an
+// env-set key) would otherwise leak it via previous.value.
+const maskedEnvValue = "(set via env)"
+
+// auditLimit caps the history rows on GET /api/settings/{key}.
+const auditLimit = 10
+
+// SettingsHandler implements the /api/settings routes.
+type SettingsHandler struct {
+	pool *pgxpool.Pool
+	cfg  *config.Store
+	// reload is settings.Reload bound to (pool, cfg) — a function field so
+	// unit tests can observe/stub the post-commit reload without a DB.
+	reload func(r *http.Request) error
+}
+
+// NewSettingsHandler creates a new SettingsHandler.
+func NewSettingsHandler(pool *pgxpool.Pool, cfg *config.Store) *SettingsHandler {
+	h := &SettingsHandler{pool: pool, cfg: cfg}
+	h.reload = func(r *http.Request) error {
+		return settings.Reload(r.Context(), pool, cfg)
+	}
+	return h
+}
+
+// MountSettings mounts the /api/settings routes behind RequireAdmin —
+// settings reads are admin too (F4-O4: GET non-admin ⇒ 403). ONE function
+// used by server.go and the gate tests, so the 403 probe exercises exactly
+// the chain production mounts (an out-of-band test router could go green
+// while the real mount forgot the gate).
+func MountSettings(r chi.Router, h *SettingsHandler) {
+	r.Group(func(r chi.Router) {
+		r.Use(RequireAdmin)
+		r.Get("/api/settings", h.HandleList)
+		r.Get("/api/settings/{key}", h.HandleGet)
+		r.Put("/api/settings/{key}", h.HandlePut)
+		r.Delete("/api/settings/{key}", h.HandleDelete)
+	})
+}
+
+// settingView is one key in the GET /api/settings rendering.
+type settingView struct {
+	Key        string `json:"key"`
+	EnvVar     string `json:"env_var,omitempty"`
+	Type       string `json:"type"`
+	Mutability string `json:"mutability"`
+	Value      any    `json:"value"`
+	Source     string `json:"source"`
+	Default    any    `json:"default"`
+	Sensitive  bool   `json:"sensitive,omitempty"`
+}
+
+// apiSource maps the snapshot source vocabulary to the API one: the override
+// layer is called "db" on the wire (§3.4), "settings" internally.
+func apiSource(s string) string {
+	if s == "settings" {
+		return "db"
+	}
+	if s == "" {
+		return "default"
+	}
+	return s
+}
+
+// renderEffective renders one key's effective value under the §3.4 masking
+// rule. overrides maps key → raw override row value (only consulted for
+// DB-sourced sensitive keys, where the row carries the harmless secret_ref
+// name while the snapshot carries the resolved plaintext).
+func renderEffective(c *config.Config, info config.KeyInfo, overrides map[string]json.RawMessage) any {
+	if !info.Sensitive {
+		v, _ := config.RenderValue(c, info.Key)
+		return v
+	}
+	switch c.Source(info.Key) {
+	case "settings":
+		if raw, ok := overrides[info.Key]; ok {
+			if name, err := settings.ScalarValue(raw); err == nil {
+				return name
+			}
+		}
+		return "set" // row vanished between load and render — presence floor
+	case "env":
+		return maskedEnvValue
+	default:
+		return "" // secret-class defaults are empty by registry construction
+	}
+}
+
+// loadOverrideMap loads the global-scope override rows keyed by settings key.
+func (h *SettingsHandler) loadOverrideMap(r *http.Request) (map[string]json.RawMessage, error) {
+	rows, err := store.LoadSettingOverrides(r.Context(), h.pool, store.GlobalScope)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]json.RawMessage, len(rows))
+	for _, row := range rows {
+		m[row.Key] = row.Value
+	}
+	return m, nil
+}
+
+// HandleList implements GET /api/settings.
+func (h *SettingsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
+	overrides, err := h.loadOverrideMap(r)
+	if err != nil {
+		h.internalError(w, r, "settings: list overrides failed", err)
+		return
+	}
+	c := h.cfg.Snapshot()
+
+	infos := config.Keys()
+	views := make([]settingView, 0, len(infos))
+	for _, info := range infos {
+		views = append(views, settingView{
+			Key:        info.Key,
+			EnvVar:     info.EnvVar,
+			Type:       info.Type,
+			Mutability: info.Mutability,
+			Value:      renderEffective(c, info, overrides),
+			Source:     apiSource(c.Source(info.Key)),
+			Default:    info.Default,
+			Sensitive:  info.Sensitive,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "settings": views})
+}
+
+// HandleGet implements GET /api/settings/{key}.
+func (h *SettingsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	info, ok := config.KeyByName(key)
+	if !ok {
+		h.unknownKey(w, key)
+		return
+	}
+	overrides, err := h.loadOverrideMap(r)
+	if err != nil {
+		h.internalError(w, r, "settings: load overrides failed", err)
+		return
+	}
+	audit, err := store.ListSettingAudit(r.Context(), h.pool, key, store.GlobalScope, auditLimit)
+	if err != nil {
+		h.internalError(w, r, "settings: load audit failed", err)
+		return
+	}
+	c := h.cfg.Snapshot()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"setting": settingView{
+			Key:        info.Key,
+			EnvVar:     info.EnvVar,
+			Type:       info.Type,
+			Mutability: info.Mutability,
+			Value:      renderEffective(c, info, overrides),
+			Source:     apiSource(c.Source(info.Key)),
+			Default:    info.Default,
+			Sensitive:  info.Sensitive,
+		},
+		"audit": audit,
+	})
+}
+
+// HandlePut implements PUT /api/settings/{key}. Validation runs BEFORE
+// persist by building the candidate config from the would-be row set through
+// the same path the reload uses (settings.BuildFromRows) — a key whose
+// override would be ignored or dropped is a 422, never a silent no-op row.
+func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	info, ok := config.KeyByName(key)
+	if !ok {
+		h.unknownKey(w, key)
+		return
+	}
+	if msg, blocked := mutabilityBlock(info); blocked {
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": msg})
+		return
+	}
+
+	var body struct {
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "invalid JSON body"})
+		return
+	}
+	raw, err := settings.ScalarValue(body.Value)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"success": false, "error": fmt.Sprintf("validation: %s: %v", key, err)})
+		return
+	}
+	if info.Type == "bool" && raw != "true" && raw != "false" {
+		// The legacy-exact bool parser would silently turn anything but
+		// "true" into false — API input gets the strict check instead.
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"success": false, "error": fmt.Sprintf("validation: %s must be true or false", key)})
+		return
+	}
+	if info.Sensitive {
+		if code, msg := h.checkSecretRef(r, key, raw); msg != "" {
+			writeJSON(w, code, map[string]any{"success": false, "error": msg})
+			return
+		}
+	}
+	normalized := normalizedJSON(info, raw)
+
+	// Candidate build: current rows with this write mixed in, through the
+	// exact reload path. Applied == Source(key)=="settings"; anything else
+	// means the override would be ignored — reject with the build's reason.
+	baseRows, err := store.LoadSettingOverrides(r.Context(), h.pool, store.GlobalScope)
+	if err != nil {
+		h.internalError(w, r, "settings: load overrides failed", err)
+		return
+	}
+	candRows := upsertRow(baseRows, key, normalized)
+	candidate, candIssues := settings.BuildFromRows(r.Context(), h.pool, candRows)
+	if candidate.Source(key) != "settings" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("validation: %s: %s", key, issueFor(candIssues, key)),
+		})
+		return
+	}
+	_, baseIssues := settings.BuildFromRows(r.Context(), h.pool, baseRows)
+	warnings := newWarnings(candIssues, baseIssues)
+	warnings = append(warnings, pairingWarnings(key, candidate)...)
+
+	// Previous effective value + source, masked, BEFORE the swap.
+	prevOverrides := make(map[string]json.RawMessage, len(baseRows))
+	for _, row := range baseRows {
+		prevOverrides[row.Key] = row.Value
+	}
+	prev := h.cfg.Snapshot()
+	previous := map[string]any{
+		"value":  renderEffective(prev, info, prevOverrides),
+		"source": apiSource(prev.Source(key)),
+	}
+
+	if err := h.writeSetting(r, key, normalized); err != nil {
+		h.internalError(w, r, "settings: persist failed", err)
+		return
+	}
+	if err := h.reload(r); err != nil {
+		// Persisted but not live — never report that as plain success.
+		h.internalError(w, r, "settings: persisted but reload failed", err)
+		return
+	}
+
+	now := h.cfg.Snapshot()
+	nowOverrides := prevOverrides
+	nowOverrides[key] = normalized
+	if warnings == nil {
+		warnings = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"key":      key,
+		"value":    renderEffective(now, info, nowOverrides),
+		"source":   apiSource(now.Source(key)),
+		"previous": previous,
+		"warnings": warnings,
+	})
+}
+
+// HandleDelete implements DELETE /api/settings/{key} — remove the override,
+// revert to env/default. The response carries the post-revert effective
+// value (masked for sensitive keys, §3.4).
+func (h *SettingsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	info, ok := config.KeyByName(key)
+	if !ok {
+		h.unknownKey(w, key)
+		return
+	}
+
+	found, err := h.deleteSetting(r, key)
+	if err != nil {
+		h.internalError(w, r, "settings: delete failed", err)
+		return
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"success": false, "error": fmt.Sprintf("no override set for %s", key)})
+		return
+	}
+	if err := h.reload(r); err != nil {
+		h.internalError(w, r, "settings: deleted but reload failed", err)
+		return
+	}
+
+	c := h.cfg.Snapshot()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"key":     key,
+		"value":   renderEffective(c, info, nil), // post-revert: source is env/default
+		"source":  apiSource(c.Source(key)),
+	})
+}
+
+// checkSecretRef gates sensitive-key values (§2.3): format first, then
+// existence in context_secrets — a plaintext provider key set as the value
+// would otherwise land verbatim in context_settings AND the append-only
+// audit. Returns (status, message); empty message = pass.
+func (h *SettingsHandler) checkSecretRef(r *http.Request, key, raw string) (int, string) {
+	if !store.ValidSecretName(raw) {
+		return http.StatusUnprocessableEntity, fmt.Sprintf(
+			"validation: %s takes a secret NAME (lowercase [a-z0-9._-], max 128 chars), never the secret value — create the secret first", key)
+	}
+	exists, err := store.SecretExists(r.Context(), h.pool, raw, store.GlobalScope)
+	if err != nil {
+		slog.Error("settings: secret existence check failed", "error", err,
+			"request_id", RequestIDFromContext(r.Context()))
+		return http.StatusInternalServerError, "internal error"
+	}
+	if !exists {
+		return http.StatusUnprocessableEntity, fmt.Sprintf(
+			"validation: %s references an unknown secret — create the secret first", key)
+	}
+	return 0, ""
+}
+
+// writeSetting persists one override in an attributed transaction (the 051
+// triggers emit audit + NOTIFY atomically with the row).
+func (h *SettingsHandler) writeSetting(r *http.Request, key string, value json.RawMessage) error {
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(r.Context()) //nolint:errcheck // rollback after commit is a no-op
+	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
+		return err
+	}
+	if err := store.UpsertSetting(r.Context(), tx, key, store.GlobalScope, value, actorID(r)); err != nil {
+		return err
+	}
+	return tx.Commit(r.Context())
+}
+
+// deleteSetting removes one override in an attributed transaction.
+func (h *SettingsHandler) deleteSetting(r *http.Request, key string) (bool, error) {
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(r.Context()) //nolint:errcheck // rollback after commit is a no-op
+	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
+		return false, err
+	}
+	found, err := store.DeleteSetting(r.Context(), tx, key, store.GlobalScope, actorID(r))
+	if err != nil {
+		return false, err
+	}
+	return found, tx.Commit(r.Context())
+}
+
+// actorID extracts the acting key id for audit attribution.
+func actorID(r *http.Request) *string {
+	if ar := AuthResultFromContext(r.Context()); ar != nil && ar.ApiKeyID != "" {
+		return &ar.ApiKeyID
+	}
+	return nil
+}
+
+// mutabilityBlock rejects writes on keys the override layer cannot serve
+// (§7.3: no pending-restart state in F2; coupled = vector space).
+func mutabilityBlock(info config.KeyInfo) (string, bool) {
+	switch info.Mutability {
+	case "hot", "coupled:embed-cache":
+		return "", false
+	case "coupled":
+		return fmt.Sprintf("%s is coupled to the embedding vector space; changing it requires a re-embed migration — set %s and restart", info.Key, envHint(info)), true
+	default: // restart
+		return fmt.Sprintf("%s is restart-only; set %s and restart", info.Key, envHint(info)), true
+	}
+}
+
+func envHint(info config.KeyInfo) string {
+	if info.EnvVar == "" {
+		return "it via env (no env var exists for this key)"
+	}
+	return info.EnvVar
+}
+
+// normalizedJSON converts the raw scalar into its canonical JSONB form so the
+// DB never carries type drift ("0.7" string vs 0.7 number). Unparseable
+// numerics fall back to the string form — the candidate build then rejects
+// them with the real parser's message instead of a duplicated check here.
+func normalizedJSON(info config.KeyInfo, raw string) json.RawMessage {
+	quote := func() json.RawMessage {
+		b, _ := json.Marshal(raw)
+		return b
+	}
+	switch info.Type {
+	case "int", "seconds":
+		if n, err := strconv.Atoi(raw); err == nil {
+			return json.RawMessage(strconv.Itoa(n))
+		}
+		return quote()
+	case "float", "hours":
+		if _, err := strconv.ParseFloat(raw, 64); err == nil {
+			return json.RawMessage(raw)
+		}
+		return quote() // hours keeps suffix forms ("45d") as strings
+	case "bool":
+		return json.RawMessage(raw) // pre-validated to true|false
+	default:
+		return quote()
+	}
+}
+
+// upsertRow returns rows with (key,value) replaced or appended.
+func upsertRow(rows []store.SettingOverride, key string, value json.RawMessage) []store.SettingOverride {
+	out := make([]store.SettingOverride, 0, len(rows)+1)
+	replaced := false
+	for _, row := range rows {
+		if row.Key == key {
+			row.Value = value
+			replaced = true
+		}
+		out = append(out, row)
+	}
+	if !replaced {
+		out = append(out, store.SettingOverride{Key: key, Scope: store.GlobalScope, Value: value})
+	}
+	return out
+}
+
+// issueFor returns the build issue attributed to key, or a generic reason.
+func issueFor(issues []config.Issue, key string) string {
+	for _, is := range issues {
+		if is.Field == key {
+			return is.Msg
+		}
+	}
+	return "override would not take effect"
+}
+
+// newWarnings returns the warning messages present in cand but not in base —
+// the §2.3 cross-field advisories (dual-runner num_ctx, blend 1.0 + graph)
+// surface on exactly the write that introduces them.
+func newWarnings(cand, base []config.Issue) []string {
+	seen := make(map[config.Issue]bool, len(base))
+	for _, is := range base {
+		seen[is] = true
+	}
+	var out []string
+	for _, is := range cand {
+		if is.Severity == config.SeverityWarn && !seen[is] {
+			out = append(out, fmt.Sprintf("%s: %s", is.Field, is.Msg))
+		}
+	}
+	return out
+}
+
+// pairingWarnings implements the X3 advisory (risk 8): a .host override whose
+// sibling .protocol still comes from env/default is the classic wire-format
+// mismatch (ollama path against an openai server = 404). Data stays data —
+// this warns, it never blocks.
+func pairingWarnings(key string, candidate *config.Config) []string {
+	group, field, _ := strings.Cut(key, ".")
+	if field != "host" {
+		return nil
+	}
+	protoKey := group + ".protocol"
+	if _, ok := config.KeyByName(protoKey); !ok {
+		return nil
+	}
+	if candidate.Source(protoKey) == "settings" {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"%s changed without %s — pair host+protocol+api_key in one migration step (wire-format mismatch otherwise)", key, protoKey)}
+}
+
+func (h *SettingsHandler) unknownKey(w http.ResponseWriter, key string) {
+	writeJSON(w, http.StatusNotFound, map[string]any{
+		"success": false, "error": fmt.Sprintf("unknown settings key %q — GET /api/settings lists the registry", key)})
+}
+
+func (h *SettingsHandler) internalError(w http.ResponseWriter, r *http.Request, msg string, err error) {
+	slog.Error(msg, "error", err, "request_id", RequestIDFromContext(r.Context()))
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+}

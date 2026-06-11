@@ -91,6 +91,8 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 		r.Post("/api/digest", digestH.HandleDigest)
 		// Synthesize — manual daily synthesis trigger (Welle 42)
 		r.Post("/api/synthesize/daily", synthH.HandleDaily)
+		// Settings — runtime overrides (F2-W5); admin-gated inside the mount.
+		handler.MountSettings(r, handler.NewSettingsHandler(pool, cfgStore))
 		// Blob — fetch, search, manage
 		r.Post("/api/blob/fetch", blobH.HandleBlobFetch)
 		r.Post("/api/blob/search", blobH.HandleBlobSearch)

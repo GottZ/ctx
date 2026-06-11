@@ -87,6 +87,20 @@ func Embed(ctx context.Context, pool *pgxpool.Pool, b backends.Backend, text str
 	return vec, nil
 }
 
+// Flush drops the ENTIRE cache. Called when an embed-cache-coupled config
+// value changes (embed/dream_embed host or protocol, X2): the cache keys only
+// on (text_hash, model), so vectors computed by the OLD backend would
+// otherwise be served against documents embedded by the new one (cosine
+// 0.997 != 1.0 measured — silent retrieval degradation, R5). Returns the
+// number of rows removed.
+func Flush(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	tag, err := pool.Exec(ctx, `DELETE FROM context_embed_cache`)
+	if err != nil {
+		return 0, fmt.Errorf("embedcache: flush: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // Evict removes stale cache entries. Applies both a TTL (entries not accessed
 // within ttl are dropped) and a size cap (if count exceeds maxRows, the
 // least-recently-accessed rows are pruned to maxRows). Returns the count removed.
