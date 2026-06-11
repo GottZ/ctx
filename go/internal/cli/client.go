@@ -61,6 +61,44 @@ func (c *Client) Post(endpoint string, body any) ([]byte, error) {
 	return respBody, nil
 }
 
+// Do sends a request with an arbitrary method to BaseURL/path (path starts
+// with "/api/…"). body may be nil. Unlike Post (endpoint-POST only), Do
+// serves the REST-shaped settings/secrets surface (GET/PUT/DELETE on
+// path-addressed resources). Returns body and status code — the caller
+// parses the envelope (success:false ⇒ stderr + exit 1, never a silent 0).
+func (c *Client) Do(method, path string, body any) ([]byte, int, error) {
+	var rdr io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshal body: %w", err)
+		}
+		rdr = bytes.NewReader(data)
+	}
+
+	url := strings.TrimSuffix(c.BaseURL, "/") + path
+	req, err := http.NewRequest(method, url, rdr)
+	if err != nil {
+		return nil, 0, fmt.Errorf("create request: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("X-Context-Key", c.Key)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("request to %s: %w", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	if err != nil {
+		return nil, 0, fmt.Errorf("read response: %w", err)
+	}
+	return respBody, resp.StatusCode, nil
+}
+
 // Get sends a GET request to the given path URL.
 func (c *Client) Get(path string) ([]byte, error) {
 	url := path
