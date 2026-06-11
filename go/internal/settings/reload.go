@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -63,7 +64,7 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, envCfg *config.Config, e
 		return envCfg, envIssues
 	}
 
-	cfg, issues := buildFromRows(ctx, pool, rows)
+	cfg, issues := BuildFromRows(ctx, pool, rows)
 
 	// Log only what the override layer CHANGED: issues already present in the
 	// env-only pass were logged by the boot loop before the pool existed.
@@ -76,6 +77,12 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, envCfg *config.Config, e
 // secret_ref resolution) → Validate → store.Replace. Callers are the
 // settings/secrets handlers (W5/W6) and the NOTIFY listener (G16). On any
 // error the previous snapshot stays active — the WARN names what failed.
+//
+// X2 (G16): when the swap changes an embed-cache-coupled value (effective
+// embed/dream_embed host or protocol — including a DELETE reverting to env
+// and a psql edit arriving via NOTIFY), the embed cache is flushed AFTER the
+// swap: post-swap only the new backend fills it, whereas a pre-swap flush
+// would let in-flight requests on the old snapshot repollute it for good.
 func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 	var rows []store.SettingOverride
 	if Disabled() {
@@ -89,9 +96,10 @@ func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 		}
 	}
 
-	cfg, issues := buildFromRows(ctx, pool, rows)
+	cfg, issues := BuildFromRows(ctx, pool, rows)
 	logIssues(issues)
 
+	prev := st.Snapshot()
 	if err := st.Replace(cfg); err != nil {
 		// Replace re-validates; errors here mean an env-level invariant broke
 		// (unreachable while env is immutable per process, but never silent).
@@ -99,7 +107,31 @@ func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 		return fmt.Errorf("settings: reload: %w", err)
 	}
 	logApplied(cfg, rows)
+
+	if EmbedCacheCoupledChanged(prev, cfg) {
+		n, err := embedcache.Flush(ctx, pool)
+		if err != nil {
+			// The new snapshot is live either way; a failed flush leaves stale
+			// vectors serving (R5) — loud, and the next coupled write retries.
+			slog.Error("settings: embed-cache flush after coupled change failed — stale vectors may serve", "error", err)
+			return fmt.Errorf("settings: reload: embed cache flush: %w", err)
+		}
+		slog.Info("settings: embed-cache-coupled value changed — flushed context_embed_cache", "rows", n)
+	}
 	return nil
+}
+
+// EmbedCacheCoupledChanged reports whether the EFFECTIVE embed-cache-coupled
+// values differ between two generations: the host/protocol of the query-path
+// and dream embed tuples (resolved through the dream_embed→embed inheritance,
+// so an embed.host change that propagates into the dream tuple counts).
+// Model changes are deliberately NOT covered — the cache keys on model, and
+// model stays mut:"coupled" (re-embed migration, not overridable).
+func EmbedCacheCoupledChanged(a, b *config.Config) bool {
+	ae, be := a.EmbedBackend(), b.EmbedBackend()
+	ad, bd := a.DreamEmbedBackend(), b.DreamEmbedBackend()
+	return ae.Host != be.Host || ae.Protocol != be.Protocol ||
+		ad.Host != bd.Host || ad.Protocol != bd.Protocol
 }
 
 // loadOverrideRows reads the global-scope override rows.
@@ -113,10 +145,13 @@ func loadOverrideRows(ctx context.Context, pool *pgxpool.Pool) ([]store.SettingO
 	return store.LoadSettingOverrides(ctx, pool, store.GlobalScope)
 }
 
-// buildFromRows is the pool-bound build: rows + a sealbox-backed resolver
+// BuildFromRows is the pool-bound build: rows + a sealbox-backed resolver
 // into config.Build. Split from the row conversion so the precedence/
-// tolerance/leak gates run without a DB (buildWith).
-func buildFromRows(ctx context.Context, pool *pgxpool.Pool, rows []store.SettingOverride) (*config.Config, []config.Issue) {
+// tolerance/leak gates run without a DB (buildWith). Exported for the W5
+// settings handler: a PUT validates by building the candidate config from
+// the would-be row set through EXACTLY this path — no second validation
+// logic that could drift from what the reload actually applies.
+func BuildFromRows(ctx context.Context, pool *pgxpool.Pool, rows []store.SettingOverride) (*config.Config, []config.Issue) {
 	resolve, keyIssue := poolResolver(ctx, pool)
 	cfg, issues := buildWith(rows, resolve)
 	if keyIssue != nil {
@@ -164,7 +199,7 @@ func toOverrides(rows []store.SettingOverride) ([]config.Override, []config.Issu
 	overrides := make([]config.Override, 0, len(rows))
 	var issues []config.Issue
 	for _, row := range rows {
-		raw, err := scalarValue(row.Value)
+		raw, err := ScalarValue(row.Value)
 		if err != nil {
 			issues = append(issues, config.Issue{Field: row.Key, Severity: config.SeverityWarn,
 				Msg: fmt.Sprintf("%v — override ignored, env/default value stays", err)})
@@ -175,10 +210,12 @@ func toOverrides(rows []store.SettingOverride) ([]config.Override, []config.Issu
 	return overrides, issues
 }
 
-// scalarValue unwraps one JSONB scalar: strings unquote, numbers and booleans
+// ScalarValue unwraps one JSONB scalar: strings unquote, numbers and booleans
 // keep their literal text (the registry parser owns the typing — no float
 // round-trip drift). Arrays, objects and null are not override values.
-func scalarValue(raw json.RawMessage) (string, error) {
+// Exported for the W5 handler, which unwraps PUT bodies through the same
+// rules the reload applies to persisted rows.
+func ScalarValue(raw json.RawMessage) (string, error) {
 	t := strings.TrimSpace(string(raw))
 	if t == "" {
 		return "", fmt.Errorf("empty value")

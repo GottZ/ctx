@@ -109,13 +109,13 @@ func TestScalarValue(t *testing.T) {
 		{`   `, "", true},
 	}
 	for _, c := range cases {
-		got, err := scalarValue(json.RawMessage(c.in))
+		got, err := ScalarValue(json.RawMessage(c.in))
 		if (err != nil) != c.wantErr {
-			t.Errorf("scalarValue(%q) err=%v, wantErr=%v", c.in, err, c.wantErr)
+			t.Errorf("ScalarValue(%q) err=%v, wantErr=%v", c.in, err, c.wantErr)
 			continue
 		}
 		if err == nil && got != c.want {
-			t.Errorf("scalarValue(%q) = %q, want %q", c.in, got, c.want)
+			t.Errorf("ScalarValue(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

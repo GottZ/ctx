@@ -59,6 +59,47 @@ func LoadSettingOverrides(ctx context.Context, pool *pgxpool.Pool, scope string)
 	return overrides, rows.Err()
 }
 
+// SettingAudit is one context_settings_audit row of entity_type='setting',
+// shaped for the GET /api/settings/{key} history. Values are never sensitive
+// for settings rows: the W5 secret_ref gate keeps plaintext out of the table
+// by construction.
+type SettingAudit struct {
+	Action     string          `json:"action"`
+	OldValue   json.RawMessage `json:"old_value,omitempty"`
+	NewValue   json.RawMessage `json:"new_value,omitempty"`
+	ActorLabel *string         `json:"actor_label,omitempty"`
+	Via        string          `json:"via,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+}
+
+// ListSettingAudit returns the newest audit rows for one settings key.
+func ListSettingAudit(ctx context.Context, pool *pgxpool.Pool, key, scope string, limit int) ([]SettingAudit, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT action, old_value, new_value, actor_label, COALESCE(metadata->>'via', ''), created_at
+		 FROM context_settings_audit
+		 WHERE entity_type = 'setting' AND entity_key = $1 AND scope = $2
+		 ORDER BY created_at DESC
+		 LIMIT $3`,
+		key, scope, limit)
+	if err != nil {
+		return nil, fmt.Errorf("settings: list audit: %w", err)
+	}
+	defer rows.Close()
+
+	var out []SettingAudit
+	for rows.Next() {
+		var a SettingAudit
+		if err := rows.Scan(&a.Action, &a.OldValue, &a.NewValue, &a.ActorLabel, &a.Via, &a.CreatedAt); err != nil {
+			return nil, fmt.Errorf("settings: scan audit: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // setTxActor stamps the audit actor for the current transaction. The 051
 // audit trigger reads ctx.api_key_id via current_setting(); set_config with
 // is_local=true is the parameterized equivalent of SET LOCAL (resets at

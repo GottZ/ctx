@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
 # Context Store Benchmark Test Suite
-# Usage: ./test.sh              — runs T01-T12 + T19 (system tests only)
+# Usage: ./test.sh              — runs T01-T12 + T19-T20 (system tests only)
 #        ./test.sh --with-ollama — runs all tests (adds T13-T18 retrieval + MCP)
 #
-# Test IDs are append-only: T19 (graph) lives in Part 1 because the graph
-# endpoint needs no LLM — T13-T18 predate it inside the --with-ollama block.
+# Test IDs are append-only: T19 (graph) and T20 (settings) live in Part 1
+# because neither needs an LLM — T13-T18 predate them inside the
+# --with-ollama block.
 #
 # ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
 # Implements GottZ 4-Way RRF verification and GottZ Scope Model tests.
@@ -345,6 +346,39 @@ print(';'.join(problems) if problems else 'OK ' + str(stats.get('nodes')) + ' no
       pass "$T (${t19_check#OK }, 404-equality holds)"
     else
       fail "$T" "404-oracle: invisible=$t19_code1 missing=$t19_code2 bodies_equal=$([[ "$t19_body1" == "$t19_body2" ]] && echo yes || echo no)"
+    fi
+  fi
+fi
+
+# T20 SETTINGS_ROUNDTRIP — /api/settings (G16/F2-W5). Admin-gated runtime
+# overrides: non-admin GET must 403 (F4-O4); PUT flips the source to db and
+# DELETE reverts it. The PUT writes the CURRENT effective value, so an
+# aborted run between PUT and DELETE never changes live behavior.
+T="T20 SETTINGS_ROUNDTRIP"
+if [[ -z "${CTX_ADMIN_KEY:-}" ]]; then
+  fail "$T" "CTX_ADMIN_KEY not set in .env (host-only admin key, G09 bootstrap)"
+else
+  t20_403=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' "$WEBHOOK/api/settings" \
+    -H "X-Context-Key: $KEY_PRIVATE" 2>/dev/null)
+  t20_cur=$(curl -s --max-time 10 "$WEBHOOK/api/settings/rerank.blend_weight" \
+    -H "X-Context-Key: $CTX_ADMIN_KEY" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['setting']['value'])" 2>/dev/null)
+  if [[ "$t20_403" != "403" ]]; then
+    fail "$T" "non-admin GET expected 403, got $t20_403"
+  elif [[ -z "$t20_cur" ]]; then
+    fail "$T" "could not read current rerank.blend_weight via admin key"
+  else
+    t20_put=$(curl -s --max-time 15 -X PUT "$WEBHOOK/api/settings/rerank.blend_weight" \
+      -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
+      -d "{\"value\":$t20_cur}" 2>/dev/null)
+    t20_src=$(echo "$t20_put" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source',''))" 2>/dev/null)
+    t20_del=$(curl -s --max-time 15 -X DELETE "$WEBHOOK/api/settings/rerank.blend_weight" \
+      -H "X-Context-Key: $CTX_ADMIN_KEY" 2>/dev/null)
+    t20_dsrc=$(echo "$t20_del" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source',''))" 2>/dev/null)
+    if [[ "$t20_src" == "db" && -n "$t20_dsrc" && "$t20_dsrc" != "db" ]]; then
+      pass "$T (403 enforced, override db→$t20_dsrc, value=$t20_cur)"
+    else
+      fail "$T" "put_source=${t20_src:-unparseable} delete_source=${t20_dsrc:-unparseable}"
     fi
   fi
 fi

@@ -74,6 +74,22 @@ func ListSecretMeta(ctx context.Context, pool *pgxpool.Pool, scope string) ([]Se
 	return metas, rows.Err()
 }
 
+// SecretExists reports whether a secret row exists for (name, scope). The
+// settings API's secret_ref gate (W5, §2.3): a ref to a non-existent secret
+// is rejected with 422 BEFORE persist — otherwise a plaintext provider key
+// mistakenly set as the value would land verbatim in context_settings and,
+// via the audit trigger, in the append-only history.
+func SecretExists(ctx context.Context, pool *pgxpool.Pool, name, scope string) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM context_secrets WHERE name = $1 AND scope = $2)`,
+		name, scope).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("secrets: exists: %w", err)
+	}
+	return exists, nil
+}
+
 // PutSecret inserts or rotates one sealed secret. created=true on first
 // insert, false on rotate (existing name+scope: ciphertext/nonce/key_version
 // replaced, rotated_at/rotated_by stamped, created_at/created_by preserved).

@@ -249,9 +249,9 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 
 ### Key environment variables
 
-Every var below can also carry a runtime override in `context_settings` (precedence: **DB override > env > default**; sealed `context_secrets` + trigger-fed audit trail in `context_settings_audit`, migration 051). The boot loads the overrides right after the migrations and builds the effective snapshot from them; sensitive keys take a `secret_ref` (the *name* of a sealed secret), resolved in-memory only — logs show keys and sources, never resolved values. The override layer is never fatal: unknown keys, restart-only/coupled keys (incl. the `CONTEXT_DB_*` group), corrupt values and a missing or wrong master key each degrade to a WARN while the env/default value stays active; `CTX_SETTINGS_DISABLE=1` switches the whole layer off (env-only boot, one log line). The settings API/CLI waves add live editing; until then overrides are provisioned per SQL and take effect on restart.
+Every var below can also carry a runtime override in `context_settings` (precedence: **DB override > env > default**; sealed `context_secrets` + trigger-fed audit trail in `context_settings_audit`, migration 051). The boot loads the overrides right after the migrations and builds the effective snapshot from them; sensitive keys take a `secret_ref` (the *name* of a sealed secret), resolved in-memory only — logs show keys and sources, never resolved values. The override layer is never fatal: unknown keys, restart-only/coupled keys (incl. the `CONTEXT_DB_*` group), corrupt values and a missing or wrong master key each degrade to a WARN while the env/default value stays active; `CTX_SETTINGS_DISABLE=1` switches the whole layer off (env-only boot, one log line). Live editing goes through the admin-gated [Settings API](#settings-api); direct SQL edits (and break-glass resets) take effect immediately too — the 051 triggers NOTIFY a listener that rebuilds the snapshot.
 
-The `mut` column is the registry's mutability class per key: **hot** keys take effect without a restart once changed at runtime (snapshot consumers pick them up on the next request/cycle; the settings API will accept live writes for exactly these), **restart** keys are process wiring (DB connection, listener, worker-goroutine count — runtime writes are rejected), **coupled** keys are hot but carry a side-effect obligation (embed host/protocol changes must flush the embed cache; an embed model change changes the vector space and needs a re-embed migration).
+The `mut` column is the registry's mutability class per key: **hot** keys take effect without a restart once changed at runtime (snapshot consumers pick them up on the next request/cycle; the settings API will accept live writes for exactly these), **restart** keys are process wiring (DB connection, listener, worker-goroutine count — runtime writes are rejected with 409), **coupled** keys carry a side-effect obligation: embed **host/protocol** changes are runtime-writable and automatically flush `context_embed_cache` on apply (stale vectors from the old backend must never serve against the new one), while an embed **model** change changes the vector space, needs a re-embed migration and stays env-only (409).
 
 | Var | Default | Mut | Purpose |
 |-----|---------|-----|---------|
@@ -312,6 +312,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `GET /api/graph/ego` | Scope-filtered k-hop ego subgraph over dream links (read-only, no LLM — see [Graph API](#graph-api)) |
 | `GET /api/whoami` | Calling key's identity: `label`, `home_scope`, `read_scopes`, `admin` tier flag — the SPA login gate probes it and derives its read-only degradation from `admin` |
 | `POST /api/manage` | CRUD, Guard API, stats, API-key management (`api-key-create` requires `home_scope`; key/MCP-client management and mutating `dream-mode` require an **admin key** since 052 — see Admin tier) |
+| `GET\|PUT\|DELETE /api/settings[/{key}]` | Runtime config overrides, **admin-gated incl. reads** (see [Settings API](#settings-api)) |
 | `POST /api/digest` | Topic map generation |
 | `POST /api/ingest` | Obsidian vault ingestion |
 | `POST /api/blob/*` | Binary storage (store/fetch/search/manage) |
@@ -347,6 +348,33 @@ GET /api/graph/ego?block=<uuid>&hops=2&per_node_cap=25&limit=500
 Out-of-range values are a `400`, never silently clamped. Response: `nodes` (id, title capped at 120 chars, category, scope, visible `degree` — capped at 201, rendered "200+" — and `hop`), `edges` as compact index tuples `[srcIdx, dstIdx, relIdx, confidence]` into `nodes`/`rels`, and `stats` (`nodes`, `edges`, `truncated`, `elapsed_ms`). The payload never contains block `content` (load it lazily via `manage get`).
 
 Security semantics: the visibility triple (not archived, not system-meta, scope readable by the key) is applied inside every hop **and** inside the per-node cap legs — a node reachable only through a foreign private bridge is never delivered, and invisible edges never consume cap slots. `degree` counts only visible neighbors (scan budget 1000 raw edges/direction). "Does not exist" and "not visible" answer with an identical `404` (no existence oracle), and only successful calls write an access-log row (`action='graph'`, `block_id=NULL` — graph browsing never feeds access-count ranking).
+
+### Settings API
+
+Runtime config editing over the `context_settings` override layer. **Admin-gated including reads** — the effective config (hosts, models, thresholds) is operational intelligence, and a non-admin key that can read it can also enumerate what to attack.
+
+```
+GET    /api/settings           # every registry key: value, source, type, mutability, default
+GET    /api/settings/{key}     # single key + last 10 audit rows (action, actor, via)
+PUT    /api/settings/{key}     # body {"value": <scalar>} — validated BEFORE persist
+DELETE /api/settings/{key}     # drop the override, revert to env/default
+```
+
+Semantics:
+
+- **Validation before persist.** A PUT builds the candidate config through the same path the reload uses; a value the build would reject or ignore is a `422` and never reaches the table (no row, no audit entry). Unknown keys are `404`; `restart`/`coupled` keys are `409` with the env var to set instead. String inputs are normalized to their registry type before persist (`"0.7"` is stored as the number `0.7`).
+- **Hot effect.** After commit the handler swaps the snapshot — the next request/cycle runs with the new value, no restart. Direct `psql` edits arrive through the NOTIFY listener with the same effect, and the trigger audit records them as `via='sql'`.
+- **Masking rule.** Any response position carrying the effective value of a sensitive key renders `"(set via env)"` when the value comes from env — including `previous.value` on PUT and the post-revert `value` on DELETE (the standard migrate-to-secret_ref flow would otherwise echo the `.env` plaintext). DB-sourced sensitive values render the secret **name** (`secret_ref`), never resolved material.
+- **secret_ref gate.** Sensitive keys (`*.api_key`, `server.db_password`) accept only the *name* of an existing sealed secret — a provider-key-shaped value is rejected with `422` so plaintext can never land in `context_settings` or its append-only audit trail.
+- **Embed-cache coupling.** Writes (and reverts) that change the effective embed/dream-embed host or protocol flush `context_embed_cache` automatically — vectors computed by the old backend must never blend with the new one's. The response `warnings` array also flags a `.host` change whose sibling `.protocol` still comes from env: **change host + protocol + api_key together** (a lone host flip onto a different wire format 404s at request time).
+
+```bash
+curl -s -X PUT "$CTX/api/settings/rerank.blend_weight" \
+  -H "X-Context-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"value":0.6}'
+# → {"success":true,"key":"rerank.blend_weight","value":0.6,"source":"db",
+#    "previous":{"value":0.5,"source":"env"},"warnings":[]}
+```
 
 ## Building
 

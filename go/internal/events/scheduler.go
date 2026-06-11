@@ -207,7 +207,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	)
 
 	// Start pgxlisten in a separate goroutine (auto-reconnect, backlog handler).
-	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s)
+	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s, s.pool, s.cfg)
 	go func() {
 		if err := listener.Listen(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("scheduler: pgxlisten fatal error", "error", err)

@@ -108,11 +108,15 @@ func admitOverride(o Override, resolve SecretResolver) (admittedOverride, *Issue
 		// dormant until the binary catches up — visible, never fatal.
 		return admittedOverride{}, warn("unknown settings key — override ignored")
 	}
-	if e.Mut != "hot" {
+	if e.Mut != "hot" && e.Mut != "coupled:embed-cache" {
 		// restart keys take effect only at process start (§7.3: no pending
-		// state in F2), coupled keys need a migration/cache flush no override
-		// can deliver, and the server.* DSN group must stay env-only — the
-		// pool that LOADED the override is bound to the env DSN (circular).
+		// state in F2), coupled keys need a re-embed migration no override can
+		// deliver, and the server.* DSN group must stay env-only — the pool
+		// that LOADED the override is bound to the env DSN (circular).
+		// coupled:embed-cache keys (embed/dream_embed host+protocol) ARE
+		// overridable since G16: the settings write path flushes
+		// context_embed_cache when their effective values change (X2), which
+		// removes the stale-vector hazard (R5) that kept them pinned.
 		return admittedOverride{}, warn(fmt.Sprintf("key is not runtime-overridable (mutability %q) — override ignored", e.Mut))
 	}
 	if e.Secret != "" {
