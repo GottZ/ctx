@@ -60,6 +60,14 @@ embed_dims="${OLLAMA_EMBED_DIMS:-not set}"
 git_branch=$(git -C "$SCRIPT_DIR" branch --show-current 2>/dev/null || echo "?")
 git_commit=$(git -C "$SCRIPT_DIR" log --oneline -1 2>/dev/null || echo "?")
 git_dirty=$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null | wc -l)
+# Agent-worktree setup keeps resetting this to the empty .git/hooks dir,
+# silently disabling pre-commit/commit-msg/pre-push repo-wide. Surface it.
+git_hookspath=$(git -C "$SCRIPT_DIR" config core.hooksPath 2>/dev/null || echo "unset")
+if [ "$git_hookspath" = ".hooks" ]; then
+  git_hookspath=".hooks (ok)"
+else
+  git_hookspath="$git_hookspath — DRIFT, fix: git config core.hooksPath .hooks"
+fi
 
 # --- Backup ---
 latest_backup=$(ls -t "$SCRIPT_DIR"/backups/*.dump 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "none")
@@ -107,6 +115,7 @@ echo "--- Git ---"
 echo "  Branch:             $git_branch"
 echo "  HEAD:               $git_commit"
 echo "  Dirty files:        $git_dirty"
+echo "  hooksPath:          $git_hookspath"
 echo ""
 echo "--- Backup ---"
 echo "  Latest:             $latest_backup"
