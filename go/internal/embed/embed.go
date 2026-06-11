@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -51,9 +52,6 @@ func (p Prefix) text() string {
 	}
 }
 
-// DefaultProtocol is the wire protocol for embeddings. Set from config.
-var DefaultProtocol = "ollama"
-
 // --- Ollama wire format ---.
 
 type ollamaEmbedRequest struct {
@@ -83,22 +81,21 @@ type openAIEmbedResponse struct {
 	} `json:"data"`
 }
 
-// Embed generates an embedding, truncates to 1024d, and L2-normalizes.
-func Embed(ctx context.Context, host, apiKey, model, text string, prefix Prefix, numCtx int) ([]float32, error) {
-	return EmbedWithProtocol(ctx, DefaultProtocol, host, apiKey, model, text, prefix, numCtx)
-}
-
-// EmbedWithProtocol generates an embedding using the specified protocol.
-func EmbedWithProtocol(ctx context.Context, protocol, host, apiKey, model, text string, prefix Prefix, numCtx int) ([]float32, error) {
+// Embed generates an embedding via the backend tuple, truncates to 1024d,
+// and L2-normalizes. Host and Protocol arrive as one backends.Backend value
+// (F1-W5) — the wire path (/api/embed vs /v1/embeddings) can never diverge
+// from the host it was configured with. Any protocol other than "openai"
+// takes the ollama path (pre-W5 dispatch semantics, incl. empty).
+func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) ([]float32, error) {
 	input := prefix.text() + text
 
 	var raw []float64
 	var err error
 
-	if protocol == "openai" {
-		raw, err = embedOpenAI(ctx, host, apiKey, model, input)
+	if b.Protocol == backends.ProtocolOpenAI {
+		raw, err = embedOpenAI(ctx, b.Host, b.APIKey, b.Model, input)
 	} else {
-		raw, err = embedOllama(ctx, host, apiKey, model, input, numCtx)
+		raw, err = embedOllama(ctx, b.Host, b.APIKey, b.Model, input, b.NumCtx)
 	}
 	if err != nil {
 		return nil, err

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/digest"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
@@ -524,27 +525,7 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 		cancel()
 	}()
 
-	// Dream uses its own embed config if set, falls back to query-path embed config.
-	embedHost := s.config.DreamEmbedHost
-	if embedHost == "" {
-		embedHost = s.config.EmbedHost
-	}
-	embedAPIKey := s.config.DreamEmbedAPIKey
-	if embedAPIKey == "" {
-		embedAPIKey = s.config.EmbedAPIKey
-	}
-	embedProtocol := s.config.DreamEmbedProtocol
-	if embedProtocol == "" {
-		embedProtocol = s.config.EmbedProtocol
-	}
-	embedModel := s.config.DreamEmbedModel
-	if embedModel == "" {
-		embedModel = s.config.EmbedModel
-	}
-	embedNumCtx := s.config.DreamEmbedNumCtx
-	if embedNumCtx == 0 {
-		embedNumCtx = s.config.EmbedNumCtx
-	}
+	embedB := s.dreamEmbedBackend()
 
 	// Build throttle function based on current dream mode.
 	throttle := dream.NoThrottle
@@ -562,12 +543,42 @@ func (s *Scheduler) runDreamCycle(dreamModel string, dreamOpts llm.Options) (int
 
 	return dream.RunDreamCycle(
 		dreamCtx, s.pool,
-		embedHost, embedAPIKey, embedProtocol, embedModel, embedNumCtx,
+		embedB,
 		s.config.DreamHost, s.config.DreamAPIKey, dreamModel,
 		s.config.DreamThink, dreamOpts,
 		s.config.ReadScopes,
 		throttle,
 	)
+}
+
+// dreamEmbedBackend assembles the dream-embed tuple: dream embed config if
+// set, per-field fallback to the query-path embed config. Values come from
+// the events.Config boot copy — the move to the config store snapshot is
+// F1-W6 (this helper then dies in favor of cfg.DreamEmbedBackend()).
+func (s *Scheduler) dreamEmbedBackend() backends.Backend {
+	b := backends.Backend{
+		Host:     s.config.DreamEmbedHost,
+		APIKey:   s.config.DreamEmbedAPIKey,
+		Protocol: backends.Protocol(s.config.DreamEmbedProtocol),
+		Model:    s.config.DreamEmbedModel,
+		NumCtx:   s.config.DreamEmbedNumCtx,
+	}
+	if b.Host == "" {
+		b.Host = s.config.EmbedHost
+	}
+	if b.APIKey == "" {
+		b.APIKey = s.config.EmbedAPIKey
+	}
+	if b.Protocol == "" {
+		b.Protocol = backends.Protocol(s.config.EmbedProtocol)
+	}
+	if b.Model == "" {
+		b.Model = s.config.EmbedModel
+	}
+	if b.NumCtx == 0 {
+		b.NumCtx = s.config.EmbedNumCtx
+	}
+	return b
 }
 
 // runDigest executes the digest, yielding if queries are active.
@@ -636,29 +647,10 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context) (bool, error) {
 	// Backfill prefers the dream embed host (e.g. CPU-based llama-embed), falls back to the
 	// query embed host. Rationale: Backfill has no latency SLA and should not compete with
 	// Dream's chat model for shared GPU VRAM via the query embedding backend.
-	embedHost := s.config.DreamEmbedHost
-	if embedHost == "" {
-		embedHost = s.config.EmbedHost
-	}
-	embedAPIKey := s.config.DreamEmbedAPIKey
-	if embedAPIKey == "" {
-		embedAPIKey = s.config.EmbedAPIKey
-	}
-	embedProtocol := s.config.DreamEmbedProtocol
-	if embedProtocol == "" {
-		embedProtocol = s.config.EmbedProtocol
-	}
-	embedModel := s.config.DreamEmbedModel
-	if embedModel == "" {
-		embedModel = s.config.EmbedModel
-	}
-	embedNumCtx := s.config.DreamEmbedNumCtx
-	if embedNumCtx == 0 {
-		embedNumCtx = s.config.EmbedNumCtx
-	}
+	embedB := s.dreamEmbedBackend()
 
 	embedText := title + "\n\n" + content
-	vec, err := embed.EmbedWithProtocol(ctx, embedProtocol, embedHost, embedAPIKey, embedModel, embedText, embed.PrefixDocument, embedNumCtx)
+	vec, err := embed.Embed(ctx, embedB, embedText, embed.PrefixDocument)
 	if err != nil {
 		return false, fmt.Errorf("backfill: embed: %w", err)
 	}

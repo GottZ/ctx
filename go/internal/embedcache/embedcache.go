@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,13 +36,13 @@ func hashKey(prefix embed.Prefix, text string) []byte {
 	return h.Sum(nil)
 }
 
-// Embed returns an embedding for text under the given model, serving from the
-// cache if possible. A cache hit issues one UPDATE (and no embed call). A cache
-// miss issues the embed call, then upserts the result. pool may be nil — in
-// that case the cache is bypassed and the embed call runs unwrapped.
-func Embed(ctx context.Context, pool *pgxpool.Pool, protocol, host, apiKey, model, text string, prefix embed.Prefix, numCtx int) ([]float32, error) {
+// Embed returns an embedding for text under the backend tuple's model, serving
+// from the cache if possible. A cache hit issues one UPDATE (and no embed call).
+// A cache miss issues the embed call, then upserts the result. pool may be nil —
+// in that case the cache is bypassed and the embed call runs unwrapped.
+func Embed(ctx context.Context, pool *pgxpool.Pool, b backends.Backend, text string, prefix embed.Prefix) ([]float32, error) {
 	if pool == nil {
-		return embed.EmbedWithProtocol(ctx, protocol, host, apiKey, model, text, prefix, numCtx)
+		return embed.Embed(ctx, b, text, prefix)
 	}
 
 	key := hashKey(prefix, text)
@@ -53,7 +54,7 @@ func Embed(ctx context.Context, pool *pgxpool.Pool, protocol, host, apiKey, mode
 		SET hit_count = hit_count + 1, last_access = now()
 		WHERE text_hash = $1 AND model = $2
 		RETURNING embedding`,
-		key, model,
+		key, b.Model,
 	).Scan(&cached)
 	if err == nil {
 		return cached.Slice(), nil
@@ -61,11 +62,11 @@ func Embed(ctx context.Context, pool *pgxpool.Pool, protocol, host, apiKey, mode
 	if !errors.Is(err, pgx.ErrNoRows) {
 		// Unexpected DB error — fall through to compute. Cache failures must never
 		// block the hot path; the call still succeeds via the embed backend.
-		return embed.EmbedWithProtocol(ctx, protocol, host, apiKey, model, text, prefix, numCtx)
+		return embed.Embed(ctx, b, text, prefix)
 	}
 
 	// Cache miss: compute, then store.
-	vec, err := embed.EmbedWithProtocol(ctx, protocol, host, apiKey, model, text, prefix, numCtx)
+	vec, err := embed.Embed(ctx, b, text, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +82,7 @@ func Embed(ctx context.Context, pool *pgxpool.Pool, protocol, host, apiKey, mode
 		ON CONFLICT (text_hash, model) DO UPDATE SET
 			hit_count   = context_embed_cache.hit_count + 1,
 			last_access = now()`,
-		key, model, pgvector.NewVector(vec), preview,
+		key, b.Model, pgvector.NewVector(vec), preview,
 	)
 	return vec, nil
 }

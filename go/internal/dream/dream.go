@@ -8,6 +8,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/llm"
@@ -110,7 +111,7 @@ func NoThrottle(_ context.Context) error { return nil }
 // extracting helpers would obscure the linear flow without reducing real complexity.
 //
 //nolint:cyclop // pipeline function with linear step sequence
-func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIKey, embedProtocol, embedModel string, embedNumCtx int, chatHost, chatAPIKey, chatModel string, think *bool, opts llm.Options, readScopes []string, throttle Throttle) (int, error) {
+func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB backends.Backend, chatHost, chatAPIKey, chatModel string, think *bool, opts llm.Options, readScopes []string, throttle Throttle) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, CycleTimeout)
 	defer cancel()
 	// Step 1: Pick a block.
@@ -194,7 +195,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIK
 	}
 
 	// Step 3: Search per keyword via RRF.
-	candidates, err := searchByKeywords(ctx, pool, embedHost, embedAPIKey, embedProtocol, embedModel, embedNumCtx, keywords, readScopes, block.ID, block.Scope)
+	candidates, err := searchByKeywords(ctx, pool, embedB, keywords, readScopes, block.ID, block.Scope)
 	if err != nil {
 		slog.Warn("dream: keyword search failed", "block_id", block.ID, "error", err)
 		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
@@ -592,7 +593,7 @@ func SetDreamCooldownMinutes(ctx context.Context, pool *pgxpool.Pool, blockID st
 
 // searchByKeywords runs one RRF search per keyword, deduplicates results,
 // and returns candidate blocks (excluding the source block and cross-scope blocks).
-func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedHost, embedAPIKey, embedProtocol, embedModel string, embedNumCtx int, keywords []string, scopes []string, sourceID, sourceScope string) ([]BlockInfo, error) {
+func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedB backends.Backend, keywords []string, scopes []string, sourceID, sourceScope string) ([]BlockInfo, error) {
 	seen := make(map[string]bool)
 	seen[sourceID] = true // Exclude source block.
 	var candidates []BlockInfo
@@ -601,7 +602,7 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedHost, embedA
 	for _, kw := range keywords {
 		// Embed the keyword for semantic search. Cached by (hash(prefix||kw), model) —
 		// Dream keywords repeat heavily across cycles (domain vocabulary, proper nouns).
-		kwEmbedding, err := embedcache.Embed(ctx, pool, embedProtocol, embedHost, embedAPIKey, embedModel, kw, embed.PrefixQuery, embedNumCtx)
+		kwEmbedding, err := embedcache.Embed(ctx, pool, embedB, kw, embed.PrefixQuery)
 		if err != nil {
 			embedFailures++
 			slog.Debug("dream: embed keyword failed", "keyword", kw, "error", err)

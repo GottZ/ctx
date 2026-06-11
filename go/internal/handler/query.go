@@ -373,7 +373,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Step 4: Embed the search query with query prefix. Cached by (hash(prefix||text), model) —
 	// repeated queries (debug sessions, recurring lookups) serve from cache in a single UPDATE.
-	embedding, err := embedcache.Embed(ctx, h.pool, string(embedB.Protocol), embedB.Host, embedB.APIKey, embedB.Model, embedQuery, embed.PrefixQuery, embedB.NumCtx)
+	embedding, err := embedcache.Embed(ctx, h.pool, embedB, embedQuery, embed.PrefixQuery)
 	if err != nil {
 		slog.Error("embedding failed",
 			"error", err,
@@ -756,7 +756,7 @@ func (h *QueryHandler) backfillPending(ctx context.Context, embedB backends.Back
 		}
 
 		embedText := title + "\n\n" + content
-		vec, err := embed.EmbedWithProtocol(ctx, string(embedB.Protocol), embedB.Host, embedB.APIKey, embedB.Model, embedText, embed.PrefixDocument, embedB.NumCtx)
+		vec, err := embed.Embed(ctx, embedB, embedText, embed.PrefixDocument)
 		if err != nil {
 			slog.Warn("query backfill: embed failed", "block_id", blockID, "error", err)
 			break // Embed backend likely unavailable, don't retry.
