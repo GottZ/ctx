@@ -7,10 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
-	"github.com/GottZ/ctx/internal/llm"
-	"github.com/GottZ/ctx/internal/rrf"
 )
 
 // defaultListenAddr is the default HTTP listen address.
@@ -247,86 +244,6 @@ func legacyConfig(cc *config.Config) (Config, error) {
 
 		ListenAddr: cc.Server.ListenAddr,
 	}, nil
-}
-
-// GraphConfig builds the rrf.GraphConfig for the Dream-graph expansion stage
-// from the loaded Graph* env values.
-func (c Config) GraphConfig() rrf.GraphConfig {
-	return rrf.GraphConfig{
-		Enabled:                c.GraphExpandEnabled,
-		Directed:               c.GraphDirected,
-		HopDepth:               c.GraphHopDepth,
-		SeedCount:              c.GraphSeedCount,
-		SeedScoreFloor:         c.GraphSeedScoreFloor,
-		PerSeedCap:             c.GraphPerSeedCap,
-		MaxInjected:            c.GraphMaxInjected,
-		MinConfidence:          c.GraphMinConfidence,
-		MinConfidenceRecurrent: c.GraphMinConfidenceRecurrent,
-		BoostWeight:            c.GraphBoostWeight,
-		HubDamping:             c.GraphHubDamping,
-		WeightTopical:          c.GraphWeightTopical,
-		WeightFactual:          c.GraphWeightFactual,
-		WeightCausal:           c.GraphWeightCausal,
-		WeightRecurrent:        c.GraphWeightRecurrent,
-		NewPlacementFrac:       c.GraphNewPlacementFrac,
-	}
-}
-
-// RerankConfig builds the rrf.RerankConfig for the post-RRF rerank stage from
-// the loaded Rerank* env values.
-func (c Config) RerankConfig() rrf.RerankConfig {
-	return rrf.RerankConfig{
-		Enabled:     c.RerankEnabled,
-		Host:        c.RerankHost,
-		APIKey:      c.RerankAPIKey,
-		Model:       c.RerankModel,
-		MaxDocs:     c.RerankMaxDocs,
-		BlendWeight: c.RerankBlendWeight,
-	}
-}
-
-// SynthesisSettings builds the llm.SynthesisSettings for the query-path
-// synthesis stage from the loaded Query* values (F1-W2: constructor argument
-// instead of llm package vars; moves onto the snapshot in F1-W4).
-func (c Config) SynthesisSettings() llm.SynthesisSettings {
-	return llm.SynthesisSettings{
-		ScoreThreshold:     c.ScoreThreshold,
-		ConfidentThreshold: c.ConfidentThreshold,
-		PromptVersion:      c.PromptVersion,
-	}
-}
-
-// ChatBackend builds the primary chat wire tuple from the loaded Chat* values
-// (F1-W3: constructor argument instead of llm.DefaultProtocol package state;
-// moves onto the snapshot in F1-W4). Mirrors config.Config.ChatBackend on the
-// bridge view; the legacy ChatThink string carries the same "true"/"false"/""
-// domain as backends.ThinkMode.
-func (c Config) ChatBackend() backends.Backend {
-	return backends.Backend{
-		Host:     c.ChatHost,
-		APIKey:   c.ChatAPIKey,
-		Protocol: backends.Protocol(c.ChatProtocol),
-		Model:    c.ChatModel,
-		NumCtx:   c.ChatNumCtx,
-		Think:    backends.ThinkMode(c.ChatThink),
-	}
-}
-
-// ChatFallbackBackend builds the emergency synthesis backend from the loaded
-// ChatFallback* values, or nil when no fallback host is configured (F1-W3:
-// parameter instead of the llm.ChatFallback package var). Model/Think stay
-// empty = inherit the primary's at the call site (chatWithFallback semantics);
-// the per-backend Timeout replaces the old FallbackBackend.Timeout field.
-func (c Config) ChatFallbackBackend() *backends.Backend {
-	if c.ChatFallbackHost == "" {
-		return nil
-	}
-	return &backends.Backend{
-		Host:     c.ChatFallbackHost,
-		APIKey:   c.ChatFallbackAPIKey,
-		Protocol: backends.Protocol(c.ChatFallbackProtocol),
-		Timeout:  time.Duration(c.ChatFallbackTimeoutS) * time.Second,
-	}
 }
 
 // DSN returns a PostgreSQL connection string for the context store database.

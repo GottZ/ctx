@@ -113,6 +113,21 @@ func TestDSN(t *testing.T) {
 	}
 }
 
+// TestSynthesisSettings pins the 1:1 mapping into the llm synthesis
+// parameter struct (F1-W4: the derivation moves here from the cmd/ctxd
+// bridge — one source, no third copy).
+func TestSynthesisSettings(t *testing.T) {
+	cfg, _ := cfgFrom(t, map[string]string{
+		"query.score_threshold":     "0.002",
+		"query.confident_threshold": "0.01",
+		"query.prompt_version":      "v6",
+	})
+	ss := cfg.SynthesisSettings()
+	if ss.ScoreThreshold != 0.002 || ss.ConfidentThreshold != 0.01 || ss.PromptVersion != "v6" {
+		t.Errorf("SynthesisSettings() = %+v", ss)
+	}
+}
+
 // TestRRFConversions pins the 1:1 mapping into the rrf parameter structs.
 func TestRRFConversions(t *testing.T) {
 	cfg, _ := cfgFrom(t, map[string]string{

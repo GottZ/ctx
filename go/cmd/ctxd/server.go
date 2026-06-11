@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
@@ -20,8 +21,11 @@ const (
 	BlobMaxBodySize = 75 << 20 // 75 MB
 )
 
-// NewRouter creates the chi router with all routes and middleware.
-func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi.Mux {
+// NewRouter creates the chi router with all routes and middleware. cfgStore
+// is the runtime-config snapshot store (F1-W4): the QueryHandler reads one
+// snapshot per request from it; the remaining handlers still consume the
+// legacy bridge view until their store adoption (F1-W6/W7).
+func NewRouter(pool *pgxpool.Pool, cfg Config, cfgStore *config.Store, scheduler *events.Scheduler) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -42,8 +46,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	r.Post("/token", oauthH.Token)
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
-	chatThink := parseThinkMode(cfg.ChatThink)
-	queryHandler := handler.NewQueryHandler(pool, cfg.ChatBackend(), cfg.ChatFallbackBackend(), cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.SynthesisSettings(), cfg.RerankConfig(), cfg.GraphConfig(), cfg.Timezone, cfg.RateLimitRead)
+	queryHandler := handler.NewQueryHandler(pool, cfgStore)
 	storeH := handler.NewStoreHandler(pool, cfg.RateLimitWrite)
 	searchH := handler.NewSearchHandler(pool, cfg.RateLimitRead)
 	graphH := handler.NewGraphHandler(pool, cfg.RateLimitRead)
@@ -78,15 +81,6 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	queryHTTPHandler := handler.WithScheduler(scheduler, queryHandler.HandleQuery)
 	mcpH := handler.NewMCPHandler(handler.MCPConfig{
 		Pool:         pool,
-		EmbedHost:    cfg.EmbedHost,
-		EmbedAPIKey:  cfg.EmbedAPIKey,
-		EmbedModel:   cfg.EmbedModel,
-		EmbedNumCtx:  cfg.EmbedNumCtx,
-		ChatHost:     cfg.ChatHost,
-		ChatAPIKey:   cfg.ChatAPIKey,
-		ChatModel:    cfg.ChatModel,
-		ChatThink:    chatThink,
-		Timezone:     cfg.Timezone,
 		QueryHandler: http.HandlerFunc(queryHTTPHandler),
 	})
 	// MCP endpoint — auth middleware injects AuthResult into context.

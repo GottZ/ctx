@@ -446,18 +446,8 @@ func TestLoadConfig_GraphExpandDefaults(t *testing.T) {
 		t.Errorf("GraphNewPlacementFrac default = %v, want 0.6", cfg.GraphNewPlacementFrac)
 	}
 
-	// GraphConfig() must mirror the loaded values 1:1.
-	gc := cfg.GraphConfig()
-	if gc.Enabled != cfg.GraphExpandEnabled || gc.Directed != cfg.GraphDirected ||
-		gc.HopDepth != cfg.GraphHopDepth || gc.SeedCount != cfg.GraphSeedCount ||
-		gc.SeedScoreFloor != cfg.GraphSeedScoreFloor || gc.PerSeedCap != cfg.GraphPerSeedCap ||
-		gc.MaxInjected != cfg.GraphMaxInjected || gc.MinConfidence != cfg.GraphMinConfidence ||
-		gc.MinConfidenceRecurrent != cfg.GraphMinConfidenceRecurrent || gc.BoostWeight != cfg.GraphBoostWeight ||
-		gc.HubDamping != cfg.GraphHubDamping || gc.WeightTopical != cfg.GraphWeightTopical ||
-		gc.WeightFactual != cfg.GraphWeightFactual || gc.WeightCausal != cfg.GraphWeightCausal ||
-		gc.WeightRecurrent != cfg.GraphWeightRecurrent || gc.NewPlacementFrac != cfg.GraphNewPlacementFrac {
-		t.Errorf("GraphConfig() does not mirror loaded Config: %+v", gc)
-	}
+	// The rrf.GraphConfig derivation lives on config.Config (GraphRRF) since
+	// F1-W4 — pinned by internal/config TestRRFConversions, not here.
 }
 
 func TestLoadConfig_GraphExpandEnabled_True(t *testing.T) {
@@ -553,13 +543,8 @@ func TestLoadConfig_RerankConfigDefaults(t *testing.T) {
 		t.Errorf("RerankBlendWeight default = %v, want 1.0", cfg.RerankBlendWeight)
 	}
 
-	// RerankConfig() must mirror the loaded values 1:1.
-	rc := cfg.RerankConfig()
-	if rc.Enabled != cfg.RerankEnabled || rc.Host != cfg.RerankHost ||
-		rc.APIKey != cfg.RerankAPIKey || rc.Model != cfg.RerankModel ||
-		rc.MaxDocs != cfg.RerankMaxDocs || rc.BlendWeight != cfg.RerankBlendWeight {
-		t.Errorf("RerankConfig() does not mirror loaded Config: %+v", rc)
-	}
+	// The rrf.RerankConfig derivation lives on config.Config (RerankRRF) since
+	// F1-W4 — pinned by internal/config TestRRFConversions, not here.
 }
 
 func TestLoadConfig_InvalidPort(t *testing.T) {
