@@ -15,7 +15,6 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/events"
-	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -90,16 +89,11 @@ func main() {
 
 	slog.Info("database pool created", "host", cfg.ContextDBHost, "db", cfg.ContextDB)
 
-	// Set wire protocol defaults from config.
-	llm.DefaultProtocol = cfg.ChatProtocol
+	// Set wire protocol defaults from config. The chat protocol + fallback now
+	// travel as backends.Backend parameters (F1-W3); embed (F1-W5) and dream
+	// (F1-W6) still read package state.
 	embed.DefaultProtocol = cfg.EmbedProtocol
 	dream.Protocol = cfg.DreamProtocol
-	llm.ChatFallback = llm.FallbackBackend{
-		Host:     cfg.ChatFallbackHost,
-		APIKey:   cfg.ChatFallbackAPIKey,
-		Protocol: cfg.ChatFallbackProtocol,
-		Timeout:  time.Duration(cfg.ChatFallbackTimeoutS) * time.Second,
-	}
 
 	// Think modes are parsed per pipeline in server.go (chatThink) and scheduler config (dreamThink).
 	// Dream think falls back to chat think if not explicitly set.

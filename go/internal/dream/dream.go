@@ -17,9 +17,10 @@ import (
 )
 
 // Protocol is the wire protocol for dream LLM calls ("ollama" or "openai").
-// Set by main() from CTX_DREAM_PROTOCOL. Without this, dream calls would
-// silently follow llm.DefaultProtocol (= chat protocol) and a split
-// chat/dream protocol configuration would break.
+// Set by main() from CTX_DREAM_PROTOCOL. Historically this existed so dream
+// calls would not silently follow the chat protocol (llm.DefaultProtocol,
+// deleted in F1-W3) under a split chat/dream configuration; the var itself
+// dies in F1-W6 when the dream entry points take a backends.Backend.
 var Protocol = "ollama"
 
 // chatJSON is the seam through which the dream pipeline calls the LLM.

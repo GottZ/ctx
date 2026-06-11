@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
@@ -292,6 +293,39 @@ func (c Config) SynthesisSettings() llm.SynthesisSettings {
 		ScoreThreshold:     c.ScoreThreshold,
 		ConfidentThreshold: c.ConfidentThreshold,
 		PromptVersion:      c.PromptVersion,
+	}
+}
+
+// ChatBackend builds the primary chat wire tuple from the loaded Chat* values
+// (F1-W3: constructor argument instead of llm.DefaultProtocol package state;
+// moves onto the snapshot in F1-W4). Mirrors config.Config.ChatBackend on the
+// bridge view; the legacy ChatThink string carries the same "true"/"false"/""
+// domain as backends.ThinkMode.
+func (c Config) ChatBackend() backends.Backend {
+	return backends.Backend{
+		Host:     c.ChatHost,
+		APIKey:   c.ChatAPIKey,
+		Protocol: backends.Protocol(c.ChatProtocol),
+		Model:    c.ChatModel,
+		NumCtx:   c.ChatNumCtx,
+		Think:    backends.ThinkMode(c.ChatThink),
+	}
+}
+
+// ChatFallbackBackend builds the emergency synthesis backend from the loaded
+// ChatFallback* values, or nil when no fallback host is configured (F1-W3:
+// parameter instead of the llm.ChatFallback package var). Model/Think stay
+// empty = inherit the primary's at the call site (chatWithFallback semantics);
+// the per-backend Timeout replaces the old FallbackBackend.Timeout field.
+func (c Config) ChatFallbackBackend() *backends.Backend {
+	if c.ChatFallbackHost == "" {
+		return nil
+	}
+	return &backends.Backend{
+		Host:     c.ChatFallbackHost,
+		APIKey:   c.ChatFallbackAPIKey,
+		Protocol: backends.Protocol(c.ChatFallbackProtocol),
+		Timeout:  time.Duration(c.ChatFallbackTimeoutS) * time.Second,
 	}
 }
 

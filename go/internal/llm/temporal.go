@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/GottZ/ctx/internal/backends"
 )
 
 const (
@@ -234,13 +236,14 @@ func HasTemporalIntent(query string) bool {
 // jsonFenceRe strips markdown code fences from LLM output.
 var jsonFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?})\\s*```")
 
-// NormalizeTemporal uses the LLM to resolve temporal references in a query.
+// NormalizeTemporal uses the LLM (chat backend) to resolve temporal references
+// in a query.
 // Returns nil if no temporal references are found or if the LLM call fails.
-func NormalizeTemporal(ctx context.Context, host, apiKey, model string, think *bool, numCtx int, query string, now time.Time) (*TemporalResult, error) {
+func NormalizeTemporal(ctx context.Context, chat backends.Backend, query string, now time.Time) (*TemporalResult, error) {
 	calendar := buildCalendar(now)
 	systemPrompt := fmt.Sprintf(temporalPromptTemplate, calendar)
 
-	resp, err := Chat(ctx, host, apiKey, model, think, systemPrompt, query, TemporalOptions(numCtx), TemporalTimeout)
+	resp, err := Chat(ctx, chat, systemPrompt, query, TemporalOptions(chat.NumCtx), TemporalTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("llm: temporal: %w", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -114,69 +115,63 @@ type openAIChatResponse struct {
 	} `json:"usage"`
 }
 
-// Chat sends a non-streaming chat request.
-func Chat(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
-	return chatDispatch(ctx, host, apiKey, model, think, systemPrompt, userPrompt, opts, "", timeout)
+// Chat sends a non-streaming chat request to the given backend. The wire path
+// (/api/chat vs /v1/chat/completions) follows b.Protocol — host and protocol
+// travel as one tuple, never as loose parameters (F1-W3).
+func Chat(ctx context.Context, b backends.Backend, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+	return chatWithFormat(ctx, string(b.Protocol), b.Host, b.APIKey, b.Model, b.Think.Ptr(), systemPrompt, userPrompt, opts, "", timeout)
 }
 
-// ChatJSON sends a non-streaming chat request with JSON-mode enabled.
-func ChatJSON(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
-	return chatDispatch(ctx, host, apiKey, model, think, systemPrompt, userPrompt, opts, "json", timeout)
+// ChatJSON sends a non-streaming chat request with JSON-mode enabled to the
+// given backend.
+func ChatJSON(ctx context.Context, b backends.Backend, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+	return chatWithFormat(ctx, string(b.Protocol), b.Host, b.APIKey, b.Model, b.Think.Ptr(), systemPrompt, userPrompt, opts, "json", timeout)
 }
-
-// Protocol is resolved from the host URL by the caller (config layer).
-// The protocol parameter is passed through the apiKey field as "protocol:key"
-// or detected from package-level config. For simplicity, we use a package var.
-
-// DefaultProtocol is the wire protocol. Set by main() from config.
-// Per-pipeline protocol is passed via the ChatWithProtocol/EmbedWithProtocol functions.
-var DefaultProtocol = "ollama"
-
-// FallbackBackend is the emergency chat backend for the query path (synthesis
-// only — translate stays fail-open, dream waits for the scheduler retry).
-// Empty Host disables the fallback. Set by main() from CTX_CHAT_FALLBACK_*.
-type FallbackBackend struct {
-	Host     string
-	APIKey   string
-	Protocol string
-	Timeout  time.Duration
-}
-
-// ChatFallback is consulted by chatWithFallback when the primary chat backend
-// is unreachable at transport level (host down, connection died) — never on
-// HTTP status errors or deadlines: a slow-but-alive primary keeps the request.
-var ChatFallback FallbackBackend
 
 // chatWithFallback runs a chat call against the primary backend and, when the
-// primary is unreachable (httpx.IsBackendUnavailable) and a fallback is
-// configured, replays the identical prompt against the fallback with its own
-// (longer) timeout — sized for CPU inference, where a 27B synthesis takes
-// minutes; the response-body heartbeat keeps the client connection alive.
+// primary is unreachable at transport level (httpx.IsBackendUnavailable: host
+// down, connection died — never HTTP status errors or deadlines, a
+// slow-but-alive primary keeps the request) and a fallback is configured,
+// replays the identical prompt against the fallback with its own (longer)
+// Timeout — sized for CPU inference, where a 27B synthesis takes minutes; the
+// response-body heartbeat keeps the client connection alive. A fallback with
+// empty Model/Think inherits the primary's (pre-F1 semantics: only
+// host/protocol/key/timeout differ between the legs). fallback == nil or an
+// empty fallback Host disables the second leg (synthesis only — translate
+// stays fail-open, dream waits for the scheduler retry).
 // Returns usedFallback for logging/metrics.
-func chatWithFallback(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (resp *ChatResponse, usedFallback bool, err error) {
-	resp, err = Chat(ctx, host, apiKey, model, think, systemPrompt, userPrompt, opts, timeout)
-	if err == nil || ChatFallback.Host == "" || !httpx.IsBackendUnavailable(err) || ctx.Err() != nil {
+func chatWithFallback(ctx context.Context, primary backends.Backend, fallback *backends.Backend, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (resp *ChatResponse, usedFallback bool, err error) {
+	resp, err = Chat(ctx, primary, systemPrompt, userPrompt, opts, timeout)
+	if err == nil || fallback == nil || fallback.Host == "" || !httpx.IsBackendUnavailable(err) || ctx.Err() != nil {
 		return resp, false, err
 	}
+	fb := *fallback
+	if fb.Model == "" {
+		fb.Model = primary.Model
+	}
+	if fb.Think == "" {
+		fb.Think = primary.Think
+	}
+	// Backends log through their LogValue (APIKey masked by construction) —
+	// never raw %+v.
 	slog.Warn("llm: primary chat backend unavailable, using fallback",
-		"primary", host, "fallback", ChatFallback.Host, "error", err)
-	resp, err = ChatWithProtocol(ctx, ChatFallback.Protocol, ChatFallback.Host, ChatFallback.APIKey,
-		model, think, systemPrompt, userPrompt, opts, ChatFallback.Timeout)
+		"primary", primary, "fallback", fb, "error", err)
+	resp, err = Chat(ctx, fb, systemPrompt, userPrompt, opts, fb.Timeout)
 	return resp, true, err
 }
 
 // ChatWithProtocol sends a chat request using the specified protocol.
+// Transitional loose-parameter form for the dream pipeline (its chatJSON test
+// seam carries the protocol separately until F1-W6 threads backends.Backend
+// through the dream entry points) — new call sites take Chat(ctx, backend, …).
 func ChatWithProtocol(ctx context.Context, protocol, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
 	return chatWithFormat(ctx, protocol, host, apiKey, model, think, systemPrompt, userPrompt, opts, "", timeout)
 }
 
-// ChatJSONWithProtocol sends a JSON-mode chat request using the specified protocol.
+// ChatJSONWithProtocol sends a JSON-mode chat request using the specified
+// protocol. Same transitional status as ChatWithProtocol.
 func ChatJSONWithProtocol(ctx context.Context, protocol, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
 	return chatWithFormat(ctx, protocol, host, apiKey, model, think, systemPrompt, userPrompt, opts, "json", timeout)
-}
-
-func chatDispatch(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
-	return chatWithFormat(ctx, DefaultProtocol, host, apiKey, model, think, systemPrompt, userPrompt, opts, format, timeout)
 }
 
 func chatWithFormat(ctx context.Context, protocol, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {

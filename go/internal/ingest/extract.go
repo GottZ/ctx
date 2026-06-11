@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/util"
 )
@@ -183,16 +184,18 @@ func ExtractionOptions() llm.Options {
 }
 
 // Extract calls the LLM to extract metadata from a chunk.
-// This is the integration function — calls Ollama Chat with JSON-mode.
-// Pure extraction functions above are unit-testable without Ollama.
+// This is the integration function — calls the chat backend with JSON-mode
+// (think travels with the backend tuple; pre-F1 this call site hardcoded
+// think=nil, so callers wanting that behavior leave chat.Think empty).
+// Pure extraction functions above are unit-testable without a backend.
 // Runs injection detection before extraction and attaches flags to the result.
-func Extract(ctx context.Context, host, apiKey, model, content string) (*ExtractionResult, error) {
+func Extract(ctx context.Context, chat backends.Backend, content string) (*ExtractionResult, error) {
 	// Detect injection patterns before sending to LLM
 	injectionFlags := DetectInjection(content)
 
 	system, user, _ := BuildExtractionPrompt(content)
 
-	resp, err := llm.ChatJSON(ctx, host, apiKey, model, nil, system, user, ExtractionOptions(), ExtractionTimeout)
+	resp, err := llm.ChatJSON(ctx, chat, system, user, ExtractionOptions(), ExtractionTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("extract: llm call failed: %w", err)
 	}

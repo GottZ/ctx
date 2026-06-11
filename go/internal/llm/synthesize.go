@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -325,8 +326,11 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // temporalDates is nil for non-temporal queries (date context omitted from prompt).
 // pool may be nil — if provided, the LLM request/response is logged via llmlog.
 // settings carries the scoring thresholds + prompt version from the config
-// registry (F1-W2: parameter instead of package state).
-func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model string, think *bool, numCtx int, settings SynthesisSettings, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
+// registry (F1-W2: parameter instead of package state); chat/chatFallback are
+// the wire tuples for the primary and the emergency CPU leg (F1-W3: parameter
+// instead of the former ChatFallback package var; chatFallback nil = no
+// second leg).
+func Synthesize(ctx context.Context, pool *pgxpool.Pool, chat backends.Backend, chatFallback *backends.Backend, settings SynthesisSettings, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
@@ -367,10 +371,10 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model str
 	// Step 6: Build prompt.
 	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates, settings)
 
-	// Step 7: Call LLM. Falls back to ChatFallback (CPU backend) when the
+	// Step 7: Call LLM. Falls back to chatFallback (CPU backend) when the
 	// primary is unreachable — "es sollte immer ein Weg zu finden sein".
 	start := time.Now()
-	resp, usedFallback, err := chatWithFallback(ctx, host, apiKey, model, think, systemPrompt, userPrompt, SynthesisOptions(numCtx), ChatTimeout)
+	resp, usedFallback, err := chatWithFallback(ctx, chat, chatFallback, systemPrompt, userPrompt, SynthesisOptions(chat.NumCtx), ChatTimeout)
 	duration := time.Since(start)
 	if usedFallback && err == nil {
 		slog.Info("synthesis served by fallback backend", "duration", duration.Round(time.Millisecond))
@@ -382,8 +386,8 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model str
 	}
 	entry := llmlog.Entry{
 		Pipeline:      "query-synthesize",
-		Model:         model,
-		Host:          host,
+		Model:         chat.Model,
+		Host:          chat.Host,
 		Duration:      duration,
 		Err:           err,
 		RequestSystem: systemPrompt,
@@ -410,7 +414,7 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, host, apiKey, model str
 		Sources:     responseSources,
 		Confidence:  confidence,
 		LLMRejected: llmRejected,
-		Model:       model,
+		Model:       chat.Model,
 		EvalCount:   resp.EvalCount,
 	}, nil
 }

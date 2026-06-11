@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
@@ -24,16 +25,16 @@ import (
 
 // QueryHandler handles POST /api/query.
 type QueryHandler struct {
-	pool          *pgxpool.Pool
-	chatHost      string
-	chatAPIKey    string
+	pool *pgxpool.Pool
+	// chat is the primary chat wire tuple; chatFallback (nil = off) is the
+	// emergency synthesis leg. Both are boot-time copies until the handler
+	// moves onto config.Store snapshots (F1-W4/G11).
+	chat          backends.Backend
+	chatFallback  *backends.Backend
 	embedHost     string
 	embedAPIKey   string
 	embedModel    string
 	embedNumCtx   int
-	chatModel     string
-	chatThink     *bool
-	chatNumCtx    int
 	synth         llm.SynthesisSettings
 	rerankCfg     rrf.RerankConfig
 	graphCfg      rrf.GraphConfig
@@ -42,18 +43,15 @@ type QueryHandler struct {
 }
 
 // NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, chatHost, chatAPIKey, embedHost, embedAPIKey, embedModel string, embedNumCtx int, chatModel string, chatThink *bool, chatNumCtx int, synth llm.SynthesisSettings, rerankCfg rrf.RerankConfig, graphCfg rrf.GraphConfig, timezone *time.Location, rateLimitRead int) *QueryHandler {
+func NewQueryHandler(pool *pgxpool.Pool, chat backends.Backend, chatFallback *backends.Backend, embedHost, embedAPIKey, embedModel string, embedNumCtx int, synth llm.SynthesisSettings, rerankCfg rrf.RerankConfig, graphCfg rrf.GraphConfig, timezone *time.Location, rateLimitRead int) *QueryHandler {
 	return &QueryHandler{
 		pool:          pool,
-		chatHost:      chatHost,
-		chatAPIKey:    chatAPIKey,
+		chat:          chat,
+		chatFallback:  chatFallback,
 		embedHost:     embedHost,
 		embedAPIKey:   embedAPIKey,
 		embedModel:    embedModel,
 		embedNumCtx:   embedNumCtx,
-		chatModel:     chatModel,
-		chatThink:     chatThink,
-		chatNumCtx:    chatNumCtx,
 		synth:         synth,
 		rerankCfg:     rerankCfg,
 		graphCfg:      graphCfg,
@@ -314,7 +312,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("german detected, translating",
 			"request_id", requestID,
 		)
-		translatedQuery, err := llm.TranslateQuery(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, query)
+		translatedQuery, err := llm.TranslateQuery(ctx, h.chat, query)
 		if err != nil {
 			slog.Warn("translation failed, using original",
 				"error", err,
@@ -350,7 +348,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	} else if llm.HasTemporalIntent(originalQuery) {
 		// LLM fallback: query seems temporal but rules couldn't parse it.
 		var err error
-		temporalResult, err = llm.NormalizeTemporal(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, originalQuery, now)
+		temporalResult, err = llm.NormalizeTemporal(ctx, h.chat, originalQuery, now)
 		if err != nil {
 			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,
@@ -566,7 +564,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		if h.rerankCfg.Host != "" {
 			results, err = rrf.RerankCrossEncoder(ctx, h.rerankCfg.Host, h.rerankCfg.APIKey, h.rerankCfg.Model, h.rerankCfg.MaxDocs, h.rerankCfg.BlendWeight, originalQuery, results)
 		} else {
-			results, err = rrf.Rerank(ctx, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, originalQuery, results)
+			results, err = rrf.Rerank(ctx, h.chat, originalQuery, results)
 		}
 		if err != nil {
 			slog.Warn("rerank failed, using original order",
@@ -658,7 +656,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.chatHost, h.chatAPIKey, h.chatModel, h.chatThink, h.chatNumCtx, h.synth, originalQuery, sources, temporalDates)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.chat, h.chatFallback, h.synth, originalQuery, sources, temporalDates)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,
@@ -687,7 +685,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Set model even when LLM was skipped (for consistency).
 	if resp.Model == "" {
-		resp.Model = h.chatModel
+		resp.Model = h.chat.Model
 	}
 
 	slog.Info("query pipeline complete",

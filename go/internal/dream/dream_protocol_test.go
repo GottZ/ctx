@@ -11,9 +11,14 @@ import (
 	"github.com/GottZ/ctx/internal/llm"
 )
 
-// Regression: dream.chatJSON must follow dream.Protocol, not
-// llm.DefaultProtocol. Before the fix, a split chat/dream protocol
-// configuration silently sent dream traffic over the chat protocol (W49).
+// Regression: dream.chatJSON must follow dream.Protocol — openai selects
+// /v1/chat/completions, ollama selects /api/chat. Historically (W49) dream
+// traffic silently followed the chat protocol via llm.DefaultProtocol under a
+// split chat/dream configuration; F1-W3 deleted that var, so the ambient-state
+// half of the old adversarial setup is structurally gone. What remains to pin
+// is the Protocol→wire-path mapping until F1-W6 moves the protocol into the
+// backends.Backend parameter of the dream entry points (this test then
+// asserts against that tuple instead).
 func TestChatJSONFollowsDreamProtocol(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -27,29 +32,21 @@ func TestChatJSONFollowsDreamProtocol(t *testing.T) {
 	defer srv.Close()
 
 	origProto := Protocol
-	origDefault := llm.DefaultProtocol
-	defer func() {
-		Protocol = origProto
-		llm.DefaultProtocol = origDefault
-	}()
+	defer func() { Protocol = origProto }()
 
-	// Adversarial setup: DefaultProtocol deliberately contradicts
-	// dream.Protocol so following the wrong one is visible.
-	llm.DefaultProtocol = "ollama"
 	Protocol = "openai"
 	if _, err := chatJSON(context.Background(), srv.URL, "", "m", nil, "sys", "user", llm.Options{}, 5*time.Second); err != nil {
 		t.Fatalf("chatJSON openai: %v", err)
 	}
 	if gotPath != "/v1/chat/completions" {
-		t.Errorf("Protocol=openai: got path %q, want /v1/chat/completions (followed DefaultProtocol?)", gotPath)
+		t.Errorf("Protocol=openai: got path %q, want /v1/chat/completions", gotPath)
 	}
 
-	llm.DefaultProtocol = "openai"
 	Protocol = "ollama"
 	if _, err := chatJSON(context.Background(), srv.URL, "", "m", nil, "sys", "user", llm.Options{}, 5*time.Second); err != nil {
 		t.Fatalf("chatJSON ollama: %v", err)
 	}
 	if gotPath != "/api/chat" {
-		t.Errorf("Protocol=ollama: got path %q, want /api/chat (followed DefaultProtocol?)", gotPath)
+		t.Errorf("Protocol=ollama: got path %q, want /api/chat", gotPath)
 	}
 }

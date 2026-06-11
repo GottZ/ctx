@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/backends"
 )
 
 // germanStopwords are the 50 most common German words used for language detection.
@@ -95,10 +97,10 @@ func DetectGerman(query string) bool {
 	return false
 }
 
-// TranslateQuery translates a German query to English using Ollama.
+// TranslateQuery translates a German query to English over the chat backend.
 // Returns the original query unchanged if translation fails validation.
-func TranslateQuery(ctx context.Context, host, apiKey, model string, think *bool, numCtx int, query string) (string, error) {
-	resp, err := Chat(ctx, host, apiKey, model, think, translationSystemPrompt, query, TranslateOptions(numCtx), TranslateTimeout)
+func TranslateQuery(ctx context.Context, chat backends.Backend, query string) (string, error) {
+	resp, err := Chat(ctx, chat, translationSystemPrompt, query, TranslateOptions(chat.NumCtx), TranslateTimeout)
 	if err != nil {
 		return query, fmt.Errorf("llm: translate: %w", err)
 	}

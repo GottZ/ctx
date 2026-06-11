@@ -43,7 +43,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
 	chatThink := parseThinkMode(cfg.ChatThink)
-	queryHandler := handler.NewQueryHandler(pool, cfg.ChatHost, cfg.ChatAPIKey, cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.ChatModel, chatThink, cfg.ChatNumCtx, cfg.SynthesisSettings(), cfg.RerankConfig(), cfg.GraphConfig(), cfg.Timezone, cfg.RateLimitRead)
+	queryHandler := handler.NewQueryHandler(pool, cfg.ChatBackend(), cfg.ChatFallbackBackend(), cfg.EmbedHost, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedNumCtx, cfg.SynthesisSettings(), cfg.RerankConfig(), cfg.GraphConfig(), cfg.Timezone, cfg.RateLimitRead)
 	storeH := handler.NewStoreHandler(pool, cfg.RateLimitWrite)
 	searchH := handler.NewSearchHandler(pool, cfg.RateLimitRead)
 	graphH := handler.NewGraphHandler(pool, cfg.RateLimitRead)
