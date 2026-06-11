@@ -48,6 +48,7 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 	searchH := handler.NewSearchHandler(pool, cfg.RateLimitRead)
 	graphH := handler.NewGraphHandler(pool, cfg.RateLimitRead)
 	manageH := handler.NewManageHandler(pool, scheduler)
+	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfg.RateLimitWrite)
 	digestH := handler.NewDigestHandler(pool)
 	// Welle 42: daily synthesis manual trigger. Uses the dream model + dream
@@ -107,6 +108,8 @@ func NewRouter(pool *pgxpool.Pool, cfg Config, scheduler *events.Scheduler) *chi
 		r.Post("/api/search", searchH.HandleSearch)
 		// Graph — scope-filtered k-hop ego subgraph (read-only, no LLM)
 		r.Get("/api/graph/ego", graphH.HandleEgo)
+		// Whoami — key identity for the SPA login gate (F4-W3)
+		r.Get("/api/whoami", whoamiH.HandleWhoami)
 		// Manage — CRUD + Guard API
 		r.Post("/api/manage", manageH.HandleManage)
 		// Digest — Topic map generation

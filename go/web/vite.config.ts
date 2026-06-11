@@ -1,5 +1,8 @@
 import { writeFileSync } from 'node:fs'
-import { defineConfig, type PluginOption } from 'vite'
+import type { PluginOption } from 'vite'
+// vitest/config re-exports Vite's defineConfig with the `test` field typed —
+// one config file drives dev, build and the unit tests.
+import { defineConfig } from 'vitest/config'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { compression } from 'vite-plugin-compression2'
 
@@ -40,5 +43,11 @@ export default defineConfig({
       '/health': { target: proxyTarget, changeOrigin: false },
       '/mcp': { target: proxyTarget, changeOrigin: false },
     },
+  },
+  test: {
+    // Logic modules only (design 04-§5.5) — no component snapshots, no DOM:
+    // fetch/sessionStorage are stubbed per test, runes compile fine in node.
+    environment: 'node',
+    include: ['src/**/*.test.ts'],
   },
 })
