@@ -45,6 +45,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(briefCmd(getClient))
 	root.AddCommand(persistCmd(getClient))
 	root.AddCommand(settingsCmd(getClient))
+	root.AddCommand(secretsCmd(getClient))
 	root.AddCommand(initCmd())
 }
 
