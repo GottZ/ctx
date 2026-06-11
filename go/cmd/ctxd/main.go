@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -70,11 +71,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Snapshot store: F1-W1 publishes the validated config; consumers adopt
-	// it wave by wave (G09-G14) and read the legacy bridge view until then.
-	cfgStore := config.NewStore(cc)
-	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), issues)...)
-
 	// Root context cancelled on SIGINT/SIGTERM
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -108,6 +104,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// F2-W4, §2.1 steps 4–7: overlay the context_settings overrides (DB >
+	// env > default; secret_refs resolve in-memory via the sealbox) onto the
+	// validated env config and publish the EFFECTIVE generation as the
+	// initial snapshot. Never fatal — kill switch, missing table, corrupt
+	// values and missing/wrong master key all degrade to WARN + env-only
+	// (the env layer above already fail-fasted on real config errors).
+	// Consumers adopt the store wave by wave (G09–G14) and read the legacy
+	// bridge view until then.
+	effCfg, effIssues := settings.Bootstrap(ctx, pool, cc, issues)
+	cfgStore := config.NewStore(effCfg)
+	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...)
+
 	// Backfill temporal dimensions for blocks missing from context_temporal.
 	if n, err := store.BackfillTemporal(ctx, pool); err != nil {
 		slog.Error("temporal backfill failed", "error", err)
@@ -116,15 +124,16 @@ func main() {
 	}
 
 	// Scheduler for background guard + digest + dream.
-	// Scopes come from the validated snapshot (scheduler.read_scopes parses
+	// Scopes come from the EFFECTIVE snapshot (scheduler.read_scopes parses
 	// CTX_READ_SCOPES with the legacy semantics: comma-separated, empty ⇒
 	// "private,shared,work"; v2.0.0 M045 dropped chk_scope, so any non-empty
 	// string is a valid scope). home_scope has no env knob — default
-	// "private", settings-fillable from F2.
+	// "private", overridable via context_settings since F2-W4 (boot-time
+	// only: the scheduler reads its config once).
 	schedulerConfig := &events.Config{
 		DSN:                     cfg.DSN(),
-		HomeScope:               cc.Scheduler.HomeScope,
-		ReadScopes:              cc.Scheduler.ReadScopes,
+		HomeScope:               effCfg.Scheduler.HomeScope,
+		ReadScopes:              effCfg.Scheduler.ReadScopes,
 		DreamEnabled:            cfg.DreamEnabled,
 		EmbedHost:               cfg.EmbedHost,
 		EmbedAPIKey:             cfg.EmbedAPIKey,

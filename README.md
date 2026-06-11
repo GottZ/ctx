@@ -249,7 +249,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
 
 ### Key environment variables
 
-Runtime overrides on top of env are provisioned in the DB (`context_settings` + sealed `context_secrets`, migration 051, with a trigger-fed audit trail in `context_settings_audit`) — the settings API/CLI waves activate them; until then env remains the only live source.
+Every var below can also carry a runtime override in `context_settings` (precedence: **DB override > env > default**; sealed `context_secrets` + trigger-fed audit trail in `context_settings_audit`, migration 051). The boot loads the overrides right after the migrations and builds the effective snapshot from them; sensitive keys take a `secret_ref` (the *name* of a sealed secret), resolved in-memory only — logs show keys and sources, never resolved values. The override layer is never fatal: unknown keys, restart-only/coupled keys (incl. the `CONTEXT_DB_*` group), corrupt values and a missing or wrong master key each degrade to a WARN while the env/default value stays active; `CTX_SETTINGS_DISABLE=1` switches the whole layer off (env-only boot, one log line). The settings API/CLI waves add live editing; until then overrides are provisioned per SQL and take effect on restart.
 
 | Var | Default | Purpose |
 |-----|---------|---------|
@@ -274,7 +274,7 @@ Runtime overrides on top of env are provisioned in the DB (`context_settings` + 
 
 ### Boot-time validation & config dump
 
-`ctxd` parses all `CTX_*`/`CONTEXT_*` env vars through a typed registry (`internal/config`) and logs one `config: effective` record at startup: every setting with its origin (`env` or `default` — a var you set in the shell but forgot to declare in compose shows up as `default`), secrets masked (`api_key`s render a short sha256 fingerprint so key rotation is provable from logs without leaking the value; the DB password renders presence-only).
+`ctxd` parses all `CTX_*`/`CONTEXT_*` env vars through a typed registry (`internal/config`) and logs one `config: effective` record at startup: every setting with its origin (`settings` for a DB override, `env`, or `default` — a var you set in the shell but forgot to declare in compose shows up as `default`), secrets masked (`api_key`s render a short sha256 fingerprint so key rotation is provable from logs without leaking the value; the DB password renders presence-only).
 
 Invalid configurations abort the boot **after logging every finding** with field + reason — fix the named fields in `.env` and restart. Beyond the long-standing fatal parses (malformed ints, unknown timezone, missing DB password), these previously-booting-but-broken-at-runtime states are now startup errors: unknown `_PROTOCOL` values (used to silently select the Ollama wire path → 404 on llama.cpp), malformed host URLs / trailing slashes / embedded `user:pass@` credentials (use `_API_KEY` instead), `CTX_SCORE_THRESHOLD` above `CTX_CONFIDENT_THRESHOLD`, out-of-range knobs (`_BLEND_WEIGHT` outside [0,1], negative rate limits), and cross-host credential inheritance in the `CTX_DREAM_EMBED_*` fallback chain. Malformed values on tolerant knobs keep their defaults as before, but now log a WARN instead of failing silently.
 

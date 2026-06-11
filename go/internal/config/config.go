@@ -3,9 +3,10 @@
 // (Validate), an atomic snapshot store, and a redacted boot dump.
 //
 // Layering rule (machine-enforced via depguard): only cmd/**,
-// internal/handler and internal/events may import this package. Domain
-// packages (llm, embed, dream, rrf, rerank, …) stay parameter-pure — they
-// receive backends.Backend tuples and plain values as arguments.
+// internal/handler, internal/events and internal/settings (the F2 reload
+// owner) may import this package. Domain packages (llm, embed, dream, rrf,
+// rerank, …) stay parameter-pure — they receive backends.Backend tuples and
+// plain values as arguments.
 //
 // Immutability convention: a *Config published through Store.Replace or
 // NewStore is never mutated afterwards. Updates are copy-on-write:
