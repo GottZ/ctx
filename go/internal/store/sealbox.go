@@ -10,12 +10,15 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/sealbox"
 )
 
 // secretNameRe is the canonical secret-name format. Validated in Go (no DB
@@ -115,6 +118,45 @@ func PutSecret(ctx context.Context, tx pgx.Tx, name, scope string, nonce, cipher
 		return false, fmt.Errorf("secrets: put %s: %w", name, err)
 	}
 	return created, nil
+}
+
+// ResolveSecret loads one sealed secret and opens it with box. Consumers are
+// ONLY the snapshot build (secret_ref resolution, F2-W4) and break-glass —
+// the plaintext lives in-memory and must never reach logs or responses.
+//
+// Error contract (config.SecretResolver): messages carry NEITHER the name NOR
+// any plaintext. Until the F2 write-gate (W6) enforces the secret_ref format
+// on settings writes, a provider key mistakenly stored AS the ref value would
+// otherwise leak through the WARN path that reports resolution failures. The
+// sealbox.Open error is therefore reduced to a fixed string here (its %s wrap
+// embeds the name).
+func ResolveSecret(ctx context.Context, pool *pgxpool.Pool, box *sealbox.Box, name, scope string) ([]byte, error) {
+	if box == nil {
+		return nil, fmt.Errorf("secrets: no sealbox (master key not loaded)")
+	}
+	if name == "" || scope == "" {
+		return nil, fmt.Errorf("secrets: name and scope are required")
+	}
+
+	var nonce, ciphertext []byte
+	err := pool.QueryRow(ctx,
+		`SELECT nonce, ciphertext FROM context_secrets
+		 WHERE name = $1 AND scope = $2`,
+		name, scope).Scan(&nonce, &ciphertext)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("secrets: no such secret in scope %q — create it first", scope)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("secrets: load sealed row: %w", err)
+	}
+
+	// usedPrev is deliberately dropped: the §3.6 re-encrypt boot sweep is a
+	// separate wave; resolution itself is key-version-agnostic.
+	plaintext, _, err := box.Open(name, scope, nonce, ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: unseal failed — authentication error (wrong master key, tampered row, or name/scope mismatch)")
+	}
+	return plaintext, nil
 }
 
 // DeleteSecret removes one sealed secret. Returns found=false when no row
