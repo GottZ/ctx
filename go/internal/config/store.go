@@ -33,8 +33,10 @@ func (s *Store) Snapshot() *Config {
 
 // Replace validates and atomically publishes a new generation. Any
 // SeverityError rejects the swap and returns the findings as the error;
-// warnings pass. F1: test-only — consumers adopt the store wave by wave
-// (G09–G14), and no CLI/API path calls this before the F2 settings API.
+// warnings pass. Consumer coverage is complete since F1-W7 (every handler,
+// the scheduler and the dream pipeline read snapshots per operation), but no
+// CLI/API path calls Replace before the F2 settings API ships — until then
+// it is reachable from tests only.
 func (s *Store) Replace(c *Config) error {
 	issues := Validate(c)
 	if HasErrors(issues) {

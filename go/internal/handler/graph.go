@@ -25,13 +25,14 @@ import (
 
 // GraphHandler handles GET /api/graph/ego.
 type GraphHandler struct {
-	pool          *pgxpool.Pool
-	rateLimitRead int // 0 = disabled
+	pool *pgxpool.Pool
+	cfg  ConfigStore
 }
 
-// NewGraphHandler creates a new GraphHandler.
-func NewGraphHandler(pool *pgxpool.Pool, rateLimitRead int) *GraphHandler {
-	return &GraphHandler{pool: pool, rateLimitRead: rateLimitRead}
+// NewGraphHandler creates a new GraphHandler. The read rate limit comes from
+// a config snapshot per request (F1-W7), not a boot copy.
+func NewGraphHandler(pool *pgxpool.Pool, cfg ConfigStore) *GraphHandler {
+	return &GraphHandler{pool: pool, cfg: cfg}
 }
 
 // Parameter ceilings (out-of-range → 400, never silently clamped).
@@ -97,17 +98,17 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read rate limit check (0 = disabled) — own action bucket "graph".
-	if h.rateLimitRead > 0 {
+	if limit := h.cfg.Snapshot().Query.RateLimitRead; limit > 0 {
 		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "graph")
 		if err != nil {
 			slog.Error("graph: read rate limit check error", "error", err, "request_id", reqID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 			return
 		}
-		if readCount >= h.rateLimitRead {
+		if readCount >= limit {
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
 				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d graph reads per 60 seconds", h.rateLimitRead),
+				"error":   fmt.Sprintf("Rate limit exceeded: max %d graph reads per 60 seconds", limit),
 			})
 			return
 		}

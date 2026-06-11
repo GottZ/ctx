@@ -11,30 +11,32 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// HealthHandler provides health check endpoints.
+// HealthHandler provides health check endpoints. It holds no host copies —
+// the ping targets come from one config snapshot per request (F1-W7), so
+// after a config replace the health check probes the backends the pipelines
+// actually use, never a stale boot copy.
 type HealthHandler struct {
-	pool      *pgxpool.Pool
-	embedHost string
-	chatHost  string
-	dreamHost string // optional, empty means not configured separately
+	pool *pgxpool.Pool
+	cfg  ConfigStore
 }
 
 // NewHealthHandler creates a new HealthHandler.
-func NewHealthHandler(pool *pgxpool.Pool, embedHost, chatHost, dreamHost string) *HealthHandler {
-	return &HealthHandler{
-		pool:      pool,
-		embedHost: embedHost,
-		chatHost:  chatHost,
-		dreamHost: dreamHost,
-	}
+func NewHealthHandler(pool *pgxpool.Pool, cfg ConfigStore) *HealthHandler {
+	return &HealthHandler{pool: pool, cfg: cfg}
 }
 
+// healthResponse is the public wire shape: role names mapped to ok|error,
+// nothing else. The route is unauthenticated and proxied to the public
+// internet — host strings or model names in any field would leak internal
+// topology, so the shape stays name-free by invariant (pinned by
+// TestHealthShapeInvariant, design §3.5).
 type healthResponse struct {
 	Status   string            `json:"status"`
 	Services map[string]string `json:"services"`
 }
 
-// Health checks database connectivity and Ollama availability for all configured hosts.
+// Health checks database connectivity and inference-backend availability for
+// all hosts in the current config snapshot.
 //
 // Status logic:
 //   - DB down → 503 "unhealthy"
@@ -44,6 +46,11 @@ type healthResponse struct {
 func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+
+	// One snapshot per request: ping targets and pipeline consumers read the
+	// same generation (until F2 ships Replace callers this is byte-identical
+	// to the boot config — Delta 2).
+	cfg := h.cfg.Snapshot()
 
 	services := make(map[string]string)
 
@@ -56,26 +63,26 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Embed host ping (critical — embeddings are mandatory)
-	if err := h.pingHost(ctx, h.embedHost); err != nil {
+	if err := pingHost(ctx, cfg.Embed.Host); err != nil {
 		services["embed"] = "error"
-		slog.Error("health check: embed host ping failed", "error", err, "host", h.embedHost)
+		slog.Error("health check: embed host ping failed", "error", err, "host", cfg.Embed.Host)
 	} else {
 		services["embed"] = "ok"
 	}
 
 	// Chat host ping (degraded if down — queries won't work)
-	if err := h.pingHost(ctx, h.chatHost); err != nil {
+	if err := pingHost(ctx, cfg.Chat.Host); err != nil {
 		services["chat"] = "error"
-		slog.Error("health check: chat host ping failed", "error", err, "host", h.chatHost)
+		slog.Error("health check: chat host ping failed", "error", err, "host", cfg.Chat.Host)
 	} else {
 		services["chat"] = "ok"
 	}
 
 	// Dream host ping (optional — background process)
-	if h.dreamHost != "" {
-		if err := h.pingHost(ctx, h.dreamHost); err != nil {
+	if cfg.Dream.Host != "" {
+		if err := pingHost(ctx, cfg.Dream.Host); err != nil {
 			services["dream"] = "error"
-			slog.Warn("health check: dream host ping failed", "error", err, "host", h.dreamHost)
+			slog.Warn("health check: dream host ping failed", "error", err, "host", cfg.Dream.Host)
 		} else {
 			services["dream"] = "ok"
 		}
@@ -104,7 +111,7 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *HealthHandler) pingHost(ctx context.Context, host string) error {
+func pingHost(ctx context.Context, host string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, host, nil)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)

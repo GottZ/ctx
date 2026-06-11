@@ -17,11 +17,20 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 )
 
+// defaultListenAddr mirrors the registry default for server.listen_addr
+// (pinned against drift by TestBootDefaults). The -health mode needs it
+// WITHOUT the full config load: it must work in a crash-looping container
+// where FromEnv could fail, so it reads LISTEN_ADDR raw.
+const defaultListenAddr = ":8080"
+
 func main() {
 	// Health check mode: /ctx -health makes an HTTP request to the local server.
 	// Used as Docker healthcheck in distroless containers (no curl/wget available).
 	if len(os.Args) > 1 && os.Args[1] == "-health" {
-		addr := getEnv("LISTEN_ADDR", defaultListenAddr)
+		addr := os.Getenv("LISTEN_ADDR")
+		if addr == "" {
+			addr = defaultListenAddr
+		}
 		url := fmt.Sprintf("http://localhost%s/health", addr)
 		resp, err := http.Get(url) //nolint:gosec,noctx // healthcheck is fire-and-forget
 		if err != nil {
@@ -51,18 +60,16 @@ func main() {
 
 	// Parse + validate (internal/config), log EVERY issue, then fail fast on
 	// any SeverityError — a misconfigured boot dies with field + reason for
-	// each finding, never with just the first one.
-	cfg, cc, issues, err := loadConfig()
+	// each finding, never with just the first one. config.Config is the only
+	// config type since F1-W7 (the cmd/ctxd bridge struct died).
+	cc, issues := config.FromEnv()
+	issues = append(issues, config.Validate(cc)...)
 	for _, is := range issues {
 		if is.Severity == config.SeverityError {
 			slog.Error("config: invalid", "field", is.Field, "msg", is.Msg)
 		} else {
 			slog.Warn("config: issue", "field", is.Field, "msg", is.Msg)
 		}
-	}
-	if err != nil {
-		slog.Error("failed to load config", "error", err)
-		os.Exit(1)
 	}
 	if config.HasErrors(issues) {
 		slog.Error("config: refusing to start — fix the fields above in .env and restart")
@@ -73,15 +80,18 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Database pool with pgvector support
-	pool, err := store.NewPool(ctx, cfg.DSN())
+	// Database pool with pgvector support. The DSN comes from the env-layer
+	// config: the settings overlay below needs this pool to even load, and the
+	// CONTEXT_DB_* group is restart-only — the effective snapshot can never
+	// carry a different DSN than the one we boot with.
+	pool, err := store.NewPool(ctx, cc.DSN())
 	if err != nil {
 		slog.Error("failed to create database pool", "error", err)
 		os.Exit(1)
 	}
 	defer pool.Close()
 
-	slog.Info("database pool created", "host", cfg.ContextDBHost, "db", cfg.ContextDB)
+	slog.Info("database pool created", "host", cc.Server.DBHost, "db", cc.Server.DB)
 
 	// Run database migrations
 	if err := store.RunMigrations(ctx, pool); err != nil {
@@ -95,8 +105,7 @@ func main() {
 	// initial snapshot. Never fatal — kill switch, missing table, corrupt
 	// values and missing/wrong master key all degrade to WARN + env-only
 	// (the env layer above already fail-fasted on real config errors).
-	// Consumers adopt the store wave by wave (G09–G14) and read the legacy
-	// bridge view until then.
+	// Every consumer reads this store per operation (F1-W4–W7).
 	effCfg, effIssues := settings.Bootstrap(ctx, pool, cc, issues)
 	cfgStore := config.NewStore(effCfg)
 	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...)
@@ -112,22 +121,24 @@ func main() {
 	// scopes, dream/embed backend tuples, idle wait, back-off policy — comes
 	// from the cfgStore snapshot per cycle/run (F1-W6; the old events.Config
 	// boot copy died here). StartupConfig carries only the restart-only
-	// parameters: DSN from the SAME bridge value the pool was built from
-	// (listener and pool must point at one database), DreamEnabled and
+	// parameters: DSN from the SAME value the pool was built from (listener
+	// and pool must point at one database), DreamEnabled and
 	// DreamParallelism from the effective snapshot (validated + clamped;
 	// both fix the worker-goroutine set once in Run). ReconnectDelay keeps
 	// its zero value = pgxlisten 5s default.
 	scheduler := events.NewScheduler(pool, cfgStore, events.StartupConfig{
-		DSN:              cfg.DSN(),
+		DSN:              cc.DSN(),
 		DreamEnabled:     effCfg.Dream.Enabled,
 		DreamParallelism: effCfg.Dream.Parallelism,
 	})
 	go scheduler.Run(ctx)
 
-	// HTTP server
-	router := NewRouter(pool, cfg, cfgStore, scheduler)
+	// HTTP server. ListenAddr is restart-only, read once from the effective
+	// snapshot (== env value; the settings overlay rejects restart-only keys).
+	listenAddr := cfgStore.Snapshot().Server.ListenAddr
+	router := NewRouter(pool, cfgStore, scheduler)
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
+		Addr:              listenAddr,
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -138,7 +149,7 @@ func main() {
 	// Start HTTP server in background
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("starting HTTP server", "addr", cfg.ListenAddr)
+		slog.Info("starting HTTP server", "addr", listenAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

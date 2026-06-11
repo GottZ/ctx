@@ -14,16 +14,14 @@ import (
 
 // StoreHandler handles POST /api/store.
 type StoreHandler struct {
-	pool           *pgxpool.Pool
-	rateLimitWrite int // 0 = disabled
+	pool *pgxpool.Pool
+	cfg  ConfigStore
 }
 
-// NewStoreHandler creates a new StoreHandler.
-func NewStoreHandler(pool *pgxpool.Pool, rateLimitWrite int) *StoreHandler {
-	return &StoreHandler{
-		pool:           pool,
-		rateLimitWrite: rateLimitWrite,
-	}
+// NewStoreHandler creates a new StoreHandler. The write rate limit comes from
+// a config snapshot per request (F1-W7), not a boot copy.
+func NewStoreHandler(pool *pgxpool.Pool, cfg ConfigStore) *StoreHandler {
+	return &StoreHandler{pool: pool, cfg: cfg}
 }
 
 type storeRequest struct {
@@ -103,7 +101,9 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rate limit check (writes/min, 0 = disabled).
-	if h.rateLimitWrite > 0 {
+	// TODO(multi-tenant): the limit is a server-global config value applied
+	// per key; the multi-tenant line moves it to per-key/per-tenant policy.
+	if limit := h.cfg.Snapshot().Query.RateLimitWrite; limit > 0 {
 		writeCount, err := store.CheckRateLimit(ctx, h.pool, authResult.ApiKeyID)
 		if err != nil {
 			slog.Error("store: rate limit check error", "error", err, "request_id", reqID)
@@ -112,9 +112,9 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if writeCount >= h.rateLimitWrite {
+		if writeCount >= limit {
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false, "error": fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", h.rateLimitWrite),
+				"success": false, "error": fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", limit),
 			})
 			return
 		}

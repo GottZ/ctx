@@ -58,9 +58,10 @@ func fieldPath(rt reflect.Type, path []int) []string {
 }
 
 // TestRegistryStrictSet pins the parse:"strict" classification to EXACTLY
-// today's fatal-parse paths (§3.3: 7 getEnvInt vars + timezone; the eighth,
-// CTX_EMBED_DIMS, lives in the cmd/ctxd bridge until wave 7). A field joining
-// or leaving this set changes boot semantics and must fail here first.
+// the pre-F1 fatal-parse paths (§3.3: 7 getEnvInt vars + timezone; the
+// eighth, CTX_EMBED_DIMS, retired with the cmd/ctxd bridge in wave 7 —
+// Delta 4, pinned by TestEmbedDimsRetired). A field joining or leaving this
+// set changes boot semantics and must fail here first.
 func TestRegistryStrictSet(t *testing.T) {
 	want := map[string]bool{
 		"server.db_port":         true,

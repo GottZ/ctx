@@ -12,13 +12,14 @@ import (
 
 // SearchHandler handles POST /api/search.
 type SearchHandler struct {
-	pool          *pgxpool.Pool
-	rateLimitRead int // 0 = disabled
+	pool *pgxpool.Pool
+	cfg  ConfigStore
 }
 
-// NewSearchHandler creates a new SearchHandler.
-func NewSearchHandler(pool *pgxpool.Pool, rateLimitRead int) *SearchHandler {
-	return &SearchHandler{pool: pool, rateLimitRead: rateLimitRead}
+// NewSearchHandler creates a new SearchHandler. The read rate limit comes
+// from a config snapshot per request (F1-W7), not a boot copy.
+func NewSearchHandler(pool *pgxpool.Pool, cfg ConfigStore) *SearchHandler {
+	return &SearchHandler{pool: pool, cfg: cfg}
 }
 
 type searchRequest struct {
@@ -42,17 +43,17 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read rate limit check (0 = disabled).
-	if h.rateLimitRead > 0 {
+	if limit := h.cfg.Snapshot().Query.RateLimitRead; limit > 0 {
 		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "query")
 		if err != nil {
 			slog.Error("search: read rate limit check error", "error", err, "request_id", reqID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 			return
 		}
-		if readCount >= h.rateLimitRead {
+		if readCount >= limit {
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
 				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d reads per 60 seconds", h.rateLimitRead),
+				"error":   fmt.Sprintf("Rate limit exceeded: max %d reads per 60 seconds", limit),
 			})
 			return
 		}

@@ -4,9 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
-	"github.com/GottZ/ctx/internal/llm"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -14,21 +12,17 @@ import (
 // pipeline (Welle 38c / Welle 42). Tested via POST /api/synthesize/daily —
 // the same code path that the daily scheduler goroutine calls at 03:00 local.
 type SynthesizeHandler struct {
-	pool      *pgxpool.Pool
-	dreamB    backends.Backend
-	dreamOpts llm.Options
+	pool *pgxpool.Pool
+	cfg  ConfigStore
 }
 
-// NewSynthesizeHandler wires the daily-synthesis trigger handler with the same
-// LLM backend tuple the dream loop uses (cfg.DreamBackend(), inheritance
-// already resolved). Boot-time copy until F1-W7 moves this handler onto the
-// config store.
-func NewSynthesizeHandler(pool *pgxpool.Pool, dreamB backends.Backend, opts llm.Options) *SynthesizeHandler {
-	return &SynthesizeHandler{
-		pool:      pool,
-		dreamB:    dreamB,
-		dreamOpts: opts,
-	}
+// NewSynthesizeHandler wires the daily-synthesis trigger handler. The LLM
+// backend tuple is derived per request from a config snapshot via
+// cfg.DreamBackend() — the same single derivation the dream loop and the
+// 03:00 scheduler iteration use (F1-W7: the boot-time dreamB/dreamOpts copy
+// died here).
+func NewSynthesizeHandler(pool *pgxpool.Pool, cfg ConfigStore) *SynthesizeHandler {
+	return &SynthesizeHandler{pool: pool, cfg: cfg}
 }
 
 // HandleDaily triggers a single daily synthesis run for the caller's
@@ -50,7 +44,16 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	blockID, err := dream.GenerateDailyReport(ctx, h.pool, h.dreamB, h.dreamOpts, scope)
+	// One snapshot per request. The chat-num_ctx carry keeps every chat-model
+	// call site on one runner (distinct num_ctx → extra 27B runner → VRAM OOM)
+	// — same pattern as the scheduler's daily iteration.
+	dreamB := h.cfg.Snapshot().DreamBackend()
+	dreamOpts := dream.DreamOptions()
+	if dreamB.NumCtx > 0 {
+		dreamOpts.NumCtx = dreamB.NumCtx
+	}
+
+	blockID, err := dream.GenerateDailyReport(ctx, h.pool, dreamB, dreamOpts, scope)
 	if err != nil {
 		slog.Error("synthesize: daily report failed",
 			"error", err,

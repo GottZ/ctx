@@ -1,0 +1,410 @@
+package main
+
+// Boot-contract suite (F1-W7) — successor of the W1 golden-equivalence test.
+// The frozen pre-F1 reference implementation and the DeepEqual bridge proof
+// died with the legacy Config struct; what this file keeps is everything the
+// equivalence matrix pinned that no other test pins:
+//
+//   - the registry DEFAULTS as concrete values (the frozen pre-F1 fallbacks
+//     became the registry default tags — drift here is a behavior change),
+//   - the env-var → field WIRING for every var (a registry tag typo would
+//     parse fine and land on the wrong field),
+//   - the fatal semantics through env names (strict parse → SeverityError on
+//     the exact field; main exits on HasErrors),
+//   - the Delta-6 pins (configs that booted pre-F1 but were broken at
+//     runtime are now boot errors; the "old code boots" red-half of that
+//     proof was carried by the reference implementation and is retired with
+//     it — design/01-config-core.md §4 Delta 6 documents the delta),
+//   - Delta 4: CTX_EMBED_DIMS is retired — no loader reads it.
+//
+// Fixture hygiene: documentation values only (RFC-2606 hosts, RFC-5737 IPs,
+// synthetic keys) — the repo is public.
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GottZ/ctx/internal/config"
+)
+
+// resetAllEnv neutralizes every env var the loader reads. The registry is
+// the authoritative list.
+func resetAllEnv(t *testing.T) {
+	t.Helper()
+	for _, v := range config.EnvVars() {
+		t.Setenv(v, "")
+	}
+}
+
+func applyEnv(t *testing.T, env map[string]string) {
+	t.Helper()
+	resetAllEnv(t)
+	if _, ok := env["CONTEXT_DB_PASSWORD"]; !ok {
+		env["CONTEXT_DB_PASSWORD"] = "test-password-123"
+	}
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+}
+
+func hasErrorOn(issues []config.Issue, field string) bool {
+	for _, is := range issues {
+		if is.Field == field && is.Severity == config.SeverityError {
+			return true
+		}
+	}
+	return false
+}
+
+// loadFromEnv is the exact boot parse main runs: FromEnv + Validate appended.
+func loadFromEnv() (*config.Config, []config.Issue) {
+	cc, issues := config.FromEnv()
+	issues = append(issues, config.Validate(cc)...)
+	return cc, issues
+}
+
+// TestBootDefaults pins every registry default as a concrete value. These
+// literals are the frozen pre-F1 fallbacks (golden equivalence, W1) — a
+// drifting default tag is a silent behavior change for every deployment that
+// relies on unset vars, so it must fail here first.
+func TestBootDefaults(t *testing.T) {
+	applyEnv(t, map[string]string{})
+
+	cc, issues := loadFromEnv()
+	if len(issues) != 0 {
+		t.Fatalf("defaults must parse + validate clean, got %v", issues)
+	}
+
+	// Server (password is the injected required value).
+	if cc.Server.DB != "context_store" || cc.Server.DBUser != "context_user" ||
+		cc.Server.DBHost != "localhost" || cc.Server.DBPort != 5432 ||
+		cc.Server.DBSSL != "disable" || cc.Server.ListenAddr != ":8080" {
+		t.Errorf("server defaults drifted: %+v", cc.Server)
+	}
+	if cc.Server.ListenAddr != defaultListenAddr {
+		t.Errorf("registry default %q != -health mode fallback %q", cc.Server.ListenAddr, defaultListenAddr)
+	}
+
+	// Chat + fallback.
+	if cc.Chat.Host != "http://localhost:11434" || cc.Chat.APIKey != "" ||
+		cc.Chat.Protocol != "ollama" || cc.Chat.Model != "qwen3.5:9b" ||
+		cc.Chat.NumCtx != 0 || cc.Chat.Think != "false" {
+		t.Errorf("chat defaults drifted: %+v", cc.Chat)
+	}
+	if cc.Fallback.Host != "" || cc.Fallback.Protocol != "openai" ||
+		cc.Fallback.Timeout != 420*time.Second {
+		t.Errorf("fallback defaults drifted: %+v", cc.Fallback)
+	}
+
+	// Embed + dream embed.
+	if cc.Embed.Host != "http://localhost:11434" || cc.Embed.Protocol != "ollama" ||
+		cc.Embed.Model != "qwen3-embedding:8b" || cc.Embed.NumCtx != 0 {
+		t.Errorf("embed defaults drifted: %+v", cc.Embed)
+	}
+	if cc.Dream.Embed.Host != "" || cc.Dream.Embed.Protocol != "" ||
+		cc.Dream.Embed.Model != "" || cc.Dream.Embed.NumCtx != 0 {
+		t.Errorf("dream embed defaults drifted (must inherit via empty): %+v", cc.Dream.Embed)
+	}
+
+	// Dream + back-off.
+	if cc.Dream.Enabled || cc.Dream.Host != "http://localhost:11434" ||
+		cc.Dream.Protocol != "ollama" || cc.Dream.Model != "" ||
+		cc.Dream.NumCtx != 0 || cc.Dream.Think != "" ||
+		cc.Dream.IdleWait != 20*time.Second || cc.Dream.Parallelism != 1 {
+		t.Errorf("dream defaults drifted: %+v", cc.Dream)
+	}
+	if cc.Dream.Backoff.Mode != "exp" || cc.Dream.Backoff.Factor != 1.6 ||
+		cc.Dream.Backoff.Grace != 0 || cc.Dream.Backoff.CapHours != config.Hours(45*24) ||
+		cc.Dream.Backoff.MinHours != config.Hours(12) || cc.Dream.Backoff.InertOffset != 7 {
+		t.Errorf("backoff defaults drifted: %+v", cc.Dream.Backoff)
+	}
+
+	// Rerank: stage off, judge dispatch (empty host), sweep knobs.
+	if cc.Rerank.Enabled || cc.Rerank.Host != "" || cc.Rerank.Model != "" ||
+		cc.Rerank.MaxDocs != 50 || cc.Rerank.BlendWeight != 1.0 {
+		t.Errorf("rerank defaults drifted: %+v", cc.Rerank)
+	}
+
+	// Graph: stage off by default — byte-identical pipeline when unset.
+	g := cc.Graph
+	if g.Enabled || !g.Directed || g.HopDepth != 1 || g.SeedCount != 5 ||
+		g.SeedScoreFloor != 0.5 || g.PerSeedCap != 3 || g.MaxInjected != 10 ||
+		g.MinConfidence != 0.75 || g.MinConfidenceRecurrent != 0.8 ||
+		g.BoostWeight != 0.20 || !g.HubDamping ||
+		g.WeightTopical != 0.5 || g.WeightFactual != 0.9 || g.WeightCausal != 0.9 ||
+		g.WeightRecurrent != 1.0 || g.NewPlacementFrac != 0.6 {
+		t.Errorf("graph defaults drifted: %+v", g)
+	}
+
+	// Query: synthesis trio (frozen pre-W2 llm-init fallbacks), UTC, limits.
+	if cc.Query.ScoreThreshold != 0.001 || cc.Query.ConfidentThreshold != 0.008 ||
+		cc.Query.PromptVersion != "v5.2" || cc.Query.Timezone != time.UTC ||
+		cc.Query.RateLimitWrite != 100 || cc.Query.RateLimitRead != 0 {
+		t.Errorf("query defaults drifted: %+v", cc.Query)
+	}
+
+	// Scheduler scopes.
+	if len(cc.Scheduler.ReadScopes) != 3 || cc.Scheduler.ReadScopes[0] != "private" ||
+		cc.Scheduler.ReadScopes[1] != "shared" || cc.Scheduler.ReadScopes[2] != "work" ||
+		cc.Scheduler.HomeScope != "private" {
+		t.Errorf("scheduler defaults drifted: %+v", cc.Scheduler)
+	}
+}
+
+// TestBootEnvWiring sets every env var to a non-default value and asserts it
+// lands on its field. This is the runtime proof behind the registry tag
+// table: a swapped env tag would still parse and validate clean.
+func TestBootEnvWiring(t *testing.T) {
+	applyEnv(t, map[string]string{
+		"CONTEXT_DB": "ctxtest", "CONTEXT_DB_USER": "ctxuser",
+		"CONTEXT_DB_PASSWORD": "test-password-123",
+		"CONTEXT_DB_HOST":     "db.example", "CONTEXT_DB_PORT": "5433",
+		"CONTEXT_DB_SSLMODE": "require", "LISTEN_ADDR": ":9090",
+
+		"CTX_EMBED_HOST":     "http://embed.example:8081",
+		"CTX_EMBED_API_KEY":  "sk-embed-0123456789abcdefghijklmn",
+		"CTX_EMBED_PROTOCOL": "openai", "CTX_EMBED_MODEL": "test-embed-8b",
+		"CTX_EMBED_NUM_CTX": "2048",
+
+		"CTX_CHAT_HOST":     "http://192.0.2.10:8089",
+		"CTX_CHAT_API_KEY":  "sk-chat-0123456789abcdefghijklmn",
+		"CTX_CHAT_PROTOCOL": "openai", "CTX_CHAT_MODEL": "test-chat-27b",
+		"CTX_CHAT_NUM_CTX": "98304", "CTX_CHAT_THINK": "false",
+
+		"CTX_CHAT_FALLBACK_HOST":     "http://fallback.example:8090",
+		"CTX_CHAT_FALLBACK_API_KEY":  "sk-fallback-0123456789abcdefghij",
+		"CTX_CHAT_FALLBACK_PROTOCOL": "openai", "CTX_CHAT_FALLBACK_TIMEOUT": "300",
+
+		"CTX_RERANK_ENABLED": "true", "CTX_RERANK_HOST": "http://rerank.example:8082",
+		"CTX_RERANK_API_KEY":  "sk-rerank-0123456789abcdefghijkl",
+		"CTX_RERANK_MODEL":    "test-reranker-m3",
+		"CTX_RERANK_MAX_DOCS": "40", "CTX_RERANK_BLEND_WEIGHT": "0.5",
+
+		"CTX_GRAPH_EXPAND_ENABLED": "true", "CTX_GRAPH_EXPAND_DIRECTED": "false",
+		"CTX_GRAPH_EXPAND_HOP_DEPTH": "2", "CTX_GRAPH_EXPAND_SEED_COUNT": "7",
+		"CTX_GRAPH_EXPAND_SEED_SCORE_FLOOR": "0.4", "CTX_GRAPH_EXPAND_PER_SEED_CAP": "4",
+		"CTX_GRAPH_EXPAND_MAX_INJECTED": "12", "CTX_GRAPH_EXPAND_MIN_CONFIDENCE": "0.7",
+		"CTX_GRAPH_EXPAND_MIN_CONFIDENCE_RECURRENT": "0.85",
+		"CTX_GRAPH_EXPAND_BOOST_WEIGHT":             "0.25",
+		"CTX_GRAPH_EXPAND_HUB_DAMPING":              "false",
+		"CTX_GRAPH_EXPAND_WEIGHT_TOPICAL":           "0.6",
+		"CTX_GRAPH_EXPAND_WEIGHT_FACTUAL":           "0.8",
+		"CTX_GRAPH_EXPAND_WEIGHT_CAUSAL":            "0.85",
+		"CTX_GRAPH_EXPAND_WEIGHT_RECURRENT":         "0.95",
+		"CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC":       "0.45",
+
+		"CTX_DREAM_ENABLED": "true", "CTX_DREAM_HOST": "http://192.0.2.10:8089",
+		"CTX_DREAM_API_KEY":  "sk-dream-0123456789abcdefghijklm",
+		"CTX_DREAM_PROTOCOL": "openai", "CTX_DREAM_MODEL": "test-dream-27b",
+		"CTX_DREAM_NUM_CTX": "98304", "CTX_DREAM_THINK": "true",
+
+		"CTX_DREAM_EMBED_HOST":     "http://embed.example:8081",
+		"CTX_DREAM_EMBED_API_KEY":  "sk-dream-embed-0123456789abcdefg",
+		"CTX_DREAM_EMBED_PROTOCOL": "openai", "CTX_DREAM_EMBED_MODEL": "test-embed-8b",
+		"CTX_DREAM_EMBED_NUM_CTX": "2048",
+
+		"CTX_DREAM_IDLE_WAIT": "30", "CTX_DREAM_PARALLELISM": "4",
+		"CTX_DREAM_BACKOFF_MODE": "log", "CTX_DREAM_BACKOFF_FACTOR": "2.5",
+		"CTX_DREAM_BACKOFF_GRACE": "3", "CTX_DREAM_BACKOFF_CAP": "30d",
+		"CTX_DREAM_BACKOFF_MIN": "6h", "CTX_DREAM_BACKOFF_INERT_OFFSET": "5",
+
+		"CTX_TIMEZONE":         "Europe/Berlin",
+		"CTX_RATE_LIMIT_WRITE": "200", "CTX_RATE_LIMIT_READ": "50",
+		"CTX_READ_SCOPES": "private,shared,work,crag",
+
+		"CTX_SCORE_THRESHOLD": "0.002", "CTX_CONFIDENT_THRESHOLD": "0.01",
+		"CTX_PROMPT_VERSION": "v6",
+	})
+
+	cc, issues := loadFromEnv()
+	if config.HasErrors(issues) {
+		t.Fatalf("wiring fixture must validate clean, got %v", issues)
+	}
+
+	if cc.Server.DB != "ctxtest" || cc.Server.DBUser != "ctxuser" ||
+		cc.Server.DBPass != "test-password-123" || cc.Server.DBHost != "db.example" ||
+		cc.Server.DBPort != 5433 || cc.Server.DBSSL != "require" ||
+		cc.Server.ListenAddr != ":9090" {
+		t.Errorf("server wiring: %+v", cc.Server)
+	}
+	if cc.Embed.Host != "http://embed.example:8081" ||
+		cc.Embed.APIKey != "sk-embed-0123456789abcdefghijklmn" ||
+		cc.Embed.Protocol != "openai" || cc.Embed.Model != "test-embed-8b" ||
+		cc.Embed.NumCtx != 2048 {
+		t.Errorf("embed wiring: %+v", cc.Embed)
+	}
+	if cc.Chat.Host != "http://192.0.2.10:8089" ||
+		cc.Chat.APIKey != "sk-chat-0123456789abcdefghijklmn" ||
+		cc.Chat.Protocol != "openai" || cc.Chat.Model != "test-chat-27b" ||
+		cc.Chat.NumCtx != 98304 || cc.Chat.Think != "false" {
+		t.Errorf("chat wiring: %+v", cc.Chat)
+	}
+	if cc.Fallback.Host != "http://fallback.example:8090" ||
+		cc.Fallback.APIKey != "sk-fallback-0123456789abcdefghij" ||
+		cc.Fallback.Protocol != "openai" || cc.Fallback.Timeout != 300*time.Second {
+		t.Errorf("fallback wiring: %+v", cc.Fallback)
+	}
+	if !cc.Rerank.Enabled || cc.Rerank.Host != "http://rerank.example:8082" ||
+		cc.Rerank.APIKey != "sk-rerank-0123456789abcdefghijkl" ||
+		cc.Rerank.Model != "test-reranker-m3" ||
+		cc.Rerank.MaxDocs != 40 || cc.Rerank.BlendWeight != 0.5 {
+		t.Errorf("rerank wiring: %+v", cc.Rerank)
+	}
+	g := cc.Graph
+	if !g.Enabled || g.Directed || g.HopDepth != 2 || g.SeedCount != 7 ||
+		g.SeedScoreFloor != 0.4 || g.PerSeedCap != 4 || g.MaxInjected != 12 ||
+		g.MinConfidence != 0.7 || g.MinConfidenceRecurrent != 0.85 ||
+		g.BoostWeight != 0.25 || g.HubDamping ||
+		g.WeightTopical != 0.6 || g.WeightFactual != 0.8 || g.WeightCausal != 0.85 ||
+		g.WeightRecurrent != 0.95 || g.NewPlacementFrac != 0.45 {
+		t.Errorf("graph wiring: %+v", g)
+	}
+	if !cc.Dream.Enabled || cc.Dream.Host != "http://192.0.2.10:8089" ||
+		cc.Dream.APIKey != "sk-dream-0123456789abcdefghijklm" ||
+		cc.Dream.Protocol != "openai" || cc.Dream.Model != "test-dream-27b" ||
+		cc.Dream.NumCtx != 98304 || cc.Dream.Think != "true" ||
+		cc.Dream.IdleWait != 30*time.Second || cc.Dream.Parallelism != 4 {
+		t.Errorf("dream wiring: %+v", cc.Dream)
+	}
+	if cc.Dream.Embed.Host != "http://embed.example:8081" ||
+		cc.Dream.Embed.APIKey != "sk-dream-embed-0123456789abcdefg" ||
+		cc.Dream.Embed.Protocol != "openai" || cc.Dream.Embed.Model != "test-embed-8b" ||
+		cc.Dream.Embed.NumCtx != 2048 {
+		t.Errorf("dream embed wiring: %+v", cc.Dream.Embed)
+	}
+	if cc.Dream.Backoff.Mode != "log" || cc.Dream.Backoff.Factor != 2.5 ||
+		cc.Dream.Backoff.Grace != 3 || cc.Dream.Backoff.CapHours != config.Hours(30*24) ||
+		cc.Dream.Backoff.MinHours != config.Hours(6) || cc.Dream.Backoff.InertOffset != 5 {
+		t.Errorf("backoff wiring: %+v", cc.Dream.Backoff)
+	}
+	if cc.Query.ScoreThreshold != 0.002 || cc.Query.ConfidentThreshold != 0.01 ||
+		cc.Query.PromptVersion != "v6" || cc.Query.Timezone.String() != "Europe/Berlin" ||
+		cc.Query.RateLimitWrite != 200 || cc.Query.RateLimitRead != 50 {
+		t.Errorf("query wiring: %+v", cc.Query)
+	}
+	if len(cc.Scheduler.ReadScopes) != 4 || cc.Scheduler.ReadScopes[3] != "crag" {
+		t.Errorf("scheduler wiring: %+v", cc.Scheduler)
+	}
+}
+
+// TestBootFatalSemantics: per strict field one malformed env fixture must
+// yield a SeverityError on the exact field — main refuses to start on
+// HasErrors, preserving the pre-F1 fatal-parse semantics.
+func TestBootFatalSemantics(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   map[string]string
+		field string
+	}{
+		{"db port", map[string]string{"CONTEXT_DB_PORT": "not_a_port"}, "server.db_port"},
+		{"embed num_ctx", map[string]string{"CTX_EMBED_NUM_CTX": "abc"}, "embed.num_ctx"},
+		{"chat num_ctx", map[string]string{"CTX_CHAT_NUM_CTX": "abc"}, "chat.num_ctx"},
+		{"dream num_ctx", map[string]string{"CTX_DREAM_NUM_CTX": "abc"}, "dream.num_ctx"},
+		{"rate limit write", map[string]string{"CTX_RATE_LIMIT_WRITE": "abc"}, "query.rate_limit_write"},
+		{"rate limit read", map[string]string{"CTX_RATE_LIMIT_READ": "abc"}, "query.rate_limit_read"},
+		{"timezone", map[string]string{"CTX_TIMEZONE": "Nope/Nowhere"}, "query.timezone"},
+		{"whitespace int", map[string]string{"CONTEXT_DB_PORT": " 5432 "}, "server.db_port"},
+		{"required password", map[string]string{"CONTEXT_DB_PASSWORD": ""}, "server.db_password"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			applyEnv(t, c.env)
+			_, issues := loadFromEnv()
+			if !hasErrorOn(issues, c.field) {
+				t.Errorf("want SeverityError on %s, got %v", c.field, issues)
+			}
+			if !config.HasErrors(issues) {
+				t.Error("HasErrors must be true — main exits on this")
+			}
+		})
+	}
+}
+
+// TestBootSafeFieldsWarn pins Delta 3: malformed values on parse-safe fields
+// keep the default (pre-F1: silent) and are VISIBLE as one WARN per field.
+func TestBootSafeFieldsWarn(t *testing.T) {
+	applyEnv(t, map[string]string{"CTX_RERANK_MAX_DOCS": "abc"})
+	cc, issues := loadFromEnv()
+	if config.HasErrors(issues) {
+		t.Fatalf("safe-malformed must not be fatal: %v", issues)
+	}
+	if cc.Rerank.MaxDocs != 50 {
+		t.Errorf("safe-malformed must keep default 50, got %d", cc.Rerank.MaxDocs)
+	}
+	for _, is := range issues {
+		if is.Field == "rerank.max_docs" && is.Severity == config.SeverityWarn {
+			return
+		}
+	}
+	t.Errorf("expected WARN on rerank.max_docs, got %v", issues)
+}
+
+// TestBootDelta6Pinned pins the deliberate behavior delta (§4 Delta 6 + V1,
+// same class): configs that BOOTED before F1 — and were already broken at
+// runtime — now abort with a SeverityError naming the field. The red-proof
+// against the pre-F1 code ran in the W1 golden suite while the frozen
+// reference implementation existed; the fixtures stay so the classes cannot
+// silently degrade to WARN.
+func TestBootDelta6Pinned(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   map[string]string
+		field string
+	}{
+		{"V2 inverted thresholds", map[string]string{
+			"CTX_SCORE_THRESHOLD": "0.5", "CTX_CONFIDENT_THRESHOLD": "0.008",
+		}, "query.score_threshold"},
+		{"V4 protocol typo", map[string]string{"CTX_CHAT_PROTOCOL": "olama"}, "chat.protocol"},
+		{"V7 unparseable host", map[string]string{"CTX_CHAT_HOST": "http://bad host"}, "chat.host"},
+		{"V7 non-http scheme", map[string]string{"CTX_CHAT_HOST": "ftp://chat.example"}, "chat.host"},
+		{"V7 trailing slash", map[string]string{"CTX_CHAT_HOST": "http://chat.example/"}, "chat.host"},
+		{"V7 userinfo", map[string]string{
+			"CTX_CHAT_HOST": "http://admin:delta-secret-marker@chat.example",
+		}, "chat.host"},
+		{"V9 blend weight range", map[string]string{"CTX_RERANK_BLEND_WEIGHT": "1.5"}, "rerank.blend_weight"},
+		{"V9 hop depth zero", map[string]string{"CTX_GRAPH_EXPAND_HOP_DEPTH": "0"}, "graph.hop_depth"},
+		{"V9 negative rate limit", map[string]string{"CTX_RATE_LIMIT_WRITE": "-1"}, "query.rate_limit_write"},
+		{"V12 cross-host credential", map[string]string{
+			"CTX_EMBED_API_KEY":    "sk-embed-0123456789abcdefghijklmn",
+			"CTX_DREAM_EMBED_HOST": "http://other-embed.example:8081",
+		}, "dream_embed.api_key"},
+		{"V1 dual-runner num_ctx (ollama)", map[string]string{
+			"CTX_CHAT_NUM_CTX": "98304", "CTX_DREAM_NUM_CTX": "32768",
+		}, "dream.num_ctx"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			applyEnv(t, c.env)
+			_, issues := loadFromEnv()
+			if !hasErrorOn(issues, c.field) {
+				t.Errorf("want SeverityError on %s, got %v", c.field, issues)
+			}
+
+			// Leak hygiene on the userinfo case: the password never reaches
+			// an issue message ((*url.Error).Error() embeds the raw URL).
+			for _, is := range issues {
+				if strings.Contains(is.Msg, "delta-secret-marker") {
+					t.Errorf("issue message leaks userinfo credential: %s", is.Msg)
+				}
+			}
+		})
+	}
+}
+
+// TestEmbedDimsRetired pins Delta 4: CTX_EMBED_DIMS is dead. The registry
+// never reads it (the real dimension is the embed.TargetDims constant), and
+// since F1-W7 no bridge parse exists either — a set value is inert: no
+// field, no issue, no fatal.
+func TestEmbedDimsRetired(t *testing.T) {
+	for _, v := range config.EnvVars() {
+		if v == "CTX_EMBED_DIMS" {
+			t.Fatal("CTX_EMBED_DIMS must not re-enter the registry (Delta 4)")
+		}
+	}
+	applyEnv(t, map[string]string{"CTX_EMBED_DIMS": "not-even-a-number"})
+	_, issues := loadFromEnv()
+	if len(issues) != 0 {
+		t.Errorf("CTX_EMBED_DIMS must be inert, got issues: %v", issues)
+	}
+}
