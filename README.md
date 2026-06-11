@@ -212,6 +212,7 @@ ctx stats     # Block count, categories, storage
 | `ctx ingest <path>` | Ingest Obsidian vault |
 | `ctx digest` | Rebuild topic map |
 | `ctx statusline` | Claude Code status bar |
+| `ctx settings [list\|get\|set\|unset]` | Runtime settings overrides (alias `cfg`; **admin key**, reads included). TTY: table, pipe: JSON; `set` takes the value as argument or stdin; API failures (422/409/403) exit 1 with the server's reason |
 | `ctx mcp [add\|list\|delete]` | Manage MCP OAuth client registrations |
 | `ctx keys create <label> --home <scope>` | Provision API key (v2.0.0: `--home` required, no default scope; admin key required since 052) |
 | `ctx keys [list\|delete]` | List / revoke provisioned API keys (admin key required since 052) |
