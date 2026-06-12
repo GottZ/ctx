@@ -34,6 +34,7 @@ import (
 	pgvec "github.com/pgvector/pgvector-go"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/sealbox"
@@ -404,7 +405,9 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
-		h := events.NewSettingsWriteHandler(pool, cfgStore)
+		// Settings-entity payload: the backend pool is not consulted on this
+		// path (G25 added the parameter for entity=context_backends reloads).
+		h := events.NewSettingsWriteHandler(pool, cfgStore, backends.NewPool(pool, nil))
 		if err := h.HandleNotification(ctx, &pgconn.Notification{Channel: "ctx_settings_write", Payload: `{"entity":"context_settings","key":"chat.model","op":"INSERT"}`}, nil); err != nil {
 			t.Fatalf("notify handler: %v", err)
 		}
