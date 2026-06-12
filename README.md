@@ -428,6 +428,16 @@ from the focus (BFS distance, LRU tie-break) are evicted down to 4 000 —
 pinned nodes and the focus survive. Each node label carries a `· +N` badge
 for visible-but-unloaded incidences (`200+` past the server's degree cap).
 
+One filter state (link class, min confidence, category, created window)
+drives both sides: loaded elements filter instantly through the sigma
+reducers — zero server roundtrips — while new focus/expand fetches mirror
+the same filters as ego-query params. Degree badges stay unfiltered by
+design (the server counts all visible incidences). Single-clicking a node
+opens the detail sidebar: metadata from the loaded attributes, full content
+lazy through the existing scope-checked `manage get` (graph payloads never
+carry content), plus focus/expand/pin actions — pinned nodes are exempt
+from eviction. Content renders as a text node, never `{@html}`.
+
 ```bash
 cd go/web
 bun install                           # once; bun.lock is committed

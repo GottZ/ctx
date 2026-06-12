@@ -10,6 +10,8 @@ export interface NodeAttrs {
   label: string
   category: string
   scope: string
+  /** ISO created_at from the API node — client-side time-range filter input. */
+  createdAt: string
   /** Visible server-side degree (201 = "200+"). */
   degree: number
   /** Incidences loaded in the client → badge = degree - loadedDeg (W3). */
@@ -79,6 +81,7 @@ export function mergeEgo(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, resp: EgoRe
       label: n.title,
       category: n.category,
       scope: n.scope,
+      createdAt: n.created_at,
       degree: n.degree,
       loadedDeg: 0,
       hopFromFocus: n.hop,

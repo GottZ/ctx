@@ -35,6 +35,8 @@ export interface EgoQuery {
   min_confidence?: number
   link_class?: string[]
   category?: string[]
+  created_after?: string
+  created_before?: string
 }
 
 export function fetchEgo(block: string, query: EgoQuery = {}): Promise<EgoResponse> {
@@ -45,6 +47,8 @@ export function fetchEgo(block: string, query: EgoQuery = {}): Promise<EgoRespon
   if (query.min_confidence !== undefined) params.set('min_confidence', String(query.min_confidence))
   if (query.link_class?.length) params.set('link_class', query.link_class.join(','))
   if (query.category?.length) params.set('category', query.category.join(','))
+  if (query.created_after) params.set('created_after', query.created_after)
+  if (query.created_before) params.set('created_before', query.created_before)
   return apiFetch<EgoResponse>(`/api/graph/ego?${params.toString()}`)
 }
 
@@ -71,5 +75,26 @@ export function searchBlocks(query: string, limit = 10): Promise<SearchResponse>
   return apiFetch<SearchResponse>('/api/search', {
     method: 'POST',
     body: JSON.stringify({ query, limit }),
+  })
+}
+
+// Source: go/internal/handler/context_manage.go (handleGet) — the existing
+// scope-checked block fetch; the sidebar lazy-loads full content through it.
+export interface BlockDetail {
+  id: string
+  category: string
+  tags: string[]
+  title: string
+  content: string
+  metadata: Record<string, unknown> | null
+  scope: string
+  created_at: string
+  updated_at: string
+}
+
+export function getBlock(id: string): Promise<{ success: true; block: BlockDetail }> {
+  return apiFetch<{ success: true; block: BlockDetail }>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'get', id }),
   })
 }

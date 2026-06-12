@@ -3,7 +3,10 @@
   import { toApiError, type ApiError } from '../../lib/api'
   import { fetchEgo } from '../../lib/graph/api'
   import { LayoutRunner } from '../../lib/graph/fa2'
+  import { defaultFilters, toEgoQuery } from '../../lib/graph/filters'
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
+  import DetailSidebar from './DetailSidebar.svelte'
+  import FilterPanel from './FilterPanel.svelte'
   import GraphView from './GraphView.svelte'
   import SearchBox from './SearchBox.svelte'
 
@@ -21,6 +24,10 @@
   // Explicit counters: graph.order/size are non-reactive by design.
   let nodeCount = $state(0)
   let edgeCount = $state(0)
+  // W4: filters drive the reducers instantly AND the params of new expands.
+  let filters = $state(defaultFilters())
+  let selected = $state<string | null>(null)
+  let loadedCategories = $state<string[]>([])
 
   // Deep-link sync: /graph?focus=<uuid> survives reload and is shareable.
   onMount(() => {
@@ -39,6 +46,10 @@
     layout.run(graph)
     nodeCount = graph.order
     edgeCount = graph.size
+    const cats = new Set<string>()
+    graph.forEachNode((_id, attrs) => cats.add(attrs.category))
+    loadedCategories = [...cats].sort()
+    if (selected !== null && !graph.hasNode(selected)) selected = null
   }
 
   async function setFocus(id: string, opts: { pushUrl?: boolean } = {}): Promise<void> {
@@ -46,7 +57,7 @@
     busy = true
     error = null
     try {
-      const resp = await fetchEgo(id, { hops: 2 })
+      const resp = await fetchEgo(id, { hops: 2, ...toEgoQuery(filters) })
       focus = id
       mergeEgo(graph, resp)
       truncated = resp.stats.truncated
@@ -71,7 +82,7 @@
     error = null
     try {
       touch(graph, id)
-      const resp = await fetchEgo(id, { hops: 1 })
+      const resp = await fetchEgo(id, { hops: 1, ...toEgoQuery(filters) })
       mergeEgo(graph, resp)
       truncated = resp.stats.truncated
       settle()
@@ -80,25 +91,6 @@
     } finally {
       busy = false
     }
-  }
-
-  // Single click re-focuses, double click expands — sigma fires clickNode
-  // before doubleClickNode, so the click action waits long enough to be
-  // cancelled by an incoming double click.
-  let clickTimer: ReturnType<typeof setTimeout> | null = null
-  function nodeClick(id: string): void {
-    if (clickTimer !== null) clearTimeout(clickTimer)
-    clickTimer = setTimeout(() => {
-      clickTimer = null
-      void setFocus(id)
-    }, 250)
-  }
-  function nodeDoubleClick(id: string): void {
-    if (clickTimer !== null) {
-      clearTimeout(clickTimer)
-      clickTimer = null
-    }
-    void expand(id)
   }
 </script>
 
@@ -123,6 +115,7 @@
   {/if}
 
   {#if focus !== null}
+    <FilterPanel {filters} categories={loadedCategories} onchange={(next) => (filters = next)} />
     <div class="meta-row">
       <code class="focus" title="focused block">{focus}</code>
       {#if busy}
@@ -132,10 +125,28 @@
         {nodeCount} nodes · {edgeCount} edges{truncated ? ' · server truncated' : ''}
       </span>
     </div>
-    <div class="viewport">
-      <GraphView bind:this={view} {graph} onnodeclick={nodeClick} onnodedoubleclick={nodeDoubleClick} />
+    <div class="stage">
+      <div class="viewport">
+        <GraphView
+          bind:this={view}
+          {graph}
+          {filters}
+          {selected}
+          onnodeclick={(id) => (selected = id)}
+          onnodedoubleclick={(id) => void expand(id)}
+        />
+      </div>
+      {#if selected !== null}
+        <DetailSidebar
+          id={selected}
+          {graph}
+          onfocus={(id) => void setFocus(id)}
+          onexpand={(id) => void expand(id)}
+          onclose={() => (selected = null)}
+        />
+      {/if}
     </div>
-    <p class="hint">click a node to re-focus · double-click to expand (+1 hop) · “· +N” = links not loaded yet</p>
+    <p class="hint">click a node for details · double-click to expand (+1 hop) · “· +N” = links not loaded yet</p>
   {:else}
     <p class="hint">no focus yet — search above or open a deep link like <code>/graph?focus=&lt;uuid&gt;</code></p>
   {/if}
@@ -203,9 +214,15 @@
     font-size: 0.8rem;
   }
 
+  .stage {
+    flex: 1;
+    display: flex;
+    gap: var(--space-3);
+    min-height: 30rem;
+  }
   .viewport {
     flex: 1;
-    min-height: 30rem;
+    min-width: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
