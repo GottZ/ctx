@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "//": "graph stack is sigma+graphology by decision (F5-W2). Never add @cosmograph/cosmograph: CC-BY-NC license is incompatible with this MPL-2.0 project.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -14,6 +15,9 @@
     "@sveltejs/vite-plugin-svelte": "7.1.2",
     "@tsconfig/svelte": "5.0.8",
     "@types/node": "24.12.3",
+    "graphology": "0.26.0",
+    "graphology-layout-forceatlas2": "0.10.1",
+    "sigma": "3.0.3",
     "sv-router": "0.16.3",
     "svelte": "5.56.3",
     "svelte-check": "4.6.0",

@@ -28,7 +28,7 @@ export const RESERVED_SERVER_PREFIXES = [
 export const areaRoutes = {
   '/settings': () => import('./settings/SettingsPage.svelte'),
   '/status': () => import('./status/Placeholder.svelte'),
-  '/graph': () => import('./graph/Placeholder.svelte'),
+  '/graph': () => import('./graph/GraphPage.svelte'),
   '/chat': () => import('./chat/Placeholder.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes

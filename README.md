@@ -410,6 +410,16 @@ are mirrored client-side as inline previews while the server-side candidate
 build stays authoritative. Non-admin keys get a read-only banner — the
 catalog itself is 403 for them.
 
+The **Graph area** (`/graph?focus=<uuid>`, deep-linkable) renders dream-link
+ego networks via sigma (WebGL) over one graphology instance as the single
+source of truth — deliberately outside Svelte reactivity, the runes proxy
+overhead on thousands of node objects is the documented reason. Entry is the
+FTS search (`POST /api/search`); a hit click or node click focuses that
+block's ego net (`GET /api/graph/ego`, 2 hops). Edge index tuples resolve to
+UUIDs at merge time (they are response-local), re-merges keep node positions,
+and the payload carries titles only — block content never travels through the
+graph endpoint. Read-only: no LLM is touched from this area.
+
 ```bash
 cd go/web
 bun install                           # once; bun.lock is committed
