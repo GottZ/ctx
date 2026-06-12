@@ -2,15 +2,18 @@
   import { onMount } from 'svelte'
   import Sigma from 'sigma'
   import type { DirectedGraph } from 'graphology'
-  import type { EdgeAttrs, NodeAttrs } from '../../lib/graph/graph-client'
+  import { remainingDegree, type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
 
   let {
     graph,
     onnodeclick,
+    onnodedoubleclick,
   }: {
     graph: DirectedGraph<NodeAttrs, EdgeAttrs>
-    /** Single click — focus/expand handling lives in the page (W3 grows this). */
+    /** Single click (debounced against double-click by the page). */
     onnodeclick?: (id: string) => void
+    /** Double click = expand (+1 hop), design 05-§2. */
+    onnodedoubleclick?: (id: string) => void
   } = $props()
 
   let container: HTMLDivElement
@@ -27,8 +30,17 @@
       labelSize: 11,
       defaultEdgeColor: '#34344a',
       renderEdgeLabels: false,
+      // Degree badge (W3): "· +N" = visible incidences not loaded yet.
+      nodeReducer: (_node, data) => {
+        const badge = remainingDegree(data)
+        return badge === null ? data : { ...data, label: `${data.label} · +${badge}` }
+      },
     })
     r.on('clickNode', ({ node }) => onnodeclick?.(node))
+    r.on('doubleClickNode', ({ node, event }) => {
+      event.preventSigmaDefault() // keep the default double-click zoom away
+      onnodedoubleclick?.(node)
+    })
     renderer = r
     return () => {
       r.kill()

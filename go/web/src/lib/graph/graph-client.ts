@@ -129,6 +129,56 @@ export function recomputeHops(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, focus:
   }
 }
 
+/** Mark a node as freshly used (LRU input for eviction). */
+export function touch(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, node: string): void {
+  if (graph.hasNode(node)) graph.setNodeAttribute(node, 'lastTouched', ++touchSeq)
+}
+
+/** Degree-badge math: incidences not yet loaded; 201 means "200+". */
+export function remainingDegree(attrs: Pick<NodeAttrs, 'degree' | 'loadedDeg'>): string | null {
+  if (attrs.degree >= 201) return '200+'
+  const remaining = attrs.degree - attrs.loadedDeg
+  return remaining > 0 ? String(remaining) : null
+}
+
+export interface EvictOptions {
+  maxNodes?: number
+  maxEdges?: number
+  /** Hysteresis target: once over a cap, prune nodes down to this count. */
+  targetNodes?: number
+}
+
+/**
+ * Hard client-memory ceiling (design 05-§4-W3, risk §6.6 — mandatory, not a
+ * retrofit): over 5k nodes / 20k edges, drop the nodes farthest from the
+ * focus first (BFS distance from recomputeHops), LRU as tie-break, down to
+ * 4k (hysteresis so every expand doesn't re-trigger a prune). The focus and
+ * pinned nodes are never evicted. Returns the number of nodes removed.
+ */
+export function evict(
+  graph: DirectedGraph<NodeAttrs, EdgeAttrs>,
+  focus: string,
+  { maxNodes = 5000, maxEdges = 20000, targetNodes = 4000 }: EvictOptions = {},
+): number {
+  if (graph.order <= maxNodes && graph.size <= maxEdges) return 0
+
+  const candidates: { id: string; hop: number; touched: number }[] = []
+  graph.forEachNode((id, attrs) => {
+    if (id === focus || attrs.pinned) return
+    candidates.push({ id, hop: attrs.hopFromFocus, touched: attrs.lastTouched })
+  })
+  // Farthest first (Infinity = unreachable sorts first), oldest touch breaks ties.
+  candidates.sort((a, b) => (b.hop - a.hop || a.touched - b.touched))
+
+  let removed = 0
+  for (const c of candidates) {
+    if (graph.order <= targetNodes && graph.size <= maxEdges) break
+    graph.dropNode(c.id) // drops incident edges with it
+    removed++
+  }
+  return removed
+}
+
 /** Where new nodes spawn: the focus position if loaded, else the origin. */
 function seedPosition(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, focus: string): [number, number] {
   if (graph.hasNode(focus)) {

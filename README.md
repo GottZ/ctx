@@ -420,6 +420,14 @@ UUIDs at merge time (they are response-local), re-merges keep node positions,
 and the payload carries titles only — block content never travels through the
 graph endpoint. Read-only: no LLM is touched from this area.
 
+Double-clicking a node expands it (+1 hop merge, focus stays); the layout is
+ForceAtlas2 in a web worker (Blob-URL — the CSP carries `worker-src blob:`
+for this), running 3–10s scaled by graph size after every merge. Client
+memory is hard-capped: over 5 000 nodes / 20 000 edges the nodes farthest
+from the focus (BFS distance, LRU tie-break) are evicted down to 4 000 —
+pinned nodes and the focus survive. Each node label carries a `· +N` badge
+for visible-but-unloaded incidences (`200+` past the server's degree cap).
+
 ```bash
 cd go/web
 bun install                           # once; bun.lock is committed

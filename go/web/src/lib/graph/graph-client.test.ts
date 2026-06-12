@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { ApiNode, EgoResponse } from './api'
-import { createGraph, mergeEgo, recomputeHops } from './graph-client'
+import { createGraph, evict, mergeEgo, recomputeHops, remainingDegree, touch } from './graph-client'
 
 function node(id: string, hop: number, partial: Partial<ApiNode> = {}): ApiNode {
   return {
@@ -99,6 +99,71 @@ describe('mergeEgo', () => {
     )
     expect(graph.getNodeAttribute('a', 'loadedDeg')).toBe(2)
     expect(graph.getNodeAttribute('b', 'loadedDeg')).toBe(1)
+  })
+})
+
+describe('evict (hard ceiling, design 05-§6.6)', () => {
+  /** Star around the focus, hop-labelled in bands of `band` nodes. */
+  function bigGraph(n: number, band = 10) {
+    const graph = createGraph()
+    const nodes = [node('focus', 0)]
+    const edges: EgoResponse['edges'] = []
+    for (let i = 1; i <= n; i++) {
+      nodes.push(node(`n${i}`, Math.ceil(i / band)))
+      edges.push([0, i, 0, 0.5])
+    }
+    mergeEgo(graph, ego({ focus: 'focus', nodes, edges }))
+    recomputeHops(graph, 'focus')
+    return graph
+  }
+
+  it('does nothing under the caps', () => {
+    const graph = bigGraph(20)
+    expect(evict(graph, 'focus', { maxNodes: 50, maxEdges: 100, targetNodes: 10 })).toBe(0)
+    expect(graph.order).toBe(21)
+  })
+
+  it('prunes to the hysteresis target once over the node cap', () => {
+    const graph = bigGraph(30)
+    const removed = evict(graph, 'focus', { maxNodes: 25, maxEdges: 1000, targetNodes: 12 })
+    expect(removed).toBe(31 - 12)
+    expect(graph.order).toBe(12)
+    expect(graph.hasNode('focus')).toBe(true)
+  })
+
+  it('drops unreachable nodes first, then keeps the BFS-closest', () => {
+    const graph = bigGraph(12, 4) // hops 1..3
+    // An island with no edges — unreachable, must go first.
+    mergeEgo(graph, ego({ focus: 'island', nodes: [node('island', 0)], edges: [] }))
+    recomputeHops(graph, 'focus')
+    evict(graph, 'focus', { maxNodes: 5, maxEdges: 1000, targetNodes: 5 })
+    expect(graph.hasNode('island')).toBe(false)
+    // BFS here marks everything hop 1 (star) — survivors are focus + 4 nodes.
+    expect(graph.order).toBe(5)
+    expect(graph.hasNode('focus')).toBe(true)
+  })
+
+  it('never evicts pinned nodes and prefers stale ones (LRU tie-break)', () => {
+    const graph = bigGraph(10, 10) // all hop 1
+    graph.setNodeAttribute('n1', 'pinned', true)
+    touch(graph, 'n2') // freshest of the band
+    evict(graph, 'focus', { maxNodes: 4, maxEdges: 1000, targetNodes: 4 })
+    expect(graph.hasNode('n1')).toBe(true)
+    expect(graph.hasNode('n2')).toBe(true)
+  })
+
+  it('enforces the edge cap by dropping far nodes with their incidences', () => {
+    const graph = bigGraph(30)
+    evict(graph, 'focus', { maxNodes: 1000, maxEdges: 20, targetNodes: 1000 })
+    expect(graph.size).toBeLessThanOrEqual(20)
+  })
+})
+
+describe('remainingDegree', () => {
+  it('reports the unloaded incidences and the 200+ cap', () => {
+    expect(remainingDegree({ degree: 18, loadedDeg: 5 })).toBe('13')
+    expect(remainingDegree({ degree: 5, loadedDeg: 5 })).toBeNull()
+    expect(remainingDegree({ degree: 201, loadedDeg: 40 })).toBe('200+')
   })
 })
 
