@@ -396,6 +396,20 @@ is the channel that ships the real UI. Plain `go build` / `go install .../cmd/ct
 need no Bun and produce a binary that serves a 503 placeholder instead of the UI;
 the CLI (`cmd/ctx`) never depends on the frontend at all.
 
+The **Settings area** renders the full [Settings API](#settings-api) catalog
+generically from the registry metadata — one category card per key prefix,
+widgets dispatched by registry type (an unknown future type degrades to a
+read-only rendering), source badge (`default`/`env`/`db`) and env-var name per
+field. Hot and `coupled:embed-cache` keys edit live (save = one `PUT` per
+changed key, a `422` lands inline at exactly that field); restart/coupled keys
+render read-only with the same hint the API's `409` carries. Fields with a
+`db` override get a reset affordance (`DELETE`, revert to env/default).
+Sensitive keys show masked values only and take a secret *name*. The three
+cross-field rules (thresholds, dual-runner `num_ctx`, `blend_weight`×graph)
+are mirrored client-side as inline previews while the server-side candidate
+build stays authoritative. Non-admin keys get a read-only banner — the
+catalog itself is 403 for them.
+
 ```bash
 cd go/web
 bun install                           # once; bun.lock is committed

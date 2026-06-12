@@ -22,11 +22,11 @@ export const RESERVED_SERVER_PREFIXES = [
 /**
  * The four areas (design 04-§2.1) — lazy per area so Settings/Status/Graph/
  * Chat become separate chunks; F5 (sigma+graphology) and F6 only load when
- * entered. Target UIs ship in W4/W6/F5/F6; the placeholders keep structure
- * and navigation real.
+ * entered. Settings is the W4 target UI; Status/Graph/Chat ship in W6/F5/F6,
+ * their placeholders keep structure and navigation real.
  */
 export const areaRoutes = {
-  '/settings': () => import('./settings/Placeholder.svelte'),
+  '/settings': () => import('./settings/SettingsPage.svelte'),
   '/status': () => import('./status/Placeholder.svelte'),
   '/graph': () => import('./graph/Placeholder.svelte'),
   '/chat': () => import('./chat/Placeholder.svelte'),
