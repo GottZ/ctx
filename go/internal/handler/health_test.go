@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 )
 
@@ -46,7 +47,8 @@ func healthTestConfig(embedHost, chatHost, dreamHost string) *config.Config {
 			Host: chatHost, Model: "needle-chat-model-g14", APIKey: "sk-needle-chat-0123456789abcdefg",
 		},
 		Dream: config.DreamConfig{
-			Host: dreamHost, Model: "needle-dream-model-g14", APIKey: "sk-needle-dream-0123456789abcdef",
+			Enabled: true,
+			Host:    dreamHost, Model: "needle-dream-model-g14", APIKey: "sk-needle-dream-0123456789abcdef",
 		},
 	}
 }
@@ -71,6 +73,24 @@ func healthNeedles(cfg *config.Config) []string {
 	}
 	return out
 }
+
+// healthTestPool builds the F3 pool snapshot the health aggregation reads:
+// one backend per historical ping role, each with a distinctive name that
+// must never surface in the public body (extra needles).
+func healthTestPool(embedHost, chatHost, dreamHost string) *backends.Pool {
+	bp := backends.NewPool(nil, nil)
+	bp.SeedSnapshotForTest([]backends.Backend{
+		{ID: "e", Name: "needle-backend-embed", Host: embedHost, Enabled: true,
+			Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed}},
+		{ID: "c", Name: "needle-backend-chat", Host: chatHost, Enabled: true,
+			Trust: backends.TrustFull, Roles: []string{backends.RoleSynthesis}},
+		{ID: "d", Name: "needle-backend-dream", Host: dreamHost, Enabled: true,
+			Trust: backends.TrustFull, Roles: []string{backends.RoleDream}},
+	})
+	return bp
+}
+
+var poolNameNeedles = []string{"needle-backend-embed", "needle-backend-chat", "needle-backend-dream"}
 
 // closedPortHost reserves a loopback port and closes it again: connecting
 // fails with an immediate refusal — the deterministic ping-error fixture.
@@ -146,12 +166,12 @@ func TestHealthShapeInvariant(t *testing.T) {
 		st.p.Store(cfg)
 
 		rec := httptest.NewRecorder()
-		NewHealthHandler(pool, st).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+		NewHealthHandler(pool, st, healthTestPool(backend.URL, backend.URL, backend.URL)).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, want 503 (DB down in unit test)", rec.Code)
 		}
-		assertHealthBody(t, rec.Body.Bytes(), healthNeedles(cfg))
+		assertHealthBody(t, rec.Body.Bytes(), append(healthNeedles(cfg), poolNameNeedles...))
 
 		var resp struct {
 			Services map[string]string `json:"services"`
@@ -171,12 +191,12 @@ func TestHealthShapeInvariant(t *testing.T) {
 		st.p.Store(cfg)
 
 		rec := httptest.NewRecorder()
-		NewHealthHandler(pool, st).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+		NewHealthHandler(pool, st, healthTestPool(down, down, down)).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, want 503", rec.Code)
 		}
-		assertHealthBody(t, rec.Body.Bytes(), healthNeedles(cfg))
+		assertHealthBody(t, rec.Body.Bytes(), append(healthNeedles(cfg), poolNameNeedles...))
 
 		var resp struct {
 			Status   string            `json:"status"`
@@ -194,11 +214,11 @@ func TestHealthShapeInvariant(t *testing.T) {
 	})
 }
 
-// TestHealthPingsSnapshotTargets pins the W7 change itself (Delta 2): the
-// ping targets come from the snapshot taken PER REQUEST. After the store
-// swaps generations, the next health check probes the new hosts — a boot
-// copy (the pre-W7 constructor fields) would keep hitting generation A and
-// fail this test.
+// TestHealthPingsSnapshotTargets pins the per-request snapshot property in
+// its F3-P2 form: the ping targets come from the POOL snapshot taken per
+// request. After a pool reload (here: a seeded swap — exactly what Reload
+// publishes), the next health check probes the new backends; a boot copy
+// would keep hitting generation A and fail this test.
 func TestHealthPingsSnapshotTargets(t *testing.T) {
 	pool := brokenPool(t)
 
@@ -216,7 +236,8 @@ func TestHealthPingsSnapshotTargets(t *testing.T) {
 
 	st := &swapStore{}
 	st.p.Store(healthTestConfig(srvA.URL, srvA.URL, srvA.URL))
-	h := NewHealthHandler(pool, st)
+	bp := healthTestPool(srvA.URL, srvA.URL, srvA.URL)
+	h := NewHealthHandler(pool, st, bp)
 
 	h.Health(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
 	if got := hitsA.Load(); got != 3 {
@@ -226,7 +247,7 @@ func TestHealthPingsSnapshotTargets(t *testing.T) {
 		t.Errorf("generation B pinged before the swap: %d", got)
 	}
 
-	st.p.Store(healthTestConfig(srvB.URL, srvB.URL, srvB.URL))
+	bp.SeedSnapshotForTest(healthTestPool(srvB.URL, srvB.URL, srvB.URL).Snapshot())
 
 	h.Health(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
 	if got := hitsB.Load(); got != 3 {

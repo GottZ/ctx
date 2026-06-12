@@ -33,6 +33,19 @@ type Entry struct {
 	BlockIDs         []string       // source + target/candidate UUIDs for graph-aware queries
 	DreamVersion     *int16         // set for dream pipelines
 	Metadata         map[string]any // free-form; serialised to JSONB
+
+	// F3-P2 backend telemetry (054). BackendName is the backend that
+	// ACTUALLY answered (provenance fix: pre-pool code logged host=primary
+	// even when the fallback served); Metadata["chain"] carries all
+	// attempts. CostUSD stays nil for local backends (OpenRouter fills it
+	// in G29). APIKeyID is the caller attribution (E4, no FK by design).
+	BackendName         string
+	BackendTrust        string
+	BackendLocality     string
+	RequiredSensitivity string
+	Attempt             int
+	CostUSD             *float64
+	APIKeyID            string
 }
 
 // Record persists an entry asynchronously. Safe to call from request paths —
@@ -65,12 +78,17 @@ func insert(pool *pgxpool.Pool, e Entry) {
 			(pipeline, model, host, duration_ms, error,
 			 prompt_tokens, completion_tokens,
 			 request_system, request_user, response_content,
-			 block_ids, dream_version, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			 block_ids, dream_version, metadata,
+			 backend_name, backend_trust, backend_locality,
+			 required_sensitivity, attempt, cost_usd, api_key_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+		        $14, $15, $16, $17, $18, $19, $20)`,
 		e.Pipeline, e.Model, e.Host, e.Duration.Milliseconds(), errStr,
 		nullInt(e.PromptTokens), nullInt(e.CompletionTokens),
 		e.RequestSystem, e.RequestUser, e.ResponseContent,
 		e.BlockIDs, e.DreamVersion, metadata,
+		nullStr(e.BackendName), nullStr(e.BackendTrust), nullStr(e.BackendLocality),
+		nullStr(e.RequiredSensitivity), nullInt16(e.Attempt), e.CostUSD, nullUUID(e.APIKeyID),
 	)
 	if err != nil {
 		slog.Debug("llmlog: insert failed", "pipeline", e.Pipeline, "error", err)
@@ -83,4 +101,24 @@ func nullInt(v int) *int {
 		return nil
 	}
 	return &v
+}
+
+func nullInt16(v int) *int16 {
+	if v == 0 {
+		return nil
+	}
+	s := int16(v) //nolint:gosec // G115: attempt counts are single digits
+	return &s
+}
+
+func nullStr(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
+}
+
+// nullUUID passes the id as *string so pgx casts to UUID; empty stays NULL.
+func nullUUID(v string) *string {
+	return nullStr(v)
 }

@@ -35,7 +35,7 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 	r.Use(handler.Recovery)
 
 	// Health check (no auth, no body)
-	h := handler.NewHealthHandler(pool, cfgStore)
+	h := handler.NewHealthHandler(pool, cfgStore, backendPool)
 	r.Get("/health", h.Health)
 
 	// OAuth 2.1 endpoints for MCP remote auth (no auth middleware — these ARE the auth flow).
@@ -46,7 +46,7 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 	r.Post("/token", oauthH.Token)
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
-	queryHandler := handler.NewQueryHandler(pool, cfgStore)
+	queryHandler := handler.NewQueryHandler(pool, cfgStore, backendPool)
 	storeH := handler.NewStoreHandler(pool, cfgStore)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
 	graphH := handler.NewGraphHandler(pool, cfgStore)

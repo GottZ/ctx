@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -40,13 +39,14 @@ type Message struct {
 
 // Options holds sampling parameters.
 type Options struct {
-	Temperature   float64 `json:"temperature"`
-	TopP          float64 `json:"top_p,omitempty"`
-	TopK          int     `json:"top_k,omitempty"`
-	MinP          float64 `json:"min_p,omitempty"`
-	RepeatPenalty float64 `json:"repeat_penalty,omitempty"`
-	NumPredict    int     `json:"num_predict,omitempty"`
-	NumCtx        int     `json:"num_ctx,omitempty"`
+	Temperature     float64 `json:"temperature"`
+	TopP            float64 `json:"top_p,omitempty"`
+	TopK            int     `json:"top_k,omitempty"`
+	MinP            float64 `json:"min_p,omitempty"`
+	RepeatPenalty   float64 `json:"repeat_penalty,omitempty"`
+	PresencePenalty float64 `json:"presence_penalty,omitempty"`
+	NumPredict      int     `json:"num_predict,omitempty"`
+	NumCtx          int     `json:"num_ctx,omitempty"`
 }
 
 // ChatResponse is the unified response from any provider.
@@ -78,12 +78,19 @@ type ollamaChatResponse struct {
 
 // --- OpenAI wire format ---.
 
+// openAIChatRequest: top_p/top_k/min_p/presence_penalty pass through since
+// F3-P2 — locally the llama.cpp server start compensated for the silent
+// drop, externally NOTHING does, and the wire carries them (OpenRouter A3).
 type openAIChatRequest struct {
 	Model            string             `json:"model"`
 	Messages         []Message          `json:"messages"`
 	Stream           bool               `json:"stream"`
 	MaxTokens        int                `json:"max_tokens,omitempty"`
 	Temperature      float64            `json:"temperature"`
+	TopP             float64            `json:"top_p,omitempty"`
+	TopK             int                `json:"top_k,omitempty"`
+	MinP             float64            `json:"min_p,omitempty"`
+	PresencePenalty  float64            `json:"presence_penalty,omitempty"`
 	FrequencyPenalty float64            `json:"frequency_penalty,omitempty"`
 	ResponseFormat   *respFormat        `json:"response_format,omitempty"`
 	Reasoning        *reasoningOption   `json:"reasoning,omitempty"`
@@ -128,37 +135,9 @@ func ChatJSON(ctx context.Context, b backends.Backend, systemPrompt, userPrompt 
 	return chatWithFormat(ctx, string(b.Protocol), b.Host, b.APIKey, b.Model, b.Think.Ptr(), systemPrompt, userPrompt, opts, "json", timeout)
 }
 
-// chatWithFallback runs a chat call against the primary backend and, when the
-// primary is unreachable at transport level (httpx.IsBackendUnavailable: host
-// down, connection died — never HTTP status errors or deadlines, a
-// slow-but-alive primary keeps the request) and a fallback is configured,
-// replays the identical prompt against the fallback with its own (longer)
-// Timeout — sized for CPU inference, where a 27B synthesis takes minutes; the
-// response-body heartbeat keeps the client connection alive. A fallback with
-// empty Model/Think inherits the primary's (pre-F1 semantics: only
-// host/protocol/key/timeout differ between the legs). fallback == nil or an
-// empty fallback Host disables the second leg (synthesis only — translate
-// stays fail-open, dream waits for the scheduler retry).
-// Returns usedFallback for logging/metrics.
-func chatWithFallback(ctx context.Context, primary backends.Backend, fallback *backends.Backend, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (resp *ChatResponse, usedFallback bool, err error) {
-	resp, err = Chat(ctx, primary, systemPrompt, userPrompt, opts, timeout)
-	if err == nil || fallback == nil || fallback.Host == "" || !httpx.IsBackendUnavailable(err) || ctx.Err() != nil {
-		return resp, false, err
-	}
-	fb := *fallback
-	if fb.Model == "" {
-		fb.Model = primary.Model
-	}
-	if fb.Think == "" {
-		fb.Think = primary.Think
-	}
-	// Backends log through their LogValue (APIKey masked by construction) —
-	// never raw %+v.
-	slog.Warn("llm: primary chat backend unavailable, using fallback",
-		"primary", primary, "fallback", fb, "error", err)
-	resp, err = Chat(ctx, fb, systemPrompt, userPrompt, opts, fb.Timeout)
-	return resp, true, err
-}
+// chatWithFallback died in F3-P2: its single consumer (the synthesize step)
+// walks the pool chain via ChatChain, which generalizes the hardwired
+// two-leg semantics (transport failure ⇒ next backend, HTTP 500 ⇒ stop).
 
 // chatWithFormat is the protocol dispatch shared by Chat and ChatJSON. The
 // exported loose-parameter forms (ChatWithProtocol/ChatJSONWithProtocol) died
@@ -233,9 +212,13 @@ func chatOpenAI(ctx context.Context, host, apiKey, model string, think *bool, sy
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		Stream:      false,
-		MaxTokens:   opts.NumPredict,
-		Temperature: opts.Temperature,
+		Stream:          false,
+		MaxTokens:       opts.NumPredict,
+		Temperature:     opts.Temperature,
+		TopP:            opts.TopP,
+		TopK:            opts.TopK,
+		MinP:            opts.MinP,
+		PresencePenalty: opts.PresencePenalty,
 	}
 	if opts.RepeatPenalty > 0 {
 		reqBody.FrequencyPenalty = opts.RepeatPenalty - 1.0

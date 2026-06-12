@@ -3,7 +3,6 @@ package llm
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -322,15 +321,15 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 }
 
 // Synthesize runs the full LLM synthesis pipeline:
-// filter -> confidence -> low-confidence limiting -> reorder -> prompt -> chat.
+// filter -> confidence -> low-confidence limiting -> reorder -> prompt -> chain.
 // temporalDates is nil for non-temporal queries (date context omitted from prompt).
-// pool may be nil — if provided, the LLM request/response is logged via llmlog.
+// db may be nil — if provided, the LLM request/response is logged via llmlog.
 // settings carries the scoring thresholds + prompt version from the config
-// registry (F1-W2: parameter instead of package state); chat/chatFallback are
-// the wire tuples for the primary and the emergency CPU leg (F1-W3: parameter
-// instead of the former ChatFallback package var; chatFallback nil = no
-// second leg).
-func Synthesize(ctx context.Context, pool *pgxpool.Pool, chat backends.Backend, chatFallback *backends.Backend, settings SynthesisSettings, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
+// registry (F1-W2). Since F3-P2 the backend tuple comes from the pool chain
+// (Chain is the ONLY way to a backend — the trust gate is structurally
+// before prompt transmission); chatWithFallback and its two-leg special case
+// died with this (the chain generalizes them).
+func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, settings SynthesisSettings, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
@@ -371,35 +370,64 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, chat backends.Backend, 
 	// Step 6: Build prompt.
 	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates, settings)
 
-	// Step 7: Call LLM. Falls back to chatFallback (CPU backend) when the
-	// primary is unreachable — "es sollte immer ein Weg zu finden sein".
-	start := time.Now()
-	resp, usedFallback, err := chatWithFallback(ctx, chat, chatFallback, systemPrompt, userPrompt, SynthesisOptions(chat.NumCtx), ChatTimeout)
-	duration := time.Since(start)
-	if usedFallback && err == nil {
-		slog.Info("synthesis served by fallback backend", "duration", duration.Round(time.Millisecond))
+	// Step 7: Resolve the chain and walk it. required is constant
+	// credentials in P2 (conservative; blocks carry no sensitivity column
+	// yet) — behavior-identical because every bootstrap backend is
+	// full-trust. P3 replaces it with max(query, llmSources).
+	required := backends.SensCredentials
+	chain, chainErr := bpool.Chain(backends.RoleSynthesis, required, backends.GamingState{})
+	if chainErr != nil {
+		// No eligible backend: hard error. Trust beats availability — the
+		// per-backend reasons went to slog; the handler keeps the client
+		// body generic (topology stays admin-only).
+		return nil, fmt.Errorf("llm: synthesize: %w", chainErr)
 	}
+	report := func(id string, class backends.ErrClass, ra time.Duration) {
+		if class == backends.ClassOK {
+			bpool.ReportSuccess(id)
+		} else {
+			bpool.ReportFailure(id, class, ra)
+		}
+	}
+
+	start := time.Now()
+	resp, served, attempts, err := ChatChain(ctx, chain, backends.RoleSynthesis,
+		systemPrompt, userPrompt, SynthesisOptions(0), "", report)
+	duration := time.Since(start)
 
 	blockIDs := make([]string, 0, len(llmSources))
 	for _, s := range llmSources {
 		blockIDs = append(blockIDs, s.ID)
 	}
+	// Provenance: the backend that ACTUALLY answered (the pre-pool code
+	// logged host=primary even when the fallback served — the llm.md §5
+	// blind spot this fixes); metadata.chain carries every attempt.
 	entry := llmlog.Entry{
-		Pipeline:      "query-synthesize",
-		Model:         chat.Model,
-		Host:          chat.Host,
-		Duration:      duration,
-		Err:           err,
-		RequestSystem: systemPrompt,
-		RequestUser:   userPrompt,
-		BlockIDs:      blockIDs,
+		Pipeline:            "query-synthesize",
+		Duration:            duration,
+		Err:                 err,
+		RequestSystem:       systemPrompt,
+		RequestUser:         userPrompt,
+		BlockIDs:            blockIDs,
+		RequiredSensitivity: string(required),
+		Attempt:             len(attempts),
+		Metadata:            map[string]any{"chain": attempts},
+	}
+	servedModel := ""
+	if served != nil {
+		servedModel = served.ModelFor(backends.RoleSynthesis).Model
+		entry.Model = servedModel
+		entry.Host = served.Host
+		entry.BackendName = served.Name
+		entry.BackendTrust = string(served.Trust)
+		entry.BackendLocality = served.Locality
 	}
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
 	}
-	llmlog.Record(pool, entry)
+	llmlog.Record(db, entry)
 
 	if err != nil {
 		return nil, fmt.Errorf("llm: synthesize: %w", err)
@@ -414,7 +442,7 @@ func Synthesize(ctx context.Context, pool *pgxpool.Pool, chat backends.Backend, 
 		Sources:     responseSources,
 		Confidence:  confidence,
 		LLMRejected: llmRejected,
-		Model:       chat.Model,
+		Model:       servedModel,
 		EvalCount:   resp.EvalCount,
 	}, nil
 }

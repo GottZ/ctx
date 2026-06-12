@@ -118,19 +118,29 @@ func TestNormalizeTemporalWirePath(t *testing.T) {
 	}
 }
 
-// Synthesize call site (primary leg of chatWithFallback).
+// Synthesize call site (first chain link since F3-P2).
 func TestSynthesizeWirePath(t *testing.T) {
 	settings := SynthesisSettings{ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: PromptVersionV52}
 	sources := []Source{{ID: "1", Title: "t", Category: "c", Content: "body", Score: 0.5, AgeDays: 1}}
 	for _, tc := range wireCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := newWireRecorder(t, "An answer.")
-			res, err := Synthesize(context.Background(), nil, rec.backend(tc.protocol), nil, settings, "q", sources, nil)
+			b := rec.backend(tc.protocol)
+			b.ID, b.Name = "wire", "wire"
+			b.Trust = backends.TrustFull
+			b.Enabled = true
+			b.Roles = []string{backends.RoleSynthesis}
+			bpool := backends.NewPool(nil, nil)
+			bpool.SeedSnapshotForTest([]backends.Backend{b})
+			res, err := Synthesize(context.Background(), nil, bpool, settings, "q", sources, nil)
 			if err != nil {
 				t.Fatalf("Synthesize: %v", err)
 			}
 			if res.Answer != "An answer." {
 				t.Errorf("answer = %q, want the stub answer", res.Answer)
+			}
+			if res.Model != "m" {
+				t.Errorf("model = %q, want the served backend's model", res.Model)
 			}
 			assertWire(t, rec, tc.wantPath, tc.bodyMark)
 		})
@@ -155,16 +165,22 @@ func TestChatJSONWirePath(t *testing.T) {
 	}
 }
 
-// The fallback leg follows the FALLBACK tuple's protocol, not the primary's —
+// Every chain link follows ITS OWN tuple's protocol, not the first link's —
 // prod runs an ollama-or-openai primary with an openai CPU sidecar; mixing
 // the fields up would 404 exactly when the emergency path is needed.
-func TestChatWithFallbackWirePathFollowsFallbackProtocol(t *testing.T) {
+// (Successor of the chatWithFallback wire-path test, F3-P2.)
+func TestChatChainWirePathFollowsEachLinksProtocol(t *testing.T) {
 	rec := newWireRecorder(t, "rescued")
-	fallback := &backends.Backend{Host: rec.srv.URL, Protocol: backends.ProtocolOpenAI, Timeout: 5 * time.Second}
-
-	resp, used, err := chatWithFallback(context.Background(), deadBackend(t), fallback, "sys", "user", Options{NumPredict: 5}, 2*time.Second)
-	if err != nil || !used {
-		t.Fatalf("want fallback used without error, got used=%v err=%v", used, err)
+	chain := []backends.Backend{
+		{ID: "p", Name: "primary", Host: deadURL(t), Protocol: backends.ProtocolOllama,
+			Model: "m", Trust: backends.TrustFull, Enabled: true, Roles: []string{backends.RoleSynthesis}},
+		{ID: "f", Name: "fallback", Host: rec.srv.URL, Protocol: backends.ProtocolOpenAI,
+			Model: "m", Trust: backends.TrustFull, Enabled: true, Roles: []string{backends.RoleSynthesis}},
+	}
+	resp, served, _, err := ChatChain(context.Background(), chain, backends.RoleSynthesis,
+		"sys", "user", Options{NumPredict: 5}, "", nil)
+	if err != nil || served == nil || served.Name != "fallback" {
+		t.Fatalf("want fallback served without error, got served=%v err=%v", served, err)
 	}
 	if resp.Message.Content != "rescued" {
 		t.Errorf("content = %q, want rescued", resp.Message.Content)

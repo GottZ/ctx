@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -28,50 +29,47 @@ func deadURL(t *testing.T) string {
 	return url
 }
 
-// deadBackend returns a primary chat tuple pointing at a closed port.
-func deadBackend(t *testing.T) backends.Backend {
-	t.Helper()
-	return backends.Backend{Host: deadURL(t), Protocol: backends.ProtocolOllama, Model: "m"}
+func chainBackend(id, name, url string) backends.Backend {
+	return backends.Backend{
+		ID: id, Name: name, Host: url, Protocol: backends.ProtocolOllama,
+		Model: "m", Trust: backends.TrustFull, Enabled: true,
+		Roles: []string{backends.RoleSynthesis},
+	}
 }
 
-func TestChatWithFallbackUsesFallbackWhenPrimaryDown(t *testing.T) {
+// TestChatChainFailsOverOnTransport replays the historical fallback
+// semantics against the chain: primary dial-refused ⇒ next backend serves.
+// Provenance: the SERVED backend comes back (the pre-pool code logged
+// host=primary even on fallback — red against that).
+func TestChatChainFailsOverOnTransport(t *testing.T) {
 	var fbHits atomic.Int64
 	fb := httptest.NewServer(ollamaOK("from-fallback", &fbHits))
 	defer fb.Close()
-	fallback := &backends.Backend{Host: fb.URL, Protocol: backends.ProtocolOllama, Timeout: 5 * time.Second}
 
-	resp, used, err := chatWithFallback(context.Background(), deadBackend(t), fallback, "sys", "user", Options{}, 2*time.Second)
+	chain := []backends.Backend{
+		chainBackend("p", "primary", deadURL(t)),
+		chainBackend("f", "fallback", fb.URL),
+	}
+	resp, served, attempts, err := ChatChain(context.Background(), chain,
+		backends.RoleSynthesis, "sys", "user", Options{}, "", nil)
 	if err != nil {
 		t.Fatalf("want fallback success, got %v", err)
 	}
-	if !used {
-		t.Error("usedFallback = false, want true")
+	if served == nil || served.Name != "fallback" {
+		t.Fatalf("provenance = %v, want fallback", served)
 	}
 	if resp.Message.Content != "from-fallback" {
-		t.Errorf("content = %q, want from-fallback", resp.Message.Content)
+		t.Errorf("content = %q", resp.Message.Content)
 	}
-	if fbHits.Load() != 1 {
-		t.Errorf("fallback hits = %d, want 1", fbHits.Load())
-	}
-}
-
-func TestChatWithFallbackErrorsWhenNoFallbackConfigured(t *testing.T) {
-	// nil = no fallback (config.ChatFallbackBackend with empty host) and an
-	// empty-Host tuple must behave identically: primary error passes through.
-	for name, fallback := range map[string]*backends.Backend{"nil": nil, "empty-host": {}} {
-		_, used, err := chatWithFallback(context.Background(), deadBackend(t), fallback, "sys", "user", Options{}, 2*time.Second)
-		if err == nil {
-			t.Fatalf("%s: want error when primary down and no fallback configured", name)
-		}
-		if used {
-			t.Errorf("%s: usedFallback = true, want false", name)
-		}
+	if len(attempts) != 2 || attempts[0].Class != "transport" || attempts[1].Class != "ok" {
+		t.Errorf("attempts = %+v, want [transport ok]", attempts)
 	}
 }
 
-func TestChatWithFallbackSkipsFallbackOnHTTPError(t *testing.T) {
-	// Primary is alive but answers 500 — the server made a statement, a slower
-	// fallback must not second-guess it.
+// TestChatChainStopsOn500 is the doctrine anchor (pre-pool negative test
+// preserved): the server RAN the request and failed at it — a slower next
+// backend must not second-guess a deterministic per-prompt failure.
+func TestChatChainStopsOn500(t *testing.T) {
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -80,14 +78,108 @@ func TestChatWithFallbackSkipsFallbackOnHTTPError(t *testing.T) {
 	var fbHits atomic.Int64
 	fb := httptest.NewServer(ollamaOK("nope", &fbHits))
 	defer fb.Close()
-	fallback := &backends.Backend{Host: fb.URL, Protocol: backends.ProtocolOllama, Timeout: 5 * time.Second}
 
-	primaryB := backends.Backend{Host: primary.URL, Protocol: backends.ProtocolOllama, Model: "m"}
-	_, used, err := chatWithFallback(context.Background(), primaryB, fallback, "sys", "user", Options{}, 2*time.Second)
+	chain := []backends.Backend{
+		chainBackend("p", "primary", primary.URL),
+		chainBackend("f", "fallback", fb.URL),
+	}
+	_, served, attempts, err := ChatChain(context.Background(), chain,
+		backends.RoleSynthesis, "sys", "user", Options{}, "", nil)
 	if err == nil {
 		t.Fatal("want HTTP 500 error passed through")
 	}
-	if used || fbHits.Load() != 0 {
-		t.Errorf("fallback consulted on HTTP error (used=%v hits=%d), want untouched", used, fbHits.Load())
+	if served != nil || fbHits.Load() != 0 {
+		t.Errorf("next backend consulted on HTTP 500 (served=%v hits=%d), want untouched", served, fbHits.Load())
 	}
+	if len(attempts) != 1 || attempts[0].Class != "server_fault" {
+		t.Errorf("attempts = %+v, want [server_fault]", attempts)
+	}
+}
+
+// TestChatChain502GoesNext documents the DELIBERATE semantic extension over
+// the old chatWithFallback (which never escalated any HTTP status):
+// 502/503/504 mean "infrastructure said no" — transient, try the next.
+func TestChatChain502GoesNext(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer primary.Close()
+
+	var fbHits atomic.Int64
+	fb := httptest.NewServer(ollamaOK("served", &fbHits))
+	defer fb.Close()
+
+	chain := []backends.Backend{
+		chainBackend("p", "primary", primary.URL),
+		chainBackend("f", "fallback", fb.URL),
+	}
+	resp, served, _, err := ChatChain(context.Background(), chain,
+		backends.RoleSynthesis, "sys", "user", Options{}, "", nil)
+	if err != nil {
+		t.Fatalf("want 502 escalation to succeed, got %v", err)
+	}
+	if served.Name != "fallback" || resp.Message.Content != "served" || fbHits.Load() != 1 {
+		t.Errorf("502 did not escalate: served=%v hits=%d", served, fbHits.Load())
+	}
+}
+
+// TestChatChainExhausted: every backend down ⇒ the last error surfaces,
+// attempts carry the full walk, every failure is reported into health.
+func TestChatChainExhausted(t *testing.T) {
+	chain := []backends.Backend{
+		chainBackend("a", "a", deadURL(t)),
+		chainBackend("b", "b", deadURL(t)),
+	}
+	var reports atomic.Int64
+	report := func(id string, class backends.ErrClass, _ time.Duration) {
+		if class != backends.ClassOK {
+			reports.Add(1)
+		}
+	}
+	_, served, attempts, err := ChatChain(context.Background(), chain,
+		backends.RoleSynthesis, "sys", "user", Options{}, "", report)
+	if err == nil || served != nil {
+		t.Fatal("want exhaustion error")
+	}
+	if len(attempts) != 2 || reports.Load() != 2 {
+		t.Errorf("attempts=%d reports=%d, want 2/2", len(attempts), reports.Load())
+	}
+}
+
+// TestChatChainParamsMerge: ModelSpec.Params override the code defaults and
+// reach the ollama wire (options.top_p), think travels as params.think, the
+// mapped model name wins over the F1 Model field.
+func TestChatChainParamsMerge(t *testing.T) {
+	var gotBody atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf, _ := io.ReadAll(r.Body)
+		gotBody.Store(string(buf))
+		fmt.Fprint(w, `{"message":{"role":"assistant","content":"ok"},"eval_count":1}`)
+	}))
+	defer srv.Close()
+
+	b := chainBackend("x", "x", srv.URL)
+	b.ModelMap = map[string]backends.ModelSpec{
+		"default": {Model: "mapped-model", Params: map[string]any{"top_p": 0.8, "think": false}},
+	}
+	_, _, _, err := ChatChain(context.Background(), []backends.Backend{b},
+		backends.RoleSynthesis, "sys", "user", Options{Temperature: 0.1}, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := gotBody.Load().(string)
+	for _, want := range []string{`"model":"mapped-model"`, `"top_p":0.8`, `"think":false`} {
+		if !hasSub(body, want) {
+			t.Errorf("wire body lacks %s: %s", want, body)
+		}
+	}
+}
+
+func hasSub(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

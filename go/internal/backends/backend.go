@@ -158,12 +158,16 @@ func (b *Backend) HasRole(role string) bool {
 }
 
 // ModelFor resolves the model spec for a role: exact role key, then
-// "default", then the zero spec (caller decides whether that is an error).
+// "default", then the F1 Model field (config-derived tuples without a map),
+// then the zero spec (caller decides whether that is an error).
 func (b *Backend) ModelFor(role string) ModelSpec {
 	if spec, ok := b.ModelMap[role]; ok {
 		return spec
 	}
-	return b.ModelMap["default"]
+	if spec, ok := b.ModelMap["default"]; ok {
+		return spec
+	}
+	return ModelSpec{Model: b.Model}
 }
 
 // TimeoutFor resolves the per-role timeout override, falling back to def.

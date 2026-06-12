@@ -248,7 +248,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 53 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
+**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 54 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
 
 ### Key environment variables
 
@@ -263,7 +263,7 @@ The `mut` column is the registry's mutability class per key: **hot** keys take e
 | `CTX_SECRETS_KEY` / `CTX_SECRETS_KEY_PREV` | – | restart | Master key for AES-256-GCM-sealed `context_secrets` (64 hex chars, `openssl rand -hex 32`); `_PREV` only while a rotation sweep is pending. Env-only by design — **copy into your password manager**, key loss = total loss (see Sealed secrets & break-glass) |
 | `CTX_EMBED_HOST` / `_PROTOCOL` / `_MODEL` | `ollama` / – | coupled | Embedding pipeline (e.g. qwen3-embedding:8b); `_API_KEY` / `_NUM_CTX` are hot |
 | `CTX_CHAT_HOST` / `_PROTOCOL` / `_MODEL` / `_THINK` / `_NUM_CTX` | `ollama` / – / `false` / `0` | hot | Generator pipeline (RRF synthesis); `_NUM_CTX` (`0`=model default) applies to *all* chat-model calls (translate / temporal-fallback / rerank / synthesis) — set equal to the dream `_NUM_CTX` to share a single Ollama runner |
-| `CTX_CHAT_FALLBACK_HOST` / `_PROTOCOL` / `_API_KEY` / `_TIMEOUT` | empty (off) / `openai` / – / `420` | hot | Emergency chat backend for query-path **synthesis only**, engaged when the primary is unreachable at transport level (host down, connection died) — never on HTTP errors or slow responses. `_TIMEOUT` in seconds, sized for CPU inference (27B ≈ 4.5–5.5 min/answer; the body heartbeat keeps proxies alive). See the `llama-cpu` compose service. Translate stays fail-open, dream waits for its scheduler retry |
+| `CTX_CHAT_FALLBACK_HOST` / `_PROTOCOL` / `_API_KEY` / `_TIMEOUT` | empty (off) / `openai` / – / `420` | hot | **Bootstrap-only since the backend pool (053):** seeds the low-priority `llama-cpu` pool row on the first boot with an empty `context_backends`; afterwards the pool chain owns synthesis failover and these vars are inert. `_TIMEOUT` in seconds becomes the row's per-role timeout, sized for CPU inference (27B ≈ 4.5–5.5 min/answer; the body heartbeat keeps proxies alive). See the `llama-cpu` compose service |
 | `CTX_DREAM_ENABLED` | `false` | restart | Toggle continuous Dream loop |
 | `CTX_DREAM_PARALLELISM` | `1` | restart | Concurrent Dream workers — race-safe via atomic claim |
 | `CTX_DREAM_HOST` / `_PROTOCOL` / `_MODEL` / `_NUM_CTX` | inherits chat | hot | Separate Dream model (e.g. larger, slower) |
@@ -297,10 +297,10 @@ Invalid configurations abort the boot **after logging every finding** with field
 - **Supersedes Filtering** — temporal-gated removal of outdated blocks from query results
 - **Dream-Graph Traversal** (Wave 1, default-on since Wave 3, `CTX_GRAPH_EXPAND_ENABLED`) — query-time 1-hop expansion of the Dream-inferred link graph (topical/factual/causal/recurrent), confidence/type-gated + hub-damped, fused as a scale-invariant post-gravity boost before rerank. Turns the inferred links into positive recall instead of write-only metadata; fully parameterized for A/B sweeps, fail-open
 - **Transport Retry** — all inference HTTP calls (chat ollama/openai, embed, rerank) retry exactly once on transient transport failures (connection reset / EOF before any response bytes) via `internal/httpx`. Covers the keep-alive race with llama.cpp's cpp-httplib servers (~5s idle close vs Go connection reuse); HTTP status errors and context deadlines are never retried. Inference POSTs are stateless, so a replay is safe
-- **CPU Synthesis Fallback** — when the primary chat backend is unreachable at transport level, query-path synthesis replays the identical prompt against `CTX_CHAT_FALLBACK_HOST` (the `llama-cpu` sidecar: same GGUF, CPU speed) with its own long timeout. "Es sollte immer ein Weg zu finden sein" — answers degrade to minutes, never to errors
+- **Synthesis on the pool chain** (054) — query-path synthesis walks the role chain from `context_backends` (priority-ordered, cooldown-sorted; the chain is the ONLY way to a backend, so the trust gate sits structurally before prompt transmission). Transport-class failures advance to the next backend (e.g. the `llama-cpu` sidecar at priority 10: same GGUF, CPU speed, its own per-role timeout); HTTP-500 and attempt timeouts stop the chain — the server *ran* the request, slow-but-alive is not down. The response heartbeat starts whenever synthesis is on (`synthesize != false`), so a CPU-leg answer survives buffering proxies even with rerank off. "Es sollte immer ein Weg zu finden sein" — answers degrade to minutes, never to errors
 - **Streaming Tool-Call Wire** (`llm.ChatStream`) — streaming OpenAI-compatible chat with function calling, the wire layer for the upcoming web-chat harness (no consumer yet). Multi-turn message arrays, per-delta events, index-keyed tool-call assembly, arguments normalisation (llama.cpp JSON-string fragments and whole-object form yield identical calls), hardened against OpenRouter SSE comment frames and mid-stream error events inside HTTP-200 streams; usage falls back to llama.cpp `timings` incl. MTP draft-acceptance
 - **Embed Cache** — content-hash-keyed embedding cache (`context_embed_cache`) to avoid re-embedding identical text across pipelines
-- **LLM Log** — per-call request/response capture (`context_llm_log`) with input/output token counts (Ollama + OpenAI), dream-pipeline version tagging, and parse-format drift tagging (`metadata.parse_format`: array | object | fenced-array | fenced-object) for pipeline debugging + offline benchmark replay
+- **LLM Log** — per-call request/response capture (`context_llm_log`) with input/output token counts (Ollama + OpenAI), dream-pipeline version tagging, and parse-format drift tagging (`metadata.parse_format`: array | object | fenced-array | fenced-object) for pipeline debugging + offline benchmark replay. Since 054 each chained call carries backend provenance: `backend_name`/`backend_trust`/`backend_locality` of the backend that **actually answered** (the pre-pool code logged the primary host even when the fallback served), `attempt` + the full per-attempt `metadata.chain`, and a partial index on `backend_locality='external'` as the egress audit trail; `cost_usd` and `api_key_id` are reserved for the OpenRouter wave and caller attribution
 - **MCP Remote** — Streamable HTTP transport with OAuth 2.1 PKCE for claude.ai/Claude Code integration. Tools: query, store, search, get, recent. Client registration via `ctx mcp add`. Tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18
 
 ## API
@@ -309,7 +309,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings; optional `categories_exclude` / `block_roles_exclude` arrays filter slot-stealers). With the cross-encoder reranker engaged (~80s/query) the response commits `200` up front and streams a whitespace keepalive every 25s so buffering reverse proxies don't hit their read timeout; the body stays valid JSON (leading whitespace, RFC 8259) and a late synthesis failure reports `success:false` inside the 200 body |
+| `POST /api/query` | 4-Way RRF + LLM synthesis (auto-backfills pending embeddings; optional `categories_exclude` / `block_roles_exclude` arrays filter slot-stealers). Whenever synthesis is on (`synthesize != false`, 054 — any pool-chain leg can exceed 60s, not just the ~80s reranker path) the response commits `200` up front and streams a whitespace keepalive every 25s so buffering reverse proxies don't hit their read timeout; the body stays valid JSON (leading whitespace, RFC 8259) and a late synthesis failure reports `success:false` inside the 200 body |
 | `POST /api/store` | Upsert (embedding async via scheduler) |
 | `POST /api/search` | Lightweight search (no LLM) |
 | `GET /api/graph/ego` | Scope-filtered k-hop ego subgraph over dream links (read-only, no LLM — see [Graph API](#graph-api)) |
@@ -320,7 +320,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST /api/digest` | Topic map generation |
 | `POST /api/ingest` | Obsidian vault ingestion |
 | `POST /api/blob/*` | Binary storage (store/fetch/search/manage) |
-| `GET /health` | DB + Ollama connectivity |
+| `GET /health` | DB + pool role reachability, aggregated to anonymous service classes (no backend names, no states — topology is admin-only via `backend-list`) |
 | `POST\|GET\|DELETE /mcp` | MCP Streamable HTTP (remote tool server) |
 | `GET /authorize` | OAuth 2.1 authorization (PKCE) |
 | `POST /token` | OAuth 2.1 token exchange |
@@ -380,13 +380,13 @@ curl -s -X PUT "$CTX/api/settings/rerank.blend_weight" \
 #    "previous":{"value":0.5,"source":"env"},"warnings":[]}
 ```
 
-### Backend pool (F3, migration 053)
+### Backend pool (F3, migrations 053–054)
 
 `context_backends` replaces the hardwired primary+fallback pair with a declarative, role-routed, priority-ordered pool. Each row is one backend: `base_url`, wire `protocol` (`openai`/`ollama`/`rerank`), `provider_class` (`generic`/`llamacpp`/`openrouter`), a **trust level**, an egress `locality`, a `roles` list (`synthesis`, `translate`, `embed`, `rerank`, `dream`, `digest`, `chat`, free-form), a per-role `model_map` (string short form or `{"model":…,"params":{…}}`), per-role `timeouts`, `priority` and `enabled`. Order/priority are pure DATA — no code path references backend names or priority constants.
 
 On first boot with an empty table, ctxd seeds it from the effective config snapshot (settings > env precedence); afterwards the **table is the source of truth** and the `CTX_*_HOST` env vars only feed that one-time bootstrap.
 
-**Trust × sensitivity matrix (fail-closed).** A backend with trust `T` may receive content of sensitivity `S` iff `rank(S) ≤ maxRank(T)` — `full-trust` ≥ credentials, `no-credentials` ≥ personal, `non-personal` ≥ internal, `public` = public only. Empty/unknown sensitivity counts as `credentials`; an empty chain is an error, **never a silent escalation across trust borders**. (Block sensitivity arrives with migration 055; until then nothing consumes the chain.)
+**Trust × sensitivity matrix (fail-closed).** A backend with trust `T` may receive content of sensitivity `S` iff `rank(S) ≤ maxRank(T)` — `full-trust` ≥ credentials, `no-credentials` ≥ personal, `non-personal` ≥ internal, `public` = public only. Empty/unknown sensitivity counts as `credentials`; an empty chain is an error, **never a silent escalation across trust borders**. Query-path synthesis consumes the chain since 054 with a constant required sensitivity of `credentials` (conservative — behavior-identical while every bootstrap backend is full-trust); per-block sensitivity arrives with migration 055.
 
 Manage actions (all **admin-gated, reads included** — the list discloses egress topology):
 

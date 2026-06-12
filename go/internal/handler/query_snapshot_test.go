@@ -105,7 +105,7 @@ func authedQueryRequest(body string) *http.Request {
 func TestHandleQuery_OneSnapshotPerRequest_EarlyExit(t *testing.T) {
 	st := &countingStore{}
 	st.cfg.Store(snapshotTestConfig("http://embed.invalid"))
-	h := NewQueryHandler(nil, st) // pool is never touched before auth
+	h := NewQueryHandler(nil, st, nil) // pool is never touched before auth
 
 	rec := httptest.NewRecorder()
 	h.HandleQuery(rec, httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(`{"query":"alpha"}`)))
@@ -127,7 +127,7 @@ func TestHandleQuery_OneSnapshotPerRequest_DeepPath(t *testing.T) {
 	srv, hits := fakeEmbedServer(t)
 	st := &countingStore{}
 	st.cfg.Store(snapshotTestConfig(srv.URL))
-	h := NewQueryHandler(brokenPool(t), st)
+	h := NewQueryHandler(brokenPool(t), st, nil)
 
 	rec := httptest.NewRecorder()
 	h.HandleQuery(rec, authedQueryRequest(`{"query":"alpha bravo charlie"}`))
@@ -152,7 +152,7 @@ func TestHandleQuery_SnapshotPerRequest_HotFlip(t *testing.T) {
 	srvB, hitsB := fakeEmbedServer(t)
 	st := &countingStore{}
 	st.cfg.Store(snapshotTestConfig(srvA.URL))
-	h := NewQueryHandler(brokenPool(t), st)
+	h := NewQueryHandler(brokenPool(t), st, nil)
 
 	h.HandleQuery(httptest.NewRecorder(), authedQueryRequest(`{"query":"alpha bravo"}`))
 	if hitsA.Load() != 1 || hitsB.Load() != 0 {

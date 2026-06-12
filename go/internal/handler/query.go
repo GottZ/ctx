@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,13 +39,15 @@ var _ ConfigStore = (*config.Store)(nil)
 // gate, the rerank dispatch and every backend tuple read the same generation
 // by construction, and a config replace is live from the next request on.
 type QueryHandler struct {
-	pool *pgxpool.Pool
-	cfg  ConfigStore
+	pool        *pgxpool.Pool
+	cfg         ConfigStore
+	backendPool *backends.Pool
 }
 
-// NewQueryHandler creates a new QueryHandler.
-func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore) *QueryHandler {
-	return &QueryHandler{pool: pool, cfg: cfg}
+// NewQueryHandler creates a new QueryHandler. backendPool feeds the
+// synthesis chain (F3-P2) — Chain() is the only way to a backend tuple.
+func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool) *QueryHandler {
+	return &QueryHandler{pool: pool, cfg: cfg, backendPool: backendPool}
 }
 
 // queryRequest is the JSON body for the query endpoint.
@@ -421,13 +424,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		"request_id", requestID,
 	)
 
-	// RRF (the last 500-capable stage) has succeeded. From here, when the
-	// cross-encoder reranker is engaged the query runs ~80s — start the keepalive
-	// heartbeat so a buffering reverse proxy doesn't time out. It commits the 200
-	// header now; every later return goes through hb.finish (no more status codes).
-	// Gate and dispatch (Step 6b) read the same rerankCfg local — one snapshot
-	// stand by construction.
-	useHeartbeat := rerankCfg.Enabled && rerankCfg.Host != ""
+	// RRF (the last 500-capable stage) has succeeded. From here the keepalive
+	// heartbeat runs UNCONDITIONALLY for the synthesis path (X4, F3-P2): with
+	// pool chains ANY synthesis can exceed 60s (the CPU link runs minutes, a
+	// failover attempt adds latency) — the old rerank-only gate left the
+	// CPU-failover-without-rerank case unprotected against a 60s proxy. It
+	// commits the 200 header now; every later return goes through hb.finish
+	// (errors after commit become success:false in a 200 body). Retrieval-only
+	// requests stay heartbeat-free (fast, no LLM in the path).
+	useHeartbeat := req.Synthesize == nil || *req.Synthesize
 	hb := startHeartbeat(w, useHeartbeat)
 
 	// Step 6a: Post-RRF temporal gravity boost (GottZ Cyclic Phase Model).
@@ -654,12 +659,23 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, chat, cfg.ChatFallbackBackend(), cfg.SynthesisSettings(), originalQuery, sources, temporalDates)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, cfg.SynthesisSettings(), originalQuery, sources, temporalDates)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,
 			"request_id", requestID,
 		)
+		// Empty chain: generic client error — role + required sensitivity are
+		// tenant-own information, the per-backend exclusion reasons (trust,
+		// gaming, disabled) are topology disclosure and stay in slog/admin.
+		var noElig *backends.ErrNoEligibleBackend
+		if errors.As(err, &noElig) {
+			hb.finish(http.StatusServiceUnavailable, map[string]any{
+				"success": false, "error_code": "no_eligible_backend",
+				"role": noElig.Role, "required_sensitivity": string(noElig.Required),
+			})
+			return
+		}
 		// In heartbeat mode the 200 is already committed -> success:false in body.
 		hb.finish(http.StatusInternalServerError, map[string]any{"success": false, "error": "synthesis failed"})
 		return
