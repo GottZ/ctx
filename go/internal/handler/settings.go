@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
@@ -215,6 +216,10 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		Value json.RawMessage `json:"value"`
+		// ConfirmSensitivityDowngrade unlocks LOWERING a guarded
+		// pool.default_*_sensitivity key (F3 §3.5): one wrong write on
+		// 'public' would mark ALL new unclassified blocks external-eligible.
+		ConfirmSensitivityDowngrade bool `json:"confirm_sensitivity_downgrade"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "invalid JSON body"})
@@ -271,6 +276,31 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	previous := map[string]any{
 		"value":  renderEffective(prev, info, prevOverrides),
 		"source": apiSource(prev.Source(key)),
+	}
+
+	// Guarded sensitivity defaults (F3 §3.5): LOWERING needs an explicit
+	// confirm — the value is already type-valid (candidate build passed), so
+	// the rank comparison is sound. Raising stays free.
+	if info.Guard == "sensitivity-downgrade" {
+		curVal, _ := config.RenderValue(prev, key)
+		curSens := backends.Sensitivity(fmt.Sprint(curVal))
+		newSens := backends.Sensitivity(raw)
+		if newSens.Rank() < curSens.Rank() {
+			if !body.ConfirmSensitivityDowngrade {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+					"success": false,
+					"error": fmt.Sprintf(
+						"validation: %s: lowering %s → %s marks new unclassified content as eligible for lower-trust backends — repeat with \"confirm_sensitivity_downgrade\": true",
+						key, curSens, newSens),
+				})
+				return
+			}
+			slog.Warn("settings: confirmed sensitivity default downgrade",
+				"key", key, "from", string(curSens), "to", string(newSens),
+				"request_id", RequestIDFromContext(r.Context()))
+			warnings = append(warnings, fmt.Sprintf(
+				"sensitivity default lowered %s → %s (confirmed)", curSens, newSens))
+		}
 	}
 
 	if err := h.writeSetting(r, key, normalized); err != nil {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -26,6 +27,9 @@ import (
 type MCPConfig struct {
 	Pool         *pgxpool.Pool
 	QueryHandler http.Handler // The full /api/query handler (with scheduler wiring).
+	// Cfg feeds the store tool's sensitivity default
+	// (pool.default_block_sensitivity, F3 §3.5) — one snapshot per call.
+	Cfg ConfigStore
 }
 
 // NewMCPHandler creates a Streamable HTTP handler for the MCP protocol.
@@ -66,6 +70,7 @@ type storeInput struct {
 	Content  string         `json:"content" jsonschema:"block content (max 50KB)"`
 	Tags     []string       `json:"tags,omitempty" jsonschema:"optional tags for filtering"`
 	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"optional metadata object"`
+	Sensitivity string     `json:"sensitivity,omitempty" jsonschema:"content sensitivity for trust gating: credentials|personal|internal|public (default from settings, fail-closed)"`
 }
 
 type searchInput struct {
@@ -195,8 +200,21 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			}, nil, nil
 		}
 
+		// Sensitivity: request > settings default (mirrors /api/store, F3 §3.5).
+		var sens store.SensitivityWrite
+		if cfg.Cfg != nil {
+			sens.Value = cfg.Cfg.Snapshot().Pool.DefaultBlockSensitivity
+		}
+		if input.Sensitivity != "" {
+			s := backends.Sensitivity(input.Sensitivity)
+			if !backends.ValidSensitivity(s) {
+				return errResult("invalid sensitivity: must be credentials|personal|internal|public"), nil, nil
+			}
+			sens = store.SensitivityWrite{Value: s, Manual: true}
+		}
+
 		// Upsert.
-		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, input.Metadata, scope, false)
+		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, input.Metadata, scope, false, sens)
 		if err != nil {
 			return errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
 		}

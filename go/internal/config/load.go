@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -82,8 +83,43 @@ func parserFor(t reflect.Type) parser {
 		return parseLocationValue
 	case typScopes:
 		return parseScopesValue
+	case typSensitivity:
+		return parseSensitivityValue
+	case typScopeFloor:
+		return parseScopeFloorValue
 	}
 	return nil
+}
+
+// parseSensitivityValue admits exactly the four defined levels — the value
+// feeds a numeric rank comparison in the trust gate, so an unknown level is a
+// broken gate, not a "new tenant value" (F3 §2.3a).
+func parseSensitivityValue(raw string, _ any) (any, error) {
+	s := backends.Sensitivity(raw)
+	if !backends.ValidSensitivity(s) {
+		return nil, fmt.Errorf("invalid sensitivity %q (credentials|personal|internal|public)", raw)
+	}
+	return s, nil
+}
+
+// parseScopeFloorValue parses the scope→min-sensitivity JSON map (F3 §2.3d).
+// The value travels as a JSON STRING through the scalar settings layer
+// (consistent with scopes/timezone — the registry is string-sourced). Scope
+// keys are free-form (scope is the generalized VARCHAR); levels are hard.
+func parseScopeFloorValue(raw string, _ any) (any, error) {
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil, fmt.Errorf("invalid scope floor (want JSON object {\"scope\":\"sensitivity\"})")
+	}
+	out := make(ScopeFloor, len(m))
+	for scope, v := range m {
+		s := backends.Sensitivity(v)
+		if !backends.ValidSensitivity(s) {
+			return nil, fmt.Errorf("scope floor %q: invalid sensitivity %q", scope, v)
+		}
+		out[scope] = s
+	}
+	return out, nil
 }
 
 func parseIntValue(raw string, _ any) (any, error) {

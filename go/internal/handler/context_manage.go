@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -358,21 +359,9 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 	}
 
 	// Size limits (match context_store.go limits).
-	if data.Category != nil && len(*data.Category) > 100 {
+	if msg := blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content)); msg != "" {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "Category exceeds 100 characters",
-		})
-		return
-	}
-	if data.Title != nil && len(*data.Title) > 500 {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "Title exceeds 500 characters",
-		})
-		return
-	}
-	if data.Content != nil && len(*data.Content) > 50*1024 {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "Content exceeds 50KB",
+			"success": false, "error": msg,
 		})
 		return
 	}
@@ -420,6 +409,11 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
+	if status, msg := h.applySensitivityGuard(ctx, ar, reqID, resolvedID, &data); msg != "" {
+		writeJSON(w, status, map[string]any{"success": false, "error": msg})
+		return
+	}
+
 	block, needsReEmbed, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, ar.HomeScope)
 	if err != nil {
 		slog.Error("manage: update error", "error", err, "request_id", reqID)
@@ -459,6 +453,52 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		"success": true,
 		"block":   block,
 	})
+}
+
+// strOrEmpty dereferences an optional update field for the shared size check.
+func strOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// applySensitivityGuard enforces the F3 §3.5 downgrade guard on a block
+// update: lowering has the same flow direction as a backend trust elevation —
+// more content may reach less trusted backends — and carries the same
+// friction (confirm flag + metadata audit who/when/from→to). Upgrades stay
+// free. Empty msg = proceed; otherwise (status, msg) is the error response.
+func (h *ManageHandler) applySensitivityGuard(ctx context.Context, ar *auth.AuthResult, reqID, resolvedID string, data *store.UpdateBlockData) (int, string) {
+	if data.Sensitivity == nil {
+		return 0, ""
+	}
+	newSens := backends.Sensitivity(*data.Sensitivity)
+	if !backends.ValidSensitivity(newSens) {
+		return http.StatusBadRequest, "Invalid sensitivity: must be credentials|personal|internal|public"
+	}
+	curSens, found, err := store.GetBlockSensitivity(ctx, h.pool, resolvedID, ar.HomeScope)
+	if err != nil {
+		slog.Error("manage: sensitivity read error", "error", err, "request_id", reqID)
+		return http.StatusInternalServerError, "Internal server error"
+	}
+	if !found || newSens.Rank() >= curSens.Rank() {
+		return 0, ""
+	}
+	if !data.ConfirmSensitivityDowngrade {
+		return http.StatusBadRequest, fmt.Sprintf(
+			"sensitivity downgrade %s → %s opens this block to lower-trust backends — repeat with \"confirm_sensitivity_downgrade\": true",
+			curSens, newSens)
+	}
+	data.SensitivityAudit = map[string]any{
+		"by":   ar.ApiKeyID,
+		"at":   time.Now().UTC().Format(time.RFC3339),
+		"from": string(curSens),
+		"to":   string(newSens),
+	}
+	slog.Warn("manage: confirmed sensitivity downgrade",
+		"block_id", resolvedID, "from", string(curSens), "to", string(newSens),
+		"api_key_id", ar.ApiKeyID, "request_id", reqID)
+	return 0, ""
 }
 
 func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {

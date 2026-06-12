@@ -16,6 +16,7 @@ type KeyInfo struct {
 	Type       string // typeName() — drives the UI widget choice
 	Mutability string // hot | restart | coupled | coupled:embed-cache
 	Sensitive  bool   // secret-class field: values are masked everywhere
+	Guard      string // "" | "sensitivity-downgrade": lowering needs a confirm flag (F3 §3.5)
 	Default    any    // registry default, rendered like RenderValue
 }
 
@@ -23,16 +24,18 @@ type KeyInfo struct {
 // API contract (settings UI widget dispatch) — change them only with the
 // consumers.
 var typeNames = map[reflect.Type]string{
-	typString:   "string",
-	typInt:      "int",
-	typFloat:    "float",
-	typBool:     "bool",
-	typProtocol: "protocol",
-	typThink:    "think",
-	typDuration: "seconds",
-	typHours:    "hours",
-	typLocation: "timezone",
-	typScopes:   "scopes",
+	typString:      "string",
+	typInt:         "int",
+	typFloat:       "float",
+	typBool:        "bool",
+	typProtocol:    "protocol",
+	typThink:       "think",
+	typDuration:    "seconds",
+	typHours:       "hours",
+	typLocation:    "timezone",
+	typScopes:      "scopes",
+	typSensitivity: "sensitivity",
+	typScopeFloor:  "scope_floor",
 }
 
 // keyInfos builds the exported view once. Registry order == struct order, the
@@ -46,6 +49,7 @@ var keyInfos = sync.OnceValue(func() []KeyInfo {
 			Type:       typeNames[e.typ],
 			Mutability: e.Mut,
 			Sensitive:  e.Secret != "",
+			Guard:      e.Guard,
 			Default:    renderField(e, reflect.ValueOf(e.defVal), SurfaceAPI),
 		})
 	}

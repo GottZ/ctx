@@ -51,7 +51,7 @@ func TestChatChainFailsOverOnTransport(t *testing.T) {
 		chainBackend("f", "fallback", fb.URL),
 	}
 	resp, served, attempts, err := ChatChain(context.Background(), chain,
-		backends.RoleSynthesis, "sys", "user", Options{}, "", nil)
+		backends.RoleSynthesis, "sys", "user", Options{}, "", 0, nil)
 	if err != nil {
 		t.Fatalf("want fallback success, got %v", err)
 	}
@@ -84,7 +84,7 @@ func TestChatChainStopsOn500(t *testing.T) {
 		chainBackend("f", "fallback", fb.URL),
 	}
 	_, served, attempts, err := ChatChain(context.Background(), chain,
-		backends.RoleSynthesis, "sys", "user", Options{}, "", nil)
+		backends.RoleSynthesis, "sys", "user", Options{}, "", 0, nil)
 	if err == nil {
 		t.Fatal("want HTTP 500 error passed through")
 	}
@@ -114,7 +114,7 @@ func TestChatChain502GoesNext(t *testing.T) {
 		chainBackend("f", "fallback", fb.URL),
 	}
 	resp, served, _, err := ChatChain(context.Background(), chain,
-		backends.RoleSynthesis, "sys", "user", Options{}, "", nil)
+		backends.RoleSynthesis, "sys", "user", Options{}, "", 0, nil)
 	if err != nil {
 		t.Fatalf("want 502 escalation to succeed, got %v", err)
 	}
@@ -137,7 +137,7 @@ func TestChatChainExhausted(t *testing.T) {
 		}
 	}
 	_, served, attempts, err := ChatChain(context.Background(), chain,
-		backends.RoleSynthesis, "sys", "user", Options{}, "", report)
+		backends.RoleSynthesis, "sys", "user", Options{}, "", 0, report)
 	if err == nil || served != nil {
 		t.Fatal("want exhaustion error")
 	}
@@ -163,7 +163,7 @@ func TestChatChainParamsMerge(t *testing.T) {
 		"default": {Model: "mapped-model", Params: map[string]any{"top_p": 0.8, "think": false}},
 	}
 	_, _, _, err := ChatChain(context.Background(), []backends.Backend{b},
-		backends.RoleSynthesis, "sys", "user", Options{Temperature: 0.1}, "", nil)
+		backends.RoleSynthesis, "sys", "user", Options{Temperature: 0.1}, "", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

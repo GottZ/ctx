@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // germanStopwords are the 50 most common German words used for language detection.
@@ -97,10 +98,23 @@ func DetectGerman(query string) bool {
 	return false
 }
 
-// TranslateQuery translates a German query to English over the chat backend.
-// Returns the original query unchanged if translation fails validation.
-func TranslateQuery(ctx context.Context, chat backends.Backend, query string) (string, error) {
-	resp, err := Chat(ctx, chat, translationSystemPrompt, query, TranslateOptions(chat.NumCtx), TranslateTimeout)
+// TranslateQuery translates a German query to English over the translate
+// chain (F3-P3: Chain is the only way to a backend; the prompt is Q-only, so
+// required = query sensitivity). Writes a slim llmlog row per wire call.
+// Returns the original query unchanged if translation fails validation; an
+// empty chain surfaces as *backends.ErrNoEligibleBackend and the caller
+// fail-opens (skip the step, keep the original query).
+func TranslateQuery(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, querySens backends.Sensitivity, query string) (string, error) {
+	resp, err := ChainCall{
+		Pool:       bpool,
+		Role:       backends.RoleTranslate,
+		Required:   querySens,
+		Pipeline:   "query-translate",
+		System:     translationSystemPrompt,
+		User:       query,
+		Opts:       TranslateOptions(0),
+		DefTimeout: TranslateTimeout,
+	}.Do(ctx, db)
 	if err != nil {
 		return query, fmt.Errorf("llm: translate: %w", err)
 	}

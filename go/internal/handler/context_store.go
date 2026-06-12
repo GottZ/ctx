@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -31,6 +32,11 @@ type storeRequest struct {
 	Tags     []string       `json:"tags"`
 	Metadata map[string]any `json:"metadata"`
 	Scope    string         `json:"scope"`
+	// Sensitivity classifies the block for trust gating (F3 §3.5). Absent ⇒
+	// settings default pool.default_block_sensitivity (source='default');
+	// present ⇒ source='manual'. On upsert-conflict an explicit value applies
+	// upgrade-only — downgrades go through the confirm-gated update path.
+	Sensitivity string `json:"sensitivity,omitempty"`
 }
 
 // HandleStore processes upsert requests with auto-embedding.
@@ -64,22 +70,17 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Size limits (HTTP 413).
-	if len(req.Category) > 100 {
+	if msg := blockSizeLimit(req.Category, req.Title, req.Content); msg != "" {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "Category exceeds 100 characters",
+			"success": false, "error": msg,
 		})
 		return
 	}
-	if len(req.Title) > 500 {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "Title exceeds 500 characters",
-		})
-		return
-	}
-	if len(req.Content) > 50*1024 {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "Content exceeds 50KB",
-		})
+
+	// Sensitivity: request > settings default (F3 §2.3b precedence).
+	sens, sensErr := storeSensitivity(h.cfg.Snapshot().Pool.DefaultBlockSensitivity, req.Sensitivity)
+	if sensErr != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": sensErr})
 		return
 	}
 
@@ -140,7 +141,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Execute upsert.
-	block, err := store.UpsertBlock(ctx, h.pool, req.Category, req.Title, req.Content, req.Tags, req.Metadata, writeScope, scopeExplicit)
+	block, err := store.UpsertBlock(ctx, h.pool, req.Category, req.Title, req.Content, req.Tags, req.Metadata, writeScope, scopeExplicit, sens)
 	if err != nil {
 		slog.Error("store: upsert error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -180,10 +181,47 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Embedding generated async by scheduler backfill loop.
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"success": true,
 		"block":   block,
-	})
+	}
+	if sens.Manual && block.Sensitivity != string(sens.Value) {
+		// Upsert-conflict downgrade rejected (upgrade-only write path): say so
+		// instead of silently keeping the higher level.
+		resp["warnings"] = []string{fmt.Sprintf(
+			"sensitivity %s not applied: existing block is %s — downgrades need manage update with confirm_sensitivity_downgrade",
+			sens.Value, block.Sensitivity)}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// blockSizeLimit checks the shared write-path size caps. Empty = within
+// limits; otherwise the 413 message. Update path checks the same caps on its
+// optional fields.
+func blockSizeLimit(category, title, content string) string {
+	switch {
+	case len(category) > 100:
+		return "Category exceeds 100 characters"
+	case len(title) > 500:
+		return "Title exceeds 500 characters"
+	case len(content) > 50*1024:
+		return "Content exceeds 50KB"
+	}
+	return ""
+}
+
+// storeSensitivity resolves the write intent: explicit request value (manual,
+// validated against the hard level set) over the settings default. Non-empty
+// errMsg = 400.
+func storeSensitivity(def backends.Sensitivity, requested string) (store.SensitivityWrite, string) {
+	if requested == "" {
+		return store.SensitivityWrite{Value: def}, ""
+	}
+	s := backends.Sensitivity(requested)
+	if !backends.ValidSensitivity(s) {
+		return store.SensitivityWrite{}, "Invalid sensitivity: must be credentials|personal|internal|public"
+	}
+	return store.SensitivityWrite{Value: s, Manual: true}, ""
 }
 
 // contains checks if a string slice contains a value.

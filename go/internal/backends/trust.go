@@ -101,6 +101,13 @@ func (t Trust) Rank() int {
 	return maxRank(t)
 }
 
+// Rank exposes the sensitivity rank for downgrade comparisons (a falling
+// rank = more content may flow to less-trusted backends = the confirm-gated
+// direction, F3 §3.5). Empty/unknown stays rank 3 (fail-closed).
+func (s Sensitivity) Rank() int {
+	return sensRank(s)
+}
+
 // ValidSensitivity reports whether s is one of the four defined levels.
 // Note the asymmetry to sensRank: unknown values FAIL validation at the API
 // boundary but act as credentials once inside the gate.

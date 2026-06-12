@@ -20,6 +20,7 @@ import (
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/rrf"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -65,6 +66,12 @@ type queryRequest struct {
 	// false = retrieval-only: return the post-rerank sources without the LLM
 	// synthesis call. Deterministic + fast, for the A/B sweep / eval harness.
 	Synthesize *bool `json:"synthesize,omitempty"`
+	// Sensitivity classifies the QUERY TEXT for trust gating (F3 §2.3b).
+	// Precedence: request > settings key pool.default_query_sensitivity
+	// (initial personal — queries are user-typed and rarely carry secrets;
+	// credentials would lock translate/synthesis failover for harmless
+	// questions, decision F3-E2). MCP query inherits via delegation.
+	Sensitivity string `json:"sensitivity,omitempty"`
 }
 
 // queryResponse is the JSON response from the query endpoint.
@@ -230,7 +237,6 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// from this one frozen generation — heartbeat gate and rerank dispatch can
 	// never see two different config stands within one request.
 	cfg := h.cfg.Snapshot()
-	chat := cfg.ChatBackend()
 	rerankCfg := cfg.RerankRRF()
 	graphCfg := cfg.GraphRRF()
 
@@ -284,6 +290,21 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Query sensitivity: request > setting (F3 §2.3b). Feeds every chain
+	// resolution on this path — translate/temporal/embed are Q-only, rerank
+	// and synthesis max it with their block sets.
+	querySens := cfg.Pool.DefaultQuerySensitivity
+	if req.Sensitivity != "" {
+		s := backends.Sensitivity(req.Sensitivity)
+		if !backends.ValidSensitivity(s) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false, "error": "Invalid sensitivity: must be credentials|personal|internal|public",
+			})
+			return
+		}
+		querySens = s
+	}
+
 	// Clamp limit: 1-20, default 5.
 	limit := 5
 	if req.Limit != nil {
@@ -310,8 +331,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("german detected, translating",
 			"request_id", requestID,
 		)
-		translatedQuery, err := llm.TranslateQuery(ctx, chat, query)
+		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, querySens, query)
 		if err != nil {
+			// Fail-open (design 03 §2.4 translate row) — covers the empty
+			// chain (trust/gaming/disabled) AND exhausted attempts alike.
 			slog.Warn("translation failed, using original",
 				"error", err,
 				"request_id", requestID,
@@ -346,7 +369,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	} else if llm.HasTemporalIntent(originalQuery) {
 		// LLM fallback: query seems temporal but rules couldn't parse it.
 		var err error
-		temporalResult, err = llm.NormalizeTemporal(ctx, chat, originalQuery, now)
+		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, querySens, originalQuery, now)
 		if err != nil {
 			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,
@@ -368,15 +391,32 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	embedQuery := searchQuery
 
 	// Step 3d: Backfill any blocks with missing embeddings before searching.
-	// Ensures freshly stored blocks are immediately searchable.
-	embedB := cfg.EmbedBackend()
-	if backfilled := h.backfillPending(ctx, embedB); backfilled > 0 {
+	// Ensures freshly stored blocks are immediately searchable. Per block the
+	// chain resolves with THAT block's floor-adjusted sensitivity (F3 §2.3
+	// gate table, embed-backfill row).
+	floor := cfg.Pool.ScopeSensitivityFloor
+	if backfilled := h.backfillPending(ctx, floor); backfilled > 0 {
 		slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
 	}
 
 	// Step 4: Embed the search query with query prefix. Cached by (hash(prefix||text), model) —
 	// repeated queries (debug sessions, recurring lookups) serve from cache in a single UPDATE.
-	embedding, err := embedcache.Embed(ctx, h.pool, embedB, embedQuery, embed.PrefixQuery)
+	// The chain resolves with the query sensitivity; empty/exhausted chain
+	// keeps today's semantics: query 500, embed is health-mandatory.
+	embChain, err := h.backendPool.Chain(backends.RoleEmbed, querySens, backends.GamingState{})
+	if err != nil {
+		slog.Error("embedding failed: no eligible backend", "error", err, "request_id", requestID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "embedding failed"})
+		return
+	}
+	embStart := time.Now()
+	embedding, embServed, embAttempts, embWired, err := embedcache.EmbedChain(
+		ctx, h.pool, embChain, backends.RoleEmbed, embedQuery, embed.PrefixQuery,
+		embedcache.ReportFunc(llm.PoolReporter(h.backendPool)))
+	if embWired {
+		// Slim row per actual wire call — cache hits are no egress (§2.7.3).
+		h.logEmbedWire(ctx, "query-embed", querySens, embServed, embAttempts, time.Since(embStart), nil, err)
+	}
 	if err != nil {
 		slog.Error("embedding failed",
 			"error", err,
@@ -558,22 +598,83 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 6b: Rerank (skipped if disabled or fewer than 3 results). Dispatch on
-	// RerankCfg.Host: set => the local cross-encoder sidecar (Wave 2, up to
-	// MaxDocs=50 candidates, the final arbiter of graph-injected neighbors);
-	// empty => the LLM-as-judge on the chat model (up to 15). Both fail open —
-	// on error the pre-rerank order is kept.
+	// Step 6a-sens: batch sensitivity lookup over ALL candidate IDs — not
+	// top-N: filterSuperseded (6d) and graph placement advance stragglers
+	// from beyond any top-N window into the final llmSources; their zero
+	// value would silently act as credentials (over-blocking) or, without
+	// the unknown rule, as public (a downgrade inside the gate). Lookup
+	// breadth ≠ gate breadth: this ANNOTATES every candidate, the synthesis
+	// gate MEASURES only the final set (F3 §2.3). Lookup miss ⇒ credentials;
+	// a failed lookup leaves all zero values = credentials (fail-closed,
+	// local full-trust backends keep serving).
+	sensIDs := make([]string, len(results))
+	for i := range results {
+		sensIDs[i] = results[i].ID
+	}
+	if sensMap, serr := store.FetchSensitivities(ctx, h.pool, sensIDs); serr != nil {
+		slog.Warn("sensitivity lookup failed; candidates act as credentials",
+			"error", serr, "request_id", requestID)
+	} else {
+		annotateSensitivities(results, sensMap, floor)
+	}
+
+	// Step 6b: Rerank (skipped if disabled or fewer than 3 results). Dispatch
+	// on the pool routing table (F3 §2.5): a backend carrying the rerank role
+	// => cross-encoder sidecar (up to MaxDocs=50 candidates, the final
+	// arbiter of graph-injected neighbors); role absent => the LLM-as-judge
+	// over the synthesis chain (up to 15). Both fail open — on error or empty
+	// chain the pre-rerank order is kept (the judge is a configuration
+	// alternative, not a failover target).
 	if rerankCfg.Enabled {
-		if rerankCfg.Host != "" {
-			results, err = rrf.RerankCrossEncoder(ctx, rerankCfg.Host, rerankCfg.APIKey, rerankCfg.Model, rerankCfg.MaxDocs, rerankCfg.BlendWeight, originalQuery, results)
+		if h.backendPool.RoleConfigured(backends.RoleRerank) {
+			maxDocs := rerankCfg.MaxDocs
+			if maxDocs <= 0 {
+				maxDocs = rrf.RerankCrossEncoderMaxDocs
+			}
+			required := rerankRequired(querySens, results, maxDocs)
+			if chain, cerr := h.backendPool.Chain(backends.RoleRerank, required, backends.GamingState{}); cerr != nil {
+				slog.Warn("rerank chain empty, using original order",
+					"error", cerr, "request_id", requestID)
+			} else {
+				b := chain[0]
+				model := b.ModelFor(backends.RoleRerank).Model
+				rrStart := time.Now()
+				reranked, rerr := rrf.RerankCrossEncoder(ctx, b.Host, b.APIKey, model, maxDocs, rerankCfg.BlendWeight, originalQuery, results)
+				if rerr == nil {
+					results = reranked
+					h.backendPool.ReportSuccess(b.ID)
+				} else {
+					h.backendPool.ReportFailure(b.ID, backends.Classify(rerr, b.ProviderClass), 0)
+					slog.Warn("rerank failed, using original order",
+						"error", rerr, "request_id", requestID)
+				}
+				docCount := len(results)
+				if docCount > maxDocs {
+					docCount = maxDocs
+				}
+				llmlog.Record(h.pool, llmlog.Entry{
+					Pipeline:            "query-rerank",
+					Model:               model,
+					Host:                b.Host,
+					Duration:            time.Since(rrStart),
+					Err:                 rerr,
+					BlockIDs:            sensIDs[:docCount],
+					RequiredSensitivity: string(required),
+					Attempt:             1,
+					BackendName:         b.Name,
+					BackendTrust:        string(b.Trust),
+					BackendLocality:     b.Locality,
+				})
+			}
 		} else {
-			results, err = rrf.Rerank(ctx, chat, originalQuery, results)
-		}
-		if err != nil {
-			slog.Warn("rerank failed, using original order",
-				"error", err,
-				"request_id", requestID,
-			)
+			required := rerankRequired(querySens, results, rrf.RerankMaxDocs)
+			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, required, originalQuery, results)
+			if err != nil {
+				slog.Warn("rerank failed, using original order",
+					"error", err,
+					"request_id", requestID,
+				)
+			}
 		}
 	}
 
@@ -618,6 +719,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			RerankScore:      r.RerankScore,
 			RRFScoreOriginal: r.RRFScoreOriginal,
 			AgeDays:          ageDays,
+			Sensitivity:      r.Sensitivity,
 		}
 	}
 
@@ -659,7 +761,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, cfg.SynthesisSettings(), originalQuery, sources, temporalDates)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,
@@ -697,9 +799,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		Translated: translated,
 	}
 
-	// Set model even when LLM was skipped (for consistency).
+	// Set model even when LLM was skipped (for consistency): the model that
+	// WOULD answer = highest-priority enabled synthesis backend in the pool.
 	if resp.Model == "" {
-		resp.Model = chat.Model
+		resp.Model = h.backendPool.PrimaryModel(backends.RoleSynthesis)
 	}
 
 	slog.Info("query pipeline complete",
@@ -757,22 +860,40 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // backfillPending generates embeddings for any blocks that don't have one yet.
 // Called before search to ensure freshly stored blocks are immediately findable.
 // Returns the number of blocks backfilled (0 in the common case).
-// The embed tuple comes from the caller's request snapshot (F1-W4).
-// Uses a TX with FOR UPDATE SKIP LOCKED per block to avoid races with the scheduler.
-func (h *QueryHandler) backfillPending(ctx context.Context, embedB backends.Backend) int {
+// Since F3-P3 the chain resolves PER BLOCK with that block's floor-adjusted
+// sensitivity (gate table embed-backfill row) and each wire call leaves a
+// slim llmlog row with the block id.
+func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor) int {
 	count := 0
 	for {
-		var blockID, title, content string
+		var blockID, title, content, sens, scope string
 		err := h.pool.QueryRow(ctx,
-			`SELECT id, title, content FROM context_blocks
+			`SELECT id, title, content, sensitivity, scope FROM context_blocks
 			WHERE embedding IS NULL AND NOT is_archived
-			LIMIT 1`).Scan(&blockID, &title, &content)
+			LIMIT 1`).Scan(&blockID, &title, &content, &sens, &scope)
 		if err != nil {
 			break // No more pending blocks (or error).
 		}
 
+		required := floor.Apply(backends.Sensitivity(sens), scope)
+		chain, cerr := h.backendPool.Chain(backends.RoleEmbed, required, backends.GamingState{})
+		if cerr != nil {
+			// Trust/gaming-empty chain: the block stays unembedded (visible
+			// via FTS only) — never escalate across the trust border.
+			slog.Warn("query backfill: no eligible embed backend", "block_id", blockID, "error", cerr)
+			break
+		}
+
 		embedText := title + "\n\n" + content
-		vec, err := embed.Embed(ctx, embedB, embedText, embed.PrefixDocument)
+		start := time.Now()
+		// pool=nil: document embeddings land in the block row, not the cache
+		// (today's semantics — the cache is for repeated query/keyword text).
+		vec, served, attempts, wired, err := embedcache.EmbedChain(
+			ctx, nil, chain, backends.RoleEmbed, embedText, embed.PrefixDocument,
+			embedcache.ReportFunc(llm.PoolReporter(h.backendPool)))
+		if wired {
+			h.logEmbedWire(ctx, "embed-backfill", required, served, attempts, time.Since(start), []string{blockID}, err)
+		}
 		if err != nil {
 			slog.Warn("query backfill: embed failed", "block_id", blockID, "error", err)
 			break // Embed backend likely unavailable, don't retry.
@@ -784,6 +905,60 @@ func (h *QueryHandler) backfillPending(ctx context.Context, embedB backends.Back
 		count++
 	}
 	return count
+}
+
+// annotateSensitivities writes the floor-adjusted sensitivity onto EVERY
+// result — not top-N: filterSuperseded and graph placement advance stragglers
+// from beyond any window into the final llmSources (F3 §2.3). IDs missing
+// from the map (deleted/archived between RRF and lookup) act as credentials
+// (fail-closed).
+func annotateSensitivities(results []rrf.SearchResult, sensMap map[string]store.BlockSensitivity, floor config.ScopeFloor) {
+	for i := range results {
+		bs, ok := sensMap[results[i].ID]
+		if !ok {
+			results[i].Sensitivity = backends.SensCredentials
+			continue
+		}
+		results[i].Sensitivity = floor.Apply(bs.Sensitivity, bs.Scope)
+	}
+}
+
+// rerankRequired folds the operation requirement of the rerank stage:
+// max(query sensitivity, the candidates that actually go to the reranker —
+// the top maxDocs, not the full 200-candidate set).
+func rerankRequired(querySens backends.Sensitivity, results []rrf.SearchResult, maxDocs int) backends.Sensitivity {
+	n := len(results)
+	if n > maxDocs {
+		n = maxDocs
+	}
+	parts := make([]backends.Sensitivity, 0, n+1)
+	parts = append(parts, querySens)
+	for i := 0; i < n; i++ {
+		parts = append(parts, results[i].Sensitivity)
+	}
+	return backends.MaxSensitivity(parts...)
+}
+
+// logEmbedWire records one slim llmlog row for an embed wire-call sequence
+// (no bodies; block_ids where the call embedded block content — §2.7.3).
+// served is nil when every attempt failed.
+func (h *QueryHandler) logEmbedWire(_ context.Context, pipeline string, required backends.Sensitivity, served *backends.Backend, attempts int, duration time.Duration, blockIDs []string, err error) {
+	entry := llmlog.Entry{
+		Pipeline:            pipeline,
+		Duration:            duration,
+		Err:                 err,
+		BlockIDs:            blockIDs,
+		RequiredSensitivity: string(required),
+		Attempt:             attempts,
+	}
+	if served != nil {
+		entry.Model = served.ModelFor(backends.RoleEmbed).Model
+		entry.Host = served.Host
+		entry.BackendName = served.Name
+		entry.BackendTrust = string(served.Trust)
+		entry.BackendLocality = served.Locality
+	}
+	llmlog.Record(h.pool, entry)
 }
 
 // filterSuperseded removes blocks from results that are superseded by another block

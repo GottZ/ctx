@@ -299,6 +299,43 @@ func (p *Pool) Chain(role string, required Sensitivity, gaming GamingState) ([]B
 	return eligible, nil
 }
 
+// RoleConfigured reports whether ANY row carries the role, regardless of
+// enabled/trust/cooldown. The rerank dispatch needs the distinction
+// "role absent from the routing table" (⇒ LLM-judge substitute, a
+// configuration alternative) vs "chain empty by trust/gaming/disabled"
+// (⇒ fail-open to RRF order, design 03 §2.5).
+func (p *Pool) RoleConfigured(role string) bool {
+	snap := p.snap.Load()
+	for i := range snap.backends {
+		if snap.backends[i].HasRole(role) {
+			return true
+		}
+	}
+	return false
+}
+
+// PrimaryModel names the model of the highest-priority enabled backend for a
+// role — "the model that WOULD answer". Used for the response model field
+// when the LLM step is skipped (score filter); empty when none qualifies.
+func (p *Pool) PrimaryModel(role string) string {
+	snap := p.snap.Load()
+	best := -1
+	model := ""
+	for i := range snap.backends {
+		b := &snap.backends[i]
+		if !b.Enabled || !b.HasRole(role) {
+			continue
+		}
+		if b.Priority > best {
+			if m := b.ModelFor(role).Model; m != "" {
+				best = b.Priority
+				model = m
+			}
+		}
+	}
+	return model
+}
+
 // cooldownSet snapshots which of the given backends are in cooldown at now.
 func (p *Pool) cooldownSet(list []Backend, now time.Time) map[string]bool {
 	out := make(map[string]bool, len(list))

@@ -195,6 +195,12 @@ type Source struct {
 	RerankScore      *float64 `json:"rerank_score,omitempty"`
 	RRFScoreOriginal *float64 `json:"rrf_score_original,omitempty"`
 	AgeDays          int     `json:"age_days"`
+
+	// Sensitivity is the scope-floor-adjusted classification from the batch
+	// lookup (F3 §2.3). Feeds the synthesis trust gate over the FINAL prompt
+	// set; never serialized (the zero value of a forgotten assignment acts as
+	// credentials inside the gate, fail-closed).
+	Sensitivity backends.Sensitivity `json:"-"`
 }
 
 // SynthesisResult holds the outcome of the LLM synthesis step.
@@ -321,7 +327,8 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 }
 
 // Synthesize runs the full LLM synthesis pipeline:
-// filter -> confidence -> low-confidence limiting -> reorder -> prompt -> chain.
+// filter -> confidence -> low-confidence limiting -> reorder -> gate ->
+// prompt -> chain.
 // temporalDates is nil for non-temporal queries (date context omitted from prompt).
 // db may be nil — if provided, the LLM request/response is logged via llmlog.
 // settings carries the scoring thresholds + prompt version from the config
@@ -329,7 +336,10 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // (Chain is the ONLY way to a backend — the trust gate is structurally
 // before prompt transmission); chatWithFallback and its two-leg special case
 // died with this (the chain generalizes them).
-func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, settings SynthesisSettings, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
+// querySens is the request-level classification (request > setting >
+// default, F3 §2.3b); P3 replaced the P2 credentials constant with
+// max(querySens, sensitivity of the FINAL prompt set).
+func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
@@ -367,14 +377,24 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, set
 	// Step 5: Lost-in-middle reordering.
 	llmSources = LostInMiddleReorder(llmSources)
 
+	// Step 5b: Operation requirement = max(query, FINAL prompt set). Measured
+	// over llmSources AFTER low-confidence limiting/truncation, NOT the 200
+	// RRF candidates — a credentials block on rank 180 that never enters the
+	// prompt must not lock the external failover (F3 §2.3, lookup breadth ≠
+	// gate breadth). A zero-value Sensitivity on any source counts as
+	// credentials (fail-closed).
+	parts := make([]backends.Sensitivity, 0, len(llmSources)+1)
+	parts = append(parts, querySens)
+	for _, s := range llmSources {
+		parts = append(parts, s.Sensitivity)
+	}
+	required := backends.MaxSensitivity(parts...)
+
 	// Step 6: Build prompt.
 	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates, settings)
 
-	// Step 7: Resolve the chain and walk it. required is constant
-	// credentials in P2 (conservative; blocks carry no sensitivity column
-	// yet) — behavior-identical because every bootstrap backend is
-	// full-trust. P3 replaces it with max(query, llmSources).
-	required := backends.SensCredentials
+	// Step 7: Resolve the chain and walk it. The gate is structural: a
+	// backend the trust matrix excludes is not in the chain.
 	chain, chainErr := bpool.Chain(backends.RoleSynthesis, required, backends.GamingState{})
 	if chainErr != nil {
 		// No eligible backend: hard error. Trust beats availability — the
@@ -382,17 +402,9 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, set
 		// body generic (topology stays admin-only).
 		return nil, fmt.Errorf("llm: synthesize: %w", chainErr)
 	}
-	report := func(id string, class backends.ErrClass, ra time.Duration) {
-		if class == backends.ClassOK {
-			bpool.ReportSuccess(id)
-		} else {
-			bpool.ReportFailure(id, class, ra)
-		}
-	}
-
 	start := time.Now()
 	resp, served, attempts, err := ChatChain(ctx, chain, backends.RoleSynthesis,
-		systemPrompt, userPrompt, SynthesisOptions(0), "", report)
+		systemPrompt, userPrompt, SynthesisOptions(0), "", ChatTimeout, PoolReporter(bpool))
 	duration := time.Since(start)
 
 	blockIDs := make([]string, 0, len(llmSources))
@@ -413,6 +425,15 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, set
 		Attempt:             len(attempts),
 		Metadata:            map[string]any{"chain": attempts},
 	}
+	if required == backends.SensCredentials {
+		// E4/8b body slim: credentials-class rows keep the full telemetry +
+		// block_ids (the egress trace stays ID-exact) but drop the prompt
+		// bodies — no plaintext shadow corpus of the hottest tier in
+		// context_llm_log. Trade-off (user decision E4): loses debug
+		// plaintext for local credentials syntheses.
+		entry.RequestSystem = ""
+		entry.RequestUser = ""
+	}
 	servedModel := ""
 	if served != nil {
 		servedModel = served.ModelFor(backends.RoleSynthesis).Model
@@ -423,7 +444,11 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, set
 		entry.BackendLocality = served.Locality
 	}
 	if resp != nil {
-		entry.ResponseContent = resp.Message.Content
+		if required != backends.SensCredentials {
+			// 8b body slim: the synthesized answer derives from the
+			// credentials blocks — slim with the request bodies.
+			entry.ResponseContent = resp.Message.Content
+		}
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
 	}

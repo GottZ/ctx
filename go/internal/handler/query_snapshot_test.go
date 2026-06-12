@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -32,20 +33,29 @@ func (s *countingStore) Snapshot() *config.Config {
 	return s.cfg.Load()
 }
 
-// snapshotTestConfig builds a minimal request-path config. Hosts use
-// RFC-2606 documentation names except the embed host, which points at the
-// test's fake server — the only backend this path actually contacts.
-func snapshotTestConfig(embedHost string) *config.Config {
+// snapshotTestConfig builds a minimal request-path config. Since F3-P3 the
+// embed tuple comes from the backend POOL, not the config snapshot — the
+// config carries only the request-path tuning surface here.
+func snapshotTestConfig() *config.Config {
 	return &config.Config{
 		Chat: config.ChatConfig{
 			Host: "http://chat.invalid", Protocol: "ollama", Model: "test-chat",
 		},
-		Embed: config.EmbedConfig{
-			Host: embedHost, Protocol: "ollama", Model: "test-embed",
-		},
 		// Rerank/Graph stay zero-valued = disabled (no heartbeat, no sidecar).
 		Query: config.QueryConfig{Timezone: time.UTC}, // RateLimitRead 0 = disabled
 	}
+}
+
+// embedPool seeds a single-row pool carrying the embed role against the
+// given host (the F3-P3 source of the embed tuple).
+func embedPool(host string) *backends.Pool {
+	bpool := backends.NewPool(nil, nil)
+	bpool.SeedSnapshotForTest([]backends.Backend{{
+		ID: "e", Name: "test-embed", Host: host, Protocol: backends.ProtocolOllama,
+		Model: "test-embed", Trust: backends.TrustFull, Enabled: true, Priority: 1,
+		Roles: []string{backends.RoleEmbed},
+	}})
+	return bpool
 }
 
 // fakeEmbedServer serves the Ollama /api/embed wire shape with a vector that
@@ -104,7 +114,7 @@ func authedQueryRequest(body string) *http.Request {
 // FIRST statement of HandleQuery, ahead of parse and auth.
 func TestHandleQuery_OneSnapshotPerRequest_EarlyExit(t *testing.T) {
 	st := &countingStore{}
-	st.cfg.Store(snapshotTestConfig("http://embed.invalid"))
+	st.cfg.Store(snapshotTestConfig())
 	h := NewQueryHandler(nil, st, nil) // pool is never touched before auth
 
 	rec := httptest.NewRecorder()
@@ -119,15 +129,15 @@ func TestHandleQuery_OneSnapshotPerRequest_EarlyExit(t *testing.T) {
 }
 
 // The deep path: auth -> rate limit -> translate gate -> temporal rules ->
-// backfill (fails open) -> query embed (against the snapshot's embed host) ->
-// rrf.Search (500 on the broken pool). Still exactly one snapshot — and the
-// embed call landing on the fake server proves the tuple came from the
-// snapshot, not from any constructor copy.
+// backfill (fails open) -> query embed (against the POOL's embed row, F3-P3)
+// -> rrf.Search (500 on the broken pool). Still exactly one config snapshot —
+// and the embed call landing on the fake server proves the tuple came from
+// the pool chain, not from any constructor copy.
 func TestHandleQuery_OneSnapshotPerRequest_DeepPath(t *testing.T) {
 	srv, hits := fakeEmbedServer(t)
 	st := &countingStore{}
-	st.cfg.Store(snapshotTestConfig(srv.URL))
-	h := NewQueryHandler(brokenPool(t), st, nil)
+	st.cfg.Store(snapshotTestConfig())
+	h := NewQueryHandler(brokenPool(t), st, embedPool(srv.URL))
 
 	rec := httptest.NewRecorder()
 	h.HandleQuery(rec, authedQueryRequest(`{"query":"alpha bravo charlie"}`))
@@ -143,23 +153,30 @@ func TestHandleQuery_OneSnapshotPerRequest_DeepPath(t *testing.T) {
 	}
 }
 
-// Hot-flip regression: a new generation published between two requests must
-// be live for the second one — one snapshot per request, none cached across
-// requests. The pre-W4 handler held boot copies as fields; under this test it
-// would keep embedding against generation A forever.
+// Hot-flip regression: a new POOL generation published between two requests
+// must be live for the second one — the chain resolves per request from the
+// current pool snapshot, never from a constructor copy (the F3 analog of the
+// F1-W4 config invariant; the pool's own reload path is NOTIFY + synchronous
+// post-mutation reload, G25).
 func TestHandleQuery_SnapshotPerRequest_HotFlip(t *testing.T) {
 	srvA, hitsA := fakeEmbedServer(t)
 	srvB, hitsB := fakeEmbedServer(t)
 	st := &countingStore{}
-	st.cfg.Store(snapshotTestConfig(srvA.URL))
-	h := NewQueryHandler(brokenPool(t), st, nil)
+	st.cfg.Store(snapshotTestConfig())
+	bpool := embedPool(srvA.URL)
+	h := NewQueryHandler(brokenPool(t), st, bpool)
 
 	h.HandleQuery(httptest.NewRecorder(), authedQueryRequest(`{"query":"alpha bravo"}`))
 	if hitsA.Load() != 1 || hitsB.Load() != 0 {
 		t.Fatalf("request 1 must embed against generation A: hits A=%d B=%d", hitsA.Load(), hitsB.Load())
 	}
 
-	st.cfg.Store(snapshotTestConfig(srvB.URL)) // publish generation B
+	// Publish generation B (the seeded analog of a backend-update + reload).
+	bpool.SeedSnapshotForTest([]backends.Backend{{
+		ID: "e", Name: "test-embed", Host: srvB.URL, Protocol: backends.ProtocolOllama,
+		Model: "test-embed", Trust: backends.TrustFull, Enabled: true, Priority: 1,
+		Roles: []string{backends.RoleEmbed},
+	}})
 
 	h.HandleQuery(httptest.NewRecorder(), authedQueryRequest(`{"query":"alpha bravo"}`))
 	if hitsA.Load() != 1 || hitsB.Load() != 1 {

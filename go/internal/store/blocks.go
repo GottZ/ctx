@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
@@ -24,8 +25,32 @@ type Block struct {
 	Scope       string            `json:"scope"`
 	ContentHash string            `json:"content_hash,omitempty"`
 	GuardStatus string            `json:"guard_status,omitempty"`
+	// Sensitivity + SensitivitySource (M055, F3-P3): trust-gate classification.
+	// Only the paths that RETURN the columns fill them (upsert/update/get);
+	// older list shapes leave them empty (omitempty).
+	Sensitivity       string    `json:"sensitivity,omitempty"`
+	SensitivitySource string    `json:"sensitivity_source,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
+}
+
+// SensitivityWrite carries the sensitivity intent of one block write.
+// Value "" = leave the column to the DDL default (internal pipeline callers:
+// digest index, dream report, ingest — G41 audits them out of the default).
+// Manual=true = user-explicit classification: sensitivity_source='manual',
+// and on upsert-conflict the value applies only UPGRADING (a write-path
+// downgrade would bypass the confirm-gated update path, F3 §3.5).
+type SensitivityWrite struct {
+	Value  backends.Sensitivity
+	Manual bool
+}
+
+// sensRankSQL renders the sensitivity rank of a SQL expression — must mirror
+// backends.sensRank (credentials=3 … public=0).
+func sensRankSQL(expr string) string {
+	return fmt.Sprintf(
+		`(CASE %s WHEN 'credentials' THEN 3 WHEN 'personal' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)`,
+		expr)
 }
 
 // BlockPreview is a compact search result (no full content).
@@ -136,7 +161,9 @@ func HashNOOPCheck(ctx context.Context, pool *pgxpool.Pool, content, scope, cate
 // UpsertBlock inserts or updates a block by (category, title).
 // content_hash is a GENERATED COLUMN and must not be set manually.
 // If scopeExplicit is true, scope is included in the ON CONFLICT UPDATE.
-func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool) (*Block, error) {
+// sens carries the sensitivity intent (F3-P3): zero value = DDL default on
+// insert, untouched on update; Manual applies upgrade-only on conflict.
+func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite) (*Block, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -144,31 +171,51 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 		metadata = map[string]any{}
 	}
 
-	var query string
+	insertCols := "category, tags, title, content, metadata, scope"
+	insertVals := "$1, $2, $3, $4, $5, $6"
+	args := []any{category, tags, title, content, metadata, scope}
+
+	setClauses := []string{
+		"content = EXCLUDED.content",
+		"tags = EXCLUDED.tags",
+		"metadata = EXCLUDED.metadata",
+		"updated_at = now()",
+	}
 	if scopeExplicit {
-		query = `INSERT INTO context_blocks (category, tags, title, content, metadata, scope)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (category, title, scope) WHERE NOT is_archived DO UPDATE SET
-				content = EXCLUDED.content,
-				tags = EXCLUDED.tags,
-				metadata = EXCLUDED.metadata,
-				scope = EXCLUDED.scope,
-				updated_at = now()
-			RETURNING id, category, tags, title, content, metadata, scope, created_at, updated_at`
-	} else {
-		query = `INSERT INTO context_blocks (category, tags, title, content, metadata, scope)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (category, title, scope) WHERE NOT is_archived DO UPDATE SET
-				content = EXCLUDED.content,
-				tags = EXCLUDED.tags,
-				metadata = EXCLUDED.metadata,
-				updated_at = now()
-			RETURNING id, category, tags, title, content, metadata, scope, created_at, updated_at`
+		setClauses = append(setClauses, "scope = EXCLUDED.scope")
+	}
+	if sens.Value != "" {
+		source := "default"
+		if sens.Manual {
+			source = "manual"
+		}
+		insertCols += ", sensitivity, sensitivity_source"
+		insertVals += ", $7, $8"
+		args = append(args, string(sens.Value), source)
+		if sens.Manual {
+			// Upgrade-only on conflict: a write-path downgrade would bypass
+			// the confirm-gated update path (F3 §3.5). >= so re-asserting the
+			// same level still stamps source='manual'.
+			upgrades := fmt.Sprintf("%s >= %s",
+				sensRankSQL("EXCLUDED.sensitivity"), sensRankSQL("context_blocks.sensitivity"))
+			setClauses = append(setClauses,
+				fmt.Sprintf("sensitivity = CASE WHEN %s THEN EXCLUDED.sensitivity ELSE context_blocks.sensitivity END", upgrades),
+				fmt.Sprintf("sensitivity_source = CASE WHEN %s THEN 'manual' ELSE context_blocks.sensitivity_source END", upgrades),
+			)
+		}
 	}
 
+	query := fmt.Sprintf(`INSERT INTO context_blocks (%s)
+		VALUES (%s)
+		ON CONFLICT (category, title, scope) WHERE NOT is_archived DO UPDATE SET
+			%s
+		RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at`,
+		insertCols, insertVals, strings.Join(setClauses, ",\n\t\t\t"))
+
 	b := &Block{}
-	err := pool.QueryRow(ctx, query, category, tags, title, content, metadata, scope).Scan(
-		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope, &b.CreatedAt, &b.UpdatedAt,
+	err := pool.QueryRow(ctx, query, args...).Scan(
+		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
+		&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: upsert block: %w", err)
@@ -302,12 +349,13 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []string) (*Block, error) {
 	b := &Block{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, category, tags, title, content, metadata, scope, created_at, updated_at
+		`SELECT id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at
 		 FROM context_blocks
 		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
 		 LIMIT 1`,
 		id, readScopes,
-	).Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
+	).Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
+		&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -343,6 +391,17 @@ type UpdateBlockData struct {
 	Tags     []string        `json:"tags,omitempty"`
 	Metadata map[string]any  `json:"metadata,omitempty"`
 	Scope    *string         `json:"scope,omitempty"`
+	// Sensitivity reclassifies the block (sensitivity_source becomes
+	// 'manual'). A DOWNGRADE below the current level requires
+	// ConfirmSensitivityDowngrade — same friction as a backend trust
+	// elevation, it opens the same flow (F3 §3.5). The handler enforces the
+	// confirm; the store applies.
+	Sensitivity                 *string `json:"sensitivity,omitempty"`
+	ConfirmSensitivityDowngrade bool    `json:"confirm_sensitivity_downgrade,omitempty"`
+	// SensitivityAudit is set by the handler on a confirmed downgrade
+	// (who/when/from→to) and merged into metadata.sensitivity_audit. Never
+	// client-supplied (json:"-").
+	SensitivityAudit map[string]any `json:"-"`
 }
 
 // UpdateBlock updates specific fields of a block. Only home_scope blocks.
@@ -374,23 +433,45 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		args = append(args, data.Tags)
 		argIdx++
 	}
+	// metadata expression: exactly ONE assignment per column is legal in SQL,
+	// so the guard_checked_at strip and the sensitivity_audit merge compose
+	// into a single expression.
+	metaExpr := ""
 	if data.Metadata != nil {
 		if contentChanged {
 			// Merge provided metadata AND strip guard_checked_at in one expression.
-			setClauses = append(setClauses, fmt.Sprintf("metadata = $%d::jsonb - 'guard_checked_at'", argIdx))
+			metaExpr = fmt.Sprintf("$%d::jsonb - 'guard_checked_at'", argIdx)
 		} else {
-			setClauses = append(setClauses, fmt.Sprintf("metadata = $%d", argIdx))
+			metaExpr = fmt.Sprintf("$%d::jsonb", argIdx)
 		}
 		args = append(args, data.Metadata)
 		argIdx++
 	} else if contentChanged {
 		// No explicit metadata update — strip guard_checked_at from existing metadata.
-		setClauses = append(setClauses, "metadata = metadata - 'guard_checked_at'")
+		metaExpr = "metadata - 'guard_checked_at'"
+	}
+	if data.SensitivityAudit != nil {
+		if metaExpr == "" {
+			metaExpr = "COALESCE(metadata, '{}'::jsonb)"
+		}
+		metaExpr = fmt.Sprintf("(%s) || jsonb_build_object('sensitivity_audit', $%d::jsonb)", metaExpr, argIdx)
+		args = append(args, data.SensitivityAudit)
+		argIdx++
+	}
+	if metaExpr != "" {
+		setClauses = append(setClauses, "metadata = "+metaExpr)
 	}
 	if data.Scope != nil {
 		setClauses = append(setClauses, fmt.Sprintf("scope = $%d", argIdx))
 		args = append(args, *data.Scope)
 		argIdx++
+	}
+	if data.Sensitivity != nil {
+		// Handler has validated the level and enforced the downgrade confirm.
+		setClauses = append(setClauses, fmt.Sprintf("sensitivity = $%d", argIdx))
+		args = append(args, *data.Sensitivity)
+		argIdx++
+		setClauses = append(setClauses, "sensitivity_source = 'manual'")
 	}
 
 	if len(setClauses) == 0 {
@@ -409,13 +490,14 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = $%d AND NOT is_archived
-		 RETURNING id, category, tags, title, content, metadata, scope, created_at, updated_at`,
+		 RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at`,
 		strings.Join(setClauses, ", "), idIdx, scopeIdx,
 	)
 
 	b := &Block{}
 	err := pool.QueryRow(ctx, query, args...).Scan(
-		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope, &b.CreatedAt, &b.UpdatedAt,
+		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
+		&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, nil

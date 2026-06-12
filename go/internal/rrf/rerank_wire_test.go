@@ -41,9 +41,17 @@ func TestRerankWirePath(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			chat := backends.Backend{Host: srv.URL, Protocol: tc.protocol, Model: "m"}
+			// F3-P3: the judge resolves over Chain("synthesis", …) — seed a
+			// single-backend pool with the test server as the synthesis row.
+			bpool := backends.NewPool(nil, nil)
+			bpool.SeedSnapshotForTest([]backends.Backend{{
+				ID: "judge", Name: "judge", Host: srv.URL, Protocol: tc.protocol,
+				Trust: backends.TrustFull, Enabled: true, Priority: 1,
+				Roles:    []string{backends.RoleSynthesis},
+				ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
+			}})
 			results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
-			out, err := Rerank(context.Background(), chat, "q", results)
+			out, err := Rerank(context.Background(), nil, bpool, backends.SensPublic, "q", results)
 			if err != nil {
 				t.Fatalf("Rerank: %v", err)
 			}

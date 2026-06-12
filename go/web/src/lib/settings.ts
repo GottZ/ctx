@@ -22,12 +22,14 @@ export function widgetFor(type: string): Widget {
       return 'number'
     case 'protocol':
     case 'think':
+    case 'sensitivity':
       return 'select'
     case 'string':
     case 'seconds':
     case 'hours':
     case 'timezone':
     case 'scopes':
+    case 'scope_floor':
       return 'text'
     default:
       return 'readonly'
@@ -44,6 +46,11 @@ export function selectOptions(type: string): string[] {
       return ['ollama', 'openai']
     case 'think':
       return ['true', 'false']
+    case 'sensitivity':
+      // Mirror of backends.Sensitivity; LOWERING a guarded pool.default_*
+      // key 422s without the confirm flag (F3 §3.5) — the error surfaces
+      // on the field, the confirmed path is the CLI (--confirm-sensitivity-downgrade).
+      return ['credentials', 'personal', 'internal', 'public']
     default:
       return []
   }
@@ -60,6 +67,8 @@ export function typeHint(type: string): string | null {
       return 'comma-separated, e.g. private,shared'
     case 'timezone':
       return 'IANA name, e.g. Europe/Berlin'
+    case 'scope_floor':
+      return 'JSON map, e.g. {"friend-scope":"personal"}'
     default:
       return null
   }

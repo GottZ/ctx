@@ -143,11 +143,20 @@ func TestRegistrySupersededSet(t *testing.T) {
 // maps to a CTX_*/CONTEXT_*/LISTEN_ADDR var and the mapping is unique
 // (buildRegistry rejects duplicates; this guards the convention).
 func TestRegistryEnvNamespace(t *testing.T) {
+	// Settings-only keys (env:"-"): born in F2's context_settings, never
+	// migrated from env vars. scheduler.home_scope (F1) + the F3-P3 trust-
+	// gating policy surface.
+	settingsOnly := map[string]bool{
+		"scheduler.home_scope":            true,
+		"pool.default_query_sensitivity":  true,
+		"pool.default_block_sensitivity":  true,
+		"pool.scope_sensitivity_floor":    true,
+	}
 	seen := map[string]string{}
 	for _, e := range registry() {
 		if e.EnvVar == "-" {
-			if e.Key != "scheduler.home_scope" {
-				t.Errorf("unexpected env-less field %s (settings-only is an F2 feature)", e.Key)
+			if !settingsOnly[e.Key] {
+				t.Errorf("unexpected env-less field %s (settings-only keys are pinned here)", e.Key)
 			}
 			continue
 		}

@@ -128,7 +128,8 @@ func settingsCmd(getClient func() (*Client, error)) *cobra.Command {
 			return runSettingsGet(getClient, args[0])
 		},
 	})
-	cmd.AddCommand(&cobra.Command{
+	var confirmDowngrade bool
+	setCmd := &cobra.Command{
 		Use:   "set <key> [value]",
 		Short: "Set a runtime override (value as argument or via stdin)",
 		Args:  cobra.RangeArgs(1, 2),
@@ -142,9 +143,12 @@ func settingsCmd(getClient func() (*Client, error)) *cobra.Command {
 			if value == "" {
 				return fmt.Errorf("usage: ctx settings set <key> <value>  (or pipe the value via stdin)")
 			}
-			return runSettingsSet(getClient, args[0], value)
+			return runSettingsSet(getClient, args[0], value, confirmDowngrade)
 		},
-	})
+	}
+	setCmd.Flags().BoolVar(&confirmDowngrade, "confirm-sensitivity-downgrade", false,
+		"Confirm LOWERING a guarded pool.default_*_sensitivity key (F3 §3.5)")
+	cmd.AddCommand(setCmd)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "unset <key>",
 		Short: "Remove the override — the key reverts to env/default",
@@ -268,13 +272,16 @@ func compactRaw(raw json.RawMessage) string {
 	return string(raw)
 }
 
-func runSettingsSet(getClient func() (*Client, error), key, value string) error {
+func runSettingsSet(getClient func() (*Client, error), key, value string, confirmDowngrade bool) error {
 	c, err := getClient()
 	if err != nil {
 		return err
 	}
-	resp, _, err := c.Do(http.MethodPut, "/api/settings/"+key,
-		map[string]any{"value": toJSONValue(value)})
+	body := map[string]any{"value": toJSONValue(value)}
+	if confirmDowngrade {
+		body["confirm_sensitivity_downgrade"] = true
+	}
+	resp, _, err := c.Do(http.MethodPut, "/api/settings/"+key, body)
 	if err != nil {
 		return err
 	}

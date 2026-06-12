@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Context Store Benchmark Test Suite
-# Usage: ./test.sh              — runs T01-T12 + T19-T21 (system tests only)
+# Usage: ./test.sh              — runs T01-T12 + T19-T22 (system tests only)
 #        ./test.sh --with-ollama — runs all tests (adds T13-T18 retrieval + MCP)
 #
 # Test IDs are append-only: T19 (graph) and T20 (settings) live in Part 1
@@ -233,16 +233,17 @@ fi
 
 # T07 SCHEMA_INTEGRITY — counts exclude manual snapshot tables (name pattern "*_snapshot_*")
 # which accumulate over time (e.g. context_dream_links_snapshot_20260423_prev5).
-# 36 columns since M044 (ts_de/ts_en bilingual generated tsvectors) + M049
-# (dream_eval_count back-off counter). 18 tables since M051/M052/M053
+# 39 columns since M055 (sensitivity + sensitivity_source + sensitivity_audited_at,
+# F3-P3 trust gating); 36 was M044 (ts_de/ts_en) + M049 (dream_eval_count).
+# 18 tables since M051/M052/M053
 # (context_settings, context_settings_audit, context_secrets, context_backends).
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "18" ]] && [[ "$col_count" == "36" ]]; then
+if [[ "$table_count" == "18" ]] && [[ "$col_count" == "39" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 18 tables + 36 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 18 tables + 39 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
@@ -403,6 +404,35 @@ else
     fail "$T" "expected >=3 bootstrapped backends, got ${t21_count:-unparseable}"
   else
     pass "$T (403 enforced, $t21_count pool rows)"
+  fi
+fi
+
+# T22 BLOCK_SENSITIVITY (F3-P3/M055) — store with explicit sensitivity stamps
+# source=manual, an unconfirmed downgrade is rejected (the confirm-gated
+# direction), a confirmed one applies + audits. No LLM: pure write surface.
+T="T22 BLOCK_SENSITIVITY"
+t22_block=$(api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
+  '{"category":"reference","title":"__t22_sensitivity_probe","content":"sensitivity gate probe '"$(date +%s)"'","sensitivity":"personal"}' 15)
+t22_id=$(echo "$t22_block" | python3 -c "import sys,json; d=json.load(sys.stdin); b=d.get('block') or {}; print(b.get('id','') if d.get('success') else '')" 2>/dev/null)
+t22_sens=$(echo "$t22_block" | python3 -c "import sys,json; b=json.load(sys.stdin).get('block') or {}; print(b.get('sensitivity',''), b.get('sensitivity_source',''))" 2>/dev/null)
+if [[ -z "$t22_id" ]]; then
+  fail "$T" "store with sensitivity failed: $(echo "$t22_block" | head -c 200)"
+elif [[ "$t22_sens" != "personal manual" ]]; then
+  fail "$T" "expected sensitivity='personal manual', got '$t22_sens'"
+else
+  t22_deny=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
+    '{"action":"update","id":"'"$t22_id"'","data":{"sensitivity":"public"}}' 15)
+  t22_deny_ok=$(echo "$t22_deny" | python3 -c "import sys,json; d=json.load(sys.stdin); print('denied' if not d.get('success') and 'confirm_sensitivity_downgrade' in d.get('error','') else 'leaked')" 2>/dev/null)
+  t22_conf=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
+    '{"action":"update","id":"'"$t22_id"'","data":{"sensitivity":"public","confirm_sensitivity_downgrade":true}}' 15)
+  t22_conf_state=$(echo "$t22_conf" | python3 -c "import sys,json; d=json.load(sys.stdin); b=d.get('block') or {}; a=(b.get('metadata') or {}).get('sensitivity_audit') or {}; print(b.get('sensitivity',''), 'audited' if a.get('from')=='personal' and a.get('to')=='public' else 'unaudited')" 2>/dev/null)
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"delete","id":"'"$t22_id"'"}' 15 >/dev/null 2>&1
+  if [[ "$t22_deny_ok" != "denied" ]]; then
+    fail "$T" "unconfirmed downgrade not rejected: $(echo "$t22_deny" | head -c 200)"
+  elif [[ "$t22_conf_state" != "public audited" ]]; then
+    fail "$T" "confirmed downgrade expected 'public audited', got '$t22_conf_state'"
+  else
+    pass "$T (manual stamp, downgrade guard + audit)"
   fi
 fi
 

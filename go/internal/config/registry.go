@@ -19,6 +19,7 @@ type entry struct {
 	Secret     string // "" | "fp" | "presence"
 	Strict     bool   // parse:"strict" — malformed value is a boot abort
 	Superseded string // "" | "f3:context_backends" (lifetime marker)
+	Guard      string // "" | "sensitivity-downgrade" — lowering needs a confirm flag (F3 §3.5)
 
 	defRaw string       // raw default tag value
 	defVal any          // default parsed through the same typed parser
@@ -27,16 +28,18 @@ type entry struct {
 }
 
 var (
-	typString   = reflect.TypeOf("")
-	typInt      = reflect.TypeOf(int(0))
-	typFloat    = reflect.TypeOf(float64(0))
-	typBool     = reflect.TypeOf(false)
-	typProtocol = reflect.TypeOf(backends.Protocol(""))
-	typThink    = reflect.TypeOf(backends.ThinkMode(""))
-	typDuration = reflect.TypeOf(time.Duration(0))
-	typHours    = reflect.TypeOf(Hours(0))
-	typLocation = reflect.TypeOf((*time.Location)(nil))
-	typScopes   = reflect.TypeOf([]string(nil))
+	typString      = reflect.TypeOf("")
+	typInt         = reflect.TypeOf(int(0))
+	typFloat       = reflect.TypeOf(float64(0))
+	typBool        = reflect.TypeOf(false)
+	typProtocol    = reflect.TypeOf(backends.Protocol(""))
+	typThink       = reflect.TypeOf(backends.ThinkMode(""))
+	typDuration    = reflect.TypeOf(time.Duration(0))
+	typHours       = reflect.TypeOf(Hours(0))
+	typLocation    = reflect.TypeOf((*time.Location)(nil))
+	typScopes      = reflect.TypeOf([]string(nil))
+	typSensitivity = reflect.TypeOf(backends.Sensitivity(""))
+	typScopeFloor  = reflect.TypeOf(ScopeFloor(nil))
 )
 
 var validMut = map[string]bool{
@@ -151,6 +154,10 @@ func buildEntry(owner string, f reflect.StructField, key string, path []int) (en
 	if parse != "" && parse != "strict" && parse != "safe" {
 		return entry{}, fmt.Errorf("%s: invalid parse tag %q", loc, parse)
 	}
+	guard := f.Tag.Get("guard")
+	if guard != "" && guard != "sensitivity-downgrade" {
+		return entry{}, fmt.Errorf("%s: invalid guard tag %q", loc, guard)
+	}
 
 	e := entry{
 		Key:        key,
@@ -159,6 +166,7 @@ func buildEntry(owner string, f reflect.StructField, key string, path []int) (en
 		Secret:     secret,
 		Strict:     parse == "strict",
 		Superseded: f.Tag.Get("superseded"),
+		Guard:      guard,
 		defRaw:     def,
 		path:       path,
 		typ:        f.Type,

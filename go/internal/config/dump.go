@@ -98,6 +98,13 @@ func renderField(e entry, v reflect.Value, surface Surface) any {
 		return string(val)
 	case backends.ThinkMode:
 		return string(val)
+	case backends.Sensitivity:
+		return string(val)
+	case ScopeFloor:
+		if val == nil {
+			return ScopeFloor{}
+		}
+		return val // JSON object; empty default renders as {}
 	default:
 		return val // string, int, float64, bool, []string render natively
 	}

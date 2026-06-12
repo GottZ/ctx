@@ -82,12 +82,24 @@ func assertWire(t *testing.T, rec *wireRecorder, wantPath, bodyMark string) {
 	}
 }
 
+// translatePool seeds a single-backend pool carrying the translate role —
+// F3-P3 turned TranslateQuery/NormalizeTemporal into chain consumers.
+func translatePool(b backends.Backend) *backends.Pool {
+	b.ID, b.Name = "wire", "wire"
+	b.Trust = backends.TrustFull
+	b.Enabled = true
+	b.Roles = []string{backends.RoleTranslate}
+	bpool := backends.NewPool(nil, nil)
+	bpool.SeedSnapshotForTest([]backends.Backend{b})
+	return bpool
+}
+
 // Translate call site: hits the endpoint of the backend tuple's protocol.
 func TestTranslateQueryWirePath(t *testing.T) {
 	for _, tc := range wireCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := newWireRecorder(t, "database status")
-			got, err := TranslateQuery(context.Background(), rec.backend(tc.protocol), "wie ist der status der datenbank")
+			got, err := TranslateQuery(context.Background(), nil, translatePool(rec.backend(tc.protocol)), backends.SensPersonal, "wie ist der status der datenbank")
 			if err != nil {
 				t.Fatalf("TranslateQuery: %v", err)
 			}
@@ -106,7 +118,7 @@ func TestNormalizeTemporalWirePath(t *testing.T) {
 	for _, tc := range wireCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := newWireRecorder(t, temporalJSON)
-			res, err := NormalizeTemporal(context.Background(), rec.backend(tc.protocol), "what happened yesterday", now)
+			res, err := NormalizeTemporal(context.Background(), nil, translatePool(rec.backend(tc.protocol)), backends.SensPersonal, "what happened yesterday", now)
 			if err != nil {
 				t.Fatalf("NormalizeTemporal: %v", err)
 			}
@@ -132,7 +144,7 @@ func TestSynthesizeWirePath(t *testing.T) {
 			b.Roles = []string{backends.RoleSynthesis}
 			bpool := backends.NewPool(nil, nil)
 			bpool.SeedSnapshotForTest([]backends.Backend{b})
-			res, err := Synthesize(context.Background(), nil, bpool, settings, "q", sources, nil)
+			res, err := Synthesize(context.Background(), nil, bpool, settings, backends.SensPersonal, "q", sources, nil)
 			if err != nil {
 				t.Fatalf("Synthesize: %v", err)
 			}
@@ -178,7 +190,7 @@ func TestChatChainWirePathFollowsEachLinksProtocol(t *testing.T) {
 			Model: "m", Trust: backends.TrustFull, Enabled: true, Roles: []string{backends.RoleSynthesis}},
 	}
 	resp, served, _, err := ChatChain(context.Background(), chain, backends.RoleSynthesis,
-		"sys", "user", Options{NumPredict: 5}, "", nil)
+		"sys", "user", Options{NumPredict: 5}, "", 0, nil)
 	if err != nil || served == nil || served.Name != "fallback" {
 		t.Fatalf("want fallback served without error, got served=%v err=%v", served, err)
 	}

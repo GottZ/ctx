@@ -115,7 +115,7 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, chatB backends
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}
 
-	block, err := store.UpsertBlock(ctx, pool, "learnings", title, content, tags, metadata, scope, true)
+	block, err := store.UpsertBlock(ctx, pool, "learnings", title, content, tags, metadata, scope, true, store.SensitivityWrite{})
 	if err != nil {
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}

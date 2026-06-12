@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/embed"
@@ -85,6 +86,86 @@ func Embed(ctx context.Context, pool *pgxpool.Pool, b backends.Backend, text str
 		key, b.Model, pgvector.NewVector(vec), preview,
 	)
 	return vec, nil
+}
+
+// ReportFunc mirrors the llm-side health feedback without importing llm —
+// wired to Pool.ReportSuccess/ReportFailure by the caller.
+type ReportFunc func(backendID string, class backends.ErrClass, retryAfter time.Duration)
+
+// EmbedChain is the chained Embed (F3-P3): cache first (keyed on the FIRST
+// backend's resolved model — the chain's preferred model), then wire attempts
+// over the chain with Classify deciding continuation. role resolves the
+// per-backend model via ModelFor (pool rows carry model_map, not the F1 Model
+// field). wired=false on a cache hit — a hit contacts no backend, is no
+// egress, and must produce NO llmlog row (§2.7.3 row semantics: one row per
+// actual WIRE call). served names the answering backend; attempts counts wire
+// tries for llmlog. Retry-After precision is not extracted here (local embed
+// backends don't rate-limit; a 429 earns the class default cooldown).
+func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backend, role, text string, prefix embed.Prefix, report ReportFunc) (vec []float32, served *backends.Backend, attempts int, wired bool, err error) {
+	if len(chain) == 0 {
+		return nil, nil, 0, false, fmt.Errorf("embedcache: chain is empty")
+	}
+
+	key := hashKey(prefix, text)
+	preferredModel := chain[0].ModelFor(role).Model
+	if pool != nil && preferredModel != "" {
+		var cached pgvector.Vector
+		cerr := pool.QueryRow(ctx,
+			`UPDATE context_embed_cache
+			SET hit_count = hit_count + 1, last_access = now()
+			WHERE text_hash = $1 AND model = $2
+			RETURNING embedding`,
+			key, preferredModel,
+		).Scan(&cached)
+		if cerr == nil {
+			return cached.Slice(), nil, 0, false, nil
+		}
+		// Any non-hit (ErrNoRows or unexpected DB error) falls through to the
+		// wire — cache failures must never block the hot path.
+	}
+
+	var lastErr error
+	for i := range chain {
+		b := chain[i] // copy: the model resolves per role without mutating the snapshot
+		b.Model = b.ModelFor(role).Model
+		if b.Model == "" {
+			attempts++
+			lastErr = fmt.Errorf("embedcache: backend %s has no model for role %s", b.Name, role)
+			continue
+		}
+		v, werr := embed.Embed(ctx, b, text, prefix)
+		attempts++
+		if werr == nil {
+			if report != nil {
+				report(b.ID, backends.ClassOK, 0)
+			}
+			if pool != nil {
+				preview := text
+				if len(preview) > previewLen {
+					preview = preview[:previewLen]
+				}
+				_, _ = pool.Exec(ctx,
+					`INSERT INTO context_embed_cache
+						(text_hash, model, embedding, text_preview)
+					VALUES ($1, $2, $3, $4)
+					ON CONFLICT (text_hash, model) DO UPDATE SET
+						hit_count   = context_embed_cache.hit_count + 1,
+						last_access = now()`,
+					key, b.Model, pgvector.NewVector(v), preview,
+				)
+			}
+			return v, &chain[i], attempts, true, nil
+		}
+		lastErr = werr
+		class := backends.Classify(werr, b.ProviderClass)
+		if report != nil && class != backends.ClassCanceled {
+			report(b.ID, class, 0)
+		}
+		if ctx.Err() != nil || !class.Next() {
+			return nil, nil, attempts, true, lastErr
+		}
+	}
+	return nil, nil, attempts, true, fmt.Errorf("embedcache: chain exhausted: %w", lastErr)
 }
 
 // Flush drops the ENTIRE cache. Called when an embed-cache-coupled config

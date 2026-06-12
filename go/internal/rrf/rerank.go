@@ -13,6 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rerank"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -71,11 +72,15 @@ const rerankSystemPrompt = `Rate how well each document answers the query. Scale
 // jsonArrayPattern matches a JSON array of integers.
 var jsonArrayPattern = regexp.MustCompile(`\[\s*[\d\s,]+\]`)
 
-// Rerank takes RRF search results and uses an LLM as judge (over the chat
-// backend tuple) to re-score them by relevance.
+// Rerank takes RRF search results and uses an LLM as judge to re-score them
+// by relevance. Since F3-P3 the judge resolves over Chain("synthesis", …) —
+// it is a chat-wire call sending Q + K(400×15), synthesis-equivalent content
+// (design 03 §2.5; the judge runs when no backend carries the rerank role).
+// required must already cover the query AND the judged docs; the slim llmlog
+// row carries the doc block_ids (egress trace).
 // Returns the results re-sorted by blended score (0.6*rerank_norm + 0.4*rrf_norm).
 // If fewer than RerankMinResults, returns results unchanged.
-func Rerank(ctx context.Context, chat backends.Backend, query string, results []SearchResult) ([]SearchResult, error) {
+func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, required backends.Sensitivity, query string, results []SearchResult) ([]SearchResult, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("rerank: skipping, fewer than min results",
 			"result_count", len(results),
@@ -96,7 +101,9 @@ func Rerank(ctx context.Context, chat backends.Backend, query string, results []
 	sb.WriteString(llm.EscapeXml(query))
 	sb.WriteString("\n\n")
 
+	blockIDs := make([]string, len(docsToRerank))
 	for i, r := range docsToRerank {
+		blockIDs[i] = r.ID
 		content := r.Content
 		if len(content) > RerankContentLimit {
 			content = content[:RerankContentLimit]
@@ -104,8 +111,18 @@ func Rerank(ctx context.Context, chat backends.Backend, query string, results []
 		fmt.Fprintf(&sb, "Doc %d [%s/%s]: %s\n\n", i+1, llm.EscapeXml(r.Category), llm.EscapeXml(r.Title), llm.EscapeXml(content))
 	}
 
-	// Call the LLM.
-	resp, err := llm.Chat(ctx, chat, rerankSystemPrompt, sb.String(), llm.RerankOptions(chat.NumCtx), llm.RerankTimeout)
+	// Call the LLM over the synthesis chain (fail-open on any error).
+	resp, err := llm.ChainCall{
+		Pool:       bpool,
+		Role:       backends.RoleSynthesis,
+		Required:   required,
+		Pipeline:   "query-rerank-judge",
+		System:     rerankSystemPrompt,
+		User:       sb.String(),
+		Opts:       llm.RerankOptions(0),
+		DefTimeout: llm.RerankTimeout,
+		BlockIDs:   blockIDs,
+	}.Do(ctx, db)
 	if err != nil {
 		slog.Warn("rerank: LLM call failed, returning original order", "error", err)
 		return results, nil

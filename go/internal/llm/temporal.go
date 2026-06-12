@@ -27,6 +27,7 @@ import (
 	"unicode"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -236,14 +237,24 @@ func HasTemporalIntent(query string) bool {
 // jsonFenceRe strips markdown code fences from LLM output.
 var jsonFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?})\\s*```")
 
-// NormalizeTemporal uses the LLM (chat backend) to resolve temporal references
-// in a query.
+// NormalizeTemporal uses the LLM (translate chain — same Q-only prompt
+// class, F3 §2.2 folds temporal into the translate role) to resolve temporal
+// references in a query. Writes a slim llmlog row per wire call.
 // Returns nil if no temporal references are found or if the LLM call fails.
-func NormalizeTemporal(ctx context.Context, chat backends.Backend, query string, now time.Time) (*TemporalResult, error) {
+func NormalizeTemporal(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, querySens backends.Sensitivity, query string, now time.Time) (*TemporalResult, error) {
 	calendar := buildCalendar(now)
 	systemPrompt := fmt.Sprintf(temporalPromptTemplate, calendar)
 
-	resp, err := Chat(ctx, chat, systemPrompt, query, TemporalOptions(chat.NumCtx), TemporalTimeout)
+	resp, err := ChainCall{
+		Pool:       bpool,
+		Role:       backends.RoleTranslate,
+		Required:   querySens,
+		Pipeline:   "query-temporal",
+		System:     systemPrompt,
+		User:       query,
+		Opts:       TemporalOptions(0),
+		DefTimeout: TemporalTimeout,
+	}.Do(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("llm: temporal: %w", err)
 	}

@@ -64,6 +64,7 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 	mcpH := handler.NewMCPHandler(handler.MCPConfig{
 		Pool:         pool,
 		QueryHandler: http.HandlerFunc(queryHTTPHandler),
+		Cfg:          cfgStore,
 	})
 	// MCP endpoint — auth middleware injects AuthResult into context.
 	r.Group(func(r chi.Router) {

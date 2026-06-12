@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
 )
@@ -22,6 +23,13 @@ type SearchResult struct {
 	CosineSim        *float64  `json:"cosine_sim,omitempty"`
 	RerankScore      *float64  `json:"rerank_score,omitempty"`
 	RRFScoreOriginal *float64  `json:"rrf_score_original,omitempty"`
+
+	// Sensitivity is the scope-floor-adjusted content classification, set by
+	// the batch lookup AFTER GraphExpand over ALL result IDs (not top-N: a
+	// supersedes/graph straggler from rank >50 can advance into the final
+	// llmSources — F3 §2.3). Never serialized; zero value acts as credentials
+	// inside the trust gate (fail-closed).
+	Sensitivity backends.Sensitivity `json:"-"`
 
 	// Graph-expansion provenance (GottZ Graph Expansion, Wave 1). All fields
 	// are zero-valued for native RRF hits and omitted from JSON (omitempty), so

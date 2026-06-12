@@ -73,6 +73,7 @@ type Config struct {
 	Graph     GraphConfig
 	Query     QueryConfig
 	Scheduler SchedulerConfig
+	Pool      PoolConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -214,6 +215,38 @@ type SchedulerConfig struct {
 	// key-keyed loader makes it settings-fillable from F2 without a special
 	// path (env:"-" skips the env source, not the lookup).
 	HomeScope string `key:"scheduler.home_scope" env:"-" default:"private" mut:"hot"`
+}
+
+// ScopeFloor maps a scope to its minimum effective sensitivity (F3 §2.3d).
+// The floor only RAISES — effective = max(block.sensitivity, floor[scope]) —
+// so friend-tenant and future workflow/issue scopes are blanket-protectable
+// without block mutation. Loader builds a fresh map per generation; consumers
+// are read-only (immutability convention above).
+type ScopeFloor map[string]backends.Sensitivity
+
+// Apply returns the floor-adjusted sensitivity for a block of the given
+// scope. No floor entry = unchanged; an entry can only RAISE (monotone —
+// MaxSensitivity never lowers).
+func (f ScopeFloor) Apply(s backends.Sensitivity, scope string) backends.Sensitivity {
+	if min, ok := f[scope]; ok {
+		return backends.MaxSensitivity(s, min)
+	}
+	return s
+}
+
+// PoolConfig is the F3 trust-gating policy surface (settings-only, no env
+// source — these keys are born in F2, not migrated from env vars).
+// The default keys are guard:"sensitivity-downgrade": LOWERING them needs a
+// confirm flag in the settings write (one wrong F4 dropdown / CLI typo on
+// 'public' would silently mark ALL new unclassified blocks external-eligible
+// until the first failover — F3 §3.5).
+type PoolConfig struct {
+	DefaultQuerySensitivity backends.Sensitivity `key:"pool.default_query_sensitivity" env:"-" default:"personal" mut:"hot" guard:"sensitivity-downgrade"`
+	DefaultBlockSensitivity backends.Sensitivity `key:"pool.default_block_sensitivity" env:"-" default:"credentials" mut:"hot" guard:"sensitivity-downgrade"`
+	// TODO(multi-tenant): the floor is server-global policy; the multi-tenant
+	// line scopes it per tenant (settings scope column) so each tenant floors
+	// its own scopes.
+	ScopeSensitivityFloor ScopeFloor `key:"pool.scope_sensitivity_floor" env:"-" default:"{}" mut:"hot"`
 }
 
 // Source reports the origin of a registry key in this snapshot:

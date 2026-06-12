@@ -9,6 +9,8 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/httpx"
+	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ChainAttempt is one tried backend for llmlog's metadata.chain — the full
@@ -34,13 +36,18 @@ type ReportFunc func(backendID string, class backends.ErrClass, retryAfter time.
 //
 // Per backend, the request derives from the row: ModelFor(role) names the
 // model, ModelSpec.Params merge field-wise over the role's code-default
-// options (think included), NumCtx comes from the row.
+// options (think included), NumCtx comes from the row. defTimeout is the
+// role's code default when the row carries no timeouts entry (synthesis 60s,
+// translate/temporal 15s — the P2 hardcoded ChatTimeout generalized in P3).
 func ChatChain(ctx context.Context, chain []backends.Backend, role string,
 	systemPrompt, userPrompt string, baseOpts Options, format string,
-	report ReportFunc,
+	defTimeout time.Duration, report ReportFunc,
 ) (*ChatResponse, *backends.Backend, []ChainAttempt, error) {
 	if len(chain) == 0 {
 		return nil, nil, nil, fmt.Errorf("llm: chain for role %q is empty", role)
+	}
+	if defTimeout <= 0 {
+		defTimeout = ChatTimeout
 	}
 
 	var attempts []ChainAttempt
@@ -58,7 +65,7 @@ func ChatChain(ctx context.Context, chain []backends.Backend, role string,
 		}
 
 		opts, think := applyModelParams(baseOpts, spec.Params, b)
-		timeout := b.TimeoutFor(role, ChatTimeout)
+		timeout := b.TimeoutFor(role, defTimeout)
 
 		start := time.Now()
 		resp, err := chatWithFormat(ctx, string(b.Protocol), b.Host, b.APIKey,
@@ -155,4 +162,73 @@ func retryAfterOf(err error) time.Duration {
 		return se.RetryAfter
 	}
 	return 0
+}
+
+// PoolReporter wires ChatChain attempt outcomes back into the pool's health
+// state (the same closure every chained call site needs — extracted in P3).
+func PoolReporter(bpool *backends.Pool) ReportFunc {
+	return func(id string, class backends.ErrClass, ra time.Duration) {
+		if class == backends.ClassOK {
+			bpool.ReportSuccess(id)
+		} else {
+			bpool.ReportFailure(id, class, ra)
+		}
+	}
+}
+
+// ChainCall is one chained Q-only chat operation (translate, temporal) with
+// its llmlog SLIM row: full backend/trust/locality/required/attempt telemetry
+// + optional block_ids, NO prompt bodies — closes the llm.md §5 coverage gap
+// (translate/temporal/rerank/embed were unlogged) at ~0 storage cost. One row
+// per WIRE-call sequence; an empty chain writes nothing (no wire contact).
+type ChainCall struct {
+	Pool       *backends.Pool
+	Role       string
+	Required   backends.Sensitivity
+	Pipeline   string // llmlog pipeline name, e.g. "query-translate"
+	System     string
+	User       string
+	Opts       Options
+	Format     string // "" | "json"
+	DefTimeout time.Duration
+	BlockIDs   []string
+}
+
+// Do resolves the chain (the trust gate: an excluded backend does not exist
+// for this call), walks it via ChatChain and records the slim llmlog row.
+// An empty chain returns *backends.ErrNoEligibleBackend — the call site
+// decides its role's fail-open/fail-hard semantics (design 03 §2.4).
+func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool) (*ChatResponse, error) {
+	chain, err := c.Pool.Chain(c.Role, c.Required, backends.GamingState{})
+	if err != nil {
+		return nil, err
+	}
+
+	start := time.Now()
+	resp, served, attempts, err := ChatChain(ctx, chain, c.Role,
+		c.System, c.User, c.Opts, c.Format, c.DefTimeout, PoolReporter(c.Pool))
+
+	entry := llmlog.Entry{
+		Pipeline:            c.Pipeline,
+		Duration:            time.Since(start),
+		Err:                 err,
+		BlockIDs:            c.BlockIDs,
+		RequiredSensitivity: string(c.Required),
+		Attempt:             len(attempts),
+		Metadata:            map[string]any{"chain": attempts},
+	}
+	if served != nil {
+		entry.Model = served.ModelFor(c.Role).Model
+		entry.Host = served.Host
+		entry.BackendName = served.Name
+		entry.BackendTrust = string(served.Trust)
+		entry.BackendLocality = served.Locality
+	}
+	if resp != nil {
+		entry.CompletionTokens = resp.EvalCount
+		entry.PromptTokens = resp.PromptTokens
+	}
+	llmlog.Record(db, entry)
+
+	return resp, err
 }

@@ -136,19 +136,21 @@ type queryResult struct {
 
 func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 	var (
-		shared bool
-		tags   []string
+		shared      bool
+		tags        []string
+		sensitivity string
 	)
 
 	cmd := &cobra.Command{
-		Use:     "save [--shared] [--tag TAG]... <category> <title> [content...]",
+		Use:     "save [--shared] [--tag TAG]... [--sensitivity LEVEL] <category> <title> [content...]",
 		Aliases: []string{"s"},
 		Short:   "Upsert block (--shared = cross-tenant)",
-		Long:    "Save a knowledge block to the context store. Upserts by category+title.\nContent can be inline args, piped via stdin, or separated with '-'.",
+		Long:    "Save a knowledge block to the context store. Upserts by category+title.\nContent can be inline args, piped via stdin, or separated with '-'.\n--sensitivity classifies for trust gating (credentials|personal|internal|public);\nomitted = settings default pool.default_block_sensitivity (fail-closed).",
 		Example: `  ctx save infrastructure "My Title" Content goes here
   ctx save decisions "My Decision" - Also works with dash
   cat file.md | ctx save docs "My Doc"
   ctx save --shared reference "Shared Block" Visible to all tenants
+  ctx save --sensitivity internal learnings "Public-safe note" No secrets here
   ctx save --tag /compose/n8n agent-briefing "Briefing" Project context`,
 		DisableFlagParsing: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -208,6 +210,9 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 			if shared {
 				body["scope"] = "shared"
 			}
+			if sensitivity != "" {
+				body["sensitivity"] = sensitivity
+			}
 
 			resp, err := c.Post("store", body)
 			if err != nil {
@@ -219,6 +224,7 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&shared, "shared", false, "Set scope to shared (cross-tenant)")
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "Add tag (repeatable)")
+	cmd.Flags().StringVar(&sensitivity, "sensitivity", "", "Trust-gating level: credentials|personal|internal|public (default: settings key)")
 	return cmd
 }
 
