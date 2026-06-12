@@ -2,7 +2,7 @@
 #
 # Context Store Benchmark Test Suite
 # Usage: ./test.sh              — runs T01-T12 + T19-T22 (system tests only)
-#        ./test.sh --with-ollama — runs all tests (adds T13-T18 retrieval + MCP)
+#        ./test.sh --with-ollama — runs all tests (adds T13-T18 retrieval + MCP + T23 digest)
 #
 # Test IDs are append-only: T19 (graph) and T20 (settings) live in Part 1
 # because neither needs an LLM — T13-T18 predate them inside the
@@ -86,6 +86,19 @@ echo ""
 # =====================================================================
 echo "--- Part 1: System Tests ---"
 echo ""
+
+# T00 VET_INTEGRATION (G28 preflight) — go test -short and golangci NEVER
+# compile build-tagged _test.go files; a signature drift there ships
+# invisibly and only the CI matrix goes red (v3.5.0 lesson, 019ebdb4-65e0).
+# This is the local mirror of that CI leg. Skipped when go is unavailable.
+if command -v go >/dev/null 2>&1 && [[ -d "$SCRIPT_DIR/go" ]]; then
+  T="T00 VET_INTEGRATION"
+  if (cd "$SCRIPT_DIR/go" && GOTMPDIR="$SCRIPT_DIR/.gocache" GOCACHE="$SCRIPT_DIR/.gocache/build" go vet -tags=integration ./... >/dev/null 2>&1); then
+    pass "$T"
+  else
+    fail "$T" "go vet -tags=integration failed — run it in go/ for details"
+  fi
+fi
 
 # T01 AUTH_REJECT
 T="T01 AUTH_REJECT"
@@ -526,6 +539,34 @@ if $WITH_OLLAMA; then
     pass "$T (got content, ${#content_text} chars)"
   else
     fail "$T" "expected non-empty content, got: '${content_text:0:100}' (resp: ${mcp_call:0:200})"
+  fi
+
+  # T23 DIGEST_TRIGGER_LLMLOG (F3-P4/G28) — the manual daily-synthesis
+  # trigger routes through Chain("digest", internal): its llmlog row carries
+  # the ANSWERING backend's provenance (backend_name, pre-pool code logged
+  # host=primary even on fallback) and required_sensitivity=internal (E6).
+  # llmlog writes are async — poll briefly after the 200.
+  T="T23 DIGEST_TRIGGER_LLMLOG"
+  t23_resp=$(api "$WEBHOOK/api/synthesize/daily" "$KEY_PRIVATE" '{}' 200)
+  t23_block=$(echo "$t23_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('block_id','') if d.get('ok') else '')" 2>/dev/null)
+  if [[ -z "$t23_block" ]]; then
+    fail "$T" "trigger failed or no_activity: $(echo "$t23_resp" | head -c 200)"
+  else
+    t23_row=""
+    for _ in 1 2 3 4 5; do
+      t23_row=$($DB_CMD -c "SELECT COALESCE(backend_name,'')||'|'||COALESCE(required_sensitivity,'') FROM context_llm_log WHERE pipeline='dream-daily-synthesis' AND created_at > now() - interval '5 minutes' ORDER BY created_at DESC LIMIT 1" 2>/dev/null)
+      [[ -n "$t23_row" && "$t23_row" != "|" ]] && break
+      sleep 2
+    done
+    t23_backend="${t23_row%%|*}"
+    t23_sens="${t23_row##*|}"
+    if [[ -z "$t23_backend" ]]; then
+      fail "$T" "llmlog row missing backend_name (row='$t23_row')"
+    elif [[ "$t23_sens" != "internal" ]]; then
+      fail "$T" "required_sensitivity expected 'internal' (E6), got '$t23_sens'"
+    else
+      pass "$T (block=$t23_block via backend=$t23_backend, required=internal)"
+    fi
   fi
 else
   echo ""

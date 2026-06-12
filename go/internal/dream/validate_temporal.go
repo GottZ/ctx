@@ -67,7 +67,9 @@ type TemporalReview struct {
 // ValidateTemporal runs the two-phase temporal validation for a block.
 // Phase 1: deterministic re-extraction. Phase 2: LLM review.
 // Non-fatal — errors are logged but don't stop the dream cycle.
-func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, block *BlockInfo) error {
+// The Phase-2 prompt carries only the source block, so the chain resolves at
+// its effective sensitivity (design 03 §2.2, dream row).
+func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, block *BlockInfo) error {
 	// Phase 1: Deterministic re-extraction.
 	contentTimes := store.ExtractDates(block.Content)
 
@@ -120,19 +122,19 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, chatB backends.Ba
 	dreamVer := int16(Version)
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-temporal",
-		Model:         chatB.Model,
-		Host:          chatB.Host,
 		RequestSystem: temporalValidationPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      []string{block.ID},
 		DreamVersion:  &dreamVer,
 	}
-	defer func() { llmlog.Record(pool, *entry) }()
+	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
 
 	start := time.Now()
-	resp, err := dreamChatJSON(ctx, chatB, temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
+	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, block.Sensitivity,
+		temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
+	applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, attempts)
 
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content

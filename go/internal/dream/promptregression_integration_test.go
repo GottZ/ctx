@@ -221,7 +221,7 @@ func TestPromptRegression_BaselineRun(t *testing.T) {
 
 		links, err := dream.EvaluateRelationships(
 			ctx, pool,
-			backends.Backend{Host: chatHost, Model: chatModel, Protocol: backends.ProtocolOllama},
+			testRouterFor(chatHost, chatModel, backends.ProtocolOllama),
 			llm.Options{Temperature: 0.0, NumCtx: 8192, NumPredict: 400},
 			*src, []dream.BlockInfo{*tgt},
 		)

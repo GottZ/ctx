@@ -160,17 +160,31 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 # ============================================================
-# Gate 3: golangci-lint on staged Go files
+# Gate 3: golangci-lint + integration-tag vet on staged Go files
 # ============================================================
+#
+# go vet -tags=integration is the local mirror of the CI matrix leg that
+# broke v3.5.0: `go test -short` and golangci NEVER compile build-tagged
+# _test.go files, so a signature drift in an integration test ships
+# invisibly and only CI goes red (lesson 019ebdb4-65e0, G27→v3.5.1).
 
 STAGED_GO=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
 if [ -z "$STAGED_GO" ]; then
     exit 0
 fi
 
-echo "pre-commit: running golangci-lint..."
 cd go || exit 0
 
+echo "pre-commit: running go vet -tags=integration..."
+go vet -tags=integration ./...
+RESULT=$?
+if [ $RESULT -ne 0 ]; then
+    echo ""
+    echo "pre-commit: integration-tagged files do not compile. Fix or commit with --no-verify."
+    exit $RESULT
+fi
+
+echo "pre-commit: running golangci-lint..."
 if ! command -v golangci-lint >/dev/null 2>&1; then
     echo "pre-commit: golangci-lint not found, skipping lint"
     exit 0

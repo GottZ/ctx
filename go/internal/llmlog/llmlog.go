@@ -48,6 +48,20 @@ type Entry struct {
 	APIKeyID            string
 }
 
+// Slimmed applies the E4/8b body slim: credentials-class rows keep the full
+// telemetry + block_ids (the egress trace stays ID-exact) but drop the prompt
+// bodies — no plaintext shadow corpus of the hottest tier in context_llm_log.
+// Trade-off (user decision E4): loses debug plaintext for local
+// credentials-class calls. No-op for every other sensitivity class.
+func (e Entry) Slimmed() Entry {
+	if e.RequiredSensitivity == "credentials" {
+		e.RequestSystem = ""
+		e.RequestUser = ""
+		e.ResponseContent = ""
+	}
+	return e
+}
+
 // Record persists an entry asynchronously. Safe to call from request paths —
 // the DB write happens in its own goroutine with a short deadline and failures
 // are logged but never bubble up.

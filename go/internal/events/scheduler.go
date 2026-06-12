@@ -83,12 +83,12 @@ type StartupConfig struct {
 	ReconnectDelay   time.Duration
 }
 
-// dreamCycleFunc is the seam between the scheduler's per-cycle config
-// derivation and the dream pipeline. Production value is dream.RunDreamCycle;
-// the capture regression test swaps it to observe which backend tuples each
-// cycle derived from its snapshot without needing a database for the
+// dreamCycleFunc is the seam between the scheduler's per-cycle derivation
+// and the dream pipeline. Production value is dream.RunDreamCycle; the
+// capture regression test swaps it to observe which backend-pool generation
+// each cycle's router resolves against without needing a database for the
 // pick/keyword/RRF stages.
-type dreamCycleFunc func(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backends.Backend, opts llm.Options, backoff dream.BackoffConfig, readScopes []string, throttle dream.Throttle) (int, error)
+type dreamCycleFunc func(ctx context.Context, pool *pgxpool.Pool, r *dream.Router, opts llm.Options, backoff dream.BackoffConfig, readScopes []string, throttle dream.Throttle) (int, error)
 
 // Scheduler orchestrates Guard + Digest as background jobs.
 // Reacts to LISTEN/NOTIFY events via pgxlisten and uses time-based fallbacks.
@@ -187,6 +187,18 @@ func (s *Scheduler) QueryStart() {
 // QueryEnd decrements the active query counter. Called by query handlers.
 func (s *Scheduler) QueryEnd() {
 	s.activeQueries.Add(-1)
+}
+
+// newRouter builds the per-cycle/per-run dream router: the live backend pool
+// plus the snapshot's scope floor and pool-health reporting. Gaming stays the
+// zero value until P6 wires the F2 settings keys. cfg is the caller's cycle
+// snapshot, so the floor travels with the same generation as scopes/back-off.
+func (s *Scheduler) newRouter(cfg *config.Config) *dream.Router {
+	return &dream.Router{
+		Pool:   s.backendPool,
+		Floor:  cfg.Pool.ScopeSensitivityFloor.Apply,
+		Report: llm.PoolReporter(s.backendPool),
+	}
 }
 
 // NotifyWrite signals that a write occurred. Schedules guard and digest.
@@ -308,23 +320,19 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 
 		// One snapshot per day-iteration (§2.3): taken after the wakeup, so
 		// the 03:00 run uses the config generation current at run time, not a
-		// boot copy. cfg.DreamBackend() resolves the model/think/num_ctx
-		// inheritance from chat — the same single derivation as the dream
-		// loop and the manual /api/synthesize/daily handler. The chat-num_ctx
-		// inheritance keeps the daily request on the single shared Ollama
-		// runner (distinct num_ctx → extra 27B runner → VRAM OOM).
+		// boot copy. The LLM call chains over the pool's digest role (G28) —
+		// num_ctx comes from the serving backend's row, so every chat-model
+		// call site that resolves onto the same row shares the single runner
+		// (distinct num_ctx → extra 27B runner → VRAM OOM).
 		cfg := s.cfg.Snapshot()
-		chatB := cfg.DreamBackend()
+		router := s.newRouter(cfg)
 		dreamOpts := dream.DreamOptions()
-		if chatB.NumCtx > 0 {
-			dreamOpts.NumCtx = chatB.NumCtx
-		}
 		scope := cfg.Scheduler.HomeScope
 		if scope == "" {
 			scope = "private"
 		}
 
-		slog.Info("scheduler: daily synthesis started", "scope", scope, "model", chatB.Model)
+		slog.Info("scheduler: daily synthesis started", "scope", scope)
 
 		// Welle 45: hygiene pass before synthesis — remove dream_links pointing
 		// to or from archived blocks. Cheap DELETE, runs once per day. Decoupled
@@ -335,7 +343,7 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 			slog.Info("scheduler: dangling-link cleanup", "removed", n)
 		}
 
-		blockID, err := dream.GenerateDailyReport(ctx, s.pool, chatB, dreamOpts, scope)
+		blockID, err := dream.GenerateDailyReport(ctx, s.pool, router, dreamOpts, scope)
 		if err != nil {
 			slog.Error("scheduler: daily synthesis failed", "error", err, "scope", scope)
 			continue
@@ -450,19 +458,20 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 		// One snapshot per cycle (§2.3): taken at loop-body start, before
 		// backfill and PickBlock. A store Replace between cycles is fully
 		// visible to the next cycle — the capture regression test pins this
-		// against the old boot-copy behavior. All dream derivations
-		// (DreamBackend/DreamEmbedBackend/DreamBackoff) come from this one
-		// generation, so the tuples within a cycle are consistent.
+		// against the old boot-copy behavior. The router carries this
+		// generation's scope floor; the backend chains resolve per call
+		// against the pool's live snapshot (G28).
 		cfg := s.cfg.Snapshot()
+		router := s.newRouter(cfg)
 
 		// Top priority: backfill blocks with missing embeddings.
-		if backfilled, err := s.backfillOneEmbedding(ctx, cfg.DreamEmbedBackend()); err != nil {
+		if backfilled, err := s.backfillOneEmbedding(ctx, router); err != nil {
 			slog.Error("scheduler: embed backfill error", "error", err)
 		} else if backfilled {
 			continue // Loop immediately to backfill more before dream runs.
 		}
 
-		linksCreated, err := s.runDreamCycle(cfg)
+		linksCreated, err := s.runDreamCycle(cfg, router)
 		if err != nil {
 			slog.Error("scheduler: dream cycle error", "error", err)
 			// Brief pause on error to avoid tight error loops.
@@ -495,12 +504,12 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 }
 
 // runDreamCycle executes one dream cycle with graceful shutdown support.
-// cfg is the cycle's snapshot from runDreamLoop; the backend tuples and the
-// back-off policy derive from it here — Delta 1 (F1-W6): the dream loop now
-// inherits chat.num_ctx when dream.num_ctx is unset, via cfg.DreamBackend(),
-// exactly like daily synthesis always did (V1 invariant; wire-neutral under
-// openai, single-runner-preserving under ollama).
-func (s *Scheduler) runDreamCycle(cfg *config.Config) (int, error) {
+// cfg is the cycle's snapshot from runDreamLoop (back-off policy, scopes);
+// router is the same iteration's chain source — the dream pipeline resolves
+// its backends per call through it (G28), num_ctx included (one num_ctx per
+// pool row, so chat-model call sites resolving onto the same row share the
+// single runner — the V1 invariant, now structural).
+func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router) (int, error) {
 	s.dreamWg.Add(1)
 	defer s.dreamWg.Done()
 
@@ -523,11 +532,7 @@ func (s *Scheduler) runDreamCycle(cfg *config.Config) (int, error) {
 		cancel()
 	}()
 
-	chatB := cfg.DreamBackend()
 	dreamOpts := dream.DreamOptions()
-	if chatB.NumCtx > 0 {
-		dreamOpts.NumCtx = chatB.NumCtx
-	}
 
 	// Build throttle function based on current dream mode.
 	throttle := dream.NoThrottle
@@ -545,7 +550,7 @@ func (s *Scheduler) runDreamCycle(cfg *config.Config) (int, error) {
 
 	return s.runCycle(
 		dreamCtx, s.pool,
-		cfg.DreamEmbedBackend(), chatB,
+		router,
 		dreamOpts,
 		cfg.DreamBackoff(),
 		cfg.Scheduler.ReadScopes,
@@ -587,8 +592,13 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 
 // backfillOneEmbedding finds one block with missing embedding, generates it, and stores it.
 // Returns true if a block was backfilled, false if none needed.
-// embedB comes from the dream-loop body's per-cycle snapshot (§2.3: the
-// backfill belongs to the dream loop, its snapshot covers it).
+// The embed chains over the pool (G28): role dream-embed when configured,
+// embed otherwise — backfill has no latency SLA and should not compete with
+// Dream's chat model for shared GPU VRAM. The chain resolves with THE block's
+// floor-adjusted sensitivity (design 03 gate table, embed-backfill row); a
+// trust/gaming-empty chain leaves the block unembedded (FTS-only visibility)
+// — never escalate across the trust border. One slim llmlog row per wire
+// call, block id attached.
 //
 // Tx-wrap (Welle-49, parallelism-bug): SELECT FOR UPDATE SKIP LOCKED on a
 // pool-bound QueryRow releases the row lock as soon as the statement returns
@@ -597,21 +607,21 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 // it, and only the last UPDATE won. Wrapping the whole pick→embed→store in a
 // single tx holds the row lock for the duration so other workers SKIP LOCKED
 // onto distinct blocks.
-func (s *Scheduler) backfillOneEmbedding(ctx context.Context, embedB backends.Backend) (bool, error) {
+func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Router) (bool, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, fmt.Errorf("backfill: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
 
-	var blockID, title, content string
+	var blockID, title, content, sens, scope string
 	err = tx.QueryRow(ctx,
-		`SELECT id, title, content FROM context_blocks
+		`SELECT id, title, content, sensitivity, scope FROM context_blocks
 		WHERE embedding IS NULL AND NOT is_archived
 		ORDER BY created_at ASC
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED`,
-	).Scan(&blockID, &title, &content)
+	).Scan(&blockID, &title, &content, &sens, &scope)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -621,12 +631,24 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, embedB backends.Ba
 
 	slog.Info("scheduler: backfilling embedding", "block_id", blockID, "title", title)
 
-	// Backfill prefers the dream embed host (e.g. CPU-based llama-embed), falls back to the
-	// query embed host per field (cfg.DreamEmbedBackend()). Rationale: Backfill has no
-	// latency SLA and should not compete with Dream's chat model for shared GPU VRAM via
-	// the query embedding backend.
+	required := router.FloorSens(backends.Sensitivity(sens), scope)
+	chain, role, err := router.EmbedChain(required)
+	if err != nil {
+		slog.Warn("scheduler: backfill has no eligible embed backend — block stays unembedded",
+			"block_id", blockID, "error", err)
+		return false, nil
+	}
+
 	embedText := title + "\n\n" + content
-	vec, err := embed.Embed(ctx, embedB, embedText, embed.PrefixDocument)
+	start := time.Now()
+	// pool=nil: document embeddings land in the block row, not the cache.
+	vec, served, attempts, wired, err := embedcache.EmbedChain(
+		ctx, nil, chain, role, embedText, embed.PrefixDocument,
+		embedcache.ReportFunc(router.Report))
+	if wired {
+		llm.LogEmbedWire(s.pool, "embed-backfill", role, required, served, attempts,
+			time.Since(start), []string{blockID}, err)
+	}
 	if err != nil {
 		return false, fmt.Errorf("backfill: embed: %w", err)
 	}

@@ -88,11 +88,16 @@ const (
 
 // BlockInfo holds the fields Dream needs from a block.
 type BlockInfo struct {
-	ID                       string
-	Title                    string
-	Category                 string
-	Content                  string
-	Scope                    string
+	ID       string
+	Title    string
+	Category string
+	Content  string
+	Scope    string
+	// Sensitivity is the EFFECTIVE classification at the trust gate:
+	// RunDreamCycle floors the stored value once after the pick; candidate
+	// lookups floor per row. Zero value acts as credentials downstream
+	// (backends.MaxSensitivity, fail-closed).
+	Sensitivity              backends.Sensitivity
 	QualityScore             float64
 	Embedding                []float32
 	UpdatedAt                time.Time
@@ -115,16 +120,27 @@ func NoThrottle(_ context.Context) error { return nil }
 
 // RunDreamCycle executes one dream cycle: pick → keywords → search → evaluate → link.
 // Returns the number of links created, or 0 if no block was available.
-// embedB/chatB are the cycle's backend tuples, backoff its back-off policy —
-// all from ONE config snapshot of the caller (F1-W6), so a settings flip is
-// live on the next cycle. backoff is the only threading chain to the cooldown:
-// SetDreamCooldown/SetDreamCooldownMinutes are called exclusively
-// cycle-internally, never by the scheduler.
+// r routes every LLM/embed call through the backend pool (G28/F3-P4): the
+// chains resolve per call with the involved blocks' effective sensitivity,
+// so a pool mutation is live on the next call and the trust gate sits
+// structurally before every prompt build. backoff is the only threading
+// chain to the cooldown: SetDreamCooldown/SetDreamCooldownMinutes are called
+// exclusively cycle-internally, never by the scheduler.
 // Cyclop threshold exceeded by 1 due to sequential error/skip branches per pipeline step;
 // extracting helpers would obscure the linear flow without reducing real complexity.
 //
 //nolint:cyclop // pipeline function with linear step sequence
-func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backends.Backend, opts llm.Options, backoff BackoffConfig, readScopes []string, throttle Throttle) (int, error) {
+func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, backoff BackoffConfig, readScopes []string, throttle Throttle) (int, error) {
+	// Step 0 (G28): cycle-skip BEFORE the block pick when no backend serves
+	// the dream role at all (gaming toggle, disabled rows, missing role).
+	// Returning (0, nil) sends the scheduler loop into its idle wait WITHOUT
+	// claiming a block — the skip must not touch any block cooldown, or
+	// gaming sessions would smear the back-off statistics (design 03 §2.4).
+	if !r.available(backends.RoleDream) {
+		slog.Info("dream: no eligible dream backend — cycle skipped before pick")
+		return 0, nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, CycleTimeout)
 	defer cancel()
 	// Step 1: Pick a block.
@@ -135,6 +151,11 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backen
 	if block == nil {
 		return 0, nil // No eligible blocks.
 	}
+
+	// Effective sensitivity once per cycle: stored class + scope floor. Every
+	// downstream consumer (keywords, temporal, eval max-fold, keyword-embed)
+	// reads the floored value from the BlockInfo.
+	block.Sensitivity = r.FloorSens(block.Sensitivity, block.Scope)
 
 	slog.Info("dream: picked block",
 		"block_id", block.ID,
@@ -149,7 +170,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backen
 	needsTemporal := block.DreamTemporalValidatedAt == nil ||
 		block.UpdatedAt.After(*block.DreamTemporalValidatedAt)
 	if needsTemporal {
-		if err := ValidateTemporal(ctx, pool, chatB, opts, block); err != nil {
+		if err := ValidateTemporal(ctx, pool, r, opts, block); err != nil {
 			slog.Warn("dream: temporal validation failed (non-fatal)", "block_id", block.ID, "error", err)
 		}
 		// Mark validated even on non-fatal LLM failure — Phase 1 (deterministic)
@@ -175,7 +196,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backen
 	// no fallback to deterministic extraction, which produces code-syntax noise.
 	keywords := block.DreamKeywords
 	if len(keywords) == 0 {
-		generated, genErr := GenerateKeywords(ctx, pool, chatB, opts.NumCtx, block.ID, block.Title, block.Content)
+		generated, genErr := GenerateKeywords(ctx, pool, r, block)
 		if genErr != nil {
 			slog.Warn("dream: LLM keyword generation exhausted retries, transient cooldown",
 				"block_id", block.ID, "error", genErr)
@@ -208,7 +229,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backen
 	}
 
 	// Step 3: Search per keyword via RRF.
-	candidates, err := searchByKeywords(ctx, pool, embedB, keywords, readScopes, block.ID, block.Scope)
+	candidates, err := searchByKeywords(ctx, pool, r, keywords, readScopes, block)
 	if err != nil {
 		slog.Warn("dream: keyword search failed", "block_id", block.ID, "error", err)
 		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
@@ -232,7 +253,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backen
 	}
 
 	// Step 4: LLM evaluation.
-	links, err := EvaluateRelationships(ctx, pool, chatB, opts, *block, candidates)
+	links, err := EvaluateRelationships(ctx, pool, r, opts, *block, candidates)
 	if err != nil {
 		slog.Warn("dream: evaluation failed", "block_id", block.ID, "error", err)
 		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
@@ -249,7 +270,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, embedB, chatB backen
 	// per-pair via LLM. Runs AFTER main eval so 'recurrent' overwrites a 'topical' that
 	// EvaluateRelationships may have written for the same pair — recurrent is the more
 	// specific classification. Non-fatal on error: dream cycle continues.
-	recurrentLinks, recErr := DetectRecurrence(ctx, pool, chatB, opts, *block)
+	recurrentLinks, recErr := DetectRecurrence(ctx, pool, r, opts, *block)
 	if recErr != nil {
 		slog.Warn("dream: recurrence detection failed (non-fatal)", "block_id", block.ID, "error", recErr)
 	} else if len(recurrentLinks) > 0 {
@@ -373,9 +394,9 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, title, category, content, scope, quality_score, updated_at, created_at, dream_keywords, dream_temporal_validated_at`,
+		RETURNING id, title, category, content, scope, sensitivity, quality_score, updated_at, created_at, dream_keywords, dream_temporal_validated_at`,
 		CooldownTransientMinutes,
-	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt, &block.DreamKeywords, &block.DreamTemporalValidatedAt)
+	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.Sensitivity, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt, &block.DreamKeywords, &block.DreamTemporalValidatedAt)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -593,17 +614,37 @@ func SetDreamCooldownMinutes(ctx context.Context, pool *pgxpool.Pool, blockID st
 }
 
 // searchByKeywords runs one RRF search per keyword, deduplicates results,
-// and returns candidate blocks (excluding the source block and cross-scope blocks).
-func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedB backends.Backend, keywords []string, scopes []string, sourceID, sourceScope string) ([]BlockInfo, error) {
+// and returns candidate blocks (excluding the source block and cross-scope
+// blocks), each annotated with its floor-adjusted sensitivity for the eval
+// gate. The keyword embeds chain over the pool (role dream-embed when
+// configured, embed otherwise) at the SOURCE block's sensitivity — the
+// keywords derive from its content (design 03 §2.2, call-site #9). One slim
+// llmlog row per wire call; cache hits are no egress and log nothing.
+func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywords []string, scopes []string, source *BlockInfo) ([]BlockInfo, error) {
 	seen := make(map[string]bool)
-	seen[sourceID] = true // Exclude source block.
+	seen[source.ID] = true // Exclude source block.
 	var candidates []BlockInfo
 	embedFailures := 0
+
+	chain, embedRole, err := r.EmbedChain(source.Sensitivity)
+	if err != nil {
+		// Trust/gaming-empty chain: no keyword can embed this cycle — the
+		// caller applies the transient cooldown (never escalate across the
+		// trust border).
+		return nil, fmt.Errorf("dream: keyword embed chain: %w", err)
+	}
 
 	for _, kw := range keywords {
 		// Embed the keyword for semantic search. Cached by (hash(prefix||kw), model) —
 		// Dream keywords repeat heavily across cycles (domain vocabulary, proper nouns).
-		kwEmbedding, err := embedcache.Embed(ctx, pool, embedB, kw, embed.PrefixQuery)
+		start := time.Now()
+		kwEmbedding, served, attempts, wired, err := embedcache.EmbedChain(
+			ctx, pool, chain, embedRole, kw, embed.PrefixQuery,
+			embedcache.ReportFunc(r.Report))
+		if wired {
+			llm.LogEmbedWire(pool, "dream-keyword-embed", embedRole, source.Sensitivity,
+				served, attempts, time.Since(start), []string{source.ID}, err)
+		}
 		if err != nil {
 			embedFailures++
 			slog.Debug("dream: embed keyword failed", "keyword", kw, "error", err)
@@ -624,26 +665,26 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedB backends.B
 			continue
 		}
 
-		for _, r := range results {
-			if seen[r.ID] {
+		for _, res := range results {
+			if seen[res.ID] {
 				continue
 			}
 			// Same-scope filter (V5).
-			if r.Scope != sourceScope {
+			if res.Scope != source.Scope {
 				continue
 			}
 			// Exclude index blocks as candidates — structural listings, not content.
-			if r.Category == "index" {
+			if res.Category == "index" {
 				continue
 			}
-			seen[r.ID] = true
+			seen[res.ID] = true
 			candidates = append(candidates, BlockInfo{
-				ID:        r.ID,
-				Title:     r.Title,
-				Category:  r.Category,
-				Content:   r.Content,
-				Scope:     r.Scope,
-				UpdatedAt: r.UpdatedAt,
+				ID:        res.ID,
+				Title:     res.Title,
+				Category:  res.Category,
+				Content:   res.Content,
+				Scope:     res.Scope,
+				UpdatedAt: res.UpdatedAt,
 			})
 		}
 
@@ -653,36 +694,46 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, embedB backends.B
 		}
 	}
 
-	// Meta-Block filter: one batch-query to prune candidates flagged is_meta=true.
+	// Meta-Block filter + sensitivity annotation in ONE batch query.
 	// Post-Reset-Audit 2026-04-20 showed meta blocks (Origin-Story, CV, Agent-Briefing,
 	// Compound-Loop, index) generate 85% of NO_REL noise without valid relationships.
+	// The same PK lookup carries each candidate's stored sensitivity for the
+	// eval gate (max-fold in EvaluateRelationships); a candidate missing from
+	// the lookup (deleted between RRF and here) keeps the zero value, which
+	// acts as credentials downstream (fail-closed).
 	if len(candidates) > 0 {
 		ids := make([]string, 0, len(candidates))
 		for _, c := range candidates {
 			ids = append(ids, c.ID)
 		}
+		type rowInfo struct {
+			meta bool
+			sens backends.Sensitivity
+		}
 		rows, err := pool.Query(ctx,
-			`SELECT id::text FROM context_blocks WHERE id = ANY($1::uuid[]) AND is_meta`,
+			`SELECT id::text, is_meta, sensitivity, scope FROM context_blocks WHERE id = ANY($1::uuid[])`,
 			ids,
 		)
 		if err == nil {
-			metaIDs := make(map[string]bool)
+			info := make(map[string]rowInfo, len(ids))
 			for rows.Next() {
-				var id string
-				if err := rows.Scan(&id); err == nil {
-					metaIDs[id] = true
+				var id, sens, scope string
+				var isMeta bool
+				if err := rows.Scan(&id, &isMeta, &sens, &scope); err == nil {
+					info[id] = rowInfo{meta: isMeta, sens: r.FloorSens(backends.Sensitivity(sens), scope)}
 				}
 			}
 			rows.Close()
-			if len(metaIDs) > 0 {
-				filtered := candidates[:0]
-				for _, c := range candidates {
-					if !metaIDs[c.ID] {
-						filtered = append(filtered, c)
-					}
+			filtered := candidates[:0]
+			for _, c := range candidates {
+				ri, ok := info[c.ID]
+				if ok && ri.meta {
+					continue
 				}
-				candidates = filtered
+				c.Sensitivity = ri.sens // zero value on lookup miss = credentials
+				filtered = append(filtered, c)
 			}
+			candidates = filtered
 		}
 	}
 

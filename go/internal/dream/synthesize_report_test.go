@@ -17,6 +17,23 @@ import (
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
+// testRouterFor routes the integration tests through a seeded
+// single-backend pool (G28): one enabled full-trust row carrying the dream +
+// digest roles. With the chatJSON seam installed, host/model never reach the
+// wire; without it (prompt regression), the row's protocol selects the path.
+func testRouterFor(host, model string, protocol backends.Protocol) *dream.Router {
+	p := backends.NewPool(nil, nil)
+	p.SeedSnapshotForTest([]backends.Backend{{
+		ID: "it-backend", Name: "it-backend",
+		Host: host, APIKey: "k", Protocol: protocol,
+		Trust: backends.TrustFull, Locality: "lan",
+		Roles:    []string{backends.RoleDream, backends.RoleDigest},
+		ModelMap: map[string]backends.ModelSpec{"default": {Model: model}},
+		Priority: 100, Enabled: true,
+	}})
+	return &dream.Router{Pool: p}
+}
+
 // mockChatJSONExternal replaces dream.ChatJSON for the duration of one test.
 // It mirrors the in-package mockChatJSON helper used in evaluate_test.go but
 // goes through the exported SetChatJSON test seam (declared in this same
@@ -85,7 +102,7 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 		}, nil
 	})
 
-	blockID, err := dream.GenerateDailyReport(ctx, pool, backends.Backend{Host: "h", APIKey: "k", Model: "m"}, llm.Options{}, reportScope)
+	blockID, err := dream.GenerateDailyReport(ctx, pool, testRouterFor("h", "m", ""), llm.Options{}, reportScope)
 	if err != nil {
 		t.Fatalf("generate report: %v", err)
 	}
@@ -128,7 +145,7 @@ func TestGenerateDailyReport_NoActivity(t *testing.T) {
 		return nil, nil
 	})
 
-	blockID, err := dream.GenerateDailyReport(ctx, pool, backends.Backend{Host: "h", APIKey: "k", Model: "m"}, llm.Options{}, reportScope)
+	blockID, err := dream.GenerateDailyReport(ctx, pool, testRouterFor("h", "m", ""), llm.Options{}, reportScope)
 	if err != nil {
 		t.Fatalf("expected nil error on empty activity, got %v", err)
 	}
@@ -160,7 +177,7 @@ func TestGenerateDailyReport_LLMError(t *testing.T) {
 		return nil, errors.New("ollama exploded")
 	})
 
-	_, err := dream.GenerateDailyReport(ctx, pool, backends.Backend{Host: "h", APIKey: "k", Model: "m"}, llm.Options{}, reportScope)
+	_, err := dream.GenerateDailyReport(ctx, pool, testRouterFor("h", "m", ""), llm.Options{}, reportScope)
 	if err == nil {
 		t.Fatal("want wrapped error, got nil")
 	}

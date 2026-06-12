@@ -58,12 +58,15 @@ type recurrenceVerdict struct {
 }
 
 // recurrenceCandidate is one Phase-1 pair: source paired with a target
-// that shares dimension+value and title-similarity.
+// that shares dimension+value and title-similarity. TargetSens is the
+// floor-adjusted sensitivity for the per-pair Phase-2 chain (the prompt
+// carries both block contents).
 type recurrenceCandidate struct {
 	TargetID    string
 	TargetTitle string
 	TargetText  string
 	TitleSim    float64
+	TargetSens  backends.Sensitivity
 }
 
 // DetectRecurrence is the Welle 38b entry point. Phase 1 (deterministic SQL)
@@ -76,12 +79,12 @@ type recurrenceCandidate struct {
 //
 // pool may be nil for the Phase-2 llmlog.Record only — Phase 1 always runs
 // against the pool and a nil pool returns no candidates.
-func DetectRecurrence(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, source BlockInfo) ([]Link, error) {
+func DetectRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, source BlockInfo) ([]Link, error) {
 	if pool == nil {
 		return nil, nil
 	}
 
-	candidates, err := pickRecurrenceCandidates(ctx, pool, source.ID, source.Title, source.Scope)
+	candidates, err := pickRecurrenceCandidates(ctx, pool, r, source.ID, source.Title, source.Scope)
 	if err != nil {
 		return nil, fmt.Errorf("dream: recurrence phase 1: %w", err)
 	}
@@ -91,7 +94,7 @@ func DetectRecurrence(ctx context.Context, pool *pgxpool.Pool, chatB backends.Ba
 
 	links := make([]Link, 0, len(candidates))
 	for _, c := range candidates {
-		verdict, vErr := confirmRecurrence(ctx, pool, chatB, opts, source, c)
+		verdict, vErr := confirmRecurrence(ctx, pool, r, opts, source, c)
 		if vErr != nil {
 			slog.Warn("dream: recurrence phase 2 failed (non-fatal)",
 				"source", source.ID, "target", c.TargetID, "error", vErr)
@@ -120,10 +123,11 @@ func DetectRecurrence(ctx context.Context, pool *pgxpool.Pool, chatB backends.Ba
 
 // pickRecurrenceCandidates is Phase 1 — same dimension+value AND title-sim > threshold.
 // Same scope as the source. is_archived blocks excluded. Bounded by MaxRecurrenceCandidates.
-func pickRecurrenceCandidates(ctx context.Context, pool *pgxpool.Pool, sourceID, sourceTitle, sourceScope string) ([]recurrenceCandidate, error) {
+// Carries each target's floor-adjusted sensitivity for the Phase-2 chain.
+func pickRecurrenceCandidates(ctx context.Context, pool *pgxpool.Pool, r *Router, sourceID, sourceTitle, sourceScope string) ([]recurrenceCandidate, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT DISTINCT b.id::text, b.title, LEFT(b.content, $4),
-		        similarity(b.title, $2) AS title_sim
+		        similarity(b.title, $2) AS title_sim, b.sensitivity, b.scope
 		 FROM context_temporal a
 		 JOIN context_temporal b_t
 		   ON a.dimension = b_t.dimension AND a.value = b_t.value AND a.block_id <> b_t.block_id
@@ -145,35 +149,39 @@ func pickRecurrenceCandidates(ctx context.Context, pool *pgxpool.Pool, sourceID,
 	var out []recurrenceCandidate
 	for rows.Next() {
 		var c recurrenceCandidate
-		if err := rows.Scan(&c.TargetID, &c.TargetTitle, &c.TargetText, &c.TitleSim); err != nil {
+		var sens, scope string
+		if err := rows.Scan(&c.TargetID, &c.TargetTitle, &c.TargetText, &c.TitleSim, &sens, &scope); err != nil {
 			return nil, err
 		}
+		c.TargetSens = r.FloorSens(backends.Sensitivity(sens), scope)
 		out = append(out, c)
 	}
 	return out, rows.Err()
 }
 
 // confirmRecurrence is Phase 2 — single LLM-call per pair. Logged via llmlog
-// for audit-trail consistency with EvaluateRelationships.
-func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, source BlockInfo, c recurrenceCandidate) (recurrenceVerdict, error) {
+// for audit-trail consistency with EvaluateRelationships. The prompt carries
+// both block contents, so the chain resolves at max(source, target).
+func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, source BlockInfo, c recurrenceCandidate) (recurrenceVerdict, error) {
 	userPrompt := buildRecurrencePrompt(source, c)
+	required := backends.MaxSensitivity(source.Sensitivity, c.TargetSens)
 	dreamVer := int16(Version)
 
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-recurrence",
-		Model:         chatB.Model,
-		Host:          chatB.Host,
 		RequestSystem: recurrenceSystemPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      []string{source.ID, c.TargetID},
 		DreamVersion:  &dreamVer,
 	}
-	defer func() { llmlog.Record(pool, *entry) }()
+	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
 
 	start := time.Now()
-	resp, err := dreamChatJSON(ctx, chatB, recurrenceSystemPrompt, userPrompt, opts, DreamTimeout)
+	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, required,
+		recurrenceSystemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
+	applyChainTelemetry(entry, backends.RoleDream, required, served, attempts)
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount

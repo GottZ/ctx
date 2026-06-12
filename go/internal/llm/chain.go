@@ -28,6 +28,13 @@ type ChainAttempt struct {
 // stays free of pool state.
 type ReportFunc func(backendID string, class backends.ErrClass, retryAfter time.Duration)
 
+// ChatFunc is the wire call one chain attempt makes. The backend arrives
+// fully resolved for the role: Model from ModelFor, Think/Options merged from
+// ModelSpec.Params, NumCtx from the row. ChatChainVia callers inject their
+// own transport (the dream package routes through its chatJSON test seam);
+// ChatChain binds the production chatWithFormat path.
+type ChatFunc func(ctx context.Context, b backends.Backend, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error)
+
 // ChatChain tries the chain in order: per attempt its own role timeout
 // (httpx.DoRetryOnce stays INSIDE the attempt — transport blip on the same
 // connection), Classify decides continuation, the parent context aborts
@@ -41,6 +48,20 @@ type ReportFunc func(backendID string, class backends.ErrClass, retryAfter time.
 // translate/temporal 15s — the P2 hardcoded ChatTimeout generalized in P3).
 func ChatChain(ctx context.Context, chain []backends.Backend, role string,
 	systemPrompt, userPrompt string, baseOpts Options, format string,
+	defTimeout time.Duration, report ReportFunc,
+) (*ChatResponse, *backends.Backend, []ChainAttempt, error) {
+	return ChatChainVia(ctx, func(ctx context.Context, b backends.Backend, sys, usr string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+		return chatWithFormat(ctx, string(b.Protocol), b.Host, b.APIKey,
+			b.Model, b.Think.Ptr(), sys, usr, opts, format, timeout)
+	}, chain, role, systemPrompt, userPrompt, baseOpts, defTimeout, report)
+}
+
+// ChatChainVia is ChatChain with an injected wire call (G28: the dream
+// package walks its chains through the chatJSON test seam). The attempt loop
+// — model resolution, params merge, Classify-driven continuation, health
+// reporting — lives ONLY here so the failover error doctrine has one home.
+func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, role string,
+	systemPrompt, userPrompt string, baseOpts Options,
 	defTimeout time.Duration, report ReportFunc,
 ) (*ChatResponse, *backends.Backend, []ChainAttempt, error) {
 	if len(chain) == 0 {
@@ -64,12 +85,14 @@ func ChatChain(ctx context.Context, chain []backends.Backend, role string,
 			continue
 		}
 
-		opts, think := applyModelParams(baseOpts, spec.Params, b)
+		resolved := *b // copy: never mutate the pool snapshot
+		opts, think := applyModelParams(baseOpts, spec.Params, &resolved)
+		resolved.Model = spec.Model
+		resolved.Think = thinkModeOf(think)
 		timeout := b.TimeoutFor(role, defTimeout)
 
 		start := time.Now()
-		resp, err := chatWithFormat(ctx, string(b.Protocol), b.Host, b.APIKey,
-			spec.Model, think, systemPrompt, userPrompt, opts, format, timeout)
+		resp, err := call(ctx, resolved, systemPrompt, userPrompt, opts, timeout)
 		elapsed := time.Since(start)
 
 		if err == nil {
@@ -153,6 +176,45 @@ func toFloat(v any, def float64) float64 {
 	default:
 		return def
 	}
+}
+
+// thinkModeOf folds the merged think toggle back into the Backend field so a
+// resolved backend carries it through ChatFunc (the wire form *bool and the
+// row form ThinkMode are losslessly interchangeable).
+func thinkModeOf(think *bool) backends.ThinkMode {
+	switch {
+	case think == nil:
+		return ""
+	case *think:
+		return "true"
+	default:
+		return "false"
+	}
+}
+
+// LogEmbedWire records one slim llmlog row for an embed wire-call sequence:
+// full backend/trust/locality/required/attempt telemetry + block_ids, NO
+// bodies (§2.7.3 — embeds carry no prompt worth storing). Callers gate on
+// EmbedChain's wired flag — cache hits contact no backend and log nothing.
+func LogEmbedWire(db *pgxpool.Pool, pipeline, role string, required backends.Sensitivity,
+	served *backends.Backend, attempts int, duration time.Duration, blockIDs []string, err error,
+) {
+	entry := llmlog.Entry{
+		Pipeline:            pipeline,
+		Duration:            duration,
+		Err:                 err,
+		BlockIDs:            blockIDs,
+		RequiredSensitivity: string(required),
+		Attempt:             attempts,
+	}
+	if served != nil {
+		entry.Model = served.ModelFor(role).Model
+		entry.Host = served.Host
+		entry.BackendName = served.Name
+		entry.BackendTrust = string(served.Trust)
+		entry.BackendLocality = served.Locality
+	}
+	llmlog.Record(db, entry)
 }
 
 // retryAfterOf extracts the parsed Retry-After of a 429 (zero otherwise).

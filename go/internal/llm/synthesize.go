@@ -425,15 +425,6 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, set
 		Attempt:             len(attempts),
 		Metadata:            map[string]any{"chain": attempts},
 	}
-	if required == backends.SensCredentials {
-		// E4/8b body slim: credentials-class rows keep the full telemetry +
-		// block_ids (the egress trace stays ID-exact) but drop the prompt
-		// bodies — no plaintext shadow corpus of the hottest tier in
-		// context_llm_log. Trade-off (user decision E4): loses debug
-		// plaintext for local credentials syntheses.
-		entry.RequestSystem = ""
-		entry.RequestUser = ""
-	}
 	servedModel := ""
 	if served != nil {
 		servedModel = served.ModelFor(backends.RoleSynthesis).Model
@@ -444,15 +435,13 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, set
 		entry.BackendLocality = served.Locality
 	}
 	if resp != nil {
-		if required != backends.SensCredentials {
-			// 8b body slim: the synthesized answer derives from the
-			// credentials blocks — slim with the request bodies.
-			entry.ResponseContent = resp.Message.Content
-		}
+		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
 	}
-	llmlog.Record(db, entry)
+	// E4/8b body slim for credentials-class rows (request AND response — the
+	// synthesized answer derives from the credentials blocks).
+	llmlog.Record(db, entry.Slimmed())
 
 	if err != nil {
 		return nil, fmt.Errorf("llm: synthesize: %w", err)

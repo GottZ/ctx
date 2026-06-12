@@ -76,7 +76,10 @@ type Link struct {
 // EvaluateRelationships asks the LLM to classify relationships between a source block
 // and candidate blocks found via keyword search. Returns validated links.
 // pool may be nil — if provided, the LLM request/response is logged via llmlog.
-func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, source BlockInfo, candidates []BlockInfo) ([]Link, error) {
+// The prompt carries source + ALL candidate contents, so the chain resolves
+// at the max over every involved block's sensitivity (design 03 §2.2, dream
+// row); a zero-value sensitivity folds to credentials (fail-closed).
+func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, source BlockInfo, candidates []BlockInfo) ([]Link, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -84,9 +87,13 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, chatB backen
 	userPrompt := buildEvalPrompt(source, candidates)
 	blockIDs := make([]string, 0, 1+len(candidates))
 	blockIDs = append(blockIDs, source.ID)
+	sensParts := make([]backends.Sensitivity, 0, 1+len(candidates))
+	sensParts = append(sensParts, source.Sensitivity)
 	for _, c := range candidates {
 		blockIDs = append(blockIDs, c.ID)
+		sensParts = append(sensParts, c.Sensitivity)
 	}
+	required := backends.MaxSensitivity(sensParts...)
 	dreamVer := int16(Version)
 
 	// Log entry mutated through the function; deferred Record (closure deref at
@@ -95,19 +102,19 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, chatB backen
 	// no zero-duration no-op rows pollute the log.
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-eval",
-		Model:         chatB.Model,
-		Host:          chatB.Host,
 		RequestSystem: dreamSystemPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      blockIDs,
 		DreamVersion:  &dreamVer,
 	}
-	defer func() { llmlog.Record(pool, *entry) }()
+	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
 
 	start := time.Now()
-	resp, err := dreamChatJSON(ctx, chatB, dreamSystemPrompt, userPrompt, opts, DreamTimeout)
+	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, required,
+		dreamSystemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
+	applyChainTelemetry(entry, backends.RoleDream, required, served, attempts)
 
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content

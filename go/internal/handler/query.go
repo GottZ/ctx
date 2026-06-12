@@ -943,22 +943,7 @@ func rerankRequired(querySens backends.Sensitivity, results []rrf.SearchResult, 
 // (no bodies; block_ids where the call embedded block content — §2.7.3).
 // served is nil when every attempt failed.
 func (h *QueryHandler) logEmbedWire(_ context.Context, pipeline string, required backends.Sensitivity, served *backends.Backend, attempts int, duration time.Duration, blockIDs []string, err error) {
-	entry := llmlog.Entry{
-		Pipeline:            pipeline,
-		Duration:            duration,
-		Err:                 err,
-		BlockIDs:            blockIDs,
-		RequiredSensitivity: string(required),
-		Attempt:             attempts,
-	}
-	if served != nil {
-		entry.Model = served.ModelFor(backends.RoleEmbed).Model
-		entry.Host = served.Host
-		entry.BackendName = served.Name
-		entry.BackendTrust = string(served.Trust)
-		entry.BackendLocality = served.Locality
-	}
-	llmlog.Record(h.pool, entry)
+	llm.LogEmbedWire(h.pool, pipeline, backends.RoleEmbed, required, served, attempts, duration, blockIDs, err)
 }
 
 // filterSuperseded removes blocks from results that are superseded by another block

@@ -60,14 +60,13 @@ const KeywordsMaxRetries = 3
 const MinKeywords = 3
 
 // keywordOptions returns Ollama options tuned for short JSON-array extraction.
-// numCtx is supplied by the caller so we share the Dream-path context size —
-// without it Ollama loads the model at its default (32k for qwen3.5), which
-// triggers KV-cache VRAM spillage and collapses throughput.
-func keywordOptions(numCtx int) llm.Options {
+// NumCtx stays unset here: the chain walk merges it from the serving
+// backend's row (one num_ctx per row — without it Ollama loads the model at
+// its default, which triggers KV-cache VRAM spillage and collapses throughput).
+func keywordOptions() llm.Options {
 	return llm.Options{
 		Temperature: 0.1,
 		NumPredict:  200,
-		NumCtx:      numCtx,
 	}
 }
 
@@ -75,10 +74,11 @@ func keywordOptions(numCtx int) llm.Options {
 // transient errors (timeout, parse failure, too-few results). Returns the
 // parsed keyword list on success, or an error after exhausting retries.
 // pool is used only for llmlog persistence; may be nil.
-// numCtx must match the Dream context size to keep the model resident in VRAM.
-func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, numCtx int, blockID, title, content string) ([]string, error) {
-	userPrompt := buildKeywordPrompt(title, content)
-	opts := keywordOptions(numCtx)
+// The prompt carries only the source block, so the chain resolves at its
+// effective sensitivity (design 03 §2.2, dream row).
+func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block *BlockInfo) ([]string, error) {
+	userPrompt := buildKeywordPrompt(block.Title, block.Content)
+	opts := keywordOptions()
 
 	var lastErr error
 	for attempt := 1; attempt <= KeywordsMaxRetries; attempt++ {
@@ -88,22 +88,22 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, chatB backends.Ba
 		}
 
 		start := time.Now()
-		resp, err := dreamChatJSON(ctx, chatB, keywordSystemPrompt, userPrompt, opts, KeywordsTimeout)
+		resp, served, attempts, err := r.chat(ctx, backends.RoleDream, block.Sensitivity,
+			keywordSystemPrompt, userPrompt, opts, KeywordsTimeout)
 		duration := time.Since(start)
 
 		dreamVer := int16(Version)
 		entry := &llmlog.Entry{
 			Pipeline:      "dream-keywords",
-			Model:         chatB.Model,
-			Host:          chatB.Host,
 			Duration:      duration,
 			Err:           err,
 			RequestSystem: keywordSystemPrompt,
 			RequestUser:   userPrompt,
-			BlockIDs:      []string{blockID},
+			BlockIDs:      []string{block.ID},
 			DreamVersion:  &dreamVer,
 			Metadata:      map[string]any{"attempt": attempt},
 		}
+		applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, attempts)
 		if resp != nil {
 			entry.ResponseContent = resp.Message.Content
 			entry.CompletionTokens = resp.EvalCount
@@ -112,7 +112,7 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, chatB backends.Ba
 		// Closure-scoped defer so parse/count failures land in entry.Err
 		// before Record fires (analogous to evaluate.go and validate_temporal.go).
 		keywords, iterErr := func() ([]string, error) {
-			defer llmlog.Record(pool, *entry)
+			defer func() { llmlog.Record(pool, entry.Slimmed()) }()
 			if err != nil {
 				return nil, err
 			}
@@ -131,7 +131,7 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, chatB backends.Ba
 		if iterErr != nil {
 			lastErr = iterErr
 			slog.Warn("dream: keyword attempt failed",
-				"block_id", blockID, "attempt", attempt, "error", iterErr)
+				"block_id", block.ID, "attempt", attempt, "error", iterErr)
 			continue
 		}
 		return keywords, nil

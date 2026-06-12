@@ -53,7 +53,12 @@ type dailyNewBlock struct {
 // fresh blocks), asks the LLM for a free-text German summary, and persists
 // the result as a synthesis/audit-trail block. Returns the new block_id, or
 // an empty string + nil error when there was zero activity to report.
-func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, chatB backends.Backend, opts llm.Options, scope string) (string, error) {
+// The chain resolves for role digest at CONSTANT internal (E6): the prompt
+// carries aggregate counts + titles/categories — structure, not content. A
+// secret in a TITLE is a corpus hygiene problem, not a routing problem. Both
+// digest callers (03:00 scheduler iteration and the manual
+// POST /api/synthesize/daily trigger) gate identically through here.
+func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, scope string) (string, error) {
 	decisions, err := fetchDailyDecisions(ctx, pool, scope)
 	if err != nil {
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
@@ -80,18 +85,18 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, chatB backends
 	dreamVer := int16(Version)
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-daily-synthesis",
-		Model:         chatB.Model,
-		Host:          chatB.Host,
 		RequestSystem: dailySynthesisSystemPrompt,
 		RequestUser:   userPrompt,
 		DreamVersion:  &dreamVer,
 	}
-	defer func() { llmlog.Record(pool, *entry) }()
+	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
 
 	start := time.Now()
-	resp, err := dreamChatJSON(ctx, chatB, dailySynthesisSystemPrompt, userPrompt, opts, DailySynthesisTimeout)
+	resp, served, attempts, err := r.chat(ctx, backends.RoleDigest, backends.SensInternal,
+		dailySynthesisSystemPrompt, userPrompt, opts, DailySynthesisTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
+	applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, served, attempts)
 
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content

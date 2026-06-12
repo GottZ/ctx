@@ -4,7 +4,9 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -12,22 +14,24 @@ import (
 // pipeline (Welle 38c / Welle 42). Tested via POST /api/synthesize/daily —
 // the same code path that the daily scheduler goroutine calls at 03:00 local.
 type SynthesizeHandler struct {
-	pool *pgxpool.Pool
-	cfg  ConfigStore
+	pool        *pgxpool.Pool
+	backendPool *backends.Pool
 }
 
 // NewSynthesizeHandler wires the daily-synthesis trigger handler. The LLM
-// backend tuple is derived per request from a config snapshot via
-// cfg.DreamBackend() — the same single derivation the dream loop and the
-// 03:00 scheduler iteration use (F1-W7: the boot-time dreamB/dreamOpts copy
-// died here).
-func NewSynthesizeHandler(pool *pgxpool.Pool, cfg ConfigStore) *SynthesizeHandler {
-	return &SynthesizeHandler{pool: pool, cfg: cfg}
+// call chains over the pool's digest role at constant internal (G28/E6) —
+// the same gate as the scheduler's 03:00 iteration. Without this explicit
+// pool wiring the handler would re-attach to an env tuple on the next
+// signature break and become a permanent Chain() bypass (gaming toggle and
+// trust gate dead on this path — design 03 P4 step).
+func NewSynthesizeHandler(pool *pgxpool.Pool, backendPool *backends.Pool) *SynthesizeHandler {
+	return &SynthesizeHandler{pool: pool, backendPool: backendPool}
 }
 
 // HandleDaily triggers a single daily synthesis run for the caller's
 // home_scope. Returns the new block_id (or empty string + ok=true when there
-// was no activity in the last 24h).
+// was no activity in the last 24h). An empty digest chain stays a generic
+// 500 — backend topology is admin-only (design 03 §2.4 digest row).
 func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	requestID := RequestIDFromContext(ctx)
@@ -44,16 +48,11 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// One snapshot per request. The chat-num_ctx carry keeps every chat-model
-	// call site on one runner (distinct num_ctx → extra 27B runner → VRAM OOM)
-	// — same pattern as the scheduler's daily iteration.
-	dreamB := h.cfg.Snapshot().DreamBackend()
-	dreamOpts := dream.DreamOptions()
-	if dreamB.NumCtx > 0 {
-		dreamOpts.NumCtx = dreamB.NumCtx
-	}
+	// Digest needs no scope floor — the role gates at constant internal,
+	// block contents never enter the prompt (E6).
+	router := &dream.Router{Pool: h.backendPool, Report: llm.PoolReporter(h.backendPool)}
 
-	blockID, err := dream.GenerateDailyReport(ctx, h.pool, dreamB, dreamOpts, scope)
+	blockID, err := dream.GenerateDailyReport(ctx, h.pool, router, dream.DreamOptions(), scope)
 	if err != nil {
 		slog.Error("synthesize: daily report failed",
 			"error", err,

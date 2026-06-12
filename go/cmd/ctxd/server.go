@@ -54,10 +54,10 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)
 	digestH := handler.NewDigestHandler(pool)
-	// Welle 42: daily synthesis manual trigger. Derives the dream backend per
-	// request from its snapshot (cfg.DreamBackend()) — the same single
-	// derivation as the scheduler's dream loop and daily iteration.
-	synthH := handler.NewSynthesizeHandler(pool, cfgStore)
+	// Welle 42: daily synthesis manual trigger. Chains over the pool's digest
+	// role at constant internal (G28/E6) — the same gate as the scheduler's
+	// 03:00 iteration.
+	synthH := handler.NewSynthesizeHandler(pool, backendPool)
 
 	// ── MCP endpoint (Streamable HTTP, authenticated) ──────────────
 	queryHTTPHandler := handler.WithScheduler(scheduler, queryHandler.HandleQuery)

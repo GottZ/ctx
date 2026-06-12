@@ -53,13 +53,15 @@ func (f *fakeOllama) hits() []string {
 	return out
 }
 
-// captureTestConfig builds a Validate-clean config generation whose dream
-// pipeline points at the given hosts. Self-checked against config.Validate so
-// the fixture cannot drift from the ERROR classes — generation B must pass
-// the same Validate inside store.Replace, or the flip under test would be
-// rejected instead of observed. Hosts use RFC-2606 documentation names where
-// no wire traffic occurs (fixture hygiene rule, public repo).
-func captureTestConfig(t *testing.T, dreamHost, dreamModel, embedHost string) *config.Config {
+// captureTestConfig builds a Validate-clean config generation whose back-off
+// policy carries the given MinHours marker — the config-snapshot axis of the
+// capture test (backend tuples moved to the pool axis in G28). Self-checked
+// against config.Validate so the fixture cannot drift from the ERROR classes
+// — generation B must pass the same Validate inside store.Replace, or the
+// flip under test would be rejected instead of observed. Hosts use RFC-2606
+// documentation names — no wire traffic runs through the config tuples since
+// G28 (fixture hygiene rule, public repo).
+func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 	t.Helper()
 	c := &config.Config{
 		Server: config.ServerConfig{
@@ -72,14 +74,14 @@ func captureTestConfig(t *testing.T, dreamHost, dreamModel, embedHost string) *c
 		},
 		Fallback: config.FallbackConfig{Protocol: backends.ProtocolOpenAI},
 		Embed: config.EmbedConfig{
-			Host: embedHost, Protocol: backends.ProtocolOllama, Model: "embed-model",
+			Host: "http://embed.example", Protocol: backends.ProtocolOllama, Model: "embed-model",
 		},
 		Dream: config.DreamConfig{
-			Enabled: true, Host: dreamHost, Protocol: backends.ProtocolOllama,
-			Model: dreamModel, IdleWait: 20 * time.Second, Parallelism: 1,
+			Enabled: true, Host: "http://dream.example", Protocol: backends.ProtocolOllama,
+			Model: "dream-model", IdleWait: 20 * time.Second, Parallelism: 1,
 			Backoff: config.BackoffConfig{
 				Mode: "exp", Factor: 1.6, Grace: 0,
-				CapHours: config.Hours(1080), MinHours: config.Hours(12), InertOffset: 7,
+				CapHours: config.Hours(1080), MinHours: config.Hours(backoffMinHours), InertOffset: 7,
 			},
 		},
 		Graph: config.GraphConfig{HopDepth: 1},
@@ -94,6 +96,19 @@ func captureTestConfig(t *testing.T, dreamHost, dreamModel, embedHost string) *c
 		t.Fatalf("capture fixture is not Validate-clean: %+v", issues)
 	}
 	return c
+}
+
+// dreamPoolRow builds one enabled full-trust pool row carrying the dream
+// role, pointed at the given host/model — one generation of the pool axis.
+func dreamPoolRow(host, model string) backends.Backend {
+	return backends.Backend{
+		ID: "row-" + model, Name: "row-" + model,
+		Host: host, Protocol: backends.ProtocolOllama,
+		Trust: backends.TrustFull, Locality: "lan",
+		Roles:    []string{backends.RoleDream},
+		ModelMap: map[string]backends.ModelSpec{"default": {Model: model}},
+		Priority: 100, Enabled: true,
+	}
 }
 
 // deadPool returns a lazily-connecting pool aimed at a closed loopback port.
@@ -113,44 +128,57 @@ func deadPool(t *testing.T) *pgxpool.Pool {
 
 // cycleObs is what the seam observed for one dream cycle.
 type cycleObs struct {
-	chatB   backends.Backend
-	embedB  backends.Backend
-	numCtx  int
-	wireErr error
+	host     string
+	model    string
+	backoff  dream.BackoffConfig
+	chainErr error
+	wireErr  error
 }
 
-// TestDreamLoopSeesReplacedConfigNextCycle is the F1-W6 capture regression
-// test (design/01-config-core.md §5): the dream loop derives its backend
-// tuples from a fresh store snapshot at every loop-body start, so a
-// store.Replace between cycles is fully visible to the next cycle.
+// TestDreamLoopSeesReplacedConfigNextCycle is the capture regression test
+// (F1-W6 origin, G28 shape): every dream cycle derives from FRESH state on
+// both hot axes — the config-store snapshot (back-off policy, scopes) and
+// the backend-pool snapshot (which backend the dream chain resolves to). A
+// store.Replace or pool snapshot swap strictly between two cycles is fully
+// visible to the second cycle.
 //
 // Mechanics: the dreamCycleFunc seam stands in for the DB-bound pipeline
-// stages (pick/keywords/RRF) and fires ONE real llm.ChatJSON against the
-// chatB tuple it received — the httptest fake backends therefore prove the
-// snapshot values reach the wire (host hit + model in the request body), not
-// merely the parameter list. The seam holds each cycle open on a channel so
-// the test can Replace the store strictly between cycle 1 and cycle 2.
+// stages (pick/keywords/RRF). It resolves the dream chain through the
+// router the scheduler handed it and fires ONE real llm.ChatJSON against the
+// resolved row — the httptest fake backends therefore prove the pool
+// generation reaches the wire (host hit + model in the request body), not
+// merely a parameter list. The seam holds each cycle open on a channel so
+// the test can flip both axes strictly between cycle 1 and cycle 2.
 //
-// Negatively probed (Pflicht-Reihenfolge „erst rot", §5): against the pre-W6
-// shape — one snapshot hoisted above the loop, the boot-copy pattern this
-// wave deletes — cycle 2 still hits the generation-A host with the
-// generation-A model and the test fails on every cycle-2 assertion. With the
-// per-cycle snapshot it is green.
+// Negatively probed (Pflicht-Reihenfolge „erst rot", §5): against a hoisted
+// chain resolution or a boot-copied back-off, cycle 2 still observes the
+// generation-A host/model/MinHours and fails on every cycle-2 assertion.
 func TestDreamLoopSeesReplacedConfigNextCycle(t *testing.T) {
 	srvA := newFakeOllama(t)
 	srvB := newFakeOllama(t)
 
-	cfgA := captureTestConfig(t, srvA.srv.URL, "dream-model-a", "http://embed-a.example")
-	cfgB := captureTestConfig(t, srvB.srv.URL, "dream-model-b", "http://embed-b.example")
+	cfgA := captureTestConfig(t, 12)
+	cfgB := captureTestConfig(t, 24)
 
 	store := config.NewStore(cfgA)
-	s := NewScheduler(deadPool(t), store, nil, StartupConfig{})
+	bpool := backends.NewPool(nil, nil)
+	bpool.SeedSnapshotForTest([]backends.Backend{dreamPoolRow(srvA.srv.URL, "dream-model-a")})
+	s := NewScheduler(deadPool(t), store, bpool, StartupConfig{})
 
 	got := make(chan cycleObs, 4)
 	release := make(chan struct{})
-	s.runCycle = func(ctx context.Context, _ *pgxpool.Pool, embedB, chatB backends.Backend, opts llm.Options, _ dream.BackoffConfig, _ []string, _ dream.Throttle) (int, error) {
-		_, err := llm.ChatJSON(ctx, chatB, "sys", "user", opts, 5*time.Second)
-		got <- cycleObs{chatB: chatB, embedB: embedB, numCtx: opts.NumCtx, wireErr: err}
+	s.runCycle = func(ctx context.Context, _ *pgxpool.Pool, r *dream.Router, opts llm.Options, backoff dream.BackoffConfig, _ []string, _ dream.Throttle) (int, error) {
+		obs := cycleObs{backoff: backoff}
+		chain, err := r.Pool.Chain(backends.RoleDream, backends.SensPublic, r.Gaming)
+		if err != nil {
+			obs.chainErr = err
+		} else {
+			b := chain[0]
+			b.Model = b.ModelFor(backends.RoleDream).Model
+			obs.host, obs.model = b.Host, b.Model
+			_, obs.wireErr = llm.ChatJSON(ctx, b, "sys", "user", opts, 5*time.Second)
+		}
+		got <- obs
 		<-release // hold the cycle open until the test releases it
 		return 1, nil
 	}
@@ -174,45 +202,42 @@ func TestDreamLoopSeesReplacedConfigNextCycle(t *testing.T) {
 		}
 	}
 
-	// Cycle 1 runs on generation A.
+	// Cycle 1 runs on generation A of both axes.
 	obs1 := waitObs("cycle 1")
-	if obs1.wireErr != nil {
-		t.Fatalf("cycle 1 wire call: %v", obs1.wireErr)
+	if obs1.chainErr != nil || obs1.wireErr != nil {
+		t.Fatalf("cycle 1: chain=%v wire=%v", obs1.chainErr, obs1.wireErr)
 	}
-	if obs1.chatB.Host != srvA.srv.URL || obs1.chatB.Model != "dream-model-a" {
-		t.Errorf("cycle 1 chatB = (%s, %s), want (%s, dream-model-a)",
-			obs1.chatB.Host, obs1.chatB.Model, srvA.srv.URL)
+	if obs1.host != srvA.srv.URL || obs1.model != "dream-model-a" {
+		t.Errorf("cycle 1 backend = (%s, %s), want (%s, dream-model-a)",
+			obs1.host, obs1.model, srvA.srv.URL)
 	}
-	if obs1.embedB.Host != "http://embed-a.example" {
-		t.Errorf("cycle 1 embedB.Host = %s, want http://embed-a.example", obs1.embedB.Host)
-	}
-	// Delta 1 at scheduler level: Dream.NumCtx unset → cycle opts inherit
-	// Chat.NumCtx through cfg.DreamBackend().
-	if obs1.numCtx != 4096 {
-		t.Errorf("cycle 1 opts.NumCtx = %d, want 4096 (inherited from chat — Delta 1)", obs1.numCtx)
+	if obs1.backoff.MinHours != 12 {
+		t.Errorf("cycle 1 backoff.MinHours = %v, want 12 (config generation A)", obs1.backoff.MinHours)
 	}
 	if hits := srvA.hits(); len(hits) != 1 || hits[0] != "dream-model-a" {
 		t.Errorf("backend A hits = %v, want [dream-model-a]", hits)
 	}
 
-	// Flip the store to generation B strictly between the cycles, then let
-	// cycle 1 return so the loop takes its next snapshot.
+	// Flip BOTH axes strictly between the cycles, then let cycle 1 return so
+	// the loop takes its next snapshot + router.
 	if err := store.Replace(cfgB); err != nil {
 		t.Fatalf("store.Replace(cfgB): %v", err)
 	}
+	bpool.SeedSnapshotForTest([]backends.Backend{dreamPoolRow(srvB.srv.URL, "dream-model-b")})
 	release <- struct{}{}
 
-	// Cycle 2 MUST run on generation B: new host hit, new model on the wire.
+	// Cycle 2 MUST run on generation B: new host hit, new model on the wire,
+	// new back-off policy.
 	obs2 := waitObs("cycle 2")
-	if obs2.wireErr != nil {
-		t.Fatalf("cycle 2 wire call: %v", obs2.wireErr)
+	if obs2.chainErr != nil || obs2.wireErr != nil {
+		t.Fatalf("cycle 2: chain=%v wire=%v", obs2.chainErr, obs2.wireErr)
 	}
-	if obs2.chatB.Host != srvB.srv.URL || obs2.chatB.Model != "dream-model-b" {
-		t.Errorf("cycle 2 chatB = (%s, %s), want (%s, dream-model-b) — boot-copy capture would still see generation A",
-			obs2.chatB.Host, obs2.chatB.Model, srvB.srv.URL)
+	if obs2.host != srvB.srv.URL || obs2.model != "dream-model-b" {
+		t.Errorf("cycle 2 backend = (%s, %s), want (%s, dream-model-b) — a hoisted chain would still see generation A",
+			obs2.host, obs2.model, srvB.srv.URL)
 	}
-	if obs2.embedB.Host != "http://embed-b.example" {
-		t.Errorf("cycle 2 embedB.Host = %s, want http://embed-b.example", obs2.embedB.Host)
+	if obs2.backoff.MinHours != 24 {
+		t.Errorf("cycle 2 backoff.MinHours = %v, want 24 (config generation B) — a boot copy would still see 12", obs2.backoff.MinHours)
 	}
 	if hits := srvB.hits(); len(hits) != 1 || hits[0] != "dream-model-b" {
 		t.Errorf("backend B hits = %v, want [dream-model-b]", hits)
