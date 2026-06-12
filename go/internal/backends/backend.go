@@ -32,6 +32,7 @@ const (
 	RoleDigest     = "digest"
 	RoleChat       = "chat"
 	RoleDreamEmbed = "dream-embed" // bootstrap split when CTX_DREAM_EMBED_* diverges
+	RoleClassify   = "classify"    // G41 sensitivity audit — hard-local, no external escape hatch
 )
 
 // CoreRoles lists the roles the validation treats as known. dream-embed is
@@ -39,7 +40,7 @@ const (
 // query-embed vs dream-embed split.
 var CoreRoles = []string{
 	RoleSynthesis, RoleTranslate, RoleEmbed, RoleRerank,
-	RoleDream, RoleDigest, RoleChat, RoleDreamEmbed,
+	RoleDream, RoleDigest, RoleChat, RoleDreamEmbed, RoleClassify,
 }
 
 // embedRoles write into the shared vector(1024) space — external backends

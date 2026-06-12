@@ -29,6 +29,7 @@ type ManageHandler struct {
 	cfg             ConfigStore
 	dreamController DreamController
 	backendPool     *backends.Pool
+	auditController AuditController
 }
 
 // NewManageHandler creates a new ManageHandler. cfg is the runtime-config
@@ -36,9 +37,10 @@ type ManageHandler struct {
 // per-request snapshot, so /api/manage shows the generation the scheduler
 // actually runs — not a boot copy that would lie after a settings flip.
 // backendPool feeds the backend-* actions (F3-P1) including the synchronous
-// post-mutation reload.
-func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool) *ManageHandler {
-	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool}
+// post-mutation reload. auditController feeds blocks-audit-* (G41); the
+// production scheduler implements both controller interfaces.
+func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool, auditController AuditController) *ManageHandler {
+	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool, auditController: auditController}
 }
 
 type manageRequest struct {
@@ -110,6 +112,10 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchBackendAction(w, r, authResult, req)
 	case "api-key-create", "api-key-list", "api-key-delete":
 		h.dispatchAPIKeyAction(w, r, req)
+	case "blocks-audit-start":
+		h.handleBlocksAuditStart(w, r, req)
+	case "blocks-audit-status":
+		h.handleBlocksAuditStatus(w, r)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
@@ -155,7 +161,11 @@ func actionRequiresAdmin(req manageRequest) bool {
 		// topology, create/update without the gate would be a corpus
 		// exfiltration/SSRF API (F3 risk R1).
 		"backend-create", "backend-update", "backend-delete",
-		"backend-list", "backend-test":
+		"backend-list", "backend-test",
+		// blocks-audit-* in full (G41): start causes bulk sensitivity
+		// downgrades (the opsec direction), status discloses block titles
+		// and classification topology.
+		"blocks-audit-start", "blocks-audit-status":
 		return true
 	case "dream-mode":
 		return isDreamModeMutation(req)

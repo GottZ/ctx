@@ -160,6 +160,40 @@ func TestEmbedExternalBlock(t *testing.T) {
 	}
 }
 
+// TestClassifyExternalBlock (G41): the classify role is hard-local. Unlike
+// embed there is NO metadata escape hatch — audit prompts carry unclassified
+// block content, which never crosses the locality border, full-trust ZDR
+// included.
+func TestClassifyExternalBlock(t *testing.T) {
+	b := validBackend()
+	b.Host = "https://api.example.com/v1"
+	b.Locality = LocalityExternal
+	b.Roles = []string{RoleClassify}
+	if _, errs := ValidateBackend(&b); !fieldHit(errs, "roles") {
+		t.Error("external classify passed validation")
+	}
+
+	// No escape hatch: the embed equivalence flag must NOT unlock classify.
+	b.Metadata = map[string]any{"embed_equivalence_verified": true}
+	if _, errs := ValidateBackend(&b); !fieldHit(errs, "roles") {
+		t.Error("external classify passed with the embed equivalence flag — there must be no escape hatch")
+	}
+
+	// LAN and local are fine.
+	for _, tc := range []struct{ host, locality string }{
+		{"http://10.13.37.11:8089", LocalityLAN},
+		{"http://127.0.0.1:8089", LocalityLocal},
+	} {
+		b := validBackend()
+		b.Host = tc.host
+		b.Locality = tc.locality
+		b.Roles = []string{RoleClassify}
+		if _, errs := ValidateBackend(&b); fieldHit(errs, "roles") {
+			t.Errorf("%s classify rejected", tc.locality)
+		}
+	}
+}
+
 func TestModelMapCoverage(t *testing.T) {
 	b := validBackend()
 	b.Roles = []string{RoleSynthesis, RoleTranslate}

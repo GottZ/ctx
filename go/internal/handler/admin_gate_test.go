@@ -23,7 +23,7 @@ func manageReqAs(t *testing.T, ar *auth.AuthResult, body any) *httptest.Response
 		t.Fatalf("marshal body: %v", err)
 	}
 
-	h := NewManageHandler(nil, nil, nil, nil)
+	h := NewManageHandler(nil, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))
@@ -131,6 +131,31 @@ func TestManageAdminGate_DreamModeMutation_NonAdmin403(t *testing.T) {
 		"data":   map[string]any{"mode": "off"},
 	})
 	assertForbiddenAdmin(t, rec)
+}
+
+// blocks-audit-* in full (G41): start triggers bulk sensitivity downgrades
+// (the opsec direction), status discloses block titles + classification
+// topology. Both gated — including the read.
+func TestManageAdminGate_BlocksAuditStart_NonAdmin403(t *testing.T) {
+	rec := manageReqAs(t, nonAdminAR(), map[string]any{
+		"action": "blocks-audit-start",
+		"data":   map[string]any{"dry_run": true},
+	})
+	assertForbiddenAdmin(t, rec)
+}
+
+func TestManageAdminGate_BlocksAuditStatus_NonAdmin403(t *testing.T) {
+	rec := manageReqAs(t, nonAdminAR(), map[string]any{"action": "blocks-audit-status"})
+	assertForbiddenAdmin(t, rec)
+}
+
+// Admin keys pass the gate; nil auditController yields 503 — past the gate,
+// before any scheduler/store access.
+func TestManageAdminGate_BlocksAudit_AdminPassesGate(t *testing.T) {
+	rec := manageReqAs(t, adminAR(), map[string]any{"action": "blocks-audit-status"})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (nil auditController)", rec.Code)
+	}
 }
 
 // dream-mode WITHOUT data is a read (current mode) and stays open to every

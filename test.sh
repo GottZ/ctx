@@ -449,6 +449,43 @@ else
   fi
 fi
 
+# T24 SENSITIVITY_AUDIT_SURFACE (G41) — blocks-audit-status is admin-gated
+# (titles + classification topology), the status carries by_source counts,
+# and the classify role is hard-local: backend-create with classify+external
+# is a 422, no metadata escape hatch. No LLM: pure manage/validation surface.
+T="T24 SENSITIVITY_AUDIT_SURFACE"
+if [[ -z "${CTX_ADMIN_KEY:-}" ]]; then
+  fail "$T" "CTX_ADMIN_KEY not set in .env (host-only admin key)"
+else
+  t24_403=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$WEBHOOK/api/manage" \
+    -H "Content-Type: application/json" -H "X-Context-Key: $KEY_PRIVATE" \
+    -d '{"action":"blocks-audit-status"}' 2>/dev/null)
+  t24_status=$(curl -s --max-time 10 -X POST "$WEBHOOK/api/manage" \
+    -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
+    -d '{"action":"blocks-audit-status"}' 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('success') and 'pending' in d and isinstance(d.get('by_source'),dict) else 'bad')" 2>/dev/null)
+  t24_extern=$(curl -s --max-time 10 -X POST "$WEBHOOK/api/manage" \
+    -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
+    -d '{"action":"backend-create","data":{"name":"__t24_classify_probe","base_url":"https://api.example.com/v1","protocol":"openai","provider_class":"generic","trust":"public","locality":"external","roles":["classify"],"model_map":{"default":"m"},"confirm_trust_elevation":true,"metadata":{"embed_equivalence_verified":true}}}' 2>/dev/null)
+  t24_extern_ok=$(echo "$t24_extern" | python3 -c "import sys,json; d=json.load(sys.stdin); print('blocked' if not d.get('success') and 'classify' in json.dumps(d) else 'leaked')" 2>/dev/null)
+  if [[ "$t24_extern_ok" == "leaked" ]]; then
+    # If the probe row was created, remove it before failing.
+    t24_pid=$(echo "$t24_extern" | python3 -c "import sys,json; b=json.load(sys.stdin).get('backend') or {}; print(b.get('id',''))" 2>/dev/null)
+    [[ -n "$t24_pid" ]] && curl -s --max-time 10 -X POST "$WEBHOOK/api/manage" \
+      -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
+      -d '{"action":"backend-delete","id":"'"$t24_pid"'"}' >/dev/null 2>&1
+  fi
+  if [[ "$t24_403" != "403" ]]; then
+    fail "$T" "non-admin blocks-audit-status expected 403, got $t24_403"
+  elif [[ "$t24_status" != "ok" ]]; then
+    fail "$T" "admin status response malformed"
+  elif [[ "$t24_extern_ok" != "blocked" ]]; then
+    fail "$T" "classify+external backend-create not rejected: $(echo "$t24_extern" | head -c 200)"
+  else
+    pass "$T (403 enforced, status shape, classify hard-local 422)"
+  fi
+fi
+
 # =====================================================================
 # PART 2: Retrieval Tests (Ollama required)
 # =====================================================================

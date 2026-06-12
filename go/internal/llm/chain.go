@@ -226,6 +226,22 @@ func retryAfterOf(err error) time.Duration {
 	return 0
 }
 
+// dropExternal removes external-locality backends from a resolved chain.
+// Slog (not a client error) — the row passed the trust gate, the locality
+// border is an additional constraint of THIS call class.
+func dropExternal(chain []backends.Backend, role string) []backends.Backend {
+	kept := chain[:0:0]
+	for i := range chain {
+		if chain[i].Locality == backends.LocalityExternal {
+			slog.Warn("llm: local-only call dropped external backend",
+				"role", role, "backend", chain[i].Name)
+			continue
+		}
+		kept = append(kept, chain[i])
+	}
+	return kept
+}
+
 // PoolReporter wires ChatChain attempt outcomes back into the pool's health
 // state (the same closure every chained call site needs — extracted in P3).
 func PoolReporter(bpool *backends.Pool) ReportFunc {
@@ -254,6 +270,11 @@ type ChainCall struct {
 	Format     string // "" | "json"
 	DefTimeout time.Duration
 	BlockIDs   []string
+	// LocalOnly drops external backends AFTER the trust gate (G41 classify:
+	// audit prompts carry unclassified block content — the locality border
+	// holds even against a full-trust external row a psql edit smuggled past
+	// the 422 validation).
+	LocalOnly bool
 }
 
 // Do resolves the chain (the trust gate: an excluded backend does not exist
@@ -264,6 +285,15 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool) (*ChatResponse, err
 	chain, err := c.Pool.Chain(c.Role, c.Required, backends.GamingState{})
 	if err != nil {
 		return nil, err
+	}
+	if c.LocalOnly {
+		chain = dropExternal(chain, c.Role)
+		if len(chain) == 0 {
+			return nil, &backends.ErrNoEligibleBackend{
+				Role: c.Role, Required: c.Required,
+				Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "local-only call, all eligible backends external"}},
+			}
+		}
 	}
 
 	start := time.Now()

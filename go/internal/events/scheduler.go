@@ -119,6 +119,16 @@ type Scheduler struct {
 	// instead of waiting for the natural CycleTimeout.
 	dreamCycleMu     sync.Mutex
 	dreamCycleCancel context.CancelFunc
+
+	// Sensitivity audit (G41): run state + the LLM seam (dreamCycleFunc
+	// pattern — the decision-table test swaps classify without a backend).
+	audit    auditState
+	classify classifyFunc
+
+	// runCtx is Run's lifecycle context, published for background jobs
+	// triggered via API after boot (audit). Before Run: context.Background().
+	runCtxMu sync.Mutex
+	runCtx   context.Context
 }
 
 // SetDreamMode sets the dream operating mode and optional silent interval.
@@ -170,8 +180,20 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 		backendPool: backendPool,
 		startup:     startup,
 		runCycle: dream.RunDreamCycle,
+		classify: llm.ClassifyBlockBool,
 		runDone:  make(chan struct{}),
 	}
+}
+
+// lifecycleCtx returns Run's context so API-triggered background jobs die
+// with the scheduler; before Run it falls back to context.Background().
+func (s *Scheduler) lifecycleCtx() context.Context {
+	s.runCtxMu.Lock()
+	defer s.runCtxMu.Unlock()
+	if s.runCtx == nil {
+		return context.Background()
+	}
+	return s.runCtx
 }
 
 // Wait blocks until Run() has fully returned (including dream cycle drain).
@@ -215,6 +237,9 @@ func (s *Scheduler) NotifyWrite() {
 // guard/digest on timer-based fallback ticks.
 func (s *Scheduler) Run(ctx context.Context) {
 	defer close(s.runDone)
+	s.runCtxMu.Lock()
+	s.runCtx = ctx
+	s.runCtxMu.Unlock()
 	slog.Info("scheduler: starting background scheduler",
 		"guard_interval", guardInterval,
 		"digest_debounce", digestDebounce,

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/jackc/pgx/v5"
@@ -74,4 +75,115 @@ func FetchSensitivities(ctx context.Context, pool *pgxpool.Pool, ids []string) (
 		return nil, fmt.Errorf("store: fetch sensitivities rows: %w", err)
 	}
 	return out, nil
+}
+
+// G41 sensitivity LLM audit — pick / verdict / progress.
+//
+// The audit only ever touches sensitivity_source='default' rows: 'manual' is
+// untouchable BY THE SQL PREDICATE, not by caller discipline — a concurrent
+// manual classification between pick and verdict makes the verdict UPDATE
+// match zero rows. 'llm-audit'/'pattern' rows are already classified and
+// never re-enter the pick set (re-audit = an explicit source reset).
+
+// AuditBlock is one pick-set row handed to the classifier.
+type AuditBlock struct {
+	ID      string
+	Title   string
+	Content string
+}
+
+// PickAuditBlocks loads up to limit unclassified blocks of the server's home
+// scope (design 03 §2.3d: classification follows block ownership — foreign
+// scopes stay fail-closed at the credentials default until THEIR tenant
+// audits them). retryCooldown skips blocks whose last attempt produced no
+// verdict (audited_at stamped, source still 'default'). randomOrder serves
+// the N=30 sample gate — a representative slice, not the oldest corner.
+func PickAuditBlocks(ctx context.Context, pool *pgxpool.Pool, homeScope string,
+	retryCooldown time.Duration, limit int, randomOrder bool,
+) ([]AuditBlock, error) {
+	order := "created_at ASC"
+	if randomOrder {
+		order = "random()"
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT id, title, content FROM context_blocks
+		 WHERE sensitivity_source = 'default' AND NOT is_archived AND scope = $1
+		   AND (sensitivity_audited_at IS NULL OR sensitivity_audited_at < now() - make_interval(secs => $2))
+		 ORDER BY `+order+` LIMIT $3`,
+		homeScope, retryCooldown.Seconds(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: pick audit blocks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AuditBlock
+	for rows.Next() {
+		var b AuditBlock
+		if err := rows.Scan(&b.ID, &b.Title, &b.Content); err != nil {
+			return nil, fmt.Errorf("store: pick audit blocks scan: %w", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: pick audit blocks rows: %w", err)
+	}
+	return out, nil
+}
+
+// ApplyAuditVerdict writes one LLM verdict: sensitivity, source='llm-audit',
+// audit timestamp. The source predicate IS the manual-untouchable guarantee
+// (negatively probed in the integration test); applied=false means the row
+// was (re)classified by someone else since the pick — the verdict is
+// discarded, never forced.
+func ApplyAuditVerdict(ctx context.Context, pool *pgxpool.Pool, id string, sens backends.Sensitivity) (applied bool, err error) {
+	tag, err := pool.Exec(ctx,
+		`UPDATE context_blocks
+		    SET sensitivity = $2, sensitivity_source = 'llm-audit', sensitivity_audited_at = now()
+		  WHERE id = $1 AND sensitivity_source = 'default'`,
+		id, string(sens))
+	if err != nil {
+		return false, fmt.Errorf("store: apply audit verdict: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// MarkAuditAttempt stamps a no-verdict attempt (parse failure): the block
+// stays at the credentials default with source='default', the timestamp
+// keeps it out of the pick set for the retry cooldown.
+func MarkAuditAttempt(ctx context.Context, pool *pgxpool.Pool, id string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE context_blocks SET sensitivity_audited_at = now()
+		  WHERE id = $1 AND sensitivity_source = 'default'`, id)
+	if err != nil {
+		return fmt.Errorf("store: mark audit attempt: %w", err)
+	}
+	return nil
+}
+
+// AuditProgress aggregates the classification state of the home scope for
+// the status surface: rows per sensitivity_source plus the pending count
+// (source='default' — what a full audit run still has in front of it).
+func AuditProgress(ctx context.Context, pool *pgxpool.Pool, homeScope string) (pending int, bySource map[string]int, err error) {
+	rows, err := pool.Query(ctx,
+		`SELECT sensitivity_source, count(*) FROM context_blocks
+		 WHERE NOT is_archived AND scope = $1
+		 GROUP BY sensitivity_source`, homeScope)
+	if err != nil {
+		return 0, nil, fmt.Errorf("store: audit progress: %w", err)
+	}
+	defer rows.Close()
+
+	bySource = make(map[string]int, 4)
+	for rows.Next() {
+		var source string
+		var n int
+		if err := rows.Scan(&source, &n); err != nil {
+			return 0, nil, fmt.Errorf("store: audit progress scan: %w", err)
+		}
+		bySource[source] = n
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, fmt.Errorf("store: audit progress rows: %w", err)
+	}
+	return bySource["default"], bySource, nil
 }

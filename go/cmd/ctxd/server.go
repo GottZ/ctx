@@ -50,7 +50,7 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 	storeH := handler.NewStoreHandler(pool, cfgStore)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
 	graphH := handler.NewGraphHandler(pool, cfgStore)
-	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool)
+	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler)
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)
 	digestH := handler.NewDigestHandler(pool)

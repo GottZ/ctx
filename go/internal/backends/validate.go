@@ -198,6 +198,16 @@ func validateRoles(b *Backend) (warnings []string, errs []FieldError) {
 		}
 	}
 
+	// The classify role reads block content BEFORE the block is classified —
+	// its prompt is potential credentials by definition. Unlike embed there
+	// is NO metadata escape hatch: audit content never crosses the locality
+	// border, full-trust ZDR included (G41; the trust gate alone would let a
+	// full-trust external backend through).
+	if b.HasRole(RoleClassify) && b.Locality == LocalityExternal {
+		errs = append(errs, FieldError{"roles",
+			"classify role is hard-local — an external backend can never audit unclassified block content"})
+	}
+
 	// Dream evaluation on a local (CPU-class) backend: DreamTimeout tears at
 	// CPU token rates → cooldown churn + corrupted back-off statistics
 	// (risk 6.5). Warning, not error — policy is data.
