@@ -11,11 +11,31 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/rerank"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 )
+
+// backendBootstrapInput assembles the env-era tuples for the one-time pool
+// bootstrap from the effective config snapshot. Lives here (not in
+// internal/backends) because backends cannot import config — config already
+// imports backends for the tuple type.
+func backendBootstrapInput(c *config.Config) backends.BootstrapInput {
+	return backends.BootstrapInput{
+		Chat:           c.ChatBackend(),
+		Fallback:       c.ChatFallbackBackend(),
+		Embed:          c.EmbedBackend(),
+		Dream:          c.DreamBackend(),
+		DreamEmbed:     c.DreamEmbedBackend(),
+		RerankHost:     c.Rerank.Host,
+		RerankKey:      c.Rerank.APIKey,
+		RerankModel:    c.Rerank.Model,
+		RerankTimeoutS: int(rerank.Timeout.Seconds()),
+	}
+}
 
 // defaultListenAddr mirrors the registry default for server.listen_addr
 // (pinned against drift by TestBootDefaults). The -health mode needs it
@@ -115,6 +135,19 @@ func main() {
 	cfgStore := config.NewStore(effCfg)
 	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...)
 
+	// F3-P1: backend pool. The one-time bootstrap reads the EFFECTIVE
+	// snapshot (X1: settings>env precedence, never raw os.Getenv) and seeds
+	// context_backends when empty; afterwards the TABLE is the source of
+	// truth. Both steps are non-fatal — P1 has no pool consumer yet, and a
+	// degraded pool must not block a boot that served queries yesterday.
+	backendPool := backends.NewPool(pool, settings.BackendSecretResolver(pool))
+	if _, err := backends.Bootstrap(ctx, pool, backendBootstrapInput(cfgStore.Snapshot())); err != nil {
+		slog.Error("backends: bootstrap failed", "error", err)
+	}
+	if err := backendPool.Reload(ctx); err != nil {
+		slog.Error("backends: initial reload failed — pool starts empty", "error", err)
+	}
+
 	// Backfill temporal dimensions for blocks missing from context_temporal.
 	if n, err := store.BackfillTemporal(ctx, pool); err != nil {
 		slog.Error("temporal backfill failed", "error", err)
@@ -131,7 +164,7 @@ func main() {
 	// DreamParallelism from the effective snapshot (validated + clamped;
 	// both fix the worker-goroutine set once in Run). ReconnectDelay keeps
 	// its zero value = pgxlisten 5s default.
-	scheduler := events.NewScheduler(pool, cfgStore, events.StartupConfig{
+	scheduler := events.NewScheduler(pool, cfgStore, backendPool, events.StartupConfig{
 		DSN:              cc.DSN(),
 		DreamEnabled:     effCfg.Dream.Enabled,
 		DreamParallelism: effCfg.Dream.Parallelism,
@@ -141,7 +174,7 @@ func main() {
 	// HTTP server. ListenAddr is restart-only, read once from the effective
 	// snapshot (== env value; the settings overlay rejects restart-only keys).
 	listenAddr := cfgStore.Snapshot().Server.ListenAddr
-	router := NewRouter(pool, cfgStore, scheduler)
+	router := NewRouter(pool, cfgStore, scheduler, backendPool)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           router,

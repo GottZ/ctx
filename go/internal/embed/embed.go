@@ -146,7 +146,7 @@ func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx 
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("embed: unexpected status %d: %s", resp.StatusCode, string(errBody))
+		return nil, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
 	}
 
 	var result ollamaEmbedResponse
@@ -187,7 +187,7 @@ func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]floa
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("embed: unexpected status %d: %s", resp.StatusCode, string(errBody))
+		return nil, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
 	}
 
 	var result openAIEmbedResponse

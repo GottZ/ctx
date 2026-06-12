@@ -95,6 +95,7 @@ type dreamCycleFunc func(ctx context.Context, pool *pgxpool.Pool, embedB, chatB 
 type Scheduler struct {
 	pool          *pgxpool.Pool
 	cfg           *config.Store // hot config: one Snapshot per cycle/run
+	backendPool   *backends.Pool // F3 pool; listener reloads it on context_backends NOTIFYs
 	startup       StartupConfig
 	runCycle      dreamCycleFunc
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
@@ -162,11 +163,12 @@ func (s *Scheduler) getDreamThrottleInterval() time.Duration {
 
 // NewScheduler creates a new Scheduler. store is the runtime-config snapshot
 // source for everything hot; startup carries the restart-only parameters.
-func NewScheduler(pool *pgxpool.Pool, store *config.Store, startup StartupConfig) *Scheduler {
+func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends.Pool, startup StartupConfig) *Scheduler {
 	return &Scheduler{
-		pool:     pool,
-		cfg:      store,
-		startup:  startup,
+		pool:        pool,
+		cfg:         store,
+		backendPool: backendPool,
+		startup:     startup,
 		runCycle: dream.RunDreamCycle,
 		runDone:  make(chan struct{}),
 	}
@@ -207,7 +209,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	)
 
 	// Start pgxlisten in a separate goroutine (auto-reconnect, backlog handler).
-	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s, s.pool, s.cfg)
+	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s, s.pool, s.cfg, s.backendPool)
 	go func() {
 		if err := listener.Listen(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("scheduler: pgxlisten fatal error", "error", err)

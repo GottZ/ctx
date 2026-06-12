@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Context Store Benchmark Test Suite
-# Usage: ./test.sh              — runs T01-T12 + T19-T20 (system tests only)
+# Usage: ./test.sh              — runs T01-T12 + T19-T21 (system tests only)
 #        ./test.sh --with-ollama — runs all tests (adds T13-T18 retrieval + MCP)
 #
 # Test IDs are append-only: T19 (graph) and T20 (settings) live in Part 1
@@ -234,15 +234,15 @@ fi
 # T07 SCHEMA_INTEGRITY — counts exclude manual snapshot tables (name pattern "*_snapshot_*")
 # which accumulate over time (e.g. context_dream_links_snapshot_20260423_prev5).
 # 36 columns since M044 (ts_de/ts_en bilingual generated tsvectors) + M049
-# (dream_eval_count back-off counter). 17 tables since M051/M052
-# (context_settings, context_settings_audit, context_secrets).
+# (dream_eval_count back-off counter). 18 tables since M051/M052/M053
+# (context_settings, context_settings_audit, context_secrets, context_backends).
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "17" ]] && [[ "$col_count" == "36" ]]; then
+if [[ "$table_count" == "18" ]] && [[ "$col_count" == "36" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 17 tables + 36 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 18 tables + 36 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
@@ -380,6 +380,29 @@ else
     else
       fail "$T" "put_source=${t20_src:-unparseable} delete_source=${t20_dsrc:-unparseable}"
     fi
+  fi
+fi
+
+# T21 BACKEND_POOL (F3-P1/M053) — bootstrap seeded the pool from the env-era
+# config, backend-list is admin-gated (it discloses egress topology), and the
+# rows carry sane trust/locality. No LLM needed: pure pool/manage surface.
+T="T21 BACKEND_POOL"
+if [[ -z "${CTX_ADMIN_KEY:-}" ]]; then
+  fail "$T" "CTX_ADMIN_KEY not set in .env (host-only admin key)"
+else
+  t21_403=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$WEBHOOK/api/manage" \
+    -H "Content-Type: application/json" -H "X-Context-Key: $KEY_PRIVATE" \
+    -d '{"action":"backend-list"}' 2>/dev/null)
+  t21_count=$(curl -s --max-time 10 -X POST "$WEBHOOK/api/manage" \
+    -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
+    -d '{"action":"backend-list"}' 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['backends']) if d.get('success') else 0)" 2>/dev/null)
+  if [[ "$t21_403" != "403" ]]; then
+    fail "$T" "non-admin backend-list expected 403, got $t21_403"
+  elif [[ -z "$t21_count" || "$t21_count" -lt 3 ]]; then
+    fail "$T" "expected >=3 bootstrapped backends, got ${t21_count:-unparseable}"
+  else
+    pass "$T (403 enforced, $t21_count pool rows)"
   fi
 fi
 

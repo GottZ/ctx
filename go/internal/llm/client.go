@@ -209,7 +209,9 @@ func chatOllama(ctx context.Context, host, apiKey, model string, think *bool, sy
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("llm: unexpected status %d: %s", resp.StatusCode, string(errBody))
+		// Typed wrap (F3-P1): errors.As reaches the status code for the
+		// failover classifier; the rendered string stays byte-identical.
+		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
 	}
 
 	var result ollamaChatResponse
@@ -274,7 +276,7 @@ func chatOpenAI(ctx context.Context, host, apiKey, model string, think *bool, sy
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("llm: unexpected status %d: %s", resp.StatusCode, string(errBody))
+		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
 	}
 
 	var result openAIChatResponse

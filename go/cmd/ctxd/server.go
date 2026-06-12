@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
@@ -24,7 +25,7 @@ const (
 // is the runtime-config snapshot store: every config-consuming handler reads
 // one snapshot per request from it (F1-W4–W7) — no handler holds a boot copy,
 // so a config replace is live from the next request on.
-func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler) *chi.Mux {
+func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -49,7 +50,7 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 	storeH := handler.NewStoreHandler(pool, cfgStore)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
 	graphH := handler.NewGraphHandler(pool, cfgStore)
-	manageH := handler.NewManageHandler(pool, cfgStore, scheduler)
+	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool)
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)
 	digestH := handler.NewDigestHandler(pool)

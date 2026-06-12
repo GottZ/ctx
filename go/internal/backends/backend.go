@@ -1,10 +1,11 @@
-// Package backends holds the Backend tuple type: the indivisible connection
-// descriptor of one inference role (chat, chat-fallback, embed, dream,
-// dream-embed). Host and Protocol select the wire path together (/api/chat vs
+// Package backends holds the Backend tuple type and (since F3-P1) the
+// declarative backend pool: context_backends rows loaded into an immutable
+// atomic snapshot, role-filtered priority chains, the trust×sensitivity
+// permission matrix, the failover error catalog and per-backend health.
+// Host and Protocol select the wire path together (/api/chat vs
 // /v1/chat/completions) — they only ever travel as one value, never as loose
-// parameters (F1 inventory §2.3). F3 grows this package into the backend
-// pool/resolver (named backends, health, trust levels); the type is the
-// landing zone.
+// parameters (F1 inventory §2.3). The F1 tuple fields stay untouched; F3
+// extends the SAME type additively (masterplan K4 — no second type).
 //
 // Log hygiene is by construction: every serialization path masks APIKey.
 // LogValue covers slog, String covers %v/%+v/%s, GoString covers %#v (fmt uses
@@ -15,8 +16,61 @@ package backends
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
+
+// Core roles of the routing table (design 03 §2.2). roles entries outside
+// this set are allowed (proxy vision) but produce API warnings; model_map
+// must cover every core role a backend carries.
+const (
+	RoleSynthesis  = "synthesis"
+	RoleTranslate  = "translate"
+	RoleEmbed      = "embed"
+	RoleRerank     = "rerank"
+	RoleDream      = "dream"
+	RoleDigest     = "digest"
+	RoleChat       = "chat"
+	RoleDreamEmbed = "dream-embed" // bootstrap split when CTX_DREAM_EMBED_* diverges
+)
+
+// CoreRoles lists the roles the validation treats as known. dream-embed is
+// included: it exists so the bootstrap never silently drops the historical
+// query-embed vs dream-embed split.
+var CoreRoles = []string{
+	RoleSynthesis, RoleTranslate, RoleEmbed, RoleRerank,
+	RoleDream, RoleDigest, RoleChat, RoleDreamEmbed,
+}
+
+// embedRoles write into the shared vector(1024) space — external backends
+// carrying them are hard-blocked without an explicit equivalence proof
+// (index corruption by foreign quantization is irreversible at scale).
+var embedRoles = map[string]bool{RoleEmbed: true, RoleDreamEmbed: true}
+
+// Provider classes refine wire behavior beyond the protocol (OpenRouter:
+// forced zdr/deny, usage.cost, no-providers classification).
+const (
+	ProviderGeneric    = "generic"
+	ProviderLlamaCpp   = "llamacpp"
+	ProviderOpenRouter = "openrouter"
+)
+
+// Localities for the egress audit dimension; validated against base_url.
+const (
+	LocalityLocal    = "local"
+	LocalityLAN      = "lan"
+	LocalityExternal = "external"
+)
+
+// ModelSpec is one model_map value: which model a role resolves to on this
+// backend, plus per-(backend, role) parameter overrides (top_p, top_k, min_p,
+// think, …). The JSONB short form "model-id" normalizes to ModelSpec{Model:…}
+// on load; the object form exists from day one so no row format migration is
+// ever needed (F3 review).
+type ModelSpec struct {
+	Model  string         `json:"model"`
+	Params map[string]any `json:"params,omitempty"`
+}
 
 // Protocol selects the wire dialect of a backend.
 type Protocol string
@@ -47,23 +101,77 @@ func (t ThinkMode) Ptr() *bool {
 	}
 }
 
-// Backend is the indivisible connection tuple of one inference role.
+// Backend is the indivisible connection tuple of one inference role (F1
+// fields) extended by the pool row dimensions (F3, additive — K4). F1
+// consumers keep reading Host/Model/NumCtx/Think/Timeout from config-derived
+// tuples; pool consumers (P2+) resolve per role via ModelFor/TimeoutFor.
 type Backend struct {
+	// Host is the connection base URL (DDL column: base_url).
 	Host string
 	// APIKey carries `json:"-"` because encoding/json ignores Stringer and
 	// would serialize the raw key — config.Redacted is the only legitimate
-	// marshal path for backend tuples.
+	// marshal path for backend tuples. Pool rows resolve it in-memory from
+	// the F2 secret named by APIKeyRef; it never exists in context_backends.
 	APIKey   string `json:"-"`
 	Protocol Protocol
 	// Model empty on a fallback backend = inherit the primary model (today's
-	// semantics). The field exists now so F3 model remapping is pure fill-in.
+	// semantics). Pool consumers use ModelFor(role) instead.
 	Model  string
 	NumCtx int
-	// Think is ignored by embed/rerank roles.
+	// Think is ignored by embed/rerank roles. Pool rows carry the toggle as
+	// model_map params.think per role.
 	Think ThinkMode
-	// Timeout is a per-backend override; 0 = call-site default. F1: only the
-	// chat fallback sets it (CPU synthesis needs minutes, not seconds).
+	// Timeout is a per-backend override; 0 = call-site default. Pool
+	// consumers use TimeoutFor(role, def) instead.
 	Timeout time.Duration
+
+	// --- F3 pool row fields (zero values on F1 config-derived tuples) ---
+
+	ID            string
+	Name          string
+	ProviderClass string
+	// APIKeyRef names the F2 secret this backend authenticates with; "" =
+	// keyless. The NAME is harmless and shows up in list responses — the
+	// resolved value only ever lives in APIKey (in-memory, masked).
+	APIKeyRef    string
+	Trust        Trust
+	Locality     string
+	Roles        []string
+	ModelMap     map[string]ModelSpec
+	Timeouts     map[string]int // role → seconds; missing = code default of the role
+	Priority     int
+	Enabled      bool
+	ExtraHeaders map[string]string
+	ExtraBody    map[string]any
+	Limits       map[string]any
+	Metadata     map[string]any
+}
+
+// HasRole reports whether the backend carries the given role.
+func (b *Backend) HasRole(role string) bool {
+	for _, r := range b.Roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+// ModelFor resolves the model spec for a role: exact role key, then
+// "default", then the zero spec (caller decides whether that is an error).
+func (b *Backend) ModelFor(role string) ModelSpec {
+	if spec, ok := b.ModelMap[role]; ok {
+		return spec
+	}
+	return b.ModelMap["default"]
+}
+
+// TimeoutFor resolves the per-role timeout override, falling back to def.
+func (b *Backend) TimeoutFor(role string, def time.Duration) time.Duration {
+	if secs, ok := b.Timeouts[role]; ok && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return def
 }
 
 // maskedAPIKey is presence-only: backends never expose key material or
@@ -76,9 +184,12 @@ func (b Backend) maskedAPIKey() string {
 }
 
 // LogValue implements slog.LogValuer: structured logging of a Backend can
-// never leak the APIKey, regardless of call-site discipline.
+// never leak the APIKey, regardless of call-site discipline. Pool fields log
+// identity + policy, never ExtraHeaders values (denylist-validated, but the
+// log path stays leak-free even against a missed pattern).
 func (b Backend) LogValue() slog.Value {
 	return slog.GroupValue(
+		slog.String("name", b.Name),
 		slog.String("host", b.Host),
 		slog.String("api_key", b.maskedAPIKey()),
 		slog.String("protocol", string(b.Protocol)),
@@ -86,14 +197,20 @@ func (b Backend) LogValue() slog.Value {
 		slog.Int("num_ctx", b.NumCtx),
 		slog.String("think", string(b.Think)),
 		slog.Duration("timeout", b.Timeout),
+		slog.String("trust", string(b.Trust)),
+		slog.String("locality", b.Locality),
+		slog.String("roles", strings.Join(b.Roles, ",")),
+		slog.Int("priority", b.Priority),
+		slog.Bool("enabled", b.Enabled),
 	)
 }
 
 // String implements fmt.Stringer (covers %v, %+v, %s) with the same masking.
 func (b Backend) String() string {
 	return fmt.Sprintf(
-		"Backend{Host:%q, APIKey:%q, Protocol:%q, Model:%q, NumCtx:%d, Think:%q, Timeout:%s}",
-		b.Host, b.maskedAPIKey(), string(b.Protocol), b.Model, b.NumCtx, string(b.Think), b.Timeout,
+		"Backend{Name:%q, Host:%q, APIKey:%q, Protocol:%q, Model:%q, NumCtx:%d, Think:%q, Timeout:%s, Trust:%q, Locality:%q, Roles:%q, Priority:%d, Enabled:%t}",
+		b.Name, b.Host, b.maskedAPIKey(), string(b.Protocol), b.Model, b.NumCtx, string(b.Think), b.Timeout,
+		string(b.Trust), b.Locality, strings.Join(b.Roles, ","), b.Priority, b.Enabled,
 	)
 }
 

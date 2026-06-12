@@ -4,9 +4,11 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/util"
@@ -60,23 +62,45 @@ func (h *WriteHandler) HandleBacklog(ctx context.Context, channel string, conn *
 
 // SettingsWriteHandler reloads the config snapshot on ctx_settings_write
 // notifications (G16 hot-reload path for psql/break-glass edits; redundant
-// but idempotent for API writes, whose handlers reload after commit).
+// but idempotent for API writes, whose handlers reload after commit). Since
+// F3-P1 the 053 trigger fires the SAME channel for context_backends rows —
+// the payload's entity field dispatches to the backend-pool reload instead.
 type SettingsWriteHandler struct {
-	pool *pgxpool.Pool
-	cfg  *config.Store
+	pool        *pgxpool.Pool
+	cfg         *config.Store
+	backendPool *backends.Pool
 }
 
 // NewSettingsWriteHandler creates the hot-reload notification handler.
-func NewSettingsWriteHandler(pool *pgxpool.Pool, cfg *config.Store) *SettingsWriteHandler {
-	return &SettingsWriteHandler{pool: pool, cfg: cfg}
+func NewSettingsWriteHandler(pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool) *SettingsWriteHandler {
+	return &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool}
+}
+
+// settingsNotifyPayload mirrors the notify_settings_write() trigger payload
+// (identity + op, never values).
+type settingsNotifyPayload struct {
+	Entity string `json:"entity"`
 }
 
 // HandleNotification is called by pgxlisten for each NOTIFY on ctx_settings_write.
-// The reload only READS context_settings/context_secrets — it can never write
-// to them, so no notify loop is possible (§6.5 review anchor).
+// The reload only READS context_settings/context_secrets/context_backends —
+// it can never write to them, so no notify loop is possible (§6.5 review
+// anchor; the backend-pool reload holds the same contract).
 func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notification *pgconn.Notification, conn *pgx.Conn) error {
-	slog.Info("listener: settings write — reloading config snapshot",
+	slog.Info("listener: settings write — reloading snapshot",
 		"payload", util.TruncateRunesWithSuffix(notification.Payload, "...", 200))
+
+	var p settingsNotifyPayload
+	_ = json.Unmarshal([]byte(notification.Payload), &p)
+	if p.Entity == "context_backends" {
+		if h.backendPool == nil {
+			return nil
+		}
+		if err := h.backendPool.Reload(ctx); err != nil {
+			slog.Warn("listener: backend pool reload failed — previous snapshot stays active", "error", err)
+		}
+		return nil
+	}
 	if err := settings.Reload(ctx, h.pool, h.cfg); err != nil {
 		// Reload already logged the cause; the previous snapshot stays active.
 		// Never propagate: pgxlisten treats handler errors as connection-level.
@@ -85,13 +109,18 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 	return nil
 }
 
-// HandleBacklog reloads unconditionally after a reconnect — a settings write
-// during the disconnect window would otherwise stay invisible until the next
-// write or restart.
+// HandleBacklog reloads unconditionally after a reconnect — a settings or
+// backend write during the disconnect window would otherwise stay invisible
+// until the next write or restart. Entity is unknown here: reload both.
 func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string, conn *pgx.Conn) error {
-	slog.Info("listener: processing settings backlog, reloading config snapshot")
+	slog.Info("listener: processing settings backlog, reloading snapshots")
 	if err := settings.Reload(ctx, h.pool, h.cfg); err != nil {
 		slog.Warn("listener: settings backlog reload failed — previous snapshot stays active", "error", err)
+	}
+	if h.backendPool != nil {
+		if err := h.backendPool.Reload(ctx); err != nil {
+			slog.Warn("listener: backend pool backlog reload failed — previous snapshot stays active", "error", err)
+		}
 	}
 	return nil
 }
@@ -100,7 +129,7 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 // Uses a dedicated pgx.Conn (NOT from pool) as required by pgxlisten.
 // pool/cfg feed the settings hot-reload handler; both come from the scheduler
 // that owns this listener.
-func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *Scheduler, pool *pgxpool.Pool, cfg *config.Store) *pgxlisten.Listener {
+func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *Scheduler, pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool) *pgxlisten.Listener {
 	if reconnectDelay == 0 {
 		reconnectDelay = defaultReconnectDelay
 	}
@@ -117,7 +146,7 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 
 	handler := &WriteHandler{scheduler: scheduler}
 	listener.Handle(channelBlockWrite, handler)
-	listener.Handle(channelSettingsWrite, &SettingsWriteHandler{pool: pool, cfg: cfg})
+	listener.Handle(channelSettingsWrite, &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool})
 
 	return listener
 }

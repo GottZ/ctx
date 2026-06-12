@@ -101,7 +101,7 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("rerank: unexpected status %d: %s", resp.StatusCode, string(errBody))
+		return nil, fmt.Errorf("rerank: %w", httpx.NewStatusError(resp, errBody))
 	}
 
 	var result rerankResponse

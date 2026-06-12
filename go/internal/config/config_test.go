@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -53,7 +54,7 @@ func TestDreamBackendInheritance(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cfg, _ := cfgFrom(t, c.vals)
-			if got := cfg.DreamBackend(); got != c.want {
+			if got := cfg.DreamBackend(); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("DreamBackend() = %+v, want %+v", got, c.want)
 			}
 		})
@@ -74,7 +75,7 @@ func TestDreamEmbedBackendInheritance(t *testing.T) {
 		Host: "http://embed.example:8081", Protocol: backends.ProtocolOpenAI,
 		Model: "dream-embed-4b", NumCtx: 2048,
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("DreamEmbedBackend() = %+v, want %+v", got, want)
 	}
 }
@@ -93,7 +94,7 @@ func TestDreamBackoffConversion(t *testing.T) {
 		Mode: "linear", Factor: 2.5, Grace: 3,
 		MinHours: 6, CapHours: 240, InertOffset: 4,
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("DreamBackoff() = %+v, want %+v", got, want)
 	}
 }

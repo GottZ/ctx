@@ -214,6 +214,7 @@ ctx stats     # Block count, categories, storage
 | `ctx statusline` | Claude Code status bar |
 | `ctx settings [list\|get\|set\|unset]` | Runtime settings overrides (alias `cfg`; **admin key**, reads included). TTY: table, pipe: JSON; `set` takes the value as argument or stdin; API failures (422/409/403) exit 1 with the server's reason |
 | `ctx secrets [list\|set\|rotate\|rm]` | Sealed provider credentials (alias `sec`; **admin key**). Write-only: values go in via stdin ONLY (`echo "$KEY" \| ctx secrets set <name>` — an argv value is rejected, it would leak via /proc and shell history); list shows metadata + `referenced_by`, never values; `rm` exits 1 with a 409 while settings reference the secret |
+| `ctx backends [list\|create\|update\|delete\|test]` | LLM backend pool (**admin key**). TTY: table with live status, pipe: JSON; `create`/`update` take a JSON spec as argument or stdin; API failures exit 1 |
 | `ctx mcp [add\|list\|delete]` | Manage MCP OAuth client registrations |
 | `ctx keys create <label> --home <scope>` | Provision API key (v2.0.0: `--home` required, no default scope; admin key required since 052) |
 | `ctx keys [list\|delete]` | List / revoke provisioned API keys (admin key required since 052) |
@@ -247,7 +248,7 @@ Store ──► Extract Times ──► Hash NOOP ──────────
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 52 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
+**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 53 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
 
 ### Key environment variables
 
@@ -378,6 +379,26 @@ curl -s -X PUT "$CTX/api/settings/rerank.blend_weight" \
 # → {"success":true,"key":"rerank.blend_weight","value":0.6,"source":"db",
 #    "previous":{"value":0.5,"source":"env"},"warnings":[]}
 ```
+
+### Backend pool (F3, migration 053)
+
+`context_backends` replaces the hardwired primary+fallback pair with a declarative, role-routed, priority-ordered pool. Each row is one backend: `base_url`, wire `protocol` (`openai`/`ollama`/`rerank`), `provider_class` (`generic`/`llamacpp`/`openrouter`), a **trust level**, an egress `locality`, a `roles` list (`synthesis`, `translate`, `embed`, `rerank`, `dream`, `digest`, `chat`, free-form), a per-role `model_map` (string short form or `{"model":…,"params":{…}}`), per-role `timeouts`, `priority` and `enabled`. Order/priority are pure DATA — no code path references backend names or priority constants.
+
+On first boot with an empty table, ctxd seeds it from the effective config snapshot (settings > env precedence); afterwards the **table is the source of truth** and the `CTX_*_HOST` env vars only feed that one-time bootstrap.
+
+**Trust × sensitivity matrix (fail-closed).** A backend with trust `T` may receive content of sensitivity `S` iff `rank(S) ≤ maxRank(T)` — `full-trust` ≥ credentials, `no-credentials` ≥ personal, `non-personal` ≥ internal, `public` = public only. Empty/unknown sensitivity counts as `credentials`; an empty chain is an error, **never a silent escalation across trust borders**. (Block sensitivity arrives with migration 055; until then nothing consumes the chain.)
+
+Manage actions (all **admin-gated, reads included** — the list discloses egress topology):
+
+```
+POST /api/manage {"action":"backend-list"}                 # rows + live status (effective_state, cooldown, sanitized last_error)
+POST /api/manage {"action":"backend-create","data":{…}}    # full validation, see below
+POST /api/manage {"action":"backend-update","id":…,"data":{…}}   # single-field patch
+POST /api/manage {"action":"backend-delete","id":…}        # hard delete (llmlog history stays readable)
+POST /api/manage {"action":"backend-test","id":…,"data":{"probe":"chat"}}  # reachability dry-run
+```
+
+Validation guards (create AND update, `422` with field errors): credential-carrier headers in `extra_headers` (`Authorization`, `Cookie`, `*-key`, `*-token`, …) and credential-semantic `extra_body` fields are rejected — provider keys go through `api_key_ref`, the *name* of a sealed F2 secret, resolved in-memory only; `locality` is cross-validated against `base_url` (a publicly routable host must be `external` — the egress audit depends on it); embed roles on external backends are blocked without `metadata.embed_equivalence_verified=true` (foreign quantization corrupts the shared vector space irreversibly). Raising `trust` (create above `public`, or update toward `full-trust`) requires `confirm_trust_elevation:true`. Every mutation reloads the pool snapshot synchronously — `backend-update {"enabled":false}` is an instant brake, no restart; psql edits converge via the 053 NOTIFY trigger.
 
 ## Building
 

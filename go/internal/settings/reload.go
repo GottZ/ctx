@@ -26,11 +26,34 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
 )
+
+// BackendSecretResolver builds the api_key_ref resolver for the backend
+// pool (F3-P1). The sealbox is constructed per call so a master-key rotation
+// (§3.6 sweep) needs no resolver rebuild; errors stay name- and value-free
+// by the store.ResolveSecret contract. Backends with unresolvable refs stay
+// keyless in the snapshot (401 → ClassAuth → reload self-heal).
+func BackendSecretResolver(pool *pgxpool.Pool) backends.SecretResolver {
+	return func(ctx context.Context, name string) (string, error) {
+		if strings.TrimSpace(os.Getenv(sealbox.EnvKey)) == "" {
+			return "", fmt.Errorf("secrets master key not configured")
+		}
+		box, err := sealbox.FromEnv()
+		if err != nil {
+			return "", fmt.Errorf("secrets master key unusable")
+		}
+		plaintext, err := store.ResolveSecret(ctx, pool, box, name, store.GlobalScope)
+		if err != nil {
+			return "", err
+		}
+		return string(plaintext), nil
+	}
+}
 
 // EnvDisable is the kill switch: CTX_SETTINGS_DISABLE=1 ignores the whole
 // override layer (boot AND reload). Env-only by design — the switch that

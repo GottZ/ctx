@@ -144,7 +144,7 @@ func TestDreamLoopSeesReplacedConfigNextCycle(t *testing.T) {
 	cfgB := captureTestConfig(t, srvB.srv.URL, "dream-model-b", "http://embed-b.example")
 
 	store := config.NewStore(cfgA)
-	s := NewScheduler(deadPool(t), store, StartupConfig{})
+	s := NewScheduler(deadPool(t), store, nil, StartupConfig{})
 
 	got := make(chan cycleObs, 4)
 	release := make(chan struct{})

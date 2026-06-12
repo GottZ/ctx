@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,14 +27,17 @@ type ManageHandler struct {
 	pool            *pgxpool.Pool
 	cfg             ConfigStore
 	dreamController DreamController
+	backendPool     *backends.Pool
 }
 
 // NewManageHandler creates a new ManageHandler. cfg is the runtime-config
 // snapshot source (F1-W6): dream-stats renders the back-off policy from a
 // per-request snapshot, so /api/manage shows the generation the scheduler
 // actually runs — not a boot copy that would lie after a settings flip.
-func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController) *ManageHandler {
-	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController}
+// backendPool feeds the backend-* actions (F3-P1) including the synchronous
+// post-mutation reload.
+func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool) *ManageHandler {
+	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool}
 }
 
 type manageRequest struct {
@@ -99,23 +103,42 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.handleDreamReview(w, r, authResult)
 	case "dream-mode":
 		h.handleDreamMode(w, r, req)
+	case "mcp-client-create", "mcp-client-list", "mcp-client-delete":
+		h.dispatchMCPClientAction(w, r, authResult, req)
+	case "backend-create", "backend-update", "backend-delete", "backend-list", "backend-test":
+		h.dispatchBackendAction(w, r, authResult, req)
+	case "api-key-create", "api-key-list", "api-key-delete":
+		h.dispatchAPIKeyAction(w, r, req)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Unknown action",
+		})
+	}
+}
+
+// dispatchMCPClientAction fans the mcp-client-* actions out (split from
+// HandleManage's switch for cyclomatic budget; all admin-gated upstream).
+func (h *ManageHandler) dispatchMCPClientAction(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+	switch req.Action {
 	case "mcp-client-create":
-		h.handleMCPClientCreate(w, r, authResult, req)
+		h.handleMCPClientCreate(w, r, ar, req)
 	case "mcp-client-list":
 		h.handleMCPClientList(w, r)
 	case "mcp-client-delete":
 		h.handleMCPClientDelete(w, r, req)
+	}
+}
+
+// dispatchAPIKeyAction fans the api-key-* actions out (same split).
+func (h *ManageHandler) dispatchAPIKeyAction(w http.ResponseWriter, r *http.Request, req manageRequest) {
+	switch req.Action {
 	case "api-key-create":
 		h.handleApiKeyCreate(w, r, req)
 	case "api-key-list":
 		h.handleApiKeyList(w, r)
 	case "api-key-delete":
 		h.handleApiKeyDelete(w, r, req)
-	default:
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false,
-			"error":   "Unknown action",
-		})
 	}
 }
 
@@ -126,7 +149,12 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 func actionRequiresAdmin(req manageRequest) bool {
 	switch req.Action {
 	case "api-key-create", "api-key-list", "api-key-delete",
-		"mcp-client-create", "mcp-client-list", "mcp-client-delete":
+		"mcp-client-create", "mcp-client-list", "mcp-client-delete",
+		// backend-* in full (reads included): the list discloses egress
+		// topology, create/update without the gate would be a corpus
+		// exfiltration/SSRF API (F3 risk R1).
+		"backend-create", "backend-update", "backend-delete",
+		"backend-list", "backend-test":
 		return true
 	case "dream-mode":
 		return isDreamModeMutation(req)
