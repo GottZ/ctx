@@ -21,6 +21,7 @@ import (
 	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
@@ -316,6 +317,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 		case <-embedCacheTicker.C:
 			s.runEmbedCacheEviction(ctx)
+			s.runLLMLogRetention(ctx)
 		}
 	}
 }
@@ -413,6 +415,27 @@ func (s *Scheduler) runEmbedCacheEviction(ctx context.Context) {
 	}
 	if removed > 0 {
 		slog.Info("scheduler: embed cache evicted", "rows", removed)
+	}
+}
+
+// runLLMLogRetention NULLs context_llm_log prompt/response bodies older than
+// the configured retention (masterplan E4 Body-NULLing — the telemetry row
+// survives). Shares the embed-cache janitor tick. retention=0 makes
+// EvictBodies a no-op (bodies kept forever).
+func (s *Scheduler) runLLMLogRetention(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in llmlog retention", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+	days := s.cfg.Snapshot().Scheduler.LLMLogRetentionDays
+	nulled, err := llmlog.EvictBodies(ctx, s.pool, days)
+	if err != nil {
+		slog.Warn("scheduler: llmlog retention failed", "error", err)
+		return
+	}
+	if nulled > 0 {
+		slog.Info("scheduler: llmlog bodies evicted", "rows", nulled, "retention_days", days)
 	}
 }
 

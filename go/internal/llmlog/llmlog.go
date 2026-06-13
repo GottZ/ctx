@@ -7,6 +7,7 @@ package llmlog
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -60,6 +61,37 @@ func (e Entry) Slimmed() Entry {
 		e.ResponseContent = ""
 	}
 	return e
+}
+
+// EvictBodies implements time-based body retention (masterplan E4): after
+// retentionDays, the plaintext prompt/response bodies (request_system,
+// request_user, response_content) are NULLed while the rest of the row —
+// pipeline, model, tokens, cost, block_ids, backend/trust/locality — survives.
+// The egress audit trace stays ID-exact and lossless; only the hottest
+// plaintext shadow corpus is dropped. This is Body-NULLing, NOT a chunk drop:
+// the retention policy must never destroy the audit (E4 user decision).
+//
+// retentionDays <= 0 disables retention entirely (bodies kept forever — the
+// operator opts in to unlimited). The IS NOT NULL guard makes a re-run
+// idempotent: already-evicted rows are skipped, so the periodic janitor never
+// rewrites long-settled chunks. Returns the number of rows NULLed.
+func EvictBodies(ctx context.Context, pool *pgxpool.Pool, retentionDays int) (int64, error) {
+	if pool == nil || retentionDays <= 0 {
+		return 0, nil
+	}
+	tag, err := pool.Exec(ctx,
+		`UPDATE context_llm_log
+		SET request_system = NULL, request_user = NULL, response_content = NULL
+		WHERE created_at < now() - make_interval(days => $1)
+		  AND (request_system IS NOT NULL
+		       OR request_user IS NOT NULL
+		       OR response_content IS NOT NULL)`,
+		retentionDays,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("llmlog: evict bodies: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // Record persists an entry asynchronously. Safe to call from request paths —

@@ -71,6 +71,8 @@ func TestRegistryStrictSet(t *testing.T) {
 		"query.rate_limit_write": true,
 		"query.rate_limit_read":  true,
 		"query.timezone":         true,
+
+		"scheduler.llmlog_retention_days": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {

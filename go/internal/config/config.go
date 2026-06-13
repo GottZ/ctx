@@ -215,6 +215,13 @@ type SchedulerConfig struct {
 	// key-keyed loader makes it settings-fillable from F2 without a special
 	// path (env:"-" skips the env source, not the lookup).
 	HomeScope string `key:"scheduler.home_scope" env:"-" default:"private" mut:"hot"`
+	// LLMLogRetentionDays is the age after which the background janitor NULLs
+	// the prompt/response BODIES in context_llm_log. The telemetry row
+	// (pipeline/model/tokens/cost/block_ids/backend/trust) survives — the
+	// egress audit stays lossless, only the plaintext shadow corpus is dropped
+	// (Body-NULLing, NOT a chunk drop; masterplan E4). 0 disables retention:
+	// bodies are kept forever (operator opt-in). The 90-day default ships safe.
+	LLMLogRetentionDays int `key:"scheduler.llmlog_retention_days" env:"CTX_LLMLOG_RETENTION_DAYS" default:"90" mut:"hot" parse:"strict"`
 }
 
 // ScopeFloor maps a scope to its minimum effective sensitivity (F3 §2.3d).
