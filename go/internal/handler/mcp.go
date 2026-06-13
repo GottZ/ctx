@@ -378,6 +378,16 @@ type responseRecorder struct {
 	statusCode int
 }
 
-func (r *responseRecorder) Header() http.Header         { return r.headers }
-func (r *responseRecorder) WriteHeader(code int)         { r.statusCode = code }
-func (r *responseRecorder) Write(b []byte) (int, error)  { r.body = append(r.body, b...); return len(b), nil }
+func (r *responseRecorder) Header() http.Header        { return r.headers }
+func (r *responseRecorder) WriteHeader(code int)        { r.statusCode = code }
+func (r *responseRecorder) Write(b []byte) (int, error) { r.body = append(r.body, b...); return len(b), nil }
+
+// Flush and SetWriteDeadline are no-ops so HandleQuery's body-heartbeat
+// (always armed when rerank is on, query.go) does not emit a "not flushable" /
+// "cannot extend write deadline" warning per internal delegation — that
+// regression alarm must stay sharp on the REAL HTTP path. The heartbeat's
+// leading-whitespace writes land in the recorded body; RFC-8259 tolerates
+// leading whitespace, so the JSON decode stays correct. Covers the MCP query
+// delegation and the F6 ctx_query tool delegation alike.
+func (r *responseRecorder) Flush()                          {}
+func (r *responseRecorder) SetWriteDeadline(time.Time) error { return nil }

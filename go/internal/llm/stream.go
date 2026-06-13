@@ -303,7 +303,12 @@ func ChatStream(ctx context.Context, host, apiKey, model string,
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("llm: unexpected status %d: %s", resp.StatusCode, string(errBody))
+		// Typed StatusError so the F3 failover classifier (backends.Classify)
+		// sees the status code — the streaming path needs the same
+		// errors.As-able error the non-streaming wire clients return, or a
+		// 502/503/504 before the first byte could never fail over (§2.3/R4).
+		// The "%w" wrap keeps the rendered string byte-identical.
+		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
 	}
 
 	return parseSSEStream(resp.Body, onEvent)

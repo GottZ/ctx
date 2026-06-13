@@ -73,7 +73,15 @@ type queryRequest struct {
 	// credentials would lock translate/synthesis failover for harmless
 	// questions, decision F3-E2). MCP query inherits via delegation.
 	Sensitivity string `json:"sensitivity,omitempty"`
+	// IncludeContent attaches a content snippet (<= maxRetrievalSnippet chars)
+	// to each source on the retrieval-only path (F6 ctx_query tool delegation).
+	// Default false ⇒ eval.sh / A-B sweep responses are byte-for-byte unchanged.
+	IncludeContent bool `json:"include_content,omitempty"`
 }
+
+// maxRetrievalSnippet caps the per-source content attached when include_content
+// is set — the same window the synthesis prompt feeds the model.
+const maxRetrievalSnippet = 1500
 
 // queryResponse is the JSON response from the query endpoint.
 type queryResponse struct {
@@ -96,12 +104,13 @@ type sourceResponse struct {
 	RerankScore      *float64 `json:"rerank_score,omitempty"`
 	RRFScoreOriginal *float64 `json:"rrf_score_original,omitempty"`
 	SupersededBy     *string  `json:"superseded_by,omitempty"`
+	Content          string   `json:"content,omitempty"` // only when include_content (F6 ctx_query)
 }
 
 // buildSourceResponses maps retrieval sources to the API response shape,
 // attaching superseded_by where the supersedes map has an entry. Shared by the
 // full-synthesis path (Step 10) and the retrieval-only path (Step 7b).
-func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]string) []sourceResponse {
+func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]string, includeContent bool) []sourceResponse {
 	out := make([]sourceResponse, len(sources))
 	for i, s := range sources {
 		out[i] = sourceResponse{
@@ -112,6 +121,13 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 			AgeDays:          s.AgeDays,
 			RerankScore:      s.RerankScore,
 			RRFScoreOriginal: s.RRFScoreOriginal,
+		}
+		if includeContent && s.Content != "" {
+			if r := []rune(s.Content); len(r) > maxRetrievalSnippet {
+				out[i].Content = string(r[:maxRetrievalSnippet])
+			} else {
+				out[i].Content = s.Content
+			}
 		}
 		if supersedesMap != nil {
 			if sl, ok := supersedesMap[s.ID]; ok && len(sl) > 0 {
@@ -757,7 +773,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		)
 		hb.finish(http.StatusOK, queryResponse{
 			Success:    true,
-			Sources:    buildSourceResponses(sources, supersedesMap),
+			Sources:    buildSourceResponses(sources, supersedesMap, req.IncludeContent),
 			Confidence: llm.ClassifyConfidence(maxScore, cfg.SynthesisSettings()),
 			Translated: translated,
 		})
@@ -797,7 +813,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	go h.logAccess(ar, results, query)
 
 	// Step 10: Build response.
-	respSources := buildSourceResponses(synthResult.Sources, supersedesMap)
+	respSources := buildSourceResponses(synthResult.Sources, supersedesMap, false)
 
 	resp := queryResponse{
 		Success:    true,

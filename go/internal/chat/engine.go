@@ -1,0 +1,532 @@
+// Package chat — engine.go is the server-side harness loop (design 06 §3.6).
+//
+// RunTurn drives the tool loop headless: it claims the session turn, persists
+// the user message, then iterates model call → tool execution → next call,
+// raising the session sensitivity HWM in lock-step so every backend pick is
+// gated on max(request, history) sensitivity (§2.3). Events flow out through the
+// Sink interface — the loop knows nothing about HTTP, so a later headless agent
+// runner can drive it with a log/collector sink (Workflow-Engine line, §2.2).
+package chat
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/store"
+)
+
+// ErrTurnBusy is returned by RunTurn when the session already has an active
+// turn (busy_until in the future). No sink event is emitted before it, so the
+// handler can still answer a clean 409 if it has not started the stream.
+var ErrTurnBusy = errors.New("chat: session has an active turn")
+
+// Sink receives the turn's events. The HTTP handler adapts an SSE writer onto
+// it; tests use a collector. An Event error (client gone) aborts the turn.
+type Sink interface {
+	Event(typ string, data any) error
+}
+
+// BackendProvider is the engine's narrow view of the F3 pool: the trust-ordered
+// chain of chat backends that may receive content of the given sensitivity,
+// best first. An empty chain is *backends.ErrNoEligibleBackend (never a silent
+// escalation). PoolProvider wraps *backends.Pool; tests inject a fake.
+type BackendProvider interface {
+	ChatChain(ctx context.Context, required backends.Sensitivity) ([]backends.Backend, error)
+}
+
+// Config carries the web-chat knobs (filled from the F1 snapshot by the handler;
+// tests fill it directly). The engine is config-package agnostic.
+type Config struct {
+	MaxIterations      int
+	MaxTokens          int
+	CompletionBudget   int
+	ToolResultMaxChars int
+	HistoryBudgetChars int
+	LLMTimeout         time.Duration
+	BusyTTL            time.Duration
+	Timezone           string
+}
+
+func (c Config) withDefaults() Config {
+	if c.MaxIterations <= 0 {
+		c.MaxIterations = 6
+	}
+	if c.MaxTokens <= 0 {
+		c.MaxTokens = 2048
+	}
+	if c.CompletionBudget <= 0 {
+		c.CompletionBudget = 8192
+	}
+	if c.HistoryBudgetChars <= 0 {
+		c.HistoryBudgetChars = 60000
+	}
+	if c.LLMTimeout <= 0 {
+		c.LLMTimeout = 900 * time.Second
+	}
+	if c.BusyTTL <= 0 {
+		c.BusyTTL = 15 * time.Minute
+	}
+	if c.Timezone == "" {
+		c.Timezone = "UTC"
+	}
+	return c
+}
+
+// Engine runs chat turns against a session store, a backend provider and the
+// tool executor.
+type Engine struct {
+	pool     *pgxpool.Pool
+	provider BackendProvider
+	exec     *Executor
+	cfg      Config
+	now      func() time.Time
+}
+
+// NewEngine builds the harness. exec carries the tool registry + executor.
+func NewEngine(pool *pgxpool.Pool, provider BackendProvider, exec *Executor, cfg Config) *Engine {
+	return &Engine{pool: pool, provider: provider, exec: exec, cfg: cfg.withDefaults(), now: time.Now}
+}
+
+// RunTurn drives one user turn to completion, emitting events through sink.
+// toolsEnabled is the request's tool toggle (the per-backend trust gate applies
+// on top). It returns ErrTurnBusy when the session is busy; all other terminal
+// conditions are reported via the sink (error / done events) and RunTurn
+// returns nil — or the Sink's error if the client vanished.
+func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.ChatSession, userMsg string, reqSens backends.Sensitivity, toolsEnabled bool, sink Sink) error {
+	claimed, err := store.ClaimTurn(ctx, e.pool, sess.ID, e.cfg.BusyTTL)
+	if err != nil {
+		return fmt.Errorf("chat: claim turn: %w", err)
+	}
+	if !claimed {
+		return ErrTurnBusy
+	}
+	// Release over a cancel-immune context: after a client abort r.Context() is
+	// already canceled and the reset would be lost (the query-path trap, §3.6).
+	defer func() {
+		rc, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := store.ReleaseTurn(rc, e.pool, sess.ID); err != nil {
+			slog.Warn("chat: release turn", "session", sess.ID, "error", err)
+		}
+	}()
+
+	apiKeyID := ""
+	if ar != nil {
+		apiKeyID = ar.ApiKeyID
+	}
+	start := e.now()
+	reqSens = normalizeSens(reqSens)
+	turnMax := reqSens
+
+	// Persist the user message; the HWM rises in the same TX (store layer).
+	userMsg = strings.TrimSpace(userMsg)
+	userRow, sessHWM, err := store.AppendMessage(ctx, e.pool, sess.ID, store.NewMessage{Role: "user", Content: userMsg, Sensitivity: reqSens})
+	if err != nil {
+		return fmt.Errorf("chat: persist user message: %w", err)
+	}
+	if userRow.Seq == 1 {
+		_ = store.SetTitleIfDefault(ctx, e.pool, sess.ID, store.DeriveTitle(userMsg))
+	}
+	if err := sink.Event("session", map[string]any{"session_id": sess.ID, "user_seq": userRow.Seq}); err != nil {
+		return err
+	}
+
+	history, err := store.ListMessages(ctx, e.pool, sess.ID, 0, 0)
+	if err != nil {
+		return fmt.Errorf("chat: load history: %w", err)
+	}
+	msgs := append([]llm.ChatMsg{{Role: "system", Content: e.systemPrompt()}}, e.buildHistory(history)...)
+
+	budgetLeft := e.cfg.CompletionBudget
+	finalReason := "tool_limit"
+
+	for iter := 1; iter <= e.cfg.MaxIterations; iter++ {
+		required := backends.MaxSensitivity(reqSens, sessHWM)
+		chain, cerr := e.provider.ChatChain(ctx, required)
+		if cerr != nil || len(chain) == 0 {
+			return emitNoEligible(sink)
+		}
+
+		so := e.runStream(ctx, chain, msgs, toolsEnabled, budgetLeft, iter, sink)
+		if !so.served {
+			return e.finishUnserved(ctx, sess, so, turnMax, start, iter, sink)
+		}
+		res := so.result
+		budgetLeft -= res.CompletionTokens
+		if serr := sink.Event("usage", map[string]any{
+			"iteration": iter, "prompt_tokens": res.PromptTokens,
+			"completion_tokens": res.CompletionTokens, "draft_accept": res.DraftAccept,
+		}); serr != nil {
+			return serr
+		}
+
+		if res.FinishReason != "tool_calls" {
+			arow, _, perr := store.AppendMessage(ctx, e.pool, sess.ID, store.NewMessage{
+				Role: "assistant", Content: res.Content, Sensitivity: turnMax,
+				Backend: so.backend.Name, Model: so.model,
+				PromptTokens: intPtr(res.PromptTokens), CompletionTokens: intPtr(res.CompletionTokens),
+				DurationMs: intPtr(int(so.durationMs)),
+			})
+			if perr != nil {
+				return fmt.Errorf("chat: persist assistant: %w", perr)
+			}
+			return sink.Event("done", map[string]any{
+				"finish_reason": doneReason(res.FinishReason),
+				"assistant_seq": arow.Seq, "iterations": iter,
+				"total_ms": e.now().Sub(start).Milliseconds(),
+			})
+		}
+
+		// tool_calls: persist the assistant call, run each tool, append results.
+		if _, _, perr := store.AppendMessage(ctx, e.pool, sess.ID, store.NewMessage{
+			Role: "assistant", Content: res.Content, ToolCalls: marshalToolCalls(res.ToolCalls), Sensitivity: turnMax,
+			Backend: so.backend.Name, Model: so.model,
+			PromptTokens: intPtr(res.PromptTokens), CompletionTokens: intPtr(res.CompletionTokens), DurationMs: intPtr(int(so.durationMs)),
+		}); perr != nil {
+			return fmt.Errorf("chat: persist assistant tool_calls: %w", perr)
+		}
+		msgs = append(msgs, llm.ChatMsg{Role: "assistant", Content: res.Content, ToolCalls: res.ToolCalls})
+
+		for _, call := range res.ToolCalls {
+			if serr := sink.Event("tool_call", map[string]any{
+				"iteration": iter, "id": call.ID, "name": call.Function.Name,
+				"arguments": json.RawMessage(call.Function.Arguments),
+			}); serr != nil {
+				return serr
+			}
+			outcome := e.exec.Run(ctx, sess.ReadScopes, apiKeyID, call)
+			toolRow, hwm, perr := store.AppendMessage(ctx, e.pool, sess.ID, store.NewMessage{
+				Role: "tool", Content: outcome.Content, Sensitivity: outcome.Sensitivity,
+				ToolCallID: call.ID, ToolName: call.Function.Name,
+				DurationMs: intPtr(int(outcome.DurationMs)),
+			})
+			if perr != nil {
+				return fmt.Errorf("chat: persist tool result: %w", perr)
+			}
+			sessHWM = hwm
+			turnMax = backends.MaxSensitivity(turnMax, outcome.Sensitivity)
+			msgs = append(msgs, llm.ChatMsg{Role: "tool", Content: outcome.Content, ToolCallID: call.ID})
+			_ = toolRow
+			if serr := sink.Event("tool_result", map[string]any{
+				"iteration": iter, "id": call.ID, "name": call.Function.Name,
+				"ok": outcome.OK, "duration_ms": outcome.DurationMs, "chars": outcome.Chars,
+				"truncated": outcome.Truncated, "summary": outcome.Summary, "blocks": outcome.Blocks,
+			}); serr != nil {
+				return serr
+			}
+		}
+
+		rc, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		_ = store.RefreshTurn(rc, e.pool, sess.ID, e.cfg.BusyTTL)
+		cancel()
+
+		if budgetLeft <= 0 {
+			finalReason = "budget"
+			break
+		}
+	}
+
+	// Iteration cap or budget reached: ONE closing call WITHOUT a tools array
+	// (E4: never tool_choice:"none" — it emits tool syntax as plain text).
+	return e.finalCall(ctx, sess, msgs, reqSens, sessHWM, turnMax, start, finalReason, sink)
+}
+
+// streamOutcome is one iteration's stream result plus failover bookkeeping.
+type streamOutcome struct {
+	result     *llm.StreamResult
+	backend    backends.Backend
+	model      string
+	served     bool
+	partial    string
+	durationMs int64
+	err        error
+	canceled   bool
+}
+
+// runStream runs the chain for one iteration: it tries each trust-eligible
+// backend, failing over to the next ONLY before the first emitted byte and only
+// on a Next()-class error (F3 doctrine). After the first token a dead stream is
+// terminal — no silent re-run / double tool execution.
+func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs []llm.ChatMsg, toolsEnabled bool, budgetLeft, iter int, sink Sink) streamOutcome {
+	var lastErr error
+	for i := range chain {
+		b := chain[i]
+		model := b.ModelFor("chat").Model
+		if model == "" {
+			lastErr = fmt.Errorf("backend %q has no chat model", b.Name)
+			continue
+		}
+		toolsActive := toolsEnabled && b.Trust == backends.TrustFull
+		var tools []llm.ToolDef
+		if toolsActive {
+			tools = e.exec.Defs()
+		}
+		if serr := sink.Event("backend", map[string]any{
+			"backend": b.Name, "model": model, "trust": string(b.Trust),
+			"tools_active": toolsActive, "fallback": i > 0,
+		}); serr != nil {
+			return streamOutcome{err: serr}
+		}
+
+		var partial strings.Builder
+		started := false
+		opts := e.chatOptions(b, e.tokenClamp(b, budgetLeft))
+		st := e.now()
+		res, err := llm.ChatStream(ctx, b.Host, b.APIKey, model, msgs, tools, opts, b.ExtraBody, e.cfg.LLMTimeout,
+			func(ev llm.StreamEvent) error {
+				started = true
+				if ev.ContentDelta != "" {
+					partial.WriteString(ev.ContentDelta)
+					return sink.Event("delta", map[string]any{"text": ev.ContentDelta})
+				}
+				if ev.ToolCallName != "" {
+					return sink.Event("tool_call_start", map[string]any{"iteration": iter, "name": ev.ToolCallName})
+				}
+				return nil
+			})
+		dur := e.now().Sub(st).Milliseconds()
+		if err == nil {
+			return streamOutcome{result: res, backend: b, model: model, served: true, partial: partial.String(), durationMs: dur}
+		}
+		if ctx.Err() != nil {
+			return streamOutcome{backend: b, model: model, partial: partial.String(), durationMs: dur, err: err, canceled: true}
+		}
+		lastErr = err
+		slog.Warn("chat: stream attempt failed", "backend", b.Name, "iteration", iter,
+			"class", backends.Classify(err, b.ProviderClass).String(), "error", err)
+		if backends.Classify(err, b.ProviderClass).Next() && !started {
+			continue // failover, no bytes emitted yet
+		}
+		return streamOutcome{backend: b, model: model, partial: partial.String(), durationMs: dur, err: err}
+	}
+	return streamOutcome{err: lastErr}
+}
+
+// finishUnserved handles an iteration that produced no usable result: a client
+// cancel persists the partial answer with a canceled marker (over a cancel-immune
+// context) and ends with a canceled done; any other error is laundered into an
+// error event (class + backend name only — never the raw URL-bearing error).
+func (e *Engine) finishUnserved(ctx context.Context, sess *store.ChatSession, so streamOutcome, turnMax backends.Sensitivity, start time.Time, iter int, sink Sink) error {
+	if so.canceled {
+		rc, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		arow, _, perr := store.AppendMessage(rc, e.pool, sess.ID, store.NewMessage{
+			Role: "assistant", Content: so.partial, Sensitivity: turnMax,
+			Backend: so.backend.Name, Model: so.model,
+			Metadata: map[string]any{"canceled": true, "iteration": iter},
+		})
+		if perr != nil {
+			slog.Warn("chat: persist canceled partial", "session", sess.ID, "error", perr)
+		}
+		seq := 0
+		if arow != nil {
+			seq = arow.Seq
+		}
+		return sink.Event("done", map[string]any{
+			"finish_reason": "canceled", "assistant_seq": seq,
+			"iterations": iter, "total_ms": e.now().Sub(start).Milliseconds(),
+		})
+	}
+	return sink.Event("error", launderError(so.err, so.backend))
+}
+
+// finalCall is the closing answer after the tool budget/iteration cap: a single
+// model call with NO tools array, prompted to answer from the gathered material.
+func (e *Engine) finalCall(ctx context.Context, sess *store.ChatSession, msgs []llm.ChatMsg, reqSens, sessHWM, turnMax backends.Sensitivity, start time.Time, reason string, sink Sink) error {
+	msgs = append(msgs, llm.ChatMsg{Role: "user", Content: "Tool budget exhausted — answer now directly from the material gathered so far."})
+	required := backends.MaxSensitivity(reqSens, sessHWM)
+	chain, cerr := e.provider.ChatChain(ctx, required)
+	if cerr != nil || len(chain) == 0 {
+		return emitNoEligible(sink)
+	}
+	so := e.runStream(ctx, chain, msgs, false, e.cfg.MaxTokens, e.cfg.MaxIterations+1, sink)
+	if !so.served {
+		return e.finishUnserved(ctx, sess, so, turnMax, start, e.cfg.MaxIterations, sink)
+	}
+	arow, _, perr := store.AppendMessage(ctx, e.pool, sess.ID, store.NewMessage{
+		Role: "assistant", Content: so.result.Content, Sensitivity: turnMax,
+		Backend: so.backend.Name, Model: so.model,
+		PromptTokens: intPtr(so.result.PromptTokens), CompletionTokens: intPtr(so.result.CompletionTokens),
+		DurationMs: intPtr(int(so.durationMs)),
+	})
+	if perr != nil {
+		return fmt.Errorf("chat: persist final assistant: %w", perr)
+	}
+	return sink.Event("done", map[string]any{
+		"finish_reason": reason, "assistant_seq": arow.Seq,
+		"iterations": e.cfg.MaxIterations, "total_ms": e.now().Sub(start).Milliseconds(),
+	})
+}
+
+func emitNoEligible(sink Sink) error {
+	return sink.Event("error", map[string]any{"code": "no_eligible_backend", "retryable": false})
+}
+
+// launderError builds the error event: class code + backend NAME only. The raw
+// error (it carries the backend URL) never reaches the client (§3.5).
+func launderError(err error, b backends.Backend) map[string]any {
+	class := backends.Classify(err, b.ProviderClass)
+	return map[string]any{"code": class.String(), "backend": b.Name, "retryable": class.Next()}
+}
+
+func (e *Engine) tokenClamp(b backends.Backend, budgetLeft int) int {
+	v := e.cfg.MaxTokens
+	if bm := backendMaxTokens(b); bm > 0 && bm < v {
+		v = bm
+	}
+	if budgetLeft > 0 && budgetLeft < v {
+		v = budgetLeft
+	}
+	if v < 1 {
+		v = 1
+	}
+	return v
+}
+
+func (e *Engine) chatOptions(b backends.Backend, numPredict int) llm.Options {
+	opts := llm.Options{Temperature: 0.7, NumPredict: numPredict}
+	if spec := b.ModelFor("chat"); spec.Params != nil {
+		if t, ok := spec.Params["temperature"].(float64); ok {
+			opts.Temperature = t
+		}
+		if tp, ok := spec.Params["top_p"].(float64); ok {
+			opts.TopP = tp
+		}
+	}
+	return opts
+}
+
+// buildHistory converts stored messages to wire form within the char budget:
+// older tool contents condense to 400 chars, then oldest messages drop, and any
+// orphaned leading tool/assistant message is trimmed so the first history turn
+// starts on a user message (the Qwen template tolerates the tail, not the head).
+func (e *Engine) buildHistory(msgs []store.ChatMessage) []llm.ChatMsg {
+	wire := make([]llm.ChatMsg, len(msgs))
+	for i, m := range msgs {
+		wire[i] = toWire(m)
+	}
+	budget := e.cfg.HistoryBudgetChars
+	if budget <= 0 || totalChars(wire) <= budget {
+		return wire
+	}
+	for i := 0; i < len(wire)-1; i++ {
+		if wire[i].Role == "tool" {
+			if r := []rune(wire[i].Content); len(r) > 400 {
+				wire[i].Content = string(r[:400]) + "…"
+			}
+		}
+	}
+	for len(wire) > 1 && totalChars(wire) > budget {
+		wire = wire[1:]
+	}
+	for len(wire) > 1 && wire[0].Role != "user" {
+		wire = wire[1:]
+	}
+	return wire
+}
+
+func (e *Engine) systemPrompt() string {
+	loc, err := time.LoadLocation(e.cfg.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	today := e.now().In(loc).Format("2006-01-02")
+	return fmt.Sprintf(`You are the ctx assistant with read-only tool access to the user's knowledge store.
+Today is %s (%s). Answer in the user's language.
+- ctx_query: hybrid retrieval for content questions — returns ranked blocks with snippets.
+- ctx_search: browse/list by keywords, category or tags (titles + previews).
+- ctx_get: read one full block by id (or unique id prefix).
+- ctx_recent: list recently saved/updated blocks.
+Cite used blocks inline as [title](ctx:<id>). If retrieval finds nothing relevant, say so instead of guessing. Never invent block ids.`, today, e.cfg.Timezone)
+}
+
+func toWire(m store.ChatMessage) llm.ChatMsg {
+	w := llm.ChatMsg{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
+	if len(m.ToolCalls) > 0 {
+		var tcs []llm.ToolCall
+		if err := json.Unmarshal(m.ToolCalls, &tcs); err == nil {
+			w.ToolCalls = tcs
+		}
+	}
+	return w
+}
+
+func marshalToolCalls(tcs []llm.ToolCall) []byte {
+	if len(tcs) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(tcs)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+func totalChars(msgs []llm.ChatMsg) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n
+}
+
+func backendMaxTokens(b backends.Backend) int {
+	if b.Limits == nil {
+		return 0
+	}
+	switch v := b.Limits["chat_max_tokens"].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	}
+	return 0
+}
+
+func normalizeSens(s backends.Sensitivity) backends.Sensitivity {
+	if !backends.ValidSensitivity(s) {
+		return backends.SensCredentials
+	}
+	return s
+}
+
+func doneReason(finish string) string {
+	if finish == "" {
+		return "stop"
+	}
+	return finish
+}
+
+func intPtr(v int) *int { return &v }
+
+// PoolProvider is the production BackendProvider over the F3 pool.
+type PoolProvider struct {
+	pool   *backends.Pool
+	gaming func() backends.GamingState
+}
+
+// NewPoolProvider wraps the pool; gaming may be nil (no gaming exclusion).
+func NewPoolProvider(pool *backends.Pool, gaming func() backends.GamingState) *PoolProvider {
+	return &PoolProvider{pool: pool, gaming: gaming}
+}
+
+// ChatChain returns the trust-ordered chat chain for the required sensitivity.
+func (p *PoolProvider) ChatChain(_ context.Context, required backends.Sensitivity) ([]backends.Backend, error) {
+	var g backends.GamingState
+	if p.gaming != nil {
+		g = p.gaming()
+	}
+	return p.pool.Chain("chat", required, g)
+}

@@ -120,7 +120,7 @@ func TestBuildSourceResponses(t *testing.T) {
 	}
 	supersedes := map[string][]string{"a": {"superseder-1", "superseder-2"}}
 
-	out := buildSourceResponses(sources, supersedes)
+	out := buildSourceResponses(sources, supersedes, false)
 	if len(out) != 2 {
 		t.Fatalf("got %d responses, want 2", len(out))
 	}
@@ -143,8 +143,22 @@ func TestBuildSourceResponses(t *testing.T) {
 
 func TestBuildSourceResponses_NilMap(t *testing.T) {
 	// A nil supersedes map must not panic and yields no SupersededBy.
-	out := buildSourceResponses([]llm.Source{{ID: "a", Title: "A"}}, nil)
+	out := buildSourceResponses([]llm.Source{{ID: "a", Title: "A"}}, nil, false)
 	if len(out) != 1 || out[0].SupersededBy != nil {
 		t.Errorf("nil map: got %+v", out)
+	}
+}
+
+func TestBuildSourceResponses_IncludeContent(t *testing.T) {
+	long := strings.Repeat("ä", maxRetrievalSnippet+500) // multibyte, over the cap
+	sources := []llm.Source{{ID: "a", Title: "A", Content: long}}
+	// Default (eval.sh / A-B sweep): no content attached, responses unchanged.
+	if out := buildSourceResponses(sources, nil, false); out[0].Content != "" {
+		t.Errorf("include_content=false must not attach content")
+	}
+	// include_content: snippet capped at maxRetrievalSnippet runes (rune-safe).
+	out := buildSourceResponses(sources, nil, true)
+	if n := len([]rune(out[0].Content)); n != maxRetrievalSnippet {
+		t.Errorf("snippet = %d runes, want %d", n, maxRetrievalSnippet)
 	}
 }

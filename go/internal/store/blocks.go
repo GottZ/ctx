@@ -618,6 +618,50 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 	return results, nil
 }
 
+// RecentBlocks lists the most recently updated non-archived blocks visible to
+// readScopes, newest first, with a 200-char preview — the store backing for the
+// ctx_recent tool (F6) and the MCP recent tool. An empty category means no
+// category filter; limit <= 0 falls back to 10, capped at 50.
+func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category string, limit int) ([]BlockPreview, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	q := `SELECT id, category, tags, title, scope, LEFT(content, 200), char_length(content), updated_at
+	      FROM context_blocks
+	      WHERE NOT is_archived AND scope = ANY($1::text[])`
+	args := []any{readScopes}
+	if category != "" {
+		q += ` AND category = $2`
+		args = append(args, category)
+		q += ` ORDER BY updated_at DESC LIMIT $3`
+	} else {
+		q += ` ORDER BY updated_at DESC LIMIT $2`
+	}
+	args = append(args, limit)
+
+	rows, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: recent blocks: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]BlockPreview, 0, limit)
+	for rows.Next() {
+		bp := BlockPreview{}
+		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: recent blocks scan: %w", err)
+		}
+		results = append(results, bp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: recent blocks rows: %w", err)
+	}
+	return results, nil
+}
+
 // ListCategories returns distinct categories with block counts.
 func ListCategories(ctx context.Context, pool *pgxpool.Pool, readScopes []string) ([]CategoryCount, error) {
 	rows, err := pool.Query(ctx,
