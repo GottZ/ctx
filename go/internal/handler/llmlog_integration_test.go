@@ -1,0 +1,138 @@
+//go:build integration
+
+// Privacy + filter probes for GET /api/llmlog against a real PG18
+// testcontainer. The endpoint must NEVER return the M025 body columns
+// (request_system/request_user/response_content = full prompts incl. block
+// content, a shadow corpus) and must cap the error detail (the raw error can
+// embed up to 1 KiB of provider body with prompt fragments).
+//
+//	go test -tags=integration ./internal/handler/ -run TestLLMLog -count=1 -v
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/testdb"
+)
+
+// serveLLMLog runs the handler against the pool with the given query string.
+func serveLLMLog(t *testing.T, h *LLMLogHandler, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/llmlog"+query, nil)
+	rec := httptest.NewRecorder()
+	h.HandleLLMLog(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/llmlog%s: status %d, body %s", query, rec.Code, rec.Body.String())
+	}
+	return rec
+}
+
+// TestLLMLogNoPrompts is the core privacy guard: seeded prompt/response bodies
+// never appear in the response, while the telemetry row IS returned. Adding the
+// body columns to the SELECT list (or struct) turns this red.
+func TestLLMLogNoPrompts(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, `INSERT INTO context_llm_log
+		(pipeline, model, host, duration_ms, prompt_tokens, completion_tokens,
+		 request_system, request_user, response_content, backend_name)
+		VALUES ('query-synthesize','qwen3.6-27b','herbert',8123,9800,412,
+		        $1,$2,$3,'herbert-chat')`,
+		"SYS-SECRET-MARKER", "USER-SECRET-MARKER", "RESP-SECRET-MARKER")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	h := NewLLMLogHandler(pool, config.NewStore(&config.Config{}))
+	body := serveLLMLog(t, h, "").Body.String()
+
+	for _, marker := range []string{"SYS-SECRET-MARKER", "USER-SECRET-MARKER", "RESP-SECRET-MARKER"} {
+		if strings.Contains(body, marker) {
+			t.Errorf("response leaked prompt body %q (the SELECT list grew body columns): %s", marker, body)
+		}
+	}
+	// Proof it actually returned the row (not just an empty result hiding a bug).
+	if !strings.Contains(body, "query-synthesize") || !strings.Contains(body, "herbert-chat") {
+		t.Errorf("telemetry row missing from response: %s", body)
+	}
+}
+
+// TestLLMLogErrorCapped proves the error side-channel is closed: a prompt marker
+// placed beyond the 256-rune cap is dropped, the class survives.
+func TestLLMLogErrorCapped(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	marker := "ERR-SECRET-PROMPT-MARKER"
+	longErr := "llm: unexpected status 403: " + strings.Repeat("x", 300) + marker
+	_, err := pool.Exec(ctx, `INSERT INTO context_llm_log
+		(pipeline, model, host, duration_ms, error, backend_name)
+		VALUES ('query-synthesize','qwen','herbert',10,$1,'herbert-chat')`, longErr)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	h := NewLLMLogHandler(pool, config.NewStore(&config.Config{}))
+	body := serveLLMLog(t, h, "").Body.String()
+
+	if strings.Contains(body, marker) {
+		t.Errorf("error marker beyond the cap leaked: %s", body)
+	}
+	if !strings.Contains(body, "http_403") {
+		t.Errorf("error class should survive normalization: %s", body)
+	}
+}
+
+// TestLLMLogFilters pins the pipeline + errors_only query params.
+func TestLLMLogFilters(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	seed := func(pipeline string, withErr bool) {
+		errVal := "NULL"
+		if withErr {
+			errVal = "'boom'"
+		}
+		_, err := pool.Exec(ctx, `INSERT INTO context_llm_log
+			(pipeline, model, host, duration_ms, error, backend_name)
+			VALUES ($1,'qwen','herbert',10,`+errVal+`,'herbert-chat')`, pipeline)
+		if err != nil {
+			t.Fatalf("seed %s: %v", pipeline, err)
+		}
+	}
+	seed("query-synthesize", false)
+	seed("query-synthesize", true)
+	seed("dream-eval", false)
+
+	type resp struct {
+		Success bool          `json:"success"`
+		Entries []llmlogEntry `json:"entries"`
+	}
+	decode := func(query string) resp {
+		var r resp
+		if err := json.Unmarshal(serveLLMLog(t, NewLLMLogHandler(pool, config.NewStore(&config.Config{})), query).Body.Bytes(), &r); err != nil {
+			t.Fatalf("decode %s: %v", query, err)
+		}
+		return r
+	}
+
+	if got := decode("?pipeline=query-synthesize"); len(got.Entries) != 2 {
+		t.Errorf("pipeline filter: got %d entries, want 2", len(got.Entries))
+	}
+	errsOnly := decode("?errors_only=true")
+	if len(errsOnly.Entries) != 1 {
+		t.Errorf("errors_only: got %d entries, want 1", len(errsOnly.Entries))
+	} else if errsOnly.Entries[0].Error == nil {
+		t.Errorf("errors_only entry must carry a non-nil error")
+	}
+	if got := decode(""); len(got.Entries) != 3 {
+		t.Errorf("no filter: got %d entries, want 3", len(got.Entries))
+	}
+}

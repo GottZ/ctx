@@ -41,52 +41,60 @@ type healthResponse struct {
 	Services map[string]string `json:"services"`
 }
 
-// Health checks database connectivity and per-role inference availability
-// from the backend pool snapshot.
+// HealthStatus computes the service-class health aggregate from ONE pool
+// snapshot: DB ping + per-role reachability (embed, chat=synthesis, optionally
+// dream). It is shared by the public /health handler and the admin status
+// collector (G33) so the two can never drift — same source, same shape. The
+// result is name-free by invariant (TestHealthShapeInvariant); the caller maps
+// the status string to an HTTP code.
 //
 // Status logic (unchanged):
-//   - DB down → 503 "unhealthy"
-//   - Embed down → 503 "unhealthy" (embeddings are mandatory for store+search)
-//   - Chat down → 200 "degraded" (queries broken, but store works)
-//   - Dream down → 200 "ok" (background process, not critical)
-func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-
-	cfg := h.cfg.Snapshot()
+//   - DB down → "unhealthy" (503 at the /health edge)
+//   - Embed down → "unhealthy" (embeddings are mandatory for store+search)
+//   - Chat down → "degraded" (queries broken, but store works)
+//   - Dream down → "ok" (background process, not critical)
+func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backend, dreamEnabled bool) healthResponse {
 	services := make(map[string]string)
 
 	// Database ping
-	if err := h.pool.Ping(ctx); err != nil {
+	if err := pool.Ping(ctx); err != nil {
 		services["database"] = "error"
 		slog.Error("health check: database ping failed", "error", err)
 	} else {
 		services["database"] = "ok"
 	}
 
-	// Per-role reachability from ONE pool snapshot. The service keys keep
+	// Per-role reachability from the given snapshot. The service keys keep
 	// their historical names ("chat" = the synthesis-serving class).
-	snap := h.backendPool.Snapshot()
 	services["embed"] = roleReachable(ctx, snap, backends.RoleEmbed)
 	services["chat"] = roleReachable(ctx, snap, backends.RoleSynthesis)
-	if cfg.Dream.Enabled {
+	if dreamEnabled {
 		services["dream"] = roleReachable(ctx, snap, backends.RoleDream)
 	}
 
-	// Determine overall status
-	statusCode := http.StatusOK
 	status := "ok"
-
 	if services["database"] != "ok" || services["embed"] != "ok" {
-		statusCode = http.StatusServiceUnavailable
 		status = "unhealthy"
 	} else if services["chat"] != "ok" {
 		status = "degraded"
 	}
 
-	resp := healthResponse{
-		Status:   status,
-		Services: services,
+	return healthResponse{Status: status, Services: services}
+}
+
+// Health serves the public /health endpoint, wrapping HealthStatus with the
+// HTTP status-code mapping (unhealthy → 503, else 200).
+func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	cfg := h.cfg.Snapshot()
+	snap := h.backendPool.Snapshot()
+	resp := HealthStatus(ctx, h.pool, snap, cfg.Dream.Enabled)
+
+	statusCode := http.StatusOK
+	if resp.Status == "unhealthy" {
+		statusCode = http.StatusServiceUnavailable
 	}
 
 	w.Header().Set("Content-Type", "application/json")

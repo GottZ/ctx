@@ -73,6 +73,10 @@ func TestRegistryStrictSet(t *testing.T) {
 		"query.timezone":         true,
 
 		"scheduler.llmlog_retention_days": true,
+		// F4-W6 (G33) read cap: a malformed limit is an operator typo worth
+		// surfacing loudly, same as its telemetry sibling above. The events.*
+		// durations stay non-strict (bad value falls back to default).
+		"llmlog.max_limit": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {

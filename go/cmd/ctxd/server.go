@@ -67,6 +67,13 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 	// 03:00 iteration.
 	synthH := handler.NewSynthesizeHandler(pool, backendPool)
 
+	// Status dashboard (F4-W6/G33): ONE process-wide collector feeds GET
+	// /api/status (and, in W7/G34, SSE) from a cache — N pollers cost one
+	// refresh, not N. scheduler supplies the dream mode (GetDreamMode).
+	statusCollector := handler.NewStatusCollector(pool, backendPool, scheduler, cfgStore)
+	statusH := handler.NewStatusHandler(statusCollector)
+	llmlogH := handler.NewLLMLogHandler(pool, cfgStore)
+
 	// ── MCP endpoint (Streamable HTTP, authenticated) ──────────────
 	queryHTTPHandler := handler.WithScheduler(scheduler, queryHandler.HandleQuery)
 	mcpH := handler.NewMCPHandler(handler.MCPConfig{
@@ -105,6 +112,14 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 		handler.MountSettings(r, handler.NewSettingsHandler(pool, cfgStore))
 		// Secrets — write-only sealed credentials (F2-W6); admin-gated inside.
 		handler.MountSecrets(r, handler.NewSecretsHandler(pool, cfgStore))
+		// Status + telemetry (F4-W6/G33) — admin-only: the payload carries
+		// hostnames/backend names and (capped) provider error detail; /health
+		// stays the anonymous, name-free path. RequireAdmin in a sub-group.
+		r.Group(func(r chi.Router) {
+			r.Use(handler.RequireAdmin)
+			r.Get("/api/status", statusH.HandleStatus)
+			r.Get("/api/llmlog", llmlogH.HandleLLMLog)
+		})
 		// Blob — fetch, search, manage
 		r.Post("/api/blob/fetch", blobH.HandleBlobFetch)
 		r.Post("/api/blob/search", blobH.HandleBlobSearch)

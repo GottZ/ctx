@@ -74,6 +74,8 @@ type Config struct {
 	Query     QueryConfig
 	Scheduler SchedulerConfig
 	Pool      PoolConfig
+	Events    EventsConfig
+	LLMLog    LLMLogConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -222,6 +224,34 @@ type SchedulerConfig struct {
 	// (Body-NULLing, NOT a chunk drop; masterplan E4). 0 disables retention:
 	// bodies are kept forever (operator opt-in). The 90-day default ships safe.
 	LLMLogRetentionDays int `key:"scheduler.llmlog_retention_days" env:"CTX_LLMLOG_RETENTION_DAYS" default:"90" mut:"hot" parse:"strict"`
+}
+
+// EventsConfig is the status-collector / SSE timing surface (design 04 §3.6).
+// Policy as data, same line gaming.active rides: a fronting-proxy change
+// becomes a settings flip, not a rebuild. F4-W6 (the status collector) reads
+// both keys today; F4-W7 (SSE) layers ping/cap keys on top of the same group.
+type EventsConfig struct {
+	// TickInterval is the collector base cadence: the cheap sources (health,
+	// pool.Status, dream mode, gaming, llm-24h aggregate) refresh at most this
+	// often, and GET /api/status serves the cache instead of rebuilding per
+	// request — N pollers cost one refresh, not N.
+	TickInterval time.Duration `key:"events.tick_interval" env:"CTX_EVENTS_TICK_INTERVAL" default:"5" mut:"hot"`
+	// QueueStatsInterval decouples dream.QueueDepth — an O(n) full-scan CTE
+	// over context_blocks with no covering index — from the base tick. The
+	// queue forecast's smallest window is 1h, so 30s is fresh enough and the
+	// scan never rides the 5s cadence. 1M+ follow-up (partial index /
+	// maintained counters) is named in design 04 §3.6 / R12.
+	QueueStatsInterval time.Duration `key:"events.queue_stats_interval" env:"CTX_EVENTS_QUEUE_STATS_INTERVAL" default:"30" mut:"hot"`
+}
+
+// LLMLogConfig is the telemetry read surface. The retention knob (body-NULLing
+// after N days) lives under scheduler.* because it is a janitor job; this is
+// the per-request read cap for GET /api/llmlog.
+type LLMLogConfig struct {
+	// MaxLimit caps GET /api/llmlog?limit=. The endpoint is admin-only and
+	// rides the created_at DESC hypertable path; 200 keeps one page bounded
+	// without a full chunk walk.
+	MaxLimit int `key:"llmlog.max_limit" env:"CTX_LLMLOG_MAX_LIMIT" default:"200" mut:"hot" parse:"strict"`
 }
 
 // ScopeFloor maps a scope to its minimum effective sensitivity (F3 §2.3d).
