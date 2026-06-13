@@ -248,15 +248,16 @@ fi
 # which accumulate over time (e.g. context_dream_links_snapshot_20260423_prev5).
 # 39 columns since M055 (sensitivity + sensitivity_source + sensitivity_audited_at,
 # F3-P3 trust gating); 36 was M044 (ts_de/ts_en) + M049 (dream_eval_count).
-# 18 tables since M051/M052/M053
-# (context_settings, context_settings_audit, context_secrets, context_backends).
+# 20 tables: 18 since M051/M052/M053 (context_settings, context_settings_audit,
+# context_secrets, context_backends) + 2 since M056 (context_chat_sessions,
+# context_chat_messages, F6-C2 web-chat).
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "18" ]] && [[ "$col_count" == "39" ]]; then
+if [[ "$table_count" == "20" ]] && [[ "$col_count" == "39" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 18 tables + 39 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 20 tables + 39 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
