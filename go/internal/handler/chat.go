@@ -298,6 +298,43 @@ type chatSessionListItem struct {
 	MessageCount int `json:"message_count"`
 }
 
+// chatMessageView is the wire shape of one message in the detail response. It
+// mirrors store.ChatMessage but carries tool_calls as json.RawMessage so the
+// stored JSONB embeds RAW — store.ChatMessage.ToolCalls is []byte, which
+// json.Marshal would base64-encode (unusable by the SPA). id/session_id are
+// dropped (internal); seq is the stable handle.
+type chatMessageView struct {
+	Seq              int                  `json:"seq"`
+	Role             string               `json:"role"`
+	Content          string               `json:"content"`
+	Sensitivity      backends.Sensitivity `json:"sensitivity"`
+	ToolCalls        json.RawMessage      `json:"tool_calls,omitempty"`
+	ToolCallID       string               `json:"tool_call_id,omitempty"`
+	ToolName         string               `json:"tool_name,omitempty"`
+	Backend          string               `json:"backend,omitempty"`
+	Model            string               `json:"model,omitempty"`
+	PromptTokens     *int                 `json:"prompt_tokens,omitempty"`
+	CompletionTokens *int                 `json:"completion_tokens,omitempty"`
+	DurationMs       *int                 `json:"duration_ms,omitempty"`
+	Metadata         map[string]any       `json:"metadata,omitempty"`
+	CreatedAt        time.Time            `json:"created_at"`
+}
+
+func messageViewsOf(msgs []store.ChatMessage) []chatMessageView {
+	out := make([]chatMessageView, len(msgs))
+	for i, m := range msgs {
+		out[i] = chatMessageView{
+			Seq: m.Seq, Role: m.Role, Content: m.Content, Sensitivity: m.Sensitivity,
+			ToolCalls:  json.RawMessage(m.ToolCalls), // raw JSONB, not base64
+			ToolCallID: m.ToolCallID, ToolName: m.ToolName,
+			Backend: m.Backend, Model: m.Model,
+			PromptTokens: m.PromptTokens, CompletionTokens: m.CompletionTokens, DurationMs: m.DurationMs,
+			Metadata: m.Metadata, CreatedAt: m.CreatedAt,
+		}
+	}
+	return out
+}
+
 // HandleListSessions lists the caller's home-scope sessions (metadata only, no
 // content), newest first (§3.3). Scope-owned, NOT read-scope filtered.
 func (h *ChatHandler) HandleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -358,10 +395,7 @@ func (h *ChatHandler) HandleGetSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
-	if msgs == nil {
-		msgs = []store.ChatMessage{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "session": viewOf(*sess), "messages": msgs})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "session": viewOf(*sess), "messages": messageViewsOf(msgs)})
 }
 
 // HandleDeleteSession hard-deletes a session (messages cascade) within the

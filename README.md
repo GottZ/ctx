@@ -497,6 +497,8 @@ lazy through the existing scope-checked `manage get` (graph payloads never
 carry content), plus focus/expand/pin actions — pinned nodes are exempt
 from eviction. Content renders as a text node, never `{@html}`.
 
+The **Chat area** (`/chat`) streams a turn from [`POST /api/chat/stream`](#web-chat-sessions-f6-migration-056) over fetch + `eventsource-parser` — **no reconnect** (a turn is one-shot; a reconnect would re-run it). The thread shows the user message, collapsible tool-call cards (`ctx_query · "…" · N blocks · ms`; arguments + block list as text, each block linking `/graph?focus=<id>`), the streamed assistant answer and a backend badge (which backend served, whether tools were offered + why not). Assistant markdown goes through the sanitizing pipeline — **markdown-it `html:false` + DOMPurify**, with `[title](ctx:<id>)` citations rewritten to `/graph?focus=<id>` BEFORE sanitizing so DOMPurify's allowlist stays intact (raw HTML in a quoted block is escaped, never parsed; `markdown.ts` carries the XSS suite). The left sidebar lists sessions (newest first, message count, a 🔒 on credentials-touched ones); a turn is abortable and aborts on navigate-away/`beforeunload` (frees the single llama.cpp slot). A pre-stream `409`/`429` is a JSON error (busy / scope semaphore); a mid-stream failure is an `error` event that keeps the partial + offers a retry.
+
 ```bash
 cd go/web
 bun install                           # once; bun.lock is committed

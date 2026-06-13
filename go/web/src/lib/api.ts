@@ -125,7 +125,7 @@ function envelopeError(body: unknown): string | null {
 }
 
 /** Stable machine class per HTTP status (ApiError.code). */
-function codeFor(status: number): string {
+export function codeFor(status: number): string {
   switch (status) {
     case 400:
       return 'bad_request'

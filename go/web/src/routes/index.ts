@@ -21,15 +21,14 @@ export const RESERVED_SERVER_PREFIXES = [
 
 /**
  * The four areas (design 04-§2.1) — lazy per area so Settings/Status/Graph/
- * Chat become separate chunks; F5 (sigma+graphology) and F6 only load when
- * entered. Settings (W4), Status (W6) and Graph (F5) are live; Chat ships in
- * F6, its placeholder keeps structure and navigation real.
+ * Chat become separate chunks; F5 (sigma+graphology) and F6 (markdown-it+
+ * DOMPurify) only load when entered. All four are live as of F6-C5.
  */
 export const areaRoutes = {
   '/settings': () => import('./settings/SettingsPage.svelte'),
   '/status': () => import('./status/StatusPage.svelte'),
   '/graph': () => import('./graph/GraphPage.svelte'),
-  '/chat': () => import('./chat/Placeholder.svelte'),
+  '/chat': () => import('./chat/ChatPage.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes
 
