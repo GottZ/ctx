@@ -1,12 +1,16 @@
-// ctx blocks — block corpus maintenance (G41: sensitivity LLM audit).
+// ctx blocks — block corpus maintenance: sensitivity LLM audit (G41) and the
+// deterministic credentials pattern re-audit (G40).
 //
 //	ctx blocks audit                  # = status
 //	ctx blocks audit status           # progress: pending, by-source, run state
 //	ctx blocks audit sample [--n 30]  # N-block dry run (sample gate, no writes)
 //	ctx blocks audit start [--limit N]# live run (writes verdicts)
+//	ctx blocks classify               # = status
+//	ctx blocks classify dry-run       # full pattern scan, NO writes (FP gate)
+//	ctx blocks classify start [--limit N] # live run (raises hits to credentials)
 //
-// All subcommands need an ADMIN key (bulk downgrades are the opsec
-// direction). Envelope discipline: success:false reaches stderr with exit 1.
+// All subcommands need an ADMIN key (corpus-wide mutation + topology
+// disclosure). Envelope discipline: success:false reaches stderr with exit 1.
 package cli
 
 import (
@@ -101,11 +105,157 @@ func blocksCmd(getClient func() (*Client, error)) *cobra.Command {
 	auditCmd.AddCommand(startCmd)
 
 	cmd.AddCommand(auditCmd)
+	cmd.AddCommand(classifyCmd(getClient))
 	return cmd
 }
 
+// classifyStatusView mirrors the server's blocks-classify-status wire shape.
+type classifyStatusView struct {
+	Scope    string         `json:"scope"`
+	BySource map[string]int `json:"by_source"`
+	Run      struct {
+		Running    bool   `json:"running"`
+		DryRun     bool   `json:"dry_run"`
+		StartedAt  string `json:"started_at"`
+		FinishedAt string `json:"finished_at"`
+		Scanned    int    `json:"scanned"`
+		Upgraded   int    `json:"upgraded"`
+		Discarded  int    `json:"discarded"`
+		Aborted    bool   `json:"aborted"`
+		LastError  string `json:"last_error"`
+		Samples    []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+			Kind  string `json:"kind"`
+		} `json:"samples"`
+	} `json:"run"`
+}
+
+// classifyCmd builds `ctx blocks classify` (G40): the deterministic credentials
+// PATTERN re-audit. dry-run scans without writing (see what WOULD be raised on
+// the real corpus first); start raises every hit to credentials, upgrade-only.
+func classifyCmd(getClient func() (*Client, error)) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "classify",
+		Short: "Credentials pattern re-audit: raise hits to credentials (G40)",
+		Long: "Scans every home-scope block (except manual / already-credentials) with the\n" +
+			"deterministic pattern+entropy detector and raises hits to credentials\n" +
+			"(sensitivity_source='pattern' — the veto the G41 LLM audit can never re-touch).\n" +
+			"Upgrade-only: it never downgrades. Run dry-run FIRST to measure false positives.",
+		Example: `  ctx blocks classify                # status
+  ctx blocks classify dry-run        # full scan, NO writes (FP gate)
+  ctx blocks classify start          # live run, raise every hit
+  ctx blocks classify start --limit 100`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBlocksClassifyStatus(getClient)
+		},
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "status",
+		Short: "Show classify progress (by-source, current/last run)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBlocksClassifyStatus(getClient)
+		},
+	})
+
+	var dryLimit int
+	dryCmd := &cobra.Command{
+		Use:   "dry-run",
+		Short: "Scan WITHOUT writing — list what would be raised (FP gate)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBlocksClassifyStart(getClient, true, dryLimit)
+		},
+	}
+	dryCmd.Flags().IntVar(&dryLimit, "limit", 0, "stop after N blocks scanned (0 = all)")
+	cmd.AddCommand(dryCmd)
+
+	var startLimit int
+	startCmd := &cobra.Command{
+		Use:   "start",
+		Short: "Live run: raise every pattern hit to credentials (upgrade-only)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBlocksClassifyStart(getClient, false, startLimit)
+		},
+	}
+	startCmd.Flags().IntVar(&startLimit, "limit", 0, "stop after N blocks scanned (0 = all)")
+	cmd.AddCommand(startCmd)
+
+	return cmd
+}
+
+func runBlocksClassifyStatus(getClient func() (*Client, error)) error {
+	resp, err := blocksManageCall(getClient, "blocks-classify-status", nil)
+	if err != nil {
+		return err
+	}
+	return printClassifyStatus(resp)
+}
+
+func runBlocksClassifyStart(getClient func() (*Client, error), dryRun bool, limit int) error {
+	data, _ := json.Marshal(map[string]any{"dry_run": dryRun, "limit": limit})
+	resp, err := blocksManageCall(getClient, "blocks-classify-start", data)
+	if err != nil {
+		return err
+	}
+	return printClassifyStatus(resp)
+}
+
+func printClassifyStatus(resp json.RawMessage) error {
+	if !StdoutIsTTY() {
+		PrintJSON(resp)
+		return nil
+	}
+	var v classifyStatusView
+	if err := json.Unmarshal(resp, &v); err != nil {
+		PrintJSON(resp)
+		return err
+	}
+
+	state := "idle"
+	switch {
+	case v.Run.Running && v.Run.DryRun:
+		state = "running (dry-run)"
+	case v.Run.Running:
+		state = "running"
+	case v.Run.Aborted:
+		state = "ABORTED: " + v.Run.LastError
+	case v.Run.StartedAt != "":
+		state = "finished"
+	}
+	fmt.Printf("scope: %s   run: %s\n", v.Scope, state)
+
+	if len(v.BySource) > 0 {
+		parts := make([]string, 0, len(v.BySource))
+		for _, k := range []string{"default", "llm-audit", "pattern", "manual"} {
+			if n, ok := v.BySource[k]; ok {
+				parts = append(parts, fmt.Sprintf("%s=%d", k, n))
+			}
+		}
+		fmt.Printf("by-source: %s\n", strings.Join(parts, "  "))
+	}
+
+	if v.Run.Scanned > 0 || v.Run.Running {
+		verb := "upgraded"
+		if v.Run.DryRun {
+			verb = "would-upgrade"
+		}
+		fmt.Printf("scanned: %d   %s: %d   discarded: %d\n", v.Run.Scanned, verb, v.Run.Upgraded, v.Run.Discarded)
+	}
+
+	if len(v.Run.Samples) > 0 {
+		w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "KIND\tTITLE\tID")
+		for _, s := range v.Run.Samples {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", s.Kind, truncate(s.Title, 48), s.ID)
+		}
+		_ = w.Flush()
+	}
+	return nil
+}
+
 func runBlocksAuditStatus(getClient func() (*Client, error)) error {
-	resp, err := blocksAuditCall(getClient, "blocks-audit-status", nil)
+	resp, err := blocksManageCall(getClient, "blocks-audit-status", nil)
 	if err != nil {
 		return err
 	}
@@ -114,14 +264,14 @@ func runBlocksAuditStatus(getClient func() (*Client, error)) error {
 
 func runBlocksAuditStart(getClient func() (*Client, error), dryRun bool, limit int) error {
 	data, _ := json.Marshal(map[string]any{"dry_run": dryRun, "limit": limit})
-	resp, err := blocksAuditCall(getClient, "blocks-audit-start", data)
+	resp, err := blocksManageCall(getClient, "blocks-audit-start", data)
 	if err != nil {
 		return err
 	}
 	return printAuditStatus(resp)
 }
 
-func blocksAuditCall(getClient func() (*Client, error), action string, data json.RawMessage) (json.RawMessage, error) {
+func blocksManageCall(getClient func() (*Client, error), action string, data json.RawMessage) (json.RawMessage, error) {
 	c, err := getClient()
 	if err != nil {
 		return nil, err

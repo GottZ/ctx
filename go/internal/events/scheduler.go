@@ -126,6 +126,10 @@ type Scheduler struct {
 	audit    auditState
 	classify classifyFunc
 
+	// Credentials pattern classify (G40): run state for the deterministic
+	// re-audit. No LLM seam — sensitivity.Scan is pure.
+	credClassify classifyState
+
 	// runCtx is Run's lifecycle context, published for background jobs
 	// triggered via API after boot (audit). Before Run: context.Background().
 	runCtxMu sync.Mutex

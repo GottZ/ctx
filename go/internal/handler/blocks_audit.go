@@ -17,12 +17,15 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 )
 
-// AuditController is the scheduler surface the blocks-audit actions consume
-// (DreamController pattern). Status carries only in-memory run state; the
+// AuditController is the scheduler surface the blocks-* maintenance actions
+// consume (DreamController pattern): the G41 sensitivity LLM audit and the G40
+// credentials pattern classify. Status carries only in-memory run state; the
 // pending/per-source counts come from the DB here.
 type AuditController interface {
 	StartSensitivityAudit(dryRun bool, limit int) error
 	SensitivityAuditStatus() events.AuditStatus
+	StartCredentialsClassify(dryRun bool, limit int) error
+	CredentialsClassifyStatus() events.ClassifyStatus
 }
 
 // handleBlocksAuditStart launches a run. data: {"dry_run":bool,"limit":int} —

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -83,6 +84,10 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": sensErr})
 		return
 	}
+
+	// G40 credentials detector: a content pattern hit forces credentials
+	// (upgrade-only, source='pattern'). See applyWriteDetector.
+	sens, req.Metadata = applyWriteDetector(req.Content, reqID, sens, req.Metadata)
 
 	// Scope validation: write scope must be home_scope or "shared" if allowed.
 	writeScope := authResult.HomeScope
@@ -208,6 +213,31 @@ func blockSizeLimit(category, title, content string) string {
 		return "Content exceeds 50KB"
 	}
 	return ""
+}
+
+// applyWriteDetector runs the G40 credentials scanner over content. On a hit it
+// returns the sensitivity raised UPGRADE-ONLY to credentials with Detector set
+// (source='pattern' in the upsert) and metadata carrying the secret-free reason
+// — never the matched secret. A hit only ever RAISES: it overrides a too-low
+// manual/default classification but leaves an already-credentials block intact.
+// No hit ⇒ inputs returned unchanged.
+func applyWriteDetector(content, reqID string, sens store.SensitivityWrite, metadata map[string]any) (store.SensitivityWrite, map[string]any) {
+	m, hit := sensitivity.Scan(content)
+	if !hit {
+		return sens, metadata
+	}
+	if sens.Value.Rank() < backends.SensCredentials.Rank() {
+		sens.Value = backends.SensCredentials
+	}
+	sens.Manual = false
+	sens.Detector = true
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["sensitivity_detector"] = map[string]any{"kind": m.Kind, "reason": m.Reason}
+	slog.Info("store: credentials pattern detected — sensitivity forced to credentials",
+		"kind", m.Kind, "request_id", reqID)
+	return sens, metadata
 }
 
 // storeSensitivity resolves the write intent: explicit request value (manual,

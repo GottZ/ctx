@@ -187,3 +187,74 @@ func AuditProgress(ctx context.Context, pool *pgxpool.Pool, homeScope string) (p
 	}
 	return bySource["default"], bySource, nil
 }
+
+// G40 credentials pattern re-audit — keyset-paginated candidate pick + the
+// upgrade-only verdict write. The detector NEVER downgrades: it only raises a
+// block to credentials, stamping sensitivity_source='pattern' (the veto marker
+// the G41 audit's source='default' pick set can never re-touch).
+
+// ClassifyBlock is one candidate the pattern detector may still raise.
+type ClassifyBlock struct {
+	ID      string
+	Title   string
+	Content string
+}
+
+// PickClassifyCandidates keyset-paginates (by id) the home-scope blocks the
+// detector may still raise: sensitivity <> 'credentials' AND source <> 'manual'
+// (manual is untantastbar, already-credentials needs no raise). afterID "" =
+// start at the beginning. Keyset over OFFSET is drain-safe under concurrent
+// upgrades: a row that turns credentials drops out of the predicate, but its id
+// is already behind the cursor so it is never re-picked or skipped.
+func PickClassifyCandidates(ctx context.Context, pool *pgxpool.Pool, homeScope, afterID string, limit int) ([]ClassifyBlock, error) {
+	if afterID == "" {
+		afterID = "00000000-0000-0000-0000-000000000000"
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT id, title, content FROM context_blocks
+		 WHERE scope = $1 AND NOT is_archived
+		   AND sensitivity <> 'credentials' AND sensitivity_source <> 'manual'
+		   AND id > $2::uuid
+		 ORDER BY id LIMIT $3`,
+		homeScope, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: pick classify candidates: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ClassifyBlock
+	for rows.Next() {
+		var b ClassifyBlock
+		if err := rows.Scan(&b.ID, &b.Title, &b.Content); err != nil {
+			return nil, fmt.Errorf("store: pick classify candidates scan: %w", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: pick classify candidates rows: %w", err)
+	}
+	return out, nil
+}
+
+// ApplyPatternVerdict raises one home-scope block to credentials with
+// sensitivity_source='pattern' and records metadata.sensitivity_detector
+// (kind + reason, never the matched secret). The WHERE predicate re-checks the
+// upgrade-only + manual-untouchable invariants at write time: applied=false
+// means the block raced to credentials or manual since the pick — discard, not
+// force. Scope-bound by construction (2.3d: no cross-tenant reclassification).
+func ApplyPatternVerdict(ctx context.Context, pool *pgxpool.Pool, id, homeScope, kind, reason string) (applied bool, err error) {
+	tag, err := pool.Exec(ctx,
+		`UPDATE context_blocks
+		    SET sensitivity = 'credentials', sensitivity_source = 'pattern',
+		        sensitivity_audited_at = now(),
+		        metadata = COALESCE(metadata, '{}'::jsonb)
+		                 || jsonb_build_object('sensitivity_detector',
+		                        jsonb_build_object('kind', $3::text, 'reason', $4::text))
+		  WHERE id = $1 AND scope = $2 AND NOT is_archived
+		    AND sensitivity <> 'credentials' AND sensitivity_source <> 'manual'`,
+		id, homeScope, kind, reason)
+	if err != nil {
+		return false, fmt.Errorf("store: apply pattern verdict: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}

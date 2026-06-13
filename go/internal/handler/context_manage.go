@@ -120,10 +120,8 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchBackendAction(w, r, authResult, req)
 	case "api-key-create", "api-key-list", "api-key-delete":
 		h.dispatchAPIKeyAction(w, r, req)
-	case "blocks-audit-start":
-		h.handleBlocksAuditStart(w, r, req)
-	case "blocks-audit-status":
-		h.handleBlocksAuditStatus(w, r)
+	case "blocks-audit-start", "blocks-audit-status", "blocks-classify-start", "blocks-classify-status":
+		h.dispatchBlocksAction(w, r, req)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
@@ -161,6 +159,22 @@ func (h *ManageHandler) dispatchAPIKeyAction(w http.ResponseWriter, r *http.Requ
 // tier (052, K2/G03). dream-mode is special-cased: only the mutating shape
 // (non-empty data) is gated; reading the current mode stays open to every
 // valid key.
+// dispatchBlocksAction routes the block-corpus maintenance actions (G41 audit +
+// G40 classify) — kept out of HandleManage's switch so the hot dispatcher stays
+// under the cyclomatic budget (mirrors dispatchBackendAction/dispatchAPIKeyAction).
+func (h *ManageHandler) dispatchBlocksAction(w http.ResponseWriter, r *http.Request, req manageRequest) {
+	switch req.Action {
+	case "blocks-audit-start":
+		h.handleBlocksAuditStart(w, r, req)
+	case "blocks-audit-status":
+		h.handleBlocksAuditStatus(w, r)
+	case "blocks-classify-start":
+		h.handleBlocksClassifyStart(w, r, req)
+	case "blocks-classify-status":
+		h.handleBlocksClassifyStatus(w, r)
+	}
+}
+
 func actionRequiresAdmin(req manageRequest) bool {
 	switch req.Action {
 	case "api-key-create", "api-key-list", "api-key-delete",
@@ -173,7 +187,11 @@ func actionRequiresAdmin(req manageRequest) bool {
 		// blocks-audit-* in full (G41): start causes bulk sensitivity
 		// downgrades (the opsec direction), status discloses block titles
 		// and classification topology.
-		"blocks-audit-start", "blocks-audit-status":
+		"blocks-audit-start", "blocks-audit-status",
+		// blocks-classify-* in full (G40): a corpus-wide mutation (even if
+		// upgrade-only) and the status/samples disclose block titles and the
+		// classification topology — same opsec surface as the audit.
+		"blocks-classify-start", "blocks-classify-status":
 		return true
 	case "dream-mode":
 		return isDreamModeMutation(req)

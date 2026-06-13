@@ -40,9 +40,15 @@ type Block struct {
 // Manual=true = user-explicit classification: sensitivity_source='manual',
 // and on upsert-conflict the value applies only UPGRADING (a write-path
 // downgrade would bypass the confirm-gated update path, F3 §3.5).
+// Detector=true = the G40 credentials pattern scanner fired:
+// sensitivity_source='pattern' (veto-protected against the G41 audit, which
+// only re-touches source='default'), value forced to credentials. On conflict
+// it re-stamps only on a STRICT elevation (>), so an already-credentials block
+// — manual or not — is left untouched (manual stays untantastbar).
 type SensitivityWrite struct {
-	Value  backends.Sensitivity
-	Manual bool
+	Value    backends.Sensitivity
+	Manual   bool
+	Detector bool
 }
 
 // sensRankSQL renders the sensitivity rank of a SQL expression — must mirror
@@ -186,21 +192,30 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 	}
 	if sens.Value != "" {
 		source := "default"
-		if sens.Manual {
+		switch {
+		case sens.Detector:
+			source = "pattern"
+		case sens.Manual:
 			source = "manual"
 		}
 		insertCols += ", sensitivity, sensitivity_source"
 		insertVals += ", $7, $8"
 		args = append(args, string(sens.Value), source)
-		if sens.Manual {
-			// Upgrade-only on conflict: a write-path downgrade would bypass
-			// the confirm-gated update path (F3 §3.5). >= so re-asserting the
-			// same level still stamps source='manual'.
-			upgrades := fmt.Sprintf("%s >= %s",
-				sensRankSQL("EXCLUDED.sensitivity"), sensRankSQL("context_blocks.sensitivity"))
+		if sens.Manual || sens.Detector {
+			// Upgrade-only on conflict: a write-path downgrade would bypass the
+			// confirm-gated update path (F3 §3.5). Manual uses >= (re-asserting
+			// the same level re-stamps source='manual'); the pattern detector
+			// uses strict > so it re-stamps only on a real elevation and never
+			// flips an already-credentials block's source (manual stays intact).
+			op := ">="
+			if sens.Detector {
+				op = ">"
+			}
+			upgrades := fmt.Sprintf("%s %s %s",
+				sensRankSQL("EXCLUDED.sensitivity"), op, sensRankSQL("context_blocks.sensitivity"))
 			setClauses = append(setClauses,
 				fmt.Sprintf("sensitivity = CASE WHEN %s THEN EXCLUDED.sensitivity ELSE context_blocks.sensitivity END", upgrades),
-				fmt.Sprintf("sensitivity_source = CASE WHEN %s THEN 'manual' ELSE context_blocks.sensitivity_source END", upgrades),
+				fmt.Sprintf("sensitivity_source = CASE WHEN %s THEN '%s' ELSE context_blocks.sensitivity_source END", upgrades, source),
 			)
 		}
 	}

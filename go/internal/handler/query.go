@@ -22,6 +22,7 @@ import (
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/rrf"
+	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -303,6 +304,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		querySens = s
+	}
+
+	// G40 credentials detector: a query carrying a secret must never reach a
+	// lower-trust backend — raise to credentials regardless of the requested or
+	// default level (upgrade-only). The reason goes to the log, never the match.
+	if m, hit := sensitivity.Scan(query); hit {
+		querySens = backends.MaxSensitivity(querySens, backends.SensCredentials)
+		slog.Warn("query: credentials pattern in query text — sensitivity raised to credentials",
+			"kind", m.Kind, "request_id", requestID)
 	}
 
 	// Clamp limit: 1-20, default 5.
