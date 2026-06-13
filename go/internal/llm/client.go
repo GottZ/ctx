@@ -53,10 +53,21 @@ type Options struct {
 // EvalCount is the completion (output) token count.
 // PromptTokens is the input token count — 0 when the provider does not report it
 // (older Ollama, some OpenAI-compatibles), or when a cached prefill returns 0.
+//
+// The three provider fields are filled for provider_class=openrouter only
+// (G29): CostUSD from usage.cost (response BODY, not headers — inventory A8),
+// ServedModel from the top-level model (the model that ACTUALLY answered;
+// OpenRouter's models-fallback can differ from the request), and
+// ProviderRequestID from the response id (async audit via
+// GET /api/v1/generation?id=…). Local backends leave all three zero —
+// llmlog's cost_usd stays NULL by construction.
 type ChatResponse struct {
-	Message      Message
-	EvalCount    int
-	PromptTokens int
+	Message           Message
+	EvalCount         int
+	PromptTokens      int
+	CostUSD           *float64
+	ServedModel       string
+	ProviderRequestID string
 }
 
 // --- Ollama wire format ---.
@@ -109,6 +120,10 @@ type respFormat struct {
 }
 
 type openAIChatResponse struct {
+	// ID and Model feed the OpenRouter provenance fields of ChatResponse;
+	// Usage.Cost is OpenRouter's USD charge (absent on local backends).
+	ID      string `json:"id"`
+	Model   string `json:"model"`
 	Choices []struct {
 		Message struct {
 			Role      string `json:"role"`
@@ -117,8 +132,9 @@ type openAIChatResponse struct {
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
-		CompletionTokens int `json:"completion_tokens"`
-		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int      `json:"completion_tokens"`
+		PromptTokens     int      `json:"prompt_tokens"`
+		Cost             *float64 `json:"cost"`
 	} `json:"usage"`
 }
 
@@ -126,39 +142,39 @@ type openAIChatResponse struct {
 // (/api/chat vs /v1/chat/completions) follows b.Protocol — host and protocol
 // travel as one tuple, never as loose parameters (F1-W3).
 func Chat(ctx context.Context, b backends.Backend, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
-	return chatWithFormat(ctx, string(b.Protocol), b.Host, b.APIKey, b.Model, b.Think.Ptr(), systemPrompt, userPrompt, opts, "", timeout)
+	return chatWithFormat(ctx, b, systemPrompt, userPrompt, opts, "", timeout)
 }
 
 // ChatJSON sends a non-streaming chat request with JSON-mode enabled to the
 // given backend.
 func ChatJSON(ctx context.Context, b backends.Backend, systemPrompt, userPrompt string, opts Options, timeout time.Duration) (*ChatResponse, error) {
-	return chatWithFormat(ctx, string(b.Protocol), b.Host, b.APIKey, b.Model, b.Think.Ptr(), systemPrompt, userPrompt, opts, "json", timeout)
+	return chatWithFormat(ctx, b, systemPrompt, userPrompt, opts, "json", timeout)
 }
 
 // chatWithFallback died in F3-P2: its single consumer (the synthesize step)
 // walks the pool chain via ChatChain, which generalizes the hardwired
 // two-leg semantics (transport failure ⇒ next backend, HTTP 500 ⇒ stop).
 
-// chatWithFormat is the protocol dispatch shared by Chat and ChatJSON. The
-// exported loose-parameter forms (ChatWithProtocol/ChatJSONWithProtocol) died
-// in F1-W6 with their last consumer, the dream chatJSON seam — every call
-// site now passes a backends.Backend.
-func chatWithFormat(ctx context.Context, protocol, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
-	if protocol == "openai" {
-		return chatOpenAI(ctx, host, apiKey, model, think, systemPrompt, userPrompt, opts, format, timeout)
+// chatWithFormat is the protocol dispatch shared by Chat and ChatJSON. Since
+// G29 the wire paths take the full Backend — ProviderClass, ExtraHeaders and
+// ExtraBody are wire-relevant (OpenRouter forced zdr/deny, per-backend
+// attribution headers), so the loose-parameter form would silently drop them.
+func chatWithFormat(ctx context.Context, b backends.Backend, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
+	if b.Protocol == backends.ProtocolOpenAI {
+		return chatOpenAI(ctx, b, systemPrompt, userPrompt, opts, format, timeout)
 	}
-	return chatOllama(ctx, host, apiKey, model, think, systemPrompt, userPrompt, opts, format, timeout)
+	return chatOllama(ctx, b, systemPrompt, userPrompt, opts, format, timeout)
 }
 
-func chatOllama(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
+func chatOllama(ctx context.Context, b backends.Backend, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
 	reqBody := ollamaChatRequest{
-		Model: model,
+		Model: b.Model,
 		Messages: []Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
 		Stream:  false,
-		Think:   think,
+		Think:   b.Think.Ptr(),
 		Format:  format,
 		Options: opts,
 	}
@@ -171,14 +187,11 @@ func chatOllama(ctx context.Context, host, apiKey, model string, think *bool, sy
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/api/chat", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.Host+"/api/chat", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	setChatHeaders(req, &b)
 
 	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
@@ -205,9 +218,10 @@ func chatOllama(ctx context.Context, host, apiKey, model string, think *bool, sy
 	}, nil
 }
 
-func chatOpenAI(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
+func chatOpenAI(ctx context.Context, b backends.Backend, systemPrompt, userPrompt string, opts Options, format string, timeout time.Duration) (*ChatResponse, error) {
+	think := b.Think.Ptr()
 	reqBody := openAIChatRequest{
-		Model: model,
+		Model: b.Model,
 		Messages: []Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
@@ -238,18 +252,19 @@ func chatOpenAI(ctx context.Context, host, apiKey, model string, think *bool, sy
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
+	body, err = applyOpenAIBodyExtras(body, &b)
+	if err != nil {
+		return nil, fmt.Errorf("llm: merge extra_body: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/v1/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.Host+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	setChatHeaders(req, &b)
 
 	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
@@ -277,11 +292,75 @@ func chatOpenAI(ctx context.Context, host, apiKey, model string, think *bool, sy
 		content = choice.Reasoning
 	}
 
-	return &ChatResponse{
+	out := &ChatResponse{
 		Message:      Message{Role: choice.Role, Content: content},
 		EvalCount:    result.Usage.CompletionTokens,
 		PromptTokens: result.Usage.PromptTokens,
-	}, nil
+	}
+	// Provider provenance is an openrouter-class contract (design 03 §2.7.4):
+	// local /v1 servers also echo a model string, but only OpenRouter's may
+	// legitimately differ from the requested one (models-fallback) — gating
+	// here keeps llmlog's model column row-faithful for local backends.
+	if b.ProviderClass == backends.ProviderOpenRouter {
+		out.CostUSD = result.Usage.Cost
+		out.ServedModel = result.Model
+		out.ProviderRequestID = result.ID
+	}
+	return out, nil
+}
+
+// applyOpenAIBodyExtras merges b.ExtraBody into the marshaled request (last
+// write wins on key collision — the stream path's escape-hatch semantics,
+// buildStreamBody) and then FORCES provider.zdr=true +
+// provider.data_collection="deny" for provider_class=openrouter,
+// trust-INDEPENDENT (design 03 §3.3): trust decides WHICH content may flow,
+// the provider class decides whether the provider may store it. extra_body
+// can only tighten, never loosen — the force runs after the merge. The only
+// way out is the explicit metadata.allow_data_collection=true escape,
+// confirm-gated at backend-create/update.
+func applyOpenAIBodyExtras(body []byte, b *backends.Backend) ([]byte, error) {
+	forceZDR := b.ProviderClass == backends.ProviderOpenRouter && !allowsDataCollection(b)
+	if len(b.ExtraBody) == 0 && !forceZDR {
+		return body, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	for k, v := range b.ExtraBody {
+		m[k] = v
+	}
+	if forceZDR {
+		prov, _ := m["provider"].(map[string]any)
+		if prov == nil {
+			prov = map[string]any{}
+		}
+		prov["zdr"] = true
+		prov["data_collection"] = "deny"
+		m["provider"] = prov
+	}
+	return json.Marshal(m)
+}
+
+// allowsDataCollection reads the explicit non-ZDR escape. Anything but a
+// literal bool true (string "true", 1, absent) keeps the enforcement on.
+func allowsDataCollection(b *backends.Backend) bool {
+	v, ok := b.Metadata["allow_data_collection"].(bool)
+	return ok && v
+}
+
+// setChatHeaders applies the standard headers, then ExtraHeaders (OpenRouter
+// attribution: HTTP-Referer/X-Title). Core headers are set LAST so a row
+// edited past the credential-carrier denylist can not override the
+// Authorization derived from api_key_ref.
+func setChatHeaders(req *http.Request, b *backends.Backend) {
+	for k, v := range b.ExtraHeaders {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if b.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.APIKey)
+	}
 }
 
 // SynthesisOptions returns default options for LLM synthesis.

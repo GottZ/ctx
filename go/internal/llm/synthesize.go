@@ -438,6 +438,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, set
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
+		applyProviderTelemetry(&entry, resp)
 	}
 	// E4/8b body slim for credentials-class rows (request AND response — the
 	// synthesized answer derives from the credentials blocks).

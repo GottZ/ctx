@@ -51,8 +51,7 @@ func ChatChain(ctx context.Context, chain []backends.Backend, role string,
 	defTimeout time.Duration, report ReportFunc,
 ) (*ChatResponse, *backends.Backend, []ChainAttempt, error) {
 	return ChatChainVia(ctx, func(ctx context.Context, b backends.Backend, sys, usr string, opts Options, timeout time.Duration) (*ChatResponse, error) {
-		return chatWithFormat(ctx, string(b.Protocol), b.Host, b.APIKey,
-			b.Model, b.Think.Ptr(), sys, usr, opts, format, timeout)
+		return chatWithFormat(ctx, b, sys, usr, opts, format, timeout)
 	}, chain, role, systemPrompt, userPrompt, baseOpts, defTimeout, report)
 }
 
@@ -319,8 +318,27 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool) (*ChatResponse, err
 	if resp != nil {
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
+		applyProviderTelemetry(&entry, resp)
 	}
 	llmlog.Record(db, entry)
 
 	return resp, err
+}
+
+// applyProviderTelemetry copies the OpenRouter provenance of a response into
+// the llmlog row (G29, design 03 §2.7.4): cost_usd from usage.cost, the model
+// column overwritten with the model that ACTUALLY answered (models-fallback),
+// response.id as metadata.provider_request_id for async audit. Local backends
+// carry zero values — the entry stays untouched.
+func applyProviderTelemetry(entry *llmlog.Entry, resp *ChatResponse) {
+	entry.CostUSD = resp.CostUSD
+	if resp.ServedModel != "" {
+		entry.Model = resp.ServedModel
+	}
+	if resp.ProviderRequestID != "" {
+		if entry.Metadata == nil {
+			entry.Metadata = map[string]any{}
+		}
+		entry.Metadata["provider_request_id"] = resp.ProviderRequestID
+	}
 }

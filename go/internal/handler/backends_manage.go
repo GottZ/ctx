@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -37,6 +38,10 @@ type backendSpec struct {
 	APIKeyRef             *string           `json:"api_key_ref"`
 	Trust                 *string           `json:"trust"`
 	ConfirmTrustElevation bool              `json:"confirm_trust_elevation"`
+	// ConfirmDataCollection guards arming metadata.allow_data_collection —
+	// the ONLY way to lift the forced zdr/deny of an openrouter-class
+	// backend (never implicit via trust elevation, design 03 §3.3).
+	ConfirmDataCollection bool `json:"confirm_data_collection"`
 	Locality              *string           `json:"locality"`
 	Roles                 []string          `json:"roles"`
 	ModelMap              json.RawMessage   `json:"model_map"`
@@ -207,6 +212,15 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 		})
 		return
 	}
+	// Same bypass logic as the trust confirm: without the create-side check
+	// the update-confirm would fall to a direct create.
+	if dataCollectionEscapeOn(b) && !spec.ConfirmDataCollection {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "metadata.allow_data_collection:true lifts the forced zdr/data_collection=deny of this openrouter backend — requires confirm_data_collection:true",
+		})
+		return
+	}
 
 	warnings, fieldErrs := backends.ValidateBackend(b)
 	if len(fieldErrs) > 0 {
@@ -271,6 +285,15 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
 			"error":   fmt.Sprintf("raising trust from %q to %q requires confirm_trust_elevation:true — trust decides which content may flow here", prev.Trust, next.Trust),
+		})
+		return
+	}
+	// Confirm only when the escape ARMS (off → on) — re-saving a backend
+	// that already carries it stays friction-free, mirroring trustRankRose.
+	if dataCollectionEscapeOn(&next) && !dataCollectionEscapeOn(prev) && !spec.ConfirmDataCollection {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "metadata.allow_data_collection:true lifts the forced zdr/data_collection=deny of this openrouter backend — requires confirm_data_collection:true",
 		})
 		return
 	}
@@ -371,7 +394,9 @@ func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request
 // handleBackendTest probes one backend without settings effect: a
 // reachability GET (llamacpp: /health; openrouter: /key with auth; generic:
 // base_url), optionally a 1-token chat probe against the default model.
-// OpenRouter detail checks (credits, zdr endpoint count) arrive with G29.
+// openrouter-class backends additionally report credits and the default
+// model's ZDR endpoint count (G29) — the count that predicts whether the
+// forced zdr:true leaves a non-empty provider set.
 func (h *ManageHandler) handleBackendTest(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	if req.ID == "" {
@@ -397,10 +422,105 @@ func (h *ManageHandler) handleBackendTest(w http.ResponseWriter, r *http.Request
 		probeChat(ctx, b, checks)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	result := map[string]any{
 		"success": true, "reachable": reachable,
 		"latency_ms": latency, "checks": checks,
-	})
+	}
+	if reachable && b.ProviderClass == backends.ProviderOpenRouter {
+		if det := openRouterDetails(ctx, b); len(det) > 0 {
+			result["openrouter"] = det
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// openRouterDetails gathers the G29 detail checks: account credits from
+// GET /v1/key (authenticated; limit_remaining is null on unlimited keys,
+// usage is always present) and the ZDR endpoint count of the backend's
+// default model from the public GET /v1/endpoints/zdr. A zero zdr_endpoints
+// means the forced zdr:true will fail permanently with "no providers"
+// (ClassNoProviders) — visible here BEFORE the first failover needs the
+// backend. The /v1 segment matches the chat path's b.Host+"/v1/chat/..."
+// convention: base_url is the API root WITHOUT the version segment
+// (llama.cpp: host:port; OpenRouter: https://openrouter.ai/api).
+func openRouterDetails(ctx context.Context, b *backends.Backend) map[string]any {
+	details := map[string]any{}
+	if body, ok := openRouterGET(ctx, b.Host+"/v1/key", b.APIKey); ok {
+		var key struct {
+			Data struct {
+				LimitRemaining *float64 `json:"limit_remaining"`
+				Usage          *float64 `json:"usage"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &key) == nil {
+			if key.Data.LimitRemaining != nil {
+				details["credits_remaining"] = *key.Data.LimitRemaining
+			}
+			if key.Data.Usage != nil {
+				details["usage_usd"] = *key.Data.Usage
+			}
+		}
+	}
+	model := b.ModelFor(backends.RoleSynthesis).Model
+	if model == "" {
+		return details
+	}
+	if body, ok := openRouterGET(ctx, b.Host+"/v1/endpoints/zdr", ""); ok {
+		var zdr struct {
+			Data []struct {
+				ModelID string `json:"model_id"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &zdr) == nil {
+			n := 0
+			for _, ep := range zdr.Data {
+				if ep.ModelID == model {
+					n++
+				}
+			}
+			details["zdr_endpoints"] = n
+		}
+	}
+	return details
+}
+
+// openRouterGET is one authenticated detail-check GET; non-200 or transport
+// failure degrades to "field absent" — the reachability verdict was already
+// made by probeBackendURL.
+func openRouterGET(ctx context.Context, url, apiKey string) ([]byte, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, false
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: admin-gated runtime data; reaching the configured backend is this action's function
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	// The full ZDR endpoint list is ~1 MB at 628 endpoints; cap generously.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, false
+	}
+	return body, true
+}
+
+// dataCollectionEscapeOn mirrors llm.allowsDataCollection: only a literal
+// bool true on an openrouter-class row arms the non-ZDR escape.
+func dataCollectionEscapeOn(b *backends.Backend) bool {
+	if b.ProviderClass != backends.ProviderOpenRouter {
+		return false
+	}
+	v, ok := b.Metadata["allow_data_collection"].(bool)
+	return ok && v
 }
 
 func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string]string) bool {
@@ -409,7 +529,9 @@ func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string
 	case backends.ProviderLlamaCpp:
 		url += "/health"
 	case backends.ProviderOpenRouter:
-		url += "/key"
+		// /v1/key matches the chat path convention (base_url is the API root
+		// without the version segment, b.Host+"/v1/...").
+		url += "/v1/key"
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
