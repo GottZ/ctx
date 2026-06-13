@@ -285,7 +285,7 @@ func ChatStream(ctx context.Context, host, apiKey, model string,
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/v1/chat/completions", bytes.NewReader(body)) //nolint:gosec // G704: host stammt aus Betreiber-Config bzw. F3-Backend-Pool (CTX_*_HOST/context_backends), kein User-Input — kein SSRF-Vektor.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/v1/chat/completions", bytes.NewReader(body)) //nolint:gosec // G704: host aus dem F3-Backend-Pool (context_backends) — admin-gated + locality-validiert, kein freier User-Input. SSRF über die Egress-Locality-Trust-Dimension gegated (vor Prompt-Übertragung), nicht auf dieser Wire-Schicht.
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}

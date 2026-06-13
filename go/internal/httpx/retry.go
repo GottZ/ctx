@@ -72,7 +72,7 @@ func IsBackendUnavailable(err error) bool {
 // (the server answered) and context errors (timeout/cancel) are returned
 // unchanged. body must be the same bytes the original request was built from.
 func DoRetryOnce(c *http.Client, req *http.Request, body []byte) (*http.Response, error) {
-	resp, err := c.Do(req) //nolint:gosec // G704: URL stammt aus Betreiber-Config (CTX_*_HOST), kein User-Input — kein SSRF-Vektor.
+	resp, err := c.Do(req) //nolint:gosec // G704: URL aus dem F3-Backend-Pool (context_backends) — admin-gated + locality-validiert beim Schreiben (backends-Validierung), kein freier User-Input. SSRF ist über die Egress-Locality-Trust-Dimension gegated (vor Prompt-Übertragung), nicht auf dieser Wire-Schicht.
 	if err == nil || !IsTransientNetErr(err) || req.Context().Err() != nil {
 		return resp, err
 	}
@@ -81,5 +81,5 @@ func DoRetryOnce(c *http.Client, req *http.Request, body []byte) (*http.Response
 	retry := req.Clone(req.Context())
 	retry.Body = io.NopCloser(bytes.NewReader(body))
 	retry.ContentLength = int64(len(body))
-	return c.Do(retry) //nolint:gosec // G704: siehe oben — Config-URLs, kein SSRF-Vektor.
+	return c.Do(retry) //nolint:gosec // G704: siehe oben — Pool-URL (context_backends), admin-gated.
 }

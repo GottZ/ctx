@@ -47,11 +47,12 @@ services:
       CTX_DREAM_MODEL: ${CTX_DREAM_MODEL:-}
       CTX_DREAM_NUM_CTX: ${CTX_DREAM_NUM_CTX:-0}
       CTX_DREAM_THINK: ${CTX_DREAM_THINK:-}
-      CTX_DREAM_EMBED_HOST: ${CTX_DREAM_EMBED_HOST:-}
-      CTX_DREAM_EMBED_API_KEY: ${CTX_DREAM_EMBED_API_KEY:-}
-      CTX_DREAM_EMBED_PROTOCOL: ${CTX_DREAM_EMBED_PROTOCOL:-}
-      CTX_DREAM_EMBED_MODEL: ${CTX_DREAM_EMBED_MODEL:-}
-      CTX_DREAM_EMBED_NUM_CTX: ${CTX_DREAM_EMBED_NUM_CTX:-0}
+      # CTX_DREAM_EMBED_* (separate dream-embedding endpoint) is no longer wired
+      # here: live it was identical to CTX_EMBED_*, and the backend pool (053)
+      # dedups an identical tuple onto the llama-embed row's dream-embed role.
+      # To run a SEPARATE dream-embed backend, create a pool row instead
+      # (`ctx backends`, role dream-embed); config.go still reads these vars for
+      # the one-time bootstrap of an empty context_backends if you re-add them.
       # Reranker (post-RRF re-score). Default ON since Wave 3.5: the surface-gold
       # counter-probe showed the cross-encoder earns its keep on real-user
       # queries (nDCG@10 +0.164, MRR +0.169 on judge-annotated answer gold)
@@ -158,9 +159,9 @@ services:
 
   # Optional: llama.cpp CPU-only inference sidecar.
   # Useful for Dream embedding on CPU (frees GPU for query-path).
-  # Mount your GGUF models into /models.
-  # Example .env: CTX_DREAM_EMBED_HOST=http://llama-embed:8081
-  #               CTX_DREAM_EMBED_PROTOCOL=openai
+  # Mount your GGUF models into /models. Route Dream embedding here via a pool
+  # row (`ctx backends`, role dream-embed, base_url http://llama-embed:8081,
+  # protocol openai) — not env vars (see the dream-embed note above).
   #
   # llama-embed:
   #   image: ghcr.io/ggml-org/llama.cpp:server
