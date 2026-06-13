@@ -131,6 +131,20 @@ export interface StatusResponse {
   activity: ActivityStatus | null
 }
 
+// Source: go/internal/handler/events.go (statusEvent) — the SSE `status` event
+// payload: the StatusResponse minus `backends` (its own `backends` event) and
+// `success`. The client merges it onto the held StatusResponse (one render
+// path shared with the GET /api/status poll fallback).
+export interface StatusEvent {
+  as_of: string
+  health: HealthStatus
+  dream: DreamStatus
+  llm_24h: LLM24hRow[]
+  llm_24h_complete: boolean
+  gaming: { active: boolean }
+  activity: ActivityStatus | null
+}
+
 // Source: go/internal/handler/llmlog.go (llmlogError) — class + length-capped
 // detail; NEVER a full prompt body.
 export interface LLMLogError {

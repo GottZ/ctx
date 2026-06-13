@@ -128,7 +128,7 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string) st
 }
 
 func pingHost(ctx context.Context, host string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, host, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, host, nil) //nolint:gosec // G704: host is a context_backends pool row (admin-gated, locality-validated), not free user input — same false positive as the Do() below. The G34 SSE path (HandleEvents → Snapshot(r.Context()) → HealthStatus → pingHost) lets gosec's taint analysis reach this line too.
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}

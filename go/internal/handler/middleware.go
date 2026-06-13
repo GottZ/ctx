@@ -145,18 +145,26 @@ func Recovery(next http.Handler) http.Handler {
 	})
 }
 
+// apiKeyFromRequest extracts and sanitizes the API key from the X-Context-Key
+// header or an Authorization: Bearer token. Shared by the Auth middleware
+// (connect-time) and the SSE in-stream re-auth path (events.go, G34) so both
+// read the key identically.
+func apiKeyFromRequest(r *http.Request) string {
+	rawKey := r.Header.Get("X-Context-Key")
+	if rawKey == "" {
+		if bearer := r.Header.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
+			rawKey = strings.TrimPrefix(bearer, "Bearer ")
+		}
+	}
+	return auth.SanitizeKey(rawKey)
+}
+
 // Auth creates middleware that authenticates requests via X-Context-Key header
 // or Authorization: Bearer token. Bearer tokens are treated as API keys.
 func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			rawKey := r.Header.Get("X-Context-Key")
-			if rawKey == "" {
-				if bearer := r.Header.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
-					rawKey = strings.TrimPrefix(bearer, "Bearer ")
-				}
-			}
-			apiKey := auth.SanitizeKey(rawKey)
+			apiKey := apiKeyFromRequest(r)
 
 			result, err := auth.Authenticate(r.Context(), pool, apiKey)
 			if err != nil {

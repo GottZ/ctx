@@ -126,6 +126,11 @@ type StatusCollector struct {
 	qsScan atomic.Bool
 	qs     atomic.Pointer[dream.QueueStats]
 	qsAt   atomic.Int64 // unix nano of last queue scan
+
+	// broadcasting is set while an SSE broadcast loop (G34) is refreshing the
+	// cache every tick. A poll then serves that cache instead of triggering its
+	// own refresh (design §3.6: "refresh only when stale AND no SSE loop runs").
+	broadcasting atomic.Bool
 }
 
 // NewStatusCollector wires the collector. dreams is typically *events.Scheduler.
@@ -153,19 +158,47 @@ func (c *StatusCollector) Snapshot(ctx context.Context) statusResponse {
 		qInterval = 30 * time.Second
 	}
 
+	// While an SSE broadcast loop runs it is the refresher (one tick = one
+	// rebuild, shared by every poller and connection); a poll then just serves
+	// that warm cache. With no loop, the poll itself refreshes (W6, read-driven).
+	live := c.broadcasting.Load()
 	cur := c.cache.Load()
 	switch {
 	case cur == nil:
 		cur = c.coldStart(ctx, cfg) // build once, synchronously
-	case stale(c.cacheAt.Load(), tick):
+	case !live && stale(c.cacheAt.Load(), tick):
 		c.refreshCheapAsync() // serve the slightly-stale cache, refresh in bg
 	}
 
-	if stale(c.qsAt.Load(), qInterval) {
+	if !live && stale(c.qsAt.Load(), qInterval) {
 		c.scanQueueAsync(cfg.Scheduler.ReadScopes)
 	}
 
 	return c.assemble(cur, c.qs.Load())
+}
+
+// setBroadcasting toggles the SSE-loop-active flag (see broadcasting).
+func (c *StatusCollector) setBroadcasting(on bool) { c.broadcasting.Store(on) }
+
+// refreshForBroadcast rebuilds the cheap snapshot synchronously and returns the
+// assembled status. Called only by the single SSE broadcast loop (G34) — there
+// is exactly one caller, so no single-flight is needed; the loop thereby keeps
+// the cache warm for concurrent /api/status polls. The O(n) dream-queue scan
+// stays on its own slower cadence (async; the returned status may carry a
+// queue snapshot up to one queue_stats_interval old).
+func (c *StatusCollector) refreshForBroadcast(ctx context.Context) statusResponse {
+	cfg := c.cfg.Snapshot()
+	snap := c.buildCheap(ctx, cfg)
+	c.cache.Store(snap)
+	c.cacheAt.Store(time.Now().UnixNano())
+	qInterval := cfg.Events.QueueStatsInterval
+	if qInterval <= 0 {
+		qInterval = 30 * time.Second
+	}
+	if stale(c.qsAt.Load(), qInterval) {
+		c.scanQueueAsync(cfg.Scheduler.ReadScopes)
+	}
+	return c.assemble(snap, c.qs.Load())
 }
 
 // coldStart builds the first cheap snapshot under a mutex so concurrent

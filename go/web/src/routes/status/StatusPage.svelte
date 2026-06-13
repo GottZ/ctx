@@ -1,13 +1,20 @@
 <script lang="ts">
-  // Status dashboard (design 04-§3.6, W6/G33). Polls GET /api/status every 5s
-  // while the tab is visible (document.visibilityState) — the server serves it
-  // from the process-wide collector cache, so N tabs cost one refresh. SSE
-  // (W7/G34) will later push the same shapes through one render path.
-  import { onMount } from 'svelte'
+  // Status dashboard (design 04-§3.6, W6/G33 + W7/G34). Live updates over SSE
+  // (GET /api/events): the server diffs the shared collector snapshot once per
+  // tick and pushes `status`/`backends`/`llmcall` events through ONE render
+  // path. A poll of GET /api/status is the fallback whenever the stream is not
+  // open (connection cap → 429, network blip, server restart).
   import { fetchPublicHealth, fetchStatus, setGamingMode } from '../../lib/api/status'
-  import type { HealthStatus, StatusResponse } from '../../lib/api/types'
+  import type {
+    BackendStatus,
+    HealthStatus,
+    LLMLogEntry,
+    StatusEvent,
+    StatusResponse,
+  } from '../../lib/api/types'
   import { session } from '../../lib/auth.svelte'
   import { Resource } from '../../lib/resource.svelte'
+  import { SseClient } from '../../lib/sse.svelte'
   import BackendsTile from './BackendsTile.svelte'
   import DreamTile from './DreamTile.svelte'
   import LlmlogTable from './LlmlogTable.svelte'
@@ -17,28 +24,64 @@
   const publicHealth = new Resource<HealthStatus>(() => fetchPublicHealth())
 
   let gamingBusy = $state(false)
-  let timer: ReturnType<typeof setInterval> | null = null
+  // Live llmcall rows pushed since connect; LlmlogTable merges them with its
+  // own fetched history (client-side filter + dedup by id).
+  let liveLlmcalls = $state<LLMLogEntry[]>([])
+  // backends arrives right after status on connect; buffer only for the
+  // theoretical out-of-order case so a backends-first frame is never dropped.
+  let pendingBackends: BackendStatus[] | null = null
 
-  function onVisible() {
-    if (document.visibilityState === 'visible') void status.reload()
+  function onSseEvent(name: string, data: unknown): void {
+    if (name === 'status') {
+      const e = data as StatusEvent
+      status.data = { success: true, ...e, backends: pendingBackends ?? status.data?.backends ?? [] }
+      pendingBackends = null
+      status.status = 'ready'
+      status.error = null
+    } else if (name === 'backends') {
+      const be = data as BackendStatus[]
+      if (status.data) status.data = { ...status.data, backends: be }
+      else pendingBackends = be
+    } else if (name === 'llmcall') {
+      liveLlmcalls = [data as LLMLogEntry, ...liveLlmcalls].slice(0, 200)
+    } else if (name === 'error') {
+      // Server ended the stream (revoked key, §3.6 re-auth). A reload returns
+      // 401 → the api client's interceptor tears the session down → login.
+      void status.reload()
+    }
   }
 
-  onMount(() => {
-    // /api/status is admin-only (403 for read-only keys) — degrade to the
-    // anonymous /health tile instead of firing a doomed request.
-    if (!session.admin) {
-      void publicHealth.load()
-      return
-    }
-    void status.load()
-    timer = setInterval(() => {
+  const sse = new SseClient('/api/events', onSseEvent, () => {
+    const headers: Record<string, string> = {}
+    if (session.key) headers.Authorization = `Bearer ${session.key}`
+    return { headers }
+  })
+
+  // Admin: hold one SSE stream open for the tab's life. Non-admin keys get 403
+  // and never open one (the read-only branch shows the public /health tile).
+  $effect(() => {
+    if (!session.admin) return
+    void sse.connect()
+    return () => sse.close()
+  })
+
+  // Poll fallback: while the stream is not delivering (connecting, capped,
+  // errored, closed) an admin tab polls GET /api/status — same shape, one
+  // render path. Stops the moment SSE is 'open'.
+  $effect(() => {
+    if (!session.admin || sse.status === 'open') return
+    void status.reload()
+    const timer = setInterval(() => {
       if (document.visibilityState === 'visible') void status.reload()
     }, POLL_MS)
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      if (timer) clearInterval(timer)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
+    return () => clearInterval(timer)
+  })
+
+  // Non-admin degradation: the anonymous /health probe instead of a doomed
+  // admin request.
+  $effect(() => {
+    if (session.admin) return
+    void publicHealth.load()
   })
 
   async function toggleGaming(active: boolean) {
@@ -145,7 +188,7 @@
 
     <DreamTile dream={s.dream} onRefresh={() => void status.reload()} />
     <BackendsTile backends={s.backends} />
-    <LlmlogTable complete={s.llm_24h_complete} />
+    <LlmlogTable complete={s.llm_24h_complete} live={liveLlmcalls} />
   {/if}
 </section>
 

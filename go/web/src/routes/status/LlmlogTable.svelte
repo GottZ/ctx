@@ -4,10 +4,13 @@
   // error is the normalized {class, detail} (capped server-side).
   import { onMount } from 'svelte'
   import { fetchLLMLog } from '../../lib/api/status'
-  import type { LLMLogResponse } from '../../lib/api/types'
+  import type { LLMLogEntry, LLMLogResponse } from '../../lib/api/types'
   import { Resource } from '../../lib/resource.svelte'
 
-  let { complete }: { complete: boolean } = $props()
+  // `live` carries SSE-pushed llmcall rows (G34); merged on top of the fetched
+  // history below. Unfiltered upstream, so the current pipeline/errors filter
+  // is reapplied client-side, and the fetched ids dedup the overlap.
+  let { complete, live = [] }: { complete: boolean; live?: LLMLogEntry[] } = $props()
 
   let pipeline = $state('')
   let errorsOnly = $state(false)
@@ -17,7 +20,16 @@
   )
   onMount(() => void log.load())
 
-  const entries = $derived(log.data?.entries ?? [])
+  const entries = $derived.by(() => {
+    const fetched = log.data?.entries ?? []
+    const ids = new Set(fetched.map((e) => e.id))
+    const p = pipeline.trim()
+    const liveMatch = live.filter(
+      (e) => !ids.has(e.id) && (p === '' || e.pipeline === p) && (!errorsOnly || e.error !== null),
+    )
+    if (liveMatch.length === 0) return fetched
+    return [...liveMatch, ...fetched].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).slice(0, 50)
+  })
   const anyCost = $derived(entries.some((e) => e.cost_usd !== null))
 
   function fmtTime(ts: string): string {

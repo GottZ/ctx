@@ -15,6 +15,7 @@
     "@sveltejs/vite-plugin-svelte": "7.1.2",
     "@tsconfig/svelte": "5.0.8",
     "@types/node": "24.12.3",
+    "eventsource-parser": "3.1.0",
     "graphology": "0.26.0",
     "graphology-layout-forceatlas2": "0.10.1",
     "sigma": "3.0.3",

@@ -242,6 +242,20 @@ type EventsConfig struct {
 	// scan never rides the 5s cadence. 1M+ follow-up (partial index /
 	// maintained counters) is named in design 04 §3.6 / R12.
 	QueueStatsInterval time.Duration `key:"events.queue_stats_interval" env:"CTX_EVENTS_QUEUE_STATS_INTERVAL" default:"30" mut:"hot"`
+	// PingInterval is the SSE keepalive cadence (a ": ping" comment line). It
+	// MUST stay below the fronting proxy's read timeout (nginx
+	// proxy_read_timeout, currently 60s) — an idle stream between diffs is
+	// dropped otherwise. Policy-as-data: a proxy retune is a settings flip, not
+	// a rebuild; 25s leaves ~2 pings inside a 60s window. F4-W7 (GET
+	// /api/events) only; the query heartbeat shares the same 25s rationale.
+	PingInterval time.Duration `key:"events.ping_interval" env:"CTX_EVENTS_PING_INTERVAL" default:"25" mut:"hot"`
+	// MaxConnections caps concurrent SSE streams; the admin-only endpoint
+	// answers 429 above it and the client degrades to polling. The default is
+	// sized for the 256M container — autonomous agents / friend-tenant panels
+	// (O5) raise it via a settings flip, not a redeploy. parse:"strict": a
+	// malformed cap is an operator typo worth a loud boot abort (same call as
+	// llmlog.max_limit), not a silent fall-back that hides the intended ceiling.
+	MaxConnections int `key:"events.max_connections" env:"CTX_EVENTS_MAX_CONNECTIONS" default:"8" mut:"hot" parse:"strict"`
 }
 
 // LLMLogConfig is the telemetry read surface. The retention knob (body-NULLing

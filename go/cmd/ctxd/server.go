@@ -27,7 +27,7 @@ const (
 // is the runtime-config snapshot store: every config-consuming handler reads
 // one snapshot per request from it (F1-W4–W7) — no handler holds a boot copy,
 // so a config replace is live from the next request on.
-func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool) *chi.Mux {
+func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -73,6 +73,11 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 	statusCollector := handler.NewStatusCollector(pool, backendPool, scheduler, cfgStore)
 	statusH := handler.NewStatusHandler(statusCollector)
 	llmlogH := handler.NewLLMLogHandler(pool, cfgStore)
+	// SSE live updates (F4-W7/G34): GET /api/events broadcasts from the SAME
+	// collector — one diff per tick fans out to all connections. ctx is the
+	// server lifecycle (cancelled on shutdown) so streams end before
+	// srv.Shutdown waits on them.
+	eventsH := handler.NewEventsHandler(ctx, pool, statusCollector, cfgStore)
 
 	// ── MCP endpoint (Streamable HTTP, authenticated) ──────────────
 	queryHTTPHandler := handler.WithScheduler(scheduler, queryHandler.HandleQuery)
@@ -119,6 +124,9 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 			r.Use(handler.RequireAdmin)
 			r.Get("/api/status", statusH.HandleStatus)
 			r.Get("/api/llmlog", llmlogH.HandleLLMLog)
+			// SSE stream — GET, no request body; the inherited MaxBodySize is
+			// a no-op on it. Auth (parent) + RequireAdmin gate it.
+			r.Get("/api/events", eventsH.HandleEvents)
 		})
 		// Blob — fetch, search, manage
 		r.Post("/api/blob/fetch", blobH.HandleBlobFetch)

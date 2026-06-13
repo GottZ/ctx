@@ -174,7 +174,7 @@ func main() {
 	// HTTP server. ListenAddr is restart-only, read once from the effective
 	// snapshot (== env value; the settings overlay rejects restart-only keys).
 	listenAddr := cfgStore.Snapshot().Server.ListenAddr
-	router := NewRouter(pool, cfgStore, scheduler, backendPool)
+	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           router,

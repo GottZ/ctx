@@ -74,9 +74,14 @@ func TestRegistryStrictSet(t *testing.T) {
 
 		"scheduler.llmlog_retention_days": true,
 		// F4-W6 (G33) read cap: a malformed limit is an operator typo worth
-		// surfacing loudly, same as its telemetry sibling above. The events.*
-		// durations stay non-strict (bad value falls back to default).
+		// surfacing loudly, same as its telemetry sibling above.
 		"llmlog.max_limit": true,
+		// F4-W7 (G34) SSE connection cap: an int ceiling like llmlog.max_limit,
+		// so it shares the loud-abort treatment — a typo'd cap that silently
+		// falls back to the default would hide the intended ceiling. The events.*
+		// DURATIONS (tick/queue_stats/ping) stay non-strict (bad value falls
+		// back to default; a stream cadence is not a security ceiling).
+		"events.max_connections": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {
