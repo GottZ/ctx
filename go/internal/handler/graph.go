@@ -42,7 +42,19 @@ const (
 	egoDefaultCap       = 25
 	egoMaxCap           = 100
 	egoDefaultLimit     = 500
-	egoMaxLimit         = 5000
+	// egoMaxLimit was lowered from 5000 to 1500 by the G39/F5-W5 1M-synthetic
+	// benchmark: at 5000 nodes the worst-case pipeline (hops=3/cap=100, a dense
+	// region with ≥5 degree-10^4 hubs) ran p95 ~850ms — dominated by Q3 (per-node
+	// visible-degree, which scales with the node count), then Q2, then the walk.
+	// The node budget is the one knob that bounds all three phases. Sweep p95
+	// (against the live host, with its real variance): 3000 ~510ms, 2500 ~450ms,
+	// 2000 ~390–490ms (tail/max to ~610ms — crosses the 500ms bar under load),
+	// 1500 ~290ms (max ~300ms — robustly clear, tail included). 1500 is the
+	// largest ceiling that stays under the 500ms bar across runs, so it is the
+	// one we offer ("nicht unbewiesen anbieten", design §5.3). The default (500)
+	// and the client's incremental expand model are unaffected.
+	// Evidence: .project/bench-graph/REPORT.md.
+	egoMaxLimit         = 1500
 	egoDefaultEdgeLimit = 4000
 	egoMaxEdgeLimit     = 20000
 )

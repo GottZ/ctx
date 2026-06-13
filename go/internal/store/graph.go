@@ -98,7 +98,7 @@ type EgoParams struct {
 	Focus         string
 	Hops          int      // 1..3
 	PerNodeCap    int      // 1..100
-	Limit         int      // 1..5000 nodes
+	Limit         int      // 1..1500 nodes (G39: ceiling lowered from 5000, see handler)
 	EdgeLimit     int      // 1..20000 induced edges
 	MinConfidence float64  // gate on weighted confidence (traversal + induced)
 	LinkClasses   []string // nil = all five

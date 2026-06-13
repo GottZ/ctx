@@ -69,14 +69,19 @@ func TestParseEgoParams_Ceilings(t *testing.T) {
 		}
 	}
 
-	// Boundary values are valid.
-	good := "block=" + egoTestUUID + "&hops=3&per_node_cap=100&limit=5000&edge_limit=20000&min_confidence=1"
+	// Boundary values are valid. limit max = 1500 (G39: lowered from 5000 — the
+	// 1M bench proved larger ceilings indefensible under the 500ms p95 bar).
+	good := "block=" + egoTestUUID + "&hops=3&per_node_cap=100&limit=1500&edge_limit=20000&min_confidence=1"
 	p, err := parseEgoParams(egoQuery(t, good))
 	if err != nil {
 		t.Fatalf("boundary values rejected: %v", err)
 	}
-	if p.Hops != 3 || p.PerNodeCap != 100 || p.Limit != 5000 || p.EdgeLimit != 20000 || p.MinConfidence != 1 {
+	if p.Hops != 3 || p.PerNodeCap != 100 || p.Limit != 1500 || p.EdgeLimit != 20000 || p.MinConfidence != 1 {
 		t.Errorf("boundary parse wrong: %+v", p)
+	}
+	// limit just past the ceiling is a 400, never clamped.
+	if _, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&limit=1501")); err == nil {
+		t.Error("limit=1501 must be rejected (ceiling is 1500)")
 	}
 }
 

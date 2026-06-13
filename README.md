@@ -353,7 +353,7 @@ GET /api/graph/ego?block=<uuid>&hops=2&per_node_cap=25&limit=500
 | `block` | — (required) | full UUID | focus node (hop 0) |
 | `hops` | 1 | 1–3 | BFS depth |
 | `per_node_cap` | 25 | 1–100 | top-N edges per frontier node by `raw_confidence` — slots count only visible, filter-passing edges |
-| `limit` | 500 | 1–5000 | total node budget (truncation: closer hop wins, then higher confidence, then id) |
+| `limit` | 500 | 1–1500 | total node budget (truncation: closer hop wins, then higher confidence, then id) — ceiling set by the G39 1M benchmark (p95 < 500ms; was 5000) |
 | `min_confidence` | 0 | 0–1 | gate on weighted confidence (traversal + displayed edges) |
 | `link_class` | all 5 | topical,factual,causal,recurrent,supersedes | `supersedes` is display-only, never traversed |
 | `category` | all | CSV | filter on neighbor blocks (focus always included) |
