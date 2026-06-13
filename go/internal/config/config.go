@@ -247,6 +247,30 @@ type PoolConfig struct {
 	// line scopes it per tenant (settings scope column) so each tenant floors
 	// its own scopes.
 	ScopeSensitivityFloor ScopeFloor `key:"pool.scope_sensitivity_floor" env:"-" default:"{}" mut:"hot"`
+
+	// GamingActive flips the named GPU-host backends out of EVERY chain so the
+	// GPU is free to game. It lives in the settings layer (persistent across
+	// restarts) — NOT an atomic: the dream-mode break path (restart ⇒ the GPU
+	// lock is gone) is the explicit anti-pattern here (design 03 §2.6).
+	// Toggled via `ctx gaming on|off` / the gaming-mode manage action.
+	GamingActive bool `key:"gaming.active" env:"-" default:"false" mut:"hot"`
+	// GamingDisabledBackends names which backends gaming.active excludes —
+	// policy as data, so a second GPU host later is a list edit, not code.
+	// Default = the herbert GPU backends; the CPU/external rows stay in as
+	// failover. Comma-split (scopes parser); the gaming-mode action validates
+	// the names against the live pool (a typo ⇒ unknown_backends, risk 6.6).
+	GamingDisabledBackends []string `key:"gaming.disabled_backends" env:"-" default:"herbert-chat,herbert-rerank" mut:"hot"`
+}
+
+// GamingState returns the chain-time gaming exclusion from THIS settings
+// snapshot (design 03 §2.6). Callers pass it to Pool.Chain — the pool holds
+// no policy (deliberate decoupling, backends/pool.go): the toggle takes
+// effect on the next chain that reads a fresh config snapshot, no restart.
+func (c *Config) GamingState() backends.GamingState {
+	return backends.GamingState{
+		Active:           c.Pool.GamingActive,
+		DisabledBackends: c.Pool.GamingDisabledBackends,
+	}
 }
 
 // Source reports the origin of a registry key in this snapshot:

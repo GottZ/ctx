@@ -30,6 +30,11 @@ type ManageHandler struct {
 	dreamController DreamController
 	backendPool     *backends.Pool
 	auditController AuditController
+	// settingsReload re-builds the config snapshot from context_settings after
+	// a gaming-mode write (the cfg interface can't bind settings.Reload itself
+	// — config must not import store). Bound to settings.Reload(pool, cfg) in
+	// server.go; nil in tests that don't exercise gaming-mode mutations.
+	settingsReload func(context.Context) error
 }
 
 // NewManageHandler creates a new ManageHandler. cfg is the runtime-config
@@ -38,9 +43,10 @@ type ManageHandler struct {
 // actually runs — not a boot copy that would lie after a settings flip.
 // backendPool feeds the backend-* actions (F3-P1) including the synchronous
 // post-mutation reload. auditController feeds blocks-audit-* (G41); the
-// production scheduler implements both controller interfaces.
-func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool, auditController AuditController) *ManageHandler {
-	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool, auditController: auditController}
+// production scheduler implements both controller interfaces. settingsReload
+// is the synchronous post-write config reload for gaming-mode (F3-P6).
+func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool, auditController AuditController, settingsReload func(context.Context) error) *ManageHandler {
+	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool, auditController: auditController, settingsReload: settingsReload}
 }
 
 type manageRequest struct {
@@ -106,6 +112,8 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.handleDreamReview(w, r, authResult)
 	case "dream-mode":
 		h.handleDreamMode(w, r, req)
+	case "gaming-mode":
+		h.handleGamingMode(w, r, req)
 	case "mcp-client-create", "mcp-client-list", "mcp-client-delete":
 		h.dispatchMCPClientAction(w, r, authResult, req)
 	case "backend-create", "backend-update", "backend-delete", "backend-list", "backend-test":
@@ -169,6 +177,12 @@ func actionRequiresAdmin(req manageRequest) bool {
 		return true
 	case "dream-mode":
 		return isDreamModeMutation(req)
+	case "gaming-mode":
+		// Only the MUTATING shape is gated: an ungated toggle would let any
+		// tenant key flip the whole system's egress topology (herbert out ⇒
+		// synthesis goes external via OpenRouter — cost + egress-character
+		// change by a non-admin, design 03 §2.6). Status read stays auth-only.
+		return isGamingModeMutation(req)
 	default:
 		return false
 	}
@@ -196,6 +210,24 @@ func requireAdminAction(w http.ResponseWriter, ar *auth.AuthResult) bool {
 // (non-empty data payload) as opposed to reading the current mode.
 func isDreamModeMutation(req manageRequest) bool {
 	return len(req.Data) > 0 && string(req.Data) != "null"
+}
+
+// isGamingModeMutation reports whether a gaming-mode request carries a mode
+// flip (non-empty data) as opposed to a status read ({} or absent data). Same
+// read/write split convention as dream-mode (design 03 §2.6).
+func isGamingModeMutation(req manageRequest) bool {
+	if len(req.Data) == 0 || string(req.Data) == "null" || string(req.Data) == "{}" {
+		return false
+	}
+	var d struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(req.Data, &d); err != nil {
+		// Malformed data on a gaming-mode call: treat as a mutation so it hits
+		// the admin gate (and then the handler's 422), never a silent read.
+		return true
+	}
+	return d.Mode != ""
 }
 
 func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {

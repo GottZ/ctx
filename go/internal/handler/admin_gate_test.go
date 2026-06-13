@@ -23,7 +23,7 @@ func manageReqAs(t *testing.T, ar *auth.AuthResult, body any) *httptest.Response
 		t.Fatalf("marshal body: %v", err)
 	}
 
-	h := NewManageHandler(nil, nil, nil, nil, nil)
+	h := NewManageHandler(nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))
@@ -129,6 +129,19 @@ func TestManageAdminGate_DreamModeMutation_NonAdmin403(t *testing.T) {
 	rec := manageReqAs(t, nonAdminAR(), map[string]any{
 		"action": "dream-mode",
 		"data":   map[string]any{"mode": "off"},
+	})
+	assertForbiddenAdmin(t, rec)
+}
+
+// gaming-mode mutation is admin-gated (design 03 §2.6): an ungated toggle
+// would let any tenant key flip the whole system's egress topology (herbert
+// out ⇒ synthesis goes external via OpenRouter — cost + egress-character
+// change by a non-admin). The gate fires before any cfg/pool access, so a
+// nil-everything handler is sufficient to probe it.
+func TestManageAdminGate_GamingModeMutation_NonAdmin403(t *testing.T) {
+	rec := manageReqAs(t, nonAdminAR(), map[string]any{
+		"action": "gaming-mode",
+		"data":   map[string]any{"mode": "on"},
 	})
 	assertForbiddenAdmin(t, rec)
 }

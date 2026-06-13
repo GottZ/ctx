@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/web"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -50,7 +52,13 @@ func NewRouter(pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Sch
 	storeH := handler.NewStoreHandler(pool, cfgStore)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
 	graphH := handler.NewGraphHandler(pool, cfgStore)
-	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler)
+	// gamingReload re-builds the config snapshot from context_settings after a
+	// gaming-mode write (F3-P6), so the toggle hits the next chain without a
+	// restart (same path PUT /api/settings uses).
+	gamingReload := func(ctx context.Context) error {
+		return settings.Reload(ctx, pool, cfgStore)
+	}
+	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler, gamingReload)
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)
 	digestH := handler.NewDigestHandler(pool)

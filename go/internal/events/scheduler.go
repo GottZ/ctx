@@ -212,12 +212,14 @@ func (s *Scheduler) QueryEnd() {
 }
 
 // newRouter builds the per-cycle/per-run dream router: the live backend pool
-// plus the snapshot's scope floor and pool-health reporting. Gaming stays the
-// zero value until P6 wires the F2 settings keys. cfg is the caller's cycle
-// snapshot, so the floor travels with the same generation as scopes/back-off.
+// plus the snapshot's scope floor, gaming exclusion and pool-health reporting.
+// cfg is the caller's cycle snapshot, so gaming/floor travel with the same
+// generation as scopes/back-off — a gaming toggle takes effect on the next
+// cycle that snapshots a fresh config (no restart, design 03 §2.6).
 func (s *Scheduler) newRouter(cfg *config.Config) *dream.Router {
 	return &dream.Router{
 		Pool:   s.backendPool,
+		Gaming: cfg.GamingState(),
 		Floor:  cfg.Pool.ScopeSensitivityFloor.Apply,
 		Report: llm.PoolReporter(s.backendPool),
 	}

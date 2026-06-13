@@ -52,7 +52,7 @@ var ErrAuditRunning = errors.New("sensitivity audit already running")
 // classifyFunc is the seam between the audit loop and the LLM call —
 // production value is llm.ClassifyBlockBool; the decision-table test swaps it
 // (dreamCycleFunc pattern).
-type classifyFunc func(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool,
+type classifyFunc func(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState,
 	question, title, content, blockID string) (bool, error)
 
 // AuditSample is one dry-run verdict for the N=30 gate: what the model
@@ -187,7 +187,7 @@ func (s *Scheduler) runSensitivityAudit(dryRun bool, limit int) {
 				s.auditAbort("shutdown")
 				return
 			}
-			sample, abort := s.auditOneBlock(ctx, blk, dryRun)
+			sample, abort := s.auditOneBlock(ctx, blk, cfg.GamingState(), dryRun)
 			if abort {
 				return
 			}
@@ -213,10 +213,10 @@ func (s *Scheduler) runSensitivityAudit(dryRun bool, limit int) {
 // auditOneBlock asks the two questions and applies (or records) the verdict.
 // abort=true when the chain/backend failed — that is an infrastructure
 // condition, not a block verdict.
-func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, dryRun bool) (AuditSample, bool) {
+func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, gaming backends.GamingState, dryRun bool) (AuditSample, bool) {
 	sample := AuditSample{ID: blk.ID, Title: blk.Title}
 
-	cred, err := s.classify(ctx, s.pool, s.backendPool, llm.QuestionCredentials, blk.Title, blk.Content, blk.ID)
+	cred, err := s.classify(ctx, s.pool, s.backendPool, gaming, llm.QuestionCredentials, blk.Title, blk.Content, blk.ID)
 	verdict, noVerdict := backends.SensCredentials, false
 	switch {
 	case err != nil && !isParseFailure(err):
@@ -228,7 +228,7 @@ func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, dry
 		sample.Credentials = &cred
 	default:
 		sample.Credentials = &cred
-		pers, perr := s.classify(ctx, s.pool, s.backendPool, llm.QuestionPersonal, blk.Title, blk.Content, blk.ID)
+		pers, perr := s.classify(ctx, s.pool, s.backendPool, gaming, llm.QuestionPersonal, blk.Title, blk.Content, blk.ID)
 		switch {
 		case perr != nil && !isParseFailure(perr):
 			s.auditAbort(fmt.Sprintf("classify chain: %v", perr))

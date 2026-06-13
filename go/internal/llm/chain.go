@@ -262,6 +262,11 @@ type ChainCall struct {
 	Pool       *backends.Pool
 	Role       string
 	Required   backends.Sensitivity
+	// Gaming is the chain-time exclusion (gaming.active + disabled_backends);
+	// the call site reads it from its config snapshot so the toggle takes
+	// effect on the next call without a restart (design 03 §2.6). Zero value
+	// = inactive.
+	Gaming     backends.GamingState
 	Pipeline   string // llmlog pipeline name, e.g. "query-translate"
 	System     string
 	User       string
@@ -281,7 +286,7 @@ type ChainCall struct {
 // An empty chain returns *backends.ErrNoEligibleBackend — the call site
 // decides its role's fail-open/fail-hard semantics (design 03 §2.4).
 func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool) (*ChatResponse, error) {
-	chain, err := c.Pool.Chain(c.Role, c.Required, backends.GamingState{})
+	chain, err := c.Pool.Chain(c.Role, c.Required, c.Gaming)
 	if err != nil {
 		return nil, err
 	}

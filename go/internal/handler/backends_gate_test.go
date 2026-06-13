@@ -23,7 +23,7 @@ func manageReqWithPool(t *testing.T, ar *auth.AuthResult, bp *backends.Pool, bod
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}
-	h := NewManageHandler(nil, nil, nil, bp, nil)
+	h := NewManageHandler(nil, nil, nil, bp, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))

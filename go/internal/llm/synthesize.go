@@ -339,7 +339,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // querySens is the request-level classification (request > setting >
 // default, F3 §2.3b); P3 replaced the P2 credentials constant with
 // max(querySens, sensitivity of the FINAL prompt set).
-func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
+func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
@@ -395,7 +395,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, set
 
 	// Step 7: Resolve the chain and walk it. The gate is structural: a
 	// backend the trust matrix excludes is not in the chain.
-	chain, chainErr := bpool.Chain(backends.RoleSynthesis, required, backends.GamingState{})
+	chain, chainErr := bpool.Chain(backends.RoleSynthesis, required, gaming)
 	if chainErr != nil {
 		// No eligible backend: hard error. Trust beats availability — the
 		// per-backend reasons went to slog; the handler keeps the client

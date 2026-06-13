@@ -21,7 +21,7 @@ func auditTestScheduler(answers map[string]struct {
 	err error
 }) *Scheduler {
 	s := NewScheduler(nil, nil, nil, StartupConfig{})
-	s.classify = func(_ context.Context, _ *pgxpool.Pool, _ *backends.Pool,
+	s.classify = func(_ context.Context, _ *pgxpool.Pool, _ *backends.Pool, _ backends.GamingState,
 		question, _, _, _ string) (bool, error) {
 		a, ok := answers[question]
 		if !ok {
@@ -86,7 +86,7 @@ func TestAuditDecisionTable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := auditTestScheduler(tc.answers)
 			blk := auditBlockFixture()
-			sample, abort := s.auditOneBlock(context.Background(), blk, true)
+			sample, abort := s.auditOneBlock(context.Background(), blk, backends.GamingState{}, true)
 			if abort != tc.wantAbort {
 				t.Fatalf("abort = %v, want %v", abort, tc.wantAbort)
 			}
@@ -115,7 +115,7 @@ func TestAuditCredentialsSkipsPersonalQuestion(t *testing.T) {
 		llm.QuestionCredentials: {val: true},
 		llm.QuestionPersonal:    {err: errors.New("must not be asked")},
 	})
-	sample, abort := s.auditOneBlock(context.Background(), auditBlockFixture(), true)
+	sample, abort := s.auditOneBlock(context.Background(), auditBlockFixture(), backends.GamingState{}, true)
 	if abort {
 		t.Fatal("credentials-ja aborted — the personal question must be skipped, not asked")
 	}

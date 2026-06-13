@@ -47,6 +47,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(settingsCmd(getClient))
 	root.AddCommand(secretsCmd(getClient))
 	root.AddCommand(backendsCmd(getClient))
+	root.AddCommand(gamingCmd(getClient))
 	root.AddCommand(blocksCmd(getClient))
 	root.AddCommand(initCmd())
 }
