@@ -185,8 +185,12 @@ func TestSensitivityAudit_Integration(t *testing.T) {
 		if pending != bySource["default"] {
 			t.Errorf("pending=%d != by_source[default]=%d", pending, bySource["default"])
 		}
-		if bySource["llm-audit"] < 1 || bySource["manual"] < 2 {
-			t.Errorf("by_source missing classified rows: %v", bySource)
+		// End state of the private scope after the subtests above: defaultID
+		// got its verdict, probeID was overwritten BY DESIGN by the unguarded
+		// negative probe (manual → llm-audit), manualID alone stays manual.
+		// The foreign-scope block must not appear in private counts.
+		if bySource["llm-audit"] != 2 || bySource["manual"] != 1 || bySource["default"] != 0 {
+			t.Errorf("by_source end state wrong (want llm-audit=2 manual=1 default=0): %v", bySource)
 		}
 	})
 }
