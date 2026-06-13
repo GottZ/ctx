@@ -117,14 +117,9 @@ func (sw *sseWriter) event(name, id string, data []byte) error {
 
 // ping writes an SSE comment keepalive (": ping"). The client ignores it; it
 // resets the fronting proxy's read timeout and the connection write deadline.
+// Thin wrapper over the generic comment() (sse.go) — same line, one writer.
 func (sw *sseWriter) ping() error {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-	_ = sw.rollDeadline()
-	if _, err := io.WriteString(sw.w, ": ping\n\n"); err != nil {
-		return err
-	}
-	return sw.rc.Flush()
+	return sw.comment("ping")
 }
 
 // statusEvent is the per-tick status payload: the full /api/status shape MINUS

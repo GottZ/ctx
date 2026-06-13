@@ -22,6 +22,7 @@ import (
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
@@ -322,6 +323,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-embedCacheTicker.C:
 			s.runEmbedCacheEviction(ctx)
 			s.runLLMLogRetention(ctx)
+			s.runWebChatRetention(ctx)
 		}
 	}
 }
@@ -440,6 +442,28 @@ func (s *Scheduler) runLLMLogRetention(ctx context.Context) {
 	}
 	if nulled > 0 {
 		slog.Info("scheduler: llmlog bodies evicted", "rows", nulled, "retention_days", days)
+	}
+}
+
+// runWebChatRetention deletes web-chat sessions whose updated_at is older than
+// webchat.session_retention (messages cascade). Shares the embed-cache janitor
+// tick. retention=0 makes DeleteExpiredSessions a no-op (sessions kept forever
+// — the shipped default; the operator opts in to retention, 06 §3.1).
+func (s *Scheduler) runWebChatRetention(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in webchat retention", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+	hours := float64(s.cfg.Snapshot().WebChat.SessionRetention)
+	ttl := time.Duration(hours * float64(time.Hour))
+	deleted, err := store.DeleteExpiredSessions(ctx, s.pool, ttl)
+	if err != nil {
+		slog.Warn("scheduler: webchat retention failed", "error", err)
+		return
+	}
+	if deleted > 0 {
+		slog.Info("scheduler: webchat sessions deleted", "rows", deleted, "retention_hours", hours)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -157,7 +158,7 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 			return emitNoEligible(sink)
 		}
 
-		so := e.runStream(ctx, chain, msgs, toolsEnabled, budgetLeft, iter, sink)
+		so := e.runStream(ctx, chain, msgs, toolsEnabled, budgetLeft, iter, sess.ID, apiKeyID, required, sink)
 		if !so.served {
 			return e.finishUnserved(ctx, sess, so, turnMax, start, iter, sink)
 		}
@@ -238,7 +239,7 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 
 	// Iteration cap or budget reached: ONE closing call WITHOUT a tools array
 	// (E4: never tool_choice:"none" — it emits tool syntax as plain text).
-	return e.finalCall(ctx, sess, msgs, reqSens, sessHWM, turnMax, start, finalReason, sink)
+	return e.finalCall(ctx, sess, msgs, reqSens, sessHWM, turnMax, start, apiKeyID, finalReason, sink)
 }
 
 // streamOutcome is one iteration's stream result plus failover bookkeeping.
@@ -257,10 +258,12 @@ type streamOutcome struct {
 // backend, failing over to the next ONLY before the first emitted byte and only
 // on a Next()-class error (F3 doctrine). After the first token a dead stream is
 // terminal — no silent re-run / double tool execution.
-func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs []llm.ChatMsg, toolsEnabled bool, budgetLeft, iter int, sink Sink) streamOutcome {
+func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs []llm.ChatMsg, toolsEnabled bool, budgetLeft, iter int, sessID, apiKeyID string, required backends.Sensitivity, sink Sink) streamOutcome {
 	var lastErr error
+	var lastBackend backends.Backend
 	for i := range chain {
 		b := chain[i]
+		lastBackend = b
 		model := b.ModelFor("chat").Model
 		if model == "" {
 			lastErr = fmt.Errorf("backend %q has no chat model", b.Name)
@@ -294,7 +297,9 @@ func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs [
 				}
 				return nil
 			})
-		dur := e.now().Sub(st).Milliseconds()
+		elapsed := e.now().Sub(st)
+		dur := elapsed.Milliseconds()
+		e.recordLLM(sessID, apiKeyID, required, b, model, i+1, iter, elapsed, res, err)
 		if err == nil {
 			return streamOutcome{result: res, backend: b, model: model, served: true, partial: partial.String(), durationMs: dur}
 		}
@@ -309,7 +314,10 @@ func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs [
 		}
 		return streamOutcome{backend: b, model: model, partial: partial.String(), durationMs: dur, err: err}
 	}
-	return streamOutcome{err: lastErr}
+	// Chain exhausted (every backend failed a Next()-class error before its
+	// first byte): keep the LAST attempted backend so the error event still
+	// carries its name (§3.5 — code + backend name, never the raw URL).
+	return streamOutcome{backend: lastBackend, err: lastErr}
 }
 
 // finishUnserved handles an iteration that produced no usable result: a client
@@ -342,14 +350,14 @@ func (e *Engine) finishUnserved(ctx context.Context, sess *store.ChatSession, so
 
 // finalCall is the closing answer after the tool budget/iteration cap: a single
 // model call with NO tools array, prompted to answer from the gathered material.
-func (e *Engine) finalCall(ctx context.Context, sess *store.ChatSession, msgs []llm.ChatMsg, reqSens, sessHWM, turnMax backends.Sensitivity, start time.Time, reason string, sink Sink) error {
+func (e *Engine) finalCall(ctx context.Context, sess *store.ChatSession, msgs []llm.ChatMsg, reqSens, sessHWM, turnMax backends.Sensitivity, start time.Time, apiKeyID, reason string, sink Sink) error {
 	msgs = append(msgs, llm.ChatMsg{Role: "user", Content: "Tool budget exhausted — answer now directly from the material gathered so far."})
 	required := backends.MaxSensitivity(reqSens, sessHWM)
 	chain, cerr := e.provider.ChatChain(ctx, required)
 	if cerr != nil || len(chain) == 0 {
 		return emitNoEligible(sink)
 	}
-	so := e.runStream(ctx, chain, msgs, false, e.cfg.MaxTokens, e.cfg.MaxIterations+1, sink)
+	so := e.runStream(ctx, chain, msgs, false, e.cfg.MaxTokens, e.cfg.MaxIterations+1, sess.ID, apiKeyID, required, sink)
 	if !so.served {
 		return e.finishUnserved(ctx, sess, so, turnMax, start, e.cfg.MaxIterations, sink)
 	}
@@ -377,6 +385,36 @@ func emitNoEligible(sink Sink) error {
 func launderError(err error, b backends.Backend) map[string]any {
 	class := backends.Classify(err, b.ProviderClass)
 	return map[string]any{"code": class.String(), "backend": b.Name, "retryable": class.Next()}
+}
+
+// recordLLM logs one physical model call to context_llm_log, METADATA-ONLY:
+// RequestSystem/RequestUser/ResponseContent stay EMPTY by construction (§3.6/R9).
+// Every chat call carries the WHOLE msgs history, and context_llm_log is
+// un-scoped + has no retention + lives outside the session CASCADE — full bodies
+// would lay whole conversations there N-fold, breaking the DELETE promise (§3.3).
+// One row per physical attempt (failover provenance: Host = the backend that
+// actually answered). Fire-and-forget; a nil pool (unit tests) is a no-op.
+func (e *Engine) recordLLM(sessID, apiKeyID string, required backends.Sensitivity, b backends.Backend, model string, attempt, iter int, elapsed time.Duration, res *llm.StreamResult, err error) {
+	entry := llmlog.Entry{
+		Pipeline:            "web-chat",
+		Model:               model,
+		Host:                b.Host,
+		Duration:            elapsed,
+		Err:                 err,
+		BackendName:         b.Name,
+		BackendTrust:        string(b.Trust),
+		BackendLocality:     b.Locality,
+		RequiredSensitivity: string(required),
+		Attempt:             attempt,
+		APIKeyID:            apiKeyID,
+		Metadata:            map[string]any{"session_id": sessID, "iteration": iter},
+	}
+	if res != nil {
+		entry.PromptTokens = res.PromptTokens
+		entry.CompletionTokens = res.CompletionTokens
+		entry.Metadata["tool_calls"] = len(res.ToolCalls)
+	}
+	llmlog.Record(e.pool, entry)
 }
 
 func (e *Engine) tokenClamp(b backends.Backend, budgetLeft int) int {

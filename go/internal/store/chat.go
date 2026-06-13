@@ -211,6 +211,39 @@ func DeleteSession(ctx context.Context, pool *pgxpool.Pool, id, homeScope string
 	return nil
 }
 
+// MessageCounts returns message_count per session id in ONE batch query (no
+// N+1 across the list). The list handler joins it onto ListSessions to fill the
+// message_count navigation anchor (06 §3.3); ids the caller is not allowed to
+// see never reach here (ListSessions is already home-scope filtered). An empty
+// id slice short-circuits without touching the pool. Sessions with no messages
+// are simply absent from the map (caller treats missing as 0).
+func MessageCounts(ctx context.Context, pool *pgxpool.Pool, sessionIDs []string) (map[string]int, error) {
+	out := map[string]int{}
+	if len(sessionIDs) == 0 {
+		return out, nil
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT session_id::text, COUNT(*) FROM context_chat_messages
+		 WHERE session_id = ANY($1::uuid[]) GROUP BY session_id`,
+		sessionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("store: message counts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("store: message counts scan: %w", err)
+		}
+		out[id] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: message counts rows: %w", err)
+	}
+	return out, nil
+}
+
 // AppendMessage assigns the next seq and persists one message in a single short
 // FOR-UPDATE transaction, raising the session HWM to max(current, msg) in the
 // SAME TX (06 §3.1). Returns the persisted message and the resulting session

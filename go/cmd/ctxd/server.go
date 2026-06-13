@@ -128,6 +128,16 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 			// a no-op on it. Auth (parent) + RequireAdmin gate it.
 			r.Get("/api/events", eventsH.HandleEvents)
 		})
+		// Web-chat (F6-C4/G37): POST /api/chat/stream runs one turn and streams
+		// SSE — wrapped in WithScheduler so dream yields the single llama.cpp
+		// slot during a turn (like /api/query). The ctx_query tool delegates to
+		// the SAME scheduler-wrapped query handler. Session routes are the
+		// read-lastig GET/DELETE companions (no LLM, no scheduler signal).
+		chatH := handler.NewChatHandler(pool, cfgStore, backendPool, http.HandlerFunc(queryHTTPHandler))
+		r.Post("/api/chat/stream", handler.WithScheduler(scheduler, chatH.HandleStream))
+		r.Get("/api/chat/sessions", chatH.HandleListSessions)
+		r.Get("/api/chat/sessions/{id}", chatH.HandleGetSession)
+		r.Delete("/api/chat/sessions/{id}", chatH.HandleDeleteSession)
 		// Blob — fetch, search, manage
 		r.Post("/api/blob/fetch", blobH.HandleBlobFetch)
 		r.Post("/api/blob/search", blobH.HandleBlobSearch)

@@ -111,6 +111,20 @@ services:
       # response bodies (telemetry row survives — Body-NULLing, not a chunk
       # drop; audit stays lossless). 0 = keep bodies forever (no retention).
       CTX_LLMLOG_RETENTION_DAYS: ${CTX_LLMLOG_RETENTION_DAYS:-90}
+      # Web-chat harness (F6). ENABLED gates POST /api/chat/stream + the session
+      # routes (off ⇒ 404). The integer budgets cap one turn; CONCURRENT_TURNS
+      # is the per-home_scope semaphore (429 above it) that bounds turn frequency
+      # on the single llama.cpp slot. SESSION_RETENTION takes a duration suffix
+      # (h/d/w/m/y); 0 = keep sessions forever (the janitor stays off).
+      CTX_WEBCHAT_ENABLED: ${CTX_WEBCHAT_ENABLED:-true}
+      CTX_WEBCHAT_MAX_ITERATIONS: ${CTX_WEBCHAT_MAX_ITERATIONS:-6}
+      CTX_WEBCHAT_MAX_TOKENS: ${CTX_WEBCHAT_MAX_TOKENS:-2048}
+      CTX_WEBCHAT_COMPLETION_BUDGET: ${CTX_WEBCHAT_COMPLETION_BUDGET:-8192}
+      CTX_WEBCHAT_TOOL_RESULT_MAX_CHARS: ${CTX_WEBCHAT_TOOL_RESULT_MAX_CHARS:-8000}
+      CTX_WEBCHAT_HISTORY_BUDGET_CHARS: ${CTX_WEBCHAT_HISTORY_BUDGET_CHARS:-60000}
+      CTX_WEBCHAT_LLM_TIMEOUT: ${CTX_WEBCHAT_LLM_TIMEOUT:-900}
+      CTX_WEBCHAT_CONCURRENT_TURNS: ${CTX_WEBCHAT_CONCURRENT_TURNS:-1}
+      CTX_WEBCHAT_SESSION_RETENTION: ${CTX_WEBCHAT_SESSION_RETENTION:-0}
       LISTEN_ADDR: ":8080"
     networks:
       - n8nintern

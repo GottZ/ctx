@@ -82,6 +82,12 @@ func TestRegistryStrictSet(t *testing.T) {
 		// DURATIONS (tick/queue_stats/ping) stay non-strict (bad value falls
 		// back to default; a stream cadence is not a security ceiling).
 		"events.max_connections": true,
+		// F6-C4 (G37) per-scope turn semaphore: a per-tenant fairness ceiling
+		// like events.max_connections — a typo'd cap silently falling back to
+		// the default would hide the intended limit on the single llama.cpp
+		// slot (R1). The other webchat.* budgets stay non-strict (engine
+		// withDefaults() is their net).
+		"webchat.concurrent_turns": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {

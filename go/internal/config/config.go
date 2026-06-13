@@ -76,6 +76,7 @@ type Config struct {
 	Pool      PoolConfig
 	Events    EventsConfig
 	LLMLog    LLMLogConfig
+	WebChat   WebChatConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -266,6 +267,45 @@ type LLMLogConfig struct {
 	// rides the created_at DESC hypertable path; 200 keeps one page bounded
 	// without a full chunk walk.
 	MaxLimit int `key:"llmlog.max_limit" env:"CTX_LLMLOG_MAX_LIMIT" default:"200" mut:"hot" parse:"strict"`
+}
+
+// WebChatConfig is the F6 web-chat harness surface (design 06 §3.2). All knobs
+// are hot — a turn reads a fresh config snapshot at start, so a settings flip
+// hits the next turn, not the running one. The integer BUDGETS stay non-strict
+// (a bad value falls back to the default, and the engine's withDefaults() is a
+// second net) — only ConcurrentTurns is parse:"strict": it is a per-tenant
+// fairness ceiling like events.max_connections, and a typo'd cap that silently
+// fell back to the default would hide the intended limit on the single
+// llama.cpp slot (R1).
+type WebChatConfig struct {
+	// Enabled gates POST /api/chat/stream + the session routes; off ⇒ 404 (the
+	// SPA route reads the /health feature bit and hides itself).
+	Enabled bool `key:"webchat.enabled" env:"CTX_WEBCHAT_ENABLED" default:"true" mut:"hot"`
+	// MaxIterations caps the tool loop per turn; one closing call WITHOUT tools
+	// follows the cap (E4 — never tool_choice:none).
+	MaxIterations int `key:"webchat.max_iterations" env:"CTX_WEBCHAT_MAX_ITERATIONS" default:"6" mut:"hot"`
+	// MaxTokens clamps max_tokens per model call (a request may ask less, never
+	// more); the per-backend limits.chat_max_tokens clamp applies on top (CPU 512).
+	MaxTokens int `key:"webchat.max_tokens" env:"CTX_WEBCHAT_MAX_TOKENS" default:"2048" mut:"hot"`
+	// CompletionBudget caps Σ completion_tokens across all iterations of one turn.
+	CompletionBudget int `key:"webchat.completion_budget" env:"CTX_WEBCHAT_COMPLETION_BUDGET" default:"8192" mut:"hot"`
+	// ToolResultMaxChars truncates one tool result (ctx_get pages the rest via
+	// the offset marker so a >window block stays fully readable).
+	ToolResultMaxChars int `key:"webchat.tool_result_max_chars" env:"CTX_WEBCHAT_TOOL_RESULT_MAX_CHARS" default:"8000" mut:"hot"`
+	// HistoryBudgetChars bounds the session history fed into the prompt (~15k
+	// tokens); older tool results condense, then oldest messages drop (§3.6).
+	HistoryBudgetChars int `key:"webchat.history_budget_chars" env:"CTX_WEBCHAT_HISTORY_BUDGET_CHARS" default:"60000" mut:"hot"`
+	// LLMTimeout bounds one model call (bare seconds; CPU-fallback worst case is
+	// why it is large — the per-backend MaxTokens clamp keeps that bounded).
+	LLMTimeout time.Duration `key:"webchat.llm_timeout" env:"CTX_WEBCHAT_LLM_TIMEOUT" default:"900" mut:"hot"`
+	// ConcurrentTurns caps simultaneously running turns per home_scope (the
+	// in-memory semaphore §3.3); above it the handler answers 429 before stream
+	// start. Bounds the turn FREQUENCY per tenant, not just one turn's budget (R1).
+	ConcurrentTurns int `key:"webchat.concurrent_turns" env:"CTX_WEBCHAT_CONCURRENT_TURNS" default:"1" mut:"hot" parse:"strict"`
+	// SessionRetention enables the retention janitor: sessions whose updated_at
+	// is older than this are deleted (messages cascade). 0 = off (kept forever,
+	// the shipped default). Duration suffix h/d/w/m/y (Hours parser, since v2.6.0).
+	SessionRetention Hours `key:"webchat.session_retention" env:"CTX_WEBCHAT_SESSION_RETENTION" default:"0" mut:"hot"`
 }
 
 // ScopeFloor maps a scope to its minimum effective sensitivity (F3 §2.3d).

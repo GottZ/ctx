@@ -346,6 +346,81 @@ func TestChatEngine(t *testing.T) {
 			t.Fatalf("done = %v; want finish_reason stop", done)
 		}
 	})
+
+	t.Run("LLMLogMetadataOnly", func(t *testing.T) {
+		// One plain answer turn → one web-chat llmlog row. It must carry the
+		// telemetry (pipeline/host/backend) but NO plaintext bodies: every chat
+		// call holds the whole history, and context_llm_log is un-scoped +
+		// outside the session CASCADE, so bodies there would be a shadow corpus
+		// breaking the DELETE promise (§3.6/R9).
+		llmSrv := &fakeLLM{responses: []fakeResp{{sse: sseContent("a plain answer")}}}
+		srv := httptest.NewServer(llmSrv.handler())
+		defer srv.Close()
+		exec := chat.NewExecutor(pool, &fakeQuery{}, 8000)
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("metric-fake", srv.URL)}}, exec, chat.Config{})
+		sess := newSession(t, pool, "private", []string{"private"})
+		col := &collector{}
+		if err := eng.RunTurn(ctx, &auth.AuthResult{ReadScopes: []string{"private"}}, sess, "hi there", backends.SensInternal, false, col); err != nil {
+			t.Fatalf("RunTurn: %v", err)
+		}
+
+		// llmlog.Record is fire-and-forget — poll for this session's row. The
+		// bodies are stored as raw strings (llmlog.insert), so metadata-only
+		// shows up as EMPTY ("") rather than NULL — either way no plaintext.
+		var pipeline, host, backendName, reqSys, reqUser, respContent string
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			err := pool.QueryRow(ctx, `
+				SELECT pipeline, host, COALESCE(backend_name,''),
+				       COALESCE(request_system,''), COALESCE(request_user,''), COALESCE(response_content,'')
+				FROM context_llm_log
+				WHERE pipeline = 'web-chat' AND metadata->>'session_id' = $1
+				ORDER BY created_at DESC LIMIT 1`, sess.ID).
+				Scan(&pipeline, &host, &backendName, &reqSys, &reqUser, &respContent)
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no web-chat llmlog row for session %s after 3s: %v", sess.ID, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if host == "" || backendName != "metric-fake" {
+			t.Fatalf("telemetry missing: host=%q backend_name=%q", host, backendName)
+		}
+		if reqSys != "" || reqUser != "" || respContent != "" {
+			t.Fatalf("web-chat llmlog must be metadata-only (§3.6/R9): request_system=%q request_user=%q response_content=%q", reqSys, reqUser, respContent)
+		}
+	})
+
+	t.Run("ErrorEventLaundersBackendURL", func(t *testing.T) {
+		// A dead backend (dial error) ends the turn with an error event that
+		// carries only the class code + backend NAME — never the raw error, which
+		// embeds the backend URL (interna topology disclosure to friend tenants,
+		// §3.5). The whole event payload must not contain the host:port.
+		deadHost := "http://127.0.0.1:1"
+		exec := chat.NewExecutor(pool, &fakeQuery{}, 8000)
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("deadbackend", deadHost)}}, exec, chat.Config{})
+		sess := newSession(t, pool, "private", []string{"private"})
+		col := &collector{}
+		if err := eng.RunTurn(ctx, &auth.AuthResult{ReadScopes: []string{"private"}}, sess, "hi", backends.SensInternal, false, col); err != nil {
+			t.Fatalf("RunTurn: %v", err)
+		}
+		errEvt := col.last("error")
+		if errEvt == nil {
+			t.Fatal("expected an error event from the dead backend")
+		}
+		if errEvt["code"] == nil || errEvt["code"] == "" {
+			t.Fatalf("error event missing class code: %v", errEvt)
+		}
+		if errEvt["backend"] != "deadbackend" {
+			t.Fatalf("error event backend = %v; want the NAME deadbackend", errEvt["backend"])
+		}
+		raw, _ := json.Marshal(errEvt)
+		if strings.Contains(string(raw), "127.0.0.1") {
+			t.Fatalf("error event leaked the backend URL (topology disclosure): %s", raw)
+		}
+	})
 }
 
 // --- executor tests ---
