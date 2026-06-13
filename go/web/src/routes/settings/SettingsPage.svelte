@@ -34,22 +34,28 @@
       read-only key — settings are admin-gated (the server answers 403); sign in with an admin key to
       view and edit.
     </p>
-  {:else if catalog.status === 'loading' || catalog.status === 'idle'}
-    <p class="state" aria-busy="true">loading settings catalog…</p>
-  {:else if catalog.status === 'error'}
-    <div class="error" role="alert">
-      <p>{catalog.error?.message}</p>
-      {#if catalog.error?.requestId}
-        <p class="request-id">request {catalog.error.requestId}</p>
-      {/if}
-      <button type="button" onclick={() => void catalog.reload()}>Retry</button>
-    </div>
   {:else}
-    <div class="groups">
-      {#each model.groups as group (group.prefix)}
-        <SettingsGroup {group} {model} />
-      {/each}
-    </div>
+    <a class="editor-link" href="/settings/backends">
+      <span class="el-title">Backend pool &amp; vault →</span>
+      <span class="el-sub">manage provider backends, trust tiers and API-key secrets</span>
+    </a>
+    {#if catalog.status === 'loading' || catalog.status === 'idle'}
+      <p class="state" aria-busy="true">loading settings catalog…</p>
+    {:else if catalog.status === 'error'}
+      <div class="error" role="alert">
+        <p>{catalog.error?.message}</p>
+        {#if catalog.error?.requestId}
+          <p class="request-id">request {catalog.error.requestId}</p>
+        {/if}
+        <button type="button" onclick={() => void catalog.reload()}>Retry</button>
+      </div>
+    {:else}
+      <div class="groups">
+        {#each model.groups as group (group.prefix)}
+          <SettingsGroup {group} {model} />
+        {/each}
+      </div>
+    {/if}
   {/if}
 </section>
 
@@ -117,5 +123,29 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+  }
+
+  .editor-link {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-1);
+    text-decoration: none;
+    transition: border-color 120ms ease;
+  }
+  .editor-link:hover {
+    border-color: var(--accent);
+  }
+  .el-title {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: var(--accent);
+  }
+  .el-sub {
+    font-size: 0.78rem;
+    color: var(--text-dim);
   }
 </style>

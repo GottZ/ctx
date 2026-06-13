@@ -26,6 +26,9 @@ export const RESERVED_SERVER_PREFIXES = [
  */
 export const areaRoutes = {
   '/settings': () => import('./settings/SettingsPage.svelte'),
+  // Deep sub-route under /settings (its own lazy chunk); the topbar /settings
+  // tab stays active via startsWith. Reaches no reserved server prefix.
+  '/settings/backends': () => import('./settings/backends/BackendsPage.svelte'),
   '/status': () => import('./status/StatusPage.svelte'),
   '/graph': () => import('./graph/GraphPage.svelte'),
   '/chat': () => import('./chat/ChatPage.svelte'),

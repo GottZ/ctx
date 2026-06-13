@@ -81,6 +81,102 @@ export interface BackendStatus {
   last_ok?: string
 }
 
+// Source: go/internal/backends/backend.go (ModelSpec) — a model_map value is
+// either a bare model-id string (short form) or this object. backend-list
+// always reads it back as the object form.
+export interface ModelSpec {
+  model: string
+  params?: Record<string, unknown>
+}
+
+// Source: go/internal/handler/backends_manage.go (backendView) — the full
+// editable backend as read back from backend-create/update/list. The resolved
+// api key is NEVER serialized (json:"-"); api_key_ref is the harmless secret
+// name. model_map keys are role names plus the special "default".
+export interface BackendView {
+  id: string
+  name: string
+  base_url: string
+  protocol: string
+  provider_class: string
+  api_key_ref: string
+  trust: string
+  locality: string
+  roles: string[]
+  model_map: Record<string, ModelSpec>
+  timeouts: Record<string, number>
+  num_ctx: number
+  priority: number
+  enabled: boolean
+  extra_headers: Record<string, string>
+  extra_body: Record<string, unknown>
+  limits: Record<string, unknown>
+  metadata: Record<string, unknown>
+}
+
+// Source: go/internal/handler/backends_manage.go (backend-list) — backendView
+// merged with the live pool status by id; the status keys are renamed off
+// BackendStatus (cooldown_remaining_s, last_error vs last_error_class).
+export interface BackendListItem extends BackendView {
+  effective_state: string
+  cooldown_remaining_s: number
+  consecutive_fails: number
+  last_error?: string
+  last_ok?: string
+}
+
+// Source: go/internal/handler/backends_manage.go (backendSpec) — the create/
+// update patch. UPDATE semantics: an omitted scalar key keeps its value; an
+// explicit `roles:[]` / `model_map:{}` CLEARS it (server reads raw-key
+// presence). confirm_trust_elevation is added by the client wrapper, not here.
+export interface BackendSpec {
+  name?: string
+  base_url?: string
+  protocol?: string
+  provider_class?: string
+  api_key_ref?: string
+  trust?: string
+  locality?: string
+  roles?: string[]
+  model_map?: Record<string, ModelSpec | string>
+  num_ctx?: number
+  priority?: number
+  enabled?: boolean
+}
+
+export interface BackendListResponse {
+  success: true
+  backends: BackendListItem[]
+}
+
+// create/update share this shape; warnings carries the F3 validateRoles
+// advisories (non-core role, dream-on-local), present only when non-empty.
+export interface BackendMutateResponse {
+  success: true
+  backend: BackendView
+  warnings?: string[]
+}
+
+export interface BackendDeleteResponse {
+  success: true
+  deleted: string // the deleted backend's name, not its id
+}
+
+// Source: go/internal/handler/backends_manage.go (backend-test). Always HTTP
+// 200 even when unreachable — the verdict is in the body. checks is a free map
+// of probe-name → status string; openrouter is present only for that class.
+export interface BackendTestResult {
+  success: true
+  reachable: boolean
+  latency_ms: number
+  checks: Record<string, string>
+  openrouter?: {
+    credits_remaining?: number
+    usage_usd?: number
+    zdr_endpoints?: number
+  }
+}
+
 // Source: go/internal/handler/status.go (dreamStatus). mode is on|throttled|
 // off; the queue fields are dream.QueueStats verbatim; last_cycle_at is the
 // last dream-cycle LLM call.
@@ -171,4 +267,40 @@ export interface LLMLogEntry {
 export interface LLMLogResponse {
   success: true
   entries: LLMLogEntry[]
+}
+
+// Source: go/internal/store/sealbox.go (SecretMeta) + handler/sealbox.go
+// (secretView). Write-only by design: NO ciphertext, nonce, value or
+// fingerprint is ever returned (pinned by the server response-scan test).
+// rotated_at is omitempty (absent until first rotation); referenced_by is
+// always present (the settings keys whose secret_ref points at this secret).
+export interface SecretMeta {
+  name: string
+  key_version: number
+  created_at: string
+  rotated_at?: string
+  referenced_by: string[]
+}
+
+// Source: go/internal/handler/sealbox.go (HandleList).
+export interface SecretListResponse {
+  success: true
+  secrets: SecretMeta[]
+}
+
+// Source: go/internal/handler/sealbox.go (HandlePut). action distinguishes a
+// first insert from a re-encrypt of an existing name.
+export interface SecretPutResponse {
+  success: true
+  name: string
+  action: 'create' | 'rotate'
+}
+
+// Source: go/internal/handler/sealbox.go (HandleDelete). A 409 (still
+// referenced) instead carries {success:false, error, referenced_by} and is
+// surfaced as ApiError — the referenced_by list is read off the error path.
+export interface SecretDeleteResponse {
+  success: true
+  name: string
+  deleted: true
 }

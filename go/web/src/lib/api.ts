@@ -8,13 +8,26 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly requestId: string | null
+  /**
+   * The full `{success:false, …}` envelope on a server error — carries the
+   * fields beyond `error`, e.g. the 422 `fields` array (per-field validation)
+   * and the 409 `referenced_by` list. null for network/parse failures.
+   */
+  readonly details: Record<string, unknown> | null
 
-  constructor(status: number, code: string, message: string, requestId: string | null = null) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    requestId: string | null = null,
+    details: Record<string, unknown> | null = null,
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.requestId = requestId
+    this.details = details
   }
 }
 
@@ -77,18 +90,19 @@ export async function apiFetch<T>(
   const requestId = res.headers.get('X-Request-ID')
   const body = await parseBody(res)
   const serverError = envelopeError(body)
+  const details = asRecord(body)
 
   if (res.status === 401) {
     if (opts.key === undefined) hooks.onUnauthorized()
-    throw new ApiError(401, 'unauthorized', serverError ?? 'invalid or revoked API key', requestId)
+    throw new ApiError(401, 'unauthorized', serverError ?? 'invalid or revoked API key', requestId, details)
   }
   if (!res.ok) {
     const message = serverError ?? `request failed (HTTP ${res.status})`
-    throw new ApiError(res.status, codeFor(res.status), message, requestId)
+    throw new ApiError(res.status, codeFor(res.status), message, requestId, details)
   }
   if (serverError !== null) {
     // success:false inside a 2xx body — surfaced as an error, never as data.
-    throw new ApiError(res.status, 'api_error', serverError, requestId)
+    throw new ApiError(res.status, 'api_error', serverError, requestId, details)
   }
   if (body === undefined) {
     throw new ApiError(res.status, 'invalid_response', 'response was not valid JSON', requestId)
@@ -114,6 +128,11 @@ async function parseBody(res: Response): Promise<unknown> {
   } catch {
     return undefined
   }
+}
+
+/** A parsed JSON object body, else null (kept on ApiError.details). */
+function asRecord(body: unknown): Record<string, unknown> | null {
+  return typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : null
 }
 
 /** Extract the error of a `{success:false, error}` envelope, else null. */

@@ -6,8 +6,15 @@ import { describe, expect, it } from 'vitest'
 import { RESERVED_SERVER_PREFIXES, areaRoutes, entryRedirect } from './index'
 
 describe('areaRoutes', () => {
-  it('contains exactly the four areas plus the catch-all', () => {
-    expect(Object.keys(areaRoutes).sort()).toEqual(['*', '/chat', '/graph', '/settings', '/status'])
+  it('contains the four areas, the backends sub-route and the catch-all', () => {
+    expect(Object.keys(areaRoutes).sort()).toEqual([
+      '*',
+      '/chat',
+      '/graph',
+      '/settings',
+      '/settings/backends',
+      '/status',
+    ])
   })
 
   it('keeps every area lazy (separate chunk per area)', () => {

@@ -335,7 +335,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST\|GET\|DELETE /mcp` | MCP Streamable HTTP (remote tool server) |
 | `GET /authorize` | OAuth 2.1 authorization (PKCE) |
 | `POST /token` | OAuth 2.1 token exchange |
-| `GET /` (unregistered paths) | Embedded admin SPA (Svelte 5 + Vite, served from the binary). History-API fallback answers HTML navigations (`Accept: text/html`) only — mistyped API URLs stay 404 for JSON clients. Hashed `/assets/*` are immutable-cached and pre-compressed (`.br`/`.gz`); binaries built without the frontend (plain `go install`) serve a 503 placeholder while all APIs stay functional — the Docker image is the channel that ships the real UI |
+| `GET /` (unregistered paths) | Embedded admin SPA (Svelte 5 + Vite, served from the binary). History-API fallback answers HTML navigations (`Accept: text/html`) only — mistyped API URLs stay 404 for JSON clients. Hashed `/assets/*` are immutable-cached and pre-compressed (`.br`/`.gz`); binaries built without the frontend (plain `go install`) serve a 503 placeholder while all APIs stay functional — the Docker image is the channel that ships the real UI. Areas: **Settings** (generic config editor + the **Backends** sub-route `/settings/backends` — backend-pool editor with a trust dropdown + elevation-confirm dialog, roles multi-select, model_map line editor, priority up/down and per-row reachability test, plus the write-only **secrets vault** with reference tracking; all over the existing `backend-*` / `/api/secrets` admin actions), **Graph**, **Status** dashboard + SSE, **Chat** |
 
 ### Graph API
 
