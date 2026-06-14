@@ -69,6 +69,12 @@ export interface SearchResult {
   scope: string
   updated_at: string
   created_at: string
+  /**
+   * Trust-gate level (credentials|personal|internal|public) for the W6 list
+   * badge. Optional + tolerant: the server omits it on old/unclassified rows
+   * (json:"sensitivity,omitempty"), so the UI fail-closes an absent value.
+   */
+  sensitivity?: string
 }
 
 export function searchBlocks(query: string, limit = 10): Promise<SearchResponse> {
@@ -90,6 +96,14 @@ export interface BlockDetail {
   scope: string
   created_at: string
   updated_at: string
+  /**
+   * Trust-gate level (credentials|personal|internal|public) for the W6 detail
+   * badge — GetBlock already RETURNS the column (blocks.go:367), only the type
+   * ignored it. Optional + tolerant: the server omits it on old/unclassified
+   * rows. The W4 editor seeds editInitial.sensitivity from THIS so the
+   * downgrade-confirm is reachable from the page.
+   */
+  sensitivity?: string
 }
 
 export function getBlock(id: string): Promise<{ success: true; block: BlockDetail }> {

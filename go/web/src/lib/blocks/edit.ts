@@ -7,7 +7,7 @@
 // and the scope-editability gate all live here so vitest covers them without a
 // DOM (lib/backends.ts pattern).
 
-import type { StoreBlockRequest, UpdateBlockData } from '../api/blocks'
+import type { BlockDetail, StoreBlockRequest, UpdateBlockData } from '../api/blocks'
 
 /**
  * The editable surface of the block dialog. category/title/content are required
@@ -126,4 +126,27 @@ export function blockDiff(original: BlockDraft, draft: BlockDraft): UpdateBlockD
 /** True when an update patch has no field changes (skip the round-trip). */
 export function isEmptyDiff(data: UpdateBlockData): boolean {
   return Object.keys(data).length === 0
+}
+
+/**
+ * Seed the edit dialog's initial draft from a loaded BlockDetail. The W4 dialog
+ * needs the block's CURRENT sensitivity pre-filled so the user can lower it and
+ * the editor recognizes the downgrade (isSensitivityDowngrade) and adds
+ * confirm_sensitivity_downgrade — i.e. so the downgrade-confirm is REACHABLE
+ * from the /blocks page at all. Before W6 the detail block carried no
+ * sensitivity, so the page seeded '' and the downgrade flow was unreachable.
+ *
+ * sensitivity falls back to '' only when the server truly omitted it (old/
+ * unclassified row) — then the editor leaves the level unset and no
+ * re-classification is sent.
+ */
+export function editInitialFromDetail(block: BlockDetail): Partial<BlockDraft> {
+  return {
+    category: block.category,
+    title: block.title,
+    content: block.content,
+    tags: block.tags,
+    scope: block.scope,
+    sensitivity: block.sensitivity ?? '',
+  }
 }

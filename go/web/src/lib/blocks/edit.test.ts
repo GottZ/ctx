@@ -6,15 +6,33 @@
 // canEdit gates on scope === home_scope (writes are scope-gated, NOT admin).
 
 import { describe, expect, it } from 'vitest'
+import type { BlockDetail } from '../api/blocks'
 import {
   blockDiff,
   canEdit,
   createStoreRequest,
+  editInitialFromDetail,
   isEmptyDiff,
   isSensitivityDowngrade,
   sensitivityRank,
   type BlockDraft,
 } from './edit'
+
+function detail(p: Partial<BlockDetail> = {}): BlockDetail {
+  return {
+    id: '0190000000007000800000000000abcd',
+    category: 'learnings',
+    title: 'a block',
+    content: 'body',
+    tags: ['go', 'graph'],
+    metadata: null,
+    scope: 'private',
+    created_at: '2026-06-01T00:00:00Z',
+    updated_at: '2026-06-14T00:00:00Z',
+    sensitivity: 'credentials',
+    ...p,
+  }
+}
 
 function draft(p: Partial<BlockDraft> = {}): BlockDraft {
   return {
@@ -120,5 +138,36 @@ describe('blockDiff', () => {
     const orig = draft({ sensitivity: 'credentials' })
     const d = blockDiff(orig, { ...orig, sensitivity: 'internal' })
     expect('confirm_sensitivity_downgrade' in d).toBe(false)
+  })
+})
+
+describe('editInitialFromDetail (W6 — seeds the real sensitivity, fixes the W4 gap)', () => {
+  it('pre-fills the block CURRENT sensitivity so the downgrade-confirm is reachable', () => {
+    // The whole point of W6's editor fix: seeding the real level means
+    // lowering it in the dialog is recognised as a downgrade (the page used to
+    // seed '' so isSensitivityDowngrade('', next) never fired).
+    const init = editInitialFromDetail(detail({ sensitivity: 'credentials' }))
+    expect(init.sensitivity).toBe('credentials')
+  })
+
+  it('copies the editable scalar fields verbatim', () => {
+    const init = editInitialFromDetail(
+      detail({ category: 'decisions', title: 't', content: 'c', tags: ['x'], scope: 'private' }),
+    )
+    expect(init.category).toBe('decisions')
+    expect(init.title).toBe('t')
+    expect(init.content).toBe('c')
+    expect(init.tags).toEqual(['x'])
+    expect(init.scope).toBe('private')
+  })
+
+  it('seeds an internal block as internal (not blanked)', () => {
+    expect(editInitialFromDetail(detail({ sensitivity: 'internal' })).sensitivity).toBe('internal')
+  })
+
+  it('falls back to "" only when the server omitted sensitivity (old/unclassified row)', () => {
+    const d = detail()
+    delete d.sensitivity
+    expect(editInitialFromDetail(d).sensitivity).toBe('')
   })
 })

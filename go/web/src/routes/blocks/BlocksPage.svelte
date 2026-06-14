@@ -8,7 +8,8 @@
   import { BlockDetailModel } from './detail.svelte'
   import { BlockEditModel, type EditMode } from './edit.svelte'
   import { BlockDeleteModel } from './delete.svelte'
-  import { canEdit, type BlockDraft } from '../../lib/blocks/edit'
+  import { canEdit, editInitialFromDetail, type BlockDraft } from '../../lib/blocks/edit'
+  import { sensitivityBadge } from '../../lib/blocks/sensitivity'
   import { session } from '../../lib/auth.svelte'
 
   // All list/search/filter state lives in the injectable model (block-workbench
@@ -69,16 +70,11 @@
     if (b === null || !canEdit(b.scope, homeScope)) return
     dialogMode = 'edit'
     editId = b.id
-    editInitial = {
-      category: b.category,
-      title: b.title,
-      content: b.content,
-      tags: b.tags,
-      scope: b.scope,
-      // The detail block carries no sensitivity field (W6) — leave it unset so
-      // an unrelated edit never re-classifies; the user picks one to change it.
-      sensitivity: '',
-    }
+    // Seed the dialog from the loaded detail — crucially carrying the block's
+    // CURRENT sensitivity (W6), so lowering it in the dialog is recognised as a
+    // downgrade and the confirm gate becomes reachable from the page. (Before W6
+    // the page hard-seeded '' and the downgrade flow was unreachable.)
+    editInitial = { ...editInitialFromDetail(b) }
     dialogOpen = true
   }
 
@@ -165,6 +161,7 @@
       {:else}
         <ul class="results">
           {#each visible as r (r.id)}
+            {@const sb = sensitivityBadge(r.sensitivity ?? '')}
             <li>
               <button type="button" class:active={detail.openId === r.id} onclick={() => select(r.id)}>
                 <span class="row">
@@ -172,6 +169,7 @@
                   <time class="updated" datetime={r.updated_at}>{r.updated_at.slice(0, 10)}</time>
                 </span>
                 <span class="meta">
+                  <span class="badge {sb.tone}" title="sensitivity">{sb.label}</span>
                   {r.category} · {r.scope}{r.tags.length > 0 ? ` · ${r.tags.join(', ')}` : ''}
                 </span>
                 <span class="preview">{r.content_preview}</span>
@@ -332,11 +330,40 @@
     white-space: nowrap;
   }
   .meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
     font-family: var(--font-mono);
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     text-transform: uppercase;
     color: var(--text-faint);
+  }
+
+  /* Sensitivity badge (W6) — tone is a token-driven CSS-class suffix
+     (BackendBadge pattern); colours come only from styles/tokens.css. */
+  .badge {
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    padding: 0 var(--space-1);
+    color: var(--text-dim);
+  }
+  .badge.danger {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .badge.warn {
+    border-color: var(--warn);
+    color: var(--warn);
+  }
+  .badge.accent {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .badge.ok {
+    border-color: var(--ok);
+    color: var(--ok);
   }
   .preview {
     font-size: 0.8rem;

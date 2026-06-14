@@ -70,6 +70,10 @@ type BlockPreview struct {
 	Content        string    `json:"content,omitempty"`
 	Metadata       map[string]any `json:"metadata,omitempty"`
 	Scope          string    `json:"scope"`
+	// Sensitivity is the trust-gate level (M055) for the W6 list badge.
+	// SearchBlocks selects the column (both the compact and full SELECT) and
+	// scans it here; older callers that don't select it leave it "" (omitempty).
+	Sensitivity    string    `json:"sensitivity,omitempty"`
 	Score          float64   `json:"score,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	CreatedAt      time.Time `json:"created_at,omitempty"`
@@ -561,7 +565,7 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 	var selectFields string
 	var orderBy string
 	if compact {
-		selectFields = `id, category, tags, title, scope, LEFT(content, 200) AS content_preview, length(content) AS content_length, updated_at`
+		selectFields = `id, category, tags, title, scope, sensitivity, LEFT(content, 200) AS content_preview, length(content) AS content_length, updated_at`
 		if hasQuery {
 			orderBy = fmt.Sprintf(
 				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
@@ -572,7 +576,7 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 			orderBy = `updated_at DESC`
 		}
 	} else {
-		selectFields = `id, category, tags, title, scope, content, metadata, created_at, updated_at`
+		selectFields = `id, category, tags, title, scope, sensitivity, content, metadata, created_at, updated_at`
 		if hasQuery {
 			orderBy = fmt.Sprintf(
 				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
@@ -601,11 +605,11 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 	for rows.Next() {
 		bp := BlockPreview{}
 		if compact {
-			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
+			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
 				return nil, fmt.Errorf("store: search blocks scan: %w", err)
 			}
 		} else {
-			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Content, &bp.Metadata, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
+			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.Content, &bp.Metadata, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
 				return nil, fmt.Errorf("store: search blocks scan: %w", err)
 			}
 		}

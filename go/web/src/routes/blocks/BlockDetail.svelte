@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { BlockDetailModel } from './detail.svelte'
   import type { BlockDeleteModel } from './delete.svelte'
+  import { sensitivityBadge } from '../../lib/blocks/sensitivity'
 
   // Detail panel (block-workbench W3 read; W4 adds an Edit action; W5 a Delete
   // action). The model owns the lazy getBlock load + status; this component is a
@@ -65,6 +66,7 @@
     {/if}
   {:else if model.block}
     {@const b = model.block}
+    {@const sb = sensitivityBadge(b.sensitivity ?? '')}
     <dl class="meta">
       <dt>id</dt>
       <dd><code>{b.id}</code></dd>
@@ -72,6 +74,8 @@
       <dd>{b.category}</dd>
       <dt>scope</dt>
       <dd>{b.scope}</dd>
+      <dt>sensitivity</dt>
+      <dd><span class="badge {sb.tone}">{sb.label}</span></dd>
       {#if b.tags.length > 0}
         <dt>tags</dt>
         <dd>{b.tags.join(', ')}</dd>
@@ -174,6 +178,35 @@
   }
   dd code {
     font-size: 0.7rem;
+  }
+
+  /* Sensitivity badge (W6) — tone is a token-driven CSS-class suffix
+     (BackendBadge pattern); colours come only from styles/tokens.css. */
+  .badge {
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    padding: 0 var(--space-1);
+    color: var(--text-dim);
+  }
+  .badge.danger {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .badge.warn {
+    border-color: var(--warn);
+    color: var(--warn);
+  }
+  .badge.accent {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .badge.ok {
+    border-color: var(--ok);
+    color: var(--ok);
   }
 
   .actions {
