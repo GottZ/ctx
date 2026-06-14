@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { configureApi } from '../api'
-import { MAX_SEARCH_LIMIT, listCategories, listMeta, searchBlocks } from './blocks'
+import { MAX_SEARCH_LIMIT, listCategories, listMeta, searchBlocks, storeBlock, updateBlock } from './blocks'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -140,5 +140,50 @@ describe('listCategories', () => {
     const res = await listCategories()
     expect(res.categories).toHaveLength(2)
     expect(res.categories[0]).toEqual({ category: 'learnings', count: 3 })
+  })
+})
+
+describe('storeBlock', () => {
+  it('POSTs the request body verbatim to /api/store', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, { success: true, block: { id: 'b1', category: 'learnings', title: 'T' } }),
+    )
+    await storeBlock({ category: 'learnings', title: 'T', content: 'body', tags: ['a'], scope: 'private' })
+    expect(mock.mock.calls[0]?.[0]).toBe('/api/store')
+    const init = mock.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(sentBody(mock)).toEqual({
+      category: 'learnings',
+      title: 'T',
+      content: 'body',
+      tags: ['a'],
+      scope: 'private',
+    })
+  })
+
+  it('forwards an explicit sensitivity', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, block: { id: 'b1' } }))
+    await storeBlock({ category: 'c', title: 't', content: 'x', sensitivity: 'credentials' })
+    expect(sentBody(mock).sensitivity).toBe('credentials')
+  })
+})
+
+describe('updateBlock', () => {
+  it('POSTs the manage update action with id + data', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, block: { id: 'b1' } }))
+    await updateBlock('b1', { title: 'new', content: 'c2' })
+    expect(mock.mock.calls[0]?.[0]).toBe('/api/manage')
+    expect(sentBody(mock)).toEqual({
+      action: 'update',
+      id: 'b1',
+      data: { title: 'new', content: 'c2' },
+    })
+  })
+
+  it('carries confirm_sensitivity_downgrade through the data payload', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, block: { id: 'b1' } }))
+    await updateBlock('b1', { sensitivity: 'internal', confirm_sensitivity_downgrade: true })
+    const body = sentBody(mock) as { data: Record<string, unknown> }
+    expect(body.data).toEqual({ sensitivity: 'internal', confirm_sensitivity_downgrade: true })
   })
 })

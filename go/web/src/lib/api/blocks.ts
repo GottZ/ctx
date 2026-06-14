@@ -67,6 +67,58 @@ export interface BlocksApi {
   get: typeof getBlock
 }
 
+// ---- write path (W4 editor) -------------------------------------------------
+
+/**
+ * POST /api/store body (context_store.go storeRequest). Upsert on
+ * (category, title, scope). scope/sensitivity omitted ⇒ server defaults
+ * (home_scope, pool.default_block_sensitivity). An explicit sensitivity on an
+ * upsert-conflict is upgrade-only — a downgrade goes through the update path.
+ */
+export interface StoreBlockRequest {
+  category: string
+  title: string
+  content: string
+  tags?: string[]
+  metadata?: Record<string, unknown>
+  scope?: string
+  sensitivity?: string
+}
+
+export interface StoreBlockResponse {
+  success: true
+  /** The stored/updated block (handler returns the block envelope). */
+  block: BlockDetail
+}
+
+/**
+ * POST /api/manage {action:"update"} data payload (store.UpdateBlockData) —
+ * ONLY the changed fields, plus confirm_sensitivity_downgrade when lowering the
+ * sensitivity (else the server answers 400, context_manage.go:547). The
+ * server-only sensitivity_audit field is never sent from the client.
+ */
+export interface UpdateBlockData {
+  category?: string
+  title?: string
+  content?: string
+  tags?: string[]
+  metadata?: Record<string, unknown>
+  scope?: string
+  sensitivity?: string
+  confirm_sensitivity_downgrade?: boolean
+}
+
+export interface UpdateBlockResponse {
+  success: true
+  block: BlockDetail
+}
+
+/** Injected into the W4 edit model (constructor-DI, pool.svelte pattern). */
+export interface BlockWriteApi {
+  store: typeof storeBlock
+  update: typeof updateBlock
+}
+
 export function searchBlocks(req: SearchRequest): Promise<SearchResponse> {
   // Build the body verbatim: query is always sent; the optional fields only
   // when set (the server applies its own defaults — compact=true, limit=10 —
@@ -96,5 +148,26 @@ export function listCategories(): Promise<ListCategoriesResponse> {
   return apiFetch<ListCategoriesResponse>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'list-categories' }),
+  })
+}
+
+/** POST /api/store — create or upsert a block (body sent verbatim). */
+export function storeBlock(req: StoreBlockRequest): Promise<StoreBlockResponse> {
+  return apiFetch<StoreBlockResponse>('/api/store', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+}
+
+/**
+ * POST /api/manage {action:"update", id, data} — patch a block with only the
+ * changed fields. `id` is the FULL block UUID (the server resolves ids in
+ * HomeScope only). A sensitivity downgrade carries confirm_sensitivity_-
+ * downgrade in `data`; apiFetch rejects the 400/403/409/422 as ApiError.
+ */
+export function updateBlock(id: string, data: UpdateBlockData): Promise<UpdateBlockResponse> {
+  return apiFetch<UpdateBlockResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'update', id, data }),
   })
 }

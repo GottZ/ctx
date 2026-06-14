@@ -2,16 +2,41 @@
   import { onMount } from 'svelte'
   import FilterPanel from './FilterPanel.svelte'
   import BlockDetail from './BlockDetail.svelte'
+  import BlockDialog from './BlockDialog.svelte'
   import { scopeVisible, type BlockFilters } from '../../lib/blocks/filters'
   import { BlocksModel } from './blocks.svelte'
   import { BlockDetailModel } from './detail.svelte'
+  import { BlockEditModel, type EditMode } from './edit.svelte'
+  import { canEdit, type BlockDraft } from '../../lib/blocks/edit'
+  import { session } from '../../lib/auth.svelte'
 
   // All list/search/filter state lives in the injectable model (block-workbench
   // W1/W2). This component stays thin: a search box, the facet panel, the hit
-  // list, the three load states. The detail viewer (W3) is a read-only sidebar
-  // panel driven by its own model — editing/delete arrive in W4/W5.
+  // list, the three load states. The detail viewer (W3) is a sidebar panel; W4
+  // adds create + edit through BlockDialog (delete/sensitivity-badge are W5/W6).
   const model = new BlocksModel()
   const detail = new BlockDetailModel()
+
+  const homeScope = $derived(session.whoami?.home_scope ?? '')
+  // The open block is editable only when it lives in the caller's home_scope —
+  // a foreign-scope hit reachable via read_scopes is read-only (write is
+  // scope-gated server-side; the dialog/edit affordance simply isn't offered).
+  const editable = $derived(detail.block !== null && canEdit(detail.block.scope, homeScope))
+
+  // After a successful save: reload the list (current filters) and, if a detail
+  // is open, re-fetch it so edits show immediately.
+  const editModel = new BlockEditModel(undefined, async () => {
+    await model.setFilters(model.filters)
+    if (detail.openId !== null) await detail.load(detail.openId)
+  })
+
+  // The dialog is mounted only while editing; its mode + seed snapshot are held
+  // here. `editId` is the FULL block UUID (the server resolves ids in HomeScope
+  // only — a prefix would be ambiguous on write).
+  let dialogOpen = $state(false)
+  let dialogMode = $state<EditMode>('create')
+  let editId = $state('')
+  let editInitial = $state<Partial<BlockDraft> | undefined>(undefined)
 
   // Local input mirror — submitting commits the query into the one filter
   // state; clearing it collapses to the empty-query default (newest-first).
@@ -21,6 +46,31 @@
     void model.load()
     void model.loadCategories()
   })
+
+  function openCreate(): void {
+    dialogMode = 'create'
+    editId = ''
+    editInitial = { scope: homeScope }
+    dialogOpen = true
+  }
+
+  function openEdit(): void {
+    const b = detail.block
+    if (b === null || !canEdit(b.scope, homeScope)) return
+    dialogMode = 'edit'
+    editId = b.id
+    editInitial = {
+      category: b.category,
+      title: b.title,
+      content: b.content,
+      tags: b.tags,
+      scope: b.scope,
+      // The detail block carries no sensitivity field (W6) — leave it unset so
+      // an unrelated edit never re-classifies; the user picks one to change it.
+      sensitivity: '',
+    }
+    dialogOpen = true
+  }
 
   // Distinct scopes present in the loaded results — the client-side scope
   // chips. Derived from what is visible, never a request param.
@@ -50,10 +100,15 @@
 
 <section class="area">
   <header>
-    <h1>Blocks</h1>
+    <div class="title-row">
+      <h1>Blocks</h1>
+      {#if homeScope !== ''}
+        <button type="button" class="new" onclick={openCreate}>New block</button>
+      {/if}
+    </div>
     <p class="sub">
       browse the corpus — empty search shows the newest blocks; a query runs full-text search
-      (stemmed by keyword, substrings/typos don't match). Read-only.
+      (stemmed by keyword, substrings/typos don't match).
     </p>
   </header>
 
@@ -119,10 +174,20 @@
     </div>
 
     {#if detail.openId !== null}
-      <BlockDetail model={detail} />
+      <BlockDetail model={detail} onedit={editable ? openEdit : undefined} />
     {/if}
   </div>
 </section>
+
+{#if dialogOpen}
+  <BlockDialog
+    mode={dialogMode}
+    model={editModel}
+    id={editId}
+    initial={editInitial}
+    onclose={() => (dialogOpen = false)}
+  />
+{/if}
 
 <style>
   .area {
@@ -145,11 +210,21 @@
     border-bottom: 1px solid var(--border);
     padding-bottom: var(--space-2);
   }
+  .title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
   h1 {
     margin: 0;
     font-size: 1.35rem;
     font-weight: 600;
     letter-spacing: 0.01em;
+  }
+  .new {
+    font-size: 0.8rem;
+    padding: var(--space-1) var(--space-3);
   }
   .sub {
     margin: var(--space-1) 0 0;

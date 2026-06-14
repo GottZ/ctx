@@ -1,12 +1,14 @@
 <script lang="ts">
   import type { BlockDetailModel } from './detail.svelte'
 
-  // Read-only detail panel (block-workbench W3). The model owns the lazy
-  // getBlock load + status; this component is a thin sidebar mirroring the
-  // graph DetailSidebar: a meta-<dl>, the full content as a TEXT NODE (never
-  // {@html} — repo XSS convention), an "open in graph" deep-link and a close
-  // button. Editing/delete/sensitivity arrive in later waves (W4/W5/W6).
-  let { model }: { model: BlockDetailModel } = $props()
+  // Detail panel (block-workbench W3 read; W4 adds an Edit action). The model
+  // owns the lazy getBlock load + status; this component is a thin sidebar
+  // mirroring the graph DetailSidebar: a meta-<dl>, the full content as a TEXT
+  // NODE (never {@html} — repo XSS convention), an "open in graph" deep-link
+  // and a close button. The Edit action is the page's callback — only passed
+  // when the block is editable (canEdit: scope === home_scope), so a foreign-
+  // scope (read-only) block simply has no edit affordance.
+  let { model, onedit }: { model: BlockDetailModel; onedit?: () => void } = $props()
 </script>
 
 <aside class="sidebar" aria-label="block details">
@@ -44,6 +46,9 @@
     {#if model.openId}
       <div class="actions">
         <a href={`/graph?focus=${model.openId}`}>Open in graph</a>
+        {#if onedit}
+          <button type="button" class="edit" onclick={onedit}>Edit</button>
+        {/if}
       </div>
     {/if}
 
@@ -115,6 +120,10 @@
   .actions a {
     font-size: 0.8rem;
     color: var(--accent);
+  }
+  .actions .edit {
+    font-size: 0.78rem;
+    padding: var(--space-1) var(--space-2);
   }
 
   .state {
