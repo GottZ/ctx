@@ -52,11 +52,29 @@ export function fetchEgo(block: string, query: EgoQuery = {}): Promise<EgoRespon
   return apiFetch<EgoResponse>(`/api/graph/ego?${params.toString()}`)
 }
 
+/**
+ * Keyset-pagination cursor for the empty-query browse path (block-workbench
+ * W7). It captures the {updated_at, id} of the LAST row of a page; the next
+ * request resumes strictly after it. updated_at is NOT unique, so id is the
+ * mandatory tiebreak — the wire shape mirrors store.SearchCursor 1:1
+ * (json:"after_updated"/"after_id"). The FTS (ranked) path never paginates.
+ */
+export interface SearchCursor {
+  after_updated: string
+  after_id: string
+}
+
 // Source: go/internal/handler/context_search.go (compact response). No
 // success field on the happy path — apiFetch only rejects success:false.
 export interface SearchResponse {
   count: number
   results: SearchResult[]
+  /**
+   * Cursor for the FOLLOWING page (W7 "Load more"), or null when there is no
+   * next page (last page, or the FTS "top matches" mode that never paginates).
+   * Absent on old servers ⇒ treated as null (no more pages).
+   */
+  next_after?: SearchCursor | null
 }
 
 export interface SearchResult {

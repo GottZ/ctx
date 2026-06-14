@@ -168,7 +168,7 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 		return errOutcome("invalid arguments: " + err.Error())
 	}
 	limit := clamp(a.Limit, 10, 1, 20)
-	previews, err := store.SearchBlocks(ctx, ex.pool, a.Query, readScopes, a.Category, a.Tags, limit, true)
+	previews, err := store.SearchBlocks(ctx, ex.pool, a.Query, readScopes, a.Category, a.Tags, limit, true, nil)
 	if err != nil {
 		return errOutcome("search failed")
 	}

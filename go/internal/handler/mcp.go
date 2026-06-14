@@ -248,7 +248,7 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 			limit = 10
 		}
 
-		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true)
+		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil)
 		if err != nil {
 			return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
 		}

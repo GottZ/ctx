@@ -178,6 +178,26 @@
             </li>
           {/each}
         </ul>
+
+        {#if model.query === ''}
+          <!-- Newest-first (browse) mode: real keyset pagination (W7). The
+               button appears only while the server handed back a next cursor;
+               a null cursor means the last page was reached. -->
+          {#if model.nextCursor !== null}
+            <button
+              type="button"
+              class="load-more"
+              disabled={model.loadingMore}
+              onclick={() => model.loadMore()}
+            >
+              {model.loadingMore ? 'loading…' : 'Load more'}
+            </button>
+          {/if}
+        {:else}
+          <!-- FTS mode is LIMIT-only "top matches" (ts_rank_cd ties make a
+               keyset fragile/slow) — no Load more; refine the query instead. -->
+          <p class="fts-hint" role="status">top matches — refine the query to narrow</p>
+        {/if}
       {/if}
     </div>
 
@@ -265,6 +285,24 @@
     margin: 0;
     color: var(--text-faint);
     font-size: 0.85rem;
+  }
+
+  /* W7 "Load more" — newest-first keyset pagination. */
+  .load-more {
+    width: 100%;
+    margin-top: var(--space-2);
+    font-size: 0.8rem;
+    padding: var(--space-2) var(--space-3);
+  }
+  /* FTS "top matches" hint — no pagination on the ranked path. */
+  .fts-hint {
+    margin: var(--space-2) 0 0;
+    text-align: center;
+    color: var(--text-faint);
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
   }
 
   .error {

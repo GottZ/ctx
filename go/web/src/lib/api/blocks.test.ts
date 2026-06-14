@@ -87,6 +87,48 @@ describe('searchBlocks', () => {
     expect(res.count).toBe(1)
     expect(res.results[0]?.id).toBe('b1')
   })
+
+  // --- W7 keyset pagination -------------------------------------------------
+
+  it('forwards the keyset cursor (after) into the /api/search body', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, count: 0, results: [], next_after: null }))
+    const after = { after_updated: '2026-06-14T12:00:00Z', after_id: 'b3' }
+    await searchBlocks({ query: '', after })
+    // The body must carry `after` verbatim so the server resumes the next page;
+    // a wrapper that drops it (W7 stub) re-fetches page 1 → this fails.
+    expect(sentBody(mock).after).toEqual(after)
+  })
+
+  it('omits after on page 1 (no cursor)', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, count: 0, results: [] }))
+    await searchBlocks({ query: '' })
+    expect('after' in sentBody(mock)).toBe(false)
+  })
+
+  it('parses the next_after cursor from the response', async () => {
+    stubFetch(
+      jsonResponse(200, {
+        success: true,
+        count: 1,
+        results: [
+          {
+            id: 'b1',
+            category: 'learnings',
+            tags: [],
+            title: 'T',
+            content_preview: 'p',
+            content_length: 1,
+            scope: 'private',
+            updated_at: '2026-06-14T12:00:00Z',
+            created_at: '2026-06-01T00:00:00Z',
+          },
+        ],
+        next_after: { after_updated: '2026-06-14T12:00:00Z', after_id: 'b1' },
+      }),
+    )
+    const res = await searchBlocks({ query: '' })
+    expect(res.next_after).toEqual({ after_updated: '2026-06-14T12:00:00Z', after_id: 'b1' })
+  })
 })
 
 describe('listMeta', () => {

@@ -529,9 +529,36 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	return b, needsReEmbed, nil
 }
 
+// SearchCursor is the keyset-pagination position for the empty-query
+// (updated_at DESC) browse path (block-workbench W7). It captures the LAST row
+// of the previous page so the next page resumes strictly after it.
+//
+// The browse ORDER BY is `updated_at DESC, id DESC`; updated_at is NOT unique
+// (ties are possible), so id is the mandatory tiebreak. The keyset WHERE is the
+// row-value comparison `(updated_at, id) < ($afterUpdated, $afterId)` — strictly
+// "older than, or same timestamp with a smaller id". A nil *SearchCursor means
+// page 1 (no cursor, unchanged behavior).
+//
+// The cursor is INERT on the FTS (ranked) path: ts_rank_cd is a float
+// expression with ties that would have to be recomputed in the WHERE for a
+// keyset, which is fragile and slow — that path stays LIMIT-only ("top matches;
+// refine the query for more"). SearchBlocks ignores a non-nil cursor when the
+// query is non-empty.
+type SearchCursor struct {
+	// UpdatedAt is the updated_at of the last row returned on the previous page.
+	UpdatedAt time.Time `json:"after_updated"`
+	// ID is that row's id — the tiebreak that makes (updated_at, id) unique.
+	ID string `json:"after_id"`
+}
+
 // SearchBlocks performs a lightweight search with optional FTS, category, and tag filters.
 // Uses precomputed ts_de tsvector for FTS ranking.
-func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool) ([]BlockPreview, error) {
+//
+// after is the keyset-pagination cursor (block-workbench W7): nil = page 1
+// (unchanged). On the empty-query browse path it resumes strictly after the
+// cursor's (updated_at, id); on the FTS path it is ignored (that path is
+// LIMIT-only). Callers that do not paginate pass nil.
+func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor) ([]BlockPreview, error) {
 	limit = ClampLimit(limit, 10, 50)
 
 	whereClauses := []string{"scope = ANY($1::text[])", "NOT is_archived"}
@@ -560,6 +587,19 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 		argIdx++
 	}
 
+	// Keyset cursor (block-workbench W7). Only the empty-query browse path
+	// (ORDER BY updated_at DESC, id DESC) paginates by keyset: resume strictly
+	// after the cursor's (updated_at, id) via the row-value comparison
+	// (updated_at, id) < ($afterUpdated, $afterId) — "older, or same timestamp
+	// with a smaller id". The args are appended AFTER the existing ones (the FTS
+	// orderBy hardcodes the query arg at $2 — never shift it). On the FTS path
+	// the cursor is INERT (LIMIT-only "top matches; refine for more").
+	if after != nil && !hasQuery {
+		whereClauses = append(whereClauses, fmt.Sprintf("(updated_at, id) < ($%d, $%d)", argIdx, argIdx+1))
+		args = append(args, after.UpdatedAt, after.ID)
+		argIdx += 2
+	}
+
 	whereClause := strings.Join(whereClauses, " AND ")
 
 	var selectFields string
@@ -573,7 +613,10 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 				2, 2,
 			)
 		} else {
-			orderBy = `updated_at DESC`
+			// Browse path: id DESC is the MANDATORY tiebreak (updated_at is not
+			// unique) so the keyset cursor (updated_at, id) is a total order —
+			// no row is skipped or repeated across a page boundary (W7).
+			orderBy = `updated_at DESC, id DESC`
 		}
 	} else {
 		selectFields = `id, category, tags, title, scope, sensitivity, content, metadata, created_at, updated_at`
@@ -583,7 +626,10 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 				2, 2,
 			)
 		} else {
-			orderBy = `updated_at DESC`
+			// Browse path: id DESC is the MANDATORY tiebreak (updated_at is not
+			// unique) so the keyset cursor (updated_at, id) is a total order —
+			// no row is skipped or repeated across a page boundary (W7).
+			orderBy = `updated_at DESC, id DESC`
 		}
 	}
 

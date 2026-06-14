@@ -6,7 +6,13 @@
 
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../../lib/api'
-import type { BlocksApi, ListCategoriesResponse, ListMetaResponse } from '../../lib/api/blocks'
+import type {
+  BlocksApi,
+  ListCategoriesResponse,
+  ListMetaResponse,
+  SearchCursor,
+  SearchRequest,
+} from '../../lib/api/blocks'
 import type { BlockDetail, SearchResponse, SearchResult } from '../../lib/graph/api'
 import { defaultFilters } from '../../lib/blocks/filters'
 import { BlocksModel } from './blocks.svelte'
@@ -164,5 +170,82 @@ describe('BlocksModel filters (W2)', () => {
     await m.loadCategories()
     expect(api.calls.some((c) => c.m === 'listCategories')).toBe(true)
     expect(m.categories.map((c) => c.category)).toEqual(['learnings', 'decisions'])
+  })
+})
+
+describe('BlocksModel loadMore (W7)', () => {
+  // A fake that serves a SCRIPTED sequence of search responses (page 1, page 2,
+  // …) and records the `after` cursor of every search call, so the test can
+  // prove the cursor round-trips and the pages append without duplication.
+  function paginatingApi(pages: SearchResponse[]): BlocksApi & { afters: (SearchCursor | undefined)[] } {
+    const afters: (SearchCursor | undefined)[] = []
+    let i = 0
+    return {
+      afters,
+      search: (req: SearchRequest): Promise<SearchResponse> => {
+        afters.push(req.after)
+        const page = pages[Math.min(i, pages.length - 1)]
+        i += 1
+        return Promise.resolve(page)
+      },
+      listMeta: (): Promise<ListMetaResponse> => Promise.resolve({ success: true, blocks: [] }),
+      listCategories: (): Promise<ListCategoriesResponse> =>
+        Promise.resolve({ success: true, categories: [] }),
+      get: (id: string): Promise<{ success: true; block: BlockDetail }> =>
+        Promise.resolve({
+          success: true,
+          block: {
+            id,
+            category: 'learnings',
+            tags: [],
+            title: 't',
+            content: 'c',
+            metadata: null,
+            scope: 'private',
+            created_at: '2026-06-01T00:00:00Z',
+            updated_at: '2026-06-14T00:00:00Z',
+          },
+        }),
+    }
+  }
+
+  const cursor1: SearchCursor = { after_updated: '2026-06-14T10:00:00Z', after_id: 'b2' }
+
+  it('appends the next page, adopts the next cursor, then stops at null', async () => {
+    const api = paginatingApi([
+      // page 1: full window, more to come → next_after set
+      { count: 2, results: [result({ id: 'b1' }), result({ id: 'b2' })], next_after: cursor1 },
+      // page 2: last page → next_after null
+      { count: 1, results: [result({ id: 'b3' })], next_after: null },
+    ])
+    const m = new BlocksModel(api)
+
+    await m.load()
+    expect(m.results.map((r) => r.id)).toEqual(['b1', 'b2'])
+    // page 1 produced a cursor → loadMore is available.
+    expect(m.nextCursor).toEqual(cursor1)
+
+    await m.loadMore()
+    // APPEND, not replace — page 2 is concatenated onto page 1.
+    expect(m.results.map((r) => r.id)).toEqual(['b1', 'b2', 'b3'])
+    // The cursor from page 1 was sent up on the loadMore call.
+    expect(api.afters[1]).toEqual(cursor1)
+    // page 2 was the last page → cursor cleared, loadMore now inert.
+    expect(m.nextCursor).toBeNull()
+
+    const callsBefore = api.afters.length
+    await m.loadMore()
+    expect(api.afters.length).toBe(callsBefore) // no further search call
+    expect(m.results).toHaveLength(3) // unchanged
+  })
+
+  it('newest-first load with no further pages leaves nextCursor null', async () => {
+    const api = paginatingApi([{ count: 1, results: [result({ id: 'b1' })], next_after: null }])
+    const m = new BlocksModel(api)
+    await m.load()
+    expect(m.nextCursor).toBeNull()
+    const before = api.afters.length
+    await m.loadMore() // inert
+    expect(api.afters.length).toBe(before)
   })
 })

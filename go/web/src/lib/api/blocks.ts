@@ -5,9 +5,15 @@
 // from lib/graph/api so W3 shares one type.
 
 import { apiFetch } from '../api'
-import { getBlock, type BlockDetail, type SearchResponse, type SearchResult } from '../graph/api'
+import {
+  getBlock,
+  type BlockDetail,
+  type SearchCursor,
+  type SearchResponse,
+  type SearchResult,
+} from '../graph/api'
 
-export { getBlock, type BlockDetail, type SearchResponse, type SearchResult }
+export { getBlock, type BlockDetail, type SearchCursor, type SearchResponse, type SearchResult }
 
 /**
  * Server hard-clamps POST /api/search limit to 50 (context_search.go:81). The
@@ -25,6 +31,13 @@ export interface SearchRequest {
   /** compact=true → preview + content_length (server default true). */
   compact?: boolean
   limit?: number
+  /**
+   * Keyset cursor for the NEXT page (block-workbench W7) — the {after_updated,
+   * after_id} returned as the previous response's next_after. Omitted on page 1
+   * (unchanged). Only meaningful on the empty-query browse path; the server
+   * ignores it for FTS queries.
+   */
+  after?: SearchCursor
 }
 
 /**
@@ -155,6 +168,10 @@ export function searchBlocks(req: SearchRequest): Promise<SearchResponse> {
   if (req.tags !== undefined) body.tags = req.tags
   if (req.compact !== undefined) body.compact = req.compact
   if (req.limit !== undefined) body.limit = Math.min(req.limit, MAX_SEARCH_LIMIT)
+  // W7 keyset cursor: forward it verbatim so the server resumes the NEXT page
+  // (empty-query browse path only — it ignores the cursor for FTS queries).
+  // Omitted on page 1 (no cursor) → unchanged page-1 body.
+  if (req.after !== undefined) body.after = req.after
   return apiFetch<SearchResponse>('/api/search', {
     method: 'POST',
     body: JSON.stringify(body),
