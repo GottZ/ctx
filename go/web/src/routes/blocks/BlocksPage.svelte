@@ -1,28 +1,42 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import FilterPanel from './FilterPanel.svelte'
+  import { scopeVisible, type BlockFilters } from '../../lib/blocks/filters'
   import { BlocksModel } from './blocks.svelte'
 
-  // All list/search state lives in the injectable model (block-workbench W1).
-  // This component stays thin: a search box, the hit list, the three load
-  // states. Read-only — detail viewing/editing arrive in W3/W4.
+  // All list/search/filter state lives in the injectable model (block-workbench
+  // W1/W2). This component stays thin: a search box, the facet panel, the hit
+  // list, the three load states. Read-only — detail viewing/editing arrive in
+  // W3/W4.
   const model = new BlocksModel()
 
-  // Local input mirror — submitting drives model.search(); clearing it falls
-  // back to model.load() (empty query → newest-first, updated_at DESC).
+  // Local input mirror — submitting commits the query into the one filter
+  // state; clearing it collapses to the empty-query default (newest-first).
   let input = $state('')
 
   onMount(() => {
     void model.load()
+    void model.loadCategories()
   })
+
+  // Distinct scopes present in the loaded results — the client-side scope
+  // chips. Derived from what is visible, never a request param.
+  const scopeOptions = $derived([...new Set(model.results.map((r) => r.scope))].sort())
+
+  // The rendered list, narrowed by the client-side scope facet (the server
+  // never sees a scope param — it gates visibility through the auth key).
+  const visible = $derived(model.results.filter((r) => scopeVisible(r, model.filters)))
 
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault()
-    const q = input.trim()
-    if (q === '') {
-      await model.load()
-    } else {
-      await model.search(q)
-    }
+    await model.setFilters({ ...model.filters, query: input.trim() })
+  }
+
+  async function applyFilters(next: BlockFilters): Promise<void> {
+    // The query lives in the filter state too — keep the search box in sync
+    // when the panel (e.g. its reset button) rewrites it.
+    input = next.query
+    await model.setFilters(next)
   }
 
   /** Per-hit pick — a light hook for the W3 detail viewer (no panel yet). */
@@ -52,6 +66,13 @@
     </button>
   </form>
 
+  <FilterPanel
+    filters={model.filters}
+    categories={model.categories}
+    scopes={scopeOptions}
+    onchange={applyFilters}
+  />
+
   {#if model.status === 'loading'}
     <p class="state" aria-busy="true">loading…</p>
   {:else if model.status === 'error'}
@@ -61,15 +82,19 @@
         <p class="request-id">request {model.loadError.requestId}</p>
       {/if}
     </div>
-  {:else if model.results.length === 0}
+  {:else if visible.length === 0}
     <p class="empty" role="status">
-      {model.query === ''
-        ? 'no blocks visible to this key'
-        : 'no full-text match — words are stemmed, substrings don’t match'}
+      {#if model.results.length > 0}
+        no block in the selected scope — clear the scope filter to see all
+      {:else if model.query === ''}
+        no blocks visible to this key
+      {:else}
+        no full-text match — words are stemmed, substrings don’t match
+      {/if}
     </p>
   {:else}
     <ul class="results">
-      {#each model.results as r (r.id)}
+      {#each visible as r (r.id)}
         <li>
           <button type="button" onclick={() => select(r.id)}>
             <span class="row">

@@ -6,8 +6,9 @@
 
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../../lib/api'
-import type { BlocksApi, ListMetaResponse } from '../../lib/api/blocks'
+import type { BlocksApi, ListCategoriesResponse, ListMetaResponse } from '../../lib/api/blocks'
 import type { BlockDetail, SearchResponse, SearchResult } from '../../lib/graph/api'
+import { defaultFilters } from '../../lib/blocks/filters'
 import { BlocksModel } from './blocks.svelte'
 
 function result(p: Partial<SearchResult> & Pick<SearchResult, 'id'>): SearchResult {
@@ -25,8 +26,10 @@ function result(p: Partial<SearchResult> & Pick<SearchResult, 'id'>): SearchResu
 }
 
 interface Call {
-  m: 'search' | 'listMeta' | 'get'
+  m: 'search' | 'listMeta' | 'listCategories' | 'get'
   query?: string
+  category?: string
+  tags?: string[]
   id?: string
 }
 
@@ -40,7 +43,7 @@ function fakeApi(initial: SearchResult[], fail?: Partial<Record<Call['m'], ApiEr
     calls,
     setResults: (r: SearchResult[]) => (current = r),
     search: (req): Promise<SearchResponse> => {
-      calls.push({ m: 'search', query: req.query })
+      calls.push({ m: 'search', query: req.query, category: req.category, tags: req.tags })
       if (fail?.search) return Promise.reject(fail.search)
       return Promise.resolve({ count: current.length, results: current })
     },
@@ -48,6 +51,17 @@ function fakeApi(initial: SearchResult[], fail?: Partial<Record<Call['m'], ApiEr
       calls.push({ m: 'listMeta' })
       if (fail?.listMeta) return Promise.reject(fail.listMeta)
       return Promise.resolve({ success: true, blocks: [] })
+    },
+    listCategories: (): Promise<ListCategoriesResponse> => {
+      calls.push({ m: 'listCategories' })
+      if (fail?.listCategories) return Promise.reject(fail.listCategories)
+      return Promise.resolve({
+        success: true,
+        categories: [
+          { category: 'learnings', count: 3 },
+          { category: 'decisions', count: 2 },
+        ],
+      })
     },
     get: (id: string): Promise<{ success: true; block: BlockDetail }> => {
       calls.push({ m: 'get', id })
@@ -117,5 +131,38 @@ describe('BlocksModel search', () => {
     await m.search('q')
     expect(m.status).toBe('error')
     expect(m.loadError?.status).toBe(500)
+  })
+})
+
+describe('BlocksModel filters (W2)', () => {
+  it('forwards active category + tags into the search body', async () => {
+    const api = fakeApi([result({ id: 'b1' })])
+    const m = new BlocksModel(api)
+    await m.setFilters({ ...defaultFilters(), query: 'go', category: 'learnings', tags: ['a', 'b'] })
+    const search = api.calls.find((c) => c.m === 'search')
+    expect(search?.query).toBe('go')
+    expect(search?.category).toBe('learnings')
+    expect(search?.tags).toEqual(['a', 'b'])
+    expect(m.status).toBe('ready')
+    expect(m.filters.category).toBe('learnings')
+  })
+
+  it('empty filters behave like W1 (empty query, no category/tags)', async () => {
+    const api = fakeApi([result({ id: 'b1' })])
+    const m = new BlocksModel(api)
+    await m.setFilters(defaultFilters())
+    const search = api.calls.find((c) => c.m === 'search')
+    expect(search?.query).toBe('')
+    // Defaults are omitted from the body — undefined, not '' / [].
+    expect(search?.category).toBeUndefined()
+    expect(search?.tags).toBeUndefined()
+  })
+
+  it('loadCategories fills the facet options', async () => {
+    const api = fakeApi([])
+    const m = new BlocksModel(api)
+    await m.loadCategories()
+    expect(api.calls.some((c) => c.m === 'listCategories')).toBe(true)
+    expect(m.categories.map((c) => c.category)).toEqual(['learnings', 'decisions'])
   })
 })

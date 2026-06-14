@@ -45,10 +45,25 @@ export interface ListMetaResponse {
   blocks: BlockMeta[]
 }
 
+/**
+ * POST /api/manage {action:"list-categories"} row (blocks.go CategoryCount).
+ * Scope-gated (NOT admin) — drives the W2 category facet options.
+ */
+export interface CategoryCount {
+  category: string
+  count: number
+}
+
+export interface ListCategoriesResponse {
+  success: true
+  categories: CategoryCount[]
+}
+
 /** Injected into BlocksModel for testing (constructor-DI, pool.svelte pattern). */
 export interface BlocksApi {
   search: typeof searchBlocks
   listMeta: typeof listMeta
+  listCategories: typeof listCategories
   get: typeof getBlock
 }
 
@@ -72,5 +87,14 @@ export function listMeta(): Promise<ListMetaResponse> {
   return apiFetch<ListMetaResponse>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'list-meta' }),
+  })
+}
+
+/** POST /api/manage {action:"list-categories"} — category facet options (W2). */
+export function listCategories(): Promise<ListCategoriesResponse> {
+  // Scope-gated (NOT admin) — drives the W2 category single-select.
+  return apiFetch<ListCategoriesResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'list-categories' }),
   })
 }

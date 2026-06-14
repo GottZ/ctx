@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { configureApi } from '../api'
-import { MAX_SEARCH_LIMIT, listMeta, searchBlocks } from './blocks'
+import { MAX_SEARCH_LIMIT, listCategories, listMeta, searchBlocks } from './blocks'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -116,5 +116,29 @@ describe('listMeta', () => {
     const res = await listMeta()
     expect(res.blocks).toHaveLength(1)
     expect(res.blocks[0]?.title).toBe('T')
+  })
+})
+
+describe('listCategories', () => {
+  it('calls the manage list-categories action', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, categories: [] }))
+    await listCategories()
+    expect(mock.mock.calls[0]?.[0]).toBe('/api/manage')
+    expect(sentBody(mock)).toEqual({ action: 'list-categories' })
+  })
+
+  it('returns the category counts', async () => {
+    stubFetch(
+      jsonResponse(200, {
+        success: true,
+        categories: [
+          { category: 'learnings', count: 3 },
+          { category: 'decisions', count: 2 },
+        ],
+      }),
+    )
+    const res = await listCategories()
+    expect(res.categories).toHaveLength(2)
+    expect(res.categories[0]).toEqual({ category: 'learnings', count: 3 })
   })
 })
