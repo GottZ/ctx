@@ -6,9 +6,10 @@ import { describe, expect, it } from 'vitest'
 import { RESERVED_SERVER_PREFIXES, areaRoutes, entryRedirect } from './index'
 
 describe('areaRoutes', () => {
-  it('contains the four areas, the backends sub-route and the catch-all', () => {
+  it('contains the five areas, the backends sub-route and the catch-all', () => {
     expect(Object.keys(areaRoutes).sort()).toEqual([
       '*',
+      '/blocks',
       '/chat',
       '/graph',
       '/settings',

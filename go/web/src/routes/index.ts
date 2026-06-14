@@ -20,9 +20,9 @@ export const RESERVED_SERVER_PREFIXES = [
 ] as const
 
 /**
- * The four areas (design 04-§2.1) — lazy per area so Settings/Status/Graph/
- * Chat become separate chunks; F5 (sigma+graphology) and F6 (markdown-it+
- * DOMPurify) only load when entered. All four are live as of F6-C5.
+ * The five areas (design 04-§2.1) — lazy per area so each area is its own
+ * chunk; F5 (sigma+graphology) and F6 (markdown-it+DOMPurify) only load when
+ * entered. /blocks (block-workbench) loads its read client lazily as well.
  */
 export const areaRoutes = {
   '/settings': () => import('./settings/SettingsPage.svelte'),
@@ -32,6 +32,7 @@ export const areaRoutes = {
   '/status': () => import('./status/StatusPage.svelte'),
   '/graph': () => import('./graph/GraphPage.svelte'),
   '/chat': () => import('./chat/ChatPage.svelte'),
+  '/blocks': () => import('./blocks/BlocksPage.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes
 

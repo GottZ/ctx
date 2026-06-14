@@ -12,6 +12,7 @@
     { href: '/settings', label: 'Settings' },
     { href: '/status', label: 'Status' },
     { href: '/graph', label: 'Graph' },
+    { href: '/blocks', label: 'Blocks' },
     { href: '/chat', label: 'Chat' },
   ]
 
