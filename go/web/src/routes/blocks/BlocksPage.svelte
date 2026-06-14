@@ -1,14 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import FilterPanel from './FilterPanel.svelte'
+  import BlockDetail from './BlockDetail.svelte'
   import { scopeVisible, type BlockFilters } from '../../lib/blocks/filters'
   import { BlocksModel } from './blocks.svelte'
+  import { BlockDetailModel } from './detail.svelte'
 
   // All list/search/filter state lives in the injectable model (block-workbench
   // W1/W2). This component stays thin: a search box, the facet panel, the hit
-  // list, the three load states. Read-only — detail viewing/editing arrive in
-  // W3/W4.
+  // list, the three load states. The detail viewer (W3) is a read-only sidebar
+  // panel driven by its own model — editing/delete arrive in W4/W5.
   const model = new BlocksModel()
+  const detail = new BlockDetailModel()
 
   // Local input mirror — submitting commits the query into the one filter
   // state; clearing it collapses to the empty-query default (newest-first).
@@ -39,9 +42,9 @@
     await model.setFilters(next)
   }
 
-  /** Per-hit pick — a light hook for the W3 detail viewer (no panel yet). */
+  /** Per-hit pick — lazy-loads the full block into the W3 detail sidebar. */
   function select(id: string): void {
-    void id
+    void detail.load(id)
   }
 </script>
 
@@ -73,44 +76,52 @@
     onchange={applyFilters}
   />
 
-  {#if model.status === 'loading'}
-    <p class="state" aria-busy="true">loading…</p>
-  {:else if model.status === 'error'}
-    <div class="error" role="alert">
-      <p>{model.loadError?.message}</p>
-      {#if model.loadError?.requestId}
-        <p class="request-id">request {model.loadError.requestId}</p>
+  <div class="workbench">
+    <div class="list">
+      {#if model.status === 'loading'}
+        <p class="state" aria-busy="true">loading…</p>
+      {:else if model.status === 'error'}
+        <div class="error" role="alert">
+          <p>{model.loadError?.message}</p>
+          {#if model.loadError?.requestId}
+            <p class="request-id">request {model.loadError.requestId}</p>
+          {/if}
+        </div>
+      {:else if visible.length === 0}
+        <p class="empty" role="status">
+          {#if model.results.length > 0}
+            no block in the selected scope — clear the scope filter to see all
+          {:else if model.query === ''}
+            no blocks visible to this key
+          {:else}
+            no full-text match — words are stemmed, substrings don’t match
+          {/if}
+        </p>
+      {:else}
+        <ul class="results">
+          {#each visible as r (r.id)}
+            <li>
+              <button type="button" class:active={detail.openId === r.id} onclick={() => select(r.id)}>
+                <span class="row">
+                  <span class="title">{r.title}</span>
+                  <time class="updated" datetime={r.updated_at}>{r.updated_at.slice(0, 10)}</time>
+                </span>
+                <span class="meta">
+                  {r.category} · {r.scope}{r.tags.length > 0 ? ` · ${r.tags.join(', ')}` : ''}
+                </span>
+                <span class="preview">{r.content_preview}</span>
+                <span class="len">{r.content_length} chars</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
       {/if}
     </div>
-  {:else if visible.length === 0}
-    <p class="empty" role="status">
-      {#if model.results.length > 0}
-        no block in the selected scope — clear the scope filter to see all
-      {:else if model.query === ''}
-        no blocks visible to this key
-      {:else}
-        no full-text match — words are stemmed, substrings don’t match
-      {/if}
-    </p>
-  {:else}
-    <ul class="results">
-      {#each visible as r (r.id)}
-        <li>
-          <button type="button" onclick={() => select(r.id)}>
-            <span class="row">
-              <span class="title">{r.title}</span>
-              <time class="updated" datetime={r.updated_at}>{r.updated_at.slice(0, 10)}</time>
-            </span>
-            <span class="meta">
-              {r.category} · {r.scope}{r.tags.length > 0 ? ` · ${r.tags.join(', ')}` : ''}
-            </span>
-            <span class="preview">{r.content_preview}</span>
-            <span class="len">{r.content_length} chars</span>
-          </button>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+
+    {#if detail.openId !== null}
+      <BlockDetail model={detail} />
+    {/if}
+  </div>
 </section>
 
 <style>
@@ -118,6 +129,16 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+  }
+
+  .workbench {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+  .list {
+    flex: 1;
+    min-width: 0;
   }
 
   header {
@@ -200,6 +221,9 @@
   }
   .results button:hover {
     background: var(--surface-2);
+  }
+  .results button.active {
+    background: var(--accent-dim);
   }
 
   .row {
