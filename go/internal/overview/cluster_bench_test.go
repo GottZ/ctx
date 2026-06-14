@@ -404,3 +404,59 @@ func TestOverviewBenchReadScaling(t *testing.T) {
 		fmt.Printf("%-12d %14d %10s %10s %10s  %s\n", nl, approxPairs, benchMS(p50), benchMS(p95), benchMS(mx), note)
 	}
 }
+
+// TestOverviewBenchStructured — F5-W6-W4 GEGENPROBE. ReadScaling/RefreshRead nutzten
+// eine ZUFÄLLIGE Partition → dichtester Supergraph (≈C(n,2) Paare, 500k edge-rows,
+// Read reißt). Diese Gegenprobe misst gegen die GROUND-TRUTH-Community-Partition des
+// STRUKTURIERTEN Korpus (seed-structured.sql: 1000 Communities, 90% intra / 10% inter
+// zu 6 Nachbarn) — was Louvain bei hoher Modularität nahezu findet. Hypothese: der
+// Supergraph ist spärlich (jede Community → ~wenige Nachbarn) → graph_cluster_edge
+// klein → Read << 50ms auch bei node_limit=500. Nur gegen den strukturierten Korpus
+// (sbench_ids); skippt sonst. Diagnostic — never asserts.
+func TestOverviewBenchStructured(t *testing.T) {
+	pool := benchPool(t)
+	ctx := context.Background()
+
+	var hasSbench bool
+	_ = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='sbench_ids')").Scan(&hasSbench)
+	if !hasSbench {
+		t.Skip("kein strukturierter Korpus (sbench_ids fehlt) — .project/bench-graph/seed-structured.sql bauen")
+	}
+
+	// Ground-Truth-Community-Partition: cluster_id = min member uuid je Community
+	// (comm = (rn-1)/1000), exakt die Louvain-cluster_id-Regel. Deterministisch und
+	// unabhängig von der Louvain-Konvergenz (die arm (a) separat misst).
+	if _, err := pool.Exec(ctx, "TRUNCATE graph_cluster_member, graph_cluster_node, graph_cluster_edge"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO graph_cluster_member (block_id, cluster_id)
+		SELECT s.id, (min(s.id::text) OVER (PARTITION BY (s.rn-1)/1000))::uuid
+		FROM sbench_ids s`); err != nil {
+		t.Fatalf("seed ground-truth partition: %v", err)
+	}
+	var members, clusters int
+	_ = pool.QueryRow(ctx, "SELECT count(*), count(DISTINCT cluster_id) FROM graph_cluster_member").Scan(&members, &clusters)
+
+	nodeRows, edgeRows := fillAggregates(t, ctx, pool)
+	fmt.Printf("=== F5-W6-W4 GEGENPROBE: strukturierter Korpus, Ground-Truth-Partition ===\n")
+	fmt.Printf("[seed] %d Member / %d Communities — graph_cluster_node=%d, graph_cluster_edge=%d rows  (Zufalls-Gegenstück: 500311 rows)\n",
+		members, clusters, nodeRows, edgeRows)
+
+	scopes := []string{"private"}
+	fmt.Printf("%-12s %10s %10s %10s  %s\n", "node_limit", "p50", "p95", "max", "note")
+	for _, nl := range []int{50, 100, 200, 500, 1000} {
+		params := store.OverviewParams{MinClusterSize: 1, MinInterWeight: 0, NodeLimit: nl, EdgeLimit: 2000}
+		var last *store.OverviewResult
+		p50, p95, mx := benchMeasure(t, 60, 5, func() error {
+			r, e := store.GraphOverview(ctx, pool, params, scopes)
+			last = r
+			return e
+		})
+		note := fmt.Sprintf("nodes=%d edges=%d", len(last.Nodes), len(last.Edges))
+		if p95 > 50*time.Millisecond {
+			note += "  ← über 50ms"
+		}
+		fmt.Printf("%-12d %10s %10s %10s  %s\n", nl, benchMS(p50), benchMS(p95), benchMS(mx), note)
+	}
+}
