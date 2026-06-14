@@ -22,6 +22,7 @@ import (
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/overview"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -96,7 +97,7 @@ type dreamCycleFunc func(ctx context.Context, pool *pgxpool.Pool, r *dream.Route
 // Reacts to LISTEN/NOTIFY events via pgxlisten and uses time-based fallbacks.
 type Scheduler struct {
 	pool          *pgxpool.Pool
-	cfg           *config.Store // hot config: one Snapshot per cycle/run
+	cfg           *config.Store  // hot config: one Snapshot per cycle/run
 	backendPool   *backends.Pool // F3 pool; listener reloads it on context_backends NOTIFYs
 	startup       StartupConfig
 	runCycle      dreamCycleFunc
@@ -185,9 +186,9 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 		cfg:         store,
 		backendPool: backendPool,
 		startup:     startup,
-		runCycle: dream.RunDreamCycle,
-		classify: llm.ClassifyBlockBool,
-		runDone:  make(chan struct{}),
+		runCycle:    dream.RunDreamCycle,
+		classify:    llm.ClassifyBlockBool,
+		runDone:     make(chan struct{}),
 	}
 }
 
@@ -292,6 +293,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// timer-loop). Decoupled from runDreamLoop so a busy dream-cycle never
 	// blocks the daily-summary cadence.
 	go s.runDailySynthesis(ctx)
+	go s.runOverviewRebuild(ctx)
 
 	for {
 		select {
@@ -402,6 +404,70 @@ func timeUntilNextDailySynthesis(now time.Time) time.Duration {
 		target = target.Add(24 * time.Hour)
 	}
 	return target.Sub(now)
+}
+
+// runOverviewRebuild recomputes the F5-W6 cluster supergraph (gonum Louvain,
+// design 07-graph-overview.md). Own goroutine with its own timeout — never in a
+// ticker arm (Louvain @1M takes seconds-minutes and would block guard/digest).
+// LLM-free, so no VRAM/OOM concern. Interval is hot-reloadable; an initial build
+// runs only when the tables were never populated (fresh deploy), not on every
+// restart.
+func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in overview rebuild", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+
+	if s.overviewNeverBuilt(ctx) {
+		s.rebuildOverviewOnce(ctx)
+	}
+
+	for {
+		interval := s.cfg.Snapshot().GraphOverview.RebuildInterval
+		if interval <= 0 {
+			interval = 6 * time.Hour
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+		s.rebuildOverviewOnce(ctx)
+	}
+}
+
+// overviewNeverBuilt reports whether the overview has never been computed (empty
+// meta row) — the one case where a synchronous boot-time build is warranted.
+func (s *Scheduler) overviewNeverBuilt(ctx context.Context) bool {
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM graph_overview_meta`).Scan(&n); err != nil {
+		slog.Error("scheduler: overview meta check failed", "error", err)
+		return false
+	}
+	return n == 0
+}
+
+// rebuildOverviewOnce runs a single rebuild if enabled. The Enabled gate lives
+// here (not the loop) so a hot toggle takes effect on the next tick.
+func (s *Scheduler) rebuildOverviewOnce(ctx context.Context) {
+	cfg := s.cfg.Snapshot()
+	if !cfg.GraphOverview.Enabled {
+		return
+	}
+	start := time.Now()
+	stats, err := overview.Rebuild(ctx, s.pool, cfg.GraphOverview.Resolution)
+	if err != nil {
+		slog.Error("scheduler: overview rebuild failed", "error", err)
+		return
+	}
+	if stats.Skipped {
+		return
+	}
+	slog.Info("scheduler: overview rebuild complete",
+		"clusters", stats.ClusterCount, "nodes", stats.NodeCount,
+		"edge_rows", stats.EdgeRows, "modularity", stats.Modularity,
+		"elapsed", time.Since(start))
 }
 
 // runEmbedCacheEviction prunes the embed cache on a fixed interval. Combines TTL

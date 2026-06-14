@@ -64,19 +64,20 @@ type Hours float64
 // generation; consumers take one snapshot per operation and pass values down
 // as parameters.
 type Config struct {
-	Server    ServerConfig
-	Chat      ChatConfig
-	Fallback  FallbackConfig
-	Embed     EmbedConfig
-	Dream     DreamConfig
-	Rerank    RerankConfig
-	Graph     GraphConfig
-	Query     QueryConfig
-	Scheduler SchedulerConfig
-	Pool      PoolConfig
-	Events    EventsConfig
-	LLMLog    LLMLogConfig
-	WebChat   WebChatConfig
+	Server        ServerConfig
+	Chat          ChatConfig
+	Fallback      FallbackConfig
+	Embed         EmbedConfig
+	Dream         DreamConfig
+	Rerank        RerankConfig
+	Graph         GraphConfig
+	GraphOverview GraphOverviewConfig
+	Query         QueryConfig
+	Scheduler     SchedulerConfig
+	Pool          PoolConfig
+	Events        EventsConfig
+	LLMLog        LLMLogConfig
+	WebChat       WebChatConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -195,6 +196,18 @@ type GraphConfig struct {
 	WeightCausal           float64 `key:"graph.weight_causal" env:"CTX_GRAPH_EXPAND_WEIGHT_CAUSAL" default:"0.9" mut:"hot"`
 	WeightRecurrent        float64 `key:"graph.weight_recurrent" env:"CTX_GRAPH_EXPAND_WEIGHT_RECURRENT" default:"1.0" mut:"hot"`
 	NewPlacementFrac       float64 `key:"graph.new_placement_frac" env:"CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC" default:"0.6" mut:"hot"`
+}
+
+// GraphOverviewConfig is the F5-W6 landkarte rebuild job (precomputed Louvain
+// cluster supergraph, design 07-graph-overview.md). Distinct from GraphConfig
+// (the RRF query-time 1-hop expansion) — same graph domain, separate surface.
+// The rebuild runs offline in the scheduler; the read endpoint (W2) gates on
+// Enabled too. RebuildInterval default is seconds (6h), like the other
+// duration keys.
+type GraphOverviewConfig struct {
+	Enabled         bool          `key:"graph_overview.enabled" env:"CTX_GRAPH_OVERVIEW_ENABLED" default:"false" mut:"hot"`
+	RebuildInterval time.Duration `key:"graph_overview.rebuild_interval" env:"CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL" default:"21600" mut:"hot"`
+	Resolution      float64       `key:"graph_overview.resolution" env:"CTX_GRAPH_OVERVIEW_RESOLUTION" default:"1.0" mut:"hot"`
 }
 
 // QueryConfig is the query-path tuning surface: synthesis thresholds, prompt

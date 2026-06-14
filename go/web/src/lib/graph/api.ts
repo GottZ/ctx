@@ -98,3 +98,52 @@ export function getBlock(id: string): Promise<{ success: true; block: BlockDetai
     body: JSON.stringify({ action: 'get', id }),
   })
 }
+
+// Source: go/internal/handler/overview.go (overviewResponse), wire format
+// pinned by the §3.1 example + handler golden test. The cluster supergraph
+// "landkarte": `cluster` is a per-request ordinal (the internal cluster_id is
+// NEVER on the wire — existence oracle, design 07-§6.1); edges are local
+// ordinal tuples [src, dst, link_count, weight].
+export interface OverviewResponse {
+  success: true
+  params: Record<string, unknown>
+  nodes: OverviewNode[]
+  edges: [src: number, dst: number, link_count: number, weight: number][]
+  stats: {
+    nodes: number
+    edges: number
+    truncated: boolean
+    /** Last rebuild timestamp; null = never built. */
+    computed_at: string | null
+    elapsed_ms: number
+  }
+}
+
+export interface OverviewNode {
+  /** Per-request ordinal (NOT the internal cluster_id). */
+  cluster: number
+  /** Visible member count (scope-pure, design 07-§2). */
+  size: number
+  top_categories: string[]
+  repr_id: string
+  repr_title: string
+  scope_mix: string[]
+}
+
+export interface OverviewQuery {
+  min_cluster_size?: number
+  min_inter_cluster_weight?: number
+  node_limit?: number
+  edge_limit?: number
+}
+
+export function fetchOverview(query: OverviewQuery = {}): Promise<OverviewResponse> {
+  const params = new URLSearchParams()
+  if (query.min_cluster_size !== undefined) params.set('min_cluster_size', String(query.min_cluster_size))
+  if (query.min_inter_cluster_weight !== undefined)
+    params.set('min_inter_cluster_weight', String(query.min_inter_cluster_weight))
+  if (query.node_limit !== undefined) params.set('node_limit', String(query.node_limit))
+  if (query.edge_limit !== undefined) params.set('edge_limit', String(query.edge_limit))
+  const qs = params.toString()
+  return apiFetch<OverviewResponse>(`/api/graph/overview${qs ? `?${qs}` : ''}`)
+}

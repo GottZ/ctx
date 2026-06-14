@@ -52,6 +52,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	storeH := handler.NewStoreHandler(pool, cfgStore)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
 	graphH := handler.NewGraphHandler(pool, cfgStore)
+	overviewH := handler.NewGraphOverviewHandler(pool, cfgStore)
 	// gamingReload re-builds the config snapshot from context_settings after a
 	// gaming-mode write (F3-P6), so the toggle hits the next chain without a
 	// restart (same path PUT /api/settings uses).
@@ -105,6 +106,8 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Post("/api/search", searchH.HandleSearch)
 		// Graph — scope-filtered k-hop ego subgraph (read-only, no LLM)
 		r.Get("/api/graph/ego", graphH.HandleEgo)
+		// Graph overview — scope-pure Louvain cluster supergraph (F5-W6, gated)
+		r.Get("/api/graph/overview", overviewH.HandleOverview)
 		// Whoami — key identity for the SPA login gate (F4-W3)
 		r.Get("/api/whoami", whoamiH.HandleWhoami)
 		// Manage — CRUD + Guard API

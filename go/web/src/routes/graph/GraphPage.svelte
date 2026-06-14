@@ -8,6 +8,7 @@
   import DetailSidebar from './DetailSidebar.svelte'
   import FilterPanel from './FilterPanel.svelte'
   import GraphView from './GraphView.svelte'
+  import OverviewMap from './OverviewMap.svelte'
   import SearchBox from './SearchBox.svelte'
 
   // ONE graphology instance per page visit = single source of truth
@@ -92,14 +93,24 @@
       busy = false
     }
   }
+
+  /** Back to the cluster map (clears the focus; the ego graph stays in memory). */
+  function backToOverview(): void {
+    focus = null
+    selected = null
+    error = null
+    const url = new URL(location.href)
+    url.searchParams.delete('focus')
+    history.replaceState(null, '', url)
+  }
 </script>
 
 <section class="area">
   <header>
     <h1>Graph</h1>
     <p class="sub">
-      dream-link ego networks — search a block, click a hit to focus; click a node to re-focus
-      (read-only, no LLM touched)
+      dream-link graph — start from the cluster map or search a block; click to focus, double-click
+      a node to expand (read-only, no LLM touched)
     </p>
   </header>
 
@@ -117,6 +128,7 @@
   {#if focus !== null}
     <FilterPanel {filters} categories={loadedCategories} onchange={(next) => (filters = next)} />
     <div class="meta-row">
+      <button class="back" type="button" onclick={backToOverview}>← map</button>
       <code class="focus" title="focused block">{focus}</code>
       {#if busy}
         <span class="loading" aria-busy="true">loading…</span>
@@ -148,7 +160,7 @@
     </div>
     <p class="hint">click a node for details · double-click to expand (+1 hop) · “· +N” = links not loaded yet</p>
   {:else}
-    <p class="hint">no focus yet — search above or open a deep link like <code>/graph?focus=&lt;uuid&gt;</code></p>
+    <OverviewMap onpick={(id) => void setFocus(id)} />
   {/if}
 </section>
 
@@ -201,6 +213,18 @@
   }
   .focus {
     font-size: 0.75rem;
+  }
+  .back {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-0);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0.15rem 0.55rem;
+  }
+  .back:hover {
+    border-color: var(--text-dim);
   }
   .loading {
     color: var(--text-faint);

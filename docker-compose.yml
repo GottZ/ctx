@@ -98,6 +98,14 @@ services:
       CTX_GRAPH_EXPAND_WEIGHT_CAUSAL: ${CTX_GRAPH_EXPAND_WEIGHT_CAUSAL:-0.9}
       CTX_GRAPH_EXPAND_WEIGHT_RECURRENT: ${CTX_GRAPH_EXPAND_WEIGHT_RECURRENT:-1.0}
       CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC: ${CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC:-0.6}
+      # Graph overview "landkarte" (F5-W6): the Louvain cluster-supergraph rebuild
+      # job (gonum, offline in the scheduler) + GET /api/graph/overview. ENABLED
+      # gates BOTH the job and the endpoint (off ⇒ 404). REBUILD_INTERVAL takes
+      # seconds (default 6h); RESOLUTION is the Louvain γ (higher ⇒ more, smaller
+      # clusters). First build runs at boot when ENABLED and the tables are empty.
+      CTX_GRAPH_OVERVIEW_ENABLED: ${CTX_GRAPH_OVERVIEW_ENABLED:-false}
+      CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL: ${CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL:-21600}
+      CTX_GRAPH_OVERVIEW_RESOLUTION: ${CTX_GRAPH_OVERVIEW_RESOLUTION:-1.0}
       CTX_RATE_LIMIT_WRITE: ${CTX_RATE_LIMIT_WRITE:-100}
       CTX_RATE_LIMIT_READ: ${CTX_RATE_LIMIT_READ:-0}
       CTX_TIMEZONE: ${CTX_TIMEZONE:-}

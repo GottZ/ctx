@@ -321,6 +321,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST /api/store` | Upsert (embedding async via scheduler). Optional `sensitivity` (`credentials`\|`personal`\|`internal`\|`public`) classifies the block manually (`sensitivity_source='manual'`); absent ⇒ settings key `pool.default_block_sensitivity` (fail-closed `credentials`). On an upsert conflict an explicit value applies upgrade-only — downgrades go through `manage update` with `confirm_sensitivity_downgrade`. A credentials pattern in the content forces `credentials` upgrade-only regardless of the requested level (G40 detector, `sensitivity_source='pattern'`) |
 | `POST /api/search` | Lightweight search (no LLM) |
 | `GET /api/graph/ego` | Scope-filtered k-hop ego subgraph over dream links (read-only, no LLM — see [Graph API](#graph-api)) |
+| `GET /api/graph/overview` | Scope-pure Louvain cluster supergraph ("landkarte"); reads precomputed scope-partitioned aggregates, gated on `graph_overview.enabled` (off → 404). Read-only, no LLM (see [Graph API](#graph-api)) |
 | `GET /api/whoami` | Calling key's identity: `label`, `home_scope`, `read_scopes`, `admin` tier flag — the SPA login gate probes it and derives its read-only degradation from `admin` |
 | `POST /api/manage` | CRUD, Guard API, stats, API-key management (`api-key-create` requires `home_scope`; key/MCP-client management and mutating `dream-mode` require an **admin key** since 052 — see Admin tier) |
 | `GET\|PUT\|DELETE /api/settings[/{key}]` | Runtime config overrides, **admin-gated incl. reads** (see [Settings API](#settings-api)) |
@@ -363,6 +364,25 @@ GET /api/graph/ego?block=<uuid>&hops=2&per_node_cap=25&limit=500
 Out-of-range values are a `400`, never silently clamped. Response: `nodes` (id, title capped at 120 chars, category, scope, visible `degree` — capped at 201, rendered "200+" — and `hop`), `edges` as compact index tuples `[srcIdx, dstIdx, relIdx, confidence]` into `nodes`/`rels`, and `stats` (`nodes`, `edges`, `truncated`, `elapsed_ms`). The payload never contains block `content` (load it lazily via `manage get`).
 
 Security semantics: the visibility triple (not archived, not system-meta, scope readable by the key) is applied inside every hop **and** inside the per-node cap legs — a node reachable only through a foreign private bridge is never delivered, and invisible edges never consume cap slots. `degree` counts only visible neighbors (scan budget 1000 raw edges/direction). "Does not exist" and "not visible" answer with an identical `404` (no existence oracle), and only successful calls write an access-log row (`action='graph'`, `block_id=NULL` — graph browsing never feeds access-count ranking).
+
+#### Overview (cluster "landkarte")
+
+`GET /api/graph/overview` returns the cluster supergraph: a few hundred meta-nodes (precomputed Louvain communities over the dream-link graph) with `size`, `top_categories`, a representative block, and aggregated inter-cluster meta-edges. Click a meta-node → drill into its representative's ego net (`GET /api/graph/ego`). The Louvain rebuild runs offline in the scheduler (`internal/overview`, gonum); the endpoint only reads precomputed tables.
+
+```
+GET /api/graph/overview?min_cluster_size=1&min_inter_cluster_weight=0&node_limit=500&edge_limit=2000
+```
+
+| Param | Default | Range | Meaning |
+|-------|---------|-------|---------|
+| `min_cluster_size` | 1 | ≥1 | hide meta-nodes whose visible size is below this |
+| `min_inter_cluster_weight` | 0 | ≥0 | hide meta-edges below this aggregated weight |
+| `node_limit` | 500 | 1–2000 | max meta-nodes (largest first) |
+| `edge_limit` | 2000 | 1–20000 | max meta-edges (strongest first) |
+
+Response: `nodes` (`cluster` ordinal, `size`, `top_categories`, `repr_id`/`repr_title`, `scope_mix`), `edges` as compact tuples `[srcOrdinal, dstOrdinal, link_count, weight]`, and `stats` (`computed_at` = last rebuild, `null` if never built). The feature is gated on the hot setting `graph_overview.enabled` (default off → `404`).
+
+Security semantics (the solved scope-count-leak, [design 07](.project/plan-web-2026-06-10/design/07-graph-overview.md)): aggregates are **scope-partitioned** — each precomputed row belongs to exactly one scope (nodes) or scope-pair (edges), and a request sums only rows whose scope(s) lie entirely within the caller's `read_scopes` (edges need **both** endpoint scopes visible, like induced edges). No global total is ever exposed, so a private member count cannot be recovered by difference. The internal `cluster_id` (the smallest member UUID, scope-agnostic) is **never** emitted — clients see a per-request ordinal, so the identifier itself is not an existence oracle over foreign blocks. Like the ego endpoint, only successful calls write an access-log row (`action='graph-overview'`, `block_id=NULL`).
 
 ### Settings API
 

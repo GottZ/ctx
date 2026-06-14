@@ -12,6 +12,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
+	gonum.org/v1/gonum v0.17.0
 )
 
 require (
