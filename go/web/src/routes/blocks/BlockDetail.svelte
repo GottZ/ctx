@@ -1,14 +1,53 @@
 <script lang="ts">
   import type { BlockDetailModel } from './detail.svelte'
+  import type { BlockDeleteModel } from './delete.svelte'
 
-  // Detail panel (block-workbench W3 read; W4 adds an Edit action). The model
-  // owns the lazy getBlock load + status; this component is a thin sidebar
-  // mirroring the graph DetailSidebar: a meta-<dl>, the full content as a TEXT
-  // NODE (never {@html} — repo XSS convention), an "open in graph" deep-link
-  // and a close button. The Edit action is the page's callback — only passed
-  // when the block is editable (canEdit: scope === home_scope), so a foreign-
-  // scope (read-only) block simply has no edit affordance.
-  let { model, onedit }: { model: BlockDetailModel; onedit?: () => void } = $props()
+  // Detail panel (block-workbench W3 read; W4 adds an Edit action; W5 a Delete
+  // action). The model owns the lazy getBlock load + status; this component is a
+  // thin sidebar mirroring the graph DetailSidebar: a meta-<dl>, the full content
+  // as a TEXT NODE (never {@html} — repo XSS convention), an "open in graph"
+  // deep-link and a close button. Edit + Delete are page-supplied callbacks —
+  // only passed when the block is editable (canEdit: scope === home_scope), so a
+  // foreign-scope (read-only) block has neither affordance. Delete goes through a
+  // native <dialog>+showModal confirm gate (no UI lib — the BackendDialog/
+  // BlockDialog pattern); the destructive call lives in the injected
+  // BlockDeleteModel.
+  let {
+    model,
+    onedit,
+    deleteModel,
+  }: { model: BlockDetailModel; onedit?: () => void; deleteModel?: BlockDeleteModel } = $props()
+
+  // The confirm dialog is mounted lazily (only while confirming) so showModal()
+  // runs on its own onMount — exactly the BlockDialog mount pattern.
+  let confirming = $state(false)
+  let confirmEl = $state<HTMLDialogElement | null>(null)
+
+  function openConfirm(): void {
+    if (deleteModel) deleteModel.error = null
+    confirming = true
+  }
+
+  // Bind callback: showModal as soon as the <dialog> is in the DOM (the lazy
+  // {#if} mounts it on demand, so this fires once per open).
+  function mountConfirm(el: HTMLDialogElement): void {
+    confirmEl = el
+    el.showModal()
+  }
+
+  async function confirmDelete(id: string): Promise<void> {
+    const ok = await deleteModel?.remove(id)
+    // On success the page closes the panel (model.close); keep the dialog up on
+    // failure so model.error stays visible next to the still-open block.
+    if (ok) {
+      confirmEl?.close()
+      confirming = false
+    }
+  }
+
+  function cancelConfirm(): void {
+    confirmEl?.close()
+  }
 </script>
 
 <aside class="sidebar" aria-label="block details">
@@ -49,11 +88,35 @@
         {#if onedit}
           <button type="button" class="edit" onclick={onedit}>Edit</button>
         {/if}
+        {#if deleteModel}
+          <button type="button" class="del" onclick={openConfirm}>Delete</button>
+        {/if}
       </div>
     {/if}
 
     <!-- Always a text node, never {@html} — repo XSS convention (DetailSidebar). -->
     <pre class="content">{b.content}</pre>
+  {/if}
+
+  {#if confirming && deleteModel}
+    {@const id = model.openId ?? ''}
+    <!-- Destructive confirm gate — native <dialog>+showModal, no UI lib (the
+         BackendDialog/BlockDialog pattern). The model holds no dialog state. -->
+    <dialog use:mountConfirm onclose={() => (confirming = false)} class="confirm-dialog">
+      <div class="confirm-body">
+        <h3>Delete block</h3>
+        <p class="confirm-text">Delete this block? This cannot be undone.</p>
+        {#if deleteModel.error}
+          <p class="problem error" role="alert">{deleteModel.error}</p>
+        {/if}
+      </div>
+      <div class="actions">
+        <button type="button" class="ghost" disabled={deleteModel.busy} onclick={cancelConfirm}>Cancel</button>
+        <button type="button" class="danger" disabled={deleteModel.busy} onclick={() => void confirmDelete(id)}>
+          {deleteModel.busy ? 'deleting…' : 'Delete'}
+        </button>
+      </div>
+    </dialog>
   {/if}
 </aside>
 
@@ -121,9 +184,64 @@
     font-size: 0.8rem;
     color: var(--accent);
   }
-  .actions .edit {
+  .actions .edit,
+  .actions .del {
     font-size: 0.78rem;
     padding: var(--space-1) var(--space-2);
+  }
+  .actions .del {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+
+  .confirm-dialog {
+    width: min(24rem, calc(100vw - 2rem));
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-1);
+    color: var(--text);
+  }
+  .confirm-dialog::backdrop {
+    background: rgb(0 0 0 / 0.55);
+  }
+  .confirm-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+  }
+  .confirm-body h3 {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+  .confirm-text {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+  .confirm-dialog .actions {
+    justify-content: flex-end;
+    border-top: 1px solid var(--border);
+    padding: var(--space-2) var(--space-3);
+  }
+  button.ghost {
+    background: transparent;
+  }
+  button.danger {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .problem.error {
+    margin: 0;
+    font-size: 0.78rem;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    background: var(--danger-dim);
   }
 
   .state {

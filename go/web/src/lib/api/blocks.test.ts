@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { configureApi } from '../api'
-import { MAX_SEARCH_LIMIT, listCategories, listMeta, searchBlocks, storeBlock, updateBlock } from './blocks'
+import { MAX_SEARCH_LIMIT, deleteBlock, listCategories, listMeta, searchBlocks, storeBlock, updateBlock } from './blocks'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -185,5 +185,42 @@ describe('updateBlock', () => {
     await updateBlock('b1', { sensitivity: 'internal', confirm_sensitivity_downgrade: true })
     const body = sentBody(mock) as { data: Record<string, unknown> }
     expect(body.data).toEqual({ sensitivity: 'internal', confirm_sensitivity_downgrade: true })
+  })
+})
+
+describe('deleteBlock', () => {
+  it('POSTs the manage delete action with the id', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, {
+        success: true,
+        deleted: { id: 'b1', category: 'learnings', title: 'T', scope: 'private', created_at: 't', updated_at: 't' },
+      }),
+    )
+    await deleteBlock('b1')
+    expect(mock.mock.calls[0]?.[0]).toBe('/api/manage')
+    const init = mock.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    // Exactly {action:'delete', id} — no data payload (mirrors the handler shape).
+    expect(sentBody(mock)).toEqual({ action: 'delete', id: 'b1' })
+  })
+
+  it('returns the deleted block envelope', async () => {
+    stubFetch(
+      jsonResponse(200, {
+        success: true,
+        deleted: { id: 'b9', category: 'reference', title: 'gone', scope: 'private', created_at: 't', updated_at: 't' },
+      }),
+    )
+    const res = await deleteBlock('b9')
+    expect(res.deleted.id).toBe('b9')
+    expect(res.deleted.title).toBe('gone')
+  })
+
+  it('rejects the 200 {success:false} not-found envelope as ApiError', async () => {
+    // handleDelete answers HTTP 200 {success:false,"Block not found"} for a
+    // block the key cannot delete (not in HomeScope / already archived); apiFetch
+    // rejects that envelope. (No referenced_by path exists for block delete.)
+    stubFetch(jsonResponse(200, { success: false, error: 'Block not found' }))
+    await expect(deleteBlock('missing')).rejects.toThrow('Block not found')
   })
 })

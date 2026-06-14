@@ -7,6 +7,7 @@
   import { BlocksModel } from './blocks.svelte'
   import { BlockDetailModel } from './detail.svelte'
   import { BlockEditModel, type EditMode } from './edit.svelte'
+  import { BlockDeleteModel } from './delete.svelte'
   import { canEdit, type BlockDraft } from '../../lib/blocks/edit'
   import { session } from '../../lib/auth.svelte'
 
@@ -29,6 +30,15 @@
     await model.setFilters(model.filters)
     if (detail.openId !== null) await detail.load(detail.openId)
   })
+
+  // Delete (W5): on success the panel closes (the block is gone) and the list
+  // reloads — no detail.load, the block no longer exists. close = detail.close
+  // (panel away), reload = re-run the list with the current filters.
+  const deleteModel = new BlockDeleteModel(
+    undefined,
+    () => model.setFilters(model.filters),
+    () => detail.close(),
+  )
 
   // The dialog is mounted only while editing; its mode + seed snapshot are held
   // here. `editId` is the FULL block UUID (the server resolves ids in HomeScope
@@ -174,7 +184,11 @@
     </div>
 
     {#if detail.openId !== null}
-      <BlockDetail model={detail} onedit={editable ? openEdit : undefined} />
+      <BlockDetail
+        model={detail}
+        onedit={editable ? openEdit : undefined}
+        deleteModel={editable ? deleteModel : undefined}
+      />
     {/if}
   </div>
 </section>

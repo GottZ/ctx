@@ -113,10 +113,36 @@ export interface UpdateBlockResponse {
   block: BlockDetail
 }
 
+/**
+ * POST /api/manage {action:"delete"} success envelope (context_manage.go
+ * handleDelete). Delete is a SOFT delete (store.DeleteBlock sets is_archived) —
+ * the returned `deleted` is the trimmed block (id/category/title/scope/dates,
+ * no content). The only failure shapes are 400 (missing id / prefix too short),
+ * 409 ambiguous-prefix (with `matches`) and the 200 {success:false} not-found
+ * envelope — all rejected as ApiError by apiFetch. There is NO referenced_by /
+ * FK-conflict path (that is the SECRET delete; a block delete has none).
+ */
+export interface DeleteBlockResponse {
+  success: true
+  deleted: {
+    id: string
+    category: string
+    title: string
+    scope: string
+    created_at: string
+    updated_at: string
+  }
+}
+
 /** Injected into the W4 edit model (constructor-DI, pool.svelte pattern). */
 export interface BlockWriteApi {
   store: typeof storeBlock
   update: typeof updateBlock
+}
+
+/** Injected into the W5 delete model (constructor-DI, pool.svelte pattern). */
+export interface BlockDeleteApi {
+  del: typeof deleteBlock
 }
 
 export function searchBlocks(req: SearchRequest): Promise<SearchResponse> {
@@ -169,5 +195,19 @@ export function updateBlock(id: string, data: UpdateBlockData): Promise<UpdateBl
   return apiFetch<UpdateBlockResponse>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'update', id, data }),
+  })
+}
+
+/**
+ * POST /api/manage {action:"delete", id} — soft-delete a block. The body is
+ * EXACTLY {action:'delete', id} (no data payload — handleDelete reads only the
+ * id). `id` is the FULL block UUID (the server resolves ids in HomeScope only,
+ * so a foreign-scope block is not deletable). apiFetch rejects the 400/409 and
+ * the 200 {success:false} not-found envelope as ApiError.
+ */
+export function deleteBlock(id: string): Promise<DeleteBlockResponse> {
+  return apiFetch<DeleteBlockResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'delete', id }),
   })
 }
