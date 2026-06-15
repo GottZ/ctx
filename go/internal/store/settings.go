@@ -59,6 +59,51 @@ func LoadSettingOverrides(ctx context.Context, pool *pgxpool.Pool, scope string)
 	return overrides, rows.Err()
 }
 
+// LoadSettingOverridesMulti returns overrides for several scopes in one query,
+// ordered by key and then by each scope's position in the input slice — the
+// LAST scope listed wins per key. For {GlobalScope, tenant} that means tenant
+// beats _global; array_position gives a total order over ANY number of scopes,
+// so a future caller resolving across >2 scopes stays deterministic regardless
+// of row order. The caller still materializes the precedence in Go (a later
+// wave); this ORDER BY is the defensive safeguard, the index-backed read path
+// the foundation. No consumer yet (additive next to LoadSettingOverrides, which
+// stays the boot-time _global path).
+//
+// Fail-closed (mirrors rrf.Search empty-scopes, auth-scope §6.2): an empty
+// slice or any empty element is rejected — an unscoped scope = ANY('{}') would
+// silently match nothing instead of erroring.
+func LoadSettingOverridesMulti(ctx context.Context, pool *pgxpool.Pool, scopes []string) ([]SettingOverride, error) {
+	if len(scopes) == 0 {
+		return nil, fmt.Errorf("settings: at least one scope is required")
+	}
+	for _, s := range scopes {
+		if s == "" {
+			return nil, fmt.Errorf("settings: empty scope is not allowed")
+		}
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT key, scope, value, updated_at, updated_by::text
+		 FROM context_settings
+		 WHERE scope = ANY($1::text[])
+		 ORDER BY key, array_position($1::text[], scope) DESC`,
+		scopes)
+	if err != nil {
+		return nil, fmt.Errorf("settings: load overrides multi: %w", err)
+	}
+	defer rows.Close()
+
+	var overrides []SettingOverride
+	for rows.Next() {
+		var o SettingOverride
+		if err := rows.Scan(&o.Key, &o.Scope, &o.Value, &o.UpdatedAt, &o.UpdatedBy); err != nil {
+			return nil, fmt.Errorf("settings: scan override: %w", err)
+		}
+		overrides = append(overrides, o)
+	}
+	return overrides, rows.Err()
+}
+
 // SettingAudit is one context_settings_audit row of entity_type='setting',
 // shaped for the GET /api/settings/{key} history. Values are never sensitive
 // for settings rows: the W5 secret_ref gate keeps plaintext out of the table
