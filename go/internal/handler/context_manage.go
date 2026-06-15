@@ -120,6 +120,8 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchBackendAction(w, r, authResult, req)
 	case "api-key-create", "api-key-list", "api-key-delete":
 		h.dispatchAPIKeyAction(w, r, req)
+	case "tenant-create", "tenant-list", "tenant-get", "tenant-update":
+		h.dispatchTenantAction(w, r, authResult, req)
 	case "blocks-audit-start", "blocks-audit-status", "blocks-classify-start", "blocks-classify-status":
 		h.dispatchBlocksAction(w, r, req)
 	default:
@@ -191,7 +193,13 @@ func actionRequiresAdmin(req manageRequest) bool {
 		// blocks-classify-* in full (G40): a corpus-wide mutation (even if
 		// upgrade-only) and the status/samples disclose block titles and the
 		// classification topology — same opsec surface as the audit.
-		"blocks-classify-start", "blocks-classify-status":
+		"blocks-classify-start", "blocks-classify-status",
+		// tenant-* lifecycle (MT T05a, Achse 01): create/list/get/update are
+		// server-admin actions — the list discloses tenant topology, create/update
+		// mutate the owner register (suspend = a system-wide access cut at the next
+		// auth via the 060 ctx_auth gate). Per-tenant-admin scoping is Achse 05
+		// (T25); until then these are server is_admin only.
+		"tenant-create", "tenant-list", "tenant-get", "tenant-update":
 		return true
 	case "dream-mode":
 		return isDreamModeMutation(req)
