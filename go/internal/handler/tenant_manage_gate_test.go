@@ -92,3 +92,56 @@ func TestTenantCreateReservedSlug(t *testing.T) {
 		t.Fatalf("tenant-create slug=' _global' (leading space): status %d, want 400 (no whitespace bypass)", rec.Code)
 	}
 }
+
+// TestTenantGrantActionsRequireAdmin (MT T17, 02-V4): the cross-tenant grant
+// actions answer 403 to a valid non-admin key — they share the tenant-* admin
+// gate (actionRequiresAdmin). Probed against a nil store pool: the gate fires
+// before dispatch, so the store is never reached.
+func TestTenantGrantActionsRequireAdmin(t *testing.T) {
+	for _, action := range []string{"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete"} {
+		rec := manageReqWithPool(t, nonAdminAR(), nil, map[string]any{
+			"action": action, "id": "00000000-0000-0000-0000-0000000d3fa0",
+			"data": map[string]any{"grantee_tenant": "00000000-0000-0000-0000-0000000d3fa0", "granted_scope": "shared"},
+		})
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s with non-admin key: status %d, want 403", action, rec.Code)
+		}
+	}
+}
+
+// TestTenantGrantCreateReservedScope (MT T17): tenant-grant-create with a
+// '_'-prefixed granted_scope is a 400 that names the reservation — system scopes
+// are never grantable. The check runs before the store (the granted_scope FK to
+// context_tenant_scopes is the fail-closed backstop, exercised in the store
+// integration test), so the nil pool never panics. Missing fields are 400 too.
+func TestTenantGrantCreateReservedScope(t *testing.T) {
+	rec := manageReqWithPool(t, adminAR(), nil, map[string]any{
+		"action": "tenant-grant-create",
+		"data":   map[string]any{"grantee_tenant": "00000000-0000-0000-0000-0000000d3fa0", "granted_scope": "_global"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("tenant-grant-create granted_scope='_global': status %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "system scope") {
+		t.Fatalf("400 body does not name the system-scope reservation: %s", rec.Body.String())
+	}
+
+	// A leading-whitespace scope must NOT bypass the reserved gate (TrimSpace before
+	// the '_'-prefix check), mirroring the slug gate.
+	rec = manageReqWithPool(t, adminAR(), nil, map[string]any{
+		"action": "tenant-grant-create",
+		"data":   map[string]any{"grantee_tenant": "00000000-0000-0000-0000-0000000d3fa0", "granted_scope": " _global"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("tenant-grant-create granted_scope=' _global' (leading space): status %d, want 400 (no whitespace bypass)", rec.Code)
+	}
+
+	// Missing granted_scope (only grantee) is a 400 (required) — still before the store.
+	rec = manageReqWithPool(t, adminAR(), nil, map[string]any{
+		"action": "tenant-grant-create",
+		"data":   map[string]any{"grantee_tenant": "00000000-0000-0000-0000-0000000d3fa0"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("tenant-grant-create without granted_scope: status %d, want 400", rec.Code)
+	}
+}

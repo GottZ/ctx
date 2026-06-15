@@ -120,7 +120,8 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchBackendAction(w, r, authResult, req)
 	case "api-key-create", "api-key-list", "api-key-delete":
 		h.dispatchAPIKeyAction(w, r, req)
-	case "tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete":
+	case "tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
+		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete":
 		h.dispatchTenantAction(w, r, authResult, req)
 	case "blocks-audit-start", "blocks-audit-status", "blocks-classify-start", "blocks-classify-status":
 		h.dispatchBlocksAction(w, r, req)
@@ -198,9 +199,12 @@ func actionRequiresAdmin(req manageRequest) bool {
 		// are server-admin actions — the list discloses tenant topology, create/update
 		// mutate the owner register (suspend = a system-wide access cut at the next
 		// auth via the 060 ctx_auth gate), and delete is the destructive full-prune
-		// (T05b). Per-tenant-admin scoping is Achse 05 (T25); until then server
+		// (T05b). The tenant-grant-* cross-tenant read-grant actions (T17, 02-V4)
+		// share the same gate — a grant widens another tenant's read_scopes, server-
+		// admin only. Per-tenant-admin scoping is Achse 05 (T25); until then server
 		// is_admin only.
-		"tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete":
+		"tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
+		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete":
 		return true
 	case "dream-mode":
 		return isDreamModeMutation(req)
