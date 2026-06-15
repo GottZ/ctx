@@ -1,9 +1,12 @@
 package config
 
 import (
+	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // generation builds a Validate-clean config whose chat tuple is internally
@@ -129,5 +132,228 @@ func TestStoreCopyOnWrite(t *testing.T) {
 	}
 	if store.Snapshot().Rerank.MaxDocs != 25 {
 		t.Error("new generation must carry the change")
+	}
+}
+
+// --- MT 06-C1: per-tenant snapshot cache ----------------------------------
+//
+// The C1 store keeps a lazy per-tenant cache on top of the base generation. It
+// is inert while overlay==nil (single-tenant operation) and the cache mechanics
+// (wipe-on-Replace + gen-stamp + single-flight) are exercised through an
+// injected counting overlay. Red-proofs (verified on a file copy, never via
+// git checkout) for each mechanic are recorded in the wave report.
+
+// countingOverlay returns a TenantOverlay that hands back *cur on every call
+// and counts the calls. cur is read under the test goroutine; the overlay never
+// touches *testing.T (it can run on a spawned goroutine under single-flight).
+func countingOverlay(calls *int32, cur **Config) TenantOverlay {
+	return func(_ context.Context, _ *Config, _ string) (*Config, error) {
+		atomic.AddInt32(calls, 1)
+		return *cur, nil
+	}
+}
+
+// TestStoreSnapshotForFallsToBaseWithoutOverlay: while overlay==nil both entry
+// points return the base generation and create no cache entry — the single-
+// tenant invariant. Red-proof: drop the `s.overlay == nil` guard ⇒ overlay(nil)
+// is called ⇒ nil-deref panic.
+func TestStoreSnapshotForFallsToBaseWithoutOverlay(t *testing.T) {
+	base := generation(t, "base")
+	s := NewStore(base)
+	ctx := context.Background()
+
+	if got := s.SnapshotForTenant(ctx, "acme"); got != base {
+		t.Errorf("SnapshotForTenant must return base while overlay is nil, got %p", got)
+	}
+	if got := s.SnapshotForRequest(ctx); got != base {
+		t.Errorf("SnapshotForRequest must return base while overlay is nil, got %p", got)
+	}
+	if _, ok := s.tenants.Load().Load("acme"); ok {
+		t.Error("overlay==nil must not create a tenant cache entry")
+	}
+}
+
+// TestStoreSnapshotForTenantReservedScope: reserved (_-prefixed) and empty
+// scopes never get a tenant generation, even with an overlay installed, and are
+// never cached. Red-proof: drop the HasPrefix/empty guard ⇒ overlay is called
+// for "_global" (t.Error fires) and the scope is cached.
+func TestStoreSnapshotForTenantReservedScope(t *testing.T) {
+	base := generation(t, "base")
+	s := NewStore(base)
+	s.overlay = func(_ context.Context, _ *Config, scope string) (*Config, error) {
+		t.Errorf("overlay must not be called for reserved/empty scope %q", scope)
+		return base, nil
+	}
+	ctx := context.Background()
+
+	for _, scope := range []string{"_global", "_orphan", "_", ""} {
+		if got := s.SnapshotForTenant(ctx, scope); got != base {
+			t.Errorf("scope %q must return base, got %p", scope, got)
+		}
+		if _, ok := s.tenants.Load().Load(scope); ok {
+			t.Errorf("scope %q must not be cached", scope)
+		}
+	}
+}
+
+// TestStoreReplaceWipesTenantCacheAndBumpsGen: a built tenant generation is
+// served from cache (no rebuild) on a hit; a Replace bumps baseGen and the next
+// per-tenant read rebuilds against the new base. Red-proof: a Replace that does
+// not bump baseGen / wipe leaves the stale generation served (calls stays 1).
+func TestStoreReplaceWipesTenantCacheAndBumpsGen(t *testing.T) {
+	base := generation(t, "base")
+	s := NewStore(base)
+	ctx := context.Background()
+
+	gen1 := generation(t, "tenant-gen1")
+	gen2 := generation(t, "tenant-gen2")
+	cur := gen1
+	var calls int32
+	s.overlay = countingOverlay(&calls, &cur)
+
+	if got := s.SnapshotForTenant(ctx, "acme"); got != gen1 {
+		t.Fatalf("first build: got %p want %p", got, gen1)
+	}
+	if got := s.SnapshotForTenant(ctx, "acme"); got != gen1 || atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("hit must not rebuild: got %p calls=%d", got, calls)
+	}
+
+	gen0 := s.baseGen.Load()
+	cur = gen2
+	if err := s.Replace(generation(t, "base2")); err != nil {
+		t.Fatal(err)
+	}
+	if s.baseGen.Load() != gen0+1 {
+		t.Errorf("Replace must bump baseGen: %d -> %d", gen0, s.baseGen.Load())
+	}
+	if got := s.SnapshotForTenant(ctx, "acme"); got != gen2 {
+		t.Errorf("after Replace: got %p want rebuilt %p", got, gen2)
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Errorf("Replace must force one rebuild: calls=%d want 2", calls)
+	}
+}
+
+// TestStoreSnapshotForTenantSingleFlight: K concurrent misses of the same scope
+// run the overlay exactly once (the others share the in-flight result).
+// Red-proof: plain LoadOrStore (no single-flight) runs the build K times.
+func TestStoreSnapshotForTenantSingleFlight(t *testing.T) {
+	base := generation(t, "base")
+	s := NewStore(base)
+	tcfg := generation(t, "tenant")
+	var calls int32
+	release := make(chan struct{})
+	s.overlay = func(_ context.Context, _ *Config, _ string) (*Config, error) {
+		atomic.AddInt32(&calls, 1)
+		<-release // hold the flight open until all callers have queued
+		return tcfg, nil
+	}
+	ctx := context.Background()
+
+	const K = 16
+	var started, done sync.WaitGroup
+	started.Add(K)
+	done.Add(K)
+	for i := 0; i < K; i++ {
+		go func() {
+			defer done.Done()
+			started.Done()
+			if got := s.SnapshotForTenant(ctx, "acme"); got != tcfg {
+				t.Errorf("got %p want %p", got, tcfg)
+			}
+		}()
+	}
+	started.Wait()
+	time.Sleep(100 * time.Millisecond) // let followers queue inside flight.Do
+	close(release)
+	done.Wait()
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("single-flight must dedup the build: overlay calls=%d want 1", got)
+	}
+}
+
+// TestStoreGenStampKillsReplaceRacePoison: a slow build that read the OLD base
+// and finishes AFTER a Replace must not poison the cache — its stale-stamped
+// entry is rejected and the next read rebuilds against the new base.
+// Red-proof: without the gen-stamp the stale entry is served on the next read.
+func TestStoreGenStampKillsReplaceRacePoison(t *testing.T) {
+	base1 := generation(t, "base1")
+	base2 := generation(t, "base2")
+	poison := generation(t, "poison") // built from base1 by the slow build
+	fresh := generation(t, "fresh")   // rebuilt from base2
+	s := NewStore(base1)
+	ctx := context.Background()
+
+	enter := make(chan struct{})
+	release := make(chan struct{})
+	var phase int32
+	s.overlay = func(_ context.Context, _ *Config, _ string) (*Config, error) {
+		if atomic.AddInt32(&phase, 1) == 1 {
+			close(enter)
+			<-release // hold the first build open across the Replace
+			return poison, nil
+		}
+		return fresh, nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = s.SnapshotForTenant(ctx, "acme") // first (slow) build, stamps gen N
+		close(done)
+	}()
+	<-enter
+	if err := s.Replace(base2); err != nil { // gen N -> N+1, wipe
+		t.Fatal(err)
+	}
+	close(release) // first build finishes, stores {poison, gen N} into the fresh map
+	<-done
+
+	if got := s.SnapshotForTenant(ctx, "acme"); got != fresh {
+		t.Errorf("stale gen-N entry survived Replace: got %p want rebuilt %p", got, fresh)
+	}
+}
+
+// TestStoreSnapshotForRequestDerivesScopeFromHook: SnapshotForRequest resolves
+// the tenant scope from the registered request-scope hook (the cycle-free stand
+// -in for AuthResultFromContext), routing through the same per-tenant cache.
+// Red-proof: a SnapshotForRequest that ignored the hook would return base.
+func TestStoreSnapshotForRequestDerivesScopeFromHook(t *testing.T) {
+	base := generation(t, "base")
+	s := NewStore(base)
+	tcfg := generation(t, "tenant")
+	cur := tcfg
+	var calls int32
+	s.overlay = countingOverlay(&calls, &cur)
+
+	requestScopeHook = func(context.Context) string { return "acme" }
+	defer func() { requestScopeHook = nil }()
+
+	if got := s.SnapshotForRequest(context.Background()); got != tcfg {
+		t.Errorf("SnapshotForRequest must resolve the hook scope to the tenant generation, got %p", got)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Errorf("expected one overlay build for the hook scope, calls=%d", calls)
+	}
+}
+
+// TestStoreSnapshotForRequestNoAuthFallsToBase covers §8.1 check 6: a request
+// whose tenant is unresolvable (scope hook unset ⇒ ""), even with a LIVE
+// overlay installed, falls back to the base generation fail-safe — it never
+// panics and never leaks a tenant generation. Red-proof: dropping the empty/
+// reserved-scope guard routes "" to the overlay (t.Error fires).
+func TestStoreSnapshotForRequestNoAuthFallsToBase(t *testing.T) {
+	base := generation(t, "base")
+	s := NewStore(base)
+	s.overlay = func(_ context.Context, _ *Config, scope string) (*Config, error) {
+		t.Errorf("overlay must not be called for an unresolved request scope %q", scope)
+		return base, nil
+	}
+	prev := requestScopeHook // isolate from any test that registered a hook
+	requestScopeHook = nil
+	defer func() { requestScopeHook = prev }()
+
+	if got := s.SnapshotForRequest(context.Background()); got != base {
+		t.Errorf("unresolved request must fall to base, got %p", got)
 	}
 }
