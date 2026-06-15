@@ -77,13 +77,24 @@ func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope stri
 	return row, plaintext, nil
 }
 
-// ListApiKeys returns all API key rows ordered by created_at desc.
+// ListApiKeys returns API key rows ordered by created_at desc, scoped to one
+// tenant unless tenantFilter is empty (server-admin → all tenants) and limited
+// to active keys unless activeOnly is false.
 // Plaintext keys are not returned — callers receive metadata only.
-func ListApiKeys(ctx context.Context, pool *pgxpool.Pool) ([]ApiKey, error) {
+func ListApiKeys(ctx context.Context, pool *pgxpool.Pool, tenantFilter string, activeOnly bool) ([]ApiKey, error) {
+	// tenantFilter empty → NULL → no tenant constraint (server-admin, all
+	// tenants); set → only that tenant's keys. activeOnly true → only active.
+	var tenantArg *string
+	if tenantFilter != "" {
+		tenantArg = &tenantFilter
+	}
 	rows, err := pool.Query(ctx,
 		`SELECT id, label, home_scope, allowed_scopes, active, last_used_at, created_at
 		 FROM context_api_keys
-		 ORDER BY created_at DESC`)
+		 WHERE ($1::uuid IS NULL OR tenant_id = $1::uuid)
+		   AND (NOT $2::boolean OR active)
+		 ORDER BY created_at DESC`,
+		tenantArg, activeOnly)
 	if err != nil {
 		return nil, fmt.Errorf("api_keys: list: %w", err)
 	}

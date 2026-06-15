@@ -143,6 +143,42 @@ func TestApiKeyCreate_MalformedData(t *testing.T) {
 	}
 }
 
+// TestResolveApiKeyListParams pins T23 (05-A6) handler logic without a DB: the
+// active_only default (the named behavior change, design 05 §6.2) and the L1
+// tenant scoping (server-admin → all tenants; non-server-admin → own only).
+func TestResolveApiKeyListParams(t *testing.T) {
+	serverAdmin := &auth.AuthResult{IsValid: true, IsAdmin: true, TenantID: "tenant-sa"}
+	tenantAdmin := &auth.AuthResult{IsValid: true, IsAdmin: false, TenantID: "tenant-x"}
+
+	t.Run("absent active_only defaults to active-only; server-admin lists all", func(t *testing.T) {
+		filter, activeOnly := resolveApiKeyListParams(nil, serverAdmin)
+		if !activeOnly {
+			t.Error("default must be active-only (named behavior change)")
+		}
+		if filter != "" {
+			t.Errorf("server-admin filter = %q, want empty (all tenants)", filter)
+		}
+	})
+	t.Run("explicit active_only=false restores the full view", func(t *testing.T) {
+		filter, activeOnly := resolveApiKeyListParams(json.RawMessage(`{"active_only":false}`), serverAdmin)
+		if activeOnly {
+			t.Error("active_only=false must disable the active filter")
+		}
+		if filter != "" {
+			t.Error("server-admin still lists all tenants under active_only=false")
+		}
+	})
+	t.Run("non-server-admin is scoped to its own tenant", func(t *testing.T) {
+		filter, activeOnly := resolveApiKeyListParams(nil, tenantAdmin)
+		if filter != "tenant-x" {
+			t.Errorf("filter = %q, want own tenant (L1 isolation)", filter)
+		}
+		if !activeOnly {
+			t.Error("default active-only applies to tenant-admins too")
+		}
+	})
+}
+
 // SECURITY PROPERTY: Action 'api-key-delete' requires an id field.
 // Without it, the handler returns 400 — no DB call, no nil-pool panic.
 func TestApiKeyDelete_MissingID(t *testing.T) {

@@ -152,7 +152,7 @@ func (h *ManageHandler) dispatchAPIKeyAction(w http.ResponseWriter, r *http.Requ
 	case "api-key-create":
 		h.handleApiKeyCreate(w, r, req)
 	case "api-key-list":
-		h.handleApiKeyList(w, r)
+		h.handleApiKeyList(w, r, req)
 	case "api-key-delete":
 		h.handleApiKeyDelete(w, r, req)
 	}
@@ -1177,14 +1177,48 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (h *ManageHandler) handleApiKeyList(w http.ResponseWriter, r *http.Request) {
-	keys, err := store.ListApiKeys(r.Context(), h.pool)
+func (h *ManageHandler) handleApiKeyList(w http.ResponseWriter, r *http.Request, req manageRequest) {
+	ar := AuthResultFromContext(r.Context())
+	if ar == nil {
+		// Defense in depth — the admin gate already rejected anon callers.
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		return
+	}
+	tenantFilter, activeOnly := resolveApiKeyListParams(req.Data, ar)
+	keys, err := store.ListApiKeys(r.Context(), h.pool, tenantFilter, activeOnly)
 	if err != nil {
 		slog.Error("manage: list api keys failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "keys": keys})
+}
+
+// resolveApiKeyListParams derives the tenant filter and active-only flag for an
+// api-key-list call (design 05 §6.2). A server-admin lists every tenant (empty
+// filter); a non-server-admin is scoped to its own tenant (L1 — never enumerate
+// foreign keys). active_only defaults to true (the named behavior change): an
+// absent field returns only ACTIVE keys, and the full set incl. soft-deleted
+// needs an explicit active_only=false (a *bool tells absent from explicit false).
+//
+// TENANT-DECISION(apikey-list-default): activeOnly=true default chosen
+// (partial-index coverage + L1 isolation) — re-decidable to a false default if
+// back-compat full-visibility outweighs index coverage.
+func resolveApiKeyListParams(rawData json.RawMessage, ar *auth.AuthResult) (tenantFilter string, activeOnly bool) {
+	activeOnly = true
+	var body struct {
+		ActiveOnly *bool `json:"active_only"`
+	}
+	if len(rawData) > 0 {
+		_ = json.Unmarshal(rawData, &body)
+	}
+	if body.ActiveOnly != nil {
+		activeOnly = *body.ActiveOnly
+	}
+	if !ar.IsServerAdmin() {
+		tenantFilter = ar.TenantID
+	}
+	return tenantFilter, activeOnly
 }
 
 func (h *ManageHandler) handleApiKeyDelete(w http.ResponseWriter, r *http.Request, req manageRequest) {
