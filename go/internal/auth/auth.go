@@ -22,7 +22,7 @@ type AuthResult struct {
 	IsValid       bool
 	IsAdmin       bool   // admin tier (052): settings/secrets/key management
 	TenantID      string // UUID of the owning tenant (Modell C, 060); empty in the sentinel paths
-	TenantRole    string // owner|admin|member (059); plain string — the named Role type is T20
+	TenantRole    Role   // owner|admin|member tenant-role (059); typed in T20. Empty ("") in the sentinel paths.
 }
 
 // SanitizeKey strips all non-hex characters from an API key.
@@ -62,7 +62,7 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Auth
 		ReadScopes:    readScopes,
 		IsValid:       isValid,
 		IsAdmin:       isAdmin,
-		TenantRole:    tenantRole,
+		TenantRole:    Role(tenantRole), // text column → named Role type (domain pinned to 059 CHECK, K4)
 	}
 
 	if apiKeyID != nil {
