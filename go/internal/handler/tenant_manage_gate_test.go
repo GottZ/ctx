@@ -21,7 +21,7 @@ import (
 // store pool — reaching the store would panic, which is the missing-gate proof.
 func TestTenantActionsRequireAdmin(t *testing.T) {
 	for _, action := range []string{
-		"tenant-create", "tenant-list", "tenant-get", "tenant-update",
+		"tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
 	} {
 		rec := manageReqWithPool(t, nonAdminAR(), nil, map[string]any{
 			"action": action, "id": "00000000-0000-0000-0000-0000000d3fa0",
@@ -30,6 +30,25 @@ func TestTenantActionsRequireAdmin(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("%s with non-admin key: status %d, want 403", action, rec.Code)
 		}
+	}
+}
+
+// TestTenantDeleteDefaultGuard: tenant-delete on the default tenant is a 400 that
+// NAMES the guard (the prune-default-guard, T05b — a full-prune of the default
+// tenant would destroy the entire single-tenant corpus). The guard runs in the
+// handler before store.PruneTenant, so the nil pool never panics. Asserting the
+// body (not just 400) keeps this honest: before T05b "tenant-delete" was an
+// unknown action whose 400 body said "unknown action", not the guard (RED).
+func TestTenantDeleteDefaultGuard(t *testing.T) {
+	rec := manageReqWithPool(t, adminAR(), nil, map[string]any{
+		"action": "tenant-delete",
+		"id":     "00000000-0000-0000-0000-0000000d3fa0",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("tenant-delete default tenant: status %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "default tenant") {
+		t.Fatalf("400 body does not name the default-tenant guard: %s", rec.Body.String())
 	}
 }
 

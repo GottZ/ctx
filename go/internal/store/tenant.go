@@ -175,6 +175,116 @@ func GetTenant(ctx context.Context, pool *pgxpool.Pool, id string) (*Tenant, err
 	return t, nil
 }
 
+// pruneBatchSize bounds each DELETE so a 1M+ offboarding does not take one giant
+// lock / WAL burst (design/01 §4.3.1 / §6.3 N11). Each table is drained in a loop
+// of DELETE ... LIMIT until a round affects 0 rows. The testcontainer data is tiny
+// so the loop runs once.
+//
+// TENANT-DECISION(prune-batch-size): 2000 rows/batch — a balance of lock duration
+// vs round-trips. Umentscheidbar: raise for fewer round-trips on huge tenants,
+// lower if lock contention is observed. Not load-bearing for correctness.
+const pruneBatchSize = 2000
+
+// pruneScopeDeletes lists the scope-carried data tables to drain, IN FK ORDER.
+// Each statement is fully static (no string interpolation → no gosec G201). $1 =
+// the tenant's scopes (text[]), $2 = the batch limit. The ctid sub-select is the
+// table-agnostic "DELETE a bounded slice" idiom (works for context_dream_links,
+// whose PK is composite). ORDER IS LOAD-BEARING:
+//
+//	context_dream_links FIRST — {source,target}_block_id → context_blocks is
+//	NO ACTION (016:18-19), so the links must go before the blocks they reference
+//	(else 23503). Every other inbound FK to these tables is SET NULL (access_log /
+//	blobs / write_log .block_id; blocks.source_id) or CASCADE (context_temporal,
+//	graph_cluster_member → blocks; context_chat_messages → chat_sessions), so
+//	blocks/blobs/sources/sessions have no hard inter-ordering among themselves.
+//
+// TENANT-DECISION(tenant-prune-order): dream_links→blocks→blobs→sources→
+// chat_sessions, then keys (HARD), then tenant (CASCADE clears tenant_scopes).
+// Umentscheidbar only if a future migration sets the dream_links FK to ON DELETE
+// CASCADE (then step 1 would be redundant) — while 016:18-19 has no ON DELETE,
+// links-first is forced (design/01 §4.3.1).
+//
+// SCALE-NAHT (N11, design/01 §6.3 — named, NOT fixed here): context_dream_links
+// has NO index on `scope` (verified: all 9 indexes lead with source/
+// target_block_id or confidence/version). At the ~2M-link target scale the
+// ctid-LIMIT inner SELECT degenerates to a full seq scan per batch → O(n²) for
+// this ONE table; context_blocks is fine (idx_context_scope greift). The fix is a
+// `scope` btree on context_dream_links, but at 1M+ it MUST be built CONCURRENTLY
+// out-of-band (the single-Tx migration runner forbids CONCURRENTLY, 057:8-12) — a
+// deliberate index wave, NOT an ad-hoc add here (would ACCESS-EXCLUSIVE-lock a 2M
+// table on deploy and collide with the planned 062-068 numbering). Today's corpus
+// (~2k links) makes the prune trivial; this is a target-scale seam, not a
+// correctness blocker. (Secondary N11: write_log.matched_block_id is an unindexed
+// SET-NULL ref → a per-block seq scan only when actually set; rare.)
+var pruneScopeDeletes = []struct{ table, sql string }{
+	{"context_dream_links", `DELETE FROM context_dream_links WHERE ctid IN (SELECT ctid FROM context_dream_links WHERE scope = ANY($1) LIMIT $2)`},
+	{"context_blocks", `DELETE FROM context_blocks WHERE ctid IN (SELECT ctid FROM context_blocks WHERE scope = ANY($1) LIMIT $2)`},
+	{"context_blobs", `DELETE FROM context_blobs WHERE ctid IN (SELECT ctid FROM context_blobs WHERE scope = ANY($1) LIMIT $2)`},
+	{"context_sources", `DELETE FROM context_sources WHERE ctid IN (SELECT ctid FROM context_sources WHERE scope = ANY($1) LIMIT $2)`},
+	{"context_chat_sessions", `DELETE FROM context_chat_sessions WHERE ctid IN (SELECT ctid FROM context_chat_sessions WHERE scope = ANY($1) LIMIT $2)`},
+}
+
+// PruneTenant is the full-prune behind tenant-delete (T05b, design/01 §4.3.1): an
+// FK-ordered, batched mass-DELETE of the tenant's scope-carried data, then its
+// keys, then the tenant row. It is deliberately NOT a metadata-only step and NOT a
+// single-Tx CASCADE: the data (blocks/links/blobs/sources/sessions) is tenant-LESS
+// (scope-discriminated, Modell C), there is no implicit CASCADE onto
+// context_blocks, and at 1M+ blocks a single mass-DELETE would be an over-large
+// lock + WAL burst (§6.3 N11). An unknown/malformed tenant id is ErrTenantNotFound
+// (404, no oracle) — the prune never pretends to delete a tenant that never was.
+//
+// AUDIT TABLES (context_access_log / context_llm_log / context_write_log) are NOT
+// purged here. They carry the tenant only via api_key_id, and llm_log is a
+// TimescaleDB hypertable with NO api_key_id FK at all (verified against the live
+// schema; the design/01 §6.3 prose "ON DELETE SET NULL" is wrong for llm_log). Per
+// §6.3 this is a Policy/Admin-axis decision (N11), NOT to be silently subsumed
+// under the data prune:
+//
+// TENANT-DECISION(prune-audit-tables): named retention boundary (Option B) — audit
+// rows are KEPT; access_log/write_log.api_key_id go NULL via their SET-NULL FK when
+// the keys are hard-deleted; llm_log keeps the (FK-less) api_key_id column and the
+// retention janitor (CTX_LLMLOG_RETENTION_DAYS) ages the bodies out. Umentscheidbar
+// to Option A (DELETE ... WHERE api_key_id = ANY(keys) BEFORE the key delete) when
+// a deployment needs a full compliance body-wipe on offboarding — but that is the
+// Policy axis (§9 N11), not this mechanism wave.
+func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string) error {
+	// Existence + the malformed/absent → ErrTenantNotFound contract, reusing the
+	// same oracle as GetTenant (no 22P02 → 500 side-channel).
+	if _, err := GetTenant(ctx, pool, tenantID); err != nil {
+		return err
+	}
+	scopes, err := TenantScopes(ctx, pool, tenantID)
+	if err != nil {
+		return fmt.Errorf("store: prune tenant scopes: %w", err)
+	}
+	// 1-5: drain the scope-carried tables in FK order (skip if the tenant owns no
+	// scope — nothing scope-discriminated can belong to it then).
+	if len(scopes) > 0 {
+		for _, d := range pruneScopeDeletes {
+			for {
+				tag, err := pool.Exec(ctx, d.sql, scopes, pruneBatchSize)
+				if err != nil {
+					return fmt.Errorf("store: prune %s: %w", d.table, err)
+				}
+				if tag.RowsAffected() == 0 {
+					break
+				}
+			}
+		}
+	}
+	// 6: HARD-delete the tenant's keys. DeleteApiKey is a SOFT delete (active=
+	// false, api_keys.go:102) which would leave the RESTRICT FK and block step 7
+	// with 23001.
+	if _, err := pool.Exec(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID); err != nil {
+		return fmt.Errorf("store: prune tenant keys: %w", err)
+	}
+	// 7: the tenant row last; ON DELETE CASCADE clears context_tenant_scopes.
+	if _, err := pool.Exec(ctx, `DELETE FROM context_tenants WHERE id = $1::uuid`, tenantID); err != nil {
+		return fmt.Errorf("store: delete tenant: %w", err)
+	}
+	return nil
+}
+
 // UpdateTenant patches status and/or display_name (empty string = leave
 // unchanged, COALESCE(NULLIF(...))) and returns the updated row, or
 // ErrTenantNotFound. The 059 CHECK is the backstop for an invalid status (the

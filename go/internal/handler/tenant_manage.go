@@ -10,11 +10,10 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 )
 
-// Tenant lifecycle manage-actions (MT T05a, Achse 01-T5; design/01 §4.3). All
-// admin-gated via actionRequiresAdmin. This slice is create/list/get/update; the
-// heavier T05 concerns are carved out along the design's own seams and deferred:
-//   - tenant-delete = full-prune (FK-ordered batched DELETE, §4.3.1 / §6.3 N11 —
-//     "NICHT metadata-only", a genuine standalone wave) = T05b.
+// Tenant lifecycle manage-actions (MT T05a + T05b, Achse 01-T5; design/01 §4.3).
+// All admin-gated via actionRequiresAdmin. T05a = create/list/get/update; T05b =
+// delete = full-prune (this slice). The one remaining T05 concern is carved out
+// along the design's own seam and deferred:
 //   - E6 engine-turn suspend gate (per-turn status re-check, addendum §6.4,
 //     chat/engine.go:208) = T05c. Note: status='suspended' set via tenant-update
 //     ALREADY bites at the next auth through the 060 ctx_auth status gate; T05c
@@ -133,6 +132,44 @@ func (h *ManageHandler) handleTenantUpdate(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tn})
 }
 
+// defaultTenantID is the fixed UUID of the single-tenant default tenant (059, E9
+// slug 'default') that carries the ENTIRE legacy corpus (all of private/work/
+// shared). It is referenced here only to GUARD it against tenant-delete.
+//
+// TENANT-DECISION(prune-default-guard): tenant-delete REFUSES the default tenant
+// (400) — a full-prune of it would destroy the whole single-tenant corpus (every
+// block in every scope), irreversibly (W17 minimal blast-radius). The guard lives
+// at the handler (policy) layer, NOT in store.PruneTenant (mechanism), so
+// test-tenant teardown and a future deliberate operator path can still reach the
+// raw prune. Umentscheidbar: an operator who genuinely offboards the default
+// tenant must lift this guard explicitly.
+const defaultTenantID = "00000000-0000-0000-0000-0000000d3fa0"
+
+// handleTenantDelete runs the T05b full-prune (store.PruneTenant): the FK-ordered,
+// batched mass-DELETE of the tenant's scope-carried data, its keys, then the
+// tenant row (design/01 §4.3.1). Admin-gated upstream (actionRequiresAdmin); the
+// default tenant is additionally guarded (400). Unknown/malformed id → 404.
+func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, req manageRequest) {
+	if req.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id required"})
+		return
+	}
+	if req.ID == defaultTenantID {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "the default tenant cannot be deleted"})
+		return
+	}
+	err := store.PruneTenant(r.Context(), h.pool, req.ID)
+	if errors.Is(err, store.ErrTenantNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "delete tenant failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": req.ID})
+}
+
 // dispatchTenantAction fans the tenant-* lifecycle actions out (split from
 // HandleManage's switch for cyclomatic budget, mirroring dispatchBackendAction).
 func (h *ManageHandler) dispatchTenantAction(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
@@ -145,5 +182,7 @@ func (h *ManageHandler) dispatchTenantAction(w http.ResponseWriter, r *http.Requ
 		h.handleTenantGet(w, r, ar, req)
 	case "tenant-update":
 		h.handleTenantUpdate(w, r, ar, req)
+	case "tenant-delete":
+		h.handleTenantDelete(w, r, ar, req)
 	}
 }
