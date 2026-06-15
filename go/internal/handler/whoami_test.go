@@ -47,6 +47,38 @@ func TestWhoami_ValidKey(t *testing.T) {
 	}
 }
 
+// TestWhoami_TenantIdentity pins T21 (05-A4): the resolved Modell-C tenant
+// identity — tenant_id and the per-tenant role (060) — travels in the whoami
+// envelope alongside the server-global admin flag, so the SPA gate can tell a
+// server-admin from a tenant-admin. The probe asserts on the raw JSON keys so a
+// dropped struct field fails at runtime, not just at the golden-shape literal.
+func TestWhoami_TenantIdentity(t *testing.T) {
+	ar := nonAdminAR() // member role, non-admin — the two flags must stay distinct
+	ar.TenantID = "00000000-0000-0000-0000-0000000d3fa0"
+	ar.TenantRole = auth.RoleMember
+
+	rec := whoamiReqAs(t, ar, "example-reader", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["tenant_id"] != "00000000-0000-0000-0000-0000000d3fa0" {
+		t.Fatalf("tenant_id = %v, want the resolved tenant UUID", got["tenant_id"])
+	}
+	if got["role"] != "member" {
+		t.Fatalf("role = %v, want member", got["role"])
+	}
+	// Back-compat: the server-global admin flag is independent of the tenant
+	// role — a member key is not a server-admin.
+	if got["admin"] != false {
+		t.Fatalf("admin = %v, want false (server-global flag, not the tenant role)", got["admin"])
+	}
+}
+
 func TestWhoami_NonAdminKey(t *testing.T) {
 	rec := whoamiReqAs(t, nonAdminAR(), "example-reader", nil)
 	if rec.Code != http.StatusOK {
@@ -114,11 +146,13 @@ func TestWhoamiGoldenShape(t *testing.T) {
 		HomeScope:  "private",
 		ReadScopes: []string{"private", "shared"},
 		Admin:      true,
+		TenantID:   "00000000-0000-0000-0000-0000000d3fa0",
+		Role:       "member",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	want := `{"success":true,"label":"example-key","home_scope":"private","read_scopes":["private","shared"],"admin":true}`
+	want := `{"success":true,"label":"example-key","home_scope":"private","read_scopes":["private","shared"],"admin":true,"tenant_id":"00000000-0000-0000-0000-0000000d3fa0","role":"member"}`
 	if string(got) != want {
 		t.Fatalf("golden shape drift:\n got: %s\nwant: %s", got, want)
 	}

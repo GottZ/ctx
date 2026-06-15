@@ -9,6 +9,11 @@ export interface WhoamiResponse {
   home_scope: string
   read_scopes: string[]
   admin: boolean
+  // Modell-C tenant identity (060): owning tenant UUID + per-tenant role
+  // (owner|admin|member). Orthogonal to the server-global `admin` flag — the
+  // gate uses both to tell server-admin from tenant-admin.
+  tenant_id: string
+  role: string
 }
 
 /** Effective-value provenance (handler/settings.go apiSource). */

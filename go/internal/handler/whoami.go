@@ -22,6 +22,15 @@ type whoamiResponse struct {
 	HomeScope  string   `json:"home_scope"`
 	ReadScopes []string `json:"read_scopes"`
 	Admin      bool     `json:"admin"`
+	// TenantID and Role carry the Modell-C tenant identity (060): the owning
+	// tenant UUID and the key's per-tenant role (owner|admin|member, 059). They
+	// are ORTHOGONAL to the server-global Admin flag (052) — the SPA gate needs
+	// both to stop conflating "server admin" with "tenant admin". Appended after
+	// the original five fields so existing consumers stay byte-compatible. Both
+	// are populated for every request that reaches here; the sentinel paths that
+	// leave them empty are stopped by the IsValid check below.
+	TenantID string `json:"tenant_id"`
+	Role     string `json:"role"`
 }
 
 // WhoamiHandler handles GET /api/whoami.
@@ -48,13 +57,12 @@ func (h *WhoamiHandler) labelFromDB(ctx context.Context, apiKeyID string) (strin
 }
 
 // HandleWhoami returns the calling key's identity: label, home scope, read
-// scopes and the admin tier flag — everything the SPA needs for its UI gate.
+// scopes, the server-global admin flag and the Modell-C tenant identity
+// (tenant_id + per-tenant role) — everything the SPA needs for its UI gate.
 //
-// TODO(multi-tenant): the response is the flat single-server key view — admin
-// is the server-global 052 tier and label/home_scope come straight from
-// context_api_keys. A tenant-aware deployment adds the owning tenant identity
-// and a per-tenant role here (and scopes the label lookup per tenant) so the
-// SPA gate stops conflating "server admin" with "tenant admin".
+// TODO(multi-tenant): the label lookup is still server-global (a bare
+// context_api_keys read), not scoped per tenant — the remaining seam once
+// per-tenant label visibility matters.
 func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(r.Context())
 	if ar == nil || !ar.IsValid {
@@ -81,5 +89,7 @@ func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 		HomeScope:  ar.HomeScope,
 		ReadScopes: ar.ReadScopes,
 		Admin:      ar.IsAdmin,
+		TenantID:   ar.TenantID,
+		Role:       string(ar.TenantRole),
 	})
 }
