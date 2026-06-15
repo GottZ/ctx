@@ -40,7 +40,7 @@ Pick by intent: one fact per block, precise title, tags for cross-cutting. ~1-1.
 
 ### Multi-Tenant Architecture
 
-`scope` column on `context_blocks` (`private` | `work` | `shared` | additional tenant scopes), enforced via API-key `home_scope`. Each LLM/tenant key sees:
+`scope` column on `context_blocks` (`private` | `work` | `shared` | additional tenant scopes), enforced via API-key `home_scope`. The `scope` discriminator is `VARCHAR(50)` across every data table (blocks, blobs, sources, dream-links, write-log); the legacy 3-value CHECK constraints were dropped (migration 058), so scope strings are unconstrained at the schema level. Each LLM/tenant key sees:
 - All blocks in its own scope
 - All blocks in `shared` (cross-tenant knowledge layer)
 - Nothing from other tenants' private scopes
