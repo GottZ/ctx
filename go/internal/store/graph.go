@@ -139,6 +139,9 @@ type hopCandidate struct {
 //     (both endpoints come from the visibility-checked node set).
 //  4. Visible degrees (Q3), batched, double-budgeted (scan + hit cap).
 func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes []string) (*EgoResult, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	focus, err := hydrateFocus(ctx, pool, p.Focus, readScopes)
 	if err != nil {
 		return nil, err

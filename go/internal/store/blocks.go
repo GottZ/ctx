@@ -319,6 +319,9 @@ func IsFullUUID(s string) bool {
 //
 // Scope-filtered identically to GetBlock; archived blocks excluded.
 func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, readScopes []string) (string, []BlockMeta, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return "", nil, err
+	}
 	if IsFullUUID(idOrPrefix) {
 		return idOrPrefix, nil, nil
 	}
@@ -366,6 +369,9 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 
 // GetBlock retrieves a single block by ID, filtered by allowed scopes.
 func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []string) (*Block, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	b := &Block{}
 	err := pool.QueryRow(ctx,
 		`SELECT id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at
@@ -559,6 +565,9 @@ type SearchCursor struct {
 // cursor's (updated_at, id); on the FTS path it is ignored (that path is
 // LIMIT-only). Callers that do not paginate pass nil.
 func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor) ([]BlockPreview, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	limit = ClampLimit(limit, 10, 50)
 
 	whereClauses := []string{"scope = ANY($1::text[])", "NOT is_archived"}
@@ -673,6 +682,9 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 // ctx_recent tool (F6) and the MCP recent tool. An empty category means no
 // category filter; limit <= 0 falls back to 10, capped at 50.
 func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category string, limit int) ([]BlockPreview, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 10
 	}
@@ -714,6 +726,9 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, readScopes []string, 
 
 // ListCategories returns distinct categories with block counts.
 func ListCategories(ctx context.Context, pool *pgxpool.Pool, readScopes []string) ([]CategoryCount, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	rows, err := pool.Query(ctx,
 		`SELECT category, count(*)::int AS count
 		 FROM context_blocks
@@ -743,6 +758,9 @@ func ListCategories(ctx context.Context, pool *pgxpool.Pool, readScopes []string
 
 // GetStats returns aggregate statistics for the context store.
 func GetStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (*Stats, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	s := &Stats{}
 	err := pool.QueryRow(ctx,
 		`SELECT
@@ -761,6 +779,9 @@ func GetStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (*St
 
 // ListMeta returns all blocks without content (metadata listing).
 func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string) ([]BlockMeta, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	rows, err := pool.Query(ctx,
 		`SELECT id, title, category, tags, scope, updated_at
 		 FROM context_blocks
@@ -803,6 +824,9 @@ func LogAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID, blockID, actio
 
 // GuardList returns flagged blocks for guard review.
 func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category, status string, limit int) ([]GuardListItem, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	limit = ClampLimit(limit, 50, 200)
 
 	whereClauses := []string{
@@ -881,6 +905,9 @@ func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, cat
 
 // GetGuardStats returns guard state statistics.
 func GetGuardStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (*GuardStats, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	gs := &GuardStats{}
 	err := pool.QueryRow(ctx,
 		`SELECT

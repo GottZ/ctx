@@ -187,10 +187,10 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		}
 
 		ar := AuthResultFromContext(ctx)
-		scope := "private"
-		if ar != nil {
-			scope = ar.HomeScope
+		if ar == nil { // T07/L7 fail-closed (design/01 §5.4): never fall back to the default tenant
+			return errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
+		scope := ar.HomeScope
 
 		// Hash NOOP check.
 		existingID, err := store.HashNOOPCheck(ctx, cfg.Pool, input.Content, scope, input.Category, input.Title)
@@ -238,10 +238,10 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input searchInput) (*mcp.CallToolResult, any, error) {
 		ar := AuthResultFromContext(ctx)
-		scopes := []string{"private"}
-		if ar != nil {
-			scopes = ar.ReadScopes
+		if ar == nil { // T07/L7 fail-closed (design/01 §5.4): never fall back to the default tenant
+			return errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
+		scopes := ar.ReadScopes
 
 		limit := input.Limit
 		if limit <= 0 {
@@ -267,10 +267,10 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 		}
 
 		ar := AuthResultFromContext(ctx)
-		scopes := []string{"private"}
-		if ar != nil {
-			scopes = ar.ReadScopes
+		if ar == nil { // T07/L7 fail-closed (design/01 §5.4): never fall back to the default tenant
+			return errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
+		scopes := ar.ReadScopes
 
 		resolvedID, matches, err := store.ResolveBlockID(ctx, cfg.Pool, input.ID, scopes)
 		if err != nil {
@@ -303,10 +303,10 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input recentInput) (*mcp.CallToolResult, any, error) {
 		ar := AuthResultFromContext(ctx)
-		scopes := []string{"private"}
-		if ar != nil {
-			scopes = ar.ReadScopes
+		if ar == nil { // T07/L7 fail-closed (design/01 §5.4): never fall back to the default tenant
+			return errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
+		scopes := ar.ReadScopes
 
 		limit := input.Limit
 		if limit <= 0 {
@@ -316,6 +316,9 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 			limit = 50
 		}
 
+		if err := store.RequireScopes(scopes); err != nil { // T07 fail-closed: this INLINE query bypasses the store-layer guards
+			return errResult("unauthorized: no resolved scopes"), nil, nil
+		}
 		query := `SELECT id, title, category, LEFT(content, 200) AS preview, updated_at
 			FROM context_blocks
 			WHERE NOT is_archived AND scope = ANY($1::text[])`

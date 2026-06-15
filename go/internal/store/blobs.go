@@ -98,6 +98,9 @@ func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filena
 // GetBlobByID retrieves a blob by ID, filtered by readScopes.
 // If metaOnly is true, data is not returned.
 func GetBlobByID(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []string, metaOnly bool) (*Blob, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	b := &Blob{}
 
 	var query string
@@ -143,6 +146,9 @@ func GetBlobByID(ctx context.Context, pool *pgxpool.Pool, id string, readScopes 
 
 // GetBlobByCategoryTitle retrieves a blob by category+title, filtered by readScopes.
 func GetBlobByCategoryTitle(ctx context.Context, pool *pgxpool.Pool, category, title string, readScopes []string, metaOnly bool) (*Blob, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	b := &Blob{}
 
 	var query string
@@ -188,6 +194,9 @@ func GetBlobByCategoryTitle(ctx context.Context, pool *pgxpool.Pool, category, t
 
 // SearchBlobs searches blobs by category, tags, and mime_type, filtered by readScopes.
 func SearchBlobs(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category string, tags []string, mimeType string, limit int) ([]BlobMeta, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	limit = ClampLimit(limit, 10, 100)
 
 	whereClauses := []string{"scope = ANY($1::text[])"}
@@ -253,6 +262,9 @@ func SearchBlobs(ctx context.Context, pool *pgxpool.Pool, readScopes []string, c
 
 // GetBlobStats returns aggregate blob storage statistics, filtered by readScopes.
 func GetBlobStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (*BlobStats, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	s := &BlobStats{}
 	err := pool.QueryRow(ctx,
 		`SELECT
@@ -293,6 +305,9 @@ func DeleteBlob(ctx context.Context, pool *pgxpool.Pool, id, homeScope string) (
 
 // ListBlobs lists all blobs (meta only) filtered by readScopes.
 func ListBlobs(ctx context.Context, pool *pgxpool.Pool, readScopes []string, limit int) ([]BlobMeta, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	limit = ClampLimit(limit, 50, 200)
 
 	rows, err := pool.Query(ctx,

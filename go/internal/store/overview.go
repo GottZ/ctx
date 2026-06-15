@@ -57,6 +57,9 @@ type OverviewResult struct {
 // context_blocks/context_dream_links touch, bounded by cluster(-pair) count,
 // not corpus size.
 func GraphOverview(ctx context.Context, pool *pgxpool.Pool, p OverviewParams, readScopes []string) (*OverviewResult, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
 	nodes, truncNodes, err := overviewNodes(ctx, pool, p, readScopes)
 	if err != nil {
 		return nil, fmt.Errorf("store: overview nodes: %w", err)
