@@ -73,6 +73,33 @@ func TenantScopes(ctx context.Context, pool *pgxpool.Pool, tenantID string) ([]s
 	return scopes, nil
 }
 
+// TenantStatusForScope resolves the OWNING tenant's lifecycle status for a scope
+// via context_tenant_scopes → context_tenants (Modell C: one scope ⇒ one tenant,
+// PK on context_tenant_scopes.scope). found=false when the scope maps to no
+// tenant — the single-tenant transition, where an unmapped scope has no tenant to
+// suspend — so callers proceed rather than fail closed on it (059 seeds the
+// existing {private,work,shared} → default tenant, so real sessions DO resolve).
+// The sole consumer is the E6 session-suspend-cut (T05c, chat/engine.go): it cuts
+// a running turn only when found && status != "active". This is a status lookup,
+// NOT a re-auth — it never touches read_scopes or last_used_at (design/01 §5.2).
+func TenantStatusForScope(ctx context.Context, pool *pgxpool.Pool, scope string) (status string, found bool, err error) {
+	if scope == "" {
+		return "", false, nil
+	}
+	err = pool.QueryRow(ctx,
+		`SELECT t.status
+		   FROM context_tenant_scopes ts
+		   JOIN context_tenants t ON t.id = ts.tenant_id
+		  WHERE ts.scope = $1`, scope).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: tenant status for scope: %w", err)
+	}
+	return status, true, nil
+}
+
 // Tenant is a row in context_tenants — the owner/management register (059).
 type Tenant struct {
 	ID          string    `json:"id"`

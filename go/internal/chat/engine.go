@@ -104,6 +104,19 @@ func NewEngine(pool *pgxpool.Pool, provider BackendProvider, exec *Executor, cfg
 // conditions are reported via the sink (error / done events) and RunTurn
 // returns nil — or the Sink's error if the client vanished.
 func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.ChatSession, userMsg string, reqSens backends.Sensitivity, toolsEnabled bool, sink Sink) error {
+	// E6 session-suspend-cut (T05c): re-check the session OWNER's tenant status
+	// every turn, BEFORE any work. sess.ReadScopes is frozen at session start
+	// (store/chat.go), so a tenant suspended mid-session would otherwise keep
+	// running tools under that snapshot (R-LEAK6) — the auth-time ctx_auth gate
+	// (060) never re-fires for an already-open session. A non-active owner ⇒ the
+	// turn is rejected outright: no claim, no persisted message, no tool, no
+	// corpus hit ("suspended = fully silent", addendum §6.4).
+	if active, serr := e.ownerActive(ctx, sess); serr != nil {
+		return fmt.Errorf("chat: owner tenant status: %w", serr)
+	} else if !active {
+		return sink.Event("error", map[string]any{"code": "tenant_suspended", "retryable": false})
+	}
+
 	claimed, err := store.ClaimTurn(ctx, e.pool, sess.ID, e.cfg.BusyTTL)
 	if err != nil {
 		return fmt.Errorf("chat: claim turn: %w", err)
@@ -240,6 +253,30 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 	// Iteration cap or budget reached: ONE closing call WITHOUT a tools array
 	// (E4: never tool_choice:"none" — it emits tool syntax as plain text).
 	return e.finalCall(ctx, sess, msgs, reqSens, sessHWM, turnMax, start, apiKeyID, finalReason, sink)
+}
+
+// ownerActive resolves the session owner's tenant status fresh (the E6 per-turn
+// suspend-cut, T05c). The owner is sess.Scope — the home_scope of the creating
+// key (store/chat.go) — which Modell C maps to exactly one tenant. A scope with
+// no tenant mapping (single-tenant transition) has nothing to suspend ⇒ active.
+//
+// TENANT-DECISION(session-suspend-cut): per-turn owner-status (re-)check at the
+// engine turn entry via sess.Scope → context_tenant_scopes → context_tenants
+// (addendum §6.4). Alternative A: gate only at session start (frozen
+// sess.ReadScopes would keep running = R-LEAK6). Alternative B: re-auth via
+// ctx_auth (gates the CALLER's tenant, not the session OWNER's). Umentscheidbar
+// weil ein Status-Lookup pro Turn — eine Naht, keine Architektur-Änderung. The
+// fail-closed scope-intersection hardening (design/01 §5.2-a) + RequireScopes
+// wiring (§5.4) are T07's defense-in-depth behind this primary cut, not T05c.
+func (e *Engine) ownerActive(ctx context.Context, sess *store.ChatSession) (bool, error) {
+	status, found, err := store.TenantStatusForScope(ctx, e.pool, sess.Scope)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return true, nil
+	}
+	return status == "active", nil
 }
 
 // streamOutcome is one iteration's stream result plus failover bookkeeping.

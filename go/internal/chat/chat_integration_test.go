@@ -421,6 +421,94 @@ func TestChatEngine(t *testing.T) {
 			t.Fatalf("error event leaked the backend URL (topology disclosure): %s", raw)
 		}
 	})
+
+	t.Run("TenantSuspendCutsRunningSession", func(t *testing.T) {
+		// E6 / R-LEAK6 (T05c): sess.ReadScopes is frozen at session start, so a
+		// tenant suspended MID-session would keep running tools under that snapshot
+		// unless the engine re-checks the OWNER's tenant status each turn — the
+		// auth-time ctx_auth gate (060) never re-fires for an already-open session.
+		// Map a dedicated scope to a fresh tenant, run a turn while active, suspend
+		// the tenant, then run AGAIN on the same open session: the second turn must
+		// be cut before any work (backend never hit, nothing persisted), proving the
+		// recheck is per-turn, not session-start only ("suspended = fully silent").
+		const tenantID = "a5c0a5c0-a5c0-a5c0-a5c0-a5c0a5c0a5c0"
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_tenants (id, slug, display_name, status)
+			 VALUES ($1, 'suspendco', 'Suspend Co', 'active') ON CONFLICT (slug) DO NOTHING`, tenantID); err != nil {
+			t.Fatalf("seed tenant: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_tenant_scopes (scope, tenant_id) VALUES ('suspendscope', $1)
+			 ON CONFLICT (scope) DO NOTHING`, tenantID); err != nil {
+			t.Fatalf("map scope to tenant: %v", err)
+		}
+
+		llmSrv := &fakeLLM{responses: []fakeResp{
+			{sse: sseContent("first turn while active")},
+			{sse: sseContent("second turn must never run")},
+		}}
+		srv := httptest.NewServer(llmSrv.handler())
+		defer srv.Close()
+		exec := chat.NewExecutor(pool, &fakeQuery{}, 8000)
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("fake", srv.URL)}}, exec, chat.Config{})
+		sess := newSession(t, pool, "suspendscope", []string{"suspendscope"})
+		ar := &auth.AuthResult{ReadScopes: []string{"suspendscope"}}
+
+		// Turn 1: owner tenant active → proceeds, hits the backend once.
+		col1 := &collector{}
+		if err := eng.RunTurn(ctx, ar, sess, "hello", backends.SensInternal, false, col1); err != nil {
+			t.Fatalf("turn 1 RunTurn: %v", err)
+		}
+		if llmSrv.hitCount() != 1 {
+			t.Fatalf("turn 1 llm hits = %d; want 1 (active owner proceeds)", llmSrv.hitCount())
+		}
+		if col1.last("done") == nil {
+			t.Fatalf("turn 1 produced no done event; an active owner must answer normally")
+		}
+
+		// Suspend the OWNER tenant mid-session.
+		if _, err := pool.Exec(ctx, `UPDATE context_tenants SET status = 'suspended' WHERE id = $1`, tenantID); err != nil {
+			t.Fatalf("suspend owner tenant: %v", err)
+		}
+
+		// Turn 2 on the SAME open session: cut before any work.
+		col2 := &collector{}
+		if err := eng.RunTurn(ctx, ar, sess, "are you still there?", backends.SensInternal, false, col2); err != nil {
+			t.Fatalf("turn 2 RunTurn: %v", err)
+		}
+		if llmSrv.hitCount() != 1 {
+			t.Fatalf("turn 2 llm hits total = %d; want still 1 — a suspended owner's turn must never reach a backend (R-LEAK6)", llmSrv.hitCount())
+		}
+		if e := col2.last("error"); e == nil || e["code"] != "tenant_suspended" {
+			t.Fatalf("turn 2 error event = %v; want code tenant_suspended", e)
+		}
+		if d := col2.last("done"); d != nil {
+			t.Fatalf("turn 2 produced a done event %v; a cut turn must not complete", d)
+		}
+		// The cut turn appends no user message: only turn 1's user+assistant remain.
+		msgs, _ := store.ListMessages(ctx, pool, sess.ID, 0, 0)
+		if len(msgs) != 2 {
+			t.Fatalf("messages after the cut turn = %d; want 2 (turn 1 only)", len(msgs))
+		}
+
+		// offboarding is the OTHER non-active status (mid-deletion). The == "active"
+		// allowlist must cut it too — guards against a future != "suspended" denylist
+		// regression that would leak an offboarding tenant (addendum §6.4: "suspended
+		// UND offboarding").
+		if _, err := pool.Exec(ctx, `UPDATE context_tenants SET status = 'offboarding' WHERE id = $1`, tenantID); err != nil {
+			t.Fatalf("offboard owner tenant: %v", err)
+		}
+		col3 := &collector{}
+		if err := eng.RunTurn(ctx, ar, sess, "still there?", backends.SensInternal, false, col3); err != nil {
+			t.Fatalf("turn 3 RunTurn: %v", err)
+		}
+		if llmSrv.hitCount() != 1 {
+			t.Fatalf("turn 3 llm hits total = %d; want still 1 — an offboarding owner is also cut", llmSrv.hitCount())
+		}
+		if e := col3.last("error"); e == nil || e["code"] != "tenant_suspended" {
+			t.Fatalf("turn 3 error event = %v; want code tenant_suspended (offboarding ⇒ non-active ⇒ cut)", e)
+		}
+	})
 }
 
 // --- executor tests ---
