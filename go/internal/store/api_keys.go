@@ -5,10 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -98,14 +100,35 @@ func ListApiKeys(ctx context.Context, pool *pgxpool.Pool) ([]ApiKey, error) {
 	return keys, rows.Err()
 }
 
-// DeleteApiKey deactivates an API key by ID (soft delete: sets active=false).
-func DeleteApiKey(ctx context.Context, pool *pgxpool.Pool, id string) (bool, error) {
+// DeleteApiKey deactivates an API key by ID (soft delete: sets active=false),
+// constrained to the caller's tenant unless the caller is a server-admin.
+//
+// The tenant constraint lives INSIDE the single UPDATE — atomic and
+// TOCTOU-free, no fetch-then-write. A server-admin (isServerAdmin=true) deletes
+// any key by id, exactly as before; a non-server-admin deletes only keys whose
+// tenant_id matches callerTenant. A miss — wrong tenant, absent, already
+// inactive, or a malformed id (22P02) — collapses to found=false with no error,
+// so the caller cannot tell a foreign tenant's key from a nonexistent one
+// (Leak-Pfad L2, design/05 §5.2). An empty callerTenant for a non-server-admin
+// yields a NULL tenant arg, which matches nothing — fail-closed.
+func DeleteApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant string, isServerAdmin bool) (bool, error) {
+	var tenantArg *string
+	if !isServerAdmin && callerTenant != "" {
+		tenantArg = &callerTenant
+	}
 	tag, err := pool.Exec(ctx,
 		`UPDATE context_api_keys SET active = false, updated_at = now()
-		 WHERE id = $1::uuid AND active = true`,
-		id,
+		 WHERE id = $1::uuid AND active = true
+		   AND ($2::boolean OR tenant_id = $3::uuid)`,
+		id, isServerAdmin, tenantArg,
 	)
 	if err != nil {
+		// A malformed id (invalid uuid text) can't match any key — collapse it
+		// to a miss so it's indistinguishable from an absent id (no oracle).
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+			return false, nil
+		}
 		return false, fmt.Errorf("api_keys: delete: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil

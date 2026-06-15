@@ -1198,14 +1198,22 @@ func (h *ManageHandler) handleApiKeyDelete(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id is required"})
 		return
 	}
-	deleted, err := store.DeleteApiKey(r.Context(), h.pool, data.ID)
+	ar := AuthResultFromContext(r.Context())
+	if ar == nil {
+		// Defense in depth — the admin gate already rejected anon callers.
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		return
+	}
+	deleted, err := store.DeleteApiKey(r.Context(), h.pool, data.ID, ar.TenantID, ar.IsServerAdmin())
 	if err != nil {
 		slog.Error("manage: delete api key failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
 	if !deleted {
-		writeJSON(w, http.StatusOK, map[string]any{"success": false, "error": "key not found or already inactive"})
+		// 404-equivalent, uniform for absent / already-inactive / foreign-tenant
+		// / malformed — never an existence oracle for another tenant's key (L2).
+		writeJSON(w, http.StatusOK, map[string]any{"success": false, "error": "key not found"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": data.ID})
