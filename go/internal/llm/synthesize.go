@@ -339,7 +339,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // querySens is the request-level classification (request > setting >
 // default, F3 §2.3b); P3 replaced the P2 credentials constant with
 // max(querySens, sensitivity of the FINAL prompt set).
-func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate) (*SynthesisResult, error) {
+func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate, apiKeyID string) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
@@ -424,6 +424,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gam
 		RequiredSensitivity: string(required),
 		Attempt:             len(attempts),
 		Metadata:            map[string]any{"chain": attempts},
+		APIKeyID:            apiKeyID, // T35a: caller attribution (NULL for background)
 	}
 	servedModel := ""
 	if served != nil {

@@ -787,7 +787,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,

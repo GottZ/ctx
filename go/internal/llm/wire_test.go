@@ -144,7 +144,7 @@ func TestSynthesizeWirePath(t *testing.T) {
 			b.Roles = []string{backends.RoleSynthesis}
 			bpool := backends.NewPool(nil, nil)
 			bpool.SeedSnapshotForTest([]backends.Backend{b})
-			res, err := Synthesize(context.Background(), nil, bpool, backends.GamingState{}, settings, backends.SensPersonal, "q", sources, nil)
+			res, err := Synthesize(context.Background(), nil, bpool, backends.GamingState{}, settings, backends.SensPersonal, "q", sources, nil, "")
 			if err != nil {
 				t.Fatalf("Synthesize: %v", err)
 			}
