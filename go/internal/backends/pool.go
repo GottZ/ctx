@@ -103,9 +103,9 @@ func NewPool(q Querier, secrets SecretResolver) *Pool {
 const loadBackendsSQL = `
 SELECT id, name, base_url, protocol, provider_class, api_key_ref, trust,
        locality, roles, model_map, timeouts, num_ctx, priority, enabled,
-       extra_headers, extra_body, limits, metadata
+       extra_headers, extra_body, limits, metadata, scope
   FROM context_backends
- ORDER BY name`
+ ORDER BY scope, name`
 
 // Reload loads context_backends, resolves api_key_refs in-memory and swaps
 // the snapshot atomically. Triggers: boot, NOTIFY (entity=context_backends),
@@ -166,7 +166,8 @@ func scanBackend(rows pgx.Rows) (Backend, error) {
 	)
 	if err := rows.Scan(&b.ID, &b.Name, &b.Host, &protocol, &b.ProviderClass,
 		&apiKeyRef, &trust, &locality, &b.Roles, &modelMap, &timeouts, &numCtx,
-		&b.Priority, &b.Enabled, &extraHeaders, &extraBody, &limits, &metadata); err != nil {
+		&b.Priority, &b.Enabled, &extraHeaders, &extraBody, &limits, &metadata,
+		&b.Scope); err != nil {
 		return b, err
 	}
 	b.Protocol = Protocol(protocol)

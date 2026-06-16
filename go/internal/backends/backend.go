@@ -128,8 +128,12 @@ type Backend struct {
 
 	// --- F3 pool row fields (zero values on F1 config-derived tuples) ---
 
-	ID            string
-	Name          string
+	ID   string
+	Name string
+	// Scope is the tenant dimension (062, Modell C): '_global' = shared server
+	// backend, '<tenant>' = tenant-private. Loaded by scanBackend; Chain() does
+	// not yet filter on it (that is 04-W2).
+	Scope         string
 	ProviderClass string
 	// APIKeyRef names the F2 secret this backend authenticates with; "" =
 	// keyless. The NAME is harmless and shows up in list responses — the
