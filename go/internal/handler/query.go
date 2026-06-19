@@ -357,7 +357,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("german detected, translating",
 			"request_id", requestID,
 		)
-		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, query)
+		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, query, ar.ApiKeyID)
 		if err != nil {
 			// Fail-open (design 03 §2.4 translate row) — covers the empty
 			// chain (trust/gaming/disabled) AND exhausted attempts alike.
@@ -395,7 +395,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	} else if llm.HasTemporalIntent(originalQuery) {
 		// LLM fallback: query seems temporal but rules couldn't parse it.
 		var err error
-		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, originalQuery, now)
+		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, originalQuery, now, ar.ApiKeyID)
 		if err != nil {
 			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,
@@ -441,7 +441,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		embedcache.ReportFunc(llm.PoolReporter(h.backendPool)))
 	if embWired {
 		// Slim row per actual wire call — cache hits are no egress (§2.7.3).
-		h.logEmbedWire(ctx, "query-embed", querySens, embServed, embAttempts, time.Since(embStart), nil, err)
+		h.logEmbedWire(ctx, "query-embed", querySens, embServed, embAttempts, time.Since(embStart), nil, err, ar.ApiKeyID)
 	}
 	if err != nil {
 		slog.Error("embedding failed",
@@ -694,7 +694,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			required := rerankRequired(querySens, results, rrf.RerankMaxDocs)
-			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, cfg.GamingState(), required, originalQuery, results)
+			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, cfg.GamingState(), required, originalQuery, results, ar.ApiKeyID)
 			if err != nil {
 				slog.Warn("rerank failed, using original order",
 					"error", err,
@@ -918,7 +918,15 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			ctx, nil, chain, backends.RoleEmbed, embedText, embed.PrefixDocument,
 			embedcache.ReportFunc(llm.PoolReporter(h.backendPool)))
 		if wired {
-			h.logEmbedWire(ctx, "embed-backfill", required, served, attempts, time.Since(start), []string{blockID}, err)
+			// TENANT-DECISION(backfill-attribution): "" → NULL. backfillPending is
+			// query-triggered but maintenance in nature — it embeds whatever blocks
+			// in this scope still lack a vector, not the caller's own request.
+			// Charging the random foreground key that happens to trigger it would
+			// skew per-key cost/call accounting (one query could absorb hundreds of
+			// embed calls). Treated as background, same as the scheduler backfill.
+			// Reversible if backfill cost should follow the triggering caller (then
+			// backfillPending gains an apiKeyID param alongside its T34 scope param).
+			h.logEmbedWire(ctx, "embed-backfill", required, served, attempts, time.Since(start), []string{blockID}, err, "")
 		}
 		if err != nil {
 			slog.Warn("query backfill: embed failed", "block_id", blockID, "error", err)
@@ -968,8 +976,8 @@ func rerankRequired(querySens backends.Sensitivity, results []rrf.SearchResult, 
 // logEmbedWire records one slim llmlog row for an embed wire-call sequence
 // (no bodies; block_ids where the call embedded block content — §2.7.3).
 // served is nil when every attempt failed.
-func (h *QueryHandler) logEmbedWire(_ context.Context, pipeline string, required backends.Sensitivity, served *backends.Backend, attempts int, duration time.Duration, blockIDs []string, err error) {
-	llm.LogEmbedWire(h.pool, pipeline, backends.RoleEmbed, required, served, attempts, duration, blockIDs, err)
+func (h *QueryHandler) logEmbedWire(_ context.Context, pipeline string, required backends.Sensitivity, served *backends.Backend, attempts int, duration time.Duration, blockIDs []string, err error, apiKeyID string) {
+	llm.LogEmbedWire(h.pool, pipeline, backends.RoleEmbed, required, served, attempts, duration, blockIDs, err, apiKeyID)
 }
 
 // filterSuperseded removes blocks from results that are superseded by another block

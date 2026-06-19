@@ -790,8 +790,9 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 		ctx, nil, chain, role, embedText, embed.PrefixDocument,
 		embedcache.ReportFunc(router.Report))
 	if wired {
+		// "" → NULL: scheduler backfill is background, no request-bound caller (T35b).
 		llm.LogEmbedWire(s.pool, "embed-backfill", role, required, served, attempts,
-			time.Since(start), []string{blockID}, err)
+			time.Since(start), []string{blockID}, err, "")
 	}
 	if err != nil {
 		return false, fmt.Errorf("backfill: embed: %w", err)

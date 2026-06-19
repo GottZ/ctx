@@ -93,6 +93,11 @@ func ClassifyBlockBool(ctx context.Context, db *pgxpool.Pool, bpool *backends.Po
 	question, title, content, blockID string,
 ) (bool, error) {
 	user := question + "\n\n---\n\nTitel: " + title + "\n\n" + content
+	// TENANT-DECISION(classify-attribution): no APIKeyID set — the only caller
+	// is the scheduler sensitivity-audit (events/scheduler.go:190), a background
+	// job with no request-bound key. Leaving it "" keeps the row NULL, the same
+	// background invariant as Dream/backfill (design/04 §4.3/§7 W3 lists classify
+	// among the chain sites, but its sole caller is background, not foreground).
 	resp, err := ChainCall{
 		Pool:       bpool,
 		Role:       backends.RoleClassify,

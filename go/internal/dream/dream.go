@@ -642,8 +642,9 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 			ctx, pool, chain, embedRole, kw, embed.PrefixQuery,
 			embedcache.ReportFunc(r.Report))
 		if wired {
+			// "" → NULL: dream keyword-embed is background, no caller (T35b).
 			llm.LogEmbedWire(pool, "dream-keyword-embed", embedRole, source.Sensitivity,
-				served, attempts, time.Since(start), []string{source.ID}, err)
+				served, attempts, time.Since(start), []string{source.ID}, err, "")
 		}
 		if err != nil {
 			embedFailures++

@@ -197,6 +197,7 @@ func thinkModeOf(think *bool) backends.ThinkMode {
 // EmbedChain's wired flag — cache hits contact no backend and log nothing.
 func LogEmbedWire(db *pgxpool.Pool, pipeline, role string, required backends.Sensitivity,
 	served *backends.Backend, attempts int, duration time.Duration, blockIDs []string, err error,
+	apiKeyID string,
 ) {
 	entry := llmlog.Entry{
 		Pipeline:            pipeline,
@@ -205,6 +206,7 @@ func LogEmbedWire(db *pgxpool.Pool, pipeline, role string, required backends.Sen
 		BlockIDs:            blockIDs,
 		RequiredSensitivity: string(required),
 		Attempt:             attempts,
+		APIKeyID:            apiKeyID, // T35b: caller attribution (NULL for background backfill/dream)
 	}
 	if served != nil {
 		entry.Model = served.ModelFor(role).Model
@@ -287,6 +289,12 @@ type ChainCall struct {
 	// holds even against a full-trust external row a psql edit smuggled past
 	// the 422 validation).
 	LocalOnly bool
+	// APIKeyID is the caller attribution for the slim llmlog row (04-W3/T35b,
+	// design/04 §4.3). Foreground callers (query translate/temporal/rerank)
+	// pass ar.ApiKeyID; background callers (sensitivity-audit classify) leave
+	// it "" — nullUUID (llmlog.go:168) drops an empty key to NULL, keeping the
+	// background invariant (Dream/Scheduler carry no caller).
+	APIKeyID string
 }
 
 // Do resolves the chain (the trust gate: an excluded backend does not exist
@@ -320,6 +328,7 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool) (*ChatResponse, err
 		RequiredSensitivity: string(c.Required),
 		Attempt:             len(attempts),
 		Metadata:            map[string]any{"chain": attempts},
+		APIKeyID:            c.APIKeyID, // T35b: caller attribution (NULL for background)
 	}
 	if served != nil {
 		entry.Model = served.ModelFor(c.Role).Model
