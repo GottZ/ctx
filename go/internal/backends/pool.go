@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -248,14 +249,37 @@ func (p *Pool) SeedSnapshotForTest(bs []Backend) {
 	p.snap.Store(&snapshot{backends: bs, version: -1, loadedAt: time.Now()})
 }
 
+// visibleTo reports whether a backend in scope bScope may be reached by caller
+// tenant (04-W2/T34, egress isolation). A '_global' backend — or an unscoped
+// row (Scope == "", pre-062 / test-seeded; the DB enforces NOT NULL DEFAULT
+// '_global', so "" is test-only) — is shared and visible to everyone. A
+// tenant-private backend is visible only to its own tenant. An empty or
+// '_'-reserved caller tenant (the __UNAUTHORIZED__ sentinel, 003:48/052:83, or
+// any reserved value) sees ONLY shared backends — never a same-named
+// tenant-private one (fail-closed, design/04 §5.7). The '_'-prefix guard is
+// defense-in-depth: handlers already reject !ar.IsValid before Chain
+// (middleware.go:179), but a security axis names its sentinel explicitly rather
+// than trust two non-local layers.
+func visibleTo(bScope, tenant string) bool {
+	if bScope == "" || bScope == GlobalScope {
+		return true
+	}
+	if tenant == "" || strings.HasPrefix(tenant, "_") {
+		return false
+	}
+	return bScope == tenant
+}
+
 // Chain returns the eligible backends for one operation, in attempt order:
-// filter (enabled && role && trust.Allows(required) && !gaming-disabled),
-// sort (inCooldown ASC, priority DESC, name ASC). Cooldown never REMOVES —
-// it sorts to the end, so a single-backend role stays reachable through its
-// cooldown (order hint, not circuit breaker). Empty chain returns
-// *ErrNoEligibleBackend with per-backend reasons for slog/admin status; the
-// client-facing error stays generic at the handler.
-func (p *Pool) Chain(role string, required Sensitivity, gaming GamingState) ([]Backend, error) {
+// filter (visibleTo(tenant) && enabled && role && trust.Allows(required) &&
+// !gaming-disabled), sort (inCooldown ASC, priority DESC, name ASC). Cooldown
+// never REMOVES — it sorts to the end, so a single-backend role stays reachable
+// through its cooldown (order hint, not circuit breaker). tenant is the caller's
+// scope (ar.HomeScope / sess.Scope); a foreign tenant-private backend is not in
+// the chain BY CONSTRUCTION (no ExclusionReason — no topology disclosure, §4.1).
+// Empty chain returns *ErrNoEligibleBackend with per-backend reasons for
+// slog/admin status; the client-facing error stays generic at the handler.
+func (p *Pool) Chain(role string, required Sensitivity, gaming GamingState, tenant string) ([]Backend, error) {
 	snap := p.snap.Load()
 	now := time.Now()
 
@@ -264,10 +288,15 @@ func (p *Pool) Chain(role string, required Sensitivity, gaming GamingState) ([]B
 	for i := range snap.backends {
 		b := &snap.backends[i]
 		switch {
+		case !visibleTo(b.Scope, tenant):
+			// Not visible to this tenant — no reason entry: a foreign
+			// tenant-private backend is non-existent to this caller (egress
+			// isolation, no topology disclosure §5.3). Checked FIRST so the
+			// tenant boundary is the outermost gate.
 		case !b.HasRole(role):
 			// Not part of this role's routing table — no reason entry, the
-			// row was never a candidate. Checked FIRST so disabled backends
-			// of unrelated roles don't spam the exclusion reasons.
+			// row was never a candidate. So disabled backends of unrelated
+			// roles don't spam the exclusion reasons.
 		case !b.Enabled:
 			excluded = append(excluded, ExclusionReason{b.Name, "disabled"})
 		case !b.Trust.Allows(required):

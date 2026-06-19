@@ -42,7 +42,10 @@ type Sink interface {
 // best first. An empty chain is *backends.ErrNoEligibleBackend (never a silent
 // escalation). PoolProvider wraps *backends.Pool; tests inject a fake.
 type BackendProvider interface {
-	ChatChain(ctx context.Context, required backends.Sensitivity) ([]backends.Backend, error)
+	// tenant is the session OWNER's scope (sess.Scope, NOT sess.ReadScopes —
+	// routing by readability would expose a foreign tenant's private backends).
+	// It bounds the chat chain to the tenant's visible backends (04-W2/T34).
+	ChatChain(ctx context.Context, required backends.Sensitivity, tenant string) ([]backends.Backend, error)
 }
 
 // Config carries the web-chat knobs (filled from the F1 snapshot by the handler;
@@ -166,7 +169,7 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 
 	for iter := 1; iter <= e.cfg.MaxIterations; iter++ {
 		required := backends.MaxSensitivity(reqSens, sessHWM)
-		chain, cerr := e.provider.ChatChain(ctx, required)
+		chain, cerr := e.provider.ChatChain(ctx, required, sess.Scope)
 		if cerr != nil || len(chain) == 0 {
 			return emitNoEligible(sink)
 		}
@@ -390,7 +393,7 @@ func (e *Engine) finishUnserved(ctx context.Context, sess *store.ChatSession, so
 func (e *Engine) finalCall(ctx context.Context, sess *store.ChatSession, msgs []llm.ChatMsg, reqSens, sessHWM, turnMax backends.Sensitivity, start time.Time, apiKeyID, reason string, sink Sink) error {
 	msgs = append(msgs, llm.ChatMsg{Role: "user", Content: "Tool budget exhausted — answer now directly from the material gathered so far."})
 	required := backends.MaxSensitivity(reqSens, sessHWM)
-	chain, cerr := e.provider.ChatChain(ctx, required)
+	chain, cerr := e.provider.ChatChain(ctx, required, sess.Scope)
 	if cerr != nil || len(chain) == 0 {
 		return emitNoEligible(sink)
 	}
@@ -597,11 +600,12 @@ func NewPoolProvider(pool *backends.Pool, gaming func() backends.GamingState) *P
 	return &PoolProvider{pool: pool, gaming: gaming}
 }
 
-// ChatChain returns the trust-ordered chat chain for the required sensitivity.
-func (p *PoolProvider) ChatChain(_ context.Context, required backends.Sensitivity) ([]backends.Backend, error) {
+// ChatChain returns the trust-ordered chat chain for the required sensitivity,
+// bounded to the caller tenant's visible backends (04-W2/T34).
+func (p *PoolProvider) ChatChain(_ context.Context, required backends.Sensitivity, tenant string) ([]backends.Backend, error) {
 	var g backends.GamingState
 	if p.gaming != nil {
 		g = p.gaming()
 	}
-	return p.pool.Chain("chat", required, g)
+	return p.pool.Chain("chat", required, g, tenant)
 }

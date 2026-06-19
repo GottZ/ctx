@@ -41,7 +41,11 @@ func (r *Router) FloorSens(s backends.Sensitivity, scope string) backends.Sensit
 // SensPublic is the weakest gate: trust exclusions are per-block and surface
 // later at the per-call chains.
 func (r *Router) available(role string) bool {
-	_, err := r.Pool.Chain(role, backends.SensPublic, r.Gaming)
+	// TENANT-DECISION(dream-tenant): the background path passes "" — it runs
+	// under the global scope set today (scheduler.go:700/724), so Chain() sees
+	// only shared '_global' backends (fail-closed, never a foreign tenant-private
+	// one). Per-tenant Dream iteration that threads each tenant here is 04-W6/T38.
+	_, err := r.Pool.Chain(role, backends.SensPublic, r.Gaming, "")
 	return err == nil
 }
 
@@ -53,7 +57,7 @@ func (r *Router) available(role string) bool {
 func (r *Router) chat(ctx context.Context, role string, required backends.Sensitivity,
 	systemPrompt, userPrompt string, baseOpts llm.Options, defTimeout time.Duration,
 ) (*llm.ChatResponse, *backends.Backend, []llm.ChainAttempt, error) {
-	chain, err := r.Pool.Chain(role, required, r.Gaming)
+	chain, err := r.Pool.Chain(role, required, r.Gaming, "") // background scope, see available()
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -72,7 +76,7 @@ func (r *Router) EmbedChain(required backends.Sensitivity) ([]backends.Backend, 
 	if r.Pool.RoleConfigured(backends.RoleDreamEmbed) {
 		role = backends.RoleDreamEmbed
 	}
-	chain, err := r.Pool.Chain(role, required, r.Gaming)
+	chain, err := r.Pool.Chain(role, required, r.Gaming, "") // background scope, see available()
 	return chain, role, err
 }
 

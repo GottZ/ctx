@@ -98,7 +98,7 @@ func sseToolCall(id, name, argsObj string) string {
 // whose trust may receive `required`, empty → ErrNoEligibleBackend.
 type trustProvider struct{ chain []backends.Backend }
 
-func (p trustProvider) ChatChain(_ context.Context, required backends.Sensitivity) ([]backends.Backend, error) {
+func (p trustProvider) ChatChain(_ context.Context, required backends.Sensitivity, _ string) ([]backends.Backend, error) {
 	var out []backends.Backend
 	for _, b := range p.chain {
 		if b.Trust.Allows(required) {

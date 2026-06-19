@@ -102,6 +102,12 @@ func (t ThinkMode) Ptr() *bool {
 	}
 }
 
+// GlobalScope is the shared-backend sentinel on context_backends.scope (062
+// DEFAULT): a '_global' backend is visible to every tenant. A '<tenant>' scope
+// is tenant-private. Mirrors store.GlobalScope (the F2 settings/secrets identity)
+// without the import — the value is a DDL constant anchored in migration 062.
+const GlobalScope = "_global"
+
 // Backend is the indivisible connection tuple of one inference role (F1
 // fields) extended by the pool row dimensions (F3, additive — K4). F1
 // consumers keep reading Host/Model/NumCtx/Think/Timeout from config-derived
@@ -131,8 +137,9 @@ type Backend struct {
 	ID   string
 	Name string
 	// Scope is the tenant dimension (062, Modell C): '_global' = shared server
-	// backend, '<tenant>' = tenant-private. Loaded by scanBackend; Chain() does
-	// not yet filter on it (that is 04-W2).
+	// backend, '<tenant>' = tenant-private. Loaded by scanBackend; Chain()
+	// filters on it via visibleTo (04-W2/T34) so a tenant-private backend is
+	// never reachable from a foreign caller's chain (egress isolation, R-LEAK7).
 	Scope         string
 	ProviderClass string
 	// APIKeyRef names the F2 secret this backend authenticates with; "" =

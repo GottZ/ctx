@@ -261,6 +261,14 @@ func PoolReporter(bpool *backends.Pool) ReportFunc {
 type ChainCall struct {
 	Pool       *backends.Pool
 	Role       string
+	// Tenant bounds Chain() to the caller's visible backends (04-W2/T34).
+	// TENANT-DECISION(chaincall-tenant): the translate/temporal/rerank/classify
+	// callers leave it "" — they are NOT in 04-W2's 5-site request-path scope,
+	// so they see only shared '_global' backends (behavior-identical today, all
+	// backends are '_global'; fail-closed — never a foreign tenant-private one).
+	// Threading ar.HomeScope here is a later refinement if those Q-only roles
+	// should reach a tenant's own private backend.
+	Tenant     string
 	Required   backends.Sensitivity
 	// Gaming is the chain-time exclusion (gaming.active + disabled_backends);
 	// the call site reads it from its config snapshot so the toggle takes
@@ -286,7 +294,7 @@ type ChainCall struct {
 // An empty chain returns *backends.ErrNoEligibleBackend — the call site
 // decides its role's fail-open/fail-hard semantics (design 03 §2.4).
 func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool) (*ChatResponse, error) {
-	chain, err := c.Pool.Chain(c.Role, c.Required, c.Gaming)
+	chain, err := c.Pool.Chain(c.Role, c.Required, c.Gaming, c.Tenant)
 	if err != nil {
 		return nil, err
 	}

@@ -17,7 +17,7 @@ func seedPool(bs []Backend) *Pool {
 
 func chainNames(t *testing.T, p *Pool, role string, required Sensitivity, g GamingState) []string {
 	t.Helper()
-	chain, err := p.Chain(role, required, g)
+	chain, err := p.Chain(role, required, g, "")
 	if err != nil {
 		t.Fatalf("Chain(%s, %s): %v", role, required, err)
 	}
@@ -126,7 +126,7 @@ func TestChainGamingExclusion(t *testing.T) {
 func TestChainEmpty(t *testing.T) {
 	p := seedPool(poolFixture())
 
-	_, err := p.Chain(RoleEmbed, SensPublic, GamingState{Active: true, DisabledBackends: []string{"embedder"}})
+	_, err := p.Chain(RoleEmbed, SensPublic, GamingState{Active: true, DisabledBackends: []string{"embedder"}}, "")
 	var noElig *ErrNoEligibleBackend
 	if err == nil {
 		t.Fatal("expected ErrNoEligibleBackend")
@@ -142,7 +142,7 @@ func TestChainEmpty(t *testing.T) {
 	}
 
 	// Unknown role: empty chain, no reasons (no row was ever a candidate).
-	if _, err := p.Chain("proxy:nonexistent", SensPublic, GamingState{}); err == nil {
+	if _, err := p.Chain("proxy:nonexistent", SensPublic, GamingState{}, ""); err == nil {
 		t.Fatal("unknown role must yield ErrNoEligibleBackend")
 	}
 }
@@ -179,7 +179,7 @@ func TestSnapshotAtomicity(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 1000; j++ {
-				chain, err := p.Chain(RoleSynthesis, SensPublic, GamingState{})
+				chain, err := p.Chain(RoleSynthesis, SensPublic, GamingState{}, "")
 				if err != nil || len(chain) != 3 {
 					t.Errorf("chain corrupted during swap: %v %v", chain, err)
 					return

@@ -421,7 +421,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// chain resolves with THAT block's floor-adjusted sensitivity (F3 §2.3
 	// gate table, embed-backfill row).
 	floor := cfg.Pool.ScopeSensitivityFloor
-	if backfilled := h.backfillPending(ctx, floor, cfg.GamingState()); backfilled > 0 {
+	if backfilled := h.backfillPending(ctx, floor, cfg.GamingState(), ar.HomeScope); backfilled > 0 {
 		slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
 	}
 
@@ -429,7 +429,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// repeated queries (debug sessions, recurring lookups) serve from cache in a single UPDATE.
 	// The chain resolves with the query sensitivity; empty/exhausted chain
 	// keeps today's semantics: query 500, embed is health-mandatory.
-	embChain, err := h.backendPool.Chain(backends.RoleEmbed, querySens, cfg.GamingState())
+	embChain, err := h.backendPool.Chain(backends.RoleEmbed, querySens, cfg.GamingState(), ar.HomeScope)
 	if err != nil {
 		slog.Error("embedding failed: no eligible backend", "error", err, "request_id", requestID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "embedding failed"})
@@ -658,7 +658,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				maxDocs = rrf.RerankCrossEncoderMaxDocs
 			}
 			required := rerankRequired(querySens, results, maxDocs)
-			if chain, cerr := h.backendPool.Chain(backends.RoleRerank, required, cfg.GamingState()); cerr != nil {
+			if chain, cerr := h.backendPool.Chain(backends.RoleRerank, required, cfg.GamingState(), ar.HomeScope); cerr != nil {
 				slog.Warn("rerank chain empty, using original order",
 					"error", cerr, "request_id", requestID)
 			} else {
@@ -787,7 +787,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID, ar.HomeScope)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,
@@ -889,7 +889,7 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // Since F3-P3 the chain resolves PER BLOCK with that block's floor-adjusted
 // sensitivity (gate table embed-backfill row) and each wire call leaves a
 // slim llmlog row with the block id.
-func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, gaming backends.GamingState) int {
+func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, gaming backends.GamingState, scope string) int {
 	count := 0
 	for {
 		var blockID, title, content, sens, scope string
@@ -902,7 +902,7 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		}
 
 		required := floor.Apply(backends.Sensitivity(sens), scope)
-		chain, cerr := h.backendPool.Chain(backends.RoleEmbed, required, gaming)
+		chain, cerr := h.backendPool.Chain(backends.RoleEmbed, required, gaming, scope)
 		if cerr != nil {
 			// Trust/gaming-empty chain: the block stays unembedded (visible
 			// via FTS only) — never escalate across the trust border.
