@@ -45,7 +45,7 @@ func TestAdminTier_Integration(t *testing.T) {
 	})
 
 	t.Run("CtxAuth_IsAdminDefaultFalse_BootstrapPerID", func(t *testing.T) {
-		key, plaintext, err := store.CreateApiKey(ctx, pool, "admin-it", "private", nil)
+		key, plaintext, err := store.CreateApiKey(ctx, pool, "admin-it", "private", nil, "")
 		if err != nil {
 			t.Fatalf("create key: %v", err)
 		}
@@ -87,7 +87,7 @@ func TestAdminTier_Integration(t *testing.T) {
 			t.Fatalf("test scope length %d outside (20,50]", len(longScope))
 		}
 
-		_, plaintext, err := store.CreateApiKey(ctx, pool, "long-scope-it", longScope, nil)
+		_, plaintext, err := store.CreateApiKey(ctx, pool, "long-scope-it", longScope, nil, "")
 		if err != nil {
 			t.Fatalf("create key with %d-char home_scope: %v", len(longScope), err)
 		}

@@ -89,7 +89,7 @@ func TestSettingsStore_Integration(t *testing.T) {
 	ctx := context.Background()
 
 	// Actor key for the API-shaped probes.
-	actor, _, err := store.CreateApiKey(ctx, pool, "settings-it-actor", "private", nil)
+	actor, _, err := store.CreateApiKey(ctx, pool, "settings-it-actor", "private", nil, "")
 	if err != nil {
 		t.Fatalf("create actor key: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestSettingsStore_Integration(t *testing.T) {
 	})
 
 	t.Run("AuditAttribution_SurvivesKeyHardDelete", func(t *testing.T) {
-		victim, _, err := store.CreateApiKey(ctx, pool, "doomed-actor", "private", nil)
+		victim, _, err := store.CreateApiKey(ctx, pool, "doomed-actor", "private", nil, "")
 		if err != nil {
 			t.Fatalf("create victim key: %v", err)
 		}

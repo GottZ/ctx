@@ -14,6 +14,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// DefaultTenantID is the fixed UUID of the single-tenant default tenant that
+// the 059 backfill pins to slug 'default' (the value also lives as the DB
+// DEFAULT on context_api_keys.tenant_id). It is the canonical home of this
+// constant; the handler layer aliases it. The trailing '…0d3fa0' ≈ "default".
+const DefaultTenantID = "00000000-0000-0000-0000-0000000d3fa0"
+
 // ApiKey represents a row in context_api_keys (without the plaintext key,
 // which is only returned once at creation).
 type ApiKey struct {
@@ -32,13 +38,33 @@ type ApiKey struct {
 //
 // home_scope is required by API contract (v2.0.0 breaking change): callers
 // must pass a non-empty value. The handler enforces this before calling.
-// allowedScopes may be nil — the DB column defaults to '{shared}'.
-func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes []string) (*ApiKey, string, error) {
+// allowedScopes may be nil — see the tenant-aware default below.
+//
+// tenantID (MT T06, Achse 01-T6) binds the new key to its owning tenant. The
+// handler passes the creator's tenant (ar.TenantID); an empty string falls back
+// to the default tenant (single-tenant / 059-backfill semantics — never NULL,
+// never fail-open, the default tenant IS the incumbent). The store is the last
+// line before the row exists, so the tenant-aware {shared} rule lives here.
+func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes []string, tenantID string) (*ApiKey, string, error) {
 	if label == "" {
 		return nil, "", fmt.Errorf("api_keys: label is required")
 	}
 	if homeScope == "" {
 		return nil, "", fmt.Errorf("api_keys: home_scope is required")
+	}
+	if tenantID == "" {
+		tenantID = DefaultTenantID
+	}
+	// Tenant-aware {shared} default (design/01 §3.6 / E3 / R-LEAK5): only the
+	// default tenant inherits 'shared' automatically. A foreign tenant's key
+	// with no explicit allowed_scopes gets an empty set — never an implicit
+	// cross-tenant read into the default tenant's shared blocks. A non-nil empty
+	// slice makes the COALESCE below keep '{}' instead of the '{shared}' literal.
+	// TENANT-DECISION(shared-scope-owner): shared stays a default-tenant scope
+	// (Weg a) — Alt: system-wide scope like _global (Weg b), reversible by
+	// rehanging one context_tenant_scopes row.
+	if allowedScopes == nil && tenantID != DefaultTenantID {
+		allowedScopes = []string{}
 	}
 	// Scope-format gate (G03): '_'-prefixed scopes are SYSTEM-RESERVED
 	// ('_global' = settings identity sentinel, 051). Enforced here as well
@@ -65,10 +91,10 @@ func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope stri
 	// ctx_auth lookups.
 	row := &ApiKey{}
 	err := pool.QueryRow(ctx,
-		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active)
-		 VALUES ($1, $2, $3, COALESCE($4::text[], '{shared}'::text[]), true)
+		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active, tenant_id)
+		 VALUES ($1, $2, $3, COALESCE($4::text[], '{shared}'::text[]), true, $5::uuid)
 		 RETURNING id, label, home_scope, allowed_scopes, active, last_used_at, created_at`,
-		label, keyHash, homeScope, allowedScopes,
+		label, keyHash, homeScope, allowedScopes, tenantID,
 	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.Active, &row.LastUsedAt, &row.CreatedAt)
 	if err != nil {
 		return nil, "", fmt.Errorf("api_keys: insert: %w", err)

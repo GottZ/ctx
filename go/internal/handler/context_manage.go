@@ -1160,7 +1160,17 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	key, plaintext, err := store.CreateApiKey(r.Context(), h.pool, data.Label, data.HomeScope, data.AllowedScopes)
+	ar := AuthResultFromContext(r.Context())
+	if ar == nil {
+		// Defense in depth — the admin gate already rejected anon callers.
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		return
+	}
+	// MT T06 (Achse 01-T6): the new key is bound to the CREATOR's tenant. The
+	// cross-tenant mint gate (home_scope must belong to the caller's tenant) is
+	// the admin-tier wave T22/05-A5 — here we only inherit tenant_id, which also
+	// drives the tenant-aware {shared} default in store.CreateApiKey (R-LEAK5).
+	key, plaintext, err := store.CreateApiKey(r.Context(), h.pool, data.Label, data.HomeScope, data.AllowedScopes, ar.TenantID)
 	if err != nil {
 		slog.Error("manage: create api key failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})

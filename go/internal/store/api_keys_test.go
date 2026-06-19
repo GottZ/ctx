@@ -10,7 +10,7 @@ import (
 // the early-return error paths with a nil pool.
 
 func TestCreateApiKey_EmptyLabel(t *testing.T) {
-	_, _, err := CreateApiKey(context.Background(), nil, "", "private", nil)
+	_, _, err := CreateApiKey(context.Background(), nil, "", "private", nil, "")
 	if err == nil {
 		t.Fatal("expected error for empty label, got nil")
 	}
@@ -20,7 +20,7 @@ func TestCreateApiKey_EmptyLabel(t *testing.T) {
 }
 
 func TestCreateApiKey_EmptyHomeScope(t *testing.T) {
-	_, _, err := CreateApiKey(context.Background(), nil, "test", "", nil)
+	_, _, err := CreateApiKey(context.Background(), nil, "test", "", nil, "")
 	if err == nil {
 		t.Fatal("expected error for empty home_scope, got nil")
 	}
@@ -31,7 +31,7 @@ func TestCreateApiKey_EmptyHomeScope(t *testing.T) {
 
 func TestCreateApiKey_BothEmpty(t *testing.T) {
 	// label is validated first → error mentions label.
-	_, _, err := CreateApiKey(context.Background(), nil, "", "", nil)
+	_, _, err := CreateApiKey(context.Background(), nil, "", "", nil, "")
 	if err == nil {
 		t.Fatal("expected error for empty inputs, got nil")
 	}
@@ -46,7 +46,7 @@ func TestCreateApiKey_BothEmpty(t *testing.T) {
 
 func TestCreateApiKey_ReservedHomeScope(t *testing.T) {
 	for _, scope := range []string{"_global", "_x"} {
-		_, _, err := CreateApiKey(context.Background(), nil, "label", scope, nil)
+		_, _, err := CreateApiKey(context.Background(), nil, "label", scope, nil, "")
 		if err == nil || !strings.Contains(err.Error(), "reserved") {
 			t.Errorf("home_scope %q: expected 'reserved' error, got: %v", scope, err)
 		}
@@ -54,7 +54,7 @@ func TestCreateApiKey_ReservedHomeScope(t *testing.T) {
 }
 
 func TestCreateApiKey_ReservedAllowedScope(t *testing.T) {
-	_, _, err := CreateApiKey(context.Background(), nil, "label", "tenant-a", []string{"shared", "_global"})
+	_, _, err := CreateApiKey(context.Background(), nil, "label", "tenant-a", []string{"shared", "_global"}, "")
 	if err == nil || !strings.Contains(err.Error(), "reserved") {
 		t.Errorf("expected 'reserved' error for '_global' in allowed_scopes, got: %v", err)
 	}

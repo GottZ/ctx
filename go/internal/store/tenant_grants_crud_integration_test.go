@@ -61,7 +61,7 @@ func TestTenantGrantCRUD_Integration(t *testing.T) {
 	tgMapScope(t, pool, "tg-b", tenantB)
 
 	// An admin key id for created_by provenance (any valid api_keys.id).
-	adminKey, _, err := store.CreateApiKey(ctx, pool, "tg-admin", "private", nil)
+	adminKey, _, err := store.CreateApiKey(ctx, pool, "tg-admin", "private", nil, "")
 	if err != nil {
 		t.Fatalf("create admin key: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestTenantGrantCRUD_Integration(t *testing.T) {
 	// E2E (§V4 gate): the grant widens the grantee's read_scopes at the NEXT auth;
 	// the delete removes it. Drives the resolver through ctx_auth, not just the table.
 	t.Run("grant_widens_read_scopes_then_delete_removes", func(t *testing.T) {
-		key, plaintext, err := store.CreateApiKey(ctx, pool, "tg-b-key", "tg-b", []string{})
+		key, plaintext, err := store.CreateApiKey(ctx, pool, "tg-b-key", "tg-b", []string{}, "")
 		if err != nil {
 			t.Fatalf("create B key: %v", err)
 		}

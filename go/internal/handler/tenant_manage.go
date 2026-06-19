@@ -134,7 +134,9 @@ func (h *ManageHandler) handleTenantUpdate(w http.ResponseWriter, r *http.Reques
 
 // defaultTenantID is the fixed UUID of the single-tenant default tenant (059, E9
 // slug 'default') that carries the ENTIRE legacy corpus (all of private/work/
-// shared). It is referenced here only to GUARD it against tenant-delete.
+// shared). It is referenced here only to GUARD it against tenant-delete. The
+// canonical definition lives in the store layer (store.DefaultTenantID, T06);
+// this is a package-local alias so the guard reads cleanly.
 //
 // TENANT-DECISION(prune-default-guard): tenant-delete REFUSES the default tenant
 // (400) — a full-prune of it would destroy the whole single-tenant corpus (every
@@ -143,7 +145,7 @@ func (h *ManageHandler) handleTenantUpdate(w http.ResponseWriter, r *http.Reques
 // test-tenant teardown and a future deliberate operator path can still reach the
 // raw prune. Umentscheidbar: an operator who genuinely offboards the default
 // tenant must lift this guard explicitly.
-const defaultTenantID = "00000000-0000-0000-0000-0000000d3fa0"
+const defaultTenantID = store.DefaultTenantID
 
 // handleTenantDelete runs the T05b full-prune (store.PruneTenant): the FK-ordered,
 // batched mass-DELETE of the tenant's scope-carried data, its keys, then the

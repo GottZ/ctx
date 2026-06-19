@@ -49,7 +49,7 @@ func TestGamingModePersistence_Integration(t *testing.T) {
 	t.Setenv(settings.EnvDisable, "")
 
 	// Acting admin key (real row → audit attribution is verifiable E2E).
-	actor, _, err := store.CreateApiKey(ctx, pool, "gaming-actor", "private", nil)
+	actor, _, err := store.CreateApiKey(ctx, pool, "gaming-actor", "private", nil, "")
 	if err != nil {
 		t.Fatalf("create actor key: %v", err)
 	}

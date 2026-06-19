@@ -77,7 +77,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 	// default UUID + tenant_role 'member' (059 DEFAULT/backfill, no auto-promote),
 	// is_valid true. RED: 42703 undefined_column "tenant_id" (052 has 6 cols).
 	t.Run("signature_default_key_carries_tenant", func(t *testing.T) {
-		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-default", "private", nil)
+		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-default", "private", nil, "")
 		if err != nil {
 			t.Fatalf("create key: %v", err)
 		}
@@ -112,7 +112,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 	// RETURNs tenant_role from context_api_keys, not a literal. The tenant stays
 	// the (active) default, so the status gate passes.
 	t.Run("admin_role_round_trips", func(t *testing.T) {
-		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-admin-role", "private", nil)
+		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-admin-role", "private", nil, "")
 		if err != nil {
 			t.Fatalf("create key: %v", err)
 		}
@@ -143,7 +143,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 	// 'private') is the load-bearing probe — 'private' sorts first and would MASK
 	// the regression. RED: 42703.
 	t.Run("work_key_read_scopes_positional", func(t *testing.T) {
-		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-work", "work", []string{"shared"})
+		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-work", "work", []string{"shared"}, "")
 		if err != nil {
 			t.Fatalf("create work key: %v", err)
 		}
@@ -169,7 +169,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 	// []string{} must NOT trip the DB DEFAULT '{shared}' (api_keys.go:67 COALESCE
 	// keeps a non-nil empty array). RED: 42703.
 	t.Run("empty_allowed_read_scopes_home_only", func(t *testing.T) {
-		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-empty", "work", []string{})
+		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-empty", "work", []string{}, "")
 		if err != nil {
 			t.Fatalf("create empty-allowed key: %v", err)
 		}
@@ -198,7 +198,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 	// allowed so it catches the sort mutation but NOT a dedup-removal mutation
 	// (which would yield [work,shared,work]).
 	t.Run("home_in_allowed_deduped", func(t *testing.T) {
-		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-dedup", "work", []string{"shared", "work"})
+		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-dedup", "work", []string{"shared", "work"}, "")
 		if err != nil {
 			t.Fatalf("create key: %v", err)
 		}
@@ -240,7 +240,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 		}
 		// A key in tenant A, home='t03a-scope', allowed={}: 't03b-scope' can ONLY
 		// arrive via the grant.
-		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-grant-key", "t03a-scope", []string{})
+		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-grant-key", "t03a-scope", []string{}, "")
 		if err != nil {
 			t.Fatalf("create key: %v", err)
 		}
@@ -281,11 +281,12 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 			`INSERT INTO context_tenant_scopes (scope, tenant_id) VALUES ('t03-susp-scope', $1::uuid)`, suspID); err != nil {
 			t.Fatalf("map suspended scope: %v", err)
 		}
-		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-susp-key", "t03-susp-scope", nil)
+		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-susp-key", "t03-susp-scope", nil, "")
 		if err != nil {
 			t.Fatalf("create key: %v", err)
 		}
-		// CreateApiKey does not set tenant_id (T06); pin it to the suspended tenant.
+		// CreateApiKey defaults the key to the default tenant; re-pin it to the
+		// suspended tenant so the status gate has something non-active to reject.
 		if _, err := pool.Exec(ctx,
 			`UPDATE context_api_keys SET tenant_id = $1::uuid WHERE id = $2::uuid`, suspID, key.ID); err != nil {
 			t.Fatalf("pin key to suspended tenant: %v", err)
@@ -326,7 +327,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 			`INSERT INTO context_tenant_scopes (scope, tenant_id) VALUES ('t03-off-scope', $1::uuid)`, offID); err != nil {
 			t.Fatalf("map offboarding scope: %v", err)
 		}
-		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-off-key", "t03-off-scope", nil)
+		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-off-key", "t03-off-scope", nil, "")
 		if err != nil {
 			t.Fatalf("create key: %v", err)
 		}
@@ -415,7 +416,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 	// (This subtest references the new AuthResult fields, so it only COMPILES
 	// after auth.go is extended — it is added in the GREEN phase, not RED.)
 	t.Run("authenticate_carries_tenant_fields", func(t *testing.T) {
-		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-authn", "private", nil)
+		_, plaintext, err := store.CreateApiKey(ctx, pool, "t03-authn", "private", nil, "")
 		if err != nil {
 			t.Fatalf("create key: %v", err)
 		}
@@ -456,7 +457,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 	// this probe the IS NULL arm is untested (no other subtest produces a NULL
 	// tenant_id — CreateApiKey always inherits the 059 DEFAULT).
 	t.Run("null_tenant_id_unauthorized", func(t *testing.T) {
-		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-null-tenant", "private", nil)
+		key, plaintext, err := store.CreateApiKey(ctx, pool, "t03-null-tenant", "private", nil, "")
 		if err != nil {
 			t.Fatalf("create key: %v", err)
 		}

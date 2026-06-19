@@ -36,7 +36,7 @@ func TestRoleDomain_MatchesDBCheck(t *testing.T) {
 	pool := testdb.SetupTestDB(t) // applies 058..061
 
 	// Seed one key (tenant_role defaults to 'member', tenant_id → default tenant).
-	key, _, err := store.CreateApiKey(ctx, pool, "t20-role-probe", "private", nil)
+	key, _, err := store.CreateApiKey(ctx, pool, "t20-role-probe", "private", nil, "")
 	if err != nil {
 		t.Fatalf("seed key: %v", err)
 	}

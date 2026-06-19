@@ -118,7 +118,7 @@ func TestSettingsAPI_Integration(t *testing.T) {
 	}
 
 	// Acting admin key (real row → audit attribution is verifiable E2E).
-	actor, _, err := store.CreateApiKey(ctx, pool, "settings-api-actor", "private", nil)
+	actor, _, err := store.CreateApiKey(ctx, pool, "settings-api-actor", "private", nil, "")
 	if err != nil {
 		t.Fatalf("create actor key: %v", err)
 	}

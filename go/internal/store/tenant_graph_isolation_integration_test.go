@@ -84,11 +84,14 @@ func t16MapScope(t *testing.T, pool *pgxpool.Pool, scope, tenantID string) {
 	}
 }
 
-// t16Key mints a tenant-bound key (CreateApiKey + pin tenant_id, as T06 does not
-// yet set it) and returns the plaintext for auth.Authenticate.
+// t16Key mints a tenant-bound key and returns the plaintext for auth.Authenticate.
+// It creates against the default tenant and then pins tenant_id with an explicit
+// UPDATE, so a nil allowed_scopes keeps the {shared} default-tenant inheritance
+// these isolation probes rely on (T06's CreateApiKey would hand a foreign tenant
+// {} instead — deliberately not what is exercised here).
 func t16Key(t *testing.T, pool *pgxpool.Pool, label, home string, allowed []string, tenantID string) string {
 	t.Helper()
-	key, plaintext, err := store.CreateApiKey(context.Background(), pool, label, home, allowed)
+	key, plaintext, err := store.CreateApiKey(context.Background(), pool, label, home, allowed, "")
 	if err != nil {
 		t.Fatalf("create key %s: %v", label, err)
 	}
