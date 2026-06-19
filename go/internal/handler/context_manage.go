@@ -80,10 +80,8 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// K2 (G03): key/MCP-client management and mutating dream-mode are
-	// admin-only (BREAKING for non-admin keys). Single gate before dispatch;
-	// actionRequiresAdmin lists the gated actions.
-	if actionRequiresAdmin(req) && !requireAdminAction(w, authResult) {
+	// MT T25 (05-A8): two-tier admin gate before dispatch (design 05 §4.4).
+	if !enforceActionTier(w, req, authResult) {
 		return
 	}
 
@@ -158,10 +156,6 @@ func (h *ManageHandler) dispatchAPIKeyAction(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-// actionRequiresAdmin reports whether a manage action is gated on the admin
-// tier (052, K2/G03). dream-mode is special-cased: only the mutating shape
-// (non-empty data) is gated; reading the current mode stays open to every
-// valid key.
 // dispatchBlocksAction routes the block-corpus maintenance actions (G41 audit +
 // G40 classify) — kept out of HandleManage's switch so the hot dispatcher stays
 // under the cyclomatic budget (mirrors dispatchBackendAction/dispatchAPIKeyAction).
@@ -178,55 +172,110 @@ func (h *ManageHandler) dispatchBlocksAction(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-func actionRequiresAdmin(req manageRequest) bool {
+// adminTier classifies how a manage action is gated (MT T25, 05-A8). It
+// replaces the binary actionRequiresAdmin (052/G03) with the two-tier cut of
+// design 05 §4.4: server-global actions stay server-admin, the per-tenant key
+// actions become tenant-admin-capable.
+type adminTier int
+
+const (
+	tierOpen        adminTier = iota // no admin gate (auth + scope only)
+	tierTenantAdmin                  // server-admin OR tenant-admin of own tenant
+	tierServerAdmin                  // server-admin only (server-global semantics)
+)
+
+// actionTier reports the admin tier a manage action requires (MT T25, 05-A8,
+// design 05 §4.4). dream-mode/gaming-mode are special-cased: only the mutating
+// shape is gated; reading the current mode stays open (tierOpen) to every valid
+// key.
+//
+// The tenant-admin tier is granted ONLY to actions whose handlers are already
+// tenant-isolated — today that is api-key-create/list/delete (T22 scope→tenant
+// via context_tenant_scopes, T23 own-tenant list filter, T24 404-no-oracle
+// delete). Every other gated action STAYS server-admin: their handlers carry no
+// tenant filter yet (handleMCPClientList takes no AuthResult, handleBackendList
+// ignores it, dispatchBlocksAction passes none), so admitting a tenant-admin
+// before T26(A9)/T37/the audit wave would be fail-OPEN. This keeps the §7
+// pausability invariant: A8 opens only what is already isolated, never something
+// closed today. tenant-*/tenant-grant-* are operator actions by nature (owner-
+// register lifecycle / cross-tenant read grants, Achse 01/02). dream-/gaming-mode
+// mutations are server-global by design (scheduler goroutine set / physical GPU
+// lock, §4.4).
+// enforceActionTier applies the two-tier admin gate (MT T25, 05-A8) for req and
+// reports whether dispatch may proceed. On a tier violation it has already
+// written the 403. Server-global actions require a server-admin; per-tenant
+// actions (key-*) also admit a tenant-admin of the caller's own tenant — the
+// fine-grained per-resource target-tenant check then lives IN the handler
+// (T22/T23/T24 against the payload). tierOpen skips the gate. Extracted from
+// HandleManage to keep the dispatcher under the cyclomatic budget (mirrors the
+// dispatch* helpers).
+func enforceActionTier(w http.ResponseWriter, req manageRequest, ar *auth.AuthResult) bool {
+	switch actionTier(req) {
+	case tierServerAdmin:
+		return requireAdminAction(w, ar)
+	case tierTenantAdmin:
+		return requireTenantAdmin(w, ar, ar.TenantID)
+	}
+	return true // tierOpen
+}
+
+func actionTier(req manageRequest) adminTier {
 	switch req.Action {
-	case "api-key-create", "api-key-list", "api-key-delete",
-		"mcp-client-create", "mcp-client-list", "mcp-client-delete",
+	// Per-tenant tier: tenant-isolated handlers (T22/T23/T24 — L1/L2/L3 closed).
+	case "api-key-create", "api-key-list", "api-key-delete":
+		return tierTenantAdmin
+	case "mcp-client-create", "mcp-client-list", "mcp-client-delete",
 		// backend-* in full (reads included): the list discloses egress
 		// topology, create/update without the gate would be a corpus
-		// exfiltration/SSRF API (F3 risk R1).
+		// exfiltration/SSRF API (F3 risk R1). Handler not yet tenant-filtered
+		// (→ server-admin until T37/04-W5).
 		"backend-create", "backend-update", "backend-delete",
 		"backend-list", "backend-test",
-		// blocks-audit-* in full (G41): start causes bulk sensitivity
-		// downgrades (the opsec direction), status discloses block titles
-		// and classification topology.
+		// blocks-audit-* (G41): start causes bulk sensitivity downgrades (the
+		// opsec direction), status discloses block titles/classification
+		// topology. Handler takes no AuthResult (→ server-admin until isolated).
 		"blocks-audit-start", "blocks-audit-status",
-		// blocks-classify-* in full (G40): a corpus-wide mutation (even if
-		// upgrade-only) and the status/samples disclose block titles and the
-		// classification topology — same opsec surface as the audit.
+		// blocks-classify-* (G40): a corpus-wide mutation (even if upgrade-only)
+		// + the status/samples disclose block titles/topology — same surface.
 		"blocks-classify-start", "blocks-classify-status",
-		// tenant-* lifecycle (MT T05a/T05b, Achse 01): create/list/get/update/delete
-		// are server-admin actions — the list discloses tenant topology, create/update
-		// mutate the owner register (suspend = a system-wide access cut at the next
-		// auth via the 060 ctx_auth gate), and delete is the destructive full-prune
-		// (T05b). The tenant-grant-* cross-tenant read-grant actions (T17, 02-V4)
-		// share the same gate — a grant widens another tenant's read_scopes, server-
-		// admin only. Per-tenant-admin scoping is Achse 05 (T25); until then server
-		// is_admin only.
+		// tenant-* lifecycle (MT T05a/T05b, Achse 01): the list discloses tenant
+		// topology, create/update mutate the owner register (suspend = a
+		// system-wide access cut at the next auth via the 060 ctx_auth gate),
+		// delete is the destructive full-prune. tenant-grant-* (T17, 02-V4)
+		// widen another tenant's read_scopes. Both are operator-level: stay
+		// server-admin (a tenant-admin manages within, never across, tenants).
 		"tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
 		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete":
-		return true
+		return tierServerAdmin
 	case "dream-mode":
-		return isDreamModeMutation(req)
+		if isDreamModeMutation(req) {
+			return tierServerAdmin
+		}
+		return tierOpen
 	case "gaming-mode":
 		// Only the MUTATING shape is gated: an ungated toggle would let any
 		// tenant key flip the whole system's egress topology (herbert out ⇒
 		// synthesis goes external via OpenRouter — cost + egress-character
-		// change by a non-admin, design 03 §2.6). Status read stays auth-only.
-		return isGamingModeMutation(req)
+		// change, design 03 §2.6). gaming.active gates a physical GPU host, not
+		// a tenant concept — server-global by design. Status read stays open.
+		if isGamingModeMutation(req) {
+			return tierServerAdmin
+		}
+		return tierOpen
 	default:
-		return false
+		return tierOpen
 	}
 }
 
-// requireAdminAction gates the key/MCP/dream-mode management actions on the
-// admin tier (052, K2/G03 — BREAKING for non-admin keys). Before this gate,
-// EVERY valid key of any home_scope could mint keys for arbitrary scopes
-// (read access to foreign tenants), revoke keys, and manage MCP clients —
-// negatively probed red on 2026-06-10 (see admin_gate_test.go).
-//
-// TODO(multi-tenant): is_admin is server-global; a per-tenant admin notion
-// (manage keys of your own tenant only) needs a finer cut than this.
+// requireAdminAction gates a server-global manage action on the server-admin
+// tier (M052 is_admin — BREAKING for non-admin keys). After MT T25 this is the
+// tierServerAdmin path: operator-level actions (mcp/backend/audit/classify,
+// tenant lifecycle + grants, dream/gaming mutations) that act across the whole
+// process, not within one tenant. The per-tenant key actions use
+// requireTenantAdmin instead — the finer cut the old is_admin-only TODO called
+// for. Before any admin gate existed, EVERY valid key could mint keys for
+// arbitrary scopes, revoke keys, and manage MCP clients (negatively probed red
+// 2026-06-10, admin_gate_test.go).
 func requireAdminAction(w http.ResponseWriter, ar *auth.AuthResult) bool {
 	if ar == nil || !ar.IsValid || !ar.IsAdmin {
 		writeJSON(w, http.StatusForbidden, map[string]any{
@@ -235,6 +284,30 @@ func requireAdminAction(w http.ResponseWriter, ar *auth.AuthResult) bool {
 		return false
 	}
 	return true
+}
+
+// requireTenantAdmin gates a per-tenant manage action (MT T25, 05-A8): a
+// server-admin (authority over every tenant) OR a tenant-admin of targetTenant
+// passes; everyone else gets 403. At the dispatch gate targetTenant is the
+// caller's own tenant (ar.TenantID) — the tier hurdle "may you administer your
+// own tenant". The fine-grained per-resource target-tenant check (is THIS
+// key/scope actually in your tenant) lives in the handler (design 05 §4.2: the
+// check is no longer only at dispatch but also against the payload — T22
+// firstScopeOutsideTenant, T23 list filter, T24 404-no-oracle delete).
+//
+// server-admin is short-circuited (§4.3 #2: "server-admin OR tenant-admin of the
+// target tenant") so a degenerate empty ar.TenantID never locks the operator
+// out; the empty-target fail-closed guard stays sharp inside IsTenantAdminOf for
+// the in-handler payload checks, where targetTenant comes from caller-supplied
+// data. The 403 body is identical to requireAdminAction — no tier oracle.
+func requireTenantAdmin(w http.ResponseWriter, ar *auth.AuthResult, targetTenant string) bool {
+	if ar.IsServerAdmin() || ar.IsTenantAdminOf(targetTenant) {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]any{
+		"success": false, "error": "admin key required",
+	})
+	return false
 }
 
 // isDreamModeMutation reports whether a dream-mode request changes state
