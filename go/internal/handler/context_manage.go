@@ -1115,6 +1115,29 @@ func firstReservedScope(homeScope string, allowedScopes []string) string {
 	return ""
 }
 
+// firstScopeOutsideTenant returns the first requested scope — homeScope first,
+// then allowedScopes in order — that is NOT in ownedScopes, or "" when every
+// requested scope is owned. ownedScopes is a tenant's context_tenant_scopes set
+// (store.TenantScopes). It is the pure decision behind the T22/05-A5 mint gate
+// (Leak-Pfad L3): a non-server-admin may mint keys only for scopes its own tenant
+// owns. An empty ownedScopes makes every requested scope "outside" — the
+// fail-closed default for a caller whose tenant owns nothing.
+func firstScopeOutsideTenant(homeScope string, allowedScopes, ownedScopes []string) string {
+	owned := make(map[string]struct{}, len(ownedScopes))
+	for _, s := range ownedScopes {
+		owned[s] = struct{}{}
+	}
+	if _, ok := owned[homeScope]; !ok {
+		return homeScope
+	}
+	for _, s := range allowedScopes {
+		if _, ok := owned[s]; !ok {
+			return s
+		}
+	}
+	return ""
+}
+
 // apiKeyCreateRequest is the JSON shape under req.Data for api-key-create.
 // home_scope is REQUIRED as of v2.0.0 — empty values yield 400.
 type apiKeyCreateRequest struct {
@@ -1166,10 +1189,37 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
 		return
 	}
-	// MT T06 (Achse 01-T6): the new key is bound to the CREATOR's tenant. The
-	// cross-tenant mint gate (home_scope must belong to the caller's tenant) is
-	// the admin-tier wave T22/05-A5 — here we only inherit tenant_id, which also
-	// drives the tenant-aware {shared} default in store.CreateApiKey (R-LEAK5).
+	// MT T22 (05-A5, Leak-Pfad L3, M052 052:5-9): a non-server-admin may mint
+	// keys ONLY for scopes its OWN tenant owns. In Modell C the scope→tenant map
+	// is context_tenant_scopes (store.TenantScopes) — NOT the naive
+	// home_scope==TenantID string compare of design/05 §5.1, which is the
+	// superseded Modell-B view (conflicts.md §0: tenant_id is a UUID, scope is the
+	// data discriminator, so the two are never string-equal). Every requested
+	// scope (home + allowed) must belong to ar.TenantID; a foreign or unowned
+	// scope is a privilege-escalation into a foreign corpus → 403. A server-admin
+	// mints any scope, byte-identical to today (§5.4 pausability). The gate is
+	// DORMANT until the action-tier cut (T25/05-A8) lets a non-server-admin reach
+	// this handler at all — built here so A8 only flips one switch. An empty
+	// ar.TenantID yields an empty owned set → every scope is "outside" → 403
+	// (fail-closed; ctx_auth guarantees a non-empty tenant_id for valid keys).
+	if !ar.IsServerAdmin() {
+		owned, err := store.TenantScopes(r.Context(), h.pool, ar.TenantID)
+		if err != nil {
+			slog.Error("manage: tenant scopes lookup failed", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+			return
+		}
+		if outside := firstScopeOutsideTenant(data.HomeScope, data.AllowedScopes, owned); outside != "" {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"success": false,
+				"error":   "cannot create keys outside your tenant",
+			})
+			return
+		}
+	}
+	// MT T06 (Achse 01-T6): the new key is bound to the CREATOR's tenant
+	// (ar.TenantID), which also drives the tenant-aware {shared} default in
+	// store.CreateApiKey (R-LEAK5).
 	key, plaintext, err := store.CreateApiKey(r.Context(), h.pool, data.Label, data.HomeScope, data.AllowedScopes, ar.TenantID)
 	if err != nil {
 		slog.Error("manage: create api key failed", "error", err)

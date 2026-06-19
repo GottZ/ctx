@@ -179,6 +179,38 @@ func TestResolveApiKeyListParams(t *testing.T) {
 	})
 }
 
+// TestFirstScopeOutsideTenant pins the pure decision behind the T22 (05-A5)
+// mint gate (Leak-Pfad L3, design/05 §5.2): a non-server-admin may mint keys
+// ONLY for scopes its own tenant owns. The function returns the first requested
+// scope — home_scope first, then allowed_scopes in order — that the tenant does
+// NOT own, or "" when every requested scope is owned. An empty owned set makes
+// every requested scope "outside" (fail-closed: a tenant that owns nothing mints
+// nothing). No DB — the owned set is the caller's store.TenantScopes result.
+func TestFirstScopeOutsideTenant(t *testing.T) {
+	tests := []struct {
+		name    string
+		home    string
+		allowed []string
+		owned   []string
+		want    string
+	}{
+		{"home owned, no allowed", "a-scope", nil, []string{"a-scope", "a-other"}, ""},
+		{"home owned, allowed owned", "a-scope", []string{"a-other"}, []string{"a-scope", "a-other"}, ""},
+		{"home foreign", "b-scope", nil, []string{"a-scope"}, "b-scope"},
+		{"home owned, allowed foreign", "a-scope", []string{"b-scope"}, []string{"a-scope"}, "b-scope"},
+		{"home owned, second allowed foreign", "a-scope", []string{"a-other", "b-scope"}, []string{"a-scope", "a-other"}, "b-scope"},
+		{"empty owned set fails closed", "a-scope", nil, nil, "a-scope"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := firstScopeOutsideTenant(tt.home, tt.allowed, tt.owned); got != tt.want {
+				t.Errorf("firstScopeOutsideTenant(%q, %v, %v) = %q, want %q",
+					tt.home, tt.allowed, tt.owned, got, tt.want)
+			}
+		})
+	}
+}
+
 // SECURITY PROPERTY: Action 'api-key-delete' requires an id field.
 // Without it, the handler returns 400 — no DB call, no nil-pool panic.
 func TestApiKeyDelete_MissingID(t *testing.T) {
