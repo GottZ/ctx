@@ -91,6 +91,17 @@ func NewStore(c *Config) *Store {
 	return s
 }
 
+// SetOverlay installs the per-tenant overlay builder (MT 06-C3). It MUST be
+// called at boot, before the store is shared with the scheduler and HTTP
+// goroutines — the field is written without synchronization, relying on the
+// happens-before of boot sequencing (server + scheduler start afterwards). It
+// is the wiring main (a separate package) needs: the overlay field is
+// unexported, so it cannot set it directly. While the overlay stays nil (the
+// pre-C3 state) SnapshotForRequest/SnapshotForTenant return the base generation.
+func (s *Store) SetOverlay(o TenantOverlay) {
+	s.overlay = o
+}
+
 // Snapshot returns the current base generation. Callers take ONE snapshot per
 // operation (request, dream cycle, daily iteration, digest run) and pass
 // values down as parameters. The returned Config is immutable — updates go

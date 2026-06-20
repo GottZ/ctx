@@ -173,6 +173,29 @@ func TestStoreSnapshotForFallsToBaseWithoutOverlay(t *testing.T) {
 	}
 }
 
+// TestStoreSetOverlay: the exported SetOverlay installs the overlay the boot
+// wiring (06-C3, cmd/ctxd/main.go) uses — main is a separate package and cannot
+// touch the private field. Before it, a per-tenant read falls back to base;
+// after it, the read resolves through the overlay. Red-proof: a SetOverlay that
+// drops the assignment leaves SnapshotForTenant on base.
+func TestStoreSetOverlay(t *testing.T) {
+	base := generation(t, "base")
+	s := NewStore(base)
+	ctx := context.Background()
+
+	if got := s.SnapshotForTenant(ctx, "acme"); got != base {
+		t.Fatalf("precondition: no overlay ⇒ base, got %p", got)
+	}
+
+	tcfg := generation(t, "tenant")
+	s.SetOverlay(func(_ context.Context, _ *Config, _ string) (*Config, error) {
+		return tcfg, nil
+	})
+	if got := s.SnapshotForTenant(ctx, "acme"); got != tcfg {
+		t.Errorf("after SetOverlay, SnapshotForTenant must resolve through the overlay: got %p want %p", got, tcfg)
+	}
+}
+
 // TestStoreSnapshotForTenantReservedScope: reserved (_-prefixed) and empty
 // scopes never get a tenant generation, even with an overlay installed, and are
 // never cached. Red-proof: drop the HasPrefix/empty guard ⇒ overlay is called

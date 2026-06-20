@@ -135,6 +135,17 @@ func main() {
 	cfgStore := config.NewStore(effCfg)
 	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...)
 
+	// MT 06-C3: install the per-tenant config overlay so SnapshotForTenant /
+	// SnapshotForRequest can resolve a tenant's context_settings rows on top of
+	// the _global base (the overlay needs the pool + secret resolver, hence the
+	// settings layer supplies it). Set here at boot, before the scheduler and
+	// HTTP server start, so the happens-before holds and the field needs no
+	// synchronization. Behavior-neutral until a caller actually resolves a
+	// tenant: SnapshotForRequest stays on base until C5 wires the scope hook,
+	// SnapshotForTenant has no caller until the C6 background iteration, and a
+	// single-tenant deployment (no per-tenant rows) inherits the base anyway.
+	cfgStore.SetOverlay(settings.TenantOverlay(pool))
+
 	// F3-P1: backend pool. The one-time bootstrap reads the EFFECTIVE
 	// snapshot (X1: settings>env precedence, never raw os.Getenv) and seeds
 	// context_backends when empty; afterwards the TABLE is the source of
