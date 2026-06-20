@@ -16,7 +16,9 @@ import (
 // the dream/gaming state or the full backend health aggregation to a tenant is
 // the topology leak §4.6 closes. The SSE PUSH path (/api/events) stays
 // server-admin-only until the per-tenant broadcast lands (T37d) — so there is no
-// push leak (K-T1: open the pull, keep the push closed).
+// push leak (K-T1: open the pull, keep the push closed). POLLING this endpoint is
+// the deliberate T37d interim (live SSE is the long-term goal); the per-tenant
+// SSE migration map lives in events.go (this SnapshotForTenant is its anchor 5).
 
 // tenantRollupTTL bounds the per-tenant rollup cache age. The rollup query joins
 // llm_log → api_keys → tenant_scopes over the 24h window; 30s amortizes it

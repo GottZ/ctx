@@ -191,6 +191,49 @@ type sseSub struct {
 	done chan struct{}
 }
 
+// ── T37d · per-tenant SSE migration map (04-W5 push; INTERIM = polling) ──────
+//
+// Decision (2026-06-20): live per-tenant SSE is the long-term goal, but the
+// interim tenant-admin telemetry path is POLLING — a tenant-admin already reads
+// its OWN view via GET /api/status (T37c, SnapshotForTenant) + GET /api/llmlog
+// (T37b, api_key_id filter), both shipped and per-tenant-scoped. /api/events
+// stays SERVER-admin-only (server.go) so there is NO push leak (K-T1: the pull
+// is per-tenant, the push is not opened). Polling is the deliberate interim, not
+// a gap. This block is the spec the SSE rework follows; every touch-point below
+// carries a `// T37d:` anchor pointing back to the numbered step here.
+//
+// What the push path must grow to admit tenant-admins:
+//
+//  1. server.go gate — RequireAdmin → RequireAdminOrTenantAdmin (mirror the
+//     /api/status mount). The gate only ADMITS; the hub MUST then scope every
+//     frame, exactly as the pull pairs the looser gate with an in-handler filter.
+//  2. subscribe() — capture the subscriber identity (scope + role + the tenant's
+//     api_key_id set) onto sseSub at subscribe time. A server-admin sub is tagged
+//     "global" and keeps today's full fan-out unchanged.
+//  3. broadcast() — fan a frame ONLY to subs it belongs to. Today one frame goes
+//     to everyone; per-tenant means a frame is keyed by scope and broadcast()
+//     matches that key against sseSub.scope (global subs match all).
+//  4. runLoop() diff — today ONE global diff (status + backends + EVERY tenant's
+//     llmcalls). Per-tenant needs either (a) a per-scope diff built from
+//     SnapshotForTenant(scope) + scope-visible backends + scope-filtered
+//     llmcalls, or (b) one global build filtered per-sub at fan-out. (a) reuses
+//     the T37c rollup cache and the egress predicate already lives in
+//     SnapshotForTenant; (b) is cheaper but re-implements that predicate inside
+//     the hub. fetchLLMCalls must additionally gain the api_key_id filter
+//     llmlog.go already uses (server-admin = all rows, tenant = ANY(its keys)).
+//  5. HandleEvents initial state — serve SnapshotForTenant(scope) instead of the
+//     global Snapshot for a tenant-admin sub (the same reduction as /api/status).
+//  6. HandleEvents re-auth — today `!res.IsAdmin` ends the stream. Per-tenant
+//     must end it on `!(server-admin || tenant-admin-of-own-tenant)` AND on a
+//     tenant_id/role CHANGE mid-stream: a key re-pointed to another tenant must
+//     not keep streaming the old tenant's telemetry. Mirror the
+//     RequireAdminOrTenantAdmin admit test plus a stored-identity compare.
+//
+// Reusable blocks already in place: SnapshotForTenant (status_tenant.go) and the
+// llmlog api_key_id filter (llmlog.go) — the per-tenant DATA shaping exists; only
+// the PUSH plumbing (subscribe-tag → broadcast-route → re-auth) is new. Open
+// design choice is (4a) vs (4b); see ctx 019ee181 §FOLGESESSION-ANKER.
+//
 // sseHub multiplexes one broadcast loop over many connections.
 type sseHub struct {
 	status statusProvider
@@ -219,6 +262,8 @@ func (h *sseHub) subscribe() (*sseSub, bool) {
 	if len(h.subs) >= max {
 		return nil, false
 	}
+	// T37d (anchor 2): tag this sub with the subscriber's scope/role + api_key_id
+	// set here; a server-admin sub stays "global". See the migration map above.
 	s := &sseSub{ch: make(chan sseFrame, sseMailbox), done: make(chan struct{})}
 	h.subs[s] = struct{}{}
 	if !h.running {
@@ -249,6 +294,8 @@ func (h *sseHub) subCount() int {
 func (h *sseHub) broadcast(f sseFrame) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// T37d (anchor 3): per-tenant fan-out filters here — a frame keyed by scope
+	// reaches only subs whose scope matches (global subs match all).
 	for s := range h.subs {
 		select {
 		case s.ch <- f:
@@ -295,6 +342,9 @@ func (h *sseHub) runLoop() {
 				return // last subscriber left — stop (no idle queue scans)
 			}
 
+			// T37d (anchor 4): today ONE global diff fans to all. Per-tenant builds
+			// a per-scope diff (SnapshotForTenant + scope-filtered llmcalls) OR
+			// filters this global build per-sub at fan-out. See the migration map.
 			opCtx, cancel := context.WithTimeout(h.life, 10*time.Second)
 			snap := h.status.refreshForBroadcast(opCtx)
 
@@ -334,6 +384,8 @@ func fetchLLMCalls(ctx context.Context, pool *pgxpool.Pool, cursor time.Time, li
 	if limit <= 0 {
 		limit = 200
 	}
+	// T37d (anchor 4): the per-tenant variant adds the `api_key_id = ANY($keys)`
+	// filter llmlog.go already uses — server-admin = all rows, tenant = own keys.
 	rows, err := pool.Query(ctx, `
 		SELECT id::text, created_at, pipeline, model,
 		       COALESCE(backend_name, host) AS backend,
@@ -428,6 +480,8 @@ func (h *EventsHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Initial full state: a complete status + backends event before any diffs
 	// (design §3.6), served from the collector cache the loop keeps warm.
+	// T37d (anchor 5): a tenant-admin sub serves SnapshotForTenant(scope) here
+	// instead of the global Snapshot — same reduction as /api/status (T37c).
 	snap := h.hub.status.Snapshot(r.Context())
 	if data, err := json.Marshal(statusEventOf(snap)); err == nil {
 		if sw.event("status", strconv.FormatInt(snap.AsOf.UnixMilli(), 10), data) != nil {
@@ -467,6 +521,9 @@ func (h *EventsHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-reauthT.C:
+			// T37d (anchor 6): per-tenant re-auth ends the stream on
+			// !(server-admin || tenant-admin-of-own-tenant) AND on a tenant_id/role
+			// change mid-stream (a re-pointed key must not keep the old telemetry).
 			res, err := h.hub.authenticate(r.Context(), key)
 			if err != nil || res == nil || !res.IsValid || !res.IsAdmin {
 				_ = sw.event("error", "", []byte(`{"error":"session revoked"}`))

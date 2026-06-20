@@ -131,7 +131,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// ONE global diff (status + backends + EVERY tenant's llmcalls) to all
 		// subscribers; a per-tenant SSE broadcast is an architecture change
 		// (T37d), so the push path stays closed to tenant-admins — no push leak
-		// (K-T1: the pull is per-tenant, the push is not opened).
+		// (K-T1: the pull is per-tenant, the push is not opened). Tenant-admins
+		// get their live-ish telemetry by POLLING /api/status + /api/llmlog
+		// (the deliberate T37d interim); when SSE lands this gate becomes
+		// RequireAdminOrTenantAdmin (anchor 1, events.go T37d migration map).
 		r.Group(func(r chi.Router) {
 			r.Use(handler.RequireAdmin)
 			r.Get("/api/events", eventsH.HandleEvents)
