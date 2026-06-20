@@ -110,7 +110,7 @@ func TestToOverridesGlobalOnlyTenantGate(t *testing.T) {
 	t.Run("tenant override on global-only key is dropped + WARN", func(t *testing.T) {
 		overrides, issues := toOverrides([]store.SettingOverride{
 			tenantRow("gaming.active", tenant, `true`),
-		})
+		}, []string{store.GlobalScope, tenant})
 		if len(overrides) != 0 {
 			t.Errorf("tenant override on global-only gaming.active must be dropped, got %+v", overrides)
 		}
@@ -122,7 +122,7 @@ func TestToOverridesGlobalOnlyTenantGate(t *testing.T) {
 	t.Run("tenant override on tenant-overridable key passes", func(t *testing.T) {
 		overrides, issues := toOverrides([]store.SettingOverride{
 			tenantRow("rerank.blend_weight", tenant, `0.5`),
-		})
+		}, []string{store.GlobalScope, tenant})
 		if len(overrides) != 1 || overrides[0].Key != "rerank.blend_weight" {
 			t.Errorf("tenant override on tenant-overridable key must pass, got %+v", overrides)
 		}
@@ -134,7 +134,7 @@ func TestToOverridesGlobalOnlyTenantGate(t *testing.T) {
 	t.Run("operator _global override on global-only key passes", func(t *testing.T) {
 		overrides, issues := toOverrides([]store.SettingOverride{
 			row("gaming.active", `true`),
-		})
+		}, []string{store.GlobalScope})
 		if len(overrides) != 1 || overrides[0].Key != "gaming.active" {
 			t.Errorf("operator _global override on global-only key must pass, got %+v", overrides)
 		}
@@ -147,7 +147,7 @@ func TestToOverridesGlobalOnlyTenantGate(t *testing.T) {
 		base, _ := config.Build(nil, nil)
 		gatedOverrides, _ := toOverrides([]store.SettingOverride{
 			tenantRow("embed.host", tenant, `"http://embed.example:9999"`),
-		})
+		}, []string{store.GlobalScope, tenant})
 		gated, _ := config.Build(gatedOverrides, nil)
 		if EmbedCacheCoupledChanged(base, gated) {
 			t.Errorf("tenant embed.host override must NOT change the effective embed tuple " +
@@ -196,7 +196,7 @@ func TestToOverridesWarnsWithoutEmbeddingValue(t *testing.T) {
 	overrides, issues := toOverrides([]store.SettingOverride{
 		row("chat.model", `"db-model"`),
 		row("chat.api_key", `{"oops":"`+pasted+`"}`),
-	})
+	}, []string{store.GlobalScope})
 	if len(overrides) != 1 || overrides[0].Key != "chat.model" {
 		t.Fatalf("overrides = %+v, want exactly chat.model", overrides)
 	}
@@ -216,7 +216,7 @@ func TestBuildWithCorruptValueKeepsEnv(t *testing.T) {
 
 	cfg, issues := buildWith([]store.SettingOverride{
 		row("rerank.blend_weight", `"kaputt"`), // §5 negative probe (valid JSON, unparseable float)
-	}, nil)
+	}, nil, []string{store.GlobalScope})
 
 	if config.HasErrors(issues) {
 		t.Fatalf("tolerance broken — override layer produced errors: %v", issues)
@@ -350,7 +350,7 @@ func TestLeakScanBootBuildReload(t *testing.T) {
 	}
 
 	// Boot surface: build, issue lines, takeover line, effective boot dump.
-	cfg, issues := buildWith(rows, resolve)
+	cfg, issues := buildWith(rows, resolve, []string{store.GlobalScope})
 	logIssues(issues)
 	logApplied(cfg, rows)
 	slog.Info("config: effective", config.BootDumpArgs(cfg, issues)...)

@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -87,7 +89,7 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, envCfg *config.Config, e
 		return envCfg, envIssues
 	}
 
-	cfg, issues := BuildFromRows(ctx, pool, rows)
+	cfg, issues := BuildFromRows(ctx, pool, rows, []string{store.GlobalScope})
 
 	// Log only what the override layer CHANGED: issues already present in the
 	// env-only pass were logged by the boot loop before the pool existed.
@@ -119,7 +121,7 @@ func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 		}
 	}
 
-	cfg, issues := BuildFromRows(ctx, pool, rows)
+	cfg, issues := BuildFromRows(ctx, pool, rows, []string{store.GlobalScope})
 	logIssues(issues)
 
 	prev := st.Snapshot()
@@ -168,25 +170,41 @@ func loadOverrideRows(ctx context.Context, pool *pgxpool.Pool) ([]store.SettingO
 	return store.LoadSettingOverrides(ctx, pool, store.GlobalScope)
 }
 
+// loadTenantOverrideRows reads the caller's tenant-scope overrides ON TOP of
+// _global in ONE query — exactly the two scopes {_global, tenant}. The Go merge
+// (toOverrides) materializes the precedence tenant > _global; the ORDER BY in
+// LoadSettingOverridesMulti is only the defensive safeguard. Additive next to
+// loadOverrideRows (the boot-time _global path stays). No consumer in T29 — the
+// W4/W5 reload/handler waves call this with TenantOf(ar); Bootstrap/Reload stay
+// _global-only here.
+func loadTenantOverrideRows(ctx context.Context, pool *pgxpool.Pool, tenant string) ([]store.SettingOverride, error) {
+	return store.LoadSettingOverridesMulti(ctx, pool, []string{store.GlobalScope, tenant})
+}
+
 // BuildFromRows is the pool-bound build: rows + a sealbox-backed resolver
 // into config.Build. Split from the row conversion so the precedence/
 // tolerance/leak gates run without a DB (buildWith). Exported for the W5
 // settings handler: a PUT validates by building the candidate config from
 // the would-be row set through EXACTLY this path — no second validation
 // logic that could drift from what the reload actually applies.
-func BuildFromRows(ctx context.Context, pool *pgxpool.Pool, rows []store.SettingOverride) (*config.Config, []config.Issue) {
+// scopePriority orders the scopes from lowest to highest precedence: a scope's
+// position in the slice is its priority, the last entry wins per key. The
+// boot/reload path passes the single-scope {_global} (no merge); the W4/W5
+// tenant consumer passes {_global, tenant} (tenant wins). MT3-W3 §4.2/§7.
+func BuildFromRows(ctx context.Context, pool *pgxpool.Pool, rows []store.SettingOverride, scopePriority []string) (*config.Config, []config.Issue) {
 	resolve, keyIssue := poolResolver(ctx, pool)
-	cfg, issues := buildWith(rows, resolve)
+	cfg, issues := buildWith(rows, resolve, scopePriority)
 	if keyIssue != nil {
 		issues = append([]config.Issue{*keyIssue}, issues...)
 	}
 	return cfg, issues
 }
 
-// buildWith converts rows to typed overrides and builds the effective config.
-// Pure except for config.Build's env read — fully unit-testable.
-func buildWith(rows []store.SettingOverride, resolve config.SecretResolver) (*config.Config, []config.Issue) {
-	overrides, convIssues := toOverrides(rows)
+// buildWith converts rows to typed overrides (merging the scopes by
+// scopePriority) and builds the effective config. Pure except for config.Build's
+// env read — fully unit-testable.
+func buildWith(rows []store.SettingOverride, resolve config.SecretResolver, scopePriority []string) (*config.Config, []config.Issue) {
+	overrides, convIssues := toOverrides(rows, scopePriority)
 	cfg, issues := config.Build(overrides, resolve)
 	return cfg, append(convIssues, issues...)
 }
@@ -214,40 +232,108 @@ func poolResolver(ctx context.Context, pool *pgxpool.Pool) (config.SecretResolve
 	}, nil
 }
 
-// toOverrides unwraps the JSONB row values into the raw scalar string form
-// config.Build's typed parsers consume. Unsupported shapes degrade to a WARN
-// per row; messages never embed the raw value — a corrupt value on a
-// sensitive key could BE a mistakenly-pasted plaintext secret.
+// toOverrides resolves the multi-scope row set into the typed override list
+// config.Build's parsers consume, in three ordered passes (MT3-W3 §4.2/§7):
 //
-// global-only gate (MT3-W2 §4.6): this pass is the only place the override's
-// SCOPE is still present (config.Override is {Key,Value} — build.go drops the
-// scope), so the tenancy gate lives here. A non-_global (tenant-scope) override
-// on a global-only key is DROPPED with a WARN before it becomes a
-// config.Override — fail-closed against a tenant flipping a server-wide switch,
-// most critically the embed-cache-coupled keys whose flush nukes the
-// process-wide shared cache for ALL tenants (R-SCALE6). _global rows (the
-// operator path) and tenant rows on tenant-overridable keys pass through
-// untouched. Today loadOverrideRows reads only _global, so this gate is inert
-// (W3 introduces the tenant rows it guards) — the no-override boot stays
-// byte-identical.
-func toOverrides(rows []store.SettingOverride) ([]config.Override, []config.Issue) {
-	overrides := make([]config.Override, 0, len(rows))
-	var issues []config.Issue
+//  1. global-only gate, PER ROW, FIRST: a non-_global (tenant-scope) override on
+//     a global-only key is DROPPED with a WARN before the merge sees it. This
+//     ordering is load-bearing — running the gate AFTER the merge would let a
+//     higher-priority tenant row win the precedence merge and then get dropped,
+//     so the key would lose its legitimate _global value (a regression). Gating
+//     first leaves only the _global row on a global-only key, which wins
+//     correctly. Fail-closed against a tenant flipping a server-wide switch,
+//     most critically the embed-cache-coupled keys whose flush nukes the
+//     process-wide shared cache for ALL tenants (R-SCALE6).
+//  2. precedence merge of the survivors, deduped BY KEY, Go-materialized: per
+//     key the row with the highest scopePriority position wins, INDEPENDENT of
+//     row order (a scope absent from the slice ranks lowest, defensively). The
+//     ORDER BY in LoadSettingOverridesMulti is only the defensive safeguard.
+//  3. first-valid-in-priority-order ScalarValue: precedence "tenant > _global >
+//     env > default" means an INVALID higher-priority row falls back to the next
+//     DB tier (the next scope's row of the same key), not straight to env. Per
+//     key the candidates are tried in priority DESCENDING; the first whose
+//     ScalarValue succeeds wins; a ScalarValue failure on a higher-priority row
+//     emits a (value-free) WARN and falls through to the next candidate. None
+//     valid ⇒ no override (env/default stays).
+//
+// Messages never embed the raw value — a corrupt value on a sensitive key could
+// BE a mistakenly-pasted plaintext secret. Output (overrides and issues) is in
+// stable key order for reproducibility.
+//
+// Byte-identical for the boot path: with scopePriority={_global} and rows from
+// one scope there is no key conflict, so the merge is the identity — exactly the
+// pre-W3 one-override-per-key result, same issues.
+func toOverrides(rows []store.SettingOverride, scopePriority []string) ([]config.Override, []config.Issue) {
+	winners, issues := mergeOverrideRows(rows, scopePriority)
+
+	keys := make([]string, 0, len(winners))
+	for k := range winners {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	overrides := make([]config.Override, 0, len(keys))
+	for _, key := range keys {
+		raw, convIssues, ok := firstValidValue(key, winners[key])
+		issues = append(issues, convIssues...)
+		if ok {
+			overrides = append(overrides, config.Override{Key: key, Value: raw})
+		}
+	}
+	return overrides, issues
+}
+
+// mergeOverrideRows runs the global-only gate then groups the surviving rows by
+// key, each group sorted by scopePriority DESCENDING (highest precedence first).
+// gateIssues holds the WARNs for tenant rows dropped on global-only keys, in
+// stable key order.
+func mergeOverrideRows(rows []store.SettingOverride, scopePriority []string) (map[string][]store.SettingOverride, []config.Issue) {
+	byKey := make(map[string][]store.SettingOverride, len(rows))
+	type gate struct {
+		key, scope string
+	}
+	var gated []gate
 	for _, row := range rows {
 		if row.Scope != store.GlobalScope && config.IsGlobalOnly(row.Key) {
-			issues = append(issues, config.Issue{Field: row.Key, Severity: config.SeverityWarn,
-				Msg: fmt.Sprintf("tenant override on global-only key ignored (scope %q)", row.Scope)})
+			gated = append(gated, gate{row.Key, row.Scope})
 			continue
 		}
+		byKey[row.Key] = append(byKey[row.Key], row)
+	}
+
+	prio := func(scope string) int { return slices.Index(scopePriority, scope) }
+	for key := range byKey {
+		group := byKey[key]
+		sort.SliceStable(group, func(i, j int) bool {
+			return prio(group[i].Scope) > prio(group[j].Scope)
+		})
+		byKey[key] = group
+	}
+
+	sort.Slice(gated, func(i, j int) bool { return gated[i].key < gated[j].key })
+	var issues []config.Issue
+	for _, g := range gated {
+		issues = append(issues, config.Issue{Field: g.key, Severity: config.SeverityWarn,
+			Msg: fmt.Sprintf("tenant override on global-only key ignored (scope %q)", g.scope)})
+	}
+	return byKey, issues
+}
+
+// firstValidValue picks the first candidate (already sorted priority-descending)
+// whose ScalarValue succeeds; each higher-priority failure emits a value-free
+// WARN and falls through to the next DB tier. ok=false ⇒ no override survives.
+func firstValidValue(key string, candidates []store.SettingOverride) (string, []config.Issue, bool) {
+	var issues []config.Issue
+	for _, row := range candidates {
 		raw, err := ScalarValue(row.Value)
 		if err != nil {
-			issues = append(issues, config.Issue{Field: row.Key, Severity: config.SeverityWarn,
+			issues = append(issues, config.Issue{Field: key, Severity: config.SeverityWarn,
 				Msg: fmt.Sprintf("%v — override ignored, env/default value stays", err)})
 			continue
 		}
-		overrides = append(overrides, config.Override{Key: row.Key, Value: raw})
+		return raw, issues, true
 	}
-	return overrides, issues
+	return "", issues, false
 }
 
 // ScalarValue unwraps one JSONB scalar: strings unquote, numbers and booleans

@@ -255,7 +255,7 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	candRows := upsertRow(baseRows, key, normalized)
-	candidate, candIssues := settings.BuildFromRows(r.Context(), h.pool, candRows)
+	candidate, candIssues := settings.BuildFromRows(r.Context(), h.pool, candRows, []string{store.GlobalScope})
 	if candidate.Source(key) != "settings" {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 			"success": false,
@@ -263,7 +263,7 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	_, baseIssues := settings.BuildFromRows(r.Context(), h.pool, baseRows)
+	_, baseIssues := settings.BuildFromRows(r.Context(), h.pool, baseRows, []string{store.GlobalScope})
 	warnings := newWarnings(candIssues, baseIssues)
 	warnings = append(warnings, pairingWarnings(key, candidate)...)
 
