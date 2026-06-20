@@ -138,24 +138,53 @@ func (s *Scheduler) runSensitivityAudit(dryRun bool, limit int) {
 	ctx := s.lifecycleCtx()
 	slog.Info("scheduler: sensitivity audit started", "dry_run", dryRun, "limit", limit)
 
+	// 06-C6: audit each tenant under its OWN config generation + scope,
+	// iterating the authoritative tenant list. Single-tenant: a 1-element loop
+	// over _global == the pre-T13 single pass.
+	for _, tenantScope := range s.tenantScopesFn(ctx) {
+		if s.auditTenantScope(ctx, tenantScope, dryRun, limit) {
+			return // shutdown / pick error / infra abort already recorded
+		}
+	}
+
+	st := s.SensitivityAuditStatus()
+	slog.Info("scheduler: sensitivity audit finished",
+		"dry_run", dryRun, "processed", st.Processed,
+		"kept_credentials", st.KeptCredentials, "to_personal", st.ToPersonal,
+		"to_internal", st.ToInternal, "no_verdict", st.NoVerdict, "discarded", st.Discarded)
+}
+
+// auditTenantScope drains the audit pick set (or the dry-run sample) for ONE
+// iterated tenant under its config snapshot (06-C6), with dream-loop manners:
+// yield to active queries, stop on shutdown, never panic the process. cfg
+// snapshot per batch (§2.3). It returns abort=true when the WHOLE audit must
+// stop — shutdown, a pick error (already recorded via auditAbort), or an
+// auditOneBlock infra abort — and false when this tenant's drain finished
+// normally (the caller continues to the next tenant).
+//
+// limit bounds blocks PER TENANT (each iterated tenant drains up to limit), not
+// per whole run. At a single tenant this is identical to the pre-T13 cap; the
+// cross-tenant aggregation of limit + run status is refined with the
+// entitlement-correct background path T38 (04-W6).
+func (s *Scheduler) auditTenantScope(ctx context.Context, tenantScope string, dryRun bool, limit int) (abort bool) {
 	processed := 0
 	for {
 		if ctx.Err() != nil {
 			s.auditAbort("shutdown")
-			return
+			return true
 		}
 		// Demand interruption: audit GPU work yields to live queries.
 		if s.activeQueries.Load() > 0 {
 			select {
 			case <-ctx.Done():
 				s.auditAbort("shutdown")
-				return
+				return true
 			case <-time.After(dreamYieldWait):
 			}
 			continue
 		}
 
-		cfg := s.cfg.Snapshot()
+		cfg := s.cfg.SnapshotForTenant(ctx, tenantScope)
 		scope := cfg.Scheduler.HomeScope
 		if scope == "" {
 			scope = "private"
@@ -163,33 +192,33 @@ func (s *Scheduler) runSensitivityAudit(dryRun bool, limit int) {
 
 		batch := auditBatchSize
 		if dryRun {
-			// One random pick serves the whole sample — the loop breaks after
+			// One random pick serves the whole sample — the drain ends after
 			// this batch (a second random pick would re-draw the same rows).
 			batch = limit
 		} else if limit > 0 && limit-processed < batch {
 			batch = limit - processed
 		}
 		if batch <= 0 {
-			break
+			return false
 		}
 
 		blocks, err := store.PickAuditBlocks(ctx, s.pool, scope, auditRetryCooldown, batch, dryRun)
 		if err != nil {
 			s.auditAbort(fmt.Sprintf("pick: %v", err))
-			return
+			return true
 		}
 		if len(blocks) == 0 {
-			break
+			return false
 		}
 
 		for _, blk := range blocks {
 			if ctx.Err() != nil {
 				s.auditAbort("shutdown")
-				return
+				return true
 			}
 			sample, abort := s.auditOneBlock(ctx, blk, cfg.GamingState(), dryRun)
 			if abort {
-				return
+				return true
 			}
 			processed++
 			if dryRun {
@@ -199,15 +228,9 @@ func (s *Scheduler) runSensitivityAudit(dryRun bool, limit int) {
 			}
 		}
 		if dryRun {
-			break // one pick per dry run — random order would re-pick the same rows
+			return false // one pick per dry run — random order would re-pick the same rows
 		}
 	}
-
-	st := s.SensitivityAuditStatus()
-	slog.Info("scheduler: sensitivity audit finished",
-		"dry_run", dryRun, "processed", st.Processed,
-		"kept_credentials", st.KeptCredentials, "to_personal", st.ToPersonal,
-		"to_internal", st.ToInternal, "no_verdict", st.NoVerdict, "discarded", st.Discarded)
 }
 
 // auditOneBlock asks the two questions and applies (or records) the verdict.

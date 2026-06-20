@@ -13,6 +13,7 @@
 package events
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -108,7 +109,34 @@ func (s *Scheduler) runCredentialsClassify(dryRun bool, limit int) {
 	}()
 
 	ctx := s.lifecycleCtx()
-	cfg := s.cfg.Snapshot()
+
+	// 06-C6: classify each tenant under its OWN config generation + scope,
+	// iterating the authoritative tenant list. Single-tenant: a 1-element loop
+	// over _global == the pre-T13 single pass.
+	for _, tenantScope := range s.tenantScopesFn(ctx) {
+		if s.classifyTenantScope(ctx, tenantScope, dryRun, limit) {
+			return // shutdown / pick / verdict-write error already recorded
+		}
+	}
+
+	st := s.CredentialsClassifyStatus()
+	slog.Info("scheduler: credentials classify finished",
+		"dry_run", dryRun, "scanned", st.Scanned, "upgraded", st.Upgraded, "discarded", st.Discarded)
+}
+
+// classifyTenantScope keyset-drains the candidate set for ONE iterated tenant
+// under its config snapshot (06-C6), scanning each block and (live) raising
+// hits. cfg snapshot once per tenant — the home scope does not change mid-run.
+// Returns abort=true when the whole classify must stop — shutdown, or a pick /
+// verdict-write error already recorded via classifyAbort — and false when this
+// tenant's drain finished normally (the caller continues to the next tenant).
+//
+// limit bounds blocks PER TENANT (each iterated tenant drains up to limit), not
+// per whole run. At a single tenant this is identical to the pre-T13 cap; the
+// cross-tenant aggregation of limit is refined with the entitlement-correct
+// background path T38 (04-W6).
+func (s *Scheduler) classifyTenantScope(ctx context.Context, tenantScope string, dryRun bool, limit int) (abort bool) {
+	cfg := s.cfg.SnapshotForTenant(ctx, tenantScope)
 	scope := cfg.Scheduler.HomeScope
 	if scope == "" {
 		scope = "private"
@@ -120,22 +148,22 @@ func (s *Scheduler) runCredentialsClassify(dryRun bool, limit int) {
 	for {
 		if ctx.Err() != nil {
 			s.classifyAbort("shutdown")
-			return
+			return true
 		}
 		batch := classifyBatchSize
 		if limit > 0 && limit-scanned < batch {
 			batch = limit - scanned
 		}
 		if batch <= 0 {
-			break
+			return false
 		}
 		blocks, err := store.PickClassifyCandidates(ctx, s.pool, scope, afterID, batch)
 		if err != nil {
 			s.classifyAbort(fmt.Sprintf("pick: %v", err))
-			return
+			return true
 		}
 		if len(blocks) == 0 {
-			break
+			return false
 		}
 		for _, blk := range blocks {
 			afterID = blk.ID
@@ -156,7 +184,7 @@ func (s *Scheduler) runCredentialsClassify(dryRun bool, limit int) {
 			applied, err := store.ApplyPatternVerdict(ctx, s.pool, blk.ID, scope, m.Kind, m.Reason)
 			if err != nil {
 				s.classifyAbort(fmt.Sprintf("verdict write: %v", err))
-				return
+				return true
 			}
 			if applied {
 				s.classifyCount(func(st *ClassifyStatus) { st.Upgraded++ })
@@ -164,15 +192,13 @@ func (s *Scheduler) runCredentialsClassify(dryRun bool, limit int) {
 				s.classifyCount(func(st *ClassifyStatus) { st.Discarded++ })
 			}
 		}
-		s.classifyCount(func(st *ClassifyStatus) { st.Scanned = scanned })
+		// Additive across batches AND tenants — consistent with Upgraded/Discarded
+		// (++). delta == len(blocks): every block in the batch increments scanned.
+		s.classifyCount(func(st *ClassifyStatus) { st.Scanned += len(blocks) })
 		if len(blocks) < batch {
-			break // drained
+			return false // drained
 		}
 	}
-
-	st := s.CredentialsClassifyStatus()
-	slog.Info("scheduler: credentials classify finished",
-		"dry_run", dryRun, "scanned", st.Scanned, "upgraded", st.Upgraded, "discarded", st.Discarded)
 }
 
 func (s *Scheduler) classifyCount(f func(*ClassifyStatus)) {

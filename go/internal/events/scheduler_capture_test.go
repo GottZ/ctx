@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -248,6 +250,155 @@ func TestDreamLoopSeesReplacedConfigNextCycle(t *testing.T) {
 
 	// Shut the loop down: cancel first, then release cycle 2 — the loop's
 	// next shutdown check exits before any third cycle.
+	cancel()
+	release <- struct{}{}
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("dream loop did not exit after cancel")
+	}
+}
+
+// TestBackgroundTenantScopesFallsBackOnDBError pins the graceful-degradation
+// contract: when the tenant register is unreachable — a pre-MT-schema deploy
+// where context_tenants does not exist yet, OR a transient DB error — the
+// background iterates exactly [_global] (the tenant-less single pass, where
+// SnapshotForTenant(_global) returns base), never an empty list that would
+// silently stall all background work. deadPool refuses every connection, so
+// store.ListTenants errors and the fallback fires without a container.
+func TestBackgroundTenantScopesFallsBackOnDBError(t *testing.T) {
+	s := NewScheduler(deadPool(t), config.NewStore(captureTestConfig(t, 12)),
+		backends.NewPool(nil, nil), StartupConfig{})
+	got := s.backgroundTenantScopes(context.Background())
+	if len(got) != 1 || got[0] != store.GlobalScope {
+		t.Fatalf("backgroundTenantScopes on DB error = %v, want [%q]", got, store.GlobalScope)
+	}
+}
+
+// TestRunDigestRetainsPendingOnTenantFailure pins the 06-C6 per-tenant digest
+// loop's partial-failure contract: when ANY iterated tenant's RunDigest fails,
+// digestPending stays SET so the next debounce retries — the pre-T13 semantics
+// preserved per multi-tenant run (one tenant's failure must not silently clear
+// the pending flag for all). deadPool makes every RunDigest fail (no DB), and
+// the two-scope tenantScopesFn proves the loop iterates more than one tenant.
+func TestRunDigestRetainsPendingOnTenantFailure(t *testing.T) {
+	s := NewScheduler(deadPool(t), config.NewStore(captureTestConfig(t, 12)),
+		backends.NewPool(nil, nil), StartupConfig{})
+	s.tenantScopesFn = func(context.Context) []string { return []string{store.GlobalScope, "tenant-x"} }
+
+	s.mu.Lock()
+	s.digestPending = true
+	s.mu.Unlock()
+
+	s.runDigest(context.Background())
+
+	s.mu.Lock()
+	pending := s.digestPending
+	s.mu.Unlock()
+	if !pending {
+		t.Fatal("digestPending cleared after a failing digest run — want retained so the next debounce retries")
+	}
+}
+
+// TestDreamLoopResolvesPerTenantGenerationEachCycle is the 06-C6 tenant arm of
+// the capture regression: the background takes ONE SnapshotForTenant per cycle
+// over the authoritative tenant list (not a single process-global Snapshot), so
+// each cycle derives from the iterated tenant's config generation — and a
+// tenant-generation flip (InvalidateTenant, the NOTIFY-dispatch path C4 will
+// drive) strictly between two cycles is fully visible to the next cycle.
+//
+// Mechanics: an overlay yields a tenant-specific generation for scope "tenant-a"
+// (a distinct back-off MinHours marker), and the tenantScopesFn seam drives the
+// loop over ["tenant-a"] without a database. Cycle 1 MUST observe the tenant
+// generation (MinHours=99), NOT the base generation (MinHours=12) — that is the
+// RED arm: against the pre-C6 `s.cfg.Snapshot()` the loop saw base. After the
+// flip + InvalidateTenant, cycle 2 MUST observe the rebuilt tenant generation
+// (MinHours=33) — a hoisted/cached snapshot would still see 99.
+func TestDreamLoopResolvesPerTenantGenerationEachCycle(t *testing.T) {
+	srv := newFakeOllama(t)
+
+	cfgBase := captureTestConfig(t, 12) // base generation (what a plain Snapshot() returns)
+	cfgT1 := captureTestConfig(t, 99)   // tenant-a generation, before the flip
+	cfgT2 := captureTestConfig(t, 33)   // tenant-a generation, after the flip
+
+	st := config.NewStore(cfgBase)
+	var flipped atomic.Bool
+	st.SetOverlay(func(_ context.Context, _ *config.Config, tenantScope string) (*config.Config, error) {
+		if tenantScope != "tenant-a" {
+			return nil, nil // any other scope falls back to base
+		}
+		if flipped.Load() {
+			return cfgT2, nil
+		}
+		return cfgT1, nil
+	})
+
+	bpool := backends.NewPool(nil, nil)
+	bpool.SeedSnapshotForTest([]backends.Backend{dreamPoolRow(srv.srv.URL, "dream-model")})
+	s := NewScheduler(deadPool(t), st, bpool, StartupConfig{})
+	s.tenantScopesFn = func(context.Context) []string { return []string{"tenant-a"} }
+
+	got := make(chan cycleObs, 4)
+	release := make(chan struct{})
+	s.runCycle = func(ctx context.Context, _ *pgxpool.Pool, r *dream.Router, opts llm.Options, backoff dream.BackoffConfig, _ []string, _ dream.Throttle) (int, error) {
+		obs := cycleObs{backoff: backoff}
+		chain, err := r.Pool.Chain(backends.RoleDream, backends.SensPublic, r.Gaming, "")
+		if err != nil {
+			obs.chainErr = err
+		} else {
+			b := chain[0]
+			b.Model = b.ModelFor(backends.RoleDream).Model
+			obs.host, obs.model = b.Host, b.Model
+			_, obs.wireErr = llm.ChatJSON(ctx, b, "sys", "user", opts, 5*time.Second)
+		}
+		got <- obs
+		<-release
+		return 1, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		s.runDreamLoop(ctx)
+		close(done)
+	}()
+
+	waitObs := func(stage string) cycleObs {
+		t.Helper()
+		select {
+		case o := <-got:
+			return o
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%s: no dream cycle within 15s", stage)
+			return cycleObs{}
+		}
+	}
+
+	// Cycle 1 runs on tenant-a's generation, NOT the base generation.
+	obs1 := waitObs("cycle 1")
+	if obs1.chainErr != nil || obs1.wireErr != nil {
+		t.Fatalf("cycle 1: chain=%v wire=%v", obs1.chainErr, obs1.wireErr)
+	}
+	if obs1.backoff.MinHours != 99 {
+		t.Errorf("cycle 1 backoff.MinHours = %v, want 99 (tenant-a generation) — a process-global Snapshot() would see the base 12", obs1.backoff.MinHours)
+	}
+
+	// Flip tenant-a's generation and drop its cached entry (the NOTIFY-dispatch
+	// path), then let cycle 1 return so the loop takes its next per-tenant snapshot.
+	flipped.Store(true)
+	st.InvalidateTenant("tenant-a")
+	release <- struct{}{}
+
+	// Cycle 2 MUST observe the rebuilt tenant-a generation.
+	obs2 := waitObs("cycle 2")
+	if obs2.chainErr != nil || obs2.wireErr != nil {
+		t.Fatalf("cycle 2: chain=%v wire=%v", obs2.chainErr, obs2.wireErr)
+	}
+	if obs2.backoff.MinHours != 33 {
+		t.Errorf("cycle 2 backoff.MinHours = %v, want 33 (rebuilt tenant-a generation) — a hoisted/cached snapshot would still see 99", obs2.backoff.MinHours)
+	}
+
 	cancel()
 	release <- struct{}{}
 	select {

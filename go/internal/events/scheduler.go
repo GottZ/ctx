@@ -103,6 +103,14 @@ type Scheduler struct {
 	runCycle      dreamCycleFunc
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
 
+	// tenantScopesFn yields the per-tenant config-resolution scopes the
+	// background iterates (06-C6): one SnapshotForTenant per scope, the scope
+	// string sourced EXCLUSIVELY from the authoritative tenant register (never
+	// request input). Production value is backgroundTenantScopes; the capture
+	// regression swaps it to drive the loop over a controlled tenant set without
+	// a database (the dreamCycleFunc/classify seam pattern).
+	tenantScopesFn func(ctx context.Context) []string
+
 	// Dream mode control (atomic for lock-free reads in hot loop).
 	dreamMode             atomic.Int32 // DreamModeOn | DreamModeThrottled | DreamModeOff
 	dreamThrottleInterval atomic.Int64 // nanoseconds; 0 = dreamThrottleDefault
@@ -181,7 +189,7 @@ func (s *Scheduler) getDreamThrottleInterval() time.Duration {
 // NewScheduler creates a new Scheduler. store is the runtime-config snapshot
 // source for everything hot; startup carries the restart-only parameters.
 func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends.Pool, startup StartupConfig) *Scheduler {
-	return &Scheduler{
+	s := &Scheduler{
 		pool:        pool,
 		cfg:         store,
 		backendPool: backendPool,
@@ -190,6 +198,76 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 		classify:    llm.ClassifyBlockBool,
 		runDone:     make(chan struct{}),
 	}
+	s.tenantScopesFn = s.backgroundTenantScopes
+	return s
+}
+
+// backgroundTenantScopes returns the per-tenant config-resolution scopes the
+// background pipeline (dream/digest/synthesis/audit/classify) iterates over
+// (06-C6). The source is the AUTHORITATIVE tenant register (context_tenants,
+// Achse 01 / T05a) — NOT "SELECT DISTINCT home_scope FROM context_api_keys"
+// (the design's other §4.5 example): the live corpus carries >1 active
+// home_scope but exactly ONE tenant, so only the register collapses to the
+// 1-element loop the pausability claim rests on (design §3.3). A home_scope
+// iteration would double-run digest/daily synthesis.
+//
+// Mapping (backgroundScopeFor): the default tenant -> _global (its config IS
+// the global config; SnapshotForTenant short-circuits to base); an active
+// non-default tenant -> its identity scope (first owned scope). Suspended /
+// offboarding tenants are dropped (test-tenant-bg-exclude, addendum §3.2).
+//
+// Fail-safe: ListTenants error (a pre-MT-schema deploy where context_tenants
+// does not exist, or a transient DB error) OR no active tenant -> exactly
+// [_global], the tenant-less single pass. The background never aborts and
+// never returns an empty list.
+//
+// SCOPE WINDOW NOT BOUNDED HERE: the per-tenant read window (read_scopes ∩
+// TenantScopes, tenant-visible Chain, per-tenant ScopeSensitivityFloor) is the
+// entitlement-correct background path T38 (04-W6), which needs Achse 01's
+// per-tenant background-scope set. T13 establishes only the ITERATION; until
+// T38 a non-default tenant's scope window stays the server-global base — a
+// named gap, never reached in single-tenant operation (only the default tenant
+// exists). The cross-tenant-background-leak (T28-Lehre) is closed in T38.
+func (s *Scheduler) backgroundTenantScopes(ctx context.Context) []string {
+	tenants, err := store.ListTenants(ctx, s.pool)
+	if err != nil {
+		return []string{store.GlobalScope}
+	}
+	scopes := make([]string, 0, len(tenants))
+	for _, t := range tenants {
+		if t.Status != "active" {
+			continue // test-tenant-bg-exclude: suspended / offboarding
+		}
+		scope, ok := s.backgroundScopeFor(ctx, t)
+		if !ok {
+			continue // non-default tenant owning no scope has no background work
+		}
+		scopes = append(scopes, scope)
+	}
+	if len(scopes) == 0 {
+		return []string{store.GlobalScope}
+	}
+	return scopes
+}
+
+// backgroundScopeFor maps one tenant to the scope under which its per-tenant
+// config is resolved for background work (06-C6). The default tenant -> _global
+// (base). A non-default tenant -> its first owned scope (deterministic, ORDER
+// BY scope), ok=false when it owns none.
+//
+// TENANT-DECISION(bg-tenant-config-scope): default -> _global, non-default ->
+// first owned scope as the identity-scope stand-in. The authoritative tenant
+// home-scope mapping + the entitlement-bounded scope WINDOW is T38 (04-W6).
+// Umentscheidbar once Achse 01 pins a tenant home_scope column.
+func (s *Scheduler) backgroundScopeFor(ctx context.Context, t store.Tenant) (string, bool) {
+	if t.ID == store.DefaultTenantID {
+		return store.GlobalScope, true
+	}
+	owned, err := store.TenantScopes(ctx, s.pool, t.ID)
+	if err != nil || len(owned) == 0 {
+		return "", false
+	}
+	return owned[0], true
 }
 
 // lifecycleCtx returns Run's context so API-triggered background jobs die
@@ -361,35 +439,41 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 		// num_ctx comes from the serving backend's row, so every chat-model
 		// call site that resolves onto the same row shares the single runner
 		// (distinct num_ctx → extra 27B runner → VRAM OOM).
-		cfg := s.cfg.Snapshot()
-		router := s.newRouter(cfg)
 		dreamOpts := dream.DreamOptions()
-		scope := cfg.Scheduler.HomeScope
-		if scope == "" {
-			scope = "private"
-		}
-
-		slog.Info("scheduler: daily synthesis started", "scope", scope)
 
 		// Welle 45: hygiene pass before synthesis — remove dream_links pointing
-		// to or from archived blocks. Cheap DELETE, runs once per day. Decoupled
-		// errors: log but do not abort synthesis.
+		// to or from archived blocks. Scope-blind + cheap DELETE, runs once per
+		// day (NOT per tenant). Decoupled errors: log but do not abort synthesis.
 		if n, cleanupErr := dream.CleanupDanglingLinks(ctx, s.pool); cleanupErr != nil {
 			slog.Error("scheduler: dangling-link cleanup failed", "error", cleanupErr)
 		} else if n > 0 {
 			slog.Info("scheduler: dangling-link cleanup", "removed", n)
 		}
 
-		blockID, err := dream.GenerateDailyReport(ctx, s.pool, router, dreamOpts, scope)
-		if err != nil {
-			slog.Error("scheduler: daily synthesis failed", "error", err, "scope", scope)
-			continue
+		// One report per tenant per day-iteration (06-C6): each runs under its
+		// own config generation + scope. Single-tenant: a 1-element loop over
+		// _global == the pre-T13 single pass.
+		for _, tenantScope := range s.tenantScopesFn(ctx) {
+			cfg := s.cfg.SnapshotForTenant(ctx, tenantScope)
+			router := s.newRouter(cfg)
+			scope := cfg.Scheduler.HomeScope
+			if scope == "" {
+				scope = "private"
+			}
+
+			slog.Info("scheduler: daily synthesis started", "scope", scope)
+
+			blockID, err := dream.GenerateDailyReport(ctx, s.pool, router, dreamOpts, scope)
+			if err != nil {
+				slog.Error("scheduler: daily synthesis failed", "error", err, "scope", scope)
+				continue
+			}
+			if blockID == "" {
+				slog.Info("scheduler: daily synthesis skipped (no activity)", "scope", scope)
+				continue
+			}
+			slog.Info("scheduler: daily synthesis completed", "block_id", blockID, "scope", scope)
 		}
-		if blockID == "" {
-			slog.Info("scheduler: daily synthesis skipped (no activity)", "scope", scope)
-			continue
-		}
-		slog.Info("scheduler: daily synthesis completed", "block_id", blockID, "scope", scope)
 	}
 }
 
@@ -571,6 +655,7 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 // When blocks are available, processes them back-to-back. When idle, waits dreamIdleWait.
 // Yields to active queries and respects graceful shutdown.
 func (s *Scheduler) runDreamLoop(ctx context.Context) {
+	var tenantCursor uint64 // round-robin position over the tenant list (06-C6)
 	for {
 		// Shutdown check.
 		if ctx.Err() != nil {
@@ -600,12 +685,25 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 		}
 
 		// One snapshot per cycle (§2.3): taken at loop-body start, before
-		// backfill and PickBlock. A store Replace between cycles is fully
-		// visible to the next cycle — the capture regression test pins this
-		// against the old boot-copy behavior. The router carries this
-		// generation's scope floor; the backend chains resolve per call
-		// against the pool's live snapshot (G28).
-		cfg := s.cfg.Snapshot()
+		// backfill and PickBlock. A store Replace (or per-tenant invalidation)
+		// between cycles is fully visible to the next cycle — the capture
+		// regression test pins this against the old boot-copy behavior. The
+		// router carries this generation's scope floor; the backend chains
+		// resolve per call against the pool's live snapshot (G28).
+		//
+		// 06-C6: the snapshot is taken per ITERATED TENANT, round-robin over the
+		// authoritative tenant list (Achse 01), so each cycle dreams under one
+		// tenant's config generation. The scope string comes EXCLUSIVELY from
+		// that list, never request input (why SnapshotForTenant takes it
+		// explicitly). Single-tenant: the list is [_global], so the cursor stays
+		// on the base generation — byte-identical to the pre-T13 single pass.
+		scopes := s.tenantScopesFn(ctx)
+		if len(scopes) == 0 {
+			scopes = []string{store.GlobalScope}
+		}
+		tenantScope := scopes[tenantCursor%uint64(len(scopes))]
+		tenantCursor++
+		cfg := s.cfg.SnapshotForTenant(ctx, tenantScope)
 		router := s.newRouter(cfg)
 
 		// Top priority: backfill blocks with missing embeddings.
@@ -716,15 +814,20 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		return
 	}
 
-	// One snapshot per run (§2.3): digest reads HomeScope/ReadScopes fresh.
-	cfg := s.cfg.Snapshot()
-
-	slog.Info("scheduler: running digest", "scope", cfg.Scheduler.HomeScope)
-
-	err := digest.RunDigest(ctx, s.pool, cfg.Scheduler.HomeScope, cfg.Scheduler.ReadScopes)
-	if err != nil {
-		slog.Error("scheduler: digest error", "error", err)
-		return
+	// One snapshot per tenant per run (§2.3 / 06-C6): digest reads
+	// HomeScope/ReadScopes fresh for each iterated tenant. Single-tenant: a
+	// 1-element loop over _global == the pre-T13 single pass.
+	ok := true
+	for _, tenantScope := range s.tenantScopesFn(ctx) {
+		cfg := s.cfg.SnapshotForTenant(ctx, tenantScope)
+		slog.Info("scheduler: running digest", "scope", cfg.Scheduler.HomeScope)
+		if err := digest.RunDigest(ctx, s.pool, cfg.Scheduler.HomeScope, cfg.Scheduler.ReadScopes); err != nil {
+			slog.Error("scheduler: digest error", "error", err)
+			ok = false // one tenant's failure must not skip the others
+		}
+	}
+	if !ok {
+		return // leave digestPending set → retry next debounce (pre-T13 semantics)
 	}
 
 	s.mu.Lock()
