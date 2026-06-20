@@ -193,6 +193,69 @@ func TestRegistryEnvNamespace(t *testing.T) {
 	}
 }
 
+// TestRegistryTenancySet pins the tenant-overridable allowlist (MT3-W2): EXACTLY
+// these keys may a tenant override on top of _global; every other registry key
+// is global-only. This is the security contract — a key silently joining the
+// tenant-writable surface (or one of the five NAMED global-only keys silently
+// leaving it) fails here first. Classification rationale lives in config.go's
+// tag-doc block; §3.3 lists a representative subset, this is the normative set.
+func TestRegistryTenancySet(t *testing.T) {
+	overridable := map[string]bool{
+		// the 6 provider api_key secret_refs (TENANT-DECISION: per-tenant creds)
+		"chat.api_key": true, "chat_fallback.api_key": true, "embed.api_key": true,
+		"dream.api_key": true, "dream_embed.api_key": true, "rerank.api_key": true,
+		// the re-dream back-off curve (atomic per-tenant unit)
+		"dream.backoff_mode": true, "dream.backoff_factor": true, "dream.backoff_grace": true,
+		"dream.backoff_cap": true, "dream.backoff_min": true, "dream.backoff_inert_offset": true,
+		// rerank query-time tuning (host/model stay global — F3 pool topology)
+		"rerank.enabled": true, "rerank.max_docs": true, "rerank.blend_weight": true,
+		// graph query-time expansion tuning (all knobs)
+		"graph.enabled": true, "graph.directed": true, "graph.hop_depth": true,
+		"graph.seed_count": true, "graph.seed_score_floor": true, "graph.per_seed_cap": true,
+		"graph.max_injected": true, "graph.min_confidence": true, "graph.min_confidence_recurrent": true,
+		"graph.boost_weight": true, "graph.hub_damping": true, "graph.weight_topical": true,
+		"graph.weight_factual": true, "graph.weight_causal": true, "graph.weight_recurrent": true,
+		"graph.new_placement_frac": true,
+		// query-path tuning
+		"query.score_threshold": true, "query.confident_threshold": true, "query.prompt_version": true,
+		"query.timezone": true, "query.rate_limit_write": true, "query.rate_limit_read": true,
+		// per-tenant scope resolution (consumer MUST intersect with entitlements — T38)
+		"scheduler.read_scopes": true, "scheduler.home_scope": true,
+		// per-tenant trust policy
+		"pool.default_query_sensitivity": true, "pool.default_block_sensitivity": true,
+		"pool.scope_sensitivity_floor": true,
+		// per-tenant SSE cap
+		"events.max_connections": true,
+		// per-tenant web-chat surface
+		"webchat.enabled": true, "webchat.max_iterations": true, "webchat.max_tokens": true,
+		"webchat.completion_budget": true, "webchat.tool_result_max_chars": true,
+		"webchat.history_budget_chars": true, "webchat.llm_timeout": true,
+		"webchat.concurrent_turns": true, "webchat.session_retention": true,
+	}
+	for _, e := range registry() {
+		gotOverridable := e.Tenancy == TenancyOverridable
+		if gotOverridable != overridable[e.Key] {
+			t.Errorf("%s: tenancy %q (overridable=%v), want overridable=%v",
+				e.Key, e.Tenancy, gotOverridable, overridable[e.Key])
+		}
+		if !gotOverridable && e.Tenancy != TenancyGlobalOnly {
+			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
+		}
+	}
+	if got := len(overridable); got != 52 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 52 (change it with intent)", got)
+	}
+	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
+	// a tenant override here would flush the process-wide embed cache / flip the
+	// server GPU switch. Also exercises IsGlobalOnly incl. its fail-closed path.
+	for _, k := range []string{"gaming.active", "embed.host", "embed.protocol",
+		"dream_embed.host", "dream_embed.protocol", "nonexistent.key"} {
+		if !IsGlobalOnly(k) {
+			t.Errorf("%s must be global-only", k)
+		}
+	}
+}
+
 // TestBuildRegistryRejectsMalformedStructs proves a broken tag is a
 // programmer error caught at first use, not a silently skipped field.
 func TestBuildRegistryRejectsMalformedStructs(t *testing.T) {
@@ -205,24 +268,34 @@ func TestBuildRegistryRejectsMalformedStructs(t *testing.T) {
 	type badMut struct {
 		X string `key:"a.x" env:"A_X" default:"" mut:"warm"`
 	}
+	type missingTenancy struct {
+		// every mandatory tag present EXCEPT tenancy — proves the tenancy
+		// classification is enforced at boot, so no key escapes it (MT3-W2).
+		X string `key:"a.x" env:"A_X" default:"" mut:"hot"`
+	}
+	type badTenancy struct {
+		X string `key:"a.x" env:"A_X" default:"" mut:"hot" tenancy:"sometimes"`
+	}
 	type badDefault struct {
-		X int `key:"a.x" env:"A_X" default:"abc" mut:"hot"`
+		X int `key:"a.x" env:"A_X" default:"abc" mut:"hot" tenancy:"global-only"`
 	}
 	type dupKey struct {
-		X string `key:"a.x" env:"A_X" default:"" mut:"hot"`
-		Y string `key:"a.x" env:"A_Y" default:"" mut:"hot"`
+		X string `key:"a.x" env:"A_X" default:"" mut:"hot" tenancy:"global-only"`
+		Y string `key:"a.x" env:"A_Y" default:"" mut:"hot" tenancy:"global-only"`
 	}
 	type dupEnv struct {
-		X string `key:"a.x" env:"A_X" default:"" mut:"hot"`
-		Y string `key:"a.y" env:"A_X" default:"" mut:"hot"`
+		X string `key:"a.x" env:"A_X" default:"" mut:"hot" tenancy:"global-only"`
+		Y string `key:"a.y" env:"A_X" default:"" mut:"hot" tenancy:"global-only"`
 	}
 	type unsupportedType struct {
-		X map[string]string `key:"a.x" env:"A_X" default:"" mut:"hot"`
+		X map[string]string `key:"a.x" env:"A_X" default:"" mut:"hot" tenancy:"global-only"`
 	}
 	for name, rt := range map[string]reflect.Type{
 		"untagged leaf":    reflect.TypeOf(untaggedLeaf{}),
 		"missing default":  reflect.TypeOf(missingDefault{}),
 		"bad mut":          reflect.TypeOf(badMut{}),
+		"missing tenancy":  reflect.TypeOf(missingTenancy{}),
+		"bad tenancy":      reflect.TypeOf(badTenancy{}),
 		"bad default":      reflect.TypeOf(badDefault{}),
 		"duplicate key":    reflect.TypeOf(dupKey{}),
 		"duplicate env":    reflect.TypeOf(dupEnv{}),

@@ -87,6 +87,75 @@ func row(key, jsonVal string) store.SettingOverride {
 	}
 }
 
+// tenantRow builds a non-global (tenant-scope) override row — the shape W3 will
+// load on top of _global. Used to probe the global-only gate (§3.3/§4.6).
+func tenantRow(key, scope, jsonVal string) store.SettingOverride {
+	return store.SettingOverride{
+		Key: key, Scope: scope,
+		Value: json.RawMessage(jsonVal), UpdatedAt: time.Now(),
+	}
+}
+
+// TestToOverridesGlobalOnlyTenantGate pins the §3.3/§4.6 invariant: a
+// tenant-scope override on a global-only key is DROPPED with a WARN before it
+// becomes a config.Override; a tenant-scope override on a tenant-overridable key
+// passes through; a _global override on a global-only key (the operator path)
+// is untouched. The embed.host sub-case is the R-SCALE6 guard — a tenant
+// override must not change the effective embed tuple, so the process-wide,
+// scope-less context_embed_cache is never flushed across all tenants.
+func TestToOverridesGlobalOnlyTenantGate(t *testing.T) {
+	resetEnv(t)
+	const tenant = "work"
+
+	t.Run("tenant override on global-only key is dropped + WARN", func(t *testing.T) {
+		overrides, issues := toOverrides([]store.SettingOverride{
+			tenantRow("gaming.active", tenant, `true`),
+		})
+		if len(overrides) != 0 {
+			t.Errorf("tenant override on global-only gaming.active must be dropped, got %+v", overrides)
+		}
+		if len(issues) != 1 || issues[0].Field != "gaming.active" || issues[0].Severity != config.SeverityWarn {
+			t.Errorf("expected one WARN on gaming.active, got %+v", issues)
+		}
+	})
+
+	t.Run("tenant override on tenant-overridable key passes", func(t *testing.T) {
+		overrides, issues := toOverrides([]store.SettingOverride{
+			tenantRow("rerank.blend_weight", tenant, `0.5`),
+		})
+		if len(overrides) != 1 || overrides[0].Key != "rerank.blend_weight" {
+			t.Errorf("tenant override on tenant-overridable key must pass, got %+v", overrides)
+		}
+		if len(issues) != 0 {
+			t.Errorf("no WARN expected for a tenant-overridable key, got %+v", issues)
+		}
+	})
+
+	t.Run("operator _global override on global-only key passes", func(t *testing.T) {
+		overrides, issues := toOverrides([]store.SettingOverride{
+			row("gaming.active", `true`),
+		})
+		if len(overrides) != 1 || overrides[0].Key != "gaming.active" {
+			t.Errorf("operator _global override on global-only key must pass, got %+v", overrides)
+		}
+		if len(issues) != 0 {
+			t.Errorf("no WARN expected for the operator _global path, got %+v", issues)
+		}
+	})
+
+	t.Run("tenant embed.host override does not flush the shared cache (R-SCALE6)", func(t *testing.T) {
+		base, _ := config.Build(nil, nil)
+		gatedOverrides, _ := toOverrides([]store.SettingOverride{
+			tenantRow("embed.host", tenant, `"http://embed.example:9999"`),
+		})
+		gated, _ := config.Build(gatedOverrides, nil)
+		if EmbedCacheCoupledChanged(base, gated) {
+			t.Errorf("tenant embed.host override must NOT change the effective embed tuple " +
+				"(would flush the process-wide context_embed_cache for all tenants)")
+		}
+	})
+}
+
 // --- JSONB unwrapping ---.
 
 func TestScalarValue(t *testing.T) {

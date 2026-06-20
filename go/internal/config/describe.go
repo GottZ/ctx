@@ -17,6 +17,7 @@ type KeyInfo struct {
 	Mutability string // hot | restart | coupled | coupled:embed-cache
 	Sensitive  bool   // secret-class field: values are masked everywhere
 	Guard      string // "" | "sensitivity-downgrade": lowering needs a confirm flag (F3 §3.5)
+	Tenancy    string // tenant-overridable | global-only (MT3-W2): the settings UI hides per-tenant editing on global-only keys
 	Default    any    // registry default, rendered like RenderValue
 }
 
@@ -50,6 +51,7 @@ var keyInfos = sync.OnceValue(func() []KeyInfo {
 			Mutability: e.Mut,
 			Sensitive:  e.Secret != "",
 			Guard:      e.Guard,
+			Tenancy:    e.Tenancy,
 			Default:    renderField(e, reflect.ValueOf(e.defVal), SurfaceAPI),
 		})
 	}

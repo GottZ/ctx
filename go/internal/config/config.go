@@ -59,6 +59,22 @@ type Hours float64
 //	         dictionary oracle)
 //	superseded  lifetime marker: F3 context_backends rows replace these keys
 //	         (bootstrap MUST read the effective snapshot, not raw env — X1)
+//	tenancy  tenant-overridable | global-only (MANDATORY — MT3-W2): may a
+//	         tenant override this key on top of _global, or does it live in
+//	         _global only? A missing/unknown value is a boot panic, so no key
+//	         escapes the classification. Classification rule: a key is
+//	         tenant-overridable only when overriding it per-tenant touches
+//	         NOTHING process-shared — it affects solely that tenant's own
+//	         query/chat/dream/policy resolution (retrieval tuning, rate limits,
+//	         scope/sensitivity policy, per-tenant chat budgets, the provider
+//	         api_key secret_refs). Everything that touches a host/physical or
+//	         process-wide resource is global-only: the DSN/listener (restart),
+//	         the backend HOST/MODEL/PROTOCOL tuples (topology — per-tenant
+//	         backends come from the F3 pool's scope dimension, not these legacy
+//	         keys), the embed-cache-coupled keys (a tenant flush nukes the
+//	         shared cache — R-SCALE6), gaming.active (GPU is one host), the
+//	         scheduler cadences and offline jobs, and the server egress-audit
+//	         retention. Fail-closed default for any NEW key: global-only.
 
 // Config is the complete runtime configuration. One immutable value per
 // generation; consumers take one snapshot per operation and pass values down
@@ -86,44 +102,58 @@ type Config struct {
 
 // ServerConfig is the restart-only process surface: DB connection + listener.
 type ServerConfig struct {
-	DB         string `key:"server.db" env:"CONTEXT_DB" default:"context_store" mut:"restart"`
-	DBUser     string `key:"server.db_user" env:"CONTEXT_DB_USER" default:"context_user" mut:"restart"`
-	DBPass     string `key:"server.db_password" env:"CONTEXT_DB_PASSWORD" default:"" mut:"restart" secret:"presence"`
-	DBHost     string `key:"server.db_host" env:"CONTEXT_DB_HOST" default:"localhost" mut:"restart"`
-	DBPort     int    `key:"server.db_port" env:"CONTEXT_DB_PORT" default:"5432" mut:"restart" parse:"strict"`
-	DBSSL      string `key:"server.db_sslmode" env:"CONTEXT_DB_SSLMODE" default:"disable" mut:"restart"`
-	ListenAddr string `key:"server.listen_addr" env:"LISTEN_ADDR" default:":8080" mut:"restart"`
+	DB         string `key:"server.db" env:"CONTEXT_DB" default:"context_store" mut:"restart" tenancy:"global-only"`
+	DBUser     string `key:"server.db_user" env:"CONTEXT_DB_USER" default:"context_user" mut:"restart" tenancy:"global-only"`
+	DBPass     string `key:"server.db_password" env:"CONTEXT_DB_PASSWORD" default:"" mut:"restart" secret:"presence" tenancy:"global-only"`
+	DBHost     string `key:"server.db_host" env:"CONTEXT_DB_HOST" default:"localhost" mut:"restart" tenancy:"global-only"`
+	DBPort     int    `key:"server.db_port" env:"CONTEXT_DB_PORT" default:"5432" mut:"restart" parse:"strict" tenancy:"global-only"`
+	DBSSL      string `key:"server.db_sslmode" env:"CONTEXT_DB_SSLMODE" default:"disable" mut:"restart" tenancy:"global-only"`
+	ListenAddr string `key:"server.listen_addr" env:"LISTEN_ADDR" default:":8080" mut:"restart" tenancy:"global-only"`
 }
 
 // ChatConfig is the primary chat/synthesis backend tuple.
 type ChatConfig struct {
-	Host     string             `key:"chat.host" env:"CTX_CHAT_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends"`
-	APIKey   string             `key:"chat.api_key" env:"CTX_CHAT_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends"`
-	Protocol backends.Protocol  `key:"chat.protocol" env:"CTX_CHAT_PROTOCOL" default:"ollama" mut:"hot" superseded:"f3:context_backends"`
-	Model    string             `key:"chat.model" env:"CTX_CHAT_MODEL" default:"qwen3.5:9b" mut:"hot" superseded:"f3:context_backends"`
-	NumCtx   int                `key:"chat.num_ctx" env:"CTX_CHAT_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends"`
-	Think    backends.ThinkMode `key:"chat.think" env:"CTX_CHAT_THINK" default:"false" mut:"hot" superseded:"f3:context_backends"`
+	Host string `key:"chat.host" env:"CTX_CHAT_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	// TENANT-DECISION(provider-api-key): the 6 provider api_key secret_refs
+	// (chat/chat_fallback/embed/dream/dream_embed/rerank) are tenant-overridable
+	// — a tenant brings its own provider credential (resolved per-tenant by the
+	// 03-W3..W5 secret resolver, isolation gated by tenant.allow_shared_secrets
+	// §4.3). Alt: global-only with credentials flowing ONLY through the F3 pool's
+	// scope+AAD path; umentscheidbar because the per-tenant secret resolver
+	// (W3-W5) is not built yet and may consolidate on the pool. §3.3 lists these
+	// six as tenant-overridable; the HOST/MODEL topology stays global (pool owns
+	// per-tenant backends). Pausable: no consumer until W3.
+	APIKey   string             `key:"chat.api_key" env:"CTX_CHAT_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
+	Protocol backends.Protocol  `key:"chat.protocol" env:"CTX_CHAT_PROTOCOL" default:"ollama" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	Model    string             `key:"chat.model" env:"CTX_CHAT_MODEL" default:"qwen3.5:9b" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	NumCtx   int                `key:"chat.num_ctx" env:"CTX_CHAT_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends" tenancy:"global-only"`
+	Think    backends.ThinkMode `key:"chat.think" env:"CTX_CHAT_THINK" default:"false" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 }
 
 // FallbackConfig is the emergency chat backend for query-path synthesis,
 // engaged only on transport-level unavailability of the primary. Empty host =
 // off. Model is inherited from the primary (today's semantics).
 type FallbackConfig struct {
-	Host     string            `key:"chat_fallback.host" env:"CTX_CHAT_FALLBACK_HOST" default:"" mut:"hot" superseded:"f3:context_backends"`
-	APIKey   string            `key:"chat_fallback.api_key" env:"CTX_CHAT_FALLBACK_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends"`
-	Protocol backends.Protocol `key:"chat_fallback.protocol" env:"CTX_CHAT_FALLBACK_PROTOCOL" default:"openai" mut:"hot" superseded:"f3:context_backends"`
-	Timeout  time.Duration     `key:"chat_fallback.timeout" env:"CTX_CHAT_FALLBACK_TIMEOUT" default:"420" mut:"hot" superseded:"f3:context_backends"`
+	Host     string            `key:"chat_fallback.host" env:"CTX_CHAT_FALLBACK_HOST" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	APIKey   string            `key:"chat_fallback.api_key" env:"CTX_CHAT_FALLBACK_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
+	Protocol backends.Protocol `key:"chat_fallback.protocol" env:"CTX_CHAT_FALLBACK_PROTOCOL" default:"openai" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	Timeout  time.Duration     `key:"chat_fallback.timeout" env:"CTX_CHAT_FALLBACK_TIMEOUT" default:"420" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 }
 
 // EmbedConfig is the query-path embedding backend tuple. Model is
 // mut:"coupled": changing it changes the vector space and requires a
 // re-embed migration. Host/Protocol are coupled to the embed cache (X2).
 type EmbedConfig struct {
-	Host     string            `key:"embed.host" env:"CTX_EMBED_HOST" default:"http://localhost:11434" mut:"coupled:embed-cache" superseded:"f3:context_backends"`
-	APIKey   string            `key:"embed.api_key" env:"CTX_EMBED_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends"`
-	Protocol backends.Protocol `key:"embed.protocol" env:"CTX_EMBED_PROTOCOL" default:"ollama" mut:"coupled:embed-cache" superseded:"f3:context_backends"`
-	Model    string            `key:"embed.model" env:"CTX_EMBED_MODEL" default:"qwen3-embedding:8b" mut:"coupled" superseded:"f3:context_backends"`
-	NumCtx   int               `key:"embed.num_ctx" env:"CTX_EMBED_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends"`
+	// embed.host/protocol are NAMED global-only (not just by fail-closed default):
+	// they are mut:"coupled:embed-cache", and a tenant override would change the
+	// effective embed tuple → embedcache.Flush nukes the process-wide, scope-less
+	// context_embed_cache for ALL tenants (R-SCALE6, cosine 0.997). Model stays
+	// global-only too (vector space — re-embed migration, not overridable).
+	Host     string            `key:"embed.host" env:"CTX_EMBED_HOST" default:"http://localhost:11434" mut:"coupled:embed-cache" superseded:"f3:context_backends" tenancy:"global-only"`
+	APIKey   string            `key:"embed.api_key" env:"CTX_EMBED_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
+	Protocol backends.Protocol `key:"embed.protocol" env:"CTX_EMBED_PROTOCOL" default:"ollama" mut:"coupled:embed-cache" superseded:"f3:context_backends" tenancy:"global-only"`
+	Model    string            `key:"embed.model" env:"CTX_EMBED_MODEL" default:"qwen3-embedding:8b" mut:"coupled" superseded:"f3:context_backends" tenancy:"global-only"`
+	NumCtx   int               `key:"embed.num_ctx" env:"CTX_EMBED_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends" tenancy:"global-only"`
 }
 
 // DreamConfig is the dream pipeline: its own chat tuple (model/num_ctx/think
@@ -131,18 +161,20 @@ type EmbedConfig struct {
 // field inheritance from embed, credential boundary V12), and the back-off
 // policy.
 type DreamConfig struct {
-	Enabled  bool               `key:"dream.enabled" env:"CTX_DREAM_ENABLED" default:"false" mut:"restart"`
-	Host     string             `key:"dream.host" env:"CTX_DREAM_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends"`
-	APIKey   string             `key:"dream.api_key" env:"CTX_DREAM_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends"`
-	Protocol backends.Protocol  `key:"dream.protocol" env:"CTX_DREAM_PROTOCOL" default:"ollama" mut:"hot" superseded:"f3:context_backends"`
-	Model    string             `key:"dream.model" env:"CTX_DREAM_MODEL" default:"" mut:"hot" superseded:"f3:context_backends"`
-	NumCtx   int                `key:"dream.num_ctx" env:"CTX_DREAM_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends"`
-	Think    backends.ThinkMode `key:"dream.think" env:"CTX_DREAM_THINK" default:"" mut:"hot" superseded:"f3:context_backends"`
+	Enabled  bool               `key:"dream.enabled" env:"CTX_DREAM_ENABLED" default:"false" mut:"restart" tenancy:"global-only"`
+	Host     string             `key:"dream.host" env:"CTX_DREAM_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	APIKey   string             `key:"dream.api_key" env:"CTX_DREAM_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
+	Protocol backends.Protocol  `key:"dream.protocol" env:"CTX_DREAM_PROTOCOL" default:"ollama" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	Model    string             `key:"dream.model" env:"CTX_DREAM_MODEL" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	NumCtx   int                `key:"dream.num_ctx" env:"CTX_DREAM_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends" tenancy:"global-only"`
+	Think    backends.ThinkMode `key:"dream.think" env:"CTX_DREAM_THINK" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 
 	Embed DreamEmbedConfig
 
-	IdleWait    time.Duration `key:"dream.idle_wait" env:"CTX_DREAM_IDLE_WAIT" default:"20" mut:"hot"`
-	Parallelism int           `key:"dream.parallelism" env:"CTX_DREAM_PARALLELISM" default:"1" mut:"restart"`
+	// idle_wait (scheduler cadence) and parallelism (process-wide worker count,
+	// restart) are background-pipeline infrastructure — global-only.
+	IdleWait    time.Duration `key:"dream.idle_wait" env:"CTX_DREAM_IDLE_WAIT" default:"20" mut:"hot" tenancy:"global-only"`
+	Parallelism int           `key:"dream.parallelism" env:"CTX_DREAM_PARALLELISM" default:"1" mut:"restart" tenancy:"global-only"`
 
 	Backoff BackoffConfig
 }
@@ -150,52 +182,63 @@ type DreamConfig struct {
 // DreamEmbedConfig is the optional separate dream embedding tuple. Empty
 // fields inherit from EmbedConfig field by field (DreamEmbedBackend).
 type DreamEmbedConfig struct {
-	Host     string            `key:"dream_embed.host" env:"CTX_DREAM_EMBED_HOST" default:"" mut:"coupled:embed-cache" superseded:"f3:context_backends"`
-	APIKey   string            `key:"dream_embed.api_key" env:"CTX_DREAM_EMBED_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends"`
-	Protocol backends.Protocol `key:"dream_embed.protocol" env:"CTX_DREAM_EMBED_PROTOCOL" default:"" mut:"coupled:embed-cache" superseded:"f3:context_backends"`
-	Model    string            `key:"dream_embed.model" env:"CTX_DREAM_EMBED_MODEL" default:"" mut:"coupled" superseded:"f3:context_backends"`
-	NumCtx   int               `key:"dream_embed.num_ctx" env:"CTX_DREAM_EMBED_NUM_CTX" default:"0" mut:"hot" superseded:"f3:context_backends"`
+	// dream_embed.host/protocol are NAMED global-only (embed-cache coupled, same
+	// R-SCALE6 shared-cache flush as embed.host/protocol).
+	Host     string            `key:"dream_embed.host" env:"CTX_DREAM_EMBED_HOST" default:"" mut:"coupled:embed-cache" superseded:"f3:context_backends" tenancy:"global-only"`
+	APIKey   string            `key:"dream_embed.api_key" env:"CTX_DREAM_EMBED_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
+	Protocol backends.Protocol `key:"dream_embed.protocol" env:"CTX_DREAM_EMBED_PROTOCOL" default:"" mut:"coupled:embed-cache" superseded:"f3:context_backends" tenancy:"global-only"`
+	Model    string            `key:"dream_embed.model" env:"CTX_DREAM_EMBED_MODEL" default:"" mut:"coupled" superseded:"f3:context_backends" tenancy:"global-only"`
+	NumCtx   int               `key:"dream_embed.num_ctx" env:"CTX_DREAM_EMBED_NUM_CTX" default:"0" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 }
 
 // BackoffConfig is the re-dream back-off policy (curve by eval count).
 type BackoffConfig struct {
-	Mode        string  `key:"dream.backoff_mode" env:"CTX_DREAM_BACKOFF_MODE" default:"exp" mut:"hot"`
-	Factor      float64 `key:"dream.backoff_factor" env:"CTX_DREAM_BACKOFF_FACTOR" default:"1.6" mut:"hot"`
-	Grace       int     `key:"dream.backoff_grace" env:"CTX_DREAM_BACKOFF_GRACE" default:"0" mut:"hot"`
-	CapHours    Hours   `key:"dream.backoff_cap" env:"CTX_DREAM_BACKOFF_CAP" default:"45d" mut:"hot"`
-	MinHours    Hours   `key:"dream.backoff_min" env:"CTX_DREAM_BACKOFF_MIN" default:"12h" mut:"hot"`
-	InertOffset int     `key:"dream.backoff_inert_offset" env:"CTX_DREAM_BACKOFF_INERT_OFFSET" default:"7" mut:"hot"`
+	// The re-dream back-off curve is an atomic per-tenant unit: it shapes when a
+	// tenant's own blocks are re-dreamed (the scheduler reads it per block), no
+	// cross-tenant effect — tenant-overridable as a group (mode §3.3-listed).
+	Mode        string  `key:"dream.backoff_mode" env:"CTX_DREAM_BACKOFF_MODE" default:"exp" mut:"hot" tenancy:"tenant-overridable"`
+	Factor      float64 `key:"dream.backoff_factor" env:"CTX_DREAM_BACKOFF_FACTOR" default:"1.6" mut:"hot" tenancy:"tenant-overridable"`
+	Grace       int     `key:"dream.backoff_grace" env:"CTX_DREAM_BACKOFF_GRACE" default:"0" mut:"hot" tenancy:"tenant-overridable"`
+	CapHours    Hours   `key:"dream.backoff_cap" env:"CTX_DREAM_BACKOFF_CAP" default:"45d" mut:"hot" tenancy:"tenant-overridable"`
+	MinHours    Hours   `key:"dream.backoff_min" env:"CTX_DREAM_BACKOFF_MIN" default:"12h" mut:"hot" tenancy:"tenant-overridable"`
+	InertOffset int     `key:"dream.backoff_inert_offset" env:"CTX_DREAM_BACKOFF_INERT_OFFSET" default:"7" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // RerankConfig is the post-RRF rerank stage. Host empty = LLM-as-judge on the
 // chat model; set = cross-encoder sidecar.
 type RerankConfig struct {
-	Enabled     bool    `key:"rerank.enabled" env:"CTX_RERANK_ENABLED" default:"false" mut:"hot"`
-	Host        string  `key:"rerank.host" env:"CTX_RERANK_HOST" default:"" mut:"hot" superseded:"f3:context_backends"`
-	APIKey      string  `key:"rerank.api_key" env:"CTX_RERANK_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends"`
-	Model       string  `key:"rerank.model" env:"CTX_RERANK_MODEL" default:"" mut:"hot" superseded:"f3:context_backends"`
-	MaxDocs     int     `key:"rerank.max_docs" env:"CTX_RERANK_MAX_DOCS" default:"50" mut:"hot"`
-	BlendWeight float64 `key:"rerank.blend_weight" env:"CTX_RERANK_BLEND_WEIGHT" default:"1.0" mut:"hot"`
+	// Per-tenant rerank tuning (enabled/max_docs/blend_weight — blend_weight
+	// §3.3-listed) is query-time, isolation-safe. host/model are backend topology
+	// (superseded by the F3 pool's scope dimension) → global-only.
+	Enabled     bool    `key:"rerank.enabled" env:"CTX_RERANK_ENABLED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
+	Host        string  `key:"rerank.host" env:"CTX_RERANK_HOST" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	APIKey      string  `key:"rerank.api_key" env:"CTX_RERANK_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
+	Model       string  `key:"rerank.model" env:"CTX_RERANK_MODEL" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	MaxDocs     int     `key:"rerank.max_docs" env:"CTX_RERANK_MAX_DOCS" default:"50" mut:"hot" tenancy:"tenant-overridable"`
+	BlendWeight float64 `key:"rerank.blend_weight" env:"CTX_RERANK_BLEND_WEIGHT" default:"1.0" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // GraphConfig is the dream-graph expansion stage (post-RRF 1-hop traversal).
 type GraphConfig struct {
-	Enabled                bool    `key:"graph.enabled" env:"CTX_GRAPH_EXPAND_ENABLED" default:"false" mut:"hot"`
-	Directed               bool    `key:"graph.directed" env:"CTX_GRAPH_EXPAND_DIRECTED" default:"true" mut:"hot"`
-	HopDepth               int     `key:"graph.hop_depth" env:"CTX_GRAPH_EXPAND_HOP_DEPTH" default:"1" mut:"hot"`
-	SeedCount              int     `key:"graph.seed_count" env:"CTX_GRAPH_EXPAND_SEED_COUNT" default:"5" mut:"hot"`
-	SeedScoreFloor         float64 `key:"graph.seed_score_floor" env:"CTX_GRAPH_EXPAND_SEED_SCORE_FLOOR" default:"0.5" mut:"hot"`
-	PerSeedCap             int     `key:"graph.per_seed_cap" env:"CTX_GRAPH_EXPAND_PER_SEED_CAP" default:"3" mut:"hot"`
-	MaxInjected            int     `key:"graph.max_injected" env:"CTX_GRAPH_EXPAND_MAX_INJECTED" default:"10" mut:"hot"`
-	MinConfidence          float64 `key:"graph.min_confidence" env:"CTX_GRAPH_EXPAND_MIN_CONFIDENCE" default:"0.75" mut:"hot"`
-	MinConfidenceRecurrent float64 `key:"graph.min_confidence_recurrent" env:"CTX_GRAPH_EXPAND_MIN_CONFIDENCE_RECURRENT" default:"0.8" mut:"hot"`
-	BoostWeight            float64 `key:"graph.boost_weight" env:"CTX_GRAPH_EXPAND_BOOST_WEIGHT" default:"0.20" mut:"hot"`
-	HubDamping             bool    `key:"graph.hub_damping" env:"CTX_GRAPH_EXPAND_HUB_DAMPING" default:"true" mut:"hot"`
-	WeightTopical          float64 `key:"graph.weight_topical" env:"CTX_GRAPH_EXPAND_WEIGHT_TOPICAL" default:"0.5" mut:"hot"`
-	WeightFactual          float64 `key:"graph.weight_factual" env:"CTX_GRAPH_EXPAND_WEIGHT_FACTUAL" default:"0.9" mut:"hot"`
-	WeightCausal           float64 `key:"graph.weight_causal" env:"CTX_GRAPH_EXPAND_WEIGHT_CAUSAL" default:"0.9" mut:"hot"`
-	WeightRecurrent        float64 `key:"graph.weight_recurrent" env:"CTX_GRAPH_EXPAND_WEIGHT_RECURRENT" default:"1.0" mut:"hot"`
-	NewPlacementFrac       float64 `key:"graph.new_placement_frac" env:"CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC" default:"0.6" mut:"hot"`
+	// All graph-expansion knobs are query-time RRF augmentation tuning — a tenant
+	// tuning its own expansion affects only its own queries, zero cross-tenant
+	// effect → tenant-overridable as a group.
+	Enabled                bool    `key:"graph.enabled" env:"CTX_GRAPH_EXPAND_ENABLED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
+	Directed               bool    `key:"graph.directed" env:"CTX_GRAPH_EXPAND_DIRECTED" default:"true" mut:"hot" tenancy:"tenant-overridable"`
+	HopDepth               int     `key:"graph.hop_depth" env:"CTX_GRAPH_EXPAND_HOP_DEPTH" default:"1" mut:"hot" tenancy:"tenant-overridable"`
+	SeedCount              int     `key:"graph.seed_count" env:"CTX_GRAPH_EXPAND_SEED_COUNT" default:"5" mut:"hot" tenancy:"tenant-overridable"`
+	SeedScoreFloor         float64 `key:"graph.seed_score_floor" env:"CTX_GRAPH_EXPAND_SEED_SCORE_FLOOR" default:"0.5" mut:"hot" tenancy:"tenant-overridable"`
+	PerSeedCap             int     `key:"graph.per_seed_cap" env:"CTX_GRAPH_EXPAND_PER_SEED_CAP" default:"3" mut:"hot" tenancy:"tenant-overridable"`
+	MaxInjected            int     `key:"graph.max_injected" env:"CTX_GRAPH_EXPAND_MAX_INJECTED" default:"10" mut:"hot" tenancy:"tenant-overridable"`
+	MinConfidence          float64 `key:"graph.min_confidence" env:"CTX_GRAPH_EXPAND_MIN_CONFIDENCE" default:"0.75" mut:"hot" tenancy:"tenant-overridable"`
+	MinConfidenceRecurrent float64 `key:"graph.min_confidence_recurrent" env:"CTX_GRAPH_EXPAND_MIN_CONFIDENCE_RECURRENT" default:"0.8" mut:"hot" tenancy:"tenant-overridable"`
+	BoostWeight            float64 `key:"graph.boost_weight" env:"CTX_GRAPH_EXPAND_BOOST_WEIGHT" default:"0.20" mut:"hot" tenancy:"tenant-overridable"`
+	HubDamping             bool    `key:"graph.hub_damping" env:"CTX_GRAPH_EXPAND_HUB_DAMPING" default:"true" mut:"hot" tenancy:"tenant-overridable"`
+	WeightTopical          float64 `key:"graph.weight_topical" env:"CTX_GRAPH_EXPAND_WEIGHT_TOPICAL" default:"0.5" mut:"hot" tenancy:"tenant-overridable"`
+	WeightFactual          float64 `key:"graph.weight_factual" env:"CTX_GRAPH_EXPAND_WEIGHT_FACTUAL" default:"0.9" mut:"hot" tenancy:"tenant-overridable"`
+	WeightCausal           float64 `key:"graph.weight_causal" env:"CTX_GRAPH_EXPAND_WEIGHT_CAUSAL" default:"0.9" mut:"hot" tenancy:"tenant-overridable"`
+	WeightRecurrent        float64 `key:"graph.weight_recurrent" env:"CTX_GRAPH_EXPAND_WEIGHT_RECURRENT" default:"1.0" mut:"hot" tenancy:"tenant-overridable"`
+	NewPlacementFrac       float64 `key:"graph.new_placement_frac" env:"CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC" default:"0.6" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // GraphOverviewConfig is the F5-W6 landkarte rebuild job (precomputed Louvain
@@ -205,20 +248,25 @@ type GraphConfig struct {
 // Enabled too. RebuildInterval default is seconds (6h), like the other
 // duration keys.
 type GraphOverviewConfig struct {
-	Enabled         bool          `key:"graph_overview.enabled" env:"CTX_GRAPH_OVERVIEW_ENABLED" default:"false" mut:"hot"`
-	RebuildInterval time.Duration `key:"graph_overview.rebuild_interval" env:"CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL" default:"21600" mut:"hot"`
-	Resolution      float64       `key:"graph_overview.resolution" env:"CTX_GRAPH_OVERVIEW_RESOLUTION" default:"1.0" mut:"hot"`
+	// The landkarte is an offline, process-global supergraph rebuilt by the
+	// scheduler over the whole corpus — not per-tenant today → global-only.
+	Enabled         bool          `key:"graph_overview.enabled" env:"CTX_GRAPH_OVERVIEW_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+	RebuildInterval time.Duration `key:"graph_overview.rebuild_interval" env:"CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL" default:"21600" mut:"hot" tenancy:"global-only"`
+	Resolution      float64       `key:"graph_overview.resolution" env:"CTX_GRAPH_OVERVIEW_RESOLUTION" default:"1.0" mut:"hot" tenancy:"global-only"`
 }
 
 // QueryConfig is the query-path tuning surface: synthesis thresholds, prompt
 // version, temporal timezone, rate limits.
 type QueryConfig struct {
-	ScoreThreshold     float64        `key:"query.score_threshold" env:"CTX_SCORE_THRESHOLD" default:"0.001" mut:"hot"`
-	ConfidentThreshold float64        `key:"query.confident_threshold" env:"CTX_CONFIDENT_THRESHOLD" default:"0.008" mut:"hot"`
-	PromptVersion      string         `key:"query.prompt_version" env:"CTX_PROMPT_VERSION" default:"v5.2" mut:"hot"`
-	Timezone           *time.Location `key:"query.timezone" env:"CTX_TIMEZONE" default:"" mut:"hot" parse:"strict"`
-	RateLimitWrite     int            `key:"query.rate_limit_write" env:"CTX_RATE_LIMIT_WRITE" default:"100" mut:"hot" parse:"strict"`
-	RateLimitRead      int            `key:"query.rate_limit_read" env:"CTX_RATE_LIMIT_READ" default:"0" mut:"hot" parse:"strict"`
+	// Query-path tuning is per-tenant request behavior (synthesis thresholds,
+	// prompt version, temporal timezone, rate limits — score_threshold and the
+	// rate limits §3.3-listed); each affects only that tenant's own queries.
+	ScoreThreshold     float64        `key:"query.score_threshold" env:"CTX_SCORE_THRESHOLD" default:"0.001" mut:"hot" tenancy:"tenant-overridable"`
+	ConfidentThreshold float64        `key:"query.confident_threshold" env:"CTX_CONFIDENT_THRESHOLD" default:"0.008" mut:"hot" tenancy:"tenant-overridable"`
+	PromptVersion      string         `key:"query.prompt_version" env:"CTX_PROMPT_VERSION" default:"v5.2" mut:"hot" tenancy:"tenant-overridable"`
+	Timezone           *time.Location `key:"query.timezone" env:"CTX_TIMEZONE" default:"" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	RateLimitWrite     int            `key:"query.rate_limit_write" env:"CTX_RATE_LIMIT_WRITE" default:"100" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	RateLimitRead      int            `key:"query.rate_limit_read" env:"CTX_RATE_LIMIT_READ" default:"0" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 }
 
 // SchedulerConfig is the background-pipeline scope surface.
@@ -226,18 +274,30 @@ type QueryConfig struct {
 // multi-tenant line they become per-key/per-tenant resolution (F2 settings
 // scope column + key home_scope), and this group degrades to defaults.
 type SchedulerConfig struct {
-	ReadScopes []string `key:"scheduler.read_scopes" env:"CTX_READ_SCOPES" default:"private,shared,work" mut:"hot"`
+	// TENANT-DECISION(scheduler-scope): read_scopes/home_scope are tenant-
+	// overridable (§3.3-listed — they ARE the per-tenant scope-resolution keys).
+	// CONSUMER OBLIGATION (04-W6/T38, NOT W2): the per-tenant background pipeline
+	// MUST intersect a tenant's configured read_scopes with that tenant's actual
+	// entitlements (ctx_auth own ∪ grants, _-filtered) before reading — a raw
+	// config value is NOT grant-gated, so an unintersected consumer would be a
+	// cross-tenant background leak. Alt: global-only (background stays server-
+	// scoped); umentscheidbar because the per-tenant background consumer (T38) is
+	// unbuilt. Pausable: no tenant rows + no per-tenant background path until W3/W4.
+	ReadScopes []string `key:"scheduler.read_scopes" env:"CTX_READ_SCOPES" default:"private,shared,work" mut:"hot" tenancy:"tenant-overridable"`
 	// HomeScope has no env knob in F1 (hardcoded "private" until now); the
 	// key-keyed loader makes it settings-fillable from F2 without a special
 	// path (env:"-" skips the env source, not the lookup).
-	HomeScope string `key:"scheduler.home_scope" env:"-" default:"private" mut:"hot"`
+	HomeScope string `key:"scheduler.home_scope" env:"-" default:"private" mut:"hot" tenancy:"tenant-overridable"`
 	// LLMLogRetentionDays is the age after which the background janitor NULLs
 	// the prompt/response BODIES in context_llm_log. The telemetry row
 	// (pipeline/model/tokens/cost/block_ids/backend/trust) survives — the
 	// egress audit stays lossless, only the plaintext shadow corpus is dropped
 	// (Body-NULLing, NOT a chunk drop; masterplan E4). 0 disables retention:
 	// bodies are kept forever (operator opt-in). The 90-day default ships safe.
-	LLMLogRetentionDays int `key:"scheduler.llmlog_retention_days" env:"CTX_LLMLOG_RETENTION_DAYS" default:"90" mut:"hot" parse:"strict"`
+	// global-only (design 03 §8-D5): the body-NULLing janitor runs process-global
+	// over the one hypertable; per-tenant retention needs a scope-aware janitor
+	// (telemetry achse, own wave). The operator owns the egress-audit policy.
+	LLMLogRetentionDays int `key:"scheduler.llmlog_retention_days" env:"CTX_LLMLOG_RETENTION_DAYS" default:"90" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // EventsConfig is the status-collector / SSE timing surface (design 04 §3.6).
@@ -249,27 +309,30 @@ type EventsConfig struct {
 	// pool.Status, dream mode, gaming, llm-24h aggregate) refresh at most this
 	// often, and GET /api/status serves the cache instead of rebuilding per
 	// request — N pollers cost one refresh, not N.
-	TickInterval time.Duration `key:"events.tick_interval" env:"CTX_EVENTS_TICK_INTERVAL" default:"5" mut:"hot"`
+	TickInterval time.Duration `key:"events.tick_interval" env:"CTX_EVENTS_TICK_INTERVAL" default:"5" mut:"hot" tenancy:"global-only"`
 	// QueueStatsInterval decouples dream.QueueDepth — an O(n) full-scan CTE
 	// over context_blocks with no covering index — from the base tick. The
 	// queue forecast's smallest window is 1h, so 30s is fresh enough and the
 	// scan never rides the 5s cadence. 1M+ follow-up (partial index /
 	// maintained counters) is named in design 04 §3.6 / R12.
-	QueueStatsInterval time.Duration `key:"events.queue_stats_interval" env:"CTX_EVENTS_QUEUE_STATS_INTERVAL" default:"30" mut:"hot"`
+	QueueStatsInterval time.Duration `key:"events.queue_stats_interval" env:"CTX_EVENTS_QUEUE_STATS_INTERVAL" default:"30" mut:"hot" tenancy:"global-only"`
 	// PingInterval is the SSE keepalive cadence (a ": ping" comment line). It
 	// MUST stay below the fronting proxy's read timeout (nginx
 	// proxy_read_timeout, currently 60s) — an idle stream between diffs is
 	// dropped otherwise. Policy-as-data: a proxy retune is a settings flip, not
 	// a rebuild; 25s leaves ~2 pings inside a 60s window. F4-W7 (GET
 	// /api/events) only; the query heartbeat shares the same 25s rationale.
-	PingInterval time.Duration `key:"events.ping_interval" env:"CTX_EVENTS_PING_INTERVAL" default:"25" mut:"hot"`
+	PingInterval time.Duration `key:"events.ping_interval" env:"CTX_EVENTS_PING_INTERVAL" default:"25" mut:"hot" tenancy:"global-only"`
 	// MaxConnections caps concurrent SSE streams; the admin-only endpoint
 	// answers 429 above it and the client degrades to polling. The default is
 	// sized for the 256M container — autonomous agents / friend-tenant panels
 	// (O5) raise it via a settings flip, not a redeploy. parse:"strict": a
 	// malformed cap is an operator typo worth a loud boot abort (same call as
 	// llmlog.max_limit), not a silent fall-back that hides the intended ceiling.
-	MaxConnections int `key:"events.max_connections" env:"CTX_EVENTS_MAX_CONNECTIONS" default:"8" mut:"hot" parse:"strict"`
+	// max_connections is a per-tenant SSE stream cap (§3.3-listed) — tenant-
+	// overridable, while the cadences above stay process-global (one collector,
+	// one proxy-bound ping window).
+	MaxConnections int `key:"events.max_connections" env:"CTX_EVENTS_MAX_CONNECTIONS" default:"8" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 }
 
 // LLMLogConfig is the telemetry read surface. The retention knob (body-NULLing
@@ -279,7 +342,9 @@ type LLMLogConfig struct {
 	// MaxLimit caps GET /api/llmlog?limit=. The endpoint is admin-only and
 	// rides the created_at DESC hypertable path; 200 keeps one page bounded
 	// without a full chunk walk.
-	MaxLimit int `key:"llmlog.max_limit" env:"CTX_LLMLOG_MAX_LIMIT" default:"200" mut:"hot" parse:"strict"`
+	// Server read-endpoint cap (bounds one /api/llmlog page over the hypertable)
+	// — global-only by fail-closed default; not a per-tenant tuning surface.
+	MaxLimit int `key:"llmlog.max_limit" env:"CTX_LLMLOG_MAX_LIMIT" default:"200" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // WebChatConfig is the F6 web-chat harness surface (design 06 §3.2). All knobs
@@ -293,32 +358,32 @@ type LLMLogConfig struct {
 type WebChatConfig struct {
 	// Enabled gates POST /api/chat/stream + the session routes; off ⇒ 404 (the
 	// SPA route reads the /health feature bit and hides itself).
-	Enabled bool `key:"webchat.enabled" env:"CTX_WEBCHAT_ENABLED" default:"true" mut:"hot"`
+	Enabled bool `key:"webchat.enabled" env:"CTX_WEBCHAT_ENABLED" default:"true" mut:"hot" tenancy:"tenant-overridable"`
 	// MaxIterations caps the tool loop per turn; one closing call WITHOUT tools
 	// follows the cap (E4 — never tool_choice:none).
-	MaxIterations int `key:"webchat.max_iterations" env:"CTX_WEBCHAT_MAX_ITERATIONS" default:"6" mut:"hot"`
+	MaxIterations int `key:"webchat.max_iterations" env:"CTX_WEBCHAT_MAX_ITERATIONS" default:"6" mut:"hot" tenancy:"tenant-overridable"`
 	// MaxTokens clamps max_tokens per model call (a request may ask less, never
 	// more); the per-backend limits.chat_max_tokens clamp applies on top (CPU 512).
-	MaxTokens int `key:"webchat.max_tokens" env:"CTX_WEBCHAT_MAX_TOKENS" default:"2048" mut:"hot"`
+	MaxTokens int `key:"webchat.max_tokens" env:"CTX_WEBCHAT_MAX_TOKENS" default:"2048" mut:"hot" tenancy:"tenant-overridable"`
 	// CompletionBudget caps Σ completion_tokens across all iterations of one turn.
-	CompletionBudget int `key:"webchat.completion_budget" env:"CTX_WEBCHAT_COMPLETION_BUDGET" default:"8192" mut:"hot"`
+	CompletionBudget int `key:"webchat.completion_budget" env:"CTX_WEBCHAT_COMPLETION_BUDGET" default:"8192" mut:"hot" tenancy:"tenant-overridable"`
 	// ToolResultMaxChars truncates one tool result (ctx_get pages the rest via
 	// the offset marker so a >window block stays fully readable).
-	ToolResultMaxChars int `key:"webchat.tool_result_max_chars" env:"CTX_WEBCHAT_TOOL_RESULT_MAX_CHARS" default:"8000" mut:"hot"`
+	ToolResultMaxChars int `key:"webchat.tool_result_max_chars" env:"CTX_WEBCHAT_TOOL_RESULT_MAX_CHARS" default:"8000" mut:"hot" tenancy:"tenant-overridable"`
 	// HistoryBudgetChars bounds the session history fed into the prompt (~15k
 	// tokens); older tool results condense, then oldest messages drop (§3.6).
-	HistoryBudgetChars int `key:"webchat.history_budget_chars" env:"CTX_WEBCHAT_HISTORY_BUDGET_CHARS" default:"60000" mut:"hot"`
+	HistoryBudgetChars int `key:"webchat.history_budget_chars" env:"CTX_WEBCHAT_HISTORY_BUDGET_CHARS" default:"60000" mut:"hot" tenancy:"tenant-overridable"`
 	// LLMTimeout bounds one model call (bare seconds; CPU-fallback worst case is
 	// why it is large — the per-backend MaxTokens clamp keeps that bounded).
-	LLMTimeout time.Duration `key:"webchat.llm_timeout" env:"CTX_WEBCHAT_LLM_TIMEOUT" default:"900" mut:"hot"`
+	LLMTimeout time.Duration `key:"webchat.llm_timeout" env:"CTX_WEBCHAT_LLM_TIMEOUT" default:"900" mut:"hot" tenancy:"tenant-overridable"`
 	// ConcurrentTurns caps simultaneously running turns per home_scope (the
 	// in-memory semaphore §3.3); above it the handler answers 429 before stream
 	// start. Bounds the turn FREQUENCY per tenant, not just one turn's budget (R1).
-	ConcurrentTurns int `key:"webchat.concurrent_turns" env:"CTX_WEBCHAT_CONCURRENT_TURNS" default:"1" mut:"hot" parse:"strict"`
+	ConcurrentTurns int `key:"webchat.concurrent_turns" env:"CTX_WEBCHAT_CONCURRENT_TURNS" default:"1" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	// SessionRetention enables the retention janitor: sessions whose updated_at
 	// is older than this are deleted (messages cascade). 0 = off (kept forever,
 	// the shipped default). Duration suffix h/d/w/m/y (Hours parser, since v2.6.0).
-	SessionRetention Hours `key:"webchat.session_retention" env:"CTX_WEBCHAT_SESSION_RETENTION" default:"0" mut:"hot"`
+	SessionRetention Hours `key:"webchat.session_retention" env:"CTX_WEBCHAT_SESSION_RETENTION" default:"0" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // ScopeFloor maps a scope to its minimum effective sensitivity (F3 §2.3d).
@@ -345,25 +410,30 @@ func (f ScopeFloor) Apply(s backends.Sensitivity, scope string) backends.Sensiti
 // 'public' would silently mark ALL new unclassified blocks external-eligible
 // until the first failover — F3 §3.5).
 type PoolConfig struct {
-	DefaultQuerySensitivity backends.Sensitivity `key:"pool.default_query_sensitivity" env:"-" default:"personal" mut:"hot" guard:"sensitivity-downgrade"`
-	DefaultBlockSensitivity backends.Sensitivity `key:"pool.default_block_sensitivity" env:"-" default:"credentials" mut:"hot" guard:"sensitivity-downgrade"`
-	// TODO(multi-tenant): the floor is server-global policy; the multi-tenant
-	// line scopes it per tenant (settings scope column) so each tenant floors
-	// its own scopes.
-	ScopeSensitivityFloor ScopeFloor `key:"pool.scope_sensitivity_floor" env:"-" default:"{}" mut:"hot"`
+	// Per-tenant trust policy (§3.3-listed): a tenant sets its own default
+	// sensitivities and per-scope floor — affects only its own blocks' egress
+	// eligibility. The floor only RAISES (ScopeFloor.Apply is monotone) and the
+	// defaults stay guard:"sensitivity-downgrade" (lowering needs a confirm flag),
+	// so per-tenant override stays fail-closed within the tenant.
+	DefaultQuerySensitivity backends.Sensitivity `key:"pool.default_query_sensitivity" env:"-" default:"personal" mut:"hot" guard:"sensitivity-downgrade" tenancy:"tenant-overridable"`
+	DefaultBlockSensitivity backends.Sensitivity `key:"pool.default_block_sensitivity" env:"-" default:"credentials" mut:"hot" guard:"sensitivity-downgrade" tenancy:"tenant-overridable"`
+	ScopeSensitivityFloor   ScopeFloor           `key:"pool.scope_sensitivity_floor" env:"-" default:"{}" mut:"hot" tenancy:"tenant-overridable"`
 
 	// GamingActive flips the named GPU-host backends out of EVERY chain so the
 	// GPU is free to game. It lives in the settings layer (persistent across
 	// restarts) — NOT an atomic: the dream-mode break path (restart ⇒ the GPU
 	// lock is gone) is the explicit anti-pattern here (design 03 §2.6).
 	// Toggled via `ctx gaming on|off` / the gaming-mode manage action.
-	GamingActive bool `key:"gaming.active" env:"-" default:"false" mut:"hot"`
+	// gaming.active/disabled_backends are NAMED global-only: the GPU is physically
+	// one host, not a tenant concept (design 03 §3.3) — a tenant must never flip a
+	// server-wide GPU switch.
+	GamingActive bool `key:"gaming.active" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
 	// GamingDisabledBackends names which backends gaming.active excludes —
 	// policy as data, so a second GPU host later is a list edit, not code.
 	// Default = the herbert GPU backends; the CPU/external rows stay in as
 	// failover. Comma-split (scopes parser); the gaming-mode action validates
 	// the names against the live pool (a typo ⇒ unknown_backends, risk 6.6).
-	GamingDisabledBackends []string `key:"gaming.disabled_backends" env:"-" default:"herbert-chat,herbert-rerank" mut:"hot"`
+	GamingDisabledBackends []string `key:"gaming.disabled_backends" env:"-" default:"herbert-chat,herbert-rerank" mut:"hot" tenancy:"global-only"`
 }
 
 // GamingState returns the chain-time gaming exclusion from THIS settings

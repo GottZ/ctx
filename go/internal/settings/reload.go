@@ -218,10 +218,27 @@ func poolResolver(ctx context.Context, pool *pgxpool.Pool) (config.SecretResolve
 // config.Build's typed parsers consume. Unsupported shapes degrade to a WARN
 // per row; messages never embed the raw value — a corrupt value on a
 // sensitive key could BE a mistakenly-pasted plaintext secret.
+//
+// global-only gate (MT3-W2 §4.6): this pass is the only place the override's
+// SCOPE is still present (config.Override is {Key,Value} — build.go drops the
+// scope), so the tenancy gate lives here. A non-_global (tenant-scope) override
+// on a global-only key is DROPPED with a WARN before it becomes a
+// config.Override — fail-closed against a tenant flipping a server-wide switch,
+// most critically the embed-cache-coupled keys whose flush nukes the
+// process-wide shared cache for ALL tenants (R-SCALE6). _global rows (the
+// operator path) and tenant rows on tenant-overridable keys pass through
+// untouched. Today loadOverrideRows reads only _global, so this gate is inert
+// (W3 introduces the tenant rows it guards) — the no-override boot stays
+// byte-identical.
 func toOverrides(rows []store.SettingOverride) ([]config.Override, []config.Issue) {
 	overrides := make([]config.Override, 0, len(rows))
 	var issues []config.Issue
 	for _, row := range rows {
+		if row.Scope != store.GlobalScope && config.IsGlobalOnly(row.Key) {
+			issues = append(issues, config.Issue{Field: row.Key, Severity: config.SeverityWarn,
+				Msg: fmt.Sprintf("tenant override on global-only key ignored (scope %q)", row.Scope)})
+			continue
+		}
 		raw, err := ScalarValue(row.Value)
 		if err != nil {
 			issues = append(issues, config.Issue{Field: row.Key, Severity: config.SeverityWarn,

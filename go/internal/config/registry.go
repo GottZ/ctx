@@ -20,6 +20,7 @@ type entry struct {
 	Strict     bool   // parse:"strict" — malformed value is a boot abort
 	Superseded string // "" | "f3:context_backends" (lifetime marker)
 	Guard      string // "" | "sensitivity-downgrade" — lowering needs a confirm flag (F3 §3.5)
+	Tenancy    string // tenant-overridable | global-only — MT3-W2: may a tenant override this key on top of _global?
 
 	defRaw string       // raw default tag value
 	defVal any          // default parsed through the same typed parser
@@ -44,6 +45,22 @@ var (
 
 var validMut = map[string]bool{
 	"hot": true, "restart": true, "coupled": true, "coupled:embed-cache": true,
+}
+
+// Tenancy classes (MT3-W2): may a tenant override a key on top of _global, or
+// does it live in _global only? The tag is MANDATORY — a missing or unknown
+// value is a boot panic (registry() at :54), so no config key can escape the
+// classification. The fail-closed posture is global-only: a key becomes
+// tenant-writable only through an explicit, deliberate tenant-overridable tag,
+// never by omission. Per-tenant resolution (W3) and the global-only gate
+// (settings.toOverrides) consume this via IsGlobalOnly.
+const (
+	TenancyOverridable = "tenant-overridable"
+	TenancyGlobalOnly  = "global-only"
+)
+
+var validTenancy = map[string]bool{
+	TenancyOverridable: true, TenancyGlobalOnly: true,
 }
 
 // registry returns the parsed registry, built once. A malformed struct tag is
@@ -146,6 +163,11 @@ func buildEntry(owner string, f reflect.StructField, key string, path []int) (en
 	if !validMut[mut] {
 		return entry{}, fmt.Errorf("%s: invalid mut tag %q", loc, mut)
 	}
+	tenancy := f.Tag.Get("tenancy")
+	if !validTenancy[tenancy] {
+		return entry{}, fmt.Errorf("%s: invalid or missing tenancy tag %q (use %q | %q)",
+			loc, tenancy, TenancyOverridable, TenancyGlobalOnly)
+	}
 	secret := f.Tag.Get("secret")
 	if secret != "" && secret != "fp" && secret != "presence" {
 		return entry{}, fmt.Errorf("%s: invalid secret tag %q", loc, secret)
@@ -167,6 +189,7 @@ func buildEntry(owner string, f reflect.StructField, key string, path []int) (en
 		Strict:     parse == "strict",
 		Superseded: f.Tag.Get("superseded"),
 		Guard:      guard,
+		Tenancy:    tenancy,
 		defRaw:     def,
 		path:       path,
 		typ:        f.Type,
@@ -180,4 +203,19 @@ func buildEntry(owner string, f reflect.StructField, key string, path []int) (en
 	}
 	e.defVal = defVal
 	return e, nil
+}
+
+// IsGlobalOnly reports whether a registry key is server-global — never
+// tenant-overridable. Unknown keys are global-only by fail-closed default: a
+// key the registry does not know cannot be proven tenant-safe. The F2 reload
+// (settings.toOverrides) uses this to drop tenant-scope overrides on global-only
+// keys before they reach config.Build — MT3-W2 §4.6: a tenant override on an
+// embed-cache-coupled key would otherwise flush the process-wide shared embed
+// cache across all tenants (R-SCALE6).
+func IsGlobalOnly(key string) bool {
+	e, ok := entryByKey()[key]
+	if !ok {
+		return true // unknown key: fail-closed
+	}
+	return e.Tenancy != TenancyOverridable
 }
