@@ -355,7 +355,14 @@ func TestGraphExpand_FetchErrorFailsOpen(t *testing.T) {
 	defer pool.Close()
 
 	cfg := defaultGraphCfg()
-	results := []SearchResult{res("TOP", 1.0), res("MID", 0.8)}
+	// Seeds carry an in-scope ("private") scope so they survive the T41 grant-only
+	// seed filter and the expansion actually reaches fetchNeighbors (a real RRF hit
+	// always carries its block's scope; the scope-less res() helper would be skipped
+	// as grant-only-visible and short-circuit before the fetch).
+	results := []SearchResult{
+		{ID: "TOP", Title: "TOP", RRFScore: 1.0, Scope: "private"},
+		{ID: "MID", Title: "MID", RRFScore: 0.8, Scope: "private"},
+	}
 	out, gerr := GraphExpand(context.Background(), pool, results, []string{"private"}, nil, cfg)
 	if gerr == nil {
 		t.Fatal("expected a fetch error from an unreachable pool")

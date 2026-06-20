@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -126,6 +127,21 @@ type hopCandidate struct {
 	conf float64
 }
 
+// isGrantOnlyVisible reports whether a block that has ALREADY reached the node
+// set is visible ONLY via a block-grant (its scope is not in readScopes). Such a
+// block is a leaf: visible, but never a hop seed — traversing FROM it would let a
+// row-level grant pull the grantee's OWN in-scope blocks (and the existence of
+// foreign private link chains) into the response over the grant bridge.
+//
+// TENANT-DECISION(block-grant-graph-traversal): Grant-Block = Blatt (sichtbar, nicht
+//   traversierbar) in allen drei Seed-Quellen — EgoGraph-frontier (Hop>=1),
+//   EgoGraph-Hop-0-Focus (frontier leer wenn focus.Scope NOT IN readScopes),
+//   GraphExpand-Seed (Seed-Set vor fetchNeighbors filtern). Alternative voller
+//   Hop-Knoten, umentscheidbar weil der Ausschluss je ein Filter im Seed-/frontier-Set ist.
+func isGrantOnlyVisible(scope string, readScopes []string) bool {
+	return !slices.Contains(readScopes, scope)
+}
+
 // EgoGraph runs the BFS hop loop (design §3.2/§3.3):
 //
 //  1. Hydrate the focus + visibility check (miss → ErrNotVisible; the handler
@@ -152,7 +168,15 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 
 	nodes := []GraphNode{*focus}
 	visited := map[string]bool{focus.ID: true}
+	// T41 (07-W3) hop-0 leaf protection: a grant-only focus (visible solely via the
+	// block-grant OR-arm, its scope NOT in readScopes) stays a visible isolated node
+	// but seeds NO traversal — frontier empty. Otherwise the hop loop would walk
+	// FROM the granted block and deliver the grantee's own in-scope neighbours over
+	// the grant bridge. An in-scope focus keeps the normal {focus} frontier.
 	frontier := []string{focus.ID}
+	if isGrantOnlyVisible(focus.Scope, readScopes) {
+		frontier = []string{}
+	}
 	truncated := false
 
 	for hop := 1; hop <= p.Hops; hop++ {
@@ -173,6 +197,13 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		frontier = make([]string, 0, len(added))
 		for i := range added {
 			nodes = append(nodes, added[i])
+			// T41 (07-W3) hop>=1 leaf protection: a grant-only neighbour (reached via
+			// the T40a OR-arm, scope NOT in readScopes) joins the visible node set but
+			// NOT the next frontier — the traversal does not continue THROUGH a granted
+			// block into the grantee's own in-scope blocks behind it.
+			if isGrantOnlyVisible(added[i].Scope, readScopes) {
+				continue
+			}
 			frontier = append(frontier, added[i].ID)
 		}
 		if hopTruncated {

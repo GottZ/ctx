@@ -37,6 +37,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -146,6 +147,67 @@ type graphEdge struct {
 	hopDecay       float64 // extra multiplier from being reached at hop >= 2
 }
 
+// isGrantOnlyVisible reports whether a block that has reached the result/neighbour
+// set is visible ONLY via a block-grant (its scope is not in readScopes). Such a
+// block is a leaf: visible, but never a graph-expand seed — seeding FROM it would
+// let a row-level grant pull the grantee's OWN in-scope blocks into the result set
+// over the grant bridge.
+//
+// TENANT-DECISION(block-grant-graph-traversal): Grant-Block = Blatt (sichtbar, nicht
+//   traversierbar) in allen drei Seed-Quellen — EgoGraph-frontier (Hop>=1),
+//   EgoGraph-Hop-0-Focus (frontier leer wenn focus.Scope NOT IN readScopes),
+//   GraphExpand-Seed (Seed-Set vor fetchNeighbors filtern). Alternative voller
+//   Hop-Knoten, umentscheidbar weil der Ausschluss je ein Filter im Seed-/frontier-Set ist.
+func isGrantOnlyVisible(scope string, readScopes []string) bool {
+	return !slices.Contains(readScopes, scope)
+}
+
+// selectSeeds picks the graph-expansion seeds from the (pre-sorted desc) results.
+// A result seeds the graph only if it is within the top SeedCount AND its score
+// clears the floor relative to the top hit AND it is not grant-only (T41). Returns
+// the seed ids plus the rank-weighted (injection magnitude) and real (new-neighbor
+// placement) seed scores keyed by id.
+//
+// T41 (07-W3) seed leaf protection: a grant-only result (scope NOT in readScopes,
+// visible only via the block-grant OR-arm) is a leaf — never a graph seed, so the
+// expansion cannot pull the grantee's own in-scope blocks in over the grant bridge.
+// The grant-only check is a per-result CONTINUE, orthogonal to the score-sorted
+// floor break (a skipped result does not change later results' scores). No-op in
+// the live pipeline until T40b makes a grant block an RRF result.
+func selectSeeds(results []SearchResult, readScopes []string, cfg GraphConfig) ([]string, map[string]float64, map[string]float64) {
+	topScore := results[0].RRFScore
+	floor := cfg.SeedScoreFloor * topScore
+
+	seedCount := cfg.SeedCount
+	if seedCount > len(results) {
+		seedCount = len(results)
+	}
+
+	seedIDs := make([]string, 0, seedCount)
+	// seedRRF is rank-weighted (drives the injection magnitude); seedReal is the
+	// actual RRFScore (drives new-neighbor placement so an injected neighbor lands
+	// inside the reranker window rather than below the whole candidate set).
+	seedRRF := make(map[string]float64, seedCount)
+	seedReal := make(map[string]float64, seedCount)
+	// rankWeight[i] = 1/(60 + i) — reuse the RRF k=60 reciprocal shape so the seed's
+	// rank tempers its outgoing pull. Folded into the seed score so downstream code
+	// only ever sees one number per seed.
+	for i := 0; i < seedCount && i < len(results); i++ {
+		r := results[i]
+		if r.RRFScore < floor {
+			break // results are sorted desc, so everything after also fails
+		}
+		if isGrantOnlyVisible(r.Scope, readScopes) {
+			continue // T41: grant-only result is a leaf, never a seed
+		}
+		rankWeight := 1.0 / (60.0 + float64(i))
+		seedIDs = append(seedIDs, r.ID)
+		seedRRF[r.ID] = r.RRFScore * rankWeight
+		seedReal[r.ID] = r.RRFScore
+	}
+	return seedIDs, seedRRF, seedReal
+}
+
 // GraphExpand 1-hop (or HopDepth-hop) expands the top RRF seeds along the
 // positive Dream link types and fuses the neighbors into results.
 //
@@ -166,37 +228,7 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 	// and GraphExpand stays under the cyclomatic budget.
 
 	// --- Seed selection -------------------------------------------------------
-	// results[0] is the top hit (input is pre-sorted desc). A result seeds the
-	// graph only if it is within the top SeedCount AND its score clears the
-	// floor relative to the top hit.
-	topScore := results[0].RRFScore
-	floor := cfg.SeedScoreFloor * topScore
-
-	seedCount := cfg.SeedCount
-	if seedCount > len(results) {
-		seedCount = len(results)
-	}
-
-	seedIDs := make([]string, 0, seedCount)
-	// seedRRF is rank-weighted (drives the injection magnitude); seedReal is the
-	// actual RRFScore (drives new-neighbor placement so an injected neighbor lands
-	// inside the reranker window rather than below the whole candidate set).
-	seedRRF := make(map[string]float64, seedCount)
-	seedReal := make(map[string]float64, seedCount)
-	// seedRankWeight[i] = 1/(60 + i) — reuse the RRF k=60 reciprocal shape so
-	// the seed's rank tempers its outgoing pull. Folded into the seed score so
-	// downstream code only ever sees one number per seed.
-	for i := 0; i < seedCount && i < len(results); i++ {
-		r := results[i]
-		if r.RRFScore < floor {
-			break // results are sorted desc, so everything after also fails
-		}
-		rankWeight := 1.0 / (60.0 + float64(i))
-		seedIDs = append(seedIDs, r.ID)
-		seedRRF[r.ID] = r.RRFScore * rankWeight
-		seedReal[r.ID] = r.RRFScore
-	}
-
+	seedIDs, seedRRF, seedReal := selectSeeds(results, readScopes, cfg)
 	if len(seedIDs) == 0 {
 		return results, nil // nothing qualifies — not an error
 	}
@@ -237,6 +269,17 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 			for _, e := range frontier {
 				nid := e.neighbor.ID
 				if visited[nid] {
+					continue
+				}
+				// T41 (07-W3) hop>=1 seed leaf protection: a frontier neighbour that
+				// became visible ONLY via the T40a block-grant OR-arm (its scope NOT in
+				// readScopes) is a leaf — it must not re-seed the next hop, or the
+				// expansion would traverse THROUGH the granted block into the grantee's
+				// own in-scope blocks behind it. Mark visited so it is not revisited,
+				// but do not add it to nextSeedIDs. This path is real today (T40a
+				// already injects grant neighbours).
+				if isGrantOnlyVisible(e.neighbor.Scope, readScopes) {
+					visited[nid] = true
 					continue
 				}
 				visited[nid] = true
