@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -77,9 +78,14 @@ func NewSettingsWriteHandler(pool *pgxpool.Pool, cfg *config.Store, backendPool 
 }
 
 // settingsNotifyPayload mirrors the notify_settings_write() trigger payload
-// (identity + op, never values).
+// (identity + op + scope, never values). Scope was added in migration 065
+// (MT T32, 03-W6): it lets the listener invalidate the per-tenant config cache
+// SELECTIVELY instead of rebuilding every tenant generation on every write. An
+// absent scope (a pre-065 payload — backward-compat) unmarshals to "" and
+// routes to the full _global reload, the safe over-invalidating fallback.
 type settingsNotifyPayload struct {
 	Entity string `json:"entity"`
+	Scope  string `json:"scope"`
 }
 
 // HandleNotification is called by pgxlisten for each NOTIFY on ctx_settings_write.
@@ -99,6 +105,24 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 		if err := h.backendPool.Reload(ctx); err != nil {
 			slog.Warn("listener: backend pool reload failed — previous snapshot stays active", "error", err)
 		}
+		return nil
+	}
+	// Scope-carried lazy invalidation (MT T32, 03-W6). A tenant-scope settings
+	// or secrets write does NOT change the _global base generation —
+	// settings.Reload reads scope='_global' exclusively (reload.go) — so a full
+	// Reload would needlessly rebuild the base AND Replace-wipe EVERY tenant
+	// generation. Instead drop only that tenant's cached generation; it rebuilds
+	// lazily on the tenant's next request (0 synchronous builds on this single-
+	// conn listener thread, design 03 §6.3). A _global / reserved / absent scope
+	// falls through to the full Reload, which rebuilds the base and Replace-wipes
+	// all tenant generations (also O(1) — they all derive from the base). The
+	// guard mirrors the Store's own fail-safe (config/store.go: a scope earns a
+	// tenant generation iff non-empty and not "_"-prefixed), so a pre-065 payload
+	// (no scope field → "") routes to the safe full reload. The 063 quota trigger
+	// rides this same channel with a tenant scope; dropping that tenant's config
+	// generation is harmless (quota is cached separately, not in the snapshot).
+	if scope := p.Scope; scope != "" && !strings.HasPrefix(scope, "_") {
+		h.cfg.InvalidateTenant(scope)
 		return nil
 	}
 	if err := settings.Reload(ctx, h.pool, h.cfg); err != nil {
