@@ -66,7 +66,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	gamingReload := func(ctx context.Context) error {
 		return settings.Reload(ctx, pool, cfgStore)
 	}
-	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler, gamingReload)
+	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler, gamingReload, quota)
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)
 	digestH := handler.NewDigestHandler(pool)

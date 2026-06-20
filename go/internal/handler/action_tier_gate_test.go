@@ -25,6 +25,7 @@ func TestActionTier_Classification(t *testing.T) {
 		{"backend-update", "", tierTenantAdmin},
 		{"backend-delete", "", tierTenantAdmin},
 		{"backend-list", "", tierTenantAdmin},
+		{"tenant-quota-get", "", tierTenantAdmin}, // read own quota (transparency)
 		// server-global (not yet isolated, or operator-level by nature)
 		{"mcp-client-create", "", tierServerAdmin},
 		{"mcp-client-list", "", tierServerAdmin},
@@ -33,6 +34,9 @@ func TestActionTier_Classification(t *testing.T) {
 		// and is NOT tenant-filtered → stays server-admin (T37 isolated the
 		// CRUD/list, deliberately not the probe).
 		{"backend-test", "", tierServerAdmin},
+		// tenant-quota-set is an operator ceiling — a tenant raising its own
+		// budget would void it, so the WRITE stays server-admin (read above).
+		{"tenant-quota-set", "", tierServerAdmin},
 		{"blocks-audit-start", "", tierServerAdmin},
 		{"blocks-audit-status", "", tierServerAdmin},
 		{"blocks-classify-start", "", tierServerAdmin},

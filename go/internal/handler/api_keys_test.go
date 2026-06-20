@@ -24,7 +24,7 @@ func makeManageRequest(t *testing.T, body any) *httptest.ResponseRecorder {
 	// Construct the handler with a nil pool — handlers that hit the DB will
 	// crash on dereference, but the validation paths we test return before
 	// any pool call. dreamController is also nil (not exercised here).
-	h := NewManageHandler(nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(nil, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -127,7 +127,7 @@ func TestApiKeyCreate_MalformedData(t *testing.T) {
 	// causes Unmarshal into apiKeyCreateRequest to fail.
 	body := []byte(`{"action":"api-key-create","data":"not-an-object"}`)
 
-	h := NewManageHandler(nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(nil, nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 

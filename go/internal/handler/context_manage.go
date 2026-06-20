@@ -35,6 +35,10 @@ type ManageHandler struct {
 	// — config must not import store). Bound to settings.Reload(pool, cfg) in
 	// server.go; nil in tests that don't exercise gaming-mode mutations.
 	settingsReload func(context.Context) error
+	// quota feeds the tenant-quota-* actions (T36b): a set refreshes it
+	// synchronously so the new policy is live at once. nil in tests that don't
+	// exercise quota mutations (the get path then reads the table directly).
+	quota *backends.QuotaAccountant
 }
 
 // NewManageHandler creates a new ManageHandler. cfg is the runtime-config
@@ -45,8 +49,8 @@ type ManageHandler struct {
 // post-mutation reload. auditController feeds blocks-audit-* (G41); the
 // production scheduler implements both controller interfaces. settingsReload
 // is the synchronous post-write config reload for gaming-mode (F3-P6).
-func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool, auditController AuditController, settingsReload func(context.Context) error) *ManageHandler {
-	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool, auditController: auditController, settingsReload: settingsReload}
+func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool, auditController AuditController, settingsReload func(context.Context) error, quota *backends.QuotaAccountant) *ManageHandler {
+	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool, auditController: auditController, settingsReload: settingsReload, quota: quota}
 }
 
 type manageRequest struct {
@@ -116,6 +120,8 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchMCPClientAction(w, r, authResult, req)
 	case "backend-create", "backend-update", "backend-delete", "backend-list", "backend-test":
 		h.dispatchBackendAction(w, r, authResult, req)
+	case "tenant-quota-get", "tenant-quota-set":
+		h.dispatchQuotaAction(w, r, authResult, req)
 	case "api-key-create", "api-key-list", "api-key-delete":
 		h.dispatchAPIKeyAction(w, r, req)
 	case "tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
@@ -231,12 +237,21 @@ func actionTier(req manageRequest) adminTier {
 		// stays server-admin below (it reaches an arbitrary backend by id with
 		// the resolved key — NOT tenant-filtered, so admitting a tenant-admin
 		// would be fail-OPEN, T25-LEHRE: isolate first, only then promote).
-		"backend-create", "backend-update", "backend-delete", "backend-list":
+		"backend-create", "backend-update", "backend-delete", "backend-list",
+		// tenant-quota-get: a tenant-admin reads its OWN quota (transparency,
+		// OE-2; the handler pins the scope to ar.HomeScope). The mutating
+		// tenant-quota-set stays server-admin below — the quota is an operator
+		// cost ceiling, a tenant raising its own budget would void it (fail-closed).
+		"tenant-quota-get":
 		return tierTenantAdmin
 	case "mcp-client-create", "mcp-client-list", "mcp-client-delete",
 		// backend-test: reads/probes a backend by id with its resolved key and
 		// is NOT tenant-filtered (poolBackendByID scans all) → server-admin.
 		"backend-test",
+		// tenant-quota-set: the quota is an operator cost ceiling — a tenant-
+		// admin must NOT raise its own budget (that would void the limit), so
+		// the write stays server-admin (the read is tenant-admin above).
+		"tenant-quota-set",
 		// blocks-audit-* (G41): start causes bulk sensitivity downgrades (the
 		// opsec direction), status discloses block titles/classification
 		// topology. Handler takes no AuthResult (→ server-admin until isolated).
