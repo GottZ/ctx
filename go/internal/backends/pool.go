@@ -249,8 +249,11 @@ func (p *Pool) SeedSnapshotForTest(bs []Backend) {
 	p.snap.Store(&snapshot{backends: bs, version: -1, loadedAt: time.Now()})
 }
 
-// visibleTo reports whether a backend in scope bScope may be reached by caller
-// tenant (04-W2/T34, egress isolation). A '_global' backend — or an unscoped
+// VisibleTo reports whether a backend in scope bScope may be reached by caller
+// tenant (04-W2/T34, egress isolation). Exported so the admin surface (T37,
+// backend-list filter + backend-update/delete pre-check) rests on the exact
+// same predicate as Chain's egress gate — one definition of "visible". A
+// '_global' backend — or an unscoped
 // row (Scope == "", pre-062 / test-seeded; the DB enforces NOT NULL DEFAULT
 // '_global', so "" is test-only) — is shared and visible to everyone. A
 // tenant-private backend is visible only to its own tenant. An empty or
@@ -260,7 +263,7 @@ func (p *Pool) SeedSnapshotForTest(bs []Backend) {
 // defense-in-depth: handlers already reject !ar.IsValid before Chain
 // (middleware.go:179), but a security axis names its sentinel explicitly rather
 // than trust two non-local layers.
-func visibleTo(bScope, tenant string) bool {
+func VisibleTo(bScope, tenant string) bool {
 	if bScope == "" || bScope == GlobalScope {
 		return true
 	}
@@ -288,7 +291,7 @@ func (p *Pool) Chain(role string, required Sensitivity, gaming GamingState, tena
 	for i := range snap.backends {
 		b := &snap.backends[i]
 		switch {
-		case !visibleTo(b.Scope, tenant):
+		case !VisibleTo(b.Scope, tenant):
 			// Not visible to this tenant — no reason entry: a foreign
 			// tenant-private backend is non-existent to this caller (egress
 			// isolation, no topology disclosure §5.3). Checked FIRST so the

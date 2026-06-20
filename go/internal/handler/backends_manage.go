@@ -43,6 +43,11 @@ type backendSpec struct {
 	// backend (never implicit via trust elevation, design 03 §3.3).
 	ConfirmDataCollection bool `json:"confirm_data_collection"`
 	Locality              *string           `json:"locality"`
+	// Scope is the tenant dimension (062, Modell C). HONORED ONLY for a
+	// server-admin on create (free choice, defaults to _global); a tenant-admin
+	// always has it forced to ar.HomeScope, and update ignores it entirely
+	// (scope is immutable through the patch path) — see backendCreateScope.
+	Scope                 *string           `json:"scope"`
 	Roles                 []string          `json:"roles"`
 	ModelMap              json.RawMessage   `json:"model_map"`
 	Timeouts              map[string]int    `json:"timeouts"`
@@ -143,11 +148,61 @@ func backendView(b *backends.Backend) map[string]any {
 		"id": b.ID, "name": b.Name, "base_url": b.Host,
 		"protocol": string(b.Protocol), "provider_class": b.ProviderClass,
 		"api_key_ref": b.APIKeyRef, "trust": string(b.Trust),
-		"locality": b.Locality, "roles": b.Roles, "model_map": b.ModelMap,
-		"timeouts": b.Timeouts, "num_ctx": b.NumCtx, "priority": b.Priority,
-		"enabled": b.Enabled, "extra_headers": b.ExtraHeaders,
-		"extra_body": b.ExtraBody, "limits": b.Limits, "metadata": b.Metadata,
+		"locality": b.Locality, "scope": b.Scope, "roles": b.Roles,
+		"model_map": b.ModelMap, "timeouts": b.Timeouts, "num_ctx": b.NumCtx,
+		"priority": b.Priority, "enabled": b.Enabled,
+		"extra_headers": b.ExtraHeaders, "extra_body": b.ExtraBody,
+		"limits": b.Limits, "metadata": b.Metadata,
 	}
+}
+
+// backendCreateScope resolves the tenant scope a new backend row gets, enforcing
+// the two-tier rule (MT T37, 04-W5 §4.6): a tenant-admin's backend is ALWAYS
+// pinned to its own tenant (ar.HomeScope — the payload scope is ignored, exactly
+// like the /api/store write-scope guard); only a server-admin may choose a scope
+// freely (e.g. provision a tenant-private backend FOR a tenant, or a shared
+// _global one), defaulting to _global when none is given. Empty/whitespace from a
+// server-admin normalizes to _global so a write never lands a blank scope.
+func backendCreateScope(ar *auth.AuthResult, specScope *string) string {
+	if !ar.IsServerAdmin() {
+		return ar.HomeScope // tenant-admin: forced to own tenant, never caller-chosen
+	}
+	if specScope != nil && *specScope != "" {
+		return *specScope
+	}
+	return backends.GlobalScope
+}
+
+// backendWriteScopes is the permitted-tenant set passed to the store gate for
+// update/delete (MT T37, 04-W5 §4.6/§5.5): nil for a server-admin (authority
+// over every tenant — no scope predicate) and []string{ar.HomeScope} for a
+// tenant-admin (only its own rows). The same set drives the in-handler pre-check
+// so a foreign id never reaches the validation path.
+func backendWriteScopes(ar *auth.AuthResult) []string {
+	if ar.IsServerAdmin() {
+		return nil
+	}
+	return []string{ar.HomeScope}
+}
+
+// backendVisibleToCaller reports whether this admin caller may SEE a backend in
+// the given scope (MT T37, 04-W5): a server-admin sees every row; a tenant-admin
+// sees _global ∪ its own tenant, via the exact Chain egress predicate. Drives
+// the backend-list filter (read visibility — a shared _global backend is visible
+// to every tenant-admin, just not mutable by one).
+func backendVisibleToCaller(ar *auth.AuthResult, scope string) bool {
+	return ar.IsServerAdmin() || backends.VisibleTo(scope, ar.HomeScope)
+}
+
+// backendWritableByCaller reports whether this admin caller may MUTATE a backend
+// in the given scope (MT T37, 04-W5 §4.6) — strictly narrower than visibility: a
+// tenant-admin owns ONLY its own tenant's rows (not _global, which it can see but
+// not change; not a foreign tenant's). It mirrors backendWriteScopes exactly
+// (nil ⇒ server-admin ⇒ all; else only ar.HomeScope), so the update/delete
+// pre-check answers 404 on the same set the store gate rejects — no 422-vs-404
+// oracle, and the store gate stays the fail-closed backstop.
+func backendWritableByCaller(ar *auth.AuthResult, scope string) bool {
+	return ar.IsServerAdmin() || scope == ar.HomeScope
 }
 
 func writeBackendValidation(w http.ResponseWriter, errs []backends.FieldError) {
@@ -200,6 +255,11 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 			b.Locality = derived
 		}
 	}
+
+	// Tenant scope is server-assigned, never caller-chosen for a tenant-admin
+	// (forced to ar.HomeScope); only a server-admin picks it (T37, §4.6). Set
+	// before validation/insert so the persisted row carries the right owner.
+	b.Scope = backendCreateScope(ar, spec.Scope)
 
 	// Trust elevation needs the confirm flag ON CREATE TOO: without it the
 	// update-confirm would be trivially bypassed via direct create or
@@ -261,7 +321,10 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	prev := h.poolBackendByID(req.ID)
-	if prev == nil {
+	if prev == nil || !backendWritableByCaller(ar, prev.Scope) {
+		// A foreign or _global row is "not found" to a tenant-admin — identical
+		// body to a truly missing id (no existence oracle, mirrors chat.go:402-
+		// 404), and the validation path never runs on a row it cannot touch.
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "backend not found"})
 		return
 	}
@@ -311,7 +374,10 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	found, err := store.UpdateBackend(ctx, tx, &next, by)
+	// Store-layer scope gate (fail-closed backstop, §5.5): nil for a server-
+	// admin, []string{ar.HomeScope} for a tenant-admin. A foreign row matches
+	// zero rows atomically → found=false → 404 (no TOCTOU, no second call path).
+	found, err := store.UpdateBackend(ctx, tx, &next, by, backendWriteScopes(ar))
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 		return
@@ -346,7 +412,9 @@ func (h *ManageHandler) handleBackendDelete(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	name, found, err := store.DeleteBackend(ctx, tx, req.ID, by)
+	// Store-layer scope gate (§4.6/§5.5): a tenant-admin deleting a foreign/
+	// _global id matches zero rows → found=false → 404 (no oracle, no TOCTOU).
+	name, found, err := store.DeleteBackend(ctx, tx, req.ID, by, backendWriteScopes(ar))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "delete failed"})
 		return
@@ -363,9 +431,13 @@ func (h *ManageHandler) handleBackendDelete(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": name})
 }
 
-func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, _ manageRequest) {
+func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, _ manageRequest) {
 	// Rows + live status merged (admin-gated). last_error is the sanitized
 	// ErrClass — full URLs/provider bodies exist in slog only (§2.9).
+	// Tenant-scoped (T37, §4.6): a server-admin sees every row; a tenant-admin
+	// sees only _global ∪ its own — a foreign tenant-private backend is not even
+	// disclosed as existing (egress topology, the read counterpart to Chain's
+	// by-construction exclusion).
 	snap := h.backendPool.Snapshot()
 	status := h.backendPool.Status()
 	statusByID := make(map[string]backends.BackendStatus, len(status))
@@ -374,6 +446,9 @@ func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request
 	}
 	list := make([]map[string]any, 0, len(snap))
 	for i := range snap {
+		if !backendVisibleToCaller(ar, snap[i].Scope) {
+			continue
+		}
 		v := backendView(&snap[i])
 		if s, ok := statusByID[snap[i].ID]; ok {
 			v["effective_state"] = s.EffectiveState

@@ -222,15 +222,21 @@ func enforceActionTier(w http.ResponseWriter, req manageRequest, ar *auth.AuthRe
 func actionTier(req manageRequest) adminTier {
 	switch req.Action {
 	// Per-tenant tier: tenant-isolated handlers (T22/T23/T24 — L1/L2/L3 closed).
-	case "api-key-create", "api-key-list", "api-key-delete":
+	case "api-key-create", "api-key-list", "api-key-delete",
+		// backend-create/update/delete/list: tenant-isolated by T37 (04-W5) —
+		// create forces scope=ar.HomeScope (server-admin may choose), update/
+		// delete gate on scope=ANY in the store layer (foreign/_global ⇒ 404),
+		// list filters to _global ∪ own. The per-resource target-tenant check
+		// thus lives IN the handler, exactly the A8 precondition. backend-test
+		// stays server-admin below (it reaches an arbitrary backend by id with
+		// the resolved key — NOT tenant-filtered, so admitting a tenant-admin
+		// would be fail-OPEN, T25-LEHRE: isolate first, only then promote).
+		"backend-create", "backend-update", "backend-delete", "backend-list":
 		return tierTenantAdmin
 	case "mcp-client-create", "mcp-client-list", "mcp-client-delete",
-		// backend-* in full (reads included): the list discloses egress
-		// topology, create/update without the gate would be a corpus
-		// exfiltration/SSRF API (F3 risk R1). Handler not yet tenant-filtered
-		// (→ server-admin until T37/04-W5).
-		"backend-create", "backend-update", "backend-delete",
-		"backend-list", "backend-test",
+		// backend-test: reads/probes a backend by id with its resolved key and
+		// is NOT tenant-filtered (poolBackendByID scans all) → server-admin.
+		"backend-test",
 		// blocks-audit-* (G41): start causes bulk sensitivity downgrades (the
 		// opsec direction), status discloses block titles/classification
 		// topology. Handler takes no AuthResult (→ server-admin until isolated).

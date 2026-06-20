@@ -17,18 +17,21 @@ func TestActionTier_Classification(t *testing.T) {
 		data   string // raw req.Data ("" = absent)
 		want   adminTier
 	}{
-		// per-tenant (isolated handlers T22/T23/T24)
+		// per-tenant (isolated handlers T22/T23/T24; backend-* by T37/04-W5)
 		{"api-key-create", "", tierTenantAdmin},
 		{"api-key-list", "", tierTenantAdmin},
 		{"api-key-delete", "", tierTenantAdmin},
+		{"backend-create", "", tierTenantAdmin},
+		{"backend-update", "", tierTenantAdmin},
+		{"backend-delete", "", tierTenantAdmin},
+		{"backend-list", "", tierTenantAdmin},
 		// server-global (not yet isolated, or operator-level by nature)
 		{"mcp-client-create", "", tierServerAdmin},
 		{"mcp-client-list", "", tierServerAdmin},
 		{"mcp-client-delete", "", tierServerAdmin},
-		{"backend-create", "", tierServerAdmin},
-		{"backend-update", "", tierServerAdmin},
-		{"backend-delete", "", tierServerAdmin},
-		{"backend-list", "", tierServerAdmin},
+		// backend-test reaches an arbitrary backend by id with its resolved key
+		// and is NOT tenant-filtered → stays server-admin (T37 isolated the
+		// CRUD/list, deliberately not the probe).
 		{"backend-test", "", tierServerAdmin},
 		{"blocks-audit-start", "", tierServerAdmin},
 		{"blocks-audit-status", "", tierServerAdmin},
@@ -152,8 +155,7 @@ func TestActionTier_Member_ApiKeyCreate_403(t *testing.T) {
 // tenant-admin tier without first isolating its handler, this test goes red.
 func TestActionTier_TenantAdmin_ServerAdminActions_403(t *testing.T) {
 	bodies := []map[string]any{
-		{"action": "backend-list"},
-		{"action": "backend-create", "data": map[string]any{"name": "x"}},
+		{"action": "backend-test", "id": "x"},
 		{"action": "mcp-client-list"},
 		{"action": "mcp-client-create", "data": map[string]any{"label": "x"}},
 		{"action": "blocks-audit-status"},

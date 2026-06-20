@@ -137,7 +137,7 @@ func TestChainUnscopedRowIsShared(t *testing.T) {
 	}
 }
 
-// visibleTo is the pure predicate the filter case rests on.
+// VisibleTo is the pure predicate the filter case rests on.
 func TestVisibleTo(t *testing.T) {
 	cases := []struct {
 		bScope, tenant string
@@ -157,8 +157,8 @@ func TestVisibleTo(t *testing.T) {
 		{"__UNAUTHORIZED__", "tenantA", false}, // _-reserved (non-global) backend never matches a real tenant
 	}
 	for _, c := range cases {
-		if got := visibleTo(c.bScope, c.tenant); got != c.want {
-			t.Errorf("visibleTo(%q,%q)=%v want %v", c.bScope, c.tenant, got, c.want)
+		if got := VisibleTo(c.bScope, c.tenant); got != c.want {
+			t.Errorf("VisibleTo(%q,%q)=%v want %v", c.bScope, c.tenant, got, c.want)
 		}
 	}
 }
