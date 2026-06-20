@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
@@ -47,8 +48,14 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	r.HandleFunc("/authorize", oauthH.Authorize) // GET = form, POST = submit
 	r.Post("/token", oauthH.Token)
 
+	// Per-tenant quota accountant (T36, 04-W4): one process-wide instance, a
+	// lock-free TTL-cached per-tenant cost/call rollup feeding the synthesis
+	// gate. 30s TTL (§6.2) — the cost SUM over the 1M+ llm_log hypertable is
+	// never run per request.
+	quota := backends.NewQuotaAccountant(pool, 30*time.Second)
+
 	// All authenticated routes in a single group with Auth middleware as first defense line.
-	queryHandler := handler.NewQueryHandler(pool, cfgStore, backendPool)
+	queryHandler := handler.NewQueryHandler(pool, cfgStore, backendPool, quota)
 	storeH := handler.NewStoreHandler(pool, cfgStore)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
 	graphH := handler.NewGraphHandler(pool, cfgStore)

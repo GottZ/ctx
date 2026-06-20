@@ -342,7 +342,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // scope is the caller's tenant (ar.HomeScope) — it bounds Chain() to the
 // tenant's visible synthesis backends (04-W2/T34 egress isolation); "" sees
 // only shared '_global' backends (background/no-caller paths).
-func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate, apiKeyID, scope string) (*SynthesisResult, error) {
+func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *backends.QuotaAccountant, gaming backends.GamingState, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate, apiKeyID, scope string) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
@@ -405,6 +405,27 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gam
 		// body generic (topology stays admin-only).
 		return nil, fmt.Errorf("llm: synthesize: %w", chainErr)
 	}
+
+	// Quota gate (T36, 04-W4 §4.5): the call budget hard-errors on every
+	// backend; the cost budget filters external (external_off, local stays
+	// reachable) or hard-errors (block) — *ErrQuotaExceeded surfaces to the
+	// handler as a generic client error. A nil accountant (not wired / tests)
+	// skips the gate. Filtering to an empty chain (external_off + no local) is a
+	// hard no-backend error, like a trust-empty chain.
+	if quota != nil {
+		gated, qerr := quota.Gate(scope, chain)
+		if qerr != nil {
+			return nil, fmt.Errorf("llm: synthesize: %w", qerr)
+		}
+		if len(gated) == 0 {
+			return nil, fmt.Errorf("llm: synthesize: %w", &backends.ErrNoEligibleBackend{
+				Role: backends.RoleSynthesis, Required: required,
+				Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "quota: external budget exhausted, no local backend"}},
+			})
+		}
+		chain = gated
+	}
+
 	start := time.Now()
 	resp, served, attempts, err := ChatChain(ctx, chain, backends.RoleSynthesis,
 		systemPrompt, userPrompt, SynthesisOptions(0), "", ChatTimeout, PoolReporter(bpool))

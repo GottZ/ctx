@@ -44,12 +44,15 @@ type QueryHandler struct {
 	pool        *pgxpool.Pool
 	cfg         ConfigStore
 	backendPool *backends.Pool
+	quota       *backends.QuotaAccountant
 }
 
 // NewQueryHandler creates a new QueryHandler. backendPool feeds the
-// synthesis chain (F3-P2) — Chain() is the only way to a backend tuple.
-func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool) *QueryHandler {
-	return &QueryHandler{pool: pool, cfg: cfg, backendPool: backendPool}
+// synthesis chain (F3-P2) — Chain() is the only way to a backend tuple. quota
+// enforces per-tenant cost/call budgets on the synthesis path (T36, 04-W4); it
+// may be nil (the gate is then skipped — behavior-identical to pre-T36).
+func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, quota *backends.QuotaAccountant) *QueryHandler {
+	return &QueryHandler{pool: pool, cfg: cfg, backendPool: backendPool, quota: quota}
 }
 
 // queryRequest is the JSON body for the query endpoint.
@@ -787,12 +790,22 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID, ar.HomeScope)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, h.quota, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID, ar.HomeScope)
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,
 			"request_id", requestID,
 		)
+		// Quota exhausted (call budget, or cost budget under on_exceed=block):
+		// 429 with a generic code — the budget kind (daily_calls/cost_budget)
+		// is tenant policy and stays in slog/admin, never on the wire.
+		var quotaErr *backends.ErrQuotaExceeded
+		if errors.As(err, &quotaErr) {
+			hb.finish(http.StatusTooManyRequests, map[string]any{
+				"success": false, "error_code": "quota_exceeded",
+			})
+			return
+		}
 		// Empty chain: generic client error — role + required sensitivity are
 		// tenant-own information, the per-backend exclusion reasons (trust,
 		// gaming, disabled) are topology disclosure and stay in slog/admin.

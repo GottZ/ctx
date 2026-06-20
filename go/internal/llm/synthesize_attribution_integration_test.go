@@ -81,7 +81,7 @@ func TestSynthesize_AttributesAPIKeyID(t *testing.T) {
 	const key = "00000000-0000-0000-0000-0000000000aa"
 
 	// Foreground synthesis attributes the row to the caller's key.
-	if _, err := llm.Synthesize(context.Background(), pool, bpool, backends.GamingState{},
+	if _, err := llm.Synthesize(context.Background(), pool, bpool, nil, backends.GamingState{},
 		settings, backends.SensPersonal, "q", sources, nil, key, ""); err != nil {
 		t.Fatalf("Synthesize: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestSynthesize_AttributesAPIKeyID(t *testing.T) {
 	}
 
 	// An empty key (the background/dream invariant) stays NULL — nullUUID drops it.
-	if _, err := llm.Synthesize(context.Background(), pool, bpool, backends.GamingState{},
+	if _, err := llm.Synthesize(context.Background(), pool, bpool, nil, backends.GamingState{},
 		settings, backends.SensPersonal, "q2", sources, nil, "", ""); err != nil {
 		t.Fatalf("Synthesize (empty key): %v", err)
 	}
