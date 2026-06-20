@@ -274,10 +274,17 @@ func toOverrides(rows []store.SettingOverride, scopePriority []string) ([]config
 
 	overrides := make([]config.Override, 0, len(keys))
 	for _, key := range keys {
-		raw, convIssues, ok := firstValidValue(key, winners[key])
+		raw, winScope, convIssues, ok := firstValidValue(key, winners[key])
 		issues = append(issues, convIssues...)
 		if ok {
-			overrides = append(overrides, config.Override{Key: key, Value: raw})
+			// Attribute a tenant-won key to the tenant; a _global-won key keeps
+			// the default SourceSettings (config.Build stamps it on an empty
+			// Source), so the boot/reload _global path stays byte-identical.
+			src := ""
+			if winScope != store.GlobalScope {
+				src = config.SourceTenant
+			}
+			overrides = append(overrides, config.Override{Key: key, Value: raw, Source: src})
 		}
 	}
 	return overrides, issues
@@ -321,19 +328,20 @@ func mergeOverrideRows(rows []store.SettingOverride, scopePriority []string) (ma
 
 // firstValidValue picks the first candidate (already sorted priority-descending)
 // whose ScalarValue succeeds; each higher-priority failure emits a value-free
-// WARN and falls through to the next DB tier. ok=false ⇒ no override survives.
-func firstValidValue(key string, candidates []store.SettingOverride) (string, []config.Issue, bool) {
-	var issues []config.Issue
+// WARN and falls through to the next DB tier. It returns the winning row's scope
+// so the caller can attribute the override (06-C2). ok=false ⇒ no override
+// survives.
+func firstValidValue(key string, candidates []store.SettingOverride) (raw, scope string, issues []config.Issue, ok bool) {
 	for _, row := range candidates {
-		raw, err := ScalarValue(row.Value)
+		val, err := ScalarValue(row.Value)
 		if err != nil {
 			issues = append(issues, config.Issue{Field: key, Severity: config.SeverityWarn,
 				Msg: fmt.Sprintf("%v — override ignored, env/default value stays", err)})
 			continue
 		}
-		return raw, issues, true
+		return val, row.Scope, issues, true
 	}
-	return "", issues, false
+	return "", "", issues, false
 }
 
 // ScalarValue unwraps one JSONB scalar: strings unquote, numbers and booleans

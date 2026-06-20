@@ -7,13 +7,27 @@ import (
 	"sync"
 )
 
+// Source labels recorded in the sources map for an admitted override. Build
+// stamps SourceSettings by default; the per-tenant overlay (06-C2) stamps
+// SourceTenant on the keys a tenant-scope row won, so Source(key) and the boot
+// dump attribute a tenant override instead of showing the generic operator
+// label. (The env/default origins are stamped elsewhere, by FromEnv.)
+const (
+	SourceSettings = "settings"
+	SourceTenant   = "tenant"
+)
+
 // Override is one context_settings row addressed to this build: the canonical
 // registry key plus the raw scalar string form of its JSONB value (the
 // settings package unwraps JSON strings/numbers/booleans before calling Build,
-// so both sources — env and DB — share one typed parser per field).
+// so both sources — env and DB — share one typed parser per field). Source is
+// the sources-map label to record for this override; the zero value defaults to
+// SourceSettings, the per-tenant overlay sets SourceTenant for tenant-won keys
+// (06-C2). It does not affect the effective value, only its attribution.
 type Override struct {
-	Key   string
-	Value string
+	Key    string
+	Value  string
+	Source string
 }
 
 // SecretResolver resolves a secret_ref value (the NAME of a context_secrets
@@ -32,11 +46,13 @@ var entryByKey = sync.OnceValue(func() map[string]entry {
 	return m
 })
 
-// admittedOverride is one override that passed admission: its registry entry
-// plus the parsed (or secret-resolved) typed value.
+// admittedOverride is one override that passed admission: its registry entry,
+// the parsed (or secret-resolved) typed value, and the sources-map label to
+// record (carried through from Override.Source).
 type admittedOverride struct {
-	e   entry
-	val any
+	e      entry
+	val    any
+	source string
 }
 
 // Build constructs the effective runtime config: env base overlaid with
@@ -132,7 +148,7 @@ func admitOverride(o Override, resolve SecretResolver) (admittedOverride, *Issue
 			// value-free — safe to embed.
 			return admittedOverride{}, warn(fmt.Sprintf("secret_ref resolution failed (%v) — override ignored, env/default value stays", err))
 		}
-		return admittedOverride{e: e, val: plaintext}, nil
+		return admittedOverride{e: e, val: plaintext, source: o.Source}, nil
 	}
 	val, err := parserFor(e.typ)(o.Value, e.defVal)
 	if err != nil {
@@ -140,7 +156,7 @@ func admitOverride(o Override, resolve SecretResolver) (admittedOverride, *Issue
 		// path keeps its SeverityError, the DB path never aborts a boot.
 		return admittedOverride{}, warn(fmt.Sprintf("%v — override ignored, env/default value stays", err))
 	}
-	return admittedOverride{e: e, val: val}, nil
+	return admittedOverride{e: e, val: val, source: o.Source}, nil
 }
 
 // buildCandidate assembles env base + admitted overrides and validates. The
@@ -157,7 +173,11 @@ func buildCandidate(adm []admittedOverride) (*Config, []Issue) {
 			val = slices.Clone(s)
 		}
 		rv.FieldByIndex(a.e.path).Set(reflect.ValueOf(val))
-		c.sources[a.e.Key] = "settings"
+		src := a.source
+		if src == "" {
+			src = SourceSettings
+		}
+		c.sources[a.e.Key] = src
 	}
 	issues = append(issues, Validate(c)...)
 	return c, issues

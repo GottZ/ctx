@@ -60,6 +60,35 @@ func TestBuildNoOverridesIdenticalToEnvBuild(t *testing.T) {
 	}
 }
 
+// --- Override source attribution (06-C2): tenant vs settings label ---.
+
+// TestBuildOverrideSourceLabel pins the 06-C2 source attribution carried by
+// Override.Source: a zero-value Source defaults to "settings" (the boot/reload
+// _global path stays byte-identical to pre-C2), while the per-tenant overlay
+// sets SourceTenant so Source(key) and the boot dump attribute a tenant
+// override. RED before Override gains the Source field / buildCandidate honors it.
+func TestBuildOverrideSourceLabel(t *testing.T) {
+	resetBuildEnv(t)
+	const key = "rerank.blend_weight"
+
+	def, _ := Build(nil, nil)
+	if def.Source(key) == SourceSettings || def.Source(key) == SourceTenant {
+		t.Fatalf("fixture: %s must not be override-sourced without a row, got %q", key, def.Source(key))
+	}
+
+	settings, _ := Build([]Override{{Key: key, Value: "0.4"}}, nil)
+	if settings.Rerank.BlendWeight != 0.4 || settings.Source(key) != SourceSettings {
+		t.Errorf("zero-value Source must default to %q: got %v source %q",
+			SourceSettings, settings.Rerank.BlendWeight, settings.Source(key))
+	}
+
+	tenant, _ := Build([]Override{{Key: key, Value: "0.6", Source: SourceTenant}}, nil)
+	if tenant.Rerank.BlendWeight != 0.6 || tenant.Source(key) != SourceTenant {
+		t.Errorf("explicit Source must be honored: got %v source %q, want 0.6/%q",
+			tenant.Rerank.BlendWeight, tenant.Source(key), SourceTenant)
+	}
+}
+
 // --- Gate (b): precedence matrix default / env / env+db per key type ---.
 
 func TestBuildPrecedenceMatrix(t *testing.T) {

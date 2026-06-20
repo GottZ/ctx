@@ -76,8 +76,8 @@ func TestToOverridesPrecedenceMatrix(t *testing.T) {
 			row(key, `0.4`),
 			tenantRow(key, testTenant, `0.6`),
 		}, nil, globalAndTenant)
-		if cfg.Rerank.BlendWeight != 0.6 || cfg.Source(key) != "settings" {
-			t.Errorf("tenant tier: got %v source %q, want 0.6/settings",
+		if cfg.Rerank.BlendWeight != 0.6 || cfg.Source(key) != config.SourceTenant {
+			t.Errorf("tenant tier: got %v source %q, want 0.6/tenant",
 				cfg.Rerank.BlendWeight, cfg.Source(key))
 		}
 	})

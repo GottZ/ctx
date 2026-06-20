@@ -77,8 +77,8 @@ func TestLoadTenantOverrideRows_Integration(t *testing.T) {
 	if config.HasErrors(issues) {
 		t.Fatalf("build must stay error-free: %v", issues)
 	}
-	if cfg.Rerank.BlendWeight != 0.6 || cfg.Source(key) != "settings" {
-		t.Errorf("tenant value must win: got %v source %q, want 0.6/settings",
+	if cfg.Rerank.BlendWeight != 0.6 || cfg.Source(key) != config.SourceTenant {
+		t.Errorf("tenant value must win + be attributed: got %v source %q, want 0.6/tenant",
 			cfg.Rerank.BlendWeight, cfg.Source(key))
 	}
 }
