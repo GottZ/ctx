@@ -34,18 +34,21 @@ func TestGraphEdgeMarshalJSON(t *testing.T) {
 }
 
 // WIRE PROPERTY: the visibility triple is byte-exactly the canonical fragment
-// from the design (§3.2) — Q1/Q3/focus-hydrate all reference this one string.
+// from the design (§3.2, extended in design/07 §4 with the block-grant OR-arm)
+// — Q1/Q3/focus-hydrate all reference this one string. The MANDATORY parentheses
+// keep NOT is_archived / system-meta OUTSIDE the scope/grant OR so a granted,
+// archived (or system-meta) block can never leak (T40a).
 func TestVisibilityPredicate(t *testing.T) {
-	got := VisibilityPredicate("b", "$2")
-	want := "NOT b.is_archived AND b.block_role <> 'system-meta' AND b.scope = ANY($2::text[])"
+	got := VisibilityPredicate("b", "$2", "$3")
+	want := "NOT b.is_archived AND b.block_role <> 'system-meta' AND ( b.scope = ANY($2::text[]) OR b.id = ANY($3::uuid[]) )"
 	if got != want {
-		t.Errorf("VisibilityPredicate(b,$2):\n got %q\nwant %q", got, want)
+		t.Errorf("VisibilityPredicate(b,$2,$3):\n got %q\nwant %q", got, want)
 	}
 
-	got = VisibilityPredicate("nb", "$2")
-	want = "NOT nb.is_archived AND nb.block_role <> 'system-meta' AND nb.scope = ANY($2::text[])"
+	got = VisibilityPredicate("nb", "$2", "$5")
+	want = "NOT nb.is_archived AND nb.block_role <> 'system-meta' AND ( nb.scope = ANY($2::text[]) OR nb.id = ANY($5::uuid[]) )"
 	if got != want {
-		t.Errorf("VisibilityPredicate(nb,$2):\n got %q\nwant %q", got, want)
+		t.Errorf("VisibilityPredicate(nb,$2,$5):\n got %q\nwant %q", got, want)
 	}
 }
 

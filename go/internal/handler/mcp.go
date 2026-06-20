@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -248,7 +250,8 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 			limit = 10
 		}
 
-		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil)
+		grants := resolveGrants(ctx, cfg.Pool, ar)
+		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil, grants)
 		if err != nil {
 			return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
 		}
@@ -272,7 +275,8 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 		}
 		scopes := ar.ReadScopes
 
-		resolvedID, matches, err := store.ResolveBlockID(ctx, cfg.Pool, input.ID, scopes)
+		grants := resolveGrants(ctx, cfg.Pool, ar)
+		resolvedID, matches, err := store.ResolveBlockID(ctx, cfg.Pool, input.ID, scopes, grants)
 		if err != nil {
 			if errors.Is(err, store.ErrAmbiguousID) {
 				body := map[string]any{
@@ -288,7 +292,7 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 			return errResult("block not found"), nil, nil
 		}
 
-		block, err := store.GetBlock(ctx, cfg.Pool, resolvedID, scopes)
+		block, err := store.GetBlock(ctx, cfg.Pool, resolvedID, scopes, grants)
 		if err != nil {
 			return errResult(fmt.Sprintf("get failed: %v", err)), nil, nil
 		}
@@ -319,13 +323,17 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 		if err := store.RequireScopes(scopes); err != nil { // T07 fail-closed: this INLINE query bypasses the store-layer guards
 			return errResult("unauthorized: no resolved scopes"), nil, nil
 		}
+		grants := resolveGrants(ctx, cfg.Pool, ar)
+		// $1=scopes, $2=grants (block-grant OR-arm, T40a). The mandatory
+		// parentheses keep NOT is_archived OUTSIDE the scope/grant OR (a granted
+		// archived block must not leak). category, if present, shifts to $3.
 		query := `SELECT id, title, category, LEFT(content, 200) AS preview, updated_at
 			FROM context_blocks
-			WHERE NOT is_archived AND scope = ANY($1::text[])`
-		args := []any{scopes}
+			WHERE NOT is_archived AND ( scope = ANY($1::text[]) OR id = ANY($2::uuid[]) )`
+		args := []any{scopes, grants}
 
 		if input.Category != "" {
-			query += ` AND category = $2`
+			query += ` AND category = $3`
 			args = append(args, input.Category)
 		}
 		query += ` ORDER BY updated_at DESC LIMIT ` + fmt.Sprintf("%d", limit)
@@ -361,6 +369,27 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 }
 
 // Helpers.
+
+// resolveGrants resolves the block-grant set for the caller's tenant (T40a,
+// design/07 §4) and is FAIL-CLOSED for grant visibility: on any resolver error
+// it logs and returns an empty set so the read proceeds scope-only — a grant
+// lookup failure must never crash a read or silently widen visibility.
+//
+// TENANT-DECISION(authresult-tenantid-shape): the design/07 briefing assumed
+// auth.AuthResult.TenantID *string (nullable). The canonical type is a plain
+// string (auth.go:24), empty in the sentinel/no-tenant paths. store.GrantedBlockIDs
+// already short-circuits an empty/whitespace tenantID to []string{}, so passing
+// ar.TenantID directly preserves the intended semantics (empty tenant ⇒ '{}'
+// ⇒ no-op OR-arm) without a nil deref. design/07 §4.1.
+func resolveGrants(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult) []string {
+	grants, err := store.GrantedBlockIDs(ctx, pool, ar.TenantID)
+	if err != nil {
+		// fail-closed for grant visibility: proceed scope-only, never crash the read
+		slog.Warn("mcp: resolve granted block ids failed — scope-only visibility", "error", err)
+		return []string{}
+	}
+	return grants
+}
 
 func textContent(text string) mcp.Content {
 	return &mcp.TextContent{Text: text}

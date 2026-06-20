@@ -617,7 +617,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				"request_id", requestID,
 			)
 		}
-		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, graphCfg); gerr != nil {
+		// grantedBlockIDs nil (T40a): the query/RRF path is NOT live-wired for
+		// block grants in T40a — the ctx_rrf sixfold OR + GraphExpand grant
+		// resolution is T40b — so nil keeps the neighbor OR-arm a no-op here.
+		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, nil, graphCfg); gerr != nil {
 			slog.Warn("graph expand failed; using pre-expansion results",
 				"error", gerr,
 				"request_id", requestID,

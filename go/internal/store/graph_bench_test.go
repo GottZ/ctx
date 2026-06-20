@@ -119,7 +119,7 @@ func TestGraphBench1M(t *testing.T) {
 		p := EgoParams{Focus: hubSTD, Hops: 2, PerNodeCap: 25, Limit: 500, EdgeLimit: 4000}
 		var last *EgoResult
 		p50, p95, mx := benchMeasure(t, 100, 5, func() error {
-			r, e := EgoGraph(ctx, pool, p, scopes)
+			r, e := EgoGraph(ctx, pool, p, scopes, nil)
 			last = r
 			return e
 		})
@@ -133,7 +133,7 @@ func TestGraphBench1M(t *testing.T) {
 		var deg int
 		p50, p95, mx := benchMeasure(t, 100, 5, func() error {
 			nodes := []GraphNode{{ID: hubAV}}
-			e := fillDegrees(ctx, pool, ids, scopes, nodes)
+			e := fillDegrees(ctx, pool, ids, scopes, nil, nodes)
 			deg = nodes[0].Degree
 			return e
 		})
@@ -147,7 +147,7 @@ func TestGraphBench1M(t *testing.T) {
 		var deg int
 		p50, p95, mx := benchMeasure(t, 100, 5, func() error {
 			nodes := []GraphNode{{ID: hubLV}}
-			e := fillDegrees(ctx, pool, ids, scopes, nodes)
+			e := fillDegrees(ctx, pool, ids, scopes, nil, nodes)
 			deg = nodes[0].Degree
 			return e
 		})
@@ -160,7 +160,7 @@ func TestGraphBench1M(t *testing.T) {
 		p := EgoParams{Focus: hubCAP, Hops: 1, PerNodeCap: 25, Limit: 500, EdgeLimit: 4000}
 		var cnt int
 		p50, p95, mx := benchMeasure(t, 100, 5, func() error {
-			cands, e := hopNeighbors(ctx, pool, []string{hubCAP}, scopes, p)
+			cands, e := hopNeighbors(ctx, pool, []string{hubCAP}, scopes, nil, p)
 			cnt = len(cands)
 			return e
 		})
@@ -177,7 +177,7 @@ func TestGraphBench1M(t *testing.T) {
 		p := EgoParams{Focus: focusQ2, Hops: 3, PerNodeCap: 100, Limit: 1500, EdgeLimit: 20000}
 		var last *EgoResult
 		p50, p95, mx := benchMeasure(t, 50, 3, func() error {
-			r, e := EgoGraph(ctx, pool, p, scopes)
+			r, e := EgoGraph(ctx, pool, p, scopes, nil)
 			last = r
 			return e
 		})
@@ -222,7 +222,7 @@ func TestGraphBench1MDiag(t *testing.T) {
 	pMax := EgoParams{Focus: focusQ2, Hops: 3, PerNodeCap: 100, Limit: 5000, EdgeLimit: 20000}
 
 	// One run to capture the worst-case node set for the phase isolation.
-	res, err := EgoGraph(ctx, pool, pMax, scopes)
+	res, err := EgoGraph(ctx, pool, pMax, scopes, nil)
 	if err != nil {
 		t.Fatalf("diag: ego: %v", err)
 	}
@@ -240,10 +240,10 @@ func TestGraphBench1MDiag(t *testing.T) {
 	_, degP95, _ := benchMeasure(t, 20, 3, func() error {
 		nn := make([]GraphNode, len(res.Nodes))
 		copy(nn, res.Nodes)
-		return fillDegrees(ctx, pool, ids, scopes, nn)
+		return fillDegrees(ctx, pool, ids, scopes, nil, nn)
 	})
 	_, fullP95, _ := benchMeasure(t, 20, 3, func() error {
-		_, e := EgoGraph(ctx, pool, pMax, scopes)
+		_, e := EgoGraph(ctx, pool, pMax, scopes, nil)
 		return e
 	})
 
@@ -257,7 +257,7 @@ func TestGraphBench1MDiag(t *testing.T) {
 		p := EgoParams{Focus: focusQ2, Hops: 3, PerNodeCap: 100, Limit: lim, EdgeLimit: 20000}
 		var last *EgoResult
 		p50, p95, mx := benchMeasure(t, 60, 5, func() error {
-			r, e := EgoGraph(ctx, pool, p, scopes)
+			r, e := EgoGraph(ctx, pool, p, scopes, nil)
 			last = r
 			return e
 		})

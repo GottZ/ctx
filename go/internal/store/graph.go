@@ -138,11 +138,14 @@ type hopCandidate struct {
 //  3. Induced edges (Q2) over the final node set — scope-safe by construction
 //     (both endpoints come from the visibility-checked node set).
 //  4. Visible degrees (Q3), batched, double-budgeted (scan + hit cap).
-func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes []string) (*EgoResult, error) {
+func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes []string, grantedBlockIDs []string) (*EgoResult, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
-	focus, err := hydrateFocus(ctx, pool, p.Focus, readScopes)
+	if grantedBlockIDs == nil {
+		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
+	}
+	focus, err := hydrateFocus(ctx, pool, p.Focus, readScopes, grantedBlockIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +165,7 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 			truncated = true
 			break
 		}
-		cands, herr := hopNeighbors(ctx, pool, frontier, readScopes, p)
+		cands, herr := hopNeighbors(ctx, pool, frontier, readScopes, grantedBlockIDs, p)
 		if herr != nil {
 			return nil, herr
 		}
@@ -193,7 +196,7 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		truncated = true
 	}
 
-	if err := fillDegrees(ctx, pool, ids, readScopes, nodes); err != nil {
+	if err := fillDegrees(ctx, pool, ids, readScopes, grantedBlockIDs, nodes); err != nil {
 		return nil, err
 	}
 
@@ -241,15 +244,17 @@ func takeHop(cands []hopCandidate, visited map[string]bool, budget, hop int) ([]
 // hydrateFocus loads the focus node (hop 0) under the canonical visibility
 // triple. Zero rows — whether the block does not exist or is out of scope —
 // collapse into the same ErrNotVisible.
-func hydrateFocus(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []string) (*GraphNode, error) {
+func hydrateFocus(ctx context.Context, pool *pgxpool.Pool, id string, readScopes, grantedBlockIDs []string) (*GraphNode, error) {
+	// $1=focus id, $2=readScopes, $3=grantedBlockIDs (T40a OR-arm via the shared
+	// VisibilityPredicate switch point — a granted block becomes a VISIBLE focus).
 	q := fmt.Sprintf(
 		`SELECT b.id::text, left(b.title, 120), b.category, b.scope::text, b.created_at
 		 FROM context_blocks b
 		 WHERE b.id = $1::uuid AND %s`,
-		VisibilityPredicate("b", "$2"),
+		VisibilityPredicate("b", "$2", "$3"),
 	)
 	n := GraphNode{Hop: 0}
-	err := pool.QueryRow(ctx, q, id, readScopes).
+	err := pool.QueryRow(ctx, q, id, readScopes, grantedBlockIDs).
 		Scan(&n.ID, &n.Title, &n.Category, &n.Scope, &n.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotVisible
@@ -267,8 +272,10 @@ func hydrateFocus(ctx context.Context, pool *pgxpool.Pool, id string, readScopes
 // window) inside the legs, BEFORE the LIMIT. Cap slots are only ever granted
 // to visible, filter-passing edges (anti-starvation + no counting channel,
 // design §6.2). DISTINCT ON keeps each neighbor once with its strongest edge.
-func hopNeighbors(ctx context.Context, pool *pgxpool.Pool, frontier, readScopes []string, p EgoParams) ([]hopCandidate, error) {
-	vis := VisibilityPredicate("b", "$2")
+func hopNeighbors(ctx context.Context, pool *pgxpool.Pool, frontier, readScopes, grantedBlockIDs []string, p EgoParams) ([]hopCandidate, error) {
+	// $9 = grantedBlockIDs (T40a): the shared VisibilityPredicate carries the
+	// block-grant OR-arm into BOTH hop legs (a granted neighbor becomes VISIBLE).
+	vis := VisibilityPredicate("b", "$2", "$9")
 	q := fmt.Sprintf(`
 WITH hop AS (
     SELECT DISTINCT ON (e.neighbor_id)
@@ -322,6 +329,7 @@ ORDER BY h.confidence DESC, h.neighbor_id`, vis, vis)
 		nilIfEmpty(p.Categories),        // $6
 		p.CreatedAfter,                  // $7
 		p.CreatedBefore,                 // $8
+		grantedBlockIDs,                 // $9 block-grant OR-arm (T40a)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: graph hop query: %w", err)
@@ -405,8 +413,10 @@ LIMIT $4`
 // Degree counts all five relationship types; the count is scope-visible —
 // a raw count would leak the existence of foreign private links on shared
 // blocks (design §6.3, decision §7.2).
-func fillDegrees(ctx context.Context, pool *pgxpool.Pool, ids, readScopes []string, nodes []GraphNode) error {
-	vis := VisibilityPredicate("nb", "$2")
+func fillDegrees(ctx context.Context, pool *pgxpool.Pool, ids, readScopes, grantedBlockIDs []string, nodes []GraphNode) error {
+	// $5 = grantedBlockIDs (T40a): a granted neighbor counts toward the VISIBLE
+	// degree via the shared VisibilityPredicate OR-arm (both UNION legs).
+	vis := VisibilityPredicate("nb", "$2", "$5")
 	q := fmt.Sprintf(`
 SELECT n.id::text,
        (SELECT count(*) FROM (
@@ -429,7 +439,7 @@ SELECT n.id::text,
         ) c)::int AS degree
 FROM unnest($1::uuid[]) AS n(id)`, vis, vis)
 
-	rows, err := pool.Query(ctx, q, ids, readScopes, DegreeScanBudget, DegreeHitCap)
+	rows, err := pool.Query(ctx, q, ids, readScopes, DegreeScanBudget, DegreeHitCap, grantedBlockIDs)
 	if err != nil {
 		return fmt.Errorf("store: graph degree query: %w", err)
 	}

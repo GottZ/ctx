@@ -157,10 +157,13 @@ type graphEdge struct {
 //
 // FAIL-OPEN: on ANY error (no seeds is NOT an error — it returns results, nil)
 // the ORIGINAL input slice is returned unchanged alongside the error. No panics.
-func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, cfg GraphConfig) ([]SearchResult, error) {
+func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, cfg GraphConfig) ([]SearchResult, error) {
 	if !cfg.Enabled || len(results) == 0 || len(readScopes) == 0 {
 		return results, nil
 	}
+	// grantedBlockIDs is nil-coalesced to '{}'::uuid[] inside fetchNeighbors (the
+	// single DB chokepoint) so the deterministic-empty guard lives at one place
+	// and GraphExpand stays under the cyclomatic budget.
 
 	// --- Seed selection -------------------------------------------------------
 	// results[0] is the top hit (input is pre-sorted desc). A result seeds the
@@ -199,7 +202,7 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 	}
 
 	// --- Hop 1 ----------------------------------------------------------------
-	edges, err := fetchNeighbors(ctx, pool, seedIDs, readScopes, cfg, 1.0)
+	edges, err := fetchNeighbors(ctx, pool, seedIDs, readScopes, grantedBlockIDs, cfg, 1.0)
 	if err != nil {
 		return results, fmt.Errorf("rrf: graph expand hop 1: %w", err)
 	}
@@ -252,7 +255,7 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 			if len(nextSeedIDs) == 0 {
 				break
 			}
-			hopEdges, herr := fetchNeighbors(ctx, pool, nextSeedIDs, readScopes, cfg, decay)
+			hopEdges, herr := fetchNeighbors(ctx, pool, nextSeedIDs, readScopes, grantedBlockIDs, cfg, decay)
 			if herr != nil {
 				return results, fmt.Errorf("rrf: graph expand hop %d: %w", hop, herr)
 			}
@@ -308,14 +311,19 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 // predicates (NOT is_archived, block_role <> 'system-meta', scope =
 // ANY(readScopes)). scope is gated on context_blocks.scope (authoritative), NOT
 // context_dream_links.scope.
-func fetchNeighbors(ctx context.Context, pool *pgxpool.Pool, seedIDs, readScopes []string, cfg GraphConfig, hopDecay float64) ([]graphEdge, error) {
+func fetchNeighbors(ctx context.Context, pool *pgxpool.Pool, seedIDs, readScopes, grantedBlockIDs []string, cfg GraphConfig, hopDecay float64) ([]graphEdge, error) {
+	if grantedBlockIDs == nil {
+		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL (T40a)
+	}
 	// edge_dir CTE normalizes every link into (seed, neighbor, relationship,
 	// raw_confidence) regardless of direction, applies the per-type confidence
 	// gate, then a window for the per-seed cap and a window for the neighbor's
 	// gate-passing inbound degree.
 	//
 	// $1 seedIDs uuid[] · $2 readScopes text[] · $3 MinConfidence ·
-	// $4 MinConfidenceRecurrent · $5 PerSeedCap · $6 Directed bool
+	// $4 MinConfidenceRecurrent · $5 PerSeedCap · $6 Directed bool ·
+	// $7 grantedBlockIDs uuid[] (T40a block-grant OR-arm on the NEIGHBOR side).
+	// Seed $1 stays UNGATED — the seed-side grant/scope filter is T41, not T40a.
 	const q = `
 WITH edge_dir AS (
     SELECT source_block_id AS seed_id,
@@ -362,7 +370,7 @@ JOIN context_blocks cb ON cb.id = r.neighbor_id
 WHERE r.seed_rn <= $5
   AND NOT cb.is_archived
   AND cb.block_role <> 'system-meta'
-  AND cb.scope = ANY($2::text[])`
+  AND ( cb.scope = ANY($2::text[]) OR cb.id = ANY($7::uuid[]) )`
 
 	rows, err := pool.Query(ctx, q,
 		seedIDs,                    // $1
@@ -371,6 +379,7 @@ WHERE r.seed_rn <= $5
 		cfg.MinConfidenceRecurrent, // $4
 		cfg.PerSeedCap,             // $5
 		cfg.Directed,               // $6
+		grantedBlockIDs,            // $7 block-grant OR-arm (T40a, neighbor side)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query dream links: %w", err)

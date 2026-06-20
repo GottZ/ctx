@@ -397,7 +397,11 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		return
 	}
 
-	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, ar.ReadScopes)
+	// Resolve the block-grant set for the caller's tenant (T40a, design/07 §4):
+	// a granted block becomes visible via the additive OR-arm. Fail-closed for
+	// grant visibility (resolveGrants logs + returns '{}') — never crash the read.
+	grants := resolveGrants(ctx, h.pool, ar)
+	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, ar.ReadScopes, grants)
 	if err != nil {
 		if errors.Is(err, store.ErrAmbiguousID) {
 			writeJSON(w, http.StatusOK, map[string]any{
@@ -428,16 +432,7 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		return
 	}
 
-	// Log access against the resolved ID, not the user-supplied prefix.
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := store.LogAccess(bgCtx, h.pool, ar.ApiKeyID, resolvedID, "manage-get"); err != nil {
-			slog.Error("manage: access log error", "error", err, "request_id", reqID)
-		}
-	}()
-
-	block, err := store.GetBlock(ctx, h.pool, resolvedID, ar.ReadScopes)
+	block, err := store.GetBlock(ctx, h.pool, resolvedID, ar.ReadScopes, grants)
 	if err != nil {
 		slog.Error("manage: get error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -451,6 +446,19 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		})
 		return
 	}
+
+	// G9 oracle fix (design/07 §5.5): log only a visible block — a 404 must leave
+	// no access_log trace. A full-UUID bypass in ResolveBlockID returns the id
+	// unconditionally; logging BEFORE GetBlock re-gates would write one access_log
+	// row even for a foreign/ungranted block, an existence oracle over the log
+	// channel. Logging here (block != nil) closes it. Log against the resolved ID.
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := store.LogAccess(bgCtx, h.pool, ar.ApiKeyID, resolvedID, "manage-get"); err != nil {
+			slog.Error("manage: access log error", "error", err, "request_id", reqID)
+		}
+	}()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"action":  "get",
@@ -545,8 +553,9 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 	}
 
 	// Prefix-resolve within HomeScope only — writes are scope-restricted, so the
-	// candidate set must be too.
-	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, []string{ar.HomeScope})
+	// candidate set must be too. grantedBlockIDs nil: a block grant is read-only
+	// (design/07 §2.5) and MUST NOT widen a write path's candidate set.
+	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, []string{ar.HomeScope}, nil)
 	if err != nil {
 		if errors.Is(err, store.ErrAmbiguousID) {
 			writeJSON(w, http.StatusConflict, map[string]any{
@@ -680,7 +689,8 @@ func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar 
 	}
 
 	// Prefix-resolve within HomeScope only — see handleUpdate for rationale.
-	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, []string{ar.HomeScope})
+	// grantedBlockIDs nil: a read-only block grant must not widen a delete path.
+	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, []string{ar.HomeScope}, nil)
 	if err != nil {
 		if errors.Is(err, store.ErrAmbiguousID) {
 			writeJSON(w, http.StatusConflict, map[string]any{

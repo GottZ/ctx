@@ -168,7 +168,9 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 		return errOutcome("invalid arguments: " + err.Error())
 	}
 	limit := clamp(a.Limit, 10, 1, 20)
-	previews, err := store.SearchBlocks(ctx, ex.pool, a.Query, readScopes, a.Category, a.Tags, limit, true, nil)
+	// grantedBlockIDs nil (T40a): the chat-tool read path is NOT live-wired for
+	// block grants in T40a (its grant resolution is a later wave) — nil ⇒ no-op.
+	previews, err := store.SearchBlocks(ctx, ex.pool, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil)
 	if err != nil {
 		return errOutcome("search failed")
 	}
@@ -209,14 +211,15 @@ func (ex *Executor) runGet(ctx context.Context, readScopes []string, apiKeyID st
 	if a.ID == "" {
 		return errOutcome("id is required")
 	}
-	resolvedID, _, err := store.ResolveBlockID(ctx, ex.pool, a.ID, readScopes)
+	// grantedBlockIDs nil (T40a): chat-tool grant resolution is a later wave.
+	resolvedID, _, err := store.ResolveBlockID(ctx, ex.pool, a.ID, readScopes, nil)
 	if err != nil {
 		return errOutcome(err.Error()) // ambiguous prefix / too-short — safe to surface (no URL)
 	}
 	if resolvedID == "" {
 		return errOutcome("block not found")
 	}
-	block, err := store.GetBlock(ctx, ex.pool, resolvedID, readScopes)
+	block, err := store.GetBlock(ctx, ex.pool, resolvedID, readScopes, nil)
 	if err != nil || block == nil {
 		return errOutcome("block not found") // scope-miss laundered to not-found (no oracle)
 	}

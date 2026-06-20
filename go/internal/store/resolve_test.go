@@ -38,7 +38,7 @@ func TestResolveBlockID_UniquePrefix(t *testing.T) {
 	insertResolveTestBlock(t, pool, "019e4444-0000-7000-9000-000000000001", "alpha", "private", now)
 	insertResolveTestBlock(t, pool, "019e5555-0000-7000-9000-000000000001", "beta", "private", now)
 
-	id, matches, err := store.ResolveBlockID(context.Background(), pool, "019e4444", []string{"private"})
+	id, matches, err := store.ResolveBlockID(context.Background(), pool, "019e4444", []string{"private"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestResolveBlockID_AmbiguousPrefix(t *testing.T) {
 	insertResolveTestBlock(t, pool, "019e6666-0000-7000-9000-00000000000a", "alpha", "private", now)
 	insertResolveTestBlock(t, pool, "019e6666-0000-7000-9000-00000000000b", "beta", "private", now.Add(time.Second))
 
-	id, matches, err := store.ResolveBlockID(context.Background(), pool, "019e6666", []string{"private"})
+	id, matches, err := store.ResolveBlockID(context.Background(), pool, "019e6666", []string{"private"}, nil)
 	if !errors.Is(err, store.ErrAmbiguousID) {
 		t.Fatalf("want ErrAmbiguousID, got %v", err)
 	}
@@ -75,7 +75,7 @@ func TestResolveBlockID_AmbiguousPrefix(t *testing.T) {
 
 func TestResolveBlockID_NoMatch(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
-	id, matches, err := store.ResolveBlockID(context.Background(), pool, "deadbeef", []string{"private"})
+	id, matches, err := store.ResolveBlockID(context.Background(), pool, "deadbeef", []string{"private"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestResolveBlockID_ScopeFiltered(t *testing.T) {
 	insertResolveTestBlock(t, pool, "019e7777-0000-7000-9000-000000000001", "shared-only", "shared", now)
 
 	// Caller has only 'private' scope → block invisible.
-	id, _, err := store.ResolveBlockID(context.Background(), pool, "019e7777", []string{"private"})
+	id, _, err := store.ResolveBlockID(context.Background(), pool, "019e7777", []string{"private"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestResolveBlockID_ScopeFiltered(t *testing.T) {
 	}
 
 	// Caller with 'shared' scope sees it.
-	id, _, err = store.ResolveBlockID(context.Background(), pool, "019e7777", []string{"private", "shared"})
+	id, _, err = store.ResolveBlockID(context.Background(), pool, "019e7777", []string{"private", "shared"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestResolveBlockID_ArchivedExcluded(t *testing.T) {
 		t.Fatalf("archive block: %v", err)
 	}
 
-	id, _, err := store.ResolveBlockID(ctx, pool, "019e8888", []string{"private"})
+	id, _, err := store.ResolveBlockID(ctx, pool, "019e8888", []string{"private"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

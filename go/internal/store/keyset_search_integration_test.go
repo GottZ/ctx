@@ -100,7 +100,7 @@ func TestSearchBlocksKeyset_Integration(t *testing.T) {
 	const pageSize = 3
 
 	// --- Page 1: no cursor. Empty query → updated_at DESC, id DESC. ----------
-	page1, err := store.SearchBlocks(ctx, pool, "", []string{scope}, "", nil, pageSize, true, nil)
+	page1, err := store.SearchBlocks(ctx, pool, "", []string{scope}, "", nil, pageSize, true, nil, nil)
 	if err != nil {
 		t.Fatalf("page 1: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestSearchBlocksKeyset_Integration(t *testing.T) {
 
 	// --- Page 2: cursor = last row of page 1. -------------------------------
 	cursor := keysetCursorOf(page1[len(page1)-1])
-	page2, err := store.SearchBlocks(ctx, pool, "", []string{scope}, "", nil, pageSize, true, cursor)
+	page2, err := store.SearchBlocks(ctx, pool, "", []string{scope}, "", nil, pageSize, true, cursor, nil)
 	if err != nil {
 		t.Fatalf("page 2: %v", err)
 	}

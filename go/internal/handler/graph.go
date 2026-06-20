@@ -133,7 +133,10 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	result, err := store.EgoGraph(ctx, h.pool, params, authResult.ReadScopes)
+	// grantedBlockIDs nil (T40a): the graph-ego handler is NOT live-wired for
+	// block grants in T40a (EgoGraph inherits the OR centrally, but its grant
+	// resolution is a later wave) — nil ⇒ no-op OR-arm.
+	result, err := store.EgoGraph(ctx, h.pool, params, authResult.ReadScopes, nil)
 	if err != nil {
 		if errors.Is(err, store.ErrNotVisible) {
 			// One identical 404 for "does not exist" and "not visible" — no

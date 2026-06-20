@@ -104,7 +104,7 @@ func TestGraphExpand_CrossScopeHopIsolation_Integration(t *testing.T) {
 
 	// Positive control: the neighbor's BLOCK scope is visible → the hop hydrates
 	// and injects it. Proves the traversal actually ran on this corpus.
-	visible, err := rrf.GraphExpand(ctx, pool, seed, []string{seedScope, neighborScope}, cfg)
+	visible, err := rrf.GraphExpand(ctx, pool, seed, []string{seedScope, neighborScope}, nil, cfg)
 	if err != nil {
 		t.Fatalf("GraphExpand (block scope visible): %v", err)
 	}
@@ -114,7 +114,7 @@ func TestGraphExpand_CrossScopeHopIsolation_Integration(t *testing.T) {
 
 	// Leak probe: only the LINK scope is visible, the neighbor's BLOCK scope is
 	// not → the neighbor must NOT cross the boundary, despite the visible link.
-	leak, err := rrf.GraphExpand(ctx, pool, seed, []string{seedScope}, cfg)
+	leak, err := rrf.GraphExpand(ctx, pool, seed, []string{seedScope}, nil, cfg)
 	if err != nil {
 		t.Fatalf("GraphExpand (only link scope visible): %v", err)
 	}

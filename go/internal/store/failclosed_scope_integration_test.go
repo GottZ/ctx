@@ -62,9 +62,9 @@ func TestReadPathsFailClosedOnEmptyScopes_Integration(t *testing.T) {
 		call func() error
 	}{
 		// blocks.go
-		{"ResolveBlockID", func() error { _, _, e := store.ResolveBlockID(ctx, pool, "0123abcd", empty); return e }},
-		{"GetBlock", func() error { _, e := store.GetBlock(ctx, pool, someUUID, empty); return e }},
-		{"SearchBlocks", func() error { _, e := store.SearchBlocks(ctx, pool, "", empty, "", nil, 10, true, nil); return e }},
+		{"ResolveBlockID", func() error { _, _, e := store.ResolveBlockID(ctx, pool, "0123abcd", empty, nil); return e }},
+		{"GetBlock", func() error { _, e := store.GetBlock(ctx, pool, someUUID, empty, nil); return e }},
+		{"SearchBlocks", func() error { _, e := store.SearchBlocks(ctx, pool, "", empty, "", nil, 10, true, nil, nil); return e }},
 		{"RecentBlocks", func() error { _, e := store.RecentBlocks(ctx, pool, empty, "", 10); return e }},
 		{"ListCategories", func() error { _, e := store.ListCategories(ctx, pool, empty); return e }},
 		{"GetStats", func() error { _, e := store.GetStats(ctx, pool, empty); return e }},
@@ -83,7 +83,7 @@ func TestReadPathsFailClosedOnEmptyScopes_Integration(t *testing.T) {
 			return e
 		}},
 		{"EgoGraph", func() error {
-			_, e := store.EgoGraph(ctx, pool, store.EgoParams{Focus: someUUID, Hops: 1, Limit: 10}, empty)
+			_, e := store.EgoGraph(ctx, pool, store.EgoParams{Focus: someUUID, Hops: 1, Limit: 10}, empty, nil)
 			return e
 		}},
 	}

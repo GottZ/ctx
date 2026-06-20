@@ -95,8 +95,9 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		after = nil
 	}
 
-	// Search.
-	results, err := store.SearchBlocks(ctx, h.pool, req.Query, authResult.ReadScopes, req.Category, req.Tags, limit, compact, after)
+	// Search. grantedBlockIDs nil (T40a): /api/search is NOT live-wired for block
+	// grants in T40a (its grant wiring is T40b/a later wave) — nil ⇒ no-op OR-arm.
+	results, err := store.SearchBlocks(ctx, h.pool, req.Query, authResult.ReadScopes, req.Category, req.Tags, limit, compact, after, nil)
 	if err != nil {
 		slog.Error("search: query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{

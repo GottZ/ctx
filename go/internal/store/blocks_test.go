@@ -113,7 +113,7 @@ func TestIsFullUUID(t *testing.T) {
 func TestResolveBlockID_FullUUIDBypassesDB(t *testing.T) {
 	// Full UUID → returns immediately, pool not touched.
 	id := "019e446c-008f-7fbc-baa9-070bbe2086e8"
-	got, matches, err := ResolveBlockID(context.Background(), nil, id, []string{"private"})
+	got, matches, err := ResolveBlockID(context.Background(), nil, id, []string{"private"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestResolveBlockID_FullUUIDBypassesDB(t *testing.T) {
 func TestResolveBlockID_PrefixTooShortRejected(t *testing.T) {
 	cases := []string{"", "abc", "019e44", "019e446"} // 0, 3, 6, 7 chars
 	for _, in := range cases {
-		_, _, err := ResolveBlockID(context.Background(), nil, in, []string{"private"})
+		_, _, err := ResolveBlockID(context.Background(), nil, in, []string{"private"}, nil)
 		if err == nil {
 			t.Errorf("ResolveBlockID(%q) expected error, got nil", in)
 			continue

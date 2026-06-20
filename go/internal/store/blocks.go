@@ -318,9 +318,17 @@ func IsFullUUID(s string) bool {
 //     candidate list so the user can re-specify
 //
 // Scope-filtered identically to GetBlock; archived blocks excluded.
-func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, readScopes []string) (string, []BlockMeta, error) {
+// grantedBlockIDs (T40a, design/07 §4) is the resolved block-grant set; nil ⇒
+// '{}'::uuid[] ⇒ no-op OR-arm. The full-UUID bypass is UNCHANGED: a full id is
+// returned verbatim and GetBlock re-gates it with the SAME scope/grant OR — the
+// existence oracle is mitigated by caller re-gating (design/07 §5.5), not by a
+// global ResolveBlockID change.
+func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, readScopes []string, grantedBlockIDs []string) (string, []BlockMeta, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return "", nil, err
+	}
+	if grantedBlockIDs == nil {
+		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
 	if IsFullUUID(idOrPrefix) {
 		return idOrPrefix, nil, nil
@@ -331,14 +339,15 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 
 	// Cap candidates at 11: anything ≥10 is too ambiguous to surface usefully,
 	// and the extra row tells the caller "≥10, narrow further" without paging.
+	// $1=prefix, $2=readScopes, $3=maxCandidates(LIMIT), $4=grantedBlockIDs.
 	const maxCandidates = 11
 	rows, err := pool.Query(ctx,
 		`SELECT id, title, category, tags, scope, updated_at
 		 FROM context_blocks
-		 WHERE id::text LIKE $1 || '%' AND scope = ANY($2::text[]) AND NOT is_archived
+		 WHERE id::text LIKE $1 || '%' AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($4::uuid[]))
 		 ORDER BY updated_at DESC
 		 LIMIT $3`,
-		idOrPrefix, readScopes, maxCandidates,
+		idOrPrefix, readScopes, maxCandidates, grantedBlockIDs,
 	)
 	if err != nil {
 		return "", nil, fmt.Errorf("store: resolve id prefix: %w", err)
@@ -367,18 +376,26 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 	}
 }
 
-// GetBlock retrieves a single block by ID, filtered by allowed scopes.
-func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []string) (*Block, error) {
+// GetBlock retrieves a single block by ID, filtered by allowed scopes plus the
+// resolved block-grant set (T40a, design/07 §4). grantedBlockIDs is the set of
+// block IDs row-level-granted to the caller's tenant; nil ⇒ '{}'::uuid[] ⇒ the
+// additive OR-arm is a deterministic no-op (byte-identical to scope-only). The
+// mandatory parentheses keep the NOT is_archived guard OUTSIDE the scope/grant
+// OR — a granted archived block must NOT surface.
+func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []string, grantedBlockIDs []string) (*Block, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
+	}
+	if grantedBlockIDs == nil {
+		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
 	b := &Block{}
 	err := pool.QueryRow(ctx,
 		`SELECT id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at
 		 FROM context_blocks
-		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
+		 WHERE id = $1 AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($3::uuid[]))
 		 LIMIT 1`,
-		id, readScopes,
+		id, readScopes, grantedBlockIDs,
 	).Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 		&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -564,13 +581,22 @@ type SearchCursor struct {
 // (unchanged). On the empty-query browse path it resumes strictly after the
 // cursor's (updated_at, id); on the FTS path it is ignored (that path is
 // LIMIT-only). Callers that do not paginate pass nil.
-func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor) ([]BlockPreview, error) {
+func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string) ([]BlockPreview, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
+	if grantedBlockIDs == nil {
+		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
+	}
 	limit = ClampLimit(limit, 10, 50)
 
-	whereClauses := []string{"scope = ANY($1::text[])", "NOT is_archived"}
+	// $1 stays readScopes and $2 stays the FTS query arg (the FTS orderBy
+	// hardcodes $2 — never shift it). The scope/grant OR-clause is NOT the first
+	// fixed element anymore: it is appended AFTER the dynamic args with its own
+	// allocated index so the grant uuid[] never collides with $2. (AND is
+	// commutative — is_archived up front, the scope-OR-clause at the back is
+	// semantically identical and keeps the mandatory parentheses, design/07 §4.)
+	whereClauses := []string{"NOT is_archived"}
 	args := []any{readScopes}
 	argIdx := 2
 
@@ -608,6 +634,15 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 		args = append(args, after.UpdatedAt, after.ID)
 		argIdx += 2
 	}
+
+	// Visibility OR-clause (T40a): scope = ANY($1) OR id = ANY($grantIdx). The
+	// grant uuid[] is allocated AFTER every dynamic arg so it never lands on $2.
+	// Mandatory parentheses: NOT is_archived already AND-ed up front, the OR group
+	// stays self-contained (a granted archived block must not leak, design/07 §4).
+	grantIdx := argIdx
+	args = append(args, grantedBlockIDs)
+	argIdx++
+	whereClauses = append(whereClauses, fmt.Sprintf("(scope = ANY($1::text[]) OR id = ANY($%d::uuid[]))", grantIdx))
 
 	whereClause := strings.Join(whereClauses, " AND ")
 

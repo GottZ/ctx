@@ -152,7 +152,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 	// the shared T2 — leaking the existence of a private link chain. The
 	// rot-beweis removes the leg predicates and post-filters (see report).
 	t.Run("BridgeNoLeak", func(t *testing.T) {
-		res, err := store.EgoGraph(ctx, pool, gEgoParams(gT1), gScopesB)
+		res, err := store.EgoGraph(ctx, pool, gEgoParams(gT1), gScopesB, nil)
 		if err != nil {
 			t.Fatalf("ego(T1) as B: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 		}
 
 		// Sanity (A sees the full chain): focus hop 0, Q1 hop 1, T2 hop 2.
-		resA, err := store.EgoGraph(ctx, pool, gEgoParams(gT1), gScopesA)
+		resA, err := store.EgoGraph(ctx, pool, gEgoParams(gT1), gScopesA, nil)
 		if err != nil {
 			t.Fatalf("ego(T1) as A: %v", err)
 		}
@@ -184,7 +184,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 	// §5.2.2: induced edges as B contain no private endpoint (per
 	// construction — this test guards against refactors).
 	t.Run("InducedEdgesNoForeignEndpoint", func(t *testing.T) {
-		res, err := store.EgoGraph(ctx, pool, gEgoParams(gS1), gScopesB)
+		res, err := store.EgoGraph(ctx, pool, gEgoParams(gS1), gScopesB, nil)
 		if err != nil {
 			t.Fatalf("ego(S1) as B: %v", err)
 		}
@@ -210,7 +210,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 	// scope-visible neighbors. Raw count of S1 would be 4 — leaking the
 	// existence of private links on a shared block.
 	t.Run("DegreeVisibleOnly", func(t *testing.T) {
-		resB, err := store.EgoGraph(ctx, pool, gEgoParams(gS1), gScopesB)
+		resB, err := store.EgoGraph(ctx, pool, gEgoParams(gS1), gScopesB, nil)
 		if err != nil {
 			t.Fatalf("ego(S1) as B: %v", err)
 		}
@@ -218,7 +218,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 			t.Errorf("degree(S1) as B = %d, want 2 (S2+W1; raw count 4 would be a leak)", d)
 		}
 
-		resA, err := store.EgoGraph(ctx, pool, gEgoParams(gS1), gScopesA)
+		resA, err := store.EgoGraph(ctx, pool, gEgoParams(gS1), gScopesA, nil)
 		if err != nil {
 			t.Fatalf("ego(S1) as A: %v", err)
 		}
@@ -230,11 +230,11 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 	// §5.2.4 store half of the existence oracle: invisible and nonexistent
 	// focus collapse into the SAME error value.
 	t.Run("NotVisibleOracle", func(t *testing.T) {
-		_, errInvisible := store.EgoGraph(ctx, pool, gEgoParams(gP1), gScopesB)
+		_, errInvisible := store.EgoGraph(ctx, pool, gEgoParams(gP1), gScopesB, nil)
 		if !errors.Is(errInvisible, store.ErrNotVisible) {
 			t.Errorf("ego(P1) as B: want ErrNotVisible, got %v", errInvisible)
 		}
-		_, errMissing := store.EgoGraph(ctx, pool, gEgoParams(gMissing), gScopesB)
+		_, errMissing := store.EgoGraph(ctx, pool, gEgoParams(gMissing), gScopesB, nil)
 		if !errors.Is(errMissing, store.ErrNotVisible) {
 			t.Errorf("ego(missing) as B: want ErrNotVisible, got %v", errMissing)
 		}
@@ -243,7 +243,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 	// §5.2.6: supersedes is never traversed (U3 absent) but IS displayed as
 	// an induced edge between loaded nodes; link_class filters hide it.
 	t.Run("SupersedesDisplayNotTraversal", func(t *testing.T) {
-		res, err := store.EgoGraph(ctx, pool, gEgoParams(gU1), gScopesB)
+		res, err := store.EgoGraph(ctx, pool, gEgoParams(gU1), gScopesB, nil)
 		if err != nil {
 			t.Fatalf("ego(U1): %v", err)
 		}
@@ -265,7 +265,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 		// link_class=topical hides the supersedes edge.
 		p := gEgoParams(gU1)
 		p.LinkClasses = []string{"topical"}
-		res, err = store.EgoGraph(ctx, pool, p, gScopesB)
+		res, err = store.EgoGraph(ctx, pool, p, gScopesB, nil)
 		if err != nil {
 			t.Fatalf("ego(U1) topical-only: %v", err)
 		}
@@ -277,7 +277,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 		// link_class=supersedes: traversal set empty → focus only, no
 		// self-edges possible.
 		p.LinkClasses = []string{"supersedes"}
-		res, err = store.EgoGraph(ctx, pool, p, gScopesB)
+		res, err = store.EgoGraph(ctx, pool, p, gScopesB, nil)
 		if err != nil {
 			t.Fatalf("ego(U1) supersedes-only: %v", err)
 		}
@@ -292,7 +292,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 		p := gEgoParams(gS1)
 		p.Hops = 1
 		p.Categories = []string{"graphtest"}
-		res, err := store.EgoGraph(ctx, pool, p, gScopesA)
+		res, err := store.EgoGraph(ctx, pool, p, gScopesA, nil)
 		if err != nil {
 			t.Fatalf("ego(S1) category-filtered: %v", err)
 		}
@@ -311,7 +311,7 @@ func TestEgoGraph_ScopeFixture(t *testing.T) {
 		p := gEgoParams(gS1)
 		cutoff := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
 		p.CreatedBefore = &cutoff
-		res, err := store.EgoGraph(ctx, pool, p, gScopesA)
+		res, err := store.EgoGraph(ctx, pool, p, gScopesA, nil)
 		if err != nil {
 			t.Fatalf("ego(S1) created-window: %v", err)
 		}
@@ -357,7 +357,7 @@ func TestEgoGraph_CapAndBudgets(t *testing.T) {
 	t.Run("CapStarvation", func(t *testing.T) {
 		p := gEgoParams(gHub)
 		p.Hops = 1
-		res, err := store.EgoGraph(ctx, pool, p, gScopesB)
+		res, err := store.EgoGraph(ctx, pool, p, gScopesB, nil)
 		if err != nil {
 			t.Fatalf("ego(H) as B: %v", err)
 		}
@@ -375,7 +375,7 @@ func TestEgoGraph_CapAndBudgets(t *testing.T) {
 	t.Run("HubCap", func(t *testing.T) {
 		p := gEgoParams(gHub)
 		p.Hops = 1
-		res, err := store.EgoGraph(ctx, pool, p, gScopesA)
+		res, err := store.EgoGraph(ctx, pool, p, gScopesA, nil)
 		if err != nil {
 			t.Fatalf("ego(H) as A: %v", err)
 		}
@@ -394,7 +394,7 @@ func TestEgoGraph_CapAndBudgets(t *testing.T) {
 		p.Hops = 1
 		p.PerNodeCap = 30
 		p.Limit = 10
-		res, err := store.EgoGraph(ctx, pool, p, gScopesA)
+		res, err := store.EgoGraph(ctx, pool, p, gScopesA, nil)
 		if err != nil {
 			t.Fatalf("ego(H) limit=10: %v", err)
 		}
@@ -418,7 +418,7 @@ func TestEgoGraph_CapAndBudgets(t *testing.T) {
 		p.Hops = 1
 		p.PerNodeCap = 30
 		p.MinConfidence = 0.895
-		res, err := store.EgoGraph(ctx, pool, p, gScopesA)
+		res, err := store.EgoGraph(ctx, pool, p, gScopesA, nil)
 		if err != nil {
 			t.Fatalf("ego(H) minconf: %v", err)
 		}
@@ -434,7 +434,7 @@ func TestEgoGraph_CapAndBudgets(t *testing.T) {
 		p.Hops = 1
 		p.PerNodeCap = 30
 		p.EdgeLimit = 10
-		res, err := store.EgoGraph(ctx, pool, p, gScopesA)
+		res, err := store.EgoGraph(ctx, pool, p, gScopesA, nil)
 		if err != nil {
 			t.Fatalf("ego(H) edge_limit=10: %v", err)
 		}
@@ -468,7 +468,7 @@ func TestEgoGraph_CapAndBudgets(t *testing.T) {
 		p := gEgoParams(gHub2)
 		p.Hops = 1
 		p.PerNodeCap = 100
-		res, err := store.EgoGraph(ctx, pool, p, gScopesB)
+		res, err := store.EgoGraph(ctx, pool, p, gScopesB, nil)
 		if err != nil {
 			t.Fatalf("ego(H2): %v", err)
 		}
