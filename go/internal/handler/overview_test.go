@@ -20,6 +20,8 @@ import (
 type ovStubConfig struct{ cfg *config.Config }
 
 func (s ovStubConfig) Snapshot() *config.Config { return s.cfg }
+func (s ovStubConfig) SnapshotForRequest(context.Context) *config.Config { return s.cfg }
+func (s ovStubConfig) SnapshotForTenant(context.Context, string) *config.Config { return s.cfg }
 
 // overviewReq drives HandleOverview without a DB — only the early-return gates
 // (auth, enabled) are exercised, which never touch the pool.

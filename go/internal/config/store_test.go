@@ -380,3 +380,31 @@ func TestStoreSnapshotForRequestNoAuthFallsToBase(t *testing.T) {
 		t.Errorf("unresolved request must fall to base, got %p", got)
 	}
 }
+
+// TestSetRequestScopeHook: the exported setter (MT 06-C5) installs the
+// request-scope resolver SnapshotForRequest reads — the package-level twin of
+// SetOverlay that the handler layer calls at boot (config cannot import the
+// handler package). Red-proof: drop the SetRequestScopeHook call and
+// SnapshotForRequest has no scope to resolve and stays on base; install nil and
+// it fails safe to base again.
+func TestSetRequestScopeHook(t *testing.T) {
+	base := generation(t, "base")
+	s := NewStore(base)
+	tcfg := generation(t, "tenant")
+	cur := tcfg
+	var calls int32
+	s.overlay = countingOverlay(&calls, &cur)
+
+	prev := requestScopeHook
+	defer func() { requestScopeHook = prev }()
+
+	SetRequestScopeHook(func(context.Context) string { return "acme" })
+	if got := s.SnapshotForRequest(context.Background()); got != tcfg {
+		t.Errorf("after SetRequestScopeHook, SnapshotForRequest must resolve the hook scope to the tenant generation, got %p", got)
+	}
+
+	SetRequestScopeHook(nil)
+	if got := s.SnapshotForRequest(context.Background()); got != base {
+		t.Errorf("after SetRequestScopeHook(nil), SnapshotForRequest must fail safe to base, got %p", got)
+	}
+}

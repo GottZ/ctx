@@ -47,8 +47,9 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read rate limit check (0 = disabled).
-	if limit := h.cfg.Snapshot().Query.RateLimitRead; limit > 0 {
+	// Read rate limit check (0 = disabled). MT 06-C5: per-tenant via the
+	// request context (tenant's own RateLimitRead override, else _global).
+	if limit := h.cfg.SnapshotForRequest(ctx).Query.RateLimitRead; limit > 0 {
 		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "query")
 		if err != nil {
 			slog.Error("search: read rate limit check error", "error", err, "request_id", reqID)

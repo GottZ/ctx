@@ -78,8 +78,10 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sensitivity: request > settings default (F3 §2.3b precedence).
-	sens, sensErr := storeSensitivity(h.cfg.Snapshot().Pool.DefaultBlockSensitivity, req.Sensitivity)
+	// Sensitivity: request > settings default (F3 §2.3b precedence). MT 06-C5:
+	// the per-tenant generation resolves from the request context (tenant scope
+	// from the auth result), so the default honors a tenant's own override.
+	sens, sensErr := storeSensitivity(h.cfg.SnapshotForRequest(ctx).Pool.DefaultBlockSensitivity, req.Sensitivity)
 	if sensErr != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": sensErr})
 		return
@@ -106,10 +108,10 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Rate limit check (writes/min, 0 = disabled).
-	// TODO(multi-tenant): the limit is a server-global config value applied
-	// per key; the multi-tenant line moves it to per-key/per-tenant policy.
-	if limit := h.cfg.Snapshot().Query.RateLimitWrite; limit > 0 {
+	// Rate limit check (writes/min, 0 = disabled). MT 06-C5: the limit now
+	// resolves per-tenant from the request context — a tenant's own
+	// RateLimitWrite override applies, falling back to the _global value.
+	if limit := h.cfg.SnapshotForRequest(ctx).Query.RateLimitWrite; limit > 0 {
 		writeCount, err := store.CheckRateLimit(ctx, h.pool, authResult.ApiKeyID)
 		if err != nil {
 			slog.Error("store: rate limit check error", "error", err, "request_id", reqID)

@@ -14,6 +14,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -34,6 +35,8 @@ type swapStore struct {
 }
 
 func (s *swapStore) Snapshot() *config.Config { return s.p.Load() }
+func (s *swapStore) SnapshotForRequest(context.Context) *config.Config { return s.p.Load() }
+func (s *swapStore) SnapshotForTenant(context.Context, string) *config.Config { return s.p.Load() }
 
 // healthTestConfig wires all three ping roles to the given hosts and plants
 // distinctive synthetic strings in every name-carrying field. The needles

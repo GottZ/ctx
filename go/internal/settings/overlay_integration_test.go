@@ -127,9 +127,11 @@ func TestStoreOverlayWiring_Integration(t *testing.T) {
 			cfg.Rerank.BlendWeight, cfg.Source(key))
 	}
 
-	// The request path is NOT wired yet (no requestScopeHook until C5) ⇒ base.
+	// The request-scope hook (MT 06-C5) is wired by the server (NewRouter), not
+	// in this settings-level test — and this ctx carries no AuthResult anyway —
+	// so the request path resolves no tenant and returns base.
 	if got := st.SnapshotForRequest(ctx); got != base {
-		t.Errorf("SnapshotForRequest must still return base until C5 wires the scope hook, got %p", got)
+		t.Errorf("SnapshotForRequest must return base with no request-scope hook wired, got %p", got)
 	}
 
 	// A dead-pool overlay fails safe to base, never panics (§5.6).

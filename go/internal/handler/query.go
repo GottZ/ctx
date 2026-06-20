@@ -30,8 +30,20 @@ import (
 // ConfigStore is the snapshot source for request-scoped configuration.
 // *config.Store implements it; tests substitute a counting fake to pin the
 // one-snapshot-per-request invariant.
+//
+// MT 06-C5: SnapshotForRequest is the request-path entry — it derives the
+// tenant scope INTERNALLY from the context (the request-scope hook over
+// AuthResultFromContext), so a caller cannot point a request at a foreign
+// tenant; there is no scope parameter to spoof (fail-closed by construction,
+// §5.1). SnapshotForTenant takes an explicit scope and is for BACKGROUND
+// iteration over the authoritative tenant list ONLY (it has no AuthResult);
+// request handlers must use SnapshotForRequest. Both fall back to the base
+// generation while the overlay/hook are unset, so single-tenant behavior is
+// byte-identical.
 type ConfigStore interface {
 	Snapshot() *config.Config
+	SnapshotForRequest(ctx context.Context) *config.Config
+	SnapshotForTenant(ctx context.Context, tenantScope string) *config.Config
 }
 
 var _ ConfigStore = (*config.Store)(nil)
@@ -255,8 +267,11 @@ func (hb *queryHeartbeat) finish(status int, v any) {
 func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// THE single snapshot of this request (F1-W4). Every stage below derives
 	// from this one frozen generation — heartbeat gate and rerank dispatch can
-	// never see two different config stands within one request.
-	cfg := h.cfg.Snapshot()
+	// never see two different config stands within one request. MT 06-C5: the
+	// request-path entry resolves the caller's per-tenant generation from the
+	// context (tenant scope from the auth result, never from the body); it is
+	// byte-identical to the base while no tenant override exists.
+	cfg := h.cfg.SnapshotForRequest(r.Context())
 	rerankCfg := cfg.RerankRRF()
 	graphCfg := cfg.GraphRRF()
 

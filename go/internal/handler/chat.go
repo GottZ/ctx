@@ -115,6 +115,13 @@ type ChatHandler struct {
 // NewChatHandler wires the chat handler. queryHandler is the /api/query handler
 // (scheduler-wrapped) the ctx_query tool delegates to.
 func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, queryHandler http.Handler) *ChatHandler {
+	// GamingState stays on the tenant-blind Snapshot() (NOT SnapshotForRequest):
+	// gaming.active and disabled_backends are global-only keys (03-W2/T28 tags +
+	// §10.5) — a tenant override is dropped before the overlay build, so the
+	// per-tenant generation carries the _global values here regardless. The
+	// closure is also built at construction time with no request context to
+	// resolve a tenant from. The per-tenant request surface (WebChat etc.) flows
+	// through SnapshotForRequest in HandleStream instead.
 	provider := chat.NewPoolProvider(backendPool, func() backends.GamingState {
 		return cfg.Snapshot().GamingState()
 	})
@@ -173,7 +180,11 @@ func (h *ChatHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
 		return
 	}
-	cfg := h.cfg.Snapshot()
+	// MT 06-C5: the per-turn config resolves per-tenant from the request
+	// context — WebChat knobs (ConcurrentTurns, MaxTokens, SessionRetention)
+	// honor the caller tenant's overrides; the §3.3 semaphore is already
+	// home_scope-keyed (chat.go inflight map).
+	cfg := h.cfg.SnapshotForRequest(r.Context())
 	wc := cfg.WebChat
 	if !wc.Enabled {
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "web chat is disabled"})

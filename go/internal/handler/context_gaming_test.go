@@ -18,6 +18,10 @@ import (
 type staticConfigStore struct{ cfg *config.Config }
 
 func (s staticConfigStore) Snapshot() *config.Config { return s.cfg }
+func (s staticConfigStore) SnapshotForRequest(context.Context) *config.Config { return s.cfg }
+func (s staticConfigStore) SnapshotForTenant(context.Context, string) *config.Config {
+	return s.cfg
+}
 
 // gamingHandler wires a ManageHandler with a static config snapshot and a
 // seeded pool (the names the disabled list is cross-checked against). No DB,

@@ -31,6 +31,15 @@ const (
 func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool) *chi.Mux {
 	r := chi.NewRouter()
 
+	// MT 06-C5: wire the request→tenant-scope hook so SnapshotForRequest can
+	// derive the caller's tenant from the auth result. This is the cycle-free
+	// seam — config cannot import handler, so the handler wrapper is injected
+	// here, where main already holds both packages. Set before any route is
+	// mounted (and well before the server serves a request), so the
+	// unsynchronized write in config rides the boot happens-before, exactly as
+	// SetOverlay (main.go) does. Inert until a tenant has settings rows.
+	config.SetRequestScopeHook(handler.RequestTenantScope)
+
 	// Global middleware
 	r.Use(handler.SecurityHeaders)
 	r.Use(handler.RequestID)

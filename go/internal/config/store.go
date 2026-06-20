@@ -70,10 +70,23 @@ type tenantEntry struct {
 // context. The design has SnapshotForRequest read the scope from
 // AuthResultFromContext, but that accessor lives in the handler package, which
 // imports config — calling it here would be an import cycle. The handler layer
-// instead registers a cycle-free wrapper at boot (a later wave wires it).
-// Until then, and in single-tenant operation, the hook is nil and
-// SnapshotForRequest returns the base generation.
+// instead registers a cycle-free wrapper at boot via SetRequestScopeHook (MT
+// 06-C5). While the hook is nil (single-tenant operation, or before the boot
+// wiring runs) SnapshotForRequest returns the base generation.
 var requestScopeHook func(context.Context) string
+
+// SetRequestScopeHook installs the request→tenant-scope resolver (MT 06-C5).
+// It is the package-level twin of (*Store).SetOverlay: config cannot import the
+// handler package (import cycle), so the handler layer supplies the cycle-free
+// wrapper around AuthResultFromContext and main wires it at boot. Like the
+// overlay it is set ONCE at boot, before any HTTP goroutine runs, so the
+// happens-before of boot sequencing covers the unsynchronized write — no HTTP
+// request (the only caller of SnapshotForRequest) is served before the router
+// is built. A nil hook (the pre-C5 / single-tenant state) leaves
+// SnapshotForRequest on the base generation.
+func SetRequestScopeHook(h func(context.Context) string) {
+	requestScopeHook = h
+}
 
 func requestScope(ctx context.Context) string {
 	if requestScopeHook == nil {

@@ -61,6 +61,32 @@ func AuthResultFromContext(ctx context.Context) *auth.AuthResult {
 	return nil
 }
 
+// RequestTenantScope resolves the authenticated tenant scope from a request
+// context, for config's per-tenant snapshot resolution (MT 06-C5). It is the
+// cycle-free wrapper the config package cannot write itself — config must not
+// import handler/auth — so main wires it via config.SetRequestScopeHook at boot.
+//
+// The scope is the requesting key's HomeScope: the tenant's OWN policy scope,
+// the same string that already drives writeScope (context_store.go:93) and is
+// consistent with the read-scope set Achse 02 feeds ctx_rrf. Per design §11.1
+// the tenant identity IS the scope namespace, NOT the tenant UUID
+// (AuthResult.TenantID): the per-tenant config lives in context_settings.scope,
+// so the overlay keys on the scope string, and a UUID would match no settings
+// row. An absent AuthResult (anonymous/health paths) or an empty HomeScope
+// returns "", which makes SnapshotForRequest fall back to the base generation
+// (fail-safe, §4.2); a reserved (_-prefixed) scope is rejected inside the store.
+//
+// TENANT-DECISION(06-C5-scope): tenantScope == ar.HomeScope (scope namespace).
+// Alt: ar.TenantID (UUID). Reversible if Achse 01 ever splits a parallel
+// tenant_id away from the scope dimension — then this wrapper and
+// LoadSettingOverrides would key on the UUID (§11.1).
+func RequestTenantScope(ctx context.Context) string {
+	if ar := AuthResultFromContext(ctx); ar != nil {
+		return ar.HomeScope
+	}
+	return ""
+}
+
 // isValidRequestID checks that a client-supplied request ID contains only
 // hex characters (0-9, a-f, A-F) and hyphens, and is at most 64 characters.
 func isValidRequestID(id string) bool {

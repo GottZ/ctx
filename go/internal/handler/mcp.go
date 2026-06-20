@@ -203,9 +203,12 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		}
 
 		// Sensitivity: request > settings default (mirrors /api/store, F3 §3.5).
+		// MT 06-C5: per-tenant via the request context (the MCP ctx carries the
+		// resolved AuthResult, used for the scope above) — the tenant's own
+		// DefaultBlockSensitivity override applies, else the _global default.
 		var sens store.SensitivityWrite
 		if cfg.Cfg != nil {
-			sens.Value = cfg.Cfg.Snapshot().Pool.DefaultBlockSensitivity
+			sens.Value = cfg.Cfg.SnapshotForRequest(ctx).Pool.DefaultBlockSensitivity
 		}
 		if input.Sensitivity != "" {
 			s := backends.Sensitivity(input.Sensitivity)

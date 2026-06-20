@@ -122,8 +122,9 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Rate limit check (writes/min, 0 = disabled).
-	if limit := h.cfg.Snapshot().Query.RateLimitWrite; limit > 0 {
+	// Rate limit check (writes/min, 0 = disabled). MT 06-C5: per-tenant via the
+	// request context (tenant's own RateLimitWrite override, else _global).
+	if limit := h.cfg.SnapshotForRequest(ctx).Query.RateLimitWrite; limit > 0 {
 		writeCount, err := store.CheckRateLimit(ctx, h.pool, authResult.ApiKeyID)
 		if err != nil {
 			slog.Error("blob-store: rate limit check error", "error", err, "request_id", reqID)

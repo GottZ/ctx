@@ -22,13 +22,26 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// countingStore implements ConfigStore and counts Snapshot calls.
+// countingStore implements ConfigStore and counts snapshot reads of ANY kind.
+// Since MT 06-C5 the request path takes SnapshotForRequest, not Snapshot — all
+// three methods bump the same counter so the one-snapshot-per-request invariant
+// still trips on a stray second read of either flavour.
 type countingStore struct {
 	calls atomic.Int32
 	cfg   atomic.Pointer[config.Config]
 }
 
 func (s *countingStore) Snapshot() *config.Config {
+	s.calls.Add(1)
+	return s.cfg.Load()
+}
+
+func (s *countingStore) SnapshotForRequest(context.Context) *config.Config {
+	s.calls.Add(1)
+	return s.cfg.Load()
+}
+
+func (s *countingStore) SnapshotForTenant(context.Context, string) *config.Config {
 	s.calls.Add(1)
 	return s.cfg.Load()
 }
