@@ -57,15 +57,19 @@ type dreamStatus struct {
 }
 
 // llm24hRow is one (backend, pipeline) aggregate over the last 24h. It carries
-// NO prompt/response bodies — only counts/timings/tokens.
+// NO prompt/response bodies — only counts/timings/tokens/cost.
 type llm24hRow struct {
-	Backend          string `json:"backend"`
-	Pipeline         string `json:"pipeline"`
-	Calls            int    `json:"calls"`
-	AvgMs            int    `json:"avg_ms"`
-	Errors           int    `json:"errors"`
-	PromptTokens     int64  `json:"prompt_tokens"`
-	CompletionTokens int64  `json:"completion_tokens"`
+	Backend          string  `json:"backend"`
+	Pipeline         string  `json:"pipeline"`
+	Calls            int     `json:"calls"`
+	AvgMs            int     `json:"avg_ms"`
+	Errors           int     `json:"errors"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	// CostUSD is the summed external cost for the (backend, pipeline) bucket
+	// (T37c, 04-W4/§4.6 — the per-tenant rollup needs it; the global rollup
+	// gets it too, additive). 0 for local/un-priced buckets.
+	CostUSD float64 `json:"cost_usd"`
 }
 
 type gamingStatus struct {
@@ -126,6 +130,15 @@ type StatusCollector struct {
 	qsScan atomic.Bool
 	qs     atomic.Pointer[dream.QueueStats]
 	qsAt   atomic.Int64 // unix nano of last queue scan
+
+	// Per-tenant 24h rollup cache (T37c, 04-W4/§4.6): the global cheapSnapshot
+	// can't carry N per-tenant-filtered rollups, so a tenant-admin's view comes
+	// from a SEPARATE lock-free generation (map[scope][]llm24hRow, one query +
+	// CAS-guarded TTL refresh, the QuotaAccountant pattern) — NOT a per-request
+	// hypertable scan. Server-admins keep the global cheapSnapshot untouched.
+	tenantRollup        atomic.Pointer[map[string][]llm24hRow]
+	tenantRollupAt      atomic.Int64 // unix nano of last per-tenant rollup refresh
+	tenantRollupRefresh atomic.Bool  // CAS single-flight guard
 
 	// broadcasting is set while an SSE broadcast loop (G34) is refreshing the
 	// cache every tick. A poll then serves that cache instead of triggering its
@@ -326,6 +339,7 @@ func (c *StatusCollector) queryLLM24h(ctx context.Context) ([]llm24hRow, bool) {
 		       (count(*) FILTER (WHERE error IS NOT NULL))::int AS errors,
 		       COALESCE(sum(prompt_tokens), 0)::bigint AS prompt_tokens,
 		       COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens,
+		       COALESCE(sum(cost_usd), 0)::float8 AS cost_usd,
 		       bool_and(backend_name IS NOT NULL) AS attributed
 		FROM context_llm_log
 		WHERE created_at > now() - interval '24 hours'
@@ -343,7 +357,7 @@ func (c *StatusCollector) queryLLM24h(ctx context.Context) ([]llm24hRow, bool) {
 		var r llm24hRow
 		var attributed bool
 		if err := rows.Scan(&r.Backend, &r.Pipeline, &r.Calls, &r.AvgMs, &r.Errors,
-			&r.PromptTokens, &r.CompletionTokens, &attributed); err != nil {
+			&r.PromptTokens, &r.CompletionTokens, &r.CostUSD, &attributed); err != nil {
 			slog.Warn("status: llm_24h scan failed", "error", err)
 			return out, false
 		}
@@ -408,5 +422,18 @@ func NewStatusHandler(collector *StatusCollector) *StatusHandler {
 // (RequireAdmin) because the payload carries hostnames/backend names; /health
 // stays the anonymous, name-free path.
 func (h *StatusHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.collector.Snapshot(r.Context()))
+	// Server-admin sees the full global status; everyone else admitted by the
+	// gate (a tenant-admin) gets the reduced per-tenant view (T37c, §4.6) —
+	// only its own backends + its own 24h rollup, no server-global telemetry.
+	// fail-closed: anything that is not a proven server-admin is tenant-scoped.
+	ar := AuthResultFromContext(r.Context())
+	if ar != nil && ar.IsServerAdmin() {
+		writeJSON(w, http.StatusOK, h.collector.Snapshot(r.Context()))
+		return
+	}
+	scope := ""
+	if ar != nil {
+		scope = ar.HomeScope
+	}
+	writeJSON(w, http.StatusOK, h.collector.SnapshotForTenant(r.Context(), scope))
 }

@@ -182,5 +182,6 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "llm24h", ls[0], []string{
 		"backend", "pipeline", "calls", "avg_ms", "errors", "prompt_tokens", "completion_tokens",
+		"cost_usd", // T37c: per-tenant rollup needs it; global rollup carries it too
 	})
 }
