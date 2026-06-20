@@ -205,6 +205,28 @@ func RequireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+// RequireAdminOrTenantAdmin gates a route on EITHER the server-admin tier (M052)
+// OR a tenant-admin (owner/admin role) of the caller's OWN tenant (MT T37b,
+// 04-W5). Mount AFTER Auth. It only ADMITS the caller — it does NOT filter the
+// payload; the route's handler MUST itself scope the response to the caller's
+// tenant (the /api/llmlog handler applies the per-tenant api_key_id filter).
+// Pairing the looser gate with the in-handler filter is the K-T1 invariant: a
+// gate-without-filter would leak every tenant's telemetry. A member or an
+// unauthenticated caller gets 403 (same body as RequireAdmin — no tier oracle).
+func RequireAdminOrTenantAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ar := AuthResultFromContext(r.Context())
+		admitted := ar != nil && (ar.IsServerAdmin() || ar.IsTenantAdminOf(ar.TenantID))
+		if !admitted {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"success": false, "error": "admin key required",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // SecurityHeaders adds security-related response headers to every request.
 func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

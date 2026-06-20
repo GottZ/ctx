@@ -137,6 +137,34 @@ func ListApiKeys(ctx context.Context, pool *pgxpool.Pool, tenantFilter string, a
 	return keys, rows.Err()
 }
 
+// TenantAPIKeyIDs returns the id of EVERY api key owned by tenantID — active AND
+// inactive (a tenant's call history includes calls made by since-revoked keys).
+// Used by the per-tenant /api/llmlog filter (T37b, 04-W5 §4.6/§6.4): resolve the
+// tenant's keys to a literal uuid[] FIRST, then `api_key_id = ANY($keys)` — not
+// `IN (subquery)`, which the planner hash-joins so the apikey index is ignored.
+// An empty tenantID yields an empty slice (fail-closed: a caller with no tenant
+// gets an empty filter → zero rows, never an unfiltered view).
+func TenantAPIKeyIDs(ctx context.Context, pool *pgxpool.Pool, tenantID string) ([]string, error) {
+	if tenantID == "" {
+		return []string{}, nil
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT id::text FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("api_keys: tenant key ids: %w", err)
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("api_keys: tenant key id scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // DeleteApiKey deactivates an API key by ID (soft delete: sets active=false),
 // constrained to the caller's tenant unless the caller is a server-admin.
 //

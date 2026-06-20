@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -65,6 +66,33 @@ func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
 	pipeline := r.URL.Query().Get("pipeline")
 	errorsOnly := r.URL.Query().Get("errors_only") == "true"
 
+	// Per-tenant scoping (T37b, 04-W5 §4.6): a server-admin sees every row; a
+	// tenant-admin (the RequireAdminOrTenantAdmin gate guarantees one or the
+	// other) sees ONLY rows attributed to its own tenant's keys. The keys are
+	// resolved to a literal uuid[] FIRST (§6.4 — `api_key_id = ANY($keys)` rides
+	// the apikey index, where `IN (subquery)` would hash-join past it). keyFilter
+	// stays nil for a server-admin (no predicate); a non-nil (even empty) slice
+	// gates: a tenant with zero keys gets an empty filter → zero rows (fail-
+	// closed, never an unfiltered view). Background rows (api_key_id NULL) drop
+	// out of any tenant view by construction and only a server-admin sees them.
+	ar := AuthResultFromContext(r.Context())
+	var keyFilter []string
+	if ar == nil || !ar.IsServerAdmin() {
+		tenant := ""
+		if ar != nil {
+			tenant = ar.TenantID
+		}
+		keys, kerr := store.TenantAPIKeyIDs(r.Context(), h.pool, tenant)
+		if kerr != nil {
+			slog.Error("llmlog: tenant key resolve failed", "error", kerr, "request_id", RequestIDFromContext(r.Context()))
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false, "error": "internal error",
+			})
+			return
+		}
+		keyFilter = keys // non-nil ([]string{} when the tenant has no keys → zero rows)
+	}
+
 	// Explicit SELECT list — NEVER request_system/request_user/response_content.
 	// id::text guarantees a string scan; backend = backend_name with host
 	// fallback (design 04 §3.2). created_at DESC rides the hypertable path.
@@ -75,8 +103,9 @@ func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
 		FROM context_llm_log
 		WHERE ($1 = '' OR pipeline = $1)
 		  AND (NOT $2 OR error IS NOT NULL)
+		  AND ($4::uuid[] IS NULL OR api_key_id = ANY($4))
 		ORDER BY created_at DESC
-		LIMIT $3`, pipeline, errorsOnly, limit)
+		LIMIT $3`, pipeline, errorsOnly, limit, keyFilter)
 	if err != nil {
 		slog.Error("llmlog: query failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{

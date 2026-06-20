@@ -303,3 +303,40 @@ func TestRequireAdmin_Admin200(t *testing.T) {
 		t.Errorf("status = %d, reached = %v, want 200 + handler reached", rec.Code, reached)
 	}
 }
+
+// --- RequireAdminOrTenantAdmin middleware (T37b/04-W5: admits server-admins AND
+// tenant-admins of their own tenant; the handler then scopes the payload) ---.
+
+func serveGateOrTenant(t *testing.T, ar *auth.AuthResult) *httptest.ResponseRecorder {
+	t.Helper()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/llmlog", nil)
+	if ar != nil {
+		req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))
+	}
+	rec := httptest.NewRecorder()
+	RequireAdminOrTenantAdmin(next).ServeHTTP(rec, req)
+	return rec
+}
+
+func TestRequireAdminOrTenantAdmin(t *testing.T) {
+	cases := []struct {
+		name string
+		ar   *auth.AuthResult
+		want int
+	}{
+		{"server-admin", adminAR(), http.StatusOK},
+		{"tenant-admin owner", tenantAdminAR(auth.RoleOwner), http.StatusOK},
+		{"tenant-admin admin", tenantAdminAR(auth.RoleAdmin), http.StatusOK},
+		{"member", memberAR(), http.StatusForbidden},
+		{"valid non-admin no tenant", nonAdminAR(), http.StatusForbidden},
+		{"no auth result", nil, http.StatusForbidden},
+	}
+	for _, c := range cases {
+		if got := serveGateOrTenant(t, c.ar).Code; got != c.want {
+			t.Errorf("%s: status = %d, want %d", c.name, got, c.want)
+		}
+	}
+}

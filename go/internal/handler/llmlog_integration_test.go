@@ -17,14 +17,24 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
-// serveLLMLog runs the handler against the pool with the given query string.
+// serveLLMLog runs the handler as a SERVER-admin (sees every tenant's rows) —
+// the privacy/filter probes are tenant-agnostic. Per-tenant scoping is pinned
+// separately in TestLLMLogTenantScoped.
 func serveLLMLog(t *testing.T, h *LLMLogHandler, query string) *httptest.ResponseRecorder {
+	return serveLLMLogAs(t, h, query, &auth.AuthResult{IsValid: true, IsAdmin: true})
+}
+
+// serveLLMLogAs runs the handler with a specific AuthResult in the request
+// context (the RequireAdminOrTenantAdmin gate normally puts it there).
+func serveLLMLogAs(t *testing.T, h *LLMLogHandler, query string, ar *auth.AuthResult) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/llmlog"+query, nil)
+	req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))
 	rec := httptest.NewRecorder()
 	h.HandleLLMLog(rec, req)
 	if rec.Code != http.StatusOK {
@@ -87,6 +97,98 @@ func TestLLMLogErrorCapped(t *testing.T) {
 	}
 	if !strings.Contains(body, "http_403") {
 		t.Errorf("error class should survive normalization: %s", body)
+	}
+}
+
+// TestLLMLogTenantScoped pins the per-tenant view (T37b, 04-W5 §4.6): a
+// server-admin sees every row; a tenant-admin sees ONLY rows attributed to its
+// own tenant's keys (never a foreign tenant's, never the api_key_id-NULL
+// background rows); a tenant with no keys sees nothing (fail-closed, not an
+// unfiltered view). Red against an unscoped handler (the pre-T37b state).
+func TestLLMLogTenantScoped(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	insertTenant := func(slug string) string {
+		var id string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO context_tenants (slug, display_name) VALUES ($1,$2) RETURNING id::text`, slug, slug).Scan(&id); err != nil {
+			t.Fatalf("insert tenant %s: %v", slug, err)
+		}
+		return id
+	}
+	insertKey := func(hash, tenantID string) string {
+		var id string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
+			 VALUES ($1,$2,'private',$3::uuid) RETURNING id::text`, hash, hash, tenantID).Scan(&id); err != nil {
+			t.Fatalf("insert key %s: %v", hash, err)
+		}
+		return id
+	}
+	insertLog := func(apiKeyID *string, backend string) {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_llm_log (pipeline, model, host, duration_ms, api_key_id, backend_name)
+			 VALUES ('query-synthesize','m','h',10,$1,$2)`, apiKeyID, backend); err != nil {
+			t.Fatalf("insert log %s: %v", backend, err)
+		}
+	}
+
+	tenantA := insertTenant("t37b-tenant-a")
+	tenantB := insertTenant("t37b-tenant-b")
+	tenantEmpty := insertTenant("t37b-tenant-empty")
+	keyA := insertKey("t37b-key-a", tenantA)
+	keyB := insertKey("t37b-key-b", tenantB)
+	insertLog(&keyA, "backend-a")
+	insertLog(&keyB, "backend-b")
+	insertLog(nil, "backend-bg") // background row, no caller
+
+	h := NewLLMLogHandler(pool, config.NewStore(&config.Config{}))
+	type resp struct {
+		Entries []llmlogEntry `json:"entries"`
+	}
+	backendsOf := func(ar *auth.AuthResult) map[string]bool {
+		var r resp
+		if err := json.Unmarshal(serveLLMLogAs(t, h, "", ar).Body.Bytes(), &r); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		set := map[string]bool{}
+		for _, e := range r.Entries {
+			set[e.Backend] = true
+		}
+		return set
+	}
+
+	// server-admin: every row incl. the background one.
+	srv := backendsOf(&auth.AuthResult{IsValid: true, IsAdmin: true})
+	for _, b := range []string{"backend-a", "backend-b", "backend-bg"} {
+		if !srv[b] {
+			t.Errorf("server-admin should see %q: %v", b, srv)
+		}
+	}
+
+	// tenant-A admin: only its own row.
+	a := backendsOf(&auth.AuthResult{IsValid: true, TenantID: tenantA, TenantRole: auth.RoleAdmin})
+	if !a["backend-a"] {
+		t.Errorf("tenant-A admin lost its own row: %v", a)
+	}
+	if a["backend-b"] {
+		t.Errorf("telemetry leak: tenant-A admin saw tenant-B's row: %v", a)
+	}
+	if a["backend-bg"] {
+		t.Errorf("tenant-A admin saw an api_key_id-NULL background row: %v", a)
+	}
+
+	// tenant-B admin: only its own row.
+	b := backendsOf(&auth.AuthResult{IsValid: true, TenantID: tenantB, TenantRole: auth.RoleOwner})
+	if !b["backend-b"] || b["backend-a"] || b["backend-bg"] {
+		t.Errorf("tenant-B admin view wrong (want only backend-b): %v", b)
+	}
+
+	// tenant with no keys: empty filter → zero rows (fail-closed).
+	empty := backendsOf(&auth.AuthResult{IsValid: true, TenantID: tenantEmpty, TenantRole: auth.RoleAdmin})
+	if len(empty) != 0 {
+		t.Errorf("keyless tenant admin should see nothing (fail-closed), saw: %v", empty)
 	}
 }
 

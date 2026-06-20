@@ -120,16 +120,25 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		handler.MountSettings(r, handler.NewSettingsHandler(pool, cfgStore))
 		// Secrets — write-only sealed credentials (F2-W6); admin-gated inside.
 		handler.MountSecrets(r, handler.NewSecretsHandler(pool, cfgStore))
-		// Status + telemetry (F4-W6/G33) — admin-only: the payload carries
-		// hostnames/backend names and (capped) provider error detail; /health
-		// stays the anonymous, name-free path. RequireAdmin in a sub-group.
+		// Status + SSE (F4-W6/G33) — SERVER-admin only: the payload carries
+		// EVERY tenant's backend names + the global 24h rollup; /health stays
+		// the anonymous, name-free path. The per-tenant rollup view (opening
+		// these to a tenant-admin) is T37c — until it lands they stay closed,
+		// so no tenant-admin ever sees the global telemetry (no push leak, K-T1).
 		r.Group(func(r chi.Router) {
 			r.Use(handler.RequireAdmin)
 			r.Get("/api/status", statusH.HandleStatus)
-			r.Get("/api/llmlog", llmlogH.HandleLLMLog)
 			// SSE stream — GET, no request body; the inherited MaxBodySize is
 			// a no-op on it. Auth (parent) + RequireAdmin gate it.
 			r.Get("/api/events", eventsH.HandleEvents)
+		})
+		// LLM telemetry table (F4-W6) — admin OR tenant-admin (T37b/04-W5): the
+		// gate admits a tenant-admin, the HANDLER then scopes the rows to the
+		// caller's own keys (server-admin sees all). Gate + filter must ship
+		// together (K-T1) — they do, in HandleLLMLog.
+		r.Group(func(r chi.Router) {
+			r.Use(handler.RequireAdminOrTenantAdmin)
+			r.Get("/api/llmlog", llmlogH.HandleLLMLog)
 		})
 		// Web-chat (F6-C4/G37): POST /api/chat/stream runs one turn and streams
 		// SSE — wrapped in WithScheduler so dream yields the single llama.cpp
