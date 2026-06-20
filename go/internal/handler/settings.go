@@ -144,7 +144,7 @@ func (h *SettingsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, "settings: list overrides failed", err)
 		return
 	}
-	c := h.cfg.Snapshot()
+	c := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: the settings API itself (GET list) renders the _global generation it administers (Achse 04); not a tenant-resolution consumer.
 
 	infos := config.Keys()
 	views := make([]settingView, 0, len(infos))
@@ -181,7 +181,7 @@ func (h *SettingsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, "settings: load audit failed", err)
 		return
 	}
-	c := h.cfg.Snapshot()
+	c := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: settings API (GET one) renders the _global generation it administers (Achse 04).
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"setting": settingView{
@@ -272,7 +272,7 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	for _, row := range baseRows {
 		prevOverrides[row.Key] = row.Value
 	}
-	prev := h.cfg.Snapshot()
+	prev := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: settings API (PUT) reads the pre-swap _global generation it administers to report the previous effective value (Achse 04).
 	previous := map[string]any{
 		"value":  renderEffective(prev, info, prevOverrides),
 		"source": apiSource(prev.Source(key)),
@@ -313,7 +313,7 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := h.cfg.Snapshot()
+	now := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: settings API (PUT) reads the post-swap _global generation it administers to report the new effective value (Achse 04).
 	nowOverrides := prevOverrides
 	nowOverrides[key] = normalized
 	if warnings == nil {
@@ -355,7 +355,7 @@ func (h *SettingsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c := h.cfg.Snapshot()
+	c := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: settings API (DELETE) reads the post-revert _global generation it administers to report the env/default value (Achse 04).
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"key":     key,

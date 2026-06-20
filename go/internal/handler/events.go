@@ -255,7 +255,7 @@ type sseHub struct {
 func (h *sseHub) subscribe() (*sseSub, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	max := h.cfg.Snapshot().Events.MaxConnections
+	max := h.cfg.Snapshot().Events.MaxConnections //nolint:forbidigo // MT 06 BLIND: events.max_connections is a server-global SSE hub cap, not tenant-scoped.
 	if max <= 0 {
 		max = 8
 	}
@@ -320,7 +320,7 @@ func (h *sseHub) runLoop() {
 		h.mu.Unlock()
 	}()
 
-	cfg := h.cfg.Snapshot()
+	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: SSE broadcast-loop cadence (events.tick_interval) is server-global, shared across all connections.
 	tick := cfg.Events.TickInterval
 	if tick <= 0 {
 		tick = 5 * time.Second
@@ -468,7 +468,7 @@ func (h *EventsHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	sw := newSSEWriter(w)
 
-	cfg := h.hub.cfg.Snapshot()
+	cfg := h.hub.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: per-connection SSE tick cadence (events.tick_interval) is server-global telemetry, not tenant-scoped.
 	tick := cfg.Events.TickInterval
 	if tick <= 0 {
 		tick = 5 * time.Second

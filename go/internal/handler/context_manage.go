@@ -879,7 +879,7 @@ func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request,
 	// The request's one config snapshot (§2.3) — dream-stats is the only
 	// manage action that consumes config, so the read lives here, not in the
 	// dispatch. The rendered policy is the generation currently in effect.
-	backoff, err := dream.ComputeBackoffStats(ctx, h.pool, ar.ReadScopes, h.cfg.Snapshot().DreamBackoff())
+	backoff, err := dream.ComputeBackoffStats(ctx, h.pool, ar.ReadScopes, h.cfg.Snapshot().DreamBackoff()) //nolint:forbidigo // MT 06 BLIND: dream back-off is a server-global scheduler policy (the dream loop is process-wide), not tenant-scoped.
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream backoff stats failed",

@@ -88,7 +88,7 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	cfg := h.cfg.Snapshot()
+	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: /health is public/anonymous — no tenant in reach; dream.enabled is server-global.
 	snap := h.backendPool.Snapshot()
 	resp := HealthStatus(ctx, h.pool, snap, cfg.Dream.Enabled)
 

@@ -124,7 +124,7 @@ func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 	cfg, issues := BuildFromRows(ctx, pool, rows, []string{store.GlobalScope})
 	logIssues(issues)
 
-	prev := st.Snapshot()
+	prev := st.Snapshot() //nolint:forbidigo // MT 06 OWNER: the _global reload reads the pre-swap base generation to diff embed-cache-coupled values (X2/G16); it builds and Replaces the _global base, not a tenant generation.
 	if err := st.Replace(cfg); err != nil {
 		// Replace re-validates; errors here mean an env-level invariant broke
 		// (unreachable while env is immutable per process, but never silent).

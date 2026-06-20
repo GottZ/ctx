@@ -161,7 +161,7 @@ func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams d
 // sources in the background (single-flight), so readers never block on I/O
 // after the first (cold-start) call.
 func (c *StatusCollector) Snapshot(ctx context.Context) statusResponse {
-	cfg := c.cfg.Snapshot()
+	cfg := c.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: /api/status process telemetry (cache TTL, queue cadence) is server-global, not tenant-scoped.
 	tick := cfg.Events.TickInterval
 	if tick <= 0 {
 		tick = 5 * time.Second
@@ -200,7 +200,7 @@ func (c *StatusCollector) setBroadcasting(on bool) { c.broadcasting.Store(on) }
 // stays on its own slower cadence (async; the returned status may carry a
 // queue snapshot up to one queue_stats_interval old).
 func (c *StatusCollector) refreshForBroadcast(ctx context.Context) statusResponse {
-	cfg := c.cfg.Snapshot()
+	cfg := c.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: broadcast-refresh status telemetry is server-global, shared across all /api/status pollers.
 	snap := c.buildCheap(ctx, cfg)
 	c.cache.Store(snap)
 	c.cacheAt.Store(time.Now().UnixNano())
@@ -238,7 +238,7 @@ func (c *StatusCollector) refreshCheapAsync() {
 		defer c.rebuild.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		snap := c.buildCheap(ctx, c.cfg.Snapshot())
+		snap := c.buildCheap(ctx, c.cfg.Snapshot()) //nolint:forbidigo // MT 06 BLIND: cold-start status rebuild reads server-global process telemetry, not tenant-scoped config.
 		c.cache.Store(snap)
 		c.cacheAt.Store(time.Now().UnixNano())
 	}()

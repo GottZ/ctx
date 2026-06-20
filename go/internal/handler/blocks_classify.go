@@ -78,7 +78,7 @@ func (h *ManageHandler) handleBlocksClassifyStatus(w http.ResponseWriter, r *htt
 }
 
 func (h *ManageHandler) writeBlocksClassifyStatus(w http.ResponseWriter, r *http.Request) {
-	scope := h.cfg.Snapshot().Scheduler.HomeScope
+	scope := h.cfg.Snapshot().Scheduler.HomeScope //nolint:forbidigo // MT 06 gated: classify status stays Snapshot() until the per-tenant-admin cut (§5.7); deliberately tenant-less for now.
 	if scope == "" {
 		scope = "private"
 	}

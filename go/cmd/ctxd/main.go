@@ -133,7 +133,7 @@ func main() {
 	// Every consumer reads this store per operation (F1-W4–W7).
 	effCfg, effIssues := settings.Bootstrap(ctx, pool, cc, issues)
 	cfgStore := config.NewStore(effCfg)
-	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...)
+	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...) //nolint:forbidigo // MT 06 BLIND: boot-time effective-config dump — the _global generation, no tenant exists at boot.
 
 	// MT 06-C3: install the per-tenant config overlay so SnapshotForTenant /
 	// SnapshotForRequest can resolve a tenant's context_settings rows on top of
@@ -152,7 +152,7 @@ func main() {
 	// truth. Both steps are non-fatal — P1 has no pool consumer yet, and a
 	// degraded pool must not block a boot that served queries yesterday.
 	backendPool := backends.NewPool(pool, settings.BackendSecretResolver(pool))
-	if _, err := backends.Bootstrap(ctx, pool, backendBootstrapInput(cfgStore.Snapshot())); err != nil {
+	if _, err := backends.Bootstrap(ctx, pool, backendBootstrapInput(cfgStore.Snapshot())); err != nil { //nolint:forbidigo // MT 06 BLIND: boot-time backend pool bootstrap reads the _global generation, no tenant exists at boot.
 		slog.Error("backends: bootstrap failed", "error", err)
 	}
 	if err := backendPool.Reload(ctx); err != nil {
@@ -184,7 +184,7 @@ func main() {
 
 	// HTTP server. ListenAddr is restart-only, read once from the effective
 	// snapshot (== env value; the settings overlay rejects restart-only keys).
-	listenAddr := cfgStore.Snapshot().Server.ListenAddr
+	listenAddr := cfgStore.Snapshot().Server.ListenAddr //nolint:forbidigo // MT 06 BLIND: restart-only server.listen_addr is a process-global env value (the overlay rejects restart-only keys), read once at boot.
 	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool)
 	srv := &http.Server{
 		Addr:              listenAddr,

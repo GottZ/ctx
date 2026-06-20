@@ -123,7 +123,7 @@ func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.P
 	// resolve a tenant from. The per-tenant request surface (WebChat etc.) flows
 	// through SnapshotForRequest in HandleStream instead.
 	provider := chat.NewPoolProvider(backendPool, func() backends.GamingState {
-		return cfg.Snapshot().GamingState()
+		return cfg.Snapshot().GamingState() //nolint:forbidigo // MT 06 BLIND: gaming.active is global-only (see the comment above) + this closure is built at construction with no request context to resolve a tenant from.
 	})
 	return &ChatHandler{
 		pool:        pool,

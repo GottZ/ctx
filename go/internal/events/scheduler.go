@@ -508,7 +508,7 @@ func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
 	}
 
 	for {
-		interval := s.cfg.Snapshot().GraphOverview.RebuildInterval
+		interval := s.cfg.Snapshot().GraphOverview.RebuildInterval //nolint:forbidigo // MT 06 background: overview-rebuild cadence is server-global (the overview is one shared artifact); per-tenant scheduling stays Snapshot() after T13 (§4.4).
 		if interval <= 0 {
 			interval = 6 * time.Hour
 		}
@@ -535,7 +535,7 @@ func (s *Scheduler) overviewNeverBuilt(ctx context.Context) bool {
 // rebuildOverviewOnce runs a single rebuild if enabled. The Enabled gate lives
 // here (not the loop) so a hot toggle takes effect on the next tick.
 func (s *Scheduler) rebuildOverviewOnce(ctx context.Context) {
-	cfg := s.cfg.Snapshot()
+	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: overview rebuild gate/resolution is server-global (one shared artifact), not tenant-scoped.
 	if !cfg.GraphOverview.Enabled {
 		return
 	}
@@ -584,7 +584,7 @@ func (s *Scheduler) runLLMLogRetention(ctx context.Context) {
 			slog.Error("scheduler: panic in llmlog retention", "error", r, "stack", string(debug.Stack()))
 		}
 	}()
-	days := s.cfg.Snapshot().Scheduler.LLMLogRetentionDays
+	days := s.cfg.Snapshot().Scheduler.LLMLogRetentionDays //nolint:forbidigo // MT 06 background: llmlog retention is a server-global janitor policy over a process-wide table, not tenant-scoped.
 	nulled, err := llmlog.EvictBodies(ctx, s.pool, days)
 	if err != nil {
 		slog.Warn("scheduler: llmlog retention failed", "error", err)
@@ -605,7 +605,7 @@ func (s *Scheduler) runWebChatRetention(ctx context.Context) {
 			slog.Error("scheduler: panic in webchat retention", "error", r, "stack", string(debug.Stack()))
 		}
 	}()
-	hours := float64(s.cfg.Snapshot().WebChat.SessionRetention)
+	hours := float64(s.cfg.Snapshot().WebChat.SessionRetention) //nolint:forbidigo // MT 06 background: webchat session retention is a server-global janitor policy over a process-wide table, not tenant-scoped.
 	ttl := time.Duration(hours * float64(time.Hour))
 	deleted, err := store.DeleteExpiredSessions(ctx, s.pool, ttl)
 	if err != nil {

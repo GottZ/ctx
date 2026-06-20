@@ -21,10 +21,38 @@ linters:
     - errorlint
     - godot
     - depguard
+    - forbidigo
 
   settings:
     cyclop:
       max-complexity: 25
+
+    # MT 06-C5 / 03-W4 fail-open guard: a tenant-less config Snapshot() on a
+    # REQUEST path silently serves the _global generation instead of the
+    # tenant-resolved one — a cross-tenant config leak that compiles and passes
+    # every test. There is no type-system signal for "this call should have been
+    # SnapshotForRequest(ctx)", so the gate is a lint rule. analyze-types keys the
+    # pattern on the RECEIVER TYPE, so it fires on config.Store / the handler-side
+    # ConfigStore interface and NOT on backends.Pool.Snapshot() (a different
+    # receiver) — empirically verified at build time. The $ anchor on .Snapshot
+    # excludes SnapshotForRequest / SnapshotForTenant / SeedSnapshotForTest. Every
+    # legitimate tenant-less site (server-global telemetry, the settings API
+    # owner, the deliberately-gated audit/classify status, background retention)
+    # carries an inline //nolint:forbidigo annotation naming its class
+    # (BLIND/OWNER/gated/background). A NEW unannotated Snapshot() on a request
+    # path fails the lint: classify it → SnapshotForRequest(ctx), or, if it is
+    # genuinely tenant-less, annotate it like the rest. _test.go is excluded
+    # below (test stores call Snapshot freely).
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^(.*config\.Store|.*ConfigStore)\.Snapshot$'
+          msg: >-
+            tenant-less config Snapshot() — a request path must call
+            SnapshotForRequest(ctx) (fail-open cross-tenant config leak, MT
+            06-C5/03-W4). If this site is genuinely tenant-less (server-global
+            telemetry, settings-API owner, gated audit/classify, background
+            retention) annotate it: //nolint:forbidigo // MT 06 BLIND/OWNER/gated/background: <reason>.
 
     # F1 layering rule (design/01-config-core.md §2.1): internal/config is
     # consumed ONLY by cmd/**, internal/handler, internal/events and
@@ -71,6 +99,7 @@ linters:
           - gosec
           - errcheck
           - cyclop
+          - forbidigo
       - path: "testutil/"
         linters:
           - gosec

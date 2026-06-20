@@ -52,7 +52,7 @@ type llmlogEntry struct {
 // HandleLLMLog serves the admin telemetry table. Admin-gated (RequireAdmin):
 // hostnames via backend, and the error detail is a privacy surface even capped.
 func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
-	cfg := h.cfg.Snapshot()
+	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: admin-only telemetry cap (llmlog.max_limit) is a server-global policy, not tenant-scoped.
 	maxLimit := cfg.LLMLog.MaxLimit
 	if maxLimit <= 0 {
 		maxLimit = 200

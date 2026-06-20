@@ -108,7 +108,7 @@ func (h *ManageHandler) writeGamingActive(r *http.Request, active bool) error {
 // that matches no backend makes the toggle silently ineffective (a typo ⇒ the
 // GPU stays busy, design 03 risk 6.6) — it surfaces as unknown_backends.
 func (h *ManageHandler) gamingSnapshot() gamingStateView {
-	gs := h.cfg.Snapshot().GamingState()
+	gs := h.cfg.Snapshot().GamingState() //nolint:forbidigo // MT 06 BLIND: gaming.* is global-only (03-W2/T28) — a tenant override is gated out, so the value is server-global by construction.
 	view := gamingStateView{
 		Active:           gs.Active,
 		DisabledBackends: gs.DisabledBackends,

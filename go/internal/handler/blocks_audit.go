@@ -88,7 +88,7 @@ func (h *ManageHandler) handleBlocksAuditStatus(w http.ResponseWriter, r *http.R
 }
 
 func (h *ManageHandler) writeBlocksAuditStatus(w http.ResponseWriter, r *http.Request) {
-	scope := h.cfg.Snapshot().Scheduler.HomeScope
+	scope := h.cfg.Snapshot().Scheduler.HomeScope //nolint:forbidigo // MT 06 gated: audit status stays Snapshot() until the per-tenant-admin cut (§5.7); deliberately tenant-less for now.
 	if scope == "" {
 		scope = "private"
 	}

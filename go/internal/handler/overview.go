@@ -96,7 +96,7 @@ func (h *GraphOverviewHandler) HandleOverview(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	cfg := h.cfg.Snapshot()
+	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: graph-overview feature gate + resolution are server-global (the rebuilt overview is one shared artifact), not tenant-scoped.
 
 	// Feature gate: disabled → 404, indistinguishable from a route that does not
 	// exist (no oracle for "the map exists but is off"). The Enabled flag also
