@@ -55,10 +55,17 @@ type SearchResult struct {
 // exclude-lists. Empty slice = no-op (NULL passed to SQL). Trigger: CRAG
 // Bench Session 38c topic-map-private slot-stealing in 4/10 movie queries.
 //
+// grantedBlockIDs (T40b, design/07 §4.2): the resolved block-grant set for the
+// caller's tenant — the row-level read-share OR-arm on the SQL retrieval side.
+// nil/empty slice → NULL passed (no-op OR-arm, byte-identical to the scope-only
+// state); the empty-scope reject (len(scopes)==0) stays HARD and is never
+// relaxed by a non-empty grant set (§5.3.1: scope-gate is the primary
+// fail-closed point, the grant arm is strictly additive).
+//
 // Temporal gravity is applied Post-RRF in the handler layer via
 // ApplyGravityBoost (linear) and ApplyCyclicGravityBoost (multi-dim cyclic).
 // The 5th RRF channel was removed in M020 (never activated from Go).
-func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, auditTrailFactor float64, categoriesExclude []string, blockRolesExclude []string) ([]SearchResult, error) {
+func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, auditTrailFactor float64, categoriesExclude []string, blockRolesExclude []string, grantedBlockIDs []string) ([]SearchResult, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("rrf: empty embedding")
 	}
@@ -100,10 +107,18 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 		blockRolesExcludeParam = blockRolesExclude
 	}
 
+	// T40b (design/07 §4.2): empty/nil grant set → NULL (SQL DEFAULT NULL = no-op
+	// OR-arm via the `p_granted_block_ids IS NOT NULL` guard, byte-identical to
+	// the scope-only state — M048 empty→NULL convention).
+	var grantedBlockIDsParam interface{}
+	if len(grantedBlockIDs) > 0 {
+		grantedBlockIDsParam = grantedBlockIDs
+	}
+
 	rows, err := pool.Query(ctx,
 		`SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at
-		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10, $11::text[], $12::text[])`,
-		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam, auditTrailFactor, categoriesExcludeParam, blockRolesExcludeParam,
+		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10, $11::text[], $12::text[], $13::uuid[])`,
+		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam, auditTrailFactor, categoriesExcludeParam, blockRolesExcludeParam, grantedBlockIDsParam,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: query ctx_rrf: %w", err)

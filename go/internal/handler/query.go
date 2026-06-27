@@ -491,7 +491,14 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// welle/audit/recurrent/handover/self-audit), 0.3 for generic queries.
 	auditTrailFactor := rrf.AuditTrailFactor(req.Query)
 
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, auditTrailFactor, req.CategoriesExclude, req.BlockRolesExclude)
+	// T40b (design/07 §4.2): resolve the caller's block-grant set ONCE and feed
+	// it into both the RRF retrieval OR-arm and the downstream GraphExpand. Same
+	// fail-closed helper as the MCP paths (resolveGrants): a resolver error logs
+	// and yields an empty set → scope-only retrieval, never a crash and never a
+	// widen to full access.
+	grantedBlockIDs := resolveGrants(ctx, h.pool, ar)
+
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, auditTrailFactor, req.CategoriesExclude, req.BlockRolesExclude, grantedBlockIDs)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,
@@ -632,10 +639,12 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				"request_id", requestID,
 			)
 		}
-		// grantedBlockIDs nil (T40a): the query/RRF path is NOT live-wired for
-		// block grants in T40a — the ctx_rrf sixfold OR + GraphExpand grant
-		// resolution is T40b — so nil keeps the neighbor OR-arm a no-op here.
-		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, nil, graphCfg); gerr != nil {
+		// T40b (design/07 §4.2/§4.5): the query/RRF path is now live-wired for
+		// block grants — the same resolved grantedBlockIDs that fed rrf.Search
+		// flow into GraphExpand. T41 (already built) makes a grant-only block a
+		// LEAF (visible via the neighbor OR-arm, never re-seeded), so passing the
+		// grant set here surfaces granted neighbors without traversing through them.
+		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, grantedBlockIDs, graphCfg); gerr != nil {
 			slog.Warn("graph expand failed; using pre-expansion results",
 				"error", gerr,
 				"request_id", requestID,

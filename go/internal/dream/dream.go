@@ -660,7 +660,10 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 		// 1.0 (no damping) — dream-cycle keyword search needs full retrieval
 		// pool, user-query pattern-aware damping is handler-layer only.
 		// v2.0.0 C2 (M048): no exclude-lists for dream — dream sees everything.
-		results, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", 1.0, nil, nil)
+		// T40b: nil grant set — dream-cycle is an internal, scope-only retrieval
+		// pass (no per-tenant grantee identity), so the block-grant OR-arm is a
+		// no-op here.
+		results, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", 1.0, nil, nil, nil)
 		if err != nil {
 			slog.Debug("dream: rrf search failed", "keyword", kw, "error", err)
 			continue

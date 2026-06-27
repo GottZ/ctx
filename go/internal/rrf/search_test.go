@@ -78,7 +78,7 @@ func TestSearch_CategoriesExclude(t *testing.T) {
 
 	// Baseline: no exclude. All three blocks should appear.
 	results, err := rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, nil)
+		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("rrf.Search baseline failed: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestSearch_CategoriesExclude(t *testing.T) {
 
 	// Exclude category='index' (the CRAG-Bench Slot-Stealer scenario).
 	results, err = rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", 1.0, []string{"index"}, nil)
+		[]string{"private"}, nil, nil, 10, "", "", 1.0, []string{"index"}, nil, nil)
 	if err != nil {
 		t.Fatalf("rrf.Search exclude=['index'] failed: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestSearch_CategoriesExclude(t *testing.T) {
 
 	// Multi-value exclude: ['index','reference'].
 	results, err = rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", 1.0, []string{"index", "reference"}, nil)
+		[]string{"private"}, nil, nil, 10, "", "", 1.0, []string{"index", "reference"}, nil, nil)
 	if err != nil {
 		t.Fatalf("rrf.Search exclude=['index','reference'] failed: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestSearch_BlockRolesExclude(t *testing.T) {
 
 	// Baseline: no exclude.
 	results, err := rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, nil)
+		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("rrf.Search baseline failed: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestSearch_BlockRolesExclude(t *testing.T) {
 
 	// Exclude block_role='audit-trail'.
 	results, err = rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, []string{"audit-trail"})
+		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, []string{"audit-trail"}, nil)
 	if err != nil {
 		t.Fatalf("rrf.Search exclude-role=['audit-trail'] failed: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestSearch_BlockRolesExclude(t *testing.T) {
 
 	// Multi-role exclude: ['audit-trail','reference'] — only knowledge remains.
 	results, err = rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, []string{"audit-trail", "reference"})
+		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, []string{"audit-trail", "reference"}, nil)
 	if err != nil {
 		t.Fatalf("rrf.Search multi-role-exclude failed: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestSearch_ExcludeCombined(t *testing.T) {
 
 	results, err := rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
 		[]string{"private"}, nil, nil, 10, "", "", 1.0,
-		[]string{"index"}, []string{"audit-trail"})
+		[]string{"index"}, []string{"audit-trail"}, nil)
 	if err != nil {
 		t.Fatalf("rrf.Search combined exclude failed: %v", err)
 	}
@@ -253,14 +253,14 @@ func TestSearch_ExcludeEmptyIsNoOp(t *testing.T) {
 
 	// nil + nil
 	res1, err := rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, nil)
+		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("nil+nil: %v", err)
 	}
 
 	// empty + empty
 	res2, err := rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", 1.0, []string{}, []string{})
+		[]string{"private"}, nil, nil, 10, "", "", 1.0, []string{}, []string{}, nil)
 	if err != nil {
 		t.Fatalf("empty+empty: %v", err)
 	}
