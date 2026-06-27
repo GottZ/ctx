@@ -103,13 +103,15 @@ type Scheduler struct {
 	runCycle      dreamCycleFunc
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
 
-	// tenantScopesFn yields the per-tenant config-resolution scopes the
-	// background iterates (06-C6): one SnapshotForTenant per scope, the scope
-	// string sourced EXCLUSIVELY from the authoritative tenant register (never
-	// request input). Production value is backgroundTenantScopes; the capture
-	// regression swaps it to drive the loop over a controlled tenant set without
-	// a database (the dreamCycleFunc/classify seam pattern).
-	tenantScopesFn func(ctx context.Context) []string
+	// backgroundTenantsFn yields the per-tenant resolution context the background
+	// iterates (06-C6 / 04-W6 T38): per tenant the config-resolution scope (the
+	// SnapshotForTenant key + the Chain egress tenant) AND the tenant's owned
+	// scope set (the entitlement ceiling the read window is clamped to). The
+	// scope strings are sourced EXCLUSIVELY from the authoritative tenant
+	// register (never request input). Production value is backgroundTenants; the
+	// capture regression swaps it to drive the loop over a controlled tenant set
+	// without a database (the dreamCycleFunc/classify seam pattern).
+	backgroundTenantsFn func(ctx context.Context) []backgroundTenant
 
 	// Dream mode control (atomic for lock-free reads in hot loop).
 	dreamMode             atomic.Int32 // DreamModeOn | DreamModeThrottled | DreamModeOff
@@ -198,76 +200,164 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 		classify:    llm.ClassifyBlockBool,
 		runDone:     make(chan struct{}),
 	}
-	s.tenantScopesFn = s.backgroundTenantScopes
+	s.backgroundTenantsFn = s.backgroundTenants
 	return s
 }
 
-// backgroundTenantScopes returns the per-tenant config-resolution scopes the
-// background pipeline (dream/digest/synthesis/audit/classify) iterates over
-// (06-C6). The source is the AUTHORITATIVE tenant register (context_tenants,
-// Achse 01 / T05a) — NOT "SELECT DISTINCT home_scope FROM context_api_keys"
-// (the design's other §4.5 example): the live corpus carries >1 active
-// home_scope but exactly ONE tenant, so only the register collapses to the
-// 1-element loop the pausability claim rests on (design §3.3). A home_scope
-// iteration would double-run digest/daily synthesis.
+// backgroundTenant is one iterated background tenant resolved from the
+// authoritative register (06-C6 / 04-W6 T38). It carries TWO derived facts so a
+// SINGLE TenantScopes lookup per tenant feeds both:
 //
-// Mapping (backgroundScopeFor): the default tenant -> _global (its config IS
-// the global config; SnapshotForTenant short-circuits to base); an active
-// non-default tenant -> its identity scope (first owned scope). Suspended /
-// offboarding tenants are dropped (test-tenant-bg-exclude, addendum §3.2).
+//   - scope: the config-resolution scope (the SnapshotForTenant key) AND the
+//     Chain egress tenant. The default tenant -> _global (its config IS base;
+//     SnapshotForTenant short-circuits, and Chain('_global') is the shared-only
+//     view). A non-default tenant -> its first owned scope (the identity stand-
+//     in, deterministic ORDER BY scope).
+//   - owned: TenantScopes(tenant) — the entitlement ceiling the per-tenant read
+//     window is clamped to (read_scopes ∩ owned, T38 §4.4-(a)). nil means
+//     "unbounded": the pre-MT / register-error fallback runs the raw read_scopes
+//     verbatim (the byte-identical legacy single pass). A non-nil owned (incl.
+//     the default tenant's {private,shared,work} from migration 059) clamps; a
+//     read_scopes value the tenant does NOT own intersects away — the
+//     cross-tenant-background-read gate (T28-Lehre, design §4.4 + §5.7).
+type backgroundTenant struct {
+	scope string
+	owned []string
+}
+
+// backgroundTenants returns the per-tenant resolution context the background
+// pipeline (dream/digest/synthesis/audit/classify) iterates over (06-C6 / T38).
+// The source is the AUTHORITATIVE tenant register (context_tenants, Achse 01 /
+// T05a) — NOT "SELECT DISTINCT home_scope FROM context_api_keys" (the design's
+// other §4.5 example): the live corpus carries >1 active home_scope but exactly
+// ONE tenant, so only the register collapses to the 1-element loop the
+// pausability claim rests on (design §3.3). A home_scope iteration would
+// double-run digest/daily synthesis.
+//
+// Suspended / offboarding tenants are dropped (test-tenant-bg-exclude, addendum
+// §3.2). ONE TenantScopes lookup per tenant fills owned; the dream loop picks
+// one tenant per cycle, digest/synthesis/audit/classify iterate the whole list.
 //
 // Fail-safe: ListTenants error (a pre-MT-schema deploy where context_tenants
-// does not exist, or a transient DB error) OR no active tenant -> exactly
-// [_global], the tenant-less single pass. The background never aborts and
-// never returns an empty list.
+// does not exist, or a transient DB error) OR no active tenant -> exactly one
+// entry {scope:_global, owned:nil} — the tenant-less single pass with an
+// UNBOUNDED read window (raw read_scopes). The background never aborts and never
+// returns an empty list.
 //
-// SCOPE WINDOW NOT BOUNDED HERE: the per-tenant read window (read_scopes ∩
-// TenantScopes, tenant-visible Chain, per-tenant ScopeSensitivityFloor) is the
-// entitlement-correct background path T38 (04-W6), which needs Achse 01's
-// per-tenant background-scope set. T13 establishes only the ITERATION; until
-// T38 a non-default tenant's scope window stays the server-global base — a
-// named gap, never reached in single-tenant operation (only the default tenant
-// exists). The cross-tenant-background-leak (T28-Lehre) is closed in T38.
-func (s *Scheduler) backgroundTenantScopes(ctx context.Context) []string {
+// SCOPE WINDOW (T38 §4.4 + AMENDMENT #3, design Z.342-348): the read window is
+// read_scopes ∩ owned, NOT the DISTINCT home_scope set. owned (the Tenant->scopes
+// map) is the ceiling; the register is only the tenant SELECTION. For the default
+// tenant owned = {private,shared,work} (059 backfill), so read_scopes ∩ owned =
+// read_scopes byte-for-byte — no cadence change at one tenant. See intersectWindow.
+func (s *Scheduler) backgroundTenants(ctx context.Context) []backgroundTenant {
 	tenants, err := store.ListTenants(ctx, s.pool)
 	if err != nil {
-		return []string{store.GlobalScope}
+		return []backgroundTenant{{scope: store.GlobalScope, owned: nil}}
 	}
-	scopes := make([]string, 0, len(tenants))
+	out := make([]backgroundTenant, 0, len(tenants))
 	for _, t := range tenants {
 		if t.Status != "active" {
 			continue // test-tenant-bg-exclude: suspended / offboarding
 		}
-		scope, ok := s.backgroundScopeFor(ctx, t)
+		bt, ok := s.backgroundTenantFor(ctx, t)
 		if !ok {
 			continue // non-default tenant owning no scope has no background work
 		}
-		scopes = append(scopes, scope)
+		out = append(out, bt)
 	}
-	if len(scopes) == 0 {
-		return []string{store.GlobalScope}
+	if len(out) == 0 {
+		return []backgroundTenant{{scope: store.GlobalScope, owned: nil}}
+	}
+	return out
+}
+
+// backgroundTenantFor maps one tenant to its background resolution context
+// (06-C6 / T38) with a SINGLE TenantScopes lookup.
+//
+// TENANT-DECISION(bg-window): the window ceiling is owned = TenantScopes(tenant),
+// NOT the DISTINCT home_scope of its keys (AMENDMENT #3). The default tenant ->
+// _global config scope, owned = its real entitlements ({private,shared,work}) so
+// the window clamps to exactly the legacy global read_scopes set. A non-default
+// tenant -> its first owned scope (identity stand-in) + its owned set. A
+// TenantScopes error keeps the DEFAULT tenant as the unbounded legacy pass
+// (owned=nil, byte-identical pre-MT) but drops a non-default tenant fail-closed
+// (no entitlements resolved -> no background read). Umentscheidbar once Achse 01
+// pins a tenant home_scope column.
+func (s *Scheduler) backgroundTenantFor(ctx context.Context, t store.Tenant) (backgroundTenant, bool) {
+	owned, err := store.TenantScopes(ctx, s.pool, t.ID)
+	if t.ID == store.DefaultTenantID {
+		if err != nil {
+			// Default tenant, entitlement lookup failed (pre-MT schema): fall back
+			// to the unbounded legacy pass so the read window is raw read_scopes.
+			return backgroundTenant{scope: store.GlobalScope, owned: nil}, true
+		}
+		// owned may be nil (no rows yet) -> unbounded fallback; or
+		// {private,shared,work} -> clamps to the byte-identical legacy set.
+		return backgroundTenant{scope: store.GlobalScope, owned: owned}, true
+	}
+	if err != nil || len(owned) == 0 {
+		return backgroundTenant{}, false
+	}
+	return backgroundTenant{scope: owned[0], owned: owned}, true
+}
+
+// backgroundTenantScopes projects backgroundTenants to the config-resolution
+// scope list — the T13 tenant-SELECTION contract (which tenants, in which order),
+// independent of the T38 read-window ceiling. Retained for the iteration
+// regression tests; the live pipeline reads backgroundTenantsFn directly.
+func (s *Scheduler) backgroundTenantScopes(ctx context.Context) []string {
+	tenants := s.backgroundTenants(ctx)
+	scopes := make([]string, len(tenants))
+	for i, t := range tenants {
+		scopes[i] = t.scope
 	}
 	return scopes
 }
 
-// backgroundScopeFor maps one tenant to the scope under which its per-tenant
-// config is resolved for background work (06-C6). The default tenant -> _global
-// (base). A non-default tenant -> its first owned scope (deterministic, ORDER
-// BY scope), ok=false when it owns none.
-//
-// TENANT-DECISION(bg-tenant-config-scope): default -> _global, non-default ->
-// first owned scope as the identity-scope stand-in. The authoritative tenant
-// home-scope mapping + the entitlement-bounded scope WINDOW is T38 (04-W6).
-// Umentscheidbar once Achse 01 pins a tenant home_scope column.
-func (s *Scheduler) backgroundScopeFor(ctx context.Context, t store.Tenant) (string, bool) {
-	if t.ID == store.DefaultTenantID {
-		return store.GlobalScope, true
+// intersectWindow clamps the configured background read_scopes to the tenant's
+// entitlements (T38 §4.4-(a)): read_scopes ∩ owned. owned == nil means
+// "unbounded" — the pre-MT / register-error fallback returns read_scopes
+// verbatim (the byte-identical legacy single pass). A non-nil owned clamps; a
+// read_scopes value the tenant does NOT own is dropped, closing the
+// cross-tenant-background-read leak a raw config value (NOT grant-gated) would
+// open (config.go:280 consumer obligation, T28-Lehre). Order follows read_scopes
+// (deterministic, the same order RunDreamCycle/RunDigest consume).
+func intersectWindow(readScopes, owned []string) []string {
+	if owned == nil {
+		return readScopes
 	}
-	owned, err := store.TenantScopes(ctx, s.pool, t.ID)
-	if err != nil || len(owned) == 0 {
-		return "", false
+	set := make(map[string]struct{}, len(owned))
+	for _, sc := range owned {
+		set[sc] = struct{}{}
 	}
-	return owned[0], true
+	out := make([]string, 0, len(readScopes))
+	for _, sc := range readScopes {
+		if _, ok := set[sc]; ok {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+// effectiveHomeScope clamps the configured background home_scope to the tenant's
+// entitlements (T38 §4.4, authoritative home-scope mapping): the config value
+// when the tenant owns it, else the tenant's identity scope (owned[0]). owned ==
+// nil (pre-MT / fallback) returns the config value verbatim (byte-identical
+// legacy). This keeps the default tenant on "private" (it owns it) while a
+// non-default tenant whose config home_scope (default "private") it does NOT own
+// falls back to its own identity scope — so the digest index / daily report /
+// audit pick is never written under a FOREIGN scope (which would leak the
+// tenant's titles to the owner of that scope despite the clamped read window).
+func effectiveHomeScope(configHome string, owned []string) string {
+	if owned == nil {
+		return configHome
+	}
+	for _, sc := range owned {
+		if sc == configHome {
+			return configHome
+		}
+	}
+	return owned[0] // configHome not owned -> identity stand-in
 }
 
 // lifecycleCtx returns Run's context so API-triggered background jobs die
@@ -301,9 +391,16 @@ func (s *Scheduler) QueryEnd() {
 // cfg is the caller's cycle snapshot, so gaming/floor travel with the same
 // generation as scopes/back-off — a gaming toggle takes effect on the next
 // cycle that snapshots a fresh config (no restart, design 03 §2.6).
-func (s *Scheduler) newRouter(cfg *config.Config) *dream.Router {
+//
+// tenant is the iterated tenant's egress scope (T38 §4.4-(b)): every chain the
+// router resolves is filtered to '_global' ∪ this tenant via Pool.Chain(role, …,
+// tenant). The default tenant's '_global' is the shared-only view — byte-
+// identical to the pre-T38 hardcoded "". The per-tenant scope floor rides cfg
+// (Pool.ScopeSensitivityFloor from SnapshotForTenant, §4.4-(c)).
+func (s *Scheduler) newRouter(cfg *config.Config, tenant string) *dream.Router {
 	return &dream.Router{
 		Pool:   s.backendPool,
+		Tenant: tenant,
 		Gaming: cfg.GamingState(),
 		Floor:  cfg.Pool.ScopeSensitivityFloor.Apply,
 		Report: llm.PoolReporter(s.backendPool),
@@ -450,13 +547,14 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 			slog.Info("scheduler: dangling-link cleanup", "removed", n)
 		}
 
-		// One report per tenant per day-iteration (06-C6): each runs under its
-		// own config generation + scope. Single-tenant: a 1-element loop over
-		// _global == the pre-T13 single pass.
-		for _, tenantScope := range s.tenantScopesFn(ctx) {
-			cfg := s.cfg.SnapshotForTenant(ctx, tenantScope)
-			router := s.newRouter(cfg)
-			scope := cfg.Scheduler.HomeScope
+		// One report per tenant per day-iteration (06-C6 / T38): each runs under
+		// its own config generation, a tenant-visible Chain (newRouter tenant),
+		// and its entitlement-clamped home scope. Single-tenant: a 1-element loop
+		// over _global == the pre-T13 single pass.
+		for _, bt := range s.backgroundTenantsFn(ctx) {
+			cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
+			router := s.newRouter(cfg, bt.scope)
+			scope := effectiveHomeScope(cfg.Scheduler.HomeScope, bt.owned)
 			if scope == "" {
 				scope = "private"
 			}
@@ -691,20 +789,23 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 		// router carries this generation's scope floor; the backend chains
 		// resolve per call against the pool's live snapshot (G28).
 		//
-		// 06-C6: the snapshot is taken per ITERATED TENANT, round-robin over the
-		// authoritative tenant list (Achse 01), so each cycle dreams under one
-		// tenant's config generation. The scope string comes EXCLUSIVELY from
-		// that list, never request input (why SnapshotForTenant takes it
-		// explicitly). Single-tenant: the list is [_global], so the cursor stays
-		// on the base generation — byte-identical to the pre-T13 single pass.
-		scopes := s.tenantScopesFn(ctx)
-		if len(scopes) == 0 {
-			scopes = []string{store.GlobalScope}
+		// 06-C6 / T38: the snapshot is taken per ITERATED TENANT, round-robin over
+		// the authoritative tenant list (Achse 01), so each cycle dreams under one
+		// tenant's config generation + a tenant-visible Chain (newRouter tenant) +
+		// an entitlement-clamped read window (intersectWindow). The scope comes
+		// EXCLUSIVELY from that list, never request input (why SnapshotForTenant
+		// takes it explicitly). Single-tenant: the list is [{_global, nil}], so the
+		// cursor stays on the base generation, the Chain stays shared-only and the
+		// window is the raw read_scopes — byte-identical to the pre-T13 single pass.
+		tenants := s.backgroundTenantsFn(ctx)
+		if len(tenants) == 0 {
+			tenants = []backgroundTenant{{scope: store.GlobalScope}}
 		}
-		tenantScope := scopes[tenantCursor%uint64(len(scopes))]
+		bt := tenants[tenantCursor%uint64(len(tenants))]
 		tenantCursor++
-		cfg := s.cfg.SnapshotForTenant(ctx, tenantScope)
-		router := s.newRouter(cfg)
+		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
+		router := s.newRouter(cfg, bt.scope)
+		readWindow := intersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 
 		// Top priority: backfill blocks with missing embeddings.
 		if backfilled, err := s.backfillOneEmbedding(ctx, router); err != nil {
@@ -713,7 +814,7 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 			continue // Loop immediately to backfill more before dream runs.
 		}
 
-		linksCreated, err := s.runDreamCycle(cfg, router)
+		linksCreated, err := s.runDreamCycle(cfg, router, readWindow)
 		if err != nil {
 			slog.Error("scheduler: dream cycle error", "error", err)
 			// Brief pause on error to avoid tight error loops.
@@ -746,12 +847,15 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 }
 
 // runDreamCycle executes one dream cycle with graceful shutdown support.
-// cfg is the cycle's snapshot from runDreamLoop (back-off policy, scopes);
-// router is the same iteration's chain source — the dream pipeline resolves
-// its backends per call through it (G28), num_ctx included (one num_ctx per
-// pool row, so chat-model call sites resolving onto the same row share the
-// single runner — the V1 invariant, now structural).
-func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router) (int, error) {
+// cfg is the cycle's snapshot from runDreamLoop (back-off policy); router is the
+// same iteration's chain source — the dream pipeline resolves its backends per
+// call through it (G28), num_ctx included (one num_ctx per pool row, so chat-
+// model call sites resolving onto the same row share the single runner — the V1
+// invariant, now structural). readScopes is the iteration's ENTITLEMENT-CLAMPED
+// read window (intersectWindow, T38 §4.4-(a)) — NOT the raw cfg.Scheduler.
+// ReadScopes, which is tenant-overridable and unintersected would be a
+// cross-tenant background-read leak (config.go:280).
+func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router, readScopes []string) (int, error) {
 	s.dreamWg.Add(1)
 	defer s.dreamWg.Done()
 
@@ -795,7 +899,7 @@ func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router) (int
 		router,
 		dreamOpts,
 		cfg.DreamBackoff(),
-		cfg.Scheduler.ReadScopes,
+		readScopes, // entitlement-clamped window (T38), NOT raw cfg.Scheduler.ReadScopes
 		throttle,
 	)
 }
@@ -814,14 +918,19 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		return
 	}
 
-	// One snapshot per tenant per run (§2.3 / 06-C6): digest reads
-	// HomeScope/ReadScopes fresh for each iterated tenant. Single-tenant: a
-	// 1-element loop over _global == the pre-T13 single pass.
+	// One snapshot per tenant per run (§2.3 / 06-C6 / T38): digest reads its
+	// corpus over the ENTITLEMENT-CLAMPED window (read_scopes ∩ owned) and writes
+	// the topic-map index under the entitlement-clamped home scope — never a raw
+	// tenant-overridable scope (config.go:280), or a non-default tenant's titles
+	// would land under a foreign scope. Single-tenant: a 1-element loop over
+	// _global, window = raw read_scopes, home = "private" == the pre-T13 pass.
 	ok := true
-	for _, tenantScope := range s.tenantScopesFn(ctx) {
-		cfg := s.cfg.SnapshotForTenant(ctx, tenantScope)
-		slog.Info("scheduler: running digest", "scope", cfg.Scheduler.HomeScope)
-		if err := digest.RunDigest(ctx, s.pool, cfg.Scheduler.HomeScope, cfg.Scheduler.ReadScopes); err != nil {
+	for _, bt := range s.backgroundTenantsFn(ctx) {
+		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
+		homeScope := effectiveHomeScope(cfg.Scheduler.HomeScope, bt.owned)
+		window := intersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
+		slog.Info("scheduler: running digest", "scope", homeScope)
+		if err := digest.RunDigest(ctx, s.pool, homeScope, window); err != nil {
 			slog.Error("scheduler: digest error", "error", err)
 			ok = false // one tenant's failure must not skip the others
 		}

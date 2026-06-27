@@ -280,11 +280,13 @@ func TestBackgroundTenantScopesFallsBackOnDBError(t *testing.T) {
 // digestPending stays SET so the next debounce retries — the pre-T13 semantics
 // preserved per multi-tenant run (one tenant's failure must not silently clear
 // the pending flag for all). deadPool makes every RunDigest fail (no DB), and
-// the two-scope tenantScopesFn proves the loop iterates more than one tenant.
+// the two-scope backgroundTenantsFn proves the loop iterates more than one tenant.
 func TestRunDigestRetainsPendingOnTenantFailure(t *testing.T) {
 	s := NewScheduler(deadPool(t), config.NewStore(captureTestConfig(t, 12)),
 		backends.NewPool(nil, nil), StartupConfig{})
-	s.tenantScopesFn = func(context.Context) []string { return []string{store.GlobalScope, "tenant-x"} }
+	s.backgroundTenantsFn = func(context.Context) []backgroundTenant {
+		return []backgroundTenant{{scope: store.GlobalScope}, {scope: "tenant-x"}}
+	}
 
 	s.mu.Lock()
 	s.digestPending = true
@@ -308,7 +310,7 @@ func TestRunDigestRetainsPendingOnTenantFailure(t *testing.T) {
 // drive) strictly between two cycles is fully visible to the next cycle.
 //
 // Mechanics: an overlay yields a tenant-specific generation for scope "tenant-a"
-// (a distinct back-off MinHours marker), and the tenantScopesFn seam drives the
+// (a distinct back-off MinHours marker), and the backgroundTenantsFn seam drives the
 // loop over ["tenant-a"] without a database. Cycle 1 MUST observe the tenant
 // generation (MinHours=99), NOT the base generation (MinHours=12) — that is the
 // RED arm: against the pre-C6 `s.cfg.Snapshot()` the loop saw base. After the
@@ -336,7 +338,7 @@ func TestDreamLoopResolvesPerTenantGenerationEachCycle(t *testing.T) {
 	bpool := backends.NewPool(nil, nil)
 	bpool.SeedSnapshotForTest([]backends.Backend{dreamPoolRow(srv.srv.URL, "dream-model")})
 	s := NewScheduler(deadPool(t), st, bpool, StartupConfig{})
-	s.tenantScopesFn = func(context.Context) []string { return []string{"tenant-a"} }
+	s.backgroundTenantsFn = func(context.Context) []backgroundTenant { return []backgroundTenant{{scope: "tenant-a"}} }
 
 	got := make(chan cycleObs, 4)
 	release := make(chan struct{})

@@ -138,11 +138,11 @@ func (s *Scheduler) runSensitivityAudit(dryRun bool, limit int) {
 	ctx := s.lifecycleCtx()
 	slog.Info("scheduler: sensitivity audit started", "dry_run", dryRun, "limit", limit)
 
-	// 06-C6: audit each tenant under its OWN config generation + scope,
-	// iterating the authoritative tenant list. Single-tenant: a 1-element loop
-	// over _global == the pre-T13 single pass.
-	for _, tenantScope := range s.tenantScopesFn(ctx) {
-		if s.auditTenantScope(ctx, tenantScope, dryRun, limit) {
+	// 06-C6 / T38: audit each tenant under its OWN config generation + its
+	// entitlement-clamped home scope, iterating the authoritative tenant list.
+	// Single-tenant: a 1-element loop over _global == the pre-T13 single pass.
+	for _, bt := range s.backgroundTenantsFn(ctx) {
+		if s.auditTenantScope(ctx, bt, dryRun, limit) {
 			return // shutdown / pick error / infra abort already recorded
 		}
 	}
@@ -166,7 +166,7 @@ func (s *Scheduler) runSensitivityAudit(dryRun bool, limit int) {
 // per whole run. At a single tenant this is identical to the pre-T13 cap; the
 // cross-tenant aggregation of limit + run status is refined with the
 // entitlement-correct background path T38 (04-W6).
-func (s *Scheduler) auditTenantScope(ctx context.Context, tenantScope string, dryRun bool, limit int) (abort bool) {
+func (s *Scheduler) auditTenantScope(ctx context.Context, bt backgroundTenant, dryRun bool, limit int) (abort bool) {
 	processed := 0
 	for {
 		if ctx.Err() != nil {
@@ -184,8 +184,8 @@ func (s *Scheduler) auditTenantScope(ctx context.Context, tenantScope string, dr
 			continue
 		}
 
-		cfg := s.cfg.SnapshotForTenant(ctx, tenantScope)
-		scope := cfg.Scheduler.HomeScope
+		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
+		scope := effectiveHomeScope(cfg.Scheduler.HomeScope, bt.owned)
 		if scope == "" {
 			scope = "private"
 		}

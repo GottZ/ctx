@@ -18,6 +18,16 @@ import (
 type Router struct {
 	Pool   *backends.Pool
 	Gaming backends.GamingState
+	// Tenant is the egress scope every chain this router resolves is filtered
+	// to (04-W6/T38): Pool.Chain(role, …, Tenant) sees only '_global' ∪ this
+	// tenant's private backends — never a foreign tenant-private one. The
+	// scheduler sets it per iterated tenant (newRouter), sourced EXCLUSIVELY
+	// from the authoritative register, never request input. The zero value ""
+	// (and any '_'-reserved scope, e.g. the default tenant's '_global') is the
+	// fail-closed shared-only view: VisibleTo returns shared backends only
+	// (pool.go:266) — byte-identical to the pre-T38 hardcoded "" background
+	// path, so a single-tenant ('_global') run is unchanged.
+	Tenant string
 	// Floor maps a block's stored sensitivity + scope to the effective
 	// sensitivity at the gate (config.ScopeFloor.Apply — raise-only).
 	// nil = identity.
@@ -41,11 +51,14 @@ func (r *Router) FloorSens(s backends.Sensitivity, scope string) backends.Sensit
 // SensPublic is the weakest gate: trust exclusions are per-block and surface
 // later at the per-call chains.
 func (r *Router) available(role string) bool {
-	// TENANT-DECISION(dream-tenant): the background path passes "" — it runs
-	// under the global scope set today (scheduler.go:700/724), so Chain() sees
-	// only shared '_global' backends (fail-closed, never a foreign tenant-private
-	// one). Per-tenant Dream iteration that threads each tenant here is 04-W6/T38.
-	_, err := r.Pool.Chain(role, backends.SensPublic, r.Gaming, "")
+	// TENANT-DECISION(dream-tenant): the background path passes r.Tenant — the
+	// iterated tenant's egress scope (04-W6/T38). The scheduler sets it per
+	// tenant via newRouter, sourced EXCLUSIVELY from the authoritative register
+	// (never request input). Chain() then sees only '_global' ∪ this tenant's
+	// backends, never a foreign tenant-private one. The default tenant's
+	// '_global' (and the "" zero value) is the fail-closed shared-only view, so a
+	// single-tenant run is byte-identical to the pre-T38 hardcoded "".
+	_, err := r.Pool.Chain(role, backends.SensPublic, r.Gaming, r.Tenant)
 	return err == nil
 }
 
@@ -57,7 +70,7 @@ func (r *Router) available(role string) bool {
 func (r *Router) chat(ctx context.Context, role string, required backends.Sensitivity,
 	systemPrompt, userPrompt string, baseOpts llm.Options, defTimeout time.Duration,
 ) (*llm.ChatResponse, *backends.Backend, []llm.ChainAttempt, error) {
-	chain, err := r.Pool.Chain(role, required, r.Gaming, "") // background scope, see available()
+	chain, err := r.Pool.Chain(role, required, r.Gaming, r.Tenant) // iterated tenant, see available()
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -76,7 +89,7 @@ func (r *Router) EmbedChain(required backends.Sensitivity) ([]backends.Backend, 
 	if r.Pool.RoleConfigured(backends.RoleDreamEmbed) {
 		role = backends.RoleDreamEmbed
 	}
-	chain, err := r.Pool.Chain(role, required, r.Gaming, "") // background scope, see available()
+	chain, err := r.Pool.Chain(role, required, r.Gaming, r.Tenant) // iterated tenant, see available()
 	return chain, role, err
 }
 
