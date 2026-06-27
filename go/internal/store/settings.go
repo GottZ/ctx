@@ -137,6 +137,38 @@ func TenantAllowsSharedSecrets(ctx context.Context, pool *pgxpool.Pool, tenant s
 	return strings.TrimSpace(string(raw)) == "true", nil
 }
 
+// AllowCrossTenantBlockGrantKey is the global-only opt-in flag a tenant's
+// CROSS-TENANT block grant is gated on (07-W6 / design/07 §5.2). EXACT analog of
+// AllowSharedSecretsKey: the registry classifies it tenancy:global-only, so the
+// toOverrides gate drops a tenant-scope row from the snapshot (a tenant must not
+// self-grant). The operator seeds the per-tenant row out of band; this read is the
+// per-tenant truth. Default false = no cross-tenant block sharing (intra-tenant
+// block grants stay default-allowed — the Enterprise department use-case).
+const AllowCrossTenantBlockGrantKey = "tenant.allow_cross_tenant_block_grant"
+
+// TenantAllowsCrossTenantBlockGrant reports whether the tenant has opted INTO
+// granting single blocks across the tenant boundary (its own tenant-scope
+// AllowCrossTenantBlockGrantKey row is the JSON bool true). Reserved/empty scopes
+// (_global never opts in) and a missing row are fail-closed false. A read error is
+// the caller's to handle — it must NOT be treated as opt-in (the handler treats
+// err as DENY, design/07 §5.2). EXACT analog of TenantAllowsSharedSecrets.
+func TenantAllowsCrossTenantBlockGrant(ctx context.Context, pool *pgxpool.Pool, tenant string) (bool, error) {
+	if tenant == "" || strings.HasPrefix(tenant, "_") {
+		return false, nil // _global / reserved scope never opts itself in
+	}
+	var raw json.RawMessage
+	err := pool.QueryRow(ctx,
+		`SELECT value FROM context_settings WHERE key = $1 AND scope = $2`,
+		AllowCrossTenantBlockGrantKey, tenant).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("block-grant: read cross-tenant opt-in for %q: %w", tenant, err)
+	}
+	return strings.TrimSpace(string(raw)) == "true", nil
+}
+
 // OptInTenantScopes returns the tenant scopes whose AllowSharedSecretsKey row is
 // true — the set a _global secret can be referenced from VIA the fallback. The
 // operator's _global-secret DELETE reference scan (§5.7) must check these scopes

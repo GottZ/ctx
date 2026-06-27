@@ -171,6 +171,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"gaming.active":                  true,
 		"gaming.disabled_backends":       true,
 		"tenant.allow_shared_secrets":    true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
+		"tenant.allow_cross_tenant_block_grant": true, // MT T43 (07-W6): operator-set per-tenant cross-tenant block-grant opt-in (global-only)
 	}
 	seen := map[string]string{}
 	for _, e := range registry() {

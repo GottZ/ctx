@@ -270,5 +270,8 @@ func (h *ManageHandler) dispatchTenantAction(w http.ResponseWriter, r *http.Requ
 		h.handleTenantGrantList(w, r, ar, req)
 	case "tenant-grant-delete":
 		h.handleTenantGrantDelete(w, r, ar, req)
+	case "block-grant-create", "block-grant-list", "block-grant-revoke":
+		// block-level (T43, 07-W6) — the row-level share, same grant family.
+		h.dispatchBlockGrantAction(w, r, ar, req)
 	}
 }

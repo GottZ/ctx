@@ -455,6 +455,19 @@ type TenantConfig struct {
 	// TENANT-DECISION(allow-shared-secrets): default false (strikte Isolation) —
 	// Alt default true / getrennte Flags, umentscheidbar weil additiver Settings-Gate.
 	AllowSharedSecrets bool `key:"tenant.allow_shared_secrets" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
+
+	// AllowCrossTenantBlockGrant opts a tenant INTO making block-level read grants
+	// to a FOREIGN tenant (design/07 §5.2): false (default = strict isolation)
+	// allows only INTRA-tenant block grants (department→department, the Enterprise
+	// use-case); true lets an owner-tenant admin share a SINGLE block across the
+	// tenant boundary. global-only so a tenant-admin cannot self-grant it; the
+	// value is read DIRECTLY at the tenant scope
+	// (store.TenantAllowsCrossTenantBlockGrant), NOT through this snapshot field —
+	// the field exists only so the key is a known registry entry (write-gate + GET
+	// visibility), exactly like AllowSharedSecrets.
+	// TENANT-DECISION(allow-cross-tenant-block-grant): default false (opt-in), analog
+	// E5 — Alt default true, umentscheidbar weil additiver Settings-Gate.
+	AllowCrossTenantBlockGrant bool `key:"tenant.allow_cross_tenant_block_grant" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
 }
 
 // GamingState returns the chain-time gaming exclusion from THIS settings

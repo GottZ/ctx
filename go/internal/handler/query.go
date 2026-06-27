@@ -667,11 +667,19 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	for i := range results {
 		sensIDs[i] = results[i].ID
 	}
+	// T43 (design/07 §5.4): grant-mediated results get a GRANTEE-side egress floor.
+	// Resolve the grantee tenant's strictest floor ONCE — only when grants are in
+	// play (no grants ⇒ no result has a scope outside readScopes ⇒ the floor is
+	// never consulted ⇒ the lookup is skipped and the path stays byte-identical).
+	granteeFloor := backends.SensPublic
+	if len(grantedBlockIDs) > 0 {
+		granteeFloor = h.granteeScopeFloor(ctx, ar.TenantID, floor)
+	}
 	if sensMap, serr := store.FetchSensitivities(ctx, h.pool, sensIDs); serr != nil {
 		slog.Warn("sensitivity lookup failed; candidates act as credentials",
 			"error", serr, "request_id", requestID)
 	} else {
-		annotateSensitivities(results, sensMap, floor)
+		annotateSensitivities(results, sensMap, floor, ar.ReadScopes, granteeFloor)
 	}
 
 	// Step 6b: Rerank (skipped if disabled or fewer than 3 results). Dispatch
@@ -981,20 +989,64 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	return count
 }
 
+// GrantFloorDefault is the conservative egress lower bound applied to EVERY
+// grant-mediated block, fail-closed INDEPENDENT of the grantee's own config — it
+// closes the fail-OPEN rift of a naive max(owner, grantee) when the grantee has no
+// floor configured (the normal case, design/07 §5.4). A grant-mediated block can
+// never leave for an external backend below personal.
+//
+// TENANT-DECISION(grant-floor-default): personal — umentscheidbar, konservativer
+// Richtwert (one step over public/internal; raise to credentials to forbid all
+// grant-mediated external egress). design/07 §5.4 ED-B8.
+const GrantFloorDefault = backends.SensPersonal
+
 // annotateSensitivities writes the floor-adjusted sensitivity onto EVERY
 // result — not top-N: filterSuperseded and graph placement advance stragglers
 // from beyond any window into the final llmSources (F3 §2.3). IDs missing
 // from the map (deleted/archived between RRF and lookup) act as credentials
 // (fail-closed).
-func annotateSensitivities(results []rrf.SearchResult, sensMap map[string]store.BlockSensitivity, floor config.ScopeFloor) {
+//
+// T43 (design/07 §5.4, ED-B8): a GRANT-MEDIATED result — its scope is NOT in the
+// caller's readScopes, so it is visible ONLY via a block grant — has its egress
+// floor hung on the GRANTEE identity, not the owner's: effective sensitivity =
+// max(ownerFloor, granteeFloor, GrantFloorDefault, block.sensitivity). granteeFloor
+// is the grantee tenant's strictest per-scope floor (resolved at the call site);
+// GrantFloorDefault is the config-independent backstop. A non-grant result (scope
+// IN readScopes) keeps today's owner-only floor — byte-identical to the scope-only
+// path.
+func annotateSensitivities(results []rrf.SearchResult, sensMap map[string]store.BlockSensitivity, floor config.ScopeFloor, readScopes []string, granteeFloor backends.Sensitivity) {
 	for i := range results {
 		bs, ok := sensMap[results[i].ID]
 		if !ok {
 			results[i].Sensitivity = backends.SensCredentials
 			continue
 		}
-		results[i].Sensitivity = floor.Apply(bs.Sensitivity, bs.Scope)
+		eff := floor.Apply(bs.Sensitivity, bs.Scope)
+		if !contains(readScopes, bs.Scope) {
+			eff = backends.MaxSensitivity(eff, granteeFloor, GrantFloorDefault)
+		}
+		results[i].Sensitivity = eff
 	}
+}
+
+// granteeScopeFloor resolves the STRONGEST per-scope sensitivity floor configured
+// across ALL scopes the grantee tenant owns (design/07 §5.4): a grant-mediated
+// block is held to the grantee's strictest egress floor, never just its home
+// scope. Unconfigured scopes contribute nothing (SensPublic is the neutral fold
+// element). A lookup error is logged and returns SensPublic — the protection never
+// DEPENDS on this lookup, because GrantFloorDefault still applies in
+// annotateSensitivities (fail-closed by construction).
+func (h *QueryHandler) granteeScopeFloor(ctx context.Context, tenantID string, floor config.ScopeFloor) backends.Sensitivity {
+	scopes, err := store.TenantScopes(ctx, h.pool, tenantID)
+	if err != nil {
+		slog.Warn("query: grantee scope floor lookup failed; GrantFloorDefault still applies", "error", err)
+		return backends.SensPublic
+	}
+	maxFloor := backends.SensPublic
+	for _, s := range scopes {
+		maxFloor = backends.MaxSensitivity(maxFloor, floor.Apply(backends.SensPublic, s))
+	}
+	return maxFloor
 }
 
 // rerankRequired folds the operation requirement of the rerank stage:

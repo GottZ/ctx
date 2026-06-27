@@ -28,7 +28,10 @@ func TestAnnotateSensitivities_StragglerBeyondRank50(t *testing.T) {
 		results[i] = rrf.SearchResult{ID: id, Scope: "private"}
 		sensMap[id] = store.BlockSensitivity{Sensitivity: backends.SensInternal, Scope: "private"}
 	}
-	annotateSensitivities(results, sensMap, nil)
+	// All blocks live in the caller's own scope (private) → none is grant-mediated
+	// → the T43 grantee-floor arm never fires → byte-identical to the scope-only
+	// owner floor (here: nil floor).
+	annotateSensitivities(results, sensMap, nil, []string{"private"}, backends.SensPublic)
 
 	for _, rank := range []int{0, 49, 55, 59} {
 		if got := results[rank].Sensitivity; got != backends.SensInternal {
@@ -42,7 +45,7 @@ func TestAnnotateSensitivities_StragglerBeyondRank50(t *testing.T) {
 // against "unknown ⇒ rank 0".
 func TestAnnotateSensitivities_LookupMissFailsClosed(t *testing.T) {
 	results := []rrf.SearchResult{{ID: "gone", Scope: "private"}}
-	annotateSensitivities(results, map[string]store.BlockSensitivity{}, nil)
+	annotateSensitivities(results, map[string]store.BlockSensitivity{}, nil, []string{"private"}, backends.SensPublic)
 	if got := results[0].Sensitivity; got != backends.SensCredentials {
 		t.Errorf("miss sensitivity = %q, want credentials (fail-closed)", got)
 	}
@@ -67,7 +70,9 @@ func TestAnnotateSensitivities_ScopeFloorOnlyRaises(t *testing.T) {
 		"b": {Sensitivity: backends.SensCredentials, Scope: "work"},
 		"c": {Sensitivity: backends.SensPublic, Scope: "private"},
 	}
-	annotateSensitivities(results, sensMap, floor)
+	// Caller owns friend/work/private → none grant-mediated → owner-only floor
+	// (the T43 arm is exercised separately in query_grant_floor_test.go).
+	annotateSensitivities(results, sensMap, floor, []string{"friend", "work", "private"}, backends.SensPublic)
 
 	if got := results[0].Sensitivity; got != backends.SensPersonal {
 		t.Errorf("floored public block = %q, want personal", got)

@@ -125,7 +125,12 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 	case "api-key-create", "api-key-list", "api-key-delete":
 		h.dispatchAPIKeyAction(w, r, req)
 	case "tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
-		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete":
+		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete",
+		// block-grant-* (T43, 07-W6) ride the same grant-family dispatcher + tier
+		// (server-admin) as tenant-grant-*; the per-block ownership gate lives in the
+		// handler. Folding them into this one case arm keeps HandleManage under the
+		// cyclop budget (no new branch).
+		"block-grant-create", "block-grant-list", "block-grant-revoke":
 		h.dispatchTenantAction(w, r, authResult, req)
 	case "blocks-audit-start", "blocks-audit-status", "blocks-classify-start", "blocks-classify-status":
 		h.dispatchBlocksAction(w, r, req)
@@ -266,7 +271,12 @@ func actionTier(req manageRequest) adminTier {
 		// widen another tenant's read_scopes. Both are operator-level: stay
 		// server-admin (a tenant-admin manages within, never across, tenants).
 		"tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
-		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete":
+		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete",
+		// block-grant-* (T43, 07-W6): the row-level share. create can exfiltrate a
+		// block across the tenant boundary, so it stays server-admin AND carries a
+		// hard per-block ownership gate IN the handler (design/07 §5.1) — the tier
+		// gate alone (server-global is_admin) is NOT sufficient.
+		"block-grant-create", "block-grant-list", "block-grant-revoke":
 		return tierServerAdmin
 	case "dream-mode":
 		if isDreamModeMutation(req) {
