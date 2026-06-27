@@ -38,7 +38,18 @@ func TenantOverlay(pool *pgxpool.Pool) config.TenantOverlay {
 		if !hasScope(rows, tenantScope) {
 			return base, nil
 		}
-		cfg, issues := BuildFromRows(ctx, pool, rows, []string{store.GlobalScope, tenantScope})
+		// Secret_refs in a tenant generation resolve at the TENANT scope, with the
+		// _global fallback gated on the tenant's own opt-in (03-W5 §4.3). A read
+		// error on the opt-in flag is fail-closed (false = strict isolation), never
+		// a silent grant; the build then keeps tenant-only secret resolution.
+		allowShared, err := store.TenantAllowsSharedSecrets(ctx, pool, tenantScope)
+		if err != nil {
+			slog.Warn("settings: tenant overlay shared-secrets opt-in read failed — strict isolation",
+				"tenant", tenantScope, "error", err)
+			allowShared = false
+		}
+		cfg, issues := BuildFromRowsScoped(ctx, pool, rows,
+			[]string{store.GlobalScope, tenantScope}, tenantScope, allowShared)
 		logTenantIssues(tenantScope, issues)
 		return cfg, nil
 	}

@@ -94,6 +94,7 @@ type Config struct {
 	Events        EventsConfig
 	LLMLog        LLMLogConfig
 	WebChat       WebChatConfig
+	Tenant        TenantConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -434,6 +435,26 @@ type PoolConfig struct {
 	// failover. Comma-split (scopes parser); the gaming-mode action validates
 	// the names against the live pool (a typo ⇒ unknown_backends, risk 6.6).
 	GamingDisabledBackends []string `key:"gaming.disabled_backends" env:"-" default:"herbert-chat,herbert-rerank" mut:"hot" tenancy:"global-only"`
+}
+
+// TenantConfig holds per-tenant POLICY switches the OPERATOR sets, never the
+// tenant itself — hence global-only (a tenant-scope row is dropped by the
+// toOverrides gate, so a tenant cannot self-grant). The value lives in the
+// tenant's OWN context_settings scope and is read DIRECTLY at that scope
+// (store.TenantAllowsSharedSecrets), NOT through this snapshot field — the
+// snapshot value is server-global by the global-only classification and is not
+// the per-tenant truth. The field exists so the key is a known registry entry
+// (write-gate + GET visibility), not as a consumed snapshot value.
+type TenantConfig struct {
+	// AllowSharedSecrets opts a tenant INTO the shared _global secret fallback
+	// (design 03 §4.3/D2): false (default = STRICT isolation) resolves a tenant
+	// secret_ref ONLY at the tenant scope; true lets tenantSecretResolver fall
+	// back to a shared _global provider key. global-only so a tenant-admin cannot
+	// self-grant it; the operator seeds the per-tenant row out of band, and the
+	// resolver / checkSecretRef read it at the tenant scope.
+	// TENANT-DECISION(allow-shared-secrets): default false (strikte Isolation) —
+	// Alt default true / getrennte Flags, umentscheidbar weil additiver Settings-Gate.
+	AllowSharedSecrets bool `key:"tenant.allow_shared_secrets" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
 }
 
 // GamingState returns the chain-time gaming exclusion from THIS settings

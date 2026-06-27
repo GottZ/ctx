@@ -192,12 +192,73 @@ func loadTenantOverrideRows(ctx context.Context, pool *pgxpool.Pool, tenant stri
 // boot/reload path passes the single-scope {_global} (no merge); the W4/W5
 // tenant consumer passes {_global, tenant} (tenant wins). MT3-W3 §4.2/§7.
 func BuildFromRows(ctx context.Context, pool *pgxpool.Pool, rows []store.SettingOverride, scopePriority []string) (*config.Config, []config.Issue) {
-	resolve, keyIssue := poolResolver(ctx, pool)
+	// _global secret resolution (poolResolver) — the boot/reload/operator path.
+	return BuildFromRowsScoped(ctx, pool, rows, scopePriority, store.GlobalScope, false)
+}
+
+// BuildFromRowsScoped is BuildFromRows with an explicit SECRET-resolution scope
+// (MT3-W5 §4.3): secretScope is the scope a secret_ref resolves AT, allowShared
+// gates the _global fallback for a tenant secretScope. The tenant overlay (06-C2)
+// and the W5 tenant PUT candidate build pass the caller's tenant scope, so a
+// secret_ref over a tenant key resolves the TENANT's secret (with the gated
+// _global fallback), never the operator's _global key by accident. A _global (or
+// empty) secretScope keeps the historical poolResolver — boot/reload/operator
+// byte-identical. The secret resolver is chosen from secretScope, NOT from the
+// highest scopePriority entry: an operator's readScopes may carry their own
+// home_scope, but their writes resolve at _global.
+func BuildFromRowsScoped(ctx context.Context, pool *pgxpool.Pool, rows []store.SettingOverride, scopePriority []string, secretScope string, allowShared bool) (*config.Config, []config.Issue) {
+	resolve, keyIssue := secretResolverForScope(ctx, pool, secretScope, allowShared)
 	cfg, issues := buildWith(rows, resolve, scopePriority)
 	if keyIssue != nil {
 		issues = append([]config.Issue{*keyIssue}, issues...)
 	}
 	return cfg, issues
+}
+
+// secretResolverForScope picks the secret_ref resolver for a build pass: the
+// historical _global poolResolver for a _global/empty secretScope, the
+// tenant-scoped resolver (with gated _global fallback) for a real tenant scope.
+func secretResolverForScope(ctx context.Context, pool *pgxpool.Pool, secretScope string, allowShared bool) (config.SecretResolver, *config.Issue) {
+	if secretScope == "" || secretScope == store.GlobalScope {
+		return poolResolver(ctx, pool)
+	}
+	return tenantSecretResolver(ctx, pool, secretScope, allowShared)
+}
+
+// tenantSecretResolver resolves a secret_ref at the TENANT scope first, then —
+// ONLY when allowSharedFallback is set (the per-tenant tenant.allow_shared_secrets
+// opt-in, default false = strict isolation) — at _global (MT3-W5 §4.3 / D2).
+// Without the opt-in a tenant miss returns the (name-free) error, so no tenant
+// silently inherits the operator's _global provider credential (cross-tenant
+// egress leak). The fallback path is telemetried (slog.Info) so a typo'd or
+// deleted own secret that silently falls back to the shared key is diagnosable
+// (D2 silent-fallback-on-typo). Defense-in-depth: the AAD binds name+scope, so
+// even a wrong scope yields a crypto auth error, never a foreign plaintext.
+func tenantSecretResolver(ctx context.Context, pool *pgxpool.Pool, tenant string, allowSharedFallback bool) (config.SecretResolver, *config.Issue) {
+	if strings.TrimSpace(os.Getenv(sealbox.EnvKey)) == "" {
+		return nil, nil
+	}
+	box, err := sealbox.FromEnv()
+	if err != nil {
+		return nil, &config.Issue{Field: "settings", Severity: config.SeverityWarn,
+			Msg: fmt.Sprintf("master key unusable (%v) — secret_ref overrides will be ignored", err)}
+	}
+	return func(name string) (string, error) {
+		plaintext, err := store.ResolveSecret(ctx, pool, box, name, tenant)
+		if err == nil {
+			return string(plaintext), nil
+		}
+		if !allowSharedFallback {
+			return "", err // strict isolation: no silent inheritance of operator credentials
+		}
+		shared, gerr := store.ResolveSecret(ctx, pool, box, name, store.GlobalScope)
+		if gerr != nil {
+			return "", gerr // name-free by the store.ResolveSecret contract
+		}
+		slog.Info("secrets: tenant fell back to shared _global secret",
+			"tenant", tenant, "secret_ref", name)
+		return string(shared), nil
+	}, nil
 }
 
 // buildWith converts rows to typed overrides (merging the scopes by

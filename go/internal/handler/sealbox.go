@@ -53,12 +53,15 @@ func NewSecretsHandler(pool *pgxpool.Pool, cfg *config.Store) *SecretsHandler {
 	return h
 }
 
-// MountSecrets mounts the /api/secrets routes behind RequireAdmin — one
-// function for server.go and the gate tests (same rationale as
-// MountSettings: the 403 probe must exercise the production chain).
+// MountSecrets mounts the /api/secrets routes behind RequireAdminOrTenantAdmin
+// (03-W5): a tenant-admin manages its OWN tenant secrets, an operator manages
+// _global. The handler scopes every read/write to writeScope (never enumerating
+// foreign scopes, S5) — the looser gate only ADMITS. One function for server.go
+// and the gate tests (same rationale as MountSettings: the 403 probe must
+// exercise the production chain).
 func MountSecrets(r chi.Router, h *SecretsHandler) {
 	r.Group(func(r chi.Router) {
-		r.Use(RequireAdmin)
+		r.Use(RequireAdminOrTenantAdmin)
 		r.Get("/api/secrets", h.HandleList)
 		r.Put("/api/secrets/{name}", h.HandlePut)
 		r.Delete("/api/secrets/{name}", h.HandleDelete)
@@ -72,9 +75,11 @@ type secretView struct {
 	ReferencedBy []string `json:"referenced_by"`
 }
 
-// HandleList implements GET /api/secrets — metadata only.
+// HandleList implements GET /api/secrets — metadata only. Scoped to writeScope
+// (S5): a tenant-admin lists ONLY its own secrets, an operator _global — never
+// enumerating a foreign tenant's provider topology.
 func (h *SecretsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
-	metas, err := store.ListSecretMeta(r.Context(), h.pool, store.GlobalScope)
+	metas, err := store.ListSecretMeta(r.Context(), h.pool, writeScope(AuthResultFromContext(r.Context())))
 	if err != nil {
 		h.fail(w, r, "secrets: list failed", err)
 		return
@@ -125,13 +130,17 @@ func (h *SecretsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 			"success": false, "error": fmt.Sprintf("secrets unavailable: %v", err)})
 		return
 	}
-	nonce, ct, err := box.Seal(name, store.GlobalScope, []byte(body.Value))
+	// Seal under writeScope: the AAD binds name+scope, so the ciphertext is
+	// cryptographically valid ONLY on the tenant's own row (§5.3). NEVER _global
+	// for a tenant — that would cement the secret in the operator namespace.
+	scope := writeScope(AuthResultFromContext(r.Context()))
+	nonce, ct, err := box.Seal(name, scope, []byte(body.Value))
 	if err != nil {
 		h.fail(w, r, "secrets: seal failed", err)
 		return
 	}
 
-	created, err := h.putSealed(r, name, nonce, ct)
+	created, err := h.putSealed(r, name, nonce, ct, scope)
 	if err != nil {
 		h.fail(w, r, "secrets: persist failed", err)
 		return
@@ -172,7 +181,7 @@ func (h *SecretsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	found, err := h.deleteSealed(r, name)
+	found, err := h.deleteSealed(r, name, writeScope(AuthResultFromContext(r.Context())))
 	if err != nil {
 		h.fail(w, r, "secrets: delete failed", err)
 		return
@@ -192,8 +201,26 @@ func (h *SecretsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 // referencedBy maps secret name → settings keys whose override row is a
 // secret_ref to it. Source of truth are the override ROWS (the snapshot
 // carries resolved plaintext, useless for reference counting).
+//
+// Scope (§5.7, the reference-integrity barrier — NOT a crypto check, so the AAD
+// is irrelevant here): a tenant-admin's DELETE scans its OWN scope. An operator's
+// _global DELETE scans _global AND every opt-in tenant scope — a _global secret
+// can be referenced VIA the gated fallback by an opted-in tenant's setting, and
+// missing that reference would let the tenant setting silently fail-open to
+// env/default. Without any opt-in tenant the set degenerates to today's
+// _global-only scan.
 func (h *SecretsHandler) referencedBy(r *http.Request) (map[string][]string, error) {
-	rows, err := store.LoadSettingOverrides(r.Context(), h.pool, store.GlobalScope)
+	ws := writeScope(AuthResultFromContext(r.Context()))
+	scopes := []string{ws}
+	if ws == store.GlobalScope {
+		optIn, err := store.OptInTenantScopes(r.Context(), h.pool)
+		if err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, optIn...)
+	}
+
+	rows, err := store.LoadSettingOverridesMulti(r.Context(), h.pool, scopes)
 	if err != nil {
 		return nil, err
 	}
@@ -204,19 +231,30 @@ func (h *SecretsHandler) referencedBy(r *http.Request) (map[string][]string, err
 		}
 	}
 	refs := map[string][]string{}
+	seen := map[string]map[string]bool{} // name → set of keys (dedup across scopes)
 	for _, row := range rows {
 		if !sensitive[row.Key] {
 			continue
 		}
-		if name, err := settings.ScalarValue(row.Value); err == nil {
-			refs[name] = append(refs[name], row.Key)
+		name, err := settings.ScalarValue(row.Value)
+		if err != nil {
+			continue
 		}
+		if seen[name] == nil {
+			seen[name] = map[string]bool{}
+		}
+		if seen[name][row.Key] {
+			continue
+		}
+		seen[name][row.Key] = true
+		refs[name] = append(refs[name], row.Key)
 	}
 	return refs, nil
 }
 
-// putSealed persists one sealed secret in an attributed transaction.
-func (h *SecretsHandler) putSealed(r *http.Request, name string, nonce, ct []byte) (bool, error) {
+// putSealed persists one sealed secret in an attributed transaction. scope is
+// writeScope(ar) — the tenant's own scope or operator _global.
+func (h *SecretsHandler) putSealed(r *http.Request, name string, nonce, ct []byte, scope string) (bool, error) {
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
 		return false, err
@@ -225,15 +263,16 @@ func (h *SecretsHandler) putSealed(r *http.Request, name string, nonce, ct []byt
 	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
 		return false, err
 	}
-	created, err := store.PutSecret(r.Context(), tx, name, store.GlobalScope, nonce, ct, 1, actorID(r))
+	created, err := store.PutSecret(r.Context(), tx, name, scope, nonce, ct, 1, actorID(r))
 	if err != nil {
 		return false, err
 	}
 	return created, tx.Commit(r.Context())
 }
 
-// deleteSealed removes one sealed secret in an attributed transaction.
-func (h *SecretsHandler) deleteSealed(r *http.Request, name string) (bool, error) {
+// deleteSealed removes one sealed secret in an attributed transaction. scope is
+// writeScope(ar) — a tenant-admin deletes only its own row.
+func (h *SecretsHandler) deleteSealed(r *http.Request, name, scope string) (bool, error) {
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
 		return false, err
@@ -242,7 +281,7 @@ func (h *SecretsHandler) deleteSealed(r *http.Request, name string) (bool, error
 	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
 		return false, err
 	}
-	found, err := store.DeleteSecret(r.Context(), tx, name, store.GlobalScope, actorID(r))
+	found, err := store.DeleteSecret(r.Context(), tx, name, scope, actorID(r))
 	if err != nil {
 		return false, err
 	}

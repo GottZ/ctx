@@ -23,9 +23,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/settings"
@@ -61,14 +63,16 @@ func NewSettingsHandler(pool *pgxpool.Pool, cfg *config.Store) *SettingsHandler 
 	return h
 }
 
-// MountSettings mounts the /api/settings routes behind RequireAdmin —
-// settings reads are admin too (F4-O4: GET non-admin ⇒ 403). ONE function
-// used by server.go and the gate tests, so the 403 probe exercises exactly
-// the chain production mounts (an out-of-band test router could go green
-// while the real mount forgot the gate).
+// MountSettings mounts the /api/settings routes behind RequireAdminOrTenantAdmin
+// (03-W5): a tenant-admin manages its OWN tenant scope, an operator manages
+// _global; a member or unauthenticated caller still gets 403. The gate only
+// ADMITS — the handler scopes every read/write to writeScope/readScopes, so the
+// looser gate never leaks a foreign tenant's config (the §4.1a fail-closed
+// order). ONE function used by server.go and the gate tests, so the 403 probe
+// exercises exactly the chain production mounts.
 func MountSettings(r chi.Router, h *SettingsHandler) {
 	r.Group(func(r chi.Router) {
-		r.Use(RequireAdmin)
+		r.Use(RequireAdminOrTenantAdmin)
 		r.Get("/api/settings", h.HandleList)
 		r.Get("/api/settings/{key}", h.HandleGet)
 		r.Put("/api/settings/{key}", h.HandlePut)
@@ -110,7 +114,7 @@ func renderEffective(c *config.Config, info config.KeyInfo, overrides map[string
 		return v
 	}
 	switch c.Source(info.Key) {
-	case "settings":
+	case "settings", config.SourceTenant:
 		if raw, ok := overrides[info.Key]; ok {
 			if name, err := settings.ScalarValue(raw); err == nil {
 				return name
@@ -124,27 +128,47 @@ func renderEffective(c *config.Config, info config.KeyInfo, overrides map[string
 	}
 }
 
-// loadOverrideMap loads the global-scope override rows keyed by settings key.
-func (h *SettingsHandler) loadOverrideMap(r *http.Request) (map[string]json.RawMessage, error) {
-	rows, err := store.LoadSettingOverrides(r.Context(), h.pool, store.GlobalScope)
+// loadOverrideMap loads the override rows for the effective-view scopes keyed by
+// settings key, keeping the HIGHEST-precedence scope's value per key (03-W5
+// §4.5): for a tenant readScopes={_global, tenant} a tenant override row wins, so
+// the rendered secret_ref name is the tenant's, not _global's. Precedence is
+// materialized in Go (the scope's position in scopes), not trusted to the SQL
+// ORDER BY.
+func (h *SettingsHandler) loadOverrideMap(r *http.Request, scopes []string) (map[string]json.RawMessage, error) {
+	rows, err := store.LoadSettingOverridesMulti(r.Context(), h.pool, scopes)
 	if err != nil {
 		return nil, err
 	}
+	return overrideMapByPrecedence(rows, scopes), nil
+}
+
+// overrideMapByPrecedence keeps, per key, the value of the HIGHEST-precedence
+// scope present (the scope's position in scopes is its priority). Materialized in
+// Go, not trusted to the SQL ORDER BY — the effective secret_ref name a tenant
+// renders must be its own, never _global's.
+func overrideMapByPrecedence(rows []store.SettingOverride, scopes []string) map[string]json.RawMessage {
+	prio := func(scope string) int { return slices.Index(scopes, scope) }
+	best := make(map[string]int, len(rows))
 	m := make(map[string]json.RawMessage, len(rows))
 	for _, row := range rows {
+		if p, seen := best[row.Key]; seen && prio(row.Scope) <= p {
+			continue
+		}
+		best[row.Key] = prio(row.Scope)
 		m[row.Key] = row.Value
 	}
-	return m, nil
+	return m
 }
 
 // HandleList implements GET /api/settings.
 func (h *SettingsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
-	overrides, err := h.loadOverrideMap(r)
+	ar := AuthResultFromContext(r.Context())
+	overrides, err := h.loadOverrideMap(r, readScopes(ar))
 	if err != nil {
 		h.internalError(w, r, "settings: list overrides failed", err)
 		return
 	}
-	c := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: the settings API itself (GET list) renders the _global generation it administers (Achse 04); not a tenant-resolution consumer.
+	c := h.cfg.SnapshotForRequest(r.Context()) // effective tenant>global view (03-W5 §4.5)
 
 	infos := config.Keys()
 	views := make([]settingView, 0, len(infos))
@@ -171,17 +195,20 @@ func (h *SettingsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 		h.unknownKey(w, key)
 		return
 	}
-	overrides, err := h.loadOverrideMap(r)
+	ar := AuthResultFromContext(r.Context())
+	overrides, err := h.loadOverrideMap(r, readScopes(ar))
 	if err != nil {
 		h.internalError(w, r, "settings: load overrides failed", err)
 		return
 	}
-	audit, err := store.ListSettingAudit(r.Context(), h.pool, key, store.GlobalScope, auditLimit)
+	// Audit reads the history of the LEVEL one writes (writeScope): a tenant-admin
+	// its own scope, an operator _global (§4.5). The trigger spiegelt the scope.
+	audit, err := store.ListSettingAudit(r.Context(), h.pool, key, writeScope(ar), auditLimit)
 	if err != nil {
 		h.internalError(w, r, "settings: load audit failed", err)
 		return
 	}
-	c := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: settings API (GET one) renders the _global generation it administers (Achse 04).
+	c := h.cfg.SnapshotForRequest(r.Context()) // effective tenant>global view (03-W5 §4.5)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"setting": settingView{
@@ -238,41 +265,61 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 			"success": false, "error": fmt.Sprintf("validation: %s must be true or false", key)})
 		return
 	}
+	// Two-write-worlds scope resolution (§4.1a/§4.5): the write targets writeScope
+	// (operator → _global, tenant-admin → own scope), the candidate validates the
+	// effective readScopes view, and secret_refs resolve at the write scope with
+	// the tenant's gated _global fallback. allowShared is read at the tenant scope
+	// (operator never needs it — _global resolution ignores it).
+	ar := AuthResultFromContext(r.Context())
+	ws := writeScope(ar)
+	rs := readScopes(ar)
+	allowShared := false
+	if ws != store.GlobalScope {
+		var serr error
+		allowShared, serr = store.TenantAllowsSharedSecrets(r.Context(), h.pool, ws)
+		if serr != nil {
+			h.internalError(w, r, "settings: shared-secrets opt-in check failed", serr)
+			return
+		}
+	}
+
 	if info.Sensitive {
-		if code, msg := h.checkSecretRef(r, key, raw); msg != "" {
+		if code, msg := h.checkSecretRef(r, key, raw, ar, allowShared); msg != "" {
 			writeJSON(w, code, map[string]any{"success": false, "error": msg})
 			return
 		}
 	}
 	normalized := normalizedJSON(info, raw)
 
-	// Candidate build: current rows with this write mixed in, through the
-	// exact reload path. Applied == Source(key)=="settings"; anything else
-	// means the override would be ignored — reject with the build's reason.
-	baseRows, err := store.LoadSettingOverrides(r.Context(), h.pool, store.GlobalScope)
+	// Candidate build: current rows with this write mixed in, through the exact
+	// reload path. Applied == the override took effect from the DB layer — the
+	// operator's _global ("settings") OR a tenant's own scope ("tenant"); anything
+	// else means it would be ignored — reject with the build's reason. A
+	// tenant-scope row on a global-only key (a tenant self-granting
+	// allow_shared_secrets) is dropped by the toOverrides gate here → not applied
+	// → 422: the fail-closed self-grant block.
+	baseRows, err := store.LoadSettingOverridesMulti(r.Context(), h.pool, rs)
 	if err != nil {
 		h.internalError(w, r, "settings: load overrides failed", err)
 		return
 	}
-	candRows := upsertRow(baseRows, key, normalized)
-	candidate, candIssues := settings.BuildFromRows(r.Context(), h.pool, candRows, []string{store.GlobalScope})
-	if candidate.Source(key) != "settings" {
+	candRows := upsertRow(baseRows, key, normalized, ws)
+	candidate, candIssues := settings.BuildFromRowsScoped(r.Context(), h.pool, candRows, rs, ws, allowShared)
+	if !appliedFromDB(candidate.Source(key)) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 			"success": false,
 			"error":   fmt.Sprintf("validation: %s: %s", key, issueFor(candIssues, key)),
 		})
 		return
 	}
-	_, baseIssues := settings.BuildFromRows(r.Context(), h.pool, baseRows, []string{store.GlobalScope})
+	_, baseIssues := settings.BuildFromRowsScoped(r.Context(), h.pool, baseRows, rs, ws, allowShared)
 	warnings := newWarnings(candIssues, baseIssues)
 	warnings = append(warnings, pairingWarnings(key, candidate)...)
 
-	// Previous effective value + source, masked, BEFORE the swap.
-	prevOverrides := make(map[string]json.RawMessage, len(baseRows))
-	for _, row := range baseRows {
-		prevOverrides[row.Key] = row.Value
-	}
-	prev := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: settings API (PUT) reads the pre-swap _global generation it administers to report the previous effective value (Achse 04).
+	// Previous effective value + source, masked, BEFORE the swap. The override
+	// map is precedence-aware so a tenant's own ref name shows, not _global's.
+	prevOverrides := overrideMapByPrecedence(baseRows, rs)
+	prev := h.cfg.SnapshotForRequest(r.Context()) // pre-swap effective tenant>global view (03-W5 §4.5)
 	previous := map[string]any{
 		"value":  renderEffective(prev, info, prevOverrides),
 		"source": apiSource(prev.Source(key)),
@@ -303,7 +350,7 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.writeSetting(r, key, normalized); err != nil {
+	if err := h.writeSetting(r, key, normalized, ws); err != nil {
 		h.internalError(w, r, "settings: persist failed", err)
 		return
 	}
@@ -313,7 +360,9 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: settings API (PUT) reads the post-swap _global generation it administers to report the new effective value (Achse 04).
+	// reload Replaced the _global base and wiped the tenant cache, so this
+	// SnapshotForRequest rebuilds the caller's generation with the fresh row.
+	now := h.cfg.SnapshotForRequest(r.Context())
 	nowOverrides := prevOverrides
 	nowOverrides[key] = normalized
 	if warnings == nil {
@@ -340,7 +389,7 @@ func (h *SettingsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	found, err := h.deleteSetting(r, key)
+	found, err := h.deleteSetting(r, key, writeScope(AuthResultFromContext(r.Context())))
 	if err != nil {
 		h.internalError(w, r, "settings: delete failed", err)
 		return
@@ -355,7 +404,7 @@ func (h *SettingsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c := h.cfg.Snapshot() //nolint:forbidigo // MT 06 OWNER: settings API (DELETE) reads the post-revert _global generation it administers to report the env/default value (Achse 04).
+	c := h.cfg.SnapshotForRequest(r.Context()) // post-revert effective view (03-W5 §4.5)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"key":     key,
@@ -368,27 +417,36 @@ func (h *SettingsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 // existence in context_secrets — a plaintext provider key set as the value
 // would otherwise land verbatim in context_settings AND the append-only
 // audit. Returns (status, message); empty message = pass.
-func (h *SettingsHandler) checkSecretRef(r *http.Request, key, raw string) (int, string) {
+func (h *SettingsHandler) checkSecretRef(r *http.Request, key, raw string, ar *auth.AuthResult, allowShared bool) (int, string) {
 	if !store.ValidSecretName(raw) {
 		return http.StatusUnprocessableEntity, fmt.Sprintf(
 			"validation: %s takes a secret NAME (lowercase [a-z0-9._-], max 128 chars), never the secret value — create the secret first", key)
 	}
-	exists, err := store.SecretExists(r.Context(), h.pool, raw, store.GlobalScope)
-	if err != nil {
-		slog.Error("settings: secret existence check failed", "error", err,
-			"request_id", RequestIDFromContext(r.Context()))
-		return http.StatusInternalServerError, "internal error"
+	// The gate follows the RESOLVER (§4.5/D2): existence in the scopes
+	// tenantSecretResolver will search — the tenant scope plus, with the
+	// allow_shared_secrets opt-in, _global. Tenant-only would 422 exactly the
+	// _global-only ref the resolver could find via the gated fallback; an
+	// ungated _global would 200 a ref the resolver would NOT resolve (strict
+	// isolation). Exists in ANY resolver scope ⇒ pass.
+	for _, scope := range resolveScopes(ar, allowShared) {
+		exists, err := store.SecretExists(r.Context(), h.pool, raw, scope)
+		if err != nil {
+			slog.Error("settings: secret existence check failed", "error", err,
+				"request_id", RequestIDFromContext(r.Context()))
+			return http.StatusInternalServerError, "internal error"
+		}
+		if exists {
+			return 0, ""
+		}
 	}
-	if !exists {
-		return http.StatusUnprocessableEntity, fmt.Sprintf(
-			"validation: %s references an unknown secret — create the secret first", key)
-	}
-	return 0, ""
+	return http.StatusUnprocessableEntity, fmt.Sprintf(
+		"validation: %s references an unknown secret — create the secret first", key)
 }
 
 // writeSetting persists one override in an attributed transaction (the 051
-// triggers emit audit + NOTIFY atomically with the row).
-func (h *SettingsHandler) writeSetting(r *http.Request, key string, value json.RawMessage) error {
+// triggers emit audit + NOTIFY atomically with the row). scope is writeScope(ar)
+// — operator _global or the tenant's own scope, NEVER the request body.
+func (h *SettingsHandler) writeSetting(r *http.Request, key string, value json.RawMessage, scope string) error {
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
 		return err
@@ -397,14 +455,15 @@ func (h *SettingsHandler) writeSetting(r *http.Request, key string, value json.R
 	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
 		return err
 	}
-	if err := store.UpsertSetting(r.Context(), tx, key, store.GlobalScope, value, actorID(r)); err != nil {
+	if err := store.UpsertSetting(r.Context(), tx, key, scope, value, actorID(r)); err != nil {
 		return err
 	}
 	return tx.Commit(r.Context())
 }
 
-// deleteSetting removes one override in an attributed transaction.
-func (h *SettingsHandler) deleteSetting(r *http.Request, key string) (bool, error) {
+// deleteSetting removes one override in an attributed transaction. scope is
+// writeScope(ar) — a tenant-admin deletes only its own row, never _global.
+func (h *SettingsHandler) deleteSetting(r *http.Request, key, scope string) (bool, error) {
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
 		return false, err
@@ -413,7 +472,7 @@ func (h *SettingsHandler) deleteSetting(r *http.Request, key string) (bool, erro
 	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
 		return false, err
 	}
-	found, err := store.DeleteSetting(r.Context(), tx, key, store.GlobalScope, actorID(r))
+	found, err := store.DeleteSetting(r.Context(), tx, key, scope, actorID(r))
 	if err != nil {
 		return false, err
 	}
@@ -475,19 +534,23 @@ func normalizedJSON(info config.KeyInfo, raw string) json.RawMessage {
 	}
 }
 
-// upsertRow returns rows with (key,value) replaced or appended.
-func upsertRow(rows []store.SettingOverride, key string, value json.RawMessage) []store.SettingOverride {
+// upsertRow returns rows with the (key, writeScope) row's value replaced or a new
+// row at writeScope appended. It matches on BOTH key and scope: a tenant write
+// must add/replace the TENANT-scope row and leave any _global row of the same key
+// in place (so the candidate build sees both and the tenant precedence wins),
+// never silently overwrite the _global row.
+func upsertRow(rows []store.SettingOverride, key string, value json.RawMessage, scope string) []store.SettingOverride {
 	out := make([]store.SettingOverride, 0, len(rows)+1)
 	replaced := false
 	for _, row := range rows {
-		if row.Key == key {
+		if row.Key == key && row.Scope == scope {
 			row.Value = value
 			replaced = true
 		}
 		out = append(out, row)
 	}
 	if !replaced {
-		out = append(out, store.SettingOverride{Key: key, Scope: store.GlobalScope, Value: value})
+		out = append(out, store.SettingOverride{Key: key, Scope: scope, Value: value})
 	}
 	return out
 }

@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -102,6 +104,64 @@ func LoadSettingOverridesMulti(ctx context.Context, pool *pgxpool.Pool, scopes [
 		overrides = append(overrides, o)
 	}
 	return overrides, rows.Err()
+}
+
+// AllowSharedSecretsKey is the global-only opt-in flag a tenant's _global
+// secret fallback is gated on (03-W5 / D2). It is read DIRECTLY at the TENANT
+// scope, NOT through the config snapshot: the registry classifies it
+// tenancy:global-only, so the toOverrides gate drops a tenant-scope row from the
+// snapshot (a tenant must not be able to self-grant). The operator seeds the
+// per-tenant row out of band; this read is the per-tenant truth. Default false =
+// strict isolation.
+const AllowSharedSecretsKey = "tenant.allow_shared_secrets"
+
+// TenantAllowsSharedSecrets reports whether the tenant has opted INTO the shared
+// _global secret fallback (its own tenant-scope AllowSharedSecretsKey row is the
+// JSON bool true). Reserved/empty scopes (_global itself never opts in) and a
+// missing row are fail-closed false (strict isolation). A read error is the
+// caller's to handle — it must NOT be treated as opt-in.
+func TenantAllowsSharedSecrets(ctx context.Context, pool *pgxpool.Pool, tenant string) (bool, error) {
+	if tenant == "" || strings.HasPrefix(tenant, "_") {
+		return false, nil // _global / reserved scope never opts itself in
+	}
+	var raw json.RawMessage
+	err := pool.QueryRow(ctx,
+		`SELECT value FROM context_settings WHERE key = $1 AND scope = $2`,
+		AllowSharedSecretsKey, tenant).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("secrets: read shared-secrets opt-in for %q: %w", tenant, err)
+	}
+	return strings.TrimSpace(string(raw)) == "true", nil
+}
+
+// OptInTenantScopes returns the tenant scopes whose AllowSharedSecretsKey row is
+// true — the set a _global secret can be referenced from VIA the fallback. The
+// operator's _global-secret DELETE reference scan (§5.7) must check these scopes
+// cross-scope, or a tenant secret_ref setting would silently fail-open. The set
+// is small (only opted-in tenants); ordered by scope for reproducibility.
+func OptInTenantScopes(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT scope FROM context_settings
+		 WHERE key = $1 AND scope <> $2 AND value::text = 'true'
+		 ORDER BY scope`,
+		AllowSharedSecretsKey, GlobalScope)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: list shared-secret opt-in scopes: %w", err)
+	}
+	defer rows.Close()
+
+	var scopes []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("secrets: scan opt-in scope: %w", err)
+		}
+		scopes = append(scopes, s)
+	}
+	return scopes, rows.Err()
 }
 
 // SettingAudit is one context_settings_audit row of entity_type='setting',

@@ -1,0 +1,188 @@
+//go:build integration
+
+// MT3-W5 (03-W5) per-tenant secrets API probes against a real PG18
+// testcontainer:
+//
+//   - Gate 5: tenant A's secret is invisible to tenant B's ListSecretMeta (S5)
+//   - Gate 6: a tenant-A ciphertext on a tenant-B row fails to open — AAD
+//     name+scope binding, no plaintext in the error (§5.3, store level)
+//   - Gate 7: with allow_shared_secrets a tenant may secret_ref a _global-only
+//     secret (200); without the opt-in it is rejected (422, strict isolation)
+//   - Gate 8: an operator's _global-secret DELETE that an opt-in tenant
+//     references via the fallback is a 409, not a silent fail-open (§5.7)
+//   - Gate 9: no submitted secret value in any tenant response
+//
+// Run with:
+//
+//	go test -tags=integration ./internal/handler/ -run TestSecretsTenantAPI -count=1 -v
+package handler
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/sealbox"
+	"github.com/GottZ/ctx/internal/settings"
+	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/testdb"
+)
+
+func seedSettingScope(t *testing.T, pool *pgxpool.Pool, key, scope, jsonVal string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := store.UpsertSetting(ctx, tx, key, scope, []byte(jsonVal), nil); err != nil {
+		t.Fatalf("seed %s/%s: %v", key, scope, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+}
+
+func TestSecretsTenantAPI_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	for _, v := range config.EnvVars() {
+		t.Setenv(v, "")
+	}
+	t.Setenv("CONTEXT_DB_PASSWORD", "test-password")
+	t.Setenv(settings.EnvDisable, "")
+	keyHex := freshMasterKey(t)
+	t.Setenv(sealbox.EnvKey, keyHex)
+	t.Setenv(sealbox.EnvKeyPrev, "")
+
+	api := newTenantAPI(t, pool)
+
+	const valueA = "PROVIDER-KEY-A-" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const valueShared = "SHARED-OPENROUTER-" + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	scanClean := func(t *testing.T, body, label string) {
+		t.Helper()
+		if strings.Contains(body, valueA) || strings.Contains(body, valueShared) {
+			t.Errorf("%s echoes a submitted secret value: %s", label, body)
+		}
+	}
+
+	// Gate 5: a tenant lists only its own secrets.
+	t.Run("Gate5_ListSecretMetaIsolation", func(t *testing.T) {
+		rec := api.as(tenantAdmin("tenanta")).do(t, http.MethodPut, "/api/secrets/sec-a", `{"value":"`+valueA+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("A create = %d body=%s", rec.Code, rec.Body.String())
+		}
+		scanClean(t, rec.Body.String(), "A PUT")
+		// B sees nothing.
+		rec = api.as(tenantAdmin("tenantb")).do(t, http.MethodGet, "/api/secrets", "")
+		if strings.Contains(rec.Body.String(), "sec-a") {
+			t.Errorf("B ListSecretMeta leaks tenant A's secret name: %s", rec.Body.String())
+		}
+		// A sees it.
+		rec = api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/secrets", "")
+		if !strings.Contains(rec.Body.String(), "sec-a") {
+			t.Errorf("A ListSecretMeta misses A's own secret: %s", rec.Body.String())
+		}
+		// DB: the row is at scope tenanta, NOT _global.
+		if _, ok := scopeSecretExists(t, pool, "sec-a", store.GlobalScope); ok {
+			t.Errorf("tenant secret landed in _global — seal scope wrong")
+		}
+	})
+
+	// Gate 6: the AAD makes a tenant-A ciphertext worthless on a tenant-B row.
+	t.Run("Gate6_AADCrossScopeAuthError", func(t *testing.T) {
+		box, err := sealbox.New(keyHex, "")
+		if err != nil {
+			t.Fatalf("sealbox: %v", err)
+		}
+		const plain = "AAD-PROBE-PLAINTEXT-cccccccccccccccccccccccc"
+		nonce, ct, err := box.Seal("aad-probe", "tenanta", []byte(plain))
+		if err != nil {
+			t.Fatalf("seal under tenanta: %v", err)
+		}
+		// Plant the tenant-A ciphertext on a tenant-B row (the cross-scope copy
+		// attack). The row exists, so this is an AAD failure, not a missing row.
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := store.PutSecret(ctx, tx, "aad-probe", "tenantb", nonce, ct, 1, nil); err != nil {
+			t.Fatalf("plant cross-scope row: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		plaintext, err := store.ResolveSecret(ctx, pool, box, "aad-probe", "tenantb")
+		if err == nil {
+			t.Fatalf("ResolveSecret on a cross-scope ciphertext succeeded — AAD not binding scope")
+		}
+		if strings.Contains(err.Error(), plain) {
+			t.Errorf("error leaks plaintext: %v", err)
+		}
+		if len(plaintext) != 0 {
+			t.Errorf("plaintext returned on an auth failure: %q", plaintext)
+		}
+	})
+
+	// Gate 7: secret_ref to a _global-only secret — opt-in gates 200 vs 422.
+	t.Run("Gate7_SharedSecretOptInGate", func(t *testing.T) {
+		// Operator creates the _global-only shared secret.
+		rec := api.as(operatorAR()).do(t, http.MethodPut, "/api/secrets/openrouter-main", `{"value":"`+valueShared+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("operator create shared secret = %d body=%s", rec.Code, rec.Body.String())
+		}
+		// Tenant A opts in (operator-seeded, out of band — a tenant cannot self-grant).
+		seedSettingScope(t, pool, store.AllowSharedSecretsKey, "tenanta", `true`)
+
+		// A with opt-in: 200, the ref resolves via the gated _global fallback.
+		rec = api.as(tenantAdmin("tenanta")).do(t, http.MethodPut, "/api/settings/chat.api_key", `{"value":"openrouter-main"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("A (opt-in) chat.api_key=openrouter-main = %d, want 200 (red if checkSecretRef is tenant-only) body=%s",
+				rec.Code, rec.Body.String())
+		}
+		// B without opt-in: 422, strict isolation.
+		rec = api.as(tenantAdmin("tenantb")).do(t, http.MethodPut, "/api/settings/chat.api_key", `{"value":"openrouter-main"}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("B (no opt-in) chat.api_key=openrouter-main = %d, want 422 (red if the fallback is ungated) body=%s",
+				rec.Code, rec.Body.String())
+		}
+	})
+
+	// Gate 8: operator DELETE of a _global secret an opt-in tenant references via
+	// the fallback is a 409, not a silent fail-open of the tenant setting.
+	t.Run("Gate8_CrossScopeReferencedBy409", func(t *testing.T) {
+		rec := api.as(operatorAR()).do(t, http.MethodDelete, "/api/secrets/openrouter-main", "")
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("operator DELETE shared secret = %d, want 409 (red if referencedBy scans _global only) body=%s",
+				rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "chat.api_key") {
+			t.Errorf("409 lacks the cross-scope referencing key: %s", rec.Body.String())
+		}
+		scanClean(t, rec.Body.String(), "DELETE 409")
+	})
+
+	// Gate 9: no submitted secret value in any tenant response.
+	t.Run("Gate9_NoSecretValueLeak", func(t *testing.T) {
+		scanClean(t, api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/secrets", "").Body.String(), "A GET list")
+		scanClean(t, api.as(operatorAR()).do(t, http.MethodGet, "/api/secrets", "").Body.String(), "operator GET list")
+	})
+}
+
+func scopeSecretExists(t *testing.T, pool *pgxpool.Pool, name, scope string) (bool, bool) {
+	t.Helper()
+	exists, err := store.SecretExists(context.Background(), pool, name, scope)
+	if err != nil {
+		t.Fatalf("SecretExists: %v", err)
+	}
+	return exists, exists
+}
