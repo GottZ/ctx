@@ -12,6 +12,8 @@ Go-Monolith (ctx CLI + ctxd Daemon), PostgreSQL 18 + pgvector, Custom Context St
 
 **Zuerst `.project/prompt.md` lesen** — Arbeitsweise, Architektur, Session-Übergabe. `.project/` ist ein privates Submodule (`GottZ/ctx-project`).
 
+**Multi-Tenant-Linie (Branch `feat/multi-tenant`):** Modell C (3 Ebenen Tenant/Scope/Block; `scope` = Daten-Diskriminator VARCHAR(50), KEIN `tenant_id` auf Daten-Tabellen). Feature-complete (alle 6 Phasen / 7 Achsen, Migrationen 058–068; optional 066 = tenant-OAuth deferred). Gesamt-Integration-Suite + race grün, Pre-Release-Sicherheits-Audit ohne cross-tenant-Leak. Bau-Wahrheit = `git log root..feat/multi-tenant` + Commit-Bodies; kanonischer Bau-Stand + Sicherheits-Audit + Roadmap in ctx (`ctx query "ctx multi-tenant Bau-Stand"`), Plan in `.project/plan-multitenant-2026-06-14/`, Decision-Board `gottz.de/decision.html`. Nächster Schritt = Release-Schnitt (RC-1/2/3) + Deploy, kein Wellen-Bau mehr.
+
 ## Workspace
 
 ```
