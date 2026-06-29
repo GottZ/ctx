@@ -126,6 +126,11 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchAPIKeyAction(w, r, req)
 	case "tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
 		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete",
+		// scope-overview (MT 04-W6/A0, design/04 §3) rides the same server-admin
+		// dispatcher + tier as the tenant family: an additive READ of the per-scope
+		// counts + scope→tenant mapping. Folded into this case arm (no new branch)
+		// to keep HandleManage under the cyclop budget (max-complexity 25).
+		"scope-overview",
 		// block-grant-* (T43, 07-W6) ride the same grant-family dispatcher + tier
 		// (server-admin) as tenant-grant-*; the per-block ownership gate lives in the
 		// handler. Folding them into this one case arm keeps HandleManage under the
@@ -272,6 +277,13 @@ func actionTier(req manageRequest) adminTier {
 		// server-admin (a tenant-admin manages within, never across, tenants).
 		"tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
 		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete",
+		// scope-overview (MT 04-W6/A0, design/04 §3): an additive server-admin READ
+		// — per-scope counts (blocks + keys) + the scope→tenant mapping, for the
+		// scope landscape, the tenant-delete blast-radius, and the QuotaForm's
+		// tenant→scope source. The GROUP BY is deliberately UNSCOPED (no readScopes
+		// filter): tierServerAdmin justifies the global aggregate, and only counts
+		// leave the store — never block content, so no cross-tenant content leak.
+		"scope-overview",
 		// block-grant-* (T43, 07-W6): the row-level share. create can exfiltrate a
 		// block across the tenant boundary, so it stays server-admin AND carries a
 		// hard per-block ownership gate IN the handler (design/07 §5.1) — the tier
