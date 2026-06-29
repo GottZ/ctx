@@ -109,7 +109,10 @@
   .canvas {
     width: 100%;
     height: 100%;
-    min-height: 24rem;
+    /* S5: the 24rem floor was the pre-definite-height collapse guard; the
+       canvas-mode height chain (GraphPage .area/.stage/.viewport) now carries a
+       real height, so the canvas fills the region exactly with no floor fight. */
+    min-height: 0;
     background: var(--surface-0);
   }
   /* sigma creates its own canvases inside; nothing to style beyond the host. */

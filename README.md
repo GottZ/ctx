@@ -517,7 +517,10 @@ FTS search (`POST /api/search`); a hit click or node click focuses that
 block's ego net (`GET /api/graph/ego`, 2 hops). Edge index tuples resolve to
 UUIDs at merge time (they are response-local), re-merges keep node positions,
 and the payload carries titles only — block content never travels through the
-graph endpoint. Read-only: no LLM is touched from this area.
+graph endpoint. Read-only: no LLM is touched from this area. In its `canvas`
+layout mode the sigma viewport fills the full content region (the `100dvh` shell
+grid minus the rail) via a definite-height chain, so the ego net spans the whole
+area rather than a fixed-height box.
 
 Double-clicking a node expands it (+1 hop merge, focus stays); the layout is
 ForceAtlas2 in a web worker (Blob-URL — the CSP carries `worker-src blob:`
@@ -537,7 +540,7 @@ lazy through the existing scope-checked `manage get` (graph payloads never
 carry content), plus focus/expand/pin actions — pinned nodes are exempt
 from eviction. Content renders as a text node, never `{@html}`.
 
-The **Chat area** (`/chat`) streams a turn from [`POST /api/chat/stream`](#web-chat-sessions-f6-migration-056) over fetch + `eventsource-parser` — **no reconnect** (a turn is one-shot; a reconnect would re-run it). The thread shows the user message, collapsible tool-call cards (`ctx_query · "…" · N blocks · ms`; arguments + block list as text, each block linking `/graph?focus=<id>`), the streamed assistant answer and a backend badge (which backend served, whether tools were offered + why not). Assistant markdown goes through the sanitizing pipeline — **markdown-it `html:false` + DOMPurify**, with `[title](ctx:<id>)` citations rewritten to `/graph?focus=<id>` BEFORE sanitizing so DOMPurify's allowlist stays intact (raw HTML in a quoted block is escaped, never parsed; `markdown.ts` carries the XSS suite). The left sidebar lists sessions (newest first, message count, a 🔒 on credentials-touched ones); a turn is abortable and aborts on navigate-away/`beforeunload` (frees the single llama.cpp slot). A pre-stream `409`/`429` is a JSON error (busy / scope semaphore); a mid-stream failure is an `error` event that keeps the partial + offers a retry.
+The **Chat area** (`/chat`) streams a turn from [`POST /api/chat/stream`](#web-chat-sessions-f6-migration-056) over fetch + `eventsource-parser` — **no reconnect** (a turn is one-shot; a reconnect would re-run it). The thread shows the user message, collapsible tool-call cards (`ctx_query · "…" · N blocks · ms`; arguments + block list as text, each block linking `/graph?focus=<id>`), the streamed assistant answer and a backend badge (which backend served, whether tools were offered + why not). Assistant markdown goes through the sanitizing pipeline — **markdown-it `html:false` + DOMPurify**, with `[title](ctx:<id>)` citations rewritten to `/graph?focus=<id>` BEFORE sanitizing so DOMPurify's allowlist stays intact (raw HTML in a quoted block is escaped, never parsed; `markdown.ts` carries the XSS suite). The left sidebar lists sessions (newest first, message count, a 🔒 on credentials-touched ones); a turn is abortable and aborts on navigate-away/`beforeunload` (frees the single llama.cpp slot). A pre-stream `409`/`429` is a JSON error (busy / scope semaphore); a mid-stream failure is an `error` event that keeps the partial + offers a retry. In its `thread` layout mode the chat fills the full content region via the same definite-height chain (`100dvh` shell grid minus the rail), so only the message thread scrolls — the composer stays pinned to the bottom and there is no page or double scrollbar; messages read in a centered `--measure-prose` column. Below `sm` the session list collapses to an off-canvas drawer behind a toggle, driven by a region-level container query so it holds whether the rail is open or collapsed.
 
 ```bash
 cd go/web

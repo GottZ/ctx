@@ -186,10 +186,17 @@
 </section>
 
 <style>
+  /* S5 (design 01 §4/§6 + Anhang Content-Region-Contract): in canvas mode the
+     content region now has a definite height (AppShell's 100dvh grid, S4), so
+     the height:100% chain finally carries. AppShell deferred the per-mode
+     `.area{height:100%;min-height:0}` rule to this wave — realised here locally.
+     min-height:0 lets this flex column shrink to the region instead of forcing
+     overflow; the stage then fills the leftover height down to the canvas. */
   .area {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+    min-height: 0;
     height: 100%;
   }
 
@@ -259,15 +266,20 @@
     font-size: 0.8rem;
   }
 
+  /* flex:1 fills the leftover column height; min-height:0 (was a 30rem floor
+     that forced overflow on short regions) lets the canvas size to the region
+     instead of squeezing it. The flex resolves to a definite height that
+     .viewport — and through it the Sigma canvas — inherits via height:100%. */
   .stage {
     flex: 1;
     display: flex;
     gap: var(--space-3);
-    min-height: 30rem;
+    min-height: 0;
   }
   .viewport {
     flex: 1;
     min-width: 0;
+    min-height: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
