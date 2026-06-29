@@ -188,8 +188,31 @@ function manageFixture(action: string | undefined, _role: Role): Record<string, 
       } }
     case 'api-key-list':
       return { success: true, keys: apiKeysFixture() }
+    case 'api-key-create':
+      return {
+        success: true,
+        id: '0190000000007000800000000000ke9',
+        label: 'new-key',
+        home_scope: 'home',
+        allowed_scopes: ['home'],
+        // Plaintext shown exactly once — the reveal-once dialog must surface it
+        // and never persist it (design 05 §6).
+        api_key: 'ctx_sk_TESTKEY_reveal_once_do_not_persist',
+      }
+    case 'api-key-delete':
+      return { success: true, deleted: '0190000000007000800000000000ke8' }
     case 'tenant-quota-get':
-      return { success: true, quota: { scope: 'home', enabled: false, unlimited: true } }
+      return {
+        success: true,
+        quota: {
+          scope: 'home',
+          enabled: true,
+          daily_cost_usd: 5,
+          monthly_cost_usd: 100,
+          daily_calls: 1000,
+          on_exceed: 'external_off',
+        },
+      }
     case 'tenant-list':
       return { success: true, tenants: [
         { id: '550e8400-e29b-41d4-a716-446655440aaa', slug: 'acme', display_name: 'Acme Corp', status: 'active', created_at: '2026-05-01T08:00:00Z', updated_at: '2026-06-01T08:00:00Z' },

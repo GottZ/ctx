@@ -30,10 +30,10 @@ test.describe('role-gated areas + routing', () => {
     expect(errors, errors.join('\n')).toEqual([])
   })
 
-  test('N4: member landing / → /blocks', async ({ page }) => {
+  test('N4: member landing / → /home', async ({ page }) => {
     await seedSession(page, { role: 'member', theme: 'dark' })
     await gotoArea(page, '/')
-    await expect(page).toHaveURL(/\/blocks$/)
+    await expect(page).toHaveURL(/\/home$/)
   })
 
   test('N4: server-admin landing / → /status', async ({ page }) => {
@@ -45,13 +45,13 @@ test.describe('role-gated areas + routing', () => {
   test('N5: member guarded out of /admin → landing', async ({ page }) => {
     await seedSession(page, { role: 'member', theme: 'dark' })
     await gotoArea(page, '/admin')
-    await expect(page).toHaveURL(/\/blocks$/)
+    await expect(page).toHaveURL(/\/home$/)
   })
 
   test('N5: member guarded out of /tenant → landing', async ({ page }) => {
     await seedSession(page, { role: 'member', theme: 'dark' })
     await gotoArea(page, '/tenant')
-    await expect(page).toHaveURL(/\/blocks$/)
+    await expect(page).toHaveURL(/\/home$/)
   })
 
   test('N7: identity badge shows tenant + role per tier', async ({ page }) => {
@@ -59,5 +59,53 @@ test.describe('role-gated areas + routing', () => {
     await gotoArea(page, '/blocks')
     await expect(page.locator('nav.rail [aria-label="Role: owner"]')).toBeVisible()
     await expect(page.locator('nav.rail')).toContainText('Acme Corp')
+  })
+
+  test('N6: member /home capability screen', async ({ page }) => {
+    await seedSession(page, { role: 'member', theme: 'dark' })
+    await gotoArea(page, '/home')
+    await expect(page.getByRole('heading', { name: /Welcome/ })).toBeVisible()
+    await expect(page.locator('main.content')).toContainText('Acme Corp') // tenant card
+    await expect(page.getByRole('link', { name: /Browse blocks/ })).toBeVisible()
+    await page.screenshot({ path: `${SHOTS}/home-member.png` })
+  })
+})
+
+// Tenant key management (TK4 create+reveal-once, TK5 revoke+self-revoke guard,
+// TK6 quota) — driven against the api-key-create/delete + tenant-quota-get mocks.
+test.describe('tenant key management', () => {
+  test('TK6: quota card renders the limits', async ({ page }) => {
+    await seedSession(page, { role: 'tenant-admin', theme: 'dark' })
+    await gotoArea(page, '/tenant')
+    const quota = page.locator('section[aria-label="tenant quota"]')
+    await expect(quota).toBeVisible()
+    await expect(quota).toContainText('$5.00') // daily_cost_usd: 5
+    await page.screenshot({ path: `${SHOTS}/tenant-functional.png` })
+  })
+
+  test('TK4: create reveals the plaintext key exactly once', async ({ page }) => {
+    await seedSession(page, { role: 'tenant-admin', theme: 'dark' })
+    await gotoArea(page, '/tenant')
+    await page.getByRole('button', { name: '+ New key' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    await dialog.getByPlaceholder('who/what this key is for').fill('ci-2')
+    await dialog.getByRole('button', { name: 'Create key' }).click()
+    // Show-once reveal: plaintext surfaced in the role=status region's input.
+    await expect(dialog.getByLabel('new api key — plaintext, shown once')).toHaveValue(
+      'ctx_sk_TESTKEY_reveal_once_do_not_persist',
+    )
+    await page.screenshot({ path: `${SHOTS}/tenant-reveal-key.png` })
+    await dialog.getByRole('button', { name: /stored it/ }).click()
+    await expect(dialog).toBeHidden() // ack wipes + closes
+  })
+
+  test('TK5: self-revoke guard — own key disabled, others revocable', async ({ page }) => {
+    await seedSession(page, { role: 'tenant-admin', theme: 'dark' })
+    await gotoArea(page, '/tenant')
+    const ownRow = page.locator('tbody tr', { hasText: 'this key' })
+    await expect(ownRow.getByRole('button', { name: /revoke/i })).toBeDisabled()
+    const otherRow = page.locator('tbody tr', { hasText: 'ci-runner' })
+    await expect(otherRow.getByRole('button', { name: /revoke/i })).toBeEnabled()
   })
 })
