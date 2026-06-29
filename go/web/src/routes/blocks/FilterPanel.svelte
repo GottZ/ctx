@@ -131,7 +131,6 @@
     font-family: var(--font-mono);
     font-size: 0.8rem;
     padding: var(--space-1) var(--space-2);
-    color-scheme: dark;
   }
   .tags {
     width: 16rem;
