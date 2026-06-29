@@ -51,6 +51,14 @@ test.describe('shell + per-area layout modes', () => {
   }
 })
 
+// 1b. Blocks master list actually populates from the search fixture (resolves
+// an earlier smoke finding where a dev-server-flake left the region blank).
+test('blocks master list populates from search', async ({ page }) => {
+  await seedSession(page, { role: 'server-admin', theme: 'dark' })
+  await gotoArea(page, '/blocks')
+  await expect(page.locator('main.content')).toContainText('Core Architecture')
+})
+
 // ---------------------------------------------------------------------------
 // 2. Role-adaptive nav rail (E3 / N1–N3) — the rail's gated sections per tier.
 //    One app, three identities: member→Corpus only, tenant-admin→+Tenant,
@@ -116,6 +124,13 @@ test.describe('graph theme palette', () => {
       return JSON.stringify({ label: g?.renderer.getSetting('labelColor'), edge: g?.renderer.getSetting('defaultEdgeColor') })
     })
 
+  const readNodeColor = (page: Page) =>
+    page.evaluate(() => {
+      const g = (window as unknown as { __ctxGraph?: { graph: { nodes(): string[]; getNodeAttribute(n: string, k: string): unknown } } }).__ctxGraph
+      const n = g?.graph.nodes()[0]
+      return n ? String(g!.graph.getNodeAttribute(n, 'color')) : ''
+    })
+
   test('label/edge colours track the theme', async ({ page }) => {
     await seedSession(page, { role: 'server-admin', theme: 'dark' })
     await gotoArea(page, '/graph')
@@ -125,6 +140,11 @@ test.describe('graph theme palette', () => {
     await page.waitForFunction(() => '__ctxGraph' in window, null, { timeout: 10_000 })
     const dark = await readPalette(page)
     expect(dark, 'dark edge token wired into Sigma').toContain('#3a3a52')
+
+    // Overview meta-nodes are categoryColor() = hsl(hue, nodeSat%, nodeLum%) — a
+    // light, theme-aware fill (dark tokens 70%/68%), NOT the black that a misread
+    // of the small dots once suggested. Mechanically resolves that smoke finding.
+    expect(await readNodeColor(page), 'overview node uses dark node sat/lum').toMatch(/70% 68%/)
 
     await page.getByRole('radio', { name: 'Light theme' }).click()
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')

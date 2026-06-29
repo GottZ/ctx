@@ -217,6 +217,12 @@ function manageFixture(action: string | undefined, _role: Role): Record<string, 
       return { success: true, tenants: [
         { id: '550e8400-e29b-41d4-a716-446655440aaa', slug: 'acme', display_name: 'Acme Corp', status: 'active', created_at: '2026-05-01T08:00:00Z', updated_at: '2026-06-01T08:00:00Z' },
       ] }
+    case 'scope-overview':
+      return { success: true, scopes: [
+        { scope: 'home', block_count: 128, key_count: 3, tenant_id: '550e8400-e29b-41d4-a716-446655440aaa' },
+        { scope: 'shared', block_count: 42, key_count: 8, tenant_id: '550e8400-e29b-41d4-a716-446655440aaa' },
+        { scope: 'legacy', block_count: 7, key_count: 1, tenant_id: null },
+      ] }
     case 'backend-list':
       return { success: true, backends: [] }
     // A7 corpus maintenance — start kicks off (running), status reports it

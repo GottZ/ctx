@@ -19,6 +19,17 @@ test.describe('role-gated areas + routing', () => {
     expect(errors, errors.join('\n')).toEqual([])
   })
 
+  test('A0-FE: server-admin sees the scope map', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/admin')
+    const scopeMap = page.locator('section[aria-label="scope map"]')
+    await expect(scopeMap).toBeVisible()
+    await expect(scopeMap).toContainText('home') // scope name
+    await expect(scopeMap).toContainText('128') // block_count for home
+    await expect(scopeMap).toContainText(/unmapped/i) // tenant_id null row (legacy)
+    await page.screenshot({ path: `${SHOTS}/admin-scopemap.png` })
+  })
+
   test('TK3: tenant-admin sees the /tenant key table', async ({ page }) => {
     const errors = trackPageErrors(page)
     await seedSession(page, { role: 'tenant-admin', theme: 'dark' })
