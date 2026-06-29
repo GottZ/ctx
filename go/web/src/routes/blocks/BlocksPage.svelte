@@ -222,20 +222,54 @@
 {/if}
 
 <style>
+  /* split mode (design 01 §4 S6 + Content-Region-Contract). AppShell renders
+     this .area inside .content[data-mode=split], a definite-height grid cell;
+     height:100% pins .area to it so the WHOLE region never page-scrolls. The
+     column flex hands the leftover height (after header/search/filter keep their
+     intrinsic height) to .workbench. container-type makes .area the query
+     container for the ≤sm stack (region-, not viewport-relative → holds with the
+     rail open or closed; BlockDetail's @container resolves against this too). */
   .area {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+    height: 100%;
+    min-height: 0;
+    container-type: inline-size;
   }
 
+  /* Master-detail: hit list (master) + BlockDetail (.detail-pane) side by side,
+     each with its OWN scroll chain. flex:1+min-height:0 lets the row shrink
+     below its content; align-items:stretch sizes both panes to the row height so
+     their overflow scrolls in place — 1M-corpus: list scrolls independently,
+     detail scrolls independently, no page scroll, no clipping. */
   .workbench {
     display: flex;
-    align-items: flex-start;
+    align-items: stretch;
     gap: var(--space-3);
+    flex: 1;
+    min-height: 0;
   }
   .list {
     flex: 1;
     min-width: 0;
+    overflow-y: auto;
+  }
+  .workbench > :global(.detail-pane) {
+    overflow-y: auto;
+  }
+
+  /* @375px (container ≤ sm / 40rem, the breakpoints.ts SM literal) → stack. The
+     two panes collapse into one scrolling column (the workbench owns the single
+     scroll; the panes flow) so the cramped side-by-side never reaches a phone. */
+  @container (max-width: 40rem) {
+    .workbench {
+      flex-direction: column;
+      overflow-y: auto;
+    }
+    .list {
+      overflow-y: visible;
+    }
   }
 
   header {

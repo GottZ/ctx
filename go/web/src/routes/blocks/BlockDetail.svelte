@@ -51,7 +51,7 @@
   }
 </script>
 
-<aside class="sidebar" aria-label="block details">
+<aside class="detail-pane" aria-label="block details">
   <header>
     <h2>{model.block?.title ?? 'Block'}</h2>
     <button class="close" type="button" title="close" onclick={() => model.close()}>×</button>
@@ -125,17 +125,33 @@
 </aside>
 
 <style>
-  .sidebar {
+  /* Detail pane of the blocks master-detail (design 01 §4 S6). Fixed reading
+     width via the --detail-w token; bounded to the workbench height by
+     BlocksPage's .workbench{align-items:stretch}, so this is its own scroll
+     region (overflow-y:auto). The .workbench>.detail-pane rule in BlocksPage
+     asserts the same chain from the parent side. */
+  .detail-pane {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    width: 22rem;
+    width: var(--detail-w);
     max-width: 40vw;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface-1);
     padding: var(--space-3);
     overflow-y: auto;
+  }
+
+  /* ≤sm: the workbench stacks (BlocksPage @container) → the pane goes full-width
+     and stops being its own scroller (the stacked workbench owns the single
+     scroll). Queries BlocksPage's .area inline-size container. */
+  @container (max-width: 40rem) {
+    .detail-pane {
+      width: 100%;
+      max-width: none;
+      overflow-y: visible;
+    }
   }
 
   header {
@@ -295,6 +311,10 @@
     color: var(--text-dim);
   }
 
+  /* Block content as a readable column: monospace <pre> wraps at --measure-code
+     (~90ch @0.78rem) so a wide pane (e.g. full-width when stacked) never runs
+     edge-to-edge (design 01 §1/§7.3). In the 22rem split pane it is naturally
+     narrower; the cap only binds once the pane grows. */
   .content {
     margin: 0;
     padding: var(--space-2);
@@ -305,5 +325,6 @@
     line-height: 1.5;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+    max-width: var(--measure-code);
   }
 </style>
