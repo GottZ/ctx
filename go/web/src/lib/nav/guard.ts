@@ -3,9 +3,9 @@
 // in a plain node environment (mirrors lib/nav/items.ts N3). router.ts owns the
 // `session.caps` read and wires both into the central `beforeLoad` hook.
 //
-// landingFor (N4): where `/` canonicalizes to, per tier. Member → /blocks (the
-// corpus-browse entry that exists today; the dedicated /home capability screen
-// arrives with N6). tenant-admin & server-admin → /status (ops focus, D3).
+// landingFor (N4/N6): where `/` canonicalizes to, per tier. Member → /home (the
+// dedicated capability screen registered in N6; this flip ships in the same
+// commit as the route, §94). tenant-admin & server-admin → /status (ops focus, D3).
 // `loading` → /status (safe default before the session resolves — superseded
 // once whoami lands and the tier resolves).
 //
@@ -25,14 +25,14 @@ import type { Capabilities } from '../auth/capabilities'
  * union (not bare `string`) is what sv-router's `navigate` accepts at the
  * router.ts call sites.
  */
-export type LandingPath = '/blocks' | '/status'
+export type LandingPath = '/home' | '/status'
 
 /**
- * The caps-adaptive landing path for `/`. Member → /blocks; every higher tier
+ * The caps-adaptive landing path for `/`. Member → /home; every higher tier
  * and the loading floor → /status (safe default). Pure function of the tier.
  */
 export function landingFor(caps: Capabilities): LandingPath {
-  return caps.tier === 'member' ? '/blocks' : '/status'
+  return caps.tier === 'member' ? '/home' : '/status'
 }
 
 /**

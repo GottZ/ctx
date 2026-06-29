@@ -13,7 +13,7 @@ export const { p, navigate, isActive, route } = createRouter({
   hooks: {
     beforeLoad({ pathname }) {
       // N4 then N5, in order. entryRedirect first so `/` resolves to the
-      // caps-adaptive landing (member→/blocks, higher tiers/loading→/status)
+      // caps-adaptive landing (member→/home, higher tiers/loading→/status)
       // and never falls through to the area-guard. guardArea then redirects a
       // tier-forbidden area (/admin needs server-admin, /tenant needs
       // tenant-admin+) to that same landing; loading → null (no redirect before

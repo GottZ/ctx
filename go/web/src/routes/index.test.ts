@@ -16,7 +16,8 @@ import type { WhoamiResponse } from '../lib/api/types'
 
 /**
  * Base areas every build must register: the 5 corpus/ops areas + backends
- * deep-route + the role-gated /admin and /tenant areas (N4/N5) + catch-all.
+ * deep-route + the member landing /home (N6) + the role-gated /admin and
+ * /tenant areas (N4/N5) + catch-all.
  */
 const BASE_AREAS = [
   '*',
@@ -24,6 +25,7 @@ const BASE_AREAS = [
   '/blocks',
   '/chat',
   '/graph',
+  '/home',
   '/settings',
   '/settings/backends',
   '/status',
@@ -80,8 +82,8 @@ describe('areaRoutes', () => {
 })
 
 describe('entryRedirect', () => {
-  it('canonicalizes / to the caps-adaptive landing: member → /blocks (N4)', () => {
-    expect(entryRedirect('/', memberCaps)).toBe('/blocks')
+  it('canonicalizes / to the caps-adaptive landing: member → /home (N6)', () => {
+    expect(entryRedirect('/', memberCaps)).toBe('/home')
   })
 
   it('canonicalizes / to /status for higher tiers and the loading floor', () => {

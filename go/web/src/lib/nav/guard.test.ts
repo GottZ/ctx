@@ -34,8 +34,8 @@ const tenantAdmin = capabilitiesFor(whoami({ admin: false, role: 'owner' }))
 const serverAdmin = capabilitiesFor(whoami({ admin: true, role: 'owner' }))
 
 describe('landingFor', () => {
-  it('member → /blocks (corpus entry that exists today)', () => {
-    expect(landingFor(member)).toBe('/blocks')
+  it('member → /home (the dedicated capability screen, N6)', () => {
+    expect(landingFor(member)).toBe('/home')
   })
   it('tenant-admin → /status (ops focus)', () => {
     expect(landingFor(tenantAdmin)).toBe('/status')
@@ -57,27 +57,27 @@ describe('guardArea', () => {
 
   it('free (ungated) areas → null for every resolved tier', () => {
     for (const caps of [member, tenantAdmin, serverAdmin]) {
-      for (const path of ['/blocks', '/graph', '/chat', '/status', '/settings', '/']) {
+      for (const path of ['/home', '/blocks', '/graph', '/chat', '/status', '/settings', '/']) {
         expect(guardArea(path, caps)).toBeNull()
       }
     }
   })
 
   it('/admin requires server-admin; lower tiers redirect to their landing', () => {
-    expect(guardArea('/admin', member)).toBe('/blocks')
+    expect(guardArea('/admin', member)).toBe('/home')
     expect(guardArea('/admin', tenantAdmin)).toBe('/status')
     expect(guardArea('/admin', serverAdmin)).toBeNull()
     // deep sub-route inherits the gate
-    expect(guardArea('/admin/tenants', member)).toBe('/blocks')
+    expect(guardArea('/admin/tenants', member)).toBe('/home')
     expect(guardArea('/admin/tenants', serverAdmin)).toBeNull()
   })
 
   it('/tenant requires tenant-admin or higher; member redirects to its landing', () => {
-    expect(guardArea('/tenant', member)).toBe('/blocks')
+    expect(guardArea('/tenant', member)).toBe('/home')
     expect(guardArea('/tenant', tenantAdmin)).toBeNull()
     expect(guardArea('/tenant', serverAdmin)).toBeNull()
     // deep sub-route inherits the gate
-    expect(guardArea('/tenant/backends', member)).toBe('/blocks')
+    expect(guardArea('/tenant/backends', member)).toBe('/home')
     expect(guardArea('/tenant/backends', tenantAdmin)).toBeNull()
   })
 })

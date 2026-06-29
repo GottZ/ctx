@@ -35,6 +35,12 @@ export const areaRoutes = {
   '/graph': () => import('./graph/GraphPage.svelte'),
   '/chat': () => import('./chat/ChatPage.svelte'),
   '/blocks': () => import('./blocks/BlocksPage.svelte'),
+  // Member landing (design 06-role-nav.md §3, D2, Welle N6): the dedicated
+  // capability screen. Registered in the SAME commit that flips
+  // landingFor(member) → /home (guard.ts), so `/` never canonicalizes to an
+  // unregistered route (§94, no NotFound window). areaMode('/home') is unmapped
+  // → 'reading' (modes.ts default), so it self-limits on the shell reading cap.
+  '/home': () => import('./MemberHome.svelte'),
   // Role-gated areas (design 06-role-nav.md §3, Welle N4/N5): the route table is
   // additive, the TIER guard lives in guardArea (router.ts beforeLoad). Pages
   // are owned by the server-admin (A2) / tenant-admin (TK3) axes; registered
@@ -47,8 +53,8 @@ export const areaRoutes = {
 } satisfies Routes
 
 /**
- * Landing redirect (design 06-role-nav.md §4, Welle N4): `/` is no area — it
- * canonicalizes to the caps-adaptive landing (member → /blocks, higher tiers /
+ * Landing redirect (design 06-role-nav.md §4, Welle N4/N6): `/` is no area — it
+ * canonicalizes to the caps-adaptive landing (member → /home, higher tiers /
  * loading → /status, via landingFor). Returns the target for `/`, else null.
  * router.ts passes `session.caps`; kept caps-as-param so this stays a pure,
  * node-testable module (the session read lives only in router.ts).
