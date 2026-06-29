@@ -484,6 +484,11 @@ OS by default, and persists in `localStorage`; a render-blocking,
 `script-src 'self'`-compliant boot script (`/theme-boot.js`) applies it before
 first paint, so there is no dark-flash.
 
+The shell is a collapsible left **nav rail** (icon-only on narrow desktops, an
+off-canvas drawer with focus-trap on mobile) rather than a top bar; rail entries
+are role-adaptive — filtered from the caller's `whoami` capabilities, so a member
+sees the corpus areas while admins additionally get tenant/server sections.
+
 The **Settings area** renders the full [Settings API](#settings-api) catalog
 generically from the registry metadata — one category card per key prefix,
 widgets dispatched by registry type (an unknown future type degrades to a

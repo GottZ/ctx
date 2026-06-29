@@ -40,8 +40,11 @@
 <style>
   .chat {
     display: flex;
-    /* fill the viewport below the 3rem topbar; the thread scrolls, not the page */
-    height: calc(100vh - 3rem - 2 * var(--space-4));
+    /* S3 stopgap (design 01-shell-layout §6): the topbar is gone, so the phantom
+       -3rem is removed and 100vh → 100dvh. Fills the content region minus its
+       own --space-4 vertical padding; S7 replaces this with height:100%;min-height:0
+       once the thread mode owns a definite-height region. */
+    height: calc(100dvh - 2 * var(--space-4));
     min-height: 24rem;
     border: 1px solid var(--border);
     border-radius: var(--radius);
