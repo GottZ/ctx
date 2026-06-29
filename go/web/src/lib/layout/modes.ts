@@ -7,9 +7,12 @@
 // test can pin "every areaRoutes key resolves to a LayoutMode".
 //
 // Anything not under a mapped prefix is 'reading' (settings, status,
-// /settings/backends, unknown paths, the '*' catch-all): registering a new
-// route in areaRoutes does NOT silently change its layout — it stays 'reading'
-// until listed here.
+// /settings/backends, the role-gated /admin and /tenant management areas (N4/N5
+// — prose/forms, so they take the reading column), unknown paths, the '*'
+// catch-all): registering a new route in areaRoutes does NOT silently change
+// its layout — it stays 'reading' until listed in MODE_BY_PREFIX below. Only
+// NON-reading modes are listed there, so /admin and /tenant need no entry; the
+// default already pins them to 'reading'.
 
 /** The four content-region layouts the shell drives via `data-mode`. */
 export type LayoutMode = 'reading' | 'canvas' | 'split' | 'thread'

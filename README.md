@@ -497,6 +497,11 @@ writable scope. Each
 area declares a layout mode: reading surfaces (Settings/Status) stay centered at a
 readable measure, while canvas/master-detail areas (Graph/Blocks/Chat) use the
 full viewport width on wide screens instead of the former fixed column.
+`/` lands each tier on its home area (members on the corpus browser, higher tiers
+on the status dashboard) and a client-side tier guard redirects a forbidden deep
+link back there — visibility only; the real authorization stays server-side. The
+server-admin **tenant register** (`/admin`, a read-only tenant list) and the
+tenant-admin **keys** area (`/tenant`) hang off the rail's server / tenant sections.
 
 The **Settings area** renders the full [Settings API](#settings-api) catalog
 generically from the registry metadata — one category card per key prefix,

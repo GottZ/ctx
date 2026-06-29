@@ -4,6 +4,8 @@
 // the instantiation).
 
 import type { Routes } from 'sv-router'
+import type { Capabilities } from '../lib/auth/capabilities'
+import { landingFor, type LandingPath } from '../lib/nav/guard'
 
 /**
  * Path prefixes chi registers on the server — the SPA must never claim them
@@ -33,12 +35,26 @@ export const areaRoutes = {
   '/graph': () => import('./graph/GraphPage.svelte'),
   '/chat': () => import('./chat/ChatPage.svelte'),
   '/blocks': () => import('./blocks/BlocksPage.svelte'),
+  // Role-gated areas (design 06-role-nav.md §3, Welle N4/N5): the route table is
+  // additive, the TIER guard lives in guardArea (router.ts beforeLoad). Pages
+  // are owned by the server-admin (A2) / tenant-admin (TK3) axes; registered
+  // here so the guard has a real route to land on. /tenant/backends is NOT
+  // registered yet — its page does not exist (the /tenant prefix-guard still
+  // covers it once it lands).
+  '/admin': () => import('./admin/AdminPage.svelte'),
+  '/tenant': () => import('./tenant/TenantPage.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes
 
-/** Landing redirect: `/` is no area — it canonicalizes to /status. */
-export function entryRedirect(pathname: string): '/status' | null {
-  return pathname === '/' ? '/status' : null
+/**
+ * Landing redirect (design 06-role-nav.md §4, Welle N4): `/` is no area — it
+ * canonicalizes to the caps-adaptive landing (member → /blocks, higher tiers /
+ * loading → /status, via landingFor). Returns the target for `/`, else null.
+ * router.ts passes `session.caps`; kept caps-as-param so this stays a pure,
+ * node-testable module (the session read lives only in router.ts).
+ */
+export function entryRedirect(pathname: string, caps: Capabilities): LandingPath | null {
+  return pathname === '/' ? landingFor(caps) : null
 }
 
 // areaMode (design 01-shell-layout §3, §4 S2) is the route->layout-mode map. It

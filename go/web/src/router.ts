@@ -5,15 +5,25 @@
 
 import { createRouter } from 'sv-router'
 import { areaRoutes, entryRedirect } from './routes'
+import { guardArea } from './lib/nav/guard'
+import { session } from './lib/auth.svelte'
 
 export const { p, navigate, isActive, route } = createRouter({
   ...areaRoutes,
   hooks: {
     beforeLoad({ pathname }) {
-      const target = entryRedirect(pathname)
-      // Documented sv-router redirect idiom: navigate() queues the new
-      // navigation, the throw aborts the current one.
-      if (target !== null) throw navigate(target, { replace: true })
+      // N4 then N5, in order. entryRedirect first so `/` resolves to the
+      // caps-adaptive landing (member→/blocks, higher tiers/loading→/status)
+      // and never falls through to the area-guard. guardArea then redirects a
+      // tier-forbidden area (/admin needs server-admin, /tenant needs
+      // tenant-admin+) to that same landing; loading → null (no redirect before
+      // whoami resolves). Both read the live session caps here — the policy
+      // functions stay pure (lib/nav/guard.ts). Documented sv-router redirect
+      // idiom: navigate() queues the new navigation, the throw aborts this one.
+      const landing = entryRedirect(pathname, session.caps)
+      if (landing !== null) throw navigate(landing, { replace: true })
+      const guarded = guardArea(pathname, session.caps)
+      if (guarded !== null) throw navigate(guarded, { replace: true })
     },
   },
 })

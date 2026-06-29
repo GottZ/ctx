@@ -11,17 +11,44 @@
 import { describe, expect, it } from 'vitest'
 import { RESERVED_SERVER_PREFIXES, areaMode, areaRoutes, entryRedirect } from './index'
 import type { LayoutMode } from './index'
+import { capabilitiesFor } from '../lib/auth/capabilities'
+import type { WhoamiResponse } from '../lib/api/types'
 
-/** Base areas every build must register: the 5 areas + backends deep-route + catch-all. */
+/**
+ * Base areas every build must register: the 5 corpus/ops areas + backends
+ * deep-route + the role-gated /admin and /tenant areas (N4/N5) + catch-all.
+ */
 const BASE_AREAS = [
   '*',
+  '/admin',
   '/blocks',
   '/chat',
   '/graph',
   '/settings',
   '/settings/backends',
   '/status',
+  '/tenant',
 ] as const
+
+function whoami(p: Partial<WhoamiResponse> = {}): WhoamiResponse {
+  return {
+    success: true,
+    label: 'a key',
+    home_scope: 'private',
+    read_scopes: ['private'],
+    admin: false,
+    tenant_id: '0190000000007000800000000000abcd',
+    role: 'member',
+    api_key_id: '0190000000007000800000000000ke7',
+    tenant_slug: 'default',
+    tenant_display_name: 'Default Tenant',
+    ...p,
+  }
+}
+
+const memberCaps = capabilitiesFor(whoami({ admin: false, role: 'member' }))
+const serverAdminCaps = capabilitiesFor(whoami({ admin: true, role: 'owner' }))
+const loadingCaps = capabilitiesFor(null)
 
 const LAYOUT_MODES: readonly LayoutMode[] = ['reading', 'canvas', 'split', 'thread']
 
@@ -53,13 +80,20 @@ describe('areaRoutes', () => {
 })
 
 describe('entryRedirect', () => {
-  it('canonicalizes / to /status', () => {
-    expect(entryRedirect('/')).toBe('/status')
+  it('canonicalizes / to the caps-adaptive landing: member → /blocks (N4)', () => {
+    expect(entryRedirect('/', memberCaps)).toBe('/blocks')
   })
 
-  it('leaves every real route alone', () => {
-    for (const path of ['/settings', '/status', '/graph', '/chat', '/nope', '']) {
-      expect(entryRedirect(path)).toBeNull()
+  it('canonicalizes / to /status for higher tiers and the loading floor', () => {
+    expect(entryRedirect('/', serverAdminCaps)).toBe('/status')
+    expect(entryRedirect('/', loadingCaps)).toBe('/status')
+  })
+
+  it('leaves every real route alone, regardless of tier', () => {
+    for (const caps of [memberCaps, serverAdminCaps, loadingCaps]) {
+      for (const path of ['/settings', '/status', '/graph', '/chat', '/admin', '/tenant', '/nope', '']) {
+        expect(entryRedirect(path, caps)).toBeNull()
+      }
     }
   })
 })
