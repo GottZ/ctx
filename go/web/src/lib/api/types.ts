@@ -541,3 +541,49 @@ export interface BlocksClassifyStatusResponse {
   by_source: Record<string, number>
   run: ClassifyStatus
 }
+
+// =============================================================================
+// Tenant-Admin API-key manage types (design 05 §3, Wave TK1). ADDITIVE — owned
+// by lib/api/keys.ts; the A1 section above (incl. TenantQuotaView /
+// TenantQuotaResponse) is reused, never redeclared.
+// =============================================================================
+
+// Source: go/internal/store/api_keys.go:25 (ApiKey) — one row of context_api_keys
+// as read back by api-key-list (store.ListApiKeys SELECT api_keys.go:118, scan
+// :132). Metadata ONLY: the plaintext key is NEVER on this shape (it is returned
+// once at creation, ApiKeyCreateResult). last_used_at is omitempty (null until
+// first use → render as '—', never an epoch/Invalid-Date). tenant_role is the 059
+// owner|admin|member column; it is NOT on the list SELECT yet (LÜCKE 1 / TK7a) —
+// optional until that additive read-enrichment lands.
+export interface ApiKeyView {
+  id: string
+  label: string
+  home_scope: string
+  allowed_scopes: string[]
+  active: boolean
+  last_used_at?: string
+  created_at: string
+  tenant_role?: string
+}
+
+// Source: go/internal/handler/context_manage.go:1346-1353 (handleApiKeyCreate
+// happy path). The plaintext `api_key` is shown EXACTLY ONCE and is never re-
+// derivable (only its SHA-256 hash is retained server-side) — the client must
+// reveal-and-discard it, never persist it. No tenant_role: CreateApiKey does not
+// set the column, so a fresh key is always the 059 DEFAULT 'member'.
+export interface ApiKeyCreateResult {
+  success: true
+  id: string
+  label: string
+  home_scope: string
+  allowed_scopes: string[]
+  api_key: string
+}
+
+// Source: go/internal/handler/context_manage.go:1370 (handleApiKeyList happy
+// path). Tenant-filtered for a non-server-admin (resolveApiKeyListParams :1394-
+// 1396) and active-only unless active_only=false is sent explicitly.
+export interface ApiKeyListResponse {
+  success: true
+  keys: ApiKeyView[]
+}
