@@ -70,7 +70,7 @@
 
 <style>
   .screen {
-    min-height: 100vh;
+    min-height: 100dvh;
     display: grid;
     place-items: center;
     padding: var(--space-3);

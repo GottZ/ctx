@@ -221,7 +221,7 @@
 <style>
   .confirm-dialog {
     width: min(32rem, calc(100vw - 2rem));
-    max-height: calc(100vh - 4rem);
+    max-height: calc(100dvh - 4rem);
     padding: 0;
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
@@ -234,7 +234,7 @@
   form {
     display: flex;
     flex-direction: column;
-    max-height: calc(100vh - 4rem);
+    max-height: calc(100dvh - 4rem);
   }
   header {
     display: flex;

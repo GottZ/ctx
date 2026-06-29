@@ -90,18 +90,26 @@
   .content {
     min-width: 0;
     min-height: 0;
-    overflow-y: auto;
-    padding: var(--space-4) var(--shell-gutter);
     box-sizing: border-box;
+    /* Every mode scrolls — nothing clips (design 01 §4 S4). The contract's
+       sketch caps canvas/split/thread with overflow:hidden + height:100%, but
+       that is deferred to S5/S6/S7: GraphPage/BlocksPage/ChatPage still lack the
+       inner min-height:0 scroll chains, so clamping their height now would cut
+       off the canvas / hit-list / thread. Until those waves land the whole
+       region scrolls — full width, fully browsable, no abscission. */
+    overflow-y: auto;
   }
 
-  /* S3 pause state: reading-default carries every area (design 01 §4 S3 — "alle
-     Modi rendern reading-default"). The 70rem blanket cap survives on
-     --measure-wide; data-mode is already wired (above) for the S4-S7 per-mode
-     full-bleed/scroll-chain work — applying overflow:hidden+height:100% to
-     split/canvas/thread now would clip the un-touched BlocksPage list (the break
-     §6 defers to S6). ChatPage owns its own dvh height (S3 stopgap). */
-  .content > :global(.area) {
+  /* reading (Settings/Status): a single column capped on the wide reading
+     measure (the old 70rem blanket cap, now scoped to this one mode) and
+     padded. canvas/split/thread get neither the cap nor the padding → they run
+     full-bleed across the whole content region (design 01 §4 S4,
+     Content-Region-Contract). */
+  .content[data-mode='reading'] {
+    padding: var(--space-4) var(--shell-gutter);
+  }
+
+  .content[data-mode='reading'] > :global(.area) {
     max-width: var(--measure-wide);
     margin-inline: auto;
   }
