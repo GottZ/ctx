@@ -14,6 +14,16 @@ export interface WhoamiResponse {
   // gate uses both to tell server-admin from tenant-admin.
   tenant_id: string
   role: string
+  // The caller's OWN key id (not a secret — neither hash nor plaintext). Used
+  // for the Self-Revoke-Schutz (design/05 §7.5): the row of the current key is
+  // marked so its revoke control is disabled. Additive read, no migration.
+  api_key_id: string
+  // The owning tenant's human-readable identity (059 context_tenants), resolved
+  // by a LEFT JOIN on the key's tenant_id (design/06 N9 / D1) so the header can
+  // show a name instead of the bare UUID. Both degrade to "" when the key has
+  // no tenant row. Additive read, no migration.
+  tenant_slug: string
+  tenant_display_name: string
 }
 
 /** Effective-value provenance (handler/settings.go apiSource). */

@@ -1,9 +1,10 @@
 // GET /api/whoami — key identity for the SPA UI gate (F4-W3).
 //
 // Reads the AuthResult the Auth middleware put into the request context and
-// resolves the key's label with a single context_api_keys lookup. The wire
-// shape is pinned by TestWhoamiGoldenShape and mirrored by the hand-maintained
-// TS type WhoamiResponse (go/web/src/lib/api/types.ts) per design 04-§2.5.
+// resolves the key's label plus its owning tenant's slug + display name with a
+// single context_api_keys ⋈ context_tenants lookup. The wire shape is pinned by
+// TestWhoamiGoldenShape and mirrored by the hand-maintained TS type
+// WhoamiResponse (go/web/src/lib/api/types.ts) per design 04-§2.5.
 
 package handler
 
@@ -31,38 +32,84 @@ type whoamiResponse struct {
 	// leave them empty are stopped by the IsValid check below.
 	TenantID string `json:"tenant_id"`
 	Role     string `json:"role"`
+	// ApiKeyID is the UUID of the calling key itself (the already-authenticated
+	// identity from ar.ApiKeyID — NOT a secret, neither the hash nor the
+	// plaintext). The SPA uses it for the Self-Revoke-Schutz (design/05 §7.5 /
+	// TK5): the row of the current key is marked so its revoke control can be
+	// disabled, preventing a self-lockout. Additive read, no migration.
+	ApiKeyID string `json:"api_key_id"`
+	// TenantSlug and TenantDisplayName carry the owning tenant's human-readable
+	// identity (059 context_tenants), resolved by a single LEFT JOIN on the
+	// key's tenant_id (design/06 N9 / D1). They let the SPA header show a name
+	// instead of the bare UUID. Additive read, no migration. They degrade to ""
+	// when the key has no tenant row (NULL tenant_id or an unmapped tenant — the
+	// LEFT JOIN yields NULL, scanned through nullable pointers); the default
+	// tenant (059 backfill) always resolves, so this is only a defensive seam.
+	TenantSlug        string `json:"tenant_slug"`
+	TenantDisplayName string `json:"tenant_display_name"`
+}
+
+// whoamiIdentity is the per-key identity resolved from the DB in one round-trip:
+// the key's label plus the owning tenant's human-readable slug + display name.
+// The tenant fields are the additive N9/D1 read-enrichment (a single LEFT JOIN
+// on context_tenants, no migration); they are empty when the key resolves to no
+// tenant row.
+type whoamiIdentity struct {
+	label             string
+	tenantSlug        string
+	tenantDisplayName string
 }
 
 // WhoamiHandler handles GET /api/whoami.
 type WhoamiHandler struct {
 	pool *pgxpool.Pool
-	// labelByKeyID resolves the key's label; a function field so unit tests
-	// can run the handler without a database (-short).
-	labelByKeyID func(ctx context.Context, apiKeyID string) (string, error)
+	// identityByKeyID resolves the key's label and its tenant's slug/display
+	// name; a function field so unit tests can run the handler without a
+	// database (-short).
+	identityByKeyID func(ctx context.Context, apiKeyID string) (whoamiIdentity, error)
 }
 
 // NewWhoamiHandler creates a new WhoamiHandler.
 func NewWhoamiHandler(pool *pgxpool.Pool) *WhoamiHandler {
 	h := &WhoamiHandler{pool: pool}
-	h.labelByKeyID = h.labelFromDB
+	h.identityByKeyID = h.identityFromDB
 	return h
 }
 
-func (h *WhoamiHandler) labelFromDB(ctx context.Context, apiKeyID string) (string, error) {
-	var label string
+// identityFromDB resolves the calling key's label and the owning tenant's
+// human-readable slug + display name in a single LEFT JOIN keyed on the key's
+// own tenant_id (equal to ar.TenantID). The join is LEFT so a key with a NULL
+// tenant_id or a missing tenant row still returns its label; the tenant columns
+// then scan as NULL through the nullable pointers and degrade to "".
+func (h *WhoamiHandler) identityFromDB(ctx context.Context, apiKeyID string) (whoamiIdentity, error) {
+	var id whoamiIdentity
+	var slug, displayName *string
 	err := h.pool.QueryRow(ctx,
-		`SELECT label FROM context_api_keys WHERE id = $1`, apiKeyID,
-	).Scan(&label)
-	return label, err
+		`SELECT k.label, t.slug, t.display_name
+		   FROM context_api_keys k
+		   LEFT JOIN context_tenants t ON t.id = k.tenant_id
+		  WHERE k.id = $1`, apiKeyID,
+	).Scan(&id.label, &slug, &displayName)
+	if err != nil {
+		return whoamiIdentity{}, err
+	}
+	if slug != nil {
+		id.tenantSlug = *slug
+	}
+	if displayName != nil {
+		id.tenantDisplayName = *displayName
+	}
+	return id, nil
 }
 
 // HandleWhoami returns the calling key's identity: label, home scope, read
-// scopes, the server-global admin flag and the Modell-C tenant identity
-// (tenant_id + per-tenant role) — everything the SPA needs for its UI gate.
+// scopes, the server-global admin flag, the Modell-C tenant identity (tenant_id
+// + per-tenant role), the key's own id (Self-Revoke-Schutz) and the owning
+// tenant's slug + display name — everything the SPA needs for its UI gate.
 //
-// TODO(multi-tenant): the label lookup is still server-global (a bare
-// context_api_keys read), not scoped per tenant — the remaining seam once
-// per-tenant label visibility matters.
+// TODO(multi-tenant): the identity lookup is still server-global (a bare
+// context_api_keys read, LEFT-joined to its tenant), not scoped per tenant —
+// the remaining seam once per-tenant label visibility matters.
 func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(r.Context())
 	if ar == nil || !ar.IsValid {
@@ -71,9 +118,9 @@ func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	label, err := h.labelByKeyID(r.Context(), ar.ApiKeyID)
+	id, err := h.identityByKeyID(r.Context(), ar.ApiKeyID)
 	if err != nil {
-		slog.Error("whoami: label lookup failed",
+		slog.Error("whoami: identity lookup failed",
 			"error", err,
 			"request_id", RequestIDFromContext(r.Context()),
 		)
@@ -84,12 +131,15 @@ func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, whoamiResponse{
-		Success:    true,
-		Label:      label,
-		HomeScope:  ar.HomeScope,
-		ReadScopes: ar.ReadScopes,
-		Admin:      ar.IsAdmin,
-		TenantID:   ar.TenantID,
-		Role:       string(ar.TenantRole),
+		Success:           true,
+		Label:             id.label,
+		HomeScope:         ar.HomeScope,
+		ReadScopes:        ar.ReadScopes,
+		Admin:             ar.IsAdmin,
+		TenantID:          ar.TenantID,
+		Role:              string(ar.TenantRole),
+		ApiKeyID:          ar.ApiKeyID,
+		TenantSlug:        id.tenantSlug,
+		TenantDisplayName: id.tenantDisplayName,
 	})
 }

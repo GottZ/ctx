@@ -16,6 +16,9 @@ function whoami(p: Partial<WhoamiResponse> = {}): WhoamiResponse {
     admin: false,
     tenant_id: '0190000000007000800000000000abcd',
     role: 'member',
+    api_key_id: '0190000000007000800000000000ke7',
+    tenant_slug: 'default',
+    tenant_display_name: 'Default Tenant',
     ...p,
   }
 }

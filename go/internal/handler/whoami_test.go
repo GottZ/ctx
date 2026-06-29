@@ -14,11 +14,15 @@ import (
 
 // whoamiReqAs runs GET /api/whoami directly against the handler with the given
 // AuthResult injected (nil = request that somehow bypassed the Auth group) and
-// a stubbed label lookup — no database in -short runs.
+// a stubbed identity lookup — no database in -short runs. The stub returns the
+// given label plus fixed default-tenant slug/display-name so the tenant-
+// enrichment fields (N9) are exercised without a DB.
 func whoamiReqAs(t *testing.T, ar *auth.AuthResult, label string, lookupErr error) *httptest.ResponseRecorder {
 	t.Helper()
 	h := NewWhoamiHandler(nil)
-	h.labelByKeyID = func(context.Context, string) (string, error) { return label, lookupErr }
+	h.identityByKeyID = func(context.Context, string) (whoamiIdentity, error) {
+		return whoamiIdentity{label: label, tenantSlug: "default", tenantDisplayName: "Default Tenant"}, lookupErr
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/whoami", nil)
 	if ar != nil {
@@ -77,6 +81,19 @@ func TestWhoami_TenantIdentity(t *testing.T) {
 	if got["admin"] != false {
 		t.Fatalf("admin = %v, want false (server-global flag, not the tenant role)", got["admin"])
 	}
+	// BE3/TK5: the caller's own key id travels for the Self-Revoke-Schutz —
+	// nonAdminAR()'s ApiKeyID, surfaced verbatim from ar.ApiKeyID.
+	if got["api_key_id"] != "non-admin-key-id" {
+		t.Fatalf("api_key_id = %v, want the caller's own key id", got["api_key_id"])
+	}
+	// BE4/N9: the owning tenant's human-readable slug + display name travel so
+	// the header shows a name, not the bare UUID (stubbed here, JOIN-resolved live).
+	if got["tenant_slug"] != "default" {
+		t.Fatalf("tenant_slug = %v, want the resolved tenant slug", got["tenant_slug"])
+	}
+	if got["tenant_display_name"] != "Default Tenant" {
+		t.Fatalf("tenant_display_name = %v, want the resolved tenant display name", got["tenant_display_name"])
+	}
 }
 
 func TestWhoami_NonAdminKey(t *testing.T) {
@@ -105,9 +122,9 @@ func TestWhoami_NoAuthContext401(t *testing.T) {
 // the handler runs (empty key short-circuits, the nil pool is never touched).
 func TestWhoami_NoKeyThroughAuthMiddleware(t *testing.T) {
 	h := NewWhoamiHandler(nil)
-	h.labelByKeyID = func(context.Context, string) (string, error) {
+	h.identityByKeyID = func(context.Context, string) (whoamiIdentity, error) {
 		t.Fatal("handler reached without auth — middleware did not gate")
-		return "", nil
+		return whoamiIdentity{}, nil
 	}
 	chain := Auth(nil)(http.HandlerFunc(h.HandleWhoami))
 
@@ -141,18 +158,21 @@ func TestWhoami_LabelLookupError500(t *testing.T) {
 // deliberate golden update on both sides.
 func TestWhoamiGoldenShape(t *testing.T) {
 	got, err := json.Marshal(whoamiResponse{
-		Success:    true,
-		Label:      "example-key",
-		HomeScope:  "private",
-		ReadScopes: []string{"private", "shared"},
-		Admin:      true,
-		TenantID:   "00000000-0000-0000-0000-0000000d3fa0",
-		Role:       "member",
+		Success:           true,
+		Label:             "example-key",
+		HomeScope:         "private",
+		ReadScopes:        []string{"private", "shared"},
+		Admin:             true,
+		TenantID:          "00000000-0000-0000-0000-0000000d3fa0",
+		Role:              "member",
+		ApiKeyID:          "11111111-1111-1111-1111-111111111111",
+		TenantSlug:        "default",
+		TenantDisplayName: "Default Tenant",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	want := `{"success":true,"label":"example-key","home_scope":"private","read_scopes":["private","shared"],"admin":true,"tenant_id":"00000000-0000-0000-0000-0000000d3fa0","role":"member"}`
+	want := `{"success":true,"label":"example-key","home_scope":"private","read_scopes":["private","shared"],"admin":true,"tenant_id":"00000000-0000-0000-0000-0000000d3fa0","role":"member","api_key_id":"11111111-1111-1111-1111-111111111111","tenant_slug":"default","tenant_display_name":"Default Tenant"}`
 	if string(got) != want {
 		t.Fatalf("golden shape drift:\n got: %s\nwant: %s", got, want)
 	}
