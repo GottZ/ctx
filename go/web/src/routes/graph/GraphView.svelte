@@ -82,6 +82,21 @@
     renderer?.refresh()
   })
 
+  // G2: a theme switch hands down a NEW palette object (GraphPage reassigns its
+  // $state on THEME_CHANGE_EVENT). labelColor/defaultEdgeColor are Sigma
+  // *settings*, not node/edge attrs — the reducers/refresh never touch them, so
+  // push them explicitly. The node/edge `color` attrs are re-baked on the
+  // shared instance by GraphPage's recolorGraph; refresh() repaints them.
+  // Guarded on renderer (the constructor already seeds these from the initial
+  // palette, so the first run before onMount is a safe no-op).
+  $effect(() => {
+    const r = renderer
+    if (!r) return
+    r.setSetting('labelColor', { color: palette.labelColor })
+    r.setSetting('defaultEdgeColor', palette.edgeColor)
+    r.refresh()
+  })
+
   /** Re-center the camera (page calls this after a focus jump). */
   export function resetCamera(): void {
     renderer?.getCamera().animatedReset({ duration: 300 })

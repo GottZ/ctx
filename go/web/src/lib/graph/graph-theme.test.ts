@@ -4,7 +4,17 @@
 // to the dark default (the silent-Light-break guard, §6).
 
 import { afterEach, describe, expect, it } from 'vitest'
-import { categoryColor, edgeColor, readGraphPalette, type GraphPalette } from './graph-theme'
+import type { ApiNode, EgoResponse, OverviewNode, OverviewResponse } from './api'
+import { createGraph, mergeEgo } from './graph-client'
+import { buildOverviewGraph } from './overview-map'
+import {
+  categoryColor,
+  edgeColor,
+  readGraphPalette,
+  recolorGraph,
+  recolorOverviewGraph,
+  type GraphPalette,
+} from './graph-theme'
 
 const dark: GraphPalette = {
   labelColor: '#9aa0bb',
@@ -12,6 +22,65 @@ const dark: GraphPalette = {
   edgeStrongColor: '#5b5e74',
   nodeSat: 70,
   nodeLum: 68,
+}
+
+// The light column of the §5a token contract — the palette readGraphPalette()
+// yields after a dark→light theme switch.
+const light: GraphPalette = {
+  labelColor: '#54586a',
+  edgeColor: '#c4c8d4',
+  edgeStrongColor: '#a6abbd',
+  nodeSat: 62,
+  nodeLum: 45,
+}
+
+function apiNode(id: string, hop: number, partial: Partial<ApiNode> = {}): ApiNode {
+  return {
+    id,
+    title: `block ${id}`,
+    category: 'learnings',
+    scope: 'private',
+    degree: 3,
+    hop,
+    created_at: '2026-06-01T00:00:00Z',
+    ...partial,
+  }
+}
+
+function ego(partial: Partial<EgoResponse>): EgoResponse {
+  return {
+    success: true,
+    focus: 'a',
+    params: {},
+    rels: ['topical', 'factual', 'causal', 'recurrent', 'supersedes'],
+    nodes: [],
+    edges: [],
+    stats: { nodes: 0, edges: 0, truncated: false, elapsed_ms: 1 },
+    ...partial,
+  }
+}
+
+function onode(cluster: number, partial: Partial<OverviewNode> = {}): OverviewNode {
+  return {
+    cluster,
+    size: 10,
+    top_categories: ['learnings'],
+    repr_id: `repr-${cluster}`,
+    repr_title: `Cluster ${cluster}`,
+    scope_mix: ['private'],
+    ...partial,
+  }
+}
+
+function overview(partial: Partial<OverviewResponse>): OverviewResponse {
+  return {
+    success: true,
+    params: {},
+    nodes: [],
+    edges: [],
+    stats: { nodes: 0, edges: 0, truncated: false, computed_at: null, elapsed_ms: 1 },
+    ...partial,
+  }
 }
 
 describe('categoryColor', () => {
@@ -98,5 +167,151 @@ describe('readGraphPalette', () => {
     expect(Number.isNaN(p.nodeLum)).toBe(false)
     // and the resulting color is well-formed, never hsl(h NaN% NaN%)
     expect(categoryColor('learnings', p)).toBe('hsl(149 70% 68%)')
+  })
+})
+
+// G2 re-color pass (design 03-§4/§6 "Sigma bakes color into the attr"): a theme
+// switch must rewrite EVERY baked node/edge color attr, not only the Sigma
+// label/edge settings. The settings are a WebGL concern verified by the
+// Playwright gate; here we pin the attribute re-paint that recolorGraph drives.
+describe('recolorGraph', () => {
+  /** Ego graph with two categories + a strong (supersedes) and a normal edge. */
+  function builtGraph(palette: GraphPalette) {
+    const graph = createGraph()
+    mergeEgo(
+      graph,
+      ego({
+        nodes: [apiNode('a', 0, { category: 'learnings' }), apiNode('b', 1, { category: 'decisions' })],
+        edges: [
+          [0, 1, 4, 0.8], // a→b supersedes → strong edge color
+          [1, 0, 0, 0.5], // b→a topical → normal edge color
+        ],
+      }),
+      palette,
+    )
+    return graph
+  }
+
+  it('re-paints ALL node color attrs from the new palette', () => {
+    const graph = builtGraph(dark)
+    // baked dark before the switch
+    expect(graph.getNodeAttribute('a', 'color')).toBe(categoryColor('learnings', dark))
+
+    recolorGraph(graph, light)
+
+    // every node now carries the light color for its category — none left dark
+    let allLight = true
+    graph.forEachNode((_id, attrs) => {
+      if (attrs.color !== categoryColor(attrs.category, light)) allLight = false
+    })
+    expect(allLight).toBe(true)
+    expect(graph.getNodeAttribute('a', 'color')).toBe(categoryColor('learnings', light))
+    expect(graph.getNodeAttribute('b', 'color')).toBe(categoryColor('decisions', light))
+  })
+
+  it('re-paints ALL edge color attrs, keeping the supersedes/normal split', () => {
+    const graph = builtGraph(dark)
+    expect(graph.getEdgeAttribute('a', 'b', 'color')).toBe(dark.edgeStrongColor)
+
+    recolorGraph(graph, light)
+
+    let allLight = true
+    graph.forEachEdge((_id, attrs) => {
+      if (attrs.color !== edgeColor(attrs.rel, light)) allLight = false
+    })
+    expect(allLight).toBe(true)
+    expect(graph.getEdgeAttribute('a', 'b', 'color')).toBe(light.edgeStrongColor) // supersedes
+    expect(graph.getEdgeAttribute('b', 'a', 'color')).toBe(light.edgeColor) // topical
+  })
+
+  // The GraphPage THEME_CHANGE_EVENT handler is exactly `readGraphPalette()`
+  // followed by `recolorGraph(graph, palette)`. The window listener + Sigma
+  // setSetting/refresh live in the WebGL canvas (Playwright gate, §6); here we
+  // pin that the handler's KERNEL flips the baked attrs when the tokens change.
+  it('simulates the theme-switch handler: readGraphPalette() → recolorGraph re-colors', () => {
+    const savedDoc = Object.getOwnPropertyDescriptor(globalThis, 'document')
+    const savedGcs = Object.getOwnPropertyDescriptor(globalThis, 'getComputedStyle')
+    let tokens: Record<string, string> = {}
+    ;(globalThis as { document?: unknown }).document = { documentElement: {} }
+    ;(globalThis as { getComputedStyle?: unknown }).getComputedStyle = () => ({
+      getPropertyValue: (name: string) => tokens[name] ?? '',
+    })
+    try {
+      // boot under dark tokens (empty → dark fallback)
+      const graph = builtGraph(readGraphPalette())
+      expect(graph.getNodeAttribute('a', 'color')).toBe(categoryColor('learnings', dark))
+
+      // user flips to light: tokens change, then the handler body runs
+      tokens = {
+        '--graph-label': '#54586a',
+        '--graph-edge': '#c4c8d4',
+        '--graph-edge-strong': '#a6abbd',
+        '--graph-node-sat': '62',
+        '--graph-node-lum': '45',
+      }
+      const palette = readGraphPalette() // what GraphPage.onThemeChange reads
+      recolorGraph(graph, palette)
+
+      expect(graph.getNodeAttribute('a', 'color')).toBe(categoryColor('learnings', light))
+      expect(graph.getEdgeAttribute('a', 'b', 'color')).toBe(light.edgeStrongColor)
+    } finally {
+      if (savedDoc) Object.defineProperty(globalThis, 'document', savedDoc)
+      else delete (globalThis as { document?: unknown }).document
+      if (savedGcs) Object.defineProperty(globalThis, 'getComputedStyle', savedGcs)
+      else delete (globalThis as { getComputedStyle?: unknown }).getComputedStyle
+    }
+  })
+})
+
+// The overview meta-graph is a separate UndirectedGraph whose nodes carry no
+// category — recolorOverviewGraph re-derives node colors from the RETAINED wire
+// response (by cluster ordinal) and resets every meta-edge to the normal edge
+// color (matching buildOverviewGraph). Positions are never touched.
+describe('recolorOverviewGraph', () => {
+  function builtOverview(palette: GraphPalette) {
+    const resp = overview({
+      nodes: [
+        onode(0, { top_categories: ['learnings'] }),
+        onode(1, { top_categories: ['decisions'] }),
+        onode(2, { top_categories: [] }), // no top category → 'cluster' fallback
+      ],
+      edges: [[0, 1, 5, 1]],
+    })
+    return { graph: buildOverviewGraph(resp, palette), resp }
+  }
+
+  it('re-paints meta-node colors from the response (top category, cluster fallback)', () => {
+    const { graph, resp } = builtOverview(dark)
+    expect(graph.getNodeAttribute('0', 'color')).toBe(categoryColor('learnings', dark))
+
+    recolorOverviewGraph(graph, resp, light)
+
+    expect(graph.getNodeAttribute('0', 'color')).toBe(categoryColor('learnings', light))
+    expect(graph.getNodeAttribute('1', 'color')).toBe(categoryColor('decisions', light))
+    expect(graph.getNodeAttribute('2', 'color')).toBe(categoryColor('cluster', light))
+  })
+
+  it('resets ALL meta-edge colors to the normal edge color', () => {
+    const { graph, resp } = builtOverview(dark)
+    expect(graph.getEdgeAttribute('0', '1', 'color')).toBe(dark.edgeColor)
+
+    recolorOverviewGraph(graph, resp, light)
+
+    let allLight = true
+    graph.forEachEdge((_id, attrs) => {
+      if (attrs.color !== light.edgeColor) allLight = false
+    })
+    expect(allLight).toBe(true)
+  })
+
+  it('leaves node positions untouched (recolor only, no re-layout)', () => {
+    const { graph, resp } = builtOverview(dark)
+    const x0 = graph.getNodeAttribute('0', 'x')
+    const y0 = graph.getNodeAttribute('0', 'y')
+
+    recolorOverviewGraph(graph, resp, light)
+
+    expect(graph.getNodeAttribute('0', 'x')).toBe(x0)
+    expect(graph.getNodeAttribute('0', 'y')).toBe(y0)
   })
 })

@@ -1,16 +1,22 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte'
+  import type { UndirectedGraph } from 'graphology'
   import Sigma from 'sigma'
   import { toApiError, type ApiError } from '../../lib/api'
   import { fetchOverview, type OverviewResponse } from '../../lib/graph/api'
   import { buildOverviewGraph, type MetaEdgeAttrs, type MetaNodeAttrs } from '../../lib/graph/overview-map'
-  import type { GraphPalette } from '../../lib/graph/graph-theme'
+  import { recolorOverviewGraph, type GraphPalette } from '../../lib/graph/graph-theme'
 
   // Single click on a cluster → drill into its representative's ego net.
   let { onpick, palette }: { onpick: (reprId: string) => void; palette: GraphPalette } = $props()
 
   let container: HTMLDivElement
   let renderer: Sigma<MetaNodeAttrs, MetaEdgeAttrs> | null = null
+  // Retained for the G2 theme re-color: the meta-graph instance + the wire
+  // response it was built from (the meta-nodes carry no category, so recolor
+  // re-derives node colors from the response — see recolorOverviewGraph).
+  let metaGraph: UndirectedGraph<MetaNodeAttrs, MetaEdgeAttrs> | null = null
+  let overviewResp: OverviewResponse | null = null
   let loading = $state(true)
   let error = $state<ApiError | null>(null)
   let stats = $state<OverviewResponse['stats'] | null>(null)
@@ -31,6 +37,8 @@
         await tick()
         if (killed) return
         const graph = buildOverviewGraph(resp, palette)
+        metaGraph = graph
+        overviewResp = resp
         const r = new Sigma(graph, container, {
           labelRenderedSizeThreshold: 4, // meta-nodes are few — label generously
           labelColor: { color: palette.labelColor },
@@ -59,7 +67,26 @@
       killed = true
       renderer?.kill()
       renderer = null
+      metaGraph = null
+      overviewResp = null
     }
+  })
+
+  // G2: theme switch hands down a NEW palette (GraphPage reassigns its $state on
+  // THEME_CHANGE_EVENT). This map owns its own sigma instance + meta-graph, so
+  // it re-bakes its node/edge color attrs (recolorOverviewGraph, from the
+  // retained response) and pushes the label/edge Sigma settings + refresh().
+  // No remount, no FA2 re-layout — positions stay put. Skips until the async
+  // load has populated the graph (the initial build already used this palette).
+  $effect(() => {
+    const r = renderer
+    const g = metaGraph
+    const resp = overviewResp
+    if (!r || !g || !resp) return
+    recolorOverviewGraph(g, resp, palette)
+    r.setSetting('labelColor', { color: palette.labelColor })
+    r.setSetting('defaultEdgeColor', palette.edgeColor)
+    r.refresh()
   })
 
   // Local date format; the timestamp is the last rebuild, not "now".

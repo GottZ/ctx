@@ -5,7 +5,8 @@
   import { LayoutRunner } from '../../lib/graph/fa2'
   import { defaultFilters, toEgoQuery } from '../../lib/graph/filters'
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
-  import { readGraphPalette } from '../../lib/graph/graph-theme'
+  import { readGraphPalette, recolorGraph } from '../../lib/graph/graph-theme'
+  import { THEME_CHANGE_EVENT } from '../../lib/theme/theme.svelte'
   import DetailSidebar from './DetailSidebar.svelte'
   import FilterPanel from './FilterPanel.svelte'
   import GraphView from './GraphView.svelte'
@@ -39,7 +40,21 @@
   onMount(() => {
     const fromUrl = new URLSearchParams(location.search).get('focus')
     if (fromUrl) void setFocus(fromUrl, { pushUrl: false })
-    return () => layout.dispose()
+    // G2: live re-color on theme switch (design 03-§4). The theme controller
+    // writes data-theme THEN fires THEME_CHANGE_EVENT, so readGraphPalette()
+    // here already sees the new --graph-* tokens. Re-bake the baked color attrs
+    // on the live graphology instance (recolorGraph) and reassign the palette
+    // $state — the latter flows to GraphView/OverviewMap, which push the new
+    // Sigma label/edge settings + refresh(). No remount, no re-layout.
+    const onThemeChange = (): void => {
+      palette = readGraphPalette()
+      recolorGraph(graph, palette)
+    }
+    window.addEventListener(THEME_CHANGE_EVENT, onThemeChange)
+    return () => {
+      window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange)
+      layout.dispose()
+    }
   })
 
   /** Post-merge bookkeeping shared by focus + expand: BFS hops → eviction
