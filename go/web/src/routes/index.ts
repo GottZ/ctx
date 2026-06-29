@@ -48,6 +48,11 @@ export const areaRoutes = {
   // registered yet — its page does not exist (the /tenant prefix-guard still
   // covers it once it lands).
   '/admin': () => import('./admin/AdminPage.svelte'),
+  // Tenant-detail + per-scope quota (design 04 §3, Welle A4). Registered in the
+  // SAME wave that adds TenantDetail.svelte (NOT in A2) so Vite can resolve the
+  // lazy chunk. areaMode('/admin/tenants/:id') is unmapped → 'reading'; the N5
+  // /admin prefix-guard already covers this sub-route (no extra guard needed).
+  '/admin/tenants/:id': () => import('./admin/TenantDetail.svelte'),
   '/tenant': () => import('./tenant/TenantPage.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes

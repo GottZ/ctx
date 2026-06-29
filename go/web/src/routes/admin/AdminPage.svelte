@@ -88,7 +88,7 @@
             <tbody>
               {#each model.tenants as t (t.id)}
                 <tr>
-                  <td class="slug">{t.slug}</td>
+                  <td class="slug"><a href="/admin/tenants/{t.id}">{t.slug}</a></td>
                   <td class="name">{t.display_name || '—'}</td>
                   <td>
                     <span class="badge">
@@ -223,6 +223,13 @@
   .slug {
     font-family: var(--font-mono);
     color: var(--text);
+  }
+  .slug a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .slug a:hover {
+    text-decoration: underline;
   }
   .name {
     color: var(--text-dim);

@@ -514,7 +514,10 @@ alongside a read-only quota card. The admin area also carries a corpus-
 maintenance panel — dry-run-by-default triggers for the sensitivity audit and
 credentials classify, with a live progress poll over the server home scope, and
 a scope-map panel listing every scope across the store with its block/key counts
-and owning tenant (unmapped for system or unassigned scopes).
+and owning tenant (unmapped for system or unassigned scopes). Clicking a tenant
+opens its detail page (`/admin/tenants/:id`) with a per-scope quota form — daily
+and monthly cost, daily calls and an on-exceed policy (block vs degrade to local)
+— where a blank limit means that dimension is unlimited rather than zero.
 
 The **Settings area** renders the full [Settings API](#settings-api) catalog
 generically from the registry metadata — one category card per key prefix,

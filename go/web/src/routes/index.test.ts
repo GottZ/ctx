@@ -22,6 +22,7 @@ import type { WhoamiResponse } from '../lib/api/types'
 const BASE_AREAS = [
   '*',
   '/admin',
+  '/admin/tenants/:id',
   '/blocks',
   '/chat',
   '/graph',
