@@ -12,6 +12,7 @@
   // (ThemeToggle) and N7 (IdentityBadge) mount later — left structurally present.
   import Wordmark from './Wordmark.svelte'
   import ThemeToggle from './lib/theme/ThemeToggle.svelte'
+  import IdentityBadge from './lib/ui/IdentityBadge.svelte'
   import { session } from './lib/auth.svelte'
   import { route } from './router'
   import { visibleNav } from './lib/layout/nav'
@@ -51,8 +52,6 @@
     const p = route.pathname
     return item.exact ? p === item.href : p === item.href || p.startsWith(`${item.href}/`)
   }
-
-  const readOnly = $derived(session.homeScope === '')
 </script>
 
 {#snippet icon(key: string)}
@@ -137,24 +136,13 @@
   </div>
 
   <div class="footer">
-    <!-- Footer-Slots: TH4 mounts ThemeToggle here, N7 mounts IdentityBadge. -->
+    <!-- Footer-Slots: TH4 mounts ThemeToggle here. -->
     <div class="footer-slots">
       <ThemeToggle {expanded} />
     </div>
 
-    {#if session.label && expanded}
-      <span class="key-label" title="API key label">{session.label}</span>
-    {/if}
-
-    {#if readOnly}
-      <span
-        class="badge"
-        title="This key has no writable scope (home_scope is empty) — mutating areas render read-only."
-        aria-label="Read-only key"
-      >
-        {expanded ? 'read-only' : 'RO'}
-      </span>
-    {/if}
+    <!-- N7: identity (label / tenant / role / read-only), a11y-named. -->
+    <IdentityBadge {expanded} />
 
     <div class="footer-actions">
       <button
@@ -323,31 +311,6 @@
   }
   .footer-slots:empty {
     display: none;
-  }
-  .key-label {
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    padding: 0 var(--space-2);
-  }
-  .badge {
-    align-self: flex-start;
-    font-family: var(--font-mono);
-    font-size: var(--label-size);
-    letter-spacing: var(--label-tracking);
-    text-transform: uppercase;
-    color: var(--warn);
-    border: 1px solid var(--warn);
-    border-radius: var(--radius);
-    padding: 0.05rem var(--space-2);
-    white-space: nowrap;
-  }
-  .rail.icon .badge {
-    align-self: center;
-    padding: 0.05rem var(--space-1);
   }
   .footer-actions {
     display: flex;

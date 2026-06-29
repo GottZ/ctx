@@ -490,7 +490,10 @@ collapsed to icons.
 The shell is a collapsible left **nav rail** (icon-only on narrow desktops, an
 off-canvas drawer with focus-trap on mobile) rather than a top bar; rail entries
 are role-adaptive — filtered from the caller's `whoami` capabilities, so a member
-sees the corpus areas while admins additionally get tenant/server sections. Each
+sees the corpus areas while admins additionally get tenant/server sections. The
+rail footer carries an **identity badge** — the API-key label, the owning tenant,
+and a role badge (owner/admin/member), with a read-only marker when the key has no
+writable scope. Each
 area declares a layout mode: reading surfaces (Settings/Status) stay centered at a
 readable measure, while canvas/master-detail areas (Graph/Blocks/Chat) use the
 full viewport width on wide screens instead of the former fixed column.
