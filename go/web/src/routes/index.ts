@@ -40,3 +40,10 @@ export const areaRoutes = {
 export function entryRedirect(pathname: string): '/status' | null {
   return pathname === '/' ? '/status' : null
 }
+
+// areaMode (design 01-shell-layout §3, §4 S2) is the route->layout-mode map. It
+// lives in lib/layout/modes but is re-exported here so the route-namespace test
+// (index.test.ts) can pin "every areaRoutes key resolves to a LayoutMode" next
+// to the table it guards — one shared pure test, no cross-dir import there.
+export { areaMode } from '../lib/layout/modes'
+export type { LayoutMode } from '../lib/layout/modes'
