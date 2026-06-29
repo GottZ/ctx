@@ -219,9 +219,39 @@ function manageFixture(action: string | undefined, _role: Role): Record<string, 
       ] }
     case 'backend-list':
       return { success: true, backends: [] }
+    // A7 corpus maintenance — start kicks off (running), status reports it
+    // finished so the poll loop converges to a terminal state on the next tick.
+    case 'blocks-audit-start':
+      return { success: true, scope: 'home', pending: 30, by_source: { 'llm-audit': 12 }, run: auditRun(true) }
+    case 'blocks-audit-status':
+      return { success: true, scope: 'home', pending: 30, by_source: { 'llm-audit': 12 }, run: auditRun(false) }
+    case 'blocks-classify-start':
+      return { success: true, scope: 'home', by_source: { default: 8 }, run: classifyRun(true) }
+    case 'blocks-classify-status':
+      return { success: true, scope: 'home', by_source: { default: 8 }, run: classifyRun(false) }
     default:
       return { success: true }
   }
+}
+
+function auditRun(running: boolean): Record<string, unknown> {
+  return running
+    ? { running: true, dry_run: true, processed: 0, kept_credentials: 0, to_personal: 0, to_internal: 0, no_verdict: 0, discarded: 0, aborted: false }
+    : { running: false, dry_run: true, processed: 30, kept_credentials: 2, to_personal: 5, to_internal: 20, no_verdict: 3, discarded: 0, aborted: false, finished_at: '2026-06-29T12:00:00Z' }
+}
+
+function classifyRun(running: boolean): Record<string, unknown> {
+  return running
+    ? { running: true, dry_run: true, scanned: 0, upgraded: 0, discarded: 0, aborted: false }
+    : { running: false, dry_run: true, scanned: 40, upgraded: 3, discarded: 0, aborted: false, finished_at: '2026-06-29T12:00:00Z' }
+}
+
+/** Empty-corpus variants (N8 empty-state coverage). */
+function emptySearchFixture(): Record<string, unknown> {
+  return { count: 0, results: [], next_after: null }
+}
+function emptyOverviewFixture(): Record<string, unknown> {
+  return { success: true, params: {}, nodes: [], edges: [], stats: { nodes: 0, edges: 0, truncated: false, computed_at: null, elapsed_ms: 5 } }
 }
 
 /**
@@ -229,7 +259,10 @@ function manageFixture(action: string | undefined, _role: Role): Record<string, 
  * a deterministic theme pref (localStorage, read by theme-boot.js before first
  * paint), then install the `/api/**` mocks. Must run BEFORE page.goto().
  */
-export async function seedSession(page: Page, opts: { role: Role; theme: 'light' | 'dark' }): Promise<void> {
+export async function seedSession(
+  page: Page,
+  opts: { role: Role; theme: 'light' | 'dark'; empty?: boolean },
+): Promise<void> {
   await page.addInitScript(
     ({ key, theme }) => {
       try {
@@ -259,10 +292,10 @@ export async function seedSession(page: Page, opts: { role: Role; theme: 'light'
     if (path === '/api/llmlog') return route.fulfill({ json: { success: true, entries: [] } })
     if (path === '/api/settings' && method === 'GET') return route.fulfill({ json: { success: true, settings: settingsFixture() } })
     if (path === '/api/secrets' && method === 'GET') return route.fulfill({ json: { success: true, secrets: [] } })
-    if (path.startsWith('/api/graph/overview')) return route.fulfill({ json: overviewFixture() })
+    if (path.startsWith('/api/graph/overview')) return route.fulfill({ json: opts.empty ? emptyOverviewFixture() : overviewFixture() })
     if (path.startsWith('/api/graph/ego')) return route.fulfill({ json: egoFixture() })
     if (path.startsWith('/api/chat/sessions')) return route.fulfill({ json: { success: true, sessions: [] } })
-    if (path === '/api/search') return route.fulfill({ json: searchFixture() })
+    if (path === '/api/search') return route.fulfill({ json: opts.empty ? emptySearchFixture() : searchFixture() })
     if (path === '/api/manage' && method === 'POST') {
       let action: string | undefined
       try {
