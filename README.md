@@ -477,6 +477,13 @@ is the channel that ships the real UI. Plain `go build` / `go install .../cmd/ct
 need no Bun and produce a binary that serves a 503 placeholder instead of the UI;
 the CLI (`cmd/ctx`) never depends on the frontend at all.
 
+All surfaces theme from one token set (Tokyo-Night-adjacent dark + a light
+counterpart) via a `data-theme` attribute on `<html>`. The preference
+(`system`/`light`/`dark`) is detected from `prefers-color-scheme`, follows the
+OS by default, and persists in `localStorage`; a render-blocking,
+`script-src 'self'`-compliant boot script (`/theme-boot.js`) applies it before
+first paint, so there is no dark-flash.
+
 The **Settings area** renders the full [Settings API](#settings-api) catalog
 generically from the registry metadata — one category card per key prefix,
 widgets dispatched by registry type (an unknown future type degrades to a

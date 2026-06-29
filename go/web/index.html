@@ -1,6 +1,10 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <!-- No-FOUC: render-blocking classic script sets data-theme before first
+         paint. First head child, NOT type=module (modules defer = too late),
+         external + same-origin = CSP script-src 'self' clean. See 02-theme.md. -->
+    <script src="/theme-boot.js"></script>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
