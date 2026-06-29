@@ -510,7 +510,9 @@ tenant-admin **keys** area (`/tenant`) hang off the rail's server / tenant
 sections. The keys area lists, creates and revokes the tenant's API keys —
 creation surfaces the plaintext exactly once (a show-once reveal that is never
 persisted client-side), revoke carries a self-revoke guard on the calling key —
-alongside a read-only quota card.
+alongside a read-only quota card. The admin area also carries a corpus-
+maintenance panel — dry-run-by-default triggers for the sensitivity audit and
+credentials classify, with a live progress poll over the server home scope.
 
 The **Settings area** renders the full [Settings API](#settings-api) catalog
 generically from the registry metadata — one category card per key prefix,

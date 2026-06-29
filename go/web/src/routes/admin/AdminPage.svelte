@@ -10,6 +10,7 @@
   import { session } from '../../lib/auth.svelte'
   import type { TenantStatus } from '../../lib/api/types'
   import { TenantsModel } from './tenants.svelte'
+  import CorpusMaintenance from './CorpusMaintenance.svelte'
 
   const model = new TenantsModel()
 
@@ -101,6 +102,8 @@
         </div>
       {/if}
     </section>
+
+    <CorpusMaintenance />
   {/if}
 </section>
 
