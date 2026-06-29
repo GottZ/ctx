@@ -6,6 +6,19 @@
 
   let { store }: { store: ChatStore } = $props()
 
+  // < sm drawer state (design 01-shell-layout §6). Presentational only — the
+  // session/stream store is never touched here. The list is an inline column
+  // ≥ sm; below sm it becomes an off-canvas drawer behind a toggle.
+  let open = $state(false)
+
+  // Opening / creating / deleting a session dismisses the drawer so the freshly
+  // selected conversation is visible. Reads currentId (the store sets it on
+  // those actions); never writes store state.
+  $effect(() => {
+    void store.currentId
+    open = false
+  })
+
   function del(id: string, title: string): void {
     if (confirm(`Delete "${title}"? This removes the session and its messages.`)) {
       void store.deleteSession(id)
@@ -13,7 +26,15 @@
   }
 </script>
 
-<aside class="sidebar">
+<button
+  class="drawer-toggle"
+  type="button"
+  aria-label="Sessions"
+  aria-expanded={open}
+  aria-controls="session-list"
+  onclick={() => (open = !open)}>☰</button>
+
+<aside id="session-list" class="sidebar" class:open>
   <button class="new" type="button" onclick={() => store.newSession()} disabled={store.streaming}>+ New chat</button>
 
   {#if store.loadingList && store.sessions.length === 0}
@@ -38,15 +59,27 @@
   {/if}
 </aside>
 
+{#if open}
+  <button class="scrim" type="button" aria-label="Close sessions" onclick={() => (open = false)}></button>
+{/if}
+
 <style>
   .sidebar {
-    width: 15rem;
+    width: var(--session-w);
     flex: none;
     border-right: 1px solid var(--border);
     background: var(--surface-1);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
+  }
+
+  /* Toggle + scrim are inert ≥ sm; the < sm container query (querying ChatPage's
+     .chat region container, design 01 §6) turns the list into an off-canvas
+     drawer behind the toggle. */
+  .drawer-toggle,
+  .scrim {
+    display: none;
   }
   .new {
     margin: var(--space-2);
@@ -105,5 +138,61 @@
   }
   .del:hover {
     color: var(--danger);
+  }
+
+  /* < sm: the region is too narrow for a fixed 15rem column beside the thread, so
+     the list becomes a slide-in drawer overlaying the conversation (design 01
+     §6). 40rem == breakpoints.ts SM, matching BlocksPage's split-stack query. */
+  @container (max-width: 40rem) {
+    .drawer-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      position: absolute;
+      top: var(--space-2);
+      /* top-right: clear of the left-sliding drawer, so it stays the visible
+         open/close affordance without overlapping the list's "+ New chat". */
+      right: var(--space-2);
+      z-index: calc(var(--z-drawer) + 2);
+      padding: var(--space-1) var(--space-2);
+      font-family: var(--font-mono);
+      line-height: 1;
+    }
+    .sidebar {
+      position: absolute;
+      inset-block: 0;
+      left: 0;
+      width: min(var(--session-w), 80%);
+      z-index: calc(var(--z-drawer) + 1);
+      transform: translateX(-100%);
+      visibility: hidden;
+      transition: transform 160ms ease, visibility 160ms ease;
+      box-shadow: 2px 0 12px rgba(0, 0, 0, 0.35);
+    }
+    .sidebar.open {
+      transform: none;
+      visibility: visible;
+    }
+    .scrim {
+      display: block;
+      position: absolute;
+      inset: 0;
+      z-index: var(--z-drawer);
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: rgba(0, 0, 0, 0.45);
+      cursor: pointer;
+    }
+    /* the global button:hover would lighten the scrim — keep it constant */
+    .scrim:hover:not(:disabled) {
+      background: rgba(0, 0, 0, 0.45);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar {
+      transition: none;
+    }
   }
 </style>
