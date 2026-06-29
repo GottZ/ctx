@@ -65,7 +65,7 @@
     // Test-hook (design 03-§4/§6): the colors live in the WebGL canvas, not
     // the DOM — the Playwright gate reads them via getSetting/getNodeAttribute.
     // Dev/test only; never exposed in production builds.
-    if (import.meta.env.DEV && typeof window !== 'undefined') {
+    if ((import.meta.env.DEV || import.meta.env.VITE_E2E) && typeof window !== 'undefined') {
       ;(window as unknown as { __ctxGraph?: unknown }).__ctxGraph = { renderer: r, graph }
     }
     return () => {

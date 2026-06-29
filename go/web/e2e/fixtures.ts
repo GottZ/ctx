@@ -255,39 +255,22 @@ export async function seedSession(page: Page, opts: { role: Role; theme: 'light'
   })
 }
 
-// The Vite DEV server pre-bundles deps lazily: the first cold navigation to a
-// route can trigger a dep-optimizer reload that drops the in-flight dynamic
-// route-chunk import with exactly this message. It is a dev-server artifact —
-// the production build the Go binary embeds ships static hashed chunks with no
-// optimizer, so this can never occur there. We run against dev (not `vite
-// preview`) only because the __ctxGraph test-hook is import.meta.env.DEV-gated.
-const DEV_IMPORT_FLAKE = /Failed to fetch dynamically imported module/
-
-/** Collect uncaught page exceptions (minus the known dev-optimizer transient). */
+/** Collect uncaught page exceptions; assert this stays empty after a render. */
 export function trackPageErrors(page: Page): string[] {
   const errors: string[] = []
-  page.on('pageerror', (err) => {
-    if (!DEV_IMPORT_FLAKE.test(err.message)) errors.push(err.message)
-  })
+  page.on('pageerror', (err) => errors.push(err.message))
   return errors
 }
 
 /**
- * Navigate to an SPA area, tolerating the dev-optimizer's one-shot dynamic-
- * import drop: if the lazy route chunk failed (shell up but content region
- * empty), reload once against the now-warm optimizer. Returns when the routed
- * area has mounted something under main.content.
+ * Navigate to an SPA area and wait for the routed content to mount. The smoke
+ * runs against the production build (vite preview), whose static hashed chunks
+ * load deterministically, so a single goto suffices. The content wait also
+ * covers the boot-time landing/guard redirect (N4/N5): after a redirect the
+ * target area's component mounts under main.content.
  */
 export async function gotoArea(page: Page, path: string): Promise<void> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    await page.goto(path)
-    try {
-      await page.locator('.shell').waitFor({ state: 'visible', timeout: 8000 })
-      await page.locator('main.content > *').first().waitFor({ state: 'attached', timeout: 6000 })
-      return
-    } catch {
-      // optimizer reload likely dropped the chunk — retry against the warm server
-    }
-  }
   await page.goto(path)
+  await page.locator('.shell').waitFor({ state: 'visible', timeout: 10_000 })
+  await page.locator('main.content > *').first().waitFor({ state: 'attached', timeout: 10_000 })
 }

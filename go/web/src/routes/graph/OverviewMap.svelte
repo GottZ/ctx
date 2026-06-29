@@ -53,7 +53,7 @@
         })
         renderer = r
         // Test-hook (design 03-§4/§6) — see GraphView; dev/test only.
-        if (import.meta.env.DEV && typeof window !== 'undefined') {
+        if ((import.meta.env.DEV || import.meta.env.VITE_E2E) && typeof window !== 'undefined') {
           ;(window as unknown as { __ctxGraph?: unknown }).__ctxGraph = { renderer: r, graph }
         }
       } catch (err) {
