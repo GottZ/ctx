@@ -11,6 +11,7 @@
   // an accessible name via aria-label. The Footer-Slots region is where TH4
   // (ThemeToggle) and N7 (IdentityBadge) mount later — left structurally present.
   import Wordmark from './Wordmark.svelte'
+  import ThemeToggle from './lib/theme/ThemeToggle.svelte'
   import { session } from './lib/auth.svelte'
   import { route } from './router'
   import { visibleNav } from './lib/layout/nav'
@@ -137,7 +138,9 @@
 
   <div class="footer">
     <!-- Footer-Slots: TH4 mounts ThemeToggle here, N7 mounts IdentityBadge. -->
-    <div class="footer-slots"></div>
+    <div class="footer-slots">
+      <ThemeToggle {expanded} />
+    </div>
 
     {#if session.label && expanded}
       <span class="key-label" title="API key label">{session.label}</span>

@@ -482,7 +482,10 @@ counterpart) via a `data-theme` attribute on `<html>`. The preference
 (`system`/`light`/`dark`) is detected from `prefers-color-scheme`, follows the
 OS by default, and persists in `localStorage`; a render-blocking,
 `script-src 'self'`-compliant boot script (`/theme-boot.js`) applies it before
-first paint, so there is no dark-flash.
+first paint, so there is no dark-flash. A three-segment toggle
+(system/light/dark) in the nav-rail footer switches it — a keyboard-navigable
+radiogroup when the rail is expanded, a compact icon-cycle button when it is
+collapsed to icons.
 
 The shell is a collapsible left **nav rail** (icon-only on narrow desktops, an
 off-canvas drawer with focus-trap on mobile) rather than a top bar; rail entries
