@@ -503,7 +503,11 @@ CTAs), higher tiers on the status dashboard — and a client-side tier guard
 redirects a forbidden deep
 link back there — visibility only; the real authorization stays server-side. The
 server-admin **tenant register** (`/admin`, a read-only tenant list) and the
-tenant-admin **keys** area (`/tenant`) hang off the rail's server / tenant sections.
+tenant-admin **keys** area (`/tenant`) hang off the rail's server / tenant
+sections. The keys area lists, creates and revokes the tenant's API keys —
+creation surfaces the plaintext exactly once (a show-once reveal that is never
+persisted client-side), revoke carries a self-revoke guard on the calling key —
+alongside a read-only quota card.
 
 The **Settings area** renders the full [Settings API](#settings-api) catalog
 generically from the registry metadata — one category card per key prefix,

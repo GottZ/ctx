@@ -1,17 +1,20 @@
 <script lang="ts">
-  // Tenant-admin area shell (design 05-tenant-admin §1/§3, Wave TK3) — the
-  // READ-ONLY surface over the tenant's API keys (the keys ARE the member-
-  // proxys). This wave only LISTS; key creation (TK4), revoke + show-revoked +
-  // self-revoke guard (TK5) and the quota form (TK6) land later and fill their
-  // own files — they do NOT edit this shell. So the model's mutation set
-  // (create/remove/toggleRevoked) is deliberately left UNWIRED here; we read
-  // only keys/status/loadError.
+  // Tenant-admin area shell (design 05-tenant-admin §1/§3, Waves TK3–TK6) — the
+  // surface over the tenant's API keys (the keys ARE the member-proxys). Now
+  // functional: list (TK3) + create-with-show-once-reveal (TK4) + revoke with
+  // confirm, show-revoked toggle and self-revoke guard (TK5) + read-only quota
+  // (TK6). All mutations go through the KeysModel; the child dialogs/cards fill
+  // their own files. The server stays authoritative on every write.
   //
   // Self-gate: manageTenantKeys (tenant-admin+ or server-admin, capabilitiesFor
   // §3) mirrors the server's requireTenantAdmin — a member key gets a banner,
   // not a doomed 403 request. The gate is UX only; the server is authoritative.
+  import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
   import { session } from '../../lib/auth.svelte'
+  import type { ApiKeyView } from '../../lib/api/types'
   import { KeysModel } from './keys.svelte'
+  import KeyCreateDialog from './KeyCreateDialog.svelte'
+  import QuotaCard from './QuotaCard.svelte'
 
   // KeysModel carries its own $state runes, so a plain const instance is
   // reactive in the template (§ Svelte-5 class-runes). Load is driven by an
@@ -19,11 +22,35 @@
   // (§6/R6) — still triggers the fetch the moment access resolves.
   const keys = new KeysModel()
 
+  // TK4: create-dialog open flag. TK5: the row pending revoke (null = no dialog)
+  // — a fresh ConfirmDialog mounts per target so showModal re-fires each time.
+  let creating = $state(false)
+  let revokeTarget = $state<ApiKeyView | null>(null)
+
   $effect(() => {
     if (session.caps.manageTenantKeys && keys.status === 'idle') {
       void keys.load()
     }
   })
+
+  function requestRevoke(k: ApiKeyView): void {
+    // Self-revoke is hard-disabled in the UI (button never reaches here for the
+    // own key), but guard once more so the dialog can never target it (§6/§7.5).
+    if (isOwnKey(k.id)) return
+    revokeTarget = k
+  }
+
+  function confirmRevoke(): Promise<void> {
+    const target = revokeTarget
+    if (target === null) return Promise.resolve()
+    // remove() throws on failure → ConfirmDialog stays open and surfaces the
+    // 404-no-oracle "key not found" (neutral, no foreign-key oracle). On success
+    // it reloaded the list; defer the unmount to a macrotask so ConfirmDialog
+    // finishes its own close() before {#if revokeTarget} tears it down.
+    return keys.remove(target.id).then(() => {
+      setTimeout(() => (revokeTarget = null), 0)
+    })
+  }
 
   function isOwnKey(id: string): boolean {
     return session.apiKeyId !== null && id === session.apiKeyId
@@ -54,7 +81,7 @@
     <h1>Tenant</h1>
     <p class="sub">
       API keys for <strong>{session.tenantDisplayName ?? session.tenantSlug ?? 'your tenant'}</strong> — they ARE the
-      tenant's member proxys. Read-only here: creation, revoke and quota land in later waves.
+      tenant's member proxys. Create, reveal once, and revoke them here; quota is read-only.
     </p>
   </header>
 
@@ -66,6 +93,23 @@
       403). Ask an owner or admin of the tenant to manage keys.
     </p>
   {:else}
+    <div class="toolbar">
+      <button type="button" class="cta" onclick={() => (creating = true)}>+ New key</button>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={keys.showRevoked}
+          disabled={keys.status === 'loading'}
+          onchange={() => void keys.toggleRevoked()}
+        />
+        show revoked
+      </label>
+    </div>
+
+    {#if keys.actionError}
+      <p class="action-error" role="alert">{keys.actionError}</p>
+    {/if}
+
     {#if keys.status === 'loading' || keys.status === 'idle'}
       <p class="state" aria-busy="true">loading tenant keys…</p>
     {:else if keys.status === 'error'}
@@ -76,8 +120,11 @@
       </div>
     {:else if keys.keys.length === 0}
       <div class="empty" role="status">
-        <p class="empty-title">No active keys yet</p>
-        <p class="empty-hint">Key creation arrives in a later wave — this view lists the tenant's keys read-only.</p>
+        <p class="empty-title">No keys to show</p>
+        <p class="empty-hint">
+          Mint one with <strong>New key</strong> above. If you've revoked keys before, toggle <strong>show revoked</strong>
+          to see them.
+        </p>
       </div>
     {:else}
       <section class="card" aria-label="tenant API keys">
@@ -96,6 +143,7 @@
                 <th>status</th>
                 <th>last used</th>
                 <th>created</th>
+                <th class="col-action">revoke</th>
               </tr>
             </thead>
             <tbody>
@@ -129,6 +177,29 @@
                   </td>
                   <td class="when">{fmtUsed(k.last_used_at)}</td>
                   <td class="when">{k.created_at.slice(0, 10)}</td>
+                  <td class="col-action">
+                    {#if !k.active}
+                      <span class="dim">—</span>
+                    {:else if isOwnKey(k.id)}
+                      <button
+                        type="button"
+                        class="revoke"
+                        disabled
+                        title="This is the key you're signed in with — create and test a replacement key first, then revoke this one from there. No self-service recovery."
+                      >
+                        revoke
+                      </button>
+                    {:else}
+                      <button
+                        type="button"
+                        class="revoke danger"
+                        disabled={keys.busyId === k.id}
+                        onclick={() => requestRevoke(k)}
+                      >
+                        {keys.busyId === k.id ? '…' : 'revoke'}
+                      </button>
+                    {/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
@@ -137,23 +208,25 @@
       </section>
     {/if}
 
-    <!-- Read-only stubs for the surfaces that later waves fill (no form, no
-         mutation): key creation + members (TK4), quota transparency (TK6). They
-         keep the area coherent without pretending the capability exists yet. -->
-    <div class="stubs">
-      <div class="stub">
-        <span class="stub-tag">soon</span>
-        <p class="stub-title">Members &amp; key creation</p>
-        <p class="stub-body">Minting new tenant keys and managing members arrives in a later wave.</p>
-      </div>
-      <div class="stub">
-        <span class="stub-tag">soon</span>
-        <p class="stub-title">Quota</p>
-        <p class="stub-body">Read-only quota transparency for the tenant's scopes arrives in a later wave.</p>
-      </div>
-    </div>
+    <!-- TK6: read-only quota transparency for the tenant's own scope. -->
+    <QuotaCard />
   {/if}
 </section>
+
+{#if creating}
+  <KeyCreateDialog {keys} onclose={() => (creating = false)} />
+{/if}
+
+{#if revokeTarget}
+  <ConfirmDialog
+    danger
+    title="Revoke key"
+    message={`Revoke "${revokeTarget.label}"? This soft-deletes it immediately — any client using it loses access at once. It cannot be un-revoked from here.`}
+    confirmLabel="Revoke"
+    onconfirm={confirmRevoke}
+    oncancel={() => (revokeTarget = null)}
+  />
+{/if}
 
 <style>
   .area {
@@ -358,41 +431,74 @@
     white-space: nowrap;
   }
 
-  .stubs {
+  .toolbar {
     display: flex;
-    flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-3);
+    flex-wrap: wrap;
   }
-  .stub {
-    flex: 1 1 16rem;
-    border: 1px dashed var(--border-strong);
+  .cta {
+    font-family: var(--font-ui);
+    font-size: 0.82rem;
+    padding: var(--space-1) var(--space-3);
+    background: var(--surface-2);
+    border: 1px solid var(--accent);
     border-radius: var(--radius);
-    padding: var(--space-3);
-    background: var(--surface-1);
+    color: var(--accent);
+    cursor: pointer;
   }
-  .stub-tag {
+  .cta:hover {
+    background: var(--accent-dim);
+  }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .toggle input:disabled {
+    cursor: not-allowed;
+  }
+  .action-error {
+    margin: 0;
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--danger);
+    background: var(--danger-dim);
+    border-radius: var(--radius);
+    color: var(--danger);
+    font-size: 0.8rem;
+  }
+  .col-action {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .revoke {
     font-family: var(--font-mono);
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     text-transform: uppercase;
-    color: var(--text-faint);
-    border: 1px dashed var(--border-strong);
+    padding: 0 var(--space-2);
+    background: transparent;
+    border: 1px solid var(--border-strong);
     border-radius: var(--radius);
-    padding: 0.05rem var(--space-2);
-  }
-  .stub-title {
-    margin: var(--space-2) 0 0;
-    color: var(--text);
-    font-weight: 600;
-    font-size: 0.9rem;
-  }
-  .stub-body {
-    margin: var(--space-1) 0 0;
     color: var(--text-dim);
-    font-size: 0.82rem;
+    cursor: pointer;
   }
-  /* Mobile: the 7-column table overflows on a phone → it scrolls horizontally
-     via .scroll (the cheap, layout-stable degradation). The stub cards stack
-     on their own via flex-wrap (flex-basis 16rem). The per-key card-stack of
-     the table itself is TK5's concern (when the action column lands). */
+  .revoke.danger {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .revoke.danger:hover {
+    background: var(--danger-dim);
+  }
+  .revoke:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  /* Mobile: the 8-column table (incl. the revoke action) overflows on a phone →
+     it scrolls horizontally via .scroll (the cheap, layout-stable degradation).
+     A per-key card-stack at @375px is the design §6 stretch; horizontal scroll
+     keeps every column reachable in the meantime. */
 </style>
