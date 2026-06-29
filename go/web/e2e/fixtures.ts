@@ -217,6 +217,10 @@ function manageFixture(action: string | undefined, _role: Role): Record<string, 
       return { success: true, tenants: [
         { id: '550e8400-e29b-41d4-a716-446655440aaa', slug: 'acme', display_name: 'Acme Corp', status: 'active', created_at: '2026-05-01T08:00:00Z', updated_at: '2026-06-01T08:00:00Z' },
       ] }
+    case 'tenant-get':
+      return { success: true, tenant: { id: '550e8400-e29b-41d4-a716-446655440aaa', slug: 'acme', display_name: 'Acme Corp', status: 'active', created_at: '2026-05-01T08:00:00Z', updated_at: '2026-06-01T08:00:00Z' } }
+    case 'tenant-quota-set':
+      return { success: true, quota: { scope: 'home', enabled: true, daily_cost_usd: 9, monthly_cost_usd: 100, daily_calls: 1000, on_exceed: 'external_off' } }
     case 'scope-overview':
       return { success: true, scopes: [
         { scope: 'home', block_count: 128, key_count: 3, tenant_id: '550e8400-e29b-41d4-a716-446655440aaa' },

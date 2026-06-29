@@ -30,6 +30,22 @@ test.describe('role-gated areas + routing', () => {
     await page.screenshot({ path: `${SHOTS}/admin-scopemap.png` })
   })
 
+  test('A4: tenant detail → set a scope quota', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/admin')
+    await page.getByRole('link', { name: 'acme' }).click() // tenant register slug link
+    await expect(page).toHaveURL(/\/admin\/tenants\/550e8400/)
+    await expect(page.getByRole('heading', { name: 'tenant detail' })).toBeVisible()
+    // one QuotaForm per scope the tenant owns (home/shared from scope-overview).
+    const homeQuota = page.locator('form[aria-label="quota for scope home"]')
+    await expect(homeQuota).toBeVisible()
+    await homeQuota.getByLabel('daily cost (USD)').fill('9')
+    await homeQuota.getByRole('button', { name: 'save quota' }).click()
+    // the set → re-get cycle completes and shows the saved marker.
+    await expect(homeQuota.getByText('saved')).toBeVisible()
+    await page.screenshot({ path: `${SHOTS}/admin-tenant-detail.png` })
+  })
+
   test('TK3: tenant-admin sees the /tenant key table', async ({ page }) => {
     const errors = trackPageErrors(page)
     await seedSession(page, { role: 'tenant-admin', theme: 'dark' })
