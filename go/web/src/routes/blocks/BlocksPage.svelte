@@ -11,6 +11,7 @@
   import { canEdit, editInitialFromDetail, type BlockDraft } from '../../lib/blocks/edit'
   import { sensitivityBadge } from '../../lib/blocks/sensitivity'
   import { session } from '../../lib/auth.svelte'
+  import EmptyState from '../../lib/ui/EmptyState.svelte'
 
   // All list/search/filter state lives in the injectable model (block-workbench
   // W1/W2). This component stays thin: a search box, the facet panel, the hit
@@ -149,15 +150,30 @@
           {/if}
         </div>
       {:else if visible.length === 0}
-        <p class="empty" role="status">
-          {#if model.results.length > 0}
-            no block in the selected scope — clear the scope filter to see all
-          {:else if model.query === ''}
-            no blocks visible to this key
+        {#if model.results.length > 0}
+          <EmptyState
+            title="No blocks in this scope"
+            copy="Nothing matches the selected scope filter — clear it to see every block visible to this key."
+          />
+        {:else if model.query === ''}
+          {#if homeScope !== ''}
+            <EmptyState
+              title="No blocks yet"
+              copy="Your corpus is empty. Store your first block to start building the knowledge base."
+            >
+              {#snippet cta()}
+                <button type="button" class="empty-cta" onclick={openCreate}>Store your first block</button>
+              {/snippet}
+            </EmptyState>
           {:else}
-            no full-text match — words are stemmed, substrings don’t match
+            <EmptyState title="No blocks yet" copy="No blocks are visible to this read-only key yet." />
           {/if}
-        </p>
+        {:else}
+          <EmptyState
+            title="No matches"
+            copy="No full-text match — words are stemmed, so substrings and typos don’t match. Try a different keyword."
+          />
+        {/if}
       {:else}
         <ul class="results">
           {#each visible as r (r.id)}
@@ -315,10 +331,11 @@
     font-family: var(--font-mono);
     font-size: 0.85rem;
   }
-  .empty {
-    margin: 0;
-    color: var(--text-faint);
+  /* N8 empty-state CTA — "store your first block" on a fresh, writable corpus.
+     Inherits the global button chrome (like .new), just sized for the panel. */
+  .empty-cta {
     font-size: 0.85rem;
+    padding: var(--space-2) var(--space-3);
   }
 
   /* W7 "Load more" — newest-first keyset pagination. */

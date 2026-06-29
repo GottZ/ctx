@@ -496,7 +496,10 @@ and a role badge (owner/admin/member), with a read-only marker when the key has 
 writable scope. Each
 area declares a layout mode: reading surfaces (Settings/Status) stay centered at a
 readable measure, while canvas/master-detail areas (Graph/Blocks/Chat) use the
-full viewport width on wide screens instead of the former fixed column.
+full viewport width on wide screens instead of the former fixed column. An area
+with no results — a fresh tenant's empty corpus, a search miss — renders a
+guiding empty state with an onboarding CTA (store the first block, browse the
+corpus) rather than a blank pane.
 `/` lands each tier on its home area — members on a `/home` capability screen
 (their write scope, read access, role and tenant at a glance, with corpus entry
 CTAs), higher tiers on the status dashboard — and a client-side tier guard

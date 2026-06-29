@@ -6,6 +6,7 @@
   import { fetchOverview, type OverviewResponse } from '../../lib/graph/api'
   import { buildOverviewGraph, type MetaEdgeAttrs, type MetaNodeAttrs } from '../../lib/graph/overview-map'
   import { recolorOverviewGraph, type GraphPalette } from '../../lib/graph/graph-theme'
+  import EmptyState from '../../lib/ui/EmptyState.svelte'
 
   // Single click on a cluster → drill into its representative's ego net.
   let { onpick, palette }: { onpick: (reprId: string) => void; palette: GraphPalette } = $props()
@@ -121,8 +122,11 @@
   {:else if loading}
     <div class="msg" aria-busy="true">building map…</div>
   {:else if stats && stats.nodes === 0}
-    <div class="msg">
-      no clusters yet — the overview is rebuilt periodically by the dream-link clustering job
+    <div class="empty-overlay">
+      <EmptyState
+        title="No clusters yet"
+        copy="The cluster map is rebuilt periodically by the dream-link clustering job. As your corpus grows, the next run groups related blocks into the clusters that appear here."
+      />
     </div>
   {/if}
 
@@ -182,7 +186,21 @@
     font-family: var(--font-mono);
     font-size: 0.8rem;
   }
-  /* Loading / error / empty — centered overlay over the (hidden) canvas. */
+  /* N8 empty-state: the same centred-overlay framing as .msg, but the title +
+     copy come from the shared EmptyState; this wrapper supplies only the
+     positioning + card backing so it stays legible over the (hidden) canvas. */
+  .empty-overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: var(--z-overlay);
+    max-width: min(34rem, calc(100% - 2 * var(--space-3)));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-1);
+  }
+  /* Loading / error — centered overlay over the (hidden) canvas. */
   .msg {
     position: absolute;
     top: 50%;

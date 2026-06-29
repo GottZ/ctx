@@ -9,8 +9,21 @@
   import ChatInput from './ChatInput.svelte'
   import MessageList from './MessageList.svelte'
   import SessionSidebar from './SessionSidebar.svelte'
+  import EmptyState from '../../lib/ui/EmptyState.svelte'
 
   const store = new ChatStore(() => session.key)
+
+  // Onboarding empty-state (Welle N8): a genuinely fresh corpus — no saved
+  // sessions and no draft turn — gets a friendly entry point instead of the bare
+  // thread hint. Gated so it never flashes mid-load or over a load error, and it
+  // yields to MessageList the instant a draft/turn begins (messages populate).
+  const showOnboarding = $derived(
+    store.sessions.length === 0 &&
+      store.messages.length === 0 &&
+      !store.loadingList &&
+      !store.streaming &&
+      store.loadError === null,
+  )
 
   onMount(() => {
     void store.loadSessions()
@@ -32,7 +45,18 @@
         <button type="button" onclick={() => store.loadSessions()}>Retry</button>
       </div>
     {/if}
-    <MessageList {store} />
+    {#if showOnboarding}
+      <EmptyState
+        title="No conversations yet"
+        copy="Ask the knowledge store a question in the box below — it can search, browse and read your blocks. Your chats then appear in the sidebar."
+      >
+        {#snippet cta()}
+          <a class="empty-cta" href="/blocks">Browse the corpus →</a>
+        {/snippet}
+      </EmptyState>
+    {:else}
+      <MessageList {store} />
+    {/if}
     <ChatInput {store} />
   </section>
 </div>
@@ -75,6 +99,17 @@
   .conversation :global(.thread) {
     padding-inline: max(var(--space-3), calc((100% - var(--measure-prose)) / 2));
   }
+  /* N8 onboarding CTA — corpus-entry link (mirrors MemberHome's .action). */
+  .empty-cta {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .empty-cta:hover {
+    text-decoration: underline;
+  }
+
   .load-error {
     margin: var(--space-2);
     padding: var(--space-2) var(--space-3);
