@@ -551,10 +551,10 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	// Scope write restriction on update.
+	// Scope write restriction on update — the target scope must be one the key
+	// may write (writableBlockScopes, same gate as /api/store create).
 	if data.Scope != nil {
-		scope := *data.Scope
-		if scope != ar.HomeScope && (scope != "shared" || !contains(ar.AllowedScopes, "shared")) {
+		if !contains(writableBlockScopes(ar), *data.Scope) {
 			writeJSON(w, http.StatusForbidden, map[string]any{
 				"success": false, "error": "Cannot set scope to requested value",
 			})
@@ -562,10 +562,12 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		}
 	}
 
-	// Prefix-resolve within HomeScope only — writes are scope-restricted, so the
-	// candidate set must be too. grantedBlockIDs nil: a block grant is read-only
-	// (design/07 §2.5) and MUST NOT widen a write path's candidate set.
-	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, []string{ar.HomeScope}, nil)
+	// Resolve within the write-eligible scopes (home_scope ∪ shared-if-allowed):
+	// a full UUID is unambiguous and the scope set is the permission filter; a
+	// partial id disambiguates over the same set (ambiguity → matches list).
+	// grantedBlockIDs nil: a block grant is read-only (design/07 §2.5) and MUST
+	// NOT widen a write path's candidate set.
+	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, writableBlockScopes(ar), nil)
 	if err != nil {
 		if errors.Is(err, store.ErrAmbiguousID) {
 			writeJSON(w, http.StatusConflict, map[string]any{
@@ -600,7 +602,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	block, needsReEmbed, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, ar.HomeScope)
+	block, needsReEmbed, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, writableBlockScopes(ar))
 	if err != nil {
 		slog.Error("manage: update error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -662,7 +664,7 @@ func (h *ManageHandler) applySensitivityGuard(ctx context.Context, ar *auth.Auth
 	if !backends.ValidSensitivity(newSens) {
 		return http.StatusBadRequest, "Invalid sensitivity: must be credentials|personal|internal|public"
 	}
-	curSens, found, err := store.GetBlockSensitivity(ctx, h.pool, resolvedID, ar.HomeScope)
+	curSens, found, err := store.GetBlockSensitivity(ctx, h.pool, resolvedID, writableBlockScopes(ar))
 	if err != nil {
 		slog.Error("manage: sensitivity read error", "error", err, "request_id", reqID)
 		return http.StatusInternalServerError, "Internal server error"
@@ -698,9 +700,9 @@ func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	// Prefix-resolve within HomeScope only — see handleUpdate for rationale.
+	// Resolve within the write-eligible scopes — see handleUpdate for rationale.
 	// grantedBlockIDs nil: a read-only block grant must not widen a delete path.
-	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, []string{ar.HomeScope}, nil)
+	resolvedID, matches, err := store.ResolveBlockID(ctx, h.pool, req.ID, writableBlockScopes(ar), nil)
 	if err != nil {
 		if errors.Is(err, store.ErrAmbiguousID) {
 			writeJSON(w, http.StatusConflict, map[string]any{
@@ -730,7 +732,7 @@ func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	block, err := store.DeleteBlock(ctx, h.pool, resolvedID, ar.HomeScope)
+	block, err := store.DeleteBlock(ctx, h.pool, resolvedID, writableBlockScopes(ar))
 	if err != nil {
 		slog.Error("manage: delete error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -841,7 +843,7 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	block, err := store.GuardResolve(ctx, h.pool, req.ID, resolveData.Resolution, ar.HomeScope)
+	block, err := store.GuardResolve(ctx, h.pool, req.ID, resolveData.Resolution, writableBlockScopes(ar))
 	if err != nil {
 		slog.Error("manage: guard-resolve error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{

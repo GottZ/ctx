@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/store"
@@ -91,15 +92,15 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// (upgrade-only, source='pattern'). See applyWriteDetector.
 	sens, req.Metadata = applyWriteDetector(req.Content, reqID, sens, req.Metadata)
 
-	// Scope validation: write scope must be home_scope or "shared" if allowed.
+	// Scope validation: the write scope must be one the key may write — its
+	// home_scope or 'shared' if allowed (writableBlockScopes, the same gate as
+	// manage update/delete).
 	writeScope := authResult.HomeScope
 	scopeExplicit := false
 	if req.Scope != "" {
 		scopeExplicit = true
-		if req.Scope == authResult.HomeScope {
+		if contains(writableBlockScopes(authResult), req.Scope) {
 			writeScope = req.Scope
-		} else if req.Scope == "shared" && contains(authResult.AllowedScopes, "shared") {
-			writeScope = "shared"
 		} else {
 			writeJSON(w, http.StatusForbidden, map[string]any{
 				"success": false, "error": "Cannot write to requested scope",
@@ -264,6 +265,20 @@ func contains(slice []string, val string) bool {
 		}
 	}
 	return false
+}
+
+// writableBlockScopes returns the scopes a key may WRITE blocks to: its
+// home_scope, plus 'shared' when that collaboration scope is in allowed_scopes.
+// This is the single source of truth for the block write gate — store create,
+// manage update, manage delete and guard-resolve all use it, so a key can mutate
+// exactly the blocks it can create. A read-only grant never widens it, and other
+// allowed_scopes (e.g. 'work') stay read-only by design.
+func writableBlockScopes(ar *auth.AuthResult) []string {
+	scopes := []string{ar.HomeScope}
+	if contains(ar.AllowedScopes, "shared") {
+		scopes = append(scopes, "shared")
+	}
+	return scopes
 }
 
 // writeJSON writes a JSON response with the given status code.

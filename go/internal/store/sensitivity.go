@@ -28,14 +28,14 @@ type BlockSensitivity struct {
 // migration + mirror maintenance). IDs without a returned row (block deleted
 // or archived between RRF and lookup) are MISSING from the map — the caller
 // treats a miss as credentials (fail-closed, F3 §2.3a).
-// GetBlockSensitivity reads the current classification of one home_scope
-// block (the downgrade-guard comparison base). found=false when the block
-// does not exist in this scope.
-func GetBlockSensitivity(ctx context.Context, pool *pgxpool.Pool, id, homeScope string) (backends.Sensitivity, bool, error) {
+// GetBlockSensitivity reads the current classification of one block in the
+// caller's write-eligible scopes (the downgrade-guard comparison base).
+// found=false when the block does not exist in those scopes.
+func GetBlockSensitivity(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) (backends.Sensitivity, bool, error) {
 	var sens string
 	err := pool.QueryRow(ctx,
 		`SELECT sensitivity FROM context_blocks
-		 WHERE id = $1 AND scope = $2 AND NOT is_archived`, id, homeScope).Scan(&sens)
+		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived`, id, writeScopes).Scan(&sens)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}

@@ -407,14 +407,15 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []s
 	return b, nil
 }
 
-// DeleteBlock archives a block (sets is_archived = true). Only home_scope blocks.
-func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id, homeScope string) (*Block, error) {
+// DeleteBlock archives a block (sets is_archived = true). The block must live in
+// one of the caller's write-eligible scopes (home_scope ∪ shared-if-allowed).
+func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) (*Block, error) {
 	b := &Block{}
 	err := pool.QueryRow(ctx,
 		`UPDATE context_blocks SET is_archived = true, updated_at = now()
-		 WHERE id = $1 AND scope = $2 AND NOT is_archived
+		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
 		 RETURNING id, category, title, scope, created_at, updated_at`,
-		id, homeScope,
+		id, writeScopes,
 	).Scan(&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -446,9 +447,10 @@ type UpdateBlockData struct {
 	SensitivityAudit map[string]any `json:"-"`
 }
 
-// UpdateBlock updates specific fields of a block. Only home_scope blocks.
+// UpdateBlock updates specific fields of a block. The block must live in one of
+// the caller's write-eligible scopes (home_scope ∪ shared-if-allowed).
 // Returns the updated block and whether content or title changed (needs re-embed).
-func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, homeScope string) (*Block, bool, error) {
+func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) (*Block, bool, error) {
 	// Build SET clause dynamically.
 	setClauses := []string{}
 	args := []any{}
@@ -526,12 +528,12 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	args = append(args, id)
 	idIdx := argIdx
 	argIdx++
-	args = append(args, homeScope)
+	args = append(args, writeScopes)
 	scopeIdx := argIdx
 
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
-		 WHERE id = $%d AND scope = $%d AND NOT is_archived
+		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
 		 RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at`,
 		strings.Join(setClauses, ", "), idIdx, scopeIdx,
 	)
@@ -969,9 +971,9 @@ func GetGuardStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string)
 	return gs, nil
 }
 
-// GuardResolve resolves a flagged block with either "archive" or "keep".
-// Only home_scope blocks can be resolved.
-func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution, homeScope string) (*Block, error) {
+// GuardResolve resolves a flagged block with either "archive" or "keep". The
+// block must live in one of the caller's write-eligible scopes.
+func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string, writeScopes []string) (*Block, error) {
 	var query string
 	switch resolution {
 	case "archive":
@@ -983,7 +985,7 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution, homeS
 				'guard_resolution', 'archive'
 			),
 			updated_at = now()
-		WHERE id = $1 AND scope = $2 AND NOT is_archived
+		WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
 		RETURNING id, title, category, scope, guard_status, created_at, updated_at`
 	case "keep":
 		query = `UPDATE context_blocks SET
@@ -993,14 +995,14 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution, homeS
 				'guard_resolution', 'keep'
 			),
 			updated_at = now()
-		WHERE id = $1 AND scope = $2 AND NOT is_archived
+		WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
 		RETURNING id, title, category, scope, guard_status, created_at, updated_at`
 	default:
 		return nil, fmt.Errorf("store: guard resolve: invalid resolution %q (must be 'archive' or 'keep')", resolution)
 	}
 
 	b := &Block{}
-	err := pool.QueryRow(ctx, query, id, homeScope).Scan(
+	err := pool.QueryRow(ctx, query, id, writeScopes).Scan(
 		&b.ID, &b.Title, &b.Category, &b.Scope, &b.GuardStatus, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
