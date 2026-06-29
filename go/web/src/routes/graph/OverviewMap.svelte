@@ -79,13 +79,20 @@
   // No remount, no FA2 re-layout — positions stay put. Skips until the async
   // load has populated the graph (the initial build already used this palette).
   $effect(() => {
+    // Read `palette` FIRST so it is always a tracked dependency. renderer/
+    // metaGraph/overviewResp are non-$state lets populated by the async onMount
+    // load, so on the effect's first run (load still pending) they are null —
+    // guarding on them before touching `palette` meant palette never registered
+    // as a dependency and the re-color never fired on a later theme switch
+    // (caught by the e2e graph-palette smoke). Hoisting the read fixes tracking.
+    const p = palette
     const r = renderer
     const g = metaGraph
     const resp = overviewResp
     if (!r || !g || !resp) return
-    recolorOverviewGraph(g, resp, palette)
-    r.setSetting('labelColor', { color: palette.labelColor })
-    r.setSetting('defaultEdgeColor', palette.edgeColor)
+    recolorOverviewGraph(g, resp, p)
+    r.setSetting('labelColor', { color: p.labelColor })
+    r.setSetting('defaultEdgeColor', p.edgeColor)
     r.refresh()
   })
 
@@ -130,17 +137,44 @@
 </div>
 
 <style>
+  /* G3 (design 03-§4): the cluster map is full-bleed. .overview is the
+     positioning stage that fills the graph region (definite height via the
+     parent .stage); the canvas sits absolute inset:0 (no min-height floor that
+     would clip on a short region — Sigma's own ResizeObserver re-measures), and
+     bar/hint/msg float as absolute overlays on top. */
   .overview {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
+    position: relative;
     flex: 1;
-    min-height: 30rem;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
   }
+  .canvas {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    background: var(--graph-bg);
+  }
+  .canvas.hidden {
+    display: none;
+  }
+  /* Cluster title + stats — overlay top-right; non-interactive → click-through
+     so the canvas pans under it. */
   .bar {
+    position: absolute;
+    top: var(--space-3);
+    right: var(--space-3);
+    z-index: var(--z-overlay);
     display: flex;
     align-items: baseline;
     gap: var(--space-3);
+    max-width: min(32rem, calc(100% - 2 * var(--space-3)));
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-1);
+    pointer-events: none;
   }
   .stat {
     margin-left: auto;
@@ -148,25 +182,37 @@
     font-family: var(--font-mono);
     font-size: 0.8rem;
   }
+  /* Loading / error / empty — centered overlay over the (hidden) canvas. */
   .msg {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: var(--z-overlay);
+    max-width: min(34rem, calc(100% - 2 * var(--space-3)));
+    text-align: center;
     color: var(--text-dim);
     font-size: 0.85rem;
-    padding: var(--space-2) 0;
-  }
-  .canvas {
-    flex: 1;
-    min-height: 24rem;
+    padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    overflow: hidden;
-    background: var(--surface-0);
-  }
-  .canvas.hidden {
-    display: none;
+    background: var(--surface-1);
   }
   .hint {
+    position: absolute;
+    bottom: var(--space-3);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: var(--z-overlay);
     margin: 0;
+    max-width: calc(100% - 2 * var(--space-3));
+    padding: var(--space-1) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-1);
     color: var(--text-faint);
-    font-size: 0.875rem;
+    font-size: 0.8rem;
+    text-align: center;
+    pointer-events: none;
   }
 </style>

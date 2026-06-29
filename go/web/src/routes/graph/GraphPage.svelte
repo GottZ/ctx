@@ -126,37 +126,11 @@
 </script>
 
 <section class="area">
-  <header>
-    <h1>Graph</h1>
-    <p class="sub">
-      dream-link graph — start from the cluster map or search a block; click to focus, double-click
-      a node to expand (read-only, no LLM touched)
-    </p>
-  </header>
-
-  <SearchBox onpick={(id) => void setFocus(id)} />
-
-  {#if error}
-    <div class="error" role="alert">
-      <p>{error.message}</p>
-      {#if error.requestId}
-        <p class="request-id">request {error.requestId}</p>
-      {/if}
-    </div>
-  {/if}
-
+  <!-- Base canvas layer — fills the whole content region (S5 definite-height
+       chain); the former in-page chrome floats as overlays on top (G3). The
+       <aside>/DetailSidebar slot + selected logic stay untouched (G5 replaces
+       them); G3 only reshapes chrome → overlays and makes the canvas full-bleed. -->
   {#if focus !== null}
-    <FilterPanel {filters} categories={loadedCategories} onchange={(next) => (filters = next)} />
-    <div class="meta-row">
-      <button class="back" type="button" onclick={backToOverview}>← map</button>
-      <code class="focus" title="focused block">{focus}</code>
-      {#if busy}
-        <span class="loading" aria-busy="true">loading…</span>
-      {/if}
-      <span class="stats">
-        {nodeCount} nodes · {edgeCount} edges{truncated ? ' · server truncated' : ''}
-      </span>
-    </div>
     <div class="stage">
       <div class="viewport">
         <GraphView
@@ -179,44 +153,117 @@
         />
       {/if}
     </div>
-    <p class="hint">click a node for details · double-click to expand (+1 hop) · “· +N” = links not loaded yet</p>
   {:else}
-    <OverviewMap onpick={(id) => void setFocus(id)} {palette} />
+    <div class="stage">
+      <OverviewMap onpick={(id) => void setFocus(id)} {palette} />
+    </div>
+  {/if}
+
+  {#if error}
+    <div class="error" role="alert">
+      <p>{error.message}</p>
+      {#if error.requestId}
+        <p class="request-id">request {error.requestId}</p>
+      {/if}
+    </div>
+  {/if}
+
+  <!-- Left overlay column: search (always mounted) + focus controls (meta-row,
+       filters). pointer-events:none on the column lets the gaps pan the canvas;
+       each card re-enables events on itself. -->
+  <div class="chrome-left">
+    <div class="card search-card">
+      <SearchBox onpick={(id) => void setFocus(id)} />
+    </div>
+    {#if focus !== null}
+      <div class="card meta-row">
+        <button class="back" type="button" onclick={backToOverview}>← map</button>
+        <code class="focus" title="focused block">{focus}</code>
+        {#if busy}
+          <span class="loading" aria-busy="true">loading…</span>
+        {/if}
+        <span class="stats">
+          {nodeCount} nodes · {edgeCount} edges{truncated ? ' · server truncated' : ''}
+        </span>
+      </div>
+      <FilterPanel {filters} categories={loadedCategories} onchange={(next) => (filters = next)} />
+    {/if}
+  </div>
+
+  {#if focus !== null}
+    <p class="hint">click a node for details · double-click to expand (+1 hop) · “· +N” = links not loaded yet</p>
   {/if}
 </section>
 
 <style>
-  /* S5 (design 01 §4/§6 + Anhang Content-Region-Contract): in canvas mode the
-     content region now has a definite height (AppShell's 100dvh grid, S4), so
-     the height:100% chain finally carries. AppShell deferred the per-mode
-     `.area{height:100%;min-height:0}` rule to this wave — realised here locally.
-     min-height:0 lets this flex column shrink to the region instead of forcing
-     overflow; the stage then fills the leftover height down to the canvas. */
+  /* G3 canvas-first (design 03-§4/§6). S5 gave the content region a definite
+     height (AppShell 100dvh grid); .area is now the positioning STAGE for a
+     full-bleed graph/overview canvas, and the former in-page chrome (h1/.sub
+     gone — the shell carries the area title; search/filters/stats/hint) floats
+     as absolute overlays on top. overflow:hidden clips overlay shadows/edges to
+     the region. */
   .area {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-height: 0;
+    position: relative;
+    width: 100%;
     height: 100%;
+    min-height: 0;
+    overflow: hidden;
   }
 
-  header {
-    border-bottom: 1px solid var(--border);
-    padding-bottom: var(--space-2);
+  /* Base canvas layer: absolute inset:0 → definite size = whole region. The
+     focus stage is master-detail (viewport + the untouched DetailSidebar); the
+     overview stage holds the full-bleed OverviewMap. Overlays stack above via
+     z-index (.area is the containing block; --z-overlay beats the auto-z stage). */
+  .stage {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    gap: var(--space-3);
+    min-height: 0;
   }
-  h1 {
-    margin: 0;
-    font-size: 1.35rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
+  .viewport {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
   }
-  .sub {
-    margin: var(--space-1) 0 0;
-    color: var(--text-dim);
-    font-size: 0.85rem;
+
+  /* ── Overlay chrome ────────────────────────────────────────────────── */
+  .chrome-left {
+    position: absolute;
+    top: var(--space-3);
+    left: var(--space-3);
+    z-index: var(--z-overlay);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    width: min(30rem, calc(100% - 2 * var(--space-3)));
+    pointer-events: none;
+  }
+  /* Re-enable events on the cards; the column's gaps stay click-through. */
+  .chrome-left > :global(*) {
+    pointer-events: auto;
+  }
+
+  .card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-1);
+    padding: var(--space-2) var(--space-3);
+  }
+  /* SearchBox renders its form + results dropdown; the card frames both so they
+     read over the canvas. Tighter padding — the form/list bring their own. */
+  .search-card {
+    padding: var(--space-2);
   }
 
   .error {
+    position: absolute;
+    top: var(--space-3);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: var(--z-overlay);
+    max-width: min(40rem, calc(100% - 2 * var(--space-3)));
     border: 1px solid var(--danger);
     border-radius: var(--radius);
     background: var(--danger-dim);
@@ -245,7 +292,7 @@
   .back {
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    background: var(--surface-0);
+    background: var(--surface-2);
     color: var(--text);
     cursor: pointer;
     font-size: 0.75rem;
@@ -266,28 +313,22 @@
     font-size: 0.8rem;
   }
 
-  /* flex:1 fills the leftover column height; min-height:0 (was a 30rem floor
-     that forced overflow on short regions) lets the canvas size to the region
-     instead of squeezing it. The flex resolves to a definite height that
-     .viewport — and through it the Sigma canvas — inherits via height:100%. */
-  .stage {
-    flex: 1;
-    display: flex;
-    gap: var(--space-3);
-    min-height: 0;
-  }
-  .viewport {
-    flex: 1;
-    min-width: 0;
-    min-height: 0;
+  /* Dezenter Onboarding-Hint als Overlay unten-zentriert; click-through. */
+  .hint {
+    position: absolute;
+    bottom: var(--space-3);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: var(--z-overlay);
+    margin: 0;
+    max-width: calc(100% - 2 * var(--space-3));
+    padding: var(--space-1) var(--space-3);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .hint {
-    margin: 0;
+    background: var(--surface-1);
     color: var(--text-faint);
-    font-size: 0.875rem;
+    font-size: 0.8rem;
+    text-align: center;
+    pointer-events: none;
   }
 </style>
