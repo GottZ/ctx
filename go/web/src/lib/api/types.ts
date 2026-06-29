@@ -309,3 +309,235 @@ export interface SecretDeleteResponse {
   name: string
   deleted: true
 }
+
+// =============================================================================
+// Server-Admin / Multi-Tenant manage types (design 04 §2/§3, Wave A1).
+// Drift anchor = the Go structs + manage handlers cited per type. ADDITIVE —
+// nothing above this line is touched. NOTE for TK1 (lib/api/keys.ts): A1 owns
+// exactly the symbols below; keys.ts must not redeclare any of them.
+// =============================================================================
+
+// Source: go/internal/store/tenant.go:104 (Tenant) — a row in context_tenants,
+// the owner/management register (059). NO counts and NO scopes are carried here
+// (tenant-get returns this verbatim, store/tenant.go:190); a tenant owns 0..N
+// scopes, read separately. status is the 059 CHECK domain.
+export type TenantStatus = 'active' | 'suspended' | 'offboarding'
+export interface Tenant {
+  id: string
+  slug: string
+  display_name: string
+  status: TenantStatus
+  created_at: string
+  updated_at: string
+}
+
+// Source: go/internal/store/tenant_grants.go:21 (TenantGrant) — one cross-tenant
+// READ grant (061): grantee_tenant gains read access to granted_scope, a scope
+// owned by ANOTHER tenant. created_by is the api_key_id of the admin who created
+// it (nullable — FK ON DELETE SET NULL).
+export interface TenantGrant {
+  id: string
+  grantee_tenant: string
+  granted_scope: string
+  created_at: string
+  created_by: string | null
+}
+
+// Source: go/internal/store/block_grants.go:61 (BlockGrant) — one row-level READ
+// grant (067): grantee_tenant gains read access to a SINGLE block_id living in
+// another scope/tenant. granted_by is the api_key_id of the granting admin
+// (nullable — FK ON DELETE SET NULL).
+export interface BlockGrant {
+  id: string
+  block_id: string
+  grantee_tenant: string
+  granted_by: string | null
+  created_at: string
+}
+
+// Source: go/internal/backends/quota.go:34 (TenantQuota.OnExceed) + the 063
+// CHECK. external_off (the default) degrades a budget-exhausted tenant to local
+// backends; block hard-errors.
+export type QuotaOnExceed = 'block' | 'external_off'
+
+// Source: go/internal/handler/quota_manage.go:46 (quotaView). SCOPE-keyed, never
+// tenant-id-keyed — a tenant has 0..N scopes, each with its own quota row. Two
+// branches: a nil policy (no row) renders {scope, enabled:false, unlimited:true};
+// a real policy renders the budget fields, where a null cost/calls field is the
+// "unlimited for that dimension" state (the *float64/*int pointer was nil).
+export interface TenantQuotaView {
+  scope: string
+  enabled: boolean
+  unlimited?: boolean
+  daily_cost_usd?: number | null
+  monthly_cost_usd?: number | null
+  daily_calls?: number | null
+  on_exceed?: QuotaOnExceed
+}
+
+// Source: go/internal/handler/quota_manage.go:35 (quotaSpec) — the tenant-quota-
+// set payload. scope is required; every budget field is optional and null = that
+// dimension is unlimited (the server stores a nil *float64/*int). on_exceed
+// defaults to external_off, enabled defaults to true (server-side).
+export interface QuotaSpec {
+  scope: string
+  daily_cost_usd?: number | null
+  monthly_cost_usd?: number | null
+  daily_calls?: number | null
+  on_exceed?: QuotaOnExceed
+  enabled?: boolean
+}
+
+// Source: go/internal/events/audit.go:60 (AuditSample) — one dry-run verdict for
+// the N=30 sample gate. credentials/personal are *bool (null = question not
+// reached / no verdict).
+export interface AuditSample {
+  id: string
+  title: string
+  credentials: boolean | null
+  personal: boolean | null
+  verdict: string
+}
+
+// Source: go/internal/events/audit.go:71 (AuditStatus) — in-memory state of the
+// current/last G41 sensitivity-audit run. started_at/finished_at use omitzero;
+// last_error/samples are omitempty → all optional on the wire.
+export interface AuditStatus {
+  running: boolean
+  dry_run: boolean
+  started_at?: string
+  finished_at?: string
+  processed: number
+  kept_credentials: number
+  to_personal: number
+  to_internal: number
+  no_verdict: number
+  discarded: number
+  aborted: boolean
+  last_error?: string
+  samples?: AuditSample[]
+}
+
+// Source: go/internal/events/classify.go:44 (ClassifySample) — one pattern hit
+// for the dry-run gate; never carries the matched secret.
+export interface ClassifySample {
+  id: string
+  title: string
+  kind: string
+}
+
+// Source: go/internal/events/classify.go:51 (ClassifyStatus) — in-memory state of
+// the current/last G40 credentials-classify run. Same omitzero/omitempty wire
+// rules as AuditStatus.
+export interface ClassifyStatus {
+  running: boolean
+  dry_run: boolean
+  started_at?: string
+  finished_at?: string
+  scanned: number
+  upgraded: number
+  discarded: number
+  aborted: boolean
+  last_error?: string
+  samples?: ClassifySample[]
+}
+
+// Source: PLANNED — the optional additive A0 `scope-overview` read-action (design
+// 04 §3 A0), NOT YET BUILT in the Go backend. Forward-declared so A2/A4 can type
+// against it; field names are provisional until the A0 golden test pins them.
+// Shape: per-scope block count (SELECT scope, count(*) ... GROUP BY scope) + the
+// per-scope api-key count + the owning tenant from context_tenant_scopes (null
+// for an unmapped Altbestand scope).
+export interface ScopeOverview {
+  scope: string
+  block_count: number
+  key_count: number
+  tenant_id: string | null
+}
+
+// --- Response envelopes (one per manage action; success:true on the happy path,
+// every failure shape — incl. {success:false} inside an HTTP 200 — is raised as
+// ApiError by apiFetch, api.ts:103). ---
+
+// Source: go/internal/handler/tenant_manage.go:80 (tenant-list).
+export interface TenantListResponse {
+  success: true
+  tenants: Tenant[]
+}
+
+// Source: tenant_manage.go:71/:97/:132 — tenant-create/get/update share this.
+export interface TenantResponse {
+  success: true
+  tenant: Tenant
+}
+
+// Source: tenant_manage.go:172 (tenant-delete) — `deleted` is the pruned tenant's id.
+export interface TenantDeleteResponse {
+  success: true
+  deleted: string
+}
+
+// Source: tenant_manage.go:231 (tenant-grant-list).
+export interface TenantGrantListResponse {
+  success: true
+  grants: TenantGrant[]
+}
+
+// Source: tenant_manage.go:216 (tenant-grant-create).
+export interface TenantGrantResponse {
+  success: true
+  grant: TenantGrant
+}
+
+// Source: tenant_manage.go:248 (tenant-grant-delete) — `deleted` is the grant id.
+export interface TenantGrantDeleteResponse {
+  success: true
+  deleted: string
+}
+
+// Source: go/internal/handler/block_grant_manage.go:138 (block-grant-list) —
+// owner-side only (filtered to the caller's own tenant; no global oracle, :124).
+export interface BlockGrantListResponse {
+  success: true
+  grants: BlockGrant[]
+}
+
+// Source: block_grant_manage.go:120 (block-grant-create).
+export interface BlockGrantResponse {
+  success: true
+  grant: BlockGrant
+}
+
+// Source: block_grant_manage.go:171 (block-grant-revoke) — echoes the revoked pair.
+export interface BlockGrantRevokeResponse {
+  success: true
+  revoked: { block_id: string; grantee_tenant: string }
+}
+
+// Source: quota_manage.go:76/:136 — tenant-quota-get/set share this.
+export interface TenantQuotaResponse {
+  success: true
+  quota: TenantQuotaView
+}
+
+// Source: go/internal/handler/blocks_audit.go:103 (writeBlocksAuditStatus) —
+// blocks-audit-start/status share this. by_source is sensitivity_source → count
+// (store.AuditProgress, sensitivity.go:166); scope is the tenant-LESS Scheduler
+// home_scope snapshot (per-tenant audit is a later backend cut, §6.6).
+export interface BlocksAuditStatusResponse {
+  success: true
+  scope: string
+  pending: number
+  by_source: Record<string, number>
+  run: AuditStatus
+}
+
+// Source: go/internal/handler/blocks_classify.go:93 (writeBlocksClassifyStatus) —
+// blocks-classify-start/status share this. NO `pending` (classify reports only
+// by_source + run, unlike audit).
+export interface BlocksClassifyStatusResponse {
+  success: true
+  scope: string
+  by_source: Record<string, number>
+  run: ClassifyStatus
+}
