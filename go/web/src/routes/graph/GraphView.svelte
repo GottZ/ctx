@@ -4,10 +4,12 @@
   import type { DirectedGraph } from 'graphology'
   import { edgeVisible, nodeVisible, type GraphFilters } from '../../lib/graph/filters'
   import { remainingDegree, type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
+  import type { GraphPalette } from '../../lib/graph/graph-theme'
 
   let {
     graph,
     filters,
+    palette,
     selected = null,
     onnodeclick,
     onnodedoubleclick,
@@ -15,6 +17,8 @@
     graph: DirectedGraph<NodeAttrs, EdgeAttrs>
     /** Instant client-side filtering via the reducers — no server roundtrip. */
     filters: GraphFilters
+    /** Theme-aware colors (label/edge Sigma settings); from readGraphPalette. */
+    palette: GraphPalette
     /** Highlighted node (sidebar selection). */
     selected?: string | null
     /** Single click — opens the detail sidebar. */
@@ -34,10 +38,10 @@
       labelRenderedSizeThreshold: 6,
       labelDensity: 0.7,
       hideEdgesOnMove: true, // LOD (W4): edges drop during pan/zoom
-      labelColor: { color: '#8a8d9c' },
+      labelColor: { color: palette.labelColor },
       labelFont: 'ui-monospace, monospace',
       labelSize: 11,
-      defaultEdgeColor: '#34344a',
+      defaultEdgeColor: palette.edgeColor,
       renderEdgeLabels: false,
       // Filters hide, selection highlights, degree badge ("· +N" = visible
       // incidences not loaded yet) decorates. Props are reactive getters —
@@ -58,6 +62,12 @@
       onnodedoubleclick?.(node)
     })
     renderer = r
+    // Test-hook (design 03-§4/§6): the colors live in the WebGL canvas, not
+    // the DOM — the Playwright gate reads them via getSetting/getNodeAttribute.
+    // Dev/test only; never exposed in production builds.
+    if (import.meta.env.DEV && typeof window !== 'undefined') {
+      ;(window as unknown as { __ctxGraph?: unknown }).__ctxGraph = { renderer: r, graph }
+    }
     return () => {
       r.kill()
       renderer = null

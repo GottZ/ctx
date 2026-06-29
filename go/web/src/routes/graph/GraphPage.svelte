@@ -5,6 +5,7 @@
   import { LayoutRunner } from '../../lib/graph/fa2'
   import { defaultFilters, toEgoQuery } from '../../lib/graph/filters'
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
+  import { readGraphPalette } from '../../lib/graph/graph-theme'
   import DetailSidebar from './DetailSidebar.svelte'
   import FilterPanel from './FilterPanel.svelte'
   import GraphView from './GraphView.svelte'
@@ -29,6 +30,10 @@
   let filters = $state(defaultFilters())
   let selected = $state<string | null>(null)
   let loadedCategories = $state<string[]>([])
+  // Theme-aware graph colors read once from the CSS tokens (dark fallback if
+  // the theme axis hasn't shipped). G1 only seeds merges/Sigma from this; the
+  // re-color-on-theme-switch listener is G2 (design 03-§4).
+  let palette = $state(readGraphPalette())
 
   // Deep-link sync: /graph?focus=<uuid> survives reload and is shareable.
   onMount(() => {
@@ -60,7 +65,7 @@
     try {
       const resp = await fetchEgo(id, { hops: 2, ...toEgoQuery(filters) })
       focus = id
-      mergeEgo(graph, resp)
+      mergeEgo(graph, resp, palette)
       truncated = resp.stats.truncated
       settle()
       if (opts.pushUrl !== false) {
@@ -84,7 +89,7 @@
     try {
       touch(graph, id)
       const resp = await fetchEgo(id, { hops: 1, ...toEgoQuery(filters) })
-      mergeEgo(graph, resp)
+      mergeEgo(graph, resp, palette)
       truncated = resp.stats.truncated
       settle()
     } catch (err) {
@@ -143,6 +148,7 @@
           bind:this={view}
           {graph}
           {filters}
+          {palette}
           {selected}
           onnodeclick={(id) => (selected = id)}
           onnodedoubleclick={(id) => void expand(id)}
@@ -160,7 +166,7 @@
     </div>
     <p class="hint">click a node for details · double-click to expand (+1 hop) · “· +N” = links not loaded yet</p>
   {:else}
-    <OverviewMap onpick={(id) => void setFocus(id)} />
+    <OverviewMap onpick={(id) => void setFocus(id)} {palette} />
   {/if}
 </section>
 

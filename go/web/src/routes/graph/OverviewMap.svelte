@@ -4,9 +4,10 @@
   import { toApiError, type ApiError } from '../../lib/api'
   import { fetchOverview, type OverviewResponse } from '../../lib/graph/api'
   import { buildOverviewGraph, type MetaEdgeAttrs, type MetaNodeAttrs } from '../../lib/graph/overview-map'
+  import type { GraphPalette } from '../../lib/graph/graph-theme'
 
   // Single click on a cluster → drill into its representative's ego net.
-  let { onpick }: { onpick: (reprId: string) => void } = $props()
+  let { onpick, palette }: { onpick: (reprId: string) => void; palette: GraphPalette } = $props()
 
   let container: HTMLDivElement
   let renderer: Sigma<MetaNodeAttrs, MetaEdgeAttrs> | null = null
@@ -29,13 +30,13 @@
         // so a tick() is required between the state change and the mount.
         await tick()
         if (killed) return
-        const graph = buildOverviewGraph(resp)
+        const graph = buildOverviewGraph(resp, palette)
         const r = new Sigma(graph, container, {
           labelRenderedSizeThreshold: 4, // meta-nodes are few — label generously
-          labelColor: { color: '#8a8d9c' },
+          labelColor: { color: palette.labelColor },
           labelFont: 'ui-monospace, monospace',
           labelSize: 11,
-          defaultEdgeColor: '#34344a',
+          defaultEdgeColor: palette.edgeColor,
           renderEdgeLabels: false,
         })
         r.on('clickNode', ({ node }) => {
@@ -43,6 +44,10 @@
           if (reprId) onpick(reprId)
         })
         renderer = r
+        // Test-hook (design 03-§4/§6) — see GraphView; dev/test only.
+        if (import.meta.env.DEV && typeof window !== 'undefined') {
+          ;(window as unknown as { __ctxGraph?: unknown }).__ctxGraph = { renderer: r, graph }
+        }
       } catch (err) {
         if (!killed) {
           error = toApiError(err)

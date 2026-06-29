@@ -6,6 +6,11 @@
 import { describe, expect, it } from 'vitest'
 import type { OverviewNode, OverviewResponse } from './api'
 import { buildOverviewGraph, clusterEdgeSize, clusterNodeSize } from './overview-map'
+import { readGraphPalette } from './graph-theme'
+
+// node test env: no document → dark fallback palette for the param-injected
+// colorer / meta-edge color buildOverviewGraph now takes.
+const palette = readGraphPalette()
 
 function onode(cluster: number, partial: Partial<OverviewNode> = {}): OverviewNode {
   return {
@@ -32,7 +37,10 @@ function overview(partial: Partial<OverviewResponse>): OverviewResponse {
 
 describe('buildOverviewGraph', () => {
   it('keys nodes by cluster ordinal and exposes repr_id for drill-down', () => {
-    const g = buildOverviewGraph(overview({ nodes: [onode(0, { repr_id: 'block-aaa' }), onode(1)] }))
+    const g = buildOverviewGraph(
+      overview({ nodes: [onode(0, { repr_id: 'block-aaa' }), onode(1)] }),
+      palette,
+    )
     expect(g.order).toBe(2)
     expect(g.hasNode('0')).toBe(true)
     expect(g.getNodeAttribute('0', 'reprId')).toBe('block-aaa')
@@ -41,6 +49,7 @@ describe('buildOverviewGraph', () => {
   it('resolves response-local ordinal edge tuples to ordinal node keys', () => {
     const g = buildOverviewGraph(
       overview({ nodes: [onode(0), onode(1), onode(2)], edges: [[0, 2, 7, 1.5]] }),
+      palette,
     )
     expect(g.hasEdge('0', '2')).toBe(true)
     expect(g.getEdgeAttribute('0', '2', 'linkCount')).toBe(7)
@@ -56,18 +65,19 @@ describe('buildOverviewGraph', () => {
           [1, 0, 3, 1], // same undirected edge as above
         ],
       }),
+      palette,
     )
     expect(g.size).toBe(1)
   })
 
   it('handles an empty map without crashing', () => {
-    const g = buildOverviewGraph(overview({ nodes: [], edges: [] }))
+    const g = buildOverviewGraph(overview({ nodes: [], edges: [] }), palette)
     expect(g.order).toBe(0)
     expect(g.size).toBe(0)
   })
 
   it('assigns finite positions (synchronous FA2 ran)', () => {
-    const g = buildOverviewGraph(overview({ nodes: [onode(0), onode(1)], edges: [[0, 1, 5, 1]] }))
+    const g = buildOverviewGraph(overview({ nodes: [onode(0), onode(1)], edges: [[0, 1, 5, 1]] }), palette)
     expect(Number.isFinite(g.getNodeAttribute('0', 'x'))).toBe(true)
     expect(Number.isFinite(g.getNodeAttribute('1', 'y'))).toBe(true)
   })

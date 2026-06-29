@@ -5,6 +5,10 @@
 
 import { DirectedGraph } from 'graphology'
 import type { ApiNode, EgoResponse } from './api'
+// Type-only import — erased at build, so no runtime cycle with graph-theme
+// (which re-exports the colorers below). graph-theme owns the palette reads;
+// the colorer signatures live here (design 03-§5b Single-Ownership).
+import type { GraphPalette } from './graph-theme'
 
 export interface NodeAttrs {
   label: string
@@ -34,19 +38,20 @@ export interface EdgeAttrs {
   color: string
 }
 
-/** Category → hue, deterministic without a category registry. */
-export function categoryColor(category: string): string {
+/** Category → hue, deterministic without a category registry. Saturation and
+ *  lightness come from the palette (theme-aware) — only the hue is hashed. */
+export function categoryColor(category: string, palette: GraphPalette): string {
   let hash = 0
   for (let i = 0; i < category.length; i++) {
     hash = (hash * 31 + category.charCodeAt(i)) | 0
   }
   const hue = ((hash % 360) + 360) % 360
-  return `hsl(${hue} 55% 62%)`
+  return `hsl(${hue} ${palette.nodeSat}% ${palette.nodeLum}%)`
 }
 
-/** supersedes renders dashed/dim — it is displayed, never traversed. */
-export function edgeColor(rel: string): string {
-  return rel === 'supersedes' ? '#595c6b' : '#34344a'
+/** supersedes renders dim/strong — it is displayed, never traversed. */
+export function edgeColor(rel: string, palette: GraphPalette): string {
+  return rel === 'supersedes' ? palette.edgeStrongColor : palette.edgeColor
 }
 
 export function nodeSize(degree: number): number {
@@ -65,7 +70,11 @@ export function createGraph(): DirectedGraph<NodeAttrs, EdgeAttrs> {
  * near their parent (the response focus if present, else origin) + jitter;
  * existing nodes keep their position so the layout never jumps.
  */
-export function mergeEgo(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, resp: EgoResponse): void {
+export function mergeEgo(
+  graph: DirectedGraph<NodeAttrs, EdgeAttrs>,
+  resp: EgoResponse,
+  palette: GraphPalette,
+): void {
   const seed = seedPosition(graph, resp.focus)
   for (const n of resp.nodes) {
     if (graph.hasNode(n.id)) {
@@ -90,7 +99,7 @@ export function mergeEgo(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, resp: EgoRe
       x,
       y,
       size: nodeSize(n.degree),
-      color: categoryColor(n.category),
+      color: categoryColor(n.category, palette),
     })
   }
   for (const [src, dst, rel, conf] of resp.edges) {
@@ -102,7 +111,7 @@ export function mergeEgo(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, resp: EgoRe
       rel: relName,
       conf,
       size: relName === 'supersedes' ? 1 : 1 + conf,
-      color: edgeColor(relName),
+      color: edgeColor(relName, palette),
     })
   }
   for (const n of resp.nodes) {

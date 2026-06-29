@@ -8,6 +8,7 @@ import { UndirectedGraph } from 'graphology'
 import forceAtlas2 from 'graphology-layout-forceatlas2'
 import type { OverviewResponse } from './api'
 import { categoryColor } from './graph-client'
+import type { GraphPalette } from './graph-theme'
 
 export interface MetaNodeAttrs {
   label: string
@@ -45,7 +46,10 @@ export function clusterEdgeSize(linkCount: number): number {
  * design 07-§3.5). Initial circular placement + one synchronous FA2 pass gives
  * a readable layout without a worker.
  */
-export function buildOverviewGraph(resp: OverviewResponse): UndirectedGraph<MetaNodeAttrs, MetaEdgeAttrs> {
+export function buildOverviewGraph(
+  resp: OverviewResponse,
+  palette: GraphPalette,
+): UndirectedGraph<MetaNodeAttrs, MetaEdgeAttrs> {
   const g = new UndirectedGraph<MetaNodeAttrs, MetaEdgeAttrs>()
   const n = Math.max(1, resp.nodes.length)
   resp.nodes.forEach((node, i) => {
@@ -58,14 +62,14 @@ export function buildOverviewGraph(resp: OverviewResponse): UndirectedGraph<Meta
       x: Math.cos(angle) * 10,
       y: Math.sin(angle) * 10,
       size: clusterNodeSize(node.size),
-      color: categoryColor(node.top_categories[0] ?? 'cluster'),
+      color: categoryColor(node.top_categories[0] ?? 'cluster', palette),
     })
   })
   for (const [src, dst, linkCount] of resp.edges) {
     const s = String(src)
     const d = String(dst)
     if (s === d || !g.hasNode(s) || !g.hasNode(d) || g.hasEdge(s, d)) continue
-    g.addEdge(s, d, { size: clusterEdgeSize(linkCount), color: '#34344a', linkCount })
+    g.addEdge(s, d, { size: clusterEdgeSize(linkCount), color: palette.edgeColor, linkCount })
   }
   if (g.order >= 2) {
     forceAtlas2.assign(g, { iterations: 300, settings: { ...forceAtlas2.inferSettings(g), slowDown: 8 } })

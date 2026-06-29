@@ -1,0 +1,77 @@
+// The ONE graph color bridge (design 03-§3 / §5b Single-Ownership): the single
+// place the graph reads its palette from the CSS theme tokens (tokens.css
+// `--graph-*`). Sigma/graphology eat color STRINGS, not var() — so the bridge
+// resolves the tokens via getComputedStyle once and hands a plain GraphPalette
+// to the param-injected colorers. categoryColor/edgeColor keep their home in
+// graph-client.ts (pure/testable); this module re-exports them so callers get
+// palette + colorers from one import. G1 seeds new merges from the palette;
+// recolorGraph is the O(order+size) re-paint pass G2 runs on a theme switch.
+
+import type { DirectedGraph } from 'graphology'
+import { categoryColor, edgeColor, type EdgeAttrs, type NodeAttrs } from './graph-client'
+
+export { categoryColor, edgeColor }
+
+export interface GraphPalette {
+  labelColor: string
+  edgeColor: string
+  edgeStrongColor: string
+  nodeSat: number
+  nodeLum: number
+}
+
+// Dark-theme fallback — ships a readable graph BEFORE/WITHOUT the theme axis
+// (and on SSR / token divergence). Values mirror tokens.css :root (design
+// 03-§5a). Keep in sync with the dark column there.
+const DARK_FALLBACK: GraphPalette = {
+  labelColor: '#9aa0bb',
+  edgeColor: '#3a3a52',
+  edgeStrongColor: '#5b5e74',
+  nodeSat: 70,
+  nodeLum: 68,
+}
+
+/**
+ * Read the `--graph-*` tokens off the document root. Color tokens are strings;
+ * sat/lum are BARE numbers (no `%`) so `hsl(h s% l%)` composes. `Number('')`
+ * and `Number('70%')` are both NaN, so `Number(raw) || fallback` keeps an
+ * empty OR a `%`-suffixed token on the dark default (no NaN leaks into hsl()).
+ * SSR-safe: no document → full dark fallback.
+ */
+export function readGraphPalette(): GraphPalette {
+  if (typeof document === 'undefined') return { ...DARK_FALLBACK }
+  const cs = getComputedStyle(document.documentElement)
+  const str = (name: string, fallback: string): string => {
+    const raw = cs.getPropertyValue(name).trim()
+    return raw || fallback
+  }
+  const num = (name: string, fallback: number): number => {
+    const raw = cs.getPropertyValue(name).trim()
+    return Number(raw) || fallback
+  }
+  return {
+    labelColor: str('--graph-label', DARK_FALLBACK.labelColor),
+    edgeColor: str('--graph-edge', DARK_FALLBACK.edgeColor),
+    edgeStrongColor: str('--graph-edge-strong', DARK_FALLBACK.edgeStrongColor),
+    nodeSat: num('--graph-node-sat', DARK_FALLBACK.nodeSat),
+    nodeLum: num('--graph-node-lum', DARK_FALLBACK.nodeLum),
+  }
+}
+
+/**
+ * Re-paint every node/edge `color` attribute from the palette (O(order+size)).
+ * Sigma bakes color into the attributes at merge time (graph-client mergeEgo),
+ * so a theme switch needs an explicit pass — the reducers alone never touch a
+ * baked attribute. G2 calls this on THEME_CHANGE; G1 only ships it.
+ */
+export function recolorGraph(
+  graph: DirectedGraph<NodeAttrs, EdgeAttrs>,
+  palette: GraphPalette,
+): void {
+  graph.forEachNode((id, attrs) => {
+    graph.setNodeAttribute(id, 'color', categoryColor(attrs.category, palette))
+  })
+  graph.forEachEdge((id, attrs) => {
+    graph.setEdgeAttribute(id, 'color', edgeColor(attrs.rel, palette))
+  })
+}

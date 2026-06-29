@@ -5,6 +5,11 @@
 import { describe, expect, it } from 'vitest'
 import type { ApiNode, EgoResponse } from './api'
 import { createGraph, evict, mergeEgo, recomputeHops, remainingDegree, touch } from './graph-client'
+import { readGraphPalette } from './graph-theme'
+
+// In the node test env there is no document → readGraphPalette() returns the
+// dark fallback: a concrete palette for the now param-injected colorers.
+const palette = readGraphPalette()
 
 function node(id: string, hop: number, partial: Partial<ApiNode> = {}): ApiNode {
   return {
@@ -41,6 +46,7 @@ describe('mergeEgo', () => {
         nodes: [node('a', 0), node('b', 1)],
         edges: [[0, 1, 4, 0.83]],
       }),
+      palette,
     )
     expect(graph.order).toBe(2)
     expect(graph.size).toBe(1)
@@ -51,19 +57,23 @@ describe('mergeEgo', () => {
 
   it('treats indices as response-local: a second response reuses index 0 for a different node', () => {
     const graph = createGraph()
-    mergeEgo(graph, ego({ nodes: [node('a', 0), node('b', 1)], edges: [[0, 1, 0, 0.5]] }))
+    mergeEgo(graph, ego({ nodes: [node('a', 0), node('b', 1)], edges: [[0, 1, 0, 0.5]] }), palette)
     // Second response: index 0 is now node b — the edge must land on b→c.
-    mergeEgo(graph, ego({ focus: 'b', nodes: [node('b', 0), node('c', 1)], edges: [[0, 1, 0, 0.9]] }))
+    mergeEgo(
+      graph,
+      ego({ focus: 'b', nodes: [node('b', 0), node('c', 1)], edges: [[0, 1, 0, 0.9]] }),
+      palette,
+    )
     expect(graph.hasDirectedEdge('b', 'c')).toBe(true)
     expect(graph.hasDirectedEdge('a', 'c')).toBe(false)
   })
 
   it('keeps existing node positions on re-merge (layout never jumps)', () => {
     const graph = createGraph()
-    mergeEgo(graph, ego({ nodes: [node('a', 0), node('b', 1)], edges: [] }))
+    mergeEgo(graph, ego({ nodes: [node('a', 0), node('b', 1)], edges: [] }), palette)
     graph.setNodeAttribute('b', 'x', 123)
     graph.setNodeAttribute('b', 'y', -7)
-    mergeEgo(graph, ego({ focus: 'b', nodes: [node('b', 0), node('c', 1)], edges: [] }))
+    mergeEgo(graph, ego({ focus: 'b', nodes: [node('b', 0), node('c', 1)], edges: [] }), palette)
     expect(graph.getNodeAttribute('b', 'x')).toBe(123)
     expect(graph.getNodeAttribute('b', 'y')).toBe(-7)
   })
@@ -79,6 +89,7 @@ describe('mergeEgo', () => {
           [1, 0, 1, 0.7],
         ],
       }),
+      palette,
     )
     expect(graph.size).toBe(2)
     expect(graph.getEdgeAttribute('a', 'b', 'rel')).toBe('topical')
@@ -96,6 +107,7 @@ describe('mergeEgo', () => {
           [0, 2, 0, 0.5],
         ],
       }),
+      palette,
     )
     expect(graph.getNodeAttribute('a', 'loadedDeg')).toBe(2)
     expect(graph.getNodeAttribute('b', 'loadedDeg')).toBe(1)
@@ -112,7 +124,7 @@ describe('evict (hard ceiling, design 05-§6.6)', () => {
       nodes.push(node(`n${i}`, Math.ceil(i / band)))
       edges.push([0, i, 0, 0.5])
     }
-    mergeEgo(graph, ego({ focus: 'focus', nodes, edges }))
+    mergeEgo(graph, ego({ focus: 'focus', nodes, edges }), palette)
     recomputeHops(graph, 'focus')
     return graph
   }
@@ -134,7 +146,7 @@ describe('evict (hard ceiling, design 05-§6.6)', () => {
   it('drops unreachable nodes first, then keeps the BFS-closest', () => {
     const graph = bigGraph(12, 4) // hops 1..3
     // An island with no edges — unreachable, must go first.
-    mergeEgo(graph, ego({ focus: 'island', nodes: [node('island', 0)], edges: [] }))
+    mergeEgo(graph, ego({ focus: 'island', nodes: [node('island', 0)], edges: [] }), palette)
     recomputeHops(graph, 'focus')
     evict(graph, 'focus', { maxNodes: 5, maxEdges: 1000, targetNodes: 5 })
     expect(graph.hasNode('island')).toBe(false)
@@ -179,6 +191,7 @@ describe('recomputeHops', () => {
           [1, 2, 0, 0.5],
         ],
       }),
+      palette,
     )
     recomputeHops(graph, 'c')
     expect(graph.getNodeAttribute('c', 'hopFromFocus')).toBe(0)
@@ -188,7 +201,7 @@ describe('recomputeHops', () => {
 
   it('marks unreachable nodes Infinity', () => {
     const graph = createGraph()
-    mergeEgo(graph, ego({ nodes: [node('a', 0), node('b', 1)], edges: [] }))
+    mergeEgo(graph, ego({ nodes: [node('a', 0), node('b', 1)], edges: [] }), palette)
     recomputeHops(graph, 'a')
     expect(graph.getNodeAttribute('b', 'hopFromFocus')).toBe(Infinity)
   })
