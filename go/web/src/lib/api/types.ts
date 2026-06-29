@@ -452,12 +452,15 @@ export interface ClassifyStatus {
   samples?: ClassifySample[]
 }
 
-// Source: PLANNED — the optional additive A0 `scope-overview` read-action (design
-// 04 §3 A0), NOT YET BUILT in the Go backend. Forward-declared so A2/A4 can type
-// against it; field names are provisional until the A0 golden test pins them.
-// Shape: per-scope block count (SELECT scope, count(*) ... GROUP BY scope) + the
-// per-scope api-key count + the owning tenant from context_tenant_scopes (null
-// for an unmapped Altbestand scope).
+// Source: go/internal/store/scope_overview.go:22 `ScopeOverview` (the A0
+// `scope-overview` read-action, design 04 §3 A0) — BUILT and tierServerAdmin-gated
+// in the Go backend (handler/scope_overview.go:18 handleScopeOverview). The JSON
+// field names are a FROZEN contract pinned by the Go struct's json tags (the store
+// doc comment forbids renaming scope/block_count/key_count/tenant_id). Shape:
+// per-scope block count (SELECT scope, count(*) ... GROUP BY scope, unscoped) + the
+// per-scope api-key count (home_scope ∪ allowed_scopes) + the owning tenant from
+// context_tenant_scopes (null for a system scope like '_global' or an unmapped
+// Altbestand scope).
 export interface ScopeOverview {
   scope: string
   block_count: number
@@ -485,6 +488,13 @@ export interface TenantResponse {
 export interface TenantDeleteResponse {
   success: true
   deleted: string
+}
+
+// Source: go/internal/handler/scope_overview.go:31 (scope-overview) — one
+// ScopeOverview row per scope across the whole store, server-admin only.
+export interface ScopeOverviewListResponse {
+  success: true
+  scopes: ScopeOverview[]
 }
 
 // Source: tenant_manage.go:231 (tenant-grant-list).

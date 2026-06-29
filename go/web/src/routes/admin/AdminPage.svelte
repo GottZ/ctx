@@ -10,6 +10,7 @@
   import { session } from '../../lib/auth.svelte'
   import type { TenantStatus } from '../../lib/api/types'
   import { TenantsModel } from './tenants.svelte'
+  import ScopeMap from './ScopeMap.svelte'
   import CorpusMaintenance from './CorpusMaintenance.svelte'
 
   const model = new TenantsModel()
@@ -102,6 +103,8 @@
         </div>
       {/if}
     </section>
+
+    <ScopeMap />
 
     <CorpusMaintenance />
   {/if}

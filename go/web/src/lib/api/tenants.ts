@@ -6,6 +6,7 @@
 
 import { apiFetch } from '../api'
 import type {
+  ScopeOverviewListResponse,
   TenantDeleteResponse,
   TenantGrantDeleteResponse,
   TenantGrantListResponse,
@@ -39,6 +40,18 @@ export function listTenants(): Promise<TenantListResponse> {
   return apiFetch<TenantListResponse>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'tenant-list' }),
+  })
+}
+
+/** Server-admin scope landscape: one row per scope (block + key counts + owning
+ * tenant) across the whole store. tierServerAdmin-gated server-side
+ * (handler/scope_overview.go); the counts are deliberately unscoped (no block
+ * content leaves the store). Feeds the ScopeMap panel (A0-FE), and later the
+ * tenant→scope mapping the QuotaForm needs + the delete blast-radius count. */
+export function scopeOverview(): Promise<ScopeOverviewListResponse> {
+  return apiFetch<ScopeOverviewListResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'scope-overview' }),
   })
 }
 
