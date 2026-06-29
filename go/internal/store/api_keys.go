@@ -23,13 +23,20 @@ const DefaultTenantID = "00000000-0000-0000-0000-0000000d3fa0"
 // ApiKey represents a row in context_api_keys (without the plaintext key,
 // which is only returned once at creation).
 type ApiKey struct {
-	ID            string     `json:"id"`
-	Label         string     `json:"label"`
-	HomeScope     string     `json:"home_scope"`
-	AllowedScopes []string   `json:"allowed_scopes"`
-	Active        bool       `json:"active"`
-	LastUsedAt    *time.Time `json:"last_used_at,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
+	ID            string   `json:"id"`
+	Label         string   `json:"label"`
+	HomeScope     string   `json:"home_scope"`
+	AllowedScopes []string `json:"allowed_scopes"`
+	// TenantRole is the per-tenant RBAC role (059 column: owner|admin|member,
+	// NOT NULL DEFAULT 'member'). Populated by ListApiKeys for the role-badge on
+	// the tenant-admin key list (design/05 LÜCKE-1 / TK7a) — an additive read of
+	// a column that has existed since 059, no migration. CreateApiKey does NOT
+	// set it (its INSERT...RETURNING omits the column), so a key built there
+	// carries the zero value "" until reloaded via the list path.
+	TenantRole string     `json:"tenant_role"`
+	Active     bool       `json:"active"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 // CreateApiKey generates a new API key, hashes it, and inserts the row.
@@ -115,7 +122,7 @@ func ListApiKeys(ctx context.Context, pool *pgxpool.Pool, tenantFilter string, a
 		tenantArg = &tenantFilter
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT id, label, home_scope, allowed_scopes, active, last_used_at, created_at
+		`SELECT id, label, home_scope, allowed_scopes, tenant_role, active, last_used_at, created_at
 		 FROM context_api_keys
 		 WHERE ($1::uuid IS NULL OR tenant_id = $1::uuid)
 		   AND (NOT $2::boolean OR active)
@@ -129,7 +136,7 @@ func ListApiKeys(ctx context.Context, pool *pgxpool.Pool, tenantFilter string, a
 	var keys []ApiKey
 	for rows.Next() {
 		var k ApiKey
-		if err := rows.Scan(&k.ID, &k.Label, &k.HomeScope, &k.AllowedScopes, &k.Active, &k.LastUsedAt, &k.CreatedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.Label, &k.HomeScope, &k.AllowedScopes, &k.TenantRole, &k.Active, &k.LastUsedAt, &k.CreatedAt); err != nil {
 			return nil, fmt.Errorf("api_keys: scan: %w", err)
 		}
 		keys = append(keys, k)
