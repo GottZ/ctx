@@ -5,6 +5,7 @@
 
 import { ApiError, apiFetch, configureApi } from './api'
 import type { WhoamiResponse } from './api/types'
+import { capabilitiesFor } from './auth/capabilities'
 
 const STORAGE_KEY = 'ctx.api-key'
 
@@ -19,6 +20,22 @@ export class Session {
   readonly active = $derived(this.key !== null && this.whoami !== null)
   readonly admin = $derived(this.whoami?.admin ?? false)
   readonly label = $derived(this.whoami?.label ?? null)
+
+  // Role-adaptive capability deriveds (design 06-role-nav.md §3/§4, Welle N2).
+  // `caps` is the single source of truth (capabilitiesFor, Welle N1); the rest
+  // expose the raw whoami identity fields for downstream consumers (Nav-Rail,
+  // landing-redirect, route-guards, IdentityBadge/N7, key-mgmt/TK5). While
+  // `restoring` or otherwise pre-login, whoami is null → capabilitiesFor(null)
+  // yields tier='loading' with every flag false (restore race, §6/R6).
+  readonly caps = $derived(capabilitiesFor(this.whoami))
+  readonly tier = $derived(this.caps.tier)
+  readonly role = $derived(this.whoami?.role ?? null)
+  readonly tenantId = $derived(this.whoami?.tenant_id ?? null)
+  readonly homeScope = $derived(this.whoami?.home_scope ?? null)
+  readonly readScopes = $derived(this.whoami?.read_scopes ?? [])
+  readonly tenantSlug = $derived(this.whoami?.tenant_slug ?? null)
+  readonly tenantDisplayName = $derived(this.whoami?.tenant_display_name ?? null)
+  readonly apiKeyId = $derived(this.whoami?.api_key_id ?? null)
 
   /** Probe the key against /api/whoami; persist it only on success. */
   async login(rawKey: string): Promise<void> {
