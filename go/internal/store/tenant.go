@@ -156,12 +156,17 @@ func scanTenant(row pgx.Row) (*Tenant, error) {
 	return &t, nil
 }
 
-// CreateTenant inserts a new tenant (status defaults to 'active' per 059). A
-// duplicate slug — including a second 'default' — raises 23505 and is returned
-// as the typed ErrTenantSlugExists (→ 409). Slug-namespace validation
-// (reservedSlug, → 400) is the caller's job; this enforces only the schema gates.
-func CreateTenant(ctx context.Context, pool *pgxpool.Pool, slug, displayName string) (*Tenant, error) {
-	t, err := scanTenant(pool.QueryRow(ctx,
+// CreateTenantTx is the tx-composable core of CreateTenant: it runs the INSERT
+// against a caller-owned transaction (pgx.Tx) instead of beginning its own. This
+// is what lets the compound tenant-create bootstrap (tenant row + initial scope +
+// owner key) commit ATOMICALLY — either all three rows land or none do, so a
+// partial failure never leaves a half-created, inert tenant (K10). The
+// 23505 → ErrTenantSlugExists mapping (→ 409) lives HERE, so both the pool wrapper
+// and the bootstrap path surface the identical typed error. Slug-namespace
+// validation (reservedSlug, → 400) is the caller's job; this enforces only the
+// schema gates.
+func CreateTenantTx(ctx context.Context, tx pgx.Tx, slug, displayName string) (*Tenant, error) {
+	t, err := scanTenant(tx.QueryRow(ctx,
 		`INSERT INTO context_tenants (slug, display_name)
 		 VALUES ($1, $2)
 		 RETURNING `+tenantCols, slug, displayName))
@@ -171,6 +176,27 @@ func CreateTenant(ctx context.Context, pool *pgxpool.Pool, slug, displayName str
 			return nil, ErrTenantSlugExists
 		}
 		return nil, fmt.Errorf("store: create tenant: %w", err)
+	}
+	return t, nil
+}
+
+// CreateTenant inserts a new tenant (status defaults to 'active' per 059). A
+// duplicate slug — including a second 'default' — raises 23505 and is returned
+// as the typed ErrTenantSlugExists (→ 409). It is a thin pool wrapper over
+// CreateTenantTx (begin → insert → commit), so the standalone path and the
+// bootstrap-composed path share one INSERT body (no logic drift).
+func CreateTenant(ctx context.Context, pool *pgxpool.Pool, slug, displayName string) (*Tenant, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: create tenant begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	t, err := CreateTenantTx(ctx, tx, slug, displayName)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("store: create tenant commit: %w", err)
 	}
 	return t, nil
 }
@@ -207,6 +233,26 @@ func AssignTenantScope(ctx context.Context, pool *pgxpool.Pool, tenantID, scope 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	created, err = AssignTenantScopeTx(ctx, tx, tenantID, scope, maxScopes)
+	if err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("store: assign scope commit: %w", err)
+	}
+	return created, nil
+}
+
+// AssignTenantScopeTx is the tx-composable core of AssignTenantScope: the same
+// lock → quota-count → insert mechanic, but against a caller-owned transaction
+// (pgx.Tx) instead of beginning its own. The compound tenant-create bootstrap
+// composes it INTO the CreateTenantTx/MintOwnerKey transaction, registering the
+// initial scope with maxScopes=-1 (cap-free) so the FIRST scope never wedges on a
+// max_scopes=0 seed, and BEFORE the owner key so the key's home_scope is already
+// registered (T22). The race + quota + error-mapping contract is identical to the
+// pool wrapper (see AssignTenantScope's doc) — only the transaction ownership
+// differs.
+func AssignTenantScopeTx(ctx context.Context, tx pgx.Tx, tenantID, scope string, maxScopes *int) (created bool, err error) {
 	// Lock the owning tenant row: per-tenant serialisation + existence check in one
 	// step. No row (or a malformed id → 22P02) → ErrTenantNotFound (404, no oracle).
 	var lockedID string
@@ -246,9 +292,6 @@ func AssignTenantScope(ctx context.Context, pool *pgxpool.Pool, tenantID, scope 
 		return false, fmt.Errorf("store: assign scope insert: %w", err)
 	}
 
-	if err = tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("store: assign scope commit: %w", err)
-	}
 	return true, nil
 }
 
@@ -344,6 +387,34 @@ func SetTenantLimits(ctx context.Context, pool *pgxpool.Pool, tenantID string, m
 		return ErrTenantNotFound
 	}
 	tag, err := pool.Exec(ctx,
+		`UPDATE context_tenants
+		    SET max_scopes = $2, max_keys = $3, updated_at = now()
+		  WHERE id = $1::uuid`, tenantID, maxScopes, maxKeys)
+	if err != nil {
+		if tenantNotFound(err) {
+			return ErrTenantNotFound
+		}
+		return fmt.Errorf("store: set tenant limits: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrTenantNotFound
+	}
+	return nil
+}
+
+// SetTenantLimitsTx is the tx-composable column write behind the compound
+// tenant-create limit seeding: the same typed-column UPDATE as SetTenantLimits,
+// but against a caller-owned transaction (pgx.Tx) so the caps commit IN THE SAME
+// tx as the tenant row (no uncapped window between create and seed). nil = SQL NULL
+// = unlimited; the >= 0 / both-required validation stays the handler's job. A
+// well-formed-but-absent id (0 rows) or a malformed id (22P02) both collapse to
+// ErrTenantNotFound (no-oracle) — unreachable on the bootstrap path, where the row
+// was just inserted in the same tx, but kept for the contract.
+func SetTenantLimitsTx(ctx context.Context, tx pgx.Tx, tenantID string, maxScopes, maxKeys *int) error {
+	if tenantID == "" {
+		return ErrTenantNotFound
+	}
+	tag, err := tx.Exec(ctx,
 		`UPDATE context_tenants
 		    SET max_scopes = $2, max_keys = $3, updated_at = now()
 		  WHERE id = $1::uuid`, tenantID, maxScopes, maxKeys)

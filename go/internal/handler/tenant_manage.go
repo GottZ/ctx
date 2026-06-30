@@ -1,11 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/store"
@@ -272,21 +276,69 @@ func (h *ManageHandler) handleTenantCreate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
-	tn, err := store.CreateTenant(r.Context(), h.pool, spec.Slug, spec.DisplayName)
-	if errors.Is(err, store.ErrTenantSlugExists) {
-		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "tenant slug already exists"})
+	// BE6-7 compound bootstrap (design/03 §6, design/01 Cross-Doc #3): the initial
+	// scope is the auto-prefixed '<slug>:main', built from the gated slug (never the
+	// payload — S1). The slug is already slugPattern-bounded (<= 24) and the name is
+	// the fixed "main", so the result can never exceed the VARCHAR(50) budget; the
+	// pre-check is defence-in-depth that yields a clean 400 ahead of the 22001 the
+	// owner-key mint would otherwise raise (the ErrScopeTooLong path, design/03 §6).
+	initialScope := spec.Slug + ":" + bootstrapScopeName
+	if len(initialScope) > 50 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "scope name too long (max 50 chars including the tenant prefix)"})
 		return
 	}
+	tn, ownerKey, ownerPlaintext, err := h.bootstrapTenant(r.Context(), spec.Slug, spec.DisplayName, initialScope, seedScopes, seedKeys)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "create tenant failed"})
+		writeBootstrapError(w, err)
 		return
 	}
-	// Seed only the dimensions the payload supplied. tn already carries the 069
-	// DEFAULTs (25/50) from the RETURNING; SetTenantLimits writes BOTH columns, so
-	// merge the supplied values over tn's defaults to avoid nulling the dimension the
-	// caller left out. A field given as a number caps it; absent → keep default (a
-	// null/absent on create is treated as "keep default", the capped-safe direction —
-	// an explicit unlimited override is done afterward via tenant-limit-set).
+	// FLAT compound result (frozen FE contract TenantCreateResult, types.ts): the
+	// owner-key plaintext is shown EXACTLY ONCE here (never persisted in clear — only
+	// its SHA-256 hash, api_keys.go).
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":      true,
+		"tenant":       tn,
+		"scope":        initialScope,
+		"owner_key_id": ownerKey.ID,
+		"owner_key":    ownerPlaintext,
+	})
+}
+
+// bootstrapScopeName is the name part of the initial auto-prefixed scope minted by
+// the compound tenant-create. The registered scope is '<slug>:main' — a sane
+// default home for the owner key so the tenant is immediately usable (not inert,
+// K10). The slug carries the cross-tenant uniqueness (S1); 'main' is just the
+// conventional first scope.
+const bootstrapScopeName = "main"
+
+// bootstrapTenant runs the ATOMIC compound tenant-create (design/03 §6, closing
+// K10): in ONE transaction it (a) creates the tenant, (b) seeds the supplied
+// structural limits over the 069 DEFAULTs, (c) registers the initial auto-prefixed
+// scope CAP-FREE (maxScopes=-1, so the first scope never wedges on a max_scopes=0
+// seed), and (d) mints the owner key (role='owner', home + allowed = that scope).
+// Any step's failure rolls the whole tx back — there is never a half-created, inert
+// tenant. The insert ORDER is load-bearing: the scope (c) is registered BEFORE the
+// owner key (d) so the key's home_scope already exists in context_tenant_scopes
+// (T22). The owner-key mint skips the key quota by construction (MintOwnerKey, no
+// cap) and skips T22 legitimately (server-admin tenant-create, freshly registered
+// own scope). It returns the tenant (with seeded limits echoed), the owner key
+// record, and its plaintext (shown once).
+func (h *ManageHandler) bootstrapTenant(ctx context.Context, slug, displayName, initialScope string, seedScopes, seedKeys *int) (*store.Tenant, store.ApiKey, string, error) {
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return nil, store.ApiKey{}, "", fmt.Errorf("bootstrap begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
+
+	// (a) Tenant row. A duplicate slug surfaces as ErrTenantSlugExists (→ 409).
+	tn, err := store.CreateTenantTx(ctx, tx, slug, displayName)
+	if err != nil {
+		return nil, store.ApiKey{}, "", err
+	}
+
+	// (b) Seed only the dimensions the payload supplied, merged over tn's 069
+	// DEFAULTs (25/50) so an absent dimension keeps its default — inside this tx, so
+	// the caps commit with the tenant (no uncapped window, design/04 §D-B S3).
 	if seedScopes != nil || seedKeys != nil {
 		newScopes, newKeys := tn.MaxScopes, tn.MaxKeys
 		if seedScopes != nil {
@@ -295,13 +347,51 @@ func (h *ManageHandler) handleTenantCreate(w http.ResponseWriter, r *http.Reques
 		if seedKeys != nil {
 			newKeys = seedKeys
 		}
-		if err := store.SetTenantLimits(r.Context(), h.pool, tn.ID, newScopes, newKeys); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "seed tenant limits failed"})
-			return
+		if err := store.SetTenantLimitsTx(ctx, tx, tn.ID, newScopes, newKeys); err != nil {
+			return nil, store.ApiKey{}, "", err
 		}
 		tn.MaxScopes, tn.MaxKeys = newScopes, newKeys
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tn})
+
+	// (c) Register the initial scope CAP-FREE (maxScopes=-1), BEFORE the owner key.
+	capFree := -1
+	if _, err := store.AssignTenantScopeTx(ctx, tx, tn.ID, initialScope, &capFree); err != nil {
+		return nil, store.ApiKey{}, "", err
+	}
+
+	// (d) Owner key: the single sanctioned path to role='owner' (MintOwnerKey), home
+	// + allowed pinned to the just-registered scope. A 22001 here (over-long scope)
+	// is mapped to a clean 400 by writeBootstrapError, not an anonymous 500.
+	key, plaintext, err := store.MintOwnerKey(ctx, tx, slug+" owner", initialScope, []string{initialScope}, tn.ID)
+	if err != nil {
+		return nil, store.ApiKey{}, "", err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, store.ApiKey{}, "", fmt.Errorf("bootstrap commit: %w", err)
+	}
+	return tn, key, plaintext, nil
+}
+
+// writeBootstrapError maps a compound tenant-create failure to its HTTP status. A
+// rolled-back tx means NO partial tenant escaped (the atomicity guarantee), so each
+// of these is a clean terminal response. The 22001 (value too long) from the
+// owner-key mint surfaces as a 400 'scope name too long' (design/03 §6
+// ErrScopeTooLong), never an anonymous 500.
+func writeBootstrapError(w http.ResponseWriter, err error) {
+	var pgErr *pgconn.PgError
+	switch {
+	case errors.Is(err, store.ErrTenantSlugExists):
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "tenant slug already exists"})
+	case errors.Is(err, store.ErrScopeExists):
+		// The slug is UNIQUE and the scope is slug-derived, so a fresh tenant can
+		// never collide here — defensive 409 rather than a misleading 500.
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "initial scope already exists"})
+	case errors.As(err, &pgErr) && pgErr.Code == "22001":
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "scope name too long (max 50 chars including the tenant prefix)"})
+	default:
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "create tenant failed"})
+	}
 }
 
 func (h *ManageHandler) handleTenantList(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, _ manageRequest) {
