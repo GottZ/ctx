@@ -15,6 +15,7 @@
   import { toApiError } from '../../lib/api'
   import { session } from '../../lib/auth.svelte'
   import type { ApiKeyCreateResult } from '../../lib/api/types'
+  import type { ApiKeyCreateSpec } from '../../lib/api/keys'
   import type { KeysModel } from './keys.svelte'
   import RevealOnceKey from './RevealOnceKey.svelte'
 
@@ -44,6 +45,16 @@
   })
 
   const readScopes = $derived(session.readScopes)
+
+  // Server-admin-only "target tenant" override (S2, design 05 FE-D2). A
+  // server-admin may mint a RECOVERY key INTO a foreign tenant; capabilitiesFor
+  // → viewTenants is the single source of truth (server-admin only). A
+  // tenant-admin never sees this field, so a cross-tenant tenant_id is
+  // structurally inexpressible from the tenant-admin UI — the unchanged TK4 path
+  // NEVER sends tenant_id. The server stays authoritative either way: a non-admin
+  // caller's value is ignored/bound to ar.TenantID (04-security-model SEC-6).
+  const canTargetTenant = $derived(session.caps.viewTenants)
+  let targetTenant = $state('')
 
   function toggleScope(scope: string): void {
     // Reassign the Set so the $state proxy notices the mutation.
@@ -79,8 +90,16 @@
     busy = true
     error = null
     try {
+      const spec: ApiKeyCreateSpec = { label: lbl, home_scope: hs, allowed_scopes: collectAllowed() }
+      // tenant_id ONLY when a server-admin (canTargetTenant) typed a target. A
+      // tenant-admin can't reach this branch (field not in DOM), so its mint
+      // stays byte-identical to TK4 — no tenant_id key on the wire.
+      if (canTargetTenant) {
+        const tid = targetTenant.trim()
+        if (tid !== '') spec.tenant_id = tid
+      }
       // create() mints, reloads the live list, and returns the show-once result.
-      created = await keys.create({ label: lbl, home_scope: hs, allowed_scopes: collectAllowed() })
+      created = await keys.create(spec)
     } catch (err) {
       // Server-403 (firstScopeOutsideTenant), 400 (reserved/empty scope), etc.
       error = toApiError(err).message
@@ -130,6 +149,23 @@
       {#if created !== null}
         <RevealOnceKey apiKey={created.api_key} onack={finish} />
       {:else}
+        {#if canTargetTenant}
+          <label class="field">
+            <span class="lbl">target tenant</span>
+            <input
+              type="text"
+              spellcheck="false"
+              placeholder="tenant id (uuid) — empty = your own tenant"
+              disabled={busy}
+              bind:value={targetTenant}
+            />
+            <span class="hint">
+              server-admin only: mint this key INTO another tenant (recovery). Empty → your own tenant; the server binds
+              any non-admin caller to its own tenant regardless.
+            </span>
+          </label>
+        {/if}
+
         <label class="field">
           <span class="lbl">label</span>
           <input
