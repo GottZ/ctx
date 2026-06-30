@@ -14,6 +14,7 @@
   import type { ResourceStatus } from '../../lib/resource.svelte'
   import type { ScopeOverview, Tenant, TenantStatus } from '../../lib/api/types'
   import QuotaForm from './QuotaForm.svelte'
+  import TenantProvision from './TenantProvision.svelte'
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
   import { TenantsModel } from './tenants.svelte'
 
@@ -56,6 +57,20 @@
       loadError = toApiError(err)
       loadedId = id // pin so the guard does not re-fire the failing load
       status = 'error'
+    }
+  }
+
+  // Re-load ONLY the scope list after a provision write (A3c), without flipping
+  // `status` to 'loading' — that would unmount the provision card mid-flow and
+  // blow away its just-revealed scope/key. The store-wide scope-overview is the
+  // same tenant→scope source `load` uses; on failure we keep the current list
+  // (the provision card surfaces its own create error).
+  async function refreshScopes(): Promise<void> {
+    try {
+      const ovRes = await scopeOverview()
+      scopes = ovRes.scopes.filter((s) => s.tenant_id === tenantId)
+    } catch {
+      // keep the existing list
     }
   }
 
@@ -194,6 +209,8 @@
       </div>
     </section>
 
+    <TenantProvision {tenantId} {scopes} onprovisioned={refreshScopes} />
+
     <section class="card" aria-label="per-scope quota">
       <header class="card-head">
         <h2>quota per scope</h2>
@@ -205,8 +222,8 @@
       </p>
       {#if scopes.length === 0}
         <p class="empty" role="status">
-          this tenant owns no scopes yet — quota is scope-keyed, so there is nothing to limit. Scope
-          provisioning is a backend write-action not yet exposed in the UI (design §5/§6.8).
+          this tenant owns no scopes yet — quota is scope-keyed, so there is nothing to limit. Provision a scope
+          in the section above to give it something to limit.
         </p>
       {:else}
         <div class="forms">
