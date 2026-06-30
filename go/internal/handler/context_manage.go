@@ -1304,10 +1304,18 @@ func firstScopeOutsideTenant(homeScope string, allowedScopes, ownedScopes []stri
 
 // apiKeyCreateRequest is the JSON shape under req.Data for api-key-create.
 // home_scope is REQUIRED as of v2.0.0 — empty values yield 400.
+//
+// TenantID is SERVER-ADMIN ONLY (S2/AM2, design/04 §D-B): only a server-admin
+// may target a foreign tenant; a non-server-admin that sets it is rejected 403
+// before it can ever bind a key outside its own tenant. There is deliberately NO
+// role field — a freshly minted key is ALWAYS 'member' (AM3): owner/admin roles
+// arise only via the tenant-create owner bootstrap and the owner-gated
+// api-key-update path, never via self-service create.
 type apiKeyCreateRequest struct {
 	Label         string   `json:"label"`
 	HomeScope     string   `json:"home_scope"`
 	AllowedScopes []string `json:"allowed_scopes,omitempty"`
+	TenantID      string   `json:"tenant_id,omitempty"` // SERVER-ADMIN ONLY
 }
 
 func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Request, req manageRequest) {
@@ -1353,41 +1361,51 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
 		return
 	}
-	// MT T22 (05-A5, Leak-Pfad L3, M052 052:5-9): a non-server-admin may mint
-	// keys ONLY for scopes its OWN tenant owns. In Modell C the scope→tenant map
-	// is context_tenant_scopes (store.TenantScopes) — NOT the naive
-	// home_scope==TenantID string compare of design/05 §5.1, which is the
-	// superseded Modell-B view (conflicts.md §0: tenant_id is a UUID, scope is the
-	// data discriminator, so the two are never string-equal). Every requested
-	// scope (home + allowed) must belong to ar.TenantID; a foreign or unowned
-	// scope is a privilege-escalation into a foreign corpus → 403. A server-admin
-	// mints any scope, byte-identical to today (§5.4 pausability). The gate is
-	// DORMANT until the action-tier cut (T25/05-A8) lets a non-server-admin reach
-	// this handler at all — built here so A8 only flips one switch. An empty
-	// ar.TenantID yields an empty owned set → every scope is "outside" → 403
-	// (fail-closed; ctx_auth guarantees a non-empty tenant_id for valid keys).
-	if !ar.IsServerAdmin() {
-		owned, err := store.TenantScopes(r.Context(), h.pool, ar.TenantID)
-		if err != nil {
-			slog.Error("manage: tenant scopes lookup failed", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
-			return
-		}
-		if outside := firstScopeOutsideTenant(data.HomeScope, data.AllowedScopes, owned); outside != "" {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"success": false,
-				"error":   "cannot create keys outside your tenant",
-			})
-			return
-		}
+
+	// S2 (design/04 §D-B): resolve and authorize the tenant the key binds to. The
+	// helper carries the AM2/T22 gates and writes its own 4xx/5xx response; a true
+	// `handled` means it already answered and we must stop. Extracted to keep this
+	// handler under the cyclop ceiling (the foreign-target vs self-mint branching
+	// would otherwise push it over).
+	bindingTenant, handled := h.resolveKeyMintTenant(w, r, data, ar)
+	if handled {
+		return
 	}
-	// MT T06 (Achse 01-T6): the new key is bound to the CREATOR's tenant
-	// (ar.TenantID), which also drives the tenant-aware {shared} default in
-	// store.CreateApiKey (R-LEAK5).
-	key, plaintext, err := store.CreateApiKey(r.Context(), h.pool, data.Label, data.HomeScope, data.AllowedScopes, ar.TenantID)
+
+	// Limits are ALWAYS fetched for the BINDING (target) tenant, NEVER ar.TenantID —
+	// otherwise a server-admin targeting tenant B would enforce A's cap. The read is
+	// FAIL-CLOSED (S3): a transient error is a 500, never a silent default to
+	// unlimited (a pool-exhaustion fault would otherwise void max_keys). An
+	// absent/unknown bindingTenant surfaces ErrTenantNotFound here AND again under
+	// MintKeyWithQuota's FOR UPDATE — either way a 404, no oracle.
+	_, maxKeys, err := store.TenantLimits(r.Context(), h.pool, bindingTenant)
+	if errors.Is(err, store.ErrTenantNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+		return
+	}
 	if err != nil {
-		slog.Error("manage: create api key failed", "error", err)
+		slog.Error("manage: tenant limits lookup failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+
+	// MT T06: the key is bound to bindingTenant (creator's tenant for a self-mint,
+	// the targeted tenant for a server-admin mint). role is FIXED "member" (AM3) —
+	// the only create-path role. MintKeyWithQuota enforces the max_keys cap under a
+	// context_tenants-row lock (race-tight, active-only), the structural limit a
+	// self-service tenant cannot exceed.
+	key, plaintext, err := store.MintKeyWithQuota(r.Context(), h.pool,
+		data.Label, data.HomeScope, data.AllowedScopes, bindingTenant, "member", maxKeys)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrKeyQuotaExceeded):
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"success": false, "error": "tenant key quota exceeded"})
+		case errors.Is(err, store.ErrTenantNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+		default:
+			slog.Error("manage: create api key failed", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		}
 		return
 	}
 
@@ -1397,8 +1415,70 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 		"label":          key.Label,
 		"home_scope":     key.HomeScope,
 		"allowed_scopes": key.AllowedScopes,
-		"api_key":        plaintext, // Shown once.
+		"tenant_role":    key.TenantRole, // Always 'member' on create (AM3).
+		"api_key":        plaintext,      // Shown once.
 	})
+}
+
+// resolveKeyMintTenant decides, and authorizes, the tenant a freshly minted api
+// key binds to (S2, design/04 §D-B). It returns the binding tenant and
+// handled=false on success, or "" and handled=true once it has written a
+// 4xx/5xx response (the caller must then stop). Three cases:
+//
+//   - data.TenantID set: SERVER-ADMIN ONLY (AM2). A non-server-admin caller can
+//     NEVER target a foreign tenant — it is rejected 403 before the field is ever
+//     read as a binding, so the field is dead for it. The server-admin must still
+//     pick scopes the TARGET tenant owns (foreign-target T22 → 403 otherwise), so
+//     it cannot mint a cross-tenant write-key.
+//   - data.TenantID empty, non-server-admin: the existing self-mint T22 gate —
+//     every requested scope (home + allowed) must belong to ar.TenantID (403).
+//   - data.TenantID empty, server-admin: self-mint, no T22 (byte-identical to the
+//     pre-BE6 server-admin path; §5.4 pausability).
+func (h *ManageHandler) resolveKeyMintTenant(w http.ResponseWriter, r *http.Request, data apiKeyCreateRequest, ar *auth.AuthResult) (string, bool) {
+	if data.TenantID != "" {
+		if !ar.IsServerAdmin() {
+			writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "tenant_id is server-admin only"})
+			return "", true
+		}
+		// foreign-target T22: a server-admin minting for tenant B must use B's scopes.
+		if h.rejectScopeOutsideTenant(w, r, data, data.TenantID) {
+			return "", true
+		}
+		return data.TenantID, false
+	}
+	if !ar.IsServerAdmin() {
+		// existing self-mint T22, byte-identical to the pre-BE6 gate (05-A5, L3).
+		if h.rejectScopeOutsideTenant(w, r, data, ar.TenantID) {
+			return "", true
+		}
+	}
+	return ar.TenantID, false
+}
+
+// rejectScopeOutsideTenant runs the T22 mint gate (05-A5, Leak-Pfad L3): every
+// requested scope (home + allowed) must belong to ownerTenant in
+// context_tenant_scopes (store.TenantScopes). In Modell C the scope→tenant map is
+// the table, NOT the naive home_scope==TenantID compare (tenant_id is a UUID,
+// scope is the data discriminator → never string-equal). A foreign/unowned scope
+// is privilege escalation into a foreign corpus → 403. An empty ownerTenant yields
+// an empty owned set → every scope is "outside" → 403 (fail-closed). It writes the
+// 403/500 and returns true when it has handled the response; false when every
+// requested scope is owned and the caller may proceed.
+func (h *ManageHandler) rejectScopeOutsideTenant(w http.ResponseWriter, r *http.Request, data apiKeyCreateRequest, ownerTenant string) bool {
+	owned, err := store.TenantScopes(r.Context(), h.pool, ownerTenant)
+	if err != nil {
+		slog.Error("manage: tenant scopes lookup failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return true
+	}
+	if outside := firstScopeOutsideTenant(data.HomeScope, data.AllowedScopes, owned); outside != "" {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"success": false,
+			"error":   "cannot create keys outside your tenant",
+		})
+		return true
+	}
+	return false
 }
 
 func (h *ManageHandler) handleApiKeyList(w http.ResponseWriter, r *http.Request, req manageRequest) {
