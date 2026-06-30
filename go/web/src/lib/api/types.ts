@@ -328,9 +328,12 @@ export interface SecretDeleteResponse {
 // =============================================================================
 
 // Source: go/internal/store/tenant.go:104 (Tenant) — a row in context_tenants,
-// the owner/management register (059). NO counts and NO scopes are carried here
-// (tenant-get returns this verbatim, store/tenant.go:190); a tenant owns 0..N
-// scopes, read separately. status is the 059 CHECK domain.
+// the owner/management register (059). NO live counts and NO scope LIST are
+// carried here (tenant-get returns this verbatim, store/tenant.go:190); a tenant
+// owns 0..N scopes, read separately. status is the 059 CHECK domain.
+// max_scopes/max_keys are the BE5 structural Tenant-Limits (design 02): stored in
+// context_tenants.metadata JSONB (migration-free, 059) and echoed on tenant-get/
+// list/create. null OR absent = unlimited (063 NULL-unlimited contract).
 export type TenantStatus = 'active' | 'suspended' | 'offboarding'
 export interface Tenant {
   id: string
@@ -339,6 +342,8 @@ export interface Tenant {
   status: TenantStatus
   created_at: string
   updated_at: string
+  max_scopes?: number | null
+  max_keys?: number | null
 }
 
 // Source: go/internal/store/tenant_grants.go:21 (TenantGrant) — one cross-tenant
@@ -589,8 +594,13 @@ export interface ApiKeyView {
 // Source: go/internal/handler/context_manage.go:1346-1353 (handleApiKeyCreate
 // happy path). The plaintext `api_key` is shown EXACTLY ONCE and is never re-
 // derivable (only its SHA-256 hash is retained server-side) — the client must
-// reveal-and-discard it, never persist it. No tenant_role: CreateApiKey does not
-// set the column, so a fresh key is always the 059 DEFAULT 'member'.
+// reveal-and-discard it, never persist it. tenant_role is the 059 owner|admin|
+// member column: BE6 (design 03 §2/§7) adds it to the CreateApiKey RETURNING so
+// the compound tenant-create owner-key carries role='owner'. OPTIONAL on the wire
+// — absent on a pre-BE6 server and the reveal-once flows don't need it (design 05
+// Offene #6); read-lenient bare string, like ApiKeyView.tenant_role. (Design 03
+// §7 wrote it required; kept optional here so the pre-BE6 literal in
+// keys.svelte.test.ts:44 still type-checks — a strict relaxation, not a drift.)
 export interface ApiKeyCreateResult {
   success: true
   id: string
@@ -598,6 +608,7 @@ export interface ApiKeyCreateResult {
   home_scope: string
   allowed_scopes: string[]
   api_key: string
+  tenant_role?: string
 }
 
 // Source: go/internal/handler/context_manage.go:1370 (handleApiKeyList happy
@@ -606,4 +617,110 @@ export interface ApiKeyCreateResult {
 export interface ApiKeyListResponse {
   success: true
   keys: ApiKeyView[]
+}
+
+// =============================================================================
+// Self-Service capabilities — frozen wire contract (FE-1 / FE-T1, design
+// 05-frontend-a3-selfservice §1). ADDITIVE: only NEW interfaces live here. The
+// in-place spec extensions ApiKeyCreateSpec.tenant_id (→ keys.ts, FE-T2) and
+// TenantSpec.max_scopes/max_keys (→ tenants.ts, FE-T3) are deliberately NOT
+// redeclared here — a duplicate would be a TS redeclare error (design 05 §1).
+// Drift anchor = the Go structs + manage handlers cited per type.
+// =============================================================================
+
+// The 059 tenant_role CHECK domain (owner|admin|member), mirroring how
+// TenantStatus names the 059 status domain. Used by the WRITE spec below, where
+// the client MUST send a valid role; the READ shapes (ApiKeyView.tenant_role,
+// WhoamiResponse.role, ApiKeyCreateResult.tenant_role) stay bare `string` for
+// forward-compat (a future server role must not break the parse).
+export type TenantRole = 'owner' | 'admin' | 'member'
+
+// Source: design 03-be6-roles §5 (handleApiKeyUpdate). api-key-update mutates the
+// 059 tenant_role and/or the active flag of ONE key, tenant-isolated. At least
+// one of tenant_role/active must be set (server 400 otherwise). home_scope /
+// allowed_scopes are deliberately NOT updatable from the FE (self-elevation risk,
+// design 05 Offene #5). tierTenantAdmin; the per-resource delegation + last-owner
+// guard is server-side (409/403).
+export interface ApiKeyUpdateSpec {
+  id: string
+  tenant_role?: TenantRole
+  active?: boolean
+}
+
+// Source: design 03-be6-roles §5 (handleApiKeyUpdate, 200 happy path) — the
+// re-read key row after the update, carrying the new tenant_role + active.
+export interface ApiKeyUpdateResult {
+  success: true
+  key: ApiKeyView
+}
+
+// Source: design 01-be5-scope-assign §3 (handleScopeCreate). The client sends
+// ONLY the bare `name`; the server builds the full `<tenant_slug>:<name>` from
+// ar.TenantID (S1 — server-authoritative prefixing, prefix injection is
+// structurally impossible client-side). tenant_id is a server-admin-only override
+// (A3c, provision for a foreign tenant); a non-server-admin's tenant_id is
+// ignored/rejected server-side. tierTenantAdmin.
+export interface ScopeCreateSpec {
+  name: string
+  tenant_id?: string
+}
+
+// Source: design 01-be5-scope-assign §3 (scope-create response, the handler
+// owner) + design 05 §1. SLIM shape { success, scope, tenant_id } — `scope` is
+// the FULL server-built name (e.g. "acme:research"). NOTE (unreconciled
+// cross-doc): design 06 CD-7 ASSUMED a ScopeOverview-shaped nested
+// `scope:{scope,block_count,key_count,tenant_id}`, but 06 itself defers to 01/02
+// ("Falls Design 01/02 eine schlankere Shape friert … anpassen"). The handler
+// doc (01) freezes the slim form → slim wins.
+export interface ScopeCreateResult {
+  success: true
+  scope: string
+  tenant_id: string
+}
+
+// Source: design 03-be6-roles §6 (handleTenantCreate compound JSON, the handler
+// owner) + design 06 fixtures (§2.4 owner_key:'ctx_sk_…'). The compound
+// tenant-create is atomic: tenant row + initial auto-prefixed scope + minted
+// owner-key (role 'owner') — solving the K10 inert-tenant gap. owner_key is the
+// reveal-once PLAINTEXT (shown exactly once, RevealOnceKey hygiene), NOT a nested
+// object. UNRECONCILED cross-doc: design 05 §1 instead named the scope field
+// `initial_scope` and typed owner_key as `ApiKeyCreateResult` (nested); the
+// handler (03) + fixtures (06) concur on flat `scope` + flat `owner_key: string`,
+// so that is encoded here. The master-synthesis must settle the field names
+// before FE-A3a consumes the value (design 05 §4 wrote `result.owner_key.api_key`,
+// which does NOT match this flat shape).
+export interface TenantCreateResult {
+  success: true
+  tenant: Tenant
+  scope: string
+  owner_key_id: string
+  owner_key: string
+}
+
+// Source: design 02-be5-tenant-quota §3 (tenant-limit-set / tenant-create
+// seeding) — the structural Tenant-Limits patch. BOTH fields are mandatory in the
+// spec (mirrors the server-side requirePresence on tenant-limit-set); null =
+// unlimited for that dimension. Distinct axis from the per-scope cost/call
+// TenantQuota (063): structure, not spend.
+export interface TenantLimitSpec {
+  max_scopes: number | null
+  max_keys: number | null
+}
+
+// Source: design 05 §1 (tenant-usage-get) — tenant-admin-readable usage + limits
+// for the /tenant self-service quota visibility (S3). null = unlimited. FLAG
+// (design 05 Offene #3): this READ action is so far modeled ONLY in 05 — NOT yet
+// in 02-be5-tenant-quota or 04-security-model. It must be frozen as
+// tierTenantAdmin with the handler PINNING a non-server-admin onto ar.TenantID
+// (req.ID read only when IsServerAdmin), else it is a cross-tenant counts leak.
+export interface TenantUsageView {
+  tenant_id: string
+  max_scopes: number | null
+  max_keys: number | null
+  scope_count: number
+  key_count: number
+}
+export interface TenantUsageResponse {
+  success: true
+  usage: TenantUsageView
 }
