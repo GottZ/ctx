@@ -146,6 +146,92 @@ func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope stri
 	return &key, plaintext, nil
 }
 
+// ErrKeyQuotaExceeded is returned by MintKeyWithQuota when the tenant already
+// owns >= max_keys ACTIVE keys — the 429 path. The count and the insert run
+// inside one transaction under a context_tenants-row FOR UPDATE lock, so the cap
+// is race-tight (no TOCTOU); a nil or negative maxKeys means unlimited (the cap is
+// skipped). The count is ACTIVE-ONLY by design (S3b, design/04 §D-B): a
+// soft-deleted (active=false) key must NOT permanently consume a max_keys slot, so
+// a create→revoke→create rotation reclaims its budget. The handler maps this to 429.
+var ErrKeyQuotaExceeded = errors.New("store: tenant key quota exceeded")
+
+// MintKeyWithQuota mints a new api key bound to tenantID, race-gated and
+// quota-capped, in ONE transaction. It is the store mechanic behind the BE6
+// self-service api-key-create action (called with role="member") — the cap it
+// enforces is what makes max_keys a HARD structural limit, unlike the fail-open,
+// synthesis-only QuotaAccountant gate (design/04 §Quota).
+//
+// Race gate (identical to AssignTenantScope): `SELECT id FROM context_tenants
+// WHERE id=$1 FOR UPDATE` locks the OWNING tenant's row, serialising ALL concurrent
+// mints of THIS tenant. The count→insert then runs under that lock, so two parallel
+// mints can NOT both observe count < max_keys and both commit (no TOCTOU). The lock
+// doubles as the existence check: no row (or a malformed id → 22P02) collapses to
+// ErrTenantNotFound, reusing tenantNotFound's no-oracle 404 contract.
+//
+// Quota: maxKeys == nil OR *maxKeys < 0 means UNLIMITED (cap skipped). Otherwise
+// count(*) of the tenant's ACTIVE keys is read under the lock; cnt >= *maxKeys →
+// ErrKeyQuotaExceeded. The count is `AND active = true` on purpose (S3b): a revoked
+// key never permanently burns a slot. insertApiKeyTx runs on the SAME tx, so the
+// count and the insert are one atomic unit. role MUST be a member of the 059 CHECK
+// domain; self-service passes a fixed "member" (owner is the MintOwnerKey path).
+func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes []string, tenantID, role string, maxKeys *int) (ApiKey, string, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return ApiKey{}, "", fmt.Errorf("api_keys: mint begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock the owning tenant row: per-tenant serialisation + existence check in one
+	// step. No row (or a malformed id → 22P02) → ErrTenantNotFound (404, no oracle).
+	var lockedID string
+	if err = tx.QueryRow(ctx,
+		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&lockedID); err != nil {
+		if tenantNotFound(err) {
+			return ApiKey{}, "", ErrTenantNotFound
+		}
+		return ApiKey{}, "", fmt.Errorf("api_keys: mint tenant lock: %w", err)
+	}
+
+	// Quota cap (nil / negative = unlimited). ACTIVE-only count under the lock so it
+	// observes any competing mint's committed insert — race-tight — AND so revoked
+	// keys do not permanently consume the budget (S3b).
+	if maxKeys != nil && *maxKeys >= 0 {
+		var cnt int
+		if err = tx.QueryRow(ctx,
+			`SELECT count(*) FROM context_api_keys WHERE tenant_id = $1::uuid AND active = true`, tenantID).Scan(&cnt); err != nil {
+			return ApiKey{}, "", fmt.Errorf("api_keys: mint count: %w", err)
+		}
+		if cnt >= *maxKeys {
+			return ApiKey{}, "", ErrKeyQuotaExceeded
+		}
+	}
+
+	key, plaintext, err := insertApiKeyTx(ctx, tx, label, homeScope, allowedScopes, tenantID, role)
+	if err != nil {
+		return ApiKey{}, "", err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return ApiKey{}, "", fmt.Errorf("api_keys: mint commit: %w", err)
+	}
+	return key, plaintext, nil
+}
+
+// MintOwnerKey mints an OWNER key bound to tenantID with NO quota check and NO
+// transaction of its own — the single sanctioned path to role='owner'. q may be a
+// *pgxpool.Pool OR a pgx.Tx (rowQuerier), so the server-admin tenant-create
+// bootstrap can compose it INTO its own CreateTenant transaction: the tenant row
+// and its first owner key then commit together or not at all.
+//
+// It deliberately bypasses MintKeyWithQuota's cap: the bootstrap owner key is the
+// tenant's FIRST key and would otherwise wedge on a max_keys=0 default. This is the
+// ONLY path that mints 'owner' on create — api-key-create is hard-'member'
+// (MintKeyWithQuota), so an owner role can arise only here or via the owner-gated
+// api-key-update (design/04 §D-B point 4, closing AM3). No cap, no tenant-row lock:
+// the caller owns the transaction scope.
+func MintOwnerKey(ctx context.Context, q rowQuerier, label, homeScope string, allowedScopes []string, tenantID string) (ApiKey, string, error) {
+	return insertApiKeyTx(ctx, q, label, homeScope, allowedScopes, tenantID, "owner")
+}
+
 // ListApiKeys returns API key rows ordered by created_at desc, scoped to one
 // tenant unless tenantFilter is empty (server-admin → all tenants) and limited
 // to active keys unless activeOnly is false.
