@@ -131,6 +131,12 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// counts + scope→tenant mapping. Folded into this case arm (no new branch)
 		// to keep HandleManage under the cyclop budget (max-complexity 25).
 		"scope-overview",
+		// scope-create/scope-list (BE5-3, Masterplan K1): self-service scope
+		// provisioning + the tenant's own scope inventory. They ROUTE through the
+		// tenant dispatcher but are tierTenantAdmin (not server-admin) — the tier is
+		// decided in actionTier, not here (routing ⟂ tier). Folded into this case arm
+		// to add NO new HandleManage branch (cyclop budget, max-complexity 25).
+		"scope-create", "scope-list",
 		// block-grant-* (T43, 07-W6) ride the same grant-family dispatcher + tier
 		// (server-admin) as tenant-grant-*; the per-block ownership gate lives in the
 		// handler. Folding them into this one case arm keeps HandleManage under the
@@ -252,7 +258,16 @@ func actionTier(req manageRequest) adminTier {
 		// OE-2; the handler pins the scope to ar.HomeScope). The mutating
 		// tenant-quota-set stays server-admin below — the quota is an operator
 		// cost ceiling, a tenant raising its own budget would void it (fail-closed).
-		"tenant-quota-get":
+		"tenant-quota-get",
+		// scope-create/scope-list (BE5-3, Masterplan K1): tenant-isolated by
+		// construction — handleScopeCreate binds to ar.TenantID and prefixes the
+		// scope with the DB slug (never the payload), and handleScopeList filters on
+		// ar.TenantID. So a tenant-admin can ONLY provision/enumerate its OWN
+		// '<slug>:' namespace — exactly the A8 precondition "open only what is
+		// already isolated". Routing lives in the tenant family, but the TIER is
+		// tenant-admin (Masterplan K10 trap: do NOT follow the routing arm into
+		// tierServerAdmin below, that would break D2 self-service).
+		"scope-create", "scope-list":
 		return tierTenantAdmin
 	case "mcp-client-create", "mcp-client-list", "mcp-client-delete",
 		// backend-test: reads/probes a backend by id with its resolved key and

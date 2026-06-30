@@ -41,6 +41,30 @@ func reservedSlug(slug string) bool {
 // (grandfathered, no data migration).
 var slugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$`)
 
+// scopeNamePattern is the S1-bearing name gate for self-service scope-create
+// (BE5-3, Masterplan K1; design/04 §D-A name-gate). The caller chooses ONLY the
+// name part; the server prepends the resolved tenant slug to build
+// '<slug>:<name>'. DNS-label style: 1..24 chars of ASCII-lowercase alnum +
+// internal hyphen, no edge hyphen. It excludes ':' (the prefix separator — the
+// structural S1 collision-bearer together with UNIQUE(slug)), whitespace, '_',
+// uppercase and any non-ASCII/Unicode-homograph BY CONSTRUCTION, not by
+// blacklist. Parsing the scope off the LAST ':' is then unambiguous (name carries
+// no ':'), so (tenant,name)→scope is injective: two distinct tenants can never
+// construct the same scope string.
+var scopeNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$`)
+
+// scopeCreateSpec is the JSON shape under req.Data for scope-create. The caller
+// supplies ONLY the bare name; the '<slug>:' prefix is derived server-side from
+// the resolved tenant (never the payload) → cross-tenant prefix-injection is
+// structurally impossible (S1). TenantID is a SERVER-ADMIN-ONLY override
+// (provision for a foreign tenant); a non-server-admin's TenantID is ignored, so
+// it can only ever address its OWN '<slug>:' namespace (S2). The frozen FE
+// contract (web/src/lib/api/scopes.ts) sends this override as data.tenant_id.
+type scopeCreateSpec struct {
+	Name     string `json:"name"`
+	TenantID string `json:"tenant_id,omitempty"`
+}
+
 type tenantSpec struct {
 	Slug        string `json:"slug"`
 	DisplayName string `json:"display_name"`
@@ -268,6 +292,126 @@ func (h *ManageHandler) handleTenantGrantDelete(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": req.ID})
 }
 
+// handleScopeCreate registers ONE self-service scope for a tenant (BE5-3,
+// Masterplan K1; design/04 §D-A, design/01 §3). Tier tierTenantAdmin (NOT the
+// server-admin tier of its tenant-* case neighbours): the handler is
+// tenant-isolated — the binding tenant is ar.TenantID for a tenant-admin (a
+// server-admin MAY target another via data.tenant_id / req.ID), and the scope
+// PREFIX is the DB slug of that tenant, never the payload. A non-server-admin
+// therefore can only write in its OWN '<slug>:' namespace → no cross-tenant squat
+// (S1+S2). The name gate (scopeNamePattern) excludes ':' (S1 collision-bearer).
+func (h *ManageHandler) handleScopeCreate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+	if ar == nil {
+		// Defense in depth — the tier gate already rejected anon callers.
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		return
+	}
+	var spec scopeCreateSpec
+	if len(req.Data) == 0 || json.Unmarshal(req.Data, &spec) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "data payload required (name)"})
+		return
+	}
+	// Target-tenant resolution (S2): a non-server-admin is ALWAYS bound to its own
+	// ar.TenantID — the override (data.tenant_id, or the top-level req.ID) is read
+	// ONLY for a server-admin. So an attacker can never choose the prefix authority
+	// and never squat a foreign namespace. data.tenant_id is the frozen FE channel
+	// (scopes.ts); req.ID is honoured as a fallback for the task's manage shape.
+	override := spec.TenantID
+	if override == "" {
+		override = req.ID
+	}
+	bindingTenant := ar.TenantID
+	if ar.IsServerAdmin() && override != "" {
+		bindingTenant = override
+	}
+	tn, err := store.GetTenant(r.Context(), h.pool, bindingTenant)
+	if errors.Is(err, store.ErrTenantNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "get tenant failed"})
+		return
+	}
+	// Defense-in-depth: re-validate the STORED slug before building the prefix, so a
+	// hypothetical off-charset legacy slug (':'/whitespace) cannot mis-attribute the
+	// '<slug>:<name>' prefix. Fail-closed (500) rather than trust the create-time gate alone.
+	if !slugPattern.MatchString(tn.Slug) {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "tenant slug is not prefix-safe"})
+		return
+	}
+	name := strings.TrimSpace(spec.Name)
+	if !scopeNamePattern.MatchString(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "name must be 1-24 chars of a-z, 0-9, '-' (no leading/trailing '-', no ':')"})
+		return
+	}
+	scope := tn.Slug + ":" + name
+	if len(scope) > 50 {
+		// context_tenant_scopes.scope is VARCHAR(50) — a hard backstop ahead of the
+		// 22001 the INSERT would otherwise raise (→ 500); pre-check yields a clean 400.
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "scope name too long (max 50 chars including the tenant prefix)"})
+		return
+	}
+	// Limits are ALWAYS fetched for the BINDING (target) tenant, NEVER ar.TenantID —
+	// otherwise a server-admin targeting tenant B would enforce A's cap. The read is
+	// FAIL-CLOSED (S3): a transient error is a 500, never a silent default to
+	// unlimited (a pool-exhaustion fault would otherwise void the quota).
+	maxScopes, _, err := store.TenantLimits(r.Context(), h.pool, bindingTenant)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "tenant limits lookup failed"})
+		return
+	}
+	if _, err := store.AssignTenantScope(r.Context(), h.pool, bindingTenant, scope, maxScopes); err != nil {
+		switch {
+		case errors.Is(err, store.ErrScopeExists):
+			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "scope already exists"})
+		case errors.Is(err, store.ErrScopeQuotaExceeded):
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"success": false, "error": "tenant scope quota exceeded"})
+		case errors.Is(err, store.ErrTenantNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "assign scope failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "scope": scope, "tenant_id": bindingTenant})
+}
+
+// handleScopeList lists the caller's OWN tenant scopes (BE5-3; design/01 §3, FE
+// scopes.ts listScopes). Tier tierTenantAdmin, server-side filtered on
+// ar.TenantID — a server-admin MAY target another tenant via req.ID, but a
+// non-server-admin NEVER sees foreign-tenant scopes (no enumeration). Distinct
+// from the server-admin scope-overview (deliberately unscoped, whole-store).
+//
+// The rows are ScopeOverview-shaped to match the frozen FE
+// ScopeOverviewListResponse, but block_count/key_count are 0 BY DESIGN: a
+// per-scope count would need either the server-admin-only global GROUP-BY of
+// store.ScopeOverviews (an index-scan over ALL blocks at the 1M target — wrong
+// for a per-tenant list) or a new tenant-scoped count store function (out of this
+// wave's file scope). The tenant-scoped read returns the scope inventory; the
+// counts are a separate, deferrable enrichment.
+func (h *ManageHandler) handleScopeList(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+	if ar == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		return
+	}
+	target := ar.TenantID
+	if ar.IsServerAdmin() && req.ID != "" {
+		target = req.ID
+	}
+	scopes, err := store.TenantScopes(r.Context(), h.pool, target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "list scopes failed"})
+		return
+	}
+	tid := target
+	rows := make([]store.ScopeOverview, 0, len(scopes))
+	for _, s := range scopes {
+		rows = append(rows, store.ScopeOverview{Scope: s, TenantID: &tid})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "scopes": rows})
+}
+
 // dispatchTenantAction fans the tenant-* lifecycle actions out (split from
 // HandleManage's switch for cyclomatic budget, mirroring dispatchBackendAction).
 // It also routes the tenant-grant-* cross-tenant read-grant actions (T17, §V4):
@@ -295,6 +439,15 @@ func (h *ManageHandler) dispatchTenantAction(w http.ResponseWriter, r *http.Requ
 		// counts + scope→tenant mapping. No AuthResult: the read is a global
 		// landscape (tierServerAdmin-gated), deliberately unscoped, counts-only.
 		h.handleScopeOverview(w, r)
+	case "scope-create":
+		// BE5-3 (Masterplan K1): self-service scope-create. tierTenantAdmin (NOT
+		// server-admin like its case neighbours) — tenant-isolated by the
+		// server-side '<slug>:' auto-prefix; the tier is set in actionTier, not here.
+		h.handleScopeCreate(w, r, ar, req)
+	case "scope-list":
+		// BE5-3: the tenant's OWN scope inventory (tierTenantAdmin, filtered on
+		// ar.TenantID). Distinct from the server-admin scope-overview above.
+		h.handleScopeList(w, r, ar, req)
 	case "block-grant-create", "block-grant-list", "block-grant-revoke":
 		// block-level (T43, 07-W6) — the row-level share, same grant family.
 		h.dispatchBlockGrantAction(w, r, ar, req)
