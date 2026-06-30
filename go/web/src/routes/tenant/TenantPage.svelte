@@ -13,15 +13,24 @@
   import { session } from '../../lib/auth.svelte'
   import type { ApiKeyView, TenantRole } from '../../lib/api/types'
   import { KeysModel } from './keys.svelte'
+  import { ScopesSelfModel } from './scopes.svelte' // FE-9 / SS1
   import { activeOwnerCount, controlDisabled } from './role-guards'
   import KeyCreateDialog from './KeyCreateDialog.svelte'
   import QuotaCard from './QuotaCard.svelte'
+  import ScopeSelfCard from './ScopeSelfCard.svelte' // FE-9 / SS1
+  import TenantUsageCard from './TenantUsageCard.svelte' // FE-10 / SS2
 
   // KeysModel carries its own $state runes, so a plain const instance is
   // reactive in the template (§ Svelte-5 class-runes). Load is driven by an
   // $effect (not onMount) so a boot-time restore race — caps='loading' at mount
   // (§6/R6) — still triggers the fetch the moment access resolves.
   const keys = new KeysModel()
+
+  // FE-9 / SS1: the single self-service scope model — drives BOTH the scope card
+  // (list + create) and the usage card (FE-10), and the key-create CTA's
+  // atKeyLimit gate (FE-10). One instance → one load (scope-list + tenant-usage-
+  // get in parallel) per visit. Same class-runes reactivity as KeysModel.
+  const scopesModel = new ScopesSelfModel()
 
   // TK4: create-dialog open flag. TK5: the row pending revoke (null = no dialog)
   // — a fresh ConfirmDialog mounts per target so showModal re-fires each time.
@@ -36,6 +45,16 @@
   $effect(() => {
     if (session.caps.manageTenantKeys && keys.status === 'idle') {
       void keys.load()
+    }
+  })
+
+  // FE-9 / SS1: same gated, idle-guarded load as the keys table — a tenant-admin
+  // is the only tier the scope-list / tenant-usage-get actions answer for (server
+  // authoritative). The $effect (not onMount) re-fires the moment a boot restore
+  // resolves caps from 'loading'.
+  $effect(() => {
+    if (session.caps.manageTenantKeys && scopesModel.status === 'idle') {
+      void scopesModel.load()
     }
   })
 
@@ -127,7 +146,16 @@
     </p>
   {:else}
     <div class="toolbar">
-      <button type="button" class="cta" onclick={() => (creating = true)}>+ New key</button>
+      <!-- FE-10 / SS2: the key-create CTA is disabled at the tenant's key cap
+           (atKeyLimit, server-authoritative — it 429s a mint over the limit). -->
+      <button
+        type="button"
+        class="cta"
+        disabled={scopesModel.atKeyLimit}
+        title={scopesModel.atKeyLimit
+          ? 'key limit reached — revoke a key or ask a server-admin to raise the cap'
+          : undefined}
+        onclick={() => (creating = true)}>+ New key</button>
       <label class="toggle">
         <input
           type="checkbox"
@@ -138,6 +166,14 @@
         show revoked
       </label>
     </div>
+
+    {#if scopesModel.atKeyLimit}
+      <!-- FE-10 / SS2 -->
+      <p class="limit" role="status">
+        key limit reached ({scopesModel.usage?.key_count}/{scopesModel.usage?.max_keys}) — revoke a key or ask a
+        server-admin to raise the cap before minting another.
+      </p>
+    {/if}
 
     {#if keys.actionError}
       <p class="action-error" role="alert">{keys.actionError}</p>
@@ -259,6 +295,12 @@
         </div>
       </section>
     {/if}
+
+    <!-- FE-9 / SS1: tenant-admin self-service scope provisioning (list + create). -->
+    <ScopeSelfCard model={scopesModel} />
+
+    <!-- FE-10 / SS2: structural scope+key usage against the per-tenant caps. -->
+    <TenantUsageCard model={scopesModel} />
 
     <!-- TK6: read-only quota transparency for the tenant's own scope. -->
     <QuotaCard />
@@ -544,8 +586,22 @@
     color: var(--accent);
     cursor: pointer;
   }
-  .cta:hover {
+  .cta:hover:not(:disabled) {
     background: var(--accent-dim);
+  }
+  /* FE-10 / SS2: key-create CTA disabled at the tenant key cap. */
+  .cta:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  /* FE-10 / SS2: key-limit hint banner under the toolbar. */
+  .limit {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--warn);
+    border-radius: var(--radius);
+    color: var(--warn);
+    font-size: 0.8rem;
   }
   .toggle {
     display: inline-flex;
