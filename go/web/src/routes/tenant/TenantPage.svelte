@@ -11,8 +11,9 @@
   // not a doomed 403 request. The gate is UX only; the server is authoritative.
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
   import { session } from '../../lib/auth.svelte'
-  import type { ApiKeyView } from '../../lib/api/types'
+  import type { ApiKeyView, TenantRole } from '../../lib/api/types'
   import { KeysModel } from './keys.svelte'
+  import { activeOwnerCount, controlDisabled } from './role-guards'
   import KeyCreateDialog from './KeyCreateDialog.svelte'
   import QuotaCard from './QuotaCard.svelte'
 
@@ -27,11 +28,43 @@
   let creating = $state(false)
   let revokeTarget = $state<ApiKeyView | null>(null)
 
+  // TK7b: active owners in the (server-tenant-isolated) list — drives the
+  // last-owner guard so a demote/deactivate that would orphan the tenant is
+  // disabled. $derived so it re-counts whenever the list reloads after a mutation.
+  const ownerCount = $derived(activeOwnerCount(keys.keys))
+
   $effect(() => {
     if (session.caps.manageTenantKeys && keys.status === 'idle') {
       void keys.load()
     }
   })
+
+  // TK7b: promote/demote a key's tenant_role. The <select> is server-controlled
+  // (one-way value + onchange, like FilterPanel) — on success keys.update reloads
+  // and the select re-syncs to the authoritative role. A rejected change (last-
+  // owner 409 / self-lockout 403) is swallowed here: keys.update already surfaced
+  // it on actionError and rethrew, so we only stop the unhandled rejection. The
+  // server stays authoritative; the disabled state is comfort only.
+  async function changeRole(k: ApiKeyView, role: TenantRole): Promise<void> {
+    if (role === k.tenant_role) return
+    try {
+      await keys.update({ id: k.id, tenant_role: role })
+    } catch {
+      /* actionError set by the model; the select stays on the rejected value until
+         the next list refresh — the server is the source of truth (design §3). */
+    }
+  }
+
+  // TK7b: (de)activate a key. Reactivation (active:false→true) is the toggle's
+  // unique power — revoke (soft-delete, TK5) can only deactivate. Same swallow.
+  async function toggleActive(k: ApiKeyView): Promise<void> {
+    try {
+      await keys.update({ id: k.id, active: !k.active })
+    } catch {
+      /* actionError set by the model; k.active is unchanged so the button label
+         stays correct without a resync. */
+    }
+  }
 
   function requestRevoke(k: ApiKeyView): void {
     // Self-revoke is hard-disabled in the UI (button never reaches here for the
@@ -155,7 +188,17 @@
                   </td>
                   <td>
                     {#if k.tenant_role}
-                      <span class="badge {roleClass(k.tenant_role)}">{k.tenant_role}</span>
+                      <select
+                        class="role-select {roleClass(k.tenant_role)}"
+                        aria-label={`role for ${k.label}`}
+                        value={k.tenant_role}
+                        disabled={controlDisabled(k, ownerCount, isOwnKey(k.id), keys.busyId === k.id)}
+                        onchange={(e) => void changeRole(k, e.currentTarget.value as TenantRole)}
+                      >
+                        <option value="member">member</option>
+                        <option value="admin">admin</option>
+                        <option value="owner">owner</option>
+                      </select>
                     {:else}
                       <span class="dim">—</span>
                     {/if}
@@ -168,12 +211,21 @@
                       {#each k.allowed_scopes as s (s)}<span class="chip">{s}</span>{/each}
                     {/if}
                   </td>
-                  <td>
+                  <td class="status-cell">
                     {#if k.active}
                       <span class="badge ok">active</span>
                     {:else}
                       <span class="badge revoked">revoked</span>
                     {/if}
+                    <button
+                      type="button"
+                      class="toggle-active"
+                      aria-label={`activation for ${k.label}`}
+                      disabled={controlDisabled(k, ownerCount, isOwnKey(k.id), keys.busyId === k.id)}
+                      onclick={() => void toggleActive(k)}
+                    >
+                      {keys.busyId === k.id ? '…' : k.active ? 'deactivate' : 'activate'}
+                    </button>
                   </td>
                   <td class="when">{fmtUsed(k.last_used_at)}</td>
                   <td class="when">{k.created_at.slice(0, 10)}</td>
@@ -403,16 +455,61 @@
     color: var(--text-dim);
     white-space: nowrap;
   }
-  .badge.role-owner {
+
+  /* TK7b: the role <select> wears the same chip/badge skin as the static badge so
+     the row reads the same; the role-* class tints it by current role. */
+  .role-select {
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    text-transform: uppercase;
+    letter-spacing: var(--label-tracking);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    padding: 0 var(--space-1);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .role-select.role-owner {
     color: var(--accent);
     border-color: var(--accent);
   }
-  .badge.role-admin {
+  .role-select.role-admin {
     color: var(--warn);
     border-color: var(--warn);
   }
-  .badge.role-member {
+  .role-select:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  /* TK7b: activation toggle sits beside the status badge (deactivate/activate). */
+  .status-cell {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .toggle-active {
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+    padding: 0 var(--space-1);
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
     color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .toggle-active:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .toggle-active:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
   .badge.ok {
     color: var(--ok);
