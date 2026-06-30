@@ -442,6 +442,10 @@ export async function seedSession(
   // Per-session, per-action call counter — drives Fault.afterCalls (quota-exhaustion
   // sequences: e.g. first scope-create ok, second → 429).
   const callIndex: Record<string, number> = {}
+  // A3b lifecycle is STATEFUL: a tenant-update records the new status (keyed by
+  // tenant id) so a following tenant-get / tenant-list reflects the toggle — the
+  // suspend→suspended→activate e2e only proves anything if the read paths move.
+  const tenantStatus: Record<string, string> = {}
 
   await page.route('**/health', (route: Route) =>
     route.fulfill({ json: { status: 'ok', services: { db: 'ok', embed: 'ok' } } }),
@@ -467,10 +471,16 @@ export async function seedSession(
     if (path === '/api/manage' && method === 'POST') {
       let action: string | undefined
       let data: Record<string, unknown> | undefined
+      let id: string | undefined
+      let status: string | undefined
       try {
-        const body = req.postDataJSON() as { action?: string; data?: Record<string, unknown> } | null
+        const body = req.postDataJSON() as
+          | { action?: string; data?: Record<string, unknown>; id?: string; status?: string }
+          | null
         action = body?.action
         data = body?.data
+        id = body?.id // top-level on tenant-get/-update/-delete (tenant_manage.go)
+        status = body?.status // top-level on tenant-update (req.Status)
       } catch {
         action = undefined
       }
@@ -489,7 +499,31 @@ export async function seedSession(
           })
         }
       }
-      return route.fulfill({ json: manageFixture(action, opts.role, ctx, data) })
+      // --- A3b stateful tenant lifecycle (suspend/activate/delete) ---
+      // tenant-update records the status; tenant-get/-list below reflect it.
+      if (action === 'tenant-update' && typeof id === 'string') {
+        if (typeof status === 'string') tenantStatus[id] = status
+        const base = manageFixture('tenant-get', opts.role, ctx, undefined) as { tenant: Record<string, unknown> }
+        const tenant: Record<string, unknown> = { ...base.tenant, id, status: tenantStatus[id] ?? base.tenant.status }
+        if (data && 'display_name' in data) tenant.display_name = data.display_name
+        return route.fulfill({ json: { success: true, tenant } })
+      }
+      if (action === 'tenant-delete' && typeof id === 'string') {
+        return route.fulfill({ json: { success: true, deleted: id } })
+      }
+
+      const fixture = manageFixture(action, opts.role, ctx, data)
+      // Overlay a recorded status override onto the read paths so the toggle shows.
+      if (action === 'tenant-get') {
+        const t = (fixture as { tenant?: Record<string, unknown> }).tenant
+        if (t && typeof t.id === 'string' && tenantStatus[t.id]) t.status = tenantStatus[t.id]
+      } else if (action === 'tenant-list') {
+        const list = (fixture as { tenants?: Record<string, unknown>[] }).tenants
+        if (Array.isArray(list)) {
+          for (const t of list) if (typeof t.id === 'string' && tenantStatus[t.id]) t.status = tenantStatus[t.id]
+        }
+      }
+      return route.fulfill({ json: fixture })
     }
 
     // Unmapped (write paths not hit on initial load): benign success envelope.

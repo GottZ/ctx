@@ -7,13 +7,15 @@
   // scope-overview filtered to this tenant_id — the only tenant→scope source.
   // This page mounts NO BlockGrantPanel: block-grants live in the Grants tab/A6
   // (design §7.1), and the block-grant list is owner-side anyway (§6.2).
-  import { route } from '../../router'
+  import { route, navigate } from '../../router'
   import { session } from '../../lib/auth.svelte'
-  import { getTenant, scopeOverview } from '../../lib/api/tenants'
+  import { getTenant, scopeOverview, DEFAULT_TENANT_ID } from '../../lib/api/tenants'
   import { toApiError, type ApiError } from '../../lib/api'
   import type { ResourceStatus } from '../../lib/resource.svelte'
   import type { ScopeOverview, Tenant, TenantStatus } from '../../lib/api/types'
   import QuotaForm from './QuotaForm.svelte'
+  import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
+  import { TenantsModel } from './tenants.svelte'
 
   // sv-router AllParams<T> is Partial<Record<param,string>> → id is string|undefined.
   // `route.params` is reactive; read it through a $derived so the load effect
@@ -71,6 +73,47 @@
   // A not-found tenant-get surfaces as an ApiError; show it 404-style (404 or a
   // 200 {success:false} "tenant not found" both land here).
   const notFound = $derived(loadError?.status === 404 || /not found/i.test(loadError?.message ?? ''))
+
+  // --- A3b lifecycle: suspend / activate / delete (design 05 §4 A3b) ---
+  // The brief drives the mutations through TenantsModel: busyId guards the
+  // in-flight control, actionError surfaces a failure. The model reloads the
+  // tenant LIST internally; this page renders ONE tenant, so after a
+  // suspend/activate we lift the fresh row off the model's reloaded list (no
+  // extra tenant-get), falling back to a local re-load if the list was truncated
+  // at scale. Delete navigates back to /admin. Authorization is server-side
+  // (tenant-update/-delete are tierServerAdmin) — these controls are UX only.
+  const lifecycle = new TenantsModel()
+  let showDelete = $state(false)
+
+  // The default tenant is server-guarded (tenant-delete → 400, tenant_manage.go
+  // :159-161); disable the control on the id we would actually delete — the route
+  // param IS the delete target, so it is the authoritative guard key.
+  const isDefault = $derived(tenantId === DEFAULT_TENANT_ID)
+
+  // Blast-radius for the delete confirm. The counts come from the server-wide
+  // scope-overview filtered to this tenant; at 1M+ scale that list can be capped,
+  // so the copy reads "at least" (W17 — never understate the blast radius).
+  const blastBlocks = $derived(scopes.reduce((n, s) => n + (s.block_count ?? 0), 0))
+  const blastKeys = $derived(scopes.reduce((n, s) => n + (s.key_count ?? 0), 0))
+
+  async function setStatus(next: 'active' | 'suspended'): Promise<void> {
+    try {
+      if (next === 'suspended') await lifecycle.suspend(tenantId)
+      else await lifecycle.activate(tenantId)
+      const updated = lifecycle.tenants.find((t) => t.id === tenantId)
+      if (updated) tenant = updated
+      else await load(tenantId) // list truncated → authoritative single re-load
+    } catch {
+      // actionError is surfaced from the model; keep the page in place.
+    }
+  }
+
+  // ConfirmDialog awaits this — a throw keeps the dialog open and shows the error;
+  // success navigates back to the (now shorter) register.
+  async function confirmDelete(): Promise<void> {
+    await lifecycle.remove(tenantId)
+    navigate('/admin', { replace: true })
+  }
 </script>
 
 <section class="area">
@@ -117,6 +160,38 @@
         <dt>updated</dt>
         <dd class="mono">{fmtDate(tenant.updated_at)}</dd>
       </dl>
+
+      {#if lifecycle.actionError}
+        <p class="problem" role="alert">{lifecycle.actionError}</p>
+      {/if}
+      <div class="actions">
+        {#if tenant.status === 'active'}
+          <button
+            type="button"
+            disabled={lifecycle.busyId === tenantId}
+            onclick={() => void setStatus('suspended')}
+          >
+            Suspend
+          </button>
+        {:else}
+          <button
+            type="button"
+            disabled={lifecycle.busyId === tenantId}
+            onclick={() => void setStatus('active')}
+          >
+            Activate
+          </button>
+        {/if}
+        <button
+          type="button"
+          class="danger"
+          disabled={isDefault || lifecycle.busyId === tenantId}
+          title={isDefault ? 'the default tenant cannot be deleted' : undefined}
+          onclick={() => (showDelete = true)}
+        >
+          Delete tenant
+        </button>
+      </div>
     </section>
 
     <section class="card" aria-label="per-scope quota">
@@ -143,6 +218,25 @@
     </section>
   {/if}
 </section>
+
+{#if showDelete && tenant}
+  <ConfirmDialog
+    title="Delete tenant"
+    danger
+    requireTyped={tenant.slug}
+    confirmLabel="Delete"
+    onconfirm={confirmDelete}
+    oncancel={() => (showDelete = false)}
+  >
+    <p class="warn-copy">
+      Permanently prunes tenant <code>{tenant.slug}</code> — at least {blastBlocks} block{blastBlocks === 1
+        ? ''
+        : 's'} across {scopes.length} scope{scopes.length === 1 ? '' : 's'} and {blastKeys} key{blastKeys === 1
+        ? ''
+        : 's'}, plus the register row. This cannot be undone.
+    </p>
+  </ConfirmDialog>
+{/if}
 
 <style>
   .area {
@@ -297,5 +391,47 @@
     border-radius: 50%;
     margin-right: var(--space-1);
     vertical-align: middle;
+  }
+  .actions {
+    display: flex;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3) var(--space-3);
+  }
+  .actions button {
+    font-family: var(--font-ui);
+    font-size: 0.82rem;
+    padding: var(--space-1) var(--space-3);
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .actions button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .actions button.danger {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .problem {
+    margin: var(--space-2) var(--space-3) 0;
+    font-size: 0.78rem;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    background: var(--danger-dim);
+  }
+  .warn-copy {
+    margin: 0;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    color: var(--warn);
+  }
+  .warn-copy code {
+    font-family: var(--font-mono);
+    color: var(--accent);
   }
 </style>
