@@ -70,6 +70,165 @@ type tenantSpec struct {
 	DisplayName string `json:"display_name"`
 }
 
+// maxTenantLimit is the upper bound per structural dimension (BEQ-1b, design/02
+// §1). It sits SAFELY below int4-MAX so a fat-finger ("10_000_000_000 = basically
+// unlimited") hits the write validation (→ 400) instead of overflowing the typed
+// 069 INTEGER column (22003 → 500). 0 is a VALID stored value ("frozen": creation
+// blocked without suspending the tenant); negative is rejected (the n >= -1
+// permanent-lockout footgun).
+const maxTenantLimit = 1_000_000
+
+var (
+	// errLimitRange — a present limit is negative or above maxTenantLimit (→ 400).
+	errLimitRange = errors.New("max_scopes/max_keys must each be an integer between 0 and 1000000")
+	// errLimitsBothNeeded — tenant-limit-set with a field missing from the JSON
+	// object (→ 400). A partial PATCH must NOT silently relax a dimension to
+	// unlimited; the set is REPLACE-semantics, both keys mandatory.
+	errLimitsBothNeeded = errors.New("both max_scopes and max_keys are required")
+)
+
+// limitsFromData decodes + range-validates the structural limit fields from the
+// manage payload. ONE helper feeds both write paths (tenant-create seeding and
+// tenant-limit-set) so the validation can never diverge. Three states per field:
+//   - ABSENT: requirePresence (limit-set) → errLimitsBothNeeded; otherwise (create
+//     seed) → nil pointer = "leave the 069 column DEFAULT" (the caller seeds only
+//     supplied dimensions).
+//   - explicit null: → nil pointer = unlimited for that dimension (set-to-unlimited;
+//     replace, not patch).
+//   - a number: must be 0 <= v <= maxTenantLimit, else errLimitRange. 0 is valid
+//     (frozen); a non-integer / negative / over-range value is errLimitRange.
+//
+// Presence is detected via map[string]json.RawMessage (a *int alone cannot tell
+// absent from explicit null). The returned pointers carry only the parsed values;
+// the absent-vs-null distinction is consumed HERE (it only changes which error or
+// nil a field yields), so callers receive the clean (*int, *int).
+func limitsFromData(data json.RawMessage, requirePresence bool) (maxScopes, maxKeys *int, err error) {
+	var fields map[string]json.RawMessage
+	if len(data) > 0 {
+		if uerr := json.Unmarshal(data, &fields); uerr != nil {
+			return nil, nil, uerr
+		}
+	}
+	if maxScopes, err = oneLimitField(fields, "max_scopes", requirePresence); err != nil {
+		return nil, nil, err
+	}
+	if maxKeys, err = oneLimitField(fields, "max_keys", requirePresence); err != nil {
+		return nil, nil, err
+	}
+	return maxScopes, maxKeys, nil
+}
+
+// oneLimitField parses a single optional limit key (see limitsFromData). A present
+// null (or empty raw) → nil = unlimited; a present number → a range-checked *int.
+func oneLimitField(fields map[string]json.RawMessage, key string, requirePresence bool) (*int, error) {
+	raw, present := fields[key]
+	if !present {
+		if requirePresence {
+			return nil, errLimitsBothNeeded
+		}
+		return nil, nil // absent: keep the 069 DEFAULT (create) / no-op
+	}
+	if t := strings.TrimSpace(string(raw)); t == "null" || t == "" {
+		return nil, nil // explicit null = unlimited for this dimension
+	}
+	var v int
+	if json.Unmarshal(raw, &v) != nil {
+		return nil, errLimitRange // non-integer (string, float, bool, ...) → 400
+	}
+	if v < 0 || v > maxTenantLimit {
+		return nil, errLimitRange
+	}
+	return &v, nil
+}
+
+// handleTenantLimitSet writes the structural per-tenant caps (BEQ-1b, design/02
+// §3b). Tier tierServerAdmin (actionTier): the cap is an OPERATOR ceiling, never
+// tenant-self-raisable (the tenant-usage-get READ is the tenant-admin counterpart
+// — K10 tier-asymmetry). REPLACE-semantics: limitsFromData(req.Data, true) forces
+// BOTH max_scopes and max_keys to be present (a missing field → 400, no silent
+// uncap); a present null = unlimited, a present number = the cap. Unknown/malformed
+// id → 404 (no oracle). The 200 re-reads the row so the response echoes the stored
+// limits (the frozen FE TenantResponse {success, tenant}); SetTenantLimits returns
+// no row, so the re-get is how the echo is produced.
+func (h *ManageHandler) handleTenantLimitSet(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, req manageRequest) {
+	if req.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id required"})
+		return
+	}
+	maxScopes, maxKeys, err := limitsFromData(req.Data, true)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	if err := store.SetTenantLimits(r.Context(), h.pool, req.ID, maxScopes, maxKeys); err != nil {
+		if errors.Is(err, store.ErrTenantNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "set tenant limits failed"})
+		return
+	}
+	// Echo the canonical stored row. SetTenantLimits already committed, so a re-read
+	// failure here is purely cosmetic — still report success.
+	tn, err := store.GetTenant(r.Context(), h.pool, req.ID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tn})
+}
+
+// handleTenantUsageGet returns one tenant's structural usage (scope_count +
+// active-key_count) alongside its limits (BEQ-1b, design/02 §3 / design/05
+// Cross-Doc #3). Tier tierTenantAdmin. SECURITY (the load-bearing pin): the target
+// is ALWAYS ar.TenantID for a non-server-admin — req.ID is read ONLY when
+// IsServerAdmin (byte-analog handleTenantQuotaGet). A tenant-admin B sending id=A
+// is therefore counted against B, NEVER A → no cross-tenant counts oracle. An empty
+// ar.TenantID (never happens for a valid non-server-admin key — ctx_auth guarantees
+// one, and the tier gate already rejected it) collapses to a 404 (fail-closed).
+func (h *ManageHandler) handleTenantUsageGet(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+	if ar == nil {
+		// Defense in depth — the tier gate already rejected anon callers.
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		return
+	}
+	target := ar.TenantID
+	if ar.IsServerAdmin() && req.ID != "" {
+		target = req.ID
+	}
+	maxScopes, maxKeys, err := store.TenantLimits(r.Context(), h.pool, target)
+	if err != nil {
+		if errors.Is(err, store.ErrTenantNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "tenant limits lookup failed"})
+		return
+	}
+	scopes, err := store.TenantScopes(r.Context(), h.pool, target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "tenant scopes lookup failed"})
+		return
+	}
+	// key_count counts ONLY active keys (ListApiKeys activeOnly=true) — consistent
+	// with the KeySlot cap semantics: a revoked (soft-deleted) key frees its slot.
+	keys, err := store.ListApiKeys(r.Context(), h.pool, target, true)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "tenant keys lookup failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"usage": map[string]any{
+			"tenant_id":   target,
+			"max_scopes":  maxScopes,
+			"max_keys":    maxKeys,
+			"scope_count": len(scopes),
+			"key_count":   len(keys),
+		},
+	})
+}
+
 // validTenantStatus is the lifecycle CHECK domain (059). Validated in the handler
 // (→ 400) ahead of the DB CHECK backstop (23514).
 func validTenantStatus(s string) bool {
@@ -103,6 +262,16 @@ func (h *ManageHandler) handleTenantCreate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "slug must be 1-24 chars of a-z, 0-9, '-' (no leading/trailing '-')"})
 		return
 	}
+	// BEQ-1b create-seeding (design/02 §3a): optional structural limits in the
+	// create payload, validated by the SAME limitsFromData helper as tenant-limit-set
+	// (symmetric range gate). Parse BEFORE the insert so a bad value 400s without
+	// creating a tenant. requirePresence=false: an ABSENT dimension keeps the 069
+	// column DEFAULT (25/50) — only supplied dimensions are seeded.
+	seedScopes, seedKeys, err := limitsFromData(req.Data, false)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
 	tn, err := store.CreateTenant(r.Context(), h.pool, spec.Slug, spec.DisplayName)
 	if errors.Is(err, store.ErrTenantSlugExists) {
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "tenant slug already exists"})
@@ -111,6 +280,26 @@ func (h *ManageHandler) handleTenantCreate(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "create tenant failed"})
 		return
+	}
+	// Seed only the dimensions the payload supplied. tn already carries the 069
+	// DEFAULTs (25/50) from the RETURNING; SetTenantLimits writes BOTH columns, so
+	// merge the supplied values over tn's defaults to avoid nulling the dimension the
+	// caller left out. A field given as a number caps it; absent → keep default (a
+	// null/absent on create is treated as "keep default", the capped-safe direction —
+	// an explicit unlimited override is done afterward via tenant-limit-set).
+	if seedScopes != nil || seedKeys != nil {
+		newScopes, newKeys := tn.MaxScopes, tn.MaxKeys
+		if seedScopes != nil {
+			newScopes = seedScopes
+		}
+		if seedKeys != nil {
+			newKeys = seedKeys
+		}
+		if err := store.SetTenantLimits(r.Context(), h.pool, tn.ID, newScopes, newKeys); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "seed tenant limits failed"})
+			return
+		}
+		tn.MaxScopes, tn.MaxKeys = newScopes, newKeys
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tn})
 }
@@ -428,6 +617,14 @@ func (h *ManageHandler) dispatchTenantAction(w http.ResponseWriter, r *http.Requ
 		h.handleTenantUpdate(w, r, ar, req)
 	case "tenant-delete":
 		h.handleTenantDelete(w, r, ar, req)
+	case "tenant-limit-set":
+		// BEQ-1b (design/02 §3b): set the structural caps. tierServerAdmin (set in
+		// actionTier, NOT here) — the operator ceiling, never tenant-self-raisable.
+		h.handleTenantLimitSet(w, r, ar, req)
+	case "tenant-usage-get":
+		// BEQ-1b (design/02 §3 / 05 Cross-Doc #3): read own usage+limits.
+		// tierTenantAdmin; the handler pins a non-server-admin onto ar.TenantID.
+		h.handleTenantUsageGet(w, r, ar, req)
 	case "tenant-grant-create":
 		h.handleTenantGrantCreate(w, r, ar, req)
 	case "tenant-grant-list":

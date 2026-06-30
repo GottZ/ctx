@@ -126,6 +126,13 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchAPIKeyAction(w, r, req)
 	case "tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
 		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete",
+		// tenant-limit-set / tenant-usage-get (BEQ-1b, design/02 §3): set the
+		// structural per-tenant caps (server-admin) and read the own usage+limits
+		// (tenant-admin). They ROUTE through the tenant dispatcher but split on TIER
+		// in actionTier (set = tierServerAdmin, usage-get = tierTenantAdmin), not
+		// here (routing ⟂ tier). Folded into this case arm to add NO new HandleManage
+		// branch (cyclop budget, max-complexity 25).
+		"tenant-limit-set", "tenant-usage-get",
 		// scope-overview (MT 04-W6/A0, design/04 §3) rides the same server-admin
 		// dispatcher + tier as the tenant family: an additive READ of the per-scope
 		// counts + scope→tenant mapping. Folded into this case arm (no new branch)
@@ -259,6 +266,14 @@ func actionTier(req manageRequest) adminTier {
 		// tenant-quota-set stays server-admin below — the quota is an operator
 		// cost ceiling, a tenant raising its own budget would void it (fail-closed).
 		"tenant-quota-get",
+		// tenant-usage-get (BEQ-1b, design/02 §3 / design/05 Cross-Doc #3): a
+		// tenant-admin reads its OWN structural usage (scope_count/key_count) +
+		// limits. Tenant-isolated by the handler, which PINS a non-server-admin
+		// onto ar.TenantID (req.ID is read ONLY for a server-admin, byte-analog
+		// handleTenantQuotaGet) — so a tenant-admin can never count a foreign
+		// tenant (no cross-tenant counts oracle). The mutating tenant-limit-set
+		// stays server-admin below (a tenant raising its own ceiling would void it).
+		"tenant-usage-get",
 		// scope-create/scope-list (BE5-3, Masterplan K1): tenant-isolated by
 		// construction — handleScopeCreate binds to ar.TenantID and prefixes the
 		// scope with the DB slug (never the payload), and handleScopeList filters on
@@ -277,6 +292,12 @@ func actionTier(req manageRequest) adminTier {
 		// admin must NOT raise its own budget (that would void the limit), so
 		// the write stays server-admin (the read is tenant-admin above).
 		"tenant-quota-set",
+		// tenant-limit-set (BEQ-1b, design/02 §3b): the structural per-tenant cap
+		// (max_scopes/max_keys) is an OPERATOR ceiling — a tenant-admin raising its
+		// OWN limit would hollow it out (the same fail-closed doctrine as
+		// tenant-quota-set). So the WRITE stays server-admin; only the READ
+		// (tenant-usage-get) is tenant-admin above. K10 tier-asymmetry: set ≠ get.
+		"tenant-limit-set",
 		// blocks-audit-* (G41): start causes bulk sensitivity downgrades (the
 		// opsec direction), status discloses block titles/classification
 		// topology. Handler takes no AuthResult (→ server-admin until isolated).
