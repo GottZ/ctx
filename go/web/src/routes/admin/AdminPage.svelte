@@ -10,10 +10,16 @@
   import { session } from '../../lib/auth.svelte'
   import type { TenantStatus } from '../../lib/api/types'
   import { TenantsModel } from './tenants.svelte'
+  import TenantCreateDialog from './TenantCreateDialog.svelte'
   import ScopeMap from './ScopeMap.svelte'
   import CorpusMaintenance from './CorpusMaintenance.svelte'
 
   const model = new TenantsModel()
+
+  // A3a: the compound tenant-create dialog (reveal-once owner key). TenantsModel
+  // .create reloads the register on success, so the new tenant appears with no
+  // extra work here; the dialog reveals + discards the owner-key plaintext.
+  let creating = $state(false)
 
   // Reactive load that survives the boot restore race: fires once the session
   // resolves to server-admin (reading session.tier + model.status as $state so
@@ -65,7 +71,12 @@
       <header class="card-head">
         <h2>tenants</h2>
         <span class="count">{model.tenants.length}</span>
+        <button type="button" class="cta" onclick={() => (creating = true)}>+ New tenant</button>
       </header>
+
+      {#if model.actionError}
+        <p class="problem" role="alert">{model.actionError}</p>
+      {/if}
 
       {#if model.tenants.length === 0}
         <p class="empty">no tenants — the register is empty</p>
@@ -109,6 +120,10 @@
     <CorpusMaintenance />
   {/if}
 </section>
+
+{#if creating}
+  <TenantCreateDialog tenants={model} onclose={() => (creating = false)} />
+{/if}
 
 <style>
   .area {
@@ -188,6 +203,26 @@
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     color: var(--text-dim);
+  }
+  .cta {
+    margin-left: auto;
+    font-family: var(--font-ui);
+    font-size: 0.82rem;
+    padding: var(--space-1) var(--space-3);
+    background: var(--surface-2);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .problem {
+    margin: var(--space-2) var(--space-3) 0;
+    font-size: 0.78rem;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    background: var(--danger-dim);
   }
   .empty {
     margin: 0;
