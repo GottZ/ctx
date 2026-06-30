@@ -107,6 +107,32 @@ func TestStatusCollectorLLM24h(t *testing.T) {
 	}
 }
 
+// TestStatusCollectorLLM24hErrorRowComplete pins the attribution fix: an ERROR
+// row with a NULL backend_name is legitimately un-attributed (the call failed
+// before a backend was selected) and must NOT flip llm_24h_complete false — it is
+// a known failure surfaced by the errors count, not a telemetry gap. Before the
+// fix, bool_and(backend_name IS NOT NULL) flipped the flag for such a row; the
+// corrected condition (… OR error IS NOT NULL) keeps the window complete.
+func TestStatusCollectorLLM24hErrorRowComplete(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}))
+
+	mustExec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	// A failed call with NO backend_name (errored before backend attribution).
+	mustExec(`INSERT INTO context_llm_log (pipeline, model, host, duration_ms, error, backend_name)
+		VALUES ('query-synthesize','qwen','herbert',12,'context deadline exceeded',NULL)`)
+
+	if _, complete := c.queryLLM24h(ctx); !complete {
+		t.Errorf("an error row with NULL backend_name must NOT flip complete false (legitimate failure, not a telemetry gap)")
+	}
+}
+
 // TestStatusCollectorLastCycle pins that last_cycle_at tracks the dream-cycle
 // pipelines only — a newer non-dream call must NOT advance it.
 func TestStatusCollectorLastCycle(t *testing.T) {

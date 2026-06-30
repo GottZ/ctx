@@ -329,8 +329,12 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats) s
 
 // queryLLM24h aggregates the last 24h of telemetry by (backend, pipeline). The
 // backend key is backend_name with a host fallback; complete reports whether
-// EVERY row in the window carried backend_name (an un-attributed row flips it
-// false → the UI shows the "telemetry incomplete" disclaimer). NO body columns.
+// every row in the window is attributed — it carried a backend_name OR it is an
+// error row. A failed call (error IS NOT NULL) may legitimately have no
+// backend_name (it failed before a backend was selected); that is a known failure
+// surfaced by the errors count, NOT a telemetry gap, so it must not flip the flag.
+// Only a SUCCESSFUL un-attributed row flips complete false → the UI shows the
+// "telemetry incomplete" disclaimer. NO body columns.
 func (c *StatusCollector) queryLLM24h(ctx context.Context) ([]llm24hRow, bool) {
 	rows, err := c.pool.Query(ctx, `
 		SELECT COALESCE(backend_name, host) AS backend, pipeline,
@@ -340,7 +344,7 @@ func (c *StatusCollector) queryLLM24h(ctx context.Context) ([]llm24hRow, bool) {
 		       COALESCE(sum(prompt_tokens), 0)::bigint AS prompt_tokens,
 		       COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens,
 		       COALESCE(sum(cost_usd), 0)::float8 AS cost_usd,
-		       bool_and(backend_name IS NOT NULL) AS attributed
+		       bool_and(backend_name IS NOT NULL OR error IS NOT NULL) AS attributed
 		FROM context_llm_log
 		WHERE created_at > now() - interval '24 hours'
 		GROUP BY 1, 2
