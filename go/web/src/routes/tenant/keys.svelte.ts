@@ -9,17 +9,19 @@
 // THROWS ApiError on failure so the table caller can render the 404-no-oracle
 // message; busyId guards the in-flight row. Plain $state class with an
 // injectable api so vitest covers the flow without a DOM. This is the COMPLETE
-// mutation set — no later wave extends this file.
+// mutation set as of TK2; FE-M2 (TK7b) adds `update` for the role/active
+// delegation (api-key-update) — no other wave extends this file.
 
 import { toApiError, type ApiError } from '../../lib/api'
-import { createApiKey, deleteApiKey, listApiKeys, type ApiKeyCreateSpec } from '../../lib/api/keys'
-import type { ApiKeyCreateResult, ApiKeyView } from '../../lib/api/types'
+import { createApiKey, deleteApiKey, listApiKeys, updateApiKey, type ApiKeyCreateSpec } from '../../lib/api/keys'
+import type { ApiKeyCreateResult, ApiKeyUpdateSpec, ApiKeyView } from '../../lib/api/types'
 import type { ResourceStatus } from '../../lib/resource.svelte'
 
 interface KeysApi {
   list: typeof listApiKeys
   create: typeof createApiKey
   del: typeof deleteApiKey
+  update: typeof updateApiKey
 }
 
 export class KeysModel {
@@ -40,6 +42,7 @@ export class KeysModel {
       list: listApiKeys,
       create: createApiKey,
       del: deleteApiKey,
+      update: updateApiKey,
     },
   ) {
     this.#api = api
@@ -87,6 +90,29 @@ export class KeysModel {
     this.actionError = null
     try {
       await this.#api.del(id)
+      await this.load()
+    } catch (err) {
+      this.actionError = toApiError(err).message
+      throw err
+    } finally {
+      this.busyId = null
+    }
+  }
+
+  /**
+   * Promote/demote a key's tenant_role and/or (de)activate it (api-key-update,
+   * tierTenantAdmin, design 03-be6-roles). Mirrors remove(): busyId guards the
+   * in-flight row, reload on success keeps the live tenant_role/active fields
+   * fresh, and a failure (last-owner demote 409, self-lockout / cross-tenant 403)
+   * is surfaced on actionError AND rethrown so the table caller can render it. The
+   * client-side disable of these controls (last-owner, self-row) is UX only — the
+   * server is authoritative.
+   */
+  async update(spec: ApiKeyUpdateSpec): Promise<void> {
+    this.busyId = spec.id
+    this.actionError = null
+    try {
+      await this.#api.update(spec)
       await this.load()
     } catch (err) {
       this.actionError = toApiError(err).message

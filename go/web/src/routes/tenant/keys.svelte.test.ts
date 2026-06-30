@@ -6,7 +6,13 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../../lib/api'
 import type { ApiKeyCreateSpec } from '../../lib/api/keys'
-import type { ApiKeyCreateResult, ApiKeyListResponse, ApiKeyView } from '../../lib/api/types'
+import type {
+  ApiKeyCreateResult,
+  ApiKeyListResponse,
+  ApiKeyUpdateResult,
+  ApiKeyUpdateSpec,
+  ApiKeyView,
+} from '../../lib/api/types'
 import { KeysModel } from './keys.svelte'
 
 function key(p: Partial<ApiKeyView> & Pick<ApiKeyView, 'label'>): ApiKeyView {
@@ -21,10 +27,11 @@ function key(p: Partial<ApiKeyView> & Pick<ApiKeyView, 'label'>): ApiKeyView {
 }
 
 interface Call {
-  m: 'list' | 'create' | 'del'
+  m: 'list' | 'create' | 'del' | 'update'
   id?: string
   activeOnly?: boolean
   spec?: ApiKeyCreateSpec
+  update?: ApiKeyUpdateSpec
 }
 
 function fakeApi(initial: ApiKeyView[], fail?: Partial<Record<Call['m'], ApiError>>) {
@@ -54,6 +61,14 @@ function fakeApi(initial: ApiKeyView[], fail?: Partial<Record<Call['m'], ApiErro
       calls.push({ m: 'del', id })
       if (fail?.del) return Promise.reject(fail.del)
       return Promise.resolve({ success: true, deleted: id })
+    },
+    update: (spec: ApiKeyUpdateSpec): Promise<ApiKeyUpdateResult> => {
+      calls.push({ m: 'update', update: spec })
+      if (fail?.update) return Promise.reject(fail.update)
+      return Promise.resolve({
+        success: true,
+        key: key({ label: 'updated', id: spec.id, tenant_role: spec.tenant_role, active: spec.active ?? true }),
+      })
     },
   }
 }
@@ -116,6 +131,44 @@ describe('KeysModel mutations', () => {
     const m = new KeysModel(api)
     await expect(m.remove('id-a')).rejects.toBeInstanceOf(ApiError)
     expect(m.actionError).toContain('not found')
+    expect(m.busyId).toBeNull()
+  })
+})
+
+describe('KeysModel update (role/active delegation)', () => {
+  it('sends the spec, reloads, and clears busyId', async () => {
+    const api = fakeApi([key({ label: 'a', id: 'id-a' })])
+    const m = new KeysModel(api)
+    await m.update({ id: 'id-a', tenant_role: 'admin' })
+    const upd = api.calls.find((c) => c.m === 'update')
+    expect(upd?.update).toMatchObject({ id: 'id-a', tenant_role: 'admin' })
+    expect(api.calls.at(-1)?.m).toBe('list') // reloaded after
+    expect(m.busyId).toBeNull()
+  })
+
+  it('guards the in-flight row via busyId until the call settles', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const api = {
+      ...fakeApi([key({ label: 'a', id: 'id-a' })]),
+      update: (spec: ApiKeyUpdateSpec): Promise<ApiKeyUpdateResult> =>
+        gate.then(() => ({ success: true, key: key({ label: 'a', id: spec.id }) })),
+    }
+    const m = new KeysModel(api)
+    const p = m.update({ id: 'id-a', active: false })
+    expect(m.busyId).toBe('id-a') // set while in flight
+    release()
+    await p
+    expect(m.busyId).toBeNull()
+  })
+
+  it('surfaces a last-owner/self-lockout error and rethrows', async () => {
+    const api = fakeApi([key({ label: 'a', id: 'id-a', tenant_role: 'owner' })], {
+      update: new ApiError(409, 'conflict', 'last owner cannot be demoted'),
+    })
+    const m = new KeysModel(api)
+    await expect(m.update({ id: 'id-a', tenant_role: 'member' })).rejects.toBeInstanceOf(ApiError)
+    expect(m.actionError).toContain('last owner')
     expect(m.busyId).toBeNull()
   })
 })
