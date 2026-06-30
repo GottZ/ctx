@@ -7,18 +7,31 @@
 import { apiFetch } from '../api'
 import type {
   ScopeOverviewListResponse,
+  TenantCreateResult,
   TenantDeleteResponse,
   TenantGrantDeleteResponse,
   TenantGrantListResponse,
   TenantGrantResponse,
+  TenantLimitSpec,
   TenantListResponse,
   TenantResponse,
+  TenantUsageResponse,
+  TenantUsageView,
 } from './types'
 
-/** tenant-create payload (tenant_manage.go:32 tenantSpec). */
+/** The seeded default tenant (mirrors store.DefaultTenantID). The server hard-
+ * guards it (tenant-delete → 400, tenant_manage.go:159-161); this FE constant
+ * only drives the Delete-disabled visibility on TenantDetail (A3b). */
+export const DEFAULT_TENANT_ID = '00000000-0000-0000-0000-0000000d3fa0'
+
+/** tenant-create payload (tenant_manage.go:32 tenantSpec). max_scopes/max_keys
+ * are the BE5 structural Tenant-Limits (design 02-be5-tenant-quota), seeded at
+ * create; null OR omitted = unlimited for that dimension (063 NULL-unlimited). */
 export interface TenantSpec {
   slug: string
   display_name: string
+  max_scopes?: number | null
+  max_keys?: number | null
 }
 
 /** tenant-update patch: status is a TOP-LEVEL manage field (req.Status), the
@@ -29,8 +42,13 @@ export interface TenantPatch {
   display_name?: string
 }
 
-export function createTenant(spec: TenantSpec): Promise<TenantResponse> {
-  return apiFetch<TenantResponse>('/api/manage', {
+/** Compound create (atomic, design 03-be6-roles §6): the tenant row + an initial
+ * auto-prefixed scope + a minted owner-key (role 'owner') — resolving the K10
+ * inert-tenant gap. The FLAT result carries the owner-key PLAINTEXT in `owner_key`
+ * (reveal-once, RevealOnceKey hygiene — never persisted on a model/storage/URL),
+ * the full server-built `scope`, and `owner_key_id`; it is NOT nested. */
+export function createTenant(spec: TenantSpec): Promise<TenantCreateResult> {
+  return apiFetch<TenantCreateResult>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'tenant-create', data: spec }),
   })
@@ -79,6 +97,33 @@ export function deleteTenant(id: string): Promise<TenantDeleteResponse> {
   return apiFetch<TenantDeleteResponse>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'tenant-delete', id }),
+  })
+}
+
+/** Reads usage + structural limits for the /tenant self-service quota visibility
+ * (S3, design 05 §1). A server-admin targets any tenant via the top-level `id`; a
+ * tenant-admin OMITS it and is server-pinned to ar.TenantID (req.ID is read only
+ * when IsServerAdmin — a foreign id is ignored/403, never leaking another
+ * tenant's counts). Unwraps the envelope to the view; null fields = unlimited. */
+export async function getTenantUsage(id?: string): Promise<TenantUsageView> {
+  const req: Record<string, unknown> = { action: 'tenant-usage-get' }
+  if (id !== undefined) req.id = id
+  const res = await apiFetch<TenantUsageResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+  return res.usage
+}
+
+/** Sets a tenant's structural limits (server-admin only, design 02-be5-tenant-
+ * quota). REPLACE-semantics like QuotaForm: BOTH max_scopes and max_keys are
+ * mandatory (server 400 otherwise), null = unlimited for that dimension, a number
+ * = the cap. `id` is a TOP-LEVEL manage field; the spec rides in `data` — exactly
+ * as handleTenantLimitSet reads it. */
+export function setTenantLimits(id: string, spec: TenantLimitSpec): Promise<TenantResponse> {
+  return apiFetch<TenantResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'tenant-limit-set', id, data: spec }),
   })
 }
 

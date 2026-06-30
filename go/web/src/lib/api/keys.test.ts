@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, configureApi } from '../api'
-import { createApiKey, deleteApiKey, getTenantQuota, listApiKeys } from './keys'
+import { createApiKey, deleteApiKey, getTenantQuota, listApiKeys, updateApiKey } from './keys'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -79,12 +79,54 @@ describe('createApiKey', () => {
     expect('allowed_scopes' in body.data).toBe(false)
   })
 
+  it('carries the server-admin tenant_id override into data when present', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, { success: true, id: 'k3', label: 'recovery', home_scope: 'acme:ops', allowed_scopes: [], api_key: 'x' }),
+    )
+    await createApiKey({ label: 'recovery', home_scope: 'acme:ops', tenant_id: 't9' })
+    expect(sentBody(mock)).toEqual({
+      action: 'api-key-create',
+      data: { label: 'recovery', home_scope: 'acme:ops', tenant_id: 't9' },
+    })
+  })
+
   it('surfaces a 403 (scope outside tenant) as ApiError (forbidden)', async () => {
     stubFetch(jsonResponse(403, { success: false, error: 'cannot create keys outside your tenant' }))
     await expect(createApiKey({ label: 'x', home_scope: 'foreign' })).rejects.toMatchObject({
       status: 403,
       code: 'forbidden',
     })
+  })
+})
+
+describe('updateApiKey', () => {
+  it('POSTs api-key-update with the spec in data and returns the re-read row', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, { success: true, key: { ...aKey, tenant_role: 'admin' } }),
+    )
+    const res = await updateApiKey({ id: 'k1', tenant_role: 'admin' })
+    expect(path(mock)).toBe('/api/manage')
+    expect(sentBody(mock)).toEqual({ action: 'api-key-update', data: { id: 'k1', tenant_role: 'admin' } })
+    expect(res.key.tenant_role).toBe('admin')
+  })
+
+  it('carries the active flag alone when only (de)activation is requested', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, key: { ...aKey, active: false } }))
+    await updateApiKey({ id: 'k1', active: false })
+    expect(sentBody(mock)).toEqual({ action: 'api-key-update', data: { id: 'k1', active: false } })
+  })
+
+  it('surfaces a 409 (last-owner demote) as ApiError (conflict)', async () => {
+    stubFetch(jsonResponse(409, { success: false, error: 'cannot demote the last owner' }))
+    await expect(updateApiKey({ id: 'k1', tenant_role: 'member' })).rejects.toMatchObject({
+      status: 409,
+      code: 'conflict',
+    })
+  })
+
+  it('surfaces a 403 tier rejection as ApiError', async () => {
+    stubFetch(jsonResponse(403, { success: false, error: 'admin access required' }))
+    await expect(updateApiKey({ id: 'k1', active: true })).rejects.toBeInstanceOf(ApiError)
   })
 })
 

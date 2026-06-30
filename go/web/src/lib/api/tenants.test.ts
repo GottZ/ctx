@@ -8,11 +8,14 @@ import { ApiError, configureApi } from '../api'
 import {
   createTenant,
   createTenantGrant,
+  DEFAULT_TENANT_ID,
   deleteTenant,
   deleteTenantGrant,
   getTenant,
+  getTenantUsage,
   listTenantGrants,
   listTenants,
+  setTenantLimits,
   updateTenant,
 } from './tenants'
 
@@ -55,8 +58,16 @@ const aTenant = {
 }
 
 describe('createTenant', () => {
-  it('POSTs tenant-create with the spec in data', async () => {
-    const mock = stubFetch(jsonResponse(200, { success: true, tenant: aTenant }))
+  it('POSTs tenant-create and parses the FLAT compound result (tenant + scope + reveal-once owner_key)', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, {
+        success: true,
+        tenant: aTenant,
+        scope: 'team-mueller:default',
+        owner_key_id: 'k1',
+        owner_key: 'ctx_live_owner_key_shown_once',
+      }),
+    )
     const res = await createTenant({ slug: 'team-mueller', display_name: 'Team Müller' })
     expect(path(mock)).toBe('/api/manage')
     expect(sentBody(mock)).toEqual({
@@ -64,6 +75,67 @@ describe('createTenant', () => {
       data: { slug: 'team-mueller', display_name: 'Team Müller' },
     })
     expect(res.tenant.id).toBe('t1')
+    expect(res.scope).toBe('team-mueller:default')
+    expect(res.owner_key).toBe('ctx_live_owner_key_shown_once')
+  })
+
+  it('seeds the structural limits into data when given (null = unlimited)', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, { success: true, tenant: aTenant, scope: 's', owner_key_id: 'k1', owner_key: 'x' }),
+    )
+    await createTenant({ slug: 'acme', display_name: 'Acme', max_scopes: 5, max_keys: null })
+    expect(sentBody(mock)).toEqual({
+      action: 'tenant-create',
+      data: { slug: 'acme', display_name: 'Acme', max_scopes: 5, max_keys: null },
+    })
+  })
+})
+
+describe('getTenantUsage', () => {
+  const usage = { tenant_id: 't1', max_scopes: 5, max_keys: null, scope_count: 2, key_count: 1 }
+
+  it('POSTs tenant-usage-get with no id (tenant-admin, server-pinned) and unwraps the view', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, usage }))
+    const res = await getTenantUsage()
+    expect(sentBody(mock)).toEqual({ action: 'tenant-usage-get' })
+    expect('id' in sentBody(mock)).toBe(false)
+    expect(res.scope_count).toBe(2)
+    expect(res.max_keys).toBeNull()
+  })
+
+  it('carries a top-level id for the server-admin cross-tenant read', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, usage }))
+    await getTenantUsage('t1')
+    expect(sentBody(mock)).toEqual({ action: 'tenant-usage-get', id: 't1' })
+  })
+
+  it('surfaces a 403 (cross-tenant counts) as ApiError', async () => {
+    stubFetch(jsonResponse(403, { success: false, error: 'admin access required' }))
+    await expect(getTenantUsage('foreign')).rejects.toMatchObject({ status: 403, code: 'forbidden' })
+  })
+})
+
+describe('setTenantLimits', () => {
+  it('POSTs tenant-limit-set with a top-level id and both limits inside data', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, tenant: { ...aTenant, max_scopes: 10, max_keys: null } }))
+    const res = await setTenantLimits('t1', { max_scopes: 10, max_keys: null })
+    expect(sentBody(mock)).toEqual({
+      action: 'tenant-limit-set',
+      id: 't1',
+      data: { max_scopes: 10, max_keys: null },
+    })
+    expect(res.tenant.max_scopes).toBe(10)
+  })
+
+  it('surfaces a 400 (a limit missing — both required) as ApiError', async () => {
+    stubFetch(jsonResponse(400, { success: false, error: 'both max_scopes and max_keys are required' }))
+    await expect(setTenantLimits('t1', { max_scopes: 1, max_keys: null })).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('DEFAULT_TENANT_ID', () => {
+  it('matches store.DefaultTenantID (the delete-disabled guard value)', () => {
+    expect(DEFAULT_TENANT_ID).toBe('00000000-0000-0000-0000-0000000d3fa0')
   })
 })
 

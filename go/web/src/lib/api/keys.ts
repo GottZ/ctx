@@ -10,7 +10,7 @@
 // NOT redeclared (same anti-duplication rule A1 set for the shared types).
 
 import { apiFetch } from '../api'
-import type { ApiKeyCreateResult, ApiKeyListResponse } from './types'
+import type { ApiKeyCreateResult, ApiKeyListResponse, ApiKeyUpdateResult, ApiKeyUpdateSpec } from './types'
 
 export { getTenantQuota } from './quota'
 
@@ -22,6 +22,11 @@ export interface ApiKeyCreateSpec {
   label: string
   home_scope: string
   allowed_scopes?: string[]
+  // Server-admin-only override (S2): mint the key in a FOREIGN tenant (A3c
+  // recovery-mint). A tenant-admin OMITS it → the server binds the key to
+  // ar.TenantID. Flows unchanged into `data`; a non-server-admin's value is
+  // ignored/rejected server-side (04-security-model SEC-6).
+  tenant_id?: string
 }
 
 /** Mints a new key bound to the caller's tenant and returns the plaintext
@@ -32,6 +37,20 @@ export function createApiKey(spec: ApiKeyCreateSpec): Promise<ApiKeyCreateResult
   return apiFetch<ApiKeyCreateResult>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'api-key-create', data: spec }),
+  })
+}
+
+/** Mutates the tenant_role and/or active flag of ONE key (tenant-isolated,
+ * tierTenantAdmin, design 03-be6-roles). At least one of tenant_role/active must
+ * be set (server 400 otherwise). home_scope/allowed_scopes are deliberately NOT
+ * updatable here (self-elevation risk). The per-resource delegation + last-owner
+ * guard is server-side: a last-owner demote/deactivate and a self-lockout answer
+ * 409/403 (surfaced as ApiError) — the client controls only disable them for UX.
+ * The 200 result is the re-read key row (new tenant_role + active). */
+export function updateApiKey(spec: ApiKeyUpdateSpec): Promise<ApiKeyUpdateResult> {
+  return apiFetch<ApiKeyUpdateResult>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'api-key-update', data: spec }),
   })
 }
 
