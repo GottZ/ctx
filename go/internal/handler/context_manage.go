@@ -1645,7 +1645,7 @@ func (h *ManageHandler) handleApiKeyUpdate(w http.ResponseWriter, r *http.Reques
 		rolePtr = &data.TenantRole
 	}
 
-	changed, err := store.UpdateApiKey(r.Context(), h.pool, data.ID, ar.TenantID,
+	updatedKey, changed, err := store.UpdateApiKey(r.Context(), h.pool, data.ID, ar.TenantID,
 		ar.IsServerAdmin(), callerMayManageOwner, rolePtr, data.Active)
 	if err != nil {
 		switch {
@@ -1666,21 +1666,10 @@ func (h *ManageHandler) handleApiKeyUpdate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Re-read the patched row for the response (frozen FE contract
-	// ApiKeyUpdateResult.key, design/03 §5): store.UpdateApiKey returns only a
-	// changed-bool, so the row is re-fetched here. A vanished row (impossible
-	// post-commit) degrades to a success without the body.
-	key, rerr := h.reReadApiKey(r, ar, data.ID)
-	if rerr != nil {
-		slog.Error("manage: re-read api key after update failed", "error", rerr)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
-		return
-	}
-	if key == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": data.ID})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "key": key})
+	// store.UpdateApiKey RETURNed the patched row, so the response carries it
+	// directly (frozen FE contract ApiKeyUpdateResult.key, design/03 §5) — no
+	// second round-trip to re-read.
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "key": updatedKey})
 }
 
 // apiKeyUpdateAuthorize applies the AM4 escalation guard for an api-key-update
@@ -1709,23 +1698,4 @@ func apiKeyUpdateAuthorize(w http.ResponseWriter, ar *auth.AuthResult, tenantRol
 		return callerMayManageOwner, true
 	}
 	return callerMayManageOwner, false
-}
-
-// reReadApiKey fetches the just-patched key row for the api-key-update response.
-// store.UpdateApiKey returns only a changed-bool, so the row is re-read via the
-// SAME tenant rule as api-key-list (server-admin → all tenants, else ar.TenantID
-// — never a foreign key) with activeOnly=false so a just-deactivated key is still
-// returned. nil = the row is gone (not found in the scoped list).
-func (h *ManageHandler) reReadApiKey(r *http.Request, ar *auth.AuthResult, id string) (*store.ApiKey, error) {
-	tenantFilter, _ := resolveApiKeyListParams(nil, ar)
-	keys, err := store.ListApiKeys(r.Context(), h.pool, tenantFilter, false)
-	if err != nil {
-		return nil, err
-	}
-	for i := range keys {
-		if keys[i].ID == id {
-			return &keys[i], nil
-		}
-	}
-	return nil, nil
 }

@@ -427,6 +427,11 @@ var ErrOwnerProtected = errors.New("store: owner key may only be managed by an o
 // active — never is_admin: the server-global admin tier has NO code path here, so
 // this action cannot escalate a key to server-admin (design/04 §D-C, AM4).
 //
+// On success the final UPDATE RETURNs the patched row, so the caller gets it back
+// as (updated, true, nil) and need not re-read for its {success, key} response. A
+// no-op miss (foreign / absent / malformed id, or a guard rollback) is (ApiKey{},
+// false, <err-or-nil>) — the empty ApiKey carries no oracle.
+//
 // Authorisation + isolation mirror DeleteApiKey: a non-server-admin reaches only
 // keys whose tenant_id == callerTenant; a foreign, absent, or malformed id (22P02)
 // resolves to zero rows → (false, nil), indistinguishable from "absent" — no
@@ -447,11 +452,11 @@ var ErrOwnerProtected = errors.New("store: owner key may only be managed by an o
 // UpdateApiKey of a tenant locks the same row first, so there is no lock-ordering
 // inversion (no deadlock).
 func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant string,
-	isServerAdmin, callerMayManageOwner bool, role *string, active *bool) (changed bool, err error) {
+	isServerAdmin, callerMayManageOwner bool, role *string, active *bool) (updated ApiKey, changed bool, err error) {
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("api_keys: update begin: %w", err)
+		return ApiKey{}, false, fmt.Errorf("api_keys: update begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
 
@@ -470,10 +475,10 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 	// foreign key from a nonexistent one (no oracle, mirrors DeleteApiKey:218-242).
 	targetTenant, curRole, curActive, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
 	if err != nil {
-		return false, err
+		return ApiKey{}, false, err
 	}
 	if !found {
-		return false, nil // foreign / absent / malformed id — no oracle (mirrors DeleteApiKey)
+		return ApiKey{}, false, nil // foreign / absent / malformed id — no oracle (mirrors DeleteApiKey)
 	}
 
 	// (2) Serialisation point: lock the target key's TENANT row (see the lock-target
@@ -482,7 +487,7 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 	var lockedTenant string
 	if err = tx.QueryRow(ctx,
 		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, targetTenant).Scan(&lockedTenant); err != nil {
-		return false, fmt.Errorf("api_keys: update tenant lock: %w", err)
+		return ApiKey{}, false, fmt.Errorf("api_keys: update tenant lock: %w", err)
 	}
 
 	// Effective post-patch state of THIS key (nil = unchanged).
@@ -504,7 +509,7 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 	targetIsOwner := curRole == ownerRole
 	removesOwnerPower := (role != nil && *role != ownerRole) || (active != nil && !*active && curActive)
 	if targetIsOwner && removesOwnerPower && !callerMayManageOwner {
-		return false, ErrOwnerProtected
+		return ApiKey{}, false, ErrOwnerProtected
 	}
 
 	// (4) Last-Owner (AM6(a)) under the tenant lock: only the transition
@@ -522,31 +527,41 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 			`SELECT count(*) FROM context_api_keys
 			  WHERE tenant_id = $1::uuid AND tenant_role = 'owner' AND active = true AND id <> $2::uuid`,
 			targetTenant, id).Scan(&others); err != nil {
-			return false, fmt.Errorf("api_keys: update owner count: %w", err)
+			return ApiKey{}, false, fmt.Errorf("api_keys: update owner count: %w", err)
 		}
 		if others < 1 {
-			return false, ErrLastOwner
+			return ApiKey{}, false, ErrLastOwner
 		}
 	}
 
 	// Apply. Tenant constraint repeated in the WHERE (no cross-tenant patch);
 	// COALESCE keeps the existing value for a nil patch field. Writes ONLY
 	// tenant_role + active — the SQL names neither is_admin nor any other column.
-	tag, err := tx.Exec(ctx,
+	// RETURNING hands the patched row straight back so the handler need not re-read
+	// it for the {success, key} response. The row was resolved (found) and its
+	// tenant locked above, so this UPDATE matches exactly one row; an ErrNoRows
+	// (the row vanished post-resolve — impossible under the lock) degrades to the
+	// same no-oracle miss as !found: (ApiKey{}, false, nil).
+	var row ApiKey
+	err = tx.QueryRow(ctx,
 		`UPDATE context_api_keys
 		    SET tenant_role = COALESCE($2::text, tenant_role),
 		        active      = COALESCE($3::boolean, active),
 		        updated_at  = now()
-		  WHERE id = $1::uuid AND ($4::boolean OR tenant_id = $5::uuid)`,
+		  WHERE id = $1::uuid AND ($4::boolean OR tenant_id = $5::uuid)
+		  RETURNING id, label, home_scope, allowed_scopes, tenant_role, active, last_used_at, created_at`,
 		id, role, active, isServerAdmin, tenantArg,
-	)
+	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.TenantRole, &row.Active, &row.LastUsedAt, &row.CreatedAt)
 	if err != nil {
-		return false, fmt.Errorf("api_keys: update: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ApiKey{}, false, nil
+		}
+		return ApiKey{}, false, fmt.Errorf("api_keys: update: %w", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("api_keys: update commit: %w", err)
+		return ApiKey{}, false, fmt.Errorf("api_keys: update commit: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	return row, true, nil
 }
 
 // resolveKeyForUpdate fetches the target key's tenant + current role/active under the

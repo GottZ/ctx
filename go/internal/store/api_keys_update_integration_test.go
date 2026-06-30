@@ -92,7 +92,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		tid := freshTenant(t, ctx, pool, "be6w3-lastdemote")
 		owner := seedKeyRole(t, pool, "be6w3-lastdemote-o1", tid, "owner", true)
 
-		changed, err := store.UpdateApiKey(ctx, pool, owner, tid,
+		_, changed, err := store.UpdateApiKey(ctx, pool, owner, tid,
 			false /*isServerAdmin*/, true /*callerMayManageOwner*/, rolePtr("member"), nil)
 		if !errors.Is(err, store.ErrLastOwner) {
 			t.Fatalf("demote last owner err = %v, want ErrLastOwner", err)
@@ -111,7 +111,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		tid := freshTenant(t, ctx, pool, "be6w3-lastdeact")
 		owner := seedKeyRole(t, pool, "be6w3-lastdeact-o1", tid, "owner", true)
 
-		changed, err := store.UpdateApiKey(ctx, pool, owner, tid,
+		_, changed, err := store.UpdateApiKey(ctx, pool, owner, tid,
 			false, true, nil, activePtr(false))
 		if !errors.Is(err, store.ErrLastOwner) {
 			t.Fatalf("deactivate last owner err = %v, want ErrLastOwner", err)
@@ -145,7 +145,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 				defer wg.Done()
 				// server-admin caller (callerMayManageOwner=true) isolates the
 				// last-owner mechanic from owner-protection / tenant constraint.
-				changeds[i], errs[i] = store.UpdateApiKey(ctx, pool, owners[i], "",
+				_, changeds[i], errs[i] = store.UpdateApiKey(ctx, pool, owners[i], "",
 					true /*isServerAdmin*/, true, rolePtr("member"), nil)
 			}(i)
 		}
@@ -177,7 +177,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		tidB := freshTenant(t, ctx, pool, "be6w3-foreign-b")
 		keyB := seedKeyRole(t, pool, "be6w3-foreign-bkey", tidB, "admin", true)
 
-		changed, err := store.UpdateApiKey(ctx, pool, keyB, tidA,
+		_, changed, err := store.UpdateApiKey(ctx, pool, keyB, tidA,
 			false /*isServerAdmin*/, false /*callerMayManageOwner*/, rolePtr("member"), activePtr(false))
 		if err != nil {
 			t.Fatalf("foreign-tenant patch err = %v, want nil (no oracle)", err)
@@ -198,7 +198,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		o1 := seedKeyRole(t, pool, "be6w3-ownerprot-o1", tid, "owner", true)
 		seedKeyRole(t, pool, "be6w3-ownerprot-o2", tid, "owner", true) // second owner → non-last
 
-		changed, err := store.UpdateApiKey(ctx, pool, o1, tid,
+		_, changed, err := store.UpdateApiKey(ctx, pool, o1, tid,
 			false /*isServerAdmin*/, false /*callerMayManageOwner = admin*/, nil, activePtr(false))
 		if !errors.Is(err, store.ErrOwnerProtected) {
 			t.Fatalf("admin deactivate owner err = %v, want ErrOwnerProtected", err)
@@ -218,10 +218,14 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		seedKeyRole(t, pool, "be6w3-promote-o1", tid, "owner", true) // keeps the tenant owned
 		member := seedKeyRole(t, pool, "be6w3-promote-m1", tid, "member", true)
 
-		changed, err := store.UpdateApiKey(ctx, pool, member, tid,
+		updated, changed, err := store.UpdateApiKey(ctx, pool, member, tid,
 			false /*isServerAdmin*/, true /*owner caller*/, rolePtr("admin"), nil)
 		if err != nil || !changed {
 			t.Fatalf("promote member→admin = (changed=%v, err=%v), want (true, nil)", changed, err)
+		}
+		// The RETURNING row is the patched state — no re-read needed (BE6-3 optim).
+		if updated.ID != member || updated.TenantRole != "admin" {
+			t.Fatalf("returned row = (id=%q role=%q), want (%s admin)", updated.ID, updated.TenantRole, member)
 		}
 		if role, active := keyRoleActive(t, pool, member); role != "admin" || !active {
 			t.Fatalf("promoted key = (role=%q active=%v), want (admin true)", role, active)
@@ -234,10 +238,14 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		tid := freshTenant(t, ctx, pool, "be6w3-reactivate")
 		member := seedKeyRole(t, pool, "be6w3-reactivate-m1", tid, "member", false)
 
-		changed, err := store.UpdateApiKey(ctx, pool, member, "",
+		updated, changed, err := store.UpdateApiKey(ctx, pool, member, "",
 			true /*isServerAdmin*/, true, nil, activePtr(true))
 		if err != nil || !changed {
 			t.Fatalf("reactivate key = (changed=%v, err=%v), want (true, nil)", changed, err)
+		}
+		// The RETURNING row carries the patched active flag (BE6-3 optim).
+		if !updated.Active {
+			t.Fatalf("returned row active=false after reactivate, want true")
 		}
 		if _, active := keyRoleActive(t, pool, member); !active {
 			t.Fatal("key not active after reactivation")
