@@ -119,6 +119,18 @@ var ErrTenantNotFound = errors.New("store: tenant not found")
 // 400 path, reservedSlug) is the caller's job; this enforces only schema gates.
 var ErrTenantSlugExists = errors.New("store: tenant slug already exists")
 
+// ErrScopeExists is returned by AssignTenantScope on a 23505 PK violation on
+// context_tenant_scopes.scope — the scope string is GLOBALLY unique (one scope =
+// one tenant), so a duplicate is the 409 path. The store inserts the scope AS-IS;
+// the auto-prefix policy (<slug>:<name>) lives in the handler, not here.
+var ErrScopeExists = errors.New("store: scope already assigned")
+
+// ErrScopeQuotaExceeded is returned by AssignTenantScope when the tenant already
+// owns >= max_scopes scopes — the 429 path. The count and the insert run inside
+// one transaction under a context_tenants-row lock, so the cap is race-tight (no
+// TOCTOU); a nil or negative maxScopes means unlimited (the cap is skipped).
+var ErrScopeQuotaExceeded = errors.New("store: tenant scope quota exceeded")
+
 const tenantCols = `id::text, slug, display_name, status, created_at, updated_at`
 
 func scanTenant(row pgx.Row) (*Tenant, error) {
@@ -146,6 +158,83 @@ func CreateTenant(ctx context.Context, pool *pgxpool.Pool, slug, displayName str
 		return nil, fmt.Errorf("store: create tenant: %w", err)
 	}
 	return t, nil
+}
+
+// AssignTenantScope registers scope → tenantID in context_tenant_scopes, race-
+// gated and quota-capped, in ONE transaction. It is the store mechanic behind the
+// BE5 self-service scope-create action. The handler owns the auto-prefix policy
+// (<slug>:<name>, built from the DB-resolved slug, never the payload) — this
+// function inserts `scope` AS-IS and NEVER prefixes (mechanic ⟂ policy, S1).
+//
+// Race gate: `SELECT id FROM context_tenants WHERE id=$1 FOR UPDATE` locks the
+// OWNING tenant's row, serialising ALL concurrent scope-assigns of THIS tenant.
+// The count→insert then runs under that lock, so two parallel assigns can NOT both
+// observe count < max_scopes and both commit (no TOCTOU). The lock target is the
+// shared context_tenants row deliberately — a per-scope lock would not serialise
+// two DIFFERENT scope names. The lock doubles as the existence check: no row (or a
+// malformed id → 22P02) collapses to ErrTenantNotFound, mirroring GetTenant's
+// no-oracle 404 contract.
+//
+// Quota: maxScopes == nil OR *maxScopes < 0 means UNLIMITED (cap skipped) — the
+// bootstrap owner-scope is registered with -1 so it never wedges on max_scopes=0.
+// Otherwise count(*) of the tenant's scopes is read under the lock; cnt >=
+// *maxScopes → ErrScopeQuotaExceeded. The count covers ALL of the tenant's scopes
+// (context_tenant_scopes has no soft-delete column and there is no scope-reclaim).
+//
+// INSERT carries NO ON CONFLICT (no silent re-assign): 23505 → ErrScopeExists (the
+// global scope PK), 23503 → ErrTenantNotFound (FK backstop — unreachable while the
+// row lock is held, kept for defence in depth). created is true on a committed
+// insert (always true on the nil-error path, since there is no ON CONFLICT).
+func AssignTenantScope(ctx context.Context, pool *pgxpool.Pool, tenantID, scope string, maxScopes *int) (created bool, err error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("store: assign scope begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock the owning tenant row: per-tenant serialisation + existence check in one
+	// step. No row (or a malformed id → 22P02) → ErrTenantNotFound (404, no oracle).
+	var lockedID string
+	if err = tx.QueryRow(ctx,
+		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&lockedID); err != nil {
+		if tenantNotFound(err) {
+			return false, ErrTenantNotFound
+		}
+		return false, fmt.Errorf("store: assign scope lock: %w", err)
+	}
+
+	// Quota cap (nil / negative = unlimited). Counted under the lock so it observes
+	// any competing assign's committed insert — race-tight, no TOCTOU.
+	if maxScopes != nil && *maxScopes >= 0 {
+		var cnt int
+		if err = tx.QueryRow(ctx,
+			`SELECT count(*) FROM context_tenant_scopes WHERE tenant_id = $1::uuid`, tenantID).Scan(&cnt); err != nil {
+			return false, fmt.Errorf("store: assign scope count: %w", err)
+		}
+		if cnt >= *maxScopes {
+			return false, ErrScopeQuotaExceeded
+		}
+	}
+
+	// Insert AS-IS, no ON CONFLICT (no silent re-assign).
+	if _, err = tx.Exec(ctx,
+		`INSERT INTO context_tenant_scopes (scope, tenant_id) VALUES ($1, $2::uuid)`, scope, tenantID); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			switch pgErr.Code {
+			case "23505":
+				return false, ErrScopeExists
+			case "23503":
+				return false, ErrTenantNotFound
+			}
+		}
+		return false, fmt.Errorf("store: assign scope insert: %w", err)
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("store: assign scope commit: %w", err)
+	}
+	return true, nil
 }
 
 // ListTenants returns all tenants, newest first.
