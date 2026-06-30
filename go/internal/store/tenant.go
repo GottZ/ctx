@@ -101,6 +101,13 @@ func TenantStatusForScope(ctx context.Context, pool *pgxpool.Pool, scope string)
 }
 
 // Tenant is a row in context_tenants — the owner/management register (059).
+//
+// MaxScopes / MaxKeys are the structural per-tenant caps carried by the typed
+// INTEGER columns added in migration 069 (max_scopes/max_keys, CHECK >= 0). A
+// nil pointer = SQL NULL = unlimited (the 063 NULL-unlimited contract). 069's
+// column DEFAULT is a concrete fail-closed cap (25/50); only the system/default
+// tenant is seeded NULL. GetTenant/ListTenants echo these automatically because
+// they share tenantCols + scanTenant.
 type Tenant struct {
 	ID          string    `json:"id"`
 	Slug        string    `json:"slug"`
@@ -108,6 +115,8 @@ type Tenant struct {
 	Status      string    `json:"status"` // active | suspended | offboarding (059 CHECK)
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	MaxScopes   *int      `json:"max_scopes"` // nil = unlimited (069 max_scopes)
+	MaxKeys     *int      `json:"max_keys"`   // nil = unlimited (069 max_keys)
 }
 
 // ErrTenantNotFound is returned by GetTenant/UpdateTenant when no tenant matches
@@ -131,11 +140,17 @@ var ErrScopeExists = errors.New("store: scope already assigned")
 // TOCTOU); a nil or negative maxScopes means unlimited (the cap is skipped).
 var ErrScopeQuotaExceeded = errors.New("store: tenant scope quota exceeded")
 
-const tenantCols = `id::text, slug, display_name, status, created_at, updated_at`
+// tenantCols is the shared SELECT/RETURNING column list. max_scopes/max_keys
+// (069) are read AS-IS — typed INTEGER columns, so no defensive cast is needed
+// (a NULL scans into a nil *int = unlimited; a value is always a CHECK-validated
+// non-negative int). This is the typed-column path the JSONB design (02 §2) was
+// superseded by — the §2 poison-the-shared-aggregate cast risk does not exist
+// for a typed column.
+const tenantCols = `id::text, slug, display_name, status, created_at, updated_at, max_scopes, max_keys`
 
 func scanTenant(row pgx.Row) (*Tenant, error) {
 	var t Tenant
-	if err := row.Scan(&t.ID, &t.Slug, &t.DisplayName, &t.Status, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Slug, &t.DisplayName, &t.Status, &t.CreatedAt, &t.UpdatedAt, &t.MaxScopes, &t.MaxKeys); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -289,6 +304,59 @@ func GetTenant(ctx context.Context, pool *pgxpool.Pool, id string) (*Tenant, err
 		return nil, fmt.Errorf("store: get tenant: %w", err)
 	}
 	return t, nil
+}
+
+// TenantLimits reads the structural per-tenant caps straight off the typed 069
+// columns (max_scopes/max_keys). A NULL column scans into a nil *int = unlimited
+// (the 063 NULL-unlimited contract); a non-NULL column is always a CHECK-bounded
+// non-negative int, so the read needs no defensive cast. An empty, absent, OR
+// malformed id all collapse to ErrTenantNotFound (404, no oracle), reusing
+// GetTenant's tenantNotFound mapping (well-formed-but-absent pgx.ErrNoRows AND
+// the 22P02 from the ::uuid cast on a non-UUID string). This is a pure read — it
+// touches no other tenant column. Validation of the returned caps is the caller's
+// job; this function is the storage accessor only.
+func TenantLimits(ctx context.Context, pool *pgxpool.Pool, tenantID string) (maxScopes, maxKeys *int, err error) {
+	if tenantID == "" {
+		return nil, nil, ErrTenantNotFound
+	}
+	if err = pool.QueryRow(ctx,
+		`SELECT max_scopes, max_keys FROM context_tenants WHERE id = $1::uuid`, tenantID).
+		Scan(&maxScopes, &maxKeys); err != nil {
+		if tenantNotFound(err) {
+			return nil, nil, ErrTenantNotFound
+		}
+		return nil, nil, fmt.Errorf("store: tenant limits: %w", err)
+	}
+	return maxScopes, maxKeys, nil
+}
+
+// SetTenantLimits writes the structural per-tenant caps onto the typed 069
+// columns. A nil argument sets its column to SQL NULL = unlimited; a non-nil
+// value writes the int. NO validation lives here — the >= 0 / both-required
+// rules are the handler's job (BEQ-1b); the 069 CHECK (max_* >= 0) is the
+// DB-level backstop (a negative value surfaces as 23514, not a silent write).
+// 0 rows affected → ErrTenantNotFound (a well-formed-but-absent id), and a
+// malformed id raises 22P02 mapped to the same 404 — both via the no-oracle
+// contract. This is a pure column write: it never touches scopes, keys, or
+// status, only stamps updated_at.
+func SetTenantLimits(ctx context.Context, pool *pgxpool.Pool, tenantID string, maxScopes, maxKeys *int) error {
+	if tenantID == "" {
+		return ErrTenantNotFound
+	}
+	tag, err := pool.Exec(ctx,
+		`UPDATE context_tenants
+		    SET max_scopes = $2, max_keys = $3, updated_at = now()
+		  WHERE id = $1::uuid`, tenantID, maxScopes, maxKeys)
+	if err != nil {
+		if tenantNotFound(err) {
+			return ErrTenantNotFound
+		}
+		return fmt.Errorf("store: set tenant limits: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrTenantNotFound
+	}
+	return nil
 }
 
 // pruneBatchSize bounds each DELETE so a 1M+ offboarding does not take one giant
