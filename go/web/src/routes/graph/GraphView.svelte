@@ -10,7 +10,8 @@
     graph,
     filters,
     palette,
-    selected = null,
+    highlightedIds,
+    topId = null,
     onnodeclick,
     onnodedoubleclick,
   }: {
@@ -19,9 +20,11 @@
     filters: GraphFilters
     /** Theme-aware colors (label/edge Sigma settings); from readGraphPalette. */
     palette: GraphPalette
-    /** Highlighted node (sidebar selection). */
-    selected?: string | null
-    /** Single click — opens the detail sidebar. */
+    /** Nodes with an open floating window — all get the Sigma highlight (G5). */
+    highlightedIds?: Set<string>
+    /** Top (focused) window's node — rendered stronger (size bump). */
+    topId?: string | null
+    /** Single click — opens a floating window for the node. */
     onnodeclick?: (id: string) => void
     /** Double click = expand (+1 hop), design 05-§2. */
     onnodedoubleclick?: (id: string) => void
@@ -50,7 +53,12 @@
         if (!nodeVisible(data, filters)) return { ...data, hidden: true }
         const badge = remainingDegree(data)
         const label = badge === null ? data.label : `${data.label} · +${badge}`
-        return { ...data, label, highlighted: node === selected }
+        // Every open-window node is highlighted; the top (focused) window's node
+        // reads stronger with a size bump (design 07-§E). `highlighted` is a
+        // Sigma DISPLAY-DATA field (reducer-only) — never written to graphology.
+        const highlighted = highlightedIds?.has(node) ?? false
+        if (node === topId) return { ...data, label, highlighted: true, size: data.size * 1.15 }
+        return { ...data, label, highlighted }
       },
       // sigma skips edges with hidden endpoints on its own — this only
       // applies the edge-level class/confidence gate.
@@ -78,7 +86,8 @@
   // object from the panel, so reading the references is enough tracking).
   $effect(() => {
     void filters
-    void selected
+    void highlightedIds
+    void topId
     renderer?.refresh()
   })
 

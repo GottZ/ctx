@@ -7,11 +7,12 @@
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
   import { readGraphPalette, recolorGraph } from '../../lib/graph/graph-theme'
   import { THEME_CHANGE_EVENT } from '../../lib/theme/theme.svelte'
-  import DetailSidebar from './DetailSidebar.svelte'
+  import { WindowStore } from '../../lib/graph/windows.svelte'
   import FilterPanel from './FilterPanel.svelte'
   import GraphView from './GraphView.svelte'
   import OverviewMap from './OverviewMap.svelte'
   import SearchBox from './SearchBox.svelte'
+  import WindowManager from './WindowManager.svelte'
 
   // ONE graphology instance per page visit = single source of truth
   // (design 05-§3.5). Deliberately NOT $state — sigma observes the graph
@@ -29,12 +30,24 @@
   let edgeCount = $state(0)
   // W4: filters drive the reducers instantly AND the params of new expands.
   let filters = $state(defaultFilters())
-  let selected = $state<string | null>(null)
+  // G5: node-click opens a floating window (multiple blocks open at once) instead
+  // of a single-selection sidebar scalar. The store holds windows as logical
+  // units; WindowManager renders them over the canvas. openIds/topId drive the
+  // node highlight. In-memory per page-visit (mirrors the ephemeral graph).
+  const store = new WindowStore()
+  let viewportEl = $state<HTMLElement>()
   let loadedCategories = $state<string[]>([])
   // Theme-aware graph colors read once from the CSS tokens (dark fallback if
   // the theme axis hasn't shipped). G1 only seeds merges/Sigma from this; the
   // re-color-on-theme-switch listener is G2 (design 03-§4).
   let palette = $state(readGraphPalette())
+
+  // a11y: a node-click window has no triggerEl (the Sigma node has no DOM
+  // target) — close() must return focus to the graph region, never <body>.
+  // The focusable .viewport (tabindex=-1) is that fallback.
+  $effect(() => {
+    store.fallbackFocusEl = viewportEl ?? null
+  })
 
   // Deep-link sync: /graph?focus=<uuid> survives reload and is shareable.
   onMount(() => {
@@ -70,7 +83,8 @@
     const cats = new Set<string>()
     graph.forEachNode((_id, attrs) => cats.add(attrs.category))
     loadedCategories = [...cats].sort()
-    if (selected !== null && !graph.hasNode(selected)) selected = null
+    // No selected-scalar cleanup (G5): a window survives an evicted node — its
+    // content loads from the API and BlockDetailContent guards on hasNode.
   }
 
   async function setFocus(id: string, opts: { pushUrl?: boolean } = {}): Promise<void> {
@@ -117,7 +131,7 @@
   /** Back to the cluster map (clears the focus; the ego graph stays in memory). */
   function backToOverview(): void {
     focus = null
-    selected = null
+    store.closeAll()
     error = null
     const url = new URL(location.href)
     url.searchParams.delete('focus')
@@ -127,31 +141,30 @@
 
 <section class="area">
   <!-- Base canvas layer — fills the whole content region (S5 definite-height
-       chain); the former in-page chrome floats as overlays on top (G3). The
-       <aside>/DetailSidebar slot + selected logic stay untouched (G5 replaces
-       them); G3 only reshapes chrome → overlays and makes the canvas full-bleed. -->
+       chain); the former in-page chrome floats as overlays on top (G3). G5:
+       the former DetailSidebar <aside> slot is replaced by the WindowManager
+       overlay (floating windows over the canvas); the viewport is a focusable
+       fallback target for window-close focus return. -->
   {#if focus !== null}
     <div class="stage">
-      <div class="viewport">
+      <div class="viewport" bind:this={viewportEl} tabindex="-1">
         <GraphView
           bind:this={view}
           {graph}
           {filters}
           {palette}
-          {selected}
-          onnodeclick={(id) => (selected = id)}
+          highlightedIds={store.openIds}
+          topId={store.topId}
+          onnodeclick={(id) => store.open(id, null)}
           onnodedoubleclick={(id) => void expand(id)}
         />
       </div>
-      {#if selected !== null}
-        <DetailSidebar
-          id={selected}
-          {graph}
-          onfocus={(id) => void setFocus(id)}
-          onexpand={(id) => void expand(id)}
-          onclose={() => (selected = null)}
-        />
-      {/if}
+      <WindowManager
+        {graph}
+        {store}
+        onfocus={(id) => void setFocus(id)}
+        onexpand={(id) => void expand(id)}
+      />
     </div>
   {:else}
     <div class="stage">
@@ -211,9 +224,10 @@
   }
 
   /* Base canvas layer: absolute inset:0 → definite size = whole region. The
-     focus stage is master-detail (viewport + the untouched DetailSidebar); the
-     overview stage holds the full-bleed OverviewMap. Overlays stack above via
-     z-index (.area is the containing block; --z-overlay beats the auto-z stage). */
+     focus stage holds the viewport (GraphView) + the WindowManager overlay
+     (floating windows, G5); the overview stage holds the full-bleed OverviewMap.
+     Overlays stack above via z-index (.area is the containing block; the windows
+     use --z-window > --z-overlay). */
   .stage {
     position: absolute;
     inset: 0;

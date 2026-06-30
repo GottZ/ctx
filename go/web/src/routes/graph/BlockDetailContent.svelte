@@ -16,6 +16,7 @@
     onfocus,
     onexpand,
     headerActions,
+    titleId,
   }: {
     id: string
     graph: DirectedGraph<NodeAttrs, EdgeAttrs>
@@ -23,6 +24,8 @@
     onexpand: (id: string) => void
     /** Host-supplied chrome actions rendered in the header (e.g. close/minimize). */
     headerActions?: Snippet
+    /** Host-supplied id for the <h2> so a window can wire aria-labelledby (G5). */
+    titleId?: string
   } = $props()
 
   // Metadata straight from the loaded attrs; full content arrives lazily
@@ -56,7 +59,7 @@
 
 <div class="detail-body">
   <header>
-    <h2>{detail?.title ?? attrs?.label ?? id}</h2>
+    <h2 id={titleId}>{detail?.title ?? attrs?.label ?? id}</h2>
     {#if headerActions}
       {@render headerActions()}
     {/if}

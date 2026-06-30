@@ -69,6 +69,7 @@
   --z-drawer: 200;
   --z-sheet: 250;
   --z-overlay: 300;
+  --z-window: 350; /* Floating-Windows (G5) — über chrome-left (--z-overlay) */
 
   color-scheme: dark;
 }
