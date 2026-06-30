@@ -251,3 +251,100 @@ test.describe('graph floating windows (G5b)', () => {
     await expect(page.locator('pre.content')).toHaveCount(0)
   })
 })
+
+// G6 — Mobile full-bleed sheet + minimize-bar (design 07-§Wellen G6, §D mobile).
+// Reuses the same open-seam (enterFocusStage → emit clickNode). Below SM=640 the
+// WindowManager renders ONLY store.topId as a `sheet` FloatingWindow (position:
+// fixed; inset:0; NO drag-handle/resize — the sheet prop suppresses `.grip`/
+// `.resize`) and ALL other windows (design §D: "Chips für alle übrigen") as chips
+// in the minbar. The sheet-z (--z-window:350) covers the nav-drawer toggle
+// (z 200/250) by design, so the titlebar minimize/close are the documented ONLY
+// way back — the gate below proves they stay reachable & clickable.
+test.describe('graph floating windows — mobile sheet (G6)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 }) // phone (< SM=640)
+  })
+
+  test('top window renders as a full-bleed sheet (inset:0); minbar shows chips', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+    await openWindow(page, NODE3)
+
+    // Mobile: EXACTLY one window is rendered (the top one), as a sheet. The other
+    // is a chip, not a dialog.
+    const sheet = page.locator('.window.sheet')
+    await expect(sheet).toHaveCount(1)
+    await expect(page.getByRole('dialog')).toHaveCount(1)
+    await expect(sheet).toHaveAttribute('aria-modal', 'false')
+
+    // Computed full-bleed: position:fixed + inset 0 on every edge.
+    const inset = await sheet.evaluate((el) => {
+      const cs = getComputedStyle(el)
+      return { position: cs.position, top: cs.top, right: cs.right, bottom: cs.bottom, left: cs.left }
+    })
+    expect(inset.position).toBe('fixed')
+    expect(inset.top).toBe('0px')
+    expect(inset.right).toBe('0px')
+    expect(inset.bottom).toBe('0px')
+    expect(inset.left).toBe('0px')
+    const box = await sheet.boundingBox()
+    expect(box!.x).toBeLessThanOrEqual(1)
+    expect(box!.y).toBeLessThanOrEqual(1)
+    expect(box!.width).toBeGreaterThanOrEqual(388) // fills the 390-wide viewport
+
+    // Minbar visible with a chip for the other (non-top) window.
+    const minbar = page.locator('.minbar')
+    await expect(minbar).toBeVisible()
+    await expect(minbar.locator('.chip')).toHaveCount(1)
+  })
+
+  test('sheet has NO drag-handle and NO resize affordance (negative)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+
+    const sheet = page.locator('.window.sheet')
+    await expect(sheet).toHaveCount(1)
+    // The `sheet` prop drops both out of the DOM ({#if !sheet}).
+    await expect(sheet.locator('.grip')).toHaveCount(0)
+    await expect(sheet.locator('.resize')).toHaveCount(0)
+  })
+
+  test('minimize and close stay reachable in the sheet titlebar (the only way back)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+
+    const sheet = page.locator('.window.sheet')
+    // Both affordances are in the titlebar, above the sheet-z that covers the
+    // drawer toggle — they must be visible and actually clickable.
+    await expect(sheet.getByRole('button', { name: 'minimize' })).toBeVisible()
+    await sheet.getByRole('button', { name: 'close' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+  })
+
+  test('minimize collapses the sheet to a chip; tapping the chip restores it as the sheet', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusStage(page)
+    await openWindow(page, NODE2) // 'API Spec', z=1
+    await openWindow(page, NODE3) // 'Findings', z=2 → top → sheet
+
+    const sheet = page.locator('.window.sheet')
+    const chips = page.locator('.minbar .chip')
+    // Sheet = NODE3 ('Findings'); the lone chip = NODE2 ('API Spec').
+    await expect(chips).toHaveText(['API Spec'])
+
+    // Minimize the sheet (NODE3) → topId falls back to NODE2, which becomes the
+    // new sheet; NODE3 ('Findings') drops to a chip. A sheet is still present.
+    await sheet.getByRole('button', { name: 'minimize' }).click()
+    await expect(page.locator('.window.sheet')).toHaveCount(1)
+    await expect(chips).toHaveText(['Findings'])
+
+    // Tap the 'Findings' chip → restore raises NODE3 back to the top → it is the
+    // sheet again, and NODE2 ('API Spec') is now the chip.
+    await chips.filter({ hasText: 'Findings' }).click()
+    await expect(page.locator('.window.sheet')).toHaveCount(1)
+    await expect(chips).toHaveText(['API Spec'])
+  })
+})
