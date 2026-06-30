@@ -42,7 +42,7 @@ func TestListApiKeys_TenantScopedActive(t *testing.T) {
 	keyA2 := seedTenantKey(t, pool, "list-keyA2", "list-a", tenantA) // → inactive below
 	keyB1 := seedTenantKey(t, pool, "list-keyB1", "list-b", tenantB) // active
 	// Make keyA2 inactive through the real soft-delete (server-admin path).
-	if _, err := store.DeleteApiKey(ctx, pool, keyA2, "", true); err != nil {
+	if _, err := store.DeleteApiKey(ctx, pool, keyA2, "", true, true); err != nil {
 		t.Fatalf("seed inactive key: %v", err)
 	}
 

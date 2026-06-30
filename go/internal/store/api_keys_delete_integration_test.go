@@ -20,6 +20,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -67,7 +68,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 	// L2: a non-server-admin of tenant A must NOT revoke a tenant-B key.
 	t.Run("non_server_admin_cannot_delete_foreign_tenant_key", func(t *testing.T) {
 		keyB := seedTenantKey(t, pool, "del-keyB-1", "del-b", tenantB)
-		deleted, err := store.DeleteApiKey(ctx, pool, keyB, tenantA, false)
+		deleted, err := store.DeleteApiKey(ctx, pool, keyB, tenantA, false, false)
 		if err != nil {
 			t.Fatalf("delete: %v", err)
 		}
@@ -82,7 +83,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 	// A non-server-admin may revoke its OWN tenant's key.
 	t.Run("non_server_admin_deletes_own_tenant_key", func(t *testing.T) {
 		keyA := seedTenantKey(t, pool, "del-keyA-1", "del-a", tenantA)
-		deleted, err := store.DeleteApiKey(ctx, pool, keyA, tenantA, false)
+		deleted, err := store.DeleteApiKey(ctx, pool, keyA, tenantA, false, false)
 		if err != nil {
 			t.Fatalf("delete: %v", err)
 		}
@@ -97,7 +98,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 	// A server-admin deletes across tenants exactly as before (behaviorally neutral).
 	t.Run("server_admin_deletes_any_tenant_key", func(t *testing.T) {
 		keyB := seedTenantKey(t, pool, "del-keyB-2", "del-b", tenantB)
-		deleted, err := store.DeleteApiKey(ctx, pool, keyB, tenantA, true)
+		deleted, err := store.DeleteApiKey(ctx, pool, keyB, tenantA, true, true)
 		if err != nil {
 			t.Fatalf("delete: %v", err)
 		}
@@ -113,7 +114,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 	// same outcome an absent id yields — a malformed vs absent distinction would
 	// be an oracle.
 	t.Run("malformed_id_is_not_found_no_oracle", func(t *testing.T) {
-		deleted, err := store.DeleteApiKey(ctx, pool, "not-a-uuid", tenantA, false)
+		deleted, err := store.DeleteApiKey(ctx, pool, "not-a-uuid", tenantA, false, false)
 		if err != nil {
 			t.Fatalf("malformed id must collapse to not-found, got err: %v", err)
 		}
@@ -121,7 +122,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 			t.Fatal("malformed id reported a delete")
 		}
 		// server-admin path collapses too (empty callerTenant is fine here).
-		deleted2, err2 := store.DeleteApiKey(ctx, pool, "also-bad", "", true)
+		deleted2, err2 := store.DeleteApiKey(ctx, pool, "also-bad", "", true, true)
 		if err2 != nil {
 			t.Fatalf("malformed id (server-admin) err: %v", err2)
 		}
@@ -132,12 +133,85 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 
 	// A well-formed but absent id is a plain miss.
 	t.Run("absent_id_is_not_found", func(t *testing.T) {
-		deleted, err := store.DeleteApiKey(ctx, pool, "00000000-0000-0000-0000-00000000dead", tenantA, false)
+		deleted, err := store.DeleteApiKey(ctx, pool, "00000000-0000-0000-0000-00000000dead", tenantA, false, false)
 		if err != nil {
 			t.Fatalf("absent id err: %v", err)
 		}
 		if deleted {
 			t.Fatal("absent id reported a delete")
+		}
+	})
+}
+
+// TestDeleteApiKey_OwnerGuards covers the BE6-4 hardening (design/04 §D-D): the
+// Last-Owner + Owner-Protection riegel on the REAL revoke path. api-key-delete is
+// tierTenantAdmin, so without these guards an owner could revoke its own last owner
+// key (tenant left owner-less) and an admin could revoke all owner keys (owner
+// disempowerment). The riegel mirrors UpdateApiKey with the patch fixed to
+// active=false. seedKeyRole / keyRoleActive / freshTenant live in the same
+// store_test package (api_keys_update_/assign_tenant_scope_integration_test.go).
+func TestDeleteApiKey_OwnerGuards(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	// N12d: revoking the SOLE active owner via api-key-delete → ErrLastOwner, the
+	// key stays active (self-revoke-recovery: a tenant never loses its last owner).
+	// callerMayManageOwner=true isolates the last-owner mechanic from owner-protection.
+	t.Run("N12d_revoke_last_owner_returns_ErrLastOwner", func(t *testing.T) {
+		tid := freshTenant(t, ctx, pool, "del-be6w4-lastowner")
+		owner := seedKeyRole(t, pool, "del-be6w4-lastowner-o1", tid, "owner", true)
+
+		deleted, err := store.DeleteApiKey(ctx, pool, owner, tid,
+			false /*isServerAdmin*/, true /*callerMayManageOwner*/)
+		if !errors.Is(err, store.ErrLastOwner) {
+			t.Fatalf("revoke last owner err = %v, want ErrLastOwner", err)
+		}
+		if deleted {
+			t.Fatal("revoke last owner reported deleted=true, want false (rolled back)")
+		}
+		if !keyActive(t, pool, owner) {
+			t.Fatal("last owner key revoked despite ErrLastOwner — tenant left owner-less")
+		}
+	})
+
+	// N19d: an admin (callerMayManageOwner=false) revoking a NON-last owner key →
+	// ErrOwnerProtected (403; AM6(b)). Two owners exist, so it is unambiguously
+	// owner-protection, not last-owner (which would be 409). The owner stays active.
+	t.Run("N19d_admin_revoke_owner_returns_ErrOwnerProtected", func(t *testing.T) {
+		tid := freshTenant(t, ctx, pool, "del-be6w4-ownerprot")
+		o1 := seedKeyRole(t, pool, "del-be6w4-ownerprot-o1", tid, "owner", true)
+		seedKeyRole(t, pool, "del-be6w4-ownerprot-o2", tid, "owner", true) // second owner → non-last
+
+		deleted, err := store.DeleteApiKey(ctx, pool, o1, tid,
+			false /*isServerAdmin*/, false /*callerMayManageOwner = admin*/)
+		if !errors.Is(err, store.ErrOwnerProtected) {
+			t.Fatalf("admin revoke owner err = %v, want ErrOwnerProtected", err)
+		}
+		if deleted {
+			t.Fatal("admin revoke owner reported deleted=true, want false")
+		}
+		if !keyActive(t, pool, o1) {
+			t.Fatal("admin neutralised an owner key via delete despite ErrOwnerProtected")
+		}
+	})
+
+	// P-owner: an owner (callerMayManageOwner=true) revoking a NON-last owner key
+	// succeeds — the guards block lockout/disempowerment, not a legitimate revoke.
+	t.Run("Powner_revoke_non_last_owner_succeeds", func(t *testing.T) {
+		tid := freshTenant(t, ctx, pool, "del-be6w4-okrevoke")
+		o1 := seedKeyRole(t, pool, "del-be6w4-okrevoke-o1", tid, "owner", true)
+		seedKeyRole(t, pool, "del-be6w4-okrevoke-o2", tid, "owner", true) // an owner remains after revoke
+
+		deleted, err := store.DeleteApiKey(ctx, pool, o1, tid,
+			false /*isServerAdmin*/, true /*owner caller*/)
+		if err != nil || !deleted {
+			t.Fatalf("owner revoke non-last owner = (deleted=%v, err=%v), want (true, nil)", deleted, err)
+		}
+		if keyActive(t, pool, o1) {
+			t.Fatal("owner key still active after a permitted revoke")
 		}
 	})
 }

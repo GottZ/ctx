@@ -1542,10 +1542,22 @@ func (h *ManageHandler) handleApiKeyDelete(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
 		return
 	}
-	deleted, err := store.DeleteApiKey(r.Context(), h.pool, data.ID, ar.TenantID, ar.IsServerAdmin())
+	// D-D: api-key-delete is the REAL revoke path and is tierTenantAdmin (owner AND
+	// admin pass), so the Last-Owner + Owner-Protection riegel must gate it here too.
+	// An admin (callerMayManageOwner=false) may not revoke an owner key, and no
+	// caller may revoke the last active owner (design/04 §D-D, AM6).
+	callerMayManageOwner := ar.IsServerAdmin() || ar.TenantRole == auth.RoleOwner
+	deleted, err := store.DeleteApiKey(r.Context(), h.pool, data.ID, ar.TenantID, ar.IsServerAdmin(), callerMayManageOwner)
 	if err != nil {
-		slog.Error("manage: delete api key failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		switch {
+		case errors.Is(err, store.ErrOwnerProtected):
+			writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "owner key may only be managed by an owner or server-admin"})
+		case errors.Is(err, store.ErrLastOwner):
+			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot revoke the last active owner of the tenant"})
+		default:
+			slog.Error("manage: delete api key failed", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		}
 		return
 	}
 	if !deleted {

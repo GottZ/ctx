@@ -294,36 +294,113 @@ func TenantAPIKeyIDs(ctx context.Context, pool *pgxpool.Pool, tenantID string) (
 	return ids, rows.Err()
 }
 
-// DeleteApiKey deactivates an API key by ID (soft delete: sets active=false),
-// constrained to the caller's tenant unless the caller is a server-admin.
+// DeleteApiKey soft-deletes (active=false) one api key by ID — the REAL revoke
+// path behind api-key-delete — tenant-isolated, owner-invariant-safe, and
+// TOCTOU-free. It MIRRORS UpdateApiKey with the patch FIXED to active=false: the
+// same two role-aware guards run under a context_tenants-row FOR UPDATE lock
+// before the soft-delete. They MUST live here too, because api-key-delete is
+// tierTenantAdmin (owner AND admin pass) and revoke is the path an attacker
+// actually reaches — the riegel at api-key-update alone would sit on the stilled
+// path (design/04 §D-D, AM6, Review-Major):
+//   - (3) Owner-Protection (AM6(b)): an admin (callerMayManageOwner=false) cannot
+//     revoke an OWNER key → ErrOwnerProtected (the handler maps it to 403).
+//   - (4) Last-Owner (AM6(a)): revoking the last ACTIVE owner → ErrLastOwner (409),
+//     nothing written — the tenant always keeps >= 1 active owner (Recovery, D3).
 //
-// The tenant constraint lives INSIDE the single UPDATE — atomic and
-// TOCTOU-free, no fetch-then-write. A server-admin (isServerAdmin=true) deletes
-// any key by id, exactly as before; a non-server-admin deletes only keys whose
-// tenant_id matches callerTenant. A miss — wrong tenant, absent, already
-// inactive, or a malformed id (22P02) — collapses to found=false with no error,
-// so the caller cannot tell a foreign tenant's key from a nonexistent one
-// (Leak-Pfad L2, design/05 §5.2). An empty callerTenant for a non-server-admin
-// yields a NULL tenant arg, which matches nothing — fail-closed.
-func DeleteApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant string, isServerAdmin bool) (bool, error) {
+// No-oracle (Leak-Pfad L2) preserved: a foreign / absent / malformed (22P02) id
+// resolves to zero rows → (false, nil), indistinguishable from "absent", BEFORE
+// the role is known — so the owner-protection 403 fires only for a SAME-tenant
+// owner target, never as a cross-tenant existence oracle. Re-deleting an already
+// inactive key is a no-op miss: the patch removes no owner power (curActive=false),
+// so NEITHER guard fires, and the final UPDATE's `active = true` predicate matches
+// nothing → false (idempotency preserved). The lock target is the SHARED
+// context_tenants row (not a per-key lock), so two concurrent revokes of DIFFERENT
+// owner keys serialise → the second sees the committed revoke and gets ErrLastOwner
+// (a per-key lock would let both through → zero owners). An empty callerTenant for a
+// non-server-admin yields a NULL tenant arg → matches nothing (fail-closed).
+func DeleteApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant string,
+	isServerAdmin, callerMayManageOwner bool) (bool, error) {
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("api_keys: delete begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
+
+	// NULL-on-empty inline idiom (ListApiKeys / UpdateApiKey house style): a
+	// non-server-admin with an empty callerTenant yields a NULL tenant arg →
+	// fail-closed in the ($isServerAdmin OR tenant_id=$callerTenant) constraint.
 	var tenantArg *string
 	if !isServerAdmin && callerTenant != "" {
 		tenantArg = &callerTenant
 	}
-	tag, err := pool.Exec(ctx,
+
+	// (1) Resolve the target's tenant + current role/active WITH the tenant
+	// constraint (the shared helper with UpdateApiKey). Zero rows — wrong tenant,
+	// absent, or a malformed id (22P02) — collapses to (false, nil): no row is
+	// touched and the caller cannot tell a foreign key from a nonexistent one.
+	targetTenant, curRole, curActive, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil // foreign / absent / malformed id — no oracle (L2)
+	}
+
+	// (2) Serialisation point: lock the target key's TENANT row (see UpdateApiKey's
+	// lock-target rationale). tenant_id is a NOT NULL FK, so the row is guaranteed.
+	var lockedTenant string
+	if err = tx.QueryRow(ctx,
+		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, targetTenant).Scan(&lockedTenant); err != nil {
+		return false, fmt.Errorf("api_keys: delete tenant lock: %w", err)
+	}
+
+	const ownerRole = "owner"
+	// A revoke removes owner power only when the target is currently active (active
+	// true→false); re-revoking an already-inactive key removes nothing → no guard.
+	removesOwnerPower := curActive
+
+	// (3) Owner-Protection (AM6(b)): only an owner / server-admin may revoke an
+	// OWNER key. An admin (callerMayManageOwner=false) → ErrOwnerProtected. Fires
+	// only for a same-tenant owner target — a foreign target already collapsed to
+	// (false, nil) in (1), before the role was known (no cross-tenant oracle).
+	if curRole == ownerRole && removesOwnerPower && !callerMayManageOwner {
+		return false, ErrOwnerProtected
+	}
+
+	// (4) Last-Owner (AM6(a)) under the lock: revoking an ACTIVE owner key may drop
+	// the active-owner count below one. Count the OTHER active owners (id <> target)
+	// — "does >= 1 owner remain after the revoke". Read under the lock, a serialised
+	// concurrent revoke of a DIFFERENT owner key is already committed → the second
+	// call sees zero others → ErrLastOwner (the race riegel).
+	if curRole == ownerRole && curActive {
+		var others int
+		if err = tx.QueryRow(ctx,
+			`SELECT count(*) FROM context_api_keys
+			  WHERE tenant_id = $1::uuid AND tenant_role = 'owner' AND active = true AND id <> $2::uuid`,
+			targetTenant, id).Scan(&others); err != nil {
+			return false, fmt.Errorf("api_keys: delete owner count: %w", err)
+		}
+		if others < 1 {
+			return false, ErrLastOwner
+		}
+	}
+
+	// (5) Soft-delete. Tenant constraint repeated in the WHERE (no cross-tenant
+	// revoke); `active = true` keeps re-deletes idempotent (already-inactive → 0
+	// rows → false). The 22P02 case is already absorbed by resolveKeyForUpdate, so
+	// this Exec runs only on a well-formed, resolved id.
+	tag, err := tx.Exec(ctx,
 		`UPDATE context_api_keys SET active = false, updated_at = now()
-		 WHERE id = $1::uuid AND active = true
-		   AND ($2::boolean OR tenant_id = $3::uuid)`,
+		  WHERE id = $1::uuid AND active = true
+		    AND ($2::boolean OR tenant_id = $3::uuid)`,
 		id, isServerAdmin, tenantArg,
 	)
 	if err != nil {
-		// A malformed id (invalid uuid text) can't match any key — collapse it
-		// to a miss so it's indistinguishable from an absent id (no oracle).
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
-			return false, nil
-		}
 		return false, fmt.Errorf("api_keys: delete: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("api_keys: delete commit: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
 }
