@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -30,34 +31,41 @@ type ApiKey struct {
 	// TenantRole is the per-tenant RBAC role (059 column: owner|admin|member,
 	// NOT NULL DEFAULT 'member'). Populated by ListApiKeys for the role-badge on
 	// the tenant-admin key list (design/05 LÜCKE-1 / TK7a) — an additive read of
-	// a column that has existed since 059, no migration. CreateApiKey does NOT
-	// set it (its INSERT...RETURNING omits the column), so a key built there
-	// carries the zero value "" until reloaded via the list path.
+	// a column that has existed since 059, no migration. insertApiKeyTx (and thus
+	// CreateApiKey) now sets it explicitly and returns it in RETURNING, so a key
+	// built on the create path carries its real role ('member' for CreateApiKey).
 	TenantRole string     `json:"tenant_role"`
 	Active     bool       `json:"active"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
-// CreateApiKey generates a new API key, hashes it, and inserts the row.
-// Returns the persisted record and the plaintext key (shown once, then only
-// the SHA-256 hash is retained server-side).
+// rowQuerier is the minimal querier satisfied by BOTH *pgxpool.Pool and pgx.Tx
+// — each exposes QueryRow with this exact signature. It lets insertApiKeyTx run
+// standalone on the pool (CreateApiKey) or compose into a larger bootstrap
+// transaction (the upcoming owner-key / quota-gated mint paths) without the
+// primitive caring which it received.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// insertApiKeyTx is the single INSERT path for a new api key: it validates the
+// inputs, applies the tenant-aware {shared} default (R-LEAK5), generates and
+// hashes the key, and inserts the row with an EXPLICIT tenant_role. q may be a
+// *pgxpool.Pool or a pgx.Tx (rowQuerier), so the primitive runs standalone or
+// composes into a tenant-bootstrap transaction.
 //
-// home_scope is required by API contract (v2.0.0 breaking change): callers
-// must pass a non-empty value. The handler enforces this before calling.
-// allowedScopes may be nil — see the tenant-aware default below.
-//
-// tenantID (MT T06, Achse 01-T6) binds the new key to its owning tenant. The
-// handler passes the creator's tenant (ar.TenantID); an empty string falls back
-// to the default tenant (single-tenant / 059-backfill semantics — never NULL,
-// never fail-open, the default tenant IS the incumbent). The store is the last
-// line before the row exists, so the tenant-aware {shared} rule lives here.
-func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes []string, tenantID string) (*ApiKey, string, error) {
+// role MUST be a member of the 059 CHECK domain ('owner'|'admin'|'member'); the
+// caller passes a fixed store-side string, never raw user input. The INSERT and
+// RETURNING now carry tenant_role — additive vs v4.0.1 (whose create path
+// omitted the column and returned TenantRole==""); the column has existed since
+// 059, so this is SQL-only, NO migration.
+func insertApiKeyTx(ctx context.Context, q rowQuerier, label, homeScope string, allowedScopes []string, tenantID, role string) (ApiKey, string, error) {
 	if label == "" {
-		return nil, "", fmt.Errorf("api_keys: label is required")
+		return ApiKey{}, "", fmt.Errorf("api_keys: label is required")
 	}
 	if homeScope == "" {
-		return nil, "", fmt.Errorf("api_keys: home_scope is required")
+		return ApiKey{}, "", fmt.Errorf("api_keys: home_scope is required")
 	}
 	if tenantID == "" {
 		tenantID = DefaultTenantID
@@ -67,6 +75,9 @@ func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope stri
 	// with no explicit allowed_scopes gets an empty set — never an implicit
 	// cross-tenant read into the default tenant's shared blocks. A non-nil empty
 	// slice makes the COALESCE below keep '{}' instead of the '{shared}' literal.
+	// This decision MUST stay BEFORE the COALESCE: the hard COALESCE '{shared}'
+	// fallback only fires for a genuinely nil arg (the default tenant), never
+	// softening the foreign-tenant empty set.
 	// TENANT-DECISION(shared-scope-owner): shared stays a default-tenant scope
 	// (Weg a) — Alt: system-wide scope like _global (Weg b), reversible by
 	// rehanging one context_tenant_scopes row.
@@ -77,17 +88,17 @@ func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope stri
 	// ('_global' = settings identity sentinel, 051). Enforced here as well
 	// as in the handler — the store is the last line before the row exists.
 	if strings.HasPrefix(homeScope, "_") {
-		return nil, "", fmt.Errorf("api_keys: scope names starting with '_' are reserved: %s", homeScope)
+		return ApiKey{}, "", fmt.Errorf("api_keys: scope names starting with '_' are reserved: %s", homeScope)
 	}
 	for _, s := range allowedScopes {
 		if strings.HasPrefix(s, "_") {
-			return nil, "", fmt.Errorf("api_keys: scope names starting with '_' are reserved: %s", s)
+			return ApiKey{}, "", fmt.Errorf("api_keys: scope names starting with '_' are reserved: %s", s)
 		}
 	}
 
 	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
-		return nil, "", fmt.Errorf("api_keys: generate key: %w", err)
+		return ApiKey{}, "", fmt.Errorf("api_keys: generate key: %w", err)
 	}
 	plaintext := hex.EncodeToString(keyBytes)
 	h := sha256.Sum256([]byte(plaintext))
@@ -96,18 +107,43 @@ func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope stri
 	// Migration 014_security_hardening.sql dropped the plaintext api_key
 	// column; key_hash is now NOT NULL UNIQUE and the sole identifier for
 	// ctx_auth lookups.
-	row := &ApiKey{}
-	err := pool.QueryRow(ctx,
-		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active, tenant_id)
-		 VALUES ($1, $2, $3, COALESCE($4::text[], '{shared}'::text[]), true, $5::uuid)
-		 RETURNING id, label, home_scope, allowed_scopes, active, last_used_at, created_at`,
-		label, keyHash, homeScope, allowedScopes, tenantID,
-	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.Active, &row.LastUsedAt, &row.CreatedAt)
+	var row ApiKey
+	err := q.QueryRow(ctx,
+		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active, tenant_id, tenant_role)
+		 VALUES ($1, $2, $3, COALESCE($4::text[], '{shared}'::text[]), true, $5::uuid, $6)
+		 RETURNING id, label, home_scope, allowed_scopes, tenant_role, active, last_used_at, created_at`,
+		label, keyHash, homeScope, allowedScopes, tenantID, role,
+	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.TenantRole, &row.Active, &row.LastUsedAt, &row.CreatedAt)
 	if err != nil {
-		return nil, "", fmt.Errorf("api_keys: insert: %w", err)
+		return ApiKey{}, "", fmt.Errorf("api_keys: insert: %w", err)
 	}
 
 	return row, plaintext, nil
+}
+
+// CreateApiKey generates a new API key, hashes it, and inserts the row.
+// Returns the persisted record and the plaintext key (shown once, then only
+// the SHA-256 hash is retained server-side).
+//
+// home_scope is required by API contract (v2.0.0 breaking change): callers
+// must pass a non-empty value. The handler enforces this before calling.
+// allowedScopes may be nil — see the tenant-aware default in insertApiKeyTx.
+//
+// tenantID (MT T06, Achse 01-T6) binds the new key to its owning tenant. The
+// handler passes the creator's tenant (ar.TenantID); an empty string falls back
+// to the default tenant (single-tenant / 059-backfill semantics — never NULL,
+// never fail-open, the default tenant IS the incumbent).
+//
+// The 6-arg signature is UNCHANGED: CreateApiKey is a thin wrapper over
+// insertApiKeyTx with role pinned to 'member' (the DB default), so the new keys
+// it mints are exactly as before. Owner / quota-gated mints are separate paths
+// that pass their own role through the shared primitive.
+func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes []string, tenantID string) (*ApiKey, string, error) {
+	key, plaintext, err := insertApiKeyTx(ctx, pool, label, homeScope, allowedScopes, tenantID, "member")
+	if err != nil {
+		return nil, "", err
+	}
+	return &key, plaintext, nil
 }
 
 // ListApiKeys returns API key rows ordered by created_at desc, scoped to one

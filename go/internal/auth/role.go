@@ -26,6 +26,24 @@ func (r Role) administers() bool {
 	return r == RoleOwner || r == RoleAdmin
 }
 
+// delegates reports whether a tenant Role may DELEGATE roles — appoint or
+// revoke admins and mutate owner keys (OE-2). ONLY owner delegates; admin
+// administers (administers() == true) but does NOT delegate (059 header:
+// "admin: administer, no delegation"). This is strictly narrower than
+// administers(): owner→true, admin→false, member→false, and any unknown or
+// empty value, including the Go zero value "", → false (fail-closed mirror).
+func (r Role) delegates() bool {
+	return r == RoleOwner
+}
+
+// ValidRole reports whether s is a member of the 059 CHECK domain on
+// context_api_keys.tenant_role ('owner'|'admin'|'member'). It is the Go-side
+// gate in front of the 23514 CHECK backstop, so a bad role yields a clean 400
+// rather than a raw SQL constraint error. "" / unknown → false (fail-closed).
+func ValidRole(s string) bool {
+	return s == string(RoleOwner) || s == string(RoleAdmin) || s == string(RoleMember)
+}
+
 // IsServerAdmin reports the M052 top tier: a valid key with the server-global
 // admin bit. server-admins act across ALL tenants and ALL actions. A nil or
 // invalid receiver is fail-closed.

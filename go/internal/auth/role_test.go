@@ -97,3 +97,65 @@ func TestIsTenantAdminOf(t *testing.T) {
 		}
 	}
 }
+
+// TestDelegates pins delegates() to OWNER-ONLY — strictly narrower than
+// administers() (owner+admin). An admin administers but must NOT delegate
+// (no admin→owner self-elevation, no admin-touch of owner keys); member and
+// any unknown/zero value are fail-closed. The owner≠admin split is the entire
+// point of the predicate, so admin→false is the decisive cell.
+func TestDelegates(t *testing.T) {
+	cases := []struct {
+		role Role
+		want bool
+	}{
+		{RoleOwner, true},
+		{RoleAdmin, false}, // administers, but does NOT delegate
+		{RoleMember, false},
+		{Role(""), false}, // Go zero value — fail-closed
+		{Role("tenant-admin"), false},
+		{Role("root"), false},
+	}
+	for _, c := range cases {
+		if got := c.role.delegates(); got != c.want {
+			t.Errorf("Role(%q).delegates() = %v, want %v", c.role, got, c.want)
+		}
+		// Sanity: delegates ⊆ administers (every delegator also administers).
+		if c.role.delegates() && !c.role.administers() {
+			t.Errorf("Role(%q) delegates but does not administer — lattice violated", c.role)
+		}
+	}
+}
+
+// TestValidRole pins ValidRole to the 059 CHECK domain ('owner'|'admin'|
+// 'member'). It is the Go-side 400 gate before the 23514 backstop, so it must
+// accept exactly the three canonical values and reject everything else —
+// including the empty string, case variants, and a stale 2-tier "tenant-admin"
+// sketch — fail-closed.
+func TestValidRole(t *testing.T) {
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"owner", true},
+		{"admin", true},
+		{"member", true},
+		{"", false},
+		{"Owner", false}, // case-sensitive (CHECK is lowercase)
+		{"OWNER", false},
+		{"tenant-admin", false}, // stale 2-tier sketch
+		{"root", false},
+		{"server-admin", false}, // server tier is is_admin, not a tenant_role
+		{" owner", false},       // no trimming — exact match
+	}
+	for _, c := range cases {
+		if got := ValidRole(c.s); got != c.want {
+			t.Errorf("ValidRole(%q) = %v, want %v", c.s, got, c.want)
+		}
+	}
+	// Cross-check: ValidRole must accept exactly the constants the domain pins.
+	for _, r := range []Role{RoleOwner, RoleAdmin, RoleMember} {
+		if !ValidRole(string(r)) {
+			t.Errorf("ValidRole(%q) = false, want true (059 CHECK domain constant)", r)
+		}
+	}
+}
