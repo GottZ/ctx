@@ -11,23 +11,94 @@ import type { Page, Route } from '@playwright/test'
 
 export type Role = 'server-admin' | 'tenant-admin' | 'member'
 
+/** Which tenant identity a session runs as (cross-tenant / isolation proofs). */
+export type TenantKey = 'A' | 'B'
+
+interface TenantDef {
+  id: string
+  slug: string
+  name: string
+  home: string
+  read: string[]
+}
+
+// read_scopes are built PER TENANT and are NOT shared — R-LEAK5 (store/api_keys.go
+// :73-74): a foreign tenant without explicit allowed_scopes inherits an EMPTY set,
+// never the default tenant's 'shared'. Baking a bare 'shared' into tenant B would
+// fixture-encode exactly the cross-tenant read S1 declares structurally impossible.
+const TENANTS: Record<TenantKey, TenantDef> = {
+  // A = default-tenant existing form: grandfathered FLAT scopes ('home','shared',
+  // unprefixed). All 34 existing specs depend on this shape (whoamiFor's default).
+  A: { id: '550e8400-e29b-41d4-a716-446655440aaa', slug: 'acme', name: 'Acme Corp', home: 'home', read: ['home', 'shared'] },
+  // B = clean self-service tenant: ONLY its own auto-prefixed home scope, NO bare
+  // 'shared'. Cross-tenant is grant-only (deliberately none here) → positive
+  // isolation: a tenant-B session must never render 'shared'/'acme:*' scopes (E5).
+  B: { id: '550e8400-e29b-41d4-a716-446655440bbb', slug: 'globex', name: 'Globex Inc', home: 'globex:home', read: ['globex:home'] },
+}
+
 const KEY = 'smoke-key'
 
-/** WhoamiResponse (types.ts:6) shaped per tier — capabilitiesFor reads admin+role. */
-export function whoamiFor(role: Role): Record<string, unknown> {
+/**
+ * WhoamiResponse (types.ts:6) shaped per tier — capabilitiesFor reads admin+role.
+ * The optional `tenant` selects the identity (default 'A'); omitting it preserves
+ * the exact pre-existing default-tenant shape so the 34 legacy specs do not break.
+ */
+export function whoamiFor(role: Role, tenant: TenantKey = 'A'): Record<string, unknown> {
+  const t = TENANTS[tenant]
   const base = {
     success: true,
     label: 'smoke-key',
-    home_scope: 'home',
-    read_scopes: ['home', 'shared'],
+    home_scope: t.home,
+    read_scopes: t.read, // per tenant, NOT shared
     api_key_id: '0190000000007000800000000000ke7',
-    tenant_id: '550e8400-e29b-41d4-a716-446655440aaa',
-    tenant_slug: 'acme',
-    tenant_display_name: 'Acme Corp',
+    tenant_id: t.id,
+    tenant_slug: t.slug,
+    tenant_display_name: t.name,
   }
   if (role === 'server-admin') return { ...base, admin: true, role: 'owner' }
   if (role === 'tenant-admin') return { ...base, admin: false, role: 'owner' }
   return { ...base, admin: false, role: 'member' }
+}
+
+/** A faulted manage action — injects a negative envelope BEFORE the happy default. */
+export interface Fault {
+  /** the manage action that should fault */
+  action: string
+  /** HTTP status: 200 (no-oracle, api-key family) | 400 | 403 | 409 | 429 | 500 */
+  status: number
+  /** body.error; falls back to DEFAULT_ERROR[status] */
+  error?: string
+  /** succeed for the first N calls of this action, then fault (default 0 = always) */
+  afterCalls?: number
+}
+
+// Default error bodies mirror the real handler strings (the frozen contract drift
+// anchor) so a Fault without an explicit `error` still matches what the live
+// backend would write; per-probe specs override `error` where the assertion pins it.
+const DEFAULT_ERROR: Record<number, string> = {
+  200: 'key not found', // api-key family no-oracle (context_manage.go:1438 / :1671)
+  400: 'invalid request', // input validation (charset / prefix injection)
+  403: 'admin key required', // tier gate (context_manage.go:325/351)
+  409: 'cannot remove the last active owner of the tenant', // last-owner guard
+  429: 'tenant scope quota exceeded', // max_scopes/max_keys — FE-render only (RF-1)
+  500: 'internal error',
+}
+
+/** Tenant context threaded into manageFixture so auto-prefix + scope-list are deterministic. */
+interface FixtureCtx {
+  id: string
+  slug: string
+  name: string
+  home: string
+  read: string[]
+  /** explicit scope-list/scope-overview override (fresh tenant = []); undefined = default. */
+  scopes?: Record<string, unknown>[]
+}
+
+/** The tenant's OWN scopes as ScopeOverview rows (counts 0, like handleScopeList). */
+function tenantScopeRows(ctx: FixtureCtx): Record<string, unknown>[] {
+  if (ctx.scopes) return ctx.scopes
+  return ctx.read.map((s) => ({ scope: s, block_count: 0, key_count: 0, tenant_id: ctx.id }))
 }
 
 /** StatusResponse (types.ts:233) — admin-only; SSE falls back to this GET poll. */
@@ -161,7 +232,12 @@ function apiKeysFixture(): Record<string, unknown>[] {
 }
 
 /** POST /api/manage dispatch — action-keyed, mirrors the handler envelopes. */
-function manageFixture(action: string | undefined, _role: Role): Record<string, unknown> {
+function manageFixture(
+  action: string | undefined,
+  _role: Role,
+  ctx: FixtureCtx,
+  data: Record<string, unknown> | undefined,
+): Record<string, unknown> {
   switch (action) {
     case 'list-categories':
       return { success: true, categories: [
@@ -222,11 +298,72 @@ function manageFixture(action: string | undefined, _role: Role): Record<string, 
     case 'tenant-quota-set':
       return { success: true, quota: { scope: 'home', enabled: true, daily_cost_usd: 9, monthly_cost_usd: 100, daily_calls: 1000, on_exceed: 'external_off' } }
     case 'scope-overview':
-      return { success: true, scopes: [
+      // server-admin global landscape (unscoped). An explicit opts.scopes override
+      // (fresh tenant = []) wins; otherwise the existing 3-row default — keeping the
+      // 34 legacy specs (A0-FE scope-map) unchanged.
+      return { success: true, scopes: ctx.scopes ?? [
         { scope: 'home', block_count: 128, key_count: 3, tenant_id: '550e8400-e29b-41d4-a716-446655440aaa' },
         { scope: 'shared', block_count: 42, key_count: 8, tenant_id: '550e8400-e29b-41d4-a716-446655440aaa' },
         { scope: 'legacy', block_count: 7, key_count: 1, tenant_id: null },
       ] }
+    // --- Self-service frozen contract (design 06 §1/§2.5, re-verified against the
+    // real handlers tenant_manage.go + context_manage.go — the committed shapes). ---
+    case 'scope-create': {
+      // ScopeCreateResult (types.ts:675): SLIM { success, scope, tenant_id } — `scope`
+      // is the FULL server-built '<slug>:<name>'. The prefix uses the TARGET tenant's
+      // slug (ctx.slug), never a hardcoded 'acme' nor the naive concat of any data.name.
+      const name = (data?.name as string) ?? 'research'
+      return { success: true, scope: `${ctx.slug}:${name}`, tenant_id: ctx.id }
+    }
+    case 'scope-list':
+      // ScopeOverviewListResponse, tenant-scoped (handleScopeList): server-side
+      // filtered onto ar.TenantID, counts 0 by design. Re-list source after scope-create.
+      return { success: true, scopes: tenantScopeRows(ctx) }
+    case 'api-key-update':
+      // ApiKeyUpdateResult (types.ts:652): { success, key: ApiKeyView } — the re-read
+      // row carrying the new tenant_role/active (handleApiKeyUpdate 200 path).
+      return { success: true, key: {
+        id: (data?.id as string) ?? '0190000000007000800000000000ke8',
+        label: 'ci-runner',
+        home_scope: ctx.home,
+        allowed_scopes: [ctx.home],
+        active: (data?.active as boolean | undefined) ?? true,
+        last_used_at: '2026-06-29T11:00:00Z',
+        created_at: '2026-06-10T08:00:00Z',
+        tenant_role: (data?.tenant_role as string | undefined) ?? 'member',
+      } }
+    case 'tenant-create': {
+      // TenantCreateResult (types.ts:692): FLAT compound { success, tenant, scope,
+      // owner_key_id, owner_key } — the handler ALWAYS mints the owner key (K10), so
+      // owner_key is unconditionally present (matches the required-field frozen type).
+      // scope = '<slug>:main'; owner_key is the reveal-once plaintext, never persisted.
+      const slug = (data?.slug as string) ?? 'globex'
+      const displayName = (data?.display_name as string) ?? 'Globex Inc'
+      return {
+        success: true,
+        tenant: { id: '550e8400-e29b-41d4-a716-446655440ccc', slug, display_name: displayName, status: 'active', created_at: '2026-06-30T12:00:00Z', updated_at: '2026-06-30T12:00:00Z', max_scopes: 25, max_keys: 50 },
+        scope: `${slug}:main`,
+        owner_key_id: '0190000000007000800000000000ow1',
+        owner_key: 'ctx_sk_TESTOWNER_reveal_once_do_not_persist',
+      }
+    }
+    case 'tenant-usage-get':
+      // TenantUsageResponse (types.ts:723): { success, usage } — structural usage +
+      // limits, pinned to ctx.id (handleTenantUsageGet pins non-server-admin → ar.TenantID).
+      return { success: true, usage: {
+        tenant_id: ctx.id,
+        max_scopes: 25,
+        max_keys: 50,
+        scope_count: tenantScopeRows(ctx).length,
+        key_count: 2,
+      } }
+    case 'tenant-limit-set': {
+      // TenantResponse (types.ts) — { success, tenant } echoing the stored row with
+      // the patched caps (handleTenantLimitSet re-reads). null = unlimited per dimension.
+      const ms = data && 'max_scopes' in data ? (data.max_scopes as number | null) : 25
+      const mk = data && 'max_keys' in data ? (data.max_keys as number | null) : 50
+      return { success: true, tenant: { id: ctx.id, slug: ctx.slug, display_name: ctx.name, status: 'active', created_at: '2026-05-01T08:00:00Z', updated_at: '2026-06-30T12:00:00Z', max_scopes: ms, max_keys: mk } }
+    }
     case 'backend-list':
       return { success: true, backends: [] }
     // A7 corpus maintenance — start kicks off (running), status reports it
@@ -240,7 +377,11 @@ function manageFixture(action: string | undefined, _role: Role): Record<string, 
     case 'blocks-classify-status':
       return { success: true, scope: 'home', by_source: { default: 8 }, run: classifyRun(false) }
     default:
-      return { success: true }
+      // HARD default (design 06 §2.3). Was {success:true} — it absorbed EVERY
+      // un-mocked action silently, the single highest false-positive risk (Inventur
+      // 06 §1). success:false makes apiFetch throw an ApiError (api.ts:103, even in a
+      // 2xx), so a forgotten new action fails LOUDLY instead of passing green.
+      return { __unmocked: true, success: false, error: `unmocked manage action: ${action}` }
   }
 }
 
@@ -271,7 +412,17 @@ function emptyOverviewFixture(): Record<string, unknown> {
  */
 export async function seedSession(
   page: Page,
-  opts: { role: Role; theme: 'light' | 'dark'; empty?: boolean },
+  opts: {
+    role: Role
+    theme: 'light' | 'dark'
+    empty?: boolean
+    /** identity tenant (default 'A' = legacy default-tenant shape). */
+    tenant?: TenantKey
+    /** negative-probe injection — faults a specific manage action (§2.2). */
+    faults?: Fault[]
+    /** scope-list / scope-overview override (fresh tenant = []). */
+    scopes?: Record<string, unknown>[]
+  },
 ): Promise<void> {
   await page.addInitScript(
     ({ key, theme }) => {
@@ -285,6 +436,13 @@ export async function seedSession(
     { key: KEY, theme: opts.theme },
   )
 
+  const tkey: TenantKey = opts.tenant ?? 'A'
+  const t = TENANTS[tkey]
+  const ctx: FixtureCtx = { id: t.id, slug: t.slug, name: t.name, home: t.home, read: t.read, scopes: opts.scopes }
+  // Per-session, per-action call counter — drives Fault.afterCalls (quota-exhaustion
+  // sequences: e.g. first scope-create ok, second → 429).
+  const callIndex: Record<string, number> = {}
+
   await page.route('**/health', (route: Route) =>
     route.fulfill({ json: { status: 'ok', services: { db: 'ok', embed: 'ok' } } }),
   )
@@ -297,7 +455,7 @@ export async function seedSession(
     // SSE telemetry stream → abort so StatusPage uses the GET /api/status poll.
     if (path === '/api/events') return route.abort()
 
-    if (path === '/api/whoami') return route.fulfill({ json: whoamiFor(opts.role) })
+    if (path === '/api/whoami') return route.fulfill({ json: whoamiFor(opts.role, tkey) })
     if (path === '/api/status') return route.fulfill({ json: statusFixture() })
     if (path === '/api/llmlog') return route.fulfill({ json: { success: true, entries: [] } })
     if (path === '/api/settings' && method === 'GET') return route.fulfill({ json: { success: true, settings: settingsFixture() } })
@@ -308,12 +466,30 @@ export async function seedSession(
     if (path === '/api/search') return route.fulfill({ json: opts.empty ? emptySearchFixture() : searchFixture() })
     if (path === '/api/manage' && method === 'POST') {
       let action: string | undefined
+      let data: Record<string, unknown> | undefined
       try {
-        action = (req.postDataJSON() as { action?: string } | null)?.action
+        const body = req.postDataJSON() as { action?: string; data?: Record<string, unknown> } | null
+        action = body?.action
+        data = body?.data
       } catch {
         action = undefined
       }
-      return route.fulfill({ json: manageFixture(action, opts.role) })
+      // Fault seam (§2.2) — ACTION-BRANCHED: only the targeted action faults; every
+      // other action falls through to the happy manageFixture layer, so a blindly
+      // fulfilled 4xx can never corrupt a subsequent unrelated manage call. afterCalls
+      // lets the first N calls succeed before faulting (sequence/quota probes).
+      const fault = (opts.faults ?? []).find((f) => f.action === action)
+      if (fault && action) {
+        const n = callIndex[action] ?? 0
+        callIndex[action] = n + 1
+        if (n >= (fault.afterCalls ?? 0)) {
+          return route.fulfill({
+            status: fault.status,
+            json: { success: false, error: fault.error ?? DEFAULT_ERROR[fault.status] ?? 'error' },
+          })
+        }
+      }
+      return route.fulfill({ json: manageFixture(action, opts.role, ctx, data) })
     }
 
     // Unmapped (write paths not hit on initial load): benign success envelope.
