@@ -122,7 +122,7 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchBackendAction(w, r, authResult, req)
 	case "tenant-quota-get", "tenant-quota-set":
 		h.dispatchQuotaAction(w, r, authResult, req)
-	case "api-key-create", "api-key-list", "api-key-delete":
+	case "api-key-create", "api-key-list", "api-key-delete", "api-key-update":
 		h.dispatchAPIKeyAction(w, r, req)
 	case "tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
 		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete",
@@ -182,6 +182,8 @@ func (h *ManageHandler) dispatchAPIKeyAction(w http.ResponseWriter, r *http.Requ
 		h.handleApiKeyList(w, r, req)
 	case "api-key-delete":
 		h.handleApiKeyDelete(w, r, req)
+	case "api-key-update":
+		h.handleApiKeyUpdate(w, r, req)
 	}
 }
 
@@ -252,6 +254,14 @@ func actionTier(req manageRequest) adminTier {
 	switch req.Action {
 	// Per-tenant tier: tenant-isolated handlers (T22/T23/T24 — L1/L2/L3 closed).
 	case "api-key-create", "api-key-list", "api-key-delete",
+		// api-key-update (BE6-6, design/04 §D-C): tenant-isolated like the sibling
+		// key actions — store.UpdateApiKey constrains on tenant_id and the
+		// per-resource owner-delegation gate (R-DELEGATE/R-OWNERKEY) lives in the
+		// handler + store, so the A8 isolation precondition holds. tierTenantAdmin
+		// (NOT server-admin, the K10 trap): an OWNER delegates roles; a non-owner
+		// tenant-admin is blocked IN the handler (AM4), not at the tier — admitting
+		// it here is exactly D3 self-service.
+		"api-key-update",
 		// backend-create/update/delete/list: tenant-isolated by T37 (04-W5) —
 		// create forces scope=ar.HomeScope (server-admin may choose), update/
 		// delete gate on scope=ANY in the store layer (foreign/_global ⇒ 404),
@@ -1567,4 +1577,155 @@ func (h *ManageHandler) handleApiKeyDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": data.ID})
+}
+
+// apiKeyUpdateRequest is the JSON shape under req.Data for api-key-update
+// (design/04 §D-C). ONLY tenant_role + active are mutable — label / home_scope /
+// allowed_scopes are DELIBERATELY excluded (an allowed_scopes change would need
+// the T22 analog against the target tenant, and a home_scope change moves the
+// key's tenant membership; both out of scope, design/04 §D-C). TenantRole is a
+// plain string ("" = leave unchanged); Active is a *bool so an absent field
+// ("leave unchanged") is distinct from an explicit false (the present-flag).
+type apiKeyUpdateRequest struct {
+	ID         string `json:"id"`
+	TenantRole string `json:"tenant_role,omitempty"`
+	Active     *bool  `json:"active,omitempty"`
+}
+
+// handleApiKeyUpdate mutates the tenant_role and/or active flag of one api key
+// (BE6-6, design/04 §D-C). The escalation guards (AM4) live in
+// apiKeyUpdateAuthorize; the owner-protection (R-OWNERKEY, AM6(b)) and last-owner
+// (AM6(a)) guards live transactionally in store.UpdateApiKey. A non-server-admin
+// reaches only keys in its own tenant; a foreign / absent / malformed id resolves
+// to changed=false → 200 {success:false,"key not found"} — no existence oracle
+// (L2, identical to api-key-delete). On success the patched row is re-read and
+// returned as {success:true, key} (frozen FE contract ApiKeyUpdateResult).
+func (h *ManageHandler) handleApiKeyUpdate(w http.ResponseWriter, r *http.Request, req manageRequest) {
+	var data apiKeyUpdateRequest
+	if len(req.Data) > 0 {
+		if err := json.Unmarshal(req.Data, &data); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false, "error": "Invalid data: expected {id, tenant_role?, active?}",
+			})
+			return
+		}
+	}
+	if data.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id is required"})
+		return
+	}
+	if data.TenantRole == "" && data.Active == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": "nothing to update (provide tenant_role and/or active)",
+		})
+		return
+	}
+
+	ar := AuthResultFromContext(r.Context())
+	if ar == nil {
+		// Defense in depth — the admin gate already rejected anon callers.
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		return
+	}
+
+	// AM4 escalation guard (design/04 §D-C): a tenant_role change is OWNER-only.
+	// callerMayManageOwner (server-admin OR owner) is also the authority the store
+	// requires to touch an OWNER key (R-OWNERKEY); a true `handled` means it has
+	// already written the 400/403. Extracted to keep this handler under the cyclop
+	// ceiling (mirrors resolveKeyMintTenant).
+	callerMayManageOwner, handled := apiKeyUpdateAuthorize(w, ar, data.TenantRole)
+	if handled {
+		return
+	}
+
+	// "" tenant_role → nil pointer (leave the role unchanged); the present-flag
+	// Active is passed through untouched (nil = unchanged, COALESCE in the store).
+	var rolePtr *string
+	if data.TenantRole != "" {
+		rolePtr = &data.TenantRole
+	}
+
+	changed, err := store.UpdateApiKey(r.Context(), h.pool, data.ID, ar.TenantID,
+		ar.IsServerAdmin(), callerMayManageOwner, rolePtr, data.Active)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrOwnerProtected):
+			writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "owner key may only be managed by an owner or server-admin"})
+		case errors.Is(err, store.ErrLastOwner):
+			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot remove the last active owner of the tenant"})
+		default:
+			slog.Error("manage: update api key failed", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		}
+		return
+	}
+	if !changed {
+		// 404-equivalent, uniform for absent / foreign-tenant / malformed — never an
+		// existence oracle for another tenant's key (L2, mirrors api-key-delete).
+		writeJSON(w, http.StatusOK, map[string]any{"success": false, "error": "key not found"})
+		return
+	}
+
+	// Re-read the patched row for the response (frozen FE contract
+	// ApiKeyUpdateResult.key, design/03 §5): store.UpdateApiKey returns only a
+	// changed-bool, so the row is re-fetched here. A vanished row (impossible
+	// post-commit) degrades to a success without the body.
+	key, rerr := h.reReadApiKey(r, ar, data.ID)
+	if rerr != nil {
+		slog.Error("manage: re-read api key after update failed", "error", rerr)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+	if key == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": data.ID})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "key": key})
+}
+
+// apiKeyUpdateAuthorize applies the AM4 escalation guard for an api-key-update
+// (design/04 §D-C). When a tenant_role change is requested it must name a valid
+// role (else 400) AND the caller must be permitted to delegate roles — a
+// server-admin or an OWNER of its tenant. A non-owner tenant-admin (it cleared the
+// tierTenantAdmin gate) is rejected 403, so admin→owner self-elevation is
+// structurally impossible. The returned callerMayManageOwner (server-admin OR
+// owner — the exported equivalent of Role.delegates(), identical to
+// handleApiKeyDelete) is the SAME authority store.UpdateApiKey needs to mutate an
+// OWNER key (R-OWNERKEY). handled=true means a 4xx was already written.
+func apiKeyUpdateAuthorize(w http.ResponseWriter, ar *auth.AuthResult, tenantRole string) (callerMayManageOwner, handled bool) {
+	callerMayManageOwner = ar.IsServerAdmin() || ar.TenantRole == auth.RoleOwner
+	if tenantRole == "" {
+		return callerMayManageOwner, false
+	}
+	if !auth.ValidRole(tenantRole) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "tenant_role must be owner, admin, or member"})
+		return callerMayManageOwner, true
+	}
+	// AM4: role delegation is an OWNER power — a non-owner tenant-admin must NOT set
+	// tenant_role (else admin→owner self-elevation). !callerMayManageOwner is exactly
+	// "neither server-admin nor owner".
+	if !callerMayManageOwner {
+		writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "role change requires owner"})
+		return callerMayManageOwner, true
+	}
+	return callerMayManageOwner, false
+}
+
+// reReadApiKey fetches the just-patched key row for the api-key-update response.
+// store.UpdateApiKey returns only a changed-bool, so the row is re-read via the
+// SAME tenant rule as api-key-list (server-admin → all tenants, else ar.TenantID
+// — never a foreign key) with activeOnly=false so a just-deactivated key is still
+// returned. nil = the row is gone (not found in the scoped list).
+func (h *ManageHandler) reReadApiKey(r *http.Request, ar *auth.AuthResult, id string) (*store.ApiKey, error) {
+	tenantFilter, _ := resolveApiKeyListParams(nil, ar)
+	keys, err := store.ListApiKeys(r.Context(), h.pool, tenantFilter, false)
+	if err != nil {
+		return nil, err
+	}
+	for i := range keys {
+		if keys[i].ID == id {
+			return &keys[i], nil
+		}
+	}
+	return nil, nil
 }
