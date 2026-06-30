@@ -93,6 +93,72 @@ func TestTenantCreateReservedSlug(t *testing.T) {
 	}
 }
 
+// TestSlugPatternCharset is the pure-regex proof of the BE5-1 charset gate
+// (Masterplan K5: 1..24 chars, ASCII-lowercase alnum + internal hyphen, no edge
+// hyphen). The positive cases cannot be probed end-to-end through the handler
+// here: a CONFORMING slug passes every gate and reaches store.CreateTenant, which
+// panics on the DB-less nil pool (the manageReqWithPool doctrine). So the
+// "default ok / acme ok" leg is proven against slugPattern directly, and the
+// reject leg is proven both here and through the handler (TestTenantCreateSlugCharset).
+func TestSlugPatternCharset(t *testing.T) {
+	for _, ok := range []string{
+		"default", // the grandfathered single-tenant slug — must NOT be rejected
+		"acme", "a", "ab", "a-b", "a1", "1a", "acme-corp", "globex",
+		strings.Repeat("a", 24), // upper length boundary (24)
+	} {
+		if !slugPattern.MatchString(ok) {
+			t.Errorf("slugPattern rejected conforming slug %q (want match)", ok)
+		}
+	}
+	for _, bad := range []string{
+		"",                      // empty
+		"_global",               // reserved namespace / leading underscore
+		"Acme",                  // uppercase
+		"a:b",                   // ':' — the prefix separator, must be excluded
+		"a b",                   // internal whitespace
+		" ab",                   // edge whitespace (TrimSpace handles this upstream, regex still rejects)
+		"a_b",                   // underscore inside
+		"-ab",                   // leading hyphen
+		"ab-",                   // trailing hyphen
+		"acmé",                  // non-ASCII / Unicode homograph
+		"a/b",                   // slash
+		strings.Repeat("a", 25), // over the 24-char ceiling
+	} {
+		if slugPattern.MatchString(bad) {
+			t.Errorf("slugPattern matched non-conforming slug %q (want reject)", bad)
+		}
+	}
+}
+
+// TestTenantCreateSlugCharset wires the charset gate through handleTenantCreate:
+// each off-charset slug below is NEITHER '_'-prefixed NOR empty, so it clears the
+// reserved + required gates and must be rejected by the new slugPattern gate with
+// a 400 that names the charset rule — before ever reaching the (nil) store. The
+// distinct "1-24 chars" body keeps it honest vs. the reserved/required 400s.
+func TestTenantCreateSlugCharset(t *testing.T) {
+	for _, slug := range []string{
+		"Acme",                  // uppercase
+		"a:b",                   // ':' (prefix-injection vector for the D2a auto-prefix)
+		"a b",                   // internal whitespace (survives TrimSpace)
+		"-acme",                 // leading hyphen
+		"acme-",                 // trailing hyphen
+		"acmé",                  // Unicode homograph
+		strings.Repeat("a", 25), // too long
+	} {
+		rec := manageReqWithPool(t, adminAR(), nil, map[string]any{
+			"action": "tenant-create",
+			"data":   map[string]any{"slug": slug, "display_name": "x"},
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("tenant-create slug=%q: status %d, want 400 (body %s)", slug, rec.Code, rec.Body.String())
+			continue
+		}
+		if !strings.Contains(rec.Body.String(), "1-24 chars") {
+			t.Errorf("tenant-create slug=%q: 400 body does not name the charset rule: %s", slug, rec.Body.String())
+		}
+	}
+}
+
 // TestTenantGrantActionsRequireAdmin (MT T17, 02-V4): the cross-tenant grant
 // actions answer 403 to a valid non-admin key — they share the tenant-* admin
 // gate (actionRequiresAdmin). Probed against a nil store pool: the gate fires

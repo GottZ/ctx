@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -28,6 +29,17 @@ import (
 func reservedSlug(slug string) bool {
 	return strings.HasPrefix(slug, "_")
 }
+
+// slugPattern is the tenant-slug charset gate (BE5-1, Masterplan K5; design/04
+// §D-A SEC-1). 1..24 chars of ASCII-lowercase alnum + internal hyphen, no
+// leading/trailing hyphen. This deliberately excludes ':', whitespace, '_',
+// uppercase and any non-ASCII/Unicode-homograph. It is Defense-in-Depth/hygiene,
+// NOT the S1 collision-bearer (that is the scope name-gate + UNIQUE(slug)) — but
+// it is load-bearing for clean prefix attribution: the D2a auto-prefix
+// '<slug>:<name>' parses the slug off the LAST ':'; a ':'-or-whitespace-carrying
+// slug would mis-attribute that prefix. The legacy 'default' slug satisfies it
+// (grandfathered, no data migration).
+var slugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$`)
 
 type tenantSpec struct {
 	Slug        string `json:"slug"`
@@ -57,6 +69,14 @@ func (h *ManageHandler) handleTenantCreate(w http.ResponseWriter, r *http.Reques
 	}
 	if reservedSlug(spec.Slug) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "slug names starting with '_' are reserved (system namespace)"})
+		return
+	}
+	// Charset gate (BE5-1): runs AFTER the reserved-namespace check so a '_'-slug
+	// keeps its specific "reserved" 400, while everything else off-charset
+	// (uppercase, ':', whitespace, '_'-internal, Unicode) is rejected here. Hard
+	// hygiene for the D2a '<slug>:<name>' auto-prefix attribution.
+	if !slugPattern.MatchString(spec.Slug) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "slug must be 1-24 chars of a-z, 0-9, '-' (no leading/trailing '-')"})
 		return
 	}
 	tn, err := store.CreateTenant(r.Context(), h.pool, spec.Slug, spec.DisplayName)
