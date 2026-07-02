@@ -73,18 +73,18 @@
     flex: 1;
     min-width: 0;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
 
   .error {
     margin: var(--space-2) 0 0;
     color: var(--danger);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .empty {
     margin: var(--space-2) 0 0;
     color: var(--text-faint);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
 
   .results {
@@ -115,7 +115,7 @@
     background: var(--surface-2);
   }
   .title {
-    font-size: 0.9rem;
+    font-size: var(--fs-md);
     color: var(--text);
   }
   .meta {
@@ -126,7 +126,7 @@
     color: var(--text-faint);
   }
   .preview {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;

@@ -106,7 +106,7 @@
     background: var(--surface-2);
     color: var(--text);
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
     text-overflow: ellipsis;
     white-space: nowrap;

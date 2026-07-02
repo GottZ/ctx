@@ -294,7 +294,7 @@
     border-radius: var(--radius);
     background: var(--danger-dim);
     padding: var(--space-2) var(--space-3);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error p {
     margin: 0;
@@ -302,7 +302,7 @@
   }
   .request-id {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim) !important;
   }
 
@@ -313,7 +313,7 @@
     min-height: 1.4rem;
   }
   .focus {
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
   }
   .back {
     border: 1px solid var(--border);
@@ -321,7 +321,7 @@
     background: var(--surface-2);
     color: var(--text);
     cursor: pointer;
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     padding: 0.15rem 0.55rem;
   }
   .back:hover {
@@ -330,13 +330,13 @@
   .loading {
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .stats {
     margin-left: auto;
     color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
 
   /* Dezenter Onboarding-Hint als Overlay unten-zentriert; click-through. */
@@ -353,7 +353,7 @@
     border-radius: var(--radius);
     background: var(--surface-1);
     color: var(--text-faint);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     text-align: center;
     pointer-events: none;
   }

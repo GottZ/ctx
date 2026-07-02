@@ -161,15 +161,15 @@
   }
   h2 {
     margin: 0;
-    font-size: 0.95rem;
-    font-weight: 600;
-    line-height: 1.35;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
+    line-height: var(--lh-heading);
     flex: 1;
   }
   .close {
     padding: 0 var(--space-2);
-    font-size: 1rem;
-    line-height: 1.4;
+    font-size: var(--fs-base);
+    line-height: var(--lh-heading);
   }
 
   .meta {
@@ -177,7 +177,7 @@
     grid-template-columns: auto 1fr;
     gap: 0.15rem var(--space-3);
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   dt {
     font-family: var(--font-mono);
@@ -193,7 +193,7 @@
     overflow-wrap: anywhere;
   }
   dd code {
-    font-size: 0.7rem;
+    font-size: var(--fs-2xs);
   }
 
   /* Sensitivity badge (W6) — tone is a token-driven CSS-class suffix
@@ -230,12 +230,12 @@
     gap: var(--space-2);
   }
   .actions a {
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--accent);
   }
   .actions .edit,
   .actions .del {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
   }
   .actions .del {
@@ -263,12 +263,12 @@
   .confirm-body h3 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .confirm-text {
     margin: 0;
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
   }
   .confirm-dialog .actions {
@@ -285,7 +285,7 @@
   }
   .problem.error {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
     border-radius: var(--radius);
     border: 1px solid var(--danger);
@@ -297,17 +297,17 @@
     margin: 0;
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .problem {
     margin: 0;
     color: var(--danger);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .request-id {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -321,8 +321,8 @@
     background: var(--surface-0);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    font-size: 0.78rem;
-    line-height: 1.5;
+    font-size: var(--fs-xs);
+    line-height: var(--lh-body);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     max-width: var(--measure-code);

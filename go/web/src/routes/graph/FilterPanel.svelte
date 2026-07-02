@@ -92,7 +92,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface-1);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
 
   fieldset {
@@ -129,13 +129,13 @@
   .conf {
     width: 5rem;
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
 
   input[type='date'] {
     font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
   }
   .sep {
@@ -143,7 +143,7 @@
   }
 
   .reset {
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
   }
 </style>

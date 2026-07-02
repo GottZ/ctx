@@ -29,18 +29,20 @@ const strictValueProps = [
 ]
 
 // Q5 ratchet extension (design 05-§7, Q5 row): the TYPO families go strict —
-// but ONLY on the migrated paths (Shell + Login + lib/ui + lib/components).
-// Q6/Q7 widen the flächen, Q8 arms them globally. font-family is deliberately
-// NOT armed here (design 05-§4.4 lists it for the Q8 global pass; the Q5 row
-// enumerates font-size/line-height/font-weight/letter-spacing only).
+// but ONLY on the migrated paths. Q6/Q7 WIDEN the flächen (paths are ADDED to
+// the list below, the ratchet only grows), Q8 arms them globally. font-family
+// is deliberately NOT armed here (design 05-§4.4 lists it for the Q8 global
+// pass; the wave rows enumerate font-size/line-height/font-weight/letter-spacing
+// only).
 const typoProps = ['font-size', 'font-weight', 'line-height', 'letter-spacing']
 
-// Files whose typo declarations are migrated onto the scale in Q5. The strict
-// gate is scoped to exactly this set: a font-size literal here is red, the same
-// literal in a not-yet-migrated file (e.g. src/routes/**) still passes — the
-// pausability invariant. Whole-dir globs for lib/ui + lib/components mirror the
-// Q5 brief ("lib/ui + lib/components"); the Shell/Login files are explicit.
-const q5MigratedPaths = [
+// Files whose typo declarations are migrated onto the scale. The strict gate is
+// scoped to exactly this set: a font-size literal here is red, the same literal
+// in a not-yet-migrated file (e.g. src/routes/admin|tenant/** — the Q7 fläche)
+// still passes — the pausability invariant. Whole-dir globs for lib/ui +
+// lib/components mirror the Q5 brief; the Shell/Login files are explicit.
+const migratedPaths = [
+  // Q5 — Kern-Fläche (Shell + Login + lib/ui + lib/components).
   'src/App.svelte',
   'src/AppShell.svelte',
   'src/NavRail.svelte',
@@ -49,6 +51,10 @@ const q5MigratedPaths = [
   'src/Login.svelte',
   'src/lib/ui/**/*.svelte',
   'src/lib/components/**/*.svelte',
+  // Q6 — Corpus-Flächen (design 05-§7 Q6 row: /blocks + /chat + /graph).
+  'src/routes/blocks/**/*.svelte',
+  'src/routes/chat/**/*.svelte',
+  'src/routes/graph/**/*.svelte',
 ]
 
 // Keywords legit as literals across strict props (shared by base + Q5 override).
@@ -93,7 +99,7 @@ export default {
   // retires this override (plus the app.css root-15px scoped ignoreValues).
   overrides: [
     {
-      files: q5MigratedPaths,
+      files: migratedPaths,
       rules: {
         'scale-unlimited/declaration-strict-value': [
           [...strictValueProps, ...typoProps],

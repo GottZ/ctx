@@ -106,10 +106,15 @@
     padding: var(--space-2);
     border-radius: var(--radius);
     overflow: auto;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .md :global(code) {
     font-family: var(--font-mono);
+    /* Parent-relative inline-code scale — the em cases (this + app.css:30
+       0.875em) are consolidated onto var(--fs-code-rel) in Q8 by design
+       (05-§7 Q8 row: "em-Konsolidierung"); folding it here would either steal
+       Q8's scope or shift the pixel (0.85em→0.875em) prematurely. */
+    /* stylelint-disable-next-line scale-unlimited/declaration-strict-value */
     font-size: 0.85em;
   }
   .md :global(a) {

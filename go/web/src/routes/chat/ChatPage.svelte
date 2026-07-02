@@ -103,7 +103,7 @@
   /* N8 onboarding CTA — corpus-entry link (mirrors MemberHome's .action). */
   .empty-cta {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--accent);
     text-decoration: none;
   }
@@ -117,7 +117,7 @@
     border: 1px solid var(--danger-dim);
     color: var(--danger);
     border-radius: var(--radius);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     display: flex;
     gap: var(--space-2);
     align-items: center;

@@ -123,9 +123,9 @@
   }
   h2 {
     margin: 0;
-    font-size: 0.95rem;
-    font-weight: 600;
-    line-height: 1.35;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
+    line-height: var(--lh-heading);
     flex: 1;
   }
 
@@ -134,7 +134,7 @@
     grid-template-columns: auto 1fr;
     gap: 0.15rem var(--space-3);
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   dt {
     font-family: var(--font-mono);
@@ -150,7 +150,7 @@
     overflow-wrap: anywhere;
   }
   dd code {
-    font-size: 0.7rem;
+    font-size: var(--fs-2xs);
   }
 
   .actions {
@@ -158,7 +158,7 @@
     gap: var(--space-2);
   }
   .actions button {
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
   .actions button.pinned {
@@ -170,12 +170,12 @@
     margin: 0;
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .problem {
     margin: 0;
     color: var(--danger);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
 
   .content {
@@ -184,8 +184,8 @@
     background: var(--surface-0);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    font-size: 0.78rem;
-    line-height: 1.5;
+    font-size: var(--fs-xs);
+    line-height: var(--lh-body);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     /* Keep the reading line length readable no matter how wide the host gets

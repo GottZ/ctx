@@ -188,7 +188,7 @@
     margin-left: auto;
     color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   /* N8 empty-state: the same centred-overlay framing as .msg, but the title +
      copy come from the shared EmptyState; this wrapper supplies only the
@@ -214,7 +214,7 @@
     max-width: min(34rem, calc(100% - 2 * var(--space-3)));
     text-align: center;
     color: var(--text-dim);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -233,7 +233,7 @@
     border-radius: var(--radius);
     background: var(--surface-1);
     color: var(--text-faint);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     text-align: center;
     pointer-events: none;
   }

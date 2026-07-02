@@ -105,7 +105,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface-1);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
 
   fieldset {
@@ -129,7 +129,7 @@
   select,
   .tags {
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
   .tags {
@@ -139,7 +139,7 @@
 
   .chip {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     text-transform: lowercase;
     padding: var(--space-1) var(--space-2);
     background: var(--surface-2);
@@ -153,7 +153,7 @@
   }
 
   .reset {
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
   }
 </style>

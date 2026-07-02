@@ -64,7 +64,7 @@
     border-radius: var(--radius);
     background: var(--surface-1);
     margin: var(--space-1) 0;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
   }
   .tool.err {
     border-color: var(--danger-dim);
@@ -125,7 +125,7 @@
     white-space: pre-wrap;
     word-break: break-word;
     font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-0);
     border-radius: var(--radius);

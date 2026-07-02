@@ -179,8 +179,8 @@
   }
   .grip {
     color: var(--text-faint);
-    font-size: 0.85rem;
-    line-height: 1;
+    font-size: var(--fs-sm);
+    line-height: var(--lh-solid);
   }
   .spacer {
     flex: 1;
@@ -191,8 +191,8 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 0.9rem;
-    line-height: 1;
+    font-size: var(--fs-md);
+    line-height: var(--lh-solid);
     padding: 0 var(--space-2);
   }
   .act:hover {

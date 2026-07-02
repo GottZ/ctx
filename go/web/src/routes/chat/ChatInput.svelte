@@ -53,7 +53,7 @@
     min-height: 2.5rem;
     max-height: 12rem;
     font-family: var(--font-ui);
-    font-size: 0.9rem;
+    font-size: var(--fs-md);
     padding: var(--space-2);
     background: var(--surface-0);
     color: var(--text);

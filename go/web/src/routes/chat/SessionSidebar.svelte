@@ -84,12 +84,12 @@
   .new {
     margin: var(--space-2);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .hint {
     padding: var(--space-3);
     color: var(--text-faint);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   ul {
     list-style: none;
@@ -118,7 +118,7 @@
   }
   .title {
     color: var(--text);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -134,7 +134,7 @@
     color: var(--text-faint);
     cursor: pointer;
     padding: 0 var(--space-2);
-    font-size: 1.1rem;
+    font-size: var(--fs-base);
   }
   .del:hover {
     color: var(--danger);
@@ -156,7 +156,7 @@
       z-index: calc(var(--z-drawer) + 2);
       padding: var(--space-1) var(--space-2);
       font-family: var(--font-mono);
-      line-height: 1;
+      line-height: var(--lh-solid);
     }
     .sidebar {
       position: absolute;

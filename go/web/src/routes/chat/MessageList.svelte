@@ -88,7 +88,7 @@
     max-width: 28rem;
     text-align: center;
     color: var(--text-faint);
-    font-size: 0.9rem;
+    font-size: var(--fs-md);
   }
   .live {
     display: flex;
@@ -107,14 +107,14 @@
     background: var(--surface-1);
     border-radius: var(--radius);
     padding: var(--space-2) var(--space-3);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .jump {
     position: sticky;
     bottom: var(--space-2);
     align-self: center;
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
   }
 </style>

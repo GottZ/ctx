@@ -300,18 +300,18 @@
   }
   h1 {
     margin: 0;
-    font-size: 1.35rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
+    font-size: var(--fs-xl);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--track-1);
   }
   .new {
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
   }
   .sub {
     margin: var(--space-1) 0 0;
     color: var(--text-dim);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
 
   .search {
@@ -322,19 +322,19 @@
     flex: 1;
     min-width: 0;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
 
   .state {
     margin: 0;
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   /* N8 empty-state CTA — "store your first block" on a fresh, writable corpus.
      Inherits the global button chrome (like .new), just sized for the panel. */
   .empty-cta {
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-2) var(--space-3);
   }
 
@@ -342,7 +342,7 @@
   .load-more {
     width: 100%;
     margin-top: var(--space-2);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-2) var(--space-3);
   }
   /* FTS "top matches" hint — no pagination on the ranked path. */
@@ -361,7 +361,7 @@
     border-radius: var(--radius);
     background: var(--danger-dim);
     padding: var(--space-2) var(--space-3);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error p {
     margin: 0;
@@ -369,7 +369,7 @@
   }
   .request-id {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim) !important;
   }
 
@@ -409,12 +409,12 @@
   }
   .title {
     flex: 1;
-    font-size: 0.95rem;
+    font-size: var(--fs-md);
     color: var(--text);
   }
   .updated {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-faint);
     white-space: nowrap;
   }
@@ -455,7 +455,7 @@
     color: var(--ok);
   }
   .preview {
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -464,7 +464,7 @@
   }
   .len {
     font-family: var(--font-mono);
-    font-size: 0.7rem;
+    font-size: var(--fs-2xs);
     color: var(--text-faint);
   }
 </style>
