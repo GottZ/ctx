@@ -63,22 +63,22 @@
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     text-transform: uppercase;
-    font-weight: 600;
+    font-weight: var(--fw-semibold);
     color: var(--text-dim);
   }
 
   .value {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 1rem;
+    font-size: var(--fs-base);
     color: var(--text);
     word-break: break-word;
   }
 
   .copy {
     margin: 0;
-    font-size: 0.85rem;
-    line-height: 1.5;
+    font-size: var(--fs-sm);
+    line-height: var(--lh-body);
     color: var(--text-dim);
   }
 

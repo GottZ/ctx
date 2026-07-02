@@ -221,7 +221,7 @@
     display: flex;
     align-items: center;
     text-decoration: none;
-    font-size: 1.05rem;
+    font-size: var(--fs-base);
     padding: 0 var(--space-2);
     overflow: hidden;
   }
@@ -269,7 +269,7 @@
     color: var(--text-dim);
     text-decoration: none;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     border: 1px solid transparent;
     border-radius: var(--radius);
     background: transparent;

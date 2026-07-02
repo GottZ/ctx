@@ -164,12 +164,12 @@
 
   header {
     margin-bottom: var(--space-2);
-    font-size: 1.5rem;
+    font-size: var(--fs-2xl);
   }
   .tagline {
     margin: var(--space-1) 0 0;
     color: var(--text-dim);
-    font-size: 0.9rem;
+    font-size: var(--fs-md);
   }
 
   .notice {
@@ -178,7 +178,7 @@
     border: 1px solid var(--warn);
     border-radius: var(--radius);
     color: var(--warn);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
 
   .field-label {
@@ -208,7 +208,7 @@
     border-radius: var(--radius);
     background: var(--danger-dim);
     padding: var(--space-2) var(--space-3);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error p {
     margin: 0;
@@ -217,14 +217,14 @@
   .request-id {
     margin-top: var(--space-1) !important;
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim) !important;
   }
 
   .hint {
     margin: var(--space-2) 0 0;
     color: var(--text-faint);
-    font-size: 0.78rem;
-    line-height: 1.45;
+    font-size: var(--fs-xs);
+    line-height: var(--lh-body);
   }
 </style>

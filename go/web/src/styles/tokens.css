@@ -53,6 +53,28 @@
   --label-size: 0.6875rem;
   --label-tracking: 0.1em;
 
+  /* ── Typo-Skala (Q5, design 05-§4.3, E7=a: 8 konsolidierende Stufen) ───
+     rem @15px-Root (app.css). Die Ist-Streuung (22 distinct rem-Werte)
+     faltet per Cluster in 8 Stufen; fs-lg (1.2) ist eine reservierte Stufe
+     ohne Ist-Konsument (E1/Q11..). fs-code-rel bleibt ELTERN-relativ (em) —
+     die em-Konsolidierung (code) zieht Q8. lh/fw/track sind color-scheme-
+     unabhängig → nur im Dark-:root, kein Light-Override. */
+  --fs-2xs: 0.72rem;
+  --fs-xs: 0.78rem;
+  --fs-sm: 0.85rem;
+  --fs-md: 0.95rem;
+  --fs-base: 1.05rem;
+  --fs-lg: 1.2rem; /* reservierte Stufe, kein Ist-Konsument in Q5 */
+  --fs-xl: 1.35rem;
+  --fs-2xl: 2rem;
+  --lh-solid: 1;
+  --lh-heading: 1.35;
+  --lh-body: 1.5;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --track-1: 0.01em;
+  --fs-code-rel: 0.875em; /* eltern-relativ (Inline-Code) — Konsum Q8 */
+
   /* ── Q3-Lücken-Tokens (design 05-§3.3) ─────────────────────────────────
      Backdrop: EIN Scrim-Wert für Dialoge/Drawer/Sidebar (Ist-Streuung
      0.45–0.55 war historisch, nicht intentional — konsolidiert auf 0.55).

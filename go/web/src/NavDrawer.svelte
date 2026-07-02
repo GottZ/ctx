@@ -131,7 +131,7 @@
     display: flex;
     align-items: center;
     text-decoration: none;
-    font-size: 1.05rem;
+    font-size: var(--fs-base);
   }
 
   .backdrop {

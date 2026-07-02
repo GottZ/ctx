@@ -28,27 +28,44 @@ const strictValueProps = [
   'animation-duration',
 ]
 
+// Q5 ratchet extension (design 05-§7, Q5 row): the TYPO families go strict —
+// but ONLY on the migrated paths (Shell + Login + lib/ui + lib/components).
+// Q6/Q7 widen the flächen, Q8 arms them globally. font-family is deliberately
+// NOT armed here (design 05-§4.4 lists it for the Q8 global pass; the Q5 row
+// enumerates font-size/line-height/font-weight/letter-spacing only).
+const typoProps = ['font-size', 'font-weight', 'line-height', 'letter-spacing']
+
+// Files whose typo declarations are migrated onto the scale in Q5. The strict
+// gate is scoped to exactly this set: a font-size literal here is red, the same
+// literal in a not-yet-migrated file (e.g. src/routes/**) still passes — the
+// pausability invariant. Whole-dir globs for lib/ui + lib/components mirror the
+// Q5 brief ("lib/ui + lib/components"); the Shell/Login files are explicit.
+const q5MigratedPaths = [
+  'src/App.svelte',
+  'src/AppShell.svelte',
+  'src/NavRail.svelte',
+  'src/NavDrawer.svelte',
+  'src/Wordmark.svelte',
+  'src/Login.svelte',
+  'src/lib/ui/**/*.svelte',
+  'src/lib/components/**/*.svelte',
+]
+
+// Keywords legit as literals across strict props (shared by base + Q5 override).
+// NB: '1' is intentionally DROPPED from the Q5 override so `line-height: 1`
+// must carry var(--lh-solid) (no strict non-typo prop in the migrated set uses
+// a literal 1); 'normal' is added for line-height/letter-spacing/font-weight.
+const baseIgnoreValues = ['currentColor', 'transparent', 'inherit', 'initial', 'unset', 'none', 'auto', '0', '1', '50%']
+const typoIgnoreValues = ['currentColor', 'transparent', 'inherit', 'initial', 'unset', 'none', 'auto', '0', '50%', 'normal']
+
 export default {
   extends: ['stylelint-config-html/svelte'],
   plugins: ['stylelint-declaration-strict-value'],
   rules: {
     'scale-unlimited/declaration-strict-value': [
       strictValueProps,
-      {
-        // Keywords that are legitimately literal (no token can carry them).
-        ignoreValues: [
-          'currentColor',
-          'transparent',
-          'inherit',
-          'initial',
-          'unset',
-          'none',
-          'auto',
-          '0',
-          '1',
-          '50%',
-        ],
-      },
+      // Keywords that are legitimately literal (no token can carry them).
+      { ignoreValues: baseIgnoreValues },
     ],
     // Spacing is deliberately NOT strict-value-linted (189 legitimate 0/auto
     // + hairlines would drown the signal — design 05-§4.4). Instead `gap`
@@ -68,8 +85,21 @@ export default {
       '^(surface|text|accent|ok|warn|danger|border|graph|dot|font|space|radius|label|rail|shell|measure|detail|session|z|backdrop|shadow|dur|ease|focus|fs|lh|fw|track|type|sync)-?',
     'custom-property-no-missing-var-function': true,
   },
-  // Ratchet slots: typo families are armed per migration wave (Q5–Q8) by
-  // extending strictValueProps above; per-path overrides go here if a wave
-  // needs a scoped ignoreValues (e.g. the app.css root 15px scale anchor).
-  overrides: [],
+  // Ratchet slots: typo families are armed per migration wave (Q5–Q8). Q5
+  // scopes them to the migrated paths via this override — stylelint replaces the
+  // rule wholesale for matched files, so the prop list carries BOTH the Q4
+  // non-typo families AND the Q5 typo families (dropping either would un-arm it
+  // on these files). Q8 folds typoProps into the global strictValueProps and
+  // retires this override (plus the app.css root-15px scoped ignoreValues).
+  overrides: [
+    {
+      files: q5MigratedPaths,
+      rules: {
+        'scale-unlimited/declaration-strict-value': [
+          [...strictValueProps, ...typoProps],
+          { ignoreValues: typoIgnoreValues },
+        ],
+      },
+    },
+  ],
 }

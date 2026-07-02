@@ -246,15 +246,15 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 1rem;
-    font-weight: 600;
+    font-size: var(--fs-base);
+    font-weight: var(--fw-semibold);
   }
   .x {
     background: transparent;
     border: none;
     color: var(--text-dim);
-    font-size: 1.3rem;
-    line-height: 1;
+    font-size: var(--fs-xl);
+    line-height: var(--lh-solid);
     cursor: pointer;
     padding: 0 var(--space-1);
     font-family: inherit;
@@ -277,8 +277,8 @@
   }
   .msg {
     margin: 0;
-    font-size: 0.85rem;
-    line-height: 1.45;
+    font-size: var(--fs-sm);
+    line-height: var(--lh-body);
     color: var(--text);
   }
   .msg.warn {
@@ -290,7 +290,7 @@
     background: var(--danger-dim);
     border-radius: var(--radius);
     padding: var(--space-1) var(--space-2);
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
   }
   .field {
     display: flex;
@@ -306,7 +306,7 @@
   }
   .field input {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
     background: var(--surface-0);
     border: 1px solid var(--border-strong);
@@ -323,7 +323,7 @@
   }
   .confirm-text {
     margin: 0;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     color: var(--warn);
   }
   footer {
@@ -337,7 +337,7 @@
   }
   button {
     font-family: var(--font-ui);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
     background: var(--surface-2);
     border: 1px solid var(--border-strong);

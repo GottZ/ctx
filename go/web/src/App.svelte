@@ -31,12 +31,12 @@
     place-content: center;
     justify-items: center;
     gap: var(--space-2);
-    font-size: 1.25rem;
+    font-size: var(--fs-xl);
   }
   .boot p {
     margin: 0;
     color: var(--text-faint);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     font-family: var(--font-mono);
   }
 </style>

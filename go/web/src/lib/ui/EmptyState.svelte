@@ -63,14 +63,14 @@
   }
   .title {
     margin: 0;
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
     color: var(--text);
   }
   .copy {
     margin: 0;
-    font-size: 0.85rem;
-    line-height: 1.5;
+    font-size: var(--fs-sm);
+    line-height: var(--lh-body);
     color: var(--text-dim);
   }
   .cta {

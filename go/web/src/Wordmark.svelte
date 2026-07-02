@@ -8,7 +8,8 @@
 <style>
   .wordmark {
     font-family: var(--font-mono);
-    font-weight: 600;
+    font-weight: var(--fw-semibold);
+    /* stylelint-disable-next-line scale-unlimited/declaration-strict-value -- Wordmark-Signatur-Tracking: die Typo-Skala definiert nur --track-1 (0.01em); die 0.04em-Weite ist das Signatur-Element (design 05-§4.9). Kein Snap in Q5 (pixel-neutral); eine eigene Tracking-Stufe entscheidet E1/Q11. */
     letter-spacing: 0.04em;
     color: var(--accent);
     user-select: none;
