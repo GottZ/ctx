@@ -379,7 +379,7 @@ Use --dry-run to preview what would be uploaded without sending anything.`,
 	cmd.Flags().IntVar(&workers, "workers", 1, "Parallel upload workers")
 	cmd.Flags().IntVar(&batch, "batch", 50, "Chunks per batch")
 	cmd.Flags().StringVar(&category, "category", "", "Override category (default: from folder path)")
-	cmd.Flags().StringVar(&scope, "scope", "private", "Scope for uploaded chunks")
+	cmd.Flags().StringVar(&scope, "scope", "private", "Scope for uploaded chunks (a scope belongs to one tenant)")
 	cmd.Flags().BoolVar(&extract, "extract", false, "Enable LLM extraction on server")
 
 	return cmd

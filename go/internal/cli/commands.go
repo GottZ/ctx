@@ -51,6 +51,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(quotaCmd(getClient))
 	root.AddCommand(blocksCmd(getClient))
 	root.AddCommand(blockGrantCmd(getClient))
+	root.AddCommand(tenantCmd(getClient))
 	root.AddCommand(initCmd())
 }
 
