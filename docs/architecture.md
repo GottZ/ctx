@@ -1,6 +1,6 @@
 # Architecture
 
-**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 74 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars (see [operations](operations.md)).
+**Stack:** Go 1.26 (matches `go.mod` and the `golang:1.26-alpine` build image), PostgreSQL 18 + pgvector 0.8.2, 74 SQL migrations (numbered 001–075; 066 is the deliberately deferred tenant-OAuth slot). Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars (see [operations](operations.md)).
 
 ## Pipelines at a glance
 
