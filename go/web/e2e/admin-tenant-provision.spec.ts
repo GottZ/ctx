@@ -6,7 +6,10 @@ import { seedSession, gotoArea, trackPageErrors } from './fixtures'
 // <slug>:name, rendered read-only — the client never builds the prefix, S1) and
 // a recovery key bound to this tenant_id (S2). The register slug is 'acme'
 // (TENANT A, id …aaa); scope-create echoes `${ctx.slug}:${name}` = 'acme:…'.
-const SHOTS = 'e2e/__shots__'
+// Eyeball dumps live under the gitignored e2e/.results/ tree since PV3 killed
+// e2e/__shots__ (committed __screenshots__ baselines replaced it); these
+// remaining manual dumps migrate to PageContracts in wave PV7.
+const SHOTS = 'e2e/.results/shots'
 const ACME_ID = '550e8400-e29b-41d4-a716-446655440aaa'
 
 test.describe('A3c: server-admin tenant provisioning (scope + recovery key)', () => {

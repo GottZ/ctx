@@ -112,7 +112,9 @@
   }
 </script>
 
-<div class="canvas" bind:this={container}></div>
+<!-- data-e2e-mask: sigma/ForceAtlas2 pixel output is not seed-stable — the
+     visual gate masks this region; semantics run via __ctxGraph (design 06 §4.3). -->
+<div class="canvas" data-e2e-mask bind:this={container}></div>
 
 <style>
   .canvas {

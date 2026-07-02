@@ -5,7 +5,10 @@ import { seedSession, gotoArea, trackPageErrors } from './fixtures'
 // reveal-once owner key). Driven against the FLAT tenant-create fixture
 // (manageFixture: { success, tenant, scope:'<slug>:main', owner_key_id, owner_key }).
 
-const SHOTS = 'e2e/__shots__'
+// Eyeball dumps live under the gitignored e2e/.results/ tree since PV3 killed
+// e2e/__shots__ (committed __screenshots__ baselines replaced it); these
+// remaining manual dumps migrate to PageContracts in wave PV7.
+const SHOTS = 'e2e/.results/shots'
 
 test.describe('A3a: tenant create + reveal-once owner key', () => {
   test('server-admin creates a tenant and the owner key is revealed exactly once', async ({ page }) => {

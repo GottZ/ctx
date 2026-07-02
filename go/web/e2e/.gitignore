@@ -1,2 +1,4 @@
-__shots__/
+# Reporter/test output (list/blob/json reporters + eyeball dumps).
 .results/
+# NOTE: e2e/__screenshots__/ is deliberately NOT ignored — visual baselines
+# are committed, container-generated references (design 06 §3.1, wave PV3).

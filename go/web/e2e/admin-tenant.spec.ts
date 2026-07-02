@@ -5,7 +5,10 @@ import { seedSession, gotoArea, trackPageErrors } from './fixtures'
 // (and thus beforeLoad) only mounts once App.svelte has finished session.restore,
 // so caps are resolved when the landing/guard run — no loading-race here.
 
-const SHOTS = 'e2e/__shots__'
+// Eyeball dumps live under the gitignored e2e/.results/ tree since PV3 killed
+// e2e/__shots__ (committed __screenshots__ baselines replaced it); these
+// remaining manual dumps migrate to PageContracts in wave PV7.
+const SHOTS = 'e2e/.results/shots'
 
 test.describe('role-gated areas + routing', () => {
   test('A2: server-admin sees the /admin tenant register', async ({ page }) => {

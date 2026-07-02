@@ -1,7 +1,10 @@
 import { test, expect } from '@playwright/test'
 import { seedSession, gotoArea, trackPageErrors } from './fixtures'
 
-const SHOTS = 'e2e/__shots__'
+// Eyeball dumps live under the gitignored e2e/.results/ tree since PV3 killed
+// e2e/__shots__ (committed __screenshots__ baselines replaced it); these
+// remaining manual dumps migrate to PageContracts in wave PV7.
+const SHOTS = 'e2e/.results/shots'
 
 // Empty-state surfaces (N8) — `empty: true` makes search + graph-overview return
 // nothing; chat sessions are always empty in the mocks.

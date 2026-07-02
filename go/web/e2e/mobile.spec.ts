@@ -14,13 +14,13 @@ test.describe('mobile drawer', () => {
     // Drawer mode: the slim mobile bar replaces the persistent rail.
     await expect(page.locator('.shell')).toBeVisible()
     await expect(page.locator('header.mobile-bar')).toBeVisible()
-    await page.screenshot({ path: 'e2e/__shots__/mobile-closed.png' })
+    await page.screenshot({ path: 'e2e/.results/shots/mobile-closed.png' })
 
     const hamburger = page.getByRole('button', { name: 'Open navigation menu' })
     await expect(hamburger).toBeVisible()
     await hamburger.click()
 
     await expect(page.locator('#nav-drawer')).toBeVisible()
-    await page.screenshot({ path: 'e2e/__shots__/mobile-drawer-open.png' })
+    await page.screenshot({ path: 'e2e/.results/shots/mobile-drawer-open.png' })
   })
 })

@@ -130,9 +130,13 @@
     </div>
   {/if}
 
-  <!-- Container stays mounted so onMount's bind:this is always live. -->
+  <!-- Container stays mounted so onMount's bind:this is always live.
+       data-e2e-mask: sigma/ForceAtlas2 pixel output is not seed-stable — the
+       visual gate masks this region; graph SEMANTICS are asserted via the
+       __ctxGraph test hook instead (design 06 §4.3). -->
   <div
     class="canvas"
+    data-e2e-mask
     bind:this={container}
     class:hidden={loading || error !== null || (stats !== null && stats.nodes === 0)}
   ></div>

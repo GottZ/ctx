@@ -1,12 +1,18 @@
 import { test, expect, type Page } from '@playwright/test'
+import { captureShot } from './contract/capture'
 import { seedSession, gotoArea, trackPageErrors, type Role } from './fixtures'
 
 // Visual + structural smoke that closes the HANDOVER §8 debt: the 23 shipped
 // shell/layout/theme/graph waves were code-green (vitest+svelte-check+build) but
-// the actual RENDERING was never seen in a browser. Each test asserts the shell
-// structure AND drops a screenshot under e2e/__shots__/ for eyeball review.
+// the actual RENDERING was never seen in a browser. Structural asserts run
+// everywhere; the visual baselines (@visual, wave PV3) replaced the former
+// e2e/__shots__ eyeball dumps with committed toHaveScreenshot references —
+// compared ONLY inside the digest-pinned toolchain container (e2e-visual.sh).
 
-const SHOTS = 'e2e/__shots__'
+// Fixture "now": e2e/fixtures.ts pins as_of/finished_at to 2026-06-29T12:00:00Z;
+// fixing the page clock 5 s after that keeps every relative-time render
+// ("5s ago" on /status) byte-stable across runs (design 06 §4.3, time rule).
+const FIXED_NOW = new Date('2026-06-29T12:00:05Z')
 
 /** Wait for the authenticated shell (App.svelte → AppShell, past restore). */
 async function waitForShell(page: Page): Promise<void> {
@@ -41,13 +47,64 @@ test.describe('shell + per-area layout modes', () => {
         // The content region carries the per-area layout mode (areaMode map).
         await expect(page.locator('main.content')).toHaveAttribute('data-mode', area.mode)
 
-        // Let the area settle (sigma canvas / lazy chunk) before the shot.
-        await page.waitForTimeout(600)
-        await page.screenshot({ path: `${SHOTS}/${area.name}-${theme}.png`, fullPage: false })
-
         expect(errors, `uncaught page errors on ${area.path}:\n${errors.join('\n')}`).toEqual([])
       })
     }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 1v. Visual baselines (@visual, wave PV3) — per-area toHaveScreenshot against
+//     the committed e2e/__screenshots__ references. Gated: these tests only
+//     run with CTX_E2E_CONTAINER=1 (playwright.config.ts grepInvert), i.e.
+//     inside the digest-pinned toolchain container via `bash e2e-visual.sh`.
+//     The graph canvas (sigma/ForceAtlas2, not seed-stable) carries
+//     data-e2e-mask and legitimately exceeds the 40 % mask budget → declared
+//     override (design 06 §4.3).
+// ---------------------------------------------------------------------------
+test.describe('visual baselines', () => {
+  for (const theme of THEMES) {
+    for (const area of AREAS) {
+      test(`${area.name} ${theme} visual baseline`, { tag: '@visual' }, async ({ page }) => {
+        await page.clock.setFixedTime(FIXED_NOW)
+        await seedSession(page, { role: 'server-admin', theme })
+        await gotoArea(page, area.path)
+        await waitForShell(page)
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+        await expect(page.locator('main.content')).toHaveAttribute('data-mode', area.mode)
+
+        // Let the area settle (sigma boot / lazy chunk) before capture;
+        // fonts are awaited inside captureShot (stabilize).
+        await page.waitForTimeout(600)
+        await captureShot(
+          page,
+          `${area.name}--default--${theme}--desktop.png`,
+          area.name === 'graph'
+            ? {
+                maskBudgetOverride: {
+                  reason:
+                    'full-bleed sigma canvas (ForceAtlas2 layout is not seed-stable); graph SEMANTICS stay asserted via the __ctxGraph hook below',
+                  issue: '.project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §4.3 (interim ref until Achse-02 issues exist)',
+                },
+              }
+            : {},
+        )
+      })
+    }
+  }
+
+  // Rail element baselines replace the former rail-<role>.png dumps.
+  const RAIL_ROLES: Role[] = ['member', 'tenant-admin', 'server-admin']
+  for (const role of RAIL_ROLES) {
+    test(`rail ${role} visual baseline`, { tag: '@visual' }, async ({ page }) => {
+      await page.clock.setFixedTime(FIXED_NOW)
+      await seedSession(page, { role, theme: 'dark' })
+      await gotoArea(page, '/blocks')
+      await waitForShell(page)
+      await captureShot(page, `rail-${role}--default--dark--desktop.png`, {
+        target: page.locator('nav.rail'),
+      })
+    })
   }
 })
 
@@ -85,7 +142,6 @@ test.describe('role-adaptive nav rail', () => {
         await expect(page.locator(`nav.rail [role="group"][aria-label="${label}"]`)).toHaveCount(0)
       }
 
-      await page.locator('nav.rail').screenshot({ path: `${SHOTS}/rail-${role}.png` })
       expect(errors, errors.join('\n')).toEqual([])
     })
   }

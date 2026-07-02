@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "e2e:visual": "bash e2e-visual.sh"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

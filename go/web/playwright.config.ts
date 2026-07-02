@@ -43,7 +43,19 @@ export default defineConfig({
     // Visual policy (design 06 §4.3): zero tolerance by default. Escalation
     // ladder on REAL need is (1) mask, (2) stylePath, (3) per-page
     // maxDiffPixels with comment + issue — NEVER a global ratio loosening.
-    toHaveScreenshot: { maxDiffPixels: 0, animations: 'disabled', caret: 'hide' },
+    //
+    // threshold is load-bearing and CALIBRATED (PV3 negative-gate findings):
+    // maxDiffPixels only counts pixels whose YIQ colour delta exceeds
+    // threshold²·35215 (pixelmatch). The Playwright default (0.2 → maxDelta
+    // 1409) silently swallowed a one-step token drift (#101014→#16161d,
+    // delta ≈ 21 — compared green). threshold 0 in turn flaked on Chromium
+    // compositing jitter: ±1-LSB antialiasing wobble at tile corners
+    // (measured: ~6 px/shot, delta ≤ ~1.5, non-deterministic across runs in
+    // the SAME pinned container). 0.01 → maxDelta 3.5 tolerates that jitter
+    // and still fails a one-step token drift with >5× margin. Honest
+    // boundary: a 1-LSB token change is indistinguishable from compositing
+    // jitter by construction — no pixel gate can separate them.
+    toHaveScreenshot: { maxDiffPixels: 0, threshold: 0.01, animations: 'disabled', caret: 'hide' },
   },
   // One canonical render environment (the digest-pinned toolchain container,
   // arrives in wave PV3) — deliberately NO {platform} token: a second

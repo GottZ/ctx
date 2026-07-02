@@ -5,7 +5,10 @@ import { seedSession, gotoArea, trackPageErrors } from './fixtures'
 // the stateful tenant-update / tenant-delete fixtures: a tenant-update records the
 // status so the following read paths reflect the suspend/activate toggle. The
 // register slug is 'acme' (TENANT A, id …aaa); the default tenant is delete-guarded.
-const SHOTS = 'e2e/__shots__'
+// Eyeball dumps live under the gitignored e2e/.results/ tree since PV3 killed
+// e2e/__shots__ (committed __screenshots__ baselines replaced it); these
+// remaining manual dumps migrate to PageContracts in wave PV7.
+const SHOTS = 'e2e/.results/shots'
 const ACME_ID = '550e8400-e29b-41d4-a716-446655440aaa'
 // Mirrors store.DefaultTenantID / DEFAULT_TENANT_ID (lib/api/tenants.ts) — hard-
 // coded here to keep the spec out of the src module graph (Node test runner).
