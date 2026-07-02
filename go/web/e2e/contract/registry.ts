@@ -17,17 +17,78 @@
 
 import { expect } from '@playwright/test'
 import type { PageContract } from './contract'
-import { SENTINEL } from '../fixtures'
+import { KEY, SENTINEL, sseRoute, type SseFrame } from '../fixtures'
 
 /**
- * Mobile opt-out for the PV4 Erstbelegung: mobile BASELINES do not exist yet —
- * the full baseline set is sequenced after the Achse-05 token stabilization
- * (design 06 §3.1/§9.3); the opt-out falls with the PV7/full-set wave.
+ * Mobile opt-out for the five PV4-Erstbelegung areas: their mobile BASELINES
+ * do not exist yet — the FULL baseline set (incl. re-freezing these five onto
+ * mobile + minimal roles) is sequenced after the Achse-05 token stabilization
+ * (design 06 §3.1/§9.3). PV7 deliberately does NOT lift this opt-out: lifting
+ * it would be a Voll-Refresh of the existing set, which §9.3 forbids before
+ * Achse-05 settles. The seven NEW PV7 contracts carry the full mobile
+ * dimension from day one (only NEW pages freeze new baselines).
  */
 const MOBILE_PV4_EXEMPT = {
   exempt:
-    'Mobile-Baselines existieren noch nicht — Voll-Satz ist auf nach der Achse-05-Token-Stabilisierung sequenziert (design 06 §3.1/§9.3); Opt-out fällt mit dem PV7-Voll-Satz.',
+    'Mobile-Baselines der PV4-Erstbelegung existieren noch nicht — Voll-Satz (Re-Freeze der Bestands-Areas) ist auf nach der Achse-05-Token-Stabilisierung sequenziert (design 06 §3.1/§9.3); PV7 friert nur die NEUEN Seiten ein.',
 } as const
+
+/** Fixture tenant A id (fixtures.ts TENANTS.A) — the /admin/tenants/:id template param. */
+const TENANT_A_ID = '550e8400-e29b-41d4-a716-446655440aaa'
+
+// ---------------------------------------------------------------------------
+// /chat primaryFlow payload (design 06 §5.6a, wave PV7): the streamed AND
+// persisted assistant answer carries the full XSS probe family, so ONE flow
+// proves send → stream → persist AND the renderer hardening on the same DOM:
+//   - a legitimate ctx: citation      → rewritten to /graph?focus=<id>
+//   - raw HTML                        → escaped to text (markdown-it html:false)
+//   - [..](javascript:)               → never a javascript: href anywhere
+//   - [..](ctx:javascript:alert(1))   → rewrite kante: encodeURIComponent proof
+//   - [..](ctx:../../evil)            → path traversal stays URL-encoded
+//   - [..](steam:alert)               → DOMPurify URI allowlist strips the href.
+//     This is the probe that turns RED when DOMPurify.sanitize is bypassed:
+//     markdown-it's own bad-proto list already blocks javascript:/data:, so a
+//     scheme OUTSIDE that list but outside DOMPurify's allowlist is the only
+//     payload that isolates the SECOND defense line (§5.6a negative gate).
+// ---------------------------------------------------------------------------
+
+const CHAT_SESSION_ID = '0190000000007000800000000000se1'
+const CHAT_PROMPT = 'Cite the architecture block, then try to break the renderer.'
+const CHAT_ANSWER_MD = [
+  'Answer with a citation [Core Architecture](ctx:550e8400-e29b-41d4-a716-446655440001).',
+  '',
+  '<img src=x onerror="alert(1)"> raw HTML must render as text.',
+  '',
+  '[js-link](javascript:alert(1)) [ctx-js](ctx:javascript:alert(1)) [ctx-trav](ctx:../../evil) [uri-probe](steam:alert)',
+].join('\n')
+
+/** Deterministic SSE frames for the /chat primaryFlow (sseRoute, §4.6). */
+const CHAT_FRAMES: SseFrame[] = [
+  { event: 'session', data: { session_id: CHAT_SESSION_ID, user_seq: 1 } },
+  { event: 'backend', data: { backend: 'llama.cpp (local)', model: 'qwen3.5-9b', trust: 'full-trust', tools_active: false, fallback: false } },
+  { event: 'delta', data: { text: 'Answer with a citation ' } },
+  { event: 'delta', data: { text: CHAT_ANSWER_MD.slice('Answer with a citation '.length) } },
+  { event: 'done', data: { finish_reason: 'stop', assistant_seq: 2, iterations: 1, total_ms: 42 } },
+]
+
+const CHAT_SESSION_VIEW = {
+  id: CHAT_SESSION_ID,
+  title: 'Renderer hardening probe',
+  scope: 'home',
+  max_sensitivity: 'internal',
+  created_at: '2026-06-29T11:59:00Z',
+  updated_at: '2026-06-29T12:00:00Z',
+}
+
+/** Persisted truth the store reloads after the stream ends (ChatSessionDetailResponse). */
+const CHAT_DETAIL = {
+  success: true,
+  session: CHAT_SESSION_VIEW,
+  messages: [
+    { seq: 1, role: 'user', content: CHAT_PROMPT, sensitivity: 'internal', created_at: '2026-06-29T11:59:00Z' },
+    { seq: 2, role: 'assistant', content: CHAT_ANSWER_MD, sensitivity: 'internal', backend: 'llama.cpp (local)', created_at: '2026-06-29T12:00:00Z' },
+  ],
+}
 
 /** Contracts for the five smoke areas (Erstbelegung — consolidates the legacy smoke tests). */
 export const contracts: PageContract[] = [
@@ -42,11 +103,37 @@ export const contracts: PageContract[] = [
         'Aggregat-Ansicht mit fixer Kachelzahl; die einzigen Listen (backends, llm_24h) sind server-seitig auf die Backend-/Pipeline-Anzahl begrenzt — kein 10k-Wachstumspfad.',
     },
     flowDoc:
-      'Operator öffnet die Status-Übersicht und liest den Live-Zustand: Backend-Zeile mit Namen und die Dream-Telemetrie sind inhaltlich gefüllt (erste Inhalts-Asserts; PV7 vertieft auf Tile-Vollständigkeit).',
+      'Operator öffnet die Status-Übersicht und liest den Live-Zustand tile-vollständig: Health-Ampel mit Services, Gaming-Toggle, Dream-Queue-Zahlen, Backend-Pool-Zeile und LLM-Telemetrie tragen die Fixture-DATEN (PV7: erste Inhalts-Asserts auf jede Tile — Inventur §5 hatte keine einzige).',
     primaryFlow: async (page) => {
-      // Content asserts against the fixture — the tiles carry DATA, not just chrome.
-      await expect(page.locator('main.content')).toContainText('llama.cpp (local)')
-      await expect(page.locator('main.content')).toContainText('never dreamed')
+      // Tile-complete content asserts against statusFixture (PV7, design 06
+      // §7-PV7): every tile carries DATA, not just chrome.
+      const content = page.locator('main.content')
+      // as_of freshness under the fixed clock: FIXED_NOW = as_of + 5 s.
+      await expect(content).toContainText('updated 5s ago')
+      // Health tile: aggregate + all three service dots.
+      const health = page.locator('section.card[aria-label="health"]')
+      await expect(health.locator('strong')).toHaveText('ok')
+      for (const svc of ['db', 'embed', 'chat']) await expect(health).toContainText(svc)
+      // Toggles tile: gaming lock reflects fixture gaming.active=false.
+      const toggles = page.locator('section.card[aria-label="toggles"]')
+      await expect(toggles.getByRole('button', { name: 'OFF' })).toHaveAttribute('aria-pressed', 'false')
+      await expect(toggles).toContainText('no signal') // activity: null
+      // Dream tile: queue counters + mode segment + meta rows.
+      const dream = page.locator('section.card[aria-label="dream queue"]')
+      await expect(dream.locator('.stat', { hasText: 'pickable now' })).toContainText('4')
+      await expect(dream.locator('.stat', { hasText: 'never dreamed' })).toContainText('12')
+      await expect(dream.locator('.stat', { hasText: 'incoming 6h' })).toContainText('9')
+      await expect(dream).toContainText('throttle')
+      // Backend pool tile: the one fixture backend, row-complete.
+      const pool = page.locator('section.card[aria-label="backend pool"]')
+      const row = pool.locator('tbody tr')
+      await expect(row).toHaveCount(1)
+      await expect(row).toContainText('llama.cpp (local)')
+      await expect(row).toContainText('full-trust')
+      await expect(row).toContainText('chat, dream')
+      await expect(row).toContainText('active')
+      // LLM telemetry tile mounts its own /api/llmlog resource (entries []).
+      await expect(page.locator('section.card[aria-label="llm telemetry"]')).toContainText('llm calls · 24h sample')
     },
     mobile: MOBILE_PV4_EXEMPT,
   },
@@ -125,15 +212,64 @@ export const contracts: PageContract[] = [
         'Thread-Ansicht rendert nur die aktive Konversation; die Sitzungsliste ist im Ist-Bestand die einzige Liste und ohne 10k-Pfad im Mock — die Scale-Pflicht greift mit den virtualisierten Achse-04-Listenflächen (design 06 §6.2).',
     },
     flowDoc:
-      'Nutzer erreicht den Chat mit bedienbarem Composer (Eingabe + Send-Gate). Benannte PV4-Grenze: der eigentliche Kern-Pfad senden→streamen→persistieren ist per §7-PV7 dem sseRoute-primaryFlow der PV7-Welle zugewiesen — dieser Flow deckt den Renderpfad, nicht den Stream.',
+      'Nutzer sendet einen Prompt, die Antwort streamt über SSE ins DOM und die Session persistiert in der Sidebar (sseRoute-Kernpfad, §7-PV7) — inklusive der XSS-Probe-Familie §5.6a auf der gerenderten Antwort (ctx:-Citation-Rewrite, escaped Raw-HTML, encodierte ctx:-Payloads, DOMPurify-URI-Allowlist).',
     primaryFlow: async (page) => {
+      // Deterministic stream + persisted truth — later page.route registrations
+      // override the seedSession defaults exactly for this flow (§4.6).
+      await sseRoute(page, '**/api/chat/stream', CHAT_FRAMES)
+      await page.route(
+        (url) => url.pathname === `/api/chat/sessions/${CHAT_SESSION_ID}`,
+        (route) => route.fulfill({ json: CHAT_DETAIL }),
+      )
+      await page.route(
+        (url) => url.pathname === '/api/chat/sessions',
+        (route) => route.fulfill({ json: { success: true, sessions: [{ ...CHAT_SESSION_VIEW, message_count: 2 }] } }),
+      )
+      // No dialog may ever fire (§5.6a: kein pageerror, kein Dialog).
+      const dialogs: string[] = []
+      page.on('dialog', (d) => {
+        dialogs.push(d.message())
+        void d.dismiss()
+      })
+
+      // Send gate, then the turn: prompt → streamed answer → persisted session.
       const composer = page.getByPlaceholder(/Ask the knowledge store/)
-      await expect(composer).toBeVisible()
-      // Send gate: empty composer disables, typed text arms the button.
       const send = page.getByRole('button', { name: 'Send' })
       await expect(send).toBeDisabled()
-      await composer.fill('probe')
+      await composer.fill(CHAT_PROMPT)
       await expect(send).toBeEnabled()
+      await send.click()
+
+      // The persisted truth is reloaded after the stream ends: user bubble +
+      // rendered assistant markdown, no streaming cursor left behind.
+      const md = page.locator('.msg.assistant .body.md')
+      await expect(page.locator('.msg.user')).toContainText(CHAT_PROMPT)
+      await expect(md).toBeVisible()
+      await expect(page.locator('.msg .cursor')).toHaveCount(0)
+      // Session persisted in the sidebar (title + the list reload after done).
+      await expect(page.locator('#session-list')).toContainText('Renderer hardening probe')
+
+      // ---- XSS probe family (§5.6a) on the rendered answer ----
+      // (1) Legitimate ctx: citation → SPA graph route, link text intact.
+      const cite = md.locator('a', { hasText: 'Core Architecture' })
+      await expect(cite).toHaveAttribute('href', '/graph?focus=550e8400-e29b-41d4-a716-446655440001')
+      // (2) Raw HTML is escaped to TEXT (markdown-it html:false): the literal
+      // tag is visible text, and no <img> element exists in the bubble.
+      await expect(md).toContainText('<img src=x onerror="alert(1)">')
+      await expect(md.locator('img')).toHaveCount(0)
+      // (3) No javascript: href anywhere in the whole DOM.
+      await expect(page.locator('a[href^="javascript" i]')).toHaveCount(0)
+      // (4) ctx:-Rewrite-Kante: the payload after ctx: is encodeURIComponent-
+      // encoded INTO the focus param — never an executable scheme.
+      await expect(md.locator('a', { hasText: 'ctx-js' })).toHaveAttribute('href', '/graph?focus=javascript%3Aalert(1)')
+      await expect(md.locator('a', { hasText: 'ctx-trav' })).toHaveAttribute('href', '/graph?focus=..%2F..%2Fevil')
+      // (5) DOMPurify URI allowlist (the SECOND defense line, isolated): a
+      // scheme markdown-it permits but DOMPurify does not → href is STRIPPED.
+      // This is the probe that turns red when sanitize() is bypassed.
+      const uriProbe = md.locator('a', { hasText: 'uri-probe' })
+      await expect(uriProbe).toBeVisible()
+      expect(await uriProbe.getAttribute('href'), 'DOMPurify must strip the non-allowlisted steam: href').toBeNull()
+      expect(dialogs, `dialogs fired during the chat turn: ${dialogs.join(' | ')}`).toEqual([])
     },
     mobile: MOBILE_PV4_EXEMPT,
   },
@@ -148,12 +284,236 @@ export const contracts: PageContract[] = [
         'Settings-Katalog ist eine bounded, server-definierte Konfigurationsliste (Dutzende Keys, kein nutzergetriebenes Wachstum) — keine 10k-Dimension.',
     },
     flowDoc:
-      'Admin liest den Settings-Katalog: die Katalogzeilen rendern Key + Wert aus dem Server-Fixture. Benannte PV4-Grenze: der Edit-Roundtrip (primaryFlow laut §4.1) ist per §7-PV7 der PV7-Welle zugewiesen.',
-    primaryFlow: async (page) => {
-      await expect(page.locator('main.content')).toContainText('dream.enabled')
-      await expect(page.locator('main.content')).toContainText('pool.default_block_sensitivity')
+      'Admin editiert eine Einstellung im Katalog (Edit-Roundtrip, §7-PV7): dream.enabled-Switch kippen → Save der Gruppe → genau EIN PUT /api/settings/dream.enabled mit {value:false} auf dem Draht (postData-Assert) → Echo wendet source=db an und der Dirty-Zähler verschwindet.',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(content).toContainText('dream.enabled')
+      await expect(content).toContainText('pool.default_block_sensitivity')
+
+      // Edit-Roundtrip (design 06 §4.1: /settings = Edit-Roundtrip, nie der
+      // Empty-State). dream.enabled is a hot bool → role=switch checkbox.
+      const card = page.locator('section.card[aria-label="dream settings"]')
+      const sw = card.locator('[id="dream.enabled"]')
+      await expect(sw).toBeChecked() // fixture value true
+      await sw.click()
+      await expect(card).toContainText('1 unsaved')
+      await card.getByRole('button', { name: 'Save' }).click()
+
+      // Applied echo: the PUT response flips the source badge env → db and
+      // clears the dirty marker (drafts re-sync to the stored value).
+      await expect(card.locator('span.badge.source-db')).toBeVisible()
+      await expect(card).not.toContainText('unsaved')
+      await expect(sw).not.toBeChecked()
+
+      // postData proof (§7-PV7): exactly one PUT carried {value:false}.
+      const puts = session.calls.filter((x) => x.method === 'PUT' && x.path === '/api/settings/dream.enabled')
+      expect(puts, 'the group save issues exactly ONE PUT for the one dirty key').toHaveLength(1)
+      expect(puts[0].body, 'PUT body carries the toggled scalar').toEqual({ value: false })
     },
     mobile: MOBILE_PV4_EXEMPT,
+  },
+
+  // -------------------------------------------------------------------------
+  // PV7 — Bestands-Lücken (design 06 §7-PV7, seam S13): the seven contracts
+  // that empty the pending list. Default states seed each page's ROLE MINIMUM
+  // (the named [baseline] decision from the PV4 return) — only the five PV4
+  // areas above keep their frozen server-admin defaults until the sequenced
+  // full-set re-freeze (§9.3). New pages carry the full mobile dimension.
+  // -------------------------------------------------------------------------
+  {
+    // The ONE pre-router page: the gate mounts before areaRoutes (App.svelte).
+    route: 'login',
+    name: 'login',
+    role: 'member',
+    path: '/',
+    states: [
+      { name: 'default', seed: { anonymous: true } },
+      {
+        // Fehl-Key error band as a DECLARED state — frozen visually in both
+        // themes/viewports; the "never the shell" flow proof lives in
+        // smoke.spec.ts (login negative path, PV7 gate).
+        name: 'error',
+        seed: { anonymous: true },
+        prepare: async (page) => {
+          await page.getByLabel('API key').fill('wrong-key')
+          await page.getByRole('button', { name: 'Sign in' }).click()
+          await expect(page.getByRole('alert')).toContainText('invalid or revoked API key')
+        },
+      },
+    ],
+    scale: {
+      exempt: 'Login-Maske: ein einzelnes Formular ohne Datenliste — es existiert kein 10k-Wachstumspfad.',
+    },
+    flowDoc:
+      'Nutzer fügt den API-Key ein und meldet sich an: whoami-Probe → Shell mountet → Member-Landing /home. Der Fehl-Key-Pfad (Fehlerband, NIE Shell) ist der deklarierte error-State + freie Negativ-Probe in smoke.spec.ts.',
+    primaryFlow: async (page) => {
+      await page.getByLabel('API key').fill(KEY)
+      await page.getByRole('button', { name: 'Sign in' }).click()
+      await expect(page.locator('.shell')).toBeVisible()
+      // Member landing: `/` canonicalizes via landingFor(member) → /home.
+      await expect(page).toHaveURL(/\/home$/)
+      await expect(page.locator('main.content')).toContainText('Welcome, smoke-key')
+    },
+  },
+  {
+    route: '/home',
+    name: 'home',
+    role: 'member',
+    mode: 'reading',
+    states: [{ name: 'default', seed: {} }], // Rollen-Minimum: member (die Zielgruppe der Seite)
+    scale: {
+      exempt:
+        'Capability-Screen mit fixer Kartenzahl aus whoami (Write-Scope, Read-Scopes, Rolle, Tenant) — keine Liste, kein 10k-Pfad.',
+    },
+    flowDoc:
+      'Member landet auf /home, liest seinen Korpus-Zuschnitt (Write-Scope home, Read-Scopes home+shared, Rolle, Tenant) und springt über „Browse blocks" in die Korpus-Fläche.',
+    primaryFlow: async (page) => {
+      const content = page.locator('main.content')
+      await expect(content).toContainText('Welcome, smoke-key')
+      // The four capability cards carry the member whoami DATA.
+      await expect(content).toContainText('home, shared') // read access
+      await expect(content).toContainText('member') // role
+      await expect(content).toContainText('Acme Corp') // tenant display name, never the UUID
+      await page.getByRole('link', { name: 'Browse blocks →' }).click()
+      await expect(page).toHaveURL(/\/blocks$/)
+      await expect(content).toContainText('Core Architecture')
+    },
+  },
+  {
+    route: '/settings/backends',
+    name: 'settings-backends',
+    // Guard truth: kein TIER_GATE auf /settings/* — dieselbe Rail↔Guard-
+    // Divergenz wie /settings (PV4-Befund, contract.ts header). Der INHALT ist
+    // page-self-gated auf session.admin; das Rollen-Minimum der Inhalts-Fläche
+    // ist server-admin (fixtures: nur server-admin trägt admin:true).
+    role: 'member',
+    mode: 'reading',
+    states: [{ name: 'default', seed: { role: 'server-admin' } }],
+    scale: {
+      exempt:
+        'Backend-Pool + Vault sind bounded Betreiber-Listen (Provider-Backends, Secret-Namen) — kein nutzergetriebenes 10k-Wachstum.',
+    },
+    flowDoc:
+      'Admin öffnet den Pool-&-Vault-Editor unter dem Settings-Crumb: Pool-Tabelle (Fixture-Empty-State als Positiv-Kontrolle des Ladepfads) und Secrets-Vault mounten hinter dem admin-Gate.',
+    primaryFlow: async (page) => {
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'Backend pool & vault' })).toBeVisible()
+      // Pool loaded past the spinner: the fixture [] renders the empty state.
+      await expect(content).toContainText('no backends — create one to populate the pool')
+      // Vault section mounts with its create form.
+      await expect(page.locator('section.card[aria-label="secrets vault"]')).toBeVisible()
+      await expect(page.getByPlaceholder('name (e.g. openrouter.key)')).toBeVisible()
+      // Crumb navigates back to the parent catalog.
+      await page.locator('.crumb').getByRole('link', { name: 'Settings' }).click()
+      await expect(page).toHaveURL(/\/settings$/)
+    },
+  },
+  {
+    route: '/admin',
+    name: 'admin',
+    role: 'server-admin',
+    mode: 'reading',
+    adminCalls: ['tenant-list', 'scope-overview'],
+    states: [{ name: 'default', seed: {} }], // Rollen-Minimum == Guard-Rolle (server-admin)
+    scale: {
+      exempt:
+        'Tenant-Register + Scope-Map sind Betreiber-Aggregate (Anzahl Tenants/Scopes, server-seitig überschaubar) — der 10k-Korpus-Pfad läuft über /api/search-Flächen, nicht über dieses Register.',
+    },
+    flowDoc:
+      'Server-Admin liest das Tenant-Register (Slug, Status-Ampel), prüft die Scope-Map und steigt über den Slug-Link in die Tenant-Detailseite ein.',
+    primaryFlow: async (page) => {
+      const content = page.locator('main.content')
+      await expect(content).toContainText('Acme Corp')
+      const scopeMap = page.locator('section[aria-label="scope map"]')
+      await expect(scopeMap).toContainText('home')
+      await expect(scopeMap).toContainText('128')
+      await expect(scopeMap).toContainText(/unmapped/i)
+      await page.getByRole('link', { name: 'acme' }).click()
+      await expect(page).toHaveURL(new RegExp(`/admin/tenants/${TENANT_A_ID}$`))
+      await expect(page.getByRole('heading', { name: 'tenant detail' })).toBeVisible()
+    },
+  },
+  {
+    // Template contract with fixture param (design 06 §4.2: EIN Kontrakt pro
+    // Template, path? aus dem PV4-Kontrakt-Modell).
+    route: '/admin/tenants/:id',
+    name: 'admin-tenant-detail',
+    role: 'server-admin',
+    mode: 'reading',
+    path: `/admin/tenants/${TENANT_A_ID}`,
+    adminCalls: ['tenant-get', 'scope-overview', 'tenant-quota-get'],
+    states: [{ name: 'default', seed: {} }],
+    scale: {
+      exempt:
+        'Detailseite EINES Tenants: Register-Karte + eine QuotaForm pro eigenem Scope (server-seitig bounded über tenant_limits) — keine 10k-Liste.',
+    },
+    flowDoc:
+      'Server-Admin öffnet die Tenant-Detailseite und setzt die Tages-Kosten-Quota eines Scopes (set → re-get → saved-Marker) — der Verwaltungs-Kernpfad der Seite.',
+    primaryFlow: async (page, session) => {
+      await expect(page.getByRole('heading', { name: 'tenant detail' })).toBeVisible()
+      await expect(page.locator('main.content')).toContainText('Acme Corp')
+      const quota = page.locator('form[aria-label="quota for scope home"]')
+      await expect(quota).toBeVisible()
+      await quota.getByLabel('daily cost (USD)').fill('9')
+      await quota.getByRole('button', { name: 'save quota' }).click()
+      await expect(quota.getByText('saved')).toBeVisible()
+      // Wire proof: the save actually issued the tenant-quota-set action.
+      expect(
+        session.calls.some((x) => x.action === 'tenant-quota-set'),
+        'quota save must reach the wire as tenant-quota-set',
+      ).toBe(true)
+    },
+  },
+  {
+    route: '/tenant',
+    name: 'tenant',
+    role: 'tenant-admin', // Rollen-Minimum: manageTenantKeys (tenant-admin), NICHT server-admin
+    mode: 'reading',
+    adminCalls: ['api-key-list', 'scope-list', 'tenant-usage-get'],
+    states: [{ name: 'default', seed: {} }],
+    scale: {
+      exempt:
+        'Key-/Scope-Tabellen sind durch tenant_limits gedeckelt (max_keys/max_scopes, Migration 069) — strukturell kein 10k-Pfad.',
+    },
+    flowDoc:
+      'Tenant-Admin verwaltet die Schlüssel seines Tenants: Tabelle listet die Keys, „+ New key" mintet einen neuen Key mit Reveal-once-Plaintext (Kernpfad der Selbstverwaltung).',
+    primaryFlow: async (page) => {
+      const content = page.locator('main.content')
+      await expect(content).toContainText('smoke-key')
+      await expect(content).toContainText('ci-runner')
+      // Mint a key: dialog → create → reveal-once → acknowledge.
+      await page.getByRole('button', { name: '+ New key' }).click()
+      const dialog = page.getByRole('dialog')
+      await expect(dialog).toBeVisible()
+      await dialog.getByPlaceholder('who/what this key is for').fill('pv7-probe')
+      await dialog.getByRole('button', { name: 'Create key' }).click()
+      await expect(dialog.getByLabel('new api key — plaintext, shown once')).toHaveValue(
+        'ctx_sk_TESTKEY_reveal_once_do_not_persist',
+      )
+      await dialog.getByRole('button', { name: "I've stored it — done" }).click()
+      await expect(dialog).toBeHidden()
+    },
+  },
+  {
+    route: '*',
+    name: 'notfound',
+    role: 'member',
+    mode: 'reading',
+    path: '/no-such-route',
+    states: [{ name: 'default', seed: {} }],
+    scale: { exempt: 'Statische 404-Seite ohne Daten — kein 10k-Pfad.' },
+    flowDoc:
+      'Nutzer landet auf einer unbekannten Route, sieht die 404-Auskunft und kehrt über den Status-Link zurück (Guard-Ist: /status ist member-erreichbar — Rail↔Guard-Divergenz, PV4-Befund).',
+    primaryFlow: async (page) => {
+      const content = page.locator('main.content')
+      await expect(content).toContainText('404')
+      await expect(content).toContainText('No such route in this UI.')
+      await page.getByRole('link', { name: 'Back to status' }).click()
+      await expect(page).toHaveURL(/\/status$/)
+      // Member on /status: the read-only degradation renders the public
+      // health probe (guard truth, not rail wish — no silent "Behebung").
+      await expect(content).toContainText('read-only key')
+    },
   },
 ]
 
@@ -166,21 +526,13 @@ export interface PendingContract {
 }
 
 /**
- * Bestands-Lücken (design 06 S13): these routes get their contracts in wave
- * PV7 ("Matrix-Test grün OHNE Ausnahme-Liste" is the PV7 gate — this list must
- * be EMPTY after PV7). The matrix meta-test enforces: every route is contract
- * XOR pending (a pending entry with a contract is stale ⇒ red), and any NEW
- * route without either entry is red — "jede Seite" cannot erode silently.
+ * Bestands-Lücken (design 06 S13): SINCE PV7 THIS LIST IS EMPTY — the matrix
+ * runs green without an exception list ("jede Seite" holds for the whole
+ * Ist-Bestand, the PV7 gate). The MECHANIC stays: a future route lands here
+ * (with reason + delivering wave) or carries a contract, otherwise the matrix
+ * meta-test is red; a pending entry whose contract exists is stale ⇒ red.
  */
-export const pendingContracts: PendingContract[] = [
-  { route: '/home', reason: 'PV7 (design 06 §7-PV7): Member-Landing-Kontrakt' },
-  { route: '/settings/backends', reason: 'PV7 (design 06 §7-PV7): Backends-Editor-Kontrakt' },
-  { route: '/admin', reason: 'PV7 (design 06 §7-PV7): Server-Admin-Kontrakt inkl. generiertem Deny' },
-  { route: '/admin/tenants/:id', reason: 'PV7 (design 06 §7-PV7): Template-Kontrakt mit Fixture-Param' },
-  { route: '/tenant', reason: 'PV7 (design 06 §7-PV7): Tenant-Admin-Kontrakt inkl. generiertem Deny' },
-  { route: '*', reason: 'PV7 (design 06 §7-PV7): NotFound-Kontrakt' },
-  { route: 'login', reason: 'PV7 (design 06 §7-PV7): Login-Gate liegt VOR dem Router (src/App.svelte) — Mock-Variante + Fehl-Key-Pfad' },
-]
+export const pendingContracts: PendingContract[] = []
 
 /** Sentinel re-export so leak-probe consumers need only the registry. */
 export { SENTINEL }

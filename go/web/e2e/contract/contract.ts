@@ -169,7 +169,7 @@ export function validateContract(c: PageContract): string[] {
   if (!c.route) errs.push('route must be non-empty')
   else if (c.route !== 'login' && c.route !== '*' && !c.route.startsWith('/'))
     errs.push(`route '${c.route}' must be an areaRoutes key ('/…', '*') or 'login'`)
-  if ((c.route === '*' || c.route.includes(':')) && !c.path)
+  if ((c.route === '*' || c.route === 'login' || c.route.includes(':')) && !c.path)
     errs.push(`route '${c.route}' needs an explicit navigable 'path'`)
   if (c.path !== undefined && !c.path.startsWith('/')) errs.push(`path '${c.path}' must start with '/'`)
   if (c.states.length === 0) errs.push('states must contain at least the default state')
@@ -218,7 +218,13 @@ async function waitForShell(page: Page): Promise<void> {
   await expect(page.locator(mobile ? 'header.mobile-bar' : 'nav.rail[aria-label="Primary"]')).toBeVisible()
 }
 
-/** Mount a contract state: fixed clock → seed → goto → shell + theme/mode asserts. */
+/**
+ * Mount a contract state: fixed clock → seed → goto → shell + theme/mode asserts.
+ * The 'login' contract (PV7) is the one PRE-router page: it seeds no session
+ * key (anonymous), mounts the Login mask instead of the shell, and asserts the
+ * mask's form — every other contract dimension (visual/aria/axe/focus) runs
+ * unchanged on top of this mount.
+ */
 async function mountState(
   page: Page,
   c: PageContract,
@@ -227,8 +233,14 @@ async function mountState(
 ): Promise<SeededSession> {
   await page.clock.setFixedTime(FIXED_NOW)
   const session = await seedSession(page, seedFor(c, state, theme))
-  await gotoArea(page, navPath(c))
-  await waitForShell(page)
+  if (c.route === 'login') {
+    await page.goto(navPath(c))
+    await expect(page.locator('form.card')).toBeVisible()
+    await expect(page.getByLabel('API key')).toBeVisible()
+  } else {
+    await gotoArea(page, navPath(c))
+    await waitForShell(page)
+  }
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
   if (c.mode) await expect(page.locator('main.content')).toHaveAttribute('data-mode', c.mode)
   if (state.prepare) await state.prepare(page)

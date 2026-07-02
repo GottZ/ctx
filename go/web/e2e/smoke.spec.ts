@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test'
 import { captureShot } from './contract/capture'
 import { FIXED_NOW, definePageContract } from './contract/contract'
 import { contracts } from './contract/registry'
-import { seedSession, gotoArea, trackPageErrors, type Role } from './fixtures'
+import { KEY, seedSession, gotoArea, trackPageErrors, type Role } from './fixtures'
 
 // PageContract host (design 06 §4.1, wave PV4). The five area contracts
 // (e2e/contract/registry.ts) are EXECUTED here — every registry entry runs,
@@ -25,6 +25,77 @@ import { seedSession, gotoArea, trackPageErrors, type Role } from './fixtures'
 // rail, theme toggle, graph palette hook.
 
 for (const c of contracts) definePageContract(c)
+
+// ---------------------------------------------------------------------------
+// Login negative path (PV7 gate: falscher Key ⇒ Fehlerband, NIE Shell). The
+// login CONTRACT freezes the error band visually (state 'error'); this free
+// test carries the behavioural halves the visual state cannot: the shell
+// never mounts, no key is persisted, and a corrected key still succeeds
+// afterwards (the mask stays operable after a failure).
+// ---------------------------------------------------------------------------
+test.describe('login negative path (PV7)', () => {
+  test('wrong key renders the error band and never the shell', async ({ page }) => {
+    const errors = trackPageErrors(page)
+    await seedSession(page, { role: 'member', theme: 'dark', anonymous: true })
+    await page.goto('/')
+    await expect(page.locator('form.card')).toBeVisible()
+
+    await page.getByLabel('API key').fill('wrong-key')
+    await page.getByRole('button', { name: 'Sign in' }).click()
+
+    // 401 error band from the whoami auth-header branch — the real handler string.
+    await expect(page.getByRole('alert')).toContainText('invalid or revoked API key')
+    // NEVER the shell: no .shell, no rail, still the login screen.
+    await expect(page.locator('.shell')).toHaveCount(0)
+    await expect(page.locator('nav.rail')).toHaveCount(0)
+    // The rejected key is not persisted (login() persists only on success).
+    expect(await page.evaluate(() => sessionStorage.getItem('ctx.api-key'))).toBeNull()
+
+    // The mask stays operable: the correct key still signs in.
+    await page.getByLabel('API key').fill(KEY)
+    await page.getByRole('button', { name: 'Sign in' }).click()
+    await expect(page.locator('.shell')).toBeVisible()
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Shell @768 — icon-rail band (E5, PV7). breakpoints.ts discriminates TWO
+// boundaries below desktop: SM 640 (rail → drawer) and MD 1024 (rail icon-
+// only). 640–1023 is a real render state neither 390 nor 1440 captures; the
+// shell is page-independent, so ONE reference page (/blocks) suffices —
+// gezielte weitere @768-Tests bleiben Kontrakt-Deklarationssache (E5).
+// ---------------------------------------------------------------------------
+test.describe('shell @768 — icon-rail band (E5)', () => {
+  test.use({ viewport: { width: 768, height: 1024 } })
+
+  test('rail renders icon-only between sm and md', async ({ page }) => {
+    const errors = trackPageErrors(page)
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/blocks')
+
+    // Persistent rail (NOT the mobile drawer bar) in its icon-only state.
+    const rail = page.locator('nav.rail[aria-label="Primary"]')
+    await expect(rail).toBeVisible()
+    await expect(rail).toHaveClass(/icon/)
+    await expect(page.locator('header.mobile-bar')).toHaveCount(0)
+    // Icon-only: no textual nav labels; the accessible name moves to aria-label.
+    const blocksLink = rail.getByRole('link', { name: 'Blocks' })
+    await expect(blocksLink).toBeVisible()
+    await expect(blocksLink).toHaveAttribute('aria-label', 'Blocks')
+    expect(await blocksLink.innerText()).not.toContain('Blocks')
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
+  test('shell @768 visual baseline', { tag: '@visual' }, async ({ page }) => {
+    await page.clock.setFixedTime(FIXED_NOW)
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/blocks')
+    await expect(page.locator('nav.rail[aria-label="Primary"]')).toHaveClass(/icon/)
+    await page.waitForTimeout(600)
+    await captureShot(page, 'shell-iconrail--default--dark--768.png')
+  })
+})
 
 /** Wait for the authenticated shell (App.svelte → AppShell, past restore). */
 async function waitForShell(page: Page): Promise<void> {

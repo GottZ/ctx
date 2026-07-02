@@ -70,7 +70,17 @@ export async function runFocusWalk(page: Page, testInfo: TestInfo): Promise<void
       return { cycled: false as const, desc, focusVisible: el.matches(':focus-visible'), indicator, obscured }
     }, i)
 
-    if (info === null || info.cycled) break
+    // A leading absorbed Tab (headless-shell: the first Tab after a fresh
+    // body-blur can land back on body — seen on the autofocus login mask, PV7)
+    // is a warm-up, not the end: only treat a null as "walk done" once at
+    // least one real stop is collected. A page with genuinely zero tab stops
+    // still exhausts the loop and the positive control below fails (vacuity
+    // guard intact).
+    if (info === null) {
+      if (stops.length > 0) break
+      continue
+    }
+    if (info.cycled) break
     stops.push(info)
   }
 

@@ -36,7 +36,8 @@ const TENANTS: Record<TenantKey, TenantDef> = {
   B: { id: '550e8400-e29b-41d4-a716-446655440bbb', slug: 'globex', name: 'Globex Inc', home: 'globex:home', read: ['globex:home'] },
 }
 
-const KEY = 'smoke-key'
+/** The one fixture API key whoami authenticates (exported for the login contract, PV7). */
+export const KEY = 'smoke-key'
 
 /**
  * High-entropy tenant sentinel markers (design 06 §4.6/§5.6b, wave PV4): every
@@ -527,6 +528,14 @@ function emptyOverviewFixture(): Record<string, unknown> {
 export interface SeedOptions {
   role: Role
   theme: 'light' | 'dark'
+  /**
+   * PV7 (login contract): install the mocks + theme pref but do NOT plant the
+   * sessionStorage key — the app boots to the Login mask instead of the shell.
+   * The whoami mock still answers for the canonical KEY, so a login ATTEMPT
+   * with the right key succeeds and a wrong key gets the 401 error band
+   * (the auth-header branch below).
+   */
+  anonymous?: boolean
   empty?: boolean
   /** identity tenant (default 'A' = legacy default-tenant shape). */
   tenant?: TenantKey
@@ -570,13 +579,13 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
   await page.addInitScript(
     ({ key, theme }) => {
       try {
-        sessionStorage.setItem('ctx.api-key', key)
+        if (key !== null) sessionStorage.setItem('ctx.api-key', key)
         localStorage.setItem('ctx.theme', theme)
       } catch {
         /* storage blocked — test will surface it as a render failure */
       }
     },
-    { key: KEY, theme: opts.theme },
+    { key: opts.anonymous === true ? null : KEY, theme: opts.theme },
   )
 
   const tkey: TenantKey = opts.tenant ?? 'A'
@@ -607,6 +616,15 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
     // so the generated deny tests can assert admin-call ABSENCE and the scale
     // tests can prove the keyset-cursor round-trip from the actual wire bodies.
     const call: RecordedCall = { method, path }
+    if (method === 'PUT' && path.startsWith('/api/settings/')) {
+      // Settings edit-roundtrip (PV7): the PUT body is the postData proof the
+      // /settings primaryFlow asserts on (design 06 §7-PV7).
+      try {
+        call.body = req.postDataJSON()
+      } catch {
+        /* non-JSON body — recorded without payload */
+      }
+    }
     if (method === 'POST' && (path === '/api/manage' || path === '/api/search')) {
       try {
         call.body = req.postDataJSON()
@@ -621,7 +639,19 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
     // SSE telemetry stream → abort so StatusPage uses the GET /api/status poll.
     if (path === '/api/events') return route.abort()
 
-    if (path === '/api/whoami') return route.fulfill({ json: whoamiFor(opts.role, tkey, opts.capabilities) })
+    if (path === '/api/whoami') {
+      // Auth-header branch (PV7 login contract): whoami authenticates ONLY the
+      // canonical fixture key. A login attempt with any other key gets the real
+      // handler's 401 envelope — the Fehl-Key path renders the error band and
+      // NEVER the shell. Every pre-existing spec seeds KEY, so the happy path
+      // is byte-identical for them. 401 with an EXPLICIT key does not fire
+      // hooks.onUnauthorized (api.ts:96) — no session teardown side effects.
+      const auth = req.headers()['authorization']
+      if (auth !== `Bearer ${KEY}`) {
+        return route.fulfill({ status: 401, json: { success: false, error: 'invalid or revoked API key' } })
+      }
+      return route.fulfill({ json: whoamiFor(opts.role, tkey, opts.capabilities) })
+    }
 
     // 'error' state (declarative, §4.6): the core READ surfaces fail with a 500
     // envelope so every page's error band becomes a declarable contract state.
@@ -641,10 +671,45 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
     if (path === '/api/status') return route.fulfill({ json: statusFixture() })
     if (path === '/api/llmlog') return route.fulfill({ json: { success: true, entries: [] } })
     if (path === '/api/settings' && method === 'GET') return route.fulfill({ json: { success: true, settings: settingsFixture() } })
+    if (path.startsWith('/api/settings/') && method === 'PUT') {
+      // SettingPutResponse (types.ts:55) — echoes the written value with
+      // source 'db' and the previous value/source from the catalog fixture
+      // (mirrors HandlePut's re-read). The PV7 /settings primaryFlow proves
+      // the postData on the recorded call, the UI proves the applied echo.
+      const key = decodeURIComponent(path.slice('/api/settings/'.length))
+      const prev = settingsFixture().find((s) => s.key === key)
+      const value = (call.body as { value?: unknown } | undefined)?.value
+      return route.fulfill({
+        json: {
+          success: true,
+          key,
+          value,
+          source: 'db',
+          previous: { value: prev?.value ?? null, source: prev?.source ?? 'default' },
+          warnings: [],
+        },
+      })
+    }
     if (path === '/api/secrets' && method === 'GET') return route.fulfill({ json: { success: true, secrets: [] } })
     if (path.startsWith('/api/graph/overview')) return route.fulfill({ json: empty ? emptyOverviewFixture() : overviewFixture() })
     if (path.startsWith('/api/graph/ego')) return route.fulfill({ json: egoFixture() })
-    if (path.startsWith('/api/chat/sessions')) return route.fulfill({ json: { success: true, sessions: [] } })
+    if (path === '/api/chat/sessions') return route.fulfill({ json: { success: true, sessions: [] } })
+    if (path.startsWith('/api/chat/sessions/')) {
+      // Detail default, shape-correct (ChatSessionDetailResponse, chat/types.ts
+      // :59): the old startsWith branch answered the LIST shape for a detail
+      // GET — never hit before PV7, but a wrong-shape default is exactly the
+      // W10 drift the fixtures must not carry. Flows that need real messages
+      // override this route per test (later page.route registrations win).
+      const id = decodeURIComponent(path.slice('/api/chat/sessions/'.length))
+      if (method === 'DELETE') return route.fulfill({ json: { success: true } })
+      return route.fulfill({
+        json: {
+          success: true,
+          session: { id, title: 'Conversation', scope: ctx.home, max_sensitivity: 'internal', created_at: '2026-06-29T11:00:00Z', updated_at: '2026-06-29T12:00:00Z' },
+          messages: [],
+        },
+      })
+    }
     if (path === '/api/search') {
       if (state === '10k') {
         return route.fulfill({ json: scaleSearchFixture((call.body as Record<string, unknown> | undefined) ?? null) })

@@ -140,11 +140,15 @@ export function renderCoverage(cs: readonly PageContract[] = contracts, pending:
     lines.push('`[baseline]`-Marker-Pflicht (.hooks/commit-msg); behobene Einträge MÜSSEN raus (stale ⇒ rot).')
   }
   lines.push('')
-  lines.push('## Ausstehende Kontrakte (PV7 leert diese Liste — Matrix-Gate)')
+  lines.push('## Ausstehende Kontrakte (Matrix-Gate: jede Route trägt Kontrakt XOR Pending-Eintrag)')
   lines.push('')
-  lines.push('| Route | Grund |')
-  lines.push('|---|---|')
-  for (const p of pending) lines.push(`| \`${p.route}\` | ${p.reason} |`)
+  if (pending.length === 0) {
+    lines.push('- keine — die Matrix ist seit PV7 vollständig über den Ist-Bestand; die Pending-Mechanik bleibt für künftige Routen bestehen.')
+  } else {
+    lines.push('| Route | Grund |')
+    lines.push('|---|---|')
+    for (const p of pending) lines.push(`| \`${p.route}\` | ${p.reason} |`)
+  }
   lines.push('')
   return lines.join('\n')
 }
