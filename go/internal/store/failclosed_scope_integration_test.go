@@ -64,11 +64,11 @@ func TestReadPathsFailClosedOnEmptyScopes_Integration(t *testing.T) {
 		// blocks.go
 		{"ResolveBlockID", func() error { _, _, e := store.ResolveBlockID(ctx, pool, "0123abcd", empty, nil); return e }},
 		{"GetBlock", func() error { _, e := store.GetBlock(ctx, pool, someUUID, empty, nil); return e }},
-		{"SearchBlocks", func() error { _, e := store.SearchBlocks(ctx, pool, "", empty, "", nil, 10, true, nil, nil); return e }},
-		{"RecentBlocks", func() error { _, e := store.RecentBlocks(ctx, pool, empty, "", 10); return e }},
+		{"SearchBlocks", func() error { _, e := store.SearchBlocks(ctx, pool, "", empty, "", nil, 10, true, nil, nil, nil, nil); return e }},
+		{"RecentBlocks", func() error { _, e := store.RecentBlocks(ctx, pool, empty, "", 10, nil, nil); return e }},
 		{"ListCategories", func() error { _, e := store.ListCategories(ctx, pool, empty); return e }},
 		{"GetStats", func() error { _, e := store.GetStats(ctx, pool, empty); return e }},
-		{"ListMeta", func() error { _, e := store.ListMeta(ctx, pool, empty); return e }},
+		{"ListMeta", func() error { _, e := store.ListMeta(ctx, pool, empty, nil, nil); return e }},
 		{"GuardList", func() error { _, e := store.GuardList(ctx, pool, empty, "", "", 10); return e }},
 		{"GetGuardStats", func() error { _, e := store.GetGuardStats(ctx, pool, empty); return e }},
 		// blobs.go

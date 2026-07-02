@@ -32,10 +32,10 @@ type SearchResult struct {
 	Sensitivity backends.Sensitivity `json:"-"`
 
 	// TypeName is the block's policy type (M073 RETURNS column, WF T5) — the
-	// UI-badge/fold consumer input (seam §2.8). NOT serialized yet: response
-	// exposure is wave T10's contract change, the wire format stays
-	// byte-identical here.
-	TypeName string `json:"-"`
+	// UI-badge/fold consumer input (seam §2.8). Wire-visible since WF T10
+	// (wire name `type`, the registry vocabulary). omitempty: graph-hydrated
+	// shapes that don't select the column stay byte-identical.
+	TypeName string `json:"type,omitempty"`
 
 	// Graph-expansion provenance (GottZ Graph Expansion, Wave 1). All fields
 	// are zero-valued for native RRF hits and omitted from JSON (omitempty), so

@@ -44,6 +44,12 @@ type storeRequest struct {
 	// present ⇒ source='manual'. On upsert-conflict an explicit value applies
 	// upgrade-only — downgrades go through the confirm-gated update path.
 	Sensitivity string `json:"sensitivity,omitempty"`
+	// Type sets the block's policy type explicitly (WF T10; REST only — the
+	// MCP store tool deliberately carries no type field until the F6-C6
+	// write-confirmation ships, decision D4). Registry-validated (422 on
+	// unknown); sets type_source='manual', which permanently overrides the
+	// auto-classifier (T4 semantics). Absent ⇒ auto-classification.
+	Type string `json:"type,omitempty"`
 }
 
 // HandleStore processes upsert requests with auto-embedding.
@@ -91,6 +97,18 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	if sensErr != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": sensErr})
 		return
+	}
+
+	// Explicit type (WF T10): validate against the registry snapshot BEFORE
+	// any write. Fail-closed on a nil registry (test wiring): an unvalidated
+	// name must never reach the manual-provenance write path.
+	if req.Type != "" {
+		if msg := h.validateStoreTypeName(ctx, req.Type); msg != "" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"success": false, "error": msg,
+			})
+			return
+		}
 	}
 
 	// G40 credentials detector: a content pattern hit forces credentials
@@ -154,7 +172,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Execute upsert.
-	block, err := store.UpsertBlock(ctx, h.pool, req.Category, req.Title, req.Content, req.Tags, req.Metadata, writeScope, scopeExplicit, sens)
+	block, err := store.UpsertBlock(ctx, h.pool, req.Category, req.Title, req.Content, req.Tags, req.Metadata, writeScope, scopeExplicit, sens, req.Type)
 	if err != nil {
 		slog.Error("store: upsert error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -304,4 +322,18 @@ func (h *StoreHandler) classifySet(ctx context.Context) *blocktype.Set {
 		return nil
 	}
 	return h.blocktypes.SnapshotForRequest(ctx)
+}
+
+// validateStoreTypeName checks an explicit store `type` value against the
+// registry snapshot (WF T10). Empty msg = registered. Fail-closed on a nil
+// registry: an unvalidated name must never reach the manual write path
+// (§5.1(b) — Go-side write validation is verification layer b).
+func (h *StoreHandler) validateStoreTypeName(ctx context.Context, name string) string {
+	if h.blocktypes == nil {
+		return "type: block-type registry not wired — cannot validate type names"
+	}
+	if _, ok := h.blocktypes.SnapshotForRequest(ctx).Resolve(name); !ok {
+		return fmt.Sprintf("type: unknown block type %q (see manage type-list)", name)
+	}
+	return ""
 }

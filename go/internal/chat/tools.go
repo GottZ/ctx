@@ -170,7 +170,7 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 	limit := clamp(a.Limit, 10, 1, 20)
 	// grantedBlockIDs nil (T40a): the chat-tool read path is NOT live-wired for
 	// block grants in T40a (its grant resolution is a later wave) — nil ⇒ no-op.
-	previews, err := store.SearchBlocks(ctx, ex.pool, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil)
+	previews, err := store.SearchBlocks(ctx, ex.pool, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil, nil, nil)
 	if err != nil {
 		return errOutcome("search failed")
 	}
@@ -258,7 +258,7 @@ func (ex *Executor) runRecent(ctx context.Context, readScopes []string, raw json
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return errOutcome("invalid arguments: " + err.Error())
 	}
-	previews, err := store.RecentBlocks(ctx, ex.pool, readScopes, a.Category, a.Limit)
+	previews, err := store.RecentBlocks(ctx, ex.pool, readScopes, a.Category, a.Limit, nil, nil)
 	if err != nil {
 		return errOutcome("recent failed")
 	}

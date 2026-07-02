@@ -216,7 +216,7 @@ func TestUpsertBlockDetector_Integration(t *testing.T) {
 
 	t.Run("detector insert stamps credentials+pattern", func(t *testing.T) {
 		b, err := store.UpsertBlock(ctx, pool, "learnings", "g40-write-new", "body", nil, nil, "private", false,
-			store.SensitivityWrite{Value: backends.SensCredentials, Detector: true})
+			store.SensitivityWrite{Value: backends.SensCredentials, Detector: true}, "")
 		if err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
@@ -231,7 +231,7 @@ func TestUpsertBlockDetector_Integration(t *testing.T) {
 		// source stays 'manual'.
 		manualID := seedClassifyBlock(t, pool, "private", "g40-write-manual", "credentials", "manual")
 		_, err := store.UpsertBlock(ctx, pool, "learnings", "g40-write-manual", "new body with a key", nil, nil, "private", false,
-			store.SensitivityWrite{Value: backends.SensCredentials, Detector: true})
+			store.SensitivityWrite{Value: backends.SensCredentials, Detector: true}, "")
 		if err != nil {
 			t.Fatalf("upsert conflict: %v", err)
 		}
@@ -247,7 +247,7 @@ func TestUpsertBlockDetector_Integration(t *testing.T) {
 		// safety net overrides a too-low classification; that is a RAISE).
 		lowID := seedClassifyBlock(t, pool, "private", "g40-write-low-manual", "internal", "manual")
 		_, err := store.UpsertBlock(ctx, pool, "learnings", "g40-write-low-manual", "now carries a key", nil, nil, "private", false,
-			store.SensitivityWrite{Value: backends.SensCredentials, Detector: true})
+			store.SensitivityWrite{Value: backends.SensCredentials, Detector: true}, "")
 		if err != nil {
 			t.Fatalf("upsert conflict: %v", err)
 		}

@@ -33,6 +33,16 @@ type searchRequest struct {
 	// the previous page. nil/absent = page 1 (unchanged). Garbage is rejected
 	// defensively (400) rather than crashing; the FTS path ignores it.
 	After *store.SearchCursor `json:"after"`
+	// Types/TypesExclude (WF T10, design/01 §7-T10 R1): opt-in SERVER-side
+	// type filters — bind parameters in the store layer, never a client
+	// filter over paginated lists (at 10k+ issues per scope, knowledge
+	// browsing would page through issue pages). NOT a hard exclude: the D5
+	// browse asymmetry stays (retrieval-excluded types remain browseable).
+	// BlockRolesExclude is the documented legacy alias for TypesExclude
+	// (seam 17); both present ⇒ the UNION applies (monotone-restrictive).
+	Types             []string `json:"types"`
+	TypesExclude      []string `json:"types_exclude"`
+	BlockRolesExclude []string `json:"block_roles_exclude"`
 }
 
 // HandleSearch processes lightweight search requests (no LLM).
@@ -98,7 +108,9 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// Search. grantedBlockIDs nil (T40a): /api/search is NOT live-wired for block
 	// grants in T40a (its grant wiring is T40b/a later wave) — nil ⇒ no-op OR-arm.
-	results, err := store.SearchBlocks(ctx, h.pool, req.Query, authResult.ReadScopes, req.Category, req.Tags, limit, compact, after, nil)
+	// Type filters (WF T10): types_exclude ∪ block_roles_exclude (legacy alias).
+	typesExclude := unionExcludes(req.TypesExclude, req.BlockRolesExclude)
+	results, err := store.SearchBlocks(ctx, h.pool, req.Query, authResult.ReadScopes, req.Category, req.Tags, limit, compact, after, nil, req.Types, typesExclude)
 	if err != nil {
 		slog.Error("search: query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -126,6 +138,14 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	if req.Query != "" {
 		queryFilter = req.Query
 	}
+	var typesFilter any = nil
+	if len(req.Types) > 0 {
+		typesFilter = req.Types
+	}
+	var typesExcludeFilter any = nil
+	if len(typesExclude) > 0 {
+		typesExcludeFilter = typesExclude
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
@@ -136,6 +156,10 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 			"category": categoryFilter,
 			"tags":     tagsFilter,
 			"limit":    limit,
+			// WF T10: the EFFECTIVE type filters (types_exclude already
+			// unioned with the legacy block_roles_exclude alias).
+			"types":         typesFilter,
+			"types_exclude": typesExcludeFilter,
 		},
 		"results": results,
 		// next_after is the cursor for the FOLLOWING page (W7 "Load more"), or

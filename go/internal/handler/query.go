@@ -85,6 +85,12 @@ type queryRequest struct {
 	// (Session 38c). Empty slice / omitted = no exclude.
 	CategoriesExclude []string `json:"categories_exclude,omitempty"`
 	BlockRolesExclude []string `json:"block_roles_exclude,omitempty"`
+	// TypesExclude (WF T10, seam 17) is the CANONICAL wire name for the
+	// request-level type exclude (p_types_exclude since M073);
+	// block_roles_exclude above stays as the documented legacy alias. Both
+	// present ⇒ the UNION applies (monotone-restrictive, no silent
+	// precedence).
+	TypesExclude []string `json:"types_exclude,omitempty"`
 	// Synthesize gates the LLM answer step. nil/true = full pipeline (default);
 	// false = retrieval-only: return the post-rerank sources without the LLM
 	// synthesis call. Deterministic + fast, for the A/B sweep / eval harness.
@@ -511,9 +517,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// widen to full access.
 	grantedBlockIDs := resolveGrants(ctx, h.pool, ar)
 
-	// Wire compat (seam 17): the REST field block_roles_exclude maps onto the
-	// request-level p_types_exclude — the rename alias (types_exclude) is T10.
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, req.CategoriesExclude, req.BlockRolesExclude, grantedBlockIDs)
+	// Wire compat (seam 17, closed in WF T10): types_exclude is the canonical
+	// wire name for the request-level p_types_exclude; block_roles_exclude
+	// stays as the documented legacy alias — both present ⇒ union.
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, req.CategoriesExclude, unionExcludes(req.TypesExclude, req.BlockRolesExclude), grantedBlockIDs)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,

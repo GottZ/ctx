@@ -115,7 +115,7 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 		"category_count": len(catNames),
 	}
 
-	block, err := store.UpsertBlock(ctx, pool, "index", indexTitle, indexContent, indexTags, indexMetadata, homeScope, true, store.SensitivityWrite{})
+	block, err := store.UpsertBlock(ctx, pool, "index", indexTitle, indexContent, indexTags, indexMetadata, homeScope, true, store.SensitivityWrite{}, "")
 	if err != nil {
 		return fmt.Errorf("digest: upsert topic map: %w", err)
 	}

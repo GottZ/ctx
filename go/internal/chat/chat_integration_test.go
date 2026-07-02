@@ -182,7 +182,7 @@ func seedBlock(t *testing.T, pool *pgxpool.Pool, scope, title, content string, s
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	b, err := store.UpsertBlock(ctx, pool, "test", title, content, nil, nil, scope, true, store.SensitivityWrite{})
+	b, err := store.UpsertBlock(ctx, pool, "test", title, content, nil, nil, scope, true, store.SensitivityWrite{}, "")
 	if err != nil {
 		t.Fatalf("seed block: %v", err)
 	}

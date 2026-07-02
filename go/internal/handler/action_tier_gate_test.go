@@ -49,6 +49,18 @@ func TestActionTier_Classification(t *testing.T) {
 		{"tenant-grant-create", "", tierServerAdmin},
 		{"tenant-grant-list", "", tierServerAdmin},
 		{"tenant-grant-delete", "", tierServerAdmin},
+		// type-* (WF T10, design/01 §5.4): mutations switch block visibility
+		// policy and tier 1 only has the server-global '_global' namespace →
+		// server-admin. THIS table is the direct fail-open probe: the
+		// dispatcher default is tierOpen, so removing the actionTier entry
+		// turns these rows red (a forgotten entry would admit every valid key).
+		{"type-create", "", tierServerAdmin},
+		{"type-update", "", tierServerAdmin},
+		{"type-delete", "", tierServerAdmin},
+		// type-list/get are deliberately open (UI badges); handler-scoped
+		// to '_global' ∪ own tenant namespace (K-T1).
+		{"type-list", "", tierOpen},
+		{"type-get", "", tierOpen},
 		// dream/gaming: only the mutating shape is gated; read stays open
 		{"dream-mode", "", tierOpen},
 		{"dream-mode", `{"mode":"off"}`, tierServerAdmin},

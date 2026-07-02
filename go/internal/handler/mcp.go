@@ -95,6 +95,13 @@ type getInput struct {
 type recentInput struct {
 	Limit    int    `json:"limit,omitempty" jsonschema:"max blocks to return (default 10, max 50)"`
 	Category string `json:"category,omitempty" jsonschema:"filter by category"`
+	// WF T10: opt-in server-side type filters (bind parameters; the recent
+	// surface lives here + the chat ctx_recent tool — there is no REST
+	// /api/recent route). block_roles_exclude is the legacy alias for
+	// types_exclude (seam 17); both present ⇒ union.
+	Types             []string `json:"types,omitempty" jsonschema:"only these block types (e.g. knowledge, audit-trail)"`
+	TypesExclude      []string `json:"types_exclude,omitempty" jsonschema:"exclude these block types"`
+	BlockRolesExclude []string `json:"block_roles_exclude,omitempty" jsonschema:"legacy alias for types_exclude"`
 }
 
 
@@ -225,7 +232,7 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		}
 
 		// Upsert.
-		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, input.Metadata, scope, false, sens)
+		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, input.Metadata, scope, false, sens, "")
 		if err != nil {
 			return errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
 		}
@@ -268,7 +275,7 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 		}
 
 		grants := resolveGrants(ctx, cfg.Pool, ar)
-		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil, grants)
+		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil, grants, nil, nil)
 		if err != nil {
 			return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
 		}
@@ -350,8 +357,18 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 		args := []any{scopes, grants}
 
 		if input.Category != "" {
-			query += ` AND category = $3`
 			args = append(args, input.Category)
+			query += fmt.Sprintf(` AND category = $%d`, len(args))
+		}
+		// WF T10: opt-in server-side type filters (bind parameters; alias
+		// union — see recentInput).
+		if len(input.Types) > 0 {
+			args = append(args, input.Types)
+			query += fmt.Sprintf(` AND type_name = ANY($%d::text[])`, len(args))
+		}
+		if excl := unionExcludes(input.TypesExclude, input.BlockRolesExclude); len(excl) > 0 {
+			args = append(args, excl)
+			query += fmt.Sprintf(` AND NOT (type_name = ANY($%d::text[]))`, len(args))
 		}
 		query += ` ORDER BY updated_at DESC LIMIT ` + fmt.Sprintf("%d", limit)
 

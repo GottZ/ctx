@@ -30,6 +30,14 @@ type Block struct {
 	// older list shapes leave them empty (omitempty).
 	Sensitivity       string    `json:"sensitivity,omitempty"`
 	SensitivitySource string    `json:"sensitivity_source,omitempty"`
+	// TypeName/LifecycleState/TypeSource (WF T10, design/01 §7-T10): the two
+	// block-type axes + provenance go wire-visible. Wire name for type_name
+	// is `type` — the registry vocabulary the UI badges consume; type_source
+	// carries the auto/manual provenance (M071). Filled by the paths whose
+	// SELECT returns them (upsert/update/get); older shapes leave "" (omitempty).
+	TypeName       string `json:"type,omitempty"`
+	LifecycleState string `json:"lifecycle_state,omitempty"`
+	TypeSource     string `json:"type_source,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }
@@ -74,6 +82,11 @@ type BlockPreview struct {
 	// SearchBlocks selects the column (both the compact and full SELECT) and
 	// scans it here; older callers that don't select it leave it "" (omitempty).
 	Sensitivity    string    `json:"sensitivity,omitempty"`
+	// Type axes (WF T10): filled by SearchBlocks + RecentBlocks; callers
+	// whose SELECT doesn't return them leave "" (omitempty).
+	TypeName       string    `json:"type,omitempty"`
+	LifecycleState string    `json:"lifecycle_state,omitempty"`
+	TypeSource     string    `json:"type_source,omitempty"`
 	Score          float64   `json:"score,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	CreatedAt      time.Time `json:"created_at,omitempty"`
@@ -86,6 +99,11 @@ type BlockMeta struct {
 	Category  string    `json:"category"`
 	Tags      []string  `json:"tags"`
 	Scope     string    `json:"scope"`
+	// Type axes (WF T10): filled by ListMeta; the ResolveBlockID matches
+	// shape doesn't select them ("" + omitempty keeps its wire unchanged).
+	TypeName       string `json:"type,omitempty"`
+	LifecycleState string `json:"lifecycle_state,omitempty"`
+	TypeSource     string `json:"type_source,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -173,7 +191,13 @@ func HashNOOPCheck(ctx context.Context, pool *pgxpool.Pool, content, scope, cate
 // If scopeExplicit is true, scope is included in the ON CONFLICT UPDATE.
 // sens carries the sensitivity intent (F3-P3): zero value = DDL default on
 // insert, untouched on update; Manual applies upgrade-only on conflict.
-func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite) (*Block, error) {
+// typeName (WF T10, design/01 §4.5/T4 semantics): "" = leave the type axes
+// to the DDL default + auto-classifier; non-empty = user-explicit type, sets
+// type_source='manual' so the auto-classifier never re-touches the block
+// (the classify hook updates only type_source='auto' rows). The HANDLER
+// validates the name against the registry snapshot (422 on unknown) — this
+// layer trusts its caller like it does for sensitivity levels.
+func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string) (*Block, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -224,17 +248,30 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 		}
 	}
 
+	if typeName != "" {
+		// Explicit type = manual provenance (T4 semantics: manual overrides
+		// the auto-classifier permanently, exactly the sensitivity_source
+		// pattern). On conflict the explicit intent overwrites — the caller
+		// asserted the type in THIS write.
+		insertCols += ", type_name, type_source"
+		insertVals += fmt.Sprintf(", $%d, 'manual'", len(args)+1)
+		args = append(args, typeName)
+		setClauses = append(setClauses,
+			"type_name = EXCLUDED.type_name",
+			"type_source = 'manual'")
+	}
+
 	query := fmt.Sprintf(`INSERT INTO context_blocks (%s)
 		VALUES (%s)
 		ON CONFLICT (category, title, scope) WHERE NOT is_archived DO UPDATE SET
 			%s
-		RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at`,
+		RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at`,
 		insertCols, insertVals, strings.Join(setClauses, ",\n\t\t\t"))
 
 	b := &Block{}
 	err := pool.QueryRow(ctx, query, args...).Scan(
 		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
-		&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt,
+		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: upsert block: %w", err)
@@ -391,13 +428,13 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []s
 	}
 	b := &Block{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at
+		`SELECT id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at
 		 FROM context_blocks
 		 WHERE id = $1 AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($3::uuid[]))
 		 LIMIT 1`,
 		id, readScopes, grantedBlockIDs,
 	).Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
-		&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt)
+		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -441,6 +478,11 @@ type UpdateBlockData struct {
 	// confirm; the store applies.
 	Sensitivity                 *string `json:"sensitivity,omitempty"`
 	ConfirmSensitivityDowngrade bool    `json:"confirm_sensitivity_downgrade,omitempty"`
+	// Type re-types the block (WF T10): type_source becomes 'manual', which
+	// permanently overrides the auto-classifier (T4 semantics — the classify
+	// hook only touches type_source='auto' rows). The handler validates the
+	// name against the registry snapshot (422 on unknown); the store applies.
+	Type *string `json:"type,omitempty"`
 	// SensitivityAudit is set by the handler on a confirmed downgrade
 	// (who/when/from→to) and merged into metadata.sensitivity_audit. Never
 	// client-supplied (json:"-").
@@ -517,6 +559,13 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		argIdx++
 		setClauses = append(setClauses, "sensitivity_source = 'manual'")
 	}
+	if data.Type != nil {
+		// Handler has validated the name against the registry (WF T10).
+		setClauses = append(setClauses, fmt.Sprintf("type_name = $%d", argIdx))
+		args = append(args, *data.Type)
+		argIdx++
+		setClauses = append(setClauses, "type_source = 'manual'")
+	}
 
 	if len(setClauses) == 0 {
 		return nil, false, fmt.Errorf("store: update block: no fields to update")
@@ -534,14 +583,14 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
-		 RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at`,
+		 RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at`,
 		strings.Join(setClauses, ", "), idIdx, scopeIdx,
 	)
 
 	b := &Block{}
 	err := pool.QueryRow(ctx, query, args...).Scan(
 		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
-		&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt,
+		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, nil
@@ -583,7 +632,15 @@ type SearchCursor struct {
 // (unchanged). On the empty-query browse path it resumes strictly after the
 // cursor's (updated_at, id); on the FTS path it is ignored (that path is
 // LIMIT-only). Callers that do not paginate pass nil.
-func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string) ([]BlockPreview, error) {
+//
+// types / typesExclude (WF T10, design/01 §7-T10 R1): OPT-IN server-side
+// type filters — `type_name = ANY($n)` / `NOT type_name = ANY($n)` as bind
+// parameters, empty/nil = no filter. Deliberately NOT a hard exclude: the
+// browse surfaces keep the D5 asymmetry (excluded-policy types stay
+// browseable; only retrieval ranks them out). A client-side filter over
+// paginated lists would be functionally wrong at the 1M+/10k-issues target
+// scale (knowledge browsing would page through issue pages).
+func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string, types []string, typesExclude []string) ([]BlockPreview, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
@@ -624,6 +681,21 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 		argIdx++
 	}
 
+	// Server-side type filters (WF T10): bind parameters, opt-in only. The
+	// 035-line partial index (WHERE type_name != 'knowledge') covers
+	// non-knowledge filter values by predicate implication; the unfiltered
+	// default view stays the knowledge-dominated browse path.
+	if len(types) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("type_name = ANY($%d::text[])", argIdx))
+		args = append(args, types)
+		argIdx++
+	}
+	if len(typesExclude) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("NOT (type_name = ANY($%d::text[]))", argIdx))
+		args = append(args, typesExclude)
+		argIdx++
+	}
+
 	// Keyset cursor (block-workbench W7). Only the empty-query browse path
 	// (ORDER BY updated_at DESC, id DESC) paginates by keyset: resume strictly
 	// after the cursor's (updated_at, id) via the row-value comparison
@@ -651,7 +723,7 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 	var selectFields string
 	var orderBy string
 	if compact {
-		selectFields = `id, category, tags, title, scope, sensitivity, LEFT(content, 200) AS content_preview, length(content) AS content_length, updated_at`
+		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, LEFT(content, 200) AS content_preview, length(content) AS content_length, updated_at`
 		if hasQuery {
 			orderBy = fmt.Sprintf(
 				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
@@ -665,7 +737,7 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 			orderBy = `updated_at DESC, id DESC`
 		}
 	} else {
-		selectFields = `id, category, tags, title, scope, sensitivity, content, metadata, created_at, updated_at`
+		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, content, metadata, created_at, updated_at`
 		if hasQuery {
 			orderBy = fmt.Sprintf(
 				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
@@ -697,11 +769,11 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 	for rows.Next() {
 		bp := BlockPreview{}
 		if compact {
-			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
+			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
 				return nil, fmt.Errorf("store: search blocks scan: %w", err)
 			}
 		} else {
-			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.Content, &bp.Metadata, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
+			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.Content, &bp.Metadata, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
 				return nil, fmt.Errorf("store: search blocks scan: %w", err)
 			}
 		}
@@ -718,7 +790,9 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 // readScopes, newest first, with a 200-char preview — the store backing for the
 // ctx_recent tool (F6) and the MCP recent tool. An empty category means no
 // category filter; limit <= 0 falls back to 10, capped at 50.
-func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category string, limit int) ([]BlockPreview, error) {
+// types / typesExclude (WF T10): opt-in server-side type filters as bind
+// parameters, nil/empty = no filter (see SearchBlocks).
+func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category string, limit int, types []string, typesExclude []string) ([]BlockPreview, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
@@ -728,18 +802,24 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, readScopes []string, 
 	if limit > 50 {
 		limit = 50
 	}
-	q := `SELECT id, category, tags, title, scope, LEFT(content, 200), char_length(content), updated_at
+	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), updated_at
 	      FROM context_blocks
 	      WHERE NOT is_archived AND scope = ANY($1::text[])`
 	args := []any{readScopes}
 	if category != "" {
-		q += ` AND category = $2`
 		args = append(args, category)
-		q += ` ORDER BY updated_at DESC LIMIT $3`
-	} else {
-		q += ` ORDER BY updated_at DESC LIMIT $2`
+		q += fmt.Sprintf(` AND category = $%d`, len(args))
+	}
+	if len(types) > 0 {
+		args = append(args, types)
+		q += fmt.Sprintf(` AND type_name = ANY($%d::text[])`, len(args))
+	}
+	if len(typesExclude) > 0 {
+		args = append(args, typesExclude)
+		q += fmt.Sprintf(` AND NOT (type_name = ANY($%d::text[]))`, len(args))
 	}
 	args = append(args, limit)
+	q += fmt.Sprintf(` ORDER BY updated_at DESC LIMIT $%d`, len(args))
 
 	rows, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -750,7 +830,7 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, readScopes []string, 
 	results := make([]BlockPreview, 0, limit)
 	for rows.Next() {
 		bp := BlockPreview{}
-		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
+		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: recent blocks scan: %w", err)
 		}
 		results = append(results, bp)
@@ -815,18 +895,26 @@ func GetStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (*St
 }
 
 // ListMeta returns all blocks without content (metadata listing).
-func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string) ([]BlockMeta, error) {
+// types / typesExclude (WF T10): opt-in server-side type filters as bind
+// parameters, nil/empty = no filter (see SearchBlocks).
+func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string, types []string, typesExclude []string) ([]BlockMeta, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
-	rows, err := pool.Query(ctx,
-		`SELECT id, title, category, tags, scope, updated_at
+	q := `SELECT id, title, category, tags, scope, type_name, lifecycle_state, type_source, updated_at
 		 FROM context_blocks
-		 WHERE scope = ANY($1::text[]) AND NOT is_archived
-		 ORDER BY category, title
-		 LIMIT 10000`,
-		readScopes,
-	)
+		 WHERE scope = ANY($1::text[]) AND NOT is_archived`
+	args := []any{readScopes}
+	if len(types) > 0 {
+		args = append(args, types)
+		q += fmt.Sprintf(` AND type_name = ANY($%d::text[])`, len(args))
+	}
+	if len(typesExclude) > 0 {
+		args = append(args, typesExclude)
+		q += fmt.Sprintf(` AND NOT (type_name = ANY($%d::text[]))`, len(args))
+	}
+	q += ` ORDER BY category, title LIMIT 10000`
+	rows, err := pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list meta: %w", err)
 	}
@@ -835,7 +923,7 @@ func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string) ([]B
 	results := make([]BlockMeta, 0)
 	for rows.Next() {
 		var bm BlockMeta
-		if err := rows.Scan(&bm.ID, &bm.Title, &bm.Category, &bm.Tags, &bm.Scope, &bm.UpdatedAt); err != nil {
+		if err := rows.Scan(&bm.ID, &bm.Title, &bm.Category, &bm.Tags, &bm.Scope, &bm.TypeName, &bm.LifecycleState, &bm.TypeSource, &bm.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: list meta scan: %w", err)
 		}
 		results = append(results, bm)

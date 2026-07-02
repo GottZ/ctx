@@ -150,7 +150,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 			t.Fatalf("GrantedBlockIDs: %v", err)
 		}
 		// With grant: B appears in A's browse (empty query).
-		withGrant, err := store.SearchBlocks(ctx, pool, "", granteeScopes, "", nil, 50, true, nil, grants)
+		withGrant, err := store.SearchBlocks(ctx, pool, "", granteeScopes, "", nil, 50, true, nil, grants, nil, nil)
 		if err != nil {
 			t.Fatalf("SearchBlocks with grant: %v", err)
 		}
@@ -158,7 +158,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 			t.Fatalf("SearchBlocks(grants=[B]) results %v, want it to contain %s", previewIDs(withGrant), blockB)
 		}
 		// Without grant (empty set): B is gone.
-		noGrant, err := store.SearchBlocks(ctx, pool, "", granteeScopes, "", nil, 50, true, nil, []string{})
+		noGrant, err := store.SearchBlocks(ctx, pool, "", granteeScopes, "", nil, 50, true, nil, []string{}, nil, nil)
 		if err != nil {
 			t.Fatalf("SearchBlocks no grant: %v", err)
 		}
@@ -188,7 +188,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 			t.Fatalf("GetBlock returned ARCHIVED granted block %s — the mandatory parentheses leaked (G3)", got.ID)
 		}
 		// SearchBlocks browse path: same guarantee.
-		res, err := store.SearchBlocks(ctx, pool, "", granteeScopes, "", nil, 50, true, nil, grants)
+		res, err := store.SearchBlocks(ctx, pool, "", granteeScopes, "", nil, 50, true, nil, grants, nil, nil)
 		if err != nil {
 			t.Fatalf("SearchBlocks archived granted: %v", err)
 		}
@@ -243,7 +243,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 		if _, err := store.GetBlock(ctx, pool, blockB, []string{}, grants); !errors.Is(err, store.ErrNoScopes) {
 			t.Fatalf("GetBlock(empty scopes, grants=[B]) err = %v, want store.ErrNoScopes (G5 conservative pin)", err)
 		}
-		if _, err := store.SearchBlocks(ctx, pool, "", []string{}, "", nil, 50, true, nil, grants); !errors.Is(err, store.ErrNoScopes) {
+		if _, err := store.SearchBlocks(ctx, pool, "", []string{}, "", nil, 50, true, nil, grants, nil, nil); !errors.Is(err, store.ErrNoScopes) {
 			t.Fatalf("SearchBlocks(empty scopes, grants=[B]) err = %v, want store.ErrNoScopes (G5)", err)
 		}
 	})

@@ -222,7 +222,7 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 		// Block mode: upsert by (category, title, scope).
 		block, err = store.UpsertBlock(ctx, h.pool,
 			chunk.Category, chunk.Title, chunk.Content,
-			chunk.Tags, chunk.Metadata, scope, false, store.SensitivityWrite{},
+			chunk.Tags, chunk.Metadata, scope, false, store.SensitivityWrite{}, "",
 		)
 		if err != nil {
 			slog.Error("ingest: upsert block error",

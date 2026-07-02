@@ -79,6 +79,15 @@ type manageRequest struct {
 	Category string          `json:"category"`
 	Status   string          `json:"status"`
 	Limit    int             `json:"limit"`
+	// Types/TypesExclude (WF T10): opt-in server-side type filters for
+	// list-meta (bind parameters, design/01 §7-T10 R1 — never a client
+	// filter over paginated lists at the 1M+/10k-issues target scale).
+	// BlockRolesExclude is the documented legacy alias for TypesExclude
+	// (seam 17 — the pre-071 wire name); both present ⇒ the UNION applies
+	// (monotone-restrictive: more excluded = narrower, no silent precedence).
+	Types             []string `json:"types"`
+	TypesExclude      []string `json:"types_exclude"`
+	BlockRolesExclude []string `json:"block_roles_exclude"`
 }
 
 // HandleManage dispatches CRUD and guard management actions.
@@ -116,17 +125,16 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 	case "list-categories":
 		h.handleListCategories(w, r, authResult)
 	case "list-meta":
-		h.handleListMeta(w, r, authResult)
+		h.handleListMeta(w, r, authResult, req)
 	case "update":
 		h.handleUpdate(w, r, authResult, req)
 	case "delete":
 		h.handleDelete(w, r, authResult, req)
-	case "guard-list":
-		h.handleGuardList(w, r, authResult, req)
-	case "guard-stats":
-		h.handleGuardStats(w, r, authResult)
-	case "guard-resolve":
-		h.handleGuardResolve(w, r, authResult, req)
+	case "guard-list", "guard-stats", "guard-resolve":
+		// Folded into one arm (WF T10): the type-* family consumed the last
+		// cyclop headroom (§9.2 conflict surface, max-complexity 25) — the
+		// guard trio moves to the established dispatch* helper pattern.
+		h.dispatchGuardAction(w, r, authResult, req)
 	case "dream-stats":
 		h.handleDreamStats(w, r, authResult)
 	case "dream-review":
@@ -171,11 +179,30 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchTenantAction(w, r, authResult, req)
 	case "blocks-audit-start", "blocks-audit-status", "blocks-classify-start", "blocks-classify-status":
 		h.dispatchBlocksAction(w, r, req)
+	case "type-list", "type-get", "type-create", "type-update", "type-delete":
+		// Block-type registry family (WF T10, design/01 §7-T10). Tier split
+		// lives in actionTier (§5.4-N1: dispatch arm AND tier entry land in
+		// the SAME wave — the dispatcher default is fail-open tierOpen).
+		h.dispatchTypeAction(w, r, authResult, req)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
 			"error":   "Unknown action",
 		})
+	}
+}
+
+// dispatchGuardAction fans the guard-* read/resolve actions out (split from
+// HandleManage's switch for the cyclomatic budget when the type-* family
+// landed, WF T10; all tierOpen — auth + scope only, unchanged).
+func (h *ManageHandler) dispatchGuardAction(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+	switch req.Action {
+	case "guard-list":
+		h.handleGuardList(w, r, ar, req)
+	case "guard-stats":
+		h.handleGuardStats(w, r, ar)
+	case "guard-resolve":
+		h.handleGuardResolve(w, r, ar, req)
 	}
 }
 
@@ -353,8 +380,22 @@ func actionTier(req manageRequest) adminTier {
 		// block across the tenant boundary, so it stays server-admin AND carries a
 		// hard per-block ownership gate IN the handler (design/07 §5.1) — the tier
 		// gate alone (server-global is_admin) is NOT sufficient.
-		"block-grant-create", "block-grant-list", "block-grant-revoke":
+		"block-grant-create", "block-grant-list", "block-grant-revoke",
+		// type-create/update/delete (WF T10, design/01 §5.4): editing a type
+		// config SWITCHES block visibility (excluded→full-pass), and tier 1
+		// only has the server-global '_global' namespace — so the mutations
+		// are server-admin. The tenant-row tier (tierTenantAdmin + hard
+		// ar.TenantID scope binding in the handler) is wave T12. This entry
+		// lands in the SAME wave as the dispatch arm (§5.4-N1: the dispatcher
+		// default is fail-open tierOpen — a forgotten entry would admit every
+		// valid key; the DB-less 403 gate probe pins it).
+		"type-create", "type-update", "type-delete":
 		return tierServerAdmin
+	case "type-list", "type-get":
+		// Deliberately open (design/01 §5.4): every UI needs type metadata
+		// for badges. The HANDLER scopes the rows to '_global' ∪ the caller's
+		// own tenant namespace (K-T1: gate admits only, handler scopes).
+		return tierOpen
 	case "dream-mode":
 		if isDreamModeMutation(req) {
 			return tierServerAdmin
@@ -574,11 +615,13 @@ func (h *ManageHandler) handleListCategories(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-func (h *ManageHandler) handleListMeta(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
+func (h *ManageHandler) handleListMeta(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
 
-	blocks, err := store.ListMeta(ctx, h.pool, ar.ReadScopes)
+	// WF T10: opt-in server-side type filters; block_roles_exclude is the
+	// legacy alias for types_exclude — both present ⇒ union (see manageRequest).
+	blocks, err := store.ListMeta(ctx, h.pool, ar.ReadScopes, req.Types, unionExcludes(req.TypesExclude, req.BlockRolesExclude))
 	if err != nil {
 		slog.Error("manage: list-meta error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -626,6 +669,19 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 			"success": false, "error": msg,
 		})
 		return
+	}
+
+	// Type re-classification (WF T10, D4: REST only): registry-validated,
+	// fail-closed — an unwired registry rejects instead of writing an
+	// unvalidated name (422). The store then sets type_source='manual',
+	// which permanently overrides the auto-classifier (T4 semantics).
+	if data.Type != nil {
+		if msg := h.validateBlockTypeName(ctx, *data.Type); msg != "" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"success": false, "error": msg,
+			})
+			return
+		}
 	}
 
 	// Scope write restriction on update — the target scope must be one the key
