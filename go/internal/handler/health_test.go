@@ -120,8 +120,9 @@ func assertHealthBody(t *testing.T, body []byte, needles []string) {
 	dec := json.NewDecoder(strings.NewReader(string(body)))
 	dec.DisallowUnknownFields()
 	var resp struct {
-		Status   string            `json:"status"`
-		Services map[string]string `json:"services"`
+		Status            string            `json:"status"`
+		Services          map[string]string `json:"services"`
+		BlocktypeRegistry string            `json:"blocktype_registry"`
 	}
 	if err := dec.Decode(&resp); err != nil {
 		t.Fatalf("health body has unknown fields or bad shape: %v\nbody: %s", err, body)
@@ -131,6 +132,13 @@ func assertHealthBody(t *testing.T, body []byte, needles []string) {
 	case "ok", "degraded", "unhealthy":
 	default:
 		t.Errorf("status %q outside the fixed vocabulary", resp.Status)
+	}
+	// WF T3: the blocktype_registry field carries process-internal
+	// degradation state, name-free by construction ("ok"|"builtin-fallback").
+	switch resp.BlocktypeRegistry {
+	case "ok", "builtin-fallback":
+	default:
+		t.Errorf("blocktype_registry %q outside the fixed vocabulary", resp.BlocktypeRegistry)
 	}
 	roles := map[string]bool{"database": true, "embed": true, "chat": true, "dream": true}
 	for k, v := range resp.Services {
@@ -169,7 +177,7 @@ func TestHealthShapeInvariant(t *testing.T) {
 		st.p.Store(cfg)
 
 		rec := httptest.NewRecorder()
-		NewHealthHandler(pool, st, healthTestPool(backend.URL, backend.URL, backend.URL)).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+		NewHealthHandler(pool, st, healthTestPool(backend.URL, backend.URL, backend.URL), nil).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, want 503 (DB down in unit test)", rec.Code)
@@ -194,7 +202,7 @@ func TestHealthShapeInvariant(t *testing.T) {
 		st.p.Store(cfg)
 
 		rec := httptest.NewRecorder()
-		NewHealthHandler(pool, st, healthTestPool(down, down, down)).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+		NewHealthHandler(pool, st, healthTestPool(down, down, down), nil).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, want 503", rec.Code)
@@ -240,7 +248,7 @@ func TestHealthPingsSnapshotTargets(t *testing.T) {
 	st := &swapStore{}
 	st.p.Store(healthTestConfig(srvA.URL, srvA.URL, srvA.URL))
 	bp := healthTestPool(srvA.URL, srvA.URL, srvA.URL)
-	h := NewHealthHandler(pool, st, bp)
+	h := NewHealthHandler(pool, st, bp, nil)
 
 	h.Health(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
 	if got := hitsA.Load(); got != 3 {

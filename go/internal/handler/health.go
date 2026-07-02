@@ -22,11 +22,31 @@ type HealthHandler struct {
 	pool        *pgxpool.Pool
 	cfg         ConfigStore
 	backendPool *backends.Pool
+	blocktypes  BlocktypeHealth
 }
 
-// NewHealthHandler creates a new HealthHandler.
-func NewHealthHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool) *HealthHandler {
-	return &HealthHandler{pool: pool, cfg: cfg, backendPool: backendPool}
+// BlocktypeHealth reports the block-type registry degradation state for the
+// /health field blocktype_registry (WF T3, design 01 §4.3): "ok" or
+// "builtin-fallback". Implemented by *blocktype.Registry; an interface here
+// keeps handler free of the blocktype import (and lets tests fake the
+// degraded state without a registry).
+type BlocktypeHealth interface {
+	Health() string
+}
+
+// NewHealthHandler creates a new HealthHandler. blocktypes may be nil
+// (tests): the field then reports "ok" — the single-binary boot always
+// wires the registry.
+func NewHealthHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, blocktypes BlocktypeHealth) *HealthHandler {
+	return &HealthHandler{pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes}
+}
+
+// blocktypeHealthValue maps a possibly-nil BlocktypeHealth to the wire value.
+func blocktypeHealthValue(bt BlocktypeHealth) string {
+	if bt == nil {
+		return "ok"
+	}
+	return bt.Health()
 }
 
 // healthResponse is the public wire shape: role names mapped to ok|error,
@@ -39,6 +59,13 @@ func NewHealthHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends
 type healthResponse struct {
 	Status   string            `json:"status"`
 	Services map[string]string `json:"services"`
+	// BlocktypeRegistry is "ok" or "builtin-fallback" (WF T3, design 01
+	// §4.3 b): the visibility-policy registry failed its DB load and runs on
+	// the compiled-in builtin set — loud, because the fallback REVERTS
+	// operator visibility narrowings. Not a services entry: services carry
+	// ping-based role reachability, this is process-internal degradation
+	// state. Name-free like everything else in this body.
+	BlocktypeRegistry string `json:"blocktype_registry"`
 }
 
 // HealthStatus computes the service-class health aggregate from ONE pool
@@ -53,7 +80,9 @@ type healthResponse struct {
 //   - Embed down → "unhealthy" (embeddings are mandatory for store+search)
 //   - Chat down → "degraded" (queries broken, but store works)
 //   - Dream down → "ok" (background process, not critical)
-func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backend, dreamEnabled bool) healthResponse {
+//   - Blocktype registry on builtin-fallback → "degraded" (WF T3: reads work,
+//     but the visibility policy runs on compiled-in defaults)
+func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backend, dreamEnabled bool, blocktypeRegistry string) healthResponse {
 	services := make(map[string]string)
 
 	// Database ping
@@ -72,14 +101,24 @@ func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backe
 		services["dream"] = roleReachable(ctx, snap, backends.RoleDream)
 	}
 
-	status := "ok"
-	if services["database"] != "ok" || services["embed"] != "ok" {
-		status = "unhealthy"
-	} else if services["chat"] != "ok" {
-		status = "degraded"
+	return healthResponse{
+		Status:            aggregateHealthStatus(services, blocktypeRegistry),
+		Services:          services,
+		BlocktypeRegistry: blocktypeRegistry,
 	}
+}
 
-	return healthResponse{Status: status, Services: services}
+// aggregateHealthStatus folds the per-service results and the blocktype
+// registry state into the overall status (pure — unit-testable without a DB).
+func aggregateHealthStatus(services map[string]string, blocktypeRegistry string) string {
+	switch {
+	case services["database"] != "ok" || services["embed"] != "ok":
+		return "unhealthy"
+	case services["chat"] != "ok" || blocktypeRegistry != "ok":
+		return "degraded"
+	default:
+		return "ok"
+	}
 }
 
 // Health serves the public /health endpoint, wrapping HealthStatus with the
@@ -90,7 +129,7 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 
 	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: /health is public/anonymous — no tenant in reach; dream.enabled is server-global.
 	snap := h.backendPool.Snapshot()
-	resp := HealthStatus(ctx, h.pool, snap, cfg.Dream.Enabled)
+	resp := HealthStatus(ctx, h.pool, snap, cfg.Dream.Enabled, blocktypeHealthValue(h.blocktypes))
 
 	statusCode := http.StatusOK
 	if resp.Status == "unhealthy" {

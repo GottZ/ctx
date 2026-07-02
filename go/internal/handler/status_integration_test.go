@@ -33,7 +33,7 @@ func TestStatusCollectorSingleFlight(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 
 	var scans int32
-	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}))
+	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}), nil)
 	c.queueDepth = func(_ context.Context, _ *pgxpool.Pool, _ []string) (*dream.QueueStats, error) {
 		atomic.AddInt32(&scans, 1)
 		return &dream.QueueStats{}, nil
@@ -68,7 +68,7 @@ func TestStatusCollectorSingleFlight(t *testing.T) {
 func TestStatusCollectorLLM24h(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
-	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}))
+	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}), nil)
 
 	mustExec := func(sql string, args ...any) {
 		t.Helper()
@@ -116,7 +116,7 @@ func TestStatusCollectorLLM24h(t *testing.T) {
 func TestStatusCollectorLLM24hErrorRowComplete(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
-	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}))
+	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}), nil)
 
 	mustExec := func(sql string, args ...any) {
 		t.Helper()
@@ -138,7 +138,7 @@ func TestStatusCollectorLLM24hErrorRowComplete(t *testing.T) {
 func TestStatusCollectorLastCycle(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
-	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}))
+	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}), nil)
 
 	if c.queryLastCycleAt(ctx) != nil {
 		t.Errorf("no dream rows → last_cycle_at must be nil")

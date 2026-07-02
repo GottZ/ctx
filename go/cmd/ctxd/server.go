@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
@@ -28,7 +29,7 @@ const (
 // is the runtime-config snapshot store: every config-consuming handler reads
 // one snapshot per request from it (F1-W4–W7) — no handler holds a boot copy,
 // so a config replace is live from the next request on.
-func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool) *chi.Mux {
+func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry) *chi.Mux {
 	r := chi.NewRouter()
 
 	// MT 06-C5: wire the request→tenant-scope hook so SnapshotForRequest can
@@ -46,8 +47,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	r.Use(handler.Logger)
 	r.Use(handler.Recovery)
 
-	// Health check (no auth, no body)
-	h := handler.NewHealthHandler(pool, cfgStore, backendPool)
+	// Health check (no auth, no body). blocktypeReg feeds the
+	// blocktype_registry degradation field (WF T3, design 01 §4.3).
+	h := handler.NewHealthHandler(pool, cfgStore, backendPool, blocktypeReg)
 	r.Get("/health", h.Health)
 
 	// OAuth 2.1 endpoints for MCP remote auth (no auth middleware — these ARE the auth flow).
@@ -87,7 +89,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// Status dashboard (F4-W6/G33): ONE process-wide collector feeds GET
 	// /api/status (and, in W7/G34, SSE) from a cache — N pollers cost one
 	// refresh, not N. scheduler supplies the dream mode (GetDreamMode).
-	statusCollector := handler.NewStatusCollector(pool, backendPool, scheduler, cfgStore)
+	statusCollector := handler.NewStatusCollector(pool, backendPool, scheduler, cfgStore, blocktypeReg)
 	statusH := handler.NewStatusHandler(statusCollector)
 	llmlogH := handler.NewLLMLogHandler(pool, cfgStore)
 	// SSE live updates (F4-W7/G34): GET /api/events broadcasts from the SAME

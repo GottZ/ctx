@@ -263,13 +263,15 @@ fi
 # 40 columns since M071 (type_source, WF T2 provenance column — the rename
 # itself is count-neutral; the added column was missed in the T2 wave commit,
 # caught by this test post-deploy 2026-07-02).
+# + 1 since M072 (context_block_types, WF T3 dynamic block-type registry;
+# context_blocks untouched, col_count stays 40).
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "29" ]] && [[ "$col_count" == "40" ]]; then
+if [[ "$table_count" == "30" ]] && [[ "$col_count" == "40" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 29 tables + 40 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 30 tables + 40 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS

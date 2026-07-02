@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/digest"
 	"github.com/GottZ/ctx/internal/dream"
@@ -97,8 +98,9 @@ type dreamCycleFunc func(ctx context.Context, pool *pgxpool.Pool, r *dream.Route
 // Reacts to LISTEN/NOTIFY events via pgxlisten and uses time-based fallbacks.
 type Scheduler struct {
 	pool          *pgxpool.Pool
-	cfg           *config.Store  // hot config: one Snapshot per cycle/run
-	backendPool   *backends.Pool // F3 pool; listener reloads it on context_backends NOTIFYs
+	cfg           *config.Store       // hot config: one Snapshot per cycle/run
+	backendPool   *backends.Pool      // F3 pool; listener reloads it on context_backends NOTIFYs
+	blocktypes    *blocktype.Registry // WF T3: the listener hot-reloads it on context_block_types NOTIFYs; nil until SetBlocktypeRegistry
 	startup       StartupConfig
 	runCycle      dreamCycleFunc
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
@@ -202,6 +204,15 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 	}
 	s.backgroundTenantsFn = s.backgroundTenants
 	return s
+}
+
+// SetBlocktypeRegistry installs the block-type registry the NOTIFY listener
+// hot-reloads (WF T3, design 01 §4.3). MUST be called at boot, before Run —
+// the field is written without synchronization, relying on the boot
+// happens-before (the config.Store.SetOverlay pattern). While nil the
+// listener's block_type entity branch is inert.
+func (s *Scheduler) SetBlocktypeRegistry(reg *blocktype.Registry) {
+	s.blocktypes = reg
 }
 
 // backgroundTenant is one iterated background tenant resolved from the
@@ -430,7 +441,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	)
 
 	// Start pgxlisten in a separate goroutine (auto-reconnect, backlog handler).
-	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s, s.pool, s.cfg, s.backendPool)
+	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s, s.pool, s.cfg, s.backendPool, s.blocktypes)
 	go func() {
 		if err := listener.Listen(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("scheduler: pgxlisten fatal error", "error", err)

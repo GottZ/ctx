@@ -120,6 +120,7 @@ type StatusCollector struct {
 	backendPool *backends.Pool
 	dreams      dreamModeSource
 	cfg         ConfigStore
+	blocktypes  BlocktypeHealth // WF T3: /health + status share the blocktype_registry field; nil ⇒ "ok"
 	queueDepth  queueDepthFn
 
 	mu      sync.Mutex // serializes the cold-start build only
@@ -147,12 +148,15 @@ type StatusCollector struct {
 }
 
 // NewStatusCollector wires the collector. dreams is typically *events.Scheduler.
-func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams dreamModeSource, cfg ConfigStore) *StatusCollector {
+// blocktypes may be nil (tests): the health aggregate then reports
+// blocktype_registry "ok" (same convention as NewHealthHandler).
+func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams dreamModeSource, cfg ConfigStore, blocktypes BlocktypeHealth) *StatusCollector {
 	return &StatusCollector{
 		pool:        pool,
 		backendPool: backendPool,
 		dreams:      dreams,
 		cfg:         cfg,
+		blocktypes:  blocktypes,
 		queueDepth:  dream.QueueDepth,
 	}
 }
@@ -270,7 +274,7 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	// pool snapshot. The ping context is capped so a hung backend cannot stall
 	// the dashboard refresh.
 	hctx, hcancel := context.WithTimeout(ctx, 4*time.Second)
-	health := HealthStatus(hctx, c.pool, c.backendPool.Snapshot(), cfg.Dream.Enabled)
+	health := HealthStatus(hctx, c.pool, c.backendPool.Snapshot(), cfg.Dream.Enabled, blocktypeHealthValue(c.blocktypes))
 	hcancel()
 
 	mode, throttle := c.dreams.GetDreamMode()

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/util"
@@ -70,11 +71,15 @@ type SettingsWriteHandler struct {
 	pool        *pgxpool.Pool
 	cfg         *config.Store
 	backendPool *backends.Pool
+	blocktypes  *blocktype.Registry
 }
 
 // NewSettingsWriteHandler creates the hot-reload notification handler.
-func NewSettingsWriteHandler(pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool) *SettingsWriteHandler {
-	return &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool}
+// blocktypes may be nil (tests, pre-T3 wiring): the block-type entity branch
+// is then inert and block_type writes fall through to the settings reload —
+// harmless, just registry-invisible.
+func NewSettingsWriteHandler(pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool, blocktypes *blocktype.Registry) *SettingsWriteHandler {
+	return &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes}
 }
 
 // settingsNotifyPayload mirrors the notify_settings_write() trigger payload
@@ -107,6 +112,27 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 		}
 		return nil
 	}
+	// Block-type registry entity branch (WF T3, design 01 §4.3): the 072
+	// notify trigger rides the same channel; without this branch the write
+	// would fall through to settings.Reload — wirkungslos for the registry
+	// (the T3 negative probe pins exactly that). A tenant-scope row (tier 2+)
+	// drops only that tenant's generation; a _global / reserved / absent
+	// scope swaps the base generation (+ tenant-cache wipe, once tier 2
+	// exists). A successful reload also clears a boot-degraded state — the
+	// psql row-fix heal path without restart.
+	if p.Entity == "context_block_types" {
+		if h.blocktypes == nil {
+			return nil
+		}
+		if scope := p.Scope; scope != "" && !strings.HasPrefix(scope, "_") {
+			h.blocktypes.InvalidateTenant(scope)
+			return nil
+		}
+		if err := h.blocktypes.Reload(ctx, h.pool); err != nil {
+			slog.Warn("listener: blocktype registry reload failed — previous snapshot stays active", "error", err)
+		}
+		return nil
+	}
 	// Scope-carried lazy invalidation (MT T32, 03-W6). A tenant-scope settings
 	// or secrets write does NOT change the _global base generation —
 	// settings.Reload reads scope='_global' exclusively (reload.go) — so a full
@@ -133,9 +159,10 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 	return nil
 }
 
-// HandleBacklog reloads unconditionally after a reconnect — a settings or
-// backend write during the disconnect window would otherwise stay invisible
-// until the next write or restart. Entity is unknown here: reload both.
+// HandleBacklog reloads unconditionally after a reconnect — a settings,
+// backend or block-type write during the disconnect window would otherwise
+// stay invisible until the next write or restart. Entity is unknown here:
+// reload all three (listener.go:139-150 pattern, extended per design 01 §4.3).
 func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string, conn *pgx.Conn) error {
 	slog.Info("listener: processing settings backlog, reloading snapshots")
 	if err := settings.Reload(ctx, h.pool, h.cfg); err != nil {
@@ -146,6 +173,11 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 			slog.Warn("listener: backend pool backlog reload failed — previous snapshot stays active", "error", err)
 		}
 	}
+	if h.blocktypes != nil {
+		if err := h.blocktypes.Reload(ctx, h.pool); err != nil {
+			slog.Warn("listener: blocktype backlog reload failed — previous snapshot stays active", "error", err)
+		}
+	}
 	return nil
 }
 
@@ -153,7 +185,7 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 // Uses a dedicated pgx.Conn (NOT from pool) as required by pgxlisten.
 // pool/cfg feed the settings hot-reload handler; both come from the scheduler
 // that owns this listener.
-func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *Scheduler, pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool) *pgxlisten.Listener {
+func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *Scheduler, pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool, blocktypes *blocktype.Registry) *pgxlisten.Listener {
 	if reconnectDelay == 0 {
 		reconnectDelay = defaultReconnectDelay
 	}
@@ -170,7 +202,7 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 
 	handler := &WriteHandler{scheduler: scheduler}
 	listener.Handle(channelBlockWrite, handler)
-	listener.Handle(channelSettingsWrite, &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool})
+	listener.Handle(channelSettingsWrite, &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes})
 
 	return listener
 }

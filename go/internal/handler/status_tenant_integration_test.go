@@ -64,7 +64,7 @@ func TestStatusPerTenantView(t *testing.T) {
 		{ID: "a", Name: "a-priv", Scope: "st-a", Enabled: true},
 		{ID: "b", Name: "b-priv", Scope: "st-b", Enabled: true},
 	})
-	col := NewStatusCollector(pool, bp, fakeDreamMode{}, config.NewStore(&config.Config{}))
+	col := NewStatusCollector(pool, bp, fakeDreamMode{}, config.NewStore(&config.Config{}), nil)
 
 	t.Run("tenant_rollup_isolated_and_costed", func(t *testing.T) {
 		snap := col.SnapshotForTenant(ctx, "st-a")

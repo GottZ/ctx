@@ -128,7 +128,7 @@ func TestSettingsNotifyScope_Integration(t *testing.T) {
 	if got := builds.Load(); got != 2 {
 		t.Fatalf("priming: builds = %d, want 2", got)
 	}
-	h := NewSettingsWriteHandler(pool, cfg, nil)
+	h := NewSettingsWriteHandler(pool, cfg, nil, nil)
 
 	t.Run("tenant_write_drops_only_that_tenant", func(t *testing.T) {
 		before := builds.Load()

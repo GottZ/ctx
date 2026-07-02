@@ -261,7 +261,11 @@ Store ──► Extract Times ──► Hash NOOP ──────────
               • ON CONFLICT dedups overlapping timestamps
 ```
 
-**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 55 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
+**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 71 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars.
+
+### Block-type registry (migration 072)
+
+`context_block_types` is the declarative per-type behaviour registry of the workflow-engine line: the four block-type classes (`knowledge`, `audit-trail`, `reference`, `system-meta`) ship as builtin seed rows whose JSONB configs reproduce today's hardcoded behaviour (retrieval damping, guard participation, dream linkability, digest/overview inclusion, classify rules). The daemon starts on a compiled-in builtin set, overlays the DB rows at boot (merge — a deleted builtin row can never blank the default type) and hot-reloads on any table write via the same NOTIFY channel the settings use; edits via `psql` take effect without a restart. A boot that finds the table but cannot load it (corrupt row) degrades LOUDLY: `/health` carries `blocktype_registry: "builtin-fallback"`, the overall status drops to `degraded`, and a 30s retry loop self-heals once the row is fixed. No pipeline consumes the registry yet — the RRF/guard/dream/digest call sites switch to it in the following waves.
 
 ### Key environment variables
 

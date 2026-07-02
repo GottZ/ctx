@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/rerank"
@@ -119,6 +120,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// WF T3 (design 01 §4.3): block-type registry — starts on the compiled-in
+	// builtin set, then loads the context_block_types rows with the error-class
+	// split (42P01 pre-072 ⇒ WARN + builtin; corrupt row ⇒ ERROR + /health
+	// blocktype_registry=builtin-fallback + retry loop until healed). Never
+	// fatal, but degradation is LOUD: the builtin fallback would silently
+	// revert operator visibility narrowings otherwise. Wired before scheduler
+	// and router so both see the registry from the first request/NOTIFY on.
+	blocktypeReg := blocktype.NewRegistry()
+	blocktypeReg.Boot(ctx, pool)
+
 	// §3.6 master-key rotation: while CTX_SECRETS_KEY_PREV is set, re-seal
 	// every prev-key secret with the current key (no-op otherwise, never
 	// fatal). Boot-only — the NOTIFY reload path stays read-only by contract.
@@ -180,12 +191,15 @@ func main() {
 		DreamEnabled:     effCfg.Dream.Enabled,
 		DreamParallelism: effCfg.Dream.Parallelism,
 	})
+	// Boot happens-before (SetOverlay pattern): installed before Run starts
+	// the listener goroutine, so the unsynchronized field write is safe.
+	scheduler.SetBlocktypeRegistry(blocktypeReg)
 	go scheduler.Run(ctx)
 
 	// HTTP server. ListenAddr is restart-only, read once from the effective
 	// snapshot (== env value; the settings overlay rejects restart-only keys).
 	listenAddr := cfgStore.Snapshot().Server.ListenAddr //nolint:forbidigo // MT 06 BLIND: restart-only server.listen_addr is a process-global env value (the overlay rejects restart-only keys), read once at boot.
-	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool)
+	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           router,

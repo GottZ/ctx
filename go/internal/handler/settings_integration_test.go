@@ -407,7 +407,7 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		}
 		// Settings-entity payload: the backend pool is not consulted on this
 		// path (G25 added the parameter for entity=context_backends reloads).
-		h := events.NewSettingsWriteHandler(pool, cfgStore, backends.NewPool(pool, nil))
+		h := events.NewSettingsWriteHandler(pool, cfgStore, backends.NewPool(pool, nil), nil)
 		if err := h.HandleNotification(ctx, &pgconn.Notification{Channel: "ctx_settings_write", Payload: `{"entity":"context_settings","key":"chat.model","op":"INSERT"}`}, nil); err != nil {
 			t.Fatalf("notify handler: %v", err)
 		}
