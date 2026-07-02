@@ -39,9 +39,12 @@ func insertRoleTestBlock(t *testing.T, pool *pgxpool.Pool, id string, embedding 
 	}
 }
 
-// TestCtxRrf_BlockRole_BehaviourMatchesContract verifies M038 (Welle 40 HOLD):
-// ctx_rrf is type_name-aware. system-meta is hard-excluded; knowledge,
-// audit-trail and reference all full-pass with role_factor=1.0.
+// TestCtxRrf_BlockRole_BehaviourMatchesContract verifies the M038 (Welle 40
+// HOLD) score contract under the M073 generation: ctx_rrf is type_name-aware
+// via the ALLOWLIST parameter — system-meta is excluded by NOT being in
+// p_types_visible (pre-073: hard-coded exclude literal); knowledge,
+// audit-trail and reference full-pass with factor 1.0 when no damping
+// arrays are passed.
 //
 // Background: M036 (Welle 40 it.2) introduced damping=0.3 for audit-trail.
 // Iter-3 + Iter-4 bench (damping 0.3 / 0.5) both regressed -7pp identically
@@ -116,8 +119,10 @@ func TestCtxRrf_BlockRole_BehaviourMatchesContract(t *testing.T) {
 	// per-block ROW_NUMBER ordering.
 	hv := pgvec.NewHalfVector(embedding)
 	rows, err := pool.Query(ctx,
-		`SELECT id::text, rrf_score FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9)`,
+		`SELECT id::text, rrf_score FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9,
+		         p_types_visible => $10::text[])`,
 		hv, "zzqqxx", "zzqqxx", []string{"private"}, nil, nil, 10, nil, nil,
+		[]string{"knowledge", "audit-trail", "reference"},
 	)
 	if err != nil {
 		t.Fatalf("query ctx_rrf: %v", err)
@@ -137,7 +142,8 @@ func TestCtxRrf_BlockRole_BehaviourMatchesContract(t *testing.T) {
 		t.Fatalf("rows iteration: %v", err)
 	}
 
-	// Contract 1: D (system-meta) must be hard-excluded.
+	// Contract 1: D (system-meta) is not in the allowlist ⇒ excluded
+	// (M073 semantics; same observable outcome as the pre-073 hard literal).
 	if _, ok := scores[idD]; ok {
 		t.Errorf("system-meta block D leaked into result: scores=%v", scores)
 	}

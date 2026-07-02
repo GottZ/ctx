@@ -84,7 +84,7 @@ func TestSearchT40b_GrantArm_Findability(t *testing.T) {
 
 	// Without a grant: the foreign block is invisible (scope-only).
 	res, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{homeScope}, nil, nil, 10, "", "", 1.0, nil, nil, nil)
+		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("rrf.Search (no grant): %v", err)
 	}
@@ -98,7 +98,7 @@ func TestSearchT40b_GrantArm_Findability(t *testing.T) {
 
 	// With the grant: the foreign block surfaces via the RRF OR-arm.
 	res, err = rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{homeScope}, nil, nil, 10, "", "", 1.0, nil, nil, []string{idGrant})
+		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, []string{idGrant})
 	if err != nil {
 		t.Fatalf("rrf.Search (with grant): %v", err)
 	}
@@ -134,7 +134,7 @@ func TestSearchT40b_HardExclusion_ArchivedAndSystemMeta(t *testing.T) {
 
 	// Grant BOTH the archived and the system-meta block. Neither may surface.
 	res, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{homeScope}, nil, nil, 10, "", "", 1.0, nil, nil,
+		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil,
 		[]string{idArch, idSysMeta})
 	if err != nil {
 		t.Fatalf("rrf.Search (grant archived+system-meta): %v", err)
@@ -172,12 +172,12 @@ func TestSearchT40b_GrantNoOp_ByteIdentical(t *testing.T) {
 	t40bInsertBlock(t, pool, idForeign, foreign, "knowledge", false, emb, now)
 
 	resNil, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{homeScope}, nil, nil, 10, "", "", 1.0, nil, nil, nil)
+		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("rrf.Search (nil grant): %v", err)
 	}
 	resEmpty, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{homeScope}, nil, nil, 10, "", "", 1.0, nil, nil, []string{})
+		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, []string{})
 	if err != nil {
 		t.Fatalf("rrf.Search (empty grant): %v", err)
 	}
@@ -207,7 +207,7 @@ func TestSearchT40b_EmptyScopeRejectStays(t *testing.T) {
 		time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC))
 
 	_, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{}, nil, nil, 10, "", "", 1.0, nil, nil, []string{idGrant})
+		[]string{}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, []string{idGrant})
 	if err == nil {
 		t.Errorf("empty scope + non-empty grant must still be rejected (got nil error) — grant arm must not replace the scope-gate")
 	}

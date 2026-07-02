@@ -95,8 +95,10 @@ func TestCtxRrf_MassFactor_BehaviourMatchesContract(t *testing.T) {
 	// blocks (identical embedding, identical title+content).
 	hv := pgvec.NewHalfVector(embedding)
 	rows, err := pool.Query(ctx,
-		`SELECT id::text, rrf_score FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9)`,
+		`SELECT id::text, rrf_score FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9,
+		         p_types_visible => $10::text[])`,
 		hv, "zzqqxx", "zzqqxx", []string{"private"}, nil, nil, 10, nil, nil,
+		[]string{"knowledge", "audit-trail", "reference"},
 	)
 	if err != nil {
 		t.Fatalf("query ctx_rrf: %v", err)

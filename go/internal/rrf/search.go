@@ -31,6 +31,12 @@ type SearchResult struct {
 	// inside the trust gate (fail-closed).
 	Sensitivity backends.Sensitivity `json:"-"`
 
+	// TypeName is the block's policy type (M073 RETURNS column, WF T5) — the
+	// UI-badge/fold consumer input (seam §2.8). NOT serialized yet: response
+	// exposure is wave T10's contract change, the wire format stays
+	// byte-identical here.
+	TypeName string `json:"-"`
+
 	// Graph-expansion provenance (GottZ Graph Expansion, Wave 1). All fields
 	// are zero-valued for native RRF hits and omitted from JSON (omitempty), so
 	// the wire format is byte-identical to pre-Wave-1 when the graph stage is
@@ -49,11 +55,19 @@ type SearchResult struct {
 // scopes for scope filtering, and optional category/tags/limit/temporal.
 // temporal is a websearch_to_tsquery OR string for date expansion (may be empty).
 // queryOR is an OR-joined query for broader FTS recall (may be empty).
-// auditTrailFactor controls audit-trail damping (Welle 41 M039): pass 1.0
-// for no damping (audit-target queries), 0.3 for generic queries.
-// categoriesExclude / blockRolesExclude (v2.0.0 C2 / M048): optional
-// exclude-lists. Empty slice = no-op (NULL passed to SQL). Trigger: CRAG
-// Bench Session 38c topic-map-private slot-stealing in 4/10 movie queries.
+//
+// Type policy (WF T5, M073 — design/01 §3.5): visibleTypes is the retrieval
+// ALLOWLIST (p_types_visible), sourced from the registry snapshot
+// (blocktype.Set.VisibleTypes). Fail-closed HARD: an empty/nil list is a Go
+// error here (analogous to the empty-scopes reject) — SQL would return 0
+// rows, but a silent empty result would mask a wiring bug. dampedTypes/
+// dampedFactors are the parallel damping arrays (Set.DampedTypesFor — an
+// intent-lifted type is absent, factor 1.0 via COALESCE); they replace the
+// former scalar auditTrailFactor (Welle 41 M039). typesExclude is the
+// request-level opt-in exclude (wire field block_roles_exclude, seam 17).
+// categoriesExclude (v2.0.0 C2 / M048): optional exclude-list. Empty slice =
+// no-op (NULL passed to SQL). Trigger: CRAG Bench Session 38c
+// topic-map-private slot-stealing in 4/10 movie queries.
 //
 // grantedBlockIDs (T40b, design/07 §4.2): the resolved block-grant set for the
 // caller's tenant — the row-level read-share OR-arm on the SQL retrieval side.
@@ -65,12 +79,21 @@ type SearchResult struct {
 // Temporal gravity is applied Post-RRF in the handler layer via
 // ApplyGravityBoost (linear) and ApplyCyclicGravityBoost (multi-dim cyclic).
 // The 5th RRF channel was removed in M020 (never activated from Go).
-func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, auditTrailFactor float64, categoriesExclude []string, blockRolesExclude []string, grantedBlockIDs []string) ([]SearchResult, error) {
+func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, visibleTypes []string, dampedTypes []string, dampedFactors []float64, categoriesExclude []string, typesExclude []string, grantedBlockIDs []string) ([]SearchResult, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("rrf: empty embedding")
 	}
 	if len(scopes) == 0 {
 		return nil, fmt.Errorf("rrf: empty scopes")
+	}
+	// Fail-closed allowlist guard (§3.5 invariant 1): NULL/empty
+	// p_types_visible means 0 hits by design — a caller that reaches this
+	// point without a resolved type set has a wiring bug, surface it loudly.
+	if len(visibleTypes) == 0 {
+		return nil, fmt.Errorf("rrf: empty visible-types allowlist (block-type registry not wired?)")
+	}
+	if len(dampedTypes) != len(dampedFactors) {
+		return nil, fmt.Errorf("rrf: damped types/factors length mismatch (%d != %d)", len(dampedTypes), len(dampedFactors))
 	}
 	if limit < 1 || limit > 200 {
 		limit = 5
@@ -102,9 +125,17 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 	if len(categoriesExclude) > 0 {
 		categoriesExcludeParam = categoriesExclude
 	}
-	var blockRolesExcludeParam interface{}
-	if len(blockRolesExclude) > 0 {
-		blockRolesExcludeParam = blockRolesExclude
+	var typesExcludeParam interface{}
+	if len(typesExclude) > 0 {
+		typesExcludeParam = typesExclude
+	}
+
+	// Damping arrays (M073): empty → NULL/NULL (unnest of NULL arrays yields
+	// zero rows → COALESCE factor 1.0 everywhere, no damping).
+	var dampedTypesParam, dampedFactorsParam interface{}
+	if len(dampedTypes) > 0 {
+		dampedTypesParam = dampedTypes
+		dampedFactorsParam = dampedFactors
 	}
 
 	// T40b (design/07 §4.2): empty/nil grant set → NULL (SQL DEFAULT NULL = no-op
@@ -116,9 +147,9 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 	}
 
 	rows, err := pool.Query(ctx,
-		`SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at
-		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10, $11::text[], $12::text[], $13::uuid[])`,
-		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam, auditTrailFactor, categoriesExcludeParam, blockRolesExcludeParam, grantedBlockIDsParam,
+		`SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at, type_name
+		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10::text[], $11::text[], $12::float8[], $13::text[], $14::text[], $15::uuid[])`,
+		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam, visibleTypes, dampedTypesParam, dampedFactorsParam, categoriesExcludeParam, typesExcludeParam, grantedBlockIDsParam,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: query ctx_rrf: %w", err)
@@ -139,6 +170,7 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 			&r.Content,
 			&r.Scope,
 			&r.UpdatedAt,
+			&r.TypeName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("rrf: scan row: %w", err)

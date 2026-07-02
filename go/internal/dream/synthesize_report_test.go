@@ -12,10 +12,25 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/testdb"
 )
+
+// reportRouter is testRouterFor plus a DB-booted block-type registry (WF T4:
+// GenerateDailyReport classifies via Router.TypeSet — rules are M072 data).
+func reportRouter(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *dream.Router {
+	t.Helper()
+	r := testRouterFor("h", "m", "")
+	reg := blocktype.NewRegistry()
+	reg.Boot(ctx, pool)
+	if reg.Health() != blocktype.HealthOK {
+		t.Fatalf("registry boot degraded: %s", reg.Health())
+	}
+	r.Blocktypes = reg
+	return r
+}
 
 // testRouterFor routes the integration tests through a seeded
 // single-backend pool (G28): one enabled full-trust row carrying the dream +
@@ -102,7 +117,7 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 		}, nil
 	})
 
-	blockID, err := dream.GenerateDailyReport(ctx, pool, testRouterFor("h", "m", ""), llm.Options{}, reportScope)
+	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), llm.Options{}, reportScope)
 	if err != nil {
 		t.Fatalf("generate report: %v", err)
 	}
@@ -145,7 +160,7 @@ func TestGenerateDailyReport_NoActivity(t *testing.T) {
 		return nil, nil
 	})
 
-	blockID, err := dream.GenerateDailyReport(ctx, pool, testRouterFor("h", "m", ""), llm.Options{}, reportScope)
+	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), llm.Options{}, reportScope)
 	if err != nil {
 		t.Fatalf("expected nil error on empty activity, got %v", err)
 	}
@@ -177,7 +192,7 @@ func TestGenerateDailyReport_LLMError(t *testing.T) {
 		return nil, errors.New("ollama exploded")
 	})
 
-	_, err := dream.GenerateDailyReport(ctx, pool, testRouterFor("h", "m", ""), llm.Options{}, reportScope)
+	_, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), llm.Options{}, reportScope)
 	if err == nil {
 		t.Fatal("want wrapped error, got nil")
 	}

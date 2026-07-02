@@ -69,7 +69,7 @@ type QueryHandler struct {
 // (visibility allowlist + damping + intent lift) resolves from a
 // SnapshotForRequest per query — NEVER from the compiled-in builtin set (the
 // live DB-sourcing probe would catch that). Must be non-nil for the retrieval
-// path; tests that reach rrf pass blocktype.NewRegistry().
+// path; tests that reach rrf inject their own registry instance.
 func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, quota *backends.QuotaAccountant, blocktypes *blocktype.Registry) *QueryHandler {
 	return &QueryHandler{pool: pool, cfg: cfg, backendPool: backendPool, quota: quota, blocktypes: blocktypes}
 }
@@ -493,19 +493,16 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		internalLimit = limit // respect explicit large limits
 	}
 
-	// Welle 41 M039 / WF T4: query-aware audit-trail damping — the pattern
-	// list and factor come from the REGISTRY snapshot now (audit-trail seed:
-	// intent lift ⇒ 1.0, else damping_factor 0.3), not a compiled-in list.
-	// T5 replaces this scalar with the full damped-arrays parametrisation.
+	// WF T5 (M073, design/01 §3.5 + §4.4 #3): the retrieval type policy comes
+	// from the REGISTRY snapshot per request — visibility allowlist +
+	// query-aware damping arrays (intent lift generalises Welle 41 M039's
+	// audit-trail scalar). NEVER the compiled-in builtin set: a live registry
+	// edit (damping/patterns) must change this ranking without a restart
+	// (DB-sourcing probe; the wiring is structurally pinned by
+	// TestQueryRetrievalWiring).
 	typeSet := h.blocktypes.SnapshotForRequest(ctx)
-	auditTrailFactor := 1.0
-	if dampedNames, dampedFactors := typeSet.DampedTypesFor(req.Query); len(dampedNames) > 0 {
-		for i, n := range dampedNames {
-			if n == "audit-trail" {
-				auditTrailFactor = dampedFactors[i]
-			}
-		}
-	}
+	visibleTypes := typeSet.VisibleTypes()
+	dampedTypes, dampedFactors := typeSet.DampedTypesFor(req.Query)
 
 	// T40b (design/07 §4.2): resolve the caller's block-grant set ONCE and feed
 	// it into both the RRF retrieval OR-arm and the downstream GraphExpand. Same
@@ -514,7 +511,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// widen to full access.
 	grantedBlockIDs := resolveGrants(ctx, h.pool, ar)
 
-	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, auditTrailFactor, req.CategoriesExclude, req.BlockRolesExclude, grantedBlockIDs)
+	// Wire compat (seam 17): the REST field block_roles_exclude maps onto the
+	// request-level p_types_exclude — the rename alias (types_exclude) is T10.
+	results, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, req.CategoriesExclude, req.BlockRolesExclude, grantedBlockIDs)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,

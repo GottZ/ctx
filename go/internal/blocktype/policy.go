@@ -87,7 +87,8 @@ type RetrievalPolicy struct {
 	// DampingFactor is the score multiplier for Kind==damped, in (0,1].
 	DampingFactor float64
 	// IntentPatterns are case-insensitive query substrings that LIFT the
-	// damping for that query (factor 1.0) — generalizes rrf.AuditTrailFactor.
+	// damping for that query (factor 1.0) — generalizes the retired
+	// rrf.AuditTrailFactor (a pure engine, rrf.MatchesAny, remains).
 	IntentPatterns []string
 }
 

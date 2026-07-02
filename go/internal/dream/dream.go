@@ -634,6 +634,16 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 		return nil, fmt.Errorf("dream: keyword embed chain: %w", err)
 	}
 
+	// WF T5 (design/01 §4.4 #4): the visibility allowlist comes from the
+	// tenant-resolved registry snapshot — one Set per candidate search, NEVER
+	// the compiled-in builtin set. nil registry = wiring bug, fail loudly
+	// (an rrf call with an empty allowlist would reject anyway).
+	typeSet := r.TypeSet(ctx)
+	if typeSet == nil {
+		return nil, fmt.Errorf("dream: no block-type registry wired (Router.Blocktypes nil)")
+	}
+	visibleTypes := typeSet.VisibleTypes()
+
 	for _, kw := range keywords {
 		// Embed the keyword for semantic search. Cached by (hash(prefix||kw), model) —
 		// Dream keywords repeat heavily across cycles (domain vocabulary, proper nouns).
@@ -656,14 +666,16 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 			continue
 		}
 
-		// RRF search with keyword as query. Welle 41 M039: audit-trail-factor
-		// 1.0 (no damping) — dream-cycle keyword search needs full retrieval
-		// pool, user-query pattern-aware damping is handler-layer only.
-		// v2.0.0 C2 (M048): no exclude-lists for dream — dream sees everything.
-		// T40b: nil grant set — dream-cycle is an internal, scope-only retrieval
-		// pass (no per-tenant grantee identity), so the block-grant OR-arm is a
-		// no-op here.
-		results, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", 1.0, nil, nil, nil)
+		// RRF search with keyword as query. WF T5: visibility allowlist from
+		// the registry snapshot; damping arrays EMPTY (no lift needed — the
+		// dream-cycle keyword search wants the full retrieval pool at factor
+		// 1.0, exactly the pre-T5 audit-trail-factor 1.0 semantics; user-query
+		// pattern-aware damping stays handler-layer only).
+		// v2.0.0 C2 (M048): no exclude-lists for dream — dream sees every
+		// visible type. T40b: nil grant set — dream-cycle is an internal,
+		// scope-only retrieval pass (no per-tenant grantee identity), so the
+		// block-grant OR-arm is a no-op here.
+		results, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", visibleTypes, nil, nil, nil, nil, nil)
 		if err != nil {
 			slog.Debug("dream: rrf search failed", "keyword", kw, "error", err)
 			continue
