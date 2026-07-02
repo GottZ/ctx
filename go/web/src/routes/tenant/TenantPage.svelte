@@ -334,18 +334,18 @@
   }
   h1 {
     margin: 0;
-    font-size: 1.35rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
+    font-size: var(--fs-xl);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--track-1);
   }
   .sub {
     margin: var(--space-1) 0 0;
     color: var(--text-dim);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .sub strong {
     color: var(--text);
-    font-weight: 600;
+    font-weight: var(--fw-semibold);
   }
 
   .banner {
@@ -354,13 +354,13 @@
     border: 1px solid var(--warn);
     border-radius: var(--radius);
     color: var(--warn);
-    font-size: 0.875rem;
+    font-size: var(--fs-sm);
   }
   .state {
     margin: 0;
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error {
     display: flex;
@@ -371,7 +371,7 @@
     border-radius: var(--radius);
     background: var(--danger-dim);
     padding: var(--space-2) var(--space-3);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error p {
     margin: 0;
@@ -379,7 +379,7 @@
   }
   .request-id {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim) !important;
   }
 
@@ -392,13 +392,13 @@
   .empty-title {
     margin: 0;
     color: var(--text);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .empty-hint {
     margin: var(--space-1) 0 0;
     color: var(--text-dim);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
 
   .card {
@@ -416,8 +416,8 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .count {
     font-family: var(--font-mono);
@@ -431,7 +431,7 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
   }
   th {
     text-align: left;
@@ -441,7 +441,7 @@
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     text-transform: uppercase;
-    font-weight: 500;
+    font-weight: var(--fw-medium);
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
@@ -578,7 +578,7 @@
   }
   .cta {
     font-family: var(--font-ui);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
     background: var(--surface-2);
     border: 1px solid var(--accent);
@@ -601,13 +601,13 @@
     border: 1px solid var(--warn);
     border-radius: var(--radius);
     color: var(--warn);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .toggle {
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -621,7 +621,7 @@
     background: var(--danger-dim);
     border-radius: var(--radius);
     color: var(--danger);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .col-action {
     text-align: right;

@@ -38,8 +38,8 @@ const typoProps = ['font-size', 'font-weight', 'line-height', 'letter-spacing']
 
 // Files whose typo declarations are migrated onto the scale. The strict gate is
 // scoped to exactly this set: a font-size literal here is red, the same literal
-// in a not-yet-migrated file (e.g. src/routes/admin|tenant/** — the Q7 fläche)
-// still passes — the pausability invariant. Whole-dir globs for lib/ui +
+// in a not-yet-migrated file (e.g. src/routes/settings|status/** — the Q8
+// fläche) still passes — the pausability invariant. Whole-dir globs for lib/ui +
 // lib/components mirror the Q5 brief; the Shell/Login files are explicit.
 const migratedPaths = [
   // Q5 — Kern-Fläche (Shell + Login + lib/ui + lib/components).
@@ -55,6 +55,12 @@ const migratedPaths = [
   'src/routes/blocks/**/*.svelte',
   'src/routes/chat/**/*.svelte',
   'src/routes/graph/**/*.svelte',
+  // Q7 — Verwaltungs-Flächen (design 05-§7 Q7 row: /admin + /tenant). The
+  // /admin dir covers AdminPage + /admin/tenants/:id (TenantDetail) +
+  // TenantCreateDialog/CorpusMaintenance/QuotaForm/ScopeMap/TenantProvision;
+  // /tenant covers TenantPage + KeyCreateDialog + the self-service cards.
+  'src/routes/admin/**/*.svelte',
+  'src/routes/tenant/**/*.svelte',
 ]
 
 // Keywords legit as literals across strict props (shared by base + Q5 override).

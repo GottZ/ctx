@@ -202,8 +202,8 @@
   .scope {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.9rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
     color: var(--text);
   }
   .hint {
@@ -224,11 +224,11 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--text);
   }
   label {
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
   }
   input[type='text'],
@@ -240,7 +240,7 @@
     border-radius: var(--radius);
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
   input:focus,
@@ -251,13 +251,13 @@
   .note {
     margin: 0;
     color: var(--text-faint);
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
   }
   .state {
     margin: 0;
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error {
     display: flex;
@@ -268,7 +268,7 @@
     border-radius: var(--radius);
     background: var(--danger-dim);
     padding: var(--space-2);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
   }
   .error.inline {
     flex-direction: row;
@@ -279,7 +279,7 @@
   }
   .request-id {
     font-family: var(--font-mono);
-    font-size: 0.72rem;
+    font-size: var(--fs-2xs);
     color: var(--text-dim) !important;
   }
   .actions {
@@ -292,7 +292,7 @@
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
     color: var(--text);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
     cursor: pointer;
   }

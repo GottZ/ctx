@@ -88,8 +88,8 @@
   }
   .warn-line {
     margin: 0;
-    font-size: 0.85rem;
-    line-height: 1.45;
+    font-size: var(--fs-sm);
+    line-height: var(--lh-body);
     color: var(--warn);
     border: 1px solid var(--warn);
     border-radius: var(--radius);
@@ -108,7 +108,7 @@
     flex: 1;
     min-width: 0;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-2);
     background: var(--surface-0);
     border: 1px solid var(--accent);
@@ -134,7 +134,7 @@
   }
   .hint {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
   }
   .hint.ok {
     color: var(--ok);
@@ -148,7 +148,7 @@
   }
   .ack {
     font-family: var(--font-ui);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
     background: var(--surface-2);
     border: 1px solid var(--border-strong);

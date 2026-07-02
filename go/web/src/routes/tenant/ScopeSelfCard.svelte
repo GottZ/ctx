@@ -152,8 +152,8 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .count {
     font-family: var(--font-mono);
@@ -171,7 +171,7 @@
     margin: 0;
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error {
     display: flex;
@@ -182,7 +182,7 @@
     border-radius: var(--radius);
     background: var(--danger-dim);
     padding: var(--space-2) var(--space-3);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error p {
     margin: 0;
@@ -190,12 +190,12 @@
   }
   .request-id {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim) !important;
   }
   .error button {
     font-family: var(--font-ui);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
     background: var(--surface-2);
     border: 1px solid var(--border-strong);
@@ -206,7 +206,7 @@
   .empty {
     margin: 0;
     color: var(--text-dim);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .scope-list {
     margin: 0;
@@ -231,7 +231,7 @@
     border: 1px solid var(--warn);
     border-radius: var(--radius);
     color: var(--warn);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .create {
     display: flex;
@@ -249,7 +249,7 @@
   }
   input[type='text'] {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
     background: var(--surface-0);
     border: 1px solid var(--border-strong);
@@ -266,7 +266,7 @@
   }
   button {
     font-family: var(--font-ui);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
     background: var(--surface-2);
     border: 1px solid var(--border-strong);
@@ -281,14 +281,14 @@
   }
   .preview {
     font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .preview.bad {
     color: var(--danger);
   }
   .hint {
-    font-size: 0.72rem;
+    font-size: var(--fs-2xs);
     color: var(--text-faint);
   }
   .created {
@@ -305,7 +305,7 @@
   }
   .problem {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
     border-radius: var(--radius);
     border: 1px solid var(--danger);

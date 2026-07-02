@@ -257,8 +257,8 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .count {
     font-family: var(--font-mono);
@@ -271,7 +271,7 @@
     margin: 0;
     padding: var(--space-2) var(--space-3);
     color: var(--text-dim);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     border-bottom: 1px solid var(--border);
   }
   .block {
@@ -303,7 +303,7 @@
   }
   input[type='text'] {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
     background: var(--surface-0);
     border: 1px solid var(--border-strong);
@@ -332,7 +332,7 @@
     color: var(--text-faint);
   }
   .hint {
-    font-size: 0.72rem;
+    font-size: var(--fs-2xs);
     color: var(--text-faint);
   }
   .scope-grid {
@@ -365,7 +365,7 @@
   }
   button {
     font-family: var(--font-ui);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
     background: var(--surface-2);
     border: 1px solid var(--border-strong);
@@ -386,7 +386,7 @@
   }
   .problem {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
     border-radius: var(--radius);
     border: 1px solid var(--danger);

@@ -147,8 +147,8 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .count {
     font-family: var(--font-mono);
@@ -160,7 +160,7 @@
     margin: 0;
     padding: var(--space-2) var(--space-3);
     color: var(--text-faint);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     border-bottom: 1px solid var(--surface-2);
   }
   .op {
@@ -179,9 +179,9 @@
   }
   h3 {
     margin: 0;
-    font-size: 0.95rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--track-1);
   }
   .live,
   .done {
@@ -211,12 +211,12 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
   }
   button {
     font-family: inherit;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
@@ -230,7 +230,7 @@
   }
   .scope {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
   }
   .scope code {
@@ -268,14 +268,14 @@
   dd {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 1.1rem;
+    font-size: var(--fs-base);
     font-variant-numeric: tabular-nums;
     color: var(--text);
   }
   .times {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-faint);
   }
   .abort {
@@ -288,6 +288,6 @@
     border-radius: var(--radius);
     background: var(--danger-dim);
     color: var(--danger);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
   }
 </style>

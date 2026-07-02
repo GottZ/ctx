@@ -107,8 +107,8 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .count {
     font-family: var(--font-mono);
@@ -123,7 +123,7 @@
     margin: 0;
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error {
     display: flex;
@@ -134,7 +134,7 @@
     border-radius: var(--radius);
     background: var(--danger-dim);
     padding: var(--space-2) var(--space-3);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error p {
     margin: 0;
@@ -142,12 +142,12 @@
   }
   .request-id {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim) !important;
   }
   .error button {
     font-family: var(--font-ui);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
     background: var(--surface-2);
     border: 1px solid var(--border-strong);
@@ -161,7 +161,7 @@
     align-items: center;
     flex-wrap: wrap;
     gap: var(--space-2);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
   }
   .badge {
@@ -197,7 +197,7 @@
   dd {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
