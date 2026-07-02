@@ -17,6 +17,11 @@ const baseURL = `http://localhost:${PORT}`
 
 export default defineConfig({
   testDir: './e2e',
+  // Runner split (wave PV4): Playwright owns *.spec.ts; *.test.ts under
+  // e2e/contract/ is the vitest COVERAGE drift gate (vite.config.ts include).
+  // Without this pin Playwright's default testMatch would grab the vitest
+  // files and crash on their describe().
+  testMatch: '**/*.spec.ts',
   outputDir: './e2e/.results',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

@@ -13,6 +13,7 @@ import { RESERVED_SERVER_PREFIXES, areaMode, areaRoutes, entryRedirect } from '.
 import type { LayoutMode } from './index'
 import { capabilitiesFor } from '../lib/auth/capabilities'
 import type { WhoamiResponse } from '../lib/api/types'
+import { contracts, pendingContracts } from '../../e2e/contract/registry'
 
 /**
  * Base areas every build must register: the 5 corpus/ops areas + backends
@@ -78,6 +79,32 @@ describe('areaRoutes', () => {
   it('resolves every registered route to a layout mode (areaMode covers the table)', () => {
     for (const key of Object.keys(areaRoutes)) {
       expect(LAYOUT_MODES).toContain(areaMode(key))
+    }
+  })
+})
+
+// Matrix pin NEXT TO the table it guards (design 06 §4.2, wave PV4): the
+// 4-point registration pattern (Route + LayoutMode + NavItem + Gate) is a
+// 5-point pattern from PV4 on — + PageContract. This is the FAST-path twin of
+// the Playwright matrix meta-test (e2e/contract/matrix.spec.ts): a new
+// areaRoutes key without a registry entry turns `bun run test` red before the
+// e2e suite ever boots.
+describe('PageContract matrix pin (PV4)', () => {
+  const contractRoutes = new Set(contracts.map((c) => c.route))
+  const pendingRoutes = new Set(pendingContracts.map((p) => p.route))
+
+  it('every areaRoutes key is contract-covered or a named pending entry', () => {
+    for (const key of Object.keys(areaRoutes)) {
+      expect(
+        contractRoutes.has(key) || pendingRoutes.has(key),
+        `route '${key}' has neither a PageContract nor a pending entry (e2e/contract/registry.ts)`,
+      ).toBe(true)
+    }
+  })
+
+  it('no pending entry shadows an existing contract (stale debt ⇒ red)', () => {
+    for (const p of pendingContracts) {
+      expect(contractRoutes.has(p.route), `pending '${p.route}' is stale — its contract exists`).toBe(false)
     }
   })
 })

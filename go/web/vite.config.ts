@@ -48,7 +48,9 @@ export default defineConfig({
     // Logic modules only (design 04-§5.5) — no component snapshots, no DOM:
     // fetch/sessionStorage are stubbed per test, runes compile fine in node.
     // tokens/ carries the build-time token gates (drift test, design 05-§4.1).
+    // e2e/contract/ carries the COVERAGE.md drift gate (design 06 §3.4, PV4) —
+    // registry/coverage are pure data modules, no Playwright runtime is invoked.
     environment: 'node',
-    include: ['src/**/*.test.ts', 'tokens/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'tokens/**/*.test.ts', 'e2e/contract/**/*.test.ts'],
   },
 })

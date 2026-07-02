@@ -39,11 +39,47 @@ const TENANTS: Record<TenantKey, TenantDef> = {
 const KEY = 'smoke-key'
 
 /**
+ * High-entropy tenant sentinel markers (design 06 §4.6/§5.6b, wave PV4): every
+ * fixture tenant carries exactly ONE sentinel block in its search/list data.
+ * The generated tenant-leak probe (contract.ts) asserts the OWN sentinel is
+ * rendered (positive control — the detector provably sees data) and the
+ * FOREIGN sentinel appears nowhere in the DOM. Deliberately not dictionary
+ * words ('acme'/'shared' collide with legitimate UI copy → false reds or a
+ * later loosening); the hex suffixes make an accidental copy collision
+ * practically impossible.
+ */
+export const SENTINEL: Record<TenantKey, string> = {
+  A: 'A-SENTINEL-1f9c62d84b7e',
+  B: 'B-SENTINEL-8d2a41c97f30',
+}
+
+/**
+ * Declarative page state for seedSession (design 06 §4.6, wave PV4).
+ * 'empty' is the declarative twin of the legacy `empty: true` flag; 'error'
+ * fails the core read endpoints (500) so error bands become a declarable
+ * state; '10k' swaps /api/search for a synthetic 10 000-item generator with
+ * REAL keyset-cursor behaviour (next_after, blocks.ts:33-37) — the target-
+ * scale proofs (§6.2) never need 10k JSON rows in the repo.
+ */
+export type SeedState = 'default' | 'empty' | 'error' | '10k'
+
+/**
  * WhoamiResponse (types.ts:6) shaped per tier — capabilitiesFor reads admin+role.
  * The optional `tenant` selects the identity (default 'A'); omitting it preserves
  * the exact pre-existing default-tenant shape so the 34 legacy specs do not break.
+ *
+ * `capabilities` (S14, wave PV4): declared SeedOptions building block for the
+ * Achse-04 feature gates (e.g. workflow.enabled → viewWorkflow). The server
+ * does not send this field yet — the wire shape lands together with the
+ * types.ts sync in the Achse-04 wave; until then the field is absent unless a
+ * seed explicitly declares flags (no drift for existing specs). Drift anchor:
+ * live-tier probe 1 sees the real whoami shape (design 06 §4.7).
  */
-export function whoamiFor(role: Role, tenant: TenantKey = 'A'): Record<string, unknown> {
+export function whoamiFor(
+  role: Role,
+  tenant: TenantKey = 'A',
+  capabilities?: Record<string, boolean>,
+): Record<string, unknown> {
   const t = TENANTS[tenant]
   const base = {
     success: true,
@@ -54,6 +90,7 @@ export function whoamiFor(role: Role, tenant: TenantKey = 'A'): Record<string, u
     tenant_id: t.id,
     tenant_slug: t.slug,
     tenant_display_name: t.name,
+    ...(capabilities !== undefined ? { capabilities } : {}),
   }
   if (role === 'server-admin') return { ...base, admin: true, role: 'owner' }
   if (role === 'tenant-admin') return { ...base, admin: false, role: 'owner' }
@@ -160,28 +197,97 @@ function settingsFixture(): Record<string, unknown>[] {
   ]
 }
 
-/** SearchResponse (graph/api.ts) — NO success field on the happy path. */
-function searchFixture(): Record<string, unknown> {
-  const mk = (n: number, cat: string, title: string, sens: string) => ({
+/**
+ * SearchResponse (graph/api.ts) — NO success field on the happy path.
+ * Tenant-KEYED since PV4 (§4.6 sentinel convention): each tenant's corpus is
+ * its own row set and always carries that tenant's sentinel block as the LAST
+ * row — if the fixture layer ever served tenant-A rows to a tenant-B session,
+ * the foreign sentinel would travel with them and the generated leak probe
+ * turns red. A tenant-agnostic fixture could never prove that.
+ */
+function searchFixture(tenant: TenantKey): Record<string, unknown> {
+  const mk = (n: number, cat: string, title: string, sens: string, preview?: string) => ({
     id: `550e8400-e29b-41d4-a716-44665544000${n}`,
     category: cat,
     tags: ['demo', cat],
     title,
-    content_preview: `Lorem ipsum preview for ${title} — enough text to fill a master-detail hit row in the split layout.`,
+    content_preview:
+      preview ?? `Lorem ipsum preview for ${title} — enough text to fill a master-detail hit row in the split layout.`,
     content_length: 1840,
-    scope: 'home',
+    scope: tenant === 'A' ? 'home' : 'globex:home',
     updated_at: '2026-06-28T10:00:00Z',
     created_at: '2026-06-01T08:00:00Z',
     sensitivity: sens,
   })
+  const sentinel = mk(
+    tenant === 'A' ? 4 : 7,
+    'meta',
+    SENTINEL[tenant],
+    'internal',
+    'Tenant-isolation sentinel block — must never render in a foreign tenant session (design 06 §5.6b).',
+  )
+  const rows =
+    tenant === 'A'
+      ? [
+          mk(1, 'design', 'Core Architecture', 'internal'),
+          mk(2, 'reference', 'API Spec', 'public'),
+          mk(3, 'learnings', 'Retrieval Findings', 'internal'),
+          sentinel,
+        ]
+      : [mk(5, 'design', 'Globex Onboarding', 'internal'), mk(6, 'reference', 'Globex Runbook', 'public'), sentinel]
+  return { count: rows.length, results: rows, next_after: null }
+}
+
+// ---- '10k' scale state (design 06 §4.6/§6.2, wave PV4) ----------------------
+// Synthetic corpus generator with REAL keyset-cursor semantics: 10 000 items,
+// strictly updated_at-DESC with the id tiebreak, paged by the request's limit
+// (server clamp 50, server default 10 — context_search.go), resumed via the
+// {after_updated, after_id} cursor exactly like store.SearchCursor. Generator
+// instead of file: 10k JSON rows do not belong in the repo.
+
+const SCALE_TOTAL = 10_000
+const SCALE_BASE_MS = Date.UTC(2026, 5, 28, 10, 0, 0)
+
+function scaleId(i: number): string {
+  return `550e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`
+}
+
+function scaleUpdatedAt(i: number): string {
+  // Strictly descending, one minute apart — a real keyset ordering.
+  return new Date(SCALE_BASE_MS - i * 60_000).toISOString()
+}
+
+function scaleRow(i: number): Record<string, unknown> {
+  const cats = ['design', 'reference', 'learnings', 'infrastructure', 'decisions']
   return {
-    count: 3,
-    results: [
-      mk(1, 'design', 'Core Architecture', 'internal'),
-      mk(2, 'reference', 'API Spec', 'public'),
-      mk(3, 'learnings', 'Retrieval Findings', 'internal'),
-    ],
-    next_after: null,
+    id: scaleId(i),
+    category: cats[i % cats.length],
+    tags: ['scale', cats[i % cats.length]],
+    title: `Scale Block ${String(i).padStart(5, '0')}`,
+    content_preview: `Synthetic 10k-state row ${i} — keyset-paged scale corpus (design 06 §6.2).`,
+    content_length: 512,
+    scope: 'home',
+    updated_at: scaleUpdatedAt(i),
+    created_at: scaleUpdatedAt(i),
+    sensitivity: 'internal',
+  }
+}
+
+/** One keyset page of the synthetic 10k corpus (mirrors context_search.go paging). */
+function scaleSearchFixture(body: Record<string, unknown> | null): Record<string, unknown> {
+  const limit = typeof body?.limit === 'number' ? body.limit : 10 // server default 10
+  const pageSize = Math.max(1, Math.min(limit, 50)) // server clamp 50
+  const after = body?.after as { after_id?: string } | undefined
+  // The cursor's after_id embeds the row index (scaleId) — resume strictly after it.
+  const start = after?.after_id ? parseInt(after.after_id.slice(-12), 10) + 1 : 0
+  const end = Math.min(start + pageSize, SCALE_TOTAL)
+  const results: Record<string, unknown>[] = []
+  for (let i = start; i < end; i++) results.push(scaleRow(i))
+  return {
+    count: results.length,
+    results,
+    next_after:
+      end < SCALE_TOTAL ? { after_updated: scaleUpdatedAt(end - 1), after_id: scaleId(end - 1) } : null,
   }
 }
 
@@ -245,11 +351,23 @@ function manageFixture(
         { category: 'reference', count: 7 },
         { category: 'learnings', count: 4 },
       ] }
-    case 'list-meta':
-      return { success: true, blocks: [
-        { id: '550e8400-e29b-41d4-a716-446655440001', category: 'design', title: 'Core Architecture', tags: ['demo'], scope: 'home', updated_at: '2026-06-28T10:00:00Z' },
-        { id: '550e8400-e29b-41d4-a716-446655440002', category: 'reference', title: 'API Spec', tags: ['demo'], scope: 'home', updated_at: '2026-06-27T10:00:00Z' },
-      ] }
+    case 'list-meta': {
+      // Tenant-keyed like searchFixture (§4.6): the A–Z nav index carries the
+      // OWN tenant's rows + sentinel, never a foreign tenant's.
+      const tkey: TenantKey = ctx.slug === TENANTS.A.slug ? 'A' : 'B'
+      const rows =
+        tkey === 'A'
+          ? [
+              { id: '550e8400-e29b-41d4-a716-446655440001', category: 'design', title: 'Core Architecture', tags: ['demo'], scope: 'home', updated_at: '2026-06-28T10:00:00Z' },
+              { id: '550e8400-e29b-41d4-a716-446655440002', category: 'reference', title: 'API Spec', tags: ['demo'], scope: 'home', updated_at: '2026-06-27T10:00:00Z' },
+              { id: '550e8400-e29b-41d4-a716-446655440004', category: 'meta', title: SENTINEL.A, tags: ['sentinel'], scope: 'home', updated_at: '2026-06-26T10:00:00Z' },
+            ]
+          : [
+              { id: '550e8400-e29b-41d4-a716-446655440005', category: 'design', title: 'Globex Onboarding', tags: ['demo'], scope: 'globex:home', updated_at: '2026-06-28T10:00:00Z' },
+              { id: '550e8400-e29b-41d4-a716-446655440007', category: 'meta', title: SENTINEL.B, tags: ['sentinel'], scope: 'globex:home', updated_at: '2026-06-26T10:00:00Z' },
+            ]
+      return { success: true, blocks: rows }
+    }
     case 'get':
       return { success: true, block: {
         id: '550e8400-e29b-41d4-a716-446655440001',
@@ -405,25 +523,50 @@ function emptyOverviewFixture(): Record<string, unknown> {
   return { success: true, params: {}, nodes: [], edges: [], stats: { nodes: 0, edges: 0, truncated: false, computed_at: null, elapsed_ms: 5 } }
 }
 
+/** seedSession options — named + exported since PV4 (the PageContract seed builds on it). */
+export interface SeedOptions {
+  role: Role
+  theme: 'light' | 'dark'
+  empty?: boolean
+  /** identity tenant (default 'A' = legacy default-tenant shape). */
+  tenant?: TenantKey
+  /** negative-probe injection — faults a specific manage action (§2.2). */
+  faults?: Fault[]
+  /** scope-list / scope-overview override (fresh tenant = []). */
+  scopes?: Record<string, unknown>[]
+  /**
+   * Declarative page state (design 06 §4.6, PV4): 'empty' ≙ empty:true,
+   * 'error' fails the core reads (500), '10k' serves the synthetic keyset-
+   * paged scale corpus on /api/search. Default 'default'.
+   */
+  state?: SeedState
+  /** Capability flags threaded into whoamiFor (S14 — Achse-04 feature gates). */
+  capabilities?: Record<string, boolean>
+}
+
+/** One recorded /api/** request (mock-call recorder, design 06 §4.1 deny dimension). */
+export interface RecordedCall {
+  method: string
+  path: string
+  /** manage action, when the call is POST /api/manage. */
+  action?: string
+  /** parsed JSON body for POST /api/manage + /api/search (cursor proofs). */
+  body?: unknown
+}
+
+/** Handle returned by seedSession — the generated deny/scale tests read `calls`. */
+export interface SeededSession {
+  calls: RecordedCall[]
+}
+
 /**
  * Seed an authenticated session (sessionStorage key, restored on App mount) +
  * a deterministic theme pref (localStorage, read by theme-boot.js before first
  * paint), then install the `/api/**` mocks. Must run BEFORE page.goto().
+ * Returns the mock-call recorder handle (every /api/** request is logged) —
+ * existing call sites may ignore it (non-breaking).
  */
-export async function seedSession(
-  page: Page,
-  opts: {
-    role: Role
-    theme: 'light' | 'dark'
-    empty?: boolean
-    /** identity tenant (default 'A' = legacy default-tenant shape). */
-    tenant?: TenantKey
-    /** negative-probe injection — faults a specific manage action (§2.2). */
-    faults?: Fault[]
-    /** scope-list / scope-overview override (fresh tenant = []). */
-    scopes?: Record<string, unknown>[]
-  },
-): Promise<void> {
+export async function seedSession(page: Page, opts: SeedOptions): Promise<SeededSession> {
   await page.addInitScript(
     ({ key, theme }) => {
       try {
@@ -439,6 +582,10 @@ export async function seedSession(
   const tkey: TenantKey = opts.tenant ?? 'A'
   const t = TENANTS[tkey]
   const ctx: FixtureCtx = { id: t.id, slug: t.slug, name: t.name, home: t.home, read: t.read, scopes: opts.scopes }
+  const state: SeedState = opts.state ?? 'default'
+  // 'empty' is the declarative twin of the legacy boolean flag (both stay valid).
+  const empty = opts.empty === true || state === 'empty'
+  const session: SeededSession = { calls: [] }
   // Per-session, per-action call counter — drives Fault.afterCalls (quota-exhaustion
   // sequences: e.g. first scope-create ok, second → 429).
   const callIndex: Record<string, number> = {}
@@ -456,18 +603,54 @@ export async function seedSession(
     const path = new URL(req.url()).pathname
     const method = req.method()
 
+    // Mock-call recorder (PV4): every /api/** request is logged BEFORE dispatch
+    // so the generated deny tests can assert admin-call ABSENCE and the scale
+    // tests can prove the keyset-cursor round-trip from the actual wire bodies.
+    const call: RecordedCall = { method, path }
+    if (method === 'POST' && (path === '/api/manage' || path === '/api/search')) {
+      try {
+        call.body = req.postDataJSON()
+        const a = (call.body as { action?: unknown } | null)?.action
+        if (typeof a === 'string') call.action = a
+      } catch {
+        /* non-JSON body — recorded without payload */
+      }
+    }
+    session.calls.push(call)
+
     // SSE telemetry stream → abort so StatusPage uses the GET /api/status poll.
     if (path === '/api/events') return route.abort()
 
-    if (path === '/api/whoami') return route.fulfill({ json: whoamiFor(opts.role, tkey) })
+    if (path === '/api/whoami') return route.fulfill({ json: whoamiFor(opts.role, tkey, opts.capabilities) })
+
+    // 'error' state (declarative, §4.6): the core READ surfaces fail with a 500
+    // envelope so every page's error band becomes a declarable contract state.
+    // whoami stays green — the session must resolve for the shell to mount.
+    if (
+      state === 'error' &&
+      (path === '/api/search' ||
+        path === '/api/status' ||
+        path === '/api/llmlog' ||
+        (path === '/api/settings' && method === 'GET') ||
+        path.startsWith('/api/graph/') ||
+        path.startsWith('/api/chat/sessions'))
+    ) {
+      return route.fulfill({ status: 500, json: { success: false, error: 'internal error' } })
+    }
+
     if (path === '/api/status') return route.fulfill({ json: statusFixture() })
     if (path === '/api/llmlog') return route.fulfill({ json: { success: true, entries: [] } })
     if (path === '/api/settings' && method === 'GET') return route.fulfill({ json: { success: true, settings: settingsFixture() } })
     if (path === '/api/secrets' && method === 'GET') return route.fulfill({ json: { success: true, secrets: [] } })
-    if (path.startsWith('/api/graph/overview')) return route.fulfill({ json: opts.empty ? emptyOverviewFixture() : overviewFixture() })
+    if (path.startsWith('/api/graph/overview')) return route.fulfill({ json: empty ? emptyOverviewFixture() : overviewFixture() })
     if (path.startsWith('/api/graph/ego')) return route.fulfill({ json: egoFixture() })
     if (path.startsWith('/api/chat/sessions')) return route.fulfill({ json: { success: true, sessions: [] } })
-    if (path === '/api/search') return route.fulfill({ json: opts.empty ? emptySearchFixture() : searchFixture() })
+    if (path === '/api/search') {
+      if (state === '10k') {
+        return route.fulfill({ json: scaleSearchFixture((call.body as Record<string, unknown> | undefined) ?? null) })
+      }
+      return route.fulfill({ json: empty ? emptySearchFixture() : searchFixture(tkey) })
+    }
     if (path === '/api/manage' && method === 'POST') {
       let action: string | undefined
       let data: Record<string, unknown> | undefined
@@ -540,6 +723,8 @@ export async function seedSession(
       json: { __unmocked: true, success: false, error: `unmocked endpoint: ${method} ${path}` },
     })
   })
+
+  return session
 }
 
 /** One named SSE frame for sseRoute. */
