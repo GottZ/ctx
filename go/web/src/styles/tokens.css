@@ -12,7 +12,7 @@
 
   --text: #d8dae5;
   --text-dim: #8a8d9c;
-  --text-faint: #595c6b;
+  --text-faint: #82869a;
 
   --accent: #7aa2f7;
   --accent-dim: rgba(122, 162, 247, 0.14);
@@ -91,12 +91,12 @@
 
   --text: #1b1d29;
   --text-dim: #4d5167;
-  --text-faint: #6a6f86;
+  --text-faint: #5f6479;
 
   --accent: #3457d5;
   --accent-dim: rgba(52, 87, 213, 0.12);
   --ok: #2e7d32;
-  --warn: #9a6a00;
+  --warn: #8a5f00;
   --danger: #c62a47;
   --danger-dim: rgba(198, 42, 71, 0.1);
 
@@ -106,7 +106,7 @@
   /* Graph-Palette light (K2-Format) */
   --graph-label: #54586a;
   --graph-edge: #c4c8d4;
-  --graph-edge-strong: #a6abbd;
+  --graph-edge-strong: #7d8298;
   --graph-node-sat: 62;
   --graph-node-lum: 45;
   --graph-bg: #e9eaf0;

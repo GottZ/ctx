@@ -1,0 +1,23 @@
+{
+  "$description": "Kontrast-Paarungs-Manifest (Q2, design 05-§4.2) — klassifiziert JEDEN $type:color-Token aus tokens.json. Genau eine Klassifikation pro Token: Paarungs-Regel (on+min, WCAG-2-Ratio wird in tokens/contrast-matrix.test.ts für BEIDE Themes gerechnet und durchgesetzt) | class:surface (Grundfläche — muss on-Ziel mindestens einer Regel sein) | class:decorative (begründet, nicht gerechnet) | class:composition (nur in Komposition sichtbar → axe-Runtime-Ebene, 06-PV5). Unklassifizierte Tokens, verwaiste Einträge und unbenutzte surfaces machen die Suite ROT (Vollständigkeits-Zwang, fail-closed). Die §4.2-Skizzen-Zeilen shadow-*/backdrop (decorative) kommen mit ihren Tokens in Q3; graph-node-sat/graph-node-lum sind $type:number (nicht Teil des Farb-Gates), graph-halo existiert nicht.",
+  "surface-0": { "class": "surface", "note": "App-Canvas + recessed input-bg — on-Ziel der Text-/Accent-Regeln" },
+  "surface-1": { "class": "surface", "note": "Panels/Topbar/Cards — on-Ziel der Text-/Status-Regeln" },
+  "surface-2": { "class": "surface", "note": "code-bg, button-bg, raised Tiles" },
+  "surface-3": { "class": "surface", "note": "Dialoge/Modals, Hover-Top" },
+  "text": { "on": ["surface-0", "surface-1", "surface-2", "surface-3"], "min": 4.5 },
+  "text-dim": { "on": ["surface-0", "surface-1", "surface-2", "surface-3"], "min": 4.5 },
+  "text-faint": { "on": ["surface-0", "surface-1", "surface-2", "surface-3"], "min": 4.5, "note": "110+ Nutzungsstellen bei 0.7–0.78 rem (klein) inkl. input::placeholder → 4.5, nicht Large-Text-3.0" },
+  "accent": { "on": ["surface-0", "surface-1"], "min": 4.5 },
+  "accent-dim": { "class": "composition", "note": "nur als Flächen-Tint unter Text-Tokens → axe-Ebene (rgba, kein Solo-Kontrastträger)" },
+  "ok": { "on": ["surface-1"], "min": 4.5, "note": "Status als Text; als reine Icon-/Badge-Farbe min 3.0 mit role=img+label" },
+  "warn": { "on": ["surface-1"], "min": 4.5, "note": "Status als Text; als reine Icon-/Badge-Farbe min 3.0 mit role=img+label" },
+  "danger": { "on": ["surface-1"], "min": 4.5, "note": "Status als Text; als reine Icon-/Badge-Farbe min 3.0 mit role=img+label" },
+  "danger-dim": { "class": "composition", "note": "nur als Flächen-Tint unter Text-Tokens → axe-Ebene (rgba, kein Solo-Kontrastträger)" },
+  "border": { "class": "decorative", "note": "nicht allein bedeutungstragend (E4-Entscheidung dokumentiert die Grauzone)" },
+  "border-strong": { "class": "decorative", "note": "05-E4 in Q2 entschieden: bewusste AA-Grauzone (SC 1.4.11) statt Pass — Ist 1.57–1.73 gegen surface-0/1; Felder unterscheiden sich zusätzlich per Hintergrund (surface-0 vs. Panel), Fokus-Zustand wird per E5 normiert (Q3). Die E4(a)-Empfehlung (≥3:1 anheben) ist Charakteränderung → E1=B-Wellen (Q11/Q12); dort wird diese Zeile auf {on:[surface-0,surface-1],min:3} geflippt und geht fail-closed rot, bis die Werte stehen" },
+  "graph-label": { "on": ["graph-bg"], "min": 4.5, "note": "Node-Labels = Text" },
+  "graph-edge": { "class": "composition", "note": "Normal-Kante, nicht allein bedeutungstragend; Graph-Rendering strukturell geprüft via __ctxGraph-Hook (smoke.spec)" },
+  "graph-edge-strong": { "on": ["graph-bg"], "min": 3.0, "note": "non-text (SC 1.4.11): supersedes-Kante ist bedeutungstragend; einzige Gate-Ebene für den maskierten Canvas" },
+  "graph-bg": { "class": "surface", "note": "Canvas-Hintergrund (= surface-0) — on-Ziel der Graph-Regeln" },
+  "dot-pattern": { "class": "decorative", "note": "Login-Punktraster, rein dekorative Textur (rgba-Tint auf surface)" }
+}
