@@ -18,7 +18,11 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+
+    /* tokens/generate.mjs (dependency-free Node tooling) is JS with JSDoc */
+    "allowJs": true,
+    "checkJs": true
   },
-  "include": ["vite.config.ts"]
+  "include": ["vite.config.ts", "tokens/**/*.mjs", "tokens/**/*.test.ts"]
 }

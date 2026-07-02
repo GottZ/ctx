@@ -1,3 +1,6 @@
+/* GENERATED — edit tokens.json (tokens/tokens.json) and run `bun run tokens`.
+ * Do not edit by hand: tokens/tokens.drift.test.ts fails on any drift. */
+
 /* Design tokens — dark-first, dense operator console (design 04-§2.2 W3).
  * Tokyo-Night-adjacent palette; semantic trio ok/warn/danger for status
  * surfaces arriving in W4+ (settings validation, dashboard tiles). */

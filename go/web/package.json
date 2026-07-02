@@ -6,6 +6,7 @@
   "//": "graph stack is sigma+graphology by decision (F5-W2). Never add @cosmograph/cosmograph: CC-BY-NC license is incompatible with this MPL-2.0 project.",
   "scripts": {
     "dev": "vite",
+    "tokens": "node tokens/generate.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
