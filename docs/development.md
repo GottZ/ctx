@@ -1,0 +1,71 @@
+# Development
+
+## Building
+
+```bash
+go build -o ctx ./cmd/ctx/           # CLI
+go build -o ctxd ./cmd/ctxd/         # Daemon
+go test ./... -short                  # Unit tests
+```
+
+The CLI (`cmd/ctx`) never depends on the frontend. Plain `go build` / `go install .../cmd/ctxd` need no Bun and produce a binary that serves a 503 placeholder instead of the UI — `docker compose build ctx` is the channel that ships the real UI.
+
+## Web UI (Svelte 5 + TypeScript + Vite, Bun)
+
+The admin SPA lives in `go/web/` and is embedded into the ctxd binary via `go:embed`. The Docker image builds it in its own stage (`oven/bun:1.3-alpine`, `bun install --frozen-lockfile`, `svelte-check` gate).
+
+```bash
+cd go/web
+bun install                           # once; bun.lock is committed
+bun run dev                           # Vite on :5173, proxies /api → ctxd
+bun run check && bun run build        # typecheck + production build into dist/
+```
+
+The dev proxy targets `http://localhost:8080`; the compose ctx service publishes no ports by default — add a local port mapping (see `docker-compose.override.yml.example`) and override with `CTX_DEV_PROXY=http://127.0.0.1:<port>` if you map a different port.
+
+### Shell & theming
+
+All surfaces theme from one token set (Tokyo-Night-adjacent dark + a light counterpart) via a `data-theme` attribute on `<html>`. The preference (`system`/`light`/`dark`) is detected from `prefers-color-scheme`, follows the OS by default, and persists in `localStorage`; a render-blocking, `script-src 'self'`-compliant boot script (`/theme-boot.js`) applies it before first paint (no dark-flash). A three-segment toggle in the nav-rail footer switches it.
+
+The shell is a collapsible left **nav rail** (icon-only on narrow desktops, an off-canvas drawer with focus-trap on mobile). Rail entries are **role-adaptive** — filtered from the caller's `whoami` capabilities, so a member sees the corpus areas while admins additionally get tenant/server sections. The rail footer carries an **identity badge** (API-key label, owning tenant, role badge owner/admin/member, read-only marker when the key has no writable scope). Each area declares a layout mode: reading surfaces (Settings/Status) stay centered at a readable measure, canvas/master-detail areas (Graph/Blocks/Chat) use the full viewport width. Empty results render a guiding empty state with an onboarding CTA. `/` lands each tier on its home area — members on a `/home` capability screen, higher tiers on the status dashboard — and a client-side tier guard redirects a forbidden deep link back there (visibility only; the real authorization stays server-side).
+
+### Areas
+
+- **Settings** — renders the full [Settings API](api.md#settings-api) catalog generically from registry metadata: one category card per key prefix, widgets dispatched by registry type (an unknown future type degrades to read-only), source badge (`default`/`env`/`db`) and env-var name per field. Hot and `coupled:embed-cache` keys edit live (one `PUT` per changed key, a `422` lands inline); restart/coupled keys render read-only. Fields with a `db` override get a reset affordance. The three cross-field rules (thresholds, dual-runner `num_ctx`, `blend_weight`×graph) are mirrored client-side as inline previews while the server-side candidate build stays authoritative. Includes the **Backends** sub-route (`/settings/backends`) — backend-pool editor with a trust dropdown + elevation-confirm dialog, roles multi-select, model_map line editor, priority up/down and per-row reachability test — plus the write-only **secrets vault** with reference tracking.
+- **Graph** (`/graph?focus=<uuid>`, deep-linkable) — renders dream-link ego networks via sigma (WebGL) over one graphology instance (deliberately outside Svelte reactivity — the runes proxy overhead on thousands of node objects is the documented reason). Entry is the FTS search; a hit/node click focuses that block's ego net (`GET /api/graph/ego`, 2 hops). Double-clicking a node expands it (+1 hop merge); the layout is ForceAtlas2 in a web worker (Blob-URL — CSP carries `worker-src blob:`), running 3–10s scaled by graph size after every merge. Client memory is hard-capped: over 5000 nodes / 20000 edges the nodes farthest from focus (BFS distance, LRU tie-break) are evicted down to 4000 — pinned nodes and focus survive. One filter state (link class, min confidence, category, created window) drives both sides: loaded elements filter instantly through the sigma reducers (zero server roundtrips) while new fetches mirror the filters as ego-query params. Single-click opens a detail sidebar (content lazy through scope-checked `manage get`; content renders as a text node, never `{@html}`).
+- **Blocks** — corpus browser: full-text search + category/tag/scope facets + a sensitivity-badged, keyset-paginated newest-first list over the scope-gated `/api/search`, a detail panel, and create/edit/delete over `/api/store` + `manage update`/`delete` (sensitivity-downgrade + delete confirms).
+- **Status** dashboard + SSE live stream.
+- **Chat** (`/chat`) — streams a turn from [`POST /api/chat/stream`](api.md#web-chat-sessions) over fetch + `eventsource-parser` (no reconnect — a turn is one-shot). The thread shows the user message, collapsible tool-call cards, the streamed assistant answer and a backend badge. Assistant markdown goes through **markdown-it `html:false` + DOMPurify**, with `[title](ctx:<id>)` citations rewritten to `/graph?focus=<id>` BEFORE sanitizing (raw HTML in a quoted block is escaped, never parsed; `markdown.ts` carries the XSS suite). A turn is abortable and aborts on navigate-away/`beforeunload` (frees the single llama.cpp slot).
+- **Admin / tenant areas** — the server-admin **tenant register** (`/admin`), tenant detail pages with per-scope quota forms, and the tenant-admin **keys** area (`/tenant`) that lists/creates/revokes keys (show-once plaintext reveal, self-revoke guard) with a quota card and scope self-provisioning. See [multi-tenancy](multi-tenancy.md#self-service-onboarding-v411).
+
+## Testing
+
+```bash
+bash state.sh                       # Live system state
+bash test.sh --with-ollama          # 18 system + retrieval + MCP tests
+bash eval.sh                        # 43 eval tests (baseline regression)
+bash eval.sh --update-baseline      # Set a new baseline
+cd go && go test ./... -short       # Go unit tests
+```
+
+MCP tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18.
+
+## Visual baseline governance (Web e2e)
+
+Screenshot baselines (`go/web/e2e/__screenshots__/`) are the frozen "objectively good" reference for the UI: the taste judgement is made once, at baseline approval — afterwards every pixel deviation is a measurable diff, not an opinion. Baselines are only valid when rendered inside the digest-pinned toolchain container (`go/web/e2e/toolchain.lock` pins the image digests; `bash go/web/e2e-visual.sh --update` is the only regeneration path — CI has no update path and only compares).
+
+Any commit that touches `__screenshots__/` or adds a11y-debt entries (`go/web/e2e/a11y-baseline.json`) must carry a **`[baseline]`** marker in its message plus a one-line reason. The `commit-msg` hook rejects it locally (fast feedback), and the CI marker gate rejects it on the PR (enforcement that survives `--no-verify` and dead hooks). Shrinking the a11y debt (ratchet) needs no marker. Baseline changes live in their own commits, never mixed with feature code, and are **batched per wave group** (one consolidated `[baseline]` commit per group, squashed before merge) to keep the non-delta-compressible PNG history rate bounded.
+
+**Playwright/toolchain upgrade runbook** — an image bump and the baseline regeneration are ONE coupled step, never separate:
+
+1. Bump the image digests in `go/web/e2e/toolchain.lock` (the tag next to it is a human-readable label, the digest wins).
+2. Regenerate: `bash go/web/e2e-visual.sh --update` (builds the container from the new pins, refreshes changed baselines inside it).
+3. Commit lock bump + regenerated baselines together as ONE `[baseline]` commit stating the upgrade as the reason.
+
+## Git hooks
+
+Enable with `git config core.hooksPath .hooks`:
+
+- **pre-commit** — golangci-lint on staged Go files.
+- **commit-msg** — enforces a documentation review for `feat:` commits and schema migrations (`go/migrations/`): the commit must stage `README.md` **or** a `docs/*.md` file. Also enforces the `[baseline]` marker (above).
+- **pre-push** — requires annotated `v*` tags for version releases.

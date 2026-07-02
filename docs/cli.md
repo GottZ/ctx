@@ -1,0 +1,66 @@
+# CLI Reference
+
+The `ctx` CLI reads its config from `~/.config/ctx/config` (`CTX_BASE_URL` + `CTX_KEY`). On a TTY most commands render a table; when piped they emit JSON. See [operations](operations.md#configure-the-cli-endpoint) for setup.
+
+## Core
+
+| Command | Description |
+|---------|-------------|
+| `ctx query question` | Hybrid search + LLM synthesis (formatted, `--json` for raw) |
+| `ctx save <cat> <title> - <content>` | Upsert knowledge block |
+| `ctx save --tag tag1,tag2 <cat> <title>` | Upsert with tags |
+| `ctx save --sensitivity LEVEL <cat> <title>` | Classify on write (`credentials`/`personal`/`internal`/`public`) |
+| `ctx search [category] [query:text]` | Compact search (no LLM) |
+| `ctx get <id>` | Fetch full block |
+| `ctx delete <id>` | Soft-delete (archive) |
+| `ctx categories` | List all categories |
+| `ctx stats` | Database statistics + Dream backlog (`dream_queue`: pickable/cooldown/incoming-forecast) |
+| `ctx health` | Healthcheck |
+| `ctx version` | Print version |
+
+## Dream & Guard
+
+| Command | Description |
+|---------|-------------|
+| `ctx guard [list\|stats\|resolve]` | Write Guard management |
+| `ctx dream [stats\|review]` | Dream Mode stats — mode, `queue` (backlog + incoming forecast), `backoff` (per-eval-count maturity distribution + effective cooldown); human-readable on a TTY, JSON when piped + link review |
+| `ctx dream enable\|disable\|throttle` | Runtime dream mode control (on/off/throttled) |
+
+## Ingest & maintenance
+
+| Command | Description |
+|---------|-------------|
+| `ctx brief` | Project briefing from store |
+| `ctx persist` | Persist `[PERSIST:cat:title]` markers |
+| `ctx ingest <path>` | Ingest Obsidian vault |
+| `ctx digest` | Rebuild topic map |
+| `ctx statusline` | Claude Code status bar |
+
+## Admin: config, secrets, backends
+
+(All require an **admin key** — see [security](security.md#admin-tier).)
+
+| Command | Description |
+|---------|-------------|
+| `ctx settings [list\|get\|set\|unset]` | Runtime settings overrides (alias `cfg`; reads included). TTY: table, pipe: JSON; `set` takes the value as argument or stdin; API failures (422/409/403) exit 1 with the server's reason |
+| `ctx secrets [list\|set\|rotate\|rm]` | Sealed provider credentials (alias `sec`). Write-only: values go in via stdin ONLY (`echo "$KEY" \| ctx secrets set <name>` — an argv value is rejected, it would leak via /proc and shell history); list shows metadata + `referenced_by`, never values; `rm` exits 1 with a 409 while settings reference the secret |
+| `ctx backends [list\|create\|update\|delete\|test]` | LLM backend pool. TTY: table with live status, pipe: JSON; `create`/`update` take a JSON spec as argument or stdin; API failures exit 1 |
+| `ctx gaming [on\|off]` | Gaming toggle: drop the GPU-host backends from every chain so the GPU is free to game (CPU/external stay in as failover). No arg = status (any valid key); `on`/`off` need an admin key. Persists in settings — survives a restart and hits the next chain without one; a typo in the disabled list surfaces as `unknown_backends` |
+| `ctx blocks audit [status\|sample\|start]` | Sensitivity LLM audit: classify `sensitivity_source='default'` blocks over the hard-local `classify` chain. `sample --n 30` = dry-run verdicts without writes, `start [--limit N]` = live run, bare/`status` = progress. See [security](security.md#sensitivity-classification) |
+| `ctx blocks classify [status\|dry-run\|start]` | Credentials PATTERN re-audit: the deterministic detector raises every home-scope hit to `credentials` (`sensitivity_source='pattern'`), upgrade-only. `dry-run [--limit N]` = full scan WITHOUT writes (run it first), `start [--limit N]` = live run, bare/`status` = progress |
+| `ctx mcp [add\|list\|delete]` | Manage MCP OAuth client registrations |
+
+## Keys & tenants
+
+| Command | Description |
+|---------|-------------|
+| `ctx keys create <label> --home <scope>` | Provision API key (v2.0.0: `--home` required, no default scope; admin key required since migration 052) |
+| `ctx keys [list\|delete]` | List / revoke provisioned API keys (admin key required since 052) |
+| `ctx tenant [list\|get\|create\|update\|delete]` | Tenant lifecycle (**server-admin key**). `create <slug> <name>` is the compound bootstrap: tenant + initial scope `<slug>:main` + owner key (plaintext shown once). TTY: table, pipe: JSON; API failures (403/404/400) exit 1 |
+| `ctx tenant grant [create\|list\|delete]` | Cross-tenant read grants (**server-admin key**): grant another tenant read access to one scope; delete revokes immediately |
+| `ctx tenant limit set <id> --max-scopes N --max-keys N` | Structural caps (**server-admin key**). Replace semantics — both flags required; negative = unlimited, 0 = frozen |
+| `ctx tenant usage [id]` | Scope/key counts vs limits. No arg = own tenant (tenant-admin suffices); targeting another tenant needs a **server-admin key** |
+| `ctx quota [set]` | Per-tenant cost/call budget (read: tenant-admin; `set`: **server-admin key**) |
+| `ctx block-grant [create\|list\|revoke]` | Row-level read sharing of a single block with another tenant (**server-admin key**) |
+
+Tenant semantics are documented in [multi-tenancy](multi-tenancy.md).

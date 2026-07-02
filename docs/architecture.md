@@ -1,0 +1,104 @@
+# Architecture
+
+**Stack:** Go 1.26, PostgreSQL 18 + pgvector 0.8.2, 74 SQL migrations. Dual-protocol inference (Ollama native or OpenAI-compatible) via any provider — per-pipeline configurable via `CTX_*_PROTOCOL`, `CTX_EMBED_*`, `CTX_CHAT_*`, `CTX_DREAM_*` env vars (see [operations](operations.md)).
+
+## Pipelines at a glance
+
+```
+Query ──► Parse Temporal ──► Embed ──► 4-Way RRF ──► Gravity Boost ──► Graph Expand ──► filterSuperseded ──► LLM Synthesis
+          │                            ├─ Semantic (0.45)    │
+          │                            ├─ EN-FTS   (0.25)    ├─ Linear (Power-Law, content_times)
+          │                            ├─ DE-FTS   (0.20)    └─ Cyclic (Gaussian, EAV dimensions)
+          │                            └─ Trigram  (0.10)       ├─ weekday σ=0.07  ┌─────────────────────────────┐
+          │                                                     ├─ month   σ=0.10  │  Dream Mode (continuous)     │
+          └─► DimensionWeights                                  ├─ quarter σ=0.12  │  N workers (PARALLELISM=N)   │
+              {weekday:1.0}  "immer dienstags"                  ├─ week    σ=0.08  │  atomic claim (SKIP LOCKED)  │
+              {month:0.4, seasonal:0.6}  "Weihnachten"          ├─ monthday σ=0.10 │  Pick → Keywords → RRF       │
+              {monthday:1.0}  "Monatsanfang"                    ├─ seasonal σ=0.08 │  → LLM Eval → Links          │
+              {daily:1.0}    "morgens"                          └─ daily   σ=0.08  │  → ApplySupersedes           │
+                                                                                   │  → PromoteToCanonical        │
+                                                                                   └─────────────────────────────┘
+
+Store ──► Extract Times ──► Hash NOOP ──────────────► Guard (async, 60s)
+          (content + created_at)          │           ├─ ≥dup-threshold: auto-archive
+          │                               │           ├─ review..dup: flag needs_review
+          │                               │           └─ <review: clean
+          │                               │           (per-type policy since M074/WF T7; seed defaults 0.98/0.92)
+          │                               └─► Embed (async, scheduler backfill, tx-wrapped)
+          └─► Dimensions = Union(content anchors ∪ meta anchor)
+              • Content: dates mentioned in text (semantic)
+              • Meta: created_at timestamp (every block, always)
+              • ON CONFLICT dedups overlapping timestamps
+```
+
+## 4-Way RRF retrieval
+
+Reciprocal rank fusion across four channels: **semantic** (pgvector, weight 0.45), **EN fulltext** (0.25), **DE fulltext** (0.20), and **trigram** title (0.10) — bilingual FTS + trigram.
+
+The `ctx_rrf` SQL function is type-policy-parameterised since migration 073 (WF T5). It takes a visibility **allowlist** (`p_types_visible`, fail-closed — an unregistered/rogue `type_name` is invisible until a registry row carries it; NULL/empty ⇒ 0 rows, Go rejects the call before that) plus parallel damping arrays (`p_damped_types`/`p_damped_factors`) sourced per request from the block-type registry, which generalises the former hardcoded audit-trail scalar into query-aware intent lift. Results carry `type_name`; a registry edit (damping factor, intent patterns) changes rankings live via hot-reload — no restart, no migration. See also the multi-tenant grant param `p_granted_block_ids` (migration 068) in [multi-tenancy](multi-tenancy.md#block-level-grants-row-level).
+
+## Temporal gravity & cyclic phases
+
+**Cyclic phase model** — 7 cyclic temporal dimensions (weekday/month/quarter/week/monthday/seasonal/daily), each with normalized phase [0,1) and its own Gaussian decay field. Queries route to dimensions via an 18-matcher deterministic parser engine: "immer dienstags" activates `weekday`, "Weihnachten" activates `{month:0.4, seasonal:0.6}`. Timezone-aware via `CTX_TIMEZONE`.
+
+**Multiple anchors per block.** Every block carries dimensions from both its content (dates mentioned in text) AND its `created_at` timestamp. A block about "Meeting am Dienstag" written on a Friday gets `weekday=2` (content anchor) AND `weekday=5` (meta anchor); both signals contribute independently. "Meeting am Dienstag, Ergebnis am Mittwoch" still pulls the Wednesday block (just weaker). Storage is EAV (`context_temporal`) with partial B-Tree indexes for O(log n) dimension lookups at 1M+ scale; `ON CONFLICT` dedups overlapping timestamps.
+
+**Forward Telescoping.** Older blocks get a wider linear gravity well (effective power scaled by `1 / (1 + 0.3·ln(1+age/30))`) so a 6-month-old block isn't drowned out by a 1-week-old block when the user asks about a date in that window. Future dates keep their 1.2× sharper cutoff. Matches Rubin & Baddeley 1989's age-dependent recall imprecision.
+
+## Dream Mode
+
+A continuous background loop that autonomously discovers relationships between blocks, marks outdated information (supersedes), and promotes high-quality content. It is **type-policy-gated** since WF T8 (`dream.linkable` both-sided via the block-type registry — the former `is_meta` exclude generalized; per-type `dream.link_classes` caps the writable link vocabulary).
+
+- **Dual-model support** — a separate model for evaluation (e.g. a larger model for better causal/supersedes reasoning). Dream pipeline version 5, v5 prompt for qwen3.6:27b non-thinking sampler, with a `recurrent` relationship class detected via `context_temporal`+title-similarity (Phase 1) + LLM (Phase 2).
+- **Parallel workers** (`CTX_DREAM_PARALLELISM`, default 1) with atomic `FOR UPDATE SKIP LOCKED` block-claim — race-safe under contention.
+- Adaptive cooldown, supersedes detection, temporal validation, a **hard cap of 5 links per cycle** with type-diversity tie-break, replace-semantics with snapshot revert, and runtime mode control (on/throttled/off via API). Throttled mode pauses between GPU-intensive steps for thermal management.
+- **Robust LLM-output parsing** — tolerates array-form, single-object, fenced-array and compact-multi-key-object link formats from heterogeneous LLM outputs.
+
+**Dream-graph traversal** (Wave 1, default-on since Wave 3, `CTX_GRAPH_EXPAND_ENABLED`) — query-time 1-hop expansion of the Dream-inferred link graph (topical/factual/causal/recurrent), confidence/type-gated + hub-damped, fused as a scale-invariant post-gravity boost before rerank. Turns inferred links into positive recall instead of write-only metadata; fully parameterized for A/B sweeps, fail-open.
+
+## Guard (deduplication)
+
+Async deduplication via PG LISTEN/NOTIFY + HNSW similarity. Policy-parameterised since migration 074 (WF T7): `ctx_guard_check` takes the thresholds + the candidate-type **allowlist** as mandatory parameters (NULL candidates ⇒ 0 matches; a legacy 1-arg call ⇒ loud 42883, no silent default fallback), plus a `p_same_scope_only` switch for same-scope dedup with `hnsw.iterative_scan='relaxed_order'` against filtered-ANN false-cleans. The batch picks only `guard.check=true` types (per-type thresholds via `guard.threshold_duplicate`/`_review`, seed defaults 0.98/0.92 = former literals), and the pending pick/count queries ride the partial index `idx_guard_pending` instead of full scans.
+
+## Block-type registry (migration 072)
+
+`context_block_types` is the declarative per-type behaviour registry of the workflow-engine line. The four block-type classes (`knowledge`, `audit-trail`, `reference`, `system-meta`) ship as builtin seed rows whose JSONB configs reproduce today's hardcoded behaviour (retrieval damping, guard participation, dream linkability, digest/overview inclusion, classify rules). The daemon starts on a compiled-in builtin set, overlays the DB rows at boot (merge — a deleted builtin row can never blank the default type) and hot-reloads on any table write via the same NOTIFY channel the settings use; edits via `psql` take effect without a restart.
+
+A boot that finds the table but cannot load it (corrupt row) degrades **loudly**: `/health` carries `blocktype_registry: "builtin-fallback"`, the overall status drops to `degraded`, and a 30s retry loop self-heals once the row is fixed.
+
+**Consumers** (unregistered types are fail-closed everywhere — invisible, no guard candidate, no dream, no digest):
+
+| Consumer | Wave / migration | Policy |
+|---|---|---|
+| Auto-classifier | T4 | classify rules per type, `type_source='auto'` respect, manage-update re-classify |
+| RRF retrieval | T5 / 073 | visibility allowlist + per-request damping arrays (the M035 CHECK fell — an unregistered name is fail-closed invisible, not INSERT-rejected) |
+| Overview clustering | T6 | `overview.include` node cut |
+| Guard | T7 / 074 | `guard.check`/`guard.candidate` allowlists + per-type thresholds |
+| Dream loop | T8 | `dream.linkable` gates both pick eligibility and link-target admission; `dream.link_classes` restricts writable link classes |
+| Digest | T8 | `digest.include` sieves the topic-map source |
+
+Since T10 the registry is **API-exposed** (no schema change) via the `type-*` manage family: `type-list`/`type-get` are open reads (scoped to `_global` ∪ the caller's own tenant namespace), `type-create`/`type-update`/`type-delete` are server-admin (tier 1: only the shipped `_global` namespace is writable). Configs are validated by the SAME decoder the reload path uses (422 with the offending key path); builtin rows are undeletable (their config IS editable), a delete is refused while ANY block references the type, and every mutation runs in one attributed transaction (`via='api'` + acting key) followed by a synchronous reload. Since T9 (migration 075) the legacy `is_meta` column + index dropped — the third type axis consolidated into the registry (`metadata.is_meta` survives as a JSONB classify-input key only).
+
+## Type & lifecycle axes
+
+- **Lifecycle state machine** (`lifecycle_state`, migration 070) — every block carries an explicit, code-owned pipeline state: `knowledge` (default) → `canonical` (dream promotion at quality ≥ 0.8) → `snapshot` (superseded; reverts to `knowledge` when the supersedes-link is dropped); `chunk` (ingest) and `synthesis` (daily report) are set by their pipelines. NOT NULL, mechanism-only — dream, ingest and the daily report are the sole writers, no user-facing write path.
+- **Policy-type axis** (`type_name` + `type_source`, migration 071 — renamed from `block_role`) — WHAT a block is: `knowledge` / `audit-trail` / `reference` / `system-meta` (+ future workflow types). The M035 CHECK enum fell with migration 073 — the registry is the type-name authority now (fail-closed lives in the READ path). `type_source` (`auto`|`manual`) records whether the auto-classifier set the type; `manual` overrides auto permanently. The classifier is policy-driven since T4 (rules live as data in `context_block_types`, `internal/rrf/pattern.go` is a pure match engine over passed patterns); it runs on store, MCP store, digest, dream daily report AND manage-update.
+
+## Backend pool (F3, migrations 053–055)
+
+`context_backends` replaces the hardwired primary+fallback pair with a declarative, role-routed, priority-ordered pool. Each row is one backend: `base_url`, wire `protocol` (`openai`/`ollama`/`rerank`), `provider_class` (`generic`/`llamacpp`/`openrouter`), a **trust level**, an egress `locality`, a `roles` list (`synthesis`, `translate`, `embed`, `rerank`, `dream`, `digest`, `chat`, `classify`, free-form), a per-role `model_map`, per-role `timeouts`, `priority` and `enabled`. Order/priority are pure DATA — no code path references backend names or priority constants.
+
+On first boot with an empty table, ctxd seeds it from the effective config snapshot (settings > env precedence); afterwards the **table is the source of truth** and the `CTX_*_HOST` env vars only feed that one-time bootstrap. Multi-tenant scope isolation of the pool is documented in [multi-tenancy](multi-tenancy.md#backend-pool-isolation-egress); the trust × sensitivity gating and the OpenRouter ZDR guarantees in [security](security.md). CRUD is in [api](api.md#backend-pool).
+
+**Synthesis on the pool chain** (054) — query-path synthesis walks the role chain from `context_backends` (priority-ordered, cooldown-sorted; the chain is the ONLY way to a backend, so the trust gate sits structurally before prompt transmission). Transport-class failures advance to the next backend (e.g. the `llama-cpu` sidecar at priority 10: same GGUF, CPU speed, its own per-role timeout); HTTP-500 and attempt timeouts stop the chain — the server *ran* the request, slow-but-alive is not down. The response heartbeat starts whenever synthesis is on (`synthesize != false`), so a CPU-leg answer survives buffering proxies even with rerank off. Since 055 the WHOLE query path resolves through the chain (translate, temporal, query-embed, rerank dispatch, inline backfill) with a real requirement: `max(query sensitivity, sensitivity of the FINAL prompt set)` — measured after rank filtering, so a credentials block on rank 180 that never enters the prompt cannot lock the failover. An empty dream chain (gaming/disabled/trust) skips the cycle BEFORE the block pick — no claim, no cooldown touch, so a gaming session never smears the back-off statistics.
+
+**Rerank sidecar.** Post-RRF rerank (default-on since Wave 3.5, fail-open) via a local **bge-reranker-v2-m3** cross-encoder sidecar (`http://ctx-rerank:8082`, cohere-style `/v1/rerank`, all-local/$0) or LLM-as-judge on the chat model when `_HOST` is empty. The surface-gold counter-probe showed the cross-encoder earns its keep (nDCG@10 +0.164, MRR +0.169) while blend 0.5 keeps it neutral on latent gold — `graph+ce-bw0.5` is the best arm on both gold sets; the ~80–90s query path stays proxy-safe via the body heartbeat.
+
+## Supporting mechanisms
+
+- **Supersedes filtering** — temporal-gated removal of outdated blocks from query results.
+- **Transport retry** — all inference HTTP calls (chat ollama/openai, embed, rerank) retry exactly once on transient transport failures (connection reset / EOF before any response bytes) via `internal/httpx`. Covers the keep-alive race with llama.cpp's cpp-httplib servers (~5s idle close vs Go connection reuse); HTTP status errors and context deadlines are never retried. Inference POSTs are stateless, so a replay is safe.
+- **Streaming tool-call wire** (`llm.ChatStream`) — streaming OpenAI-compatible chat with function calling: multi-turn message arrays, per-delta events, index-keyed tool-call assembly, arguments normalisation (llama.cpp JSON-string fragments and whole-object form yield identical calls), hardened against OpenRouter SSE comment frames and mid-stream error events inside HTTP-200 streams; usage falls back to llama.cpp `timings` incl. MTP draft-acceptance. Drives the web-chat harness (see [api](api.md#web-chat-sessions)).
+- **Embed cache** — content-hash-keyed embedding cache (`context_embed_cache`) to avoid re-embedding identical text across pipelines.
+- **LLM log** — per-call request/response capture (`context_llm_log`) with input/output token counts (Ollama + OpenAI), dream-pipeline version tagging, and parse-format drift tagging (`metadata.parse_format`). Since 054 each chained call carries backend provenance (`backend_name`/`backend_trust`/`backend_locality` of the backend that **actually answered**, `attempt` + the full per-attempt `metadata.chain`, a partial index on `backend_locality='external'` as the egress audit trail; `cost_usd` carries OpenRouter's `usage.cost`, NULL on local; `api_key_id` for caller attribution). Since 055 the formerly unlogged query-path roles write **slim rows** (full telemetry + `block_ids`, NO prompt bodies); rows whose `required_sensitivity` is `credentials` get the body slim across ALL pipelines (the egress trace stays ID-exact while the hottest tier leaves no plaintext shadow corpus). Retention: see `CTX_LLMLOG_RETENTION_DAYS` in [operations](operations.md).
+- **MCP Remote** — Streamable HTTP transport with OAuth 2.1 PKCE for claude.ai/Claude Code integration. Tools: query, store, search, get, recent. Client registration via `ctx mcp add`; tool handlers return `Content[].text` (no structured output).
