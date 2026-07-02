@@ -526,9 +526,47 @@ export async function seedSession(
       return route.fulfill({ json: fixture })
     }
 
-    // Unmapped (write paths not hit on initial load): benign success envelope.
-    return route.fulfill({ json: { success: true } })
+    // Unmapped /api/** → HARD-FAIL (design 06 §4.6, wave PV2). Was a benign
+    // {success:true} — it absorbed every un-mocked endpoint silently (seam S5).
+    // Status 599 (non-2xx) fails ALL THREE consumer classes loudly: apiFetch
+    // throws via !res.ok (api.ts:99-101); streamTurn throws the pre-stream
+    // ApiError (stream.ts:44-48 — a 200 JSON body would pass its gate and
+    // resolve as a silently EMPTY turn); SseClient goes to status 'error'
+    // (sse.svelte.ts:44) instead of a clean-EOF reconnect loop. 401 is
+    // deliberately avoided: it would trigger hooks.onUnauthorized and tear the
+    // session down mid-test (api.ts:95-96). Self-tested in meta.spec.ts.
+    return route.fulfill({
+      status: 599,
+      json: { __unmocked: true, success: false, error: `unmocked endpoint: ${method} ${path}` },
+    })
   })
+}
+
+/** One named SSE frame for sseRoute. */
+export interface SseFrame {
+  event: string
+  data: unknown
+}
+
+/**
+ * SSE mock building block (design 06 §4.6, wave PV2): serve a route as a
+ * deterministic `text/event-stream` response built from the given frames. The
+ * body is delivered atomically; the app's eventsource-parser (stream.ts /
+ * sse.svelte.ts) parses the frames sequentially — no chunk timing, no race.
+ * Register AFTER seedSession: later page.route registrations take precedence,
+ * so this overrides the `/api/**` 599 catch-all (and, for '/api/events', the
+ * abort default) exactly where a test needs real frames. Frame SEMANTICS are
+ * mock-testable here; transport BEHAVIOUR (reconnect, server timing) stays
+ * live-tier domain (PV10).
+ */
+export async function sseRoute(page: Page, url: string, frames: SseFrame[]): Promise<void> {
+  await page.route(url, (route: Route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: frames.map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n\n`).join(''),
+    }),
+  )
 }
 
 /** Collect uncaught page exceptions; assert this stays empty after a render. */
