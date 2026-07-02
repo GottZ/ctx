@@ -53,6 +53,120 @@ jobs:
           args: --timeout=5m
           only-new-issues: ${{ github.event_name == 'pull_request' }}
 
+  # ─── Stage 1b: Web (frontend gate, parallel to Lint) ─────────────────────────
+  # Wave PV8 (design 06 §7): PRs check the frontend for the first time.
+  # Every bun step runs inside the digest-pinned toolchain container built
+  # from e2e/toolchain.lock — the SINGLE digest source (decision E4), parsed
+  # by go/web/e2e-container.sh (the same implementation e2e-visual.sh uses;
+  # no second copy of the lock mechanics in this YAML). That container is the
+  # canonical render environment, so @visual pixel asserts run here
+  # (CTX_E2E_CONTAINER=1 is set by the runner script).
+  #
+  # Command parity with the release build (go/Dockerfile stage 0):
+  # `bun install --frozen-lockfile` and `bun run check` are byte-identical;
+  # `bun run build` runs inside the e2e step via the Playwright webServer
+  # (with VITE_E2E=1 — the plain production build stays covered by the
+  # Docker stage). Known, deliberate divergence: the release stage uses
+  # oven/bun alpine (musl), the toolchain image the glibc bun binary on the
+  # Playwright noble base (design 06 §4.4/S4).
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    # Hard deck above the 10-min budget fail (design 06 §6.3).
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - name: Record job start (budget measurement, design 06 §6.3)
+        run: echo "CTX_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history: the baseline marker gate diffs the whole PR/push
+          # range and reads per-commit messages (design 06 §5.5 layer 2).
+          fetch-depth: 0
+
+      # Enforcement that survives --no-verify and dead local hooks: baseline
+      # changes (__screenshots__, a11y debt growth) require the [baseline]
+      # marker on every touching commit, or the PR label `baseline-update`.
+      # Runs where a range exists: PRs (base...head) and pushes with a real
+      # `before` SHA. Skipped for branch-creation pushes (before = zero SHA)
+      # and workflow_dispatch — there is no range to check there.
+      - name: Baseline marker gate (design 06 §5.5 layer 2)
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000')
+        env:
+          RANGE_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.event.pull_request.base.ref) || github.event.before }}
+          PR_LABELS: ${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ' ') || '' }}
+        run: bash .github/scripts/baseline-marker-gate.sh
+
+      - name: Build pinned toolchain container (e2e/toolchain.lock)
+        run: bash go/web/e2e-container.sh bun --version
+
+      # Byte-identical to go/Dockerfile stage 0 — the v4.1.0 lesson: bun.lock
+      # drift was CI-invisible until the Docker build; this catches it on PR.
+      - name: Install (bun, frozen lockfile)
+        run: bash go/web/e2e-container.sh bun install --frozen-lockfile
+
+      # K9 steps (design 05 → this job): 05 contributes lint:css and the
+      # contrast matrix as named job components. Reading of 05 (§1 DoD +
+      # masterplan K9): no separate MECHANISM is demanded — the contrast
+      # matrix is a vitest test (tokens/contrast-matrix.test.ts) and would be
+      # covered by `bun run test` below; `bun run check` re-runs lint:css.
+      # Both get named steps anyway for failure attribution (the K9 contract
+      # stays visible in the job UI); each re-run costs single-digit seconds.
+      - name: Lint CSS (token gate + inline gate — K9)
+        run: bash go/web/e2e-container.sh bun run lint:css
+
+      - name: Contrast matrix (WCAG token gate — K9)
+        run: bash go/web/e2e-container.sh bun run test tokens/contrast-matrix.test.ts
+
+      - name: Check (lint:css + svelte-check + tsc)
+        run: bash go/web/e2e-container.sh bun run check
+
+      - name: Unit tests (vitest)
+        run: bash go/web/e2e-container.sh bun run test
+
+      # Full suite incl. @visual: this is the canonical pinned container, the
+      # committed baselines are compared here (design 06 §5.5: CI has NO
+      # update path — --update-snapshots exists only in e2e-visual.sh).
+      - name: e2e (Playwright in pinned container)
+        run: bash go/web/e2e-container.sh bun run test:e2e
+
+      - name: Flake annotation (report.json retry statistics)
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/flake-annotations.sh
+
+      - name: Budget check (design 06 §6.3)
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/e2e-budget.sh
+
+      # HTML report from the blob reporter output — git hosting renders no
+      # PNG diffs inline; without this artifact baseline review is blind
+      # (design 06 §4.8). Runs in the same container; `bun x` (not `bunx` —
+      # the toolchain image ships only the bun binary, no bunx symlink).
+      - name: Render HTML report from blob
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -d go/web/e2e/.results/blob ]; then
+            bash go/web/e2e-container.sh bun x playwright merge-reports --reporter html ./e2e/.results/blob
+          else
+            echo "no blob output (e2e step did not run) — skipping HTML render"
+          fi
+
+      - name: Upload e2e report + diffs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: web-e2e-report
+          path: |
+            go/web/playwright-report/
+            go/web/e2e/.results/report.json
+          # Mock-tier retention 14 days (design 06 §4.8); the live tier
+          # (wave PV10) gets 3 — real keys flow only there.
+          retention-days: 14
+          if-no-files-found: ignore
+
   # ─── Stage 2: Unit Tests ──────────────────────────────────────────────────────
   unit-tests:
     name: Unit Tests
@@ -206,7 +320,10 @@ jobs:
     name: Docker Build + Push
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [build, integration-tests]
+    # web gates the image push like lint gates the binary build: a red
+    # frontend job must not publish an image (the Dockerfile embeds web/dist,
+    # so this only moves the red earlier and names it — wave PV8).
+    needs: [build, integration-tests, web]
     if: >-
       github.ref == 'refs/heads/root' ||
       github.event_name == 'workflow_dispatch'

@@ -1,0 +1,19 @@
+{
+  "_doc": [
+    "Runtime budget for the ci.yml `web` job (design 06 §6.3, wave PV8).",
+    "calibrated=false: the seconds below are DESIGN ESTIMATES, not anchors —",
+    "the first real CI run of the web job (RC-1 push) measures the actual",
+    "values; the calibration commit then sets calibrated=true and replaces",
+    "the numbers with the measured reference (§6.3: the gate compares against",
+    "the calibrated budget, never against the design estimate).",
+    "Until calibrated, the budget step only reports + annotates (no red).",
+    "job_fail_seconds is a design CONSTANT (fail > 10 min), active regardless",
+    "of calibration; timeout-minutes: 12 on the job is the hard deck above it.",
+    "Sharding trigger: three consecutive runs over e2e_budget_seconds =>",
+    "activate wave PV11 (shard matrix + merge-reports)."
+  ],
+  "calibrated": false,
+  "e2e_budget_seconds": 270,
+  "job_budget_seconds": 390,
+  "job_fail_seconds": 600
+}

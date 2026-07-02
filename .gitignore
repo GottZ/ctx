@@ -4,6 +4,9 @@
 !.gitmodules
 !.env.example
 !.project
+# CI workflow assets (workflows/ were force-added before this exception;
+# scripts/ + budget json arrived with wave PV8):
+!.github
 
 # Local overrides
 docker-compose.override.yml
@@ -19,6 +22,7 @@ go/dist/
 
 # Frontend (Svelte 5 + Vite, bun)
 go/web/node_modules/
+go/web/playwright-report/
 go/web/dist/*
 !go/web/dist/.gitkeep
 !.gitkeep
