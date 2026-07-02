@@ -588,6 +588,33 @@ no ports by default — add a local port mapping (see
 `docker-compose.override.yml.example`) and override with
 `CTX_DEV_PROXY=http://127.0.0.1:<port>` if you map a different port.
 
+#### Visual baseline governance
+
+Screenshot baselines (`go/web/e2e/__screenshots__/`) are the frozen "objectively
+good" reference for the UI: the taste judgement is made once, at baseline
+approval — afterwards every pixel deviation is a measurable diff, not an
+opinion. Baselines are only valid when rendered inside the digest-pinned
+toolchain container (`go/web/e2e/toolchain.lock` pins the image digests;
+`bash go/web/e2e-visual.sh --update` is the only regeneration path — CI has no
+update path and only compares). Any commit that touches `__screenshots__/` or
+adds a11y-debt entries must carry a **`[baseline]`** marker in its message plus
+a one-line reason: the `commit-msg` hook rejects it locally (fast feedback),
+and the CI marker gate rejects it on the PR (enforcement — `--no-verify` and
+dead hooks don't help). Baseline changes live in their own commits, never mixed
+with feature code, and are **batched per wave group** — one consolidated
+`[baseline]` commit per group of related waves (squashed before merge), not one
+per wave, to keep the non-delta-compressible PNG history rate bounded.
+
+**Playwright/toolchain upgrade runbook** — an image bump and the baseline
+regeneration are ONE coupled step, never separate:
+
+1. Bump the image digests in `go/web/e2e/toolchain.lock` (new Playwright/Bun
+   digest; the tag next to it is a human-readable label, the digest wins).
+2. Regenerate: `bash go/web/e2e-visual.sh --update` (builds the container from
+   the new pins, refreshes changed baselines inside it).
+3. Commit lock bump + regenerated baselines together as ONE `[baseline]`
+   commit stating the upgrade as the reason.
+
 ## License
 
 [MPL-2.0](LICENSE) — By [GottZ](https://github.com/GottZ)

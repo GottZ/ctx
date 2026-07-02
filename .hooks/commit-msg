@@ -1,9 +1,18 @@
 #!/bin/sh
-# Commit-msg hook: enforce README review for feat-commits + migration changes.
+# Commit-msg hook: enforce README review for feat-commits + migration changes,
+# and the [baseline] marker for visual-baseline / a11y-debt changes.
 #
-# Rule: if commit is a feat-commit OR modifies go/migrations/, then README.md
+# Rule 1: if commit is a feat-commit OR modifies go/migrations/, then README.md
 # MUST be staged (reviewed). Rationale: features and schema changes are user-
 # visible and the README should always reflect current capabilities.
+#
+# Rule 2 (design 06 §5.5 layer 1, wave PV9): if the commit touches
+# go/web/e2e/__screenshots__/ (add/modify/delete) or ADDS entries to
+# go/web/e2e/a11y-baseline.json, the message MUST carry a [baseline] marker.
+# Baseline updates are visible decisions, never side effects. Shrinking the
+# a11y debt (ratchet) needs no marker. This hook is the fast local feedback
+# layer; the CI marker gate (design 06 §5.5 layer 2, wave PV8) is the
+# enforcement that survives --no-verify and dead hooks.
 #
 # Override: git commit --no-verify (bypasses ALL hooks)
 #
@@ -12,6 +21,68 @@
 MSG_FILE=$1
 FIRST_LINE=$(head -n1 "$MSG_FILE")
 STAGED=$(git diff --cached --name-only)
+
+# ============================================================
+# Rule 2: [baseline] marker for baseline / debt-growth commits
+# ============================================================
+
+TOUCHES_SHOTS=false
+GROWS_DEBT=false
+
+if echo "$STAGED" | grep -qE '^go/web/e2e/__screenshots__/'; then
+    TOUCHES_SHOTS=true
+fi
+
+# Debt growth = the a11y ledger has MORE entries staged than at HEAD.
+# Entries are objects with a "page" field (a11y-baseline.json schema,
+# design 06 §3.3), so the entry count is the count of "page" keys. A count
+# comparison (staged vs HEAD) is robust against reformatting — a pure
+# removal that touches a neighbour line (trailing comma) must not trigger.
+# Removals/shrinks (ratchet) pass freely.
+if echo "$STAGED" | grep -qE '^go/web/e2e/a11y-baseline\.json$'; then
+    DEBT_STAGED=$(git show :go/web/e2e/a11y-baseline.json 2>/dev/null | grep -cE '"page"[[:space:]]*:')
+    DEBT_HEAD=$(git show HEAD:go/web/e2e/a11y-baseline.json 2>/dev/null | grep -cE '"page"[[:space:]]*:')
+    if [ "${DEBT_STAGED:-0}" -gt "${DEBT_HEAD:-0}" ]; then
+        GROWS_DEBT=true
+    fi
+fi
+
+if [ "$TOUCHES_SHOTS" = true ] || [ "$GROWS_DEBT" = true ]; then
+    # Marker anywhere in subject or body; commit-template comments don't count.
+    if ! sed -e '/^#/d' "$MSG_FILE" | grep -qF '[baseline]'; then
+        echo ""
+        echo "commit-msg: [baseline] marker required"
+        echo ""
+        if [ "$TOUCHES_SHOTS" = true ]; then
+            echo "  Trigger: staged changes under go/web/e2e/__screenshots__/"
+        fi
+        if [ "$GROWS_DEBT" = true ]; then
+            echo "  Trigger: new entries added to go/web/e2e/a11y-baseline.json"
+        fi
+        echo ""
+        echo "  Visual baselines are the frozen 'objectively good' reference;"
+        echo "  a11y debt entries are frozen accessibility exceptions. Changing"
+        echo "  either is a visible decision, not a side effect (design 06 §5.5)."
+        echo ""
+        echo "  To proceed:"
+        echo "    1. Add the [baseline] marker to the commit subject or body"
+        echo "    2. State WHY the baseline changes (one line is enough)"
+        echo "    3. Keep baseline changes in their own commit, apart from"
+        echo "       feature code; batch them per wave GROUP, not per wave"
+        echo ""
+        echo "  Regenerate baselines only via: bash go/web/e2e-visual.sh --update"
+        echo "  (pinned container — never from an unpinned host render)."
+        echo ""
+        echo "  Note: the CI marker gate (PV8) checks this too — --no-verify"
+        echo "  only postpones the red to the PR."
+        echo ""
+        exit 1
+    fi
+fi
+
+# ============================================================
+# Rule 1: README review for feat-commits + migrations
+# ============================================================
 
 # Detect trigger conditions.
 IS_FEAT=false
