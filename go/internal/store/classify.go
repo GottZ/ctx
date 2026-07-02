@@ -8,25 +8,25 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ClassifyBlockAfterUpsert sets block_role and is_meta on a freshly-stored
+// ClassifyBlockAfterUpsert sets type_name and is_meta on a freshly-stored
 // block based on its metadata and title. Welle 44 — automates classification
 // that Welle 40-43 had to do via manual SQL UPDATE after each ctx_save.
 //
 // Decision tree:
 //
-//  1. metadata["is_meta"] == true → block_role='system-meta', is_meta=TRUE
+//  1. metadata["is_meta"] == true → type_name='system-meta', is_meta=TRUE
 //     (Highest priority. ctx-system audit blocks: welle-promote-doc, S12
 //     decisions, integration-upgrade, agent-briefings.)
 //
-//  2. metadata["source"] starts with "dream-" → block_role='audit-trail'
+//  2. metadata["source"] starts with "dream-" → type_name='audit-trail'
 //     (synthesis-blocks from Welle 42 daily-report and any future dream-
 //     pipeline-generated content.)
 //
 //  3. rrf.HasAuditTrailIntent(title) detects audit-pattern in title
-//     → block_role='audit-trail'. Pattern set: session/welle/audit/
+//     → type_name='audit-trail'. Pattern set: session/welle/audit/
 //     recurrent/handover/self-audit/dream v/performance/reset/baseline.
 //
-//  4. Otherwise: no-op. block_role stays at default 'knowledge', is_meta
+//  4. Otherwise: no-op. type_name stays at default 'knowledge', is_meta
 //     stays at default FALSE (set by initial INSERT/M035).
 //
 // Idempotent — UPDATE only fires when role/meta differ from current state.
@@ -44,7 +44,7 @@ func ClassifyBlockAfterUpsert(ctx context.Context, pool *pgxpool.Pool, blockID, 
 	}
 
 	if _, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET block_role = $1, is_meta = $2 WHERE id = $3::uuid`,
+		`UPDATE context_blocks SET type_name = $1, is_meta = $2 WHERE id = $3::uuid`,
 		role, isMeta, blockID,
 	); err != nil {
 		return "", false, fmt.Errorf("store: classify block: %w", err)

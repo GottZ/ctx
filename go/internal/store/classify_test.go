@@ -81,7 +81,7 @@ func TestClassifyBlockAfterUpsert_Decisions(t *testing.T) {
 			var dbRole string
 			var dbIsMeta bool
 			err = pool.QueryRow(ctx,
-				`SELECT block_role, is_meta FROM context_blocks WHERE id = $1::uuid`, id,
+				`SELECT type_name, is_meta FROM context_blocks WHERE id = $1::uuid`, id,
 			).Scan(&dbRole, &dbIsMeta)
 			if err != nil {
 				t.Fatalf("verify DB: %v", err)
@@ -91,7 +91,7 @@ func TestClassifyBlockAfterUpsert_Decisions(t *testing.T) {
 				expectRole = "knowledge"
 			}
 			if dbRole != expectRole {
-				t.Errorf("DB block_role = %q, want %q", dbRole, expectRole)
+				t.Errorf("DB type_name = %q, want %q", dbRole, expectRole)
 			}
 			if dbIsMeta != tc.wantIsMeta {
 				t.Errorf("DB is_meta = %v, want %v", dbIsMeta, tc.wantIsMeta)

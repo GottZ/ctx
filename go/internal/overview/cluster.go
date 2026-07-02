@@ -162,7 +162,7 @@ func loadNodes(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 	// position, so a stable order yields a stable partition under a fixed seed.
 	rows, err := pool.Query(ctx,
 		`SELECT id::text FROM context_blocks
-		 WHERE NOT is_archived AND block_role <> 'system-meta'
+		 WHERE NOT is_archived AND type_name <> 'system-meta'
 		 ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -206,7 +206,7 @@ func loadEdges(ctx context.Context, pool *pgxpool.Pool) ([]rawEdge, error) {
 // (cluster, scope, category) counts + best representative, outer rolls up to
 // size + category_counts(jsonb) + the representative of the highest-quality
 // category. All visibility filtering is the canonical block-set predicate
-// (NOT is_archived AND block_role <> 'system-meta'); scope partitioning is the
+// (NOT is_archived AND type_name <> 'system-meta'); scope partitioning is the
 // GROUP BY, so each row belongs to exactly one scope (design §3.3).
 const nodeAggSQL = `
 INSERT INTO graph_cluster_node (cluster_id, scope, size, category_counts, repr_block_id, repr_title, repr_quality)
@@ -224,7 +224,7 @@ FROM (
            (array_agg(left(b.title,120) ORDER BY b.quality_score DESC, b.id))[1] AS repr_title
     FROM graph_cluster_member m
     JOIN context_blocks b ON b.id = m.block_id
-       AND NOT b.is_archived AND b.block_role <> 'system-meta'
+       AND NOT b.is_archived AND b.type_name <> 'system-meta'
     GROUP BY m.cluster_id, b.scope, b.category
 ) per_cat
 GROUP BY cluster_id, scope`
@@ -243,8 +243,8 @@ SELECT LEAST(ms.cluster_id, mt.cluster_id),
 FROM context_dream_links l
 JOIN graph_cluster_member ms ON ms.block_id = l.source_block_id
 JOIN graph_cluster_member mt ON mt.block_id = l.target_block_id
-JOIN context_blocks bs ON bs.id = l.source_block_id AND NOT bs.is_archived AND bs.block_role <> 'system-meta'
-JOIN context_blocks bt ON bt.id = l.target_block_id AND NOT bt.is_archived AND bt.block_role <> 'system-meta'
+JOIN context_blocks bs ON bs.id = l.source_block_id AND NOT bs.is_archived AND bs.type_name <> 'system-meta'
+JOIN context_blocks bt ON bt.id = l.target_block_id AND NOT bt.is_archived AND bt.type_name <> 'system-meta'
 WHERE l.relationship <> 'supersedes' AND ms.cluster_id <> mt.cluster_id
 GROUP BY 1, 2, bs.scope, bt.scope`
 

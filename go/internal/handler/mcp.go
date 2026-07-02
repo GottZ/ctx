@@ -224,7 +224,7 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			return errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
 		}
 
-		// Welle 44: Auto-classify block_role + is_meta from metadata + title.
+		// Welle 44: Auto-classify type_name + is_meta from metadata + title.
 		// MCP audit-blocks (welle promotes, ctx-system docs) used to need a
 		// follow-up SQL UPDATE — now handled inline.
 		_, _, _ = store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, block.ID, block.Title, block.Metadata)

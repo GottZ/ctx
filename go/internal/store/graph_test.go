@@ -40,13 +40,13 @@ func TestGraphEdgeMarshalJSON(t *testing.T) {
 // archived (or system-meta) block can never leak (T40a).
 func TestVisibilityPredicate(t *testing.T) {
 	got := VisibilityPredicate("b", "$2", "$3")
-	want := "NOT b.is_archived AND b.block_role <> 'system-meta' AND ( b.scope = ANY($2::text[]) OR b.id = ANY($3::uuid[]) )"
+	want := "NOT b.is_archived AND b.type_name <> 'system-meta' AND ( b.scope = ANY($2::text[]) OR b.id = ANY($3::uuid[]) )"
 	if got != want {
 		t.Errorf("VisibilityPredicate(b,$2,$3):\n got %q\nwant %q", got, want)
 	}
 
 	got = VisibilityPredicate("nb", "$2", "$5")
-	want = "NOT nb.is_archived AND nb.block_role <> 'system-meta' AND ( nb.scope = ANY($2::text[]) OR nb.id = ANY($5::uuid[]) )"
+	want = "NOT nb.is_archived AND nb.type_name <> 'system-meta' AND ( nb.scope = ANY($2::text[]) OR nb.id = ANY($5::uuid[]) )"
 	if got != want {
 		t.Errorf("VisibilityPredicate(nb,$2,$5):\n got %q\nwant %q", got, want)
 	}

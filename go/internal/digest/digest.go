@@ -83,9 +83,9 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readSc
 
 	// Upsert as block: category=index, title=topic-map-{scope}.
 	// Welle 47 (W47-NEU-A): metadata.is_meta=true plus a ClassifyBlockAfterUpsert
-	// call route the topic-map through the Welle-44 hook → block_role='system-meta'
+	// call route the topic-map through the Welle-44 hook → type_name='system-meta'
 	// + is_meta=TRUE. This makes ctx_rrf hard-exclude the topic-map (M036/M048
-	// `cb.block_role != 'system-meta'` filter) instead of letting it slot-steal
+	// `cb.type_name != 'system-meta'` filter) instead of letting it slot-steal
 	// retrieval candidates (CRAG Phase 6 found 5/10 movie queries pulled
 	// topic-map-private into top-5).
 	indexTitle := "topic-map-" + homeScope
@@ -104,7 +104,7 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readSc
 		return fmt.Errorf("digest: upsert topic map: %w", err)
 	}
 
-	// Welle 44 hook: classify block_role + is_meta. Topic-map metadata sets
+	// Welle 44 hook: classify type_name + is_meta. Topic-map metadata sets
 	// is_meta=true so branch 1 (system-meta) fires. Idempotent — re-runs of
 	// RunDigest are no-ops at this layer.
 	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, block.ID, block.Title, block.Metadata); err != nil {

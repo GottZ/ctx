@@ -126,7 +126,7 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, opt
 	}
 
 	// lifecycle_state is not handled by the Welle-44 hook (which only sets
-	// block_role/is_meta). Set it explicitly so /api/query consumers can
+	// type_name/is_meta). Set it explicitly so /api/query consumers can
 	// distinguish synthesis output from generic learnings blocks.
 	if _, err := pool.Exec(ctx,
 		`UPDATE context_blocks SET lifecycle_state = 'synthesis' WHERE id = $1::uuid`,
@@ -137,7 +137,7 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, opt
 
 	// Welle 47 (W47-NEU-A): route through ClassifyBlockAfterUpsert instead of
 	// the previous inline UPDATE so the Welle-44 hook is the single source of
-	// truth for block_role. metadata.source='dream-synthesis' → branch 2
+	// truth for type_name. metadata.source='dream-synthesis' → branch 2
 	// (audit-trail). Reusing the hook keeps behaviour aligned with
 	// handler/context_store.go and handler/mcp.go ctx_save paths.
 	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, block.ID, block.Title, block.Metadata); err != nil {

@@ -10,7 +10,7 @@
 //   - G1-RRF: a foreign-scope block granted to the caller surfaces in rrf.Search
 //     WHEN the grant set carries its id; with nil/empty grants it stays absent.
 //     Mutation "OR removed from the 6 CTEs" → grant block disappears → G1-RRF red.
-//   - G3:     an ARCHIVED or block_role='system-meta' foreign-scope block that is
+//   - G3:     an ARCHIVED or type_name='system-meta' foreign-scope block that is
 //     granted is NEVER visible — the archived/system-meta conjuncts stand BEFORE
 //     the inner (scope OR id) parens. Mutation "inner parens omitted" (flat OR,
 //     AND binds tighter) → the archived grant block leaks → G3 red. §5.3.2.
@@ -35,11 +35,11 @@ import (
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
-// t40bInsertBlock writes a context_blocks row with an explicit scope, block_role
+// t40bInsertBlock writes a context_blocks row with an explicit scope, type_name
 // and is_archived flag (the three switch-point-relevant columns). A shared
 // embedding ranks every block into the semantic channel so visibility — not
 // relevance — is what the test isolates.
-func t40bInsertBlock(t *testing.T, pool *pgxpool.Pool, id, scope, blockRole string, isArchived bool, embedding []float32, ts time.Time) {
+func t40bInsertBlock(t *testing.T, pool *pgxpool.Pool, id, scope, typeName string, isArchived bool, embedding []float32, ts time.Time) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -48,9 +48,9 @@ func t40bInsertBlock(t *testing.T, pool *pgxpool.Pool, id, scope, blockRole stri
 	title := fmt.Sprintf("rrf-t40b-title-%s", id[len(id)-4:])
 	_, err := pool.Exec(ctx,
 		`INSERT INTO context_blocks
-			(id, category, title, content, scope, embedding, created_at, updated_at, block_role, is_archived)
+			(id, category, title, content, scope, embedding, created_at, updated_at, type_name, is_archived)
 		 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $7, $8, $9)`,
-		id, "knowledge", title, "rrf-t40b-content", scope, vec, ts, blockRole, isArchived,
+		id, "knowledge", title, "rrf-t40b-content", scope, vec, ts, typeName, isArchived,
 	)
 	if err != nil {
 		t.Fatalf("insert t40b block %s: %v", id, err)

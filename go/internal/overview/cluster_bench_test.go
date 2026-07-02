@@ -213,7 +213,7 @@ func seedSyntheticPartition(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 		INSERT INTO graph_cluster_member (block_id, cluster_id)
 		SELECT id, (min(id::text) OVER (PARTITION BY abs(hashtextextended(id::text, 0)) % $1))::uuid
 		FROM context_blocks
-		WHERE NOT is_archived AND block_role <> 'system-meta'`, nClusters)
+		WHERE NOT is_archived AND type_name <> 'system-meta'`, nClusters)
 	if err != nil {
 		t.Fatalf("seed partition: insert: %v", err)
 	}

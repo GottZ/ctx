@@ -113,12 +113,12 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 	var (
 		title     string
 		blockType string
-		blockRole string
+		typeName string
 	)
 	if err := pool.QueryRow(ctx,
-		`SELECT title, lifecycle_state, block_role FROM context_blocks WHERE id = $1::uuid`,
+		`SELECT title, lifecycle_state, type_name FROM context_blocks WHERE id = $1::uuid`,
 		blockID,
-	).Scan(&title, &blockType, &blockRole); err != nil {
+	).Scan(&title, &blockType, &typeName); err != nil {
 		t.Fatalf("read created block: %v", err)
 	}
 
@@ -130,8 +130,8 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 	if blockType != "synthesis" {
 		t.Errorf("lifecycle_state mismatch: got %q, want %q", blockType, "synthesis")
 	}
-	if blockRole != "audit-trail" {
-		t.Errorf("block_role mismatch: got %q, want %q", blockRole, "audit-trail")
+	if typeName != "audit-trail" {
+		t.Errorf("type_name mismatch: got %q, want %q", typeName, "audit-trail")
 	}
 }
 

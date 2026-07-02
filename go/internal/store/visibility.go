@@ -3,7 +3,7 @@
 // This file defines THE single shared SQL fragment for "this block is visible
 // to the caller". The graph endpoint references it from every hop leg, the
 // degree counter and the focus hydrate; ctx_rrf carries the same triple on the
-// retrieval side. When block_role graduates from a hard CHECK enum to
+// retrieval side. When type_name graduates from a hard CHECK enum to
 // data-driven policy (workflow-engine line), exactly this function and ctx_rrf
 // change — no inline copies to chase.
 package store
@@ -15,7 +15,7 @@ import "fmt"
 // bind-parameter placeholder:
 //
 //	NOT <alias>.is_archived
-//	AND <alias>.block_role <> 'system-meta'
+//	AND <alias>.type_name <> 'system-meta'
 //	AND ( <alias>.scope = ANY(<scopeParam>::text[])
 //	      OR <alias>.id = ANY(<grantParam>::uuid[]) )
 //
@@ -39,7 +39,7 @@ import "fmt"
 // row-level read grant. Scope-level tenant resolution stays the readScopes axis.
 func VisibilityPredicate(alias, scopeParam, grantParam string) string {
 	return fmt.Sprintf(
-		"NOT %[1]s.is_archived AND %[1]s.block_role <> 'system-meta' AND ( %[1]s.scope = ANY(%[2]s::text[]) OR %[1]s.id = ANY(%[3]s::uuid[]) )",
+		"NOT %[1]s.is_archived AND %[1]s.type_name <> 'system-meta' AND ( %[1]s.scope = ANY(%[2]s::text[]) OR %[1]s.id = ANY(%[3]s::uuid[]) )",
 		alias, scopeParam, grantParam,
 	)
 }

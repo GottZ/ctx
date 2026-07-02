@@ -16,11 +16,11 @@ import (
 )
 
 // insertExcludeTestBlock writes a context_blocks row with the supplied category
-// and block_role. Each block uses the same shared embedding so the semantic
+// and type_name. Each block uses the same shared embedding so the semantic
 // channel ranks them all identically modulo per-block ROW_NUMBER ordering.
 // Title varies per id so the uq_context_category_title_scope unique constraint
 // is satisfied.
-func insertExcludeTestBlock(t *testing.T, pool *pgxpool.Pool, id, category, blockRole string, embedding []float32, ts time.Time) {
+func insertExcludeTestBlock(t *testing.T, pool *pgxpool.Pool, id, category, typeName string, embedding []float32, ts time.Time) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -29,10 +29,10 @@ func insertExcludeTestBlock(t *testing.T, pool *pgxpool.Pool, id, category, bloc
 	title := fmt.Sprintf("rrf-exclude-test-title-%s", id[len(id)-1:])
 	_, err := pool.Exec(ctx,
 		`INSERT INTO context_blocks
-			(id, category, title, content, scope, embedding, created_at, updated_at, block_role)
+			(id, category, title, content, scope, embedding, created_at, updated_at, type_name)
 		 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $7, $8)`,
 		id, category, title, "rrf-exclude-test-content",
-		"private", vec, ts, blockRole,
+		"private", vec, ts, typeName,
 	)
 	if err != nil {
 		t.Fatalf("insert exclude-test block %s: %v", id, err)
@@ -47,9 +47,9 @@ func insertExcludeTestBlock(t *testing.T, pool *pgxpool.Pool, id, category, bloc
 //
 // Setup:
 //
-//	A: category='knowledge', block_role='knowledge'    → kept
-//	B: category='index',     block_role='knowledge'    → excluded when ['index']
-//	C: category='reference', block_role='knowledge'    → kept
+//	A: category='knowledge', type_name='knowledge'    → kept
+//	B: category='index',     type_name='knowledge'    → excluded when ['index']
+//	C: category='reference', type_name='knowledge'    → kept
 //
 // Contract:
 //
@@ -121,15 +121,15 @@ func TestSearch_CategoriesExclude(t *testing.T) {
 }
 
 // TestSearch_BlockRolesExclude verifies that passing blockRolesExclude to
-// rrf.Search hides blocks whose block_role appears in the exclude list.
+// rrf.Search hides blocks whose type_name appears in the exclude list.
 //
-// Setup (block_role CHECK constraint from M035 allows
+// Setup (type_name CHECK constraint from M035 allows
 // 'system-meta','audit-trail','reference','knowledge' — 'system-meta' is
 // always hard-excluded by ctx_rrf, so we don't use it):
 //
-//	A: block_role='knowledge'    → kept
-//	B: block_role='audit-trail'  → excluded when ['audit-trail']
-//	C: block_role='reference'    → kept (unless excluded)
+//	A: type_name='knowledge'    → kept
+//	B: type_name='audit-trail'  → excluded when ['audit-trail']
+//	C: type_name='reference'    → kept (unless excluded)
 func TestSearch_BlockRolesExclude(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -163,7 +163,7 @@ func TestSearch_BlockRolesExclude(t *testing.T) {
 		}
 	}
 
-	// Exclude block_role='audit-trail'.
+	// Exclude type_name='audit-trail'.
 	results, err = rrf.Search(ctx, pool, embedding, "zzqqxx", "zzqqxx",
 		[]string{"private"}, nil, nil, 10, "", "", 1.0, nil, []string{"audit-trail"}, nil)
 	if err != nil {
@@ -171,7 +171,7 @@ func TestSearch_BlockRolesExclude(t *testing.T) {
 	}
 	gotIDs = idSet(results)
 	if gotIDs[idB] {
-		t.Errorf("idB (block_role=audit-trail) leaked through exclude: got=%v", gotIDs)
+		t.Errorf("idB (type_name=audit-trail) leaked through exclude: got=%v", gotIDs)
 	}
 	for _, want := range []string{idA, idC} {
 		if !gotIDs[want] {

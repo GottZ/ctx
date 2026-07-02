@@ -334,7 +334,7 @@ T="T19 GRAPH_EGO"
 # KEY_PRIVATE, guaranteed >= 1 edge so the edge-count assertion is meaningful).
 t19_focus=$($DB_CMD -c "SELECT b.id FROM context_blocks b
   JOIN context_dream_links l ON l.source_block_id = b.id OR l.target_block_id = b.id
-  WHERE NOT b.is_archived AND b.block_role <> 'system-meta' AND b.scope IN ('private','shared')
+  WHERE NOT b.is_archived AND b.type_name <> 'system-meta' AND b.scope IN ('private','shared')
   GROUP BY b.id ORDER BY count(*) DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
 if [[ -z "$t19_focus" ]]; then
   fail "$T" "no linked block found to use as focus"

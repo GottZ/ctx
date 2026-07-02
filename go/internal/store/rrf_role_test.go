@@ -40,13 +40,13 @@ func insertRoleTestBlock(t *testing.T, pool *pgxpool.Pool, id string, embedding 
 }
 
 // TestCtxRrf_BlockRole_BehaviourMatchesContract verifies M038 (Welle 40 HOLD):
-// ctx_rrf is block_role-aware. system-meta is hard-excluded; knowledge,
+// ctx_rrf is type_name-aware. system-meta is hard-excluded; knowledge,
 // audit-trail and reference all full-pass with role_factor=1.0.
 //
 // Background: M036 (Welle 40 it.2) introduced damping=0.3 for audit-trail.
 // Iter-3 + Iter-4 bench (damping 0.3 / 0.5) both regressed -7pp identically
 // (5 NEG flips at explicit-audit-trail-target queries). M038 reverts damping
-// to 1.0 (no-op) while keeping the block_role schema for forwards-compat.
+// to 1.0 (no-op) while keeping the type_name schema for forwards-compat.
 // Folge-Welle 41+ shall implement query-aware damping.
 //
 // Four test blocks share identical embedding/content_times — so mass_factor
@@ -55,10 +55,10 @@ func insertRoleTestBlock(t *testing.T, pool *pgxpool.Pool, id string, embedding 
 //
 // Contract:
 //
-//	A: block_role='knowledge'    → role_factor = 1.0 (full-pass)
-//	B: block_role='audit-trail'  → role_factor = 1.0 (M038 HOLD: no damping)
-//	C: block_role='reference'    → role_factor = 1.0 (full-pass)
-//	D: block_role='system-meta'  → hard-excluded (must NOT appear in result)
+//	A: type_name='knowledge'    → role_factor = 1.0 (full-pass)
+//	B: type_name='audit-trail'  → role_factor = 1.0 (M038 HOLD: no damping)
+//	C: type_name='reference'    → role_factor = 1.0 (full-pass)
+//	D: type_name='system-meta'  → hard-excluded (must NOT appear in result)
 //
 // Expected:
 //
@@ -90,7 +90,7 @@ func TestCtxRrf_BlockRole_BehaviourMatchesContract(t *testing.T) {
 	insertRoleTestBlock(t, pool, idC, embedding, now)
 	insertRoleTestBlock(t, pool, idD, embedding, now)
 
-	// Differentiate block_role per block. M035 default is 'knowledge', so A
+	// Differentiate type_name per block. M035 default is 'knowledge', so A
 	// could be left untouched — explicit UPDATE for symmetry and read-clarity.
 	for _, p := range []struct {
 		id   string
@@ -102,10 +102,10 @@ func TestCtxRrf_BlockRole_BehaviourMatchesContract(t *testing.T) {
 		{idD, "system-meta"},
 	} {
 		if _, err := pool.Exec(ctx,
-			`UPDATE context_blocks SET block_role = $1 WHERE id = $2::uuid`,
+			`UPDATE context_blocks SET type_name = $1 WHERE id = $2::uuid`,
 			p.role, p.id,
 		); err != nil {
-			t.Fatalf("set block_role=%s on %s: %v", p.role, p.id, err)
+			t.Fatalf("set type_name=%s on %s: %v", p.role, p.id, err)
 		}
 	}
 

@@ -47,7 +47,7 @@ import (
 // ROW_NUMBER over identical embeddings produces unique ranks via tie-break,
 // not a tied 1-rank. The mass_factor SQL math itself is correct (verified by
 // TestCtxRrf_MassFactor_DirectMath). The test now uses tolerance-bands the
-// same way rrf_role_test.go does for its block_role contract.
+// same way rrf_role_test.go does for its type_name contract.
 func TestCtxRrf_MassFactor_BehaviourMatchesContract(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()

@@ -214,7 +214,7 @@ func selectSeeds(results []SearchResult, readScopes []string, cfg GraphConfig) (
 // results MUST already be sorted by RRFScore desc (the gravity stage runs
 // before this and re-sorts). readScopes are the caller's visible scopes — the
 // hydrate re-applies the SAME visibility predicates ctx_rrf uses (NOT archived,
-// block_role <> 'system-meta', scope = ANY(readScopes)) so a neighbor can only
+// type_name <> 'system-meta', scope = ANY(readScopes)) so a neighbor can only
 // appear if RRF itself could have returned it.
 //
 // FAIL-OPEN: on ANY error (no seeds is NOT an error — it returns results, nil)
@@ -351,7 +351,7 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 // costs no extra round-trip.
 //
 // Visibility: JOIN context_blocks on the neighbor id and re-apply ctx_rrf's
-// predicates (NOT is_archived, block_role <> 'system-meta', scope =
+// predicates (NOT is_archived, type_name <> 'system-meta', scope =
 // ANY(readScopes)). scope is gated on context_blocks.scope (authoritative), NOT
 // context_dream_links.scope.
 func fetchNeighbors(ctx context.Context, pool *pgxpool.Pool, seedIDs, readScopes, grantedBlockIDs []string, cfg GraphConfig, hopDecay float64) ([]graphEdge, error) {
@@ -412,7 +412,7 @@ FROM ranked r
 JOIN context_blocks cb ON cb.id = r.neighbor_id
 WHERE r.seed_rn <= $5
   AND NOT cb.is_archived
-  AND cb.block_role <> 'system-meta'
+  AND cb.type_name <> 'system-meta'
   AND ( cb.scope = ANY($2::text[]) OR cb.id = ANY($7::uuid[]) )`
 
 	rows, err := pool.Query(ctx, q,
