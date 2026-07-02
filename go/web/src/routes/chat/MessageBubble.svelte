@@ -1,9 +1,10 @@
 <script lang="ts">
   // One user or assistant message. User content is plain text; assistant
-  // content is markdown rendered through the sanitizing pipeline (markdown.ts —
-  // html:false + DOMPurify + ctx: rewrite). Tool messages are not rendered here
-  // (they surface as ToolCallCard under the assistant turn that called them).
-  import { renderMarkdown } from '../../lib/chat/markdown'
+  // content is markdown rendered through the shared sanitizing pipeline
+  // (lib/markdown — html:false + DOMPurify + ctx: rewrite + foreign-origin
+  // hardening, design 04 §4.4). Tool messages are not rendered here (they
+  // surface as ToolCallCard under the assistant turn that called them).
+  import { renderMarkdown } from '../../lib/markdown/markdown'
   import type { Sensitivity } from '../../lib/chat/types'
 
   let {
@@ -118,5 +119,23 @@
   .md :global(ol) {
     margin: 0 0 var(--space-2);
     padding-left: var(--space-4);
+  }
+  /* Pipeline-emitted markers (lib/markdown): blocked remote image + 256 KB
+     truncation notice (design 04 §4.4.2/§4.4.3). */
+  .md :global(.md-img-blocked) {
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    color: var(--text-dim);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    padding: 0 var(--space-1);
+    word-break: break-all;
+  }
+  .md :global(.md-truncated) {
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    color: var(--warn);
+    border-top: 1px dashed var(--border-strong);
+    padding-top: var(--space-1);
   }
 </style>
