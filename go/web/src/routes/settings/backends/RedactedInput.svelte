@@ -52,7 +52,7 @@
     flex: 1;
     min-width: 0;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
   input:disabled {
@@ -60,7 +60,7 @@
     cursor: not-allowed;
   }
   button {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
     white-space: nowrap;
   }

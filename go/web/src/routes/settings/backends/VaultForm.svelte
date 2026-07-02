@@ -172,8 +172,8 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .count {
     font-family: var(--font-mono);
@@ -183,13 +183,13 @@
   }
   .sub {
     color: var(--text-faint);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
   }
   .empty {
     margin: 0;
     padding: var(--space-3);
     color: var(--text-faint);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .list {
     list-style: none;
@@ -211,7 +211,7 @@
   }
   .name {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--text);
   }
   .ver {
@@ -221,13 +221,13 @@
   }
   .dates {
     margin-left: auto;
-    font-size: 0.72rem;
+    font-size: var(--fs-2xs);
     color: var(--text-faint);
     font-family: var(--font-mono);
   }
   .refs {
     margin: 0;
-    font-size: 0.74rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     display: flex;
     flex-wrap: wrap;
@@ -257,11 +257,11 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--danger);
   }
   .ghost {
-    font-size: 0.72rem;
+    font-size: var(--fs-2xs);
     padding: 0 var(--space-1);
     background: transparent;
   }
@@ -271,7 +271,7 @@
   button.danger {
     border-color: var(--danger);
     color: var(--danger);
-    font-size: 0.72rem;
+    font-size: var(--fs-2xs);
     padding: 0 var(--space-1);
   }
   .new {
@@ -297,7 +297,7 @@
   .new-name {
     flex: 0 1 14rem;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
   .new-row :global(.redacted) {
@@ -305,11 +305,11 @@
     min-width: 14rem;
   }
   .dangling-head {
-    font-weight: 600;
+    font-weight: var(--fw-semibold);
   }
   .problem {
     margin: var(--space-2) var(--space-3) 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
     border-radius: var(--radius);
     border: 1px solid;

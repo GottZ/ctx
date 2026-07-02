@@ -127,19 +127,19 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .filters {
     margin-left: auto;
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
   }
   .filters input[type='text'] {
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
     width: 12rem;
   }
@@ -153,7 +153,7 @@
     margin: 0;
     padding: var(--space-1) var(--space-3);
     color: var(--warn);
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     border-bottom: 1px solid var(--border);
   }
   .state {
@@ -161,7 +161,7 @@
     padding: var(--space-3);
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .state.error {
     display: flex;
@@ -175,7 +175,7 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   th {
     text-align: left;
@@ -185,7 +185,7 @@
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     text-transform: uppercase;
-    font-weight: 500;
+    font-weight: var(--fw-medium);
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
@@ -220,6 +220,6 @@
   }
   .errdetail {
     color: var(--text-dim);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
   }
 </style>

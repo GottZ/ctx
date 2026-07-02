@@ -102,8 +102,8 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .modes {
     margin-left: auto;
@@ -138,7 +138,7 @@
     margin: 0;
     padding: var(--space-2) var(--space-3);
     color: var(--danger);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .grid {
     display: grid;
@@ -156,7 +156,7 @@
   }
   .stat .v {
     font-family: var(--font-mono);
-    font-size: 1.3rem;
+    font-size: var(--fs-xl);
     font-variant-numeric: tabular-nums;
   }
   .stat .l {
@@ -187,7 +187,7 @@
   dd {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
   }
 </style>

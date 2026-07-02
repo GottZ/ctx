@@ -204,8 +204,8 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .count {
     font-family: var(--font-mono);
@@ -215,14 +215,14 @@
   }
   .new {
     margin-left: auto;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
   .empty {
     margin: 0;
     padding: var(--space-3);
     color: var(--text-faint);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .scroll {
     overflow-x: auto;
@@ -230,7 +230,7 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
   }
   th {
     text-align: left;
@@ -240,7 +240,7 @@
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     text-transform: uppercase;
-    font-weight: 500;
+    font-weight: var(--fw-medium);
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
@@ -264,7 +264,7 @@
   }
   .roles {
     color: var(--text-dim);
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
   }
   .num {
     text-align: right;
@@ -278,6 +278,7 @@
   .updown {
     display: inline-flex;
     flex-direction: column;
+    /* stylelint-disable-next-line scale-unlimited/declaration-strict-value -- Micro-Spinner-Geometrie: die 0.7 zieht die gestapelten ▲▼-Glyphen dicht zusammen; keine Text-Zeilenhöhe, außerhalb der lh-Skala (design 05-§2.2 nennt 0.7 ×1 als Einzelfall). */
     line-height: 0.7;
   }
   .updown button {
@@ -285,6 +286,7 @@
     border: none;
     color: var(--text-dim);
     cursor: pointer;
+    /* stylelint-disable-next-line scale-unlimited/declaration-strict-value -- Micro-Spinner-Glyph: 0.55rem ist der Skalen-Ausreißer (design 05-§4.3: 307 Cluster-rem + genau diese 0.55rem = 308); ein Snap auf --fs-2xs (0.72) würde die ▲▼-Pfeile sichtbar aufblähen. */
     font-size: 0.55rem;
     padding: 0;
   }
@@ -303,7 +305,7 @@
     white-space: nowrap;
   }
   .secret {
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
   }
   .ok-ref {
@@ -352,7 +354,7 @@
     accent-color: var(--accent);
   }
   .ghost {
-    font-size: 0.72rem;
+    font-size: var(--fs-2xs);
     padding: 0 var(--space-1);
     background: transparent;
   }
@@ -362,19 +364,19 @@
   button.danger {
     border-color: var(--danger);
     color: var(--danger);
-    font-size: 0.72rem;
+    font-size: var(--fs-2xs);
     padding: 0 var(--space-1);
   }
   .confirm-del {
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--danger);
   }
   .test-row td {
     background: var(--surface-0);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
@@ -403,12 +405,12 @@
     border: none;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     margin-left: auto;
   }
   .problem {
     margin: var(--space-2) var(--space-3) 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
     border-radius: var(--radius);
     border: 1px solid;

@@ -14,7 +14,7 @@
   .code {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 2rem;
+    font-size: var(--fs-2xl);
     color: var(--text-faint);
   }
   p {

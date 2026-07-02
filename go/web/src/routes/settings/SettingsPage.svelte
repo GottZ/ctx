@@ -72,14 +72,14 @@
   }
   h1 {
     margin: 0;
-    font-size: 1.35rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
+    font-size: var(--fs-xl);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--track-1);
   }
   .sub {
     margin: var(--space-1) 0 0;
     color: var(--text-dim);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
 
   .banner {
@@ -88,14 +88,14 @@
     border: 1px solid var(--warn);
     border-radius: var(--radius);
     color: var(--warn);
-    font-size: 0.875rem;
+    font-size: var(--fs-sm);
   }
 
   .state {
     margin: 0;
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
 
   .error {
@@ -107,7 +107,7 @@
     border-radius: var(--radius);
     background: var(--danger-dim);
     padding: var(--space-2) var(--space-3);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .error p {
     margin: 0;
@@ -115,7 +115,7 @@
   }
   .request-id {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim) !important;
   }
 
@@ -141,11 +141,11 @@
   }
   .el-title {
     font-family: var(--font-mono);
-    font-size: 0.9rem;
+    font-size: var(--fs-md);
     color: var(--accent);
   }
   .el-sub {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 </style>

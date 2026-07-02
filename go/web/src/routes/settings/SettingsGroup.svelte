@@ -46,13 +46,14 @@
     position: sticky;
     top: 0;
     background: var(--surface-1);
+    /* stylelint-disable-next-line scale-unlimited/declaration-strict-value -- Lokaler Stacking-Context: der sticky Gruppen-Header hebt sich um 1 über die scrollenden Zeilen; das ist KEINE globale Layer-Ebene (--z-rail..--z-window), sondern der minimale lokale Wert. Q8 entzog '1' den globalen ignoreValues (erzwingt line-height:1→--lh-solid), was diesen Alt-Wert freilegte. */
     z-index: 1;
   }
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .dirty-count {
     font-family: var(--font-mono);
@@ -63,7 +64,7 @@
   }
   .save {
     margin-left: auto;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
   }
 

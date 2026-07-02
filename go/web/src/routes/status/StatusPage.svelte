@@ -206,14 +206,14 @@
   }
   h1 {
     margin: 0;
-    font-size: 1.35rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
+    font-size: var(--fs-xl);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--track-1);
   }
   .sub {
     margin: var(--space-1) 0 0;
     color: var(--text-dim);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .banner {
     margin: 0;
@@ -221,7 +221,7 @@
     border: 1px solid var(--warn);
     border-radius: var(--radius);
     color: var(--warn);
-    font-size: 0.875rem;
+    font-size: var(--fs-sm);
   }
   .asof {
     margin: 0;
@@ -235,7 +235,7 @@
     margin: 0;
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .state.error {
     display: flex;
@@ -250,7 +250,7 @@
   }
   .request-id {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .tiles {
@@ -282,7 +282,7 @@
   }
   .svc {
     color: var(--text-dim);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     display: inline-flex;
     align-items: center;
   }
@@ -322,17 +322,17 @@
     border-top: 1px solid var(--border);
   }
   .toggle strong {
-    font-size: 0.9rem;
+    font-size: var(--fs-md);
   }
   .hint {
     margin: var(--space-1) 0 0;
     color: var(--text-faint);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
   }
   .muted {
     color: var(--text-faint);
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .switch {
     font-family: var(--font-mono);

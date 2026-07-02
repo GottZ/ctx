@@ -67,8 +67,8 @@
   h2 {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
   }
   .count {
     font-family: var(--font-mono);
@@ -80,7 +80,7 @@
     margin: 0;
     padding: var(--space-3);
     color: var(--text-faint);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
   .scroll {
     overflow-x: auto;
@@ -88,7 +88,7 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
   }
   th {
     text-align: left;
@@ -98,7 +98,7 @@
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     text-transform: uppercase;
-    font-weight: 500;
+    font-weight: var(--fw-medium);
     border-bottom: 1px solid var(--border);
   }
   td {
@@ -120,7 +120,7 @@
   }
   .roles {
     color: var(--text-dim);
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
   }
   .num {
     text-align: right;

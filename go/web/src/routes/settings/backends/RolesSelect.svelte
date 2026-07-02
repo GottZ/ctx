@@ -87,7 +87,7 @@
     align-items: center;
     gap: var(--space-1);
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
   }
   .role input {
@@ -103,7 +103,7 @@
     align-items: center;
     gap: var(--space-1);
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     border: 1px solid var(--accent);
     border-radius: var(--radius);
     padding: 0 var(--space-1);
@@ -115,8 +115,8 @@
     color: inherit;
     cursor: pointer;
     padding: 0;
-    font-size: 0.9rem;
-    line-height: 1;
+    font-size: var(--fs-md);
+    line-height: var(--lh-solid);
   }
   .add {
     display: flex;
@@ -126,11 +126,11 @@
     flex: 1;
     min-width: 0;
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
   .add button {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
   }
   .disabled {

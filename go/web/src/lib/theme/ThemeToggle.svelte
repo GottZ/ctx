@@ -200,7 +200,7 @@
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     text-transform: uppercase;
-    line-height: 1;
+    line-height: var(--lh-solid);
   }
 
   .cycle {

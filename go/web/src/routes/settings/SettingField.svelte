@@ -146,12 +146,12 @@
   }
   .key {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--text);
   }
   .env {
     margin-left: auto;
-    font-size: 0.7rem;
+    font-size: var(--fs-2xs);
     color: var(--text-faint);
     background: transparent;
     padding: 0;
@@ -192,13 +192,13 @@
     flex: 1;
     min-width: 0;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
   .row select {
     font: inherit;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--text);
     background: var(--surface-0);
     border: 1px solid var(--border-strong);
@@ -219,25 +219,25 @@
 
   .readonly-value {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--text-dim);
   }
 
   .ghost {
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     padding: 0 var(--space-2);
     background: transparent;
   }
 
   .hint {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-faint);
   }
 
   .problem {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
     border-radius: var(--radius);
     border: 1px solid;

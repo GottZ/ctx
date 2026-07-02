@@ -110,12 +110,11 @@
   }
   .md :global(code) {
     font-family: var(--font-mono);
-    /* Parent-relative inline-code scale — the em cases (this + app.css:30
-       0.875em) are consolidated onto var(--fs-code-rel) in Q8 by design
-       (05-§7 Q8 row: "em-Konsolidierung"); folding it here would either steal
-       Q8's scope or shift the pixel (0.85em→0.875em) prematurely. */
-    /* stylelint-disable-next-line scale-unlimited/declaration-strict-value */
-    font-size: 0.85em;
+    /* Parent-relative inline-code scale — em (not the rem scale) so it tracks
+       the surrounding message text. Q8 em-Konsolidierung (05-§7 Q8 row): the
+       former 0.85em folds onto var(--fs-code-rel) (0.875em, = app.css code),
+       the +0.025em pixel-delta is the documented Doc decision. */
+    font-size: var(--fs-code-rel);
   }
   .md :global(a) {
     color: var(--accent);

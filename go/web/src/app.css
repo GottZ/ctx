@@ -6,8 +6,10 @@ html {
   background: var(--surface-0);
   color: var(--text);
   font-family: var(--font-ui);
+  /* Root-Anker der gesamten rem-Skala (design 05-§4.3): die einzige erlaubte
+   * font-size-Literal-Stelle im Baum; scoped ignoreValues in .stylelintrc.mjs. */
   font-size: 15px;
-  line-height: 1.5;
+  line-height: var(--lh-body);
 }
 
 body {
@@ -30,7 +32,9 @@ body {
 
 code {
   font-family: var(--font-mono);
-  font-size: 0.875em;
+  /* Eltern-relativ (em, nicht rem-Skala): Inline-Code skaliert mit dem
+   * umgebenden Text. Q8 em-Konsolidierung (design 05-§7). */
+  font-size: var(--fs-code-rel);
   background: var(--surface-2);
   padding: 0.1em 0.35em;
   border-radius: var(--radius);

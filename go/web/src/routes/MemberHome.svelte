@@ -89,14 +89,14 @@
   }
   h1 {
     margin: 0;
-    font-size: 1.35rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
+    font-size: var(--fs-xl);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--track-1);
   }
   .sub {
     margin: var(--space-1) 0 0;
     color: var(--text-dim);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
   }
 
   .group {
@@ -106,8 +106,8 @@
   }
   .section-title {
     margin: 0;
-    font-size: 0.95rem;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
     color: var(--text);
   }
 
@@ -119,7 +119,7 @@
 
   .action {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: var(--fs-sm);
     color: var(--accent);
     text-decoration: none;
   }

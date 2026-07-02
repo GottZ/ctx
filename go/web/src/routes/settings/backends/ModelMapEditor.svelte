@@ -64,7 +64,7 @@
   }
   .empty {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-faint);
   }
   .mrow {
@@ -82,14 +82,14 @@
   }
   .mrow input {
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-2);
   }
   .arrow {
     color: var(--text-faint);
   }
   .params {
-    font-size: 0.7rem;
+    font-size: var(--fs-2xs);
     color: var(--text-faint);
     font-family: var(--font-mono);
   }
@@ -98,13 +98,13 @@
     border: none;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 1rem;
-    line-height: 1;
+    font-size: var(--fs-base);
+    line-height: var(--lh-solid);
     padding: 0 var(--space-1);
   }
   .add {
     align-self: flex-start;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: var(--space-1) var(--space-2);
     background: transparent;
   }
