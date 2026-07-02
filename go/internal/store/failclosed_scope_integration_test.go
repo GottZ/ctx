@@ -83,7 +83,7 @@ func TestReadPathsFailClosedOnEmptyScopes_Integration(t *testing.T) {
 			return e
 		}},
 		{"EgoGraph", func() error {
-			_, e := store.EgoGraph(ctx, pool, store.EgoParams{Focus: someUUID, Hops: 1, Limit: 10}, empty, nil)
+			_, e := store.EgoGraph(ctx, pool, store.EgoParams{Focus: someUUID, Hops: 1, Limit: 10}, empty, nil, gVisibleTypes)
 			return e
 		}},
 	}

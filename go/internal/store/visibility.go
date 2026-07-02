@@ -1,45 +1,45 @@
-// Package store — canonical block-visibility predicate (F5-W1).
+// Package store — canonical block-visibility predicate (F5-W1, typ-param T6).
 //
-// This file defines THE single shared SQL fragment for "this block is visible
-// to the caller". The graph endpoint references it from every hop leg, the
-// degree counter and the focus hydrate; ctx_rrf carries the same triple on the
-// retrieval side. When type_name graduates from a hard CHECK enum to
-// data-driven policy (workflow-engine line), exactly this function and ctx_rrf
-// change — no inline copies to chase.
+// This file is the store-side entry to THE single shared SQL fragment for
+// "this block is visible to the caller" (internal/visibility since WF T6).
+// The graph endpoint references it from every hop leg, the degree counter and
+// the focus hydrate; ctx_rrf carries the same triple on the retrieval side,
+// and rrf/graph.go + overview/cluster.go embed the same fragment directly.
+// With T6 the type conjunct graduated from the hard `<> 'system-meta'` enum
+// literal to the data-driven registry allowlist (workflow-engine line) —
+// exactly the change the pre-T6 header reserved for this function and
+// ctx_rrf. No inline copies remain to chase.
 package store
 
-import "fmt"
+import "github.com/GottZ/ctx/internal/visibility"
 
 // VisibilityPredicate returns the canonical visibility triple for a
-// context_blocks alias, a scope bind-parameter placeholder and a block-grant
-// bind-parameter placeholder:
+// context_blocks alias, a type-allowlist bind-parameter placeholder, a scope
+// bind-parameter placeholder and a block-grant bind-parameter placeholder:
 //
 //	NOT <alias>.is_archived
-//	AND <alias>.type_name <> 'system-meta'
+//	AND <alias>.type_name = ANY(<typesParam>::text[])
 //	AND ( <alias>.scope = ANY(<scopeParam>::text[])
 //	      OR <alias>.id = ANY(<grantParam>::uuid[]) )
 //
+// typesParam binds the resolved retrieval allowlist (blocktype.Set
+// .VisibleTypes) — fail-closed: an unregistered type name matches nothing
+// (design/01 §3.5 invariant 1; Go callers reject an empty list loudly).
+//
 // scope is gated on context_blocks.scope (authoritative), never on
-// context_dream_links.scope. All three arguments are code-owned constants at
+// context_dream_links.scope. All four arguments are code-owned constants at
 // every call site — never user input — so embedding the fragment via Sprintf
 // adds no injection surface.
 //
 // CRITICAL — the mandatory parentheses (design/07 §4 / §5.5): the archived /
-// system-meta conjuncts stand BEFORE the parenthesised group; the additive
-// block-level OR lives strictly INSIDE ( scope=ANY OR id=ANY ). SQL binds AND
-// tighter than OR — without the parentheses a granted, archived (or system-meta)
-// block would leak through the bare `OR id = ANY(...)`. The grant arm is
-// PURELY additive: an empty grant set ('{}'::uuid[]) makes `id = ANY('{}')` a
-// deterministic FALSE, so the predicate collapses byte-equivalently to the
-// scope-only state (pausability invariant).
+// type conjuncts stand BEFORE the parenthesised group; the additive
+// block-level OR lives strictly INSIDE ( scope=ANY OR id=ANY ). See
+// visibility.Predicate for the full contract.
 //
 // block-level note (multi-tenant, T40a): visibility is a flat readScopes list
 // PLUS a resolved per-tenant block-grant set (context_block_grants, 067). This
-// function (plus ctx_rrf in T40b) is the designated single switch point for the
+// function (plus ctx_rrf) is the designated single switch point for the
 // row-level read grant. Scope-level tenant resolution stays the readScopes axis.
-func VisibilityPredicate(alias, scopeParam, grantParam string) string {
-	return fmt.Sprintf(
-		"NOT %[1]s.is_archived AND %[1]s.type_name <> 'system-meta' AND ( %[1]s.scope = ANY(%[2]s::text[]) OR %[1]s.id = ANY(%[3]s::uuid[]) )",
-		alias, scopeParam, grantParam,
-	)
+func VisibilityPredicate(alias, typesParam, scopeParam, grantParam string) string {
+	return visibility.Predicate(alias, typesParam, scopeParam, grantParam)
 }

@@ -41,6 +41,8 @@ import (
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/visibility"
 )
 
 // GraphConfig controls the Dream-graph expansion stage. Every field is a runtime
@@ -212,14 +214,16 @@ func selectSeeds(results []SearchResult, readScopes []string, cfg GraphConfig) (
 // positive Dream link types and fuses the neighbors into results.
 //
 // results MUST already be sorted by RRFScore desc (the gravity stage runs
-// before this and re-sorts). readScopes are the caller's visible scopes — the
-// hydrate re-applies the SAME visibility predicates ctx_rrf uses (NOT archived,
-// type_name <> 'system-meta', scope = ANY(readScopes)) so a neighbor can only
-// appear if RRF itself could have returned it.
+// before this and re-sorts). readScopes are the caller's visible scopes,
+// visibleTypes the resolved registry allowlist (blocktype.Set.VisibleTypes,
+// T6) — the hydrate re-applies the SAME visibility predicates ctx_rrf uses
+// (NOT archived, type_name = ANY(visibleTypes), scope = ANY(readScopes) plus
+// the grant OR-arm) so a neighbor can only appear if RRF itself could have
+// returned it.
 //
 // FAIL-OPEN: on ANY error (no seeds is NOT an error — it returns results, nil)
 // the ORIGINAL input slice is returned unchanged alongside the error. No panics.
-func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, cfg GraphConfig) ([]SearchResult, error) {
+func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig) ([]SearchResult, error) {
 	if !cfg.Enabled || len(results) == 0 || len(readScopes) == 0 {
 		return results, nil
 	}
@@ -234,7 +238,7 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 	}
 
 	// --- Hop 1 ----------------------------------------------------------------
-	edges, err := fetchNeighbors(ctx, pool, seedIDs, readScopes, grantedBlockIDs, cfg, 1.0)
+	edges, err := fetchNeighbors(ctx, pool, seedIDs, readScopes, grantedBlockIDs, visibleTypes, cfg, 1.0)
 	if err != nil {
 		return results, fmt.Errorf("rrf: graph expand hop 1: %w", err)
 	}
@@ -298,7 +302,7 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 			if len(nextSeedIDs) == 0 {
 				break
 			}
-			hopEdges, herr := fetchNeighbors(ctx, pool, nextSeedIDs, readScopes, grantedBlockIDs, cfg, decay)
+			hopEdges, herr := fetchNeighbors(ctx, pool, nextSeedIDs, readScopes, grantedBlockIDs, visibleTypes, cfg, decay)
 			if herr != nil {
 				return results, fmt.Errorf("rrf: graph expand hop %d: %w", hop, herr)
 			}
@@ -351,12 +355,20 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 // costs no extra round-trip.
 //
 // Visibility: JOIN context_blocks on the neighbor id and re-apply ctx_rrf's
-// predicates (NOT is_archived, type_name <> 'system-meta', scope =
-// ANY(readScopes)). scope is gated on context_blocks.scope (authoritative), NOT
-// context_dream_links.scope.
-func fetchNeighbors(ctx context.Context, pool *pgxpool.Pool, seedIDs, readScopes, grantedBlockIDs []string, cfg GraphConfig, hopDecay float64) ([]graphEdge, error) {
+// predicates via THE shared fragment (visibility.Predicate, WF T6 — this was
+// the inline copy the store/visibility.go doc header promised away): NOT
+// is_archived, type_name = ANY(visibleTypes) (registry allowlist, fail-closed)
+// and the parenthesised scope/grant group. scope is gated on
+// context_blocks.scope (authoritative), NOT context_dream_links.scope.
+func fetchNeighbors(ctx context.Context, pool *pgxpool.Pool, seedIDs, readScopes, grantedBlockIDs, visibleTypes []string, cfg GraphConfig, hopDecay float64) ([]graphEdge, error) {
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL (T40a)
+	}
+	if len(visibleTypes) == 0 {
+		// Fail-closed loud (rrf.Search pattern): SQL alone would silently return
+		// 0 neighbors; GraphExpand's fail-open contract turns this error into
+		// "keep the pre-expansion results" plus a caller-side warning.
+		return nil, fmt.Errorf("rrf: empty visible-types allowlist (block-type registry not wired?)")
 	}
 	// edge_dir CTE normalizes every link into (seed, neighbor, relationship,
 	// raw_confidence) regardless of direction, applies the per-type confidence
@@ -365,9 +377,10 @@ func fetchNeighbors(ctx context.Context, pool *pgxpool.Pool, seedIDs, readScopes
 	//
 	// $1 seedIDs uuid[] · $2 readScopes text[] · $3 MinConfidence ·
 	// $4 MinConfidenceRecurrent · $5 PerSeedCap · $6 Directed bool ·
-	// $7 grantedBlockIDs uuid[] (T40a block-grant OR-arm on the NEIGHBOR side).
+	// $7 grantedBlockIDs uuid[] (T40a block-grant OR-arm on the NEIGHBOR side) ·
+	// $8 visibleTypes text[] (T6 registry allowlist).
 	// Seed $1 stays UNGATED — the seed-side grant/scope filter is T41, not T40a.
-	const q = `
+	q := `
 WITH edge_dir AS (
     SELECT source_block_id AS seed_id,
            target_block_id AS neighbor_id,
@@ -411,9 +424,7 @@ SELECT r.seed_id::text,
 FROM ranked r
 JOIN context_blocks cb ON cb.id = r.neighbor_id
 WHERE r.seed_rn <= $5
-  AND NOT cb.is_archived
-  AND cb.type_name <> 'system-meta'
-  AND ( cb.scope = ANY($2::text[]) OR cb.id = ANY($7::uuid[]) )`
+  AND ` + visibility.Predicate("cb", "$8", "$2", "$7")
 
 	rows, err := pool.Query(ctx, q,
 		seedIDs,                    // $1
@@ -423,6 +434,7 @@ WHERE r.seed_rn <= $5
 		cfg.PerSeedCap,             // $5
 		cfg.Directed,               // $6
 		grantedBlockIDs,            // $7 block-grant OR-arm (T40a, neighbor side)
+		visibleTypes,               // $8 registry type allowlist (T6)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query dream links: %w", err)

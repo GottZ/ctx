@@ -659,7 +659,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		// flow into GraphExpand. T41 (already built) makes a grant-only block a
 		// LEAF (visible via the neighbor OR-arm, never re-seeded), so passing the
 		// grant set here surfaces granted neighbors without traversing through them.
-		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, grantedBlockIDs, graphCfg); gerr != nil {
+		// T6: the SAME per-request visibleTypes allowlist that fed rrf.Search
+		// gates the neighbor hydrate — one policy source per request.
+		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, grantedBlockIDs, visibleTypes, graphCfg); gerr != nil {
 			slog.Warn("graph expand failed; using pre-expansion results",
 				"error", gerr,
 				"request_id", requestID,

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -80,7 +81,10 @@ func hgAuth(keyID, home string) *auth.AuthResult {
 func hgDo(t *testing.T, pool *pgxpool.Pool, ar *auth.AuthResult, query string) *httptest.ResponseRecorder {
 	t.Helper()
 	// Zero-valued config: RateLimitRead 0 = disabled, like the old literal 0.
-	h := NewGraphHandler(pool, config.NewStore(&config.Config{}))
+	// Builtin registry set (T6): the fixture blocks are default-typed
+	// 'knowledge', so the compiled-in visible allowlist matches the pre-T6
+	// literal semantics for this fixture.
+	h := NewGraphHandler(pool, config.NewStore(&config.Config{}), blocktype.NewRegistry())
 	req := httptest.NewRequest("GET", "/api/graph/ego?"+query, nil)
 	req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))
 	rec := httptest.NewRecorder()

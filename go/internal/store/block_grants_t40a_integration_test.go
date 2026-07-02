@@ -300,7 +300,7 @@ func TestBlockGrantsT40a_EgoGraph_Integration(t *testing.T) {
 	granteeScopes := []string{scopeA}
 
 	// Without a grant the foreign-scope focus is ErrNotVisible (404, no oracle).
-	if _, err := store.EgoGraph(ctx, pool, store.EgoParams{Focus: focus, Hops: 1, Limit: 10}, granteeScopes, nil); !errors.Is(err, store.ErrNotVisible) {
+	if _, err := store.EgoGraph(ctx, pool, store.EgoParams{Focus: focus, Hops: 1, Limit: 10}, granteeScopes, nil, gVisibleTypes); !errors.Is(err, store.ErrNotVisible) {
 		t.Fatalf("EgoGraph(foreign focus, no grant) err = %v, want store.ErrNotVisible", err)
 	}
 
@@ -311,7 +311,7 @@ func TestBlockGrantsT40a_EgoGraph_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GrantedBlockIDs: %v", err)
 	}
-	res, err := store.EgoGraph(ctx, pool, store.EgoParams{Focus: focus, Hops: 1, Limit: 10}, granteeScopes, grants)
+	res, err := store.EgoGraph(ctx, pool, store.EgoParams{Focus: focus, Hops: 1, Limit: 10}, granteeScopes, grants, gVisibleTypes)
 	if err != nil {
 		t.Fatalf("EgoGraph(granted focus) err = %v, want visible focus", err)
 	}
@@ -327,7 +327,7 @@ func TestBlockGrantsT40a_EgoGraph_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GrantedBlockIDs (arch): %v", err)
 	}
-	if _, err := store.EgoGraph(ctx, pool, store.EgoParams{Focus: archFocus, Hops: 1, Limit: 10}, granteeScopes, grants); !errors.Is(err, store.ErrNotVisible) {
+	if _, err := store.EgoGraph(ctx, pool, store.EgoParams{Focus: archFocus, Hops: 1, Limit: 10}, granteeScopes, grants, gVisibleTypes); !errors.Is(err, store.ErrNotVisible) {
 		t.Fatalf("EgoGraph(archived granted focus) err = %v, want store.ErrNotVisible (mandatory parentheses)", err)
 	}
 }

@@ -64,7 +64,7 @@ func TestBlockGrantsT41_GraphBridgeLeaf_Integration(t *testing.T) {
 		t40Grant(t, pool, focusB, grantee)
 		grants := []string{focusB}
 
-		res, err := store.EgoGraph(ctx, pool, gEgoParams(focusB), granteeScopes, grants)
+		res, err := store.EgoGraph(ctx, pool, gEgoParams(focusB), granteeScopes, grants, gVisibleTypes)
 		if err != nil {
 			t.Fatalf("EgoGraph(grant focus B): %v", err)
 		}
@@ -95,7 +95,7 @@ func TestBlockGrantsT41_GraphBridgeLeaf_Integration(t *testing.T) {
 		t40Grant(t, pool, bridgeB, grantee)
 		grants := []string{bridgeB}
 
-		res, err := store.EgoGraph(ctx, pool, gEgoParams(seedS), granteeScopes, grants)
+		res, err := store.EgoGraph(ctx, pool, gEgoParams(seedS), granteeScopes, grants, gVisibleTypes)
 		if err != nil {
 			t.Fatalf("EgoGraph(seed S): %v", err)
 		}

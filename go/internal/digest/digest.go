@@ -89,9 +89,11 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 	// Upsert as block: category=index, title=topic-map-{scope}.
 	// Welle 47 (W47-NEU-A): metadata.is_meta=true plus a ClassifyBlockAfterUpsert
 	// call route the topic-map through the Welle-44 hook → type_name='system-meta'
-	// + is_meta=TRUE. This makes ctx_rrf hard-exclude the topic-map (M036/M048
-	// `cb.type_name != 'system-meta'` filter) instead of letting it slot-steal
-	// retrieval candidates (CRAG Phase 6 found 5/10 movie queries pulled
+	// + is_meta=TRUE. This keeps the topic-map out of retrieval (historically
+	// the M036/M048 hard-exclude literal; since M073/T5+T6 the system-meta
+	// policy is retrieval=excluded, so the type is simply absent from every
+	// visibility allowlist) instead of letting it slot-steal retrieval
+	// candidates (CRAG Phase 6 found 5/10 movie queries pulled
 	// topic-map-private into top-5).
 	indexTitle := "topic-map-" + homeScope
 	indexTags := []string{"index", "topic-map", homeScope, "auto-generated"}

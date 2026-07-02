@@ -17,6 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"gonum.org/v1/gonum/graph/community"
 	"gonum.org/v1/gonum/graph/simple"
+
+	"github.com/GottZ/ctx/internal/visibility"
 )
 
 const (
@@ -63,11 +65,27 @@ type clustering struct {
 // Rebuild recomputes the cluster supergraph and replaces the 057 tables in one
 // advisory-locked transaction. Never call from a request path — gonum loads the
 // whole graph into RAM; this belongs in the scheduler (runOverviewRebuild).
-func Rebuild(ctx context.Context, pool *pgxpool.Pool, resolution float64) (Stats, error) {
+//
+// Type policy (WF T6, design/01 §6.8/§7-T6): visibleTypes is the resolved
+// retrieval allowlist (blocktype.Set.VisibleTypes — the registry successor of
+// the former `type_name <> 'system-meta'` literal); overviewTypes is the
+// overview.include allowlist (Set.OverviewTypes — the digest.include pendant
+// against issue flooding). The NODE set is cut by the INTERSECTION of both
+// (a type must be retrieval-visible AND overview-included to become a Louvain
+// node); the aggregation re-checks use visibleTypes alone (pure visibility
+// semantics — members are already the cut set). Both lists come from the BASE
+// snapshot: the rebuild is ONE global run, tenant overlays act only with a
+// per-tenant overview (§9.6 caveat, T12 boundary). Empty lists are a wiring
+// bug and fail loudly (rrf.Search pattern).
+func Rebuild(ctx context.Context, pool *pgxpool.Pool, resolution float64, visibleTypes, overviewTypes []string) (Stats, error) {
 	if resolution <= 0 {
 		resolution = 1.0
 	}
-	nodeUUIDs, err := loadNodes(ctx, pool)
+	if len(visibleTypes) == 0 || len(overviewTypes) == 0 {
+		return Stats{}, fmt.Errorf("overview: empty type allowlist (visible=%d, overview=%d) — block-type registry not wired?",
+			len(visibleTypes), len(overviewTypes))
+	}
+	nodeUUIDs, err := loadNodes(ctx, pool, intersect(visibleTypes, overviewTypes))
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading nodes: %w", err)
 	}
@@ -76,7 +94,25 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, resolution float64) (Stats
 		return Stats{}, fmt.Errorf("loading edges: %w", err)
 	}
 	cl := computeClustering(nodeUUIDs, edges, resolution)
-	return persist(ctx, pool, cl, resolution)
+	return persist(ctx, pool, cl, resolution, visibleTypes)
+}
+
+// intersect returns the sorted intersection of two string slices. Used for
+// the node-set cut (visible ∩ overview.include); n is registry-sized (tens),
+// never corpus-sized.
+func intersect(a, b []string) []string {
+	in := make(map[string]struct{}, len(b))
+	for _, s := range b {
+		in[s] = struct{}{}
+	}
+	out := make([]string, 0, len(a))
+	for _, s := range a {
+		if _, ok := in[s]; ok {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // computeClustering is the pure core: build an undirected weighted graph from
@@ -157,13 +193,16 @@ func computeClustering(nodeUUIDs []string, edges []rawEdge, resolution float64) 
 	return clustering{blockToCluster: b2c, modularity: q, clusterCount: len(comms)}
 }
 
-func loadNodes(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+func loadNodes(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string) ([]string, error) {
 	// ORDER BY id = determinism axis 2: the int64 surrogate id is the load
 	// position, so a stable order yields a stable partition under a fixed seed.
+	// nodeTypes = visible ∩ overview.include (T6): the shared type-visibility
+	// fragment plus the overview sieve, folded into ONE bind parameter.
 	rows, err := pool.Query(ctx,
-		`SELECT id::text FROM context_blocks
-		 WHERE NOT is_archived AND type_name <> 'system-meta'
-		 ORDER BY id`)
+		fmt.Sprintf(`SELECT cb.id::text FROM context_blocks cb
+		 WHERE %s
+		 ORDER BY cb.id`, visibility.TypeVisible("cb", "$1")),
+		nodeTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -205,10 +244,11 @@ func loadEdges(ctx context.Context, pool *pgxpool.Pool) ([]rawEdge, error) {
 // nodeAggSQL builds graph_cluster_node: two-level aggregation — inner per
 // (cluster, scope, category) counts + best representative, outer rolls up to
 // size + category_counts(jsonb) + the representative of the highest-quality
-// category. All visibility filtering is the canonical block-set predicate
-// (NOT is_archived AND type_name <> 'system-meta'); scope partitioning is the
-// GROUP BY, so each row belongs to exactly one scope (design §3.3).
-const nodeAggSQL = `
+// category. All visibility filtering is the canonical type-visibility
+// fragment (visibility.TypeVisible, $1 = registry allowlist — T6); scope
+// partitioning is the GROUP BY, so each row belongs to exactly one scope
+// (design §3.3).
+var nodeAggSQL = fmt.Sprintf(`
 INSERT INTO graph_cluster_node (cluster_id, scope, size, category_counts, repr_block_id, repr_title, repr_quality)
 SELECT cluster_id, scope,
        sum(cat_cnt)::int,
@@ -224,17 +264,18 @@ FROM (
            (array_agg(left(b.title,120) ORDER BY b.quality_score DESC, b.id))[1] AS repr_title
     FROM graph_cluster_member m
     JOIN context_blocks b ON b.id = m.block_id
-       AND NOT b.is_archived AND b.type_name <> 'system-meta'
+       AND %s
     GROUP BY m.cluster_id, b.scope, b.category
 ) per_cat
-GROUP BY cluster_id, scope`
+GROUP BY cluster_id, scope`, visibility.TypeVisible("b", "$1"))
 
 // edgeAggSQL builds graph_cluster_edge: inter-cluster links aggregated per
 // (cluster-pair, scope-pair). cluster_a < cluster_b normalizes the undirected
 // meta-edge; scope_s/scope_t are the source/target BLOCK scopes (a meta-edge is
 // visible iff both are in readScopes — design §2). raw_confidence (CHECK >= 0)
-// is the weight, never the unconstrained confidence column.
-const edgeAggSQL = `
+// is the weight, never the unconstrained confidence column. Both endpoint
+// re-checks use the shared type-visibility fragment ($1 = registry allowlist).
+var edgeAggSQL = fmt.Sprintf(`
 INSERT INTO graph_cluster_edge (cluster_a, cluster_b, scope_s, scope_t, link_count, weight_sum)
 SELECT LEAST(ms.cluster_id, mt.cluster_id),
        GREATEST(ms.cluster_id, mt.cluster_id),
@@ -243,10 +284,11 @@ SELECT LEAST(ms.cluster_id, mt.cluster_id),
 FROM context_dream_links l
 JOIN graph_cluster_member ms ON ms.block_id = l.source_block_id
 JOIN graph_cluster_member mt ON mt.block_id = l.target_block_id
-JOIN context_blocks bs ON bs.id = l.source_block_id AND NOT bs.is_archived AND bs.type_name <> 'system-meta'
-JOIN context_blocks bt ON bt.id = l.target_block_id AND NOT bt.is_archived AND bt.type_name <> 'system-meta'
+JOIN context_blocks bs ON bs.id = l.source_block_id AND %s
+JOIN context_blocks bt ON bt.id = l.target_block_id AND %s
 WHERE l.relationship <> 'supersedes' AND ms.cluster_id <> mt.cluster_id
-GROUP BY 1, 2, bs.scope, bt.scope`
+GROUP BY 1, 2, bs.scope, bt.scope`,
+	visibility.TypeVisible("bs", "$1"), visibility.TypeVisible("bt", "$1"))
 
 const metaUpsertSQL = `
 INSERT INTO graph_overview_meta (singleton, computed_at, modularity, cluster_n, node_n, edge_n, resolution)
@@ -257,7 +299,8 @@ ON CONFLICT (singleton) DO UPDATE SET
     edge_n = EXCLUDED.edge_n, resolution = EXCLUDED.resolution`
 
 // persist replaces the three 057 tables in one advisory-locked transaction.
-func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution float64) (Stats, error) {
+// visibleTypes feeds the aggregation re-checks (T6, $1 in node/edgeAggSQL).
+func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution float64, visibleTypes []string) (Stats, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return Stats{}, err
@@ -299,10 +342,10 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution 
 		}
 	}
 
-	if _, err := tx.Exec(ctx, nodeAggSQL); err != nil {
+	if _, err := tx.Exec(ctx, nodeAggSQL, visibleTypes); err != nil {
 		return Stats{}, fmt.Errorf("node aggregation: %w", err)
 	}
-	edgeTag, err := tx.Exec(ctx, edgeAggSQL)
+	edgeTag, err := tx.Exec(ctx, edgeAggSQL, visibleTypes)
 	if err != nil {
 		return Stats{}, fmt.Errorf("edge aggregation: %w", err)
 	}

@@ -154,14 +154,23 @@ func isGrantOnlyVisible(scope string, readScopes []string) bool {
 //  3. Induced edges (Q2) over the final node set — scope-safe by construction
 //     (both endpoints come from the visibility-checked node set).
 //  4. Visible degrees (Q3), batched, double-budgeted (scan + hit cap).
-func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes []string, grantedBlockIDs []string) (*EgoResult, error) {
+//
+// visibleTypes is the resolved retrieval allowlist (blocktype.Set
+// .VisibleTypes, WF T6) — every visibility predicate in all four queries
+// consumes it as a bind parameter. Fail-closed HARD: an empty/nil list is a
+// Go error here (rrf.Search pattern) — SQL would return 0 rows, but a silent
+// empty graph would mask a wiring bug.
+func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes []string, grantedBlockIDs []string, visibleTypes []string) (*EgoResult, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
+	}
+	if len(visibleTypes) == 0 {
+		return nil, errors.New("store: empty visible-types allowlist (block-type registry not wired?)")
 	}
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
-	focus, err := hydrateFocus(ctx, pool, p.Focus, readScopes, grantedBlockIDs)
+	focus, err := hydrateFocus(ctx, pool, p.Focus, readScopes, grantedBlockIDs, visibleTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +198,7 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 			truncated = true
 			break
 		}
-		cands, herr := hopNeighbors(ctx, pool, frontier, readScopes, grantedBlockIDs, p)
+		cands, herr := hopNeighbors(ctx, pool, frontier, readScopes, grantedBlockIDs, visibleTypes, p)
 		if herr != nil {
 			return nil, herr
 		}
@@ -227,7 +236,7 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		truncated = true
 	}
 
-	if err := fillDegrees(ctx, pool, ids, readScopes, grantedBlockIDs, nodes); err != nil {
+	if err := fillDegrees(ctx, pool, ids, readScopes, grantedBlockIDs, visibleTypes, nodes); err != nil {
 		return nil, err
 	}
 
@@ -275,17 +284,18 @@ func takeHop(cands []hopCandidate, visited map[string]bool, budget, hop int) ([]
 // hydrateFocus loads the focus node (hop 0) under the canonical visibility
 // triple. Zero rows — whether the block does not exist or is out of scope —
 // collapse into the same ErrNotVisible.
-func hydrateFocus(ctx context.Context, pool *pgxpool.Pool, id string, readScopes, grantedBlockIDs []string) (*GraphNode, error) {
+func hydrateFocus(ctx context.Context, pool *pgxpool.Pool, id string, readScopes, grantedBlockIDs, visibleTypes []string) (*GraphNode, error) {
 	// $1=focus id, $2=readScopes, $3=grantedBlockIDs (T40a OR-arm via the shared
-	// VisibilityPredicate switch point — a granted block becomes a VISIBLE focus).
+	// VisibilityPredicate switch point — a granted block becomes a VISIBLE focus),
+	// $4=visibleTypes (T6 registry allowlist).
 	q := fmt.Sprintf(
 		`SELECT b.id::text, left(b.title, 120), b.category, b.scope::text, b.created_at
 		 FROM context_blocks b
 		 WHERE b.id = $1::uuid AND %s`,
-		VisibilityPredicate("b", "$2", "$3"),
+		VisibilityPredicate("b", "$4", "$2", "$3"),
 	)
 	n := GraphNode{Hop: 0}
-	err := pool.QueryRow(ctx, q, id, readScopes, grantedBlockIDs).
+	err := pool.QueryRow(ctx, q, id, readScopes, grantedBlockIDs, visibleTypes).
 		Scan(&n.ID, &n.Title, &n.Category, &n.Scope, &n.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotVisible
@@ -303,10 +313,11 @@ func hydrateFocus(ctx context.Context, pool *pgxpool.Pool, id string, readScopes
 // window) inside the legs, BEFORE the LIMIT. Cap slots are only ever granted
 // to visible, filter-passing edges (anti-starvation + no counting channel,
 // design §6.2). DISTINCT ON keeps each neighbor once with its strongest edge.
-func hopNeighbors(ctx context.Context, pool *pgxpool.Pool, frontier, readScopes, grantedBlockIDs []string, p EgoParams) ([]hopCandidate, error) {
+func hopNeighbors(ctx context.Context, pool *pgxpool.Pool, frontier, readScopes, grantedBlockIDs, visibleTypes []string, p EgoParams) ([]hopCandidate, error) {
 	// $9 = grantedBlockIDs (T40a): the shared VisibilityPredicate carries the
 	// block-grant OR-arm into BOTH hop legs (a granted neighbor becomes VISIBLE).
-	vis := VisibilityPredicate("b", "$2", "$9")
+	// $10 = visibleTypes (T6): registry allowlist, inside the legs BEFORE the cap.
+	vis := VisibilityPredicate("b", "$10", "$2", "$9")
 	q := fmt.Sprintf(`
 WITH hop AS (
     SELECT DISTINCT ON (e.neighbor_id)
@@ -361,6 +372,7 @@ ORDER BY h.confidence DESC, h.neighbor_id`, vis, vis)
 		p.CreatedAfter,                  // $7
 		p.CreatedBefore,                 // $8
 		grantedBlockIDs,                 // $9 block-grant OR-arm (T40a)
+		visibleTypes,                    // $10 registry type allowlist (T6)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: graph hop query: %w", err)
@@ -444,10 +456,11 @@ LIMIT $4`
 // Degree counts all five relationship types; the count is scope-visible —
 // a raw count would leak the existence of foreign private links on shared
 // blocks (design §6.3, decision §7.2).
-func fillDegrees(ctx context.Context, pool *pgxpool.Pool, ids, readScopes, grantedBlockIDs []string, nodes []GraphNode) error {
+func fillDegrees(ctx context.Context, pool *pgxpool.Pool, ids, readScopes, grantedBlockIDs, visibleTypes []string, nodes []GraphNode) error {
 	// $5 = grantedBlockIDs (T40a): a granted neighbor counts toward the VISIBLE
 	// degree via the shared VisibilityPredicate OR-arm (both UNION legs).
-	vis := VisibilityPredicate("nb", "$2", "$5")
+	// $6 = visibleTypes (T6): only allowlisted neighbors count.
+	vis := VisibilityPredicate("nb", "$6", "$2", "$5")
 	q := fmt.Sprintf(`
 SELECT n.id::text,
        (SELECT count(*) FROM (
@@ -470,7 +483,7 @@ SELECT n.id::text,
         ) c)::int AS degree
 FROM unnest($1::uuid[]) AS n(id)`, vis, vis)
 
-	rows, err := pool.Query(ctx, q, ids, readScopes, DegreeScanBudget, DegreeHitCap, grantedBlockIDs)
+	rows, err := pool.Query(ctx, q, ids, readScopes, DegreeScanBudget, DegreeHitCap, grantedBlockIDs, visibleTypes)
 	if err != nil {
 		return fmt.Errorf("store: graph degree query: %w", err)
 	}

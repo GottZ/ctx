@@ -69,7 +69,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	queryHandler := handler.NewQueryHandler(pool, cfgStore, backendPool, quota, blocktypeReg)
 	storeH := handler.NewStoreHandler(pool, cfgStore, blocktypeReg)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
-	graphH := handler.NewGraphHandler(pool, cfgStore)
+	graphH := handler.NewGraphHandler(pool, cfgStore, blocktypeReg)
 	overviewH := handler.NewGraphOverviewHandler(pool, cfgStore)
 	// gamingReload re-builds the config snapshot from context_settings after a
 	// gaming-mode write (F3-P6), so the toggle hits the next chain without a

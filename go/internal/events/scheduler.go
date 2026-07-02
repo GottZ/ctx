@@ -649,8 +649,18 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context) {
 	if !cfg.GraphOverview.Enabled {
 		return
 	}
+	// WF T6: the rebuild consumes the BASE registry snapshot (the rebuild is
+	// ONE global run; tenant overlays act only with a per-tenant overview —
+	// design/01 §9.6 caveat, T12 boundary). nil registry = wiring gap: skip
+	// loudly rather than cluster with a stale type set.
+	if s.blocktypes == nil {
+		slog.Error("scheduler: overview rebuild skipped — block-type registry not wired")
+		return
+	}
+	typeSet := s.blocktypes.Snapshot()
 	start := time.Now()
-	stats, err := overview.Rebuild(ctx, s.pool, cfg.GraphOverview.Resolution)
+	stats, err := overview.Rebuild(ctx, s.pool, cfg.GraphOverview.Resolution,
+		typeSet.VisibleTypes(), typeSet.OverviewTypes())
 	if err != nil {
 		slog.Error("scheduler: overview rebuild failed", "error", err)
 		return

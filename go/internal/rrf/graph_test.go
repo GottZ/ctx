@@ -300,7 +300,7 @@ func TestGraphExpand_DisabledReturnsInput(t *testing.T) {
 	cfg := defaultGraphCfg()
 	cfg.Enabled = false
 	results := []SearchResult{res("A", 1.0)}
-	out, err := GraphExpand(context.Background(), nil, results, []string{"private"}, nil, cfg)
+	out, err := GraphExpand(context.Background(), nil, results, []string{"private"}, nil, []string{"knowledge"}, cfg)
 	if err != nil {
 		t.Fatalf("disabled GraphExpand should not error: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestGraphExpand_DisabledReturnsInput(t *testing.T) {
 // any DB access (pool=nil is safe) and return the input unchanged.
 func TestGraphExpand_EmptyResultsReturnsInput(t *testing.T) {
 	cfg := defaultGraphCfg()
-	out, err := GraphExpand(context.Background(), nil, []SearchResult{}, []string{"private"}, nil, cfg)
+	out, err := GraphExpand(context.Background(), nil, []SearchResult{}, []string{"private"}, nil, []string{"knowledge"}, cfg)
 	if err != nil {
 		t.Fatalf("empty-results GraphExpand should not error: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestGraphExpand_EmptyResultsReturnsInput(t *testing.T) {
 	}
 	// And a non-nil empty slice round-trips as the same slice (not nil).
 	in := make([]SearchResult, 0)
-	out2, _ := GraphExpand(context.Background(), nil, in, []string{"private"}, nil, cfg)
+	out2, _ := GraphExpand(context.Background(), nil, in, []string{"private"}, nil, []string{"knowledge"}, cfg)
 	if out2 == nil {
 		t.Error("empty (non-nil) input should return non-nil slice")
 	}
@@ -333,7 +333,7 @@ func TestGraphExpand_EmptyResultsReturnsInput(t *testing.T) {
 func TestGraphExpand_EmptyScopesReturnsInput(t *testing.T) {
 	cfg := defaultGraphCfg()
 	results := []SearchResult{res("A", 1.0)}
-	out, err := GraphExpand(context.Background(), nil, results, nil, nil, cfg)
+	out, err := GraphExpand(context.Background(), nil, results, nil, nil, []string{"knowledge"}, cfg)
 	if err != nil {
 		t.Fatalf("empty-scopes GraphExpand should not error: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestGraphExpand_FetchErrorFailsOpen(t *testing.T) {
 		{ID: "TOP", Title: "TOP", RRFScore: 1.0, Scope: "private"},
 		{ID: "MID", Title: "MID", RRFScore: 0.8, Scope: "private"},
 	}
-	out, gerr := GraphExpand(context.Background(), pool, results, []string{"private"}, nil, cfg)
+	out, gerr := GraphExpand(context.Background(), pool, results, []string{"private"}, nil, []string{"knowledge"}, cfg)
 	if gerr == nil {
 		t.Fatal("expected a fetch error from an unreachable pool")
 	}

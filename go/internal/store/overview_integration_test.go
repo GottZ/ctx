@@ -62,7 +62,7 @@ func TestGraphOverview_ScopeNegativeProbes(t *testing.T) {
 	ovInsLink(t, pool, D, F, 0.9)
 	ovInsLink(t, pool, C, F, 0.05) // bridge
 
-	if _, err := overview.Rebuild(ctx, pool, 1.0); err != nil {
+	if _, err := overview.Rebuild(ctx, pool, 1.0, []string{"knowledge"}, []string{"knowledge"}); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 

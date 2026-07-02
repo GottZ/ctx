@@ -19,20 +19,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // GraphHandler handles GET /api/graph/ego.
 type GraphHandler struct {
-	pool *pgxpool.Pool
-	cfg  ConfigStore
+	pool       *pgxpool.Pool
+	cfg        ConfigStore
+	blocktypes *blocktype.Registry
 }
 
 // NewGraphHandler creates a new GraphHandler. The read rate limit comes from
-// a config snapshot per request (F1-W7), not a boot copy.
-func NewGraphHandler(pool *pgxpool.Pool, cfg ConfigStore) *GraphHandler {
-	return &GraphHandler{pool: pool, cfg: cfg}
+// a config snapshot per request (F1-W7), not a boot copy. blocktypes feeds
+// the per-request type-visibility allowlist (WF T6) — never the compiled-in
+// builtin set (T5 DB-sourcing doctrine).
+func NewGraphHandler(pool *pgxpool.Pool, cfg ConfigStore, blocktypes *blocktype.Registry) *GraphHandler {
+	return &GraphHandler{pool: pool, cfg: cfg, blocktypes: blocktypes}
 }
 
 // Parameter ceilings (out-of-range → 400, never silently clamped).
@@ -138,7 +142,10 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 	// grantedBlockIDs nil (T40a): the graph-ego handler is NOT live-wired for
 	// block grants in T40a (EgoGraph inherits the OR centrally, but its grant
 	// resolution is a later wave) — nil ⇒ no-op OR-arm.
-	result, err := store.EgoGraph(ctx, h.pool, params, authResult.ReadScopes, nil)
+	// T6: the type allowlist comes from the REGISTRY snapshot per request —
+	// a live registry edit changes graph visibility without a restart.
+	visibleTypes := h.blocktypes.SnapshotForRequest(ctx).VisibleTypes()
+	result, err := store.EgoGraph(ctx, h.pool, params, authResult.ReadScopes, nil, visibleTypes)
 	if err != nil {
 		if errors.Is(err, store.ErrNotVisible) {
 			// One identical 404 for "does not exist" and "not visible" — no

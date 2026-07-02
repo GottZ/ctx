@@ -89,7 +89,7 @@ func TestGraphExpandT41_SeedFilter_Integration(t *testing.T) {
 		results := []rrf.SearchResult{{ID: t41uuid("b1"), Title: "B", RRFScore: 1.0, Scope: foreign}}
 		grants := []string{t41uuid("b1")}
 
-		out, err := rrf.GraphExpand(ctx, pool, results, []string{homeScope}, grants, cfg)
+		out, err := rrf.GraphExpand(ctx, pool, results, []string{homeScope}, grants, []string{"knowledge"}, cfg)
 		if err != nil {
 			t.Fatalf("GraphExpand (C1): %v", err)
 		}
@@ -117,7 +117,7 @@ func TestGraphExpandT41_SeedFilter_Integration(t *testing.T) {
 		results := []rrf.SearchResult{{ID: t41uuid("s2"), Title: "S", RRFScore: 1.0, Scope: homeScope}}
 		grants := []string{t41uuid("b2")}
 
-		out, err := rrf.GraphExpand(ctx, pool, results, []string{homeScope}, grants, cfg)
+		out, err := rrf.GraphExpand(ctx, pool, results, []string{homeScope}, grants, []string{"knowledge"}, cfg)
 		if err != nil {
 			t.Fatalf("GraphExpand (C2): %v", err)
 		}

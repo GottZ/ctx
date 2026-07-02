@@ -169,7 +169,7 @@ func TestTenantGraphIsolation_EndToEnd(t *testing.T) {
 	// the node reachable only THROUGH it, never the promotion target (gated on the
 	// BLOCK scope, not the A-visible link scope).
 	t.Run("EgoGraph_TenantA_HopAndPromotionIsolation", func(t *testing.T) {
-		res, err := store.EgoGraph(ctx, pool, gEgoParams(t16BS1), arA.ReadScopes, nil)
+		res, err := store.EgoGraph(ctx, pool, gEgoParams(t16BS1), arA.ReadScopes, nil, gVisibleTypes)
 		if err != nil {
 			t.Fatalf("EgoGraph(BS1) as A: %v", err)
 		}
@@ -196,7 +196,7 @@ func TestTenantGraphIsolation_EndToEnd(t *testing.T) {
 	// promotion target (t16-b, B-visible) — but never A's private BA. Proves the
 	// isolation is keyed on the resolved scope set, not on a hardcoded list.
 	t.Run("EgoGraph_TenantB_SeesOwnNotForeign", func(t *testing.T) {
-		res, err := store.EgoGraph(ctx, pool, gEgoParams(t16BS1), arB.ReadScopes, nil)
+		res, err := store.EgoGraph(ctx, pool, gEgoParams(t16BS1), arB.ReadScopes, nil, gVisibleTypes)
 		if err != nil {
 			t.Fatalf("EgoGraph(BS1) as B: %v", err)
 		}
@@ -219,7 +219,7 @@ func TestTenantGraphIsolation_EndToEnd(t *testing.T) {
 	// under each tenant's RESOLVED scopes is scope-pure — a node's scope_mix can
 	// only contain that tenant's read_scopes, never the other tenant's scope.
 	t.Run("GraphOverview_ScopePureViaResolvedScopes", func(t *testing.T) {
-		if _, err := overview.Rebuild(ctx, pool, 1.0); err != nil {
+		if _, err := overview.Rebuild(ctx, pool, 1.0, gVisibleTypes, gVisibleTypes); err != nil {
 			t.Fatalf("overview rebuild: %v", err)
 		}
 		params := store.OverviewParams{MinClusterSize: 1, NodeLimit: 500, EdgeLimit: 2000}
@@ -274,7 +274,7 @@ func TestTenantGraphIsolation_EndToEnd(t *testing.T) {
 		if len(arS.ReadScopes) != 0 {
 			t.Fatalf("suspended read_scopes = %v, want empty (060 __UNAUTHORIZED__ sentinel)", arS.ReadScopes)
 		}
-		if _, err := store.EgoGraph(ctx, pool, gEgoParams(t16BS1), arS.ReadScopes, nil); !errors.Is(err, store.ErrNoScopes) {
+		if _, err := store.EgoGraph(ctx, pool, gEgoParams(t16BS1), arS.ReadScopes, nil, gVisibleTypes); !errors.Is(err, store.ErrNoScopes) {
 			t.Errorf("EgoGraph(suspended scopes) err = %v, want store.ErrNoScopes (fail-closed)", err)
 		}
 		if _, err := store.GraphOverview(ctx, pool, store.OverviewParams{MinClusterSize: 1, NodeLimit: 500, EdgeLimit: 2000}, arS.ReadScopes); !errors.Is(err, store.ErrNoScopes) {
