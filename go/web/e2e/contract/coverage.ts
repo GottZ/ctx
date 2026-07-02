@@ -7,8 +7,15 @@
 // meta-test (matrix.spec.ts) both fail when the committed file differs from
 // the regenerate — a hand edit can never survive (PV4 gate c).
 
+import { readFileSync } from 'node:fs'
+import type { A11yLedger } from './a11y'
 import { isScaleState, type PageContract } from './contract'
 import { contracts, pendingContracts, type PendingContract } from './registry'
+
+/** The committed a11y debt ledger — rendered into the Ausnahmen-Ausweis. */
+function loadLedgerForCoverage(): A11yLedger {
+  return JSON.parse(readFileSync(new URL('../a11y-baseline.json', import.meta.url), 'utf8')) as A11yLedger
+}
 
 function scaleCell(c: PageContract): string {
   return isScaleState(c.scale) ? `\`${c.scale.name}\` (Deckel ${c.scale.domCap.max} @ \`${c.scale.domCap.selector}\`)` : `EXEMPT`
@@ -25,6 +32,7 @@ function denyCell(c: PageContract): string {
 
 /** Render the full COVERAGE.md content — PURE, deterministic (drift-pinned). */
 export function renderCoverage(cs: readonly PageContract[] = contracts, pending: readonly PendingContract[] = pendingContracts): string {
+  const ledger = loadLedgerForCoverage()
   const lines: string[] = []
   lines.push('# e2e-Abdeckungs-Matrix — Seite × Prüfart (generiert)')
   lines.push('')
@@ -45,8 +53,11 @@ export function renderCoverage(cs: readonly PageContract[] = contracts, pending:
   lines.push('Test erwartet), Shape-Aktualität der Fixtures (W10), SSE-Transport-Verhalten,')
   lines.push('Backend-Performance. Adressen: Go-Integration-Suite + Live-Tier (PV10), Achse 02 (Latenz-Budgets).')
   lines.push('')
-  lines.push('**Noch nicht generiert (ehrlich):** ARIA-Snapshots (PV6), axe-Gate + Fokus-Walk (PV5),')
-  lines.push('Live-Tier-Spalte (PV10) — als Spalten bereits ausgewiesen, Wert `— (PVn)` bis zur Welle.')
+  lines.push('**Noch nicht generiert (ehrlich):** ARIA-Snapshots (PV6), Live-Tier-Spalte (PV10) —')
+  lines.push('als Spalten bereits ausgewiesen, Wert `— (PVn)` bis zur Welle. Das axe-Gate (WCAG 2.2 AA')
+  lines.push('inkl. target-size) + der Fokus-Walk laufen seit PV5; axe-`incomplete`-Ergebnisse (Kontrast-')
+  lines.push('Blindstellen: Gradients, überlappende Elemente) hängen als `axe-incomplete`-Attachment am')
+  lines.push('Report und sind zu triagieren, nie stillschweigend grün (design 06 §4.5).')
   lines.push('')
   lines.push('## Matrix')
   lines.push('')
@@ -57,8 +68,10 @@ export function renderCoverage(cs: readonly PageContract[] = contracts, pending:
     const visualStates = c.states.length + (isScaleState(c.scale) ? 1 : 0)
     const vp = c.mobile === undefined ? 2 : 1
     const visual = `✓ ${visualStates * 2 * vp} Shots (states×dark/light×${vp} VP)`
+    const debt = ledger.entries.filter((e) => e.page === c.route).length
+    const axe = `✓ 4 Scans (dark/light × 2 VP)${debt > 0 ? ` — ${debt} Debt-Entr${debt === 1 ? 'y' : 'ies'}` : ''}`
     lines.push(
-      `| ${c.name} | \`${c.route}\` | ${c.role} | ${states} | ✓ | ${visual} | — (PV6) | — (PV5) | — (PV5) | ${mobileCell(c)} | ${denyCell(c)} | ${c.tenantScoped ? '✓ generiert (§5.6b)' : '—'} | ${scaleCell(c)} | — (PV10) |`,
+      `| ${c.name} | \`${c.route}\` | ${c.role} | ${states} | ✓ | ${visual} | — (PV6) | ${axe} | ✓ (1440, Tab-Walk) | ${mobileCell(c)} | ${denyCell(c)} | ${c.tenantScoped ? '✓ generiert (§5.6b)' : '—'} | ${scaleCell(c)} | — (PV10) |`,
     )
   }
   lines.push('')
@@ -93,7 +106,7 @@ export function renderCoverage(cs: readonly PageContract[] = contracts, pending:
   }
   if (!anyMask) lines.push('- keine')
   lines.push('')
-  lines.push('### axe-Excludes (ab PV5 wirksam, Ausweis-Pflicht ab sofort)')
+  lines.push('### axe-Excludes (design 06 §4.3c — wirksam im PV5-Gate)')
   lines.push('')
   let anyAxe = false
   for (const c of cs) {
@@ -103,6 +116,25 @@ export function renderCoverage(cs: readonly PageContract[] = contracts, pending:
     }
   }
   if (!anyAxe) lines.push('- keine')
+  lines.push('')
+  lines.push('### a11y-Baseline-Debt (e2e/a11y-baseline.json — Node-Count-Freeze, shrink-only)')
+  lines.push('')
+  if (ledger.entries.length === 0) {
+    lines.push('- keine Einträge — das axe-Gate läuft ohne eingefrorenen Debt.')
+  } else {
+    lines.push('| Seite | Regel | Kontext | Selektoren | Nodes | Seit | Referenz |')
+    lines.push('|---|---|---|---|---|---|---|')
+    for (const e of ledger.entries) {
+      lines.push(
+        `| \`${e.page}\` | ${e.rule} | ${e.theme}/${e.viewport} | \`${e.targets.join('`, `')}\` | ${e.nodes} | ${e.since} | ${e.issue} |`,
+      )
+    }
+    lines.push('')
+    lines.push(
+      `Gesamt: ${ledger.entries.length} Einträge. Wachstum (neue Einträge oder Node-Zuwachs) ⇒ rot bzw.`,
+    )
+    lines.push('`[baseline]`-Marker-Pflicht (.hooks/commit-msg); behobene Einträge MÜSSEN raus (stale ⇒ rot).')
+  }
   lines.push('')
   lines.push('## Ausstehende Kontrakte (PV7 leert diese Liste — Matrix-Gate)')
   lines.push('')

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ctx e2e a11y baseline debt ledger (design 06 §3.3, wave PV5)",
+  "description": "Frozen accessibility violations of existing pages: visible, shrink-only debt. `nodes` is the gate (node-count freeze: grew/partial/stale all turn red); `nodePaths` is triage documentation. Entries are keyed per run context (page + theme + viewport) — see e2e/contract/a11y.ts for the named deviation from the design-06 example. Growth requires a [baseline]-marked commit (.hooks/commit-msg rule 2); the structural rules are enforced by e2e/contract/a11y.test.ts (vitest), the runtime ratchet by the generated axe tests.",
+  "type": "object",
+  "required": ["entries"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page", "rule", "theme", "viewport", "targets", "nodes", "nodePaths", "since", "issue"],
+        "additionalProperties": false,
+        "properties": {
+          "page": { "type": "string", "description": "Contract route ('/status', '*', 'login')." },
+          "rule": { "type": "string", "minLength": 1, "description": "axe rule id." },
+          "theme": { "enum": ["dark", "light"] },
+          "viewport": { "enum": ["desktop", "mobile"] },
+          "targets": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Generalized CSS selectors delimiting the debt region (coverage domain)."
+          },
+          "nodes": { "type": "integer", "minimum": 1, "description": "Frozen node budget — THE gate." },
+          "nodePaths": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Exact axe node targets at freeze time — triage only, length must equal `nodes`."
+          },
+          "since": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "issue": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Mandatory tracking reference — design-doc anchor as interim form until Achse-02 issues exist (§3.3)."
+          }
+        }
+      }
+    }
+  }
+}

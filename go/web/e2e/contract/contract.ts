@@ -4,9 +4,10 @@
 // POLICY = the declarative contract data in registry.ts. A new page changes
 // only data (registry entry + baselines), never this file.
 //
-// PV4 generates the flow/visual/deny/leak/scale dimensions; the a11y gate
-// (axe + focus walk, PV5) and the ARIA snapshots (PV6) extend THIS generator
-// in their own waves — COVERAGE.md marks those columns as pending until then.
+// PV4 generated the flow/visual/deny/leak/scale dimensions; PV5 added the
+// a11y dimension (axe gate against the frozen debt ledger + focus walk —
+// axe.ts / focus.ts / a11y.ts). The ARIA snapshots (PV6) extend this
+// generator in their own wave — COVERAGE.md marks that column as pending.
 //
 // Model deviations from design 06 §4.1, named (not silently resolved):
 //   - `mobile` is `{ exempt: string }` instead of the doc's bare `false` +
@@ -26,7 +27,9 @@
 
 import { expect, test, type Page } from '@playwright/test'
 import type { LayoutMode } from '../../src/lib/layout/modes'
+import { runAxeGate } from './axe'
 import { captureShot } from './capture'
+import { runFocusWalk } from './focus'
 import {
   gotoArea,
   SENTINEL,
@@ -232,6 +235,13 @@ async function mountState(
   return session
 }
 
+function axeTest(c: PageContract, state: PageState, theme: Theme, viewport: ViewportName): void {
+  test(`${c.name} ${state.name} ${theme} ${viewport} axe`, { tag: '@a11y' }, async ({ page }, testInfo) => {
+    await mountState(page, c, state, theme)
+    await runAxeGate(page, c, theme, viewport, testInfo)
+  })
+}
+
 function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: ViewportName): void {
   test(`${c.name} ${state.name} ${theme} ${viewport} visual`, { tag: '@visual' }, async ({ page }) => {
     await mountState(page, c, state, theme)
@@ -253,6 +263,12 @@ function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: V
  *   - primary flow            1 × @flow      (desktop, dark, default state)
  *   - toHaveScreenshot        states(+scale) × themes × viewports × @visual
  *                             (mobile halved away by a reasoned opt-out)
+ *   - axe scan (PV5)          2 themes × 2 viewports × @a11y (default state)
+ *                             — ALWAYS both viewports, independent of the
+ *                             mobile VISUAL opt-out: axe needs no baselines,
+ *                             and target-size (SC 2.5.8) bites hardest at
+ *                             390 px (§4.1 table: axe "immer")
+ *   - focus walk (PV5)        1 × @a11y      (desktop, dark, default state)
  *   - deny                    1 × @flow      (role ≠ member only)
  *   - tenant-leak probe       1 × @flow      (tenantScoped only, §5.6b)
  *   - scale                   1 × @flow      (scale is a PageState only)
@@ -287,6 +303,17 @@ export function definePageContract(c: PageContract): void {
         }
       })
     }
+
+    // ---- a11y dimension (@a11y — axe gate + focus walk, PV5) ----
+    for (const theme of THEMES) axeTest(c, defaultState, theme, 'desktop')
+    test.describe(() => {
+      test.use({ viewport: VIEWPORTS.mobile })
+      for (const theme of THEMES) axeTest(c, defaultState, theme, 'mobile')
+    })
+    test(`${c.name} focus walk`, { tag: '@a11y' }, async ({ page }, testInfo) => {
+      await mountState(page, c, defaultState, 'dark')
+      await runFocusWalk(page, testInfo)
+    })
 
     // ---- deny (generated auth dimension, §4.1) ----
     const lower = denyRoleFor(c.role)

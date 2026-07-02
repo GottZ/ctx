@@ -17,18 +17,21 @@ DOM-Deckel bei 10k Fixture-Items (Scale-Zustand mit echtem Keyset-Cursor); kein 
 Test erwartet), Shape-Aktualität der Fixtures (W10), SSE-Transport-Verhalten,
 Backend-Performance. Adressen: Go-Integration-Suite + Live-Tier (PV10), Achse 02 (Latenz-Budgets).
 
-**Noch nicht generiert (ehrlich):** ARIA-Snapshots (PV6), axe-Gate + Fokus-Walk (PV5),
-Live-Tier-Spalte (PV10) — als Spalten bereits ausgewiesen, Wert `— (PVn)` bis zur Welle.
+**Noch nicht generiert (ehrlich):** ARIA-Snapshots (PV6), Live-Tier-Spalte (PV10) —
+als Spalten bereits ausgewiesen, Wert `— (PVn)` bis zur Welle. Das axe-Gate (WCAG 2.2 AA
+inkl. target-size) + der Fokus-Walk laufen seit PV5; axe-`incomplete`-Ergebnisse (Kontrast-
+Blindstellen: Gradients, überlappende Elemente) hängen als `axe-incomplete`-Attachment am
+Report und sind zu triagieren, nie stillschweigend grün (design 06 §4.5).
 
 ## Matrix
 
 | Seite | Route | Rolle | States | Kern-Flow | Visual | ARIA | axe | Fokus-Walk | Mobile | Deny | Leak | Scale | Live |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| status | `/status` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | — (PV5) | — (PV5) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
-| graph | `/graph` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | — (PV5) | — (PV5) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
-| blocks | `/blocks` | member | `default` | ✓ | ✓ 4 Shots (states×dark/light×1 VP) | — (PV6) | — (PV5) | — (PV5) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | ✓ generiert (§5.6b) | `10k` (Deckel 300 @ `main.content ul.results > li`) | — (PV10) |
-| chat | `/chat` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | — (PV5) | — (PV5) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
-| settings | `/settings` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | — (PV5) | — (PV5) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
+| status | `/status` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) — 2 Debt-Entries | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
+| graph | `/graph` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
+| blocks | `/blocks` | member | `default` | ✓ | ✓ 4 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) — 4 Debt-Entries | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | ✓ generiert (§5.6b) | `10k` (Deckel 300 @ `main.content ul.results > li`) | — (PV10) |
+| chat | `/chat` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
+| settings | `/settings` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
 
 ## Kern-Pfade (flowDoc — W21: „verifiziert" meint prüfbar den Hauptpfad)
 
@@ -59,9 +62,23 @@ Live-Tier-Spalte (PV10) — als Spalten bereits ausgewiesen, Wert `— (PVn)` bi
 
 - **graph**: full-bleed sigma canvas (ForceAtlas2 layout is not seed-stable); graph SEMANTICS stay asserted via the __ctxGraph hook (primaryFlow + graph-palette special) — Referenz: .project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §4.3 (interim ref until Achse-02 issues exist)
 
-### axe-Excludes (ab PV5 wirksam, Ausweis-Pflicht ab sofort)
+### axe-Excludes (design 06 §4.3c — wirksam im PV5-Gate)
 
 - keine
+
+### a11y-Baseline-Debt (e2e/a11y-baseline.json — Node-Count-Freeze, shrink-only)
+
+| Seite | Regel | Kontext | Selektoren | Nodes | Seit | Referenz |
+|---|---|---|---|---|---|---|
+| `/status` | color-contrast | light/desktop | `.modes button.active` | 1 | 2026-07-02 | .project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §3.3 (interim ref until Achse-02 issues exist) — DreamTile mode segment: --accent on --accent-dim misses 4.5:1 in the light theme only |
+| `/status` | color-contrast | light/mobile | `.modes button.active` | 1 | 2026-07-02 | .project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §3.3 (interim ref until Achse-02 issues exist) — DreamTile mode segment: --accent on --accent-dim misses 4.5:1 in the light theme only |
+| `/blocks` | select-name | dark/desktop | `.panel fieldset select` | 1 | 2026-07-02 | .project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §3.3 (interim ref until Achse-02 issues exist) — FilterPanel category select has no accessible name (the fieldset legend does not label the control) |
+| `/blocks` | select-name | dark/mobile | `.panel fieldset select` | 1 | 2026-07-02 | .project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §3.3 (interim ref until Achse-02 issues exist) — FilterPanel category select has no accessible name (the fieldset legend does not label the control) |
+| `/blocks` | select-name | light/desktop | `.panel fieldset select` | 1 | 2026-07-02 | .project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §3.3 (interim ref until Achse-02 issues exist) — FilterPanel category select has no accessible name (the fieldset legend does not label the control) |
+| `/blocks` | select-name | light/mobile | `.panel fieldset select` | 1 | 2026-07-02 | .project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §3.3 (interim ref until Achse-02 issues exist) — FilterPanel category select has no accessible name (the fieldset legend does not label the control) |
+
+Gesamt: 6 Einträge. Wachstum (neue Einträge oder Node-Zuwachs) ⇒ rot bzw.
+`[baseline]`-Marker-Pflicht (.hooks/commit-msg); behobene Einträge MÜSSEN raus (stale ⇒ rot).
 
 ## Ausstehende Kontrakte (PV7 leert diese Liste — Matrix-Gate)
 

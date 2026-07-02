@@ -14,7 +14,11 @@
      */
     "allowJs": true,
     "checkJs": true,
-    "moduleDetection": "force"
+    "moduleDetection": "force",
+    /* e2e/contract/axe.ts imports the a11y debt ledger as a typed JSON module
+       (design 06 §3.3, wave PV5) — svelte-check walks that file with THIS
+       config even though it lives outside `include`. */
+    "resolveJsonModule": true
   },
   "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte"]
 }
