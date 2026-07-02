@@ -7,7 +7,8 @@
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
   import { readGraphPalette, recolorGraph } from '../../lib/graph/graph-theme'
   import { THEME_CHANGE_EVENT } from '../../lib/theme/theme.svelte'
-  import { WindowStore } from '../../lib/graph/windows.svelte'
+  import { WindowStore } from '../../lib/windows/windows.svelte'
+  import BlockDetailContent from './BlockDetailContent.svelte'
   import FilterPanel from './FilterPanel.svelte'
   import GraphView from './GraphView.svelte'
   import OverviewMap from './OverviewMap.svelte'
@@ -159,12 +160,23 @@
           onnodedoubleclick={(id) => void expand(id)}
         />
       </div>
+      <!-- U02 (design 04-§4.6): die Fenster-Schicht ist graph-frei; DIESE
+           Kompositions-Wurzel injiziert die beiden Graph-Kopplungen —
+           labelFor (Titel/Chips) und das BlockDetailContent-Snippet (Body). -->
       <WindowManager
-        {graph}
         {store}
-        onfocus={(id) => void setFocus(id)}
-        onexpand={(id) => void expand(id)}
-      />
+        labelFor={(id) => (graph.hasNode(id) ? graph.getNodeAttribute(id, 'label') : id.slice(0, 8))}
+      >
+        {#snippet content(win, titleId)}
+          <BlockDetailContent
+            id={win.id}
+            {graph}
+            onfocus={(id) => void setFocus(id)}
+            onexpand={(id) => void expand(id)}
+            {titleId}
+          />
+        {/snippet}
+      </WindowManager>
     </div>
   {:else}
     <div class="stage">

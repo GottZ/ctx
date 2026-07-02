@@ -1,36 +1,32 @@
 <script lang="ts">
-  import type { DirectedGraph } from 'graphology'
-  import { type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
-  import { DomProjector } from '../../lib/graph/window-projection'
-  import type { WindowStore, WinState } from '../../lib/graph/windows.svelte'
-  import BlockDetailContent from './BlockDetailContent.svelte'
+  import type { Snippet } from 'svelte'
+  import { DomProjector } from '../../lib/windows/window-projection'
+  import type { WindowStore, WinState } from '../../lib/windows/windows.svelte'
 
   // The render-leaf (design 07-§C): the single DOM-px point of the window
   // system. It consumes the store's logical rect (lu) THROUGH the DomProjector
   // and paints it; the store stays renderer-agnostic. For WebXR this whole leaf
   // is replaced by a 3D-panel component consuming a QuadPose — the store and
   // store.move/resize(lu) stay untouched (// WebXR: markers below).
+  //
+  // Content-Snippet-Injection (U02, design 04-§4.6.2): das Fenster rendert im
+  // Body NUR das injizierte `content(win, titleId)`-Snippet — keine Graph-Prop,
+  // kein hartkodierter BlockDetailContent mehr. Der Graph-Host reicht
+  // BlockDetailContent durch; ein Board-Host einen Issue-Renderer.
   let {
     win,
     store,
-    graph,
-    onfocus,
-    onexpand,
+    content,
     sheet = false,
   }: {
     win: WinState
     store: WindowStore
-    graph: DirectedGraph<NodeAttrs, EdgeAttrs>
-    onfocus: (id: string) => void
-    onexpand: (id: string) => void
+    /** Fenster-Inhalt; titleId ist die id des Host-<h2> (aria-labelledby). */
+    content: Snippet<[WinState, string]>
     /** Mobile-Vollbild-Sheet: unterdrückt inline-px/Drag/Resize, rendert inset:0. */
     sheet?: boolean
   } = $props()
 
-  // win.id is the IMMUTABLE Block-UUID (the dedup key; each FloatingWindow is
-  // keyed by it). Snapshotting it once is intended — only win.rect/win.z change.
-  // svelte-ignore state_referenced_locally
-  const id = win.id
   // Stable + unique without Math.random — win.id is a Block-UUID (vgl.
   // ConfirmDialog.svelte:97, das fuer generierte ids Math.random braucht).
   // svelte-ignore state_referenced_locally
@@ -133,7 +129,7 @@
     <button class="act" aria-label="close" type="button" onclick={() => store.close(win.id)}>×</button>
   </div>
   <div class="body">
-    <BlockDetailContent {id} {graph} {onfocus} {onexpand} {titleId} />
+    {@render content(win, titleId)}
   </div>
   {#if !sheet}
     <!-- pointer-only resize grip; kein Resize im Sheet. -->

@@ -1,9 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import type { DirectedGraph } from 'graphology'
-  import { type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
+  import type { Snippet } from 'svelte'
   import { SM, onBelow } from '../../lib/layout/breakpoints'
-  import type { WindowStore } from '../../lib/graph/windows.svelte'
+  import type { WindowStore, WinState } from '../../lib/windows/windows.svelte'
   import FloatingWindow from './FloatingWindow.svelte'
 
   // The overlay layer (design 07-§D): position:absolute; inset:0 over the graph
@@ -12,16 +11,22 @@
   // Block, no clamp/placement drift. pointer-events:none makes the gaps between
   // windows click-through to the Sigma canvas (node-click + camera-pan survive);
   // the windows + minbar re-enable events on themselves.
+  //
+  // Graph-entkoppelt (U02, design 04-§4.6): statt einer DirectedGraph-Prop
+  // injiziert der Host (a) `labelFor(id)` für Titel-Leiste + Minbar-Chips und
+  // (b) das `content`-Snippet, das FloatingWindow im Body rendert. Der Graph
+  // reicht BlockDetailContent samt graph durch; ein Board reicht später einen
+  // IssueDetail-Renderer — dieselbe Fenster-Schicht, kein Graph-Wissen hier.
   let {
-    graph,
     store,
-    onfocus,
-    onexpand,
+    labelFor,
+    content,
   }: {
-    graph: DirectedGraph<NodeAttrs, EdgeAttrs>
     store: WindowStore
-    onfocus: (id: string) => void
-    onexpand: (id: string) => void
+    /** Chip-/Titel-Label-Auflösung — ersetzt die frühere DirectedGraph-Prop. */
+    labelFor: (id: string) => string
+    /** Fenster-Inhalt; erhält (win, titleId) für aria-labelledby-Verdrahtung. */
+    content: Snippet<[WinState, string]>
   } = $props()
 
   // Reactive surface measurement of THIS overlay root (= containing block).
@@ -44,32 +49,28 @@
   // Mobile: the top window is the full-bleed sheet; everything else is a chip.
   const topWin = $derived(store.wins.find((w) => w.id === store.topId) ?? null)
   const mobileChips = $derived(store.wins.filter((w) => w.id !== store.topId))
-
-  function chipLabel(id: string): string {
-    return graph.hasNode(id) ? graph.getNodeAttribute(id, 'label') : id.slice(0, 8)
-  }
 </script>
 
 <div class="wm-root" bind:clientWidth={rootW} bind:clientHeight={rootH}>
   {#if mobile}
     {#if topWin}
-      <FloatingWindow win={topWin} {store} {graph} {onfocus} {onexpand} sheet />
+      <FloatingWindow win={topWin} {store} {content} sheet />
     {/if}
     {#if mobileChips.length > 0}
       <div class="minbar" aria-label="minimized windows">
         {#each mobileChips as w (w.id)}
-          <button class="chip" type="button" onclick={() => store.restore(w.id)}>{chipLabel(w.id)}</button>
+          <button class="chip" type="button" onclick={() => store.restore(w.id)}>{labelFor(w.id)}</button>
         {/each}
       </div>
     {/if}
   {:else}
     {#each openWins as w (w.id)}
-      <FloatingWindow win={w} {store} {graph} {onfocus} {onexpand} />
+      <FloatingWindow win={w} {store} {content} />
     {/each}
     {#if minimizedWins.length > 0}
       <div class="minbar" aria-label="minimized windows">
         {#each minimizedWins as w (w.id)}
-          <button class="chip" type="button" onclick={() => store.restore(w.id)}>{chipLabel(w.id)}</button>
+          <button class="chip" type="button" onclick={() => store.restore(w.id)}>{labelFor(w.id)}</button>
         {/each}
       </div>
     {/if}
