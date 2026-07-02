@@ -1,0 +1,62 @@
+- navigation "Primary":
+  - link "ctx_":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - link "Settings":
+    - /url: /settings
+  - text: / backends
+  - heading "Backend pool & vault" [level=1]
+  - paragraph: provider backends, trust tier and API-key secrets — all server-side admin-gated; the pool drives LLM routing and failover
+  - region "backend pool editor":
+    - heading "backend pool" [level=2]
+    - text: "0"
+    - button "+ new backend"
+    - paragraph: no backends — create one to populate the pool
+  - region "secrets vault":
+    - heading "vault" [level=2]
+    - text: 0 write-only — values are set here and never shown again
+    - paragraph: no secrets yet — add one below (e.g. an OpenRouter API key)
+    - text: add / set a secret
+    - textbox "name (e.g. openrouter.key)"
+    - textbox "value (write-only — never shown again)" [disabled]
+    - button "set" [disabled]

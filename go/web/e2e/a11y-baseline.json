@@ -66,6 +66,17 @@
       "nodePaths": ["select"],
       "since": "2026-07-02",
       "issue": ".project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §3.3 (interim ref until Achse-02 issues exist) — FilterPanel category select has no accessible name (the fieldset legend does not label the control)"
+    },
+    {
+      "page": "/tenant",
+      "rule": "color-contrast",
+      "theme": "light",
+      "viewport": "desktop",
+      "targets": [".own .status-cell .badge.ok"],
+      "nodes": 1,
+      "nodePaths": [".own > .status-cell > .ok.badge"],
+      "since": "2026-07-02",
+      "issue": ".project/plan-workflow-ui-2026-07-02/design/06-playwright-validation.md §3.3 (interim ref until Achse-02 issues exist) — TenantPage own-key status badge: --ok text on --surface-2 (own-row highlight) misses 4.5:1 in the light theme only; PV7 surfaces it as the first /tenant contract's Ist-Verstoß"
     }
   ]
 }

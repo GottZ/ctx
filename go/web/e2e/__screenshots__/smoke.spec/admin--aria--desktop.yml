@@ -1,0 +1,105 @@
+- navigation "Primary":
+  - link "ctx_":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - heading "Admin" [level=1]
+  - paragraph: tenant register and cross-tenant administration — server-admin only
+  - region "tenant register":
+    - heading "tenants" [level=2]
+    - text: "1"
+    - button "+ New tenant"
+    - status: only the default tenant exists — no additional tenants have been created yet
+    - table:
+      - rowgroup:
+        - row "slug display name status created":
+          - columnheader "slug"
+          - columnheader "display name"
+          - columnheader "status"
+          - columnheader "created"
+      - rowgroup:
+        - row /acme Acme Corp active \d+-\d+-\d+/:
+          - cell "acme":
+            - link "acme":
+              - /url: /admin/tenants/550e8400-e29b-41d4-a716-446655440aaa
+          - cell "Acme Corp"
+          - cell "active"
+          - cell /\d+-\d+-\d+/
+  - region "scope map":
+    - heading "scope map" [level=2]
+    - text: "3"
+    - paragraph: Every scope across the store with its block and key counts and owning tenant. Counts only — no block content. A scope with no tenant (a system scope or an unassigned scope) shows as unmapped.
+    - table:
+      - rowgroup:
+        - row "scope blocks keys tenant":
+          - columnheader "scope"
+          - columnheader "blocks"
+          - columnheader "keys"
+          - columnheader "tenant"
+      - rowgroup:
+        - row /home \d+ 3 [0-9a-fA-F-]+/:
+          - cell "home"
+          - cell /\d+/
+          - cell "3"
+          - cell /[0-9a-fA-F-]+/
+        - row /shared \d+ 8 [0-9a-fA-F-]+/:
+          - cell "shared"
+          - cell /\d+/
+          - cell "8"
+          - cell /[0-9a-fA-F-]+/
+        - row "legacy 7 1 unmapped":
+          - cell "legacy"
+          - cell "7"
+          - cell "1"
+          - cell "unmapped"
+  - region "corpus maintenance":
+    - heading "corpus maintenance" [level=2]
+    - text: audit · classify
+    - paragraph: Sensitivity audit (G41) and credentials classify (G40) run over the server home scope only — per-tenant coverage is a later backend cut. Dry-run is the default and writes nothing.
+    - heading "sensitivity audit" [level=3]
+    - checkbox "dry-run (sample only, no write)" [checked]
+    - text: dry-run (sample only, no write)
+    - button "Run audit"
+    - heading "credentials classify" [level=3]
+    - checkbox "dry-run (sample only, no write)" [checked]
+    - text: dry-run (sample only, no write)
+    - button "Run classify"

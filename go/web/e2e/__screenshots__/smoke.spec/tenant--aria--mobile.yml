@@ -1,0 +1,88 @@
+- banner:
+  - button "Open navigation menu"
+  - link "ctx":
+    - /url: /status
+- main:
+  - heading "Tenant" [level=1]
+  - paragraph:
+    - text: API keys for
+    - strong: Acme Corp
+    - text: — they ARE the tenant's member proxys. Create, reveal once, and revoke them here; quota is read-only.
+  - button "+ New key"
+  - checkbox "show revoked"
+  - text: show revoked
+  - region "tenant API keys":
+    - heading "api keys" [level=2]
+    - text: "2"
+    - table:
+      - rowgroup:
+        - row "label role home scope allowed scopes status last used created revoke":
+          - columnheader "label"
+          - columnheader "role"
+          - columnheader "home scope"
+          - columnheader "allowed scopes"
+          - columnheader "status"
+          - columnheader "last used"
+          - columnheader "created"
+          - columnheader "revoke"
+      - rowgroup:
+        - row /smoke-key this key owner home home shared active activation for smoke-key 6\/\d+\/\d+, \d+:\d+:\d+ AM \d+-\d+-\d+ revoke/:
+          - cell "smoke-key this key"
+          - cell "owner":
+            - combobox "role for smoke-key" [disabled]:
+              - option "member"
+              - option "admin"
+              - option "owner" [selected]
+          - cell "home"
+          - cell "home shared"
+          - cell "active activation for smoke-key":
+            - text: ""
+            - button "activation for smoke-key" [disabled]: deactivate
+          - cell /6\/\d+\/\d+, \d+:\d+:\d+ AM/
+          - cell /\d+-\d+-\d+/
+          - cell "revoke":
+            - button "revoke" [disabled]
+        - row /ci-runner member home home active activation for ci-runner — \d+-\d+-\d+ revoke/:
+          - cell "ci-runner"
+          - cell "member":
+            - combobox "role for ci-runner":
+              - option "member" [selected]
+              - option "admin"
+              - option "owner"
+          - cell "home"
+          - cell "home"
+          - cell "active activation for ci-runner":
+            - text: ""
+            - button "activation for ci-runner": deactivate
+          - cell "—"
+          - cell /\d+-\d+-\d+/
+          - cell "revoke":
+            - button "revoke"
+  - region "self-service scopes":
+    - heading "your scopes" [level=2]
+    - text: "2"
+    - list "tenant scopes":
+      - listitem: home
+      - listitem: shared
+    - textbox "new scope name":
+      - /placeholder: bare name, e.g. research
+    - button "Create scope"
+    - text: The server prepends your tenant namespace — you send only the bare name.
+  - region "tenant usage":
+    - heading "usage" [level=2]
+    - text: structural
+    - term: scopes
+    - definition: /2 \/ \d+/
+    - term: keys
+    - definition: /2 \/ \d+/
+  - region "tenant quota":
+    - heading "quota" [level=2]
+    - text: home
+    - term: daily cost
+    - definition: /\$\d+\.\d+/
+    - term: monthly cost
+    - definition: /\$\d+\.\d+/
+    - term: daily calls
+    - definition: /\d+,\d+/
+    - term: on exceed
+    - definition: external backends off (degrade to local)

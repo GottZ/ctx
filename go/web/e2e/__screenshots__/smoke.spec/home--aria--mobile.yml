@@ -1,0 +1,39 @@
+- banner:
+  - button "Open navigation menu"
+  - link "ctx":
+    - /url: /status
+- main:
+  - heading "Welcome, smoke-key" [level=1]
+  - paragraph: Your corpus access at a glance — what you can read, where your writes land, and where to start.
+  - article "Write scope":
+    - heading "Write scope" [level=2]
+    - paragraph: home
+    - paragraph: New blocks you store land in this scope, and only blocks in it are yours to edit.
+  - article "Read access":
+    - heading "Read access" [level=2]
+    - paragraph: home, shared
+    - paragraph: Search, ask and the graph span these scopes.
+  - article "Role":
+    - heading "Role" [level=2]
+    - paragraph: member
+    - paragraph: Your role within this tenant. Higher roles unlock tenant and server administration.
+  - article "Tenant":
+    - heading "Tenant" [level=2]
+    - paragraph: Acme Corp
+    - paragraph: The tenant your key belongs to; its shared scope is visible to every member.
+  - heading "Start here" [level=2]
+  - article "Blocks":
+    - heading "Blocks" [level=2]
+    - paragraph: Browse, search and edit the blocks in your scopes.
+    - link "Browse blocks →":
+      - /url: /blocks
+  - article "Graph":
+    - heading "Graph" [level=2]
+    - paragraph: Explore how your blocks connect.
+    - link "Open the graph →":
+      - /url: /graph
+  - article "Chat":
+    - heading "Chat" [level=2]
+    - paragraph: Ask the corpus a question in natural language.
+    - link "Start a chat →":
+      - /url: /chat

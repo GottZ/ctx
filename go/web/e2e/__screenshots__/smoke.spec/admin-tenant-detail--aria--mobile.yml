@@ -1,0 +1,80 @@
+- banner:
+  - button "Open navigation menu"
+  - link "ctx":
+    - /url: /status
+- main:
+  - link "← back to admin":
+    - /url: /admin
+  - heading "tenant detail" [level=1]
+  - paragraph: register row and per-scope quota — server-admin only
+  - region "tenant register row":
+    - heading "acme" [level=2]
+    - text: active
+    - term: display name
+    - definition: Acme Corp
+    - term: id
+    - definition: /[0-9a-fA-F-]+/
+    - term: created
+    - definition: /\d+-\d+-\d+/
+    - term: updated
+    - definition: /\d+-\d+-\d+/
+    - button "Suspend"
+    - button "Delete tenant"
+  - region "provision scope and key":
+    - heading "provision" [level=2]
+    - text: server-admin
+    - paragraph: "/Activate this tenant: provision a scope \\(the server namespaces it to this tenant\\) and mint a recovery owner key\\. Both writes are server-authoritative — a cross-tenant or unowned target answers \\d+\\./"
+    - heading "add scope" [level=3]
+    - textbox "new scope name":
+      - /placeholder: bare name, e.g. research
+    - button "Provision scope"
+    - text: The server prepends this tenant's namespace and returns the full scope — the client never builds the prefix.
+    - heading "mint recovery key" [level=3]
+    - button "+ Mint key for this tenant"
+    - text: "Recovery path (design §4 A3c): mints a key bound to THIS tenant (tenant_id) and reveals the plaintext once."
+  - region "per-scope quota":
+    - heading "quota per scope" [level=2]
+    - text: "2"
+    - paragraph: Each scope this tenant owns has its own quota row. A scope with no quota row is unlimited until you set one. The scope list comes from the store-wide scope overview filtered to this tenant.
+    - form "quota for scope home":
+      - heading "home" [level=3]
+      - checkbox "enabled" [checked]
+      - text: enabled daily cost (USD)
+      - textbox "daily cost (USD)":
+        - /placeholder: unlimited
+        - text: "5"
+      - text: monthly cost (USD)
+      - textbox "monthly cost (USD)":
+        - /placeholder: unlimited
+        - text: /\d+/
+      - text: daily calls
+      - textbox "daily calls":
+        - /placeholder: unlimited
+        - text: /\d+/
+      - text: on exceed
+      - combobox "on exceed":
+        - option "external_off" [selected]
+        - option "block"
+      - paragraph: A blank limit means that dimension is unlimited (null) — not 0.
+      - button "save quota"
+    - form "quota for scope shared":
+      - heading "shared" [level=3]
+      - checkbox "enabled" [checked]
+      - text: enabled daily cost (USD)
+      - textbox "daily cost (USD)":
+        - /placeholder: unlimited
+        - text: "5"
+      - text: monthly cost (USD)
+      - textbox "monthly cost (USD)":
+        - /placeholder: unlimited
+        - text: /\d+/
+      - text: daily calls
+      - textbox "daily calls":
+        - /placeholder: unlimited
+        - text: /\d+/
+      - text: on exceed
+      - combobox "on exceed":
+        - option "external_off" [selected]
+        - option "block"
+      - paragraph: A blank limit means that dimension is unlimited (null) — not 0.
+      - button "save quota"

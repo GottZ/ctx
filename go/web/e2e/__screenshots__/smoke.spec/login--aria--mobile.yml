@@ -1,0 +1,13 @@
+- banner:
+  - text: ctx
+  - paragraph: Your AI's save game.
+- text: API key
+- textbox "API key":
+  - /placeholder: paste an API key
+- button "Sign in" [disabled]
+- paragraph:
+  - text: The key is held for this tab only (sessionStorage) and sent as a
+  - code: Bearer
+  - text: token to
+  - code: /api/*
+  - text: .

@@ -1,0 +1,10 @@
+- banner:
+  - button "Open navigation menu"
+  - link "ctx":
+    - /url: /status
+- main:
+  - paragraph: /\d+/
+  - paragraph: No such route in this UI.
+  - paragraph:
+    - link "Back to status":
+      - /url: /status

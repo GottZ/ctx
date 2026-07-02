@@ -1,0 +1,28 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp member
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - paragraph: /\d+/
+  - paragraph: No such route in this UI.
+  - paragraph:
+    - link "Back to status":
+      - /url: /status
