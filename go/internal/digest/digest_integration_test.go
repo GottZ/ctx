@@ -15,12 +15,14 @@ import (
 
 // TestRunDigest_TopicMapClassifiedAsSystemMeta verifies the Welle 47 W47-NEU-A
 // fix: digest.RunDigest must produce a topic-map block with
-// type_name='system-meta' + is_meta=TRUE. Pre-fix the block defaulted to
+// type_name='system-meta'. Pre-fix the block defaulted to
 // type_name='knowledge' (CRAG Phase 6, COMPARISON.md DB-Query proof).
 //
-// Mechanism: digest.RunDigest sets metadata.is_meta=true → store.UpsertBlock
-// persists it → ClassifyBlockAfterUpsert branch 1 (is_meta flag) sets
-// type_name='system-meta'. ctx_rrf M036/M048 then hard-excludes the block.
+// Mechanism: digest.RunDigest sets the metadata KEY is_meta=true (classify
+// INPUT — the materialised column fell with M075/T9) → store.UpsertBlock
+// persists it → ClassifyBlockAfterUpsert (system-meta metadata_flags rule)
+// sets type_name='system-meta'; the retrieval visibility allowlist then
+// excludes the type.
 func TestRunDigest_TopicMapClassifiedAsSystemMeta(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -42,24 +44,24 @@ func TestRunDigest_TopicMapClassifiedAsSystemMeta(t *testing.T) {
 	}
 
 	var (
-		typeName string
-		isMeta    bool
+		typeName  string
+		metaFlag  bool
 		blockType *string
 	)
 	err := pool.QueryRow(ctx,
-		`SELECT type_name, is_meta, lifecycle_state FROM context_blocks
+		`SELECT type_name, COALESCE((metadata->>'is_meta')::bool, false), lifecycle_state FROM context_blocks
 		 WHERE category = 'index' AND title = $1 AND NOT is_archived`,
 		"topic-map-"+homeScope,
-	).Scan(&typeName, &isMeta, &blockType)
+	).Scan(&typeName, &metaFlag, &blockType)
 	if err != nil {
 		t.Fatalf("read topic-map block: %v", err)
 	}
 
 	if typeName != "system-meta" {
-		t.Errorf("type_name = %q, want %q (W47-NEU-A: topic-map must be hard-excluded by ctx_rrf)", typeName, "system-meta")
+		t.Errorf("type_name = %q, want %q (W47-NEU-A: topic-map must be retrieval-excluded)", typeName, "system-meta")
 	}
-	if !isMeta {
-		t.Error("is_meta = false, want true (W47-NEU-A: topic-map carries metadata.is_meta=true)")
+	if !metaFlag {
+		t.Error("metadata.is_meta = false, want true (W47-NEU-A: the classify-input key must persist)")
 	}
 }
 
@@ -90,15 +92,15 @@ func TestRunDigest_IdempotentReClassification(t *testing.T) {
 
 	var (
 		typeName string
-		isMeta    bool
-		count     int
+		metaFlag bool
+		count    int
 	)
 	err := pool.QueryRow(ctx,
-		`SELECT type_name, is_meta, COUNT(*) OVER () FROM context_blocks
+		`SELECT type_name, COALESCE((metadata->>'is_meta')::bool, false), COUNT(*) OVER () FROM context_blocks
 		 WHERE category = 'index' AND title = $1 AND NOT is_archived
 		 LIMIT 1`,
 		"topic-map-"+homeScope,
-	).Scan(&typeName, &isMeta, &count)
+	).Scan(&typeName, &metaFlag, &count)
 	if err != nil {
 		t.Fatalf("read topic-map block: %v", err)
 	}
@@ -109,8 +111,8 @@ func TestRunDigest_IdempotentReClassification(t *testing.T) {
 	if typeName != "system-meta" {
 		t.Errorf("type_name after re-run = %q, want %q (classification must be idempotent)", typeName, "system-meta")
 	}
-	if !isMeta {
-		t.Error("is_meta after re-run = false, want true")
+	if !metaFlag {
+		t.Error("metadata.is_meta after re-run = false, want true")
 	}
 }
 

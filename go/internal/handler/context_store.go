@@ -163,10 +163,10 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Welle 44 / WF T4: Auto-classify type_name + is_meta from the registry
+	// Welle 44 / WF T4: Auto-classify type_name from the registry
 	// snapshot (rules are data now; type_source='manual' blocks are never
 	// re-classified). No-op when no rule matches (default type stays).
-	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, h.classifySet(ctx), block.ID, block.Title, block.Metadata); err != nil {
+	if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, h.classifySet(ctx), block.ID, block.Title, block.Metadata); err != nil {
 		slog.Warn("store: auto-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
 	}
 

@@ -20,8 +20,9 @@ const (
 	frBlockCID = "019e8888-0001-7000-9000-000000000003" // C: meta-block — NICHT eligible, bleibt unverändert
 )
 
-// insertFullResetBlock schreibt einen context_blocks-Row mit konfigurierbaren
-// is_meta und dream-state Feldern. Die Felder dream_checked_at, dream_cooldown_until,
+// insertFullResetBlock schreibt einen context_blocks-Row mit konfigurierbarem
+// type_name (seit M075/T9 der Träger der Meta-Semantik — die is_meta-Spalte
+// ist gefallen) und dream-state Feldern. Die Felder dream_checked_at, dream_cooldown_until,
 // dream_keywords und dream_temporal_validated_at werden gesetzt, damit der Test
 // nachweisen kann, dass die Migration sie NULLed (für eligible blocks) bzw.
 // unverändert lässt (für meta-blocks).
@@ -29,7 +30,7 @@ func insertFullResetBlock(
 	t *testing.T,
 	pool *pgxpool.Pool,
 	id, category, title string,
-	isMeta bool,
+	typeName string,
 	checkedAt, cooldownUntil, temporalValidatedAt *time.Time,
 	keywords []string,
 ) {
@@ -45,12 +46,12 @@ func insertFullResetBlock(
 
 	_, err := pool.Exec(ctx,
 		`INSERT INTO context_blocks
-		   (id, category, title, content, scope, embedding, is_meta, lifecycle_state,
+		   (id, category, title, content, scope, embedding, type_name, lifecycle_state,
 		    dream_checked_at, dream_cooldown_until, dream_keywords,
 		    dream_temporal_validated_at, created_at, updated_at)
 		 VALUES ($1::uuid, $2, $3, $4, 'private', $5, $6, 'knowledge',
 		    $7, $8, $9, $10, now(), now())`,
-		id, category, title, "full-reset-test-content", vec, isMeta,
+		id, category, title, "full-reset-test-content", vec, typeName,
 		checkedAt, cooldownUntil, keywords, temporalValidatedAt,
 	)
 	if err != nil {
@@ -83,8 +84,10 @@ func insertFullResetLink(t *testing.T, pool *pgxpool.Pool, src, tgt string) {
 // Inline statt RunMigrations, weil zum Zeitpunkt von testdb-Setup unsere
 // Test-Blocks noch nicht existieren und M042 keinerlei Effekt hätte.
 // Seit M070 ist der Mirror aufs Post-Rename-Schema adaptiert (Alt-Spalte →
-// lifecycle_state, NULL backfilled, 'source' tot): die Test-DB ist voll
-// migriert, das historische 042-SQL würde hier mit 42703 brechen.
+// lifecycle_state, NULL backfilled, 'source' tot); seit M075 zusätzlich
+// NOT is_meta → type_name <> 'system-meta' (live deckungsgleich, 24/24):
+// die Test-DB ist voll migriert, das historische 042-SQL würde hier mit
+// 42703 brechen.
 func applyM042(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -102,7 +105,7 @@ func applyM042(t *testing.T, pool *pgxpool.Pool) {
 		 WHERE NOT is_archived
 		   AND embedding IS NOT NULL
 		   AND lifecycle_state IN ('knowledge', 'canonical')
-		   AND NOT is_meta
+		   AND type_name <> 'system-meta'
 	`); err != nil {
 		t.Fatalf("apply M042 (UPDATE): %v", err)
 	}
@@ -115,9 +118,9 @@ func applyM042(t *testing.T, pool *pgxpool.Pool) {
 // dream_temporal_validated_at = NULL. Meta-Blocks bleiben unverändert.
 //
 // Setup:
-//   - A (eligible): is_meta=false, dream-state komplett gesetzt → muss reset werden
-//   - B (eligible): is_meta=false, dream-state komplett gesetzt → muss reset werden
-//   - C (meta):     is_meta=true,  dream-state gesetzt          → bleibt unverändert
+//   - A (eligible): type_name=knowledge,   dream-state komplett gesetzt → muss reset werden
+//   - B (eligible): type_name=knowledge,   dream-state komplett gesetzt → muss reset werden
+//   - C (meta):     type_name=system-meta, dream-state gesetzt          → bleibt unverändert
 //
 // Inserts 2 dream_links A↔B; nach TRUNCATE sind 0 dream_links übrig.
 func TestMigration042_FullReset_BehaviourMatchesContract(t *testing.T) {
@@ -129,11 +132,11 @@ func TestMigration042_FullReset_BehaviourMatchesContract(t *testing.T) {
 	temporal := time.Date(2026, 5, 2, 9, 30, 0, 0, time.UTC)
 	keywords := []string{"alpha", "beta", "gamma"}
 
-	insertFullResetBlock(t, pool, frBlockAID, "learnings", "block-A", false,
+	insertFullResetBlock(t, pool, frBlockAID, "learnings", "block-A", "knowledge",
 		&checked, &cooldown, &temporal, keywords)
-	insertFullResetBlock(t, pool, frBlockBID, "learnings", "block-B", false,
+	insertFullResetBlock(t, pool, frBlockBID, "learnings", "block-B", "knowledge",
 		&checked, &cooldown, &temporal, keywords)
-	insertFullResetBlock(t, pool, frBlockCID, "reference", "meta-C", true,
+	insertFullResetBlock(t, pool, frBlockCID, "reference", "meta-C", "system-meta",
 		&checked, &cooldown, &temporal, keywords)
 
 	insertFullResetLink(t, pool, frBlockAID, frBlockBID)
@@ -175,7 +178,7 @@ func TestMigration042_FullReset_BehaviourMatchesContract(t *testing.T) {
 	assertBlockUnchanged(t, pool, "C", frBlockCID, checked, cooldown, temporal, keywords)
 
 	// Idempotenz: zweiter Apply ändert nichts mehr. A/B sind schon NULL, C
-	// bleibt durch is_meta=true ausgeschlossen, dream_links-Tabelle ist leer.
+	// bleibt durch type_name='system-meta' ausgeschlossen, dream_links-Tabelle ist leer.
 	applyM042(t, pool)
 
 	if err := pool.QueryRow(ctx,

@@ -701,7 +701,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 	// keeps its current type (the hook promotes, never demotes). Non-fatal.
 	if h.blocktypes != nil && (data.Title != nil || data.Metadata != nil) {
 		set := h.blocktypes.SnapshotForRequest(ctx)
-		if _, _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, set, block.ID, block.Title, block.Metadata); err != nil {
+		if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, set, block.ID, block.Title, block.Metadata); err != nil {
 			slog.Warn("manage: re-classify on update failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}

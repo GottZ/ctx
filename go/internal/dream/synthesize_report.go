@@ -126,7 +126,7 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, opt
 	}
 
 	// lifecycle_state is not handled by the Welle-44 hook (which only sets
-	// type_name/is_meta). Set it explicitly so /api/query consumers can
+	// type_name). Set it explicitly so /api/query consumers can
 	// distinguish synthesis output from generic learnings blocks.
 	if _, err := pool.Exec(ctx,
 		`UPDATE context_blocks SET lifecycle_state = 'synthesis' WHERE id = $1::uuid`,
@@ -140,7 +140,7 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, opt
 	// from the registry snapshot (metadata.source='dream-synthesis' matches
 	// the audit-trail source_prefixes seed). Keeps behaviour aligned with
 	// handler/context_store.go and handler/mcp.go ctx_save paths.
-	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, r.TypeSet(ctx), block.ID, block.Title, block.Metadata); err != nil {
+	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, r.TypeSet(ctx), block.ID, block.Title, block.Metadata); err != nil {
 		return "", fmt.Errorf("dream: synthesize report: classify block: %w", err)
 	}
 

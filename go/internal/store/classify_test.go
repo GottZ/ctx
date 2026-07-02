@@ -36,76 +36,65 @@ func TestClassifyBlockAfterUpsert_Decisions(t *testing.T) {
 	set := dbRegistry(t, ctx, pool).Snapshot()
 
 	cases := []struct {
-		name       string
-		title      string
-		metadata   map[string]any
-		wantRole   string
-		wantIsMeta bool
+		name     string
+		title    string
+		metadata map[string]any
+		wantRole string
 	}{
 		{
-			name:       "metadata-is-meta-flag",
-			title:      "Some Block",
-			metadata:   map[string]any{"is_meta": true},
-			wantRole:   "system-meta",
-			wantIsMeta: true,
+			name:     "metadata-is-meta-flag", // metadata KEY (classify input) — the column fell with M075/T9
+			title:    "Some Block",
+			metadata: map[string]any{"is_meta": true},
+			wantRole: "system-meta",
 		},
 		{
-			name:       "metadata-dream-source",
-			title:      "Tagesbericht 2026-05-07",
-			metadata:   map[string]any{"source": "dream-synthesis"},
-			wantRole:   "audit-trail",
-			wantIsMeta: false,
+			name:     "metadata-dream-source",
+			title:    "Tagesbericht 2026-05-07",
+			metadata: map[string]any{"source": "dream-synthesis"},
+			wantRole: "audit-trail",
 		},
 		{
-			name:       "title-pattern-session",
-			title:      "Session 7 Abschlussbilanz",
-			metadata:   map[string]any{},
-			wantRole:   "audit-trail",
-			wantIsMeta: false,
+			name:     "title-pattern-session",
+			title:    "Session 7 Abschlussbilanz",
+			metadata: map[string]any{},
+			wantRole: "audit-trail",
 		},
 		{
-			name:       "title-pattern-welle",
-			title:      "Welle 42 Bench-Verdict",
-			metadata:   nil,
-			wantRole:   "audit-trail",
-			wantIsMeta: false,
+			name:     "title-pattern-welle",
+			title:    "Welle 42 Bench-Verdict",
+			metadata: nil,
+			wantRole: "audit-trail",
 		},
 		{
-			name:       "no-pattern-no-meta-noop",
-			title:      "ddstatus mariadb donnerstags",
-			metadata:   map[string]any{"source": "claude-code-2026-05-07"},
-			wantRole:   "", // no UPDATE — defaults stay
-			wantIsMeta: false,
+			name:     "no-pattern-no-meta-noop",
+			title:    "ddstatus mariadb donnerstags",
+			metadata: map[string]any{"source": "claude-code-2026-05-07"},
+			wantRole: "", // no UPDATE — defaults stay
 		},
 		{
-			name:       "bare-dream-prefix-noop", // old-tree parity: len(src) > 6
-			title:      "Irgendwas",
-			metadata:   map[string]any{"source": "dream-"},
-			wantRole:   "",
-			wantIsMeta: false,
+			name:     "bare-dream-prefix-noop", // old-tree parity: len(src) > 6
+			title:    "Irgendwas",
+			metadata: map[string]any{"source": "dream-"},
+			wantRole: "",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			id := insertClassifyTestBlock(t, pool, tc.title)
-			role, isMeta, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, id, tc.title, tc.metadata)
+			role, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, id, tc.title, tc.metadata)
 			if err != nil {
 				t.Fatalf("ClassifyBlockAfterUpsert: %v", err)
 			}
 			if role != tc.wantRole {
 				t.Errorf("role = %q, want %q", role, tc.wantRole)
 			}
-			if isMeta != tc.wantIsMeta {
-				t.Errorf("isMeta = %v, want %v", isMeta, tc.wantIsMeta)
-			}
 
 			// Verify DB state matches return values (or default state for noop).
 			var dbRole string
-			var dbIsMeta bool
 			err = pool.QueryRow(ctx,
-				`SELECT type_name, is_meta FROM context_blocks WHERE id = $1::uuid`, id,
-			).Scan(&dbRole, &dbIsMeta)
+				`SELECT type_name FROM context_blocks WHERE id = $1::uuid`, id,
+			).Scan(&dbRole)
 			if err != nil {
 				t.Fatalf("verify DB: %v", err)
 			}
@@ -116,16 +105,13 @@ func TestClassifyBlockAfterUpsert_Decisions(t *testing.T) {
 			if dbRole != expectRole {
 				t.Errorf("DB type_name = %q, want %q", dbRole, expectRole)
 			}
-			if dbIsMeta != tc.wantIsMeta {
-				t.Errorf("DB is_meta = %v, want %v", dbIsMeta, tc.wantIsMeta)
-			}
 		})
 	}
 
 	// nil set: loud error, no silent builtin fallback.
 	t.Run("nil-set-errors", func(t *testing.T) {
 		id := insertClassifyTestBlock(t, pool, "Session nil-set probe")
-		if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, nil, id, "Session nil-set probe", nil); err == nil {
+		if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, nil, id, "Session nil-set probe", nil); err == nil {
 			t.Error("nil set accepted — classify must fail loudly, not fall back")
 		}
 	})
@@ -147,7 +133,7 @@ func TestClassifyPolicyEffect_Integration(t *testing.T) {
 
 	// Baseline: "Sprint Retro" matches no seed pattern → no classification.
 	idBefore := insertClassifyTestBlock(t, pool, "Sprint Retro")
-	role, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, reg.Snapshot(), idBefore, "Sprint Retro", nil)
+	role, err := store.ClassifyBlockAfterUpsert(ctx, pool, reg.Snapshot(), idBefore, "Sprint Retro", nil)
 	if err != nil {
 		t.Fatalf("baseline classify: %v", err)
 	}
@@ -170,7 +156,7 @@ func TestClassifyPolicyEffect_Integration(t *testing.T) {
 
 	// New block with the same title now classifies audit-trail.
 	idAfter := insertClassifyTestBlock(t, pool, "Sprint Retro 2")
-	role, _, err = store.ClassifyBlockAfterUpsert(ctx, pool, reg.Snapshot(), idAfter, "Sprint Retro 2", nil)
+	role, err = store.ClassifyBlockAfterUpsert(ctx, pool, reg.Snapshot(), idAfter, "Sprint Retro 2", nil)
 	if err != nil {
 		t.Fatalf("post-edit classify: %v", err)
 	}
@@ -203,7 +189,7 @@ func TestClassifyManualOverride_Integration(t *testing.T) {
 		t.Fatalf("set manual: %v", err)
 	}
 
-	role, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, id, "Session 9 Handover Manual", nil)
+	role, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, id, "Session 9 Handover Manual", nil)
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
@@ -222,7 +208,7 @@ func TestClassifyManualOverride_Integration(t *testing.T) {
 	// Counter-probe: the SAME title on an auto block IS re-classified —
 	// proves the guard is type_source, not a general skip.
 	idAuto := insertClassifyTestBlock(t, pool, "Session 9 Handover Auto")
-	role, _, err = store.ClassifyBlockAfterUpsert(ctx, pool, set, idAuto, "Session 9 Handover Auto", nil)
+	role, err = store.ClassifyBlockAfterUpsert(ctx, pool, set, idAuto, "Session 9 Handover Auto", nil)
 	if err != nil {
 		t.Fatalf("auto classify: %v", err)
 	}

@@ -230,7 +230,7 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			return errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
 		}
 
-		// Welle 44 / WF T4: Auto-classify type_name + is_meta from the registry
+		// Welle 44 / WF T4: Auto-classify type_name from the registry
 		// snapshot. MCP audit-blocks (welle promotes, ctx-system docs) used to
 		// need a follow-up SQL UPDATE — handled inline. Errors are LOGGED, not
 		// silently dropped (T4 gate: the pre-T4 `_, _, _ =` discarded a failed
@@ -239,7 +239,7 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		if cfg.Blocktypes != nil {
 			classifySet = cfg.Blocktypes.SnapshotForRequest(ctx)
 		}
-		if _, _, err := store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
+		if _, err := store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 			slog.Warn("mcp: auto-classify failed", "error", err, "block_id", block.ID)
 		}
 

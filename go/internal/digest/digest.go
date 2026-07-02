@@ -95,9 +95,10 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 	indexContent := sb.String()
 
 	// Upsert as block: category=index, title=topic-map-{scope}.
-	// Welle 47 (W47-NEU-A): metadata.is_meta=true plus a ClassifyBlockAfterUpsert
-	// call route the topic-map through the Welle-44 hook → type_name='system-meta'
-	// + is_meta=TRUE. This keeps the topic-map out of retrieval (historically
+	// Welle 47 (W47-NEU-A): the metadata KEY is_meta=true (classify INPUT —
+	// the materialised column fell with M075/T9) plus a
+	// ClassifyBlockAfterUpsert call route the topic-map through the Welle-44
+	// hook → type_name='system-meta'. This keeps the topic-map out of retrieval (historically
 	// the M036/M048 hard-exclude literal; since M073/T5+T6 the system-meta
 	// policy is retrieval=excluded, so the type is simply absent from every
 	// visibility allowlist) instead of letting it slot-steal retrieval
@@ -120,10 +121,10 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 	}
 
 	// Welle 44 / WF T4 hook: classify type_name from the registry snapshot
-	// (the run's ONE tenant-resolved set, WF T8). Topic-map metadata sets
-	// is_meta=true so the system-meta rule fires. Idempotent — re-runs of
-	// RunDigest are no-ops at this layer.
-	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
+	// (the run's ONE tenant-resolved set, WF T8). The topic-map's metadata
+	// key is_meta=true makes the system-meta rule fire. Idempotent — re-runs
+	// of RunDigest are no-ops at this layer.
+	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
 		// Non-fatal: the topic-map block exists, classification can be retried
 		// next cycle. Log + continue rather than fail the whole digest.
 		slog.Warn("digest: topic map auto-classify failed", "error", err, "block_id", block.ID)
