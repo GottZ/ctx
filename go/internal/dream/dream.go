@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/llm"
@@ -143,8 +144,18 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 
 	ctx, cancel := context.WithTimeout(ctx, CycleTimeout)
 	defer cancel()
+
+	// ONE policy snapshot per cycle (WF T8, blocktype doctrine): pick
+	// eligibility, the candidate sieve (searchByKeywords) and the WriteLinks
+	// target/link-class gates all read the same tenant-resolved generation.
+	// nil registry = wiring bug, fail loudly — never silently builtin.
+	typeSet := r.TypeSet(ctx)
+	if typeSet == nil {
+		return 0, fmt.Errorf("dream: no block-type registry wired (Router.Blocktypes nil)")
+	}
+
 	// Step 1: Pick a block.
-	block, err := PickBlock(ctx, pool)
+	block, err := PickBlock(ctx, pool, typeSet.DreamLinkableTypes())
 	if err != nil {
 		return 0, fmt.Errorf("dream: pick: %w", err)
 	}
@@ -229,7 +240,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	}
 
 	// Step 3: Search per keyword via RRF.
-	candidates, err := searchByKeywords(ctx, pool, r, keywords, readScopes, block)
+	candidates, err := searchByKeywords(ctx, pool, r, typeSet, keywords, readScopes, block)
 	if err != nil {
 		slog.Warn("dream: keyword search failed", "block_id", block.ID, "error", err)
 		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
@@ -261,7 +272,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	}
 
 	// Step 5: Write links.
-	written, err := WriteLinks(ctx, pool, block.ID, block.Scope, block.QualityScore, links)
+	written, err := WriteLinks(ctx, pool, typeSet, block.ID, block.Scope, block.QualityScore, links)
 	if err != nil {
 		slog.Warn("dream: write links failed", "block_id", block.ID, "error", err)
 	}
@@ -274,7 +285,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	if recErr != nil {
 		slog.Warn("dream: recurrence detection failed (non-fatal)", "block_id", block.ID, "error", recErr)
 	} else if len(recurrentLinks) > 0 {
-		rWritten, rwErr := WriteLinks(ctx, pool, block.ID, block.Scope, block.QualityScore, recurrentLinks)
+		rWritten, rwErr := WriteLinks(ctx, pool, typeSet, block.ID, block.Scope, block.QualityScore, recurrentLinks)
 		if rwErr != nil {
 			slog.Warn("dream: recurrent write failed (non-fatal)", "block_id", block.ID, "error", rwErr)
 		} else {
@@ -363,11 +374,26 @@ func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string)
 	return tag.RowsAffected() > 0, nil
 }
 
+// dreamEligibleWhere is THE single dream-eligibility predicate (WF T8,
+// design/01 §7-T8): PickBlock, Stats, QueueDepth and ComputeBackoffStats
+// consume this one fragment instead of the former five NOT-is_meta mirrors.
+// typesParam binds the DreamLinkableTypes allowlist (dream.linkable=true
+// types; the system-meta seed carries linkable=false — the generalization of
+// the retired is_meta column, whose Post-Reset-Audit 2026-04-20 showed meta
+// blocks cause 85% of NO_REL noise without valid relationships). typesParam
+// is a code-owned bind placeholder at every call site, never user input.
+// Embedding/cooldown/checked/scope conjuncts stay call-site-specific.
+func dreamEligibleWhere(typesParam string) string {
+	return `NOT is_archived
+		  AND lifecycle_state IN ('knowledge', 'canonical')
+		  AND type_name = ANY(` + typesParam + `::text[])`
+}
+
 // PickBlock selects the next block for Dream processing.
 // Priority: unchecked blocks first, then oldest-checked with expired cooldown.
-// Excludes is_meta blocks — Post-Reset-Audit 2026-04-20 validated that meta blocks
-// (Origin-Stories, CV, Compound-Loop, Agent-Briefing, index) cause 85% of NO_REL noise
-// without producing any valid relationships. Filter empirically clean (0% FN-Rate).
+// linkable is the DreamLinkableTypes allowlist of the cycle's policy snapshot
+// (WF T8) — an empty list is legitimate policy ("no type dreams") and yields
+// no pick, fail-closed.
 //
 // Atomic claim-with-TTL (Welle-49, parallelism-bug-fix): a plain
 // pool.QueryRow(... FOR UPDATE SKIP LOCKED) releases the row lock as soon as
@@ -378,24 +404,22 @@ func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string)
 // cycle completion the caller overrides with the real outcome cooldown
 // (CooldownActiveDays / CooldownInertDays). On crash the transient claim
 // expires after 5 min and the block re-enters the queue.
-func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
+func PickBlock(ctx context.Context, pool *pgxpool.Pool, linkable []string) (*BlockInfo, error) {
 	var block BlockInfo
 	err := pool.QueryRow(ctx,
 		`UPDATE context_blocks
 		SET dream_cooldown_until = now() + ($1 * interval '1 minute')
 		WHERE id = (
 			SELECT id FROM context_blocks
-			WHERE NOT is_archived
+			WHERE `+dreamEligibleWhere("$2")+`
 			  AND embedding IS NOT NULL
-			  AND lifecycle_state IN ('knowledge', 'canonical')
-			  AND NOT is_meta
 			  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
 			ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING id, title, category, content, scope, sensitivity, quality_score, updated_at, created_at, dream_keywords, dream_temporal_validated_at`,
-		CooldownTransientMinutes,
+		CooldownTransientMinutes, linkable,
 	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.Sensitivity, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt, &block.DreamKeywords, &block.DreamTemporalValidatedAt)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -519,7 +543,7 @@ const maxBackoffLevels = 100
 // the final row shows the true maximum, not a floor. bc comes from the caller's
 // request snapshot (ManageHandler dream-stats), so the rendered policy is the
 // generation currently in effect, not a boot copy.
-func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []string, bc BackoffConfig) (*BackoffStats, error) {
+func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string, bc BackoffConfig) (*BackoffStats, error) {
 	out := &BackoffStats{
 		Mode: bc.Mode, Factor: bc.Factor, Grace: bc.Grace, CapHours: bc.CapHours,
 		MinHours: bc.MinHours, InertOffset: bc.InertOffset,
@@ -527,20 +551,18 @@ func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []strin
 	}
 	if err := pool.QueryRow(ctx,
 		`SELECT COALESCE(max(dream_eval_count), 0)::int FROM context_blocks
-		 WHERE NOT is_archived AND embedding IS NOT NULL
-		   AND lifecycle_state IN ('knowledge','canonical')
-		   AND NOT is_meta AND scope = ANY($1::text[])`,
-		scopes).Scan(&out.MaxEval); err != nil {
+		 WHERE `+dreamEligibleWhere("$2")+`
+		   AND embedding IS NOT NULL AND scope = ANY($1::text[])`,
+		scopes, linkable).Scan(&out.MaxEval); err != nil {
 		return nil, fmt.Errorf("dream: backoff max eval: %w", err)
 	}
 	rows, err := pool.Query(ctx,
 		`SELECT dream_eval_count::int, count(*)::int FROM context_blocks
-		 WHERE NOT is_archived AND embedding IS NOT NULL
-		   AND lifecycle_state IN ('knowledge','canonical')
-		   AND NOT is_meta AND scope = ANY($1::text[])
+		 WHERE `+dreamEligibleWhere("$2")+`
+		   AND embedding IS NOT NULL AND scope = ANY($1::text[])
 		 GROUP BY dream_eval_count ORDER BY dream_eval_count
-		 LIMIT $2`,
-		scopes, maxBackoffLevels+1)
+		 LIMIT $3`,
+		scopes, linkable, maxBackoffLevels+1)
 	if err != nil {
 		return nil, fmt.Errorf("dream: backoff stats: %w", err)
 	}
@@ -620,7 +642,7 @@ func SetDreamCooldownMinutes(ctx context.Context, pool *pgxpool.Pool, blockID st
 // configured, embed otherwise) at the SOURCE block's sensitivity — the
 // keywords derive from its content (design 03 §2.2, call-site #9). One slim
 // llmlog row per wire call; cache hits are no egress and log nothing.
-func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywords []string, scopes []string, source *BlockInfo) ([]BlockInfo, error) {
+func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSet *blocktype.Set, keywords []string, scopes []string, source *BlockInfo) ([]BlockInfo, error) {
 	seen := make(map[string]bool)
 	seen[source.ID] = true // Exclude source block.
 	var candidates []BlockInfo
@@ -634,13 +656,12 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 		return nil, fmt.Errorf("dream: keyword embed chain: %w", err)
 	}
 
-	// WF T5 (design/01 §4.4 #4): the visibility allowlist comes from the
-	// tenant-resolved registry snapshot — one Set per candidate search, NEVER
-	// the compiled-in builtin set. nil registry = wiring bug, fail loudly
-	// (an rrf call with an empty allowlist would reject anyway).
-	typeSet := r.TypeSet(ctx)
+	// WF T5 (design/01 §4.4 #4) / T8: typeSet is the cycle's ONE
+	// tenant-resolved policy snapshot (threaded from RunDreamCycle) — NEVER
+	// the compiled-in builtin set. nil = wiring bug, fail loudly (an rrf
+	// call with an empty allowlist would reject anyway).
 	if typeSet == nil {
-		return nil, fmt.Errorf("dream: no block-type registry wired (Router.Blocktypes nil)")
+		return nil, fmt.Errorf("dream: no block-type policy set (registry not wired)")
 	}
 	visibleTypes := typeSet.VisibleTypes()
 
@@ -710,10 +731,14 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 		}
 	}
 
-	// Meta-Block filter + sensitivity annotation in ONE batch query.
-	// Post-Reset-Audit 2026-04-20 showed meta blocks (Origin-Story, CV, Agent-Briefing,
-	// Compound-Loop, index) generate 85% of NO_REL noise without valid relationships.
-	// The same PK lookup carries each candidate's stored sensitivity for the
+	// Type-policy candidate sieve + sensitivity annotation in ONE batch query
+	// (WF T8, design/01 §4.4 #21): the PK lookup reads type_name instead of
+	// the retired is_meta column; a candidate whose type is not dream-linkable
+	// — or not registered at all (fail-closed, §5.1) — is sieved out.
+	// dream.linkable acts on BOTH sides (§3.3 R1): the system-meta seed keeps
+	// the empirical meta-noise exclusion (Post-Reset-Audit 2026-04-20: 85% of
+	// NO_REL noise), and any other linkable=false type is now sieved too.
+	// The same lookup carries each candidate's stored sensitivity for the
 	// eval gate (max-fold in EvaluateRelationships); a candidate missing from
 	// the lookup (deleted between RRF and here) keeps the zero value, which
 	// acts as credentials downstream (fail-closed).
@@ -723,28 +748,29 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 			ids = append(ids, c.ID)
 		}
 		type rowInfo struct {
-			meta bool
-			sens backends.Sensitivity
+			typeName string
+			sens     backends.Sensitivity
 		}
 		rows, err := pool.Query(ctx,
-			`SELECT id::text, is_meta, sensitivity, scope FROM context_blocks WHERE id = ANY($1::uuid[])`,
+			`SELECT id::text, type_name, sensitivity, scope FROM context_blocks WHERE id = ANY($1::uuid[])`,
 			ids,
 		)
 		if err == nil {
 			info := make(map[string]rowInfo, len(ids))
 			for rows.Next() {
-				var id, sens, scope string
-				var isMeta bool
-				if err := rows.Scan(&id, &isMeta, &sens, &scope); err == nil {
-					info[id] = rowInfo{meta: isMeta, sens: r.FloorSens(backends.Sensitivity(sens), scope)}
+				var id, typeName, sens, scope string
+				if err := rows.Scan(&id, &typeName, &sens, &scope); err == nil {
+					info[id] = rowInfo{typeName: typeName, sens: r.FloorSens(backends.Sensitivity(sens), scope)}
 				}
 			}
 			rows.Close()
 			filtered := candidates[:0]
 			for _, c := range candidates {
 				ri, ok := info[c.ID]
-				if ok && ri.meta {
-					continue
+				if ok {
+					if p, known := typeSet.Resolve(ri.typeName); !known || !p.Dream.Linkable {
+						continue
+					}
 				}
 				c.Sensitivity = ri.sens // zero value on lookup miss = credentials
 				filtered = append(filtered, c)
@@ -756,29 +782,29 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 	return candidates, nil
 }
 
-// Stats returns dream processing statistics, filtered by scope.
-// Eligibility criteria mirror PickBlock: not archived, has embedding, knowledge/canonical, not index.
+// Stats returns dream processing statistics, filtered by scope. Eligibility
+// criteria are the PickBlock predicate itself (dreamEligibleWhere + linkable
+// allowlist, WF T8) — Stats never counts a block PickBlock would not pick.
 //
 // Returned counters:
 //   - total:          all eligible blocks
 //   - checked:        blocks that have been through at least one Dream cycle
 //   - linked:         total links in the graph (scope-filtered)
 //   - pendingRecheck: already-checked blocks whose cooldown has expired (ready for re-dream)
-func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, checked, linked, pendingRecheck int, err error) {
+func Stats(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string) (total, checked, linked, pendingRecheck int, err error) {
+	eligible := dreamEligibleWhere("$2")
 	err = pool.QueryRow(ctx,
 		`SELECT
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND lifecycle_state IN ('knowledge', 'canonical') AND NOT is_meta AND scope = ANY($1::text[]))::int,
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND lifecycle_state IN ('knowledge', 'canonical') AND NOT is_meta AND scope = ANY($1::text[]))::int,
+			(SELECT count(*) FROM context_blocks WHERE `+eligible+` AND embedding IS NOT NULL AND scope = ANY($1::text[]))::int,
+			(SELECT count(*) FROM context_blocks WHERE `+eligible+` AND dream_checked_at IS NOT NULL AND scope = ANY($1::text[]))::int,
 			(SELECT count(*) FROM context_dream_links WHERE scope = ANY($1::text[]))::int,
 			(SELECT count(*) FROM context_blocks
-				WHERE NOT is_archived
+				WHERE `+eligible+`
 				  AND embedding IS NOT NULL
-				  AND lifecycle_state IN ('knowledge', 'canonical')
-				  AND NOT is_meta
 				  AND dream_checked_at IS NOT NULL
 				  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
 				  AND scope = ANY($1::text[]))::int`,
-		scopes,
+		scopes, linkable,
 	).Scan(&total, &checked, &linked, &pendingRecheck)
 	return
 }
@@ -798,15 +824,14 @@ type QueueStats struct {
 // PickBlock, plus a forward-looking forecast: how many cooldowns expire in the
 // next hour / 6 hours and the exact timestamp of the next one. The forecast lets
 // operators anticipate GPU load instead of only seeing the current backlog.
-func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*QueueStats, error) {
+func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string) (*QueueStats, error) {
 	var q QueueStats
 	err := pool.QueryRow(ctx,
 		`WITH eligible AS (
 			SELECT dream_cooldown_until AS cd, dream_checked_at AS chk, embedding IS NULL AS no_embed
 			FROM context_blocks
-			WHERE NOT is_archived
-			  AND lifecycle_state IN ('knowledge', 'canonical')
-			  AND NOT is_meta AND scope = ANY($1::text[])
+			WHERE `+dreamEligibleWhere("$2")+`
+			  AND scope = ANY($1::text[])
 		)
 		SELECT
 			(SELECT count(*) FROM eligible WHERE NOT no_embed AND (cd IS NULL OR cd < now()))::int,
@@ -816,7 +841,7 @@ func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*Queu
 			(SELECT count(*) FROM eligible WHERE NOT no_embed AND cd > now() AND cd <= now() + interval '1 hour')::int,
 			(SELECT count(*) FROM eligible WHERE NOT no_embed AND cd > now() AND cd <= now() + interval '6 hours')::int,
 			(SELECT min(cd) FROM eligible WHERE NOT no_embed AND cd > now())`,
-		scopes,
+		scopes, linkable,
 	).Scan(&q.PickableNow, &q.InCooldown, &q.NeverDreamed, &q.AwaitingEmbed, &q.Incoming1h, &q.Incoming6h, &q.NextPendingAt)
 	if err != nil {
 		return nil, err

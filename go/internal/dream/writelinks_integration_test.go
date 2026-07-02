@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -20,6 +21,11 @@ const (
 	icTargetID = "019d0000-0000-7000-9000-000000000002"
 	icOtherID  = "019d0000-0000-7000-9000-000000000003"
 )
+
+// icBuiltinSet is the compiled-in seed policy set (WF T8): all fixture
+// blocks carry the default 'knowledge' type, so the seed defaults reproduce
+// the pre-T8 behaviour byte-equivalently.
+var icBuiltinSet = blocktype.NewRegistry().Snapshot()
 
 // insertBlock writes a minimal context_blocks row with the supplied id and
 // metadata. created_at is set explicitly so V8/V9 temporal checks fire
@@ -79,7 +85,7 @@ func TestWriteLinks_TxAbort_BehaviourMatchesContract(t *testing.T) {
 	// gates apply to unknown relationships) and reaches the INSERT, where the
 	// CHECK constraint rejects it. Real PG marks the TX aborted, so Commit
 	// must fail or the deferred Rollback must reclaim cleanly.
-	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err := dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "invalid_relationship", Confidence: 0.9}})
 
 	// Either: Commit returns the aborted-TX error wrapped by WriteLinks, OR
@@ -124,7 +130,7 @@ func TestWriteLinks_Supersedes_RealSimilarity_BehaviourMatchesContract(t *testin
 	insertBlock(t, pool, icSourceID, "private", "decisions", "Authentication strategy v2", tLate, tLate)
 	insertBlock(t, pool, icTargetID, "private", "decisions", "Authentication strategy", tEarly, tEarly)
 
-	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err := dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "supersedes", Confidence: 0.95}})
 	if err != nil {
 		t.Fatalf("similar-title supersedes: unexpected error: %v", err)
@@ -150,7 +156,7 @@ func TestWriteLinks_Supersedes_RealSimilarity_BehaviourMatchesContract(t *testin
 	// no trigram overlap above the 0.25 threshold.
 	insertBlock(t, pool, icOtherID, "private", "decisions", "completely unrelated topic xyzzy", tEarly, tEarly)
 
-	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err = dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icOtherID, Relationship: "supersedes", Confidence: 0.95}})
 	if err != nil {
 		t.Fatalf("dissimilar-title supersedes: unexpected error: %v", err)
@@ -178,7 +184,7 @@ func TestWriteLinks_OnConflictUpsert_BehaviourMatchesContract(t *testing.T) {
 	insertBlock(t, pool, icTargetID, "private", "topic", "tgt", tLate, tLate)
 
 	// First run: write with confidence 0.7.
-	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err := dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "topical", Confidence: 0.7}})
 	if err != nil {
 		t.Fatalf("first write: %v", err)
@@ -189,7 +195,7 @@ func TestWriteLinks_OnConflictUpsert_BehaviourMatchesContract(t *testing.T) {
 
 	// Second run: same (source, target) pair, higher confidence. Must
 	// upsert into the existing row, not insert a duplicate.
-	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err = dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "topical", Confidence: 0.95}})
 	if err != nil {
 		t.Fatalf("second write: %v", err)
@@ -234,7 +240,7 @@ func TestWriteLinks_ReplaceSemantics_RealUUIDs_BehaviourMatchesContract(t *testi
 	insertBlock(t, pool, icTargetID, "private", "topic", "tgt1", tLate, tLate)
 	insertBlock(t, pool, icOtherID, "private", "topic", "tgt2", tLate, tLate)
 
-	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err := dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{
 			{TargetID: icTargetID, Relationship: "topical", Confidence: 0.8},
 			{TargetID: icOtherID, Relationship: "topical", Confidence: 0.8},
@@ -251,7 +257,7 @@ func TestWriteLinks_ReplaceSemantics_RealUUIDs_BehaviourMatchesContract(t *testi
 
 	// Second run with only icTargetID — replace-semantics must delete
 	// the orphaned icOtherID via the != ALL clause.
-	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err = dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "topical", Confidence: 0.9}})
 	if err != nil {
 		t.Fatalf("second write: %v", err)
@@ -300,7 +306,7 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 	insertBlock(t, pool, icTargetID, "private", "decisions", "auth strategy", tEarly, tEarly)
 
 	// Step 1: write supersedes link → target becomes snapshot, superseded_by=source.
-	written, err := dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err := dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "supersedes", Confidence: 0.95}})
 	if err != nil {
 		t.Fatalf("step 1 write: %v", err)
@@ -319,7 +325,7 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 	}
 
 	// Step 2: idempotent re-write — same input, no drift on target.
-	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err = dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icTargetID, Relationship: "supersedes", Confidence: 0.95}})
 	if err != nil {
 		t.Fatalf("step 2 write: %v", err)
@@ -337,7 +343,7 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 	// drops the old supersedes row and reverts the original target's lifecycle_state.
 	insertBlock(t, pool, icOtherID, "private", "decisions", "unrelated decision", tLate, tLate)
 
-	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
+	written, err = dream.WriteLinks(ctx, pool, icBuiltinSet, icSourceID, "private", 1.0,
 		[]dream.Link{{TargetID: icOtherID, Relationship: "topical", Confidence: 0.8}})
 	if err != nil {
 		t.Fatalf("step 3 write: %v", err)

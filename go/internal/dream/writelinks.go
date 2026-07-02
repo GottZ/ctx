@@ -8,6 +8,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -107,6 +108,18 @@ func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarg
 // Enforces same-scope rule: only creates links between blocks of the same scope.
 // Checks is_archived on target blocks (Race condition mitigation V6).
 //
+// set is the cycle's resolved block-type policy snapshot (WF T8, design/01
+// §4.4 #20/#21). It gates two ways, both fail-closed (§5.1):
+//   - target types: dream.linkable acts on BOTH sides (§3.3 R1) — a target
+//     whose type is not linkable, or not registered, never receives a link,
+//     regardless of how it entered the candidate set;
+//   - link classes: the SOURCE type's dream.link_classes restrict which
+//     semantic classes this batch may write (nil/empty = all). An
+//     unregistered source type rejects the whole batch (loud WARN — the
+//     pick should never have chosen it).
+//
+// nil set is a wiring bug and fails loudly (RunGuardBatch pattern).
+//
 // Replace-Semantik (S25 Welle 7): when the cycle produces at least one
 // successfully-written link, stale links for the same source are removed
 // inside the same transaction. ApplySupersedes-side-effects on previously
@@ -115,14 +128,18 @@ func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarg
 // transient LLM failures (Pessimist M1: stochastic empty responses must
 // not be destructive).
 //
-// Cyclomatic complexity 26 vs lint cap 25: V5/V6/V8/V9/V10 structural
-// checks form a linear filter chain in one loop body — extracting them
-// would obscure the per-link decision flow without reducing real complexity.
+// Cyclomatic complexity vs lint cap: the V5/V6/V8/V9/V10 structural checks
+// plus the T8 type-policy gates (target-linkable, link-class) form a linear
+// filter chain in one loop body — extracting them would obscure the per-link
+// decision flow without reducing real complexity.
 //
-//nolint:cyclop // pipeline function with linear V5/V6/V8/V9/V10 filter chain
-func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string, sourceQuality float64, links []Link) (int, error) {
+//nolint:cyclop,gocognit // pipeline function with linear V5/V6/V8/V9/V10 + T8 policy filter chain
+func WriteLinks(ctx context.Context, pool linkPool, set *blocktype.Set, sourceID, sourceScope string, sourceQuality float64, links []Link) (int, error) {
 	if len(links) == 0 {
 		return 0, nil
+	}
+	if set == nil {
+		return 0, fmt.Errorf("dream: write links: nil block-type policy set (registry not wired?)")
 	}
 
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
@@ -136,12 +153,30 @@ func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string
 	// created_at) — kept in the SELECT for column-stability but discarded.
 	var srcCategory string
 	var srcUpdatedAt, srcCreatedAt time.Time
-	var srcTitle string
+	var srcTitle, srcTypeName string
 	_ = tx.QueryRow(ctx,
-		`SELECT category, updated_at, created_at, title FROM context_blocks WHERE id = $1`,
+		`SELECT category, updated_at, created_at, title, type_name FROM context_blocks WHERE id = $1`,
 		sourceID,
-	).Scan(&srcCategory, &srcUpdatedAt, &srcCreatedAt, &srcTitle)
+	).Scan(&srcCategory, &srcUpdatedAt, &srcCreatedAt, &srcTitle, &srcTypeName)
 	_ = srcUpdatedAt
+
+	// WF T8 (§4.4 #20): resolve the SOURCE type's link-class policy. An
+	// unregistered source type (incl. a vanished source row — the ignored
+	// scan above leaves "") is fail-closed: no class allowed, whole batch
+	// rejected loudly. nil/empty link_classes = all classes allowed.
+	srcPolicy, srcKnown := set.Resolve(srcTypeName)
+	if !srcKnown {
+		slog.Warn("dream: write links rejected — source type not registered (fail-closed)",
+			"source", sourceID, "type_name", srcTypeName)
+		return 0, nil
+	}
+	var allowedClasses map[string]bool
+	if len(srcPolicy.Dream.LinkClasses) > 0 {
+		allowedClasses = make(map[string]bool, len(srcPolicy.Dream.LinkClasses))
+		for _, c := range srcPolicy.Dream.LinkClasses {
+			allowedClasses[c] = true
+		}
+	}
 
 	written := 0
 	keptTargets := make([]string, 0, len(links))
@@ -152,13 +187,13 @@ func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string
 		var targetScope string
 		var targetArchived bool
 		var targetQuality float64
-		var targetCategory string
+		var targetCategory, targetTypeName string
 		var targetUpdatedAt, targetCreatedAt time.Time
 		var targetTitle string
 		err := tx.QueryRow(ctx,
-			`SELECT scope, is_archived, quality_score, category, updated_at, created_at, title FROM context_blocks WHERE id = $1`,
+			`SELECT scope, is_archived, quality_score, category, updated_at, created_at, title, type_name FROM context_blocks WHERE id = $1`,
 			link.TargetID,
-		).Scan(&targetScope, &targetArchived, &targetQuality, &targetCategory, &targetUpdatedAt, &targetCreatedAt, &targetTitle)
+		).Scan(&targetScope, &targetArchived, &targetQuality, &targetCategory, &targetUpdatedAt, &targetCreatedAt, &targetTitle, &targetTypeName)
 		if err != nil {
 			slog.Warn("dream: target block not found", "target_id", link.TargetID)
 			continue
@@ -171,11 +206,27 @@ func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string
 			continue
 		}
 
+		// WF T8 target gate: dream.linkable acts on the target side too
+		// (§3.3 R1). Unknown type = fail-closed (§5.1).
+		if tp, known := set.Resolve(targetTypeName); !known || !tp.Dream.Linkable {
+			slog.Debug("dream: link rejected", "src", sourceID, "tgt", link.TargetID,
+				"reason", "target type not dream-linkable", "type_name", targetTypeName)
+			continue
+		}
+
 		// V10: factual same-category coerce → topical.
 		if newRel := coerceCategoryFactual(link.Relationship, srcCategory, targetCategory); newRel != link.Relationship {
 			slog.Debug("dream: factual coerced to topical (same-category sibling)",
 				"category", srcCategory, "src", sourceID, "tgt", link.TargetID)
 			link.Relationship = newRel
+		}
+
+		// WF T8 link-class gate (post-coerce: the class as persisted): the
+		// source type's dream.link_classes must carry the relationship.
+		if allowedClasses != nil && !allowedClasses[link.Relationship] {
+			slog.Debug("dream: link rejected", "src", sourceID, "tgt", link.TargetID,
+				"reason", "link class not allowed for source type", "class", link.Relationship)
+			continue
 		}
 
 		// V8 / Welle 46 (2026-05-22): supersedes structural pre-filter (same cat +

@@ -20,12 +20,20 @@ import (
 // Groups blocks by category, sorts alphabetically, and upserts as category=index, title=topic-map-{scope}.
 // No LLM involved — purely deterministic.
 //
-// blocktypes (WF T4) feeds the topic-map classify hook with the registry
-// snapshot; the digest.include type filter follows in T8. nil in tests
-// without classify wiring — the hook then logs and skips.
+// blocktypes (WF T4/T8) feeds BOTH the digest.include source sieve and the
+// topic-map classify hook from ONE tenant-resolved snapshot per run. nil is
+// a wiring bug and fails loudly (RunGuardBatch pattern) — since T8 the
+// source query cannot run without the type allowlist.
 func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, homeScope string, readScopes []string) error {
-	// Fetch all block metadata (no content).
-	blocks, err := fetchBlockMeta(ctx, pool, readScopes)
+	if blocktypes == nil {
+		return fmt.Errorf("digest: nil block-type registry (wiring bug)")
+	}
+	set := blocktypes.SnapshotForTenant(ctx, homeScope)
+
+	// Fetch block metadata (no content), sieved by digest.include (WF T8,
+	// design/01 §4.4 #13): an unregistered type is absent from the allowlist
+	// and therefore fail-closed out of the topic-map source (§5.1).
+	blocks, err := fetchBlockMeta(ctx, pool, readScopes, set.DigestTypes())
 	if err != nil {
 		return fmt.Errorf("digest: fetch meta: %w", err)
 	}
@@ -111,15 +119,11 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 		return fmt.Errorf("digest: upsert topic map: %w", err)
 	}
 
-	// Welle 44 / WF T4 hook: classify type_name + is_meta from the registry
-	// snapshot (tenant-resolved for the digest's home scope). Topic-map
-	// metadata sets is_meta=true so the system-meta rule fires. Idempotent —
-	// re-runs of RunDigest are no-ops at this layer.
-	var classifySet *blocktype.Set
-	if blocktypes != nil {
-		classifySet = blocktypes.SnapshotForTenant(ctx, homeScope)
-	}
-	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
+	// Welle 44 / WF T4 hook: classify type_name from the registry snapshot
+	// (the run's ONE tenant-resolved set, WF T8). Topic-map metadata sets
+	// is_meta=true so the system-meta rule fires. Idempotent — re-runs of
+	// RunDigest are no-ops at this layer.
+	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
 		// Non-fatal: the topic-map block exists, classification can be retried
 		// next cycle. Log + continue rather than fail the whole digest.
 		slog.Warn("digest: topic map auto-classify failed", "error", err, "block_id", block.ID)
@@ -147,14 +151,18 @@ func truncateTitle(title string) string {
 	return title
 }
 
-// fetchBlockMeta retrieves all non-archived block metadata for the given scopes.
-func fetchBlockMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string) ([]store.BlockMeta, error) {
+// fetchBlockMeta retrieves non-archived block metadata for the given scopes,
+// restricted to the digest.include type allowlist (WF T8). digestTypes is a
+// code-owned bind value from the run's policy snapshot, never user input; an
+// empty list is legitimate policy ("nothing digests") and yields no rows.
+func fetchBlockMeta(ctx context.Context, pool *pgxpool.Pool, readScopes, digestTypes []string) ([]store.BlockMeta, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT id, title, category, tags, scope, updated_at
 		FROM context_blocks
 		WHERE scope = ANY($1::text[]) AND NOT is_archived
+		  AND type_name = ANY($2::text[])
 		ORDER BY category, title`,
-		readScopes,
+		readScopes, digestTypes,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query block meta: %w", err)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
@@ -23,8 +24,19 @@ type dreamModeSource interface {
 }
 
 // queueDepthFn matches dream.QueueDepth; injectable so the single-flight test
-// can count scans without a real corpus.
-type queueDepthFn func(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*dream.QueueStats, error)
+// can count scans without a real corpus. linkable is the dream-linkable type
+// allowlist of the scan's policy snapshot (WF T8).
+type queueDepthFn func(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string) (*dream.QueueStats, error)
+
+// BlocktypeSource is the collector's registry dependency: the /health
+// degradation state (WF T3) plus the policy snapshot the dream-queue scan
+// consumes (WF T8). *blocktype.Registry implements both; the scan uses the
+// BASE snapshot — /api/status is server-global telemetry, exactly like the
+// cfg.Scheduler.ReadScopes window it already scans with.
+type BlocktypeSource interface {
+	BlocktypeHealth
+	Snapshot() *blocktype.Set
+}
 
 // Wire shapes — admin-only; field names pinned 1:1 by TestStatusGoldenKeys.
 
@@ -120,7 +132,7 @@ type StatusCollector struct {
 	backendPool *backends.Pool
 	dreams      dreamModeSource
 	cfg         ConfigStore
-	blocktypes  BlocktypeHealth // WF T3: /health + status share the blocktype_registry field; nil ⇒ "ok"
+	blocktypes  BlocktypeSource // WF T3/T8: /health field + dream-queue-scan allowlist; nil ⇒ "ok" + fail-closed empty scan
 	queueDepth  queueDepthFn
 
 	mu      sync.Mutex // serializes the cold-start build only
@@ -149,8 +161,9 @@ type StatusCollector struct {
 
 // NewStatusCollector wires the collector. dreams is typically *events.Scheduler.
 // blocktypes may be nil (tests): the health aggregate then reports
-// blocktype_registry "ok" (same convention as NewHealthHandler).
-func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams dreamModeSource, cfg ConfigStore, blocktypes BlocktypeHealth) *StatusCollector {
+// blocktype_registry "ok" (same convention as NewHealthHandler) and the
+// dream-queue scan runs with an empty allowlist (fail-closed zeros + WARN).
+func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams dreamModeSource, cfg ConfigStore, blocktypes BlocktypeSource) *StatusCollector {
 	return &StatusCollector{
 		pool:        pool,
 		backendPool: backendPool,
@@ -258,7 +271,15 @@ func (c *StatusCollector) scanQueueAsync(scopes []string) {
 		defer c.qsScan.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		qs, err := c.queueDepth(ctx, c.pool, scopes)
+		// WF T8: the scan consumes the BASE registry snapshot (server-global
+		// telemetry). nil registry = test wiring; fail-closed empty allowlist.
+		var linkable []string
+		if c.blocktypes != nil {
+			linkable = c.blocktypes.Snapshot().DreamLinkableTypes()
+		} else {
+			slog.Warn("status: block-type registry not wired — dream queue scan runs fail-closed empty")
+		}
+		qs, err := c.queueDepth(ctx, c.pool, scopes, linkable)
 		if err != nil {
 			slog.Warn("status: dream queue depth scan failed", "error", err)
 			return

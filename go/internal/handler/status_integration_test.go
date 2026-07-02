@@ -34,7 +34,7 @@ func TestStatusCollectorSingleFlight(t *testing.T) {
 
 	var scans int32
 	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}), nil)
-	c.queueDepth = func(_ context.Context, _ *pgxpool.Pool, _ []string) (*dream.QueueStats, error) {
+	c.queueDepth = func(_ context.Context, _ *pgxpool.Pool, _, _ []string) (*dream.QueueStats, error) {
 		atomic.AddInt32(&scans, 1)
 		return &dream.QueueStats{}, nil
 	}

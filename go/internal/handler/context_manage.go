@@ -47,6 +47,19 @@ type ManageHandler struct {
 	blocktypes *blocktype.Registry
 }
 
+// dreamLinkableTypes resolves the request's dream-linkable type allowlist
+// (WF T8) for the dream Stats/QueueDepth/Backoff reads. nil registry (test
+// wiring — production always passes it, cmd/ctxd/server.go) degrades
+// fail-closed to an empty allowlist with a WARN: the counters then read 0
+// instead of silently falling back to a compiled-in policy.
+func (h *ManageHandler) dreamLinkableTypes(ctx context.Context) []string {
+	if h.blocktypes == nil {
+		slog.Warn("manage: block-type registry not wired — dream counters run fail-closed empty")
+		return nil
+	}
+	return h.blocktypes.SnapshotForRequest(ctx).DreamLinkableTypes()
+}
+
 // NewManageHandler creates a new ManageHandler. cfg is the runtime-config
 // snapshot source (F1-W6): dream-stats renders the back-off policy from a
 // per-request snapshot, so /api/manage shows the generation the scheduler
@@ -451,7 +464,7 @@ func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *
 	// Dream backlog + incoming forecast at a glance — surfaces whether the GPU
 	// is busy now and how much load is queued to drop out of cooldown soon.
 	// Non-fatal: stats stand on their own if the dream queue probe fails.
-	if queue, derr := dream.QueueDepth(ctx, h.pool, ar.ReadScopes); derr == nil {
+	if queue, derr := dream.QueueDepth(ctx, h.pool, ar.ReadScopes, h.dreamLinkableTypes(ctx)); derr == nil {
 		resp["dream_queue"] = queue
 	} else {
 		slog.Warn("manage: dream queue probe failed", "error", derr, "request_id", reqID)
@@ -950,14 +963,17 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 
 func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
 	ctx := r.Context()
-	total, checked, linked, pendingRecheck, err := dream.Stats(ctx, h.pool, ar.ReadScopes)
+	// ONE policy snapshot per request (WF T8): all three counters read the
+	// same dream-linkable allowlist generation.
+	linkable := h.dreamLinkableTypes(ctx)
+	total, checked, linked, pendingRecheck, err := dream.Stats(ctx, h.pool, ar.ReadScopes, linkable)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream stats failed",
 		})
 		return
 	}
-	queue, err := dream.QueueDepth(ctx, h.pool, ar.ReadScopes)
+	queue, err := dream.QueueDepth(ctx, h.pool, ar.ReadScopes, linkable)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream queue depth failed",
@@ -967,7 +983,7 @@ func (h *ManageHandler) handleDreamStats(w http.ResponseWriter, r *http.Request,
 	// The request's one config snapshot (§2.3) — dream-stats is the only
 	// manage action that consumes config, so the read lives here, not in the
 	// dispatch. The rendered policy is the generation currently in effect.
-	backoff, err := dream.ComputeBackoffStats(ctx, h.pool, ar.ReadScopes, h.cfg.Snapshot().DreamBackoff()) //nolint:forbidigo // MT 06 BLIND: dream back-off is a server-global scheduler policy (the dream loop is process-wide), not tenant-scoped.
+	backoff, err := dream.ComputeBackoffStats(ctx, h.pool, ar.ReadScopes, linkable, h.cfg.Snapshot().DreamBackoff()) //nolint:forbidigo // MT 06 BLIND: dream back-off is a server-global scheduler policy (the dream loop is process-wide), not tenant-scoped.
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream backoff stats failed",
@@ -994,7 +1010,7 @@ func (h *ManageHandler) handleDreamReview(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 
 	// 1. Stats overview.
-	total, checked, linked, pendingRecheck, err := dream.Stats(ctx, h.pool, ar.ReadScopes)
+	total, checked, linked, pendingRecheck, err := dream.Stats(ctx, h.pool, ar.ReadScopes, h.dreamLinkableTypes(ctx))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream review failed",
