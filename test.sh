@@ -254,14 +254,19 @@ fi
 # graph_cluster_edge, graph_cluster_member, graph_overview_meta, F5-W6 landkarte)
 # + 2 since M059 (context_tenants, context_tenant_scopes, MT-T02 tenants_hybrid;
 # Modell C — context_blocks unangetastet, col_count BLEIBT 39)
-# + 1 since M061 (context_tenant_grants, MT-T14 cross-tenant read channel).
+# + 1 since M061 (context_tenant_grants, MT-T14 cross-tenant read channel)
+# + 1 since M063 (context_tenant_quota, MT quota; extended by M069 tenant_limits)
+# + 1 M023 (context_oauth_clients, MCP OAuth — live since 2026-04-09 per
+# _migrations but missing from every earlier count; stale-expectation fix
+# 2026-07-02, verified against information_schema table list).
+# M070 renames block_type→lifecycle_state: table count unchanged, 39 columns hold.
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "27" ]] && [[ "$col_count" == "39" ]]; then
+if [[ "$table_count" == "29" ]] && [[ "$col_count" == "39" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 27 tables + 39 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 29 tables + 39 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
