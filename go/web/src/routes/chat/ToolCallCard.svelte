@@ -83,7 +83,7 @@
     color: var(--text-dim);
   }
   .caret {
-    transition: transform 120ms ease;
+    transition: transform var(--dur-1) var(--ease);
     color: var(--text-faint);
   }
   .caret.open {

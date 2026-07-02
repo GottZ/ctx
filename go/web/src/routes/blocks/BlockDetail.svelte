@@ -252,7 +252,7 @@
     color: var(--text);
   }
   .confirm-dialog::backdrop {
-    background: rgb(0 0 0 / 0.55);
+    background: var(--backdrop);
   }
   .confirm-body {
     display: flex;

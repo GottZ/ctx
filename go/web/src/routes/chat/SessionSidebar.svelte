@@ -166,8 +166,8 @@
       z-index: calc(var(--z-drawer) + 1);
       transform: translateX(-100%);
       visibility: hidden;
-      transition: transform 160ms ease, visibility 160ms ease;
-      box-shadow: 2px 0 12px rgba(0, 0, 0, 0.35);
+      transition: transform var(--dur-2) var(--ease), visibility var(--dur-2) var(--ease);
+      box-shadow: var(--shadow-1); /* Q3: Ist war 2px 0 12px (Achsen-Tausch dokumentiert, design 05-§3.3) */
     }
     .sidebar.open {
       transform: none;
@@ -181,12 +181,12 @@
       padding: 0;
       border: 0;
       border-radius: 0;
-      background: rgba(0, 0, 0, 0.45);
+      background: var(--backdrop); /* Q3: 0.45 → 0.55 konsolidiert */
       cursor: pointer;
     }
     /* the global button:hover would lighten the scrim — keep it constant */
     .scrim:hover:not(:disabled) {
-      background: rgba(0, 0, 0, 0.45);
+      background: var(--backdrop); /* Q3: 0.45 → 0.55 konsolidiert */
     }
   }
 

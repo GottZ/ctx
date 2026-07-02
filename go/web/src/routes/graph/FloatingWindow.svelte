@@ -149,7 +149,7 @@
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
     background: var(--surface-1);
-    box-shadow: 0 8px 28px rgb(0 0 0 / 0.35);
+    box-shadow: var(--shadow-2);
   }
   .window:focus {
     outline: none;

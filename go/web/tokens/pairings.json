@@ -1,5 +1,5 @@
 {
-  "$description": "Kontrast-Paarungs-Manifest (Q2, design 05-§4.2) — klassifiziert JEDEN $type:color-Token aus tokens.json. Genau eine Klassifikation pro Token: Paarungs-Regel (on+min, WCAG-2-Ratio wird in tokens/contrast-matrix.test.ts für BEIDE Themes gerechnet und durchgesetzt) | class:surface (Grundfläche — muss on-Ziel mindestens einer Regel sein) | class:decorative (begründet, nicht gerechnet) | class:composition (nur in Komposition sichtbar → axe-Runtime-Ebene, 06-PV5). Unklassifizierte Tokens, verwaiste Einträge und unbenutzte surfaces machen die Suite ROT (Vollständigkeits-Zwang, fail-closed). Die §4.2-Skizzen-Zeilen shadow-*/backdrop (decorative) kommen mit ihren Tokens in Q3; graph-node-sat/graph-node-lum sind $type:number (nicht Teil des Farb-Gates), graph-halo existiert nicht.",
+  "$description": "Kontrast-Paarungs-Manifest (Q2, design 05-§4.2) — klassifiziert JEDEN $type:color-Token aus tokens.json. Genau eine Klassifikation pro Token: Paarungs-Regel (on+min, WCAG-2-Ratio wird in tokens/contrast-matrix.test.ts für BEIDE Themes gerechnet und durchgesetzt) | class:surface (Grundfläche — muss on-Ziel mindestens einer Regel sein) | class:decorative (begründet, nicht gerechnet) | class:composition (nur in Komposition sichtbar → axe-Runtime-Ebene, 06-PV5). Unklassifizierte Tokens, verwaiste Einträge und unbenutzte surfaces machen die Suite ROT (Vollständigkeits-Zwang, fail-closed). Seit Q3 gilt der Vollständigkeits-Zwang auch für $type:shadow-Tokens (nur class-Klassifikation möglich) und DTCG-Alias-Werte ({group.token}) werden vor der Ratio-Rechnung aufgelöst; graph-node-sat/graph-node-lum sind $type:number (nicht Teil des Farb-Gates), graph-halo existiert nicht.",
   "surface-0": { "class": "surface", "note": "App-Canvas + recessed input-bg — on-Ziel der Text-/Accent-Regeln" },
   "surface-1": { "class": "surface", "note": "Panels/Topbar/Cards — on-Ziel der Text-/Status-Regeln" },
   "surface-2": { "class": "surface", "note": "code-bg, button-bg, raised Tiles" },
@@ -19,5 +19,20 @@
   "graph-edge": { "class": "composition", "note": "Normal-Kante, nicht allein bedeutungstragend; Graph-Rendering strukturell geprüft via __ctxGraph-Hook (smoke.spec)" },
   "graph-edge-strong": { "on": ["graph-bg"], "min": 3.0, "note": "non-text (SC 1.4.11): supersedes-Kante ist bedeutungstragend; einzige Gate-Ebene für den maskierten Canvas" },
   "graph-bg": { "class": "surface", "note": "Canvas-Hintergrund (= surface-0) — on-Ziel der Graph-Regeln" },
-  "dot-pattern": { "class": "decorative", "note": "Login-Punktraster, rein dekorative Textur (rgba-Tint auf surface)" }
+  "dot-pattern": { "class": "decorative", "note": "Login-Punktraster, rein dekorative Textur (rgba-Tint auf surface)" },
+  "backdrop": { "class": "decorative", "note": "Q3: abdunkelnder Scrim unter Dialogen/Drawer/Sidebar — Alpha-Tint, kein Solo-Kontrastträger (§4.2-Skizze)" },
+  "shadow-1": { "class": "decorative", "note": "Q3: Elevation-Schatten (Sidebar) — $type:shadow, rein dekorative Tiefe" },
+  "shadow-2": { "class": "decorative", "note": "Q3: Elevation-Schatten (Floating-Windows) — $type:shadow, rein dekorative Tiefe" },
+  "type-slot-1": { "on": ["surface-1"], "min": 3.0, "note": "K-f-Slot blue — non-text Badge-/Board-Farbe (SC 1.4.11); Text auf Badges trägt Text-Tokens. Palette-Validator (Band/Chroma/CVD) läuft zusätzlich in contrast-matrix.test.ts" },
+  "type-slot-2": { "on": ["surface-1"], "min": 3.0, "note": "K-f-Slot red" },
+  "type-slot-3": { "on": ["surface-1"], "min": 3.0, "note": "K-f-Slot violet" },
+  "type-slot-4": { "on": ["surface-1"], "min": 3.0, "note": "K-f-Slot green" },
+  "type-slot-5": { "on": ["surface-1"], "min": 3.0, "note": "K-f-Slot magenta" },
+  "type-slot-6": { "on": ["surface-1"], "min": 3.0, "note": "K-f-Slot yellow" },
+  "type-slot-7": { "on": ["surface-1"], "min": 3.0, "note": "K-f-Slot aqua" },
+  "type-slot-8": { "on": ["surface-1"], "min": 3.0, "note": "K-f-Slot orange" },
+  "sync-ok": { "on": ["surface-1"], "min": 3.0, "note": "Alias auf ok (aufgelöst gerechnet) — Sync-Badge mit Icon+Label, non-text min 3.0" },
+  "sync-ahead": { "on": ["surface-1"], "min": 3.0, "note": "Alias auf warn (positional §3.3) — Sync-Badge mit Icon+Label" },
+  "sync-behind": { "on": ["surface-1"], "min": 3.0, "note": "Alias auf accent (positional §3.3) — Sync-Badge mit Icon+Label" },
+  "sync-conflict": { "on": ["surface-1"], "min": 3.0, "note": "Alias auf danger — Sync-Badge mit Icon+Label" }
 }

@@ -185,7 +185,7 @@
     color: var(--text-dim);
     font-family: var(--font-mono);
     cursor: pointer;
-    transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+    transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
   }
   .opt:hover {
     color: var(--text);
@@ -213,7 +213,7 @@
     border-radius: var(--radius);
     color: var(--text-dim);
     cursor: pointer;
-    transition: color 120ms ease, background 120ms ease;
+    transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
   }
   .cycle:hover {
     color: var(--text);

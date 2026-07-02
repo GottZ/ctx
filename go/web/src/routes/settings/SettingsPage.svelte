@@ -134,7 +134,7 @@
     border-radius: var(--radius);
     background: var(--surface-1);
     text-decoration: none;
-    transition: border-color 120ms ease;
+    transition: border-color var(--dur-1) var(--ease);
   }
   .editor-link:hover {
     border-color: var(--accent);

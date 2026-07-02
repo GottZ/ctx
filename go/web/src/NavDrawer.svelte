@@ -141,7 +141,7 @@
     padding: 0;
     border: none;
     border-radius: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--backdrop); /* Q3: 0.5 → 0.55 konsolidiert (design 05-§3.3) */
     cursor: default;
     z-index: var(--z-drawer);
   }

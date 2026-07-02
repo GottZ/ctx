@@ -34,7 +34,10 @@ const serverAdmin = capabilitiesFor(whoami({ admin: true, role: 'owner' }))
 const hrefs = (caps: Capabilities) => navItems(caps).map((i) => i.href)
 
 const CORPUS = ['/blocks', '/graph', '/chat']
-const TENANT = ['/tenant', '/tenant/backends']
+// S11 (Q3, design 05-§2.5): /tenant/backends ist aus der Rail ausgeblendet,
+// solange die Route nicht existiert — der Eintrag kehrt mit der
+// Tenant-Backends-Welle zurück (items.ts, auskommentierter push).
+const TENANT = ['/tenant']
 const SERVER = ['/admin', '/settings', '/status', '/settings/backends']
 
 describe('navItems', () => {

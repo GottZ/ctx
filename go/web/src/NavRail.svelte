@@ -273,7 +273,7 @@
     border: 1px solid transparent;
     border-radius: var(--radius);
     background: transparent;
-    transition: color 120ms ease, background 120ms ease;
+    transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
   }
   .rail a:not(.home):hover,
   .footer button:hover {

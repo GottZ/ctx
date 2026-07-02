@@ -31,11 +31,11 @@
     }
   })
 
-  /** Status → token color (active healthy, suspended warned, offboarding danger). */
-  function statusColor(s: TenantStatus): string {
-    if (s === 'active') return 'var(--ok)'
-    if (s === 'suspended') return 'var(--warn)'
-    return 'var(--danger)' // offboarding
+  /** Status → dot-Klasse (K-f, Q3): active ok, suspended warn, offboarding danger (Default-Zweig fail-closed). */
+  function statusClass(s: TenantStatus): string {
+    if (s === 'active') return 'ok'
+    if (s === 'suspended') return 'warn'
+    return 'danger' // offboarding + Unbekanntes
   }
 
   /** ISO timestamp → date portion; degrades to the raw string if unparseable. */
@@ -103,7 +103,7 @@
                   <td class="name">{t.display_name || '—'}</td>
                   <td>
                     <span class="badge">
-                      <span class="dot" style="background:{statusColor(t.status)}"></span>{t.status}
+                      <span class="dot {statusClass(t.status)}"></span>{t.status}
                     </span>
                   </td>
                   <td class="created">{fmtDate(t.created_at)}</td>
@@ -294,5 +294,14 @@
     border-radius: 50%;
     margin-right: var(--space-1);
     vertical-align: middle;
+  }
+  .dot.ok {
+    background: var(--ok);
+  }
+  .dot.warn {
+    background: var(--warn);
+  }
+  .dot.danger {
+    background: var(--danger);
   }
 </style>

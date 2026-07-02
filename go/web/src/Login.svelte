@@ -76,7 +76,7 @@
     padding: var(--space-3);
     background:
       radial-gradient(60rem 40rem at 50% 18%, var(--accent-dim), transparent 60%),
-      radial-gradient(rgba(216, 218, 229, 0.035) 1px, transparent 1px);
+      radial-gradient(var(--dot-pattern) 1px, transparent 1px);
     background-size:
       auto,
       24px 24px;

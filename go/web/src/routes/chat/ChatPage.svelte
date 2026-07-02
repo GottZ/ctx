@@ -36,7 +36,8 @@
   })
 </script>
 
-<div class="chat">
+<!-- S12 (Q3, design 05-§2.5): .area-Wurzel-Konvention angeglichen (S7-Selektor-Kontrakt); chat ist thread-Mode, der reading-.area-Cap greift hier nicht. -->
+<div class="chat area">
   <SessionSidebar {store} />
   <section class="conversation">
     {#if store.loadError}

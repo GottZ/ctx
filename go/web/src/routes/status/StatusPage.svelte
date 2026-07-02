@@ -95,13 +95,15 @@
     }
   }
 
-  function healthColor(s: string): string {
-    if (s === 'ok') return 'var(--ok)'
-    if (s === 'degraded') return 'var(--warn)'
-    return 'var(--danger)'
+  // K-f-Klassen-Mapping (Q3, design 05-§4.8.2): Daten→Farbe nur über
+  // CSS-Klassen geschlossener Mengen — nie über style-Attribute.
+  function healthClass(s: string): string {
+    if (s === 'ok') return 'ok'
+    if (s === 'degraded') return 'warn'
+    return 'danger'
   }
-  function svcColor(v: string): string {
-    return v === 'ok' ? 'var(--ok)' : 'var(--danger)'
+  function svcClass(v: string): string {
+    return v === 'ok' ? 'ok' : 'danger'
   }
   function fmtAge(asOf: string): string {
     const s = Math.max(0, Math.round((Date.now() - new Date(asOf).getTime()) / 1000))
@@ -123,11 +125,11 @@
     {#if publicHealth.status === 'ready' && publicHealth.data}
       {@const h = publicHealth.data}
       <section class="card health" aria-label="health">
-        <span class="dot big" style="background:{healthColor(h.status)}"></span>
+        <span class="dot big {healthClass(h.status)}"></span>
         <strong>{h.status}</strong>
         <div class="svcs">
           {#each Object.entries(h.services) as [name, value] (name)}
-            <span class="svc"><span class="dot" style="background:{svcColor(value)}"></span>{name}</span>
+            <span class="svc"><span class="dot {svcClass(value)}"></span>{name}</span>
           {/each}
         </div>
       </section>
@@ -150,11 +152,11 @@
 
     <div class="tiles">
       <section class="card health" aria-label="health">
-        <span class="dot big" style="background:{healthColor(s.health.status)}"></span>
+        <span class="dot big {healthClass(s.health.status)}"></span>
         <strong>{s.health.status}</strong>
         <div class="svcs">
           {#each Object.entries(s.health.services) as [name, value] (name)}
-            <span class="svc"><span class="dot" style="background:{svcColor(value)}"></span>{name}</span>
+            <span class="svc"><span class="dot {svcClass(value)}"></span>{name}</span>
           {/each}
         </div>
       </section>
@@ -295,6 +297,15 @@
   .dot.big {
     width: 0.8rem;
     height: 0.8rem;
+  }
+  .dot.ok {
+    background: var(--ok);
+  }
+  .dot.warn {
+    background: var(--warn);
+  }
+  .dot.danger {
+    background: var(--danger);
   }
   .toggles {
     display: flex;

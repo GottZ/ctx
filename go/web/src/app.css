@@ -20,9 +20,12 @@ body {
   color: var(--text);
 }
 
+/* E5 (Q3, design 05-§8): EIN Indikator-Modell — der 2px-Token-Ring gilt
+ * überall, auch auf Inputs (das frühere input:focus { outline: none } ist
+ * gefallen). */
 :focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
 }
 
 code {
@@ -41,7 +44,7 @@ button {
   border-radius: var(--radius);
   padding: var(--space-1) var(--space-3);
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
 }
 
 button:hover:not(:disabled) {
@@ -61,14 +64,24 @@ input {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: var(--space-2) var(--space-3);
-  transition: border-color 120ms ease;
+  transition: border-color var(--dur-1) var(--ease);
 }
 
 input:focus {
-  outline: none;
   border-color: var(--accent);
 }
 
 input::placeholder {
   color: var(--text-faint);
+}
+
+/* Globaler reduced-motion-Guard (Q3, design 05-§4.4 Lint-Grenze 2): deckt auch
+ * die komponenten-lokalen Langanimationen (rise/blink) ohne Einzel-Opt-in. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

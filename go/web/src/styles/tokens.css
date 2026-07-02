@@ -41,6 +41,7 @@
   --font-mono: ui-monospace, 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
   --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
 
+  --space-0: 0.125rem; /* Q3: schließt das Skala-Loch unter space-1 (design 05-§3.3) */
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 1rem;
@@ -51,6 +52,54 @@
   /* Micro-labels: uppercase, wide-tracked machine tags. */
   --label-size: 0.6875rem;
   --label-tracking: 0.1em;
+
+  /* ── Q3-Lücken-Tokens (design 05-§3.3) ─────────────────────────────────
+     Backdrop: EIN Scrim-Wert für Dialoge/Drawer/Sidebar (Ist-Streuung
+     0.45–0.55 war historisch, nicht intentional — konsolidiert auf 0.55).
+     Abdunkelnde Scrims funktionieren in beiden Themes → Light identisch. */
+  --backdrop: rgb(0 0 0 / 0.55);
+
+  /* Elevation: gleiche Geometrie in beiden Themes, Alpha gegen die
+     Light-Surfaces neu gerechnet (0.18/0.22). */
+  --shadow-1: 0 2px 12px rgb(0 0 0 / 0.35);
+  --shadow-2: 0 8px 28px rgb(0 0 0 / 0.35);
+
+  /* Motion: Mikro-Interaktionen (dur-1) + Slide-Panels (dur-2).
+     Langanimationen (rise/blink) bleiben komponenten-lokal, der globale
+     reduced-motion-Block in app.css deckt sie (design 05-§4.4). */
+  --dur-1: 120ms;
+  --dur-2: 160ms;
+  --ease: ease;
+
+  /* Fokus (E5, in Q3 entschieden = Option a): EIN Indikator-Modell —
+     2px-Ring auch auf Inputs; input:focus{outline:none} ist gefallen. */
+  --focus-ring: 2px solid var(--accent);
+  --focus-offset: 2px;
+
+  /* ── Type-/Kategorie-Slots (design 05-§4.8, K-f) ───────────────────────
+     Die EINZIGE Farbquelle für dynamische Kategorien: Daten→Farbe läuft
+     ausschließlich über Klassen-Mapping geschlossener Mengen (Hash →
+     Slot-Folding in diese 8), NIE über style-Attribute. Palette-Validator-
+     geprüft (tokens/contrast-matrix.test.ts): OKLCH-Band, Chroma ≥ 0.10,
+     CVD Machado-2009 adjacent ΔE ≥ 12 (protan/deutan; Ist ≥ 25.9, tritan
+     ≥ 24.5), Kontrast ≥ 3:1 auf surface-1 in beiden Themes. Slot-Ordnung
+     = CVD-Mechanismus (ordering-enumeriert), nicht kosmetisch. */
+  --type-slot-1: #3987e5; /* blue    */
+  --type-slot-2: #e66767; /* red     */
+  --type-slot-3: #9085e9; /* violet  */
+  --type-slot-4: #008300; /* green   */
+  --type-slot-5: #d55181; /* magenta */
+  --type-slot-6: #c98500; /* yellow  */
+  --type-slot-7: #199e70; /* aqua    */
+  --type-slot-8: #d95926; /* orange  */
+
+  /* Sync-Badge-Semantik (Bedarfs-Anmeldung Achse 04, design 05-§3.3):
+     Aliasse auf ok/warn/accent/danger (positional laut §3.3; eigene Werte
+     erst falls E1 sie trennt). var() folgt dem Theme automatisch. */
+  --sync-ok: var(--ok);
+  --sync-ahead: var(--warn);
+  --sync-behind: var(--accent);
+  --sync-conflict: var(--danger);
 
   /* ── Layout-System (Achse 01/S1) — sizing only, color-scheme-INDEPENDENT.
      Der frühere 70rem-Blanket-Deckel (App.svelte main) zerfällt in drei
@@ -112,6 +161,20 @@
   --graph-bg: #e9eaf0;
 
   --dot-pattern: rgba(27, 29, 41, 0.05);
+
+  --backdrop: rgb(0 0 0 / 0.55);
+
+  --shadow-1: 0 2px 12px rgb(0 0 0 / 0.18);
+  --shadow-2: 0 8px 28px rgb(0 0 0 / 0.22);
+
+  --type-slot-1: #2a78d6;
+  --type-slot-2: #d63c3b;
+  --type-slot-3: #4a3aa7;
+  --type-slot-4: #008300;
+  --type-slot-5: #c2497f;
+  --type-slot-6: #96690a;
+  --type-slot-7: #0f7d57;
+  --type-slot-8: #bf4d1c;
 
   color-scheme: light;
 }

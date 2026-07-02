@@ -70,9 +70,12 @@ export function navItems(caps: Capabilities): NavItem[] {
     // under /tenant). exact so /tenant/backends doesn't also highlight it.
     items.push({ href: '/tenant', label: 'Keys & Members', iconKey: 'keys', section: 'tenant', exact: true })
   }
-  if (caps.viewTenantBackends) {
-    items.push({ href: '/tenant/backends', label: 'Backends', iconKey: 'backends', section: 'tenant' })
-  }
+  // S11 (Q3, design 05-§2.5): /tenant/backends hat KEINE Route (routes/index.ts)
+  // — der Link führte auf NotFound. Fail-closed ausgeblendet, bis die
+  // Tenant-Backends-Welle die Route baut; Wiedereinblendung = dieser eine push.
+  // if (caps.viewTenantBackends) {
+  //   items.push({ href: '/tenant/backends', label: 'Backends', iconKey: 'backends', section: 'tenant' })
+  // }
 
   // SERVER — cross-tenant admin (server-admin only). Tenants route owned by the
   // server-admin axis (A2); the ops surfaces stay here conservatively (D5/K2).

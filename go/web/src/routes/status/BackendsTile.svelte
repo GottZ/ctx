@@ -5,10 +5,11 @@
 
   let { backends }: { backends: BackendStatus[] } = $props()
 
-  function stateColor(s: string): string {
-    if (s === 'active') return 'var(--ok)'
-    if (s === 'cooldown') return 'var(--warn)'
-    return 'var(--text-faint)'
+  // K-f-Klassen-Mapping (Q3): active ok, cooldown warn, sonst idle (fail-closed).
+  function stateClass(s: string): string {
+    if (s === 'active') return 'ok'
+    if (s === 'cooldown') return 'warn'
+    return 'idle'
   }
 </script>
 
@@ -35,7 +36,7 @@
               <td class="roles">{b.roles.join(', ')}</td>
               <td class="num">{b.priority}</td>
               <td class="state">
-                <span class="dot" style="background:{stateColor(b.effective_state)}"></span>
+                <span class="dot {stateClass(b.effective_state)}"></span>
                 {b.effective_state}{#if b.effective_state === 'cooldown'}
                   · {b.cooldown_remaining_s}s{/if}
                 {#if b.last_error_class}
@@ -144,6 +145,15 @@
     border-radius: 50%;
     margin-right: var(--space-1);
     vertical-align: middle;
+  }
+  .dot.ok {
+    background: var(--ok);
+  }
+  .dot.warn {
+    background: var(--warn);
+  }
+  .dot.idle {
+    background: var(--text-faint);
   }
   .errcls {
     margin-left: var(--space-2);

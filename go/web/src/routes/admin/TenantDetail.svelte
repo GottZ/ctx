@@ -74,10 +74,11 @@
     }
   }
 
-  function statusColor(s: TenantStatus): string {
-    if (s === 'active') return 'var(--ok)'
-    if (s === 'suspended') return 'var(--warn)'
-    return 'var(--danger)' // offboarding
+  // K-f-Klassen-Mapping (Q3): Default-Zweig fail-closed.
+  function statusClass(s: TenantStatus): string {
+    if (s === 'active') return 'ok'
+    if (s === 'suspended') return 'warn'
+    return 'danger' // offboarding + Unbekanntes
   }
 
   function fmtDate(iso: string): string {
@@ -162,7 +163,7 @@
       <header class="card-head">
         <h2>{tenant.slug}</h2>
         <span class="badge">
-          <span class="dot" style="background:{statusColor(tenant.status)}"></span>{tenant.status}
+          <span class="dot {statusClass(tenant.status)}"></span>{tenant.status}
         </span>
       </header>
       <dl class="meta">
@@ -408,6 +409,15 @@
     border-radius: 50%;
     margin-right: var(--space-1);
     vertical-align: middle;
+  }
+  .dot.ok {
+    background: var(--ok);
+  }
+  .dot.warn {
+    background: var(--warn);
+  }
+  .dot.danger {
+    background: var(--danger);
   }
   .actions {
     display: flex;
