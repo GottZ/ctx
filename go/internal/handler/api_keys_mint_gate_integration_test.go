@@ -87,7 +87,7 @@ func TestApiKeyCreate_MintGate_Integration(t *testing.T) {
 	mintGateMapScope(t, pool, "t22-a", tenantA)
 	mintGateMapScope(t, pool, "t22-b", tenantB)
 
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tenantAdminA := &auth.AuthResult{IsValid: true, IsAdmin: false, TenantID: tenantA, TenantRole: auth.RoleAdmin}
 	// server-admin's own tenant is irrelevant — it skips the gate entirely.

@@ -66,8 +66,8 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	quota := backends.NewQuotaAccountant(pool, 30*time.Second)
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
-	queryHandler := handler.NewQueryHandler(pool, cfgStore, backendPool, quota)
-	storeH := handler.NewStoreHandler(pool, cfgStore)
+	queryHandler := handler.NewQueryHandler(pool, cfgStore, backendPool, quota, blocktypeReg)
+	storeH := handler.NewStoreHandler(pool, cfgStore, blocktypeReg)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
 	graphH := handler.NewGraphHandler(pool, cfgStore)
 	overviewH := handler.NewGraphOverviewHandler(pool, cfgStore)
@@ -77,14 +77,14 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	gamingReload := func(ctx context.Context) error {
 		return settings.Reload(ctx, pool, cfgStore)
 	}
-	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler, gamingReload, quota)
+	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler, gamingReload, quota, blocktypeReg)
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)
-	digestH := handler.NewDigestHandler(pool)
+	digestH := handler.NewDigestHandler(pool, blocktypeReg)
 	// Welle 42: daily synthesis manual trigger. Chains over the pool's digest
 	// role at constant internal (G28/E6) — the same gate as the scheduler's
 	// 03:00 iteration.
-	synthH := handler.NewSynthesizeHandler(pool, backendPool)
+	synthH := handler.NewSynthesizeHandler(pool, backendPool, blocktypeReg)
 
 	// Status dashboard (F4-W6/G33): ONE process-wide collector feeds GET
 	// /api/status (and, in W7/G34, SSE) from a cache — N pollers cost one
@@ -104,6 +104,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		Pool:         pool,
 		QueryHandler: http.HandlerFunc(queryHTTPHandler),
 		Cfg:          cfgStore,
+		Blocktypes:   blocktypeReg,
 	})
 	// MCP endpoint — auth middleware injects AuthResult into context.
 	r.Group(func(r chi.Router) {

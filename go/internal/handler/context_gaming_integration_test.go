@@ -87,7 +87,7 @@ func TestGamingModePersistence_Integration(t *testing.T) {
 			next.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), authResultKey, ar)))
 		})
 	})
-	manageH := NewManageHandler(pool, cfgStore, nil, bp, nil, reload, nil)
+	manageH := NewManageHandler(pool, cfgStore, nil, bp, nil, reload, nil, nil)
 	router.Post("/api/manage", manageH.HandleManage)
 
 	do := func(t *testing.T, body string) *httptest.ResponseRecorder {

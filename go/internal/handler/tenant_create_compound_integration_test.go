@@ -53,7 +53,7 @@ func TestTenantCreateCompound_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	// The headline: a single tenant-create yields a working, authenticatable owner.

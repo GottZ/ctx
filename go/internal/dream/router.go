@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 )
@@ -34,6 +35,22 @@ type Router struct {
 	Floor func(s backends.Sensitivity, scope string) backends.Sensitivity
 	// Report feeds attempt outcomes into pool health (llm.PoolReporter).
 	Report llm.ReportFunc
+	// Blocktypes is the block-type registry (WF T4/T5): the daily-report
+	// classify hook and (T5) the candidate-search visibility allowlist resolve
+	// from SnapshotForTenant per cycle — never from the compiled-in builtin
+	// set. Set by scheduler.newRouter and the synthesize handler; nil in tests
+	// without classify/retrieval wiring.
+	Blocktypes *blocktype.Registry
+}
+
+// TypeSet resolves the tenant's block-type policy set for this router's
+// iteration scope. nil registry → nil set (consumers fail loudly, never
+// silently builtin).
+func (r *Router) TypeSet(ctx context.Context) *blocktype.Set {
+	if r.Blocktypes == nil {
+		return nil
+	}
+	return r.Blocktypes.SnapshotForTenant(ctx, r.Tenant)
 }
 
 // FloorSens applies the scope floor; identity when none is configured.

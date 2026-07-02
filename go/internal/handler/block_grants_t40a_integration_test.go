@@ -217,7 +217,7 @@ func TestBlockGrantsT40a_ManageGetOracle_Integration(t *testing.T) {
 	// Grantee key (real api_keys row so LogAccess's api_key_id cast holds).
 	keyID := bgKey(t, pool, "t40o-grantee-key", scopeA)
 
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 	callGet := func(blockID string) map[string]any {
 		ar := &auth.AuthResult{
 			IsValid: true, HomeScope: scopeA, ReadScopes: []string{scopeA},

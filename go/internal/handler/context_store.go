@@ -10,6 +10,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,14 +18,18 @@ import (
 
 // StoreHandler handles POST /api/store.
 type StoreHandler struct {
-	pool *pgxpool.Pool
-	cfg  ConfigStore
+	pool       *pgxpool.Pool
+	cfg        ConfigStore
+	blocktypes *blocktype.Registry
 }
 
 // NewStoreHandler creates a new StoreHandler. The write rate limit comes from
-// a config snapshot per request (F1-W7), not a boot copy.
-func NewStoreHandler(pool *pgxpool.Pool, cfg ConfigStore) *StoreHandler {
-	return &StoreHandler{pool: pool, cfg: cfg}
+// a config snapshot per request (F1-W7), not a boot copy. blocktypes feeds
+// the T4 classify hook (registry-driven, never the compiled-in builtin set);
+// nil in tests that don't exercise classification — the hook then logs and
+// skips (block stays at the default type).
+func NewStoreHandler(pool *pgxpool.Pool, cfg ConfigStore, blocktypes *blocktype.Registry) *StoreHandler {
+	return &StoreHandler{pool: pool, cfg: cfg, blocktypes: blocktypes}
 }
 
 type storeRequest struct {
@@ -158,10 +163,10 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Welle 44: Auto-classify type_name + is_meta from metadata + title.
-	// metadata.is_meta=true → system-meta. dream-source or audit-pattern in
-	// title → audit-trail. Otherwise no-op (default 'knowledge').
-	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, block.ID, block.Title, block.Metadata); err != nil {
+	// Welle 44 / WF T4: Auto-classify type_name + is_meta from the registry
+	// snapshot (rules are data now; type_source='manual' blocks are never
+	// re-classified). No-op when no rule matches (default type stays).
+	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, h.classifySet(ctx), block.ID, block.Title, block.Metadata); err != nil {
 		slog.Warn("store: auto-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
 	}
 
@@ -288,4 +293,15 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		slog.Error("failed to encode JSON response", "error", err)
 	}
+}
+
+// classifySet resolves the caller's block-type policy set for the classify
+// hook. nil registry (tests without classify wiring) → nil set: the hook
+// fails loudly in its error return instead of silently using a compiled-in
+// set — the T4 policy-effect gate depends on the DB registry being the source.
+func (h *StoreHandler) classifySet(ctx context.Context) *blocktype.Set {
+	if h.blocktypes == nil {
+		return nil
+	}
+	return h.blocktypes.SnapshotForRequest(ctx)
 }

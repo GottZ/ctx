@@ -8,7 +8,7 @@
 //
 //	GOTMPDIR=/compose/n8n/.gocache GOCACHE=/compose/n8n/.gocache/build \
 //	  go test -tags=integration ./internal/blocktype/ -count=1 -v
-package blocktype
+package blocktype_test
 
 import (
 	"context"
@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/testdb"
 	"github.com/GottZ/ctx/migrations"
 )
@@ -82,7 +83,7 @@ func installCapture(t *testing.T) *logCapture {
 	return c
 }
 
-func dampingOf(t *testing.T, s *Set) float64 {
+func dampingOf(t *testing.T, s *blocktype.Set) float64 {
 	t.Helper()
 	// A query no intent pattern matches — audit-trail stays damped.
 	names, factors := s.DampedTypesFor("zzz probe query zzz")
@@ -111,7 +112,7 @@ func TestRegistryGolden_Integration(t *testing.T) {
 			t.Fatalf("select seeds: %v", err)
 		}
 		defer rows.Close()
-		got := map[string]Policy{}
+		got := map[string]blocktype.Policy{}
 		for rows.Next() {
 			var (
 				name, scope        string
@@ -121,7 +122,7 @@ func TestRegistryGolden_Integration(t *testing.T) {
 			if err := rows.Scan(&name, &scope, &builtin, &isDefault, &raw); err != nil {
 				t.Fatalf("scan: %v", err)
 			}
-			p, err := DecodePolicy(name, scope, builtin, isDefault, raw)
+			p, err := blocktype.DecodePolicy(name, scope, builtin, isDefault, raw)
 			if err != nil {
 				t.Fatalf("seed row %q does not decode: %v", name, err)
 			}
@@ -131,8 +132,8 @@ func TestRegistryGolden_Integration(t *testing.T) {
 			t.Fatalf("rows: %v", err)
 		}
 
-		want := map[string]Policy{}
-		for _, b := range builtinPolicies() {
+		want := map[string]blocktype.Policy{}
+		for _, b := range blocktype.BuiltinPoliciesForTest() {
 			want[b.Name] = b
 		}
 		if len(got) != len(want) {
@@ -213,11 +214,11 @@ func TestRegistryGolden_Integration(t *testing.T) {
 
 	t.Run("boot_healthy_and_reload_reflects_db", func(t *testing.T) {
 		capture := installCapture(t)
-		reg := NewRegistry()
+		reg := blocktype.NewRegistry()
 		bctx, cancel := context.WithCancel(ctx)
 		t.Cleanup(cancel)
 		reg.Boot(bctx, pool)
-		if got := reg.Health(); got != HealthOK {
+		if got := reg.Health(); got != blocktype.HealthOK {
 			t.Fatalf("healthy boot: Health() = %q, want ok", got)
 		}
 		if capture.has(slog.LevelError, "", "") {
@@ -249,13 +250,13 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 			t.Fatalf("corrupt row: %v", err)
 		}
 		capture := installCapture(t)
-		reg := NewRegistry()
+		reg := blocktype.NewRegistry()
 		reg.RetryInterval = 100 * time.Millisecond
 		bctx, cancel := context.WithCancel(ctx)
 		t.Cleanup(cancel)
 		reg.Boot(bctx, pool)
 
-		if got := reg.Health(); got != HealthBuiltinFallback {
+		if got := reg.Health(); got != blocktype.HealthBuiltinFallback {
 			t.Fatalf("corrupt-row boot: Health() = %q, want builtin-fallback (silent WARN path?)", got)
 		}
 		if !capture.has(slog.LevelError, "boot reload failed", "") {
@@ -274,10 +275,10 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 			t.Fatalf("heal row: %v", err)
 		}
 		deadline := time.Now().Add(10 * time.Second)
-		for reg.Health() != HealthOK && time.Now().Before(deadline) {
+		for reg.Health() != blocktype.HealthOK && time.Now().Before(deadline) {
 			time.Sleep(50 * time.Millisecond)
 		}
-		if got := reg.Health(); got != HealthOK {
+		if got := reg.Health(); got != blocktype.HealthOK {
 			t.Fatalf("degraded state not cleared by retry loop within 10s: Health() = %q", got)
 		}
 		if got := dampingOf(t, reg.Snapshot()); got != 0.4 {
@@ -302,7 +303,7 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 			t.Fatalf("delete knowledge row: %v", err)
 		}
 		capture := installCapture(t)
-		reg := NewRegistry()
+		reg := blocktype.NewRegistry()
 		if err := reg.Reload(ctx, pool); err != nil {
 			t.Fatalf("reload after builtin delete errored (replace semantics?): %v", err)
 		}
@@ -310,7 +311,7 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 		if !ok {
 			t.Fatal("knowledge unresolvable after row delete — replace semantics, corpus blackout")
 		}
-		if p.Retrieval.Kind != RetrievalFullPass || !p.IsDefault {
+		if p.Retrieval.Kind != blocktype.RetrievalFullPass || !p.IsDefault {
 			t.Errorf("knowledge fallback policy = %+v, want builtin full-pass default", p)
 		}
 		if !hasString(reg.Snapshot().VisibleTypes(), "knowledge") {
@@ -345,7 +346,7 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 			t.Fatalf("insert orphan block: %v", err)
 		}
 		capture := installCapture(t)
-		reg := NewRegistry()
+		reg := blocktype.NewRegistry()
 		if err := reg.Reload(ctx, pool); err != nil {
 			t.Fatalf("reload: %v", err)
 		}
@@ -362,11 +363,11 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 			t.Fatalf("drop table: %v", err)
 		}
 		capture := installCapture(t)
-		reg := NewRegistry()
+		reg := blocktype.NewRegistry()
 		bctx, cancel := context.WithCancel(ctx)
 		t.Cleanup(cancel)
 		reg.Boot(bctx, pool)
-		if got := reg.Health(); got != HealthOK {
+		if got := reg.Health(); got != blocktype.HealthOK {
 			t.Fatalf("pre-072 boot: Health() = %q, want ok (42P01 is class a, not b)", got)
 		}
 		if !capture.has(slog.LevelWarn, "registry table missing", "") {

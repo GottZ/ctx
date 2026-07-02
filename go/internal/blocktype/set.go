@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/rrf"
 )
 
 // Set is an immutable snapshot of one resolved type namespace (analogous to
@@ -27,8 +29,9 @@ type Set struct {
 	classifyOrder  []Policy // sorted by (priority, name)
 }
 
-// dampedEntry precomputes the per-type damping data for DampedTypesFor,
-// with patterns lowercased once at build time.
+// dampedEntry holds the per-type damping data for DampedTypesFor. Matching
+// runs through rrf.MatchesAny — ONE engine for read-side intent lift and
+// write-side classification (T4, design/01 §4.5 dual-use decoupling).
 type dampedEntry struct {
 	name     string
 	factor   float64
@@ -73,11 +76,7 @@ func NewSet(policies []Policy) (*Set, error) {
 			s.visible = append(s.visible, n)
 		}
 		if p.Retrieval.Kind == RetrievalDamped {
-			lower := make([]string, len(p.Retrieval.IntentPatterns))
-			for i, pat := range p.Retrieval.IntentPatterns {
-				lower[i] = strings.ToLower(pat)
-			}
-			s.damped = append(s.damped, dampedEntry{name: n, factor: p.Retrieval.DampingFactor, patterns: lower})
+			s.damped = append(s.damped, dampedEntry{name: n, factor: p.Retrieval.DampingFactor, patterns: p.Retrieval.IntentPatterns})
 		}
 		if p.Retrieval.Kind == RetrievalAggregateToParent {
 			s.aggregate = append(s.aggregate, n)
@@ -139,25 +138,17 @@ func (s *Set) VisibleTypes() []string { return s.visible }
 
 // DampedTypesFor returns the parallel (types, factors) arrays for the query:
 // damped types whose intent patterns do NOT match the query. An intent match
-// lifts the type out of the arrays (factor 1.0 downstream) — generalizes
-// rrf.AuditTrailFactor.
+// lifts the type out of the arrays (factor 1.0 downstream) — generalizes the
+// former rrf.AuditTrailFactor; matching is rrf.MatchesAny (the shared engine).
 func (s *Set) DampedTypesFor(query string) ([]string, []float64) {
 	if len(s.damped) == 0 {
 		return nil, nil
 	}
-	q := strings.ToLower(query)
 	names := make([]string, 0, len(s.damped))
 	factors := make([]float64, 0, len(s.damped))
 	for _, d := range s.damped {
-		lifted := false
-		for _, pat := range d.patterns {
-			if strings.Contains(q, pat) {
-				lifted = true
-				break
-			}
-		}
-		if lifted {
-			continue
+		if rrf.MatchesAny(query, d.patterns) {
+			continue // intent lift: type leaves the damping arrays
 		}
 		names = append(names, d.name)
 		factors = append(factors, d.factor)
@@ -204,10 +195,16 @@ func (s *Set) AggregateTypes() []string { return s.aggregate }
 
 // Classify runs every type's classify rules in (priority, name) order,
 // first match wins. No match returns the default type name with
-// matched=false. Semantics mirror store.ClassifyBlockAfterUpsert's decision
-// tree (metadata flag → source prefix → title pattern, per type).
+// matched=false. Semantics mirror the pre-T4 store.ClassifyBlockAfterUpsert
+// decision tree (metadata flag → source prefix → title pattern, per type) —
+// pinned by the T4 golden corpus (store/classify_golden_test.go) that was
+// generated against the old tree BEFORE it was replaced.
+//
+// Source prefixes match as PROPER prefixes: the source must carry a payload
+// after the prefix (old tree: len(src) > 6 && src[:6] == "dream-" — a source
+// that IS the bare prefix, e.g. exactly "dream-", never matched and still
+// does not). Title patterns run through rrf.MatchesAny (shared engine, §4.5).
 func (s *Set) Classify(title string, metadata map[string]any) (string, bool) {
-	titleLower := strings.ToLower(title)
 	source, _ := metadata["source"].(string)
 	for _, p := range s.classifyOrder {
 		for _, flag := range p.Classify.MetadataFlags {
@@ -216,14 +213,12 @@ func (s *Set) Classify(title string, metadata map[string]any) (string, bool) {
 			}
 		}
 		for _, prefix := range p.Classify.SourcePrefixes {
-			if prefix != "" && strings.HasPrefix(source, prefix) {
+			if prefix != "" && len(source) > len(prefix) && strings.HasPrefix(source, prefix) {
 				return p.Name, true
 			}
 		}
-		for _, pat := range p.Classify.TitlePatterns {
-			if pat != "" && strings.Contains(titleLower, strings.ToLower(pat)) {
-				return p.Name, true
-			}
+		if rrf.MatchesAny(title, p.Classify.TitlePatterns) {
+			return p.Name, true
 		}
 	}
 	return s.defaultName, false

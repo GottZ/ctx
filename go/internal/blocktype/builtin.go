@@ -8,11 +8,11 @@ package blocktype
 // is safe: without the table (pre-072) the process behaves exactly like
 // today; with the table the DB rows overlay these values (merge reload).
 //
-// auditPatterns is a deliberate second copy of internal/rrf/pattern.go:25-36
-// for the T3 window: pattern.go stays the live consumer until T4/T5 turn it
-// into a pattern-arg engine and retire its own list (§4.4 #16). The golden
-// test pins THIS copy against the migration; TestBuiltinPatternsMatchRRF pins
-// it against the rrf copy, so a drift in either direction goes red.
+// auditPatterns is the compiled-in mirror of the M072 audit-trail seed
+// patterns — since T4 the ONLY code-side copy (rrf/pattern.go is a pure
+// pattern-arg engine now, §4.4 #16; the T3-window duplication ended). The
+// golden integration test pins this copy against the migration seeds, so a
+// drift in either direction goes red.
 var auditPatterns = []string{
 	"session",
 	"welle",
@@ -26,7 +26,8 @@ var auditPatterns = []string{
 	"baseline",
 }
 
-// auditTrailDamping mirrors rrf.AuditTrailFactor's damped branch (0.3).
+// auditTrailDamping mirrors the historical Welle-41 damped factor (0.3),
+// seeded as data in M072.
 const auditTrailDamping = 0.3
 
 // builtinPolicies returns fresh copies of the four builtin type policies

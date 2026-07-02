@@ -111,7 +111,7 @@ func TestApiKeyCreate_TenantBinding_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tenantA := be5SeedTenant(t, pool, "be6kc-acme")
 	tenantB := be5SeedTenant(t, pool, "be6kc-globex")
@@ -224,7 +224,7 @@ func TestApiKeyCreate_KeyQuota_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tid := be5SeedTenant(t, pool, "be6kc-capped")
 	scope := "be6kc-capped:keys"

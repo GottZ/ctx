@@ -99,7 +99,7 @@ func TestApiKeyUpdate_Handler_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tenantA := be5SeedTenant(t, pool, "be6ku-acme")
 	tenantB := be5SeedTenant(t, pool, "be6ku-globex")
@@ -227,7 +227,7 @@ func TestApiKeyUpdate_LastOwner_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tid := be5SeedTenant(t, pool, "be6ku-soleowner")
 	scope := "be6ku-soleowner:keys"
@@ -259,7 +259,7 @@ func TestApiKeyUpdate_OwnerProtection_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tid := be5SeedTenant(t, pool, "be6ku-twoowners")
 	scope := "be6ku-twoowners:keys"

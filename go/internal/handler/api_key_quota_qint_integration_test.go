@@ -91,7 +91,7 @@ func TestApiKeyQuota_QINT_ReleaseGate_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	// 1. LIVE-429 (live handler): max_keys=2, a tenant-admin self-mints 3× → the
 	// first two 200, the third 429 with the quota error, active count exactly 2.

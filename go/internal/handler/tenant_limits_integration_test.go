@@ -117,7 +117,7 @@ func TestTenantLimitSet_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 	tid := be5SeedTenant(t, pool, "tl-acme")
 
 	// Server-admin sets both caps; the response echoes them AND an independent
@@ -218,7 +218,7 @@ func TestTenantUsageGet_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tenantA := be5SeedTenant(t, pool, "tlu-acme")
 	tenantB := be5SeedTenant(t, pool, "tlu-globex")
@@ -309,7 +309,7 @@ func TestTenantCreateSeeding_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	// WITH limits → echoed on create AND persisted (a follow-up tenant-get echoes).
 	t.Run("WithLimits", func(t *testing.T) {

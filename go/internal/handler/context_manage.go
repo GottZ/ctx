@@ -12,6 +12,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,6 +40,11 @@ type ManageHandler struct {
 	// synchronously so the new policy is live at once. nil in tests that don't
 	// exercise quota mutations (the get path then reads the table directly).
 	quota *backends.QuotaAccountant
+	// blocktypes feeds the T4 re-classify hook on the update path (design/01
+	// §4.5, seam 5): a title/metadata update re-runs the auto-classifier for
+	// type_source='auto' blocks. nil in tests without classify wiring — the
+	// hook is then skipped (pre-T4 behaviour: update never classified).
+	blocktypes *blocktype.Registry
 }
 
 // NewManageHandler creates a new ManageHandler. cfg is the runtime-config
@@ -49,8 +55,8 @@ type ManageHandler struct {
 // post-mutation reload. auditController feeds blocks-audit-* (G41); the
 // production scheduler implements both controller interfaces. settingsReload
 // is the synchronous post-write config reload for gaming-mode (F3-P6).
-func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool, auditController AuditController, settingsReload func(context.Context) error, quota *backends.QuotaAccountant) *ManageHandler {
-	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool, auditController: auditController, settingsReload: settingsReload, quota: quota}
+func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool, auditController AuditController, settingsReload func(context.Context) error, quota *backends.QuotaAccountant, blocktypes *blocktype.Registry) *ManageHandler {
+	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool, auditController: auditController, settingsReload: settingsReload, quota: quota, blocktypes: blocktypes}
 }
 
 type manageRequest struct {
@@ -673,6 +679,18 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 			"success": false, "error": "Block not found",
 		})
 		return
+	}
+
+	// WF T4 (design/01 §4.5, seam 5): re-run the auto-classifier when title or
+	// metadata changed — safe because ClassifyBlockAfterUpsert only writes
+	// type_source='auto' blocks (manual wins permanently, sensitivity_source
+	// pattern). Deliberately match-only: a block whose new title stops matching
+	// keeps its current type (the hook promotes, never demotes). Non-fatal.
+	if h.blocktypes != nil && (data.Title != nil || data.Metadata != nil) {
+		set := h.blocktypes.SnapshotForRequest(ctx)
+		if _, _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, set, block.ID, block.Title, block.Metadata); err != nil {
+			slog.Warn("manage: re-classify on update failed", "error", err, "block_id", block.ID, "request_id", reqID)
+		}
 	}
 
 	// Re-extract temporal data when content changes.

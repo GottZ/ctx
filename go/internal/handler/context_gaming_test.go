@@ -37,7 +37,7 @@ func gamingHandler(active bool, disabled, poolNames []string) *ManageHandler {
 		bs = append(bs, backends.Backend{Name: n})
 	}
 	bp.SeedSnapshotForTest(bs)
-	return NewManageHandler(nil, staticConfigStore{cfg}, nil, bp, nil, nil, nil)
+	return NewManageHandler(nil, staticConfigStore{cfg}, nil, bp, nil, nil, nil, nil)
 }
 
 func gamingReq(t *testing.T, h *ManageHandler, ar *auth.AuthResult, data string) *httptest.ResponseRecorder {

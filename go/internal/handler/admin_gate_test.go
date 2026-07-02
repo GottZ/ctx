@@ -23,7 +23,7 @@ func manageReqAs(t *testing.T, ar *auth.AuthResult, body any) *httptest.Response
 		t.Fatalf("marshal body: %v", err)
 	}
 
-	h := NewManageHandler(nil, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(nil, nil, nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))

@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -18,7 +19,11 @@ import (
 // RunDigest builds a deterministic topic map (compact block index) for the given scope.
 // Groups blocks by category, sorts alphabetically, and upserts as category=index, title=topic-map-{scope}.
 // No LLM involved — purely deterministic.
-func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readScopes []string) error {
+//
+// blocktypes (WF T4) feeds the topic-map classify hook with the registry
+// snapshot; the digest.include type filter follows in T8. nil in tests
+// without classify wiring — the hook then logs and skips.
+func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, homeScope string, readScopes []string) error {
 	// Fetch all block metadata (no content).
 	blocks, err := fetchBlockMeta(ctx, pool, readScopes)
 	if err != nil {
@@ -104,10 +109,15 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, homeScope string, readSc
 		return fmt.Errorf("digest: upsert topic map: %w", err)
 	}
 
-	// Welle 44 hook: classify type_name + is_meta. Topic-map metadata sets
-	// is_meta=true so branch 1 (system-meta) fires. Idempotent — re-runs of
-	// RunDigest are no-ops at this layer.
-	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, block.ID, block.Title, block.Metadata); err != nil {
+	// Welle 44 / WF T4 hook: classify type_name + is_meta from the registry
+	// snapshot (tenant-resolved for the digest's home scope). Topic-map
+	// metadata sets is_meta=true so the system-meta rule fires. Idempotent —
+	// re-runs of RunDigest are no-ops at this layer.
+	var classifySet *blocktype.Set
+	if blocktypes != nil {
+		classifySet = blocktypes.SnapshotForTenant(ctx, homeScope)
+	}
+	if _, _, err := store.ClassifyBlockAfterUpsert(ctx, pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 		// Non-fatal: the topic-map block exists, classification can be retried
 		// next cycle. Log + continue rather than fail the whole digest.
 		slog.Warn("digest: topic map auto-classify failed", "error", err, "block_id", block.ID)

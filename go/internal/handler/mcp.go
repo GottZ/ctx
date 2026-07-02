@@ -16,6 +16,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -32,6 +33,11 @@ type MCPConfig struct {
 	// Cfg feeds the store tool's sensitivity default
 	// (pool.default_block_sensitivity, F3 §3.5) — one snapshot per call.
 	Cfg ConfigStore
+	// Blocktypes feeds the store tool's classify hook (WF T4) — registry
+	// snapshot per call, never the compiled-in builtin set. nil in tests
+	// without classify wiring: the hook then errors and is logged, the block
+	// stays at the default type.
+	Blocktypes *blocktype.Registry
 }
 
 // NewMCPHandler creates a Streamable HTTP handler for the MCP protocol.
@@ -224,10 +230,18 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			return errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
 		}
 
-		// Welle 44: Auto-classify type_name + is_meta from metadata + title.
-		// MCP audit-blocks (welle promotes, ctx-system docs) used to need a
-		// follow-up SQL UPDATE — now handled inline.
-		_, _, _ = store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, block.ID, block.Title, block.Metadata)
+		// Welle 44 / WF T4: Auto-classify type_name + is_meta from the registry
+		// snapshot. MCP audit-blocks (welle promotes, ctx-system docs) used to
+		// need a follow-up SQL UPDATE — handled inline. Errors are LOGGED, not
+		// silently dropped (T4 gate: the pre-T4 `_, _, _ =` discarded a failed
+		// classification without a trace).
+		var classifySet *blocktype.Set
+		if cfg.Blocktypes != nil {
+			classifySet = cfg.Blocktypes.SnapshotForRequest(ctx)
+		}
+		if _, _, err := store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
+			slog.Warn("mcp: auto-classify failed", "error", err, "block_id", block.ID)
+		}
 
 		// Temporal enrichment (inline, not async — MCP calls are not latency-sensitive).
 		times := store.ExtractDates(block.Content)

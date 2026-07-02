@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/digest"
 	"github.com/GottZ/ctx/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,11 +28,16 @@ func TestRunDigest_TopicMapClassifiedAsSystemMeta(t *testing.T) {
 	homeScope := "private"
 	readScopes := []string{homeScope}
 
+	// Registry loaded from the DB seeds (M072) — the classify hook sources
+	// rules from data, never the compiled-in tree (T4).
+	reg := blocktype.NewRegistry()
+	reg.Boot(ctx, pool)
+
 	// Need at least one block so RunDigest produces a topic-map. The empty-
 	// corpus branch returns early with no upsert.
 	seedDigestBlock(t, pool, homeScope, "test-block-1")
 
-	if err := digest.RunDigest(ctx, pool, homeScope, readScopes); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, homeScope, readScopes); err != nil {
 		t.Fatalf("RunDigest: %v", err)
 	}
 
@@ -68,12 +74,17 @@ func TestRunDigest_IdempotentReClassification(t *testing.T) {
 	homeScope := "private"
 	readScopes := []string{homeScope}
 
+	// Registry loaded from the DB seeds (M072) — the classify hook sources
+	// rules from data, never the compiled-in tree (T4).
+	reg := blocktype.NewRegistry()
+	reg.Boot(ctx, pool)
+
 	seedDigestBlock(t, pool, homeScope, "test-block-1")
 
-	if err := digest.RunDigest(ctx, pool, homeScope, readScopes); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, homeScope, readScopes); err != nil {
 		t.Fatalf("first RunDigest: %v", err)
 	}
-	if err := digest.RunDigest(ctx, pool, homeScope, readScopes); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, homeScope, readScopes); err != nil {
 		t.Fatalf("second RunDigest: %v", err)
 	}
 

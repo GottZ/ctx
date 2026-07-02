@@ -206,7 +206,7 @@ func TestBlockGrantT43_OwnershipAndCrossTenantGates(t *testing.T) {
 // h builds a ManageHandler with only the pool (the block-grant actions need no
 // dream/backend/quota controllers).
 func t43Handler(pool *pgxpool.Pool) *ManageHandler {
-	return NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	return NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 }
 
 func containsStr(s []string, v string) bool {

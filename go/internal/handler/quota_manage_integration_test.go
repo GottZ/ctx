@@ -41,7 +41,7 @@ func TestQuotaManageRoundTrip(t *testing.T) {
 	}
 
 	acc := backends.NewQuotaAccountant(pool, time.Minute)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, acc)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, acc, nil)
 
 	callSet := func(ar *auth.AuthResult, data map[string]any) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(data)

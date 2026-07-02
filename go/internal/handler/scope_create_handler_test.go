@@ -120,7 +120,7 @@ func TestScopeCreate_Handler_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tenantA := be5SeedTenant(t, pool, "be5sc-acme")
 	tenantB := be5SeedTenant(t, pool, "be5sc-globex")
@@ -200,7 +200,7 @@ func TestScopeCreate_Quota_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tid := be5SeedTenant(t, pool, "be5sc-capped")
 	be5SetMaxScopes(t, pool, tid, 1)
@@ -227,7 +227,7 @@ func TestScopeList_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil)
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, nil)
 
 	tenantA := be5SeedTenant(t, pool, "be5sl-acme")
 	tenantB := be5SeedTenant(t, pool, "be5sl-globex")

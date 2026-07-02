@@ -4,18 +4,21 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/digest"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // DigestHandler handles POST /api/digest.
 type DigestHandler struct {
-	pool *pgxpool.Pool
+	pool       *pgxpool.Pool
+	blocktypes *blocktype.Registry
 }
 
-// NewDigestHandler creates a new DigestHandler.
-func NewDigestHandler(pool *pgxpool.Pool) *DigestHandler {
-	return &DigestHandler{pool: pool}
+// NewDigestHandler creates a new DigestHandler. blocktypes feeds the T4
+// topic-map classify hook (registry snapshot, never the compiled-in set).
+func NewDigestHandler(pool *pgxpool.Pool, blocktypes *blocktype.Registry) *DigestHandler {
+	return &DigestHandler{pool: pool, blocktypes: blocktypes}
 }
 
 // HandleDigest triggers a topic map rebuild for the authenticated scope.
@@ -31,7 +34,7 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run digest.
-	err := digest.RunDigest(ctx, h.pool, authResult.HomeScope, authResult.ReadScopes)
+	err := digest.RunDigest(ctx, h.pool, h.blocktypes, authResult.HomeScope, authResult.ReadScopes)
 	if err != nil {
 		slog.Error("digest: run error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{

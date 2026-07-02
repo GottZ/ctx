@@ -3,8 +3,6 @@ package blocktype
 import (
 	"reflect"
 	"testing"
-
-	"github.com/GottZ/ctx/internal/rrf"
 )
 
 func builtinTestSet(t *testing.T) *Set {
@@ -50,30 +48,34 @@ func TestBuiltinSetShape(t *testing.T) {
 	}
 }
 
-// TestDampedTypesForMirrorsAuditTrailFactor pins the generalized damping
-// against the LIVE rrf implementation it replaces in T5 — for every probe
-// query both sides must agree (lift ⇔ factor 1.0).
-func TestDampedTypesForMirrorsAuditTrailFactor(t *testing.T) {
+// TestDampedTypesForAuditTrailGolden pins the generalized damping against
+// FIXED expectations captured from rrf.AuditTrailFactor before T4 retired it
+// (lift ⇔ the old factor was 1.0). The old function is gone — these literals
+// are the frozen contract.
+func TestDampedTypesForAuditTrailGolden(t *testing.T) {
 	s := builtinTestSet(t)
-	queries := []string{
-		"wie funktioniert der embed cache",
-		"session handover von gestern",
-		"Welle 41 AUDIT ergebnisse",
-		"dream v3 performance letzte woche",
-		"was ist der aktuelle stand",
-		"baseline vergleich",
+	cases := []struct {
+		query string
+		lift  bool // true ⇔ old rrf.AuditTrailFactor(query) == 1.0
+	}{
+		{"wie funktioniert der embed cache", false},
+		{"session handover von gestern", true},
+		{"Welle 41 AUDIT ergebnisse", true},
+		{"dream v3 performance letzte woche", true},
+		{"was ist der aktuelle stand", false},
+		{"baseline vergleich", true},
+		{"", false},
 	}
-	for _, q := range queries {
-		names, factors := s.DampedTypesFor(q)
-		wantLift := rrf.AuditTrailFactor(q) == 1.0
-		if wantLift {
+	for _, tc := range cases {
+		names, factors := s.DampedTypesFor(tc.query)
+		if tc.lift {
 			if len(names) != 0 {
-				t.Errorf("query %q: damped %v, want lift (rrf says intent)", q, names)
+				t.Errorf("query %q: damped %v, want intent lift (empty arrays)", tc.query, names)
 			}
 			continue
 		}
 		if !reflect.DeepEqual(names, []string{"audit-trail"}) || !reflect.DeepEqual(factors, []float64{0.3}) {
-			t.Errorf("query %q: (%v, %v), want ([audit-trail], [0.3])", q, names, factors)
+			t.Errorf("query %q: (%v, %v), want ([audit-trail], [0.3])", tc.query, names, factors)
 		}
 	}
 }
@@ -153,18 +155,32 @@ func TestNewSetRejectsBrokenDefaults(t *testing.T) {
 	}
 }
 
-// TestBuiltinPatternsMatchRRF pins the deliberate T3-window copy of the
-// audit patterns against the live rrf list (§4.4 #16 retires the rrf copy in
-// T4/T5; until then a drift in either list goes red here).
-func TestBuiltinPatternsMatchRRF(t *testing.T) {
+// TestBuiltinPatternsDriveEngine replaces the pre-T4 TestBuiltinPatternsMatchRRF:
+// the rrf list is retired (§4.4 #16), the builtin copy is the ONLY code-side
+// list. This test pins that every builtin pattern actually fires through the
+// shared engine paths (DampedTypesFor lift + Classify title rule).
+func TestBuiltinPatternsDriveEngine(t *testing.T) {
+	s := builtinTestSet(t)
 	for _, probe := range auditPatterns {
-		if !rrf.HasAuditTrailIntent("xx " + probe + " yy") {
-			t.Errorf("pattern %q not recognized by rrf.HasAuditTrailIntent — lists drifted", probe)
+		if names, _ := s.DampedTypesFor("xx " + probe + " yy"); len(names) != 0 {
+			t.Errorf("pattern %q does not lift audit-trail damping via the engine", probe)
+		}
+		if name, matched := s.Classify("xx "+probe+" yy", nil); !matched || name != "audit-trail" {
+			t.Errorf("pattern %q does not classify audit-trail via the engine (got %q, %v)", probe, name, matched)
 		}
 	}
-	// Counter-direction: a query with no builtin pattern must not be intent
-	// in rrf either (spot probe, not exhaustive by construction).
-	if rrf.HasAuditTrailIntent("embed cache tuning") {
-		t.Error("rrf matches a query no builtin pattern covers — lists drifted")
+}
+
+// TestClassifySourceProperPrefix pins the old-tree edge case (T4 golden
+// corpus, case source-dream-exact): a source that IS the bare prefix
+// ("dream-", no payload) never matched (len(src) > 6) and must keep not
+// matching under the registry engine.
+func TestClassifySourceProperPrefix(t *testing.T) {
+	s := builtinTestSet(t)
+	if name, matched := s.Classify("Irgendwas", map[string]any{"source": "dream-"}); matched {
+		t.Errorf("bare-prefix source classified as %q, want no match (old-tree parity)", name)
+	}
+	if name, matched := s.Classify("Irgendwas", map[string]any{"source": "dream-x"}); !matched || name != "audit-trail" {
+		t.Errorf("proper-prefix source = (%q, %v), want (audit-trail, true)", name, matched)
 	}
 }

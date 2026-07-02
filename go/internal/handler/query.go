@@ -15,6 +15,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
@@ -57,14 +58,20 @@ type QueryHandler struct {
 	cfg         ConfigStore
 	backendPool *backends.Pool
 	quota       *backends.QuotaAccountant
+	blocktypes  *blocktype.Registry
 }
 
 // NewQueryHandler creates a new QueryHandler. backendPool feeds the
 // synthesis chain (F3-P2) — Chain() is the only way to a backend tuple. quota
 // enforces per-tenant cost/call budgets on the synthesis path (T36, 04-W4); it
 // may be nil (the gate is then skipped — behavior-identical to pre-T36).
-func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, quota *backends.QuotaAccountant) *QueryHandler {
-	return &QueryHandler{pool: pool, cfg: cfg, backendPool: backendPool, quota: quota}
+// blocktypes is the block-type registry (WF T4/T5): the retrieval type policy
+// (visibility allowlist + damping + intent lift) resolves from a
+// SnapshotForRequest per query — NEVER from the compiled-in builtin set (the
+// live DB-sourcing probe would catch that). Must be non-nil for the retrieval
+// path; tests that reach rrf pass blocktype.NewRegistry().
+func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, quota *backends.QuotaAccountant, blocktypes *blocktype.Registry) *QueryHandler {
+	return &QueryHandler{pool: pool, cfg: cfg, backendPool: backendPool, quota: quota, blocktypes: blocktypes}
 }
 
 // queryRequest is the JSON body for the query endpoint.
@@ -486,10 +493,19 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		internalLimit = limit // respect explicit large limits
 	}
 
-	// Welle 41 M039: query-aware audit-trail damping. Pattern-Detection in
-	// rrf.AuditTrailFactor returns 1.0 for explicit-target queries (session/
-	// welle/audit/recurrent/handover/self-audit), 0.3 for generic queries.
-	auditTrailFactor := rrf.AuditTrailFactor(req.Query)
+	// Welle 41 M039 / WF T4: query-aware audit-trail damping — the pattern
+	// list and factor come from the REGISTRY snapshot now (audit-trail seed:
+	// intent lift ⇒ 1.0, else damping_factor 0.3), not a compiled-in list.
+	// T5 replaces this scalar with the full damped-arrays parametrisation.
+	typeSet := h.blocktypes.SnapshotForRequest(ctx)
+	auditTrailFactor := 1.0
+	if dampedNames, dampedFactors := typeSet.DampedTypesFor(req.Query); len(dampedNames) > 0 {
+		for i, n := range dampedNames {
+			if n == "audit-trail" {
+				auditTrailFactor = dampedFactors[i]
+			}
+		}
+	}
 
 	// T40b (design/07 §4.2): resolve the caller's block-grant set ONCE and feed
 	// it into both the RRF retrieval OR-arm and the downstream GraphExpand. Same

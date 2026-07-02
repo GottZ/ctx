@@ -410,11 +410,12 @@ func (s *Scheduler) QueryEnd() {
 // (Pool.ScopeSensitivityFloor from SnapshotForTenant, §4.4-(c)).
 func (s *Scheduler) newRouter(cfg *config.Config, tenant string) *dream.Router {
 	return &dream.Router{
-		Pool:   s.backendPool,
-		Tenant: tenant,
-		Gaming: cfg.GamingState(),
-		Floor:  cfg.Pool.ScopeSensitivityFloor.Apply,
-		Report: llm.PoolReporter(s.backendPool),
+		Pool:       s.backendPool,
+		Tenant:     tenant,
+		Gaming:     cfg.GamingState(),
+		Floor:      cfg.Pool.ScopeSensitivityFloor.Apply,
+		Report:     llm.PoolReporter(s.backendPool),
+		Blocktypes: s.blocktypes,
 	}
 }
 
@@ -941,7 +942,7 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		homeScope := effectiveHomeScope(cfg.Scheduler.HomeScope, bt.owned)
 		window := intersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 		slog.Info("scheduler: running digest", "scope", homeScope)
-		if err := digest.RunDigest(ctx, s.pool, homeScope, window); err != nil {
+		if err := digest.RunDigest(ctx, s.pool, s.blocktypes, homeScope, window); err != nil {
 			slog.Error("scheduler: digest error", "error", err)
 			ok = false // one tenant's failure must not skip the others
 		}
