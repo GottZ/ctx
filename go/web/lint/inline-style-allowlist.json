@@ -1,0 +1,7 @@
+[
+  {
+    "file": "src/routes/graph/FloatingWindow.svelte",
+    "count": 1,
+    "reason": "Fenster-Geometrie (left/top/width/height/z-Stack) aus dem Drag-Store — reine Geometrie-Properties, einziger DOM-px-Bind (WebXR-Anker); Farbe/Typo laufen über Klassen (design 05-§4.4.2, Erst-Bestand)."
+  }
+]

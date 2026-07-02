@@ -74,6 +74,9 @@
     display: grid;
     place-items: center;
     padding: var(--space-3);
+    /* stylelint-disable-next-line scale-unlimited/declaration-strict-value --
+     * Token-konform (var(--accent-dim)/var(--dot-pattern)); der Mehrschicht-
+     * Wert (Komma-Layer) übersteigt den Werte-Parser des Plugins. */
     background:
       radial-gradient(60rem 40rem at 50% 18%, var(--accent-dim), transparent 60%),
       radial-gradient(var(--dot-pattern) 1px, transparent 1px);

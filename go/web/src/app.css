@@ -81,7 +81,11 @@ input::placeholder {
   *,
   *::before,
   *::after {
+    /* stylelint-disable scale-unlimited/declaration-strict-value --
+     * Der Guard MUSS jede Token-Dauer überstimmen (deshalb !important) und
+     * near-zero literal setzen — ein var(--dur-*) wäre hier gerade falsch. */
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+    /* stylelint-enable scale-unlimited/declaration-strict-value */
   }
 }

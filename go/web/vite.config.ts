@@ -38,11 +38,20 @@ export default defineConfig({
   server: {
     // Same-origin dev loop: the proxy is server-side, the browser sees one
     // origin — ctxd needs zero CORS code.
-    proxy: {
-      '/api': { target: proxyTarget, changeOrigin: false },
-      '/health': { target: proxyTarget, changeOrigin: false },
-      '/mcp': { target: proxyTarget, changeOrigin: false },
-    },
+    //
+    // Fail-closed under e2e (design 05-§5.2.1, wave Q4): preview inherits
+    // server.proxy via resolveConfig, so this proxy would be the ONE
+    // server-side path from the e2e webServer (always VITE_E2E=1) to a live
+    // backend. Under VITE_E2E the proxy does not exist — an unmocked
+    // /api/** request dies at the static server instead of reaching real
+    // data. Complements the browser-level 599 catch-all (e2e/fixtures.ts).
+    proxy: process.env.VITE_E2E
+      ? undefined
+      : {
+          '/api': { target: proxyTarget, changeOrigin: false },
+          '/health': { target: proxyTarget, changeOrigin: false },
+          '/mcp': { target: proxyTarget, changeOrigin: false },
+        },
   },
   test: {
     // Logic modules only (design 04-§5.5) — no component snapshots, no DOM:
