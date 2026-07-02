@@ -1,5 +1,9 @@
 // Package guard implements the write guard that detects near-duplicate blocks.
-// Uses HNSW similarity check with thresholds: >=0.98 auto-archive, 0.92-0.98 flag for review.
+// Uses an HNSW similarity check; since WF T7 (M074) the thresholds and the
+// candidate set are POLICY — resolved per block type from the block-type
+// registry (blocktype.Set.GuardThresholds / GuardCandidateTypes, seed
+// defaults 0.98 auto-archive / 0.92 flag-for-review = the former literals)
+// and passed to ctx_guard_check as mandatory parameters.
 package guard
 
 import (
@@ -11,16 +15,49 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/GottZ/ctx/internal/blocktype"
 )
 
-// GuardResult holds the outcome of processing a single block.
+// GuardResult holds the outcome of processing a single block. The two
+// thresholds record the POLICY VALUES the decision was made under (per-type,
+// T7) — applyDecision and the audit log persist them instead of literals.
 type GuardResult struct {
-	BlockID      string
-	Decision     string
-	Similarity   float64
-	MatchedID    *string
-	MatchedTitle *string
-	IsCrossScope bool
+	BlockID            string
+	Decision           string
+	Similarity         float64
+	MatchedID          *string
+	MatchedTitle       *string
+	IsCrossScope       bool
+	ThresholdDuplicate float64
+	ThresholdReview    float64
+}
+
+// pendingBlock is one pick-query row: the block plus its policy type (the
+// per-type threshold key).
+type pendingBlock struct {
+	id       string
+	typeName string
+}
+
+// guardPendingWhere is THE single guard-batch pending predicate (WF T7,
+// design/01 §7-T7): the pick query and both count subqueries in the state
+// update consume this one fragment instead of carrying three copies.
+// typesParam binds the GuardCheckTypes allowlist (guard.check=true types).
+// The first three conjuncts mirror idx_guard_pending (M074) byte-for-byte —
+// only pending rows are IN that partial index; category != 'index'
+// (topic-map mechanism rest, §4.2: agent briefings share the system-meta
+// type but ARE checked — dropping the category rest would silently
+// guard-check the topic-map), the lifecycle gate and the type allowlist
+// filter on the index result. typesParam is a code-owned bind placeholder
+// at every call site — never user input.
+func guardPendingWhere(typesParam string) string {
+	return `NOT is_archived
+		  AND (metadata->>'guard_checked_at') IS NULL
+		  AND embedding IS NOT NULL
+		  AND category != 'index'
+		  AND lifecycle_state = 'knowledge'
+		  AND type_name = ANY(` + typesParam + `::text[])`
 }
 
 // guardPool is the minimum *pgxpool.Pool surface that RunGuardBatch needs.
@@ -35,6 +72,14 @@ type guardPool interface {
 // Uses the ctx_guard_check PG function for each block.
 // Returns the number of blocks processed and any error.
 //
+// set is the resolved block-type policy snapshot (WF T7): the pick predicate
+// consumes GuardCheckTypes, the per-block call resolves GuardThresholds by
+// the block's type and passes GuardCandidateTypes as the candidate allowlist.
+// A nil set is a wiring bug and fails loudly (rrf.Search pattern) — an empty
+// GuardCheckTypes list is legitimate policy ("no type is guard-checked") and
+// simply yields zero picks. The singleton state counts stay GLOBAL and count
+// with the same allowlist (telemetry, not policy — design/01 §7-T12 note).
+//
 // Tx-Abort-Kaskade fix (W47-02): Each block is wrapped in a SAVEPOINT so a
 // failed block (SQL error in checkBlock/applyDecision/writeAuditLog) does not
 // poison the surrounding transaction. Without the savepoint, the first error
@@ -42,10 +87,14 @@ type guardPool interface {
 // statement fails — losing all later block updates. With per-block savepoints,
 // a failure is ROLLBACK'd back to its savepoint, the outer tx stays clean, and
 // the loop continues to the next block.
-func RunGuardBatch(ctx context.Context, pool guardPool, limit int) (int, error) {
+func RunGuardBatch(ctx context.Context, pool guardPool, set *blocktype.Set, limit int) (int, error) {
+	if set == nil {
+		return 0, fmt.Errorf("guard: nil block-type policy set (registry not wired?)")
+	}
 	if limit <= 0 {
 		limit = 100
 	}
+	checkTypes := set.GuardCheckTypes()
 
 	// Wrap entire batch in a transaction so FOR UPDATE SKIP LOCKED row locks
 	// are held until all blocks are processed, preventing race conditions.
@@ -55,40 +104,38 @@ func RunGuardBatch(ctx context.Context, pool guardPool, limit int) (int, error) 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
 
-	// Fetch pending blocks (unchecked, not archived, not index, has embedding).
-	// FOR UPDATE SKIP LOCKED prevents concurrent guard runs from processing the same blocks.
-	// Row locks are held for the duration of the transaction.
+	// Fetch pending blocks (the shared guardPendingWhere fragment: unchecked,
+	// not archived, not index, has embedding, knowledge lifecycle, policy
+	// type allowlist). ORDER BY created_at ASC rides idx_guard_pending (M074).
+	// FOR UPDATE SKIP LOCKED prevents concurrent guard runs from processing
+	// the same blocks; row locks are held for the duration of the transaction.
 	rows, err := tx.Query(ctx,
-		`SELECT id FROM context_blocks
-		WHERE NOT is_archived
-		  AND (metadata->>'guard_checked_at') IS NULL
-		  AND category != 'index'
-		  AND embedding IS NOT NULL
-		  AND lifecycle_state = 'knowledge'
+		`SELECT id, type_name FROM context_blocks
+		WHERE `+guardPendingWhere("$1")+`
 		ORDER BY created_at ASC
-		LIMIT $1
+		LIMIT $2
 		FOR UPDATE SKIP LOCKED`,
-		limit,
+		checkTypes, limit,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("guard: fetch pending: %w", err)
 	}
 
-	var blockIDs []string
+	var blocks []pendingBlock
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var b pendingBlock
+		if err := rows.Scan(&b.id, &b.typeName); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("guard: scan block id: %w", err)
 		}
-		blockIDs = append(blockIDs, id)
+		blocks = append(blocks, b)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("guard: rows error: %w", err)
 	}
 
-	if len(blockIDs) == 0 {
+	if len(blocks) == 0 {
 		// No pending blocks. Clear dirty state.
 		_, _ = tx.Exec(ctx,
 			`UPDATE context_guard_state SET
@@ -101,7 +148,7 @@ func RunGuardBatch(ctx context.Context, pool guardPool, limit int) (int, error) 
 	}
 
 	processed := 0
-	for _, blockID := range blockIDs {
+	for _, block := range blocks {
 		// Check for context cancellation (demand interruption).
 		select {
 		case <-ctx.Done():
@@ -110,33 +157,27 @@ func RunGuardBatch(ctx context.Context, pool guardPool, limit int) (int, error) 
 		default:
 		}
 
-		if processBlock(ctx, tx, blockID) {
+		if processBlock(ctx, tx, block, set) {
 			processed++
 		}
 	}
 
-	// Update guard state.
+	// Update guard state — both count subqueries reuse the SAME pending
+	// fragment as the pick ($1 = the type allowlist).
 	_, err = tx.Exec(ctx,
 		`UPDATE context_guard_state SET
 			last_guard_at = now(),
 			dirty_since = CASE
 				WHEN (SELECT count(*) FROM context_blocks
-					WHERE NOT is_archived
-					  AND (metadata->>'guard_checked_at') IS NULL
-					  AND category != 'index'
-					  AND embedding IS NOT NULL
-					  AND lifecycle_state = 'knowledge'
+					WHERE `+guardPendingWhere("$1")+`
 				) = 0 THEN NULL
 				ELSE dirty_since
 			END,
 			pending_count = (SELECT count(*)::int FROM context_blocks
-				WHERE NOT is_archived
-				  AND (metadata->>'guard_checked_at') IS NULL
-				  AND category != 'index'
-				  AND embedding IS NOT NULL
-				  AND lifecycle_state = 'knowledge'
+				WHERE `+guardPendingWhere("$1")+`
 			)
 		WHERE id = true`,
+		checkTypes,
 	)
 	if err != nil {
 		slog.Error("guard: update state failed", "error", err)
@@ -146,7 +187,7 @@ func RunGuardBatch(ctx context.Context, pool guardPool, limit int) (int, error) 
 		return processed, fmt.Errorf("guard: commit tx: %w", err)
 	}
 
-	slog.Info("guard: batch complete", "processed", processed, "total_pending", len(blockIDs))
+	slog.Info("guard: batch complete", "processed", processed, "total_pending", len(blocks))
 	return processed, nil
 }
 
@@ -165,18 +206,25 @@ func savepointName(blockID string) string {
 // On any error the savepoint is rolled back so the surrounding transaction
 // stays usable for the next block.
 //
+// The per-type thresholds resolve HERE (Set.GuardThresholds by the block's
+// type; null config fields fall back to the 0.98/0.92 seed defaults) — one
+// policy source for the SQL decision, the persisted metadata and the audit
+// row.
+//
 // The atomic-per-block semantic means an audit-log failure rolls the
 // decision back too. That is acceptable: the block stays pending and will be
 // picked up on the next guard cycle, where it can succeed cleanly or, if the
 // underlying failure persists, fail again without poisoning the batch.
-func processBlock(ctx context.Context, tx pgx.Tx, blockID string) bool {
+func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *blocktype.Set) bool {
+	blockID := block.id
 	sp := savepointName(blockID)
 	if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
 		slog.Error("guard: savepoint create failed", "block_id", blockID, "error", err)
 		return false
 	}
 
-	result, err := checkBlock(ctx, tx, blockID)
+	dup, review := set.GuardThresholds(block.typeName)
+	result, err := checkBlock(ctx, tx, blockID, dup, review, set.GuardCandidateTypes())
 	if err != nil {
 		slog.Error("guard: check block failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
@@ -219,8 +267,15 @@ func rollbackToSavepoint(ctx context.Context, tx pgx.Tx, sp string) {
 	}
 }
 
-// checkBlock calls the ctx_guard_check PG function for a single block.
-func checkBlock(ctx context.Context, tx pgx.Tx, blockID string) (*GuardResult, error) {
+// checkBlock calls the ctx_guard_check PG function for a single block with
+// the resolved policy parameters (M074 signature — NO defaults for the
+// thresholds/candidates on the SQL side, and Go passes ALL FIVE parameters
+// explicitly at this single call site (design/02 §4.7 enumeration rule:
+// never rely on the p_same_scope_only SQL default). candidateTypes nil/empty
+// ⇒ 0 candidates in SQL (fail-closed `= ANY(NULL)`); the knowledge line
+// passes same_scope_only=false (cross-scope dedup is the v1 bestand — the
+// issue axis flips it per policy in wave I-J).
+func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplicate, thresholdReview float64, candidateTypes []string) (*GuardResult, error) {
 	var (
 		decision      string
 		topSimilarity float64
@@ -230,22 +285,26 @@ func checkBlock(ctx context.Context, tx pgx.Tx, blockID string) (*GuardResult, e
 		isCrossScope  bool
 	)
 
+	const sameScopeOnly = false // knowledge-line semantic; policy-driven from Achse 02 I-J
+
 	err := tx.QueryRow(ctx,
 		`SELECT decision, top_similarity, matched_id::text, matched_title, matched_scope, is_cross_scope
-		FROM ctx_guard_check($1::uuid)`,
-		blockID,
+		FROM ctx_guard_check($1::uuid, $2::real, $3::real, $4::text[], $5::boolean)`,
+		blockID, thresholdDuplicate, thresholdReview, candidateTypes, sameScopeOnly,
 	).Scan(&decision, &topSimilarity, &matchedID, &matchedTitle, &matchedScope, &isCrossScope)
 	if err != nil {
 		return nil, fmt.Errorf("guard: ctx_guard_check: %w", err)
 	}
 
 	return &GuardResult{
-		BlockID:      blockID,
-		Decision:     decision,
-		Similarity:   topSimilarity,
-		MatchedID:    matchedID,
-		MatchedTitle: matchedTitle,
-		IsCrossScope: isCrossScope,
+		BlockID:            blockID,
+		Decision:           decision,
+		Similarity:         topSimilarity,
+		MatchedID:          matchedID,
+		MatchedTitle:       matchedTitle,
+		IsCrossScope:       isCrossScope,
+		ThresholdDuplicate: thresholdDuplicate,
+		ThresholdReview:    thresholdReview,
 	}, nil
 }
 
@@ -284,6 +343,8 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 		// Mark as checked (needs_review or clean).
 		// $2::text on the column assignment too: PG18 rejects mixed deductions
 		// (varchar from column vs text from jsonb_build_object cast).
+		// The persisted thresholds are the RESOLVED per-type policy values
+		// (T7) — the metadata documents what the decision was made under.
 		_, err := tx.Exec(ctx,
 			`UPDATE context_blocks SET
 				guard_status = $2::text,
@@ -293,12 +354,13 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 					'guard_similarity', $4::float8,
 					'guard_matched_id', $5::text,
 					'guard_is_cross_scope', $6::bool,
-					'guard_threshold_duplicate', 0.98,
-					'guard_threshold_review', 0.92
+					'guard_threshold_duplicate', $7::float8,
+					'guard_threshold_review', $8::float8
 				),
 				updated_at = now()
 			WHERE id = $1`,
 			blockID, result.Decision, checkedAt, result.Similarity, matchedIDVal, result.IsCrossScope,
+			result.ThresholdDuplicate, result.ThresholdReview,
 		)
 		if err != nil {
 			return fmt.Errorf("mark checked: %w", err)
@@ -331,11 +393,12 @@ func writeAuditLog(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 		VALUES (
 			$1::uuid, $2::uuid, $3, $4, $5, $6, $7,
 			jsonb_build_object(
-				'threshold_duplicate', 0.98,
-				'threshold_review', 0.92
+				'threshold_duplicate', $8::float8,
+				'threshold_review', $9::float8
 			)
 		)`,
 		blockID, matchedIDArg, result.Decision, result.Similarity, scope, title, category,
+		result.ThresholdDuplicate, result.ThresholdReview,
 	)
 	if err != nil {
 		return fmt.Errorf("write audit log: %w", err)

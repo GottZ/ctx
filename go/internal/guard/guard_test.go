@@ -7,7 +7,14 @@ import (
 	"testing"
 
 	"github.com/pashagolub/pgxmock/v4"
+
+	"github.com/GottZ/ctx/internal/blocktype"
 )
+
+// testSet is the compiled-in builtin policy set — thresholds and allowlists
+// identical to the M072 seeds, so the mocked flows exercise the seed-default
+// behaviour (T7).
+var testSet = blocktype.NewRegistry().Snapshot()
 
 // --- Fixtures ---.
 
@@ -37,12 +44,12 @@ func anyArgs(n int) []any {
 // expectPendingFetch matches the FOR UPDATE SKIP LOCKED row-fetch and yields
 // the given block IDs as candidates.
 func expectPendingFetch(mock pgxmock.PgxPoolIface, ids ...string) {
-	rows := mock.NewRows([]string{"id"})
+	rows := mock.NewRows([]string{"id", "type_name"})
 	for _, id := range ids {
-		rows.AddRow(id)
+		rows.AddRow(id, "knowledge")
 	}
-	mock.ExpectQuery(`SELECT id FROM context_blocks`).
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery(`SELECT id, type_name FROM context_blocks`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(rows)
 }
 
@@ -52,14 +59,14 @@ func expectGuardCheck(mock pgxmock.PgxPoolIface, id string) {
 	rows := mock.NewRows([]string{"decision", "top_similarity", "matched_id", "matched_title", "matched_scope", "is_cross_scope"}).
 		AddRow("clean", 0.1, (*string)(nil), (*string)(nil), (*string)(nil), false)
 	mock.ExpectQuery(`FROM ctx_guard_check`).
-		WithArgs(id).
+		WithArgs(id, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(rows)
 }
 
 // expectGuardCheckFail makes ctx_guard_check return an error for the given id.
 func expectGuardCheckFail(mock pgxmock.PgxPoolIface, id string, sqlErr error) {
 	mock.ExpectQuery(`FROM ctx_guard_check`).
-		WithArgs(id).
+		WithArgs(id, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(sqlErr)
 }
 
@@ -67,7 +74,7 @@ func expectGuardCheckFail(mock pgxmock.PgxPoolIface, id string, sqlErr error) {
 // (the else-branch in applyDecision: 7 args).
 func expectApplyDecisionClean(mock pgxmock.PgxPoolIface) *pgxmock.ExpectedExec {
 	return mock.ExpectExec(`UPDATE context_blocks SET\s+guard_status`).
-		WithArgs(anyArgs(6)...).
+		WithArgs(anyArgs(8)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 }
 
@@ -83,13 +90,14 @@ func expectAuditFetch(mock pgxmock.PgxPoolIface, id string) {
 // expectAuditInsert matches the audit-log INSERT.
 func expectAuditInsert(mock pgxmock.PgxPoolIface) *pgxmock.ExpectedExec {
 	return mock.ExpectExec(`INSERT INTO context_write_log`).
-		WithArgs(anyArgs(7)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 
 // expectGuardStateUpdate matches the final guard_state UPDATE.
 func expectGuardStateUpdate(mock pgxmock.PgxPoolIface) {
 	mock.ExpectExec(`UPDATE context_guard_state`).
+		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 }
 
@@ -160,15 +168,15 @@ func TestRunGuardBatch_NoPending(t *testing.T) {
 
 	mock.ExpectBegin()
 	// Empty result set.
-	mock.ExpectQuery(`SELECT id FROM context_blocks`).
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(mock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`SELECT id, type_name FROM context_blocks`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(mock.NewRows([]string{"id", "type_name"}))
 	// State update for empty case.
 	mock.ExpectExec(`UPDATE context_guard_state`).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	processed, err := RunGuardBatch(context.Background(), mock, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -194,7 +202,7 @@ func TestRunGuardBatch_HappyPath_ThreeBlocks(t *testing.T) {
 	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
 
-	processed, err := RunGuardBatch(context.Background(), mock, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -229,7 +237,7 @@ func TestRunGuardBatch_MiddleBlockFails_OthersProceed(t *testing.T) {
 	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
 
-	processed, err := RunGuardBatch(context.Background(), mock, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -255,7 +263,7 @@ func TestRunGuardBatch_ApplyDecisionFails_RollsBack(t *testing.T) {
 	expectSavepoint(mock, blockA)
 	expectGuardCheck(mock, blockA)
 	mock.ExpectExec(`UPDATE context_blocks SET\s+guard_status`).
-		WithArgs(anyArgs(6)...).
+		WithArgs(anyArgs(8)...).
 		WillReturnError(errors.New("constraint violation"))
 	expectRollback(mock, blockA)
 
@@ -265,7 +273,7 @@ func TestRunGuardBatch_ApplyDecisionFails_RollsBack(t *testing.T) {
 	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
 
-	processed, err := RunGuardBatch(context.Background(), mock, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -293,7 +301,7 @@ func TestRunGuardBatch_AuditLogFails_RollsBack(t *testing.T) {
 	expectApplyDecisionClean(mock)
 	expectAuditFetch(mock, blockA)
 	mock.ExpectExec(`INSERT INTO context_write_log`).
-		WithArgs(anyArgs(7)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnError(errors.New("audit log table full"))
 	expectRollback(mock, blockA)
 
@@ -303,7 +311,7 @@ func TestRunGuardBatch_AuditLogFails_RollsBack(t *testing.T) {
 	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
 
-	processed, err := RunGuardBatch(context.Background(), mock, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -335,7 +343,7 @@ func TestRunGuardBatch_SavepointCreateFails_SkipsBlock(t *testing.T) {
 	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
 
-	processed, err := RunGuardBatch(context.Background(), mock, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -354,7 +362,7 @@ func TestRunGuardBatch_BeginTxFails(t *testing.T) {
 
 	mock.ExpectBegin().WillReturnError(errors.New("pool exhausted"))
 
-	processed, err := RunGuardBatch(context.Background(), mock, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

@@ -753,7 +753,15 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 
 	slog.Info("scheduler: running guard batch")
 
-	processed, err := guard.RunGuardBatch(ctx, s.pool, guardBatchLimit)
+	// WF T7: the batch consumes the BASE registry snapshot (the guard is ONE
+	// global run today — the per-tenant loop with SnapshotForTenant is T12,
+	// design/01 §7-T12). nil registry = wiring gap: skip loudly rather than
+	// run with a stale policy.
+	if s.blocktypes == nil {
+		slog.Error("scheduler: guard batch skipped — block-type registry not wired")
+		return
+	}
+	processed, err := guard.RunGuardBatch(ctx, s.pool, s.blocktypes.Snapshot(), guardBatchLimit)
 	if err != nil {
 		if ctx.Err() != nil {
 			return

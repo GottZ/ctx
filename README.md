@@ -251,9 +251,11 @@ Query ──► Parse Temporal ──► Embed ──► 4-Way RRF ──► Gra
                                                                                    └─────────────────────────────┘
 
 Store ──► Extract Times ──► Hash NOOP ──────────────► Guard (async, 60s)
-          (content + created_at)          │           ├─ ≥0.98: auto-archive
-          │                               │           ├─ 0.92-0.98: flag needs_review
-          │                               │           └─ <0.92: clean
+          (content + created_at)          │           ├─ ≥dup-threshold: auto-archive
+          │                               │           ├─ review..dup: flag needs_review
+          │                               │           └─ <review: clean
+          │                               │           (per-type policy since M074/WF T7;
+          │                               │            seed defaults 0.98/0.92)
           │                               └─► Embed (async, scheduler backfill, tx-wrapped)
           └─► Dimensions = Union(content anchors ∪ meta anchor)
               • Content: dates mentioned in text (semantic)
@@ -311,7 +313,7 @@ Invalid configurations abort the boot **after logging every finding** with field
 **Key features:**
 - **GottZ 4-Way RRF** — reciprocal rank fusion across semantic, bilingual fulltext, and trigram channels; type-policy-parameterised since migration 073 (WF T5): `ctx_rrf` takes the visibility **allowlist** (`p_types_visible`, fail-closed — an unregistered/rogue `type_name` is invisible until a registry row carries it; NULL/empty ⇒ 0 rows, Go rejects the call before that) plus parallel damping arrays (`p_damped_types`/`p_damped_factors`) sourced per request from the block-type registry — query-aware intent lift (Welle 41 semantics, patterns now registry data) generalises the former hardcoded audit-trail scalar. Results carry `type_name`; a registry edit (damping factor, intent patterns) changes rankings live via hot-reload, no restart, no migration
 - **GottZ Scope Model** — multi-tenant isolation (private/work/shared) via API key scoping
-- **GottZ Guard** — async deduplication via PG LISTEN/NOTIFY + HNSW similarity
+- **GottZ Guard** — async deduplication via PG LISTEN/NOTIFY + HNSW similarity; policy-parameterised since migration 074 (WF T7): `ctx_guard_check` takes the thresholds + the candidate-type **allowlist** as mandatory parameters (NULL candidates ⇒ 0 matches, legacy 1-arg call ⇒ loud 42883 — no silent default fallback) plus a `p_same_scope_only` switch for the issue axis (same-scope dedup with `hnsw.iterative_scan='relaxed_order'` against filtered-ANN false-cleans); the batch picks only `guard.check=true` types (per-type thresholds via `guard.threshold_duplicate`/`_review`, seed defaults 0.98/0.92 = former literals), and the pending pick/count queries ride the new partial index `idx_guard_pending` instead of full scans
 - **GottZ Cyclic Phase Model** — 7 cyclic temporal dimensions (weekday/month/quarter/week/monthday/seasonal/daily) with normalized phase [0,1) and per-dimension Gaussian decay. Queries route to dimensions via parser (18-matcher deterministic engine). Timezone-aware via `CTX_TIMEZONE`.
 - **Forward Telescoping** — older blocks get a wider linear gravity well (effective power scaled by `1 / (1 + 0.3·ln(1+age/30))`) so a 6-month-old block isn't drowned out by a 1-week-old block when the user asks about a date in that window. Future dates keep their 1.2× sharper cutoff. Matches Rubin & Baddeley 1989's age-dependent recall imprecision.
 - **GottZ Temporal Dimension Table** — EAV storage with partial B-Tree indexes, O(log n) dimension lookups at 1M+ scale. Every block carries multiple anchors: content-mentioned times (semantic) + `created_at` (meta) as independent signals.

@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -36,6 +37,11 @@ const (
 	gP08ID     = "019e9aaa-0000-7000-9000-000000000007"
 	gP08PeerID = "019e9aaa-0000-7000-9000-000000000008"
 )
+
+// gitSet returns the builtin policy snapshot (byte-equivalent to the M072
+// seeds per the T3 drift gate) — the seed-default behaviour these golden
+// tests pin (T7: same three-branch outcomes as the pre-policy literals).
+func gitSet() *blocktype.Set { return blocktype.NewRegistry().Snapshot() }
 
 // insertGuardBlock writes a context_blocks row with the supplied id, title
 // and embedding vector. The created_at is set explicitly so the FOR UPDATE
@@ -190,7 +196,7 @@ func TestRunGuardBatch_NearDuplicatePath(t *testing.T) {
 	insertGuardBlock(t, pool, gNearAID, "near-dup-anchor", emb, tEarly)
 	insertGuardBlock(t, pool, gNearBID, "near-dup-clone", emb, tLate)
 
-	processed, err := guard.RunGuardBatch(ctx, pool, 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
@@ -257,7 +263,7 @@ func TestRunGuardBatch_NeedsReviewPath(t *testing.T) {
 	insertGuardBlock(t, pool, gReviewAID, "review-anchor", anchor, tEarly)
 	insertGuardBlock(t, pool, gReviewBID, "review-peer", peer, tLate)
 
-	processed, err := guard.RunGuardBatch(ctx, pool, 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
@@ -302,7 +308,7 @@ func TestRunGuardBatch_CleanPath(t *testing.T) {
 	insertGuardBlock(t, pool, gCleanAID, "clean-a", a, tEarly)
 	insertGuardBlock(t, pool, gCleanBID, "clean-b", b, tLate)
 
-	processed, err := guard.RunGuardBatch(ctx, pool, 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
@@ -360,7 +366,7 @@ func TestRunGuardBatch_42P08_Regression(t *testing.T) {
 	insertGuardBlock(t, pool, gP08ID, "p08-anchor", a, tEarly)
 	insertGuardBlock(t, pool, gP08PeerID, "p08-peer", b, tLate)
 
-	processed, err := guard.RunGuardBatch(ctx, pool, 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
 	if err != nil {
 		// 42P08 manifests as a wrapped pgx error from tx.Exec. If anything
 		// resembling the pre-fix surface appears we want a clear failure
@@ -395,7 +401,7 @@ func TestRunGuardBatch_42P08_Regression(t *testing.T) {
 	// regression, the second batch would crash even if the first one (somehow)
 	// passed. With the v1.6.6 fix, the cache is happy and processed=0
 	// (no pending blocks remain).
-	processed2, err := guard.RunGuardBatch(ctx, pool, 10)
+	processed2, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
 	if err != nil {
 		t.Fatalf("RunGuardBatch (2nd run, cached prepare path): %v", err)
 	}
@@ -427,7 +433,7 @@ func TestRunGuardBatch_WriteLogPersistence(t *testing.T) {
 	insertGuardBlock(t, pool, "019e9bbb-0000-7000-9000-000000000003", "wl-orth", orth, t0.Add(2*time.Hour))
 	insertGuardBlock(t, pool, "019e9bbb-0000-7000-9000-000000000004", "wl-review", review, t0.Add(3*time.Hour))
 
-	processed, err := guard.RunGuardBatch(ctx, pool, 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
