@@ -6,8 +6,8 @@
 //
 // PV4 generated the flow/visual/deny/leak/scale dimensions; PV5 added the
 // a11y dimension (axe gate against the frozen debt ledger + focus walk —
-// axe.ts / focus.ts / a11y.ts). The ARIA snapshots (PV6) extend this
-// generator in their own wave — COVERAGE.md marks that column as pending.
+// axe.ts / focus.ts / a11y.ts); PV6 added the ARIA snapshots (structure
+// gate, platform-/font-independent — runs on the host AND in the container).
 //
 // Model deviations from design 06 §4.1, named (not silently resolved):
 //   - `mobile` is `{ exempt: string }` instead of the doc's bare `false` +
@@ -242,6 +242,20 @@ function axeTest(c: PageContract, state: PageState, theme: Theme, viewport: View
   })
 }
 
+function ariaTest(c: PageContract, viewport: ViewportName): void {
+  test(`${c.name} aria ${viewport}`, { tag: '@aria' }, async ({ page }) => {
+    await mountState(page, c, c.states.find((s) => s.name === 'default') as PageState, 'dark')
+    // Same settle as the visual captures (async area data → the tree must be
+    // the LOADED state, not "loading …" — the un-settled race froze exactly
+    // that into the first status snapshot draft).
+    await page.waitForTimeout(600)
+    // Whole-page ARIA snapshot (PW ≥ 1.60): the YAML freezes role/name/
+    // hierarchy — the structural gate that needs no container (§3.2).
+    // {arg} keys the file next to the visual baselines: <page>--aria--<vp>.yml.
+    await expect(page.locator('body')).toMatchAriaSnapshot({ name: `${c.name}--aria--${viewport}.yml` })
+  })
+}
+
 function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: ViewportName): void {
   test(`${c.name} ${state.name} ${theme} ${viewport} visual`, { tag: '@visual' }, async ({ page }) => {
     await mountState(page, c, state, theme)
@@ -269,6 +283,11 @@ function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: V
  *                             and target-size (SC 2.5.8) bites hardest at
  *                             390 px (§4.1 table: axe "immer")
  *   - focus walk (PV5)        1 × @a11y      (desktop, dark, default state)
+ *   - toMatchAriaSnapshot     1–2 × @aria    (desktop always; mobile rides
+ *     (PV6)                   the contract's mobile dimension — an exempted
+ *                             contract snapshots desktop only, the opt-out
+ *                             falls with the PV7 full set; dark only: the
+ *                             accessibility tree is theme-independent)
  *   - deny                    1 × @flow      (role ≠ member only)
  *   - tenant-leak probe       1 × @flow      (tenantScoped only, §5.6b)
  *   - scale                   1 × @flow      (scale is a PageState only)
@@ -301,6 +320,15 @@ export function definePageContract(c: PageContract): void {
         for (const state of visualStates) {
           for (const theme of THEMES) visualTest(c, state, theme, 'mobile')
         }
+      })
+    }
+
+    // ---- ARIA structure gate (@aria — committed YAML snapshots, PV6) ----
+    ariaTest(c, 'desktop')
+    if (c.mobile === undefined) {
+      test.describe(() => {
+        test.use({ viewport: VIEWPORTS.mobile })
+        ariaTest(c, 'mobile')
       })
     }
 

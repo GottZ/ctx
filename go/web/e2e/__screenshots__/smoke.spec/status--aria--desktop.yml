@@ -1,0 +1,94 @@
+- navigation "Primary":
+  - link "ctx_":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - heading "Status" [level=1]
+  - paragraph: live system health, backend pool, dream queue and LLM telemetry
+  - paragraph: /updated \d+[hmsp]+ ago/
+  - region "health":
+    - strong: ok
+    - text: db embed chat
+  - region "toggles":
+    - strong: gaming lock
+    - paragraph: excludes the GPU backends from every chain
+    - button "OFF"
+    - strong: activity
+    - paragraph: host idle signal
+    - text: no signal
+  - region "dream queue":
+    - heading "dream" [level=2]
+    - group "dream mode":
+      - button "on"
+      - button "throttled"
+      - button "off"
+    - text: /4 pickable now 1 in cooldown \d+ never dreamed 0 awaiting embed 3 incoming \d+[hmsp]+ 9 incoming \d+[hmsp]+/
+    - term: throttle
+    - definition: "off"
+    - term: last cycle
+    - definition: /6\/\d+\/\d+, \d+:\d+:\d+ AM/
+    - term: next pending
+    - definition: —
+  - region "backend pool":
+    - heading "backends" [level=2]
+    - text: "1"
+    - table:
+      - rowgroup:
+        - row "name trust roles prio state":
+          - columnheader "name"
+          - columnheader "trust"
+          - columnheader "roles"
+          - columnheader "prio"
+          - columnheader "state"
+      - rowgroup:
+        - row /llama\.cpp \(local\) local full-trust chat, dream \d+ active/:
+          - cell "llama.cpp (local) local"
+          - cell "full-trust"
+          - cell "chat, dream"
+          - cell /\d+/
+          - cell "active"
+  - region "llm telemetry":
+    - heading /llm calls · \d+[hmsp]+ sample/ [level=2]
+    - textbox "pipeline filter"
+    - checkbox "errors only"
+    - text: errors only
+    - paragraph: no calls match.

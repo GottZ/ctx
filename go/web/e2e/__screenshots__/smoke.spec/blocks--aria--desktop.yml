@@ -1,0 +1,80 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - heading "Blocks" [level=1]
+  - button "New block"
+  - paragraph: browse the corpus — empty search shows the newest blocks; a query runs full-text search (stemmed by keyword, substrings/typos don't match).
+  - searchbox "search blocks by keyword — leave empty for the newest"
+  - button "Search"
+  - group "category":
+    - text: ""
+    - combobox:
+      - option "all categories" [selected]
+      - option /design \(\d+\)/
+      - option "reference (7)"
+      - option "learnings (4)"
+  - group "tags":
+    - text: ""
+    - textbox "comma-separated, overlap match"
+  - list:
+    - listitem:
+      - button /Core Architecture \d+-\d+-\d+ internal design · home · demo, design Lorem ipsum preview for Core Architecture — enough text to fill a master-detail hit row in the split layout\. \d+ chars/:
+        - text: ""
+        - time: /\d+-\d+-\d+/
+        - text: ""
+    - listitem:
+      - button /API Spec \d+-\d+-\d+ public reference · home · demo, reference Lorem ipsum preview for API Spec — enough text to fill a master-detail hit row in the split layout\. \d+ chars/:
+        - text: ""
+        - time: /\d+-\d+-\d+/
+        - text: ""
+    - listitem:
+      - button /Retrieval Findings \d+-\d+-\d+ internal learnings · home · demo, learnings Lorem ipsum preview for Retrieval Findings — enough text to fill a master-detail hit row in the split layout\. \d+ chars/:
+        - text: ""
+        - time: /\d+-\d+-\d+/
+        - text: ""
+    - listitem:
+      - button /A-SENTINEL-1f9c62d84b7e \d+-\d+-\d+ internal meta · home · demo, meta Tenant-isolation sentinel block — must never render in a foreign tenant session \(design \d+ §[\d,.]+[bkmBKM]+\)\. \d+ chars/:
+        - text: ""
+        - time: /\d+-\d+-\d+/
+        - text: ""

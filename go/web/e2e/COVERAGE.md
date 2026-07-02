@@ -17,21 +17,24 @@ DOM-Deckel bei 10k Fixture-Items (Scale-Zustand mit echtem Keyset-Cursor); kein 
 Test erwartet), Shape-Aktualität der Fixtures (W10), SSE-Transport-Verhalten,
 Backend-Performance. Adressen: Go-Integration-Suite + Live-Tier (PV10), Achse 02 (Latenz-Budgets).
 
-**Noch nicht generiert (ehrlich):** ARIA-Snapshots (PV6), Live-Tier-Spalte (PV10) —
-als Spalten bereits ausgewiesen, Wert `— (PVn)` bis zur Welle. Das axe-Gate (WCAG 2.2 AA
-inkl. target-size) + der Fokus-Walk laufen seit PV5; axe-`incomplete`-Ergebnisse (Kontrast-
-Blindstellen: Gradients, überlappende Elemente) hängen als `axe-incomplete`-Attachment am
-Report und sind zu triagieren, nie stillschweigend grün (design 06 §4.5).
+**Noch nicht generiert (ehrlich):** Live-Tier-Spalte (PV10) — als Spalte bereits
+ausgewiesen, Wert `— (PV10)` bis zur Welle. Das axe-Gate (WCAG 2.2 AA inkl. target-size)
++ der Fokus-Walk laufen seit PV5; axe-`incomplete`-Ergebnisse (Kontrast-Blindstellen:
+Gradients, überlappende Elemente) hängen als `axe-incomplete`-Attachment am Report und
+sind zu triagieren, nie stillschweigend grün (design 06 §4.5). ARIA-Snapshots (PV6) sind
+committete YAML-Struktur-Gates (`__screenshots__/smoke.spec/<seite>--aria--<vp>.yml`) —
+plattform-/font-unabhängig, laufen auf Host UND Container; Änderungen sind [baseline]-
+Marker-pflichtig (der commit-msg-Hook deckt ALLE Pfade unter `__screenshots__/`, nicht nur PNGs).
 
 ## Matrix
 
 | Seite | Route | Rolle | States | Kern-Flow | Visual | ARIA | axe | Fokus-Walk | Mobile | Deny | Leak | Scale | Live |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| status | `/status` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) — 2 Debt-Entries | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
-| graph | `/graph` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
-| blocks | `/blocks` | member | `default` | ✓ | ✓ 4 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) — 4 Debt-Entries | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | ✓ generiert (§5.6b) | `10k` (Deckel 300 @ `main.content ul.results > li`) | — (PV10) |
-| chat | `/chat` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
-| settings | `/settings` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | — (PV6) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
+| status | `/status` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | ✓ 1 (Desktop; Mobile fällt mit dem Opt-out) | ✓ 4 Scans (dark/light × 2 VP) — 2 Debt-Entries | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
+| graph | `/graph` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | ✓ 1 (Desktop; Mobile fällt mit dem Opt-out) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
+| blocks | `/blocks` | member | `default` | ✓ | ✓ 4 Shots (states×dark/light×1 VP) | ✓ 1 (Desktop; Mobile fällt mit dem Opt-out) | ✓ 4 Scans (dark/light × 2 VP) — 4 Debt-Entries | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | ✓ generiert (§5.6b) | `10k` (Deckel 300 @ `main.content ul.results > li`) | — (PV10) |
+| chat | `/chat` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | ✓ 1 (Desktop; Mobile fällt mit dem Opt-out) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
+| settings | `/settings` | member | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | ✓ 1 (Desktop; Mobile fällt mit dem Opt-out) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
 
 ## Kern-Pfade (flowDoc — W21: „verifiziert" meint prüfbar den Hauptpfad)
 

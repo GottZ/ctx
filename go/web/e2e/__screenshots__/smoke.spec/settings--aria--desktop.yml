@@ -1,0 +1,76 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - heading "Settings" [level=1]
+  - paragraph:
+    - text: runtime configuration — precedence
+    - code: db
+    - text: ">"
+    - code: env
+    - text: ">"
+    - code: default
+    - text: ; overrides apply on the fly
+  - link "Backend pool & vault → manage provider backends, trust tiers and API-key secrets":
+    - /url: /settings/backends
+  - region "pool settings":
+    - heading "pool" [level=2]
+    - button "Save" [disabled]
+    - text: pool.default_block_sensitivity db
+    - textbox "pool.default_block_sensitivity":
+      - /placeholder: ""
+      - text: internal
+    - button "reset"
+  - region "dream settings":
+    - heading "dream" [level=2]
+    - button "Save" [disabled]
+    - text: dream.enabled env
+    - switch "dream.enabled" [checked]
+  - region "server settings":
+    - heading "server" [level=2]
+    - button "Save" [disabled]
+    - text: server.timezone db restart
+    - textbox "server.timezone" [disabled]:
+      - /placeholder: IANA name, e.g. Europe/Berlin
+      - text: Europe/Berlin
+    - paragraph: restart-only; set it via env (no env var exists for this key) and restart

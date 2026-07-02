@@ -1,0 +1,55 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - complementary:
+    - button "+ New chat"
+    - paragraph: No sessions yet.
+  - status:
+    - paragraph: No conversations yet
+    - paragraph: Ask the knowledge store a question in the box below — it can search, browse and read your blocks. Your chats then appear in the sidebar.
+    - link "Browse the corpus →":
+      - /url: /blocks
+  - textbox "message":
+    - /placeholder: Ask the knowledge store… (Enter to send, Shift+Enter for a newline)
+  - button "Send" [disabled]

@@ -73,6 +73,16 @@ export default defineConfig({
   grepInvert: process.env.CTX_E2E_CONTAINER ? undefined : /@visual/,
   use: {
     baseURL,
+    // ARIA snapshots (PV6) are the FIRST artifact compared on the host AND in
+    // the container: every toLocale* render must agree across both. The
+    // toolchain image already pins TZ=UTC (e2e/Dockerfile); pinning the
+    // BROWSER timezone/locale here extends that determinism to host runs —
+    // found via the PV6 gate: /status "last cycle" froze as /1:\d+:\d+ PM/
+    // (host, Europe/Berlin) and rendered 11:55:00 AM in the container. The
+    // container was already UTC/en-US, so the committed PNG baselines stay
+    // byte-valid (verified: full container run green after this pin).
+    timezoneId: 'UTC',
+    locale: 'en-US',
     trace: 'retain-on-failure',
     screenshot: 'off',
     // Sigma renders WebGL; the headless shell needs a software GL backend.

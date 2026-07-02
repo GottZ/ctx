@@ -53,11 +53,14 @@ export function renderCoverage(cs: readonly PageContract[] = contracts, pending:
   lines.push('Test erwartet), Shape-Aktualität der Fixtures (W10), SSE-Transport-Verhalten,')
   lines.push('Backend-Performance. Adressen: Go-Integration-Suite + Live-Tier (PV10), Achse 02 (Latenz-Budgets).')
   lines.push('')
-  lines.push('**Noch nicht generiert (ehrlich):** ARIA-Snapshots (PV6), Live-Tier-Spalte (PV10) —')
-  lines.push('als Spalten bereits ausgewiesen, Wert `— (PVn)` bis zur Welle. Das axe-Gate (WCAG 2.2 AA')
-  lines.push('inkl. target-size) + der Fokus-Walk laufen seit PV5; axe-`incomplete`-Ergebnisse (Kontrast-')
-  lines.push('Blindstellen: Gradients, überlappende Elemente) hängen als `axe-incomplete`-Attachment am')
-  lines.push('Report und sind zu triagieren, nie stillschweigend grün (design 06 §4.5).')
+  lines.push('**Noch nicht generiert (ehrlich):** Live-Tier-Spalte (PV10) — als Spalte bereits')
+  lines.push('ausgewiesen, Wert `— (PV10)` bis zur Welle. Das axe-Gate (WCAG 2.2 AA inkl. target-size)')
+  lines.push('+ der Fokus-Walk laufen seit PV5; axe-`incomplete`-Ergebnisse (Kontrast-Blindstellen:')
+  lines.push('Gradients, überlappende Elemente) hängen als `axe-incomplete`-Attachment am Report und')
+  lines.push('sind zu triagieren, nie stillschweigend grün (design 06 §4.5). ARIA-Snapshots (PV6) sind')
+  lines.push('committete YAML-Struktur-Gates (`__screenshots__/smoke.spec/<seite>--aria--<vp>.yml`) —')
+  lines.push('plattform-/font-unabhängig, laufen auf Host UND Container; Änderungen sind [baseline]-')
+  lines.push('Marker-pflichtig (der commit-msg-Hook deckt ALLE Pfade unter `__screenshots__/`, nicht nur PNGs).')
   lines.push('')
   lines.push('## Matrix')
   lines.push('')
@@ -70,8 +73,9 @@ export function renderCoverage(cs: readonly PageContract[] = contracts, pending:
     const visual = `✓ ${visualStates * 2 * vp} Shots (states×dark/light×${vp} VP)`
     const debt = ledger.entries.filter((e) => e.page === c.route).length
     const axe = `✓ 4 Scans (dark/light × 2 VP)${debt > 0 ? ` — ${debt} Debt-Entr${debt === 1 ? 'y' : 'ies'}` : ''}`
+    const aria = c.mobile === undefined ? '✓ 2 (Desktop+Mobile)' : '✓ 1 (Desktop; Mobile fällt mit dem Opt-out)'
     lines.push(
-      `| ${c.name} | \`${c.route}\` | ${c.role} | ${states} | ✓ | ${visual} | — (PV6) | ${axe} | ✓ (1440, Tab-Walk) | ${mobileCell(c)} | ${denyCell(c)} | ${c.tenantScoped ? '✓ generiert (§5.6b)' : '—'} | ${scaleCell(c)} | — (PV10) |`,
+      `| ${c.name} | \`${c.route}\` | ${c.role} | ${states} | ✓ | ${visual} | ${aria} | ${axe} | ✓ (1440, Tab-Walk) | ${mobileCell(c)} | ${denyCell(c)} | ${c.tenantScoped ? '✓ generiert (§5.6b)' : '—'} | ${scaleCell(c)} | — (PV10) |`,
     )
   }
   lines.push('')
