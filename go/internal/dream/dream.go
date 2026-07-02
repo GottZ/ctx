@@ -336,7 +336,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 }
 
 // PromoteToCanonical upgrades a block to 'canonical' if it meets all criteria:
-// quality_score >= 0.8, no inbound supersedes, block_type = 'knowledge' or NULL.
+// quality_score >= 0.8, no inbound supersedes, lifecycle_state = 'knowledge'.
 //
 // Welle 46 Convention-Switch (2026-05-22): under the English convention
 // "A supersedes B" → A=source=newer, B=target=outdated. A block is OUTDATED
@@ -346,11 +346,11 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 // Returns true if the block was promoted.
 func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string) (bool, error) {
 	tag, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET block_type = 'canonical'
+		`UPDATE context_blocks SET lifecycle_state = 'canonical'
 		WHERE id = $1
 		  AND NOT is_archived
 		  AND quality_score >= 0.8
-		  AND (block_type IS NULL OR block_type = 'knowledge')
+		  AND lifecycle_state = 'knowledge'
 		  AND NOT EXISTS (
 			SELECT 1 FROM context_dream_links
 			WHERE target_block_id = $1 AND relationship = 'supersedes'
@@ -387,7 +387,7 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool) (*BlockInfo, error) {
 			SELECT id FROM context_blocks
 			WHERE NOT is_archived
 			  AND embedding IS NOT NULL
-			  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
+			  AND lifecycle_state IN ('knowledge', 'canonical')
 			  AND NOT is_meta
 			  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
 			ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
@@ -528,7 +528,7 @@ func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []strin
 	if err := pool.QueryRow(ctx,
 		`SELECT COALESCE(max(dream_eval_count), 0)::int FROM context_blocks
 		 WHERE NOT is_archived AND embedding IS NOT NULL
-		   AND (block_type IS NULL OR block_type IN ('knowledge','source','canonical'))
+		   AND lifecycle_state IN ('knowledge','canonical')
 		   AND NOT is_meta AND scope = ANY($1::text[])`,
 		scopes).Scan(&out.MaxEval); err != nil {
 		return nil, fmt.Errorf("dream: backoff max eval: %w", err)
@@ -536,7 +536,7 @@ func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes []strin
 	rows, err := pool.Query(ctx,
 		`SELECT dream_eval_count::int, count(*)::int FROM context_blocks
 		 WHERE NOT is_archived AND embedding IS NOT NULL
-		   AND (block_type IS NULL OR block_type IN ('knowledge','source','canonical'))
+		   AND lifecycle_state IN ('knowledge','canonical')
 		   AND NOT is_meta AND scope = ANY($1::text[])
 		 GROUP BY dream_eval_count ORDER BY dream_eval_count
 		 LIMIT $2`,
@@ -745,7 +745,7 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 }
 
 // Stats returns dream processing statistics, filtered by scope.
-// Eligibility criteria mirror PickBlock: not archived, has embedding, knowledge/source/canonical, not index.
+// Eligibility criteria mirror PickBlock: not archived, has embedding, knowledge/canonical, not index.
 //
 // Returned counters:
 //   - total:          all eligible blocks
@@ -755,13 +755,13 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, keywor
 func Stats(ctx context.Context, pool *pgxpool.Pool, scopes []string) (total, checked, linked, pendingRecheck int, err error) {
 	err = pool.QueryRow(ctx,
 		`SELECT
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND NOT is_meta AND scope = ANY($1::text[]))::int,
-			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical')) AND NOT is_meta AND scope = ANY($1::text[]))::int,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL AND lifecycle_state IN ('knowledge', 'canonical') AND NOT is_meta AND scope = ANY($1::text[]))::int,
+			(SELECT count(*) FROM context_blocks WHERE NOT is_archived AND dream_checked_at IS NOT NULL AND lifecycle_state IN ('knowledge', 'canonical') AND NOT is_meta AND scope = ANY($1::text[]))::int,
 			(SELECT count(*) FROM context_dream_links WHERE scope = ANY($1::text[]))::int,
 			(SELECT count(*) FROM context_blocks
 				WHERE NOT is_archived
 				  AND embedding IS NOT NULL
-				  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
+				  AND lifecycle_state IN ('knowledge', 'canonical')
 				  AND NOT is_meta
 				  AND dream_checked_at IS NOT NULL
 				  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
@@ -793,7 +793,7 @@ func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes []string) (*Queu
 			SELECT dream_cooldown_until AS cd, dream_checked_at AS chk, embedding IS NULL AS no_embed
 			FROM context_blocks
 			WHERE NOT is_archived
-			  AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
+			  AND lifecycle_state IN ('knowledge', 'canonical')
 			  AND NOT is_meta AND scope = ANY($1::text[])
 		)
 		SELECT

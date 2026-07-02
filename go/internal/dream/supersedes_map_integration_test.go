@@ -154,7 +154,7 @@ func TestPromoteToCanonical_RejectsBlocksWithInboundSupersedes(t *testing.T) {
 	insertBlock(t, pool, smOlderID, "private", "decisions", "spec v1", tEarly, tEarly)
 	insertBlock(t, pool, smNewerID, "private", "decisions", "spec v2", tLate, tLate)
 	if _, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET quality_score = 0.9, block_type = 'knowledge'
+		`UPDATE context_blocks SET quality_score = 0.9, lifecycle_state = 'knowledge'
 		WHERE id IN ($1::uuid, $2::uuid)`,
 		smOlderID, smNewerID,
 	); err != nil {
@@ -187,14 +187,14 @@ func TestPromoteToCanonical_RejectsBlocksWithInboundSupersedes(t *testing.T) {
 		t.Errorf("newer source was not promoted — should be canonical (no inbound supersedes, quality 0.9)")
 	}
 
-	// Verify block_type was actually updated.
+	// Verify lifecycle_state was actually updated.
 	var bt string
 	if err := pool.QueryRow(ctx,
-		`SELECT block_type FROM context_blocks WHERE id = $1::uuid`, smNewerID,
+		`SELECT lifecycle_state FROM context_blocks WHERE id = $1::uuid`, smNewerID,
 	).Scan(&bt); err != nil {
-		t.Fatalf("read block_type: %v", err)
+		t.Fatalf("read lifecycle_state: %v", err)
 	}
 	if bt != "canonical" {
-		t.Errorf("post-promote block_type=%q, want canonical", bt)
+		t.Errorf("post-promote lifecycle_state=%q, want canonical", bt)
 	}
 }

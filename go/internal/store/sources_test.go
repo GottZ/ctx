@@ -47,7 +47,7 @@ func TestDeleteSourceAndChunks_RequiresDB(t *testing.T) {
 
 func TestInsertChunk_RequiresDB(t *testing.T) {
 	t.Skip("requires database connection")
-	// Test: inserts new chunk with block_type='chunk'.
+	// Test: inserts new chunk with lifecycle_state='chunk'.
 	// Test: idempotent — same source_id+chunk_index updates content.
 	// Test: nil tags/metadata default to empty.
 	// Test: returns populated Block.

@@ -125,14 +125,14 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, opt
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
 
-	// block_type is not handled by the Welle-44 hook (which only sets
+	// lifecycle_state is not handled by the Welle-44 hook (which only sets
 	// block_role/is_meta). Set it explicitly so /api/query consumers can
 	// distinguish synthesis output from generic learnings blocks.
 	if _, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET block_type = 'synthesis' WHERE id = $1::uuid`,
+		`UPDATE context_blocks SET lifecycle_state = 'synthesis' WHERE id = $1::uuid`,
 		block.ID,
 	); err != nil {
-		return "", fmt.Errorf("dream: synthesize report: set block_type: %w", err)
+		return "", fmt.Errorf("dream: synthesize report: set lifecycle_state: %w", err)
 	}
 
 	// Welle 47 (W47-NEU-A): route through ClassifyBlockAfterUpsert instead of

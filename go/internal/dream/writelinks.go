@@ -21,8 +21,8 @@ type linkPool interface {
 }
 
 // deletedLink captures what a stale-link DELETE returned, so the caller can
-// revert side-effects (e.g. block_type='snapshot' set by ApplySupersedes when
-// the supersedes-link was first written).
+// revert side-effects (e.g. lifecycle_state='snapshot' set by ApplySupersedes
+// when the supersedes-link was first written).
 type deletedLink struct {
 	TargetID     string
 	Relationship string
@@ -85,11 +85,14 @@ func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarg
 		if d.Relationship != "supersedes" {
 			continue
 		}
+		// Revert target: snapshot → 'knowledge'. Since M070 the lifecycle
+		// state machine is NOT NULL — the pre-M070 revert wrote NULL here,
+		// which produced exactly the NULL rows M070 backfilled away.
 		_, revertErr := tx.Exec(ctx,
 			`UPDATE context_blocks
-			SET block_type = NULL, superseded_by = NULL
+			SET lifecycle_state = 'knowledge', superseded_by = NULL
 			WHERE id = $1::uuid
-			  AND block_type = 'snapshot'
+			  AND lifecycle_state = 'snapshot'
 			  AND superseded_by = $2::uuid`,
 			d.TargetID, sourceID)
 		if revertErr != nil {
@@ -233,8 +236,8 @@ func WriteLinks(ctx context.Context, pool linkPool, sourceID, sourceScope string
 		// Only apply at high confidence to prevent false-positive snapshot marking.
 		if link.Relationship == "supersedes" && weightedConfidence >= 0.7 {
 			_, err = tx.Exec(ctx,
-				`UPDATE context_blocks SET block_type = 'snapshot', superseded_by = $1::uuid
-				WHERE id = $2::uuid AND block_type != 'snapshot'`,
+				`UPDATE context_blocks SET lifecycle_state = 'snapshot', superseded_by = $1::uuid
+				WHERE id = $2::uuid AND lifecycle_state != 'snapshot'`,
 				sourceID, link.TargetID,
 			)
 			if err != nil {

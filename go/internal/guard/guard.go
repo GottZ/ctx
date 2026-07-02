@@ -64,7 +64,7 @@ func RunGuardBatch(ctx context.Context, pool guardPool, limit int) (int, error) 
 		  AND (metadata->>'guard_checked_at') IS NULL
 		  AND category != 'index'
 		  AND embedding IS NOT NULL
-		  AND (block_type IS NULL OR block_type IN ('knowledge', 'source'))
+		  AND lifecycle_state = 'knowledge'
 		ORDER BY created_at ASC
 		LIMIT $1
 		FOR UPDATE SKIP LOCKED`,
@@ -125,7 +125,7 @@ func RunGuardBatch(ctx context.Context, pool guardPool, limit int) (int, error) 
 					  AND (metadata->>'guard_checked_at') IS NULL
 					  AND category != 'index'
 					  AND embedding IS NOT NULL
-					  AND (block_type IS NULL OR block_type IN ('knowledge', 'source'))
+					  AND lifecycle_state = 'knowledge'
 				) = 0 THEN NULL
 				ELSE dirty_since
 			END,
@@ -134,7 +134,7 @@ func RunGuardBatch(ctx context.Context, pool guardPool, limit int) (int, error) 
 				  AND (metadata->>'guard_checked_at') IS NULL
 				  AND category != 'index'
 				  AND embedding IS NOT NULL
-				  AND (block_type IS NULL OR block_type IN ('knowledge', 'source'))
+				  AND lifecycle_state = 'knowledge'
 			)
 		WHERE id = true`,
 	)

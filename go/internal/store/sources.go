@@ -182,8 +182,8 @@ func DeleteSourceAndChunks(ctx context.Context, pool *pgxpool.Pool, sourceID str
 	return nil
 }
 
-// InsertChunk inserts a block with block_type='chunk', source_id, chunk_index.
-// Uses ON CONFLICT on (source_id, chunk_index) WHERE NOT is_archived AND block_type='chunk'
+// InsertChunk inserts a block with lifecycle_state='chunk', source_id, chunk_index.
+// Uses ON CONFLICT on (source_id, chunk_index) WHERE NOT is_archived AND lifecycle_state='chunk'
 // for idempotent upsert. Returns the resulting block.
 func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunkIndex int, category, title, content string, tags []string, metadata map[string]any, scope string) (*Block, error) {
 	if tags == nil {
@@ -196,9 +196,9 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 	b := &Block{}
 	err := pool.QueryRow(ctx,
 		`INSERT INTO context_blocks
-			(category, tags, title, content, metadata, scope, source_id, chunk_index, block_type)
+			(category, tags, title, content, metadata, scope, source_id, chunk_index, lifecycle_state)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7::uuid, $8, 'chunk')
-		 ON CONFLICT (source_id, chunk_index) WHERE NOT is_archived AND block_type = 'chunk'
+		 ON CONFLICT (source_id, chunk_index) WHERE NOT is_archived AND lifecycle_state = 'chunk'
 		 DO UPDATE SET
 			category = EXCLUDED.category,
 			tags = EXCLUDED.tags,

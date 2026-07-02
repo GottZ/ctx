@@ -142,8 +142,8 @@ func TestWriteLinks_Supersedes_RealSimilarity_BehaviourMatchesContract(t *testin
 		t.Fatalf("reset links: %v", err)
 	}
 	// Welle 46: snapshot side-effect is on the TARGET (the older block); revert it.
-	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET block_type = 'knowledge', superseded_by = NULL WHERE id = $1::uuid`, icTargetID); err != nil {
-		t.Fatalf("reset block_type: %v", err)
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET lifecycle_state = 'knowledge', superseded_by = NULL WHERE id = $1::uuid`, icTargetID); err != nil {
+		t.Fatalf("reset lifecycle_state: %v", err)
 	}
 
 	// Dissimilar-title sibling — same category, source NEWER than target, but
@@ -279,10 +279,11 @@ func TestWriteLinks_ReplaceSemantics_RealUUIDs_BehaviourMatchesContract(t *testi
 // TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract verifies
 // the full ApplySupersedes lifecycle against real PG:
 //
-//  1. supersedes link writes block_type='snapshot' on TARGET (older block).
+//  1. supersedes link writes lifecycle_state='snapshot' on TARGET (older block).
 //  2. Idempotent re-write of the same supersedes link does not drift.
-//  3. Subsequent write that drops the supersedes link reverts block_type
-//     and superseded_by to NULL via replaceStaleLinks.
+//  3. Subsequent write that drops the supersedes link reverts lifecycle_state
+//     to 'knowledge' and superseded_by to NULL via replaceStaleLinks (M070:
+//     the lifecycle state machine is NOT NULL — pre-M070 the revert wrote NULL).
 //
 // Welle 46 Convention-Switch (2026-05-22): under "A supersedes B" → A=source=
 // newer, B=target=outdated, the TARGET is the block that becomes a snapshot.
@@ -310,11 +311,11 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 
 	bt, sb := readSnapshotState(t, pool, icTargetID)
 	if bt != "snapshot" || sb != icSourceID {
-		t.Errorf("step 1: got block_type=%q superseded_by=%q on target, want snapshot/%s", bt, sb, icSourceID)
+		t.Errorf("step 1: got lifecycle_state=%q superseded_by=%q on target, want snapshot/%s", bt, sb, icSourceID)
 	}
 	// Source must NOT be snapshotted.
 	if btSrc, sbSrc := readSnapshotState(t, pool, icSourceID); btSrc == "snapshot" || sbSrc != "" {
-		t.Errorf("step 1: source incorrectly marked: block_type=%q superseded_by=%q", btSrc, sbSrc)
+		t.Errorf("step 1: source incorrectly marked: lifecycle_state=%q superseded_by=%q", btSrc, sbSrc)
 	}
 
 	// Step 2: idempotent re-write — same input, no drift on target.
@@ -329,11 +330,11 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 
 	bt, sb = readSnapshotState(t, pool, icTargetID)
 	if bt != "snapshot" || sb != icSourceID {
-		t.Errorf("step 2 drift: got block_type=%q superseded_by=%q on target, want snapshot/%s", bt, sb, icSourceID)
+		t.Errorf("step 2 drift: got lifecycle_state=%q superseded_by=%q on target, want snapshot/%s", bt, sb, icSourceID)
 	}
 
 	// Step 3: write a non-supersedes link to a different target → replaceStale
-	// drops the old supersedes row and reverts the original target's block_type.
+	// drops the old supersedes row and reverts the original target's lifecycle_state.
 	insertBlock(t, pool, icOtherID, "private", "decisions", "unrelated decision", tLate, tLate)
 
 	written, err = dream.WriteLinks(ctx, pool, icSourceID, "private", 1.0,
@@ -346,12 +347,12 @@ func TestWriteLinks_SnapshotRevert_Idempotent_BehaviourMatchesContract(t *testin
 	}
 
 	bt, sb = readSnapshotState(t, pool, icTargetID)
-	if bt != "" || sb != "" {
-		t.Errorf("step 3 revert (target): got block_type=%q superseded_by=%q, want NULL/NULL", bt, sb)
+	if bt != "knowledge" || sb != "" {
+		t.Errorf("step 3 revert (target): got lifecycle_state=%q superseded_by=%q, want knowledge/NULL", bt, sb)
 	}
 }
 
-// readSnapshotState fetches block_type and superseded_by for the given block,
+// readSnapshotState fetches lifecycle_state and superseded_by for the given block,
 // returning empty strings when the column is NULL.
 func readSnapshotState(t *testing.T, pool *pgxpool.Pool, id string) (blockType, supersededBy string) {
 	t.Helper()
@@ -359,7 +360,7 @@ func readSnapshotState(t *testing.T, pool *pgxpool.Pool, id string) (blockType, 
 	defer cancel()
 	var bt, sb *string
 	err := pool.QueryRow(ctx,
-		`SELECT block_type, superseded_by::text FROM context_blocks WHERE id=$1::uuid`,
+		`SELECT lifecycle_state, superseded_by::text FROM context_blocks WHERE id=$1::uuid`,
 		id,
 	).Scan(&bt, &sb)
 	if err != nil {

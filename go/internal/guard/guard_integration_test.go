@@ -48,7 +48,7 @@ func insertGuardBlock(t *testing.T, pool *pgxpool.Pool, id, title string, embedd
 	vec := pgvec.NewVector(embedding)
 	_, err := pool.Exec(ctx,
 		`INSERT INTO context_blocks
-			(id, category, title, content, scope, embedding, block_type, created_at, updated_at)
+			(id, category, title, content, scope, embedding, lifecycle_state, created_at, updated_at)
 		 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $8)`,
 		id, "learnings", title, "guard-it body for "+title, "private", vec, "knowledge", createdAt,
 	)

@@ -41,7 +41,7 @@ func TestRunDigest_TopicMapClassifiedAsSystemMeta(t *testing.T) {
 		blockType *string
 	)
 	err := pool.QueryRow(ctx,
-		`SELECT block_role, is_meta, block_type FROM context_blocks
+		`SELECT block_role, is_meta, lifecycle_state FROM context_blocks
 		 WHERE category = 'index' AND title = $1 AND NOT is_archived`,
 		"topic-map-"+homeScope,
 	).Scan(&blockRole, &isMeta, &blockType)

@@ -285,6 +285,50 @@ func TestWriteLinks_ReplaceSemantics_NotTriggered_OnZeroWritten(t *testing.T) {
 // it matched the SQL strings but couldn't verify real WHERE-clause
 // semantics across rows or the no-drift property of the idempotent step.
 
+func TestWriteLinks_SupersedesRevert_WritesKnowledge_NotNull(t *testing.T) {
+	// M070 (Welle T1): the lifecycle state machine is NOT NULL — the stale-
+	// supersedes revert must write lifecycle_state='knowledge', never NULL
+	// (the pre-M070 revert wrote NULL, producing exactly the rows M070
+	// backfilled away). Unlike the removed full-lifecycle pgxmock variant,
+	// this test is deliberately narrow: pgxmock CAN pin the SQL contract —
+	// which value the revert UPDATE carries and for which (target, source)
+	// pair it fires. WHERE-semantics across rows stay with the integration
+	// test.
+	mock := newPool(t)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
+	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
+	expectInsertLink(mock)
+	// Stale DELETE returns a previously-written supersedes link to otherID →
+	// replaceStaleLinks must fire the revert UPDATE for exactly that target.
+	staleRows := mock.NewRows([]string{"target_block_id", "relationship"}).
+		AddRow(otherID, "supersedes")
+	mock.ExpectQuery(`DELETE FROM context_dream_links`).
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(staleRows)
+	// The contract under test: SET lifecycle_state = 'knowledge' — a revert
+	// that still wrote NULL would not match this expectation and fail.
+	mock.ExpectExec(`SET lifecycle_state = 'knowledge', superseded_by = NULL`).
+		WithArgs(otherID, sourceID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	expectAuditLog(mock)
+
+	written, err := WriteLinks(context.Background(), mock, sourceID, "private", 1.0,
+		[]Link{{TargetID: targetID, Relationship: "topical", Confidence: 0.9}})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if written != 1 {
+		t.Errorf("got written=%d, want 1", written)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expectations: %v", err)
+	}
+}
+
 func TestWriteLinks_BeginTxError_PropagatesWrapped(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()

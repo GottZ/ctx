@@ -45,7 +45,7 @@ func insertFullResetBlock(
 
 	_, err := pool.Exec(ctx,
 		`INSERT INTO context_blocks
-		   (id, category, title, content, scope, embedding, is_meta, block_type,
+		   (id, category, title, content, scope, embedding, is_meta, lifecycle_state,
 		    dream_checked_at, dream_cooldown_until, dream_keywords,
 		    dream_temporal_validated_at, created_at, updated_at)
 		 VALUES ($1::uuid, $2, $3, $4, 'private', $5, $6, 'knowledge',
@@ -82,6 +82,9 @@ func insertFullResetLink(t *testing.T, pool *pgxpool.Pool, src, tgt string) {
 // Hinweis dass die SQL-File auseinanderläuft → in Migration-Review prüfen.
 // Inline statt RunMigrations, weil zum Zeitpunkt von testdb-Setup unsere
 // Test-Blocks noch nicht existieren und M042 keinerlei Effekt hätte.
+// Seit M070 ist der Mirror aufs Post-Rename-Schema adaptiert (Alt-Spalte →
+// lifecycle_state, NULL backfilled, 'source' tot): die Test-DB ist voll
+// migriert, das historische 042-SQL würde hier mit 42703 brechen.
 func applyM042(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -98,7 +101,7 @@ func applyM042(t *testing.T, pool *pgxpool.Pool) {
 		       dream_temporal_validated_at = NULL
 		 WHERE NOT is_archived
 		   AND embedding IS NOT NULL
-		   AND (block_type IS NULL OR block_type IN ('knowledge', 'source', 'canonical'))
+		   AND lifecycle_state IN ('knowledge', 'canonical')
 		   AND NOT is_meta
 	`); err != nil {
 		t.Fatalf("apply M042 (UPDATE): %v", err)
