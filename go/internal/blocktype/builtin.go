@@ -1,7 +1,8 @@
 package blocktype
 
 // Compiled-in builtin set — the fail-safe truth the registry starts from and
-// falls back to (§4.1). It MUST stay byte-equivalent to the 072 seed rows:
+// falls back to (§4.1). It MUST stay byte-equivalent to the seed rows (072 for
+// the four M035 enum classes, 084 for the issue/comment workflow types):
 // the golden test applies the REAL migration from migrations.FS to a test DB
 // and diffs the SELECT rows against exactly this set (drift gate — no
 // test-local JSON copy, §4.1 R1). With this floor in place every deploy state
@@ -30,8 +31,9 @@ var auditPatterns = []string{
 // seeded as data in M072.
 const auditTrailDamping = 0.3
 
-// builtinPolicies returns fresh copies of the four builtin type policies
-// (M035 enum classes). Fresh slices per call: Policies end up in immutable
+// builtinPolicies returns fresh copies of the six builtin type policies (the
+// four M035 enum classes + the issue/comment workflow types, Welle I-C). Fresh
+// slices per call: Policies end up in immutable
 // Sets — shared backing arrays between generations would let one Set's
 // consumer observe another's mutation.
 func builtinPolicies() []Policy {
@@ -89,8 +91,67 @@ func builtinPolicies() []Policy {
 			Parent:    ParentPolicy{Mode: ParentModeNone},
 			Classify:  ClassifyRules{Priority: 10, MetadataFlags: []string{"is_meta"}},
 		},
+		// ── Workflow-engine issue axis (design/02 §4.1, Welle I-C) ────────────
+		// issue: full-pass retrieval, guard participates in FLAG mode (a
+		// duplicate issue is surfaced, never auto-archived, §4.7) restricted to
+		// its own scope, per-type thresholds 0.97/0.90; dream links issues but
+		// digest + overview EXCLUDE them (10k+ issues/repo would flood the
+		// topic-map and Louvain clustering, §6.8 — the LOOP overview gate);
+		// workflow state machine backlog→in-progress→done with the forge
+		// open/closed mapping; structural links references + duplicate-of.
+		{
+			Name: "issue", Scope: globalScope, Builtin: true,
+			Retrieval: RetrievalPolicy{Kind: RetrievalFullPass},
+			Guard: GuardPolicy{
+				Check: true, Candidate: true,
+				Mode: GuardModeFlag, Candidates: GuardCandidatesSameScope,
+				ThresholdDuplicate: f64(0.97), ThresholdReview: f64(0.90),
+			},
+			Dream:    DreamPolicy{Linkable: true},
+			Digest:   DigestPolicy{Include: false},
+			Overview: OverviewPolicy{Include: false},
+			Parent:   ParentPolicy{Mode: ParentModeNone},
+			Workflow: WorkflowPolicy{
+				States:        []string{"backlog", "in-progress", "done"},
+				Initial:       "backlog",
+				Terminal:      []string{"done"},
+				ForgeStateMap: map[string]string{"open": "backlog", "closed": "done"},
+			},
+			StructuralLinkClasses: []string{"references", "duplicate-of"},
+			Classify:              ClassifyRules{Priority: DefaultClassifyPriority},
+		},
+		// comment: kept OUT of every autonomous pipeline — guard.check=false,
+		// guard.candidate=false, dream.linkable=false, digest.include=false,
+		// overview.include=false (all exact §4.1). INTERIM DEVIATION (§5.2 /
+		// "kein Gate aufweichen"): §4.1 asks for retrieval=aggregate-to-parent
+		// and parent.mode=required/comment-of, but NEITHER mechanism ships in
+		// this base — the aggregate-to-parent FOLD (Achse-01 T11) has no
+		// consumer (Set.AggregateTypes is unused) and the parent_id WRITE path
+		// (store.PutBlockParent) has no production caller (its consumer is
+		// I-D2's InsertCommentBlock). policy.go rejects both values fail-closed
+		// until then. So comment ships with retrieval=excluded (the safe subset
+		// of aggregate: a comment stays invisible, never leaks raw into results)
+		// and parent.mode=none. FLIP TARGET: when T11 fold + the parent_id
+		// write path land (I-E era), update this row + seed to
+		// retrieval=aggregate-to-parent, parent.mode=required,
+		// relationship=comment-of. See the I-C wave return + design §9.1a.
+		{
+			Name: "comment", Scope: globalScope, Builtin: true,
+			Retrieval: RetrievalPolicy{Kind: RetrievalExcluded},
+			Guard:     GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
+			Dream:     DreamPolicy{Linkable: false},
+			Digest:    DigestPolicy{Include: false},
+			Overview:  OverviewPolicy{Include: false},
+			Parent:    ParentPolicy{Mode: ParentModeNone},
+			Classify:  ClassifyRules{Priority: DefaultClassifyPriority},
+		},
 	}
 }
+
+// f64 returns a pointer to a fresh float64 — per-call allocation so per-type
+// threshold pointers are never shared across builtinPolicies() generations
+// (same immutability rationale as the fresh pattern slices above).
+func f64(v float64) *float64 { return &v }
 
 // builtinSet builds the compiled-in fallback Set. Panics on an invalid
 // builtin definition — that is a programming error caught by every test run,

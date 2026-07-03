@@ -16,28 +16,30 @@ func builtinTestSet(t *testing.T) *Set {
 
 func TestBuiltinSetShape(t *testing.T) {
 	s := builtinTestSet(t)
-	want := []string{"audit-trail", "knowledge", "reference", "system-meta"}
+	// Six builtins since Welle I-C: the four M035 enum classes + issue/comment.
+	want := []string{"audit-trail", "comment", "issue", "knowledge", "reference", "system-meta"}
 	if got := s.Names(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Names() = %v, want %v", got, want)
 	}
 	if s.Default().Name != "knowledge" {
 		t.Errorf("Default() = %q, want knowledge", s.Default().Name)
 	}
-	// system-meta is excluded from retrieval but present everywhere the M035
-	// behaviour keeps it (guard, digest, overview) — byte-equivalence contract.
-	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "knowledge", "reference"}) {
-		t.Errorf("VisibleTypes() = %v (system-meta must be excluded)", got)
+	// Retrieval-visible = full-pass|damped|aggregate. issue is full-pass; comment
+	// and system-meta are excluded (comment INTERIM-excluded until the T11 fold).
+	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference"}) {
+		t.Errorf("VisibleTypes() = %v (comment + system-meta must be excluded)", got)
 	}
-	if got := s.GuardCheckTypes(); len(got) != 4 {
-		t.Errorf("GuardCheckTypes() = %v, want all 4", got)
+	// guard.check: the 4 builtins + issue; comment is OUT (guard.check=false).
+	if got := s.GuardCheckTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference", "system-meta"}) {
+		t.Errorf("GuardCheckTypes() = %v, want 4 builtins + issue (comment out)", got)
 	}
-	if got := s.GuardCandidateTypes(); len(got) != 4 {
-		t.Errorf("GuardCandidateTypes() = %v, want all 4", got)
+	if got := s.GuardCandidateTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference", "system-meta"}) {
+		t.Errorf("GuardCandidateTypes() = %v, want 4 builtins + issue (comment out)", got)
 	}
-	// I-J: every builtin keeps the guard bestand — archive persist + cross-scope
-	// candidates. Builtins are constructed directly (not via DecodePolicy), so
-	// these fields must be set explicitly or the guard silently flag-persists.
-	for _, n := range s.Names() {
+	// The four M035 classes keep the guard bestand — archive persist + cross-
+	// scope candidates. Builtins are constructed directly (not via DecodePolicy),
+	// so these fields must be set explicitly or the guard silently flag-persists.
+	for _, n := range []string{"knowledge", "reference", "audit-trail", "system-meta"} {
 		if got := s.GuardMode(n); got != GuardModeArchive {
 			t.Errorf("GuardMode(%q) = %q, want archive (builtin bestand)", n, got)
 		}
@@ -45,17 +47,37 @@ func TestBuiltinSetShape(t *testing.T) {
 			t.Errorf("GuardSameScopeOnly(%q) = true, want false (builtin cross-scope bestand)", n)
 		}
 	}
-	if got := s.DreamLinkableTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "knowledge", "reference"}) {
-		t.Errorf("DreamLinkableTypes() = %v (system-meta = NOT is_meta must be out)", got)
+	// issue deviates by design (§4.7): flag persist (never auto-archive) +
+	// same-scope candidates (never a cross-tenant match).
+	if got := s.GuardMode("issue"); got != GuardModeFlag {
+		t.Errorf("GuardMode(issue) = %q, want flag (§4.7)", got)
 	}
-	if got := s.DigestTypes(); len(got) != 4 {
-		t.Errorf("DigestTypes() = %v, want all 4 (today's non-filter)", got)
+	if !s.GuardSameScopeOnly("issue") {
+		t.Errorf("GuardSameScopeOnly(issue) = false, want true (§5.3)")
 	}
-	if got := s.OverviewTypes(); len(got) != 4 {
-		t.Errorf("OverviewTypes() = %v, want all 4 (today's non-filter)", got)
+	if dup, review := s.GuardThresholds("issue"); dup != 0.97 || review != 0.90 {
+		t.Errorf("issue thresholds = (%v, %v), want (0.97, 0.90)", dup, review)
 	}
+	// dream.linkable: 3 builtins + issue; comment + system-meta are out.
+	if got := s.DreamLinkableTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference"}) {
+		t.Errorf("DreamLinkableTypes() = %v (comment + system-meta must be out)", got)
+	}
+	// digest/overview stay the four builtins — issue + comment are EXCLUDED so a
+	// 10k-issue repo never floods the topic-map or Louvain clustering (§6.8).
+	if got := s.DigestTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "knowledge", "reference", "system-meta"}) {
+		t.Errorf("DigestTypes() = %v, want the 4 builtins (issue+comment excluded)", got)
+	}
+	if got := s.OverviewTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "knowledge", "reference", "system-meta"}) {
+		t.Errorf("OverviewTypes() = %v, want the 4 builtins (issue+comment excluded)", got)
+	}
+	// The aggregate-to-parent gate stays CLOSED: comment ships excluded, NOT
+	// aggregate, because the T11 fold has no consumer (kein Gate aufweichen).
 	if got := s.AggregateTypes(); len(got) != 0 {
-		t.Errorf("AggregateTypes() = %v, want empty before T11", got)
+		t.Errorf("AggregateTypes() = %v, want empty (T11 fold gate stays closed)", got)
+	}
+	// issue carries the structural-link write allowlist (§4.1).
+	if p, ok := s.Resolve("issue"); !ok || !reflect.DeepEqual(p.StructuralLinkClasses, []string{"references", "duplicate-of"}) {
+		t.Errorf("issue StructuralLinkClasses = %v, want [references duplicate-of]", p.StructuralLinkClasses)
 	}
 }
 

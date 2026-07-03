@@ -2,6 +2,7 @@ package blocktype
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -66,6 +67,13 @@ func TestDecodePolicyRejects(t *testing.T) {
 		{"threshold out of range", `{"v":1,"guard":{"threshold_duplicate":1.2}}`, "threshold_duplicate"},
 		{"unknown guard.mode", `{"v":1,"guard":{"mode":"delete"}}`, "guard.mode"},
 		{"unknown guard.candidates", `{"v":1,"guard":{"candidates":"tenant"}}`, "guard.candidates"},
+		// I-C structural_link_classes (design/02 §4.1).
+		{"structural_link_classes bad format", `{"v":1,"structural_link_classes":["Bad Class"]}`, "structural_link_classes"},
+		{"structural_link_classes duplicate", `{"v":1,"structural_link_classes":["references","references"]}`, "duplicate"},
+		// Typo of the new key still rejects as unknown (strict decode, key path):
+		// this is the negative counterpart proving structural_link_classes had to
+		// be ADDED to the envelope — a config carrying it would reject before I-C.
+		{"structural_link_classes typo key", `{"v":1,"structural_links":["references"]}`, "structural_links"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,6 +133,82 @@ func TestDecodePolicyGuardModeCandidates(t *testing.T) {
 	}
 	if set.GuardSameScopeOnly("does-not-exist") {
 		t.Error("Set.GuardSameScopeOnly(unknown) = true, want false fallback")
+	}
+}
+
+// TestDecodePolicyStructuralLinkClasses pins the I-C field extension (design/02
+// §4.1): structural_link_classes is a NEW known top-level key (a bare []string,
+// NOT dream.link_classes). Absent = nil (no restriction declared).
+func TestDecodePolicyStructuralLinkClasses(t *testing.T) {
+	p, err := DecodePolicy("issue", globalScope, false, false,
+		[]byte(`{"v":1,"structural_link_classes":["references","duplicate-of"]}`))
+	if err != nil {
+		t.Fatalf("DecodePolicy: %v", err)
+	}
+	if !reflect.DeepEqual(p.StructuralLinkClasses, []string{"references", "duplicate-of"}) {
+		t.Errorf("StructuralLinkClasses = %v, want [references duplicate-of]", p.StructuralLinkClasses)
+	}
+	q, err := DecodePolicy("plain", globalScope, false, false, []byte(validBase))
+	if err != nil {
+		t.Fatalf("DecodePolicy(plain): %v", err)
+	}
+	if q.StructuralLinkClasses != nil {
+		t.Errorf("absent structural_link_classes = %v, want nil", q.StructuralLinkClasses)
+	}
+}
+
+// TestIssueSeedConfigDecodes is the I-C positive probe (§7 gate): the issue seed
+// config — carrying the requested extensions (guard.mode/candidates from I-J,
+// workflow from I-B, structural_link_classes new in I-C) — decodes against the
+// extended v1 schema. RED against a schema missing ANY of these keys
+// (DisallowUnknownFields rejects the unknown key path) — that reject is the
+// proof the extension was necessary.
+func TestIssueSeedConfigDecodes(t *testing.T) {
+	cfg := `{"v":1,"retrieval":{"policy":"full-pass"},` +
+		`"guard":{"check":true,"candidate":true,"mode":"flag","candidates":"same-scope","threshold_duplicate":0.97,"threshold_review":0.90},` +
+		`"dream":{"linkable":true},"digest":{"include":false},"overview":{"include":false},"parent":{"mode":"none"},` +
+		`"workflow":{"states":["backlog","in-progress","done"],"initial":"backlog","terminal":["done"],"forge_state_map":{"open":"backlog","closed":"done"}},` +
+		`"structural_link_classes":["references","duplicate-of"],"classify":{}}`
+	p, err := DecodePolicy("issue", globalScope, true, false, []byte(cfg))
+	if err != nil {
+		t.Fatalf("issue seed config rejected by extended schema: %v", err)
+	}
+	if !reflect.DeepEqual(p.StructuralLinkClasses, []string{"references", "duplicate-of"}) {
+		t.Errorf("structural_link_classes = %v", p.StructuralLinkClasses)
+	}
+	if len(p.Workflow.States) != 3 || p.Workflow.Initial != "backlog" {
+		t.Errorf("workflow = %+v", p.Workflow)
+	}
+	if p.Guard.Mode != GuardModeFlag || p.Guard.Candidates != GuardCandidatesSameScope {
+		t.Errorf("guard = %+v", p.Guard)
+	}
+	if p.Digest.Include || p.Overview.Include {
+		t.Errorf("issue must be digest+overview excluded, got %+v %+v", p.Digest, p.Overview)
+	}
+}
+
+// TestCommentSeedConfigInterim pins the INTERIM comment seed AND the fail-closed
+// gate that "kein Gate aufweichen" preserves: the effective §4.1 values (all-off
+// guard/dream/digest/overview) decode, while the §4.1 target values
+// (retrieval=aggregate-to-parent, parent.mode=required) still REJECT because
+// their mechanisms (T11 fold, parent_id write path) do not ship in this base.
+func TestCommentSeedConfigInterim(t *testing.T) {
+	cfg := `{"v":1,"retrieval":{"policy":"excluded"},"guard":{"check":false,"candidate":false},` +
+		`"dream":{"linkable":false},"digest":{"include":false},"overview":{"include":false},` +
+		`"parent":{"mode":"none"},"classify":{}}`
+	p, err := DecodePolicy("comment", globalScope, true, false, []byte(cfg))
+	if err != nil {
+		t.Fatalf("interim comment seed rejected: %v", err)
+	}
+	if p.Retrieval.Kind != RetrievalExcluded || p.Parent.Mode != ParentModeNone {
+		t.Errorf("comment interim = %+v / %+v", p.Retrieval, p.Parent)
+	}
+	if p.Guard.Check || p.Guard.Candidate || p.Dream.Linkable || p.Digest.Include || p.Overview.Include {
+		t.Errorf("comment must be out of every pipeline, got %+v", p)
+	}
+	if _, err := DecodePolicy("comment", globalScope, true, false,
+		[]byte(`{"v":1,"retrieval":{"policy":"aggregate-to-parent"},"parent":{"mode":"required","relationship":"comment-of"}}`)); err == nil {
+		t.Fatal("§4.1 comment (aggregate-to-parent + required) accepted — gate softened")
 	}
 }
 

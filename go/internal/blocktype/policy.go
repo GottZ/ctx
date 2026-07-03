@@ -108,6 +108,12 @@ var nameFormat = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
 // SQL. Forge-state keys (open/closed) share the format.
 var statusFormat = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
 
+// linkClassFormat gates structural link-class tokens (design/02 §4.1/§5.5, same
+// rationale as nameFormat): trivial identifiers (e.g. "references",
+// "duplicate-of"), no quoting potential in logs/UI/graph, bind-parameter-only in
+// SQL (context_structural_links.link_class carries no CHECK, §3.2).
+var linkClassFormat = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
+
 // RetrievalPolicy — visibility class of a type in the retrieval pipelines.
 type RetrievalPolicy struct {
 	Kind string
@@ -202,7 +208,16 @@ type Policy struct {
 	Overview  OverviewPolicy
 	Parent    ParentPolicy
 	Workflow  WorkflowPolicy
-	Classify  ClassifyRules
+	// StructuralLinkClasses is the allowlist of link classes writable into
+	// context_structural_links FOR blocks of this type (design/02 §4.1). The
+	// name is deliberately NOT link_classes — that word is dream.link_classes
+	// (semantic Dream classes), a distinct axis. Empty/nil = no structural link
+	// restriction declared. This is a declarative WRITE allowlist consumed by
+	// the link-create path (I-D2/I-G); it participates in no running retrieval/
+	// guard/dream pipeline, so — unlike aggregate-to-parent / parent.mode — it
+	// carries no fail-closed mechanism gate (§3.3 gates only those two).
+	StructuralLinkClasses []string
+	Classify              ClassifyRules
 }
 
 // ── strict config decoding ───────────────────────────────────────────────────
@@ -222,7 +237,12 @@ type cfgEnvelope struct {
 	Overview  *cfgOverview  `json:"overview"`
 	Parent    *cfgParent    `json:"parent"`
 	Workflow  *cfgWorkflow  `json:"workflow"`
-	Classify  *cfgClassify  `json:"classify"`
+	// StructuralLinkClasses is a plain top-level array (not a section) — a bare
+	// []string, absent = nil = no restriction. json.Decoder with
+	// DisallowUnknownFields still rejects any UNKNOWN top-level key, so a typo
+	// like "structural_links" (missing _classes) rejects with the key path.
+	StructuralLinkClasses []string     `json:"structural_link_classes"`
+	Classify              *cfgClassify `json:"classify"`
 }
 
 type cfgRetrieval struct {
@@ -372,6 +392,10 @@ func applyEnvelope(p *Policy, env *cfgEnvelope) error {
 			p.Parent.Relationship = *pa.Relationship
 		}
 	}
+	if err := checkStrings(p.Name, "structural_link_classes", env.StructuralLinkClasses); err != nil {
+		return err
+	}
+	p.StructuralLinkClasses = env.StructuralLinkClasses
 	if err := applyWorkflow(p, env.Workflow); err != nil {
 		return err
 	}
@@ -471,6 +495,17 @@ func validatePolicy(p *Policy) error {
 	case GuardCandidatesAll, GuardCandidatesSameScope:
 	default:
 		return fmt.Errorf("blocktype %q: unknown guard.candidates %q (want all|same-scope)", p.Name, p.Guard.Candidates)
+	}
+
+	seenClass := make(map[string]bool, len(p.StructuralLinkClasses))
+	for _, c := range p.StructuralLinkClasses {
+		if !linkClassFormat.MatchString(c) {
+			return fmt.Errorf("blocktype %q: structural_link_classes entry %q violates format ^[a-z0-9][a-z0-9-]{0,49}$", p.Name, c)
+		}
+		if seenClass[c] {
+			return fmt.Errorf("blocktype %q: structural_link_classes contains duplicate %q", p.Name, c)
+		}
+		seenClass[c] = true
 	}
 	return validateWorkflow(p)
 }

@@ -98,13 +98,9 @@ func TestIJRecallFilteredANN(t *testing.T) {
 	defer cancel()
 
 	// Issue policy from the registry — the same-scope value is RESOLVED through
-	// the Set, not hard-coded, so the gate exercises the Go policy path.
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO context_block_types (name, scope, builtin, is_default, config) VALUES
-		('issue', '_global', false, false,
-		 '{"v":1,"guard":{"check":true,"candidate":true,"mode":"flag","candidates":"same-scope","threshold_duplicate":0.97,"threshold_review":0.90}}'::jsonb)`); err != nil {
-		t.Fatalf("insert issue registry row: %v", err)
-	}
+	// the Set, not hard-coded, so the gate exercises the Go policy path. Since
+	// Welle I-C the issue type is a builtin seed (migration 084 §4.1) already in
+	// the DB — resolve it, do NOT re-insert (uq_block_types_name_scope collision).
 	reg := blocktype.NewRegistry()
 	if err := reg.Reload(ctx, pool); err != nil {
 		t.Fatalf("registry reload: %v", err)

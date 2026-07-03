@@ -45,13 +45,10 @@ func TestIJGuardPolicy(t *testing.T) {
 	ctx := context.Background()
 
 	// Issue policy from the DB registry (not a test literal): flag mode +
-	// same-scope candidates + per-type thresholds 0.97/0.90 (§4.1 seed).
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO context_block_types (name, scope, builtin, is_default, config) VALUES
-		('issue', '_global', false, false,
-		 '{"v":1,"guard":{"check":true,"candidate":true,"mode":"flag","candidates":"same-scope","threshold_duplicate":0.97,"threshold_review":0.90}}'::jsonb)`); err != nil {
-		t.Fatalf("insert issue registry row: %v", err)
-	}
+	// same-scope candidates + per-type thresholds 0.97/0.90. Since Welle I-C the
+	// issue type ships as a builtin seed (migration 084 §4.1), so the row is
+	// already in the DB — resolve it from the registry, do NOT re-insert it (that
+	// would collide on uq_block_types_name_scope).
 	reg := blocktype.NewRegistry()
 	if err := reg.Reload(ctx, pool); err != nil {
 		t.Fatalf("registry reload: %v", err)
