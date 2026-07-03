@@ -102,6 +102,12 @@ const (
 // logs/UI, bind-parameter-only in SQL (§5.5).
 var nameFormat = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
 
+// statusFormat gates workflow status tokens (§5.5 line, same rationale as
+// nameFormat): trivial identifiers, no quoting potential in logs/UI/board, and
+// they land in the VARCHAR(50) workflow_status column — bind-parameter-only in
+// SQL. Forge-state keys (open/closed) share the format.
+var statusFormat = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
+
 // RetrievalPolicy — visibility class of a type in the retrieval pipelines.
 type RetrievalPolicy struct {
 	Kind string
@@ -153,6 +159,28 @@ type ParentPolicy struct {
 	Relationship string // descriptive label (e.g. "comment-of"); UI/graph only
 }
 
+// WorkflowPolicy — per-type workflow state machine (config vocabulary v1,
+// design/02 §4.1/§9.1 point 2b — the I-B field-extension request to Achse 01).
+// This is the POLICY behind the context_blocks.workflow_status column (mig 077):
+// the column carries the per-block VALUE, this config carries the SET of valid
+// states, the board column order (States is ordered), the entry point (Initial)
+// and the forge open/closed mapping (§4.5.4). Empty States = the type has no
+// workflow (the whole knowledge corpus) — ValidateTransition rejects any
+// transition for it (ErrNoWorkflow).
+//
+// v1 has NO explicit transition adjacency list (§4.1 form is exactly
+// {states, initial, terminal, forge_state_map}): a transition is valid iff both
+// endpoints are configured states — a complete graph over States. Terminal is
+// NOT an outgoing constraint (reopen closed→open is real, §4.5.4); it flags
+// which states map to the forge "closed" state and groups the board. An
+// explicit adjacency matrix is a deferred config extension if ever needed.
+type WorkflowPolicy struct {
+	States        []string          // ordered board columns; empty = no workflow
+	Initial       string            // entry state; ∈ States when States non-empty
+	Terminal      []string          // subset of States; forge-closed / board grouping
+	ForgeStateMap map[string]string // forge state (open/closed) → ctx status ∈ States
+}
+
 // ClassifyRules — write-side auto-classification rules of a type.
 type ClassifyRules struct {
 	Priority       int
@@ -173,6 +201,7 @@ type Policy struct {
 	Digest    DigestPolicy
 	Overview  OverviewPolicy
 	Parent    ParentPolicy
+	Workflow  WorkflowPolicy
 	Classify  ClassifyRules
 }
 
@@ -192,6 +221,7 @@ type cfgEnvelope struct {
 	Digest    *cfgDigest    `json:"digest"`
 	Overview  *cfgOverview  `json:"overview"`
 	Parent    *cfgParent    `json:"parent"`
+	Workflow  *cfgWorkflow  `json:"workflow"`
 	Classify  *cfgClassify  `json:"classify"`
 }
 
@@ -226,6 +256,13 @@ type cfgOverview struct {
 type cfgParent struct {
 	Mode         *string `json:"mode"`
 	Relationship *string `json:"relationship"`
+}
+
+type cfgWorkflow struct {
+	States        []string          `json:"states"`
+	Initial       *string           `json:"initial"`
+	Terminal      []string          `json:"terminal"`
+	ForgeStateMap map[string]string `json:"forge_state_map"`
 }
 
 type cfgClassify struct {
@@ -335,7 +372,34 @@ func applyEnvelope(p *Policy, env *cfgEnvelope) error {
 			p.Parent.Relationship = *pa.Relationship
 		}
 	}
+	if err := applyWorkflow(p, env.Workflow); err != nil {
+		return err
+	}
 	return applyClassify(p, env.Classify)
+}
+
+// applyWorkflow overlays the workflow section (absent = keep zero = no workflow)
+// and enforces its array caps. Cross-field validity is checked in validatePolicy.
+func applyWorkflow(p *Policy, w *cfgWorkflow) error {
+	if w == nil {
+		return nil
+	}
+	if err := checkStrings(p.Name, "workflow.states", w.States); err != nil {
+		return err
+	}
+	if err := checkStrings(p.Name, "workflow.terminal", w.Terminal); err != nil {
+		return err
+	}
+	if len(w.ForgeStateMap) > maxArrayEntries {
+		return fmt.Errorf("blocktype %q: workflow.forge_state_map exceeds %d entries (%d)", p.Name, maxArrayEntries, len(w.ForgeStateMap))
+	}
+	p.Workflow.States = w.States
+	p.Workflow.Terminal = w.Terminal
+	p.Workflow.ForgeStateMap = w.ForgeStateMap
+	if w.Initial != nil {
+		p.Workflow.Initial = *w.Initial
+	}
+	return nil
 }
 
 // applyClassify overlays the classify section and enforces its array caps.
@@ -407,6 +471,50 @@ func validatePolicy(p *Policy) error {
 	case GuardCandidatesAll, GuardCandidatesSameScope:
 	default:
 		return fmt.Errorf("blocktype %q: unknown guard.candidates %q (want all|same-scope)", p.Name, p.Guard.Candidates)
+	}
+	return validateWorkflow(p)
+}
+
+// validateWorkflow enforces the workflow section cross-field rules (§4.1 form).
+// An absent workflow section (States empty AND no companion fields) is valid —
+// the type has no workflow. Any companion field WITHOUT states is a
+// misconfiguration (silent-ineffective class, §5.2), so it rejects.
+func validateWorkflow(p *Policy) error {
+	w := &p.Workflow
+	if len(w.States) == 0 {
+		if w.Initial != "" || len(w.Terminal) > 0 || len(w.ForgeStateMap) > 0 {
+			return fmt.Errorf("blocktype %q: workflow config requires a non-empty states set", p.Name)
+		}
+		return nil
+	}
+	stateSet := make(map[string]bool, len(w.States))
+	for _, s := range w.States {
+		if !statusFormat.MatchString(s) {
+			return fmt.Errorf("blocktype %q: workflow.states entry %q violates format ^[a-z0-9][a-z0-9-]{0,49}$", p.Name, s)
+		}
+		if stateSet[s] {
+			return fmt.Errorf("blocktype %q: workflow.states contains duplicate %q", p.Name, s)
+		}
+		stateSet[s] = true
+	}
+	if w.Initial == "" {
+		return fmt.Errorf("blocktype %q: workflow.initial is required when states is set", p.Name)
+	}
+	if !stateSet[w.Initial] {
+		return fmt.Errorf("blocktype %q: workflow.initial %q is not in states", p.Name, w.Initial)
+	}
+	for _, tstate := range w.Terminal {
+		if !stateSet[tstate] {
+			return fmt.Errorf("blocktype %q: workflow.terminal %q is not in states", p.Name, tstate)
+		}
+	}
+	for forgeState, ctxStatus := range w.ForgeStateMap {
+		if !statusFormat.MatchString(forgeState) {
+			return fmt.Errorf("blocktype %q: workflow.forge_state_map key %q violates format ^[a-z0-9][a-z0-9-]{0,49}$", p.Name, forgeState)
+		}
+		if !stateSet[ctxStatus] {
+			return fmt.Errorf("blocktype %q: workflow.forge_state_map[%q]=%q is not in states", p.Name, forgeState, ctxStatus)
+		}
 	}
 	return nil
 }

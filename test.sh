@@ -275,15 +275,18 @@ fi
 # 39, table_count 30→31.
 # + 2 tables since M079 (context_projects + context_project_sync_runs, workflow
 # W4 project register + sync-run history; design/03 §3.1, masterplan K1). Both
-# are NEW tables; context_blocks untouched — col_count STAYS 39, table_count
-# 31→33.
+# are NEW tables; context_blocks untouched by 079 — table_count 31→33.
+# 40 columns since M077 (Achse-02 I-B workflow_status VARCHAR(50) nullable, the
+# per-block workflow value; the partial board index idx_blocks_workflow_board is
+# added by the same migration but adds no column and no table — verified live
+# against the migration chain in migration077_integration_test).
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "33" ]] && [[ "$col_count" == "39" ]]; then
+if [[ "$table_count" == "33" ]] && [[ "$col_count" == "40" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 33 tables + 39 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 33 tables + 40 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
