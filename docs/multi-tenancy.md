@@ -33,6 +33,21 @@ The **`RequireScopes` guard** establishes the fail-closed read contract: an empt
 
 Managed by server-admin manage-actions `tenant-grant-create` / `tenant-grant-list` / `tenant-grant-delete`: create rejects a `_`-system scope (400, with the `granted_scope` FK as fail-closed backstop), an unregistered grantee/scope (400) and a duplicate pair (409), and records the creating admin key for provenance; delete is a 404-no-oracle by id.
 
+## Per-key write scopes (E4b, migration 078)
+
+By default a key may WRITE blocks only to its `home_scope` (plus `shared` when that is in its `allowed_scopes`); every other `allowed_scope` stays read-only (write-in, never-out). Migration 078 adds an explicit `context_api_keys.write_scopes TEXT[] NOT NULL DEFAULT '{}'` so a key can be granted extra write targets **beyond** its home scope without widening its read set. The effective write gate — the single eval point `writableBlockScopes`, used by `/api/store` create and `manage` update/delete/guard-resolve — is:
+
+```
+writableBlockScopes = [home_scope] ∪ (write_scopes ∩ (allowed_scopes ∪ {home_scope})) ∪ {shared if allowed}
+```
+
+The invariant `write_scopes ⊆ allowed_scopes ∪ {home_scope}` (a write right implies a read right — no blind-writers) is enforced **twice**, fail-closed:
+
+- **(a) at mint/update** — `api-key-create` and `api-key-update` reject a `write_scope` outside `allowed_scopes ∪ {home_scope}` (or a `_`-reserved name) with **400** (Go-side, no DB CHECK — the v2.0.0 open-set line).
+- **(b) at the eval point** — the formula intersects `write_scopes` with the readable set, so a `write_scope` left **stale** by a later `allowed_scopes` shrink is neutralised for free; no per-write-site re-check is needed.
+
+`ctx_auth` returns the RAW `write_scopes` column as its 9th return value (appended after `tenant_role` — old binaries selecting the original 8 columns keep working); the intersection is applied in Go, so the DB stays the record of intent and the gate stays the single fail-closed decision. **Backfill: none** — the empty default reproduces v4.2.x behaviour byte-for-byte (pausability/rollback invariant). Set at creation via `ctx keys create … --write <scopes>` (or the `write_scopes` field on `api-key-create`); mutate an existing key via `api-key-update {write_scopes:[…]}` (`[]` clears the set, absent = leave unchanged).
+
 ## Block-level grants (row level)
 
 `context_block_grants` (migration 067) shares **one** `block_id` with a `grantee_tenant` — a granularity finer than the scope-level grants. `block_id` and `grantee_tenant` are both FK `ON DELETE CASCADE` (a deleted block or offboarded grantee drops its grants — contrast `context_dream_links`, which blocks the delete); `granted_by` is an `ON DELETE SET NULL` audit pointer; `uq_block_grant (block_id, grantee_tenant)` is the idempotency guard and `idx_block_grants_grantee (grantee_tenant, block_id)` the hot-read index. Deliberately **no `permission` column** (a single-value `'read'` enum gates nothing today — additive later). New table on an empty relation, so no `context_blocks` lock and no 1M index build.
@@ -116,8 +131,8 @@ Migration 069 adds structural per-tenant count-limits on `context_tenants`: `max
 | `scope-list` | tenant-admin | Tenant-filtered scope list. |
 | `tenant-limit-set` | server-admin | Sets a tenant's structural ceiling (both `max_scopes`/`max_keys` required, range `0..1_000_000`, explicit null = unlimited); optionally seeded at `tenant-create` over the 069 defaults. A tenant-admin raising its own limit would void it. |
 | `tenant-usage-get` | tenant-admin (own) | Scope/key counts vs limits; a server-admin may target any. |
-| `api-key-create` | tenant-admin | Enforces `max_keys` transactionally (429, active-only count); a server-admin may mint into another tenant via `tenant_id` (foreign-target T22 — the new key's scopes must belong to the target; a non-server-admin's `tenant_id` → 403, AM2). New keys are always `member` (a smuggled `tenant_role` is ignored, AM3). |
-| `api-key-update` | tenant-admin | Role delegation (`{tenant_role?, active?}`): only an owner (or server-admin) may change a key's role — a non-owner tenant-admin → 403, so admin→owner self-elevation is structurally impossible (no `is_admin` field means the server-global tier can never be set here). Demoting/deactivating the last active owner → 409 (last-owner invariant); an admin cannot neutralize an owner key → 403 (enforced at both update and the `api-key-delete` revoke path). |
+| `api-key-create` | tenant-admin | Enforces `max_keys` transactionally (429, active-only count); a server-admin may mint into another tenant via `tenant_id` (foreign-target T22 — the new key's scopes must belong to the target; a non-server-admin's `tenant_id` → 403, AM2). New keys are always `member` (a smuggled `tenant_role` is ignored, AM3). Optional `write_scopes` (078, E4b) must be ⊆ `allowed_scopes ∪ {home_scope}` else 400 (see [Per-key write scopes](#per-key-write-scopes-e4b-migration-078)). |
+| `api-key-update` | tenant-admin | Role delegation (`{tenant_role?, active?, write_scopes?}`): only an owner (or server-admin) may change a key's role — a non-owner tenant-admin → 403, so admin→owner self-elevation is structurally impossible (no `is_admin` field means the server-global tier can never be set here). Demoting/deactivating the last active owner → 409 (last-owner invariant); an admin cannot neutralize an owner key → 403 (enforced at both update and the `api-key-delete` revoke path). `write_scopes` (078, E4b) is validated ⊆ the key's existing `allowed_scopes ∪ {home_scope}` → 400 on a blind-writer; `[]` clears, absent leaves unchanged. |
 
 **`tenant-create` as real onboarding.** Provisions atomically in ONE transaction: the tenant row, an auto-prefixed initial scope `<slug>:main` (cap-free so a zero limit can't wedge the bootstrap), and an owner key (role `owner`, plaintext returned once) — scope before key so the key's home scope is registered (T22). Any step's failure rolls the whole transaction back (no half-provisioned tenant; a scope-name collision → 409 with zero orphans). The freshly minted owner key authenticates immediately, closing the inert-tenant gap (K10) that blocked self-service onboarding.
 

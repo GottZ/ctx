@@ -32,7 +32,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 
 `POST /api/manage` covers CRUD, Guard API, stats, key/MCP-client management and the block-type registry.
 
-- **Keys/clients:** `api-key-create` requires `home_scope`; key + MCP-client management and mutating `dream-mode` require an **admin key** since migration 052 (see [security](security.md#admin-tier)). Per-tenant scoping of the `api-key-*` actions and the tenant lifecycle (`tenant-*`, `tenant-grant-*`, `scope-*`, `tenant-limit-set`, `tenant-usage-get`, `tenant-quota-*`, `block-grant-*`) are in [multi-tenancy](multi-tenancy.md).
+- **Keys/clients:** `api-key-create` requires `home_scope`; key + MCP-client management and mutating `dream-mode` require an **admin key** since migration 052 (see [security](security.md#admin-tier)). `api-key-create`/`api-key-update` accept optional `write_scopes` (078, E4b) — explicit per-key write scopes that must be ⊆ `allowed_scopes ∪ {home_scope}` (else 400); the effective block-write gate and its double enforcement are in [multi-tenancy](multi-tenancy.md#per-key-write-scopes-e4b-migration-078). Per-tenant scoping of the `api-key-*` actions and the tenant lifecycle (`tenant-*`, `tenant-grant-*`, `scope-*`, `tenant-limit-set`, `tenant-usage-get`, `tenant-quota-*`, `block-grant-*`) are in [multi-tenancy](multi-tenancy.md).
 - **Block-type registry:** `type-list`/`type-get` are open reads; `type-create`/`type-update`/`type-delete` are server-admin. `manage update` accepts a registry-validated `type` field; `list-meta` accepts the `types`/`types_exclude` filters.
 - **Backend pool:** `backend-list`/`create`/`update`/`delete`/`test` — see [Backend pool](#backend-pool).
 

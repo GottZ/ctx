@@ -290,16 +290,37 @@ func contains(slice []string, val string) bool {
 	return false
 }
 
-// writableBlockScopes returns the scopes a key may WRITE blocks to: its
-// home_scope, plus 'shared' when that collaboration scope is in allowed_scopes.
-// This is the single source of truth for the block write gate — store create,
-// manage update, manage delete and guard-resolve all use it, so a key can mutate
-// exactly the blocks it can create. A read-only grant never widens it, and other
-// allowed_scopes (e.g. 'work') stay read-only by design.
+// writableBlockScopes returns the scopes a key may WRITE blocks to. It is the
+// SINGLE source of truth for the block write gate — store create, manage update,
+// manage delete and guard-resolve all use it, so a key can mutate exactly the
+// scopes this formula yields. The formula (078, E4b) is:
+//
+//	[home_scope] ∪ (write_scopes ∩ (allowed_scopes ∪ {home_scope})) ∪ {shared-if-allowed}
+//
+//   - home_scope is always writable and always element [0] (the minimal view, never
+//     empty) — a read-only grant never widens it (v4.0.1 line).
+//   - 'shared' stays writable only when it is in allowed_scopes (the collaboration
+//     scope of the default tenant) — unchanged from pre-078.
+//   - write_scopes widen the set, but ONLY intersected with what the key may READ
+//     (allowed ∪ home). This is enforcement path (b) of the double invariant: a
+//     write_scope left STALE by a later allowed_scopes shrink falls out of the
+//     intersection HERE — fail-closed at one eval point, not re-checked at N write
+//     sites. Other allowed_scopes with no matching write_scope stay read-only.
 func writableBlockScopes(ar *auth.AuthResult) []string {
 	scopes := []string{ar.HomeScope}
 	if contains(ar.AllowedScopes, "shared") {
 		scopes = append(scopes, "shared")
+	}
+	// write_scopes ∩ (allowed_scopes ∪ {home_scope}): a write_scope is honoured only
+	// if the key also holds a read right for it. Dedup against what is already in the
+	// set (home / shared) keeps the output stable.
+	for _, ws := range ar.WriteScopes {
+		if contains(scopes, ws) {
+			continue
+		}
+		if ws == ar.HomeScope || contains(ar.AllowedScopes, ws) {
+			scopes = append(scopes, ws)
+		}
 	}
 	return scopes
 }

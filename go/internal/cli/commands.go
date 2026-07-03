@@ -1035,12 +1035,14 @@ func keysCreateCmd(getClient func() (*Client, error)) *cobra.Command {
 	var (
 		homeScope     string
 		allowedScopes []string
+		writeScopes   []string
 	)
 	cmd := &cobra.Command{
 		Use:   "create <label>",
 		Short: "Provision a new API key (home_scope is required)",
 		Example: `  ctx keys create bench-crag --home crag
   ctx keys create work-key --home work --allowed shared,work
+  ctx keys create writer --home private --allowed shared,work --write work
   ctx keys create temp --home private --allowed shared`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1059,6 +1061,11 @@ func keysCreateCmd(getClient func() (*Client, error)) *cobra.Command {
 			if len(allowedScopes) > 0 {
 				data["allowed_scopes"] = allowedScopes
 			}
+			// write_scopes (078, E4b): scopes the key may WRITE to beyond home_scope.
+			// Server rejects any not ⊆ allowed_scopes ∪ {home_scope}.
+			if len(writeScopes) > 0 {
+				data["write_scopes"] = writeScopes
+			}
 			resp, err := c.Post("manage", map[string]any{
 				"action": "api-key-create",
 				"data":   data,
@@ -1072,6 +1079,7 @@ func keysCreateCmd(getClient func() (*Client, error)) *cobra.Command {
 				Label         string   `json:"label"`
 				HomeScope     string   `json:"home_scope"`
 				AllowedScopes []string `json:"allowed_scopes"`
+				WriteScopes   []string `json:"write_scopes"`
 				ApiKey        string   `json:"api_key"`
 				Error         string   `json:"error"`
 			}
@@ -1086,6 +1094,7 @@ func keysCreateCmd(getClient func() (*Client, error)) *cobra.Command {
 			fmt.Printf("  id:             %s\n", result.ID)
 			fmt.Printf("  home_scope:     %s\n", result.HomeScope)
 			fmt.Printf("  allowed_scopes: %v\n", result.AllowedScopes)
+			fmt.Printf("  write_scopes:   %v\n", result.WriteScopes)
 			fmt.Printf("  api_key:        %s\n", result.ApiKey)
 			fmt.Printf("\n  Save the key now — it cannot be retrieved later.\n")
 			return nil
@@ -1093,6 +1102,7 @@ func keysCreateCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&homeScope, "home", "", "home_scope for the new key (REQUIRED, e.g. 'private', 'work', 'crag')")
 	cmd.Flags().StringSliceVar(&allowedScopes, "allowed", nil, "additional allowed read scopes (comma-separated, default: shared)")
+	cmd.Flags().StringSliceVar(&writeScopes, "write", nil, "additional write scopes (comma-separated; must be ⊆ home + allowed) [078]")
 	return cmd
 }
 
@@ -1123,6 +1133,7 @@ func keysListRun(getClient func() (*Client, error)) error {
 			Label         string   `json:"label"`
 			HomeScope     string   `json:"home_scope"`
 			AllowedScopes []string `json:"allowed_scopes"`
+			WriteScopes   []string `json:"write_scopes"`
 			Active        bool     `json:"active"`
 			CreatedAt     string   `json:"created_at"`
 		} `json:"keys"`
@@ -1144,7 +1155,11 @@ func keysListRun(getClient func() (*Client, error)) error {
 		if len(created) >= 10 {
 			created = created[:10]
 		}
-		fmt.Printf("  %s  %s  home=%s  [%s]  %s\n", k.ID, k.Label, k.HomeScope, status, created)
+		write := ""
+		if len(k.WriteScopes) > 0 {
+			write = fmt.Sprintf("  write=%v", k.WriteScopes)
+		}
+		fmt.Printf("  %s  %s  home=%s%s  [%s]  %s\n", k.ID, k.Label, k.HomeScope, write, status, created)
 	}
 	return nil
 }

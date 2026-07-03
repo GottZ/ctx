@@ -23,6 +23,13 @@ type AuthResult struct {
 	IsAdmin       bool   // admin tier (052): settings/secrets/key management
 	TenantID      string // UUID of the owning tenant (Modell C, 060); empty in the sentinel paths
 	TenantRole    Role   // owner|admin|member tenant-role (059); typed in T20. Empty ("") in the sentinel paths.
+	// WriteScopes is the RAW per-key write-scope set (078, E4b): scopes the key
+	// may WRITE blocks to beyond its home_scope. It is the DB column value, NOT
+	// yet intersected with (allowed_scopes ∪ home_scope) — that fail-closed
+	// intersection is applied at the single eval point (handler.writableBlockScopes),
+	// so a stale entry from a later allowed_scopes shrink never widens the write set.
+	// Empty for every key until one is minted with explicit write_scopes.
+	WriteScopes []string
 }
 
 // SanitizeKey strips all non-hex characters from an API key.
@@ -46,12 +53,15 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Auth
 		isAdmin       bool
 		tenantID      *string // nullable UUID (NULL in the miss/suspended sentinel paths)
 		tenantRole    string  // never NULL ('' in the sentinel paths)
+		writeScopes   []string // 078 (E4b): RAW write-scope set; '{}' in the sentinel paths
 	)
 
+	// write_scopes is the LAST ctx_auth column (078, appended after tenant_role so
+	// this named SELECT stays valid across the DROP+CREATE).
 	err := pool.QueryRow(ctx,
-		`SELECT api_key_id, home_scope, allowed_scopes, read_scopes, is_valid, is_admin, tenant_id, tenant_role FROM ctx_auth($1)`,
+		`SELECT api_key_id, home_scope, allowed_scopes, read_scopes, is_valid, is_admin, tenant_id, tenant_role, write_scopes FROM ctx_auth($1)`,
 		apiKey,
-	).Scan(&apiKeyID, &homeScope, &allowedScopes, &readScopes, &isValid, &isAdmin, &tenantID, &tenantRole)
+	).Scan(&apiKeyID, &homeScope, &allowedScopes, &readScopes, &isValid, &isAdmin, &tenantID, &tenantRole, &writeScopes)
 	if err != nil {
 		return nil, fmt.Errorf("auth: query ctx_auth: %w", err)
 	}
@@ -63,6 +73,7 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Auth
 		IsValid:       isValid,
 		IsAdmin:       isAdmin,
 		TenantRole:    Role(tenantRole), // text column → named Role type (domain pinned to 059 CHECK, K4)
+		WriteScopes:   writeScopes,
 	}
 
 	if apiKeyID != nil {

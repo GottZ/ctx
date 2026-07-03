@@ -34,10 +34,16 @@ type ApiKey struct {
 	// a column that has existed since 059, no migration. insertApiKeyTx (and thus
 	// CreateApiKey) now sets it explicitly and returns it in RETURNING, so a key
 	// built on the create path carries its real role ('member' for CreateApiKey).
-	TenantRole string     `json:"tenant_role"`
-	Active     bool       `json:"active"`
-	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	TenantRole string `json:"tenant_role"`
+	// WriteScopes is the explicit per-key write-scope set (078, E4b): scopes the
+	// key may WRITE blocks to beyond its home_scope. Empty for every existing key
+	// (column DEFAULT '{}'). The invariant write_scopes ⊆ allowed_scopes ∪
+	// {home_scope} is enforced at mint/update (validateWriteScopes) AND at the
+	// read-time write gate (handler.writableBlockScopes) — double, fail-closed.
+	WriteScopes []string   `json:"write_scopes"`
+	Active      bool       `json:"active"`
+	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 // rowQuerier is the minimal querier satisfied by BOTH *pgxpool.Pool and pgx.Tx
@@ -47,6 +53,40 @@ type ApiKey struct {
 // primitive caring which it received.
 type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// ErrWriteScopeNotAllowed is returned by the mint/update paths when a requested
+// write_scope is not a subset of allowed_scopes ∪ {home_scope} (078, E4b invariant,
+// enforcement path (a)). A write_scope with no matching read right would be a
+// blind-writer; the handler maps this to 400. This is the Go-side gate (no DB CHECK,
+// v2.0.0 line) — the read-time writableBlockScopes intersection is the second,
+// independent enforcement (path (b)) that also neutralises entries left stale by a
+// later allowed_scopes shrink.
+var ErrWriteScopeNotAllowed = errors.New("store: write_scope not in allowed_scopes ∪ home_scope")
+
+// validateWriteScopes enforces write_scopes ⊆ allowed_scopes ∪ {home_scope} and the
+// '_'-reserved namespace, the mint/update-time half of the 078 double invariant. A
+// nil writeScopes (unchanged / none) passes trivially. It returns the FIRST
+// offending scope wrapped so the caller can surface a precise 400, or nil when every
+// element is a subset of the readable set.
+func validateWriteScopes(homeScope string, allowedScopes, writeScopes []string) error {
+	if len(writeScopes) == 0 {
+		return nil
+	}
+	readable := make(map[string]struct{}, len(allowedScopes)+1)
+	readable[homeScope] = struct{}{}
+	for _, s := range allowedScopes {
+		readable[s] = struct{}{}
+	}
+	for _, ws := range writeScopes {
+		if strings.HasPrefix(ws, "_") {
+			return fmt.Errorf("api_keys: scope names starting with '_' are reserved: %s", ws)
+		}
+		if _, ok := readable[ws]; !ok {
+			return fmt.Errorf("%w: %s", ErrWriteScopeNotAllowed, ws)
+		}
+	}
+	return nil
 }
 
 // insertApiKeyTx is the single INSERT path for a new api key: it validates the
@@ -60,7 +100,7 @@ type rowQuerier interface {
 // RETURNING now carry tenant_role — additive vs v4.0.1 (whose create path
 // omitted the column and returned TenantRole==""); the column has existed since
 // 059, so this is SQL-only, NO migration.
-func insertApiKeyTx(ctx context.Context, q rowQuerier, label, homeScope string, allowedScopes []string, tenantID, role string) (ApiKey, string, error) {
+func insertApiKeyTx(ctx context.Context, q rowQuerier, label, homeScope string, allowedScopes, writeScopes []string, tenantID, role string) (ApiKey, string, error) {
 	if label == "" {
 		return ApiKey{}, "", fmt.Errorf("api_keys: label is required")
 	}
@@ -95,6 +135,14 @@ func insertApiKeyTx(ctx context.Context, q rowQuerier, label, homeScope string, 
 			return ApiKey{}, "", fmt.Errorf("api_keys: scope names starting with '_' are reserved: %s", s)
 		}
 	}
+	// write_scopes ⊆ allowed_scopes ∪ {home_scope} (078, E4b enforcement path (a)).
+	// Runs BEFORE key generation / INSERT (mirrors the reserved-scope gates above),
+	// so a nil-querier unit test early-returns and the store is the last line before
+	// a blind-writer row could exist. The intersection at writableBlockScopes is the
+	// independent second half (path (b)).
+	if err := validateWriteScopes(homeScope, allowedScopes, writeScopes); err != nil {
+		return ApiKey{}, "", err
+	}
 
 	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
@@ -107,13 +155,16 @@ func insertApiKeyTx(ctx context.Context, q rowQuerier, label, homeScope string, 
 	// Migration 014_security_hardening.sql dropped the plaintext api_key
 	// column; key_hash is now NOT NULL UNIQUE and the sole identifier for
 	// ctx_auth lookups.
+	// write_scopes (078): a nil arg persists '{}' (COALESCE) — the pausability
+	// default. A non-nil set was already validated ⊆ allowed_scopes ∪ {home_scope}
+	// by validateWriteScopes above (defense-in-depth, last line before the row).
 	var row ApiKey
 	err := q.QueryRow(ctx,
-		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active, tenant_id, tenant_role)
-		 VALUES ($1, $2, $3, COALESCE($4::text[], '{shared}'::text[]), true, $5::uuid, $6)
-		 RETURNING id, label, home_scope, allowed_scopes, tenant_role, active, last_used_at, created_at`,
-		label, keyHash, homeScope, allowedScopes, tenantID, role,
-	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.TenantRole, &row.Active, &row.LastUsedAt, &row.CreatedAt)
+		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, write_scopes, active, tenant_id, tenant_role)
+		 VALUES ($1, $2, $3, COALESCE($4::text[], '{shared}'::text[]), COALESCE($5::text[], '{}'::text[]), true, $6::uuid, $7)
+		 RETURNING id, label, home_scope, allowed_scopes, write_scopes, tenant_role, active, last_used_at, created_at`,
+		label, keyHash, homeScope, allowedScopes, writeScopes, tenantID, role,
+	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.WriteScopes, &row.TenantRole, &row.Active, &row.LastUsedAt, &row.CreatedAt)
 	if err != nil {
 		return ApiKey{}, "", fmt.Errorf("api_keys: insert: %w", err)
 	}
@@ -139,7 +190,7 @@ func insertApiKeyTx(ctx context.Context, q rowQuerier, label, homeScope string, 
 // it mints are exactly as before. Owner / quota-gated mints are separate paths
 // that pass their own role through the shared primitive.
 func CreateApiKey(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes []string, tenantID string) (*ApiKey, string, error) {
-	key, plaintext, err := insertApiKeyTx(ctx, pool, label, homeScope, allowedScopes, tenantID, "member")
+	key, plaintext, err := insertApiKeyTx(ctx, pool, label, homeScope, allowedScopes, nil, tenantID, "member")
 	if err != nil {
 		return nil, "", err
 	}
@@ -174,7 +225,7 @@ var ErrKeyQuotaExceeded = errors.New("store: tenant key quota exceeded")
 // key never permanently burns a slot. insertApiKeyTx runs on the SAME tx, so the
 // count and the insert are one atomic unit. role MUST be a member of the 059 CHECK
 // domain; self-service passes a fixed "member" (owner is the MintOwnerKey path).
-func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes []string, tenantID, role string, maxKeys *int) (ApiKey, string, error) {
+func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes, writeScopes []string, tenantID, role string, maxKeys *int) (ApiKey, string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return ApiKey{}, "", fmt.Errorf("api_keys: mint begin: %w", err)
@@ -206,7 +257,7 @@ func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope 
 		}
 	}
 
-	key, plaintext, err := insertApiKeyTx(ctx, tx, label, homeScope, allowedScopes, tenantID, role)
+	key, plaintext, err := insertApiKeyTx(ctx, tx, label, homeScope, allowedScopes, writeScopes, tenantID, role)
 	if err != nil {
 		return ApiKey{}, "", err
 	}
@@ -229,7 +280,10 @@ func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope 
 // api-key-update (design/04 §D-B point 4, closing AM3). No cap, no tenant-row lock:
 // the caller owns the transaction scope.
 func MintOwnerKey(ctx context.Context, q rowQuerier, label, homeScope string, allowedScopes []string, tenantID string) (ApiKey, string, error) {
-	return insertApiKeyTx(ctx, q, label, homeScope, allowedScopes, tenantID, "owner")
+	// Owner keys mint with empty write_scopes (nil): an owner's home_scope IS the
+	// tenant's first scope and covers the bootstrap corpus; explicit write_scopes
+	// are a later, per-key concern via api-key-update.
+	return insertApiKeyTx(ctx, q, label, homeScope, allowedScopes, nil, tenantID, "owner")
 }
 
 // ListApiKeys returns API key rows ordered by created_at desc, scoped to one
@@ -244,7 +298,7 @@ func ListApiKeys(ctx context.Context, pool *pgxpool.Pool, tenantFilter string, a
 		tenantArg = &tenantFilter
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT id, label, home_scope, allowed_scopes, tenant_role, active, last_used_at, created_at
+		`SELECT id, label, home_scope, allowed_scopes, write_scopes, tenant_role, active, last_used_at, created_at
 		 FROM context_api_keys
 		 WHERE ($1::uuid IS NULL OR tenant_id = $1::uuid)
 		   AND (NOT $2::boolean OR active)
@@ -258,7 +312,7 @@ func ListApiKeys(ctx context.Context, pool *pgxpool.Pool, tenantFilter string, a
 	var keys []ApiKey
 	for rows.Next() {
 		var k ApiKey
-		if err := rows.Scan(&k.ID, &k.Label, &k.HomeScope, &k.AllowedScopes, &k.TenantRole, &k.Active, &k.LastUsedAt, &k.CreatedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.Label, &k.HomeScope, &k.AllowedScopes, &k.WriteScopes, &k.TenantRole, &k.Active, &k.LastUsedAt, &k.CreatedAt); err != nil {
 			return nil, fmt.Errorf("api_keys: scan: %w", err)
 		}
 		keys = append(keys, k)
@@ -339,13 +393,14 @@ func DeleteApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 	// constraint (the shared helper with UpdateApiKey). Zero rows — wrong tenant,
 	// absent, or a malformed id (22P02) — collapses to (false, nil): no row is
 	// touched and the caller cannot tell a foreign key from a nonexistent one.
-	targetTenant, curRole, curActive, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
+	rk, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
 	if err != nil {
 		return false, err
 	}
 	if !found {
 		return false, nil // foreign / absent / malformed id — no oracle (L2)
 	}
+	targetTenant, curRole, curActive := rk.tenant, rk.role, rk.active
 
 	// (2) Serialisation point: lock the target key's TENANT row (see UpdateApiKey's
 	// lock-target rationale). tenant_id is a NOT NULL FK, so the row is guaranteed.
@@ -452,7 +507,7 @@ var ErrOwnerProtected = errors.New("store: owner key may only be managed by an o
 // UpdateApiKey of a tenant locks the same row first, so there is no lock-ordering
 // inversion (no deadlock).
 func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant string,
-	isServerAdmin, callerMayManageOwner bool, role *string, active *bool) (updated ApiKey, changed bool, err error) {
+	isServerAdmin, callerMayManageOwner bool, role *string, active *bool, writeScopes *[]string) (updated ApiKey, changed bool, err error) {
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -473,12 +528,25 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 	// constraint. Zero rows — wrong tenant, absent, or a malformed id (22P02) —
 	// collapses to (false, nil): no row is touched and the caller cannot tell a
 	// foreign key from a nonexistent one (no oracle, mirrors DeleteApiKey:218-242).
-	targetTenant, curRole, curActive, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
+	rk, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
 	if err != nil {
 		return ApiKey{}, false, err
 	}
 	if !found {
 		return ApiKey{}, false, nil // foreign / absent / malformed id — no oracle (mirrors DeleteApiKey)
+	}
+	targetTenant := rk.tenant
+
+	// (2a) write_scopes ⊆ allowed_scopes ∪ {home_scope} (078, E4b, enforcement path
+	// (a) on update). Validated against the key's EXISTING read set — home_scope and
+	// allowed_scopes are NOT mutable via this action, so the resolved row is the
+	// authority. A write_scope with no read right is a blind-writer → rejected; the
+	// '_'-reserved namespace is rejected too (same rule as home/allowed). nil = leave
+	// unchanged → passes trivially. Checked under the tenant lock, before the write.
+	if writeScopes != nil {
+		if verr := validateWriteScopes(rk.homeScope, rk.allowedScopes, *writeScopes); verr != nil {
+			return ApiKey{}, false, verr
+		}
 	}
 
 	// (2) Serialisation point: lock the target key's TENANT row (see the lock-target
@@ -490,48 +558,11 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 		return ApiKey{}, false, fmt.Errorf("api_keys: update tenant lock: %w", err)
 	}
 
-	// Effective post-patch state of THIS key (nil = unchanged).
-	const ownerRole = "owner"
-	effRole := curRole
-	if role != nil {
-		effRole = *role
-	}
-	effActive := curActive
-	if active != nil {
-		effActive = *active
-	}
-
-	// (3) Owner-Protection (AM6(b)): only an owner / server-admin may strip owner
-	// power (demote off 'owner', or deactivate true→false) from an OWNER key. An
-	// admin (callerMayManageOwner=false) → 403. Fires only for a same-tenant owner
-	// target — a foreign target already collapsed to (false, nil) in (1), before
-	// the role was known, so this is no cross-tenant oracle.
-	targetIsOwner := curRole == ownerRole
-	removesOwnerPower := (role != nil && *role != ownerRole) || (active != nil && !*active && curActive)
-	if targetIsOwner && removesOwnerPower && !callerMayManageOwner {
-		return ApiKey{}, false, ErrOwnerProtected
-	}
-
-	// (4) Last-Owner (AM6(a)) under the tenant lock: only the transition
-	// active-owner → not-active-owner can drop the count. Count the OTHER active
-	// owners (id <> target) — directly "does >= 1 owner remain after the patch".
-	// Read under the lock, a serialised concurrent demotion of a DIFFERENT owner key
-	// is already committed, so its key no longer counts here → the second call sees
-	// zero others → ErrLastOwner (the race riegel). Excluding the target by id (vs
-	// count-then-minus-one) is robust to a stale self-read.
-	wasActiveOwner := curRole == ownerRole && curActive
-	willBeActiveOwner := effRole == ownerRole && effActive
-	if wasActiveOwner && !willBeActiveOwner {
-		var others int
-		if err = tx.QueryRow(ctx,
-			`SELECT count(*) FROM context_api_keys
-			  WHERE tenant_id = $1::uuid AND tenant_role = 'owner' AND active = true AND id <> $2::uuid`,
-			targetTenant, id).Scan(&others); err != nil {
-			return ApiKey{}, false, fmt.Errorf("api_keys: update owner count: %w", err)
-		}
-		if others < 1 {
-			return ApiKey{}, false, ErrLastOwner
-		}
+	// (3)+(4) AM6 owner guards under the tenant lock: Owner-Protection (an admin may
+	// not strip owner power) and Last-Owner (never drop the tenant's active-owner count
+	// below one). Extracted to keep this function under the cyclop ceiling.
+	if err = enforceOwnerInvariantsTx(ctx, tx, rk, id, role, active, callerMayManageOwner); err != nil {
+		return ApiKey{}, false, err
 	}
 
 	// Apply. Tenant constraint repeated in the WHERE (no cross-tenant patch);
@@ -542,16 +573,25 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 	// tenant locked above, so this UPDATE matches exactly one row; an ErrNoRows
 	// (the row vanished post-resolve — impossible under the lock) degrades to the
 	// same no-oracle miss as !found: (ApiKey{}, false, nil).
+	// write_scopes patch: nil → COALESCE keeps the existing value (unchanged); a
+	// non-nil slice (incl. empty, to CLEAR the set) replaces it. pgx encodes a nil
+	// *[]string as NULL and a non-nil *[]string as the array, so COALESCE($6,…)
+	// distinguishes "leave" from "set/clear" cleanly.
+	var wsArg any
+	if writeScopes != nil {
+		wsArg = *writeScopes
+	}
 	var row ApiKey
 	err = tx.QueryRow(ctx,
 		`UPDATE context_api_keys
-		    SET tenant_role = COALESCE($2::text, tenant_role),
-		        active      = COALESCE($3::boolean, active),
-		        updated_at  = now()
+		    SET tenant_role  = COALESCE($2::text, tenant_role),
+		        active       = COALESCE($3::boolean, active),
+		        write_scopes = COALESCE($6::text[], write_scopes),
+		        updated_at   = now()
 		  WHERE id = $1::uuid AND ($4::boolean OR tenant_id = $5::uuid)
-		  RETURNING id, label, home_scope, allowed_scopes, tenant_role, active, last_used_at, created_at`,
-		id, role, active, isServerAdmin, tenantArg,
-	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.TenantRole, &row.Active, &row.LastUsedAt, &row.CreatedAt)
+		  RETURNING id, label, home_scope, allowed_scopes, write_scopes, tenant_role, active, last_used_at, created_at`,
+		id, role, active, isServerAdmin, tenantArg, wsArg,
+	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.WriteScopes, &row.TenantRole, &row.Active, &row.LastUsedAt, &row.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ApiKey{}, false, nil
@@ -564,27 +604,85 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 	return row, true, nil
 }
 
+// enforceOwnerInvariantsTx runs the AM6 owner guards for an api-key patch under the
+// already-held tenant lock: (3) Owner-Protection (only an owner / server-admin may
+// strip owner power from an OWNER key) and (4) Last-Owner (a patch must never drop the
+// tenant's active-owner count below one). rk is the resolved target; role/active are
+// the patch (nil = unchanged). Returns ErrOwnerProtected / ErrLastOwner, a wrapped
+// query error, or nil when the patch is owner-safe. Extracted from UpdateApiKey to
+// keep it under the cyclop ceiling; the owner-count read runs under the caller's lock,
+// so the last-owner race riegel is preserved (a serialised concurrent demotion is
+// already committed and no longer counts).
+func enforceOwnerInvariantsTx(ctx context.Context, tx pgx.Tx, rk resolvedKey, id string,
+	role *string, active *bool, callerMayManageOwner bool) error {
+	const ownerRole = "owner"
+	effRole := rk.role
+	if role != nil {
+		effRole = *role
+	}
+	effActive := rk.active
+	if active != nil {
+		effActive = *active
+	}
+	// (3) Owner-Protection (AM6(b)): fires only for a same-tenant owner target — a
+	// foreign target already collapsed to !found before the role was known (no oracle).
+	targetIsOwner := rk.role == ownerRole
+	removesOwnerPower := (role != nil && *role != ownerRole) || (active != nil && !*active && rk.active)
+	if targetIsOwner && removesOwnerPower && !callerMayManageOwner {
+		return ErrOwnerProtected
+	}
+	// (4) Last-Owner (AM6(a)): only the active-owner → not-active-owner transition can
+	// drop the count. Count the OTHER active owners (id <> target) — "does >= 1 owner
+	// remain after the patch". Excluding the target by id is robust to a stale self-read.
+	wasActiveOwner := rk.role == ownerRole && rk.active
+	willBeActiveOwner := effRole == ownerRole && effActive
+	if wasActiveOwner && !willBeActiveOwner {
+		var others int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM context_api_keys
+			  WHERE tenant_id = $1::uuid AND tenant_role = 'owner' AND active = true AND id <> $2::uuid`,
+			rk.tenant, id).Scan(&others); err != nil {
+			return fmt.Errorf("api_keys: update owner count: %w", err)
+		}
+		if others < 1 {
+			return ErrLastOwner
+		}
+	}
+	return nil
+}
+
 // resolveKeyForUpdate fetches the target key's tenant + current role/active under the
 // caller's tenant constraint. A foreign, absent, or malformed (22P02) id collapses to
 // found=false so the caller cannot distinguish a foreign key from a nonexistent one
 // (no oracle, mirrors DeleteApiKey). Split out of UpdateApiKey to keep its cyclomatic
 // complexity under the cyclop limit.
-func resolveKeyForUpdate(ctx context.Context, q rowQuerier, id string, isServerAdmin bool, tenantArg *string) (targetTenant, role string, active, found bool, err error) {
+func resolveKeyForUpdate(ctx context.Context, q rowQuerier, id string, isServerAdmin bool, tenantArg *string) (r resolvedKey, found bool, err error) {
 	err = q.QueryRow(ctx,
-		`SELECT tenant_id::text, tenant_role, active
+		`SELECT tenant_id::text, tenant_role, active, home_scope, allowed_scopes
 		   FROM context_api_keys
 		  WHERE id = $1::uuid AND ($2::boolean OR tenant_id = $3::uuid)`,
 		id, isServerAdmin, tenantArg,
-	).Scan(&targetTenant, &role, &active)
+	).Scan(&r.tenant, &r.role, &r.active, &r.homeScope, &r.allowedScopes)
 	if err == nil {
-		return targetTenant, role, active, true, nil
+		return r, true, nil
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", false, false, nil
+		return resolvedKey{}, false, nil
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
-		return "", "", false, false, nil // malformed id → indistinguishable from absent
+		return resolvedKey{}, false, nil // malformed id → indistinguishable from absent
 	}
-	return "", "", false, false, fmt.Errorf("api_keys: update resolve: %w", err)
+	return resolvedKey{}, false, fmt.Errorf("api_keys: update resolve: %w", err)
+}
+
+// resolvedKey carries the fields resolveKeyForUpdate reads under the caller's
+// tenant constraint. home_scope + allowed_scopes were added for the 078 write_scopes
+// validation (write_scopes ⊆ allowed_scopes ∪ {home_scope}); DeleteApiKey ignores them.
+type resolvedKey struct {
+	tenant        string
+	role          string
+	active        bool
+	homeScope     string
+	allowedScopes []string
 }

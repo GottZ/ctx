@@ -93,7 +93,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		owner := seedKeyRole(t, pool, "be6w3-lastdemote-o1", tid, "owner", true)
 
 		_, changed, err := store.UpdateApiKey(ctx, pool, owner, tid,
-			false /*isServerAdmin*/, true /*callerMayManageOwner*/, rolePtr("member"), nil)
+			false /*isServerAdmin*/, true /*callerMayManageOwner*/, rolePtr("member"), nil, nil)
 		if !errors.Is(err, store.ErrLastOwner) {
 			t.Fatalf("demote last owner err = %v, want ErrLastOwner", err)
 		}
@@ -112,7 +112,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		owner := seedKeyRole(t, pool, "be6w3-lastdeact-o1", tid, "owner", true)
 
 		_, changed, err := store.UpdateApiKey(ctx, pool, owner, tid,
-			false, true, nil, activePtr(false))
+			false, true, nil, activePtr(false), nil)
 		if !errors.Is(err, store.ErrLastOwner) {
 			t.Fatalf("deactivate last owner err = %v, want ErrLastOwner", err)
 		}
@@ -146,7 +146,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 				// server-admin caller (callerMayManageOwner=true) isolates the
 				// last-owner mechanic from owner-protection / tenant constraint.
 				_, changeds[i], errs[i] = store.UpdateApiKey(ctx, pool, owners[i], "",
-					true /*isServerAdmin*/, true, rolePtr("member"), nil)
+					true /*isServerAdmin*/, true, rolePtr("member"), nil, nil)
 			}(i)
 		}
 		wg.Wait()
@@ -178,7 +178,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		keyB := seedKeyRole(t, pool, "be6w3-foreign-bkey", tidB, "admin", true)
 
 		_, changed, err := store.UpdateApiKey(ctx, pool, keyB, tidA,
-			false /*isServerAdmin*/, false /*callerMayManageOwner*/, rolePtr("member"), activePtr(false))
+			false /*isServerAdmin*/, false /*callerMayManageOwner*/, rolePtr("member"), activePtr(false), nil)
 		if err != nil {
 			t.Fatalf("foreign-tenant patch err = %v, want nil (no oracle)", err)
 		}
@@ -199,7 +199,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		seedKeyRole(t, pool, "be6w3-ownerprot-o2", tid, "owner", true) // second owner → non-last
 
 		_, changed, err := store.UpdateApiKey(ctx, pool, o1, tid,
-			false /*isServerAdmin*/, false /*callerMayManageOwner = admin*/, nil, activePtr(false))
+			false /*isServerAdmin*/, false /*callerMayManageOwner = admin*/, nil, activePtr(false), nil)
 		if !errors.Is(err, store.ErrOwnerProtected) {
 			t.Fatalf("admin deactivate owner err = %v, want ErrOwnerProtected", err)
 		}
@@ -219,7 +219,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		member := seedKeyRole(t, pool, "be6w3-promote-m1", tid, "member", true)
 
 		updated, changed, err := store.UpdateApiKey(ctx, pool, member, tid,
-			false /*isServerAdmin*/, true /*owner caller*/, rolePtr("admin"), nil)
+			false /*isServerAdmin*/, true /*owner caller*/, rolePtr("admin"), nil, nil)
 		if err != nil || !changed {
 			t.Fatalf("promote member→admin = (changed=%v, err=%v), want (true, nil)", changed, err)
 		}
@@ -239,7 +239,7 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		member := seedKeyRole(t, pool, "be6w3-reactivate-m1", tid, "member", false)
 
 		updated, changed, err := store.UpdateApiKey(ctx, pool, member, "",
-			true /*isServerAdmin*/, true, nil, activePtr(true))
+			true /*isServerAdmin*/, true, nil, activePtr(true), nil)
 		if err != nil || !changed {
 			t.Fatalf("reactivate key = (changed=%v, err=%v), want (true, nil)", changed, err)
 		}

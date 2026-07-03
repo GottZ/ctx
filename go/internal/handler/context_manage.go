@@ -1415,7 +1415,11 @@ type apiKeyCreateRequest struct {
 	Label         string   `json:"label"`
 	HomeScope     string   `json:"home_scope"`
 	AllowedScopes []string `json:"allowed_scopes,omitempty"`
-	TenantID      string   `json:"tenant_id,omitempty"` // SERVER-ADMIN ONLY
+	// WriteScopes (078, E4b): explicit scopes the key may WRITE to beyond home_scope.
+	// Must be ⊆ allowed_scopes ∪ {home_scope} — validated below (path (a)); the empty
+	// default reproduces v4.2.x (home_scope ∪ shared-when-allowed) exactly.
+	WriteScopes []string `json:"write_scopes,omitempty"`
+	TenantID    string   `json:"tenant_id,omitempty"` // SERVER-ADMIN ONLY
 }
 
 func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Request, req manageRequest) {
@@ -1495,13 +1499,17 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 	// context_tenants-row lock (race-tight, active-only), the structural limit a
 	// self-service tenant cannot exceed.
 	key, plaintext, err := store.MintKeyWithQuota(r.Context(), h.pool,
-		data.Label, data.HomeScope, data.AllowedScopes, bindingTenant, "member", maxKeys)
+		data.Label, data.HomeScope, data.AllowedScopes, data.WriteScopes, bindingTenant, "member", maxKeys)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrKeyQuotaExceeded):
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{"success": false, "error": "tenant key quota exceeded"})
 		case errors.Is(err, store.ErrTenantNotFound):
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+		case errors.Is(err, store.ErrWriteScopeNotAllowed):
+			// 078 (E4b) path (a): a write_scope ⊄ allowed_scopes ∪ {home_scope} — a
+			// blind-writer. Client error, not a 500 (mirrors the reserved-scope 400).
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		default:
 			slog.Error("manage: create api key failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
@@ -1515,8 +1523,9 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 		"label":          key.Label,
 		"home_scope":     key.HomeScope,
 		"allowed_scopes": key.AllowedScopes,
-		"tenant_role":    key.TenantRole, // Always 'member' on create (AM3).
-		"api_key":        plaintext,      // Shown once.
+		"write_scopes":   key.WriteScopes, // 078: echoed so the caller sees the effective set.
+		"tenant_role":    key.TenantRole,  // Always 'member' on create (AM3).
+		"api_key":        plaintext,       // Shown once.
 	})
 }
 
@@ -1680,6 +1689,11 @@ type apiKeyUpdateRequest struct {
 	ID         string `json:"id"`
 	TenantRole string `json:"tenant_role,omitempty"`
 	Active     *bool  `json:"active,omitempty"`
+	// WriteScopes (078, E4b): a *[]string so absent ("leave unchanged") is distinct
+	// from an explicit [] ("clear the set"). Validated ⊆ existing allowed_scopes ∪
+	// {home_scope} in the store (path (a) on update; home/allowed are not mutable
+	// here, so the persisted row is the authority).
+	WriteScopes *[]string `json:"write_scopes,omitempty"`
 }
 
 // handleApiKeyUpdate mutates the tenant_role and/or active flag of one api key
@@ -1704,9 +1718,9 @@ func (h *ManageHandler) handleApiKeyUpdate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id is required"})
 		return
 	}
-	if data.TenantRole == "" && data.Active == nil {
+	if data.TenantRole == "" && data.Active == nil && data.WriteScopes == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false, "error": "nothing to update (provide tenant_role and/or active)",
+			"success": false, "error": "nothing to update (provide tenant_role, active and/or write_scopes)",
 		})
 		return
 	}
@@ -1736,13 +1750,15 @@ func (h *ManageHandler) handleApiKeyUpdate(w http.ResponseWriter, r *http.Reques
 	}
 
 	updatedKey, changed, err := store.UpdateApiKey(r.Context(), h.pool, data.ID, ar.TenantID,
-		ar.IsServerAdmin(), callerMayManageOwner, rolePtr, data.Active)
+		ar.IsServerAdmin(), callerMayManageOwner, rolePtr, data.Active, data.WriteScopes)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrOwnerProtected):
 			writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "owner key may only be managed by an owner or server-admin"})
 		case errors.Is(err, store.ErrLastOwner):
 			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot remove the last active owner of the tenant"})
+		case errors.Is(err, store.ErrWriteScopeNotAllowed):
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		default:
 			slog.Error("manage: update api key failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})

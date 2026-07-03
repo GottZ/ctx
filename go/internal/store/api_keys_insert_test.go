@@ -36,7 +36,7 @@ func TestInsertApiKeyTx_ValidationOwnedByPrimitive(t *testing.T) {
 			{"reserved allowed_scope", "lbl", "tenant-a", []string{"shared", "_x"}, "reserved"},
 		}
 		for _, c := range cases {
-			_, _, err := insertApiKeyTx(ctx, nil, c.label, c.homeScope, c.allowed, "", role)
+			_, _, err := insertApiKeyTx(ctx, nil, c.label, c.homeScope, c.allowed, nil, "", role)
 			if err == nil {
 				t.Errorf("role=%s %s: expected error, got nil", role, c.name)
 				continue

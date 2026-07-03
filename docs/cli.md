@@ -55,8 +55,8 @@ The `ctx` CLI reads its config from `~/.config/ctx/config` (`CTX_BASE_URL` + `CT
 
 | Command | Description |
 |---------|-------------|
-| `ctx keys create <label> --home <scope>` | Provision API key (v2.0.0: `--home` required, no default scope; admin key required since migration 052) |
-| `ctx keys [list\|delete]` | List / revoke provisioned API keys (admin key required since 052) |
+| `ctx keys create <label> --home <scope> [--allowed a,b] [--write a]` | Provision API key (v2.0.0: `--home` required, no default scope; admin key required since migration 052). `--write` (078, E4b) grants extra write scopes; each must be ⊆ home + allowed (else 400) |
+| `ctx keys [list\|delete]` | List / revoke provisioned API keys (admin key required since 052); `list` shows `write=[…]` when a key carries write scopes |
 | `ctx tenant [list\|get\|create\|update\|delete]` | Tenant lifecycle (**server-admin key**). `create <slug> <name>` is the compound bootstrap: tenant + initial scope `<slug>:main` + owner key (plaintext shown once). TTY: table, pipe: JSON; API failures (403/404/400) exit 1 |
 | `ctx tenant grant [create\|list\|delete]` | Cross-tenant read grants (**server-admin key**): grant another tenant read access to one scope; delete revokes immediately |
 | `ctx tenant limit set <id> --max-scopes N --max-keys N` | Structural caps (**server-admin key**). Replace semantics — both flags required; negative = unlimited, 0 = frozen |
