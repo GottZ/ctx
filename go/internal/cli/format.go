@@ -20,6 +20,18 @@ func StdoutIsTTY() bool {
 	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
+// StdinIsTTY reports whether stdin is an interactive terminal (not piped or
+// redirected). Mirrors StdoutIsTTY via os.ModeCharDevice. Used by the project
+// detect/init flow: a mismatched .ctx-project file or a missing git identity
+// prompts on a TTY, but MUST error (never block on a read) when piped (§4.3).
+func StdinIsTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
 // PrintJSON writes raw JSON to stdout with optional pretty-printing.
 // If the data is valid JSON, it pretty-prints it; otherwise writes raw.
 func PrintJSON(data []byte) {

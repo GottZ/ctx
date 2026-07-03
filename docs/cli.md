@@ -67,3 +67,23 @@ The `ctx` CLI reads its config from `~/.config/ctx/config` (`CTX_BASE_URL` + `CT
 | `ctx block-grant [create\|list\|revoke]` | Row-level read sharing of a single block with another tenant (**server-admin key**) |
 
 Tenant semantics are documented in [multi-tenancy](multi-tenancy.md).
+
+## Projects
+
+A project binds one repo corpus to exactly one tenant scope (Model C): the scope is the isolation boundary, so a scope belongs to one tenant and each project's issues live only in its own scope.
+
+| Command | Description |
+|---------|-------------|
+| `ctx project` | = `show`: detect this repo's identity, then look up its registered project. TTY: detail; pipe: JSON |
+| `ctx project detect` | Resolve the identity locally, no server call. Precedence: a GitHub `origin` remote → `github:owner/repo`, else a single-root git repo → `git-root:<sha>` (survives clones), else a manual slug (prompted on a TTY, an **error when piped**). TTY: human lines; pipe: JSON `{identity, source}` |
+| `ctx project init [--identity ID \| --repo URL] [--scope NAME]` | Register this repo (idempotent — re-running with the same identity returns the existing project, never a duplicate) and write `.ctx-project` (the identity only, never a secret). `--scope` defaults to a name derived from the identity; the server prefixes it with your tenant slug. Needs a **tenant-admin key** |
+| `ctx project show` | Detect, then show the registered project (or a "not registered" hint) |
+| `ctx project list` | Every project your key can read (scope intersection). TTY: table, pipe: JSON |
+
+**`.ctx-project` is a detect shortcut, not a trust anchor.** For `github:`/`git-root:` identities `detect` honors the file **only when it matches** the independent git detection; a mismatch (e.g. a cloned foreign repo with a planted file that would redirect issue writes into someone else's corpus) forces interactive confirmation on a TTY and **errors when piped** (exit ≠ 0). Only `manual:` identities — which have no independent source — are authoritative from the file.
+
+## Raw REST access
+
+| Command | Description |
+|---------|-------------|
+| `ctx api <method> <path> [json]` | Generic authenticated passthrough to any `/api` route (method is GET/POST/PUT/PATCH/DELETE; JSON body via arg or stdin, sent verbatim). Prints the response JSON; a `success:false` envelope exits 1 with the server's reason. This is the script-level reach for the REST surfaces (project/types/issues) that are not `manage` actions — e.g. `ctx api GET /api/project`, `echo '{"display_name":"X"}' \| ctx api PATCH /api/project/<id>` |

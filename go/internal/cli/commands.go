@@ -53,6 +53,8 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(blocksCmd(getClient))
 	root.AddCommand(blockGrantCmd(getClient))
 	root.AddCommand(tenantCmd(getClient))
+	root.AddCommand(projectCmd(getClient))
+	root.AddCommand(apiCmd(getClient))
 	root.AddCommand(initCmd())
 }
 
