@@ -11,6 +11,7 @@ import type {
   ApiKeyCreateResult,
   ApiKeyUpdateResult,
   ApiKeyUpdateSpec,
+  BlockTypeView,
   ScopeCreateResult,
   ScopeCreateSpec,
   Tenant,
@@ -19,6 +20,9 @@ import type {
   TenantRole,
   TenantUsageResponse,
   TenantUsageView,
+  TypeResponse,
+  TypesListResponse,
+  TypeSource,
 } from './types'
 
 const sampleTenant: Tenant = {
@@ -110,6 +114,53 @@ describe('tenant limits + usage (design 02 §3 / 05 §1)', () => {
     const resp: TenantUsageResponse = { success: true, usage }
     expect(resp.usage.scope_count).toBe(3)
     expect(resp.usage.max_keys).toBeNull()
+  })
+})
+
+describe('block-type registry wire shape (workflow W1, K5)', () => {
+  const sampleType: BlockTypeView = {
+    id: '11111111-1111-1111-1111-111111111111',
+    name: 'issue',
+    scope: '_global',
+    display_name: 'Issue',
+    description: 'A tracked work item',
+    builtin: true,
+    is_default: false,
+    config: {
+      v: 1,
+      retrieval: { policy: 'full-pass' },
+      guard: { check: true, candidate: true },
+      dream: { linkable: true },
+      digest: { include: true },
+      overview: { include: true },
+      parent: { mode: 'none' },
+      classify: { priority: 100 },
+    },
+    created_at: '2026-07-03T00:00:00Z',
+    updated_at: '2026-07-03T00:00:00Z',
+    updated_by: '22222222-2222-2222-2222-222222222222',
+    source: 'builtin',
+  }
+
+  it('mirrors the Go typeView (TestTypesGoldenShape) incl. the source badge', () => {
+    const list: TypesListResponse = { success: true, types: [sampleType] }
+    const single: TypeResponse = { success: true, type: sampleType }
+    expect(list.types[0].source).toBe('builtin')
+    expect(single.type.config.v).toBe(1)
+  })
+
+  it('pins source to the builtin|tenant domain', () => {
+    const sources: TypeSource[] = ['builtin', 'tenant']
+    // @ts-expect-error — an arbitrary string is NOT a valid TypeSource
+    const bad: BlockTypeView = { ...sampleType, source: 'external' }
+    expect(sources).toHaveLength(2)
+    expect(bad.name).toBe('issue')
+  })
+
+  it('updated_by is optional (absent on a never-touched builtin seed row)', () => {
+    const { updated_by: _omit, ...withoutUpdatedBy } = sampleType
+    const row: BlockTypeView = withoutUpdatedBy
+    expect(row.updated_by).toBeUndefined()
   })
 })
 

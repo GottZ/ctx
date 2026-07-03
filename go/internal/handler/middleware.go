@@ -213,6 +213,31 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireMember gates a route on ANY valid authenticated key (member tier and
+// up). Mount AFTER Auth — Auth already rejects invalid/missing keys with 401,
+// so in the production chain this is the explicit, DB-free, PROBEABLE in-mount
+// gate that makes a member surface fail-closed the same structural way
+// RequireAdmin does (design/03 §5.1: the gate lives in the SAME function as the
+// routes, so the negative probe exercises exactly the chain production mounts).
+// A missing or invalid AuthResult yields 401 — no member handler downstream
+// ever runs without a caller identity to scope against (the K-T1 pairing: the
+// gate admits, the handler scopes reads to the caller's visible scopes).
+// Negative probe: TestTypesMemberGate_NoAuth401 was red against MountTypes with
+// this Use() line removed (the nil AuthResult reached the handler and panicked
+// into typeVisibleScopes — the fail-open trap made visible).
+func RequireMember(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ar := AuthResultFromContext(r.Context())
+		if ar == nil || !ar.IsValid {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"success": false, "error": "unauthorized",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // RequireAdmin gates a route on the admin tier (052). Mount AFTER Auth —
 // it reads the AuthResult from the request context. Non-admin (or missing
 // auth context) yields 403; the response shape matches the API envelope.

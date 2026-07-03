@@ -13,6 +13,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `GET /api/graph/overview` | Scope-pure Louvain cluster supergraph ("landkarte"); reads precomputed scope-partitioned aggregates, gated on `graph_overview.enabled` (off → 404). Read-only, no LLM. |
 | `GET /api/whoami` | Calling key's identity: `label`, `home_scope`, `read_scopes`, the server-global `admin` tier flag, plus the Model-C tenant identity `tenant_id` + per-tenant `role` (`owner`/`admin`/`member`). The SPA login gate probes it, derives its read-only degradation from `admin`, and tells server-admin from tenant-admin. |
 | `POST /api/manage` | CRUD, Guard API, stats, API-key management, block-type registry (see [manage actions](#manage-actions)). |
+| `GET /api/types[/{name}]` | Read-only block-type registry: effective type list (`_global` ∪ your tenant) and single-type policy config, **member-gated** (any valid key) (see [Block-type registry](#block-type-registry)). |
 | `GET\|PUT\|DELETE /api/settings[/{key}]` | Runtime config overrides, **admin-gated incl. reads** (see [Settings API](#settings-api)). |
 | `GET\|PUT\|DELETE /api/secrets[/{name}]` | Write-only sealed credentials, **admin-gated**: PUT creates/rotates (value never returned), GET lists metadata + `referenced_by`, DELETE 409s while referenced (see [security](security.md#sealed-secrets--break-glass)). |
 | `GET /api/status` | **Admin dashboard** aggregate from the process-wide status collector: health, backend pool (`pool.Status()` shape), dream queue + mode, 24h LLM telemetry (with an `llm_24h_complete` attribution flag), gaming toggle. Served from a cache (N pollers cost one collection). Carries hostnames, so it is admin-gated where `/health` stays anonymous. Opens to a tenant-admin with a reduced own-tenant view (see [multi-tenancy](multi-tenancy.md#telemetry-per-tenant-views)). |
@@ -36,6 +37,21 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 - **Backend pool:** `backend-list`/`create`/`update`/`delete`/`test` — see [Backend pool](#backend-pool).
 
 **Type axes on responses.** `/api/search`, `manage get`, the MCP/chat `recent` surface and `manage list-meta` carry `type` (policy type), `lifecycle_state` and `type_source` per block; `/api/query` results carry `type`. Server-side type filters (`types` / `types_exclude` arrays) are pure opt-in bind parameters — no hard exclude (retrieval-excluded types stay browseable by design), with `block_roles_exclude` kept as the documented legacy alias everywhere including `/api/query` (both names ⇒ union).
+
+## Block-type registry
+
+The read side of the block-type registry has its own REST namespace (workflow W1), the canonical surface going forward. It is **member-gated** — any valid key reads — with the member gate living inside the mount (`RequireMember`), so a missing/invalid key is `401` before the handler runs.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/types` | Effective type list: the shipped `_global` set **∪** your own tenant's overlay, with a tenant-scoped type shadowing the `_global` row of the same name. Each entry carries a `source` badge (`builtin` = shipped `_global` namespace, `tenant` = your tenant's own). |
+| `GET /api/types/{name}` | One type incl. its policy `config` envelope + `source`. A name that is unknown **or** belongs to another tenant reads as `404 {success:false,error:"Type not found"}` — the same body either way (no existence oracle: type names can leak project internals). |
+
+The response row is the frozen wire shape (K5): `id`, `name`, `scope`, `display_name`, `description`, `builtin`, `is_default`, `config` (the design 01-§3.3 policy envelope, carried verbatim), `created_at`, `updated_at`, `updated_by?`, `source`. The shape is pinned by a Go golden test (`TestTypesGoldenShape`) and its TypeScript mirror (`web/src/lib/api/types.ts`); the two must move in lockstep.
+
+CLI: `ctx types` / `ctx types list` (table on a TTY, JSON when piped) and `ctx types get <name>`.
+
+> The write side (`type-create`/`-update`/`-delete`) remains on the `manage` action family for now (Achse-01 first exposure); the dedicated `PUT/DELETE /api/types/{name}` REST surface is a later wave.
 
 ## Graph API
 

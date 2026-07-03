@@ -131,6 +131,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Get("/api/whoami", whoamiH.HandleWhoami)
 		// Manage — CRUD + Guard API
 		r.Post("/api/manage", manageH.HandleManage)
+		// Block-type registry — read-only member surface (workflow W1); the
+		// member gate lives inside the mount (RequireMember, design/03 §5.1).
+		handler.MountTypes(r, handler.NewTypesHandler(pool))
 		// Digest — Topic map generation
 		r.Post("/api/digest", digestH.HandleDigest)
 		// Synthesize — manual daily synthesis trigger (Welle 42)

@@ -724,3 +724,78 @@ export interface TenantUsageResponse {
   success: true
   usage: TenantUsageView
 }
+
+// =============================================================================
+// Block-type registry — frozen wire contract (workflow W1, K5). ADDITIVE. Drift
+// anchor = go/internal/handler/types.go (typeView) + go/internal/store/
+// blocktypes.go (BlockTypeRow), pinned by TestTypesGoldenShape; the config
+// envelope vocabulary is design 01-§3.3 (the field truth per masterplan K5).
+// A change to either side must update BOTH in lockstep (Go golden ↔ this file).
+// =============================================================================
+
+// The origin badge on the effective type (handler/types.go typeSourceForScope):
+// 'builtin' = a row in the shipped '_global' namespace, 'tenant' = the caller's
+// own tenant-scoped overlay. Derived from scope, not the `builtin` column.
+export type TypeSource = 'builtin' | 'tenant'
+
+// The config JSONB envelope (design 01-§3.3, "v":1). ALL fields optional on the
+// wire: a stored config may be partial and the server fills the documented
+// defaults at resolve time. The UI must render an unknown/missing field as its
+// default, never crash — new config keys are forward-compatible.
+export interface BlockTypeConfig {
+  v: 1
+  retrieval?: {
+    policy?: 'full-pass' | 'excluded' | 'damped' | 'aggregate-to-parent'
+    damping_factor?: number
+    intent_patterns?: string[]
+  }
+  guard?: {
+    check?: boolean
+    candidate?: boolean
+    threshold_duplicate?: number | null
+    threshold_review?: number | null
+  }
+  dream?: { linkable?: boolean; link_classes?: string[] | null }
+  digest?: { include?: boolean }
+  overview?: { include?: boolean }
+  parent?: { mode?: 'none' | 'optional' | 'required'; relationship?: string | null }
+  classify?: {
+    priority?: number
+    metadata_flags?: string[]
+    source_prefixes?: string[]
+    title_patterns?: string[]
+  }
+}
+
+// Source: go/internal/handler/types.go (typeView) — one row of the effective
+// type registry as read back by GET /api/types[/{name}]. config is carried
+// verbatim (the API shows what the row stores); updated_by is omitempty (absent
+// on a never-touched builtin seed row → optional on the wire).
+export interface BlockTypeView {
+  id: string
+  name: string
+  scope: string
+  display_name: string
+  description: string
+  builtin: boolean
+  is_default: boolean
+  config: BlockTypeConfig
+  created_at: string
+  updated_at: string
+  updated_by?: string
+  source: TypeSource
+}
+
+// Source: go/internal/handler/types.go (HandleList) — effective list, '_global'
+// ∪ the caller's own tenant namespace, tenant rows shadowing '_global' by name.
+export interface TypesListResponse {
+  success: true
+  types: BlockTypeView[]
+}
+
+// Source: go/internal/handler/types.go (HandleGet) — one type; a foreign or
+// unknown name is 404 {success:false,error} (raised as ApiError, no oracle).
+export interface TypeResponse {
+  success: true
+  type: BlockTypeView
+}
