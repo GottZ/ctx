@@ -15,6 +15,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST /api/manage` | CRUD, Guard API, stats, API-key management, block-type registry (see [manage actions](#manage-actions)). |
 | `GET /api/types[/{name}]` | Block-type registry reads: effective type list (`_global` ∪ your tenant) and single-type policy config, **member-gated** (any valid key) (see [Block-type registry](#block-type-registry)). |
 | `PUT\|DELETE /api/types/{name}` | Block-type registry writes (upsert/delete), **admin-or-tenant-admin-gated**: a tenant-admin writes its own tenant namespace, `_global` types are operator-only; DELETE 409s while referenced or on a builtin (see [Block-type registry](#block-type-registry)). |
+| `GET\|POST /api/project` + `GET\|PATCH\|DELETE /api/project/{id}` | Project register: one project = one repo corpus bound to one tenant scope. Reads **member-gated** (scope-read), create/patch/delete **tenant-admin** (see [Project register](#project-register)). |
 | `GET\|PUT\|DELETE /api/settings[/{key}]` | Runtime config overrides, **admin-gated incl. reads** (see [Settings API](#settings-api)). |
 | `GET\|PUT\|DELETE /api/secrets[/{name}]` | Write-only sealed credentials, **admin-gated**: PUT creates/rotates (value never returned), GET lists metadata + `referenced_by`, DELETE 409s while referenced (see [security](security.md#sealed-secrets--break-glass)). |
 | `GET /api/status` | **Admin dashboard** aggregate from the process-wide status collector: health, backend pool (`pool.Status()` shape), dream queue + mode, 24h LLM telemetry (with an `llm_24h_complete` attribution flag), gaming toggle. Served from a cache (N pollers cost one collection). Carries hostnames, so it is admin-gated where `/health` stays anonymous. Opens to a tenant-admin with a reduced own-tenant view (see [multi-tenancy](multi-tenancy.md#telemetry-per-tenant-views)). |
@@ -55,6 +56,20 @@ The response row is the frozen wire shape (K5): `id`, `name`, `scope`, `display_
 **One write logic, two transports.** The REST `PUT/DELETE` handlers and the `manage type-create/update/delete` family call the **identical** store functions (`store.Create/Update/DeleteBlockType`), validation authority (`blocktype.DecodePolicy`) and error mapper — no mutation logic is duplicated. The `_global` write path carries the same authority (server-admin) on both transports, so there is no divergent gate; the tenant-admin write path exists only on REST. The manage family stays functional for its MCP/CLI consumers (not removed).
 
 CLI: `ctx types` / `ctx types list` (table on a TTY, JSON when piped), `ctx types get <name>`, `ctx types set <name>` (upsert) and `ctx types rm <name>` (delete).
+
+## Project register
+
+The project register (workflow W4, migration 079) binds a project identity to exactly **one** tenant scope — that scope is the project's repo corpus (issues/comments live there, so isolation/RRF/Guard/Dream come for free, Modell C). Reads are **member-gated** (scope-read); create/patch/delete are **tenant-admin**. Both gate groups live inside one `MountProject`, so a missing gate is a missing route (404), never fail-open.
+
+| Endpoint | Gate | Description |
+|----------|------|-------------|
+| `GET /api/project` | member | Projects whose scope is in your `read_scopes`, newest first. `?identity=<id>` narrows to the single project of that identity (the `ctx project init` existence probe). |
+| `POST /api/project` | tenant-admin | Compound create: assign the project scope **and** insert the register row in ONE transaction (a failure after the scope assign rolls the scope back too). Body `{identity, scope, display_name?, forge?}`; `scope` is a NAME the server prefixes from the tenant slug (`<slug>:<name>`, ≤ 50 chars). A **server-admin** targets a foreign tenant via a `tenant_id` field (T22-analog; a tenant-admin passing `tenant_id` ⇒ 403). Scope quota is loaded **fail-closed** (a limits-lookup error is a 500, never silent unlimited) and enforced (over `max_scopes` ⇒ 429). Re-init of an identical `identity` ⇒ idempotent 200, no duplicate, no orphan scope. |
+| `GET /api/project/{id}` | member | One project, scope-read. Unknown, malformed, or foreign-scope id all read as `404 {success:false,error:"Project not found"}` — same body (no existence oracle). |
+| `PATCH /api/project/{id}` | tenant-admin | `display_name` and/or `forge` only. `scope`/`tenant_id` (the tenant_id = tenant_of(scope) invariant) and `webhook_secret_ref` (server-managed, W13) ⇒ 422. `forge.api_base` is validated (SSRF): non-`https`, or a private/loopback/link-local IP literal (RFC1918, 127/8, 169.254/16, ::1, fd00::/8, fe80::/10) or `localhost` ⇒ 422. A foreign/absent project ⇒ 404 uniform. |
+| `DELETE /api/project/{id}` | tenant-admin | Delete the register row (its `context_project_sync_runs` cascade). The project's **blocks and its tenant scope survive** — scope teardown is a tenant-lifecycle concern. A foreign/absent project ⇒ 404 uniform. |
+
+`identity` is one of `github:owner/repo` | `git-root:<sha>` | `manual:<slug>` (validated in Go, no DB CHECK on the open set). The register row is `{id, tenant_id, scope, identity, display_name, forge, webhook_secret_ref, sync_status, last_sync_at, sync_cursor, created_at, created_by?, metadata}`. The `webhook_secret_ref` is server-managed and always NULL until the W13 webhook surface lands; `forge`/`sync_cursor` are the Achse-02 sync contract (extended additively by migration 080). A tenant prune drains `context_projects` (+ sync runs) as a mandatory K14 gate.
 
 ## Graph API
 

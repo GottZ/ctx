@@ -332,7 +332,7 @@ func tenantNotFound(err error) bool {
 
 // GetTenant returns one tenant by id, or ErrTenantNotFound. An empty, absent, OR
 // malformed id all collapse to ErrTenantNotFound (404, no oracle). The empty
-// short-circuit avoids a needless round-trip + the ''::uuid 22P02; a non-empty
+// short-circuit avoids a needless round-trip + the ”::uuid 22P02; a non-empty
 // malformed id is caught by tenantNotFound after the cast.
 func GetTenant(ctx context.Context, pool *pgxpool.Pool, id string) (*Tenant, error) {
 	if id == "" {
@@ -527,13 +527,31 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string) error
 			}
 		}
 	}
-	// 6: HARD-delete the tenant's keys. DeleteApiKey is a SOFT delete (active=
-	// false, api_keys.go:102) which would leave the RESTRICT FK and block step 7
+	// 6: drain the project register (K14, design/03 §3.1/§7-W4). context_projects
+	// is TENANT-keyed (FK tenant_id → context_tenants is NO ACTION) AND scope-keyed
+	// (FK scope → context_tenant_scopes is NO ACTION), so it MUST go before BOTH the
+	// tenant row delete (step 8, which CASCADE-clears context_tenant_scopes) and the
+	// scope teardown — else that delete 23503s against a surviving project row.
+	// context_project_sync_runs CASCADEs off context_projects (079), so it drains for
+	// free; created_by → context_api_keys is ON DELETE SET NULL but the row is gone
+	// before the key delete anyway. Bounded per tenant (one row per repo), so a
+	// single statement, not the batched scope-drain idiom.
+	//
+	// PROJECT-SECRET-DRAIN BOUNDARY (K14): webhook secrets (context_secrets in the
+	// PROJECT scope under 'webhook.github.<id>') do NOT exist yet — that surface is
+	// W13. When it lands, those per-project secret rows must ALSO be drained here
+	// (context_secrets is not currently in pruneScopeDeletes). Today webhook_secret_ref
+	// is always NULL, so there is nothing to drain beyond the register itself.
+	if _, err := pool.Exec(ctx, `DELETE FROM context_projects WHERE tenant_id = $1::uuid`, tenantID); err != nil {
+		return fmt.Errorf("store: prune tenant projects: %w", err)
+	}
+	// 7: HARD-delete the tenant's keys. DeleteApiKey is a SOFT delete (active=
+	// false, api_keys.go:102) which would leave the RESTRICT FK and block step 8
 	// with 23001.
 	if _, err := pool.Exec(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID); err != nil {
 		return fmt.Errorf("store: prune tenant keys: %w", err)
 	}
-	// 7: the tenant row last; ON DELETE CASCADE clears context_tenant_scopes.
+	// 8: the tenant row last; ON DELETE CASCADE clears context_tenant_scopes.
 	if _, err := pool.Exec(ctx, `DELETE FROM context_tenants WHERE id = $1::uuid`, tenantID); err != nil {
 		return fmt.Errorf("store: delete tenant: %w", err)
 	}

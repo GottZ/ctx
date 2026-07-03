@@ -136,6 +136,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// RequireAdminOrTenantAdmin for PUT/DELETE, design/03 §5.1). The 1 MB
 		// body cap is the enclosing group's DefaultMaxBodySize (above).
 		handler.MountTypes(r, handler.NewTypesHandler(pool, blocktypeReg))
+		// Project register — reads member-gated (scope-read), writes tenant-admin
+		// (workflow W4); both gate groups live inside the mount (design/03 §5.1).
+		handler.MountProject(r, handler.NewProjectHandler(pool))
 		// Digest — Topic map generation
 		r.Post("/api/digest", digestH.HandleDigest)
 		// Synthesize — manual daily synthesis trigger (Welle 42)
