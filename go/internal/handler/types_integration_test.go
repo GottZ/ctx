@@ -39,7 +39,7 @@ func typesIntegReq(t *testing.T, pool *pgxpool.Pool, ar *auth.AuthResult, method
 			next.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), authResultKey, ar)))
 		})
 	})
-	MountTypes(r, NewTypesHandler(pool))
+	MountTypes(r, NewTypesHandler(pool, nil))
 	req := httptest.NewRequest(method, path, nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)

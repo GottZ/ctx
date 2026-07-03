@@ -131,9 +131,11 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Get("/api/whoami", whoamiH.HandleWhoami)
 		// Manage — CRUD + Guard API
 		r.Post("/api/manage", manageH.HandleManage)
-		// Block-type registry — read-only member surface (workflow W1); the
-		// member gate lives inside the mount (RequireMember, design/03 §5.1).
-		handler.MountTypes(r, handler.NewTypesHandler(pool))
+		// Block-type registry surface (workflow W1 reads + W2 writes); both
+		// gates live inside the mount (RequireMember for GET,
+		// RequireAdminOrTenantAdmin for PUT/DELETE, design/03 §5.1). The 1 MB
+		// body cap is the enclosing group's DefaultMaxBodySize (above).
+		handler.MountTypes(r, handler.NewTypesHandler(pool, blocktypeReg))
 		// Digest — Topic map generation
 		r.Post("/api/digest", digestH.HandleDigest)
 		// Synthesize — manual daily synthesis trigger (Welle 42)

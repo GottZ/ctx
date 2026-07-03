@@ -373,10 +373,23 @@ func typeRowCaps(displayName, description string) string {
 	return ""
 }
 
-// writeTypeStoreError maps the store sentinel errors of the type-* family
-// onto HTTP statuses: exists/default-collision/in-use ⇒ 409, builtin-delete
-// ⇒ 409 (a permanent conflict with the shipped registry), rest ⇒ 500.
+// writeTypeStoreError maps the store sentinel errors of the type-* family onto
+// HTTP statuses. Thin wrapper over the package-level writeBlockTypeStoreError —
+// the manage transport and the /api/types REST write transport share ONE
+// error-mapping logic (design/03 §4.1 reconciliation: one logic, two
+// transports).
 func (h *ManageHandler) writeTypeStoreError(w http.ResponseWriter, action string, err error, reqID string) {
+	writeBlockTypeStoreError(w, action, err, reqID)
+}
+
+// writeBlockTypeStoreError maps the block-type store sentinel errors onto HTTP
+// statuses: exists/default-collision/builtin ⇒ 409 (permanent conflicts with
+// the shipped registry / a per-scope uniqueness), in-use ⇒ 409 + the
+// active/archived count split, rest ⇒ 500 (logged, no detail on the wire).
+// Package-level and shared by BOTH the manage type-* family and the REST
+// PUT/DELETE surface (design/03 §4.1): a status divergence between the two
+// transports is impossible by construction.
+func writeBlockTypeStoreError(w http.ResponseWriter, action string, err error, reqID string) {
 	var inUse *store.BlockTypeInUseError
 	switch {
 	case errors.Is(err, store.ErrBlockTypeExists),
@@ -390,7 +403,7 @@ func (h *ManageHandler) writeTypeStoreError(w http.ResponseWriter, action string
 			"blocks":  map[string]int{"active": inUse.Active, "archived": inUse.Archived},
 		})
 	default:
-		slog.Error("manage: "+action+" error", "error", err, "request_id", reqID)
+		slog.Error(action+" error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 	}
 }

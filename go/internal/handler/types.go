@@ -24,19 +24,27 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TypesHandler serves the read-only /api/types surface.
+// TypesHandler serves the /api/types surface: the W1 read routes and the W2
+// write routes (PUT/DELETE, types_write.go). blocktypes is the shared registry
+// snapshot refreshed after a mutation so the writer's next request sees the new
+// policy at once (latency optimization; the NOTIFY listener is the consistency
+// mechanism — nil-safe for test wiring without a registry).
 type TypesHandler struct {
-	pool *pgxpool.Pool
+	pool       *pgxpool.Pool
+	blocktypes *blocktype.Registry
 }
 
-// NewTypesHandler creates a new TypesHandler.
-func NewTypesHandler(pool *pgxpool.Pool) *TypesHandler {
-	return &TypesHandler{pool: pool}
+// NewTypesHandler creates a new TypesHandler. blocktypes may be nil (test
+// wiring / read-only deployments); the write path then skips the eager reload
+// and relies on the NOTIFY listener alone.
+func NewTypesHandler(pool *pgxpool.Pool, blocktypes *blocktype.Registry) *TypesHandler {
+	return &TypesHandler{pool: pool, blocktypes: blocktypes}
 }
 
 // MountTypes mounts GET /api/types[/{name}] behind RequireMember. ONE function
@@ -50,6 +58,18 @@ func MountTypes(r chi.Router, h *TypesHandler) {
 		r.Use(RequireMember)
 		r.Get("/api/types", h.HandleList)
 		r.Get("/api/types/{name}", h.HandleGet)
+	})
+	// W2 write surface (design/03 §4.2/§9.5(c)): PUT/DELETE live in the SAME
+	// mount function as the reads, behind RequireAdminOrTenantAdmin — the gate
+	// cannot be forgotten without the routes vanishing (§5.1, the fail-open
+	// class eliminated structurally). The 1 MB body cap is inherited from the
+	// enclosing server.go group (DefaultMaxBodySize, server.go:118). The write
+	// scope is pinned by role inside the handler (typeWriteScope), never read
+	// from the body — the gate ADMITS, the handler SCOPES (K-T1).
+	r.Group(func(r chi.Router) {
+		r.Use(RequireAdminOrTenantAdmin)
+		r.Put("/api/types/{name}", h.HandlePut)
+		r.Delete("/api/types/{name}", h.HandleDelete)
 	})
 }
 

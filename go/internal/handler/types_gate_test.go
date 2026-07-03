@@ -28,7 +28,7 @@ func typesRouterAs(t *testing.T, ar *auth.AuthResult, method, path string) *http
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
 	})
-	MountTypes(r, NewTypesHandler(nil))
+	MountTypes(r, NewTypesHandler(nil, nil))
 
 	req := httptest.NewRequest(method, path, nil)
 	rec := httptest.NewRecorder()
@@ -74,6 +74,35 @@ func TestTypesMemberGate_NoAuth401(t *testing.T) {
 			rec := typesRouterAs(t, invalidAR(), c.method, c.path)
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("%s %s with invalid key: status = %d, want 401 (body %s)",
+					c.method, c.path, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// SECURITY PROPERTY (design/03 §5.1, §7-W2): the /api/types write routes
+// (PUT/DELETE) require the admin-or-tenant-admin tier. A member key passes the
+// read gate but MUST be refused 403 by the write gate BEFORE any handler runs —
+// with a nil pool, a missing gate would let the request panic into the store
+// layer (HandlePut → store.GetBlockType(nil)), which the recover turns into the
+// red proof.
+//
+// Negative probe (2026-07-04): run against MountTypes with the
+// `r.Use(RequireAdminOrTenantAdmin)` line removed from the write group — the
+// member PUT/DELETE reached the handler and panicked on the nil pool
+// (recover fired: "handler panicked (reached the store layer — no member gate
+// before it)"), proving the write gate is load-bearing in exactly the chain
+// production mounts. With the gate in place both subtests return 403.
+func TestTypesWriteGate_Member403(t *testing.T) {
+	cases := []struct{ method, path string }{
+		{http.MethodPut, "/api/types/knowledge"},
+		{http.MethodDelete, "/api/types/knowledge"},
+	}
+	for _, c := range cases {
+		t.Run("member_"+c.method, func(t *testing.T) {
+			rec := typesRouterAs(t, memberAR(), c.method, c.path)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s %s as member: status = %d, want 403 (body %s)",
 					c.method, c.path, rec.Code, rec.Body.String())
 			}
 		})
