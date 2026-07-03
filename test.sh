@@ -268,13 +268,18 @@ fi
 # 39 columns since M075 (WF T9: is_meta dropped — the dream-exclude semantics
 # live in the block-type registry as dream.linkable=false on system-meta;
 # metadata.is_meta stays as a JSONB classify-input key, not a column).
+# + 1 table since M076 (context_structural_links, Achse-02 I-A structural link
+# layer — deterministic fact edges, separate from context_dream_links). The
+# parent_id FK (E8) added by the same migration touches NO column: parent_id
+# ALREADY exists since 001:39 (M076 only adds the constraint) — col_count STAYS
+# 39, table_count 30→31.
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "30" ]] && [[ "$col_count" == "39" ]]; then
+if [[ "$table_count" == "31" ]] && [[ "$col_count" == "39" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 30 tables + 39 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 31 tables + 39 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
