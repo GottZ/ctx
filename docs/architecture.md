@@ -66,6 +66,8 @@ The **one** structural parent (comment→issue) is not stored here — it lives 
 
 Async deduplication via PG LISTEN/NOTIFY + HNSW similarity. Policy-parameterised since migration 074 (WF T7): `ctx_guard_check` takes the thresholds + the candidate-type **allowlist** as mandatory parameters (NULL candidates ⇒ 0 matches; a legacy 1-arg call ⇒ loud 42883, no silent default fallback), plus a `p_same_scope_only` switch for same-scope dedup with `hnsw.iterative_scan='relaxed_order'` against filtered-ANN false-cleans. The batch picks only `guard.check=true` types (per-type thresholds via `guard.threshold_duplicate`/`_review`, seed defaults 0.98/0.92 = former literals), and the pending pick/count queries ride the partial index `idx_guard_pending` instead of full scans.
 
+Two further per-type dimensions are resolved in Go and passed to every call **explicitly** — never relying on the SQL default (a forgotten parameter would silently re-open cross-scope matching): `guard.candidates` (`all` | `same-scope`) drives `p_same_scope_only`, and `guard.mode` (`archive` | `flag`) drives the persist branch. In `flag` mode a near-duplicate is recorded as a `possible_duplicate` flag (`guard_status` + `guard_matched_id`) and is **never** auto-archived — the issue axis (design/02 §4.7) surfaces duplicates instead of silently removing them, while the knowledge line keeps the `archive` + cross-scope bestand byte-for-byte. `hnsw.iterative_scan='relaxed_order'` is load-bearing only when the planner chooses the HNSW index (large same-scope sets); a selective scope is served exactly by `idx_context_scope`, where recall is unconditional.
+
 ## Block-type registry (migration 072)
 
 `context_block_types` is the declarative per-type behaviour registry of the workflow-engine line. The four block-type classes (`knowledge`, `audit-trail`, `reference`, `system-meta`) ship as builtin seed rows whose JSONB configs reproduce today's hardcoded behaviour (retrieval damping, guard participation, dream linkability, digest/overview inclusion, classify rules). The daemon starts on a compiled-in builtin set, overlays the DB rows at boot (merge — a deleted builtin row can never blank the default type) and hot-reloads on any table write via the same NOTIFY channel the settings use; edits via `psql` take effect without a restart.
@@ -79,7 +81,7 @@ A boot that finds the table but cannot load it (corrupt row) degrades **loudly**
 | Auto-classifier | T4 | classify rules per type, `type_source='auto'` respect, manage-update re-classify |
 | RRF retrieval | T5 / 073 | visibility allowlist + per-request damping arrays (the M035 CHECK fell — an unregistered name is fail-closed invisible, not INSERT-rejected) |
 | Overview clustering | T6 | `overview.include` node cut |
-| Guard | T7 / 074 | `guard.check`/`guard.candidate` allowlists + per-type thresholds |
+| Guard | T7 / 074 · I-J | `guard.check`/`guard.candidate` allowlists + per-type thresholds; `guard.candidates=same-scope` → `p_same_scope_only`, `guard.mode=flag` → possible_duplicate flag (no auto-archive), both passed explicitly (I-J) |
 | Dream loop | T8 | `dream.linkable` gates both pick eligibility and link-target admission; `dream.link_classes` restricts writable link classes |
 | Digest | T8 | `digest.include` sieves the topic-map source |
 

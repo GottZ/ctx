@@ -34,6 +34,17 @@ func TestBuiltinSetShape(t *testing.T) {
 	if got := s.GuardCandidateTypes(); len(got) != 4 {
 		t.Errorf("GuardCandidateTypes() = %v, want all 4", got)
 	}
+	// I-J: every builtin keeps the guard bestand — archive persist + cross-scope
+	// candidates. Builtins are constructed directly (not via DecodePolicy), so
+	// these fields must be set explicitly or the guard silently flag-persists.
+	for _, n := range s.Names() {
+		if got := s.GuardMode(n); got != GuardModeArchive {
+			t.Errorf("GuardMode(%q) = %q, want archive (builtin bestand)", n, got)
+		}
+		if s.GuardSameScopeOnly(n) {
+			t.Errorf("GuardSameScopeOnly(%q) = true, want false (builtin cross-scope bestand)", n)
+		}
+	}
 	if got := s.DreamLinkableTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "knowledge", "reference"}) {
 		t.Errorf("DreamLinkableTypes() = %v (system-meta = NOT is_meta must be out)", got)
 	}

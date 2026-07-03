@@ -55,6 +55,27 @@ const (
 	DefaultThresholdReview    = 0.92
 )
 
+// Guard persist modes (config vocabulary v1, design/02 §4.1/§4.7 — the I-J
+// field-extension request to Achse 01, §9.1 point 2a). "archive" is the
+// bestand: a near_duplicate is auto-archived (guard.go archive branch).
+// "flag" persists a possible_duplicate flag (guard_status + guard_matched_id)
+// and NEVER sets is_archived — the issue axis needs this so a duplicate issue
+// is surfaced, never silently removed (§4.7).
+const (
+	GuardModeArchive = "archive"
+	GuardModeFlag    = "flag"
+)
+
+// Guard candidate scopes (config vocabulary v1, design/02 §4.1/§5.3). "all" is
+// the bestand: the guard matches candidates across ALL scopes. "same-scope"
+// restricts the candidate set to the checked block's own scope (Go passes
+// p_same_scope_only=TRUE to ctx_guard_check) — the issue axis needs this so an
+// issue never matches a cross-tenant block (guard-as-side-channel, §5.3).
+const (
+	GuardCandidatesAll       = "all"
+	GuardCandidatesSameScope = "same-scope"
+)
+
 // DefaultClassifyPriority orders types without an explicit classify.priority
 // last (smaller = evaluated earlier; builtin seeds: system-meta 10,
 // audit-trail 20 — the M035 decision-tree order).
@@ -96,6 +117,12 @@ type RetrievalPolicy struct {
 type GuardPolicy struct {
 	Check     bool // block is itself guard-checked (batch eligibility)
 	Candidate bool // block is a match candidate for others
+	// Mode is the persist mode for a near_duplicate finding:
+	// GuardModeArchive (bestand, auto-archive) | GuardModeFlag (flag only).
+	Mode string
+	// Candidates is the candidate scope: GuardCandidatesAll (bestand,
+	// cross-scope) | GuardCandidatesSameScope (own scope only).
+	Candidates string
 	// Per-type thresholds; nil = global defaults 0.98/0.92.
 	ThresholdDuplicate *float64
 	ThresholdReview    *float64
@@ -177,6 +204,8 @@ type cfgRetrieval struct {
 type cfgGuard struct {
 	Check              *bool    `json:"check"`
 	Candidate          *bool    `json:"candidate"`
+	Mode               *string  `json:"mode"`
+	Candidates         *string  `json:"candidates"`
 	ThresholdDuplicate *float64 `json:"threshold_duplicate"`
 	ThresholdReview    *float64 `json:"threshold_review"`
 }
@@ -235,7 +264,7 @@ func DecodePolicy(name, scope string, builtin, isDefault bool, rawConfig []byte)
 		Builtin:   builtin,
 		IsDefault: isDefault,
 		Retrieval: RetrievalPolicy{Kind: RetrievalFullPass},
-		Guard:     GuardPolicy{Check: true, Candidate: true},
+		Guard:     GuardPolicy{Check: true, Candidate: true, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
 		Dream:     DreamPolicy{Linkable: true},
 		Digest:    DigestPolicy{Include: true},
 		Overview:  OverviewPolicy{Include: true},
@@ -273,6 +302,12 @@ func applyEnvelope(p *Policy, env *cfgEnvelope) error {
 		}
 		if g.Candidate != nil {
 			p.Guard.Candidate = *g.Candidate
+		}
+		if g.Mode != nil {
+			p.Guard.Mode = *g.Mode
+		}
+		if g.Candidates != nil {
+			p.Guard.Candidates = *g.Candidates
 		}
 		p.Guard.ThresholdDuplicate = g.ThresholdDuplicate
 		p.Guard.ThresholdReview = g.ThresholdReview
@@ -360,6 +395,18 @@ func validatePolicy(p *Policy) error {
 		if thr != nil && (*thr <= 0 || *thr > 1) {
 			return fmt.Errorf("blocktype %q: %s must be in (0,1], got %v", p.Name, field, *thr)
 		}
+	}
+
+	switch p.Guard.Mode {
+	case GuardModeArchive, GuardModeFlag:
+	default:
+		return fmt.Errorf("blocktype %q: unknown guard.mode %q (want archive|flag)", p.Name, p.Guard.Mode)
+	}
+
+	switch p.Guard.Candidates {
+	case GuardCandidatesAll, GuardCandidatesSameScope:
+	default:
+		return fmt.Errorf("blocktype %q: unknown guard.candidates %q (want all|same-scope)", p.Name, p.Guard.Candidates)
 	}
 	return nil
 }

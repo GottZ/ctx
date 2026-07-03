@@ -4,6 +4,17 @@
 // registry (blocktype.Set.GuardThresholds / GuardCandidateTypes, seed
 // defaults 0.98 auto-archive / 0.92 flag-for-review = the former literals)
 // and passed to ctx_guard_check as mandatory parameters.
+//
+// Wave I-J (design/02 §4.7) adds two more per-type policy dimensions, both
+// resolved in processBlock and threaded through EXPLICITLY:
+//   - GuardSameScopeOnly → p_same_scope_only (guard.candidates=same-scope):
+//     the issue axis restricts candidates to the block's own scope so a guard
+//     match can never leak the existence/similarity of a cross-tenant block
+//     (§5.3). When TRUE, M074 sets hnsw.iterative_scan='relaxed_order' so the
+//     filtered-ANN keeps its recall at 1M+ scale.
+//   - GuardMode (guard.mode=flag) → applyDecision persists a possible_duplicate
+//     flag instead of auto-archiving, so a duplicate issue is surfaced, never
+//     silently removed (§4.7). archive stays the knowledge-line bestand.
 package guard
 
 import (
@@ -206,10 +217,13 @@ func savepointName(blockID string) string {
 // On any error the savepoint is rolled back so the surrounding transaction
 // stays usable for the next block.
 //
-// The per-type thresholds resolve HERE (Set.GuardThresholds by the block's
-// type; null config fields fall back to the 0.98/0.92 seed defaults) — one
-// policy source for the SQL decision, the persisted metadata and the audit
-// row.
+// The per-type policy resolves HERE (by the block's type name) — one policy
+// source for the SQL decision, the persisted metadata and the audit row:
+//   - GuardThresholds: the dup/review thresholds (null config → 0.98/0.92).
+//   - GuardSameScopeOnly: the p_same_scope_only value passed EXPLICITLY to
+//     ctx_guard_check (guard.candidates=same-scope ⇒ TRUE; §4.7/§5.3).
+//   - GuardMode: the persist mode (GuardModeArchive | GuardModeFlag) handed to
+//     applyDecision so a flag-mode type (issues) is NEVER auto-archived (§4.7).
 //
 // The atomic-per-block semantic means an audit-log failure rolls the
 // decision back too. That is acceptable: the block stays pending and will be
@@ -224,14 +238,16 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 	}
 
 	dup, review := set.GuardThresholds(block.typeName)
-	result, err := checkBlock(ctx, tx, blockID, dup, review, set.GuardCandidateTypes())
+	sameScopeOnly := set.GuardSameScopeOnly(block.typeName)
+	mode := set.GuardMode(block.typeName)
+	result, err := checkBlock(ctx, tx, blockID, dup, review, set.GuardCandidateTypes(), sameScopeOnly)
 	if err != nil {
 		slog.Error("guard: check block failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
 		return false
 	}
 
-	if err := applyDecision(ctx, tx, blockID, result); err != nil {
+	if err := applyDecision(ctx, tx, blockID, result, mode); err != nil {
 		slog.Error("guard: apply decision failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
 		return false
@@ -272,10 +288,13 @@ func rollbackToSavepoint(ctx context.Context, tx pgx.Tx, sp string) {
 // thresholds/candidates on the SQL side, and Go passes ALL FIVE parameters
 // explicitly at this single call site (design/02 §4.7 enumeration rule:
 // never rely on the p_same_scope_only SQL default). candidateTypes nil/empty
-// ⇒ 0 candidates in SQL (fail-closed `= ANY(NULL)`); the knowledge line
-// passes same_scope_only=false (cross-scope dedup is the v1 bestand — the
-// issue axis flips it per policy in wave I-J).
-func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplicate, thresholdReview float64, candidateTypes []string) (*GuardResult, error) {
+// ⇒ 0 candidates in SQL (fail-closed `= ANY(NULL)`); sameScopeOnly is the
+// per-type policy value (GuardSameScopeOnly) — false is the knowledge-line
+// bestand (cross-scope dedup), TRUE is the issue axis (guard.candidates=
+// same-scope, §4.7/§5.3). When TRUE, ctx_guard_check sets
+// hnsw.iterative_scan='relaxed_order' so the filtered-ANN does not silently
+// miss the same-scope neighbour at 1M+ scale (M074, §4.7 recall gate).
+func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplicate, thresholdReview float64, candidateTypes []string, sameScopeOnly bool) (*GuardResult, error) {
 	var (
 		decision      string
 		topSimilarity float64
@@ -284,8 +303,6 @@ func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplica
 		matchedScope  *string
 		isCrossScope  bool
 	)
-
-	const sameScopeOnly = false // knowledge-line semantic; policy-driven from Achse 02 I-J
 
 	err := tx.QueryRow(ctx,
 		`SELECT decision, top_similarity, matched_id::text, matched_title, matched_scope, is_cross_scope
@@ -308,8 +325,14 @@ func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplica
 	}, nil
 }
 
-// applyDecision updates the block based on the guard decision.
-func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *GuardResult) error {
+// applyDecision updates the block based on the guard decision and the per-type
+// persist mode (design/02 §4.7). mode == GuardModeArchive is the bestand: a
+// near_duplicate is auto-archived. mode == GuardModeFlag (issues) NEVER
+// archives — a near_duplicate is persisted as a possible_duplicate flag
+// (guard_status='possible_duplicate' + guard_matched_id + similarity), so a
+// duplicate issue is surfaced (guard-list / later issue-list) and never
+// silently removed. needs_review and clean are mode-independent.
+func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *GuardResult, mode string) error {
 	checkedAt := time.Now().UTC().Format(time.RFC3339)
 
 	matchedIDVal := ""
@@ -317,8 +340,10 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 		matchedIDVal = *result.MatchedID
 	}
 
-	if result.Decision == "near_duplicate" {
-		// Auto-archive near duplicates.
+	if result.Decision == "near_duplicate" && mode != blocktype.GuardModeFlag {
+		// Auto-archive near duplicates. Bestand for every mode EXCEPT flag —
+		// fail-safe to archive so an empty/unset mode (e.g. a policy built
+		// outside DecodePolicy) never silently degrades to flag-only.
 		// Explicit casts inside jsonb_build_object: VARIADIC "any" can't infer
 		// types under pgx extended protocol on PG18 → 42P08 at PREPARE time.
 		_, err := tx.Exec(ctx,
@@ -340,11 +365,18 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 			return fmt.Errorf("auto-archive: %w", err)
 		}
 	} else {
-		// Mark as checked (needs_review or clean).
+		// Mark as checked WITHOUT archiving: needs_review, clean, OR a
+		// near_duplicate under flag mode. The reached-only-in-flag near_duplicate
+		// is persisted as guard_status='possible_duplicate' (§4.7 flag-only
+		// persist) — is_archived stays false; the matched_id/similarity flag it.
 		// $2::text on the column assignment too: PG18 rejects mixed deductions
 		// (varchar from column vs text from jsonb_build_object cast).
 		// The persisted thresholds are the RESOLVED per-type policy values
 		// (T7) — the metadata documents what the decision was made under.
+		statusVal := result.Decision
+		if result.Decision == "near_duplicate" {
+			statusVal = "possible_duplicate" // flag mode (archive took the branch above)
+		}
 		_, err := tx.Exec(ctx,
 			`UPDATE context_blocks SET
 				guard_status = $2::text,
@@ -359,7 +391,7 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 				),
 				updated_at = now()
 			WHERE id = $1`,
-			blockID, result.Decision, checkedAt, result.Similarity, matchedIDVal, result.IsCrossScope,
+			blockID, statusVal, checkedAt, result.Similarity, matchedIDVal, result.IsCrossScope,
 			result.ThresholdDuplicate, result.ThresholdReview,
 		)
 		if err != nil {

@@ -179,6 +179,31 @@ func (s *Set) GuardThresholds(name string) (dup, review float64) {
 	return dup, review
 }
 
+// GuardMode resolves the per-type guard persist mode for a near_duplicate
+// finding (GuardModeArchive | GuardModeFlag). Unknown names fall back to the
+// archive bestand (design/02 §4.7). guard.go passes the resolved mode into
+// applyDecision so a flag-mode type is NEVER auto-archived.
+func (s *Set) GuardMode(name string) string {
+	p, ok := s.policies[name]
+	if !ok {
+		return GuardModeArchive
+	}
+	return p.Guard.Mode
+}
+
+// GuardSameScopeOnly reports whether the type's guard candidate set is
+// restricted to the checked block's own scope (guard.candidates=same-scope).
+// Unknown names fall back to false (cross-scope bestand). guard.go passes the
+// resolved value EXPLICITLY as p_same_scope_only at the ctx_guard_check call
+// site — never relying on the SQL default (design/02 §4.7/§5.3).
+func (s *Set) GuardSameScopeOnly(name string) bool {
+	p, ok := s.policies[name]
+	if !ok {
+		return false
+	}
+	return p.Guard.Candidates == GuardCandidatesSameScope
+}
+
 // DreamLinkableTypes returns the types admitted to the dream loop — BOTH
 // sides: pick eligibility and candidate/target sieve (§3.3 R1).
 func (s *Set) DreamLinkableTypes() []string { return s.dreamLinkable }

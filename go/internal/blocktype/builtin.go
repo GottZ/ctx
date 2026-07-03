@@ -44,7 +44,7 @@ func builtinPolicies() []Policy {
 		{
 			Name: "knowledge", Scope: globalScope, Builtin: true, IsDefault: true,
 			Retrieval: RetrievalPolicy{Kind: RetrievalFullPass},
-			Guard:     GuardPolicy{Check: true, Candidate: true},
+			Guard:     GuardPolicy{Check: true, Candidate: true, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
 			Dream:     DreamPolicy{Linkable: true},
 			Digest:    DigestPolicy{Include: true},
 			Overview:  OverviewPolicy{Include: true},
@@ -54,7 +54,7 @@ func builtinPolicies() []Policy {
 		{
 			Name: "reference", Scope: globalScope, Builtin: true,
 			Retrieval: RetrievalPolicy{Kind: RetrievalFullPass},
-			Guard:     GuardPolicy{Check: true, Candidate: true},
+			Guard:     GuardPolicy{Check: true, Candidate: true, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
 			Dream:     DreamPolicy{Linkable: true},
 			Digest:    DigestPolicy{Include: true},
 			Overview:  OverviewPolicy{Include: true},
@@ -68,7 +68,7 @@ func builtinPolicies() []Policy {
 				DampingFactor:  auditTrailDamping,
 				IntentPatterns: patterns(),
 			},
-			Guard:    GuardPolicy{Check: true, Candidate: true},
+			Guard:    GuardPolicy{Check: true, Candidate: true, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
 			Dream:    DreamPolicy{Linkable: true},
 			Digest:   DigestPolicy{Include: true},
 			Overview: OverviewPolicy{Include: true},
@@ -82,7 +82,7 @@ func builtinPolicies() []Policy {
 		{
 			Name: "system-meta", Scope: globalScope, Builtin: true,
 			Retrieval: RetrievalPolicy{Kind: RetrievalExcluded},
-			Guard:     GuardPolicy{Check: true, Candidate: true},
+			Guard:     GuardPolicy{Check: true, Candidate: true, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
 			Dream:     DreamPolicy{Linkable: false},
 			Digest:    DigestPolicy{Include: true},
 			Overview:  OverviewPolicy{Include: true},
