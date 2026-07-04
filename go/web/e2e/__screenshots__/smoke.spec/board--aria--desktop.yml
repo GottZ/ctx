@@ -23,7 +23,51 @@
 - main:
   - region "Board":
     - heading "Board" [level=1]
-    - text: No project selected
-    - status:
-      - paragraph: No board to show yet
-      - paragraph: The status columns for this workspace will appear here once the board is wired up.
+    - text: Project
+    - code: Acme Main
+    - group "Board columns":
+      - region "open (3)":
+        - button "open" [expanded]
+        - text: ""
+        - list "open issues":
+          - listitem:
+            - link /open card 0 open \d+-\d+-\d+/:
+              - /url: /issues/33333333-3333-3333-3333-000000000000?scope=acme%3Amain
+              - text: ""
+              - time: /\d+-\d+-\d+/
+          - listitem:
+            - link /open card 1 open \d+-\d+-\d+/:
+              - /url: /issues/33333333-3333-3333-3333-000000000001?scope=acme%3Amain
+              - text: ""
+              - time: /\d+-\d+-\d+/
+          - listitem:
+            - link /open card 2 open \d+-\d+-\d+/:
+              - /url: /issues/33333333-3333-3333-3333-000000000002?scope=acme%3Amain
+              - text: ""
+              - time: /\d+-\d+-\d+/
+      - region "in_progress (2)":
+        - button "in_progress" [expanded]
+        - text: ""
+        - list "in_progress issues":
+          - listitem:
+            - link /in_progress card 0 in_progress \d+-\d+-\d+/:
+              - /url: /issues/33333333-3333-3333-3333-000000000000?scope=acme%3Amain
+              - text: ""
+              - time: /\d+-\d+-\d+/
+          - listitem:
+            - link /in_progress card 1 in_progress \d+-\d+-\d+/:
+              - /url: /issues/33333333-3333-3333-3333-000000000001?scope=acme%3Amain
+              - text: ""
+              - time: /\d+-\d+-\d+/
+      - region "review (1)":
+        - button "review" [expanded]
+        - text: ""
+        - list "review issues":
+          - listitem:
+            - link /review card 0 review \d+-\d+-\d+/:
+              - /url: /issues/33333333-3333-3333-3333-000000000000?scope=acme%3Amain
+              - text: ""
+              - time: /\d+-\d+-\d+/
+      - region /done \(\d+\)/:
+        - button "done"
+        - text: ""
