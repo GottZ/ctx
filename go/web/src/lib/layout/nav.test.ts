@@ -31,9 +31,9 @@ const hrefs = (whoamiResponse: WhoamiResponse | null) =>
   visibleNav({ caps: capabilitiesFor(whoamiResponse) }).map((i) => i.href)
 
 const CORPUS = ['/blocks', '/graph', '/chat']
-// S11 (Q3, design 05-§2.5): /tenant/backends ist aus der Rail ausgeblendet,
-// solange die Route nicht existiert (items.ts, auskommentierter push).
-const TENANT = ['/tenant']
+// U11 (design 04 §4 E04-4): /tenant/backends is re-shown in the tenant section
+// now that its route exists (items.ts, the S11 fail-closed hide is lifted).
+const TENANT = ['/tenant', '/tenant/backends']
 const SERVER = ['/admin', '/settings', '/status', '/settings/backends']
 
 describe('visibleNav', () => {

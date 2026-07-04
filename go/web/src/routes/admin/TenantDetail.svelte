@@ -5,8 +5,11 @@
   // store/tenant.go:104) plus one QuotaForm per scope the tenant owns. The scope
   // list is NOT in tenant-get (a tenant owns 0..N scopes); it comes from the A0
   // scope-overview filtered to this tenant_id — the only tenant→scope source.
-  // This page mounts NO BlockGrantPanel: block-grants live in the Grants tab/A6
-  // (design §7.1), and the block-grant list is owner-side anyway (§6.2).
+  // Grants (design §7.1, wave U11): the SCOPE-level cross-tenant read grants
+  // where this tenant is the grantee now render in TenantGrantsPanel (list /
+  // create / revoke via the pre-built tenants.ts client). Block-grants stay OUT —
+  // block-grant-list is owner-side (the caller's own tenant, §6.2), so it has no
+  // coherent per-tenant view on a server-admin session (noted in the panel).
   import { route, navigate } from '../../router'
   import { session } from '../../lib/auth.svelte'
   import { getTenant, scopeOverview, DEFAULT_TENANT_ID } from '../../lib/api/tenants'
@@ -15,6 +18,7 @@
   import type { ScopeOverview, Tenant, TenantStatus } from '../../lib/api/types'
   import QuotaForm from './QuotaForm.svelte'
   import TenantProvision from './TenantProvision.svelte'
+  import TenantGrantsPanel from './TenantGrantsPanel.svelte'
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
   import { TenantsModel } from './tenants.svelte'
 
@@ -234,6 +238,8 @@
         </div>
       {/if}
     </section>
+
+    <TenantGrantsPanel {tenantId} tenantSlug={tenant.slug} />
   {/if}
 </section>
 

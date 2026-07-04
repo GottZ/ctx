@@ -38,6 +38,7 @@ const BASE_AREAS = [
   '/settings/backends',
   '/status',
   '/tenant',
+  '/tenant/backends',
 ] as const
 
 // Reserved server prefixes the SPA must never claim (index.ts

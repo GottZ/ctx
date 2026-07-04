@@ -485,6 +485,23 @@ function manageFixture(
       const mk = data && 'max_keys' in data ? (data.max_keys as number | null) : 50
       return { success: true, tenant: { id: ctx.id, slug: ctx.slug, display_name: ctx.name, status: 'active', created_at: '2026-05-01T08:00:00Z', updated_at: '2026-06-30T12:00:00Z', max_scopes: ms, max_keys: mk } }
     }
+    // Cross-tenant read grants (U11, tenant_manage.go:511-555). tenant-grant-list
+    // returns the grants where THIS tenant is the grantee (the client narrows by
+    // grantee_tenant); one deterministic row so the TenantGrantsPanel visual/aria
+    // baseline has body. Create echoes the TenantGrant it just made (delete is a
+    // top-level-id intercept in the dispatch below, mirroring tenant-delete).
+    case 'tenant-grant-list':
+      return { success: true, grants: [
+        { id: '550e8400-e29b-41d4-a716-4466554400f1', grantee_tenant: ctx.id, granted_scope: 'shared', created_at: '2026-06-20T08:00:00Z', created_by: '0190000000007000800000000000ke7' },
+      ] }
+    case 'tenant-grant-create':
+      return { success: true, grant: {
+        id: '550e8400-e29b-41d4-a716-4466554400f2',
+        grantee_tenant: (data?.grantee_tenant as string) ?? ctx.id,
+        granted_scope: (data?.granted_scope as string) ?? 'other:main',
+        created_at: '2026-06-30T12:00:00Z',
+        created_by: '0190000000007000800000000000ke7',
+      } }
     case 'backend-list':
       return { success: true, backends: [] }
     // A7 corpus maintenance — start kicks off (running), status reports it
@@ -768,6 +785,11 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
         return route.fulfill({ json: { success: true, tenant } })
       }
       if (action === 'tenant-delete' && typeof id === 'string') {
+        return route.fulfill({ json: { success: true, deleted: id } })
+      }
+      // tenant-grant-delete carries the grant id top-level (like tenant-delete),
+      // so it is echoed here rather than in the data-only manageFixture layer.
+      if (action === 'tenant-grant-delete' && typeof id === 'string') {
         return route.fulfill({ json: { success: true, deleted: id } })
       }
 

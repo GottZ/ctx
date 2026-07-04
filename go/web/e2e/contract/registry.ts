@@ -612,7 +612,7 @@ export const contracts: PageContract[] = [
     role: 'server-admin',
     mode: 'reading',
     path: `/admin/tenants/${TENANT_A_ID}`,
-    adminCalls: ['tenant-get', 'scope-overview', 'tenant-quota-get'],
+    adminCalls: ['tenant-get', 'scope-overview', 'tenant-quota-get', 'tenant-grant-list'],
     states: [{ name: 'default', seed: {} }],
     scale: {
       exempt:
@@ -705,6 +705,44 @@ export const contracts: PageContract[] = [
       )
       await dialog.getByRole('button', { name: "I've stored it — done" }).click()
       await expect(dialog).toBeHidden()
+    },
+  },
+  {
+    // Tenant-scoped backend pool (design 04 §4 E04-4 / §5.5, wave U11) — the
+    // E04-4 rot-fix route. Reuses the settings BackendsPage in its tenant-scoped
+    // variant (pool only, no vault). role:'tenant-admin' = the guard truth: the
+    // /tenant prefix-guard (guard.ts TIER_GATED → manageTenantKeys) redirects a
+    // member; the generated deny test proves the member lands on /home and
+    // backend-list never fires. Mobile exempt like the other admin surfaces (the
+    // §5.5-Zeile targets dark+light × Desktop); the mobile baseline rides the
+    // sequenced full-set re-freeze (design 06 §9.3).
+    route: '/tenant/backends',
+    name: 'tenant-backends',
+    role: 'tenant-admin',
+    mode: 'reading',
+    adminCalls: ['backend-list'],
+    states: [{ name: 'default', seed: {} }],
+    scale: {
+      exempt:
+        'Backend-Pool ist eine bounded Betreiber-Liste (Provider-Backends pro Tenant, server-seitig überschaubar) — kein nutzergetriebener 10k-Pfad (design 04 §5.5-Zeile /tenant/backends).',
+    },
+    mobile: {
+      exempt:
+        'Tenant-Verwaltungsfläche, Ziel-Viewport dark+light × Desktop (design 04 §5.5-Zeile /tenant/backends); die Mobile-Baseline landet mit dem sequenzierten Voll-Satz-Re-Freeze (design 06 §9.3), wie /admin/types.',
+    },
+    flowDoc:
+      'Tenant-Admin öffnet den Backend-Pool unter dem Tenant-Crumb: die Pool-Tabelle mountet hinter dem tenant-admin-Self-Gate (Fixture-Empty-State als Positiv-Kontrolle des Ladepfads), der Vault bleibt server-admin-only ausgeblendet, und der Crumb führt zurück auf /tenant.',
+    primaryFlow: async (page) => {
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'Backend pool', exact: true })).toBeVisible()
+      // Pool loaded past the tenant self-gate: the fixture [] renders the empty
+      // state (positive control of the reachable, tenant-scoped load path).
+      await expect(content).toContainText('no backends — create one to populate the pool')
+      // The vault is server-admin only → hidden in the tenant variant.
+      await expect(page.locator('section.card[aria-label="secrets vault"]')).toHaveCount(0)
+      // Crumb navigates back to the tenant self-service area.
+      await page.locator('.crumb').getByRole('link', { name: 'Tenant' }).click()
+      await expect(page).toHaveURL(/\/tenant$/)
     },
   },
   {

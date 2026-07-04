@@ -38,11 +38,10 @@ const serverAdminWorkflow = capabilitiesFor(whoami({ admin: true, role: 'owner',
 const hrefs = (caps: Capabilities) => navItems(caps).map((i) => i.href)
 
 const CORPUS = ['/blocks', '/graph', '/chat']
-// S11 (Q3, design 05-§2.5): /tenant/backends ist aus der Rail ausgeblendet,
-// solange die Route nicht existiert — der Eintrag kehrt mit der
-// Tenant-Backends-Welle zurück (items.ts, auskommentierter push).
+// U11 (design 04 §4 E04-4): the /tenant/backends route exists now, so the item
+// is re-shown in the tenant section (the S11 fail-closed hide is lifted).
 const WORKFLOW = ['/issues', '/board']
-const TENANT = ['/tenant']
+const TENANT = ['/tenant', '/tenant/backends']
 const SERVER = ['/admin', '/settings', '/status', '/settings/backends']
 
 describe('navItems', () => {

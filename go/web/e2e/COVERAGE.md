@@ -45,6 +45,7 @@ Marker-pflichtig (der commit-msg-Hook deckt ALLE Pfade unter `__screenshots__/`,
 | admin-tenant-detail | `/admin/tenants/:id` | server-admin | `default` | ✓ | ✓ 4 Shots (states×dark/light×2 VP) | ✓ 2 (Desktop+Mobile) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | ✓ (390×844) | ✓ generiert (server-admin → nächst-niedrigere Rolle) | — | EXEMPT | — (PV10) |
 | admin-types | `/admin/types` | server-admin | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | ✓ 1 (Desktop; Mobile fällt mit dem Opt-out) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | ✓ generiert (server-admin → nächst-niedrigere Rolle) | — | EXEMPT | — (PV10) |
 | tenant | `/tenant` | tenant-admin | `default` | ✓ | ✓ 4 Shots (states×dark/light×2 VP) | ✓ 2 (Desktop+Mobile) | ✓ 4 Scans (dark/light × 2 VP) — 1 Debt-Entry | ✓ (1440, Tab-Walk) | ✓ (390×844) | ✓ generiert (tenant-admin → nächst-niedrigere Rolle) | — | EXEMPT | — (PV10) |
+| tenant-backends | `/tenant/backends` | tenant-admin | `default` | ✓ | ✓ 2 Shots (states×dark/light×1 VP) | ✓ 1 (Desktop; Mobile fällt mit dem Opt-out) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | OPT-OUT | ✓ generiert (tenant-admin → nächst-niedrigere Rolle) | — | EXEMPT | — (PV10) |
 | notfound | `*` | member | `default` | ✓ | ✓ 4 Shots (states×dark/light×2 VP) | ✓ 2 (Desktop+Mobile) | ✓ 4 Scans (dark/light × 2 VP) | ✓ (1440, Tab-Walk) | ✓ (390×844) | — (role member: guard gated ist nur /admin,/tenant) | — | EXEMPT | — (PV10) |
 
 ## Kern-Pfade (flowDoc — W21: „verifiziert" meint prüfbar den Hauptpfad)
@@ -64,6 +65,7 @@ Marker-pflichtig (der commit-msg-Hook deckt ALLE Pfade unter `__screenshots__/`,
 - **admin-tenant-detail**: Server-Admin öffnet die Tenant-Detailseite und setzt die Tages-Kosten-Quota eines Scopes (set → re-get → saved-Marker) — der Verwaltungs-Kernpfad der Seite.
 - **admin-types**: Server-Admin öffnet die Type-Registry, liest die Typen mit Source-Badge (builtin/tenant) + Policy-Zusammenfassung und öffnet das deklarative Policy-Formular eines Typs (Edit-Kernpfad); builtin-Typen sind nicht löschbar (Delete disabled — die Komfort-Hälfte des Doppel-Schutzes, Server ist das Gate).
 - **tenant**: Tenant-Admin verwaltet die Schlüssel seines Tenants: Tabelle listet die Keys, „+ New key" mintet einen neuen Key mit Reveal-once-Plaintext (Kernpfad der Selbstverwaltung).
+- **tenant-backends**: Tenant-Admin öffnet den Backend-Pool unter dem Tenant-Crumb: die Pool-Tabelle mountet hinter dem tenant-admin-Self-Gate (Fixture-Empty-State als Positiv-Kontrolle des Ladepfads), der Vault bleibt server-admin-only ausgeblendet, und der Crumb führt zurück auf /tenant.
 - **notfound**: Nutzer landet auf einer unbekannten Route, sieht die 404-Auskunft und kehrt über den Status-Link zurück (Guard-Ist: /status ist member-erreichbar — Rail↔Guard-Divergenz, PV4-Befund).
 
 ## Ausnahmen-Ausweis (design 06 §4.3c — Opt-outs sind sichtbare Entscheidungen)
@@ -82,6 +84,7 @@ Marker-pflichtig (der commit-msg-Hook deckt ALLE Pfade unter `__screenshots__/`,
 - **admin-tenant-detail**: Detailseite EINES Tenants: Register-Karte + eine QuotaForm pro eigenem Scope (server-seitig bounded über tenant_limits) — keine 10k-Liste.
 - **admin-types**: Type-Registry ist eine bounded, betreiber-definierte Liste (≪ 100 Zeilen: builtin-Defaults ∪ Tenant-Overlays) — kein nutzergetriebener 10k-Pfad (design 04 §5.5-Zeile /admin/types).
 - **tenant**: Key-/Scope-Tabellen sind durch tenant_limits gedeckelt (max_keys/max_scopes, Migration 069) — strukturell kein 10k-Pfad.
+- **tenant-backends**: Backend-Pool ist eine bounded Betreiber-Liste (Provider-Backends pro Tenant, server-seitig überschaubar) — kein nutzergetriebener 10k-Pfad (design 04 §5.5-Zeile /tenant/backends).
 - **notfound**: Statische 404-Seite ohne Daten — kein 10k-Pfad.
 
 ### Mobile-Opt-outs
@@ -92,6 +95,7 @@ Marker-pflichtig (der commit-msg-Hook deckt ALLE Pfade unter `__screenshots__/`,
 - **chat**: Mobile-Baselines der PV4-Erstbelegung existieren noch nicht — Voll-Satz (Re-Freeze der Bestands-Areas) ist auf nach der Achse-05-Token-Stabilisierung sequenziert (design 06 §3.1/§9.3); PV7 friert nur die NEUEN Seiten ein.
 - **settings**: Mobile-Baselines der PV4-Erstbelegung existieren noch nicht — Voll-Satz (Re-Freeze der Bestands-Areas) ist auf nach der Achse-05-Token-Stabilisierung sequenziert (design 06 §3.1/§9.3); PV7 friert nur die NEUEN Seiten ein.
 - **admin-types**: Admin-Verwaltungsfläche, Ziel-Viewport dark+light × Desktop (design 04 §5.5-Zeile /admin/types); die Mobile-Baseline landet mit dem sequenzierten Voll-Satz-Re-Freeze (design 06 §9.3), wie die PV4-Erstbelegung.
+- **tenant-backends**: Tenant-Verwaltungsfläche, Ziel-Viewport dark+light × Desktop (design 04 §5.5-Zeile /tenant/backends); die Mobile-Baseline landet mit dem sequenzierten Voll-Satz-Re-Freeze (design 06 §9.3), wie /admin/types.
 
 ### Mask-Budget-Overrides (40 %-Deckel, §4.3b)
 

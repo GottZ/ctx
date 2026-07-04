@@ -64,6 +64,13 @@ export const areaRoutes = {
   // Vite resolves the lazy chunk; areaMode('/admin/types') is unmapped → 'reading'.
   '/admin/types': () => import('./admin/types/TypesAdminPage.svelte'),
   '/tenant': () => import('./tenant/TenantPage.svelte'),
+  // Tenant-scoped backend pool (design 04 §4 E04-4 / §4.9, wave U11): the E04-4
+  // rot-fix. The /tenant/backends nav item shipped in U04 but the route did not,
+  // so the deep link hit NotFound. Registered here, it reuses the settings
+  // BackendsPage in its tenant-scoped variant (pool only). Inherits the /tenant
+  // prefix-guard (guard.ts TIER_GATED → manageTenantKeys, tenant-admin-or-up);
+  // areaMode('/tenant/backends') is unmapped → 'reading'.
+  '/tenant/backends': () => import('./tenant/TenantBackendsPage.svelte'),
   // Workflow surface (design 04 §4.1, wave U04): additive lazy routes for the
   // issue list, issue detail and board. DARK-LAUNCHED — the nav section + home
   // tile are gated on caps.viewWorkflow (false until whoami carries the flag,

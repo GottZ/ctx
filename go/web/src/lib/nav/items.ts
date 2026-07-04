@@ -83,12 +83,15 @@ export function navItems(caps: Capabilities): NavItem[] {
     // under /tenant). exact so /tenant/backends doesn't also highlight it.
     items.push({ href: '/tenant', label: 'Keys & Members', iconKey: 'keys', section: 'tenant', exact: true })
   }
-  // S11 (Q3, design 05-§2.5): /tenant/backends hat KEINE Route (routes/index.ts)
-  // — der Link führte auf NotFound. Fail-closed ausgeblendet, bis die
-  // Tenant-Backends-Welle die Route baut; Wiedereinblendung = dieser eine push.
-  // if (caps.viewTenantBackends) {
-  //   items.push({ href: '/tenant/backends', label: 'Backends', iconKey: 'backends', section: 'tenant' })
-  // }
+  // U11 (design 04 §4 E04-4): the /tenant/backends route now exists (routes/
+  // index.ts), so the item is re-shown — the S11 fail-closed hide is lifted. The
+  // tenant backend pool is the row-level backend surface for a tenant-admin
+  // (gated on viewTenantBackends, tenant-admin-or-up), sitting under the
+  // /tenant Keys & Members parent (which is `exact` so this leaf doesn't
+  // double-highlight it).
+  if (caps.viewTenantBackends) {
+    items.push({ href: '/tenant/backends', label: 'Backends', iconKey: 'backends', section: 'tenant' })
+  }
 
   // SERVER — cross-tenant admin (server-admin only). Tenants route owned by the
   // server-admin axis (A2); the ops surfaces stay here conservatively (D5/K2).

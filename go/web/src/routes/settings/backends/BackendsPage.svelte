@@ -5,6 +5,16 @@
   // list, the secret metadata and the settings list (the last only to derive the
   // "fehlt" status of sensitive secret_refs — its failure degrades the join, not
   // the page).
+  //
+  // U11 (design 04 §4 E04-4, §4.9): the SAME page mounts under two routes with
+  // a parametrised self-gate — the SERVER-admin /settings/backends (default) and
+  // the TENANT-admin /tenant/backends. The backend-* manage actions are already
+  // tenant-admin-tier with a server-side tenant filter (backends_manage.go), so
+  // the tenant variant gates on caps.viewTenantBackends and shows only the POOL.
+  // The secrets VAULT stays server-admin only (the /api/secrets endpoint is not
+  // tenant-scoped), so the tenant variant hides it — fail-closed, never a doomed
+  // 403 read. The self-gate + crumb are the ONLY per-variant differences (the
+  // pool table + models are shared byte-for-byte).
   import { onMount } from 'svelte'
   import { listSettings } from '../../../lib/api/settings'
   import type { SettingView } from '../../../lib/api/types'
@@ -15,9 +25,19 @@
   import BackendTable from './BackendTable.svelte'
   import VaultForm from './VaultForm.svelte'
 
+  // tenantScoped=false → the server-admin /settings/backends surface (pool +
+  // vault, gated on session.admin). tenantScoped=true → the tenant-admin
+  // /tenant/backends surface (pool only, gated on viewTenantBackends).
+  let { tenantScoped = false }: { tenantScoped?: boolean } = $props()
+
   const pool = new PoolModel()
   const vault = new VaultModel()
   let settings = $state<SettingView[]>([])
+
+  // Gate: server variant needs the server-global admin flag; tenant variant
+  // needs the tenant-admin-or-up capability (the /tenant prefix-guard already
+  // redirects a lower tier, guard.ts TIER_GATED — this is the page self-gate).
+  const allowed = $derived(tenantScoped ? session.caps.viewTenantBackends : session.admin)
 
   const usage = $derived(secretUsage(vault.secrets, pool.backends, settings))
   const knownSecrets = $derived(new Set(vault.secrets.map((s) => s.name)))
@@ -32,27 +52,46 @@
   }
 
   onMount(() => {
-    if (!session.admin) return
+    if (!allowed) return
     void pool.load()
-    void vault.load()
-    void loadSettings()
+    // The vault + its settings join are server-admin only (the /api/secrets +
+    // /api/settings endpoints are not tenant-scoped) — never fetched in the
+    // tenant variant, so a tenant-admin never issues a doomed 403 read.
+    if (!tenantScoped) {
+      void vault.load()
+      void loadSettings()
+    }
   })
 </script>
 
 <section class="area">
   <header>
-    <div class="crumb"><a href="/settings">Settings</a> / backends</div>
-    <h1>Backend pool &amp; vault</h1>
-    <p class="sub">
-      provider backends, trust tier and API-key secrets — all server-side admin-gated; the pool drives LLM routing and
-      failover
-    </p>
+    {#if tenantScoped}
+      <div class="crumb"><a href="/tenant">Tenant</a> / backends</div>
+      <h1>Backend pool</h1>
+      <p class="sub">
+        the LLM provider backends available to your tenant — trust tier, roles and priority drive routing and failover
+        (server-side tenant-scoped)
+      </p>
+    {:else}
+      <div class="crumb"><a href="/settings">Settings</a> / backends</div>
+      <h1>Backend pool &amp; vault</h1>
+      <p class="sub">
+        provider backends, trust tier and API-key secrets — all server-side admin-gated; the pool drives LLM routing and
+        failover
+      </p>
+    {/if}
   </header>
 
-  {#if !session.admin}
+  {#if !allowed}
     <p class="banner" role="status">
-      read-only key — the backend pool and vault are admin-gated (the server answers 403); sign in with an admin key to
-      manage them.
+      {#if tenantScoped}
+        read-only key — the backend pool is tenant-admin-gated (the server answers 403); sign in with a tenant-admin key
+        to manage it.
+      {:else}
+        read-only key — the backend pool and vault are admin-gated (the server answers 403); sign in with an admin key to
+        manage them.
+      {/if}
     </p>
   {:else}
     {#if pool.status === 'loading' || pool.status === 'idle'}
@@ -67,15 +106,17 @@
       <BackendTable {pool} {knownSecrets} />
     {/if}
 
-    {#if vault.status === 'loading' || vault.status === 'idle'}
-      <p class="state" aria-busy="true">loading vault…</p>
-    {:else if vault.status === 'error'}
-      <div class="error" role="alert">
-        <p>vault unavailable: {vault.loadError?.message}</p>
-        <button type="button" onclick={() => void vault.reload()}>Retry</button>
-      </div>
-    {:else}
-      <VaultForm {vault} {usage} />
+    {#if !tenantScoped}
+      {#if vault.status === 'loading' || vault.status === 'idle'}
+        <p class="state" aria-busy="true">loading vault…</p>
+      {:else if vault.status === 'error'}
+        <div class="error" role="alert">
+          <p>vault unavailable: {vault.loadError?.message}</p>
+          <button type="button" onclick={() => void vault.reload()}>Retry</button>
+        </div>
+      {:else}
+        <VaultForm {vault} {usage} />
+      {/if}
     {/if}
   {/if}
 </section>
