@@ -1,11 +1,12 @@
 <script lang="ts">
   // Backend create/edit dialog (design §3.5). The backend is edited as ONE
   // tuple (host+protocol+model_map+api_key_ref together — a host flip without a
-  // protocol flip 404s). Native <dialog>+showModal (no UI lib, matching the
-  // rest of the frontend). Trust ELEVATION needs an explicit in-dialog confirm
-  // step → confirm_trust_elevation:true; the server stays authoritative (it
-  // 400s without it). On edit only the changed fields are PATCHed (backendDiff).
-  import { onMount, untrack } from 'svelte'
+  // protocol flip 404s). Built on the shared Modal shell (design 05 §7 Q9 — the
+  // native <dialog>+showModal wiring lives in lib/ui/Modal.svelte). Trust
+  // ELEVATION needs an explicit in-dialog confirm step → confirm_trust_elevation
+  // :true; the server stays authoritative (it 400s without it). On edit only the
+  // changed fields are PATCHed (backendDiff).
+  import { untrack } from 'svelte'
   import { toApiError } from '../../../lib/api'
   import type { BackendListItem } from '../../../lib/api/types'
   import {
@@ -27,6 +28,7 @@
   } from '../../../lib/backends'
   import ModelMapEditor from './ModelMapEditor.svelte'
   import RolesSelect from './RolesSelect.svelte'
+  import Modal from '../../../lib/ui/Modal.svelte'
 
   let {
     mode,
@@ -95,8 +97,7 @@
   // backend serves — declaratively from roles (llmlog has blind spots, §3.5).
   const downgrade = $derived(mode === 'edit' && backend !== null && trustRank(trust) < trustRank(backend.trust))
 
-  let dialogEl: HTMLDialogElement
-  onMount(() => dialogEl.showModal())
+  let dialogEl: HTMLDialogElement | undefined = $state()
 
   function collectDraft() {
     return {
@@ -141,7 +142,7 @@
         confirmTrust: elevation,
       })
       void warnings
-      dialogEl.close()
+      dialogEl?.close()
     } catch (err) {
       error = toApiError(err).message
       fieldErrs = fieldErrors(err)
@@ -154,7 +155,7 @@
   const trustTip = $derived(TRUST_LEVELS.find((t) => t.value === trust)?.tip ?? '')
 </script>
 
-<dialog bind:this={dialogEl} onclose={onclose} class="backend-dialog">
+<Modal bind:dialogEl width="42rem" {onclose}>
   <form
     method="dialog"
     onsubmit={(e) => {
@@ -164,7 +165,7 @@
   >
     <header>
       <h2>{mode === 'create' ? 'New backend' : `Edit ${backend?.name}`}</h2>
-      <button type="button" class="x" title="close" onclick={() => dialogEl.close()}>×</button>
+      <button type="button" class="x" title="close" onclick={() => dialogEl?.close()}>×</button>
     </header>
 
     <div class="body">
@@ -280,27 +281,15 @@
         </div>
       {:else}
         <div class="actions">
-          <button type="button" class="ghost" disabled={saving} onclick={() => dialogEl.close()}>Cancel</button>
+          <button type="button" class="ghost" disabled={saving} onclick={() => dialogEl?.close()}>Cancel</button>
           <button type="submit" disabled={saving}>{saving ? 'saving…' : mode === 'create' ? 'Create' : 'Save'}</button>
         </div>
       {/if}
     </footer>
   </form>
-</dialog>
+</Modal>
 
 <style>
-  .backend-dialog {
-    width: min(42rem, calc(100vw - 2rem));
-    max-height: calc(100dvh - 4rem);
-    padding: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    background: var(--surface-1);
-    color: var(--text);
-  }
-  .backend-dialog::backdrop {
-    background: var(--backdrop);
-  }
   form {
     display: flex;
     flex-direction: column;

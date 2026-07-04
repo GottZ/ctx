@@ -1,12 +1,14 @@
 <script lang="ts" module>
   // Tenant-create dialog (design 05-frontend-a3-selfservice §4 A3a, Wave FE-A3a) —
-  // native <dialog>+showModal, no UI lib, mirroring KeyCreateDialog. Two views in
-  // ONE modal: the create form, then — on success — the show-once RevealOnceKey
-  // for the compound owner-key. The compound tenant-create is atomic (K10): tenant
-  // row + initial auto-prefixed scope + minted owner-key. The owner-key PLAINTEXT
-  // (TenantCreateResult.owner_key, a string) lives only in this dialog's local
-  // `created` $state and in RevealOnceKey; ack/dismiss drops both. It is NEVER put
-  // on TenantsModel/storage/URL/console (TenantsModel.create never retains it).
+  // built on the shared Modal shell (design 05 §7 Q9 — the native <dialog>+
+  // showModal wiring lives in lib/ui/Modal.svelte), mirroring KeyCreateDialog.
+  // Two views in ONE modal: the create form, then — on success — the show-once
+  // RevealOnceKey for the compound owner-key. The compound tenant-create is atomic
+  // (K10): tenant row + initial auto-prefixed scope + minted owner-key. The
+  // owner-key PLAINTEXT (TenantCreateResult.owner_key, a string) lives only in this
+  // dialog's local `created` $state and in RevealOnceKey; ack/dismiss drops both. It
+  // is NEVER put on TenantsModel/storage/URL/console (TenantsModel.create never
+  // retains it).
   //
   // Pure helpers below live in the module script so the node-only vitest can cover
   // them without a DOM (design 04 §5.5), like ConfirmDialog's slug-match logic.
@@ -38,6 +40,7 @@
   import type { TenantCreateResult } from '../../lib/api/types'
   import type { TenantsModel } from './tenants.svelte'
   import RevealOnceKey from '../tenant/RevealOnceKey.svelte'
+  import Modal from '../../lib/ui/Modal.svelte'
 
   let { tenants, onclose }: { tenants: TenantsModel; onclose: () => void } = $props()
 
@@ -55,12 +58,9 @@
   // view. Holds the owner-key plaintext transiently — wiped on ack (finish()).
   let created = $state<TenantCreateResult | null>(null)
 
-  let dialogEl: HTMLDialogElement
+  let dialogEl: HTMLDialogElement | undefined = $state()
   let slugInputEl = $state<HTMLInputElement>()
-  onMount(() => {
-    dialogEl.showModal()
-    slugInputEl?.focus()
-  })
+  onMount(() => slugInputEl?.focus())
 
   async function submit(): Promise<void> {
     if (busy) return
@@ -106,26 +106,22 @@
    *  close (the register already refreshed on create success). */
   function finish(): void {
     created = null
-    dialogEl.close()
+    dialogEl?.close()
   }
 
   function close(): void {
     if (busy) return
-    dialogEl.close()
+    dialogEl?.close()
   }
 </script>
 
-<dialog
-  bind:this={dialogEl}
-  class="tenant-dialog"
-  aria-labelledby="tenant-create-title"
-  onclose={onclose}
-  oncancel={(e) => {
-    if (busy) e.preventDefault()
-  }}
-  onclick={(e) => {
-    if (e.target === dialogEl && !busy && created === null) dialogEl.close()
-  }}
+<Modal
+  bind:dialogEl
+  width="34rem"
+  dismissable={!busy}
+  backdropClose={!busy && created === null}
+  ariaLabelledby="tenant-create-title"
+  {onclose}
 >
   <form
     method="dialog"
@@ -207,21 +203,9 @@
       </footer>
     {/if}
   </form>
-</dialog>
+</Modal>
 
 <style>
-  .tenant-dialog {
-    width: min(34rem, calc(100vw - 2rem));
-    max-height: calc(100dvh - 4rem);
-    padding: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    background: var(--surface-1);
-    color: var(--text);
-  }
-  .tenant-dialog::backdrop {
-    background: var(--backdrop);
-  }
   form {
     display: flex;
     flex-direction: column;

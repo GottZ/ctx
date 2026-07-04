@@ -2,6 +2,7 @@
   import type { BlockDetailModel } from './detail.svelte'
   import type { BlockDeleteModel } from './delete.svelte'
   import { sensitivityBadge } from '../../lib/blocks/sensitivity'
+  import Modal from '../../lib/ui/Modal.svelte'
 
   // Detail panel (block-workbench W3 read; W4 adds an Edit action; W5 a Delete
   // action). The model owns the lazy getBlock load + status; this component is a
@@ -10,30 +11,23 @@
   // deep-link and a close button. Edit + Delete are page-supplied callbacks —
   // only passed when the block is editable (canEdit: scope === home_scope), so a
   // foreign-scope (read-only) block has neither affordance. Delete goes through a
-  // native <dialog>+showModal confirm gate (no UI lib — the BackendDialog/
-  // BlockDialog pattern); the destructive call lives in the injected
-  // BlockDeleteModel.
+  // shared Modal confirm gate (design 05 §7 Q9 — the native <dialog>+showModal
+  // wiring lives in lib/ui/Modal.svelte); the destructive call lives in the
+  // injected BlockDeleteModel.
   let {
     model,
     onedit,
     deleteModel,
   }: { model: BlockDetailModel; onedit?: () => void; deleteModel?: BlockDeleteModel } = $props()
 
-  // The confirm dialog is mounted lazily (only while confirming) so showModal()
-  // runs on its own onMount — exactly the BlockDialog mount pattern.
+  // The confirm dialog is mounted lazily (only while confirming) so Modal's
+  // onMount showModal() runs on its own — exactly the prior lazy mount pattern.
   let confirming = $state(false)
-  let confirmEl = $state<HTMLDialogElement | null>(null)
+  let confirmDialogEl: HTMLDialogElement | undefined = $state()
 
   function openConfirm(): void {
     if (deleteModel) deleteModel.error = null
     confirming = true
-  }
-
-  // Bind callback: showModal as soon as the <dialog> is in the DOM (the lazy
-  // {#if} mounts it on demand, so this fires once per open).
-  function mountConfirm(el: HTMLDialogElement): void {
-    confirmEl = el
-    el.showModal()
   }
 
   async function confirmDelete(id: string): Promise<void> {
@@ -41,13 +35,13 @@
     // On success the page closes the panel (model.close); keep the dialog up on
     // failure so model.error stays visible next to the still-open block.
     if (ok) {
-      confirmEl?.close()
+      confirmDialogEl?.close()
       confirming = false
     }
   }
 
   function cancelConfirm(): void {
-    confirmEl?.close()
+    confirmDialogEl?.close()
   }
 </script>
 
@@ -104,9 +98,9 @@
 
   {#if confirming && deleteModel}
     {@const id = model.openId ?? ''}
-    <!-- Destructive confirm gate — native <dialog>+showModal, no UI lib (the
-         BackendDialog/BlockDialog pattern). The model holds no dialog state. -->
-    <dialog use:mountConfirm onclose={() => (confirming = false)} class="confirm-dialog">
+    <!-- Destructive confirm gate on the shared Modal shell (design 05 §7 Q9).
+         The model holds no dialog state. -->
+    <Modal bind:dialogEl={confirmDialogEl} width="24rem" onclose={() => (confirming = false)}>
       <div class="confirm-body">
         <h3>Delete block</h3>
         <p class="confirm-text">Delete this block? This cannot be undone.</p>
@@ -114,13 +108,13 @@
           <p class="problem error" role="alert">{deleteModel.error}</p>
         {/if}
       </div>
-      <div class="actions">
+      <div class="confirm-actions">
         <button type="button" class="ghost" disabled={deleteModel.busy} onclick={cancelConfirm}>Cancel</button>
         <button type="button" class="danger" disabled={deleteModel.busy} onclick={() => void confirmDelete(id)}>
           {deleteModel.busy ? 'deleting…' : 'Delete'}
         </button>
       </div>
-    </dialog>
+    </Modal>
   {/if}
 </aside>
 
@@ -243,17 +237,10 @@
     color: var(--danger);
   }
 
-  .confirm-dialog {
-    width: min(24rem, calc(100vw - 2rem));
-    padding: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    background: var(--surface-1);
-    color: var(--text);
-  }
-  .confirm-dialog::backdrop {
-    background: var(--backdrop);
-  }
+  /* Confirm gate body + action row inside the shared Modal shell (Q9). The box
+     chrome (width/border/radius/surface/backdrop) is owned by Modal now; only
+     the inner layout lives here. .confirm-actions carries what .confirm-dialog
+     .actions did before the shell extraction (flex-end row + top divider). */
   .confirm-body {
     display: flex;
     flex-direction: column;
@@ -271,7 +258,9 @@
     font-size: var(--fs-sm);
     color: var(--text-dim);
   }
-  .confirm-dialog .actions {
+  .confirm-actions {
+    display: flex;
+    gap: var(--space-2);
     justify-content: flex-end;
     border-top: 1px solid var(--border);
     padding: var(--space-2) var(--space-3);

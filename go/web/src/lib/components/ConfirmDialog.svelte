@@ -1,9 +1,10 @@
 <script lang="ts" module>
   // Generic confirm primitive (design 04-§3 / §4 wave A2b). Generalises the
   // BackendDialog.svelte:84 confirmStep two-click pattern into a standalone,
-  // reusable native <dialog> — BackendDialog itself is left untouched. Adds an
-  // optional "type the slug" prune gate for irreversible Full-Prune actions
-  // (e.g. tenant-delete, §6.4). Consumed by A3/A5/A6 and the Blocks axis.
+  // reusable confirm dialog on top of the shared Modal shell (design 05 §7 Q9 —
+  // the native <dialog>+showModal wiring now lives in lib/ui/Modal.svelte).
+  // Adds an optional "type the slug" prune gate for irreversible Full-Prune
+  // actions (e.g. tenant-delete, §6.4). Consumed by A3/A5/A6 and the Blocks axis.
   //
   // The confirm-step + slug-match logic lives here in the module script (pure,
   // no DOM) so it is unit-testable in the node-only vitest env (design
@@ -43,8 +44,9 @@
 </script>
 
 <script lang="ts">
-  import { onMount, type Snippet } from 'svelte'
+  import { type Snippet } from 'svelte'
   import { toApiError } from '../api'
+  import Modal from '../ui/Modal.svelte'
 
   let {
     title,
@@ -80,7 +82,7 @@
   let busy = $state(false)
   let error = $state<string | null>(null)
 
-  let dialogEl: HTMLDialogElement
+  let dialogEl: HTMLDialogElement | undefined = $state()
   // $state: the focus $effect reads these reactively when `armed` flips, so the
   // ref must be reactive — else focus never moves into the armed/slug field.
   let typedInputEl = $state<HTMLInputElement>()
@@ -97,8 +99,6 @@
   const uid = `confirm-${Math.random().toString(36).slice(2, 9)}`
   const titleId = `${uid}-t`
   const msgId = `${uid}-m`
-
-  onMount(() => dialogEl.showModal())
 
   // On entering the armed (confirm / slug) stage move focus to the tip-field
   // (if any), else to the danger button — a11y per design 04-§3 A2b. The
@@ -127,7 +127,7 @@
     try {
       await onconfirm?.()
       committed = true
-      dialogEl.close()
+      dialogEl?.close()
     } catch (err) {
       // Stay open, keep the typed value, let the user retry the confirm.
       error = toApiError(err).message
@@ -138,7 +138,7 @@
 
   function close(): void {
     if (busy) return
-    dialogEl.close()
+    dialogEl?.close()
   }
 
   function handleClose(): void {
@@ -146,18 +146,14 @@
   }
 </script>
 
-<dialog
-  bind:this={dialogEl}
-  class="confirm-dialog"
-  aria-labelledby={titleId}
-  aria-describedby={msgId}
+<Modal
+  bind:dialogEl
+  width="32rem"
+  dismissable={!busy}
+  backdropClose={!busy}
+  ariaLabelledby={titleId}
+  ariaDescribedby={msgId}
   onclose={handleClose}
-  oncancel={(e) => {
-    if (busy) e.preventDefault()
-  }}
-  onclick={(e) => {
-    if (e.target === dialogEl) close()
-  }}
 >
   <form
     method="dialog"
@@ -216,21 +212,9 @@
       </div>
     </footer>
   </form>
-</dialog>
+</Modal>
 
 <style>
-  .confirm-dialog {
-    width: min(32rem, calc(100vw - 2rem));
-    max-height: calc(100dvh - 4rem);
-    padding: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    background: var(--surface-1);
-    color: var(--text);
-  }
-  .confirm-dialog::backdrop {
-    background: var(--backdrop);
-  }
   form {
     display: flex;
     flex-direction: column;

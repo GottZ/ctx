@@ -1,15 +1,17 @@
 <script lang="ts">
-  // Block create/edit dialog (block-workbench W4, design plan §W4). Native
-  // <dialog>+showModal (no UI lib — matches the rest of the frontend). On edit
-  // only the changed fields are PATCHed (blockDiff in the model). A sensitivity
-  // DOWNGRADE needs an explicit in-dialog confirm step → confirm_sensitivity_-
-  // downgrade:true; the server stays authoritative (it 400s without it, the
-  // exact analogue of the BackendDialog trust-elevation step). The save flow +
-  // field errors live in the injected BlockEditModel; this component stays thin.
+  // Block create/edit dialog (block-workbench W4, design plan §W4). Built on the
+  // shared Modal shell (design 05 §7 Q9 — the native <dialog>+showModal wiring
+  // lives in lib/ui/Modal.svelte). On edit only the changed fields are PATCHed
+  // (blockDiff in the model). A sensitivity DOWNGRADE needs an explicit in-dialog
+  // confirm step → confirm_sensitivity_downgrade:true; the server stays
+  // authoritative (it 400s without it, the exact analogue of the BackendDialog
+  // trust-elevation step). The save flow + field errors live in the injected
+  // BlockEditModel; this component stays thin.
   import { onMount, untrack } from 'svelte'
   import { isSensitivityDowngrade, SENSITIVITY_LEVELS, type BlockDraft } from '../../lib/blocks/edit'
   import type { BlockEditModel, EditMode } from './edit.svelte'
   import { session } from '../../lib/auth.svelte'
+  import Modal from '../../lib/ui/Modal.svelte'
 
   let {
     mode,
@@ -87,11 +89,8 @@
   }
   let clientErr = $state<string | null>(null)
 
-  let dialogEl: HTMLDialogElement
-  onMount(() => {
-    model.reset()
-    dialogEl.showModal()
-  })
+  let dialogEl: HTMLDialogElement | undefined = $state()
+  onMount(() => model.reset())
 
   async function commit(): Promise<void> {
     clientErr = clientError()
@@ -108,7 +107,7 @@
       const ok = await model.save({ mode, draft: collectDraft(), id, original })
       // A second 400-driven needsConfirm (e.g. the rank changed since open) is
       // surfaced as the confirm step; otherwise a success closes the dialog.
-      if (ok) dialogEl.close()
+      if (ok) dialogEl?.close()
     } finally {
       saving = false
     }
@@ -119,7 +118,7 @@
   }
 </script>
 
-<dialog bind:this={dialogEl} onclose={onclose} class="block-dialog">
+<Modal bind:dialogEl width="46rem" {onclose}>
   <form
     method="dialog"
     onsubmit={(e) => {
@@ -129,7 +128,7 @@
   >
     <header>
       <h2>{mode === 'create' ? 'New block' : 'Edit block'}</h2>
-      <button type="button" class="x" title="close" onclick={() => dialogEl.close()}>×</button>
+      <button type="button" class="x" title="close" onclick={() => dialogEl?.close()}>×</button>
     </header>
 
     <div class="body">
@@ -207,27 +206,15 @@
         </div>
       {:else}
         <div class="actions">
-          <button type="button" class="ghost" disabled={saving} onclick={() => dialogEl.close()}>Cancel</button>
+          <button type="button" class="ghost" disabled={saving} onclick={() => dialogEl?.close()}>Cancel</button>
           <button type="submit" disabled={saving}>{saving ? 'saving…' : mode === 'create' ? 'Create' : 'Save'}</button>
         </div>
       {/if}
     </footer>
   </form>
-</dialog>
+</Modal>
 
 <style>
-  .block-dialog {
-    width: min(46rem, calc(100vw - 2rem));
-    max-height: calc(100dvh - 4rem);
-    padding: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    background: var(--surface-1);
-    color: var(--text);
-  }
-  .block-dialog::backdrop {
-    background: var(--backdrop);
-  }
   form {
     display: flex;
     flex-direction: column;

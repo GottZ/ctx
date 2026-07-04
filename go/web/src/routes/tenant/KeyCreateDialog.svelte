@@ -1,6 +1,7 @@
 <script lang="ts">
-  // Mint-a-key dialog (design 05-tenant-admin §3, Wave TK4) — native <dialog>+
-  // showModal (no UI lib, matching BackendDialog). Two views in ONE modal: the
+  // Mint-a-key dialog (design 05-tenant-admin §3, Wave TK4) — built on the shared
+  // Modal shell (design 05 §7 Q9 — the native <dialog>+showModal wiring lives in
+  // lib/ui/Modal.svelte), matching BackendDialog. Two views in ONE modal: the
   // create form, then — on success — the show-once RevealOnceKey. The plaintext
   // returned by keys.create() lives only in this dialog's local `created` $state
   // and in RevealOnceKey; ack/dismiss drops both (design §6 hygiene). It is NEVER
@@ -18,6 +19,7 @@
   import type { ApiKeyCreateSpec } from '../../lib/api/keys'
   import type { KeysModel } from './keys.svelte'
   import RevealOnceKey from './RevealOnceKey.svelte'
+  import Modal from '../../lib/ui/Modal.svelte'
 
   let { keys, onclose }: { keys: KeysModel; onclose: () => void } = $props()
 
@@ -37,12 +39,9 @@
   // the plaintext transiently — wiped on ack (finish()).
   let created = $state<ApiKeyCreateResult | null>(null)
 
-  let dialogEl: HTMLDialogElement
+  let dialogEl: HTMLDialogElement | undefined = $state()
   let labelInputEl = $state<HTMLInputElement>()
-  onMount(() => {
-    dialogEl.showModal()
-    labelInputEl?.focus()
-  })
+  onMount(() => labelInputEl?.focus())
 
   const readScopes = $derived(session.readScopes)
 
@@ -112,26 +111,22 @@
    *  close (the list already refreshed on create success). */
   function finish(): void {
     created = null
-    dialogEl.close()
+    dialogEl?.close()
   }
 
   function close(): void {
     if (busy) return
-    dialogEl.close()
+    dialogEl?.close()
   }
 </script>
 
-<dialog
-  bind:this={dialogEl}
-  class="key-dialog"
-  aria-labelledby="key-create-title"
-  onclose={onclose}
-  oncancel={(e) => {
-    if (busy) e.preventDefault()
-  }}
-  onclick={(e) => {
-    if (e.target === dialogEl && !busy && created === null) dialogEl.close()
-  }}
+<Modal
+  bind:dialogEl
+  width="34rem"
+  dismissable={!busy}
+  backdropClose={!busy && created === null}
+  ariaLabelledby="key-create-title"
+  {onclose}
 >
   <form
     method="dialog"
@@ -221,21 +216,9 @@
       </footer>
     {/if}
   </form>
-</dialog>
+</Modal>
 
 <style>
-  .key-dialog {
-    width: min(34rem, calc(100vw - 2rem));
-    max-height: calc(100dvh - 4rem);
-    padding: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    background: var(--surface-1);
-    color: var(--text);
-  }
-  .key-dialog::backdrop {
-    background: var(--backdrop);
-  }
   form {
     display: flex;
     flex-direction: column;
