@@ -1,0 +1,11 @@
+- dialog "Provision project":
+  - region "project provisioning wizard":
+    - heading "Provision project" [level=2]
+    - button "close": ×
+    - paragraph: "Provision a repo corpus: a repo scope plus a scoped agent key, over the atomic tenant compound."
+    - 'button "New tenant + repo scope Create a fresh tenant (compound: tenant, main scope, owner key), then its repo scope + agent key."'
+    - text: Repo scope in an existing tenant Add a repo scope + agent key to a tenant that already exists (2 steps). target tenant
+    - combobox "target tenant":
+      - option "select a tenant…" [selected]
+      - option "acme — Acme Corp"
+    - button "Continue" [disabled]
