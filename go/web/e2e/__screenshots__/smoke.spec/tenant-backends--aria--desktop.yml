@@ -1,0 +1,42 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+      - listitem:
+        - link "Backends":
+          - /url: /tenant/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - link "Tenant":
+    - /url: /tenant
+  - text: / backends
+  - heading "Backend pool" [level=1]
+  - paragraph: the LLM provider backends available to your tenant — trust tier, roles and priority drive routing and failover (server-side tenant-scoped)
+  - region "backend pool editor":
+    - heading "backend pool" [level=2]
+    - text: "0"
+    - button "+ new backend"
+    - paragraph: no backends — create one to populate the pool
