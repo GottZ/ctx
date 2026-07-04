@@ -678,6 +678,16 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Step 6-fold: aggregate-to-parent fold (design/01 §4.6, WF T11). A block of
+	// an aggregating type (retrieval.policy=aggregate-to-parent) is folded onto
+	// its structural parent — the response carries the parent, not the child
+	// (Comment→Issue). Placed BEFORE the sensitivity annotation on purpose: a
+	// hydrated parent then flows through sensitivity/rerank/supersedes/
+	// filterSuperseded via the existing machinery instead of carrying a
+	// zero-value (credentials, over-blocking) sensitivity. Fast-path: no
+	// aggregating type registered ⇒ zero DB calls ⇒ eval baseline byte-identical.
+	results = h.foldAggregates(ctx, results, typeSet.AggregateTypes(), visibleTypes, ar.ReadScopes, grantedBlockIDs, requestID)
+
 	// Step 6a-sens: batch sensitivity lookup over ALL candidate IDs — not
 	// top-N: filterSuperseded (6d) and graph placement advance stragglers
 	// from beyond any top-N window into the final llmSources; their zero

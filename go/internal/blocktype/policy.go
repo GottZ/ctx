@@ -459,9 +459,15 @@ func validatePolicy(p *Policy) error {
 			return fmt.Errorf("blocktype %q: retrieval.policy=damped requires damping_factor in (0,1], got %v", p.Name, f)
 		}
 	case RetrievalAggregateToParent:
-		// Fail-closed until the T11 fold mechanism exists (§3.3/§5.2): the
-		// vocabulary word is known, accepting it would be silent behaviour.
-		return fmt.Errorf("blocktype %q: retrieval.policy=aggregate-to-parent is not accepted before the fold mechanism ships (wave T11)", p.Name)
+		// WF T11: the fold mechanism ships in this wave, so the value is accepted
+		// (the blanket pre-T11 reject is gone). Cross-field rule (§3.3): an
+		// aggregating type MUST carry a structural parent pointer, otherwise the
+		// fold has nothing to fold onto. This reads the parent.mode VALUE and is
+		// independent of the parent.mode GATE (Achse 02 / I-D, below) — it holds
+		// in either merge order (T11 alone, or T11 after I-D unlocks parent.mode).
+		if p.Parent.Mode == ParentModeNone {
+			return fmt.Errorf("blocktype %q: retrieval.policy=aggregate-to-parent requires parent.mode != none (§3.3 cross-field)", p.Name)
+		}
 	default:
 		return fmt.Errorf("blocktype %q: unknown retrieval.policy %q", p.Name, p.Retrieval.Kind)
 	}

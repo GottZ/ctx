@@ -60,7 +60,11 @@ func TestDecodePolicyRejects(t *testing.T) {
 		{"damped factor zero", `{"v":1,"retrieval":{"policy":"damped","damping_factor":0}}`, "damping_factor"},
 		{"damped factor >1", `{"v":1,"retrieval":{"policy":"damped","damping_factor":1.5}}`, "damping_factor"},
 		{"unknown retrieval policy", `{"v":1,"retrieval":{"policy":"invisible"}}`, "retrieval.policy"},
-		{"aggregate-to-parent before T11", `{"v":1,"retrieval":{"policy":"aggregate-to-parent"}}`, "aggregate-to-parent"},
+		// WF T11: the blanket "wave T11" reject is gone; aggregate-to-parent now
+		// hits the cross-field rule when parent.mode is (default) none. errPart
+		// "parent.mode" is RED against the pre-T11 blanket message (which never
+		// mentioned parent.mode) and GREEN against the cross-field message.
+		{"aggregate-to-parent with parent.mode=none (cross-field)", `{"v":1,"retrieval":{"policy":"aggregate-to-parent"}}`, "parent.mode"},
 		{"parent.mode optional before Achse 02", `{"v":1,"parent":{"mode":"optional"}}`, "parent.mode"},
 		{"parent.mode required before Achse 02", `{"v":1,"parent":{"mode":"required"}}`, "parent.mode"},
 		{"unknown parent.mode", `{"v":1,"parent":{"mode":"maybe"}}`, "parent.mode"},
@@ -187,11 +191,27 @@ func TestIssueSeedConfigDecodes(t *testing.T) {
 	}
 }
 
+// TestAggregateToParentFreischaltung pins the WF T11 validation freischaltung:
+// the blanket pre-T11 reject of retrieval=aggregate-to-parent is gone. A config
+// carrying it with a non-none parent.mode no longer fails on the aggregate value
+// itself — any remaining error is the (foreign, I-D-owned) parent.mode gate.
+// RED against the pre-T11 code (blanket "fold mechanism ships" reject fires
+// first); GREEN in either merge order (T11 alone ⇒ parent.mode gate error; T11
+// after I-D ⇒ nil). The assertion never depends on the parent.mode gate itself.
+func TestAggregateToParentFreischaltung(t *testing.T) {
+	_, err := DecodePolicy("agg-fixture", globalScope, false, false,
+		[]byte(`{"v":1,"retrieval":{"policy":"aggregate-to-parent"},"parent":{"mode":"optional"}}`))
+	if err != nil && strings.Contains(err.Error(), "fold mechanism") {
+		t.Fatalf("aggregate-to-parent still blanket-rejected after T11: %v", err)
+	}
+}
+
 // TestCommentSeedConfigInterim pins the INTERIM comment seed AND the fail-closed
 // gate that "kein Gate aufweichen" preserves: the effective §4.1 values (all-off
-// guard/dream/digest/overview) decode, while the §4.1 target values
-// (retrieval=aggregate-to-parent, parent.mode=required) still REJECT because
-// their mechanisms (T11 fold, parent_id write path) do not ship in this base.
+// guard/dream/digest/overview) decode, while the §4.1 target combo
+// (retrieval=aggregate-to-parent + parent.mode=required) still REJECTS — no
+// longer for the aggregate value (WF T11 accepts it) but because the parent_id
+// write path (parent.mode gate, Achse 02 / I-D) does not ship in this base.
 func TestCommentSeedConfigInterim(t *testing.T) {
 	cfg := `{"v":1,"retrieval":{"policy":"excluded"},"guard":{"check":false,"candidate":false},` +
 		`"dream":{"linkable":false},"digest":{"include":false},"overview":{"include":false},` +

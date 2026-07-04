@@ -214,8 +214,11 @@ func (s *Set) DigestTypes() []string { return s.digestTypes }
 // OverviewTypes returns the types included in the overview clustering.
 func (s *Set) OverviewTypes() []string { return s.overviewTypes }
 
-// AggregateTypes returns the types with retrieval=aggregate-to-parent (T11
-// fold). Empty until T11 — the validator rejects the value before then.
+// AggregateTypes returns the types with retrieval=aggregate-to-parent — the
+// input to the WF T11 query-handler fold (QueryHandler.foldAggregates). Empty
+// on the builtin set (no builtin type aggregates; the comment seed ships
+// excluded, flipped only in the I-E era), so the fold is a zero-DB no-op on the
+// current corpus (eval baseline-neutral).
 func (s *Set) AggregateTypes() []string { return s.aggregate }
 
 // Classify runs every type's classify rules in (priority, name) order,
