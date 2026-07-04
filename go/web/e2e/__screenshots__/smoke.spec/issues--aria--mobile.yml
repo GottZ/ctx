@@ -1,0 +1,11 @@
+- banner:
+  - button "Open navigation menu"
+  - link "ctx":
+    - /url: /status
+- main:
+  - region "Issues":
+    - heading "Issues" [level=1]
+    - text: No project selected
+    - status:
+      - paragraph: No issues to show yet
+      - paragraph: The issue list for this workspace will appear here once the workflow surface is wired up.

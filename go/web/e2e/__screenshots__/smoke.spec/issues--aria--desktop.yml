@@ -1,0 +1,29 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp member
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - region "Issues":
+    - heading "Issues" [level=1]
+    - text: No project selected
+    - status:
+      - paragraph: No issues to show yet
+      - paragraph: The issue list for this workspace will appear here once the workflow surface is wired up.

@@ -1,0 +1,10 @@
+- banner:
+  - button "Open navigation menu"
+  - link "ctx":
+    - /url: /status
+- main:
+  - region "Issue detail":
+    - heading "Issue" [level=1]
+    - status:
+      - paragraph: Issue detail is not wired up yet
+      - paragraph: The selected issue and its comments will render here once the detail view is connected.

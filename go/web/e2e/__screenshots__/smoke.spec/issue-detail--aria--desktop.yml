@@ -1,0 +1,28 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp member
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - region "Issue detail":
+    - heading "Issue" [level=1]
+    - status:
+      - paragraph: Issue detail is not wired up yet
+      - paragraph: The selected issue and its comments will render here once the detail view is connected.
