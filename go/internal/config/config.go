@@ -337,11 +337,31 @@ type EventsConfig struct {
 	MaxConnections int `key:"events.max_connections" env:"CTX_EVENTS_MAX_CONNECTIONS" default:"8" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 }
 
-// ProjectConfig is the workflow project surface (design/03 §4.4). Only the forge
-// SYNC trigger carries runtime knobs today; the webhook rate/retention keys land
-// with the W13 inbound surface.
+// ProjectConfig is the workflow project surface (design/03 §4.4). The forge SYNC
+// trigger and the SSE domain-event hub (W9) carry runtime knobs; the webhook
+// rate/retention keys land with the W13 inbound surface.
 type ProjectConfig struct {
-	Sync ProjectSyncConfig
+	Sync   ProjectSyncConfig
+	Events ProjectEventsConfig
+}
+
+// ProjectEventsConfig governs the GET /api/project/events SSE domain-event hub
+// (workflow W9, design/03 §4.5/§6.2). MaxConnections is counted PER TENANT in
+// projectHub.subscribe() (§4.4/§6.2) — deliberately NOT the server-global
+// events.max_connections (/api/events, telemetry): a global 8-cap would push
+// whole tenants into the expensive per-request auth poll path at target scale
+// (§6.4). FlushInterval is the coalescing cadence: NOTIFY writes accumulate per
+// project for one interval, then flush as ONE frame set — a 10k-import burst
+// collapses to O(subs) frames per tick, not O(writes) (§6.2). CoalesceThreshold
+// is the per-project-per-tick block count above which the frame degrades to a
+// content-free {kind:'issues-bulk', count} refetch signal instead of an id list.
+// PingInterval is the keepalive; it reuses the events.ping_interval rationale
+// (below the fronting-proxy read timeout).
+type ProjectEventsConfig struct {
+	MaxConnections    int           `key:"project.events.max_connections" env:"CTX_PROJECT_EVENTS_MAX_CONNECTIONS" default:"16" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	FlushInterval     time.Duration `key:"project.events.flush_interval" env:"CTX_PROJECT_EVENTS_FLUSH_INTERVAL" default:"1" mut:"hot" tenancy:"global-only"`
+	PingInterval      time.Duration `key:"project.events.ping_interval" env:"CTX_PROJECT_EVENTS_PING_INTERVAL" default:"25" mut:"hot" tenancy:"global-only"`
+	CoalesceThreshold int           `key:"project.events.coalesce_threshold" env:"CTX_PROJECT_EVENTS_COALESCE_THRESHOLD" default:"20" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // ProjectSyncConfig governs the manual forge-sync trigger (POST /api/project/{id}

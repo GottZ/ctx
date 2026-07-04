@@ -185,7 +185,7 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 // Uses a dedicated pgx.Conn (NOT from pool) as required by pgxlisten.
 // pool/cfg feed the settings hot-reload handler; both come from the scheduler
 // that owns this listener.
-func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *Scheduler, pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool, blocktypes *blocktype.Registry) *pgxlisten.Listener {
+func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *Scheduler, pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool, blocktypes *blocktype.Registry, projectHub *ProjectHub) *pgxlisten.Listener {
 	if reconnectDelay == 0 {
 		reconnectDelay = defaultReconnectDelay
 	}
@@ -203,6 +203,13 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 	handler := &WriteHandler{scheduler: scheduler}
 	listener.Handle(channelBlockWrite, handler)
 	listener.Handle(channelSettingsWrite, &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes})
+	// W9: forward ctx_project_write (081) to the SSE domain-event hub. Registered
+	// ONLY when the hub is wired — a nil hub leaves the channel un-LISTENed, so
+	// the 081 notifies are Postgres no-ops (the listener-discard invariant also
+	// holds intra-process, not just for an old binary).
+	if projectHub != nil {
+		listener.Handle(channelProjectWrite, &ProjectNotifyHandler{hub: projectHub})
+	}
 
 	return listener
 }

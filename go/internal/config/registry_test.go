@@ -94,6 +94,14 @@ func TestRegistryStrictSet(t *testing.T) {
 		// GitHub-token protection, so both abort loudly.
 		"project.sync.rate_limit":     true,
 		"project.sync.max_concurrent": true,
+		// W9 (design/03 §4.5/§6.2) project SSE hub caps: per-tenant connection
+		// ceiling + per-project-per-tick coalesce threshold — int ceilings like
+		// events.max_connections; a typo'd cap silently defaulting would hide the
+		// intended fan-out limit, so both abort loudly. The DURATIONS
+		// (flush_interval, ping_interval) stay non-strict (a stream cadence is not
+		// a security ceiling).
+		"project.events.max_connections":    true,
+		"project.events.coalesce_threshold": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {
@@ -237,6 +245,9 @@ func TestRegistryTenancySet(t *testing.T) {
 		// W11 per-project sync rate (max_concurrent is a PROCESS-global semaphore →
 		// global-only, so it is deliberately absent here)
 		"project.sync.rate_limit": true,
+		// W9 per-tenant SSE domain-event connection cap (flush/ping cadences +
+		// coalesce_threshold are process-global → deliberately absent here)
+		"project.events.max_connections": true,
 		// per-tenant web-chat surface
 		"webchat.enabled": true, "webchat.max_iterations": true, "webchat.max_tokens": true,
 		"webchat.completion_budget": true, "webchat.tool_result_max_chars": true,
@@ -253,8 +264,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 53 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 53 (change it with intent)", got)
+	if got := len(overridable); got != 54 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 54 (change it with intent)", got)
 	}
 	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
 	// a tenant override here would flush the process-wide embed cache / flip the

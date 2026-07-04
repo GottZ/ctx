@@ -213,12 +213,17 @@ func main() {
 	// Boot happens-before (SetOverlay pattern): installed before Run starts
 	// the listener goroutine, so the unsynchronized field write is safe.
 	scheduler.SetBlocktypeRegistry(blocktypeReg)
+	// W9: the SSE domain-event hub. Its flush loop is bound to ctx (server
+	// lifecycle); the scheduler's listener forwards ctx_project_write (081) to it.
+	// Installed before Run for the same boot happens-before contract.
+	projectHub := events.NewProjectHub(ctx, pool, cfgStore)
+	scheduler.SetProjectHub(projectHub)
 	go scheduler.Run(ctx)
 
 	// HTTP server. ListenAddr is restart-only, read once from the effective
 	// snapshot (== env value; the settings overlay rejects restart-only keys).
 	listenAddr := cfgStore.Snapshot().Server.ListenAddr //nolint:forbidigo // MT 06 BLIND: restart-only server.listen_addr is a process-global env value (the overlay rejects restart-only keys), read once at boot.
-	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg)
+	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           router,

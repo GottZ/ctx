@@ -31,7 +31,7 @@ const (
 // is the runtime-config snapshot store: every config-consuming handler reads
 // one snapshot per request from it (F1-W4–W7) — no handler holds a boot copy,
 // so a config replace is live from the next request on.
-func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry) *chi.Mux {
+func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub) *chi.Mux {
 	r := chi.NewRouter()
 
 	// MT 06-C5: wire the request→tenant-scope hook so SnapshotForRequest can
@@ -180,7 +180,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		handler.MountTypes(r, handler.NewTypesHandler(pool, blocktypeReg))
 		// Project register — reads member-gated (scope-read), writes tenant-admin
 		// (workflow W4); both gate groups live inside the mount (design/03 §5.1).
-		handler.MountProject(r, handler.NewProjectHandler(pool))
+		handler.MountProject(r, handler.NewProjectHandler(pool).WithHub(projectHub))
 		// Project issue READ surface (workflow W6): list / detail+thread / comments
 		// / board under /api/project/{id}/issues*, member-gated (scope-read) inside
 		// the mount (design/03 §4.2/§6.1). Needs the type registry to resolve the
@@ -192,6 +192,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// is member scope-read. It shells the SAME forge.SyncManager the manage forge-
 		// sync-start action drives (one run engine, two transports).
 		handler.MountProjectSync(r, handler.NewProjectSyncHandler(pool, forgeSync, cfgStore))
+		// Project SSE domain-event stream (workflow W9): GET /api/project/events,
+		// member-gated inside the mount, scope-filtered at the projectHub fan-out
+		// (design/03 §4.5). Separate from the server-admin telemetry /api/events.
+		handler.MountProjectEvents(r, handler.NewProjectEventsHandler(projectHub, pool, cfgStore))
 		// Digest — Topic map generation
 		r.Post("/api/digest", digestH.HandleDigest)
 		// Synthesize — manual daily synthesis trigger (Welle 42)

@@ -37,14 +37,36 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// projectCacheInvalidator is the slice of the W9 projectHub the write path needs:
+// drop the scope→project cache so a create/delete is reflected in the SSE fan-out
+// immediately (design/03 §4.5, MountProject-write-path invalidation). *events.
+// ProjectHub satisfies it; nil (test / no-hub wiring) makes the hook a no-op.
+type projectCacheInvalidator interface{ InvalidateProjects() }
+
 // ProjectHandler serves the /api/project surface.
 type ProjectHandler struct {
 	pool *pgxpool.Pool
+	hub  projectCacheInvalidator
 }
 
 // NewProjectHandler creates a new ProjectHandler.
 func NewProjectHandler(pool *pgxpool.Pool) *ProjectHandler {
 	return &ProjectHandler{pool: pool}
+}
+
+// WithHub attaches the W9 SSE hub so create/patch/delete invalidate its
+// scope→project cache (§4.5). Returns the handler for chaining; left unset the
+// invalidation is a no-op (the TTL fallback still re-resolves within 60s).
+func (h *ProjectHandler) WithHub(hub projectCacheInvalidator) *ProjectHandler {
+	h.hub = hub
+	return h
+}
+
+// invalidateHub drops the scope→project cache if a hub is wired (nil-safe).
+func (h *ProjectHandler) invalidateHub() {
+	if h.hub != nil {
+		h.hub.InvalidateProjects()
+	}
 }
 
 // identityPrefixes is the closed set of valid project-identity kinds (§3.1,
@@ -218,6 +240,11 @@ func (h *ProjectHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// A fresh create adds a scope→project mapping the SSE hub must see at once
+	// (§4.5). Idempotent re-init leaves the mapping unchanged, but the wipe is
+	// cheap (lazy rebuild) — no need to branch on created. PATCH is exempt: scope
+	// is immutable there (UpdateProject never touches it), so the mapping stands.
+	h.invalidateHub()
 	// Idempotent re-init and fresh create both return 200 (codebase convention,
 	// handleScopeCreate) — the row identity + the no-duplicate DB state carry the
 	// distinction (§7-W4 idempotency gate).
@@ -320,6 +347,9 @@ func (h *ProjectHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		internalProjectError(w, ctx, "project: delete error", err)
 		return
 	}
+	// Drop the deleted scope→project mapping from the SSE hub cache so a stale
+	// entry cannot keep fanning frames for a gone project (§4.5).
+	h.invalidateHub()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 

@@ -101,6 +101,7 @@ type Scheduler struct {
 	cfg           *config.Store       // hot config: one Snapshot per cycle/run
 	backendPool   *backends.Pool      // F3 pool; listener reloads it on context_backends NOTIFYs
 	blocktypes    *blocktype.Registry // WF T3: the listener hot-reloads it on context_block_types NOTIFYs; nil until SetBlocktypeRegistry
+	projectHub    *ProjectHub         // W9: the listener forwards ctx_project_write NOTIFYs to it; nil until SetProjectHub (then the channel is inert)
 	startup       StartupConfig
 	runCycle      dreamCycleFunc
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
@@ -213,6 +214,15 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 // listener's block_type entity branch is inert.
 func (s *Scheduler) SetBlocktypeRegistry(reg *blocktype.Registry) {
 	s.blocktypes = reg
+}
+
+// SetProjectHub installs the W9 SSE domain-event hub the NOTIFY listener forwards
+// ctx_project_write payloads to. Same boot contract as SetBlocktypeRegistry: MUST
+// be called before Run (the field is read when Run builds the listener, relying on
+// the boot happens-before). While nil the ctx_project_write channel is not
+// registered — no listener, so the 081 notifies are Postgres no-ops.
+func (s *Scheduler) SetProjectHub(hub *ProjectHub) {
+	s.projectHub = hub
 }
 
 // backgroundTenant is one iterated background tenant resolved from the
@@ -442,7 +452,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	)
 
 	// Start pgxlisten in a separate goroutine (auto-reconnect, backlog handler).
-	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s, s.pool, s.cfg, s.backendPool, s.blocktypes)
+	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s, s.pool, s.cfg, s.backendPool, s.blocktypes, s.projectHub)
 	go func() {
 		if err := listener.Listen(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("scheduler: pgxlisten fatal error", "error", err)
