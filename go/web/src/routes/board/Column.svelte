@@ -1,16 +1,19 @@
 <script lang="ts">
-  // One board column (design 04 §4.2/§4.3/§6.2, wave U07). A workflow-status
-  // column: a header (collapse toggle + status + wire count, plus an `unmapped`
-  // badge when the status is not in the registry vocabulary) and — when expanded
-  // — a VERTICALLY WINDOWED card list. Each column owns its own scroll container
-  // and windowing (computeWindow over a fixed card height), so a 10k-card column
-  // keeps the DOM at O(viewport): the board stays bounded even with several
-  // columns open (§6.2 DOM ceiling). Near the bottom the column keyset-appends
-  // its next page (per-column cursor); collapsed columns render zero cards but
-  // keep their count visible.
+  // One board column (design 04 §4.2/§4.3/§4.5/§6.2, waves U07 + U08). A
+  // workflow-status column: a header (collapse toggle + status + wire count, plus
+  // an `unmapped` badge when the status is not in the registry vocabulary) and —
+  // when expanded — a VERTICALLY WINDOWED card list. Each column owns its own
+  // scroll container and windowing (computeWindow over a fixed card height), so a
+  // 10k-card column keeps the DOM at O(viewport): the board stays bounded even
+  // with several columns open (§6.2 DOM ceiling). Near the bottom the column
+  // keyset-appends its next page (per-column cursor); collapsed columns render
+  // zero cards but keep their count visible.
   //
-  // Read-only in U07 — no drop targets, no card grip (DnD is U08). The count is
-  // the WIRE count (B7), the "N of count" footer makes the windowing honest.
+  // U08: when the board is writable (§5.3) AND this column is a real drop target
+  // (not the synthetic unmapped one) the column registers as a DnD drop target
+  // (use:columnDrop) and its cards become drag sources + grow a Move button. A
+  // read-only board (adapter=null) renders exactly the U07 column — no drop
+  // target, no grips. data-drop-over is set by the adapter during a hover only.
   //
   // NOTE: comments here avoid quote pairs / backticks — svelte2tsx scans the
   // script block for string literals without honouring line comments, so a
@@ -19,6 +22,7 @@
   import Card from './Card.svelte'
   import { computeWindow, isNearBottom } from '../../lib/ui/virtual-window'
   import type { ClassifiedColumn } from './board-columns'
+  import { columnDrop, type BoardDndAdapter } from '../../lib/board/dnd'
 
   let {
     column,
@@ -26,16 +30,24 @@
     collapsed,
     loadingMore,
     canLoadMore,
+    adapter = null,
+    writable = false,
+    transitioning = {},
     ontoggle,
     onloadmore,
+    onmove,
   }: {
     column: ClassifiedColumn
     scope: string | null
     collapsed: boolean
     loadingMore: boolean
     canLoadMore: boolean
+    adapter?: BoardDndAdapter | null
+    writable?: boolean
+    transitioning?: Record<string, boolean>
     ontoggle: () => void
     onloadmore: () => void
+    onmove?: (issueId: string, from: string) => void
   } = $props()
 
   // Fixed card geometry (§4.3) — MUST match the .card height in Card.svelte (56)
@@ -43,6 +55,9 @@
   const CARD_H = 56 + 8
   const OVERSCAN = 6
   const NEAR_BOTTOM_PX = CARD_H * 4
+
+  // An unmapped column is never a drop target (§4.2), even on a writable board.
+  const droppable = $derived(writable && column.category !== 'unmapped')
 
   let scroller = $state<HTMLElement | null>(null)
   let scrollTop = $state(0)
@@ -79,7 +94,9 @@
   data-board-column
   data-status={column.status}
   data-category={column.category}
+  data-droppable={droppable ? '' : undefined}
   aria-label="{column.status} ({column.count})"
+  use:columnDrop={{ adapter: droppable ? adapter : null, statusId: column.status }}
 >
   <header>
     <button type="button" class="toggle" aria-expanded={!collapsed} onclick={ontoggle}>
@@ -108,7 +125,16 @@
           <div class="spacer" aria-hidden="true" style="height: {win.padTop}px"></div>
         {/if}
         {#each windowCards as issue (issue.id)}
-          <div class="card-slot" role="listitem"><Card {issue} {scope} /></div>
+          <div class="card-slot" role="listitem">
+            <Card
+              {issue}
+              {scope}
+              {adapter}
+              writable={droppable}
+              pending={transitioning[issue.id] === true}
+              {onmove}
+            />
+          </div>
         {/each}
         {#if win.padBottom > 0}
           <div class="spacer" aria-hidden="true" style="height: {win.padBottom}px"></div>
@@ -141,6 +167,13 @@
     background: var(--surface-0);
     border: 1px solid var(--border);
     border-radius: var(--radius);
+  }
+  /* Drop-target hover highlight — set by the DnD adapter during a drag only, so
+     it never appears in a static (read-only) screenshot baseline. */
+  .column:global([data-drop-over]) {
+    border-color: var(--accent);
+    outline: 1px solid var(--accent);
+    outline-offset: -2px;
   }
   header {
     display: flex;

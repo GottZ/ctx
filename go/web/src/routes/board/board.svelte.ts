@@ -1,6 +1,6 @@
-// /board state (design 04 §4.2/§6.2, wave U07). Injectable runes class (pool/
-// blocks pattern) so the classification + collapse + per-column window logic is
-// vitest-covered without a DOM.
+// /board state (design 04 §4.2/§4.5/§6.2, waves U07 + U08). Injectable runes
+// class (pool/blocks pattern) so the classification + collapse + per-column
+// window + the OPTIMISTIC TRANSITION logic is vitest-covered without a DOM.
 //
 // TWO reads, ONE model:
 //   - GET /api/project/{id}/board  → per-status columns (status/count/first page/
@@ -10,21 +10,33 @@
 //     has no category, so the open/closed/unmapped verdict + the closed-collapse
 //     come from config.workflow.{states,terminal} (joined in board-columns.ts).
 //
-// Read-only in U07 — the drag-and-drop status transition is U08. Scale (10k+/
-// column): the board loads only a FIRST page per column; a column keyset-appends
-// via the list endpoint (state = the column status, after = the column cursor).
-// The count shown is always the wire count (B7 aggregate), NEVER the loaded card
-// length — a column can show "12 of 10 000" with 12 hydrated cards.
+// U08 write path: transition(issueId, from, to) moves a card OPTIMISTICALLY
+// (card + counts move at once, §4.5) then PATCHes the status (W7 wire). Success
+// reconciles the card from the server issue; an ApiError ROLLS BACK the move and
+// surfaces transitionError. A 409/422 additionally re-reads the board + registry
+// (§4.8 staleness) so the columns reflect the wire truth after a policy drift.
+//
+// Scale (10k+/column): the board loads only a FIRST page per column; a column
+// keyset-appends via the list endpoint. The count shown is always the wire count
+// (B7 aggregate), NEVER the loaded card length.
 
 import { toApiError, type ApiError } from '../../lib/api'
 import {
   getBoard as getBoardApi,
   listIssues as listIssuesApi,
+  patchIssue as patchIssueApi,
   type BoardParams,
   type IssueListParams,
 } from '../../lib/api/issues'
 import { listTypes as listTypesApi } from '../../lib/api/types-registry'
-import type { BoardResponse, IssueListResponse, TypesListResponse } from '../../lib/api/types'
+import type {
+  BoardResponse,
+  IssueBlock,
+  IssueListResponse,
+  IssueMutateResponse,
+  IssueRow,
+  TypesListResponse,
+} from '../../lib/api/types'
 import type { ResourceStatus } from '../../lib/resource.svelte'
 import { classifyColumns, initialCollapsed, vocabFromTypes, type ClassifiedColumn } from './board-columns'
 
@@ -38,9 +50,29 @@ export interface BoardApi {
   getBoard: (projectId: string, params?: BoardParams) => Promise<BoardResponse>
   listTypes: () => Promise<TypesListResponse>
   listIssues: (projectId: string, params?: IssueListParams) => Promise<IssueListResponse>
+  patchIssue: (projectId: string, blockId: string, body: { status: string }) => Promise<IssueMutateResponse>
 }
 
-const defaultApi: BoardApi = { getBoard: getBoardApi, listTypes: listTypesApi, listIssues: listIssuesApi }
+const defaultApi: BoardApi = {
+  getBoard: getBoardApi,
+  listTypes: listTypesApi,
+  listIssues: listIssuesApi,
+  patchIssue: (projectId, blockId, body) => patchIssueApi(projectId, blockId, body),
+}
+
+/** Fold the server issue block back onto a board row after a confirmed
+ * transition — the id is stable, the status/updated_at/title come from the wire
+ * truth (the block carries the full record; the row is the slim projection). */
+function mergeRow(row: IssueRow, block: IssueBlock): IssueRow {
+  return {
+    ...row,
+    title: block.title ?? row.title,
+    workflow_status: block.workflow_status ?? row.workflow_status,
+    updated_at: block.updated_at ?? row.updated_at,
+    scope: block.scope ?? row.scope,
+    type_name: block.type ?? row.type_name,
+  }
+}
 
 export class BoardModel {
   /** Classified columns in WIRE order (board-columns preserves it). */
@@ -52,6 +84,11 @@ export class BoardModel {
   /** statusId → an append is in flight (per-column, so one hot column does not
    * block the others). */
   loadingMore = $state<Record<string, boolean>>({})
+  /** issueId → a transition is in flight (disables its move affordance, §4.5). */
+  transitioning = $state<Record<string, boolean>>({})
+  /** The last transition failure (409/422/403/network) — surfaced as an alert;
+   * cleared when a fresh transition starts. */
+  transitionError = $state<ApiError | null>(null)
 
   readonly #projectId: string
   #api: BoardApi
@@ -122,5 +159,90 @@ export class BoardModel {
     } finally {
       this.loadingMore = { ...this.loadingMore, [status]: false }
     }
+  }
+
+  /** Is a target status a real drop target (a known column, not the synthetic
+   * unmapped one)? Drop onto an unmapped column is refused up front (§4.2). */
+  isDropTarget(status: string): boolean {
+    const col = this.columns.find((c) => c.status === status)
+    return col !== undefined && col.category !== 'unmapped'
+  }
+
+  /** The other droppable statuses for a card currently in `from` — the Move
+   * dialog's target list (the registry vocabulary, minus the current column and
+   * the unmapped synthetic ones). */
+  moveTargets(from: string): string[] {
+    return this.columns.filter((c) => c.category !== 'unmapped' && c.status !== from).map((c) => c.status)
+  }
+
+  /**
+   * Move an issue to another status. OPTIMISTIC (§4.5): the card + counts move
+   * before the round-trip. On success the card is reconciled from the server
+   * issue; on ApiError the move is ROLLED BACK (visible immediately) and
+   * transitionError is set. A 409/422 additionally re-reads board + registry
+   * (§4.8) so the columns reflect the wire truth after a policy drift. The
+   * promise resolves either way (the caller announces via transitionError) —
+   * a same-column or unknown move is a no-op.
+   */
+  async transition(issueId: string, from: string, to: string): Promise<void> {
+    if (from === to || !this.isDropTarget(to)) return
+    const before = this.columns
+    const card = this.#findCard(before, issueId, from)
+    if (card === null) return
+
+    this.transitionError = null
+    this.transitioning = { ...this.transitioning, [issueId]: true }
+    // Optimistic move: pull from `from`, prepend to `to` (a transition bumps
+    // updated_at, so the card sorts to the top of its new column).
+    this.columns = this.#withMove(before, issueId, from, to)
+
+    try {
+      const res = await this.#api.patchIssue(this.#projectId, issueId, { status: to })
+      const serverStatus = res.issue.workflow_status ?? to
+      if (serverStatus !== to) {
+        // The server landed the card in a different status than requested —
+        // re-read the wire truth instead of guessing (rare policy remap).
+        await this.load()
+      } else {
+        this.columns = this.columns.map((c) =>
+          c.status === to
+            ? { ...c, issues: c.issues.map((i) => (i.id === issueId ? mergeRow(i, res.issue) : i)) }
+            : c,
+        )
+      }
+    } catch (err) {
+      const e = toApiError(err)
+      this.columns = before // visible rollback (§4.5 — trivially correct, no order state)
+      this.transitionError = e
+      // Registry staleness (§4.8): a 409/422 re-reads board + registry so the
+      // columns (and the unmapped mechanic) reflect the wire truth.
+      if (e.status === 409 || e.status === 422) await this.load()
+    } finally {
+      this.transitioning = { ...this.transitioning, [issueId]: false }
+    }
+  }
+
+  #findCard(columns: ClassifiedColumn[], issueId: string, from: string): IssueRow | null {
+    const col = columns.find((c) => c.status === from)
+    return col?.issues.find((i) => i.id === issueId) ?? null
+  }
+
+  #withMove(columns: ClassifiedColumn[], issueId: string, from: string, to: string): ClassifiedColumn[] {
+    const card = this.#findCard(columns, issueId, from)
+    if (card === null) return columns
+    const moved: IssueRow = { ...card, workflow_status: to }
+    return columns.map((c) => {
+      if (c.status === from) {
+        return {
+          ...c,
+          issues: c.issues.filter((i) => i.id !== issueId),
+          count: Math.max(0, c.count - 1),
+        }
+      }
+      if (c.status === to) {
+        return { ...c, issues: [moved, ...c.issues], count: c.count + 1 }
+      }
+      return c
+    })
   }
 }

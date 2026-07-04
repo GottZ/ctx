@@ -1,6 +1,7 @@
-// BoardModel pins (design 04 §4.2/§6.2, wave U07). DOM-free via an injected api:
-// the board+registry join, the closed-collapse seed + toggle, and the per-column
-// keyset window (count from the wire, cards appended, cap).
+// BoardModel pins (design 04 §4.2/§4.5/§6.2, waves U07 + U08). DOM-free via an
+// injected api: the board+registry join, the closed-collapse seed + toggle, the
+// per-column keyset window (count from the wire, cards appended, cap), and the
+// U08 OPTIMISTIC TRANSITION (move → confirm | rollback + wire re-read).
 //
 // The CLOSED-COLLAPSE negative gate (RED-then-GREEN): a terminal column starts
 // collapsed. RED against a seed that ignores the registry — make initialCollapsed
@@ -9,7 +10,16 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { BOARD_COLUMN_CAP, BoardModel, type BoardApi } from './board.svelte'
-import type { BlockTypeView, BoardResponse, IssueListResponse, IssueRow, TypesListResponse } from '../../lib/api/types'
+import { ApiError } from '../../lib/api'
+import type {
+  BlockTypeView,
+  BoardResponse,
+  IssueBlock,
+  IssueListResponse,
+  IssueMutateResponse,
+  IssueRow,
+  TypesListResponse,
+} from '../../lib/api/types'
 
 function boardCard(status: string, i: number): IssueRow {
   return {
@@ -19,6 +29,22 @@ function boardCard(status: string, i: number): IssueRow {
     title: `${status} ${i}`,
     workflow_status: status,
     updated_at: '2026-07-03T00:00:00Z',
+  }
+}
+
+function issueBlock(id: string, status: string): IssueBlock {
+  return {
+    id,
+    category: 'issue',
+    tags: [],
+    title: 'moved',
+    content: '',
+    metadata: {},
+    scope: 'acme:main',
+    type: 'issue',
+    workflow_status: status,
+    created_at: '2026-07-03T00:00:00Z',
+    updated_at: '2026-07-04T00:00:00Z',
   }
 }
 
@@ -68,6 +94,11 @@ function api(overrides: Partial<BoardApi> = {}): BoardApi {
         cursor: null,
       }
     }),
+    patchIssue: vi.fn(async (_id, blockId, body): Promise<IssueMutateResponse> => ({
+      success: true,
+      render: 'untrusted',
+      issue: issueBlock(blockId, body.status),
+    })),
     ...overrides,
   }
 }
@@ -154,5 +185,116 @@ describe('BoardModel per-column window', () => {
     const open = m.columns.find((c) => c.status === 'open')
     expect(open!.issues.length).toBeGreaterThanOrEqual(BOARD_COLUMN_CAP)
     expect(m.canLoadMore('open')).toBe(false)
+  })
+})
+
+describe('BoardModel.transition (U08)', () => {
+  it('optimistically moves the card + counts, then reconciles from the server issue', async () => {
+    const a = api()
+    const m = new BoardModel('p1', a)
+    await m.load()
+    await m.transition('open-0000', 'open', 'review')
+    const open = m.columns.find((c) => c.status === 'open')!
+    const review = m.columns.find((c) => c.status === 'review')!
+    // open lost the card + a count; review gained it (at the top) + a count.
+    expect(open.issues.map((i) => i.id)).not.toContain('open-0000')
+    expect(open.count).toBe(2)
+    expect(review.issues[0].id).toBe('open-0000')
+    expect(review.issues[0].workflow_status).toBe('review')
+    expect(review.count).toBe(2)
+    expect(m.transitionError).toBeNull()
+    // PATCH carried the target status (B5).
+    expect(a.patchIssue).toHaveBeenCalledWith('p1', 'open-0000', { status: 'review' })
+  })
+
+  it('409 rolls the move back AND re-reads the wire (board GET fires again)', async () => {
+    const a = api({
+      patchIssue: vi.fn(async () => Promise.reject(new ApiError(409, 'conflict', 'transition not allowed'))),
+    })
+    const m = new BoardModel('p1', a)
+    await m.load()
+    expect(a.getBoard).toHaveBeenCalledTimes(1)
+    await m.transition('open-0000', 'open', 'review')
+    // Rolled back: the card is back in open, counts restored.
+    const open = m.columns.find((c) => c.status === 'open')!
+    const review = m.columns.find((c) => c.status === 'review')!
+    expect(open.issues.map((i) => i.id)).toContain('open-0000')
+    expect(open.count).toBe(3)
+    expect(review.count).toBe(1)
+    // Error surfaced + the wire re-read fired (§4.8 registry staleness).
+    expect(m.transitionError?.status).toBe(409)
+    expect(a.getBoard).toHaveBeenCalledTimes(2)
+  })
+
+  it('422 (invalid transition) rolls back, surfaces the error, re-reads the wire', async () => {
+    const a = api({
+      patchIssue: vi.fn(async () => Promise.reject(new ApiError(422, 'unprocessable', 'not a valid transition'))),
+    })
+    const m = new BoardModel('p1', a)
+    await m.load()
+    await m.transition('open-0000', 'open', 'review')
+    const open = m.columns.find((c) => c.status === 'open')!
+    expect(open.issues.map((i) => i.id)).toContain('open-0000')
+    expect(open.count).toBe(3)
+    expect(m.transitionError?.status).toBe(422)
+    expect(a.getBoard).toHaveBeenCalledTimes(2)
+  })
+
+  it('403 (read-only race) rolls back + surfaces, but does NOT re-read (only 409/422 do)', async () => {
+    const a = api({
+      patchIssue: vi.fn(async () => Promise.reject(new ApiError(403, 'forbidden', 'read-only scope'))),
+    })
+    const m = new BoardModel('p1', a)
+    await m.load()
+    await m.transition('open-0000', 'open', 'review')
+    expect(m.columns.find((c) => c.status === 'open')!.issues.map((i) => i.id)).toContain('open-0000')
+    expect(m.transitionError?.status).toBe(403)
+    expect(a.getBoard).toHaveBeenCalledTimes(1) // no wire re-read for a 403
+  })
+
+  it('a same-column transition is a no-op (no PATCH)', async () => {
+    const a = api()
+    const m = new BoardModel('p1', a)
+    await m.load()
+    await m.transition('open-0000', 'open', 'open')
+    expect(a.patchIssue).not.toHaveBeenCalled()
+  })
+
+  it('refuses a drop onto an unmapped column (never a drop target)', async () => {
+    const a = api({
+      getBoard: vi.fn(async () => ({
+        success: true as const,
+        render: 'untrusted' as const,
+        columns: [
+          { status: 'open', count: 1, cursor: null, issues: [boardCard('open', 0)] },
+          { status: 'on_hold', count: 1, cursor: null, issues: [boardCard('on_hold', 0)] },
+        ],
+      })),
+    })
+    const m = new BoardModel('p1', a)
+    await m.load()
+    expect(m.columns.find((c) => c.status === 'on_hold')?.category).toBe('unmapped')
+    await m.transition('open-0000', 'open', 'on_hold')
+    expect(a.patchIssue).not.toHaveBeenCalled()
+  })
+
+  it('moveTargets = droppable statuses minus the current column and the unmapped ones', async () => {
+    const a = api({
+      getBoard: vi.fn(async () => ({
+        success: true as const,
+        render: 'untrusted' as const,
+        columns: [
+          { status: 'open', count: 0, cursor: null, issues: [] },
+          { status: 'review', count: 0, cursor: null, issues: [] },
+          { status: 'done', count: 0, cursor: null, issues: [] },
+          { status: 'on_hold', count: 0, cursor: null, issues: [] }, // unmapped
+        ],
+      })),
+    })
+    const m = new BoardModel('p1', a)
+    await m.load()
+    expect(m.moveTargets('open')).toEqual(['review', 'done'])
+    expect(m.isDropTarget('on_hold')).toBe(false)
+    expect(m.isDropTarget('review')).toBe(true)
   })
 })
