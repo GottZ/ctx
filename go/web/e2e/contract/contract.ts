@@ -68,6 +68,16 @@ export interface PageState {
   seed: ContractSeed
   /** Bring the page into the state after mount (open dialog, …). */
   prepare?: (page: Page) => Promise<void>
+  /**
+   * Escalation rung 3 (design 05-§8.E3 escalation ladder / 06 §4.3): a per-shot
+   * maxDiffPixels budget for a state whose render carries a REAL, named
+   * sub-pixel non-determinism that mask (rung 1) and stylePath (rung 2) cannot
+   * fix. This is NEVER the forbidden global loosening — it rides this one state
+   * only, reason + issue are mandatory (validated), and the value stays orders
+   * of magnitude below any genuine regression on the state (which moves
+   * hundreds of pixels, not the tolerated few).
+   */
+  visualTolerance?: { maxDiffPixels: number; reason: string; issue: string }
 }
 
 /** DOM ceiling for a scale state — the region that must stay bounded at 10k items. */
@@ -195,6 +205,13 @@ export function validateContract(c: PageContract): string[] {
     if (ex.selector.trim() === '' || ex.reason.trim() === '')
       errs.push('axe.exclude entries require non-empty selector AND reason (§4.3c)')
   }
+  for (const st of c.states) {
+    const t = st.visualTolerance
+    if (t === undefined) continue
+    if (!(t.maxDiffPixels >= 1)) errs.push(`state '${st.name}' visualTolerance.maxDiffPixels must be ≥ 1 (rung 3, §4.3)`)
+    if (t.reason.trim() === '' || t.issue.trim() === '')
+      errs.push(`state '${st.name}' visualTolerance requires non-empty reason AND issue (rung 3, §4.3)`)
+  }
   return errs
 }
 
@@ -278,6 +295,7 @@ function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: V
     await captureShot(page, `${c.name}--${state.name}--${theme}--${viewport}.png`, {
       mask: c.mask,
       maskBudgetOverride: c.maskBudgetOverride,
+      maxDiffPixels: state.visualTolerance?.maxDiffPixels,
     })
   })
 }

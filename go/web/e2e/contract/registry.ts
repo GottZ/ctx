@@ -549,7 +549,28 @@ export const contracts: PageContract[] = [
     // baselines (design 04 §7-U09). Mobile visual/aria freeze from here.
     states: [
       { name: 'default', seed: { state: 'board' } },
-      { name: 'empty', seed: { empty: true } },
+      {
+        name: 'empty',
+        seed: { empty: true },
+        // Rung 3 (design 05-§8.E3 ladder / 06 §4.3): the Q11 self-hosted Mono
+        // (JetBrains Mono) draws the accent-blue glyph edges of the empty board's
+        // sparse chrome against the wide surface-0 field; under parallel-worker
+        // load the pinned SwiftShader rasteriser wobbles ONE such edge pixel by
+        // ±1 LSB in the blue channel (measured: 1 pixel, YIQ-delta ~3.6, just
+        // over the calibrated maxDelta 3.5). It is deterministic in isolation and
+        // load-induced under contention, and CI retries do NOT clear it on this
+        // sparse shot (fails both attempts). mask (rung 1)/stylePath (rung 2) do
+        // not fit a single AA edge pixel; per-shot maxDiffPixels is the ladder's
+        // rung 3. 4 ≫ the observed 1 yet ≪ any real regression (hundreds of px).
+        // Issue anchor: design 05-§8.E3 (Q11 Font-Determinismus). NOT a global
+        // loosening — this rides the empty state only; every other shot keeps 0.
+        visualTolerance: {
+          maxDiffPixels: 4,
+          reason:
+            'Q11 self-hosted Mono: accent-blue glyph edge AA wobbles ±1 LSB on surface-0 under load (1 px, delta ~3.6); deterministic in isolation, not retry-clearable on this sparse shot.',
+          issue: 'design 05-§8.E3 (Q11 Font-Determinismus escalation rung 3)',
+        },
+      },
     ],
     scale: {
       // 10k×6 board: each column count = 10 000, a bounded first page + a

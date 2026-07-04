@@ -38,7 +38,7 @@
 
   --dot-pattern: rgba(216, 218, 229, 0.035); /* Login-Punktraster          */
 
-  --font-mono: ui-monospace, 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Fira Code', 'Cascadia Code', monospace;
   --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
 
   --space-0: 0.125rem; /* Q3: schließt das Skala-Loch unter space-1 (design 05-§3.3) */

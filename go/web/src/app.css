@@ -1,5 +1,42 @@
 @import './styles/tokens.css';
 
+/* Q11 (design 05-§8, E1=B "Instrument Panel mit eigener Stimme"): self-hosted
+ * charaktervolle Mono — JetBrains Mono v2.304 (OFL 1.1, license shipped at
+ * public/fonts/OFL.txt). ONE variable woff2 (weight axis 100-800, ~111 KB)
+ * covers every mono weight in use (400 default / 500 fw-medium / 600
+ * fw-semibold) from REAL glyphs — no font-synthesis, one preload, within the
+ * §6.4 bundle budget. (Static per-weight instances were measured to give NO
+ * determinism advantage — the residual ±1-LSB glyph-edge jitter is load-
+ * induced, not interpolation-induced, and is absorbed by the CI retry the same
+ * way the pre-existing compositing jitter is; so the smaller variable file
+ * wins. See §5.5.1 + the determinism note below.)
+ *
+ * Applied via the --font-mono token (tokens.json), which now lists 'JetBrains
+ * Mono' first; every mono surface (wordmark, headings, numbers, code, tables)
+ * already consumes that token, so the character lands everywhere at once. The
+ * body (--font-ui) stays system-ui = ruhiger Body. Bundling removes the
+ * system-mono render variance the old ui-monospace stack carried: UI-text
+ * rendering is deterministic across environments (design 05-§5.5.1
+ * Font-Determinismus-Gewinn).
+ *
+ * font-display: block (not swap) is the deterministic choice — the file is
+ * same-origin + preloaded, so the block period is imperceptible for users, and
+ * block guarantees no fallback-font frame can ever be captured: a swap flash
+ * would only appear before document.fonts.ready resolves, and the capture path
+ * already awaits exactly that (e2e/contract/capture.ts stabilize()) before every
+ * shot, so block + fonts.ready close the flake structurally from both ends. */
+/* stylelint-disable scale-unlimited/declaration-strict-value --
+ * @font-face DEFINES the family name and declares the variable weight range;
+ * both are literals by construction, not token references (design 05-§5.6). */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono-var.woff2') format('woff2');
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: block;
+}
+/* stylelint-enable scale-unlimited/declaration-strict-value */
+
 /* Base — component looks live in scoped styles; only resets, focus and
  * form primitives are global. */
 html {

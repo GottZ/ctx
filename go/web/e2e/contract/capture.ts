@@ -42,6 +42,15 @@ export interface CaptureOptions {
   /** Element shot instead of viewport shot (e.g. nav.rail). */
   target?: Locator
   fullPage?: boolean
+  /**
+   * Escalation rung 3 (design 05-§8.E3 / 06 §4.3): a per-shot maxDiffPixels
+   * budget for a shot with a REAL, named sub-pixel non-determinism that mask
+   * (rung 1) and stylePath (rung 2) cannot address. NEVER a global loosening —
+   * this rides one shot only, and only with reason + issue (validated). The
+   * value tolerates the measured AA jitter and stays orders of magnitude below
+   * any genuine regression on that shot (which moves hundreds of pixels).
+   */
+  maxDiffPixels?: number
 }
 
 /**
@@ -127,9 +136,12 @@ export async function captureShot(page: Page, name: string, opts: CaptureOptions
 
   await stabilize(page)
   const mask = selectors.map((s) => page.locator(s))
+  // maxDiffPixels overrides the global 0 for THIS shot only (rung 3); omitted
+  // → undefined → the config default (0) stands. threshold stays global.
+  const tol = opts.maxDiffPixels === undefined ? {} : { maxDiffPixels: opts.maxDiffPixels }
   if (opts.target) {
-    await expect(opts.target).toHaveScreenshot(name, { mask })
+    await expect(opts.target).toHaveScreenshot(name, { mask, ...tol })
   } else {
-    await expect(page).toHaveScreenshot(name, { mask, fullPage: opts.fullPage ?? false })
+    await expect(page).toHaveScreenshot(name, { mask, fullPage: opts.fullPage ?? false, ...tol })
   }
 }

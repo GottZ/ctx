@@ -7,6 +7,12 @@
     <script src="/theme-boot.js"></script>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Q11 (design 05-§8 E1=B): preload the self-hosted variable Mono so
+         the character font is present at first paint (font-display: block in
+         app.css; @font-face src is same-origin, font-src 'self' covers it —
+         no external request). crossorigin is mandatory: fonts fetch in CORS
+         mode even same-origin, a preload without it would double-fetch. -->
+    <link rel="preload" href="/fonts/jetbrains-mono-var.woff2" as="font" type="font/woff2" crossorigin />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ctx</title>
   </head>
