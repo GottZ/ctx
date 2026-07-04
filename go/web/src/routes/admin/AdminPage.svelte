@@ -6,9 +6,12 @@
   // restore probe is in flight the tier is 'loading' (capabilities loading-floor,
   // R6) — we hold a neutral state rather than flash the 403 banner. This wave is
   // strictly read-only: tenant create/edit/suspend/delete is A3, the
-  // /admin/tenants/:id detail + quota is A4, grants/corpus are later tabs.
+  // /admin/tenants/:id detail + quota is A4, grants/corpus are later tabs. The
+  // register's scroll+table shell comes from the shared lib/ui/Table primitive
+  // (Q10); columns/rows/empty stay here.
   import { session } from '../../lib/auth.svelte'
   import type { TenantStatus } from '../../lib/api/types'
+  import Table from '../../lib/ui/Table.svelte'
   import { TenantsModel } from './tenants.svelte'
   import TenantCreateDialog from './TenantCreateDialog.svelte'
   import ScopeMap from './ScopeMap.svelte'
@@ -78,41 +81,36 @@
         <p class="problem" role="alert">{model.actionError}</p>
       {/if}
 
-      {#if model.tenants.length === 0}
-        <p class="empty">no tenants — the register is empty</p>
-      {:else}
-        {#if model.tenants.length === 1}
-          <p class="empty" role="status">
-            only the default tenant exists — no additional tenants have been created yet
-          </p>
-        {/if}
-        <div class="scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>slug</th>
-                <th>display name</th>
-                <th>status</th>
-                <th>created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each model.tenants as t (t.id)}
-                <tr>
-                  <td class="slug"><a href="/admin/tenants/{t.id}">{t.slug}</a></td>
-                  <td class="name">{t.display_name || '—'}</td>
-                  <td>
-                    <span class="badge">
-                      <span class="dot {statusClass(t.status)}"></span>{t.status}
-                    </span>
-                  </td>
-                  <td class="created">{fmtDate(t.created_at)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+      {#if model.tenants.length === 1}
+        <p class="empty" role="status">
+          only the default tenant exists — no additional tenants have been created yet
+        </p>
       {/if}
+      <Table empty={model.tenants.length === 0}>
+        {#snippet emptyState()}
+          <p class="empty">no tenants — the register is empty</p>
+        {/snippet}
+        {#snippet head()}
+          <tr>
+            <th>slug</th>
+            <th>display name</th>
+            <th>status</th>
+            <th>created</th>
+          </tr>
+        {/snippet}
+        {#each model.tenants as t (t.id)}
+          <tr>
+            <td class="slug"><a href="/admin/tenants/{t.id}">{t.slug}</a></td>
+            <td class="name">{t.display_name || '—'}</td>
+            <td>
+              <span class="badge">
+                <span class="dot {statusClass(t.status)}"></span>{t.status}
+              </span>
+            </td>
+            <td class="created">{fmtDate(t.created_at)}</td>
+          </tr>
+        {/each}
+      </Table>
     </section>
 
     <ScopeMap />
@@ -229,31 +227,6 @@
     padding: var(--space-3);
     color: var(--text-faint);
     font-size: var(--fs-sm);
-  }
-  .scroll {
-    overflow-x: auto;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-sm);
-  }
-  th {
-    text-align: left;
-    padding: var(--space-1) var(--space-3);
-    color: var(--text-faint);
-    font-family: var(--font-mono);
-    font-size: var(--label-size);
-    letter-spacing: var(--label-tracking);
-    text-transform: uppercase;
-    font-weight: var(--fw-medium);
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  td {
-    padding: var(--space-1) var(--space-3);
-    border-bottom: 1px solid var(--surface-2);
-    vertical-align: top;
   }
   .slug {
     font-family: var(--font-mono);

@@ -4,7 +4,10 @@
   // functional: list (TK3) + create-with-show-once-reveal (TK4) + revoke with
   // confirm, show-revoked toggle and self-revoke guard (TK5) + read-only quota
   // (TK6). All mutations go through the KeysModel; the child dialogs/cards fill
-  // their own files. The server stays authoritative on every write.
+  // their own files. The server stays authoritative on every write. The key
+  // table's scroll+table shell comes from the shared lib/ui/Table primitive
+  // (Q10); the no-keys empty is a whole-card panel and stays here (it replaces
+  // the card, not just the table body).
   //
   // Self-gate: manageTenantKeys (tenant-admin+ or server-admin, capabilitiesFor
   // §3) mirrors the server's requireTenantAdmin — a member key gets a banner,
@@ -12,6 +15,7 @@
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
   import { session } from '../../lib/auth.svelte'
   import type { ApiKeyView, TenantRole } from '../../lib/api/types'
+  import Table from '../../lib/ui/Table.svelte'
   import { KeysModel } from './keys.svelte'
   import { ScopesSelfModel } from './scopes.svelte' // FE-9 / SS1
   import { activeOwnerCount, controlDisabled } from './role-guards'
@@ -201,98 +205,94 @@
           <h2>api keys</h2>
           <span class="count">{keys.keys.length}</span>
         </header>
-        <div class="scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>label</th>
-                <th>role</th>
-                <th>home scope</th>
-                <th>allowed scopes</th>
-                <th>status</th>
-                <th>last used</th>
-                <th>created</th>
-                <th class="col-action">revoke</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each keys.keys as k (k.id)}
-                <tr class:own={isOwnKey(k.id)} class:off={!k.active}>
-                  <td class="label">
-                    <span class="label-text">{k.label}</span>
-                    {#if isOwnKey(k.id)}<span class="this-key" title="the key you are signed in with">this key</span>{/if}
-                  </td>
-                  <td>
-                    {#if k.tenant_role}
-                      <select
-                        class="role-select {roleClass(k.tenant_role)}"
-                        aria-label={`role for ${k.label}`}
-                        value={k.tenant_role}
-                        disabled={controlDisabled(k, ownerCount, isOwnKey(k.id), keys.busyId === k.id)}
-                        onchange={(e) => void changeRole(k, e.currentTarget.value as TenantRole)}
-                      >
-                        <option value="member">member</option>
-                        <option value="admin">admin</option>
-                        <option value="owner">owner</option>
-                      </select>
-                    {:else}
-                      <span class="dim">—</span>
-                    {/if}
-                  </td>
-                  <td><span class="chip">{k.home_scope}</span></td>
-                  <td class="scopes">
-                    {#if k.allowed_scopes.length === 0}
-                      <span class="dim">—</span>
-                    {:else}
-                      {#each k.allowed_scopes as s (s)}<span class="chip">{s}</span>{/each}
-                    {/if}
-                  </td>
-                  <td class="status-cell">
-                    {#if k.active}
-                      <span class="badge ok">active</span>
-                    {:else}
-                      <span class="badge revoked">revoked</span>
-                    {/if}
-                    <button
-                      type="button"
-                      class="toggle-active"
-                      aria-label={`activation for ${k.label}`}
-                      disabled={controlDisabled(k, ownerCount, isOwnKey(k.id), keys.busyId === k.id)}
-                      onclick={() => void toggleActive(k)}
-                    >
-                      {keys.busyId === k.id ? '…' : k.active ? 'deactivate' : 'activate'}
-                    </button>
-                  </td>
-                  <td class="when">{fmtUsed(k.last_used_at)}</td>
-                  <td class="when">{k.created_at.slice(0, 10)}</td>
-                  <td class="col-action">
-                    {#if !k.active}
-                      <span class="dim">—</span>
-                    {:else if isOwnKey(k.id)}
-                      <button
-                        type="button"
-                        class="revoke"
-                        disabled
-                        title="This is the key you're signed in with — create and test a replacement key first, then revoke this one from there. No self-service recovery."
-                      >
-                        revoke
-                      </button>
-                    {:else}
-                      <button
-                        type="button"
-                        class="revoke danger"
-                        disabled={keys.busyId === k.id}
-                        onclick={() => requestRevoke(k)}
-                      >
-                        {keys.busyId === k.id ? '…' : 'revoke'}
-                      </button>
-                    {/if}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+        <Table>
+          {#snippet head()}
+            <tr>
+              <th>label</th>
+              <th>role</th>
+              <th>home scope</th>
+              <th>allowed scopes</th>
+              <th>status</th>
+              <th>last used</th>
+              <th>created</th>
+              <th class="col-action">revoke</th>
+            </tr>
+          {/snippet}
+          {#each keys.keys as k (k.id)}
+            <tr class:own={isOwnKey(k.id)} class:off={!k.active}>
+              <td class="label">
+                <span class="label-text">{k.label}</span>
+                {#if isOwnKey(k.id)}<span class="this-key" title="the key you are signed in with">this key</span>{/if}
+              </td>
+              <td>
+                {#if k.tenant_role}
+                  <select
+                    class="role-select {roleClass(k.tenant_role)}"
+                    aria-label={`role for ${k.label}`}
+                    value={k.tenant_role}
+                    disabled={controlDisabled(k, ownerCount, isOwnKey(k.id), keys.busyId === k.id)}
+                    onchange={(e) => void changeRole(k, e.currentTarget.value as TenantRole)}
+                  >
+                    <option value="member">member</option>
+                    <option value="admin">admin</option>
+                    <option value="owner">owner</option>
+                  </select>
+                {:else}
+                  <span class="dim">—</span>
+                {/if}
+              </td>
+              <td><span class="chip">{k.home_scope}</span></td>
+              <td class="scopes">
+                {#if k.allowed_scopes.length === 0}
+                  <span class="dim">—</span>
+                {:else}
+                  {#each k.allowed_scopes as s (s)}<span class="chip">{s}</span>{/each}
+                {/if}
+              </td>
+              <td class="status-cell">
+                {#if k.active}
+                  <span class="badge ok">active</span>
+                {:else}
+                  <span class="badge revoked">revoked</span>
+                {/if}
+                <button
+                  type="button"
+                  class="toggle-active"
+                  aria-label={`activation for ${k.label}`}
+                  disabled={controlDisabled(k, ownerCount, isOwnKey(k.id), keys.busyId === k.id)}
+                  onclick={() => void toggleActive(k)}
+                >
+                  {keys.busyId === k.id ? '…' : k.active ? 'deactivate' : 'activate'}
+                </button>
+              </td>
+              <td class="when">{fmtUsed(k.last_used_at)}</td>
+              <td class="when">{k.created_at.slice(0, 10)}</td>
+              <td class="col-action">
+                {#if !k.active}
+                  <span class="dim">—</span>
+                {:else if isOwnKey(k.id)}
+                  <button
+                    type="button"
+                    class="revoke"
+                    disabled
+                    title="This is the key you're signed in with — create and test a replacement key first, then revoke this one from there. No self-service recovery."
+                  >
+                    revoke
+                  </button>
+                {:else}
+                  <button
+                    type="button"
+                    class="revoke danger"
+                    disabled={keys.busyId === k.id}
+                    onclick={() => requestRevoke(k)}
+                  >
+                    {keys.busyId === k.id ? '…' : 'revoke'}
+                  </button>
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </Table>
       </section>
     {/if}
 
@@ -424,31 +424,6 @@
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     color: var(--text-dim);
-  }
-  .scroll {
-    overflow-x: auto;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-sm);
-  }
-  th {
-    text-align: left;
-    padding: var(--space-1) var(--space-3);
-    color: var(--text-faint);
-    font-family: var(--font-mono);
-    font-size: var(--label-size);
-    letter-spacing: var(--label-tracking);
-    text-transform: uppercase;
-    font-weight: var(--fw-medium);
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  td {
-    padding: var(--space-1) var(--space-3);
-    border-bottom: 1px solid var(--surface-2);
-    vertical-align: top;
   }
   tr.off .label-text,
   tr.off .scopes {
@@ -651,7 +626,7 @@
     cursor: not-allowed;
   }
   /* Mobile: the 8-column table (incl. the revoke action) overflows on a phone →
-     it scrolls horizontally via .scroll (the cheap, layout-stable degradation).
-     A per-key card-stack at @375px is the design §6 stretch; horizontal scroll
-     keeps every column reachable in the meantime. */
+     it scrolls horizontally via the primitive's .scroll (the cheap, layout-stable
+     degradation). A per-key card-stack at @375px is the design §6 stretch;
+     horizontal scroll keeps every column reachable in the meantime. */
 </style>

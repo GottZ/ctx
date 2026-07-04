@@ -1,11 +1,15 @@
 <script lang="ts">
   // LLM telemetry table — its own Resource over GET /api/llmlog (separate
   // endpoint, own filters). The response NEVER carries prompt/response bodies;
-  // error is the normalized {class, detail} (capped server-side).
+  // error is the normalized {class, detail} (capped server-side). The scroll+
+  // table shell comes from the shared lib/ui/Table primitive (Q10); cells keep
+  // the baseline vertical-align (valign) so a wrapping error detail aligns the
+  // sibling cells as before.
   import { onMount } from 'svelte'
   import { fetchLLMLog } from '../../lib/api/status'
   import type { LLMLogEntry, LLMLogResponse } from '../../lib/api/types'
   import { Resource } from '../../lib/resource.svelte'
+  import Table from '../../lib/ui/Table.svelte'
 
   // `live` carries SSE-pushed llmcall rows (G34); merged on top of the fetched
   // history below. Unfiltered upstream, so the current pipeline/errors filter
@@ -71,42 +75,39 @@
       <span>{log.error?.message}</span>
       <button type="button" onclick={() => void log.reload()}>Retry</button>
     </div>
-  {:else if entries.length === 0}
-    <p class="state">no calls match.</p>
   {:else}
-    <div class="scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>time</th><th>pipeline</th><th>model</th><th>backend</th>
-            <th class="num">ms</th><th class="num">tok in/out</th>
-            {#if anyCost}<th class="num">cost</th>{/if}
-            <th>error</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each entries as e (e.id)}
-            <tr class:has-error={e.error !== null}>
-              <td class="mono">{fmtTime(e.created_at)}</td>
-              <td class="mono">{e.pipeline}</td>
-              <td class="mono dim">{e.model}</td>
-              <td class="mono">{e.backend}</td>
-              <td class="num">{e.duration_ms ?? '—'}</td>
-              <td class="num dim">{e.prompt_tokens ?? '—'}/{e.completion_tokens ?? '—'}</td>
-              {#if anyCost}<td class="num">{fmtCost(e.cost_usd)}</td>{/if}
-              <td class="errcell">
-                {#if e.error}
-                  <span class="errcls">{e.error.class}</span>
-                  <span class="errdetail" title={e.error.detail}>{e.error.detail}</span>
-                {:else}
-                  —
-                {/if}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
+    <Table empty={entries.length === 0} valign="baseline">
+      {#snippet emptyState()}
+        <p class="state">no calls match.</p>
+      {/snippet}
+      {#snippet head()}
+        <tr>
+          <th>time</th><th>pipeline</th><th>model</th><th>backend</th>
+          <th class="num">ms</th><th class="num">tok in/out</th>
+          {#if anyCost}<th class="num">cost</th>{/if}
+          <th>error</th>
+        </tr>
+      {/snippet}
+      {#each entries as e (e.id)}
+        <tr class:has-error={e.error !== null}>
+          <td class="mono">{fmtTime(e.created_at)}</td>
+          <td class="mono">{e.pipeline}</td>
+          <td class="mono dim">{e.model}</td>
+          <td class="mono">{e.backend}</td>
+          <td class="num">{e.duration_ms ?? '—'}</td>
+          <td class="num dim">{e.prompt_tokens ?? '—'}/{e.completion_tokens ?? '—'}</td>
+          {#if anyCost}<td class="num">{fmtCost(e.cost_usd)}</td>{/if}
+          <td class="errcell">
+            {#if e.error}
+              <span class="errcls">{e.error.class}</span>
+              <span class="errdetail" title={e.error.detail}>{e.error.detail}</span>
+            {:else}
+              —
+            {/if}
+          </td>
+        </tr>
+      {/each}
+    </Table>
   {/if}
 </section>
 
@@ -168,30 +169,6 @@
     align-items: center;
     gap: var(--space-2);
     color: var(--danger);
-  }
-  .scroll {
-    overflow-x: auto;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-sm);
-  }
-  th {
-    text-align: left;
-    padding: var(--space-1) var(--space-3);
-    color: var(--text-faint);
-    font-family: var(--font-mono);
-    font-size: var(--label-size);
-    letter-spacing: var(--label-tracking);
-    text-transform: uppercase;
-    font-weight: var(--fw-medium);
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  td {
-    padding: var(--space-1) var(--space-3);
-    border-bottom: 1px solid var(--surface-2);
   }
   .mono {
     font-family: var(--font-mono);

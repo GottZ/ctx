@@ -5,10 +5,12 @@
   // Delete confirms inline. The secret column joins api_key_ref against the known
   // secret names (a missing one is the derived "fehlt" status). Health/state is
   // read-only from the merged live status — mutation and status are separate
-  // server paths.
+  // server paths. The scroll+table shell and cell chrome come from the shared
+  // lib/ui/Table primitive (Q10); only the columns/rows/empty are ours.
   import { toApiError } from '../../../lib/api'
   import type { BackendListItem, BackendTestResult } from '../../../lib/api/types'
   import { backendDiff, draftFromBackend, isEmptySpec } from '../../../lib/backends'
+  import Table from '../../../lib/ui/Table.svelte'
   import type { PoolModel } from './pool.svelte'
   import BackendDialog from './BackendDialog.svelte'
 
@@ -85,103 +87,98 @@
     </div>
   {/if}
 
-  {#if pool.backends.length === 0}
-    <p class="empty">no backends — create one to populate the pool</p>
-  {:else}
-    <div class="scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>name</th>
-            <th>trust</th>
-            <th>roles</th>
-            <th class="num">prio</th>
-            <th>secret</th>
-            <th>state</th>
-            <th class="act">actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each pool.sorted as b (b.id)}
-            <tr class:off={!b.enabled}>
-              <td class="name">
-                {b.name}
-                <span class="meta">{b.locality} · {b.protocol} · {b.base_url}</span>
-              </td>
-              <td><span class="badge">{b.trust}</span></td>
-              <td class="roles">{b.roles.join(', ') || '—'}</td>
-              <td class="num">
-                <div class="prio">
-                  <span>{b.priority}</span>
-                  <span class="updown">
-                    <button type="button" title="raise priority" disabled={pool.busyId === b.id} onclick={() => void pool.reprioritize(b.id, 'up')}>▲</button>
-                    <button type="button" title="lower priority" disabled={pool.busyId === b.id} onclick={() => void pool.reprioritize(b.id, 'down')}>▼</button>
-                  </span>
-                </div>
-              </td>
-              <td class="secret">
-                {#if b.api_key_ref === ''}
-                  <span class="dim">—</span>
-                {:else if knownSecrets.has(b.api_key_ref)}
-                  <span class="ok-ref" title="resolves to a vault secret">✓ {b.api_key_ref}</span>
-                {:else}
-                  <span class="missing" title="no vault secret of this name — set it below">⚠ fehlt: {b.api_key_ref}</span>
-                {/if}
-              </td>
-              <td class="state">
-                <span class="dot {stateClass(b.effective_state)}"></span>
-                {b.effective_state}{#if b.effective_state === 'cooldown'} · {b.cooldown_remaining_s}s{/if}
-                {#if b.last_error}<span class="errcls" title="last error class">{b.last_error}</span>{/if}
-              </td>
-              <td class="act">
-                <label class="switch" title="enabled">
-                  <input
-                    type="checkbox"
-                    checked={b.enabled}
-                    disabled={pool.busyId === b.id}
-                    onchange={(e) => void pool.setEnabled(b.id, e.currentTarget.checked)}
-                  />
-                </label>
-                <button type="button" class="ghost" disabled={pool.busyId === b.id} onclick={() => void runTest(b.id, false)}>test</button>
-                <button type="button" class="ghost" disabled={pool.busyId === b.id} onclick={() => void runTest(b.id, true)}>test+chat</button>
-                <button type="button" class="ghost" onclick={() => (editing = { mode: 'edit', backend: b })}>edit</button>
-                {#if confirmDeleteId === b.id}
-                  <span class="confirm-del">
-                    delete?
-                    <button type="button" class="danger" onclick={() => void doDelete(b.id)}>yes</button>
-                    <button type="button" class="ghost" onclick={() => (confirmDeleteId = null)}>no</button>
-                  </span>
-                {:else}
-                  <button type="button" class="ghost danger-text" onclick={() => (confirmDeleteId = b.id)}>delete</button>
-                {/if}
-              </td>
-            </tr>
-            {#if testResults[b.id]}
-              {@const t = testResults[b.id]}
-              <tr class="test-row">
-                <td colspan="7">
-                  {#if 'error' in t}
-                    <span class="problem error">test failed: {t.error}</span>
-                  {:else}
-                    <span class="t-verdict" class:bad={!t.reachable}>{t.reachable ? 'reachable' : 'unreachable'}</span>
-                    <span class="t-lat">{t.latency_ms}ms</span>
-                    {#each Object.entries(t.checks) as [k, v] (k)}
-                      <span class="t-check" class:bad={v.startsWith('error')}>{k}: {v}</span>
-                    {/each}
-                    {#if t.openrouter}
-                      {#if t.openrouter.credits_remaining !== undefined}<span class="t-check">credits: {t.openrouter.credits_remaining}</span>{/if}
-                      {#if t.openrouter.zdr_endpoints !== undefined}<span class="t-check" class:bad={t.openrouter.zdr_endpoints === 0}>zdr endpoints: {t.openrouter.zdr_endpoints}</span>{/if}
-                    {/if}
-                    <button type="button" class="dismiss" onclick={() => delete testResults[b.id]}>×</button>
-                  {/if}
-                </td>
-              </tr>
+  <Table empty={pool.backends.length === 0}>
+    {#snippet emptyState()}
+      <p class="empty">no backends — create one to populate the pool</p>
+    {/snippet}
+    {#snippet head()}
+      <tr>
+        <th>name</th>
+        <th>trust</th>
+        <th>roles</th>
+        <th class="num">prio</th>
+        <th>secret</th>
+        <th>state</th>
+        <th class="act">actions</th>
+      </tr>
+    {/snippet}
+    {#each pool.sorted as b (b.id)}
+      <tr class:off={!b.enabled}>
+        <td class="name">
+          {b.name}
+          <span class="meta">{b.locality} · {b.protocol} · {b.base_url}</span>
+        </td>
+        <td><span class="badge">{b.trust}</span></td>
+        <td class="roles">{b.roles.join(', ') || '—'}</td>
+        <td class="num">
+          <div class="prio">
+            <span>{b.priority}</span>
+            <span class="updown">
+              <button type="button" title="raise priority" disabled={pool.busyId === b.id} onclick={() => void pool.reprioritize(b.id, 'up')}>▲</button>
+              <button type="button" title="lower priority" disabled={pool.busyId === b.id} onclick={() => void pool.reprioritize(b.id, 'down')}>▼</button>
+            </span>
+          </div>
+        </td>
+        <td class="secret">
+          {#if b.api_key_ref === ''}
+            <span class="dim">—</span>
+          {:else if knownSecrets.has(b.api_key_ref)}
+            <span class="ok-ref" title="resolves to a vault secret">✓ {b.api_key_ref}</span>
+          {:else}
+            <span class="missing" title="no vault secret of this name — set it below">⚠ fehlt: {b.api_key_ref}</span>
+          {/if}
+        </td>
+        <td class="state">
+          <span class="dot {stateClass(b.effective_state)}"></span>
+          {b.effective_state}{#if b.effective_state === 'cooldown'} · {b.cooldown_remaining_s}s{/if}
+          {#if b.last_error}<span class="errcls" title="last error class">{b.last_error}</span>{/if}
+        </td>
+        <td class="act">
+          <label class="switch" title="enabled">
+            <input
+              type="checkbox"
+              checked={b.enabled}
+              disabled={pool.busyId === b.id}
+              onchange={(e) => void pool.setEnabled(b.id, e.currentTarget.checked)}
+            />
+          </label>
+          <button type="button" class="ghost" disabled={pool.busyId === b.id} onclick={() => void runTest(b.id, false)}>test</button>
+          <button type="button" class="ghost" disabled={pool.busyId === b.id} onclick={() => void runTest(b.id, true)}>test+chat</button>
+          <button type="button" class="ghost" onclick={() => (editing = { mode: 'edit', backend: b })}>edit</button>
+          {#if confirmDeleteId === b.id}
+            <span class="confirm-del">
+              delete?
+              <button type="button" class="danger" onclick={() => void doDelete(b.id)}>yes</button>
+              <button type="button" class="ghost" onclick={() => (confirmDeleteId = null)}>no</button>
+            </span>
+          {:else}
+            <button type="button" class="ghost danger-text" onclick={() => (confirmDeleteId = b.id)}>delete</button>
+          {/if}
+        </td>
+      </tr>
+      {#if testResults[b.id]}
+        {@const t = testResults[b.id]}
+        <tr class="test-row">
+          <td colspan="7">
+            {#if 'error' in t}
+              <span class="problem error">test failed: {t.error}</span>
+            {:else}
+              <span class="t-verdict" class:bad={!t.reachable}>{t.reachable ? 'reachable' : 'unreachable'}</span>
+              <span class="t-lat">{t.latency_ms}ms</span>
+              {#each Object.entries(t.checks) as [k, v] (k)}
+                <span class="t-check" class:bad={v.startsWith('error')}>{k}: {v}</span>
+              {/each}
+              {#if t.openrouter}
+                {#if t.openrouter.credits_remaining !== undefined}<span class="t-check">credits: {t.openrouter.credits_remaining}</span>{/if}
+                {#if t.openrouter.zdr_endpoints !== undefined}<span class="t-check" class:bad={t.openrouter.zdr_endpoints === 0}>zdr endpoints: {t.openrouter.zdr_endpoints}</span>{/if}
+              {/if}
+              <button type="button" class="dismiss" onclick={() => delete testResults[b.id]}>×</button>
             {/if}
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  {/if}
+          </td>
+        </tr>
+      {/if}
+    {/each}
+  </Table>
 </section>
 
 {#if editing}
@@ -223,31 +220,6 @@
     padding: var(--space-3);
     color: var(--text-faint);
     font-size: var(--fs-sm);
-  }
-  .scroll {
-    overflow-x: auto;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-sm);
-  }
-  th {
-    text-align: left;
-    padding: var(--space-1) var(--space-3);
-    color: var(--text-faint);
-    font-family: var(--font-mono);
-    font-size: var(--label-size);
-    letter-spacing: var(--label-tracking);
-    text-transform: uppercase;
-    font-weight: var(--fw-medium);
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  td {
-    padding: var(--space-1) var(--space-3);
-    border-bottom: 1px solid var(--surface-2);
-    vertical-align: top;
   }
   tr.off .name,
   tr.off .roles {
