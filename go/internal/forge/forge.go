@@ -94,14 +94,56 @@ type CommentPage struct {
 	NextURL  string
 }
 
-// Forge is the pull-only forge abstraction (I-F). The FIRST-page methods take a
-// since cursor + ETag (conditional); the *Page follow methods take an absolute
-// Link-header URL (strict pagination — GitHub docs: "use the link headers", never
-// hand-built page queries). Push methods (CreateIssue/UpdateIssue/…) are Welle
-// I-H and are deliberately absent — I-H widens this interface additively.
+// IssueCreate is the payload of a push-create (§4.5.2 creation case). Title is
+// the PREFIX-FREE human title (the "#L<seq>"/"#<nr>" prefix is a ctx derivat,
+// never sent to the forge). Labels/Assignees are the ctx-side sets; Milestone is
+// deliberately NOT pushed (it needs a forge milestone NUMBER, and there is no
+// local milestone-edit surface — §4.5.7 keeps it pull-display-only).
+type IssueCreate struct {
+	Title     string   `json:"title"`
+	Body      string   `json:"body"`
+	Labels    []string `json:"labels,omitempty"`
+	Assignees []string `json:"assignees,omitempty"`
+}
+
+// IssuePatch is a push-UPDATE field-diff (§4.5.2, data-loss guard): only fields
+// whose projected value diverges from the last-synced base are present, so a
+// local status flip carries `state` and NOT the body. A nil field is omitted
+// from the wire PATCH (a truncated body is HARD-excluded upstream — the diff
+// never sets Body for a truncated entity). Labels/Assignees are pointers so a
+// set cleared to empty ([]) is distinguishable from "unchanged" (nil).
+type IssuePatch struct {
+	Title     *string   `json:"title,omitempty"`
+	Body      *string   `json:"body,omitempty"`
+	State     *string   `json:"state,omitempty"` // "open" | "closed"
+	Labels    *[]string `json:"labels,omitempty"`
+	Assignees *[]string `json:"assignees,omitempty"`
+}
+
+// empty reports whether the patch carries no wire field (⇒ 0 content-POSTs; the
+// base advance still happens, e.g. when only the never-pushed milestone diverged).
+func (p IssuePatch) empty() bool {
+	return p.Title == nil && p.Body == nil && p.State == nil && p.Labels == nil && p.Assignees == nil
+}
+
+// Forge is the forge abstraction. The pull half (I-F) reads issues/comments with
+// conditional requests + strict Link-header pagination. The push half (I-H)
+// writes ctx-ahead entities back: CreateIssue/UpdateIssue as a FIELD-DIFF,
+// CreateComment/UpdateComment for the comment leg. Every push method is a
+// content-POST governed by the token-scoped throttle (§6.1) at the call site.
 type Forge interface {
 	ListIssuesSince(ctx context.Context, repo RepoRef, since time.Time, etag string) (IssuePage, error)
 	ListIssuesPage(ctx context.Context, pageURL string) (IssuePage, error)
 	ListCommentsSince(ctx context.Context, repo RepoRef, since time.Time, etag string) (CommentPage, error)
 	ListCommentsPage(ctx context.Context, pageURL string) (CommentPage, error)
+
+	// CreateIssue POSTs a new issue and returns its forge number (§4.5.2 create).
+	CreateIssue(ctx context.Context, repo RepoRef, c IssueCreate) (number int64, err error)
+	// UpdateIssue PATCHes an existing issue with the field-diff (empty patch is a
+	// programming error the caller avoids via IssuePatch.empty()).
+	UpdateIssue(ctx context.Context, repo RepoRef, number int64, p IssuePatch) error
+	// CreateComment POSTs a comment on an issue and returns its forge comment id.
+	CreateComment(ctx context.Context, repo RepoRef, issueNumber int64, body string) (id int64, err error)
+	// UpdateComment PATCHes an existing comment's body.
+	UpdateComment(ctx context.Context, repo RepoRef, commentID int64, body string) error
 }

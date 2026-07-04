@@ -204,12 +204,18 @@ func ConflictCount(ctx context.Context, pool *pgxpool.Pool, projectID string) (i
 
 // SyncMap is one context_project_sync_map row as the 3-way apply needs it: the
 // stored base_hash + the conflict flag drive the direction decision (§4.5.2).
+// BaseFields is the canonical projection JSON at the last base write — the push
+// field-diff (Welle I-H, §4.5.2) reads it to send only CHANGED fields; nil on a
+// legacy row (the push then falls back to a full-projection push). It is stored
+// under metadata.base_fields, never a direction input (like base_hash it is a
+// SNAPSHOT, not a timestamp — W16).
 type SyncMap struct {
 	ProjectID      string
 	EntityKind     string
 	ForgeID        int64
 	BlockID        string
 	BaseHash       string
+	BaseFields     json.RawMessage
 	Conflict       bool
 	ForgeUpdatedAt *time.Time
 }
@@ -225,7 +231,8 @@ func GetSyncMapsByForge(ctx context.Context, pool *pgxpool.Pool, projectID, kind
 		return out, nil
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT entity_kind, forge_id, block_id::text, base_hash, conflict, forge_updated_at
+		`SELECT entity_kind, forge_id, block_id::text, base_hash, conflict, forge_updated_at,
+		        metadata->'base_fields'
 		   FROM context_project_sync_map
 		  WHERE project_id = $1::uuid AND entity_kind = $2 AND forge_id = ANY($3::bigint[])`,
 		projectID, kind, forgeIDs)
@@ -235,7 +242,7 @@ func GetSyncMapsByForge(ctx context.Context, pool *pgxpool.Pool, projectID, kind
 	defer rows.Close()
 	for rows.Next() {
 		m := SyncMap{ProjectID: projectID}
-		if err := rows.Scan(&m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash, &m.Conflict, &m.ForgeUpdatedAt); err != nil {
+		if err := rows.Scan(&m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash, &m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields); err != nil {
 			return nil, fmt.Errorf("store: scan sync map: %w", err)
 		}
 		out[m.ForgeID] = m
@@ -249,16 +256,31 @@ func GetSyncMapsByForge(ctx context.Context, pool *pgxpool.Pool, projectID, kind
 // re-applied create idempotent (a concurrent create of the same forge id is a
 // no-op, not a 23505 abort of the run).
 func InsertSyncMap(ctx context.Context, tx pgx.Tx, m SyncMap) error {
+	meta := baseFieldsMeta(m.BaseFields)
 	_, err := tx.Exec(ctx,
 		`INSERT INTO context_project_sync_map
-		   (project_id, entity_kind, forge_id, block_id, base_hash, forge_updated_at)
-		 VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6)
+		   (project_id, entity_kind, forge_id, block_id, base_hash, forge_updated_at, metadata)
+		 VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6, $7::jsonb)
 		 ON CONFLICT (project_id, entity_kind, forge_id, block_id) DO NOTHING`,
-		m.ProjectID, m.EntityKind, m.ForgeID, m.BlockID, m.BaseHash, m.ForgeUpdatedAt)
+		m.ProjectID, m.EntityKind, m.ForgeID, m.BlockID, m.BaseHash, m.ForgeUpdatedAt, meta)
 	if err != nil {
 		return fmt.Errorf("store: insert sync map: %w", err)
 	}
 	return nil
+}
+
+// baseFieldsMeta wraps a canonical projection snapshot in the mapping-metadata
+// shape {"base_fields": <json>}; a nil snapshot yields '{}' (legacy row, no
+// snapshot — the push falls back to a full-projection push).
+func baseFieldsMeta(fields json.RawMessage) string {
+	if len(fields) == 0 {
+		return `{}`
+	}
+	obj, err := json.Marshal(map[string]json.RawMessage{"base_fields": fields})
+	if err != nil {
+		return `{}`
+	}
+	return string(obj)
 }
 
 // UpdateSyncMapBase rewrites base_hash after a pull-apply (base := forgeH) or a
@@ -266,13 +288,14 @@ func InsertSyncMap(ctx context.Context, tx pgx.Tx, m SyncMap) error {
 // direction ends the conflict. Keyed on block_id (the per-block unique index).
 // Tx-bound so it commits with the block update (or, for convergence, alone: no
 // block write, only the base advance, §4.5.2).
-func UpdateSyncMapBase(ctx context.Context, tx pgx.Tx, blockID, baseHash string, forgeUpdatedAt *time.Time) error {
+func UpdateSyncMapBase(ctx context.Context, tx pgx.Tx, blockID, baseHash string, baseFields json.RawMessage, forgeUpdatedAt *time.Time) error {
 	_, err := tx.Exec(ctx,
 		`UPDATE context_project_sync_map
 		    SET base_hash = $2, forge_updated_at = $3, synced_at = now(),
-		        conflict = false, conflict_at = NULL
+		        conflict = false, conflict_at = NULL,
+		        metadata = metadata || $4::jsonb
 		  WHERE block_id = $1::uuid`,
-		blockID, baseHash, forgeUpdatedAt)
+		blockID, baseHash, forgeUpdatedAt, baseFieldsMeta(baseFields))
 	if err != nil {
 		return fmt.Errorf("store: update sync map base: %w", err)
 	}

@@ -7,6 +7,7 @@
 package forge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -117,6 +118,89 @@ func rateLimitFrom(resp *http.Response) *RateLimitError {
 		}
 	}
 	return rl
+}
+
+// doWrite issues one POST/PATCH with a JSON body + conditional/auth headers and
+// maps the forge rate-limit semantics (§4.5.3) onto RateLimitError (never a
+// conflict). It returns the decoded body for the caller (create needs the new
+// number/id). The URL/token never enter an error surface (§5.4 leak-scan line).
+func (c *githubClient) doWrite(ctx context.Context, method, url string, payload any) ([]byte, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("forge: marshal write payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body)) //nolint:gosec // G107: url = base(api.github.com or PATCH-validated api_base) + owner/repo; SSRF enforced dial-time (ssrf.go).
+	if err != nil {
+		return nil, fmt.Errorf("forge: build write request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("forge: write request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch {
+	case isRateLimited(resp):
+		return nil, rateLimitFrom(resp)
+	case resp.StatusCode >= 400:
+		return nil, fmt.Errorf("forge: unexpected write status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, bodyCap))
+}
+
+// ── push (Welle I-H) ─────────────────────────────────────────────────────────.
+
+func (c *githubClient) CreateIssue(ctx context.Context, repo RepoRef, in IssueCreate) (int64, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/issues", apiBase(repo), repo.Owner, repo.Repo)
+	raw, err := c.doWrite(ctx, http.MethodPost, url, in)
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		Number int64 `json:"number"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return 0, fmt.Errorf("forge: decode created issue: %w", err)
+	}
+	if out.Number <= 0 {
+		return 0, fmt.Errorf("forge: created issue has no number")
+	}
+	return out.Number, nil
+}
+
+func (c *githubClient) UpdateIssue(ctx context.Context, repo RepoRef, number int64, p IssuePatch) error {
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d", apiBase(repo), repo.Owner, repo.Repo, number)
+	_, err := c.doWrite(ctx, http.MethodPatch, url, p)
+	return err
+}
+
+func (c *githubClient) CreateComment(ctx context.Context, repo RepoRef, issueNumber int64, body string) (int64, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", apiBase(repo), repo.Owner, repo.Repo, issueNumber)
+	raw, err := c.doWrite(ctx, http.MethodPost, url, map[string]string{"body": body})
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return 0, fmt.Errorf("forge: decode created comment: %w", err)
+	}
+	if out.ID <= 0 {
+		return 0, fmt.Errorf("forge: created comment has no id")
+	}
+	return out.ID, nil
+}
+
+func (c *githubClient) UpdateComment(ctx context.Context, repo RepoRef, commentID int64, body string) error {
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/comments/%d", apiBase(repo), repo.Owner, repo.Repo, commentID)
+	_, err := c.doWrite(ctx, http.MethodPatch, url, map[string]string{"body": body})
+	return err
 }
 
 // ── issues ─────────────────────────────────────────────────────────────────.

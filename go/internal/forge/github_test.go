@@ -3,6 +3,7 @@ package forge
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -152,6 +153,96 @@ func TestListIssues_AuthHeader(t *testing.T) {
 	}
 	if gotAuth != "Bearer ghp_secrettoken" {
 		t.Fatalf("auth header = %q", gotAuth)
+	}
+}
+
+// TestCreateIssue_PostsAndReturnsNumber (I-H): CreateIssue POSTs the prefix-free
+// title/body and returns the forge number the finalise/rename needs.
+func TestCreateIssue_PostsAndReturnsNumber(t *testing.T) {
+	var gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"number":42}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(srv, "tok")
+	n, err := c.CreateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL},
+		IssueCreate{Title: "Fix it", Body: "steps", Labels: []string{"bug"}})
+	if err != nil || n != 42 {
+		t.Fatalf("CreateIssue = %d err=%v, want 42", n, err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %s, want POST", gotMethod)
+	}
+	if !strings.Contains(gotBody, `"title":"Fix it"`) || !strings.Contains(gotBody, `"bug"`) {
+		t.Fatalf("create body missing fields: %s", gotBody)
+	}
+}
+
+// TestUpdateIssue_FieldDiffOmitsBody is the wire half of the truncated gate: an
+// IssuePatch carrying only State PATCHes {"state":"closed"} — the body key is
+// ABSENT (omitempty). RED if IssuePatch used value fields (a "" body would wire).
+func TestUpdateIssue_FieldDiffOmitsBody(t *testing.T) {
+	var gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"number":5}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(srv, "tok")
+	st := "closed"
+	if err := c.UpdateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, 5,
+		IssuePatch{State: &st}); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if gotMethod != http.MethodPatch {
+		t.Fatalf("method = %s, want PATCH", gotMethod)
+	}
+	if !strings.Contains(gotBody, `"state":"closed"`) {
+		t.Fatalf("patch missing state: %s", gotBody)
+	}
+	if strings.Contains(gotBody, `"body"`) {
+		t.Fatalf("field-diff PATCH leaked a body field (data-loss guard breached): %s", gotBody)
+	}
+}
+
+// TestCreateComment_PostsAndReturnsID (I-H): CreateComment POSTs the body to the
+// issue's comments endpoint and returns the new comment id.
+func TestCreateComment_PostsAndReturnsID(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"id":900}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(srv, "tok")
+	id, err := c.CreateComment(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, 42, "hi")
+	if err != nil || id != 900 {
+		t.Fatalf("CreateComment = %d err=%v, want 900", id, err)
+	}
+	if !strings.HasSuffix(gotPath, "/issues/42/comments") {
+		t.Fatalf("comment path = %s, want .../issues/42/comments", gotPath)
+	}
+}
+
+// TestUpdateIssue_RateLimit: a push PATCH hitting the secondary limit surfaces
+// RateLimitError (never a normal error/conflict) so the run backs off (§4.5.3).
+func TestUpdateIssue_RateLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := newTestClient(srv, "tok")
+	st := "open"
+	err := c.UpdateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, 5, IssuePatch{State: &st})
+	var rl *RateLimitError
+	if !errors.As(err, &rl) || rl.RetryAfter != 30*time.Second {
+		t.Fatalf("want RateLimitError RetryAfter=30s, got %v", err)
 	}
 }
 

@@ -7,6 +7,8 @@ package forge
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +61,12 @@ type IssueApplyFunc func(ctx context.Context, project store.ProjectRow, issues [
 // parent is not yet pulled is skipped and picked up on a later run).
 type CommentApplyFunc func(ctx context.Context, project store.ProjectRow, comments []CommentRemote) (ApplyResult, error)
 
+// PushFunc drains ctx-ahead entities back onto the forge — Welle I-H
+// (Pusher.PushProject). nil ⇒ no push (I-F/I-G / dry-run). allow() gates each
+// content-POST against the token-scoped throttle. It runs AFTER both pull legs
+// (§4.5.3: "on return the next run drains ctx-ahead via push").
+type PushFunc func(ctx context.Context, project store.ProjectRow, client Forge, repo RepoRef, allow func() bool) (PushResult, error)
+
 // SyncStatus is the in-memory state of the current/last run for one project
 // (forge-sync-status surface). DB-side history (last run row, conflict count) is
 // merged by the handler.
@@ -72,7 +80,8 @@ type SyncStatus struct {
 	PRsSkipped int       `json:"prs_skipped"` // pull_request items dropped (§6.1)
 	Pages      int       `json:"pages"`
 	Applied    int       `json:"applied"`   // I-G writes; 0 in I-F (no-op apply)
-	Conflicts  int       `json:"conflicts"` // I-G
+	Pushed     int       `json:"pushed"`    // I-H: entities written back to the forge
+	Conflicts  int       `json:"conflicts"` // I-G pull + I-H push (truncated data-loss guard)
 	Aborted    bool      `json:"aborted"`
 	BackoffSet bool      `json:"backoff_set"`
 	RunID      string    `json:"run_id,omitempty"`
@@ -98,6 +107,8 @@ type SyncManager struct {
 	issuePolicy   IssuePolicyFn
 	applyIssues   IssueApplyFunc   // nil ⇒ I-F fetch-only no-op (I-G wires it)
 	applyComments CommentApplyFunc // nil ⇒ no comment pull (I-G wires it)
+	push          PushFunc         // nil ⇒ no push (I-H wires it)
+	throttle      *Throttle        // token-scoped content-POST limiter (§6.1)
 	clock         func() time.Time
 
 	mu   sync.Mutex
@@ -114,6 +125,7 @@ func NewSyncManager(pool *pgxpool.Pool, tenantStatus TenantStatusFn, issuePolicy
 		newForge:     NewGitHubClient,
 		tenantStatus: tenantStatus,
 		issuePolicy:  issuePolicy,
+		throttle:     NewThrottle(),
 		clock:        time.Now,
 		runs:         make(map[string]*SyncStatus),
 	}
@@ -124,6 +136,9 @@ func (m *SyncManager) SetApplyIssues(fn IssueApplyFunc) { m.applyIssues = fn }
 
 // SetApplyComments wires the I-G comment Pull-APPLY hook (call once at boot).
 func (m *SyncManager) SetApplyComments(fn CommentApplyFunc) { m.applyComments = fn }
+
+// SetPush wires the I-H push pass (call once at boot).
+func (m *SyncManager) SetPush(fn PushFunc) { m.push = fn }
 
 // SetToken seals a PAT for the project and records its ref name (never the PAT,
 // §5.4). The seal + the token_secret ref update commit in ONE transaction. The
@@ -274,6 +289,27 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 			m.handleWireError(ctx, project.ID, runID, backoffN, err)
 			return
 		}
+	}
+
+	// Push leg (I-H): drain ctx-ahead entities back onto the forge (§4.5.3). Gated
+	// by push_enabled (§5.6, fail-closed) AND a resolved token (a write needs auth
+	// — no token ⇒ 0 wire writes). The throttle is keyed on the CREDENTIAL (forge
+	// kind + PAT hash), so repos sharing one PAT share the content-POST bucket
+	// (§6.1). A push wire error backs off like a pull; a dry bucket just stops the
+	// pass (batch-wise, the rest drain next run).
+	if m.push != nil && !dryRun && project.PushEnabled && token != "" {
+		key := pushThrottleKey(project.Forge, token)
+		pres, err := m.push(ctx, project, client, repo, func() bool { return m.throttle.Allow(key) })
+		if err != nil {
+			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			return
+		}
+		m.mu.Lock()
+		if st := m.runs[project.ID]; st != nil {
+			st.Pushed += pres.Pushed
+			st.Conflicts += pres.Conflicts
+		}
+		m.mu.Unlock()
 	}
 
 	// SUCCESS. Backoff/error are cleared and last_sync_at stamped; backoff_n reset.
@@ -488,7 +524,8 @@ func (m *SyncManager) finish(projectID, runID, errMsg string, aborted, backoffSe
 	}
 	stats, _ := json.Marshal(map[string]int{
 		"fetched": statsSnapshot.Fetched, "prs_skipped": statsSnapshot.PRsSkipped,
-		"pages": statsSnapshot.Pages, "applied": statsSnapshot.Applied, "conflicts": statsSnapshot.Conflicts,
+		"pages": statsSnapshot.Pages, "applied": statsSnapshot.Applied,
+		"pushed": statsSnapshot.Pushed, "conflicts": statsSnapshot.Conflicts,
 	})
 	_ = store.FinishSyncRun(context.Background(), m.pool, runID, dbStatus, errMsg, stats)
 }
@@ -531,6 +568,25 @@ type forgeCfg struct {
 	Owner   string `json:"owner"`
 	Repo    string `json:"repo"`
 	APIBase string `json:"api_base"`
+}
+
+// pushThrottleKey builds the token-scoped throttle key (§6.1). The design keys on
+// (forge_kind, token_secret NAME, secret scope); under masterplan K14 each project
+// seals its OWN secret ("forge.token.<project_id>"), so the NAME is per-repo and
+// keying on it would give per-repo buckets — the very bug §6.1 warns of. To
+// realise the per-CREDENTIAL intent (the GitHub secondary limit is per PAT), the
+// key is the forge kind + a sha256 of the resolved PAT: two repos that sealed the
+// SAME PAT hash to the same bucket. The hash is in-memory only, never logged.
+func pushThrottleKey(forge json.RawMessage, token string) string {
+	kind := "github"
+	var f forgeCfg
+	if len(forge) > 0 {
+		if err := json.Unmarshal(forge, &f); err == nil && f.Kind != "" {
+			kind = f.Kind
+		}
+	}
+	sum := sha256.Sum256([]byte(token))
+	return kind + "\x00" + hex.EncodeToString(sum[:])
 }
 
 func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {

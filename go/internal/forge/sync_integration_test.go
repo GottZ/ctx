@@ -49,6 +49,15 @@ func (f *fakeForge) ListCommentsPage(context.Context, string) (CommentPage, erro
 	return CommentPage{}, nil
 }
 
+// Push methods (I-H) — no-op spies for the I-F/I-G sync tests (which never push:
+// push_enabled defaults false). The dedicated push gates use pushSpyForge.
+func (f *fakeForge) CreateIssue(context.Context, RepoRef, IssueCreate) (int64, error) { return 0, nil }
+func (f *fakeForge) UpdateIssue(context.Context, RepoRef, int64, IssuePatch) error    { return nil }
+func (f *fakeForge) CreateComment(context.Context, RepoRef, int64, string) (int64, error) {
+	return 0, nil
+}
+func (f *fakeForge) UpdateComment(context.Context, RepoRef, int64, string) error { return nil }
+
 func seedIFProject(t *testing.T, pool *pgxpool.Pool, slug string) store.ProjectRow {
 	t.Helper()
 	ctx := context.Background()

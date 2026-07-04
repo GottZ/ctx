@@ -23,6 +23,7 @@ package forge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strconv"
@@ -148,7 +149,7 @@ func (a *Applier) ApplyIssues(ctx context.Context, project store.ProjectRow, iss
 func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
 	writable []string, iss IssueRemote, m store.SyncMap, exists bool) (ApplyResult, error) {
 
-	forgeH, cappedBody, truncated := ForgeIssueHash(iss)
+	forgeFields, forgeH, cappedBody, truncated := ForgeIssueBase(iss)
 	fUpdated := iss.UpdatedAt
 	content := store.ForgeIssueContent{
 		Number: iss.Number, Title: iss.Title, Body: cappedBody, Truncated: truncated,
@@ -157,7 +158,7 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 	}
 
 	if !exists {
-		return a.pullCreateIssue(ctx, project, pol, writable, iss, content, forgeH, &fUpdated)
+		return a.pullCreateIssue(ctx, project, pol, writable, iss, content, forgeH, forgeFields, &fUpdated)
 	}
 
 	block, err := store.GetIssue(ctx, a.pool, m.BlockID, writable, nil)
@@ -167,18 +168,18 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	ctxH := CtxIssueHash(block, pol.terminalSet, pol.registryOK)
+	ctxFields, ctxH := CtxIssueBase(block, pol.terminalSet, pol.registryOK)
 	base := m.BaseHash
 
 	switch {
 	case base == ctxH && base == forgeH:
 		return ApplyResult{}, nil // (=,=): noop
 	case base == ctxH && base != forgeH:
-		return a.pullUpdateIssue(ctx, project, pol, writable, iss, m.BlockID, content, forgeH, &fUpdated)
+		return a.pullUpdateIssue(ctx, project, pol, writable, iss, m.BlockID, content, forgeH, forgeFields, &fUpdated)
 	case base != ctxH && base == forgeH:
 		return ApplyResult{}, nil // ctx-ahead: push is I-H, I-G does nothing
 	case ctxH == forgeH:
-		return ApplyResult{}, a.txBaseUpdate(ctx, m.BlockID, ctxH, &fUpdated) // converged
+		return ApplyResult{}, a.txBaseUpdate(ctx, m.BlockID, ctxH, ctxFields, &fUpdated) // converged
 	default:
 		if m.Conflict {
 			return ApplyResult{}, nil // already flagged — idempotent, 0 new conflicts
@@ -188,7 +189,7 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 }
 
 func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
-	writable []string, iss IssueRemote, content store.ForgeIssueContent, forgeH string, fUpdated *time.Time) (ApplyResult, error) {
+	writable []string, iss IssueRemote, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
@@ -202,7 +203,7 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 	}
 	if err := store.InsertSyncMap(ctx, tx, store.SyncMap{
 		ProjectID: project.ID, EntityKind: entityKindIssue, ForgeID: iss.Number,
-		BlockID: b.ID, BaseHash: forgeH, ForgeUpdatedAt: fUpdated,
+		BlockID: b.ID, BaseHash: forgeH, BaseFields: forgeFields, ForgeUpdatedAt: fUpdated,
 	}); err != nil {
 		return ApplyResult{}, err
 	}
@@ -216,7 +217,7 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 }
 
 func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
-	writable []string, iss IssueRemote, blockID string, content store.ForgeIssueContent, forgeH string, fUpdated *time.Time) (ApplyResult, error) {
+	writable []string, iss IssueRemote, blockID string, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
@@ -227,7 +228,7 @@ func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow,
 	if _, err := store.PullUpdateIssueBlock(ctx, tx, blockID, content); err != nil {
 		return ApplyResult{}, err
 	}
-	if err := store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, fUpdated); err != nil {
+	if err := store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, forgeFields, fUpdated); err != nil {
 		return ApplyResult{}, err
 	}
 	if err := a.applyReferences(ctx, tx, project, pol, writable, blockID, iss.Number, iss.Body); err != nil {
@@ -239,14 +240,15 @@ func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow,
 	return ApplyResult{Applied: 1}, nil
 }
 
-// txBaseUpdate rewrites base_hash alone (convergence) — 0 block writes.
-func (a *Applier) txBaseUpdate(ctx context.Context, blockID, baseHash string, fUpdated *time.Time) error {
+// txBaseUpdate rewrites base_hash + the base-field snapshot alone (convergence)
+// — 0 block writes.
+func (a *Applier) txBaseUpdate(ctx context.Context, blockID, baseHash string, baseFields json.RawMessage, fUpdated *time.Time) error {
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.UpdateSyncMapBase(ctx, tx, blockID, baseHash, fUpdated); err != nil {
+	if err := store.UpdateSyncMapBase(ctx, tx, blockID, baseHash, baseFields, fUpdated); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -320,11 +322,11 @@ func (a *Applier) ApplyComments(ctx context.Context, project store.ProjectRow, c
 func (a *Applier) applyComment(ctx context.Context, project store.ProjectRow, writable []string,
 	c CommentRemote, parentBlockID string, m store.SyncMap, exists bool) (ApplyResult, error) {
 
-	forgeH, cappedBody, _ := ForgeCommentHash(c.Body)
+	forgeFields, forgeH, cappedBody, _ := ForgeCommentBase(c.Body)
 	fUpdated := c.UpdatedAt
 
 	if !exists {
-		return a.pullCreateComment(ctx, project, c, parentBlockID, cappedBody, forgeH, &fUpdated, writable)
+		return a.pullCreateComment(ctx, project, c, parentBlockID, cappedBody, forgeH, forgeFields, &fUpdated, writable)
 	}
 	block, err := store.GetIssue(ctx, a.pool, m.BlockID, writable, nil)
 	if errors.Is(err, store.ErrIssueNotFound) {
@@ -333,17 +335,17 @@ func (a *Applier) applyComment(ctx context.Context, project store.ProjectRow, wr
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	ctxH := CtxCommentHash(block)
+	ctxFields, ctxH := CtxCommentBase(block)
 	base := m.BaseHash
 	switch {
 	case base == ctxH && base == forgeH:
 		return ApplyResult{}, nil
 	case base == ctxH && base != forgeH:
-		return a.pullUpdateComment(ctx, m.BlockID, cappedBody, forgeH, &fUpdated)
+		return a.pullUpdateComment(ctx, m.BlockID, cappedBody, forgeH, forgeFields, &fUpdated)
 	case base != ctxH && base == forgeH:
 		return ApplyResult{}, nil // ctx-ahead (I-H)
 	case ctxH == forgeH:
-		return ApplyResult{}, a.txBaseUpdate(ctx, m.BlockID, ctxH, &fUpdated)
+		return ApplyResult{}, a.txBaseUpdate(ctx, m.BlockID, ctxH, ctxFields, &fUpdated)
 	default:
 		if m.Conflict {
 			return ApplyResult{}, nil
@@ -353,7 +355,7 @@ func (a *Applier) applyComment(ctx context.Context, project store.ProjectRow, wr
 }
 
 func (a *Applier) pullCreateComment(ctx context.Context, project store.ProjectRow, c CommentRemote,
-	parentBlockID, cappedBody, forgeH string, fUpdated *time.Time, writable []string) (ApplyResult, error) {
+	parentBlockID, cappedBody, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time, writable []string) (ApplyResult, error) {
 
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
@@ -370,7 +372,7 @@ func (a *Applier) pullCreateComment(ctx context.Context, project store.ProjectRo
 	}
 	if err := store.InsertSyncMap(ctx, tx, store.SyncMap{
 		ProjectID: project.ID, EntityKind: entityKindComment, ForgeID: c.ID,
-		BlockID: b.ID, BaseHash: forgeH, ForgeUpdatedAt: fUpdated,
+		BlockID: b.ID, BaseHash: forgeH, BaseFields: forgeFields, ForgeUpdatedAt: fUpdated,
 	}); err != nil {
 		return ApplyResult{}, err
 	}
@@ -380,7 +382,7 @@ func (a *Applier) pullCreateComment(ctx context.Context, project store.ProjectRo
 	return ApplyResult{Applied: 1}, nil
 }
 
-func (a *Applier) pullUpdateComment(ctx context.Context, blockID, body, forgeH string, fUpdated *time.Time) (ApplyResult, error) {
+func (a *Applier) pullUpdateComment(ctx context.Context, blockID, body, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
 		return ApplyResult{}, err
@@ -389,7 +391,7 @@ func (a *Applier) pullUpdateComment(ctx context.Context, blockID, body, forgeH s
 	if _, err := store.PullUpdateCommentBlock(ctx, tx, blockID, body); err != nil {
 		return ApplyResult{}, err
 	}
-	if err := store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, fUpdated); err != nil {
+	if err := store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, forgeFields, fUpdated); err != nil {
 		return ApplyResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

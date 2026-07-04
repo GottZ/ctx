@@ -109,6 +109,12 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	forgeApplier := forge.NewApplier(pool, blocktypeReg.SnapshotForTenant)
 	forgeSync.SetApplyIssues(forgeApplier.ApplyIssues)
 	forgeSync.SetApplyComments(forgeApplier.ApplyComments)
+	// I-H push: drains ctx-ahead entities back onto the forge (create/update as a
+	// field-diff, comment-create, "#L<seq>"→"#<nr>" rename cascade) under a
+	// token-scoped content-POST throttle. push_enabled defaults false (§5.6), so
+	// the pass is a no-op until a tenant-admin opens the write channel.
+	forgePusher := forge.NewPusher(pool, blocktypeReg.SnapshotForTenant)
+	forgeSync.SetPush(forgePusher.PushProject)
 	manageH.SetForgeController(forgeSync)
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)
