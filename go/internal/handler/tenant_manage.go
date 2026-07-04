@@ -699,6 +699,11 @@ func (h *ManageHandler) dispatchTenantAction(w http.ResponseWriter, r *http.Requ
 	switch req.Action {
 	case "tenant-create":
 		h.handleTenantCreate(w, r, ar, req)
+	case "project-provision":
+		// I-I (design/02 §4.6): the server-admin compound that bootstraps a whole
+		// tenant-per-repo. Routed through the tenant family (it CREATES a tenant);
+		// tierServerAdmin is set in actionTier, not here (routing ⟂ tier).
+		h.handleProjectProvision(w, r, ar, req)
 	case "tenant-list":
 		h.handleTenantList(w, r, ar, req)
 	case "tenant-get":

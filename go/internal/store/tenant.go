@@ -527,24 +527,27 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string) error
 			}
 		}
 	}
-	// 6: drain the project register (K14, design/03 §3.1/§7-W4). context_projects
-	// is TENANT-keyed (FK tenant_id → context_tenants is NO ACTION) AND scope-keyed
-	// (FK scope → context_tenant_scopes is NO ACTION), so it MUST go before BOTH the
-	// tenant row delete (step 8, which CASCADE-clears context_tenant_scopes) and the
-	// scope teardown — else that delete 23503s against a surviving project row.
-	// context_project_sync_runs (079) AND context_project_sync_map (080, I-F)
-	// both CASCADE off context_projects, so they drain for free with this delete
-	// (the map ALSO cascades off context_blocks in step 1-5, whichever fires first);
-	// created_by → context_api_keys is ON DELETE SET NULL but the row is gone
-	// before the key delete anyway. Bounded per tenant (one row per repo), so a
-	// single statement, not the batched scope-drain idiom. The I-F gate proves
-	// "PruneTenant ⇒ 0 context_project_sync_map rows of the tenant".
-	//
-	// PROJECT-SECRET-DRAIN BOUNDARY (K14): webhook secrets (context_secrets in the
-	// PROJECT scope under 'webhook.github.<id>') do NOT exist yet — that surface is
-	// W13. When it lands, those per-project secret rows must ALSO be drained here
-	// (context_secrets is not currently in pruneScopeDeletes). Today webhook_secret_ref
-	// is always NULL, so there is nothing to drain beyond the register itself.
+	// 6: PROJECT-SECRET-DRAIN (K14, design/02 §5.2): context_secrets rows carry the
+	// scope ONLY as a plain column (no FK to context_blocks / context_tenant_scopes,
+	// 051), so NOTHING cascades them — a naked prune would leave a live forge PAT
+	// (I-F seals it under 'forge.token.<project_id>' in the PROJECT scope, sync.go)
+	// AND any future webhook secret ('webhook.github.<id>', W13) alive in a scope
+	// whose owning tenant is gone. That is a token surviving its tenant's death —
+	// the exact leak §5.2 mandates draining here (the found=false sync gate is the
+	// SECOND line; this delete is the FIRST). Drained by SCOPE (the secret's key), so
+	// it MUST run before the scope teardown (step 8 CASCADE-clears the scope mapping)
+	// while `scopes` still lists the tenant's scopes; ANY of an empty list is a no-op.
+	// The I-I gate proves "PruneTenant -> 0 context_secrets rows of the tenant scope".
+	if len(scopes) > 0 {
+		if _, err := pool.Exec(ctx, `DELETE FROM context_secrets WHERE scope = ANY($1::text[])`, scopes); err != nil {
+			return fmt.Errorf("store: prune tenant secrets: %w", err)
+		}
+	}
+	// Drain the project register (K14, design/03 §3.1/§7-W4). context_projects is
+	// TENANT-keyed (FK tenant_id -> context_tenants is NO ACTION) AND scope-keyed
+	// (FK scope -> context_tenant_scopes is NO ACTION), so it MUST go before BOTH the
+	// tenant row delete (step 8) and the scope teardown. context_project_sync_runs
+	// (079) AND context_project_sync_map (080, I-F) both CASCADE off context_projects.
 	if _, err := pool.Exec(ctx, `DELETE FROM context_projects WHERE tenant_id = $1::uuid`, tenantID); err != nil {
 		return fmt.Errorf("store: prune tenant projects: %w", err)
 	}

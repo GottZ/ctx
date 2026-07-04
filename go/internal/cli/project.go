@@ -168,19 +168,6 @@ func readCtxProjectFile(dir string) (identity string, ok bool, err error) {
 	return "", false, nil
 }
 
-// writeCtxProjectFile writes the identity (only — never a secret) to the repo
-// root. The comment documents that the file is a re-verified shortcut, so a
-// reader who greps it understands it is not trusted blindly.
-func writeCtxProjectFile(dir, identity string) error {
-	content := "# ctx project identity — a detect shortcut, re-verified against git on read\n" +
-		"# (design/03 §4.3). NOT a trust anchor: for github:/git-root: identities detect\n" +
-		"# honors this file ONLY when it matches independent git detection; a mismatch\n" +
-		"# forces confirmation on a TTY and errors when piped.\n" +
-		"identity=" + identity + "\n"
-	//nolint:gosec // G306: .ctx-project holds only the (non-secret) identity and is meant to be committed — world-readable 0644 is correct, unlike the 0600 secret files
-	return os.WriteFile(filepath.Join(dir, ctxProjectFile), []byte(content), 0o644)
-}
-
 // ── precedence resolver (the §4.3 confused-deputy gate) ───────────────────────.
 
 // prompter abstracts the interactive channel so the resolver is unit-testable.
@@ -543,77 +530,20 @@ func runProjectInit(getClient func() (*Client, error), identity, repo, scope str
 		chosen = id
 	}
 
+	_ = scope // provision derives the scope from the identity ('<slug>:main'); the
+	// legacy --scope register path lives on `ctx api POST /api/project` (§4.6).
+
 	c, err := getClient()
 	if err != nil {
 		return err
 	}
 
-	// 2. Existence probe (idempotency, W4 contract): if it already exists, show it
-	//    and (re)write .ctx-project so a fresh clone gets the shortcut.
-	rows, err := lookupByIdentity(c, chosen.Identity)
-	if err != nil {
-		return err
-	}
-	if len(rows) > 0 {
-		if werr := maybeWriteMarker(chosen.Identity); werr != nil {
-			Errorf("warning: could not write %s: %v", ctxProjectFile, werr)
-		}
-		if !StdoutIsTTY() {
-			out, _ := json.MarshalIndent(map[string]any{"success": true, "already_registered": true, "project": rows[0]}, "", "  ")
-			fmt.Println(string(out))
-			return nil
-		}
-		fmt.Printf("already registered:\n")
-		printProjectDetail(rows[0])
-		return nil
-	}
-
-	// 3. Create. Derive the scope name if not given; the server validates + prefixes.
-	scopeName := scope
-	if scopeName == "" {
-		scopeName = deriveScopeName(chosen.Identity)
-		if scopeName == "" {
-			return fmt.Errorf("could not derive a scope name from %q; pass --scope", chosen.Identity)
-		}
-	}
-	body := map[string]any{"identity": chosen.Identity, "scope": scopeName}
-	resp, _, err := c.Do(http.MethodPost, "/api/project", body)
-	if err != nil {
-		return err
-	}
-	if err := checkSettingsEnvelope(resp); err != nil {
-		return err
-	}
-
-	// 4. Write the .ctx-project marker (identity only).
-	if werr := maybeWriteMarker(chosen.Identity); werr != nil {
-		Errorf("warning: project created but could not write %s: %v", ctxProjectFile, werr)
-	}
-
-	if !StdoutIsTTY() {
-		PrintJSON(resp)
-		return nil
-	}
-	var payload struct {
-		Project projectRow `json:"project"`
-	}
-	if err := json.Unmarshal(resp, &payload); err != nil {
-		PrintJSON(resp)
-		return err
-	}
-	fmt.Printf("registered:\n")
-	printProjectDetail(payload.Project)
-	return nil
-}
-
-// maybeWriteMarker writes .ctx-project into the git repo root (or the CWD when
-// not in a repo) — never a secret, only the identity.
-func maybeWriteMarker(identity string) error {
-	dir := "."
-	if root, ok := gitOutput(".", "rev-parse", "--show-toplevel"); ok && root != "" {
-		dir = root
-	}
-	return writeCtxProjectFile(dir, identity)
+	// 2. Provision (I-I, design/02 §4.6): the server-admin compound. It is
+	//    idempotent on the identity — a re-run returns the existing project
+	//    (provisioned=false) and mints nothing, so init needs no separate existence
+	//    probe. On a fresh provision it mints the repo-agent key (K12 template) which
+	//    runProjectProvisionInit stores 0600 under ~/.config and writes the marker.
+	return runProjectProvisionInit(c, c.BaseURL, chosen)
 }
 
 // lookupByIdentity fetches the projects matching an identity via GET

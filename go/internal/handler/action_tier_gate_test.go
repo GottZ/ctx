@@ -42,6 +42,10 @@ func TestActionTier_Classification(t *testing.T) {
 		{"blocks-classify-start", "", tierServerAdmin},
 		{"blocks-classify-status", "", tierServerAdmin},
 		{"tenant-create", "", tierServerAdmin},
+		// project-provision (I-I): CREATES a tenant → server-admin (E4). Removing
+		// its actionTier entry drops it to the fail-open tierOpen default → this row
+		// turns RED (the S9 probe).
+		{"project-provision", "", tierServerAdmin},
 		{"tenant-list", "", tierServerAdmin},
 		{"tenant-get", "", tierServerAdmin},
 		{"tenant-update", "", tierServerAdmin},
@@ -152,6 +156,21 @@ func TestActionTier_ForgeFamilyExplicitlyTiered(t *testing.T) {
 	}
 }
 
+// TestActionTier_ProvisionExplicitlyTiered is the I-I S9 fail-open probe:
+// project-provision is dispatched (via the tenant family) and MUST be EXPLICITLY
+// classified tierServerAdmin — it CREATES a tenant (the allocation authority is
+// server-admin, E4). Remove its actionTier arm and this turns RED (the entry +
+// dispatch arm land in the SAME commit).
+func TestActionTier_ProvisionExplicitlyTiered(t *testing.T) {
+	tier, explicit := actionTierExplicit(manageRequest{Action: "project-provision"})
+	if !explicit {
+		t.Error("project-provision is dispatched but NOT explicitly tiered (fail-open tierOpen default, S9)")
+	}
+	if tier != tierServerAdmin {
+		t.Errorf("project-provision tier = %d, want tierServerAdmin (tenant-creation authority, E4)", tier)
+	}
+}
+
 // Gate tests for Multi-Tenant wave T25 (05-A8): the action-tier cut that turns
 // the binary admin gate (actionRequiresAdmin) into a two-tier classification
 // (server-admin vs tenant-admin, design 05 §4.4). They run DB-less against a nil
@@ -243,6 +262,7 @@ func TestActionTier_TenantAdmin_ServerAdminActions_403(t *testing.T) {
 		{"action": "blocks-audit-status"},
 		{"action": "blocks-classify-status"},
 		{"action": "tenant-list"},
+			{"action": "project-provision", "data": map[string]any{"identity": "manual:x"}},
 		{"action": "tenant-grant-list"},
 		{"action": "gaming-mode", "data": map[string]any{"mode": "on"}},
 		{"action": "dream-mode", "data": map[string]any{"mode": "off"}},

@@ -156,6 +156,11 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 	case "api-key-create", "api-key-list", "api-key-delete", "api-key-update":
 		h.dispatchAPIKeyAction(w, r, req)
 	case "tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
+		// project-provision (I-I, design/02 §4.6): the server-admin compound
+		// (tenant + scope + owner key + project row + repo-agent key + quota).
+		// Routed via the tenant dispatcher (it creates a tenant); tierServerAdmin
+		// is decided in actionTier, pinned by the S9 enumeration gate.
+		"project-provision",
 		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete",
 		// tenant-limit-set / tenant-usage-get (BEQ-1b, design/02 §3): set the
 		// structural per-tenant caps (server-admin) and read the own usage+limits
@@ -412,6 +417,11 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 		// widen another tenant's read_scopes. Both are operator-level: stay
 		// server-admin (a tenant-admin manages within, never across, tenants).
 		"tenant-create", "tenant-list", "tenant-get", "tenant-update", "tenant-delete",
+		// project-provision (I-I, design/02 §4.6/E4): CREATES a tenant — the
+		// tenant-allocation authority is server-admin (like tenant-create). The
+		// EXPLICIT entry is mandatory (§5.1): a dispatched action without it would
+		// inherit the fail-open tierOpen default; the S9 enumeration gate pins it.
+		"project-provision",
 		"tenant-grant-create", "tenant-grant-list", "tenant-grant-delete",
 		// scope-overview (MT 04-W6/A0, design/04 §3): an additive server-admin READ
 		// — per-scope counts (blocks + keys) + the scope→tenant mapping, for the

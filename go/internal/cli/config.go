@@ -53,19 +53,29 @@ func LoadConfig() (Config, error) {
 }
 
 func configFilePath() string {
+	return filepath.Join(configBaseDir(), "config")
+}
+
+// configBaseDir is the ctx config DIRECTORY (parent of the config file):
+// $XDG_CONFIG_HOME/ctx, %APPDATA%\ctx on Windows, else ~/.config/ctx. It is the
+// single source of truth for where ctx keeps user state — the per-project
+// repo-agent keys (`ctx project init`, I-I) live UNDER it in projects/, never in
+// the working directory (a secret in the CWD is a commit-into-the-repo hazard,
+// design/02 §4.6 step 4).
+func configBaseDir() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "ctx", "config")
+		return filepath.Join(xdg, "ctx")
 	}
-	// Windows: %APPDATA%\ctx\config
+	// Windows: %APPDATA%\ctx
 	if appdata := os.Getenv("APPDATA"); appdata != "" {
-		return filepath.Join(appdata, "ctx", "config")
+		return filepath.Join(appdata, "ctx")
 	}
-	// Unix: ~/.config/ctx/config
+	// Unix: ~/.config/ctx
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.Getenv("HOME"), ".config", "ctx", "config")
+		return filepath.Join(os.Getenv("HOME"), ".config", "ctx")
 	}
-	return filepath.Join(home, ".config", "ctx", "config")
+	return filepath.Join(home, ".config", "ctx")
 }
 
 // loadConfigFile reads a Key=Value file (bash source-compatible).
