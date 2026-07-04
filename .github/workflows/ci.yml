@@ -372,9 +372,12 @@ jobs:
     # frontend job must not publish an image (the Dockerfile embeds web/dist,
     # so this only moves the red earlier and names it — wave PV8).
     needs: [build, integration-tests, web]
+    # Off-schedule gate (PV10): the nightly run is a verification pass for the
+    # live tier — it must never re-push an image of an unchanged ref.
     if: >-
-      github.ref == 'refs/heads/root' ||
-      github.event_name == 'workflow_dispatch'
+      github.event_name != 'schedule' &&
+      (github.ref == 'refs/heads/root' ||
+      github.event_name == 'workflow_dispatch')
 
     permissions:
       contents: read
