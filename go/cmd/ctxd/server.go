@@ -139,6 +139,11 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// Project register — reads member-gated (scope-read), writes tenant-admin
 		// (workflow W4); both gate groups live inside the mount (design/03 §5.1).
 		handler.MountProject(r, handler.NewProjectHandler(pool))
+		// Project issue READ surface (workflow W6): list / detail+thread / comments
+		// / board under /api/project/{id}/issues*, member-gated (scope-read) inside
+		// the mount (design/03 §4.2/§6.1). Needs the type registry to resolve the
+		// board/list status set from policy data.
+		handler.MountProjectIssues(r, handler.NewProjectIssuesHandler(pool, blocktypeReg))
 		// Digest — Topic map generation
 		r.Post("/api/digest", digestH.HandleDigest)
 		// Synthesize — manual daily synthesis trigger (Welle 42)

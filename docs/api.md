@@ -16,6 +16,7 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `GET /api/types[/{name}]` | Block-type registry reads: effective type list (`_global` ∪ your tenant) and single-type policy config, **member-gated** (any valid key) (see [Block-type registry](#block-type-registry)). |
 | `PUT\|DELETE /api/types/{name}` | Block-type registry writes (upsert/delete), **admin-or-tenant-admin-gated**: a tenant-admin writes its own tenant namespace, `_global` types are operator-only; DELETE 409s while referenced or on a builtin (see [Block-type registry](#block-type-registry)). |
 | `GET\|POST /api/project` + `GET\|PATCH\|DELETE /api/project/{id}` | Project register: one project = one repo corpus bound to one tenant scope. Reads **member-gated** (scope-read), create/patch/delete **tenant-admin** (see [Project register](#project-register)). |
+| `GET /api/project/{id}/issues` + `…/issues/{block_id}` + `…/issues/{block_id}/comments` + `…/board` | Project issue **read surface** (workflow W6), **member-gated** (scope-read): keyset issue list (filters `state`/`labels`/`q`, `sort=updated\|created`, opaque `after` cursor), issue detail + inline comment thread, paginated comment thread, and the per-status board (columns + index-only counts). A foreign-scope project or issue id ⇒ 404 uniform (see [Project issues](#project-issues-read-surface)). |
 | `GET\|PUT\|DELETE /api/settings[/{key}]` | Runtime config overrides, **admin-gated incl. reads** (see [Settings API](#settings-api)). |
 | `GET\|PUT\|DELETE /api/secrets[/{name}]` | Write-only sealed credentials, **admin-gated**: PUT creates/rotates (value never returned), GET lists metadata + `referenced_by`, DELETE 409s while referenced (see [security](security.md#sealed-secrets--break-glass)). |
 | `GET /api/status` | **Admin dashboard** aggregate from the process-wide status collector: health, backend pool (`pool.Status()` shape), dream queue + mode, 24h LLM telemetry (with an `llm_24h_complete` attribution flag), gaming toggle. Served from a cache (N pollers cost one collection). Carries hostnames, so it is admin-gated where `/health` stays anonymous. Opens to a tenant-admin with a reduced own-tenant view (see [multi-tenancy](multi-tenancy.md#telemetry-per-tenant-views)). |
@@ -87,6 +88,34 @@ The project register (workflow W4, migration 079) binds a project identity to ex
 | `DELETE /api/project/{id}` | tenant-admin | Delete the register row (its `context_project_sync_runs` cascade). The project's **blocks and its tenant scope survive** — scope teardown is a tenant-lifecycle concern. A foreign/absent project ⇒ 404 uniform. |
 
 `identity` is one of `github:owner/repo` | `git-root:<sha>` | `manual:<slug>` (validated in Go, no DB CHECK on the open set). The register row is `{id, tenant_id, scope, identity, display_name, forge, webhook_secret_ref, sync_status, last_sync_at, sync_cursor, created_at, created_by?, metadata}`. The `webhook_secret_ref` is server-managed and always NULL until the W13 webhook surface lands; `forge`/`sync_cursor` are the Achse-02 sync contract (extended additively by migration 080). A tenant prune drains `context_projects` (+ sync runs) as a mandatory K14 gate.
+
+## Project issues (read surface)
+
+The project issue read surface (workflow W6, `MountProjectIssues`) is the SPA's board + list + detail source. It resolves `{id}` to the project's single scope, requires that scope in the caller's `read_scopes` (else 404 uniform — no existence oracle), and bounds every read to that ONE scope (never `read_scopes` wholesale, and NO block grants — a project's issue view is deliberately scope-pure). All GETs are **member-gated** inside the mount (a missing gate is a missing route, never fail-open). Every body-bearing response carries `render: "untrusted"` (issue/comment bodies are attacker-controlled markdown) plus the `workflow_status`/`type_name` fields (wire-consistent with the `manage issue-*` transport).
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/project/{id}/issues` | One keyset page. Filters: `state` (one workflow status), `labels` (repeated or comma-separated; AND), `q` (full-text). `sort=updated` (default) \| `created`. `after=<opaque token>` resumes; `limit` ≤ 100. Response `{success, render, issues:[{id,scope,type_name,title,workflow_status,updated_at}], cursor}` — `cursor` is the opaque `after` token for the next page, or `null` at end of data. |
+| `GET /api/project/{id}/issues/{block_id}` | Full issue + the first page of the comment thread inline: `{success, render, issue, comments, comments_cursor}`. A foreign/absent/malformed id ⇒ 404 uniform. |
+| `GET /api/project/{id}/issues/{block_id}/comments` | The comment thread, ASC keyset on the immutable `(created_at, id)`: `{success, render, comments, cursor}`. `after`/`limit` as above. |
+| `GET /api/project/{id}/board` | Per-config-status columns: `{success, render, columns:[{status, count, issues:[…], cursor}]}`. `count` is index-only; `cursor` is the per-column `after` token — load more of a column via `…/issues?state=<col>&after=<token>`. |
+
+**Sort + pagination semantics.** `sort=updated` (the board view) keys on the MUTABLE `(updated_at, id)`: a row updated mid-pagination moves ahead of the consumed cursor and drops out of that traversal — accepted **list** semantics (a UI view, not an export contract), gated in `TestW6CursorAndSemantics`. For a **lossless** traversal (agents, export) use `sort=created` — keyset on the IMMUTABLE `(created_at, id)`, which no update reorders. The opaque `after` token is a base64url-encoded keyset cursor; a malformed token ⇒ 400 (never 500).
+
+**`q` full-text search (masterplan K4 decision).** `q` binds to the **existing FTS tsvector GIN path** (`idx_context_ts_de` / `idx_context_ts_en` over `title || content`, migrations 001/044) — matching `plainto_tsquery('german', q) OR plainto_tsquery('english', q)`, scope/type/status-predicated. This is **not** a silent sequential scan (the EXPLAIN gate asserts the FTS GIN index is used, no `Seq Scan`). No new trigram index was needed: design/03 §6.1 specifies the FTS path, and `idx_trgm_title` already exists too (001). The freed W6 migration slot (086) instead carries `idx_blocks_workflow_created` for the `sort=created` traversal.
+
+**Index story + scale (design/03 §6.1, W6 EXPLAIN gate).** At the target scale (10k+ issues/repo, proven against a 10k-issue + ≥200k-non-issue backdrop):
+
+- `state` list rides the named `idx_blocks_workflow_board` (M077); `sort=created` rides `idx_blocks_workflow_created` (M086) status-unfiltered, and the board index when a `state` narrows it (both index-backed, no `Seq Scan`). At 215k rows the planner serves these as a Bitmap Index Scan on the named index + a bounded top-N heapsort — index-backed and keyset-correct; P95 < 100 ms (measured ~20–28 ms). The RED differential (index/bitmap scans disabled) Seq-Scans the 210k table an order of magnitude slower.
+- `q` rides the FTS GIN indexes (above).
+- Board `count` is an **Index Only Scan** over the board index (no heap) — degrades to a heap Filter only when a `labels` filter is present (documented edge).
+
+**Documented deviations from design/03 §6.1.**
+
+- **`labels` is a post-filter, not a dedicated GIN index.** §6.1 sketched `labels → Array + GIN`; the shipped I-B primitive (M077 / `store.WorkflowStatusListSQL`, design/02 §3.3) treats `labels` as an AND post-filter over `metadata->'labels'` (`?&`) inside the board-index range scan — the board index already bounds the row set, so the post-filter stays cheap. W6 keeps that I-B semantics rather than adding a labels GIN index (Achse-02 schema hoheit); the default jsonb GIN index does not cover the `metadata->'labels'` sub-path, so a labels probe rides the board index with a Filter.
+- **`sort=created` first page is O(scope-issues), not O(limit).** With the `+infinity` first-page keyset sentinel the planner bitmaps the whole status-unfiltered issue set then top-N sorts (bounded by the scope) — <100 ms at the 10k target; a mid-page `after` cursor tightens the range. An ordered O(limit) range scan at 100k+ issues/repo would be a follow-up optimization.
+
+**Unmapped status.** An issue whose `workflow_status` is not in the type config is **not** shown on the board and **not** returned by the default merge list (both are config-status-bound), but IS reachable via an explicit `?state=<unmapped>` and via the lossless `?sort=created` (which surfaces all statuses) — gated in `TestProjectIssuesW6`.
 
 ## Graph API
 
