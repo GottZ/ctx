@@ -73,12 +73,12 @@ type queryInput struct {
 }
 
 type storeInput struct {
-	Category string         `json:"category" jsonschema:"block category (e.g. decisions, learnings, infrastructure)"`
-	Title    string         `json:"title" jsonschema:"block title (upserts on same category+title+scope)"`
-	Content  string         `json:"content" jsonschema:"block content (max 50KB)"`
-	Tags     []string       `json:"tags,omitempty" jsonschema:"optional tags for filtering"`
-	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"optional metadata object"`
-	Sensitivity string     `json:"sensitivity,omitempty" jsonschema:"content sensitivity for trust gating: credentials|personal|internal|public (default from settings, fail-closed)"`
+	Category    string         `json:"category" jsonschema:"block category (e.g. decisions, learnings, infrastructure)"`
+	Title       string         `json:"title" jsonschema:"block title (upserts on same category+title+scope)"`
+	Content     string         `json:"content" jsonschema:"block content (max 50KB)"`
+	Tags        []string       `json:"tags,omitempty" jsonschema:"optional tags for filtering"`
+	Metadata    map[string]any `json:"metadata,omitempty" jsonschema:"optional metadata object"`
+	Sensitivity string         `json:"sensitivity,omitempty" jsonschema:"content sensitivity for trust gating: credentials|personal|internal|public (default from settings, fail-closed)"`
 }
 
 type searchInput struct {
@@ -103,7 +103,6 @@ type recentInput struct {
 	TypesExclude      []string `json:"types_exclude,omitempty" jsonschema:"exclude these block types"`
 	BlockRolesExclude []string `json:"block_roles_exclude,omitempty" jsonschema:"legacy alias for types_exclude"`
 }
-
 
 func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// query
@@ -139,6 +138,10 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 		Description: "List recently created or updated blocks. Useful for temporal queries like 'what was saved this week'.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpRecentHandler(cfg))
+
+	// W12: issue-content write tools (issue_create/issue_comment/issue_state,
+	// E5 (a) — create+comment+state, no delete). Registered in their own file.
+	registerIssueTools(server, cfg)
 }
 
 // Tool handlers.
@@ -444,9 +447,12 @@ type responseRecorder struct {
 	statusCode int
 }
 
-func (r *responseRecorder) Header() http.Header        { return r.headers }
-func (r *responseRecorder) WriteHeader(code int)        { r.statusCode = code }
-func (r *responseRecorder) Write(b []byte) (int, error) { r.body = append(r.body, b...); return len(b), nil }
+func (r *responseRecorder) Header() http.Header  { return r.headers }
+func (r *responseRecorder) WriteHeader(code int) { r.statusCode = code }
+func (r *responseRecorder) Write(b []byte) (int, error) {
+	r.body = append(r.body, b...)
+	return len(b), nil
+}
 
 // Flush and SetWriteDeadline are no-ops so HandleQuery's body-heartbeat
 // (always armed when rerank is on, query.go) does not emit a "not flushable" /
@@ -455,5 +461,5 @@ func (r *responseRecorder) Write(b []byte) (int, error) { r.body = append(r.body
 // leading-whitespace writes land in the recorded body; RFC-8259 tolerates
 // leading whitespace, so the JSON decode stays correct. Covers the MCP query
 // delegation and the F6 ctx_query tool delegation alike.
-func (r *responseRecorder) Flush()                          {}
+func (r *responseRecorder) Flush()                           {}
 func (r *responseRecorder) SetWriteDeadline(time.Time) error { return nil }

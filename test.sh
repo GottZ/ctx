@@ -581,7 +581,8 @@ if $WITH_OLLAMA; then
     fail "$T" "expected answer containing postgresql/mount, got: ${answer:0:80}"
   fi
 
-  # T17 MCP_TOOLS_LIST — /mcp endpoint returns all 5 registered tools.
+  # T17 MCP_TOOLS_LIST — /mcp endpoint returns all 8 registered tools
+  # (query/store/search/get/recent + W12 issue_create/issue_comment/issue_state).
   # Added after Session 24 bug: noOutput struct{} triggered outputSchema generation,
   # making clients show empty {} instead of Content[].text. Fixed in v0.27.1.
   T="T17 MCP_TOOLS_LIST"
@@ -591,10 +592,10 @@ if $WITH_OLLAMA; then
     -H "Accept: application/json, text/event-stream" \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>/dev/null)
   tool_count=$(echo "$mcp_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('result',{}).get('tools',[])))" 2>/dev/null)
-  if [[ "$tool_count" == "5" ]]; then
+  if [[ "$tool_count" == "8" ]]; then
     pass "$T (tools=$tool_count)"
   else
-    fail "$T" "expected 5 tools, got: $tool_count (resp: ${mcp_resp:0:200})"
+    fail "$T" "expected 8 tools, got: $tool_count (resp: ${mcp_resp:0:200})"
   fi
 
   # T18 MCP_TOOL_CALL — recent tool returns actual text content (not empty {}).
