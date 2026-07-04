@@ -39,7 +39,7 @@ func TestRunDigest_TopicMapClassifiedAsSystemMeta(t *testing.T) {
 	// corpus branch returns early with no upsert.
 	seedDigestBlock(t, pool, homeScope, "test-block-1")
 
-	if err := digest.RunDigest(ctx, pool, reg, homeScope, readScopes); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, homeScope, homeScope, readScopes); err != nil {
 		t.Fatalf("RunDigest: %v", err)
 	}
 
@@ -83,10 +83,10 @@ func TestRunDigest_IdempotentReClassification(t *testing.T) {
 
 	seedDigestBlock(t, pool, homeScope, "test-block-1")
 
-	if err := digest.RunDigest(ctx, pool, reg, homeScope, readScopes); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, homeScope, homeScope, readScopes); err != nil {
 		t.Fatalf("first RunDigest: %v", err)
 	}
-	if err := digest.RunDigest(ctx, pool, reg, homeScope, readScopes); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, homeScope, homeScope, readScopes); err != nil {
 		t.Fatalf("second RunDigest: %v", err)
 	}
 

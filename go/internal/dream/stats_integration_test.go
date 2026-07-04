@@ -125,8 +125,9 @@ func TestStatsQueueDepth_LinkableFalseTypeExcluded(t *testing.T) {
 		t.Errorf("QueueDepth.PickableNow = %d, want 1 (wf-nolink excluded)", q.PickableNow)
 	}
 
-	// PickBlock itself: only A may ever be claimed.
-	block, err := dream.PickBlock(ctx, pool, linkable)
+	// PickBlock itself: only A may ever be claimed. nil scopes = no scope
+	// conjunct (T12) — this probe is about the type allowlist, not tenant scope.
+	block, err := dream.PickBlock(ctx, pool, linkable, nil)
 	if err != nil {
 		t.Fatalf("PickBlock: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestStatsQueueDepth_LinkableFalseTypeExcluded(t *testing.T) {
 		t.Errorf("PickBlock picked %s, want block A (wf-nolink must never be picked)", block.ID)
 	}
 	// Second pick: A is claimed (transient cooldown), B must NOT surface.
-	block2, err := dream.PickBlock(ctx, pool, linkable)
+	block2, err := dream.PickBlock(ctx, pool, linkable, nil)
 	if err != nil {
 		t.Fatalf("PickBlock #2: %v", err)
 	}

@@ -43,6 +43,14 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// SetOverlay (main.go) does. Inert until a tenant has settings rows.
 	config.SetRequestScopeHook(handler.RequestTenantScope)
 
+	// WF T12: the block-type registry resolves per-tenant overlays off the SAME
+	// request-scope seam — SnapshotForRequest derives the caller's tenant from
+	// the auth result (never a caller argument, §5.4). blocktype cannot import
+	// handler (cycle), so main injects the identical cycle-free wrapper here.
+	// Inert until a tenant has its own context_block_types rows (buildTenantSet
+	// then inherits the base pointer byte-for-byte — default-tenant equivalence).
+	blocktype.SetRequestScopeHook(handler.RequestTenantScope)
+
 	// Global middleware
 	r.Use(handler.SecurityHeaders)
 	r.Use(handler.RequestID)

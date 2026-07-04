@@ -24,11 +24,18 @@ import (
 // topic-map classify hook from ONE tenant-resolved snapshot per run. nil is
 // a wiring bug and fails loudly (RunGuardBatch pattern) — since T8 the
 // source query cannot run without the type allowlist.
-func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, homeScope string, readScopes []string) error {
+//
+// tenantScope (WF T12) is the iterating tenant's SCOPE — the key the policy
+// overlay resolves against (config.SnapshotForTenant(bt.scope) twin). It is
+// distinct from homeScope, which is the entitlement-clamped WRITE scope for the
+// topic-map index title/row. Pre-T12 the registry ignored its argument, so the
+// background loop passing homeScope was harmless; now the tenant key must be the
+// tenant scope (default tenant → "_global" → base generation, unchanged).
+func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, tenantScope, homeScope string, readScopes []string) error {
 	if blocktypes == nil {
 		return fmt.Errorf("digest: nil block-type registry (wiring bug)")
 	}
-	set := blocktypes.SnapshotForTenant(ctx, homeScope)
+	set := blocktypes.SnapshotForTenant(ctx, tenantScope)
 
 	// Fetch block metadata (no content), sieved by digest.include (WF T8,
 	// design/01 §4.4 #13): an unregistered type is absent from the allowlist

@@ -154,8 +154,13 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 		return 0, fmt.Errorf("dream: no block-type registry wired (Router.Blocktypes nil)")
 	}
 
-	// Step 1: Pick a block.
-	block, err := PickBlock(ctx, pool, typeSet.DreamLinkableTypes())
+	// Step 1: Pick a block — scoped to the iteration's entitlement-clamped read
+	// window (WF T12): the DreamLinkableTypes allowlist above is this tenant's
+	// resolved generation (Router.TypeSet → SnapshotForTenant), so the pick MUST
+	// be bound to the tenant's own scopes or A's policy would govern B's blocks
+	// (design/01 §7-T12). readScopes is read_scopes ∩ owned; single-tenant it is
+	// the raw read window, so the pick set is byte-identical to pre-T12 there.
+	block, err := PickBlock(ctx, pool, typeSet.DreamLinkableTypes(), readScopes)
 	if err != nil {
 		return 0, fmt.Errorf("dream: pick: %w", err)
 	}
@@ -404,8 +409,23 @@ func dreamEligibleWhere(typesParam string) string {
 // cycle completion the caller overrides with the real outcome cooldown
 // (CooldownActiveDays / CooldownInertDays). On crash the transient claim
 // expires after 5 min and the block re-enters the queue.
-func PickBlock(ctx context.Context, pool *pgxpool.Pool, linkable []string) (*BlockInfo, error) {
+// scopes (WF T12) is the iterating tenant's ENTITLEMENT-CLAMPED read window
+// (read_scopes ∩ owned) — the pick is bound to `scope = ANY(scopes)` so a
+// tenant's DreamLinkableTypes allowlist is applied ONLY to that tenant's blocks.
+// Without it the just-iterated tenant's policy would decide FOREIGN tenants'
+// blocks (design/01 §7-T12/§9.6: A's dream.linkable=false for type X would
+// wrongly skip B's X-blocks in A's cycle). An empty scopes list adds NO
+// conjunct — the tenant-less single pass (backgroundTenants fail-safe
+// {_global, nil} → raw read_scopes... but a caller may pass nil) stays
+// byte-identical to the pre-T12 unrestricted pick.
+func PickBlock(ctx context.Context, pool *pgxpool.Pool, linkable []string, scopes []string) (*BlockInfo, error) {
 	var block BlockInfo
+	scopeConjunct := ""
+	args := []any{CooldownTransientMinutes, linkable}
+	if len(scopes) > 0 {
+		scopeConjunct = "\n\t\t\t  AND scope = ANY($3::text[])"
+		args = append(args, scopes)
+	}
 	err := pool.QueryRow(ctx,
 		`UPDATE context_blocks
 		SET dream_cooldown_until = now() + ($1 * interval '1 minute')
@@ -413,13 +433,13 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool, linkable []string) (*Blo
 			SELECT id FROM context_blocks
 			WHERE `+dreamEligibleWhere("$2")+`
 			  AND embedding IS NOT NULL
-			  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())
+			  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())`+scopeConjunct+`
 			ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING id, title, category, content, scope, sensitivity, quality_score, updated_at, created_at, dream_keywords, dream_temporal_validated_at`,
-		CooldownTransientMinutes, linkable,
+		args...,
 	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.Sensitivity, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt, &block.DreamKeywords, &block.DreamTemporalValidatedAt)
 
 	if errors.Is(err, pgx.ErrNoRows) {
