@@ -1,0 +1,67 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - heading "Types" [level=1]
+  - paragraph: block-type registry — classification policy per type (server-admin only)
+  - region "type registry":
+    - heading "types" [level=2]
+    - text: "1"
+    - button "+ New type"
+    - table "type registry":
+      - rowgroup:
+        - row "key name source policy actions":
+          - columnheader "key"
+          - columnheader "name"
+          - columnheader "source"
+          - columnheader "policy"
+          - columnheader "actions"
+      - rowgroup:
+        - row "issue Issue builtin full-pass Edit Delete":
+          - cell "issue"
+          - cell "Issue"
+          - cell "builtin"
+          - cell "full-pass"
+          - cell "Edit Delete":
+            - button "Edit"
+            - button "Delete" [disabled]
