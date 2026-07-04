@@ -77,6 +77,11 @@ func TestActionTier_Classification(t *testing.T) {
 		{"issue-comment-create", "", tierOpen},
 		{"issue-link-create", "", tierOpen},
 		{"issue-link-delete", "", tierOpen},
+		// Achse-02 forge sync family (I-F, design/02 §4.3): tierTenantAdmin —
+		// PAT injection / outbound sync trigger, ownership re-checked per project.
+		{"forge-token-set", "", tierTenantAdmin},
+		{"forge-sync-start", "", tierTenantAdmin},
+		{"forge-sync-status", "", tierTenantAdmin},
 		// ungated read/CRUD paths (auth + scope only)
 		{"get", "", tierOpen},
 		{"stats", "", tierOpen},
@@ -125,6 +130,25 @@ func TestActionTier_IssueFamilyExplicitlyTiered(t *testing.T) {
 	// against. If this ever reported true, the detection mechanism is broken.
 	if _, explicit := actionTierExplicit(manageRequest{Action: "definitely-not-an-action"}); explicit {
 		t.Error("unknown action reported as explicitly tiered — S9 fail-open detection broken")
+	}
+}
+
+// TestActionTier_ForgeFamilyExplicitlyTiered is the Achse-02 I-F S9 fail-open
+// probe (design/02 §5.1): each forge-* action this wave dispatches MUST be
+// EXPLICITLY classified tierTenantAdmin. Remove any forge arm from actionTier and
+// its row here turns RED (the entries + dispatch arm land in the SAME commit).
+// The I-D IssueFamily test enumerates a HARDCODED list — it does NOT auto-extend
+// to new families, so I-F adds its own enumeration here (documented drift from
+// the "erweitert sich automatisch" assumption).
+func TestActionTier_ForgeFamilyExplicitlyTiered(t *testing.T) {
+	for _, a := range []string{"forge-token-set", "forge-sync-start", "forge-sync-status"} {
+		tier, explicit := actionTierExplicit(manageRequest{Action: a})
+		if !explicit {
+			t.Errorf("action %q is dispatched but NOT explicitly tiered (fail-open tierOpen default, S9)", a)
+		}
+		if tier != tierTenantAdmin {
+			t.Errorf("action %q tier = %d, want tierTenantAdmin (credential injection / outbound trigger)", a, tier)
+		}
 	}
 }
 

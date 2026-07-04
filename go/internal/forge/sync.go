@@ -1,0 +1,462 @@
+// Forge sync SHELL (design/02 §4.5.5, S7/S8): per-project run-state (single-flight
+// ⇒ 409 on double-start), fail-closed gates (tenant + issue-policy), the fetch
+// loop with offline-first backoff, and the Pull-APPLY seam (I-G). It is the
+// on-demand engine behind the forge-sync-start/-status manage actions and, later,
+// the periodic scheduler loop — both drive THIS type (audit.go run-state pattern).
+package forge
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"runtime/debug"
+	"sync"
+	"time"
+
+	"github.com/GottZ/ctx/internal/sealbox"
+	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const (
+	// backoffBase/backoffCap bound the exponential offline-first backoff
+	// (§4.5.3): 1m, 2m, 4m … capped at 1h. A GitHub Retry-After overrides it.
+	backoffBase = time.Minute
+	backoffCap  = time.Hour
+	// tokenSecretPrefix names the per-project sealed PAT secret in the PROJECT
+	// scope (mirrors the webhook.github.<id> convention, §5.4). reveal-never.
+	tokenSecretPrefix = "forge.token."
+)
+
+// Sentinel errors surfaced to the manage handler (mapped to 409/422/…).
+var (
+	ErrSyncRunning     = errors.New("forge sync already running for this project")
+	ErrNoTenant        = errors.New("scope has no owning tenant")                                          // found=false gate (S13)
+	ErrTenantSuspended = errors.New("owning tenant is suspended")                                          // skip, not proceed
+	ErrIssuePolicy     = errors.New("issue type policy not resolvable — deploy Achse-01 T3 + Welle I-C first") // §6.4
+	ErrForgeKind       = errors.New("unsupported forge kind (github only)")
+)
+
+// ApplyResult is what a Pull-APPLY hook reports back to the run (I-G).
+type ApplyResult struct {
+	Applied   int
+	Conflicts int
+}
+
+// IssueApplyFunc applies one fetched page of issues to the corpus — Welle I-G
+// (block create/update + context_project_sync_map write + 3-way base_hash). I-F
+// wires nil ⇒ the fetch-only no-op: the run fetches, counts and gates but writes
+// no blocks and advances no durable fetch cursor (§7 boundary). I-G supplies this
+// AND takes over etag/since cursor commit per page.
+type IssueApplyFunc func(ctx context.Context, project store.ProjectRow, issues []IssueRemote) (ApplyResult, error)
+
+// SyncStatus is the in-memory state of the current/last run for one project
+// (forge-sync-status surface). DB-side history (last run row, conflict count) is
+// merged by the handler.
+type SyncStatus struct {
+	ProjectID  string    `json:"project_id"`
+	Running    bool      `json:"running"`
+	DryRun     bool      `json:"dry_run"`
+	StartedAt  time.Time `json:"started_at,omitzero"`
+	FinishedAt time.Time `json:"finished_at,omitzero"`
+	Fetched    int       `json:"fetched"`     // issues fetched (PRs excluded)
+	PRsSkipped int       `json:"prs_skipped"` // pull_request items dropped (§6.1)
+	Pages      int       `json:"pages"`
+	Applied    int       `json:"applied"`   // I-G writes; 0 in I-F (no-op apply)
+	Conflicts  int       `json:"conflicts"` // I-G
+	Aborted    bool      `json:"aborted"`
+	BackoffSet bool      `json:"backoff_set"`
+	RunID      string    `json:"run_id,omitempty"`
+	LastError  string    `json:"last_error,omitempty"`
+}
+
+// TenantStatusFn resolves the owning tenant's status for a scope; found=false ⇒
+// no tenant (the fail-closed skip, §4.5.5). Bound to store.TenantStatusForScope.
+type TenantStatusFn func(ctx context.Context, scope string) (status string, found bool, err error)
+
+// IssuePolicyFn reports whether the issue type policy is resolvable for a scope
+// (with digest.include=false, §6.4). reason is a human message for the refusal.
+// Bound in server.go over the block-type registry.
+type IssuePolicyFn func(ctx context.Context, scope string) (ok bool, reason string)
+
+// SyncManager owns run-state and the gates. It is the ForgeController the manage
+// handler consumes.
+type SyncManager struct {
+	pool         *pgxpool.Pool
+	openBox      func() (*sealbox.Box, error)
+	newForge     func(token string) Forge
+	tenantStatus TenantStatusFn
+	issuePolicy  IssuePolicyFn
+	applyIssues  IssueApplyFunc // nil ⇒ I-F fetch-only no-op (I-G wires it)
+	clock        func() time.Time
+
+	mu   sync.Mutex
+	runs map[string]*SyncStatus
+}
+
+// NewSyncManager builds the manager with the production GitHub client factory and
+// the sealbox from env. applyIssues is nil (I-F fetch-only) until I-G calls
+// SetApplyIssues. tenantStatus/issuePolicy are the fail-closed gates.
+func NewSyncManager(pool *pgxpool.Pool, tenantStatus TenantStatusFn, issuePolicy IssuePolicyFn) *SyncManager {
+	return &SyncManager{
+		pool:         pool,
+		openBox:      sealbox.FromEnv,
+		newForge:     NewGitHubClient,
+		tenantStatus: tenantStatus,
+		issuePolicy:  issuePolicy,
+		clock:        time.Now,
+		runs:         make(map[string]*SyncStatus),
+	}
+}
+
+// SetApplyIssues wires the I-G Pull-APPLY hook (idempotent; call once at boot).
+func (m *SyncManager) SetApplyIssues(fn IssueApplyFunc) { m.applyIssues = fn }
+
+// SetToken seals a PAT for the project and records its ref name (never the PAT,
+// §5.4). The seal + the token_secret ref update commit in ONE transaction. The
+// secret lives in the PROJECT scope so its AAD binds it to that scope.
+func (m *SyncManager) SetToken(ctx context.Context, project store.ProjectRow, plaintext string) error {
+	if plaintext == "" {
+		return fmt.Errorf("token is required")
+	}
+	box, err := m.openBox()
+	if err != nil {
+		return fmt.Errorf("secrets unavailable: %w", err)
+	}
+	name := tokenSecretPrefix + project.ID
+	nonce, ct, err := box.Seal(name, project.Scope, []byte(plaintext))
+	if err != nil {
+		return fmt.Errorf("seal token: %w", err)
+	}
+	tx, err := m.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := store.PutSecret(ctx, tx, name, project.Scope, nonce, ct, 1, nzp(project.CreatedBy)); err != nil {
+		return fmt.Errorf("persist token: %w", err)
+	}
+	if err := store.SetProjectToken(ctx, tx, project.ID, name); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func nzp(s *string) *string {
+	if s == nil || *s == "" {
+		return nil
+	}
+	return s
+}
+
+// Status returns the in-memory run status for a project (copy). Missing = zero.
+func (m *SyncManager) Status(projectID string) SyncStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if st, ok := m.runs[projectID]; ok {
+		return *st
+	}
+	return SyncStatus{ProjectID: projectID}
+}
+
+// StartSync runs the fail-closed gates synchronously (so the caller gets the
+// refusal), then launches the fetch loop in a goroutine. It returns ErrSyncRunning
+// on a second concurrent run of the SAME project (S7 409), ErrNoTenant /
+// ErrTenantSuspended (S13) or ErrIssuePolicy (§6.4) when a gate refuses — in every
+// refusal case ZERO wire calls have been made and no goroutine is launched.
+func (m *SyncManager) StartSync(ctx context.Context, project store.ProjectRow, dryRun bool) (SyncStatus, error) {
+	m.mu.Lock()
+	if st, ok := m.runs[project.ID]; ok && st.Running {
+		m.mu.Unlock()
+		return SyncStatus{}, ErrSyncRunning
+	}
+
+	// Gate A — tenant (fail-closed, §4.5.5/S13). found=false ⇒ disable sync +
+	// stamp last_error, NEVER proceed (would re-materialise blocks into an
+	// owner-less scope). Held under the run-state lock so the disable is atomic
+	// with the refusal. NO forge client exists yet ⇒ 0 wire calls.
+	status, found, err := m.tenantStatus(ctx, project.Scope)
+	if err != nil {
+		m.mu.Unlock()
+		return SyncStatus{}, err
+	}
+	if !found {
+		m.mu.Unlock()
+		off := false
+		msg := ErrNoTenant.Error()
+		_ = store.SetProjectSyncState(ctx, m.pool, project.ID, store.SyncStatePatch{
+			SyncEnabled: &off, LastError: &msg, SyncStatus: strptr("error"),
+		})
+		return SyncStatus{}, ErrNoTenant
+	}
+	if status != "active" {
+		m.mu.Unlock()
+		return SyncStatus{}, ErrTenantSuspended
+	}
+
+	// Gate B — issue policy resolvable with digest.include=false (§6.4). 0 wire calls.
+	if ok, reason := m.issuePolicy(ctx, project.Scope); !ok {
+		m.mu.Unlock()
+		return SyncStatus{}, fmt.Errorf("%w (%s)", ErrIssuePolicy, reason)
+	}
+
+	st := &SyncStatus{ProjectID: project.ID, Running: true, DryRun: dryRun, StartedAt: m.clock()}
+	m.runs[project.ID] = st
+	m.mu.Unlock()
+
+	run, err := store.StartSyncRun(ctx, m.pool, project.ID)
+	if err != nil {
+		m.finish(project.ID, "", "start run: "+err.Error(), true, false)
+		return SyncStatus{}, err
+	}
+	m.setRunID(project.ID, run.ID)
+
+	go m.runSync(context.WithoutCancel(ctx), project, dryRun, run.ID)
+	return m.Status(project.ID), nil
+}
+
+// runSync is the background fetch loop. It never panics the process (§4.5.5
+// recover), records the run row on exit, and treats every wire/rate-limit error
+// as backoff — never a conflict.
+func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dryRun bool, runID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("forge: sync run panicked", "project", project.ID, "panic", r, "stack", string(debug.Stack()))
+			m.finish(project.ID, runID, "panic during sync", true, false)
+		}
+	}()
+
+	token, err := m.resolveToken(ctx, project)
+	if err != nil {
+		m.finish(project.ID, runID, "token resolve failed", true, false)
+		return
+	}
+	repo, err := repoRefFromForge(project.Forge)
+	if err != nil {
+		m.finish(project.ID, runID, err.Error(), true, false)
+		return
+	}
+	client := m.newForge(token)
+
+	etag, since, backoffN := readCursor(project.SyncCursor)
+
+	page, err := client.ListIssuesSince(ctx, repo, since, etag)
+	if errors.Is(err, ErrNotModified) {
+		// 304: nothing changed ⇒ 0 writes, cursor untouched, backoff/error cleared.
+		_ = store.SetProjectSyncState(ctx, m.pool, project.ID, store.SyncStatePatch{
+			SyncStatus: strptr("idle"), ClearError: true, ClearBackoff: true, SetLastSync: true,
+		})
+		m.finish(project.ID, runID, "", false, false)
+		return
+	}
+	if err != nil {
+		m.handleWireError(ctx, project.ID, runID, backoffN, err)
+		return
+	}
+
+	for {
+		if err := m.applyPage(ctx, project, dryRun, page); err != nil {
+			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			return
+		}
+		m.addPageStats(project.ID, page)
+		if page.NextURL == "" {
+			break
+		}
+		page, err = client.ListIssuesPage(ctx, page.NextURL)
+		if err != nil {
+			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			return
+		}
+	}
+
+	// SUCCESS. I-F (applyIssues==nil) does NOT advance the durable etag/since
+	// cursor — no apply happened, so advancing would skip un-applied entities
+	// (the etag/since commit is I-G's job, coupled per page with the writes).
+	// Backoff/error are cleared and last_sync_at stamped regardless (diagnostic
+	// state, not the fetch cursor).
+	_ = store.SetProjectSyncState(ctx, m.pool, project.ID, store.SyncStatePatch{
+		SyncStatus: strptr("idle"), ClearError: true, ClearBackoff: true, SetLastSync: true,
+	})
+	_ = store.MergeProjectSyncCursor(ctx, m.pool, project.ID, json.RawMessage(`{"backoff_n":0}`))
+	m.finish(project.ID, runID, "", false, false)
+}
+
+// applyPage streams one page to the Pull-APPLY hook (I-G). On I-F (nil hook) it is
+// a no-op — the page is fetched and counted, nothing is written. dryRun also skips
+// apply (fetch-only preview).
+func (m *SyncManager) applyPage(ctx context.Context, project store.ProjectRow, dryRun bool, page IssuePage) error {
+	if m.applyIssues == nil || dryRun {
+		return nil
+	}
+	res, err := m.applyIssues(ctx, project, page.Issues)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if st := m.runs[project.ID]; st != nil {
+		st.Applied += res.Applied
+		st.Conflicts += res.Conflicts
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// handleWireError stamps backoff_until (Retry-After if the forge gave one, else
+// exponential cap 1h) + last_error, bumps backoff_n, and finishes the run as a
+// clean abort (NEVER a conflict, §4.5.3).
+func (m *SyncManager) handleWireError(ctx context.Context, projectID, runID string, backoffN int, err error) {
+	var rl *RateLimitError
+	var until time.Time
+	switch {
+	case errors.As(err, &rl) && rl.RetryAfter > 0:
+		until = m.clock().Add(rl.RetryAfter)
+	default:
+		until = m.clock().Add(expBackoff(backoffN))
+	}
+	msg := sanitizeErr(err)
+	_ = store.SetProjectSyncState(ctx, m.pool, projectID, store.SyncStatePatch{
+		SyncStatus: strptr("error"), LastError: &msg, BackoffUntil: &until,
+	})
+	_ = store.MergeProjectSyncCursor(ctx, m.pool, projectID,
+		json.RawMessage(fmt.Sprintf(`{"backoff_n":%d}`, backoffN+1)))
+	m.finish(projectID, runID, msg, true, true)
+}
+
+// expBackoff = min(base * 2^n, cap). n is the count of prior consecutive failures.
+func expBackoff(n int) time.Duration {
+	d := backoffBase
+	for i := 0; i < n && d < backoffCap; i++ {
+		d *= 2
+	}
+	if d > backoffCap {
+		d = backoffCap
+	}
+	return d
+}
+
+// ── run-state helpers ────────────────────────────────────────────────────────.
+
+func (m *SyncManager) setRunID(projectID, runID string) {
+	m.mu.Lock()
+	if st := m.runs[projectID]; st != nil {
+		st.RunID = runID
+	}
+	m.mu.Unlock()
+}
+
+func (m *SyncManager) addPageStats(projectID string, page IssuePage) {
+	m.mu.Lock()
+	if st := m.runs[projectID]; st != nil {
+		st.Fetched += len(page.Issues)
+		st.PRsSkipped += page.PRsSkipped
+		st.Pages++
+	}
+	m.mu.Unlock()
+}
+
+// finish records the terminal run state in memory AND the DB run row.
+func (m *SyncManager) finish(projectID, runID, errMsg string, aborted, backoffSet bool) {
+	m.mu.Lock()
+	st := m.runs[projectID]
+	if st != nil {
+		st.Running = false
+		st.FinishedAt = m.clock()
+		st.Aborted = aborted
+		st.BackoffSet = backoffSet
+		st.LastError = errMsg
+	}
+	statsSnapshot := SyncStatus{}
+	if st != nil {
+		statsSnapshot = *st
+	}
+	m.mu.Unlock()
+
+	if runID == "" {
+		return
+	}
+	dbStatus := "done"
+	if aborted {
+		dbStatus = "error"
+	}
+	stats, _ := json.Marshal(map[string]int{
+		"fetched": statsSnapshot.Fetched, "prs_skipped": statsSnapshot.PRsSkipped,
+		"pages": statsSnapshot.Pages, "applied": statsSnapshot.Applied, "conflicts": statsSnapshot.Conflicts,
+	})
+	_ = store.FinishSyncRun(context.Background(), m.pool, runID, dbStatus, errMsg, stats)
+}
+
+// resolveToken opens the sealed PAT if the project carries a token ref; "" (no
+// ref) = unauth pull. The plaintext is returned in-memory only, never logged.
+func (m *SyncManager) resolveToken(ctx context.Context, project store.ProjectRow) (string, error) {
+	if project.TokenSecret == nil || *project.TokenSecret == "" {
+		return "", nil
+	}
+	box, err := m.openBox()
+	if err != nil {
+		return "", err
+	}
+	pt, err := store.ResolveSecret(ctx, m.pool, box, *project.TokenSecret, project.Scope)
+	if err != nil {
+		return "", err
+	}
+	return string(pt), nil
+}
+
+func strptr(s string) *string { return &s }
+
+// sanitizeErr reduces an error to a fixed short string per class — never the URL
+// or token material (leak-scan line, §5.4).
+func sanitizeErr(err error) string {
+	var rl *RateLimitError
+	if errors.As(err, &rl) {
+		return "rate limited"
+	}
+	if errors.Is(err, ErrForgeKind) {
+		return ErrForgeKind.Error()
+	}
+	return "sync wire error"
+}
+
+// forgeCfg is the {kind,owner,repo,api_base?} shape of context_projects.forge.
+type forgeCfg struct {
+	Kind    string `json:"kind"`
+	Owner   string `json:"owner"`
+	Repo    string `json:"repo"`
+	APIBase string `json:"api_base"`
+}
+
+func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
+	var f forgeCfg
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return RepoRef{}, fmt.Errorf("forge: invalid forge config: %w", err)
+		}
+	}
+	if f.Kind != "" && f.Kind != "github" {
+		return RepoRef{}, ErrForgeKind
+	}
+	if f.Owner == "" || f.Repo == "" {
+		return RepoRef{}, fmt.Errorf("forge: owner/repo required in forge config")
+	}
+	return RepoRef{Owner: f.Owner, Repo: f.Repo, APIBase: f.APIBase}, nil
+}
+
+// cursor is the sync_cursor JSONB shape this wave reads/writes (issues leg).
+type cursor struct {
+	Issues struct {
+		ETag  string    `json:"etag"`
+		Since time.Time `json:"since"`
+	} `json:"issues"`
+	BackoffN int `json:"backoff_n"`
+}
+
+func readCursor(raw json.RawMessage) (etag string, since time.Time, backoffN int) {
+	var c cursor
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &c)
+	}
+	return c.Issues.ETag, c.Issues.Since, c.BackoffN
+}

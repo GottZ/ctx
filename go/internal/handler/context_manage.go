@@ -45,6 +45,10 @@ type ManageHandler struct {
 	// type_source='auto' blocks. nil in tests without classify wiring — the
 	// hook is then skipped (pre-T4 behaviour: update never classified).
 	blocktypes *blocktype.Registry
+	// forge feeds the forge-* sync family (I-F). Wired via SetForgeController
+	// (server.go) rather than the constructor to avoid churning its 28 call
+	// sites; nil ⇒ the forge-* actions answer 503.
+	forge ForgeController
 }
 
 // dreamLinkableTypes resolves the request's dream-linkable type allowlist
@@ -185,7 +189,14 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// the SAME wave — the dispatcher default is fail-open tierOpen).
 		h.dispatchTypeAction(w, r, authResult, req)
 	case "issue-create", "issue-update", "issue-get", "issue-list",
-		"issue-comment-create", "issue-link-create", "issue-link-delete":
+		"issue-comment-create", "issue-link-create", "issue-link-delete",
+		// Achse-02 forge sync family (I-F, design/02 §4.3/§4.5): folded into this
+		// ONE Achse-02 case arm (cyclop budget, max-complexity 25 — no new
+		// HandleManage branch). dispatchIssueAction re-routes forge-* to
+		// dispatchForgeAction; the actionTier split (issue=open, forge=tenant-admin)
+		// lives in actionTier, not here (routing ⟂ tier), and both are pinned by the
+		// S9 enumeration gate (§5.1).
+		"forge-token-set", "forge-sync-start", "forge-sync-status":
 		// Achse-02 issue/comment family (design/02 §4.3, K2 Store+Tier form):
 		// the OPERATOR transport over the store issue logic (store.InsertIssue-
 		// Block &c), mirroring the type-* operator transport — the primary UI
@@ -362,7 +373,16 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 		// already isolated". Routing lives in the tenant family, but the TIER is
 		// tenant-admin (Masterplan K10 trap: do NOT follow the routing arm into
 		// tierServerAdmin below, that would break D2 self-service).
-		"scope-create", "scope-list":
+		"scope-create", "scope-list",
+		// forge-token-set/forge-sync-start/forge-sync-status (Achse-02 I-F,
+		// design/02 §4.3): tierTenantAdmin — they inject a PAT / trigger outbound
+		// sync, so a plain member must not reach them, and the per-project
+		// ownership check in dispatchForgeAction (ownsProject) IS the A8 isolation
+		// precondition (a tenant-admin of tenant A gets a uniform 404 on tenant B's
+		// project). The EXPLICIT entry is mandatory (§5.1) — a forge-* dispatch arm
+		// without it would inherit the fail-open tierOpen default; the S9
+		// enumeration gate pins it RED-then-GREEN.
+		"forge-token-set", "forge-sync-start", "forge-sync-status":
 		return tierTenantAdmin, true
 	case "mcp-client-create", "mcp-client-list", "mcp-client-delete",
 		// backend-test: reads/probes a backend by id with its resolved key and

@@ -532,10 +532,13 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string) error
 	// (FK scope → context_tenant_scopes is NO ACTION), so it MUST go before BOTH the
 	// tenant row delete (step 8, which CASCADE-clears context_tenant_scopes) and the
 	// scope teardown — else that delete 23503s against a surviving project row.
-	// context_project_sync_runs CASCADEs off context_projects (079), so it drains for
-	// free; created_by → context_api_keys is ON DELETE SET NULL but the row is gone
+	// context_project_sync_runs (079) AND context_project_sync_map (080, I-F)
+	// both CASCADE off context_projects, so they drain for free with this delete
+	// (the map ALSO cascades off context_blocks in step 1-5, whichever fires first);
+	// created_by → context_api_keys is ON DELETE SET NULL but the row is gone
 	// before the key delete anyway. Bounded per tenant (one row per repo), so a
-	// single statement, not the batched scope-drain idiom.
+	// single statement, not the batched scope-drain idiom. The I-F gate proves
+	// "PruneTenant ⇒ 0 context_project_sync_map rows of the tenant".
 	//
 	// PROJECT-SECRET-DRAIN BOUNDARY (K14): webhook secrets (context_secrets in the
 	// PROJECT scope under 'webhook.github.<id>') do NOT exist yet — that surface is

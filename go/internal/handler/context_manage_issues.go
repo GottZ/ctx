@@ -78,6 +78,13 @@ type linkPayload struct {
 // upstream in enforceActionTier (all tierOpen).
 func (h *ManageHandler) dispatchIssueAction(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	switch req.Action {
+	// Achse-02 forge sync family (I-F) shares this Achse-02 dispatch arm (cyclop
+	// budget in HandleManage). Routing only — the tier is decided in actionTier.
+	case "forge-token-set", "forge-sync-start", "forge-sync-status":
+		h.dispatchForgeAction(w, r, req)
+		return
+	}
+	switch req.Action {
 	case "issue-create":
 		h.handleIssueCreate(w, r, ar, req)
 	case "issue-update":

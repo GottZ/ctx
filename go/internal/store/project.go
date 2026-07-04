@@ -25,6 +25,12 @@ import (
 
 // ProjectRow is one context_projects row (the /api/project wire shape; forge/
 // sync_cursor/metadata stay raw JSON — the API shows what the row stores).
+//
+// TokenSecret is the NAME of a context_secrets row (never the PAT) — it is
+// deliberately json:"-" so no list/get response can leak even the ref name via
+// the wire shape (the API exposes only token_set=bool via forge-sync-status,
+// design/02 §5.4). The remaining sync-state columns (SyncEnabled/PushEnabled/
+// LastError/BackoffUntil) are the Achse-02 I-F contract (migration 080).
 type ProjectRow struct {
 	ID               string          `json:"id"`
 	TenantID         string          `json:"tenant_id"`
@@ -33,8 +39,13 @@ type ProjectRow struct {
 	DisplayName      string          `json:"display_name"`
 	Forge            json.RawMessage `json:"forge"`
 	WebhookSecretRef *string         `json:"webhook_secret_ref"`
+	TokenSecret      *string         `json:"-"` // secret NAME only, never on the wire (§5.4)
 	SyncStatus       string          `json:"sync_status"`
+	SyncEnabled      bool            `json:"sync_enabled"`
+	PushEnabled      bool            `json:"push_enabled"`
 	LastSyncAt       *time.Time      `json:"last_sync_at"`
+	LastError        *string         `json:"last_error,omitempty"`
+	BackoffUntil     *time.Time      `json:"backoff_until,omitempty"`
 	SyncCursor       json.RawMessage `json:"sync_cursor"`
 	CreatedAt        time.Time       `json:"created_at"`
 	CreatedBy        *string         `json:"created_by,omitempty"`
@@ -58,7 +69,8 @@ var (
 func scanProject(row pgx.Row) (*ProjectRow, error) {
 	p := &ProjectRow{}
 	err := row.Scan(&p.ID, &p.TenantID, &p.Scope, &p.Identity, &p.DisplayName,
-		&p.Forge, &p.WebhookSecretRef, &p.SyncStatus, &p.LastSyncAt, &p.SyncCursor,
+		&p.Forge, &p.WebhookSecretRef, &p.TokenSecret, &p.SyncStatus, &p.SyncEnabled,
+		&p.PushEnabled, &p.LastSyncAt, &p.LastError, &p.BackoffUntil, &p.SyncCursor,
 		&p.CreatedAt, &p.CreatedBy, &p.Metadata)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -71,7 +83,7 @@ func scanProject(row pgx.Row) (*ProjectRow, error) {
 
 // projectSelect builds the RETURNING/SELECT column list with tenant_id/created_by
 // rendered as text (the ::text casts scanProject expects).
-const projectSelect = `id, tenant_id::text, scope, identity, display_name, forge, webhook_secret_ref, sync_status, last_sync_at, sync_cursor, created_at, created_by::text, metadata`
+const projectSelect = `id, tenant_id::text, scope, identity, display_name, forge, webhook_secret_ref, token_secret, sync_status, sync_enabled, push_enabled, last_sync_at, last_error, backoff_until, sync_cursor, created_at, created_by::text, metadata`
 
 // GetProjectByID returns one project by id, UNSCOPED — the caller applies
 // visibility (scope-read for member GET, tenant-ownership for admin PATCH/

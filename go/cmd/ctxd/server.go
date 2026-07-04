@@ -9,8 +9,10 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/forge"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/settings"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/web"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -78,6 +80,29 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		return settings.Reload(ctx, pool, cfgStore)
 	}
 	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler, gamingReload, quota, blocktypeReg)
+	// Forge PULL sync engine (Achse-02 I-F). Fail-closed gates: the tenant gate
+	// is store.TenantStatusForScope (found=false ⇒ skip + disable, S13); the
+	// issue-policy gate refuses a run unless the registry resolves an `issue`
+	// type with digest.include=false (§6.4 — else a 10k-issue import floods the
+	// topic map). NOTE: builtin.go compiles issue/comment into the base set, so
+	// this gate passes in production; it fires on a tenant override that sets
+	// digest.include=true or a Set genuinely lacking issue (see I-F return).
+	issuePolicyOK := func(ctx context.Context, scope string) (bool, string) {
+		set := blocktypeReg.SnapshotForTenant(ctx, scope)
+		pol, ok := set.Resolve("issue")
+		if !ok {
+			return false, "issue type not registered — deploy Achse-01 T3 + Welle I-C first"
+		}
+		if pol.Digest.Include {
+			return false, "issue policy has digest.include=true — would flood the topic map at 10k+ issues/repo"
+		}
+		return true, ""
+	}
+	tenantStatus := func(ctx context.Context, scope string) (string, bool, error) {
+		return store.TenantStatusForScope(ctx, pool, scope)
+	}
+	forgeSync := forge.NewSyncManager(pool, tenantStatus, issuePolicyOK)
+	manageH.SetForgeController(forgeSync)
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)
 	digestH := handler.NewDigestHandler(pool, blocktypeReg)
