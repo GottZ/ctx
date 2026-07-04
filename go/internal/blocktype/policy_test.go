@@ -65,8 +65,8 @@ func TestDecodePolicyRejects(t *testing.T) {
 		// "parent.mode" is RED against the pre-T11 blanket message (which never
 		// mentioned parent.mode) and GREEN against the cross-field message.
 		{"aggregate-to-parent with parent.mode=none (cross-field)", `{"v":1,"retrieval":{"policy":"aggregate-to-parent"}}`, "parent.mode"},
-		{"parent.mode optional before Achse 02", `{"v":1,"parent":{"mode":"optional"}}`, "parent.mode"},
-		{"parent.mode required before Achse 02", `{"v":1,"parent":{"mode":"required"}}`, "parent.mode"},
+		// parent.mode optional|required are UNLOCKED in Welle I-D (positive probe:
+		// TestDecodePolicyParentModeUnlocked); only an UNKNOWN mode still rejects.
 		{"unknown parent.mode", `{"v":1,"parent":{"mode":"maybe"}}`, "parent.mode"},
 		{"threshold out of range", `{"v":1,"guard":{"threshold_duplicate":1.2}}`, "threshold_duplicate"},
 		{"unknown guard.mode", `{"v":1,"guard":{"mode":"delete"}}`, "guard.mode"},
@@ -208,10 +208,12 @@ func TestAggregateToParentFreischaltung(t *testing.T) {
 
 // TestCommentSeedConfigInterim pins the INTERIM comment seed AND the fail-closed
 // gate that "kein Gate aufweichen" preserves: the effective §4.1 values (all-off
-// guard/dream/digest/overview) decode, while the §4.1 target combo
-// (retrieval=aggregate-to-parent + parent.mode=required) still REJECTS — no
-// longer for the aggregate value (WF T11 accepts it) but because the parent_id
-// write path (parent.mode gate, Achse 02 / I-D) does not ship in this base.
+// guard/dream/digest/overview) decode. Integrator note (T11 ∧ I-D merged): BOTH
+// mechanisms now ship — T11 unlocked aggregate-to-parent, I-D unlocked
+// parent.mode — so the §4.1 target combo (aggregate-to-parent +
+// parent.mode=required/comment-of) now DECODES; the probe below is the positive
+// proof that the seed FLIP (wave I-E) is unblocked. The comment SEED itself
+// stays INTERIM (retrieval=excluded, parent.mode=none) until I-E flips it.
 func TestCommentSeedConfigInterim(t *testing.T) {
 	cfg := `{"v":1,"retrieval":{"policy":"excluded"},"guard":{"check":false,"candidate":false},` +
 		`"dream":{"linkable":false},"digest":{"include":false},"overview":{"include":false},` +
@@ -226,9 +228,56 @@ func TestCommentSeedConfigInterim(t *testing.T) {
 	if p.Guard.Check || p.Guard.Candidate || p.Dream.Linkable || p.Digest.Include || p.Overview.Include {
 		t.Errorf("comment must be out of every pipeline, got %+v", p)
 	}
-	if _, err := DecodePolicy("comment", globalScope, true, false,
-		[]byte(`{"v":1,"retrieval":{"policy":"aggregate-to-parent"},"parent":{"mode":"required","relationship":"comment-of"}}`)); err == nil {
-		t.Fatal("§4.1 comment (aggregate-to-parent + required) accepted — gate softened")
+	// Integrator (T11 ∧ I-D): the §4.1 target config now DECODES — both gates
+	// are unlocked with their mechanisms shipped. This positive probe proves the
+	// I-E seed flip is unblocked; a regression re-introducing either blanket
+	// reject turns it red.
+	q, err := DecodePolicy("comment", globalScope, true, false,
+		[]byte(`{"v":1,"retrieval":{"policy":"aggregate-to-parent"},"parent":{"mode":"required","relationship":"comment-of"}}`))
+	if err != nil {
+		t.Fatalf("§4.1 comment target (aggregate-to-parent + required) rejected after T11+I-D: %v", err)
+	}
+	if q.Retrieval.Kind != RetrievalAggregateToParent || q.Parent.Mode != ParentModeRequired || q.Parent.Relationship != "comment-of" {
+		t.Errorf("§4.1 target decoded to %+v / %+v", q.Retrieval, q.Parent)
+	}
+}
+
+// TestDecodePolicyParentModeUnlocked is the I-D positive probe: parent.mode
+// optional|required + a comment-of relationship now DECODE (the parent_id write
+// path ships in this wave). RED against the pre-I-D validator that rejected any
+// non-"none" parent.mode ("not accepted before the parent_id write path ships").
+func TestDecodePolicyParentModeUnlocked(t *testing.T) {
+	for _, mode := range []string{ParentModeOptional, ParentModeRequired} {
+		cfg := `{"v":1,"parent":{"mode":"` + mode + `","relationship":"comment-of"}}`
+		p, err := DecodePolicy("comment", globalScope, false, false, []byte(cfg))
+		if err != nil {
+			t.Fatalf("parent.mode=%q rejected after I-D unlock: %v", mode, err)
+		}
+		if p.Parent.Mode != mode || p.Parent.Relationship != "comment-of" {
+			t.Errorf("parent.mode=%q decoded to %+v", mode, p.Parent)
+		}
+	}
+	// Resolve through a Set to exercise the accessor.
+	def, err := DecodePolicy("knowledge", globalScope, true, true, []byte(validBase))
+	if err != nil {
+		t.Fatalf("DecodePolicy(knowledge): %v", err)
+	}
+	req, err := DecodePolicy("comment", globalScope, false, false, []byte(`{"v":1,"parent":{"mode":"required"}}`))
+	if err != nil {
+		t.Fatalf("DecodePolicy(comment required): %v", err)
+	}
+	set, err := NewSet([]Policy{def, req})
+	if err != nil {
+		t.Fatalf("NewSet: %v", err)
+	}
+	if got := set.ParentMode("comment"); got != ParentModeRequired {
+		t.Errorf("Set.ParentMode(comment) = %q, want required", got)
+	}
+	if got := set.ParentMode("knowledge"); got != ParentModeNone {
+		t.Errorf("Set.ParentMode(knowledge) = %q, want none (bestand)", got)
+	}
+	if got := set.ParentMode("does-not-exist"); got != ParentModeNone {
+		t.Errorf("Set.ParentMode(unknown) = %q, want none fallback", got)
 	}
 }
 

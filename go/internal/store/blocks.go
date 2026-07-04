@@ -38,6 +38,11 @@ type Block struct {
 	TypeName       string `json:"type,omitempty"`
 	LifecycleState string `json:"lifecycle_state,omitempty"`
 	TypeSource     string `json:"type_source,omitempty"`
+	// WorkflowStatus (M077, Achse 02): the per-block workflow state VALUE (the
+	// SET of valid states is type-config policy). Filled only by the issue paths
+	// (InsertIssueBlock/GetIssue/UpdateIssueBlock/ListWorkflowBlocks); every
+	// other SELECT leaves it "" (omitempty), so no existing wire shape changes.
+	WorkflowStatus string `json:"workflow_status,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }

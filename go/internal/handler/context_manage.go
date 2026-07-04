@@ -184,6 +184,16 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// lives in actionTier (§5.4-N1: dispatch arm AND tier entry land in
 		// the SAME wave — the dispatcher default is fail-open tierOpen).
 		h.dispatchTypeAction(w, r, authResult, req)
+	case "issue-create", "issue-update", "issue-get", "issue-list",
+		"issue-comment-create", "issue-link-create", "issue-link-delete":
+		// Achse-02 issue/comment family (design/02 §4.3, K2 Store+Tier form):
+		// the OPERATOR transport over the store issue logic (store.InsertIssue-
+		// Block &c), mirroring the type-* operator transport — the primary UI
+		// surface is the REST /api/project issue family (W6/W7) over the SAME
+		// store functions (one logic, two transports). All tierOpen; scope
+		// isolation lives in the store layer (§5.2). The actionTier entry is
+		// mandatory (§4.3) and pinned by the S9 enumeration gate.
+		h.dispatchIssueAction(w, r, authResult, req)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
@@ -296,7 +306,21 @@ func enforceActionTier(w http.ResponseWriter, req manageRequest, ar *auth.AuthRe
 	return true // tierOpen
 }
 
+// actionTier reports the admin tier for dispatch. Thin wrapper over
+// actionTierExplicit that discards the explicit-classification bool.
 func actionTier(req manageRequest) adminTier {
+	t, _ := actionTierExplicit(req)
+	return t
+}
+
+// actionTierExplicit reports the tier AND whether the action was EXPLICITLY
+// classified (a switch case) rather than falling through to the fail-open
+// default. The S9 enumeration gate (action_tier_gate_test) asserts every
+// DISPATCHED manage action is explicitly classified: a new dispatch arm added
+// without an actionTier entry makes ok=false ⇒ the gate goes RED (§5.1/S9 — the
+// dispatcher default is fail-open tierOpen, so a forgotten entry would silently
+// admit every valid key).
+func actionTierExplicit(req manageRequest) (adminTier, bool) {
 	switch req.Action {
 	// Per-tenant tier: tenant-isolated handlers (T22/T23/T24 — L1/L2/L3 closed).
 	case "api-key-create", "api-key-list", "api-key-delete",
@@ -339,7 +363,7 @@ func actionTier(req manageRequest) adminTier {
 		// tenant-admin (Masterplan K10 trap: do NOT follow the routing arm into
 		// tierServerAdmin below, that would break D2 self-service).
 		"scope-create", "scope-list":
-		return tierTenantAdmin
+		return tierTenantAdmin, true
 	case "mcp-client-create", "mcp-client-list", "mcp-client-delete",
 		// backend-test: reads/probes a backend by id with its resolved key and
 		// is NOT tenant-filtered (poolBackendByID scans all) → server-admin.
@@ -390,17 +414,26 @@ func actionTier(req manageRequest) adminTier {
 		// default is fail-open tierOpen — a forgotten entry would admit every
 		// valid key; the DB-less 403 gate probe pins it).
 		"type-create", "type-update", "type-delete":
-		return tierServerAdmin
+		return tierServerAdmin, true
 	case "type-list", "type-get":
 		// Deliberately open (design/01 §5.4): every UI needs type metadata
 		// for badges. The HANDLER scopes the rows to '_global' ∪ the caller's
 		// own tenant namespace (K-T1: gate admits only, handler scopes).
-		return tierOpen
+		return tierOpen, true
+	case "issue-create", "issue-update", "issue-get", "issue-list",
+		"issue-comment-create", "issue-link-create", "issue-link-delete":
+		// Achse-02 issue/comment family (design/02 §4.3, K2 Store+Tier form):
+		// tierOpen — scope isolation is enforced in the store layer
+		// (writableBlockScopes / ReadScopes, §5.2), not by an admin tier. The
+		// EXPLICIT entry is mandatory (§4.3 "verbindlicher actionTier-Eintrag pro
+		// Action"): without it these dispatched actions would inherit the
+		// fail-open tierOpen default silently — the S9 enumeration gate pins it.
+		return tierOpen, true
 	case "dream-mode":
 		if isDreamModeMutation(req) {
-			return tierServerAdmin
+			return tierServerAdmin, true
 		}
-		return tierOpen
+		return tierOpen, true
 	case "gaming-mode":
 		// Only the MUTATING shape is gated: an ungated toggle would let any
 		// tenant key flip the whole system's egress topology (herbert out ⇒
@@ -408,11 +441,11 @@ func actionTier(req manageRequest) adminTier {
 		// change, design 03 §2.6). gaming.active gates a physical GPU host, not
 		// a tenant concept — server-global by design. Status read stays open.
 		if isGamingModeMutation(req) {
-			return tierServerAdmin
+			return tierServerAdmin, true
 		}
-		return tierOpen
+		return tierOpen, true
 	default:
-		return tierOpen
+		return tierOpen, false
 	}
 }
 

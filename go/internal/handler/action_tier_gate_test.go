@@ -66,6 +66,17 @@ func TestActionTier_Classification(t *testing.T) {
 		{"dream-mode", `{"mode":"off"}`, tierServerAdmin},
 		{"gaming-mode", "", tierOpen},
 		{"gaming-mode", `{"mode":"on"}`, tierServerAdmin},
+		// Achse-02 issue/comment family (I-D, design/02 §4.3): all tierOpen —
+		// scope isolation is in the store layer, not an admin tier. The EXPLICIT
+		// entries are mandatory (§4.3); the enumeration gate below proves a
+		// missing entry (fail-open tierOpen default, S9) goes red.
+		{"issue-create", "", tierOpen},
+		{"issue-update", "", tierOpen},
+		{"issue-get", "", tierOpen},
+		{"issue-list", "", tierOpen},
+		{"issue-comment-create", "", tierOpen},
+		{"issue-link-create", "", tierOpen},
+		{"issue-link-delete", "", tierOpen},
 		// ungated read/CRUD paths (auth + scope only)
 		{"get", "", tierOpen},
 		{"stats", "", tierOpen},
@@ -83,6 +94,37 @@ func TestActionTier_Classification(t *testing.T) {
 		if got := actionTier(req); got != c.want {
 			t.Errorf("actionTier(%q, data=%q) = %d, want %d", c.action, c.data, got, c.want)
 		}
+	}
+}
+
+// TestActionTier_IssueFamilyExplicitlyTiered is the Achse-02 I-D S9 fail-open
+// probe (design/02 §5.1 / §7): the manage dispatcher default is tierOpen, so a
+// dispatched action WITHOUT an actionTier entry silently inherits tierOpen (a
+// forgotten gated action would admit every valid key). Each issue-* action this
+// wave dispatches MUST be EXPLICITLY classified — actionTierExplicit returns
+// ok=true. Remove any issue arm from actionTier and its row here turns RED
+// (proven: the entries + dispatch arm land in the SAME commit). This is the
+// forward guard the design mandates: a future dispatched action (forge-repo-* in
+// I-F, tenant-admin) added without its actionTier entry is caught the same way.
+func TestActionTier_IssueFamilyExplicitlyTiered(t *testing.T) {
+	issueActions := []string{
+		"issue-create", "issue-update", "issue-get", "issue-list",
+		"issue-comment-create", "issue-link-create", "issue-link-delete",
+	}
+	for _, a := range issueActions {
+		tier, explicit := actionTierExplicit(manageRequest{Action: a})
+		if !explicit {
+			t.Errorf("action %q is dispatched but NOT explicitly tiered (fail-open tierOpen default, S9)", a)
+		}
+		if tier != tierOpen {
+			t.Errorf("action %q tier = %d, want tierOpen (store-layer isolation)", a, tier)
+		}
+	}
+	// Control: a truly unknown action DOES fall through to the fail-open default
+	// (explicit=false) — the exact property the explicit entries above guard
+	// against. If this ever reported true, the detection mechanism is broken.
+	if _, explicit := actionTierExplicit(manageRequest{Action: "definitely-not-an-action"}); explicit {
+		t.Error("unknown action reported as explicitly tiered — S9 fail-open detection broken")
 	}
 }
 

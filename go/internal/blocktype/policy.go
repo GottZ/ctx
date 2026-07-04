@@ -473,11 +473,16 @@ func validatePolicy(p *Policy) error {
 	}
 
 	switch p.Parent.Mode {
-	case ParentModeNone:
-	case ParentModeOptional, ParentModeRequired:
-		// Symmetric to aggregate-to-parent (§3.3 R1): no parent_id write path
-		// exists yet — accepting the mode would be silently ineffective.
-		return fmt.Errorf("blocktype %q: parent.mode=%q is not accepted before the parent_id write path ships (Achse 02)", p.Name, p.Parent.Mode)
+	case ParentModeNone, ParentModeOptional, ParentModeRequired:
+		// UNLOCKED in Achse 02 Welle I-D: the parent_id write path now ships
+		// (store.InsertCommentBlock composes store.PutBlockParent). optional|
+		// required are effective and no longer silently ineffective — the wave
+		// that brings the write path unlocks the vocabulary and carries the
+		// orphan handling (design/01 §9.1a / design/02 §4.2). The write path
+		// enforces the mode (InsertCommentBlock mandates a parent, so a
+		// required-parent block is never created orphaned; the T11 fold keeps a
+		// parent_id=NULL WARN as the defensive read-side line). aggregate-to-
+		// parent stays gated above (its fold mechanism is wave T11, not I-D).
 	default:
 		return fmt.Errorf("blocktype %q: unknown parent.mode %q", p.Name, p.Parent.Mode)
 	}

@@ -32,10 +32,11 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 
 ## Manage actions
 
-`POST /api/manage` covers CRUD, Guard API, stats, key/MCP-client management and the block-type registry.
+`POST /api/manage` covers CRUD, Guard API, stats, key/MCP-client management, the block-type registry and the issue corpus.
 
 - **Keys/clients:** `api-key-create` requires `home_scope`; key + MCP-client management and mutating `dream-mode` require an **admin key** since migration 052 (see [security](security.md#admin-tier)). `api-key-create`/`api-key-update` accept optional `write_scopes` (078, E4b) — explicit per-key write scopes that must be ⊆ `allowed_scopes ∪ {home_scope}` (else 400); the effective block-write gate and its double enforcement are in [multi-tenancy](multi-tenancy.md#per-key-write-scopes-e4b-migration-078). Per-tenant scoping of the `api-key-*` actions and the tenant lifecycle (`tenant-*`, `tenant-grant-*`, `scope-*`, `tenant-limit-set`, `tenant-usage-get`, `tenant-quota-*`, `block-grant-*`) are in [multi-tenancy](multi-tenancy.md).
 - **Block-type registry:** `type-list`/`type-get` are open reads; `type-create`/`type-update`/`type-delete` are the **operator transport** (server-admin, `_global` namespace) of the same store logic the REST `PUT/DELETE /api/types/{name}` surface uses — kept functional for MCP/CLI consumers, not superseded (see [Block-type registry](#block-type-registry)). `manage update` accepts a registry-validated `type` field; `list-meta` accepts the `types`/`types_exclude` filters.
+- **Issue corpus:** `issue-create`/`issue-update`/`issue-get`/`issue-list`/`issue-comment-create`/`issue-link-create`/`issue-link-delete` are the **operator transport** (all tierOpen; isolation is store-layer scope filtering, not an admin tier) over the same store issue logic the REST `/api/project` issue surface (W6/W7) uses — kept reachable for MCP/CLI operators, not the primary UI surface (see [Issue corpus](#issue-corpus)).
 - **Backend pool:** `backend-list`/`create`/`update`/`delete`/`test` — see [Backend pool](#backend-pool).
 
 **Type axes on responses.** `/api/search`, `manage get`, the MCP/chat `recent` surface and `manage list-meta` carry `type` (policy type), `lifecycle_state` and `type_source` per block; `/api/query` results carry `type`. Server-side type filters (`types` / `types_exclude` arrays) are pure opt-in bind parameters — no hard exclude (retrieval-excluded types stay browseable by design), with `block_roles_exclude` kept as the documented legacy alias everywhere including `/api/query` (both names ⇒ union).
@@ -56,6 +57,22 @@ The response row is the frozen wire shape (K5): `id`, `name`, `scope`, `display_
 **One write logic, two transports.** The REST `PUT/DELETE` handlers and the `manage type-create/update/delete` family call the **identical** store functions (`store.Create/Update/DeleteBlockType`), validation authority (`blocktype.DecodePolicy`) and error mapper — no mutation logic is duplicated. The `_global` write path carries the same authority (server-admin) on both transports, so there is no divergent gate; the tenant-admin write path exists only on REST. The manage family stays functional for its MCP/CLI consumers (not removed).
 
 CLI: `ctx types` / `ctx types list` (table on a TTY, JSON when piped), `ctx types get <name>`, `ctx types set <name>` (upsert) and `ctx types rm <name>` (delete).
+
+## Issue corpus
+
+Issues and comments are ordinary `context_blocks` (`type_name` `issue`/`comment`, migration 084 seeds) — they inherit scope isolation, RRF, Guard and Dream for free (Modell C, one project scope = one repo corpus). The **primary** wire surface is the REST `/api/project` issue family (workflow W6/W7); the `manage issue-*` actions below are the **operator transport** over the identical store functions (`store.InsertIssueBlock`/`UpdateIssueBlock`/`InsertCommentBlock`/`GetIssue`/`ListIssues`, plus the structural-link store) — one logic, two transports (masterplan K2). All are `tierOpen`: isolation is enforced in the store layer via the caller's write scopes (writes) and read scopes + block grants (reads), never an admin tier.
+
+| Action | Data | Semantics |
+|--------|------|-----------|
+| `issue-create` | `title` (required), `content?`, `scope?` (default `home_scope`), `tags?`, `metadata?`, `status?` | Insert-once issue. Title gets a per-scope `#L<seq>` prefix (so two issues may share a human title without a `23505`). `workflow_status` = the type's `initial` (a supplied `status` must be a valid entry, else `422`). |
+| `issue-update` | `id`; `title?`/`content?`/`tags?`/`metadata?`/`status?` | By-id patch (never upsert). A `status` change is validated against the type's workflow **policy data** (invalid ⇒ `422`); the `#L<seq>` prefix is preserved; `metadata` is JSONB-merged. A foreign/absent id ⇒ `404` (no oracle). |
+| `issue-get` | `id` | The issue + its comment thread. |
+| `issue-list` | `status?`, `labels?`, `limit?` (≤100), `cursor?` | Keyset board page. `status` set ⇒ one board column; absent ⇒ per-status merge. Scoped to the caller's read scopes (a foreign key sees an empty list). |
+| `issue-comment-create` | `parent_id` (required), `content?`, `author?`, `metadata?` | Comment under an issue. The scope is **always** the parent's (never the request); a parent the caller cannot write ⇒ `404`. |
+| `issue-link-create` | `source_id`, `target_id`, `link_class` | Structural edge (`context_structural_links`). `link_class` must be in the source type's `structural_link_classes` allowlist (else `422`); source and target must share one writable scope — a foreign/absent target ⇒ the **same** `404` as a nonexistent one (no existence oracle). |
+| `issue-link-delete` | `source_id`, `target_id`, `link_class` | Remove a structural edge. Foreign/absent source ⇒ `404`. |
+
+**render:'untrusted'.** Every body-bearing response (`issue-create`/`issue-update`/`issue-get`/`issue-list`/`issue-comment-create`) carries `render: "untrusted"` — issue/comment bodies are attacker-controlled markdown; the UI MUST take the sanitising render path (the field cannot be silently overlooked).
 
 ## Project register
 

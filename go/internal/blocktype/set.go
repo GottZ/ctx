@@ -204,6 +204,19 @@ func (s *Set) GuardSameScopeOnly(name string) bool {
 	return p.Guard.Candidates == GuardCandidatesSameScope
 }
 
+// ParentMode resolves the type's parent.mode (ParentModeNone|Optional|Required,
+// unlocked in Achse 02 Welle I-D). Unknown names and the zero value fall back to
+// ParentModeNone (no parent). The comment write path (store.InsertCommentBlock,
+// via the manage/REST handler) consults it: parent.mode=required means a block of
+// that type MUST be created with a parent (orphan prevention, design/01 §9.1a).
+func (s *Set) ParentMode(name string) string {
+	p, ok := s.policies[name]
+	if !ok || p.Parent.Mode == "" {
+		return ParentModeNone
+	}
+	return p.Parent.Mode
+}
+
 // DreamLinkableTypes returns the types admitted to the dream loop — BOTH
 // sides: pick eligibility and candidate/target sieve (§3.3 R1).
 func (s *Set) DreamLinkableTypes() []string { return s.dreamLinkable }
