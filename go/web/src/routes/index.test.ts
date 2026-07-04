@@ -26,6 +26,7 @@ const BASE_AREAS = [
   '*',
   '/admin',
   '/admin/tenants/:id',
+  '/admin/types',
   '/blocks',
   '/board',
   '/chat',

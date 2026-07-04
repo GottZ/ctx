@@ -74,9 +74,24 @@ export function workflowMock(method: string, path: string): MockResult | null {
   // --- /api/types[/{name}] ---
   if (inTypes) {
     if (path === TYPES_BASE && method === 'GET') return { status: 200, json: typeList }
-    if (path.startsWith(`${TYPES_BASE}/`) && method === 'GET') {
-      const first = (typeList as { types: unknown[] }).types[0]
-      return { status: 200, json: { success: true, type: first } }
+    if (path.startsWith(`${TYPES_BASE}/`)) {
+      const name = decodeURIComponent(path.slice(`${TYPES_BASE}/`.length))
+      const first = (typeList as { types: Array<{ name: string; builtin: boolean }> }).types[0]
+      if (method === 'GET') return { status: 200, json: { success: true, type: first } }
+      // PUT upsert (U10): echo a success type envelope with the URL name. The
+      // 422-draft mechanic is proven on the pure form logic (vitest) + a per-test
+      // page.route override (admin-types.spec.ts) — a body-blind namespace mock
+      // stays deterministic, it does not branch on the payload.
+      if (method === 'PUT') return { status: 200, json: { success: true, type: { ...first, name } } }
+      // DELETE (U10): the builtin '_global' seed is operator-protected — the
+      // server answers 409 ErrBlockTypeBuiltin (the UI also disables the control;
+      // double-layer, §4.7). Any custom (non-builtin) name deletes cleanly.
+      if (method === 'DELETE') {
+        if (name === first.name && first.builtin) {
+          return { status: 409, json: { success: false, error: 'builtin block types cannot be deleted' } }
+        }
+        return { status: 200, json: { success: true, deleted: name } }
+      }
     }
     return namespaceHardFail(method, path)
   }

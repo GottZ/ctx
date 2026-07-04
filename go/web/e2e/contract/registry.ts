@@ -538,6 +538,48 @@ export const contracts: PageContract[] = [
     },
   },
   {
+    // Type-registry admin (design 04 §4.7/§5.5, wave U10). Server-admin only —
+    // /admin/types inherits the /admin prefix-guard (guard.ts TIER_GATED, U04
+    // pin), so the generated deny test proves a tenant-admin is redirected to
+    // /status and /api/types never fires. Rollen-Minimum == Guard-Rolle
+    // (server-admin) → the default state seeds no role override.
+    route: '/admin/types',
+    name: 'admin-types',
+    role: 'server-admin',
+    mode: 'reading',
+    adminCalls: ['/api/types'],
+    states: [{ name: 'default', seed: {} }],
+    scale: {
+      exempt:
+        'Type-Registry ist eine bounded, betreiber-definierte Liste (≪ 100 Zeilen: builtin-Defaults ∪ Tenant-Overlays) — kein nutzergetriebener 10k-Pfad (design 04 §5.5-Zeile /admin/types).',
+    },
+    mobile: {
+      exempt:
+        'Admin-Verwaltungsfläche, Ziel-Viewport dark+light × Desktop (design 04 §5.5-Zeile /admin/types); die Mobile-Baseline landet mit dem sequenzierten Voll-Satz-Re-Freeze (design 06 §9.3), wie die PV4-Erstbelegung.',
+    },
+    flowDoc:
+      'Server-Admin öffnet die Type-Registry, liest die Typen mit Source-Badge (builtin/tenant) + Policy-Zusammenfassung und öffnet das deklarative Policy-Formular eines Typs (Edit-Kernpfad); builtin-Typen sind nicht löschbar (Delete disabled — die Komfort-Hälfte des Doppel-Schutzes, Server ist das Gate).',
+    primaryFlow: async (page) => {
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'Types', exact: true })).toBeVisible()
+      // The frozen /api/types list renders the builtin 'issue' row + its badge.
+      const rows = content.locator('section.card[aria-label="type registry"] tbody tr')
+      await expect(rows).toHaveCount(1)
+      const row = rows.first()
+      await expect(row).toContainText('issue')
+      await expect(row.locator('.badge')).toContainText('builtin')
+      // Builtin ⇒ Delete disabled (the double-layer comfort half, §4.7).
+      await expect(row.getByRole('button', { name: 'Delete' })).toBeDisabled()
+      // Edit opens the declarative policy form (Modal) with the builtin note +
+      // locked key — the human Edit core path.
+      await row.getByRole('button', { name: 'Edit' }).click()
+      const dialog = page.getByRole('dialog')
+      await expect(dialog).toBeVisible()
+      await expect(dialog.getByRole('heading', { name: /Edit issue/ })).toBeVisible()
+      await expect(dialog).toContainText('Builtin type')
+    },
+  },
+  {
     route: '/tenant',
     name: 'tenant',
     role: 'tenant-admin', // Rollen-Minimum: manageTenantKeys (tenant-admin), NICHT server-admin

@@ -813,6 +813,31 @@ export interface TypeResponse {
   type: BlockTypeView
 }
 
+// Source: go/internal/handler/types_write.go (typeWritePayload) — the PUT
+// /api/types/{name} body (workflow W2 write surface). `name` comes from the URL
+// and `scope` is role-pinned server-side — NEITHER is a body field (the strict
+// decoder 400s on an unknown/extra key, §5.2 scope-injection class). Every field
+// is optional: an absent field keeps its value on update / takes the documented
+// default on create, so a bare `{}` PUT never silently clears a field. `config`
+// is the full BlockTypeConfig envelope (validated by DecodePolicy — a violation
+// is a 422, surfaced as ApiError). is_default cannot change on an existing type
+// (loud 422, not a silent no-op).
+export interface BlockTypeWriteSpec {
+  display_name?: string
+  description?: string
+  is_default?: boolean
+  config?: BlockTypeConfig
+}
+
+// Source: types_write.go HandleDelete happy path — `deleted` is the removed
+// type's name. A builtin (409 ErrBlockTypeBuiltin) or a still-referenced type
+// (409 + active/archived count in the {success:false} envelope) is raised as
+// ApiError, never this shape.
+export interface TypeDeleteResponse {
+  success: true
+  deleted: string
+}
+
 // ============================================================================
 // Workflow-UI wire types (design/04 §3.1 / U03). The fixtures in
 // src/lib/api/__fixtures__/*.json are the shared contract source; the Go golden

@@ -6,7 +6,7 @@
 // admin territory and is out of U03 scope (§1 Liefert-nicht).
 
 import { apiFetch } from '../api'
-import type { TypeResponse, TypesListResponse } from './types'
+import type { BlockTypeWriteSpec, TypeDeleteResponse, TypeResponse, TypesListResponse } from './types'
 
 /**
  * The single path prefix of the type-registry surface. Imported by the e2e
@@ -32,4 +32,32 @@ export function listTypes(): Promise<TypesListResponse> {
  */
 export function getType(name: string): Promise<TypeResponse> {
   return apiFetch<TypeResponse>(`${TYPES_BASE}/${encodeURIComponent(name)}`)
+}
+
+/**
+ * PUT /api/types/{name} — upsert a type (workflow W2 write surface, U10). An
+ * existing row is updated in its own scope; an unknown name is created in the
+ * caller's role-pinned write scope (server-admin → '_global', tenant-admin →
+ * own tenant). A 422 (config/caps validation), 403 (a tenant-admin targeting a
+ * '_global' type) or 409 is raised as ApiError — the admin form keeps the draft
+ * open and surfaces the message at the field (no silent input loss).
+ */
+export function putType(name: string, spec: BlockTypeWriteSpec): Promise<TypeResponse> {
+  return apiFetch<TypeResponse>(`${TYPES_BASE}/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    body: JSON.stringify(spec),
+  })
+}
+
+/**
+ * DELETE /api/types/{name} (U10). A builtin type (409 ErrBlockTypeBuiltin) and a
+ * still-referenced type (409 + the active/archived count on ApiError.details)
+ * are raised as ApiError. The builtin case is ALSO guarded UI-side (delete
+ * control disabled), so this call is the server half of the double-layer
+ * builtin protection (§4.7): the UI-disable is comfort, the server is the gate.
+ */
+export function deleteType(name: string): Promise<TypeDeleteResponse> {
+  return apiFetch<TypeDeleteResponse>(`${TYPES_BASE}/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
 }

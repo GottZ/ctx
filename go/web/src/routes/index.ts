@@ -57,6 +57,12 @@ export const areaRoutes = {
   // lazy chunk. areaMode('/admin/tenants/:id') is unmapped → 'reading'; the N5
   // /admin prefix-guard already covers this sub-route (no extra guard needed).
   '/admin/tenants/:id': () => import('./admin/TenantDetail.svelte'),
+  // Type-registry admin (design 04 §4.7/§5.5, wave U10): the first web surface
+  // that makes classification policy writable (retrieval/guard/dream/parent).
+  // Server-admin-only via the /admin prefix-guard (guard.ts TIER_GATED, U04 pin)
+  // — no new guard entry. Registered in the SAME wave as TypesAdminPage.svelte so
+  // Vite resolves the lazy chunk; areaMode('/admin/types') is unmapped → 'reading'.
+  '/admin/types': () => import('./admin/types/TypesAdminPage.svelte'),
   '/tenant': () => import('./tenant/TenantPage.svelte'),
   // Workflow surface (design 04 §4.1, wave U04): additive lazy routes for the
   // issue list, issue detail and board. DARK-LAUNCHED — the nav section + home
