@@ -538,17 +538,15 @@ export const contracts: PageContract[] = [
     //            seed ALSO overrides GET /api/types with a workflow config
     //            (states + terminal) — the freeze type-list.json has none.
     //  - empty   a project whose board has zero columns → EmptyState.
-    // Mobile (390 Column-Pager) is deferred to U09; the desktop board scrolls
-    // horizontally already, but the pager UX is not built here (W21: no claim on
-    // untested scope).
+    // U09: mobile is the single-column Column-Pager (one column + prev/next);
+    // desktop keeps the horizontal multi-column scroll AND opens a card as a
+    // floating detail window (lib/windows interop).
     route: '/board',
     name: 'board',
     role: 'member',
     mode: 'board',
-    mobile: {
-      exempt:
-        'Der 390-Column-Pager ist U09 (design 04 §7-U09); U07 liefert nur das Desktop-Board (horizontal scrollend). Mobile-Baseline erst mit dem Pager, sonst friert sie eine Nicht-Pager-Sicht ein.',
-    },
+    // U09 lifts the U07 mobile opt-out: the 390 Column-Pager now has real
+    // baselines (design 04 §7-U09). Mobile visual/aria freeze from here.
     states: [
       { name: 'default', seed: { state: 'board' } },
       { name: 'empty', seed: { empty: true } },
@@ -569,7 +567,7 @@ export const contracts: PageContract[] = [
       },
     },
     flowDoc:
-      'Deep-Link auf /board rendert die Status-Spalten aus dem Board-Wire (Reihenfolge == Wire-Order == Type-Config), jede mit ihrem Wire-Count; terminale Spalten (registry workflow.terminal) starten eingeklappt, offene zeigen ihre Karten (Klick → /issues/:id).',
+      'Deep-Link auf /board rendert die Status-Spalten aus dem Board-Wire (Reihenfolge == Wire-Order == Type-Config), jede mit ihrem Wire-Count; terminale Spalten (registry workflow.terminal) starten eingeklappt, offene zeigen ihre Karten; Desktop-Klick öffnet das Detail als Fenster (lib/windows), Mobile (<SM) blättert einspaltig per Column-Pager (Tap navigiert zu /issues/:id).',
     primaryFlow: async (page) => {
       const content = page.locator('main.content')
       await expect(page.getByRole('heading', { name: 'Board' })).toBeVisible()

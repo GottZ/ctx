@@ -36,6 +36,7 @@
     ontoggle,
     onloadmore,
     onmove,
+    onopen,
   }: {
     column: ClassifiedColumn
     scope: string | null
@@ -48,6 +49,8 @@
     ontoggle: () => void
     onloadmore: () => void
     onmove?: (issueId: string, from: string) => void
+    // U09 desktop interop: forwarded to each Card (open detail as a window).
+    onopen?: (issueId: string, el: HTMLElement) => void
   } = $props()
 
   // Fixed card geometry (§4.3) — MUST match the .card height in Card.svelte (56)
@@ -133,6 +136,7 @@
               writable={droppable}
               pending={transitioning[issue.id] === true}
               {onmove}
+              {onopen}
             />
           </div>
         {/each}

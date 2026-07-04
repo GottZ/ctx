@@ -1,7 +1,7 @@
 <script lang="ts">
-  // Board surface (design 04 §4.1/§4.2/§4.5/§5.5, waves U07 + U08). Status columns
-  // straight from the board wire (order == wire order == the type-config status
-  // order, NEVER hardcoded), the wire count per column, per-column keyset
+  // Board surface (design 04 §4.1/§4.2/§4.5/§5.5, waves U07 + U08 + U09). Status
+  // columns straight from the board wire (order == wire order == the type-config
+  // status order, NEVER hardcoded), the wire count per column, per-column keyset
   // windowing, and the closed-collapse driven by the registry workflow.terminal
   // set (board-columns.ts joins the board wire with GET /api/types). Runs in the
   // `board` layout mode (full-bleed + horizontal scroll). API only through the
@@ -15,6 +15,14 @@
   // is the Move dialog (focus a card Move button → pick a target column). A
   // read-only board (writable:false) is exactly the U07 board: no drop targets,
   // no grips, no Move affordance.
+  //
+  // U09 adds two presentation seams (design 04 §7-U09):
+  //  - DESKTOP: a card click opens the issue detail as a floating window
+  //    (lib/windows content-snippet, the graph interop mechanism) instead of
+  //    navigating away — the anchor href stays for ctrl/middle-click + a11y.
+  //  - MOBILE (< SM): the horizontal multi-column board becomes a single-column
+  //    PAGER (prev / indicator / next); a card tap navigates to /issues/:id
+  //    (which is itself a G6-sheet there).
   //
   // NOTE: comments here avoid quote pairs / backticks — svelte2tsx scans the
   // script block for string literals without honouring line comments, so a
@@ -35,6 +43,10 @@
   import { canWriteScope } from '../../lib/workflow/writable'
   import { createBoardDnd, type BoardDndAdapter } from '../../lib/board/dnd'
   import { LiveSource } from '../../lib/workflow/live'
+  import { SM, onBelow } from '../../lib/layout/breakpoints'
+  import { WindowStore } from '../../lib/windows/windows.svelte'
+  import WindowManager from '../graph/WindowManager.svelte'
+  import IssueDetailContent from '../issues/IssueDetailContent.svelte'
 
   let scope = $state<string | null>(parseScopeParam(location.search))
   let projects = $state<ProjectRow[]>([])
@@ -43,6 +55,12 @@
   let dnd = $state<BoardDndAdapter | null>(null)
   let live = $state<LiveSource | null>(null)
   let announcement = $state('')
+
+  // U09 mobile: the persistent breakpoint state + the single-column pager index.
+  let belowSm = $state(false)
+  let pagerIndex = $state(0)
+  // U09 desktop: the floating-window store for card-opened issue details.
+  const winStore = new WindowStore()
 
   // Keyboard Move dialog (§4.5 keyboard path): a card raises onmove, the page
   // opens this dialog with the droppable target columns for that card.
@@ -56,6 +74,12 @@
     activeProject !== null &&
       canWriteScope(activeProject.scope, { homeScope: session.homeScope, readScopes: session.readScopes }),
   )
+
+  // Column pager derivations (mobile). pageIndex is pagerIndex clamped to the
+  // current column count so a project switch or a shrunk board never dangles.
+  const columnCount = $derived(model?.columns.length ?? 0)
+  const pageIndex = $derived(Math.min(pagerIndex, Math.max(0, columnCount - 1)))
+  const activeColumn = $derived(model?.columns[pageIndex] ?? null)
 
   /** Scope → URL (replaceState, sv-router-safe: no navigation event, §4.2). */
   function writeUrl(): void {
@@ -72,6 +96,9 @@
       writeUrl()
     }
     const proj = projectForScope(projects, resolved)
+    // New board context ⇒ reset the pager + drop any stale detail windows.
+    pagerIndex = 0
+    winStore.closeAll()
     if (proj === null) {
       model = null
       live?.stop()
@@ -117,6 +144,15 @@
     await activate()
   })
 
+  // Desktop↔mobile switch via the shared breakpoint (consistent with AppShell /
+  // WindowManager). Closing windows on the way down keeps the mobile pager clean.
+  onMount(() =>
+    onBelow(SM, (b) => {
+      belowSm = b
+      if (b) winStore.closeAll()
+    }),
+  )
+
   // One DnD adapter per mounted board; the drop callback drives the optimistic
   // transition. The monitor is inert while no card is a drag source (read-only),
   // so it is created unconditionally and torn down on unmount.
@@ -139,6 +175,30 @@
     scope = next
     writeUrl()
     void activate() // new project ⇒ new model
+  }
+
+  /** Card title lookup for the window title-bar + minbar chips (labelFor). */
+  function issueTitle(id: string): string {
+    if (model !== null) {
+      for (const col of model.columns) {
+        const hit = col.issues.find((i) => i.id === id)
+        if (hit !== undefined) return hit.title
+      }
+    }
+    return id.slice(0, 8)
+  }
+
+  /** Desktop card click → open the issue detail as a floating window (no nav
+   * loss). triggerEl is the card anchor so close returns focus to it (a11y). */
+  function openIssueWindow(issueId: string, el: HTMLElement | null): void {
+    winStore.open(issueId, el)
+  }
+
+  function pagerPrev(): void {
+    if (pageIndex > 0) pagerIndex = pageIndex - 1
+  }
+  function pagerNext(): void {
+    if (pageIndex < columnCount - 1) pagerIndex = pageIndex + 1
   }
 
   /** Run one optimistic transition + announce the outcome for the live region
@@ -217,6 +277,54 @@
         title="No board to show"
         copy="This project's type has no workflow statuses, so there is nothing to lay out."
       />
+    {:else if belowSm}
+      <!-- U09 mobile column pager: one column at a time, prev / indicator / next.
+           A card tap navigates to /issues/:id (the mobile sheet) — no interop
+           window here (onopen omitted). -->
+      <div class="pager" data-column-pager>
+        <div class="pager-nav">
+          <button
+            type="button"
+            class="pager-btn"
+            data-pager-prev
+            aria-label="Previous column"
+            disabled={pageIndex === 0}
+            onclick={pagerPrev}
+          >
+            ‹
+          </button>
+          <span class="pager-indicator" data-pager-indicator aria-live="polite">
+            {pageIndex + 1} / {columnCount}{activeColumn ? ` · ${activeColumn.status}` : ''}
+          </span>
+          <button
+            type="button"
+            class="pager-btn"
+            data-pager-next
+            aria-label="Next column"
+            disabled={pageIndex >= columnCount - 1}
+            onclick={pagerNext}
+          >
+            ›
+          </button>
+        </div>
+        {#if activeColumn}
+          <div class="board board-mobile" role="group" aria-label="Board columns">
+            <Column
+              column={activeColumn}
+              {scope}
+              adapter={dnd}
+              {writable}
+              transitioning={model.transitioning}
+              collapsed={model.isCollapsed(activeColumn.status)}
+              loadingMore={model.loadingMore[activeColumn.status] === true}
+              canLoadMore={model.canLoadMore(activeColumn.status)}
+              ontoggle={() => model?.toggle(activeColumn.status)}
+              onloadmore={() => model?.loadMore(activeColumn.status)}
+              onmove={openMove}
+            />
+          </div>
+        {/if}
+      </div>
     {:else}
       <div class="board" role="group" aria-label="Board columns">
         {#each model.columns as column (column.status)}
@@ -232,11 +340,29 @@
             ontoggle={() => model?.toggle(column.status)}
             onloadmore={() => model?.loadMore(column.status)}
             onmove={openMove}
+            onopen={openIssueWindow}
           />
         {/each}
       </div>
     {/if}
   </div>
+
+  {#if !belowSm}
+    <!-- U09 desktop interop: the floating-window layer over the board (design
+         04 §4.6). Empty + pointer-events:none until a card opens a window, so it
+         is invisible in the static board baselines. -->
+    <WindowManager store={winStore} labelFor={issueTitle}>
+      {#snippet content(win, titleId)}
+        <IssueDetailContent
+          projectId={activeProject?.id ?? ''}
+          issueId={win.id}
+          {scope}
+          statusOptions={model?.columns.map((c) => c.status) ?? []}
+          {titleId}
+        />
+      {/snippet}
+    </WindowManager>
+  {/if}
 </section>
 
 {#if moveDialog}
@@ -276,6 +402,8 @@
     min-height: 0;
     box-sizing: border-box;
     padding: var(--space-4) var(--shell-gutter);
+    /* positioned containing block for the U09 WindowManager overlay (inset:0). */
+    position: relative;
   }
   header {
     display: flex;
@@ -308,6 +436,54 @@
     overflow-x: auto;
     align-items: flex-start;
     padding-bottom: var(--space-2);
+  }
+  /* Mobile pager wrapper: a nav bar over a single full-width column. */
+  .pager {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .pager-nav {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+  .pager-btn {
+    font-family: var(--font-mono);
+    font-size: var(--fs-md);
+    line-height: var(--lh-solid);
+    padding: var(--space-1) var(--space-3);
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .pager-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+  .pager-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .pager-indicator {
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .board-mobile {
+    overflow-x: hidden;
+  }
+  .board-mobile > :global(.column) {
+    width: 100%;
+    max-width: none;
   }
   .state {
     margin: 0;

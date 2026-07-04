@@ -31,6 +31,7 @@
     writable = false,
     pending = false,
     onmove,
+    onopen,
   }: {
     issue: IssueRow
     scope: string | null
@@ -38,6 +39,9 @@
     writable?: boolean
     pending?: boolean
     onmove?: (issueId: string, from: string) => void
+    // U09 desktop interop: a plain click opens the issue detail as a floating
+    // window instead of navigating (the href stays for ctrl/middle-click + a11y).
+    onopen?: (issueId: string, el: HTMLElement) => void
   } = $props()
 
   const href = $derived(`/issues/${issue.id}${scope ? `?scope=${encodeURIComponent(scope)}` : ''}`)
@@ -49,6 +53,18 @@
     {href}
     data-board-card
     aria-disabled={pending ? 'true' : undefined}
+    onclick={(e) => {
+      // Desktop interop: a plain left-click opens the detail window. Modifier /
+      // middle clicks fall through to the anchor (open in a new tab, a11y). The
+      // sv-router link handler listens on window in the bubble phase and ignores
+      // defaultPrevented, so stopPropagation (not just preventDefault) is what
+      // keeps it from also navigating.
+      if (onopen && e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        onopen(issue.id, e.currentTarget)
+      }
+    }}
     use:cardDrag={{ adapter: writable ? adapter : null, issueId: issue.id, from: issue.workflow_status }}
   >
     <span class="title">{issue.title}</span>
