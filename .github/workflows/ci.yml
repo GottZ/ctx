@@ -13,6 +13,12 @@ on:
   pull_request:
     branches: [root]
   workflow_dispatch:
+  # Nightly cadence for the PV10 live tier (design 06 §4.7/§9.5, decision E3).
+  # The whole workflow re-runs at 03:00 UTC, but only web-live is scheduled-
+  # gated to actually do live work; docker is gated OFF schedule so a nightly
+  # run stays a verification, not a redundant image re-push.
+  schedule:
+    - cron: "0 3 * * *"
 
 # Deny-all default — jeder Job deklariert eigene Permissions.
 permissions: {}
@@ -165,6 +171,48 @@ jobs:
           # Mock-tier retention 14 days (design 06 §4.8); the live tier
           # (wave PV10) gets 3 — real keys flow only there.
           retention-days: 14
+          if-no-files-found: ignore
+
+  # ─── Stage 1c: Web Live Tier (PV10, nightly + on-demand) ─────────────────────
+  # Wave PV10 (design 06 §4.7/§9.5): the ≤15 @live specs run against a REAL,
+  # throwaway ctxd + Postgres (docker-compose.e2e.yml), seeded ONLY through
+  # production write paths (fail-closed target gate, §3.6). It proves classes
+  # the mock `web` job cannot — server enforcement (tenant isolation), fixture-
+  # shape truth (W10), real SSE transport — so it is intentionally OFF the
+  # per-PR path: nightly (schedule) + on-demand (dispatch) + PR opt-in via the
+  # `e2e-live` label (decision E3). run-live.sh needs only docker on the host;
+  # bun + Playwright run INSIDE the pinned toolchain image (--network host).
+  #
+  # RELEASE-GATE RULE (design 06 §9.5, README): a version tag is pushed only
+  # after a GREEN nightly run of THIS job — the live-tier extension of the
+  # repo's "CI is truth, not local" rule.
+  web-live:
+    name: Web Live Tier
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-live'))
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Live tier (throwaway compose stack + seed + @live specs)
+        run: bash go/web/e2e/live/run-live.sh
+
+      # Live traces retention 3 (design 06 §4.8): they record Bearer headers +
+      # the reveal-once owner_key, but every key is valid ONLY against the
+      # job-local instance that just died — impact null (§3.6 invariant 3).
+      - name: Upload live-tier report + traces
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: web-live-report
+          path: go/web/e2e/live/.results/
+          retention-days: 3
           if-no-files-found: ignore
 
   # ─── Stage 2: Unit Tests ──────────────────────────────────────────────────────
