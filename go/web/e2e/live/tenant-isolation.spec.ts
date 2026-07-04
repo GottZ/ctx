@@ -33,9 +33,13 @@ test('@live tenant-isolation: B sees its own sentinel, never A’s', async ({ pa
   //     A sentinel would surface here.
   await search.fill(state.tenants.a.sentinel)
   await search.press('Enter')
-  // Waiting for B's sentinel to leave the list confirms the A-search actually
-  // ran (the list refreshed) before the absence assert.
-  await expect(page.getByText(state.tenants.b.sentinel)).toHaveCount(0)
+  // Deterministic completion signal: the clean end state of this search IS the
+  // "No matches" empty state. A transient assert ("B's sentinel left the list")
+  // is satisfied mid-refresh — after the list clears but BEFORE the new hits
+  // render — so a leaked row could slip past a bare not.toContainText (verified
+  // live: the API returned the injected row while the probe stayed green).
+  // With a leak the hit row renders instead and this assert goes red.
+  await expect(page.getByText('No matches')).toBeVisible()
   // The search box VALUE holds the typed A-sentinel, but that is not a text
   // node; the rendered content must not contain it anywhere.
   await expect(page.locator('main.content')).not.toContainText(state.tenants.a.sentinel)
