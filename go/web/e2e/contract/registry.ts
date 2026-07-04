@@ -399,19 +399,53 @@ export const contracts: PageContract[] = [
     name: 'issues',
     role: 'member',
     mode: 'split',
-    states: [{ name: 'default', seed: {} }],
+    // U05 states (design 04 §5.5): default (single project auto-selected + list),
+    // empty (project with no issues → EmptyState), search (q typed → Top-N, no
+    // load-more affordance). The 10k DOM-cap proof is the scale dimension.
+    states: [
+      { name: 'default', seed: {} },
+      { name: 'empty', seed: { empty: true } },
+      {
+        name: 'search',
+        seed: {},
+        // Type a query + submit ⇒ search mode: the wire returns cursor null and
+        // the list renders "Top matches" with NO load-more affordance (§6.1).
+        prepare: async (page) => {
+          await page.getByRole('searchbox', { name: 'Search issues' }).fill('bug')
+          await page.getByRole('button', { name: 'Search' }).click()
+          await expect(page.locator('main.content')).toContainText('Top matches')
+        },
+      },
+    ],
     scale: {
-      exempt:
-        'U04-Scaffold ohne Datenanbindung — die virtualisierte 10k-Liste + ihr DOM-Cap-Beweis (< 200 Rows) landen mit der Datenschicht in U05 (design 04 §5.5).',
+      name: '10k',
+      seed: { state: '10k' },
+      // The virtualisation proof: 10k rows load into the model, virtua keeps the
+      // DOM at O(viewport). 200 = the design 04 §5.5 literal; remove the
+      // windowing (virtual-window.ts) and the page renders 10k <tr> (RED).
+      domCap: { selector: 'main.content tr[data-issue-row]', max: 200 },
+      flow: async (page) => {
+        // XSS-title-bleibt-Text (§5.5): row 0 carries a <script> title; it renders
+        // as literal text (Svelte-escaped), never as an element.
+        const first = page.locator('main.content tr[data-issue-row]').first()
+        await expect(first).toContainText('<script>alert(')
+        expect(await page.locator('main.content tr[data-issue-row] script').count()).toBe(0)
+        // Windowing follows the scroll: jump to the bottom, the DOM stays bounded
+        // (the runner re-asserts domCap after this flow) and the list still holds.
+        await page.locator('main.content .list').evaluate((el) => el.scrollTo(0, el.scrollHeight))
+        await expect(page.locator('main.content tr[data-issue-row]').first()).toBeVisible()
+      },
     },
     flowDoc:
-      'Deep-Link auf /issues rendert unter Dark-Launch die statische EmptyState (keine API-Calls); die Picker-Skeleton liest ?scope=. Liste, Server-Filter und ProjectPicker landen in U05.',
+      'Ein Member öffnet /issues: der einzige Projekt-Scope wird auto-selektiert (Picker), die virtualisierte Liste füllt sich, und der Filter-Zustand (inkl. ?scope=) wandert in die URL (deep-linkbar).',
     primaryFlow: async (page) => {
       const content = page.locator('main.content')
       await expect(page.getByRole('heading', { name: 'Issues' })).toBeVisible()
-      await expect(content).toContainText('No issues to show yet')
-      // Picker skeleton: no ?scope= in the contract path ⇒ the neutral placeholder.
-      await expect(content).toContainText('No project selected')
+      // The lone project auto-selects (0/1/N picker, §4.1.5) and writes ?scope=.
+      await expect(content).toContainText('Acme Main')
+      await expect(page).toHaveURL(/scope=acme(%3A|:)main/)
+      // The freeze list row renders through the virtualised table.
+      await expect(content.getByRole('link', { name: 'Example issue' })).toBeVisible()
     },
   },
   {

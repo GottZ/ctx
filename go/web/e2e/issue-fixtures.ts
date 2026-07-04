@@ -46,6 +46,86 @@ export interface MockResult {
   json: unknown
 }
 
+/** Extra dispatch context threaded from seedSession (wave U05): the request
+ * query string (list filters + keyset cursor) and the declarative seed state /
+ * empty flag, so the issue-list endpoint can serve the 10k scale corpus, the
+ * search-mode Top-N, an empty list, or the freeze default. Optional so the
+ * vitest namespace pins (issue-fixtures.test.ts) keep calling workflowMock with
+ * two args and get the freeze default. */
+export interface WorkflowMockOpts {
+  /** location.search of the request (e.g. '?q=bug&status=open&after=…'). */
+  search?: string
+  /** declarative seed state (design 06 §4.6) — '10k' serves the scale corpus. */
+  state?: 'default' | 'empty' | 'error' | '10k'
+  /** empty-corpus variant (empty:true / state 'empty'). */
+  empty?: boolean
+}
+
+// ---- issue-list scale + search generators (design 04 §5.5/§6.1, wave U05) ----
+// Synthetic corpus so the 10k JSON never lives in the repo (mirrors the blocks
+// scale generator, fixtures.ts §4.6). The DOM-cap gate needs the MODEL to hold
+// far more rows than the DOM renders, so the 10k scale serves the whole corpus
+// in ONE page (cursor null): virtua keeps the DOM < 200 while the model holds
+// 10k — remove the windowing and the page renders 10k rows (the RED state).
+
+const SCALE_TOTAL = 10_000
+const ISSUE_SCALE_STATUSES = ['open', 'in_progress', 'review', 'blocked', 'done']
+
+/** Row 0 carries an XSS-shaped title — the §5.5 "XSS-Titel bleibt Text" proof:
+ * the list renders titles via text interpolation (Svelte-escaped), so this stays
+ * literal text and never executes. */
+function scaleIssueTitle(i: number): string {
+  if (i === 0) return `<script>alert('xss-issue')</script> Injected title`
+  return `Scale Issue ${String(i).padStart(5, '0')}`
+}
+
+function scaleIssueRow(i: number): Record<string, unknown> {
+  return {
+    id: `11111111-1111-1111-1111-${String(i).padStart(12, '0')}`,
+    scope: 'acme:main',
+    type_name: 'issue',
+    title: scaleIssueTitle(i),
+    workflow_status: ISSUE_SCALE_STATUSES[i % ISSUE_SCALE_STATUSES.length],
+    updated_at: new Date(Date.UTC(2026, 6, 3, 12, 0, 0) - i * 60_000).toISOString(),
+  }
+}
+
+/** One issue-list page for the scale corpus. Honours ?limit (clamp ≤ 100) and
+ * the opaque ?after cursor (base64 of the next index); with NO limit it returns
+ * the whole corpus in one page (the DOM-cap probe) — cursor null. A `state`
+ * filter narrows to that workflow status. */
+function scaleIssueList(sp: URLSearchParams): Record<string, unknown> {
+  const state = sp.get('state')?.trim() ?? ''
+  const limitRaw = sp.get('limit')
+  const after = sp.get('after')
+  // Opaque keyset cursor (client never inspects it): 'idx-<n>' of the last row.
+  const start = after ? parseInt(after.replace(/^idx-/, ''), 10) + 1 : 0
+  const pageSize = limitRaw ? Math.max(1, Math.min(parseInt(limitRaw, 10) || 0, 100)) : SCALE_TOTAL
+  const issues: Record<string, unknown>[] = []
+  let i = start
+  while (issues.length < pageSize && i < SCALE_TOTAL) {
+    const r = scaleIssueRow(i)
+    if (state === '' || r.workflow_status === state) issues.push(r)
+    i += 1
+  }
+  const cursor = i < SCALE_TOTAL ? `idx-${i - 1}` : null
+  return { success: true, render: 'untrusted', issues, cursor }
+}
+
+/** Search-mode Top-N: ranked, cursor ALWAYS null (rank order is not keyset-
+ * paginable, §6.1) — the client renders no load-more affordance. */
+function searchIssueList(q: string): Record<string, unknown> {
+  const issues = Array.from({ length: 12 }, (_, k) => ({
+    ...scaleIssueRow(k),
+    title: `${q} — match ${k}`,
+  }))
+  return { success: true, render: 'untrusted', issues, cursor: null }
+}
+
+function emptyIssueList(): Record<string, unknown> {
+  return { success: true, render: 'untrusted', issues: [], cursor: null }
+}
+
 /**
  * A distinct, LOUD hard-fail for an un-mocked path INSIDE the workflow namespace.
  * Kept separate from the global 599 catch-all so a namespace miss is diagnosable
@@ -66,7 +146,7 @@ function namespaceHardFail(method: string, path: string): MockResult {
  *  - returns a 200 + freeze-JSON body for a mocked endpoint;
  *  - returns the namespace hard-fail for an un-mocked path INSIDE the namespace.
  */
-export function workflowMock(method: string, path: string): MockResult | null {
+export function workflowMock(method: string, path: string, opts: WorkflowMockOpts = {}): MockResult | null {
   const inTypes = path === TYPES_BASE || path.startsWith(`${TYPES_BASE}/`)
   const inIssues = path === ISSUES_BASE || path.startsWith(`${ISSUES_BASE}/`)
   if (!inTypes && !inIssues) return null
@@ -126,7 +206,16 @@ export function workflowMock(method: string, path: string): MockResult | null {
   // /api/project/{id}/issues*
   if (sub === 'issues') {
     if (seg.length === 2) {
-      if (method === 'GET') return { status: 200, json: issueList }
+      if (method === 'GET') {
+        const sp = new URLSearchParams(opts.search ?? '')
+        const q = sp.get('q')?.trim()
+        // Search mode wins (cursor null), then empty, then the scale corpus,
+        // else the freeze default (the vitest pins call with no opts → freeze).
+        if (q) return { status: 200, json: searchIssueList(q) }
+        if (opts.empty || opts.state === 'empty') return { status: 200, json: emptyIssueList() }
+        if (opts.state === '10k') return { status: 200, json: scaleIssueList(sp) }
+        return { status: 200, json: issueList }
+      }
       if (method === 'POST') return { status: 200, json: issueMutate }
       return namespaceHardFail(method, path)
     }

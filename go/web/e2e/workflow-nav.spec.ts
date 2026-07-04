@@ -27,11 +27,12 @@ test.describe('workflow surface — dark-launch cap gate (U04)', () => {
     // Rail: no Workflow group.
     await expect(page.locator('nav.rail [role="group"][aria-label="Workflow"]')).toHaveCount(0)
 
-    // Deep link to each dark-launched route still renders the page (EmptyState),
-    // never a redirect back to /home, never NotFound.
+    // Deep link to each dark-launched route still renders the page, never a
+    // redirect back to /home, never NotFound. (/issues auto-selects the lone
+    // project and writes ?scope=, so the URL carries a query — U05.)
     await gotoArea(page, '/issues')
-    await expect(page).toHaveURL(/\/issues$/)
-    await expect(content).toContainText('No issues to show yet')
+    await expect(page).toHaveURL(/\/issues(\?|$)/)
+    await expect(page.getByRole('heading', { name: 'Issues' })).toBeVisible()
 
     await gotoArea(page, '/board')
     await expect(page).toHaveURL(/\/board$/)
@@ -61,8 +62,8 @@ test.describe('workflow surface — dark-launch cap gate (U04)', () => {
 
     // The tile links into the issue surface.
     await tile.click()
-    await expect(page).toHaveURL(/\/issues$/)
-    await expect(content).toContainText('No issues to show yet')
+    await expect(page).toHaveURL(/\/issues(\?|$)/)
+    await expect(page.getByRole('heading', { name: 'Issues' })).toBeVisible()
 
     expect(errors, errors.join('\n')).toEqual([])
   })

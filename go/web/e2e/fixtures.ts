@@ -9,6 +9,7 @@
 
 import type { Page, Route } from '@playwright/test'
 import { workflowMock } from './issue-fixtures'
+import { ISSUES_BASE } from '../src/lib/api/issues'
 
 export type Role = 'server-admin' | 'tenant-admin' | 'member'
 
@@ -562,6 +563,9 @@ export interface RecordedCall {
   action?: string
   /** parsed JSON body for POST /api/manage + /api/search (cursor proofs). */
   body?: unknown
+  /** request query string incl. leading '?' (workflow GETs carry the list
+   * filters + the keyset ?after cursor here — the U05 scale round-trip proof). */
+  query?: string
 }
 
 /** Handle returned by seedSession — the generated deny/scale tests read `calls`. */
@@ -610,13 +614,19 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
 
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request()
-    const path = new URL(req.url()).pathname
+    const url = new URL(req.url())
+    const path = url.pathname
+    const search = url.search
     const method = req.method()
 
     // Mock-call recorder (PV4): every /api/** request is logged BEFORE dispatch
     // so the generated deny tests can assert admin-call ABSENCE and the scale
     // tests can prove the keyset-cursor round-trip from the actual wire bodies.
     const call: RecordedCall = { method, path }
+    // Workflow GETs carry their filters + keyset cursor in the query string
+    // (the issue endpoints are GET, not POST) — record it for the U05 scale
+    // cursor round-trip proof (the blocks scale proves it from the POST body).
+    if (search !== '' && (path === ISSUES_BASE || path.startsWith(`${ISSUES_BASE}/`))) call.query = search
     if (method === 'PUT' && path.startsWith('/api/settings/')) {
       // Settings edit-roundtrip (PV7): the PUT body is the postData proof the
       // /settings primaryFlow asserts on (design 06 §7-PV7).
@@ -780,7 +790,7 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
     // pinned). workflowMock returns null for paths OUTSIDE the namespace (fall
     // through to the generic catch-all) and its OWN loud 599 for an un-mocked
     // path INSIDE it — the closed N3 benign catch-all can never swallow these.
-    const wf = workflowMock(method, path)
+    const wf = workflowMock(method, path, { search, state, empty })
     if (wf) return route.fulfill({ status: wf.status, json: wf.json })
 
     // Unmapped /api/** → HARD-FAIL (design 06 §4.6, wave PV2). Was a benign
