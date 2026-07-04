@@ -1,13 +1,21 @@
-// {@html}-Zähl-Meta-Test (design 06 §5.6a, wave PV7) — the mechanical
-// convention guard: the ENTIRE frontend owns exactly ONE {@html} sink
-// (src/routes/chat/MessageBubble.svelte), fed exclusively by renderMarkdown
-// (src/lib/markdown — markdown-it html:false + DOMPurify + ctx: rewrite).
+// {@html}-Zähl-Meta-Test (design 06 §5.6a, wave PV7; extended U06) — the
+// mechanical convention guard: the ENTIRE frontend owns a FROZEN, enumerated set
+// of {@html} sinks, each fed exclusively by renderMarkdown (src/lib/markdown —
+// markdown-it html:false + DOMPurify + ctx: rewrite).
+//
+//   - src/lib/markdown/Markdown.svelte — the shared sanitized renderer used by
+//     the chat assistant turn, the issue body AND every issue comment (design 04
+//     §9.6: one markdown path, not many). U06 introduced this ONE sink so the
+//     issue-detail surface renders foreign markdown WITHOUT a second raw sink.
+//   - src/routes/chat/MessageBubble.svelte — the chat turn (kept as-is; it wraps
+//     the streaming cursor around the same renderMarkdown output).
 //
 // Why a frozen COUNT and not a lint rule: Achse 03 renders FOREIGN text
 // (GitHub issue comments) and MUST take the same renderMarkdown path; a second
-// sink added anywhere turns this test red BEFORE a review can overlook it.
-// Growing the freeze is a conscious decision: the new sink must consume
-// renderMarkdown, and the expected map below is extended in the same commit.
+// UNSANCTIONED sink added anywhere turns this test red BEFORE a review can
+// overlook it. Growing the freeze is a conscious decision (as U06 did): the new
+// sink must consume renderMarkdown, and the expected map below is extended in the
+// same commit — never as a side effect.
 //
 // Lives beside the other vitest meta-gates (coverage/a11y) under e2e/contract/
 // — src/ is svelte-checked with the app tsconfig (types: svelte + vite/client)
@@ -37,7 +45,7 @@ function svelteFiles(dir: string, prefix = ''): string[] {
 }
 
 describe('{@html} sink freeze (design 06 §5.6a)', () => {
-  it('exactly one {@html} sink exists: MessageBubble via renderMarkdown', () => {
+  it('exactly the frozen sinks exist, each rendering through renderMarkdown', () => {
     const found: Record<string, number> = {}
     for (const rel of svelteFiles(SRC_ROOT).sort()) {
       const n = (readFileSync(join(SRC_ROOT, rel), 'utf8').match(SINK) ?? []).length
@@ -48,6 +56,6 @@ describe('{@html} sink freeze (design 06 §5.6a)', () => {
       'the {@html} sink set changed — every sink MUST render through lib/markdown renderMarkdown ' +
         '(html:false + DOMPurify + ctx: rewrite, design 06 §5.6a); extend this freeze only together ' +
         'with that proof, never as a side effect',
-    ).toEqual({ 'routes/chat/MessageBubble.svelte': 1 })
+    ).toEqual({ 'lib/markdown/Markdown.svelte': 1, 'routes/chat/MessageBubble.svelte': 1 })
   })
 })

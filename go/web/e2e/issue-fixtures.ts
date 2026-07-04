@@ -126,6 +126,44 @@ function emptyIssueList(): Record<string, unknown> {
   return { success: true, render: 'untrusted', issues: [], cursor: null }
 }
 
+// ---- detail scale: the 500-comment thread (design 04 §5.5, wave U06) --------
+// The state '10k' seed serves a detail with 500 inline comments so the render-
+// budget proof (progressive-reveal cap keeps the rendered thread bounded while
+// the model holds all 500) has a fixture. cursor null = the whole thread in one
+// inline page.
+
+const SCALE_COMMENTS = 500
+
+function scaleComment(i: number): Record<string, unknown> {
+  const at = new Date(Date.UTC(2026, 6, 1, 0, 0, 0) + i * 60_000).toISOString()
+  return {
+    id: `22222222-2222-2222-2222-${String(i).padStart(12, '0')}`,
+    category: 'comment',
+    content: `Scale comment ${i} — thread render-budget probe (design 04 §5.5).`,
+    created_at: at,
+    lifecycle_state: 'active',
+    metadata: {},
+    scope: 'acme:main',
+    sensitivity: 'internal',
+    sensitivity_source: 'auto',
+    tags: [],
+    title: '',
+    type: 'comment',
+    type_source: 'manual',
+    updated_at: at,
+  }
+}
+
+function scaleIssueDetail(): Record<string, unknown> {
+  return {
+    success: true,
+    render: 'untrusted',
+    issue: (issueDetail as { issue: unknown }).issue,
+    comments: Array.from({ length: SCALE_COMMENTS }, (_, k) => scaleComment(k)),
+    comments_cursor: null,
+  }
+}
+
 /**
  * A distinct, LOUD hard-fail for an un-mocked path INSIDE the workflow namespace.
  * Kept separate from the global 599 catch-all so a namespace miss is diagnosable
@@ -220,7 +258,10 @@ export function workflowMock(method: string, path: string, opts: WorkflowMockOpt
       return namespaceHardFail(method, path)
     }
     if (seg.length === 3) {
-      if (method === 'GET') return { status: 200, json: issueDetail }
+      if (method === 'GET') {
+        if (opts.state === '10k') return { status: 200, json: scaleIssueDetail() }
+        return { status: 200, json: issueDetail }
+      }
       if (method === 'PATCH') return { status: 200, json: issueMutate }
       return namespaceHardFail(method, path)
     }

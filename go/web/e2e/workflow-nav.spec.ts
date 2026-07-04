@@ -40,7 +40,9 @@ test.describe('workflow surface — dark-launch cap gate (U04)', () => {
 
     await gotoArea(page, '/issues/550e8400-e29b-41d4-a716-446655440001')
     await expect(page).toHaveURL(/\/issues\/550e8400/)
-    await expect(content).toContainText('Issue detail is not wired up yet')
+    // U06: the deep link resolves the lone project + loads the detail (still an
+    // ungated member surface — visibility, not reachability, is the flag's job).
+    await expect(content.getByRole('heading', { name: 'Example issue' })).toBeVisible()
 
     expect(errors, errors.join('\n')).toEqual([])
   })

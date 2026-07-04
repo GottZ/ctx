@@ -449,22 +449,86 @@ export const contracts: PageContract[] = [
     },
   },
   {
-    // Template contract (design 06 §4.2): EIN Kontrakt pro Template, path? nötig.
+    // Template contract (design 06 §4.2): EIN Kontrakt pro Template, path nötig.
+    // U06 wires the real detail. States (design 04 §5.5):
+    //  - default      the freeze issue (scope acme:main) — read-only for the
+    //                 generic member (home 'home'): the deep-link-read-only
+    //                 baseline (no composer, read-only banner).
+    //  - dialog-status a WRITABLE issue (scope 'home', prepared via a detail
+    //                 override + reload) with the status-transition ConfirmDialog
+    //                 OPEN — the Q9 dialog-open Screenshot baseline (name scheme
+    //                 dialog-<name>; the matching ARIA snapshot lives in
+    //                 issue-detail.spec.ts, the harness snapshots only default).
     route: '/issues/:id',
     name: 'issue-detail',
     role: 'member',
     mode: 'split',
     path: '/issues/550e8400-e29b-41d4-a716-446655440001',
-    states: [{ name: 'default', seed: {} }],
+    states: [
+      { name: 'default', seed: {} },
+      {
+        name: 'dialog-status',
+        seed: {},
+        prepare: async (page) => {
+          // Serve a WRITABLE (home-scoped) issue for the detail GET so the
+          // status/composer controls render, then reload and open the confirm.
+          await page.route('**/api/project/*/issues/*', async (route) => {
+            const u = new URL(route.request().url())
+            if (route.request().method() !== 'GET' || u.pathname.endsWith('/comments')) return route.fallback()
+            return route.fulfill({
+              status: 200,
+              json: {
+                success: true,
+                render: 'untrusted',
+                comments: [],
+                comments_cursor: null,
+                issue: {
+                  id: '550e8400-e29b-41d4-a716-446655440001',
+                  category: 'task',
+                  tags: ['bug'],
+                  title: 'Writable issue',
+                  content: '# Writable\n\nBody markdown.',
+                  metadata: { sync_state: 'in_sync' },
+                  scope: 'home',
+                  type: 'issue',
+                  workflow_status: 'open',
+                  created_at: '2026-07-01T00:00:00Z',
+                  updated_at: '2026-07-03T00:00:00Z',
+                },
+              },
+            })
+          })
+          await page.reload()
+          await expect(page.locator('.shell')).toBeVisible()
+          await expect(page.getByRole('heading', { name: 'Writable issue' })).toBeVisible()
+          await page.getByRole('combobox', { name: 'Workflow status' }).selectOption('closed')
+          await page.getByRole('button', { name: 'Change status' }).click()
+          await expect(page.getByRole('dialog')).toBeVisible()
+        },
+      },
+    ],
     scale: {
-      exempt:
-        'U04-Scaffold ohne Datenanbindung — der virtualisierte 500-Comments-Thread + das uniform-404-Verhalten landen mit der Detail-Datenschicht in U06 (design 04 §5.5).',
+      // 500-comment thread (design 04 §5.5): the state '10k' seed makes the
+      // detail wire return 500 comments; the progressive-reveal cap keeps the
+      // rendered thread bounded (<= 150) while the model holds all 500 — the
+      // render-budget proof (remove the cap and the page renders 500 <li>).
+      name: '10k',
+      seed: { state: '10k' },
+      domCap: { selector: 'main.content li[data-comment]', max: 150 },
     },
     flowDoc:
-      'Deep-Link auf /issues/:id rendert unter Dark-Launch die statische EmptyState (keine API-Calls); Markdown-Body, Comments-Thread, Composer und Sync-Badge landen in U06.',
+      'Deep-Link auf /issues/:id lädt Issue + Kommentare: der Markdown-Body und jeder Kommentar rendern über die sanitizende lib/markdown-Pipeline, das Sync-Badge zeigt den Forge-Zustand, und im schreibbaren Scope erscheinen Composer + Status-/Titel-Mutation (sonst read-only).',
     primaryFlow: async (page) => {
-      await expect(page.getByRole('heading', { name: 'Issue' })).toBeVisible()
-      await expect(page.locator('main.content')).toContainText('Issue detail is not wired up yet')
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'Example issue' })).toBeVisible()
+      // The markdown body rendered through the shared pipeline.
+      await expect(content).toContainText('Body markdown')
+      // The one freeze comment renders in the thread.
+      await expect(content.locator('li[data-comment]')).toHaveCount(1)
+      // The freeze issue lives in acme:main; the generic member (home 'home')
+      // cannot write it → read-only (no composer), the §5.5 deep-link default.
+      await expect(content).toContainText('Read-only in this scope')
+      await expect(content.getByRole('textbox', { name: 'Add a comment' })).toHaveCount(0)
     },
   },
   {
