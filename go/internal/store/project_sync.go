@@ -317,3 +317,84 @@ func FlagSyncMapConflict(ctx context.Context, tx pgx.Tx, blockID string, at time
 	}
 	return nil
 }
+
+// ── W11 sync-trigger substrate (design/03 §4.4/§3.1) ────────────────────────.
+
+// CountSyncRunsSince counts the runs a project STARTED inside the trailing
+// window — the per-PROJECT rate substrate for project.sync.rate_limit (§4.4).
+// It counts by project_id, NOT api_key_id (the I6 CheckRateLimit dimension), so
+// N agent keys of one repo share ONE budget and cannot each fire 6 syncs/h at the
+// same GitHub token. It also returns retryAfter: how long until the OLDEST run in
+// the window ages out (so the 429 caller gets an honest wait, not a fixed guess);
+// 0 when no run is in the window. Index: idx_sync_runs_project (project_id,
+// started_at DESC), 079.
+func CountSyncRunsSince(ctx context.Context, pool *pgxpool.Pool, projectID string, window time.Duration) (count int, retryAfter time.Duration, err error) {
+	var secs float64
+	err = pool.QueryRow(ctx,
+		`SELECT count(*),
+		        COALESCE(EXTRACT(EPOCH FROM (min(started_at) + make_interval(secs => $2::double precision) - now())), 0)
+		   FROM context_project_sync_runs
+		  WHERE project_id = $1::uuid
+		    AND started_at > now() - make_interval(secs => $2::double precision)`,
+		projectID, window.Seconds()).Scan(&count, &secs)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: count sync runs: %w", err)
+	}
+	if secs < 0 {
+		secs = 0
+	}
+	return count, time.Duration(secs * float64(time.Second)), nil
+}
+
+// ListSyncRuns returns the newest N runs for a project (the diagnosis history
+// behind `ctx project issues sync --status` / GET .../sync). limit is clamped to
+// [1,50]. Empty slice (never nil-panic) when the project has no runs.
+func ListSyncRuns(ctx context.Context, pool *pgxpool.Pool, projectID string, limit int) ([]SyncRunRow, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT `+syncRunSelect+` FROM context_project_sync_runs
+		  WHERE project_id = $1::uuid ORDER BY started_at DESC LIMIT $2`, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: list sync runs: %w", err)
+	}
+	defer rows.Close()
+	out := make([]SyncRunRow, 0, limit)
+	for rows.Next() {
+		r := SyncRunRow{}
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.StartedAt, &r.FinishedAt, &r.Status, &r.Error, &r.Stats); err != nil {
+			return nil, fmt.Errorf("store: scan sync run row: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// NormalizeInterruptedSyncs is the boot-time crash recovery (design/03 §3.1): the
+// in-memory run-state (forge.SyncManager) does NOT survive a process restart, so a
+// project left at sync_status='running' by a crash is a lie — normalise it to
+// 'error' + last_error='interrupted', and close every open run row (status=
+// 'running') as 'interrupted'. Idempotent (a clean boot matches 0 rows). Called
+// once after migrations, before the router serves. Returns (projects, runs)
+// normalised for the boot log.
+func NormalizeInterruptedSyncs(ctx context.Context, pool *pgxpool.Pool) (projects int, runs int, err error) {
+	pt, err := pool.Exec(ctx,
+		`UPDATE context_projects
+		    SET sync_status = 'error', last_error = 'interrupted'
+		  WHERE sync_status = 'running'`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: normalize interrupted projects: %w", err)
+	}
+	rt, err := pool.Exec(ctx,
+		`UPDATE context_project_sync_runs
+		    SET status = 'interrupted', finished_at = now(), error = COALESCE(error, 'interrupted')
+		  WHERE status = 'running'`)
+	if err != nil {
+		return int(pt.RowsAffected()), 0, fmt.Errorf("store: normalize interrupted runs: %w", err)
+	}
+	return int(pt.RowsAffected()), int(rt.RowsAffected()), nil
+}

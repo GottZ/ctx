@@ -93,6 +93,7 @@ Work with a project's issues. The project is detected from the current repo (lik
 | `ctx project issues create [title]` | Create an issue. Title is the positional arg **or** `--title`; body is `--body` **or** stdin (`echo body \| ctx project issues create --title t`). `--label` (repeatable), `--status` (a valid entry state for the type policy) |
 | `ctx project issues comment <block-id>` | Add a comment to an issue's thread. Body is `--body` or stdin; `--author` labels it (default: anon) |
 | `ctx project issues status <block-id> <new-status>` | Move an issue to a new workflow status. The transition is validated against the type's policy data server-side; an out-of-policy target exits 1 (422) with the reason |
+| `ctx project issues sync [--status]` | Trigger a forge (GitHub) pull sync for the project (needs **write** access to its scope — decision E6=a), or with `--status` poll the current/last run without starting one. A double-start of the same project, the per-project rate limit, or the daemon-wide concurrency cap exit 1 (409/429) with the server's reason |
 
 Issue/comment titles, bodies and labels are attacker-controlled text (any user can open an issue in a mirrored repo). Human/TTY output runs every such value through a terminal-escape **allowlist** — all C0 controls except newline/tab, DEL, and all C1 controls (raw byte or code point) are stripped — so a crafted title cannot drive escape sequences into your terminal, an agent log or CI output. The piped JSON is the machine contract and is left verbatim.
 

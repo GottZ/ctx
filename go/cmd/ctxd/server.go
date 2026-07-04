@@ -102,6 +102,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		return store.TenantStatusForScope(ctx, pool, scope)
 	}
 	forgeSync := forge.NewSyncManager(pool, tenantStatus, issuePolicyOK)
+	// W11: size the process-global sync concurrency semaphore from config
+	// (project.sync.max_concurrent, §4.4). Boot-only (restart-only key), before the
+	// router serves — the SetApplyIssues happens-before pattern, no resize race.
+	forgeSync.SetMaxConcurrent(cfgStore.Snapshot().Project.Sync.MaxConcurrent) //nolint:forbidigo // MT 06 BLIND: boot-time read of the restart-only, global-only project.sync.max_concurrent — no tenant exists at router construction, and a process-global semaphore cannot carry a per-tenant override.
 	// I-G Pull-APPLY: the 3-way direction logic + block/comment create-update +
 	// mapping + references edges (design/02 §4.5.2/§4.5.7). The applier resolves
 	// the issue type config per scope for the workflow_status mapping (the
@@ -182,6 +186,12 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// the mount (design/03 §4.2/§6.1). Needs the type registry to resolve the
 		// board/list status set from policy data.
 		handler.MountProjectIssues(r, handler.NewProjectIssuesHandler(pool, blocktypeReg).WithConfig(cfgStore))
+		// Project forge-sync TRIGGER + status poll (workflow W11): POST/GET
+		// /api/project/{id}/sync. POST is write-scope-gated (E6=a) + per-project rate
+		// limited (project.sync.rate_limit) under the global concurrency semaphore; GET
+		// is member scope-read. It shells the SAME forge.SyncManager the manage forge-
+		// sync-start action drives (one run engine, two transports).
+		handler.MountProjectSync(r, handler.NewProjectSyncHandler(pool, forgeSync, cfgStore))
 		// Digest — Topic map generation
 		r.Post("/api/digest", digestH.HandleDigest)
 		// Synthesize — manual daily synthesis trigger (Welle 42)

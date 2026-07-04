@@ -92,6 +92,7 @@ func issuesCmd(getClient func() (*Client, error)) *cobra.Command {
 	cmd.AddCommand(issuesCreateCmd(getClient, &project))
 	cmd.AddCommand(issuesCommentCmd(getClient, &project))
 	cmd.AddCommand(issuesStatusCmd(getClient, &project))
+	cmd.AddCommand(issuesSyncCmd(getClient, &project))
 	return cmd
 }
 
@@ -214,10 +215,113 @@ func issuesStatusCmd(getClient func() (*Client, error), project *string) *cobra.
 			"type's policy data server-side; an out-of-policy target is refused (exit 1 with\n" +
 			"the server's reason).",
 		Example: `  ctx project issues status <id> closed`,
-		Args: cobra.ExactArgs(2),
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runIssuesStatus(getClient, *project, args[0], args[1])
 		},
+	}
+}
+
+func issuesSyncCmd(getClient func() (*Client, error), project *string) *cobra.Command {
+	var status bool
+	cmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Trigger a forge (GitHub) pull sync for the project, or poll its status",
+		Long: "Start an on-demand forge pull sync (issues + comments) for the project, or,\n" +
+			"with --status, poll the current/last run without starting one. Starting needs\n" +
+			"WRITE access to the project's scope (whoever may write its issues may sync it).\n" +
+			"A second start of the SAME project while one is in flight exits 1 (409); the\n" +
+			"per-project rate limit and the daemon-wide concurrency cap also exit 1 (429/409)\n" +
+			"with the server's reason. On a TTY the output is human lines; piped, raw JSON.",
+		Example: `  ctx project issues sync
+  ctx project issues sync --status`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runIssuesSync(getClient, *project, status)
+		},
+	}
+	cmd.Flags().BoolVar(&status, "status", false, "poll the sync status instead of starting a run")
+	return cmd
+}
+
+// runIssuesSync starts a sync (POST) or polls status (GET). Both parse the
+// {success,…} envelope (success:false ⇒ stderr + exit 1) so a 409/429 refusal is
+// scriptable, not a silent exit 0.
+func runIssuesSync(getClient func() (*Client, error), project string, status bool) error {
+	c, err := getClient()
+	if err != nil {
+		return err
+	}
+	pid, err := resolveProjectID(c, project)
+	if err != nil {
+		return err
+	}
+	method := http.MethodPost
+	if status {
+		method = http.MethodGet
+	}
+	resp, _, err := c.Do(method, "/api/project/"+pid+"/sync", nil)
+	if err != nil {
+		return err
+	}
+	if err := checkSettingsEnvelope(resp); err != nil {
+		return err
+	}
+	if !StdoutIsTTY() {
+		PrintJSON(resp)
+		return nil
+	}
+	if status {
+		printSyncStatus(resp)
+	} else {
+		printSyncStarted(resp)
+	}
+	return nil
+}
+
+// syncRun mirrors the run-state fields the CLI renders (store.SyncRunRow / the
+// engine's in-memory SyncStatus overlap on these names).
+type syncRun struct {
+	Running   bool   `json:"running"`
+	Fetched   int    `json:"fetched"`
+	Applied   int    `json:"applied"`
+	Conflicts int    `json:"conflicts"`
+	RunID     string `json:"run_id"`
+	Status    string `json:"status"`
+}
+
+// printSyncStarted renders the POST response (a launched run).
+func printSyncStarted(resp []byte) {
+	var payload struct {
+		Run syncRun `json:"run"`
+	}
+	if err := json.Unmarshal(resp, &payload); err != nil {
+		PrintJSON(resp)
+		return
+	}
+	fmt.Printf("sync started (run %s)\n", shortID(payload.Run.RunID))
+}
+
+// printSyncStatus renders the GET response (current/last run + recent history).
+func printSyncStatus(resp []byte) {
+	var payload struct {
+		SyncStatus string  `json:"sync_status"`
+		LastSyncAt *string `json:"last_sync_at"`
+		LastError  *string `json:"last_error"`
+		Conflicts  int     `json:"conflicts"`
+		Run        syncRun `json:"run"`
+	}
+	if err := json.Unmarshal(resp, &payload); err != nil {
+		PrintJSON(resp)
+		return
+	}
+	fmt.Printf("status:    %s%s\n", sanitizeTerminal(payload.SyncStatus), map[bool]string{true: " (running)", false: ""}[payload.Run.Running])
+	if payload.LastSyncAt != nil && *payload.LastSyncAt != "" {
+		fmt.Printf("last sync: %s\n", shortDate(*payload.LastSyncAt))
+	}
+	fmt.Printf("conflicts: %d\n", payload.Conflicts)
+	if payload.LastError != nil && *payload.LastError != "" {
+		fmt.Printf("last error: %s\n", sanitizeTerminal(*payload.LastError))
 	}
 }
 

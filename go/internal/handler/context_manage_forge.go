@@ -136,6 +136,8 @@ func (h *ManageHandler) handleForgeSyncStart(w http.ResponseWriter, r *http.Requ
 		switch {
 		case errors.Is(err, forge.ErrSyncRunning):
 			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "sync already running for this project"})
+		case errors.Is(err, forge.ErrSyncSaturated):
+			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "sync concurrency limit reached — retry shortly", "retry_after_s": syncSaturatedRetryAfterS})
 		case errors.Is(err, forge.ErrTenantSuspended):
 			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "owning tenant is suspended"})
 		case errors.Is(err, forge.ErrNoTenant):

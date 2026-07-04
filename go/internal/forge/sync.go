@@ -30,11 +30,16 @@ const (
 	// tokenSecretPrefix names the per-project sealed PAT secret in the PROJECT
 	// scope (mirrors the webhook.github.<id> convention, §5.4). reveal-never.
 	tokenSecretPrefix = "forge.token."
+	// defaultMaxConcurrent bounds the daemon-wide count of in-flight syncs
+	// (project.sync.max_concurrent, §4.4). NewSyncManager seeds this; SetMaxConcurrent
+	// overrides it from config at boot.
+	defaultMaxConcurrent = 3
 )
 
 // Sentinel errors surfaced to the manage handler (mapped to 409/422/…).
 var (
 	ErrSyncRunning     = errors.New("forge sync already running for this project")
+	ErrSyncSaturated   = errors.New("forge sync concurrency limit reached")                                    // global semaphore full (§4.4 → 409 + retry_after_s)
 	ErrNoTenant        = errors.New("scope has no owning tenant")                                              // found=false gate (S13)
 	ErrTenantSuspended = errors.New("owning tenant is suspended")                                              // skip, not proceed
 	ErrIssuePolicy     = errors.New("issue type policy not resolvable — deploy Achse-01 T3 + Welle I-C first") // §6.4
@@ -113,6 +118,12 @@ type SyncManager struct {
 
 	mu   sync.Mutex
 	runs map[string]*SyncStatus
+
+	// sem is the process-global concurrency semaphore (project.sync.max_concurrent,
+	// §4.4): a buffered channel whose capacity is the slot count. nil ⇒ unlimited
+	// (test wiring built via struct literal). Sized once at boot (NewSyncManager /
+	// SetMaxConcurrent), before any sync starts — no resize race.
+	sem chan struct{}
 }
 
 // NewSyncManager builds the manager with the production GitHub client factory and
@@ -128,7 +139,19 @@ func NewSyncManager(pool *pgxpool.Pool, tenantStatus TenantStatusFn, issuePolicy
 		throttle:     NewThrottle(),
 		clock:        time.Now,
 		runs:         make(map[string]*SyncStatus),
+		sem:          make(chan struct{}, defaultMaxConcurrent),
 	}
+}
+
+// SetMaxConcurrent sizes the process-global concurrency semaphore from config
+// (project.sync.max_concurrent, §4.4). Call once at boot BEFORE serving (the
+// SetApplyIssues happens-before pattern) — it replaces the channel, so it is not
+// safe concurrent with a running sync. n<=0 falls back to the default.
+func (m *SyncManager) SetMaxConcurrent(n int) {
+	if n <= 0 {
+		n = defaultMaxConcurrent
+	}
+	m.sem = make(chan struct{}, n)
 }
 
 // SetApplyIssues wires the I-G Pull-APPLY hook (idempotent; call once at boot).
@@ -226,6 +249,21 @@ func (m *SyncManager) StartSync(ctx context.Context, project store.ProjectRow, d
 	if ok, reason := m.issuePolicy(ctx, project.Scope); !ok {
 		m.mu.Unlock()
 		return SyncStatus{}, fmt.Errorf("%w (%s)", ErrIssuePolicy, reason)
+	}
+
+	// Gate C — global concurrency semaphore (§4.4). The per-project single-flight
+	// above stops a double-start of the SAME project (ErrSyncRunning); THIS bounds
+	// the daemon-wide count so one tenant's 10k import cannot serialise every other
+	// project/tenant. A full semaphore ⇒ ErrSyncSaturated (the handler answers 409 +
+	// retry_after_s — a queue would be hidden state, sync is idempotently retriable).
+	// Held under mu (a non-blocking try is instant); released in finish() 1:1.
+	if m.sem != nil {
+		select {
+		case m.sem <- struct{}{}:
+		default:
+			m.mu.Unlock()
+			return SyncStatus{}, ErrSyncSaturated
+		}
 	}
 
 	st := &SyncStatus{ProjectID: project.ID, Running: true, DryRun: dryRun, StartedAt: m.clock()}
@@ -500,6 +538,15 @@ func (m *SyncManager) addPageStats(projectID string, page IssuePage) {
 
 // finish records the terminal run state in memory AND the DB run row.
 func (m *SyncManager) finish(projectID, runID, errMsg string, aborted, backoffSet bool) {
+	// Release the global concurrency slot acquired in StartSync (1:1 with a started
+	// run; the gate-refusal paths never reach finish). Non-blocking so a defensive
+	// stray finish can never deadlock.
+	if m.sem != nil {
+		select {
+		case <-m.sem:
+		default:
+		}
+	}
 	m.mu.Lock()
 	st := m.runs[projectID]
 	if st != nil {

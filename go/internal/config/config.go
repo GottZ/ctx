@@ -92,6 +92,7 @@ type Config struct {
 	Scheduler     SchedulerConfig
 	Pool          PoolConfig
 	Events        EventsConfig
+	Project       ProjectConfig
 	LLMLog        LLMLogConfig
 	WebChat       WebChatConfig
 	Tenant        TenantConfig
@@ -334,6 +335,25 @@ type EventsConfig struct {
 	// overridable, while the cadences above stay process-global (one collector,
 	// one proxy-bound ping window).
 	MaxConnections int `key:"events.max_connections" env:"CTX_EVENTS_MAX_CONNECTIONS" default:"8" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+}
+
+// ProjectConfig is the workflow project surface (design/03 §4.4). Only the forge
+// SYNC trigger carries runtime knobs today; the webhook rate/retention keys land
+// with the W13 inbound surface.
+type ProjectConfig struct {
+	Sync ProjectSyncConfig
+}
+
+// ProjectSyncConfig governs the manual forge-sync trigger (POST /api/project/{id}
+// /sync, workflow W11). RateLimit is counted PER PROJECT over context_project_
+// sync_runs (§4.4 — NOT per api_key_id like the I6 write throttle: N agent keys of
+// one repo share the budget, so they cannot storm one GitHub token). MaxConcurrent
+// is a PROCESS-global semaphore over the per-project run-state map — it can carry
+// no tenant override (a process-wide slot count is not a per-tenant quantity), so
+// it is global-only + restart (the semaphore is sized once at boot).
+type ProjectSyncConfig struct {
+	RateLimit     int `key:"project.sync.rate_limit" env:"CTX_PROJECT_SYNC_RATE_LIMIT" default:"6" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	MaxConcurrent int `key:"project.sync.max_concurrent" env:"CTX_PROJECT_SYNC_MAX_CONCURRENT" default:"3" mut:"restart" parse:"strict" tenancy:"global-only"`
 }
 
 // LLMLogConfig is the telemetry read surface. The retention knob (body-NULLing

@@ -88,6 +88,12 @@ func TestRegistryStrictSet(t *testing.T) {
 		// slot (R1). The other webchat.* budgets stay non-strict (engine
 		// withDefaults() is their net).
 		"webchat.concurrent_turns": true,
+		// W11 (design/03 §4.4) project sync ceilings: per-project starts/h and the
+		// process-global concurrency cap — int ceilings like events.max_connections,
+		// a typo'd cap silently falling back to the default would hide the intended
+		// GitHub-token protection, so both abort loudly.
+		"project.sync.rate_limit":     true,
+		"project.sync.max_concurrent": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {
@@ -164,13 +170,13 @@ func TestRegistryEnvNamespace(t *testing.T) {
 	// migrated from env vars. scheduler.home_scope (F1) + the F3-P3 trust-
 	// gating policy surface + the F3-P6 gaming toggle (persistent by design).
 	settingsOnly := map[string]bool{
-		"scheduler.home_scope":           true,
-		"pool.default_query_sensitivity": true,
-		"pool.default_block_sensitivity": true,
-		"pool.scope_sensitivity_floor":   true,
-		"gaming.active":                  true,
-		"gaming.disabled_backends":       true,
-		"tenant.allow_shared_secrets":    true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
+		"scheduler.home_scope":                  true,
+		"pool.default_query_sensitivity":        true,
+		"pool.default_block_sensitivity":        true,
+		"pool.scope_sensitivity_floor":          true,
+		"gaming.active":                         true,
+		"gaming.disabled_backends":              true,
+		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
 		"tenant.allow_cross_tenant_block_grant": true, // MT T43 (07-W6): operator-set per-tenant cross-tenant block-grant opt-in (global-only)
 	}
 	seen := map[string]string{}
@@ -228,6 +234,9 @@ func TestRegistryTenancySet(t *testing.T) {
 		"pool.scope_sensitivity_floor": true,
 		// per-tenant SSE cap
 		"events.max_connections": true,
+		// W11 per-project sync rate (max_concurrent is a PROCESS-global semaphore →
+		// global-only, so it is deliberately absent here)
+		"project.sync.rate_limit": true,
 		// per-tenant web-chat surface
 		"webchat.enabled": true, "webchat.max_iterations": true, "webchat.max_tokens": true,
 		"webchat.completion_budget": true, "webchat.tool_result_max_chars": true,
@@ -244,8 +253,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 52 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 52 (change it with intent)", got)
+	if got := len(overridable); got != 53 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 53 (change it with intent)", got)
 	}
 	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
 	// a tenant override here would flush the process-wide embed cache / flip the

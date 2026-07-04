@@ -18,6 +18,7 @@ import (
 	"github.com/GottZ/ctx/internal/rerank"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // backendBootstrapInput assembles the env-era tuples for the one-time pool
@@ -43,6 +44,19 @@ func backendBootstrapInput(c *config.Config) backends.BootstrapInput {
 // WITHOUT the full config load: it must work in a crash-looping container
 // where FromEnv could fail, so it reads LISTEN_ADDR raw.
 const defaultListenAddr = ":8080"
+
+// normalizeInterruptedSyncsBoot runs the W11 boot-time sync crash recovery
+// (design/03 §3.1): a project left at sync_status='running' by a crash is a lie
+// (the in-memory run-state died with the process), so normalise it to
+// error:interrupted and close open run rows as interrupted. Idempotent, never
+// fatal — a degraded normalisation must not block a boot that served yesterday.
+func normalizeInterruptedSyncsBoot(ctx context.Context, pool *pgxpool.Pool) {
+	if np, nr, err := store.NormalizeInterruptedSyncs(ctx, pool); err != nil {
+		slog.Error("sync normalization failed", "error", err)
+	} else if np > 0 || nr > 0 {
+		slog.Info("normalized interrupted syncs on boot", "projects", np, "runs", nr)
+	}
+}
 
 func main() {
 	// Health check mode: /ctx -health makes an HTTP request to the local server.
@@ -119,6 +133,11 @@ func main() {
 		slog.Error("migrations failed", "error", err)
 		os.Exit(1)
 	}
+
+	// W11 (design/03 §3.1): normalise crash-orphaned sync run-state (running ⇒
+	// interrupted) before the router serves — the in-memory state does not survive
+	// a restart. Extracted to keep main() under the cyclop budget.
+	normalizeInterruptedSyncsBoot(ctx, pool)
 
 	// WF T3 (design 01 §4.3): block-type registry — starts on the compiled-in
 	// builtin set, then loads the context_block_types rows with the error-class
