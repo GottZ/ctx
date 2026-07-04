@@ -36,6 +36,15 @@ export interface Capabilities {
   viewTenantBackends: boolean
   /** Ops surfaces (Settings/Secrets/Status) — RequireAdminOrTenantAdmin (§2a). Tier ≥ tenant-admin. */
   viewOpsSurfaces: boolean
+  /**
+   * Issue/board workflow surface (design 04 §4.1.3, wave U04). NOT tier-derived
+   * — a per-tenant feature flag from whoami.capabilities.workflow (B9). False
+   * whenever the flag is absent (dark-launch) OR loading, so the nav section +
+   * MemberHome tile stay hidden until the backend enables the surface. The
+   * routes themselves are ungated (deep-link renders the EmptyState); this flag
+   * is visibility only, like every other cap (R2 — real auth is server-side).
+   */
+  viewWorkflow: boolean
 }
 
 /** Per-tenant roles that map to the tenant-admin tier (owner manages the tenant, admin co-manages). */
@@ -49,6 +58,7 @@ const NO_CAPS = {
   manageMembers: false,
   viewTenantBackends: false,
   viewOpsSurfaces: false,
+  viewWorkflow: false,
 } as const
 
 /**
@@ -78,5 +88,8 @@ export function capabilitiesFor(whoami: WhoamiResponse | null): Capabilities {
     manageMembers: tenantAdminOrUp,
     viewTenantBackends: tenantAdminOrUp,
     viewOpsSurfaces: tenantAdminOrUp,
+    // Feature flag, not tier-derived: enabled for ANY resolved tier once the
+    // backend sends it, absent (⇒ false) until then (dark-launch, §4.1.3).
+    viewWorkflow: whoami.capabilities?.workflow === true,
   }
 }

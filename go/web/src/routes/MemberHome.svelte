@@ -72,6 +72,17 @@
           <a class="action" href="/chat">Start a chat →</a>
         {/snippet}
       </CapabilityCard>
+      <!-- Workflow entry (design 04 §4.1.6, wave U04): the ONLY member discovery
+           surface beside the rail. Gated on viewWorkflow (same flag as the nav
+           section) so it stays hidden under dark-launch and appears for both
+           directions of the U04 cap-negative probe. -->
+      {#if session.caps.viewWorkflow}
+        <CapabilityCard title="Issues & Board" copy="Track and work the issues synced into this workspace.">
+          {#snippet cta()}
+            <a class="action" href="/issues">Open issues →</a>
+          {/snippet}
+        </CapabilityCard>
+      {/if}
     </div>
   </div>
 </section>

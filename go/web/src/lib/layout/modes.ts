@@ -14,8 +14,10 @@
 // NON-reading modes are listed there, so /admin and /tenant need no entry; the
 // default already pins them to 'reading'.
 
-/** The four content-region layouts the shell drives via `data-mode`. */
-export type LayoutMode = 'reading' | 'canvas' | 'split' | 'thread'
+/** The content-region layouts the shell drives via `data-mode`. `board` (design
+ * 04 §4.1.2, wave U04) joins the original four: full-bleed like canvas, but with
+ * horizontal scroll-containment over the status columns (AppShell §4). */
+export type LayoutMode = 'reading' | 'canvas' | 'split' | 'thread' | 'board'
 
 /**
  * Non-reading area modes keyed by route prefix. Prefixes are disjoint, so first
@@ -27,6 +29,12 @@ const MODE_BY_PREFIX: ReadonlyArray<readonly [string, LayoutMode]> = [
   ['/graph', 'canvas'],
   ['/blocks', 'split'],
   ['/chat', 'thread'],
+  // Workflow surface (design 04 §4.1.2, U04): the issue list is a list+detail
+  // 'split' column like /blocks; /issues/:id inherits it via prefix-match. The
+  // board is its own full-bleed column mode. /admin/types (U10) stays the
+  // 'reading' default — no entry needed.
+  ['/issues', 'split'],
+  ['/board', 'board'],
 ]
 
 /**

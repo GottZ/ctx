@@ -30,6 +30,10 @@ const loading = capabilitiesFor(null)
 const member = capabilitiesFor(whoami({ admin: false, role: 'member' }))
 const tenantAdmin = capabilitiesFor(whoami({ admin: false, role: 'owner' }))
 const serverAdmin = capabilitiesFor(whoami({ admin: true, role: 'owner' }))
+// Workflow feature flag on (design 04 §4.1.3, U04) — a per-tenant flag, so it
+// stacks onto ANY tier. A plain member with the flag gets the workflow section.
+const memberWorkflow = capabilitiesFor(whoami({ admin: false, role: 'member', capabilities: { workflow: true } }))
+const serverAdminWorkflow = capabilitiesFor(whoami({ admin: true, role: 'owner', capabilities: { workflow: true } }))
 
 const hrefs = (caps: Capabilities) => navItems(caps).map((i) => i.href)
 
@@ -37,6 +41,7 @@ const CORPUS = ['/blocks', '/graph', '/chat']
 // S11 (Q3, design 05-§2.5): /tenant/backends ist aus der Rail ausgeblendet,
 // solange die Route nicht existiert — der Eintrag kehrt mit der
 // Tenant-Backends-Welle zurück (items.ts, auskommentierter push).
+const WORKFLOW = ['/issues', '/board']
 const TENANT = ['/tenant']
 const SERVER = ['/admin', '/settings', '/status', '/settings/backends']
 
@@ -48,6 +53,30 @@ describe('navItems', () => {
   it('member → corpus only', () => {
     expect(hrefs(member)).toEqual(CORPUS)
     expect(navItems(member).every((i) => i.section === 'corpus')).toBe(true)
+  })
+
+  it('workflow section hidden without the flag (dark-launch, U04)', () => {
+    for (const caps of [member, tenantAdmin, serverAdmin]) {
+      expect(navItems(caps).some((i) => i.section === 'workflow')).toBe(false)
+    }
+  })
+
+  it('workflow flag on → workflow section between corpus and tenant (U04)', () => {
+    // Plain member + flag: corpus, then the workflow section, nothing else.
+    expect(hrefs(memberWorkflow)).toEqual([...CORPUS, ...WORKFLOW])
+    const wf = navItems(memberWorkflow).filter((i) => i.section === 'workflow')
+    expect(wf.map((i) => i.href)).toEqual(WORKFLOW)
+    // /issues is exact so /issues/:id does not double-highlight it; /board is a leaf.
+    const byHref = new Map(navItems(memberWorkflow).map((i) => [i.href, i]))
+    expect(byHref.get('/issues')?.exact).toBe(true)
+    expect(byHref.get('/board')?.exact).toBeUndefined()
+  })
+
+  it('workflow section sits between corpus and tenant/server for a full tier (U04)', () => {
+    expect(hrefs(serverAdminWorkflow)).toEqual([...CORPUS, ...WORKFLOW, ...TENANT, ...SERVER])
+    const rank = { corpus: 0, workflow: 1, tenant: 2, server: 3 }
+    const seq = navItems(serverAdminWorkflow).map((i) => rank[i.section])
+    expect(seq).toEqual([...seq].sort((a, b) => a - b))
   })
 
   it('tenant-admin → corpus + tenant section', () => {
@@ -67,7 +96,7 @@ describe('navItems', () => {
   })
 
   it('sections are grouped in corpus → tenant → server order', () => {
-    const rank = { corpus: 0, tenant: 1, server: 2 }
+    const rank = { corpus: 0, workflow: 1, tenant: 2, server: 3 }
     const seq = navItems(serverAdmin).map((i) => rank[i.section])
     expect(seq).toEqual([...seq].sort((a, b) => a - b))
   })
@@ -82,9 +111,9 @@ describe('navItems', () => {
   })
 
   it('every item carries a non-empty iconKey and a known section', () => {
-    for (const item of navItems(serverAdmin)) {
+    for (const item of navItems(serverAdminWorkflow)) {
       expect(item.iconKey.length).toBeGreaterThan(0)
-      expect(['corpus', 'tenant', 'server']).toContain(item.section)
+      expect(['corpus', 'workflow', 'tenant', 'server']).toContain(item.section)
     }
   })
 })

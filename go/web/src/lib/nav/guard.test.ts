@@ -80,4 +80,26 @@ describe('guardArea', () => {
     expect(guardArea('/tenant/backends', member)).toBe('/home')
     expect(guardArea('/tenant/backends', tenantAdmin)).toBeNull()
   })
+
+  it('/admin/types inherits the /admin server-admin gate — no new entry (U04 pin, U10 vorgriff)', () => {
+    // design 04 §4.1.4: /admin/types matches the ['/admin', viewTenants] prefix
+    // via startsWith, so it is server-admin-only WITHOUT a dedicated TIER_GATED
+    // row. Pinned now so U10 can land the route knowing the guard already covers
+    // it (else a member/tenant-admin deep link would reach the type-registry admin).
+    expect(guardArea('/admin/types', member)).toBe('/home')
+    expect(guardArea('/admin/types', tenantAdmin)).toBe('/status')
+    expect(guardArea('/admin/types', serverAdmin)).toBeNull()
+  })
+
+  it('the workflow surface stays ungated for every tier (deep-link renders EmptyState, U04)', () => {
+    // design 04 §4.1.4: /issues, /issues/:id, /board are member surfaces — the
+    // guard never redirects them; visibility is the viewWorkflow flag's job, the
+    // real authorization stays server-side. A dark-launched deep link must reach
+    // the page (EmptyState), not bounce to a landing.
+    for (const caps of [member, tenantAdmin, serverAdmin]) {
+      for (const path of ['/issues', '/issues/550e8400-e29b-41d4-a716-446655440001', '/board']) {
+        expect(guardArea(path, caps)).toBeNull()
+      }
+    }
+  })
 })

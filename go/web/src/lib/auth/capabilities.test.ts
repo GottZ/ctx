@@ -33,6 +33,7 @@ describe('capabilitiesFor', () => {
       manageMembers: false,
       viewTenantBackends: false,
       viewOpsSurfaces: false,
+      viewWorkflow: false,
     })
   })
 
@@ -45,6 +46,7 @@ describe('capabilitiesFor', () => {
       manageMembers: true,
       viewTenantBackends: true,
       viewOpsSurfaces: true,
+      viewWorkflow: false, // feature flag off unless whoami carries it (dark-launch)
     })
   })
 
@@ -63,6 +65,7 @@ describe('capabilitiesFor', () => {
       manageMembers: true,
       viewTenantBackends: true,
       viewOpsSurfaces: true,
+      viewWorkflow: false,
     })
   })
 
@@ -82,7 +85,23 @@ describe('capabilitiesFor', () => {
       manageMembers: false,
       viewTenantBackends: false,
       viewOpsSurfaces: false,
+      viewWorkflow: false,
     })
+  })
+
+  it('viewWorkflow follows the whoami feature flag, not the tier (design 04 §4.1.3, U04)', () => {
+    // Absent flag → false for every tier (dark-launch).
+    expect(capabilitiesFor(whoami({ admin: false, role: 'member' })).viewWorkflow).toBe(false)
+    expect(capabilitiesFor(whoami({ admin: true, role: 'owner' })).viewWorkflow).toBe(false)
+    // Flag on → true even for a plain member (it is a per-tenant feature, not a tier).
+    expect(
+      capabilitiesFor(whoami({ admin: false, role: 'member', capabilities: { workflow: true } })).viewWorkflow,
+    ).toBe(true)
+    // Explicit false or an empty capabilities bag → false.
+    expect(
+      capabilitiesFor(whoami({ admin: false, role: 'member', capabilities: { workflow: false } })).viewWorkflow,
+    ).toBe(false)
+    expect(capabilitiesFor(whoami({ admin: false, role: 'member', capabilities: {} })).viewWorkflow).toBe(false)
   })
 
   it('unknown role → member (least privilege, R3 forward-compat)', () => {

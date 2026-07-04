@@ -34,8 +34,9 @@ export interface NavItem {
   label: string
   /** Stable key the shell-layout rail maps to an icon glyph (no component coupling here). */
   iconKey: string
-  /** The grouped section the rail renders the item under. */
-  section: 'corpus' | 'tenant' | 'server'
+  /** The grouped section the rail renders the item under. `workflow` (design 04
+   * §4.1.3, U04) sits between corpus and tenant, gated on caps.viewWorkflow. */
+  section: 'corpus' | 'workflow' | 'tenant' | 'server'
   /** Match active state on exact pathname rather than startsWith — set on a parent that has a child nav item so they don't both highlight. */
   exact?: boolean
 }
@@ -60,6 +61,18 @@ export function navItems(caps: Capabilities): NavItem[] {
       { href: '/blocks', label: 'Blocks', iconKey: 'blocks', section: 'corpus' },
       { href: '/graph', label: 'Graph', iconKey: 'graph', section: 'corpus' },
       { href: '/chat', label: 'Chat', iconKey: 'chat', section: 'corpus' },
+    )
+  }
+
+  // WORKFLOW — issue list + board (design 04 §4.1.3, U04). Gated on the
+  // per-tenant viewWorkflow flag (whoami.capabilities.workflow, NOT a tier), so
+  // it is hidden by default (dark-launch) and visible to ANY resolved tier once
+  // the backend enables the surface. Rendered between corpus and tenant.
+  if (caps.viewWorkflow) {
+    items.push(
+      // exact so /issues/:id (detail) does not also highlight the list item.
+      { href: '/issues', label: 'Issues', iconKey: 'issues', section: 'workflow', exact: true },
+      { href: '/board', label: 'Board', iconKey: 'board', section: 'workflow' },
     )
   }
 

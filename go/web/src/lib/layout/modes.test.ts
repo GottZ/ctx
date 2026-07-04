@@ -10,7 +10,7 @@ import { areaRoutes } from '../../routes/index'
 import { areaMode } from './modes'
 import type { LayoutMode } from './modes'
 
-const LAYOUT_MODES: readonly LayoutMode[] = ['reading', 'canvas', 'split', 'thread']
+const LAYOUT_MODES: readonly LayoutMode[] = ['reading', 'canvas', 'split', 'thread', 'board']
 
 describe('areaMode', () => {
   const cases: ReadonlyArray<readonly [string, LayoutMode]> = [
@@ -20,6 +20,9 @@ describe('areaMode', () => {
     ['/settings', 'reading'],
     ['/status', 'reading'],
     ['/settings/backends', 'reading'],
+    // Workflow surface (design 04 §4.1.2, U04): list is split, board its own mode.
+    ['/issues', 'split'],
+    ['/board', 'board'],
   ]
 
   for (const [pathname, mode] of cases) {
@@ -38,6 +41,8 @@ describe('areaMode', () => {
     expect(areaMode('/graph/019d')).toBe('canvas')
     expect(areaMode('/blocks/abc')).toBe('split')
     expect(areaMode('/chat/123')).toBe('thread')
+    // /issues/:id inherits the list's split mode via prefix-match (U04).
+    expect(areaMode('/issues/550e8400')).toBe('split')
   })
 
   it('resolves every areaRoutes key to a valid LayoutMode', () => {

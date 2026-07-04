@@ -37,6 +37,7 @@
   // we only need the labels and to skip empty sections per tier.
   const SECTIONS = [
     { key: 'corpus', label: 'Corpus' },
+    { key: 'workflow', label: 'Workflow' },
     { key: 'tenant', label: 'Tenant' },
     { key: 'server', label: 'Server' },
   ] as const
@@ -75,6 +76,12 @@
       /><path d="M7.9 7.1l8.2 1.5M8.1 16.1l1-7.8M11.2 17l5-6.6" />
     {:else if key === 'chat'}
       <path d="M4.5 5h15v10H10l-4 3v-3H4.5z" />
+    {:else if key === 'issues'}
+      <circle cx="12" cy="12" r="8" /><path d="M12 8v5M12 16h.01" />
+    {:else if key === 'board'}
+      <rect x="4" y="4" width="16" height="16" rx="1.5" /><path
+        d="M9 4v16M15 4v16"
+      />
     {:else if key === 'keys'}
       <circle cx="8" cy="8" r="3.3" /><path d="M10.4 10.4L20 20M16 16l1.8-1.8M18.2 18.2l1.6-1.6" />
     {:else if key === 'backends'}

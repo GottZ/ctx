@@ -19,6 +19,10 @@ export const RESERVED_SERVER_PREFIXES = [
   '/authorize',
   '/token',
   '/.well-known',
+  // Forge webhook receiver (design 04 §4.1.1, W13-Vorgriff; Achse 03 §5.3/§9.3):
+  // the ingress lives OUTSIDE /api, so the SPA must never claim it as a client
+  // route. Pinned now (prefix only) — the handler lands with the W13 sync wave.
+  '/webhooks',
 ] as const
 
 /**
@@ -54,6 +58,18 @@ export const areaRoutes = {
   // /admin prefix-guard already covers this sub-route (no extra guard needed).
   '/admin/tenants/:id': () => import('./admin/TenantDetail.svelte'),
   '/tenant': () => import('./tenant/TenantPage.svelte'),
+  // Workflow surface (design 04 §4.1, wave U04): additive lazy routes for the
+  // issue list, issue detail and board. DARK-LAUNCHED — the nav section + home
+  // tile are gated on caps.viewWorkflow (false until whoami carries the flag,
+  // §4.1.3), but the routes are registered unconditionally so a deep link
+  // renders the page's EmptyState, never NotFound and never a redirect loop
+  // (the pages are ungated member surfaces; authorization stays server-side).
+  // /issues is 'split' (list+detail column, like /blocks), /issues/:id inherits
+  // it via prefix-match, /board is the new 'board' mode (modes.ts). U04 ships
+  // empty scaffolds only — the data layer lands in U05/U06/U07.
+  '/issues': () => import('./issues/IssuesPage.svelte'),
+  '/issues/:id': () => import('./issues/IssueDetailPage.svelte'),
+  '/board': () => import('./board/BoardPage.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes
 

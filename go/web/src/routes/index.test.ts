@@ -18,20 +18,39 @@ import { contracts, pendingContracts } from '../../e2e/contract/registry'
 /**
  * Base areas every build must register: the 5 corpus/ops areas + backends
  * deep-route + the member landing /home (N6) + the role-gated /admin and
- * /tenant areas (N4/N5) + catch-all.
+ * /tenant areas (N4/N5) + the workflow surface (/issues, /issues/:id, /board —
+ * design 04 §4.1.1, wave U04; dark-launched behind viewWorkflow but registered
+ * so a deep link renders the EmptyState instead of NotFound) + catch-all.
  */
 const BASE_AREAS = [
   '*',
   '/admin',
   '/admin/tenants/:id',
   '/blocks',
+  '/board',
   '/chat',
   '/graph',
   '/home',
+  '/issues',
+  '/issues/:id',
   '/settings',
   '/settings/backends',
   '/status',
   '/tenant',
+] as const
+
+// Reserved server prefixes the SPA must never claim (index.ts
+// RESERVED_SERVER_PREFIXES). U04 adds '/webhooks' as a pin ahead of the W13
+// forge-webhook route (design 04 §4.1.1 / Achse 03 §5.3): the route lives
+// OUTSIDE /api and the SPA must never interpret it as a client route.
+const REQUIRED_RESERVED_PREFIXES = [
+  '/api',
+  '/mcp',
+  '/health',
+  '/authorize',
+  '/token',
+  '/.well-known',
+  '/webhooks',
 ] as const
 
 function whoami(p: Partial<WhoamiResponse> = {}): WhoamiResponse {
@@ -54,7 +73,7 @@ const memberCaps = capabilitiesFor(whoami({ admin: false, role: 'member' }))
 const serverAdminCaps = capabilitiesFor(whoami({ admin: true, role: 'owner' }))
 const loadingCaps = capabilitiesFor(null)
 
-const LAYOUT_MODES: readonly LayoutMode[] = ['reading', 'canvas', 'split', 'thread']
+const LAYOUT_MODES: readonly LayoutMode[] = ['reading', 'canvas', 'split', 'thread', 'board']
 
 describe('areaRoutes', () => {
   it('registers at least the base areas, backends sub-route and the catch-all', () => {
@@ -65,6 +84,10 @@ describe('areaRoutes', () => {
     for (const loader of Object.values(areaRoutes)) {
       expect(typeof loader).toBe('function')
     }
+  })
+
+  it('reserves every required server prefix incl. /webhooks (W13 pin, design 04 §4.1.1)', () => {
+    expect(RESERVED_SERVER_PREFIXES).toEqual(expect.arrayContaining([...REQUIRED_RESERVED_PREFIXES]))
   })
 
   it('claims no path inside the reserved server namespace', () => {

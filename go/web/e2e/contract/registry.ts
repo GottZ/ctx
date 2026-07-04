@@ -360,13 +360,17 @@ export const contracts: PageContract[] = [
     name: 'home',
     role: 'member',
     mode: 'reading',
-    states: [{ name: 'default', seed: {} }], // Rollen-Minimum: member (die Zielgruppe der Seite)
+    // Rollen-Minimum: member (die Zielgruppe der Seite). U04: der Default-State
+    // trägt jetzt das viewWorkflow-Flag, damit die Bestands-Shot die neue
+    // Workflow-Kachel einfriert (design 04 §4.1.6/§5.5, [baseline]-Update). Die
+    // Abwesenheits-Richtung (Kachel weg ohne Flag) probt workflow-nav.spec.ts.
+    states: [{ name: 'default', seed: { capabilities: { workflow: true } } }],
     scale: {
       exempt:
         'Capability-Screen mit fixer Kartenzahl aus whoami (Write-Scope, Read-Scopes, Rolle, Tenant) — keine Liste, kein 10k-Pfad.',
     },
     flowDoc:
-      'Member landet auf /home, liest seinen Korpus-Zuschnitt (Write-Scope home, Read-Scopes home+shared, Rolle, Tenant) und springt über „Browse blocks" in die Korpus-Fläche.',
+      'Member landet auf /home, liest seinen Korpus-Zuschnitt (Write-Scope home, Read-Scopes home+shared, Rolle, Tenant), sieht bei viewWorkflow die Workflow-Kachel und springt über „Browse blocks" in die Korpus-Fläche.',
     primaryFlow: async (page) => {
       const content = page.locator('main.content')
       await expect(content).toContainText('Welcome, smoke-key')
@@ -374,9 +378,78 @@ export const contracts: PageContract[] = [
       await expect(content).toContainText('home, shared') // read access
       await expect(content).toContainText('member') // role
       await expect(content).toContainText('Acme Corp') // tenant display name, never the UUID
+      // U04: the workflow tile shows under viewWorkflow (both directions probed
+      // in workflow-nav.spec.ts) — its CTA links into the issue surface.
+      await expect(content.getByRole('link', { name: 'Open issues →' })).toBeVisible()
       await page.getByRole('link', { name: 'Browse blocks →' }).click()
       await expect(page).toHaveURL(/\/blocks$/)
       await expect(content).toContainText('Core Architecture')
+    },
+  },
+  // -------------------------------------------------------------------------
+  // Workflow surface (design 04 §4.1/§5.5, wave U04) — DARK-LAUNCH scaffolds.
+  // U04 registers the routes + freezes the EMPTY-state baselines; the data
+  // layers land in U05 (/issues), U06 (/issues/:id) and U07 (/board), each of
+  // which re-freezes its baseline with real content. role:'member' = the guard
+  // truth (the routes are ungated member surfaces; the viewWorkflow flag only
+  // drives nav visibility). The scaffolds make ZERO API calls.
+  // -------------------------------------------------------------------------
+  {
+    route: '/issues',
+    name: 'issues',
+    role: 'member',
+    mode: 'split',
+    states: [{ name: 'default', seed: {} }],
+    scale: {
+      exempt:
+        'U04-Scaffold ohne Datenanbindung — die virtualisierte 10k-Liste + ihr DOM-Cap-Beweis (< 200 Rows) landen mit der Datenschicht in U05 (design 04 §5.5).',
+    },
+    flowDoc:
+      'Deep-Link auf /issues rendert unter Dark-Launch die statische EmptyState (keine API-Calls); die Picker-Skeleton liest ?scope=. Liste, Server-Filter und ProjectPicker landen in U05.',
+    primaryFlow: async (page) => {
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'Issues' })).toBeVisible()
+      await expect(content).toContainText('No issues to show yet')
+      // Picker skeleton: no ?scope= in the contract path ⇒ the neutral placeholder.
+      await expect(content).toContainText('No project selected')
+    },
+  },
+  {
+    // Template contract (design 06 §4.2): EIN Kontrakt pro Template, path? nötig.
+    route: '/issues/:id',
+    name: 'issue-detail',
+    role: 'member',
+    mode: 'split',
+    path: '/issues/550e8400-e29b-41d4-a716-446655440001',
+    states: [{ name: 'default', seed: {} }],
+    scale: {
+      exempt:
+        'U04-Scaffold ohne Datenanbindung — der virtualisierte 500-Comments-Thread + das uniform-404-Verhalten landen mit der Detail-Datenschicht in U06 (design 04 §5.5).',
+    },
+    flowDoc:
+      'Deep-Link auf /issues/:id rendert unter Dark-Launch die statische EmptyState (keine API-Calls); Markdown-Body, Comments-Thread, Composer und Sync-Badge landen in U06.',
+    primaryFlow: async (page) => {
+      await expect(page.getByRole('heading', { name: 'Issue' })).toBeVisible()
+      await expect(page.locator('main.content')).toContainText('Issue detail is not wired up yet')
+    },
+  },
+  {
+    route: '/board',
+    name: 'board',
+    role: 'member',
+    mode: 'board',
+    states: [{ name: 'default', seed: {} }],
+    scale: {
+      exempt:
+        'U04-Scaffold ohne Datenanbindung — die Status-Spalten aus der Type-Config, per-Spalte-Fenster + der 10k×6-DOM-Cap-Beweis (< 300 Karten) landen mit der Board-Datenschicht in U07 (design 04 §5.5).',
+    },
+    flowDoc:
+      'Deep-Link auf /board rendert unter Dark-Launch die statische EmptyState (keine API-Calls); die Status-Spalten, Counts und DnD landen in U07/U08.',
+    primaryFlow: async (page) => {
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'Board' })).toBeVisible()
+      await expect(content).toContainText('No board to show yet')
+      await expect(content).toContainText('No project selected')
     },
   },
   {

@@ -113,4 +113,13 @@
     max-width: var(--measure-wide);
     margin-inline: auto;
   }
+
+  /* board (design 04 §4.1.2, wave U04): full-bleed like canvas — no reading cap,
+     no padding — but the status columns scroll HORIZONTALLY inside this region
+     rather than the page body (the column virtualization owns the vertical
+     scroll, U07). The empty U04 scaffold does not overflow yet; the containment
+     is the content-region contract the board fills in later. */
+  .content[data-mode='board'] {
+    overflow-x: auto;
+  }
 </style>
