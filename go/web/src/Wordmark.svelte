@@ -1,9 +1,14 @@
 <script lang="ts">
   // The ctx wordmark with its terminal cursor — shared by login, boot splash
-  // and the top bar.
+  // and the top bar. The cursor is aria-hidden: it is a decorative signature
+  // (the Q12 pulse), never part of the accessible link name. Without it the
+  // visibility-blink toggled the cursor in and out of the a11y name, so the
+  // committed aria baselines had frozen it inconsistently ("ctx" on most pages,
+  // "ctx_" on status/admin/settings-backends); aria-hidden makes the name a
+  // deterministic "ctx" everywhere (Q12 refreshes the three stale entries).
 </script>
 
-<span class="wordmark">ctx<span class="cursor">_</span></span>
+<span class="wordmark">ctx<span class="cursor" aria-hidden="true">_</span></span>
 
 <style>
   .wordmark {
@@ -15,6 +20,18 @@
     user-select: none;
   }
   .cursor {
+    /* Signatur-Element (design 05-§4.9 "spend your boldness in one place"): der
+       blinkende Terminal-Cursor ist der EINE orchestrierte Signatur-Puls der UI.
+       Q12 haertet ihn, statt ihn neu zu animieren: aria-hidden (oben) macht den
+       Link-Namen deterministisch, und die Q12-reduced-motion-walk beweist die
+       Abschaltbarkeit (lokaler Guard unten + globaler app.css-Guard). Der
+       Rhythmus bleibt bewusst HEAD-identisch (steps(2,start) = diskret, zwei
+       Repaints/Zyklus): eine mehrstufige/kontinuierliche Variante wurde
+       verworfen, weil ihr 60fps-Repaint die parallele @visual-Erfassung der
+       virtualisierten /issues-Liste ueber das 0-Pixel-Gate kippte (unter CI-Last
+       reproduzierbar rot; container-verifiziert). Ein zweites Signatur-Element
+       kommt NICHT dazu — der MessageBubble-Streaming-Cursor ist ein funktionaler
+       Status-Indikator, keine Marke. */
     animation: blink 1.2s steps(2, start) infinite;
   }
   @keyframes blink {

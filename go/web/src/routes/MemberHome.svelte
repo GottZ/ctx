@@ -91,7 +91,17 @@
   .area {
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
+    /* Density-Feinschliff (Q12, E1=B "Dichte hoch"): der Home-Dashboard-
+       Vertikalabstand faellt --space-4 → --space-3 (1.75rem → 1rem) — die
+       Sektionen ruecken zu einem dichteren Operator-Console-Rhythmus zusammen.
+       GEZIELT + token-basiert: eine stabile, nicht-virtualisierte Flaeche. Der
+       nominelle Design-05-Hebel (Table-Zellpadding) wurde bewusst NICHT
+       angefasst — er speist die virtualisierte Issues-Liste (fixe ROW_H=44,
+       virtual-window.ts), deren Titel-Wrap unter schmalerem Padding an der
+       Sub-Pixel-Grenze kippt und das 0-Pixel-Gate unter Last flaky macht;
+       dichte Tabellen brauchen zuerst nowrap/Ellipsis (table-layout:fixed,
+       U05-Scope), nicht diesen Feinschliff. */
+    gap: var(--space-3);
   }
 
   header {
