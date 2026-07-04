@@ -58,6 +58,40 @@ func normalizeInterruptedSyncsBoot(ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
+// bootstrapAdminKeyBoot runs the fail-closed first-key bootstrap (design 06
+// §3.6, wave PV10a): the e2e live-tier compose stack generates a per-run random
+// key and passes it here via CTX_BOOTSTRAP_ADMIN_KEY (plus a run id via
+// CTX_BOOTSTRAP_RUN_ID for the label). When the api-key table is EMPTY, ctxd
+// mints a single server-admin key with that plaintext's hash under the label
+// e2e-bootstrap-<run-id>; on a POPULATED table it mints nothing and only logs —
+// the credential is NEVER injected into a real deployment. The env is unset in
+// every normal deployment, so this is a no-op there. It also covers the ops
+// fresh-DB deploy henhouse-egg gap (same problem, same safe mechanic).
+//
+// The plaintext is NEVER logged — only the created flag, the label and the
+// minted key id (an already-public identity, neither hash nor plaintext).
+func bootstrapAdminKeyBoot(ctx context.Context, pool *pgxpool.Pool) {
+	plaintext := os.Getenv("CTX_BOOTSTRAP_ADMIN_KEY")
+	if plaintext == "" {
+		return // not an e2e/bootstrap boot — the normal case, no-op
+	}
+	runID := os.Getenv("CTX_BOOTSTRAP_RUN_ID")
+	if runID == "" {
+		runID = "unknown"
+	}
+	label := "e2e-bootstrap-" + runID
+	created, keyID, err := store.BootstrapAdminKey(ctx, pool, plaintext, label)
+	if err != nil {
+		slog.Error("bootstrap admin key failed", "error", err, "label", label)
+		return
+	}
+	if created {
+		slog.Info("bootstrap admin key minted (empty api-key table)", "label", label, "api_key_id", keyID)
+	} else {
+		slog.Info("bootstrap admin key ignored — api-key table already populated (fail-closed)", "label", label)
+	}
+}
+
 func main() {
 	// Health check mode: /ctx -health makes an HTTP request to the local server.
 	// Used as Docker healthcheck in distroless containers (no curl/wget available).
@@ -138,6 +172,13 @@ func main() {
 	// interrupted) before the router serves — the in-memory state does not survive
 	// a restart. Extracted to keep main() under the cyclop budget.
 	normalizeInterruptedSyncsBoot(ctx, pool)
+
+	// PV10a (design 06 §3.6): fail-closed first-key bootstrap for the e2e
+	// live-tier (and ops fresh-DB deploys). No-op unless CTX_BOOTSTRAP_ADMIN_KEY
+	// is set AND context_api_keys is empty — never injects a key into a
+	// populated table. Runs after migrations (the table must exist) and before
+	// the router serves.
+	bootstrapAdminKeyBoot(ctx, pool)
 
 	// WF T3 (design 01 §4.3): block-type registry — starts on the compiled-in
 	// builtin set, then loads the context_block_types rows with the error-class
