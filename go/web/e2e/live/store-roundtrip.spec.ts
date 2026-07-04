@@ -20,7 +20,13 @@ test('@live store-roundtrip: seeded block is searchable and opens in detail', as
   const hit = page.locator('ul.results li', { hasText: state.roundtripTitle })
   await expect(hit).toBeVisible()
 
-  // Open it — the detail view renders server-delivered content.
+  // Open it — the detail view renders server-delivered content. Scoped to the
+  // detail panel: in the split view the same sentence also renders in the list
+  // row's preview span, so a page-wide getByText resolves to TWO elements and
+  // trips Playwright's strict mode (first real CI run, dispatch 28722792265 —
+  // locally the list re-render window hid the double match).
   await hit.click()
-  await expect(page.getByText('Roundtrip content stored via the live /api/store handler.')).toBeVisible()
+  await expect(
+    page.getByLabel('block details').getByText('Roundtrip content stored via the live /api/store handler.'),
+  ).toBeVisible()
 })
