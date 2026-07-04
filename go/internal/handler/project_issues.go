@@ -38,31 +38,49 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ProjectIssuesHandler serves the /api/project/{id}/issues* read surface. It
-// holds the block-type registry so the status set (board columns, list merge)
-// resolves from policy data, never a hardcoded list (§4.3 doctrine).
+// ProjectIssuesHandler serves the /api/project/{id}/issues* read + write surface.
+// It holds the block-type registry so the status set (board columns, list merge,
+// W7 transition validation) resolves from policy data, never a hardcoded list
+// (§4.3 doctrine). cfg is OPTIONAL (nil on a read-only/test wiring): it drives
+// only the W7 write throttle (query.rate_limit_write, §4.4) — reads never touch it.
 type ProjectIssuesHandler struct {
 	pool       *pgxpool.Pool
 	blocktypes *blocktype.Registry
+	cfg        ConfigStore
 }
 
-// NewProjectIssuesHandler wires the pool + the type registry.
+// NewProjectIssuesHandler wires the pool + the type registry. Use WithConfig to
+// attach the runtime config that arms the W7 write rate limit.
 func NewProjectIssuesHandler(pool *pgxpool.Pool, blocktypes *blocktype.Registry) *ProjectIssuesHandler {
 	return &ProjectIssuesHandler{pool: pool, blocktypes: blocktypes}
 }
 
-// MountProjectIssues mounts the four read routes behind RequireMember (design/03
-// §5.1: the gate lives in the mount, so a missing gate is a missing route — 404,
-// never fail-open). Every handler re-scopes to the project's scope after the
-// member admit (K-T1). Distinct from MountProject (W4) so the W4 handler keeps its
-// pool-only constructor; chi routes the deeper /issues* patterns independently.
+// WithConfig attaches the runtime config store (arms the W7 write throttle) and
+// returns the handler for chaining. Left unset, issue writes are not throttled
+// (the read surface and tests that do not exercise the limit pass no config).
+func (h *ProjectIssuesHandler) WithConfig(cfg ConfigStore) *ProjectIssuesHandler {
+	h.cfg = cfg
+	return h
+}
+
+// MountProjectIssues mounts the read (W6) AND write (W7) routes behind ONE
+// RequireMember group (design/03 §5.1: the gate lives in the mount, so a missing
+// gate is a missing route — 404, never fail-open). RequireMember admits; each
+// handler then re-scopes to the project's scope — reads via ar.ReadScopes, writes
+// via the per-project WRITE-SCOPE gate (resolveWriteScope, §4.6). Distinct from
+// MountProject (W4); chi routes the deeper /issues* patterns independently.
 func MountProjectIssues(r chi.Router, h *ProjectIssuesHandler) {
 	r.Group(func(r chi.Router) {
 		r.Use(RequireMember)
+		// Reads (W6): member scope-read.
 		r.Get("/api/project/{id}/issues", h.HandleList)
 		r.Get("/api/project/{id}/issues/{block_id}", h.HandleDetail)
 		r.Get("/api/project/{id}/issues/{block_id}/comments", h.HandleComments)
 		r.Get("/api/project/{id}/board", h.HandleBoard)
+		// Writes (W7): per-project write-scope gate inside each handler.
+		r.Post("/api/project/{id}/issues", h.HandleCreate)
+		r.Patch("/api/project/{id}/issues/{block_id}", h.HandlePatch)
+		r.Post("/api/project/{id}/issues/{block_id}/comments", h.HandleCommentCreate)
 	})
 }
 

@@ -28,6 +28,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // uuidRe validates a block id before it reaches the store — a malformed id reads
@@ -410,10 +411,19 @@ func validateLinkClass(set *blocktype.Set, typeName, class string) error {
 // not permitted for its type). Distinct from ErrLinkScopeViolation (404).
 var errInvalidLinkClass = errors.New("link_class not permitted for the source block type")
 
-// inIssueTx runs fn in a transaction, committing on success and rolling back on
-// error. Returns fn's block (nil for link/void writes).
+// inIssueTx runs fn in a transaction (the manage transport wrapper); it
+// delegates to the shared issueTx so the REST W7 surface and the manage transport
+// share ONE tx-boilerplate + error-mapping truth (one write logic, two
+// transports).
 func (h *ManageHandler) inIssueTx(ctx context.Context, fn func(tx pgx.Tx) (*store.Block, error)) (*store.Block, error) {
-	tx, err := h.pool.Begin(ctx)
+	return issueTx(ctx, h.pool, fn)
+}
+
+// issueTx runs fn in a transaction, committing on success and rolling back on
+// error. Returns fn's block (nil for link/void writes). Shared by the manage
+// transport (inIssueTx) and the REST W7 write handlers.
+func issueTx(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) (*store.Block, error)) (*store.Block, error) {
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -428,10 +438,17 @@ func (h *ManageHandler) inIssueTx(ctx context.Context, fn func(tx pgx.Tx) (*stor
 	return b, nil
 }
 
-// writeIssueError maps the issue store sentinels onto HTTP statuses: not-found/
-// scope violations ⇒ uniform 404 (no oracle); transition + body-cap + class ⇒
-// 422; everything else ⇒ 500 (logged, no wire detail).
+// writeIssueError is the manage-transport alias for writeIssueStoreError (kept so
+// the manage call sites stay untouched).
 func (h *ManageHandler) writeIssueError(w http.ResponseWriter, action string, err error, reqID string) {
+	writeIssueStoreError(w, action, err, reqID)
+}
+
+// writeIssueStoreError maps the issue store sentinels onto HTTP statuses:
+// not-found/scope violations ⇒ uniform 404 (no oracle); a non-writable requested
+// scope ⇒ 403; transition + body-cap + class ⇒ 422; everything else ⇒ 500
+// (logged, no wire detail). Shared by the manage transport and the REST W7 writes.
+func writeIssueStoreError(w http.ResponseWriter, action string, err error, reqID string) {
 	switch {
 	case errors.Is(err, store.ErrIssueNotFound), errors.Is(err, store.ErrLinkScopeViolation):
 		writeIssueNotFound(w)

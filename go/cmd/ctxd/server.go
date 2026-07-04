@@ -168,7 +168,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// / board under /api/project/{id}/issues*, member-gated (scope-read) inside
 		// the mount (design/03 §4.2/§6.1). Needs the type registry to resolve the
 		// board/list status set from policy data.
-		handler.MountProjectIssues(r, handler.NewProjectIssuesHandler(pool, blocktypeReg))
+		handler.MountProjectIssues(r, handler.NewProjectIssuesHandler(pool, blocktypeReg).WithConfig(cfgStore))
 		// Digest — Topic map generation
 		r.Post("/api/digest", digestH.HandleDigest)
 		// Synthesize — manual daily synthesis trigger (Welle 42)
