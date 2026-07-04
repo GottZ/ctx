@@ -34,9 +34,12 @@ test.describe('workflow surface — dark-launch cap gate (U04)', () => {
     await expect(page).toHaveURL(/\/issues(\?|$)/)
     await expect(page.getByRole('heading', { name: 'Issues' })).toBeVisible()
 
+    // U07 made /board functional: like /issues it auto-selects the lone project
+    // and writes ?scope= — the invariant under test stays "deep link renders the
+    // page" (columns from the fixture wire), never a redirect/NotFound/crash.
     await gotoArea(page, '/board')
-    await expect(page).toHaveURL(/\/board$/)
-    await expect(content).toContainText('No board to show yet')
+    await expect(page).toHaveURL(/\/board(\?|$)/)
+    await expect(page.locator('[data-board-column]').first()).toBeVisible()
 
     await gotoArea(page, '/issues/550e8400-e29b-41d4-a716-446655440001')
     await expect(page).toHaveURL(/\/issues\/550e8400/)
