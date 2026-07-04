@@ -62,9 +62,11 @@ export const SENTINEL: Record<TenantKey, string> = {
  * fails the core read endpoints (500) so error bands become a declarable
  * state; '10k' swaps /api/search for a synthetic 10 000-item generator with
  * REAL keyset-cursor behaviour (next_after, blocks.ts:33-37) — the target-
- * scale proofs (§6.2) never need 10k JSON rows in the repo.
+ * scale proofs (§6.2) never need 10k JSON rows in the repo. 'board' / 'board-10k'
+ * (U07) serve the multi-column board world + a workflow-config /api/types the
+ * freeze fixtures lack (issue-fixtures.ts).
  */
-export type SeedState = 'default' | 'empty' | 'error' | '10k'
+export type SeedState = 'default' | 'empty' | 'error' | '10k' | 'board' | 'board-10k'
 
 /**
  * WhoamiResponse (types.ts:6) shaped per tier — capabilitiesFor reads admin+role.

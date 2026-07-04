@@ -56,7 +56,7 @@ export interface WorkflowMockOpts {
   /** location.search of the request (e.g. '?q=bug&status=open&after=…'). */
   search?: string
   /** declarative seed state (design 06 §4.6) — '10k' serves the scale corpus. */
-  state?: 'default' | 'empty' | 'error' | '10k'
+  state?: 'default' | 'empty' | 'error' | '10k' | 'board' | 'board-10k'
   /** empty-corpus variant (empty:true / state 'empty'). */
   empty?: boolean
 }
@@ -126,6 +126,109 @@ function emptyIssueList(): Record<string, unknown> {
   return { success: true, render: 'untrusted', issues: [], cursor: null }
 }
 
+// ---- board scenarios (design 04 §4.2/§6.2, wave U07) -------------------------
+// The freeze board.json is a single golden shape (open+closed, TestContract-
+// FreezeGolden-pinned — untouchable here). The board GATES need richer worlds:
+// a multi-column board in a KNOWN order with a terminal (collapsed) column, plus
+// a 10k×6 scale board — so these are GENERATED (never the golden file). The
+// registry drives open/closed/unmapped, so the board seeds ALSO override
+// GET /api/types with a workflow config the freeze type-list.json lacks (states
+// + terminal). Kept out of the golden files entirely: the golden stays pinned,
+// the scenario data lives here + in per-test page.route overrides.
+
+/** Default board column order (== the wire order the board must preserve, §5.5).
+ * `done` is terminal (the registry marks it closed → the column starts
+ * collapsed). */
+const BOARD_STATUSES = ['open', 'in_progress', 'review', 'done']
+/** Scale board: 6 columns so the 10k×6 DOM-ceiling probe (§5.5) has its width. */
+const BOARD_SCALE_STATUSES = ['open', 'in_progress', 'review', 'blocked', 'staged', 'done']
+const BOARD_TERMINAL = ['done']
+
+function boardCard(status: string, i: number): Record<string, unknown> {
+  return {
+    id: `33333333-3333-3333-3333-${String(i).padStart(12, '0')}`,
+    scope: 'acme:main',
+    type_name: 'issue',
+    title: `${status} card ${i}`,
+    workflow_status: status,
+    updated_at: new Date(Date.UTC(2026, 6, 3, 12, 0, 0) - i * 60_000).toISOString(),
+  }
+}
+
+/** GET /api/types override for the board seeds: the issue type WITH a workflow
+ * config (states + terminal), the policy the board reads for open/closed. */
+function boardTypes(states: string[]): Record<string, unknown> {
+  return {
+    success: true,
+    types: [
+      {
+        id: '77777777-7777-7777-7777-777777777777',
+        name: 'issue',
+        scope: '_global',
+        display_name: 'Issue',
+        description: 'A tracked work item',
+        builtin: true,
+        is_default: false,
+        source: 'builtin',
+        created_at: '2026-07-03T00:00:00Z',
+        updated_at: '2026-07-03T00:00:00Z',
+        config: {
+          v: 1,
+          retrieval: { policy: 'full-pass' },
+          parent: { mode: 'none' },
+          workflow: { states, initial: states[0], terminal: BOARD_TERMINAL },
+        },
+      },
+    ],
+  }
+}
+
+/** Default board: four columns in a fixed order, small wire counts, full first
+ * pages (cursor null). `done` (terminal) carries count 12 but starts collapsed —
+ * the closed-collapse baseline + the count-from-wire proof. */
+function boardScenario(): Record<string, unknown> {
+  const counts: Record<string, number> = { open: 3, in_progress: 2, review: 1, done: 12 }
+  const columns = BOARD_STATUSES.map((status) => {
+    const shown = status === 'done' ? 5 : counts[status]
+    return {
+      status,
+      count: counts[status],
+      cursor: null,
+      issues: Array.from({ length: shown }, (_, k) => boardCard(status, k)),
+    }
+  })
+  return { success: true, render: 'untrusted', columns }
+}
+
+/** Scale board: 6 columns × count 10 000, each a bounded 30-card first page with
+ * a resume cursor. The count is the WIRE total (10 000), the loaded page tiny —
+ * so the board shows "30 of 10 000" and the per-column windowing keeps the DOM
+ * bounded (< 300 cards across the open columns; `done` collapsed renders zero). */
+function boardScenarioScale(): Record<string, unknown> {
+  const columns = BOARD_SCALE_STATUSES.map((status) => ({
+    status,
+    count: 10_000,
+    cursor: 'idx-29',
+    issues: Array.from({ length: 30 }, (_, k) => boardCard(status, k)),
+  }))
+  return { success: true, render: 'untrusted', columns }
+}
+
+function emptyBoard(): Record<string, unknown> {
+  return { success: true, render: 'untrusted', columns: [] }
+}
+
+/** A per-column keyset page for the scale board's load-more (state-filtered list
+ * endpoint). Returns one more 30-card page then ends (cursor null) — so an
+ * accidental scroll-append terminates cleanly instead of looping. */
+function boardColumnPage(sp: URLSearchParams): Record<string, unknown> {
+  const state = sp.get('state')?.trim() ?? 'open'
+  const after = sp.get('after')
+  const start = after ? parseInt(after.replace(/^idx-/, ''), 10) + 1 : 0
+  const issues = Array.from({ length: 30 }, (_, k) => boardCard(state, start + k))
+  return { success: true, render: 'untrusted', issues, cursor: null }
+}
+
 // ---- detail scale: the 500-comment thread (design 04 §5.5, wave U06) --------
 // The state '10k' seed serves a detail with 500 inline comments so the render-
 // budget proof (progressive-reveal cap keeps the rendered thread bounded while
@@ -191,7 +294,13 @@ export function workflowMock(method: string, path: string, opts: WorkflowMockOpt
 
   // --- /api/types[/{name}] ---
   if (inTypes) {
-    if (path === TYPES_BASE && method === 'GET') return { status: 200, json: typeList }
+    if (path === TYPES_BASE && method === 'GET') {
+      // Board seeds (U07) need the workflow config the freeze type-list.json
+      // lacks; they override the registry read with a states+terminal set.
+      if (opts.state === 'board') return { status: 200, json: boardTypes(BOARD_STATUSES) }
+      if (opts.state === 'board-10k') return { status: 200, json: boardTypes(BOARD_SCALE_STATUSES) }
+      return { status: 200, json: typeList }
+    }
     if (path.startsWith(`${TYPES_BASE}/`)) {
       const name = decodeURIComponent(path.slice(`${TYPES_BASE}/`.length))
       const first = (typeList as { types: Array<{ name: string; builtin: boolean }> }).types[0]
@@ -234,7 +343,12 @@ export function workflowMock(method: string, path: string, opts: WorkflowMockOpt
 
   const sub = seg[1]
   // /api/project/{id}/board
-  if (sub === 'board' && seg.length === 2 && method === 'GET') return { status: 200, json: board }
+  if (sub === 'board' && seg.length === 2 && method === 'GET') {
+    if (opts.empty || opts.state === 'empty') return { status: 200, json: emptyBoard() }
+    if (opts.state === 'board') return { status: 200, json: boardScenario() }
+    if (opts.state === 'board-10k') return { status: 200, json: boardScenarioScale() }
+    return { status: 200, json: board }
+  }
   // /api/project/{id}/sync
   if (sub === 'sync' && seg.length === 2) {
     if (method === 'GET') return { status: 200, json: syncStatus }
@@ -252,6 +366,8 @@ export function workflowMock(method: string, path: string, opts: WorkflowMockOpt
         if (q) return { status: 200, json: searchIssueList(q) }
         if (opts.empty || opts.state === 'empty') return { status: 200, json: emptyIssueList() }
         if (opts.state === '10k') return { status: 200, json: scaleIssueList(sp) }
+        // Board scale: a column keyset-appends via the state-filtered list.
+        if (opts.state === 'board-10k') return { status: 200, json: boardColumnPage(sp) }
         return { status: 200, json: issueList }
       }
       if (method === 'POST') return { status: 200, json: issueMutate }

@@ -532,22 +532,63 @@ export const contracts: PageContract[] = [
     },
   },
   {
+    // U07 wires the real read-only board (design 04 §4.2/§5.5). States:
+    //  - default the rich board seed (columns open/in_progress/review/done in
+    //            wire order; `done` is terminal → starts COLLAPSED). The board
+    //            seed ALSO overrides GET /api/types with a workflow config
+    //            (states + terminal) — the freeze type-list.json has none.
+    //  - empty   a project whose board has zero columns → EmptyState.
+    // Mobile (390 Column-Pager) is deferred to U09; the desktop board scrolls
+    // horizontally already, but the pager UX is not built here (W21: no claim on
+    // untested scope).
     route: '/board',
     name: 'board',
     role: 'member',
     mode: 'board',
-    states: [{ name: 'default', seed: {} }],
-    scale: {
+    mobile: {
       exempt:
-        'U04-Scaffold ohne Datenanbindung — die Status-Spalten aus der Type-Config, per-Spalte-Fenster + der 10k×6-DOM-Cap-Beweis (< 300 Karten) landen mit der Board-Datenschicht in U07 (design 04 §5.5).',
+        'Der 390-Column-Pager ist U09 (design 04 §7-U09); U07 liefert nur das Desktop-Board (horizontal scrollend). Mobile-Baseline erst mit dem Pager, sonst friert sie eine Nicht-Pager-Sicht ein.',
+    },
+    states: [
+      { name: 'default', seed: { state: 'board' } },
+      { name: 'empty', seed: { empty: true } },
+    ],
+    scale: {
+      // 10k×6 board: each column count = 10 000, a bounded first page + a
+      // per-column cursor. The per-column windowing keeps the DOM under 300 cards
+      // across the open columns (done collapsed renders zero) — remove the
+      // windowing (Column.svelte) and the open columns render every loaded card.
+      name: 'board-10k',
+      seed: { state: 'board-10k' },
+      domCap: { selector: 'main.content [data-board-card]', max: 300 },
+      flow: async (page) => {
+        // The count is the WIRE total (B7), not the loaded card length: an open
+        // column shows 10 000 while only a bounded page is hydrated.
+        const open = page.locator('[data-board-column][data-status="open"]')
+        await expect(open.locator('[data-count]')).toHaveText('10000')
+      },
     },
     flowDoc:
-      'Deep-Link auf /board rendert unter Dark-Launch die statische EmptyState (keine API-Calls); die Status-Spalten, Counts und DnD landen in U07/U08.',
+      'Deep-Link auf /board rendert die Status-Spalten aus dem Board-Wire (Reihenfolge == Wire-Order == Type-Config), jede mit ihrem Wire-Count; terminale Spalten (registry workflow.terminal) starten eingeklappt, offene zeigen ihre Karten (Klick → /issues/:id).',
     primaryFlow: async (page) => {
       const content = page.locator('main.content')
       await expect(page.getByRole('heading', { name: 'Board' })).toBeVisible()
-      await expect(content).toContainText('No board to show yet')
-      await expect(content).toContainText('No project selected')
+      // Lone project auto-selects (0/1/N picker) and writes ?scope=.
+      await expect(page).toHaveURL(/scope=acme(%3A|:)main/)
+      // Columns render in WIRE order (open, in_progress, review, done).
+      const statuses = await content.locator('[data-board-column]').evaluateAll((els) =>
+        els.map((e) => e.getAttribute('data-status')),
+      )
+      expect(statuses).toEqual(['open', 'in_progress', 'review', 'done'])
+      // open: count 3 from the wire, its cards render + link to the detail.
+      const open = content.locator('[data-board-column][data-status="open"]')
+      await expect(open.locator('[data-count]')).toHaveText('3')
+      await expect(open.locator('[data-board-card]').first()).toBeVisible()
+      // done is terminal → COLLAPSED: count visible, zero cards rendered.
+      const done = content.locator('[data-board-column][data-status="done"]')
+      await expect(done.locator('[data-count]')).toHaveText('12')
+      await expect(done.getByRole('button')).toHaveAttribute('aria-expanded', 'false')
+      await expect(done.locator('[data-board-card]')).toHaveCount(0)
     },
   },
   {

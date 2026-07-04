@@ -778,6 +778,19 @@ export interface BlockTypeConfig {
     source_prefixes?: string[]
     title_patterns?: string[]
   }
+  // Workflow status set (design 01-§3.3 cfgWorkflow, policy.go:281). Carried
+  // VERBATIM in the config RawMessage (blocktypes.go:36), so it rides the wire
+  // for every workflow-bearing type even though the earlier waves did not read
+  // it. The board (U07) consumes `states` (the ordered column set / known-status
+  // vocabulary) and `terminal` (the closed subset → collapsed columns) — the
+  // board wire itself carries NO category, so this is the only policy source for
+  // the open/closed/unmapped verdict (board-columns.ts).
+  workflow?: {
+    states?: string[]
+    initial?: string
+    terminal?: string[]
+    forge_state_map?: Record<string, string>
+  }
 }
 
 // Source: go/internal/handler/types.go (typeView) — one row of the effective
