@@ -97,6 +97,14 @@ Work with a project's issues. The project is detected from the current repo (lik
 
 Issue/comment titles, bodies and labels are attacker-controlled text (any user can open an issue in a mirrored repo). Human/TTY output runs every such value through a terminal-escape **allowlist** — all C0 controls except newline/tab, DEL, and all C1 controls (raw byte or code point) are stripped — so a crafted title cannot drive escape sequences into your terminal, an agent log or CI output. The piped JSON is the machine contract and is left verbatim.
 
+### Board
+
+The kanban board view: the project's issues grouped into the workflow-status columns of its type config (never hardcoded). One data path — the CLI eats the same `/api/project/{id}/board` wire the web UI does.
+
+| Command | Description |
+|---------|-------------|
+| `ctx kanban [--project ID] [--limit N]` | On a **TTY**, an interactive, read-only board (bubbletea/lipgloss): arrows or `hjkl` navigate columns/cards, `q` quits (v1 does not mutate — re-status via `ctx project issues status`). **Piped**, the raw board JSON `{columns:[{status,count,issues,cursor}]}` (stable, scriptable). Each column carries a total `count` and only a **first page** of cards, so the board scales to 10k+ issues per column; `--limit` sets the page size (server default when 0). Page a hot column via its `cursor` with `ctx project issues list --state <col> --after <cursor>`. Titles are sanitized through the same escape allowlist on a TTY; the piped JSON stays verbatim. A `success:false` envelope (e.g. a foreign project) exits 1 |
+
 ## Raw REST access
 
 | Command | Description |
