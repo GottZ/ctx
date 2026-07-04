@@ -168,11 +168,12 @@ func TestWhoamiGoldenShape(t *testing.T) {
 		ApiKeyID:          "11111111-1111-1111-1111-111111111111",
 		TenantSlug:        "default",
 		TenantDisplayName: "Default Tenant",
+		Capabilities:      whoamiCapabilities{Workflow: true},
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	want := `{"success":true,"label":"example-key","home_scope":"private","read_scopes":["private","shared"],"admin":true,"tenant_id":"00000000-0000-0000-0000-0000000d3fa0","role":"member","api_key_id":"11111111-1111-1111-1111-111111111111","tenant_slug":"default","tenant_display_name":"Default Tenant"}`
+	want := `{"success":true,"label":"example-key","home_scope":"private","read_scopes":["private","shared"],"admin":true,"tenant_id":"00000000-0000-0000-0000-0000000d3fa0","role":"member","api_key_id":"11111111-1111-1111-1111-111111111111","tenant_slug":"default","tenant_display_name":"Default Tenant","capabilities":{"workflow":true}}`
 	if string(got) != want {
 		t.Fatalf("golden shape drift:\n got: %s\nwant: %s", got, want)
 	}

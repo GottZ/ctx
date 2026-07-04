@@ -24,15 +24,15 @@ export interface WhoamiResponse {
   // no tenant row. Additive read, no migration.
   tenant_slug: string
   tenant_display_name: string
-  // Achse-04 feature gates (design 04 §3.2 B9 / §4.1.3, wave U04). Derived
-  // server-side (from the type registry) and folded into the derived caps
-  // (capabilitiesFor → viewWorkflow) so nav visibility needs no async fetch.
-  // OPTIONAL + additive: absent on a pre-B9 server ⇒ every gate false ⇒
-  // dark-launch (the routes stay reachable, the section/tile stay hidden).
-  // Shape note: B9 named a top-level `workflow:{enabled}`; the e2e seed harness
-  // (fixtures.ts whoamiFor, S14) planted a flat `capabilities` bag first, so the
-  // interim wire field is `capabilities.workflow`. Reconcile with the final B9
-  // shape when the backend flag lands (single read site: capabilitiesFor).
+  // Achse-04 feature gates (design 04 §3.2 B9 / §4.1.3, wave U04). Server-sent
+  // (handler/whoami.go whoamiCapabilities — since v4.3.0 statically true; a
+  // later per-tenant gate only changes the VALUE) and folded into the derived
+  // caps (capabilitiesFor → viewWorkflow) so nav visibility needs no async
+  // fetch. OPTIONAL + additive: absent on a pre-v4.3.0 server ⇒ every gate
+  // false ⇒ dark-launch (routes reachable, section/tile hidden). The flat
+  // `capabilities` bag IS the final wire shape (B9's `workflow:{enabled}`
+  // sketch was superseded by the shipped Go struct; single read site:
+  // capabilitiesFor).
   capabilities?: {
     /** The issue/board workflow surface is enabled for this key's tenant. */
     workflow?: boolean

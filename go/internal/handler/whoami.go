@@ -47,6 +47,18 @@ type whoamiResponse struct {
 	// tenant (059 backfill) always resolves, so this is only a defensive seam.
 	TenantSlug        string `json:"tenant_slug"`
 	TenantDisplayName string `json:"tenant_display_name"`
+	// Capabilities carries feature flags that are DATA, not tier-derived (the
+	// SPA derives tier caps itself from Admin/Role). workflow=true switches the
+	// workflow UI (issues/board, U04 dark-launch cap viewWorkflow) visible; it
+	// went GA with v4.3.0 (RC-2, user decision 2026-07-04) and is emitted
+	// statically here — the field stays in the wire so a later per-tenant gate
+	// (B9, tenant_limits-style) only changes THIS value, not the SPA. Additive.
+	Capabilities whoamiCapabilities `json:"capabilities"`
+}
+
+// whoamiCapabilities is the whoami feature-flag bag (design 04-§3.2 B9).
+type whoamiCapabilities struct {
+	Workflow bool `json:"workflow"`
 }
 
 // whoamiIdentity is the per-key identity resolved from the DB in one round-trip:
@@ -141,5 +153,6 @@ func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 		ApiKeyID:          ar.ApiKeyID,
 		TenantSlug:        id.tenantSlug,
 		TenantDisplayName: id.tenantDisplayName,
+		Capabilities:      whoamiCapabilities{Workflow: true},
 	})
 }
