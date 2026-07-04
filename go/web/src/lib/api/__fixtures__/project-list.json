@@ -1,0 +1,26 @@
+{
+  "projects": [
+    {
+      "created_at": "2026-07-01T00:00:00Z",
+      "created_by": "66666666-6666-6666-6666-666666666666",
+      "display_name": "Acme Main",
+      "forge": {
+        "kind": "github",
+        "owner": "acme",
+        "repo": "main"
+      },
+      "id": "33333333-3333-3333-3333-333333333333",
+      "identity": "github:acme/main",
+      "last_sync_at": "2026-07-03T00:00:00Z",
+      "metadata": {},
+      "push_enabled": false,
+      "scope": "acme:main",
+      "sync_cursor": null,
+      "sync_enabled": true,
+      "sync_status": "idle",
+      "tenant_id": "44444444-4444-4444-4444-444444444444",
+      "webhook_secret_ref": null
+    }
+  ],
+  "success": true
+}

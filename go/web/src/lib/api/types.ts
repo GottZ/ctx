@@ -799,3 +799,206 @@ export interface TypeResponse {
   success: true
   type: BlockTypeView
 }
+
+// ============================================================================
+// Workflow-UI wire types (design/04 §3.1 / U03). The fixtures in
+// src/lib/api/__fixtures__/*.json are the shared contract source; the Go golden
+// TestContractFreezeGolden (internal/handler/contract_freeze_golden_test.go)
+// re-serializes the SAME files from the live handler structs, so a drift on
+// either side turns red before deploy.
+//
+// K04-A is decided: the endpoint family is the /api/project/{id}/issues-style
+// (built by W6/W7/W11), NOT the §3.1 POST /api/issues/list proposal. The shapes
+// below follow the IST serialization.
+// §3.1 → Ist DEVIATIONS (Ist wins): the list row is IssueRow (WorkflowBlockRow) —
+// it has NO sync_state/external_ref/comment_count/labels/status field and NO
+// top-level total/writable; the cursor is an OPAQUE base64 string, not the
+// {after_updated,after_id} pair. Detail/comment bodies are the full block.
+// ============================================================================
+
+/** Server-set trust tag: issue/comment bodies are attacker-controlled markdown,
+ * so every body-bearing response carries render:'untrusted' and the client must
+ * route the body through the sanitising markdown pipeline. */
+export type RenderMode = 'untrusted'
+
+/** Opaque base64url keyset cursor — echoed straight back as ?after=. `null` =
+ * end-of-data; on the FTS (q!=='') path it is ALWAYS null (rank order is not
+ * keyset-paginable, context_search.go:110-114). Never parsed client-side. */
+export type IssueCursor = string | null
+
+// Source: go/internal/store/workflow.go (WorkflowBlockRow) — the minimal list +
+// board row. Carries NO content (10k+ rows × N columns). type_name +
+// workflow_status are the registry vocabulary the badges + board columns consume.
+export interface IssueRow {
+  id: string
+  scope: string
+  type_name: string
+  title: string
+  workflow_status: string
+  updated_at: string
+}
+
+// Source: go/internal/store/blocks.go (Block, issueScanCols) — the full issue OR
+// comment body (W6 detail/comment endpoints). content is the markdown SOURCE
+// (HTML is client-only). Fields the issue SELECT leaves empty are omitempty on
+// the wire (optional here); a comment has no workflow_status (absent), and `type`
+// carries the registry key ('issue' | 'comment').
+export interface IssueBlock {
+  id: string
+  category: string
+  tags: string[]
+  title: string
+  content: string
+  metadata: Record<string, unknown>
+  scope: string
+  content_hash?: string
+  guard_status?: string
+  sensitivity?: string
+  sensitivity_source?: string
+  type?: string
+  lifecycle_state?: string
+  type_source?: string
+  workflow_status?: string
+  created_at: string
+  updated_at: string
+}
+
+// Source: project_issues.go writeIssueListPage — GET /api/project/{id}/issues.
+export interface IssueListResponse {
+  success: true
+  render: RenderMode
+  issues: IssueRow[]
+  cursor: IssueCursor
+}
+
+// Source: project_issues.go HandleDetail — GET /api/project/{id}/issues/{block_id};
+// full issue + the first inline page of the comment thread.
+export interface IssueDetailResponse {
+  success: true
+  render: RenderMode
+  issue: IssueBlock
+  comments: IssueBlock[]
+  comments_cursor: IssueCursor
+}
+
+// Source: project_issues.go HandleComments — GET …/issues/{block_id}/comments (ASC).
+export interface IssueCommentsResponse {
+  success: true
+  render: RenderMode
+  comments: IssueBlock[]
+  cursor: IssueCursor
+}
+
+// Source: project_issues.go HandleBoard — GET /api/project/{id}/board. Each column
+// has an index-only count + a first page + a resume cursor (fed back as
+// ?status=<col>&after=…). The column SET is the type-config status set (never
+// hardcoded); a data status absent from the config is unmapped and not shown.
+export interface BoardColumn {
+  status: string
+  count: number
+  issues: IssueRow[]
+  cursor: IssueCursor
+}
+export interface BoardResponse {
+  success: true
+  render: RenderMode
+  columns: BoardColumn[]
+}
+
+// Source: project_issues_write.go HandleCreate/HandlePatch — POST/PATCH issue.
+export interface IssueMutateResponse {
+  success: true
+  render: RenderMode
+  issue: IssueBlock
+}
+// Source: project_issues_write.go HandleCommentCreate — POST …/comments.
+export interface CommentCreateResponse {
+  success: true
+  render: RenderMode
+  comment: IssueBlock
+}
+
+// Source: go/internal/store/project.go (ProjectRow) — the /api/project register
+// row (W4). token_secret is NEVER on the wire (json:"-"); forge/sync_cursor/
+// metadata are opaque JSON envelopes; last_error/backoff_until/created_by are
+// omitempty (optional here).
+export interface ProjectRow {
+  id: string
+  tenant_id: string
+  scope: string
+  identity: string
+  display_name: string
+  forge: Record<string, unknown> | null
+  webhook_secret_ref: string | null
+  sync_status: string
+  sync_enabled: boolean
+  push_enabled: boolean
+  last_sync_at: string | null
+  last_error?: string
+  backoff_until?: string
+  sync_cursor: unknown
+  created_at: string
+  created_by?: string
+  metadata: unknown
+}
+export interface ProjectListResponse {
+  success: true
+  projects: ProjectRow[]
+}
+export interface ProjectResponse {
+  success: true
+  project: ProjectRow
+}
+
+// Source: go/internal/forge/sync.go (SyncStatus) — the in-memory run state.
+// started_at/finished_at are omitzero (absent while zero); run_id/last_error are
+// omitempty.
+export interface SyncRunStatus {
+  project_id: string
+  running: boolean
+  dry_run: boolean
+  started_at?: string
+  finished_at?: string
+  fetched: number
+  prs_skipped: number
+  pages: number
+  applied: number
+  pushed: number
+  conflicts: number
+  aborted: boolean
+  backoff_set: boolean
+  run_id?: string
+  last_error?: string
+}
+// Source: go/internal/store/project_sync.go (SyncRunRow) — one DB history row.
+export interface SyncRunRow {
+  id: string
+  project_id: string
+  started_at: string
+  finished_at: string | null
+  status: string
+  error?: string
+  stats: unknown
+}
+// Source: project_sync.go HandleStatus — GET /api/project/{id}/sync (in-memory run
+// merged with the DB history + the register's display columns).
+export interface SyncStatusResponse {
+  success: true
+  project_id: string
+  sync_status: string
+  sync_enabled: boolean
+  push_enabled: boolean
+  token_set: boolean
+  last_sync_at: string | null
+  backoff_until: string | null
+  last_error: string | null
+  conflicts: number
+  run: SyncRunStatus
+  last_run: SyncRunRow | null
+  recent_runs: SyncRunRow[]
+}
+// Source: project_sync.go HandleStart — POST /api/project/{id}/sync.
+export interface SyncStartResponse {
+  success: true
+  run: SyncRunStatus
+}

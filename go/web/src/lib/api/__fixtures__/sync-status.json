@@ -1,0 +1,49 @@
+{
+  "backoff_until": null,
+  "conflicts": 0,
+  "last_error": null,
+  "last_run": {
+    "finished_at": "2026-07-03T00:00:00Z",
+    "id": "55555555-5555-5555-5555-555555555555",
+    "project_id": "33333333-3333-3333-3333-333333333333",
+    "started_at": "2026-07-01T00:00:00Z",
+    "stats": {
+      "applied": 8,
+      "fetched": 10
+    },
+    "status": "done"
+  },
+  "last_sync_at": "2026-07-03T00:00:00Z",
+  "project_id": "33333333-3333-3333-3333-333333333333",
+  "push_enabled": false,
+  "recent_runs": [
+    {
+      "finished_at": "2026-07-03T00:00:00Z",
+      "id": "55555555-5555-5555-5555-555555555555",
+      "project_id": "33333333-3333-3333-3333-333333333333",
+      "started_at": "2026-07-01T00:00:00Z",
+      "stats": {
+        "applied": 8,
+        "fetched": 10
+      },
+      "status": "done"
+    }
+  ],
+  "run": {
+    "aborted": false,
+    "applied": 0,
+    "backoff_set": false,
+    "conflicts": 0,
+    "dry_run": false,
+    "fetched": 0,
+    "pages": 0,
+    "project_id": "33333333-3333-3333-3333-333333333333",
+    "prs_skipped": 0,
+    "pushed": 0,
+    "running": false
+  },
+  "success": true,
+  "sync_enabled": true,
+  "sync_status": "idle",
+  "token_set": false
+}

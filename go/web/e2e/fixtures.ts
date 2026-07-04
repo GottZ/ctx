@@ -8,6 +8,7 @@
 // (the Go golden tests are the drift anchor; these fixtures are NOT a second one).
 
 import type { Page, Route } from '@playwright/test'
+import { workflowMock } from './issue-fixtures'
 
 export type Role = 'server-admin' | 'tenant-admin' | 'member'
 
@@ -773,6 +774,14 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
       }
       return route.fulfill({ json: fixture })
     }
+
+    // Workflow namespace (U03): the ISSUES_BASE (/api/project) + TYPES_BASE
+    // (/api/types) families answer from the contract-freeze JSONs (Go-golden
+    // pinned). workflowMock returns null for paths OUTSIDE the namespace (fall
+    // through to the generic catch-all) and its OWN loud 599 for an un-mocked
+    // path INSIDE it — the closed N3 benign catch-all can never swallow these.
+    const wf = workflowMock(method, path)
+    if (wf) return route.fulfill({ status: wf.status, json: wf.json })
 
     // Unmapped /api/** → HARD-FAIL (design 06 §4.6, wave PV2). Was a benign
     // {success:true} — it absorbed every un-mocked endpoint silently (seam S5).

@@ -126,4 +126,47 @@ test.describe('meta: fixtures foundation (E0)', () => {
         'event: done\ndata: {"finish":"stop"}\n\n',
     )
   })
+
+  // U03 self-probe (design 04 §7-U03): the ISSUES_BASE (/api/project) + /api/types
+  // namespaces answer from the contract-freeze JSONs through the REAL fixture
+  // wiring, and an un-mocked path INSIDE the namespace hard-fails LOUD with the
+  // namespace's OWN diagnostic (never the closed benign {success:true} — N3). The
+  // freeze bodies carry render:'untrusted' + the Ist wire shape (workflow_status
+  // first-class, opaque cursor), pinned cross-language by TestContractFreezeGolden.
+  test('workflow namespace: mocked path serves the freeze shape, un-mocked hard-fails loud', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/admin')
+
+    const res = await page.evaluate(async () => {
+      const get = async (path: string) => {
+        const r = await fetch(path)
+        return { ok: r.ok, status: r.status, body: (await r.json()) as Record<string, unknown> }
+      }
+      return {
+        list: await get('/api/project/33333333-3333-3333-3333-333333333333/issues'),
+        types: await get('/api/types'),
+        miss: await get('/api/project/33333333-3333-3333-3333-333333333333/bogus'),
+      }
+    })
+
+    // Mocked list endpoint → the freeze shape (Ist wire: render + workflow_status).
+    expect(res.list.ok).toBe(true)
+    expect(res.list.body.success).toBe(true)
+    expect(res.list.body.render).toBe('untrusted')
+    const issues = res.list.body.issues as Array<Record<string, unknown>>
+    expect(issues[0].workflow_status).toBe('open')
+    expect('sync_state' in issues[0]).toBe(false) // §3.1 → Ist deviation, pinned
+
+    // Mocked /api/types → the effective registry list.
+    expect(res.types.ok).toBe(true)
+    expect(Array.isArray(res.types.body.types)).toBe(true)
+
+    // Un-mocked path INSIDE the namespace → the namespace's OWN loud hard-fail.
+    expect(res.miss.ok).toBe(false)
+    expect(res.miss.status).toBe(599)
+    expect(res.miss.body.success).toBe(false)
+    expect(res.miss.body.__unmocked).toBe(true)
+    expect(String(res.miss.body.error)).toContain('unmocked workflow endpoint')
+  })
+
 })

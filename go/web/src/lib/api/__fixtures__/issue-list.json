@@ -1,0 +1,15 @@
+{
+  "cursor": null,
+  "issues": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "scope": "acme:main",
+      "title": "Example issue",
+      "type_name": "issue",
+      "updated_at": "2026-07-03T00:00:00Z",
+      "workflow_status": "open"
+    }
+  ],
+  "render": "untrusted",
+  "success": true
+}

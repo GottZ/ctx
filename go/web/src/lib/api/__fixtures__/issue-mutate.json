@@ -1,0 +1,29 @@
+{
+  "issue": {
+    "category": "task",
+    "content": "# Example\n\nBody markdown.",
+    "created_at": "2026-07-01T00:00:00Z",
+    "id": "11111111-1111-1111-1111-111111111111",
+    "lifecycle_state": "active",
+    "metadata": {
+      "labels": [
+        "bug",
+        "p1"
+      ]
+    },
+    "scope": "acme:main",
+    "sensitivity": "internal",
+    "sensitivity_source": "manual",
+    "tags": [
+      "bug",
+      "p1"
+    ],
+    "title": "Example issue",
+    "type": "issue",
+    "type_source": "manual",
+    "updated_at": "2026-07-03T00:00:00Z",
+    "workflow_status": "open"
+  },
+  "render": "untrusted",
+  "success": true
+}

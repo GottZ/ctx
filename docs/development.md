@@ -50,6 +50,16 @@ cd go && go test ./... -short       # Go unit tests
 
 MCP tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18.
 
+### Wire-contract freeze (workflow UI)
+
+The workflow-UI API client (`go/web/src/lib/api/issues.ts`, `types-registry.ts`) and the SPA e2e/vitest fixtures both eat the **same** contract-freeze JSONs in `go/web/src/lib/api/__fixtures__/*.json` (issue list/detail/comments/board/mutate, project list, sync status, type list). Those files are re-serialized from the live handler structs (W6/W7/W11/W4/types) by the Go golden `TestContractFreezeGolden` (`internal/handler/contract_freeze_golden_test.go`) — a drift on either side turns it red before deploy (closes the fixture-drift gap: the FE mocks can no longer diverge silently from the Go wire). To regenerate the JSONs after an intentional wire change, review the diff from:
+
+```bash
+cd go && UPDATE_FREEZE=1 go test ./internal/handler -run TestContractFreezeGolden
+```
+
+The path prefix of the whole workflow surface lives in exactly one constant each (`ISSUES_BASE` = `/api/project`, `TYPES_BASE` = `/api/types`); the client functions and the e2e fixture namespace matcher (`go/web/e2e/issue-fixtures.ts`) both import it, so an un-mocked path inside the namespace hard-fails loudly (599) instead of a benign `{success:true}`.
+
 ## Visual baseline governance (Web e2e)
 
 Screenshot baselines (`go/web/e2e/__screenshots__/`) are the frozen "objectively good" reference for the UI: the taste judgement is made once, at baseline approval — afterwards every pixel deviation is a measurable diff, not an opinion. Baselines are only valid when rendered inside the digest-pinned toolchain container (`go/web/e2e/toolchain.lock` pins the image digests; `bash go/web/e2e-visual.sh --update` is the only regeneration path — CI has no update path and only compares).
