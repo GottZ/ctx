@@ -1,0 +1,32 @@
+- banner:
+  - button "Open navigation menu"
+  - link "ctx":
+    - /url: /status
+- main:
+  - region "Board":
+    - heading "Board" [level=1]
+    - text: Project
+    - code: Acme Main
+    - button "Previous column" [disabled]: ‹
+    - text: 1 / 4 · open
+    - button "Next column": ›
+    - group "Board columns":
+      - region "open (3)":
+        - button "open" [expanded]
+        - text: ""
+        - list "open issues":
+          - listitem:
+            - link /open card 0 open \d+-\d+-\d+/:
+              - /url: /issues/33333333-3333-3333-3333-000000000000?scope=acme%3Amain
+              - text: ""
+              - time: /\d+-\d+-\d+/
+          - listitem:
+            - link /open card 1 open \d+-\d+-\d+/:
+              - /url: /issues/33333333-3333-3333-3333-000000000001?scope=acme%3Amain
+              - text: ""
+              - time: /\d+-\d+-\d+/
+          - listitem:
+            - link /open card 2 open \d+-\d+-\d+/:
+              - /url: /issues/33333333-3333-3333-3333-000000000002?scope=acme%3Amain
+              - text: ""
+              - time: /\d+-\d+-\d+/
