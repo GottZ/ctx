@@ -82,6 +82,20 @@ A project binds one repo corpus to exactly one tenant scope (Model C): the scope
 
 **`.ctx-project` is a detect shortcut, not a trust anchor.** For `github:`/`git-root:` identities `detect` honors the file **only when it matches** the independent git detection; a mismatch (e.g. a cloned foreign repo with a planted file that would redirect issue writes into someone else's corpus) forces interactive confirmation on a TTY and **errors when piped** (exit ≠ 0). Only `manual:` identities — which have no independent source — are authoritative from the file.
 
+### Issues
+
+Work with a project's issues. The project is detected from the current repo (like `ctx project`), or named explicitly with `--project` (a project id **or** an identity). The state-change verb is **`status`** (not `state`/`move`). On a TTY the output is a table / human lines; piped, it is the raw server JSON (stable, scriptable). A `success:false` envelope exits 1 with the server's reason.
+
+| Command | Description |
+|---------|-------------|
+| `ctx project issues [list]` | List issues, newest first. Filters: `--state <status>`, `--label <l>` (repeatable), `--q <text>`. Keyset-paginated for 10k+ issues: the response carries an opaque cursor; pass it back with `--after <cursor>` for the next page. `--sort created` gives a gap-free immutable traversal for export |
+| `ctx project issues show <block-id>` | Show one issue in full plus the first page of its comment thread (a foreign/unknown id reads as not found) |
+| `ctx project issues create [title]` | Create an issue. Title is the positional arg **or** `--title`; body is `--body` **or** stdin (`echo body \| ctx project issues create --title t`). `--label` (repeatable), `--status` (a valid entry state for the type policy) |
+| `ctx project issues comment <block-id>` | Add a comment to an issue's thread. Body is `--body` or stdin; `--author` labels it (default: anon) |
+| `ctx project issues status <block-id> <new-status>` | Move an issue to a new workflow status. The transition is validated against the type's policy data server-side; an out-of-policy target exits 1 (422) with the reason |
+
+Issue/comment titles, bodies and labels are attacker-controlled text (any user can open an issue in a mirrored repo). Human/TTY output runs every such value through a terminal-escape **allowlist** — all C0 controls except newline/tab, DEL, and all C1 controls (raw byte or code point) are stripped — so a crafted title cannot drive escape sequences into your terminal, an agent log or CI output. The piped JSON is the machine contract and is left verbatim.
+
 ## Raw REST access
 
 | Command | Description |

@@ -386,6 +386,7 @@ func projectCmd(getClient func() (*Client, error)) *cobra.Command {
 	cmd.AddCommand(projectInitCmd(getClient))
 	cmd.AddCommand(projectShowCmd(getClient))
 	cmd.AddCommand(projectListCmd(getClient))
+	cmd.AddCommand(issuesCmd(getClient))
 	return cmd
 }
 
