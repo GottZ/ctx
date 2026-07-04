@@ -4,7 +4,18 @@
     - /url: /status
 - main:
   - region "Issue detail":
-    - heading "Issue" [level=1]
-    - status:
-      - paragraph: Issue detail is not wired up yet
-      - paragraph: The selected issue and its comments will render here once the detail view is connected.
+    - link "← Issues":
+      - /url: /issues?scope=acme%3Amain
+    - article:
+      - heading "Example issue" [level=1]
+      - text: issue local bug p1 open
+      - note: Read-only in this scope — you cannot edit this issue.
+      - heading "Example" [level=1]
+      - paragraph: Body markdown.
+      - region "Comments":
+        - heading "Comments (1)" [level=2]
+        - list:
+          - listitem:
+            - text: comment
+            - time: /\d+-\d+-\d+/
+            - paragraph: A comment on the issue.

@@ -1,0 +1,7 @@
+- dialog "Change status":
+  - heading "Change status" [level=2]
+  - button "×"
+  - status:
+    - paragraph: Move this issue to "closed"?
+  - button "Cancel"
+  - button "Move"
