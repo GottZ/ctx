@@ -626,7 +626,22 @@ export const contracts: PageContract[] = [
     role: 'server-admin',
     mode: 'reading',
     adminCalls: ['tenant-list', 'scope-overview'],
-    states: [{ name: 'default', seed: {} }], // Rollen-Minimum == Guard-Rolle (server-admin)
+    states: [
+      { name: 'default', seed: {} }, // Rollen-Minimum == Guard-Rolle (server-admin)
+      {
+        // U12: the project-provisioning wizard OPEN at its entry chooser (design
+        // 04 §7-U12 baseline row: dark × Dialog). Deterministic (no async data —
+        // the mode chooser + existing-tenant picker), so it freezes byte-stably;
+        // the wire/flow/abort/reveal halves live in provision-wizard.spec.ts, the
+        // ARIA snapshot is spec-local there (like issue-detail dialog-status).
+        name: 'wizard',
+        seed: {},
+        prepare: async (page) => {
+          await page.getByRole('button', { name: '+ Provision project' }).click()
+          await expect(page.getByRole('dialog')).toBeVisible()
+        },
+      },
+    ],
     scale: {
       exempt:
         'Tenant-Register + Scope-Map sind Betreiber-Aggregate (Anzahl Tenants/Scopes, server-seitig überschaubar) — der 10k-Korpus-Pfad läuft über /api/search-Flächen, nicht über dieses Register.',

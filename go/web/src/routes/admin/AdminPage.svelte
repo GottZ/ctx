@@ -13,7 +13,9 @@
   import type { TenantStatus } from '../../lib/api/types'
   import Table from '../../lib/ui/Table.svelte'
   import { TenantsModel } from './tenants.svelte'
+  import { ProvisionModel } from './provision.svelte'
   import TenantCreateDialog from './TenantCreateDialog.svelte'
+  import ProvisionWizard from './ProvisionWizard.svelte'
   import ScopeMap from './ScopeMap.svelte'
   import CorpusMaintenance from './CorpusMaintenance.svelte'
 
@@ -23,6 +25,27 @@
   // .create reloads the register on success, so the new tenant appears with no
   // extra work here; the dialog reveals + discards the owner-key plaintext.
   let creating = $state(false)
+
+  // U12: the project-provisioning wizard (tenant-create → scope-create →
+  // agent-key). The ProvisionModel lives at page level so a close mid-flow keeps
+  // its checkpoint — reopening RESUMES (design 04 §7-U12). The wizard reveals +
+  // discards the owner/agent key plaintext; the model never holds a secret.
+  const provision = new ProvisionModel()
+  let wizardOpen = $state(false)
+
+  function openWizard(): void {
+    wizardOpen = true
+  }
+  function resumeWizard(): void {
+    // A resumable checkpoint keeps its stage; just remount the wizard on it.
+    wizardOpen = true
+  }
+  function closeWizard(): void {
+    wizardOpen = false
+    // A finished run reset itself (stage 'done' → reset on Finish); reload the
+    // register so a newly provisioned tenant/scope shows.
+    if (provision.stage === 'entry') void model.reload()
+  }
 
   // Reactive load that survives the boot restore race: fires once the session
   // resolves to server-admin (reading session.tier + model.status as $state so
@@ -75,7 +98,16 @@
         <h2>tenants</h2>
         <span class="count">{model.tenants.length}</span>
         <button type="button" class="cta" onclick={() => (creating = true)}>+ New tenant</button>
+        <button type="button" class="cta" onclick={openWizard}>+ Provision project</button>
       </header>
+
+      {#if provision.resumable}
+        <p class="resume" role="status">
+          A project provisioning is in progress
+          {#if provision.tenantSlug}(tenant <strong>{provision.tenantSlug}</strong>{#if provision.repoScope}, scope <code>{provision.repoScope}</code>{/if}){/if}.
+          <button type="button" class="link" onclick={resumeWizard}>Resume</button>
+        </p>
+      {/if}
 
       {#if model.actionError}
         <p class="problem" role="alert">{model.actionError}</p>
@@ -121,6 +153,10 @@
 
 {#if creating}
   <TenantCreateDialog tenants={model} onclose={() => (creating = false)} />
+{/if}
+
+{#if wizardOpen}
+  <ProvisionWizard model={provision} tenants={model.tenants} onclose={closeWizard} />
 {/if}
 
 <style>
@@ -203,7 +239,6 @@
     color: var(--text-dim);
   }
   .cta {
-    margin-left: auto;
     font-family: var(--font-ui);
     font-size: var(--fs-sm);
     padding: var(--space-1) var(--space-3);
@@ -212,6 +247,34 @@
     border-radius: var(--radius);
     color: var(--accent);
     cursor: pointer;
+  }
+  .card-head .cta:first-of-type {
+    margin-left: auto;
+  }
+  .resume {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin: var(--space-2) var(--space-3) 0;
+    font-size: var(--fs-sm);
+    color: var(--text-dim);
+  }
+  .resume code {
+    font-family: var(--font-mono);
+  }
+  .resume strong {
+    color: var(--text);
+  }
+  .link {
+    font-family: var(--font-ui);
+    font-size: var(--fs-sm);
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
   }
   .problem {
     margin: var(--space-2) var(--space-3) 0;

@@ -22,6 +22,12 @@ export interface ApiKeyCreateSpec {
   label: string
   home_scope: string
   allowed_scopes?: string[]
+  // WriteScopes (078, E4b): the explicit per-key write set, additive to the
+  // home_scope-only default. The server enforces write_scopes ⊆ allowed_scopes ∪
+  // {home_scope} (validateWriteScopes → 400). An explicit [] pins the key to
+  // home-only writes — the K12 agent-key template (U12 provisioning wizard:
+  // home_scope=repo scope, allowed_scopes=[], write_scopes=[]).
+  write_scopes?: string[]
   // Server-admin-only override (S2): mint the key in a FOREIGN tenant (A3c
   // recovery-mint). A tenant-admin OMITS it → the server binds the key to
   // ar.TenantID. Flows unchanged into `data`; a non-server-admin's value is
