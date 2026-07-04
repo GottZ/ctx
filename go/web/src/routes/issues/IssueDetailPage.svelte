@@ -23,7 +23,7 @@
   // svelte2tsx (svelte-check) scans the block for string/template literals
   // without honouring line comments, so a quoted token swallows the closing
   // script tag (a script-left-open false positive); the real compiler is fine.
-  import { onMount } from 'svelte'
+  import { onMount, onDestroy } from 'svelte'
   import { route } from '../../router'
   import { session } from '../../lib/auth.svelte'
   import EmptyState from '../../lib/ui/EmptyState.svelte'
@@ -38,6 +38,7 @@
   import { syncBadgeForIssue } from '../../lib/workflow/sync-badge'
   import { canWriteScope } from '../../lib/workflow/writable'
   import { issueFiltersToQuery } from './issue-filters'
+  import { LiveSource } from '../../lib/workflow/live'
 
   /** A related-issue row as the detail wire may carry it (metadata.related). The
    * shipped wire does not emit it yet (Ist deviation) — rendered only when
@@ -55,6 +56,7 @@
   let projectsStatus = $state<ResourceStatus>('idle')
   let model = $state<IssueDetailModel | null>(null)
   let statusOptions = $state<string[]>([])
+  let live = $state<LiveSource | null>(null)
 
   // Mutation UI state.
   let pendingStatus = $state('')
@@ -122,6 +124,17 @@
     const m = new IssueDetailModel(proj.id, blockId)
     model = m
     void m.load()
+    // Live: refetch this issue only when a frame names its id (targeted) or a
+    // bulk/resync/poll signal arrives (full). design 04 §7-U13: Detail = das Issue.
+    live?.stop()
+    live = new LiveSource({
+      projectId: proj.id,
+      getInit: () => (session.key ? { headers: { Authorization: `Bearer ${session.key}` } } : {}),
+      onBatch: (batch) => {
+        if (batch.full || batch.ids.includes(blockId)) void m.load()
+      },
+    })
+    live.start()
     // Best-effort status vocabulary; a board failure just hides the transition.
     try {
       const board = await getBoard(proj.id)
@@ -129,6 +142,11 @@
     } catch {
       statusOptions = []
     }
+  })
+
+  onDestroy(() => {
+    live?.stop()
+    live = null
   })
 
   // Keep the pending status seeded to the current one whenever it changes.

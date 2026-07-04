@@ -20,7 +20,7 @@
   // script block for string literals without honouring line comments, so a
   // quoted word can swallow the closing script tag (false positive; the real
   // compiler is unaffected).
-  import { onMount } from 'svelte'
+  import { onMount, onDestroy } from 'svelte'
   import EmptyState from '../../lib/ui/EmptyState.svelte'
   import Modal from '../../lib/ui/Modal.svelte'
   import ProjectPicker from '../issues/ProjectPicker.svelte'
@@ -34,12 +34,14 @@
   import { session } from '../../lib/auth.svelte'
   import { canWriteScope } from '../../lib/workflow/writable'
   import { createBoardDnd, type BoardDndAdapter } from '../../lib/board/dnd'
+  import { LiveSource } from '../../lib/workflow/live'
 
   let scope = $state<string | null>(parseScopeParam(location.search))
   let projects = $state<ProjectRow[]>([])
   let projectsStatus = $state<ResourceStatus>('idle')
   let model = $state<BoardModel | null>(null)
   let dnd = $state<BoardDndAdapter | null>(null)
+  let live = $state<LiveSource | null>(null)
   let announcement = $state('')
 
   // Keyboard Move dialog (§4.5 keyboard path): a card raises onmove, the page
@@ -72,11 +74,36 @@
     const proj = projectForScope(projects, resolved)
     if (proj === null) {
       model = null
+      live?.stop()
+      live = null
       return
     }
     model = new BoardModel(proj.id)
+    startLive(proj.id)
     await model.load()
   }
+
+  /** (Re)open the SSE live stream for the active project. The board refetches the
+   * whole wire (columns + registry) on any live signal or poll tick — the column
+   * SET/ORDER is wire-derived, so a full board read is the safe reconcile
+   * (design 04 §7-U13: betroffene Spalte falls ableitbar, sonst Board-Refetch).
+   * Poll stays the permanent fallback. */
+  function startLive(projectId: string): void {
+    live?.stop()
+    live = new LiveSource({
+      projectId,
+      getInit: () => (session.key ? { headers: { Authorization: `Bearer ${session.key}` } } : {}),
+      onBatch: () => {
+        if (model !== null) void model.load()
+      },
+    })
+    live.start()
+  }
+
+  onDestroy(() => {
+    live?.stop()
+    live = null
+  })
 
   onMount(async () => {
     projectsStatus = 'loading'

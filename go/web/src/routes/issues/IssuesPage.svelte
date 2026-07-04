@@ -16,7 +16,7 @@
   // svelte2tsx (svelte-check) scans the block for string/template literals
   // without honouring line comments, so a quoted word swallows the closing
   // script tag and reports script-left-open (the real compiler is unaffected).
-  import { onMount } from 'svelte'
+  import { onMount, onDestroy } from 'svelte'
   import EmptyState from '../../lib/ui/EmptyState.svelte'
   import Table from '../../lib/ui/Table.svelte'
   import ProjectPicker from './ProjectPicker.svelte'
@@ -28,6 +28,8 @@
   import { parseIssueFilters, issueFiltersToQuery, isSearchMode, type IssueFilters } from './issue-filters'
   import { projectForScope, resolveScope } from './picker'
   import { computeWindow, isNearBottom } from '../../lib/ui/virtual-window'
+  import { LiveSource } from '../../lib/workflow/live'
+  import { session } from '../../lib/auth.svelte'
 
   // Fixed row geometry (§4.3): the constant that makes the window pure math.
   // MUST match the .issue-row height in the style block (44px) — the spacer
@@ -40,6 +42,7 @@
   let projects = $state<ProjectRow[]>([])
   let projectsStatus = $state<ResourceStatus>('idle')
   let model = $state<IssuesModel | null>(null)
+  let live = $state<LiveSource | null>(null)
 
   let scroller = $state<HTMLElement | null>(null)
   let scrollTop = $state(0)
@@ -90,12 +93,35 @@
     const proj = projectForScope(projects, scope)
     if (proj === null) {
       model = null
+      live?.stop()
+      live = null
       return
     }
     model = new IssuesModel(proj.id)
+    startLive(proj.id)
     resetScroll()
     await model.load(queryFrom(filters))
   }
+
+  /** (Re)open the SSE live stream for the active project; a project frame drives a
+   * head reload, a bulk/resync or a poll tick reloads the whole page. Poll stays
+   * the permanent fallback (design 04 §7-U13). */
+  function startLive(projectId: string): void {
+    live?.stop()
+    live = new LiveSource({
+      projectId,
+      getInit: () => (session.key ? { headers: { Authorization: `Bearer ${session.key}` } } : {}),
+      onBatch: () => {
+        if (model !== null) void model.load(queryFrom(filters))
+      },
+    })
+    live.start()
+  }
+
+  onDestroy(() => {
+    live?.stop()
+    live = null
+  })
 
   /** Reload the CURRENT project list with the current filters (query change). */
   async function reloadCurrent(): Promise<void> {
