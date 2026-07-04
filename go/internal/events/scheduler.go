@@ -102,6 +102,7 @@ type Scheduler struct {
 	backendPool   *backends.Pool      // F3 pool; listener reloads it on context_backends NOTIFYs
 	blocktypes    *blocktype.Registry // WF T3: the listener hot-reloads it on context_block_types NOTIFYs; nil until SetBlocktypeRegistry
 	projectHub    *ProjectHub         // W9: the listener forwards ctx_project_write NOTIFYs to it; nil until SetProjectHub (then the channel is inert)
+	webhookSync   WebhookSyncTrigger  // W13: the inbox arm fires this per drained project; mu-guarded (wired from NewRouter post-Run); inbox arm inert while nil
 	startup       StartupConfig
 	runCycle      dreamCycleFunc
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
@@ -468,6 +469,12 @@ func (s *Scheduler) Run(ctx context.Context) {
 	embedCacheTicker := time.NewTicker(embedCacheEvictInterval)
 	defer embedCacheTicker.Stop()
 
+	// W13: the webhook inbox arm drains pending deliveries and fires one debounced
+	// forge sync per project. Own ticker (the inter-tick window is the debounce
+	// window, §4.4); inert until SetWebhookSyncTrigger wires a consumer.
+	webhookInboxTicker := time.NewTicker(webhookInboxInterval)
+	defer webhookInboxTicker.Stop()
+
 	// Dream runs in its own goroutine(s) as continuous loop(s).
 	// DreamParallelism workers all share the same DB; PickBlock's FOR UPDATE
 	// SKIP LOCKED ensures distinct blocks per worker. Backfill stays single-
@@ -523,6 +530,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.runEmbedCacheEviction(ctx)
 			s.runLLMLogRetention(ctx)
 			s.runWebChatRetention(ctx)
+			s.runWebhookRetention(ctx)
+
+		case <-webhookInboxTicker.C:
+			s.runWebhookInbox(ctx)
 		}
 	}
 }

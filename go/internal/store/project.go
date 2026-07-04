@@ -260,13 +260,59 @@ func UpdateProject(ctx context.Context, pool *pgxpool.Pool, id string, displayNa
 	return p, nil
 }
 
-// DeleteProject removes the register row (context_project_sync_runs CASCADEs).
-// The project's blocks AND its tenant scope survive — scope teardown is a
-// tenant-lifecycle concern (design/03 §4.2). Returns whether a row was deleted.
+// DeleteProject removes the register row (context_project_sync_runs +
+// context_webhook_events CASCADE) AND drains the project's own scoped credentials
+// (K14 secret-drain, design/03 §5.6 + design/02 §5.2). The project's blocks AND
+// its tenant scope survive — scope teardown is a tenant-lifecycle concern
+// (design/03 §4.2). Returns whether a register row was deleted.
+//
+// Secret-drain (W13 project-delete leg — the tenant-prune leg is PruneTenant):
+// context_secrets rows carry the scope only as a plain column (no FK, no cascade,
+// 051), so a naked register-delete would ORPHAN the sealed webhook HMAC secret
+// ('webhook.github.<id>') AND any forge PAT ('forge.token.<id>') in a scope that
+// now has no project referencing them — a live credential surviving its project.
+// Both are project-id-keyed by construction, so the drain is deterministic. Done
+// in ONE tx with the register-delete: a failure rolls the whole delete back.
 func DeleteProject(ctx context.Context, pool *pgxpool.Pool, id string) (bool, error) {
-	tag, err := pool.Exec(ctx, `DELETE FROM context_projects WHERE id = $1::uuid`, id)
+	if id == "" {
+		return false, nil
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("store: delete project begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Resolve the scope the credentials live in (the project's own scope). A
+	// vanished/malformed id ⇒ nothing to delete (idempotent, no oracle).
+	var scope string
+	err = tx.QueryRow(ctx, `SELECT scope FROM context_projects WHERE id = $1::uuid`, id).Scan(&scope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, tx.Commit(ctx)
+	}
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+			return false, tx.Commit(ctx) // malformed id → no row
+		}
+		return false, fmt.Errorf("store: delete project scope load: %w", err)
+	}
+
+	// Drain the project-scoped credentials by their deterministic names BEFORE
+	// the register-delete (order is cosmetic — different table, no FK — but keeps
+	// the drain readable next to the row it belongs to).
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM context_secrets WHERE scope = $1 AND name = ANY($2::text[])`,
+		scope, []string{WebhookSecretName(id), "forge.token." + id}); err != nil {
+		return false, fmt.Errorf("store: delete project secrets: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM context_projects WHERE id = $1::uuid`, id)
 	if err != nil {
 		return false, fmt.Errorf("store: delete project: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("store: delete project commit: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
 }

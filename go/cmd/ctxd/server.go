@@ -128,6 +128,15 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	forgePusher := forge.NewPusher(pool, blocktypeReg.SnapshotForTenant)
 	forgeSync.SetPush(forgePusher.PushProject)
 	manageH.SetForgeController(forgeSync)
+	// W13: the webhook inbox arm fires a debounced forge sync per project the same
+	// SyncManager drives (one run engine — REST trigger, manage trigger, webhook
+	// trigger). Wired here (post-Run, main.go) via the mu-guarded setter; the
+	// status is discarded (a benign ErrSyncRunning/ErrSyncSaturated is logged by
+	// the arm, not fatal — the delivery is a non-authoritative trigger, §5.3).
+	scheduler.SetWebhookSyncTrigger(func(ctx context.Context, project store.ProjectRow) error {
+		_, err := forgeSync.StartSync(ctx, project, false)
+		return err
+	})
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)
 	digestH := handler.NewDigestHandler(pool, blocktypeReg)
@@ -200,6 +209,12 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// is member scope-read. It shells the SAME forge.SyncManager the manage forge-
 		// sync-start action drives (one run engine, two transports).
 		handler.MountProjectSync(r, handler.NewProjectSyncHandler(pool, forgeSync, cfgStore))
+		// Project webhook-secret lifecycle (workflow W13): POST/DELETE
+		// /api/project/{id}/webhook-secret, tenant-admin inside the mount (§5.1). The
+		// secret is server-generated (crypto/rand, reveal-once) and sealed in the
+		// PROJECT scope under the server-fixed name — NOT via /api/secrets, whose
+		// writeScope could never reach the project scope (§5.6).
+		handler.MountProjectWebhookSecret(r, handler.NewWebhookSecretHandler(pool))
 		// Project SSE domain-event stream (workflow W9): GET /api/project/events,
 		// member-gated inside the mount, scope-filtered at the projectHub fan-out
 		// (design/03 §4.5). Separate from the server-admin telemetry /api/events.
@@ -264,6 +279,18 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Use(handler.Auth(pool))
 		r.Use(handler.MaxBodySize(BlobMaxBodySize))
 		r.Post("/api/blob/store", blobH.HandleBlobStore)
+	})
+
+	// Webhook inbound (workflow W13) — the FIRST unauthenticated write surface,
+	// deliberately OUTSIDE the /api Auth group: GitHub POSTs here with no api key,
+	// so HMAC-SHA256 over the raw body against the per-project sealed secret
+	// replaces Auth(pool) (naht N2). Only the 1 MB body cap fronts it (§5.3 order:
+	// Body-Cap → Lookup → HMAC → Rate-Limit → INSERT, all inside the handler). The
+	// SPA reserves the /webhooks prefix (index.ts RESERVED_SERVER_PREFIXES, U04).
+	webhookH := handler.NewWebhookGitHubHandler(pool, cfgStore)
+	r.Group(func(r chi.Router) {
+		r.Use(handler.MaxBodySize(DefaultMaxBodySize))
+		r.Post("/webhooks/github/{project_id}", webhookH.HandleWebhook)
 	})
 
 	// Embedded SPA — mounted last: chi matches registered routes first, only

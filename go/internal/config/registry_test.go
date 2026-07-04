@@ -102,6 +102,12 @@ func TestRegistryStrictSet(t *testing.T) {
 		// a security ceiling).
 		"project.events.max_connections":    true,
 		"project.events.coalesce_threshold": true,
+		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
+		// int cap like events.max_connections; a typo'd cap silently defaulting
+		// would hide the intended Denial-of-Sync protection, so it aborts loudly.
+		// webhook.retention is a Duration (Hours), non-strict (a janitor horizon is
+		// not a security ceiling).
+		"webhook.rate_limit": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {
@@ -248,6 +254,9 @@ func TestRegistryTenancySet(t *testing.T) {
 		// W9 per-tenant SSE domain-event connection cap (flush/ping cadences +
 		// coalesce_threshold are process-global → deliberately absent here)
 		"project.events.max_connections": true,
+		// W13 per-project webhook inbound rate (retention is a process-global
+		// janitor horizon → global-only, deliberately absent here)
+		"webhook.rate_limit": true,
 		// per-tenant web-chat surface
 		"webchat.enabled": true, "webchat.max_iterations": true, "webchat.max_tokens": true,
 		"webchat.completion_budget": true, "webchat.tool_result_max_chars": true,
@@ -264,8 +273,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 54 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 54 (change it with intent)", got)
+	if got := len(overridable); got != 55 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 55 (change it with intent)", got)
 	}
 	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
 	// a tenant override here would flush the process-wide embed cache / flip the

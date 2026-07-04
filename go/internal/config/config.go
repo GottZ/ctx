@@ -341,8 +341,35 @@ type EventsConfig struct {
 // trigger and the SSE domain-event hub (W9) carry runtime knobs; the webhook
 // rate/retention keys land with the W13 inbound surface.
 type ProjectConfig struct {
-	Sync   ProjectSyncConfig
-	Events ProjectEventsConfig
+	Sync    ProjectSyncConfig
+	Events  ProjectEventsConfig
+	Webhook ProjectWebhookConfig
+}
+
+// ProjectWebhookConfig governs the unauthenticated GitHub inbound surface (POST
+// /webhooks/github/{project_id}, workflow W13, design/03 §3.4/§4.4/§5.3). W11
+// deliberately did NOT create these keys (no webhook surface yet); they land with
+// the inbound wave.
+//
+// RateLimit is counted PER PROJECT over a fixed 60-s window
+// (context_webhook_events, idx_webhook_project_recent) and applies ONLY to
+// signature-valid deliveries (§5.3 order Body-Cap → Lookup → HMAC → Rate-Limit →
+// INSERT) — an unsigned flood never reaches the counter, so it cannot push GitHub
+// into disabling the hook. An int ceiling like events.max_connections ⇒
+// parse:"strict" (a typo'd cap silently defaulting would hide the intended
+// Denial-of-Sync protection). tenant-overridable (a per-tenant repo-traffic
+// profile), 120/min the GitHub-comfortable default.
+//
+// Retention is the age past which the scheduler Janitor arm evicts PROCESSED
+// deliveries index-gestützt (idx_webhook_done); the queue is a through-buffer,
+// not an archive (the block-write audit lives in context_write_log). Duration
+// suffix h/d/w/m/y (Hours parser), 0 = keep forever (operator opt-out, same
+// convention as scheduler.llmlog_retention_days / webchat.session_retention).
+// global-only: the janitor is one process-wide sweep over the one queue table,
+// like the llmlog body-NULLing janitor (design/03 §3.4/§8).
+type ProjectWebhookConfig struct {
+	RateLimit int   `key:"webhook.rate_limit" env:"CTX_WEBHOOK_RATE_LIMIT" default:"120" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	Retention Hours `key:"webhook.retention" env:"CTX_WEBHOOK_RETENTION" default:"14d" mut:"hot" tenancy:"global-only"`
 }
 
 // ProjectEventsConfig governs the GET /api/project/events SSE domain-event hub

@@ -284,13 +284,16 @@ fi
 # per-block workflow value; the partial board index idx_blocks_workflow_board is
 # added by the same migration but adds no column and no table — verified live
 # against the migration chain in migration077_integration_test).
+# + 1 table since M082 (context_webhook_events, workflow W13 webhook inbound queue;
+# design/03 §3.4, masterplan K1 reserved 082 for W13). NEW table, context_blocks
+# untouched — table_count 34→35, col_count STAYS 40.
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "34" ]] && [[ "$col_count" == "40" ]]; then
+if [[ "$table_count" == "35" ]] && [[ "$col_count" == "40" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 34 tables + 40 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 35 tables + 40 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS
