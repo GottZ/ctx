@@ -16,6 +16,8 @@
 # the env var is truthful here by construction — @visual pixel asserts run
 # (playwright.config.ts grepInvert gating). CI is passed through so the
 # CI-specific config knobs (workers: 4, retries: 1, forbidOnly) apply inside.
+# CTX_E2E_QUARANTINE is passed through so the nightly web-job step can include
+# the @quarantine specs (design 06 §5.4); empty on PRs ⇒ they stay excluded.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -57,6 +59,7 @@ docker build -f e2e/Dockerfile \
 # --ipc=host + --init per Playwright container guidance (design 06 §4.4).
 exec docker run --rm --init --ipc=host \
   -e CTX_E2E_CONTAINER=1 \
+  -e CTX_E2E_QUARANTINE="${CTX_E2E_QUARANTINE:-}" \
   -e CI="${CI:-}" \
   -v "$PWD:/work" -w /work \
   "$TAG" \

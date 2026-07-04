@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ctx e2e quarantine ledger (design 06 §3.5/§5.4, wave PV11)",
+  "description": "The flake-quarantine ledger. A `@quarantine`-tagged spec is excluded from the per-PR mock-tier gate (grepInvert) but STILL run nightly (observed, not forgotten) — so it must be tracked here. Tag<->ledger is a 1:1 bijection (e2e/contract/quarantine.test.ts): a `@quarantine` tag without an entry is red (`untracked quarantine`), an entry without a tag is red (`stale`). The cap is > 5 entries => red (evaluateCap) — the quarantine cannot silently grow into an invisible heap. Adding an entry is a deliberate process decision (COVERAGE.md header rule: flaky twice within 14 days => quarantine or fix), never automatic. Empty is the healthy default.",
+  "type": "object",
+  "required": ["entries"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "issue", "since"],
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The Playwright test title (leaf title of the `@quarantine`-tagged test). MUST match the tag holder exactly — the bijection test resolves tags structurally via `playwright test --list --reporter=json`."
+          },
+          "issue": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Mandatory tracking reference — GitHub-issue interim form until Achse-02 issues exist (§3.3/§9.4), never empty."
+          },
+          "since": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Date the test entered quarantine (YYYY-MM-DD) — the 14-day flake clock and the cap-age review read this."
+          }
+        }
+      }
+    }
+  }
+}

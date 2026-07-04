@@ -87,6 +87,14 @@ Any commit that touches `__screenshots__/` or adds a11y-debt entries (`go/web/e2
 2. Regenerate: `bash go/web/e2e-visual.sh --update` (builds the container from the new pins, refreshes changed baselines inside it).
 3. Commit lock bump + regenerated baselines together as ONE `[baseline]` commit stating the upgrade as the reason.
 
+## Flake quarantine, budgets & trend (Web e2e, PV11)
+
+Retries are declared infrastructure protection (CI `1`, local `0`), not a flake blanket. Every `flaky` outcome (a test that only passed on retry) becomes a visible CI annotation (`.github/scripts/flake-annotations.sh`) and flows into the nightly trend line. **Process rule: a test flaky twice within 14 days must be quarantined or fixed** — this is not optional (also stated in the `e2e/COVERAGE.md` header).
+
+**Quarantine** is a `@quarantine` tag on the test **plus** an entry in `go/web/e2e/quarantine.json` (`title` + mandatory `issue` + `since`). The per-PR mock-tier gate excludes tagged tests (config `grepInvert`), while the nightly run keeps executing them (`CTX_E2E_QUARANTINE=1`, set on the schedule/dispatch `web`-job step) — quarantine means *observed, not forgotten*. Two gates in `e2e/contract/quarantine.test.ts` keep it honest: a **hard cap** of 5 entries (> 5 ⇒ red), and a **tag↔ledger bijection** (a tag with no entry ⇒ red `untracked quarantine`; an entry with no tag ⇒ red `stale`). The tag set is resolved structurally from `playwright test --list --reporter=json`, not from a source grep. The empty ledger is the healthy default.
+
+**Runtime budgets** (`.github/e2e-budget.json`, calibrated) split the e2e wall time (from `report.json`) from the whole-job wall; over budget annotates, `> 10 min` fails the job. **Three consecutive runs over the e2e part budget trigger sharding** — the blob-reporter foundation is already laid, so activation is a documented YAML diff in `ci.yml` (`vars.E2E_SHARD`), currently dormant (measured e2e ≈ 77 s ≪ the trigger). Nightly, a dedicated `web-trend` job writes one duration+flaky JSON trend line per run (`e2e-trend.sh`, retention 90 d) and measures the cumulative `__screenshots__` git-history blob volume (`history-budget.sh`): it annotates from 60 MB and flags the documented escalation path (baseline orphan branch / Git-LFS) from 150 MB, but never auto-fails — that decision is taken with the measurement, not by the CI run.
+
 ## Git hooks
 
 Enable with `git config core.hooksPath .hooks`:

@@ -75,6 +75,35 @@ jobs:
   # Docker stage). Known, deliberate divergence: the release stage uses
   # oven/bun alpine (musl), the toolchain image the glibc bun binary on the
   # Playwright noble base (design 06 §4.4/S4).
+  #
+  # ── Sharding preparation (design 06 §6.3, wave PV11 — PREPARED, NOT ACTIVE) ──
+  # The reporter foundation (blob) is already laid (playwright.config.ts), so
+  # activating sharding is a YAML DIFF, not a rebuild. It stays dormant because
+  # the calibrated budget (.github/e2e-budget.json: e2e ~77s, budget 160s) sits
+  # far below the 270s e2e part budget — sharding activates only after the §6.3
+  # trigger (three consecutive runs over the e2e part budget) OR by flipping the
+  # repo variable `vars.E2E_SHARD == '1'`. The activation diff, verbatim:
+  #
+  #   web:
+  #     strategy:
+  #       fail-fast: false
+  #       matrix: { shard: [1, 2, 3, 4] }
+  #     steps:
+  #       ...
+  #       - name: e2e (Playwright in pinned container)
+  #         run: bash go/web/e2e-container.sh bun run test:e2e -- \
+  #                --shard=${{ matrix.shard }}/4          # blob reporter is per-shard
+  #       # upload each shard's e2e/.results/blob as blob-${{ matrix.shard }}
+  #   web-merge:                                          # new fan-in job
+  #     needs: [web]
+  #     steps:
+  #       - download all blob-* artifacts
+  #       - bun x playwright merge-reports --reporter html ./blobs
+  #
+  # Activation-day gate (design 06 §7-PV11 (c)): a 4×blob → merge-reports probe
+  # must yield the SAME total test count as a single-run report. Not run here —
+  # sharding is dormant, and a real 4-shard probe means four full e2e runs
+  # (deliberately deferred until the trigger fires; not a rebuild).
   web:
     name: Web
     runs-on: ubuntu-latest
@@ -137,6 +166,13 @@ jobs:
       # committed baselines are compared here (design 06 §5.5: CI has NO
       # update path — --update-snapshots exists only in e2e-visual.sh).
       - name: e2e (Playwright in pinned container)
+        # Nightly (schedule) + on-demand (dispatch) INCLUDE the @quarantine
+        # specs — quarantine means observed, not forgotten (design 06 §5.4,
+        # wave PV11). PRs/pushes leave CTX_E2E_QUARANTINE empty, so the config
+        # grepInvert excludes them from the per-PR gate. e2e-container.sh passes
+        # the var through into the pinned container.
+        env:
+          CTX_E2E_QUARANTINE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1' || '' }}
         run: bash go/web/e2e-container.sh bun run test:e2e
 
       - name: Flake annotation (report.json retry statistics)
@@ -213,6 +249,66 @@ jobs:
           name: web-live-report
           path: go/web/e2e/live/.results/
           retention-days: 3
+          if-no-files-found: ignore
+
+  # ─── Stage 1d: Web Trend + History Budget (PV11, nightly) ────────────────────
+  # Wave PV11 (design 06 §6.3): two nightly bookkeeping measurements that dock
+  # onto the nightly run without touching the release-gating web-live job.
+  #   - e2e DURATION + flaky trend line, from the mock-tier `web` job's
+  #     report.json (one JSON line per run, retention 90d — §4.7/§6.3);
+  #   - screenshot HISTORY blob-volume budget (git rev-list over the full
+  #     history, needs fetch-depth: 0 — §3.1/§6.3).
+  # A DEDICATED job (not a step in web-live): web-live runs a 30-min live stack
+  # and owns the LIVE report.json (e2e/live/.results), while the trend wants the
+  # MOCK-tier duration from the `web` job — folding it into web-live would couple
+  # trend bookkeeping to the release gate and force a mock-artifact download into
+  # the live job. A ~2-min job stays independently green/red. Nightly + dispatch
+  # only (no per-PR trend noise). `needs: [web]` for the report.json artifact —
+  # a red `web` skips the trend (no point trending a failed run).
+  web-trend:
+    name: Web Trend + History Budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [web]
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (full history for the screenshot blob-volume measurement)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Download mock-tier e2e report (from the `web` job)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-e2e-report
+          path: web-report
+
+      - name: e2e duration + flaky trend line (design 06 §6.3)
+        run: |
+          REPORT=$(find web-report -name report.json -print -quit 2>/dev/null || true)
+          REPORT="${REPORT:-go/web/e2e/.results/report.json}" TREND_DIR=trend \
+            bash .github/scripts/e2e-trend.sh
+
+      - name: Screenshot history budget (design 06 §3.1/§6.3)
+        # Nightly runs on root ⇒ HEAD==root; the script defaults to the `root`
+        # ref when present, HEAD otherwise. Annotates >=60 MB, escalation-due
+        # >=150 MB — never an auto-fail (§6.3: the orphan-branch/LFS decision is
+        # the User's, taken WITH the measurement).
+        run: bash .github/scripts/history-budget.sh
+
+      - name: Upload trend line
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: web-trend
+          path: trend/
+          # Generous retention (design 06 §6.3): one line per run reconstructs
+          # the duration/flaky trend from the retained set.
+          retention-days: 90
           if-no-files-found: ignore
 
   # ─── Stage 2: Unit Tests ──────────────────────────────────────────────────────

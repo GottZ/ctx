@@ -15,6 +15,16 @@ import { defineConfig, devices } from '@playwright/test'
 const PORT = 5179
 const baseURL = `http://localhost:${PORT}`
 
+// grepInvert as a single RegExp over the tags that must NOT run in the current
+// mode (design 06 §4.4/§5.4). Returns undefined when nothing is excluded so
+// Playwright runs the full suite.
+function buildGrepInvert(): RegExp | undefined {
+  const excluded: string[] = []
+  if (!process.env.CTX_E2E_CONTAINER) excluded.push('@visual')
+  if (!process.env.CTX_E2E_QUARANTINE) excluded.push('@quarantine')
+  return excluded.length ? new RegExp(excluded.join('|')) : undefined
+}
+
 export default defineConfig({
   testDir: './e2e',
   // Runner split (wave PV4): Playwright owns *.spec.ts; *.test.ts under
@@ -71,10 +81,16 @@ export default defineConfig({
   // platform-suffixed baseline set would be the backdoor to unpinned local
   // renders (design 06 §3.1). {arg} carries <page>--<state>--<theme>--<viewport>.
   snapshotPathTemplate: '{testDir}/__screenshots__/{testFileBaseName}/{arg}{ext}',
-  // @visual gating (design 06 §4.4): pixel asserts only run inside the pinned
-  // container (CTX_E2E_CONTAINER=1, self-declared + CI-defended); flow/ARIA/axe
-  // tests are platform-stable and always run.
-  grepInvert: process.env.CTX_E2E_CONTAINER ? undefined : /@visual/,
+  // grepInvert combines two independent exclusions (design 06 §4.4 + §5.4):
+  //   @visual     — pixel asserts only run inside the pinned container
+  //                 (CTX_E2E_CONTAINER=1, self-declared + CI-defended);
+  //                 flow/ARIA/axe tests are platform-stable and always run.
+  //   @quarantine — flaky specs are excluded from the per-PR mock-tier gate but
+  //                 STILL run nightly (CTX_E2E_QUARANTINE=1, set on the schedule/
+  //                 dispatch web-job step). Quarantine = observed, not forgotten;
+  //                 the tag<->ledger bijection (e2e/quarantine.json) is gated in
+  //                 e2e/contract/quarantine.test.ts.
+  grepInvert: buildGrepInvert(),
   use: {
     baseURL,
     // ARIA snapshots (PV6) are the FIRST artifact compared on the host AND in

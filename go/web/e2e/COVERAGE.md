@@ -26,6 +26,26 @@ committete YAML-Struktur-Gates (`__screenshots__/smoke.spec/<seite>--aria--<vp>.
 plattform-/font-unabhängig, laufen auf Host UND Container; Änderungen sind [baseline]-
 Marker-pflichtig (der commit-msg-Hook deckt ALLE Pfade unter `__screenshots__/`, nicht nur PNGs).
 
+## Flake-Politik, Quarantäne & Budgets (design 06 §5.4/§6.3)
+
+**Flake-Prozess-Regel:** Retries sind deklarierter Infra-Schutz (CI: 1, lokal: 0), kein
+Flake-Teppich. Jeder `flaky`-Status (Test bestand erst im Retry) erzeugt eine sichtbare
+CI-Annotation (`.github/scripts/flake-annotations.sh`) und fließt in die nightly Trend-Zeile
+(`.github/scripts/e2e-trend.sh`). **Ein Test, der zweimal in 14 Tagen flaky war, MUSS in
+Quarantäne oder gefixt werden** — nicht optional.
+
+**Quarantäne:** Eintrag in `e2e/quarantine.json` (Pflicht: `issue` + `since`) + `@quarantine`-
+Tag am Test. Das PR-Gate schließt getaggte Tests aus (config `grepInvert`), nightly führt sie
+WEITER aus (`CTX_E2E_QUARANTINE=1` — beobachtet, nicht vergessen). Harter Deckel > 5 ⇒ rot;
+Tag↔Ledger-Bijektion 1:1 (Tag ohne Eintrag ⇒ rot „untracked", Eintrag ohne Tag ⇒ rot „stale") —
+erzwungen in `e2e/contract/quarantine.test.ts`. Ledger leer = gesunder Default.
+
+**Budgets (kalibriert, `.github/e2e-budget.json`):** e2e-Teilbudget (report.json-Wall) + Job-
+Budget; Überschreitung annotiert, Job > 10 min ⇒ rot. Drei Läufe über dem e2e-Teilbudget ⇒
+Sharding-Aktivierung (in ci.yml vorbereitet, NICHT aktiv — §6.3). **History-Budget (nightly):**
+kumuliertes `__screenshots__`-Blob-Volumen der Git-History; Annotation ab 60 MB, dokumentierter
+Eskalationspfad (Orphan-Branch/LFS) ab 150 MB — nie Auto-Fail (`.github/scripts/history-budget.sh`).
+
 ## Matrix
 
 | Seite | Route | Rolle | States | Kern-Flow | Visual | ARIA | axe | Fokus-Walk | Mobile | Deny | Leak | Scale | Live |
