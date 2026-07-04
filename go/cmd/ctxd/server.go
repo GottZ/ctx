@@ -102,6 +102,13 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		return store.TenantStatusForScope(ctx, pool, scope)
 	}
 	forgeSync := forge.NewSyncManager(pool, tenantStatus, issuePolicyOK)
+	// I-G Pull-APPLY: the 3-way direction logic + block/comment create-update +
+	// mapping + references edges (design/02 §4.5.2/§4.5.7). The applier resolves
+	// the issue type config per scope for the workflow_status mapping (the
+	// metadata-only fallback when the registry is not resolvable, §4.5.4).
+	forgeApplier := forge.NewApplier(pool, blocktypeReg.SnapshotForTenant)
+	forgeSync.SetApplyIssues(forgeApplier.ApplyIssues)
+	forgeSync.SetApplyComments(forgeApplier.ApplyComments)
 	manageH.SetForgeController(forgeSync)
 	whoamiH := handler.NewWhoamiHandler(pool)
 	blobH := handler.NewBlobHandler(pool, cfgStore)

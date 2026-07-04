@@ -192,3 +192,105 @@ func ConflictCount(ctx context.Context, pool *pgxpool.Pool, projectID string) (i
 	}
 	return n, nil
 }
+
+// ── I-G Pull-APPLY mapping writes (design/02 §3.5/§3.6/§4.5.2) ────────────────
+// I-F ships the mapping TABLE and reads it (ConflictCount); I-G MINTS the rows:
+// every write below carries a block_id (NOT NULL, 080), so a mapping row is
+// structurally inseparable from a real block — the ownership boundary in the 080
+// header. base_hash is the sha256 canonical projection at last successful sync
+// (§3.6, W16 — never a timestamp); forge_updated_at is telemetry ONLY, never a
+// direction input. Every write is Tx-bound (the apply couples block + mapping in
+// one Tx so a half-written mapping can never exist).
+
+// SyncMap is one context_project_sync_map row as the 3-way apply needs it: the
+// stored base_hash + the conflict flag drive the direction decision (§4.5.2).
+type SyncMap struct {
+	ProjectID      string
+	EntityKind     string
+	ForgeID        int64
+	BlockID        string
+	BaseHash       string
+	Conflict       bool
+	ForgeUpdatedAt *time.Time
+}
+
+// GetSyncMapsByForge batch-loads the mapping rows for a page of forge ids of one
+// kind, keyed forge_id→row — ONE query per page, no N+1 on the direction lookup
+// (§6, 10k+ issues/repo). forge_id 0 (local-only, I-H push) is never a fetch id,
+// so ctx-only mappings are naturally untouched by a pull. A forge id with no
+// mapping is simply absent from the result (⇒ the pull-create case, §4.5.2).
+func GetSyncMapsByForge(ctx context.Context, pool *pgxpool.Pool, projectID, kind string, forgeIDs []int64) (map[int64]SyncMap, error) {
+	out := make(map[int64]SyncMap, len(forgeIDs))
+	if len(forgeIDs) == 0 {
+		return out, nil
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT entity_kind, forge_id, block_id::text, base_hash, conflict, forge_updated_at
+		   FROM context_project_sync_map
+		  WHERE project_id = $1::uuid AND entity_kind = $2 AND forge_id = ANY($3::bigint[])`,
+		projectID, kind, forgeIDs)
+	if err != nil {
+		return nil, fmt.Errorf("store: get sync maps: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		m := SyncMap{ProjectID: projectID}
+		if err := rows.Scan(&m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash, &m.Conflict, &m.ForgeUpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan sync map: %w", err)
+		}
+		out[m.ForgeID] = m
+	}
+	return out, rows.Err()
+}
+
+// InsertSyncMap writes the mapping row of a pull-create (§4.5.2 creation case):
+// (project, kind, forge_id) → block_id with base_hash = the projection just
+// pulled. Tx-bound (couples to the block insert). ON CONFLICT DO NOTHING keeps a
+// re-applied create idempotent (a concurrent create of the same forge id is a
+// no-op, not a 23505 abort of the run).
+func InsertSyncMap(ctx context.Context, tx pgx.Tx, m SyncMap) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO context_project_sync_map
+		   (project_id, entity_kind, forge_id, block_id, base_hash, forge_updated_at)
+		 VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6)
+		 ON CONFLICT (project_id, entity_kind, forge_id, block_id) DO NOTHING`,
+		m.ProjectID, m.EntityKind, m.ForgeID, m.BlockID, m.BaseHash, m.ForgeUpdatedAt)
+	if err != nil {
+		return fmt.Errorf("store: insert sync map: %w", err)
+	}
+	return nil
+}
+
+// UpdateSyncMapBase rewrites base_hash after a pull-apply (base := forgeH) or a
+// convergence (base := ctxH == forgeH). It CLEARS any conflict flag — a resolved
+// direction ends the conflict. Keyed on block_id (the per-block unique index).
+// Tx-bound so it commits with the block update (or, for convergence, alone: no
+// block write, only the base advance, §4.5.2).
+func UpdateSyncMapBase(ctx context.Context, tx pgx.Tx, blockID, baseHash string, forgeUpdatedAt *time.Time) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE context_project_sync_map
+		    SET base_hash = $2, forge_updated_at = $3, synced_at = now(),
+		        conflict = false, conflict_at = NULL
+		  WHERE block_id = $1::uuid`,
+		blockID, baseHash, forgeUpdatedAt)
+	if err != nil {
+		return fmt.Errorf("store: update sync map base: %w", err)
+	}
+	return nil
+}
+
+// FlagSyncMapConflict marks a both-ahead mapping (§4.5.2 last row): conflict=true
+// + conflict_at, and ZERO writes to the block in either direction. conflict_at is
+// preserved on a re-flag (COALESCE) so the divergence timestamp is the FIRST
+// detection, not the latest run. Keyed on block_id.
+func FlagSyncMapConflict(ctx context.Context, tx pgx.Tx, blockID string, at time.Time) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE context_project_sync_map
+		    SET conflict = true, conflict_at = COALESCE(conflict_at, $2), synced_at = now()
+		  WHERE block_id = $1::uuid`,
+		blockID, at)
+	if err != nil {
+		return fmt.Errorf("store: flag sync map conflict: %w", err)
+	}
+	return nil
+}

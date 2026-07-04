@@ -33,8 +33,8 @@ const (
 // Sentinel errors surfaced to the manage handler (mapped to 409/422/…).
 var (
 	ErrSyncRunning     = errors.New("forge sync already running for this project")
-	ErrNoTenant        = errors.New("scope has no owning tenant")                                          // found=false gate (S13)
-	ErrTenantSuspended = errors.New("owning tenant is suspended")                                          // skip, not proceed
+	ErrNoTenant        = errors.New("scope has no owning tenant")                                              // found=false gate (S13)
+	ErrTenantSuspended = errors.New("owning tenant is suspended")                                              // skip, not proceed
 	ErrIssuePolicy     = errors.New("issue type policy not resolvable — deploy Achse-01 T3 + Welle I-C first") // §6.4
 	ErrForgeKind       = errors.New("unsupported forge kind (github only)")
 )
@@ -51,6 +51,13 @@ type ApplyResult struct {
 // no blocks and advances no durable fetch cursor (§7 boundary). I-G supplies this
 // AND takes over etag/since cursor commit per page.
 type IssueApplyFunc func(ctx context.Context, project store.ProjectRow, issues []IssueRemote) (ApplyResult, error)
+
+// CommentApplyFunc applies one fetched page of comments — Welle I-G (comment
+// block create/update + mapping + {body} 3-way, §3.6/§4.5.2). nil ⇒ the run does
+// not pull comments (I-F fetch-only / dry-run). The comment leg runs AFTER the
+// issue leg so a comment's parent issue mapping already exists (a comment whose
+// parent is not yet pulled is skipped and picked up on a later run).
+type CommentApplyFunc func(ctx context.Context, project store.ProjectRow, comments []CommentRemote) (ApplyResult, error)
 
 // SyncStatus is the in-memory state of the current/last run for one project
 // (forge-sync-status surface). DB-side history (last run row, conflict count) is
@@ -84,13 +91,14 @@ type IssuePolicyFn func(ctx context.Context, scope string) (ok bool, reason stri
 // SyncManager owns run-state and the gates. It is the ForgeController the manage
 // handler consumes.
 type SyncManager struct {
-	pool         *pgxpool.Pool
-	openBox      func() (*sealbox.Box, error)
-	newForge     func(token string) Forge
-	tenantStatus TenantStatusFn
-	issuePolicy  IssuePolicyFn
-	applyIssues  IssueApplyFunc // nil ⇒ I-F fetch-only no-op (I-G wires it)
-	clock        func() time.Time
+	pool          *pgxpool.Pool
+	openBox       func() (*sealbox.Box, error)
+	newForge      func(token string) Forge
+	tenantStatus  TenantStatusFn
+	issuePolicy   IssuePolicyFn
+	applyIssues   IssueApplyFunc   // nil ⇒ I-F fetch-only no-op (I-G wires it)
+	applyComments CommentApplyFunc // nil ⇒ no comment pull (I-G wires it)
+	clock         func() time.Time
 
 	mu   sync.Mutex
 	runs map[string]*SyncStatus
@@ -113,6 +121,9 @@ func NewSyncManager(pool *pgxpool.Pool, tenantStatus TenantStatusFn, issuePolicy
 
 // SetApplyIssues wires the I-G Pull-APPLY hook (idempotent; call once at boot).
 func (m *SyncManager) SetApplyIssues(fn IssueApplyFunc) { m.applyIssues = fn }
+
+// SetApplyComments wires the I-G comment Pull-APPLY hook (call once at boot).
+func (m *SyncManager) SetApplyComments(fn CommentApplyFunc) { m.applyComments = fn }
 
 // SetToken seals a PAT for the project and records its ref name (never the PAT,
 // §5.4). The seal + the token_secret ref update commit in ONE transaction. The
@@ -242,46 +253,140 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 
 	etag, since, backoffN := readCursor(project.SyncCursor)
 
-	page, err := client.ListIssuesSince(ctx, repo, since, etag)
-	if errors.Is(err, ErrNotModified) {
-		// 304: nothing changed ⇒ 0 writes, cursor untouched, backoff/error cleared.
-		_ = store.SetProjectSyncState(ctx, m.pool, project.ID, store.SyncStatePatch{
-			SyncStatus: strptr("idle"), ClearError: true, ClearBackoff: true, SetLastSync: true,
-		})
-		m.finish(project.ID, runID, "", false, false)
-		return
-	}
-	if err != nil {
-		m.handleWireError(ctx, project.ID, runID, backoffN, err)
-		return
-	}
-
-	for {
-		if err := m.applyPage(ctx, project, dryRun, page); err != nil {
-			m.handleWireError(ctx, project.ID, runID, backoffN, err)
-			return
-		}
-		m.addPageStats(project.ID, page)
-		if page.NextURL == "" {
-			break
-		}
-		page, err = client.ListIssuesPage(ctx, page.NextURL)
-		if err != nil {
+	// Issue leg: fetch + 3-way apply per page, committing the etag/since cursor
+	// AFTER each successful page apply (I-G — I-F left the durable advance to us).
+	// A wire OR apply error backs off with the cursor UN-advanced (resume re-fetches
+	// from the last committed page, re-applies idempotently — no skip).
+	if err := m.pullIssues(ctx, project, client, repo, dryRun, etag, since); err != nil {
+		if errors.Is(err, ErrNotModified) {
+			// 304 on the FIRST issue page: nothing changed ⇒ issue cursor untouched.
+			// Comments may still have changed, so fall through to the comment leg.
+		} else {
 			m.handleWireError(ctx, project.ID, runID, backoffN, err)
 			return
 		}
 	}
 
-	// SUCCESS. I-F (applyIssues==nil) does NOT advance the durable etag/since
-	// cursor — no apply happened, so advancing would skip un-applied entities
-	// (the etag/since commit is I-G's job, coupled per page with the writes).
-	// Backoff/error are cleared and last_sync_at stamped regardless (diagnostic
-	// state, not the fetch cursor).
+	// Comment leg (I-G): only when the hook is wired and this is not a dry run.
+	if m.applyComments != nil && !dryRun {
+		cEtag, cSince := readCommentCursor(project.SyncCursor)
+		if err := m.pullComments(ctx, project, client, repo, cEtag, cSince); err != nil && !errors.Is(err, ErrNotModified) {
+			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			return
+		}
+	}
+
+	// SUCCESS. Backoff/error are cleared and last_sync_at stamped; backoff_n reset.
+	// The etag/since fetch cursors were advanced per page inside the legs above (I-F
+	// with applyIssues==nil advances nothing — no apply happened).
 	_ = store.SetProjectSyncState(ctx, m.pool, project.ID, store.SyncStatePatch{
 		SyncStatus: strptr("idle"), ClearError: true, ClearBackoff: true, SetLastSync: true,
 	})
 	_ = store.MergeProjectSyncCursor(ctx, m.pool, project.ID, json.RawMessage(`{"backoff_n":0}`))
 	m.finish(project.ID, runID, "", false, false)
+}
+
+// pullIssues runs the issue fetch loop: each page is 3-way applied, then the
+// etag/since cursor is durably committed (only when a real apply hook is wired and
+// not a dry run — I-F's no-op advances nothing, §7 boundary). A 304 on the first
+// page returns ErrNotModified (clean, cursor untouched); any other error aborts
+// the leg with the cursor at its last committed page.
+func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, client Forge, repo RepoRef, dryRun bool, etag string, since time.Time) error {
+	page, err := client.ListIssuesSince(ctx, repo, since, etag)
+	if err != nil {
+		return err
+	}
+	firstETag := page.ETag
+	var maxSeen time.Time
+	for {
+		if err := m.applyPage(ctx, project, dryRun, page); err != nil {
+			return err // cursor NOT advanced for this page (commit is below the apply)
+		}
+		m.addPageStats(project.ID, page)
+		if m.applyIssues != nil && !dryRun {
+			if mu := maxIssueUpdated(page); mu.After(maxSeen) {
+				maxSeen = mu
+			}
+			if !maxSeen.IsZero() {
+				m.commitFetchCursor(ctx, project.ID, "issues", firstETag, maxSeen)
+			}
+		}
+		if page.NextURL == "" {
+			return nil
+		}
+		if page, err = client.ListIssuesPage(ctx, page.NextURL); err != nil {
+			return err
+		}
+	}
+}
+
+// pullComments runs the comment fetch loop (I-G): each page is 3-way applied over
+// the {body} projection, then the comment etag/since cursor is committed per page.
+func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow, client Forge, repo RepoRef, etag string, since time.Time) error {
+	page, err := client.ListCommentsSince(ctx, repo, since, etag)
+	if err != nil {
+		return err
+	}
+	firstETag := page.ETag
+	var maxSeen time.Time
+	for {
+		res, err := m.applyComments(ctx, project, page.Comments)
+		if err != nil {
+			return err
+		}
+		m.mu.Lock()
+		if st := m.runs[project.ID]; st != nil {
+			st.Applied += res.Applied
+			st.Conflicts += res.Conflicts
+		}
+		m.mu.Unlock()
+		if mu := maxCommentUpdated(page); mu.After(maxSeen) {
+			maxSeen = mu
+		}
+		if !maxSeen.IsZero() {
+			m.commitFetchCursor(ctx, project.ID, "comments", firstETag, maxSeen)
+		}
+		if page.NextURL == "" {
+			return nil
+		}
+		if page, err = client.ListCommentsPage(ctx, page.NextURL); err != nil {
+			return err
+		}
+	}
+}
+
+// commitFetchCursor durably advances the etag/since fetch cursor for one leg
+// (leg = "issues" | "comments") after a successful page apply. jsonb `||` replaces
+// only that leg's sub-object; backoff_n and the other leg survive.
+func (m *SyncManager) commitFetchCursor(ctx context.Context, projectID, leg, etag string, since time.Time) {
+	patch, err := json.Marshal(map[string]any{leg: map[string]any{"etag": etag, "since": since}})
+	if err != nil {
+		return
+	}
+	_ = store.MergeProjectSyncCursor(ctx, m.pool, projectID, patch)
+}
+
+// maxIssueUpdated / maxCommentUpdated return the newest updated_at of a page — the
+// since boundary to commit (GitHub returns items updated at/after `since`, so a
+// resume re-fetches the boundary item, applied idempotently). Zero when empty.
+func maxIssueUpdated(page IssuePage) time.Time {
+	var mx time.Time
+	for _, iss := range page.Issues {
+		if iss.UpdatedAt.After(mx) {
+			mx = iss.UpdatedAt
+		}
+	}
+	return mx
+}
+
+func maxCommentUpdated(page CommentPage) time.Time {
+	var mx time.Time
+	for _, c := range page.Comments {
+		if c.UpdatedAt.After(mx) {
+			mx = c.UpdatedAt
+		}
+	}
+	return mx
 }
 
 // applyPage streams one page to the Pull-APPLY hook (I-G). On I-F (nil hook) it is
@@ -444,12 +549,18 @@ func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
 	return RepoRef{Owner: f.Owner, Repo: f.Repo, APIBase: f.APIBase}, nil
 }
 
-// cursor is the sync_cursor JSONB shape this wave reads/writes (issues leg).
+// cursor is the sync_cursor JSONB shape this wave reads/writes: an independent
+// etag/since leg per entity kind (issues, comments — a comment-only change does
+// not bump the issue leg) plus the shared backoff counter.
 type cursor struct {
 	Issues struct {
 		ETag  string    `json:"etag"`
 		Since time.Time `json:"since"`
 	} `json:"issues"`
+	Comments struct {
+		ETag  string    `json:"etag"`
+		Since time.Time `json:"since"`
+	} `json:"comments"`
 	BackoffN int `json:"backoff_n"`
 }
 
@@ -459,4 +570,12 @@ func readCursor(raw json.RawMessage) (etag string, since time.Time, backoffN int
 		_ = json.Unmarshal(raw, &c)
 	}
 	return c.Issues.ETag, c.Issues.Since, c.BackoffN
+}
+
+func readCommentCursor(raw json.RawMessage) (etag string, since time.Time) {
+	var c cursor
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &c)
+	}
+	return c.Comments.ETag, c.Comments.Since
 }
