@@ -22,6 +22,10 @@ export default defineConfig({
   // Without this pin Playwright's default testMatch would grab the vitest
   // files and crash on their describe().
   testMatch: '**/*.spec.ts',
+  // The live tier (wave PV10) has its OWN config (e2e/live/playwright.live.
+  // config.ts) and needs a seeded throwaway stack — its specs read seed state
+  // at collection time and must never be swept into the mock-tier run.
+  testIgnore: 'live/**',
   outputDir: './e2e/.results',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
