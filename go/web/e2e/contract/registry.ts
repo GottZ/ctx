@@ -415,6 +415,22 @@ export const contracts: PageContract[] = [
           await page.getByRole('button', { name: 'Search' }).click()
           await expect(page.locator('main.content')).toContainText('Top matches')
         },
+        // Rung 3 (design 05-§8.E3 ladder / 06 §4.3) — same failure class as the
+        // board 'empty' state below: Q11 self-hosted Mono glyph-edge AA wobbles
+        // ±1 LSB under parallel-worker load (1 px, YIQ-delta just over the
+        // calibrated 3.5) on this sparse filtered-list shot. Locally (12 cores)
+        // the CI retry absorbed it; on the 4-vCPU GitHub runner it failed BOTH
+        // attempts on three of the four theme/viewport variants (v4.5.0 run
+        // 28722080386), the fourth failed locally — the wobble rides the state,
+        // not one variant. mask/stylePath do not fit a single AA edge pixel.
+        // 4 ≫ the observed 1 yet ≪ any real regression (hundreds of px). NOT a
+        // global loosening — every other shot keeps 0.
+        visualTolerance: {
+          maxDiffPixels: 4,
+          reason:
+            'Q11 self-hosted Mono: glyph edge AA wobbles ±1 LSB on the sparse search shot under load (1 px, delta ~3.6); failed both CI attempts on the 4-vCPU runner (v4.5.0), local retry absorbed it.',
+          issue: 'design 05-§8.E3 (Q11 Font-Determinismus escalation rung 3; CI run 28722080386)',
+        },
       },
     ],
     scale: {
