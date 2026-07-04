@@ -58,6 +58,59 @@ type childFold struct {
 	visible  bool   // parent passes the caller's VisibilityPredicate (only meaningful when parentID != "")
 }
 
+// Over-fetch tuning (design/02 §4.4). The fold reduces the row count (several
+// comments of one issue collapse to one issue row), so the candidate window must
+// be wider than the user limit for enough DISTINCT parents to survive the
+// collapse. overFetchFactor widens the base internal limit; overFetchHardCap
+// bounds it at ctx_rrf's documented 500-capable ceiling (query.go RRF-stage note)
+// so a pathological corpus can never balloon the rerank work.
+//
+// Note on the design's literal "limit × 2 (Cap 200)": that phrasing predates the
+// live baseline where the gravity reranker already fetches 200 unconditionally
+// (query.go internalLimit), which for any user limit ≤ 20 ALREADY exceeds
+// limit×2. Reducing to limit×2 would SHRINK the window and defeat the gate. I-E
+// therefore realises the design INTENT — widen to compensate the collapse — as a
+// factor on the base internal limit, not a shrink to limit×2. Doc deviation
+// recorded in design/02 §4.4 handling; the ×2 factor is kept.
+const (
+	overFetchFactor  = 2
+	overFetchHardCap = 500
+)
+
+// aggregateOverFetchLimit returns a widened internal limit when the caller's read
+// scopes actually contain at least one aggregating-type block, else the base
+// unchanged. The presence probe is ONE EXISTS query (design's "billige Prüfung")
+// — a corpus without aggregating blocks (e.g. the eval baseline) never widens, so
+// the RRF candidate set and every downstream stage stay byte-identical. Fail-safe:
+// a probe error logs and returns the base (degrade to no over-fetch, never crash).
+func (h *QueryHandler) aggregateOverFetchLimit(ctx context.Context, base int, aggTypes, readScopes []string) int {
+	if len(aggTypes) == 0 || len(readScopes) == 0 {
+		return base
+	}
+	var exists bool
+	err := h.pool.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM context_blocks
+			WHERE type_name = ANY($1::text[]) AND scope = ANY($2::text[]) AND NOT is_archived
+			LIMIT 1)`,
+		aggTypes, readScopes).Scan(&exists)
+	if err != nil {
+		slog.Warn("aggregate over-fetch: presence probe failed; using base limit", "error", err)
+		return base
+	}
+	if !exists {
+		return base
+	}
+	widened := base * overFetchFactor
+	if widened > overFetchHardCap {
+		widened = overFetchHardCap
+	}
+	if widened < base {
+		return base
+	}
+	return widened
+}
+
 // foldAggregates applies the aggregate-to-parent fold to the ranked results.
 // It is a no-op (zero DB calls) when no aggregating type is registered — the
 // current-corpus fast path that keeps eval.sh baseline-neutral. Placement in the
@@ -189,16 +242,20 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 	for _, r := range results {
 		inSet[r.ID] = true
 	}
-	// max child RRFScore per parent, over foldable children only (parent set &
-	// visible). This is the K13 max(parent, child) input.
-	parentMax := make(map[string]float64)
+	// Per-parent candidate cap (design/02 §4.4): over the foldable children only
+	// (parent set & visible), each parent keeps its BEST-ranked child — that one
+	// child sets both the K13 max(parent, child) score input AND the
+	// matched_comment attribution. Every further child of the same thread folds
+	// away silently: it never emits a second row and never displaces a foreign
+	// candidate (one hot thread cannot monopolise the Top-K at 10k+ comments/repo).
+	parentBest := make(map[string]childHit)
 	for _, r := range results {
 		cf, ok := folds[r.ID]
 		if !ok || cf.parentID == "" || !cf.visible {
 			continue
 		}
-		if cur, seen := parentMax[cf.parentID]; !seen || r.RRFScore > cur {
-			parentMax[cf.parentID] = r.RRFScore
+		if cur, seen := parentBest[cf.parentID]; !seen || r.RRFScore > cur.score {
+			parentBest[cf.parentID] = childHit{score: r.RRFScore, id: r.ID, content: r.Content}
 		}
 	}
 
@@ -216,18 +273,21 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 			case inSet[cf.parentID]: // parent emitted at its own position (score bumped there)
 			case !emitted[cf.parentID]: // hydrate parent at this (best-ranked) child's slot
 				p := hydrated[cf.parentID]
-				p.RRFScore = parentMax[cf.parentID]
+				best := parentBest[cf.parentID]
+				p.RRFScore = best.score
+				p.MatchedComment = matchedCommentOf(best) // §4.4: WHY the issue ranked
 				out = append(out, p)
 				emitted[cf.parentID] = true
 			}
 			continue
 		}
 		// r is a normal block or an in-set parent that has folded children.
-		if ms, isParent := parentMax[r.ID]; isParent && inSet[r.ID] {
+		if best, isParent := parentBest[r.ID]; isParent && inSet[r.ID] {
 			if !emitted[r.ID] {
-				if ms > r.RRFScore {
-					r.RRFScore = ms // K13: max(parent, child), no bonus
+				if best.score > r.RRFScore {
+					r.RRFScore = best.score // K13: max(parent, child), no bonus
 				}
+				r.MatchedComment = matchedCommentOf(best) // §4.4 attribution on the in-set parent too
 				out = append(out, r)
 				emitted[r.ID] = true
 			}
@@ -236,4 +296,34 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 		out = append(out, r)
 	}
 	return out, orphanIDs, invisibleIDs
+}
+
+// childHit is the per-parent best child captured during the fold: its score
+// feeds the K13 max merge, its id+content feed the matched_comment annotation.
+type childHit struct {
+	score   float64
+	id      string
+	content string
+}
+
+// matchedCommentOf builds the §4.4 matched_comment attribution from the best
+// child of a folded parent. Nil-safe on an empty hit (no foldable child).
+func matchedCommentOf(h childHit) *rrf.MatchedComment {
+	if h.id == "" {
+		return nil
+	}
+	return &rrf.MatchedComment{ID: h.id, Preview: commentPreview(h.content)}
+}
+
+// matchedCommentPreviewRunes caps the matched_comment preview length (rune-safe,
+// no multibyte split — pty-capture-safe per house norm).
+const matchedCommentPreviewRunes = 200
+
+// commentPreview is a rune-safe truncation of a comment body for the preview.
+func commentPreview(s string) string {
+	r := []rune(s)
+	if len(r) <= matchedCommentPreviewRunes {
+		return s
+	}
+	return string(r[:matchedCommentPreviewRunes]) + "…"
 }

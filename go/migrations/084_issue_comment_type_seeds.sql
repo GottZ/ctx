@@ -25,22 +25,25 @@
 -- state machine with the forge open/closed mapping (§4.2). structural_link_
 -- classes = the write allowlist for context_structural_links edges of issues.
 --
--- ── comment (INTERIM, see §5.2 / "kein Gate aufweichen") ──────────────────────
+-- ── comment (INTERIM at I-C, FLIPPED by migration 085 at I-E) ─────────────────
 -- Kept out of every autonomous pipeline: guard.check=false, guard.candidate=
 -- false, dream.linkable=false, digest.include=false, overview.include=false
--- (all exact §4.1). DEVIATION from §4.1 in TWO fields, because their mechanisms
--- do not ship in this base and the strict decoder rejects them fail-closed:
+-- (all exact §4.1). At I-C this row DEVIATED from §4.1 in TWO fields, because
+-- their mechanisms did not ship yet and the strict decoder rejects them fail-
+-- closed:
 --   * §4.1 wants retrieval=aggregate-to-parent, but the fold mechanism (Achse-01
---     T11) has NO consumer (Set.AggregateTypes is unused) — accepting it would
+--     T11) had NO consumer (Set.AggregateTypes unused) — accepting it would have
 --     let comments leak raw into results. Interim: retrieval=excluded (the safe
 --     subset: comment invisible, never leaked).
 --   * §4.1 wants parent.mode=required + relationship=comment-of, but the
---     parent_id WRITE path (store.PutBlockParent) has no production caller (its
---     consumer is I-D2's InsertCommentBlock) — required would be silently
+--     parent_id WRITE path (store.PutBlockParent) had no production caller (its
+--     consumer is I-D's InsertCommentBlock) — required would have been silently
 --     ineffective (§5.2). Interim: parent.mode=none.
--- FLIP TARGET (I-E era, once T11 fold + the parent_id write path land): UPDATE
--- this row + builtin.go to retrieval=aggregate-to-parent, parent.mode=required,
--- relationship=comment-of. Handoff recorded in design §9.1a and the I-C return.
+-- RESOLVED: Welle I-E ships migration 085, which UPDATEs THIS row (in the same
+-- lockstep as builtin.go) to the §4.1 target retrieval=aggregate-to-parent +
+-- parent.mode=required/comment-of, now that T11 (fold) and I-D (parent_id write)
+-- are both live. 084 stays the INTERIM seed (ON CONFLICT DO NOTHING, no rewrite);
+-- 085 is the deliberate correcting UPDATE. Handoff recorded in design §9.1a.
 -- =============================================================================
 
 SET LOCAL lock_timeout = '3s';

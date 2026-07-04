@@ -517,6 +517,17 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// widen to full access.
 	grantedBlockIDs := resolveGrants(ctx, h.pool, ar)
 
+	// Aggregate-to-parent over-fetch (Achse-02 I-E, design/02 §4.4): the fold
+	// COLLAPSES rows (N comments of one issue ⇒ one issue row), so a fixed fetch
+	// truncated to the user limit can under-fill and under-diversify when a scope
+	// carries many comments per issue (10k+ comments/repo). When the scope
+	// actually holds an aggregating-type block, fetch a wider candidate window so
+	// enough DISTINCT parents survive the collapse to fill the limit; the
+	// per-parent cap in the fold keeps one hot thread from monopolising that
+	// window. Gated on real presence (a single EXISTS probe) — a corpus without
+	// comments takes the base 200 unchanged, keeping eval.sh byte-identical.
+	internalLimit = h.aggregateOverFetchLimit(ctx, internalLimit, typeSet.AggregateTypes(), ar.ReadScopes)
+
 	// Wire compat (seam 17, closed in WF T10): types_exclude is the canonical
 	// wire name for the request-level p_types_exclude; block_roles_exclude
 	// stays as the documented legacy alias — both present ⇒ union.

@@ -122,29 +122,24 @@ func builtinPolicies() []Policy {
 		},
 		// comment: kept OUT of every autonomous pipeline — guard.check=false,
 		// guard.candidate=false, dream.linkable=false, digest.include=false,
-		// overview.include=false (all exact §4.1). INTERIM DEVIATION (§5.2 /
-		// "kein Gate aufweichen"): §4.1 asks for retrieval=aggregate-to-parent
-		// and parent.mode=required/comment-of. WF T11 now ships the aggregate-
-		// to-parent FOLD consumer (QueryHandler.foldAggregates over
-		// Set.AggregateTypes), so retrieval=aggregate-to-parent is no longer
-		// blanket-rejected — but the cross-field rule ties it to parent.mode !=
-		// none, and the parent_id WRITE path (store.PutBlockParent, consumer
-		// I-D2's InsertCommentBlock) still has no production caller, so
-		// parent.mode=required stays rejected (policy.go, Achse 02). The seed
-		// flip itself is I-E, not T11. So comment ships with retrieval=excluded
-		// (the safe subset of aggregate: a comment stays invisible, never leaks
-		// raw into results) and parent.mode=none. FLIP TARGET: when the parent_id
-		// write path lands (I-E era), update this row + seed to
-		// retrieval=aggregate-to-parent, parent.mode=required,
-		// relationship=comment-of. See the I-C wave return + design §9.1a.
+		// overview.include=false (all exact §4.1). FLIPPED to the §4.1 target in
+		// Welle I-E (migration 085): retrieval=aggregate-to-parent (a ranked
+		// comment folds onto its parent issue via QueryHandler.foldAggregates over
+		// Set.AggregateTypes — the T11 fold consumer, now live) + parent.mode=
+		// required/comment-of (the parent_id WRITE path store.InsertCommentBlock /
+		// PutBlockParent is live since I-D, so required is effective, not silently
+		// ineffective). The interim shape (retrieval=excluded, parent.mode=none)
+		// that 084 planted while both mechanisms were unbuilt is retired. This row
+		// and migration 085 move in lockstep (registry drift gate). The other
+		// pipeline fields stay OFF: a comment never guards/dreams/digests/overviews.
 		{
 			Name: "comment", Scope: globalScope, Builtin: true,
-			Retrieval: RetrievalPolicy{Kind: RetrievalExcluded},
+			Retrieval: RetrievalPolicy{Kind: RetrievalAggregateToParent},
 			Guard:     GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
 			Dream:     DreamPolicy{Linkable: false},
 			Digest:    DigestPolicy{Include: false},
 			Overview:  OverviewPolicy{Include: false},
-			Parent:    ParentPolicy{Mode: ParentModeNone},
+			Parent:    ParentPolicy{Mode: ParentModeRequired, Relationship: "comment-of"},
 			Classify:  ClassifyRules{Priority: DefaultClassifyPriority},
 		},
 	}

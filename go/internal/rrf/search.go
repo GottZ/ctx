@@ -48,6 +48,22 @@ type SearchResult struct {
 	ViaGraph          bool   `json:"via_graph,omitempty"`
 	GraphSeedID       string `json:"graph_seed_id,omitempty"`
 	GraphRelationship string `json:"graph_relationship,omitempty"`
+
+	// MatchedComment is the aggregate-to-parent fold's issue-specific response
+	// contract (Achse-02 I-E, design/02 §4.4): when a comment folds onto its
+	// parent issue, the delivered issue row carries the best-ranked child comment
+	// (id + content preview) so the caller sees WHY the issue ranked — the passage
+	// that actually hit. Set ONLY on a folded parent (nil for native hits and for
+	// a child kept raw), so omitempty keeps every non-fold wire shape byte-
+	// identical. Never serialized as the child itself (the child folded away).
+	MatchedComment *MatchedComment `json:"matched_comment,omitempty"`
+}
+
+// MatchedComment is the fold attribution attached to a folded parent issue
+// (design/02 §4.4). Preview is a rune-safe truncation of the child comment body.
+type MatchedComment struct {
+	ID      string `json:"id"`
+	Preview string `json:"preview"`
 }
 
 // Search executes the ctx_rrf PG function with a single SQL call.

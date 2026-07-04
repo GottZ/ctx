@@ -25,9 +25,10 @@ func TestBuiltinSetShape(t *testing.T) {
 		t.Errorf("Default() = %q, want knowledge", s.Default().Name)
 	}
 	// Retrieval-visible = full-pass|damped|aggregate. issue is full-pass; comment
-	// and system-meta are excluded (comment INTERIM-excluded until the T11 fold).
-	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference"}) {
-		t.Errorf("VisibleTypes() = %v (comment + system-meta must be excluded)", got)
+	// is aggregate-to-parent (I-E flip) — hence VISIBLE (it ranks in RRF, then
+	// folds onto its parent issue). Only system-meta stays excluded.
+	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "comment", "issue", "knowledge", "reference"}) {
+		t.Errorf("VisibleTypes() = %v (only system-meta must be excluded; comment is aggregate-visible)", got)
 	}
 	// guard.check: the 4 builtins + issue; comment is OUT (guard.check=false).
 	if got := s.GuardCheckTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference", "system-meta"}) {
@@ -70,10 +71,14 @@ func TestBuiltinSetShape(t *testing.T) {
 	if got := s.OverviewTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "knowledge", "reference", "system-meta"}) {
 		t.Errorf("OverviewTypes() = %v, want the 4 builtins (issue+comment excluded)", got)
 	}
-	// The aggregate-to-parent gate stays CLOSED: comment ships excluded, NOT
-	// aggregate, because the T11 fold has no consumer (kein Gate aufweichen).
-	if got := s.AggregateTypes(); len(got) != 0 {
-		t.Errorf("AggregateTypes() = %v, want empty (T11 fold gate stays closed)", got)
+	// The aggregate-to-parent set is now {comment} (I-E flip, migration 085): the
+	// T11 fold consumer + the parent_id write path (I-D) are both live, so comment
+	// carries retrieval=aggregate-to-parent and parent.mode=required/comment-of.
+	if got := s.AggregateTypes(); !reflect.DeepEqual(got, []string{"comment"}) {
+		t.Errorf("AggregateTypes() = %v, want [comment] (I-E flip)", got)
+	}
+	if got := s.ParentMode("comment"); got != ParentModeRequired {
+		t.Errorf("ParentMode(comment) = %q, want required (I-E flip)", got)
 	}
 	// issue carries the structural-link write allowlist (§4.1).
 	if p, ok := s.Resolve("issue"); !ok || !reflect.DeepEqual(p.StructuralLinkClasses, []string{"references", "duplicate-of"}) {

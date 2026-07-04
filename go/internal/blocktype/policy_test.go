@@ -206,39 +206,46 @@ func TestAggregateToParentFreischaltung(t *testing.T) {
 	}
 }
 
-// TestCommentSeedConfigInterim pins the INTERIM comment seed AND the fail-closed
-// gate that "kein Gate aufweichen" preserves: the effective §4.1 values (all-off
-// guard/dream/digest/overview) decode. Integrator note (T11 ∧ I-D merged): BOTH
-// mechanisms now ship — T11 unlocked aggregate-to-parent, I-D unlocked
-// parent.mode — so the §4.1 target combo (aggregate-to-parent +
-// parent.mode=required/comment-of) now DECODES; the probe below is the positive
-// proof that the seed FLIP (wave I-E) is unblocked. The comment SEED itself
-// stays INTERIM (retrieval=excluded, parent.mode=none) until I-E flips it.
-func TestCommentSeedConfigInterim(t *testing.T) {
-	cfg := `{"v":1,"retrieval":{"policy":"excluded"},"guard":{"check":false,"candidate":false},` +
-		`"dream":{"linkable":false},"digest":{"include":false},"overview":{"include":false},` +
-		`"parent":{"mode":"none"},"classify":{}}`
-	p, err := DecodePolicy("comment", globalScope, true, false, []byte(cfg))
-	if err != nil {
-		t.Fatalf("interim comment seed rejected: %v", err)
-	}
-	if p.Retrieval.Kind != RetrievalExcluded || p.Parent.Mode != ParentModeNone {
-		t.Errorf("comment interim = %+v / %+v", p.Retrieval, p.Parent)
-	}
-	if p.Guard.Check || p.Guard.Candidate || p.Dream.Linkable || p.Digest.Include || p.Overview.Include {
-		t.Errorf("comment must be out of every pipeline, got %+v", p)
-	}
-	// Integrator (T11 ∧ I-D): the §4.1 target config now DECODES — both gates
-	// are unlocked with their mechanisms shipped. This positive probe proves the
-	// I-E seed flip is unblocked; a regression re-introducing either blanket
-	// reject turns it red.
+// TestCommentSeedConfigTarget pins the FLIPPED comment seed (Welle I-E, migration
+// 085): the §4.1 target config (retrieval=aggregate-to-parent, parent.mode=
+// required/comment-of, all-off guard/dream/digest/overview) decodes AND is the
+// shape the builtin set ships. The former INTERIM config (retrieval=excluded,
+// parent.mode=none) that 084 planted must ALSO still decode — existing operator/
+// tenant rows written before the flip stay valid (backward compat).
+func TestCommentSeedConfigTarget(t *testing.T) {
+	// The §4.1 target decodes — both gates (aggregate-to-parent, non-none
+	// parent.mode) are unlocked with their mechanisms live (T11 fold + I-D write).
 	q, err := DecodePolicy("comment", globalScope, true, false,
-		[]byte(`{"v":1,"retrieval":{"policy":"aggregate-to-parent"},"parent":{"mode":"required","relationship":"comment-of"}}`))
+		[]byte(`{"v":1,"retrieval":{"policy":"aggregate-to-parent"},"guard":{"check":false,"candidate":false},`+
+			`"dream":{"linkable":false},"digest":{"include":false},"overview":{"include":false},`+
+			`"parent":{"mode":"required","relationship":"comment-of"},"classify":{}}`))
 	if err != nil {
-		t.Fatalf("§4.1 comment target (aggregate-to-parent + required) rejected after T11+I-D: %v", err)
+		t.Fatalf("§4.1 comment target rejected: %v", err)
 	}
 	if q.Retrieval.Kind != RetrievalAggregateToParent || q.Parent.Mode != ParentModeRequired || q.Parent.Relationship != "comment-of" {
 		t.Errorf("§4.1 target decoded to %+v / %+v", q.Retrieval, q.Parent)
+	}
+	if q.Guard.Check || q.Guard.Candidate || q.Dream.Linkable || q.Digest.Include || q.Overview.Include {
+		t.Errorf("comment must stay out of every autonomous pipeline, got %+v", q)
+	}
+	// The builtin set now carries the target (I-E flip, lockstep with mig 085).
+	s := builtinSet()
+	if got := s.AggregateTypes(); len(got) != 1 || got[0] != "comment" {
+		t.Errorf("builtin AggregateTypes() = %v, want [comment] after flip", got)
+	}
+	if got := s.ParentMode("comment"); got != ParentModeRequired {
+		t.Errorf("builtin ParentMode(comment) = %q, want required after flip", got)
+	}
+	// Backward compat: the old INTERIM config still decodes for pre-flip rows.
+	interim := `{"v":1,"retrieval":{"policy":"excluded"},"guard":{"check":false,"candidate":false},` +
+		`"dream":{"linkable":false},"digest":{"include":false},"overview":{"include":false},` +
+		`"parent":{"mode":"none"},"classify":{}}`
+	p, err := DecodePolicy("comment", globalScope, true, false, []byte(interim))
+	if err != nil {
+		t.Fatalf("pre-flip interim comment config no longer decodes: %v", err)
+	}
+	if p.Retrieval.Kind != RetrievalExcluded || p.Parent.Mode != ParentModeNone {
+		t.Errorf("interim decoded to %+v / %+v", p.Retrieval, p.Parent)
 	}
 }
 

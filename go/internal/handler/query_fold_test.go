@@ -134,6 +134,69 @@ func TestApplyParentFold_InvisibleParentNoLeak(t *testing.T) {
 	}
 }
 
+// TestApplyParentFold_MatchedComment pins the I-E §4.4 attribution: a folded
+// parent (hydrated OR in-set) carries matched_comment = the BEST-ranked child's
+// id + content preview. RED before the MatchedComment field/wiring (nil pointer).
+func TestApplyParentFold_MatchedComment(t *testing.T) {
+	// Hydrated-parent branch: parent absent from the set, two children of it.
+	c1 := rrf.SearchResult{ID: "c1", RRFScore: 0.20, Content: "low-rank comment body"}
+	c2 := rrf.SearchResult{ID: "c2", RRFScore: 0.40, Content: "the best matching comment body"}
+	results := []rrf.SearchResult{c1, c2, makeResult("other", 0.10)}
+	folds := map[string]childFold{
+		"c1": {parentID: "issue", visible: true},
+		"c2": {parentID: "issue", visible: true},
+	}
+	hydrated := map[string]rrf.SearchResult{"issue": {ID: "issue", Title: "The Issue"}}
+
+	out, _, _ := applyParentFold(results, folds, hydrated)
+
+	var issue *rrf.SearchResult
+	for i := range out {
+		if out[i].ID == "issue" {
+			issue = &out[i]
+		}
+	}
+	if issue == nil {
+		t.Fatalf("issue not delivered: %v", ids(out))
+	}
+	if issue.MatchedComment == nil {
+		t.Fatal("folded issue carries no matched_comment (I-E §4.4)")
+	}
+	if issue.MatchedComment.ID != "c2" {
+		t.Errorf("matched_comment.id = %q, want c2 (best-ranked child)", issue.MatchedComment.ID)
+	}
+	if issue.MatchedComment.Preview != "the best matching comment body" {
+		t.Errorf("matched_comment.preview = %q, want the best child body", issue.MatchedComment.Preview)
+	}
+
+	// In-set-parent branch: parent already in the result set, one folded child.
+	results2 := []rrf.SearchResult{makeResult("issue", 0.10), {ID: "cc", RRFScore: 0.30, Content: "child body"}}
+	folds2 := map[string]childFold{"cc": {parentID: "issue", visible: true}}
+	out2, _, _ := applyParentFold(results2, folds2, nil)
+	if len(out2) != 1 || out2[0].ID != "issue" {
+		t.Fatalf("want [issue], got %v", ids(out2))
+	}
+	if out2[0].MatchedComment == nil || out2[0].MatchedComment.ID != "cc" {
+		t.Errorf("in-set parent matched_comment = %+v, want child cc", out2[0].MatchedComment)
+	}
+}
+
+// TestCommentPreview_RuneSafe pins the preview truncation is rune-safe and capped.
+func TestCommentPreview_RuneSafe(t *testing.T) {
+	short := "ünüü short"
+	if got := commentPreview(short); got != short {
+		t.Errorf("short preview mutated: %q", got)
+	}
+	long := make([]rune, matchedCommentPreviewRunes+50)
+	for i := range long {
+		long[i] = 'ä'
+	}
+	got := []rune(commentPreview(string(long)))
+	if len(got) != matchedCommentPreviewRunes+1 || got[len(got)-1] != '…' {
+		t.Errorf("long preview len=%d last=%q, want cap+ellipsis", len(got), string(got[len(got)-1]))
+	}
+}
+
 // TestApplyParentFold_NoFolds is the fast-path identity: no fold entries ⇒
 // results pass through untouched (the current-corpus / eval-neutral shape).
 func TestApplyParentFold_NoFolds(t *testing.T) {
