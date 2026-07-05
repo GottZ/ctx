@@ -14,6 +14,8 @@ import (
 	"math/rand/v2"
 	"sort"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"gonum.org/v1/gonum/graph/community"
 	"gonum.org/v1/gonum/graph/simple"
@@ -67,6 +69,16 @@ type Options struct {
 	// A node set larger than this cap skips the rebuild fail-safe (logged,
 	// Stats.SkipReason="node-cap"). 0 = uncapped.
 	MaxNodes int
+	// ScopeFilter is the per-tenant partition filter (B-W3, decision B-E3).
+	// Non-nil: teardown AND aggregation are scoped to exactly these scopes,
+	// ATOMICALLY — never one without the other (B1-C1: a scoped DELETE with an
+	// unscoped re-aggregation resurrects foreign-partition rows and hits the
+	// (cluster_id, scope) PK ⇒ 23505 from tenant #2 on). nil: global run,
+	// behaviour-identical to the pre-B full replace (TRUNCATE + unscoped
+	// aggregation). INPUT scoping (loadNodes/loadEdges) lands in B-W6 — until
+	// then a non-nil filter requires an input already cut to these scopes;
+	// persist fails loudly on any input block outside the filter.
+	ScopeFilter []string
 }
 
 // rawEdge is a directed dream-link reduced to the fields the clustering needs.
@@ -128,7 +140,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	if err != nil {
 		return Stats{}, err
 	}
-	return persist(ctx, pool, cl, opts.Resolution, opts.VisibleTypes, nodeScopes)
+	return persist(ctx, pool, cl, opts, nodeScopes)
 }
 
 // clusterWithCtx runs computeClustering in its own goroutine so a ctx
@@ -307,7 +319,11 @@ func loadEdges(ctx context.Context, pool *pgxpool.Pool) ([]rawEdge, error) {
 // fragment (visibility.TypeVisible, $1 = registry allowlist — T6); scope
 // partitioning is the GROUP BY, so each row belongs to exactly one scope
 // (design §3.3).
-var nodeAggSQL = fmt.Sprintf(`
+// nodeAggTemplate has two slots: the type-visibility fragment ($1) and the
+// B-W3 scope filter ("" = global run, or a WHERE on the DENORMALIZED
+// m.scope ($2) — the member column exists exactly so the scoped aggregation
+// never joins context_blocks for partition membership, 087 header).
+const nodeAggTemplate = `
 INSERT INTO graph_cluster_node (cluster_id, scope, size, category_counts, repr_block_id, repr_title, repr_quality)
 SELECT cluster_id, scope,
        sum(cat_cnt)::int,
@@ -324,9 +340,18 @@ FROM (
     FROM graph_cluster_member m
     JOIN context_blocks b ON b.id = m.block_id
        AND %s
+    %s
     GROUP BY m.cluster_id, b.scope, b.category
 ) per_cat
-GROUP BY cluster_id, scope`, visibility.TypeVisible("b", "$1"))
+GROUP BY cluster_id, scope`
+
+var nodeAggSQL = fmt.Sprintf(nodeAggTemplate, visibility.TypeVisible("b", "$1"), "")
+
+// nodeAggScopedSQL is the B-W3 partition-scoped variant ($2 = scope filter).
+// It MUST only ever run after the equally scoped teardown DELETE (persist
+// keeps the two in one branch — B1-C1).
+var nodeAggScopedSQL = fmt.Sprintf(nodeAggTemplate, visibility.TypeVisible("b", "$1"),
+	"WHERE m.scope = ANY($2)")
 
 // edgeAggSQL builds graph_cluster_edge: inter-cluster links aggregated per
 // (cluster-pair, scope-pair). cluster_a < cluster_b normalizes the undirected
@@ -334,7 +359,14 @@ GROUP BY cluster_id, scope`, visibility.TypeVisible("b", "$1"))
 // visible iff both are in readScopes — design §2). raw_confidence (CHECK >= 0)
 // is the weight, never the unconstrained confidence column. Both endpoint
 // re-checks use the shared type-visibility fragment ($1 = registry allowlist).
-var edgeAggSQL = fmt.Sprintf(`
+// edgeAggTemplate: slots = two type-visibility fragments ($1) and the B-W3
+// scope filter. The scoped variant restricts BOTH endpoint member scopes
+// (AND, not OR): a partition's meta-edges are exactly those the tenant's
+// owned-disjoint Louvain input can produce (both endpoints owned — matches
+// the B-W6 loadEdges contract and the read path's "both scopes readable"
+// rule, 057 header). Cross-partition mixed edges are deliberately NOT torn
+// down by a scoped run — the B-W5/B-W6 transition owns their lifecycle.
+const edgeAggTemplate = `
 INSERT INTO graph_cluster_edge (cluster_a, cluster_b, scope_s, scope_t, link_count, weight_sum)
 SELECT LEAST(ms.cluster_id, mt.cluster_id),
        GREATEST(ms.cluster_id, mt.cluster_id),
@@ -345,9 +377,17 @@ JOIN graph_cluster_member ms ON ms.block_id = l.source_block_id
 JOIN graph_cluster_member mt ON mt.block_id = l.target_block_id
 JOIN context_blocks bs ON bs.id = l.source_block_id AND %s
 JOIN context_blocks bt ON bt.id = l.target_block_id AND %s
-WHERE l.relationship <> 'supersedes' AND ms.cluster_id <> mt.cluster_id
-GROUP BY 1, 2, bs.scope, bt.scope`,
-	visibility.TypeVisible("bs", "$1"), visibility.TypeVisible("bt", "$1"))
+WHERE l.relationship <> 'supersedes' AND ms.cluster_id <> mt.cluster_id%s
+GROUP BY 1, 2, bs.scope, bt.scope`
+
+var edgeAggSQL = fmt.Sprintf(edgeAggTemplate,
+	visibility.TypeVisible("bs", "$1"), visibility.TypeVisible("bt", "$1"), "")
+
+// edgeAggScopedSQL is the B-W3 partition-scoped variant ($2 = scope filter,
+// both endpoints). Only ever runs after the scoped teardown (B1-C1).
+var edgeAggScopedSQL = fmt.Sprintf(edgeAggTemplate,
+	visibility.TypeVisible("bs", "$1"), visibility.TypeVisible("bt", "$1"),
+	"\n  AND ms.scope = ANY($2) AND mt.scope = ANY($2)")
 
 const metaUpsertSQL = `
 INSERT INTO graph_overview_meta (singleton, computed_at, modularity, cluster_n, node_n, edge_n, resolution)
@@ -357,11 +397,45 @@ ON CONFLICT (singleton) DO UPDATE SET
     cluster_n = EXCLUDED.cluster_n, node_n = EXCLUDED.node_n,
     edge_n = EXCLUDED.edge_n, resolution = EXCLUDED.resolution`
 
-// persist replaces the three 057 tables in one advisory-locked transaction.
-// visibleTypes feeds the aggregation re-checks (T6, $1 in node/edgeAggSQL).
-// nodeScopes is the Louvain-input scope per block (loadNodes) — denormalized
-// onto the member row (B-W2, migration 087).
-func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution float64, visibleTypes []string, nodeScopes map[string]string) (Stats, error) {
+// teardown clears the 057 tables for one persist run: global = TRUNCATE (the
+// pre-B path), scoped = per-partition DELETEs (B-W3) — the atomic partner of
+// the equally scoped aggregation in persist; never ships without it (B1-C1).
+// Members and nodes belong to exactly one scope; edges use AND on both
+// endpoint scopes (partition semantics, see edgeAggTemplate).
+func teardown(ctx context.Context, tx pgx.Tx, scoped bool, scopeFilter []string) error {
+	if !scoped {
+		if _, err := tx.Exec(ctx, `TRUNCATE graph_cluster_member, graph_cluster_node, graph_cluster_edge`); err != nil {
+			return fmt.Errorf("truncate: %w", err)
+		}
+		return nil
+	}
+	for _, del := range []struct{ label, sql string }{
+		{"member", `DELETE FROM graph_cluster_member WHERE scope = ANY($1)`},
+		{"node", `DELETE FROM graph_cluster_node WHERE scope = ANY($1)`},
+		{"edge", `DELETE FROM graph_cluster_edge WHERE scope_s = ANY($1) AND scope_t = ANY($1)`},
+	} {
+		if _, err := tx.Exec(ctx, del.sql, scopeFilter); err != nil {
+			return fmt.Errorf("scoped %s teardown: %w", del.label, err)
+		}
+	}
+	return nil
+}
+
+// persist replaces the 057 tables in one advisory-locked transaction —
+// globally (nil ScopeFilter: TRUNCATE + unscoped aggregation, the pre-B
+// behaviour) or for ONE partition (B-W3: scoped DELETE + scoped aggregation,
+// ATOMICALLY paired — a scoped DELETE with the unscoped aggregation
+// resurrects foreign-partition rows into the (cluster_id, scope) PK ⇒ 23505,
+// the verified B1-C1 breakage). opts.VisibleTypes feeds the aggregation
+// re-checks (T6, $1). nodeScopes is the Louvain-input scope per block
+// (loadNodes) — denormalized onto the member row (B-W2, migration 087).
+func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Options, nodeScopes map[string]string) (Stats, error) {
+	scoped := len(opts.ScopeFilter) > 0
+	filterSet := make(map[string]struct{}, len(opts.ScopeFilter))
+	for _, s := range opts.ScopeFilter {
+		filterSet[s] = struct{}{}
+	}
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return Stats{}, err
@@ -377,8 +451,8 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution 
 		return Stats{Skipped: true, SkipReason: "advisory-lock"}, nil
 	}
 
-	if _, err := tx.Exec(ctx, `TRUNCATE graph_cluster_member, graph_cluster_node, graph_cluster_edge`); err != nil {
-		return Stats{}, fmt.Errorf("truncate: %w", err)
+	if err := teardown(ctx, tx, scoped, opts.ScopeFilter); err != nil {
+		return Stats{}, err
 	}
 
 	// Batched member insert (deterministic order; unnest text[]→uuid[] cast).
@@ -404,6 +478,16 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution 
 			// NOT NULL or silently land in the wrong partition (B-W3 poison).
 			return Stats{}, fmt.Errorf("insert members: block %s has no Louvain-input scope", b)
 		}
+		if scoped {
+			// Input-purity guard (B-W3): a scoped run whose input carries a
+			// block outside the filter would collide with the surviving
+			// foreign partition (block_id PK) or poison it. Input scoping
+			// itself (loadNodes/loadEdges) is B-W6 — until then callers must
+			// hand persist an already-cut input; fail loud, never trim.
+			if _, in := filterSet[scope]; !in {
+				return Stats{}, fmt.Errorf("insert members: block %s scope %q outside ScopeFilter %v — input not partition-cut (B-W6 wires scoped loading)", b, scope, opts.ScopeFilter)
+			}
+		}
 		scopes[i] = scope
 	}
 	for i := 0; i < len(blocks); i += memberBatch {
@@ -416,12 +500,25 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution 
 		}
 	}
 
-	if _, err := tx.Exec(ctx, nodeAggSQL, visibleTypes); err != nil {
-		return Stats{}, fmt.Errorf("node aggregation: %w", err)
-	}
-	edgeTag, err := tx.Exec(ctx, edgeAggSQL, visibleTypes)
-	if err != nil {
-		return Stats{}, fmt.Errorf("edge aggregation: %w", err)
+	// Aggregation — ALWAYS the variant matching the teardown above (B1-C1:
+	// scoped DELETE + unscoped aggregation = resurrected foreign rows ⇒ 23505).
+	var edgeTag pgconn.CommandTag
+	if !scoped {
+		if _, err := tx.Exec(ctx, nodeAggSQL, opts.VisibleTypes); err != nil {
+			return Stats{}, fmt.Errorf("node aggregation: %w", err)
+		}
+		edgeTag, err = tx.Exec(ctx, edgeAggSQL, opts.VisibleTypes)
+		if err != nil {
+			return Stats{}, fmt.Errorf("edge aggregation: %w", err)
+		}
+	} else {
+		if _, err := tx.Exec(ctx, nodeAggScopedSQL, opts.VisibleTypes, opts.ScopeFilter); err != nil {
+			return Stats{}, fmt.Errorf("scoped node aggregation: %w", err)
+		}
+		edgeTag, err = tx.Exec(ctx, edgeAggScopedSQL, opts.VisibleTypes, opts.ScopeFilter)
+		if err != nil {
+			return Stats{}, fmt.Errorf("scoped edge aggregation: %w", err)
+		}
 	}
 
 	stats := Stats{
@@ -431,9 +528,14 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution 
 		Modularity:   cl.modularity,
 	}
 
-	if _, err := tx.Exec(ctx, metaUpsertSQL,
-		stats.Modularity, stats.ClusterCount, stats.NodeCount, stats.EdgeRows, resolution); err != nil {
-		return Stats{}, fmt.Errorf("meta upsert: %w", err)
+	// Meta stays the 057 singleton until B-W5 (scope-PK migration 088): a
+	// scoped run must not overwrite the global stats row with one partition's
+	// numbers — B-W5 replaces this with per-scope rows in the same tx.
+	if !scoped {
+		if _, err := tx.Exec(ctx, metaUpsertSQL,
+			stats.Modularity, stats.ClusterCount, stats.NodeCount, stats.EdgeRows, opts.Resolution); err != nil {
+			return Stats{}, fmt.Errorf("meta upsert: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
