@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/ssrfguard"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -409,10 +410,10 @@ func validateForge(forge json.RawMessage) string {
 
 // isDeniedHost reports whether host is a forbidden SSRF target: the literal
 // 'localhost', or an IP literal in a private / loopback / link-local /
-// unspecified range (RFC1918 + fd00::/8 via IsPrivate, 127/8 + ::1 via
-// IsLoopback, 169.254/16 + fe80::/10 via IsLinkLocal*, 0.0.0.0/:: via
-// IsUnspecified). A non-IP hostname passes PATCH-time (the dial-time guard
-// re-checks the RESOLVED address against DNS rebinding, §5.7).
+// unspecified range. The IP branch delegates to ssrfguard.IsDeniedIP — the same
+// classifier the dial-time guard uses — so this validate-time check and the
+// rebinding-time check can never drift (design 07-camo §5, D8). A non-IP hostname
+// passes PATCH-time; the dial-time guard re-checks the RESOLVED address (§5.7).
 func isDeniedHost(host string) bool {
 	if host == "" || strings.EqualFold(host, "localhost") {
 		return true
@@ -421,9 +422,7 @@ func isDeniedHost(host string) bool {
 	if ip == nil {
 		return false
 	}
-	return ip.IsLoopback() || ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified()
+	return ssrfguard.IsDeniedIP(ip)
 }
 
 // projectNotFound writes the uniform 404 (no existence oracle — unknown id,

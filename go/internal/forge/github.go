@@ -3,7 +3,7 @@
 // window, strict Link-header pagination, PR filtering (the issues listing returns
 // pull requests too — only the pull_request field distinguishes them), and
 // rate-limit respect (403 + Retry-After / x-ratelimit-remaining:0 ⇒ RateLimitError,
-// never a conflict). Outbound dials pass the §5.7 SSRF guard (ssrf.go).
+// never a conflict). Outbound dials pass the §5.7 SSRF guard (internal/ssrfguard).
 package forge
 
 import (
@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GottZ/ctx/internal/ssrfguard"
 )
 
 const (
@@ -41,7 +43,7 @@ func NewGitHubClient(token string) Forge {
 		token: token,
 		http: &http.Client{
 			Timeout:   30 * time.Second,
-			Transport: &http.Transport{DialContext: guardedDialer().DialContext, ForceAttemptHTTP2: true},
+			Transport: &http.Transport{DialContext: ssrfguard.GuardedDialer().DialContext, ForceAttemptHTTP2: true},
 		},
 	}
 }
@@ -57,7 +59,7 @@ func apiBase(repo RepoRef) string {
 // forge semantics (304, rate limit) onto errors. On a normal 2xx it returns the
 // response for the caller to decode. The caller MUST close resp.Body.
 func (c *githubClient) do(ctx context.Context, url, etag string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G107: url is base(api.github.com or a PATCH-validated api_base) + owner/repo; SSRF is enforced dial-time by the §5.7 guard (ssrf.go), not on this string.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G107: url is base(api.github.com or a PATCH-validated api_base) + owner/repo; SSRF is enforced dial-time by the §5.7 guard (internal/ssrfguard), not on this string.
 	if err != nil {
 		return nil, fmt.Errorf("forge: build request: %w", err)
 	}
@@ -129,7 +131,7 @@ func (c *githubClient) doWrite(ctx context.Context, method, url string, payload 
 	if err != nil {
 		return nil, fmt.Errorf("forge: marshal write payload: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body)) //nolint:gosec // G107: url = base(api.github.com or PATCH-validated api_base) + owner/repo; SSRF enforced dial-time (ssrf.go).
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body)) //nolint:gosec // G107: url = base(api.github.com or PATCH-validated api_base) + owner/repo; SSRF enforced dial-time (internal/ssrfguard).
 	if err != nil {
 		return nil, fmt.Errorf("forge: build write request: %w", err)
 	}
