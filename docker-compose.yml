@@ -25,6 +25,13 @@ services:
       # 503 although .env carries the key (compose gap, found live G17).
       CTX_SECRETS_KEY: ${CTX_SECRETS_KEY:-}
       CTX_SECRETS_KEY_PREV: ${CTX_SECRETS_KEY_PREV:-}
+      # Camo image proxy (design 07-camo). Fail-closed: without ENABLED=true
+      # both /api/img routes 404 and the SPA keeps its placeholder. Same
+      # compose-gap class as CTX_SECRETS_KEY above (G17): .env alone is not
+      # enough, the declaration must exist here.
+      CTX_CAMO_ENABLED: ${CTX_CAMO_ENABLED:-}
+      CTX_CAMO_TTL: ${CTX_CAMO_TTL:-}
+      CTX_CAMO_MAX_BYTES: ${CTX_CAMO_MAX_BYTES:-}
       CTX_EMBED_HOST: ${CTX_EMBED_HOST}
       CTX_EMBED_API_KEY: ${CTX_EMBED_API_KEY:-}
       CTX_EMBED_PROTOCOL: ${CTX_EMBED_PROTOCOL:-ollama}
