@@ -95,6 +95,7 @@ type Config struct {
 	Project       ProjectConfig
 	LLMLog        LLMLogConfig
 	WebChat       WebChatConfig
+	Writes        WritesConfig
 	Tenant        TenantConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
@@ -452,6 +453,26 @@ type WebChatConfig struct {
 	// is older than this are deleted (messages cascade). 0 = off (kept forever,
 	// the shipped default). Duration suffix h/d/w/m/y (Hours parser, since v2.6.0).
 	SessionRetention Hours `key:"webchat.session_retention" env:"CTX_WEBCHAT_SESSION_RETENTION" default:"0" mut:"hot" tenancy:"tenant-overridable"`
+}
+
+// WritesConfig governs the F6-C6 write-confirmation staging store
+// (context_pending_writes, migration 089): LLM-path writes (MCP/Chat) are
+// staged and only a hash-selected confirm executes them; REST/CLI stay direct.
+// TWO DECOUPLED knobs (masterplan D-E3 — the coupled draft was a double-break,
+// D2-C1: expiry=eviction meant ttl=0 rejected every confirm AND grew unbounded).
+type WritesConfig struct {
+	// ConfirmTTL is the expiry clock: a staged write must be confirmed within
+	// this window (bare seconds; default 600 = 10min — long enough for human
+	// confirm latency). 0 = staged writes never expire (0-is-off convention),
+	// which is NOT feature-death: expiry and eviction are separate knobs.
+	// global-only: the D-W3 ticker is one process-wide sweep.
+	ConfirmTTL time.Duration `key:"writes.confirm_ttl" env:"CTX_WRITES_CONFIRM_TTL" default:"600" mut:"hot" tenancy:"global-only"`
+	// ConfirmRetention is the eviction window: the D-W3 ticker chunk-drops
+	// hypertable chunks whose rows (created_at) are older than this — consumed
+	// history and never-confirmed stages alike (D2-M3). 0 = keep forever
+	// (operator opt-out, same convention as llmlog/webchat/webhook retention).
+	// Duration suffix h/d/w/m/y (Hours parser); keep well above confirm_ttl.
+	ConfirmRetention Hours `key:"writes.confirm_retention" env:"CTX_WRITES_CONFIRM_RETENTION" default:"24h" mut:"hot" tenancy:"global-only"`
 }
 
 // ScopeFloor maps a scope to its minimum effective sensitivity (F3 §2.3d).
