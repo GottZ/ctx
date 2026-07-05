@@ -139,6 +139,14 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpRecentHandler(cfg))
 
+	// confirm (F6-C6 D-W5): executes a staged write by payload hash. Only
+	// meaningful for confirm_writes keys — for everyone else every hash is a
+	// generic miss (the store tool never stages for them).
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "confirm",
+		Description: "Execute a staged write. A key with the confirm_writes capability gets store calls STAGED (response carries a payload_hash); calling confirm with that hash executes the exact server-held write.",
+	}, mcpConfirmHandler(cfg))
+
 	// W12: issue-content write tools (issue_create/issue_comment/issue_state,
 	// E5 (a) — create+comment+state, no delete). Registered in their own file.
 	registerIssueTools(server, cfg)
@@ -210,12 +218,24 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		}
 		scope := ar.HomeScope
 
-		// Hash NOOP check.
+		// Hash NOOP check. Runs BEFORE the D-W5 stage branch on purpose: an
+		// identical-content call is a no-op for flagged keys too — no card
+		// for a write that would change nothing (D-W2 note 3).
 		existingID, err := store.HashNOOPCheck(ctx, cfg.Pool, input.Content, scope, input.Category, input.Title)
 		if err == nil && existingID != "" {
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{textContent(fmt.Sprintf("No change needed — identical content already exists (id: %s)", existingID))},
 			}, nil, nil
+		}
+
+		// D-W5 branch (F6-C6): a confirm_writes key (090) stages instead of
+		// executing — the staged path runs the FULL direct-path gate set
+		// (runStageWriteGates) and answers IsError=true (D3-C3). Handler-level
+		// on purpose — digest/dream write through store.UpsertBlock internally
+		// and must never self-stage. Keys without the flag fall through to the
+		// unchanged direct path below (fail-open, D-E2).
+		if ar.ConfirmWrites {
+			return mcpStageStore(ctx, cfg, ar, input)
 		}
 
 		// Sensitivity: request > settings default (mirrors /api/store, F3 §3.5).
@@ -233,13 +253,6 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			}
 			sens = store.SensitivityWrite{Value: s, Manual: true}
 		}
-
-		// D-W5 branch point (F6-C6): ar.ConfirmWrites (090) forks a flagged
-		// key into the stage-then-confirm path HERE (staged response with
-		// IsError=true for non-confirm-capable clients, D3-C3). Handler-level
-		// on purpose — digest/dream write through store.UpsertBlock internally
-		// and must never self-stage. D-W4 ships the capability only; MCP
-		// behaviour is unchanged.
 
 		// Upsert.
 		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, input.Metadata, scope, false, sens, "")

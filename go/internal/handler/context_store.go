@@ -171,12 +171,14 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// D-W5 branch point (F6-C6): authResult.ConfirmWrites (090) forks a
-	// flagged key into the stage-then-confirm path HERE — after every write
-	// gate above (size, type, detector, scope, rate limit), before the upsert.
-	// The hook lives at the HANDLER, not in store.UpsertBlock: digest and
-	// dream write through UpsertBlock internally and must never self-stage.
-	// D-W4 ships the capability only; REST behaviour is unchanged.
+	// F6-C6 scope boundary (D-E1, DECISIONS §Klarstellung): REST stays a
+	// DIRECT write path — deliberately. The stage-then-confirm dance lives on
+	// the LLM surfaces only (MCP store, D-W5; chat tools, D-W6+); a
+	// confirm_writes key writing over REST is not gated here. Gating LLM
+	// writes is the calling harness's job — this endpoint serves human-driven
+	// clients (CLI, scripts). The handler-level placement (never in
+	// store.UpsertBlock) still matters: digest/dream write through UpsertBlock
+	// internally and must never self-stage.
 
 	// Execute upsert.
 	block, err := store.UpsertBlock(ctx, h.pool, req.Category, req.Title, req.Content, req.Tags, req.Metadata, writeScope, scopeExplicit, sens, req.Type)
