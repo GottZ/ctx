@@ -175,6 +175,27 @@ jobs:
           CTX_E2E_QUARANTINE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1' || '' }}
         run: bash go/web/e2e-container.sh bun run test:e2e
 
+      # ── Bundle byte budget gate (PLc, wave C-W2) ──────────────────────────
+      # Byte truth = the RELEASE encoding: on-disk .br siblings from a build
+      # WITHOUT VITE_E2E (the bytes go/web/web.go actually serves). At this
+      # point dist/ holds the VITE_E2E build from the Playwright webServer
+      # (test hooks included — wrong bytes for a budget verdict), so the gate
+      # step pair rebuilds fresh and measures immediately after; nothing runs
+      # in between. Placement AFTER e2e (masterplan C-W2): the webServer build
+      # can never overwrite the measured artifacts. `if: !cancelled()` keeps
+      # byte-bloat attribution visible even when e2e is red; the gate itself
+      # is guarded on the release build's outcome so it can never measure a
+      # stale VITE_E2E dist/. PLc is the PR byte authority — the Lighthouse
+      # layer (C-W3) is nightly, warn-only, and never judges bytes.
+      - name: Release build (byte truth — no VITE_E2E)
+        id: release_build
+        if: ${{ !cancelled() }}
+        run: bash go/web/e2e-container.sh bun run build
+
+      - name: Bundle byte budget gate (PLc)
+        if: ${{ !cancelled() && steps.release_build.outcome == 'success' }}
+        run: bash go/web/e2e-container.sh bun run test:budget
+
       - name: Flake annotation (report.json retry statistics)
         if: ${{ !cancelled() }}
         run: bash .github/scripts/flake-annotations.sh
