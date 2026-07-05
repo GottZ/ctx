@@ -238,10 +238,11 @@ func fillAggregates(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (node
 	if _, err := pool.Exec(ctx, edgeAggSQL); err != nil {
 		t.Fatalf("fillAggregates: edgeAggSQL: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO graph_overview_meta (singleton, computed_at, modularity, cluster_n, node_n, edge_n, resolution)
-		VALUES (true, now(), 0, (SELECT count(DISTINCT cluster_id) FROM graph_cluster_member), 0, 0, 1.0)
-		ON CONFLICT (singleton) DO UPDATE SET computed_at = EXCLUDED.computed_at, cluster_n = EXCLUDED.cluster_n`); err != nil {
+	// Per-scope meta rows since B-W5 (088) — replace-all like the global run.
+	if _, err := pool.Exec(ctx, `DELETE FROM graph_overview_meta`); err != nil {
+		t.Fatalf("fillAggregates: meta teardown: %v", err)
+	}
+	if _, err := pool.Exec(ctx, metaWriteGlobalSQL, 0.0, 1.0); err != nil {
 		t.Fatalf("fillAggregates: meta: %v", err)
 	}
 	_ = pool.QueryRow(ctx, `SELECT count(*) FROM graph_cluster_node`).Scan(&nodeRows)

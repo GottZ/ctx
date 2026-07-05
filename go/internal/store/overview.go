@@ -80,8 +80,17 @@ func GraphOverview(ctx context.Context, pool *pgxpool.Pool, p OverviewParams, re
 	}
 
 	var computedAt time.Time
-	// Single meta row; absent (never built) leaves computedAt zero — not an error.
-	_ = pool.QueryRow(ctx, `SELECT computed_at FROM graph_overview_meta LIMIT 1`).Scan(&computedAt)
+	// Per-scope meta rows (B-W5, migration 088): freshness is the newest
+	// rebuild among the CALLER's scopes — never an unscoped row pick, which
+	// would leak a foreign partition's computed_at as our own (B1-m1). No
+	// matching row (never built) leaves computedAt zero — not an error.
+	var computedAtP *time.Time
+	_ = pool.QueryRow(ctx,
+		`SELECT max(computed_at) FROM graph_overview_meta WHERE scope = ANY($1)`,
+		readScopes).Scan(&computedAtP)
+	if computedAtP != nil {
+		computedAt = *computedAtP
+	}
 
 	return &OverviewResult{
 		Nodes:      nodes,

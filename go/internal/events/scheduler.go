@@ -710,8 +710,11 @@ func (s *Scheduler) yieldThenRebuildOverview(ctx context.Context, bt backgroundT
 	s.rebuildOverviewOnce(ctx, bt)
 }
 
-// overviewNeverBuilt reports whether the overview has never been computed (empty
-// meta row) — the one case where a synchronous boot-time build is warranted.
+// overviewNeverBuilt reports whether the overview has never been computed
+// (zero meta rows) — the one case where a synchronous boot-time build is
+// warranted. Deliberately count(*) over ALL rows, not a per-scope read
+// (B-W5): this is the server-global boot probe with no caller scopes; any
+// row means SOME rebuild ran and the regular loop handles freshness.
 func (s *Scheduler) overviewNeverBuilt(ctx context.Context) bool {
 	var n int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM graph_overview_meta`).Scan(&n); err != nil {

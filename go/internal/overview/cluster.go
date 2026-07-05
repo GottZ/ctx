@@ -432,13 +432,33 @@ var edgeAggScopedSQL = fmt.Sprintf(edgeAggTemplate,
 	visibility.TypeVisible("bs", "$1"), visibility.TypeVisible("bt", "$1"),
 	"\n  AND ms.scope = ANY($2) AND mt.scope = ANY($2)")
 
-const metaUpsertSQL = `
-INSERT INTO graph_overview_meta (singleton, computed_at, modularity, cluster_n, node_n, edge_n, resolution)
-VALUES (true, now(), $1, $2, $3, $4, $5)
-ON CONFLICT (singleton) DO UPDATE SET
-    computed_at = EXCLUDED.computed_at, modularity = EXCLUDED.modularity,
-    cluster_n = EXCLUDED.cluster_n, node_n = EXCLUDED.node_n,
-    edge_n = EXCLUDED.edge_n, resolution = EXCLUDED.resolution`
+// Meta writes (B-W5, migration 088): one row per scope, replaced in the SAME
+// advisory-locked tx as the tables it describes (no sentinel scope, no
+// computed_at:null window — B3-M1). The global run derives its scope set from
+// the freshly aggregated graph_cluster_node (DISTINCT scope); the scoped run
+// writes exactly its filter scopes via unnest + LEFT JOIN, so a partition
+// that became empty still records a fresh computed_at (its rebuild DID run).
+// Stats are per-scope: cluster_n/node_n from the node rows, edge_n counts
+// INTRA-partition edge rows (scope_s = scope_t — a cross-scope row belongs to
+// no single partition, see 088 header); modularity/resolution are the run's.
+const metaWriteGlobalSQL = `
+INSERT INTO graph_overview_meta (scope, computed_at, modularity, cluster_n, node_n, edge_n, resolution)
+SELECT n.scope, now(), $1, count(*)::int, COALESCE(sum(n.size), 0)::int,
+       (SELECT count(*) FROM graph_cluster_edge e
+         WHERE e.scope_s = n.scope AND e.scope_t = n.scope)::int,
+       $2
+  FROM graph_cluster_node n
+ GROUP BY n.scope`
+
+const metaWriteScopedSQL = `
+INSERT INTO graph_overview_meta (scope, computed_at, modularity, cluster_n, node_n, edge_n, resolution)
+SELECT s.scope, now(), $1, count(n.cluster_id)::int, COALESCE(sum(n.size), 0)::int,
+       (SELECT count(*) FROM graph_cluster_edge e
+         WHERE e.scope_s = s.scope AND e.scope_t = s.scope)::int,
+       $2
+  FROM unnest($3::text[]) AS s(scope)
+  LEFT JOIN graph_cluster_node n ON n.scope = s.scope
+ GROUP BY s.scope`
 
 // teardown clears the 057 tables for one persist run: global = TRUNCATE (the
 // pre-B path), scoped = per-partition DELETEs (B-W3) — the atomic partner of
@@ -576,13 +596,23 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		Modularity:   cl.modularity,
 	}
 
-	// Meta stays the 057 singleton until B-W5 (scope-PK migration 088): a
-	// scoped run must not overwrite the global stats row with one partition's
-	// numbers — B-W5 replaces this with per-scope rows in the same tx.
+	// Meta rows (B-W5, 088): replace exactly the rows this run owns, in the
+	// same tx — the global run replaces ALL rows (its scope set = every scope
+	// it just aggregated), the scoped run only its filter scopes (a foreign
+	// partition's computed_at is never touched, leak B1-m1).
 	if !scoped {
-		if _, err := tx.Exec(ctx, metaUpsertSQL,
-			stats.Modularity, stats.ClusterCount, stats.NodeCount, stats.EdgeRows, opts.Resolution); err != nil {
-			return Stats{}, fmt.Errorf("meta upsert: %w", err)
+		if _, err := tx.Exec(ctx, `DELETE FROM graph_overview_meta`); err != nil {
+			return Stats{}, fmt.Errorf("meta teardown: %w", err)
+		}
+		if _, err := tx.Exec(ctx, metaWriteGlobalSQL, stats.Modularity, opts.Resolution); err != nil {
+			return Stats{}, fmt.Errorf("meta write: %w", err)
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `DELETE FROM graph_overview_meta WHERE scope = ANY($1)`, opts.ScopeFilter); err != nil {
+			return Stats{}, fmt.Errorf("scoped meta teardown: %w", err)
+		}
+		if _, err := tx.Exec(ctx, metaWriteScopedSQL, stats.Modularity, opts.Resolution, opts.ScopeFilter); err != nil {
+			return Stats{}, fmt.Errorf("scoped meta write: %w", err)
 		}
 	}
 

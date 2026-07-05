@@ -102,13 +102,16 @@ func TestRebuild_ScopePartitioned(t *testing.T) {
 		t.Errorf("graph_cluster_member count = %d, want 6", memberN)
 	}
 
-	// meta single row populated.
-	var metaN, clusterN int
-	if err := pool.QueryRow(ctx, `SELECT count(*), coalesce(max(cluster_n),0) FROM graph_overview_meta`).Scan(&metaN, &clusterN); err != nil {
+	// meta populated per scope (B-W5, 088): one row per DISTINCT node scope.
+	var metaN, scopeN, clusterN int
+	if err := pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM graph_overview_meta),
+		       (SELECT count(DISTINCT scope) FROM graph_cluster_node),
+		       (SELECT coalesce(max(cluster_n),0) FROM graph_overview_meta)`).Scan(&metaN, &scopeN, &clusterN); err != nil {
 		t.Fatal(err)
 	}
-	if metaN != 1 || clusterN < 1 {
-		t.Errorf("graph_overview_meta: rows=%d cluster_n=%d", metaN, clusterN)
+	if metaN != scopeN || metaN == 0 || clusterN < 1 {
+		t.Errorf("graph_overview_meta: rows=%d, want one per node scope (%d); max cluster_n=%d", metaN, scopeN, clusterN)
 	}
 
 	// INVARIANT 1 (scope partitioning of nodes): every graph_cluster_node.size

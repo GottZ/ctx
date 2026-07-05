@@ -147,3 +147,40 @@ func TestGraphOverview_Empty(t *testing.T) {
 		t.Errorf("expected empty map, got %d nodes / %d edges", len(res.Nodes), len(res.Edges))
 	}
 }
+
+// TestGraphOverview_ComputedAtScoped is the B-W5 read gate (leak B1-m1): the
+// freshness timestamp answers over the CALLER's scopes only. Red probe
+// (documented in the wave report): reverting the read to the pre-088
+// `SELECT computed_at … LIMIT 1` serves the private partition's computed_at
+// to the foreign-scope caller and turns this red.
+func TestGraphOverview_ComputedAtScoped(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	const (
+		A = "019d0000-0000-7000-9000-000000000011" // private
+		B = "019d0000-0000-7000-9000-000000000012" // private
+	)
+	ovInsBlock(t, pool, A, "private", "learnings", "CA-A")
+	ovInsBlock(t, pool, B, "private", "learnings", "CA-B")
+	ovInsLink(t, pool, A, B, 0.9)
+	if _, err := overview.Rebuild(ctx, pool, overview.Options{Resolution: 1.0, VisibleTypes: []string{"knowledge"}, OverviewTypes: []string{"knowledge"}}); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+
+	params := store.OverviewParams{MinClusterSize: 1, NodeLimit: 10, EdgeLimit: 10}
+	own, err := store.GraphOverview(ctx, pool, params, []string{"private"})
+	if err != nil {
+		t.Fatalf("GraphOverview(private): %v", err)
+	}
+	if own.ComputedAt.IsZero() {
+		t.Fatal("private caller: ComputedAt zero despite a fresh rebuild")
+	}
+	foreign, err := store.GraphOverview(ctx, pool, params, []string{"dach"})
+	if err != nil {
+		t.Fatalf("GraphOverview(dach): %v", err)
+	}
+	if !foreign.ComputedAt.IsZero() {
+		t.Fatalf("foreign-scope caller sees ComputedAt %v — another partition's freshness leaked (B1-m1)", foreign.ComputedAt)
+	}
+}
