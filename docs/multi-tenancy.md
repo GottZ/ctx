@@ -129,6 +129,10 @@ The background pipeline (dream, digest, daily synthesis, sensitivity audit, cred
 
 **Entitlement clamp (T38, R-LEAK).** Each iterated tenant's read window is clamped to `read_scopes ∩ TenantScopes(tenant)` — the tenant-overridable `scheduler.read_scopes` is NOT grant-gated on its own, so an unintersected consumer would be a cross-tenant background read. The dream/synthesis backend chain is filtered to `_global ∪ tenant`, the per-tenant `ScopeSensitivityFloor` rides the per-tenant snapshot, and digest/synthesis/audit write scopes are clamped to the tenant's entitlements.
 
+## Per-tenant graph overview (B line, migration 087)
+
+Migration 087 adds a denormalized `scope` (TEXT, the 057 family convention) to `graph_cluster_member`, backfilled from `context_blocks` and `NOT NULL` afterwards. The rebuild writes it from the **Louvain input** (never a re-read at persist time), so a member row always records the partition the clustering ran in — the prerequisite for the scope-scoped teardown/aggregation (B-W3) and the per-tenant rebuild loop (B-W6). `block_id` stays the sole PK: the overview input is strictly owned-disjoint (no grants in the input) — a load-bearing invariant the B-W6 input-purity assert will enforce. Rollback note: a pre-087 binary's scope-less member INSERT fails the NOT NULL constraint loudly; the advisory-locked replace keeps the previous tables readable.
+
 ## Self-service onboarding (v4.1.1)
 
 Migration 069 adds structural per-tenant count-limits on `context_tenants`: `max_scopes`/`max_keys` (typed `INTEGER`, `CHECK >= 0`, `DEFAULT 25`/`50` so every existing tenant is capped without a backfill, `NULL` = operator-set unlimited — the system/default tenant seeded `NULL`), plus `idx_tenant_scopes_tenant`/`idx_api_keys_tenant`. These are structural counts (how many scopes/keys a tenant may self-provision), distinct from the 063 cost quota.

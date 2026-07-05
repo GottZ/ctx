@@ -111,7 +111,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 		return Stats{}, fmt.Errorf("overview: empty type allowlist (visible=%d, overview=%d) — block-type registry not wired?",
 			len(opts.VisibleTypes), len(opts.OverviewTypes))
 	}
-	nodeUUIDs, err := loadNodes(ctx, pool, intersect(opts.VisibleTypes, opts.OverviewTypes))
+	nodeUUIDs, nodeScopes, err := loadNodes(ctx, pool, intersect(opts.VisibleTypes, opts.OverviewTypes))
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading nodes: %w", err)
 	}
@@ -128,7 +128,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	if err != nil {
 		return Stats{}, err
 	}
-	return persist(ctx, pool, cl, opts.Resolution, opts.VisibleTypes)
+	return persist(ctx, pool, cl, opts.Resolution, opts.VisibleTypes, nodeScopes)
 }
 
 // clusterWithCtx runs computeClustering in its own goroutine so a ctx
@@ -247,29 +247,34 @@ func computeClustering(nodeUUIDs []string, edges []rawEdge, resolution float64) 
 	return clustering{blockToCluster: b2c, modularity: q, clusterCount: len(comms)}
 }
 
-func loadNodes(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string) ([]string, error) {
+func loadNodes(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string) ([]string, map[string]string, error) {
 	// ORDER BY id = determinism axis 2: the int64 surrogate id is the load
 	// position, so a stable order yields a stable partition under a fixed seed.
 	// nodeTypes = visible ∩ overview.include (T6): the shared type-visibility
 	// fragment plus the overview sieve, folded into ONE bind parameter.
+	// The scope rides along (B-W2): persist denormalizes it onto the member
+	// row, so the written partition is the one the clustering RAN in — never
+	// a re-read that a concurrent scope-move could skew.
 	rows, err := pool.Query(ctx,
-		fmt.Sprintf(`SELECT cb.id::text FROM context_blocks cb
+		fmt.Sprintf(`SELECT cb.id::text, cb.scope FROM context_blocks cb
 		 WHERE %s
 		 ORDER BY cb.id`, visibility.TypeVisible("cb", "$1")),
 		nodeTypes)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	var out []string
+	scopes := make(map[string]string)
 	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
+		var s, scope string
+		if err := rows.Scan(&s, &scope); err != nil {
+			return nil, nil, err
 		}
 		out = append(out, s)
+		scopes[s] = scope
 	}
-	return out, rows.Err()
+	return out, scopes, rows.Err()
 }
 
 func loadEdges(ctx context.Context, pool *pgxpool.Pool) ([]rawEdge, error) {
@@ -354,7 +359,9 @@ ON CONFLICT (singleton) DO UPDATE SET
 
 // persist replaces the three 057 tables in one advisory-locked transaction.
 // visibleTypes feeds the aggregation re-checks (T6, $1 in node/edgeAggSQL).
-func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution float64, visibleTypes []string) (Stats, error) {
+// nodeScopes is the Louvain-input scope per block (loadNodes) — denormalized
+// onto the member row (B-W2, migration 087).
+func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution float64, visibleTypes []string, nodeScopes map[string]string) (Stats, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return Stats{}, err
@@ -375,23 +382,36 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution 
 	}
 
 	// Batched member insert (deterministic order; unnest text[]→uuid[] cast).
+	// scope is denormalized from the Louvain input (B-W2, 087) — the member
+	// row records the partition the clustering RAN in. block_id stays the
+	// SOLE PK: the overview input is strictly owned-disjoint (no grants), so
+	// no block is a member under two scopes — load-bearing invariant, the
+	// input-purity assert lands in B-W6 (087 header).
 	blocks := make([]string, 0, len(cl.blockToCluster))
 	for b := range cl.blockToCluster {
 		blocks = append(blocks, b)
 	}
 	sort.Strings(blocks)
 	clusters := make([]string, len(blocks))
+	scopes := make([]string, len(blocks))
 	clusterSet := make(map[string]struct{})
 	for i, b := range blocks {
 		clusters[i] = cl.blockToCluster[b]
 		clusterSet[cl.blockToCluster[b]] = struct{}{}
+		scope, ok := nodeScopes[b]
+		if !ok || scope == "" {
+			// Fail loud: a member without an input scope would either violate
+			// NOT NULL or silently land in the wrong partition (B-W3 poison).
+			return Stats{}, fmt.Errorf("insert members: block %s has no Louvain-input scope", b)
+		}
+		scopes[i] = scope
 	}
 	for i := 0; i < len(blocks); i += memberBatch {
 		end := min(i+memberBatch, len(blocks))
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO graph_cluster_member (block_id, cluster_id)
-			 SELECT b::uuid, c::uuid FROM unnest($1::text[], $2::text[]) AS t(b, c)`,
-			blocks[i:end], clusters[i:end]); err != nil {
+			`INSERT INTO graph_cluster_member (block_id, cluster_id, scope)
+			 SELECT b::uuid, c::uuid, s FROM unnest($1::text[], $2::text[], $3::text[]) AS t(b, c, s)`,
+			blocks[i:end], clusters[i:end], scopes[i:end]); err != nil {
 			return Stats{}, fmt.Errorf("insert members: %w", err)
 		}
 	}

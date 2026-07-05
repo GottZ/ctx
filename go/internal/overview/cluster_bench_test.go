@@ -132,7 +132,7 @@ func mbFromBytes(b uint64) string { return fmt.Sprintf("%.0f MB", float64(b)/102
 func loadCorpus(t *testing.T, ctx context.Context, pool *pgxpool.Pool) ([]string, []rawEdge) {
 	t.Helper()
 	t0 := time.Now()
-	nodes, err := loadNodes(ctx, pool, []string{"knowledge", "audit-trail"})
+	nodes, _, err := loadNodes(ctx, pool, []string{"knowledge", "audit-trail"})
 	if err != nil {
 		t.Fatalf("loadNodes: %v", err)
 	}
