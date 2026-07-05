@@ -168,6 +168,38 @@ func TestPreCompressedEncoding(t *testing.T) {
 	}
 }
 
+// wantCSP is the EXACT Content-Security-Policy byte string HTML responses must
+// carry. It is a hand-written literal, deliberately NOT built from the package
+// `csp` constant: TestCSPOnHTMLOnly only asserts `got == csp`, so a change to the
+// constant (e.g. widening img-src to admit a foreign image host) would keep that
+// test green while silently mutating the header. This literal pins the bytes, so
+// ANY edit to the CSP — the img-src 'self' data: barrier in particular — turns
+// TestCSPByteLiteralPin red before review (design 07-camo §4.6, Z-5). The Camo
+// image proxy (W-CAMO-B) re-hosts foreign images under 'self' precisely so this
+// string never needs to change; this pin is the proof it did not.
+const wantCSP = "default-src 'self'; script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+	"font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; " +
+	"frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+
+// TestCSPByteLiteralPin freezes the CSP header at the byte level. It asserts both
+// that the package constant equals the pinned literal AND that a served HTML
+// response emits exactly those bytes — so neither a constant edit nor a serving
+// change can pass unnoticed. Negative probe: flipping any token in `csp`
+// (web.go) — e.g. `img-src 'self' data: https://images.example` — makes this red
+// while leaving TestCSPOnHTMLOnly green.
+func TestCSPByteLiteralPin(t *testing.T) {
+	if csp != wantCSP {
+		t.Errorf("csp constant drifted from the pinned CSP:\n got  %q\n want %q", csp, wantCSP)
+	}
+
+	h := stack(handlerFor(fixtureFS()))
+	rec := doReq(t, h, http.MethodGet, "/", map[string]string{"Accept": "text/html"})
+	if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
+		t.Errorf("served CSP header drifted from the pinned CSP:\n got  %q\n want %q", got, wantCSP)
+	}
+}
+
 // TestCSPOnHTMLOnly: HTML responses carry the CSP, asset responses do not.
 func TestCSPOnHTMLOnly(t *testing.T) {
 	h := stack(handlerFor(fixtureFS()))
