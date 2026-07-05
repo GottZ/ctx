@@ -378,6 +378,22 @@ jobs:
       - name: LHCI (3 runs, median, warn-only)
         run: bash go/web/e2e-container.sh bun run perf:lhci
 
+      # Trend line (wave C-W4): ONE JSON line from the representative (median)
+      # run — the 90-day artifact set reconstructs the timing trend. Noise
+      # floor ±20-40% (annotation only, never a gate — C1-M2/M3).
+      - name: LHCI timing trend line (wave C-W4)
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/lhci-trend.sh
+
+      - name: Upload trend line (90d)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: web-lhci-trend
+          path: go/web/e2e/perf/.lhci/trend/
+          retention-days: 90
+          if-no-files-found: ignore
+
       # if-no-files-found: error — an LHCI run that produced no lhr JSON is a
       # broken measurement and must be visibly red, never silently green.
       - name: Upload lhr reports
