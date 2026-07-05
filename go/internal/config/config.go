@@ -253,9 +253,20 @@ type GraphConfig struct {
 type GraphOverviewConfig struct {
 	// The landkarte is an offline, process-global supergraph rebuilt by the
 	// scheduler over the whole corpus — not per-tenant today → global-only.
+	// (The per-tenant rebuild loop is under construction on the B line; the
+	// rebuild POLICY knobs below stay server-global even then.)
 	Enabled         bool          `key:"graph_overview.enabled" env:"CTX_GRAPH_OVERVIEW_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
 	RebuildInterval time.Duration `key:"graph_overview.rebuild_interval" env:"CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL" default:"21600" mut:"hot" tenancy:"global-only"`
 	Resolution      float64       `key:"graph_overview.resolution" env:"CTX_GRAPH_OVERVIEW_RESOLUTION" default:"1.0" mut:"hot" tenancy:"global-only"`
+	// MaxNodes is the load-bearing liveness guard (B-W1/B2-C1): Louvain past
+	// ~200k nodes hits a convergence wall (bench 019ec56f); a larger node set
+	// skips the rebuild fail-safe. 0 = uncapped.
+	MaxNodes int `key:"graph_overview.max_nodes" env:"CTX_GRAPH_OVERVIEW_MAX_NODES" default:"200000" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// RebuildTimeout bounds one rebuild run (secondary liveness guard, B-W1).
+	// Seconds, like the other duration keys. A running Modularize cannot be
+	// interrupted — the timeout abandons it (documented goroutine leak) and
+	// keeps the scheduler loop alive. 0 → 900s.
+	RebuildTimeout time.Duration `key:"graph_overview.rebuild_timeout" env:"CTX_GRAPH_OVERVIEW_REBUILD_TIMEOUT" default:"900" mut:"hot" tenancy:"global-only"`
 }
 
 // QueryConfig is the query-path tuning surface: synthesis thresholds, prompt

@@ -62,9 +62,11 @@ func TestT6RebuildDurationSynthetic(t *testing.T) {
 	t.Logf("seeded %d nodes / %d edges in %s", n, edgeN, time.Since(seedStart).Round(time.Millisecond))
 
 	start := time.Now()
-	stats, err := overview.Rebuild(ctx, pool, 1.0,
-		[]string{"audit-trail", "knowledge", "reference"},
-		[]string{"audit-trail", "knowledge", "reference", "system-meta"})
+	stats, err := overview.Rebuild(ctx, pool, overview.Options{
+		Resolution:    1.0,
+		VisibleTypes:  []string{"audit-trail", "knowledge", "reference"},
+		OverviewTypes: []string{"audit-trail", "knowledge", "reference", "system-meta"},
+	})
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}

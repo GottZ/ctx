@@ -42,11 +42,31 @@ const (
 
 // Stats is the result of one rebuild for logging/telemetry.
 type Stats struct {
-	Skipped      bool    // advisory lock held elsewhere → no-op
+	Skipped      bool    // no-op run — SkipReason says why
+	SkipReason   string  // "advisory-lock" | "node-cap" (empty when not skipped)
 	NodeCount    int     // clustered blocks (members)
 	ClusterCount int     // distinct communities
 	EdgeRows     int     // rows written to graph_cluster_edge (scope-pair partitioned)
 	Modularity   float64 // gonum Q-score of the partition
+}
+
+// Options bundles the rebuild inputs (B-W1). The per-tenant scope filter
+// (B-W6) lands here so call sites change once.
+type Options struct {
+	// Resolution is the Louvain resolution parameter (<=0 → 1.0).
+	Resolution float64
+	// VisibleTypes is the resolved retrieval allowlist (T6); feeds the node cut
+	// and the aggregation re-checks. Empty = wiring bug, fails loudly.
+	VisibleTypes []string
+	// OverviewTypes is the overview.include allowlist (T6); node cut only.
+	// Empty = wiring bug, fails loudly.
+	OverviewTypes []string
+	// MaxNodes is the load-bearing liveness guard (B2-C1): Louvain is one
+	// opaque gonum call that cannot be interrupted, and past ~200k nodes it
+	// hits a convergence wall (bench 019ec56f: 400k=465s, 1M never converges).
+	// A node set larger than this cap skips the rebuild fail-safe (logged,
+	// Stats.SkipReason="node-cap"). 0 = uncapped.
+	MaxNodes int
 }
 
 // rawEdge is a directed dream-link reduced to the fields the clustering needs.
@@ -74,27 +94,61 @@ type clustering struct {
 // (a type must be retrieval-visible AND overview-included to become a Louvain
 // node); the aggregation re-checks use visibleTypes alone (pure visibility
 // semantics — members are already the cut set). Both lists come from the BASE
-// snapshot: the rebuild is ONE global run, tenant overlays act only with a
-// per-tenant overview (§9.6 caveat, T12 boundary). Empty lists are a wiring
-// bug and fail loudly (rrf.Search pattern).
-func Rebuild(ctx context.Context, pool *pgxpool.Pool, resolution float64, visibleTypes, overviewTypes []string) (Stats, error) {
-	if resolution <= 0 {
-		resolution = 1.0
+// snapshot: the rebuild is ONE global run TODAY; the per-tenant rebuild loop
+// (B-W6) threads a scope filter through Options (§9.6 caveat, T12 boundary —
+// under active migration on the B line). Empty lists are a wiring bug and
+// fail loudly (rrf.Search pattern).
+//
+// Liveness (B-W1): opts.MaxNodes is the load-bearing guard (fail-safe skip);
+// ctx cancellation/timeout is the secondary guard — it aborts BETWEEN the
+// load/compute/persist phases and via clusterWithCtx during compute (with the
+// documented goroutine leak: a running Modularize cannot be interrupted).
+func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, error) {
+	if opts.Resolution <= 0 {
+		opts.Resolution = 1.0
 	}
-	if len(visibleTypes) == 0 || len(overviewTypes) == 0 {
+	if len(opts.VisibleTypes) == 0 || len(opts.OverviewTypes) == 0 {
 		return Stats{}, fmt.Errorf("overview: empty type allowlist (visible=%d, overview=%d) — block-type registry not wired?",
-			len(visibleTypes), len(overviewTypes))
+			len(opts.VisibleTypes), len(opts.OverviewTypes))
 	}
-	nodeUUIDs, err := loadNodes(ctx, pool, intersect(visibleTypes, overviewTypes))
+	nodeUUIDs, err := loadNodes(ctx, pool, intersect(opts.VisibleTypes, opts.OverviewTypes))
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading nodes: %w", err)
+	}
+	if opts.MaxNodes > 0 && len(nodeUUIDs) > opts.MaxNodes {
+		slog.Warn("overview: rebuild skipped — node count exceeds cap (Louvain wall)",
+			"nodes", len(nodeUUIDs), "max_nodes", opts.MaxNodes)
+		return Stats{Skipped: true, SkipReason: "node-cap"}, nil
 	}
 	edges, err := loadEdges(ctx, pool)
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading edges: %w", err)
 	}
-	cl := computeClustering(nodeUUIDs, edges, resolution)
-	return persist(ctx, pool, cl, resolution, visibleTypes)
+	cl, err := clusterWithCtx(ctx, nodeUUIDs, edges, opts.Resolution)
+	if err != nil {
+		return Stats{}, err
+	}
+	return persist(ctx, pool, cl, opts.Resolution, opts.VisibleTypes)
+}
+
+// clusterWithCtx runs computeClustering in its own goroutine so a ctx
+// timeout/cancel lets the CALLER move on. Modularize is one opaque gonum call
+// and cannot observe ctx — on abort the goroutine keeps computing until
+// Louvain converges and is then discarded (documented leak; bounded by
+// Options.MaxNodes, which keeps the input below the convergence wall). The
+// buffered channel lets the orphaned goroutine exit instead of blocking
+// forever.
+func clusterWithCtx(ctx context.Context, nodeUUIDs []string, edges []rawEdge, resolution float64) (clustering, error) {
+	done := make(chan clustering, 1)
+	go func() {
+		done <- computeClustering(nodeUUIDs, edges, resolution)
+	}()
+	select {
+	case <-ctx.Done():
+		return clustering{}, fmt.Errorf("clustering aborted (goroutine keeps running until convergence): %w", ctx.Err())
+	case cl := <-done:
+		return cl, nil
+	}
 }
 
 // intersect returns the sorted intersection of two string slices. Used for
@@ -313,7 +367,7 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, resolution 
 	}
 	if !locked {
 		slog.Info("overview: rebuild skipped — advisory lock held by another instance")
-		return Stats{Skipped: true}, nil
+		return Stats{Skipped: true, SkipReason: "advisory-lock"}, nil
 	}
 
 	if _, err := tx.Exec(ctx, `TRUNCATE graph_cluster_member, graph_cluster_node, graph_cluster_edge`); err != nil {

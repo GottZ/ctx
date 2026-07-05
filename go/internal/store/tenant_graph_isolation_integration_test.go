@@ -219,7 +219,7 @@ func TestTenantGraphIsolation_EndToEnd(t *testing.T) {
 	// under each tenant's RESOLVED scopes is scope-pure — a node's scope_mix can
 	// only contain that tenant's read_scopes, never the other tenant's scope.
 	t.Run("GraphOverview_ScopePureViaResolvedScopes", func(t *testing.T) {
-		if _, err := overview.Rebuild(ctx, pool, 1.0, gVisibleTypes, gVisibleTypes); err != nil {
+		if _, err := overview.Rebuild(ctx, pool, overview.Options{Resolution: 1.0, VisibleTypes: gVisibleTypes, OverviewTypes: gVisibleTypes}); err != nil {
 			t.Fatalf("overview rebuild: %v", err)
 		}
 		params := store.OverviewParams{MinClusterSize: 1, NodeLimit: 500, EdgeLimit: 2000}

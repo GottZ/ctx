@@ -82,7 +82,7 @@ func TestRebuild_ScopePartitioned(t *testing.T) {
 	insLink(t, pool, D, F, 0.9)
 	insLink(t, pool, C, F, 0.05) // weak cross-scope bridge
 
-	stats, err := overview.Rebuild(ctx, pool, 1.0, []string{"knowledge"}, []string{"knowledge"})
+	stats, err := overview.Rebuild(ctx, pool, overview.Options{Resolution: 1.0, VisibleTypes: []string{"knowledge"}, OverviewTypes: []string{"knowledge"}})
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestRebuild_ScopePartitioned(t *testing.T) {
 	// DETERMINISM against a real DB: a second rebuild (TRUNCATE+INSERT) yields the
 	// identical member→cluster assignment — proves the fixed seed + ORDER BY load.
 	before := dumpMembers(t, pool)
-	if _, err := overview.Rebuild(ctx, pool, 1.0, []string{"knowledge"}, []string{"knowledge"}); err != nil {
+	if _, err := overview.Rebuild(ctx, pool, overview.Options{Resolution: 1.0, VisibleTypes: []string{"knowledge"}, OverviewTypes: []string{"knowledge"}}); err != nil {
 		t.Fatalf("rebuild #2: %v", err)
 	}
 	after := dumpMembers(t, pool)

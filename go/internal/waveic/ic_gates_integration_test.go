@@ -225,7 +225,7 @@ func TestICOverviewExcludesIssueComment(t *testing.T) {
 	insDreamLink(t, pool, ovIssue, ovKa)
 	insDreamLink(t, pool, ovComment, ovKa)
 
-	if _, err := overview.Rebuild(ctx, pool, 1.0, set.VisibleTypes(), set.OverviewTypes()); err != nil {
+	if _, err := overview.Rebuild(ctx, pool, overview.Options{Resolution: 1.0, VisibleTypes: set.VisibleTypes(), OverviewTypes: set.OverviewTypes()}); err != nil {
 		t.Fatalf("overview.Rebuild: %v", err)
 	}
 

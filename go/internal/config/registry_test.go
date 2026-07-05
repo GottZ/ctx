@@ -102,6 +102,12 @@ func TestRegistryStrictSet(t *testing.T) {
 		// a security ceiling).
 		"project.events.max_connections":    true,
 		"project.events.coalesce_threshold": true,
+		// B-W1 overview liveness cap: the load-bearing guard against the
+		// Louvain convergence wall — an int ceiling like the caps above; a
+		// typo'd cap silently falling back to the default would hide the
+		// intended liveness bound, so it aborts loudly. rebuild_timeout (a
+		// DURATION) stays non-strict like the other cadences.
+		"graph_overview.max_nodes": true,
 		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
 		// int cap like events.max_connections; a typo'd cap silently defaulting
 		// would hide the intended Denial-of-Sync protection, so it aborts loudly.

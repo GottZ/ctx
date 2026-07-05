@@ -138,7 +138,7 @@ func TestT6TypePolicy_GraphAndOverview(t *testing.T) {
 	// the rogue block nor the overview.include=false block is a Louvain
 	// member; the knowledge focus is (positive control).
 	t.Run("Overview_TypeSieve", func(t *testing.T) {
-		if _, err := overview.Rebuild(ctx, pool, 1.0, visible, overviewTypes); err != nil {
+		if _, err := overview.Rebuild(ctx, pool, overview.Options{Resolution: 1.0, VisibleTypes: visible, OverviewTypes: overviewTypes}); err != nil {
 			t.Fatalf("Rebuild: %v", err)
 		}
 		memberCount := func(id string) int {
@@ -163,10 +163,10 @@ func TestT6TypePolicy_GraphAndOverview(t *testing.T) {
 	// PROBE 5 (overview fail-closed): empty lists are a wiring bug and error
 	// loudly instead of clustering an empty (or unfiltered) corpus.
 	t.Run("Overview_EmptyAllowlistFailsClosed", func(t *testing.T) {
-		if _, err := overview.Rebuild(ctx, pool, 1.0, nil, overviewTypes); err == nil {
+		if _, err := overview.Rebuild(ctx, pool, overview.Options{Resolution: 1.0, OverviewTypes: overviewTypes}); err == nil {
 			t.Error("Rebuild with empty visible list: want loud error, got nil")
 		}
-		if _, err := overview.Rebuild(ctx, pool, 1.0, visible, nil); err == nil {
+		if _, err := overview.Rebuild(ctx, pool, overview.Options{Resolution: 1.0, VisibleTypes: visible}); err == nil {
 			t.Error("Rebuild with empty overview list: want loud error, got nil")
 		}
 	})

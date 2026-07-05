@@ -49,6 +49,12 @@ const (
 	// dreamYieldWait is the wait duration when dream yields to active queries.
 	dreamYieldWait = 2 * time.Second
 
+	// overviewYieldWait is the re-check cadence while the overview rebuild
+	// defers to active queries (B-W1 demand interruption). Coarser than
+	// dreamYieldWait: a rebuild burns minutes of CPU, so it should not slip
+	// into a brief lull between two interactive queries.
+	overviewYieldWait = 30 * time.Second
+
 	// guardBatchLimit is the max blocks per guard cycle.
 	guardBatchLimit = 100
 
@@ -621,11 +627,16 @@ func timeUntilNextDailySynthesis(now time.Time) time.Duration {
 }
 
 // runOverviewRebuild recomputes the F5-W6 cluster supergraph (gonum Louvain,
-// design 07-graph-overview.md). Own goroutine with its own timeout — never in a
-// ticker arm (Louvain @1M takes seconds-minutes and would block guard/digest).
-// LLM-free, so no VRAM/OOM concern. Interval is hot-reloadable; an initial build
-// runs only when the tables were never populated (fresh deploy), not on every
-// restart.
+// design 07-graph-overview.md). Own goroutine — never in a ticker arm (Louvain
+// takes seconds-minutes and would block guard/digest). Liveness (B-W1): each
+// run is bounded by graph_overview.rebuild_timeout + the max_nodes cap, and
+// defers to active queries (demand interruption, guard/dream pattern). The
+// tenant cursor is the round-robin foundation for the per-tenant rebuild
+// (one tenant per tick, runDreamLoop pattern) — the tenant's scope filter is
+// threaded into the rebuild in B-W6; until then the run stays global.
+// LLM-free, so no VRAM/OOM concern. Interval is hot-reloadable; an initial
+// build runs only when the tables were never populated (fresh deploy), not on
+// every restart.
 func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -633,12 +644,14 @@ func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
 		}
 	}()
 
+	var tenantCursor uint64 // round-robin position over the tenant list (B-W1 foundation)
+
 	if s.overviewNeverBuilt(ctx) {
-		s.rebuildOverviewOnce(ctx)
+		s.yieldThenRebuildOverview(ctx, s.nextOverviewTenant(ctx, &tenantCursor))
 	}
 
 	for {
-		interval := s.cfg.Snapshot().GraphOverview.RebuildInterval //nolint:forbidigo // MT 06 background: overview-rebuild cadence is server-global (the overview is one shared artifact); per-tenant scheduling stays Snapshot() after T13 (§4.4).
+		interval := s.cfg.Snapshot().GraphOverview.RebuildInterval //nolint:forbidigo // MT 06 background: overview-rebuild cadence is a server-global policy knob; the per-tenant loop (B-W6) rotates WHICH tenant rebuilds per tick, the cadence itself stays Snapshot() (§4.4).
 		if interval <= 0 {
 			interval = 6 * time.Hour
 		}
@@ -647,8 +660,37 @@ func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
 			return
 		case <-time.After(interval):
 		}
-		s.rebuildOverviewOnce(ctx)
+		s.yieldThenRebuildOverview(ctx, s.nextOverviewTenant(ctx, &tenantCursor))
 	}
+}
+
+// nextOverviewTenant advances the round-robin cursor over the authoritative
+// tenant list (runDreamLoop pattern). Single-tenant: the list is [{_global,
+// nil}], so the pick is constant and the run matches the pre-B single pass.
+func (s *Scheduler) nextOverviewTenant(ctx context.Context, cursor *uint64) backgroundTenant {
+	tenants := s.backgroundTenantsFn(ctx)
+	if len(tenants) == 0 {
+		tenants = []backgroundTenant{{scope: store.GlobalScope}}
+	}
+	bt := tenants[*cursor%uint64(len(tenants))]
+	*cursor++
+	return bt
+}
+
+// yieldThenRebuildOverview defers the rebuild while queries are active (demand
+// interruption, B2-M1 — the dream pattern: wait and re-check rather than skip
+// a whole interval), then runs one rebuild. Sustained query load defers
+// indefinitely — interactive work outranks background compute by design.
+func (s *Scheduler) yieldThenRebuildOverview(ctx context.Context, bt backgroundTenant) {
+	for s.activeQueries.Load() > 0 {
+		slog.Debug("scheduler: overview rebuild deferred, active queries", "count", s.activeQueries.Load())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(overviewYieldWait):
+		}
+	}
+	s.rebuildOverviewOnce(ctx, bt)
 }
 
 // overviewNeverBuilt reports whether the overview has never been computed (empty
@@ -663,35 +705,54 @@ func (s *Scheduler) overviewNeverBuilt(ctx context.Context) bool {
 }
 
 // rebuildOverviewOnce runs a single rebuild if enabled. The Enabled gate lives
-// here (not the loop) so a hot toggle takes effect on the next tick.
-func (s *Scheduler) rebuildOverviewOnce(ctx context.Context) {
-	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: overview rebuild gate/resolution is server-global (one shared artifact), not tenant-scoped.
+// here (not the loop) so a hot toggle takes effect on the next tick. bt is the
+// round-robin tenant pick (B-W1 foundation): today it only labels the run —
+// B-W6 threads its owned set as the rebuild scope filter. Each run is bounded
+// by rebuild_timeout (B2-C1); on expiry the abandoned Modularize goroutine
+// keeps running until convergence (documented leak) while the loop stays live.
+func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant) {
+	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: overview rebuild gate/resolution/cap/timeout are server-global policy knobs, not tenant-scoped — the B-W6 per-tenant loop varies the SCOPE FILTER per tick, not these.
 	if !cfg.GraphOverview.Enabled {
 		return
 	}
 	// WF T6: the rebuild consumes the BASE registry snapshot (the rebuild is
-	// ONE global run; tenant overlays act only with a per-tenant overview —
-	// design/01 §9.6 caveat, T12 boundary). nil registry = wiring gap: skip
-	// loudly rather than cluster with a stale type set.
+	// ONE global run today; the per-tenant rebuild — B-W6 — keeps consuming
+	// the BASE snapshot and varies only the scope filter; design/01 §9.6
+	// caveat, T12 boundary). nil registry = wiring gap: skip loudly rather
+	// than cluster with a stale type set.
 	if s.blocktypes == nil {
 		slog.Error("scheduler: overview rebuild skipped — block-type registry not wired")
 		return
 	}
 	typeSet := s.blocktypes.Snapshot()
+
+	timeout := cfg.GraphOverview.RebuildTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	start := time.Now()
-	stats, err := overview.Rebuild(ctx, s.pool, cfg.GraphOverview.Resolution,
-		typeSet.VisibleTypes(), typeSet.OverviewTypes())
+	stats, err := overview.Rebuild(rctx, s.pool, overview.Options{
+		Resolution:    cfg.GraphOverview.Resolution,
+		VisibleTypes:  typeSet.VisibleTypes(),
+		OverviewTypes: typeSet.OverviewTypes(),
+		MaxNodes:      cfg.GraphOverview.MaxNodes,
+	})
 	if err != nil {
-		slog.Error("scheduler: overview rebuild failed", "error", err)
+		slog.Error("scheduler: overview rebuild failed", "error", err,
+			"tenant_scope", bt.scope, "timeout", timeout, "elapsed", time.Since(start))
 		return
 	}
 	if stats.Skipped {
+		slog.Info("scheduler: overview rebuild skipped", "reason", stats.SkipReason, "tenant_scope", bt.scope)
 		return
 	}
 	slog.Info("scheduler: overview rebuild complete",
 		"clusters", stats.ClusterCount, "nodes", stats.NodeCount,
 		"edge_rows", stats.EdgeRows, "modularity", stats.Modularity,
-		"elapsed", time.Since(start))
+		"tenant_scope", bt.scope, "elapsed", time.Since(start))
 }
 
 // runEmbedCacheEviction prunes the embed cache on a fixed interval. Combines TTL
