@@ -100,11 +100,23 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
       // with a visible placeholder instead of a silent broken image (E04-9).
       // The replacement carries only TEXT content, so skipping re-sanitization
       // of the inserted node is safe by construction.
+      //
+      // Camo (design 07 §4.3): the placeholder ALSO carries the foreign URL in
+      // data-camo-src, so a post-render pass (Markdown.svelte) can batch-sign
+      // the URLs via POST /api/img/sign and swap the placeholder for a proxied
+      // <img src="/api/img/…"> (same-origin ⇒ CSP-allowed). The placeholder is
+      // the safe DEFAULT and the fallback: no sign step, sign failure, or a
+      // disabled proxy all leave this visible text in place. The attribute value
+      // is a data-* attribute (never executed) set on an element we construct,
+      // so it is safe by construction like the text content.
       const doc = node.ownerDocument
       if (!doc) return
       const placeholder = doc.createElement('span')
       placeholder.className = 'md-img-blocked'
       placeholder.setAttribute('role', 'note')
+      placeholder.setAttribute('data-camo-src', src)
+      const alt = node.getAttribute('alt')
+      if (alt) placeholder.setAttribute('data-camo-alt', alt)
       placeholder.textContent = `[external image blocked] ${src}`
       node.replaceWith(placeholder)
     }

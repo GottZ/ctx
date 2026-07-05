@@ -5,6 +5,7 @@
   // hardening, design 04 §4.4). Tool messages are not rendered here (they
   // surface as ToolCallCard under the assistant turn that called them).
   import { renderMarkdown } from '../../lib/markdown/markdown'
+  import { camoProxy } from '../../lib/markdown/camo'
   import type { Sensitivity } from '../../lib/chat/types'
 
   let {
@@ -26,7 +27,8 @@
   </div>
   {#if role === 'assistant'}
     <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized by renderMarkdown -->
-    <div class="body md">{@html html}{#if streaming}<span class="cursor"></span>{/if}</div>
+    <!-- use:camoProxy swaps remote-image placeholders for proxied same-origin <img> post-render (design 07 §4.3) -->
+    <div class="body md" use:camoProxy={html}>{@html html}{#if streaming}<span class="cursor"></span>{/if}</div>
   {:else}
     <div class="body user-text">{content}</div>
   {/if}

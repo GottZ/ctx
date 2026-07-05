@@ -13,13 +13,15 @@
   // is DOMPurify-sanitized. Adding a second raw {@html} anywhere turns that
   // freeze red before review.
   import { renderMarkdown } from './markdown'
+  import { camoProxy } from './camo'
 
   let { source }: { source: string } = $props()
   const html = $derived(renderMarkdown(source))
 </script>
 
 <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized by renderMarkdown (html:false + DOMPurify) -->
-<div class="md">{@html html}</div>
+<!-- use:camoProxy swaps remote-image placeholders for proxied same-origin <img> post-render (design 07 §4.3) -->
+<div class="md" use:camoProxy={html}>{@html html}</div>
 
 <style>
   /* Shared markdown body styling — the readable defaults + the pipeline-emitted
@@ -71,6 +73,11 @@
     padding-left: var(--space-3);
     border-left: 2px solid var(--border-strong);
     color: var(--text-dim);
+  }
+  .md :global(.md-img) {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius);
   }
   .md :global(.md-img-blocked) {
     font-family: var(--font-mono);
