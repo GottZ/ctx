@@ -238,6 +238,9 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 				"iteration": iter, "id": call.ID, "name": call.Function.Name,
 				"ok": outcome.OK, "duration_ms": outcome.DurationMs, "chars": outcome.Chars,
 				"truncated": outcome.Truncated, "summary": outcome.Summary, "blocks": outcome.Blocks,
+				// staged is the D-W6b ConfirmCard payload (nil → null for every
+				// read tool; the SPA treats null as "no card").
+				"staged": outcome.Staged,
 			}); serr != nil {
 				return serr
 			}
@@ -519,13 +522,19 @@ func (e *Engine) systemPrompt() string {
 		loc = time.UTC
 	}
 	today := e.now().In(loc).Format("2006-01-02")
-	return fmt.Sprintf(`You are the ctx assistant with read-only tool access to the user's knowledge store.
+	storeLine := ""
+	access := "read-only tool access"
+	if e.exec.HasStage() {
+		access = "tool access"
+		storeLine = "\n- ctx_store: save a NEW knowledge block. The write is STAGED, never immediate: the user must approve a confirmation card in the UI. After staging, ask the user to confirm or dismiss the card; never call ctx_store twice for the same content."
+	}
+	return fmt.Sprintf(`You are the ctx assistant with %s to the user's knowledge store.
 Today is %s (%s). Answer in the user's language.
 - ctx_query: hybrid retrieval for content questions — returns ranked blocks with snippets.
 - ctx_search: browse/list by keywords, category or tags (titles + previews).
 - ctx_get: read one full block by id (or unique id prefix).
-- ctx_recent: list recently saved/updated blocks.
-Cite used blocks inline as [title](ctx:<id>). If retrieval finds nothing relevant, say so instead of guessing. Never invent block ids.`, today, e.cfg.Timezone)
+- ctx_recent: list recently saved/updated blocks.%s
+Cite used blocks inline as [title](ctx:<id>). If retrieval finds nothing relevant, say so instead of guessing. Never invent block ids.`, access, today, e.cfg.Timezone, storeLine)
 }
 
 func toWire(m store.ChatMessage) llm.ChatMsg {

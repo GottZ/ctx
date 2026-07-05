@@ -8,7 +8,7 @@
 //
 // Pure + testable — MessageList is then just markup over this list.
 
-import type { ChatMessage, Sensitivity, ToolResultBlock, ToolResultEvent } from './types'
+import type { ChatMessage, Sensitivity, StagedWriteInfo, ToolResultBlock, ToolResultEvent } from './types'
 
 export type RenderItem =
   | { kind: 'user'; key: string; content: string; sensitivity: Sensitivity }
@@ -64,13 +64,31 @@ function parseArgs(raw: string): Record<string, unknown> {
 /** Reconstruct a ToolResultEvent-shaped view from a persisted tool message. */
 function resultOf(toolMsg?: ChatMessage): ToolResultEvent | undefined {
   if (!toolMsg) return undefined
-  let parsed: { blocks?: unknown; count?: unknown; error?: unknown } = {}
+  let parsed: { blocks?: unknown; count?: unknown; error?: unknown; staged?: unknown } = {}
   try {
     parsed = JSON.parse(toolMsg.content) as typeof parsed
   } catch {
     /* a non-JSON / errored result — treated as ok:false below */
   }
   const ok = parsed.error === undefined
+  // D-W6b: a persisted ctx_store result carries the staged card payload — the
+  // ConfirmCard re-renders after a session reload from exactly this.
+  const staged =
+    typeof parsed.staged === 'object' && parsed.staged !== null ? (parsed.staged as StagedWriteInfo) : undefined
+  if (staged) {
+    return {
+      iteration: 0,
+      id: toolMsg.tool_call_id ?? '',
+      name: toolMsg.tool_name ?? '',
+      ok,
+      duration_ms: toolMsg.duration_ms ?? 0,
+      chars: toolMsg.content.length,
+      truncated: false,
+      summary: 'staged — awaiting user confirmation',
+      blocks: [],
+      staged,
+    }
+  }
   const blocks: ToolResultBlock[] = Array.isArray(parsed.blocks)
     ? (parsed.blocks as Array<Record<string, unknown>>).map((b) => ({
         id: String(b.id ?? ''),

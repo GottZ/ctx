@@ -105,6 +105,21 @@ export interface ToolResultBlock {
   category: string
   score?: number
 }
+// Source: chat.StagedWrite (tools.go, D-W6b) — the ConfirmCard payload of a
+// staged ctx_store write. Rides on tool_result events AND inside persisted
+// tool message content (render.ts reconstructs it after a session reload).
+export interface StagedWriteInfo {
+  payload_hash: string
+  op: string
+  scope: string
+  category: string
+  title: string
+  sensitivity: string
+  content_preview: string
+  content_chars: number
+  expires_at: string | null
+}
+
 export interface ToolResultEvent {
   iteration: number
   id: string
@@ -115,6 +130,13 @@ export interface ToolResultEvent {
   truncated: boolean
   summary: string
   blocks: ToolResultBlock[] | null
+  staged?: StagedWriteInfo | null
+}
+
+// Source: POST /api/confirm (handler/confirm.go, D-W6b).
+export interface ConfirmResponse {
+  success: true
+  block: { id: string; title: string; category: string; scope: string }
 }
 export interface UsageEvent {
   iteration: number

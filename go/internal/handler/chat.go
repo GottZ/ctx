@@ -31,6 +31,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/chat"
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -107,14 +108,16 @@ type ChatHandler struct {
 	cfg         ConfigStore
 	provider    chat.BackendProvider
 	queryRunner chat.QueryRunner
+	stageRunner chat.StageRunner // D-W6b: ctx_store staging (nil = tool off)
 
 	mu       sync.Mutex
 	inflight map[string]int // home_scope → running turns (the §3.3 semaphore)
 }
 
 // NewChatHandler wires the chat handler. queryHandler is the /api/query handler
-// (scheduler-wrapped) the ctx_query tool delegates to.
-func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, queryHandler http.Handler) *ChatHandler {
+// (scheduler-wrapped) the ctx_query tool delegates to. blocktypes feeds the
+// staged-write gate bundle (type validation) — nil disables the ctx_store tool.
+func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, queryHandler http.Handler, blocktypes *blocktype.Registry) *ChatHandler {
 	// GamingState stays on the tenant-blind Snapshot() (NOT SnapshotForRequest):
 	// gaming.active and disabled_backends are global-only keys (03-W2/T28 tags +
 	// §10.5) — a tenant override is dropped before the overlay build, so the
@@ -125,13 +128,17 @@ func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.P
 	provider := chat.NewPoolProvider(backendPool, func() backends.GamingState {
 		return cfg.Snapshot().GamingState() //nolint:forbidigo // MT 06 BLIND: gaming.active is global-only (see the comment above) + this closure is built at construction with no request context to resolve a tenant from.
 	})
-	return &ChatHandler{
+	h := &ChatHandler{
 		pool:        pool,
 		cfg:         cfg,
 		provider:    provider,
 		queryRunner: &chatQueryRunner{handler: queryHandler},
 		inflight:    map[string]int{},
 	}
+	// D-W6b: every chat write is staged (default-confirm by birth — the chat
+	// is a harness without an own gating layer, DECISIONS §Klarstellung).
+	h.stageRunner = &chatStageRunner{pool: pool, cfg: cfg, blocktypes: blocktypes}
+	return h
 }
 
 // acquire reserves a turn slot for home_scope; ok=false means the per-scope cap
@@ -255,7 +262,7 @@ func (h *ChatHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		LLMTimeout:         wc.LLMTimeout,
 		Timezone:           tzName(cfg.Query.Timezone),
 	}
-	exec := chat.NewExecutor(h.pool, h.queryRunner, wc.ToolResultMaxChars)
+	exec := chat.NewExecutor(h.pool, h.queryRunner, wc.ToolResultMaxChars).WithStage(h.stageRunner)
 	engine := chat.NewEngine(h.pool, h.provider, exec, engineCfg)
 
 	sink := newChatSink(w)

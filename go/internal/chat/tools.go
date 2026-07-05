@@ -32,6 +32,38 @@ type QueryRunner interface {
 	RunQuery(ctx context.Context, readScopes []string, query string, limit int) (QueryResult, error)
 }
 
+// StagedWrite is the card payload of one staged chat write (F6-C6 D-W6b). It
+// rides on the tool_result SSE event AND inside the persisted tool message
+// content, so the ConfirmCard renders identically live and after a session
+// reload. Never the full content — ContentPreview is display material, the
+// authoritative payload is server-held (context_pending_writes, 089).
+type StagedWrite struct {
+	PayloadHash    string     `json:"payload_hash"`
+	Op             string     `json:"op"` // 'store' (update is a later wave)
+	Scope          string     `json:"scope"`
+	Category       string     `json:"category"`
+	Title          string     `json:"title"`
+	Sensitivity    string     `json:"sensitivity"` // resolved post-gate (detector included)
+	ContentPreview string     `json:"content_preview"`
+	ContentChars   int        `json:"content_chars"`
+	ExpiresAt      *time.Time `json:"expires_at"` // nil = never (writes.confirm_ttl = 0)
+}
+
+// StageRunner stages a chat-initiated write (F6-C6 D-W6b). The chat surface is
+// itself a harness WITHOUT its own gating layer (DECISIONS §Klarstellung
+// D-E1/E2), so EVERY chat write is staged — default-confirm by birth,
+// independent of the per-key confirm_writes flag; the ConfirmCard is this
+// harness's human-in-the-loop mechanism. The handler implements it over the
+// direct-path gate bundle (runStageWriteGates → CanonicalWrite →
+// StagePendingWrite, origin 'chat') — the QueryRunner injection pattern: the
+// chat package must not import handler (import cycle).
+//
+// reject != "" is a pre-stage gate rejection (model-visible, turn continues);
+// err is infrastructural (DB down etc.).
+type StageRunner interface {
+	StageWrite(ctx context.Context, category, title, content string, tags []string, metadata map[string]any) (staged *StagedWrite, reject string, err error)
+}
+
 // QueryResult is the retrieval-only outcome the QueryRunner hands back.
 type QueryResult struct {
 	Confidence string
@@ -70,6 +102,9 @@ type ToolOutcome struct {
 	Truncated   bool
 	Summary     string
 	Blocks      []EventBlock
+	// Staged is set by ctx_store only (D-W6b): the ConfirmCard payload the
+	// engine forwards on the tool_result event. nil for every read tool.
+	Staged *StagedWrite
 }
 
 // Executor runs the read-only tools. maxContentWindow is the ctx_get content
@@ -78,6 +113,7 @@ type ToolOutcome struct {
 type Executor struct {
 	pool             *pgxpool.Pool
 	query            QueryRunner
+	stage            StageRunner // nil = ctx_store not offered (read-only executor)
 	maxContentWindow int
 }
 
@@ -89,8 +125,27 @@ func NewExecutor(pool *pgxpool.Pool, query QueryRunner, maxContentWindow int) *E
 	return &Executor{pool: pool, query: query, maxContentWindow: maxContentWindow}
 }
 
-// Defs returns the tool schemas offered to the model.
-func (ex *Executor) Defs() []llm.ToolDef { return toolDefs }
+// WithStage arms the ctx_store staging tool (D-W6b). A setter, not a
+// constructor parameter: the read-only executor stays the default and every
+// existing wiring keeps its exact behaviour (D3-m1).
+func (ex *Executor) WithStage(stage StageRunner) *Executor {
+	ex.stage = stage
+	return ex
+}
+
+// HasStage reports whether the staging tool is armed (system-prompt gate).
+func (ex *Executor) HasStage() bool { return ex.stage != nil }
+
+// Defs returns the tool schemas offered to the model. ctx_store appears only
+// on an armed executor — a model must never see a tool that cannot run.
+func (ex *Executor) Defs() []llm.ToolDef {
+	if ex.stage == nil {
+		return toolDefs
+	}
+	defs := make([]llm.ToolDef, 0, len(toolDefs)+1)
+	defs = append(defs, toolDefs...)
+	return append(defs, storeToolDef)
+}
 
 // Run dispatches one tool call. Unknown tool / bad arguments / not-found /
 // ambiguous-prefix / DB error all return OK=false outcomes — only the engine's
@@ -107,6 +162,8 @@ func (ex *Executor) Run(ctx context.Context, readScopes []string, apiKeyID strin
 		out = ex.runGet(ctx, readScopes, apiKeyID, call.Function.Arguments)
 	case "ctx_recent":
 		out = ex.runRecent(ctx, readScopes, call.Function.Arguments)
+	case "ctx_store":
+		out = ex.runStore(ctx, call.Function.Arguments)
 	default:
 		out = errOutcome("unknown tool: " + call.Function.Name)
 	}
@@ -395,4 +452,62 @@ var toolDefs = []llm.ToolDef{
 			`"category":{"type":"string"},` +
 			`"limit":{"type":"integer","minimum":1,"maximum":50,"default":10}}}`),
 	}},
+}
+
+// storeToolDef is the ctx_store schema — offered ONLY by an armed executor
+// (Defs). No sensitivity/scope parameters on purpose: sensitivity resolves
+// from the settings default + the credentials detector at stage time, the
+// scope is the caller key's home_scope — the model steers neither.
+var storeToolDef = llm.ToolDef{Type: "function", Function: llm.ToolDefFunction{
+	Name:        "ctx_store",
+	Description: "Save a NEW knowledge block. The write is NOT executed immediately: it is STAGED and the user must approve it via a confirmation card shown in the UI. After staging, tell the user to confirm or dismiss the card — never call ctx_store again for the same content.",
+	Parameters: json.RawMessage(`{"type":"object","properties":{` +
+		`"category":{"type":"string","description":"knowledge category, e.g. infrastructure, decisions, projects, reference, learnings"},` +
+		`"title":{"type":"string","description":"precise block title (category+title upserts)"},` +
+		`"content":{"type":"string","description":"the block content (markdown)"},` +
+		`"tags":{"type":"array","items":{"type":"string"}},` +
+		`"metadata":{"type":"object"}},` +
+		`"required":["category","title","content"]}`),
+}}
+
+// stagePreviewChars bounds the ConfirmCard content preview (display only —
+// the authoritative payload is server-held).
+const stagePreviewChars = 280
+
+// runStore stages a chat write (D-W6b) — it NEVER executes one. The stage
+// runner runs every direct-path write gate first; a gate rejection comes back
+// as a normal OK=false tool outcome (the model self-corrects, §3.7). On
+// success the outcome content tells the model the write awaits the USER's
+// confirmation, and Staged carries the card payload for the UI.
+func (ex *Executor) runStore(ctx context.Context, raw json.RawMessage) ToolOutcome {
+	if ex.stage == nil {
+		return errOutcome("ctx_store is not available")
+	}
+	var a struct {
+		Category string         `json:"category"`
+		Title    string         `json:"title"`
+		Content  string         `json:"content"`
+		Tags     []string       `json:"tags"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return errOutcome("ctx_store: invalid arguments")
+	}
+	staged, reject, err := ex.stage.StageWrite(ctx, a.Category, a.Title, a.Content, a.Tags, a.Metadata)
+	if err != nil {
+		return errOutcome("ctx_store: staging failed")
+	}
+	if reject != "" {
+		return errOutcome("ctx_store rejected: " + reject)
+	}
+	return ToolOutcome{
+		Content: mustJSON(map[string]any{
+			"staged": staged,
+			"note":   "Write staged, NOT saved yet. The user must confirm the card shown in the UI. Tell the user to confirm or dismiss it; do not call ctx_store again for this content.",
+		}),
+		Sensitivity: backends.Sensitivity(staged.Sensitivity),
+		OK:          true,
+		Summary:     "staged — awaiting user confirmation",
+		Staged:      staged,
+	}
 }

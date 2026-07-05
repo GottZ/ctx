@@ -265,11 +265,16 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// slot during a turn (like /api/query). The ctx_query tool delegates to
 		// the SAME scheduler-wrapped query handler. Session routes are the
 		// read-lastig GET/DELETE companions (no LLM, no scheduler signal).
-		chatH := handler.NewChatHandler(pool, cfgStore, backendPool, http.HandlerFunc(queryHTTPHandler))
+		chatH := handler.NewChatHandler(pool, cfgStore, backendPool, http.HandlerFunc(queryHTTPHandler), blocktypeReg)
 		r.Post("/api/chat/stream", handler.WithScheduler(scheduler, chatH.HandleStream))
 		r.Get("/api/chat/sessions", chatH.HandleListSessions)
 		r.Get("/api/chat/sessions/{id}", chatH.HandleGetSession)
 		r.Delete("/api/chat/sessions/{id}", chatH.HandleDeleteSession)
+		// Write-confirmation (F6-C6 D-W6b): the SPA ConfirmCard executes a
+		// staged chat write here. Header-auth ONLY (this Auth group; no cookie
+		// path exists server-wide, D1-m4) — never mount outside the group.
+		confirmH := handler.NewConfirmHandler(pool, blocktypeReg)
+		r.Post("/api/confirm", confirmH.HandleConfirm)
 		// Blob — fetch, search, manage
 		r.Post("/api/blob/fetch", blobH.HandleBlobFetch)
 		r.Post("/api/blob/search", blobH.HandleBlobSearch)

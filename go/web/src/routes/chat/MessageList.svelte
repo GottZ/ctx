@@ -5,6 +5,7 @@
   import { buildRenderItems } from '../../lib/chat/render'
   import type { ChatStore } from '../../lib/chat/store.svelte'
   import BackendBadge from './BackendBadge.svelte'
+  import ConfirmCard from './ConfirmCard.svelte'
   import MessageBubble from './MessageBubble.svelte'
   import ToolCallCard from './ToolCallCard.svelte'
 
@@ -42,6 +43,9 @@
   {#each items as item (item.key)}
     {#if item.kind === 'tool'}
       <ToolCallCard name={item.name} args={item.args} result={item.result} />
+      {#if item.result?.staged}
+        <ConfirmCard staged={item.result.staged} />
+      {/if}
     {:else if item.kind === 'user'}
       <MessageBubble role="user" content={item.content} sensitivity={item.sensitivity} />
     {:else}
@@ -55,6 +59,9 @@
       <BackendBadge backend={store.liveBackend} />
       {#each store.liveTools as t (t.id)}
         <ToolCallCard name={t.name} args={t.arguments} result={t.result} />
+        {#if t.result?.staged}
+          <ConfirmCard staged={t.result.staged} />
+        {/if}
       {/each}
       {#if store.liveAssistant !== '' || store.liveTools.length === 0}
         <MessageBubble role="assistant" content={store.liveAssistant} streaming={true} />

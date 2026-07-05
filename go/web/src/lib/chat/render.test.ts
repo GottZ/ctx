@@ -76,4 +76,44 @@ describe('buildRenderItems', () => {
     const items = buildRenderItems([userMsg(1, 'hi'), { seq: 2, role: 'assistant', content: 'hello', sensitivity: 'personal', created_at: '' }])
     expect(items.map((i) => i.kind)).toEqual(['user', 'assistant'])
   })
+
+  it('reconstructs the staged ConfirmCard payload from a persisted ctx_store result (D-W6b)', () => {
+    const staged = {
+      payload_hash: 'a'.repeat(64),
+      op: 'store',
+      scope: 'private',
+      category: 'test',
+      title: 'T',
+      sensitivity: 'personal',
+      content_preview: 'p',
+      content_chars: 1,
+      expires_at: null,
+    }
+    const messages: ChatMessage[] = [
+      userMsg(1, 'save this'),
+      {
+        seq: 2,
+        role: 'assistant',
+        content: '',
+        sensitivity: 'personal',
+        created_at: '',
+        tool_calls: [{ id: 'c9', type: 'function', function: { name: 'ctx_store', arguments: '{"title":"T"}' } }],
+      },
+      {
+        seq: 3,
+        role: 'tool',
+        content: JSON.stringify({ staged, note: 'awaiting confirmation' }),
+        sensitivity: 'personal',
+        tool_call_id: 'c9',
+        tool_name: 'ctx_store',
+        created_at: '',
+      },
+    ]
+    const items = buildRenderItems(messages)
+    const tool = items.find((i) => i.kind === 'tool')
+    if (tool?.kind !== 'tool') throw new Error('expected tool item')
+    expect(tool.result?.staged).toEqual(staged)
+    expect(tool.result?.summary).toBe('staged — awaiting user confirmation')
+    expect(tool.result?.ok).toBe(true)
+  })
 })
