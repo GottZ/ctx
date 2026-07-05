@@ -355,13 +355,11 @@ func (h *StoreHandler) classifySet(ctx context.Context) *blocktype.Set {
 // validateStoreTypeName checks an explicit store `type` value against the
 // registry snapshot (WF T10). Empty msg = registered. Fail-closed on a nil
 // registry: an unvalidated name must never reach the manual write path
-// (§5.1(b) — Go-side write validation is verification layer b).
+// (§5.1(b) — Go-side write validation is verification layer b). Delegates to
+// validateTypeNameAgainstSet — the same check the stage gates run (D-W2).
 func (h *StoreHandler) validateStoreTypeName(ctx context.Context, name string) string {
 	if h.blocktypes == nil {
 		return "type: block-type registry not wired — cannot validate type names"
 	}
-	if _, ok := h.blocktypes.SnapshotForRequest(ctx).Resolve(name); !ok {
-		return fmt.Sprintf("type: unknown block type %q (see manage type-list)", name)
-	}
-	return ""
+	return validateTypeNameAgainstSet(h.blocktypes.SnapshotForRequest(ctx), name)
 }
