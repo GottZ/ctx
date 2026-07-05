@@ -8,10 +8,11 @@
 // No prior art combines all dimensions — confirmed via 22-agent literature review.
 //
 // GottZ Cyclic Phase Model: Multi-dimensional temporal retrieval where each
-// cyclic time structure (weekday, month, quarter, year, daily) is an independent
-// dimension with normalized phase [0,1) and Gaussian decay. Queries activate
-// specific dimensions — "immer dienstags" activates weekday:1.0 while
-// "am letzten Dienstag" activates linear:0.6 + weekday:0.4.
+// cyclic time structure (weekday, month, quarter, week, monthday, seasonal,
+// daily — see rrf.DimensionSigma) is an independent dimension with normalized
+// phase [0,1) and Gaussian decay. Queries activate specific dimensions —
+// "immer dienstags" activates weekday:1.0 while "am letzten Dienstag"
+// activates linear:0.6 + weekday:0.4.
 //
 // Source: https://github.com/GottZ/ctx
 // Contributors: https://github.com/GottZ/ctx/graphs/contributors
@@ -49,15 +50,20 @@ type TemporalDate struct {
 // TemporalResult is the output of LLM temporal normalization.
 //
 // DimensionWeights (GottZ Cyclic Phase Model): maps dimension name to query weight.
-// Dimensions: "linear" (absolute date distance), "weekday", "month", "week", "quarter", "year".
-// Sum should be ~1.0. Empty/nil means no cyclic gravity, linear-only scoring.
+// Vocabulary truth is rrf.DimensionSigma (gravity.go): the 7 cyclic dimensions
+// "weekday", "month", "quarter", "week", "monthday", "seasonal", "daily" plus
+// "linear" (absolute date distance). "year" is NOT a cyclic dimension — it is
+// monotonic and lives in the linear path; the consumer budget would inflate on
+// unknown keys (query.go Step 6a), so keys outside this vocabulary must never
+// be emitted. Sum should be ~1.0. Empty/nil means no cyclic gravity,
+// linear-only scoring.
 //
 // Examples:
-//   "am 2026-03-27"    → {"linear": 1.0}
-//   "am Dienstag"      → {"linear": 0.6, "weekday": 0.4}
-//   "immer dienstags"  → {"weekday": 1.0}
-//   "Q1 Reviews"       → {"quarter": 1.0}
-//   "im März"          → {"linear": 0.5, "month": 0.5}
+//
+//	"am 2026-03-27"    → {"linear": 1.0}
+//	"am Dienstag"      → {"linear": 0.6, "weekday": 0.4}
+//	"immer dienstags"  → {"weekday": 1.0}
+//	"im März"          → {"linear": 0.5, "month": 0.5}
 type TemporalResult struct {
 	Dates            []TemporalDate     `json:"dates"`
 	Query            string             `json:"query"`

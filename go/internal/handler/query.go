@@ -2,8 +2,8 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -120,6 +120,24 @@ type queryResponse struct {
 	Model      string           `json:"model,omitempty"`
 	EvalCount  int              `json:"eval_count,omitempty"`
 	Translated bool             `json:"translated"`
+	// ActivatedDimWeights exposes the temporal dimension weights the gravity
+	// boost ran with (GottZ Cyclic Phase Model) — the eval-cyclic dim_weight_pass
+	// assert reads this field. Omitted when the query had no temporal treatment.
+	ActivatedDimWeights map[string]float64 `json:"activated_dim_weights,omitempty"`
+}
+
+// activatedDimWeights mirrors the gravity-boost weight resolution (Step 6a):
+// nil result or no dates → no temporal treatment (nil); dates without
+// DimensionWeights → the backward-compat pure-linear default; otherwise the
+// weights as parsed. Kept as a function so the eval contract is unit-testable.
+func activatedDimWeights(tr *llm.TemporalResult) map[string]float64 {
+	if tr == nil || len(tr.Dates) == 0 {
+		return nil
+	}
+	if tr.DimensionWeights == nil {
+		return map[string]float64{"linear": 1.0}
+	}
+	return tr.DimensionWeights
 }
 
 // sourceResponse is a single source in the query response.
@@ -855,10 +873,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"request_id", requestID,
 		)
 		hb.finish(http.StatusOK, queryResponse{
-			Success:    true,
-			Sources:    buildSourceResponses(sources, supersedesMap, req.IncludeContent),
-			Confidence: llm.ClassifyConfidence(maxScore, cfg.SynthesisSettings()),
-			Translated: translated,
+			Success:             true,
+			Sources:             buildSourceResponses(sources, supersedesMap, req.IncludeContent),
+			Confidence:          llm.ClassifyConfidence(maxScore, cfg.SynthesisSettings()),
+			Translated:          translated,
+			ActivatedDimWeights: activatedDimWeights(temporalResult),
 		})
 		return
 	}
@@ -909,13 +928,14 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	respSources := buildSourceResponses(synthResult.Sources, supersedesMap, false)
 
 	resp := queryResponse{
-		Success:    true,
-		Answer:     synthResult.Answer,
-		Sources:    respSources,
-		Confidence: synthResult.Confidence,
-		Model:      synthResult.Model,
-		EvalCount:  synthResult.EvalCount,
-		Translated: translated,
+		Success:             true,
+		Answer:              synthResult.Answer,
+		Sources:             respSources,
+		Confidence:          synthResult.Confidence,
+		Model:               synthResult.Model,
+		EvalCount:           synthResult.EvalCount,
+		Translated:          translated,
+		ActivatedDimWeights: activatedDimWeights(temporalResult),
 	}
 
 	// Set model even when LLM was skipped (for consistency): the model that

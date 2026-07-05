@@ -105,7 +105,7 @@ def query(q):
         return {"error": str(e), "results": []}
 
 cases = gold.get("cases", gold) if isinstance(gold, dict) else gold
-buckets = {"C":[], "M":[], "L":[], "N":[]}
+buckets = {"C":[], "M":[], "L":[], "N":[], "F":[]}
 case_results = []
 
 for case in cases:
@@ -115,6 +115,7 @@ for case in cases:
     expected = case.get("expected_top_k_block_ids", [])
     must_not = case.get("must_not_contain_block_ids", [])
     or_semantic = case.get("or_semantic", False)
+    expected_dw = case.get("expected_dim_weights") or {}
 
     resp = query(q)
     # /api/query returns "sources" (LLM-synthesis-filtered subset of RRF top-K).
@@ -136,7 +137,19 @@ for case in cases:
         top_k_overlap = None
 
     must_not_pass = not any(mid in top5 for mid in must_not) if must_not else True
-    case_pass = top_k_pass and must_not_pass
+
+    # dim_weight_pass (methodology): expected_dim_weights ⊆ activated_dim_weights —
+    # ungewichtete Vergleichsmenge, d.h. Key-Ebene: jede erwartete Dimension muss
+    # mit Gewicht > 0 aktiviert sein. activated_dim_weights liefert /api/query
+    # seit A-W1. Cases ohne expected_dim_weights: vacuous pass (Schiene inaktiv);
+    # heute trägt nur Bucket F das Feld, C/M/L-Semantik bleibt unverändert.
+    activated_dw = resp.get("activated_dim_weights") or {}
+    if expected_dw:
+        dim_weight_pass = all(activated_dw.get(k, 0) > 0 for k in expected_dw)
+    else:
+        dim_weight_pass = True
+
+    case_pass = top_k_pass and must_not_pass and dim_weight_pass
 
     case_results.append({
         "id": cid,
@@ -146,6 +159,9 @@ for case in cases:
         "expected": expected,
         "top_k_pass": top_k_pass,
         "must_not_pass": must_not_pass,
+        "expected_dim_weights": expected_dw or None,
+        "activated_dim_weights": activated_dw or None,
+        "dim_weight_pass": dim_weight_pass,
         "case_pass": case_pass,
         "top_k_overlap": top_k_overlap,
         "confidence": resp.get("confidence"),
@@ -173,6 +189,13 @@ for b, items in buckets.items():
 valid_rates = [v["pass_rate"] for v in per_bucket.values() if v["pass_rate"] is not None]
 mean_pass_rate = round(statistics.mean(valid_rates), 4) if valid_rates else 0.0
 
+# dim_weight-Schiene aggregiert über alle Cases, die sie messen (Branch W).
+dw_cases = [c for c in case_results if c["expected_dim_weights"]]
+dim_weight_pass_rate = (
+    round(sum(1 for c in dw_cases if c["dim_weight_pass"]) / len(dw_cases), 4)
+    if dw_cases else None
+)
+
 out = {
     "ref": git_ref,
     "branch": branch,
@@ -182,6 +205,7 @@ out = {
     "n_cases": len(case_results),
     "per_bucket": per_bucket,
     "mean_pass_rate": mean_pass_rate,
+    "dim_weight_pass_rate": dim_weight_pass_rate,
     "case_results": case_results,
 }
 print(json.dumps(out, indent=2, ensure_ascii=False))
@@ -208,8 +232,9 @@ import json, sys
 with open(sys.argv[1]) as f:
     d = json.load(f)
 pb = d["per_bucket"]
-print(f"branch={d['branch']} ref={d['ref']} cases={d['n_cases']} mean_pass={d['mean_pass_rate']}")
-for b in ("C","M","L","N"):
+dwr = d.get("dim_weight_pass_rate")
+print(f"branch={d['branch']} ref={d['ref']} cases={d['n_cases']} mean_pass={d['mean_pass_rate']} dim_weight_pass={dwr}")
+for b in ("C","M","L","N","F"):
     v = pb.get(b, {})
     print(f"  {b}: n={v.get('n',0)} passes={v.get('passes',0)} pass_rate={v.get('pass_rate')} overlap@5={v.get('top_k_overlap_at_5')}")
 PY
