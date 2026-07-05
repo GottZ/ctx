@@ -15,6 +15,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -104,6 +105,123 @@ func (s *chatStageRunner) StageWrite(ctx context.Context, category, title, conte
 		ContentPreview: previewOf(content),
 		ContentChars:   len(content),
 		ExpiresAt:      pw.ExpiresAt,
+	}, "", nil
+}
+
+// StageUpdate implements chat.StageRunner for field-level updates (D-W6c).
+// Mirrors the MCP stage branch (mcpStageUpdate): write rate limit (staging is
+// write intent), resolve within writableBlockScopes, size limits, then the
+// D1-M3 TOCTOU pin — the target's updated_at at stage time, hash-bound via
+// CanonicalWrite.BaseUpdatedAt. Deliberately NO credentials detector: the
+// update EXECUTE path (store.UpdateBlock, REST parity) applies none either —
+// the staged card must promise exactly what the confirm will do (D1-M2).
+func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, title, content *string, tags []string, metadata map[string]any) (*chat.StagedWrite, string, error) {
+	ar := AuthResultFromContext(ctx)
+	if ar == nil || !ar.IsValid {
+		return nil, "", errors.New("chat stage: no resolved auth identity")
+	}
+	reqID := RequestIDFromContext(ctx)
+
+	data := store.UpdateBlockData{Category: category, Title: title, Content: content, Tags: tags, Metadata: metadata}
+	fields := make([]string, 0, 5)
+	if category != nil {
+		fields = append(fields, "category")
+	}
+	if title != nil {
+		fields = append(fields, "title")
+	}
+	if content != nil {
+		fields = append(fields, "content")
+	}
+	if tags != nil {
+		fields = append(fields, "tags")
+	}
+	if metadata != nil {
+		fields = append(fields, "metadata")
+	}
+	if len(fields) == 0 {
+		return nil, "nothing to update — provide at least one of category, title, content, tags, metadata", nil
+	}
+	if msg := blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content)); msg != "" {
+		return nil, msg, nil
+	}
+
+	var ttl time.Duration
+	rateLimit := 0
+	if s.cfg != nil {
+		snap := s.cfg.SnapshotForRequest(ctx)
+		ttl = snap.Writes.ConfirmTTL
+		rateLimit = snap.Query.RateLimitWrite
+	}
+	if rateLimit > 0 {
+		writeCount, err := store.CheckRateLimit(ctx, s.pool, ar.ApiKeyID)
+		if err != nil {
+			slog.Error("chat: stage update rate limit check error", "error", err, "request_id", reqID)
+			return nil, "", err
+		}
+		if writeCount >= rateLimit {
+			return nil, fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", rateLimit), nil
+		}
+	}
+
+	resolvedID, _, err := store.ResolveBlockID(ctx, s.pool, id, writableBlockScopes(ar), nil)
+	if err != nil {
+		return nil, fmt.Sprintf("cannot resolve block id: %v", err), nil
+	}
+	if resolvedID == "" {
+		return nil, "Block not found (or not in a writable scope of this key)", nil
+	}
+	// TOCTOU pin (D1-M3): read through the SAME write-eligible filter the
+	// execute will use, capture updated_at as the base fingerprint.
+	block, err := store.GetBlock(ctx, s.pool, resolvedID, writableBlockScopes(ar), nil)
+	if err != nil {
+		slog.Error("chat: stage update base read failed", "error", err, "block_id", resolvedID, "request_id", reqID)
+		return nil, "", err
+	}
+	if block == nil {
+		return nil, "Block not found (or not in a writable scope of this key)", nil
+	}
+
+	cw := store.CanonicalWrite{
+		Op:            "update",
+		ID:            resolvedID,
+		Scope:         block.Scope,
+		Category:      strOrEmpty(category),
+		Title:         strOrEmpty(title),
+		Content:       strOrEmpty(content),
+		Tags:          tags,
+		Metadata:      metadata,
+		UpdateFields:  fields,
+		BaseUpdatedAt: block.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	hash, canonical, err := cw.PayloadHash()
+	if err != nil {
+		slog.Error("chat: canonicalize staged update failed", "error", err, "request_id", reqID)
+		return nil, "", err
+	}
+	pw, err := store.StagePendingWrite(ctx, s.pool, ar.ApiKeyID, block.Scope, "update", "chat", canonical, hash, ttl)
+	if err != nil {
+		slog.Error("chat: stage pending update failed", "error", err, "request_id", reqID)
+		return nil, "", err
+	}
+
+	preview := ""
+	previewChars := 0
+	if content != nil {
+		preview = previewOf(*content)
+		previewChars = len(*content)
+	}
+	return &chat.StagedWrite{
+		PayloadHash:    hash,
+		Op:             "update",
+		Scope:          block.Scope,
+		Category:       block.Category,
+		Title:          block.Title,
+		ContentPreview: preview,
+		ContentChars:   previewChars,
+		ExpiresAt:      pw.ExpiresAt,
+		TargetID:       resolvedID,
+		UpdateFields:   cw.UpdateFields,
 	}, "", nil
 }
 

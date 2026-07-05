@@ -27,6 +27,11 @@ func (f *fakeStage) StageWrite(_ context.Context, _, _, _ string, _ []string, _ 
 	return f.staged, f.reject, f.err
 }
 
+func (f *fakeStage) StageUpdate(_ context.Context, _ string, _, _, _ *string, _ []string, _ map[string]any) (*StagedWrite, string, error) {
+	f.calls++
+	return f.staged, f.reject, f.err
+}
+
 // unitFakeQuery is the no-op QueryRunner for these unit tests (the richer
 // fakeQuery lives behind the integration build tag).
 type unitFakeQuery struct{}
@@ -108,5 +113,69 @@ func TestRunStoreWithoutRunnerFailsClosed(t *testing.T) {
 	out := ex.Run(context.Background(), nil, "key1", storeCall(`{"category":"test","title":"t","content":"c"}`))
 	if out.OK || !strings.Contains(out.Content, "not available") {
 		t.Fatalf("unarmed ctx_store must fail closed: ok=%v content=%s", out.OK, out.Content)
+	}
+}
+
+func updateCall(args string) llm.ToolCall {
+	return llm.ToolCall{ID: "c2", Function: llm.ToolCallFunction{Name: "ctx_update", Arguments: json.RawMessage(args)}}
+}
+
+// D-W6c: ctx_update is offered exactly like ctx_store — armed executors only —
+// and its staged outcome carries the card payload with the update form fields.
+func TestDefsOfferCtxUpdateOnlyWhenArmed(t *testing.T) {
+	ex := NewExecutor(nil, &unitFakeQuery{}, 0)
+	for _, d := range ex.Defs() {
+		if d.Function.Name == "ctx_update" {
+			t.Fatalf("unarmed executor must not offer ctx_update")
+		}
+	}
+	armed := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(&fakeStage{})
+	found := false
+	for _, d := range armed.Defs() {
+		if d.Function.Name == "ctx_update" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("armed executor must offer ctx_update")
+	}
+}
+
+func TestRunUpdateStagesAndCarriesTheCardPayload(t *testing.T) {
+	fs := &fakeStage{staged: &StagedWrite{
+		PayloadHash: "up456", Op: "update", Scope: "private", Category: "test",
+		Title: "target block", TargetID: "0198aaaa-0000-7000-8000-000000000001",
+		UpdateFields: []string{"content", "tags"},
+	}}
+	ex := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(fs)
+
+	out := ex.Run(context.Background(), nil, "key1", updateCall(`{"id":"0198aaaa","content":"neu","tags":[]}`))
+	if !out.OK {
+		t.Fatalf("staged update outcome must be OK=true: %s", out.Content)
+	}
+	if out.Staged == nil || out.Staged.Op != "update" || len(out.Staged.UpdateFields) != 2 {
+		t.Fatalf("outcome misses the update card payload: %+v", out.Staged)
+	}
+	if !strings.Contains(out.Content, "up456") || !strings.Contains(out.Content, "NOT applied") {
+		t.Fatalf("model content must carry hash + not-applied note: %s", out.Content)
+	}
+	if fs.calls != 1 {
+		t.Fatalf("stage runner calls = %d, want 1", fs.calls)
+	}
+}
+
+func TestRunUpdateRequiresID(t *testing.T) {
+	ex := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(&fakeStage{})
+	out := ex.Run(context.Background(), nil, "key1", updateCall(`{"content":"neu"}`))
+	if out.OK || !strings.Contains(out.Content, "id is required") {
+		t.Fatalf("ctx_update without id must reject: ok=%v content=%s", out.OK, out.Content)
+	}
+}
+
+func TestRunUpdateWithoutRunnerFailsClosed(t *testing.T) {
+	ex := NewExecutor(nil, &unitFakeQuery{}, 0)
+	out := ex.Run(context.Background(), nil, "key1", updateCall(`{"id":"x","content":"neu"}`))
+	if out.OK || !strings.Contains(out.Content, "not available") {
+		t.Fatalf("unarmed ctx_update must fail closed: ok=%v content=%s", out.OK, out.Content)
 	}
 }

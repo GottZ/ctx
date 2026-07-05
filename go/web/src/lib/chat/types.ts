@@ -110,7 +110,7 @@ export interface ToolResultBlock {
 // tool message content (render.ts reconstructs it after a session reload).
 export interface StagedWriteInfo {
   payload_hash: string
-  op: string
+  op: string // 'store' | 'update' (D-W6c)
   scope: string
   category: string
   title: string
@@ -118,6 +118,10 @@ export interface StagedWriteInfo {
   content_preview: string
   content_chars: number
   expires_at: string | null
+  // update form only (op 'update', D-W6c): target block + the authoritative
+  // field list the staged update writes.
+  target_id?: string
+  update_fields?: string[]
 }
 
 export interface ToolResultEvent {
@@ -133,9 +137,10 @@ export interface ToolResultEvent {
   staged?: StagedWriteInfo | null
 }
 
-// Source: POST /api/confirm (handler/confirm.go, D-W6b).
+// Source: POST /api/confirm (handler/confirm.go, D-W6b; op since D-W6c).
 export interface ConfirmResponse {
   success: true
+  op?: string // 'store' | 'update'
   block: { id: string; title: string; category: string; scope: string }
 }
 export interface UsageEvent {

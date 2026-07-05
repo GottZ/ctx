@@ -9,8 +9,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -111,12 +109,10 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 }
 
 // mcpConfirmHandler executes a previously staged write, selected by payload
-// hash, strictly per-key (D1-M4: consume is bound to the caller's api_key_id).
-// Before executing it re-validates writableBlockScopes (D1-M1 — write rights
-// may have shrunk between stage and confirm); that rejection happens on a
-// LOOKUP, not a consume, so the stage survives a transient rights problem.
-// The consume itself is one atomic statement (fail-closed): replay, expiry,
-// foreign key and unknown hash all land in the same generic miss.
+// hash, strictly per-key (D1-M4). Since D-W6c the sequence itself lives in
+// confirm_core.go (shared with POST /api/confirm) — this handler only maps
+// the typed outcome onto the exact MCP wordings (raw errors surface here;
+// the HTTP surface launders them).
 func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input confirmInput) (*mcp.CallToolResult, any, error) {
 		if input.PayloadHash == "" {
@@ -127,114 +123,35 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			return errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
 
-		pw, err := store.LookupPendingWrite(ctx, cfg.Pool, ar.ApiKeyID, input.PayloadHash)
-		if errors.Is(err, store.ErrPendingWriteNotFound) {
-			return errResult(confirmNotFoundMsg), nil, nil
-		}
-		if err != nil {
-			return errResult(fmt.Sprintf("confirm failed: %v", err)), nil, nil
-		}
-
-		var cw store.CanonicalWrite
-		if err := json.Unmarshal(pw.Payload, &cw); err != nil {
-			slog.Error("mcp: staged payload unmarshal failed", "error", err, "pending_id", pw.ID)
-			return errResult("confirm failed: staged payload unreadable"), nil, nil
-		}
-		if (cw.Op != "store" && cw.Op != "update") || cw.Scope != pw.Scope {
-			// A scope mismatch between row and payload would mean the stage
-			// row was tampered with — reject.
-			return errResult(confirmNotFoundMsg), nil, nil
-		}
-
-		// D1-M1: re-validate the write scope against the CURRENT key rights.
-		// This runs on the un-consumed row: a shrunk right rejects without
-		// burning the stage token.
-		if !contains(writableBlockScopes(ar), pw.Scope) {
-			return errResult(fmt.Sprintf("confirm rejected: scope %q is no longer writable for this key — the staged write stays pending until it expires", pw.Scope)), nil, nil
-		}
-
-		// TOCTOU guard for staged updates (D1-M3): the confirm executes only
-		// against the exact block state the card was rendered for. Runs on
-		// the un-consumed row (like D1-M1) — a drift rejects without burning
-		// the token, the client re-reads and re-stages.
-		if cw.Op == "update" {
-			base, err := store.GetBlock(ctx, cfg.Pool, cw.ID, writableBlockScopes(ar), nil)
-			if err != nil {
-				return errResult(fmt.Sprintf("confirm failed: %v", err)), nil, nil
+		out := executeConfirm(ctx, cfg.Pool, cfg.Blocktypes, ar, input.PayloadHash)
+		switch out.Kind {
+		case confirmOK:
+			verb := "stored"
+			if out.Op == "update" {
+				verb = "updated"
 			}
-			if base == nil {
-				return errResult("confirm rejected: the target block no longer exists in a writable scope — the staged update stays pending until it expires"), nil, nil
-			}
-			if base.UpdatedAt.UTC().Format(time.RFC3339Nano) != cw.BaseUpdatedAt {
-				return errResult(fmt.Sprintf(
-					"confirm rejected: block %s changed since this update was staged (lost-update protection) — re-read the block and stage the update again; the stale stage expires on its own",
-					cw.ID)), nil, nil
-			}
-		}
-
-		// Atomic consume (exactly once). A racing double-confirm loses here
-		// and gets the generic miss.
-		if _, err := store.ConsumePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, input.PayloadHash); err != nil {
-			if errors.Is(err, store.ErrPendingWriteNotFound) {
-				return errResult(confirmNotFoundMsg), nil, nil
-			}
-			return errResult(fmt.Sprintf("confirm failed: %v", err)), nil, nil
-		}
-
-		// op 'update' (D-W6a): execute over the SAME path as the direct
-		// update tool (UpdateBlock + re-classify/temporal/re-embed).
-		// scopeExplicit does not apply here — the update form never changes
-		// the scope (no scope field, D4-analog), so there is nothing to mark
-		// explicit; UpdateBlock filters by writableBlockScopes instead.
-		if cw.Op == "update" {
-			data := updateDataFromCanonical(cw)
-			block, needsReEmbed, err := store.UpdateBlock(ctx, cfg.Pool, cw.ID, data, writableBlockScopes(ar))
-			if err != nil {
-				slog.Error("mcp: confirmed update execute failed", "error", err, "pending_id", pw.ID)
-				return errResult(fmt.Sprintf("confirmed update failed to execute: %v — the stage token is consumed; re-stage the update", err)), nil, nil
-			}
-			if block == nil {
-				// Vanished between the TOCTOU read and the execute — token is
-				// consumed (rejected finding D1-m2 behaviour sentence).
-				return errResult("confirmed update failed to execute: block no longer accessible — the stage token is consumed; re-stage the update"), nil, nil
-			}
-			finishBlockUpdate(ctx, cfg, data, block, needsReEmbed)
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and updated: %s (id: %s, category: %s)", block.Title, block.ID, block.Category))},
+				Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and %s: %s (id: %s, category: %s)", verb, out.Block.Title, out.Block.ID, out.Block.Category))},
 			}, nil, nil
+		case confirmMiss:
+			return errResult(confirmNotFoundMsg), nil, nil
+		case confirmScopeRejected:
+			return errResult(confirmScopeRejectMsg(out.Scope)), nil, nil
+		case confirmTOCTOUGone:
+			return errResult(confirmTOCTOUGoneMsg), nil, nil
+		case confirmTOCTOUDrift:
+			return errResult(confirmTOCTOUDriftMsg(out.BlockID)), nil, nil
+		case confirmUnreadable:
+			return errResult("confirm failed: staged payload unreadable"), nil, nil
+		case confirmExecErr:
+			if out.Op == "update" {
+				return errResult(fmt.Sprintf("confirmed update failed to execute: %v — the stage token is consumed; re-stage the update", out.Err)), nil, nil
+			}
+			return errResult(fmt.Sprintf("confirmed write failed to execute: %v — the stage token is consumed; re-stage the write", out.Err)), nil, nil
+		case confirmExecGone:
+			return errResult("confirmed update failed to execute: block no longer accessible — the stage token is consumed; re-stage the update"), nil, nil
+		default: // confirmInfraErr
+			return errResult(fmt.Sprintf("confirm failed: %v", out.Err)), nil, nil
 		}
-
-		// op 'store': execute over the SAME path as the direct store tool
-		// (upsert + classify + temporal). scopeExplicit=false mirrors the MCP
-		// direct path (the store tool has no scope input; cw.Scope is the
-		// resolved home_scope from stage time, re-validated above).
-		sens := store.SensitivityWrite{
-			Value:    backends.Sensitivity(cw.Sensitivity),
-			Manual:   cw.SensitivityManual,
-			Detector: cw.SensitivityDetect,
-		}
-		block, err := store.UpsertBlock(ctx, cfg.Pool, cw.Category, cw.Title, cw.Content, cw.Tags, cw.Metadata, cw.Scope, false, sens, cw.Type)
-		if err != nil {
-			// The token is consumed but the write failed — fail-closed and
-			// rare (rejected finding D1-m2): the client re-stages.
-			slog.Error("mcp: confirmed write execute failed", "error", err, "pending_id", pw.ID)
-			return errResult(fmt.Sprintf("confirmed write failed to execute: %v — the stage token is consumed; re-stage the write", err)), nil, nil
-		}
-
-		var classifySet *blocktype.Set
-		if cfg.Blocktypes != nil {
-			classifySet = cfg.Blocktypes.SnapshotForRequest(ctx)
-		}
-		if _, err := store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
-			slog.Warn("mcp: auto-classify failed", "error", err, "block_id", block.ID)
-		}
-
-		times := store.ExtractDates(block.Content)
-		_ = store.UpdateContentTimes(ctx, cfg.Pool, block.ID, times)
-		_ = store.PopulateTemporal(ctx, cfg.Pool, block.ID, times, block.CreatedAt)
-
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and stored: %s (id: %s, category: %s)", block.Title, block.ID, block.Category))},
-		}, nil, nil
 	}
 }

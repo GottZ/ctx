@@ -16,6 +16,10 @@
   let phase = $state<Phase>('open')
   let resultText = $state('')
 
+  // D-W6c: the card carries both forms — a staged NEW block (op 'store') and
+  // a staged field-level update (op 'update', with the hash-bound field list).
+  const isUpdate = $derived(staged.op === 'update')
+
   const expiry = $derived.by(() => {
     if (!staged.expires_at) return 'never expires'
     const t = new Date(staged.expires_at)
@@ -26,7 +30,7 @@
     phase = 'confirming'
     try {
       const res = await confirmWrite(staged.payload_hash)
-      resultText = `saved: ${res.block.title} (${res.block.id.slice(0, 8)}…)`
+      resultText = `${isUpdate ? 'updated' : 'saved'}: ${res.block.title} (${res.block.id.slice(0, 8)}…)`
       phase = 'confirmed'
     } catch (err) {
       resultText = toApiError(err).message
@@ -41,22 +45,27 @@
 
 <div class="confirm" class:done={phase === 'confirmed'} class:failed={phase === 'failed'}>
   <div class="head">
-    <span class="badge">staged write</span>
+    <span class="badge">{isUpdate ? 'staged update' : 'staged write'}</span>
     <span class="title">{staged.title}</span>
     <span class="cat">{staged.category}</span>
   </div>
   <div class="meta">
     <span>scope <b>{staged.scope}</b></span>
-    <span>sensitivity <b>{staged.sensitivity}</b></span>
-    <span>{staged.content_chars} chars</span>
+    {#if staged.sensitivity}<span>sensitivity <b>{staged.sensitivity}</b></span>{/if}
+    {#if isUpdate && staged.update_fields?.length}
+      <span>changes <b>{staged.update_fields.join(', ')}</b></span>
+    {/if}
+    {#if staged.content_chars > 0}<span>{staged.content_chars} chars</span>{/if}
     <span class="hash" title={staged.payload_hash}>{staged.payload_hash.slice(0, 12)}…</span>
   </div>
-  <pre class="preview">{staged.content_preview}</pre>
+  {#if staged.content_preview}
+    <pre class="preview">{staged.content_preview}</pre>
+  {/if}
 
   {#if phase === 'open' || phase === 'confirming'}
     <div class="actions">
       <button class="ok" type="button" disabled={phase === 'confirming'} onclick={confirm}>
-        {phase === 'confirming' ? 'confirming…' : 'Confirm & save'}
+        {phase === 'confirming' ? 'confirming…' : isUpdate ? 'Confirm & update' : 'Confirm & save'}
       </button>
       <button class="no" type="button" disabled={phase === 'confirming'} onclick={dismiss}>Dismiss</button>
       <span class="expiry">{expiry}</span>

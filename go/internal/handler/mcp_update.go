@@ -19,7 +19,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -100,25 +103,27 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // (context_manage.go handleUpdate): re-classify on title/metadata change
 // (T4: promotes auto-typed blocks only), temporal re-extraction on content
 // change, embedding reset when content/title changed. All non-fatal.
-func finishBlockUpdate(ctx context.Context, cfg MCPConfig, data store.UpdateBlockData, block *store.Block, needsReEmbed bool) {
-	if cfg.Blocktypes != nil && (data.Title != nil || data.Metadata != nil) {
-		set := cfg.Blocktypes.SnapshotForRequest(ctx)
-		if _, err := store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, set, block.ID, block.Title, block.Metadata); err != nil {
-			slog.Warn("mcp: re-classify on update failed", "error", err, "block_id", block.ID)
+// Surface-neutral since D-W6c (pool+registry, not MCPConfig): the MCP direct
+// path AND the shared confirm core (confirm_core.go) call it.
+func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, data store.UpdateBlockData, block *store.Block, needsReEmbed bool) {
+	if blocktypes != nil && (data.Title != nil || data.Metadata != nil) {
+		set := blocktypes.SnapshotForRequest(ctx)
+		if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
+			slog.Warn("update afterwork: re-classify failed", "error", err, "block_id", block.ID)
 		}
 	}
 	if data.Content != nil {
 		times := store.ExtractDates(block.Content)
-		if err := store.UpdateContentTimes(ctx, cfg.Pool, block.ID, times); err != nil {
-			slog.Error("mcp: content_times update failed", "error", err, "block_id", block.ID)
+		if err := store.UpdateContentTimes(ctx, pool, block.ID, times); err != nil {
+			slog.Error("update afterwork: content_times update failed", "error", err, "block_id", block.ID)
 		}
-		if err := store.PopulateTemporal(ctx, cfg.Pool, block.ID, times, block.CreatedAt); err != nil {
-			slog.Error("mcp: temporal populate failed", "error", err, "block_id", block.ID)
+		if err := store.PopulateTemporal(ctx, pool, block.ID, times, block.CreatedAt); err != nil {
+			slog.Error("update afterwork: temporal populate failed", "error", err, "block_id", block.ID)
 		}
 	}
 	if needsReEmbed {
-		if err := store.ClearEmbedding(ctx, cfg.Pool, block.ID); err != nil {
-			slog.Error("mcp: clear embedding failed", "error", err, "block_id", block.ID)
+		if err := store.ClearEmbedding(ctx, pool, block.ID); err != nil {
+			slog.Error("update afterwork: clear embedding failed", "error", err, "block_id", block.ID)
 		}
 	}
 }
@@ -176,7 +181,7 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		if block == nil {
 			return errResult("Block not found (or not in a writable scope of this key)"), nil, nil
 		}
-		finishBlockUpdate(ctx, cfg, data, block, needsReEmbed)
+		finishBlockUpdate(ctx, cfg.Pool, cfg.Blocktypes, data, block, needsReEmbed)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(fmt.Sprintf("Updated: %s (id: %s, category: %s)", block.Title, block.ID, block.Category))},
 		}, nil, nil

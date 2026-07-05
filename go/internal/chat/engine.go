@@ -526,7 +526,8 @@ func (e *Engine) systemPrompt() string {
 	access := "read-only tool access"
 	if e.exec.HasStage() {
 		access = "tool access"
-		storeLine = "\n- ctx_store: save a NEW knowledge block. The write is STAGED, never immediate: the user must approve a confirmation card in the UI. After staging, ask the user to confirm or dismiss the card; never call ctx_store twice for the same content."
+		storeLine = "\n- ctx_store: save a NEW knowledge block. The write is STAGED, never immediate: the user must approve a confirmation card in the UI. After staging, ask the user to confirm or dismiss the card; never call ctx_store twice for the same content." +
+			"\n- ctx_update: change an EXISTING block (partial: only passed fields change). Also STAGED behind a confirmation card; if the block changes before the user confirms, the confirmation is rejected — re-stage then. Never call ctx_update twice for the same change."
 	}
 	return fmt.Sprintf(`You are the ctx assistant with %s to the user's knowledge store.
 Today is %s (%s). Answer in the user's language.

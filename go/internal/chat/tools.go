@@ -39,14 +39,19 @@ type QueryRunner interface {
 // authoritative payload is server-held (context_pending_writes, 089).
 type StagedWrite struct {
 	PayloadHash    string     `json:"payload_hash"`
-	Op             string     `json:"op"` // 'store' (update is a later wave)
+	Op             string     `json:"op"` // 'store' | 'update' (D-W6c)
 	Scope          string     `json:"scope"`
 	Category       string     `json:"category"`
 	Title          string     `json:"title"`
-	Sensitivity    string     `json:"sensitivity"` // resolved post-gate (detector included)
+	Sensitivity    string     `json:"sensitivity"` // resolved post-gate (detector included); '' for updates (unchanged)
 	ContentPreview string     `json:"content_preview"`
 	ContentChars   int        `json:"content_chars"`
 	ExpiresAt      *time.Time `json:"expires_at"` // nil = never (writes.confirm_ttl = 0)
+	// Update form only (op 'update', D-W6c): the target block and the
+	// authoritative field list the staged update writes (mirrors
+	// CanonicalWrite.UpdateFields — the card shows WHAT will change).
+	TargetID     string   `json:"target_id,omitempty"`
+	UpdateFields []string `json:"update_fields,omitempty"`
 }
 
 // StageRunner stages a chat-initiated write (F6-C6 D-W6b). The chat surface is
@@ -62,6 +67,11 @@ type StagedWrite struct {
 // err is infrastructural (DB down etc.).
 type StageRunner interface {
 	StageWrite(ctx context.Context, category, title, content string, tags []string, metadata map[string]any) (staged *StagedWrite, reject string, err error)
+	// StageUpdate stages a field-level block update (op 'update', D-W6c) with
+	// the D1-M3 TOCTOU pin captured at stage time. nil pointer/slice/map =
+	// field unchanged; a non-nil empty tags slice / metadata map is a clear
+	// (the update_fields list, not value presence, is authoritative).
+	StageUpdate(ctx context.Context, id string, category, title, content *string, tags []string, metadata map[string]any) (staged *StagedWrite, reject string, err error)
 }
 
 // QueryResult is the retrieval-only outcome the QueryRunner hands back.
@@ -136,15 +146,16 @@ func (ex *Executor) WithStage(stage StageRunner) *Executor {
 // HasStage reports whether the staging tool is armed (system-prompt gate).
 func (ex *Executor) HasStage() bool { return ex.stage != nil }
 
-// Defs returns the tool schemas offered to the model. ctx_store appears only
-// on an armed executor — a model must never see a tool that cannot run.
+// Defs returns the tool schemas offered to the model. ctx_store/ctx_update
+// appear only on an armed executor — a model must never see a tool that
+// cannot run.
 func (ex *Executor) Defs() []llm.ToolDef {
 	if ex.stage == nil {
 		return toolDefs
 	}
-	defs := make([]llm.ToolDef, 0, len(toolDefs)+1)
+	defs := make([]llm.ToolDef, 0, len(toolDefs)+2)
 	defs = append(defs, toolDefs...)
-	return append(defs, storeToolDef)
+	return append(defs, storeToolDef, updateToolDef)
 }
 
 // Run dispatches one tool call. Unknown tool / bad arguments / not-found /
@@ -164,6 +175,8 @@ func (ex *Executor) Run(ctx context.Context, readScopes []string, apiKeyID strin
 		out = ex.runRecent(ctx, readScopes, call.Function.Arguments)
 	case "ctx_store":
 		out = ex.runStore(ctx, call.Function.Arguments)
+	case "ctx_update":
+		out = ex.runUpdate(ctx, call.Function.Arguments)
 	default:
 		out = errOutcome("unknown tool: " + call.Function.Name)
 	}
@@ -470,6 +483,24 @@ var storeToolDef = llm.ToolDef{Type: "function", Function: llm.ToolDefFunction{
 		`"required":["category","title","content"]}`),
 }}
 
+// updateToolDef is the ctx_update schema (D-W6c) — offered ONLY by an armed
+// executor (Defs), staged like ctx_store (default-confirm by birth). Field
+// semantics mirror the MCP update tool: omit = unchanged, [] / {} = clear.
+// No scope/type/sensitivity parameters — an update never moves a block's
+// scope and the model steers no classification.
+var updateToolDef = llm.ToolDef{Type: "function", Function: llm.ToolDefFunction{
+	Name:        "ctx_update",
+	Description: "Update an EXISTING knowledge block (partial: only the fields you pass change; [] clears tags, {} clears metadata). The update is NOT executed immediately: it is STAGED and the user must approve a confirmation card in the UI. If the block changes before the user confirms, the confirmation is rejected and you must re-stage. Never call ctx_update twice for the same change.",
+	Parameters: json.RawMessage(`{"type":"object","properties":{` +
+		`"id":{"type":"string","description":"the block's UUID (from ctx_query/ctx_search/ctx_get results)"},` +
+		`"category":{"type":"string","description":"new category (omit = unchanged)"},` +
+		`"title":{"type":"string","description":"new title (omit = unchanged)"},` +
+		`"content":{"type":"string","description":"new content (omit = unchanged)"},` +
+		`"tags":{"type":"array","items":{"type":"string"},"description":"replacement tag set ([] clears, omit = unchanged)"},` +
+		`"metadata":{"type":"object","description":"replacement metadata ({} clears, omit = unchanged)"}},` +
+		`"required":["id"]}`),
+}}
+
 // stagePreviewChars bounds the ConfirmCard content preview (display only —
 // the authoritative payload is server-held).
 const stagePreviewChars = 280
@@ -508,6 +539,48 @@ func (ex *Executor) runStore(ctx context.Context, raw json.RawMessage) ToolOutco
 		Sensitivity: backends.Sensitivity(staged.Sensitivity),
 		OK:          true,
 		Summary:     "staged — awaiting user confirmation",
+		Staged:      staged,
+	}
+}
+
+// runUpdate stages a chat block update (D-W6c) — like runStore it NEVER
+// executes one. Field pointers keep the omit-vs-clear distinction the staged
+// form hash-binds (update_fields list); the TOCTOU pin is captured by the
+// stage runner. The outcome sensitivity stays public: the update result
+// carries no block content beyond what the model itself supplied.
+func (ex *Executor) runUpdate(ctx context.Context, raw json.RawMessage) ToolOutcome {
+	if ex.stage == nil {
+		return errOutcome("ctx_update is not available")
+	}
+	var a struct {
+		ID       string         `json:"id"`
+		Category *string        `json:"category"`
+		Title    *string        `json:"title"`
+		Content  *string        `json:"content"`
+		Tags     []string       `json:"tags"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return errOutcome("ctx_update: invalid arguments")
+	}
+	if a.ID == "" {
+		return errOutcome("ctx_update: id is required")
+	}
+	staged, reject, err := ex.stage.StageUpdate(ctx, a.ID, a.Category, a.Title, a.Content, a.Tags, a.Metadata)
+	if err != nil {
+		return errOutcome("ctx_update: staging failed")
+	}
+	if reject != "" {
+		return errOutcome("ctx_update rejected: " + reject)
+	}
+	return ToolOutcome{
+		Content: mustJSON(map[string]any{
+			"staged": staged,
+			"note":   "Update staged, NOT applied yet. The user must confirm the card shown in the UI. Tell the user to confirm or dismiss it; do not call ctx_update again for this change.",
+		}),
+		Sensitivity: backends.SensPublic,
+		OK:          true,
+		Summary:     "staged update — awaiting user confirmation",
 		Staged:      staged,
 	}
 }

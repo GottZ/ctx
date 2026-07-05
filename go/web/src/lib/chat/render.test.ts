@@ -116,4 +116,46 @@ describe('buildRenderItems', () => {
     expect(tool.result?.summary).toBe('staged — awaiting user confirmation')
     expect(tool.result?.ok).toBe(true)
   })
+
+  it('reconstructs a staged ctx_update payload with the update form fields (D-W6c)', () => {
+    const staged = {
+      payload_hash: 'b'.repeat(64),
+      op: 'update',
+      scope: 'private',
+      category: 'test',
+      title: 'target block',
+      sensitivity: '',
+      content_preview: '',
+      content_chars: 0,
+      expires_at: null,
+      target_id: '0198aaaa-0000-7000-8000-000000000001',
+      update_fields: ['content', 'tags'],
+    }
+    const messages: ChatMessage[] = [
+      userMsg(1, 'update that block'),
+      {
+        seq: 2,
+        role: 'assistant',
+        content: '',
+        sensitivity: 'personal',
+        created_at: '',
+        tool_calls: [{ id: 'c10', type: 'function', function: { name: 'ctx_update', arguments: '{"id":"0198aaaa"}' } }],
+      },
+      {
+        seq: 3,
+        role: 'tool',
+        content: JSON.stringify({ staged, note: 'awaiting confirmation' }),
+        sensitivity: 'personal',
+        tool_call_id: 'c10',
+        tool_name: 'ctx_update',
+        created_at: '',
+      },
+    ]
+    const items = buildRenderItems(messages)
+    const tool = items.find((i) => i.kind === 'tool')
+    if (tool?.kind !== 'tool') throw new Error('expected tool item')
+    expect(tool.result?.staged).toEqual(staged)
+    expect(tool.result?.staged?.update_fields).toEqual(['content', 'tags'])
+    expect(tool.result?.ok).toBe(true)
+  })
 })
