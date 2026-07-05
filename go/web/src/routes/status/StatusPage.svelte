@@ -138,7 +138,14 @@
     {:else}
       <p class="state" aria-busy="true">loading health…</p>
     {/if}
-  {:else if status.status === 'loading' || status.status === 'idle'}
+  {:else if (status.status === 'loading' && status.data === null) || status.status === 'idle'}
+    <!-- Nur der ERSTE Load zeigt den Loading-Zweig. Ein Hintergrund-Reload
+         (Poll-Fallback alle 5 s bzw. nach jedem SSE-Reconnect-Versuch) behält
+         die gemounteten Tiles: der Zweig-Flip würde sonst pro Tick den
+         kompletten Tile-DOM zerstören und neu aufbauen — sichtbares Flackern
+         und Verlust des Tastatur-Fokus für den Operator (SC 2.4.3-relevant;
+         gefunden über den e2e-Focus-Walk, der unter CI-Last mitten im
+         Tab-Durchlauf den Fokus an body verlor). -->
     <p class="state" aria-busy="true">loading status…</p>
   {:else if status.status === 'error'}
     <div class="state error" role="alert">
