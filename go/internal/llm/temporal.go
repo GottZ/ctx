@@ -267,8 +267,20 @@ func NormalizeTemporal(ctx context.Context, db *pgxpool.Pool, bpool *backends.Po
 		return nil, fmt.Errorf("llm: temporal: %w", err)
 	}
 
-	raw := strings.TrimSpace(resp.Message.Content)
+	return parseTemporalResponse(strings.TrimSpace(resp.Message.Content), query)
+}
 
+// parseTemporalResponse turns the raw LLM answer into a TemporalResult and
+// derives the DimensionWeights (D-B post-derivation, dimweights_fallback.go).
+// Split from NormalizeTemporal so the parse+derive contract is unit-testable
+// without an LLM call.
+//
+// Any dimension_weights the LLM may have hallucinated into the JSON are
+// DISCARDED unconditionally: the prompt never asks for weights, and the
+// consumer budget would inflate on unknown keys (query.go Step 6a — a
+// hallucinated "year" inflates cyclicWeightSum while ComputeCyclicGravity
+// skips it, design 01 R5). The derivation is the only weight source.
+func parseTemporalResponse(raw, query string) (*TemporalResult, error) {
 	// Strip markdown fences if present.
 	if m := jsonFenceRe.FindStringSubmatch(raw); len(m) > 1 {
 		raw = m[1]
@@ -284,6 +296,7 @@ func NormalizeTemporal(ctx context.Context, db *pgxpool.Pool, bpool *backends.Po
 		return nil, nil
 	}
 
+	result.DimensionWeights = DeriveDimensionWeights(query, result.Dates)
 	return &result, nil
 }
 

@@ -126,6 +126,37 @@ type queryResponse struct {
 	ActivatedDimWeights map[string]float64 `json:"activated_dim_weights,omitempty"`
 }
 
+// collectDimWeights splits DimensionWeights into the linear share and the
+// cyclic dimension list feeding the gravity boost (Step 6a). nil map =
+// backward-compat pure linear. Keys outside rrf.DimensionSigma (e.g. "year",
+// which the stale vocabulary once listed) are SKIPPED: ComputeCyclicGravity
+// would ignore them anyway (contribution 0), but their weight would still
+// inflate cyclicWeightSum and with it the boost budget
+// maxBoost*cyclicWeightSum — breaking the ≤0.30 invariant (design 01 R5).
+// Allowlist truth is rrf.DimensionSigma; the llm package cannot import it
+// (rrf imports llm), so this consumer-side check is the vocabulary gate —
+// defense in depth behind the deterministic derivation (D-B, A-W2).
+func collectDimWeights(dimWeights map[string]float64) (linearWeight float64, cyclicDims []string, cyclicWeightSum float64) {
+	linearWeight = 1.0 // backward-compat: if no DimensionWeights, assume pure linear
+	if dimWeights == nil {
+		return linearWeight, nil, 0
+	}
+	linearWeight = dimWeights["linear"]
+	for dim, w := range dimWeights {
+		if dim == "linear" || w <= 0 {
+			continue
+		}
+		if _, ok := rrf.DimensionSigma[dim]; !ok {
+			slog.Warn("cyclic gravity: unknown dimension key skipped (vocabulary is rrf.DimensionSigma)",
+				"dimension", dim, "weight", w)
+			continue
+		}
+		cyclicDims = append(cyclicDims, dim)
+		cyclicWeightSum += w
+	}
+	return linearWeight, cyclicDims, cyclicWeightSum
+}
+
 // activatedDimWeights mirrors the gravity-boost weight resolution (Step 6a):
 // nil result or no dates → no temporal treatment (nil); dates without
 // DimensionWeights → the backward-compat pure-linear default; otherwise the
@@ -599,18 +630,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 		// Collect dimension weights (linear vs cyclic).
 		dimWeights := temporalResult.DimensionWeights
-		linearWeight := 1.0 // backward-compat: if no DimensionWeights, assume pure linear
-		cyclicDims := []string{}
-		cyclicWeightSum := 0.0
-		if dimWeights != nil {
-			linearWeight = dimWeights["linear"]
-			for dim, w := range dimWeights {
-				if dim != "linear" && w > 0 {
-					cyclicDims = append(cyclicDims, dim)
-					cyclicWeightSum += w
-				}
-			}
-		}
+		linearWeight, cyclicDims, cyclicWeightSum := collectDimWeights(dimWeights)
 
 		ids := make([]string, len(results))
 		for i, r := range results {
