@@ -132,6 +132,7 @@ func TestW1FallbackGoldCasesReachFallback(t *testing.T) {
 			Bucket             string             `json:"bucket"`
 			Query              string             `json:"query"`
 			ExpectedDimWeights map[string]float64 `json:"expected_dim_weights"`
+			ProbeAnchorDate    string             `json:"probe_anchor_date"`
 		} `json:"cases"`
 	}
 	if err := json.Unmarshal(raw, &gold); err != nil {
@@ -165,6 +166,24 @@ func TestW1FallbackGoldCasesReachFallback(t *testing.T) {
 			}
 			if _, ok := rrf.DimensionSigma[dim]; !ok {
 				t.Errorf("gold case %s: expected_dim_weights key %q not in canonical cyclic vocabulary (rrf.DimensionSigma)", c.ID, dim)
+			}
+		}
+		// Derivability gate (gold revision 2026-07-06, decision a+c): a
+		// bucket-F case may only expect what the D-B derivation CAN produce
+		// for its query given a phase-coherent LLM date. probe_anchor_date is
+		// that date, declared per case — without it (or with an incoherent
+		// one) the expectation would be structurally unmeetable and the F
+		// rate would misreport a design boundary as a feature failure
+		// (exactly the pre-revision state of F-001/003/004/005).
+		if c.ProbeAnchorDate == "" {
+			t.Errorf("gold case %s: bucket F requires probe_anchor_date (derivability gate)", c.ID)
+			continue
+		}
+		derived := llm.DeriveDimensionWeights(c.Query, []llm.TemporalDate{{Date: c.ProbeAnchorDate}})
+		for dim := range c.ExpectedDimWeights {
+			if derived[dim] <= 0 {
+				t.Errorf("gold case %s (%q, anchor %s): expected dimension %q not derivable — derivation yields %v (design boundary or wrong anchor; see eval-w3/REPORT.md)",
+					c.ID, c.Query, c.ProbeAnchorDate, dim, derived)
 			}
 		}
 	}
