@@ -171,6 +171,13 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// D-W5 branch point (F6-C6): authResult.ConfirmWrites (090) forks a
+	// flagged key into the stage-then-confirm path HERE — after every write
+	// gate above (size, type, detector, scope, rate limit), before the upsert.
+	// The hook lives at the HANDLER, not in store.UpsertBlock: digest and
+	// dream write through UpsertBlock internally and must never self-stage.
+	// D-W4 ships the capability only; REST behaviour is unchanged.
+
 	// Execute upsert.
 	block, err := store.UpsertBlock(ctx, h.pool, req.Category, req.Title, req.Content, req.Tags, req.Metadata, writeScope, scopeExplicit, sens, req.Type)
 	if err != nil {

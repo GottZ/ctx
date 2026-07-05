@@ -234,6 +234,13 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			sens = store.SensitivityWrite{Value: s, Manual: true}
 		}
 
+		// D-W5 branch point (F6-C6): ar.ConfirmWrites (090) forks a flagged
+		// key into the stage-then-confirm path HERE (staged response with
+		// IsError=true for non-confirm-capable clients, D3-C3). Handler-level
+		// on purpose — digest/dream write through store.UpsertBlock internally
+		// and must never self-stage. D-W4 ships the capability only; MCP
+		// behaviour is unchanged.
+
 		// Upsert.
 		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, input.Metadata, scope, false, sens, "")
 		if err != nil {
