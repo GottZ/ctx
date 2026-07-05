@@ -81,11 +81,11 @@ func snapshotPartition(t *testing.T, pool *pgxpool.Pool, scope string) string {
 func scopedInput(t *testing.T, pool *pgxpool.Pool, types, scopes []string) (clustering, map[string]string) {
 	t.Helper()
 	ctx := context.Background()
-	nodeUUIDs, nodeScopes, err := loadNodes(ctx, pool, types)
+	nodeUUIDs, nodeScopes, err := loadNodes(ctx, pool, types, nil)
 	if err != nil {
 		t.Fatalf("loadNodes: %v", err)
 	}
-	edges, err := loadEdges(ctx, pool)
+	edges, err := loadEdges(ctx, pool, nil)
 	if err != nil {
 		t.Fatalf("loadEdges: %v", err)
 	}

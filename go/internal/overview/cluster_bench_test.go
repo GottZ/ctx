@@ -132,14 +132,14 @@ func mbFromBytes(b uint64) string { return fmt.Sprintf("%.0f MB", float64(b)/102
 func loadCorpus(t *testing.T, ctx context.Context, pool *pgxpool.Pool) ([]string, []rawEdge) {
 	t.Helper()
 	t0 := time.Now()
-	nodes, _, err := loadNodes(ctx, pool, []string{"knowledge", "audit-trail"})
+	nodes, _, err := loadNodes(ctx, pool, []string{"knowledge", "audit-trail"}, nil)
 	if err != nil {
 		t.Fatalf("loadNodes: %v", err)
 	}
 	loadNodesDur := time.Since(t0)
 
 	t1 := time.Now()
-	edges, err := loadEdges(ctx, pool)
+	edges, err := loadEdges(ctx, pool, nil)
 	if err != nil {
 		t.Fatalf("loadEdges: %v", err)
 	}

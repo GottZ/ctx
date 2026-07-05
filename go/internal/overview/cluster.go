@@ -9,9 +9,9 @@ package overview
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"math"
-	"hash/fnv"
 	"math/rand/v2"
 	"sort"
 
@@ -78,9 +78,9 @@ type Options struct {
 	// unscoped re-aggregation resurrects foreign-partition rows and hits the
 	// (cluster_id, scope) PK ⇒ 23505 from tenant #2 on). nil: global run,
 	// behaviour-identical to the pre-B full replace (TRUNCATE + unscoped
-	// aggregation). INPUT scoping (loadNodes/loadEdges) lands in B-W6 — until
-	// then a non-nil filter requires an input already cut to these scopes;
-	// persist fails loudly on any input block outside the filter.
+	// aggregation). Since B-W6 the filter also cuts the INPUT (loadNodes/
+	// loadEdges, both edge endpoints); the persist input-purity guard stays
+	// as the fail-loud backstop against an out-of-filter input.
 	ScopeFilter []string
 }
 
@@ -149,10 +149,14 @@ type clustering struct {
 // (a type must be retrieval-visible AND overview-included to become a Louvain
 // node); the aggregation re-checks use visibleTypes alone (pure visibility
 // semantics — members are already the cut set). Both lists come from the BASE
-// snapshot: the rebuild is ONE global run TODAY; the per-tenant rebuild loop
-// (B-W6) threads a scope filter through Options (§9.6 caveat, T12 boundary —
-// under active migration on the B line). Empty lists are a wiring bug and
-// fail loudly (rrf.Search pattern).
+// snapshot: the per-tenant rebuild loop (B-W6) varies only the scope filter,
+// never the type policy (§9.6 caveat, T12 boundary). Empty lists are a wiring
+// bug and fail loudly (rrf.Search pattern).
+//
+// Input scoping (B-W6): a non-nil opts.ScopeFilter cuts the LOAD — loadNodes
+// filters blocks, loadEdges keeps only edges with BOTH endpoints inside the
+// filter (partition semantics; a cross-partition edge belongs to no
+// partition). nil keeps both queries byte-identical to the pre-B global load.
 //
 // Liveness (B-W1): opts.MaxNodes is the load-bearing guard (fail-safe skip);
 // ctx cancellation/timeout is the secondary guard — it aborts BETWEEN the
@@ -166,7 +170,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 		return Stats{}, fmt.Errorf("overview: empty type allowlist (visible=%d, overview=%d) — block-type registry not wired?",
 			len(opts.VisibleTypes), len(opts.OverviewTypes))
 	}
-	nodeUUIDs, nodeScopes, err := loadNodes(ctx, pool, intersect(opts.VisibleTypes, opts.OverviewTypes))
+	nodeUUIDs, nodeScopes, err := loadNodes(ctx, pool, intersect(opts.VisibleTypes, opts.OverviewTypes), opts.ScopeFilter)
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading nodes: %w", err)
 	}
@@ -175,7 +179,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 			"nodes", len(nodeUUIDs), "max_nodes", opts.MaxNodes)
 		return Stats{Skipped: true, SkipReason: "node-cap"}, nil
 	}
-	edges, err := loadEdges(ctx, pool)
+	edges, err := loadEdges(ctx, pool, opts.ScopeFilter)
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading edges: %w", err)
 	}
@@ -302,7 +306,7 @@ func computeClustering(nodeUUIDs []string, edges []rawEdge, resolution float64) 
 	return clustering{blockToCluster: b2c, modularity: q, clusterCount: len(comms)}
 }
 
-func loadNodes(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string) ([]string, map[string]string, error) {
+func loadNodes(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string, scopeFilter []string) ([]string, map[string]string, error) {
 	// ORDER BY id = determinism axis 2: the int64 surrogate id is the load
 	// position, so a stable order yields a stable partition under a fixed seed.
 	// nodeTypes = visible ∩ overview.include (T6): the shared type-visibility
@@ -310,11 +314,20 @@ func loadNodes(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string) ([]s
 	// The scope rides along (B-W2): persist denormalizes it onto the member
 	// row, so the written partition is the one the clustering RAN in — never
 	// a re-read that a concurrent scope-move could skew.
-	rows, err := pool.Query(ctx,
-		fmt.Sprintf(`SELECT cb.id::text, cb.scope FROM context_blocks cb
+	// scopeFilter (B-W6): non-nil cuts the node input to the tenant partition
+	// (owned scopes); nil is the byte-identical pre-B global load.
+	query := fmt.Sprintf(`SELECT cb.id::text, cb.scope FROM context_blocks cb
 		 WHERE %s
-		 ORDER BY cb.id`, visibility.TypeVisible("cb", "$1")),
-		nodeTypes)
+		 ORDER BY cb.id`, visibility.TypeVisible("cb", "$1"))
+	args := []any{nodeTypes}
+	if len(scopeFilter) > 0 {
+		query = fmt.Sprintf(`SELECT cb.id::text, cb.scope FROM context_blocks cb
+		 WHERE %s
+		   AND cb.scope = ANY($2)
+		 ORDER BY cb.id`, visibility.TypeVisible("cb", "$1"))
+		args = append(args, scopeFilter)
+	}
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -332,14 +345,33 @@ func loadNodes(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string) ([]s
 	return out, scopes, rows.Err()
 }
 
-func loadEdges(ctx context.Context, pool *pgxpool.Pool) ([]rawEdge, error) {
+func loadEdges(ctx context.Context, pool *pgxpool.Pool, scopeFilter []string) ([]rawEdge, error) {
 	// supersedes is a replacement relation, not a topical bond — excluded from
 	// clustering (matches the ego traversal, which never walks supersedes).
-	rows, err := pool.Query(ctx,
-		`SELECT source_block_id::text, target_block_id::text, raw_confidence
+	//
+	// scopeFilter (B-W6, review B2-M4): the scoped load restricts BOTH
+	// endpoints via context_blocks joins — NOT via graph_cluster_member (the
+	// member table is the PREVIOUS run's state, semantically wrong as an input
+	// filter). Without this cut every tenant rebuild would pull the full edge
+	// set (~3.24M rows at the live corpus target) into RAM N times per cycle —
+	// no isolation leak (computeClustering skips dangling endpoints), but
+	// exactly the N-fold scan/RAM load the per-tenant line exists to avoid.
+	// nil keeps the query byte-identical to the pre-B global load.
+	query := `SELECT source_block_id::text, target_block_id::text, raw_confidence
 		 FROM context_dream_links
 		 WHERE relationship <> 'supersedes'
-		 ORDER BY source_block_id, target_block_id`)
+		 ORDER BY source_block_id, target_block_id`
+	var args []any
+	if len(scopeFilter) > 0 {
+		query = `SELECT l.source_block_id::text, l.target_block_id::text, l.raw_confidence
+		 FROM context_dream_links l
+		 JOIN context_blocks bs ON bs.id = l.source_block_id AND bs.scope = ANY($1)
+		 JOIN context_blocks bt ON bt.id = l.target_block_id AND bt.scope = ANY($1)
+		 WHERE l.relationship <> 'supersedes'
+		 ORDER BY l.source_block_id, l.target_block_id`
+		args = append(args, scopeFilter)
+	}
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -407,8 +439,9 @@ var nodeAggScopedSQL = fmt.Sprintf(nodeAggTemplate, visibility.TypeVisible("b", 
 // (AND, not OR): a partition's meta-edges are exactly those the tenant's
 // owned-disjoint Louvain input can produce (both endpoints owned — matches
 // the B-W6 loadEdges contract and the read path's "both scopes readable"
-// rule, 057 header). Cross-partition mixed edges are deliberately NOT torn
-// down by a scoped run — the B-W5/B-W6 transition owns their lifecycle.
+// rule, 057 header). Mixed cross-partition rows left over from a pre-B
+// GLOBAL run are swept by the OR edge teardown (B-W6, see teardown) and —
+// with this AND — never re-created.
 const edgeAggTemplate = `
 INSERT INTO graph_cluster_edge (cluster_a, cluster_b, scope_s, scope_t, link_count, weight_sum)
 SELECT LEAST(ms.cluster_id, mt.cluster_id),
@@ -472,10 +505,16 @@ func teardown(ctx context.Context, tx pgx.Tx, scoped bool, scopeFilter []string)
 		}
 		return nil
 	}
+	// Edge teardown is OR on purpose (B-W6 transition lifecycle): a mixed
+	// cross-partition row — possible only from a pre-B GLOBAL run, since the
+	// scoped aggregation emits AND-rows and owned-disjointness means no OTHER
+	// tenant can ever aggregate an edge touching one of THESE scopes — is
+	// swept by the first partition run that owns either endpoint and is never
+	// re-created. Member/node rows are single-scope; ANY() is exact there.
 	for _, del := range []struct{ label, sql string }{
 		{"member", `DELETE FROM graph_cluster_member WHERE scope = ANY($1)`},
 		{"node", `DELETE FROM graph_cluster_node WHERE scope = ANY($1)`},
-		{"edge", `DELETE FROM graph_cluster_edge WHERE scope_s = ANY($1) AND scope_t = ANY($1)`},
+		{"edge", `DELETE FROM graph_cluster_edge WHERE scope_s = ANY($1) OR scope_t = ANY($1)`},
 	} {
 		if _, err := tx.Exec(ctx, del.sql, scopeFilter); err != nil {
 			return fmt.Errorf("scoped %s teardown: %w", del.label, err)

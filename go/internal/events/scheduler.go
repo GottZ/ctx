@@ -664,7 +664,20 @@ func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
 	var tenantCursor uint64 // round-robin position over the tenant list (B-W1 foundation)
 
 	if s.overviewNeverBuilt(ctx) {
-		s.yieldThenRebuildOverview(ctx, s.nextOverviewTenant(ctx, &tenantCursor))
+		// Boot (never built): build EVERY tenant partition once, sequentially —
+		// deliberately NOT one global run (B-W6 choice): a global boot run would
+		// co-cluster all tenants' blocks in one Louvain pass (a cross-tenant
+		// window the partition runs would only heal over the next N intervals),
+		// and it would take the base lock while later partition runs take
+		// partition locks (the B-W4 non-exclusion note). Per-tenant boot keeps
+		// per-scope meta (088) consistent from the first build. Single-tenant:
+		// the list has one entry — exactly one run, today's behaviour.
+		for _, bt := range s.overviewTenants(ctx) {
+			s.yieldThenRebuildOverview(ctx, bt)
+			if ctx.Err() != nil {
+				return
+			}
+		}
 	}
 
 	for {
@@ -681,14 +694,28 @@ func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
 	}
 }
 
-// nextOverviewTenant advances the round-robin cursor over the authoritative
-// tenant list (runDreamLoop pattern). Single-tenant: the list is [{_global,
-// nil}], so the pick is constant and the run matches the pre-B single pass.
-func (s *Scheduler) nextOverviewTenant(ctx context.Context, cursor *uint64) backgroundTenant {
+// overviewTenants returns the tenant list the overview loop iterates —
+// backgroundTenantsFn with the never-empty guarantee re-asserted locally.
+//
+// OWNED-DISJOINTNESS (B-W2 invariant, load-bearing): the overview input must
+// be strictly owned-disjoint across tenants — graph_cluster_member keeps
+// block_id as its SOLE PK (087 header). That holds because owned comes from
+// TenantScopes (context_tenant_scopes = scope OWNERSHIP, one owner per scope);
+// grants (context_tenant_grants) are read-widenings that feed key read_scopes
+// and never appear in owned, so no block enters two tenants' Louvain inputs.
+func (s *Scheduler) overviewTenants(ctx context.Context) []backgroundTenant {
 	tenants := s.backgroundTenantsFn(ctx)
 	if len(tenants) == 0 {
 		tenants = []backgroundTenant{{scope: store.GlobalScope}}
 	}
+	return tenants
+}
+
+// nextOverviewTenant advances the round-robin cursor over the authoritative
+// tenant list (runDreamLoop pattern). Single-tenant: the list is [{_global,
+// owned}], so the pick is constant and the run matches the pre-B single pass.
+func (s *Scheduler) nextOverviewTenant(ctx context.Context, cursor *uint64) backgroundTenant {
+	tenants := s.overviewTenants(ctx)
 	bt := tenants[*cursor%uint64(len(tenants))]
 	*cursor++
 	return bt
@@ -753,26 +780,37 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// B-W6: the tenant's owned set IS the partition (scope filter for load,
+	// teardown, aggregation, meta and the advisory lock — lockKeyForScopes).
+	// owned may be nil on two legitimate paths (masterplan anchor: the
+	// {private,shared,work} default is a migration seed, not a code guarantee;
+	// and the register-error fallback) — a nil filter runs the byte-identical
+	// global pass under the base lock key. E1 (B-W0 measurement): at the
+	// current corpus every block lies inside owned, so the default tenant's
+	// scoped run equals the global run; future drift shows up in the
+	// NodeCount log below and fails the B1-M2 integration assert.
 	start := time.Now()
 	stats, err := overview.Rebuild(rctx, s.pool, overview.Options{
 		Resolution:    cfg.GraphOverview.Resolution,
 		VisibleTypes:  typeSet.VisibleTypes(),
 		OverviewTypes: typeSet.OverviewTypes(),
 		MaxNodes:      cfg.GraphOverview.MaxNodes,
+		ScopeFilter:   bt.owned,
 	})
 	if err != nil {
 		slog.Error("scheduler: overview rebuild failed", "error", err,
-			"tenant_scope", bt.scope, "timeout", timeout, "elapsed", time.Since(start))
+			"tenant_scope", bt.scope, "scope_filter", bt.owned, "timeout", timeout, "elapsed", time.Since(start))
 		return
 	}
 	if stats.Skipped {
-		slog.Info("scheduler: overview rebuild skipped", "reason", stats.SkipReason, "tenant_scope", bt.scope)
+		slog.Info("scheduler: overview rebuild skipped", "reason", stats.SkipReason,
+			"tenant_scope", bt.scope, "scope_filter", bt.owned)
 		return
 	}
 	slog.Info("scheduler: overview rebuild complete",
 		"clusters", stats.ClusterCount, "nodes", stats.NodeCount,
 		"edge_rows", stats.EdgeRows, "modularity", stats.Modularity,
-		"tenant_scope", bt.scope, "elapsed", time.Since(start))
+		"tenant_scope", bt.scope, "scope_filter", bt.owned, "elapsed", time.Since(start))
 }
 
 // runEmbedCacheEviction prunes the embed cache on a fixed interval. Combines TTL
