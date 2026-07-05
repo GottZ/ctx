@@ -1,0 +1,53 @@
+{
+  "_doc": [
+    "On-disk byte budget for the release bundle (overnight plan C, wave C-W1 = PLc).",
+    "Gate: `bun run test:budget` reads dist/**/*.{js,css}(.br) AFTER a real",
+    "`bun run build` (release build, NO VITE_E2E) and asserts every chunk,",
+    "every stylesheet and the transfer total against this file. The .br",
+    "sibling is what go/web/web.go actually serves (verify lens = release lens).",
+    "",
+    "CALIBRATED 2026-07-05 inside the pinned toolchain container",
+    "(e2e/toolchain.lock sha256 8a0d9ebe2614, bun 1.3 / vite 8.0.16 /",
+    "vite-plugin-compression2 2.5.3 at brotli DEFAULT quality Q11 —",
+    "vite.config.ts sets no explicit quality). Brotli output is",
+    "node/toolchain-version-sensitive: budgets and the determinism verdict",
+    "hold ONLY for in-container builds. Two consecutive container builds were",
+    "byte-identical (sha256 over all js/css/br artifacts) on 2026-07-05.",
+    "",
+    "RUNBOOK: a toolchain.lock digest bump is a RE-BASELINE event — re-measure",
+    "inside the new container and update budgets + toolchain_lock_sha256_12 in",
+    "the SAME commit, otherwise the gate goes falsely red after the update.",
+    "",
+    "Budget policy: overrides = measured .br size x ~1.4 headroom for chunks",
+    "whose measured x1.4 exceeds the per-extension default; every other chunk",
+    "(current and future) is covered by the defaults. total_transfer_bytes =",
+    "sum of served bytes (.br when present, raw otherwise) x ~1.25.",
+    "Chunks below raw_threshold_bytes legitimately have no .br sibling",
+    "(vite.config.ts compression threshold: 1024) and count at raw size."
+  ],
+  "calibrated": true,
+  "calibrated_at": "2026-07-05",
+  "toolchain_lock_sha256_12": "8a0d9ebe2614",
+  "brotli_quality": 11,
+  "raw_threshold_bytes": 1024,
+  "total_transfer_bytes": 295000,
+  "defaults": {
+    "js_br_bytes": 6144,
+    "css_br_bytes": 3072
+  },
+  "overrides": {
+    "GraphPage.js": 58000,
+    "camo.js": 65000,
+    "disclose-version.js": 25000,
+    "index.js": 17000,
+    "BoardPage.js": 15500,
+    "BackendsPage.js": 13500,
+    "AdminPage.js": 11500,
+    "BlocksPage.js": 10000,
+    "TenantPage.js": 9500,
+    "TenantDetail.js": 9000,
+    "ChatPage.js": 7500,
+    "StatusPage.js": 6500,
+    "index.css": 4200
+  }
+}

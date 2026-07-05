@@ -12,6 +12,7 @@
     "lint:css": "stylelint \"src/**/*.{css,svelte}\" && node lint/inline-gate.mjs",
     "check": "bun run lint:css && svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "test": "vitest run",
+    "test:budget": "bun e2e/perf/chunk-budget.ts",
     "test:e2e": "playwright test",
     "e2e:visual": "bash e2e-visual.sh",
     "e2e:matrix": "bun e2e/contract/coverage.ts",
