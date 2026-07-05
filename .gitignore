@@ -23,6 +23,8 @@ go/dist/
 # Frontend (Svelte 5 + Vite, bun)
 go/web/node_modules/
 go/web/playwright-report/
+go/web/e2e/perf/.lhci/
+go/web/.lighthouseci/
 go/web/dist/*
 !go/web/dist/.gitkeep
 !.gitkeep

@@ -13,6 +13,7 @@
     "check": "bun run lint:css && svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "test": "vitest run",
     "test:budget": "bun e2e/perf/chunk-budget.ts",
+    "perf:lhci": "lhci autorun --config=lighthouserc.cjs",
     "test:e2e": "playwright test",
     "e2e:visual": "bash e2e-visual.sh",
     "e2e:matrix": "bun e2e/contract/coverage.ts",
@@ -20,6 +21,7 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "4.12.1",
+    "@lhci/cli": "0.15.1",
     "@playwright/test": "1.61.1",
     "@sveltejs/vite-plugin-svelte": "7.1.2",
     "@tsconfig/svelte": "5.0.8",

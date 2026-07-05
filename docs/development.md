@@ -79,6 +79,10 @@ The release bundle is guarded by a deterministic on-disk byte gate: `bun run tes
 
 Budgets were calibrated **inside the digest-pinned toolchain container** (brotli output is toolchain-version-sensitive; the plugin runs at brotli default Q11). Runbook: a `toolchain.lock` digest bump is a **re-baseline event** — re-measure in the new container and update `chunk-budget.json` (budgets + `toolchain_lock_sha256_12`) in the same commit, otherwise the gate goes falsely red after the update. Loosening a budget is a visible decision with a reason in the commit message, never a silent side effect of a feature commit.
 
+## Lighthouse timing trend (Web, nightly — never a gate)
+
+`bun run perf:lhci` (in `go/web/`, config `lighthouserc.cjs`) runs Lighthouse 3× against a statically served release build and writes lhr reports to `e2e/perf/.lhci/`. Role boundary: **bytes are judged by the PLc budget gate above** — LHCI is a lab **timing** probe only, runs nightly in CI (`web-lhci` job, schedule + manual dispatch, never on PRs) and every assertion is warn-only with deliberately uncalibrated thresholds. Lab timings on shared runners carry a **±20–40 % noise floor**: a single run is never signal, only jumps beyond ~40 % across the trend are. If timing budgets are ever introduced, calibrate them from the **median of several nightly runs**, never a single run. Chromium and node come from the pinned toolchain image; verdicts are only comparable in-container.
+
 ## Visual baseline governance (Web e2e)
 
 Screenshot baselines (`go/web/e2e/__screenshots__/`) are the frozen "objectively good" reference for the UI: the taste judgement is made once, at baseline approval — afterwards every pixel deviation is a measurable diff, not an opinion. Baselines are only valid when rendered inside the digest-pinned toolchain container (`go/web/e2e/toolchain.lock` pins the image digests; `bash go/web/e2e-visual.sh --update` is the only regeneration path — CI has no update path and only compares).

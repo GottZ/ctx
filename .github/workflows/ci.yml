@@ -23,8 +23,14 @@ on:
 # Deny-all default — jeder Job deklariert eigene Permissions.
 permissions: {}
 
+# Schedule runs get their OWN concurrency group (wave C-W3): the nightly
+# tiers (web-live release gate, web-lhci timing trend) must survive a root
+# push around 03:00 UTC — in the shared group the push would cancel the
+# schedule run and the tag rule (green nightly before a version tag) would
+# block the morning release until a manual re-dispatch. Two parallel runs on
+# the same ref cannot conflict: docker (image push) is gated OFF schedule.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
@@ -331,6 +337,57 @@ jobs:
           # the duration/flaky trend from the retained set.
           retention-days: 90
           if-no-files-found: ignore
+
+  # ─── Stage 1e: Web LHCI Nightly (timing trend, wave C-W3) ────────────────────
+  # LHCI is the lab TIMING probe — nightly-only, warn-only, NEVER a PR gate
+  # and NEVER a byte authority (DECISIONS C-E1/C-E2, keeps 06-E6: bytes are
+  # judged by the PLc budget gate in the `web` job). A DEDICATED job, not a
+  # step in `web` and without `needs:` — it must stay green/red independently
+  # (web-trend dies with a red `web`; this must not). Runs the same pinned
+  # toolchain container; Chromium + node come from the image (no
+  # chrome-launcher dep, CHROME_PATH globbed in lighthouserc.cjs). Lab noise
+  # floor is ±20-40% on shared runners — the lhr artifacts feed the 90-day
+  # trend (C-W4), single runs are never interpreted. timeout-minutes is the
+  # wall-clock budget: a hung Chromium turns the job visibly red, never a
+  # silent multi-hour runner burn (C2-3).
+  web-lhci:
+    name: Web LHCI Nightly (timing trend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # workflow_dispatch is included deliberately: it is the only way to test
+    # the nightly path without waiting for 03:00 UTC (same rationale as
+    # web-live/web-trend).
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build pinned toolchain container (e2e/toolchain.lock)
+        run: bash go/web/e2e-container.sh bun --version
+
+      - name: Install (bun, frozen lockfile)
+        run: bash go/web/e2e-container.sh bun install --frozen-lockfile
+
+      - name: Release build (no VITE_E2E — LHCI serves dist/ statically)
+        run: bash go/web/e2e-container.sh bun run build
+
+      - name: LHCI (3 runs, median, warn-only)
+        run: bash go/web/e2e-container.sh bun run perf:lhci
+
+      # if-no-files-found: error — an LHCI run that produced no lhr JSON is a
+      # broken measurement and must be visibly red, never silently green.
+      - name: Upload lhr reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: web-lhci-reports
+          path: go/web/e2e/perf/.lhci/
+          retention-days: 14
+          if-no-files-found: error
 
   # ─── Stage 2: Unit Tests ──────────────────────────────────────────────────────
   unit-tests:
