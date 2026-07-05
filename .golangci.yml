@@ -93,6 +93,11 @@ linters:
       period: true
 
   exclusions:
+    # npm-Pakete können Go-Portierungen mitliefern (z. B. flatted/golang);
+    # go list ./... überspringt node_modules NICHT — ohne diese Exklusion
+    # lintet der pre-commit-Hook Fremdcode.
+    paths:
+      - "web/node_modules/"
     rules:
       - path: "_test\\.go$"
         linters:
