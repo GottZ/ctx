@@ -46,17 +46,40 @@ type CanonicalWrite struct {
 	SensitivityManual bool   `json:"sensitivity_manual"`
 	SensitivityDetect bool   `json:"sensitivity_detector"`
 	Type              string `json:"type,omitempty"` // explicit block type ('' = auto-classify)
+
+	// Update form only (op 'update', D-W6a) — both omitempty, so every
+	// existing op 'store' hash stays byte-identical.
+	//
+	// UpdateFields is the authoritative SET of fields this update writes
+	// (sorted by Canonical(), like Tags). It disambiguates "clear
+	// tags/metadata" (field listed, value empty — omitempty drops the empty
+	// value from the JSON) from "leave unchanged" (field not listed). The
+	// confirm execute rebuilds UpdateBlockData from THIS list, never from
+	// value presence.
+	UpdateFields []string `json:"update_fields,omitempty"`
+	// BaseUpdatedAt pins the block state the staged card was rendered against
+	// (TOCTOU guard, D1-M3): context_blocks.updated_at at stage time,
+	// UTC/RFC3339Nano. The confirm rejects — without consuming the token —
+	// when the block's updated_at no longer matches (lost-update protection).
+	BaseUpdatedAt string `json:"base_updated_at,omitempty"`
 }
 
 // Canonical returns the canonical JSON bytes of the write: fixed field order,
-// sorted tags (input slice untouched), metadata keys sorted by encoding/json.
-// These bytes are what gets staged as the server-held payload.
+// sorted tags and update_fields (input slices untouched), metadata keys
+// sorted by encoding/json. These bytes are what gets staged as the
+// server-held payload.
 func (c CanonicalWrite) Canonical() ([]byte, error) {
 	if len(c.Tags) > 0 {
 		sorted := make([]string, len(c.Tags))
 		copy(sorted, c.Tags)
 		sort.Strings(sorted)
 		c.Tags = sorted
+	}
+	if len(c.UpdateFields) > 0 {
+		sorted := make([]string, len(c.UpdateFields))
+		copy(sorted, c.UpdateFields)
+		sort.Strings(sorted)
+		c.UpdateFields = sorted
 	}
 	b, err := json.Marshal(c)
 	if err != nil {

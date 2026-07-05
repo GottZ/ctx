@@ -23,7 +23,7 @@ import (
 )
 
 type confirmInput struct {
-	PayloadHash string `json:"payload_hash" jsonschema:"the payload_hash returned by a staged store call — confirming executes that exact server-held write"`
+	PayloadHash string `json:"payload_hash" jsonschema:"the payload_hash returned by a staged store or update call — confirming executes that exact server-held write"`
 }
 
 // confirmNotFoundMsg is the ONE generic miss answer (D1-M4): unknown hash,
@@ -140,9 +140,9 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			slog.Error("mcp: staged payload unmarshal failed", "error", err, "pending_id", pw.ID)
 			return errResult("confirm failed: staged payload unreadable"), nil, nil
 		}
-		if cw.Op != "store" || cw.Scope != pw.Scope {
-			// op 'update' ships with D-W6+; a scope mismatch between row and
-			// payload would mean the stage row was tampered with — reject.
+		if (cw.Op != "store" && cw.Op != "update") || cw.Scope != pw.Scope {
+			// A scope mismatch between row and payload would mean the stage
+			// row was tampered with — reject.
 			return errResult(confirmNotFoundMsg), nil, nil
 		}
 
@@ -151,6 +151,25 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 		// burning the stage token.
 		if !contains(writableBlockScopes(ar), pw.Scope) {
 			return errResult(fmt.Sprintf("confirm rejected: scope %q is no longer writable for this key — the staged write stays pending until it expires", pw.Scope)), nil, nil
+		}
+
+		// TOCTOU guard for staged updates (D1-M3): the confirm executes only
+		// against the exact block state the card was rendered for. Runs on
+		// the un-consumed row (like D1-M1) — a drift rejects without burning
+		// the token, the client re-reads and re-stages.
+		if cw.Op == "update" {
+			base, err := store.GetBlock(ctx, cfg.Pool, cw.ID, writableBlockScopes(ar), nil)
+			if err != nil {
+				return errResult(fmt.Sprintf("confirm failed: %v", err)), nil, nil
+			}
+			if base == nil {
+				return errResult("confirm rejected: the target block no longer exists in a writable scope — the staged update stays pending until it expires"), nil, nil
+			}
+			if base.UpdatedAt.UTC().Format(time.RFC3339Nano) != cw.BaseUpdatedAt {
+				return errResult(fmt.Sprintf(
+					"confirm rejected: block %s changed since this update was staged (lost-update protection) — re-read the block and stage the update again; the stale stage expires on its own",
+					cw.ID)), nil, nil
+			}
 		}
 
 		// Atomic consume (exactly once). A racing double-confirm loses here
@@ -162,10 +181,33 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			return errResult(fmt.Sprintf("confirm failed: %v", err)), nil, nil
 		}
 
-		// Execute over the SAME path as the direct store tool (upsert +
-		// classify + temporal). scopeExplicit=false mirrors the MCP direct
-		// path (the store tool has no scope input; cw.Scope is the resolved
-		// home_scope from stage time, re-validated above).
+		// op 'update' (D-W6a): execute over the SAME path as the direct
+		// update tool (UpdateBlock + re-classify/temporal/re-embed).
+		// scopeExplicit does not apply here — the update form never changes
+		// the scope (no scope field, D4-analog), so there is nothing to mark
+		// explicit; UpdateBlock filters by writableBlockScopes instead.
+		if cw.Op == "update" {
+			data := updateDataFromCanonical(cw)
+			block, needsReEmbed, err := store.UpdateBlock(ctx, cfg.Pool, cw.ID, data, writableBlockScopes(ar))
+			if err != nil {
+				slog.Error("mcp: confirmed update execute failed", "error", err, "pending_id", pw.ID)
+				return errResult(fmt.Sprintf("confirmed update failed to execute: %v — the stage token is consumed; re-stage the update", err)), nil, nil
+			}
+			if block == nil {
+				// Vanished between the TOCTOU read and the execute — token is
+				// consumed (rejected finding D1-m2 behaviour sentence).
+				return errResult("confirmed update failed to execute: block no longer accessible — the stage token is consumed; re-stage the update"), nil, nil
+			}
+			finishBlockUpdate(ctx, cfg, data, block, needsReEmbed)
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and updated: %s (id: %s, category: %s)", block.Title, block.ID, block.Category))},
+			}, nil, nil
+		}
+
+		// op 'store': execute over the SAME path as the direct store tool
+		// (upsert + classify + temporal). scopeExplicit=false mirrors the MCP
+		// direct path (the store tool has no scope input; cw.Scope is the
+		// resolved home_scope from stage time, re-validated above).
 		sens := store.SensitivityWrite{
 			Value:    backends.Sensitivity(cw.Sensitivity),
 			Manual:   cw.SensitivityManual,

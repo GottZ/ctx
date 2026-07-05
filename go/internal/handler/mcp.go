@@ -139,12 +139,19 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpRecentHandler(cfg))
 
-	// confirm (F6-C6 D-W5): executes a staged write by payload hash. Only
+	// update (F6-C6 D-W6a): field-level block update, REST manage-update
+	// parity. Stages for confirm_writes keys (op 'update', TOCTOU-pinned).
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "update",
+		Description: "Update fields of an existing block (category, title, content, tags, metadata). Resolves the id within this key's writable scopes.",
+	}, mcpUpdateHandler(cfg))
+
+	// confirm (F6-C6 D-W5/W6a): executes a staged write by payload hash. Only
 	// meaningful for confirm_writes keys — for everyone else every hash is a
-	// generic miss (the store tool never stages for them).
+	// generic miss (the store/update tools never stage for them).
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "confirm",
-		Description: "Execute a staged write. A key with the confirm_writes capability gets store calls STAGED (response carries a payload_hash); calling confirm with that hash executes the exact server-held write.",
+		Description: "Execute a staged write. A key with the confirm_writes capability gets store/update calls STAGED (response carries a payload_hash); calling confirm with that hash executes the exact server-held write.",
 	}, mcpConfirmHandler(cfg))
 
 	// W12: issue-content write tools (issue_create/issue_comment/issue_state,
