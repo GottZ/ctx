@@ -41,6 +41,15 @@ const (
 
 	// embedCacheEvictInterval is how often the embed cache is pruned.
 	embedCacheEvictInterval = 6 * time.Hour
+
+	// pendingWriteEvictInterval is the F6-C6 staging-store janitor cadence
+	// (D-W3). Deliberately its OWN minute ticker, not the 6h janitor tick
+	// (D2-M1): confirm_ttl is minute-scale (default 10m) and the 089 chunks
+	// are 1h wide — a 6h cadence would let expired stages linger for hours.
+	// A constant (embedCacheEvictInterval precedent): the tick is one cheap
+	// catalog query and the measured stage rate (D-W0: ≪ 0.01 QPS) makes the
+	// cadence uncritical — nothing to tune.
+	pendingWriteEvictInterval = time.Minute
 	// embedCacheTTLDays: entries not accessed within this window are evicted.
 	embedCacheTTLDays = 30
 	// embedCacheMaxRows: size cap — oldest rows above this are pruned.
@@ -480,6 +489,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 	webhookInboxTicker := time.NewTicker(webhookInboxInterval)
 	defer webhookInboxTicker.Stop()
 
+	// D-W3: staging-store eviction on its own minute cadence (see the
+	// pendingWriteEvictInterval constant for why it is not the 6h janitor).
+	pendingWriteTicker := time.NewTicker(pendingWriteEvictInterval)
+	defer pendingWriteTicker.Stop()
+
 	// Dream runs in its own goroutine(s) as continuous loop(s).
 	// DreamParallelism workers all share the same DB; PickBlock's FOR UPDATE
 	// SKIP LOCKED ensures distinct blocks per worker. Backfill stays single-
@@ -539,6 +553,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 		case <-webhookInboxTicker.C:
 			s.runWebhookInbox(ctx)
+
+		case <-pendingWriteTicker.C:
+			s.runPendingWriteEviction(ctx)
 		}
 	}
 }
@@ -815,6 +832,29 @@ func (s *Scheduler) runWebChatRetention(ctx context.Context) {
 	}
 	if deleted > 0 {
 		slog.Info("scheduler: webchat sessions deleted", "rows", deleted, "retention_hours", hours)
+	}
+}
+
+// runPendingWriteEviction drops aged context_pending_writes chunks
+// (writes.confirm_retention, D-W3). Own minute ticker, no yield: the tick is
+// one cheap catalog call (drop_chunks), never a scan — nothing to defer for.
+// retention=0 makes EvictPendingWrites a no-op (stages kept forever, D-E3:
+// eviction stays decoupled from the confirm_ttl expiry clock).
+func (s *Scheduler) runPendingWriteEviction(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in pending-write eviction", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+	hours := float64(s.cfg.Snapshot().Writes.ConfirmRetention) //nolint:forbidigo // MT 06 background: staging-store retention is a server-global janitor policy over a process-wide table, not tenant-scoped.
+	retention := time.Duration(hours * float64(time.Hour))
+	dropped, err := store.EvictPendingWrites(ctx, s.pool, retention)
+	if err != nil {
+		slog.Warn("scheduler: pending-write eviction failed", "error", err)
+		return
+	}
+	if dropped > 0 {
+		slog.Info("scheduler: pending-write chunks dropped", "chunks", dropped, "retention_hours", hours)
 	}
 }
 

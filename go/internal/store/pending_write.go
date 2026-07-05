@@ -136,3 +136,33 @@ func LookupPendingWrite(ctx context.Context, pool *pgxpool.Pool, apiKeyID, paylo
 	}
 	return &pw, nil
 }
+
+// EvictPendingWrites drops whole hypertable chunks of context_pending_writes
+// older than the retention window (writes.confirm_retention, D-W3). Eviction
+// is chunk-drop by design (E4): no row-DELETE, no dead-tuple bloat, no
+// autovacuum pressure — and it is column-blind, so never-confirmed stages
+// (consumed_at IS NULL) age out exactly like consumed ones (D2-M3). A chunk
+// is only dropped when its ENTIRE 1h time range is older than the cutoff, so
+// fresh stages in the current chunk always survive.
+//
+// retention <= 0 is the 0-is-off convention (keep forever, D-E3): eviction is
+// DECOUPLED from the expiry clock — an expired-but-retained stage merely
+// rejects consumes until its chunk ages out.
+//
+// Returns the number of chunks dropped (0 on a quiet minute — the common case
+// at the measured stage rate of ≪ 0.01 QPS).
+func EvictPendingWrites(ctx context.Context, pool *pgxpool.Pool, retention time.Duration) (int64, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	var dropped int64
+	err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM drop_chunks('context_pending_writes',
+		                   older_than => now() - make_interval(secs => $1))`,
+		retention.Seconds()).Scan(&dropped)
+	if err != nil {
+		return 0, fmt.Errorf("pending write: evict chunks: %w", err)
+	}
+	return dropped, nil
+}
