@@ -7,6 +7,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/camo"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/forge"
@@ -138,6 +139,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		return err
 	})
 	whoamiH := handler.NewWhoamiHandler(pool)
+	// Camo image proxy service (design 07-camo). Fail-closed: disabled unless
+	// CTX_CAMO_ENABLED is set AND the sealbox master key is present; a misconfig
+	// logs and disables rather than crashing boot. Shared by both /api/img routes.
+	camoH := handler.NewCamoHandler(camo.NewFromEnv())
 	blobH := handler.NewBlobHandler(pool, cfgStore)
 	digestH := handler.NewDigestHandler(pool, blocktypeReg)
 	// Welle 42: daily synthesis manual trigger. Chains over the pool's digest
@@ -190,6 +195,11 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Get("/api/whoami", whoamiH.HandleWhoami)
 		// Manage — CRUD + Guard API
 		r.Post("/api/manage", manageH.HandleManage)
+		// Camo image proxy — MINT half (auth-gated, rate-limited). The FE has no
+		// secret, so it asks the server to sign the foreign image URLs it renders
+		// (design 07-camo §4.2, D2b). The matching auth-LESS fetch route is
+		// mounted below, outside the Auth group.
+		r.Post("/api/img/sign", camoH.HandleSign)
 		// Block-type registry surface (workflow W1 reads + W2 writes); both
 		// gates live inside the mount (RequireMember for GET,
 		// RequireAdminOrTenantAdmin for PUT/DELETE, design/03 §5.1). The 1 MB
@@ -291,6 +301,15 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	r.Group(func(r chi.Router) {
 		r.Use(handler.MaxBodySize(DefaultMaxBodySize))
 		r.Post("/webhooks/github/{project_id}", webhookH.HandleWebhook)
+	})
+
+	// Camo image proxy — FETCH half (auth-LESS, like the webhook: a browser <img>
+	// carries no API key, so the HMAC signature IS the capability, verified before
+	// any upstream request). Mounted OUTSIDE the Auth group; the /api prefix is
+	// reserved server-side (index.ts RESERVED_SERVER_PREFIXES), so no SPA route
+	// collides. GET only — no body cap needed (design 07-camo §4.1/§4.2, D2b).
+	r.Group(func(r chi.Router) {
+		r.Get("/api/img/{sig}", camoH.HandleFetch)
 	})
 
 	// Embedded SPA — mounted last: chi matches registered routes first, only

@@ -30,6 +30,8 @@ All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization:
 | `POST /api/digest` | Topic map generation. |
 | `POST /api/ingest` | Obsidian vault ingestion. |
 | `POST /api/blob/*` | Binary storage (store/fetch/search/manage). |
+| `POST /api/img/sign` | Camo image-proxy **mint**, **auth-gated** + per-key rate-limited. Body `{urls:[…]}` ⇒ `{signatures:{url → "/api/img/<sig>?url=…&exp=…"}}`; non-proxiable URLs (relative, `data:`, `mailto:`) are omitted. The SPA renderer has no signing secret, so it asks the server to sign the foreign image URLs it wants to proxy (see [Camo image proxy](#camo-image-proxy)). Off (404) unless `CTX_CAMO_ENABLED`. |
+| `GET /api/img/{sig}` | Camo image-proxy **fetch**, **unauthenticated** — a browser `<img>` carries no api key, so the HMAC-SHA256 signature (over `url`+`exp`, keyed by a labeled subkey of `CTX_SECRETS_KEY`) IS the capability. Verifies the sig BEFORE any upstream request (forged ⇒ **403**, expired ⇒ **410**, ZERO fetch either way), then fetches under an SSRF-guarded / redirect-hop-checked / size-capped / content-type-allowlisted policy (SVG excluded — XSS) and streams the bytes from `'self'` with `X-Content-Type-Options: nosniff` + immutable cache. Upstream failure ⇒ **502/415** + `no-store`, no substitute body. Re-hosts remote images so the SPA renders them under `img-src 'self'` WITHOUT widening the CSP, and the viewer's browser never talks to the foreign origin (see [Camo image proxy](#camo-image-proxy)). |
 | `POST /api/chat/stream` + `/api/chat/sessions[/{id}]` | Web-chat harness (see [Web chat sessions](#web-chat-sessions)). |
 | `GET /health` | DB + pool role reachability, aggregated to anonymous service classes (no backend names, no states — topology is admin-only via `backend-list`). |
 | `POST\|GET\|DELETE /mcp` | MCP Streamable HTTP (remote tool server). |
@@ -279,3 +281,20 @@ The **harness** (`internal/chat`) drives the model loop (model call → tool exe
 | `DELETE /api/chat/sessions/{id}` | Hard-delete (messages cascade); home-scope-owned → 404 on miss. llmlog logs `web-chat` **metadata-only** (no conversation bodies in the un-scoped `context_llm_log`). |
 
 A per-`home_scope` semaphore (`CTX_WEBCHAT_CONCURRENT_TURNS`, default 1) bounds concurrent turns — multi-tenant fairness on the single slot (429 before stream start).
+
+## Camo image proxy
+
+(design 07-camo) A signing image proxy that lets the SPA render foreign remote images WITHOUT widening the Content-Security-Policy and without the viewer's browser ever contacting the foreign origin (no tracking-pixel deanonymization). Off by default — fail-closed unless `CTX_CAMO_ENABLED` is truthy AND the sealbox master key `CTX_SECRETS_KEY` is present; when off both routes 404 and the renderer keeps its `[external image blocked]` placeholder.
+
+**Why a proxy, not an `img-src` widening.** The markdown renderer runs entirely client-side and the CSP pins `img-src 'self' data:` (byte-pinned by `TestCSPByteLiteralPin`). A proxied image is re-hosted under `/api/img/…` = `'self'`, so it is already allowed — the CSP is never touched. The server fetches the bytes; the browser only ever talks to `'self'`.
+
+**Two surfaces, opposite auth (design §4.2, D2b).** The SPA has no signing secret, so it cannot mint proxy URLs itself; a browser `<img>` request carries no api key (ctx auth lives in `sessionStorage`, not cookies), so the fetch endpoint cannot be api-key-authed. Hence:
+
+| Route | Auth | What |
+|---|---|---|
+| `POST /api/img/sign` | api key + per-key rate limit | Batch-mints proxy paths for the foreign image URLs a rendered document wants to show. The auth-gated mint bounds the signature oracle. |
+| `GET /api/img/{sig}` | none — the HMAC signature IS the capability | Verifies the signature over `url`+`exp` (labeled-HMAC subkey of `CTX_SECRETS_KEY`, constant-time, prev-key rotation slot) BEFORE any upstream request. Forged ⇒ 403, expired ⇒ 410, ZERO fetch either way (no SSRF/timing oracle without a valid sig). |
+
+**Fetch policy (design §4.4, analog to the forge W11 guard).** Scheme allowlist (`http`/`https`); SSRF dial guard on the resolved IP of **every** hop including redirects (the classic "302 → internal IP" bypass is closed at the dial layer via the shared `internal/ssrfguard`); 3-hop redirect cap; dial/header/total timeouts 5s/5s/10s; size cap (`CTX_CAMO_MAX_BYTES`, default 10 MiB — `LimitReader` + `Content-Length` precheck, no unbounded buffering); and a two-layer content-type gate — the declared type must be in `{image/png, image/jpeg, image/gif, image/webp, image/avif}` AND the sniffed bytes must not be active content (HTML/XML/SVG/text/script). `image/svg+xml` is excluded outright (XSS vector). On success the bytes are served with the sniffed image content-type + `X-Content-Type-Options: nosniff` + `Cache-Control: public, max-age=<TTL>, immutable`; on failure a bodyless 502/415 + `no-store` (no substitute image, no retry storm).
+
+Env (all default-safe): `CTX_CAMO_ENABLED` (default false), `CTX_CAMO_TTL` (signature + cache lifetime, default `24h` — bounds the auth-less fetch endpoint's relay window), `CTX_CAMO_MAX_BYTES` (default `10485760`). No new secret and no DB migration — the signature is stateless and the signing key is derived from the existing `CTX_SECRETS_KEY` (rotation via `CTX_SECRETS_KEY_PREV`).
