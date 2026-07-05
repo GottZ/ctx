@@ -27,7 +27,6 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	pgvec "github.com/pgvector/pgvector-go"
 )
 
 const (
@@ -1061,12 +1060,9 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 		return false, fmt.Errorf("backfill: embed: %w", err)
 	}
 
-	// Inline UPDATE within tx (store.StoreEmbedding takes *pgxpool.Pool, not tx).
+	// StoreEmbedding within tx (execQuerier: pgx.Tx satisfies it too).
 	// Atomic with the FOR UPDATE SKIP LOCKED pick: lock holds until commit.
-	if _, err := tx.Exec(ctx,
-		`UPDATE context_blocks SET embedding = $1 WHERE id = $2`,
-		pgvec.NewVector(vec), blockID,
-	); err != nil {
+	if err := store.StoreEmbedding(ctx, tx, blockID, vec); err != nil {
 		return false, fmt.Errorf("backfill: store: %w", err)
 	}
 

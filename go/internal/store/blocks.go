@@ -10,6 +10,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
 )
@@ -284,9 +285,19 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 	return b, nil
 }
 
-// StoreEmbedding updates the embedding vector for a block.
-func StoreEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string, vec []float32) error {
-	_, err := pool.Exec(ctx,
+// execQuerier is the minimal querier satisfied by BOTH *pgxpool.Pool and pgx.Tx
+// — each exposes Exec with this exact signature. It lets StoreEmbedding run
+// standalone on the pool (query.go re-embed path) or compose into a caller-owned
+// transaction (scheduler backfill: the write must be atomic with the
+// FOR UPDATE SKIP LOCKED pick so the row lock holds until commit).
+type execQuerier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// StoreEmbedding updates the embedding vector for a block. It accepts any
+// execQuerier so callers can run it on the pool or inside their own tx.
+func StoreEmbedding(ctx context.Context, q execQuerier, blockID string, vec []float32) error {
+	_, err := q.Exec(ctx,
 		`UPDATE context_blocks SET embedding = $1 WHERE id = $2`,
 		pgvec.NewVector(vec), blockID,
 	)
