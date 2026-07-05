@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/ssrfguard"
 )
 
 // A valid 64-hex-char master key (openssl rand -hex 32 shape).
@@ -37,32 +39,18 @@ func newTestService(t *testing.T) *Service {
 }
 
 // permitOnly builds a Dialer.Control that allows exactly allowAddr (the test
-// mock's loopback host:port) and delegates every OTHER address to the real
-// ssrfguard deny-list. So the first hop reaches the mock, but a redirect hop to
-// a private/link-local range is refused by the SAME guard production uses.
+// mock's loopback host:port) and delegates every OTHER address to the REAL
+// ssrfguard.DialControl — not a test-local mirror, so a regression in the
+// production deny-list rips these tests too. The first hop reaches the mock,
+// but a redirect hop to a private/link-local range is refused by the SAME
+// guard production uses.
 func permitOnly(allowAddr string) func(network, address string, c syscall.RawConn) error {
-	guarded := func(network, address string, c syscall.RawConn) error {
-		return dialControlForTest(network, address)
-	}
 	return func(network, address string, c syscall.RawConn) error {
 		if address == allowAddr {
 			return nil
 		}
-		return guarded(network, address, c)
+		return ssrfguard.DialControl(network, address, c)
 	}
-}
-
-// dialControlForTest mirrors ssrfguard.DialControl without importing syscall.
-func dialControlForTest(_, address string) error {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return err
-	}
-	ip := net.ParseIP(host)
-	if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()) {
-		return &net.AddrError{Err: "SSRF guard refusal", Addr: address}
-	}
-	return nil
 }
 
 // testFetcher builds a Fetcher that can reach the loopback mock at addr while
@@ -204,9 +192,9 @@ func TestFetch_SSRF_RedirectHopRefused(t *testing.T) {
 	// redirect hop dials through the SAME guard, which refuses the loopback hop,
 	// so the valid PNG is NEVER delivered.
 	//
-	// Red-probe: neutering dialControlForTest (return nil) lets the hop reach the
-	// internal mock and the PNG comes back → this test goes red. The guard is what
-	// blocks it, not mere unreachability.
+	// Red-probe: neutering ssrfguard.IsDeniedIP (always false) lets the hop reach
+	// the internal mock and the PNG comes back → this test goes red. The guard is
+	// what blocks it, not mere unreachability.
 	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pngBytes)
