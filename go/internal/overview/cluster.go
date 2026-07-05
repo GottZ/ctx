@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"hash/fnv"
 	"math/rand/v2"
 	"sort"
 
@@ -34,7 +35,9 @@ const (
 
 	// overviewLockKey gates the rebuild tx with pg_try_advisory_xact_lock so two
 	// ctxd instances (multi-tenant line) never overwrite the tables against each
-	// other. First advisory lock in the repo.
+	// other. First advisory lock in the repo. Since B-W4 this is the BASE key:
+	// a global run (nil ScopeFilter) locks exactly this value, a partition run
+	// XORs a process-stable hash of its scope set on top (lockKeyForScopes).
 	overviewLockKey int64 = 0x6f76727677 // "ovrvw"
 
 	// memberBatch caps the per-INSERT unnest array size (1M+ members → batched,
@@ -79,6 +82,46 @@ type Options struct {
 	// then a non-nil filter requires an input already cut to these scopes;
 	// persist fails loudly on any input block outside the filter.
 	ScopeFilter []string
+}
+
+// lockKeyForScopes returns the advisory lock key for one persist run (B-W4).
+//
+// Empty/nil filter (the global run) returns overviewLockKey BYTE-IDENTICALLY:
+// during a mixed-version deploy or rollback window an old binary (which only
+// knows the base key) and the new one keep serializing against each other.
+//
+// A partition run hashes its scope set with FNV-64a — seedless and therefore
+// process-stable — and XORs it onto the base key. hash/maphash is NOT usable
+// here (B1-M1): its seed is per-process, so two ctxd instances on the same DB
+// would compute DIFFERENT keys for the same tenant and stop excluding each
+// other. The input is sorted and deduplicated (a tenant's owned set is a SET —
+// order or duplicates must never change the key), scopes joined with a 0x00
+// separator (scope values are VARCHAR/TEXT and cannot contain NUL, so the
+// framing is unambiguous).
+//
+// Collision note (B2-m2(i), deliberately unhandled): two distinct scope sets
+// colliding in the 64-bit space merely serialize their rebuilds — the losing
+// run skips and retries next tick; a delayed rebuild, never a correctness
+// problem.
+func lockKeyForScopes(scopeFilter []string) int64 {
+	if len(scopeFilter) == 0 {
+		return overviewLockKey
+	}
+	set := make([]string, 0, len(scopeFilter))
+	seen := make(map[string]struct{}, len(scopeFilter))
+	for _, s := range scopeFilter {
+		if _, dup := seen[s]; !dup {
+			seen[s] = struct{}{}
+			set = append(set, s)
+		}
+	}
+	sort.Strings(set)
+	h := fnv.New64a()
+	for _, s := range set {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{0})
+	}
+	return overviewLockKey ^ int64(h.Sum64()) //nolint:gosec // deliberate wrap-around: the lock key is an opaque 64-bit identity, not a quantity
 }
 
 // rawEdge is a directed dream-link reduced to the fields the clustering needs.
@@ -442,12 +485,17 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
 
+	// B-W4: the lock is per-partition — two different tenants persist in
+	// parallel, the same tenant (and the global run against old binaries)
+	// keeps serializing. See lockKeyForScopes.
+	lockKey := lockKeyForScopes(opts.ScopeFilter)
 	var locked bool
-	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, overviewLockKey).Scan(&locked); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, lockKey).Scan(&locked); err != nil {
 		return Stats{}, fmt.Errorf("advisory lock: %w", err)
 	}
 	if !locked {
-		slog.Info("overview: rebuild skipped — advisory lock held by another instance")
+		slog.Info("overview: rebuild skipped — advisory lock held by another instance",
+			"lock_key", lockKey, "scope_filter", opts.ScopeFilter)
 		return Stats{Skipped: true, SkipReason: "advisory-lock"}, nil
 	}
 
