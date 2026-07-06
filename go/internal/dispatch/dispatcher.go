@@ -41,13 +41,18 @@ type Lease struct {
 	// done guards single release (Dispatcher.mu). Both Release and the
 	// reaper settle a lease through finishLocked exactly once.
 	done bool
+	// usage is the backend usage reported via ReportUsage before Release;
+	// nil at settle time counts as uncharged (MW22/C1, usage.go).
+	usage *Usage
 }
 
 // Release returns the slot and wakes the next waiter (strict class order,
 // direct handoff). Idempotent: double release is a no-op.
 func (l *Lease) Release() {
 	l.d.mu.Lock()
+	opStart := time.Now()
 	l.d.finishLocked(l)
+	l.d.opDone(opStart)
 	l.d.mu.Unlock()
 	// Free the derived runCtx resources — Release means the caller's wire
 	// call has ended. For an already-reaped lease the cause is set; a
@@ -83,6 +88,8 @@ type targetState struct {
 	cancelable  map[*Lease]context.CancelCauseFunc
 	interactive *classQueue
 	background  bgQueue
+	// usage is the per-fairness-bucket token meter (MW22/F2, usage.go).
+	usage map[string]*usageWindow
 }
 
 // Dispatcher is the process-wide admission layer (I-D1: exactly one). Policy
@@ -108,6 +115,9 @@ type Dispatcher struct {
 
 	reapsTotal      atomic.Int64
 	classDowngrades atomic.Int64
+	// stats are the MW22 meter counters: uncharged_calls + the hot-path
+	// measurement hooks (usage.go).
+	stats usageStats
 
 	stopReaper chan struct{}
 	stopOnce   sync.Once
@@ -212,26 +222,30 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	}
 
 	d.mu.Lock()
+	opStart := time.Now()
 	st := d.targetLocked(canonicalOrigin(req.Target.Origin))
 	slots := d.slotsLocked(st.origin)
 	if slots <= 0 {
 		// Pass-through: disabled or no declared policy — exactly today's
 		// behavior, tracked for telemetry only.
 		l := d.admitLocked(st, w, now, false)
+		d.opDone(opStart)
 		d.mu.Unlock()
 		return l, runCtx, nil
 	}
 	if d.eligibleNowLocked(st, class, slots) {
 		l := d.admitLocked(st, w, now, true)
+		d.opDone(opStart)
 		d.mu.Unlock()
 		return l, runCtx, nil
 	}
-	if err := d.enqueueLocked(st, w); err != nil {
-		d.mu.Unlock()
+	err := d.enqueueLocked(st, w)
+	d.opDone(opStart)
+	d.mu.Unlock()
+	if err != nil {
 		cancel(context.Canceled)
 		return nil, nil, err
 	}
-	d.mu.Unlock()
 
 	select {
 	case <-w.admitCh:
@@ -347,6 +361,7 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 		return
 	}
 	l.done = true
+	d.chargeLocked(l, time.Now())
 	delete(l.st.inflight, l)
 	delete(l.st.cancelable, l)
 	if l.slotHeld {
@@ -416,6 +431,7 @@ func (d *Dispatcher) targetLocked(origin string) *targetState {
 			inflight:    make(map[*Lease]struct{}),
 			cancelable:  make(map[*Lease]context.CancelCauseFunc),
 			interactive: newClassQueue(),
+			usage:       make(map[string]*usageWindow),
 		}
 		d.targets[origin] = st
 	}
@@ -530,6 +546,7 @@ func (d *Dispatcher) reapNow(now time.Time) {
 				d.warnWaitLocked(st, now.Sub(w.enqueued))
 			}
 		})
+		d.sweepUsageLocked(st, now)
 	}
 }
 
@@ -543,8 +560,10 @@ type WaitStats struct {
 // TargetSnapshot is the introspection view of one origin (queue depths,
 // inflight, policy) — data source for WARN correlation and the status waves.
 // Exposure rule (design/01 §6, binding): registry-derived status data is
-// server-admin-only OR filtered to the caller's own principals — this
-// snapshot carries no principal detail at all, by construction.
+// server-admin-only OR filtered to the caller's own principals. Since MW22
+// the snapshot DOES carry principal detail (Buckets keys on fairKey) —
+// every status surface must be server-admin-only or filter Buckets to the
+// caller's own tenant before exposure (F-B3, probe lands with MW12).
 type TargetSnapshot struct {
 	Origin            string
 	Slots             int
@@ -554,6 +573,9 @@ type TargetSnapshot struct {
 	Inflight          int
 	Interactive       WaitStats
 	Background        WaitStats
+	// Buckets is the per-fairness-bucket wait + token-window view (MW22,
+	// usage.go) — the primary gate source for the fairness/budget waves.
+	Buckets []BucketSnapshot
 }
 
 // Snapshot is the dispatcher-wide introspection view.
@@ -562,7 +584,14 @@ type Snapshot struct {
 	Demand          int
 	ReapsTotal      int64
 	ClassDowngrades int64
-	Targets         []TargetSnapshot
+	// UnchargedCalls counts interactive releases without reported usage
+	// (charge 0 — visibility instead of estimation, MW22/C1).
+	UnchargedCalls int64
+	// OpsTotal / MaxOpDur are the hot-path measurement hooks (design/04 §6):
+	// Acquire+Release mutex sections and the longest observed section.
+	OpsTotal int64
+	MaxOpDur time.Duration
+	Targets  []TargetSnapshot
 }
 
 // Snapshot returns the current introspection view (W1 visibility).
@@ -577,6 +606,9 @@ func (d *Dispatcher) Snapshot() Snapshot {
 		Demand:          int(d.demand.Load()),
 		ReapsTotal:      d.reapsTotal.Load(),
 		ClassDowngrades: d.classDowngrades.Load(),
+		UnchargedCalls:  d.stats.unchargedCalls.Load(),
+		OpsTotal:        d.stats.opsTotal.Load(),
+		MaxOpDur:        time.Duration(d.stats.maxOpNs.Load()),
 	}
 	for _, origin := range sortedOrigins(d.targets) {
 		st := d.targets[origin]
@@ -601,6 +633,7 @@ func (d *Dispatcher) Snapshot() Snapshot {
 		if t := st.background.oldest(); !t.IsZero() {
 			ts.Background.OldestWait = now.Sub(t)
 		}
+		ts.Buckets = d.bucketSnapshotsLocked(st, now)
 		out.Targets = append(out.Targets, ts)
 	}
 	return out

@@ -304,6 +304,10 @@ type Settings struct {
 	// the config key registration is the fairness wave's). Unknown or empty
 	// reads as fifo.
 	Fairness FairnessMode
+	// UsageWindow is the fixed token-charge window per fairness bucket
+	// (MW22/F2 meter, usage.go; the config key registration is a later
+	// wave's). ≤ 0 reads as the 1h default (design/04 §3.2 window_s).
+	UsageWindow time.Duration
 }
 
 // DefaultSettings mirrors the config registry defaults of the dispatch.* keys.
@@ -317,6 +321,7 @@ func DefaultSettings() Settings {
 		LeaseReapGrace:               30 * time.Second,
 		LeaseMaxAge:                  900 * time.Second,
 		Fairness:                     FairnessFIFO,
+		UsageWindow:                  time.Hour,
 	}
 }
 
