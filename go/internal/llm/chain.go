@@ -32,12 +32,15 @@ type Admission struct {
 	Class    dispatch.Class
 }
 
-// acquire leases one attempt on the backend's physical origin (per attempt,
+// Acquire leases one attempt on the backend's physical origin (per attempt,
 // after chain resolution — I-D1). The deadline hint travels admission-
 // anchored (Request.DeadlineIn, rule V1: the wire deadline is
 // admission+timeout — an enqueue-anchored absolute hint would underestimate
-// the reap reference by the wait time).
-func (a Admission) acquire(ctx context.Context, b *backends.Backend, role string, timeout time.Duration) (*dispatch.Lease, context.Context, error) {
+// the reap reference by the wait time). Exported since MW5: the stream
+// engine (chat.runStream, N2) and the cross-encoder rerank
+// (rrf.RerankCrossEncoder, N4) share the exact acquire form of the
+// non-stream chain walk instead of growing drift copies.
+func (a Admission) Acquire(ctx context.Context, b *backends.Backend, role string, timeout time.Duration) (*dispatch.Lease, context.Context, error) {
 	if a.Admitter == nil {
 		return nil, nil, &AdmissionError{Err: fmt.Errorf("llm: %s call site without dispatch admitter (I-D1)", role)}
 	}
@@ -181,7 +184,7 @@ func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, 
 		// deadline hint. A failed acquire ends the walk terminally per the
 		// AdmissionError doctrine — the continue/Classify machinery below
 		// never sees it.
-		lease, runCtx, admErr := adm.acquire(ctx, b, role, timeout)
+		lease, runCtx, admErr := adm.Acquire(ctx, b, role, timeout)
 		if admErr != nil {
 			return nil, nil, attempts, admErr
 		}

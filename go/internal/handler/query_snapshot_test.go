@@ -20,8 +20,19 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// snapshotTestAdmitter is the MW5 pass-through dispatcher for the deep-path
+// probes: since MW5 the query embed acquires a lease, so a nil admitter would
+// end these requests at the acquire instead of the embed wire.
+func snapshotTestAdmitter(t *testing.T) dispatch.Admitter {
+	t.Helper()
+	d := dispatch.New(nil, dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	return d
+}
 
 // countingStore implements ConfigStore and counts snapshot reads of ANY kind.
 // Since MT 06-C5 the request path takes SnapshotForRequest, not Snapshot — all
@@ -151,7 +162,7 @@ func TestHandleQuery_OneSnapshotPerRequest_DeepPath(t *testing.T) {
 	srv, hits := fakeEmbedServer(t)
 	st := &countingStore{}
 	st.cfg.Store(snapshotTestConfig())
-	h := NewQueryHandler(brokenPool(t), st, embedPool(srv.URL), nil, blocktype.NewRegistry(), nil)
+	h := NewQueryHandler(brokenPool(t), st, embedPool(srv.URL), nil, blocktype.NewRegistry(), snapshotTestAdmitter(t))
 
 	rec := httptest.NewRecorder()
 	h.HandleQuery(rec, authedQueryRequest(`{"query":"alpha bravo charlie"}`))
@@ -178,7 +189,7 @@ func TestHandleQuery_SnapshotPerRequest_HotFlip(t *testing.T) {
 	st := &countingStore{}
 	st.cfg.Store(snapshotTestConfig())
 	bpool := embedPool(srvA.URL)
-	h := NewQueryHandler(brokenPool(t), st, bpool, nil, blocktype.NewRegistry(), nil)
+	h := NewQueryHandler(brokenPool(t), st, bpool, nil, blocktype.NewRegistry(), snapshotTestAdmitter(t))
 
 	h.HandleQuery(httptest.NewRecorder(), authedQueryRequest(`{"query":"alpha bravo"}`))
 	if hitsA.Load() != 1 || hitsB.Load() != 0 {

@@ -102,7 +102,7 @@ func TestEmbedWirePath(t *testing.T) {
 				Model:    "m",
 				NumCtx:   2048,
 			}
-			vec, err := Embed(context.Background(), b, "hello wire", PrefixQuery)
+			vec, _, err := Embed(context.Background(), b, "hello wire", PrefixQuery)
 			if err != nil {
 				t.Fatalf("Embed: %v", err)
 			}
@@ -144,7 +144,7 @@ func TestEmbedWirePath(t *testing.T) {
 func TestEmbedWirePathDocumentPrefix(t *testing.T) {
 	rec := newEmbedWireRecorder(t)
 	b := backends.Backend{Host: rec.srv.URL, Protocol: backends.ProtocolOllama, Model: "m"}
-	if _, err := Embed(context.Background(), b, "doc body", PrefixDocument); err != nil {
+	if _, _, err := Embed(context.Background(), b, "doc body", PrefixDocument); err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
 	_, _, body := rec.recorded()

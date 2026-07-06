@@ -11,13 +11,12 @@ package embedcache
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/embed"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 )
@@ -37,60 +36,64 @@ func hashKey(prefix embed.Prefix, text string) []byte {
 	return h.Sum(nil)
 }
 
-// Embed returns an embedding for text under the backend tuple's model, serving
-// from the cache if possible. A cache hit issues one UPDATE (and no embed call).
-// A cache miss issues the embed call, then upserts the result. pool may be nil —
-// in that case the cache is bypassed and the embed call runs unwrapped.
-func Embed(ctx context.Context, pool *pgxpool.Pool, b backends.Backend, text string, prefix embed.Prefix) ([]float32, error) {
-	if pool == nil {
-		return embed.Embed(ctx, b, text, prefix)
+// ReportFunc mirrors the llm-side health feedback without importing llm —
+// wired to Pool.ReportSuccess/ReportFailure by the caller.
+type ReportFunc func(backendID string, class backends.ErrClass, retryAfter time.Duration)
+
+// Admission mirrors llm.Admission without importing llm (same decoupling
+// decision as ReportFunc above): the ONE process-wide dispatch admitter
+// (I-D1) bound to the CALLER's class — query embed interactive, query-path
+// backfill interactive per E-U5(a), scheduler backfill and dream keyword
+// embeds background (design/01 §4.6 N3). The principal is ctx-derived since
+// MW4 (design/03 §4.1.1) — carrying it as a field would reopen the stored-
+// principal replay. Target and per-attempt binding happen inside EmbedChain;
+// a zero Admission fails the acquire loudly instead of passing an unadmitted
+// wire call (MW5).
+type Admission struct {
+	Admitter dispatch.Admitter
+	Class    dispatch.Class
+}
+
+// acquire leases one wire attempt on the backend's physical origin. The
+// embed path deliberately carries NO deadline hint (embed.go: wire timeout
+// removed in Welle 49; the reaper's lease_max_age fallback covers a leaked
+// lease — design/01 §4.4).
+func (a Admission) acquire(ctx context.Context, b *backends.Backend, role string) (*dispatch.Lease, context.Context, error) {
+	if a.Admitter == nil {
+		return nil, nil, fmt.Errorf("embedcache: %s call site without dispatch admitter (I-D1)", role)
 	}
+	// MW4 (design/03 §4.1.1): no principal parameter — the dispatcher
+	// derives it from the request ctx flowing into this acquire.
+	return a.Admitter.Acquire(ctx, dispatch.Request{
+		Target: dispatch.Target{Origin: b.Host}, // Acquire normalizes defensively (design/01 §4.3)
+		Class:  a.Class,
+		Role:   role,
+	})
+}
 
-	key := hashKey(prefix, text)
-
-	// Fast path: cache hit. UPDATE ... RETURNING is atomic; no race with concurrent hits.
+// cacheProbe is the cache fast-path lookup, a package var as a test seam
+// (pattern: the dream package's chatJSON seam): the I-D1 cache-hit clause —
+// a hit contacts no backend and acquires NO lease — needs a DB-free negative
+// probe. UPDATE ... RETURNING is atomic; no race with concurrent hits. Any
+// non-hit (nil pool, ErrNoRows, unexpected DB error) reports a miss — cache
+// failures must never block the hot path.
+var cacheProbe = func(ctx context.Context, pool *pgxpool.Pool, key []byte, model string) ([]float32, bool) {
+	if pool == nil || model == "" {
+		return nil, false
+	}
 	var cached pgvector.Vector
 	err := pool.QueryRow(ctx,
 		`UPDATE context_embed_cache
 		SET hit_count = hit_count + 1, last_access = now()
 		WHERE text_hash = $1 AND model = $2
 		RETURNING embedding`,
-		key, b.Model,
+		key, model,
 	).Scan(&cached)
-	if err == nil {
-		return cached.Slice(), nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		// Unexpected DB error — fall through to compute. Cache failures must never
-		// block the hot path; the call still succeeds via the embed backend.
-		return embed.Embed(ctx, b, text, prefix)
-	}
-
-	// Cache miss: compute, then store.
-	vec, err := embed.Embed(ctx, b, text, prefix)
 	if err != nil {
-		return nil, err
+		return nil, false
 	}
-
-	preview := text
-	if len(preview) > previewLen {
-		preview = preview[:previewLen]
-	}
-	_, _ = pool.Exec(ctx,
-		`INSERT INTO context_embed_cache
-			(text_hash, model, embedding, text_preview)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (text_hash, model) DO UPDATE SET
-			hit_count   = context_embed_cache.hit_count + 1,
-			last_access = now()`,
-		key, b.Model, pgvector.NewVector(vec), preview,
-	)
-	return vec, nil
+	return cached.Slice(), true
 }
-
-// ReportFunc mirrors the llm-side health feedback without importing llm —
-// wired to Pool.ReportSuccess/ReportFailure by the caller.
-type ReportFunc func(backendID string, class backends.ErrClass, retryAfter time.Duration)
 
 // EmbedChain is the chained Embed (F3-P3): cache first (keyed on the FIRST
 // backend's resolved model — the chain's preferred model), then wire attempts
@@ -101,27 +104,27 @@ type ReportFunc func(backendID string, class backends.ErrClass, retryAfter time.
 // actual WIRE call). served names the answering backend; attempts counts wire
 // tries for llmlog. Retry-After precision is not extracted here (local embed
 // backends don't rate-limit; a 429 earns the class default cooldown).
-func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backend, role, text string, prefix embed.Prefix, report ReportFunc) (vec []float32, served *backends.Backend, attempts int, wired bool, err error) {
+//
+// MW5 admission (design/01 §4.6 N3): each wire attempt runs under its own
+// lease on the attempt's physical origin, acquired immediately before the
+// embed call with a FRESH queue position — a multi-call consumer (the
+// backfill loops) therefore holds no standing reservation across calls, which
+// is exactly the E-U5(a) structural overtake: a younger interactive query
+// embed passes the waiting backfill rest between two of its acquires. The
+// cache-hit fast path stays lease-free (I-D1). A failed acquire is TERMINAL
+// (doctrine §4.3): no attempt count, no Classify, no health report — and
+// wired stays false unless an earlier attempt DID reach the wire, so the
+// caller's llmlog gate keeps the no-wire-no-row semantics. A successful
+// attempt charges the backend-reported prompt tokens into the lease before
+// release (MW22/C1); a backend without counts stays uncharged.
+func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backend, role, text string, prefix embed.Prefix, report ReportFunc, adm Admission) (vec []float32, served *backends.Backend, attempts int, wired bool, err error) {
 	if len(chain) == 0 {
 		return nil, nil, 0, false, fmt.Errorf("embedcache: chain is empty")
 	}
 
 	key := hashKey(prefix, text)
-	preferredModel := chain[0].ModelFor(role).Model
-	if pool != nil && preferredModel != "" {
-		var cached pgvector.Vector
-		cerr := pool.QueryRow(ctx,
-			`UPDATE context_embed_cache
-			SET hit_count = hit_count + 1, last_access = now()
-			WHERE text_hash = $1 AND model = $2
-			RETURNING embedding`,
-			key, preferredModel,
-		).Scan(&cached)
-		if cerr == nil {
-			return cached.Slice(), nil, 0, false, nil
-		}
-		// Any non-hit (ErrNoRows or unexpected DB error) falls through to the
-		// wire — cache failures must never block the hot path.
+	if cached, hit := cacheProbe(ctx, pool, key, chain[0].ModelFor(role).Model); hit {
+		return cached, nil, 0, false, nil
 	}
 
 	var lastErr error
@@ -133,8 +136,23 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 			lastErr = fmt.Errorf("embedcache: backend %s has no model for role %s", b.Name, role)
 			continue
 		}
-		v, werr := embed.Embed(ctx, b, text, prefix)
+
+		lease, runCtx, admErr := adm.acquire(ctx, &b, role)
+		if admErr != nil {
+			return nil, nil, attempts, wired, fmt.Errorf("embedcache: admission: %w", admErr)
+		}
+		v, werr := func() ([]float32, error) {
+			// defer is the only allowed release form (B1: panic-safe).
+			defer lease.Release()
+			v, ptoks, werr := embed.Embed(runCtx, b, text, prefix)
+			if werr == nil && ptoks > 0 {
+				// Embeds charge their prompt side only (C1); booked at Release.
+				lease.ReportUsage(dispatch.Usage{PromptTokens: ptoks})
+			}
+			return v, werr
+		}()
 		attempts++
+		wired = true
 		if werr == nil {
 			if report != nil {
 				report(b.ID, backends.ClassOK, 0)
@@ -165,7 +183,7 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 			return nil, nil, attempts, true, lastErr
 		}
 	}
-	return nil, nil, attempts, true, fmt.Errorf("embedcache: chain exhausted: %w", lastErr)
+	return nil, nil, attempts, wired, fmt.Errorf("embedcache: chain exhausted: %w", lastErr)
 }
 
 // Flush drops the ENTIRE cache. Called when an embed-cache-coupled config

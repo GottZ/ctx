@@ -66,6 +66,11 @@ type ollamaOpts struct {
 
 type ollamaEmbedResponse struct {
 	Embeddings [][]float64 `json:"embeddings"`
+	// PromptEvalCount is ollama's token count of the embedded input — the
+	// MW22/C1 charge dimension of an embed wire call (prompt side only).
+	// Absent field ⇒ 0 ⇒ the call site charges nothing (uncharged, never an
+	// estimate).
+	PromptEvalCount int `json:"prompt_eval_count"`
 }
 
 // --- OpenAI wire format ---.
@@ -79,6 +84,11 @@ type openAIEmbedResponse struct {
 	Data []struct {
 		Embedding []float64 `json:"embedding"`
 	} `json:"data"`
+	// Usage carries the standard OpenAI-wire token accounting (same charge
+	// role as ollama's prompt_eval_count above).
+	Usage struct {
+		PromptTokens int `json:"prompt_tokens"`
+	} `json:"usage"`
 }
 
 // Embed generates an embedding via the backend tuple, truncates to 1024d,
@@ -86,35 +96,37 @@ type openAIEmbedResponse struct {
 // (F1-W5) — the wire path (/api/embed vs /v1/embeddings) can never diverge
 // from the host it was configured with. Any protocol other than "openai"
 // takes the ollama path (pre-W5 dispatch semantics, incl. empty).
-func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) ([]float32, error) {
+// promptTokens is the backend-reported input token count (MW5: embeds charge
+// prompt tokens into the dispatch usage meter); 0 when the backend reports
+// none — the call site then charges nothing instead of estimating (C1).
+func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) (vec []float32, promptTokens int, err error) {
 	input := prefix.text() + text
 
 	var raw []float64
-	var err error
 
 	if b.Protocol == backends.ProtocolOpenAI {
-		raw, err = embedOpenAI(ctx, b.Host, b.APIKey, b.Model, input)
+		raw, promptTokens, err = embedOpenAI(ctx, b.Host, b.APIKey, b.Model, input)
 	} else {
-		raw, err = embedOllama(ctx, b.Host, b.APIKey, b.Model, input, b.NumCtx)
+		raw, promptTokens, err = embedOllama(ctx, b.Host, b.APIKey, b.Model, input, b.NumCtx)
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if len(raw) < TargetDims {
-		return nil, fmt.Errorf("embed: embedding too short: got %d, need >= %d", len(raw), TargetDims)
+		return nil, 0, fmt.Errorf("embed: embedding too short: got %d, need >= %d", len(raw), TargetDims)
 	}
 
-	vec := l2Normalize(raw[:TargetDims])
+	vec = l2Normalize(raw[:TargetDims])
 
 	if err := qualityGate(vec); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	return vec, nil
+	return vec, promptTokens, nil
 }
 
-func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx int) ([]float64, error) {
+func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx int) ([]float64, int, error) {
 	reqBody := ollamaEmbedRequest{Model: model, Input: input}
 	if numCtx > 0 {
 		reqBody.Options = &ollamaOpts{NumCtx: numCtx}
@@ -122,7 +134,7 @@ func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx 
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("embed: marshal: %w", err)
+		return nil, 0, fmt.Errorf("embed: marshal: %w", err)
 	}
 
 	// No artificial deadline: embed-call latency is data-dependent (chunk-size,
@@ -131,7 +143,7 @@ func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx 
 	// Was: WithTimeout(ctx, 30s) — fired under parallel=16 pressure (Welle-49).
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/api/embed", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("embed: create request: %w", err)
+		return nil, 0, fmt.Errorf("embed: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
@@ -140,39 +152,39 @@ func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx 
 
 	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
-		return nil, fmt.Errorf("embed: request failed: %w", err)
+		return nil, 0, fmt.Errorf("embed: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
+		return nil, 0, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
 	}
 
 	var result ollamaEmbedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("embed: decode: %w", err)
+		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 
 	if len(result.Embeddings) == 0 || len(result.Embeddings[0]) == 0 {
-		return nil, fmt.Errorf("embed: empty embedding returned")
+		return nil, 0, fmt.Errorf("embed: empty embedding returned")
 	}
 
-	return result.Embeddings[0], nil
+	return result.Embeddings[0], result.PromptEvalCount, nil
 }
 
-func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]float64, error) {
+func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]float64, int, error) {
 	reqBody := openAIEmbedRequest{Model: model, Input: input}
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("embed: marshal: %w", err)
+		return nil, 0, fmt.Errorf("embed: marshal: %w", err)
 	}
 
 	// No artificial deadline (see Ollama-path note above).
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/v1/embeddings", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("embed: create request: %w", err)
+		return nil, 0, fmt.Errorf("embed: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
@@ -181,25 +193,25 @@ func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]floa
 
 	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
-		return nil, fmt.Errorf("embed: request failed: %w", err)
+		return nil, 0, fmt.Errorf("embed: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
+		return nil, 0, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
 	}
 
 	var result openAIEmbedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("embed: decode: %w", err)
+		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 
 	if len(result.Data) == 0 || len(result.Data[0].Embedding) == 0 {
-		return nil, fmt.Errorf("embed: empty embedding returned")
+		return nil, 0, fmt.Errorf("embed: empty embedding returned")
 	}
 
-	return result.Data[0].Embedding, nil
+	return result.Data[0].Embedding, result.Usage.PromptTokens, nil
 }
 
 func l2Normalize(v []float64) []float32 {

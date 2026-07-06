@@ -33,6 +33,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/chat"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -109,6 +110,9 @@ type ChatHandler struct {
 	provider    chat.BackendProvider
 	queryRunner chat.QueryRunner
 	stageRunner chat.StageRunner // D-W6b: ctx_store staging (nil = tool off)
+	// admitter is the ONE process-wide dispatch admission layer (MW5, I-D1);
+	// the per-turn engine's stream wire calls acquire through it.
+	admitter dispatch.Admitter
 
 	mu       sync.Mutex
 	inflight map[string]int // home_scope → running turns (the §3.3 semaphore)
@@ -117,7 +121,9 @@ type ChatHandler struct {
 // NewChatHandler wires the chat handler. queryHandler is the /api/query handler
 // (scheduler-wrapped) the ctx_query tool delegates to. blocktypes feeds the
 // staged-write gate bundle (type validation) — nil disables the ctx_store tool.
-func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, queryHandler http.Handler, blocktypes *blocktype.Registry) *ChatHandler {
+// admitter is the dispatch admission layer for the stream path (MW5, design/01
+// §4.6 N2).
+func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, queryHandler http.Handler, blocktypes *blocktype.Registry, admitter dispatch.Admitter) *ChatHandler {
 	// GamingState stays on the tenant-blind Snapshot() (NOT SnapshotForRequest):
 	// gaming.active and disabled_backends are global-only keys (03-W2/T28 tags +
 	// §10.5) — a tenant override is dropped before the overlay build, so the
@@ -133,6 +139,7 @@ func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.P
 		cfg:         cfg,
 		provider:    provider,
 		queryRunner: &chatQueryRunner{handler: queryHandler},
+		admitter:    admitter,
 		inflight:    map[string]int{},
 	}
 	// D-W6b: every chat write is staged (default-confirm by birth — the chat
@@ -263,7 +270,7 @@ func (h *ChatHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		Timezone:           tzName(cfg.Query.Timezone),
 	}
 	exec := chat.NewExecutor(h.pool, h.queryRunner, wc.ToolResultMaxChars).WithStage(h.stageRunner)
-	engine := chat.NewEngine(h.pool, h.provider, exec, engineCfg)
+	engine := chat.NewEngine(h.pool, h.provider, exec, engineCfg, h.admitter)
 
 	sink := newChatSink(w)
 	hbCtx, cancelHB := context.WithCancel(r.Context())

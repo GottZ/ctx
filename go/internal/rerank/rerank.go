@@ -62,23 +62,32 @@ type rerankResult struct {
 
 type rerankResponse struct {
 	Results []rerankResult `json:"results"`
+	// Usage is llama.cpp's Jina-style token accounting on the rerank
+	// response. prompt_tokens covers ALL query+document pairs of the request
+	// — the MW22/C1 charge dimension of the sidecar call. Absent field ⇒ 0 ⇒
+	// the call site charges nothing (uncharged, never an estimate).
+	Usage struct {
+		PromptTokens int `json:"prompt_tokens"`
+	} `json:"usage"`
 }
 
 // Score returns one relevance score per document, in the SAME order as docs
 // (scores[i] is the score for docs[i]). Scores are raw cross-encoder logits
-// (higher = more relevant; may be negative).
+// (higher = more relevant; may be negative). promptTokens is the sidecar's
+// reported usage.prompt_tokens (MW5: rerank charges prompt tokens into the
+// dispatch usage meter); 0 when the server reports none.
 //
 // Returns an error on transport failure, non-200, malformed JSON, or any
 // index the server returns that does not cleanly cover the input set — the
 // caller fails open and keeps the pre-rerank order.
-func Score(ctx context.Context, host, apiKey, model, query string, docs []string) ([]float64, error) {
+func Score(ctx context.Context, host, apiKey, model, query string, docs []string) ([]float64, int, error) {
 	if len(docs) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	body, err := json.Marshal(rerankRequest{Model: model, Query: query, Documents: docs})
 	if err != nil {
-		return nil, fmt.Errorf("rerank: marshal: %w", err)
+		return nil, 0, fmt.Errorf("rerank: marshal: %w", err)
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, Timeout)
@@ -86,7 +95,7 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, host+"/v1/rerank", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("rerank: create request: %w", err)
+		return nil, 0, fmt.Errorf("rerank: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
@@ -95,18 +104,18 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 
 	resp, err := httpx.DoRetryOnce(httpClient, req, body)
 	if err != nil {
-		return nil, fmt.Errorf("rerank: request failed: %w", err)
+		return nil, 0, fmt.Errorf("rerank: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("rerank: %w", httpx.NewStatusError(resp, errBody))
+		return nil, 0, fmt.Errorf("rerank: %w", httpx.NewStatusError(resp, errBody))
 	}
 
 	var result rerankResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("rerank: decode: %w", err)
+		return nil, 0, fmt.Errorf("rerank: decode: %w", err)
 	}
 
 	// Re-align strictly by result.Index into input order. The server sorts
@@ -119,18 +128,18 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 	got := 0
 	for _, r := range result.Results {
 		if r.Index < 0 || r.Index >= len(docs) {
-			return nil, fmt.Errorf("rerank: result index %d out of range [0,%d)", r.Index, len(docs))
+			return nil, 0, fmt.Errorf("rerank: result index %d out of range [0,%d)", r.Index, len(docs))
 		}
 		if seen[r.Index] {
-			return nil, fmt.Errorf("rerank: duplicate result index %d", r.Index)
+			return nil, 0, fmt.Errorf("rerank: duplicate result index %d", r.Index)
 		}
 		seen[r.Index] = true
 		scores[r.Index] = r.RelevanceScore
 		got++
 	}
 	if got != len(docs) {
-		return nil, fmt.Errorf("rerank: result count mismatch: got %d scores for %d documents", got, len(docs))
+		return nil, 0, fmt.Errorf("rerank: result count mismatch: got %d scores for %d documents", got, len(docs))
 	}
 
-	return scores, nil
+	return scores, result.Usage.PromptTokens, nil
 }

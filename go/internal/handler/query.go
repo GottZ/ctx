@@ -81,18 +81,27 @@ func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.
 	return &QueryHandler{pool: pool, cfg: cfg, backendPool: backendPool, quota: quota, blocktypes: blocktypes, admitter: admitter}
 }
 
-// admission binds the query pipeline's dispatch class (MW3, design/01 §4.6
-// N1): EVERYTHING on this handler is interactive — a human waits
-// synchronously on translate/temporal/rerank-judge/synthesize. The principal
-// is NOT bound here (MW4, design/03 §4.1.1): the dispatcher derives it from
-// the request ctx that flows into every acquire, via the boot-installed
-// RequestPrincipal hook. The embed/backfill sites stay lease-free until MW5
-// (E-U5(a)).
+// admission binds the query pipeline's dispatch class (MW3/MW5, design/01
+// §4.6 N1): EVERYTHING on this handler is interactive — a human waits
+// synchronously on translate/temporal/rerank/synthesize AND on the embed
+// path including the pre-search backfill (E-U5(a): backfill runs inside the
+// request latency; the overtake relief is structural, per-attempt acquire in
+// EmbedChain). The principal is NOT bound here (MW4, design/03 §4.1.1): the
+// dispatcher derives it from the request ctx that flows into every acquire,
+// via the boot-installed RequestPrincipal hook.
 func (h *QueryHandler) admission() llm.Admission {
 	return llm.Admission{
 		Admitter: h.admitter,
 		Class:    dispatch.ClassInteractive,
 	}
+}
+
+// embedAdmission is admission in embedcache's mirror type (the embed chain
+// does not import llm — same decoupling as embedcache.ReportFunc). The
+// principal is ctx-derived since MW4, so the mirror carries class only.
+func (h *QueryHandler) embedAdmission() embedcache.Admission {
+	adm := h.admission()
+	return embedcache.Admission{Admitter: adm.Admitter, Class: adm.Class}
 }
 
 // queryRequest is the JSON body for the query endpoint.
@@ -522,7 +531,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// chain resolves with THAT block's floor-adjusted sensitivity (F3 §2.3
 	// gate table, embed-backfill row).
 	floor := cfg.Pool.ScopeSensitivityFloor
-	if backfilled := h.backfillPending(ctx, floor, cfg.GamingState(), ar.HomeScope); backfilled > 0 {
+	if backfilled := h.backfillPending(ctx, floor, cfg.GamingState(), ar.HomeScope, h.embedAdmission()); backfilled > 0 {
 		slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
 	}
 
@@ -539,7 +548,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	embStart := time.Now()
 	embedding, embServed, embAttempts, embWired, err := embedcache.EmbedChain(
 		ctx, h.pool, embChain, backends.RoleEmbed, embedQuery, embed.PrefixQuery,
-		embedcache.ReportFunc(llm.PoolReporter(h.backendPool)))
+		embedcache.ReportFunc(llm.PoolReporter(h.backendPool)), h.embedAdmission())
 	if embWired {
 		// Slim row per actual wire call — cache hits are no egress (§2.7.3).
 		h.logEmbedWire(ctx, "query-embed", querySens, embServed, embAttempts, time.Since(embStart), nil, err, ar.ApiKeyID)
@@ -807,32 +816,41 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				b := chain[0]
 				model := b.ModelFor(backends.RoleRerank).Model
 				rrStart := time.Now()
-				reranked, rerr := rrf.RerankCrossEncoder(ctx, b.Host, b.APIKey, model, maxDocs, rerankCfg.BlendWeight, originalQuery, results)
-				if rerr == nil {
-					results = reranked
-					h.backendPool.ReportSuccess(b.ID)
-				} else {
-					h.backendPool.ReportFailure(b.ID, backends.Classify(rerr, b.ProviderClass), 0)
-					slog.Warn("rerank failed, using original order",
+				reranked, rerr := rrf.RerankCrossEncoder(ctx, b.Host, b.APIKey, model, maxDocs, rerankCfg.BlendWeight, originalQuery, results, h.admission())
+				if llm.IsAdmissionError(rerr) {
+					// Acquire-error doctrine (MW5, design/01 §4.3): a rejected
+					// admission is NOT an attempt — no Classify, no health
+					// report, no llmlog row. The stage stays fail-open on the
+					// pre-rerank order.
+					slog.Warn("rerank admission rejected, using original order",
 						"error", rerr, "request_id", requestID)
+				} else {
+					if rerr == nil {
+						results = reranked
+						h.backendPool.ReportSuccess(b.ID)
+					} else {
+						h.backendPool.ReportFailure(b.ID, backends.Classify(rerr, b.ProviderClass), 0)
+						slog.Warn("rerank failed, using original order",
+							"error", rerr, "request_id", requestID)
+					}
+					docCount := len(results)
+					if docCount > maxDocs {
+						docCount = maxDocs
+					}
+					llmlog.Record(h.pool, llmlog.Entry{
+						Pipeline:            "query-rerank",
+						Model:               model,
+						Host:                b.Host,
+						Duration:            time.Since(rrStart),
+						Err:                 rerr,
+						BlockIDs:            sensIDs[:docCount],
+						RequiredSensitivity: string(required),
+						Attempt:             1,
+						BackendName:         b.Name,
+						BackendTrust:        string(b.Trust),
+						BackendLocality:     b.Locality,
+					})
 				}
-				docCount := len(results)
-				if docCount > maxDocs {
-					docCount = maxDocs
-				}
-				llmlog.Record(h.pool, llmlog.Entry{
-					Pipeline:            "query-rerank",
-					Model:               model,
-					Host:                b.Host,
-					Duration:            time.Since(rrStart),
-					Err:                 rerr,
-					BlockIDs:            sensIDs[:docCount],
-					RequiredSensitivity: string(required),
-					Attempt:             1,
-					BackendName:         b.Name,
-					BackendTrust:        string(b.Trust),
-					BackendLocality:     b.Locality,
-				})
 			}
 		} else {
 			required := rerankRequired(querySens, results, rrf.RerankMaxDocs)
@@ -1043,7 +1061,17 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // Since F3-P3 the chain resolves PER BLOCK with that block's floor-adjusted
 // sensitivity (gate table embed-backfill row) and each wire call leaves a
 // slim llmlog row with the block id.
-func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, gaming backends.GamingState, scope string) int {
+//
+// Dispatch class (MW5, E-U5(a)): INTERACTIVE under the triggering caller's
+// principal — the loop runs inside the request latency, so calling it
+// background would let a foreign background job starve this user's own
+// pre-search step. The known lopsidedness (an unbounded backfill loop ahead
+// of the search) is NOT solved here, only honestly classified; the
+// structural relief is EmbedChain's per-attempt acquire with a fresh queue
+// position — a younger interactive query embed overtakes the waiting
+// backfill rest between two blocks. (Dispatch attribution is separate from
+// the T35b llmlog attribution below, which stays NULL/background in nature.)
+func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, gaming backends.GamingState, scope string, adm embedcache.Admission) int {
 	count := 0
 	for {
 		var blockID, title, content, sens, scope string
@@ -1070,7 +1098,7 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		// (today's semantics — the cache is for repeated query/keyword text).
 		vec, served, attempts, wired, err := embedcache.EmbedChain(
 			ctx, nil, chain, backends.RoleEmbed, embedText, embed.PrefixDocument,
-			embedcache.ReportFunc(llm.PoolReporter(h.backendPool)))
+			embedcache.ReportFunc(llm.PoolReporter(h.backendPool)), adm)
 		if wired {
 			// TENANT-DECISION(backfill-attribution): "" → NULL. backfillPending is
 			// query-triggered but maintenance in nature — it embeds whatever blocks

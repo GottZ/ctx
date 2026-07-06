@@ -56,7 +56,7 @@ func TestWindowContent(t *testing.T) {
 }
 
 func TestBuildHistoryBudget(t *testing.T) {
-	e := NewEngine(nil, nil, nil, Config{HistoryBudgetChars: 120})
+	e := NewEngine(nil, nil, nil, Config{HistoryBudgetChars: 120}, nil)
 	msgs := []store.ChatMessage{
 		{Role: "user", Content: strings.Repeat("u", 50)},
 		{Role: "assistant", Content: strings.Repeat("a", 50)},
@@ -111,7 +111,7 @@ func TestBackendMaxTokens(t *testing.T) {
 }
 
 func TestTokenClampPrefersSmallest(t *testing.T) {
-	e := NewEngine(nil, nil, nil, Config{MaxTokens: 2048})
+	e := NewEngine(nil, nil, nil, Config{MaxTokens: 2048}, nil)
 	// Backend CPU clamp 512 beats the global 2048; budget 300 beats both.
 	cpu := backends.Backend{Limits: map[string]any{"chat_max_tokens": float64(512)}}
 	if got := e.tokenClamp(cpu, 8192); got != 512 {

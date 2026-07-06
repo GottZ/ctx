@@ -21,6 +21,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
@@ -94,11 +95,28 @@ type Engine struct {
 	exec     *Executor
 	cfg      Config
 	now      func() time.Time
+	// admitter is the ONE process-wide dispatch admission layer (MW5, I-D1);
+	// every stream wire call of the turn loop acquires through it. nil is
+	// tolerated for tests that never reach a stream attempt — the acquire
+	// then fails loudly (no unadmitted wire call), never silently passes.
+	admitter dispatch.Admitter
 }
 
 // NewEngine builds the harness. exec carries the tool registry + executor.
-func NewEngine(pool *pgxpool.Pool, provider BackendProvider, exec *Executor, cfg Config) *Engine {
-	return &Engine{pool: pool, provider: provider, exec: exec, cfg: cfg.withDefaults(), now: time.Now}
+// admitter is the dispatch admission layer (MW5, design/01 §4.6 N2) — a
+// mandatory positional parameter like the query handler's (a call site
+// without an admitter does not compile).
+func NewEngine(pool *pgxpool.Pool, provider BackendProvider, exec *Executor, cfg Config, admitter dispatch.Admitter) *Engine {
+	return &Engine{pool: pool, provider: provider, exec: exec, cfg: cfg.withDefaults(), now: time.Now, admitter: admitter}
+}
+
+// admission binds the turn's dispatch class (design/01 §4.6 N2): a web-chat
+// turn is interactive — a human waits on the stream. The principal is NOT
+// bound here (MW4, design/03 §4.1.1): the dispatcher derives it from the
+// request ctx that flows into the acquire; a ctx without an AuthResult
+// yields the empty principal, which downgrades fail-closed to background (B8).
+func (e *Engine) admission() llm.Admission {
+	return llm.Admission{Admitter: e.admitter, Class: dispatch.ClassInteractive}
 }
 
 // RunTurn drives one user turn to completion, emitting events through sink.
@@ -166,6 +184,7 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 
 	budgetLeft := e.cfg.CompletionBudget
 	finalReason := "tool_limit"
+	adm := e.admission()
 
 	for iter := 1; iter <= e.cfg.MaxIterations; iter++ {
 		required := backends.MaxSensitivity(reqSens, sessHWM)
@@ -174,7 +193,7 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 			return emitNoEligible(sink)
 		}
 
-		so := e.runStream(ctx, chain, msgs, toolsEnabled, budgetLeft, iter, sess.ID, apiKeyID, required, sink)
+		so := e.runStream(ctx, chain, msgs, toolsEnabled, budgetLeft, iter, sess.ID, apiKeyID, required, adm, sink)
 		if !so.served {
 			return e.finishUnserved(ctx, sess, so, turnMax, start, iter, sink)
 		}
@@ -258,7 +277,7 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 
 	// Iteration cap or budget reached: ONE closing call WITHOUT a tools array
 	// (E4: never tool_choice:"none" — it emits tool syntax as plain text).
-	return e.finalCall(ctx, sess, msgs, reqSens, sessHWM, turnMax, start, apiKeyID, finalReason, sink)
+	return e.finalCall(ctx, sess, msgs, reqSens, sessHWM, turnMax, start, apiKeyID, finalReason, adm, sink)
 }
 
 // ownerActive resolves the session owner's tenant status fresh (the E6 per-turn
@@ -301,7 +320,16 @@ type streamOutcome struct {
 // backend, failing over to the next ONLY before the first emitted byte and only
 // on a Next()-class error (F3 doctrine). After the first token a dead stream is
 // terminal — no silent re-run / double tool execution.
-func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs []llm.ChatMsg, toolsEnabled bool, budgetLeft, iter int, sessID, apiKeyID string, required backends.Sensitivity, sink Sink) streamOutcome {
+//
+// MW5 admission (design/01 §4.6 N2): each attempt's wire call runs under its
+// own lease on the attempt's origin, held over the WHOLE stream (ChatStream
+// consumes the SSE body before returning — the longest GPU occupancy case)
+// and released at stream end, error included. The stream-end usage charges at
+// Release (C1: stream usage only exists at the end); an aborted/preempted
+// stream without a result stays uncharged. A failed acquire is TERMINAL
+// (doctrine §4.3): no wire contact, no Classify, no health signal, no llmlog
+// row (recordLLM is skipped), no failover onto the next chain link.
+func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs []llm.ChatMsg, toolsEnabled bool, budgetLeft, iter int, sessID, apiKeyID string, required backends.Sensitivity, adm llm.Admission, sink Sink) streamOutcome {
 	var lastErr error
 	var lastBackend backends.Backend
 	for i := range chain {
@@ -327,19 +355,45 @@ func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs [
 		var partial strings.Builder
 		started := false
 		opts := e.chatOptions(b, e.tokenClamp(b, budgetLeft))
+
+		// Acquire immediately before the wire call; the resolved LLMTimeout
+		// doubles as the admission-anchored deadline hint (ChatStream applies
+		// the same value as its wire deadline — rule V1).
+		lease, runCtx, admErr := adm.Acquire(ctx, &b, "chat", e.cfg.LLMTimeout)
+		if admErr != nil {
+			if ctx.Err() != nil {
+				// Client disconnect while queued: the wait slot is vacated,
+				// the turn ends as a regular cancel (partial persist + done).
+				return streamOutcome{backend: b, model: model, err: admErr, canceled: true}
+			}
+			return streamOutcome{backend: b, model: model, err: admErr}
+		}
+
 		st := e.now()
-		res, err := llm.ChatStream(ctx, b.Host, b.APIKey, model, msgs, tools, opts, b.ExtraBody, e.cfg.LLMTimeout,
-			func(ev llm.StreamEvent) error {
-				started = true
-				if ev.ContentDelta != "" {
-					partial.WriteString(ev.ContentDelta)
-					return sink.Event("delta", map[string]any{"text": ev.ContentDelta})
-				}
-				if ev.ToolCallName != "" {
-					return sink.Event("tool_call_start", map[string]any{"iteration": iter, "name": ev.ToolCallName})
-				}
-				return nil
-			})
+		res, err := func() (*llm.StreamResult, error) {
+			// defer is the only allowed release form (B1: panic-safe) — it
+			// fires after ChatStream drained the stream, so the lease spans
+			// first byte to stream end.
+			defer lease.Release()
+			res, err := llm.ChatStream(runCtx, b.Host, b.APIKey, model, msgs, tools, opts, b.ExtraBody, e.cfg.LLMTimeout,
+				func(ev llm.StreamEvent) error {
+					started = true
+					if ev.ContentDelta != "" {
+						partial.WriteString(ev.ContentDelta)
+						return sink.Event("delta", map[string]any{"text": ev.ContentDelta})
+					}
+					if ev.ToolCallName != "" {
+						return sink.Event("tool_call_start", map[string]any{"iteration": iter, "name": ev.ToolCallName})
+					}
+					return nil
+				})
+			if res != nil {
+				// MW22 meter feed: the stream-end usage, booked into the
+				// fairness window at Release (C1). No result ⇒ uncharged.
+				lease.ReportUsage(dispatch.Usage{PromptTokens: res.PromptTokens, CompletionTokens: res.CompletionTokens})
+			}
+			return res, err
+		}()
 		elapsed := e.now().Sub(st)
 		dur := elapsed.Milliseconds()
 		e.recordLLM(sessID, apiKeyID, required, b, model, i+1, iter, elapsed, res, err)
@@ -368,6 +422,13 @@ func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs [
 // context) and ends with a canceled done; any other error is laundered into an
 // error event (class + backend name only — never the raw URL-bearing error).
 func (e *Engine) finishUnserved(ctx context.Context, sess *store.ChatSession, so streamOutcome, turnMax backends.Sensitivity, start time.Time, iter int, sink Sink) error {
+	if llm.IsAdmissionError(so.err) && !so.canceled {
+		// Dispatch rejection (§4.3): not an attempt — launderError's Classify
+		// would mislabel the sentinel. Generic saturation event (B6 doctrine:
+		// sentinel texts stay server-side); the full 429/SSE rejection mapping
+		// is MW8's (D3-W4).
+		return sink.Event("error", map[string]any{"code": "saturated", "backend": so.backend.Name, "retryable": true})
+	}
 	if so.canceled {
 		rc, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
@@ -393,14 +454,14 @@ func (e *Engine) finishUnserved(ctx context.Context, sess *store.ChatSession, so
 
 // finalCall is the closing answer after the tool budget/iteration cap: a single
 // model call with NO tools array, prompted to answer from the gathered material.
-func (e *Engine) finalCall(ctx context.Context, sess *store.ChatSession, msgs []llm.ChatMsg, reqSens, sessHWM, turnMax backends.Sensitivity, start time.Time, apiKeyID, reason string, sink Sink) error {
+func (e *Engine) finalCall(ctx context.Context, sess *store.ChatSession, msgs []llm.ChatMsg, reqSens, sessHWM, turnMax backends.Sensitivity, start time.Time, apiKeyID, reason string, adm llm.Admission, sink Sink) error {
 	msgs = append(msgs, llm.ChatMsg{Role: "user", Content: "Tool budget exhausted — answer now directly from the material gathered so far."})
 	required := backends.MaxSensitivity(reqSens, sessHWM)
 	chain, cerr := e.provider.ChatChain(ctx, required, sess.Scope)
 	if cerr != nil || len(chain) == 0 {
 		return emitNoEligible(sink)
 	}
-	so := e.runStream(ctx, chain, msgs, false, e.cfg.MaxTokens, e.cfg.MaxIterations+1, sess.ID, apiKeyID, required, sink)
+	so := e.runStream(ctx, chain, msgs, false, e.cfg.MaxTokens, e.cfg.MaxIterations+1, sess.ID, apiKeyID, required, adm, sink)
 	if !so.served {
 		return e.finishUnserved(ctx, sess, so, turnMax, start, e.cfg.MaxIterations, sink)
 	}

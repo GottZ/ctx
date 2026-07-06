@@ -278,7 +278,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// slot during a turn (like /api/query). The ctx_query tool delegates to
 		// the SAME scheduler-wrapped query handler. Session routes are the
 		// read-lastig GET/DELETE companions (no LLM, no scheduler signal).
-		chatH := handler.NewChatHandler(pool, cfgStore, backendPool, http.HandlerFunc(queryHTTPHandler), blocktypeReg)
+		chatH := handler.NewChatHandler(pool, cfgStore, backendPool, http.HandlerFunc(queryHTTPHandler), blocktypeReg, dispatcher)
 		r.Post("/api/chat/stream", handler.WithScheduler(scheduler, chatH.HandleStream))
 		r.Get("/api/chat/sessions", chatH.HandleListSessions)
 		r.Get("/api/chat/sessions/{id}", chatH.HandleGetSession)

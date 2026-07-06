@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rerank"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -158,7 +159,17 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming 
 //
 // Fail-open: any error (transport, malformed response, index mismatch) returns
 // the input results UNCHANGED plus the error for the caller to log.
-func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs int, blendWeight float64, query string, results []SearchResult) ([]SearchResult, error) {
+//
+// MW5 admission (design/01 §4.6 N4): the ONE sidecar wire call runs under a
+// lease on the sidecar origin, acquired after the early-outs (no lease
+// without wire contact — the mirror of the embed cache-hit clause) with
+// rerank.Timeout as the admission-anchored deadline hint. A failed acquire
+// still fails open on the result order, but the returned error is an
+// llm.AdmissionError — the CALLER must honor the §4.3 doctrine on it (no
+// Classify, no health report, no llmlog row). The sidecar's reported
+// usage.prompt_tokens charge into the lease (MW22/C1); a server without
+// counts stays uncharged.
+func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs int, blendWeight float64, query string, results []SearchResult, adm llm.Admission) ([]SearchResult, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("cross-encoder rerank: skipping, fewer than min results",
 			"result_count", len(results),
@@ -186,7 +197,19 @@ func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs
 		docs[i] = r.Title + "\n" + content
 	}
 
-	logits, err := rerank.Score(ctx, host, apiKey, model, query, docs)
+	lease, runCtx, admErr := adm.Acquire(ctx, &backends.Backend{Host: host}, backends.RoleRerank, rerank.Timeout)
+	if admErr != nil {
+		return results, admErr // terminal doctrine §4.3: not an attempt — caller skips Classify/health/llmlog
+	}
+	logits, err := func() ([]float64, error) {
+		// defer is the only allowed release form (B1: panic-safe).
+		defer lease.Release()
+		logits, ptoks, err := rerank.Score(runCtx, host, apiKey, model, query, docs)
+		if err == nil && ptoks > 0 {
+			lease.ReportUsage(dispatch.Usage{PromptTokens: ptoks})
+		}
+		return logits, err
+	}()
 	if err != nil {
 		return results, fmt.Errorf("cross-encoder rerank: %w", err)
 	}

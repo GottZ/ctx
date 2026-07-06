@@ -1270,9 +1270,13 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 	embedText := title + "\n\n" + content
 	start := time.Now()
 	// pool=nil: document embeddings land in the block row, not the cache.
+	// MW5: background admission per attempt (design/01 §4.6 N3) — the
+	// scheduler backfill waits AT THE TARGET and any interactive embed
+	// enqueued meanwhile overtakes it between two blocks (fresh seq per
+	// acquire, E-U5(a) structural relief).
 	vec, served, attempts, wired, err := embedcache.EmbedChain(
 		ctx, nil, chain, role, embedText, embed.PrefixDocument,
-		embedcache.ReportFunc(router.Report))
+		embedcache.ReportFunc(router.Report), router.EmbedAdmit())
 	if wired {
 		// "" → NULL: scheduler backfill is background, no request-bound caller (T35b).
 		llm.LogEmbedWire(s.pool, "embed-backfill", role, required, served, attempts,

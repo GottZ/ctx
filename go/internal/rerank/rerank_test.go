@@ -45,7 +45,7 @@ func TestScore_ReAlignsByIndex(t *testing.T) {
 		)
 	})
 
-	scores, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"apple", "bear", "exact"})
+	scores, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"apple", "bear", "exact"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestScore_SendsDocumentsAndQuery(t *testing.T) {
 			map[string]any{"index": 2, "relevance_score": 3.0},
 		)
 	})
-	if _, err := Score(context.Background(), srv.URL, "", "mymodel", "myquery", []string{"d0", "d1", "d2"}); err != nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "mymodel", "myquery", []string{"d0", "d1", "d2"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Model != "mymodel" || got.Query != "myquery" || len(got.Documents) != 3 || got.Documents[2] != "d2" {
@@ -86,7 +86,7 @@ func TestScore_RejectsOutOfRangeIndex(t *testing.T) {
 			map[string]any{"index": 9, "relevance_score": 2.0}, // out of range for 2 docs
 		)
 	})
-	if _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
 		t.Fatal("expected error for out-of-range index, got nil")
 	}
 }
@@ -98,7 +98,7 @@ func TestScore_RejectsDuplicateIndex(t *testing.T) {
 			map[string]any{"index": 0, "relevance_score": 2.0}, // dup → index 1 never filled
 		)
 	})
-	if _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
 		t.Fatal("expected error for duplicate index, got nil")
 	}
 }
@@ -108,7 +108,7 @@ func TestScore_RejectsCountMismatch(t *testing.T) {
 		// Only one result for two docs (e.g. server truncated to top_n).
 		return http.StatusOK, okResults(map[string]any{"index": 0, "relevance_score": 1.0})
 	})
-	if _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
 		t.Fatal("expected error for count mismatch, got nil")
 	}
 }
@@ -117,13 +117,13 @@ func TestScore_RejectsNon200(t *testing.T) {
 	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
 		return http.StatusInternalServerError, map[string]any{"error": "boom"}
 	})
-	if _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b", "c"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b", "c"}); err == nil {
 		t.Fatal("expected error for non-200, got nil")
 	}
 }
 
 func TestScore_EmptyDocs(t *testing.T) {
-	scores, err := Score(context.Background(), "http://unused.invalid", "", "m", "q", nil)
+	scores, _, err := Score(context.Background(), "http://unused.invalid", "", "m", "q", nil)
 	if err != nil || scores != nil {
 		t.Errorf("empty docs: got (%v, %v), want (nil, nil)", scores, err)
 	}

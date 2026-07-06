@@ -6,6 +6,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 )
@@ -115,6 +116,15 @@ func (r *Router) EmbedChain(required backends.Sensitivity) ([]backends.Backend, 
 	}
 	chain, err := r.Pool.Chain(role, required, r.Gaming, r.Tenant) // iterated tenant, see available()
 	return chain, role, err
+}
+
+// EmbedAdmit is Admit in embedcache's mirror type (MW5, design/01 §4.6 N3 —
+// embedcache does not import llm): the router's class binding carries
+// unchanged onto its embed wire calls (scheduler backfill + dream keyword
+// embeds = background; the principal is ctx-derived since MW4 and detached
+// scheduler ctx resolve to the zero principal).
+func (r *Router) EmbedAdmit() embedcache.Admission {
+	return embedcache.Admission{Admitter: r.Admit.Admitter, Class: r.Admit.Class}
 }
 
 // applyChainTelemetry stamps the chained-call provenance onto a dream llmlog

@@ -33,10 +33,22 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/chat"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
+
+// testAdmitter is the MW5 pass-through admission for engine tests (empty
+// policy = Durchreiche). The test AuthResults carry no ApiKeyID, so the B8
+// downgrade to background fires — with an empty policy both classes are
+// behavior-identical pass-through.
+func testAdmitter(t *testing.T) dispatch.Admitter {
+	t.Helper()
+	d := dispatch.New(nil, dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	return d
+}
 
 // --- fakes ---
 
@@ -213,7 +225,7 @@ func TestChatEngine(t *testing.T) {
 
 		fq := &fakeQuery{result: chat.QueryResult{Confidence: "confident", Blocks: []chat.QueryBlock{{ID: blockID, Title: "Dream backoff", Category: "test", Score: 0.9}}}}
 		exec := chat.NewExecutor(pool, fq, 8000)
-		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("fake", srv.URL)}}, exec, chat.Config{})
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("fake", srv.URL)}}, exec, chat.Config{}, testAdmitter(t))
 		sess := newSession(t, pool, "private", []string{"private"})
 		col := &collector{}
 
@@ -247,7 +259,7 @@ func TestChatEngine(t *testing.T) {
 		nc := fullTrustBackend("nocreds", srv.URL)
 		nc.Trust = backends.TrustNoCredentials
 		exec := chat.NewExecutor(pool, &fakeQuery{}, 8000)
-		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{nc}}, exec, chat.Config{})
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{nc}}, exec, chat.Config{}, testAdmitter(t))
 
 		sess := newSession(t, pool, "private", []string{"private"})
 		// A prior credentials tool result raised the PERSISTED HWM — the engine
@@ -276,7 +288,7 @@ func TestChatEngine(t *testing.T) {
 		srv := httptest.NewServer(llmSrv.handler())
 		defer srv.Close()
 		exec := chat.NewExecutor(pool, &fakeQuery{result: chat.QueryResult{}}, 8000)
-		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("fake", srv.URL)}}, exec, chat.Config{MaxIterations: 1})
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("fake", srv.URL)}}, exec, chat.Config{MaxIterations: 1}, testAdmitter(t))
 		sess := newSession(t, pool, "private", []string{"private"})
 		col := &collector{}
 
@@ -306,7 +318,7 @@ func TestChatEngine(t *testing.T) {
 		srv := httptest.NewServer(llmSrv.handler())
 		defer srv.Close()
 		exec := chat.NewExecutor(pool, &fakeQuery{}, 8000)
-		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("fake", srv.URL)}}, exec, chat.Config{})
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("fake", srv.URL)}}, exec, chat.Config{}, testAdmitter(t))
 		sess := newSession(t, pool, "private", []string{"private"})
 		col := &collector{}
 
@@ -329,7 +341,7 @@ func TestChatEngine(t *testing.T) {
 		srvB := httptest.NewServer(up.handler())
 		defer srvB.Close()
 		exec := chat.NewExecutor(pool, &fakeQuery{}, 8000)
-		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("down", srvA.URL), fullTrustBackend("up", srvB.URL)}}, exec, chat.Config{})
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("down", srvA.URL), fullTrustBackend("up", srvB.URL)}}, exec, chat.Config{}, testAdmitter(t))
 		sess := newSession(t, pool, "private", []string{"private"})
 		col := &collector{}
 
@@ -357,7 +369,7 @@ func TestChatEngine(t *testing.T) {
 		srv := httptest.NewServer(llmSrv.handler())
 		defer srv.Close()
 		exec := chat.NewExecutor(pool, &fakeQuery{}, 8000)
-		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("metric-fake", srv.URL)}}, exec, chat.Config{})
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("metric-fake", srv.URL)}}, exec, chat.Config{}, testAdmitter(t))
 		sess := newSession(t, pool, "private", []string{"private"})
 		col := &collector{}
 		if err := eng.RunTurn(ctx, &auth.AuthResult{ReadScopes: []string{"private"}}, sess, "hi there", backends.SensInternal, false, col); err != nil {
@@ -400,7 +412,7 @@ func TestChatEngine(t *testing.T) {
 		// §3.5). The whole event payload must not contain the host:port.
 		deadHost := "http://127.0.0.1:1"
 		exec := chat.NewExecutor(pool, &fakeQuery{}, 8000)
-		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("deadbackend", deadHost)}}, exec, chat.Config{})
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("deadbackend", deadHost)}}, exec, chat.Config{}, testAdmitter(t))
 		sess := newSession(t, pool, "private", []string{"private"})
 		col := &collector{}
 		if err := eng.RunTurn(ctx, &auth.AuthResult{ReadScopes: []string{"private"}}, sess, "hi", backends.SensInternal, false, col); err != nil {
@@ -450,7 +462,7 @@ func TestChatEngine(t *testing.T) {
 		srv := httptest.NewServer(llmSrv.handler())
 		defer srv.Close()
 		exec := chat.NewExecutor(pool, &fakeQuery{}, 8000)
-		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("fake", srv.URL)}}, exec, chat.Config{})
+		eng := chat.NewEngine(pool, trustProvider{chain: []backends.Backend{fullTrustBackend("fake", srv.URL)}}, exec, chat.Config{}, testAdmitter(t))
 		sess := newSession(t, pool, "suspendscope", []string{"suspendscope"})
 		ar := &auth.AuthResult{ReadScopes: []string{"suspendscope"}}
 
