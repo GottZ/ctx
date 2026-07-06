@@ -185,7 +185,8 @@ func TestDeriveUnparseableBaseURL(t *testing.T) {
 func TestDeriveLiveActivationShape(t *testing.T) {
 	pol, _ := derive(t, []BackendRow{
 		{Name: "herbert-chat", Scope: GlobalScope, BaseURL: "http://10.13.37.11:8089/v1",
-			Limits: map[string]any{"slots": float64(1), "preempt_background": true}},
+			ProviderClass: providerClassLlamaCpp,
+			Limits:        map[string]any{"slots": float64(1), "preempt_background": true}},
 		{Name: "llama-embed", Scope: GlobalScope, BaseURL: "http://10.13.37.11:8081/v1",
 			Limits: map[string]any{"slots": float64(4)}},
 		{Name: "herbert-rerank", Scope: GlobalScope, BaseURL: "http://10.13.37.11:8085/v1",

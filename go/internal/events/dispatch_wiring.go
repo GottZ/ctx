@@ -27,7 +27,10 @@ func DispatchSettings(c config.DispatchConfig) dispatch.Settings {
 		InteractiveQueueMax:          c.InteractiveQueueMax,
 		LeaseReapGrace:               c.LeaseReapGrace,
 		LeaseMaxAge:                  c.LeaseMaxAge,
+		PreemptReleaseTimeout:        c.PreemptReleaseTimeout,
 		Fairness:                     dispatch.FairnessFIFO,
+		// UsageWindow stays zero (= package default): its config key belongs
+		// to the fairness activation wave (MW23), the Fairness pattern.
 	}
 }
 
@@ -41,10 +44,13 @@ func DispatchBackendRows(bs []backends.Backend) []dispatch.BackendRow {
 	rows := make([]dispatch.BackendRow, 0, len(bs))
 	for _, b := range bs {
 		rows = append(rows, dispatch.BackendRow{
-			Name:    b.Name,
-			Scope:   b.Scope,
-			BaseURL: b.Host,
-			Limits:  b.Limits,
+			Name:          b.Name,
+			Scope:         b.Scope,
+			BaseURL:       b.Host,
+			ProviderClass: b.ProviderClass,
+			Limits:        b.Limits,
+			Roles:         b.Roles,
+			External:      b.Locality == backends.LocalityExternal,
 		})
 	}
 	return rows

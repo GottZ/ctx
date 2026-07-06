@@ -24,6 +24,7 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		InteractiveQueueMax:          11,
 		LeaseReapGrace:               13 * time.Second,
 		LeaseMaxAge:                  17 * time.Second,
+		PreemptReleaseTimeout:        19 * time.Second,
 	}
 	want := dispatch.Settings{
 		Enabled:                      false,
@@ -33,6 +34,7 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		InteractiveQueueMax:          11,
 		LeaseReapGrace:               13 * time.Second,
 		LeaseMaxAge:                  17 * time.Second,
+		PreemptReleaseTimeout:        19 * time.Second,
 		Fairness:                     dispatch.FairnessFIFO,
 	}
 	if got := DispatchSettings(in); got != want {
@@ -46,23 +48,32 @@ func TestDispatchSettingsMapping(t *testing.T) {
 func TestDispatchBackendRowsMapping(t *testing.T) {
 	in := []backends.Backend{
 		{
-			Name:    "herbert-chat",
-			Scope:   "_global",
-			Host:    "http://HOST:8089/v1",
-			Enabled: true,
-			Limits:  map[string]any{"slots": float64(1)},
-			APIKey:  "never-projected",
+			Name:          "herbert-chat",
+			Scope:         "_global",
+			Host:          "http://HOST:8089/v1",
+			ProviderClass: "llamacpp",
+			Locality:      backends.LocalityLocal,
+			Roles:         []string{"chat", "dream"},
+			Enabled:       true,
+			Limits:        map[string]any{"slots": float64(1)},
+			APIKey:        "never-projected",
 		},
 		{
-			Name:    "tenant-private",
-			Scope:   "acme",
-			Host:    "https://api.example.com",
-			Enabled: false, // disabled rows are projected too
+			Name:          "tenant-private",
+			Scope:         "acme",
+			Host:          "https://api.example.com",
+			ProviderClass: "openrouter",
+			Locality:      backends.LocalityExternal,
+			Enabled:       false, // disabled rows are projected too
 		},
 	}
+	// The projection is the cross-wave seam: Roles/External feed the MW14
+	// Enforcing coverage term, ProviderClass feeds the MW18 external guard.
+	// A field silently dropped here degrades those gates without any test
+	// in internal/dispatch noticing — this pin is their owner-side anchor.
 	want := []dispatch.BackendRow{
-		{Name: "herbert-chat", Scope: "_global", BaseURL: "http://HOST:8089/v1", Limits: map[string]any{"slots": float64(1)}},
-		{Name: "tenant-private", Scope: "acme", BaseURL: "https://api.example.com"},
+		{Name: "herbert-chat", Scope: "_global", BaseURL: "http://HOST:8089/v1", ProviderClass: "llamacpp", Limits: map[string]any{"slots": float64(1)}, Roles: []string{"chat", "dream"}},
+		{Name: "tenant-private", Scope: "acme", BaseURL: "https://api.example.com", ProviderClass: "openrouter", External: true},
 	}
 	if got := DispatchBackendRows(in); !reflect.DeepEqual(got, want) {
 		t.Fatalf("DispatchBackendRows = %+v, want %+v", got, want)

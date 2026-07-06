@@ -90,6 +90,9 @@ type targetState struct {
 	background  bgQueue
 	// usage is the per-fairness-bucket token meter (MW22/F2, usage.go).
 	usage map[string]*usageWindow
+	// preempt is the MW18 preempt-path bookkeeping (victims in eviction +
+	// telemetry counters, design/02 §3.3) — see preempt.go.
+	preempt preemptState
 }
 
 // Dispatcher is the process-wide admission layer (I-D1: exactly one). Policy
@@ -240,6 +243,12 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		return l, runCtx, nil
 	}
 	err := d.enqueueLocked(st, w)
+	if err == nil && class == ClassInteractive {
+		// Preempt trigger (MW18, design/02 §4.2.1): only an interactive
+		// acquire that has to WAIT may open a preempt on a preempt-enabled
+		// target — never a background acquire, never the herald alone.
+		d.maybePreemptLocked(st, slots)
+	}
 	d.opDone(opStart)
 	d.mu.Unlock()
 	if err != nil {
@@ -362,6 +371,7 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 	}
 	l.done = true
 	d.chargeLocked(l, time.Now())
+	d.preemptSettledLocked(l) // release-latency sample for a regular victim release (MW18)
 	delete(l.st.inflight, l)
 	delete(l.st.cancelable, l)
 	if l.slotHeld {
@@ -576,6 +586,9 @@ type TargetSnapshot struct {
 	// Buckets is the per-fairness-bucket wait + token-window view (MW22,
 	// usage.go) — the primary gate source for the fairness/budget waves.
 	Buckets []BucketSnapshot
+	// Preempt carries the per-target preempt telemetry (design/02 §3.3);
+	// same exposure rule as the rest of the snapshot.
+	Preempt PreemptStats
 }
 
 // Snapshot is the dispatcher-wide introspection view.
@@ -626,6 +639,7 @@ func (d *Dispatcher) Snapshot() Snapshot {
 			Inflight:          len(st.inflight),
 			Interactive:       WaitStats{Waiting: st.interactive.total},
 			Background:        WaitStats{Waiting: st.background.len()},
+			Preempt:           st.preempt.statsLocked(),
 		}
 		if t := st.interactive.oldest(); !t.IsZero() {
 			ts.Interactive.OldestWait = now.Sub(t)

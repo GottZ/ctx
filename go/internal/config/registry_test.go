@@ -127,6 +127,10 @@ func TestRegistryStrictSet(t *testing.T) {
 		"dispatch.interactive_queue_max":           true,
 		"dispatch.lease_reap_grace":                true,
 		"dispatch.lease_max_age":                   true,
+		// MW18: the preempt watchdog fence is a security clock like the reaper
+		// clocks above — a typo'd value silently defaulting would move the
+		// force-release fence unnoticed, so it aborts loudly.
+		"dispatch.preempt_release_timeout": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {

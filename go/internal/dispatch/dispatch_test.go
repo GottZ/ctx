@@ -737,6 +737,7 @@ func TestDefaultSettings(t *testing.T) {
 		s.InteractiveQueuePerPrincipal != 8 || s.InteractiveQueuePerTenant != 16 ||
 		s.InteractiveQueueMax != 64 ||
 		s.LeaseReapGrace != 30*time.Second || s.LeaseMaxAge != 900*time.Second ||
+		s.PreemptReleaseTimeout != 2*time.Second ||
 		s.Fairness != FairnessFIFO {
 		t.Fatalf("defaults drifted from the registry contract: %+v", s)
 	}

@@ -86,7 +86,12 @@ type BackendRow struct {
 	// shared backend, '<tenant>' = tenant-private (migration 062).
 	Scope   string
 	BaseURL string
-	Limits  map[string]any
+	// ProviderClass mirrors context_backends.provider_class (validate.go
+	// enum: generic | llamacpp | openrouter). Sole consumer is the external
+	// guard of the preempt derivation (preempt.go, design/02 §3.1 no. 2):
+	// preempt_background counts only on local llama.cpp wire classes.
+	ProviderClass string
+	Limits        map[string]any
 	// Roles are the routing roles of the row (context_backends.roles) — the
 	// coverage term derives background reachability from them (enforcing.go).
 	Roles []string
@@ -204,7 +209,17 @@ func mergeRows(origin string, auth []BackendRow, logger *slog.Logger) TargetPoli
 		}
 		if v, ok := r.Limits[limitPreempt]; ok {
 			if b, boolOK := v.(bool); boolOK {
-				pol.PreemptBackground = pol.PreemptBackground || b
+				switch {
+				case b && !preemptClassAllowed(r.ProviderClass):
+					// External guard (design/02 §3.1 no. 2, E-P5): a cancel
+					// on an external pass-through only closes OUR connection
+					// — upstream keeps generating and billing. The target
+					// degrades to admission control, mechanism=code.
+					logger.Warn("dispatch: limits.preempt_background on non-local provider class ignored (external guard)",
+						"backend", r.Name, "origin", origin, "provider_class", r.ProviderClass)
+				default:
+					pol.PreemptBackground = pol.PreemptBackground || b
+				}
 			} else {
 				logger.Warn("dispatch: invalid limits.preempt_background ignored", "backend", r.Name, "origin", origin, "value", v)
 			}
@@ -300,6 +315,10 @@ type Settings struct {
 	// and WITHOUT a ctx deadline (the embed path) — without it a leaked
 	// embed lease would NEVER be reaped.
 	LeaseMaxAge time.Duration
+	// PreemptReleaseTimeout is the preempt watchdog fence (E-P2): a canceled
+	// victim whose release stays out past it is force-released (the third
+	// legitimate release path). ≤ 0 falls back to the 2 s registry default.
+	PreemptReleaseTimeout time.Duration
 	// Fairness is the interactive pick order (structure built in MW1, E-F2;
 	// the config key registration is the fairness wave's). Unknown or empty
 	// reads as fifo.
@@ -320,6 +339,7 @@ func DefaultSettings() Settings {
 		InteractiveQueueMax:          64,
 		LeaseReapGrace:               30 * time.Second,
 		LeaseMaxAge:                  900 * time.Second,
+		PreemptReleaseTimeout:        defaultPreemptReleaseTimeout,
 		Fairness:                     FairnessFIFO,
 		UsageWindow:                  time.Hour,
 	}

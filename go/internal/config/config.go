@@ -610,6 +610,14 @@ type DispatchConfig struct {
 	// wave 49). Default == the longest legitimate hold (webchat stream
 	// timeout below).
 	LeaseMaxAge time.Duration `key:"dispatch.lease_max_age" env:"CTX_DISPATCH_LEASE_MAX_AGE" default:"900" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// PreemptReleaseTimeout (bare seconds) is the preempt watchdog (MW18,
+	// E-P2): a background victim canceled in favor of interactive demand
+	// whose release stays out past this fence is force-released — the third
+	// legitimate release path (slog-ERROR + divergence counter). It guards
+	// the CLIENT half of the abort latency (cancel → wire return, purely
+	// Go-side, healthy in milliseconds); 2 s is a ≥3-orders-of-magnitude
+	// safety factor, calibrated against preempt_release_ms_max after MW20.
+	PreemptReleaseTimeout time.Duration `key:"dispatch.preempt_release_timeout" env:"CTX_DISPATCH_PREEMPT_RELEASE_TIMEOUT" default:"2" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // GamingState returns the chain-time gaming exclusion from THIS settings
