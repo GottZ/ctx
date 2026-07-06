@@ -15,23 +15,36 @@ import {
   recolorOverviewGraph,
   type GraphPalette,
 } from './graph-theme'
+import tokensJson from '../../../tokens/tokens.json'
+
+// G1d (design 02-graph-darkmode §4.6): die Palette-Fixtures werden AUS tokens.json
+// gebunden, nicht als Literale gepinnt — damit ist die N1-Drift (ein Hand-Pin
+// wie edgeStrongColor '#a6abbd', der vom Token abwich) strukturell tot: dark =
+// $value, light = $extensions.ctx.light (dasselbe Bindungs-Muster wie
+// tokens/contrast-matrix.test.ts:27-36). Ändert ein Token, wandern die Fixtures
+// automatisch mit; Format bleibt Hex/Zahl wie in tokens.json.
+const graphTokens = (tokensJson as unknown as {
+  graph: Record<string, { $value: string; $extensions?: { ctx?: { light?: string } } }>
+}).graph
+const tok = (name: string, theme: 'dark' | 'light'): string =>
+  theme === 'light' ? String(graphTokens[name].$extensions?.ctx?.light) : String(graphTokens[name].$value)
 
 const dark: GraphPalette = {
-  labelColor: '#9aa0bb',
-  edgeColor: '#3a3a52',
-  edgeStrongColor: '#5b5e74',
-  nodeSat: 70,
-  nodeLum: 68,
+  labelColor: tok('graph-label', 'dark'),
+  edgeColor: tok('graph-edge', 'dark'),
+  edgeStrongColor: tok('graph-edge-strong', 'dark'),
+  nodeSat: Number(tok('graph-node-sat', 'dark')),
+  nodeLum: Number(tok('graph-node-lum', 'dark')),
 }
 
 // The light column of the §5a token contract — the palette readGraphPalette()
 // yields after a dark→light theme switch.
 const light: GraphPalette = {
-  labelColor: '#54586a',
-  edgeColor: '#c4c8d4',
-  edgeStrongColor: '#a6abbd',
-  nodeSat: 62,
-  nodeLum: 45,
+  labelColor: tok('graph-label', 'light'),
+  edgeColor: tok('graph-edge', 'light'),
+  edgeStrongColor: tok('graph-edge-strong', 'light'),
+  nodeSat: Number(tok('graph-node-sat', 'light')),
+  nodeLum: Number(tok('graph-node-lum', 'light')),
 }
 
 function apiNode(id: string, hop: number, partial: Partial<ApiNode> = {}): ApiNode {
@@ -96,16 +109,16 @@ describe('categoryColor', () => {
   })
 
   it('takes saturation/lightness from the palette (theme-swappable), hue fixed', () => {
-    const light: GraphPalette = { ...dark, nodeSat: 62, nodeLum: 45 }
-    expect(categoryColor('learnings', light)).toBe('hsl(149 62% 45%)')
+    const light: GraphPalette = { ...dark, nodeSat: 62, nodeLum: 33 }
+    expect(categoryColor('learnings', light)).toBe('hsl(149 62% 33%)')
   })
 })
 
 describe('edgeColor', () => {
   it('maps supersedes to the strong color and everything else to the normal edge', () => {
-    expect(edgeColor('supersedes', dark)).toBe('#5b5e74')
-    expect(edgeColor('topical', dark)).toBe('#3a3a52')
-    expect(edgeColor('factual', dark)).toBe('#3a3a52')
+    expect(edgeColor('supersedes', dark)).toBe(dark.edgeStrongColor)
+    expect(edgeColor('topical', dark)).toBe(dark.edgeColor)
+    expect(edgeColor('factual', dark)).toBe(dark.edgeColor)
   })
 })
 
@@ -136,17 +149,17 @@ describe('readGraphPalette', () => {
   it('reads present tokens and trims them', () => {
     stubTokens({
       '--graph-label': '  #54586a ',
-      '--graph-edge': '#c4c8d4',
-      '--graph-edge-strong': '#a6abbd',
+      '--graph-edge': '#767b91',
+      '--graph-edge-strong': '#54597a',
       '--graph-node-sat': '62',
-      '--graph-node-lum': '45',
+      '--graph-node-lum': '33',
     })
     expect(readGraphPalette()).toEqual({
       labelColor: '#54586a',
-      edgeColor: '#c4c8d4',
-      edgeStrongColor: '#a6abbd',
+      edgeColor: '#767b91',
+      edgeStrongColor: '#54597a',
       nodeSat: 62,
-      nodeLum: 45,
+      nodeLum: 33,
     })
   })
 
@@ -244,10 +257,10 @@ describe('recolorGraph', () => {
       // user flips to light: tokens change, then the handler body runs
       tokens = {
         '--graph-label': '#54586a',
-        '--graph-edge': '#c4c8d4',
-        '--graph-edge-strong': '#a6abbd',
+        '--graph-edge': '#767b91',
+        '--graph-edge-strong': '#54597a',
         '--graph-node-sat': '62',
-        '--graph-node-lum': '45',
+        '--graph-node-lum': '33',
       }
       const palette = readGraphPalette() // what GraphPage.onThemeChange reads
       recolorGraph(graph, palette)

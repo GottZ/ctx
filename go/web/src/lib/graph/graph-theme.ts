@@ -27,8 +27,8 @@ export interface GraphPalette {
 // 03-§5a). Keep in sync with the dark column there.
 const DARK_FALLBACK: GraphPalette = {
   labelColor: '#9aa0bb',
-  edgeColor: '#3a3a52',
-  edgeStrongColor: '#5b5e74',
+  edgeColor: '#5d5f80',
+  edgeStrongColor: '#7d80a8',
   nodeSat: 70,
   nodeLum: 68,
 }

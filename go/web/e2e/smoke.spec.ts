@@ -200,7 +200,7 @@ test.describe('graph theme palette', () => {
     // OverviewMap mounts Sigma + exposes __ctxGraph once the cluster map renders.
     await page.waitForFunction(() => '__ctxGraph' in window, null, { timeout: 10_000 })
     const dark = await readPalette(page)
-    expect(dark, 'dark edge token wired into Sigma').toContain('#3a3a52')
+    expect(dark, 'dark edge token wired into Sigma').toContain('#5d5f80')
 
     // Overview meta-nodes are categoryColor() = hsl(hue, nodeSat%, nodeLum%) — a
     // light, theme-aware fill (dark tokens 70%/68%), NOT the black that a misread
@@ -213,6 +213,6 @@ test.describe('graph theme palette', () => {
     // The re-color flows through the THEME_CHANGE_EVENT → palette $state → the
     // OverviewMap $effect (setSetting + refresh); poll past Svelte/Sigma flush.
     await expect.poll(() => readPalette(page), { timeout: 5000 }).not.toBe(dark)
-    expect(await readPalette(page), 'light edge token after toggle').toContain('#c4c8d4')
+    expect(await readPalette(page), 'light edge token after toggle').toContain('#767b91')
   })
 })

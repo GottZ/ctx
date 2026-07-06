@@ -30,8 +30,8 @@
      sat/lum sind BARE Zahlen (kein %), weil readGraphPalette hsl(h s% l%)
      baut — Number('70%') wäre NaN → stiller Dark-Fallback. */
   --graph-label: #9aa0bb;        /* Sigma labelColor                       */
-  --graph-edge: #3a3a52;         /* Normal-Kante / defaultEdgeColor        */
-  --graph-edge-strong: #5b5e74;  /* supersedes-Kante                       */
+  --graph-edge: #5d5f80;         /* Normal-Kante / defaultEdgeColor        */
+  --graph-edge-strong: #7d80a8;  /* supersedes-Kante                       */
   --graph-node-sat: 70;          /* Node-HSL-Saturation (bare Zahl)        */
   --graph-node-lum: 68;          /* Node-HSL-Lightness (bare Zahl)         */
   --graph-bg: #0b0b0f;           /* Canvas-Hintergrund (= surface-0)       */
@@ -176,10 +176,10 @@
 
   /* Graph-Palette light (K2-Format) */
   --graph-label: #54586a;
-  --graph-edge: #c4c8d4;
-  --graph-edge-strong: #7d8298;
+  --graph-edge: #767b91;
+  --graph-edge-strong: #54597a;
   --graph-node-sat: 62;
-  --graph-node-lum: 45;
+  --graph-node-lum: 33;
   --graph-bg: #e9eaf0;
 
   --dot-pattern: rgba(27, 29, 41, 0.05);
