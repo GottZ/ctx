@@ -122,6 +122,10 @@ func main() {
 		os.Exit(runSecretDecrypt(os.Stdin, os.Stdout, os.Stderr))
 	}
 
+	// Hidden overview-rebuild worker mode (E-A, design/05 §4.7): never
+	// returns when argv[1] == overview.WorkerCommand (see overviewworker.go).
+	dispatchOverviewWorkerMode()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
@@ -259,6 +263,9 @@ func main() {
 	// Installed before Run for the same boot happens-before contract.
 	projectHub := events.NewProjectHub(ctx, pool, cfgStore)
 	scheduler.SetProjectHub(projectHub)
+	// E-A: wire the overview worker argv (the own binary's hidden subcommand)
+	// under the same boot happens-before as SetBlocktypeRegistry.
+	wireOverviewWorkerArgv(scheduler)
 	go scheduler.Run(ctx)
 
 	// HTTP server. ListenAddr is restart-only, read once from the effective

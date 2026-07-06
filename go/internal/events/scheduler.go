@@ -164,6 +164,13 @@ type Scheduler struct {
 	// triggered via API after boot (audit). Before Run: context.Background().
 	runCtxMu sync.Mutex
 	runCtx   context.Context
+
+	// overviewWorkerArgv is the E-A worker child argv the overview rebuild
+	// spawns (SetOverviewWorkerArgv; production {os.Executable(),
+	// overview.WorkerCommand}, wired at boot in cmd/ctxd). nil = every
+	// rebuild stays in-process (pre-E-A behaviour + fallback target).
+	// Boot happens-before contract, never mutated after Run.
+	overviewWorkerArgv []string
 }
 
 // SetDreamMode sets the dream operating mode and optional silent interval.
@@ -789,8 +796,14 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// current corpus every block lies inside owned, so the default tenant's
 	// scoped run equals the global run; future drift shows up in the
 	// NodeCount log below and fails the B1-M2 integration assert.
+	// E-A (design/05 §4.7): the rebuild runs in a worker child process when
+	// one is wired (SetOverviewWorkerArgv) — result-identical by the fixed-
+	// seed determinism contract — and falls back in-process when the child
+	// cannot be started. rctx bounds BOTH paths: the child is killed on
+	// timeout (CommandContext), the in-process path keeps the documented
+	// Modularize goroutine leak until E-B retires it.
 	start := time.Now()
-	stats, err := overview.Rebuild(rctx, s.pool, overview.Options{
+	stats, err := s.executeOverviewRebuild(rctx, overview.Options{
 		Resolution:    cfg.GraphOverview.Resolution,
 		VisibleTypes:  typeSet.VisibleTypes(),
 		OverviewTypes: typeSet.OverviewTypes(),
