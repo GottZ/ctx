@@ -1312,21 +1312,29 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 	}
 
 	embedText := title + "\n\n" + content
-	start := time.Now()
 	// pool=nil: document embeddings land in the block row, not the cache.
 	// MW5: background admission per attempt (design/01 §4.6 N3) — the
 	// scheduler backfill waits AT THE TARGET and any interactive embed
 	// enqueued meanwhile overtakes it between two blocks (fresh seq per
 	// acquire, E-U5(a) structural relief). MW9: the wait happens in
 	// acquireBackfillLease above; under the tx the guard hands the held
-	// lease through and answers follow-ups non-blocking (Q-I3).
+	// lease through and answers follow-ups non-blocking (Q-I3). MW11: the
+	// telemetry rows below take their class from the SAME guarded admission.
 	vec, served, attempts, wired, err := embedcache.EmbedChain(
 		ctx, nil, chain, role, embedText, embed.PrefixDocument,
 		embedcache.ReportFunc(router.Report), guarded)
 	if wired {
 		// "" → NULL: scheduler backfill is background, no request-bound caller (T35b).
+		// MW11: duration/queue_wait derive from the attempts (§4.4a).
 		llm.LogEmbedWire(s.pool, "embed-backfill", role, required, served, attempts,
-			time.Since(start), []string{blockID}, err, "")
+			[]string{blockID}, err, "", guarded.Class)
+	} else if err != nil {
+		// K9 rejection line (MW11, design/05 §3.2): a never-admitted
+		// background acquire (queue_full/acquire_expired) persists its
+		// futile wait — without it, backfill starvation under permanent
+		// interactive demand would produce exactly zero rows. Every other
+		// no-wire failure is filtered inside RecordRejection (doctrine §4.3).
+		llm.RecordRejection(s.pool, "embed-backfill", err, guarded.Class)
 	}
 	if err != nil {
 		if errors.Is(err, dispatch.ErrWouldBlock) {

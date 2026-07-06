@@ -28,6 +28,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -113,10 +114,11 @@ func TestChainAndEmbed_AttributesAPIKeyID(t *testing.T) {
 
 	// --- LogEmbedWire (embed path): foreground carries the key, background NULL. ---
 	// served=nil keeps the row minimal (no ModelFor lookup); api_key_id is what we assert.
+	wireAttempts := []embedcache.WireAttempt{{Backend: "b", Class: "ok", Ms: 1, WaitMs: 0}}
 	llm.LogEmbedWire(pool, "query-embed", backends.RoleEmbed, backends.SensInternal,
-		nil, 1, time.Millisecond, []string{"00000000-0000-0000-0000-000000000001"}, nil, attrKey)
+		nil, wireAttempts, []string{"00000000-0000-0000-0000-000000000001"}, nil, attrKey, dispatch.ClassInteractive)
 	llm.LogEmbedWire(pool, "embed-backfill", backends.RoleEmbed, backends.SensInternal,
-		nil, 1, time.Millisecond, []string{"00000000-0000-0000-0000-000000000002"}, nil, "")
+		nil, wireAttempts, []string{"00000000-0000-0000-0000-000000000002"}, nil, "", dispatch.ClassBackground)
 	waitForPipelineRows(t, pool, "query-embed", 1)
 	waitForPipelineRows(t, pool, "embed-backfill", 1)
 

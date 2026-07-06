@@ -369,6 +369,12 @@ func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs [
 			return streamOutcome{backend: b, model: model, err: admErr}
 		}
 
+		// Lease wait of THIS attempt (admitted − enqueued, the single
+		// queue_wait_ms source — design/05 §3.2, MW11). st below starts
+		// AFTER admission, so elapsed is wait-free by construction (§4.4a)
+		// and the wait travels as its own column.
+		waitMs := lease.WaitDur().Milliseconds()
+
 		st := e.now()
 		res, err := func() (*llm.StreamResult, error) {
 			// defer is the only allowed release form (B1: panic-safe) — it
@@ -396,7 +402,7 @@ func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs [
 		}()
 		elapsed := e.now().Sub(st)
 		dur := elapsed.Milliseconds()
-		e.recordLLM(sessID, apiKeyID, required, b, model, i+1, iter, elapsed, res, err)
+		e.recordLLM(sessID, apiKeyID, required, b, model, i+1, iter, elapsed, waitMs, adm.Class, res, err)
 		if err == nil {
 			return streamOutcome{result: res, backend: b, model: model, served: true, partial: partial.String(), durationMs: dur}
 		}
@@ -491,6 +497,11 @@ func launderError(err error, b backends.Backend) map[string]any {
 	return map[string]any{"code": class.String(), "backend": b.Name, "retryable": class.Next()}
 }
 
+// recordEntry is the llmlog write seam (pattern: the dream chatJSON seam) —
+// the MW11 stream telemetry probe captures the entry to assert the wait-free
+// duration/queue_wait split without a DB. Production value: llmlog.Record.
+var recordEntry = llmlog.Record
+
 // recordLLM logs one physical model call to context_llm_log, METADATA-ONLY:
 // RequestSystem/RequestUser/ResponseContent stay EMPTY by construction (§3.6/R9).
 // Every chat call carries the WHOLE msgs history, and context_llm_log is
@@ -498,7 +509,12 @@ func launderError(err error, b backends.Backend) map[string]any {
 // would lay whole conversations there N-fold, breaking the DELETE promise (§3.3).
 // One row per physical attempt (failover provenance: Host = the backend that
 // actually answered). Fire-and-forget; a nil pool (unit tests) is a no-op.
-func (e *Engine) recordLLM(sessID, apiKeyID string, required backends.Sensitivity, b backends.Backend, model string, attempt, iter int, elapsed time.Duration, res *llm.StreamResult, err error) {
+// MW11 (design/05 §4.4b stream row): waitMs is the attempt's lease wait —
+// persisted via pointer, 0 is a real measurement (pass-through admission,
+// B-R4) — and class is the caller-bound admission class (constant
+// interactive on this engine). No dispatch_abort here by the class
+// invariant: the dispatcher never cancels interactive leases (I-D1).
+func (e *Engine) recordLLM(sessID, apiKeyID string, required backends.Sensitivity, b backends.Backend, model string, attempt, iter int, elapsed time.Duration, waitMs int64, class dispatch.Class, res *llm.StreamResult, err error) {
 	entry := llmlog.Entry{
 		Pipeline:            "web-chat",
 		Model:               model,
@@ -511,6 +527,8 @@ func (e *Engine) recordLLM(sessID, apiKeyID string, required backends.Sensitivit
 		RequiredSensitivity: string(required),
 		Attempt:             attempt,
 		APIKeyID:            apiKeyID,
+		QueueWaitMs:         &waitMs,
+		DispatchClass:       class.String(),
 		Metadata:            map[string]any{"session_id": sessID, "iteration": iter},
 	}
 	if res != nil {
@@ -518,7 +536,7 @@ func (e *Engine) recordLLM(sessID, apiKeyID string, required backends.Sensitivit
 		entry.CompletionTokens = res.CompletionTokens
 		entry.Metadata["tool_calls"] = len(res.ToolCalls)
 	}
-	llmlog.Record(e.pool, entry)
+	recordEntry(e.pool, entry)
 }
 
 func (e *Engine) tokenClamp(b backends.Backend, budgetLeft int) int {

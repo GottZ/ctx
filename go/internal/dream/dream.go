@@ -688,14 +688,20 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 	for _, kw := range keywords {
 		// Embed the keyword for semantic search. Cached by (hash(prefix||kw), model) —
 		// Dream keywords repeat heavily across cycles (domain vocabulary, proper nouns).
-		start := time.Now()
+		eadm := r.EmbedAdmit()
 		kwEmbedding, served, attempts, wired, err := embedcache.EmbedChain(
 			ctx, pool, chain, embedRole, kw, embed.PrefixQuery,
-			embedcache.ReportFunc(r.Report), r.EmbedAdmit())
+			embedcache.ReportFunc(r.Report), eadm)
 		if wired {
 			// "" → NULL: dream keyword-embed is background, no caller (T35b).
+			// MW11: duration/queue_wait derive from the attempts (§4.4a).
 			llm.LogEmbedWire(pool, "dream-keyword-embed", embedRole, source.Sensitivity,
-				served, attempts, time.Since(start), []string{source.ID}, err, "")
+				served, attempts, []string{source.ID}, err, "", eadm.Class)
+		} else if err != nil {
+			// K9 rejection line (MW11, design/05 §3.2): a never-admitted
+			// background acquire persists its futile wait; every other
+			// no-wire failure is filtered inside RecordRejection (§4.3).
+			llm.RecordRejection(pool, "dream-keyword-embed", err, eadm.Class)
 		}
 		if err != nil {
 			embedFailures++

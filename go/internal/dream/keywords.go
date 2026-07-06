@@ -103,7 +103,7 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 			DreamVersion:  &dreamVer,
 			Metadata:      map[string]any{"attempt": attempt},
 		}
-		applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, attempts)
+		r.applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, attempts, err)
 		if resp != nil {
 			entry.ResponseContent = resp.Message.Content
 			entry.CompletionTokens = resp.EvalCount

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
@@ -160,6 +161,25 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming 
 // Fail-open: any error (transport, malformed response, index mismatch) returns
 // the input results UNCHANGED plus the error for the caller to log.
 //
+// RerankWire is the dispatch/wire telemetry of the ONE cross-encoder call
+// (MW11, design/05 §4.4a/§4.4b rerank row) — a RETURN extension rather than
+// a callback: the handler builds its llmlog row after the call anyway, and a
+// value return keeps the fail-open error contract untouched. Wired=false
+// covers every path without a lease (early-outs, rejected admission): the
+// caller must not fabricate wait/duration columns there.
+type RerankWire struct {
+	// Wired: a lease was acquired and the physical call ran (even if it
+	// failed on the wire).
+	Wired bool
+	// WaitMs is the lease wait (admitted − enqueued, §3.2) — 0 is a real
+	// measurement in the pass-through state (B-R4).
+	WaitMs int64
+	// WireDur is the WAIT-FREE span of the physical call (§4.4a): the clock
+	// starts after admission — the caller's old clock around the whole
+	// function would have counted the lease wait into duration_ms.
+	WireDur time.Duration
+}
+
 // MW5 admission (design/01 §4.6 N4): the ONE sidecar wire call runs under a
 // lease on the sidecar origin, acquired after the early-outs (no lease
 // without wire contact — the mirror of the embed cache-hit clause) with
@@ -169,13 +189,13 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming 
 // Classify, no health report, no llmlog row). The sidecar's reported
 // usage.prompt_tokens charge into the lease (MW22/C1); a server without
 // counts stays uncharged.
-func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs int, blendWeight float64, query string, results []SearchResult, adm llm.Admission) ([]SearchResult, error) {
+func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs int, blendWeight float64, query string, results []SearchResult, adm llm.Admission) ([]SearchResult, RerankWire, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("cross-encoder rerank: skipping, fewer than min results",
 			"result_count", len(results),
 			"min_required", RerankMinResults,
 		)
-		return results, nil
+		return results, RerankWire{}, nil
 	}
 	if maxDocs <= 0 {
 		maxDocs = RerankCrossEncoderMaxDocs
@@ -199,8 +219,12 @@ func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs
 
 	lease, runCtx, admErr := adm.Acquire(ctx, &backends.Backend{Host: host}, backends.RoleRerank, rerank.Timeout)
 	if admErr != nil {
-		return results, admErr // terminal doctrine §4.3: not an attempt — caller skips Classify/health/llmlog
+		return results, RerankWire{}, admErr // terminal doctrine §4.3: not an attempt — caller skips Classify/health/llmlog
 	}
+	// Lease wait captured before the wire call; the clock below starts
+	// AFTER admission so WireDur is wait-free (design/05 §4.4a, MW11).
+	tel := RerankWire{Wired: true, WaitMs: lease.WaitDur().Milliseconds()}
+	start := time.Now()
 	logits, err := func() ([]float64, error) {
 		// defer is the only allowed release form (B1: panic-safe).
 		defer lease.Release()
@@ -210,11 +234,12 @@ func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs
 		}
 		return logits, err
 	}()
+	tel.WireDur = time.Since(start)
 	if err != nil {
-		return results, fmt.Errorf("cross-encoder rerank: %w", err)
+		return results, tel, fmt.Errorf("cross-encoder rerank: %w", err)
 	}
 	if len(logits) != len(docsToRerank) {
-		return results, fmt.Errorf("cross-encoder rerank: score count %d != doc count %d", len(logits), len(docsToRerank))
+		return results, tel, fmt.Errorf("cross-encoder rerank: score count %d != doc count %d", len(logits), len(docsToRerank))
 	}
 
 	// Raw logits -> (0,1) via sigmoid before the shared blend.
@@ -223,7 +248,7 @@ func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs
 		scores[i] = 1.0 / (1.0 + math.Exp(-l))
 	}
 
-	return applyRerankScores(results, scores, len(docsToRerank), blendWeight), nil
+	return applyRerankScores(results, scores, len(docsToRerank), blendWeight), tel, nil
 }
 
 // parseRerankScores extracts a JSON array of integers from the LLM response.

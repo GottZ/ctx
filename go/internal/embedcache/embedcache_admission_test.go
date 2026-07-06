@@ -182,8 +182,8 @@ func TestEmbedChainAcquireEqualsWireCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmbedChain: %v", err)
 	}
-	if len(vec) != embed.TargetDims || served == nil || served.Name != "up" || attempts != 2 || !wired {
-		t.Fatalf("outcome = served %v attempts %d wired %v", served, attempts, wired)
+	if len(vec) != embed.TargetDims || served == nil || served.Name != "up" || len(attempts) != 2 || !wired {
+		t.Fatalf("outcome = served %v attempts %d wired %v", served, len(attempts), wired)
 	}
 	reqs := rec.recorded()
 	if len(reqs) != 2 {
@@ -227,8 +227,8 @@ func TestEmbedChainCacheHitAcquiresNoLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmbedChain: %v", err)
 	}
-	if wired || served != nil || attempts != 0 || len(vec) != embed.TargetDims {
-		t.Fatalf("cache hit outcome = wired %v served %v attempts %d", wired, served, attempts)
+	if wired || served != nil || len(attempts) != 0 || len(vec) != embed.TargetDims {
+		t.Fatalf("cache hit outcome = wired %v served %v attempts %d", wired, served, len(attempts))
 	}
 	if got := len(rec.recorded()); got != 0 {
 		t.Fatalf("acquires on cache hit = %d, want 0 (I-D1 cache clause)", got)
@@ -257,8 +257,8 @@ func TestEmbedChainRejectionIsTerminal(t *testing.T) {
 	if err == nil || !errors.Is(err, dispatch.ErrQueueFull) || !dispatch.IsRejection(err) {
 		t.Fatalf("err = %v, want wrapped dispatch.ErrQueueFull rejection", err)
 	}
-	if wired || served != nil || attempts != 0 {
-		t.Fatalf("rejection outcome = wired %v served %v attempts %d, want no attempt", wired, served, attempts)
+	if wired || served != nil || len(attempts) != 0 {
+		t.Fatalf("rejection outcome = wired %v served %v attempts %d, want no attempt", wired, served, len(attempts))
 	}
 	if srv.hits() != 0 {
 		t.Fatalf("wire hits after rejection = %d, want 0 (terminal, no failover)", srv.hits())

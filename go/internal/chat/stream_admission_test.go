@@ -16,9 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -303,5 +306,133 @@ func TestRunStreamRejectionIsTerminal(t *testing.T) {
 	ev := sink.last("error")
 	if ev == nil || ev["code"] != "saturated" || ev["retryable"] != true {
 		t.Fatalf("error event = %v, want code saturated retryable true", ev)
+	}
+}
+
+// TestRunStreamWaitFreeTelemetrySplit is the §4.4a stream probe (MW11,
+// design/05 A5-W5 gate): a held slot forces a real queue wait W — the
+// web-chat row must carry queue_wait_ms == ~W while duration_ms stays the
+// wait-free stream span (the clock starts AFTER admission), NOT ≥ W. The
+// entry is captured via the recordEntry seam — no DB.
+func TestRunStreamWaitFreeTelemetrySplit(t *testing.T) {
+	var mu sync.Mutex
+	var entries []llmlog.Entry
+	orig := recordEntry
+	recordEntry = func(_ *pgxpool.Pool, e llmlog.Entry) {
+		mu.Lock()
+		entries = append(entries, e)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { recordEntry = orig })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, sseDelta("hi")+sseTail)
+	}))
+	defer srv.Close()
+
+	d := dispatch.New(nil, dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	origin, err := dispatch.NormalizeOrigin(srv.URL)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	d.UpdatePolicy(dispatch.Policy{Targets: map[string]dispatch.TargetPolicy{origin: {Slots: 1}}})
+	adm := interactiveStreamAdmission(t, d)
+
+	// Hold the single slot so the stream acquire has to queue.
+	holder, _, err := d.Acquire(context.Background(), dispatch.Request{
+		Target: dispatch.Target{Origin: srv.URL}, Class: dispatch.ClassInteractive, Role: "chat",
+	})
+	if err != nil {
+		t.Fatalf("holder acquire: %v", err)
+	}
+
+	e := streamEngine()
+	outcome := make(chan streamOutcome, 1)
+	go func() {
+		outcome <- e.runStream(context.Background(), []backends.Backend{streamBackend("b", srv.URL)},
+			[]llm.ChatMsg{{Role: "user", Content: "hi"}}, false, 0, 1, "sess", "key-s", backends.SensPublic, adm, newEventSink())
+	}()
+
+	waiting := func() bool {
+		for _, ts := range d.Snapshot().Targets {
+			if ts.Origin == origin && ts.Interactive.Waiting == 1 {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !waiting() {
+		if time.Now().After(deadline) {
+			t.Fatal("stream acquire never queued")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	const holdMs = 60
+	time.Sleep(holdMs * time.Millisecond)
+	holder.Release()
+
+	so := <-outcome
+	if !so.served || so.err != nil {
+		t.Fatalf("outcome = served %v err %v", so.served, so.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(entries) != 1 {
+		t.Fatalf("recorded entries = %d, want 1 (one row per physical attempt)", len(entries))
+	}
+	entry := entries[0]
+	if entry.QueueWaitMs == nil || *entry.QueueWaitMs < holdMs-10 {
+		t.Errorf("queue_wait_ms = %v, want >= ~%d (the forced wait)", entry.QueueWaitMs, holdMs-10)
+	}
+	if entry.QueueWaitMs != nil && entry.Duration.Milliseconds() >= *entry.QueueWaitMs {
+		t.Errorf("duration = %v >= wait %dms — duration_ms must be wait-free (§4.4a)", entry.Duration, *entry.QueueWaitMs)
+	}
+	if entry.DispatchClass != dispatch.ClassInteractive.String() {
+		t.Errorf("dispatch_class = %q, want interactive", entry.DispatchClass)
+	}
+	if entry.DispatchAbort != "" {
+		t.Errorf("dispatch_abort = %q, want empty (the dispatcher never cancels interactive leases)", entry.DispatchAbort)
+	}
+}
+
+// TestRunStreamZeroWaitIsARealValue pins B-R4 on the stream row: a
+// pass-through admission records queue_wait_ms 0 via pointer — never nil —
+// so immediate admissions stay inside every percentile aggregation.
+func TestRunStreamZeroWaitIsARealValue(t *testing.T) {
+	var mu sync.Mutex
+	var entries []llmlog.Entry
+	orig := recordEntry
+	recordEntry = func(_ *pgxpool.Pool, e llmlog.Entry) {
+		mu.Lock()
+		entries = append(entries, e)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { recordEntry = orig })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, sseDelta("hi")+sseTail)
+	}))
+	defer srv.Close()
+
+	d := dispatch.New(nil, dispatch.DefaultSettings()) // pass-through: no policy
+	t.Cleanup(d.Close)
+	adm := interactiveStreamAdmission(t, d)
+	e := streamEngine()
+	so := e.runStream(context.Background(), []backends.Backend{streamBackend("b", srv.URL)},
+		[]llm.ChatMsg{{Role: "user", Content: "hi"}}, false, 0, 1, "sess", "key-s", backends.SensPublic, adm, newEventSink())
+	if !so.served || so.err != nil {
+		t.Fatalf("outcome = served %v err %v", so.served, so.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(entries) != 1 || entries[0].QueueWaitMs == nil {
+		t.Fatalf("entries = %d / wait %v, want 1 row with a NON-nil zero wait (B-R4)", len(entries), entries)
+	}
+	if *entries[0].QueueWaitMs > 50 {
+		t.Fatalf("pass-through wait = %dms, want ~0", *entries[0].QueueWaitMs)
 	}
 }

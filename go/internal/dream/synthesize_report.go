@@ -96,7 +96,7 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, opt
 		dailySynthesisSystemPrompt, userPrompt, opts, DailySynthesisTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
-	applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, served, attempts)
+	r.applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, served, attempts, err)
 
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content

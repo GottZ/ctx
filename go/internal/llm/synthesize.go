@@ -435,7 +435,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 		// background acquire_expired/queue_full (MW10; the scheduler's
 		// daily-synthesis path is background, the query path is interactive
 		// and writes nothing here by the class invariant).
-		recordRejection(db, "query-synthesize", err, adm.Class)
+		RecordRejection(db, "query-synthesize", err, adm.Class)
 		return nil, fmt.Errorf("llm: synthesize: %w", err)
 	}
 

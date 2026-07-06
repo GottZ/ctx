@@ -100,12 +100,15 @@ func TestRerankCrossEncoderAcquireEqualsWireAndCharges(t *testing.T) {
 	rec := newCERecAdmitter(t)
 
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
-	out, err := RerankCrossEncoder(context.Background(), url, "", "m", 50, 1.0, "q", results, ceAdmission(t, rec))
+	out, tel, err := RerankCrossEncoder(context.Background(), url, "", "m", 50, 1.0, "q", results, ceAdmission(t, rec))
 	if err != nil {
 		t.Fatalf("RerankCrossEncoder: %v", err)
 	}
 	if out[0].RerankScore == nil {
 		t.Fatal("RerankScore not set — sidecar response was not consumed")
+	}
+	if !tel.Wired || tel.WaitMs < 0 || tel.WireDur <= 0 {
+		t.Fatalf("telemetry = %+v, want wired with wait + wire span (MW11)", tel)
 	}
 	mu.Lock()
 	gotHits := *hits
@@ -141,7 +144,7 @@ func TestRerankCrossEncoderNoUsageStaysUncharged(t *testing.T) {
 	t.Cleanup(d.Close)
 
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
-	if _, err := RerankCrossEncoder(context.Background(), url, "", "m", 50, 1.0, "q", results, ceAdmission(t, d)); err != nil {
+	if _, _, err := RerankCrossEncoder(context.Background(), url, "", "m", 50, 1.0, "q", results, ceAdmission(t, d)); err != nil {
 		t.Fatalf("RerankCrossEncoder: %v", err)
 	}
 	snap := d.Snapshot()
@@ -163,12 +166,15 @@ func TestRerankCrossEncoderNoUsageStaysUncharged(t *testing.T) {
 func TestRerankCrossEncoderEarlyOutAcquiresNoLease(t *testing.T) {
 	rec := newCERecAdmitter(t)
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b")}
-	out, err := RerankCrossEncoder(context.Background(), "http://unused.invalid", "", "m", 50, 1.0, "q", results, ceAdmission(t, rec))
+	out, tel, err := RerankCrossEncoder(context.Background(), "http://unused.invalid", "", "m", 50, 1.0, "q", results, ceAdmission(t, rec))
 	if err != nil || len(out) != 2 {
 		t.Fatalf("early-out = %v err %v", ids(out), err)
 	}
 	if got := len(rec.recorded()); got != 0 {
 		t.Fatalf("acquires on early-out = %d, want 0", got)
+	}
+	if tel.Wired {
+		t.Fatalf("telemetry on early-out = %+v, want zero (no lease)", tel)
 	}
 }
 
@@ -181,12 +187,15 @@ func TestRerankCrossEncoderRejectionFailsOpenTerminal(t *testing.T) {
 	rec.reject = dispatch.ErrTargetSaturated
 
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
-	out, err := RerankCrossEncoder(context.Background(), url, "", "m", 50, 1.0, "q", results, ceAdmission(t, rec))
+	out, tel, err := RerankCrossEncoder(context.Background(), url, "", "m", 50, 1.0, "q", results, ceAdmission(t, rec))
 	if !llm.IsAdmissionError(err) || !errors.Is(err, dispatch.ErrTargetSaturated) {
 		t.Fatalf("err = %v, want llm.AdmissionError wrapping ErrTargetSaturated", err)
 	}
 	if got := ids(out); got[0] != "A" || got[1] != "B" || got[2] != "C" {
 		t.Fatalf("fail-open order = %v, want input order", got)
+	}
+	if tel.Wired {
+		t.Fatalf("telemetry on rejection = %+v, want zero (never admitted — the caller must not fabricate columns)", tel)
 	}
 	mu.Lock()
 	defer mu.Unlock()

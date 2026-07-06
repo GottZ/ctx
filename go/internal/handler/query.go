@@ -545,13 +545,14 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "embedding failed"})
 		return
 	}
-	embStart := time.Now()
 	embedding, embServed, embAttempts, embWired, err := embedcache.EmbedChain(
 		ctx, h.pool, embChain, backends.RoleEmbed, embedQuery, embed.PrefixQuery,
 		embedcache.ReportFunc(llm.PoolReporter(h.backendPool)), h.embedAdmission())
 	if embWired {
 		// Slim row per actual wire call — cache hits are no egress (§2.7.3).
-		h.logEmbedWire(ctx, "query-embed", querySens, embServed, embAttempts, time.Since(embStart), nil, err, ar.ApiKeyID)
+		// MW11: duration/queue_wait derive from the attempts inside
+		// LogEmbedWire (§4.4a) — no caller-side clock spanning the acquires.
+		h.logEmbedWire(ctx, "query-embed", querySens, embServed, embAttempts, nil, err, ar.ApiKeyID)
 	}
 	if err != nil {
 		slog.Error("embedding failed",
@@ -816,7 +817,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				b := chain[0]
 				model := b.ModelFor(backends.RoleRerank).Model
 				rrStart := time.Now()
-				reranked, rerr := rrf.RerankCrossEncoder(ctx, b.Host, b.APIKey, model, maxDocs, rerankCfg.BlendWeight, originalQuery, results, h.admission())
+				reranked, rerankTel, rerr := rrf.RerankCrossEncoder(ctx, b.Host, b.APIKey, model, maxDocs, rerankCfg.BlendWeight, originalQuery, results, h.admission())
 				if llm.IsAdmissionError(rerr) {
 					// Acquire-error doctrine (MW5, design/01 §4.3): a rejected
 					// admission is NOT an attempt — no Classify, no health
@@ -837,19 +838,8 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 					if docCount > maxDocs {
 						docCount = maxDocs
 					}
-					llmlog.Record(h.pool, llmlog.Entry{
-						Pipeline:            "query-rerank",
-						Model:               model,
-						Host:                b.Host,
-						Duration:            time.Since(rrStart),
-						Err:                 rerr,
-						BlockIDs:            sensIDs[:docCount],
-						RequiredSensitivity: string(required),
-						Attempt:             1,
-						BackendName:         b.Name,
-						BackendTrust:        string(b.Trust),
-						BackendLocality:     b.Locality,
-					})
+					llmlog.Record(h.pool, rerankLogEntry(model, b, required,
+						sensIDs[:docCount], rerankTel, time.Since(rrStart), rerr, h.admission().Class))
 				}
 			}
 		} else {
@@ -1093,7 +1083,6 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		}
 
 		embedText := title + "\n\n" + content
-		start := time.Now()
 		// pool=nil: document embeddings land in the block row, not the cache
 		// (today's semantics — the cache is for repeated query/keyword text).
 		vec, served, attempts, wired, err := embedcache.EmbedChain(
@@ -1108,7 +1097,7 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			// embed calls). Treated as background, same as the scheduler backfill.
 			// Reversible if backfill cost should follow the triggering caller (then
 			// backfillPending gains an apiKeyID param alongside its T34 scope param).
-			h.logEmbedWire(ctx, "embed-backfill", required, served, attempts, time.Since(start), []string{blockID}, err, "")
+			h.logEmbedWire(ctx, "embed-backfill", required, served, attempts, []string{blockID}, err, "")
 		}
 		if err != nil {
 			slog.Warn("query backfill: embed failed", "block_id", blockID, "error", err)
@@ -1183,6 +1172,41 @@ func (h *QueryHandler) granteeScopeFloor(ctx context.Context, tenantID string, f
 	return maxFloor
 }
 
+// rerankLogEntry builds the query-rerank llmlog row (MW11, design/05 §4.4b
+// rerank row). Under a WIRED call, duration_ms is the wait-free physical
+// span and queue_wait_ms the lease wait (§4.4a — the caller-side clock
+// starts before the acquire and would double-count the wait under
+// enforcement). A non-wired outcome (the early-outs inside
+// RerankCrossEncoder: <3 results, empty doc set) keeps the caller span —
+// there was no lease, nothing inflates — and carries no queue_wait_ms
+// (fabricating a 0 there would pollute the wait distribution with rows
+// that never entered a queue). Class is the handler's admission binding
+// (interactive; rejected admissions never reach this builder).
+func rerankLogEntry(model string, b backends.Backend, required backends.Sensitivity,
+	blockIDs []string, tel rrf.RerankWire, callerSpan time.Duration, rerr error, class dispatch.Class,
+) llmlog.Entry {
+	entry := llmlog.Entry{
+		Pipeline:            "query-rerank",
+		Model:               model,
+		Host:                b.Host,
+		Duration:            callerSpan,
+		Err:                 rerr,
+		BlockIDs:            blockIDs,
+		RequiredSensitivity: string(required),
+		Attempt:             1,
+		BackendName:         b.Name,
+		BackendTrust:        string(b.Trust),
+		BackendLocality:     b.Locality,
+		DispatchClass:       class.String(),
+	}
+	if tel.Wired {
+		entry.Duration = tel.WireDur
+		w := tel.WaitMs
+		entry.QueueWaitMs = &w
+	}
+	return entry
+}
+
 // rerankRequired folds the operation requirement of the rerank stage:
 // max(query sensitivity, the candidates that actually go to the reranker —
 // the top maxDocs, not the full 200-candidate set).
@@ -1201,9 +1225,13 @@ func rerankRequired(querySens backends.Sensitivity, results []rrf.SearchResult, 
 
 // logEmbedWire records one slim llmlog row for an embed wire-call sequence
 // (no bodies; block_ids where the call embedded block content — §2.7.3).
-// served is nil when every attempt failed.
-func (h *QueryHandler) logEmbedWire(_ context.Context, pipeline string, required backends.Sensitivity, served *backends.Backend, attempts int, duration time.Duration, blockIDs []string, err error, apiKeyID string) {
-	llm.LogEmbedWire(h.pool, pipeline, backends.RoleEmbed, required, served, attempts, duration, blockIDs, err, apiKeyID)
+// served is nil when every attempt failed. MW11: duration/queue_wait/abort
+// derive from the attempts (§4.4a); the class is this handler's admission
+// binding — interactive for BOTH pipelines here, including the pre-search
+// backfill (E-U5(a): it runs inside the request latency; the dispatch class
+// is deliberately separate from the T35b llmlog attribution).
+func (h *QueryHandler) logEmbedWire(_ context.Context, pipeline string, required backends.Sensitivity, served *backends.Backend, attempts []embedcache.WireAttempt, blockIDs []string, err error, apiKeyID string) {
+	llm.LogEmbedWire(h.pool, pipeline, backends.RoleEmbed, required, served, attempts, blockIDs, err, apiKeyID, h.embedAdmission().Class)
 }
 
 // filterSuperseded removes blocks from results that are superseded by another block

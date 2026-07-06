@@ -9,6 +9,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -71,7 +72,7 @@ func (a Admission) Acquire(ctx context.Context, b *backends.Backend, role string
 // no ChainAttempt entry, no Classify, no health report, and the walk ends
 // TERMINALLY (no failover spill onto a following chain link, e.g. openrouter
 // under local saturation). The ONE deliberate exception is the K9 rejection
-// TELEMETRY line (MW10, design/05 §3.2): recordRejection persists a
+// TELEMETRY line (MW10, design/05 §3.2): RecordRejection persists a
 // never-admitted background acquire_expired/queue_full — everything else
 // about the doctrine stays. Unwrap keeps errors.Is against the dispatch
 // sentinels (IsRejection) and ctx errors intact.
@@ -321,6 +322,8 @@ func applyDispatchTelemetry(entry *llmlog.Entry, attempts []ChainAttempt, class 
 // interactive rejections (cap ladder — the error goes to the caller, the
 // class invariant keeps scheduler traces out of tenant-visible rows) and
 // parent cancels (shutdown/dream-off are lifecycle, not admission verdicts).
+// Since MW11 the embed walk's mirror error type is recognized too — the K9
+// line has ONE shape regardless of which pipeline family was rejected.
 func rejectionEntry(pipeline string, err error, class dispatch.Class) (llmlog.Entry, bool) {
 	if class != dispatch.ClassBackground {
 		return llmlog.Entry{}, false
@@ -334,15 +337,22 @@ func rejectionEntry(pipeline string, err error, class dispatch.Class) (llmlog.En
 	default:
 		return llmlog.Entry{}, false
 	}
+	var host, backend string
+	var w int64
 	var ae *AdmissionError
-	if !errors.As(err, &ae) {
+	var eae *embedcache.AdmissionError
+	switch {
+	case errors.As(err, &ae):
+		host, backend, w = ae.Host, ae.Backend, ae.WaitMs
+	case errors.As(err, &eae):
+		host, backend, w = eae.Host, eae.Backend, eae.WaitMs
+	default:
 		return llmlog.Entry{}, false
 	}
-	w := ae.WaitMs
 	return llmlog.Entry{
 		Pipeline:      pipeline,
-		Host:          ae.Host,
-		BackendName:   ae.Backend,
+		Host:          host,
+		BackendName:   backend,
 		Err:           err,
 		QueueWaitMs:   &w,
 		DispatchClass: class.String(),
@@ -351,13 +361,45 @@ func rejectionEntry(pipeline string, err error, class dispatch.Class) (llmlog.En
 	}, true
 }
 
-// recordRejection persists the K9 rejection line (async, fire-and-forget
+// RecordRejection persists the K9 rejection line (async, fire-and-forget
 // like every llmlog write). Safe on every acquire-failure path — the
-// non-line cases are filtered inside rejectionEntry.
-func recordRejection(db *pgxpool.Pool, pipeline string, err error, class dispatch.Class) {
+// non-line cases are filtered inside rejectionEntry. Exported since MW11:
+// the background embed call sites (scheduler backfill, dream keyword
+// embeds) hook their never-admitted acquires here — EmbedChain's wired
+// flag stays false on that path, so their regular llmlog gate writes
+// nothing and starvation would otherwise be invisible.
+func RecordRejection(db *pgxpool.Pool, pipeline string, err error, class dispatch.Class) {
 	if entry, ok := rejectionEntry(pipeline, err, class); ok {
 		llmlog.Record(db, entry)
 	}
+}
+
+// ApplyDispatchOutcome is the dispatch-outcome funnel for SELF-LOGGING
+// pipelines — call sites that build and defer-Record their own llmlog entry
+// (the five dream chat pipelines via dream's applyChainTelemetry, design/05
+// §4.4b: ONE place, five pipelines). Two halves:
+//
+//   - Walk reached the wire (or failed without an admission error): the
+//     MW10 column derivation from the row-defining attempt, identical to
+//     ChainCall.Do (applyDispatchTelemetry).
+//   - Walk ended by a NEVER-ADMITTED acquire (no wire contact): the entry
+//     must not persist as a wire-shaped error row (acquire-error doctrine
+//     design/01 §4.3 — closes the MW3 gap where the sites' deferred Record
+//     fired anyway). A background queue_full/acquire_expired rejection
+//     REPLACES the entry with the uniform K9 line (bodies dropped, duration
+//     NULL); every other admission failure (interactive rejection, parent
+//     cancel, nil admitter) BLANKS it — llmlog.Record skips an entry
+//     without a pipeline, so the deferred Record becomes a no-op.
+func ApplyDispatchOutcome(entry *llmlog.Entry, attempts []ChainAttempt, err error, class dispatch.Class) {
+	if err != nil && len(attempts) == 0 && IsAdmissionError(err) {
+		if rej, ok := rejectionEntry(entry.Pipeline, err, class); ok {
+			*entry = rej
+		} else {
+			*entry = llmlog.Entry{}
+		}
+		return
+	}
+	applyDispatchTelemetry(entry, attempts, class)
 }
 
 // applyModelParams merges ModelSpec.Params field-wise over the code-default
@@ -423,18 +465,39 @@ func thinkModeOf(think *bool) backends.ThinkMode {
 // full backend/trust/locality/required/attempt telemetry + block_ids, NO
 // bodies (§2.7.3 — embeds carry no prompt worth storing). Callers gate on
 // EmbedChain's wired flag — cache hits contact no backend and log nothing.
+// MW11 (design/05 §4.4a/§4.4b): the row derives its telemetry columns from
+// the walk's attempts — duration_ms is the row-defining attempt's WAIT-FREE
+// wire span (the old caller-measured sequence span contained every lease
+// wait and would double-count queue_wait_ms under enforcement), the full
+// per-attempt slice lands in metadata.chain, and class travels from the
+// caller's admission binding.
 func LogEmbedWire(db *pgxpool.Pool, pipeline, role string, required backends.Sensitivity,
-	served *backends.Backend, attempts int, duration time.Duration, blockIDs []string, err error,
-	apiKeyID string,
+	served *backends.Backend, attempts []embedcache.WireAttempt, blockIDs []string, err error,
+	apiKeyID string, class dispatch.Class,
 ) {
+	llmlog.Record(db, embedWireEntry(pipeline, role, required, served, attempts, blockIDs, err, apiKeyID, class))
+}
+
+// embedWireEntry builds the embed row (split from LogEmbedWire so the column
+// derivation is probe-able without a DB — Record is fire-and-forget).
+func embedWireEntry(pipeline, role string, required backends.Sensitivity,
+	served *backends.Backend, attempts []embedcache.WireAttempt, blockIDs []string, err error,
+	apiKeyID string, class dispatch.Class,
+) llmlog.Entry {
+	chain := make([]ChainAttempt, len(attempts))
+	for i, a := range attempts {
+		chain[i] = ChainAttempt{Backend: a.Backend, Class: a.Class, Ms: a.Ms, WaitMs: a.WaitMs}
+	}
 	entry := llmlog.Entry{
 		Pipeline:            pipeline,
-		Duration:            duration,
 		Err:                 err,
 		BlockIDs:            blockIDs,
 		RequiredSensitivity: string(required),
-		Attempt:             attempts,
+		Attempt:             len(attempts),
 		APIKeyID:            apiKeyID, // T35b: caller attribution (NULL for background backfill/dream)
+	}
+	if len(chain) > 0 {
+		entry.Metadata = map[string]any{"chain": chain}
 	}
 	if served != nil {
 		entry.Model = served.ModelFor(role).Model
@@ -443,7 +506,8 @@ func LogEmbedWire(db *pgxpool.Pool, pipeline, role string, required backends.Sen
 		entry.BackendTrust = string(served.Trust)
 		entry.BackendLocality = served.Locality
 	}
-	llmlog.Record(db, entry)
+	applyDispatchTelemetry(&entry, chain, class)
+	return entry
 }
 
 // retryAfterOf extracts the parsed Retry-After of a 429 (zero otherwise).
@@ -554,7 +618,7 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 		// Never admitted, no wire contact: no regular llmlog row
 		// (acquire-error doctrine §4.3) — only the K9 rejection line for
 		// background acquire_expired/queue_full (MW10, design/05 §3.2).
-		recordRejection(db, c.Pipeline, err, adm.Class)
+		RecordRejection(db, c.Pipeline, err, adm.Class)
 		return nil, err
 	}
 

@@ -114,7 +114,7 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 		dreamSystemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
-	applyChainTelemetry(entry, backends.RoleDream, required, served, attempts)
+	r.applyChainTelemetry(entry, backends.RoleDream, required, served, attempts, err)
 
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content

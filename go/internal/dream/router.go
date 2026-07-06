@@ -132,8 +132,19 @@ func (r *Router) EmbedAdmit() embedcache.Admission {
 // the required sensitivity, the attempt count and the full chain in
 // metadata. Body slim for credentials-class rows happens at Record time via
 // Entry.Slimmed — telemetry is never slimmed.
-func applyChainTelemetry(entry *llmlog.Entry, role string, required backends.Sensitivity,
-	served *backends.Backend, attempts []llm.ChainAttempt,
+//
+// Since MW11 this is ALSO the ONE dispatch-outcome funnel of the five dream
+// chat pipelines (design/05 §4.4b: one place, five pipelines — a Router
+// method because the class binding lives on r.Admit): queue_wait_ms/
+// dispatch_class/dispatch_abort plus the WAIT-FREE duration derive from the
+// walk's attempts (llm.ApplyDispatchOutcome — it overwrites the caller's
+// chain-walk span, which contained every lease wait, §4.4a). A walk that a
+// NEVER-ADMITTED acquire ended folds the entry per the §4.3 doctrine instead
+// of persisting a wire-shaped error row through the site's deferred Record
+// (the MW3 gap): background queue_full/acquire_expired becomes the uniform
+// K9 rejection line, everything else becomes no row at all.
+func (r *Router) applyChainTelemetry(entry *llmlog.Entry, role string, required backends.Sensitivity,
+	served *backends.Backend, attempts []llm.ChainAttempt, err error,
 ) {
 	entry.RequiredSensitivity = string(required)
 	entry.Attempt = len(attempts)
@@ -150,4 +161,7 @@ func applyChainTelemetry(entry *llmlog.Entry, role string, required backends.Sen
 		entry.BackendTrust = string(served.Trust)
 		entry.BackendLocality = served.Locality
 	}
+	// LAST on purpose: the K9/blank fold replaces the entry wholesale — the
+	// provenance stamped above only survives on rows that reached the wire.
+	llm.ApplyDispatchOutcome(entry, attempts, err, r.Admit.Class)
 }

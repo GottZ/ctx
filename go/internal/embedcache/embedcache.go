@@ -11,12 +11,14 @@ package embedcache
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/embed"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 )
@@ -54,21 +56,71 @@ type Admission struct {
 	Class    dispatch.Class
 }
 
+// AdmissionError mirrors llm.AdmissionError without importing llm (same
+// decoupling as Admission/ReportFunc above): a failed embed acquire carries
+// the K9 rejection telemetry — the rejected target and the futile wait — so
+// llm.RecordRejection can attribute the rejection line (MW11, design/05
+// §3.2). Unwrap keeps errors.Is against the dispatch sentinels intact.
+type AdmissionError struct {
+	Err error
+	// Backend/Host/WaitMs are zero-valued for the nil-admitter error
+	// (nothing waited anywhere) — the mirror of llm.AdmissionError.
+	Backend string
+	Host    string
+	WaitMs  int64
+}
+
+func (e *AdmissionError) Error() string { return e.Err.Error() }
+func (e *AdmissionError) Unwrap() error { return e.Err }
+
 // acquire leases one wire attempt on the backend's physical origin. The
 // embed path deliberately carries NO deadline hint (embed.go: wire timeout
 // removed in Welle 49; the reaper's lease_max_age fallback covers a leaked
 // lease — design/01 §4.4).
 func (a Admission) acquire(ctx context.Context, b *backends.Backend, role string) (*dispatch.Lease, context.Context, error) {
 	if a.Admitter == nil {
-		return nil, nil, fmt.Errorf("embedcache: %s call site without dispatch admitter (I-D1)", role)
+		return nil, nil, &AdmissionError{Err: fmt.Errorf("embedcache: %s call site without dispatch admitter (I-D1)", role)}
 	}
+	enqueued := time.Now()
 	// MW4 (design/03 §4.1.1): no principal parameter — the dispatcher
 	// derives it from the request ctx flowing into this acquire.
-	return a.Admitter.Acquire(ctx, dispatch.Request{
+	lease, runCtx, err := a.Admitter.Acquire(ctx, dispatch.Request{
 		Target: dispatch.Target{Origin: b.Host}, // Acquire normalizes defensively (design/01 §4.3)
 		Class:  a.Class,
 		Role:   role,
 	})
+	if err != nil {
+		return nil, nil, &AdmissionError{Err: err, Backend: b.Name, Host: b.Host, WaitMs: time.Since(enqueued).Milliseconds()}
+	}
+	return lease, runCtx, nil
+}
+
+// WireAttempt is one tried backend of an embed wire-call sequence — the
+// embed mirror of llm.ChainAttempt with the SAME JSON keys (metadata.chain
+// stays ONE vocabulary across pipelines). llm.LogEmbedWire derives the MW10
+// telemetry columns from the row-defining attempt (design/05 §3.2) and
+// stores the full slice as metadata.chain (Σ single-case forensics).
+type WireAttempt struct {
+	Backend string `json:"backend"`
+	Class   string `json:"err_class"`
+	Ms      int64  `json:"ms"`
+	WaitMs  int64  `json:"wait_ms"`
+}
+
+// abortClass classifies a dispatcher-caused cancel of one attempt's runCtx —
+// the embed-loop mirror of llm's §4.4c discrimination (MW11, design/05
+// §4.4c/B-R9): "preempted"/"reaped" via errors.Is over context.Cause
+// (wrap-safe, never sentinel identity), everything else "".
+func abortClass(runCtx context.Context) string {
+	cause := context.Cause(runCtx)
+	switch {
+	case errors.Is(cause, dispatch.ErrPreempted):
+		return llmlog.AbortPreempted
+	case errors.Is(cause, dispatch.ErrReaped):
+		return llmlog.AbortReaped
+	default:
+		return ""
+	}
 }
 
 // cacheProbe is the cache fast-path lookup, a package var as a test seam
@@ -112,19 +164,29 @@ var cacheProbe = func(ctx context.Context, pool *pgxpool.Pool, key []byte, model
 // is exactly the E-U5(a) structural overtake: a younger interactive query
 // embed passes the waiting backfill rest between two of its acquires. The
 // cache-hit fast path stays lease-free (I-D1). A failed acquire is TERMINAL
-// (doctrine §4.3): no attempt count, no Classify, no health report — and
+// (doctrine §4.3): no attempt entry, no Classify, no health report — and
 // wired stays false unless an earlier attempt DID reach the wire, so the
-// caller's llmlog gate keeps the no-wire-no-row semantics. A successful
-// attempt charges the backend-reported prompt tokens into the lease before
-// release (MW22/C1); a backend without counts stays uncharged.
-func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backend, role, text string, prefix embed.Prefix, report ReportFunc, adm Admission) (vec []float32, served *backends.Backend, attempts int, wired bool, err error) {
+// caller's llmlog gate keeps the no-wire-no-row semantics (the background
+// callers hook llm.RecordRejection on that path for the K9 line, MW11). A
+// successful attempt charges the backend-reported prompt tokens into the
+// lease before release (MW22/C1); a backend without counts stays uncharged.
+//
+// MW11 telemetry (design/05 §4.4a/§4.4b): attempts carries per attempt the
+// lease wait (admitted − enqueued, the single queue_wait_ms source) and the
+// wait-free wire span — the old caller-side clock spanned acquire+call and
+// would have double-counted the wait under enforcement. §4.4c abort rule:
+// a dispatcher-canceled attempt (cause ErrPreempted/ErrReaped on the lease's
+// runCtx) is TERMINAL — no failover onto following links and no report()
+// (the pool health state is shared with interactive, B-R9) — and carries the
+// abort kind as its class.
+func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backend, role, text string, prefix embed.Prefix, report ReportFunc, adm Admission) (vec []float32, served *backends.Backend, attempts []WireAttempt, wired bool, err error) {
 	if len(chain) == 0 {
-		return nil, nil, 0, false, fmt.Errorf("embedcache: chain is empty")
+		return nil, nil, nil, false, fmt.Errorf("embedcache: chain is empty")
 	}
 
 	key := hashKey(prefix, text)
 	if cached, hit := cacheProbe(ctx, pool, key, chain[0].ModelFor(role).Model); hit {
-		return cached, nil, 0, false, nil
+		return cached, nil, nil, false, nil
 	}
 
 	var lastErr error
@@ -132,7 +194,7 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 		b := chain[i] // copy: the model resolves per role without mutating the snapshot
 		b.Model = b.ModelFor(role).Model
 		if b.Model == "" {
-			attempts++
+			attempts = append(attempts, WireAttempt{Backend: b.Name, Class: "no_model"})
 			lastErr = fmt.Errorf("embedcache: backend %s has no model for role %s", b.Name, role)
 			continue
 		}
@@ -141,6 +203,10 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 		if admErr != nil {
 			return nil, nil, attempts, wired, fmt.Errorf("embedcache: admission: %w", admErr)
 		}
+		// Lease wait of THIS attempt, captured before the wire call; the
+		// pass-through state yields a real 0 (design/05 §3.2, B-R4).
+		waitMs := lease.WaitDur().Milliseconds()
+		start := time.Now()
 		v, werr := func() ([]float32, error) {
 			// defer is the only allowed release form (B1: panic-safe).
 			defer lease.Release()
@@ -151,9 +217,10 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 			}
 			return v, werr
 		}()
-		attempts++
+		elapsed := time.Since(start).Milliseconds()
 		wired = true
 		if werr == nil {
+			attempts = append(attempts, WireAttempt{Backend: b.Name, Class: "ok", Ms: elapsed, WaitMs: waitMs})
 			if report != nil {
 				report(b.ID, backends.ClassOK, 0)
 			}
@@ -175,7 +242,14 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 			return v, &chain[i], attempts, true, nil
 		}
 		lastErr = werr
+		// §4.4c abort rule (MW11 — BEFORE the generic Classify): terminal,
+		// no health report, abort kind instead of the generic class.
+		if abort := abortClass(runCtx); abort != "" {
+			attempts = append(attempts, WireAttempt{Backend: b.Name, Class: abort, Ms: elapsed, WaitMs: waitMs})
+			return nil, nil, attempts, true, lastErr
+		}
 		class := backends.Classify(werr, b.ProviderClass)
+		attempts = append(attempts, WireAttempt{Backend: b.Name, Class: class.String(), Ms: elapsed, WaitMs: waitMs})
 		if report != nil && class != backends.ClassCanceled {
 			report(b.ID, class, 0)
 		}
