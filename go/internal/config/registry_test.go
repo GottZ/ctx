@@ -131,6 +131,11 @@ func TestRegistryStrictSet(t *testing.T) {
 		// clocks above — a typo'd value silently defaulting would move the
 		// force-release fence unnoticed, so it aborts loudly.
 		"dispatch.preempt_release_timeout": true,
+		// MW25: the aging escape is a deliberate, capped weakening of the
+		// herald term (design/04 §4.6) — a typo'd value silently defaulting
+		// to 0 would hide an intended activation, a malformed one must never
+		// guess a weakening window, so it aborts loudly.
+		"dispatch.background_aging_after": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {

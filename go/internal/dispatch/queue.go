@@ -26,6 +26,10 @@ type waiter struct {
 	admitted bool
 	// warned dedupes the >5s interactive wait WARN across reaper ticks.
 	warned bool
+	// aged marks a background waiter admitted via the aging escape (MW25,
+	// aging.go) — carried onto the lease so a later preempt of it is
+	// distinguishable (the waste metric of the FA activation gate).
+	aged bool
 }
 
 // classQueue is the interactive wait queue of one target: per-fairness-bucket

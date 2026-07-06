@@ -28,6 +28,7 @@ func DispatchSettings(c config.DispatchConfig) dispatch.Settings {
 		LeaseReapGrace:               c.LeaseReapGrace,
 		LeaseMaxAge:                  c.LeaseMaxAge,
 		PreemptReleaseTimeout:        c.PreemptReleaseTimeout,
+		BackgroundAgingAfter:         c.BackgroundAgingAfter,
 		Fairness:                     dispatch.FairnessFIFO,
 		// UsageWindow stays zero (= package default): its config key belongs
 		// to the fairness activation wave (MW23), the Fairness pattern.

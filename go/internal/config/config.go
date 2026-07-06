@@ -618,6 +618,17 @@ type DispatchConfig struct {
 	// Go-side, healthy in milliseconds); 2 s is a ≥3-orders-of-magnitude
 	// safety factor, calibrated against preempt_release_ms_max after MW20.
 	PreemptReleaseTimeout time.Duration `key:"dispatch.preempt_release_timeout" env:"CTX_DISPATCH_PREEMPT_RELEASE_TIMEOUT" default:"2" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// BackgroundAgingAfter (bare seconds) arms the FA anti-starvation aging
+	// escape (MW25, design/04 §4.6; key renamed from background_max_wait per
+	// K6 — the semantics are an aging ESCAPE, never a wait-abort budget): a
+	// background acquire waiting longer may break the herald term once. It
+	// NEVER overtakes a waiting interactive acquire, and on targets with an
+	// interactive role it requires preempt_background=true (coupling
+	// invariant, F-B7 — the only tag-1-built exception to the herald term,
+	// K7). 0 (default) = off: herald term unweakened, behavior byte-identical.
+	// Activation is an operations decision under the aged-preempt waste
+	// metric (E-F5), not a deploy.
+	BackgroundAgingAfter time.Duration `key:"dispatch.background_aging_after" env:"CTX_DISPATCH_BACKGROUND_AGING_AFTER" default:"0" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // GamingState returns the chain-time gaming exclusion from THIS settings

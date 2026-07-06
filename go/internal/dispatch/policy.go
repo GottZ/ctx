@@ -58,6 +58,12 @@ type TargetPolicy struct {
 	PreemptBackground bool
 	// HeraldScope "" is read as HeraldGlobal (zero value = default).
 	HeraldScope HeraldScope
+	// InteractiveRole marks a target whose rows carry an interactive-capable
+	// routing role (derived metadata, aging.go — sole consumer is the FA
+	// coupling invariant: no aging escape on interactive-role targets without
+	// preempt_background). NEVER part of declared(): metadata must not turn a
+	// pass-through target into a declared one.
+	InteractiveRole bool
 }
 
 // declared reports whether any effective dispatch key survived the merge.
@@ -156,6 +162,9 @@ func DerivePolicy(rows []BackendRow, logger *slog.Logger) Policy {
 			}
 		}
 		pol := mergeRows(origin, auth, logger)
+		// Physical property of the target, independent of the K2 authority
+		// split — any row routing an interactive role to the origin counts.
+		pol.InteractiveRole = hasInteractiveRole(group)
 		if pol.declared() {
 			targets[origin] = pol
 		}
@@ -327,6 +336,12 @@ type Settings struct {
 	// (MW22/F2 meter, usage.go; the config key registration is a later
 	// wave's). ≤ 0 reads as the 1h default (design/04 §3.2 window_s).
 	UsageWindow time.Duration
+	// BackgroundAgingAfter arms the FA aging escape (MW25, aging.go): a
+	// background waiter older than this may break the herald term once,
+	// F-B7-capped (never past a waiting interactive; coupling invariant on
+	// interactive-role targets). ≤ 0 (default) = off — herald term
+	// unweakened, behavior byte-identical (E-F5/K6).
+	BackgroundAgingAfter time.Duration
 }
 
 // DefaultSettings mirrors the config registry defaults of the dispatch.* keys.

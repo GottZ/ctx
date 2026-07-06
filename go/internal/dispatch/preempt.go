@@ -63,6 +63,14 @@ type preemptState struct {
 	releaseMsLast  int64
 	releaseMsMax   int64
 	forcedReleases int64
+	// agedAdmits / agedPreempts are the MW25 coupling telemetry (design/04
+	// §4.6): admissions via the aging escape and how many of those leases
+	// were later preempted — the ratio is the waste metric
+	// (preempts_of_aged_leases) that is the NEGATIVE condition of the FA
+	// activation gate (a high ratio means the admit-preempt cycle burns
+	// prompt-processing work without background ever completing).
+	agedAdmits   int64
+	agedPreempts int64
 }
 
 // PreemptStats is the snapshot view of one target's preempt telemetry
@@ -73,6 +81,10 @@ type PreemptStats struct {
 	ReleaseMsLast       int64
 	ReleaseMsMax        int64
 	ForcedReleasesTotal int64
+	// AgedAdmitsTotal / AgedPreemptsTotal are the MW25 FA gate inputs
+	// (preempts_of_aged_leases, design/04 §4.6).
+	AgedAdmitsTotal   int64
+	AgedPreemptsTotal int64
 }
 
 // statsLocked exports the counters (Dispatcher.mu held).
@@ -83,6 +95,8 @@ func (p *preemptState) statsLocked() PreemptStats {
 		ReleaseMsLast:       p.releaseMsLast,
 		ReleaseMsMax:        p.releaseMsMax,
 		ForcedReleasesTotal: p.forcedReleases,
+		AgedAdmitsTotal:     p.agedAdmits,
+		AgedPreemptsTotal:   p.agedPreempts,
 	}
 }
 
@@ -132,6 +146,11 @@ func (d *Dispatcher) maybePreemptLocked(st *targetState, slots int) {
 		st.preempt.preempting[l] = now
 		st.preempt.preemptsTotal++
 		st.preempt.wastedMs += now.Sub(l.admitted).Milliseconds()
+		if l.agedAdmit {
+			// MW25 coupling telemetry: a preempt of an aging-escape lease is
+			// the admit-preempt-cycle signal (design/04 §4.6 waste metric).
+			st.preempt.agedPreempts++
+		}
 		cancel(ErrPreempted)
 		d.logger.Warn("dispatch: background lease preempted for interactive demand",
 			"target", st.origin, "role", l.role, "victim_age", now.Sub(l.admitted),

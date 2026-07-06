@@ -44,6 +44,10 @@ type Lease struct {
 	// usage is the backend usage reported via ReportUsage before Release;
 	// nil at settle time counts as uncharged (MW22/C1, usage.go).
 	usage *Usage
+	// agedAdmit marks a lease admitted via the aging escape (MW25,
+	// aging.go): a preempt of it bumps aged_preempts — the waste metric
+	// that is the NEGATIVE condition of the FA activation gate.
+	agedAdmit bool
 }
 
 // Release returns the slot and wakes the next waiter (strict class order,
@@ -338,6 +342,7 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 		reapRef:   w.reapRef,
 		cancel:    w.cancel,
 		slotHeld:  slotHeld,
+		agedAdmit: w.aged,
 	}
 	st.inflight[l] = struct{}{}
 	if slotHeld {
@@ -381,8 +386,12 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 }
 
 // wakeLocked re-evaluates admission on one target: strict class order,
-// direct handoff, herald term for background. With slots ≤ 0 (emergency
-// stop or cleared policy) every waiter drains as pass-through.
+// direct handoff, herald term for background — softened ONLY by the FA
+// aging escape (aging.go): with demand > 0 an aged background HEAD may still
+// be admitted, re-checked per iteration (a younger next head stays gated).
+// Interactive precedence is structural: the escape is consulted only after
+// the interactive pick returned nil. With slots ≤ 0 (emergency stop or
+// cleared policy) every waiter drains as pass-through.
 func (d *Dispatcher) wakeLocked(st *targetState) {
 	slots := d.slotsLocked(st.origin)
 	if slots <= 0 {
@@ -403,8 +412,12 @@ func (d *Dispatcher) wakeLocked(st *targetState) {
 			d.handoffLocked(st, w, true)
 			continue
 		}
-		if d.demand.Load() == 0 {
+		now := time.Now()
+		if demandFree := d.demand.Load() == 0; demandFree || d.agingEscapeLocked(st, now) {
 			if w := st.background.pop(); w != nil {
+				if !demandFree {
+					d.agedAdmitLocked(st, w, now)
+				}
 				d.handoffLocked(st, w, true)
 				continue
 			}
@@ -557,6 +570,14 @@ func (d *Dispatcher) reapNow(now time.Time) {
 			}
 		})
 		d.sweepUsageLocked(st, now)
+		if set.BackgroundAgingAfter > 0 {
+			// FA trigger (b), design/04 §4.6: with the escape armed the reaper
+			// tick re-evaluates admission — an IDLE target (free slot, no
+			// running lease, process-wide demand > 0) has no release event, so
+			// without this an aged background waiter there would wait forever.
+			// Gated on the knob so the default-0 path stays byte-identical.
+			d.wakeLocked(st)
+		}
 	}
 }
 

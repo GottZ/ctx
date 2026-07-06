@@ -738,7 +738,8 @@ func TestDefaultSettings(t *testing.T) {
 		s.InteractiveQueueMax != 64 ||
 		s.LeaseReapGrace != 30*time.Second || s.LeaseMaxAge != 900*time.Second ||
 		s.PreemptReleaseTimeout != 2*time.Second ||
-		s.Fairness != FairnessFIFO {
+		s.Fairness != FairnessFIFO ||
+		s.BackgroundAgingAfter != 0 { // MW25: aging escape off by default (E-F5/K6)
 		t.Fatalf("defaults drifted from the registry contract: %+v", s)
 	}
 }

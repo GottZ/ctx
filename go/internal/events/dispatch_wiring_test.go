@@ -25,6 +25,7 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		LeaseReapGrace:               13 * time.Second,
 		LeaseMaxAge:                  17 * time.Second,
 		PreemptReleaseTimeout:        19 * time.Second,
+		BackgroundAgingAfter:         23 * time.Second,
 	}
 	want := dispatch.Settings{
 		Enabled:                      false,
@@ -35,6 +36,7 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		LeaseReapGrace:               13 * time.Second,
 		LeaseMaxAge:                  17 * time.Second,
 		PreemptReleaseTimeout:        19 * time.Second,
+		BackgroundAgingAfter:         23 * time.Second,
 		Fairness:                     dispatch.FairnessFIFO,
 	}
 	if got := DispatchSettings(in); got != want {
