@@ -17,6 +17,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/digest"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
@@ -120,6 +121,18 @@ type Scheduler struct {
 	startup       StartupConfig
 	runCycle      dreamCycleFunc
 	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
+
+	// dispatcher is the process-wide admission layer (Vorhaben E). In wave
+	// MW2 it only carries the demand herald: QueryStart/QueryEnd delegate to
+	// InteractiveArrived/done so interactive demand counts from HTTP ingress
+	// (design/01 §4.5), while activeQueries stays the consumer-facing mirror
+	// until wave MW15 (§4.7). nil = herald inert (tests, pre-wire boot).
+	dispatcher *dispatch.Dispatcher
+	// demandMu guards demandDones: the open herald entries. The done
+	// closures are interchangeable (each settles exactly one Arrived), so
+	// QueryEnd pairs any end with any outstanding start via a LIFO pop.
+	demandMu    sync.Mutex
+	demandDones []func()
 
 	// backgroundTenantsFn yields the per-tenant resolution context the background
 	// iterates (06-C6 / 04-W6 T38): per tenant the config-resolution scope (the
@@ -419,14 +432,49 @@ func (s *Scheduler) Wait() {
 	<-s.runDone
 }
 
-// QueryStart increments the active query counter. Called by query handlers.
-func (s *Scheduler) QueryStart() {
-	s.activeQueries.Add(1)
+// SetDispatcher wires the process-wide dispatch admission layer (MW2). Boot
+// happens-before (SetOverlay pattern): installed before Run starts the
+// listener goroutine and before the HTTP server serves, so the
+// unsynchronized field write is safe.
+func (s *Scheduler) SetDispatcher(d *dispatch.Dispatcher) {
+	s.dispatcher = d
 }
 
-// QueryEnd decrements the active query counter. Called by query handlers.
+// QueryStart increments the active query counter and registers the request
+// with the dispatcher's demand herald (MW2, design/01 §4.5: interactive
+// demand counts from HTTP ingress, not from the first wire call). Both
+// counters move from this ONE entry point, so the mirror cannot drift (B7).
+// Called by query handlers (the WithScheduler mounts).
+func (s *Scheduler) QueryStart() {
+	s.activeQueries.Add(1)
+	if s.dispatcher == nil {
+		return
+	}
+	done := s.dispatcher.InteractiveArrived()
+	s.demandMu.Lock()
+	s.demandDones = append(s.demandDones, done)
+	s.demandMu.Unlock()
+}
+
+// QueryEnd decrements the active query counter and settles one herald entry
+// (see demandDones for why a LIFO pop is a valid pairing). An unmatched end
+// (no outstanding start) leaves the herald untouched — the mirror-divergence
+// probe in scheduler_dispatch_test.go pins that starts and ends stay paired.
 func (s *Scheduler) QueryEnd() {
 	s.activeQueries.Add(-1)
+	if s.dispatcher == nil {
+		return
+	}
+	var done func()
+	s.demandMu.Lock()
+	if n := len(s.demandDones); n > 0 {
+		done = s.demandDones[n-1]
+		s.demandDones = s.demandDones[:n-1]
+	}
+	s.demandMu.Unlock()
+	if done != nil {
+		done()
+	}
 }
 
 // newRouter builds the per-cycle/per-run dream router: the live backend pool

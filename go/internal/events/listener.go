@@ -12,6 +12,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5"
@@ -72,6 +73,11 @@ type SettingsWriteHandler struct {
 	cfg         *config.Store
 	backendPool *backends.Pool
 	blocktypes  *blocktype.Registry
+	// dispatcher receives the re-mapped dispatch.Settings after a settings
+	// reload and the re-derived admission Policy after a backend-pool reload
+	// (MW2 carrying the W1 construction leftover, design/01 §3.1 + N9). nil
+	// (tests, pre-wire) leaves both refreshes inert.
+	dispatcher *dispatch.Dispatcher
 }
 
 // NewSettingsWriteHandler creates the hot-reload notification handler.
@@ -110,6 +116,11 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 		if err := h.backendPool.Reload(ctx); err != nil {
 			slog.Warn("listener: backend pool reload failed — previous snapshot stays active", "error", err)
 		}
+		// Re-derive the admission policy from whatever snapshot is now
+		// active (design/01 N9): after a failed reload this maps the
+		// unchanged previous snapshot — idempotent, never a policy from a
+		// failed read.
+		h.refreshDispatchPolicy()
 		return nil
 	}
 	// Block-type registry entity branch (WF T3, design 01 §4.3): the 072
@@ -156,7 +167,33 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 		// Never propagate: pgxlisten treats handler errors as connection-level.
 		slog.Warn("listener: settings reload failed — previous snapshot stays active", "error", err)
 	}
+	// Re-map the dispatch.* keys from the now-active snapshot (design/01
+	// §3.1). Only on this _global branch: the keys are global-only, so a
+	// tenant-scope write (early return above) can never change them.
+	h.refreshDispatchSettings()
 	return nil
+}
+
+// refreshDispatchSettings pushes the current snapshot's dispatch.* keys into
+// the dispatcher (design/01 §3.1: the reload owner maps config.DispatchConfig
+// → dispatch.Settings; dispatch never imports config). Idempotent — callers
+// invoke it after every reload attempt, successful or kept-previous.
+func (h *SettingsWriteHandler) refreshDispatchSettings() {
+	if h.dispatcher == nil {
+		return
+	}
+	h.dispatcher.UpdateSettings(DispatchSettings(h.cfg.Snapshot().Dispatch)) //nolint:forbidigo // MT 06 OWNER: dispatch.* keys are global-only (design/01 §3.1) — the reload owner reads the base generation, no tenant dimension exists for them.
+}
+
+// refreshDispatchPolicy re-derives the per-origin admission policy from the
+// current backend-pool snapshot and hot-swaps it (design/01 N9: NOTIFY →
+// DerivePolicy → UpdatePolicy; a cleared limits row drains its wait queue as
+// pass-through within NOTIFY latency — the W7 return path).
+func (h *SettingsWriteHandler) refreshDispatchPolicy() {
+	if h.dispatcher == nil || h.backendPool == nil {
+		return
+	}
+	h.dispatcher.UpdatePolicy(dispatch.DerivePolicy(DispatchBackendRows(h.backendPool.Snapshot()), nil))
 }
 
 // HandleBacklog reloads unconditionally after a reconnect — a settings,
@@ -168,10 +205,12 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 	if err := settings.Reload(ctx, h.pool, h.cfg); err != nil {
 		slog.Warn("listener: settings backlog reload failed — previous snapshot stays active", "error", err)
 	}
+	h.refreshDispatchSettings()
 	if h.backendPool != nil {
 		if err := h.backendPool.Reload(ctx); err != nil {
 			slog.Warn("listener: backend pool backlog reload failed — previous snapshot stays active", "error", err)
 		}
+		h.refreshDispatchPolicy()
 	}
 	if h.blocktypes != nil {
 		if err := h.blocktypes.Reload(ctx, h.pool); err != nil {
@@ -202,7 +241,10 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 
 	handler := &WriteHandler{scheduler: scheduler}
 	listener.Handle(channelBlockWrite, handler)
-	listener.Handle(channelSettingsWrite, &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes})
+	// dispatcher comes from the owning scheduler (SetDispatcher, boot
+	// happens-before Run): the reload owner pushes re-mapped settings/policy
+	// into it (MW2; nil = inert, exactly like blocktypes).
+	listener.Handle(channelSettingsWrite, &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes, dispatcher: scheduler.dispatcher})
 	// W9: forward ctx_project_write (081) to the SSE domain-event hub. Registered
 	// ONLY when the hub is wired — a nil hub leaves the channel un-LISTENed, so
 	// the 081 notifies are Postgres no-ops (the listener-discard invariant also

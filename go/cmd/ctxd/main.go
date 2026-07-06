@@ -14,6 +14,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/rerank"
 	"github.com/GottZ/ctx/internal/settings"
@@ -234,6 +235,17 @@ func main() {
 		slog.Error("backends: initial reload failed — pool starts empty", "error", err)
 	}
 
+	// Vorhaben E (wave MW2, carrying the W1 construction leftover — design/01
+	// §7 W1: "Konstruktion in cmd/ctxd/main.go, Reload-Anbindung"): the ONE
+	// process-wide dispatch admission layer (I-D1). Settings map from the
+	// effective snapshot, the per-origin policy derives from the backend pool;
+	// both stay hot via the NOTIFY reload owner (events.SettingsWriteHandler).
+	// No Acquire call site exists yet (MW3+) — until then the dispatcher only
+	// carries the demand herald fed through scheduler.QueryStart/QueryEnd.
+	dispatcher := dispatch.New(nil, events.DispatchSettings(cfgStore.Snapshot().Dispatch)) //nolint:forbidigo // MT 06 BLIND: boot-time read; dispatch.* keys are global-only (design/01 §3.1), no tenant dimension exists for them.
+	dispatcher.UpdatePolicy(dispatch.DerivePolicy(events.DispatchBackendRows(backendPool.Snapshot()), nil))
+	defer dispatcher.Close()
+
 	// Backfill temporal dimensions for blocks missing from context_temporal.
 	if n, err := store.BackfillTemporal(ctx, pool); err != nil {
 		slog.Error("temporal backfill failed", "error", err)
@@ -266,6 +278,10 @@ func main() {
 	// E-A: wire the overview worker argv (the own binary's hidden subcommand)
 	// under the same boot happens-before as SetBlocktypeRegistry.
 	wireOverviewWorkerArgv(scheduler)
+	// MW2: the demand herald target. Installed before Run (the listener's
+	// SettingsWriteHandler reads it) and before the HTTP server serves (the
+	// WithScheduler mounts delegate through QueryStart/QueryEnd).
+	scheduler.SetDispatcher(dispatcher)
 	go scheduler.Run(ctx)
 
 	// HTTP server. ListenAddr is restart-only, read once from the effective
