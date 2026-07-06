@@ -1235,7 +1235,47 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 // it, and only the last UPDATE won. Wrapping the whole pick→embed→store in a
 // single tx holds the row lock for the duration so other workers SKIP LOCKED
 // onto distinct blocks.
+//
+// Lease-then-tx order (MW9, Q-I3 design/03 §4.4 / D3-W5): the blocking
+// background admission happens BEFORE the tx opens — a lock-free peek of the
+// oldest pending block resolves the expected first wire target, whose lease
+// is acquired up front. The admission wait — potentially the whole
+// interactive queue time under the herald term — therefore holds neither the
+// row lock nor an open tx (S7: a minutes-open tx pins the xmin horizon,
+// stalling VACUUM on context_blocks and the TimescaleDB chunk management of
+// context_llm_log at 1M+ scale). Under the held tx every FURTHER acquire —
+// failover links, or a pick that landed on a block whose chain starts
+// elsewhere — goes through non-blocking TryAcquire (mechanical rule); a busy
+// follow-up target DEFERS the block to a later cycle instead of waiting.
 func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Router) (bool, error) {
+	var peekID, peekSens, peekScope string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, sensitivity, scope FROM context_blocks
+		WHERE embedding IS NULL AND NOT is_archived
+		ORDER BY created_at ASC
+		LIMIT 1`,
+	).Scan(&peekID, &peekSens, &peekScope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("backfill: peek: %w", err)
+	}
+
+	peekChain, peekRole, err := router.EmbedChain(router.FloorSens(backends.Sensitivity(peekSens), peekScope))
+	if err != nil {
+		slog.Warn("scheduler: backfill has no eligible embed backend — block stays unembedded",
+			"block_id", peekID, "error", err)
+		return false, nil
+	}
+	guarded, releaseLease, err := acquireBackfillLease(ctx, router.EmbedAdmit(), peekChain, peekRole)
+	if err != nil {
+		return false, fmt.Errorf("backfill: admission: %w", err)
+	}
+	// Idempotent (B1): settles the pre-lease on every path where EmbedChain
+	// never claims it (empty pick, chain mismatch, pre-wire error).
+	defer releaseLease()
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, fmt.Errorf("backfill: begin tx: %w", err)
@@ -1251,6 +1291,7 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 		FOR UPDATE SKIP LOCKED`,
 	).Scan(&blockID, &title, &content, &sens, &scope)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// Another worker took the peeked block during the admission wait.
 		return false, nil
 	}
 	if err != nil {
@@ -1259,6 +1300,9 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 
 	slog.Info("scheduler: backfilling embedding", "block_id", blockID, "title", title)
 
+	// Re-resolve for THE picked block (it may differ from the peeked one):
+	// the gate table (design 03, embed-backfill row) binds the chain to the
+	// block's floor-adjusted sensitivity, never the peek's.
 	required := router.FloorSens(backends.Sensitivity(sens), scope)
 	chain, role, err := router.EmbedChain(required)
 	if err != nil {
@@ -1273,16 +1317,28 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 	// MW5: background admission per attempt (design/01 §4.6 N3) — the
 	// scheduler backfill waits AT THE TARGET and any interactive embed
 	// enqueued meanwhile overtakes it between two blocks (fresh seq per
-	// acquire, E-U5(a) structural relief).
+	// acquire, E-U5(a) structural relief). MW9: the wait happens in
+	// acquireBackfillLease above; under the tx the guard hands the held
+	// lease through and answers follow-ups non-blocking (Q-I3).
 	vec, served, attempts, wired, err := embedcache.EmbedChain(
 		ctx, nil, chain, role, embedText, embed.PrefixDocument,
-		embedcache.ReportFunc(router.Report), router.EmbedAdmit())
+		embedcache.ReportFunc(router.Report), guarded)
 	if wired {
 		// "" → NULL: scheduler backfill is background, no request-bound caller (T35b).
 		llm.LogEmbedWire(s.pool, "embed-backfill", role, required, served, attempts,
 			time.Since(start), []string{blockID}, err, "")
 	}
 	if err != nil {
+		if errors.Is(err, dispatch.ErrWouldBlock) {
+			// Mechanical Q-I3 defer (design/03 §4.4): a follow-up target
+			// under the held tx is busy — never wait here. Roll back and
+			// let a later cycle (or the query-path backfill) retry the
+			// block; not an error, so the loop proceeds to the dream cycle
+			// instead of hot-looping on the busy target.
+			slog.Info("scheduler: backfill deferred — follow-up embed target busy under held tx (Q-I3)",
+				"block_id", blockID)
+			return false, nil
+		}
 		return false, fmt.Errorf("backfill: embed: %w", err)
 	}
 
