@@ -4,7 +4,7 @@
 // objects is the documented reason (web-graph.md (e)).
 
 import { DirectedGraph } from 'graphology'
-import type { ApiNode, EgoResponse } from './api'
+import type { EgoResponse } from './api'
 // Type-only import — erased at build, so no runtime cycle with graph-theme
 // (which re-exports the colorers below). graph-theme owns the palette reads;
 // the colorer signatures live here (design 03-§5b Single-Ownership).
@@ -38,15 +38,39 @@ export interface EdgeAttrs {
   color: string
 }
 
+/**
+ * hsl (h 0..359, s/l 0..100) → '#rrggbb' (lowercase). Total: Hue mod 360,
+ * s/l auf [0,100] geklemmt, Rundung — kein Throw-Pfad, keine NaN-Propagation
+ * (design 02-graph-darkmode §4.1 M1). Sigmas WebGL-Farbparser (colorToArray)
+ * kollabiert `hsl(...)`-Strings auf [0,0,0,·] (schwarz) — Hex ist parsebar.
+ * EXPORTIERT, damit das Node-Kontrast-Gate G1a exakt diese Funktion aufruft
+ * (eine Implementierung für Render UND Gate, keine Rundungsdivergenz).
+ */
+export function hslToHex(h: number, s: number, l: number): string {
+  const hh = ((h % 360) + 360) % 360
+  const ss = Math.min(100, Math.max(0, s)) / 100
+  const ll = Math.min(100, Math.max(0, l)) / 100
+  const a = ss * Math.min(ll, 1 - ll)
+  const f = (n: number): string => {
+    const k = (n + hh / 30) % 12
+    const c = ll - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))
+    return Math.round(255 * c)
+      .toString(16)
+      .padStart(2, '0')
+  }
+  return `#${f(0)}${f(8)}${f(4)}`
+}
+
 /** Category → hue, deterministic without a category registry. Saturation and
- *  lightness come from the palette (theme-aware) — only the hue is hashed. */
+ *  lightness come from the palette (theme-aware) — only the hue is hashed.
+ *  Ausgabe ist Hex (nicht hsl), weil sigma nur Hex/rgb parst (§4.1 M1). */
 export function categoryColor(category: string, palette: GraphPalette): string {
   let hash = 0
   for (let i = 0; i < category.length; i++) {
     hash = (hash * 31 + category.charCodeAt(i)) | 0
   }
   const hue = ((hash % 360) + 360) % 360
-  return `hsl(${hue} ${palette.nodeSat}% ${palette.nodeLum}%)`
+  return hslToHex(hue, palette.nodeSat, palette.nodeLum)
 }
 
 /** supersedes renders dim/strong — it is displayed, never traversed. */

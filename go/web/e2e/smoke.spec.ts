@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { colorToArray } from 'sigma/utils'
 import { captureShot } from './contract/capture'
 import { FIXED_NOW, definePageContract } from './contract/contract'
 import { contracts } from './contract/registry'
@@ -202,10 +203,18 @@ test.describe('graph theme palette', () => {
     const dark = await readPalette(page)
     expect(dark, 'dark edge token wired into Sigma').toContain('#5d5f80')
 
-    // Overview meta-nodes are categoryColor() = hsl(hue, nodeSat%, nodeLum%) — a
-    // light, theme-aware fill (dark tokens 70%/68%), NOT the black that a misread
-    // of the small dots once suggested. Mechanically resolves that smoke finding.
-    expect(await readNodeColor(page), 'overview node uses dark node sat/lum').toMatch(/70% 68%/)
+    // Overview-Meta-Nodes sind categoryColor() → seit U02-W2 ein Hex-Wert
+    // (#rrggbb), nicht mehr hsl(): sigmas WebGL-Parser (colorToArray) kollabiert
+    // hsl()-Strings auf [0,0,0,·] — schwarz. Der frühere „misread"-Vermerk
+    // (der damalige Schwarz-Augenschein sei eine Fehldeutung der kleinen Punkte
+    // gewesen) wird hiermit EXPLIZIT umgekehrt: der Augenschein war KORREKT, das
+    // Attribut-FORMAT war der Defekt (W21 — geprüfter Augenschein trägt, bequeme
+    // Umdeutung nicht). Assertion daher auf der Parse-Ebene: das Node-color-Attr
+    // liegt im Hex-Format und parst zu einer NICHT-schwarzen Farbe.
+    const nodeColor = await readNodeColor(page)
+    expect(nodeColor, 'Node-Farbe ist Hex (#rrggbb), nicht hsl()').toMatch(/^#[0-9a-f]{6}$/)
+    const [nr, ng, nb] = colorToArray(nodeColor)
+    expect([nr, ng, nb], `Node-Farbe ${nodeColor} parst zu nicht-schwarz`).not.toEqual([0, 0, 0])
 
     await page.getByRole('radio', { name: 'Light theme' }).click()
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')

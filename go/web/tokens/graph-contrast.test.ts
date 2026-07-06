@@ -3,20 +3,34 @@
 // BEIDE Themes, mit der WCAG-2-Relative-Luminance-Formel (byte-identisch zu
 // tokens/contrast-matrix.test.ts:55-65).
 //
-// Diese Welle (U02-W1) trägt zwei Gates:
+// Gates (U02-W1 + U02-W2):
 //   G1b — Edge-Kontrast gegen den Canvas ≥ 3.0 in BEIDEN Themes. AM-1 (Board
 //         U02-E2 = a) hebt die Politik von „nur Dark" auf symmetrisch: auch die
 //         Light-Edge muss ≥ 3.0 tragen.
 //   G1c — supersedes-Split-Guard: der edge-strong-Kontrast muss ≥ 1.4× den
 //         edge-Kontrast betragen, sonst kollabiert der normal/supersedes-Split
 //         unter einer späteren Token-Drift unsichtbar.
+//   G1a — Node-Kontrast-Sweep (U02-W2): für BEIDE Themes und ALLE 360 Integer-
+//         Hues den Kontrast der TATSÄCHLICH gebackenen Node-Farbe gegen
+//         --graph-bg ≥ 3.0. VERBINDLICH: ruft exakt die Ship-Funktion hslToHex
+//         (aus graph-client) auf und parst deren Ausgabe über colorToArray
+//         (sigma/utils) zu RGB — KEINE test-lokale hsl→rgb-Mathematik, damit
+//         Gate und Render bit-identisch sind (Fail-open-Schutz am 0.13-Grenz-
+//         abstand des Light-Floors). Plus Floor-Regressions-Pins.
+//   G2  — Sigma-Parse-Gate (U02-W2): colorToArray(categoryColor(...)) sowie
+//         alle String-Farbfelder der Palette ≠ [0,0,0,·] (schwarz), plus ein
+//         exakt gepinnter RGB-Fall. Parse-Ebene == Render-Ebene (WebGL-Node-
+//         Fill nimmt denselben Parser). Rot gegen Ist: das ehemalige hsl()-
+//         Format kollabierte hier auf [0,0,0,254].
 //
-// NICHT hier (spätere Wellen, brauchen anderen Code): G1a (Node-Sweep über die
-// gebackene hslToHex-Hex-Farbe, W2) und G4d (Hover-Rahmen-Kontrast, W3).
+// NICHT hier (spätere Welle): G4d (Hover-Rahmen-Kontrast, W3).
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from 'vitest'
+import { colorToArray } from 'sigma/utils'
+import { categoryColor, hslToHex } from '../src/lib/graph/graph-client'
+import type { GraphPalette } from '../src/lib/graph/graph-theme'
 
 type ThemePair = { dark: string; light: string }
 type TokenNode = { $type?: string; $value?: string; $extensions?: { ctx?: { light?: string } } }
@@ -74,8 +88,49 @@ function tok(name: string, theme: 'dark' | 'light'): string {
   return v[theme]
 }
 
+// Node-sat/lum sind $type:number (nicht in der color-Map oben) — direkt aus doc
+// lesen: dark = $value, light = $extensions.ctx.light. Bare Zahlen (kein %).
+function num(name: string, theme: 'dark' | 'light'): number {
+  const t = doc.graph[name]
+  if (!t) throw new Error(`graph-contrast: Token '${name}' fehlt in tokens.json`)
+  const raw = theme === 'light' ? t.$extensions?.ctx?.light : t.$value
+  return Number(raw)
+}
+
+// Die Laufzeit-Palette pro Theme, wie readGraphPalette sie nach einem Theme-
+// Wechsel liefert — gespeist aus tokens.json (dieselbe Quelle wie graph-theme).
+function palette(theme: 'dark' | 'light'): GraphPalette {
+  return {
+    labelColor: tok('graph-label', theme),
+    edgeColor: tok('graph-edge', theme),
+    edgeStrongColor: tok('graph-edge-strong', theme),
+    nodeSat: num('graph-node-sat', theme),
+    nodeLum: num('graph-node-lum', theme),
+  }
+}
+
+// WCAG-2-Luminanz direkt aus RGB-Kanälen (identische Kern-Formel wie luminance()
+// oben, aber Eingabe ist das von colorToArray geparste [r,g,b] — der Kontrast
+// wird also gegen die TATSÄCHLICH gerenderte Farbe gerechnet, nicht gegen ein
+// paralleles Modell).
+function luminanceRGB(r: number, g: number, b: number): number {
+  const chan = (c: number) => {
+    const s = c / 255
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
+  }
+  return 0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b)
+}
+function contrastLum(a: number, b: number): number {
+  const [hi, lo] = [a, b].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
 const EDGE_MIN = 3.0
 const SPLIT_MIN = 1.4
+const NODE_MIN = 3.0
+// Floor-Pins: mit der Ship-hslToHex GEMESSEN (nicht analytisch) im W2-Build —
+// dark 5.05 @ Hue 240, light 3.13 @ Hue 60. Absenkung = bewusste Diff-Entscheidung.
+const NODE_FLOOR_PIN = { dark: 5.0, light: 3.1 } as const
 
 // G1b — Edge-Kontrast gegen den Canvas ≥ 3.0 in BEIDEN Themes (AM-1 symmetrisch).
 test('G1b: --graph-edge Kontrast gegen --graph-bg ≥ 3.0 in beiden Themes', () => {
@@ -104,4 +159,97 @@ test('G1c: --graph-edge-strong Split ≥ 1.4× --graph-edge in beiden Themes', (
     }
   }
   expect(failures, `supersedes-Split unter ${SPLIT_MIN}×:\n${failures.join('\n')}`).toEqual([])
+})
+
+// RGB der gebackenen Node-Farbe: hslToHex (Ship-Funktion) → colorToArray (sigma).
+// Genau die Kette, die der WebGL-Node-Fill nimmt — keine parallele Mathematik.
+function bakedNodeRGB(hue: number, sat: number, lum: number): [number, number, number] {
+  const [r, g, b] = colorToArray(hslToHex(hue, sat, lum))
+  return [r, g, b]
+}
+
+// G1a — Node-Kontrast-Sweep: alle 360 Integer-Hues, beide Themes, gebackene Farbe
+// (Ship-hslToHex → colorToArray) gegen --graph-bg ≥ 3.0. Fail-closed über die
+// offene Kategorie-Menge (jeder künftige Hash-Hue liegt im gegateten Bereich).
+test('G1a: Node-Kontrast (gebackene Hex via hslToHex+colorToArray) gegen --graph-bg ≥ 3.0, alle 360 Hues, beide Themes', () => {
+  const failures: string[] = []
+  for (const theme of THEMES) {
+    const p = palette(theme)
+    const bg = luminance(tok('graph-bg', theme))
+    for (let hue = 0; hue < 360; hue++) {
+      const [r, g, b] = bakedNodeRGB(hue, p.nodeSat, p.nodeLum)
+      const ratio = contrastLum(luminanceRGB(r, g, b), bg)
+      if (ratio < NODE_MIN) {
+        failures.push(`${theme} Hue ${hue} (${hslToHex(hue, p.nodeSat, p.nodeLum)}): ${ratio.toFixed(2)} < ${NODE_MIN}`)
+      }
+    }
+  }
+  // nur die ersten paar Verstöße zeigen, sonst wird die Message riesig
+  expect(failures, `Node-Kontrast unter ${NODE_MIN}:\n${failures.slice(0, 8).join('\n')}${failures.length > 8 ? `\n… (+${failures.length - 8})` : ''}`).toEqual([])
+})
+
+// G1a Floor-Regression: der schwächste Hue je Theme bleibt über dem Pin.
+// Absenkung ⇒ dieser Test bricht ⇒ bewusste Diff-Entscheidung nötig.
+test('G1a Floor-Pin: dark ≥ 5.0, light ≥ 3.1 (mit der Ship-hslToHex gemessen)', () => {
+  for (const theme of THEMES) {
+    const p = palette(theme)
+    const bg = luminance(tok('graph-bg', theme))
+    let floor = Infinity
+    let floorHue = -1
+    for (let hue = 0; hue < 360; hue++) {
+      const [r, g, b] = bakedNodeRGB(hue, p.nodeSat, p.nodeLum)
+      const ratio = contrastLum(luminanceRGB(r, g, b), bg)
+      if (ratio < floor) {
+        floor = ratio
+        floorHue = hue
+      }
+    }
+    expect(
+      floor,
+      `${theme} Node-Floor ${floor.toFixed(3)} @ Hue ${floorHue} unter Pin ${NODE_FLOOR_PIN[theme]}`,
+    ).toBeGreaterThanOrEqual(NODE_FLOOR_PIN[theme])
+  }
+})
+
+// G2 — Sigma-Parse-Gate: jede je gebackene Farbe muss sigma-parsebar sein
+// (≠ schwarz). categoryColor(...) über repräsentative Kategorien + alle String-
+// Farbfelder der Palette, beide Themes. Rot gegen Ist: colorToArray des alten
+// hsl()-Formats kollabierte auf [0,0,0,254].
+const REPR_CATEGORIES = ['learnings', 'reference', 'projects', 'test', 'infrastructure', 'decisions']
+test('G2: colorToArray(categoryColor(...)) ≠ schwarz für repräsentative Kategorien, beide Themes', () => {
+  const failures: string[] = []
+  for (const theme of THEMES) {
+    const p = palette(theme)
+    for (const cat of REPR_CATEGORIES) {
+      const hex = categoryColor(cat, p)
+      const [r, g, b] = colorToArray(hex)
+      if (r === 0 && g === 0 && b === 0) {
+        failures.push(`${theme} ${cat} (${hex}) → colorToArray schwarz`)
+      }
+    }
+  }
+  expect(failures, `Node-Farben parsen auf schwarz:\n${failures.join('\n')}`).toEqual([])
+})
+
+test('G2: colorToArray aller String-Farbfelder der Palette ≠ schwarz, beide Themes', () => {
+  const failures: string[] = []
+  for (const theme of THEMES) {
+    const p = palette(theme)
+    for (const field of ['labelColor', 'edgeColor', 'edgeStrongColor'] as const) {
+      const hex = p[field]
+      const [r, g, b] = colorToArray(hex)
+      if (r === 0 && g === 0 && b === 0) {
+        failures.push(`${theme} ${field} (${hex}) → colorToArray schwarz`)
+      }
+    }
+  }
+  expect(failures, `Palette-Farbfelder parsen auf schwarz:\n${failures.join('\n')}`).toEqual([])
+})
+
+// G2 Pin: exakte RGBA-Erwartung eines gebackenen Falls — der Alpha-Wert ist
+// GEMESSEN (sigma packt 254, nicht 255), nicht geraten.
+test('G2 Pin: categoryColor(learnings, dark) = #74e7ab → colorToArray [116,231,171,254]', () => {
+  const dark = palette('dark')
+  expect(categoryColor('learnings', dark)).toBe('#74e7ab')
+  expect(colorToArray('#74e7ab')).toEqual([116, 231, 171, 254])
 })

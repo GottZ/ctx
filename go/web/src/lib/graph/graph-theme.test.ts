@@ -97,20 +97,23 @@ function overview(partial: Partial<OverviewResponse>): OverviewResponse {
 }
 
 describe('categoryColor', () => {
-  it('builds hsl(hue sat% lum%) with the hashed hue and palette sat/lum', () => {
-    // hue('learnings') = 149 (hash*31 char fold, mod 360) — pins the formula.
-    expect(categoryColor('learnings', dark)).toBe('hsl(149 70% 68%)')
-    expect(categoryColor('cluster', dark)).toBe('hsl(74 70% 68%)')
+  it('backt Hex aus dem gehashten Hue + palette sat/lum (Parser-Fix U02-W2)', () => {
+    // hue('learnings') = 149 (hash*31 char fold, mod 360) — pins die Formel.
+    // Ausgabe ist jetzt Hex (nicht hsl), weil sigma hsl() auf schwarz kollabiert:
+    // hslToHex(149,70,68) = #74e7ab, hslToHex(74,70,68) = #cce774.
+    expect(categoryColor('learnings', dark)).toBe('#74e7ab')
+    expect(categoryColor('cluster', dark)).toBe('#cce774')
   })
 
   it('is deterministic per category', () => {
     expect(categoryColor('infrastructure', dark)).toBe(categoryColor('infrastructure', dark))
-    expect(categoryColor('decisions', dark)).toBe('hsl(175 70% 68%)')
+    expect(categoryColor('decisions', dark)).toBe('#74e7dd')
   })
 
   it('takes saturation/lightness from the palette (theme-swappable), hue fixed', () => {
     const light: GraphPalette = { ...dark, nodeSat: 62, nodeLum: 33 }
-    expect(categoryColor('learnings', light)).toBe('hsl(149 62% 33%)')
+    // hslToHex(149, 62, 33) = #208852 (Light-Node-Kalibrierung 62/33, §3.2).
+    expect(categoryColor('learnings', light)).toBe('#208852')
   })
 })
 
@@ -178,8 +181,8 @@ describe('readGraphPalette', () => {
     expect(p.nodeLum).toBe(68)
     expect(Number.isNaN(p.nodeSat)).toBe(false)
     expect(Number.isNaN(p.nodeLum)).toBe(false)
-    // and the resulting color is well-formed, never hsl(h NaN% NaN%)
-    expect(categoryColor('learnings', p)).toBe('hsl(149 70% 68%)')
+    // and the resulting color is well-formed Hex, never #NaNNaNNaN
+    expect(categoryColor('learnings', p)).toBe('#74e7ab')
   })
 })
 

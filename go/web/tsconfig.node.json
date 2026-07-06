@@ -2,7 +2,12 @@
   "compilerOptions": {
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "target": "es2023",
-    "lib": ["ES2023"],
+    /* DOM: tokens/graph-contrast.test.ts (G1a/G2, design 02-graph-darkmode §4.6)
+       importiert die Ship-Funktionen aus src/lib/graph/graph-client.ts, deren
+       Typ-Import von graph-theme.ts (getComputedStyle/document) den Modulgraphen
+       in dieses Node-Programm zieht — die Test-Runner-Config prüft damit Browser-
+       nahen Render-Code und braucht die DOM-Lib. Betrifft nur den Typecheck. */
+    "lib": ["ES2023", "DOM"],
     "module": "esnext",
     "types": ["node"],
     "skipLibCheck": true,

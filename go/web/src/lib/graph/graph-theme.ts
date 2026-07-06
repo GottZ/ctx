@@ -35,9 +35,10 @@ const DARK_FALLBACK: GraphPalette = {
 
 /**
  * Read the `--graph-*` tokens off the document root. Color tokens are strings;
- * sat/lum are BARE numbers (no `%`) so `hsl(h s% l%)` composes. `Number('')`
- * and `Number('70%')` are both NaN, so `Number(raw) || fallback` keeps an
- * empty OR a `%`-suffixed token on the dark default (no NaN leaks into hsl()).
+ * sat/lum are BARE numbers (no `%`) — they feed hslToHex (U02-W2 parser fix),
+ * which needs plain 0..100 values. `Number('')` and `Number('70%')` are both
+ * NaN, so `Number(raw) || fallback` keeps an empty OR a `%`-suffixed token on
+ * the dark default (no NaN reaches the hex baking).
  * SSR-safe: no document → full dark fallback.
  */
 export function readGraphPalette(): GraphPalette {
