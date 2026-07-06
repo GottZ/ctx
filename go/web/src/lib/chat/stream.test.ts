@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api'
-import { streamTurn } from './stream'
+import { parseRetryAfter, streamTurn } from './stream'
 
 function sseResponse(...frames: string[]): Response {
   const enc = new TextEncoder()
@@ -76,5 +76,61 @@ describe('streamTurn', () => {
 
   it('guards: ApiError is the thrown type', () => {
     expect(new ApiError(409, 'conflict', 'busy')).toBeInstanceOf(ApiError)
+  })
+
+  it('attaches the Retry-After hint to a pre-stream 429 (MW8 B1)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ success: false, error: 'server busy — retry shortly' }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json', 'Retry-After': '7' },
+        }),
+      ),
+    )
+    await expect(streamTurn({ message: 'x' }, 'k', () => {}, new AbortController().signal)).rejects.toMatchObject({
+      status: 429,
+      code: 'rate_limited',
+      details: { retry_after: 7 },
+    })
+  })
+
+  it('omits the hint on a 429 without a Retry-After header (honest absence)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ success: false, error: 'a turn is already running for this scope' }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    )
+    await expect(streamTurn({ message: 'x' }, 'k', () => {}, new AbortController().signal)).rejects.toMatchObject({
+      status: 429,
+      code: 'rate_limited',
+      details: null,
+    })
+  })
+})
+
+describe('parseRetryAfter', () => {
+  const res = (headers: Record<string, string>): Response => new Response(null, { status: 429, headers })
+
+  it('parses a positive integer delta-seconds', () => {
+    expect(parseRetryAfter(res({ 'Retry-After': '12' }))).toBe(12)
+  })
+
+  it('ceils a fractional value to whole seconds', () => {
+    expect(parseRetryAfter(res({ 'Retry-After': '3.2' }))).toBe(4)
+  })
+
+  it('returns null for an absent header', () => {
+    expect(parseRetryAfter(res({}))).toBeNull()
+  })
+
+  it('returns null for the HTTP-date form (not emitted by ctxd) and non-positive values', () => {
+    expect(parseRetryAfter(res({ 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' }))).toBeNull()
+    expect(parseRetryAfter(res({ 'Retry-After': '0' }))).toBeNull()
+    expect(parseRetryAfter(res({ 'Retry-After': '-3' }))).toBeNull()
   })
 })

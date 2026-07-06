@@ -93,6 +93,13 @@ export interface ToolCallStartEvent {
   iteration: number
   name: string
 }
+// Source: chat/engine.go acquireQueued (MW8) — the "queued" keepalive re-fired
+// (~20s) while the stream acquire waits in the dispatcher queue behind a foreign
+// lease. Payload is generic (no target/depth/estimate — C2/B6 doctrine); the
+// iteration is the current turn iteration.
+export interface QueuedEvent {
+  iteration: number
+}
 export interface ToolCallEvent {
   iteration: number
   id: string

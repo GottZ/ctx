@@ -53,6 +53,24 @@ describe('ChatStore.applyEvent', () => {
     expect(s.liveAssistant).toBe('partial') // kept, not cleared
   })
 
+  it('sets liveQueued on a queued keepalive and clears it on the next real event (MW8)', () => {
+    const s = store()
+    s.applyEvent('queued', { iteration: 1 })
+    expect(s.liveQueued).toBe(true)
+    s.applyEvent('queued', { iteration: 2 }) // repeat keepalive keeps it set
+    expect(s.liveQueued).toBe(true)
+    s.applyEvent('backend', { backend: 'b', model: 'm', trust: 'full-trust', tools_active: false, fallback: false })
+    expect(s.liveQueued).toBe(false) // admission over
+  })
+
+  it('treats a mid-stream saturated error as a retryable saturation, not a fault (B2)', () => {
+    const s = store()
+    s.applyEvent('delta', { text: 'x' })
+    s.applyEvent('error', { code: 'saturated', retryable: true })
+    expect(s.turnError).toBeNull() // NOT a hard turn error
+    expect(s.saturation).toEqual({ retryAfter: null, secondsLeft: null }) // manual retry only
+  })
+
   it('ignores unknown / forward-compat events', () => {
     const s = store()
     s.applyEvent('tool_call_start', { iteration: 1, name: 'ctx_query' })

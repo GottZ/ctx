@@ -7,6 +7,7 @@
   import BackendBadge from './BackendBadge.svelte'
   import ConfirmCard from './ConfirmCard.svelte'
   import MessageBubble from './MessageBubble.svelte'
+  import SaturationNotice from './SaturationNotice.svelte'
   import ToolCallCard from './ToolCallCard.svelte'
 
   let { store }: { store: ChatStore } = $props()
@@ -31,6 +32,7 @@
     void store.liveAssistant
     void store.liveTools.length
     void store.streaming
+    void store.liveQueued
     if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight
   })
 </script>
@@ -56,6 +58,15 @@
 
   {#if store.streaming}
     <div class="live">
+      {#if store.liveQueued}
+        <!-- MW8 queued keepalive: waiting for a free model slot, not thinking.
+             The composer's Abort button cancels the wait (aborts the request →
+             the server vacates the queue slot on disconnect). -->
+        <div class="queued" role="status" aria-live="polite">
+          <span class="q-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span>Waiting in the queue — the model is busy with other requests. Your turn starts automatically when a slot frees up.</span>
+        </div>
+      {/if}
       <BackendBadge backend={store.liveBackend} />
       {#each store.liveTools as t (t.id)}
         <ToolCallCard name={t.name} args={t.arguments} result={t.result} />
@@ -63,13 +74,15 @@
           <ConfirmCard staged={t.result.staged} />
         {/if}
       {/each}
-      {#if store.liveAssistant !== '' || store.liveTools.length === 0}
+      {#if !store.liveQueued && (store.liveAssistant !== '' || store.liveTools.length === 0)}
         <MessageBubble role="assistant" content={store.liveAssistant} streaming={true} />
       {/if}
     </div>
   {/if}
 
-  {#if store.turnError}
+  {#if store.saturation}
+    <SaturationNotice {store} />
+  {:else if store.turnError}
     <div class="turn-error" role="alert">
       Turn failed: {store.turnError}. The partial above is kept — send again to retry.
     </div>
@@ -101,6 +114,51 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+  }
+  /* Queued keepalive indicator — a calm "waiting in line", distinct from the
+     assistant's blinking type cursor (which means the model is producing). */
+  .queued {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    font-size: var(--fs-sm);
+  }
+  .q-dots {
+    flex: none;
+    display: inline-flex;
+    gap: 3px;
+  }
+  .q-dots span {
+    width: 0.35rem;
+    height: 0.35rem;
+    border-radius: 50%;
+    background: var(--text-faint);
+    animation: q-bounce 1.2s ease-in-out infinite;
+  }
+  .q-dots span:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+  .q-dots span:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+  @keyframes q-bounce {
+    0%,
+    80%,
+    100% {
+      opacity: 0.3;
+    }
+    40% {
+      opacity: 1;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .q-dots span {
+      animation: none;
+    }
   }
   .canceled {
     font-family: var(--font-mono);

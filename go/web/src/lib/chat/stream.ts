@@ -13,6 +13,22 @@ import { ApiError, codeFor } from '../api'
 import type { StreamCallback, StreamRequest } from './types'
 
 /**
+ * Parse an RFC 7231 `Retry-After` as integer delta-seconds (the dispatcher
+ * sends a clamped 1..30, or omits the header — design/03 §3.3 / dispatch_reject.go).
+ * Returns null for an absent / non-numeric / non-positive value: an HONEST
+ * absence the UI renders as the generic "system busy" state rather than a
+ * fabricated countdown (mirrors the server's "no snapshot ⇒ no value" rule).
+ * The HTTP-date form is not emitted by ctxd, so it is treated as absent too.
+ */
+export function parseRetryAfter(res: Response): number | null {
+  const raw = res.headers.get('Retry-After')
+  if (raw === null) return null
+  const secs = Number(raw.trim())
+  if (!Number.isFinite(secs) || secs <= 0) return null
+  return Math.ceil(secs)
+}
+
+/**
  * Run one chat turn. Resolves when the stream ends (a done/error event or EOF);
  * the AbortSignal cancels the in-flight request (the server persists the
  * partial with a canceled marker and frees the slot). Throws ApiError only for
@@ -44,7 +60,12 @@ export async function streamTurn(
   if (!res.ok || !res.body) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null
     const message = body?.error ?? `chat stream failed (HTTP ${res.status})`
-    throw new ApiError(res.status, codeFor(res.status), message, requestId)
+    // A 429 is a capacity signal (dispatcher rejection / per-scope turn cap):
+    // carry the Retry-After hint (when present) so the caller can drive a
+    // countdown + jittered auto-retry instead of a hard "turn failed".
+    const retryAfter = res.status === 429 ? parseRetryAfter(res) : null
+    const details = retryAfter !== null ? { retry_after: retryAfter } : null
+    throw new ApiError(res.status, codeFor(res.status), message, requestId, details)
   }
 
   const parser = createParser({
