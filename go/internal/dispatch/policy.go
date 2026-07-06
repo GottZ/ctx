@@ -70,6 +70,11 @@ func (t TargetPolicy) declared() bool {
 // pass-through everywhere.
 type Policy struct {
 	Targets map[string]TargetPolicy
+	// covered is the Enforcing coverage term (design/05 §4.2), computed ONCE
+	// per derivation: every background-reachable LOCAL origin carries a slots
+	// cap. Only DerivePolicy sets it — a hand-built Policy value is never
+	// enforcing (fail-closed toward the legacy yield fallback).
+	covered bool
 }
 
 // BackendRow is the leaf-safe projection of one context_backends row —
@@ -82,6 +87,12 @@ type BackendRow struct {
 	Scope   string
 	BaseURL string
 	Limits  map[string]any
+	// Roles are the routing roles of the row (context_backends.roles) — the
+	// coverage term derives background reachability from them (enforcing.go).
+	Roles []string
+	// External marks locality='external' rows (openrouter): exempt from the
+	// Enforcing coverage term — "external skaliert selbst" (design/01 §3.2).
+	External bool
 }
 
 // The limits keys the dispatcher derives policy from. background_reserved_slots
@@ -144,7 +155,7 @@ func DerivePolicy(rows []BackendRow, logger *slog.Logger) Policy {
 			targets[origin] = pol
 		}
 	}
-	return Policy{Targets: targets}
+	return Policy{Targets: targets, covered: deriveCoverage(byOrigin, targets, logger)}
 }
 
 // splitAuthority partitions one origin's rows into authoritative and foreign
