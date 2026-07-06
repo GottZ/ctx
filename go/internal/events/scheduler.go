@@ -762,8 +762,10 @@ func (s *Scheduler) overviewNeverBuilt(ctx context.Context) bool {
 // here (not the loop) so a hot toggle takes effect on the next tick. bt is the
 // round-robin tenant pick (B-W1 foundation): today it only labels the run —
 // B-W6 threads its owned set as the rebuild scope filter. Each run is bounded
-// by rebuild_timeout (B2-C1); on expiry the abandoned Modularize goroutine
-// keeps running until convergence (documented leak) while the loop stays live.
+// by rebuild_timeout (B2-C1); on expiry the worker child is SIGKILLed (E-B —
+// the regular path, argv boot-wired in cmd/ctxd) while the loop stays live;
+// only the in-process FALLBACK still abandons a Modularize goroutine until
+// convergence (documented leak, overview.clusterWithCtx).
 func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant) {
 	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: overview rebuild gate/resolution/cap/timeout are server-global policy knobs, not tenant-scoped — the B-W6 per-tenant loop varies the SCOPE FILTER per tick, not these.
 	if !cfg.GraphOverview.Enabled {
@@ -796,12 +798,13 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// current corpus every block lies inside owned, so the default tenant's
 	// scoped run equals the global run; future drift shows up in the
 	// NodeCount log below and fails the B1-M2 integration assert.
-	// E-A (design/05 §4.7): the rebuild runs in a worker child process when
-	// one is wired (SetOverviewWorkerArgv) — result-identical by the fixed-
-	// seed determinism contract — and falls back in-process when the child
-	// cannot be started. rctx bounds BOTH paths: the child is killed on
-	// timeout (CommandContext), the in-process path keeps the documented
-	// Modularize goroutine leak until E-B retires it.
+	// E-A/E-B (design/05 §4.7): the rebuild runs in a worker child process
+	// when one is wired (SetOverviewWorkerArgv) — result-identical by the
+	// fixed-seed determinism contract, self-deprioritized to nice 19 + idle
+	// I/O — and falls back in-process when the child cannot be started. rctx
+	// bounds BOTH paths: the child is SIGKILLed on timeout (CommandContext,
+	// E-B kill probes); only the in-process fallback keeps the documented
+	// Modularize goroutine leak (overview.clusterWithCtx).
 	start := time.Now()
 	stats, err := s.executeOverviewRebuild(rctx, overview.Options{
 		Resolution:    cfg.GraphOverview.Resolution,

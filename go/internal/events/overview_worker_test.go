@@ -3,11 +3,17 @@ package events
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/overview"
 )
@@ -16,6 +22,11 @@ import (
 // when the tests below re-exec the test binary (the os/exec helper-process
 // pattern). Unset in a normal run — the helper then skips.
 const helperEnv = "CTX_TEST_OVERVIEW_WORKER_HELPER"
+
+// hangPidFileEnv tells the "hang" helper where to advertise its pid — the
+// E-B kill probe needs it to assert the child is DEAD (not just abandoned)
+// after the context kill.
+const hangPidFileEnv = "CTX_TEST_OVERVIEW_WORKER_PIDFILE"
 
 // workerHelperArgv re-execs THIS test binary constrained to the helper test —
 // a real child process with real stdin/stdout pipes, no DB and no ctxd binary
@@ -49,6 +60,15 @@ func TestOverviewWorkerHelperProcess(t *testing.T) {
 	case "fail":
 		fmt.Fprintln(os.Stderr, "helper: deliberate worker failure")
 		os.Exit(1)
+	case "hang":
+		// E-B kill-probe body: a worst-case child that ignores SIGTERM (the
+		// real worker mid-Louvain handles no signals either), advertises its
+		// pid, then hangs forever — only SIGKILL ends it.
+		signal.Ignore(syscall.SIGTERM)
+		if pf := os.Getenv(hangPidFileEnv); pf != "" {
+			_ = os.WriteFile(pf, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		}
+		select {}
 	}
 	os.Exit(2)
 }
@@ -121,6 +141,76 @@ func TestRunOverviewRebuild_WorkerFailureIsNoFallback(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "deliberate worker failure") {
 		t.Fatalf("worker stderr missing from the failure: %v", err)
+	}
+}
+
+// TestRebuildViaWorker_TimeoutKillsHangingChild is the E-B kill gate
+// (design/05 §4.7: "Kind tot binnen Frist, kein Zombie, Loop lebt"): a
+// SIGTERM-deaf, forever-hanging child is SIGKILLed when the rebuild context
+// ends (CommandContext Cancel = Process.Kill — no ignorable grace signal),
+// Wait returns promptly (reaping the child: no zombie), and the spawn
+// mechanics stay usable for the next rebuild (the scheduler loop lives).
+func TestRebuildViaWorker_TimeoutKillsHangingChild(t *testing.T) {
+	t.Setenv(helperEnv, "hang")
+	pidFile := filepath.Join(t.TempDir(), "worker.pid")
+	t.Setenv(hangPidFileEnv, pidFile)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type result struct {
+		started bool
+		err     error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		_, started, err := rebuildViaWorker(ctx, workerHelperArgv(), overview.Options{})
+		resCh <- result{started, err}
+	}()
+
+	// The pid file is the sync point: once it exists the child is up and
+	// provably inside its hang (it writes the file right before select{}).
+	var pid int
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if b, err := os.ReadFile(pidFile); err == nil && len(b) > 0 {
+			if p, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				pid = p
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("hanging child never advertised its pid")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel() // the rebuild_timeout stand-in (same mechanism: ctx end)
+
+	select {
+	case res := <-resCh:
+		if !res.started {
+			t.Fatal("kill path misreported started=false — the caller would wrongly fall back in-process")
+		}
+		if res.err == nil || !strings.Contains(res.err.Error(), "killed") {
+			t.Fatalf("want a signal: killed failure, got: %v", res.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Wait did not return within 3s of ctx cancel — SIGTERM-deaf child not SIGKILLed?")
+	}
+
+	// No zombie, no survivor: Wait reaped the child, so its pid is GONE
+	// (a zombie would still answer kill(pid, 0) with success).
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("child pid %d still exists after Wait returned (zombie/orphan): kill(pid,0) = %v", pid, err)
+	}
+
+	// Loop lives: the very next spawn over the same mechanics succeeds.
+	t.Setenv(helperEnv, "echo")
+	s := &Scheduler{}
+	s.SetOverviewWorkerArgv(workerHelperArgv())
+	stats, err := s.executeOverviewRebuild(context.Background(), overview.Options{MaxNodes: 7})
+	if err != nil || stats.NodeCount != 7 {
+		t.Fatalf("spawn after kill broken (loop would be dead): stats=%+v err=%v", stats, err)
 	}
 }
 

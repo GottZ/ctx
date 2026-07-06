@@ -7,9 +7,12 @@
 //
 // E-A is result-neutral by contract: fixed seeds + ordered loads make the
 // worker's partition identical to the in-process one (pinned by the overview
-// worker integration roundtrip). Wave E-B adds the OS layer on top — nice/
-// ionice on the spawn and the hard kill on rebuild_timeout that structurally
-// retires the documented in-process Modularize goroutine leak.
+// worker integration roundtrip). Wave E-B is the OS layer on top: the child
+// self-deprioritizes to nice 19 + idle I/O at entry (cmd/ctxd
+// deprioritizeSelf), and rebuild_timeout SIGKILLs it (rebuildViaWorker) —
+// which structurally retires the documented in-process Modularize goroutine
+// leak on this REGULAR path; the leak survives only in the in-process
+// fallback (overview.clusterWithCtx).
 package events
 
 import (
@@ -18,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"time"
 
 	"github.com/GottZ/ctx/internal/overview"
 )
@@ -25,6 +29,13 @@ import (
 // workerStderrTailMax caps how much child stderr rides along in errors/logs —
 // enough for the worker's slog JSON diagnostics, never an unbounded blob.
 const workerStderrTailMax = 4096
+
+// workerWaitDelay bounds Wait's pipe drain after the context kill (E-B): the
+// SIGKILL ends the child instantly, but Wait also waits for the stdout/stderr
+// copy goroutines — a straggler holding an inherited pipe end (a grandchild
+// the worker should never have, but Wait must not bet the scheduler loop on
+// that) is cut loose after this delay instead of wedging the loop forever.
+const workerWaitDelay = 10 * time.Second
 
 // SetOverviewWorkerArgv installs the argv the overview rebuild spawns as its
 // worker child process (production: {os.Executable(), overview.WorkerCommand},
@@ -38,7 +49,10 @@ func (s *Scheduler) SetOverviewWorkerArgv(argv []string) {
 }
 
 // executeOverviewRebuild runs one rebuild, through the worker child process when
-// one is wired and startable, in-process otherwise.
+// one is wired and startable, in-process otherwise. The worker path is the
+// REGULAR path in production (cmd/ctxd wires the argv at boot); in-process is
+// the fallback — and since E-B the only place the documented clusterWithCtx
+// Modularize goroutine leak still exists.
 //
 // Fallback semantics (E-A contract): the in-process path is the fallback for
 // a worker that cannot be STARTED (missing binary, exec denied, argv rot) —
@@ -69,9 +83,18 @@ func (s *Scheduler) executeOverviewRebuild(ctx context.Context, opts overview.Op
 // The child runs under ctx (exec.CommandContext): the caller's
 // rebuild_timeout kills it instead of orphaning it — where the in-process
 // path leaks an unstoppable Modularize goroutine, the process boundary is
-// already hard-cancelable. E-B builds on exactly this edge (nice/ionice +
-// the kill/rollback probes); Wait() reaps the child on every path, so no
-// zombie survives here either.
+// hard-cancelable. Wait() reaps the child on every path, so no zombie
+// survives here either.
+//
+// E-B kill semantics (design/05 §4.7 "rebuild_timeout ⇒ Process.Kill()"):
+// CommandContext wires Cancel = Process.Kill — SIGKILL, deliberately KEPT
+// (no SIGTERM grace): mid-Louvain the child handles no signals (one opaque
+// gonum call), so a polite term would be ignored exactly where the timeout
+// bites, and mid-persist a killed connection is a clean tx rollback (persist
+// is one tx, pinned by the kill-mid-persist integration probe). WaitDelay
+// bounds the pipe drain so Wait always returns. OS deprioritization is NOT
+// done here: the child renices itself at entry (cmd/ctxd deprioritizeSelf) —
+// no external nice/ionice binaries to depend on.
 func rebuildViaWorker(ctx context.Context, argv []string, opts overview.Options) (overview.Stats, bool, error) {
 	var input bytes.Buffer
 	if err := overview.EncodeWorkerOptions(&input, opts); err != nil {
@@ -79,6 +102,7 @@ func rebuildViaWorker(ctx context.Context, argv []string, opts overview.Options)
 	}
 
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // argv is boot-wired (os.Executable + shared const), never request input
+	cmd.WaitDelay = workerWaitDelay
 	cmd.Stdin = &input
 	var stdout, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdout

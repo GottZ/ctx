@@ -1,9 +1,12 @@
-// Hidden overview-rebuild worker mode (wave E-A, plan-inference-scheduler
+// Hidden overview-rebuild worker mode (waves E-A/E-B, plan-inference-scheduler
 // design/05 §4.7): `ctxd overview-rebuild-worker` — the -health /
 // -secret-decrypt precedent. The ctxd scheduler spawns this subcommand of
 // its OWN binary as a child process so the minutes-long single-threaded
-// Louvain compute runs behind a process boundary (E-B adds nice/ionice and
-// the timeout kill on top).
+// Louvain compute runs behind a process boundary. E-B is the OS layer on that
+// boundary: the worker self-deprioritizes to nice 19 + idle I/O class at
+// entry (deprioritizeSelf), and the parent's rebuild_timeout arrives as a
+// SIGKILL (events.rebuildViaWorker) that the persist tx survives as a clean
+// rollback.
 //
 // Contract (overview.WorkerCommand IPC): ONE Options JSON document on stdin,
 // ONE Stats JSON document on stdout, exit code carries success; the database
@@ -37,6 +40,17 @@ func dispatchOverviewWorkerMode() {
 		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 			Level: slog.LevelInfo,
 		})))
+		// E-B (design/05 §4.7): the worker deprioritizes ITSELF (nice 19 +
+		// idle I/O class) instead of being spawned through external nice/
+		// ionice binaries — none are guaranteed in the container image, and
+		// lowering own priority needs no privilege. Failures WARN and never
+		// abort: a full-priority rebuild beats none. Lives HERE (process
+		// entry), not in runOverviewWorker — the in-process unit tests call
+		// that function directly and must not renice the test binary.
+		if niceErr, ioErr := deprioritizeSelf(); niceErr != nil || ioErr != nil {
+			slog.Warn("overview-worker: OS deprioritization incomplete — continuing at current priority",
+				"nice_error", niceErr, "ioprio_error", ioErr)
+		}
 		os.Exit(runOverviewWorker(os.Stdin, os.Stdout, os.Stderr))
 	}
 }

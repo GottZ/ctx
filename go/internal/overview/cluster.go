@@ -197,6 +197,13 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 // Options.MaxNodes, which keeps the input below the convergence wall). The
 // buffered channel lets the orphaned goroutine exit instead of blocking
 // forever.
+//
+// Since wave E-B this leak lives ONLY in the in-process FALLBACK path (no
+// worker argv wired, or the child not startable — events.executeOverviewRebuild):
+// the REGULAR path runs this code inside the worker child process, where the
+// parent's rebuild_timeout is a SIGKILL and the leak dies with the process.
+// Deliberately NOT rebuilt away here — the process boundary already retires
+// it structurally on the path that matters (design/05 §4.7).
 func clusterWithCtx(ctx context.Context, nodeUUIDs []string, edges []rawEdge, resolution float64) (clustering, error) {
 	done := make(chan clustering, 1)
 	go func() {
