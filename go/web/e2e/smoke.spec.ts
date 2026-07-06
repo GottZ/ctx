@@ -245,4 +245,35 @@ test.describe('graph theme palette', () => {
     })
     expect(hoverType, 'defaultDrawNodeHover ist eine Funktion (theme-fester Drawer gesetzt)').toBe('function')
   })
+
+  // G5 (U02-W4, design 02-graph-darkmode §7 + §4.6): der Ego-Canvas-Host bezieht
+  // seinen Hintergrund aus DERSELBEN Quelle wie die Kontrast-Gates (--graph-bg),
+  // nicht mehr aus --surface-0. Beide Tokens sind heute wertgleich (#0b0b0f/
+  // #e9eaf0), aber alle Gates (G1a–G1c, G4d) rechnen gegen --graph-bg — läge der
+  // echte Host auf --surface-0, ließe eine künftige Token-Divergenz die Gates
+  // grün, während der sichtbare Kontrast bricht. Override-Probe: --graph-bg auf
+  // einen Sentinel-Wert setzen und die computed background-color des GraphView-
+  // Hosts lesen; sie MUSS dem Sentinel folgen.
+  //
+  // Der Selektor ist bewusst auf `.viewport .canvas` verankert (NICHT bloß
+  // `.canvas`): die OverviewMap folgt --graph-bg schon vor dieser Welle — säße
+  // das Gate auf ihr, wäre es fail-open. Nur GraphView liegt in `.viewport`
+  // (GraphPage {#if focus !== null}); die OverviewMap ({:else}) ist bei aktivem
+  // Fokus gar nicht gemountet. Erreicht wird der Ego-Host über den Deep-Link
+  // ?focus=<uuid> → GraphPage.onMount → setFocus → fetchEgo (egoFixture).
+  test('Ego-Canvas-Host bezieht die Hintergrundfarbe aus --graph-bg (nicht --surface-0)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/graph?focus=550e8400-e29b-41d4-a716-446655440001')
+    await waitForShell(page)
+
+    // Der GraphView-Host mountet erst, wenn setFocus/fetchEgo aufgelöst hat.
+    const host = page.locator('.viewport .canvas')
+    await host.waitFor({ state: 'attached', timeout: 10_000 })
+
+    const bg = await host.evaluate((el) => {
+      document.documentElement.style.setProperty('--graph-bg', 'rgb(1, 2, 3)')
+      return getComputedStyle(el).backgroundColor
+    })
+    expect(bg, 'Host folgt --graph-bg (Kontrast-Gate-Quelle), nicht --surface-0').toBe('rgb(1, 2, 3)')
+  })
 })

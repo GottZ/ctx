@@ -131,7 +131,11 @@
        canvas-mode height chain (GraphPage .area/.stage/.viewport) now carries a
        real height, so the canvas fills the region exactly with no floor fight. */
     min-height: 0;
-    background: var(--surface-0);
+    /* U02-W4: der Host bezieht seinen Hintergrund aus DERSELBEN Quelle, gegen die
+       alle Kontrast-Gates (G1a–G1c, G4d) rechnen (--graph-bg) — nicht --surface-0.
+       Beide sind heute wertgleich, aber eine künftige Divergenz ließe die Gates
+       grün, während der echte Kontrast bricht. OverviewMap folgt --graph-bg bereits. */
+    background: var(--graph-bg);
   }
   /* sigma creates its own canvases inside; nothing to style beyond the host. */
 </style>
