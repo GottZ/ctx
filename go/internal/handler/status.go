@@ -11,6 +11,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,6 +22,24 @@ import (
 // tests inject a fake without standing up a scheduler.
 type dreamModeSource interface {
 	GetDreamMode() (mode int32, throttleInterval time.Duration)
+}
+
+// armRunSource is the OPTIONAL scheduler slice for the P6 last-run timestamps
+// (design/05 §4.5, MW12). *events.Scheduler satisfies it; a dreamModeSource
+// that does not (test fakes) simply yields no timestamps — the collector
+// type-asserts and degrades to nil stamps, never a hard dependency.
+type armRunSource interface {
+	LastArmRuns() (guard, digest, overview time.Time)
+}
+
+// DispatchSource is the in-memory admission-registry view the collector adds as
+// a "cheap source" (design/05 §4.5, MW12): Snapshot is a mutex-guarded map read
+// (no I/O — cheaper than any DB source), Enforcing is the feature-gate predicate.
+// *dispatch.Dispatcher satisfies it; nil = pre-wire boot / tests (no dispatch
+// section is emitted).
+type DispatchSource interface {
+	Snapshot() dispatch.Snapshot
+	Enforcing() bool
 }
 
 // queueDepthFn matches dream.QueueDepth; injectable so the single-flight test
@@ -50,6 +69,13 @@ type statusResponse struct {
 	LLM24hComplete bool                     `json:"llm_24h_complete"`
 	Gaming         gamingStatus             `json:"gaming"`
 	Activity       *activityStatus          `json:"activity"`
+	// Dispatch carries the FULL admission-registry view — populated ONLY on the
+	// server-admin path (MW12/K13). DispatchTenant carries the coarsened
+	// per-tenant occupancy view — populated ONLY on the tenant path. Exactly one
+	// is non-null per response (the other renders null, Activity convention); a
+	// tenant response can therefore never carry a foreign fairKey (F-B3).
+	Dispatch       *dispatchStatus       `json:"dispatch"`
+	DispatchTenant *dispatchTenantStatus `json:"dispatch_tenant"`
 }
 
 // dreamStatus flattens scheduler mode + the dream.QueueStats fields (names 1:1,
@@ -71,13 +97,13 @@ type dreamStatus struct {
 // llm24hRow is one (backend, pipeline) aggregate over the last 24h. It carries
 // NO prompt/response bodies — only counts/timings/tokens/cost.
 type llm24hRow struct {
-	Backend          string  `json:"backend"`
-	Pipeline         string  `json:"pipeline"`
-	Calls            int     `json:"calls"`
-	AvgMs            int     `json:"avg_ms"`
-	Errors           int     `json:"errors"`
-	PromptTokens     int64   `json:"prompt_tokens"`
-	CompletionTokens int64   `json:"completion_tokens"`
+	Backend          string `json:"backend"`
+	Pipeline         string `json:"pipeline"`
+	Calls            int    `json:"calls"`
+	AvgMs            int    `json:"avg_ms"`
+	Errors           int    `json:"errors"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
 	// CostUSD is the summed external cost for the (backend, pipeline) bucket
 	// (T37c, 04-W4/§4.6 — the per-tenant rollup needs it; the global rollup
 	// gets it too, additive). 0 for local/un-priced buckets.
@@ -110,6 +136,17 @@ type cheapSnapshot struct {
 	llm24h         []llm24hRow
 	llm24hComplete bool
 	gamingActive   bool
+	// Dispatch registry view + arm last-run stamps, captured in-memory at the
+	// tick (MW12). Both the server-admin and the tenant view read THIS cached
+	// snapshot — never a live Snapshot() per request — so N pollers within one
+	// tick see an identical stand (design/05 §4.5 abtast-probe). dispatchOK is
+	// false when no DispatchSource is wired (no section emitted).
+	dispatch          dispatch.Snapshot
+	dispatchOK        bool
+	dispatchEnforcing bool
+	lastGuardAt       *time.Time
+	lastDigestAt      *time.Time
+	lastOverviewAt    *time.Time
 }
 
 // StatusCollector is the process-wide status aggregator (design 04 §3.6, W6).
@@ -134,6 +171,7 @@ type StatusCollector struct {
 	cfg         ConfigStore
 	blocktypes  BlocktypeSource // WF T3/T8: /health field + dream-queue-scan allowlist; nil ⇒ "ok" + fail-closed empty scan
 	queueDepth  queueDepthFn
+	dispatch    DispatchSource // MW12: in-memory admission-registry cheap source; nil ⇒ no dispatch section
 
 	mu      sync.Mutex // serializes the cold-start build only
 	rebuild atomic.Bool
@@ -163,7 +201,7 @@ type StatusCollector struct {
 // blocktypes may be nil (tests): the health aggregate then reports
 // blocktype_registry "ok" (same convention as NewHealthHandler) and the
 // dream-queue scan runs with an empty allowlist (fail-closed zeros + WARN).
-func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams dreamModeSource, cfg ConfigStore, blocktypes BlocktypeSource) *StatusCollector {
+func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams dreamModeSource, cfg ConfigStore, blocktypes BlocktypeSource, dispatchSrc DispatchSource) *StatusCollector {
 	return &StatusCollector{
 		pool:        pool,
 		backendPool: backendPool,
@@ -171,6 +209,7 @@ func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams d
 		cfg:         cfg,
 		blocktypes:  blocktypes,
 		queueDepth:  dream.QueueDepth,
+		dispatch:    dispatchSrc,
 	}
 }
 
@@ -179,15 +218,30 @@ func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams d
 // after the first (cold-start) call.
 func (c *StatusCollector) Snapshot(ctx context.Context) statusResponse {
 	cfg := c.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: /api/status process telemetry (cache TTL, queue cadence) is server-global, not tenant-scoped.
-	tick := cfg.Events.TickInterval
-	if tick <= 0 {
-		tick = 5 * time.Second
-	}
+	cur := c.cheapNow(ctx, cfg)
+
 	qInterval := cfg.Events.QueueStatsInterval
 	if qInterval <= 0 {
 		qInterval = 30 * time.Second
 	}
+	if !c.broadcasting.Load() && stale(c.qsAt.Load(), qInterval) {
+		c.scanQueueAsync(cfg.Scheduler.ReadScopes)
+	}
 
+	return c.assemble(cur, c.qs.Load())
+}
+
+// cheapNow returns the current cheap snapshot, cold-starting it or triggering a
+// background refresh when stale (never blocks after cold start). BOTH the
+// server-admin Snapshot and the tenant SnapshotForTenant read this ONE cache,
+// so the dispatch occupancy view's sampling resolution is structurally bounded
+// by events.tick_interval — a tenant cannot poll faster than the cache turns
+// over (design/05 §4.5 abtast-probe).
+func (c *StatusCollector) cheapNow(ctx context.Context, cfg *config.Config) *cheapSnapshot {
+	tick := cfg.Events.TickInterval
+	if tick <= 0 {
+		tick = 5 * time.Second
+	}
 	// While an SSE broadcast loop runs it is the refresher (one tick = one
 	// rebuild, shared by every poller and connection); a poll then just serves
 	// that warm cache. With no loop, the poll itself refreshes (W6, read-driven).
@@ -199,12 +253,7 @@ func (c *StatusCollector) Snapshot(ctx context.Context) statusResponse {
 	case !live && stale(c.cacheAt.Load(), tick):
 		c.refreshCheapAsync() // serve the slightly-stale cache, refresh in bg
 	}
-
-	if !live && stale(c.qsAt.Load(), qInterval) {
-		c.scanQueueAsync(cfg.Scheduler.ReadScopes)
-	}
-
-	return c.assemble(cur, c.qs.Load())
+	return cur
 }
 
 // setBroadcasting toggles the SSE-loop-active flag (see broadcasting).
@@ -301,7 +350,7 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	mode, throttle := c.dreams.GetDreamMode()
 	llm24h, complete := c.queryLLM24h(ctx)
 
-	return &cheapSnapshot{
+	snap := &cheapSnapshot{
 		asOf:           time.Now().UTC(),
 		health:         health,
 		backends:       c.backendPool.Status(), // in-memory, leak-safe admin shape
@@ -312,6 +361,31 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 		llm24hComplete: complete,
 		gamingActive:   cfg.GamingState().Active,
 	}
+	// Dispatch cheap source (MW12): the in-memory registry snapshot + enforcing
+	// predicate. Captured HERE so every reader within a tick serves the same
+	// stand (abtast-probe). The P6 last-run stamps come from the scheduler when
+	// it exposes them (armRunSource); a fake dreamMode source degrades to nil.
+	if c.dispatch != nil {
+		snap.dispatch = c.dispatch.Snapshot()
+		snap.dispatchOK = true
+		snap.dispatchEnforcing = c.dispatch.Enforcing()
+	}
+	if src, ok := c.dreams.(armRunSource); ok {
+		g, d, o := src.LastArmRuns()
+		snap.lastGuardAt = timePtr(g)
+		snap.lastDigestAt = timePtr(d)
+		snap.lastOverviewAt = timePtr(o)
+	}
+	return snap
+}
+
+// timePtr maps a wall-clock time to a *time.Time, folding the zero time to nil
+// (a never-run arm reads null on the wire, not the Unix epoch).
+func timePtr(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 // assemble merges the cheap snapshot with the latest queue scan into the wire
@@ -339,6 +413,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats) s
 	if l == nil {
 		l = []llm24hRow{}
 	}
+	var disp *dispatchStatus
+	if cheap.dispatchOK {
+		disp = buildDispatchAdmin(cheap.dispatch, cheap.dispatchEnforcing,
+			cheap.lastGuardAt, cheap.lastDigestAt, cheap.lastOverviewAt, l)
+	}
 	return statusResponse{
 		Success:        true,
 		AsOf:           cheap.asOf,
@@ -349,6 +428,7 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats) s
 		LLM24hComplete: cheap.llm24hComplete,
 		Gaming:         gamingStatus{Active: cheap.gamingActive},
 		Activity:       nil,
+		Dispatch:       disp,
 	}
 }
 

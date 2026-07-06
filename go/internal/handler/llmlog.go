@@ -36,6 +36,9 @@ type llmlogError struct {
 // llmlogEntry is one telemetry row. It carries NO request_system/request_user/
 // response_content — the M025 body columns (full prompts incl. block content =
 // a shadow corpus) are NEVER in the SELECT list (pinned by TestLLMLogNoPrompts).
+// The three dispatch-telemetry columns (queue_wait_ms/dispatch_class/
+// dispatch_abort, MW10/091) are pure Lease telemetry — nullable, body-free — so
+// they join the list without touching the body-exclusion invariant (A5-W6).
 type llmlogEntry struct {
 	ID               string       `json:"id"`
 	CreatedAt        time.Time    `json:"created_at"`
@@ -47,6 +50,9 @@ type llmlogEntry struct {
 	PromptTokens     *int         `json:"prompt_tokens"`
 	CompletionTokens *int         `json:"completion_tokens"`
 	CostUSD          *float64     `json:"cost_usd"`
+	QueueWaitMs      *int         `json:"queue_wait_ms"`
+	DispatchClass    *string      `json:"dispatch_class"`
+	DispatchAbort    *string      `json:"dispatch_abort"`
 }
 
 // HandleLLMLog serves the admin telemetry table. Admin-gated (RequireAdmin):
@@ -99,7 +105,8 @@ func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.pool.Query(r.Context(), `
 		SELECT id::text, created_at, pipeline, model,
 		       COALESCE(backend_name, host) AS backend,
-		       duration_ms, error, prompt_tokens, completion_tokens, cost_usd
+		       duration_ms, error, prompt_tokens, completion_tokens, cost_usd,
+		       queue_wait_ms, dispatch_class, dispatch_abort
 		FROM context_llm_log
 		WHERE ($1 = '' OR pipeline = $1)
 		  AND (NOT $2 OR error IS NOT NULL)
@@ -120,7 +127,8 @@ func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
 		var e llmlogEntry
 		var rawErr *string
 		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.Pipeline, &e.Model, &e.Backend,
-			&e.DurationMs, &rawErr, &e.PromptTokens, &e.CompletionTokens, &e.CostUSD); err != nil {
+			&e.DurationMs, &rawErr, &e.PromptTokens, &e.CompletionTokens, &e.CostUSD,
+			&e.QueueWaitMs, &e.DispatchClass, &e.DispatchAbort); err != nil {
 			slog.Error("llmlog: scan failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"success": false, "error": "internal error",

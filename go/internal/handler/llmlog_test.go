@@ -92,6 +92,8 @@ func TestLLMLogGoldenKeys(t *testing.T) {
 	assertKeys(t, "entry", es[0], []string{
 		"id", "created_at", "pipeline", "model", "backend",
 		"duration_ms", "error", "prompt_tokens", "completion_tokens", "cost_usd",
+		// MW12/091 dispatch telemetry — pure Lease measurands, never body columns.
+		"queue_wait_ms", "dispatch_class", "dispatch_abort",
 	})
 
 	var entryMap map[string]json.RawMessage

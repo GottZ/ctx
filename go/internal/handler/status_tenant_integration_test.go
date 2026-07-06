@@ -14,13 +14,25 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/testdb"
 )
+
+// fakeDispatch is a DispatchSource returning a fixed snapshot (the MW12 exposure
+// probes drive the wiring, not a live dispatcher).
+type fakeDispatch struct {
+	snap      dispatch.Snapshot
+	enforcing bool
+}
+
+func (f fakeDispatch) Snapshot() dispatch.Snapshot { return f.snap }
+func (f fakeDispatch) Enforcing() bool             { return f.enforcing }
 
 // fakeDreamMode (status_integration_test.go) satisfies dreamModeSource for the
 // global server-admin snapshot path; the per-tenant view never touches it.
@@ -64,7 +76,7 @@ func TestStatusPerTenantView(t *testing.T) {
 		{ID: "a", Name: "a-priv", Scope: "st-a", Enabled: true},
 		{ID: "b", Name: "b-priv", Scope: "st-b", Enabled: true},
 	})
-	col := NewStatusCollector(pool, bp, fakeDreamMode{}, config.NewStore(&config.Config{}), nil)
+	col := NewStatusCollector(pool, bp, fakeDreamMode{}, config.NewStore(&config.Config{}), nil, nil)
 
 	t.Run("tenant_rollup_isolated_and_costed", func(t *testing.T) {
 		snap := col.SnapshotForTenant(ctx, "st-a")
@@ -101,6 +113,63 @@ func TestStatusPerTenantView(t *testing.T) {
 		snap := col.SnapshotForTenant(ctx, "st-a")
 		if snap.Dream.Mode != "" || snap.Gaming.Active || snap.Activity != nil {
 			t.Errorf("tenant view leaked server-global fields: dream=%+v gaming=%+v activity=%v", snap.Dream, snap.Gaming, snap.Activity)
+		}
+	})
+
+	t.Run("dispatch_exposure_matrix", func(t *testing.T) {
+		// A dispatch-wired collector: the herbert origin is a _global backend
+		// (visible to every tenant); the sidecar origin has NO backend and must
+		// therefore be invisible to a tenant. sampleSnapshot (status_dispatch_test.go)
+		// carries an OWN ("private") + FOREIGN ("acme-secret") bucket on herbert.
+		bpd := backends.NewPool(nil, nil)
+		bpd.SeedSnapshotForTest([]backends.Backend{
+			{ID: "hc", Name: "herbert-chat", Host: "http://herbert:8089", Scope: backends.GlobalScope, Enabled: true},
+		})
+		snap := sampleSnapshot()
+		snap.Targets[0].Buckets[0].FairKey = "st-a" // caller's own bucket keys on its scope
+		dcol := NewStatusCollector(pool, bpd, fakeDreamMode{}, config.NewStore(&config.Config{}), nil,
+			fakeDispatch{snap: snap, enforcing: true})
+
+		// server-admin: full section, foreign fairKey visible, no tenant section.
+		srv := dcol.Snapshot(ctx)
+		if srv.Dispatch == nil || srv.DispatchTenant != nil {
+			t.Fatalf("server-admin: want dispatch set + dispatch_tenant nil, got %+v / %+v", srv.Dispatch, srv.DispatchTenant)
+		}
+		if !srv.Dispatch.Enforcing || len(srv.Dispatch.Targets) != 2 {
+			t.Errorf("server-admin dispatch detail wrong: %+v", srv.Dispatch)
+		}
+		adminJSON, _ := json.Marshal(srv.Dispatch)
+		if !strings.Contains(string(adminJSON), "acme-secret") {
+			t.Errorf("server-admin must see foreign fairKey: %s", adminJSON)
+		}
+
+		// tenant st-a: coarsened section, own bucket detail, NO foreign fairKey,
+		// sidecar target absent (not visible), no server-admin dispatch field.
+		ten := dcol.SnapshotForTenant(ctx, "st-a")
+		if ten.Dispatch != nil || ten.DispatchTenant == nil {
+			t.Fatalf("tenant: want dispatch nil + dispatch_tenant set, got %+v / %+v", ten.Dispatch, ten.DispatchTenant)
+		}
+		if len(ten.DispatchTenant.Targets) != 1 || ten.DispatchTenant.Targets[0].Origin != "http://herbert:8089" {
+			t.Fatalf("tenant should see ONLY the visible herbert target: %+v", ten.DispatchTenant.Targets)
+		}
+		tt := ten.DispatchTenant.Targets[0]
+		if !tt.Busy || tt.Depth != "hoch" || tt.OwnWaiting != 1 {
+			t.Errorf("tenant coarsened view wrong: busy=%v depth=%q own=%d", tt.Busy, tt.Depth, tt.OwnWaiting)
+		}
+		tenJSON, _ := json.Marshal(ten.DispatchTenant)
+		for _, forbidden := range []string{"acme-secret", "fair_key", "sidecar", "999"} {
+			if strings.Contains(string(tenJSON), forbidden) {
+				t.Errorf("F-B3/B-R3 leak: tenant payload contains %q: %s", forbidden, tenJSON)
+			}
+		}
+
+		// abtast-probe: two tenant pulls within one tick read the SAME cached
+		// snapshot (cheapSnapshot binding, design/05 §4.5).
+		ten2 := dcol.SnapshotForTenant(ctx, "st-a")
+		a, _ := json.Marshal(ten.DispatchTenant)
+		b, _ := json.Marshal(ten2.DispatchTenant)
+		if string(a) != string(b) {
+			t.Errorf("abtast: two pulls within a tick differ:\n%s\n%s", a, b)
 		}
 	})
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 )
 
 // Per-tenant status view (MT T37c, 04-W4/§4.6). A tenant-admin's GET /api/status
@@ -133,5 +134,34 @@ func (c *StatusCollector) SnapshotForTenant(ctx context.Context, scope string) s
 		// so completeness is not a meaningful flag here.
 		LLM24hComplete: true,
 		// Health/Dream/Gaming/Activity intentionally left zero — server-global.
+		DispatchTenant: c.dispatchForTenant(ctx, snap, scope),
 	}
+}
+
+// dispatchForTenant builds the E-A5-6(b) coarsened occupancy view for a tenant
+// admin from the CACHED dispatch snapshot (never a live Snapshot() — the tenant
+// path shares the server-admin cheap cache, so it cannot poll finer than the
+// tick; abtast-probe). Only targets the tenant may SEE appear (VisibleTo over
+// the backend pool → origin set); the caller's fairKey is its HomeScope (scope),
+// the sole bucket whose detail is exposed. Returns nil when no dispatch source
+// is wired.
+func (c *StatusCollector) dispatchForTenant(ctx context.Context, snap []backends.Backend, scope string) *dispatchTenantStatus {
+	cfg := c.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: dispatch cheap-cache TTL is a server-global process knob, not tenant-scoped.
+	cheap := c.cheapNow(ctx, cfg)
+	if cheap == nil || !cheap.dispatchOK {
+		return nil
+	}
+	// Origins the tenant may see: normalize the base_url of every visible
+	// backend to its physical origin (the dispatch target key). A malformed URL
+	// simply contributes no visible origin (it is no dispatch target either).
+	visible := make(map[string]bool, len(snap))
+	for i := range snap {
+		if !backends.VisibleTo(snap[i].Scope, scope) {
+			continue
+		}
+		if origin, err := dispatch.NormalizeOrigin(snap[i].Host); err == nil {
+			visible[origin] = true
+		}
+	}
+	return buildDispatchTenant(cheap.dispatch, visible, scope)
 }

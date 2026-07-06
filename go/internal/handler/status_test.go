@@ -135,6 +135,21 @@ func assertKeys(t *testing.T, what string, raw json.RawMessage, want []string) {
 	}
 }
 
+// mustField returns one field's raw JSON out of an object, failing the test if
+// it is absent.
+func mustField(t *testing.T, raw json.RawMessage, key string) json.RawMessage {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("mustField %q: unmarshal object: %v", key, err)
+	}
+	v, ok := m[key]
+	if !ok {
+		t.Fatalf("mustField %q: absent", key)
+	}
+	return v
+}
+
 // TestStatusGoldenKeys pins the /api/status wire field names — the anchor for
 // the hand-maintained TS types (web/src/lib/api/types.ts). An add/remove/rename
 // is a deliberate contract change that must update both sides.
@@ -147,6 +162,16 @@ func TestStatusGoldenKeys(t *testing.T) {
 		Dream:    dreamStatus{Mode: "on", NextPendingAt: &next},
 		LLM24h:   []llm24hRow{{Backend: "n", Pipeline: "p"}},
 		Gaming:   gamingStatus{Active: false},
+		// MW12: server-admin fixture carries the full dispatch section (one
+		// target + one bucket) so the wire shape is pinned; dispatch_tenant
+		// stays null on the admin path.
+		Dispatch: &dispatchStatus{
+			EmbedTokens: []dispatchEmbedTokens{{Target: "n", PromptTokens: 1}},
+			Targets: []dispatchTarget{{
+				Origin:  "http://h:8089",
+				Buckets: []dispatchBucket{{FairKey: "private"}},
+			}},
+		},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -154,6 +179,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "gaming", "activity",
+		"dispatch", "dispatch_tenant",
 	})
 
 	var top map[string]json.RawMessage
@@ -163,6 +189,31 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "dream", top["dream"], []string{
 		"mode", "throttle_interval_s", "pickable_now", "in_cooldown", "never_dreamed",
 		"awaiting_embed", "incoming_1h", "incoming_6h", "next_pending_at", "last_cycle_at",
+	})
+
+	// MW12 dispatch section (server-admin) wire pins.
+	assertKeys(t, "dispatch", top["dispatch"], []string{
+		"enabled", "enforcing", "demand", "reaps_total", "class_downgrades",
+		"uncharged_calls", "ops_total", "max_op_ms", "last_guard_at", "last_digest_at",
+		"last_overview_at", "embed_tokens", "targets",
+	})
+	var dts []json.RawMessage
+	if err := json.Unmarshal(mustField(t, top["dispatch"], "targets"), &dts); err != nil {
+		t.Fatalf("unmarshal dispatch.targets: %v", err)
+	}
+	assertKeys(t, "dispatch.target", dts[0], []string{
+		"origin", "slots", "preempt_background", "herald_scope", "held", "inflight",
+		"interactive", "background", "preempt", "buckets",
+	})
+	var dbk []json.RawMessage
+	if err := json.Unmarshal(mustField(t, dts[0], "buckets"), &dbk); err != nil {
+		t.Fatalf("unmarshal dispatch.target.buckets: %v", err)
+	}
+	// fair_key is SERVER-ADMIN ONLY — it must never appear in the tenant shape
+	// (asserted by TestStatusDispatchTenantNoForeignPrincipal). Here it is pinned
+	// as present on the admin side.
+	assertKeys(t, "dispatch.bucket", dbk[0], []string{
+		"fair_key", "waiting", "oldest_wait_ms", "inflight", "tokens", "charges",
 	})
 
 	var be []json.RawMessage

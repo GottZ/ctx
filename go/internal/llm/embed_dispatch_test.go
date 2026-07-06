@@ -27,13 +27,19 @@ func TestEmbedWireEntryDispatchColumns(t *testing.T) {
 	served := &backends.Backend{Name: "cpu-embed", Host: "http://cpu:8081", Trust: backends.TrustFull, Locality: "local"}
 	attempts := []embedcache.WireAttempt{
 		{Backend: "broken", Class: "no_model"},
-		{Backend: "cpu-embed", Class: "ok", Ms: 12, WaitMs: 9},
+		{Backend: "cpu-embed", Class: "ok", Ms: 12, WaitMs: 9, PromptTokens: 77},
 	}
 	entry := embedWireEntry("embed-backfill", backends.RoleEmbed, backends.SensInternal,
 		served, attempts, []string{"b1"}, nil, "", dispatch.ClassBackground)
 
 	if entry.QueueWaitMs == nil || *entry.QueueWaitMs != 9 {
 		t.Errorf("queue_wait_ms = %v, want 9 (row-defining wire attempt)", entry.QueueWaitMs)
+	}
+	// D1(a): the serving attempt's prompt-token count lands on the llmlog row so
+	// the status embed-token metric has a source (the same column the chat path
+	// fills). Without it the metric would be dead-on-arrival zeros.
+	if entry.PromptTokens != 77 {
+		t.Errorf("prompt_tokens = %d, want 77 (D1(a) embed-token substrate)", entry.PromptTokens)
 	}
 	if entry.Duration != 12*time.Millisecond {
 		t.Errorf("duration = %v, want 12ms wait-free wire span (§4.4a)", entry.Duration)

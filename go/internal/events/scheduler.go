@@ -148,6 +148,17 @@ type Scheduler struct {
 	dreamMode             atomic.Int32 // DreamModeOn | DreamModeThrottled | DreamModeOff
 	dreamThrottleInterval atomic.Int64 // nanoseconds; 0 = dreamThrottleDefault
 
+	// Last-run timestamps of the signal-driven, lease-free arms (unix nanos;
+	// 0 = never ran this process). Stamped when the arm actually executes its
+	// work body — PAST the demand-defer check — so staleness IS the observable
+	// anti-starvation gap the status surface reports (design/05 §4.5, P6 metric:
+	// the lease-free arms have no waitQ, so their only starvation signal is
+	// "how long since they last ran while demand stayed high"). Lock-free
+	// atomics: written by the scheduler goroutines, read by the status collector.
+	lastGuardNs    atomic.Int64
+	lastDigestNs   atomic.Int64
+	lastOverviewNs atomic.Int64
+
 	// Internal state.
 	mu            sync.Mutex
 	lastWriteAt   time.Time
@@ -216,6 +227,23 @@ func (s *Scheduler) SetDreamMode(mode int32, throttleInterval time.Duration) {
 // GetDreamMode returns the current dream mode and silent interval.
 func (s *Scheduler) GetDreamMode() (mode int32, throttleInterval time.Duration) {
 	return s.dreamMode.Load(), s.getDreamThrottleInterval()
+}
+
+// LastArmRuns returns the last-run wall-clock time of the three signal-driven,
+// lease-free arms (guard, digest, overview) — the P6 anti-starvation
+// observation metric (design/05 §4.5, MW12). A zero time.Time means the arm
+// has not run this process. The status collector maps each to a *time.Time
+// (nil when zero) for the server-admin dispatch section.
+func (s *Scheduler) LastArmRuns() (guard, digest, overview time.Time) {
+	return nsToTime(s.lastGuardNs.Load()), nsToTime(s.lastDigestNs.Load()), nsToTime(s.lastOverviewNs.Load())
+}
+
+// nsToTime converts a stored unix-nano stamp to wall-clock time; 0 → zero time.
+func nsToTime(ns int64) time.Time {
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 func (s *Scheduler) getDreamThrottleInterval() time.Duration {
@@ -869,7 +897,10 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// bounds BOTH paths: the child is SIGKILLed on timeout (CommandContext,
 	// E-B kill probes); only the in-process fallback keeps the documented
 	// Modularize goroutine leak (overview.clusterWithCtx).
+	// Stamp the actual-run marker (MW12/§4.5): reached only past the enabled +
+	// registry gates and the yield loop, so it reflects a real rebuild pass.
 	start := time.Now()
+	s.lastOverviewNs.Store(start.UnixNano())
 	stats, err := s.executeOverviewRebuild(rctx, overview.Options{
 		Resolution:    cfg.GraphOverview.Resolution,
 		VisibleTypes:  typeSet.VisibleTypes(),
@@ -993,6 +1024,9 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 		return
 	}
 
+	// Stamp the actual-run marker PAST the demand defer (MW12/§4.5): a deferred
+	// tick does NOT advance it, so the status surface shows the real gap.
+	s.lastGuardNs.Store(time.Now().UnixNano())
 	slog.Info("scheduler: running guard batch")
 
 	// WF T7: the batch consumes the BASE registry snapshot (the guard is ONE
@@ -1189,6 +1223,9 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		slog.Debug("scheduler: digest deferred, active queries", "count", s.activeQueries.Load())
 		return
 	}
+
+	// Stamp the actual-run marker PAST the demand defer (MW12/§4.5).
+	s.lastDigestNs.Store(time.Now().UnixNano())
 
 	// One snapshot per tenant per run (§2.3 / 06-C6 / T38): digest reads its
 	// corpus over the ENTITLEMENT-CLAMPED window (read_scopes ∩ owned) and writes

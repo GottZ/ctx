@@ -485,8 +485,15 @@ func embedWireEntry(pipeline, role string, required backends.Sensitivity,
 	apiKeyID string, class dispatch.Class,
 ) llmlog.Entry {
 	chain := make([]ChainAttempt, len(attempts))
+	var promptTokens int
 	for i, a := range attempts {
 		chain[i] = ChainAttempt{Backend: a.Backend, Class: a.Class, Ms: a.Ms, WaitMs: a.WaitMs}
+		// D1(a): the serving attempt carries the embed prompt-token count; a
+		// sequence has at most one "ok" attempt (it returns on success), so the
+		// running max is exactly the served count without double-counting.
+		if a.PromptTokens > promptTokens {
+			promptTokens = a.PromptTokens
+		}
 	}
 	entry := llmlog.Entry{
 		Pipeline:            pipeline,
@@ -495,6 +502,9 @@ func embedWireEntry(pipeline, role string, required backends.Sensitivity,
 		RequiredSensitivity: string(required),
 		Attempt:             len(attempts),
 		APIKeyID:            apiKeyID, // T35b: caller attribution (NULL for background backfill/dream)
+	}
+	if promptTokens > 0 {
+		entry.PromptTokens = promptTokens
 	}
 	if len(chain) > 0 {
 		entry.Metadata = map[string]any{"chain": chain}

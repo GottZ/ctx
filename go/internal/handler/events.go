@@ -134,6 +134,13 @@ type statusEvent struct {
 	LLM24hComplete bool            `json:"llm_24h_complete"`
 	Gaming         gamingStatus    `json:"gaming"`
 	Activity       *activityStatus `json:"activity"`
+	// Dispatch is the full server-admin registry section (MW12). The SSE stream
+	// is server-admin-only (RequireAdmin, server.go), so the full view rides it.
+	// Accepted per-tick diff behaviour (design/05 §4.5 lens-2): the section
+	// carries monotone since-boot counters + volatile inflight/waitQ, so under
+	// load it diffs every tick — the broadcast loop already refreshes at that
+	// cadence; no diff-exception logic (more code without a measured problem).
+	Dispatch *dispatchStatus `json:"dispatch"`
 }
 
 func statusEventOf(s statusResponse) statusEvent {
@@ -145,6 +152,7 @@ func statusEventOf(s statusResponse) statusEvent {
 		LLM24hComplete: s.LLM24hComplete,
 		Gaming:         s.Gaming,
 		Activity:       s.Activity,
+		Dispatch:       s.Dispatch,
 	}
 }
 

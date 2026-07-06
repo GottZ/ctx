@@ -105,6 +105,14 @@ type WireAttempt struct {
 	Class   string `json:"err_class"`
 	Ms      int64  `json:"ms"`
 	WaitMs  int64  `json:"wait_ms"`
+	// PromptTokens is the embed backend's reported prompt-token usage of a
+	// SUCCESSFUL attempt (0 otherwise). It is the D1(a) embed-token metric
+	// substrate: llm.LogEmbedWire copies the serving attempt's count onto the
+	// llmlog row (prompt_tokens), so the status page can aggregate embed tokens
+	// per target/window from llmlog — the SAME column the chat path already
+	// fills. Distinct from the dispatcher usage window (C1/MW22), which the
+	// lease.ReportUsage call feeds independently.
+	PromptTokens int `json:"prompt_tokens,omitempty"`
 }
 
 // abortClass classifies a dispatcher-caused cancel of one attempt's runCtx —
@@ -207,6 +215,7 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 		// pass-through state yields a real 0 (design/05 §3.2, B-R4).
 		waitMs := lease.WaitDur().Milliseconds()
 		start := time.Now()
+		var okTokens int
 		v, werr := func() ([]float32, error) {
 			// defer is the only allowed release form (B1: panic-safe).
 			defer lease.Release()
@@ -214,13 +223,14 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 			if werr == nil && ptoks > 0 {
 				// Embeds charge their prompt side only (C1); booked at Release.
 				lease.ReportUsage(dispatch.Usage{PromptTokens: ptoks})
+				okTokens = ptoks // D1(a): also carried onto the llmlog row
 			}
 			return v, werr
 		}()
 		elapsed := time.Since(start).Milliseconds()
 		wired = true
 		if werr == nil {
-			attempts = append(attempts, WireAttempt{Backend: b.Name, Class: "ok", Ms: elapsed, WaitMs: waitMs})
+			attempts = append(attempts, WireAttempt{Backend: b.Name, Class: "ok", Ms: elapsed, WaitMs: waitMs, PromptTokens: okTokens})
 			if report != nil {
 				report(b.ID, backends.ClassOK, 0)
 			}

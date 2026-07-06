@@ -74,6 +74,53 @@ func TestLLMLogNoPrompts(t *testing.T) {
 	}
 }
 
+// TestLLMLogDispatchColumns is the MW12 llmlog exposure gate: the three 091
+// dispatch-telemetry columns (queue_wait_ms/dispatch_class/dispatch_abort) reach
+// the list response — and the body-exclusion invariant stays intact (no prompt
+// marker). Dropping any column from the SELECT/scan turns this red.
+func TestLLMLogDispatchColumns(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	// A wired background row: queue_wait_ms 0 is a REAL measurement (not NULL),
+	// dispatch_class background, and a K9 rejection kind.
+	_, err := pool.Exec(ctx, `INSERT INTO context_llm_log
+		(pipeline, model, host, duration_ms, backend_name,
+		 queue_wait_ms, dispatch_class, dispatch_abort, request_user)
+		VALUES ('embed-backfill','qwen3-embed','herbert',NULL,'llama-embed',
+		        1234,'background','queue_full','USER-SECRET-MARKER')`)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	handler := NewLLMLogHandler(pool, config.NewStore(&config.Config{}))
+	body := serveLLMLog(t, handler, "").Body.String()
+
+	var resp struct {
+		Entries []llmlogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v — body %s", err, body)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(resp.Entries))
+	}
+	e := resp.Entries[0]
+	if e.QueueWaitMs == nil || *e.QueueWaitMs != 1234 {
+		t.Errorf("queue_wait_ms missing/wrong: %v", e.QueueWaitMs)
+	}
+	if e.DispatchClass == nil || *e.DispatchClass != "background" {
+		t.Errorf("dispatch_class missing/wrong: %v", e.DispatchClass)
+	}
+	if e.DispatchAbort == nil || *e.DispatchAbort != "queue_full" {
+		t.Errorf("dispatch_abort missing/wrong: %v", e.DispatchAbort)
+	}
+	// Body-exclusion invariant holds even with the new columns.
+	if strings.Contains(body, "USER-SECRET-MARKER") {
+		t.Errorf("body column leaked alongside dispatch columns: %s", body)
+	}
+}
+
 // TestLLMLogErrorCapped proves the error side-channel is closed: a prompt marker
 // placed beyond the 256-rune cap is dropped, the class survives.
 func TestLLMLogErrorCapped(t *testing.T) {

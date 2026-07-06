@@ -159,7 +159,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// Status dashboard (F4-W6/G33): ONE process-wide collector feeds GET
 	// /api/status (and, in W7/G34, SSE) from a cache — N pollers cost one
 	// refresh, not N. scheduler supplies the dream mode (GetDreamMode).
-	statusCollector := handler.NewStatusCollector(pool, backendPool, scheduler, cfgStore, blocktypeReg)
+	statusCollector := handler.NewStatusCollector(pool, backendPool, scheduler, cfgStore, blocktypeReg, dispatcher)
 	statusH := handler.NewStatusHandler(statusCollector)
 	llmlogH := handler.NewLLMLogHandler(pool, cfgStore)
 	// SSE live updates (F4-W7/G34): GET /api/events broadcasts from the SAME
