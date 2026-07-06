@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -46,6 +47,108 @@ func schedulerWithDemand(t *testing.T, n int) (*Scheduler, func()) {
 		for _, done := range dones {
 			done()
 		}
+	}
+}
+
+// schedulerEnforcingWithDemand builds a scheduler wired to a dispatcher whose
+// derived policy fully covers the local background-reachable targets (a capped
+// GPU chat origin carrying the background roles + a capped embed origin — the
+// live-shaped fixture of dispatch.enforcingRows), so Enforcing() is true, and
+// raises interactive demand to n. Release lowers demand back to zero. Used by
+// the P-GPU probes: unlike schedulerWithDemand (empty policy ⇒ !Enforcing ⇒
+// P-Fallback), this one exercises the poll-less path.
+func schedulerEnforcingWithDemand(t *testing.T, n int) (*Scheduler, func()) {
+	t.Helper()
+	logger := slog.Default()
+	d := dispatch.New(logger, dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	d.UpdatePolicy(dispatch.DerivePolicy([]dispatch.BackendRow{
+		{Name: "gpu-chat", Scope: dispatch.GlobalScope, BaseURL: "http://gpu:8089/v1",
+			Roles:  []string{"chat", "dream", "classify", "digest", "synthesis", "translate"},
+			Limits: map[string]any{"slots": float64(1)}},
+		{Name: "embed", Scope: dispatch.GlobalScope, BaseURL: "http://embed:8081",
+			Roles:  []string{"embed", "dream-embed"},
+			Limits: map[string]any{"slots": float64(4)}},
+	}, logger))
+	s := &Scheduler{}
+	s.SetDispatcher(d)
+	if !s.enforcing() {
+		t.Fatal("fixture policy did not make the dispatcher Enforcing")
+	}
+	dones := make([]func(), 0, n)
+	for i := 0; i < n; i++ {
+		dones = append(dones, d.InteractiveArrived())
+	}
+	return s, func() {
+		for _, done := range dones {
+			done()
+		}
+	}
+}
+
+// TestEnforcing_NilSafe pins the unwired-scheduler neutrality of the yield
+// gate: no dispatcher ⇒ enforcing() false ⇒ the legacy yield fallback stays
+// active (P-Fallback), never the removed poll-less path (SetDispatcher
+// happens-before Run, so production always has a live dispatcher).
+func TestEnforcing_NilSafe(t *testing.T) {
+	s := &Scheduler{}
+	if s.enforcing() {
+		t.Fatal("nil-dispatcher enforcing() = true, want false (fallback must stay active)")
+	}
+}
+
+// TestEnforcing_ReflectsDispatcher pins that the arm's yield gate tracks the
+// dispatcher: full local coverage ⇒ true; an emergency stop (enabled=false)
+// drops it back to false even under that coverage — the fallback returns within
+// a reload, no arm involvement (design/05 §4.2).
+func TestEnforcing_ReflectsDispatcher(t *testing.T) {
+	s, release := schedulerEnforcingWithDemand(t, 0)
+	defer release()
+	if !s.enforcing() {
+		t.Fatal("enforcing() = false under full local coverage")
+	}
+	off := dispatch.DefaultSettings()
+	off.Enabled = false
+	s.dispatcher.UpdateSettings(off)
+	if s.enforcing() {
+		t.Fatal("enforcing() = true after emergency stop (enabled=false)")
+	}
+}
+
+// TestAuditTenantScope_ProceedsUnderEnforcing is the P-GPU gate for audit
+// (A5-W2/MW16): with the dispatcher Enforcing and demand > 0 the arm does NOT
+// self-poll — it proceeds past the removed vor-start yield so each classify
+// call waits AT THE TARGET in its background lease. Observable via this file's
+// idiom: the zero-value scheduler has a nil cfg, so proceeding past the yield
+// reaches s.cfg.SnapshotForTenant and panics, whereas still sitting in the
+// yield would instead abort cleanly on the ctx timeout — panic ⟺ proceeded.
+// The "waits at target / waitQ depth 1" property belongs to the background
+// lease (dispatch Acquire/Herald tests, MW3); the MW16 delta is precisely that
+// the arm stops polling under Enforcing.
+func TestAuditTenantScope_ProceedsUnderEnforcing(t *testing.T) {
+	s, release := schedulerEnforcingWithDemand(t, 1)
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	proceeded := make(chan bool, 1)
+	go func() {
+		defer func() {
+			// nil cfg deref past the yield ⇒ the arm proceeded (did not poll).
+			proceeded <- recover() != nil
+		}()
+		s.auditTenantScope(ctx, backgroundTenant{scope: store.GlobalScope}, false, 10)
+		proceeded <- false // returned via the yield/abort path — did NOT proceed
+	}()
+
+	select {
+	case p := <-proceeded:
+		if !p {
+			t.Fatal("audit yielded under Enforcing instead of proceeding to the target (vor-start poll not removed)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("audit stuck under Enforcing")
 	}
 }
 
@@ -135,11 +238,14 @@ func TestRunDreamLoop_YieldsOnDemand(t *testing.T) {
 	}
 }
 
-// TestAuditTenantScope_DefersOnDemand is the P-GPU negative gate for audit
-// (yield SEMANTICS unchanged — 2 s wait-loop, entfernung is A5-W2/MW16): under
+// TestAuditTenantScope_DefersOnDemand is the P-Fallback gate for audit after
+// the yield removal (A5-W2/MW16): schedulerWithDemand wires an EMPTY-policy
+// dispatcher ⇒ !Enforcing ⇒ the fail-open fallback 2 s wait-loop runs, so under
 // demand the scope loop stays in the yield branch and aborts on ctx cancel
-// without reaching the nil-cfg SnapshotForTenant body. A dead demand read would
-// fall through to that body and panic instead of returning abort.
+// without reaching the nil-cfg SnapshotForTenant body — byte-identical to the
+// pre-removal Ist. A dead demand read (or a wrongly-Enforcing fallback) would
+// fall through to that body and panic instead of returning abort. The
+// Enforcing (poll-less) leg is TestAuditTenantScope_ProceedsUnderEnforcing.
 func TestAuditTenantScope_DefersOnDemand(t *testing.T) {
 	s, _ := schedulerWithDemand(t, 1)
 

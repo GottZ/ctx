@@ -175,15 +175,20 @@ func (s *Scheduler) auditTenantScope(ctx context.Context, bt backgroundTenant, d
 			s.auditAbort("shutdown")
 			return true
 		}
-		// Demand interruption: audit GPU work yields to interactive demand.
-		if s.interactiveDemand() > 0 {
+		// Demand interruption (design/05 §4.2/§4.3, A5-W2/MW16 — Kunde 1 of the
+		// yield removal): under Enforcing the vor-start poll ENTFÄLLT — the
+		// classify calls wait AT THE TARGET in their background lease (the Herald
+		// blocks background admission while interactive demand stands), so the arm
+		// proceeds and never self-polls (P-GPU). Under !enforcing() (kill switch,
+		// empty or partial policy) the byte-identical legacy 2 s wait loop is the
+		// fail-open fallback (P-Fallback), same constant, same shutdown abort.
+		for !s.enforcing() && s.interactiveDemand() > 0 {
 			select {
 			case <-ctx.Done():
 				s.auditAbort("shutdown")
 				return true
 			case <-time.After(dreamYieldWait):
 			}
-			continue
 		}
 
 		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)

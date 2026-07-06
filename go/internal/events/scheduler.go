@@ -494,6 +494,20 @@ func (s *Scheduler) interactiveDemand() int {
 	return s.dispatcher.InteractiveDemand()
 }
 
+// enforcing is the nil-safe read of dispatch.Enforcing (design/05 §4.2, the
+// fail-open hinge of the feature gating): true only when the dispatcher fully
+// admits — enabled AND non-empty policy AND coverage of every
+// background-reachable local target. The GPU arms whose vor-start yield was
+// removed (audit A5-W2/MW16, dream A5-W3/MW17) gate that yield on !enforcing():
+// under Enforcing the wire call waits AT THE TARGET in its background lease (the
+// Herald blocks background admission while interactive demand stands), so there
+// is no vor-start polling. An unwired scheduler (tests, boot before
+// SetDispatcher) is never enforcing — the legacy yield fallback stays active,
+// byte-identical to the pre-removal behavior (P-Fallback).
+func (s *Scheduler) enforcing() bool {
+	return s.dispatcher != nil && s.dispatcher.Enforcing()
+}
+
 // newRouter builds the per-cycle/per-run dream router: the live backend pool
 // plus the snapshot's scope floor, gaming exclusion and pool-health reporting.
 // cfg is the caller's cycle snapshot, so gaming/floor travel with the same
