@@ -16,6 +16,7 @@
   import { Resource } from '../../lib/resource.svelte'
   import { SseClient } from '../../lib/sse.svelte'
   import BackendsTile from './BackendsTile.svelte'
+  import DispatchTile from './DispatchTile.svelte'
   import DreamTile from './DreamTile.svelte'
   import LlmlogTable from './LlmlogTable.svelte'
 
@@ -197,6 +198,7 @@
 
     <DreamTile dream={s.dream} onRefresh={() => void status.reload()} />
     <BackendsTile backends={s.backends} />
+    <DispatchTile dispatch={s.dispatch} dispatchTenant={s.dispatch_tenant} />
     <LlmlogTable complete={s.llm_24h_complete} live={liveLlmcalls} />
   {/if}
 </section>

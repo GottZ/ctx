@@ -241,8 +241,119 @@ export interface ActivityStatus {
   updated_at: string
 }
 
+// =============================================================================
+// Dispatch status surfaces (inference-scheduler MW12/MW12b, design/05 §4.5).
+// TWO deliberately distinct wire shapes (K13 exposure doctrine), drift-anchored
+// to go/internal/handler/status_dispatch.go (dispatchStatus / dispatchTenant-
+// Status), pinned by TestStatusGoldenKeys + status_dispatch_test.go:
+//   - DispatchStatus (server-admin): the FULL registry snapshot incl. per-fair-
+//     key bucket detail, wait aggregates, preempt/aged counters, embed-token
+//     rollup and the P6 last-run timestamps.
+//   - DispatchTenantStatus (tenant-admin): the coarsened occupancy view. It
+//     carries NO fair_key field at all — a foreign principal is structurally
+//     unreachable through it (F-B3). `depth` is the coarsened waitQ bucket, NOT
+//     a live count; there is deliberately no exact foreign-load number.
+// =============================================================================
+
+// Source: status_dispatch.go (dispatchWait) — one class's wait aggregate. All
+// *_ms are integer milliseconds; oldest/p95/max come off the MW7 K=512 ring.
+export interface DispatchWait {
+  waiting: number
+  oldest_wait_ms: number
+  p95_wait_ms: number
+  max_wait_ms: number
+  samples: number
+}
+
+// Source: status_dispatch.go (dispatchPreempt) — per-target preemption counters
+// (since boot) + the last/max release latency. SERVER-ADMIN only.
+export interface DispatchPreempt {
+  preempts_total: number
+  wasted_ms_total: number
+  release_ms_last: number
+  release_ms_max: number
+  forced_releases_total: number
+  aged_admits_total: number
+  aged_preempts_total: number
+}
+
+// Source: status_dispatch.go (dispatchBucket) — per-fair-key detail. SERVER-
+// ADMIN ONLY: fair_key is principal identity (HomeScope) and NEVER appears in
+// the tenant shape.
+export interface DispatchBucket {
+  fair_key: string
+  waiting: number
+  oldest_wait_ms: number
+  inflight: number
+  tokens: number
+  charges: number
+}
+
+// Source: status_dispatch.go (dispatchEmbedTokens) — the D1(a) embed-token
+// metric: summed prompt_tokens of the embed pipelines per target over 24h.
+export interface DispatchEmbedTokens {
+  target: string
+  prompt_tokens: number
+}
+
+// Source: status_dispatch.go (dispatchTarget) — one backend target's live
+// occupancy + wait/preempt aggregates + per-fair-key buckets. SERVER-ADMIN.
+export interface DispatchTarget {
+  origin: string
+  slots: number
+  preempt_background: boolean
+  herald_scope: string
+  held: number
+  inflight: number
+  interactive: DispatchWait
+  background: DispatchWait
+  preempt: DispatchPreempt
+  buckets: DispatchBucket[]
+}
+
+// Source: status_dispatch.go (dispatchStatus) — the FULL server-admin registry
+// view. Present ONLY on a server-admin response (null for a tenant-admin).
+export interface DispatchStatus {
+  enabled: boolean
+  enforcing: boolean
+  demand: number
+  reaps_total: number
+  class_downgrades: number
+  uncharged_calls: number
+  ops_total: number
+  max_op_ms: number
+  last_guard_at: string | null
+  last_digest_at: string | null
+  last_overview_at: string | null
+  embed_tokens: DispatchEmbedTokens[]
+  targets: DispatchTarget[]
+}
+
+// Source: status_dispatch.go (dispatchTenantTarget) — the coarsened per-target
+// occupancy a tenant may see. `depth` is 'leer' | 'niedrig' | 'hoch' (a
+// coarsened waitQ bucket, NEVER an exact foreign count); own_* is the caller's
+// OWN fairness bucket. There is deliberately NO fair_key / foreign-count field.
+export type DispatchDepth = 'leer' | 'niedrig' | 'hoch'
+export interface DispatchTenantTarget {
+  origin: string
+  busy: boolean
+  depth: DispatchDepth
+  own_waiting: number
+  own_inflight: number
+  own_oldest_wait_ms: number
+}
+
+// Source: status_dispatch.go (dispatchTenantStatus) — the coarsened tenant view.
+// Present ONLY on a tenant-admin response (null for a server-admin).
+export interface DispatchTenantStatus {
+  targets: DispatchTenantTarget[]
+}
+
 // Source: go/internal/handler/status.go (statusResponse),
-// pinned by TestStatusGoldenKeys.
+// pinned by TestStatusGoldenKeys. Exactly ONE of dispatch / dispatch_tenant is
+// non-null per response: a server-admin gets the full `dispatch`, a tenant-admin
+// gets the coarsened `dispatch_tenant` (so a tenant response can never carry a
+// foreign fair_key, F-B3). Both null when no dispatch source is wired.
 export interface StatusResponse {
   success: true
   as_of: string
@@ -253,6 +364,8 @@ export interface StatusResponse {
   llm_24h_complete: boolean
   gaming: { active: boolean }
   activity: ActivityStatus | null
+  dispatch?: DispatchStatus | null
+  dispatch_tenant?: DispatchTenantStatus | null
 }
 
 // Source: go/internal/handler/events.go (statusEvent) — the SSE `status` event
@@ -267,6 +380,10 @@ export interface StatusEvent {
   llm_24h_complete: boolean
   gaming: { active: boolean }
   activity: ActivityStatus | null
+  // The SSE stream is SERVER-admin only (events.go RequireAdmin), so it carries
+  // the FULL `dispatch` section — never the coarsened tenant shape. Absent on a
+  // pre-MW12 server (⇒ the tile simply hides).
+  dispatch?: DispatchStatus | null
 }
 
 // Source: go/internal/handler/llmlog.go (llmlogError) — class + length-capped
@@ -277,7 +394,12 @@ export interface LLMLogError {
 }
 
 // Source: go/internal/handler/llmlog.go (llmlogEntry),
-// pinned by TestLLMLogGoldenKeys.
+// pinned by TestLLMLogGoldenKeys. NO prompt/response bodies — the list is
+// body-free by invariant (TestLLMLogNoPrompts); bodies live only behind the
+// per-id LLMLogDetail fetch. The three dispatch-telemetry columns (MW10/091)
+// are pure Lease measurands: queue wait in ms, the admission class the row ran
+// under, and the abort cause (only background rows ever carry one). All three
+// are null on a pre-scheduler / lease-free row.
 export interface LLMLogEntry {
   id: string
   created_at: string
@@ -289,12 +411,47 @@ export interface LLMLogEntry {
   prompt_tokens: number | null
   completion_tokens: number | null
   cost_usd: number | null
+  queue_wait_ms: number | null
+  dispatch_class: string | null
+  dispatch_abort: string | null
 }
 
 // Source: go/internal/handler/llmlog.go (HandleLLMLog).
 export interface LLMLogResponse {
   success: true
   entries: LLMLogEntry[]
+}
+
+// The reason a detail body is absent (llmlog.go bodyPresent/bodySealed/
+// bodyEvicted): 'present' = bodies returned; 'sealed' = credentials-class row,
+// bodies never stored (E4 no-shadow-corpus); 'evicted' = retention NULLed them
+// (or a bodyless rejection line). The UI shows WHY rather than a blank card.
+export type LLMLogBodyState = 'present' | 'sealed' | 'evicted'
+
+// Source: go/internal/handler/llmlog.go (llmlogDetail),
+// pinned by TestLLMLogDetailGoldenKeys. The ONLY llmlog shape that MAY carry the
+// M025 prompt/reply bodies — and ONLY per-id, behind the gated GET
+// /api/llmlog/{id} (server-admin any row; tenant-admin only its own keys' rows,
+// uniform 404 otherwise). The three bodies are null unless body_state==='present'.
+export interface LLMLogDetail {
+  id: string
+  created_at: string
+  pipeline: string
+  model: string
+  backend: string
+  required_sensitivity: string
+  body_state: LLMLogBodyState
+  request_system: string | null
+  request_user: string | null
+  response_content: string | null
+}
+
+// Source: go/internal/handler/llmlog.go (HandleLLMLogDetail happy path). An
+// unknown or foreign id answers 404 {success:false,error:'not found'} (raised as
+// ApiError, no existence oracle) — never this shape.
+export interface LLMLogDetailResponse {
+  success: true
+  detail: LLMLogDetail
 }
 
 // Source: go/internal/store/sealbox.go (SecretMeta) + handler/sealbox.go

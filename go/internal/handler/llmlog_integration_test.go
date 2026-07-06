@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -283,5 +285,97 @@ func TestLLMLogFilters(t *testing.T) {
 	}
 	if got := decode(""); len(got.Entries) != 3 {
 		t.Errorf("no filter: got %d entries, want 3", len(got.Entries))
+	}
+}
+
+// TestLLMLogDetailTenantGate pins the per-tenant gate of the D1b detail
+// endpoint (MW12b) — the half TestLLMLogTenantScoped covers for the LIST.
+// Added by the integrator after a red-probe (dropping the api_key_id
+// predicate from the detail query) stayed GREEN: nothing pinned the gate.
+// A tenant-admin fetches ONLY rows attributed to its own keys; a foreign,
+// background (api_key_id NULL), unknown or malformed id answers a UNIFORM
+// 404 (no existence oracle); a keyless tenant is fail-closed. The
+// server-admin counter-probe proves the test could see a foreign body.
+func TestLLMLogDetailTenantGate(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	insertTenant := func(slug string) string {
+		var id string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO context_tenants (slug, display_name) VALUES ($1,$2) RETURNING id::text`, slug, slug).Scan(&id); err != nil {
+			t.Fatalf("insert tenant %s: %v", slug, err)
+		}
+		return id
+	}
+	insertKey := func(hash, tenantID string) string {
+		var id string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
+			 VALUES ($1,$2,'private',$3::uuid) RETURNING id::text`, hash, hash, tenantID).Scan(&id); err != nil {
+			t.Fatalf("insert key %s: %v", hash, err)
+		}
+		return id
+	}
+	insertLog := func(apiKeyID *string, backend, body string) string {
+		var id string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO context_llm_log (pipeline, model, host, duration_ms, api_key_id, backend_name, required_sensitivity, request_system)
+			 VALUES ('query-synthesize','m','h',10,$1,$2,'internal',$3) RETURNING id::text`, apiKeyID, backend, body).Scan(&id); err != nil {
+			t.Fatalf("insert log %s: %v", backend, err)
+		}
+		return id
+	}
+
+	tenantA := insertTenant("d1b-tenant-a")
+	tenantB := insertTenant("d1b-tenant-b")
+	tenantEmpty := insertTenant("d1b-tenant-empty")
+	keyA := insertKey("d1b-key-a", tenantA)
+	keyB := insertKey("d1b-key-b", tenantB)
+	rowA := insertLog(&keyA, "backend-a", "body-a")
+	rowB := insertLog(&keyB, "backend-b", "body-b")
+	rowBG := insertLog(nil, "backend-bg", "body-bg")
+
+	h := NewLLMLogHandler(pool, config.NewStore(&config.Config{}))
+	fetch := func(id string, ar *auth.AuthResult) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/llmlog/"+id, nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", id)
+		reqCtx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		req = req.WithContext(context.WithValue(reqCtx, authResultKey, ar))
+		rec := httptest.NewRecorder()
+		h.HandleLLMLogDetail(rec, req)
+		return rec
+	}
+	admA := &auth.AuthResult{IsValid: true, TenantID: tenantA, TenantRole: auth.RoleAdmin}
+
+	// Own row: 200 with the body present.
+	if rec := fetch(rowA, admA); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "body-a") {
+		t.Errorf("tenant-A own row: status %d body %s; want 200 with body-a", rec.Code, rec.Body.String())
+	}
+	// Foreign row, background row, unknown id, malformed id: UNIFORM 404,
+	// and the foreign body never appears anywhere in the response.
+	for name, id := range map[string]string{
+		"foreign":    rowB,
+		"background": rowBG,
+		"unknown":    "01920000-0000-7000-8000-000000000000",
+		"malformed":  "not-a-uuid",
+	} {
+		rec := fetch(id, admA)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("tenant-A %s id: status %d, want uniform 404", name, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "body-b") || strings.Contains(rec.Body.String(), "body-bg") {
+			t.Errorf("tenant-A %s id: foreign body leaked: %s", name, rec.Body.String())
+		}
+	}
+	// Keyless tenant: fail-closed 404 even for an existing row.
+	if rec := fetch(rowA, &auth.AuthResult{IsValid: true, TenantID: tenantEmpty, TenantRole: auth.RoleAdmin}); rec.Code != http.StatusNotFound {
+		t.Errorf("keyless tenant admin: status %d, want 404", rec.Code)
+	}
+	// Server-admin counter-probe: the foreign row IS servable (the 404s above
+	// come from the gate, not from a broken fetch).
+	if rec := fetch(rowB, &auth.AuthResult{IsValid: true, IsAdmin: true}); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "body-b") {
+		t.Errorf("server-admin foreign row: status %d body %s; want 200 with body-b", rec.Code, rec.Body.String())
 	}
 }

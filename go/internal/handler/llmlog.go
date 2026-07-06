@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -147,6 +150,142 @@ func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "entries": entries})
+}
+
+// Body-state vocabulary for the gated detail fetch (D1b). The LIST stays
+// body-free (TestLLMLogNoPrompts); the bodies live ONLY behind this per-id
+// endpoint, and the state tells the client WHY a body is absent so it can
+// render an honest affordance instead of a blank card.
+const (
+	// bodyPresent — at least one of request_system/request_user/response_content
+	// is non-empty and is returned.
+	bodyPresent = "present"
+	// bodySealed — the row is a credentials-class call: bodies were never stored
+	// (Entry.Slimmed at write time, E4). Not a loss — a deliberate no-shadow-
+	// corpus policy for the hottest tier.
+	bodySealed = "sealed"
+	// bodyEvicted — a non-credentials row whose bodies are all NULL: retention
+	// NULLed them (llmlog.EvictBodies) or the row never carried a wire body (a
+	// K9 rejection line). Either way there is nothing to show.
+	bodyEvicted = "evicted"
+)
+
+// llmlogDetail is the STRICTLY GATED per-id body view (D1b, design/05 §4.5 /
+// DECISIONS D1). Unlike llmlogEntry it MAY carry the M025 bodies — but only for
+// a single row the caller is authorized to see (server-admin: any row; tenant-
+// admin: only rows attributed to its own keys, mirroring the list filter). The
+// bodies are pointers so a sealed/evicted row renders null (never ""), and
+// BodyState names the reason. This is the ONLY handler in the package that
+// SELECTs the body columns; it is per-id and gated, so it never becomes the
+// bulk shadow-corpus surface the list invariant forbids.
+type llmlogDetail struct {
+	ID                  string    `json:"id"`
+	CreatedAt           time.Time `json:"created_at"`
+	Pipeline            string    `json:"pipeline"`
+	Model               string    `json:"model"`
+	Backend             string    `json:"backend"`
+	RequiredSensitivity string    `json:"required_sensitivity"`
+	BodyState           string    `json:"body_state"`
+	RequestSystem       *string   `json:"request_system"`
+	RequestUser         *string   `json:"request_user"`
+	ResponseContent     *string   `json:"response_content"`
+}
+
+// HandleLLMLogDetail serves GET /api/llmlog/{id} — the gated prompt/reply body
+// fetch behind a history-row click (D1b). Admin OR tenant-admin (same mount as
+// the list); a tenant-admin sees a row ONLY if it is attributed to one of its
+// own keys — a foreign or unknown id answers a uniform 404 (no existence oracle,
+// §4.6/R6). Sealed (credentials-class) and evicted (retention-NULLed) rows
+// return 200 with null bodies + the reason in body_state, so the client shows
+// why rather than a blank card.
+func (h *LLMLogHandler) HandleLLMLogDetail(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if !uuidRe.MatchString(id) {
+		// A malformed id is treated exactly like an unknown one: uniform 404, no
+		// separate "bad id" branch that would let a probe distinguish the two.
+		writeLLMLogNotFound(w)
+		return
+	}
+
+	// Same per-tenant gate as the list (T37b): server-admin → no key predicate;
+	// anyone else → api_key_id = ANY(its keys). A tenant with zero keys resolves
+	// to an empty slice → the WHERE never matches → uniform 404 (fail-closed).
+	ar := AuthResultFromContext(r.Context())
+	var keyFilter []string
+	if ar == nil || !ar.IsServerAdmin() {
+		tenant := ""
+		if ar != nil {
+			tenant = ar.TenantID
+		}
+		keys, kerr := store.TenantAPIKeyIDs(r.Context(), h.pool, tenant)
+		if kerr != nil {
+			slog.Error("llmlog: detail tenant key resolve failed", "error", kerr, "request_id", RequestIDFromContext(r.Context()))
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false, "error": "internal error",
+			})
+			return
+		}
+		keyFilter = keys
+	}
+
+	var d llmlogDetail
+	var reqSystem, reqUser, respContent *string
+	var sensitivity *string
+	err := h.pool.QueryRow(r.Context(), `
+		SELECT id::text, created_at, pipeline, model,
+		       COALESCE(backend_name, host) AS backend,
+		       required_sensitivity, request_system, request_user, response_content
+		FROM context_llm_log
+		WHERE id = $1::uuid
+		  AND ($2::uuid[] IS NULL OR api_key_id = ANY($2))`,
+		id, keyFilter,
+	).Scan(&d.ID, &d.CreatedAt, &d.Pipeline, &d.Model, &d.Backend,
+		&sensitivity, &reqSystem, &reqUser, &respContent)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Unknown id OR a row the caller may not see — one uniform answer.
+			writeLLMLogNotFound(w)
+			return
+		}
+		slog.Error("llmlog: detail query failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "internal error",
+		})
+		return
+	}
+	if sensitivity != nil {
+		d.RequiredSensitivity = *sensitivity
+	}
+	d.BodyState, d.RequestSystem, d.RequestUser, d.ResponseContent =
+		classifyBodies(d.RequiredSensitivity, reqSystem, reqUser, respContent)
+
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "detail": d})
+}
+
+// classifyBodies decides the body_state and which bodies to return. A
+// credentials-class row is SEALED (bodies never stored — Entry.Slimmed, E4);
+// otherwise a row with any non-empty body is PRESENT and returns them, and a row
+// with all-empty bodies is EVICTED (retention NULLed them or it was a bodyless
+// rejection line). Returning nil pointers for a non-present row keeps the wire
+// bodies null, never "".
+func classifyBodies(sensitivity string, sys, user, resp *string) (state string, outSys, outUser, outResp *string) {
+	if sensitivity == "credentials" {
+		return bodySealed, nil, nil, nil
+	}
+	if nonEmpty(sys) || nonEmpty(user) || nonEmpty(resp) {
+		return bodyPresent, sys, user, resp
+	}
+	return bodyEvicted, nil, nil, nil
+}
+
+// nonEmpty reports whether a *string carries actual content (non-nil, non-"").
+func nonEmpty(s *string) bool { return s != nil && *s != "" }
+
+// writeLLMLogNotFound is the uniform 404 for the detail endpoint — the same
+// shape for an unknown id and for a row the caller is not authorized to see, so
+// the response is not an existence oracle (R6).
+func writeLLMLogNotFound(w http.ResponseWriter) {
+	writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "not found"})
 }
 
 // errDetailCap is the hard cap on the error detail (design 04 §3.2 + R3): the

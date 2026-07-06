@@ -273,6 +273,11 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 			r.Use(handler.RequireAdminOrTenantAdmin)
 			r.Get("/api/status", statusH.HandleStatus)
 			r.Get("/api/llmlog", llmlogH.HandleLLMLog)
+			// Gated per-id body fetch behind a history-row click (D1b): the list
+			// stays body-free, the prompt/reply bodies live ONLY here, per-id and
+			// under the SAME tenant gate (server-admin = any row; tenant-admin =
+			// only its own keys' rows, uniform 404 otherwise).
+			r.Get("/api/llmlog/{id}", llmlogH.HandleLLMLogDetail)
 		})
 		// Web-chat (F6-C4/G37): POST /api/chat/stream runs one turn and streams
 		// SSE — wrapped in WithScheduler so dream yields the single llama.cpp

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClassifyLLMError(t *testing.T) {
@@ -101,4 +102,53 @@ func TestLLMLogGoldenKeys(t *testing.T) {
 		t.Fatalf("unmarshal entry: %v", err)
 	}
 	assertKeys(t, "error", entryMap["error"], []string{"class", "detail"})
+}
+
+// TestLLMLogDetailGoldenKeys pins the GET /api/llmlog/{id} wire field names
+// (anchor for the TS LLMLogDetail type). This is the ONLY llmlog shape that MAY
+// carry body columns — and only per-id, gated.
+func TestLLMLogDetailGoldenKeys(t *testing.T) {
+	body := "sys"
+	d := llmlogDetail{
+		ID: "x", CreatedAt: time.Unix(0, 0).UTC(), Pipeline: "p", Model: "m",
+		Backend: "b", RequiredSensitivity: "internal", BodyState: bodyPresent,
+		RequestSystem: &body,
+	}
+	b, err := json.Marshal(map[string]any{"success": true, "detail": d})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	assertKeys(t, "detail-envelope", b, []string{"success", "detail"})
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	assertKeys(t, "detail", top["detail"], []string{
+		"id", "created_at", "pipeline", "model", "backend",
+		"required_sensitivity", "body_state",
+		"request_system", "request_user", "response_content",
+	})
+}
+
+// TestClassifyBodies pins the body_state decision: credentials ⇒ sealed (bodies
+// dropped), any body ⇒ present (bodies returned), all-empty ⇒ evicted (bodies
+// dropped). A regression that leaked a sealed/evicted body would turn this red.
+func TestClassifyBodies(t *testing.T) {
+	s := "sys"
+	u := "user"
+	empty := ""
+
+	// credentials-class: SEALED, every body nil regardless of stored content.
+	if state, os, ou, or := classifyBodies("credentials", &s, &u, &s); state != bodySealed || os != nil || ou != nil || or != nil {
+		t.Fatalf("credentials: got state=%q os=%v ou=%v or=%v; want sealed + all nil", state, os, ou, or)
+	}
+	// non-credentials with content: PRESENT, bodies passed through.
+	if state, os, _, _ := classifyBodies("internal", &s, &u, nil); state != bodyPresent || os != &s {
+		t.Fatalf("present: got state=%q os=%v; want present + passthrough", state, os)
+	}
+	// non-credentials, all bodies nil/empty: EVICTED, bodies nil.
+	if state, os, ou, or := classifyBodies("internal", nil, &empty, nil); state != bodyEvicted || os != nil || ou != nil || or != nil {
+		t.Fatalf("evicted: got state=%q os=%v ou=%v or=%v; want evicted + all nil", state, os, ou, or)
+	}
 }

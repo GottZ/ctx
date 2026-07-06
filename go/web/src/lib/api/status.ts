@@ -4,7 +4,7 @@
 // non-admin degradation path (no auth, name-free).
 
 import { apiFetch } from '../api'
-import type { HealthStatus, LLMLogResponse, StatusResponse } from './types'
+import type { HealthStatus, LLMLogDetailResponse, LLMLogResponse, StatusResponse } from './types'
 
 export function fetchStatus(): Promise<StatusResponse> {
   return apiFetch<StatusResponse>('/api/status')
@@ -23,6 +23,17 @@ export function fetchLLMLog(q: LLMLogQuery = {}): Promise<LLMLogResponse> {
   if (q.errorsOnly) p.set('errors_only', 'true')
   const qs = p.toString()
   return apiFetch<LLMLogResponse>(`/api/llmlog${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * Gated per-id prompt/reply body fetch (D1b) behind a history-row click. The
+ * bodies live ONLY here (the list is body-free); an unknown or foreign id is a
+ * 404 ApiError (no existence oracle), a sealed/evicted row returns 200 with
+ * null bodies + a body_state reason. The caller must NOT cache the returned
+ * bodies — they are the sensitive shadow-corpus this endpoint gates.
+ */
+export function fetchLLMLogDetail(id: string): Promise<LLMLogDetailResponse> {
+  return apiFetch<LLMLogDetailResponse>(`/api/llmlog/${encodeURIComponent(id)}`)
 }
 
 export type DreamMode = 'on' | 'throttled' | 'off'
