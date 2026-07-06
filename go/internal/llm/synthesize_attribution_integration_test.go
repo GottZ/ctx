@@ -31,6 +31,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -82,7 +83,7 @@ func TestSynthesize_AttributesAPIKeyID(t *testing.T) {
 
 	// Foreground synthesis attributes the row to the caller's key.
 	if _, err := llm.Synthesize(context.Background(), pool, bpool, nil, backends.GamingState{},
-		settings, backends.SensPersonal, "q", sources, nil, key, ""); err != nil {
+		settings, backends.SensPersonal, "q", sources, nil, key, "", attrAdmission(t)); err != nil {
 		t.Fatalf("Synthesize: %v", err)
 	}
 	waitForSynthRows(t, pool, 1)
@@ -98,7 +99,7 @@ func TestSynthesize_AttributesAPIKeyID(t *testing.T) {
 
 	// An empty key (the background/dream invariant) stays NULL — nullUUID drops it.
 	if _, err := llm.Synthesize(context.Background(), pool, bpool, nil, backends.GamingState{},
-		settings, backends.SensPersonal, "q2", sources, nil, "", ""); err != nil {
+		settings, backends.SensPersonal, "q2", sources, nil, "", "", attrAdmission(t)); err != nil {
 		t.Fatalf("Synthesize (empty key): %v", err)
 	}
 	waitForSynthRows(t, pool, 2)
@@ -110,4 +111,13 @@ func TestSynthesize_AttributesAPIKeyID(t *testing.T) {
 	if nullCount != 1 {
 		t.Fatalf("NULL api_key_id rows = %d, want 1 (empty key → NULL, the background invariant)", nullCount)
 	}
+}
+
+// attrAdmission is the MW3 pass-through admission for these integration
+// call sites (empty policy = Durchreiche; background avoids B8 noise).
+func attrAdmission(t *testing.T) llm.Admission {
+	t.Helper()
+	d := dispatch.New(nil, dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	return llm.Admission{Admitter: d, Class: dispatch.ClassBackground}
 }

@@ -8,10 +8,69 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// Admission binds the ONE process-wide dispatch admitter (I-D1) to a call
+// site's class and principal (Vorhaben E wave MW3, design/01 §4.6 N1):
+// Class/Principal are bound by the CALLER — the query pipeline binds
+// interactive + its auth principal, scheduler arms bind background with an
+// empty principal (structurally, B8) — while target and deadline hint are
+// bound per attempt inside the chain walk. It travels as a mandatory
+// positional parameter (pattern: the report ReportFunc parameter; llm stays
+// parameter-pure): a call site without an admitter does not compile, and a
+// zero Admission fails the acquire loudly instead of passing an unadmitted
+// wire call.
+type Admission struct {
+	Admitter  dispatch.Admitter
+	Class     dispatch.Class
+	Principal dispatch.Principal
+}
+
+// acquire leases one attempt on the backend's physical origin (per attempt,
+// after chain resolution — I-D1). The deadline hint travels admission-
+// anchored (Request.DeadlineIn, rule V1: the wire deadline is
+// admission+timeout — an enqueue-anchored absolute hint would underestimate
+// the reap reference by the wait time).
+func (a Admission) acquire(ctx context.Context, b *backends.Backend, role string, timeout time.Duration) (*dispatch.Lease, context.Context, error) {
+	if a.Admitter == nil {
+		return nil, nil, &AdmissionError{Err: fmt.Errorf("llm: %s call site without dispatch admitter (I-D1)", role)}
+	}
+	lease, runCtx, err := a.Admitter.Acquire(ctx, dispatch.Request{
+		Target:     dispatch.Target{Origin: b.Host}, // Acquire normalizes defensively (design/01 §4.3)
+		Class:      a.Class,
+		Role:       role,
+		Principal:  a.Principal,
+		DeadlineIn: timeout,
+	})
+	if err != nil {
+		return nil, nil, &AdmissionError{Err: err}
+	}
+	return lease, runCtx, nil
+}
+
+// AdmissionError marks a chain walk ended by a failed Acquire. Acquire-error
+// doctrine (design/01 §4.3, binding): a failed acquire is NOT an attempt —
+// no ChainAttempt entry, no Classify, no health report, no llmlog line (the
+// K9 rejection line is MW10's), and the walk ends TERMINALLY (no failover
+// spill onto a following chain link, e.g. openrouter under local
+// saturation). Unwrap keeps errors.Is against the dispatch sentinels
+// (IsRejection) and ctx errors intact.
+type AdmissionError struct{ Err error }
+
+func (e *AdmissionError) Error() string { return e.Err.Error() }
+func (e *AdmissionError) Unwrap() error { return e.Err }
+
+// IsAdmissionError reports whether err is a chain walk ended by a failed
+// acquire (no wire contact of its own) — the ONE check point for the
+// telemetry sites honoring the no-llmlog-line doctrine.
+func IsAdmissionError(err error) bool {
+	var ae *AdmissionError
+	return errors.As(err, &ae)
+}
 
 // ChainAttempt is one tried backend for llmlog's metadata.chain — the full
 // provenance of a chained call (the row's backend_name alone only names the
@@ -48,11 +107,11 @@ type ChatFunc func(ctx context.Context, b backends.Backend, systemPrompt, userPr
 // translate/temporal 15s — the P2 hardcoded ChatTimeout generalized in P3).
 func ChatChain(ctx context.Context, chain []backends.Backend, role string,
 	systemPrompt, userPrompt string, baseOpts Options, format string,
-	defTimeout time.Duration, report ReportFunc,
+	defTimeout time.Duration, report ReportFunc, adm Admission,
 ) (*ChatResponse, *backends.Backend, []ChainAttempt, error) {
 	return ChatChainVia(ctx, func(ctx context.Context, b backends.Backend, sys, usr string, opts Options, timeout time.Duration) (*ChatResponse, error) {
 		return chatWithFormat(ctx, b, sys, usr, opts, format, timeout)
-	}, chain, role, systemPrompt, userPrompt, baseOpts, defTimeout, report)
+	}, chain, role, systemPrompt, userPrompt, baseOpts, defTimeout, report, adm)
 }
 
 // ChatChainVia is ChatChain with an injected wire call (G28: the dream
@@ -61,7 +120,7 @@ func ChatChain(ctx context.Context, chain []backends.Backend, role string,
 // reporting — lives ONLY here so the failover error doctrine has one home.
 func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, role string,
 	systemPrompt, userPrompt string, baseOpts Options,
-	defTimeout time.Duration, report ReportFunc,
+	defTimeout time.Duration, report ReportFunc, adm Admission,
 ) (*ChatResponse, *backends.Backend, []ChainAttempt, error) {
 	if len(chain) == 0 {
 		return nil, nil, nil, fmt.Errorf("llm: chain for role %q is empty", role)
@@ -90,8 +149,29 @@ func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, 
 		resolved.Think = thinkModeOf(think)
 		timeout := b.TimeoutFor(role, defTimeout)
 
+		// MW3 admission: one lease per attempt on the attempt's physical
+		// origin, acquired immediately before the wire call (design/01 §4.6
+		// N1); the resolved timeout doubles as the admission-anchored
+		// deadline hint. A failed acquire ends the walk terminally per the
+		// AdmissionError doctrine — the continue/Classify machinery below
+		// never sees it.
+		lease, runCtx, admErr := adm.acquire(ctx, b, role, timeout)
+		if admErr != nil {
+			return nil, nil, attempts, admErr
+		}
+
 		start := time.Now()
-		resp, err := call(ctx, resolved, systemPrompt, userPrompt, opts, timeout)
+		resp, err := func() (*ChatResponse, error) {
+			// defer is the only allowed release form (B1: panic-safe).
+			defer lease.Release()
+			resp, err := call(runCtx, resolved, systemPrompt, userPrompt, opts, timeout)
+			if resp != nil {
+				// MW22 meter feed: backend-reported usage in the llmlog
+				// dimensions, booked into the fairness window at Release.
+				lease.ReportUsage(dispatch.Usage{PromptTokens: resp.PromptTokens, CompletionTokens: resp.EvalCount})
+			}
+			return resp, err
+		}()
 		elapsed := time.Since(start)
 
 		if err == nil {
@@ -261,8 +341,8 @@ func PoolReporter(bpool *backends.Pool) ReportFunc {
 // (translate/temporal/rerank/embed were unlogged) at ~0 storage cost. One row
 // per WIRE-call sequence; an empty chain writes nothing (no wire contact).
 type ChainCall struct {
-	Pool       *backends.Pool
-	Role       string
+	Pool *backends.Pool
+	Role string
 	// Tenant bounds Chain() to the caller's visible backends (04-W2/T34).
 	// TENANT-DECISION(chaincall-tenant): the translate/temporal/rerank/classify
 	// callers leave it "" — they are NOT in 04-W2's 5-site request-path scope,
@@ -270,8 +350,8 @@ type ChainCall struct {
 	// backends are '_global'; fail-closed — never a foreign tenant-private one).
 	// Threading ar.HomeScope here is a later refinement if those Q-only roles
 	// should reach a tenant's own private backend.
-	Tenant     string
-	Required   backends.Sensitivity
+	Tenant   string
+	Required backends.Sensitivity
 	// Gaming is the chain-time exclusion (gaming.active + disabled_backends);
 	// the call site reads it from its config snapshot so the toggle takes
 	// effect on the next call without a restart (design 03 §2.6). Zero value
@@ -301,7 +381,10 @@ type ChainCall struct {
 // for this call), walks it via ChatChain and records the slim llmlog row.
 // An empty chain returns *backends.ErrNoEligibleBackend — the call site
 // decides its role's fail-open/fail-hard semantics (design 03 §2.4).
-func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool) (*ChatResponse, error) {
+// adm is the caller-bound dispatch admission (MW3): a walk that ends by
+// acquire failure WITHOUT any wire contact writes no llmlog row (doctrine
+// §4.3; the deliberate K9 rejection line lands with MW10).
+func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*ChatResponse, error) {
 	chain, err := c.Pool.Chain(c.Role, c.Required, c.Gaming, c.Tenant)
 	if err != nil {
 		return nil, err
@@ -318,7 +401,13 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool) (*ChatResponse, err
 
 	start := time.Now()
 	resp, served, attempts, err := ChatChain(ctx, chain, c.Role,
-		c.System, c.User, c.Opts, c.Format, c.DefTimeout, PoolReporter(c.Pool))
+		c.System, c.User, c.Opts, c.Format, c.DefTimeout, PoolReporter(c.Pool), adm)
+
+	if err != nil && len(attempts) == 0 && IsAdmissionError(err) {
+		// Never admitted, no wire contact: no llmlog row (acquire-error
+		// doctrine §4.3 — the K9 rejection line is MW10's).
+		return nil, err
+	}
 
 	entry := llmlog.Entry{
 		Pipeline:            c.Pipeline,

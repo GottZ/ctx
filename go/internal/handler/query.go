@@ -17,6 +17,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
@@ -59,6 +60,9 @@ type QueryHandler struct {
 	backendPool *backends.Pool
 	quota       *backends.QuotaAccountant
 	blocktypes  *blocktype.Registry
+	// admitter is the ONE process-wide dispatch admission layer (MW3, I-D1);
+	// every non-stream LLM call of the query pipeline acquires through it.
+	admitter dispatch.Admitter
 }
 
 // NewQueryHandler creates a new QueryHandler. backendPool feeds the
@@ -70,8 +74,28 @@ type QueryHandler struct {
 // SnapshotForRequest per query — NEVER from the compiled-in builtin set (the
 // live DB-sourcing probe would catch that). Must be non-nil for the retrieval
 // path; tests that reach rrf inject their own registry instance.
-func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, quota *backends.QuotaAccountant, blocktypes *blocktype.Registry) *QueryHandler {
-	return &QueryHandler{pool: pool, cfg: cfg, backendPool: backendPool, quota: quota, blocktypes: blocktypes}
+// admitter is the dispatch admission layer (MW3); nil is tolerated for tests
+// that never reach a resolved chain — a resolving LLM call then fails loudly
+// in llm (I-D1: no unadmitted wire call), never silently passes through.
+func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, quota *backends.QuotaAccountant, blocktypes *blocktype.Registry, admitter dispatch.Admitter) *QueryHandler {
+	return &QueryHandler{pool: pool, cfg: cfg, backendPool: backendPool, quota: quota, blocktypes: blocktypes, admitter: admitter}
+}
+
+// admission binds the query pipeline's dispatch class (MW3, design/01 §4.6
+// N1): EVERYTHING on this handler is interactive — a human waits
+// synchronously on translate/temporal/rerank-judge/synthesize. The principal
+// comes from the request's auth result (N10); the embed/backfill sites stay
+// lease-free until MW5 (E-U5(a)).
+func (h *QueryHandler) admission(ar *auth.AuthResult) llm.Admission {
+	return llm.Admission{
+		Admitter: h.admitter,
+		Class:    dispatch.ClassInteractive,
+		Principal: dispatch.Principal{
+			ApiKeyID:  ar.ApiKeyID,
+			TenantID:  ar.TenantID,
+			HomeScope: ar.HomeScope,
+		},
+	}
 }
 
 // queryRequest is the JSON body for the query endpoint.
@@ -437,7 +461,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("german detected, translating",
 			"request_id", requestID,
 		)
-		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, query, ar.ApiKeyID)
+		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, query, ar.ApiKeyID, h.admission(ar))
 		if err != nil {
 			// Fail-open (design 03 §2.4 translate row) — covers the empty
 			// chain (trust/gaming/disabled) AND exhausted attempts alike.
@@ -475,7 +499,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	} else if llm.HasTemporalIntent(originalQuery) {
 		// LLM fallback: query seems temporal but rules couldn't parse it.
 		var err error
-		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, originalQuery, now, ar.ApiKeyID)
+		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, originalQuery, now, ar.ApiKeyID, h.admission(ar))
 		if err != nil {
 			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,
@@ -815,7 +839,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			required := rerankRequired(querySens, results, rrf.RerankMaxDocs)
-			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, cfg.GamingState(), required, originalQuery, results, ar.ApiKeyID)
+			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, cfg.GamingState(), required, originalQuery, results, ar.ApiKeyID, h.admission(ar))
 			if err != nil {
 				slog.Warn("rerank failed, using original order",
 					"error", err,
@@ -909,7 +933,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, h.quota, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID, ar.HomeScope)
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, h.quota, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID, ar.HomeScope, h.admission(ar))
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,

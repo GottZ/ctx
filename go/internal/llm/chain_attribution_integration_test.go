@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -78,7 +79,7 @@ func TestChainAndEmbed_AttributesAPIKeyID(t *testing.T) {
 		Pool: bpool, Role: backends.RoleTranslate, Required: backends.SensInternal,
 		Pipeline: "query-translate", System: "s", User: "u",
 		DefTimeout: 10 * time.Second, APIKeyID: attrKey,
-	}).Do(context.Background(), pool); err != nil {
+	}).Do(context.Background(), pool, integrationAdmission(t)); err != nil {
 		t.Fatalf("ChainCall.Do: %v", err)
 	}
 	waitForPipelineRows(t, pool, "query-translate", 1)
@@ -97,7 +98,7 @@ func TestChainAndEmbed_AttributesAPIKeyID(t *testing.T) {
 		Pool: bpool, Role: backends.RoleTranslate, Required: backends.SensInternal,
 		Pipeline: "query-translate", System: "s", User: "u",
 		DefTimeout: 10 * time.Second, APIKeyID: "",
-	}).Do(context.Background(), pool); err != nil {
+	}).Do(context.Background(), pool, integrationAdmission(t)); err != nil {
 		t.Fatalf("ChainCall.Do (empty): %v", err)
 	}
 	waitForPipelineRows(t, pool, "query-translate", 2)
@@ -137,4 +138,13 @@ func TestChainAndEmbed_AttributesAPIKeyID(t *testing.T) {
 	if backfillKey != nil {
 		t.Fatalf("embed-backfill api_key_id = %v, want NULL (maintenance, not caller-attributed)", *backfillKey)
 	}
+}
+
+// integrationAdmission is the MW3 pass-through admission for integration
+// call sites (empty policy = Durchreiche; background avoids B8 noise).
+func integrationAdmission(t *testing.T) llm.Admission {
+	t.Helper()
+	d := dispatch.New(nil, dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	return llm.Admission{Admitter: d, Class: dispatch.ClassBackground}
 }

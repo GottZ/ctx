@@ -35,6 +35,13 @@ type Router struct {
 	Floor func(s backends.Sensitivity, scope string) backends.Sensitivity
 	// Report feeds attempt outcomes into pool health (llm.PoolReporter).
 	Report llm.ReportFunc
+	// Admit is the dispatch binding of every chat this router walks (MW3,
+	// design/01 §4.6 N1/N8a): the scheduler binds background with an empty
+	// principal (structurally background, I-D1/B8), the daily API handler
+	// binds interactive + the caller's principal (E-U2 coupling — valid only
+	// together with the endpoint's concurrency brake). The zero value fails
+	// the acquire loudly — a router without an admitter walks no chain.
+	Admit llm.Admission
 	// Blocktypes is the block-type registry (WF T4/T5): the daily-report
 	// classify hook and (T5) the candidate-search visibility allowlist resolve
 	// from SnapshotForTenant per cycle — never from the compiled-in builtin
@@ -93,7 +100,7 @@ func (r *Router) chat(ctx context.Context, role string, required backends.Sensit
 	}
 	return llm.ChatChainVia(ctx, func(ctx context.Context, b backends.Backend, sys, usr string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error) {
 		return dreamChatJSON(ctx, b, sys, usr, opts, timeout)
-	}, chain, role, systemPrompt, userPrompt, baseOpts, defTimeout, r.Report)
+	}, chain, role, systemPrompt, userPrompt, baseOpts, defTimeout, r.Report, r.Admit)
 }
 
 // EmbedChain resolves the background-embed chain: the dedicated dream-embed

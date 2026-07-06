@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 )
 
 // wireRecorder is a dual-protocol chat stub. It records the request path +
@@ -99,7 +100,7 @@ func TestTranslateQueryWirePath(t *testing.T) {
 	for _, tc := range wireCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := newWireRecorder(t, "database status")
-			got, err := TranslateQuery(context.Background(), nil, translatePool(rec.backend(tc.protocol)), backends.GamingState{}, backends.SensPersonal, "wie ist der status der datenbank", "")
+			got, err := TranslateQuery(context.Background(), nil, translatePool(rec.backend(tc.protocol)), backends.GamingState{}, backends.SensPersonal, "wie ist der status der datenbank", "", testAdmission(t, dispatch.ClassInteractive))
 			if err != nil {
 				t.Fatalf("TranslateQuery: %v", err)
 			}
@@ -118,7 +119,7 @@ func TestNormalizeTemporalWirePath(t *testing.T) {
 	for _, tc := range wireCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := newWireRecorder(t, temporalJSON)
-			res, err := NormalizeTemporal(context.Background(), nil, translatePool(rec.backend(tc.protocol)), backends.GamingState{}, backends.SensPersonal, "what happened yesterday", now, "")
+			res, err := NormalizeTemporal(context.Background(), nil, translatePool(rec.backend(tc.protocol)), backends.GamingState{}, backends.SensPersonal, "what happened yesterday", now, "", testAdmission(t, dispatch.ClassInteractive))
 			if err != nil {
 				t.Fatalf("NormalizeTemporal: %v", err)
 			}
@@ -144,7 +145,7 @@ func TestSynthesizeWirePath(t *testing.T) {
 			b.Roles = []string{backends.RoleSynthesis}
 			bpool := backends.NewPool(nil, nil)
 			bpool.SeedSnapshotForTest([]backends.Backend{b})
-			res, err := Synthesize(context.Background(), nil, bpool, nil, backends.GamingState{}, settings, backends.SensPersonal, "q", sources, nil, "", "")
+			res, err := Synthesize(context.Background(), nil, bpool, nil, backends.GamingState{}, settings, backends.SensPersonal, "q", sources, nil, "", "", testAdmission(t, dispatch.ClassInteractive))
 			if err != nil {
 				t.Fatalf("Synthesize: %v", err)
 			}
@@ -190,7 +191,7 @@ func TestChatChainWirePathFollowsEachLinksProtocol(t *testing.T) {
 			Model: "m", Trust: backends.TrustFull, Enabled: true, Roles: []string{backends.RoleSynthesis}},
 	}
 	resp, served, _, err := ChatChain(context.Background(), chain, backends.RoleSynthesis,
-		"sys", "user", Options{NumPredict: 5}, "", 0, nil)
+		"sys", "user", Options{NumPredict: 5}, "", 0, nil, testAdmission(t, dispatch.ClassBackground))
 	if err != nil || served == nil || served.Name != "fallback" {
 		t.Fatalf("want fallback served without error, got served=%v err=%v", served, err)
 	}

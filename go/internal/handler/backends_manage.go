@@ -11,6 +11,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/store"
@@ -31,34 +32,34 @@ import (
 // "absent" from zero for patch semantics; presence is double-checked via the
 // raw key set where the zero value is meaningful.
 type backendSpec struct {
-	Name                  *string           `json:"name"`
-	BaseURL               *string           `json:"base_url"`
-	Protocol              *string           `json:"protocol"`
-	ProviderClass         *string           `json:"provider_class"`
-	APIKeyRef             *string           `json:"api_key_ref"`
-	Trust                 *string           `json:"trust"`
-	ConfirmTrustElevation bool              `json:"confirm_trust_elevation"`
+	Name                  *string `json:"name"`
+	BaseURL               *string `json:"base_url"`
+	Protocol              *string `json:"protocol"`
+	ProviderClass         *string `json:"provider_class"`
+	APIKeyRef             *string `json:"api_key_ref"`
+	Trust                 *string `json:"trust"`
+	ConfirmTrustElevation bool    `json:"confirm_trust_elevation"`
 	// ConfirmDataCollection guards arming metadata.allow_data_collection —
 	// the ONLY way to lift the forced zdr/deny of an openrouter-class
 	// backend (never implicit via trust elevation, design 03 §3.3).
-	ConfirmDataCollection bool `json:"confirm_data_collection"`
-	Locality              *string           `json:"locality"`
+	ConfirmDataCollection bool    `json:"confirm_data_collection"`
+	Locality              *string `json:"locality"`
 	// Scope is the tenant dimension (062, Modell C). HONORED ONLY for a
 	// server-admin on create (free choice, defaults to _global); a tenant-admin
 	// always has it forced to ar.HomeScope, and update ignores it entirely
 	// (scope is immutable through the patch path) — see backendCreateScope.
-	Scope                 *string           `json:"scope"`
-	Roles                 []string          `json:"roles"`
-	ModelMap              json.RawMessage   `json:"model_map"`
-	Timeouts              map[string]int    `json:"timeouts"`
-	NumCtx                *int              `json:"num_ctx"`
-	Priority              *int              `json:"priority"`
-	Enabled               *bool             `json:"enabled"`
-	ExtraHeaders          map[string]string `json:"extra_headers"`
-	ExtraBody             map[string]any    `json:"extra_body"`
-	Limits                map[string]any    `json:"limits"`
-	Metadata              map[string]any    `json:"metadata"`
-	Probe                 string            `json:"probe"` // backend-test only
+	Scope        *string           `json:"scope"`
+	Roles        []string          `json:"roles"`
+	ModelMap     json.RawMessage   `json:"model_map"`
+	Timeouts     map[string]int    `json:"timeouts"`
+	NumCtx       *int              `json:"num_ctx"`
+	Priority     *int              `json:"priority"`
+	Enabled      *bool             `json:"enabled"`
+	ExtraHeaders map[string]string `json:"extra_headers"`
+	ExtraBody    map[string]any    `json:"extra_body"`
+	Limits       map[string]any    `json:"limits"`
+	Metadata     map[string]any    `json:"metadata"`
+	Probe        string            `json:"probe"` // backend-test only
 }
 
 // applySpec overlays the present payload fields onto b. keys is the raw
@@ -472,7 +473,7 @@ func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request
 // openrouter-class backends additionally report credits and the default
 // model's ZDR endpoint count (G29) — the count that predicts whether the
 // forced zdr:true leaves a non-empty provider set.
-func (h *ManageHandler) handleBackendTest(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, req manageRequest) {
+func (h *ManageHandler) handleBackendTest(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	if req.ID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id required"})
@@ -494,7 +495,11 @@ func (h *ManageHandler) handleBackendTest(w http.ResponseWriter, r *http.Request
 	latency := time.Since(start).Milliseconds()
 
 	if reachable && spec.Probe == "chat" {
-		probeChat(ctx, b, checks)
+		probeChat(ctx, h.admitter, dispatch.Principal{
+			ApiKeyID:  ar.ApiKeyID,
+			TenantID:  ar.TenantID,
+			HomeScope: ar.HomeScope,
+		}, b, checks)
 	}
 
 	result := map[string]any{
@@ -644,7 +649,14 @@ func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string
 	return true
 }
 
-func probeChat(ctx context.Context, b *backends.Backend, checks map[string]string) {
+// probeChat runs the 1-token connectivity chat under a dispatch lease (MW3,
+// design/01 §4.6 N8b): interactive — an admin waits synchronously; NumPredict
+// 1 is negligible, but I-D1 knows no exception (every exception is a future
+// unadmitted call site). Deliberately NO herald entry: 15 s, 1 token — no
+// DB-/CPU-consideration the LLM-free arms would need signaled. The probe's
+// usage stays unreported (the chatProbe seam returns no token counts) — it
+// counts as one uncharged interactive release in the MW22 meter.
+func probeChat(ctx context.Context, adm dispatch.Admitter, principal dispatch.Principal, b *backends.Backend, checks map[string]string) {
 	spec := b.ModelFor(backends.RoleChat)
 	if spec.Model == "" {
 		spec = b.ModelFor("default")
@@ -655,8 +667,27 @@ func probeChat(ctx context.Context, b *backends.Backend, checks map[string]strin
 	}
 	probe := *b
 	probe.Model = spec.Model
-	_, err := chatProbe(ctx, probe)
 	key := "model_" + spec.Model
+	if adm == nil {
+		// No unadmitted wire call (I-D1) — fail loudly instead.
+		checks[key] = "error: dispatch admitter not wired"
+		return
+	}
+	lease, runCtx, err := adm.Acquire(ctx, dispatch.Request{
+		Target:     dispatch.Target{Origin: b.Host}, // Acquire normalizes defensively
+		Class:      dispatch.ClassInteractive,
+		Role:       backends.RoleChat,
+		Principal:  principal,
+		DeadlineIn: probeChatTimeout, // admission-anchored hint (rule V1)
+	})
+	if err != nil {
+		// Acquire-error doctrine (§4.3): no attempt, no Classify, no health
+		// report — the probe result stays generic.
+		checks[key] = "error: admission rejected"
+		return
+	}
+	defer lease.Release()
+	_, err = chatProbe(runCtx, probe)
 	if err != nil {
 		checks[key] = "error: " + backends.Classify(err, b.ProviderClass).String()
 		return
@@ -687,8 +718,12 @@ func trustRankRose(prev, next backends.Trust) bool {
 	return next.Rank() > prev.Rank()
 }
 
+// probeChatTimeout is the 1-token connectivity probe's wire timeout; it
+// doubles as the admission-anchored deadline hint of the probe's lease.
+const probeChatTimeout = 15 * time.Second
+
 // chatProbe is indirected for tests.
 var chatProbe = func(ctx context.Context, b backends.Backend) (any, error) {
 	return llm.Chat(ctx, b, "You are a connectivity probe.", "Reply with: ok",
-		llm.Options{Temperature: 0, NumPredict: 1}, 15*time.Second)
+		llm.Options{Temperature: 0, NumPredict: 1}, probeChatTimeout)
 }

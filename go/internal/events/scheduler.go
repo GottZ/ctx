@@ -440,6 +440,20 @@ func (s *Scheduler) SetDispatcher(d *dispatch.Dispatcher) {
 	s.dispatcher = d
 }
 
+// backgroundAdmission is the dispatch binding of every scheduler arm (MW3,
+// design/01 §4.6 N1): class background with an EMPTY principal — scheduler
+// arms carry no request-bound caller and are structurally background
+// (I-D1/B8). The nil guard keeps a typed-nil dispatcher out of the interface
+// (schedulers built without SetDispatcher fail the acquire loudly in llm,
+// never with a nil-receiver panic).
+func (s *Scheduler) backgroundAdmission() llm.Admission {
+	adm := llm.Admission{Class: dispatch.ClassBackground}
+	if s.dispatcher != nil {
+		adm.Admitter = s.dispatcher
+	}
+	return adm
+}
+
 // QueryStart increments the active query counter and registers the request
 // with the dispatcher's demand herald (MW2, design/01 §4.5: interactive
 // demand counts from HTTP ingress, not from the first wire call). Both
@@ -495,6 +509,7 @@ func (s *Scheduler) newRouter(cfg *config.Config, tenant string) *dream.Router {
 		Gaming:     cfg.GamingState(),
 		Floor:      cfg.Pool.ScopeSensitivityFloor.Apply,
 		Report:     llm.PoolReporter(s.backendPool),
+		Admit:      s.backgroundAdmission(), // MW3: dream + 03:00 daily are background (N1/N8a)
 		Blocktypes: s.blocktypes,
 	}
 }

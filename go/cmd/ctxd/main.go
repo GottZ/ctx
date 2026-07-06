@@ -240,8 +240,10 @@ func main() {
 	// process-wide dispatch admission layer (I-D1). Settings map from the
 	// effective snapshot, the per-origin policy derives from the backend pool;
 	// both stay hot via the NOTIFY reload owner (events.SettingsWriteHandler).
-	// No Acquire call site exists yet (MW3+) — until then the dispatcher only
-	// carries the demand herald fed through scheduler.QueryStart/QueryEnd.
+	// Since MW3 every non-stream chat call site acquires through it (llm
+	// chain walk, daily synthesis, backend chat probe); stream/embed/rerank
+	// follow with MW5. Empty policy = pass-through (behavior-neutral until
+	// the deliberate data activation MW13).
 	dispatcher := dispatch.New(nil, events.DispatchSettings(cfgStore.Snapshot().Dispatch)) //nolint:forbidigo // MT 06 BLIND: boot-time read; dispatch.* keys are global-only (design/01 §3.1), no tenant dimension exists for them.
 	dispatcher.UpdatePolicy(dispatch.DerivePolicy(events.DispatchBackendRows(backendPool.Snapshot()), nil))
 	defer dispatcher.Close()
@@ -287,7 +289,7 @@ func main() {
 	// HTTP server. ListenAddr is restart-only, read once from the effective
 	// snapshot (== env value; the settings overlay rejects restart-only keys).
 	listenAddr := cfgStore.Snapshot().Server.ListenAddr //nolint:forbidigo // MT 06 BLIND: restart-only server.listen_addr is a process-global env value (the overlay rejects restart-only keys), read once at boot.
-	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub)
+	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           router,

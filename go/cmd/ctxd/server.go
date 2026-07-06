@@ -9,6 +9,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/camo"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/forge"
 	"github.com/GottZ/ctx/internal/handler"
@@ -31,8 +32,10 @@ const (
 // NewRouter creates the chi router with all routes and middleware. cfgStore
 // is the runtime-config snapshot store: every config-consuming handler reads
 // one snapshot per request from it (F1-W4–W7) — no handler holds a boot copy,
-// so a config replace is live from the next request on.
-func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub) *chi.Mux {
+// so a config replace is live from the next request on. dispatcher is the ONE
+// process-wide dispatch admission layer (MW3, I-D1) feeding the query
+// pipeline, the daily-synthesis trigger and the backend chat probe.
+func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher) *chi.Mux {
 	r := chi.NewRouter()
 
 	// MT 06-C5: wire the request→tenant-scope hook so SnapshotForRequest can
@@ -77,7 +80,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	quota := backends.NewQuotaAccountant(pool, 30*time.Second)
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
-	queryHandler := handler.NewQueryHandler(pool, cfgStore, backendPool, quota, blocktypeReg)
+	queryHandler := handler.NewQueryHandler(pool, cfgStore, backendPool, quota, blocktypeReg, dispatcher)
 	storeH := handler.NewStoreHandler(pool, cfgStore, blocktypeReg)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
 	graphH := handler.NewGraphHandler(pool, cfgStore, blocktypeReg)
@@ -89,6 +92,8 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		return settings.Reload(ctx, pool, cfgStore)
 	}
 	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler, gamingReload, quota, blocktypeReg)
+	// MW3: the backend-test chat probe acquires through the dispatcher (N8b).
+	manageH.SetAdmitter(dispatcher)
 	// Forge PULL sync engine (Achse-02 I-F). Fail-closed gates: the tenant gate
 	// is store.TenantStatusForScope (found=false ⇒ skip + disable, S13); the
 	// issue-policy gate refuses a run unless the registry resolves an `issue`
@@ -147,8 +152,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	digestH := handler.NewDigestHandler(pool, blocktypeReg)
 	// Welle 42: daily synthesis manual trigger. Chains over the pool's digest
 	// role at constant internal (G28/E6) — the same gate as the scheduler's
-	// 03:00 iteration.
-	synthH := handler.NewSynthesizeHandler(pool, backendPool, blocktypeReg)
+	// 03:00 iteration. MW3/E-U2: interactive classification + per-principal
+	// concurrency brake live in the handler.
+	synthH := handler.NewSynthesizeHandler(pool, backendPool, blocktypeReg, dispatcher)
 
 	// Status dashboard (F4-W6/G33): ONE process-wide collector feeds GET
 	// /api/status (and, in W7/G34, SSE) from a cache — N pollers cost one

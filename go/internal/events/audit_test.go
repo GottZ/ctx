@@ -22,7 +22,7 @@ func auditTestScheduler(answers map[string]struct {
 }) *Scheduler {
 	s := NewScheduler(nil, nil, nil, StartupConfig{})
 	s.classify = func(_ context.Context, _ *pgxpool.Pool, _ *backends.Pool, _ backends.GamingState,
-		question, _, _, _ string) (bool, error) {
+		question, _, _, _ string, _ llm.Admission) (bool, error) {
 		a, ok := answers[question]
 		if !ok {
 			return false, fmt.Errorf("unexpected question: %s", question)

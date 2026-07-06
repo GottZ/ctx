@@ -137,8 +137,16 @@ type Request struct {
 	// Contract note for call-site waves: compute the hint relative to the
 	// expected ADMISSION (wire deadline is admission+timeout, rule V1) — a
 	// hint anchored at enqueue underestimates the reap reference by the wait
-	// time; lease_reap_grace is the only slack on top.
+	// time; lease_reap_grace is the only slack on top. Callers holding a
+	// timeout DURATION therefore pass DeadlineIn, not an absolute Deadline.
 	Deadline time.Time
+	// DeadlineIn is the admission-anchored form of the hint (MW3, closing
+	// the contract note above): the dispatcher resolves it to
+	// admitted+DeadlineIn AT ADMISSION TIME — exactly the wire deadline of
+	// rule V1, however long the acquire waited. The reap reference stays the
+	// EARLIEST of {Deadline, ctx deadline, admitted+DeadlineIn} over the
+	// provided values. Zero = not provided.
+	DeadlineIn time.Duration
 }
 
 // Wrap error doctrine (K1, binding since MW1): the two cancel causes WRAP

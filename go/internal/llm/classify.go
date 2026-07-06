@@ -90,7 +90,7 @@ func ParseClassifyAnswer(raw string) (bool, error) {
 // lookup, no trust shortcut. LocalOnly drops external rows even if a psql
 // edit smuggled one past the 422 validation (defense in depth).
 func ClassifyBlockBool(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState,
-	question, title, content, blockID string,
+	question, title, content, blockID string, adm Admission,
 ) (bool, error) {
 	user := question + "\n\n---\n\nTitel: " + title + "\n\n" + content
 	// TENANT-DECISION(classify-attribution): no APIKeyID set — the only caller
@@ -111,7 +111,7 @@ func ClassifyBlockBool(ctx context.Context, db *pgxpool.Pool, bpool *backends.Po
 		Format:     "json",
 		DefTimeout: ClassifyTimeout,
 		BlockIDs:   []string{blockID},
-	}.Do(ctx, db)
+	}.Do(ctx, db, adm)
 	if err != nil {
 		return false, err
 	}

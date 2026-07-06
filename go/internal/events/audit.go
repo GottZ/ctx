@@ -51,9 +51,11 @@ var ErrAuditRunning = errors.New("sensitivity audit already running")
 
 // classifyFunc is the seam between the audit loop and the LLM call —
 // production value is llm.ClassifyBlockBool; the decision-table test swaps it
-// (dreamCycleFunc pattern).
+// (dreamCycleFunc pattern). adm is the scheduler's background admission
+// binding (MW3, design/01 §4.6 N1: classify is the one ChainCall consumer
+// classified background).
 type classifyFunc func(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState,
-	question, title, content, blockID string) (bool, error)
+	question, title, content, blockID string, adm llm.Admission) (bool, error)
 
 // AuditSample is one dry-run verdict for the N=30 gate: what the model
 // answered and what the run WOULD have written.
@@ -239,7 +241,7 @@ func (s *Scheduler) auditTenantScope(ctx context.Context, bt backgroundTenant, d
 func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, gaming backends.GamingState, dryRun bool) (AuditSample, bool) {
 	sample := AuditSample{ID: blk.ID, Title: blk.Title}
 
-	cred, err := s.classify(ctx, s.pool, s.backendPool, gaming, llm.QuestionCredentials, blk.Title, blk.Content, blk.ID)
+	cred, err := s.classify(ctx, s.pool, s.backendPool, gaming, llm.QuestionCredentials, blk.Title, blk.Content, blk.ID, s.backgroundAdmission())
 	verdict, noVerdict := backends.SensCredentials, false
 	switch {
 	case err != nil && !isParseFailure(err):
@@ -251,7 +253,7 @@ func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, gam
 		sample.Credentials = &cred
 	default:
 		sample.Credentials = &cred
-		pers, perr := s.classify(ctx, s.pool, s.backendPool, gaming, llm.QuestionPersonal, blk.Title, blk.Content, blk.ID)
+		pers, perr := s.classify(ctx, s.pool, s.backendPool, gaming, llm.QuestionPersonal, blk.Title, blk.Content, blk.ID, s.backgroundAdmission())
 		switch {
 		case perr != nil && !isParseFailure(perr):
 			s.auditAbort(fmt.Sprintf("classify chain: %v", perr))

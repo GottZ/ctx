@@ -218,14 +218,15 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	now := time.Now()
 	runCtx, cancel := context.WithCancelCause(ctx)
 	w := &waiter{
-		class:     class,
-		principal: req.Principal,
-		role:      req.Role,
-		enqueued:  now,
-		reapRef:   reapReference(req.Deadline, ctx),
-		runCtx:    runCtx,
-		cancel:    cancel,
-		admitCh:   make(chan struct{}),
+		class:      class,
+		principal:  req.Principal,
+		role:       req.Role,
+		enqueued:   now,
+		reapRef:    reapReference(req.Deadline, ctx),
+		deadlineIn: req.DeadlineIn,
+		runCtx:     runCtx,
+		cancel:     cancel,
+		admitCh:    make(chan struct{}),
 	}
 
 	d.mu.Lock()
@@ -329,8 +330,17 @@ func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 }
 
 // admitLocked turns a waiter into a live lease (immediate admission and
-// direct handoff share it).
+// direct handoff share it). The admission-anchored deadline hint
+// (Request.DeadlineIn) resolves HERE — admitted+DeadlineIn is the rule-V1
+// wire deadline regardless of wait time; the reap reference stays the
+// earliest of all provided references.
 func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slotHeld bool) *Lease {
+	reapRef := w.reapRef
+	if w.deadlineIn > 0 {
+		if rel := now.Add(w.deadlineIn); reapRef.IsZero() || rel.Before(reapRef) {
+			reapRef = rel
+		}
+	}
 	l := &Lease{
 		d:         d,
 		st:        st,
@@ -339,7 +349,7 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 		role:      w.role,
 		enqueued:  w.enqueued,
 		admitted:  now,
-		reapRef:   w.reapRef,
+		reapRef:   reapRef,
 		cancel:    w.cancel,
 		slotHeld:  slotHeld,
 		agedAdmit: w.aged,

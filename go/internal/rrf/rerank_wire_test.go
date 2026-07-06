@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/llm"
 )
 
 // LLM-judge call site: Rerank must hit the endpoint of the chat tuple's
@@ -51,7 +53,7 @@ func TestRerankWirePath(t *testing.T) {
 				ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
 			}})
 			results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
-			out, err := Rerank(context.Background(), nil, bpool, backends.GamingState{}, backends.SensPublic, "q", results, "")
+			out, err := Rerank(context.Background(), nil, bpool, backends.GamingState{}, backends.SensPublic, "q", results, "", rerankTestAdmission(t))
 			if err != nil {
 				t.Fatalf("Rerank: %v", err)
 			}
@@ -65,5 +67,18 @@ func TestRerankWirePath(t *testing.T) {
 				t.Errorf("wire path = %q, want %q", gotPath, tc.wantPath)
 			}
 		})
+	}
+}
+
+// rerankTestAdmission is the MW3 pass-through admission for the judge call
+// site (interactive, design/01 §4.6 N1 rerank-judge).
+func rerankTestAdmission(t *testing.T) llm.Admission {
+	t.Helper()
+	d := dispatch.New(nil, dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	return llm.Admission{
+		Admitter:  d,
+		Class:     dispatch.ClassInteractive,
+		Principal: dispatch.Principal{ApiKeyID: "test-key", HomeScope: "private"},
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -81,7 +82,7 @@ func TestSynthesize_QuotaBlocksOverBudget(t *testing.T) {
 	sources := []llm.Source{{ID: "00000000-0000-0000-0000-000000000001", Title: "t", Category: "c", Content: "body", Score: 0.5, AgeDays: 1}}
 
 	_, err := llm.Synthesize(ctx, pool, bpool, acc, backends.GamingState{},
-		settings, backends.SensPersonal, "q", sources, nil, keyID, scope)
+		settings, backends.SensPersonal, "q", sources, nil, keyID, scope, quotaAdmission(t))
 
 	var qe *backends.ErrQuotaExceeded
 	if err == nil || !errors.As(err, &qe) {
@@ -96,11 +97,20 @@ func TestSynthesize_QuotaBlocksOverBudget(t *testing.T) {
 
 	// Control: a scope with no quota row synthesizes normally (gate fail-open).
 	_, err = llm.Synthesize(ctx, pool, bpool, acc, backends.GamingState{},
-		settings, backends.SensPersonal, "q", sources, nil, "", "no-quota-scope")
+		settings, backends.SensPersonal, "q", sources, nil, "", "no-quota-scope", quotaAdmission(t))
 	if err != nil {
 		t.Fatalf("no-quota scope should pass the gate and synthesize: %v", err)
 	}
 	if !called {
 		t.Error("control: the backend should have been called for the un-quota'd scope")
 	}
+}
+
+// quotaAdmission is the MW3 pass-through admission for these integration
+// call sites (empty policy = Durchreiche; background avoids B8 noise).
+func quotaAdmission(t *testing.T) llm.Admission {
+	t.Helper()
+	d := dispatch.New(nil, dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	return llm.Admission{Admitter: d, Class: dispatch.ClassBackground}
 }

@@ -80,7 +80,7 @@ var jsonArrayPattern = regexp.MustCompile(`\[\s*[\d\s,]+\]`)
 // row carries the doc block_ids (egress trace).
 // Returns the results re-sorted by blended score (0.6*rerank_norm + 0.4*rrf_norm).
 // If fewer than RerankMinResults, returns results unchanged.
-func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState, required backends.Sensitivity, query string, results []SearchResult, apiKeyID string) ([]SearchResult, error) {
+func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState, required backends.Sensitivity, query string, results []SearchResult, apiKeyID string, adm llm.Admission) ([]SearchResult, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("rerank: skipping, fewer than min results",
 			"result_count", len(results),
@@ -124,7 +124,7 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming 
 		DefTimeout: llm.RerankTimeout,
 		BlockIDs:   blockIDs,
 		APIKeyID:   apiKeyID, // T35b: foreground caller attribution
-	}.Do(ctx, db)
+	}.Do(ctx, db, adm)
 	if err != nil {
 		slog.Warn("rerank: LLM call failed, returning original order", "error", err)
 		return results, nil

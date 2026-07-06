@@ -247,7 +247,7 @@ var jsonFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?})\\s*```")
 // class, F3 §2.2 folds temporal into the translate role) to resolve temporal
 // references in a query. Writes a slim llmlog row per wire call.
 // Returns nil if no temporal references are found or if the LLM call fails.
-func NormalizeTemporal(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState, querySens backends.Sensitivity, query string, now time.Time, apiKeyID string) (*TemporalResult, error) {
+func NormalizeTemporal(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState, querySens backends.Sensitivity, query string, now time.Time, apiKeyID string, adm Admission) (*TemporalResult, error) {
 	calendar := buildCalendar(now)
 	systemPrompt := fmt.Sprintf(temporalPromptTemplate, calendar)
 
@@ -262,7 +262,7 @@ func NormalizeTemporal(ctx context.Context, db *pgxpool.Pool, bpool *backends.Po
 		Opts:       TemporalOptions(0),
 		DefTimeout: TemporalTimeout,
 		APIKeyID:   apiKeyID, // T35b: foreground caller attribution
-	}.Do(ctx, db)
+	}.Do(ctx, db, adm)
 	if err != nil {
 		return nil, fmt.Errorf("llm: temporal: %w", err)
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -49,6 +50,18 @@ type ManageHandler struct {
 	// (server.go) rather than the constructor to avoid churning its 28 call
 	// sites; nil ⇒ the forge-* actions answer 503.
 	forge ForgeController
+	// admitter is the dispatch admission layer for the backend-test chat
+	// probe (MW3, design/01 §4.6 N8b: I-D1 knows no exception — every
+	// exception is a future unadmitted call site). Wired via SetAdmitter
+	// (server.go, same rationale as SetForgeController); nil ⇒ the probe
+	// reports an admission error instead of making an unadmitted wire call.
+	admitter dispatch.Admitter
+}
+
+// SetAdmitter wires the ONE process-wide dispatch admission layer (MW3).
+// Boot happens-before: called in NewRouter before the server serves.
+func (h *ManageHandler) SetAdmitter(a dispatch.Admitter) {
+	h.admitter = a
 }
 
 // dreamLinkableTypes resolves the request's dream-linkable type allowlist

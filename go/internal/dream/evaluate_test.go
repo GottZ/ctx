@@ -26,7 +26,7 @@ func newTestRouter() *Router {
 		ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
 		Priority: 100, Enabled: true,
 	}})
-	return &Router{Pool: p}
+	return &Router{Pool: p, Admit: testAdmit()}
 }
 
 // mockChatJSON installs fn as the package-level chatJSON seam for the duration
@@ -281,13 +281,13 @@ func TestFilterValidCandidates_NegInfConfidence_Dropped(t *testing.T) {
 func TestFilterValidCandidates_AllPathsCovered(t *testing.T) {
 	cands := map[string]bool{uuidA: true, uuidB: true, uuidC: true, uuidD: true, uuidE: true}
 	in := []Link{
-		{TargetID: "bad-format", Relationship: "topical", Confidence: 0.9},      // bad UUID
-		{TargetID: uuidF, Relationship: "topical", Confidence: 0.9},             // not in candidates
-		{TargetID: uuidA, Relationship: "similar", Confidence: 0.9},             // bad relationship
-		{TargetID: uuidB, Relationship: "topical", Confidence: 1.5},             // > 1.0
-		{TargetID: uuidC, Relationship: "topical", Confidence: math.NaN()},      // NaN
-		{TargetID: uuidD, Relationship: "topical", Confidence: 0.65},            // below threshold
-		{TargetID: uuidE, Relationship: "topical", Confidence: 0.85},            // valid
+		{TargetID: "bad-format", Relationship: "topical", Confidence: 0.9}, // bad UUID
+		{TargetID: uuidF, Relationship: "topical", Confidence: 0.9},        // not in candidates
+		{TargetID: uuidA, Relationship: "similar", Confidence: 0.9},        // bad relationship
+		{TargetID: uuidB, Relationship: "topical", Confidence: 1.5},        // > 1.0
+		{TargetID: uuidC, Relationship: "topical", Confidence: math.NaN()}, // NaN
+		{TargetID: uuidD, Relationship: "topical", Confidence: 0.65},       // below threshold
+		{TargetID: uuidE, Relationship: "topical", Confidence: 0.85},       // valid
 	}
 	out := filterValidCandidates(in, cands)
 	if len(out) != 1 || out[0].TargetID != uuidE {

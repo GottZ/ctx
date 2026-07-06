@@ -88,9 +88,9 @@ func selectSystemPrompt(s SynthesisSettings) string {
 
 // Confidence levels for query results.
 const (
-	ConfidenceConfident    = "confident"
-	ConfidenceLow          = "low_confidence"
-	ConfidenceNoRelevant   = "no_relevant_blocks_found"
+	ConfidenceConfident  = "confident"
+	ConfidenceLow        = "low_confidence"
+	ConfidenceNoRelevant = "no_relevant_blocks_found"
 )
 
 // systemPromptV52 is the v5.2 synthesis prompt (fact extraction engine).
@@ -187,14 +187,14 @@ A: NO_RELEVANT_SOURCES
 
 // Source represents a search result to be fed into the LLM prompt.
 type Source struct {
-	ID               string  `json:"id"`
-	Title            string  `json:"title"`
-	Category         string  `json:"category"`
-	Content          string  `json:"content,omitempty"`
-	Score            float64 `json:"score"`
+	ID               string   `json:"id"`
+	Title            string   `json:"title"`
+	Category         string   `json:"category"`
+	Content          string   `json:"content,omitempty"`
+	Score            float64  `json:"score"`
 	RerankScore      *float64 `json:"rerank_score,omitempty"`
 	RRFScoreOriginal *float64 `json:"rrf_score_original,omitempty"`
-	AgeDays          int     `json:"age_days"`
+	AgeDays          int      `json:"age_days"`
 
 	// Sensitivity is the scope-floor-adjusted classification from the batch
 	// lookup (F3 §2.3). Feeds the synthesis trust gate over the FINAL prompt
@@ -258,9 +258,9 @@ func LostInMiddleReorder(sources []Source) []Source {
 		return sources
 	}
 	reordered := make([]Source, 0, len(sources))
-	reordered = append(reordered, sources[0])    // best first
+	reordered = append(reordered, sources[0])     // best first
 	reordered = append(reordered, sources[2:]...) // rest in middle
-	reordered = append(reordered, sources[1])    // second-best last
+	reordered = append(reordered, sources[1])     // second-best last
 	return reordered
 }
 
@@ -342,7 +342,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // scope is the caller's tenant (ar.HomeScope) — it bounds Chain() to the
 // tenant's visible synthesis backends (04-W2/T34 egress isolation); "" sees
 // only shared '_global' backends (background/no-caller paths).
-func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *backends.QuotaAccountant, gaming backends.GamingState, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate, apiKeyID, scope string) (*SynthesisResult, error) {
+func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *backends.QuotaAccountant, gaming backends.GamingState, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate, apiKeyID, scope string, adm Admission) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
@@ -428,8 +428,14 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 
 	start := time.Now()
 	resp, served, attempts, err := ChatChain(ctx, chain, backends.RoleSynthesis,
-		systemPrompt, userPrompt, SynthesisOptions(0), "", ChatTimeout, PoolReporter(bpool))
+		systemPrompt, userPrompt, SynthesisOptions(0), "", ChatTimeout, PoolReporter(bpool), adm)
 	duration := time.Since(start)
+
+	if err != nil && len(attempts) == 0 && IsAdmissionError(err) {
+		// Never admitted, no wire contact: no llmlog row (acquire-error
+		// doctrine §4.3 — the K9 rejection line is MW10's).
+		return nil, fmt.Errorf("llm: synthesize: %w", err)
+	}
 
 	blockIDs := make([]string, 0, len(llmSources))
 	for _, s := range llmSources {
@@ -531,4 +537,3 @@ func FormatAnswer(raw string) string {
 
 	return answer
 }
-

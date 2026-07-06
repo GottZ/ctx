@@ -62,7 +62,7 @@ func TestDailyMountIsThirdHeraldEntry_Integration(t *testing.T) {
 		t.Fatalf("bootstrap admin key: created=%v err=%v", created, err)
 	}
 
-	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub)
+	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, d)
 
 	// Deterministic mid-handler hold: HandleDaily's first query reads
 	// context_write_log (dream.fetchDailyDecisions); an ACCESS EXCLUSIVE

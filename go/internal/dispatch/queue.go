@@ -17,9 +17,12 @@ type waiter struct {
 	// reapRef is the reap reference captured at Acquire: the EARLIER of the
 	// deadline hint and the ctx deadline; zero = lease_max_age fallback.
 	reapRef time.Time
-	runCtx  context.Context
-	cancel  context.CancelCauseFunc
-	admitCh chan struct{}
+	// deadlineIn is the admission-anchored hint (Request.DeadlineIn); it
+	// resolves to admitted+deadlineIn in admitLocked (rule V1).
+	deadlineIn time.Duration
+	runCtx     context.Context
+	cancel     context.CancelCauseFunc
+	admitCh    chan struct{}
 	// lease is set by the admitting side (direct handoff) before admitCh
 	// closes; the waiting goroutine reads it after <-admitCh.
 	lease    *Lease

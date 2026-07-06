@@ -743,3 +743,53 @@ func TestDefaultSettings(t *testing.T) {
 		t.Fatalf("defaults drifted from the registry contract: %+v", s)
 	}
 }
+
+// TestDeadlineInAnchorsAtAdmission pins the MW3 half of the V1 contract on
+// the dispatch side (Request.DeadlineIn): a waiter that spent time in the
+// queue gets its reap reference anchored at ADMISSION+DeadlineIn, not at
+// enqueue+DeadlineIn — an enqueue-anchored hint would underestimate the reap
+// reference by the wait time and let the reaper cancel a legitimately
+// running wire call.
+func TestDeadlineInAnchorsAtAdmission(t *testing.T) {
+	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
+
+	// Occupy the single slot.
+	first, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	const hint = time.Minute
+	enqueue := time.Now()
+	type res struct {
+		lease *Lease
+		err   error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		req := interactiveReq(principal("b"))
+		req.DeadlineIn = hint
+		l, _, err := d.Acquire(context.Background(), req)
+		ch <- res{l, err}
+	}()
+	waitFor(t, "second acquire queued", func() bool { return target(t, d).Interactive.Waiting == 1 })
+
+	// Hold the slot long enough that enqueue-anchored and admission-anchored
+	// references are clearly distinguishable.
+	const wait = 120 * time.Millisecond
+	time.Sleep(wait)
+	first.Release()
+
+	r := <-ch
+	if r.err != nil {
+		t.Fatalf("second acquire: %v", r.err)
+	}
+	defer r.lease.Release()
+	if got := r.lease.reapRef; got.Before(r.lease.admitted.Add(hint)) {
+		t.Fatalf("reap reference anchored before admission+hint: ref=%v admitted=%v (enqueue-anchored would be %v)",
+			got, r.lease.admitted, enqueue.Add(hint))
+	}
+	if waited := r.lease.WaitDur(); waited < wait/2 {
+		t.Fatalf("probe vacuous: waiter did not actually wait (waited %v)", waited)
+	}
+}

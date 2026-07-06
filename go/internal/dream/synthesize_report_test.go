@@ -13,6 +13,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -46,7 +47,7 @@ func testRouterFor(host, model string, protocol backends.Protocol) *dream.Router
 		ModelMap: map[string]backends.ModelSpec{"default": {Model: model}},
 		Priority: 100, Enabled: true,
 	}})
-	return &dream.Router{Pool: p}
+	return &dream.Router{Pool: p, Admit: reportAdmission()}
 }
 
 // mockChatJSONExternal replaces dream.ChatJSON for the duration of one test.
@@ -128,7 +129,7 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 	var (
 		title     string
 		blockType string
-		typeName string
+		typeName  string
 	)
 	if err := pool.QueryRow(ctx,
 		`SELECT title, lifecycle_state, type_name FROM context_blocks WHERE id = $1::uuid`,
@@ -200,4 +201,12 @@ func TestGenerateDailyReport_LLMError(t *testing.T) {
 	if !strings.Contains(msg, "synthesize report") || !strings.Contains(msg, "ollama exploded") {
 		t.Errorf("error not wrapped as expected: %v", err)
 	}
+}
+
+// reportTestDispatcher is one shared pass-through dispatcher for this file's
+// integration routers (MW3: Router.Admit is mandatory).
+var reportTestDispatcher = dispatch.New(nil, dispatch.DefaultSettings())
+
+func reportAdmission() llm.Admission {
+	return llm.Admission{Admitter: reportTestDispatcher, Class: dispatch.ClassBackground}
 }

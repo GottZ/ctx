@@ -29,7 +29,7 @@ func TestRunDreamCycle_EmptyChainSkipsBeforePick(t *testing.T) {
 	p := backends.NewPool(nil, nil)
 	p.SeedSnapshotForTest([]backends.Backend{}) // no dream backend at all
 
-	n, err := RunDreamCycle(context.Background(), db, &Router{Pool: p},
+	n, err := RunDreamCycle(context.Background(), db, &Router{Pool: p, Admit: testAdmit()},
 		llm.Options{}, BackoffConfig{Mode: "off"}, []string{"private"}, NoThrottle)
 	if err != nil {
 		t.Fatalf("empty chain must skip silently (idle wait), got error: %v", err)
@@ -60,7 +60,7 @@ func TestEvaluateRelationships_TrustGate_NoWireCall(t *testing.T) {
 		ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
 		Priority: 100, Enabled: true,
 	}})
-	r := &Router{Pool: p}
+	r := &Router{Pool: p, Admit: testAdmit()}
 
 	assertBlocked := func(name string, source BlockInfo, cand BlockInfo) {
 		t.Helper()
