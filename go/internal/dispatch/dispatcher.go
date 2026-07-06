@@ -97,6 +97,9 @@ type targetState struct {
 	// preempt is the MW18 preempt-path bookkeeping (victims in eviction +
 	// telemetry counters, design/02 §3.3) — see preempt.go.
 	preempt preemptState
+	// waits are the per-class rolling wait-sample windows (MW7/D3-W3,
+	// indexed by classIdx) — see metrics.go.
+	waits [2]waitRing
 }
 
 // Dispatcher is the process-wide admission layer (I-D1: exactly one). Policy
@@ -368,10 +371,10 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 			st.cancelable[l] = w.cancel
 		}
 	}
-	if l.class == ClassInteractive {
-		if wait := now.Sub(w.enqueued); wait > d.warnAfter {
-			d.warnWaitLocked(st, wait)
-		}
+	wait := now.Sub(w.enqueued)
+	st.waits[classIdx(l.class)].add(wait) // MW7/D3-W3 wait sample, O(1)
+	if l.class == ClassInteractive && wait > d.warnAfter {
+		d.warnWaitLocked(st, wait)
 	}
 	return l
 }
@@ -603,6 +606,16 @@ type WaitStats struct {
 	Waiting int
 	// OldestWait is the wait time of the longest-queued acquire.
 	OldestWait time.Duration
+	// P95Wait / MaxWait are aggregates over the rolling window of the last
+	// waitRingK admitted wait samples of this target × class (MW7/D3-W3,
+	// metrics.go); Samples is the window size they were computed from
+	// (design/03 §4.6.1 window honesty). Exposure rule (§4.6.1, decided):
+	// target×class wait aggregates are server-admin-only — a tenant-pollable
+	// target aggregate would be a live activity oracle over foreign load
+	// (the C2 leak type via the status channel).
+	P95Wait time.Duration
+	MaxWait time.Duration
+	Samples int
 }
 
 // TargetSnapshot is the introspection view of one origin (queue depths,
@@ -685,6 +698,8 @@ func (d *Dispatcher) Snapshot() Snapshot {
 		if t := st.background.oldest(); !t.IsZero() {
 			ts.Background.OldestWait = now.Sub(t)
 		}
+		st.waits[classIdx(ClassInteractive)].statsInto(&ts.Interactive)
+		st.waits[classIdx(ClassBackground)].statsInto(&ts.Background)
 		ts.Buckets = d.bucketSnapshotsLocked(st, now)
 		out.Targets = append(out.Targets, ts)
 	}
