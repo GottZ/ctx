@@ -150,7 +150,8 @@ func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.P
 
 // acquire reserves a turn slot for home_scope; ok=false means the per-scope cap
 // (webchat.concurrent_turns) is reached → the handler answers 429 before any
-// stream byte (R1, multi-tenant fairness on the single llama.cpp slot). The map
+// stream byte (R1, multi-tenant fairness above the shared llama.cpp backend,
+// whose GPU slot count is now dispatcher policy — design/05 §4.3). The map
 // holds only scopes with inflight > 0.
 func (h *ChatHandler) acquire(scope string, limit int) bool {
 	if limit <= 0 {

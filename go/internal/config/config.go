@@ -576,7 +576,7 @@ type TenantConfig struct {
 // backend targets (classification rule above). The capacity caps are
 // parse:"strict" like their siblings (webchat.concurrent_turns,
 // events.max_connections) — a typo'd cap silently falling back to the
-// default would hide the intended ceiling on the single llama.cpp slot.
+// default would hide the intended ceiling on the shared llama.cpp backend.
 // The per-TARGET policy (slots, preempt_background, herald_scope) lives in
 // context_backends.limits, not here (mechanism=code, policy=data). The
 // settings reload owner maps this struct onto dispatch.Settings.

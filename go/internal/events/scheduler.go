@@ -56,8 +56,6 @@ const (
 	// embedCacheMaxRows: size cap — oldest rows above this are pruned.
 	embedCacheMaxRows = 50000
 
-	// dreamYieldWait is the wait duration when dream yields to active queries.
-	dreamYieldWait = 2 * time.Second
 
 	// overviewYieldWait is the re-check cadence while the overview rebuild
 	// defers to active queries (B-W1 demand interruption). Coarser than
@@ -78,6 +76,13 @@ const (
 	// dreamThrottleDefault is the default interval for throttled mode.
 	dreamThrottleDefault = 20 * time.Second
 )
+
+// dreamYieldWait is the wait duration when dream/audit yield to interactive
+// demand (the legacy fallback loop AND the MW17 vor-pick skip cadence). A var,
+// not a const, so the launch-skip gate can shorten it and actually observe a
+// fall-through past the vor-pick check (with the 2 s production value every
+// test ctx cancels inside the skip select, masking a missing continue).
+var dreamYieldWait = 2 * time.Second
 
 // StartupConfig holds the restart-only scheduler parameters. They stay
 // constructor arguments — never snapshot reads — because they cannot take
@@ -1065,9 +1070,41 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 			continue
 		}
 
-		// Demand interruption: yield to interactive demand.
-		if demand := s.interactiveDemand(); demand > 0 {
-			slog.Debug("scheduler: dream yielding to interactive demand", "count", demand)
+		// Demand handling (design/05 §4.2/§4.3, A5-W3/MW17 — Kunde 2 of the yield
+		// removal, the complex GPU customer: chat on GPU + embeds on the CPU host,
+		// backfill priority). Two regimes selected by enforcing():
+		//
+		// (1) P-Fallback — under !enforcing() (kill switch, empty or partial policy)
+		//     the byte-identical legacy 2 s wait-loop is the fail-open fallback:
+		//     block here until demand clears, same dreamYieldWait, same shutdown
+		//     abort. This is the MW16 fallback block (audit.go), applied to dream.
+		for !s.enforcing() && s.interactiveDemand() > 0 {
+			slog.Debug("scheduler: dream yielding to interactive demand", "count", s.interactiveDemand())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(dreamYieldWait):
+			}
+		}
+
+		// (2) P-GPU / B-R7a — under Enforcing() the cycle's wire calls wait AT THEIR
+		//     TARGETS in their background leases (the Herald blocks background
+		//     admission while interactive demand stands), so there is no vor-start
+		//     poll for demand that arises WHILE a cycle runs — the leases carry it.
+		//     But the cycle LAUNCH mutates state before any wire call: PickBlock is
+		//     an UPDATE with a transient claim (SET dream_cooldown_until,
+		//     dream/dream.go:429-443) and the cycle error path stamps dream_checked_at
+		//     (SetDreamCooldownMinutes, dream.go:647-656). Under sustained demand an
+		//     unguarded launch would rotate those stamps with no work done (claim →
+		//     wire waits to CycleTimeout → error path stamps → 10 s pause → next
+		//     block), systematically corrupting the pick order (dream_checked_at ASC
+		//     NULLS FIRST) and firing a steady error-log cadence. So a NON-BLOCKING
+		//     vor-pick demand check skips THIS iteration's launch and returns to the
+		//     loop head — loop cadence, NOT a cycle-blocking wait (only the mutating
+		//     launch is avoided, not non-wire work of an already-running cycle) and
+		//     NOT a Herald softening.
+		if s.enforcing() && s.interactiveDemand() > 0 {
+			slog.Debug("scheduler: dream cycle launch skipped, interactive demand", "count", s.interactiveDemand())
 			select {
 			case <-ctx.Done():
 				return

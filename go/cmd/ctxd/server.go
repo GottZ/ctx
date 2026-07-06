@@ -280,10 +280,15 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 			r.Get("/api/llmlog/{id}", llmlogH.HandleLLMLogDetail)
 		})
 		// Web-chat (F6-C4/G37): POST /api/chat/stream runs one turn and streams
-		// SSE — wrapped in WithScheduler so dream yields the single llama.cpp
-		// slot during a turn (like /api/query). The ctx_query tool delegates to
-		// the SAME dispatcher-wrapped query handler. Session routes are the
-		// read-lastig GET/DELETE companions (no LLM, no demand signal).
+		// SSE — wrapped in WithScheduler so the turn raises the interactive-demand
+		// herald (like /api/query). The background arms no longer cooperatively
+		// yield the slot up front: under Enforcing() the herald blocks background
+		// admission so dream's wire calls wait AT THE TARGET in their leases (the
+		// vor-start yields were removed, design/05 §4.3 — audit A5-W2/MW16, dream
+		// A5-W3/MW17); under !Enforcing() the legacy yield fallback still defers
+		// them. The ctx_query tool delegates to the SAME dispatcher-wrapped query
+		// handler. Session routes are the read-lastig GET/DELETE companions (no
+		// LLM, no demand signal).
 		chatH := handler.NewChatHandler(pool, cfgStore, backendPool, http.HandlerFunc(queryHTTPHandler), blocktypeReg, dispatcher)
 		r.Post("/api/chat/stream", handler.WithScheduler(dispatcher, chatH.HandleStream))
 		r.Get("/api/chat/sessions", chatH.HandleListSessions)

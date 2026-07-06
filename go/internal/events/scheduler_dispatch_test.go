@@ -216,11 +216,15 @@ func TestRunDigest_DefersOnDemand(t *testing.T) {
 	}
 }
 
-// TestRunDreamLoop_YieldsOnDemand is the P-GPU negative gate for dream in this
-// wave (yield SEMANTICS unchanged — 2 s wait-loop, entfernung is A5-W3/MW17):
-// under sustained demand the loop stays in the yield branch and exits on ctx,
+// TestRunDreamLoop_YieldsOnDemand is the P-Fallback gate for dream after the
+// yield removal (A5-W3/MW17): schedulerWithDemand wires an EMPTY-policy
+// dispatcher ⇒ !Enforcing ⇒ the fail-open fallback 2 s wait-loop runs, so under
+// sustained demand the loop stays in the yield branch and exits cleanly on ctx,
 // never reaching the nil-cfg pick/backfill body (which would panic if the yield
-// were skipped). DreamModeOn is the zero value, so no SetDreamMode is needed.
+// were skipped) — byte-identical to the pre-removal Ist. A dead demand read (or
+// a wrongly-Enforcing fallback) would fall through to that body and panic. The
+// Enforcing leg (vor-pick launch skip) is TestRunDreamLoop_SkipsLaunchUnderEnforcing.
+// DreamModeOn is the zero value, so no SetDreamMode is needed.
 func TestRunDreamLoop_YieldsOnDemand(t *testing.T) {
 	s, _ := schedulerWithDemand(t, 1)
 
@@ -235,6 +239,54 @@ func TestRunDreamLoop_YieldsOnDemand(t *testing.T) {
 	case <-done: // yielded through the demand branch, exited cleanly on ctx
 	case <-time.After(5 * time.Second):
 		t.Fatal("dream loop did not yield/exit under sustained demand")
+	}
+}
+
+// TestRunDreamLoop_SkipsLaunchUnderEnforcing is the P-GPU / stamp-rotation gate
+// for dream (A5-W3/MW17, B-R7a): with the dispatcher Enforcing and demand > 0
+// the loop must NOT launch a cycle — the non-blocking vor-pick demand check
+// skips the iteration, so no PickBlock transient claim and no dream_checked_at
+// stamp happen (the stamps stay UNTOUCHED under sustained demand). Observable
+// via this file's nil-cfg idiom: a launch would reach s.cfg.SnapshotForTenant on
+// the zero-value scheduler's nil cfg and panic; skipping means the loop only
+// cycles the vor-pick select and returns cleanly on ctx. panic ⟺ launched (bad),
+// clean return ⟺ skipped (good). Sustained demand over the whole run stands in
+// for "a full CycleTimeout span". The !Enforcing (P-Fallback) leg is
+// TestRunDreamLoop_YieldsOnDemand.
+//
+// The yield cadence is shortened so the ctx window spans MANY skip iterations
+// (integrator red-probe 2026-07-06: with the 2 s production cadence and a
+// 50 ms ctx, ctx.Done always won inside the skip select — a removed `continue`
+// fell through AFTER the select and stayed invisible; the shortened cadence
+// makes that fall-through panic within the window).
+func TestRunDreamLoop_SkipsLaunchUnderEnforcing(t *testing.T) {
+	s, release := schedulerEnforcingWithDemand(t, 1)
+	defer release()
+
+	oldWait := dreamYieldWait
+	dreamYieldWait = 2 * time.Millisecond
+	t.Cleanup(func() { dreamYieldWait = oldWait })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	launched := make(chan bool, 1)
+	go func() {
+		defer func() {
+			// nil cfg deref past the vor-pick check ⇒ a cycle launched.
+			launched <- recover() != nil
+		}()
+		s.runDreamLoop(ctx)
+		launched <- false // returned via the skip/ctx path — no launch
+	}()
+
+	select {
+	case l := <-launched:
+		if l {
+			t.Fatal("dream launched a cycle under Enforcing + demand (vor-pick check missing) — stamp rotation")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dream loop stuck under Enforcing + demand")
 	}
 }
 
