@@ -97,6 +97,7 @@ type Config struct {
 	WebChat       WebChatConfig
 	Writes        WritesConfig
 	Tenant        TenantConfig
+	Dispatch      DispatchConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -567,6 +568,48 @@ type TenantConfig struct {
 	// TENANT-DECISION(allow-cross-tenant-block-grant): default false (opt-in), analog
 	// E5 — Alt default true, umentscheidbar weil additiver Settings-Gate.
 	AllowCrossTenantBlockGrant bool `key:"tenant.allow_cross_tenant_block_grant" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
+}
+
+// DispatchConfig is the internal/dispatch admission-layer surface (Vorhaben
+// E, MW1 — design/01 §3.1 + design/03 §3.1). All keys are hot and
+// global-only: the dispatcher arbitrates the process-shared physical
+// backend targets (classification rule above). The capacity caps are
+// parse:"strict" like their siblings (webchat.concurrent_turns,
+// events.max_connections) — a typo'd cap silently falling back to the
+// default would hide the intended ceiling on the single llama.cpp slot.
+// The per-TARGET policy (slots, preempt_background, herald_scope) lives in
+// context_backends.limits, not here (mechanism=code, policy=data). The
+// settings reload owner maps this struct onto dispatch.Settings.
+type DispatchConfig struct {
+	// Enabled is the emergency stop, NOT a feature flag (E-U3): false
+	// degrades every Acquire to a pass-through = exactly today's behavior.
+	// The code waves are behavior-neutral through policy emptiness anyway;
+	// a default-off switch would be a second activation truth (B7 analog).
+	// Deliberately non-strict: the exact-match bool parser cannot malform,
+	// so a strict tag would be an unreachable classification (see
+	// TestRegistryStrictSet's contract).
+	Enabled bool `key:"dispatch.enabled" env:"CTX_DISPATCH_ENABLED" default:"true" mut:"hot" tenancy:"global-only"`
+	// BackgroundQueueMax caps waiting background acquires per target; above
+	// it Acquire fails fast with ErrQueueFull and the arm retries on its own
+	// cadence (terminal defer — the W49c back-off keeps its authority).
+	BackgroundQueueMax int `key:"dispatch.background_queue_max" env:"CTX_DISPATCH_BACKGROUND_QUEUE_MAX" default:"32" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// InteractiveQueuePerPrincipal is the B9/E-U6 tag-1 brake: waiting
+	// interactive acquires per ApiKeyID per target; 0 = off.
+	InteractiveQueuePerPrincipal int `key:"dispatch.interactive_queue_per_principal" env:"CTX_DISPATCH_INTERACTIVE_QUEUE_PER_PRINCIPAL" default:"8" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// InteractiveQueuePerTenant closes the key-mint factorization (C8): N
+	// self-minted keys of ONE tenant cannot multiply the principal cap; 0 = off.
+	InteractiveQueuePerTenant int `key:"dispatch.interactive_queue_per_tenant" env:"CTX_DISPATCH_INTERACTIVE_QUEUE_PER_TENANT" default:"16" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// InteractiveQueueMax is the aggregate load-shed per target: an early
+	// 429 beats an unservable wait slot (design/03 §4.5.4); 0 = off.
+	InteractiveQueueMax int `key:"dispatch.interactive_queue_max" env:"CTX_DISPATCH_INTERACTIVE_QUEUE_MAX" default:"64" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// LeaseReapGrace (bare seconds) is the slack AFTER the reap reference
+	// before the reaper force-releases a never-released lease (B1).
+	LeaseReapGrace time.Duration `key:"dispatch.lease_reap_grace" env:"CTX_DISPATCH_LEASE_REAP_GRACE" default:"30" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// LeaseMaxAge (bare seconds) is the reap fallback for leases without a
+	// deadline hint AND without a ctx deadline (the embed wire path since
+	// wave 49). Default == the longest legitimate hold (webchat stream
+	// timeout below).
+	LeaseMaxAge time.Duration `key:"dispatch.lease_max_age" env:"CTX_DISPATCH_LEASE_MAX_AGE" default:"900" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // GamingState returns the chain-time gaming exclusion from THIS settings

@@ -114,6 +114,19 @@ func TestRegistryStrictSet(t *testing.T) {
 		// webhook.retention is a Duration (Hours), non-strict (a janitor horizon is
 		// not a security ceiling).
 		"webhook.rate_limit": true,
+		// Vorhaben E MW1 (design/01 §3.1 + design/03 §3.1): dispatcher
+		// capacity caps and reaper clocks are fairness/security ceilings on
+		// the process-shared inference targets — a typo'd value silently
+		// falling back to the default would hide the intended ceiling (same
+		// rationale as webchat.concurrent_turns). dispatch.enabled is the
+		// deliberate exception: the exact-match bool parser cannot malform,
+		// so a strict tag would be an unreachable classification here.
+		"dispatch.background_queue_max":            true,
+		"dispatch.interactive_queue_per_principal": true,
+		"dispatch.interactive_queue_per_tenant":    true,
+		"dispatch.interactive_queue_max":           true,
+		"dispatch.lease_reap_grace":                true,
+		"dispatch.lease_max_age":                   true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {
