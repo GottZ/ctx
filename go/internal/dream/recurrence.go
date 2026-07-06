@@ -3,12 +3,14 @@ package dream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -96,8 +98,20 @@ func DetectRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 	for _, c := range candidates {
 		verdict, vErr := confirmRecurrence(ctx, pool, r, opts, source, c)
 		if vErr != nil {
-			slog.Warn("dream: recurrence phase 2 failed (non-fatal)",
-				"source", source.ID, "target", c.TargetID, "error", vErr)
+			// Per-pair non-fatal skip (MW19 pin, design/02 §4.6
+			// dream-recurrence row): the verdict is lost, the candidate loop
+			// CONTINUES — the next pair call re-acquires and waits regularly
+			// in the queue (it is background and never triggers a cancel
+			// itself, §4.2.1). A preempt is a scheduling decision, not a
+			// failure: INFO instead of WARN, detected exclusively via
+			// errors.Is over the returned error chain (§4.2.6).
+			if errors.Is(vErr, dispatch.ErrPreempted) {
+				slog.Info("dream: recurrence pair preempted by interactive demand — verdict lost, loop continues",
+					"source", source.ID, "target", c.TargetID)
+			} else {
+				slog.Warn("dream: recurrence phase 2 failed (non-fatal)",
+					"source", source.ID, "target", c.TargetID, "error", vErr)
+			}
 			continue
 		}
 		switch verdict.Verdict {

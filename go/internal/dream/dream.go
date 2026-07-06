@@ -10,6 +10,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/llm"
@@ -271,7 +272,21 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	// Step 4: LLM evaluation.
 	links, err := EvaluateRelationships(ctx, pool, r, opts, *block, candidates)
 	if err != nil {
-		slog.Warn("dream: evaluation failed", "block_id", block.ID, "error", err)
+		// Preempt semantics pin (MW19, design/02 §4.6 dream-eval row): a
+		// dispatcher preempt is a scheduling decision, not a quality signal
+		// about the block — it takes the SAME transient cooldown as any other
+		// transient failure and NEVER SetDreamCooldown (no dream_eval_count
+		// advance, P-N6). The distinction travels EXCLUSIVELY on the returned
+		// error chain via errors.Is (wrap contract §4.2.6); context.Cause
+		// stays dispatcher-internal. Log-only branch: an INFO instead of a
+		// WARN, because nothing failed — the block retries in ≥5 min with its
+		// persisted keywords, the next cycle picks the next block.
+		if errors.Is(err, dispatch.ErrPreempted) {
+			slog.Info("dream: evaluation preempted by interactive demand — transient cooldown, no back-off advance",
+				"block_id", block.ID)
+		} else {
+			slog.Warn("dream: evaluation failed", "block_id", block.ID, "error", err)
+		}
 		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
 		return 0, err
 	}
@@ -286,6 +301,15 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	// per-pair via LLM. Runs AFTER main eval so 'recurrent' overwrites a 'topical' that
 	// EvaluateRelationships may have written for the same pair — recurrent is the more
 	// specific classification. Non-fatal on error: dream cycle continues.
+	//
+	// Recurrence exception (MW19, design/02 §4.6 dream-recurrence row —
+	// deliberate Tag-1 decision, not a gap): a preempted pair call inside
+	// DetectRecurrence is a per-pair non-fatal skip, the cycle completes and
+	// step 7 advances the back-off REGULARLY (dream_eval_count+1, full W49c
+	// curve) — unlike a preempted MAIN eval above, which retries in 5 min
+	// without an advance. The lost verdict is a recall delay on the
+	// recurrence edge only; refinement (transient cooldown instead) is owned
+	// by axis 05, the error-chain signature lies ready.
 	recurrentLinks, recErr := DetectRecurrence(ctx, pool, r, opts, *block)
 	if recErr != nil {
 		slog.Warn("dream: recurrence detection failed (non-fatal)", "block_id", block.ID, "error", recErr)
