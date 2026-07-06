@@ -39,6 +39,7 @@ func (a Admission) acquire(ctx context.Context, b *backends.Backend, role string
 	if a.Admitter == nil {
 		return nil, nil, &AdmissionError{Err: fmt.Errorf("llm: %s call site without dispatch admitter (I-D1)", role)}
 	}
+	enqueued := time.Now()
 	lease, runCtx, err := a.Admitter.Acquire(ctx, dispatch.Request{
 		Target:     dispatch.Target{Origin: b.Host}, // Acquire normalizes defensively (design/01 §4.3)
 		Class:      a.Class,
@@ -47,19 +48,38 @@ func (a Admission) acquire(ctx context.Context, b *backends.Backend, role string
 		DeadlineIn: timeout,
 	})
 	if err != nil {
-		return nil, nil, &AdmissionError{Err: err}
+		// K9 telemetry payload (MW10): the rejected target and the futile
+		// wait travel with the error so the rejection line can attribute
+		// them (design/05 §3.2 — backend_name = target of the failed
+		// acquire, queue_wait_ms = time wasted waiting).
+		return nil, nil, &AdmissionError{
+			Err:     err,
+			Backend: b.Name,
+			Host:    b.Host,
+			WaitMs:  time.Since(enqueued).Milliseconds(),
+		}
 	}
 	return lease, runCtx, nil
 }
 
 // AdmissionError marks a chain walk ended by a failed Acquire. Acquire-error
 // doctrine (design/01 §4.3, binding): a failed acquire is NOT an attempt —
-// no ChainAttempt entry, no Classify, no health report, no llmlog line (the
-// K9 rejection line is MW10's), and the walk ends TERMINALLY (no failover
-// spill onto a following chain link, e.g. openrouter under local
-// saturation). Unwrap keeps errors.Is against the dispatch sentinels
-// (IsRejection) and ctx errors intact.
-type AdmissionError struct{ Err error }
+// no ChainAttempt entry, no Classify, no health report, and the walk ends
+// TERMINALLY (no failover spill onto a following chain link, e.g. openrouter
+// under local saturation). The ONE deliberate exception is the K9 rejection
+// TELEMETRY line (MW10, design/05 §3.2): recordRejection persists a
+// never-admitted background acquire_expired/queue_full — everything else
+// about the doctrine stays. Unwrap keeps errors.Is against the dispatch
+// sentinels (IsRejection) and ctx errors intact.
+type AdmissionError struct {
+	Err error
+	// Backend/Host/WaitMs are the K9 rejection telemetry (MW10): the
+	// target of the failed acquire and the futile wait before rejection.
+	// Zero-valued for the nil-admitter error (nothing waited anywhere).
+	Backend string
+	Host    string
+	WaitMs  int64
+}
 
 func (e *AdmissionError) Error() string { return e.Err.Error() }
 func (e *AdmissionError) Unwrap() error { return e.Err }
@@ -74,11 +94,16 @@ func IsAdmissionError(err error) bool {
 
 // ChainAttempt is one tried backend for llmlog's metadata.chain — the full
 // provenance of a chained call (the row's backend_name alone only names the
-// winner).
+// winner). Since MW10 it also carries the per-attempt lease wait (WaitMs) and
+// — for dispatcher-aborted attempts — the abort kind ("preempted"/"reaped")
+// as Class instead of the generic "canceled" (design/05 §3.2): the Σ view
+// over ALL attempts (incl. waits on failover predecessors) lives here as
+// single-case forensics; the row columns carry only the row-defining attempt.
 type ChainAttempt struct {
 	Backend string `json:"backend"`
 	Class   string `json:"err_class"`
 	Ms      int64  `json:"ms"`
+	WaitMs  int64  `json:"wait_ms"`
 }
 
 // ReportFunc feeds attempt outcomes back into the pool's health state.
@@ -159,6 +184,10 @@ func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, 
 		if admErr != nil {
 			return nil, nil, attempts, admErr
 		}
+		// Lease wait of THIS attempt (admitted − enqueued, the single
+		// queue_wait_ms source — design/05 §3.2). Captured before the wire
+		// call; the pass-through state yields a real 0.
+		waitMs := lease.WaitDur().Milliseconds()
 
 		start := time.Now()
 		resp, err := func() (*ChatResponse, error) {
@@ -175,7 +204,7 @@ func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, 
 		elapsed := time.Since(start)
 
 		if err == nil {
-			attempts = append(attempts, ChainAttempt{Backend: b.Name, Class: "ok", Ms: elapsed.Milliseconds()})
+			attempts = append(attempts, ChainAttempt{Backend: b.Name, Class: "ok", Ms: elapsed.Milliseconds(), WaitMs: waitMs})
 			if report != nil {
 				report(b.ID, backends.ClassOK, 0)
 			}
@@ -187,8 +216,25 @@ func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, 
 			return resp, b, attempts, nil
 		}
 
+		// §4.4c abort rule (MW10, design/05 — BEFORE the generic Classify):
+		// a dispatcher-canceled attempt (cause ErrPreempted/ErrReaped on the
+		// lease's runCtx) is TERMINAL — no class.Next() failover onto
+		// following links (a preempted background prompt must never spill
+		// toward openrouter through a scheduling decision) and no report()
+		// (the pool health state is shared with interactive; a preempt/reap
+		// must not cooldown the target, B-R9). The attempt carries the abort
+		// kind instead of the generic "canceled". Classify's own
+		// context.Canceled match would only cover an UNwrapped cause — this
+		// rule is errors.Is over context.Cause and therefore wrap-safe.
+		if abort := dispatchAbortClass(runCtx); abort != "" {
+			attempts = append(attempts, ChainAttempt{Backend: b.Name, Class: abort, Ms: elapsed.Milliseconds(), WaitMs: waitMs})
+			slog.Warn("llm: chain attempt aborted by dispatcher", "role", role,
+				"backend", b.Name, "attempt", i+1, "abort", abort, "error", err)
+			return nil, nil, attempts, err
+		}
+
 		class := backends.Classify(err, b.ProviderClass)
-		attempts = append(attempts, ChainAttempt{Backend: b.Name, Class: class.String(), Ms: elapsed.Milliseconds()})
+		attempts = append(attempts, ChainAttempt{Backend: b.Name, Class: class.String(), Ms: elapsed.Milliseconds(), WaitMs: waitMs})
 		lastErr = err
 		if report != nil && class != backends.ClassCanceled {
 			report(b.ID, class, retryAfterOf(err))
@@ -210,6 +256,104 @@ func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, 
 		}
 	}
 	return nil, nil, attempts, fmt.Errorf("llm: chain exhausted for role %q: %w", role, lastErr)
+}
+
+// dispatchAbortClass classifies a dispatcher-caused cancel of one attempt's
+// runCtx (MW10, design/05 §4.4c/B-R8): "preempted"/"reaped" via errors.Is
+// over context.Cause — wrap-safe, NEVER sentinel identity (a decorated
+// cause, e.g. fmt.Errorf with %w plus target origin, would silently fall to
+// "" under ==) and never generic ctx.Err(). Everything else — parent cancel
+// (shutdown, dream-off, client disconnect), plain wire errors — returns "".
+func dispatchAbortClass(runCtx context.Context) string {
+	cause := context.Cause(runCtx)
+	switch {
+	case errors.Is(cause, dispatch.ErrPreempted):
+		return llmlog.AbortPreempted
+	case errors.Is(cause, dispatch.ErrReaped):
+		return llmlog.AbortReaped
+	default:
+		return ""
+	}
+}
+
+// applyDispatchTelemetry derives the MW10 telemetry columns of one llmlog
+// row from a chain walk's attempts (design/05 §3.2/§4.4a/§4.4b, shared by
+// ChainCall.Do and Synthesize — one derivation, no duplicate code). The
+// row-defining attempt is the LAST wire attempt: the answering one on
+// success (the walk returns immediately), the last tried on full failure —
+// consistent with the row's backend_name attribution. Entry.Duration becomes
+// that attempt's wire elapsed (§4.4a duration fix: the old chain-walk span
+// contained every lease wait of every attempt and would double-count
+// queue_wait_ms under enforcement — exactly in the state the telemetry is
+// meant to measure). QueueWaitMs keeps 0 as a real measurement (B-R4).
+// "no_model" pseudo-attempts (no lease, no wire) never define the row; a
+// walk with ONLY those leaves QueueWaitMs nil and Duration zero.
+func applyDispatchTelemetry(entry *llmlog.Entry, attempts []ChainAttempt, class dispatch.Class) {
+	entry.DispatchClass = class.String()
+	for i := len(attempts) - 1; i >= 0; i-- {
+		a := attempts[i]
+		if a.Class == "no_model" {
+			continue
+		}
+		entry.Duration = time.Duration(a.Ms) * time.Millisecond
+		w := a.WaitMs
+		entry.QueueWaitMs = &w
+		if a.Class == llmlog.AbortPreempted || a.Class == llmlog.AbortReaped {
+			entry.DispatchAbort = a.Class
+		}
+		return
+	}
+}
+
+// rejectionEntry builds the ONE K9 rejection telemetry line (MW10,
+// design/05 §3.2 — the narrow exception to the acquire-error doctrine of
+// design/01 §4.3): a never-admitted BACKGROUND acquire that expired while
+// waiting (acquire_expired) or bounced off the full background queue
+// (queue_full) persists its futile wait. Without it, starvation under
+// permanent interactive demand would produce exactly zero rows and every
+// p95 would measure survivors only (survivorship bias, design/05 §6).
+// Everything else stays doctrine: no attempt, no Classify, no health
+// report, terminal. ok==false for every case that writes nothing:
+// interactive rejections (cap ladder — the error goes to the caller, the
+// class invariant keeps scheduler traces out of tenant-visible rows) and
+// parent cancels (shutdown/dream-off are lifecycle, not admission verdicts).
+func rejectionEntry(pipeline string, err error, class dispatch.Class) (llmlog.Entry, bool) {
+	if class != dispatch.ClassBackground {
+		return llmlog.Entry{}, false
+	}
+	var abort string
+	switch {
+	case errors.Is(err, dispatch.ErrQueueFull):
+		abort = llmlog.AbortQueueFull
+	case errors.Is(err, context.DeadlineExceeded):
+		abort = llmlog.AbortAcquireExpired
+	default:
+		return llmlog.Entry{}, false
+	}
+	var ae *AdmissionError
+	if !errors.As(err, &ae) {
+		return llmlog.Entry{}, false
+	}
+	w := ae.WaitMs
+	return llmlog.Entry{
+		Pipeline:      pipeline,
+		Host:          ae.Host,
+		BackendName:   ae.Backend,
+		Err:           err,
+		QueueWaitMs:   &w,
+		DispatchClass: class.String(),
+		DispatchAbort: abort,
+		NoWireCall:    true, // no physical call — duration_ms stays NULL
+	}, true
+}
+
+// recordRejection persists the K9 rejection line (async, fire-and-forget
+// like every llmlog write). Safe on every acquire-failure path — the
+// non-line cases are filtered inside rejectionEntry.
+func recordRejection(db *pgxpool.Pool, pipeline string, err error, class dispatch.Class) {
+	if entry, ok := rejectionEntry(pipeline, err, class); ok {
+		llmlog.Record(db, entry)
+	}
 }
 
 // applyModelParams merges ModelSpec.Params field-wise over the code-default
@@ -382,8 +526,8 @@ type ChainCall struct {
 // An empty chain returns *backends.ErrNoEligibleBackend — the call site
 // decides its role's fail-open/fail-hard semantics (design 03 §2.4).
 // adm is the caller-bound dispatch admission (MW3): a walk that ends by
-// acquire failure WITHOUT any wire contact writes no llmlog row (doctrine
-// §4.3; the deliberate K9 rejection line lands with MW10).
+// acquire failure WITHOUT any wire contact writes no regular llmlog row
+// (doctrine §4.3) — only the K9 rejection line where it applies (MW10).
 func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*ChatResponse, error) {
 	chain, err := c.Pool.Chain(c.Role, c.Required, c.Gaming, c.Tenant)
 	if err != nil {
@@ -399,19 +543,19 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 		}
 	}
 
-	start := time.Now()
 	resp, served, attempts, err := ChatChain(ctx, chain, c.Role,
 		c.System, c.User, c.Opts, c.Format, c.DefTimeout, PoolReporter(c.Pool), adm)
 
 	if err != nil && len(attempts) == 0 && IsAdmissionError(err) {
-		// Never admitted, no wire contact: no llmlog row (acquire-error
-		// doctrine §4.3 — the K9 rejection line is MW10's).
+		// Never admitted, no wire contact: no regular llmlog row
+		// (acquire-error doctrine §4.3) — only the K9 rejection line for
+		// background acquire_expired/queue_full (MW10, design/05 §3.2).
+		recordRejection(db, c.Pipeline, err, adm.Class)
 		return nil, err
 	}
 
 	entry := llmlog.Entry{
 		Pipeline:            c.Pipeline,
-		Duration:            time.Since(start),
 		Err:                 err,
 		BlockIDs:            c.BlockIDs,
 		RequiredSensitivity: string(c.Required),
@@ -431,6 +575,9 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 		entry.PromptTokens = resp.PromptTokens
 		applyProviderTelemetry(&entry, resp)
 	}
+	// MW10: queue_wait_ms/class/abort plus the wait-free Duration from the
+	// row-defining attempt (§4.4a — replaces the old chain-walk span).
+	applyDispatchTelemetry(&entry, attempts, adm.Class)
 	llmlog.Record(db, entry)
 
 	return resp, err

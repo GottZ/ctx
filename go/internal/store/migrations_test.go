@@ -1,8 +1,54 @@
 package store
 
 import (
+	"io/fs"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/GottZ/ctx/migrations"
 )
+
+// TestMigrationVersionsUnique guards the runner's silent-skip trap (MW10
+// gate): RunMigrations keys applied-tracking on the numeric prefix ONLY — a
+// second file with a duplicate number would be skipped SILENTLY (the
+// _migrations EXISTS check matches the first file's record), shipping a
+// migration that never runs anywhere. This test makes the collision loud at
+// unit-test time, using the exact parse the runner uses.
+func TestMigrationVersionsUnique(t *testing.T) {
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	if err != nil {
+		t.Fatalf("read embedded migrations: %v", err)
+	}
+	seen := map[int]string{}
+	count := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		parts := strings.SplitN(name, "_", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		v, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue // the runner skips non-numeric prefixes with a WARN
+		}
+		if prev, dup := seen[v]; dup {
+			t.Errorf("duplicate migration version %d: %q vs %q — the runner would skip the second SILENTLY", v, prev, name)
+		}
+		seen[v] = name
+		count++
+	}
+	if count == 0 {
+		t.Fatal("no migrations parsed — embed or parse broken")
+	}
+	// Pin the MW10 migration is present under its final number.
+	if got := seen[91]; got != "091_dispatch_telemetry.sql" {
+		t.Errorf("migration 091 = %q, want 091_dispatch_telemetry.sql (dispatch telemetry, design/05 §3.1)", got)
+	}
+}
 
 // migrations.go has no pure functions — RunMigrations depends on pgxpool and
 // the embedded filesystem. The parsing/sorting logic is inline within RunMigrations.

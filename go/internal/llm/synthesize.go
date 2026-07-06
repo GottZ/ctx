@@ -426,14 +426,16 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 		chain = gated
 	}
 
-	start := time.Now()
 	resp, served, attempts, err := ChatChain(ctx, chain, backends.RoleSynthesis,
 		systemPrompt, userPrompt, SynthesisOptions(0), "", ChatTimeout, PoolReporter(bpool), adm)
-	duration := time.Since(start)
 
 	if err != nil && len(attempts) == 0 && IsAdmissionError(err) {
-		// Never admitted, no wire contact: no llmlog row (acquire-error
-		// doctrine §4.3 — the K9 rejection line is MW10's).
+		// Never admitted, no wire contact: no regular llmlog row
+		// (acquire-error doctrine §4.3) — only the K9 rejection line for
+		// background acquire_expired/queue_full (MW10; the scheduler's
+		// daily-synthesis path is background, the query path is interactive
+		// and writes nothing here by the class invariant).
+		recordRejection(db, "query-synthesize", err, adm.Class)
 		return nil, fmt.Errorf("llm: synthesize: %w", err)
 	}
 
@@ -446,7 +448,6 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 	// blind spot this fixes); metadata.chain carries every attempt.
 	entry := llmlog.Entry{
 		Pipeline:            "query-synthesize",
-		Duration:            duration,
 		Err:                 err,
 		RequestSystem:       systemPrompt,
 		RequestUser:         userPrompt,
@@ -471,6 +472,9 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 		entry.PromptTokens = resp.PromptTokens
 		applyProviderTelemetry(&entry, resp)
 	}
+	// MW10: queue_wait_ms/class/abort plus the wait-free Duration from the
+	// row-defining attempt (§4.4a — same derivation as ChainCall.Do).
+	applyDispatchTelemetry(&entry, attempts, adm.Class)
 	// E4/8b body slim for credentials-class rows (request AND response — the
 	// synthesized answer derives from the credentials blocks).
 	llmlog.Record(db, entry.Slimmed())
