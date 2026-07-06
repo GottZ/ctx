@@ -555,6 +555,17 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		h.logEmbedWire(ctx, "query-embed", querySens, embServed, embAttempts, nil, err, ar.ApiKeyID)
 	}
 	if err != nil {
+		if dispatch.IsRejection(err) {
+			// Capacity rejection at the embed step (design/03 §4.5.2 embed row):
+			// map to a generic 429 + B1 Retry-After instead of the 500 that
+			// poisons client retry/alerting. This site runs BEFORE the heartbeat
+			// commits the 200, so the header travels on the wire. Body stays
+			// B6-generic (§3.3): no target, no depth.
+			setRejectRetryAfter(w, h.admitter, err)
+			slog.Warn("query embed rejected by dispatcher", "error", err, "request_id", requestID)
+			writeJSON(w, http.StatusTooManyRequests, rejectionBody())
+			return
+		}
 		slog.Error("embedding failed",
 			"error", err,
 			"request_id", requestID,
@@ -952,6 +963,18 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			hb.finish(http.StatusTooManyRequests, map[string]any{
 				"success": false, "error_code": "quota_exceeded",
 			})
+			return
+		}
+		// Dispatcher capacity rejection (design/03 §4.5.2 synthesis row): hooked
+		// into the EXISTING mapper as a 429 — one mapper, one doctrine. The
+		// heartbeat has already committed the 200 header on the synthesis path
+		// (useHeartbeat is always true here), so the Retry-After header cannot
+		// travel; the generic B6 body carries the signal, exactly as the
+		// quota_exceeded 429 above does. Best-effort header set is a no-op after
+		// commit but correct should the path ever run heartbeat-free.
+		if dispatch.IsRejection(err) {
+			setRejectRetryAfter(w, h.admitter, err)
+			hb.finish(http.StatusTooManyRequests, rejectionBody())
 			return
 		}
 		// Empty chain: generic client error — role + required sensitivity are

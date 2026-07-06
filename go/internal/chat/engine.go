@@ -321,6 +321,48 @@ type streamOutcome struct {
 // on a Next()-class error (F3 doctrine). After the first token a dead stream is
 // terminal — no silent re-run / double tool execution.
 //
+// queuedEventInterval is the "queued" SSE keepalive cadence while a stream
+// acquire waits in the dispatcher queue (design/03 §4.4 V2b / C6). Well under
+// 30 s so it clears a typical ~60 s reverse-proxy idle timeout with margin;
+// a package var so tests can shrink it.
+var queuedEventInterval = 20 * time.Second
+
+// acquireQueued wraps the blocking stream acquire with a periodic "queued"
+// keepalive event (Muster S8): without a byte during a long queue wait the
+// turn dies silently in the proxy (C6 — at target scale the HÄUFIGE case, one
+// foreign stream lease holds the 1-slot target while the proxy idle-kills the
+// waiting turn). The acquire runs on the caller ctx, so a client disconnect
+// cancels it and vacates the wait slot exactly as before (design/01 §4.2); the
+// goroutine always terminates when Acquire returns. The event is generic — no
+// target, no depth, no wait estimate (same C2/B6 doctrine as the rejection
+// body). Only the select loop touches the sink (the acquire goroutine never
+// does), so there is no concurrent sink access. An immediate admission (slot
+// free) emits NO event — the first tick is one interval away.
+func (e *Engine) acquireQueued(ctx context.Context, adm llm.Admission, b *backends.Backend, iter int, sink Sink) (*dispatch.Lease, context.Context, error) {
+	type acqResult struct {
+		lease  *dispatch.Lease
+		runCtx context.Context
+		err    error
+	}
+	done := make(chan acqResult, 1)
+	go func() {
+		lease, runCtx, err := adm.Acquire(ctx, b, "chat", e.cfg.LLMTimeout)
+		done <- acqResult{lease, runCtx, err}
+	}()
+	t := time.NewTicker(queuedEventInterval)
+	defer t.Stop()
+	for {
+		select {
+		case r := <-done:
+			return r.lease, r.runCtx, r.err
+		case <-t.C:
+			// Keepalive only — a dead sink surfaces at the next real event, and
+			// the acquire goroutine owns termination via ctx cancel.
+			_ = sink.Event("queued", map[string]any{"iteration": iter})
+		}
+	}
+}
+
 // MW5 admission (design/01 §4.6 N2): each attempt's wire call runs under its
 // own lease on the attempt's origin, held over the WHOLE stream (ChatStream
 // consumes the SSE body before returning — the longest GPU occupancy case)
@@ -358,8 +400,11 @@ func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs [
 
 		// Acquire immediately before the wire call; the resolved LLMTimeout
 		// doubles as the admission-anchored deadline hint (ChatStream applies
-		// the same value as its wire deadline — rule V1).
-		lease, runCtx, admErr := adm.Acquire(ctx, &b, "chat", e.cfg.LLMTimeout)
+		// the same value as its wire deadline — rule V1). The acquire can BLOCK
+		// in the dispatcher queue behind a foreign stream lease (up to 900 s at
+		// the 1-slot GPU target) while a reverse-proxy idle timeout is ~60 s —
+		// so we emit a periodic "queued" keepalive event during the wait (C6).
+		lease, runCtx, admErr := e.acquireQueued(ctx, adm, &b, iter, sink)
 		if admErr != nil {
 			if ctx.Err() != nil {
 				// Client disconnect while queued: the wait slot is vacated,
@@ -430,10 +475,14 @@ func (e *Engine) runStream(ctx context.Context, chain []backends.Backend, msgs [
 func (e *Engine) finishUnserved(ctx context.Context, sess *store.ChatSession, so streamOutcome, turnMax backends.Sensitivity, start time.Time, iter int, sink Sink) error {
 	if llm.IsAdmissionError(so.err) && !so.canceled {
 		// Dispatch rejection (§4.3): not an attempt — launderError's Classify
-		// would mislabel the sentinel. Generic saturation event (B6 doctrine:
-		// sentinel texts stay server-side); the full 429/SSE rejection mapping
-		// is MW8's (D3-W4).
-		return sink.Event("error", map[string]any{"code": "saturated", "backend": so.backend.Name, "retryable": true})
+		// would mislabel the sentinel. Generic saturation event, retryable:true
+		// (distinguishes it from the terminal retryable:false no_eligible_backend
+		// — design/03 §4.5.2 webchat row). MW8 (D3-W4): the backend NAME is
+		// DROPPED here — for a saturation event it is a C2 topology signal
+		// (which target is busy = foreign-load oracle), unlike a regular error
+		// event where §3.5 permits the name. Body carries neither target nor
+		// depth (B6/§3.3).
+		return sink.Event("error", map[string]any{"code": "saturated", "retryable": true})
 	}
 	if so.canceled {
 		rc, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
