@@ -21,20 +21,30 @@ var validRequestID = regexp.MustCompile(`^[0-9a-fA-F-]+$`)
 
 const maxRequestIDLen = 64
 
-// SchedulerNotifier is the interface the scheduler must implement for demand signaling.
+// SchedulerNotifier signals interactive demand for the lifetime of one HTTP
+// request. InteractiveArrived marks the request entering the house and returns
+// an idempotent done that MUST run at handler end to mark it leaving
+// (design/05 §4.1, A5-W0). The process-wide dispatcher implements this directly
+// — its demand herald is the successor of the old scheduler query-demand
+// mirror. The single-method closure form is deliberate: it keeps the
+// idempotent-done guarantee the herald primitive already pins (dispatch
+// TestHeraldDoneIdempotent) and needs no caller-side start/end pairing state —
+// the returned done IS the "InteractiveDone".
 type SchedulerNotifier interface {
-	QueryStart()
-	QueryEnd()
+	InteractiveArrived() func()
 }
 
-// WithScheduler wraps an http.HandlerFunc to signal query start/end to the scheduler.
+// WithScheduler wraps an http.HandlerFunc to signal interactive demand for the
+// duration of the request. The wrapper and every mount stay structurally
+// unchanged across A5-W0 — only the injected object moves from the scheduler
+// (old QueryStart/QueryEnd mirror) to the dispatcher (the demand herald).
 func WithScheduler(sn SchedulerNotifier, next http.HandlerFunc) http.HandlerFunc {
 	if sn == nil {
 		return next
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		sn.QueryStart()
-		defer sn.QueryEnd()
+		done := sn.InteractiveArrived()
+		defer done()
 		next(w, r)
 	}
 }

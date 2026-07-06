@@ -9,13 +9,13 @@ import (
 )
 
 // TestYieldThenRebuildOverview_DefersToActiveQueries is the B-W1 gate for the
-// dispatch yield (B2-M1): with an active query the rebuild is deferred — the
+// dispatch yield (B2-M1), now against the A5-W0 dispatcher signal: with
+// interactive demand present the rebuild is deferred (30 s wait-loop) — the
 // rebuild path is never reached before ctx expiry. The zero-value Scheduler
 // (nil cfg) makes the assertion mechanical: reaching rebuildOverviewOnce would
 // panic on cfg.Snapshot(), so a clean return proves the deferral.
 func TestYieldThenRebuildOverview_DefersToActiveQueries(t *testing.T) {
-	s := &Scheduler{}
-	s.activeQueries.Add(1)
+	s, _ := schedulerWithDemand(t, 1) // demand stays > 0 for the whole probe
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()

@@ -289,9 +289,11 @@ func main() {
 	// E-A: wire the overview worker argv (the own binary's hidden subcommand)
 	// under the same boot happens-before as SetBlocktypeRegistry.
 	wireOverviewWorkerArgv(scheduler)
-	// MW2: the demand herald target. Installed before Run (the listener's
-	// SettingsWriteHandler reads it) and before the HTTP server serves (the
-	// WithScheduler mounts delegate through QueryStart/QueryEnd).
+	// MW2/A5-W0: the dispatcher is the demand-herald target AND the signal the
+	// scheduler's arms read (interactiveDemand → dispatcher.InteractiveDemand).
+	// Installed before Run (the listener's SettingsWriteHandler reads it) and
+	// before the HTTP server serves (the WithScheduler mounts inject the
+	// dispatcher directly — InteractiveArrived per request).
 	scheduler.SetDispatcher(dispatcher)
 	go scheduler.Run(ctx)
 

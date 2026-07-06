@@ -169,7 +169,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	eventsH := handler.NewEventsHandler(ctx, pool, statusCollector, cfgStore)
 
 	// ── MCP endpoint (Streamable HTTP, authenticated) ──────────────
-	queryHTTPHandler := handler.WithScheduler(scheduler, queryHandler.HandleQuery)
+	queryHTTPHandler := handler.WithScheduler(dispatcher, queryHandler.HandleQuery)
 	mcpH := handler.NewMCPHandler(handler.MCPConfig{
 		Pool:         pool,
 		QueryHandler: http.HandlerFunc(queryHTTPHandler),
@@ -241,11 +241,12 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// WithScheduler as the THIRD herald entry (MW2, design/01 §4.5 + §4.6
 		// N8a signal side): the synchronously waiting daily-API user counts as
 		// interactive demand from HTTP ingress on — visible to the LLM-free
-		// arms via activeQueries today and InteractiveDemand() from MW15 on.
-		// The 03:00 scheduler path stays herald-free (background); the
-		// interactive CLASSIFICATION + per-principal concurrency brake are the
-		// coupled MW3 wave (E-U2, §4.6 N8a).
-		r.Post("/api/synthesize/daily", handler.WithScheduler(scheduler, synthH.HandleDaily))
+		// arms via InteractiveDemand() (A5-W0/MW15 swapped them off the old
+		// query-demand mirror onto this dispatcher herald). The 03:00 scheduler
+		// path stays herald-free (background); the interactive CLASSIFICATION +
+		// per-principal concurrency brake are the coupled MW3 wave (E-U2, §4.6
+		// N8a).
+		r.Post("/api/synthesize/daily", handler.WithScheduler(dispatcher, synthH.HandleDaily))
 		// Settings — runtime overrides (F2-W5); admin-gated inside the mount.
 		handler.MountSettings(r, handler.NewSettingsHandler(pool, cfgStore))
 		// Secrets — write-only sealed credentials (F2-W6); admin-gated inside.
@@ -276,10 +277,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// Web-chat (F6-C4/G37): POST /api/chat/stream runs one turn and streams
 		// SSE — wrapped in WithScheduler so dream yields the single llama.cpp
 		// slot during a turn (like /api/query). The ctx_query tool delegates to
-		// the SAME scheduler-wrapped query handler. Session routes are the
-		// read-lastig GET/DELETE companions (no LLM, no scheduler signal).
+		// the SAME dispatcher-wrapped query handler. Session routes are the
+		// read-lastig GET/DELETE companions (no LLM, no demand signal).
 		chatH := handler.NewChatHandler(pool, cfgStore, backendPool, http.HandlerFunc(queryHTTPHandler), blocktypeReg, dispatcher)
-		r.Post("/api/chat/stream", handler.WithScheduler(scheduler, chatH.HandleStream))
+		r.Post("/api/chat/stream", handler.WithScheduler(dispatcher, chatH.HandleStream))
 		r.Get("/api/chat/sessions", chatH.HandleListSessions)
 		r.Get("/api/chat/sessions/{id}", chatH.HandleGetSession)
 		r.Delete("/api/chat/sessions/{id}", chatH.HandleDeleteSession)

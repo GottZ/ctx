@@ -191,8 +191,8 @@ func (d *Dispatcher) InteractiveArrived() func() {
 }
 
 // InteractiveDemand is the process-wide demand signal — the successor of the
-// scheduler's activeQueries counter (consumed by the LLM-free arms, wave
-// MW15).
+// scheduler's removed query-demand counter, consumed by the signal-driven
+// arms (guard/digest/overview/dream/audit) since A5-W0 (MW15).
 func (d *Dispatcher) InteractiveDemand() int {
 	return int(d.demand.Load())
 }

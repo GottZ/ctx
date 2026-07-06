@@ -175,8 +175,8 @@ func (s *Scheduler) auditTenantScope(ctx context.Context, bt backgroundTenant, d
 			s.auditAbort("shutdown")
 			return true
 		}
-		// Demand interruption: audit GPU work yields to live queries.
-		if s.activeQueries.Load() > 0 {
+		// Demand interruption: audit GPU work yields to interactive demand.
+		if s.interactiveDemand() > 0 {
 			select {
 			case <-ctx.Done():
 				s.auditAbort("shutdown")

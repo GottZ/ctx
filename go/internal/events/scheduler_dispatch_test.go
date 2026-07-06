@@ -1,128 +1,151 @@
 package events
 
 import (
-	"sync"
+	"context"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/store"
 )
 
-// MW2 herald probes (design/01 §7 W2 gate): QueryStart/QueryEnd delegate to
-// the dispatcher's InteractiveArrived/done while activeQueries stays the
-// mirror — both counters move from the ONE entry point (B7), so the
-// divergence over any test run is zero and every Arrived has its done (no
-// herald leak).
+// A5-W0 (MW15, design/05 §4.1): the five signal-driven arms (guard, digest,
+// overview, dream, audit) read the dispatcher's InteractiveDemand() — via the
+// nil-safe interactiveDemand() — instead of the removed scheduler demand mirror.
+// QueryStart/QueryEnd + the demandDones pairing shim are gone; the herald lives
+// entirely in the dispatcher (proven idempotent by dispatch TestHeraldDone*),
+// and the WithScheduler mounts inject the dispatcher directly. These probes
+// pin: (a) the read is nil-safe (unwired scheduler = neutral), (b) it tracks
+// the herald, and (c) each arm still defers exactly as before against the new
+// signal (P-Signal/P-GPU parity — yield SEMANTICS unchanged in this wave).
 //
-// Red probe (2026-07-06, documented per wave contract): with the delegation
-// block in QueryStart removed (the `done := s.dispatcher.InteractiveArrived()`
-// append), TestQueryStartEnd_HeraldDelegation failed with
-// "after QueryStart: demand = 0, want 1" and the divergence probe failed at
-// the all-started quiesce point — the tests observe the delegation itself,
-// not the mirror.
+// Red probe (2026-07-06, documented per wave contract): with the guard's
+// demand branch hard-wired to a constant 0 (`if 0 > 0`), the demand read is
+// dead and TestRunGuard_DefersOnDemand failed with "guard ran under sustained
+// demand" — the arm stamped lastGuardNs past a defer that never fired. A second
+// mutation totlegged the signal at the source (interactiveDemand returning a
+// constant 0): that probe plus the audit/dream/overview probes went red
+// together, proving they observe the live signal, not a fixture.
 
-// newHeraldScheduler builds a zero-value scheduler with a live dispatcher
-// (default settings, empty policy — pass-through, exactly the MW2 state).
-func newHeraldScheduler(t *testing.T) (*Scheduler, *dispatch.Dispatcher) {
+// schedulerWithDemand builds a zero-value scheduler wired to a live dispatcher
+// (default settings, empty policy — pass-through, the MW2 herald state) and
+// raises interactive demand to n, returning the scheduler and a release that
+// lowers demand back to zero (each done is the dispatcher's idempotent herald
+// closure).
+func schedulerWithDemand(t *testing.T, n int) (*Scheduler, func()) {
 	t.Helper()
 	d := dispatch.New(nil, dispatch.DefaultSettings())
 	t.Cleanup(d.Close)
 	s := &Scheduler{}
 	s.SetDispatcher(d)
-	return s, d
-}
-
-// TestQueryStartEnd_HeraldDelegation is the herald probe: entry raises
-// InteractiveDemand(), exit lowers it, and the activeQueries mirror moves in
-// lockstep — including nested entries (the MCP/chat path re-enters through
-// the same wrapped query handler; counter, not bool).
-func TestQueryStartEnd_HeraldDelegation(t *testing.T) {
-	s, d := newHeraldScheduler(t)
-
-	s.QueryStart()
-	if got := d.InteractiveDemand(); got != 1 {
-		t.Fatalf("after QueryStart: demand = %d, want 1", got)
+	dones := make([]func(), 0, n)
+	for i := 0; i < n; i++ {
+		dones = append(dones, d.InteractiveArrived())
 	}
-	if got := s.activeQueries.Load(); got != 1 {
-		t.Fatalf("after QueryStart: activeQueries = %d, want 1", got)
-	}
-
-	s.QueryStart() // nested entry (chat turn delegating to ctx_query)
-	if got := d.InteractiveDemand(); got != 2 {
-		t.Fatalf("after nested QueryStart: demand = %d, want 2", got)
-	}
-
-	s.QueryEnd()
-	if got := d.InteractiveDemand(); got != 1 {
-		t.Fatalf("after first QueryEnd: demand = %d, want 1", got)
-	}
-	if got := s.activeQueries.Load(); got != 1 {
-		t.Fatalf("after first QueryEnd: activeQueries = %d, want 1", got)
-	}
-
-	s.QueryEnd()
-	if got := d.InteractiveDemand(); got != 0 {
-		t.Fatalf("after last QueryEnd: demand = %d, want 0 (herald leak)", got)
-	}
-	if got := s.activeQueries.Load(); got != 0 {
-		t.Fatalf("after last QueryEnd: activeQueries = %d, want 0", got)
+	return s, func() {
+		for _, done := range dones {
+			done()
+		}
 	}
 }
 
-// TestQueryStartEnd_NilDispatcher pins behavior neutrality for the unwired
-// state (tests, boot before SetDispatcher): the mirror keeps working, no
-// panic, no herald.
-func TestQueryStartEnd_NilDispatcher(t *testing.T) {
+// TestInteractiveDemand_NilSafe pins the unwired-scheduler neutrality: no
+// dispatcher ⇒ demand 0 ⇒ no arm defers, identical to the removed zero-value
+// query-count mirror (SetDispatcher happens-before Run, so production always
+// has a live dispatcher; tests and pre-wire boot must stay neutral).
+func TestInteractiveDemand_NilSafe(t *testing.T) {
 	s := &Scheduler{}
-	s.QueryStart()
-	if got := s.activeQueries.Load(); got != 1 {
-		t.Fatalf("activeQueries = %d, want 1", got)
-	}
-	s.QueryEnd()
-	if got := s.activeQueries.Load(); got != 0 {
-		t.Fatalf("activeQueries = %d, want 0", got)
+	if got := s.interactiveDemand(); got != 0 {
+		t.Fatalf("nil-dispatcher interactiveDemand() = %d, want 0", got)
 	}
 }
 
-// TestQueryStartEnd_MirrorDivergenceZero is the W2 negative gate (design/01
-// §7 W2): field↔dispatcher divergence == 0 over a concurrent run, checked at
-// two quiesce points (all started, all ended). The final zero also proves
-// every Arrived had its done — a leaked done would leave demand > 0 and
-// permanently starve background admission (the herald term is not softenable).
-func TestQueryStartEnd_MirrorDivergenceZero(t *testing.T) {
-	s, d := newHeraldScheduler(t)
-
-	const goroutines = 8
-	const perG = 50
-
-	// Phase 1: everyone starts.
-	var wg sync.WaitGroup
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < perG; i++ {
-				s.QueryStart()
-			}
-		}()
+// TestInteractiveDemand_ReflectsHerald pins that the arms' read tracks the
+// dispatcher herald 0 → n → 0 (the successor of the old demand mirror).
+func TestInteractiveDemand_ReflectsHerald(t *testing.T) {
+	s, release := schedulerWithDemand(t, 2)
+	if got := s.interactiveDemand(); got != 2 {
+		t.Fatalf("interactiveDemand() = %d, want 2", got)
 	}
-	wg.Wait()
-	if mirror, demand := s.activeQueries.Load(), d.InteractiveDemand(); int(mirror) != demand || demand != goroutines*perG {
-		t.Fatalf("all-started quiesce: activeQueries = %d, demand = %d, want both %d", mirror, demand, goroutines*perG)
+	release()
+	if got := s.interactiveDemand(); got != 0 {
+		t.Fatalf("after release interactiveDemand() = %d, want 0", got)
+	}
+}
+
+// TestRunGuard_DefersOnDemand is the P-Signal negative gate for guard: under
+// demand the arm returns BEFORE the lastGuardNs run-stamp (return-defer, Ist);
+// with zero demand it runs past the defer (stamp advances). lastGuardNs is the
+// observable because it is stamped ONLY past the demand check (scheduler.go,
+// MW12/§4.5). The zero-demand leg is the built-in red-probe: if the guard
+// stopped reading the signal, the demand leg would stamp too and this fails.
+func TestRunGuard_DefersOnDemand(t *testing.T) {
+	s, release := schedulerWithDemand(t, 1)
+
+	s.runGuard(context.Background())
+	if g, _, _ := s.LastArmRuns(); !g.IsZero() {
+		t.Fatalf("guard ran under sustained demand (lastGuardNs stamped) — return-defer broken")
 	}
 
-	// Phase 2: everyone ends (ends pair with arbitrary starts — the done
-	// closures are interchangeable, LIFO pop).
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < perG; i++ {
-				s.QueryEnd()
-			}
-		}()
+	release()
+	s.runGuard(context.Background()) // nil block-type registry ⇒ loud skip past the stamp
+	if g, _, _ := s.LastArmRuns(); g.IsZero() {
+		t.Fatalf("guard did not run at zero demand (lastGuardNs unstamped) — probe blind")
 	}
-	wg.Wait()
-	if mirror, demand := s.activeQueries.Load(), d.InteractiveDemand(); mirror != 0 || demand != 0 {
-		t.Fatalf("all-ended quiesce: activeQueries = %d, demand = %d, want both 0", mirror, demand)
+}
+
+// TestRunDigest_DefersOnDemand is the P-Signal negative gate for digest,
+// symmetric to guard (lastDigestNs is the past-defer run-stamp). The empty
+// tenant set makes the zero-demand leg complete cleanly past the stamp.
+func TestRunDigest_DefersOnDemand(t *testing.T) {
+	s, release := schedulerWithDemand(t, 1)
+	s.backgroundTenantsFn = func(context.Context) []backgroundTenant { return nil }
+
+	s.runDigest(context.Background())
+	if _, dg, _ := s.LastArmRuns(); !dg.IsZero() {
+		t.Fatalf("digest ran under sustained demand (lastDigestNs stamped) — return-defer broken")
+	}
+
+	release()
+	s.runDigest(context.Background())
+	if _, dg, _ := s.LastArmRuns(); dg.IsZero() {
+		t.Fatalf("digest did not run at zero demand (lastDigestNs unstamped) — probe blind")
+	}
+}
+
+// TestRunDreamLoop_YieldsOnDemand is the P-GPU negative gate for dream in this
+// wave (yield SEMANTICS unchanged — 2 s wait-loop, entfernung is A5-W3/MW17):
+// under sustained demand the loop stays in the yield branch and exits on ctx,
+// never reaching the nil-cfg pick/backfill body (which would panic if the yield
+// were skipped). DreamModeOn is the zero value, so no SetDreamMode is needed.
+func TestRunDreamLoop_YieldsOnDemand(t *testing.T) {
+	s, _ := schedulerWithDemand(t, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.runDreamLoop(ctx)
+	}()
+	select {
+	case <-done: // yielded through the demand branch, exited cleanly on ctx
+	case <-time.After(5 * time.Second):
+		t.Fatal("dream loop did not yield/exit under sustained demand")
+	}
+}
+
+// TestAuditTenantScope_DefersOnDemand is the P-GPU negative gate for audit
+// (yield SEMANTICS unchanged — 2 s wait-loop, entfernung is A5-W2/MW16): under
+// demand the scope loop stays in the yield branch and aborts on ctx cancel
+// without reaching the nil-cfg SnapshotForTenant body. A dead demand read would
+// fall through to that body and panic instead of returning abort.
+func TestAuditTenantScope_DefersOnDemand(t *testing.T) {
+	s, _ := schedulerWithDemand(t, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if abort := s.auditTenantScope(ctx, backgroundTenant{scope: store.GlobalScope}, false, 10); !abort {
+		t.Fatal("audit did not abort under sustained demand + ctx cancel — yield branch not taken")
 	}
 }

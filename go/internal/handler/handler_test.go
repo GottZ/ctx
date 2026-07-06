@@ -817,16 +817,20 @@ func TestWithScheduler_NilNotifier(t *testing.T) {
 	}
 }
 
-// mockScheduler tracks query start/end calls.
+// mockScheduler tracks interactive-demand arrive/done calls. It implements the
+// A5-W0 closure interface: InteractiveArrived returns the done that marks the
+// request leaving (the successor of the old QueryStart/QueryEnd pair).
 type mockScheduler struct {
 	starts int
 	ends   int
 }
 
-func (m *mockScheduler) QueryStart() { m.starts++ }
-func (m *mockScheduler) QueryEnd()   { m.ends++ }
+func (m *mockScheduler) InteractiveArrived() func() {
+	m.starts++
+	return func() { m.ends++ }
+}
 
-// SECURITY PROPERTY: WithScheduler signals query end even when the handler
+// SECURITY PROPERTY: WithScheduler signals demand-done even when the handler
 // panics (via defer), preventing scheduler resource leaks.
 func TestWithScheduler_SignalsStartAndEnd(t *testing.T) {
 	ms := &mockScheduler{}
@@ -847,8 +851,8 @@ func TestWithScheduler_SignalsStartAndEnd(t *testing.T) {
 	}
 }
 
-// SECURITY PROPERTY: WithScheduler calls QueryEnd even if the handler panics,
-// preventing a stuck scheduler state from blocking future queries.
+// SECURITY PROPERTY: WithScheduler calls the demand-done even if the handler
+// panics, preventing a stuck demand state from blocking future queries.
 func TestWithScheduler_QueryEndOnPanic(t *testing.T) {
 	ms := &mockScheduler{}
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -865,7 +869,7 @@ func TestWithScheduler_QueryEndOnPanic(t *testing.T) {
 		t.Errorf("scheduler starts = %d, want 1", ms.starts)
 	}
 	if ms.ends != 1 {
-		t.Errorf("scheduler ends = %d, want 1 (must call QueryEnd even on panic)", ms.ends)
+		t.Errorf("scheduler ends = %d, want 1 (must call demand-done even on panic)", ms.ends)
 	}
 }
 

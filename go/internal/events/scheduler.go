@@ -120,19 +120,16 @@ type Scheduler struct {
 	webhookSync   WebhookSyncTrigger  // W13: the inbox arm fires this per drained project; mu-guarded (wired from NewRouter post-Run); inbox arm inert while nil
 	startup       StartupConfig
 	runCycle      dreamCycleFunc
-	activeQueries atomic.Int32 // Counter, NOT Bool (Armada-Fix)
 
-	// dispatcher is the process-wide admission layer (Vorhaben E). In wave
-	// MW2 it only carries the demand herald: QueryStart/QueryEnd delegate to
-	// InteractiveArrived/done so interactive demand counts from HTTP ingress
-	// (design/01 §4.5), while activeQueries stays the consumer-facing mirror
-	// until wave MW15 (§4.7). nil = herald inert (tests, pre-wire boot).
+	// dispatcher is the process-wide admission layer (Vorhaben E) and, since
+	// A5-W0 (MW15), the SOLE source of the interactive-demand signal the
+	// signal-driven arms defer on: the WithScheduler mounts inject the
+	// dispatcher directly (its demand herald), and the arms read
+	// interactiveDemand() (→ dispatcher.InteractiveDemand()). The old
+	// query-demand mirror + QueryStart/QueryEnd shim are gone (design/05
+	// §4.1). nil = signal inert (tests, pre-wire boot): demand reads 0, no arm
+	// defers — identical to the removed zero-value counter.
 	dispatcher *dispatch.Dispatcher
-	// demandMu guards demandDones: the open herald entries. The done
-	// closures are interchangeable (each settles exactly one Arrived), so
-	// QueryEnd pairs any end with any outstanding start via a LIFO pop.
-	demandMu    sync.Mutex
-	demandDones []func()
 
 	// backgroundTenantsFn yields the per-tenant resolution context the background
 	// iterates (06-C6 / 04-W6 T38): per tenant the config-resolution scope (the
@@ -483,41 +480,18 @@ func (s *Scheduler) backgroundAdmission() llm.Admission {
 	return adm
 }
 
-// QueryStart increments the active query counter and registers the request
-// with the dispatcher's demand herald (MW2, design/01 §4.5: interactive
-// demand counts from HTTP ingress, not from the first wire call). Both
-// counters move from this ONE entry point, so the mirror cannot drift (B7).
-// Called by query handlers (the WithScheduler mounts).
-func (s *Scheduler) QueryStart() {
-	s.activeQueries.Add(1)
+// interactiveDemand is the nil-safe read of the process-wide interactive-demand
+// signal (dispatcher herald) the signal-driven arms defer on (design/05 §4.1,
+// A5-W0 — successor of the removed query-demand mirror). Interactive demand
+// counts from HTTP ingress (WithScheduler mounts inject the dispatcher, MW2
+// §4.5), not from the first wire call. An unwired scheduler (tests, boot before
+// SetDispatcher) reports 0: no demand, no defer, identical to the old
+// zero-value counter.
+func (s *Scheduler) interactiveDemand() int {
 	if s.dispatcher == nil {
-		return
+		return 0
 	}
-	done := s.dispatcher.InteractiveArrived()
-	s.demandMu.Lock()
-	s.demandDones = append(s.demandDones, done)
-	s.demandMu.Unlock()
-}
-
-// QueryEnd decrements the active query counter and settles one herald entry
-// (see demandDones for why a LIFO pop is a valid pairing). An unmatched end
-// (no outstanding start) leaves the herald untouched — the mirror-divergence
-// probe in scheduler_dispatch_test.go pins that starts and ends stay paired.
-func (s *Scheduler) QueryEnd() {
-	s.activeQueries.Add(-1)
-	if s.dispatcher == nil {
-		return
-	}
-	var done func()
-	s.demandMu.Lock()
-	if n := len(s.demandDones); n > 0 {
-		done = s.demandDones[n-1]
-		s.demandDones = s.demandDones[:n-1]
-	}
-	s.demandMu.Unlock()
-	if done != nil {
-		done()
-	}
+	return s.dispatcher.InteractiveDemand()
 }
 
 // newRouter builds the per-cycle/per-run dream router: the live backend pool
@@ -825,8 +799,8 @@ func (s *Scheduler) nextOverviewTenant(ctx context.Context, cursor *uint64) back
 // a whole interval), then runs one rebuild. Sustained query load defers
 // indefinitely — interactive work outranks background compute by design.
 func (s *Scheduler) yieldThenRebuildOverview(ctx context.Context, bt backgroundTenant) {
-	for s.activeQueries.Load() > 0 {
-		slog.Debug("scheduler: overview rebuild deferred, active queries", "count", s.activeQueries.Load())
+	for s.interactiveDemand() > 0 {
+		slog.Debug("scheduler: overview rebuild deferred, interactive demand", "count", s.interactiveDemand())
 		select {
 		case <-ctx.Done():
 			return
@@ -1018,9 +992,9 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 		}
 	}()
 
-	// Demand interruption: wait if queries are active.
-	if s.activeQueries.Load() > 0 {
-		slog.Debug("scheduler: guard deferred, active queries", "count", s.activeQueries.Load())
+	// Demand interruption: wait if interactive demand is present.
+	if demand := s.interactiveDemand(); demand > 0 {
+		slog.Debug("scheduler: guard deferred, interactive demand", "count", demand)
 		return
 	}
 
@@ -1077,9 +1051,9 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 			continue
 		}
 
-		// Demand interruption: yield to active queries.
-		if s.activeQueries.Load() > 0 {
-			slog.Debug("scheduler: dream yielding to queries", "count", s.activeQueries.Load())
+		// Demand interruption: yield to interactive demand.
+		if demand := s.interactiveDemand(); demand > 0 {
+			slog.Debug("scheduler: dream yielding to interactive demand", "count", demand)
 			select {
 			case <-ctx.Done():
 				return
@@ -1218,9 +1192,9 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		}
 	}()
 
-	// Demand interruption: wait if queries are active.
-	if s.activeQueries.Load() > 0 {
-		slog.Debug("scheduler: digest deferred, active queries", "count", s.activeQueries.Load())
+	// Demand interruption: wait if interactive demand is present.
+	if demand := s.interactiveDemand(); demand > 0 {
+		slog.Debug("scheduler: digest deferred, interactive demand", "count", demand)
 		return
 	}
 
