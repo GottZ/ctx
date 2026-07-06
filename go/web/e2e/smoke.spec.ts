@@ -224,4 +224,25 @@ test.describe('graph theme palette', () => {
     await expect.poll(() => readPalette(page), { timeout: 5000 }).not.toBe(dark)
     expect(await readPalette(page), 'light edge token after toggle').toContain('#767b91')
   })
+
+  // G4c (U02-W3, design 02-graph-darkmode §4.6): Boot-Smoke des theme-festen
+  // Hover-Renderers. Nach dem Mount ist `defaultDrawNodeHover` die eigene
+  // Factory-Closure (makeDrawNodeHover) — eine Funktion, KEIN undefined. Bewusst
+  // KEINE Function.prototype.toString().includes('#FFF')-Quelltext-Inspektion:
+  // die wäre gegen sigma-/Minifier-Drift brittle. Die Regressions-Garantie
+  // (Fill=hoverBg + Stroke=hoverStroke) trägt allein der Unit-Gate G4b
+  // (node-hover.test.ts, Recording-Context). Erreicht wird hier der OverviewMap-
+  // Mount (der __ctxGraph exponiert); GraphView verdrahtet identisch (Konstruktor
+  // + Theme-$effect, makeDrawNodeHover(palette)).
+  test('defaultDrawNodeHover ist die eigene Factory-Closure (nicht sigmas #FFF-Default)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/graph')
+    await waitForShell(page)
+    await page.waitForFunction(() => '__ctxGraph' in window, null, { timeout: 10_000 })
+    const hoverType = await page.evaluate(() => {
+      const g = (window as unknown as { __ctxGraph?: { renderer: { getSetting(k: string): unknown } } }).__ctxGraph
+      return typeof g?.renderer.getSetting('defaultDrawNodeHover')
+    })
+    expect(hoverType, 'defaultDrawNodeHover ist eine Funktion (theme-fester Drawer gesetzt)').toBe('function')
+  })
 })

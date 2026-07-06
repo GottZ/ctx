@@ -35,6 +35,9 @@
   --graph-node-sat: 70;          /* Node-HSL-Saturation (bare Zahl)        */
   --graph-node-lum: 68;          /* Node-HSL-Lightness (bare Zahl)         */
   --graph-bg: #0b0b0f;           /* Canvas-Hintergrund (= surface-0)       */
+  --graph-hover-bg: var(--surface-3);   /* Hover-/Highlight-Kasten (opake Rückfläche) */
+  --graph-hover-stroke: var(--graph-edge-strong); /* 1px-Rahmen (Abhebung gegen Canvas)     */
+  --graph-hover-label: var(--text);  /* Label im Hover-Kasten                  */
 
   --dot-pattern: rgba(216, 218, 229, 0.035); /* Login-Punktraster          */
 

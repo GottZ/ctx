@@ -23,11 +23,23 @@ import tokensJson from '../../../tokens/tokens.json'
 // $value, light = $extensions.ctx.light (dasselbe Bindungs-Muster wie
 // tokens/contrast-matrix.test.ts:27-36). Ändert ein Token, wandern die Fixtures
 // automatisch mit; Format bleibt Hex/Zahl wie in tokens.json.
-const graphTokens = (tokensJson as unknown as {
-  graph: Record<string, { $value: string; $extensions?: { ctx?: { light?: string } } }>
-}).graph
+type TokenNode = { $value: string; $extensions?: { ctx?: { light?: string } } }
+const tokensDoc = tokensJson as unknown as Record<string, Record<string, TokenNode>>
+const graphTokens = tokensDoc.graph
 const tok = (name: string, theme: 'dark' | 'light'): string =>
   theme === 'light' ? String(graphTokens[name].$extensions?.ctx?.light) : String(graphTokens[name].$value)
+
+// U02-W3: die drei Hover-Tokens sind DTCG-Aliasse ({surface.surface-3} usw.) und
+// haben KEINEN eigenen light-Wert — sie folgen dem Ziel-Token pro Theme. Der
+// Resolver spiegelt readGraphPalette/getComputedStyle: Alias → Ziel-Token, dann
+// dessen Theme-Wert (G1d-Prinzip: aus tokens.json gebunden, kein Hand-Pin).
+const ALIAS = /^\{([a-z0-9-]+)\.([a-z0-9-]+)\}$/
+const themed = (t: TokenNode, theme: 'dark' | 'light'): string =>
+  theme === 'light' ? String(t.$extensions?.ctx?.light) : String(t.$value)
+const resolved = (name: string, theme: 'dark' | 'light'): string => {
+  const m = ALIAS.exec(String(graphTokens[name].$value))
+  return m ? themed(tokensDoc[m[1]][m[2]], theme) : themed(graphTokens[name], theme)
+}
 
 const dark: GraphPalette = {
   labelColor: tok('graph-label', 'dark'),
@@ -35,6 +47,9 @@ const dark: GraphPalette = {
   edgeStrongColor: tok('graph-edge-strong', 'dark'),
   nodeSat: Number(tok('graph-node-sat', 'dark')),
   nodeLum: Number(tok('graph-node-lum', 'dark')),
+  hoverBg: resolved('graph-hover-bg', 'dark'),
+  hoverStroke: resolved('graph-hover-stroke', 'dark'),
+  hoverLabel: resolved('graph-hover-label', 'dark'),
 }
 
 // The light column of the §5a token contract — the palette readGraphPalette()
@@ -45,6 +60,9 @@ const light: GraphPalette = {
   edgeStrongColor: tok('graph-edge-strong', 'light'),
   nodeSat: Number(tok('graph-node-sat', 'light')),
   nodeLum: Number(tok('graph-node-lum', 'light')),
+  hoverBg: resolved('graph-hover-bg', 'light'),
+  hoverStroke: resolved('graph-hover-stroke', 'light'),
+  hoverLabel: resolved('graph-hover-label', 'light'),
 }
 
 function apiNode(id: string, hop: number, partial: Partial<ApiNode> = {}): ApiNode {
@@ -156,6 +174,11 @@ describe('readGraphPalette', () => {
       '--graph-edge-strong': '#54597a',
       '--graph-node-sat': '62',
       '--graph-node-lum': '33',
+      // getComputedStyle liefert für die Alias-Hover-Tokens den substituierten
+      // Wert pro Theme (hier die Light-Auflösung: surface-3/edge-strong/text).
+      '--graph-hover-bg': '#ffffff',
+      '--graph-hover-stroke': '#54597a',
+      '--graph-hover-label': '#1b1d29',
     })
     expect(readGraphPalette()).toEqual({
       labelColor: '#54586a',
@@ -163,6 +186,9 @@ describe('readGraphPalette', () => {
       edgeStrongColor: '#54597a',
       nodeSat: 62,
       nodeLum: 33,
+      hoverBg: '#ffffff',
+      hoverStroke: '#54597a',
+      hoverLabel: '#1b1d29',
     })
   })
 

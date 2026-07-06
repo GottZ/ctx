@@ -6,6 +6,7 @@
   import { fetchOverview, type OverviewResponse } from '../../lib/graph/api'
   import { buildOverviewGraph, type MetaEdgeAttrs, type MetaNodeAttrs } from '../../lib/graph/overview-map'
   import { recolorOverviewGraph, type GraphPalette } from '../../lib/graph/graph-theme'
+  import { makeDrawNodeHover } from '../../lib/graph/node-hover'
   import EmptyState from '../../lib/ui/EmptyState.svelte'
 
   // Single click on a cluster → drill into its representative's ego net.
@@ -46,6 +47,8 @@
           labelFont: 'ui-monospace, monospace',
           labelSize: 11,
           defaultEdgeColor: palette.edgeColor,
+          // Theme-fester Hover-/Selektions-Renderer (U02-W3), s. GraphView.
+          defaultDrawNodeHover: makeDrawNodeHover(palette),
           renderEdgeLabels: false,
         })
         r.on('clickNode', ({ node }) => {
@@ -94,6 +97,8 @@
     recolorOverviewGraph(g, resp, p)
     r.setSetting('labelColor', { color: p.labelColor })
     r.setSetting('defaultEdgeColor', p.edgeColor)
+    // Hover-Drawer beim Theme-Wechsel neu setzen (Closure über alte Palette, M5).
+    r.setSetting('defaultDrawNodeHover', makeDrawNodeHover(p))
     r.refresh()
   })
 

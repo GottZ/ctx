@@ -20,6 +20,12 @@ export interface GraphPalette {
   edgeStrongColor: string
   nodeSat: number
   nodeLum: number
+  /** Hover-/Highlight-Kasten: opake Rückfläche (U02-W3, node-hover.ts). */
+  hoverBg: string
+  /** Hover-/Highlight-Kasten: 1px-Rahmen (Abhebung gegen den Canvas). */
+  hoverStroke: string
+  /** Hover-/Highlight-Kasten: Label-Farbe. */
+  hoverLabel: string
 }
 
 // Dark-theme fallback — ships a readable graph BEFORE/WITHOUT the theme axis
@@ -31,6 +37,11 @@ const DARK_FALLBACK: GraphPalette = {
   edgeStrongColor: '#7d80a8',
   nodeSat: 70,
   nodeLum: 68,
+  // Spiegel der aufgelösten Dark-Aliasse (graph-hover-*): surface-3 / edge-strong
+  // / text.text. Keep in sync with the dark column there.
+  hoverBg: '#1e1e28',
+  hoverStroke: '#7d80a8',
+  hoverLabel: '#d8dae5',
 }
 
 /**
@@ -58,6 +69,11 @@ export function readGraphPalette(): GraphPalette {
     edgeStrongColor: str('--graph-edge-strong', DARK_FALLBACK.edgeStrongColor),
     nodeSat: num('--graph-node-sat', DARK_FALLBACK.nodeSat),
     nodeLum: num('--graph-node-lum', DARK_FALLBACK.nodeLum),
+    // Alias-Tokens: getComputedStyle liefert den var()-substituierten Hex-Wert
+    // pro Theme (Substitution ist Teil des computed value von Custom Properties).
+    hoverBg: str('--graph-hover-bg', DARK_FALLBACK.hoverBg),
+    hoverStroke: str('--graph-hover-stroke', DARK_FALLBACK.hoverStroke),
+    hoverLabel: str('--graph-hover-label', DARK_FALLBACK.hoverLabel),
   }
 }
 

@@ -5,6 +5,7 @@
   import { edgeVisible, nodeVisible, type GraphFilters } from '../../lib/graph/filters'
   import { remainingDegree, type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
   import type { GraphPalette } from '../../lib/graph/graph-theme'
+  import { makeDrawNodeHover } from '../../lib/graph/node-hover'
 
   let {
     graph,
@@ -45,6 +46,9 @@
       labelFont: 'ui-monospace, monospace',
       labelSize: 11,
       defaultEdgeColor: palette.edgeColor,
+      // Theme-fester Hover-/Selektions-Renderer (U02-W3): ersetzt sigmas
+      // hartkodierten '#FFF'-Kasten durch palette.hoverBg + hoverStroke-Rahmen.
+      defaultDrawNodeHover: makeDrawNodeHover(palette),
       renderEdgeLabels: false,
       // Filters hide, selection highlights, degree badge ("· +N" = visible
       // incidences not loaded yet) decorates. Props are reactive getters —
@@ -103,6 +107,9 @@
     if (!r) return
     r.setSetting('labelColor', { color: palette.labelColor })
     r.setSetting('defaultEdgeColor', palette.edgeColor)
+    // Der Hover-Drawer ist eine Closure über die ALTE Palette — beim Theme-
+    // Wechsel neu setzen (Settings-Funktionen lesen nicht reaktiv, M5).
+    r.setSetting('defaultDrawNodeHover', makeDrawNodeHover(palette))
     r.refresh()
   })
 

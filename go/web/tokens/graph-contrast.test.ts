@@ -23,7 +23,11 @@
 //         Fill nimmt denselben Parser). Rot gegen Ist: das ehemalige hsl()-
 //         Format kollabierte hier auf [0,0,0,254].
 //
-// NICHT hier (spätere Welle): G4d (Hover-Rahmen-Kontrast, W3).
+//   G4d — Hover-Rahmen-Kontrast (U02-W3): contrast(graph-hover-stroke, graph-bg)
+//         ≥ 3.0 in BEIDEN Themes (Non-Text, SC 1.4.11). Das ist der Gate, der die
+//         Kasten-Abhebung gegen den Canvas prüft — die graph-hover-bg als
+//         class:surface bewusst NICHT liefert (dark 1.19:1). Alias-Auflösung
+//         ({graph.graph-edge-strong}) läuft über dieselbe Kette wie oben.
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -106,6 +110,10 @@ function palette(theme: 'dark' | 'light'): GraphPalette {
     edgeStrongColor: tok('graph-edge-strong', theme),
     nodeSat: num('graph-node-sat', theme),
     nodeLum: num('graph-node-lum', theme),
+    // Hover-Felder (U02-W3): alias-aufgelöst aus tokens.json über tok().
+    hoverBg: tok('graph-hover-bg', theme),
+    hoverStroke: tok('graph-hover-stroke', theme),
+    hoverLabel: tok('graph-hover-label', theme),
   }
 }
 
@@ -159,6 +167,25 @@ test('G1c: --graph-edge-strong Split ≥ 1.4× --graph-edge in beiden Themes', (
     }
   }
   expect(failures, `supersedes-Split unter ${SPLIT_MIN}×:\n${failures.join('\n')}`).toEqual([])
+})
+
+const HOVER_STROKE_MIN = 3.0
+
+// G4d — Hover-Rahmen-Kontrast: der 1px-Rahmen des Hover-Kastens (graph-hover-
+// stroke, Alias auf graph-edge-strong) trägt die Abhebung gegen den Canvas.
+// ≥ 3.0 in BEIDEN Themes (Non-Text). Negativ-Probe: Alias temporär auf
+// {surface.surface-2} (~1.1:1 vs graph-bg) → rot; zurück → grün.
+test('G4d: --graph-hover-stroke Kontrast gegen --graph-bg ≥ 3.0 in beiden Themes', () => {
+  const failures: string[] = []
+  for (const theme of THEMES) {
+    const stroke = tok('graph-hover-stroke', theme)
+    const bg = tok('graph-bg', theme)
+    const ratio = contrast(stroke, bg)
+    if (ratio < HOVER_STROKE_MIN) {
+      failures.push(`${theme} --graph-hover-stroke (${stroke}) auf --graph-bg (${bg}): ${ratio.toFixed(2)} < ${HOVER_STROKE_MIN}`)
+    }
+  }
+  expect(failures, `graph-hover-stroke unter ${HOVER_STROKE_MIN}:\n${failures.join('\n')}`).toEqual([])
 })
 
 // RGB der gebackenen Node-Farbe: hslToHex (Ship-Funktion) → colorToArray (sigma).
