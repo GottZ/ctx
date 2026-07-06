@@ -16,6 +16,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/rerank"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
@@ -247,6 +248,14 @@ func main() {
 	dispatcher := dispatch.New(nil, events.DispatchSettings(cfgStore.Snapshot().Dispatch)) //nolint:forbidigo // MT 06 BLIND: boot-time read; dispatch.* keys are global-only (design/01 §3.1), no tenant dimension exists for them.
 	dispatcher.UpdatePolicy(dispatch.DerivePolicy(events.DispatchBackendRows(backendPool.Snapshot()), nil))
 	defer dispatcher.Close()
+
+	// MW4 (design/03 §4.1.1): class authorization is ctx-bound — the
+	// dispatcher derives the admission principal exclusively from the request
+	// context via this hook; Request carries no principal parameter. Wired
+	// HERE, not in buildRouter next to the request-scope hooks: Acquire also
+	// runs on the scheduler's detached contexts, which spawn below — the
+	// unsynchronized write must ride the boot happens-before ahead of them.
+	dispatch.SetPrincipalHook(handler.RequestPrincipal)
 
 	// Backfill temporal dimensions for blocks missing from context_temporal.
 	if n, err := store.BackfillTemporal(ctx, pool); err != nil {

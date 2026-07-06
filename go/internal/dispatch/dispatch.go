@@ -101,8 +101,10 @@ func NormalizeOrigin(raw string) (string, error) {
 }
 
 // Principal identifies the caller for class authorization (I-D1/B8), the
-// Deckel-Staffel and the fairness bucket. Filled from auth.AuthResult (N10);
-// empty on scheduler arms — which makes them STRUCTURALLY background.
+// Deckel-Staffel and the fairness bucket. Derived from auth.AuthResult (N10)
+// — since MW4 EXCLUSIVELY out of the request ctx via the boot-installed
+// principal hook (design/03 §4.1.1), never as a caller parameter: detached
+// scheduler contexts resolve empty, which makes them STRUCTURALLY background.
 type Principal struct {
 	ApiKeyID  string
 	TenantID  string
@@ -121,15 +123,17 @@ func (p Principal) fairKey() string {
 	return p.ApiKeyID
 }
 
-// Request is one admission demand: which physical target, which class, who
-// asks. Role is a telemetry dimension only, never dispatch semantics.
+// Request is one admission demand: which physical target, which class. WHO
+// asks is deliberately NOT a field (design/03 §4.1.1): the principal — class
+// authorization + Deckel-Staffel dimensions — derives exclusively from the
+// Acquire ctx via the boot-installed hook (SetPrincipalHook), so a stored
+// AuthResult cannot be replayed as a parameter. Role is a telemetry dimension
+// only, never dispatch semantics.
 type Request struct {
 	Target Target
 	Class  Class
 	// Role travels into llmlog/telemetry (design/01 §4.3).
 	Role string
-	// Principal carries class authorization + the Deckel-Staffel dimensions.
-	Principal Principal
 	// Deadline is the caller's attempt-deadline hint (N1 knows b.TimeoutFor
 	// before the acquire, N4 has rerank.Timeout). Zero is allowed: leases
 	// without a hint AND without a ctx deadline fall under the reaper's

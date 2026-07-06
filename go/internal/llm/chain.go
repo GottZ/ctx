@@ -15,19 +15,21 @@ import (
 )
 
 // Admission binds the ONE process-wide dispatch admitter (I-D1) to a call
-// site's class and principal (Vorhaben E wave MW3, design/01 §4.6 N1):
-// Class/Principal are bound by the CALLER — the query pipeline binds
-// interactive + its auth principal, scheduler arms bind background with an
-// empty principal (structurally, B8) — while target and deadline hint are
-// bound per attempt inside the chain walk. It travels as a mandatory
+// site's class (Vorhaben E wave MW3, design/01 §4.6 N1): the CLASS is bound
+// by the caller — the query pipeline binds interactive, scheduler arms bind
+// background — while target and deadline hint are bound per attempt inside
+// the chain walk. The PRINCIPAL is deliberately NOT a field (MW4, design/03
+// §4.1.1): the dispatcher derives it exclusively from the Acquire ctx via
+// the boot-installed hook, so a stored AuthResult held in a variable cannot
+// buy interactive — an interactive class on a ctx without an authenticated
+// principal runs into the B8 downgrade. Admission travels as a mandatory
 // positional parameter (pattern: the report ReportFunc parameter; llm stays
 // parameter-pure): a call site without an admitter does not compile, and a
 // zero Admission fails the acquire loudly instead of passing an unadmitted
 // wire call.
 type Admission struct {
-	Admitter  dispatch.Admitter
-	Class     dispatch.Class
-	Principal dispatch.Principal
+	Admitter dispatch.Admitter
+	Class    dispatch.Class
 }
 
 // acquire leases one attempt on the backend's physical origin (per attempt,
@@ -44,7 +46,6 @@ func (a Admission) acquire(ctx context.Context, b *backends.Backend, role string
 		Target:     dispatch.Target{Origin: b.Host}, // Acquire normalizes defensively (design/01 §4.3)
 		Class:      a.Class,
 		Role:       role,
-		Principal:  a.Principal,
 		DeadlineIn: timeout,
 	})
 	if err != nil {

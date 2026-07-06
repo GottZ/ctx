@@ -137,7 +137,7 @@ func TestAgingEscapeIdleTargetAdmitsOnReaperTick(t *testing.T) {
 func TestAgingNeverOvertakesWaitingInteractive(t *testing.T) {
 	const aging = 20 * time.Millisecond
 	d, _ := newTestDispatcher(t, agingSettings(aging), agingPolicy(1, false, false))
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestAgingNeverOvertakesWaitingInteractive(t *testing.T) {
 	waitFor(t, "bg queued", func() bool { return waitingBackground(d) == 1 })
 	time.Sleep(2 * aging) // bg is aged well past the threshold
 	ia := make(chan admission, 1)
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ia)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ia)
 	waitFor(t, "ia queued", func() bool { return waitingInteractive(d) == 1 })
 
 	occ.Release()
@@ -240,7 +240,7 @@ func TestAgingEscapedLeaseStaysPreemptableAndCounts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ia := make(chan admission, 1)
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ia)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ia)
 	waitFor(t, "aged victim canceled", func() bool { return bg.ctx.Err() != nil })
 	if cause := context.Cause(bg.ctx); !errors.Is(cause, ErrPreempted) {
 		t.Fatalf("aged lease preempt cause: got %v want ErrPreempted", cause)

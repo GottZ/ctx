@@ -81,8 +81,11 @@ func principal(n string) Principal {
 	return Principal{ApiKeyID: "key-" + n, TenantID: "tenant-" + n, HomeScope: "scope-" + n}
 }
 
-func interactiveReq(p Principal) Request {
-	return Request{Target: Target{Origin: testOrigin}, Class: ClassInteractive, Role: "test", Principal: p}
+// interactiveReq is an interactive admission demand. WHO asks travels in the
+// Acquire ctx (withPrincipal, principal_test.go) — Request has no principal
+// field since MW4 (design/03 §4.1.1).
+func interactiveReq() Request {
+	return Request{Target: Target{Origin: testOrigin}, Class: ClassInteractive, Role: "test"}
 }
 
 func backgroundReq() Request {
@@ -171,7 +174,7 @@ func TestPassthroughIgnoresHerald(t *testing.T) {
 
 func TestClassOrderInteractiveBeforeBackground(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
@@ -182,7 +185,7 @@ func TestClassOrderInteractiveBeforeBackground(t *testing.T) {
 	// admit interactive first (strict class order).
 	startWaiter(ctx, d, "bg", backgroundReq(), ch)
 	waitFor(t, "bg waiter queued", func() bool { return waitingBackground(d) == 1 })
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ch)
 	waitFor(t, "ia waiter queued", func() bool { return waitingInteractive(d) == 1 })
 
 	occ.Release()
@@ -204,14 +207,14 @@ func TestNoBargingSameClass(t *testing.T) {
 	// newcomers (direct handoff).
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 	p := principal("same") // one bucket: same principal for all waiters
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(p))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), p), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 2)
-	startWaiter(ctx, d, "w1", interactiveReq(p), ch)
+	startWaiter(withPrincipal(ctx, p), d, "w1", interactiveReq(), ch)
 	waitFor(t, "w1 queued", func() bool { return waitingInteractive(d) == 1 })
 	occ.Release() // direct handoff to w1 under the mutex
 	first := <-ch
@@ -219,9 +222,9 @@ func TestNoBargingSameClass(t *testing.T) {
 		t.Fatalf("expected w1 admitted, got %q err=%v", first.label, first.err)
 	}
 	// The newcomer arrives while w2 is queued — it must land BEHIND w2.
-	startWaiter(ctx, d, "w2", interactiveReq(p), ch)
+	startWaiter(withPrincipal(ctx, p), d, "w2", interactiveReq(), ch)
 	waitFor(t, "w2 queued", func() bool { return waitingInteractive(d) == 1 })
-	startWaiter(ctx, d, "w3", interactiveReq(p), ch)
+	startWaiter(withPrincipal(ctx, p), d, "w3", interactiveReq(), ch)
 	waitFor(t, "w3 queued", func() bool { return waitingInteractive(d) == 2 })
 	first.lease.Release()
 	second := <-ch
@@ -283,8 +286,9 @@ func TestHeraldDoneIdempotent(t *testing.T) {
 // --- class authorization (B8).
 
 func TestInteractiveWithoutPrincipalDowngrades(t *testing.T) {
-	// Acquire(ClassInteractive, Principal{}) is enqueued as BACKGROUND +
-	// slog-ERROR + counter (fail-closed toward the protected good).
+	// An interactive Acquire on a ctx WITHOUT a bound principal (detached
+	// goroutine ctx — the scheduler-arm shape) is enqueued as BACKGROUND +
+	// slog-ERROR + counter (fail-closed toward the protected good, B8/§4.1.1).
 	d, h := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 	done := d.InteractiveArrived() // herald blocks background ⇒ proves the class
 	ctx, cancel := context.WithCancel(context.Background())
@@ -336,7 +340,7 @@ func staffelSettings() Settings {
 
 func TestStaffelPrincipalCap(t *testing.T) {
 	d, _ := newTestDispatcher(t, staffelSettings(), onSlotPolicy(1))
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
@@ -345,22 +349,22 @@ func TestStaffelPrincipalCap(t *testing.T) {
 	defer cancel()
 	ch := make(chan admission, 4)
 	flooder := principal("flood")
-	startWaiter(ctx, d, "f1", interactiveReq(flooder), ch)
-	startWaiter(ctx, d, "f2", interactiveReq(flooder), ch)
+	startWaiter(withPrincipal(ctx, flooder), d, "f1", interactiveReq(), ch)
+	startWaiter(withPrincipal(ctx, flooder), d, "f2", interactiveReq(), ch)
 	waitFor(t, "two flooder waiters", func() bool { return waitingInteractive(d) == 2 })
 
-	if _, _, err := d.Acquire(ctx, interactiveReq(flooder)); !errors.Is(err, ErrPrincipalSaturated) {
+	if _, _, err := d.Acquire(withPrincipal(ctx, flooder), interactiveReq()); !errors.Is(err, ErrPrincipalSaturated) {
 		t.Fatalf("3rd waiter of one key: got %v want ErrPrincipalSaturated", err)
 	}
 	// Foreign principals stay unaffected.
-	startWaiter(ctx, d, "other", interactiveReq(principal("other")), ch)
+	startWaiter(withPrincipal(ctx, principal("other")), d, "other", interactiveReq(), ch)
 	waitFor(t, "foreign principal still admitted to the queue", func() bool { return waitingInteractive(d) == 3 })
 }
 
 func TestStaffelTenantCap(t *testing.T) {
 	// N keys of the SAME tenant cannot multiply the principal cap (C8).
 	d, _ := newTestDispatcher(t, staffelSettings(), onSlotPolicy(1))
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
@@ -371,23 +375,23 @@ func TestStaffelTenantCap(t *testing.T) {
 	mk := func(key string) Principal {
 		return Principal{ApiKeyID: key, TenantID: "tenant-one", HomeScope: "scope-one"}
 	}
-	startWaiter(ctx, d, "a1", interactiveReq(mk("key-a")), ch)
-	startWaiter(ctx, d, "a2", interactiveReq(mk("key-a")), ch)
-	startWaiter(ctx, d, "b1", interactiveReq(mk("key-b")), ch)
+	startWaiter(withPrincipal(ctx, mk("key-a")), d, "a1", interactiveReq(), ch)
+	startWaiter(withPrincipal(ctx, mk("key-a")), d, "a2", interactiveReq(), ch)
+	startWaiter(withPrincipal(ctx, mk("key-b")), d, "b1", interactiveReq(), ch)
 	waitFor(t, "three tenant waiters", func() bool { return waitingInteractive(d) == 3 })
 
 	// key-c is below its principal cap, but the tenant is saturated.
-	if _, _, err := d.Acquire(ctx, interactiveReq(mk("key-c"))); !errors.Is(err, ErrTenantSaturated) {
+	if _, _, err := d.Acquire(withPrincipal(ctx, mk("key-c")), interactiveReq()); !errors.Is(err, ErrTenantSaturated) {
 		t.Fatalf("4th waiter of one tenant: got %v want ErrTenantSaturated", err)
 	}
 	// A foreign tenant is unaffected.
-	startWaiter(ctx, d, "x", interactiveReq(principal("x")), ch)
+	startWaiter(withPrincipal(ctx, principal("x")), d, "x", interactiveReq(), ch)
 	waitFor(t, "foreign tenant still admitted to the queue", func() bool { return waitingInteractive(d) == 4 })
 }
 
 func TestStaffelAggregateCap(t *testing.T) {
 	d, _ := newTestDispatcher(t, staffelSettings(), onSlotPolicy(1))
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
@@ -396,10 +400,10 @@ func TestStaffelAggregateCap(t *testing.T) {
 	defer cancel()
 	ch := make(chan admission, 8)
 	for i := 0; i < 4; i++ {
-		startWaiter(ctx, d, fmt.Sprintf("w%d", i), interactiveReq(principal(fmt.Sprintf("t%d", i))), ch)
+		startWaiter(withPrincipal(ctx, principal(fmt.Sprintf("t%d", i))), d, fmt.Sprintf("w%d", i), interactiveReq(), ch)
 	}
 	waitFor(t, "aggregate at cap", func() bool { return waitingInteractive(d) == 4 })
-	if _, _, err := d.Acquire(ctx, interactiveReq(principal("t9"))); !errors.Is(err, ErrTargetSaturated) {
+	if _, _, err := d.Acquire(withPrincipal(ctx, principal("t9")), interactiveReq()); !errors.Is(err, ErrTargetSaturated) {
 		t.Fatalf("65th-equivalent waiter: got %v want ErrTargetSaturated", err)
 	}
 	// The background queue is unaffected by the interactive aggregate cap.
@@ -413,7 +417,7 @@ func TestStaffelCheckOrderPrincipalFirst(t *testing.T) {
 	s := staffelSettings()
 	s.InteractiveQueueMax = 2
 	d, _ := newTestDispatcher(t, s, onSlotPolicy(1))
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
@@ -422,10 +426,10 @@ func TestStaffelCheckOrderPrincipalFirst(t *testing.T) {
 	defer cancel()
 	ch := make(chan admission, 2)
 	flooder := principal("flood")
-	startWaiter(ctx, d, "f1", interactiveReq(flooder), ch)
-	startWaiter(ctx, d, "f2", interactiveReq(flooder), ch)
+	startWaiter(withPrincipal(ctx, flooder), d, "f1", interactiveReq(), ch)
+	startWaiter(withPrincipal(ctx, flooder), d, "f2", interactiveReq(), ch)
 	waitFor(t, "queue at aggregate cap", func() bool { return waitingInteractive(d) == 2 })
-	if _, _, err := d.Acquire(ctx, interactiveReq(flooder)); !errors.Is(err, ErrPrincipalSaturated) {
+	if _, _, err := d.Acquire(withPrincipal(ctx, flooder), interactiveReq()); !errors.Is(err, ErrPrincipalSaturated) {
 		t.Fatalf("check order: got %v want ErrPrincipalSaturated before ErrTargetSaturated", err)
 	}
 }
@@ -526,14 +530,14 @@ func TestOriginSpellingsShareOneTargetState(t *testing.T) {
 func TestEnabledFalseDrainsWaitersAsPassthrough(t *testing.T) {
 	// B2: a blocked targetState + enabled=false ⇒ the wire call runs.
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 2)
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ch)
 	startWaiter(ctx, d, "bg", backgroundReq(), ch)
 	waitFor(t, "both waiters queued", func() bool {
 		return waitingInteractive(d) == 1 && waitingBackground(d) == 1
@@ -549,7 +553,7 @@ func TestEnabledFalseDrainsWaitersAsPassthrough(t *testing.T) {
 		a.lease.Release()
 	}
 	// New acquires pass immediately while disabled.
-	l, _, err := d.Acquire(context.Background(), interactiveReq(principal("b")))
+	l, _, err := d.Acquire(withPrincipal(context.Background(), principal("b")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire while disabled: %v", err)
 	}
@@ -582,11 +586,11 @@ func TestPolicyClearDrainsWaiters(t *testing.T) {
 
 func TestReleaseIdempotent(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(2))
-	l1, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	l1, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	l2, _, err := d.Acquire(context.Background(), interactiveReq(principal("b")))
+	l2, _, err := d.Acquire(withPrincipal(context.Background(), principal("b")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -605,7 +609,7 @@ func TestAcquireWithCanceledCtx(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := d.Acquire(ctx, interactiveReq(principal("a"))); !errors.Is(err, context.Canceled) {
+	if _, _, err := d.Acquire(withPrincipal(ctx, principal("a")), interactiveReq()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled ctx: got %v want context.Canceled", err)
 	}
 	ts := target(t, d)
@@ -616,13 +620,13 @@ func TestAcquireWithCanceledCtx(t *testing.T) {
 
 func TestWaiterCancelVacatesQueueSlot(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan admission, 1)
-	startWaiter(ctx, d, "w", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "w", interactiveReq(), ch)
 	waitFor(t, "waiter queued", func() bool { return waitingInteractive(d) == 1 })
 	cancel()
 	a := <-ch
@@ -662,7 +666,7 @@ func fairnessFixture(t *testing.T, mode FairnessMode) []string {
 	s := DefaultSettings()
 	s.Fairness = mode
 	d, _ := newTestDispatcher(t, s, onSlotPolicy(1))
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
@@ -673,11 +677,11 @@ func fairnessFixture(t *testing.T, mode FairnessMode) []string {
 	ch := make(chan admission, 3)
 	// Arrival order: a1, a2, b1 — fifo keeps it; principal_rr alternates
 	// buckets (a1, b1, a2) while intra-bucket FIFO holds (a1 before a2).
-	startWaiter(ctx, d, "a1", interactiveReq(scopeA), ch)
+	startWaiter(withPrincipal(ctx, scopeA), d, "a1", interactiveReq(), ch)
 	waitFor(t, "a1 queued", func() bool { return waitingInteractive(d) == 1 })
-	startWaiter(ctx, d, "a2", interactiveReq(scopeA), ch)
+	startWaiter(withPrincipal(ctx, scopeA), d, "a2", interactiveReq(), ch)
 	waitFor(t, "a2 queued", func() bool { return waitingInteractive(d) == 2 })
-	startWaiter(ctx, d, "b1", interactiveReq(scopeB), ch)
+	startWaiter(withPrincipal(ctx, scopeB), d, "b1", interactiveReq(), ch)
 	waitFor(t, "b1 queued", func() bool { return waitingInteractive(d) == 3 })
 	return drainOrder(t, occ, ch, 3)
 }
@@ -707,14 +711,14 @@ func TestFairnessPrincipalRRAlternatesBuckets(t *testing.T) {
 func TestInteractiveWaitWarn(t *testing.T) {
 	d, h := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 	d.warnAfter = time.Millisecond // per-instance, race-free
-	occ, _, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, _, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 1)
-	startWaiter(ctx, d, "w", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "w", interactiveReq(), ch)
 	waitFor(t, "waiter queued", func() bool { return waitingInteractive(d) == 1 })
 	time.Sleep(10 * time.Millisecond)
 	occ.Release()
@@ -754,7 +758,7 @@ func TestDeadlineInAnchorsAtAdmission(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 
 	// Occupy the single slot.
-	first, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	first, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
@@ -767,9 +771,9 @@ func TestDeadlineInAnchorsAtAdmission(t *testing.T) {
 	}
 	ch := make(chan res, 1)
 	go func() {
-		req := interactiveReq(principal("b"))
+		req := interactiveReq()
 		req.DeadlineIn = hint
-		l, _, err := d.Acquire(context.Background(), req)
+		l, _, err := d.Acquire(ictx(principal("b")), req)
 		ch <- res{l, err}
 	}()
 	waitFor(t, "second acquire queued", func() bool { return target(t, d).Interactive.Waiting == 1 })

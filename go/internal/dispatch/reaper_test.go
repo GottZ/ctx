@@ -29,7 +29,7 @@ func TestReapMaxAgeFallback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 1)
-	startWaiter(ctx, d, "next", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "next", interactiveReq(), ch)
 	waitFor(t, "next acquire queued behind the leak", func() bool { return waitingInteractive(d) == 1 })
 
 	time.Sleep(50 * time.Millisecond) // past max_age + grace
@@ -98,7 +98,7 @@ func TestReapCancelBeforeRelease(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 1)
-	startWaiter(ctx, d, "next", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "next", interactiveReq(), ch)
 	waitFor(t, "next acquire queued", func() bool { return waitingInteractive(d) == 1 })
 
 	time.Sleep(40 * time.Millisecond)
@@ -115,7 +115,7 @@ func TestReapCancelBeforeRelease(t *testing.T) {
 // freed and the divergence metric (reap counter + ERROR log) alarms.
 func TestReapInteractiveFreesSlotWithoutCancel(t *testing.T) {
 	d, _ := newTestDispatcher(t, reaperSettings(), onSlotPolicy(1))
-	_, runCtx, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	_, runCtx, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}

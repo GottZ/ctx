@@ -495,11 +495,9 @@ func (h *ManageHandler) handleBackendTest(w http.ResponseWriter, r *http.Request
 	latency := time.Since(start).Milliseconds()
 
 	if reachable && spec.Probe == "chat" {
-		probeChat(ctx, h.admitter, dispatch.Principal{
-			ApiKeyID:  ar.ApiKeyID,
-			TenantID:  ar.TenantID,
-			HomeScope: ar.HomeScope,
-		}, b, checks)
+		// The admin's principal derives from ctx inside Acquire (MW4,
+		// design/03 §4.1.1) — ctx is the authenticated request context.
+		probeChat(ctx, h.admitter, b, checks)
 	}
 
 	result := map[string]any{
@@ -652,11 +650,13 @@ func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string
 // probeChat runs the 1-token connectivity chat under a dispatch lease (MW3,
 // design/01 §4.6 N8b): interactive — an admin waits synchronously; NumPredict
 // 1 is negligible, but I-D1 knows no exception (every exception is a future
-// unadmitted call site). Deliberately NO herald entry: 15 s, 1 token — no
-// DB-/CPU-consideration the LLM-free arms would need signaled. The probe's
-// usage stays unreported (the chatProbe seam returns no token counts) — it
-// counts as one uncharged interactive release in the MW22 meter.
-func probeChat(ctx context.Context, adm dispatch.Admitter, principal dispatch.Principal, b *backends.Backend, checks map[string]string) {
+// unadmitted call site). The admin's principal derives from ctx inside
+// Acquire (MW4, design/03 §4.1.1 — no principal parameter). Deliberately NO
+// herald entry: 15 s, 1 token — no DB-/CPU-consideration the LLM-free arms
+// would need signaled. The probe's usage stays unreported (the chatProbe
+// seam returns no token counts) — it counts as one uncharged interactive
+// release in the MW22 meter.
+func probeChat(ctx context.Context, adm dispatch.Admitter, b *backends.Backend, checks map[string]string) {
 	spec := b.ModelFor(backends.RoleChat)
 	if spec.Model == "" {
 		spec = b.ModelFor("default")
@@ -677,7 +677,6 @@ func probeChat(ctx context.Context, adm dispatch.Admitter, principal dispatch.Pr
 		Target:     dispatch.Target{Origin: b.Host}, // Acquire normalizes defensively
 		Class:      dispatch.ClassInteractive,
 		Role:       backends.RoleChat,
-		Principal:  principal,
 		DeadlineIn: probeChatTimeout, // admission-anchored hint (rule V1)
 	})
 	if err != nil {

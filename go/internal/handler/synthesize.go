@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/dispatch"
@@ -75,19 +74,17 @@ func (h *SynthesizeHandler) releaseDaily(apiKeyID string) {
 }
 
 // dailyAdmission is the API path's dispatch binding (E-U2, design/01 §4.6
-// N8a): interactive — a human waits synchronously on the response — with the
-// caller's principal. Only valid together with the acquireDaily brake; the
-// 03:00 scheduler path binds background through the same
-// GenerateDailyReport.
-func (h *SynthesizeHandler) dailyAdmission(ar *auth.AuthResult) llm.Admission {
+// N8a): interactive — a human waits synchronously on the response. The
+// caller's principal is NOT bound here (MW4, design/03 §4.1.1): the
+// dispatcher derives it from the request ctx via the boot-installed
+// RequestPrincipal hook. Only valid together with the acquireDaily brake;
+// the 03:00 scheduler path binds background through the same
+// GenerateDailyReport (its detached ctx resolves to the zero principal —
+// structurally background).
+func (h *SynthesizeHandler) dailyAdmission() llm.Admission {
 	return llm.Admission{
 		Admitter: h.admitter,
 		Class:    dispatch.ClassInteractive,
-		Principal: dispatch.Principal{
-			ApiKeyID:  ar.ApiKeyID,
-			TenantID:  ar.TenantID,
-			HomeScope: ar.HomeScope,
-		},
 	}
 }
 
@@ -127,7 +124,7 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 	router := &dream.Router{
 		Pool:       h.backendPool,
 		Report:     llm.PoolReporter(h.backendPool),
-		Admit:      h.dailyAdmission(authResult),
+		Admit:      h.dailyAdmission(),
 		Blocktypes: h.blocktypes,
 	}
 

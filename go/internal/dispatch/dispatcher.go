@@ -204,22 +204,29 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err // canceled ctx never takes a wait slot
 	}
+	principal := principalFromContext(ctx)
 	class := req.Class
-	if class == ClassInteractive && req.Principal.ApiKeyID == "" {
-		// B8 class authorization: interactive requires a principal.
-		// Scheduler arms (empty principal) are structurally background;
+	if class == ClassInteractive && principal.ApiKeyID == "" {
+		// B8 class authorization, ctx-bound (design/03 §4.1.1): interactive
+		// requires a principal derived from the request ctx — emptiness is
+		// pinned on ApiKeyID != "", so a synthetic AuthResult with an empty
+		// key id (the S9 finding, handler/chat.go RunQuery) downgrades too
+		// instead of forming an anonymous "" bucket in the interactive FIFO.
+		// Detached scheduler ctx (no AuthResult) are structurally background;
 		// a violating call is downgraded fail-closed toward the protected
-		// good, never rejected (the work itself is legitimate).
+		// good, never rejected (the work itself is legitimate). Every
+		// downgrade is a code bug: counted (class_downgrades, WARN > 0) and
+		// logged at ERROR so it cannot drown in slog noise.
 		class = ClassBackground
 		d.classDowngrades.Add(1)
-		d.logger.Error("dispatch: interactive acquire without principal downgraded to background",
+		d.logger.Error("dispatch: interactive acquire without ctx-bound principal downgraded to background",
 			"target", req.Target.Origin, "role", req.Role)
 	}
 	now := time.Now()
 	runCtx, cancel := context.WithCancelCause(ctx)
 	w := &waiter{
 		class:      class,
-		principal:  req.Principal,
+		principal:  principal,
 		role:       req.Role,
 		enqueued:   now,
 		reapRef:    reapReference(req.Deadline, ctx),

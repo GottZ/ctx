@@ -59,38 +59,48 @@ func (r *handlerRecordingAdmitter) count() int {
 	return len(r.reqs)
 }
 
-// TestQueryAdmissionBindsInteractivePrincipal pins the query pipeline's
+// TestQueryAdmissionBindsInteractive pins the query pipeline's
 // classification (N1): translate/temporal/rerank-judge/synthesize all run
-// through h.admission — interactive with the caller's principal.
-func TestQueryAdmissionBindsInteractivePrincipal(t *testing.T) {
+// through h.admission — interactive. The caller's principal is no Admission
+// field since MW4 (design/03 §4.1.1): it derives from the request ctx via
+// the boot-installed RequestPrincipal hook (probed below).
+func TestQueryAdmissionBindsInteractive(t *testing.T) {
 	rec := newHandlerRecordingAdmitter(t)
 	h := NewQueryHandler(nil, nil, nil, nil, nil, rec)
-	adm := h.admission(testAuthResult())
+	adm := h.admission()
 	if adm.Class != dispatch.ClassInteractive {
 		t.Fatalf("query pipeline class = %v, want interactive", adm.Class)
-	}
-	want := dispatch.Principal{ApiKeyID: "key-1", TenantID: "tenant-1", HomeScope: "scope-1"}
-	if adm.Principal != want {
-		t.Fatalf("query pipeline principal = %+v, want %+v", adm.Principal, want)
 	}
 	if adm.Admitter == nil {
 		t.Fatal("query pipeline admission carries no admitter")
 	}
 }
 
-// TestDailyAdmissionBindsInteractivePrincipal pins the daily API path's
-// classification (N8a, E-U2): interactive with the caller's principal —
-// valid only because the acquireDaily brake lands in the same wave.
-func TestDailyAdmissionBindsInteractivePrincipal(t *testing.T) {
+// TestDailyAdmissionBindsInteractive pins the daily API path's
+// classification (N8a, E-U2): interactive — valid only because of the
+// acquireDaily brake. Principal: ctx-derived, see TestRequestPrincipal.
+func TestDailyAdmissionBindsInteractive(t *testing.T) {
 	rec := newHandlerRecordingAdmitter(t)
 	h := NewSynthesizeHandler(nil, nil, nil, rec)
-	adm := h.dailyAdmission(testAuthResult())
+	adm := h.dailyAdmission()
 	if adm.Class != dispatch.ClassInteractive {
 		t.Fatalf("daily API class = %v, want interactive", adm.Class)
 	}
+}
+
+// TestRequestPrincipal pins the MW4 hook wrapper (design/03 §4.1.1): the
+// dispatch principal derives from the auth middleware's ctx AuthResult —
+// field-faithful mapping with an AuthResult present, the zero Principal
+// without one (detached/anonymous ctx ⇒ structurally background; the B8
+// emptiness pin on ApiKeyID lives inside dispatch and is probed there).
+func TestRequestPrincipal(t *testing.T) {
+	ctx := context.WithValue(context.Background(), authResultKey, testAuthResult())
 	want := dispatch.Principal{ApiKeyID: "key-1", TenantID: "tenant-1", HomeScope: "scope-1"}
-	if adm.Principal != want {
-		t.Fatalf("daily API principal = %+v, want %+v", adm.Principal, want)
+	if got := RequestPrincipal(ctx); got != want {
+		t.Fatalf("RequestPrincipal = %+v, want %+v", got, want)
+	}
+	if got := RequestPrincipal(context.Background()); got != (dispatch.Principal{}) {
+		t.Fatalf("RequestPrincipal on a bare ctx = %+v, want zero (structurally background)", got)
 	}
 }
 
@@ -162,16 +172,15 @@ func TestProbeChatAcquiresInteractiveLease(t *testing.T) {
 		Name: "probe-target", Host: "http://probe:8089",
 		ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
 	}
-	principal := dispatch.Principal{ApiKeyID: "key-1", TenantID: "tenant-1", HomeScope: "scope-1"}
 
 	rec := newHandlerRecordingAdmitter(t)
 	checks := map[string]string{}
-	probeChat(context.Background(), rec, principal, b, checks)
+	probeChat(context.Background(), rec, b, checks)
 	if wireCalls != 1 || rec.count() != 1 {
 		t.Fatalf("acquire==wire on probe: %d acquires vs %d wire calls", rec.count(), wireCalls)
 	}
 	got := rec.reqs[0]
-	if got.Class != dispatch.ClassInteractive || got.Principal != principal {
+	if got.Class != dispatch.ClassInteractive {
 		t.Fatalf("probe request wrong: %+v", got)
 	}
 	if got.Target.Origin != "http://probe:8089" {
@@ -189,7 +198,7 @@ func TestProbeChatAcquiresInteractiveLease(t *testing.T) {
 	rec2 := newHandlerRecordingAdmitter(t)
 	rec2.reject = dispatch.ErrQueueFull
 	checks = map[string]string{}
-	probeChat(context.Background(), rec2, principal, b, checks)
+	probeChat(context.Background(), rec2, b, checks)
 	if wireCalls != 0 {
 		t.Fatalf("rejected probe made a wire call")
 	}
@@ -200,7 +209,7 @@ func TestProbeChatAcquiresInteractiveLease(t *testing.T) {
 	// Nil admitter: loud failure, no wire call (I-D1).
 	wireCalls = 0
 	checks = map[string]string{}
-	probeChat(context.Background(), nil, principal, b, checks)
+	probeChat(context.Background(), nil, b, checks)
 	if wireCalls != 0 || !strings.Contains(checks["model_m"], "not wired") {
 		t.Fatalf("nil admitter: calls=%d checks=%v", wireCalls, checks)
 	}

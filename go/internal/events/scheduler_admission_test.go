@@ -3,7 +3,9 @@ package events
 // MW3 binding probes on the scheduler side of the classification table
 // (design/01 §4.6 N1/N8a): every scheduler arm — dream cycle, 03:00 daily
 // synthesis (both through newRouter) and the sensitivity-audit classify —
-// binds background with an EMPTY principal (structurally background, B8).
+// binds background. Since MW4 (design/03 §4.1.1) the principal is not part
+// of the Admission at all: it derives from the Acquire ctx, and the
+// scheduler's detached contexts resolve empty — structurally background, B8.
 
 import (
 	"testing"
@@ -14,9 +16,9 @@ import (
 )
 
 // TestBackgroundAdmissionBinding pins the scheduler's dispatch binding:
-// class background, empty principal, admitter from SetDispatcher — and the
-// typed-nil guard (a scheduler without SetDispatcher yields a nil Admitter
-// interface, never a typed-nil pointer that would panic on Acquire).
+// class background, admitter from SetDispatcher — and the typed-nil guard
+// (a scheduler without SetDispatcher yields a nil Admitter interface, never
+// a typed-nil pointer that would panic on Acquire).
 func TestBackgroundAdmissionBinding(t *testing.T) {
 	s := NewScheduler(nil, nil, nil, StartupConfig{})
 
@@ -24,8 +26,8 @@ func TestBackgroundAdmissionBinding(t *testing.T) {
 	if adm.Admitter != nil {
 		t.Fatalf("without SetDispatcher the admitter must be interface-nil, got %T", adm.Admitter)
 	}
-	if adm.Class != dispatch.ClassBackground || adm.Principal != (dispatch.Principal{}) {
-		t.Fatalf("scheduler binding = class %v principal %+v, want background + empty", adm.Class, adm.Principal)
+	if adm.Class != dispatch.ClassBackground {
+		t.Fatalf("scheduler binding = class %v, want background", adm.Class)
 	}
 
 	d := dispatch.New(nil, dispatch.DefaultSettings())
@@ -49,9 +51,6 @@ func TestNewRouterBindsBackgroundAdmission(t *testing.T) {
 	r := s.newRouter(config.NewStore(&config.Config{}).Snapshot(), "tenant-a")
 	if r.Admit.Class != dispatch.ClassBackground {
 		t.Fatalf("dream router class = %v, want background", r.Admit.Class)
-	}
-	if r.Admit.Principal != (dispatch.Principal{}) {
-		t.Fatalf("dream router principal = %+v, want empty (structurally background, B8)", r.Admit.Principal)
 	}
 	if r.Admit.Admitter == nil {
 		t.Fatal("dream router carries no admitter")

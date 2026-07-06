@@ -71,14 +71,17 @@ func TestRerankWirePath(t *testing.T) {
 }
 
 // rerankTestAdmission is the MW3 pass-through admission for the judge call
-// site (interactive, design/01 §4.6 N1 rerank-judge).
+// site (interactive, design/01 §4.6 N1 rerank-judge). The principal is
+// ctx-derived since MW4 (design/03 §4.1.1): the test installs the hook with
+// a fixed caller so the interactive class never runs into the B8 downgrade
+// (pattern: blocktype.SetRequestScopeHook in registry_t12_test.go).
 func rerankTestAdmission(t *testing.T) llm.Admission {
 	t.Helper()
+	dispatch.SetPrincipalHook(func(context.Context) dispatch.Principal {
+		return dispatch.Principal{ApiKeyID: "test-key", HomeScope: "private"}
+	})
+	t.Cleanup(func() { dispatch.SetPrincipalHook(nil) })
 	d := dispatch.New(nil, dispatch.DefaultSettings())
 	t.Cleanup(d.Close)
-	return llm.Admission{
-		Admitter:  d,
-		Class:     dispatch.ClassInteractive,
-		Principal: dispatch.Principal{ApiKeyID: "test-key", HomeScope: "private"},
-	}
+	return llm.Admission{Admitter: d, Class: dispatch.ClassInteractive}
 }

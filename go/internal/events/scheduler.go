@@ -441,9 +441,10 @@ func (s *Scheduler) SetDispatcher(d *dispatch.Dispatcher) {
 }
 
 // backgroundAdmission is the dispatch binding of every scheduler arm (MW3,
-// design/01 §4.6 N1): class background with an EMPTY principal — scheduler
-// arms carry no request-bound caller and are structurally background
-// (I-D1/B8). The nil guard keeps a typed-nil dispatcher out of the interface
+// design/01 §4.6 N1): class background. The principal is ctx-derived inside
+// Acquire (MW4, design/03 §4.1.1) — scheduler arms run on detached contexts
+// without an AuthResult and are structurally background (I-D1/B8). The nil
+// guard keeps a typed-nil dispatcher out of the interface
 // (schedulers built without SetDispatcher fail the acquire loudly in llm,
 // never with a nil-receiver panic).
 func (s *Scheduler) backgroundAdmission() llm.Admission {

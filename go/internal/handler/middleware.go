@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -85,6 +86,30 @@ func RequestTenantScope(ctx context.Context) string {
 		return ar.HomeScope
 	}
 	return ""
+}
+
+// RequestPrincipal resolves the dispatch admission principal from the
+// authenticated request context (Vorhaben E MW4, design/03 §4.1.1). It is
+// the cycle-free wrapper dispatch cannot write itself — dispatch is a leaf
+// package and must not import handler/auth — so main wires it via
+// dispatch.SetPrincipalHook at boot, BEFORE the scheduler goroutines spawn:
+// unlike the HTTP-only request-scope hooks, Acquire also runs on detached
+// background contexts. An absent AuthResult (detached scheduler ctx,
+// anonymous paths) yields the zero Principal, which is structurally
+// background — an interactive acquire on such a ctx runs into the B8
+// downgrade. Emptiness stays pinned on ApiKeyID inside dispatch: a synthetic
+// AuthResult with an empty key id (chat.go RunQuery, the S9 finding)
+// downgrades too instead of forming an anonymous interactive bucket.
+func RequestPrincipal(ctx context.Context) dispatch.Principal {
+	ar := AuthResultFromContext(ctx)
+	if ar == nil {
+		return dispatch.Principal{}
+	}
+	return dispatch.Principal{
+		ApiKeyID:  ar.ApiKeyID,
+		TenantID:  ar.TenantID,
+		HomeScope: ar.HomeScope,
+	}
 }
 
 // isValidRequestID checks that a client-supplied request ID contains only

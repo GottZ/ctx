@@ -61,7 +61,7 @@ func rewindWindow(t *testing.T, d *Dispatcher, key string, by time.Duration) {
 func TestChargeBooksUsageTokens(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 
-	l, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	l, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestChargeBooksUsageTokens(t *testing.T) {
 	l.Release()
 
 	// Embed-style report: prompt tokens only (C1).
-	l2, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	l2, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("second acquire: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestChargeBooksUsageTokens(t *testing.T) {
 func TestReleaseWithoutUsageUncharged(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 
-	l, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	l, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestChargeFairKeyBuckets(t *testing.T) {
 
 	charge := func(p Principal, tokens int) {
 		t.Helper()
-		l, _, err := d.Acquire(context.Background(), interactiveReq(p))
+		l, _, err := d.Acquire(withPrincipal(context.Background(), p), interactiveReq())
 		if err != nil {
 			t.Fatalf("acquire %v: %v", p, err)
 		}
@@ -180,7 +180,7 @@ func TestChargeFairKeyBuckets(t *testing.T) {
 func TestWindowRollover(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 
-	l, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	l, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestWindowRollover(t *testing.T) {
 		t.Fatalf("expired window resurfaced in the snapshot")
 	}
 
-	l2, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	l2, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("second acquire: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestSweepEvictsExpiredWindows(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 
 	for _, n := range []string{"a", "b"} {
-		l, _, err := d.Acquire(context.Background(), interactiveReq(principal(n)))
+		l, _, err := d.Acquire(withPrincipal(context.Background(), principal(n)), interactiveReq())
 		if err != nil {
 			t.Fatalf("acquire %s: %v", n, err)
 		}
@@ -243,7 +243,7 @@ func TestSweepEvictsExpiredWindows(t *testing.T) {
 func TestPassThroughChargeCounts(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), Policy{}) // no policy: slots 0
 
-	l, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	l, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestLateUsageAfterReapIgnored(t *testing.T) {
 	s.LeaseReapGrace = time.Millisecond
 	d, _ := newTestDispatcher(t, s, onSlotPolicy(1))
 
-	l, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	l, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -293,15 +293,15 @@ func TestLateUsageAfterReapIgnored(t *testing.T) {
 func TestSnapshotBucketsAndOps(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 
-	holder, _, err := d.Acquire(context.Background(), interactiveReq(principal("a")))
+	holder, _, err := d.Acquire(withPrincipal(context.Background(), principal("a")), interactiveReq())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 2)
-	startWaiter(ctx, d, "a2", interactiveReq(Principal{ApiKeyID: "key-a2", TenantID: "tenant-a", HomeScope: "scope-a"}), ch)
-	startWaiter(ctx, d, "b", interactiveReq(principal("b")), ch)
+	startWaiter(withPrincipal(ctx, Principal{ApiKeyID: "key-a2", TenantID: "tenant-a", HomeScope: "scope-a"}), d, "a2", interactiveReq(), ch)
+	startWaiter(withPrincipal(ctx, principal("b")), d, "b", interactiveReq(), ch)
 	waitFor(t, "two queued waiters", func() bool { return waitingInteractive(d) == 2 })
 
 	a, ok := bucketFor(d, "scope-a")

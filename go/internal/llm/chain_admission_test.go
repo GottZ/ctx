@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -16,18 +17,40 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 )
 
+// llmTestPrincipalKey is the llm test binary's caller ctx key: TestMain
+// installs the dispatch principal hook ONCE over it (boot-once discipline,
+// mirroring cmd/ctxd/main.go) — since MW4 (design/03 §4.1.1) the principal
+// travels exclusively in the Acquire ctx, never as an Admission field.
+type llmTestPrincipalKey struct{}
+
+func withTestPrincipal(ctx context.Context, p dispatch.Principal) context.Context {
+	return context.WithValue(ctx, llmTestPrincipalKey{}, p)
+}
+
+// testPrincipalCtx is the standard authenticated caller ctx of the llm
+// tests; interactive call sites pass it so the B8 downgrade never fires in
+// unrelated tests.
+func testPrincipalCtx() context.Context {
+	return withTestPrincipal(context.Background(),
+		dispatch.Principal{ApiKeyID: "test-key", TenantID: "test-tenant", HomeScope: "private"})
+}
+
+func TestMain(m *testing.M) {
+	dispatch.SetPrincipalHook(func(ctx context.Context) dispatch.Principal {
+		p, _ := ctx.Value(llmTestPrincipalKey{}).(dispatch.Principal)
+		return p
+	})
+	os.Exit(m.Run())
+}
+
 // testAdmission returns a live pass-through admission (empty policy =
-// Durchreiche) bound to class. Interactive gets a non-empty principal so the
-// B8 downgrade never fires in unrelated tests.
+// Durchreiche) bound to class. Interactive callers pass testPrincipalCtx()
+// as the request ctx — the hook-derived principal keeps B8 quiet.
 func testAdmission(t *testing.T, class dispatch.Class) Admission {
 	t.Helper()
 	d := dispatch.New(nil, dispatch.DefaultSettings())
 	t.Cleanup(d.Close)
-	adm := Admission{Admitter: d, Class: class}
-	if class == dispatch.ClassInteractive {
-		adm.Principal = dispatch.Principal{ApiKeyID: "test-key", TenantID: "test-tenant", HomeScope: "private"}
-	}
-	return adm
+	return Admission{Admitter: d, Class: class}
 }
 
 // recordingAdmitter delegates to a real dispatcher and records every request
@@ -38,6 +61,10 @@ type recordingAdmitter struct {
 	mu sync.Mutex
 	// reqs are the recorded Acquire inputs in call order.
 	reqs []dispatch.Request
+	// ctxPrincipals are the callers the recorded Acquire CONTEXTS carried
+	// (MW4 ctx-threading probe: the chain walk must pass the caller ctx into
+	// every per-attempt acquire — the principal has no other path).
+	ctxPrincipals []dispatch.Principal
 	// rejectAt maps call index (0-based) → error to return instead of
 	// delegating (scripted ErrQueueFull etc.).
 	rejectAt map[int]error
@@ -54,6 +81,8 @@ func (r *recordingAdmitter) Acquire(ctx context.Context, req dispatch.Request) (
 	r.mu.Lock()
 	idx := len(r.reqs)
 	r.reqs = append(r.reqs, req)
+	p, _ := ctx.Value(llmTestPrincipalKey{}).(dispatch.Principal)
+	r.ctxPrincipals = append(r.ctxPrincipals, p)
 	rej := r.rejectAt[idx]
 	r.mu.Unlock()
 	if rej != nil {
@@ -88,11 +117,7 @@ func admissionBackend(name, host string) backends.Backend {
 // equals the wire-call count (the full 6-site invariant gate is MW6).
 func TestChatChainViaAcquireEqualsWireCalls(t *testing.T) {
 	rec := newRecordingAdmitter(t)
-	adm := Admission{
-		Admitter:  rec,
-		Class:     dispatch.ClassInteractive,
-		Principal: dispatch.Principal{ApiKeyID: "k1", TenantID: "t1", HomeScope: "private"},
-	}
+	adm := Admission{Admitter: rec, Class: dispatch.ClassInteractive}
 	chain := []backends.Backend{
 		admissionBackend("first", "http://first:8089"),
 		admissionBackend("second", "http://second:8089"),
@@ -106,7 +131,7 @@ func TestChatChainViaAcquireEqualsWireCalls(t *testing.T) {
 		return &ChatResponse{Message: Message{Content: "ok"}, PromptTokens: 10, EvalCount: 5}, nil
 	}
 
-	resp, served, attempts, err := ChatChainVia(context.Background(), call, chain, "chat",
+	resp, served, attempts, err := ChatChainVia(testPrincipalCtx(), call, chain, "chat",
 		"sys", "usr", Options{}, time.Second, nil, adm)
 	if err != nil || resp == nil || served == nil || served.Name != "second" {
 		t.Fatalf("expected second backend to serve, got served=%v err=%v", served, err)
@@ -126,8 +151,10 @@ func TestChatChainViaAcquireEqualsWireCalls(t *testing.T) {
 		if rq.Class != dispatch.ClassInteractive {
 			t.Fatalf("attempt %d: class = %v, want interactive", i, rq.Class)
 		}
-		if rq.Principal.ApiKeyID != "k1" {
-			t.Fatalf("attempt %d: principal not threaded: %+v", i, rq.Principal)
+		// MW4: the principal travels in the ctx, not the Request — every
+		// per-attempt acquire must see the CALLER ctx (design/03 §4.1.1).
+		if rec.ctxPrincipals[i].ApiKeyID != "test-key" {
+			t.Fatalf("attempt %d: caller ctx not threaded into the acquire: %+v", i, rec.ctxPrincipals[i])
 		}
 		// Deadline hint travels admission-anchored: DeadlineIn == attempt
 		// timeout, no absolute pre-acquire Deadline (MW1 contract note).
@@ -206,15 +233,13 @@ func TestChatChainViaNilAdmitterFailsLoudly(t *testing.T) {
 func TestChatChainViaReportsUsageAtRelease(t *testing.T) {
 	d := dispatch.New(nil, dispatch.DefaultSettings())
 	t.Cleanup(d.Close)
-	adm := Admission{
-		Admitter:  d,
-		Class:     dispatch.ClassInteractive,
-		Principal: dispatch.Principal{ApiKeyID: "k1", TenantID: "t1", HomeScope: "scope-a"},
-	}
+	adm := Admission{Admitter: d, Class: dispatch.ClassInteractive}
+	callerCtx := withTestPrincipal(context.Background(),
+		dispatch.Principal{ApiKeyID: "k1", TenantID: "t1", HomeScope: "scope-a"})
 	call := func(context.Context, backends.Backend, string, string, Options, time.Duration) (*ChatResponse, error) {
 		return &ChatResponse{Message: Message{Content: "ok"}, PromptTokens: 40, EvalCount: 2}, nil
 	}
-	_, _, _, err := ChatChainVia(context.Background(), call,
+	_, _, _, err := ChatChainVia(callerCtx, call,
 		[]backends.Backend{admissionBackend("b", "http://b:8089")}, "chat",
 		"s", "u", Options{}, time.Second, nil, adm)
 	if err != nil {
@@ -279,8 +304,7 @@ func TestChainAdmissionOrderInteractiveBeforeBackground(t *testing.T) {
 
 	chain := []backends.Backend{admissionBackend("gpu", origin)}
 	bg := Admission{Admitter: d, Class: dispatch.ClassBackground}
-	ia := Admission{Admitter: d, Class: dispatch.ClassInteractive,
-		Principal: dispatch.Principal{ApiKeyID: "k", TenantID: "t", HomeScope: "s"}}
+	ia := Admission{Admitter: d, Class: dispatch.ClassInteractive}
 
 	release := make(chan struct{})
 	firstRunning := make(chan struct{})
@@ -300,12 +324,12 @@ func TestChainAdmissionOrderInteractiveBeforeBackground(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	run := func(name string, adm Admission, hold bool, started chan struct{}) {
+	run := func(ctx context.Context, name string, adm Admission, hold bool, started chan struct{}) {
 		defer wg.Done()
 		if started != nil {
 			close(started)
 		}
-		_, _, _, err := ChatChainVia(context.Background(), call(name, hold), chain, "chat",
+		_, _, _, err := ChatChainVia(ctx, call(name, hold), chain, "chat",
 			"s", "u", Options{}, time.Minute, nil, adm)
 		if err != nil {
 			t.Errorf("%s: %v", name, err)
@@ -313,7 +337,7 @@ func TestChainAdmissionOrderInteractiveBeforeBackground(t *testing.T) {
 	}
 
 	wg.Add(1)
-	go run("bg-running", bg, true, nil)
+	go run(context.Background(), "bg-running", bg, true, nil)
 	<-firstRunning // slot held by the background wire call
 
 	// Queue one interactive and one background acquire behind the slot.
@@ -331,10 +355,12 @@ func TestChainAdmissionOrderInteractiveBeforeBackground(t *testing.T) {
 		t.Fatalf("timeout waiting for queue depth %d", want)
 	}
 	wg.Add(1)
-	go run("bg-waiting", bg, false, nil)
+	go run(context.Background(), "bg-waiting", bg, false, nil)
 	waitDepth(1)
 	wg.Add(1)
-	go run("interactive-waiting", ia, false, nil)
+	// The interactive walker carries the authenticated caller ctx — without
+	// it the acquire would B8-downgrade and the order probe would go red.
+	go run(testPrincipalCtx(), "interactive-waiting", ia, false, nil)
 	waitDepth(2)
 
 	close(release) // background wire call ends, slot frees

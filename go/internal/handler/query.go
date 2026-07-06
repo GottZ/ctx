@@ -84,17 +84,14 @@ func NewQueryHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.
 // admission binds the query pipeline's dispatch class (MW3, design/01 §4.6
 // N1): EVERYTHING on this handler is interactive — a human waits
 // synchronously on translate/temporal/rerank-judge/synthesize. The principal
-// comes from the request's auth result (N10); the embed/backfill sites stay
-// lease-free until MW5 (E-U5(a)).
-func (h *QueryHandler) admission(ar *auth.AuthResult) llm.Admission {
+// is NOT bound here (MW4, design/03 §4.1.1): the dispatcher derives it from
+// the request ctx that flows into every acquire, via the boot-installed
+// RequestPrincipal hook. The embed/backfill sites stay lease-free until MW5
+// (E-U5(a)).
+func (h *QueryHandler) admission() llm.Admission {
 	return llm.Admission{
 		Admitter: h.admitter,
 		Class:    dispatch.ClassInteractive,
-		Principal: dispatch.Principal{
-			ApiKeyID:  ar.ApiKeyID,
-			TenantID:  ar.TenantID,
-			HomeScope: ar.HomeScope,
-		},
 	}
 }
 
@@ -461,7 +458,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("german detected, translating",
 			"request_id", requestID,
 		)
-		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, query, ar.ApiKeyID, h.admission(ar))
+		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, query, ar.ApiKeyID, h.admission())
 		if err != nil {
 			// Fail-open (design 03 §2.4 translate row) — covers the empty
 			// chain (trust/gaming/disabled) AND exhausted attempts alike.
@@ -499,7 +496,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	} else if llm.HasTemporalIntent(originalQuery) {
 		// LLM fallback: query seems temporal but rules couldn't parse it.
 		var err error
-		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, originalQuery, now, ar.ApiKeyID, h.admission(ar))
+		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, cfg.GamingState(), querySens, originalQuery, now, ar.ApiKeyID, h.admission())
 		if err != nil {
 			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,
@@ -839,7 +836,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			required := rerankRequired(querySens, results, rrf.RerankMaxDocs)
-			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, cfg.GamingState(), required, originalQuery, results, ar.ApiKeyID, h.admission(ar))
+			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, cfg.GamingState(), required, originalQuery, results, ar.ApiKeyID, h.admission())
 			if err != nil {
 				slog.Warn("rerank failed, using original order",
 					"error", err,
@@ -933,7 +930,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if temporalResult != nil {
 		temporalDates = temporalResult.Dates
 	}
-	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, h.quota, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID, ar.HomeScope, h.admission(ar))
+	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, h.quota, cfg.GamingState(), cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID, ar.HomeScope, h.admission())
 	if err != nil {
 		slog.Error("synthesis failed",
 			"error", err,

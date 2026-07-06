@@ -123,10 +123,11 @@ func TestChatChainViaPreemptCauseIsTerminal(t *testing.T) {
 	<-running
 
 	// Interactive acquire on the full target opens the preempt (MW18).
-	ia, iaCtx, err := d.Acquire(context.Background(), dispatch.Request{
-		Target:    dispatch.Target{Origin: origin},
-		Class:     dispatch.ClassInteractive,
-		Principal: dispatch.Principal{ApiKeyID: "k", TenantID: "t", HomeScope: "s"},
+	// MW4: the principal binds via the request ctx (testPrincipalCtx installs
+	// the hook), never via a Request field.
+	ia, iaCtx, err := d.Acquire(testPrincipalCtx(), dispatch.Request{
+		Target: dispatch.Target{Origin: origin},
+		Class:  dispatch.ClassInteractive,
 	})
 	if err != nil {
 		t.Fatalf("interactive acquire: %v", err)

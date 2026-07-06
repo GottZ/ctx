@@ -44,7 +44,7 @@ func TestPreemptCancelsYoungestBackground(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 1)
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ch)
 	waitFor(t, "victim canceled", func() bool { return youngerCtx.Err() != nil })
 
 	// Contrast probe: the OLDEST lease must keep running — an inverted
@@ -105,7 +105,7 @@ func TestPreemptDisabledStaysAdmissionControl(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 1)
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ch)
 	waitFor(t, "interactive queued", func() bool { return waitingInteractive(d) == 1 })
 	time.Sleep(30 * time.Millisecond)
 	if bgCtx.Err() != nil {
@@ -136,9 +136,9 @@ func TestPreemptSingleGuardTwoWaitersOneCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 2)
-	startWaiter(ctx, d, "ia1", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia1", interactiveReq(), ch)
 	waitFor(t, "victim canceled", func() bool { return bgCtx.Err() != nil })
-	startWaiter(ctx, d, "ia2", interactiveReq(principal("b")), ch)
+	startWaiter(withPrincipal(ctx, principal("b")), d, "ia2", interactiveReq(), ch)
 	waitFor(t, "second waiter queued", func() bool { return waitingInteractive(d) == 2 })
 	if got := preemptStats(t, d); got.PreemptsTotal != 1 {
 		t.Fatalf("single-preempt guard: got %d cancels want 1", got.PreemptsTotal)
@@ -172,7 +172,7 @@ func TestPreemptSingleGuardMultiSlotNoCascade(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 1)
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ch)
 	waitFor(t, "one victim canceled", func() bool { return youngerCtx.Err() != nil })
 	time.Sleep(20 * time.Millisecond)
 	if olderCtx.Err() != nil {
@@ -194,14 +194,14 @@ func TestPreemptSingleGuardMultiSlotNoCascade(t *testing.T) {
 // (its cancel func does not exist in the registry, structurally).
 func TestPreemptNeverCancelsInteractive(t *testing.T) {
 	d, h := newTestDispatcher(t, DefaultSettings(), preemptPolicy(1))
-	occ, occCtx, err := d.Acquire(context.Background(), interactiveReq(principal("occ")))
+	occ, occCtx, err := d.Acquire(withPrincipal(context.Background(), principal("occ")), interactiveReq())
 	if err != nil {
 		t.Fatalf("occupier: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 1)
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ch)
 	waitFor(t, "waiter queued", func() bool { return waitingInteractive(d) == 1 })
 	time.Sleep(30 * time.Millisecond) // demand pressure holds — still no cancel
 	if occCtx.Err() != nil {
@@ -265,7 +265,7 @@ func TestPreemptWatchdogForceRelease(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 1)
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ch)
 	waitFor(t, "victim canceled", func() bool { return victimCtx.Err() != nil })
 
 	// The victim HOLDS (no Release). Before the fence: no force-release.
@@ -312,7 +312,7 @@ func TestPreemptTriggerCanceledAfterVictimCancel(t *testing.T) {
 	}
 	iaCtx, iaCancel := context.WithCancel(context.Background())
 	ch := make(chan admission, 1)
-	startWaiter(iaCtx, d, "ia", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(iaCtx, principal("a")), d, "ia", interactiveReq(), ch)
 	waitFor(t, "victim canceled", func() bool { return victimCtx.Err() != nil })
 	iaCancel() // the beneficiary walks away AFTER the cancel is spoken
 	a := <-ch
@@ -443,11 +443,11 @@ func TestPreemptSkipsVictimAlreadyInEviction(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan admission, 2)
-	startWaiter(ctx, d, "ia", interactiveReq(principal("a")), ch)
+	startWaiter(withPrincipal(ctx, principal("a")), d, "ia", interactiveReq(), ch)
 	waitFor(t, "youngest victim canceled", func() bool { return youngerCtx.Err() != nil })
 	// The youngest victim does NOT release (slow teardown) — the second
 	// waiter's demand must evict the OLDER lease, not re-pick the first.
-	startWaiter(ctx, d, "ib", interactiveReq(principal("b")), ch)
+	startWaiter(withPrincipal(ctx, principal("b")), d, "ib", interactiveReq(), ch)
 	waitFor(t, "older victim canceled for the second waiter", func() bool { return olderCtx.Err() != nil })
 	if got := preemptStats(t, d); got.PreemptsTotal != 2 {
 		t.Fatalf("cancels: got %d want 2 (one per victim, no re-pick)", got.PreemptsTotal)
