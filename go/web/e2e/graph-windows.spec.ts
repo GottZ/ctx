@@ -252,6 +252,145 @@ test.describe('graph floating windows (G5b)', () => {
   })
 })
 
+// U04-W1 — Content-Guard: der Load-$effect in BlockDetailContent ist idempotent
+// gegenüber WinState-Invalidierungen mit wertgleicher id (design 04-§4.1/§7-W1).
+// Jede Fenster-Geste (focus/move/restore) ersetzt im Ist das WinState-Objekt via
+// .map() → der Load-$effect feuerte erneut → detail=null/loading=true zerstörte
+// <pre.content> → scrollTop kollabierte auf 0 + Refetch. Nach W1: Δ /api/manage=0,
+// scrollTop erhalten, das <pre>-Element (samt DOM-Marker) überlebt jede Geste.
+// vitest läuft node-only (kein DOM, vite.config.ts:60-64) → dieses Verhalten wird
+// hier per Playwright gegated (design 04-§2 Test-Konvention, §7-W1).
+test.describe('graph floating windows — W1 content-guard (U04-W1)', () => {
+  // Der Fixture-'get' liefert nur einen kurzen Absatz — zu kurz, damit .body über
+  // 150px scrollt. Hier ein langer, deterministischer Block, andere Aktionen
+  // (list-meta/list-categories beim Graph-Boot) fallen per fallback() an die
+  // seedSession-Mocks durch.
+  const LONG_CONTENT = Array.from({ length: 80 }, (_, i) => `Zeile ${i + 1}: ctx-Volltext für den Scroll-Erhalt-Beweis.`).join('\n')
+
+  async function longGetContent(page: Page): Promise<void> {
+    await page.route('**/api/manage', async (route) => {
+      const body = route.request().postDataJSON() as { action?: string } | null
+      if (body?.action === 'get') {
+        return route.fulfill({
+          status: 200,
+          json: {
+            success: true,
+            block: {
+              id: NODE2,
+              category: 'design',
+              tags: ['demo', 'design'],
+              title: 'Core Architecture',
+              content: LONG_CONTENT,
+              scope: 'home',
+              sensitivity: 'internal',
+              created_at: '2026-06-01T08:00:00Z',
+              updated_at: '2026-06-28T10:00:00Z',
+            },
+          },
+        })
+      }
+      return route.fallback()
+    })
+  }
+
+  test('Scroll und Content überleben Fenster-Gesten (idempotenter Load)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await longGetContent(page)
+
+    // /api/manage-get-Zähler: nur die getBlock-Refetches nach dem Armen zählen
+    // (list-meta/-categories tragen eine andere action und werden ausgefiltert).
+    let manageGets = 0
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.url().includes('/api/manage') && (r.postData() ?? '').includes('"action":"get"')) {
+        manageGets += 1
+      }
+    })
+
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+
+    const win = page.getByRole('dialog').first()
+    const body = win.locator('.body')
+    const pre = win.locator('pre.content')
+    await expect(pre).toBeVisible()
+
+    // scrollTop setzen + DOM-Marker auf genau dieses <pre> heften. Ein Remount
+    // ersetzt das Element → der Marker verschwindet (Rot-Kriterium).
+    await body.evaluate((el) => {
+      el.scrollTop = 150
+    })
+    await pre.evaluate((el) => {
+      ;(el as HTMLElement).dataset.probe = 'W1-KEEP'
+    })
+    expect(await body.evaluate((el) => el.scrollTop)).toBe(150)
+
+    // Nach JEDER Geste: kein Refetch, scrollTop erhalten, <pre>-Marker erhalten,
+    // kein Ladezustand. 250ms Setzzeit, damit ein etwaiger Refetch/Remount landet.
+    const assertSurvived = async (label: string, base: number): Promise<void> => {
+      await page.waitForTimeout(250)
+      expect(manageGets - base, `${label}: Δ /api/manage-get`).toBe(0)
+      expect(await body.evaluate((el) => el.scrollTop), `${label}: scrollTop`).toBe(150)
+      const marker = await pre.evaluate((el) => (el as HTMLElement).dataset.probe ?? '')
+      expect(marker, `${label}: DOM-Marker auf <pre>`).toBe('W1-KEEP')
+      await expect(win.getByText('loading content…'), `${label}: kein Ladezustand`).toHaveCount(0)
+    }
+
+    // (i) pointerdown+up auf der Titlebar → store.focus (WinState-.map im Ist).
+    let base = manageGets
+    {
+      const tb = await win.locator('.titlebar').boundingBox()
+      if (!tb) throw new Error('titlebar has no box')
+      await page.mouse.move(tb.x + 12, tb.y + tb.height / 2)
+      await page.mouse.down()
+      await page.mouse.up()
+    }
+    await assertSurvived('Titlebar-Klick (focus)', base)
+
+    // (ii) Re-Klick auf denselben Node über die emit-Seam → store.open → dedup →
+    // restore (im Ist: restore-.map + focus-.map).
+    base = manageGets
+    await openWindow(page, NODE2)
+    await assertSurvived('Re-Klick (dedup restore)', base)
+
+    // (iii) pointerdown im .body → window onpointerdown → store.focus.
+    base = manageGets
+    {
+      const bb = await body.boundingBox()
+      if (!bb) throw new Error('body has no box')
+      await page.mouse.move(bb.x + bb.width / 2, bb.y + 8)
+      await page.mouse.down()
+      await page.mouse.up()
+    }
+    await assertSurvived('Body-pointerdown (focus)', base)
+
+    // (iv) Drag-Mikroszenario: pointerdown + 2 pointermoves + pointerup auf der
+    // Titlebar → focus + 2× store.move (im Ist: 3 WinState-.map → 3 Remounts).
+    base = manageGets
+    {
+      const tb = await win.locator('.titlebar').boundingBox()
+      if (!tb) throw new Error('titlebar has no box')
+      const sx = tb.x + 12
+      const sy = tb.y + tb.height / 2
+      await page.mouse.move(sx, sy)
+      await page.mouse.down()
+      await page.mouse.move(sx + 20, sy + 15) // pointermove #1 → store.move
+      await page.mouse.move(sx + 40, sy + 30) // pointermove #2 → store.move
+      await page.mouse.up()
+    }
+    await assertSurvived('Drag-Mikroszenario (2 moves)', base)
+
+    // Zusatz: ein zweites Fenster (anderer Node) startet frisch bei scrollTop 0,
+    // während Fenster 1 unberührt bei 150 bleibt (Node-Wechsel = eigenes Fenster,
+    // eigener Mount — design 04-§1/§4.1).
+    await openWindow(page, NODE3)
+    await expect(page.getByRole('dialog')).toHaveCount(2)
+    const win2 = page.getByRole('dialog').nth(1)
+    await expect(win2.locator('pre.content')).toBeVisible()
+    expect(await win2.locator('.body').evaluate((el) => el.scrollTop)).toBe(0)
+    expect(await body.evaluate((el) => el.scrollTop)).toBe(150)
+  })
+})
+
 // G6 — Mobile full-bleed sheet + minimize-bar (design 07-§Wellen G6, §D mobile).
 // Reuses the same open-seam (enterFocusStage → emit clickNode). Below SM=640 the
 // WindowManager renders ONLY store.topId as a `sheet` FloatingWindow (position:

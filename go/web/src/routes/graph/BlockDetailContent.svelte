@@ -39,15 +39,37 @@
   let error = $state<ApiError | null>(null)
   let loading = $state(false)
 
+  // Effect 1: nur der attrs→pinned-Sync. Getrennt vom Load, damit eine
+  // Invalidierung (WinState-.map bei focus/move/resize/restore) diesen billigen
+  // Sync auslösen darf, ohne den Content-Load anzustoßen.
   $effect(() => {
     pinned = attrs?.pinned ?? false
+  })
+
+  // Effect 2 (Load): idempotent gegenüber Invalidierungen mit wertgleicher id
+  // (design 04-§4.1/W1). `requestedId` ist bewusst ein plain let, KEIN $state —
+  // sonst würde das Schreiben in requestedId den Effect selbst re-tracken. Bei
+  // gleicher id kehrt der Effect vor detail=null um → <pre.content> bleibt im DOM,
+  // scrollTop bleibt, kein Refetch, kein Lade-Flackern. Nur ein echter id-Wechsel
+  // (anderer Node = eigenes Fenster = eigener Mount) lädt frisch.
+  let requestedId: string | null = null
+  $effect(() => {
+    if (id === requestedId) return
+    requestedId = id
+    const rid = id // Race-Anker für Spät-Antworten nach einem id-Wechsel
     detail = null
     error = null
     loading = true
-    void getBlock(id)
-      .then((res) => (detail = res.block))
-      .catch((err) => (error = toApiError(err)))
-      .finally(() => (loading = false))
+    void getBlock(rid)
+      .then((res) => {
+        if (rid === requestedId) detail = res.block
+      })
+      .catch((err) => {
+        if (rid === requestedId) error = toApiError(err)
+      })
+      .finally(() => {
+        if (rid === requestedId) loading = false
+      })
   })
 
   function togglePin(): void {
