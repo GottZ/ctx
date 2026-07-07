@@ -28,10 +28,13 @@
   // behält der Host minimierte Fenster GEMOUNTET (FloatingWindow blendet sie per
   // display:none aus) statt sie aus dem keyed each zu werfen — Scroll/Content
   // überleben Minimize/Restore ohne Remount. Graph-Host = true (BlockDetailContent
-  // hat KEINEN Live-Loader im Body). Board-Host = false (IssueDetailContent hält
-  // eine LiveSource — SSE + 10s-Poll je Instanz; ein per display:none gemountet
-  // gehaltenes minimiertes Board-Fenster hielte je eine langlebige SSE-Verbindung.
-  // Destroy folgt dort der Sichtbarkeit, live.stop() schließt die Verbindung).
+  // hat KEINEN Live-Loader im Body). Board-Host = true SEIT U04-W8 (AM-4, §8-D4):
+  // IssueDetailContent hält je Instanz eine LiveSource (SSE + 10s-Poll), also würde
+  // ein per display:none gemountet gehaltenes minimiertes Board-Fenster sonst eine
+  // langlebige Verbindung offen halten. Der Board-Host reicht daher paused=
+  // win.minimized durch — der Pause-Contract (live.stop() bei minimized→true,
+  // live.start() bei Restore) lässt die Verbindung der Sichtbarkeit folgen, TROTZ
+  // gemountetem DOM, sodass Scroll/Composer-Draft überleben ohne SSE-Leak.
   let {
     store,
     labelFor,

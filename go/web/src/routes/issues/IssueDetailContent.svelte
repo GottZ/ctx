@@ -44,6 +44,7 @@
     scope,
     statusOptions: statusOptionsProp,
     titleId,
+    paused = false,
   }: {
     projectId: string
     issueId: string
@@ -53,6 +54,12 @@
     statusOptions?: string[]
     /** Host id for the heading so a floating window can wire aria-labelledby. */
     titleId?: string
+    /** LiveSource pause signal (U04-W8, AM-4, design 04-§4.3/§8-D4). The keep-
+     * mounted board window passes paused=win.minimized: a minimized-but-mounted
+     * window must NOT hold its LiveSource open. On false→true the LiveSource stops
+     * (SSE closes + poll halts); on true→false it restarts. Default false — the
+     * /issues/:id route host never mounts inside a window, so it never pauses. */
+    paused?: boolean
   } = $props()
 
   /** A related-issue row as the detail wire may carry it (metadata.related). The
@@ -67,6 +74,11 @@
 
   let model = $state<IssueDetailModel | null>(null)
   let statusOptions = $state<string[]>([])
+
+  // The per-instance live loader (U13). Hoisted out of onMount so the U04-W8
+  // pause-contract $effect can stop/start it on the paused (=win.minimized) edge.
+  // Plain let (NOT $state): the effect reacts to `paused`, never to `live` itself.
+  let live: LiveSource | null = null
 
   // Mutation UI state.
   let pendingStatus = $state('')
@@ -138,15 +150,41 @@
     // Live (U13, moved here by the U09 extraction — the content owns the model,
     // so it owns the refetch): reload this issue only when a frame names its id
     // (targeted) or a bulk/resync/poll signal arrives (full).
-    const live = new LiveSource({
+    live = new LiveSource({
       projectId,
       getInit: () => (session.key ? { headers: { Authorization: `Bearer ${session.key}` } } : {}),
       onBatch: (batch) => {
         if (batch.full || batch.ids.includes(issueId)) void m.load()
       },
     })
-    live.start()
-    return () => live.stop()
+    // Mount honours the initial pause state: a window opens un-minimized (paused
+    // false), so this starts; a defensive guard keeps a hypothetical paused mount
+    // quiet. wasPaused is seeded here so the effect below sees no spurious edge.
+    if (!paused) live.start()
+    wasPaused = paused
+    return () => {
+      live?.stop()
+      live = null
+    }
+  })
+
+  // Pause-Contract (U04-W8, AM-4, design 04-§4.3/§8-D4). In a keep-mounted board
+  // window the host passes paused=win.minimized. This effect follows the window
+  // visibility WITH the connection: on the false→true edge it stops the LiveSource
+  // (the SSE connection closes + the poll halts) so a minimized-but-mounted window
+  // holds NO long-lived connection; on true→false it restarts it (start() after
+  // stop() rebuilds the connection — live.ts:129-135, both idempotent). The onMount
+  // teardown still owns the real destroy on window close. wasPaused is a plain let
+  // (no $state self-track); the edge guard means the mount never double-starts what
+  // onMount already started — the same wasMinimized flank pattern as FloatingWindow.
+  let wasPaused = false
+  $effect(() => {
+    const p = paused
+    if (live !== null && p !== wasPaused) {
+      if (p) live.stop()
+      else live.start()
+    }
+    wasPaused = p
   })
 
   // Keep the pending status seeded to the current one whenever it changes.

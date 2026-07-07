@@ -510,25 +510,73 @@ test.describe('graph floating windows — W3 keep-mounted (U04-W3, Graph-Host)',
   })
 })
 
-// U04-W3 SSE-Gate (Board-Host, design 04-§4.3/§6/§7-W3). Der Board-Renderer
-// IssueDetailContent hält je Instanz eine LiveSource (SSE-Bearer-fetch auf
-// /api/project/events + 10s-Poll). Deshalb ist der Board-Host bewusst
-// keepMinimized=false (BoardPage UNANGETASTET): Minimize ZERSTÖRT das Fenster ⇒
-// live.stop() ⇒ AbortController schließt die SSE-Verbindung (sie SINKT). Die
-// naive W3-Fassung (Board ebenfalls keep-mounted per display:none) hielte die
-// Verbindung offen — das ist der Rot-Beleg.
-test.describe('graph floating windows — W3 SSE-Gate (U04-W3, Board-Host)', () => {
-  test('Minimize eines Board-Fensters schließt seine SSE-Verbindung (destroy-basiert)', async ({ page }) => {
+// U04-W8 SSE-Pause-Contract (Board-Host keep-mounted, AM-4, design 04-§4.3/§8-D4/
+// §6/§7-W3). GEWOLLTER Gate-Umbau gegenüber U04-W3: dort war der Board-Host bewusst
+// keepMinimized=false — Minimize ZERSTÖRTE das Fenster, und der destroy trug den
+// live.stop() als Nebenwirkung (die SSE-Verbindung sank durch DESTROY). Diese Welle
+// flippt den Board-Host auf keepMinimized=true (Scroll/Draft-Erhalt wie beim Graph-
+// Host) UND verkabelt den §8-D4-Pause-Contract: IssueDetailContent bekommt
+// paused=win.minimized und folgt der Sichtbarkeit mit der Verbindung — false→true
+// stoppt die LiveSource (SSE schließt + Poll hält), true→false startet sie neu.
+// Ergebnis: die Verbindungszahl sinkt beim Minimize TROTZ gemountetem DOM (die naive
+// keep-mounted-Fassung OHNE Contract hielte sie offen — genau der W3-Rot-Beleg), und
+// Restore refetcht NICHT (kein Remount) — Composer-Draft + Scroll überleben. Das
+// pinnt die neue Pause-Semantik; das alte destroy-basierte W3-Board-Gate (count 0)
+// ist mit dem Flip obsolet und hier ersetzt.
+test.describe('board window — W8 SSE pause-contract (U04-W8, AM-4)', () => {
+  const isEvents = (u: string): boolean => u.includes('/api/project/events')
+  /** Nur die issue-detail-GET (…/issues/{id}), nicht die Liste (…/issues) noch die
+   *  Events-Verbindung. */
+  const isDetailGet = (method: string, u: string): boolean =>
+    method === 'GET' && /\/issues\/[^/?]+(?:\?|$)/.test(u)
+
+  /** Home-scope-Detail so, dass das Fenster writable rendert (Composer + Status-
+   *  Picker). NUR die issue-detail-GET wird abgefangen; board/list/comments/events
+   *  fallen durch (fallback → Events-Route, dann seedSession-Mocks). */
+  async function homeScopeDetail(page: Page): Promise<void> {
+    await page.route('**/api/project/**', async (route) => {
+      const url = route.request().url()
+      if (isDetailGet(route.request().method(), url)) {
+        return route.fulfill({
+          status: 200,
+          json: {
+            success: true,
+            render: 'untrusted',
+            issue: {
+              id: '33333333-3333-3333-3333-000000000000',
+              category: 'task',
+              type: 'issue',
+              type_source: 'manual',
+              title: 'Pause contract issue',
+              content: '# Body\n\n' + Array.from({ length: 60 }, (_, i) => `Zeile ${i + 1} des Volltexts.`).join('\n\n'),
+              scope: 'home',
+              sensitivity: 'internal',
+              sensitivity_source: 'manual',
+              lifecycle_state: 'active',
+              tags: ['bug', 'p1'],
+              metadata: {},
+              created_at: '2026-07-01T00:00:00Z',
+              updated_at: '2026-07-03T00:00:00Z',
+              workflow_status: 'open',
+            },
+            comments: [],
+            comments_cursor: null,
+          },
+        })
+      }
+      return route.fallback()
+    })
+  }
+
+  test('Minimize stoppt die Fenster-SSE TROTZ keep-mounted (Pause-Contract, nicht destroy)', async ({ page }) => {
     await seedSession(page, { role: 'member', theme: 'dark', state: 'board' })
 
     // Jede LiveSource öffnet EINE fetch-SSE-Verbindung auf /api/project/events.
     // Die Route wird GEHÄNGT (nie fulfillt), damit jede Verbindung als genau EIN
-    // in-flight-Request steht (ein atomarer Body → clean-EOF → Reconnect ~1s →
-    // Rauschen). Der App-AbortController (live.stop()) bricht sie ab →
-    // Playwright feuert 'requestfailed' auf genau dieser Verbindung.
+    // in-flight-Request steht. Der App-AbortController (live.stop() via Pause)
+    // bricht sie ab → Playwright feuert 'requestfailed' auf genau dieser Verbindung.
     await page.route('**/api/project/events**', () => new Promise<void>(() => {}))
 
-    const isEvents = (u: string): boolean => u.includes('/api/project/events')
     let opens = 0
     let fails = 0
     page.on('request', (r) => {
@@ -544,24 +592,100 @@ test.describe('graph floating windows — W3 SSE-Gate (U04-W3, Board-Host)', () 
     // Board-eigene LiveSource verbunden (Verbindung #1).
     await expect.poll(() => opens, { timeout: 10_000 }).toBeGreaterThanOrEqual(1)
 
-    // Board-Fenster öffnen → IssueDetailContent mountet → eigene LiveSource
-    // verbindet (die Fenster-eigene Verbindung).
+    // Board-Fenster öffnen → IssueDetailContent mountet → eigene LiveSource verbindet.
     const opensBeforeOpen = opens
     await firstCard.click()
     const win = page.getByRole('dialog').first()
     await expect(win).toBeVisible()
     await expect.poll(() => opens, { timeout: 10_000 }).toBe(opensBeforeOpen + 1)
 
-    // Minimize → Board-Host keepMinimized=false ⇒ Fenster ZERSTÖRT ⇒ live.stop()
-    // ⇒ die Fenster-SSE-Verbindung wird abgebrochen (sie SINKT). Kein keep-
-    // mounted display:none-Fenster (destroy-Beleg gegen die naive Fassung).
+    // Minimize → keepMinimized=true ⇒ Fenster BLEIBT gemountet (display:none), aber
+    // der Pause-Contract stoppt die LiveSource ⇒ die Fenster-SSE-Verbindung SINKT.
     const failsBeforeMin = fails
     await win.getByRole('button', { name: 'minimize' }).click()
-    await expect(page.getByRole('dialog')).toHaveCount(0)
-    // Die Verbindung des minimierten Fensters SINKT (destroy → live.stop() →
-    // AbortController). Rot gegen die naive Fassung: dort bleibt sie offen.
+    await expect(page.getByRole('dialog')).toHaveCount(0) // aus dem a11y-Tree
+    // Kern-Beleg keep-mounted (Rot gegen U04-W3-Ist: dort destroy ⇒ count 0).
+    await expect(page.locator('.window.minimized')).toHaveCount(1)
+    // Pause-Beleg: die Verbindung sinkt TROTZ gemountetem DOM (Rot gegen die naive
+    // keep-mounted-Fassung ohne Contract: dort bliebe sie offen ⇒ fails unverändert).
     await expect.poll(() => fails, { timeout: 10_000 }).toBe(failsBeforeMin + 1)
-    // Destroy-Korroboration: kein keep-mounted display:none-Fenster.
+  })
+
+  test('Restore startet die SSE neu und erhält Draft + Scroll ohne Refetch', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark', state: 'board' })
+    // Events-Route ZUERST (hängt), homeScopeDetail DANACH (letzte gewinnt): die
+    // Events-URL matcht homeScopeDetail → kein detail-GET → fallback → hängende Route.
+    await page.route('**/api/project/events**', () => new Promise<void>(() => {}))
+    await homeScopeDetail(page)
+
+    let opens = 0
+    let detailGets = 0
+    page.on('request', (r) => {
+      if (isEvents(r.url())) opens += 1
+      else if (isDetailGet(r.method(), r.url())) detailGets += 1
+    })
+
+    await gotoArea(page, '/board?scope=acme:main')
+    const firstCard = page.locator('[data-board-card]').first()
+    await expect(firstCard).toBeVisible()
+    await firstCard.click()
+
+    const win = page.getByRole('dialog').first()
+    await expect(win.locator('.issue')).toBeVisible()
+    const composer = win.locator('textarea')
+    await expect(composer).toBeVisible() // writable (home scope) → Composer da
+    const body = win.locator('.body')
+
+    // Draft tippen (NICHT absenden) + Body scrollen — der GEWINN dieser Welle.
+    await composer.fill('Entwurf der überlebt')
+    await body.evaluate((el) => {
+      el.scrollTop = 120
+    })
+    expect(await body.evaluate((el) => el.scrollTop)).toBe(120)
+
+    const detailBefore = detailGets
+    const opensBeforeMin = opens
+
+    // Minimize (Pause) → Restore (Re-Start), KEIN Remount.
+    await win.getByRole('button', { name: 'minimize' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.locator('.window.minimized')).toHaveCount(1)
+
+    await page.locator('.minbar .chip').first().click()
+    await expect(page.getByRole('dialog')).toHaveCount(1)
+    await page.waitForTimeout(250) // ein etwaiger Refetch/Remount landete hier
+
+    // Re-Start: die SSE verbindet WIEDER (Zähler steigt).
+    await expect.poll(() => opens, { timeout: 10_000 }).toBeGreaterThan(opensBeforeMin)
+    // Draft + Scroll erhalten (keep-mounted), KEIN Refetch. Rot gegen Ist
+    // (destroy+remount): Draft leer, Δ issue-detail-GET == 1.
+    expect(await composer.inputValue(), 'Composer-Draft').toBe('Entwurf der überlebt')
+    expect(await body.evaluate((el) => el.scrollTop), 'Body-Scroll').toBe(120)
+    expect(detailGets - detailBefore, 'Δ issue-detail-GET').toBe(0)
+  })
+
+  test('minimiert: das Board-Fenster verlässt den a11y-Tree, bleibt aber gemountet (negativ)', async ({ page }) => {
+    await seedSession(page, { role: 'member', theme: 'dark', state: 'board' })
+    await page.route('**/api/project/events**', () => new Promise<void>(() => {}))
+
+    await gotoArea(page, '/board?scope=acme:main')
+    const firstCard = page.locator('[data-board-card]').first()
+    await expect(firstCard).toBeVisible()
+    await firstCard.click()
+
+    const win = page.getByRole('dialog').first()
+    await expect(win).toBeVisible()
+    await win.getByRole('button', { name: 'minimize' }).click()
+
+    // display:none ⇒ raus aus a11y-Tree + Tab-Order, obwohl das DOM (keep-mounted)
+    // weiterlebt — dieselbe §5-Nr.6-Invariante wie der Graph-Host, jetzt für Board.
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'close' })).toHaveCount(0)
+    await expect(page.locator('.window.minimized')).toHaveCount(1)
+
+    // Restore stellt beides wieder her.
+    await page.locator('.minbar .chip').first().click()
+    await expect(page.getByRole('dialog')).toHaveCount(1)
     await expect(page.locator('.window.minimized')).toHaveCount(0)
   })
 })

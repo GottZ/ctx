@@ -351,7 +351,14 @@
     <!-- U09 desktop interop: the floating-window layer over the board (design
          04 §4.6). Empty + pointer-events:none until a card opens a window, so it
          is invisible in the static board baselines. -->
-    <WindowManager store={winStore} labelFor={issueTitle}>
+    <!-- U04-W8 (AM-4, design 04-§4.3/§8-D4): der Board-Host hält minimierte Fenster
+         jetzt GEMOUNTET (keepMinimized) — Scroll/Composer-Draft überleben Minimize/
+         Restore wie beim Graph-Host. Weil IssueDetailContent je Instanz eine
+         LiveSource hält (SSE + Poll), reicht der Host `paused={win.minimized}` durch:
+         der §8-D4-Pause-Contract stoppt die LiveSource bei minimized→true und startet
+         sie bei Restore neu, sodass ein gemountet gehaltenes minimiertes Fenster
+         KEINE langlebige SSE-Verbindung offen hält (WinState trägt minimized bereits). -->
+    <WindowManager store={winStore} keepMinimized labelFor={issueTitle}>
       {#snippet content(win, titleId)}
         <IssueDetailContent
           projectId={activeProject?.id ?? ''}
@@ -359,6 +366,7 @@
           {scope}
           statusOptions={model?.columns.map((c) => c.status) ?? []}
           {titleId}
+          paused={win.minimized}
         />
       {/snippet}
     </WindowManager>
