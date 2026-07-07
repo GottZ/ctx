@@ -1,0 +1,61 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+      - listitem:
+        - link "Backends":
+          - /url: /tenant/backends
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - link "Settings":
+    - /url: /settings
+  - text: / farb-overrides
+  - heading "kategorie-farben" [level=1]
+  - paragraph: pro kategorie den farb-hue überschreiben — das rad zeigt belegte hues perceptuell (oklch), damit die abstände sichtbar werden. gespeichert wird der hsl-hue-grad; sat/lum bleiben theme-token. der graph zieht die farben beim nächsten aufruf.
+  - 'button "Farb-Rad — Kategorie-Hue per Zeiger wählen (Tastatur: Regler unten)"'
+  - paragraph: wähle links eine kategorie, um ihren hue zu setzen.
+  - list "kategorien":
+    - listitem:
+      - button /design \d+° · seed/
+    - listitem:
+      - button /learnings \d+° · seed/
+    - listitem:
+      - button /reference \d+° · seed/

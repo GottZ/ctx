@@ -1,0 +1,19 @@
+- banner:
+  - button "Open navigation menu"
+  - link "ctx":
+    - /url: /status
+- main:
+  - link "Settings":
+    - /url: /settings
+  - text: / farb-overrides
+  - heading "kategorie-farben" [level=1]
+  - paragraph: pro kategorie den farb-hue überschreiben — das rad zeigt belegte hues perceptuell (oklch), damit die abstände sichtbar werden. gespeichert wird der hsl-hue-grad; sat/lum bleiben theme-token. der graph zieht die farben beim nächsten aufruf.
+  - 'button "Farb-Rad — Kategorie-Hue per Zeiger wählen (Tastatur: Regler unten)"'
+  - paragraph: wähle links eine kategorie, um ihren hue zu setzen.
+  - list "kategorien":
+    - listitem:
+      - button /design \d+° · seed/
+    - listitem:
+      - button /learnings \d+° · seed/
+    - listitem:
+      - button /reference \d+° · seed/
