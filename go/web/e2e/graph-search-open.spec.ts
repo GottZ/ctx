@@ -524,3 +524,47 @@ test.describe('graph rotation (U03-W5 / AM-3)', () => {
     expect((await camState(page)).angle).toBe(0)
   })
 })
+
+// U03-W2 — Deep-Link ?focus öffnet das Node-Fenster MIT (design 03-§4.4/§7-W2,
+// Board-Entscheid U03-E1=ja). Anders als der Rest dieser Spec (W2-immun über den
+// Overview-Pick, s. o.) navigiert dieser Test BEWUSST über ?focus= — er testet
+// exakt die neue, vereinheitlichte Deep-Link-Semantik: "?focus=<uuid>" bedeutet
+// "diesen Block zeigen" = Ego-Netz + geöffnetes Detail-Fenster (KEIN neuer Query-
+// Param, ToolCallCard bleibt unangetastet). Der Deep-Link-Fall reicht KEINEN
+// openTrigger → der Close-Fokus fällt auf .viewport (fallbackFocusEl), identisch
+// zum Canvas-Klick-Fenster (design 03-§4.3/§4.5-Zweig A Punkt 3).
+test.describe('graph deep-link open (U03-W2)', () => {
+  // (a) Landung via ?focus öffnet genau EIN Fenster; Titel = Block-Titel.
+  //     Rot gegen Ist: setFocus lief ohne open:true → Landung ohne Fenster (Count 0).
+  test('Deep-Link ?focus öffnet das Node-Fenster mit dem Block-Titel', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, `/graph?focus=${LANDING}`)
+
+    // Genau EIN Fenster (WindowStore ist nicht persistent → nie eine Fenster-
+    // Sammlung, auch bei Reload/Bookmark einer ?focus-URL; design 03-§4.4).
+    await expect(page.getByRole('dialog')).toHaveCount(1)
+    // Fenster-Titel = Block-Titel: der manage-get-Mock liefert 'Core Architecture'
+    // für LANDING; das <h2 id=titleId> zeigt detail.title (BlockDetailContent:89).
+    await expect(page.getByRole('dialog').getByRole('heading', { level: 2 })).toHaveText('Core Architecture')
+  })
+
+  // (b) Escape schließt das Auto-Fenster → Fokus auf .viewport (Deep-Link ohne
+  //     openTrigger → fallbackFocusEl, NICHT das Such-Input). Rot gegen Ist:
+  //     ohne Auto-Fenster gibt es nichts zu schließen (Count bleibt 0).
+  test('Escape schließt das Deep-Link-Fenster und gibt den Fokus an .viewport zurück', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, `/graph?focus=${LANDING}`)
+    await expect(page.getByRole('dialog')).toHaveCount(1)
+    // Autofokus zieht den Fokus in den frisch gemounteten Fenster-Container.
+    await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('role') ?? '')).toBe('dialog')
+
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+
+    // Deep-Link-Fall: kein openTrigger → close() fällt auf fallbackFocusEl =
+    // .viewport (GraphPage:53–55), NIE das Such-Input, NIE <body>.
+    const active = await activeInfo(page)
+    expect(active.tag).not.toBe('BODY')
+    expect(active.cls).toContain('viewport')
+  })
+})

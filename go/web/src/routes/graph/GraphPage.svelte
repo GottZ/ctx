@@ -58,7 +58,11 @@
   // Deep-link sync: /graph?focus=<uuid> survives reload and is shareable.
   onMount(() => {
     const fromUrl = new URLSearchParams(location.search).get('focus')
-    if (fromUrl) void setFocus(fromUrl, { pushUrl: false })
+    // U03-W2 (§4.4): ?focus=<uuid> bedeutet einheitlich „diesen Block zeigen" =
+    // Ego-Netz + geöffnetes Detail-Fenster (kein neuer Query-Param, ToolCallCard
+    // bleibt unangetastet). openTrigger bleibt weg → Close-Fokus fällt auf
+    // fallbackFocusEl = .viewport, identisch zum Canvas-Klick-Fenster (§4.3/§4.5).
+    if (fromUrl) void setFocus(fromUrl, { pushUrl: false, open: true })
     // G2: live re-color on theme switch (design 03-§4). The theme controller
     // writes data-theme THEN fires THEME_CHANGE_EVENT, so readGraphPalette()
     // here already sees the new --graph-* tokens. Re-bake the baked color attrs

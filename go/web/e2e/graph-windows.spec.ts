@@ -42,6 +42,18 @@ async function enterFocusStage(page: Page): Promise<void> {
     NODE2,
     { timeout: 10_000 },
   )
+  // U03-W2 SEMANTIK-WECHSEL AM SEAM (design 03-§4.4/§7-W2): ?focus= öffnet seit
+  // W2 automatisch das Fenster des Landungs-Nodes (FOCUS) mit. Dieser Helper ist
+  // der EINZIGE ?focus-Einstieg der Spec (Blast-Radius: grep -rn 'focus=' e2e/
+  // → nur hier navigiert real; smoke.spec liest computed-style ohne dialog-Count,
+  // contract/registry asserted nur href-Attribute, fixtures.ts definiert nur
+  // URLs, graph-search-open ist per Design ?focus-frei). Damit ALLE Absolut-
+  // Zählungen unten (open NODE2 → Count 1 usw.) gültig bleiben, schließen wir das
+  // Auto-Fenster hier (Escape, Deep-Link-Fall) und pinnen Count 0 als sauberen
+  // Ausgangszustand — jeder Test baut seine Fenster-Menge ab hier neu auf.
+  await page.getByRole('dialog').first().waitFor({ state: 'visible', timeout: 10_000 })
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
 }
 
 /** Step 2: re-dispatch the Sigma clickNode event → onnodeclick → store.open. */
