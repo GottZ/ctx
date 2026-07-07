@@ -68,6 +68,37 @@ describe('WindowStore z-order / topId', () => {
   })
 })
 
+describe('WindowStore identity + z-raise-no-op (U04-W2, §7-W2)', () => {
+  // Gate-Grenze (bewusst, §7-W2 / §6-Client-Render): Dieses Gate belegt die
+  // Store-OBJEKT-Identität (den Mechanismus der In-Place-Mutation), NICHT die
+  // Repaint-/Snippet-Re-Invocation-Reduktion. vitest läuft DOM-frei
+  // (vite.config.ts:60-64) — der Server-Last-Nutzen ist W1-getragen und dort
+  // e2e-gegated (Δ /api/manage == 0). W2s Client-Render-Nutzen ist analytisch
+  // (Svelte-5-Deep-Proxy: Lesen des Bezeichners `win` erzeugt keine Abhängigkeit
+  // auf `win.rect`), hier bewusst nicht render-gegated.
+  it('WinState-Identität überlebt focus/move/resize/minimize/restore', () => {
+    const s = new WindowStore()
+    s.open(A)
+    const ref = s.wins[0]
+    s.focus(A)
+    s.move(A, 10, 10)
+    s.resize(A, 5, 5)
+    s.minimize(A)
+    s.restore(A)
+    expect(s.wins[0]).toBe(ref) // dasselbe (Proxy-)Objekt — keine .map()-Ersetzung
+  })
+
+  it('focus auf ein bereits oben liegendes Fenster lässt z unverändert (z-Raise-No-op)', () => {
+    const s = new WindowStore()
+    s.open(A)
+    s.open(B) // B ist jetzt top
+    const zBefore = s.wins.find((w) => w.id === B)?.z
+    s.focus(B) // B ist bereits top → kein z-Schreiben (kein unbegrenztes z-Wachstum)
+    const zAfter = s.wins.find((w) => w.id === B)?.z
+    expect(zAfter).toBe(zBefore)
+  })
+})
+
 describe('WindowStore minimize / restore', () => {
   it('minimized windows drop out of topId but stay in openIds (highlight)', () => {
     const s = new WindowStore()

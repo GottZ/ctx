@@ -83,10 +83,19 @@ export class WindowStore {
     this.wins = []
   }
 
-  /** Hebt `id` nach vorn (z = max(z)+1). */
+  /**
+   * Hebt `id` nach vorn. IN-PLACE-Mutation (KEINE .map()-Objekt-Ersetzung):
+   * Svelte-5-`$state`-Arrays proxien tief, Feld-Mutation ist fein-granular
+   * reaktiv (U04-W2, §4.2). Damit bleibt das WinState-OBJEKT identitätsstabil —
+   * das Snippet-Argument (FloatingWindow.svelte:132) invalidiert nicht mehr, der
+   * Content re-mountet nicht. Der z-Raise-No-op (bereits-top ⇒ kein Schreiben)
+   * eliminiert zusätzlich das unbegrenzte z-Wachstum pro pointerdown.
+   */
   focus(id: string): void {
-    const top = this.#maxZ() + 1
-    this.wins = this.wins.map((w) => (w.id === id ? { ...w, z: top } : w))
+    const w = this.wins.find((x) => x.id === id)
+    if (w === undefined) return
+    const top = this.#maxZ() // #maxZ() schließt w selbst ein
+    if (w.z < top) w.z = top + 1 // nur anheben, wenn nicht bereits oben
   }
 
   /**
@@ -94,29 +103,32 @@ export class WindowStore {
    * (greifbar-Invariante: Titelleiste + MIN_VISIBLE bleiben on-surface — ein per
    * Drag „verlorenes" Fenster ist ausgeschlossen). Der Caller projiziert px→lu
    * über den WindowProjector (toLogicalDelta), bevor er hier reingibt.
+   * In-Place-Mutation des rect (§4.2) — identitätsstabil.
    */
   move(id: string, dxLu: number, dyLu: number): void {
-    this.wins = this.wins.map((w) =>
-      w.id === id ? { ...w, rect: clampPos({ ...w.rect, x: w.rect.x + dxLu, y: w.rect.y + dyLu }, this.surface) } : w,
-    )
+    const w = this.wins.find((x) => x.id === id)
+    if (w === undefined) return
+    w.rect = clampPos({ ...w.rect, x: w.rect.x + dxLu, y: w.rect.y + dyLu }, this.surface)
   }
 
-  /** Logisches Resize-Delta (lu) + clampSize (MIN_W_LU/MIN_H_LU erzwungen). */
+  /** Logisches Resize-Delta (lu) + clampSize (MIN_W_LU/MIN_H_LU erzwungen). In-Place (§4.2). */
   resize(id: string, dwLu: number, dhLu: number): void {
-    this.wins = this.wins.map((w) => {
-      if (w.id !== id) return w
-      const { w: nw, h: nh } = clampSize(w.rect.w + dwLu, w.rect.h + dhLu)
-      return { ...w, rect: { ...w.rect, w: nw, h: nh } }
-    })
+    const w = this.wins.find((x) => x.id === id)
+    if (w === undefined) return
+    const { w: nw, h: nh } = clampSize(w.rect.w + dwLu, w.rect.h + dhLu)
+    w.rect = { ...w.rect, w: nw, h: nh }
   }
 
   minimize(id: string): void {
-    this.wins = this.wins.map((w) => (w.id === id ? { ...w, minimized: true } : w))
+    const w = this.wins.find((x) => x.id === id)
+    if (w !== undefined) w.minimized = true
   }
 
-  /** Un-minimieren + nach vorn (focus). */
+  /** Un-minimieren + nach vorn (focus). In-Place (§4.2). */
   restore(id: string): void {
-    this.wins = this.wins.map((w) => (w.id === id ? { ...w, minimized: false } : w))
+    const w = this.wins.find((x) => x.id === id)
+    if (w === undefined) return
+    w.minimized = false
     this.focus(id)
   }
 
