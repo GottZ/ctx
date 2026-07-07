@@ -70,6 +70,20 @@ func TestActionTier_Classification(t *testing.T) {
 		{"dream-mode", `{"mode":"off"}`, tierServerAdmin},
 		{"gaming-mode", "", tierOpen},
 		{"gaming-mode", `{"mode":"on"}`, tierServerAdmin},
+		// eject-mode (AM-7 canonical) mirrors the gaming-mode alias exactly:
+		// read open (U01-E6 legacy surface), mutation server-admin (it flips the
+		// _global eject profile = system egress topology).
+		{"eject-mode", "", tierOpen},
+		{"eject-mode", `{"mode":"on"}`, tierServerAdmin},
+		// Abschaltprofile (U01-W3, AM-5 VOLL): tierTenantAdmin — the handler +
+		// store are tenant-isolated (scope predicate), so a tenant-admin manages
+		// its OWN-scope profiles and reads _global ones; it can never mutate a
+		// _global profile (store scope gate → 404).
+		{"disable-profile-list", "", tierTenantAdmin},
+		{"disable-profile-create", "", tierTenantAdmin},
+		{"disable-profile-update", "", tierTenantAdmin},
+		{"disable-profile-delete", "", tierTenantAdmin},
+		{"disable-profile-toggle", "", tierTenantAdmin},
 		// Achse-02 issue/comment family (I-D, design/02 §4.3): all tierOpen —
 		// scope isolation is in the store layer, not an admin tier. The EXPLICIT
 		// entries are mandatory (§4.3); the enumeration gate below proves a
@@ -171,6 +185,34 @@ func TestActionTier_ProvisionExplicitlyTiered(t *testing.T) {
 	}
 }
 
+// TestActionTier_DisableProfileFamilyExplicitlyTiered is the U01-W3 S9 fail-open
+// probe (design/01 §4.3): every disable-profile-* action this wave dispatches
+// MUST be EXPLICITLY classified tierTenantAdmin. Remove any arm from actionTier
+// and its row here turns RED (the entries + dispatch arm land in the SAME commit).
+// eject-mode (AM-7 canonical, alias of gaming-mode) is enumerated too: its
+// mutation MUST be tierServerAdmin (system egress topology).
+func TestActionTier_DisableProfileFamilyExplicitlyTiered(t *testing.T) {
+	for _, a := range []string{
+		"disable-profile-list", "disable-profile-create", "disable-profile-update",
+		"disable-profile-delete", "disable-profile-toggle",
+	} {
+		tier, explicit := actionTierExplicit(manageRequest{Action: a})
+		if !explicit {
+			t.Errorf("action %q is dispatched but NOT explicitly tiered (fail-open tierOpen default, S9)", a)
+		}
+		if tier != tierTenantAdmin {
+			t.Errorf("action %q tier = %d, want tierTenantAdmin (tenant-isolated handler + store scope gate)", a, tier)
+		}
+	}
+	// eject-mode: read open, mutation server-admin (byte-identical to gaming-mode).
+	if tier, explicit := actionTierExplicit(manageRequest{Action: "eject-mode"}); !explicit || tier != tierOpen {
+		t.Errorf("eject-mode read tier = %d explicit=%v, want tierOpen/true", tier, explicit)
+	}
+	if tier, explicit := actionTierExplicit(manageRequest{Action: "eject-mode", Data: json.RawMessage(`{"mode":"on"}`)}); !explicit || tier != tierServerAdmin {
+		t.Errorf("eject-mode mutation tier = %d explicit=%v, want tierServerAdmin/true", tier, explicit)
+	}
+}
+
 // Gate tests for Multi-Tenant wave T25 (05-A8): the action-tier cut that turns
 // the binary admin gate (actionRequiresAdmin) into a two-tier classification
 // (server-admin vs tenant-admin, design 05 §4.4). They run DB-less against a nil
@@ -262,9 +304,10 @@ func TestActionTier_TenantAdmin_ServerAdminActions_403(t *testing.T) {
 		{"action": "blocks-audit-status"},
 		{"action": "blocks-classify-status"},
 		{"action": "tenant-list"},
-			{"action": "project-provision", "data": map[string]any{"identity": "manual:x"}},
+		{"action": "project-provision", "data": map[string]any{"identity": "manual:x"}},
 		{"action": "tenant-grant-list"},
 		{"action": "gaming-mode", "data": map[string]any{"mode": "on"}},
+		{"action": "eject-mode", "data": map[string]any{"mode": "on"}},
 		{"action": "dream-mode", "data": map[string]any{"mode": "off"}},
 	}
 	for _, body := range bodies {

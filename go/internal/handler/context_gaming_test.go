@@ -17,7 +17,7 @@ import (
 // gaming-mode read/validation paths.
 type staticConfigStore struct{ cfg *config.Config }
 
-func (s staticConfigStore) Snapshot() *config.Config { return s.cfg }
+func (s staticConfigStore) Snapshot() *config.Config                          { return s.cfg }
 func (s staticConfigStore) SnapshotForRequest(context.Context) *config.Config { return s.cfg }
 func (s staticConfigStore) SnapshotForTenant(context.Context, string) *config.Config {
 	return s.cfg
@@ -60,56 +60,13 @@ type gamingResp struct {
 	} `json:"gaming"`
 }
 
-// A status read ({} data) stays open to any valid key (design 03 §2.6 — only
-// the mutating shape is admin-gated) and renders the live state. A name in the
-// disabled list that matches no live backend surfaces as unknown_backends (a
-// typo would otherwise make the toggle silently ineffective, risk 6.6).
-func TestGamingMode_Read_NonAdmin_RendersStateAndUnknown(t *testing.T) {
-	h := gamingHandler(true,
-		[]string{"herbert-chat", "herbert-rerank", "herbert_typo"},
-		[]string{"herbert-chat", "herbert-rerank", "llama-cpu"})
-	rec := gamingReq(t, h, nonAdminAR(), "{}")
-	if rec.Code == http.StatusForbidden {
-		t.Fatalf("read got 403 — the status read must stay non-admin (design 03 §2.6)")
-	}
-	if rec.Code != http.StatusOK {
-		t.Fatalf("read status = %d, want 200", rec.Code)
-	}
-	var resp gamingResp
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !resp.Success || !resp.Gaming.Active {
-		t.Errorf("success=%v active=%v, want both true", resp.Success, resp.Gaming.Active)
-	}
-	if len(resp.Gaming.UnknownBackends) != 1 || resp.Gaming.UnknownBackends[0] != "herbert_typo" {
-		t.Errorf("unknown_backends = %v, want [herbert_typo]", resp.Gaming.UnknownBackends)
-	}
-	if resp.Gaming.Note == "" {
-		t.Error("note is empty — the in-flight advisory must always be present")
-	}
-}
-
-// A clean disabled list (all names live) yields no unknown_backends.
-func TestGamingMode_Read_NoUnknownWhenNamesLive(t *testing.T) {
-	h := gamingHandler(false,
-		[]string{"herbert-chat", "herbert-rerank"},
-		[]string{"herbert-chat", "herbert-rerank", "llama-cpu"})
-	rec := gamingReq(t, h, nonAdminAR(), "{}")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	var resp gamingResp
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.Gaming.Active {
-		t.Error("active = true, want false")
-	}
-	if len(resp.Gaming.UnknownBackends) != 0 {
-		t.Errorf("unknown_backends = %v, want empty", resp.Gaming.UnknownBackends)
-	}
-}
+// NOTE (U01-W3, AM-7): the eject/gaming-mode READ now renders the '_global'
+// 'eject' profile's live state (active + member names), not the old
+// config-derived list — so unknown_backends is gone structurally (FK membership
+// cannot dangle) and the read touches the DB. The read + shape assertions moved
+// to context_disable_profiles_integration_test.go (DB-backed); the byte-identical
+// eject-mode==gaming-mode shape is pinned there too (gate f). The DB-FREE
+// mode-validation path stays a unit test below.
 
 // An admin passes the gate; an unknown mode is a 422 BEFORE any write — the
 // nil pool/reload are never reached (the validation precedes them).

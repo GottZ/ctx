@@ -158,8 +158,15 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.handleDreamReview(w, r, authResult)
 	case "dream-mode":
 		h.handleDreamMode(w, r, req)
-	case "gaming-mode":
-		h.handleGamingMode(w, r, req)
+	case "gaming-mode", "eject-mode",
+		"disable-profile-list", "disable-profile-create", "disable-profile-update",
+		"disable-profile-delete", "disable-profile-toggle":
+		// Abschaltprofil-Familie (092, U01-W3, design/01 §4.3 + AM-5/AM-7) in EINEM
+		// case-Arm (cyclop-Budget, max-complexity 25): eject-mode ist die KANONISCHE
+		// Shim-Fläche, gaming-mode der shape-kompatible Alias (beide → Profil
+		// '_global'/'eject'); die disable-profile-* Actions sind tierTenantAdmin
+		// (actionTierExplicit + S9-Gate), Isolation liegt im Handler+Store.
+		h.dispatchDisableProfileAction(w, r, authResult, req)
 	case "mcp-client-create", "mcp-client-list", "mcp-client-delete":
 		h.dispatchMCPClientAction(w, r, authResult, req)
 	case "backend-create", "backend-update", "backend-delete", "backend-list", "backend-test":
@@ -477,16 +484,31 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 			return tierServerAdmin, true
 		}
 		return tierOpen, true
-	case "gaming-mode":
+	case "gaming-mode", "eject-mode":
 		// Only the MUTATING shape is gated: an ungated toggle would let any
 		// tenant key flip the whole system's egress topology (herbert out ⇒
 		// synthesis goes external via OpenRouter — cost + egress-character
-		// change, design 03 §2.6). gaming.active gates a physical GPU host, not
-		// a tenant concept — server-global by design. Status read stays open.
+		// change, design 03 §2.6). The toggle targets the '_global' eject
+		// profile — a physical GPU host, not a tenant concept — so server-global
+		// by design. Status read stays open (U01-E6: legacy tierOpen surface).
+		// eject-mode (AM-7 canonical) and gaming-mode (alias) share this arm;
+		// both EXPLICIT entries are mandatory (S9 fail-open probe).
 		if isGamingModeMutation(req) {
 			return tierServerAdmin, true
 		}
 		return tierOpen, true
+	case "disable-profile-list", "disable-profile-create", "disable-profile-update",
+		"disable-profile-delete", "disable-profile-toggle":
+		// Abschaltprofile (092, U01-W3, AM-5 VOLL). tierTenantAdmin — NOT
+		// server-admin: the handler + store are tenant-isolated (scope predicate
+		// = profileWriteScopes; create forces scope to ar.HomeScope for a
+		// tenant-admin; a foreign/_global profile matches zero rows → 404), so
+		// this satisfies the A8 precondition "open only what is already isolated".
+		// A tenant-admin may thus manage its OWN-scope profiles and READ _global
+		// ones (list), but never mutate a _global profile (gate g). The EXPLICIT
+		// entry is mandatory (§5.1): a dispatched action without it inherits the
+		// fail-open tierOpen default; the S9 enumeration gate pins it RED-then-GREEN.
+		return tierTenantAdmin, true
 	default:
 		return tierOpen, false
 	}

@@ -73,8 +73,20 @@ func TestGamingModePersistence_Integration(t *testing.T) {
 		t.Fatal("fresh boot has gaming.active=true, want false default")
 	}
 
-	bp := backends.NewPool(nil, nil)
-	bp.SeedSnapshotForTest([]backends.Backend{{Name: "herbert-chat"}, {Name: "herbert-rerank"}})
+	// DB-backed pool: U01-W3's shim reloads the pool after the atomic dual-write
+	// (the eject profile flip must land in the chain), so a seeded (q=nil) pool
+	// would panic on Reload. Insert the two backends the eject profile targets.
+	for _, n := range []string{"herbert-chat", "herbert-rerank"} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_backends (name, base_url, scope) VALUES ($1,$2,'_global')`,
+			n, "http://"+n); err != nil {
+			t.Fatalf("insert backend %s: %v", n, err)
+		}
+	}
+	bp := backends.NewPool(pool, nil)
+	if err := bp.Reload(ctx); err != nil {
+		t.Fatalf("pool reload: %v", err)
+	}
 	reload := func(ctx context.Context) error { return settings.Reload(ctx, pool, cfgStore) }
 
 	ar := &auth.AuthResult{
