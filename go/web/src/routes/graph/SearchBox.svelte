@@ -4,8 +4,15 @@
 
   // U03-W1 (§4.2): der Pick liefert das Fokus-Rückgabe-Ziel mit. `origin` ist
   // das Such-INPUT-Element (stabil über beide Stages, überlebt den Pick) — NIE
-  // der Treffer-Button, der beim Pick aus dem DOM entfernt wird.
-  let { onpick }: { onpick: (id: string, origin: HTMLElement | null) => void } = $props()
+  // der Treffer-Button. (Seit W3 überlebt der Button den Pick zwar, das Input
+  // bleibt aber die stabilere Fokus-Rückgabe, §4.2.)
+  // U03-W3 (§4.7.1): `pageBusy` = der Ego-Load-Zustand der GraphPage; solange er
+  // läuft, sind die Treffer-Buttons disabled → der stille Pick-Drop (busy-Guard
+  // in setFocus) wird SICHTBAR statt kommentarlos verschluckt.
+  let {
+    onpick,
+    pageBusy = false,
+  }: { onpick: (id: string, origin: HTMLElement | null) => void; pageBusy?: boolean } = $props()
 
   let query = $state('')
   let results = $state<SearchResult[]>([])
@@ -35,44 +42,73 @@
   }
 
   function pick(id: string): void {
-    // Listen-Verhalten (Liste leert sich) bleibt in W1 unverändert — das offene
-    // Halten der Liste ist W3. Das Such-Input als origin mitgeben (§4.2).
+    // U03-W3 (§4.7.1): die Liste bleibt nach dem Pick OFFEN (kein results=[]/
+    // searched=false mehr) → Mehrfach-Pick aus einer Liste + Fehler-Retry ohne
+    // Re-Submit. Der Query-Text stand ohnehin schon (bind:value). Das Such-Input
+    // bleibt das Fokus-Rückgabe-Ziel (§4.2).
+    onpick(id, inputEl)
+  }
+
+  // U03-W3 (§4.7.1): EIN Escape-Handler am gemeinsamen Wrapper. <form> und
+  // <ul class="results"> sind Geschwister — ein Handler nur am <form> erreichte
+  // den fokussierten Treffer-Button (im <ul>) NICHT. Liste offen → schließen +
+  // preventDefault (verhindert zugleich das native Text-Löschen von
+  // input[type=search] in Blink/WebKit). Liste zu → Event unangetastet (native
+  // Semantik). Kein Konflikt mit dem Fenster-Escape (der hängt am Fenster-
+  // Container, nicht an diesem Teilbaum).
+  function onkeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return
+    if (results.length === 0 && !searched) return
+    event.preventDefault()
     results = []
     searched = false
-    onpick(id, inputEl)
   }
 </script>
 
-<form class="search" onsubmit={submit}>
-  <input
-    type="search"
-    placeholder="search blocks (FTS) — pick a hit to focus its ego net"
-    spellcheck="false"
-    bind:this={inputEl}
-    bind:value={query}
-  />
-  <button type="submit" disabled={busy || query.trim() === ''}>{busy ? '…' : 'Search'}</button>
-</form>
+<!-- U03-W3 (§4.7.1): gemeinsamer, CSS-neutraler Wrapper (display:contents → kein
+     eigener Box im Layout, Kind-Flow im .search-card bleibt byte-gleich zum Ist,
+     der nur block-flow um Form + Liste legt) mit EINEM onkeydown, das Escape
+     unabhängig vom Fokus-Ort (Input ODER Treffer-Button) fängt. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="searchbox" {onkeydown}>
+  <form class="search" onsubmit={submit}>
+    <input
+      type="search"
+      placeholder="search blocks (FTS) — pick a hit to focus its ego net"
+      spellcheck="false"
+      bind:this={inputEl}
+      bind:value={query}
+    />
+    <button type="submit" disabled={busy || query.trim() === ''}>{busy ? '…' : 'Search'}</button>
+  </form>
 
-{#if error}
-  <p class="error" role="alert">{error.message}</p>
-{:else if searched && results.length === 0}
-  <p class="empty" role="status">no FTS match — words are stemmed, substrings don't match</p>
-{:else if results.length > 0}
-  <ul class="results">
-    {#each results as r (r.id)}
-      <li>
-        <button type="button" onclick={() => pick(r.id)}>
-          <span class="title">{r.title}</span>
-          <span class="meta">{r.category} · {r.scope}</span>
-          <span class="preview">{r.content_preview.slice(0, 140)}</span>
-        </button>
-      </li>
-    {/each}
-  </ul>
-{/if}
+  {#if error}
+    <p class="error" role="alert">{error.message}</p>
+  {:else if searched && results.length === 0}
+    <p class="empty" role="status">no FTS match — words are stemmed, substrings don't match</p>
+  {:else if results.length > 0}
+    <ul class="results">
+      {#each results as r (r.id)}
+        <li>
+          <button type="button" disabled={pageBusy} onclick={() => pick(r.id)}>
+            <span class="title">{r.title}</span>
+            <span class="meta">{r.category} · {r.scope}</span>
+            <span class="preview">{r.content_preview.slice(0, 140)}</span>
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</div>
 
 <style>
+  /* U03-W3: rein struktureller Wrapper (Escape-Handler-Träger). display:contents
+     erzeugt keinen eigenen Box → Form + Liste bleiben layout-identisch zum Ist
+     (der .search-card legt nur normalen Block-Flow um sie). */
+  .searchbox {
+    display: contents;
+  }
+
   .search {
     display: flex;
     gap: var(--space-2);
@@ -121,6 +157,12 @@
   }
   .results button:hover {
     background: var(--surface-2);
+  }
+  /* U03-W3 (§4.7.1): während des Ego-Loads sind die Treffer disabled — sichtbar
+     gedämpft statt still gedroppt. */
+  .results button:disabled {
+    cursor: default;
+    opacity: 0.5;
   }
   .title {
     font-size: var(--fs-md);

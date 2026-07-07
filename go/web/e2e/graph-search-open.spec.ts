@@ -263,3 +263,104 @@ test.describe('graph search-open (U03-W1)', () => {
     expect(dialogs).toHaveLength(0)
   })
 })
+
+// U03-W3 — Trefferliste bleibt nach dem Pick offen (Mehrfach-Pick) + Escape
+// schließt sie (an EINEM gemeinsamen Wrapper, damit der Handler auch mit Fokus
+// auf einem Treffer-Button feuert) + ein Pick während des laufenden Ego-Loads ist
+// SICHTBAR geblockt (disabled) statt still gedroppt (design 03-§4.7.1). Alle Gates
+// erreichen die Focus-Stage ?focus-frei über den Overview-Pick (W2-Immunität, s.o.).
+test.describe('graph search-open (U03-W3)', () => {
+  // (a) Zwei Picks aus EINER Trefferliste → zwei Fenster. Rot gegen Ist: der Pick
+  //     leert die Liste (SearchBox.pick results=[]), ein zweiter Treffer existiert
+  //     nach Pick 1 nicht mehr → der zweite .click() findet kein Ziel.
+  test('zwei Picks aus einer Trefferliste öffnen zwei Fenster', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+    await submitSearch(page)
+
+    await page.locator('.results button', { hasText: 'API Spec' }).click() // NODE2
+    await expect(page.getByRole('dialog')).toHaveCount(1)
+
+    // Liste bleibt offen (W3) → zweiter Pick OHNE Re-Submit direkt aus derselben Liste.
+    await page.locator('.results button', { hasText: 'Retrieval Findings' }).click() // NODE3
+    await expect(page.getByRole('dialog')).toHaveCount(2)
+    // Die Liste steht nach beiden Picks weiterhin (nicht geleert).
+    await expect(page.locator('ul.results')).toHaveCount(1)
+  })
+
+  // (b1) Escape bei offener Liste, Fokus IM INPUT → Liste zu, Input-Wert bleibt.
+  //      Rot gegen Ist: kein Escape-Pfad → Liste bleibt offen; zudem löscht das
+  //      native Escape von input[type=search] in Chromium den Text (der Wert-
+  //      Assert pinnt das preventDefault).
+  test('Escape (Fokus im Input) schließt die Liste und lässt den Input-Wert stehen', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+
+    const input = page.locator('input[type="search"]')
+    await input.fill('block')
+    await input.press('Enter')
+    await expect(page.locator('.results button').first()).toBeVisible()
+
+    await input.press('Escape')
+    await expect(page.locator('ul.results')).toHaveCount(0)
+    await expect(input).toHaveValue('block')
+  })
+
+  // (b2) Escape bei offener Liste, Fokus auf einem TREFFER-BUTTON (im <ul>, das im
+  //      Ist Geschwister der <form> ist) → Liste zu. Rot gegen Ist: kein Escape-
+  //      Handler; pinnt zusätzlich den WRAPPER-Anbringungsort (ein form-Handler
+  //      erreicht den Button im <ul> nicht).
+  test('Escape (Fokus auf Treffer-Button) schließt die Liste', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+
+    const input = page.locator('input[type="search"]')
+    await input.fill('block')
+    await input.press('Enter')
+    const hit = page.locator('.results button', { hasText: 'API Spec' })
+    await expect(hit).toBeVisible()
+
+    await hit.focus()
+    await expect.poll(() => page.evaluate(() => document.activeElement?.tagName ?? '')).toBe('BUTTON')
+
+    await hit.press('Escape')
+    await expect(page.locator('ul.results')).toHaveCount(0)
+    // Input-Wert bleibt (der Wrapper-Handler preventDefault'et, egal wo der Fokus liegt).
+    await expect(input).toHaveValue('block')
+  })
+
+  // (c) busy SICHTBAR: während eines verzögerten Ego-Loads sind alle Treffer-
+  //     Buttons disabled, und ein Klick auf einen zweiten (disabled) Treffer
+  //     erzeugt KEINEN zweiten Dialog. Rot gegen Ist: Buttons nie disabled
+  //     (kein pageBusy) → toBeDisabled() schlägt fehl; der still gedroppte Zweit-
+  //     Pick ist im Ist der busy-Guard (setFocus), W3 macht ihn sichtbar.
+  test('busy sichtbar: Treffer-Buttons disabled während des Ego-Loads, kein zweiter Dialog', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+    await submitSearch(page)
+
+    // Ego-Route ab jetzt verzögern (route-fulfill nach Delay via fallback an die
+    // seedSession-Mocks) → der nächste Pick hält busy sichtbar offen.
+    await page.route('**/api/graph/ego**', async (route) => {
+      await new Promise((r) => setTimeout(r, 1500))
+      return route.fallback()
+    })
+
+    const hit1 = page.locator('.results button', { hasText: 'API Spec' }) // NODE2
+    const hit2 = page.locator('.results button', { hasText: 'Retrieval Findings' }) // NODE3
+    await hit1.click() // startet den verzögerten Ego-Load → busy=true (pageBusy)
+
+    // Während des Loads: alle Treffer-Buttons disabled (aus der Tab-Ordnung raus).
+    await expect(hit1).toBeDisabled()
+    await expect(hit2).toBeDisabled()
+
+    // Ein (Force-)Klick auf den disabled Zweit-Treffer feuert kein click → kein Pick.
+    await hit2.click({ force: true })
+
+    // Nach Load-Abschluss: genau EIN Fenster (der erste Pick), nie ein zweites.
+    await expect(page.getByRole('dialog')).toHaveCount(1)
+    // Buttons wieder aktiv, Liste weiterhin offen (W3).
+    await expect(hit1).toBeEnabled()
+    await expect(page.locator('ul.results')).toHaveCount(1)
+  })
+})

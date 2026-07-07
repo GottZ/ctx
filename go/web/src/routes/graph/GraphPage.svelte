@@ -221,7 +221,10 @@
        each card re-enables events on itself. -->
   <div class="chrome-left">
     <div class="card search-card">
-      <SearchBox onpick={(id, origin) => void setFocus(id, { open: true, openTrigger: origin })} />
+      <SearchBox
+        pageBusy={busy}
+        onpick={(id, origin) => void setFocus(id, { open: true, openTrigger: origin })}
+      />
     </div>
     {#if focus !== null}
       <div class="card meta-row">
