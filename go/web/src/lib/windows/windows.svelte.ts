@@ -52,7 +52,15 @@ export class WindowStore {
    * Fokus-Rückgabe-Ziel beim Close (Node-Klick → null → fallbackFocusEl).
    */
   open(id: string, triggerEl: HTMLElement | null = null): void {
-    if (this.wins.some((w) => w.id === id)) {
+    const existing = this.wins.find((w) => w.id === id)
+    if (existing !== undefined) {
+      // U03-W1 (§4.2): ein NON-NULL triggerEl aktualisiert das gespeicherte
+      // Fokus-Rückgabe-Ziel des existierenden Fensters VOR restore — ein zuvor
+      // per Canvas-Klick (triggerEl:null) oder Deep-Link geöffnetes und danach
+      // aus der Suche re-gepicktes Fenster führt beim Close so in die Suche
+      // zurück statt auf .viewport. null lässt das gespeicherte unangetastet
+      // (Canvas-Klick-Verhalten bricht nicht).
+      if (triggerEl !== null) existing.triggerEl = triggerEl
       this.restore(id)
       return
     }

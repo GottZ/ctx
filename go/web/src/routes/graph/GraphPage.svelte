@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
   import { toApiError, type ApiError } from '../../lib/api'
   import { fetchEgo } from '../../lib/graph/api'
   import { LayoutRunner } from '../../lib/graph/fa2'
@@ -37,6 +37,11 @@
   // node highlight. In-memory per page-visit (mirrors the ephemeral graph).
   const store = new WindowStore()
   let viewportEl = $state<HTMLElement>()
+  // U03-W1 (§5.2): bind:this auf die Focus-Stage-Region. `.wm-root` ist inset:0
+  // dieser Stage (box-gleich), also misst clientWidth/clientHeight dieselbe Box
+  // wie der WindowManager. setFocus misst hier VOR store.open die frische
+  // Surface (timing-unabhängig von der WindowManager-Mount-Ordnung).
+  let stageEl = $state<HTMLElement>()
   let loadedCategories = $state<string[]>([])
   // Theme-aware graph colors read once from the CSS tokens (dark fallback if
   // the theme axis hasn't shipped). G1 only seeds merges/Sigma from this; the
@@ -88,7 +93,14 @@
     // content loads from the API and BlockDetailContent guards on hasNode.
   }
 
-  async function setFocus(id: string, opts: { pushUrl?: boolean } = {}): Promise<void> {
+  // U03-W1 (§4.1): setFocus lernt `open` — nach Ego-Erfolg öffnet es das
+  // Node-Detail-Fenster über DENSELBEN Pfad wie der Canvas-Klick (store.open),
+  // Erfolgs-gekoppelt (der catch öffnet nie → kein Zombie-Fenster). `openTrigger`
+  // ist das Fokus-Rückgabe-Ziel beim Close (Such-Input, §4.2).
+  async function setFocus(
+    id: string,
+    opts: { pushUrl?: boolean; open?: boolean; openTrigger?: HTMLElement | null } = {},
+  ): Promise<void> {
     if (busy) return
     busy = true
     error = null
@@ -104,6 +116,16 @@
         history.replaceState(null, '', url)
       }
       view?.resetCamera()
+      if (opts.open) {
+        // §5.2: nach tick() ist die Focus-Stage im DOM committed → die Stage-
+        // Surface synchron und FRISCH messen (1 lu = 1 CSS-px, DomProjector-
+        // Identität) und in den Store pushen, BEVOR spawnRect sie liest. Damit
+        // hängt die Erst-Platzierung an der eigenen Messung, nicht an einer
+        // Mount-/Effect-Reihenfolge des WindowManagers.
+        await tick()
+        if (stageEl) store.setSurface({ wLu: stageEl.clientWidth, hLu: stageEl.clientHeight })
+        store.open(id, opts.openTrigger ?? null)
+      }
     } catch (err) {
       error = toApiError(err)
     } finally {
@@ -147,7 +169,7 @@
        overlay (floating windows over the canvas); the viewport is a focusable
        fallback target for window-close focus return. -->
   {#if focus !== null}
-    <div class="stage">
+    <div class="stage" bind:this={stageEl}>
       <div class="viewport" bind:this={viewportEl} tabindex="-1">
         <GraphView
           bind:this={view}
@@ -198,7 +220,7 @@
        each card re-enables events on itself. -->
   <div class="chrome-left">
     <div class="card search-card">
-      <SearchBox onpick={(id) => void setFocus(id)} />
+      <SearchBox onpick={(id, origin) => void setFocus(id, { open: true, openTrigger: origin })} />
     </div>
     {#if focus !== null}
       <div class="card meta-row">

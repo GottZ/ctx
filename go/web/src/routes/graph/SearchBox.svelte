@@ -2,13 +2,18 @@
   import { toApiError, type ApiError } from '../../lib/api'
   import { searchBlocks, type SearchResult } from '../../lib/graph/api'
 
-  let { onpick }: { onpick: (id: string) => void } = $props()
+  // U03-W1 (§4.2): der Pick liefert das Fokus-Rückgabe-Ziel mit. `origin` ist
+  // das Such-INPUT-Element (stabil über beide Stages, überlebt den Pick) — NIE
+  // der Treffer-Button, der beim Pick aus dem DOM entfernt wird.
+  let { onpick }: { onpick: (id: string, origin: HTMLElement | null) => void } = $props()
 
   let query = $state('')
   let results = $state<SearchResult[]>([])
   let busy = $state(false)
   let error = $state<ApiError | null>(null)
   let searched = $state(false)
+  // Fokus-Rückgabe-Ziel: das Such-Input (bind:this), stabil über den Pick hinweg.
+  let inputEl = $state<HTMLInputElement | null>(null)
 
   // FTS entry point (design 05-§3.1): stemmed words match, substrings/typos
   // do not — plain /api/search, no LLM touched.
@@ -30,9 +35,11 @@
   }
 
   function pick(id: string): void {
+    // Listen-Verhalten (Liste leert sich) bleibt in W1 unverändert — das offene
+    // Halten der Liste ist W3. Das Such-Input als origin mitgeben (§4.2).
     results = []
     searched = false
-    onpick(id)
+    onpick(id, inputEl)
   }
 </script>
 
@@ -41,6 +48,7 @@
     type="search"
     placeholder="search blocks (FTS) — pick a hit to focus its ego net"
     spellcheck="false"
+    bind:this={inputEl}
     bind:value={query}
   />
   <button type="submit" disabled={busy || query.trim() === ''}>{busy ? '…' : 'Search'}</button>
