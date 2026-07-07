@@ -364,3 +364,102 @@ test.describe('graph search-open (U03-W3)', () => {
     await expect(page.locator('ul.results')).toHaveCount(1)
   })
 })
+
+// U03-W4 — Arrow-Key-Navigation Input ↔ Trefferliste (design 03-§4.7.2 + §4.5-
+// Zweig B). Roving `focus()` auf den NATIVEN Treffer-Buttons, EXPLIZIT KEINE ARIA-
+// Combobox-Rollen (role=combobox/listbox/option / aria-activedescendant sind
+// verboten, §4.7.2). Zweite Hälfte des Tastatur-Escape-Loops (§4.5-Zweig B). Alle
+// Gates erreichen die Focus-Stage ?focus-frei über den Overview-Pick (W2-Immunität).
+test.describe('graph search-open (U03-W4)', () => {
+  // (a) ArrowDown im Such-Input springt auf den ersten Treffer-Button. Rot gegen
+  //     Ist: der Wrapper-onkeydown behandelt nur Escape → ArrowDown bewegt nichts,
+  //     der Fokus bleibt im Input.
+  test('ArrowDown im Such-Input springt auf den ersten Treffer-Button', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+
+    const input = page.locator('input[type="search"]')
+    await input.fill('block')
+    await input.press('Enter')
+    await expect(page.locator('.results button').first()).toBeVisible()
+
+    await input.press('ArrowDown')
+    await expect(page.locator('.results button').nth(0)).toBeFocused()
+  })
+
+  // (b) Roving zwischen den Buttons: ArrowDown → zweiter Button; ArrowUp → erster;
+  //     ArrowUp vom ersten → zurück ins Such-Input. Rot gegen Ist (keine Arrow-
+  //     Behandlung → Fokus wandert nie auf einen Button).
+  test('ArrowDown/ArrowUp roven zwischen den Treffern und zurück ins Such-Input', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+
+    const input = page.locator('input[type="search"]')
+    await input.fill('block')
+    await input.press('Enter')
+    const buttons = page.locator('.results button')
+    await expect(buttons.first()).toBeVisible()
+
+    await input.press('ArrowDown')
+    await expect(buttons.nth(0)).toBeFocused()
+
+    await page.keyboard.press('ArrowDown')
+    await expect(buttons.nth(1)).toBeFocused()
+
+    await page.keyboard.press('ArrowUp')
+    await expect(buttons.nth(0)).toBeFocused()
+
+    await page.keyboard.press('ArrowUp')
+    await expect(input).toBeFocused()
+  })
+
+  // (c) Voller Tastatur-Escape-Loop (§4.5-Zweig B, END-ZU-END): submitten →
+  //     ArrowDown → Enter (Pick 1, Fenster + Autofokus) → Escape (Fenster zu, Fokus
+  //     zurück ins Such-Input) → ArrowDown (Liste ist NOCH offen, W3) → Fokus wieder
+  //     auf dem ersten Treffer. Der geschlossene Loop als EIN Test. Rot gegen Ist:
+  //     das erste ArrowDown bewegt den Fokus nicht auf einen Button.
+  test('Tastatur-Escape-Loop: ArrowDown → Enter → Escape → ArrowDown re-öffnet die Trefferführung', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+
+    const input = page.locator('input[type="search"]')
+    await input.fill('block')
+    await input.press('Enter')
+    await expect(page.locator('.results button').first()).toBeVisible()
+
+    // ArrowDown → erster Treffer, Enter → Pick 1 (nativer Button-Klick, Fenster öffnet).
+    await input.press('ArrowDown')
+    await expect(page.locator('.results button').nth(0)).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('dialog')).toHaveCount(1)
+    await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('role') ?? '')).toBe('dialog')
+
+    // Escape schließt das Fenster (Fenster-Container-Handler, nicht der SearchBox-
+    // Wrapper — der Fokus liegt im Fenster) → close() gibt den Fokus ans Such-Input.
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(input).toBeFocused()
+
+    // Liste ist NOCH offen (W3) → ArrowDown führt wieder auf den ersten Treffer.
+    await input.press('ArrowDown')
+    await expect(page.locator('.results button').nth(0)).toBeFocused()
+  })
+
+  // (d) §4.7.2-Entscheidung gepinnt: KEINE ARIA-Combobox-Rollen. Kein Rot-Gate
+  //     (Ist setzt ohnehin keine), sondern eine Regressions-Sperre gegen einen
+  //     späteren, halben Combobox-Ausbau.
+  test('setzt keine ARIA-Combobox-Rollen (native Buttons, §4.7.2)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+
+    const input = page.locator('input[type="search"]')
+    await input.fill('block')
+    await input.press('Enter')
+    await expect(page.locator('.results button').first()).toBeVisible()
+
+    await expect(page.locator('[role="combobox"]')).toHaveCount(0)
+    await expect(page.locator('[role="listbox"]')).toHaveCount(0)
+    await expect(page.locator('[role="option"]')).toHaveCount(0)
+    await expect(page.locator('[aria-activedescendant]')).toHaveCount(0)
+  })
+})

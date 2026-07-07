@@ -21,6 +21,10 @@
   let searched = $state(false)
   // Fokus-Rückgabe-Ziel: das Such-Input (bind:this), stabil über den Pick hinweg.
   let inputEl = $state<HTMLInputElement | null>(null)
+  // U03-W4 (§4.7.2): die Trefferliste (bind:this) — Quelle der nativen Treffer-
+  // Buttons für den Roving-Fokus. querySelectorAll statt eines Index-States, damit
+  // die Fokus-Wahrheit immer das LIVE-DOM ist (kein Sync-Zweig, kein Stale-Index).
+  let listEl = $state<HTMLUListElement | null>(null)
 
   // FTS entry point (design 05-§3.1): stemmed words match, substrings/typos
   // do not — plain /api/search, no LLM touched.
@@ -56,12 +60,53 @@
   // input[type=search] in Blink/WebKit). Liste zu → Event unangetastet (native
   // Semantik). Kein Konflikt mit dem Fenster-Escape (der hängt am Fenster-
   // Container, nicht an diesem Teilbaum).
+  // U03-W4 (§4.7.2): Arrow-Roving hängt am SELBEN Wrapper-onkeydown wie Escape
+  // (W3) — genau EINE Anbindung, denn nur der gemeinsame Wrapper sieht Events aus
+  // BEIDEN Fokus-Orten (Such-Input UND Treffer-Button im <ul>, die im Layout
+  // Geschwister sind; ein form-Handler erreichte den Button nicht). Mechanismus:
+  // roving `focus()` auf den nativen <button>s — KEINE ARIA-Combobox-Rollen und
+  // KEINE tabindex-Akrobatik (Buttons sind nativ fokussierbar), §4.7.2. Zugleich
+  // zweite Hälfte des Tastatur-Escape-Loops (§4.5-Zweig B): nach Fenster-Close
+  // (Fokus zurück im Input) re-öffnet ArrowDown die per W3 offen bleibende Liste.
   function onkeydown(event: KeyboardEvent): void {
-    if (event.key !== 'Escape') return
-    if (results.length === 0 && !searched) return
+    if (event.key === 'Escape') {
+      if (results.length === 0 && !searched) return
+      event.preventDefault()
+      results = []
+      searched = false
+      return
+    }
+
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    // Leere/geschlossene Liste → nichts tun, Event unangetastet (native Semantik).
+    // pageBusy → die Treffer-Buttons sind disabled, `.focus()` darauf wäre wirkungs-
+    // los; die Navigation gar nicht erst starten (Event durchlassen) ist der saubere
+    // Weg (§Scope: pageBusy-Verhalten). Steady-State: pageBusy=false → volle Roving.
+    if (results.length === 0 || pageBusy) return
+
+    const buttons = listEl ? [...listEl.querySelectorAll<HTMLButtonElement>('button')] : []
+    if (buttons.length === 0) return
+
+    const idx = buttons.indexOf(document.activeElement as HTMLButtonElement)
+    if (idx === -1) {
+      // Fokus liegt nicht auf einem Treffer: nur ArrowDown AUS DEM INPUT springt
+      // auf den ersten Treffer. ArrowUp im Input bleibt nativ (Cursor-Semantik).
+      if (event.key === 'ArrowDown' && document.activeElement === inputEl) {
+        event.preventDefault()
+        buttons[0].focus()
+      }
+      return
+    }
+
+    // Fokus auf einem Treffer → roven. preventDefault verhindert das Seiten-Scrollen.
     event.preventDefault()
-    results = []
-    searched = false
+    if (event.key === 'ArrowDown') {
+      buttons[Math.min(idx + 1, buttons.length - 1)].focus() // am letzten Treffer stehen bleiben
+    } else if (idx === 0) {
+      inputEl?.focus() // ArrowUp vom ersten Treffer → zurück ins Such-Input
+    } else {
+      buttons[idx - 1].focus()
+    }
   }
 </script>
 
@@ -87,7 +132,7 @@
   {:else if searched && results.length === 0}
     <p class="empty" role="status">no FTS match — words are stemmed, substrings don't match</p>
   {:else if results.length > 0}
-    <ul class="results">
+    <ul class="results" bind:this={listEl}>
       {#each results as r (r.id)}
         <li>
           <button type="button" disabled={pageBusy} onclick={() => pick(r.id)}>
