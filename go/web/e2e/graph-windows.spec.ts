@@ -566,6 +566,166 @@ test.describe('graph floating windows — W3 SSE-Gate (U04-W3, Board-Host)', () 
   })
 })
 
+// U04-W7 — Board-Host Drag-Region-Contract (AM-4, design 04-§4.5). Der Board-
+// Renderer IssueDetailContent nimmt am DOM-Vertrag teil: in einem FloatingWindow
+// (titleId gesetzt → .in-window) ziehen die Kopf-Freiflächen .titlebar + .meta das
+// Fenster; Titel-Edit/Status-Wechsel (button/input/select via DRAG_EXEMPT) und die
+// kopier-relevanten Labels (data-window-drag-exempt) sind ausgenommen. Der Kern-
+// Unterschied zu W5: dieser Renderer hat ZWEI Hosts — auf der /issues/:id-Route
+// (kein titleId) ist der Marker ABWESEND und der Lese-Host bleibt selektierbar.
+// Rot gegen Ist: dort trägt IssueDetailContent keine Marker/kein user-select:none.
+test.describe('board window — W7 drag region (U04-W7, AM-4)', () => {
+  const ISSUE = '11111111-1111-1111-1111-111111111111' // board.json first card
+
+  /** Override the detail GET so the issue is in the caller home scope (writable →
+   *  Status-Picker + Edit-Button + Composer render) with copy-relevant labels and
+   *  a long body. Only the detail GET (…/issues/{id}) is intercepted; comments,
+   *  /board and the issues list fall through to the seedSession mocks. */
+  async function homeScopeDetail(page: Page): Promise<void> {
+    await page.route('**/api/project/**', async (route) => {
+      const url = route.request().url()
+      if (route.request().method() === 'GET' && /\/issues\/[^/?]+(?:\?|$)/.test(url)) {
+        return route.fulfill({
+          status: 200,
+          json: {
+            success: true,
+            render: 'untrusted',
+            issue: {
+              id: ISSUE,
+              category: 'task',
+              type: 'issue',
+              type_source: 'manual',
+              title: 'Drag region issue',
+              content: '# Body\n\n' + Array.from({ length: 60 }, (_, i) => `Zeile ${i + 1} des Volltexts.`).join('\n\n'),
+              scope: 'home',
+              sensitivity: 'internal',
+              sensitivity_source: 'manual',
+              lifecycle_state: 'active',
+              tags: ['bug', 'p1'],
+              metadata: {},
+              created_at: '2026-07-01T00:00:00Z',
+              updated_at: '2026-07-03T00:00:00Z',
+              workflow_status: 'open',
+            },
+            comments: [],
+            comments_cursor: null,
+          },
+        })
+      }
+      return route.fallback()
+    })
+  }
+
+  async function dragFrom(page: Page, sx: number, sy: number, dx: number, dy: number): Promise<void> {
+    await page.mouse.move(sx, sy)
+    await page.mouse.down()
+    await page.mouse.move(sx + dx, sy + dy, { steps: 8 })
+    await page.mouse.up()
+  }
+
+  async function openBoardWindow(page: Page): Promise<Locator> {
+    await seedSession(page, { role: 'server-admin', theme: 'dark', state: 'board' })
+    await homeScopeDetail(page)
+    await gotoArea(page, '/board?scope=acme:main')
+    const firstCard = page.locator('[data-board-card]').first()
+    await expect(firstCard).toBeVisible()
+    await firstCard.click()
+    const win = page.getByRole('dialog').first()
+    await expect(win).toBeVisible()
+    // Detail geladen + writable (Status-Picker sichtbar).
+    await expect(win.locator('.issue')).toBeVisible()
+    await expect(win.locator('select[aria-label="Workflow status"]')).toBeVisible()
+    return win
+  }
+
+  test('Drag von der Meta-Freifläche (.type) bewegt das Board-Fenster (>40px)', async ({ page }) => {
+    const win = await openBoardWindow(page)
+    const type = win.locator('.meta .type')
+    await expect(type).toBeVisible()
+    const box = await type.boundingBox()
+    if (!box) throw new Error('type has no box')
+    const before = await win.boundingBox()
+    await dragFrom(page, box.x + box.width / 2, box.y + box.height / 2, 110, 70)
+    const after = await win.boundingBox()
+    // Rot gegen Ist: die Meta war keine Drag-Fläche → Delta ~0.
+    expect(Math.abs(after!.x - before!.x) + Math.abs(after!.y - before!.y)).toBeGreaterThan(40)
+  })
+
+  test('Interaktive Kopf-Controls + kopier-relevante Labels ziehen NICHT; user-select gepinnt', async ({ page }) => {
+    const win = await openBoardWindow(page)
+
+    // (a) Der Status-<select> zieht NICHT (generisch DRAG_EXEMPT) und bleibt bedienbar.
+    const select = win.locator('select[aria-label="Workflow status"]')
+    {
+      const box = await select.boundingBox()
+      if (!box) throw new Error('select has no box')
+      const b0 = await win.boundingBox()
+      await dragFrom(page, box.x + box.width / 2, box.y + box.height / 2, 90, 60)
+      const b1 = await win.boundingBox()
+      expect(Math.abs(b1!.x - b0!.x) + Math.abs(b1!.y - b0!.y), 'select Drag').toBeLessThan(5)
+    }
+    await expect(select).toBeEnabled()
+
+    // (b) Der Edit-Title-Button zieht NICHT und sein Klick öffnet die Titel-Edit.
+    const editBtn = win.getByRole('button', { name: 'Edit title' })
+    {
+      const box = await editBtn.boundingBox()
+      if (!box) throw new Error('edit button has no box')
+      const b0 = await win.boundingBox()
+      await dragFrom(page, box.x + box.width / 2, box.y + box.height / 2, 80, 50)
+      const b1 = await win.boundingBox()
+      expect(Math.abs(b1!.x - b0!.x) + Math.abs(b1!.y - b0!.y), 'edit-btn Drag').toBeLessThan(5)
+    }
+    await editBtn.click()
+    const titleInput = win.locator('input[aria-label="Issue title"]')
+    await expect(titleInput).toBeVisible()
+    // Der Titel-Input ist trotz Drag-Region-Elter selektierbar (user-select:text).
+    expect(await titleInput.evaluate((el) => getComputedStyle(el).userSelect), 'title input user-select').toBe('text')
+    await win.getByRole('button', { name: 'Cancel' }).click()
+
+    // (c) Die kopier-relevanten Labels (exempt) ziehen NICHT.
+    const labels = win.locator('.meta .labels')
+    {
+      const box = await labels.boundingBox()
+      if (!box) throw new Error('labels has no box')
+      const b0 = await win.boundingBox()
+      await dragFrom(page, box.x + box.width / 2, box.y + box.height / 2, 90, 60)
+      const b1 = await win.boundingBox()
+      expect(Math.abs(b1!.x - b0!.x) + Math.abs(b1!.y - b0!.y), 'labels (exempt) Drag').toBeLessThan(5)
+    }
+
+    // user-select: meta = none (Drag-Region), labels = text (selektierbar).
+    expect(await win.locator('.meta').evaluate((el) => getComputedStyle(el).userSelect), '.meta user-select').toBe('none')
+    expect(await labels.evaluate((el) => getComputedStyle(el).userSelect), '.labels user-select').toBe('text')
+  })
+
+  test('Der Volltext-Body zieht NICHT (scrollt/selektiert wie Ist)', async ({ page }) => {
+    const win = await openBoardWindow(page)
+    const body = win.locator('.issue-body')
+    await expect(body).toBeVisible()
+    const box = await body.boundingBox()
+    if (!box) throw new Error('body has no box')
+    const b0 = await win.boundingBox()
+    await dragFrom(page, box.x + box.width / 2, box.y + 20, 90, 60)
+    const b1 = await win.boundingBox()
+    expect(Math.abs(b1!.x - b0!.x) + Math.abs(b1!.y - b0!.y), 'issue-body Drag').toBeLessThan(5)
+    expect(await body.evaluate((el) => getComputedStyle(el).userSelect), '.issue-body user-select').not.toBe('none')
+  })
+
+  test('Host-aware: die /issues/:id-Route trägt KEINE Drag-Marker und bleibt selektierbar', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark', state: 'board' })
+    await homeScopeDetail(page)
+    await gotoArea(page, `/issues/${ISSUE}?scope=acme:main`)
+    const meta = page.locator('.meta').first()
+    await expect(meta).toBeVisible()
+    // Kein data-window-drag auf der Route (inWindow=false).
+    expect(await meta.getAttribute('data-window-drag'), 'route .meta marker').toBeNull()
+    expect(await page.locator('.titlebar').first().getAttribute('data-window-drag'), 'route .titlebar marker').toBeNull()
+    // Und kein user-select:none → der Leser kann Titel/Meta selektieren.
+    expect(await meta.evaluate((el) => getComputedStyle(el).userSelect), 'route .meta user-select').not.toBe('none')
+  })
+})
+
 // U04-W5 — Drag-Region-Contract: die Kopf-Freifläche (header + Meta) zieht das
 // Fenster (design 04-§4.5/§7-W5). FloatingWindow delegiert den Body-pointerdown
 // gegen den DOM-Vertrag (data-window-drag / data-window-drag-exempt); startDrag/

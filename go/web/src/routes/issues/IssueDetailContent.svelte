@@ -87,6 +87,17 @@
       canWriteScope(issue.scope, { homeScope: session.homeScope, readScopes: session.readScopes }),
   )
 
+  // Drag-Region host-awareness (U04-W7, AM-4, design 04-§4.5). THIS renderer has
+  // two live hosts: the board FloatingWindow (BoardPage passes titleId to wire the
+  // window h2) AND the /issues/:id route (IssueDetailPage mounts it WITHOUT
+  // titleId, an h1 in a scrollable reading column). Only the window host may turn
+  // the head into a drag handle; on the route host user-select:none / cursor:move
+  // would be a real regression (a reader could not select the title, the cursor
+  // would lie). titleId IS that host signal, so it gates both the data-window-drag
+  // markers and the drag CSS (via .in-window). Unlike BlockDetailContent (W5, one
+  // window-only host) the markers here are NOT unconditional.
+  const inWindow = $derived(titleId != null)
+
   // Related refs, defensively read from metadata (dormant until the wire emits it).
   const related = $derived<RelatedRef[]>(readRelated(issue?.metadata))
   // Status targets = board columns plus the current one, minus duplicates.
@@ -208,8 +219,17 @@
     {#if model.loadError?.requestId}<p class="request-id">request {model.loadError.requestId}</p>{/if}
   </div>
 {:else if issue !== null}
-  <article class="issue">
-    <div class="titlebar">
+  <!-- U04-W7 (AM-4, design 04-§4.5): in a board FloatingWindow host (inWindow),
+       the head free area (titlebar + meta) is the drag handle of the surrounding
+       window via the DOM contract (data-window-drag / data-window-drag-exempt +
+       the generic DRAG_EXEMPT interactive list in FloatingWindow). The Titel-Edit
+       button/input, the Status-Wechsel select/button and the composer are all
+       generically exempt (button/input/select/textarea) so they keep working; the
+       copy-relevant labels opt out explicitly. On the /issues/:id route host
+       (inWindow=false) NO marker is emitted and .in-window is absent → the reader
+       keeps full selection. -->
+  <article class="issue" class:in-window={inWindow}>
+    <div class="titlebar" data-window-drag={inWindow ? '' : undefined}>
       {#if editingTitle}
         <div class="title-edit">
           <input type="text" aria-label="Issue title" bind:value={titleDraft} disabled={model.mutating} />
@@ -227,7 +247,7 @@
       {/if}
     </div>
 
-    <div class="meta">
+    <div class="meta" data-window-drag={inWindow ? '' : undefined}>
       <span class="type">{issue.type ?? issue.category}</span>
       {#if sync}
         <span class="sync tone-{sync.tone}" title={sync.hint} data-sync-state={sync.state}>
@@ -235,7 +255,7 @@
         </span>
       {/if}
       {#if issue.tags.length > 0}
-        <span class="labels">
+        <span class="labels" data-window-drag-exempt>
           {#each issue.tags as tag (tag)}<span class="label">{tag}</span>{/each}
         </span>
       {/if}
@@ -361,6 +381,35 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
+  }
+  /* U04-W7 (AM-4, design 04-§4.5): host-aware drag regions. ONLY when this
+     renderer sits in a board FloatingWindow (host passes titleId → .in-window) do
+     the titlebar + meta become the drag handle of the surrounding window. The
+     /issues/:id route mounts the SAME component WITHOUT titleId, so .in-window is
+     absent and NONE of these rules apply — the reading route keeps full text
+     selection and the default cursor. touch-action:none → the browser drags
+     instead of scrolling; user-select:none → drags instead of selecting;
+     cursor:move is the affordance. The full-text body, related and comments stay
+     unmarked (scroll/select as Ist). */
+  .in-window .titlebar,
+  .in-window .meta {
+    touch-action: none;
+    user-select: none;
+    cursor: move;
+  }
+  /* The copy-relevant labels opt back out (selectable/scrollable). */
+  .in-window .labels[data-window-drag-exempt] {
+    touch-action: auto;
+    user-select: text;
+    cursor: auto;
+  }
+  /* The title input (edit mode) sits INSIDE the titlebar drag region; without this
+     restore, user-select:none would cascade in and block selecting/typing. The
+     drag itself never starts on it (input is DRAG_EXEMPT). */
+  .in-window .title-edit input {
+    touch-action: auto;
+    user-select: text;
+    cursor: text;
   }
   .issue-title {
     margin: 0;
