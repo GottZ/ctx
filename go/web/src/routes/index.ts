@@ -35,6 +35,11 @@ export const areaRoutes = {
   // Deep sub-route under /settings (its own lazy chunk); the topbar /settings
   // tab stays active via startsWith. Reaches no reserved server prefix.
   '/settings/backends': () => import('./settings/backends/BackendsPage.svelte'),
+  // Kategorie-Farb-Overrides (AM-2, U02-W6): eigene Lazy-Sub-Route = eigener
+  // Chunk (das OKLCH-Wheel trägt weder der /settings- noch der Default-Chunk,
+  // design 02a §A4-W6 PLc). Kein Tier-Guard auf /settings/*; die Fläche self-
+  // gated auf admin/tenant-admin (HueWheelPage). areaMode unmapped → 'reading'.
+  '/settings/hues': () => import('./settings/hues/HueWheelPage.svelte'),
   '/status': () => import('./status/StatusPage.svelte'),
   '/graph': () => import('./graph/GraphPage.svelte'),
   '/chat': () => import('./chat/ChatPage.svelte'),

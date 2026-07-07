@@ -10,7 +10,15 @@
   import EmptyState from '../../lib/ui/EmptyState.svelte'
 
   // Single click on a cluster → drill into its representative's ego net.
-  let { onpick, palette }: { onpick: (reprId: string) => void; palette: GraphPalette } = $props()
+  // AM-2 (design 02a §A3/§A4-W6): `overrides` ist die aufgelöste Kategorie-Hue-
+  // Map (GraphPage lädt sie fire-and-forget). Der Initial-Bake (buildOverviewGraph)
+  // nimmt sie mit; trifft sie erst NACH dem Bake ein (paralleler Fetch), zieht der
+  // overrides-$effect unten die Cluster-Farben nach.
+  let {
+    onpick,
+    palette,
+    overrides,
+  }: { onpick: (reprId: string) => void; palette: GraphPalette; overrides: Map<string, number> } = $props()
 
   let container: HTMLDivElement
   let renderer: Sigma<MetaNodeAttrs, MetaEdgeAttrs> | null = null
@@ -38,7 +46,7 @@
         // so a tick() is required between the state change and the mount.
         await tick()
         if (killed) return
-        const graph = buildOverviewGraph(resp, palette)
+        const graph = buildOverviewGraph(resp, palette, overrides)
         metaGraph = graph
         overviewResp = resp
         const r = new Sigma(graph, container, {
@@ -90,11 +98,15 @@
     // as a dependency and the re-color never fired on a later theme switch
     // (caught by the e2e graph-palette smoke). Hoisting the read fixes tracking.
     const p = palette
+    // AM-2: overrides ebenfalls als getrackte Dependency lesen — so re-baked der
+    // Effect sowohl beim Theme-Wechsel ALS AUCH bei der (fire-and-forget) späten
+    // Ankunft/Änderung der Override-Map (design 02a §A3, recolor-on-arrival).
+    const ov = overrides
     const r = renderer
     const g = metaGraph
     const resp = overviewResp
     if (!r || !g || !resp) return
-    recolorOverviewGraph(g, resp, p)
+    recolorOverviewGraph(g, resp, p, ov)
     r.setSetting('labelColor', { color: p.labelColor })
     r.setSetting('defaultEdgeColor', p.edgeColor)
     // Hover-Drawer beim Theme-Wechsel neu setzen (Closure über alte Palette, M5).

@@ -142,6 +142,13 @@
   export function resetCamera(): void {
     renderer?.getCamera().animatedReset({ duration: 300 })
   }
+
+  /** Repaint after the page re-bakes node color attrs off-band (AM-2 hues
+   *  arrive fire-and-forget after the initial seed merge, design 02a §A3 —
+   *  recolor-on-arrival: GraphPage calls recolorGraph then this refresh). */
+  export function refresh(): void {
+    renderer?.refresh()
+  }
 </script>
 
 <!-- data-e2e-mask: sigma/ForceAtlas2 pixel output is not seed-stable — the

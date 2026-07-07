@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte'
   import { toApiError, type ApiError } from '../../lib/api'
-  import { fetchEgo } from '../../lib/graph/api'
+  import { fetchCategoryHues, fetchEgo } from '../../lib/graph/api'
   import { LayoutRunner } from '../../lib/graph/fa2'
   import { defaultFilters, toEgoQuery } from '../../lib/graph/filters'
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
@@ -47,6 +47,12 @@
   // the theme axis hasn't shipped). G1 only seeds merges/Sigma from this; the
   // re-color-on-theme-switch listener is G2 (design 03-§4).
   let palette = $state(readGraphPalette())
+  // AM-2 (design 02a §A3): aufgelöste sparse Override-Map {Kategorie → HSL-Hue}
+  // für den eigenen {_global, Tenant}-View. Beim Mount FIRE-AND-FORGET parallel
+  // geladen (NIE vor fetchEgo/fetchOverview awaited — kein Wasserfall auf First
+  // Paint); trifft sie nach dem ersten Render ein, ist der einmalige Seed-Farb-
+  // Flash + ein Recolor-Pass akzeptiert. Leere Map = alles auf Seed.
+  let categoryHues = $state<Map<string, number>>(new Map())
 
   // a11y: a node-click window has no triggerEl (the Sigma node has no DOM
   // target) — close() must return focus to the graph region, never <body>.
@@ -63,6 +69,20 @@
     // bleibt unangetastet). openTrigger bleibt weg → Close-Fokus fällt auf
     // fallbackFocusEl = .viewport, identisch zum Canvas-Klick-Fenster (§4.3/§4.5).
     if (fromUrl) void setFocus(fromUrl, { pushUrl: false, open: true })
+    // AM-2 Override-Fetch: parallel + fire-and-forget (kein await vor dem ersten
+    // Render). Erfolg → Map setzen, den bereits geseedeten Ego-Graph nachfärben
+    // (recolor-on-arrival) + View-Refresh; die OverviewMap zieht die Map über
+    // ihren overrides-$effect nach. Fehlschlag → Seed bleibt stehen (Overrides
+    // sind eine Zusatzschicht, kein First-Paint-Blocker).
+    void fetchCategoryHues()
+      .then((r) => {
+        categoryHues = new Map(Object.entries(r.hues))
+        recolorGraph(graph, palette, categoryHues)
+        view?.refresh()
+      })
+      .catch(() => {
+        /* Overrides optional — der Hash-Seed trägt den Graph ohne sie. */
+      })
     // G2: live re-color on theme switch (design 03-§4). The theme controller
     // writes data-theme THEN fires THEME_CHANGE_EVENT, so readGraphPalette()
     // here already sees the new --graph-* tokens. Re-bake the baked color attrs
@@ -71,7 +91,9 @@
     // Sigma label/edge settings + refresh(). No remount, no re-layout.
     const onThemeChange = (): void => {
       palette = readGraphPalette()
-      recolorGraph(graph, palette)
+      // Die Overrides MITFÜHREN (design 02a §A3) — sonst verliert ein Theme-
+      // Wechsel jeden Kategorie-Hue-Override und fällt auf den Seed zurück.
+      recolorGraph(graph, palette, categoryHues)
     }
     window.addEventListener(THEME_CHANGE_EVENT, onThemeChange)
     return () => {
@@ -111,7 +133,7 @@
     try {
       const resp = await fetchEgo(id, { hops: 2, ...toEgoQuery(filters) })
       focus = id
-      mergeEgo(graph, resp, palette)
+      mergeEgo(graph, resp, palette, categoryHues)
       truncated = resp.stats.truncated
       settle()
       if (opts.pushUrl !== false) {
@@ -145,7 +167,7 @@
     try {
       touch(graph, id)
       const resp = await fetchEgo(id, { hops: 1, ...toEgoQuery(filters) })
-      mergeEgo(graph, resp, palette)
+      mergeEgo(graph, resp, palette, categoryHues)
       truncated = resp.stats.truncated
       settle()
     } catch (err) {
@@ -207,7 +229,7 @@
     </div>
   {:else}
     <div class="stage">
-      <OverviewMap onpick={(id) => void setFocus(id)} {palette} />
+      <OverviewMap onpick={(id) => void setFocus(id)} {palette} overrides={categoryHues} />
     </div>
   {/if}
 

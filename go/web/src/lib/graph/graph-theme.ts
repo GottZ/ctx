@@ -86,9 +86,10 @@ export function readGraphPalette(): GraphPalette {
 export function recolorGraph(
   graph: DirectedGraph<NodeAttrs, EdgeAttrs>,
   palette: GraphPalette,
+  overrides?: Map<string, number>,
 ): void {
   graph.forEachNode((id, attrs) => {
-    graph.setNodeAttribute(id, 'color', categoryColor(attrs.category, palette))
+    graph.setNodeAttribute(id, 'color', categoryColor(attrs.category, palette, overrides))
   })
   graph.forEachEdge((id, attrs) => {
     graph.setEdgeAttribute(id, 'color', edgeColor(attrs.rel, palette))
@@ -108,11 +109,12 @@ export function recolorOverviewGraph(
   graph: UndirectedGraph<MetaNodeAttrs, MetaEdgeAttrs>,
   resp: OverviewResponse,
   palette: GraphPalette,
+  overrides?: Map<string, number>,
 ): void {
   for (const node of resp.nodes) {
     const key = String(node.cluster)
     if (graph.hasNode(key)) {
-      graph.setNodeAttribute(key, 'color', categoryColor(node.top_categories[0] ?? 'cluster', palette))
+      graph.setNodeAttribute(key, 'color', categoryColor(node.top_categories[0] ?? 'cluster', palette, overrides))
     }
   }
   graph.forEachEdge((id) => graph.setEdgeAttribute(id, 'color', palette.edgeColor))

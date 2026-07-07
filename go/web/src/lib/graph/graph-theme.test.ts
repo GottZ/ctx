@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ApiNode, EgoResponse, OverviewNode, OverviewResponse } from './api'
-import { createGraph, mergeEgo } from './graph-client'
+import { createGraph, hslToHex, mergeEgo } from './graph-client'
 import { buildOverviewGraph } from './overview-map'
 import {
   categoryColor,
@@ -132,6 +132,24 @@ describe('categoryColor', () => {
     const light: GraphPalette = { ...dark, nodeSat: 62, nodeLum: 33 }
     // hslToHex(149, 62, 33) = #208852 (Light-Node-Kalibrierung 62/33, §3.2).
     expect(categoryColor('learnings', light)).toBe('#208852')
+  })
+
+  // AM-2 Override-Kette (design 02a §A2/§A3/§A4-W6). Rot-Beleg: vor der
+  // Signatur-Erweiterung ist der dritte Parameter ein TS-Compile-Fehler (der
+  // strukturelle Rot per §A4-W6). Der Override tauscht NUR den Hue gegen den
+  // gewählten HSL-Grad, sat/lum bleiben Palette — er durchläuft dieselbe
+  // hslToHex-Kette wie der Seed, also deckt G1a ihn (kein Kontrast-Risiko).
+  it('overschreibt NUR den Hue aus der Map (sat/lum bleiben Palette)', () => {
+    // hslToHex(200,70,68) ≠ das Hash-Ergebnis von 'learnings' (Hue 149).
+    expect(categoryColor('learnings', dark, new Map([['learnings', 200]]))).toBe(hslToHex(200, dark.nodeSat, dark.nodeLum))
+    expect(categoryColor('learnings', dark, new Map([['learnings', 200]]))).not.toBe(categoryColor('learnings', dark))
+  })
+
+  it('fällt ohne Map-Eintrag auf den Hash-Seed zurück (Default-Träger bleibt Code)', () => {
+    // Kategorie fehlt in der Map → Seed, bit-identisch zum argumentlosen Aufruf.
+    expect(categoryColor('learnings', dark, new Map([['decisions', 10]]))).toBe(categoryColor('learnings', dark))
+    // undefined-Map (kein Override-Fetch) → ebenfalls bit-identisch (Regression-Pin).
+    expect(categoryColor('learnings', dark, undefined)).toBe(categoryColor('learnings', dark))
   })
 })
 

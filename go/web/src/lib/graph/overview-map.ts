@@ -49,6 +49,7 @@ export function clusterEdgeSize(linkCount: number): number {
 export function buildOverviewGraph(
   resp: OverviewResponse,
   palette: GraphPalette,
+  overrides?: Map<string, number>,
 ): UndirectedGraph<MetaNodeAttrs, MetaEdgeAttrs> {
   const g = new UndirectedGraph<MetaNodeAttrs, MetaEdgeAttrs>()
   const n = Math.max(1, resp.nodes.length)
@@ -62,7 +63,7 @@ export function buildOverviewGraph(
       x: Math.cos(angle) * 10,
       y: Math.sin(angle) * 10,
       size: clusterNodeSize(node.size),
-      color: categoryColor(node.top_categories[0] ?? 'cluster', palette),
+      color: categoryColor(node.top_categories[0] ?? 'cluster', palette, overrides),
     })
   })
   for (const [src, dst, linkCount] of resp.edges) {

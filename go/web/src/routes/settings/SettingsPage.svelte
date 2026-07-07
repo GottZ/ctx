@@ -39,6 +39,10 @@
       <span class="el-title">Backend pool &amp; vault →</span>
       <span class="el-sub">manage provider backends, trust tiers and API-key secrets</span>
     </a>
+    <a class="editor-link" href="/settings/hues">
+      <span class="el-title">Kategorie-Farben →</span>
+      <span class="el-sub">Graph-Hue pro Kategorie überschreiben (AM-2) — Rad zeigt die Abstände perceptuell</span>
+    </a>
     {#if catalog.status === 'loading' || catalog.status === 'idle'}
       <p class="state" aria-busy="true">loading settings catalog…</p>
     {:else if catalog.status === 'error'}

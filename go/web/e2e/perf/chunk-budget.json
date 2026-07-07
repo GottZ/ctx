@@ -37,6 +37,7 @@
   },
   "overrides": {
     "GraphPage.js": 58000,
+    "graph-theme.js": 18000,
     "camo.js": 65000,
     "disclose-version.js": 25000,
     "index.js": 17000,

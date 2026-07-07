@@ -63,14 +63,32 @@ export function hslToHex(h: number, s: number, l: number): string {
 
 /** Category → hue, deterministic without a category registry. Saturation and
  *  lightness come from the palette (theme-aware) — only the hue is hashed.
- *  Ausgabe ist Hex (nicht hsl), weil sigma nur Hex/rgb parst (§4.1 M1). */
-export function categoryColor(category: string, palette: GraphPalette): string {
+ *  Ausgabe ist Hex (nicht hsl), weil sigma nur Hex/rgb parst (§4.1 M1).
+ *
+ *  AM-2 (design 02a §A2/§A3): `overrides` ist die aufgelöste sparse Map
+ *  {Kategorie → HSL-Hue-Grad} (Tenant→global vom Server materialisiert). Ein
+ *  Treffer tauscht NUR den Hue gegen den gewählten Grad — sat/lum bleiben
+ *  Palette, die Farbe durchläuft dieselbe hslToHex-Kette wie der Seed (G1a
+ *  deckt jeden HSL-Hue, kein Override-spezifischer Gate-Lauf). KEIN
+ *  `new Map()`-Default: der Param ist optional + `overrides?.get(...)`, damit
+ *  ohne Argument bit-identisches Verhalten UND keine Pro-Node-Allokation im
+ *  Recolor-Hot-Path (Review-Note §A4-W6). */
+export function categoryColor(category: string, palette: GraphPalette, overrides?: Map<string, number>): string {
+  return hslToHex(categoryHue(category, overrides), palette.nodeSat, palette.nodeLum)
+}
+
+/** The effective HSL hue degree (0–359) for a category: the override if the map
+ *  carries one, else the deterministic hash seed. Exported so the Hue-Wheel
+ *  (design 02a §A4-W6) places markers on the SAME hue the graph bakes — one
+ *  hash, no divergence. Kept palette-independent (only the hue). */
+export function categoryHue(category: string, overrides?: Map<string, number>): number {
+  const override = overrides?.get(category)
+  if (override !== undefined) return ((override % 360) + 360) % 360
   let hash = 0
   for (let i = 0; i < category.length; i++) {
     hash = (hash * 31 + category.charCodeAt(i)) | 0
   }
-  const hue = ((hash % 360) + 360) % 360
-  return hslToHex(hue, palette.nodeSat, palette.nodeLum)
+  return ((hash % 360) + 360) % 360
 }
 
 /** supersedes renders dim/strong — it is displayed, never traversed. */
@@ -98,6 +116,7 @@ export function mergeEgo(
   graph: DirectedGraph<NodeAttrs, EdgeAttrs>,
   resp: EgoResponse,
   palette: GraphPalette,
+  overrides?: Map<string, number>,
 ): void {
   const seed = seedPosition(graph, resp.focus)
   for (const n of resp.nodes) {
@@ -123,7 +142,7 @@ export function mergeEgo(
       x,
       y,
       size: nodeSize(n.degree),
-      color: categoryColor(n.category, palette),
+      color: categoryColor(n.category, palette, overrides),
     })
   }
   for (const [src, dst, rel, conf] of resp.edges) {

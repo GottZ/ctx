@@ -766,6 +766,30 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
     if (path === '/api/secrets' && method === 'GET') return route.fulfill({ json: { success: true, secrets: [] } })
     if (path.startsWith('/api/graph/overview')) return route.fulfill({ json: empty ? emptyOverviewFixture() : overviewFixture() })
     if (path.startsWith('/api/graph/ego')) return route.fulfill({ json: egoFixture() })
+    // Category-hue overrides (AM-2, U02-W6). GET = resolved sparse map (default
+    // EMPTY — every category renders on its hash seed; graph specs stay clean).
+    // PUT/DELETE echo the handler envelope; the server derives the scope from
+    // auth (never the body, §A5-MT), so the fixture returns the caller's home.
+    // Specs that need populated overrides register their OWN page.route AFTER
+    // seedSession (later registration wins) — e.g. the graph-render probe.
+    if (path.startsWith('/api/graph/category-hues')) {
+      const prefix = '/api/graph/category-hues/'
+      if (method === 'PUT') {
+        const category = decodeURIComponent(path.slice(prefix.length))
+        let hue = 0
+        try {
+          hue = (req.postDataJSON() as { hue?: number } | null)?.hue ?? 0
+        } catch {
+          /* non-JSON body — hue stays 0 */
+        }
+        return route.fulfill({ json: { success: true, category, hue, scope: ctx.home } })
+      }
+      if (method === 'DELETE') {
+        const category = decodeURIComponent(path.slice(prefix.length))
+        return route.fulfill({ json: { success: true, category, deleted: true, scope: ctx.home } })
+      }
+      return route.fulfill({ json: { success: true, hues: {} } })
+    }
     if (path === '/api/chat/sessions') return route.fulfill({ json: { success: true, sessions: [] } })
     if (path.startsWith('/api/chat/sessions/')) {
       // Detail default, shape-correct (ChatSessionDetailResponse, chat/types.ts

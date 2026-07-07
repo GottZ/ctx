@@ -660,6 +660,43 @@ export const contracts: PageContract[] = [
     },
   },
   {
+    route: '/settings/hues',
+    name: 'settings-hues',
+    // Guard-Wahrheit wie /settings/backends: kein TIER_GATE auf /settings/* —
+    // die Fläche ist page-self-gated (session.admin || viewOpsSurfaces =
+    // tenant-admin-or-up, = Server-Schreib-Gate W5). Mechanisches Rollen-Minimum
+    // = member (erreicht die Route, sieht das Banner statt eines 403-Requests);
+    // der Inhalt braucht admin (fixtures: nur server-admin trägt admin:true).
+    role: 'member',
+    mode: 'reading',
+    states: [{ name: 'default', seed: { role: 'server-admin' } }],
+    scale: {
+      exempt:
+        'Kategorie-Liste ist eine bounded Betreiber-/Tenant-Menge (Block-Kategorien) — die Override-Zeilen skalieren mit der Kategorie-Anzahl, nicht mit Blöcken (kein 10k-Nutzerpfad).',
+    },
+    flowDoc:
+      'Admin öffnet die Farb-Override-Fläche unter dem Settings-Crumb, wählt eine Kategorie und setzt ihren Graph-Hue am Regler (optimistische Vorschau + PUT); der Crumb führt zurück in den Katalog.',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'kategorie-farben' })).toBeVisible()
+      // Kategorie-Liste aus list-categories (Fixture: design/reference/learnings).
+      const cats = content.locator('ul[aria-label="kategorien"] .cat')
+      await expect(cats).toHaveCount(3)
+      // Kategorie wählen → der Hue-Regler erscheint.
+      await content.locator('ul[aria-label="kategorien"] .row').first().click()
+      const slider = page.getByRole('slider')
+      await expect(slider).toBeVisible()
+      // Hue setzen → PUT auf den Draht (die lokale Map + Swatches ziehen optimistisch mit).
+      await slider.fill('200')
+      await expect
+        .poll(() => session.calls.some((c) => c.method === 'PUT' && c.path.startsWith('/api/graph/category-hues/')))
+        .toBe(true)
+      // Crumb zurück in den Katalog.
+      await page.locator('.crumb').getByRole('link', { name: 'Settings' }).click()
+      await expect(page).toHaveURL(/\/settings$/)
+    },
+  },
+  {
     route: '/admin',
     name: 'admin',
     role: 'server-admin',
