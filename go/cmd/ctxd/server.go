@@ -197,6 +197,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Get("/api/graph/ego", graphH.HandleEgo)
 		// Graph overview — scope-pure Louvain cluster supergraph (F5-W6, gated)
 		r.Get("/api/graph/overview", overviewH.HandleOverview)
+		// Graph category-hue overrides (AM-2, U02-W5): GET is member-tier (the
+		// resolved {_global, tenant} map), PUT/DELETE are tenant-admin inside the
+		// mount (design/02a §A4-W5). FE renders the map atop the hash seed (W6).
+		handler.MountGraphCategoryHues(r, handler.NewGraphCategoryHuesHandler(pool))
 		// Whoami — key identity for the SPA login gate (F4-W3)
 		r.Get("/api/whoami", whoamiH.HandleWhoami)
 		// Manage — CRUD + Guard API

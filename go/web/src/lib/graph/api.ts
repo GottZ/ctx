@@ -179,3 +179,51 @@ export function fetchOverview(query: OverviewQuery = {}): Promise<OverviewRespon
   const qs = params.toString()
   return apiFetch<OverviewResponse>(`/api/graph/overview${qs ? `?${qs}` : ''}`)
 }
+
+// ── Category-hue overrides (AM-2, U02-W5, design 02a §A3/§A4-W5) ──────────────
+// Source: go/internal/handler/context_graph_category_hues.go. The GET is
+// member-tier and returns the RESOLVED sparse map (tenant > _global per
+// category); PUT/DELETE are tenant-admin, the server derives the target scope
+// from auth (never the client). Only the HUE (HSL degree 0–359) is overridden —
+// the consumer (W6) merges this atop the hash seed, this wave ships the client
+// only (no renderer yet).
+
+/** Resolved sparse override map: category → HSL hue degree (0–359). */
+export interface CategoryHuesResponse {
+  success: true
+  hues: Record<string, number>
+}
+
+/** GET the resolved override map for the caller's effective {_global, tenant} view. */
+export function fetchCategoryHues(): Promise<CategoryHuesResponse> {
+  return apiFetch<CategoryHuesResponse>('/api/graph/category-hues')
+}
+
+export interface CategoryHuePutResponse {
+  success: true
+  category: string
+  hue: number
+  scope: string
+}
+
+/** PUT an override for one category (tenant-admin). hue is an integer 0–359. */
+export function putCategoryHue(category: string, hue: number): Promise<CategoryHuePutResponse> {
+  return apiFetch<CategoryHuePutResponse>(`/api/graph/category-hues/${encodeURIComponent(category)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ hue }),
+  })
+}
+
+export interface CategoryHueDeleteResponse {
+  success: true
+  category: string
+  deleted: true
+  scope: string
+}
+
+/** DELETE the override for one category (tenant-admin) — reverts to the seed. */
+export function deleteCategoryHue(category: string): Promise<CategoryHueDeleteResponse> {
+  return apiFetch<CategoryHueDeleteResponse>(`/api/graph/category-hues/${encodeURIComponent(category)}`, {
+    method: 'DELETE',
+  })
+}
