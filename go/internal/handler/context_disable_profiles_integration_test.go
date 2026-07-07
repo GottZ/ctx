@@ -44,8 +44,12 @@ type profileHarness struct {
 func insertBackendRoles(t *testing.T, pool *pgxpool.Pool, name, scope string, roles []string) string {
 	t.Helper()
 	var id string
+	// model_map carries a "default" entry so the backend is update-valid: every
+	// core role must resolve to a model (validate.go role/model-coverage rule),
+	// which backend-update re-checks (W4 attaches disable_profiles via that path).
 	if err := pool.QueryRow(context.Background(),
-		`INSERT INTO context_backends (name, base_url, scope, roles) VALUES ($1,$2,$3,$4) RETURNING id`,
+		`INSERT INTO context_backends (name, base_url, scope, roles, model_map)
+		 VALUES ($1,$2,$3,$4,'{"default":"stub-model"}') RETURNING id`,
 		name, "http://"+name, scope, roles).Scan(&id); err != nil {
 		t.Fatalf("insert backend %s: %v", name, err)
 	}

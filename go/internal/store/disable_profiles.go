@@ -206,6 +206,44 @@ func DeleteDisableProfile(ctx context.Context, tx pgx.Tx, scope, name string, by
 	return false, true, nil
 }
 
+// SyncBackendDisableProfiles reconciles the disable-profile memberships of ONE
+// backend to exactly profileIDs (092, U01-W4): it PRUNEs the backend's join rows
+// whose profile is not in the target set and INSERTs the missing ones (INSERT
+// missing, DELETE surplus — per-backend atomic, minimal audit churn vs a full
+// delete+reinsert). It runs inside the SAME caller Tx as the backend write, so
+// the membership and the backend row commit or roll back together. An empty (or
+// nil) profileIDs removes EVERY membership of the backend. The handler already
+// resolved names→ids against the visible profile set, so the FK is the last-line
+// integrity guard. by re-stamps the tx actor for the 092 join audit trigger
+// (harmless when the preceding backend write already set it).
+func SyncBackendDisableProfiles(ctx context.Context, tx pgx.Tx, backendID string, profileIDs []string, by *string) error {
+	if err := setTxActor(ctx, tx, by); err != nil {
+		return err
+	}
+	if len(profileIDs) == 0 {
+		// nil/[] semantics: clear all memberships (a plain DELETE — a nil slice
+		// would encode as SQL NULL and make `<> ALL(NULL)` prune nothing).
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM context_disable_profile_backends WHERE backend_id = $1`, backendID); err != nil {
+			return fmt.Errorf("store: clear backend profiles: %w", err)
+		}
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM context_disable_profile_backends
+		 WHERE backend_id = $1 AND profile_id <> ALL($2::uuid[])`, backendID, profileIDs); err != nil {
+		return fmt.Errorf("store: prune backend profiles: %w", err)
+	}
+	for _, pid := range profileIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO context_disable_profile_backends (profile_id, backend_id)
+			VALUES ($1, $2) ON CONFLICT DO NOTHING`, pid, backendID); err != nil {
+			return fmt.Errorf("store: add backend to profile %q: %w", pid, err)
+		}
+	}
+	return nil
+}
+
 func insertProfileMembers(ctx context.Context, tx pgx.Tx, profileID string, memberIDs []string) error {
 	for _, bid := range memberIDs {
 		if _, err := tx.Exec(ctx, `

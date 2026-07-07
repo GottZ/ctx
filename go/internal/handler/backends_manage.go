@@ -59,7 +59,14 @@ type backendSpec struct {
 	ExtraBody    map[string]any    `json:"extra_body"`
 	Limits       map[string]any    `json:"limits"`
 	Metadata     map[string]any    `json:"metadata"`
-	Probe        string            `json:"probe"` // backend-test only
+	// DisableProfiles is the disable-profile membership of this backend by profile
+	// NAME (092, U01-W4, design §4.3/§5.2). It is NOT a Backend column — the
+	// handler resolves the names to ids and syncs the join rows in the same Tx as
+	// the backend write; hence it lives outside applySpec. Patch semantics via the
+	// raw key set: an ABSENT key = no change; a PRESENT key (incl. [] or null) =
+	// replace the full membership set ([] ⇒ remove all).
+	DisableProfiles []string `json:"disable_profiles"`
+	Probe           string   `json:"probe"` // backend-test only
 }
 
 // applySpec overlays the present payload fields onto b. keys is the raw
@@ -206,6 +213,82 @@ func backendWritableByCaller(ar *auth.AuthResult, scope string) bool {
 	return ar.IsServerAdmin() || scope == ar.HomeScope
 }
 
+// profileAcceptsBackend reports whether a backend of backendScope may be a member
+// of a disable-profile of profileScope (092, U01-W4, §5.2 membership direction).
+// A _global profile accepts a backend of ANY scope — this is the deliberate
+// self-disable exception: a tenant-admin may hang its OWN backend on a _global
+// profile (no cross-tenant effect, no privilege gain), so the toggle takes its
+// backend out too. A scoped (tenant) profile accepts only its own scope's
+// backends. This is the COUNTERPART to (and intentionally asymmetric with)
+// resolveMembers' backendScopeMatches on the profile-edit path: there a _global
+// profile takes only _global backends; here a tenant-admin self-selects from the
+// backend side. The net invariant stays coherent — a scoped profile still only
+// ever contains its own backends; only _global profiles gain tenant self-members.
+func profileAcceptsBackend(profileScope, backendScope string) bool {
+	return profileScope == backends.GlobalScope || profileScope == backendScope
+}
+
+// resolveDisableProfiles turns disable-profile NAMES into their ids for a backend
+// of backendScope (092, U01-W4, §4.3/§5.2). The candidate set is every profile
+// (a) VISIBLE to the caller (backendVisibleToCaller — server-admin: all;
+// tenant-admin: _global ∪ own; a foreign tenant's profile is invisible ⇒ 422)
+// AND (b) that a backend of this scope may legally join (profileAcceptsBackend).
+// On a name collision across scopes the own-scope profile wins over a _global one
+// (deterministic). An unknown/invisible/unacceptable name ⇒ 422 with the name.
+func (h *ManageHandler) resolveDisableProfiles(ar *auth.AuthResult, backendScope string, names []string) ([]string, *errResponse) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	byName := make(map[string]backends.Profile)
+	for _, p := range h.backendPool.Profiles() {
+		if !backendVisibleToCaller(ar, p.Scope) || !profileAcceptsBackend(p.Scope, backendScope) {
+			continue
+		}
+		if cur, ok := byName[p.Name]; ok && cur.Scope == backendScope {
+			continue // keep the own-scope match; do not let a _global namesake overwrite it
+		}
+		byName[p.Name] = p
+	}
+	ids := make([]string, 0, len(names))
+	for _, n := range names {
+		p, ok := byName[n]
+		if !ok {
+			return nil, &errResponse{code: http.StatusUnprocessableEntity,
+				msg: "disable profile " + n + " is unknown or not attachable for a backend in scope " + backendScope}
+		}
+		ids = append(ids, p.ID)
+	}
+	return ids, nil
+}
+
+// planDisableProfileSync decides whether the membership sync runs and to which
+// ids (092, U01-W4). shouldSync=false when the disable_profiles key is ABSENT
+// (nil = no change); a PRESENT key (incl. [] / null) yields shouldSync=true with
+// the resolved ids (empty ⇒ the sync removes every membership). backendScope is
+// the OWNER scope of the row being written (create: the assigned scope; update:
+// the immutable prev scope).
+func (h *ManageHandler) planDisableProfileSync(ar *auth.AuthResult, backendScope string, spec *backendSpec, keys map[string]json.RawMessage) ([]string, bool, *errResponse) {
+	if _, ok := keys["disable_profiles"]; !ok {
+		return nil, false, nil
+	}
+	ids, errResp := h.resolveDisableProfiles(ar, backendScope, spec.DisableProfiles)
+	if errResp != nil {
+		return nil, false, errResp
+	}
+	return ids, true, nil
+}
+
+// attachDisableProfiles adds the membership names (full, incl. inactive profiles)
+// to a rendered backend view (092, U01-W4). Distinct from disabled_by_profiles
+// (W2, the ACTIVE profiles currently taking it out of the chain — a status field):
+// disable_profiles is the config-time membership the W6 checkbox dialog reflects.
+// Omitted when empty (mirrors disabled_by_profiles' omit-when-empty rendering).
+func (h *ManageHandler) attachDisableProfiles(v map[string]any, backendID string) {
+	if names := h.backendPool.MemberOf()[backendID]; len(names) > 0 {
+		v["disable_profiles"] = names
+	}
+}
+
 func writeBackendValidation(w http.ResponseWriter, errs []backends.FieldError) {
 	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 		"success": false, "error": "validation failed", "fields": errs,
@@ -289,6 +372,15 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// disable_profiles: resolve names → ids against the caller's visible+acceptable
+	// profile set (§5.2) BEFORE opening the tx, so an unknown name is a 422 without
+	// a half-written row.
+	profileIDs, syncProfiles, perr := h.planDisableProfileSync(ar, b.Scope, spec, keys)
+	if perr != nil {
+		perr.write(w)
+		return
+	}
+
 	by := actorID(r)
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
@@ -301,6 +393,13 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
+	// Join-sync in the SAME tx as the backend insert (per-backend atomic).
+	if syncProfiles {
+		if err := store.SyncBackendDisableProfiles(ctx, tx, id, profileIDs, by); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "commit failed"})
 		return
@@ -308,7 +407,9 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 	b.ID = id
 	h.reloadAfterMutation(ctx, "backend-create")
 
-	resp := map[string]any{"success": true, "backend": backendView(b)}
+	v := backendView(b)
+	h.attachDisableProfiles(v, b.ID)
+	resp := map[string]any{"success": true, "backend": v}
 	if len(warnings) > 0 {
 		resp["warnings"] = warnings
 	}
@@ -368,6 +469,17 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// disable_profiles rides on backend-update and inherits its write scope: the
+	// row was already gated to the caller's own tenant above (backendWritableByCaller
+	// + the store WHERE scope=ANY backstop), so a tenant-admin can only sync the
+	// membership of a backend it owns. Scope is immutable through update, so the
+	// candidate profiles resolve against prev.Scope (§5.2).
+	profileIDs, syncProfiles, perr := h.planDisableProfileSync(ar, prev.Scope, spec, keys)
+	if perr != nil {
+		perr.write(w)
+		return
+	}
+
 	by := actorID(r)
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
@@ -387,13 +499,22 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "backend not found"})
 		return
 	}
+	// Join-sync in the SAME tx as the backend update (per-backend atomic).
+	if syncProfiles {
+		if err := store.SyncBackendDisableProfiles(ctx, tx, next.ID, profileIDs, by); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "commit failed"})
 		return
 	}
 	h.reloadAfterMutation(ctx, "backend-update")
 
-	resp := map[string]any{"success": true, "backend": backendView(&next)}
+	v := backendView(&next)
+	h.attachDisableProfiles(v, next.ID)
+	resp := map[string]any{"success": true, "backend": v}
 	if len(warnings) > 0 {
 		resp["warnings"] = warnings
 	}
@@ -451,6 +572,10 @@ func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		v := backendView(&snap[i])
+		// disable_profiles = full membership (incl. inactive profiles, U01-W4) so
+		// the W6 checkbox dialog can pre-check every profile the backend belongs
+		// to — distinct from disabled_by_profiles below (the ACTIVE subset).
+		h.attachDisableProfiles(v, snap[i].ID)
 		if s, ok := statusByID[snap[i].ID]; ok {
 			v["effective_state"] = s.EffectiveState
 			v["cooldown_remaining_s"] = s.CooldownRemaining

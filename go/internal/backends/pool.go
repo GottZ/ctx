@@ -98,8 +98,16 @@ type snapshot struct {
 	// single map lookup; W1 only builds it. Empty string / absent = no active
 	// profile disables the backend.
 	disabledBy map[string]string
-	version    int64
-	loadedAt   time.Time
+	// memberOf maps backend_id → the SORTED names of ALL profiles it is a member
+	// of, REGARDLESS of active (092, U01-W4). This is the membership truth the
+	// backend-config surface renders (disable_profiles field + the W6 checkbox
+	// dialog needs inactive membership too); disabledBy only carries the ACTIVE
+	// subset. Precomputed in the same atomic swap so the backend-list view is
+	// consistent with the chain's snapshot without a second query. Absent = the
+	// backend belongs to no profile.
+	memberOf map[string][]string
+	version  int64
+	loadedAt time.Time
 }
 
 // Pool is the declarative backend pool: an immutable snapshot of
@@ -201,6 +209,7 @@ func (p *Pool) Reload(ctx context.Context) error {
 		backends:   loaded,
 		profiles:   profiles,
 		disabledBy: buildDisabledBy(profiles, memberships),
+		memberOf:   buildMemberOf(profiles, memberships),
 		version:    v,
 		loadedAt:   time.Now(),
 	})
@@ -282,10 +291,40 @@ func buildDisabledBy(profiles []Profile, memberships []profileMembership) map[st
 	return out
 }
 
+// buildMemberOf precomputes backend_id → SORTED names of ALL profiles containing
+// it, regardless of active (092, U01-W4). Unlike buildDisabledBy (active only,
+// chain-facing) this is the full membership truth the backend-config surface
+// renders. Names are sorted explicitly so the value is byte-stable (no Go-map
+// iteration order leaks outward). A backend in no profile is absent from the map.
+func buildMemberOf(profiles []Profile, memberships []profileMembership) map[string][]string {
+	name := make(map[string]string, len(profiles))
+	for _, pr := range profiles {
+		name[pr.ID] = pr.Name
+	}
+	out := make(map[string][]string)
+	for _, m := range memberships {
+		if n, ok := name[m.profileID]; ok {
+			out[m.backendID] = append(out[m.backendID], n)
+		}
+	}
+	for bid := range out {
+		sort.Strings(out[bid])
+	}
+	return out
+}
+
 // Profiles returns the current disable-profile registry snapshot (092), ORDER
 // BY name. Readers dereference once per operation, like Snapshot.
 func (p *Pool) Profiles() []Profile {
 	return p.snap.Load().profiles
+}
+
+// MemberOf returns the precomputed backend_id → ALL-profile-names map from the
+// current snapshot (092, U01-W4). The backend-list/create/update view reads it
+// to render disable_profiles (full membership, incl. profiles that are inactive
+// right now). The returned map + its slices are snapshot-owned — read-only.
+func (p *Pool) MemberOf() map[string][]string {
+	return p.snap.Load().memberOf
 }
 
 // DisabledBy returns the precomputed backend_id → active-profile-names map from
