@@ -49,9 +49,12 @@
     - strong: ok
     - text: db embed chat
   - region "toggles":
-    - strong: gaming lock
-    - paragraph: excludes the GPU backends from every chain
-    - button "OFF"
+    - strong: Eject-Modus
+    - paragraph:
+      - text: 2 Backends ·
+      - link "konfigurieren →":
+        - /url: /settings/backends
+    - button "Eject-Modus umschalten": "OFF"
     - strong: activity
     - paragraph: host idle signal
     - text: no signal
