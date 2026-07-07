@@ -14,7 +14,11 @@
   import type { PoolModel } from './pool.svelte'
   import BackendDialog from './BackendDialog.svelte'
 
-  let { pool, knownSecrets }: { pool: PoolModel; knownSecrets: Set<string> } = $props()
+  let {
+    pool,
+    knownSecrets,
+    profileOptions = [],
+  }: { pool: PoolModel; knownSecrets: Set<string>; profileOptions?: { name: string; label: string }[] } = $props()
 
   let editing = $state<{ mode: 'create' | 'edit'; backend: BackendListItem | null } | null>(null)
   let confirmDeleteId = $state<string | null>(null)
@@ -106,10 +110,17 @@
       </tr>
     {/snippet}
     {#each pool.sorted as b (b.id)}
-      <tr class:off={!b.enabled}>
+      <tr class:off={!b.enabled} class:profile-off={b.effective_state === 'profile-disabled'}>
         <td class="name">
           {b.name}
           <span class="meta">{b.locality} · {b.protocol} · {b.base_url}</span>
+          {#if b.disable_profiles && b.disable_profiles.length > 0}
+            <span class="memberships">
+              {#each b.disable_profiles as pm (pm)}
+                <span class="pchip" class:pchip-active={b.disabled_by_profiles?.includes(pm)} title={b.disabled_by_profiles?.includes(pm) ? 'aktives Abschaltprofil' : 'Abschaltprofil-Mitglied'}>{pm}</span>
+              {/each}
+            </span>
+          {/if}
         </td>
         <td><span class="badge">{b.trust}</span></td>
         <td class="roles">{b.roles.join(', ') || '—'}</td>
@@ -185,7 +196,7 @@
 </section>
 
 {#if editing}
-  <BackendDialog mode={editing.mode} backend={editing.backend} {save} onclose={() => (editing = null)} />
+  <BackendDialog mode={editing.mode} backend={editing.backend} {profileOptions} {save} onclose={() => (editing = null)} />
 {/if}
 
 <style>
@@ -228,10 +239,35 @@
   tr.off .roles {
     opacity: 0.5;
   }
+  /* An active disable-profile holds the backend out of every chain (§4.2) —
+     dim its config row like a disabled one, but the profile chip carries the
+     distinct reason. */
+  tr.profile-off .name,
+  tr.profile-off .roles {
+    opacity: 0.5;
+  }
   .name {
     font-family: var(--font-mono);
     display: flex;
     flex-direction: column;
+  }
+  .memberships {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+  }
+  .pchip {
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    padding: 0 var(--space-1);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    color: var(--text-faint);
+  }
+  .pchip-active {
+    border-color: var(--warn);
+    color: var(--warn);
   }
   .meta {
     color: var(--text-faint);

@@ -33,11 +33,14 @@
   let {
     mode,
     backend = null,
+    profileOptions = [],
     save,
     onclose,
   }: {
     mode: 'create' | 'edit'
     backend?: BackendListItem | null
+    /** The disable-profiles the checkbox section offers (name + label). */
+    profileOptions?: { name: string; label: string }[]
     /** Returns the server warnings on success; throws ApiError on failure. */
     save: (args: {
       mode: 'create' | 'edit'
@@ -66,6 +69,7 @@
       trust: d?.trust ?? 'public',
       roles: d ? [...d.roles] : [],
       mmRows: b ? modelMapToRows(b.model_map) : [],
+      disableProfiles: d ? [...d.disable_profiles] : [],
     }
   })
 
@@ -79,6 +83,14 @@
   let trust = $state(init.trust)
   let roles = $state<string[]>(init.roles)
   let mmRows = $state<ModelMapRow[]>(init.mmRows)
+  let disableProfiles = $state<string[]>(init.disableProfiles)
+
+  // Toggle this backend's membership in a disable-profile (092, U01-W6). The
+  // server resolves names → ids and syncs the join on save; it stays
+  // authoritative on scope (a cross-scope pairing 422s).
+  function toggleProfile(name: string, on: boolean): void {
+    disableProfiles = on ? [...new Set([...disableProfiles, name])] : disableProfiles.filter((p) => p !== name)
+  }
 
   let saving = $state(false)
   let error = $state<string | null>(null)
@@ -110,6 +122,7 @@
       trust,
       roles,
       model_map: rowsToModelMap(mmRows),
+      disable_profiles: disableProfiles,
     }
   }
 
@@ -264,6 +277,26 @@
         <ModelMapEditor rows={mmRows} disabled={saving} onchange={(r) => (mmRows = r)} />
       </div>
 
+      {#if profileOptions.length > 0}
+        <div class="field">
+          <span class="lbl">Abschaltprofile</span>
+          <span class="hint">Dieses Backend wird deaktiviert durch:</span>
+          <div class="profiles">
+            {#each profileOptions as p (p.name)}
+              <label class="pcheck">
+                <input
+                  type="checkbox"
+                  checked={disableProfiles.includes(p.name)}
+                  disabled={saving}
+                  onchange={(e) => toggleProfile(p.name, e.currentTarget.checked)}
+                />
+                {p.label !== '' ? p.label : p.name}
+              </label>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
       {#if error}
         <p class="problem error" role="alert">{error}</p>
       {/if}
@@ -364,6 +397,21 @@
   .hint {
     font-size: var(--fs-2xs);
     color: var(--text-faint);
+  }
+  .profiles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .pcheck {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--fs-sm);
+    color: var(--text-dim);
+  }
+  .pcheck input {
+    accent-color: var(--accent);
   }
   footer {
     border-top: 1px solid var(--border);

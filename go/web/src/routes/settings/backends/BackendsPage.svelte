@@ -22,7 +22,9 @@
   import { session } from '../../../lib/auth.svelte'
   import { PoolModel } from './pool.svelte'
   import { VaultModel } from './vault.svelte'
+  import { ProfilesModel } from './profiles.svelte'
   import BackendTable from './BackendTable.svelte'
+  import ProfilesCard from './ProfilesCard.svelte'
   import VaultForm from './VaultForm.svelte'
 
   // tenantScoped=false → the server-admin /settings/backends surface (pool +
@@ -32,6 +34,11 @@
 
   const pool = new PoolModel()
   const vault = new VaultModel()
+  // Disable-profiles (092, U01-W6). Mounts in BOTH variants (AM-5 VOLL): the
+  // tenant-admin sees _global profiles read-only + CRUDs/toggles its own. The
+  // disable-profile-* actions are tenant-admin-tier with server-side isolation,
+  // so the tenant variant issues no doomed 403 read.
+  const profiles = new ProfilesModel()
   let settings = $state<SettingView[]>([])
 
   // Gate: server variant needs the server-global admin flag; tenant variant
@@ -51,9 +58,12 @@
     }
   }
 
+  const profileOptions = $derived(profiles.profiles.map((p) => ({ name: p.name, label: p.label })))
+
   onMount(() => {
     if (!allowed) return
     void pool.load()
+    void profiles.load()
     // The vault + its settings join are server-admin only (the /api/secrets +
     // /api/settings endpoints are not tenant-scoped) — never fetched in the
     // tenant variant, so a tenant-admin never issues a doomed 403 read.
@@ -103,7 +113,15 @@
         <button type="button" onclick={() => void pool.reload()}>Retry</button>
       </div>
     {:else}
-      <BackendTable {pool} {knownSecrets} />
+      {#if profiles.status === 'error'}
+        <div class="error" role="alert">
+          <p>Abschaltprofile nicht ladbar: {profiles.loadError?.message}</p>
+          <button type="button" onclick={() => void profiles.reload()}>Retry</button>
+        </div>
+      {:else if profiles.status === 'ready'}
+        <ProfilesCard {profiles} />
+      {/if}
+      <BackendTable {pool} {knownSecrets} {profileOptions} />
     {/if}
 
     {#if !tenantScoped}

@@ -135,6 +135,10 @@ export interface BackendDraft {
   trust: string
   roles: string[]
   model_map: Record<string, ModelSpec>
+  // disable-profile membership (092, U01-W6): the profile names this backend
+  // belongs to. The dialog checkbox section edits it; it rides on the same
+  // create/update patch (raw-key presence — see createSpec/backendDiff).
+  disable_profiles: string[]
 }
 
 export function draftFromBackend(b: BackendView): BackendDraft {
@@ -148,6 +152,7 @@ export function draftFromBackend(b: BackendView): BackendDraft {
     trust: b.trust,
     roles: [...b.roles],
     model_map: { ...b.model_map },
+    disable_profiles: [...(b.disable_profiles ?? [])],
   }
 }
 
@@ -166,6 +171,9 @@ export function createSpec(name: string, d: BackendDraft): BackendSpec {
   }
   if (d.api_key_ref) spec.api_key_ref = d.api_key_ref
   if (d.locality) spec.locality = d.locality
+  // Membership is always sent on create so the join is set from the start; []
+  // is the harmless no-op (clears nothing on a fresh backend).
+  spec.disable_profiles = d.disable_profiles
   return spec
 }
 
@@ -182,6 +190,9 @@ export function backendDiff(original: BackendView, d: BackendDraft): BackendSpec
   if (d.trust !== original.trust) spec.trust = d.trust
   if (!sameSet(d.roles, original.roles)) spec.roles = d.roles
   if (!sameModelMap(d.model_map, original.model_map)) spec.model_map = d.model_map
+  // Only patch membership when it changed — an absent key leaves the join
+  // untouched server-side (§4.3); an explicit [] clears all memberships.
+  if (!sameSet(d.disable_profiles, original.disable_profiles ?? [])) spec.disable_profiles = d.disable_profiles
   return spec
 }
 

@@ -146,6 +146,12 @@ export interface BackendView {
   extra_body: Record<string, unknown>
   limits: Record<string, unknown>
   metadata: Record<string, unknown>
+  // disable_profiles is the config-time disable-profile MEMBERSHIP (092, U01-W4):
+  // the full set of profile names this backend belongs to, incl. inactive ones.
+  // Distinct from disabled_by_profiles (the ACTIVE subset holding it out of the
+  // chain right now). The W6 BackendDialog checkbox section reflects this field;
+  // omitted by the server when empty (attachDisableProfiles).
+  disable_profiles?: string[]
 }
 
 // Source: go/internal/handler/backends_manage.go (backend-list) — backendView
@@ -177,6 +183,11 @@ export interface BackendSpec {
   num_ctx?: number
   priority?: number
   enabled?: boolean
+  // disable_profiles (092, U01-W4) rides on backend-update: profile NAMES the
+  // server resolves to ids and syncs into the join. Raw-key presence semantics
+  // like the rest of the patch — an absent key leaves membership untouched, an
+  // explicit [] clears ALL memberships of this backend.
+  disable_profiles?: string[]
 }
 
 export interface BackendListResponse {

@@ -94,6 +94,7 @@ const draft: BackendDraft = {
   trust: 'public',
   roles: ['chat'],
   model_map: { chat: { model: 'q' } },
+  disable_profiles: [],
 }
 
 describe('PoolModel load', () => {

@@ -506,6 +506,46 @@ function manageFixture(
       } }
     case 'backend-list':
       return { success: true, backends: [] }
+    // Disable-profiles (092, U01-W6). The DEFAULT is an empty registry so the
+    // shared backends pages (contract/tenant-backends) render the card's empty
+    // state — the rich scenarios (members, role-blackout) are injected per-test
+    // in disable-profiles.spec.ts via a route override. The mutating actions
+    // echo a benign shape so a stray call never hits the 599 hard-default.
+    case 'disable-profile-list':
+      return { success: true, profiles: [] }
+    case 'disable-profile-toggle':
+      return {
+        success: true,
+        profile: {
+          name: (data?.name as string) ?? 'eject',
+          scope: (data?.scope as string) ?? '_global',
+          label: '',
+          description: '',
+          active: (data?.active as boolean | undefined) ?? false,
+          reserved: false,
+        },
+        impact: { backends: [], roles_affected: [], roles_blacked_out: [] },
+        as_of: '2026-06-29T12:00:00Z',
+        note: 'ok',
+        ...(data?.dry_run === true ? { dry_run: true } : {}),
+      }
+    case 'disable-profile-create':
+    case 'disable-profile-update':
+      return {
+        success: true,
+        profile: {
+          name: (data?.name as string) ?? 'eject',
+          scope: (data?.scope as string) ?? '_global',
+          label: (data?.label as string) ?? '',
+          description: (data?.description as string) ?? '',
+          active: false,
+          reserved: false,
+          impact: { backends: [], roles_affected: [], roles_blacked_out: [] },
+        },
+        as_of: '2026-06-29T12:00:00Z',
+      }
+    case 'disable-profile-delete':
+      return { success: true, deleted: (data?.name as string) ?? 'eject', as_of: '2026-06-29T12:00:00Z' }
     // A7 corpus maintenance — start kicks off (running), status reports it
     // finished so the poll loop converges to a terminal state on the next tick.
     case 'blocks-audit-start':
