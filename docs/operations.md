@@ -112,6 +112,10 @@ Invalid configurations abort the boot **after logging every finding** with field
 
 `backup.sh` archives only the pg_dumps — the sealed-secret ciphertexts are in every dump, the master key (`CTX_SECRETS_KEY`) is in **none**, by design. Disaster recovery needs both the dump and the separately-stored master key. See [security](security.md#sealed-secrets--break-glass) for master-key setup, rotation and break-glass extraction.
 
+## GPU-host maintenance (eject)
+
+To take a GPU host (e.g. `herbert`) down for maintenance without dropping in-flight work, use the eject toggle as a quiesce gate. The disable profile takes the host's backends out of every NEW chain; requests already on the wire finish normally (a 27B synthesis ≤60s, an in-flight dream cycle ≤700s). The runbook: **activate the profile → watch the DispatchTile until `inflight=0` for that origin → then service the host.** `ctx eject on` (or the disable-profiles card on the backends settings page) activates it; the status page's DispatchTile shows `inflight`/`waitQ` per origin live, so `inflight=0` is the safe-to-stop signal. `ctx eject off` restores the host to the pool. There is no active drain — a waiting lease already holds its chain, and failover + cooldown heal the dead-host case on their own; the DispatchTile is the quiesce monitor, not an automated barrier. See [security](security.md#trust--sensitivity-gating) for the toggle's admin gating and persistence semantics.
+
 ## Deploy & migrations
 
 `docker compose build ctx` builds the multi-stage Go binary (incl. the embedded Svelte SPA — see [development](development.md)); `docker compose up -d ctx` starts ctx + PostgreSQL. Migrations run at boot in order. Rolling the multi-tenant line out to a running deployment (migrating the production DB from 057 across the 058–068 chain) is a separate operational step; the single-tenant default tenant keeps every path byte-identical until tenants are provisioned — see [multi-tenancy](multi-tenancy.md#self-service-onboarding-v411).
