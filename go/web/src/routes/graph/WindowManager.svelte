@@ -17,6 +17,13 @@
   // (b) das `content`-Snippet, das FloatingWindow im Body rendert. Der Graph
   // reicht BlockDetailContent samt graph durch; ein Board reicht später einen
   // IssueDetail-Renderer — dieselbe Fenster-Schicht, kein Graph-Wissen hier.
+  // Drag-Region-Vertrag (U04-W5, design 04-§4.5): der injizierte content darf
+  // Kopf-Flächen per data-window-drag zur Drag-Fläche seines Fensters erklären
+  // (Ausnahmen: a/button/input/select/textarea/[contenteditable]/
+  // [data-window-drag-exempt] + touch-action:none auf den Drag-Regionen). Der
+  // Graph-Host (BlockDetailContent) nimmt opt-in teil; ein Board-Renderer bliebe
+  // ohne Marker unverändert. Die Fensterschicht (FloatingWindow) delegiert den
+  // Body-pointerdown gegen diesen Vertrag — kein Content-Markup-Wissen hier.
   // Keep-Mounted-Opt-in pro Host (U04-W3, design 04-§4.3): mit keepMinimized
   // behält der Host minimierte Fenster GEMOUNTET (FloatingWindow blendet sie per
   // display:none aus) statt sie aus dem keyed each zu werfen — Scroll/Content

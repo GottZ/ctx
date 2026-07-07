@@ -57,6 +57,29 @@
     wasMinimized = m
   })
 
+  // Drag-Region-Vertrag (U04-W5, design 04-§4.5): der Content markiert per
+  // data-window-drag, welche Flächen sein umgebendes Fenster ziehen (h2 + Meta =
+  // die vom User wahrgenommene Kopf-Freifläche). data-window-drag-exempt und die
+  // generische Interaktiv-Liste DRAG_EXEMPT nehmen einzelne Kinder wieder aus
+  // (kopier-relevante Werte, Buttons, Formularfelder). Die Fensterschicht braucht
+  // KEIN Content-Markup-Wissen — nur diesen Vertrag. Die Drag-Regionen tragen im
+  // Content zusätzlich touch-action:none (sonst nimmt der Browser den Touch als
+  // Scroll und feuert pointercancel statt pointermove).
+  const DRAG_EXEMPT = 'a, button, input, select, textarea, [contenteditable], [data-window-drag-exempt]'
+  function onBodyPointerDown(e: PointerEvent): void {
+    const t = e.target as HTMLElement
+    if (t.closest('[data-window-drag]') === null || t.closest(DRAG_EXEMPT) !== null) return
+    startDrag(e) // identischer Capture-Pfad; e.currentTarget (= .body) wird das Capture-Handle
+  }
+
+  // Instanz-State: der EINE erfasste Drag/Resize-Pointer (Drag ∪ Resize teilen
+  // ihn — ein Resize darf während eines Drags nicht starten und umgekehrt).
+  // Ohne diesen Guard löste ein zweiter Finger auf der durch W5 geweiteten
+  // touch-action:none-Kopf-Freifläche einen zweiten startDrag mit zweitem onMove
+  // aus → Doppel-Delta gegen die fremde Start-Koordinate (04-§4.5/§5-Nr.9). Auf
+  // der 25-px-Titlebar praktisch nie getroffen, auf der Freifläche real.
+  let activePointer: number | null = null
+
   // Pointer-Drag/Resize ohne Lib. setPointerCapture haelt den Pointer-Stream im
   // Window → Events erreichen den Sigma-Canvas NICHT → kein Kamera-Pan.
   // WebXR: derselbe Pfad nimmt Controller-/Hand-Ray-Deltas direkt als lu.
@@ -65,43 +88,60 @@
     // the pointer here would steal their click (pointerup redirects to the
     // capture target). Let the button own its click.
     if ((e.target as HTMLElement).closest('button')) return
+    if (activePointer !== null) return // Re-Entry-Guard: zweiter Pointer während aktiver Geste verworfen
+    activePointer = e.pointerId
     const handle = e.currentTarget as HTMLElement
     handle.setPointerCapture(e.pointerId)
     let lastX = e.clientX
     let lastY = e.clientY
     const onMove = (ev: PointerEvent): void => {
+      if (ev.pointerId !== activePointer) return // nur der erfasste Pointer bewegt
       const { dx, dy } = DomProjector.toLogicalDelta(ev.clientX - lastX, ev.clientY - lastY, store.surface)
       store.move(win.id, dx, dy)
       lastX = ev.clientX
       lastY = ev.clientY
     }
-    const onUp = (ev: PointerEvent): void => {
+    // pointercancel erhält denselben Cleanup wie pointerup (§5-Nr.2): ein vom
+    // Browser übernommener Touch-Drag ließe die Listener sonst am Handle hängen
+    // → Doppel-Delta beim Folge-Drag.
+    const end = (ev: PointerEvent): void => {
+      if (ev.pointerId !== activePointer) return
       handle.releasePointerCapture(ev.pointerId)
       handle.removeEventListener('pointermove', onMove)
-      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointerup', end)
+      handle.removeEventListener('pointercancel', end)
+      activePointer = null
     }
     handle.addEventListener('pointermove', onMove)
-    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointerup', end)
+    handle.addEventListener('pointercancel', end)
   }
 
   function startResize(e: PointerEvent): void {
+    if (activePointer !== null) return // teilt den Guard mit startDrag (Drag ∪ Resize)
+    activePointer = e.pointerId
     const handle = e.currentTarget as HTMLElement
     handle.setPointerCapture(e.pointerId)
     let lastX = e.clientX
     let lastY = e.clientY
     const onMove = (ev: PointerEvent): void => {
+      if (ev.pointerId !== activePointer) return
       const { dx, dy } = DomProjector.toLogicalDelta(ev.clientX - lastX, ev.clientY - lastY, store.surface)
       store.resize(win.id, dx, dy)
       lastX = ev.clientX
       lastY = ev.clientY
     }
-    const onUp = (ev: PointerEvent): void => {
+    const end = (ev: PointerEvent): void => {
+      if (ev.pointerId !== activePointer) return
       handle.releasePointerCapture(ev.pointerId)
       handle.removeEventListener('pointermove', onMove)
-      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointerup', end)
+      handle.removeEventListener('pointercancel', end)
+      activePointer = null
     }
     handle.addEventListener('pointermove', onMove)
-    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointerup', end)
+    handle.addEventListener('pointercancel', end)
   }
 
   function onKeydown(e: KeyboardEvent): void {
@@ -143,7 +183,13 @@
     <button class="act" aria-label="minimize" type="button" onclick={() => store.minimize(win.id)}>–</button>
     <button class="act" aria-label="close" type="button" onclick={() => store.close(win.id)}>×</button>
   </div>
-  <div class="body">
+  <!-- U04-W5 (design 04-§4.5): Body-Delegation. Ein pointerdown auf eine
+       Content-Fläche mit [data-window-drag] (und ohne DRAG_EXEMPT-Vorfahr) zieht
+       das Fenster über denselben Capture-Pfad wie die Titlebar — e.currentTarget
+       (= .body) wird das Capture-Handle, der Stream bleibt weg vom Sigma-Canvas.
+       Im Sheet (Mobile) unterdrückt (kein Drag), wie die Titlebar. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="body" onpointerdown={sheet ? undefined : onBodyPointerDown}>
     {@render content(win, titleId)}
   </div>
   {#if !sheet}

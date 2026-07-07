@@ -79,8 +79,13 @@
   }
 </script>
 
+<!-- U04-W5 (design 04-§4.5): header + Meta tragen data-window-drag → in einem
+     FloatingWindow-Host ziehen diese Kopf-Freiflächen das Fenster (Drag-Region-
+     Vertrag). data-window-drag-exempt nimmt die kopier-relevante UUID und die
+     Tags wieder aus (selektierbar/scrollbar). In Nicht-Fenster-Hosts (Sidebar
+     G4, Master-Detail) ist data-window-drag inert — kein FloatingWindow-Listener. -->
 <div class="detail-body">
-  <header>
+  <header data-window-drag>
     <h2 id={titleId}>{detail?.title ?? attrs?.label ?? id}</h2>
     {#if headerActions}
       {@render headerActions()}
@@ -88,9 +93,9 @@
   </header>
 
   {#if attrs}
-    <dl class="meta">
+    <dl class="meta" data-window-drag>
       <dt>id</dt>
-      <dd><code>{id}</code></dd>
+      <dd data-window-drag-exempt><code>{id}</code></dd>
       <dt>category</dt>
       <dd>{attrs.category}</dd>
       <dt>scope</dt>
@@ -104,7 +109,7 @@
         <dd>{detail.updated_at.slice(0, 10)}</dd>
         {#if detail.tags.length > 0}
           <dt>tags</dt>
-          <dd>{detail.tags.join(', ')}</dd>
+          <dd data-window-drag-exempt>{detail.tags.join(', ')}</dd>
         {/if}
       {/if}
     </dl>
@@ -138,6 +143,24 @@
     gap: var(--space-2);
   }
 
+  /* U04-W5 (design 04-§4.5): header + Meta sind Drag-Regionen (data-window-drag).
+     touch-action:none → der Browser nimmt den Touch als Drag statt als Scroll;
+     user-select:none → gezogen statt Text selektiert; cursor:move als sichtbare
+     Affordanz. In Nicht-Fenster-Hosts bleibt das kosmetisch (Marker inert). Der
+     Volltext <pre> und die übrigen Flächen bleiben unmarkiert (Touch scrollt,
+     Maus selektiert — Ist). */
+  header,
+  .meta {
+    touch-action: none;
+    user-select: none;
+    cursor: move;
+  }
+  /* Exempt-Werte (kopier-relevante UUID + Tags) restaurieren Selektion/Scroll. */
+  dd[data-window-drag-exempt] {
+    touch-action: auto;
+    user-select: text;
+    cursor: auto;
+  }
   header {
     display: flex;
     align-items: flex-start;

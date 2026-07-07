@@ -566,6 +566,250 @@ test.describe('graph floating windows — W3 SSE-Gate (U04-W3, Board-Host)', () 
   })
 })
 
+// U04-W5 — Drag-Region-Contract: die Kopf-Freifläche (header + Meta) zieht das
+// Fenster (design 04-§4.5/§7-W5). FloatingWindow delegiert den Body-pointerdown
+// gegen den DOM-Vertrag (data-window-drag / data-window-drag-exempt); startDrag/
+// startResize sind gegen Multi-Pointer gehärtet (activePointer-Re-Entry-Guard +
+// pointerId-Filter) und räumen bei pointercancel denselben Cleanup wie bei
+// pointerup ab. Rot gegen Ist: (a) Meta-Drag bewegt NICHT (Body war nicht drag-
+// gebunden); Multi-Pointer/pointercancel siehe die dokumentierten Guard-losen
+// Rot-Proben im Report (temporäre Guard-Entfernung auf derselben Fläche).
+test.describe('graph floating windows — W5 drag region (U04-W5)', () => {
+  const LONG_CONTENT = Array.from({ length: 80 }, (_, i) => `Zeile ${i + 1}: ctx-Volltext für den W5-Drag-Freifläche-Beweis.`).join('\n')
+
+  async function longGetContent(page: Page): Promise<void> {
+    await page.route('**/api/manage', async (route) => {
+      const body = route.request().postDataJSON() as { action?: string } | null
+      if (body?.action === 'get') {
+        return route.fulfill({
+          status: 200,
+          json: {
+            success: true,
+            block: {
+              id: NODE2,
+              category: 'reference',
+              tags: ['demo', 'design'],
+              title: 'API Spec',
+              content: LONG_CONTENT,
+              scope: 'home',
+              sensitivity: 'internal',
+              created_at: '2026-06-01T08:00:00Z',
+              updated_at: '2026-06-28T10:00:00Z',
+            },
+          },
+        })
+      }
+      return route.fallback()
+    })
+  }
+
+  /** Erster ziehbarer, NICHT-exempter Punkt in der Meta (Label/Gap-Freifläche),
+   *  in aktuellen Viewport-Koordinaten (respektiert den .body-Scroll-Clip). */
+  async function metaDragPoint(page: Page, win: Locator): Promise<{ x: number; y: number }> {
+    const box = await win.locator('dl.meta').boundingBox()
+    if (!box) throw new Error('meta has no box')
+    const pt = await page.evaluate(({ bx, by, width, height }) => {
+      const exempt = 'a, button, input, select, textarea, [contenteditable], [data-window-drag-exempt]'
+      const inDrag = (x: number, y: number): boolean => {
+        const el = document.elementFromPoint(x, y) as HTMLElement | null
+        return !!el && el.closest('[data-window-drag]') !== null && el.closest(exempt) === null
+      }
+      for (let gy = 0.12; gy <= 0.88; gy += 0.08) {
+        for (let gx = 0.03; gx <= 0.6; gx += 0.04) {
+          const x = bx + width * gx
+          const y = by + height * gy
+          if (inDrag(x, y)) return { x, y }
+        }
+      }
+      return null
+    }, { bx: box.x, by: box.y, width: box.width, height: box.height })
+    if (!pt) throw new Error('no draggable non-exempt point found in meta')
+    return pt
+  }
+
+  async function dragFrom(page: Page, sx: number, sy: number, dx: number, dy: number): Promise<void> {
+    await page.mouse.move(sx, sy)
+    await page.mouse.down()
+    await page.mouse.move(sx + dx, sy + dy, { steps: 8 })
+    await page.mouse.up()
+  }
+
+  test('Drag von der Meta-Freifläche bewegt das Fenster (kein Pan, kein Refetch, Scroll erhalten)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await longGetContent(page)
+
+    let manageGets = 0
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.url().includes('/api/manage') && (r.postData() ?? '').includes('"action":"get"')) {
+        manageGets += 1
+      }
+    })
+
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+    // setFocus animatedReset (300ms) abklingen lassen → stabile Kamera-Baseline.
+    await page.waitForTimeout(500)
+
+    const win = page.getByRole('dialog').first()
+    const body = win.locator('.body')
+    await expect(win.locator('pre.content')).toBeVisible()
+
+    // Ein Nicht-Null-Scroll, der die Meta oben teilweise sichtbar lässt.
+    await body.evaluate((el) => {
+      el.scrollTop = 40
+    })
+    expect(await body.evaluate((el) => el.scrollTop)).toBe(40)
+
+    const camState = (): Promise<string> =>
+      page.evaluate(() => {
+        const g = (window as unknown as { __ctxGraph: CtxGraph }).__ctxGraph
+        return JSON.stringify(g.renderer.getCamera().getState())
+      })
+
+    const before = await win.boundingBox()
+    const camBefore = await camState()
+    const base = manageGets
+
+    const pt = await metaDragPoint(page, win)
+    await dragFrom(page, pt.x, pt.y, 110, 70)
+
+    const after = await win.boundingBox()
+    // Rot gegen Ist: dort ist die Meta keine Drag-Fläche → Delta ~0.
+    expect(Math.abs(after!.x - before!.x) + Math.abs(after!.y - before!.y)).toBeGreaterThan(40)
+    // setPointerCapture hält den Stream weg vom Sigma-Canvas → kein Kamera-Pan.
+    expect(await camState()).toBe(camBefore)
+    // Kein Remount → Scroll erhalten, kein zusätzlicher manage-get.
+    expect(await body.evaluate((el) => el.scrollTop)).toBe(40)
+    expect(manageGets - base, 'Δ /api/manage-get').toBe(0)
+  })
+
+  test('Negativ: pre.content und der exempt id-<dd> ziehen NICHT; user-select stimmt', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await longGetContent(page)
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+    await page.waitForTimeout(500)
+
+    const win = page.getByRole('dialog').first()
+    const pre = win.locator('pre.content')
+    await expect(pre).toBeVisible()
+
+    // Drag auf dem Volltext bewegt das Fenster NICHT (nicht markiert → scrollt/selektiert).
+    {
+      const box = await pre.boundingBox()
+      if (!box) throw new Error('pre has no box')
+      const b0 = await win.boundingBox()
+      await dragFrom(page, box.x + box.width / 2, box.y + 20, 90, 60)
+      const b1 = await win.boundingBox()
+      expect(Math.abs(b1!.x - b0!.x) + Math.abs(b1!.y - b0!.y), 'pre.content Drag').toBeLessThan(5)
+    }
+
+    // Drag auf dem exempt id-<dd> (kopier-relevante UUID) bewegt NICHT.
+    const idDd = win.locator('dl.meta dd[data-window-drag-exempt]').first()
+    {
+      const box = await idDd.boundingBox()
+      if (!box) throw new Error('id-dd has no box')
+      const b0 = await win.boundingBox()
+      await dragFrom(page, box.x + box.width / 2, box.y + box.height / 2, 90, 60)
+      const b1 = await win.boundingBox()
+      expect(Math.abs(b1!.x - b0!.x) + Math.abs(b1!.y - b0!.y), 'id-dd (exempt) Drag').toBeLessThan(5)
+    }
+
+    // user-select: Meta = none (Drag-Region), exempt id-<dd> = text (selektierbar).
+    const metaUserSelect = await win.locator('dl.meta').evaluate((el) => getComputedStyle(el).userSelect)
+    expect(metaUserSelect, 'dl.meta user-select').toBe('none')
+    const idUserSelect = await idDd.evaluate((el) => getComputedStyle(el).userSelect)
+    expect(idUserSelect, 'id-dd user-select').toBe('text')
+  })
+
+  test('Multi-Pointer: das Fenster folgt NUR dem ersten Finger (Guard gegen Doppel-Delta)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await longGetContent(page)
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+    await page.waitForTimeout(500)
+
+    const win = page.getByRole('dialog').first()
+    await expect(win.locator('pre.content')).toBeVisible()
+
+    // Zwei Punkte weit auseinander auf der Header-Drag-Fläche (scrollTop 0 → h2
+    // voll sichtbar und breit). Ohne Guard rechnet die zweite onMove-Closure ihr
+    // Delta gegen die Start-Koordinate des ANDEREN Pointers → Sprung; mit Guard
+    // folgt das Fenster nur dem ERSTEN Finger.
+    const hb = await win.locator('header').boundingBox()
+    if (!hb) throw new Error('header has no box')
+    const y = hb.y + hb.height / 2
+    const p1 = { x: hb.x + hb.width * 0.2, y }
+    const p2 = { x: hb.x + hb.width * 0.75, y }
+
+    const client = await page.context().newCDPSession(page)
+    await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [p1, p2] })
+    const before = await win.boundingBox()
+    // beide Finger um dasselbe Delta bewegen (2 Schritte)
+    await client.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{ x: p1.x + 20, y: y + 12 }, { x: p2.x + 20, y: y + 12 }],
+    })
+    await client.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{ x: p1.x + 40, y: y + 25 }, { x: p2.x + 40, y: y + 25 }],
+    })
+    await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    const after = await win.boundingBox()
+
+    const ddx = after!.x - before!.x
+    const ddy = after!.y - before!.y
+    // Folgt dem ersten Finger (~+40/+25). Rot gegen die Guard-lose Fassung: dort
+    // ein erratischer Sprung (Delta gegen die 2. Start-Koordinate, |Δ| ≫).
+    expect(Math.abs(ddx - 40), `x-Delta ${ddx}`).toBeLessThanOrEqual(22)
+    expect(Math.abs(ddy - 25), `y-Delta ${ddy}`).toBeLessThanOrEqual(20)
+  })
+
+  test('pointercancel mitten im Drag: der Folge-Drag hat ein einfaches Delta (kein Leck)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await longGetContent(page)
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+    await page.waitForTimeout(500)
+
+    const win = page.getByRole('dialog').first()
+    await expect(win.locator('pre.content')).toBeVisible()
+
+    const hb = await win.locator('header').boundingBox()
+    if (!hb) throw new Error('header has no box')
+    const y = hb.y + hb.height / 2
+    const start = { x: hb.x + hb.width * 0.3, y }
+
+    const client = await page.context().newCDPSession(page)
+    // Drag #1: start → move → CANCEL (Browser übernimmt den Touch). Ohne
+    // pointercancel-Cleanup bliebe die onMove-Closure am Handle hängen.
+    await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [start] })
+    await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start.x + 30, y: y + 20 }] })
+    await client.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] })
+
+    const afterCancel = await win.boundingBox()
+
+    // Drag #2: frischer, sauberer Ein-Finger-Drag um (+30/+20). Bei einem Leck
+    // feuerte jedes pointermove ZWEI Closures → doppeltes Delta. Header-Box NEU
+    // messen — Drag #1 hat das Fenster (samt Header) verschoben.
+    const hb2 = await win.locator('header').boundingBox()
+    if (!hb2) throw new Error('header has no box (drag2)')
+    const y2 = hb2.y + hb2.height / 2
+    const start2 = { x: hb2.x + hb2.width * 0.3, y: y2 }
+    await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [start2] })
+    await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start2.x + 15, y: y2 + 10 }] })
+    await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start2.x + 30, y: y2 + 20 }] })
+    await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    const afterDrag2 = await win.boundingBox()
+
+    const d2x = afterDrag2!.x - afterCancel!.x
+    const d2y = afterDrag2!.y - afterCancel!.y
+    // Einfaches Delta (~+30/+20). Rot gegen die Cancel-lose Fassung: ~doppelt.
+    expect(Math.abs(d2x - 30), `Folge-Drag x-Delta ${d2x}`).toBeLessThanOrEqual(16)
+    expect(Math.abs(d2y - 20), `Folge-Drag y-Delta ${d2y}`).toBeLessThanOrEqual(14)
+  })
+})
+
 // G6 — Mobile full-bleed sheet + minimize-bar (design 07-§Wellen G6, §D mobile).
 // Reuses the same open-seam (enterFocusStage → emit clickNode). Below SM=640 the
 // WindowManager renders ONLY store.topId as a `sheet` FloatingWindow (position:
