@@ -74,7 +74,10 @@ export const DomProjector: WindowProjector<RenderRect> = {
 // UA-16px gelten nur für @media-Breakpoints, nicht für rem-basierte Token-Maße.
 const REM = 15
 export const MIN_W_LU = 17 * REM // 255 lu Mindestbreite (Titelleiste + Actions lesbar)
-export const MIN_H_LU = 9 * REM // 135 lu Mindesthöhe
+// 12rem = 180 lu Mindesthöhe: Titlebar (25) + Padding (~26) + h2 (19) +
+// Actions (~34) + ~4 Prose-Zeilen (~70) — die kleinste Form, in der die Karte
+// noch „Karte mit Inhalt" ist statt leerer Rahmen (W4, 04-node-card §4.4).
+export const MIN_H_LU = 12 * REM // 180 lu Mindesthöhe
 export const TITLEBAR_H_LU = 2 * REM // 30 lu Titelleisten-Höhe; muss beim Move on-surface bleiben
 export const MIN_VISIBLE_LU = 4 * REM // 60 lu min. greifbarer Fenster-Anteil (Grip + min/close)
 
@@ -111,7 +114,7 @@ export const SPAWN_ORIGIN_Y = 1 * REM // 15 lu
 /**
  * Open-Default + deterministische Kaskade (lu), HART und VOLL in die Surface
  * geclampt (Open-Fenster sind immer komplett sichtbar — Gegensatz zu clampPos/move).
- * Größe: 28rem-Äquiv (≤ 90% Surface-Breite) × 22rem-Äquiv (≤ 80% Höhe), durch
+ * Größe: 40rem-Äquiv (≤ 90% Surface-Breite) × 38rem-Äquiv (≤ 80% Höhe), durch
  * `clampSize` auf das MIN gezogen. Position: (ORIGIN + off, ORIGIN + off) mit
  * off = SPAWN_STEP*(index % SPAWN_WRAP), dann geclampt in [0, wLu-w] × [0, hLu-h].
  * Sub-Min-Sonderfall: auf einer Surface < MIN_W_LU/MIN_H_LU erzwingt `clampSize`
@@ -121,7 +124,11 @@ export const SPAWN_ORIGIN_Y = 1 * REM // 15 lu
  * Pure → vitest (G5a deckt den normalen UND den Sub-Min-Zweig ab).
  */
 export function spawnRect(index: number, surface: SurfaceMetrics): LogicalRect {
-  const { w, h } = clampSize(Math.min(28 * REM, 0.9 * surface.wLu), Math.min(22 * REM, 0.8 * surface.hLu))
+  // Breite 40rem (600 lu): 40rem-Fenster ≈ 38rem Prose + Body-Padding — der
+  // Default zeigt die Prose-Zeile ungebrochen (U04-E2, 04-node-card §4.4).
+  // Höhe 38rem (570 lu): korrespondiert mit --measure-prose; ein Normblock
+  // (~1–1.5k chars ≈ 14–20 Zeilen) passt vollständig ohne Scroll (W4, §4.4).
+  const { w, h } = clampSize(Math.min(40 * REM, 0.9 * surface.wLu), Math.min(38 * REM, 0.8 * surface.hLu))
   const off = SPAWN_STEP * (index % SPAWN_WRAP)
   const x = Math.max(0, Math.min(SPAWN_ORIGIN_X + off, surface.wLu - w)) // voll-clamp in [0, wLu-w]
   const y = Math.max(0, Math.min(SPAWN_ORIGIN_Y + off, surface.hLu - h)) // voll-clamp in [0, hLu-h]

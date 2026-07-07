@@ -192,13 +192,18 @@ test.describe('graph floating windows (G5b)', () => {
 
     // Click-through proof: a point in a gap (pointer-events:none on .wm-root)
     // resolves to the Sigma <canvas> below, NOT the overlay root.
+    // Sample the bottom-right gap (0.9/0.9): after U04-W4 the default window is
+    // 600×570 (was 420×330), so the dragged card now reaches ~(1185,675) on the
+    // 1440×900 viewport and the former 0.72/0.75 sample sits INSIDE it. The point
+    // just needs to be a real overlay gap; bottom-right clears the enlarged card
+    // and the top-left chrome overlay alike.
     const vp = await page.locator('.viewport').boundingBox()
     const hit = await page.evaluate(
       ([x, y]) => {
         const el = document.elementFromPoint(x as number, y as number)
         return { tag: el?.tagName ?? '', cls: (el as HTMLElement)?.className ?? '' }
       },
-      [vp!.x + vp!.width * 0.72, vp!.y + vp!.height * 0.75],
+      [vp!.x + vp!.width * 0.9, vp!.y + vp!.height * 0.9],
     )
     expect(hit.cls).not.toContain('wm-root')
     expect(hit.tag).toBe('CANVAS')

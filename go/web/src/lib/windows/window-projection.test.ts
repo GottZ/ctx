@@ -86,11 +86,11 @@ describe('D4 falsification — genuinely agnostic, not accidentally 1:1', () => 
   })
 })
 
-describe('clampSize — minimum window size (MIN_W_LU=255 / MIN_H_LU=135)', () => {
+describe('clampSize — minimum window size (MIN_W_LU=255 / MIN_H_LU=180)', () => {
   it('floors sub-minimum dims to the minimum', () => {
     expect(MIN_W_LU).toBe(255)
-    expect(MIN_H_LU).toBe(135)
-    expect(clampSize(10, 10)).toEqual({ w: 255, h: 135 })
+    expect(MIN_H_LU).toBe(180)
+    expect(clampSize(10, 10)).toEqual({ w: 255, h: 180 })
   })
 
   it('passes through dims already at or above the minimum', () => {
@@ -101,8 +101,9 @@ describe('clampSize — minimum window size (MIN_W_LU=255 / MIN_H_LU=135)', () =
 describe('spawnRect — cascade off=SPAWN_STEP*(i%6) from origin, full clamp', () => {
   it('places window 0 at the origin with the default size', () => {
     const r = spawnRect(0, SURFACE)
-    // size: min(28rem,0.9·wLu) × min(22rem,0.8·hLu) = 420 × 330 on this surface
-    expect(r).toEqual({ x: SPAWN_ORIGIN_X, y: SPAWN_ORIGIN_Y, w: 420, h: 330 })
+    // size: min(40rem,0.9·wLu) × min(38rem,0.8·hLu) = 600 × 570 on this surface
+    // (0.9·1280=1152 > 600 → 600; 0.8·720=576 > 570 → 570)
+    expect(r).toEqual({ x: SPAWN_ORIGIN_X, y: SPAWN_ORIGIN_Y, w: 600, h: 570 })
   })
 
   it('cascades by SPAWN_STEP per window and wraps modulo 6', () => {
@@ -129,6 +130,27 @@ describe('spawnRect — cascade off=SPAWN_STEP*(i%6) from origin, full clamp', (
     // a sub-min (unreadable) window is worse than overflow → MIN wins, x/y clamp to 0
     expect(r).toEqual({ x: 0, y: 0, w: MIN_W_LU, h: MIN_H_LU })
     expect(r.w).toBeGreaterThan(surface.wLu) // overflow accepted
+  })
+})
+
+describe('W4 — Default-/Mindesthöhe (Spawn 38rem/40rem, Floor 12rem)', () => {
+  it('Spawn-Höhe wird auf 38rem (570 lu) gedeckelt, wenn der 0.8·hLu-Zweig nicht bindet', () => {
+    // 0.8·1200 = 960 > 570 → der rem-Cap 570 bindet
+    expect(spawnRect(0, { wLu: 2000, hLu: 1200 }).h).toBe(570)
+  })
+
+  it('der 0.8·hLu-Zweig bindet unter 712 px Surface-Höhe (Spawn-Höhe = 0.8·600)', () => {
+    // 0.8·600 = 480 < 570 → der relative Zweig bindet
+    expect(spawnRect(0, { wLu: 2000, hLu: 600 }).h).toBe(480)
+  })
+
+  it('Spawn-Breite wird auf 40rem (600 lu) gedeckelt (U04-E2)', () => {
+    // 0.9·2000 = 1800 > 600 → der rem-Cap 600 bindet
+    expect(spawnRect(0, { wLu: 2000, hLu: 1200 }).w).toBe(600)
+  })
+
+  it('MIN_H_LU-Floor liegt bei 12rem (180 lu)', () => {
+    expect(clampSize(0, 0).h).toBe(180)
   })
 })
 

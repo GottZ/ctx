@@ -193,7 +193,7 @@ describe('WindowStore move — clampPos (grabbable, not full containment)', () =
   it('applies the logical delta and clamps so the titlebar stays grabbable', () => {
     const s = new WindowStore()
     s.setSurface({ wLu: 1280, hLu: 720 })
-    s.open(A) // origin ~ (465,15), size 420×330
+    s.open(A) // origin ~ (465,15), size 600×570
     const before = { ...s.wins[0].rect }
     s.move(A, -100_000, -100_000) // shove far off the top-left
     const r = s.wins[0].rect
