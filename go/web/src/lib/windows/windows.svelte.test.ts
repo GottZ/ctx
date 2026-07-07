@@ -6,7 +6,7 @@
 // stub stands in for the HTMLElement focus targets (vitest env = node).
 
 import { describe, expect, it } from 'vitest'
-import { MIN_H_LU, MIN_VISIBLE_LU, MIN_W_LU, type SurfaceMetrics } from './window-projection'
+import { MIN_H_LU, MIN_VISIBLE_LU, MIN_W_LU, TITLEBAR_H_LU, spawnRect, type SurfaceMetrics } from './window-projection'
 import { WindowStore } from './windows.svelte'
 
 /** Minimal focus-tracking stand-in for an HTMLElement (no DOM in node env). */
@@ -18,6 +18,13 @@ function focusTarget() {
 const A = '550e8400-e29b-41d4-a716-446655440001'
 const B = '550e8400-e29b-41d4-a716-446655440002'
 const C = '550e8400-e29b-41d4-a716-446655440003'
+// Test-Isolation (U04-W6): move()/resize() schreiben in ein MODUL-Gedächtnis
+// (lastRects), das über alle Tests DIESER Datei hinweg überlebt. Tests, die
+// absolute Spawn-Geometrie beim open() prüfen, brauchen daher IDs, die NIE
+// bewegt wurden (A/B/C werden von den move/resize/identity-Gates verstellt).
+// Saubere Lösung ohne Test-nur-Reset-API: eindeutige IDs pro Anspruch (§7-W6).
+const D = '550e8400-e29b-41d4-a716-446655440004'
+const E = '550e8400-e29b-41d4-a716-446655440005'
 
 describe('WindowStore open / dedup', () => {
   it('open adds a window and surfaces it in openIds', () => {
@@ -173,7 +180,7 @@ describe('WindowStore setSurface — open places within the set surface', () => 
     const s = new WindowStore()
     const surface: SurfaceMetrics = { wLu: 2000, hLu: 1200 }
     s.setSurface(surface)
-    s.open(A)
+    s.open(D) // nie bewegte ID → echte Spawn-Geometrie (Gedächtnis-frei, s. oben)
     const r = s.wins[0].rect
     expect(r.x).toBeGreaterThanOrEqual(0)
     expect(r.y).toBeGreaterThanOrEqual(0)
@@ -184,7 +191,7 @@ describe('WindowStore setSurface — open places within the set surface', () => 
   it('a tiny surface forces the MIN window size (sub-min branch)', () => {
     const s = new WindowStore()
     s.setSurface({ wLu: 120, hLu: 90 })
-    s.open(A)
+    s.open(E) // nie bewegte ID → echte Spawn-Geometrie (Gedächtnis-frei, s. oben)
     expect(s.wins[0].rect).toMatchObject({ w: MIN_W_LU, h: MIN_H_LU })
   })
 })
@@ -228,5 +235,99 @@ describe('WindowStore resize — clampSize', () => {
     s.open(A)
     s.resize(A, -100_000, -100_000)
     expect(s.wins[0].rect).toMatchObject({ w: MIN_W_LU, h: MIN_H_LU })
+  })
+})
+
+describe('WindowStore Positions-Gedächtnis (U04-W6, §4.6/§7-W6)', () => {
+  // Test-Isolation: das Modul-Gedächtnis (lastRects) überlebt zwischen Tests
+  // DERSELBEN Datei. Jeder Test hier verwendet daher eine EIGENE, nie
+  // wiederverwendete ID (Präfix je Anspruch) — der saubere Weg ohne eine
+  // Test-nur-Reset-API, die das Produktions-Modul aufblähen würde (§7-W6).
+
+  it('open → move → close → open landet an der gemerkten Position (nicht am Spawn)', () => {
+    const s = new WindowStore()
+    s.setSurface({ wLu: 1280, hLu: 720 })
+    const id = 'w6-basic'
+    s.open(id)
+    s.move(id, 40, 30) // USER-verstellt ⇒ merken
+    const moved = { ...s.wins[0].rect }
+    s.close(id)
+    s.open(id) // Re-Open: gemerkte Position, nicht spawnRect
+    expect(s.wins[0].rect).toMatchObject({ x: moved.x, y: moved.y })
+    // Gegenprobe zum Ist: der Spawn läge woanders
+    expect(s.wins[0].rect.x).not.toBe(spawnRect(0, { wLu: 1280, hLu: 720 }).x)
+  })
+
+  it('Surface-Verkleinerung zwischen close und Re-Open hält die clampPos-Invariante (greifbar)', () => {
+    const s = new WindowStore()
+    s.setSurface({ wLu: 2000, hLu: 1200 })
+    const id = 'w6-clamp'
+    s.open(id)
+    s.move(id, 1200, 1000) // auf großer Surface weit nach rechts/unten geschoben
+    const moved = { ...s.wins[0].rect }
+    s.close(id)
+    s.setSurface({ wLu: 640, hLu: 480 }) // kleinerer „Monitor" beim Re-Open
+    s.open(id)
+    const r = s.wins[0].rect
+    // Position re-geclampt gegen die AKTUELLE (kleine) Surface — Titlebar + MIN_VISIBLE greifbar
+    expect(r.x).toBeGreaterThanOrEqual(MIN_VISIBLE_LU - r.w)
+    expect(r.x).toBeLessThanOrEqual(640 - MIN_VISIBLE_LU)
+    expect(r.y).toBeGreaterThanOrEqual(0)
+    expect(r.y).toBeLessThanOrEqual(480 - TITLEBAR_H_LU)
+    // Gemerkte GRÖSSE bleibt (clampSize erzwingt nur MIN, KEIN Surface-Max, §5-Nr.4/§8-D5)
+    expect(r.w).toBe(moved.w)
+  })
+
+  it('LRU: der 201. Eintrag verdrängt den ältesten (Re-Open des Ältesten ⇒ Spawn)', () => {
+    const surface: SurfaceMetrics = { wLu: 1280, hLu: 720 }
+    const s = new WindowStore()
+    s.setSurface(surface)
+    const ids = Array.from({ length: 201 }, (_, i) => `w6-lru-${i}`)
+    for (const id of ids) {
+      s.open(id)
+      s.move(id, 5, 5) // verstellen ⇒ merken
+      s.close(id) // close löscht das Fenster, NICHT das Gedächtnis
+    }
+    // Cap 200 ⇒ ältester (ids[0]) ist verdrängt, ids[1..200] noch gemerkt
+    const spawn0 = spawnRect(0, surface)
+    const a = new WindowStore()
+    a.setSurface(surface)
+    a.open(ids[0]) // nicht mehr im Gedächtnis ⇒ frischer Spawn
+    expect(a.wins[0].rect).toMatchObject({ x: spawn0.x, y: spawn0.y })
+    // Gegenprobe: ids[1] ist noch gemerkt ⇒ NICHT die Spawn-Position
+    const b = new WindowStore()
+    b.setSurface(surface)
+    b.open(ids[1])
+    expect(b.wins[0].rect.x).not.toBe(spawn0.x)
+  })
+
+  it('nie bewegtes Fenster behält Kaskaden-Spawn (bloßes open/close merkt nichts)', () => {
+    const surface: SurfaceMetrics = { wLu: 1280, hLu: 720 }
+    const id = 'w6-untouched'
+    const s = new WindowStore()
+    s.setSurface(surface)
+    s.open(id) // NUR öffnen/schließen — kein move/resize
+    s.close(id)
+    const fresh = new WindowStore()
+    fresh.setSurface(surface)
+    fresh.open(id)
+    const spawn0 = spawnRect(0, surface)
+    expect(fresh.wins[0].rect).toMatchObject({ x: spawn0.x, y: spawn0.y, w: spawn0.w, h: spawn0.h })
+  })
+
+  it('ein ZWEITER WindowStore sieht das Modul-Gedächtnis (SPA-Session-Scope, der Persistenz-Claim)', () => {
+    const surface: SurfaceMetrics = { wLu: 1280, hLu: 720 }
+    const id = 'w6-shared'
+    const s1 = new WindowStore()
+    s1.setSurface(surface)
+    s1.open(id)
+    s1.move(id, 40, 30)
+    const remembered = { ...s1.wins[0].rect }
+    // Getrennter Store (z. B. Graph-Besuch #2 nach Route-Wechsel) — kein geteilter
+    // Instanz-State, NUR das Modul-Gedächtnis kann die Position tragen:
+    const s2 = new WindowStore()
+    s2.setSurface(surface)
+    s2.open(id)
+    expect(s2.wins[0].rect).toMatchObject({ x: remembered.x, y: remembered.y, w: remembered.w, h: remembered.h })
   })
 })

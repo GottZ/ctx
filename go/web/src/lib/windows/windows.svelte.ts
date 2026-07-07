@@ -3,10 +3,39 @@
 // later WebXR layer reuses this store verbatim and only swaps the render layer
 // (WindowProjector + render-leaf). Injectable plain-runes class (like KeysModel)
 // so vitest covers open/dedup/z-order/minimize/close-focus-return/closeAll/
-// setSurface/move-clamp/resize-clamp without a DOM. In-memory per page-visit
-// (mirrors the ephemeral graph instance) — no localStorage, no URL.
+// setSurface/move-clamp/resize-clamp without a DOM. Die Fenster-LISTE ist
+// in-memory pro Seiten-Besuch (mirrors the ephemeral graph instance) — no
+// localStorage, no URL. Die POSITIONEN sind dagegen über die SPA-Session
+// gemerkt (Modul-Heap `lastRects`, U04-W6/§8-D1): ein Re-Open desselben Blocks
+// — auch nach closeAll/Route-Wechsel oder in einem zweiten WindowStore —
+// landet an der zuletzt user-verstellten Stelle; ein Reload startet frisch.
 
 import { clampPos, clampSize, spawnRect, type LogicalRect, type SurfaceMetrics } from './window-projection'
+
+// Positions-Gedächtnis der SPA-Session (U04-W6, 04-node-card §4.6). Modul-Ebene,
+// AUSSERHALB der Klasse: geteilt über ALLE WindowStore-Instanzen der Session
+// (Graph-Besuch #1 → Board → Graph-Besuch #2) — genau die Wechsel, bei denen der
+// Store per closeAll()/Route-Wechsel OHNE close()-Aufrufe zerstört wird. Bewusst
+// KEIN sessionStorage/localStorage (§8-D1): die Fenster-Liste überlebt Reload
+// ohnehin nicht, also kein Serialisierungs-/Versionierungs-Code, kein Cross-Tab-
+// Bleed. Keys sind Fenster-IDs (Block-/Issue-UUIDs, disjunkte Namensräume →
+// kollisionsfrei). LRU-gedeckelt: auch eine 1M-Korpus-Browsing-Session wächst
+// nicht über ~200 Rects (≈ 20 KB Heap).
+const lastRects = new Map<string, LogicalRect>()
+const LAST_RECTS_CAP = 200
+
+/** Merkt sich das (bereits geclampte) Rect für `id` mit LRU-Touch. Map iteriert
+ *  in Insert-Reihenfolge → re-insert schiebt ans Ende, Überlauf löscht den
+ *  ältesten Key. Nur move()/resize() rufen das auf (nur USER-verstellte Fenster
+ *  merken — die Spawn-Kaskade bleibt für nie angefasste Fenster deterministisch). */
+function rememberRect(id: string, rect: LogicalRect): void {
+  lastRects.delete(id) // re-insert ⇒ LRU-Touch
+  lastRects.set(id, rect)
+  if (lastRects.size > LAST_RECTS_CAP) {
+    const oldest = lastRects.keys().next().value // ältester Key (Insert-Reihenfolge)
+    if (oldest !== undefined) lastRects.delete(oldest)
+  }
+}
 
 export interface WinState {
   id: string // Block-UUID (Dedup-Schlüssel)
@@ -64,7 +93,21 @@ export class WindowStore {
       this.restore(id)
       return
     }
-    const rect = spawnRect(this.wins.length, this.surface)
+    // U04-W6 (§4.6): kennt die Session eine user-verstellte Position für `id`,
+    // an ihr wieder öffnen — sonst deterministischer Spawn wie Ist. Das gemerkte
+    // Rect wird gegen die AKTUELLE Surface re-geclampt (greifbar-Invariante,
+    // §5-Nr.4): clampPos hält Titelleiste + MIN_VISIBLE on-surface; clampSize
+    // erzwingt nur das MIN, KEIN Surface-Max — eine auf großem Monitor gemerkte
+    // Übergröße bleibt (bewusst partiell off-canvas, wie beim User-Resize, §8-D5),
+    // wird aber nie ungreifbar.
+    const remembered = lastRects.get(id)
+    let rect: LogicalRect
+    if (remembered !== undefined) {
+      const { w, h } = clampSize(remembered.w, remembered.h)
+      rect = clampPos({ x: remembered.x, y: remembered.y, w, h }, this.surface)
+    } else {
+      rect = spawnRect(this.wins.length, this.surface)
+    }
     const z = this.#maxZ() + 1
     this.wins = [...this.wins, { id, rect, z, minimized: false, triggerEl }]
   }
@@ -117,6 +160,7 @@ export class WindowStore {
     const w = this.wins.find((x) => x.id === id)
     if (w === undefined) return
     w.rect = clampPos({ ...w.rect, x: w.rect.x + dxLu, y: w.rect.y + dyLu }, this.surface)
+    rememberRect(id, { ...w.rect }) // U04-W6: NACH dem Clamp merken (Snapshot, nicht der $state-Proxy)
   }
 
   /** Logisches Resize-Delta (lu) + clampSize (MIN_W_LU/MIN_H_LU erzwungen). In-Place (§4.2). */
@@ -125,6 +169,7 @@ export class WindowStore {
     if (w === undefined) return
     const { w: nw, h: nh } = clampSize(w.rect.w + dwLu, w.rect.h + dhLu)
     w.rect = { ...w.rect, w: nw, h: nh }
+    rememberRect(id, { ...w.rect }) // U04-W6: NACH dem Clamp merken (Snapshot, nicht der $state-Proxy)
   }
 
   minimize(id: string): void {
