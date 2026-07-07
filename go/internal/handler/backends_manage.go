@@ -455,6 +455,13 @@ func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request
 			v["effective_state"] = s.EffectiveState
 			v["cooldown_remaining_s"] = s.CooldownRemaining
 			v["consecutive_fails"] = s.ConsecutiveFails
+			// disabled_by_profiles rides the live-status merge (like
+			// effective_state): the ACTIVE disable-profiles containing this
+			// backend (092, U01-W2). Uniform for both admin tiers — a
+			// tenant-admin sees it on the visible _global rows (U01-E2=a).
+			if len(s.DisabledByProfiles) > 0 {
+				v["disabled_by_profiles"] = s.DisabledByProfiles
+			}
 			if s.LastErrorClass != "" {
 				v["last_error"] = s.LastErrorClass
 			}

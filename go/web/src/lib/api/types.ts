@@ -90,10 +90,15 @@ export interface HealthStatus {
   services: Record<string, string>
 }
 
+// effective_state is a CLOSED set (source: pool.go BackendStatus). profile-disabled
+// (092, U01-W2) = an active disable-profile holds the backend out of every chain;
+// precedence disabled > profile-disabled > cooldown > active.
+export type BackendEffectiveState = 'active' | 'disabled' | 'profile-disabled' | 'cooldown'
+
 // Source: go/internal/backends/pool.go (BackendStatus), surfaced via
-// /api/status. trust is one of full-trust|no-credentials|non-personal|public;
-// effective_state is active|disabled|cooldown. last_error_class is the
-// sanitized error class (never a raw URL/body).
+// /api/status. trust is one of full-trust|no-credentials|non-personal|public.
+// last_error_class is the sanitized error class (never a raw URL/body).
+// disabled_by_profiles names the active profiles disabling this backend.
 export interface BackendStatus {
   id: string
   name: string
@@ -102,7 +107,8 @@ export interface BackendStatus {
   roles: string[]
   priority: number
   enabled: boolean
-  effective_state: string
+  effective_state: BackendEffectiveState
+  disabled_by_profiles?: string[]
   cooldown_remaining_s: number
   consecutive_fails: number
   last_error_class?: string
@@ -146,7 +152,8 @@ export interface BackendView {
 // merged with the live pool status by id; the status keys are renamed off
 // BackendStatus (cooldown_remaining_s, last_error vs last_error_class).
 export interface BackendListItem extends BackendView {
-  effective_state: string
+  effective_state: BackendEffectiveState
+  disabled_by_profiles?: string[]
   cooldown_remaining_s: number
   consecutive_fails: number
   last_error?: string

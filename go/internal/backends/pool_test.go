@@ -15,6 +15,15 @@ func seedPool(bs []Backend) *Pool {
 	return p
 }
 
+// seedPoolWithDisabledBy publishes a static snapshot carrying a precomputed
+// disabledBy map (backend_id → comma-joined SORTED active-profile names, the
+// shape buildDisabledBy produces at Reload). W2 chain arm + Status() read it.
+func seedPoolWithDisabledBy(bs []Backend, disabledBy map[string]string) *Pool {
+	p := NewPool(nil, nil)
+	p.snap.Store(&snapshot{backends: bs, disabledBy: disabledBy, version: 1, loadedAt: time.Now()})
+	return p
+}
+
 func chainNames(t *testing.T, p *Pool, role string, required Sensitivity, g GamingState) []string {
 	t.Helper()
 	chain, err := p.Chain(role, required, g, "")
@@ -118,6 +127,44 @@ func TestChainGamingExclusion(t *testing.T) {
 	got = chainNames(t, p, RoleSynthesis, SensPublic, g)
 	if got[0] != "gpu" {
 		t.Fatalf("inactive gaming still excluded: %v", got)
+	}
+}
+
+// TestChainProfileExclusion is the W2 gate (§7-W2): a backend disabled by an
+// ACTIVE profile (present in the snapshot disabledBy map) must fall out of the
+// chain with the reason "disabled by profile <names>". Against the W1 stand this
+// FAILS — Chain() ignored disabledBy, so the member stayed in the chain.
+func TestChainProfileExclusion(t *testing.T) {
+	// Active profile "eject" disables "gpu" (id "1").
+	p := seedPoolWithDisabledBy(poolFixture(), map[string]string{"1": "eject"})
+
+	got := chainNames(t, p, RoleSynthesis, SensPublic, GamingState{})
+	for _, n := range got {
+		if n == "gpu" {
+			t.Fatalf("profile-disabled backend made the chain: %v", got)
+		}
+	}
+
+	// The exclusion reason names the profile(s), comma-joined and sorted. Drive
+	// the empty-chain path so Excluded is populated: embedder (id "5") is the
+	// only embed backend — disabling it empties the embed chain.
+	p2 := seedPoolWithDisabledBy(poolFixture(), map[string]string{"5": "eject,gpu-wartung"})
+	_, err := p2.Chain(RoleEmbed, SensPublic, GamingState{}, "")
+	var noElig *ErrNoEligibleBackend
+	if !asNoEligible(err, &noElig) {
+		t.Fatalf("expected ErrNoEligibleBackend, got %T (%v)", err, err)
+	}
+	if len(noElig.Excluded) == 0 {
+		t.Fatalf("reasons missing: %+v", noElig)
+	}
+	if noElig.Excluded[0].Reason != "disabled by profile eject,gpu-wartung" {
+		t.Fatalf("reason = %q, want %q", noElig.Excluded[0].Reason, "disabled by profile eject,gpu-wartung")
+	}
+
+	// A backend NOT in an active profile stays in the chain (disabledBy absent).
+	got = chainNames(t, p, RoleEmbed, SensCredentials, GamingState{})
+	if len(got) != 1 || got[0] != "embedder" {
+		t.Fatalf("non-disabled backend dropped: %v", got)
 	}
 }
 
@@ -262,6 +309,54 @@ func TestStatusSanitized(t *testing.T) {
 	}
 	if gpu.LastErrorClass != "auth" {
 		t.Fatalf("last error class = %q, want auth", gpu.LastErrorClass)
+	}
+}
+
+// TestStatusProfileDisabled is the W2 effective_state gate (§7-W2): a backend
+// held by an ACTIVE profile reports effective_state "profile-disabled" and its
+// DisabledByProfiles names; `disabled` (enabled=false) wins the precedence, and
+// cooldown loses to profile-disabled.
+func TestStatusProfileDisabled(t *testing.T) {
+	p := seedPoolWithDisabledBy(poolFixture(), map[string]string{
+		"1": "eject",          // gpu (enabled)      → profile-disabled
+		"4": "eject",          // off (enabled=false) → disabled wins
+		"5": "eject,gpu-wart", // embedder           → profile-disabled, 2 names
+	})
+
+	byName := func() map[string]BackendStatus {
+		m := map[string]BackendStatus{}
+		for _, s := range p.Status() {
+			m[s.Name] = s
+		}
+		return m
+	}
+
+	st := byName()
+	if st["gpu"].EffectiveState != "profile-disabled" {
+		t.Fatalf("gpu state = %q, want profile-disabled", st["gpu"].EffectiveState)
+	}
+	if got := st["gpu"].DisabledByProfiles; len(got) != 1 || got[0] != "eject" {
+		t.Fatalf("gpu DisabledByProfiles = %v, want [eject]", got)
+	}
+	if got := st["embedder"].DisabledByProfiles; len(got) != 2 || got[0] != "eject" || got[1] != "gpu-wart" {
+		t.Fatalf("embedder DisabledByProfiles = %v, want [eject gpu-wart]", got)
+	}
+	// disabled beats profile-disabled — but the membership is still surfaced.
+	if st["off"].EffectiveState != "disabled" {
+		t.Fatalf("off state = %q, want disabled (disabled beats profile-disabled)", st["off"].EffectiveState)
+	}
+	if got := st["off"].DisabledByProfiles; len(got) != 1 || got[0] != "eject" {
+		t.Fatalf("off DisabledByProfiles = %v, want [eject] even when disabled", got)
+	}
+	// A backend outside any active profile stays active with no profile names.
+	if st["cpu"].EffectiveState != "active" || len(st["cpu"].DisabledByProfiles) != 0 {
+		t.Fatalf("cpu = %+v, want active/no profiles", st["cpu"])
+	}
+
+	// cooldown loses to profile-disabled (precedence).
+	p.ReportFailure("1", ClassTransport, 0) // gpu cooldown
+	if got := byName()["gpu"].EffectiveState; got != "profile-disabled" {
+		t.Fatalf("gpu state under cooldown+profile = %q, want profile-disabled", got)
 	}
 }
 

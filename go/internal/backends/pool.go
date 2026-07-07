@@ -445,6 +445,15 @@ func (p *Pool) Chain(role string, required Sensitivity, gaming GamingState, tena
 			// roles don't spam the exclusion reasons.
 		case !b.Enabled:
 			excluded = append(excluded, ExclusionReason{b.Name, "disabled"})
+		case snap.disabledBy[b.ID] != "":
+			// An ACTIVE disable-profile (092, U01-W2) contains this backend. The
+			// reason names the profile(s) (comma-joined, sorted at reload). Placed
+			// AFTER !Enabled (that reason stays the more specific one) and BEFORE
+			// trust; the gaming arm below stays in parallel until W5 (double
+			// mechanism, deckungsgleich by backfill — the backend falls out once,
+			// reason order decides the text).
+			excluded = append(excluded, ExclusionReason{b.Name,
+				"disabled by profile " + snap.disabledBy[b.ID]})
 		case !b.Trust.Allows(required):
 			excluded = append(excluded, ExclusionReason{b.Name,
 				fmt.Sprintf("trust %s < required %s", b.Trust, required)})
@@ -571,18 +580,23 @@ func (p *Pool) ReportSuccess(backendID string) {
 // reachability, never names). LastErrorClass is the sanitized ErrClass
 // string — URLs and provider bodies never reach this struct.
 type BackendStatus struct {
-	ID                string   `json:"id"`
-	Name              string   `json:"name"`
-	Trust             Trust    `json:"trust"`
-	Locality          string   `json:"locality"`
-	Roles             []string `json:"roles"`
-	Priority          int      `json:"priority"`
-	Enabled           bool     `json:"enabled"`
-	EffectiveState    string   `json:"effective_state"` // active|disabled|cooldown
-	CooldownRemaining int      `json:"cooldown_remaining_s"`
-	ConsecutiveFails  int      `json:"consecutive_fails"`
-	LastErrorClass    string   `json:"last_error_class,omitempty"`
-	LastOK            string   `json:"last_ok,omitempty"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Trust          Trust    `json:"trust"`
+	Locality       string   `json:"locality"`
+	Roles          []string `json:"roles"`
+	Priority       int      `json:"priority"`
+	Enabled        bool     `json:"enabled"`
+	EffectiveState string   `json:"effective_state"` // active|disabled|profile-disabled|cooldown
+	// DisabledByProfiles names the ACTIVE disable-profiles that contain this
+	// backend (092, U01-W2), sorted; empty/omitted when none. Independent of
+	// EffectiveState — it is populated even when `disabled` (enabled=false) wins
+	// the precedence, so the admin surface still sees the profile membership.
+	DisabledByProfiles []string `json:"disabled_by_profiles,omitempty"`
+	CooldownRemaining  int      `json:"cooldown_remaining_s"`
+	ConsecutiveFails   int      `json:"consecutive_fails"`
+	LastErrorClass     string   `json:"last_error_class,omitempty"`
+	LastOK             string   `json:"last_ok,omitempty"`
 }
 
 // Status merges the current snapshot with live health for the admin surface.
@@ -599,6 +613,14 @@ func (p *Pool) Status() []BackendStatus {
 			Roles: b.Roles, Priority: b.Priority, Enabled: b.Enabled,
 			EffectiveState: "active",
 		}
+		// Precedence: disabled > profile-disabled > cooldown > active (092,
+		// U01-W2 §4.2). profile-disabled is set first, then `disabled`
+		// (enabled=false) overrides it; cooldown below only applies while the
+		// state is still "active", so both stronger states suppress it.
+		if names := snap.disabledBy[b.ID]; names != "" {
+			s.DisabledByProfiles = strings.Split(names, ",")
+			s.EffectiveState = "profile-disabled"
+		}
 		if !b.Enabled {
 			s.EffectiveState = "disabled"
 		}
@@ -610,7 +632,7 @@ func (p *Pool) Status() []BackendStatus {
 			if !h.lastOK.IsZero() {
 				s.LastOK = h.lastOK.UTC().Format(time.RFC3339)
 			}
-			if b.Enabled && h.cooldownUntil.After(now) {
+			if b.Enabled && s.EffectiveState == "active" && h.cooldownUntil.After(now) {
 				s.EffectiveState = "cooldown"
 				s.CooldownRemaining = int(time.Until(h.cooldownUntil).Seconds())
 			}

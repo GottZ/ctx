@@ -22,10 +22,13 @@
   type TestState = BackendTestResult | { error: string }
   let testResults = $state<Record<string, TestState>>({})
 
-  // K-f-Klassen-Mapping (Q3): active ok, cooldown warn, sonst idle (fail-closed).
+  // K-f-Klassen-Mapping (Q3): active ok, cooldown/profile-disabled warn,
+  // sonst idle (fail-closed). profile-disabled (092, U01-W2) reuses the warn
+  // token — intentionally out, distinct from a broken/disabled row.
   function stateClass(s: string): string {
     if (s === 'active') return 'ok'
     if (s === 'cooldown') return 'warn'
+    if (s === 'profile-disabled') return 'profile'
     return 'idle'
   }
 
@@ -308,6 +311,9 @@
   }
   .dot.idle {
     background: var(--text-faint);
+  }
+  .dot.profile {
+    background: var(--warn);
   }
   .errcls {
     margin-left: var(--space-1);
