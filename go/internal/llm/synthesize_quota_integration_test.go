@@ -81,7 +81,7 @@ func TestSynthesize_QuotaBlocksOverBudget(t *testing.T) {
 	settings := llm.SynthesisSettings{ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: llm.PromptVersionV52}
 	sources := []llm.Source{{ID: "00000000-0000-0000-0000-000000000001", Title: "t", Category: "c", Content: "body", Score: 0.5, AgeDays: 1}}
 
-	_, err := llm.Synthesize(ctx, pool, bpool, acc, backends.GamingState{},
+	_, err := llm.Synthesize(ctx, pool, bpool, acc,
 		settings, backends.SensPersonal, "q", sources, nil, keyID, scope, quotaAdmission(t))
 
 	var qe *backends.ErrQuotaExceeded
@@ -96,7 +96,7 @@ func TestSynthesize_QuotaBlocksOverBudget(t *testing.T) {
 	}
 
 	// Control: a scope with no quota row synthesizes normally (gate fail-open).
-	_, err = llm.Synthesize(ctx, pool, bpool, acc, backends.GamingState{},
+	_, err = llm.Synthesize(ctx, pool, bpool, acc,
 		settings, backends.SensPersonal, "q", sources, nil, "", "no-quota-scope", quotaAdmission(t))
 	if err != nil {
 		t.Fatalf("no-quota scope should pass the gate and synthesize: %v", err)

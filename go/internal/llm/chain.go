@@ -572,13 +572,8 @@ type ChainCall struct {
 	// backends are '_global'; fail-closed — never a foreign tenant-private one).
 	// Threading ar.HomeScope here is a later refinement if those Q-only roles
 	// should reach a tenant's own private backend.
-	Tenant   string
-	Required backends.Sensitivity
-	// Gaming is the chain-time exclusion (gaming.active + disabled_backends);
-	// the call site reads it from its config snapshot so the toggle takes
-	// effect on the next call without a restart (design 03 §2.6). Zero value
-	// = inactive.
-	Gaming     backends.GamingState
+	Tenant     string
+	Required   backends.Sensitivity
 	Pipeline   string // llmlog pipeline name, e.g. "query-translate"
 	System     string
 	User       string
@@ -607,7 +602,7 @@ type ChainCall struct {
 // acquire failure WITHOUT any wire contact writes no regular llmlog row
 // (doctrine §4.3) — only the K9 rejection line where it applies (MW10).
 func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*ChatResponse, error) {
-	chain, err := c.Pool.Chain(c.Role, c.Required, c.Gaming, c.Tenant)
+	chain, err := c.Pool.Chain(c.Role, c.Required, c.Tenant)
 	if err != nil {
 		return nil, err
 	}

@@ -60,7 +60,7 @@ func TestSynthesizeGate_PublicBackendNeverSeesPersonal(t *testing.T) {
 
 	sources := []Source{{ID: "1", Title: "t", Category: "c", Content: "body",
 		Score: 0.5, Sensitivity: backends.SensPersonal}}
-	res, err := Synthesize(testPrincipalCtx(), nil, bpool, nil, backends.GamingState{}, gateSettings(),
+	res, err := Synthesize(testPrincipalCtx(), nil, bpool, nil, gateSettings(),
 		backends.SensPersonal, "q", sources, nil, "", "", testAdmission(t, dispatch.ClassInteractive))
 	if err != nil {
 		t.Fatalf("Synthesize: %v", err)
@@ -95,7 +95,7 @@ func TestSynthesizeGate_MeasuresFinalSetNotAllCandidates(t *testing.T) {
 		{ID: "2", Title: "secret", Category: "c", Content: "key material",
 			Score: 0.0001, Sensitivity: backends.SensCredentials},
 	}
-	res, err := Synthesize(testPrincipalCtx(), nil, bpool, nil, backends.GamingState{}, gateSettings(),
+	res, err := Synthesize(testPrincipalCtx(), nil, bpool, nil, gateSettings(),
 		backends.SensPersonal, "q", sources, nil, "", "", testAdmission(t, dispatch.ClassInteractive))
 	if err != nil {
 		t.Fatalf("Synthesize: %v — a rank-filtered credentials block locked the chain", err)
@@ -119,7 +119,7 @@ func TestSynthesizeGate_ZeroValueActsAsCredentials(t *testing.T) {
 
 	sources := []Source{{ID: "1", Title: "t", Category: "c", Content: "body",
 		Score: 0.5 /* Sensitivity deliberately unset */}}
-	_, err := Synthesize(testPrincipalCtx(), nil, bpool, nil, backends.GamingState{}, gateSettings(),
+	_, err := Synthesize(testPrincipalCtx(), nil, bpool, nil, gateSettings(),
 		backends.SensPersonal, "q", sources, nil, "", "", testAdmission(t, dispatch.ClassInteractive))
 	if err == nil {
 		t.Fatal("want ErrNoEligibleBackend — zero-value sensitivity must act as credentials")

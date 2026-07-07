@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -20,21 +21,38 @@ const (
 	ejectProfileScope = "_global"
 )
 
+// ejectProfileActive reports whether the reserved eject profile is currently
+// active in the given pool-snapshot profile registry (ORDER BY name, Pool.
+// Profiles()). It is the single source of truth for the status payload's
+// gaming.active field since U01-W5 (the legacy gaming.active settings key is
+// gone). A missing profile (only reachable via psql break-glass) degrades to
+// false — same fail-soft as ejectShapeView, never an error. The eject naming
+// lives HERE, not in backends.Pool: the pool holds no policy (deliberate
+// decoupling, backends/pool.go).
+func ejectProfileActive(profiles []backends.Profile) bool {
+	for i := range profiles {
+		if profiles[i].Scope == ejectProfileScope && profiles[i].Name == ejectProfileName {
+			return profiles[i].Active
+		}
+	}
+	return false
+}
+
 // gamingModeNote is the constant advisory in every eject/gaming-mode response:
 // the toggle affects NEW chains only — a running 27B synthesis (≤60s) and an
 // in-flight dream cycle (≤700s) finish normally (design 03 §2.6).
 const gamingModeNote = "laufende Requests beenden normal; dream pausiert ab nächstem Zyklus"
 
-// errEjectProfileMissing is returned by the dual-write when the reserved eject
+// errEjectProfileMissing is returned by the eject-write when the reserved eject
 // profile is gone (only reachable via psql break-glass — the reserved guard
-// blocks API deletion). The shim then answers 422 rather than diverging.
+// blocks API deletion). The shim then answers 422 rather than silently no-op'ing.
 var errEjectProfileMissing = errors.New("eject profile missing")
 
 // beforeGamingCommit is a test seam (nil in production): it fires inside the
-// dual-write transaction, AFTER both writes and BEFORE Commit. Returning an
-// error there forces the deferred Rollback — the atomicity probe (gate b) uses
-// it to prove a commit-boundary failure leaves NEITHER row written (no divergent
-// state: profile off / settings on, or the inverse).
+// eject-write transaction, AFTER the profile write and BEFORE Commit. Returning
+// an error there forces the deferred Rollback — the atomicity probe uses it to
+// prove a commit-boundary failure leaves the profile row untouched (since U01-W5
+// the write is profile-only; the legacy gaming.active dual-write is gone).
 var beforeGamingCommit func() error
 
 // gamingStateView is the eject/gaming-mode response payload (LEGACY shape, kept
@@ -81,7 +99,7 @@ func (h *ManageHandler) handleGamingMode(w http.ResponseWriter, r *http.Request,
 				"success": false, "error": `gaming mode must be "on" or "off"`})
 			return
 		}
-		if err := h.writeEjectAndGaming(r, active); err != nil {
+		if err := h.writeEjectActive(r, active); err != nil {
 			if errors.Is(err, errEjectProfileMissing) {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 					"success": false,
@@ -94,8 +112,12 @@ func (h *ManageHandler) handleGamingMode(w http.ResponseWriter, r *http.Request,
 		}
 		// Persisted but not live is never a plain success (settings.HandlePut
 		// doctrine): a reload failure must surface, not silently report on. The
-		// pool reload lands the profile flip in this process; settingsReload
-		// keeps the parallel gaming arm live through the cutover window.
+		// pool reload lands the profile flip in this process — that is the live
+		// surface since U01-W5 (the eject profile is the single source of truth;
+		// the legacy gaming.active settings arm is gone). settingsReload no longer
+		// carries the toggle, but stays wired as an idempotent config refresh —
+		// removing its plumbing would churn NewManageHandler's call sites and is
+		// out of this wave's scope.
 		h.reloadAfterMutation(ctx, "eject/gaming-mode")
 		if h.settingsReload != nil {
 			if err := h.settingsReload(ctx); err != nil {
@@ -120,14 +142,14 @@ func (h *ManageHandler) handleGamingMode(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-// writeEjectAndGaming is the atomic dual-write (§4.7-W3): the eject profile's
-// active flag AND the gaming.active settings row flip in ONE transaction, so a
-// crash at the commit boundary can never leave them divergent (profile off /
-// settings on ⇒ the parallel gaming arm keeps disabling while the shim reports
-// "off", or the inverse). The 092 + 051 triggers emit audit + NOTIFY atomically
-// with each row. The eject profile is toggled with scopes=nil (the mutation is
-// server-admin by tier). A missing eject profile aborts the whole tx.
-func (h *ManageHandler) writeEjectAndGaming(r *http.Request, active bool) error {
+// writeEjectActive flips the eject profile's active flag in its own transaction
+// (U01-W5 cutover: the legacy gaming.active settings dual-write is gone — the
+// eject profile is now the single source of truth for the exclusion). The write
+// stays transactional so the 092 + 051 triggers emit audit + NOTIFY atomically
+// with the row; SetTxRequestID stamps the request id for the trigger. The eject
+// profile is toggled with scopes=nil (the mutation is server-admin by tier). A
+// missing eject profile aborts the tx (errEjectProfileMissing).
+func (h *ManageHandler) writeEjectActive(r *http.Request, active bool) error {
 	ctx := r.Context()
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
@@ -143,13 +165,6 @@ func (h *ManageHandler) writeEjectAndGaming(r *http.Request, active bool) error 
 	}
 	if !found {
 		return errEjectProfileMissing
-	}
-	val := json.RawMessage("false")
-	if active {
-		val = json.RawMessage("true")
-	}
-	if err := store.UpsertSetting(ctx, tx, "gaming.active", store.GlobalScope, val, actorID(r)); err != nil {
-		return err
 	}
 	if beforeGamingCommit != nil {
 		if err := beforeGamingCommit(); err != nil {

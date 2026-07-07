@@ -236,3 +236,55 @@ func TestStatusGoldenKeys(t *testing.T) {
 		"cost_usd", // T37c: per-tenant rollup needs it; global rollup carries it too
 	})
 }
+
+// TestStatusGamingActiveFollowsEjectProfile is the U01-W5 deploy-probe gate: the
+// status payload's gaming.active field must follow the eject disable-profile's
+// active state (the cutover from the retired gaming.active settings key). The
+// eject profile lives in the pool snapshot (scope='_global', name='eject');
+// c.ejectActive() is the DB-free seam buildCheap feeds cheapSnapshot.gamingActive
+// from. Active profile ⇒ true, inactive ⇒ false, missing ⇒ false (break-glass
+// degrade, no error). Structurally red against the pre-W5 stand: the field was
+// fed from the retired config gaming-state method (now gone), and the collector
+// seam did not exist, so the naive removal is a compile error (the red proof).
+func TestStatusGamingActiveFollowsEjectProfile(t *testing.T) {
+	const otherProfile = "gpu-wartung"
+	cases := []struct {
+		name     string
+		profiles []backends.Profile
+		want     bool
+	}{
+		{
+			name:     "eject active ⇒ payload true",
+			profiles: []backends.Profile{{Name: "eject", Scope: "_global", Active: true, Reserved: true}},
+			want:     true,
+		},
+		{
+			name:     "eject inactive ⇒ payload false",
+			profiles: []backends.Profile{{Name: "eject", Scope: "_global", Active: false, Reserved: true}},
+			want:     false,
+		},
+		{
+			name:     "eject missing (break-glass) ⇒ payload false, no error",
+			profiles: []backends.Profile{{Name: otherProfile, Scope: "_global", Active: true}},
+			want:     false,
+		},
+		{
+			name: "same-name profile in a foreign scope does NOT satisfy the _global eject",
+			profiles: []backends.Profile{
+				{Name: "eject", Scope: "tenantA", Active: true},
+				{Name: "eject", Scope: "_global", Active: false},
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bp := backends.NewPool(nil, nil)
+			bp.SeedSnapshotForTestWithProfiles(nil, tc.profiles)
+			c := &StatusCollector{backendPool: bp}
+			if got := c.ejectActive(); got != tc.want {
+				t.Errorf("gaming.active payload = %v, want %v (must follow eject profile)", got, tc.want)
+			}
+		})
+	}
+}

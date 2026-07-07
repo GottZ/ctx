@@ -106,35 +106,37 @@ func TestToOverridesShuffleIndependence(t *testing.T) {
 }
 
 // TestToOverridesGlobalOnlyMergeOrder is the order-bug guard: a global-only key
-// (gaming.active) carries BOTH a _global row (operator, value true) and a tenant
-// row (value false). The tenant row must be dropped by the gate BEFORE the
-// merge, so the _global value survives. Under a merge-before-gate bug the
-// higher-priority tenant row would win the merge then get dropped, collapsing
-// the key to env/default (false) — a regression of the operator's _global value.
+// (tenant.allow_shared_secrets) carries BOTH a _global row (operator, value
+// true) and a tenant row (value false). The tenant row must be dropped by the
+// gate BEFORE the merge, so the _global value survives. Under a merge-before-gate
+// bug the higher-priority tenant row would win the merge then get dropped,
+// collapsing the key to env/default (false) — a regression of the operator's
+// _global value. (Exemplar key updated in U01-W5: the former gaming.active key
+// was retired; the merge-order gate under test is key-agnostic.)
 func TestToOverridesGlobalOnlyMergeOrder(t *testing.T) {
 	resetEnv(t)
-	if !config.IsGlobalOnly("gaming.active") {
-		t.Fatalf("test premise broken: gaming.active must be global-only")
+	if !config.IsGlobalOnly("tenant.allow_shared_secrets") {
+		t.Fatalf("test premise broken: tenant.allow_shared_secrets must be global-only")
 	}
 
 	cfg, issues := buildWith([]store.SettingOverride{
-		row("gaming.active", `true`),                   // operator _global, must survive
-		tenantRow("gaming.active", testTenant, `false`), // tenant, must be gated out
+		row("tenant.allow_shared_secrets", `true`),                    // operator _global, must survive
+		tenantRow("tenant.allow_shared_secrets", testTenant, `false`), // tenant, must be gated out
 	}, nil, globalAndTenant)
 
-	if !cfg.Pool.GamingActive || cfg.Source("gaming.active") != "settings" {
-		t.Errorf("gate-before-merge broken: gaming.active = %v source %q, want true/settings "+
+	if !cfg.Tenant.AllowSharedSecrets || cfg.Source("tenant.allow_shared_secrets") != "settings" {
+		t.Errorf("gate-before-merge broken: tenant.allow_shared_secrets = %v source %q, want true/settings "+
 			"(operator _global value must survive, tenant row dropped)",
-			cfg.Pool.GamingActive, cfg.Source("gaming.active"))
+			cfg.Tenant.AllowSharedSecrets, cfg.Source("tenant.allow_shared_secrets"))
 	}
 	var warned bool
 	for _, is := range issues {
-		if is.Field == "gaming.active" && is.Severity == config.SeverityWarn {
+		if is.Field == "tenant.allow_shared_secrets" && is.Severity == config.SeverityWarn {
 			warned = true
 		}
 	}
 	if !warned {
-		t.Errorf("expected a WARN on the dropped tenant gaming.active override, got %+v", issues)
+		t.Errorf("expected a WARN on the dropped tenant tenant.allow_shared_secrets override, got %+v", issues)
 	}
 }
 
@@ -149,7 +151,7 @@ func TestToOverridesMalformedFallthrough(t *testing.T) {
 	const key = "rerank.blend_weight"
 
 	cfg, issues := buildWith([]store.SettingOverride{
-		row(key, `0.4`),                            // valid _global
+		row(key, `0.4`),                          // valid _global
 		tenantRow(key, testTenant, `{"oops":1}`), // non-scalar ⇒ ScalarValue fails, higher-priority tenant
 	}, nil, globalAndTenant)
 

@@ -36,9 +36,9 @@ func has(s []string, v string) bool {
 	return false
 }
 
-func mustChain(t *testing.T, p *Pool, role string, req Sensitivity, g GamingState, tenant string) []string {
+func mustChain(t *testing.T, p *Pool, role string, req Sensitivity, tenant string) []string {
 	t.Helper()
-	chain, err := p.Chain(role, req, g, tenant)
+	chain, err := p.Chain(role, req, tenant)
 	if err != nil {
 		t.Fatalf("Chain(%s,%s,tenant=%q): %v", role, req, tenant, err)
 	}
@@ -48,7 +48,7 @@ func mustChain(t *testing.T, p *Pool, role string, req Sensitivity, g GamingStat
 // §5.1 — the egress-leak probe. tenantA must never see tenantB's private
 // external backend, even at priority 1000.
 func TestChainTenantFiltersForeignPrivate(t *testing.T) {
-	got := mustChain(t, seedPool(tenantBackends()), RoleSynthesis, SensPublic, GamingState{}, "tenantA")
+	got := mustChain(t, seedPool(tenantBackends()), RoleSynthesis, SensPublic, "tenantA")
 	if has(got, "tenantB-cloud") {
 		t.Fatalf("egress leak: tenantA chain contains foreign tenant backend: %v", got)
 	}
@@ -62,7 +62,7 @@ func TestChainTenantFiltersForeignPrivate(t *testing.T) {
 
 // A tenant sees its own private backend, in priority order, never a foreign one.
 func TestChainTenantSeesOwnPrivate(t *testing.T) {
-	got := mustChain(t, seedPool(tenantBackends()), RoleSynthesis, SensPublic, GamingState{}, "tenantB")
+	got := mustChain(t, seedPool(tenantBackends()), RoleSynthesis, SensPublic, "tenantB")
 	if !has(got, "tenantB-cloud") {
 		t.Fatalf("tenantB lost its own backend: %v", got)
 	}
@@ -84,7 +84,7 @@ func TestChainSentinelTenantSeesOnlyShared(t *testing.T) {
 		ID: "u1", Name: "unauth-bait", Scope: "__UNAUTHORIZED__",
 		Trust: TrustFull, Roles: []string{RoleSynthesis}, Priority: 2000, Enabled: true,
 	})
-	got := mustChain(t, seedPool(fix), RoleSynthesis, SensPublic, GamingState{}, "__UNAUTHORIZED__")
+	got := mustChain(t, seedPool(fix), RoleSynthesis, SensPublic, "__UNAUTHORIZED__")
 	if has(got, "unauth-bait") {
 		t.Fatalf("sentinel caller matched a _-reserved backend: %v", got)
 	}
@@ -98,7 +98,7 @@ func TestChainSentinelTenantSeesOnlyShared(t *testing.T) {
 
 // An empty caller tenant (no resolved identity) sees ONLY shared backends.
 func TestChainEmptyTenantSeesOnlyShared(t *testing.T) {
-	got := mustChain(t, seedPool(tenantBackends()), RoleSynthesis, SensPublic, GamingState{}, "")
+	got := mustChain(t, seedPool(tenantBackends()), RoleSynthesis, SensPublic, "")
 	if has(got, "tenantA-cloud") || has(got, "tenantB-cloud") {
 		t.Fatalf("empty caller saw a tenant-private backend: %v", got)
 	}
@@ -116,7 +116,7 @@ func TestChainSharedGlobalVisibleToEveryTenant(t *testing.T) {
 		{ID: "g2", Name: "shared-cpu", Scope: GlobalScope, Trust: TrustFull, Roles: []string{RoleSynthesis}, Priority: 10, Enabled: true},
 	})
 	for _, tn := range []string{"tenantA", "tenantB", "", "__UNAUTHORIZED__"} {
-		got := mustChain(t, p, RoleSynthesis, SensPublic, GamingState{}, tn)
+		got := mustChain(t, p, RoleSynthesis, SensPublic, tn)
 		if len(got) != 2 || got[0] != "shared-gpu" || got[1] != "shared-cpu" {
 			t.Fatalf("tenant %q: all-_global chain should be [shared-gpu shared-cpu], got %v", tn, got)
 		}
@@ -131,7 +131,7 @@ func TestChainUnscopedRowIsShared(t *testing.T) {
 		{ID: "z", Name: "legacy", Scope: "", Trust: TrustFull, Roles: []string{RoleSynthesis}, Priority: 100, Enabled: true},
 	})
 	for _, tn := range []string{"tenantA", "", "__UNAUTHORIZED__"} {
-		if got := mustChain(t, p, RoleSynthesis, SensPublic, GamingState{}, tn); !has(got, "legacy") {
+		if got := mustChain(t, p, RoleSynthesis, SensPublic, tn); !has(got, "legacy") {
 			t.Fatalf("tenant %q: unscoped row should be shared, got %v", tn, got)
 		}
 	}
@@ -146,14 +146,14 @@ func TestVisibleTo(t *testing.T) {
 		{GlobalScope, "tenantA", true},
 		{GlobalScope, "", true},
 		{GlobalScope, "__UNAUTHORIZED__", true},
-		{"", "tenantA", true},  // unscoped row = shared
-		{"", "", true},         // unscoped row, empty caller = still shared
+		{"", "tenantA", true}, // unscoped row = shared
+		{"", "", true},        // unscoped row, empty caller = still shared
 		{"tenantA", "tenantA", true},
 		{"tenantA", "tenantB", false},
 		{"tenantB", "tenantA", false},
-		{"tenantA", "", false},               // empty caller never matches a private scope
+		{"tenantA", "", false},                 // empty caller never matches a private scope
 		{"tenantA", "__UNAUTHORIZED__", false}, // sentinel caller
-		{"tenantA", "_anything", false},       // any _-reserved caller
+		{"tenantA", "_anything", false},        // any _-reserved caller
 		{"__UNAUTHORIZED__", "tenantA", false}, // _-reserved (non-global) backend never matches a real tenant
 	}
 	for _, c := range cases {

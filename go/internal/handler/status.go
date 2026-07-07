@@ -359,7 +359,11 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 		lastCycleAt:    c.queryLastCycleAt(ctx),
 		llm24h:         llm24h,
 		llm24hComplete: complete,
-		gamingActive:   cfg.GamingState().Active,
+		// gaming.active on the wire follows the eject disable-profile's active
+		// state (U01-W5 cutover): the legacy gaming.active settings key is gone,
+		// the eject profile in the pool snapshot is the single source of truth.
+		// The field name stays "gaming" until W7 (frontend/TS types consume it).
+		gamingActive: c.ejectActive(),
 	}
 	// Dispatch cheap source (MW12): the in-memory registry snapshot + enforcing
 	// predicate. Captured HERE so every reader within a tick serves the same
@@ -377,6 +381,14 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 		snap.lastOverviewAt = timePtr(o)
 	}
 	return snap
+}
+
+// ejectActive reports the eject disable-profile's live active state from the
+// backend pool snapshot — the source of the status payload's gaming.active
+// field since U01-W5. Split out as a DB-free seam so the cutover can be unit
+// tested (buildCheap itself needs a live pool for its health/llm queries).
+func (c *StatusCollector) ejectActive() bool {
+	return ejectProfileActive(c.backendPool.Profiles())
 }
 
 // timePtr maps a wall-clock time to a *time.Time, folding the zero time to nil

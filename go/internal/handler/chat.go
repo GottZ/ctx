@@ -124,16 +124,11 @@ type ChatHandler struct {
 // admitter is the dispatch admission layer for the stream path (MW5, design/01
 // §4.6 N2).
 func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, queryHandler http.Handler, blocktypes *blocktype.Registry, admitter dispatch.Admitter) *ChatHandler {
-	// GamingState stays on the tenant-blind Snapshot() (NOT SnapshotForRequest):
-	// gaming.active and disabled_backends are global-only keys (03-W2/T28 tags +
-	// §10.5) — a tenant override is dropped before the overlay build, so the
-	// per-tenant generation carries the _global values here regardless. The
-	// closure is also built at construction time with no request context to
-	// resolve a tenant from. The per-tenant request surface (WebChat etc.) flows
-	// through SnapshotForRequest in HandleStream instead.
-	provider := chat.NewPoolProvider(backendPool, func() backends.GamingState {
-		return cfg.Snapshot().GamingState() //nolint:forbidigo // MT 06 BLIND: gaming.active is global-only (see the comment above) + this closure is built at construction with no request context to resolve a tenant from.
-	})
+	// Chain-time exclusion is the eject disable-profile (092), applied inside
+	// Pool.Chain from the live pool snapshot — no config input threads through
+	// the provider since U01-W5 (the legacy global-only gaming.active/
+	// disabled_backends settings keys are gone).
+	provider := chat.NewPoolProvider(backendPool)
 	h := &ChatHandler{
 		pool:        pool,
 		cfg:         cfg,

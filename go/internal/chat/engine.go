@@ -729,21 +729,17 @@ func intPtr(v int) *int { return &v }
 
 // PoolProvider is the production BackendProvider over the F3 pool.
 type PoolProvider struct {
-	pool   *backends.Pool
-	gaming func() backends.GamingState
+	pool *backends.Pool
 }
 
-// NewPoolProvider wraps the pool; gaming may be nil (no gaming exclusion).
-func NewPoolProvider(pool *backends.Pool, gaming func() backends.GamingState) *PoolProvider {
-	return &PoolProvider{pool: pool, gaming: gaming}
+// NewPoolProvider wraps the pool. Chain-time exclusion is the eject
+// disable-profile (092), applied inside Pool.Chain — no provider-level input.
+func NewPoolProvider(pool *backends.Pool) *PoolProvider {
+	return &PoolProvider{pool: pool}
 }
 
 // ChatChain returns the trust-ordered chat chain for the required sensitivity,
 // bounded to the caller tenant's visible backends (04-W2/T34).
 func (p *PoolProvider) ChatChain(_ context.Context, required backends.Sensitivity, tenant string) ([]backends.Backend, error) {
-	var g backends.GamingState
-	if p.gaming != nil {
-		g = p.gaming()
-	}
-	return p.pool.Chain("chat", required, g, tenant)
+	return p.pool.Chain("chat", required, tenant)
 }

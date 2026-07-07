@@ -25,26 +25,6 @@ type Querier interface {
 // resolved value — it lives in the in-memory snapshot only.
 type SecretResolver func(ctx context.Context, name string) (string, error)
 
-// GamingState is the chain-time exclusion input (P6 wires it to the F2
-// settings keys gaming.active / gaming.disabled_backends; until then callers
-// pass the zero value = inactive).
-type GamingState struct {
-	Active           bool
-	DisabledBackends []string
-}
-
-func (g GamingState) disables(name string) bool {
-	if !g.Active {
-		return false
-	}
-	for _, n := range g.DisabledBackends {
-		if n == name {
-			return true
-		}
-	}
-	return false
-}
-
 // ExclusionReason names why one backend did not make a chain. Reasons go to
 // slog and the admin-gated status surface ONLY — client errors stay generic
 // (topology/presence disclosure, design 03 §2.4.3).
@@ -431,6 +411,14 @@ func (p *Pool) SeedSnapshotForTest(bs []Backend) {
 	p.snap.Store(&snapshot{backends: bs, version: -1, loadedAt: time.Now()})
 }
 
+// SeedSnapshotForTestWithProfiles publishes a static snapshot carrying the
+// disable-profile registry too (Profiles(), ORDER BY name). Test seam only —
+// the status collector's eject-profile probe (U01-W5) reads Profiles() without
+// a database. Production snapshots come exclusively from Reload.
+func (p *Pool) SeedSnapshotForTestWithProfiles(bs []Backend, profiles []Profile) {
+	p.snap.Store(&snapshot{backends: bs, profiles: profiles, version: -1, loadedAt: time.Now()})
+}
+
 // VisibleTo reports whether a backend in scope bScope may be reached by caller
 // tenant (04-W2/T34, egress isolation). Exported so the admin surface (T37,
 // backend-list filter + backend-update/delete pre-check) rests on the exact
@@ -456,15 +444,16 @@ func VisibleTo(bScope, tenant string) bool {
 }
 
 // Chain returns the eligible backends for one operation, in attempt order:
-// filter (visibleTo(tenant) && enabled && role && trust.Allows(required) &&
-// !gaming-disabled), sort (inCooldown ASC, priority DESC, name ASC). Cooldown
-// never REMOVES — it sorts to the end, so a single-backend role stays reachable
-// through its cooldown (order hint, not circuit breaker). tenant is the caller's
-// scope (ar.HomeScope / sess.Scope); a foreign tenant-private backend is not in
-// the chain BY CONSTRUCTION (no ExclusionReason — no topology disclosure, §4.1).
-// Empty chain returns *ErrNoEligibleBackend with per-backend reasons for
-// slog/admin status; the client-facing error stays generic at the handler.
-func (p *Pool) Chain(role string, required Sensitivity, gaming GamingState, tenant string) ([]Backend, error) {
+// filter (visibleTo(tenant) && enabled && role && !profile-disabled &&
+// trust.Allows(required)), sort (inCooldown ASC, priority DESC, name ASC).
+// Cooldown never REMOVES — it sorts to the end, so a single-backend role stays
+// reachable through its cooldown (order hint, not circuit breaker). tenant is
+// the caller's scope (ar.HomeScope / sess.Scope); a foreign tenant-private
+// backend is not in the chain BY CONSTRUCTION (no ExclusionReason — no topology
+// disclosure, §4.1). Empty chain returns *ErrNoEligibleBackend with per-backend
+// reasons for slog/admin status; the client-facing error stays generic at the
+// handler.
+func (p *Pool) Chain(role string, required Sensitivity, tenant string) ([]Backend, error) {
 	snap := p.snap.Load()
 	now := time.Now()
 
@@ -488,16 +477,14 @@ func (p *Pool) Chain(role string, required Sensitivity, gaming GamingState, tena
 			// An ACTIVE disable-profile (092, U01-W2) contains this backend. The
 			// reason names the profile(s) (comma-joined, sorted at reload). Placed
 			// AFTER !Enabled (that reason stays the more specific one) and BEFORE
-			// trust; the gaming arm below stays in parallel until W5 (double
-			// mechanism, deckungsgleich by backfill — the backend falls out once,
-			// reason order decides the text).
+			// trust. Since U01-W5 this is the ONLY exclusion mechanism — the legacy
+			// gaming arm (parallel double-write) is gone; the eject profile is the
+			// single source of truth.
 			excluded = append(excluded, ExclusionReason{b.Name,
 				"disabled by profile " + snap.disabledBy[b.ID]})
 		case !b.Trust.Allows(required):
 			excluded = append(excluded, ExclusionReason{b.Name,
 				fmt.Sprintf("trust %s < required %s", b.Trust, required)})
-		case gaming.disables(b.Name):
-			excluded = append(excluded, ExclusionReason{b.Name, "disabled by gaming"})
 		default:
 			eligible = append(eligible, *b)
 		}
@@ -526,7 +513,7 @@ func (p *Pool) Chain(role string, required Sensitivity, gaming GamingState, tena
 // RoleConfigured reports whether ANY row carries the role, regardless of
 // enabled/trust/cooldown. The rerank dispatch needs the distinction
 // "role absent from the routing table" (⇒ LLM-judge substitute, a
-// configuration alternative) vs "chain empty by trust/gaming/disabled"
+// configuration alternative) vs "chain empty by trust/profile/disabled"
 // (⇒ fail-open to RRF order, design 03 §2.5).
 func (p *Pool) RoleConfigured(role string) bool {
 	snap := p.snap.Load()

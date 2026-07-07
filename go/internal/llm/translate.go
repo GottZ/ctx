@@ -104,12 +104,11 @@ func DetectGerman(query string) bool {
 // Returns the original query unchanged if translation fails validation; an
 // empty chain surfaces as *backends.ErrNoEligibleBackend and the caller
 // fail-opens (skip the step, keep the original query).
-func TranslateQuery(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState, querySens backends.Sensitivity, query, apiKeyID string, adm Admission) (string, error) {
+func TranslateQuery(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, querySens backends.Sensitivity, query, apiKeyID string, adm Admission) (string, error) {
 	resp, err := ChainCall{
 		Pool:       bpool,
 		Role:       backends.RoleTranslate,
 		Required:   querySens,
-		Gaming:     gaming,
 		Pipeline:   "query-translate",
 		System:     translationSystemPrompt,
 		User:       query,

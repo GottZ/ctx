@@ -519,22 +519,11 @@ type PoolConfig struct {
 	DefaultQuerySensitivity backends.Sensitivity `key:"pool.default_query_sensitivity" env:"-" default:"personal" mut:"hot" guard:"sensitivity-downgrade" tenancy:"tenant-overridable"`
 	DefaultBlockSensitivity backends.Sensitivity `key:"pool.default_block_sensitivity" env:"-" default:"credentials" mut:"hot" guard:"sensitivity-downgrade" tenancy:"tenant-overridable"`
 	ScopeSensitivityFloor   ScopeFloor           `key:"pool.scope_sensitivity_floor" env:"-" default:"{}" mut:"hot" tenancy:"tenant-overridable"`
-
-	// GamingActive flips the named GPU-host backends out of EVERY chain so the
-	// GPU is free to game. It lives in the settings layer (persistent across
-	// restarts) — NOT an atomic: the dream-mode break path (restart ⇒ the GPU
-	// lock is gone) is the explicit anti-pattern here (design 03 §2.6).
-	// Toggled via `ctx gaming on|off` / the gaming-mode manage action.
-	// gaming.active/disabled_backends are NAMED global-only: the GPU is physically
-	// one host, not a tenant concept (design 03 §3.3) — a tenant must never flip a
-	// server-wide GPU switch.
-	GamingActive bool `key:"gaming.active" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
-	// GamingDisabledBackends names which backends gaming.active excludes —
-	// policy as data, so a second GPU host later is a list edit, not code.
-	// Default = the herbert GPU backends; the CPU/external rows stay in as
-	// failover. Comma-split (scopes parser); the gaming-mode action validates
-	// the names against the live pool (a typo ⇒ unknown_backends, risk 6.6).
-	GamingDisabledBackends []string `key:"gaming.disabled_backends" env:"-" default:"herbert-chat,herbert-rerank" mut:"hot" tenancy:"global-only"`
+	// The legacy gaming.active / gaming.disabled_backends settings keys were
+	// retired in Web-UX U01-W5 (AM-7 cutover): chain-time exclusion is now the
+	// eject disable-profile (092), read live from the pool snapshot. Any leftover
+	// gaming.* rows in context_settings are inert — admitOverride drops them as
+	// unknown keys (build.go), so no delete-migration is needed.
 }
 
 // TenantConfig holds per-tenant POLICY switches the OPERATOR sets, never the
@@ -629,17 +618,6 @@ type DispatchConfig struct {
 	// Activation is an operations decision under the aged-preempt waste
 	// metric (E-F5), not a deploy.
 	BackgroundAgingAfter time.Duration `key:"dispatch.background_aging_after" env:"CTX_DISPATCH_BACKGROUND_AGING_AFTER" default:"0" mut:"hot" parse:"strict" tenancy:"global-only"`
-}
-
-// GamingState returns the chain-time gaming exclusion from THIS settings
-// snapshot (design 03 §2.6). Callers pass it to Pool.Chain — the pool holds
-// no policy (deliberate decoupling, backends/pool.go): the toggle takes
-// effect on the next chain that reads a fresh config snapshot, no restart.
-func (c *Config) GamingState() backends.GamingState {
-	return backends.GamingState{
-		Active:           c.Pool.GamingActive,
-		DisabledBackends: c.Pool.GamingDisabledBackends,
-	}
 }
 
 // Source reports the origin of a registry key in this snapshot:

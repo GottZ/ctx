@@ -23,14 +23,12 @@ func (s staticConfigStore) SnapshotForTenant(context.Context, string) *config.Co
 	return s.cfg
 }
 
-// gamingHandler wires a ManageHandler with a static config snapshot and a
-// seeded pool (the names the disabled list is cross-checked against). No DB,
-// no reload — the read and the 422-before-write paths never touch them.
-func gamingHandler(active bool, disabled, poolNames []string) *ManageHandler {
-	cfg := &config.Config{Pool: config.PoolConfig{
-		GamingActive:           active,
-		GamingDisabledBackends: disabled,
-	}}
+// gamingHandler wires a ManageHandler with a static (empty) config snapshot and
+// a seeded pool. No DB, no reload — the 422-before-write validation path never
+// touches them. Since U01-W5 the exclusion state lives in the eject profile
+// (DB), not config, so the handler carries no gaming config fields.
+func gamingHandler(poolNames []string) *ManageHandler {
+	cfg := &config.Config{}
 	bp := backends.NewPool(nil, nil)
 	bs := make([]backends.Backend, 0, len(poolNames))
 	for _, n := range poolNames {
@@ -71,7 +69,7 @@ type gamingResp struct {
 // An admin passes the gate; an unknown mode is a 422 BEFORE any write — the
 // nil pool/reload are never reached (the validation precedes them).
 func TestGamingMode_BadMode_422(t *testing.T) {
-	h := gamingHandler(false, nil, nil)
+	h := gamingHandler(nil)
 	rec := gamingReq(t, h, adminAR(), `{"mode":"bogus"}`)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad mode status = %d, want 422", rec.Code)

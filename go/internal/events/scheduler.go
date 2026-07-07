@@ -514,10 +514,11 @@ func (s *Scheduler) enforcing() bool {
 }
 
 // newRouter builds the per-cycle/per-run dream router: the live backend pool
-// plus the snapshot's scope floor, gaming exclusion and pool-health reporting.
-// cfg is the caller's cycle snapshot, so gaming/floor travel with the same
-// generation as scopes/back-off — a gaming toggle takes effect on the next
-// cycle that snapshots a fresh config (no restart, design 03 §2.6).
+// plus the snapshot's scope floor and pool-health reporting. Chain-time
+// exclusion is the eject disable-profile (092), applied inside Pool.Chain from
+// the live pool snapshot — no per-cycle config input carries it since U01-W5.
+// cfg is the caller's cycle snapshot, so the scope floor travels with the same
+// generation as scopes/back-off.
 //
 // tenant is the iterated tenant's egress scope (T38 §4.4-(b)): every chain the
 // router resolves is filtered to '_global' ∪ this tenant via Pool.Chain(role, …,
@@ -528,7 +529,6 @@ func (s *Scheduler) newRouter(cfg *config.Config, tenant string) *dream.Router {
 	return &dream.Router{
 		Pool:       s.backendPool,
 		Tenant:     tenant,
-		Gaming:     cfg.GamingState(),
 		Floor:      cfg.Pool.ScopeSensitivityFloor.Apply,
 		Report:     llm.PoolReporter(s.backendPool),
 		Admit:      s.backgroundAdmission(), // MW3: dream + 03:00 daily are background (N1/N8a)

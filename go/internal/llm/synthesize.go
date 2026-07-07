@@ -342,7 +342,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 // scope is the caller's tenant (ar.HomeScope) — it bounds Chain() to the
 // tenant's visible synthesis backends (04-W2/T34 egress isolation); "" sees
 // only shared '_global' backends (background/no-caller paths).
-func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *backends.QuotaAccountant, gaming backends.GamingState, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate, apiKeyID, scope string, adm Admission) (*SynthesisResult, error) {
+func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *backends.QuotaAccountant, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate, apiKeyID, scope string, adm Admission) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
 	filtered, maxScore := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
@@ -398,7 +398,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 
 	// Step 7: Resolve the chain and walk it. The gate is structural: a
 	// backend the trust matrix excludes is not in the chain.
-	chain, chainErr := bpool.Chain(backends.RoleSynthesis, required, gaming, scope)
+	chain, chainErr := bpool.Chain(backends.RoleSynthesis, required, scope)
 	if chainErr != nil {
 		// No eligible backend: hard error. Trust beats availability — the
 		// per-backend reasons went to slog; the handler keeps the client

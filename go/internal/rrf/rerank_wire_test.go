@@ -53,7 +53,7 @@ func TestRerankWirePath(t *testing.T) {
 				ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
 			}})
 			results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
-			out, err := Rerank(context.Background(), nil, bpool, backends.GamingState{}, backends.SensPublic, "q", results, "", rerankTestAdmission(t))
+			out, err := Rerank(context.Background(), nil, bpool, backends.SensPublic, "q", results, "", rerankTestAdmission(t))
 			if err != nil {
 				t.Fatalf("Rerank: %v", err)
 			}

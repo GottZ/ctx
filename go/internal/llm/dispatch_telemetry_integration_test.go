@@ -148,7 +148,7 @@ func TestSynthesize_RowCarriesInteractiveAndWait(t *testing.T) {
 
 	settings := llm.SynthesisSettings{ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: llm.PromptVersionV52}
 	sources := []llm.Source{{ID: "00000000-0000-0000-0000-000000000001", Title: "t", Category: "c", Content: "body", Score: 0.5, AgeDays: 1}}
-	if _, err := llm.Synthesize(llm.PrincipalCtxForTest(), pool, bpool, nil, backends.GamingState{},
+	if _, err := llm.Synthesize(llm.PrincipalCtxForTest(), pool, bpool, nil,
 		settings, backends.SensPersonal, "q", sources, nil, "", "", adm); err != nil {
 		t.Fatalf("Synthesize: %v", err)
 	}

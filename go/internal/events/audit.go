@@ -54,7 +54,7 @@ var ErrAuditRunning = errors.New("sensitivity audit already running")
 // (dreamCycleFunc pattern). adm is the scheduler's background admission
 // binding (MW3, design/01 §4.6 N1: classify is the one ChainCall consumer
 // classified background).
-type classifyFunc func(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, gaming backends.GamingState,
+type classifyFunc func(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool,
 	question, title, content, blockID string, adm llm.Admission) (bool, error)
 
 // AuditSample is one dry-run verdict for the N=30 gate: what the model
@@ -223,7 +223,7 @@ func (s *Scheduler) auditTenantScope(ctx context.Context, bt backgroundTenant, d
 				s.auditAbort("shutdown")
 				return true
 			}
-			sample, abort := s.auditOneBlock(ctx, blk, cfg.GamingState(), dryRun)
+			sample, abort := s.auditOneBlock(ctx, blk, dryRun)
 			if abort {
 				return true
 			}
@@ -243,10 +243,10 @@ func (s *Scheduler) auditTenantScope(ctx context.Context, bt backgroundTenant, d
 // auditOneBlock asks the two questions and applies (or records) the verdict.
 // abort=true when the chain/backend failed — that is an infrastructure
 // condition, not a block verdict.
-func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, gaming backends.GamingState, dryRun bool) (AuditSample, bool) {
+func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, dryRun bool) (AuditSample, bool) {
 	sample := AuditSample{ID: blk.ID, Title: blk.Title}
 
-	cred, err := s.classify(ctx, s.pool, s.backendPool, gaming, llm.QuestionCredentials, blk.Title, blk.Content, blk.ID, s.backgroundAdmission())
+	cred, err := s.classify(ctx, s.pool, s.backendPool, llm.QuestionCredentials, blk.Title, blk.Content, blk.ID, s.backgroundAdmission())
 	verdict, noVerdict := backends.SensCredentials, false
 	switch {
 	case err != nil && !isParseFailure(err):
@@ -258,7 +258,7 @@ func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, gam
 		sample.Credentials = &cred
 	default:
 		sample.Credentials = &cred
-		pers, perr := s.classify(ctx, s.pool, s.backendPool, gaming, llm.QuestionPersonal, blk.Title, blk.Content, blk.ID, s.backgroundAdmission())
+		pers, perr := s.classify(ctx, s.pool, s.backendPool, llm.QuestionPersonal, blk.Title, blk.Content, blk.ID, s.backgroundAdmission())
 		switch {
 		case perr != nil && !isParseFailure(perr):
 			s.auditAbort(fmt.Sprintf("classify chain: %v", perr))

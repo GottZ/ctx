@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
 )
@@ -33,7 +32,7 @@ func TestAuditPreemptedClassifyAbortsDrain(t *testing.T) {
 		llm.QuestionCredentials: {err: preempted},
 	})
 
-	sample, abort := s.auditOneBlock(context.Background(), auditBlockFixture(), backends.GamingState{}, true)
+	sample, abort := s.auditOneBlock(context.Background(), auditBlockFixture(), true)
 	if !abort {
 		t.Fatal("preempted classify must abort the drain run (infrastructure condition, not a verdict)")
 	}

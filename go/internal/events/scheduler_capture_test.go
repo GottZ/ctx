@@ -171,7 +171,7 @@ func TestDreamLoopSeesReplacedConfigNextCycle(t *testing.T) {
 	release := make(chan struct{})
 	s.runCycle = func(ctx context.Context, _ *pgxpool.Pool, r *dream.Router, opts llm.Options, backoff dream.BackoffConfig, _ []string, _ dream.Throttle) (int, error) {
 		obs := cycleObs{backoff: backoff}
-		chain, err := r.Pool.Chain(backends.RoleDream, backends.SensPublic, r.Gaming, "")
+		chain, err := r.Pool.Chain(backends.RoleDream, backends.SensPublic, "")
 		if err != nil {
 			obs.chainErr = err
 		} else {
@@ -344,7 +344,7 @@ func TestDreamLoopResolvesPerTenantGenerationEachCycle(t *testing.T) {
 	release := make(chan struct{})
 	s.runCycle = func(ctx context.Context, _ *pgxpool.Pool, r *dream.Router, opts llm.Options, backoff dream.BackoffConfig, _ []string, _ dream.Throttle) (int, error) {
 		obs := cycleObs{backoff: backoff}
-		chain, err := r.Pool.Chain(backends.RoleDream, backends.SensPublic, r.Gaming, "")
+		chain, err := r.Pool.Chain(backends.RoleDream, backends.SensPublic, "")
 		if err != nil {
 			obs.chainErr = err
 		} else {

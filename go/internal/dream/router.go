@@ -13,13 +13,12 @@ import (
 
 // Router resolves the dream pipeline's backend chains from the declarative
 // pool (G28/F3-P4): per call-site role + required sensitivity, with the
-// gaming exclusion and the scope-sensitivity floor applied. It replaces the
-// (embedB, chatB) tuple parameters of the pre-pool entry points — the trust
-// gate is structural: a backend the matrix excludes is not in any chain this
-// type hands out.
+// scope-sensitivity floor applied and the eject disable-profile exclusion
+// applied inside Pool.Chain (092, U01-W5). It replaces the (embedB, chatB)
+// tuple parameters of the pre-pool entry points — the trust gate is structural:
+// a backend the matrix excludes is not in any chain this type hands out.
 type Router struct {
-	Pool   *backends.Pool
-	Gaming backends.GamingState
+	Pool *backends.Pool
 	// Tenant is the egress scope every chain this router resolves is filtered
 	// to (04-W6/T38): Pool.Chain(role, …, Tenant) sees only '_global' ∪ this
 	// tenant's private backends — never a foreign tenant-private one. The
@@ -72,7 +71,7 @@ func (r *Router) FloorSens(s backends.Sensitivity, scope string) backends.Sensit
 }
 
 // available reports whether ANY backend currently serves the role — the
-// pre-pick cycle-skip check (gaming toggle, disabled rows, missing role).
+// pre-pick cycle-skip check (eject profile, disabled rows, missing role).
 // SensPublic is the weakest gate: trust exclusions are per-block and surface
 // later at the per-call chains.
 func (r *Router) available(role string) bool {
@@ -83,7 +82,7 @@ func (r *Router) available(role string) bool {
 	// backends, never a foreign tenant-private one. The default tenant's
 	// '_global' (and the "" zero value) is the fail-closed shared-only view, so a
 	// single-tenant run is byte-identical to the pre-T38 hardcoded "".
-	_, err := r.Pool.Chain(role, backends.SensPublic, r.Gaming, r.Tenant)
+	_, err := r.Pool.Chain(role, backends.SensPublic, r.Tenant)
 	return err == nil
 }
 
@@ -95,7 +94,7 @@ func (r *Router) available(role string) bool {
 func (r *Router) chat(ctx context.Context, role string, required backends.Sensitivity,
 	systemPrompt, userPrompt string, baseOpts llm.Options, defTimeout time.Duration,
 ) (*llm.ChatResponse, *backends.Backend, []llm.ChainAttempt, error) {
-	chain, err := r.Pool.Chain(role, required, r.Gaming, r.Tenant) // iterated tenant, see available()
+	chain, err := r.Pool.Chain(role, required, r.Tenant) // iterated tenant, see available()
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -114,7 +113,7 @@ func (r *Router) EmbedChain(required backends.Sensitivity) ([]backends.Backend, 
 	if r.Pool.RoleConfigured(backends.RoleDreamEmbed) {
 		role = backends.RoleDreamEmbed
 	}
-	chain, err := r.Pool.Chain(role, required, r.Gaming, r.Tenant) // iterated tenant, see available()
+	chain, err := r.Pool.Chain(role, required, r.Tenant) // iterated tenant, see available()
 	return chain, role, err
 }
 

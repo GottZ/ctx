@@ -24,9 +24,9 @@ func seedPoolWithDisabledBy(bs []Backend, disabledBy map[string]string) *Pool {
 	return p
 }
 
-func chainNames(t *testing.T, p *Pool, role string, required Sensitivity, g GamingState) []string {
+func chainNames(t *testing.T, p *Pool, role string, required Sensitivity) []string {
 	t.Helper()
-	chain, err := p.Chain(role, required, g, "")
+	chain, err := p.Chain(role, required, "")
 	if err != nil {
 		t.Fatalf("Chain(%s, %s): %v", role, required, err)
 	}
@@ -51,7 +51,7 @@ func TestChainFilterAndOrder(t *testing.T) {
 	p := seedPool(poolFixture())
 
 	// public content: every enabled synthesis backend, priority DESC.
-	got := chainNames(t, p, RoleSynthesis, SensPublic, GamingState{})
+	got := chainNames(t, p, RoleSynthesis, SensPublic)
 	want := []string{"gpu", "cloud", "cpu"}
 	if len(got) != len(want) {
 		t.Fatalf("chain = %v, want %v", got, want)
@@ -63,19 +63,19 @@ func TestChainFilterAndOrder(t *testing.T) {
 	}
 
 	// credentials content: trust gate removes the no-credentials cloud.
-	got = chainNames(t, p, RoleSynthesis, SensCredentials, GamingState{})
+	got = chainNames(t, p, RoleSynthesis, SensCredentials)
 	if len(got) != 2 || got[0] != "gpu" || got[1] != "cpu" {
 		t.Fatalf("credentials chain = %v, want [gpu cpu]", got)
 	}
 
 	// role filter: embed chain never contains synthesis backends.
-	got = chainNames(t, p, RoleEmbed, SensCredentials, GamingState{})
+	got = chainNames(t, p, RoleEmbed, SensCredentials)
 	if len(got) != 1 || got[0] != "embedder" {
 		t.Fatalf("embed chain = %v, want [embedder]", got)
 	}
 
 	// disabled backends never appear despite top priority.
-	for _, n := range chainNames(t, p, RoleSynthesis, SensPublic, GamingState{}) {
+	for _, n := range chainNames(t, p, RoleSynthesis, SensPublic) {
 		if n == "off" {
 			t.Fatal("disabled backend made the chain")
 		}
@@ -88,7 +88,7 @@ func TestChainCooldownSortsNotRemoves(t *testing.T) {
 	p := seedPool(poolFixture())
 	p.ReportFailure("1", ClassTransport, 0) // gpu: 30s cooldown
 
-	got := chainNames(t, p, RoleSynthesis, SensPublic, GamingState{})
+	got := chainNames(t, p, RoleSynthesis, SensPublic)
 	if got[len(got)-1] != "gpu" {
 		t.Fatalf("cooled backend not sorted last: %v", got)
 	}
@@ -98,35 +98,16 @@ func TestChainCooldownSortsNotRemoves(t *testing.T) {
 
 	// Single-backend role under cooldown: still returned.
 	p.ReportFailure("5", ClassGateway, 0)
-	got = chainNames(t, p, RoleEmbed, SensCredentials, GamingState{})
+	got = chainNames(t, p, RoleEmbed, SensCredentials)
 	if len(got) != 1 || got[0] != "embedder" {
 		t.Fatalf("single cooled backend dropped: %v", got)
 	}
 
 	// Success clears the cooldown.
 	p.ReportSuccess("1")
-	got = chainNames(t, p, RoleSynthesis, SensPublic, GamingState{})
+	got = chainNames(t, p, RoleSynthesis, SensPublic)
 	if got[0] != "gpu" {
 		t.Fatalf("ReportSuccess did not clear cooldown: %v", got)
-	}
-}
-
-func TestChainGamingExclusion(t *testing.T) {
-	p := seedPool(poolFixture())
-	g := GamingState{Active: true, DisabledBackends: []string{"gpu"}}
-
-	got := chainNames(t, p, RoleSynthesis, SensPublic, g)
-	for _, n := range got {
-		if n == "gpu" {
-			t.Fatal("gaming-disabled backend made the chain")
-		}
-	}
-
-	// Inactive gaming: list is ignored.
-	g.Active = false
-	got = chainNames(t, p, RoleSynthesis, SensPublic, g)
-	if got[0] != "gpu" {
-		t.Fatalf("inactive gaming still excluded: %v", got)
 	}
 }
 
@@ -138,7 +119,7 @@ func TestChainProfileExclusion(t *testing.T) {
 	// Active profile "eject" disables "gpu" (id "1").
 	p := seedPoolWithDisabledBy(poolFixture(), map[string]string{"1": "eject"})
 
-	got := chainNames(t, p, RoleSynthesis, SensPublic, GamingState{})
+	got := chainNames(t, p, RoleSynthesis, SensPublic)
 	for _, n := range got {
 		if n == "gpu" {
 			t.Fatalf("profile-disabled backend made the chain: %v", got)
@@ -149,7 +130,7 @@ func TestChainProfileExclusion(t *testing.T) {
 	// the empty-chain path so Excluded is populated: embedder (id "5") is the
 	// only embed backend — disabling it empties the embed chain.
 	p2 := seedPoolWithDisabledBy(poolFixture(), map[string]string{"5": "eject,gpu-wartung"})
-	_, err := p2.Chain(RoleEmbed, SensPublic, GamingState{}, "")
+	_, err := p2.Chain(RoleEmbed, SensPublic, "")
 	var noElig *ErrNoEligibleBackend
 	if !asNoEligible(err, &noElig) {
 		t.Fatalf("expected ErrNoEligibleBackend, got %T (%v)", err, err)
@@ -162,18 +143,20 @@ func TestChainProfileExclusion(t *testing.T) {
 	}
 
 	// A backend NOT in an active profile stays in the chain (disabledBy absent).
-	got = chainNames(t, p, RoleEmbed, SensCredentials, GamingState{})
+	got = chainNames(t, p, RoleEmbed, SensCredentials)
 	if len(got) != 1 || got[0] != "embedder" {
 		t.Fatalf("non-disabled backend dropped: %v", got)
 	}
 }
 
 // TestChainEmpty: trust beats availability — the error carries per-backend
-// reasons for slog/admin, and NEVER silently escalates.
+// reasons for slog/admin, and NEVER silently escalates. The single embed
+// backend is emptied via an ACTIVE disable-profile (the sole exclusion
+// mechanism since U01-W5; the reason carries the profile name).
 func TestChainEmpty(t *testing.T) {
-	p := seedPool(poolFixture())
+	p := seedPoolWithDisabledBy(poolFixture(), map[string]string{"5": "eject"})
 
-	_, err := p.Chain(RoleEmbed, SensPublic, GamingState{Active: true, DisabledBackends: []string{"embedder"}}, "")
+	_, err := p.Chain(RoleEmbed, SensPublic, "")
 	var noElig *ErrNoEligibleBackend
 	if err == nil {
 		t.Fatal("expected ErrNoEligibleBackend")
@@ -184,12 +167,12 @@ func TestChainEmpty(t *testing.T) {
 	if noElig.Role != RoleEmbed || len(noElig.Excluded) == 0 {
 		t.Fatalf("reasons missing: %+v", noElig)
 	}
-	if noElig.Excluded[0].Reason != "disabled by gaming" {
+	if noElig.Excluded[0].Reason != "disabled by profile eject" {
 		t.Fatalf("reason = %q", noElig.Excluded[0].Reason)
 	}
 
 	// Unknown role: empty chain, no reasons (no row was ever a candidate).
-	if _, err := p.Chain("proxy:nonexistent", SensPublic, GamingState{}, ""); err == nil {
+	if _, err := p.Chain("proxy:nonexistent", SensPublic, ""); err == nil {
 		t.Fatal("unknown role must yield ErrNoEligibleBackend")
 	}
 }
@@ -226,7 +209,7 @@ func TestSnapshotAtomicity(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 1000; j++ {
-				chain, err := p.Chain(RoleSynthesis, SensPublic, GamingState{}, "")
+				chain, err := p.Chain(RoleSynthesis, SensPublic, "")
 				if err != nil || len(chain) != 3 {
 					t.Errorf("chain corrupted during swap: %v %v", chain, err)
 					return

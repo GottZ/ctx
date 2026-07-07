@@ -8,8 +8,9 @@
 //   - Gate 2: a member (no tenant-admin role) is 403; a tenant-admin is ADMITTED
 //     (red under the old server-admin-only RequireAdmin); operator writes _global
 //     only, never a foreign tenant scope
-//   - Gate 3: operator PUT gaming.active writes _global (the §4.5 regression probe:
-//     a pauschal TenantOf(ar) would 422 a global-only key)
+//   - Gate 3: operator PUT of a global-only key (tenant.allow_shared_secrets)
+//     writes _global (the §4.5 regression probe: a pauschal TenantOf(ar) would
+//     422 a global-only key)
 //   - Gate 4: a tenant PUT writes the TENANT row, the _global row stays unchanged
 //   - Gate 9: no plaintext secret/env marker in any tenant response
 //
@@ -216,15 +217,18 @@ func TestSettingsTenantAPI_Integration(t *testing.T) {
 		}
 	})
 
-	// Gate 3: operator PUT gaming.active writes _global (the §4.5 regression probe).
-	t.Run("Gate3_OperatorGamingActiveGlobal", func(t *testing.T) {
-		rec := api.as(operatorAR()).do(t, http.MethodPut, "/api/settings/gaming.active", `{"value":"true"}`)
+	// Gate 3: operator PUT of a global-only key writes _global (the §4.5
+	// regression probe: a pauschal TenantOf(ar) would 422 a global-only key).
+	// Exemplar key updated in U01-W5: the former gaming.active key was retired;
+	// tenant.allow_shared_secrets is the current global-only bool.
+	t.Run("Gate3_OperatorGlobalOnlyWritesGlobal", func(t *testing.T) {
+		rec := api.as(operatorAR()).do(t, http.MethodPut, "/api/settings/tenant.allow_shared_secrets", `{"value":"true"}`)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("operator gaming.active PUT = %d, want 200 (red if operator writeScope is a tenant scope: global-only gate would 422) body=%s",
+			t.Fatalf("operator tenant.allow_shared_secrets PUT = %d, want 200 (red if operator writeScope is a tenant scope: global-only gate would 422) body=%s",
 				rec.Code, rec.Body.String())
 		}
-		if v, ok := scopeRowValue(t, pool, "gaming.active", store.GlobalScope); !ok || v != "true" {
-			t.Errorf("gaming.active _global row = %q ok=%v, want true", v, ok)
+		if v, ok := scopeRowValue(t, pool, "tenant.allow_shared_secrets", store.GlobalScope); !ok || v != "true" {
+			t.Errorf("tenant.allow_shared_secrets _global row = %q ok=%v, want true", v, ok)
 		}
 	})
 

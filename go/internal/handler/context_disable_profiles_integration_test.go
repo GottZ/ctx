@@ -268,17 +268,12 @@ func TestEjectShim_NoBlackout422(t *testing.T) {
 			t.Fatalf("%s on = %d, want 200 (shim bypasses blackout gate); body=%s", action, rec.Code, rec.Body.String())
 		}
 	}
-	// The dual-write landed: eject profile active AND gaming.active set.
+	// The profile write landed: the eject profile is active (U01-W5: the eject
+	// profile is the single source of truth; the legacy gaming.active dual-write
+	// is gone).
 	p, _ := store.GetDisableProfile(ph.ctx, ph.pool, "_global", "eject")
 	if !p.Active {
 		t.Error("eject profile not active after shim on")
-	}
-	var gaming string
-	if err := ph.pool.QueryRow(ph.ctx, `SELECT value::text FROM context_settings WHERE key='gaming.active' AND scope='_global'`).Scan(&gaming); err != nil {
-		t.Fatalf("read gaming.active: %v", err)
-	}
-	if gaming != "true" {
-		t.Errorf("gaming.active = %q, want true (dual-write)", gaming)
 	}
 }
 
@@ -313,10 +308,12 @@ func TestEjectShim_ReadShapeIdentical(t *testing.T) {
 	}
 }
 
-// Gate (b): the shim dual-write is atomic. A forced failure at the commit
-// boundary (beforeGamingCommit seam) leaves NEITHER the profile nor the settings
-// row written — no divergent state.
-func TestEjectShim_DualWriteAtomic(t *testing.T) {
+// Gate (b): the shim profile write is atomic. A forced failure at the commit
+// boundary (beforeGamingCommit seam) leaves the eject profile row untouched.
+// (Since U01-W5 the write is profile-only — the legacy gaming.active dual-write
+// and its divergence hazard are gone; this pins that a rolled-back toggle does
+// not partially land the profile flip.)
+func TestEjectShim_ProfileWriteAtomic(t *testing.T) {
 	ph := setupProfileHarness(t)
 	beforeGamingCommit = func() error { return errors.New("forced commit-boundary failure") }
 	defer func() { beforeGamingCommit = nil }()
@@ -325,15 +322,10 @@ func TestEjectShim_DualWriteAtomic(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("forced-failure toggle = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
-	// Neither row moved: eject.active still false AND no gaming.active=true.
+	// The profile row did not move: eject.active still false.
 	p, _ := store.GetDisableProfile(ph.ctx, ph.pool, "_global", "eject")
 	if p.Active {
-		t.Error("eject.active=true after a rolled-back dual-write (divergent!)")
-	}
-	var gaming *string
-	_ = ph.pool.QueryRow(ph.ctx, `SELECT value::text FROM context_settings WHERE key='gaming.active' AND scope='_global'`).Scan(&gaming)
-	if gaming != nil && *gaming == "true" {
-		t.Error("gaming.active=true after a rolled-back dual-write (divergent!)")
+		t.Error("eject.active=true after a rolled-back write (the flip must not partially land)")
 	}
 }
 
