@@ -67,8 +67,17 @@ type statusResponse struct {
 	Dream          dreamStatus              `json:"dream"`
 	LLM24h         []llm24hRow              `json:"llm_24h"`
 	LLM24hComplete bool                     `json:"llm_24h_complete"`
-	Gaming         gamingStatus             `json:"gaming"`
-	Activity       *activityStatus          `json:"activity"`
+	// Profiles is the disable-profile registry line (U01-W7): the {name, scope,
+	// label, active, member_count} of every profile in the pool snapshot, ORDER
+	// BY name (the diffKey-stable order, §4.5-5). It REPLACES the retired
+	// gaming:{active} wire field (the gaming→eject cutover ends here). Pointer +
+	// omitempty so it is PRESENT on the server-admin path (even when empty) and
+	// ABSENT on the per-tenant path (N8: the tenant snapshot stays nulled — it
+	// never sets this field). Deliberately fan-out-schlank: NO member names, NO
+	// description in this per-tick frame — those load on-demand via
+	// disable-profile-list (§4.5-5 review finding).
+	Profiles *[]statusProfile `json:"profiles,omitempty"`
+	Activity *activityStatus  `json:"activity"`
 	// Dispatch carries the FULL admission-registry view — populated ONLY on the
 	// server-admin path (MW12/K13). DispatchTenant carries the coarsened
 	// per-tenant occupancy view — populated ONLY on the tenant path. Exactly one
@@ -110,8 +119,19 @@ type llm24hRow struct {
 	CostUSD float64 `json:"cost_usd"`
 }
 
-type gamingStatus struct {
-	Active bool `json:"active"`
+// statusProfile is one disable-profile row in the status frame (U01-W7): the
+// slim, fan-out-safe shape that rides the per-tick SSE `status` event and the
+// GET /api/status poll. scope is carried so the client can address the toggle
+// unambiguously (name is UNIQUE only per scope, AM-5) — the splice key is
+// (name, scope). member_count is the total membership (active or not); the
+// member NAMES are deliberately NOT here (on-demand via disable-profile-list,
+// §4.5-5). ORDER BY name upstream keeps the slice diffKey-stable.
+type statusProfile struct {
+	Name        string `json:"name"`
+	Scope       string `json:"scope"`
+	Label       string `json:"label"`
+	Active      bool   `json:"active"`
+	MemberCount int    `json:"member_count"`
 }
 
 // activityStatus is the Wave-G host idle signal; the field stays null until the
@@ -135,7 +155,9 @@ type cheapSnapshot struct {
 	lastCycleAt    *time.Time
 	llm24h         []llm24hRow
 	llm24hComplete bool
-	gamingActive   bool
+	// profiles is the disable-profile registry line, built ORDER BY name at the
+	// tick (buildStatusProfiles) so the status frame's diffKey stays byte-stable.
+	profiles []statusProfile
 	// Dispatch registry view + arm last-run stamps, captured in-memory at the
 	// tick (MW12). Both the server-admin and the tenant view read THIS cached
 	// snapshot — never a live Snapshot() per request — so N pollers within one
@@ -359,11 +381,11 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 		lastCycleAt:    c.queryLastCycleAt(ctx),
 		llm24h:         llm24h,
 		llm24hComplete: complete,
-		// gaming.active on the wire follows the eject disable-profile's active
-		// state (U01-W5 cutover): the legacy gaming.active settings key is gone,
-		// the eject profile in the pool snapshot is the single source of truth.
-		// The field name stays "gaming" until W7 (frontend/TS types consume it).
-		gamingActive: c.ejectActive(),
+		// The disable-profile registry line (U01-W7): every profile in the pool
+		// snapshot as {name, scope, label, active, member_count}, ORDER BY name.
+		// Replaces the retired gaming.active field — the eject profile is now just
+		// one row in this array (its active flag rides here like any other).
+		profiles: buildStatusProfiles(c.backendPool.Profiles(), c.backendPool.MemberCounts()),
 	}
 	// Dispatch cheap source (MW12): the in-memory registry snapshot + enforcing
 	// predicate. Captured HERE so every reader within a tick serves the same
@@ -383,12 +405,26 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	return snap
 }
 
-// ejectActive reports the eject disable-profile's live active state from the
-// backend pool snapshot — the source of the status payload's gaming.active
-// field since U01-W5. Split out as a DB-free seam so the cutover can be unit
-// tested (buildCheap itself needs a live pool for its health/llm queries).
-func (c *StatusCollector) ejectActive() bool {
-	return ejectProfileActive(c.backendPool.Profiles())
+// buildStatusProfiles maps the pool's disable-profile snapshot onto the slim
+// status-frame shape (U01-W7). It is a DB-free pure function (unit-testable
+// without a live pool). The input profiles slice is ORDER BY name (Pool.
+// Profiles), so the output — and thus the status frame's diffKey — is stable
+// tick over tick. member_count comes from the snapshot's ID-keyed count map
+// (Pool.MemberCounts): keyed by profile ID, so two same-named profiles in
+// different scopes (legal under AM-5, UNIQUE(scope,name)) never cross-count
+// each other's members. Returns a non-nil slice.
+func buildStatusProfiles(profiles []backends.Profile, memberCounts map[string]int) []statusProfile {
+	out := make([]statusProfile, 0, len(profiles))
+	for _, p := range profiles {
+		out = append(out, statusProfile{
+			Name:        p.Name,
+			Scope:       p.Scope,
+			Label:       p.Label,
+			Active:      p.Active,
+			MemberCount: memberCounts[p.ID],
+		})
+	}
+	return out
 }
 
 // timePtr maps a wall-clock time to a *time.Time, folding the zero time to nil
@@ -430,6 +466,13 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats) s
 		disp = buildDispatchAdmin(cheap.dispatch, cheap.dispatchEnforcing,
 			cheap.lastGuardAt, cheap.lastDigestAt, cheap.lastOverviewAt, l)
 	}
+	// profiles is PRESENT on the server-admin path (pointer, even when empty);
+	// the per-tenant SnapshotForTenant never calls assemble, so it leaves the
+	// field nil → omitted (N8: tenant snapshot stays nulled).
+	pf := cheap.profiles
+	if pf == nil {
+		pf = []statusProfile{}
+	}
 	return statusResponse{
 		Success:        true,
 		AsOf:           cheap.asOf,
@@ -438,7 +481,7 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats) s
 		Dream:          d,
 		LLM24h:         l,
 		LLM24hComplete: cheap.llm24hComplete,
-		Gaming:         gamingStatus{Active: cheap.gamingActive},
+		Profiles:       &pf,
 		Activity:       nil,
 		Dispatch:       disp,
 	}

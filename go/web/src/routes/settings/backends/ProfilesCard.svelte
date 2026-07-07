@@ -18,6 +18,7 @@
   // ausschließlich „Eject" — kein Alt-Wording im UI dieser Karte.
   import { session } from '../../../lib/auth.svelte'
   import type { DisableProfileView } from '../../../lib/api/profiles'
+  import BlackoutConfirm from '../../../lib/components/BlackoutConfirm.svelte'
   import { profileKey, type ProfilesModel } from './profiles.svelte'
 
   let { profiles }: { profiles: ProfilesModel } = $props()
@@ -53,7 +54,7 @@
   }
 
   // --- Blackout confirm step (§5.1) ------------------------------------------
-  interface BlackoutConfirm {
+  interface BlackoutState {
     name: string
     scope: string
     label: string
@@ -61,45 +62,7 @@
     embedDegraded: boolean
     trigger: HTMLElement | null
   }
-  let confirm = $state<BlackoutConfirm | null>(null)
-
-  /**
-   * Focus-managed alertdialog trap (§5.5): moves focus onto the confirm button,
-   * traps Tab between the two actions, Escape cancels, and on teardown returns
-   * focus to the switch that opened it. use:action so the wiring lives with the
-   * node's lifetime — no manual mount/unmount bookkeeping.
-   */
-  function blackoutTrap(node: HTMLElement, trigger: HTMLElement | null) {
-    const buttons = (): HTMLButtonElement[] => Array.from(node.querySelectorAll('button'))
-    // Confirm is the LAST button ("Trotzdem aktivieren") — focus lands there.
-    buttons().at(-1)?.focus()
-    function onKey(e: KeyboardEvent): void {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        cancelBlackout()
-        return
-      }
-      if (e.key !== 'Tab') return
-      const b = buttons()
-      if (b.length === 0) return
-      const first = b[0]
-      const last = b[b.length - 1]
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault()
-        last.focus()
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault()
-        first.focus()
-      }
-    }
-    node.addEventListener('keydown', onKey)
-    return {
-      destroy(): void {
-        node.removeEventListener('keydown', onKey)
-        trigger?.focus()
-      },
-    }
-  }
+  let confirm = $state<BlackoutState | null>(null)
 
   async function onSwitch(p: DisableProfileView, e: Event & { currentTarget: HTMLInputElement }): Promise<void> {
     const input = e.currentTarget
@@ -319,25 +282,14 @@
           {/if}
 
           {#if confirm?.name === p.name && confirm?.scope === p.scope}
-            <div
-              class="blackout"
-              role="alertdialog"
-              aria-live="assertive"
-              aria-label="Rollen-Blackout bestätigen"
-              use:blackoutTrap={confirm.trigger}
-            >
-              <p class="bo-lead">„{confirm.label}" aktivieren nimmt diese Rollen vollständig vom Netz:</p>
-              {#if confirm.roles.length > 0}
-                <ul class="bo-roles">{#each confirm.roles as r (r)}<li>{r}</li>{/each}</ul>
-              {/if}
-              {#if confirm.embedDegraded}
-                <p class="bo-embed">Embedding fällt aus — neue Blöcke bleiben nur per Volltext auffindbar (kein Datenverlust).</p>
-              {/if}
-              <div class="bo-actions">
-                <button type="button" class="ghost" onclick={cancelBlackout}>abbrechen</button>
-                <button type="button" class="danger" onclick={() => void acceptBlackout()}>Trotzdem aktivieren</button>
-              </div>
-            </div>
+            <BlackoutConfirm
+              label={confirm.label}
+              roles={confirm.roles}
+              embedDegraded={confirm.embedDegraded}
+              trigger={confirm.trigger}
+              onconfirm={() => void acceptBlackout()}
+              oncancel={cancelBlackout}
+            />
           {/if}
         </li>
       {/each}
@@ -496,39 +448,6 @@
   .reserved-note {
     font-size: var(--fs-2xs);
     color: var(--text-faint);
-  }
-  .blackout {
-    margin-top: var(--space-1);
-    border: 1px solid var(--danger);
-    border-radius: var(--radius);
-    background: var(--danger-dim);
-    padding: var(--space-2);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-  .bo-lead {
-    margin: 0;
-    font-size: var(--fs-xs);
-    color: var(--danger);
-  }
-  .bo-roles {
-    margin: 0;
-    padding-left: var(--space-3);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--danger);
-  }
-  .bo-embed {
-    margin: 0;
-    font-size: var(--fs-2xs);
-    color: var(--warn);
-  }
-  .bo-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-2);
-    margin-top: var(--space-1);
   }
   .edit-form {
     display: flex;

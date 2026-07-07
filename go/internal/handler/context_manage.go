@@ -1382,10 +1382,15 @@ func (h *ManageHandler) handleDreamMode(w http.ResponseWriter, _ *http.Request, 
 	h.dreamController.SetDreamMode(mode, interval)
 	_, currentInterval := h.dreamController.GetDreamMode()
 
+	// as_of is the merge floor (U01-W7, §4.5-4): the DreamTile splices this
+	// mutation answer into the held status instead of a stale reload, and the
+	// client's asOfFloor needs a timestamp to order it against late SSE frames.
+	// Server time here (the mode flip is in-memory + immediate, no reload).
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":  true,
 		"mode":     data.Mode,
 		"interval": currentInterval.Seconds(),
+		"as_of":    serverNow(),
 	})
 }
 

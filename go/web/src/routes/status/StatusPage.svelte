@@ -4,45 +4,36 @@
   // tick and pushes `status`/`backends`/`llmcall` events through ONE render
   // path. A poll of GET /api/status is the fallback whenever the stream is not
   // open (connection cap → 429, network blip, server restart).
-  import { fetchPublicHealth, fetchStatus, setGamingMode } from '../../lib/api/status'
-  import type {
-    BackendStatus,
-    HealthStatus,
-    LLMLogEntry,
-    StatusEvent,
-    StatusResponse,
-  } from '../../lib/api/types'
+  import { fetchPublicHealth } from '../../lib/api/status'
+  import { toggleDisableProfile } from '../../lib/api/profiles'
+  import type { BackendStatus, HealthStatus, LLMLogEntry, StatusEvent, StatusProfile } from '../../lib/api/types'
   import { session } from '../../lib/auth.svelte'
   import { Resource } from '../../lib/resource.svelte'
   import { SseClient } from '../../lib/sse.svelte'
+  import BlackoutConfirm from '../../lib/components/BlackoutConfirm.svelte'
+  import { StatusStore } from './status-store.svelte'
   import BackendsTile from './BackendsTile.svelte'
   import DispatchTile from './DispatchTile.svelte'
   import DreamTile from './DreamTile.svelte'
   import LlmlogTable from './LlmlogTable.svelte'
 
   const POLL_MS = 5000
-  const status = new Resource<StatusResponse>(() => fetchStatus())
+  // StatusStore holds data + the as_of-floor: every SSE frame / poll answer is
+  // order-guarded, and a profile/dream mutation is spliced in + raises the floor
+  // (U01-W7, §4.5). It replaces the raw Resource so a late frame can no longer
+  // overwrite a just-toggled profile.
+  const status = new StatusStore()
   const publicHealth = new Resource<HealthStatus>(() => fetchPublicHealth())
 
-  let gamingBusy = $state(false)
   // Live llmcall rows pushed since connect; LlmlogTable merges them with its
   // own fetched history (client-side filter + dedup by id).
   let liveLlmcalls = $state<LLMLogEntry[]>([])
-  // backends arrives right after status on connect; buffer only for the
-  // theoretical out-of-order case so a backends-first frame is never dropped.
-  let pendingBackends: BackendStatus[] | null = null
 
   function onSseEvent(name: string, data: unknown): void {
     if (name === 'status') {
-      const e = data as StatusEvent
-      status.data = { success: true, ...e, backends: pendingBackends ?? status.data?.backends ?? [] }
-      pendingBackends = null
-      status.status = 'ready'
-      status.error = null
+      status.applyStatusFrame(data as StatusEvent)
     } else if (name === 'backends') {
-      const be = data as BackendStatus[]
-      if (status.data) status.data = { ...status.data, backends: be }
-      else pendingBackends = be
+      status.applyBackends(data as BackendStatus[])
     } else if (name === 'llmcall') {
       liveLlmcalls = [data as LLMLogEntry, ...liveLlmcalls].slice(0, 200)
     } else if (name === 'error') {
@@ -85,15 +76,84 @@
     void publicHealth.load()
   })
 
-  async function toggleGaming(active: boolean) {
-    if (gamingBusy) return
-    gamingBusy = true
+  // --- Profile quick-toggles (§4.6) ------------------------------------------
+  // The toggles card loops over the live s.profiles. A flip ON first dry-runs to
+  // learn the role-blackout impact; an emptying role raises the shared Klartext
+  // confirm (same fail-closed a11y contract as the backends page). Every write
+  // is spliced into the held status by (name, scope) — no reload, and the answer
+  // as_of raises the floor so a late SSE frame cannot revert it.
+  let busyKey = $state<string | null>(null)
+  let toggleError = $state<string | null>(null)
+
+  interface StatusBlackout {
+    name: string
+    scope: string
+    label: string
+    roles: string[]
+    embedDegraded: boolean
+    trigger: HTMLElement | null
+  }
+  let confirm = $state<StatusBlackout | null>(null)
+
+  function pKey(p: StatusProfile): string {
+    return `${p.scope} ${p.name}`
+  }
+  function profileLabel(p: StatusProfile): string {
+    return p.label !== '' ? p.label : p.name
+  }
+
+  async function toggleProfile(p: StatusProfile, trigger: HTMLElement): Promise<void> {
+    const key = pKey(p)
+    if (busyKey === key || (confirm?.name === p.name && confirm?.scope === p.scope)) return
+    const next = !p.active
+    busyKey = key
+    toggleError = null
     try {
-      await setGamingMode(active)
-      await status.reload()
+      if (!next) {
+        const r = await toggleDisableProfile(p.name, p.scope, false)
+        status.spliceProfile(r.profile, r.as_of)
+        return
+      }
+      // Dry-run to learn the blackout set WITHOUT writing (§5.1).
+      const dry = await toggleDisableProfile(p.name, p.scope, true, { dryRun: true })
+      if (dry.impact.roles_blacked_out.length > 0) {
+        confirm = {
+          name: p.name,
+          scope: p.scope,
+          label: profileLabel(p),
+          roles: dry.impact.roles_blacked_out.filter((r) => r !== 'embed'),
+          embedDegraded: dry.impact.embed_degraded === true,
+          trigger,
+        }
+      } else {
+        const r = await toggleDisableProfile(p.name, p.scope, true)
+        status.spliceProfile(r.profile, r.as_of)
+      }
+    } catch (e) {
+      toggleError = e instanceof Error ? e.message : String(e)
     } finally {
-      gamingBusy = false
+      busyKey = null
     }
+  }
+
+  async function acceptBlackout(): Promise<void> {
+    if (!confirm) return
+    const c = confirm
+    confirm = null // tears down the trap → focus returns to the switch
+    busyKey = `${c.scope} ${c.name}`
+    toggleError = null
+    try {
+      const r = await toggleDisableProfile(c.name, c.scope, true, { confirm: true })
+      status.spliceProfile(r.profile, r.as_of)
+    } catch (e) {
+      toggleError = e instanceof Error ? e.message : String(e)
+    } finally {
+      busyKey = null
+    }
+  }
+
+  function cancelBlackout(): void {
+    confirm = null // trap teardown returns focus to the switch
   }
 
   // K-f-Klassen-Mapping (Q3, design 05-§4.8.2): Daten→Farbe nur über
@@ -170,24 +230,47 @@
       </section>
 
       <section class="card toggles" aria-label="toggles">
-        <div class="toggle">
-          <div>
-            <strong>gaming lock</strong>
-            <p class="hint">excludes the GPU backends from every chain</p>
+        {#if toggleError}
+          <p class="toggle-error" role="alert">{toggleError}</p>
+        {/if}
+        {#each s.profiles ?? [] as p (pKey(p))}
+          {@const key = pKey(p)}
+          <div class="toggle">
+            <div class="toggle-info">
+              <strong>{profileLabel(p)}</strong>
+              <p class="hint">
+                {p.member_count} {p.member_count === 1 ? 'Backend' : 'Backends'} ·
+                <a href="/settings/backends">konfigurieren →</a>
+              </p>
+            </div>
+            <!-- NOT disabled while the confirm is open: a disabled button can't
+                 take focus, and the a11y contract returns focus HERE on Escape.
+                 A re-click while confirming is guarded inside toggleProfile. -->
+            <button
+              type="button"
+              class="switch"
+              class:on={p.active}
+              disabled={busyKey === key}
+              aria-pressed={p.active}
+              aria-label={`${profileLabel(p)} umschalten`}
+              onclick={(e) => void toggleProfile(p, e.currentTarget)}
+            >
+              {p.active ? 'ON' : 'OFF'}
+            </button>
           </div>
-          <button
-            type="button"
-            class="switch"
-            class:on={s.gaming.active}
-            disabled={gamingBusy}
-            aria-pressed={s.gaming.active}
-            onclick={() => toggleGaming(!s.gaming.active)}
-          >
-            {s.gaming.active ? 'ON' : 'OFF'}
-          </button>
-        </div>
+          {#if confirm?.name === p.name && confirm?.scope === p.scope}
+            <BlackoutConfirm
+              label={confirm.label}
+              roles={confirm.roles}
+              embedDegraded={confirm.embedDegraded}
+              trigger={confirm.trigger}
+              onconfirm={() => void acceptBlackout()}
+              oncancel={cancelBlackout}
+            />
+          {/if}
+        {/each}
         <div class="toggle">
-          <div>
+          <div class="toggle-info">
             <strong>activity</strong>
             <p class="hint">host idle signal</p>
           </div>
@@ -196,7 +279,7 @@
       </section>
     </div>
 
-    <DreamTile dream={s.dream} onRefresh={() => void status.reload()} />
+    <DreamTile dream={s.dream} onApplied={(r) => status.applyDream(r)} />
     <BackendsTile backends={s.backends} />
     <DispatchTile dispatch={s.dispatch} dispatchTenant={s.dispatch_tenant} />
     <LlmlogTable complete={s.llm_24h_complete} live={liveLlmcalls} />
@@ -337,6 +420,22 @@
     margin: var(--space-1) 0 0;
     color: var(--text-faint);
     font-size: var(--fs-xs);
+  }
+  .hint a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .hint a:hover {
+    text-decoration: underline;
+  }
+  .toggle-info {
+    min-width: 0;
+  }
+  .toggle-error {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    color: var(--danger);
+    font-size: var(--fs-sm);
   }
   .muted {
     color: var(--text-faint);

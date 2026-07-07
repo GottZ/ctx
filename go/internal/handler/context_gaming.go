@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -20,23 +19,6 @@ const (
 	ejectProfileName  = "eject"
 	ejectProfileScope = "_global"
 )
-
-// ejectProfileActive reports whether the reserved eject profile is currently
-// active in the given pool-snapshot profile registry (ORDER BY name, Pool.
-// Profiles()). It is the single source of truth for the status payload's
-// gaming.active field since U01-W5 (the legacy gaming.active settings key is
-// gone). A missing profile (only reachable via psql break-glass) degrades to
-// false — same fail-soft as ejectShapeView, never an error. The eject naming
-// lives HERE, not in backends.Pool: the pool holds no policy (deliberate
-// decoupling, backends/pool.go).
-func ejectProfileActive(profiles []backends.Profile) bool {
-	for i := range profiles {
-		if profiles[i].Scope == ejectProfileScope && profiles[i].Name == ejectProfileName {
-			return profiles[i].Active
-		}
-	}
-	return false
-}
 
 // gamingModeNote is the constant advisory in every eject/gaming-mode response:
 // the toggle affects NEW chains only — a running 27B synthesis (≤60s) and an

@@ -38,19 +38,20 @@ export function fetchLLMLogDetail(id: string): Promise<LLMLogDetailResponse> {
 
 export type DreamMode = 'on' | 'throttled' | 'off'
 
-/** Toggle the dream scheduler mode (manage action; admin-gated server-side). */
-export function setDreamMode(mode: DreamMode): Promise<unknown> {
-  return apiFetch('/api/manage', {
-    method: 'POST',
-    body: JSON.stringify({ action: 'dream-mode', data: { mode } }),
-  })
+// dream-mode mutation answer (U01-W7): carries as_of so the DreamTile splices it
+// into the held status against the asOfFloor instead of a stale reload (§4.5-4).
+export interface DreamModeResponse {
+  success: true
+  mode: DreamMode
+  interval: number
+  as_of: string
 }
 
-/** Toggle the GPU gaming lock (manage action; admin-gated server-side). */
-export function setGamingMode(active: boolean): Promise<unknown> {
-  return apiFetch('/api/manage', {
+/** Toggle the dream scheduler mode (manage action; admin-gated server-side). */
+export function setDreamMode(mode: DreamMode): Promise<DreamModeResponse> {
+  return apiFetch<DreamModeResponse>('/api/manage', {
     method: 'POST',
-    body: JSON.stringify({ action: 'gaming-mode', data: { mode: active ? 'on' : 'off' } }),
+    body: JSON.stringify({ action: 'dream-mode', data: { mode } }),
   })
 }
 

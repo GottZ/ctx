@@ -103,7 +103,7 @@ export const contracts: PageContract[] = [
         'Aggregat-Ansicht mit fixer Kachelzahl; die einzigen Listen (backends, llm_24h) sind server-seitig auf die Backend-/Pipeline-Anzahl begrenzt — kein 10k-Wachstumspfad.',
     },
     flowDoc:
-      'Operator öffnet die Status-Übersicht und liest den Live-Zustand tile-vollständig: Health-Ampel mit Services, Gaming-Toggle, Dream-Queue-Zahlen, Backend-Pool-Zeile und LLM-Telemetrie tragen die Fixture-DATEN (PV7: erste Inhalts-Asserts auf jede Tile — Inventur §5 hatte keine einzige).',
+      'Operator öffnet die Status-Übersicht und liest den Live-Zustand tile-vollständig: Health-Ampel mit Services, Profil-Quick-Toggle, Dream-Queue-Zahlen, Backend-Pool-Zeile und LLM-Telemetrie tragen die Fixture-DATEN (PV7: erste Inhalts-Asserts auf jede Tile — Inventur §5 hatte keine einzige).',
     primaryFlow: async (page) => {
       // Tile-complete content asserts against statusFixture (PV7, design 06
       // §7-PV7): every tile carries DATA, not just chrome.
@@ -114,9 +114,13 @@ export const contracts: PageContract[] = [
       const health = page.locator('section.card[aria-label="health"]')
       await expect(health.locator('strong')).toHaveText('ok')
       for (const svc of ['db', 'embed', 'chat']) await expect(health).toContainText(svc)
-      // Toggles tile: gaming lock reflects fixture gaming.active=false.
+      // Toggles tile: the eject disable-profile quick-toggle (U01-W7, replacing
+      // the retired gaming lock) reflects the fixture profile's active=false.
       const toggles = page.locator('section.card[aria-label="toggles"]')
-      await expect(toggles.getByRole('button', { name: 'OFF' })).toHaveAttribute('aria-pressed', 'false')
+      await expect(toggles.getByRole('button', { name: 'Eject-Modus umschalten' })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      )
       await expect(toggles).toContainText('no signal') // activity: null
       // Dream tile: queue counters + mode segment + meta rows.
       const dream = page.locator('section.card[aria-label="dream queue"]')

@@ -380,10 +380,26 @@ export interface StatusResponse {
   dream: DreamStatus
   llm_24h: LLM24hRow[]
   llm_24h_complete: boolean
-  gaming: { active: boolean }
+  // Disable-profile registry line (U01-W7), replacing the retired
+  // gaming:{active} field. PRESENT on the server-admin path, ABSENT on the
+  // per-tenant path (the Go field is *[]statusProfile,omitempty — the tenant
+  // snapshot stays nulled, N8), hence optional. The status page guards `?? []`.
+  profiles?: StatusProfile[]
   activity: ActivityStatus | null
   dispatch?: DispatchStatus | null
   dispatch_tenant?: DispatchTenantStatus | null
+}
+
+// Source: go/internal/handler/status.go (statusProfile). The slim per-tick shape
+// of one disable-profile: NO member names / description (those load on-demand
+// via disable-profile-list, §4.5-5). scope is the splice key alongside name
+// (name is unique only per scope, AM-5); member_count is the total membership.
+export interface StatusProfile {
+  name: string
+  scope: string
+  label: string
+  active: boolean
+  member_count: number
 }
 
 // Source: go/internal/handler/events.go (statusEvent) — the SSE `status` event
@@ -396,7 +412,9 @@ export interface StatusEvent {
   dream: DreamStatus
   llm_24h: LLM24hRow[]
   llm_24h_complete: boolean
-  gaming: { active: boolean }
+  // The SSE stream is server-admin-only, so profiles is always carried (a plain
+  // array, never omitted, unlike the poll shape's optional field).
+  profiles: StatusProfile[]
   activity: ActivityStatus | null
   // The SSE stream is SERVER-admin only (events.go RequireAdmin), so it carries
   // the FULL `dispatch` section — never the coarsened tenant shape. Absent on a

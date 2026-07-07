@@ -1,11 +1,13 @@
 <script lang="ts">
   // Dream tile — the QueueStats forecast + the mode control. The mode buttons
   // hit the existing dream-mode manage action (admin-gated server-side); on
-  // success the parent re-polls so the change shows up from the live source.
-  import { setDreamMode, type DreamMode } from '../../lib/api/status'
+  // success the TYPED answer (mode + interval + as_of) is merged into the held
+  // status via onApplied — no stale reload (U01-W7, §4.5-4). The as_of raises the
+  // client's floor so a late SSE frame cannot revert the mode.
+  import { setDreamMode, type DreamMode, type DreamModeResponse } from '../../lib/api/status'
   import type { DreamStatus } from '../../lib/api/types'
 
-  let { dream, onRefresh }: { dream: DreamStatus; onRefresh: () => void } = $props()
+  let { dream, onApplied }: { dream: DreamStatus; onApplied: (r: DreamModeResponse) => void } = $props()
 
   let busy = $state(false)
   let err = $state<string | null>(null)
@@ -17,8 +19,7 @@
     busy = true
     err = null
     try {
-      await setDreamMode(mode)
-      onRefresh()
+      onApplied(await setDreamMode(mode))
     } catch (e) {
       err = e instanceof Error ? e.message : String(e)
     } finally {

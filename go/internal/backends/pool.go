@@ -86,8 +86,14 @@ type snapshot struct {
 	// consistent with the chain's snapshot without a second query. Absent = the
 	// backend belongs to no profile.
 	memberOf map[string][]string
-	version  int64
-	loadedAt time.Time
+	// memberCount maps profile ID → its total membership count (active or not),
+	// precomputed per reload (092, U01-W7). Keyed by ID — NOT name — so two
+	// same-named profiles in different scopes (possible under AM-5 tenant
+	// scoping, UNIQUE(scope,name)) never cross-count each other's members. The
+	// status frame's member_count reads this exact figure.
+	memberCount map[string]int
+	version     int64
+	loadedAt    time.Time
 }
 
 // Pool is the declarative backend pool: an immutable snapshot of
@@ -186,12 +192,13 @@ func (p *Pool) Reload(ctx context.Context) error {
 
 	v := p.version.Add(1)
 	p.snap.Store(&snapshot{
-		backends:   loaded,
-		profiles:   profiles,
-		disabledBy: buildDisabledBy(profiles, memberships),
-		memberOf:   buildMemberOf(profiles, memberships),
-		version:    v,
-		loadedAt:   time.Now(),
+		backends:    loaded,
+		profiles:    profiles,
+		disabledBy:  buildDisabledBy(profiles, memberships),
+		memberOf:    buildMemberOf(profiles, memberships),
+		memberCount: buildMemberCounts(memberships),
+		version:     v,
+		loadedAt:    time.Now(),
 	})
 	slog.Info("backends: snapshot reloaded", "version", v,
 		"backends", len(loaded), "profiles", len(profiles))
@@ -293,10 +300,32 @@ func buildMemberOf(profiles []Profile, memberships []profileMembership) map[stri
 	return out
 }
 
+// buildMemberCounts precomputes profile ID → total membership count, active or
+// not (092, U01-W7). ID-keyed on purpose: name-keyed aggregation would let two
+// same-named profiles in different scopes (legal under AM-5, UNIQUE(scope,name))
+// cross-count each other's members and report a wrong figure in the status
+// frame. A membership row whose profile vanished mid-load cannot exist (FK), so
+// no existence filter is needed.
+func buildMemberCounts(memberships []profileMembership) map[string]int {
+	out := make(map[string]int)
+	for _, m := range memberships {
+		out[m.profileID]++
+	}
+	return out
+}
+
 // Profiles returns the current disable-profile registry snapshot (092), ORDER
 // BY name. Readers dereference once per operation, like Snapshot.
 func (p *Pool) Profiles() []Profile {
 	return p.snap.Load().profiles
+}
+
+// MemberCounts returns the precomputed profile-ID → membership-count map from
+// the current snapshot (092, U01-W7). The status frame's member_count reads it
+// (buildStatusProfiles); ID-keyed, see buildMemberCounts. Snapshot-owned —
+// read-only.
+func (p *Pool) MemberCounts() map[string]int {
+	return p.snap.Load().memberCount
 }
 
 // MemberOf returns the precomputed backend_id → ALL-profile-names map from the
@@ -411,13 +440,6 @@ func (p *Pool) SeedSnapshotForTest(bs []Backend) {
 	p.snap.Store(&snapshot{backends: bs, version: -1, loadedAt: time.Now()})
 }
 
-// SeedSnapshotForTestWithProfiles publishes a static snapshot carrying the
-// disable-profile registry too (Profiles(), ORDER BY name). Test seam only —
-// the status collector's eject-profile probe (U01-W5) reads Profiles() without
-// a database. Production snapshots come exclusively from Reload.
-func (p *Pool) SeedSnapshotForTestWithProfiles(bs []Backend, profiles []Profile) {
-	p.snap.Store(&snapshot{backends: bs, profiles: profiles, version: -1, loadedAt: time.Now()})
-}
 
 // VisibleTo reports whether a backend in scope bScope may be reached by caller
 // tenant (04-W2/T34, egress isolation). Exported so the admin surface (T37,

@@ -132,7 +132,11 @@ type statusEvent struct {
 	Dream          dreamStatus     `json:"dream"`
 	LLM24h         []llm24hRow     `json:"llm_24h"`
 	LLM24hComplete bool            `json:"llm_24h_complete"`
-	Gaming         gamingStatus    `json:"gaming"`
+	// Profiles is the disable-profile registry line (U01-W7), replacing the
+	// retired gaming field. The SSE stream is server-admin-only, so it always
+	// carries the array (never nil) — a plain slice, unlike the pointer on the
+	// dual-purpose statusResponse. ORDER BY name upstream ⇒ diffKey-stable.
+	Profiles       []statusProfile `json:"profiles"`
 	Activity       *activityStatus `json:"activity"`
 	// Dispatch is the full server-admin registry section (MW12). The SSE stream
 	// is server-admin-only (RequireAdmin, server.go), so the full view rides it.
@@ -150,10 +154,22 @@ func statusEventOf(s statusResponse) statusEvent {
 		Dream:          s.Dream,
 		LLM24h:         s.LLM24h,
 		LLM24hComplete: s.LLM24hComplete,
-		Gaming:         s.Gaming,
+		Profiles:       derefProfiles(s.Profiles),
 		Activity:       s.Activity,
 		Dispatch:       s.Dispatch,
 	}
+}
+
+// derefProfiles flattens the statusResponse's *[]statusProfile (present on the
+// server-admin path, nil on the per-tenant path) to the plain slice the SSE
+// frame carries. The SSE stream is server-admin-only, so in practice the
+// pointer is always non-nil here; nil degrades to an empty slice for a stable
+// wire shape.
+func derefProfiles(p *[]statusProfile) []statusProfile {
+	if p == nil {
+		return []statusProfile{}
+	}
+	return *p
 }
 
 // diffKey marshals the status event with as_of zeroed: as_of advances every

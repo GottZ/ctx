@@ -161,7 +161,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 		Backends: []backends.BackendStatus{{ID: "b1", Name: "n", Trust: backends.TrustFull, Roles: []string{"chat"}, EffectiveState: "active"}},
 		Dream:    dreamStatus{Mode: "on", NextPendingAt: &next},
 		LLM24h:   []llm24hRow{{Backend: "n", Pipeline: "p"}},
-		Gaming:   gamingStatus{Active: false},
+		Profiles: &[]statusProfile{{Name: "eject", Scope: "_global", Label: "Eject-Modus", Active: false, MemberCount: 2}},
 		// MW12: server-admin fixture carries the full dispatch section (one
 		// target + one bucket) so the wire shape is pinned; dispatch_tenant
 		// stays null on the admin path.
@@ -178,7 +178,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	assertKeys(t, "status", b, []string{
-		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "gaming", "activity",
+		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
 		"dispatch", "dispatch_tenant",
 	})
 
@@ -189,6 +189,16 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "dream", top["dream"], []string{
 		"mode", "throttle_interval_s", "pickable_now", "in_cooldown", "never_dreamed",
 		"awaiting_embed", "incoming_1h", "incoming_6h", "next_pending_at", "last_cycle_at",
+	})
+
+	// profiles rows carry the slim {name, scope, label, active, member_count}
+	// shape — NO member names / description in the per-tick frame (§4.5-5).
+	var pfs []json.RawMessage
+	if err := json.Unmarshal(top["profiles"], &pfs); err != nil {
+		t.Fatalf("unmarshal profiles: %v", err)
+	}
+	assertKeys(t, "profiles.row", pfs[0], []string{
+		"name", "scope", "label", "active", "member_count",
 	})
 
 	// MW12 dispatch section (server-admin) wire pins.
@@ -237,54 +247,67 @@ func TestStatusGoldenKeys(t *testing.T) {
 	})
 }
 
-// TestStatusGamingActiveFollowsEjectProfile is the U01-W5 deploy-probe gate: the
-// status payload's gaming.active field must follow the eject disable-profile's
-// active state (the cutover from the retired gaming.active settings key). The
-// eject profile lives in the pool snapshot (scope='_global', name='eject');
-// c.ejectActive() is the DB-free seam buildCheap feeds cheapSnapshot.gamingActive
-// from. Active profile ⇒ true, inactive ⇒ false, missing ⇒ false (break-glass
-// degrade, no error). Structurally red against the pre-W5 stand: the field was
-// fed from the retired config gaming-state method (now gone), and the collector
-// seam did not exist, so the naive removal is a compile error (the red proof).
-func TestStatusGamingActiveFollowsEjectProfile(t *testing.T) {
-	const otherProfile = "gpu-wartung"
-	cases := []struct {
-		name     string
-		profiles []backends.Profile
-		want     bool
-	}{
-		{
-			name:     "eject active ⇒ payload true",
-			profiles: []backends.Profile{{Name: "eject", Scope: "_global", Active: true, Reserved: true}},
-			want:     true,
-		},
-		{
-			name:     "eject inactive ⇒ payload false",
-			profiles: []backends.Profile{{Name: "eject", Scope: "_global", Active: false, Reserved: true}},
-			want:     false,
-		},
-		{
-			name:     "eject missing (break-glass) ⇒ payload false, no error",
-			profiles: []backends.Profile{{Name: otherProfile, Scope: "_global", Active: true}},
-			want:     false,
-		},
-		{
-			name: "same-name profile in a foreign scope does NOT satisfy the _global eject",
-			profiles: []backends.Profile{
-				{Name: "eject", Scope: "tenantA", Active: true},
-				{Name: "eject", Scope: "_global", Active: false},
-			},
-			want: false,
-		},
+// TestBuildStatusProfiles is the U01-W7 status-frame gate (replaces the retired
+// W5 gaming.active deploy-probe): the disable-profile registry maps onto the
+// slim frame shape ORDER BY name, carries scope (the splice key), and reports
+// the ID-keyed member_count (Pool.MemberCounts). The eject profile is just one
+// row here — no special-casing. DB-free pure function.
+func TestBuildStatusProfiles(t *testing.T) {
+	profiles := []backends.Profile{
+		// Pool.Profiles() is ORDER BY name; assert the builder preserves it.
+		// eject exists TWICE (_global + tenant-scoped, legal under AM-5
+		// UNIQUE(scope,name)) with different membership — pins that the count
+		// is ID-keyed: the earlier name-aggregated builder reported 3 (2+1
+		// cross-counted) on both rows.
+		{ID: "p-eject", Name: "eject", Scope: "_global", Label: "Eject-Modus", Active: true, Reserved: true},
+		{ID: "p-eject-acme", Name: "eject", Scope: "acme:home", Label: "Acme-Eject", Active: false},
+		{ID: "p-wart", Name: "gpu-wartung", Scope: "_global", Label: "GPU-Wartung", Active: false},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			bp := backends.NewPool(nil, nil)
-			bp.SeedSnapshotForTestWithProfiles(nil, tc.profiles)
-			c := &StatusCollector{backendPool: bp}
-			if got := c.ejectActive(); got != tc.want {
-				t.Errorf("gaming.active payload = %v, want %v (must follow eject profile)", got, tc.want)
-			}
-		})
+	counts := map[string]int{
+		"p-eject":      2, // b-chat + b-rerank
+		"p-eject-acme": 1, // the tenant's own backend
+		"p-wart":       1, // b-chat
+	}
+	got := buildStatusProfiles(profiles, counts)
+
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	// Order-preserving (diffKey stability rides on this).
+	wantNames := []string{"eject", "eject", "gpu-wartung"}
+	for i, w := range wantNames {
+		if got[i].Name != w {
+			t.Errorf("row %d name = %q, want %q (order must follow ORDER BY name)", i, got[i].Name, w)
+		}
+	}
+	// Slim shape: scope + label carried; member_count per profile ID.
+	if got[0].Scope != "_global" || got[0].Label != "Eject-Modus" || !got[0].Active || got[0].MemberCount != 2 {
+		t.Errorf("eject/_global row = %+v, want scope=_global label=Eject-Modus active=true member_count=2", got[0])
+	}
+	if got[1].Scope != "acme:home" || got[1].MemberCount != 1 {
+		t.Errorf("eject/acme row = %+v, want scope=acme:home member_count=1 (no cross-scope aggregation)", got[1])
+	}
+	if got[2].MemberCount != 1 { // gpu-wartung: only b-chat
+		t.Errorf("gpu-wartung member_count = %d, want 1", got[2].MemberCount)
+	}
+
+	// A nil registry yields a non-nil empty slice (stable client shape).
+	if out := buildStatusProfiles(nil, nil); out == nil || len(out) != 0 {
+		t.Errorf("nil profiles → %v, want non-nil empty slice", out)
+	}
+}
+
+// TestStatusEventCarriesProfiles proves statusEventOf flattens the response's
+// *[]statusProfile pointer onto the SSE frame's plain slice (server-admin path),
+// and degrades a nil pointer (never reached in practice — SSE is admin-only) to
+// an empty slice.
+func TestStatusEventCarriesProfiles(t *testing.T) {
+	pf := []statusProfile{{Name: "eject", Scope: "_global", Active: true, MemberCount: 2}}
+	se := statusEventOf(statusResponse{Profiles: &pf})
+	if len(se.Profiles) != 1 || se.Profiles[0].Name != "eject" {
+		t.Errorf("statusEvent.Profiles = %+v, want the eject row", se.Profiles)
+	}
+	if se2 := statusEventOf(statusResponse{}); se2.Profiles == nil {
+		t.Error("nil profiles pointer must deref to a non-nil empty slice")
 	}
 }

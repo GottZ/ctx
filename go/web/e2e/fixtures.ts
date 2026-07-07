@@ -188,7 +188,10 @@ function statusFixture(): Record<string, unknown> {
       },
     ],
     llm_24h_complete: true,
-    gaming: { active: false },
+    // Disable-profile registry line (U01-W7) — replaces the retired gaming
+    // field. The eject profile is the default operator quick-toggle; the rich
+    // toggle/blackout scenarios are injected per-test (status-profiles.spec.ts).
+    profiles: [{ name: 'eject', scope: '_global', label: 'Eject-Modus', active: false, member_count: 2 }],
     activity: null,
   }
 }

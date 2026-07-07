@@ -111,6 +111,23 @@ func TestChainCooldownSortsNotRemoves(t *testing.T) {
 	}
 }
 
+// TestBuildMemberCounts pins the ID-keyed membership count (092, U01-W7): two
+// same-named profiles in different scopes have DISTINCT IDs, so their members
+// never cross-count (a name-keyed aggregation would).
+func TestBuildMemberCounts(t *testing.T) {
+	got := buildMemberCounts([]profileMembership{
+		{profileID: "p-eject", backendID: "b-chat"},
+		{profileID: "p-eject", backendID: "b-rerank"},
+		{profileID: "p-eject-acme", backendID: "b-acme"},
+	})
+	if got["p-eject"] != 2 || got["p-eject-acme"] != 1 {
+		t.Fatalf("counts = %v, want p-eject=2 p-eject-acme=1 (ID-keyed, no cross-count)", got)
+	}
+	if len(buildMemberCounts(nil)) != 0 {
+		t.Fatal("nil memberships must yield an empty map")
+	}
+}
+
 // TestChainProfileExclusion is the W2 gate (§7-W2): a backend disabled by an
 // ACTIVE profile (present in the snapshot disabledBy map) must fall out of the
 // chain with the reason "disabled by profile <names>". Against the W1 stand this

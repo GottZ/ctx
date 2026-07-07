@@ -111,8 +111,10 @@ func TestStatusPerTenantView(t *testing.T) {
 
 	t.Run("server_global_fields_zero_for_tenant", func(t *testing.T) {
 		snap := col.SnapshotForTenant(ctx, "st-a")
-		if snap.Dream.Mode != "" || snap.Gaming.Active || snap.Activity != nil {
-			t.Errorf("tenant view leaked server-global fields: dream=%+v gaming=%+v activity=%v", snap.Dream, snap.Gaming, snap.Activity)
+		// profiles is server-admin-only (N8): the per-tenant snapshot never sets
+		// it, so the pointer stays nil → the wire key is omitted entirely.
+		if snap.Dream.Mode != "" || snap.Profiles != nil || snap.Activity != nil {
+			t.Errorf("tenant view leaked server-global fields: dream=%+v profiles=%v activity=%v", snap.Dream, snap.Profiles, snap.Activity)
 		}
 	})
 
