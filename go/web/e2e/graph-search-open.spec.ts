@@ -463,3 +463,64 @@ test.describe('graph search-open (U03-W4)', () => {
     await expect(page.locator('[aria-activedescendant]')).toHaveCount(0)
   })
 })
+
+// U03-W5 (Amendment AM-3) — Shift+Mausrad rotiert den Ego-Graphen (sigma-Camera
+// `angle`), normales Mausrad bleibt Zoom. Beide Gates fahren den ECHTEN Wheel-Pfad:
+// ein WheelEvent auf sigmas Maus-Layer (.sigma-mouse — das Element, an dem der
+// MouseCaptor seinen wheel-Listener hält) durchläuft handleWheel → renderer-emit
+// → unseren Handler INKL. der synchronen Zoom-Unterdrückung via preventSigmaDefault.
+// Kamera-State ist deterministisch (Pixel-Output ist es nicht → der __ctxGraph-Hook
+// liest getCamera().getState()). Focus-Stage ?focus-frei über den Overview-Pick.
+interface CtxGraphCamera {
+  renderer: {
+    emit(e: string, p: unknown): unknown
+    getCamera(): { getState(): { angle: number; ratio: number } }
+  }
+  graph: { hasNode(id: string): boolean }
+}
+
+function camState(page: Page): Promise<{ angle: number; ratio: number }> {
+  return page.evaluate(() => {
+    const g = (window as unknown as { __ctxGraph: CtxGraphCamera }).__ctxGraph
+    return g.renderer.getCamera().getState()
+  })
+}
+
+/** Echtes Wheel-Event auf sigmas Maus-Layer (deltaY<0 = „hochscrollen"). */
+function wheelOnCanvas(page: Page, shiftKey: boolean): Promise<void> {
+  return page.evaluate(
+    (shift) => {
+      const el = document.querySelector('.sigma-mouse')
+      if (!el) throw new Error('sigma-mouse layer not found')
+      el.dispatchEvent(new WheelEvent('wheel', { deltaY: -300, shiftKey: shift, bubbles: true, cancelable: true }))
+    },
+    shiftKey,
+  )
+}
+
+test.describe('graph rotation (U03-W5 / AM-3)', () => {
+  // (a) Shift+Mausrad dreht die Kamera. Rot gegen Ist: der MouseCaptor kennt keine
+  //     Modifier → Shift+Wheel zoomt nur, `angle` bleibt 0.
+  test('Shift+Mausrad rotiert die Kamera (angle ändert sich)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+
+    const before = await camState(page)
+    expect(before.angle).toBe(0) // frische Kamera startet ungedreht
+    await wheelOnCanvas(page, true)
+    await expect.poll(() => camState(page).then((s) => s.angle), { timeout: 5000 }).not.toBe(0)
+  })
+
+  // (b) Normales Mausrad bleibt Zoom: `ratio` ändert sich, `angle` NICHT. Sperrt
+  //     eine Regression, die den Zoom-Pfad für ALLE Wheel-Events übernähme.
+  test('normales Mausrad zoomt (ratio ändert sich, angle bleibt 0)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await enterFocusViaOverview(page)
+
+    const before = await camState(page)
+    await wheelOnCanvas(page, false)
+    // Zoom läuft über camera.animate → auf den Ziel-ratio pollen; angle bleibt 0.
+    await expect.poll(() => camState(page).then((s) => s.ratio), { timeout: 5000 }).not.toBe(before.ratio)
+    expect((await camState(page)).angle).toBe(0)
+  })
+})

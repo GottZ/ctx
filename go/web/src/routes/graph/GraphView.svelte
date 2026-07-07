@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import Sigma from 'sigma'
+  import type { MouseCoords, WheelCoords } from 'sigma/types'
   import type { DirectedGraph } from 'graphology'
   import { edgeVisible, nodeVisible, type GraphFilters } from '../../lib/graph/filters'
   import { remainingDegree, type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
@@ -73,6 +74,30 @@
       event.preventSigmaDefault() // keep the default double-click zoom away
       onnodedoubleclick?.(node)
     })
+    // AM-3 (U03-W5): Shift+Mausrad rotiert die Kamera. sigmas MouseCaptor
+    // verdrahtet das Mausrad AUSSCHLIESSLICH auf Zoom und prüft dabei KEINE
+    // Modifier. Das an den Renderer weitergereichte wheel-Event trägt aber die
+    // originale DOM-WheelEvent (event.original) sowie preventSigmaDefault(), das
+    // der MouseCaptor SYNCHRON nach dem Emit prüft und bei true den Default-Zoom
+    // unterdrückt — der idiomatische Seam, um den Zoom zu übernehmen, statt einen
+    // eigenen DOM-Wheel-Listener gegen sigmas eigenen zu setzen. Bei gehaltenem
+    // Shift drehen wir camera.angle proportional zum (von sigma bereits
+    // normalisierten) Delta und schlucken den Zoom; ohne Shift bleibt alles
+    // unverändert (weiter Zoom). Touch-Zwei-Finger-Rotation ist bereits aktiv
+    // (enableCameraRotation ist per Default true und wird hier nicht
+    // überschrieben) — nicht angefasst. Nur Ego-GraphView: AM-3 meint „den
+    // Graphen"; die OverviewMap-Cluster-Karte bleibt bewusst rotationsfrei.
+    const ROTATE_STEP = 0.25 // rad je Wheel-Notch (sigma-Delta ~2.5 ⇒ ~0.6 rad)
+    // Der Payload ist statisch MouseCoords; zur Laufzeit ist es beim Wheel eine
+    // WheelCoords (trägt `.delta`) — daher der gezielte Cast.
+    const rotateOnShiftWheel = ({ event }: { event: MouseCoords }) => {
+      if (!event.original.shiftKey) return // ohne Shift: sigma zoomt (unverändert)
+      event.preventSigmaDefault() // Default-Zoom unterdrücken
+      const cam = r.getCamera()
+      cam.setState({ angle: cam.getState().angle + (event as WheelCoords).delta * ROTATE_STEP })
+    }
+    r.on('wheelStage', rotateOnShiftWheel)
+    r.on('wheelNode', rotateOnShiftWheel)
     renderer = r
     // Test-hook (design 03-§4/§6): the colors live in the WebGL canvas, not
     // the DOM — the Playwright gate reads them via getSetting/getNodeAttribute.
