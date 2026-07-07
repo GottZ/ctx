@@ -396,6 +396,176 @@ test.describe('graph floating windows — W1 content-guard (U04-W1)', () => {
   })
 })
 
+// U04-W3 — Minimize/Restore ohne Remount (Graph-Host opt-in, design 04-§4.3/§7-W3).
+// Der Graph-Host reicht keepMinimized → WindowManager rendert ALLE Fenster und
+// versteckt minimierte per display:none (keep-mounted) statt sie aus dem keyed
+// each zu werfen. Restore ist damit KEIN Remount: Scroll, DOM-Marker und der
+// geladene Content überleben; kein Refetch. Der Mount-Autofokus bleibt (Open =
+// frischer Mount), ein ADDITIVER Flanken-$effect trägt den Fokus beim Restore
+// (true→false) zurück auf role=dialog. Rot gegen Ist (Voll-Remount, Messwert G):
+// Marker weg, Δ /api/manage-get=1, scrollTop 0, kein Fokus.
+test.describe('graph floating windows — W3 keep-mounted (U04-W3, Graph-Host)', () => {
+  const LONG_CONTENT = Array.from({ length: 80 }, (_, i) => `Zeile ${i + 1}: ctx-Volltext für den W3-Restore-Erhalt-Beweis.`).join('\n')
+
+  async function longGetContent(page: Page): Promise<void> {
+    await page.route('**/api/manage', async (route) => {
+      const body = route.request().postDataJSON() as { action?: string } | null
+      if (body?.action === 'get') {
+        return route.fulfill({
+          status: 200,
+          json: {
+            success: true,
+            block: {
+              id: NODE2,
+              category: 'design',
+              tags: ['demo', 'design'],
+              title: 'Core Architecture',
+              content: LONG_CONTENT,
+              scope: 'home',
+              sensitivity: 'internal',
+              created_at: '2026-06-01T08:00:00Z',
+              updated_at: '2026-06-28T10:00:00Z',
+            },
+          },
+        })
+      }
+      return route.fallback()
+    })
+  }
+
+  test('Restore nach Minimize ohne Remount: Scroll, Content und Fokus überleben', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await longGetContent(page)
+
+    let manageGets = 0
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.url().includes('/api/manage') && (r.postData() ?? '').includes('"action":"get"')) {
+        manageGets += 1
+      }
+    })
+
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+
+    const win = page.getByRole('dialog').first()
+    const body = win.locator('.body')
+    const pre = win.locator('pre.content')
+    await expect(pre).toBeVisible()
+
+    // Positiv-Assert: der Mount-Autofokus trägt den Open-Fokus auf role=dialog
+    // (sichert, dass der Umbau den Open-Fokus NICHT bricht, design 04-§4.3).
+    expect(await page.evaluate(() => document.activeElement?.getAttribute('role') ?? '')).toBe('dialog')
+
+    // scrollTop + DOM-Marker auf genau dieses <pre>. Ein Remount ersetzt das
+    // Element → Marker weg (Rot-Kriterium gegen Ist / gegen keepMinimized=false).
+    await body.evaluate((el) => {
+      el.scrollTop = 150
+    })
+    await pre.evaluate((el) => {
+      ;(el as HTMLElement).dataset.probe = 'W3-KEEP'
+    })
+    expect(await body.evaluate((el) => el.scrollTop)).toBe(150)
+
+    const base = manageGets
+    // Minimize: Fenster verlässt den a11y-Tree (display:none), bleibt aber gemountet.
+    await win.getByRole('button', { name: 'minimize' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.locator('.window.minimized')).toHaveCount(1) // keep-mounted-Beleg
+
+    // Restore über den Minbar-Chip → store.restore. KEIN Remount.
+    await page.locator('.minbar .chip').first().click()
+    await expect(page.getByRole('dialog')).toHaveCount(1)
+    await page.waitForTimeout(250) // ein etwaiger Refetch/Remount hätte hier gelandet
+
+    // Δ /api/manage-get == 0, scrollTop erhalten, DERSELBE <pre> (Marker), Fokus
+    // zurück auf dem restaurierten Fenster (Flanken-$effect).
+    expect(manageGets - base, 'Restore: Δ /api/manage-get').toBe(0)
+    expect(await body.evaluate((el) => el.scrollTop), 'Restore: scrollTop').toBe(150)
+    expect(await pre.evaluate((el) => (el as HTMLElement).dataset.probe ?? ''), 'Restore: DOM-Marker auf <pre>').toBe('W3-KEEP')
+    expect(await page.evaluate(() => document.activeElement?.getAttribute('role') ?? ''), 'Restore: Fokus auf role=dialog').toBe('dialog')
+  })
+
+  test('minimiert: das Fenster verlässt den a11y-Tree und ist nicht per Tab erreichbar (negativ)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await longGetContent(page)
+    await enterFocusStage(page)
+    await openWindow(page, NODE2)
+
+    const win = page.getByRole('dialog').first()
+    await expect(win).toHaveCount(1)
+    await expect(page.getByRole('button', { name: 'close' })).toHaveCount(1)
+
+    await win.getByRole('button', { name: 'minimize' }).click()
+
+    // display:none ⇒ raus aus a11y-Tree und Tab-Order: keine role=dialog, kein
+    // fokussierbarer close-Button — obwohl das DOM (keep-mounted) noch existiert.
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'close' })).toHaveCount(0)
+    await expect(page.locator('.window.minimized')).toHaveCount(1)
+
+    // Restore stellt beides wieder her.
+    await page.locator('.minbar .chip').first().click()
+    await expect(page.getByRole('dialog')).toHaveCount(1)
+    await expect(page.locator('.window.minimized')).toHaveCount(0)
+  })
+})
+
+// U04-W3 SSE-Gate (Board-Host, design 04-§4.3/§6/§7-W3). Der Board-Renderer
+// IssueDetailContent hält je Instanz eine LiveSource (SSE-Bearer-fetch auf
+// /api/project/events + 10s-Poll). Deshalb ist der Board-Host bewusst
+// keepMinimized=false (BoardPage UNANGETASTET): Minimize ZERSTÖRT das Fenster ⇒
+// live.stop() ⇒ AbortController schließt die SSE-Verbindung (sie SINKT). Die
+// naive W3-Fassung (Board ebenfalls keep-mounted per display:none) hielte die
+// Verbindung offen — das ist der Rot-Beleg.
+test.describe('graph floating windows — W3 SSE-Gate (U04-W3, Board-Host)', () => {
+  test('Minimize eines Board-Fensters schließt seine SSE-Verbindung (destroy-basiert)', async ({ page }) => {
+    await seedSession(page, { role: 'member', theme: 'dark', state: 'board' })
+
+    // Jede LiveSource öffnet EINE fetch-SSE-Verbindung auf /api/project/events.
+    // Die Route wird GEHÄNGT (nie fulfillt), damit jede Verbindung als genau EIN
+    // in-flight-Request steht (ein atomarer Body → clean-EOF → Reconnect ~1s →
+    // Rauschen). Der App-AbortController (live.stop()) bricht sie ab →
+    // Playwright feuert 'requestfailed' auf genau dieser Verbindung.
+    await page.route('**/api/project/events**', () => new Promise<void>(() => {}))
+
+    const isEvents = (u: string): boolean => u.includes('/api/project/events')
+    let opens = 0
+    let fails = 0
+    page.on('request', (r) => {
+      if (isEvents(r.url())) opens += 1
+    })
+    page.on('requestfailed', (r) => {
+      if (isEvents(r.url())) fails += 1
+    })
+
+    await gotoArea(page, '/board?scope=acme:main')
+    const firstCard = page.locator('[data-board-card]').first()
+    await expect(firstCard).toBeVisible()
+    // Board-eigene LiveSource verbunden (Verbindung #1).
+    await expect.poll(() => opens, { timeout: 10_000 }).toBeGreaterThanOrEqual(1)
+
+    // Board-Fenster öffnen → IssueDetailContent mountet → eigene LiveSource
+    // verbindet (die Fenster-eigene Verbindung).
+    const opensBeforeOpen = opens
+    await firstCard.click()
+    const win = page.getByRole('dialog').first()
+    await expect(win).toBeVisible()
+    await expect.poll(() => opens, { timeout: 10_000 }).toBe(opensBeforeOpen + 1)
+
+    // Minimize → Board-Host keepMinimized=false ⇒ Fenster ZERSTÖRT ⇒ live.stop()
+    // ⇒ die Fenster-SSE-Verbindung wird abgebrochen (sie SINKT). Kein keep-
+    // mounted display:none-Fenster (destroy-Beleg gegen die naive Fassung).
+    const failsBeforeMin = fails
+    await win.getByRole('button', { name: 'minimize' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    // Die Verbindung des minimierten Fensters SINKT (destroy → live.stop() →
+    // AbortController). Rot gegen die naive Fassung: dort bleibt sie offen.
+    await expect.poll(() => fails, { timeout: 10_000 }).toBe(failsBeforeMin + 1)
+    // Destroy-Korroboration: kein keep-mounted display:none-Fenster.
+    await expect(page.locator('.window.minimized')).toHaveCount(0)
+  })
+})
+
 // G6 — Mobile full-bleed sheet + minimize-bar (design 07-§Wellen G6, §D mobile).
 // Reuses the same open-seam (enterFocusStage → emit clickNode). Below SM=640 the
 // WindowManager renders ONLY store.topId as a `sheet` FloatingWindow (position:

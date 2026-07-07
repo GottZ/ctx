@@ -187,6 +187,7 @@
            labelFor (Titel/Chips) und das BlockDetailContent-Snippet (Body). -->
       <WindowManager
         {store}
+        keepMinimized
         labelFor={(id) => (graph.hasNode(id) ? graph.getNodeAttribute(id, 'label') : id.slice(0, 8))}
       >
         {#snippet content(win, titleId)}

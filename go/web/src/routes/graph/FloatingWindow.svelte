@@ -43,6 +43,20 @@
     el?.focus()
   })
 
+  // Fokus-Rückgabe beim Restore (U04-W3, design 04-§4.3): mit keepMinimized ist
+  // Restore kein Remount → der Mount-Autofokus oben feuert dabei nicht. Dieser
+  // ADDITIVE Effect deckt genau die true→false-Flanke von win.minimized ab: er
+  // feuert NICHT beim Open (wasMinimized=false ∧ minimized=false → keine Flanke)
+  // und NICHT bei fremden Invalidierungen. Auf dem Board-Host (destroy-basiert)
+  // ist Restore ein frischer Mount → wasMinimized=false → inert, keine Doppel-
+  // Fokussierung. wasMinimized ist bewusst plain let (kein $state, kein Self-Track).
+  let wasMinimized = false
+  $effect(() => {
+    const m = win.minimized
+    if (wasMinimized && !m) el?.focus() // nur die true→false-Flanke (Restore)
+    wasMinimized = m
+  })
+
   // Pointer-Drag/Resize ohne Lib. setPointerCapture haelt den Pointer-Stream im
   // Window → Events erreichen den Sigma-Canvas NICHT → kein Kamera-Pan.
   // WebXR: derselbe Pfad nimmt Controller-/Hand-Ray-Deltas direkt als lu.
@@ -104,6 +118,7 @@
 <div
   class="window"
   class:sheet
+  class:minimized={!sheet && win.minimized}
   bind:this={el}
   tabindex="-1"
   role="dialog"
@@ -153,6 +168,13 @@
   }
   .window:focus {
     outline: none;
+  }
+  /* U04-W3 (design 04-§4.3, §5-Nr.6): minimiert = keep-mounted, aber display:none
+     → raus aus Layout, Tab-Order UND a11y-Tree (kein Screenreader-Geisterfenster,
+     korrekte getByRole-Zählung). Restore = kein Remount → Scroll/Content bleiben.
+     Nur der keepMinimized-Host (Graph) rendert überhaupt minimierte Fenster. */
+  .window.minimized {
+    display: none;
   }
   .window.sheet {
     position: fixed;

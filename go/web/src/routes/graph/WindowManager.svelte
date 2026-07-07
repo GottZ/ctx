@@ -17,16 +17,28 @@
   // (b) das `content`-Snippet, das FloatingWindow im Body rendert. Der Graph
   // reicht BlockDetailContent samt graph durch; ein Board reicht später einen
   // IssueDetail-Renderer — dieselbe Fenster-Schicht, kein Graph-Wissen hier.
+  // Keep-Mounted-Opt-in pro Host (U04-W3, design 04-§4.3): mit keepMinimized
+  // behält der Host minimierte Fenster GEMOUNTET (FloatingWindow blendet sie per
+  // display:none aus) statt sie aus dem keyed each zu werfen — Scroll/Content
+  // überleben Minimize/Restore ohne Remount. Graph-Host = true (BlockDetailContent
+  // hat KEINEN Live-Loader im Body). Board-Host = false (IssueDetailContent hält
+  // eine LiveSource — SSE + 10s-Poll je Instanz; ein per display:none gemountet
+  // gehaltenes minimiertes Board-Fenster hielte je eine langlebige SSE-Verbindung.
+  // Destroy folgt dort der Sichtbarkeit, live.stop() schließt die Verbindung).
   let {
     store,
     labelFor,
     content,
+    keepMinimized = false,
   }: {
     store: WindowStore
     /** Chip-/Titel-Label-Auflösung — ersetzt die frühere DirectedGraph-Prop. */
     labelFor: (id: string) => string
     /** Fenster-Inhalt; erhält (win, titleId) für aria-labelledby-Verdrahtung. */
     content: Snippet<[WinState, string]>
+    /** Host-Opt-in: minimierte Fenster gemountet halten (display:none) statt
+     * zerstören. Default false (Ist-destroy). Siehe Host-Doku oben. */
+    keepMinimized?: boolean
   } = $props()
 
   // Reactive surface measurement of THIS overlay root (= containing block).
@@ -64,7 +76,10 @@
       </div>
     {/if}
   {:else}
-    {#each openWins as w (w.id)}
+    <!-- keepMinimized: ALLE Fenster rendern (minimierte werden per display:none
+         versteckt); sonst nur die offenen (Ist-destroy). openWins bleibt für den
+         Board-Pfad in Gebrauch, minimizedWins treibt weiter die Chips. -->
+    {#each (keepMinimized ? store.wins : openWins) as w (w.id)}
       <FloatingWindow win={w} {store} {content} />
     {/each}
     {#if minimizedWins.length > 0}
