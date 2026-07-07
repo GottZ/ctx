@@ -278,3 +278,48 @@ func TestConsecutiveFailBackoff(t *testing.T) {
 		t.Fatalf("doubled cooldown out of range: %s", d)
 	}
 }
+
+// TestBuildDisabledBy_SortedAndActiveOnly ist der konstruktive Beweis gegen die
+// diffKey-Instabilität (§4.1): buildDisabledBy sortiert die gejointen
+// Profil-Namen explizit und berücksichtigt NUR aktive Profile. Zwei Membership-
+// Reihenfolgen, die dasselbe Set beschreiben, ergeben byte-identische Map-Werte
+// — es gibt keinen Pfad, der eine Go-Map-Iterationsordnung nach außen trägt.
+func TestBuildDisabledBy_SortedAndActiveOnly(t *testing.T) {
+	profiles := []Profile{
+		{ID: "pa", Name: "alpha", Active: true},
+		{ID: "pz", Name: "zeta", Active: true},
+		{ID: "pm", Name: "mid", Active: false}, // inaktiv → darf nie erscheinen
+	}
+	// Memberships absichtlich in "falscher" Reihenfolge: zeta vor alpha, plus
+	// das inaktive mid — das aktive Set für backend "b1" ist {alpha,zeta}.
+	memberships := []profileMembership{
+		{profileID: "pz", backendID: "b1"},
+		{profileID: "pm", backendID: "b1"},
+		{profileID: "pa", backendID: "b1"},
+		{profileID: "pa", backendID: "b2"},
+	}
+	got := buildDisabledBy(profiles, memberships)
+
+	if got["b1"] != "alpha,zeta" {
+		t.Fatalf("b1 disabledBy = %q, want %q (sortiert, aktiv-only)", got["b1"], "alpha,zeta")
+	}
+	if got["b2"] != "alpha" {
+		t.Fatalf("b2 disabledBy = %q, want %q", got["b2"], "alpha")
+	}
+	// Ein Backend ohne aktive Profil-Zugehörigkeit ist ABWESEND (Go-Zero "").
+	if _, ok := got["b3"]; ok {
+		t.Fatalf("b3 darf nicht in disabledBy stehen (kein aktives Profil): %v", got)
+	}
+
+	// Stabilitätsprobe: eine permutierte Membership-Liste liefert byte-identisch.
+	perm := []profileMembership{
+		{profileID: "pa", backendID: "b2"},
+		{profileID: "pa", backendID: "b1"},
+		{profileID: "pz", backendID: "b1"},
+		{profileID: "pm", backendID: "b1"},
+	}
+	got2 := buildDisabledBy(profiles, perm)
+	if got["b1"] != got2["b1"] || got["b2"] != got2["b2"] {
+		t.Fatalf("buildDisabledBy nicht ordnungsstabil: %v vs %v", got, got2)
+	}
+}

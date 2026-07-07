@@ -29,8 +29,8 @@ type SecretResolver func(ctx context.Context, name string) (string, error)
 // settings keys gaming.active / gaming.disabled_backends; until then callers
 // pass the zero value = inactive).
 type GamingState struct {
-	Active            bool
-	DisabledBackends  []string
+	Active           bool
+	DisabledBackends []string
 }
 
 func (g GamingState) disables(name string) bool {
@@ -73,10 +73,33 @@ type healthState struct {
 	lastOK           time.Time
 }
 
+// Profile is one row of context_disable_profiles (092, Web-UX U01-W1): a named,
+// scope-filtered set of backends that a disable-toggle takes out of every chain.
+// W1 only LOADS profiles into the snapshot — the chain-time exclusion arm is
+// W2. The slice in the snapshot is ORDER BY name (load-fixed, never Go-map
+// order) so the status-payload diffKey stays byte-stable tick over tick.
+type Profile struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	Active      bool   `json:"active"`
+	Reserved    bool   `json:"reserved"`
+	Scope       string `json:"scope"`
+}
+
 type snapshot struct {
 	backends []Backend
-	version  int64
-	loadedAt time.Time
+	// profiles is ORDER BY name (loadProfilesSQL) — deterministic, so any
+	// consumer that marshals it (status frame) produces a stable diffKey.
+	profiles []Profile
+	// disabledBy maps backend_id → the comma-joined, SORTED names of the ACTIVE
+	// profiles that contain it (precomputed at reload). W2's chain arm pays a
+	// single map lookup; W1 only builds it. Empty string / absent = no active
+	// profile disables the backend.
+	disabledBy map[string]string
+	version    int64
+	loadedAt   time.Time
 }
 
 // Pool is the declarative backend pool: an immutable snapshot of
@@ -107,6 +130,24 @@ SELECT id, name, base_url, protocol, provider_class, api_key_ref, trust,
        extra_headers, extra_body, limits, metadata, scope
   FROM context_backends
  ORDER BY scope, name`
+
+// loadProfilesSQL loads the disable-profile registry (092). ORDER BY name is
+// load-fixed on purpose (analog loadBackendsSQL ORDER BY scope,name): the
+// profiles slice feeds the status payload, whose diffKey marshals the whole
+// event every tick — an unstable order would re-broadcast without a state
+// change (§4.1/§4.5.5 fan-out storm).
+const loadProfilesSQL = `
+SELECT id, name, label, description, active, reserved, scope
+  FROM context_disable_profiles
+ ORDER BY name`
+
+// loadProfileMembershipsSQL loads the profile↔backend join (092). ORDER BY
+// profile_id, backend_id is load-fixed; disabledBy sorts the joined names by
+// name independently, so the map value is stable regardless of row order.
+const loadProfileMembershipsSQL = `
+SELECT profile_id, backend_id
+  FROM context_disable_profile_backends
+ ORDER BY profile_id, backend_id`
 
 // Reload loads context_backends, resolves api_key_refs in-memory and swaps
 // the snapshot atomically. Triggers: boot, NOTIFY (entity=context_backends),
@@ -146,24 +187,126 @@ func (p *Pool) Reload(ctx context.Context) error {
 		return fmt.Errorf("backends: load: %w", err)
 	}
 
+	// Disable profiles + memberships (092, U01-W1) go into the SAME atomic swap
+	// as the backends — chain-time consumers (W2) always see backends and
+	// profile state consistent to each other. A failed load keeps the previous
+	// snapshot (settings.Reload doctrine), same as a failed backend load.
+	profiles, memberships, err := p.loadProfiles(ctx)
+	if err != nil {
+		return err
+	}
+
 	v := p.version.Add(1)
-	p.snap.Store(&snapshot{backends: loaded, version: v, loadedAt: time.Now()})
-	slog.Info("backends: snapshot reloaded", "version", v, "backends", len(loaded))
+	p.snap.Store(&snapshot{
+		backends:   loaded,
+		profiles:   profiles,
+		disabledBy: buildDisabledBy(profiles, memberships),
+		version:    v,
+		loadedAt:   time.Now(),
+	})
+	slog.Info("backends: snapshot reloaded", "version", v,
+		"backends", len(loaded), "profiles", len(profiles))
 	return nil
+}
+
+// profileMembership is one context_disable_profile_backends row (092).
+type profileMembership struct {
+	profileID string
+	backendID string
+}
+
+// loadProfiles reads the disable-profile registry and its memberships (092).
+// Both queries carry a load-fixed ORDER BY (see the SQL consts). Errors bubble
+// up so Reload keeps the previous snapshot rather than publishing a partial one.
+func (p *Pool) loadProfiles(ctx context.Context) ([]Profile, []profileMembership, error) {
+	prows, err := p.q.Query(ctx, loadProfilesSQL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("backends: load profiles: %w", err)
+	}
+	defer prows.Close()
+	var profiles []Profile
+	for prows.Next() {
+		var pr Profile
+		if err := prows.Scan(&pr.ID, &pr.Name, &pr.Label, &pr.Description,
+			&pr.Active, &pr.Reserved, &pr.Scope); err != nil {
+			return nil, nil, fmt.Errorf("backends: scan profile: %w", err)
+		}
+		profiles = append(profiles, pr)
+	}
+	if err := prows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("backends: load profiles: %w", err)
+	}
+
+	mrows, err := p.q.Query(ctx, loadProfileMembershipsSQL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("backends: load memberships: %w", err)
+	}
+	defer mrows.Close()
+	var memberships []profileMembership
+	for mrows.Next() {
+		var m profileMembership
+		if err := mrows.Scan(&m.profileID, &m.backendID); err != nil {
+			return nil, nil, fmt.Errorf("backends: scan membership: %w", err)
+		}
+		memberships = append(memberships, m)
+	}
+	if err := mrows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("backends: load memberships: %w", err)
+	}
+	return profiles, memberships, nil
+}
+
+// buildDisabledBy precomputes backend_id → comma-joined SORTED names of the
+// ACTIVE profiles containing it. Names are sorted explicitly (not left to the
+// membership row order) so the value is byte-stable — the constructive proof
+// against a diffKey-instability fan-out storm (§4.1). Backends not disabled by
+// any active profile are absent from the map (Go zero value "" on lookup).
+func buildDisabledBy(profiles []Profile, memberships []profileMembership) map[string]string {
+	activeName := make(map[string]string, len(profiles))
+	for _, pr := range profiles {
+		if pr.Active {
+			activeName[pr.ID] = pr.Name
+		}
+	}
+	names := make(map[string][]string)
+	for _, m := range memberships {
+		if n, ok := activeName[m.profileID]; ok {
+			names[m.backendID] = append(names[m.backendID], n)
+		}
+	}
+	out := make(map[string]string, len(names))
+	for bid, ns := range names {
+		sort.Strings(ns)
+		out[bid] = strings.Join(ns, ",")
+	}
+	return out
+}
+
+// Profiles returns the current disable-profile registry snapshot (092), ORDER
+// BY name. Readers dereference once per operation, like Snapshot.
+func (p *Pool) Profiles() []Profile {
+	return p.snap.Load().profiles
+}
+
+// DisabledBy returns the precomputed backend_id → active-profile-names map from
+// the current snapshot (092). W2's chain arm reads it; W1 exposes it for the
+// snapshot probe. The returned map is snapshot-owned — treat it as read-only.
+func (p *Pool) DisabledBy() map[string]string {
+	return p.snap.Load().disabledBy
 }
 
 // scanBackend maps one context_backends row onto the Backend type,
 // normalizing model_map short forms ("model-id" → ModelSpec{Model:…}).
 func scanBackend(rows pgx.Rows) (Backend, error) {
 	var (
-		b                                   Backend
-		apiKeyRef                           *string
-		numCtx                              *int
-		modelMap, timeouts                  []byte
-		extraHeaders, extraBody             []byte
-		limits, metadata                    []byte
-		trust, locality                     string
-		protocol                            string
+		b                       Backend
+		apiKeyRef               *string
+		numCtx                  *int
+		modelMap, timeouts      []byte
+		extraHeaders, extraBody []byte
+		limits, metadata        []byte
+		trust, locality         string
+		protocol                string
 	)
 	if err := rows.Scan(&b.ID, &b.Name, &b.Host, &protocol, &b.ProviderClass,
 		&apiKeyRef, &trust, &locality, &b.Roles, &modelMap, &timeouts, &numCtx,

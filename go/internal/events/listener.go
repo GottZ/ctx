@@ -17,8 +17,8 @@ import (
 	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgxlisten"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgxlisten"
 )
 
 const (
@@ -121,6 +121,20 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 		// unchanged previous snapshot — idempotent, never a policy from a
 		// failed read.
 		h.refreshDispatchPolicy()
+		return nil
+	}
+	// Disable-profile entity branch (Web-UX U01-W1, design/01 §4.1/N9): the 092
+	// notify triggers ride the same channel. Profiles/memberships live in the
+	// backend-pool snapshot, so a write here reloads the pool — but does NOT
+	// touch refreshDispatchPolicy: profiles change no `limits`, the admission
+	// policy derivation would be identical.
+	if p.Entity == "context_disable_profiles" || p.Entity == "context_disable_profile_backends" {
+		if h.backendPool == nil {
+			return nil
+		}
+		if err := h.backendPool.Reload(ctx); err != nil {
+			slog.Warn("listener: backend pool reload failed — previous snapshot stays active", "error", err)
+		}
 		return nil
 	}
 	// Block-type registry entity branch (WF T3, design 01 §4.3): the 072
