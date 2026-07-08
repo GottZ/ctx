@@ -91,6 +91,16 @@ Using a shared memory *well* takes discipline against drift — see [using ctx e
 
 ctx is built by AI agents working against a published RLHF-warnings calibration — a 22-axis map of LLM failure modes (memory drift, unattributed certainty, median-user caution) with concrete exemplars. It is the methodology reference behind this project's way of working: **[gottz.de/warnings.md](https://gottz.de/warnings.md)**. Background in [using ctx effectively](docs/using-ctx-effectively.md).
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=GottZ%2Fctx&type=timeline&logscale=&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=GottZ/ctx&type=timeline&theme=dark&logscale&legend=top-left&sealed_token=Yy6khpQuejujUPJlxutS6W7OyHG3LK2CpjPXjsF0sQ3SsC1jGc5FX2A47LX6AZ-q_Q55svVbCFEOHkRydCi0qBcF3Qq3xpc-bKPf7GLoabu0VfXiTlHBsw" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=GottZ/ctx&type=timeline&logscale&legend=top-left&sealed_token=Yy6khpQuejujUPJlxutS6W7OyHG3LK2CpjPXjsF0sQ3SsC1jGc5FX2A47LX6AZ-q_Q55svVbCFEOHkRydCi0qBcF3Qq3xpc-bKPf7GLoabu0VfXiTlHBsw" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=GottZ/ctx&type=timeline&logscale&legend=top-left&sealed_token=Yy6khpQuejujUPJlxutS6W7OyHG3LK2CpjPXjsF0sQ3SsC1jGc5FX2A47LX6AZ-q_Q55svVbCFEOHkRydCi0qBcF3Qq3xpc-bKPf7GLoabu0VfXiTlHBsw" />
+ </picture>
+</a>
+
 ## License
 
 [MPL-2.0](LICENSE) — By [GottZ](https://github.com/GottZ)
