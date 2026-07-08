@@ -378,6 +378,18 @@ jobs:
       - name: LHCI (3 runs, median, warn-only)
         run: bash go/web/e2e-container.sh bun run perf:lhci
 
+      # e2e-container.sh writes .lhci/ as root (the pinned container runs as
+      # root, repo bind-mounted at /work). The host-side trend step below runs
+      # as the runner user and cannot mkdir into a root-owned dir — reclaim
+      # ownership first. Non-fatal: a missing .lhci/ means perf:lhci already
+      # failed and owns the red; this step must never introduce a new one.
+      - name: Reclaim LHCI output ownership (container writes .lhci/ as root)
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -d go/web/e2e/perf/.lhci ]; then
+            sudo chown -R "$(id -u):$(id -g)" go/web/e2e/perf/.lhci
+          fi
+
       # Trend line (wave C-W4): ONE JSON line from the representative (median)
       # run — the 90-day artifact set reconstructs the timing trend. Noise
       # floor ±20-40% (annotation only, never a gate — C1-M2/M3).
@@ -393,6 +405,8 @@ jobs:
           path: go/web/e2e/perf/.lhci/trend/
           retention-days: 90
           if-no-files-found: ignore
+          # .lhci is a dot-dir — upload-artifact excludes hidden paths by default.
+          include-hidden-files: true
 
       # if-no-files-found: error — an LHCI run that produced no lhr JSON is a
       # broken measurement and must be visibly red, never silently green.
@@ -404,6 +418,8 @@ jobs:
           path: go/web/e2e/perf/.lhci/
           retention-days: 14
           if-no-files-found: error
+          # .lhci is a dot-dir — upload-artifact excludes hidden paths by default.
+          include-hidden-files: true
 
   # ─── Stage 2: Unit Tests ──────────────────────────────────────────────────────
   unit-tests:
