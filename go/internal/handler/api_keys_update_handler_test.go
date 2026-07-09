@@ -55,8 +55,11 @@ func be6SeedKey(t *testing.T, pool *pgxpool.Pool, tenantID, homeScope, role stri
 	t.Helper()
 	var id string
 	if err := pool.QueryRow(context.Background(),
-		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active, tenant_id, tenant_role)
-		 VALUES ($1, gen_random_uuid()::text, $2, '{}', $3, $4::uuid, $5)
+		`WITH p AS (
+		     INSERT INTO context_principals (display_name) VALUES ($1) RETURNING id
+		 )
+		 INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active, tenant_id, tenant_role, principal_id)
+		 SELECT $1, gen_random_uuid()::text, $2, '{}', $3, $4::uuid, $5, p.id FROM p
 		 RETURNING id::text`,
 		role+"-key", homeScope, active, tenantID, role).Scan(&id); err != nil {
 		t.Fatalf("seed %s key (active=%v) for tenant %s: %v", role, active, tenantID, err)

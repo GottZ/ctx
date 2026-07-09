@@ -35,8 +35,11 @@ func seedTenantKey(t *testing.T, pool *pgxpool.Pool, keyHash, homeScope, tenantI
 	t.Helper()
 	var id string
 	if err := pool.QueryRow(context.Background(),
-		`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
-		 VALUES ($1, $2, $3, $4::uuid) RETURNING id::text`,
+		`WITH p AS (
+		     INSERT INTO context_principals (display_name) VALUES ($2) RETURNING id
+		 )
+		 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id)
+		 SELECT $1, $2, $3, $4::uuid, p.id FROM p RETURNING id::text`,
 		keyHash, keyHash, homeScope, tenantID).Scan(&id); err != nil {
 		t.Fatalf("seed tenant key %s: %v", keyHash, err)
 	}

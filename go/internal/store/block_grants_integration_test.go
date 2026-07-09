@@ -310,8 +310,11 @@ func TestBlockGrants_Constraints(t *testing.T) {
 		}
 		var keyID string
 		if err := tx.QueryRow(ctx,
-			`INSERT INTO context_api_keys (key_hash, label, home_scope)
-			 VALUES ('t39-granter-key','t39-granter','private') RETURNING id::text`).Scan(&keyID); err != nil {
+			`WITH p AS (
+			     INSERT INTO context_principals (display_name) VALUES ('test-fixture') RETURNING id
+			 )
+			 INSERT INTO context_api_keys (key_hash, label, home_scope, principal_id)
+			 SELECT 't39-granter-key','t39-granter','private', p.id FROM p RETURNING id::text`).Scan(&keyID); err != nil {
 			t.Fatalf("insert granter key: code=%q err=%v", pgCode(err), err)
 		}
 		var grantID string

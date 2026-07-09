@@ -47,11 +47,23 @@ func BootstrapAdminKey(ctx context.Context, pool *pgxpool.Pool, plaintext, label
 	// non-empty table yields zero rows (RETURNING → pgx.ErrNoRows) and NO write.
 	// Columns: server-admin (is_admin=true), default tenant as owner, private
 	// home scope + shared read (the default-tenant convention, api_keys.go).
+	// principal_id (094/F4): the bootstrap key mints its own fresh principal in
+	// the SAME statement. The guard CTE gates BOTH inserts — a populated table
+	// yields zero principal rows and zero key rows (no orphan principal), and
+	// the empty-table check keeps the exact single-statement TOCTOU semantics
+	// of the previous shape (all CTE legs share one snapshot).
 	err = pool.QueryRow(ctx,
-		`INSERT INTO context_api_keys
-		     (label, key_hash, home_scope, allowed_scopes, active, tenant_id, tenant_role, is_admin)
-		 SELECT $1, $2, 'private', '{shared}'::text[], true, $3::uuid, 'owner', true
-		  WHERE NOT EXISTS (SELECT 1 FROM context_api_keys)
+		`WITH guard AS (
+		     SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM context_api_keys)
+		 ), p AS (
+		     INSERT INTO context_principals (display_name)
+		     SELECT $1 FROM guard
+		     RETURNING id
+		 )
+		 INSERT INTO context_api_keys
+		     (label, key_hash, home_scope, allowed_scopes, active, tenant_id, tenant_role, is_admin, principal_id)
+		 SELECT $1, $2, 'private', '{shared}'::text[], true, $3::uuid, 'owner', true, p.id
+		   FROM p
 		 RETURNING id`,
 		label, keyHash, DefaultTenantID,
 	).Scan(&keyID)

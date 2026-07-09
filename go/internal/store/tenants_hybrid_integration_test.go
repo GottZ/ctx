@@ -74,8 +74,11 @@ func seedAPIKey(t *testing.T, pool *pgxpool.Pool, keyHash string) string {
 
 	var id string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO context_api_keys (key_hash, label, home_scope)
-		 VALUES ($1, 't02-key-label', 'private')
+		`WITH p AS (
+		     INSERT INTO context_principals (display_name) VALUES ('test-fixture') RETURNING id
+		 )
+		 INSERT INTO context_api_keys (key_hash, label, home_scope, principal_id)
+		 SELECT $1, 't02-key-label', 'private', p.id FROM p
 		 RETURNING id`, keyHash).Scan(&id); err != nil {
 		t.Fatalf("seed api_key key_hash=%q: %v", keyHash, err)
 	}
@@ -213,8 +216,11 @@ func TestTenantsHybrid_Integration(t *testing.T) {
 	t.Run("tenant_role_check_rejects_out_of_domain", func(t *testing.T) {
 		// INSERT a brand-new key with an illegal role → 23514 check_violation.
 		_, err := pool.Exec(ctx,
-			`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_role)
-			 VALUES ('t02-bad-role-key', 't02-bad', 'private', 'superuser')`)
+			`WITH p AS (
+			     INSERT INTO context_principals (display_name) VALUES ('test-fixture') RETURNING id
+			 )
+			 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_role, principal_id)
+			 SELECT 't02-bad-role-key', 't02-bad', 'private', 'superuser', p.id FROM p`)
 		if err == nil {
 			t.Fatal("INSERT tenant_role='superuser' succeeded, want 23514 check_violation")
 		}
@@ -237,8 +243,11 @@ func TestTenantsHybrid_Integration(t *testing.T) {
 		// Sanity: each legal role is accepted (the CHECK is not over-broad).
 		for _, ok := range []string{"owner", "admin", "member"} {
 			if _, err := pool.Exec(ctx,
-				`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_role)
-				 VALUES ('t02-ok-role-'||$1, 't02-ok', 'private', $1)`, ok); err != nil {
+				`WITH p AS (
+				     INSERT INTO context_principals (display_name) VALUES ('test-fixture') RETURNING id
+				 )
+				 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_role, principal_id)
+				 SELECT 't02-ok-role-'||$1, 't02-ok', 'private', $1, p.id FROM p`, ok); err != nil {
 				t.Fatalf("INSERT legal tenant_role=%q rejected: code=%q err=%v", ok, pgCode(err), err)
 			}
 		}
@@ -260,8 +269,11 @@ func TestTenantsHybrid_Integration(t *testing.T) {
 		// Bestands-keys — 059's backfill only touches pre-existing rows; the
 		// column DEFAULT would also set it, but be explicit).
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
-			 VALUES ('t02-restrict-probe', 't02-restrict', 'private', $1::uuid)`, defaultTenantID); err != nil {
+			`WITH p AS (
+			     INSERT INTO context_principals (display_name) VALUES ('test-fixture') RETURNING id
+			 )
+			 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id)
+			 SELECT 't02-restrict-probe', 't02-restrict', 'private', $1::uuid, p.id FROM p`, defaultTenantID); err != nil {
 			t.Fatalf("seed key pointing at default tenant: code=%q err=%v", pgCode(err), err)
 		}
 

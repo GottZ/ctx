@@ -53,7 +53,9 @@ func TestStatusPerTenantView(t *testing.T) {
 		if _, err := pool.Exec(ctx, `INSERT INTO context_tenant_scopes (scope, tenant_id) VALUES ($1,$2::uuid)`, slug, tid); err != nil {
 			t.Fatalf("scope %s: %v", slug, err)
 		}
-		if err := pool.QueryRow(ctx, `INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id) VALUES ($1,$2,$3,$4::uuid) RETURNING id::text`, "sk-"+slug, "sk-"+slug, slug, tid).Scan(&kid); err != nil {
+		if err := pool.QueryRow(ctx, `WITH p AS (
+			INSERT INTO context_principals (display_name) VALUES ($2) RETURNING id
+		) INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id) SELECT $1,$2,$3,$4::uuid, p.id FROM p RETURNING id::text`, "sk-"+slug, "sk-"+slug, slug, tid).Scan(&kid); err != nil {
 			t.Fatalf("key %s: %v", slug, err)
 		}
 		return kid

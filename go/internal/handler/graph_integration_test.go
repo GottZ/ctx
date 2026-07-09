@@ -57,8 +57,11 @@ func hgSetup(t *testing.T) *pgxpool.Pool {
 		{hgKeyB, "work"},
 	} {
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO context_api_keys (id, key_hash, label, home_scope, allowed_scopes)
-			 VALUES ($1::uuid, 'graph-test-hash-'||$2, $2, $2, '{shared}')`,
+			`WITH p AS (
+			     INSERT INTO context_principals (display_name) VALUES ($2) RETURNING id
+			 )
+			 INSERT INTO context_api_keys (id, key_hash, label, home_scope, allowed_scopes, principal_id)
+			 SELECT $1::uuid, 'graph-test-hash-'||$2, $2, $2, '{shared}', p.id FROM p`,
 			k.id, k.home,
 		); err != nil {
 			t.Fatalf("insert api key %s: %v", k.id, err)

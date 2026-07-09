@@ -44,8 +44,11 @@ func TestSynthesize_QuotaBlocksOverBudget(t *testing.T) {
 		t.Fatalf("scope map: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
-		 VALUES ($1,$2,$3,$4::uuid) RETURNING id::text`, "t36-synth-k", "t36-synth-k", scope, tenantID).Scan(&keyID); err != nil {
+		`WITH p AS (
+		     INSERT INTO context_principals (display_name) VALUES ($2) RETURNING id
+		 )
+		 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id)
+		 SELECT $1,$2,$3,$4::uuid, p.id FROM p RETURNING id::text`, "t36-synth-k", "t36-synth-k", scope, tenantID).Scan(&keyID); err != nil {
 		t.Fatalf("key: %v", err)
 	}
 	if _, err := pool.Exec(ctx,

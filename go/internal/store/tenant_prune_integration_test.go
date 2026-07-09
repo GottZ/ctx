@@ -85,8 +85,11 @@ func TestTenantPrune_Integration(t *testing.T) {
 			t.Fatalf("create tenant: %v", err)
 		}
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
-			 VALUES ('tp-fk1-key', 'k', 'private', $1::uuid)`, tn.ID); err != nil {
+			`WITH p AS (
+			     INSERT INTO context_principals (display_name) VALUES ('test-fixture') RETURNING id
+			 )
+			 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id)
+			 SELECT 'tp-fk1-key', 'k', 'private', $1::uuid, p.id FROM p`, tn.ID); err != nil {
 			t.Fatalf("seed key: %v", err)
 		}
 		_, err = pool.Exec(ctx, `DELETE FROM context_tenants WHERE id = $1::uuid`, tn.ID)
@@ -152,8 +155,11 @@ func TestTenantPrune_Integration(t *testing.T) {
 			t.Fatalf("seed chat session: %v", err)
 		}
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
-			 VALUES ('tp-victim-key', 'k', $1, $2::uuid)`, vs, victim.ID); err != nil {
+			`WITH p AS (
+			     INSERT INTO context_principals (display_name) VALUES ('test-fixture') RETURNING id
+			 )
+			 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id)
+			 SELECT 'tp-victim-key', 'k', $1, $2::uuid, p.id FROM p`, vs, victim.ID); err != nil {
 			t.Fatalf("seed key: %v", err)
 		}
 		// Bystander: a block in the default tenant's 'private' scope MUST survive.

@@ -158,10 +158,19 @@ func insertApiKeyTx(ctx context.Context, q rowQuerier, label, homeScope string, 
 	// write_scopes (078): a nil arg persists '{}' (COALESCE) — the pausability
 	// default. A non-nil set was already validated ⊆ allowed_scopes ∪ {home_scope}
 	// by validateWriteScopes above (defense-in-depth, last line before the row).
+	// principal_id (094/F4): every mint creates a FRESH principal named after
+	// the key label — the same 1-key-1-principal semantics as the 094 backfill.
+	// One atomic statement (data-modifying CTE): a failed key INSERT rolls the
+	// principal back with it, no rights-less orphan row. Linking a new key to
+	// an EXISTING principal (second key of a person) is a later, explicit flow
+	// (Achse 05 key selector / 04 SSO onboarding) — never an implicit default.
 	var row ApiKey
 	err := q.QueryRow(ctx,
-		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, write_scopes, active, tenant_id, tenant_role)
-		 VALUES ($1, $2, $3, COALESCE($4::text[], '{shared}'::text[]), COALESCE($5::text[], '{}'::text[]), true, $6::uuid, $7)
+		`WITH p AS (
+		     INSERT INTO context_principals (display_name) VALUES ($1) RETURNING id
+		 )
+		 INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, write_scopes, active, tenant_id, tenant_role, principal_id)
+		 SELECT $1, $2, $3, COALESCE($4::text[], '{shared}'::text[]), COALESCE($5::text[], '{}'::text[]), true, $6::uuid, $7, p.id FROM p
 		 RETURNING id, label, home_scope, allowed_scopes, write_scopes, tenant_role, active, last_used_at, created_at`,
 		label, keyHash, homeScope, allowedScopes, writeScopes, tenantID, role,
 	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.WriteScopes, &row.TenantRole, &row.Active, &row.LastUsedAt, &row.CreatedAt)

@@ -45,8 +45,11 @@ import (
 func tlSeedKey(t *testing.T, pool *pgxpool.Pool, tenantID, scope string, active bool) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active, tenant_id, tenant_role)
-		 VALUES ($1, gen_random_uuid()::text, $2, '{}'::text[], $3, $4::uuid, 'member')`,
+		`WITH p AS (
+		     INSERT INTO context_principals (display_name) VALUES ($1) RETURNING id
+		 )
+		 INSERT INTO context_api_keys (label, key_hash, home_scope, allowed_scopes, active, tenant_id, tenant_role, principal_id)
+		 SELECT $1, gen_random_uuid()::text, $2, '{}'::text[], $3, $4::uuid, 'member', p.id FROM p`,
 		"tl-"+scope, scope, active, tenantID); err != nil {
 		t.Fatalf("seed key for %s: %v", tenantID, err)
 	}

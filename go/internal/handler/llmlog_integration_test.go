@@ -169,8 +169,11 @@ func TestLLMLogTenantScoped(t *testing.T) {
 	insertKey := func(hash, tenantID string) string {
 		var id string
 		if err := pool.QueryRow(ctx,
-			`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
-			 VALUES ($1,$2,'private',$3::uuid) RETURNING id::text`, hash, hash, tenantID).Scan(&id); err != nil {
+			`WITH p AS (
+			     INSERT INTO context_principals (display_name) VALUES ($2) RETURNING id
+			 )
+			 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id)
+			 SELECT $1,$2,'private',$3::uuid, p.id FROM p RETURNING id::text`, hash, hash, tenantID).Scan(&id); err != nil {
 			t.Fatalf("insert key %s: %v", hash, err)
 		}
 		return id
@@ -311,8 +314,11 @@ func TestLLMLogDetailTenantGate(t *testing.T) {
 	insertKey := func(hash, tenantID string) string {
 		var id string
 		if err := pool.QueryRow(ctx,
-			`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
-			 VALUES ($1,$2,'private',$3::uuid) RETURNING id::text`, hash, hash, tenantID).Scan(&id); err != nil {
+			`WITH p AS (
+			     INSERT INTO context_principals (display_name) VALUES ($2) RETURNING id
+			 )
+			 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id)
+			 SELECT $1,$2,'private',$3::uuid, p.id FROM p RETURNING id::text`, hash, hash, tenantID).Scan(&id); err != nil {
 			t.Fatalf("insert key %s: %v", hash, err)
 		}
 		return id

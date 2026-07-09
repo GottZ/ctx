@@ -357,8 +357,11 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 		sum := sha256.Sum256([]byte(plaintext))
 		keyHash := hex.EncodeToString(sum[:])
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO context_api_keys (key_hash, label, home_scope, allowed_scopes, tenant_id)
-			 VALUES ($1, 't03-underscore', 'private', '{_global}', $2::uuid)`, keyHash, defaultTenantID); err != nil {
+			`WITH p AS (
+			     INSERT INTO context_principals (display_name) VALUES ('test-fixture') RETURNING id
+			 )
+			 INSERT INTO context_api_keys (key_hash, label, home_scope, allowed_scopes, tenant_id, principal_id)
+			 SELECT $1, 't03-underscore', 'private', '{_global}', $2::uuid, p.id FROM p`, keyHash, defaultTenantID); err != nil {
 			t.Fatalf("direct-insert underscore key: %v", err)
 		}
 		var (

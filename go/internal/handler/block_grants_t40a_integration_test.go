@@ -81,7 +81,11 @@ func bgKey(t *testing.T, pool *pgxpool.Pool, keyHash, homeScope string) string {
 	t.Helper()
 	var id string
 	if err := pool.QueryRow(context.Background(),
-		`INSERT INTO context_api_keys (key_hash, label, home_scope) VALUES ($1,$2,$3) RETURNING id::text`,
+		`WITH p AS (
+		     INSERT INTO context_principals (display_name) VALUES ($2) RETURNING id
+		 )
+		 INSERT INTO context_api_keys (key_hash, label, home_scope, principal_id)
+		 SELECT $1,$2,$3, p.id FROM p RETURNING id::text`,
 		keyHash, keyHash, homeScope).Scan(&id); err != nil {
 		t.Fatalf("seed api_key %s: %v", keyHash, err)
 	}

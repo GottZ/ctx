@@ -41,8 +41,11 @@ func seedQuotaTenant(t *testing.T, pool *pgxpool.Pool, slug, scope string) (stri
 	}
 	var keyID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id)
-		 VALUES ($1,$2,$3,$4::uuid) RETURNING id::text`, "qk-"+scope, "qk-"+scope, scope, tenantID).Scan(&keyID); err != nil {
+		`WITH p AS (
+		     INSERT INTO context_principals (display_name) VALUES ($2) RETURNING id
+		 )
+		 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id)
+		 SELECT $1,$2,$3,$4::uuid, p.id FROM p RETURNING id::text`, "qk-"+scope, "qk-"+scope, scope, tenantID).Scan(&keyID); err != nil {
 		t.Fatalf("insert key for %s: %v", scope, err)
 	}
 	return scope, keyID
