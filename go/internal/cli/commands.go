@@ -887,11 +887,13 @@ func mcpCmd(getClient func() (*Client, error)) *cobra.Command {
 }
 
 func mcpAddCmd(getClient func() (*Client, error)) *cobra.Command {
-	return &cobra.Command{
+	var redirectURIs []string
+	cmd := &cobra.Command{
 		Use:   "add <label>",
 		Short: "Register a new MCP OAuth client",
 		Example: `  ctx mcp add "Claude AI"
-  ctx mcp add "Claude Code Desktop"`,
+  ctx mcp add "Claude Code Desktop"
+  ctx mcp add "My Client" --redirect-uri https://example.com/cb --redirect-uri http://127.0.0.1:7777/cb`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			label := strings.Join(args, " ")
@@ -899,19 +901,24 @@ func mcpAddCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			data := map[string]any{"label": label}
+			if len(redirectURIs) > 0 {
+				data["redirect_uris"] = redirectURIs
+			}
 			resp, err := c.Post("manage", map[string]any{
 				"action": "mcp-client-create",
-				"data":   map[string]any{"label": label},
+				"data":   data,
 			})
 			if err != nil {
 				return err
 			}
 			var result struct {
-				Success      bool   `json:"success"`
-				ClientID     string `json:"client_id"`
-				ClientSecret string `json:"client_secret"`
-				Label        string `json:"label"`
-				Error        string `json:"error"`
+				Success      bool     `json:"success"`
+				ClientID     string   `json:"client_id"`
+				ClientSecret string   `json:"client_secret"`
+				Label        string   `json:"label"`
+				RedirectURIs []string `json:"redirect_uris"`
+				Error        string   `json:"error"`
 			}
 			if err := json.Unmarshal(resp, &result); err != nil {
 				PrintJSON(resp)
@@ -924,10 +931,16 @@ func mcpAddCmd(getClient func() (*Client, error)) *cobra.Command {
 			fmt.Printf("MCP Client registered: %s\n\n", result.Label)
 			fmt.Printf("  client_id:     %s\n", result.ClientID)
 			fmt.Printf("  client_secret: %s\n", result.ClientSecret)
+			if len(result.RedirectURIs) > 0 {
+				fmt.Printf("  redirect_uris: %s\n", strings.Join(result.RedirectURIs, ", "))
+			}
 			fmt.Printf("\n  Save the secret now — it cannot be retrieved later.\n")
 			return nil
 		},
 	}
+	cmd.Flags().StringArrayVar(&redirectURIs, "redirect-uri", nil,
+		"exact redirect URI to allowlist (repeatable; https, or http on loopback)")
+	return cmd
 }
 
 func mcpListCmd(getClient func() (*Client, error)) *cobra.Command {

@@ -84,6 +84,33 @@ func redirectAllowed(raw string, parsed *url.URL) bool {
 	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
+// validateRegisteredRedirectURI enforces the REGISTRATION rule for redirect
+// URIs (design 02 §4b, OAuth 2.1 §5.2): https for real hosts, plain http ONLY
+// for loopback (localhost / 127.0.0.1 / ::1 — RFC 8252 native apps), anything
+// else rejected. Deliberately STRICTER than the runtime scheme gate above:
+// this list is what 03 will match EXACTLY at /authorize — a registered
+// plaintext-http foreign host would be a permanent code/key exfiltration
+// channel. Shared by the CLI pre-registration path (mcp-client-create) and
+// the DCR /register handler (02-W4).
+func validateRegisteredRedirectURI(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return fmt.Errorf("invalid redirect_uri %q: not an absolute URL", raw)
+	}
+	switch parsed.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := parsed.Hostname()
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return nil
+		}
+		return fmt.Errorf("invalid redirect_uri %q: plain http is allowed for loopback hosts only", raw)
+	default:
+		return fmt.Errorf("invalid redirect_uri %q: scheme must be https (or http on loopback)", raw)
+	}
+}
+
 // codeSealDomain versions the code→key derivation for the transitional
 // api_key_sealed blob (098, W03-1→W03-3). Part of the persisted format.
 const codeSealDomain = "ctx:oauth-code-seal:v1:"

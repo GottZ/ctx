@@ -1408,6 +1408,11 @@ func dreamModeStr(mode int32) string {
 func (h *ManageHandler) handleMCPClientCreate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	var data struct {
 		Label string `json:"label"`
+		// redirect_uris (02-W2, §4a′): the pre-registration allowlist 03 will
+		// match exactly. Optional today — clients registered without it keep
+		// '{}' and the static S2 allowlist until 03 enforcement (then a
+		// redirect-less client matches nothing, by design).
+		RedirectURIs []string `json:"redirect_uris"`
 	}
 	if len(req.Data) > 0 {
 		_ = json.Unmarshal(req.Data, &data)
@@ -1416,8 +1421,19 @@ func (h *ManageHandler) handleMCPClientCreate(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "label is required"})
 		return
 	}
+	for _, uri := range data.RedirectURIs {
+		if err := validateRegisteredRedirectURI(uri); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+	}
 
-	client, secret, err := store.CreateOAuthClient(r.Context(), h.pool, data.Label, ar.ApiKeyID)
+	client, secret, err := store.RegisterOAuthClient(r.Context(), h.pool, store.RegisterOAuthClientSpec{
+		Label:        data.Label,
+		RedirectURIs: data.RedirectURIs,
+		Source:       "admin",
+		CreatedBy:    ar.ApiKeyID,
+	})
 	if err != nil {
 		slog.Error("manage: create oauth client failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
@@ -1429,6 +1445,7 @@ func (h *ManageHandler) handleMCPClientCreate(w http.ResponseWriter, r *http.Req
 		"client_id":     client.ClientID,
 		"client_secret": secret, // Shown once.
 		"label":         client.Label,
+		"redirect_uris": client.RedirectURIs,
 	})
 }
 
