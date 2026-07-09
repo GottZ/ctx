@@ -9,9 +9,11 @@ import (
 
 // TestMetadataDocument pins the 02-W3 gate: RFC 8414 required fields present,
 // existing fields unchanged, and NO statement the server does not serve —
-// no scopes_supported (no enforced catalog), no refresh_token grant (03/S4
-// issues it later), no registration_endpoint while DCR is off (route lands
-// in 02-W4).
+// no scopes_supported (no enforced catalog), no registration_endpoint while
+// DCR is off (route lands in 02-W4). Since S4 the refresh_token grant IS
+// served (rotation + reuse detection), so its advertisement flipped from a
+// forbidden to a required statement — the coupling rule, applied in both
+// directions.
 func TestMetadataDocument(t *testing.T) {
 	h := &OAuthHandler{issuer: "https://ctx.example"}
 
@@ -56,8 +58,8 @@ func TestMetadataDocument(t *testing.T) {
 		if _, ok := doc["scopes_supported"]; ok {
 			t.Error("scopes_supported advertised without an enforced catalog")
 		}
-		if gt := toStrings(doc["grant_types_supported"]); slices.Contains(gt, "refresh_token") {
-			t.Error("refresh_token advertised before 03/S4 issues it")
+		if gt := toStrings(doc["grant_types_supported"]); !slices.Equal(gt, []string{"authorization_code", "refresh_token"}) {
+			t.Errorf("grant_types_supported = %v (S4 serves refresh_token — advertise exactly what is served)", gt)
 		}
 		if _, ok := doc["registration_endpoint"]; ok {
 			t.Error("registration_endpoint advertised while DCR mode is off")

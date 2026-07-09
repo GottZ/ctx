@@ -117,10 +117,46 @@ func codeHash(code string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// accessTokenTTL is the opaque access-token lifetime (E-03c, decided: 1h).
-// The short TTL bounds the revocation latency; long-lived MCP sessions get
-// their continuity from the rotating refresh token (S4, 30d rolling).
-const accessTokenTTL = time.Hour
+// Token lifetimes (E-TTL, decided: access 1h · refresh 30d rolling with
+// rotation · family absolute cap 90d — "Config-Werte"): the defaults are the
+// decision values; the env vars are the deployment override knobs, Go
+// duration syntax ("30m", "720h" — hours are the largest unit Go parses).
+// The short access TTL bounds revocation latency; continuity comes from the
+// rotating refresh (S4); the family cap bounds how long rolling rotation
+// can keep one authorization alive without a fresh consent.
+const (
+	defaultAccessTokenTTL  = time.Hour
+	defaultRefreshTokenTTL = 30 * 24 * time.Hour
+	defaultRefreshFamilyCap = 90 * 24 * time.Hour
+
+	// EnvAccessTokenTTL / EnvRefreshTokenTTL / EnvRefreshFamilyCap name the
+	// optional TTL override env vars (E-TTL "Config-Werte").
+	EnvAccessTokenTTL   = "CTX_OAUTH_ACCESS_TTL"  //nolint:gosec // env var NAME, not a credential
+	EnvRefreshTokenTTL  = "CTX_OAUTH_REFRESH_TTL" //nolint:gosec // env var NAME, not a credential
+	EnvRefreshFamilyCap = "CTX_OAUTH_FAMILY_CAP"
+)
+
+// ttlFromEnv reads one duration override; unset, unparsable or non-positive
+// values fall back to the decided default (fail-safe — a typo must never
+// yield eternal or instant-dead tokens).
+func ttlFromEnv(envName string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(envName))
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		slog.Warn("oauth: invalid TTL override ignored", "env", envName, "value", raw)
+		return def
+	}
+	return d
+}
+
+func accessTokenTTL() time.Duration  { return ttlFromEnv(EnvAccessTokenTTL, defaultAccessTokenTTL) }
+func refreshTokenTTL() time.Duration { return ttlFromEnv(EnvRefreshTokenTTL, defaultRefreshTokenTTL) }
+func refreshFamilyCap() time.Duration {
+	return ttlFromEnv(EnvRefreshFamilyCap, defaultRefreshFamilyCap)
+}
 
 // canonicalOrHostIssuer returns the configured canonical issuer (S2,
 // RVW-Spec-F4) or falls back to the pre-S2 r.Host derivation. The RFC 9207
@@ -150,12 +186,13 @@ func dcrMode() string {
 }
 
 // Metadata serves GET /.well-known/oauth-authorization-server (RFC 8414).
-// Coupling rules (design 02 §4c, 02-W3): grant_types_supported stays
-// ["authorization_code"] until 03/S4 actually issues refresh tokens, and
-// scopes_supported is omitted until a scope catalog exists that /token
-// enforces — the discovery document never advertises what the server does
-// not do. registration_endpoint appears only when DCR is switched on
-// (route lands in 02-W4; the flag default is off).
+// Coupling rules (design 02 §4c, 02-W3): grant_types_supported includes
+// refresh_token since S4 actually issues and rotates them (the coupling
+// rule paid off — advertised exactly when served); scopes_supported is
+// omitted until a scope catalog exists that /token enforces — the discovery
+// document never advertises what the server does not do.
+// registration_endpoint appears only when DCR is switched on (02-W4;
+// the flag default is off).
 func (h *OAuthHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 	issuer := h.canonicalOrHostIssuer(r)
 
@@ -164,7 +201,7 @@ func (h *OAuthHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 		"authorization_endpoint":                issuer + "/authorize",
 		"token_endpoint":                        issuer + "/token",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":       []string{"S256"},
 		// none | client_secret_basic | client_secret_post (design 02 §3/§4c;
 		// no private_key_jwt — there is no jwks path in the MVP). The
@@ -369,14 +406,63 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	grantType := r.FormValue("grant_type")
-	code := r.FormValue("code")
-	codeVerifier := r.FormValue("code_verifier")
+	// client_id arrives in the form body (public, auth method `none`) or as
+	// the Basic-Auth username (confidential, enforcement wired in S6). Both
+	// grants bind on it: the code binding (S2) and the refresh binding (S4).
+	presentedClient := r.FormValue("client_id")
+	if presentedClient == "" {
+		if u, _, ok := r.BasicAuth(); ok {
+			presentedClient = u
+		}
+	}
 
-	if grantType != "authorization_code" {
-		oauthError(w, "unsupported_grant_type", "only authorization_code is supported")
+	// All form values are extracted HERE, behind the MaxBytesReader +
+	// ParseForm above — the grant handlers receive plain strings (gosec
+	// G120 cannot see the cap across the function boundary, and neither
+	// should a future caller have to remember it).
+	switch r.FormValue("grant_type") {
+	case "authorization_code":
+		h.tokenAuthorizationCode(w, r, presentedClient, r.FormValue("code"), r.FormValue("code_verifier"))
+	case "refresh_token":
+		h.tokenRefresh(w, r, presentedClient, r.FormValue("refresh_token"))
+	default:
+		oauthError(w, "unsupported_grant_type", "only authorization_code and refresh_token are supported")
+	}
+}
+
+// tokenRefresh handles the refresh_token grant (S4/W03-4): rotation with
+// reuse detection. Every failure class — unknown, expired, wrong client,
+// capped-out family AND detected reuse — answers the SAME invalid_grant (no
+// oracle); the reuse case additionally revoked the whole family server-side.
+func (h *OAuthHandler) tokenRefresh(w http.ResponseWriter, r *http.Request, presentedClient, presented string) {
+	if presented == "" || !strings.HasPrefix(presented, store.RefreshTokenPrefix) {
+		oauthError(w, "invalid_grant", "refresh token invalid or expired")
 		return
 	}
+	pair, outcome, err := store.RotateRefreshToken(r.Context(), h.pool, presented, presentedClient,
+		accessTokenTTL(), refreshTokenTTL(), refreshFamilyCap())
+	if err != nil {
+		slog.Error("oauth: rotate refresh token", "error", err)
+		oauthError(w, "invalid_grant", "refresh token invalid or expired")
+		return
+	}
+	switch outcome {
+	case store.Rotated:
+		writeTokenPair(w, pair)
+	case store.RotateReuse:
+		// Theft signal: family already revoked inside the rotation tx. Log
+		// loudly server-side, answer the standard invalid_grant (RFC 6749
+		// §5.2) — the wire carries no detection oracle.
+		slog.Warn("oauth: refresh token reuse detected — family revoked", "client_id", presentedClient)
+		oauthError(w, "invalid_grant", "refresh token invalid or expired")
+	default:
+		oauthError(w, "invalid_grant", "refresh token invalid or expired")
+	}
+}
+
+// tokenAuthorizationCode handles the authorization_code grant: the S1/S2
+// hardened code redemption, minting the S3 opaque pair (S4: + refresh).
+func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request, presentedClient, code, codeVerifier string) {
 
 	// Atomic single-use take (098, S1): DELETE … RETURNING — of two racing
 	// /token calls exactly one gets the row, on ANY instance sharing the DB
@@ -404,50 +490,48 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 	// code↔client binding (S2/W03-2; OAuth 2.1 §4.1.3 MUST: "the code MUST
 	// have been issued to the requesting client"). For public clients this
 	// equality is the ONLY client binding there is; without it client B can
-	// redeem client A's code. client_id arrives in the form body (public,
-	// auth method `none`) or as the Basic-Auth username (confidential,
-	// wired in W03-7). Since S2 makes client_id mandatory at /authorize,
-	// every code row carries one — an empty ac.ClientID can only be a
-	// pre-S2 leftover row and fails closed.
-	presentedClient := r.FormValue("client_id")
-	if presentedClient == "" {
-		if u, _, ok := r.BasicAuth(); ok {
-			presentedClient = u
-		}
-	}
+	// redeem client A's code. Since S2 makes client_id mandatory at
+	// /authorize, every code row carries one — an empty ac.ClientID can
+	// only be a pre-S2 leftover row and fails closed.
 	if ac.ClientID == "" || presentedClient != ac.ClientID {
 		oauthError(w, "invalid_grant", "code was not issued to this client")
 		return
 	}
 
-	// Issue token — an OPAQUE, revocable, key-bound access token (S3/W03-3;
-	// E-03a decided ja): the raw api key no longer circulates through the
-	// OAuth client's token storage. The row carries the INV-A single-key
-	// selector from the code; resolution at /mcp materialises through the
-	// same ctx_auth_by_id gates as the raw-key path. audiences always
-	// contains the ctx-MCP resource (design 03 §4: E2 × RFC-8707 — the
-	// membership CHECK at /mcp lands in S5); the refresh token follows in
-	// S4 (rotation + reuse detection), so expires_in is the whole story for
-	// now and clients re-run the code flow after expiry.
-	token, err := store.MintAccessToken(r.Context(), h.pool, store.OAuthToken{
+	// Issue tokens — an OPAQUE, revocable, key-bound access token (S3/W03-3;
+	// E-03a decided ja) plus its rotating refresh token (S4/W03-4): the raw
+	// api key no longer circulates through the OAuth client's token storage.
+	// The rows carry the INV-A single-key selector from the code; resolution
+	// at /mcp materialises through the same ctx_auth_by_id gates as the
+	// raw-key path. audiences always contains the ctx-MCP resource (design
+	// 03 §4: E2 × RFC-8707 — the membership CHECK at /mcp lands in S5).
+	pair, err := store.MintTokenPair(r.Context(), h.pool, store.OAuthToken{
 		APIKeyID:    ac.APIKeyID,
 		PrincipalID: ac.PrincipalID,
 		ClientID:    ac.ClientID,
 		Audiences:   []string{h.canonicalOrHostIssuer(r) + "/mcp"},
 		IssuedVia:   "oauth",
-		ExpiresAt:   time.Now().Add(accessTokenTTL),
-	})
+	}, accessTokenTTL(), refreshTokenTTL())
 	if err != nil {
-		slog.Error("oauth: mint access token", "error", err)
+		slog.Error("oauth: mint token pair", "error", err)
 		oauthError(w, "invalid_grant", "code expired or not found")
 		return
 	}
+	writeTokenPair(w, pair)
+}
+
+// writeTokenPair emits the RFC 6749 §5.1 success response for a fresh or
+// rotated pair. expires_in carries the pair's nominal access TTL (a
+// rotation near the family cap shortens only the refresh lifetime, never
+// the access TTL).
+func writeTokenPair(w http.ResponseWriter, pair *store.TokenPair) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"access_token": token,
-		"token_type":   "Bearer",
-		"expires_in":   int(accessTokenTTL / time.Second),
+		"access_token":  pair.AccessToken,
+		"token_type":    "Bearer",
+		"expires_in":    int(pair.AccessTTL / time.Second),
+		"refresh_token": pair.RefreshToken,
 	})
 }
 
