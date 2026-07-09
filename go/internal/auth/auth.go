@@ -37,6 +37,14 @@ type AuthResult struct {
 	// every existing key (fail-open, D-E2). Consumed at the store handlers
 	// only (D-W5); internal writers (digest, dream) never see it.
 	ConfirmWrites bool
+	// PrincipalID is the UUID of the person this key belongs to (OAuth F2,
+	// migration 095). Every valid key resolves to exactly one principal
+	// (api_keys.principal_id NOT NULL, 094); it is the LAST ctx_auth column.
+	// Empty in the sentinel paths. This is Person-Attribution, NEVER an
+	// authorisation input (INV-B): tenant isolation + scope filter stay the
+	// sole authorisation decision. Achse 03 (token) and 05 (session) resolve
+	// their AuthResult through the SAME ctx_auth_by_id(uuid) SQL sibling.
+	PrincipalID string
 }
 
 // SanitizeKey strips all non-hex characters from an API key.
@@ -62,14 +70,15 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Auth
 		tenantRole    string  // never NULL ('' in the sentinel paths)
 		writeScopes   []string // 078 (E4b): RAW write-scope set; '{}' in the sentinel paths
 		confirmWrites bool     // 090 (D-W4): per-key confirm opt-in; false in the sentinel paths
+		principalID   *string  // 095 (F2): nullable UUID (NULL in the sentinel paths)
 	)
 
-	// confirm_writes is the LAST ctx_auth column (090, appended after
-	// write_scopes so this named SELECT stays valid across the DROP+CREATE).
+	// principal_id is the LAST ctx_auth column (095, appended after
+	// confirm_writes so this named SELECT stays valid across the DROP+CREATE).
 	err := pool.QueryRow(ctx,
-		`SELECT api_key_id, home_scope, allowed_scopes, read_scopes, is_valid, is_admin, tenant_id, tenant_role, write_scopes, confirm_writes FROM ctx_auth($1)`,
+		`SELECT api_key_id, home_scope, allowed_scopes, read_scopes, is_valid, is_admin, tenant_id, tenant_role, write_scopes, confirm_writes, principal_id FROM ctx_auth($1)`,
 		apiKey,
-	).Scan(&apiKeyID, &homeScope, &allowedScopes, &readScopes, &isValid, &isAdmin, &tenantID, &tenantRole, &writeScopes, &confirmWrites)
+	).Scan(&apiKeyID, &homeScope, &allowedScopes, &readScopes, &isValid, &isAdmin, &tenantID, &tenantRole, &writeScopes, &confirmWrites, &principalID)
 	if err != nil {
 		return nil, fmt.Errorf("auth: query ctx_auth: %w", err)
 	}
@@ -90,6 +99,9 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Auth
 	}
 	if tenantID != nil {
 		result.TenantID = *tenantID
+	}
+	if principalID != nil {
+		result.PrincipalID = *principalID
 	}
 
 	return result, nil

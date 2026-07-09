@@ -109,6 +109,14 @@ type Principal struct {
 	ApiKeyID  string
 	TenantID  string
 	HomeScope string
+	// PrincipalID is the person identity behind the key (OAuth F2, auth.go
+	// AuthResult.PrincipalID / migration 095). Carried here like TenantID —
+	// an identity dimension, NOT the fairness key: fairKey stays HomeScope
+	// (E-F1, the tenant IS the scope namespace), so scheduling is byte-
+	// unchanged by F2. It is the seam for a later person-level fairness mode
+	// (policy.FairnessPrincipalRR) once a principal may hold keys across
+	// tenants (E1t=multi); no consumer flips it in this wave.
+	PrincipalID string
 }
 
 // fairKey is the fairness bucket of a principal (E-F1: HomeScope, single

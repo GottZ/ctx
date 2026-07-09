@@ -38,6 +38,12 @@ type whoamiResponse struct {
 	// TK5): the row of the current key is marked so its revoke control can be
 	// disabled, preventing a self-lockout. Additive read, no migration.
 	ApiKeyID string `json:"api_key_id"`
+	// PrincipalID is the UUID of the person the calling key belongs to (OAuth
+	// F2, ar.PrincipalID / migration 095). Additive read, no migration of its
+	// own. NOT a secret and NOT an authorisation input (INV-B) — the SPA uses
+	// it only to group a person's keys in the identity UI. Empty until F2 is
+	// deployed (an old ctx_auth without the column leaves ar.PrincipalID "").
+	PrincipalID string `json:"principal_id"`
 	// TenantSlug and TenantDisplayName carry the owning tenant's human-readable
 	// identity (059 context_tenants), resolved by a single LEFT JOIN on the
 	// key's tenant_id (design/06 N9 / D1). They let the SPA header show a name
@@ -151,6 +157,7 @@ func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 		TenantID:          ar.TenantID,
 		Role:              string(ar.TenantRole),
 		ApiKeyID:          ar.ApiKeyID,
+		PrincipalID:       ar.PrincipalID,
 		TenantSlug:        id.tenantSlug,
 		TenantDisplayName: id.tenantDisplayName,
 		Capabilities:      whoamiCapabilities{Workflow: true},

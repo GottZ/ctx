@@ -18,6 +18,11 @@ export interface WhoamiResponse {
   // for the Self-Revoke-Schutz (design/05 §7.5): the row of the current key is
   // marked so its revoke control is disabled. Additive read, no migration.
   api_key_id: string
+  // The UUID of the person the calling key belongs to (OAuth F2, migration 095).
+  // Not a secret and NOT an authorisation input (INV-B) — used only to group a
+  // person's keys in the identity UI. OPTIONAL + additive like `capabilities`:
+  // absent on a pre-F2 server (an old ctx_auth without the column). Additive read.
+  principal_id?: string
   // The owning tenant's human-readable identity (059 context_tenants), resolved
   // by a LEFT JOIN on the key's tenant_id (design/06 N9 / D1) so the header can
   // show a name instead of the bare UUID. Both degrade to "" when the key has

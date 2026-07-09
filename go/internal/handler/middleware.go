@@ -116,9 +116,10 @@ func RequestPrincipal(ctx context.Context) dispatch.Principal {
 		return dispatch.Principal{}
 	}
 	return dispatch.Principal{
-		ApiKeyID:  ar.ApiKeyID,
-		TenantID:  ar.TenantID,
-		HomeScope: ar.HomeScope,
+		ApiKeyID:    ar.ApiKeyID,
+		TenantID:    ar.TenantID,
+		HomeScope:   ar.HomeScope,
+		PrincipalID: ar.PrincipalID,
 	}
 }
 
