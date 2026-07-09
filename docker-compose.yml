@@ -32,6 +32,13 @@ services:
       CTX_CAMO_ENABLED: ${CTX_CAMO_ENABLED:-}
       CTX_CAMO_TTL: ${CTX_CAMO_TTL:-}
       CTX_CAMO_MAX_BYTES: ${CTX_CAMO_MAX_BYTES:-}
+      # OAuth S2 (design 03 W03-2): canonical issuer for RFC 9207 `iss` +
+      # discovery documents — derived from the proxy hostname above; an
+      # r.Host-derived iss would be client-influencable (RVW-Spec-F4).
+      # REDIRECT_EXTRA extends the static redirect allowlist per deployment
+      # (comma-separated exact URIs; loopback is always allowed by rule).
+      CTX_CANONICAL_ISSUER: ${CTX_CANONICAL_ISSUER:-https://${CTX_HOSTNAME}}
+      CTX_OAUTH_REDIRECT_EXTRA: ${CTX_OAUTH_REDIRECT_EXTRA:-}
       CTX_EMBED_HOST: ${CTX_EMBED_HOST}
       CTX_EMBED_API_KEY: ${CTX_EMBED_API_KEY:-}
       CTX_EMBED_PROTOCOL: ${CTX_EMBED_PROTOCOL:-ollama}

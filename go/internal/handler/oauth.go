@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -28,11 +30,58 @@ import (
 // OAuthHandler implements the minimal OAuth 2.1 endpoints for MCP remote auth.
 type OAuthHandler struct {
 	pool *pgxpool.Pool
+	// issuer is the canonical issuer (CTX_CANONICAL_ISSUER, no trailing
+	// slash) — the RFC 9207 `iss` value and, when set, the base for the
+	// discovery documents. Empty → discovery keeps deriving from r.Host
+	// (pre-S2 behaviour) and NO `iss` is emitted: an r.Host-derived `iss`
+	// would be client-influencable and make the mix-up protection
+	// illusory (design 03 RVW-Spec-F4) — no iss beats a forgeable one.
+	issuer string
 }
+
+// EnvCanonicalIssuer names the canonical-issuer environment variable (S2).
+const EnvCanonicalIssuer = "CTX_CANONICAL_ISSUER"
 
 // NewOAuthHandler creates a new OAuthHandler.
 func NewOAuthHandler(pool *pgxpool.Pool) *OAuthHandler {
-	return &OAuthHandler{pool: pool}
+	return &OAuthHandler{
+		pool:   pool,
+		issuer: strings.TrimRight(strings.TrimSpace(os.Getenv(EnvCanonicalIssuer)), "/"),
+	}
+}
+
+// redirectAllowlist is the static exact-match set of known MCP-client
+// callback URIs (S2/W03-2, design 03 E-03e): the transitional,
+// Achse-02-independent closure of GHSA-p3jf-x27v-4jg6 — W03-7 replaces it
+// with the per-client redirect_uris registration. Extend per deployment via
+// CTX_OAUTH_REDIRECT_EXTRA (comma-separated, exact URIs). Loopback redirects
+// (RFC 8252 §7.3) are allowed by rule in redirectAllowed, not listed here.
+var redirectAllowlist = map[string]bool{
+	"https://claude.ai/api/mcp/auth_callback":            true,
+	"https://claude.com/api/mcp/auth_callback":           true,
+	"https://chatgpt.com/connector_platform_oauth_redirect": true,
+}
+
+// EnvRedirectExtra names the deployment-extension env var for the static
+// redirect allowlist (comma-separated exact URIs).
+const EnvRedirectExtra = "CTX_OAUTH_REDIRECT_EXTRA"
+
+// redirectAllowed reports whether the (already scheme-checked and parsed)
+// redirect target passes the static allowlist: exact match against the known
+// callbacks or the env extension, or a loopback target (RFC 8252 §7.3 —
+// 127.0.0.1 / ::1 / localhost with any port and path, native-app pattern).
+// No substring or wildcard matching anywhere (OAuth 2.1 §4.1.3).
+func redirectAllowed(raw string, parsed *url.URL) bool {
+	if redirectAllowlist[raw] {
+		return true
+	}
+	for _, extra := range strings.Split(os.Getenv(EnvRedirectExtra), ",") {
+		if extra = strings.TrimSpace(extra); extra != "" && extra == raw {
+			return true
+		}
+	}
+	host := parsed.Hostname()
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
 // codeSealDomain versions the code→key derivation for the transitional
@@ -94,10 +143,20 @@ func openAPIKey(code string, sealed []byte) (string, error) {
 	return string(plain), nil
 }
 
+// canonicalOrHostIssuer returns the configured canonical issuer (S2,
+// RVW-Spec-F4) or falls back to the pre-S2 r.Host derivation. The RFC 9207
+// `iss` redirect parameter uses ONLY the canonical value (never the
+// fallback) — see the issuer field doc.
+func (h *OAuthHandler) canonicalOrHostIssuer(r *http.Request) string {
+	if h.issuer != "" {
+		return h.issuer
+	}
+	return "https://" + r.Host
+}
+
 // Metadata serves GET /.well-known/oauth-authorization-server.
 func (h *OAuthHandler) Metadata(w http.ResponseWriter, r *http.Request) {
-	scheme := "https"
-	issuer := scheme + "://" + r.Host
+	issuer := h.canonicalOrHostIssuer(r)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -113,8 +172,7 @@ func (h *OAuthHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 
 // ProtectedResource serves GET /.well-known/oauth-protected-resource.
 func (h *OAuthHandler) ProtectedResource(w http.ResponseWriter, r *http.Request) {
-	scheme := "https"
-	issuer := scheme + "://" + r.Host
+	issuer := h.canonicalOrHostIssuer(r)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -198,19 +256,33 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate client_id.
+	// Static redirect allowlist (S2/W03-2) — the GHSA-p3jf-x27v-4jg6 core:
+	// without it, an attacker-controlled redirect_uri carries the code (and
+	// with it the victim's key) off-site. Exact match or loopback only;
+	// per-client registration replaces this in W03-7.
+	if !redirectAllowed(redirectURI, parsedRedirect) {
+		slog.Warn("oauth: redirect_uri not in allowlist", "redirect_uri", redirectURI)
+		http.Error(w, "invalid redirect_uri: not an allowed callback", http.StatusBadRequest)
+		return
+	}
+
+	// client_id is MANDATORY (S2/W03-2; OAuth 2.1 §4.1.1). The former
+	// `if clientID != ""` anonymous flow was half the takeover surface —
+	// without a client identity there is nothing to bind the code to.
 	clientID := r.FormValue("client_id")
-	if clientID != "" {
-		valid, err := store.ValidateOAuthClient(r.Context(), h.pool, clientID)
-		if err != nil || !valid {
-			slog.Warn("oauth: invalid client_id in authorize", "client_id", clientID)
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
-				<h1>Unknown Client</h1><p>This client_id is not registered. Use <code>ctx mcp add</code> to create one.</p>
-			</body></html>`))
-			return
-		}
+	if clientID == "" {
+		http.Error(w, "client_id is required", http.StatusBadRequest)
+		return
+	}
+	valid, err := store.ValidateOAuthClient(r.Context(), h.pool, clientID)
+	if err != nil || !valid {
+		slog.Warn("oauth: invalid client_id in authorize", "client_id", clientID)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
+			<h1>Unknown Client</h1><p>This client_id is not registered. Use <code>ctx mcp add</code> to create one.</p>
+		</body></html>`))
+		return
 	}
 
 	// Validate the API key.
@@ -265,6 +337,12 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	if state != "" {
 		q.Set("state", state)
 	}
+	// RFC 9207 `iss` — ONLY from the configured canonical issuer, never an
+	// r.Host derivation (a client-influencable iss would defeat the mix-up
+	// protection it exists for, RVW-Spec-F4). Unset → omitted, as before S2.
+	if h.issuer != "" {
+		q.Set("iss", h.issuer)
+	}
 	parsedRedirect.RawQuery = q.Encode()
 	// #nosec G710 -- redirectURI is validated above (scheme allowlist + Host
 	// non-empty) and reconstructed via net/url; the residual taint flow
@@ -314,6 +392,25 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 	computed := base64.RawURLEncoding.EncodeToString(hash[:])
 	if computed != ac.CodeChallenge {
 		oauthError(w, "invalid_grant", "code_verifier mismatch")
+		return
+	}
+
+	// code↔client binding (S2/W03-2; OAuth 2.1 §4.1.3 MUST: "the code MUST
+	// have been issued to the requesting client"). For public clients this
+	// equality is the ONLY client binding there is; without it client B can
+	// redeem client A's code. client_id arrives in the form body (public,
+	// auth method `none`) or as the Basic-Auth username (confidential,
+	// wired in W03-7). Since S2 makes client_id mandatory at /authorize,
+	// every code row carries one — an empty ac.ClientID can only be a
+	// pre-S2 leftover row and fails closed.
+	presentedClient := r.FormValue("client_id")
+	if presentedClient == "" {
+		if u, _, ok := r.BasicAuth(); ok {
+			presentedClient = u
+		}
+	}
+	if ac.ClientID == "" || presentedClient != ac.ClientID {
+		oauthError(w, "invalid_grant", "code was not issued to this client")
 		return
 	}
 
