@@ -295,13 +295,16 @@ fi
 # F1 principal foundation; api_keys gains principal_id but context_blocks is
 # untouched) — table_count 35→41, col_count STAYS 40. M095 (ctx_auth function
 # DDL) and M096 (additive audit-FK COLUMNS on 11 existing tables) add NO tables.
+# + 1 table since M098 (context_oauth_codes, OAuth S1/W03-1 persistent code
+# store — the in-memory map goes to DB; design 03 §3, masterplan K1: 097 stays
+# reserved for C1/02-W1) — table_count 41→42, col_count STAYS 40.
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "41" ]] && [[ "$col_count" == "40" ]]; then
+if [[ "$table_count" == "42" ]] && [[ "$col_count" == "40" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 41 tables + 40 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 42 tables + 40 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS

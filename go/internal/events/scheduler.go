@@ -642,6 +642,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.runLLMLogRetention(ctx)
 			s.runWebChatRetention(ctx)
 			s.runWebhookRetention(ctx)
+			s.runOAuthCodeGC(ctx)
 
 		case <-webhookInboxTicker.C:
 			s.runWebhookInbox(ctx)
@@ -977,6 +978,26 @@ func (s *Scheduler) runWebChatRetention(ctx context.Context) {
 	}
 	if deleted > 0 {
 		slog.Info("scheduler: webchat sessions deleted", "rows", deleted, "retention_hours", hours)
+	}
+}
+
+// runOAuthCodeGC sweeps expired OAuth authorization codes (098, design 03 §4;
+// shares the embed-cache janitor tick). Correctness never depends on this
+// sweep — TakeOAuthCode rejects stale codes regardless; the GC only keeps the
+// table from accumulating dead 5-minute rows.
+func (s *Scheduler) runOAuthCodeGC(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in oauth code gc", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+	deleted, err := store.EvictExpiredOAuthCodes(ctx, s.pool)
+	if err != nil {
+		slog.Warn("scheduler: oauth code gc failed", "error", err)
+		return
+	}
+	if deleted > 0 {
+		slog.Info("scheduler: oauth codes evicted", "rows", deleted)
 	}
 }
 
