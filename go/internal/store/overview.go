@@ -251,8 +251,9 @@ func LogGraphOverviewAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID st
 		keyID = apiKeyID
 	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO context_access_log (api_key_id, block_id, action, metadata)
-		 VALUES ($1::uuid, NULL, 'graph-overview', $2::jsonb)`,
+		`INSERT INTO context_access_log (api_key_id, block_id, action, metadata, principal_id)
+		 VALUES ($1::uuid, NULL, 'graph-overview', $2::jsonb,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid))`,
 		keyID, meta,
 	); err != nil {
 		return fmt.Errorf("store: log graph overview access: %w", err)

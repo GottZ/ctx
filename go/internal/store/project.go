@@ -208,8 +208,9 @@ func CreateProject(ctx context.Context, pool *pgxpool.Pool, p CreateProjectParam
 		forge = json.RawMessage(`{}`)
 	}
 	inserted, err := scanProject(tx.QueryRow(ctx,
-		`INSERT INTO context_projects (tenant_id, scope, identity, display_name, forge, created_by)
-		 VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::uuid)
+		`INSERT INTO context_projects (tenant_id, scope, identity, display_name, forge, created_by, created_by_principal)
+		 VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::uuid,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $6::uuid))
 		 RETURNING `+projectSelect,
 		p.TenantID, p.ScopeName, p.Identity, p.DisplayName, forge, createdBy))
 	if err != nil {

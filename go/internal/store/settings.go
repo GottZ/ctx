@@ -289,12 +289,14 @@ func UpsertSetting(ctx context.Context, tx pgx.Tx, key, scope string, value json
 	}
 
 	_, err := tx.Exec(ctx,
-		`INSERT INTO context_settings (key, scope, value, updated_by)
-		 VALUES ($1, $2, $3::jsonb, $4::uuid)
+		`INSERT INTO context_settings (key, scope, value, updated_by, updated_by_principal)
+		 VALUES ($1, $2, $3::jsonb, $4::uuid,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $4::uuid))
 		 ON CONFLICT (key, scope) DO UPDATE
 		 SET value = EXCLUDED.value,
 		     updated_at = now(),
-		     updated_by = EXCLUDED.updated_by`,
+		     updated_by = EXCLUDED.updated_by,
+		     updated_by_principal = EXCLUDED.updated_by_principal`,
 		key, scope, string(value), by)
 	if err != nil {
 		return fmt.Errorf("settings: upsert %s: %w", key, err)

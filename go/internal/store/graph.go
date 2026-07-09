@@ -561,8 +561,9 @@ func LogGraphAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID, focus str
 		keyID = apiKeyID
 	}
 	_, err = pool.Exec(ctx,
-		`INSERT INTO context_access_log (api_key_id, block_id, action, metadata)
-		 VALUES ($1::uuid, NULL, 'graph', $2::jsonb)`,
+		`INSERT INTO context_access_log (api_key_id, block_id, action, metadata, principal_id)
+		 VALUES ($1::uuid, NULL, 'graph', $2::jsonb,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid))`,
 		keyID, meta,
 	)
 	if err != nil {

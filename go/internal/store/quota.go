@@ -44,8 +44,9 @@ func GetTenantQuota(ctx context.Context, pool *pgxpool.Pool, scope string) (*bac
 func UpsertTenantQuota(ctx context.Context, pool *pgxpool.Pool, scope string, q backends.TenantQuota, by *string) error {
 	_, err := pool.Exec(ctx, `
 		INSERT INTO context_tenant_quota
-		    (scope, daily_cost_usd, monthly_cost_usd, daily_calls, on_exceed, enabled, updated_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7::uuid)
+		    (scope, daily_cost_usd, monthly_cost_usd, daily_calls, on_exceed, enabled, updated_by, updated_by_principal)
+		VALUES ($1,$2,$3,$4,$5,$6,$7::uuid,
+		        (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $7::uuid))
 		ON CONFLICT (scope) DO UPDATE SET
 		    daily_cost_usd  = EXCLUDED.daily_cost_usd,
 		    monthly_cost_usd = EXCLUDED.monthly_cost_usd,
@@ -53,6 +54,7 @@ func UpsertTenantQuota(ctx context.Context, pool *pgxpool.Pool, scope string, q 
 		    on_exceed       = EXCLUDED.on_exceed,
 		    enabled         = EXCLUDED.enabled,
 		    updated_by      = EXCLUDED.updated_by,
+		    updated_by_principal = EXCLUDED.updated_by_principal,
 		    updated_at      = now()`,
 		scope, q.DailyCostUSD, q.MonthlyCostUSD, q.DailyCalls, q.OnExceed, q.Enabled, by)
 	if err != nil {

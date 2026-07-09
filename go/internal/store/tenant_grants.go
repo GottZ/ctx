@@ -65,8 +65,9 @@ func CreateTenantGrant(ctx context.Context, pool *pgxpool.Pool, granteeTenant, g
 		creator = createdBy
 	}
 	g, err := scanTenantGrant(pool.QueryRow(ctx,
-		`INSERT INTO context_tenant_grants (grantee_tenant, granted_scope, created_by)
-		 VALUES ($1::uuid, $2, $3::uuid)
+		`INSERT INTO context_tenant_grants (grantee_tenant, granted_scope, created_by, created_by_principal)
+		 VALUES ($1::uuid, $2, $3::uuid,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $3::uuid))
 		 RETURNING `+tenantGrantCols, granteeTenant, grantedScope, creator))
 	if err != nil {
 		var pgErr *pgconn.PgError

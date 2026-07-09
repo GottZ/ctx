@@ -57,10 +57,11 @@ func StagePendingWrite(ctx context.Context, pool *pgxpool.Pool, apiKeyID, scope,
 			RETURNING id, scope, op, origin, payload, created_at, expires_at
 		), ins AS (
 			INSERT INTO context_pending_writes
-			       (api_key_id, scope, op, origin, payload, payload_hash, expires_at)
+			       (api_key_id, scope, op, origin, payload, payload_hash, expires_at, principal_id)
 			SELECT $1, $2, $3, $4, $5, $6,
 			       CASE WHEN $7 <= 0::double precision THEN NULL
-			            ELSE now() + make_interval(secs => $7) END
+			            ELSE now() + make_interval(secs => $7) END,
+			       (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid)
 			 WHERE NOT EXISTS (SELECT 1 FROM rearm)
 			RETURNING id, scope, op, origin, payload, created_at, expires_at
 		)

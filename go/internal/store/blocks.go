@@ -950,11 +950,14 @@ func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string, type
 	return results, nil
 }
 
-// LogAccess inserts an access log entry (read or write).
+// LogAccess inserts an access log entry (read or write). principal_id is
+// derived from the acting key in SQL (096, F3): key→principal is 1:1 NOT NULL
+// since 094, so the person anchor can never drift from the key anchor (INV-A).
 func LogAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID, blockID, action string) error {
 	_, err := pool.Exec(ctx,
-		`INSERT INTO context_access_log (api_key_id, block_id, action, metadata)
-		 VALUES ($1::uuid, $2::uuid, $3, '{}'::jsonb)`,
+		`INSERT INTO context_access_log (api_key_id, block_id, action, metadata, principal_id)
+		 VALUES ($1::uuid, $2::uuid, $3, '{}'::jsonb,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid))`,
 		apiKeyID, blockID, action,
 	)
 	if err != nil {

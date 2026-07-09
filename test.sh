@@ -287,13 +287,21 @@ fi
 # + 1 table since M082 (context_webhook_events, workflow W13 webhook inbound queue;
 # design/03 §3.4, masterplan K1 reserved 082 for W13). NEW table, context_blocks
 # untouched — table_count 34→35, col_count STAYS 40.
+# + 4 tables M089–M093 (context_pending_writes M089 stage-then-confirm;
+# context_disable_profiles + context_disable_profile_backends M092;
+# context_graph_category_hues M093) — stale expectation caught 2026-07-09 by the
+# OAuth-F1/F2 verification sweep: the count was not updated across v4.7.0–v4.11.0.
+# + 2 tables since M094 (context_principals + context_external_identities, OAuth
+# F1 principal foundation; api_keys gains principal_id but context_blocks is
+# untouched) — table_count 35→41, col_count STAYS 40. M095 (ctx_auth function
+# DDL) and M096 (additive audit-FK COLUMNS on 11 existing tables) add NO tables.
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "35" ]] && [[ "$col_count" == "40" ]]; then
+if [[ "$table_count" == "41" ]] && [[ "$col_count" == "40" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 35 tables + 40 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 41 tables + 40 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS

@@ -125,8 +125,9 @@ func CreateBlockGrant(ctx context.Context, pool *pgxpool.Pool, blockID, granteeT
 		granter = grantedBy
 	}
 	g, err := scanBlockGrant(pool.QueryRow(ctx,
-		`INSERT INTO context_block_grants (block_id, grantee_tenant, granted_by)
-		 VALUES ($1::uuid, $2::uuid, $3::uuid)
+		`INSERT INTO context_block_grants (block_id, grantee_tenant, granted_by, granted_by_principal)
+		 VALUES ($1::uuid, $2::uuid, $3::uuid,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $3::uuid))
 		 ON CONFLICT (block_id, grantee_tenant) DO NOTHING
 		 RETURNING `+blockGrantCols, blockID, granteeTenant, granter))
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -1055,8 +1055,9 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 		}
 
 		_, err = h.pool.Exec(ctx,
-			`INSERT INTO context_access_log (api_key_id, block_id, action, query_text, metadata)
-			 VALUES ($1, $2, 'query', $3, $4)`,
+			`INSERT INTO context_access_log (api_key_id, block_id, action, query_text, metadata, principal_id)
+			 VALUES ($1, $2, 'query', $3, $4,
+			         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid))`,
 			ar.ApiKeyID, r.ID, queryText, string(metaJSON),
 		)
 		if err != nil {

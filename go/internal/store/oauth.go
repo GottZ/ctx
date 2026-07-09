@@ -39,8 +39,9 @@ func CreateOAuthClient(ctx context.Context, pool *pgxpool.Pool, label string, cr
 
 	var client OAuthClient
 	err := pool.QueryRow(ctx,
-		`INSERT INTO context_oauth_clients (client_id, client_secret_hash, label, created_by)
-		VALUES ($1, $2, $3, $4::uuid)
+		`INSERT INTO context_oauth_clients (client_id, client_secret_hash, label, created_by, created_by_principal)
+		VALUES ($1, $2, $3, $4::uuid,
+		        (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $4::uuid))
 		RETURNING id, client_id, label, active, created_at`,
 		clientID, secretHash, label, createdBy,
 	).Scan(&client.ID, &client.ClientID, &client.Label, &client.Active, &client.CreatedAt)

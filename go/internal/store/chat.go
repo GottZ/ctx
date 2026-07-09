@@ -127,8 +127,9 @@ func CreateSession(ctx context.Context, pool *pgxpool.Pool, scope string, readSc
 		createdBy = &createdByKeyID
 	}
 	row := pool.QueryRow(ctx,
-		`INSERT INTO context_chat_sessions (scope, read_scopes, created_by, title)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO context_chat_sessions (scope, read_scopes, created_by, title, created_by_principal)
+		 VALUES ($1, $2, $3, $4,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $3::uuid))
 		 RETURNING `+sessionColumns,
 		scope, readScopes, createdBy, title)
 	s, err := scanSession(row)

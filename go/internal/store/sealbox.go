@@ -119,14 +119,16 @@ func PutSecret(ctx context.Context, tx pgx.Tx, name, scope string, nonce, cipher
 	// UPDATE and the audit action (create|rotate) follows TG_OP.
 	var created bool
 	err := tx.QueryRow(ctx,
-		`INSERT INTO context_secrets (name, scope, ciphertext, nonce, key_version, created_by)
-		 VALUES ($1, $2, $3, $4, $5, $6::uuid)
+		`INSERT INTO context_secrets (name, scope, ciphertext, nonce, key_version, created_by, created_by_principal)
+		 VALUES ($1, $2, $3, $4, $5, $6::uuid,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $6::uuid))
 		 ON CONFLICT (name, scope) DO UPDATE
 		 SET ciphertext = EXCLUDED.ciphertext,
 		     nonce = EXCLUDED.nonce,
 		     key_version = EXCLUDED.key_version,
 		     rotated_at = now(),
-		     rotated_by = EXCLUDED.created_by
+		     rotated_by = EXCLUDED.created_by,
+		     rotated_by_principal = EXCLUDED.created_by_principal
 		 RETURNING (xmax = 0)`,
 		name, scope, ciphertext, nonce, keyVersion, by,
 	).Scan(&created)

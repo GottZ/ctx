@@ -154,8 +154,9 @@ func ProvisionProject(ctx context.Context, pool *pgxpool.Pool, p ProvisionParams
 		forge = json.RawMessage(`{}`)
 	}
 	project, err := scanProject(tx.QueryRow(ctx,
-		`INSERT INTO context_projects (tenant_id, scope, identity, display_name, forge, created_by)
-		 VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::uuid)
+		`INSERT INTO context_projects (tenant_id, scope, identity, display_name, forge, created_by, created_by_principal)
+		 VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::uuid,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $6::uuid))
 		 RETURNING `+projectSelect,
 		tn.ID, p.Scope, p.Identity, p.DisplayName, forge, createdBy))
 	if err != nil {
@@ -205,8 +206,9 @@ func ProvisionProject(ctx context.Context, pool *pgxpool.Pool, p ProvisionParams
 func upsertTenantQuotaTx(ctx context.Context, tx pgx.Tx, scope string, q backends.TenantQuota, by any) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO context_tenant_quota
-		    (scope, daily_cost_usd, monthly_cost_usd, daily_calls, on_exceed, enabled, updated_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7::uuid)
+		    (scope, daily_cost_usd, monthly_cost_usd, daily_calls, on_exceed, enabled, updated_by, updated_by_principal)
+		VALUES ($1,$2,$3,$4,$5,$6,$7::uuid,
+		        (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $7::uuid))
 		ON CONFLICT (scope) DO UPDATE SET
 		    daily_cost_usd  = EXCLUDED.daily_cost_usd,
 		    monthly_cost_usd = EXCLUDED.monthly_cost_usd,
@@ -214,6 +216,7 @@ func upsertTenantQuotaTx(ctx context.Context, tx pgx.Tx, scope string, q backend
 		    on_exceed       = EXCLUDED.on_exceed,
 		    enabled         = EXCLUDED.enabled,
 		    updated_by      = EXCLUDED.updated_by,
+		    updated_by_principal = EXCLUDED.updated_by_principal,
 		    updated_at      = now()`,
 		scope, q.DailyCostUSD, q.MonthlyCostUSD, q.DailyCalls, q.OnExceed, q.Enabled, by)
 	if err != nil {
