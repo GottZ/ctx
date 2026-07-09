@@ -643,6 +643,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.runWebChatRetention(ctx)
 			s.runWebhookRetention(ctx)
 			s.runOAuthCodeGC(ctx)
+			s.runSSOStateGC(ctx)
 
 		case <-webhookInboxTicker.C:
 			s.runWebhookInbox(ctx)
@@ -998,6 +999,26 @@ func (s *Scheduler) runOAuthCodeGC(ctx context.Context) {
 	}
 	if deleted > 0 {
 		slog.Info("scheduler: oauth codes evicted", "rows", deleted)
+	}
+}
+
+// runSSOStateGC sweeps expired SSO login states (101, design 04 §3.3; shares
+// the embed-cache janitor tick). Correctness never depends on this sweep —
+// ConsumeSSOState checks expires_at itself; the GC only keeps abandoned
+// logins from accumulating dead rows.
+func (s *Scheduler) runSSOStateGC(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in sso state gc", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+	deleted, err := store.EvictExpiredSSOStates(ctx, s.pool)
+	if err != nil {
+		slog.Warn("scheduler: sso state gc failed", "error", err)
+		return
+	}
+	if deleted > 0 {
+		slog.Info("scheduler: sso states evicted", "rows", deleted)
 	}
 }
 
