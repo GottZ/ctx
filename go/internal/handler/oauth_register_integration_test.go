@@ -27,10 +27,14 @@ func TestDCRRegister_Integration(t *testing.T) {
 	ctx := context.Background()
 	h := NewOAuthHandler(pool)
 
-	post := func(t *testing.T, body string, hdr map[string]string) (*httptest.ResponseRecorder, map[string]any) {
+	// postFrom pins the source IP (rate-limit probes); post hands each
+	// request a unique IP so the process-wide W4b limiter never couples
+	// unrelated subtests.
+	postFrom := func(t *testing.T, remoteAddr, body string, hdr map[string]string) (*httptest.ResponseRecorder, map[string]any) {
 		t.Helper()
 		req := httptest.NewRequest("POST", "/register", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = remoteAddr
 		for k, v := range hdr {
 			req.Header.Set(k, v)
 		}
@@ -39,6 +43,10 @@ func TestDCRRegister_Integration(t *testing.T) {
 		var doc map[string]any
 		_ = json.Unmarshal(rec.Body.Bytes(), &doc)
 		return rec, doc
+	}
+	post := func(t *testing.T, body string, hdr map[string]string) (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		return postFrom(t, dcrTestAddr(), body, hdr)
 	}
 
 	t.Run("OpenValidPublicClient201_NoSecret", func(t *testing.T) {
@@ -174,6 +182,54 @@ func TestDCRRegister_Integration(t *testing.T) {
 		}
 		if createdBy == nil || *createdBy != adminKey.ID {
 			t.Errorf("created_by = %v, want acting admin key %s", createdBy, adminKey.ID)
+		}
+	})
+
+	// --- 02-W4b guardrail gates ---
+
+	t.Run("W4b_CapReached403", func(t *testing.T) {
+		t.Setenv(EnvDCRMode, "open")
+		// Self-sufficient under -run filtering: guarantee at least one row
+		// under the default cap, then drop the cap to 1 → next must be 403.
+		rec, _ := post(t, `{"redirect_uris":["https://cap-seed.example/cb"]}`, nil)
+		if rec.Code != 201 {
+			t.Fatalf("cap seed: status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
+		}
+		t.Setenv(EnvDCRMaxClients, "1")
+		rec, doc := post(t, `{"redirect_uris":["https://cap-over.example/cb"]}`, nil)
+		if rec.Code != 403 {
+			t.Fatalf("over cap: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+		}
+		if doc["error"] != "too_many_clients" {
+			t.Errorf("error = %v, want too_many_clients", doc["error"])
+		}
+		var count int
+		if err := pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM context_oauth_clients WHERE redirect_uris @> ARRAY['https://cap-over.example/cb']`,
+		).Scan(&count); err != nil || count != 0 {
+			t.Errorf("capped registration persisted anyway (count %d, err %v)", count, err)
+		}
+	})
+
+	t.Run("W4b_RateLimit_SameIP429_OtherIP201", func(t *testing.T) {
+		t.Setenv(EnvDCRMode, "open")
+		t.Setenv(EnvDCRRegisterRate, "3")
+		body := `{"redirect_uris":["https://rate.example/cb"]}`
+		ipA := "203.0.113.41:6001"
+		for i := 1; i <= 3; i++ {
+			if rec, _ := postFrom(t, ipA, body, nil); rec.Code != 201 {
+				t.Fatalf("request %d within budget: status = %d, want 201 (body %s)", i, rec.Code, rec.Body.String())
+			}
+		}
+		rec, doc := postFrom(t, ipA, body, nil)
+		if rec.Code != 429 {
+			t.Fatalf("request 4 over budget: status = %d, want 429 (body %s)", rec.Code, rec.Body.String())
+		}
+		if doc["error"] != "too_many_requests" {
+			t.Errorf("error = %v, want too_many_requests", doc["error"])
+		}
+		if rec, _ := postFrom(t, "203.0.113.42:6001", body, nil); rec.Code != 201 {
+			t.Errorf("other IP: status = %d, want 201 — the limit is per IP, not global (body %s)", rec.Code, rec.Body.String())
 		}
 	})
 }

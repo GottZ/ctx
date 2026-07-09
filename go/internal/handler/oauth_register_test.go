@@ -2,10 +2,23 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+// dcrTestIPSeq hands every helper request a unique source IP: the W4b rate
+// limiter is process-wide, so tests sharing httptest's default RemoteAddr
+// would throttle EACH OTHER once the guard exists. Rate-limit tests pin
+// their own RemoteAddr explicitly instead.
+var dcrTestIPSeq atomic.Int64
+
+func dcrTestAddr() string {
+	n := dcrTestIPSeq.Add(1)
+	return fmt.Sprintf("10.99.%d.%d:4242", n/250, n%250+1)
+}
 
 // These probes pin the 02-W4a fail-closed surface that returns BEFORE any DB
 // access — mode gate, body cap, metadata validation. Every rejection is its
@@ -16,6 +29,7 @@ func dcrPost(t *testing.T, h *OAuthHandler, body string) *httptest.ResponseRecor
 	t.Helper()
 	req := httptest.NewRequest("POST", "/register", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = dcrTestAddr()
 	rec := httptest.NewRecorder()
 	h.Register(rec, req)
 	return rec

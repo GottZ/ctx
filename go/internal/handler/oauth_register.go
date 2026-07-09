@@ -87,6 +87,14 @@ func (h *OAuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		createdBy = ar.ApiKeyID
 	}
 
+	// W4b guard 1: per-IP rate limit — in every non-off mode (uniform; the
+	// admin gate above is authorization, not resource protection), before
+	// any body work. Guard 2 (table cap) sits after validation: it needs
+	// the DB, and invalid requests should settle without a round trip.
+	if !h.dcrRateLimitOK(w, r) {
+		return
+	}
+
 	// Body cap analogous to /authorize and /token (8192, design 02 §4b).
 	r.Body = http.MaxBytesReader(w, r.Body, 8192)
 	var req dcrRequest
@@ -103,6 +111,12 @@ func (h *OAuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec.CreatedBy = createdBy
+
+	// W4b guard 2: hard table cap (CTX_OAUTH_MAX_CLIENTS) — the DoS
+	// backstop that holds even when the per-IP counting is evaded.
+	if !h.dcrCapOK(w, r) {
+		return
+	}
 
 	client, secret, err := store.RegisterOAuthClient(r.Context(), h.pool, spec)
 	if err != nil {
