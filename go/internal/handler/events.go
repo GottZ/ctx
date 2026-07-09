@@ -464,7 +464,11 @@ func NewEventsHandler(life context.Context, pool *pgxpool.Pool, collector *Statu
 			return fetchLLMCalls(ctx, pool, cursor, limit)
 		},
 		authenticate: func(ctx context.Context, key string) (*auth.AuthResult, error) {
-			return auth.Authenticate(ctx, pool, key)
+			// resolveCredential, not auth.Authenticate: the stream may be
+			// carried by an opaque ctxt_ token (S3) — SanitizeKey would
+			// destroy its prefix on the re-auth tick and kill the stream
+			// (design 03 §4, RVW-Vollst-F2).
+			return resolveCredential(ctx, pool, key)
 		},
 		subs: map[*sseSub]struct{}{},
 	}}
@@ -518,7 +522,7 @@ func (h *EventsHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	key := apiKeyFromRequest(r)
+	key := credentialFromRequest(r)
 	pingT := time.NewTicker(ping)
 	defer pingT.Stop()
 	// Re-auth every 12th base tick (= 60s at the 5s default). The system is

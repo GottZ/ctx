@@ -180,9 +180,13 @@ func TestBackendsDiffKeyExcludesCooldown(t *testing.T) {
 	}
 }
 
-// TestAPIKeyFromRequest pins the shared extraction: X-Context-Key wins, Bearer
-// is the fallback, non-hex is stripped, empty stays empty.
-func TestAPIKeyFromRequest(t *testing.T) {
+// TestCredentialFromRequest pins the shared RAW extraction: X-Context-Key
+// wins, Bearer is the fallback, empty stays empty — and the ctxt_/ctxr_
+// prefix SURVIVES extraction from either header (S3: sanitizing here would
+// hex-strip an opaque token into the raw-key path, design 03 §4
+// RVW-Vollst-F6; SanitizeKey now lives inside resolveCredential's raw-key
+// branch only).
+func TestCredentialFromRequest(t *testing.T) {
 	mk := func(set func(*http.Request)) *http.Request {
 		r := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 		set(r)
@@ -200,11 +204,13 @@ func TestAPIKeyFromRequest(t *testing.T) {
 			r.Header.Set("X-Context-Key", "aaaa")
 			r.Header.Set("Authorization", "Bearer bbbb")
 		}), "aaaa"},
-		{"sanitized", mk(func(r *http.Request) { r.Header.Set("X-Context-Key", "ab-cd ef") }), "abcdef"},
+		{"token-prefix-survives-x-header", mk(func(r *http.Request) { r.Header.Set("X-Context-Key", "ctxt_abc123") }), "ctxt_abc123"},
+		{"token-prefix-survives-bearer", mk(func(r *http.Request) { r.Header.Set("Authorization", "Bearer ctxr_abc123") }), "ctxr_abc123"},
+		{"trimmed", mk(func(r *http.Request) { r.Header.Set("X-Context-Key", " abc123 ") }), "abc123"},
 		{"empty", mk(func(r *http.Request) {}), ""},
 	}
 	for _, c := range cases {
-		if got := apiKeyFromRequest(c.r); got != c.want {
+		if got := credentialFromRequest(c.r); got != c.want {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
 	}

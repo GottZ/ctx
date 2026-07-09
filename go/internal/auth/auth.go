@@ -106,3 +106,62 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Auth
 
 	return result, nil
 }
+
+// AuthenticateByID materialises the AuthResult for one already-resolved
+// api_key_id via ctx_auth_by_id — the SAME inner scope-build ctx_auth
+// delegates to (095, K3): all three fail-closed gates (key active, tenant
+// status, principal is_active) + the last_used_at write live in ONE SQL
+// function, so a token or session resolving here can never drift from the
+// raw-key path (design 03 §4, RVW-Sec-M2). Callers: the opaque-token path
+// (S3) and Achse 05's browser session. INV-A: the input is always exactly
+// ONE key id, never a set.
+func AuthenticateByID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string) (*AuthResult, error) {
+	if apiKeyID == "" {
+		return &AuthResult{IsValid: false}, nil
+	}
+
+	var (
+		keyID         *string
+		homeScope     string
+		allowedScopes []string
+		readScopes    []string
+		isValid       bool
+		isAdmin       bool
+		tenantID      *string
+		tenantRole    string
+		writeScopes   []string
+		confirmWrites bool
+		principalID   *string
+	)
+
+	err := pool.QueryRow(ctx,
+		`SELECT api_key_id, home_scope, allowed_scopes, read_scopes, is_valid, is_admin, tenant_id, tenant_role, write_scopes, confirm_writes, principal_id FROM ctx_auth_by_id($1::uuid)`,
+		apiKeyID,
+	).Scan(&keyID, &homeScope, &allowedScopes, &readScopes, &isValid, &isAdmin, &tenantID, &tenantRole, &writeScopes, &confirmWrites, &principalID)
+	if err != nil {
+		return nil, fmt.Errorf("auth: query ctx_auth_by_id: %w", err)
+	}
+
+	result := &AuthResult{
+		HomeScope:     homeScope,
+		AllowedScopes: allowedScopes,
+		ReadScopes:    readScopes,
+		IsValid:       isValid,
+		IsAdmin:       isAdmin,
+		TenantRole:    Role(tenantRole),
+		WriteScopes:   writeScopes,
+		ConfirmWrites: confirmWrites,
+	}
+
+	if keyID != nil {
+		result.ApiKeyID = *keyID
+	}
+	if tenantID != nil {
+		result.TenantID = *tenantID
+	}
+	if principalID != nil {
+		result.PrincipalID = *principalID
+	}
+
+	return result, nil
+}

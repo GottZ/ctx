@@ -302,13 +302,18 @@ fi
 # OAuth L1/04-W1a+W1b consumer-strand schema; design 04 §3.2/§3.3 — M097/C1
 # adds only columns on context_oauth_clients) — table_count 42→44, col_count
 # STAYS 40.
+# + 1 table since M099 (context_access_tokens, OAuth S3/W03-3 universal opaque
+# token store — Masterplan K2: the ONE credential store, Achse 05 adds only
+# the web overlay in M102; M099 also DROPS the transitional
+# context_oauth_codes.api_key_sealed column, no table change from that) —
+# table_count 44→45, col_count STAYS 40.
 T="T07 SCHEMA_INTEGRITY"
 table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
 col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "44" ]] && [[ "$col_count" == "40" ]]; then
+if [[ "$table_count" == "45" ]] && [[ "$col_count" == "40" ]]; then
   pass "$T (tables=$table_count, columns=$col_count)"
 else
-  fail "$T" "expected 44 tables + 40 columns, got tables=$table_count columns=$col_count"
+  fail "$T" "expected 45 tables + 40 columns, got tables=$table_count columns=$col_count"
 fi
 
 # T08 GUARD_STATS

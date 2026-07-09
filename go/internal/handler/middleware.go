@@ -13,6 +13,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -207,28 +208,66 @@ func Recovery(next http.Handler) http.Handler {
 	})
 }
 
-// apiKeyFromRequest extracts and sanitizes the API key from the X-Context-Key
-// header or an Authorization: Bearer token. Shared by the Auth middleware
-// (connect-time) and the SSE in-stream re-auth path (events.go, G34) so both
-// read the key identically.
-func apiKeyFromRequest(r *http.Request) string {
+// credentialFromRequest extracts the RAW credential from the X-Context-Key
+// header or an Authorization: Bearer token — deliberately WITHOUT SanitizeKey:
+// the ctxt_/ctxr_ prefix of an opaque token (S3) must survive extraction so
+// resolveCredential can branch on it, and it must do so header-agnostically
+// (a ctxt_ token via X-Context-Key would otherwise be hex-stripped into the
+// raw-key path — design 03 §4, RVW-Vollst-F6). Shared by the Auth middleware
+// (connect-time) and both SSE in-stream re-auth paths (events.go,
+// project_events.go) so all three read the credential identically.
+func credentialFromRequest(r *http.Request) string {
 	rawKey := r.Header.Get("X-Context-Key")
 	if rawKey == "" {
 		if bearer := r.Header.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
 			rawKey = strings.TrimPrefix(bearer, "Bearer ")
 		}
 	}
-	return auth.SanitizeKey(rawKey)
+	return strings.TrimSpace(rawKey)
+}
+
+// resolveCredential is the ONE credential→AuthResult gate for all HTTP auth
+// paths (design 03 §4, wave S3). Branching happens on the extracted value,
+// BEFORE SanitizeKey, independent of the source header:
+//
+//   - ctxt_ (opaque access token, 099): token-store lookup → ctx_auth_by_id.
+//     A miss NEVER falls back to the raw-key path (explicit fail-closed) —
+//     unknown, expired and revoked tokens are all the same invalid result.
+//   - ctxr_ (refresh token): explicitly rejected — a refresh token is not an
+//     access credential; the SQL token_type='access' filter is only the
+//     second belt.
+//   - anything else: the raw-api-key path, byte-identical to the pre-S3
+//     behaviour (SanitizeKey → ctx_auth). Raw keys are pure hex, so a
+//     prefixed token can never be misclassified here and vice versa.
+//
+// Both token and key materialise through the SAME ctx_auth_by_id scope-build
+// (095): a revoked key or deactivated principal kills its tokens instantly,
+// with no separate token-revocation bookkeeping.
+func resolveCredential(ctx context.Context, pool *pgxpool.Pool, raw string) (*auth.AuthResult, error) {
+	switch {
+	case strings.HasPrefix(raw, store.AccessTokenPrefix):
+		apiKeyID, ok, err := store.LookupAccessToken(ctx, pool, raw)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return &auth.AuthResult{IsValid: false}, nil
+		}
+		return auth.AuthenticateByID(ctx, pool, apiKeyID)
+	case strings.HasPrefix(raw, store.RefreshTokenPrefix):
+		return &auth.AuthResult{IsValid: false}, nil
+	default:
+		return auth.Authenticate(ctx, pool, auth.SanitizeKey(raw))
+	}
 }
 
 // Auth creates middleware that authenticates requests via X-Context-Key header
-// or Authorization: Bearer token. Bearer tokens are treated as API keys.
+// or Authorization: Bearer token. Bearer values are opaque ctxt_ tokens or raw
+// API keys — resolveCredential branches (S3).
 func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			apiKey := apiKeyFromRequest(r)
-
-			result, err := auth.Authenticate(r.Context(), pool, apiKey)
+			result, err := resolveCredential(r.Context(), pool, credentialFromRequest(r))
 			if err != nil {
 				slog.Error("auth failed",
 					"error", err,

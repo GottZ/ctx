@@ -2,12 +2,11 @@
 // Maps existing ctx API keys to OAuth Bearer tokens. No external OAuth provider needed.
 //
 // Flow: claude.ai → /authorize → user enters API key → redirect with code →
-// claude.ai → /token → gets Bearer token (= API key) → MCP calls with Bearer.
+// claude.ai → /token → gets opaque Bearer token (ctxt_, key-bound, S3) →
+// MCP calls with Bearer. Raw api keys stay valid as Bearer (E2 legacy path).
 package handler
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -111,10 +110,6 @@ func validateRegisteredRedirectURI(raw string) error {
 	}
 }
 
-// codeSealDomain versions the code→key derivation for the transitional
-// api_key_sealed blob (098, W03-1→W03-3). Part of the persisted format.
-const codeSealDomain = "ctx:oauth-code-seal:v1:"
-
 // codeHash is the DB lookup form of an authorization code — the plaintext
 // code never reaches the DB (design 03 §3).
 func codeHash(code string) string {
@@ -122,53 +117,10 @@ func codeHash(code string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// codeSealAEAD derives the AES-256-GCM instance for one code's transitional
-// api_key_sealed blob. The key is derived FROM THE CODE (domain-separated
-// SHA-256) — the DB stores only code_hash, so a dump/backup alone cannot
-// decrypt the blob; only the code bearer (the OAuth client at /token) can.
-// Weaker-alternative note: sealbox (CTX_SECRETS_KEY) would put the unseal
-// key in the same env as the DB credentials and is optional at boot; the
-// code-derived key needs no config and is strictly bound to the flow.
-func codeSealAEAD(code string) (cipher.AEAD, error) {
-	key := sha256.Sum256([]byte(codeSealDomain + code))
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return nil, fmt.Errorf("oauth: seal cipher: %w", err)
-	}
-	return cipher.NewGCM(block)
-}
-
-// sealAPIKey encrypts the plaintext api key under the code-derived key.
-// Layout: nonce || ciphertext (GCM tag included).
-func sealAPIKey(code, apiKey string) ([]byte, error) {
-	aead, err := codeSealAEAD(code)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("oauth: seal nonce: %w", err)
-	}
-	return append(nonce, aead.Seal(nil, nonce, []byte(apiKey), nil)...), nil
-}
-
-// openAPIKey decrypts the transitional blob with the presented code. Fails
-// (authentication error) on any tamper or on a wrong code — which cannot
-// normally happen, since the row was looked up by this code's hash.
-func openAPIKey(code string, sealed []byte) (string, error) {
-	aead, err := codeSealAEAD(code)
-	if err != nil {
-		return "", err
-	}
-	if len(sealed) < aead.NonceSize() {
-		return "", fmt.Errorf("oauth: sealed blob too short")
-	}
-	plain, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], nil)
-	if err != nil {
-		return "", fmt.Errorf("oauth: unseal: %w", err)
-	}
-	return string(plain), nil
-}
+// accessTokenTTL is the opaque access-token lifetime (E-03c, decided: 1h).
+// The short TTL bounds the revocation latency; long-lived MCP sessions get
+// their continuity from the rotating refresh token (S4, 30d rolling).
+const accessTokenTTL = time.Hour
 
 // canonicalOrHostIssuer returns the configured canonical issuer (S2,
 // RVW-Spec-F4) or falls back to the pre-S2 r.Host derivation. The RFC 9207
@@ -364,22 +316,16 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Persist the pending code (098, S1): the DB row carries the INV-A
 	// single-key selector + principal anchor from the AuthResult — the
-	// plaintext key exists only transiently here and inside the code-sealed
-	// transitional blob (see codeSealAEAD; W03-3 removes it with the opaque
-	// tokens). The plaintext code never reaches the DB either (code_hash).
-	sealed, err := sealAPIKey(code, apiKey)
-	if err != nil {
-		slog.Error("oauth: seal api key for code row", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
+	// plaintext key exists only transiently in this handler and is gone
+	// after this request (since S3 /token mints an opaque token from
+	// api_key_id; the S1-transitional sealed-key blob is dropped). The
+	// plaintext code never reaches the DB either (code_hash).
 	if err := store.PutOAuthCode(r.Context(), h.pool, codeHash(code), store.OAuthCode{
 		APIKeyID:      result.ApiKeyID,
 		PrincipalID:   result.PrincipalID,
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
-		APIKeySealed:  sealed,
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	}); err != nil {
 		slog.Error("oauth: persist authorization code", "error", err)
@@ -474,20 +420,34 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issue token — the API key IS the token (E2 passthrough until W03-3/S3
-	// mints opaque tokens). The plaintext is recovered from the transitional
-	// code-sealed blob; only the code bearer can perform this step.
-	apiKey, err := openAPIKey(code, ac.APIKeySealed)
+	// Issue token — an OPAQUE, revocable, key-bound access token (S3/W03-3;
+	// E-03a decided ja): the raw api key no longer circulates through the
+	// OAuth client's token storage. The row carries the INV-A single-key
+	// selector from the code; resolution at /mcp materialises through the
+	// same ctx_auth_by_id gates as the raw-key path. audiences always
+	// contains the ctx-MCP resource (design 03 §4: E2 × RFC-8707 — the
+	// membership CHECK at /mcp lands in S5); the refresh token follows in
+	// S4 (rotation + reuse detection), so expires_in is the whole story for
+	// now and clients re-run the code flow after expiry.
+	token, err := store.MintAccessToken(r.Context(), h.pool, store.OAuthToken{
+		APIKeyID:    ac.APIKeyID,
+		PrincipalID: ac.PrincipalID,
+		ClientID:    ac.ClientID,
+		Audiences:   []string{h.canonicalOrHostIssuer(r) + "/mcp"},
+		IssuedVia:   "oauth",
+		ExpiresAt:   time.Now().Add(accessTokenTTL),
+	})
 	if err != nil {
-		slog.Error("oauth: unseal api key", "error", err)
+		slog.Error("oauth: mint access token", "error", err)
 		oauthError(w, "invalid_grant", "code expired or not found")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"access_token": apiKey,
+		"access_token": token,
 		"token_type":   "Bearer",
+		"expires_in":   int(accessTokenTTL / time.Second),
 	})
 }
 

@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -70,7 +69,7 @@ func (h *OAuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	createdBy := "" // open mode: anonymous; forensics via rate-limit logs (W4b)
 	if mode == "admin" {
-		ar, err := auth.Authenticate(r.Context(), h.pool, apiKeyFromRequest(r))
+		ar, err := resolveCredential(r.Context(), h.pool, credentialFromRequest(r))
 		if err != nil {
 			slog.Error("oauth: dcr admin auth", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)

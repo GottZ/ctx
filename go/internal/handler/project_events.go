@@ -63,7 +63,9 @@ func NewProjectEventsHandler(hub *events.ProjectHub, pool *pgxpool.Pool, cfg Con
 		pool: pool,
 		cfg:  cfg,
 		authenticate: func(ctx context.Context, key string) (*auth.AuthResult, error) {
-			return auth.Authenticate(ctx, pool, key)
+			// resolveCredential, not auth.Authenticate: a ctxt_-token-backed
+			// stream must survive the re-auth tick (design 03 §4, RVW-Vollst-F2).
+			return resolveCredential(ctx, pool, key)
 		},
 	}
 }
@@ -178,7 +180,7 @@ func (h *ProjectEventsHandler) HandleProjectEvents(w http.ResponseWriter, r *htt
 		reauthEvery = flush * time.Duration(projectSSEReauthMult)
 	}
 
-	key := apiKeyFromRequest(r)
+	key := credentialFromRequest(r)
 	pingT := time.NewTicker(ping)
 	defer pingT.Stop()
 	reauthT := time.NewTicker(reauthEvery)

@@ -12,18 +12,16 @@ import (
 
 // OAuthCode is one pending authorization code (098, design 03 §3 / wave S1).
 // The row carries the INV-A single-key selector (APIKeyID) + the person
-// anchor (PrincipalID) — never a key set and never the plaintext key: the
-// transitional APIKeySealed blob (W03-1→W03-3) is AES-256-GCM ciphertext
-// under a key DERIVED FROM THE CODE (handler/oauth.go), and the code itself
-// is stored only as its SHA-256 (code_hash). A DB dump alone can neither
-// replay the code nor recover the key.
+// anchor (PrincipalID) — never a key set and never the plaintext key; the
+// code itself is stored only as its SHA-256 (code_hash). The S1-transitional
+// sealed-key blob is gone since S3 (099 dropped the column): /token mints an
+// opaque token from api_key_id and never needs the plaintext key again.
 type OAuthCode struct {
 	APIKeyID      string
 	PrincipalID   string
 	ClientID      string // "" → NULL (client_id becomes mandatory in S2/W03-2)
 	RedirectURI   string
 	CodeChallenge string
-	APIKeySealed  []byte
 	ExpiresAt     time.Time
 }
 
@@ -37,9 +35,9 @@ func PutOAuthCode(ctx context.Context, pool *pgxpool.Pool, codeHash string, c OA
 	}
 	_, err := pool.Exec(ctx,
 		`INSERT INTO context_oauth_codes
-		     (code_hash, api_key_id, principal_id, client_id, redirect_uri, code_challenge, api_key_sealed, expires_at)
-		 VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8)`,
-		codeHash, c.APIKeyID, c.PrincipalID, clientID, c.RedirectURI, c.CodeChallenge, c.APIKeySealed, c.ExpiresAt,
+		     (code_hash, api_key_id, principal_id, client_id, redirect_uri, code_challenge, expires_at)
+		 VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7)`,
+		codeHash, c.APIKeyID, c.PrincipalID, clientID, c.RedirectURI, c.CodeChallenge, c.ExpiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("oauth codes: put: %w", err)
@@ -60,9 +58,9 @@ func TakeOAuthCode(ctx context.Context, pool *pgxpool.Pool, codeHash string) (*O
 	err := pool.QueryRow(ctx,
 		`DELETE FROM context_oauth_codes
 		  WHERE code_hash = $1
-		 RETURNING api_key_id, principal_id, client_id, redirect_uri, code_challenge, api_key_sealed, expires_at`,
+		 RETURNING api_key_id, principal_id, client_id, redirect_uri, code_challenge, expires_at`,
 		codeHash,
-	).Scan(&c.APIKeyID, &c.PrincipalID, &clientID, &c.RedirectURI, &c.CodeChallenge, &c.APIKeySealed, &c.ExpiresAt)
+	).Scan(&c.APIKeyID, &c.PrincipalID, &clientID, &c.RedirectURI, &c.CodeChallenge, &c.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil // unknown or already consumed — the caller answers invalid_grant
 	}

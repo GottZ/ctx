@@ -19,7 +19,7 @@ docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 \
   -c "UPDATE context_api_keys SET is_admin = true WHERE id = '<uuid>';"
 ```
 
-**Admin-key hygiene.** The OAuth/MCP flow hands the API key ITSELF out as the bearer token — a key used as an MCP remote token circulates through claude.ai/Cloudflare and is stored in external connector storage. Create a **dedicated admin key that is never used as an MCP/OAuth token**; the claude.ai MCP key stays non-admin. Test/eval script keys stay non-admin too (least privilege).
+**Admin-key hygiene.** Since S3 (migration 099) the OAuth `/token` exchange hands out an **opaque, key-bound, revocable `ctxt_` token** (SHA-256 at rest, 1h TTL) instead of the api key itself — what circulates through claude.ai/Cloudflare and external connector storage is no longer the long-lived key. The raw api key **stays valid as a Bearer value** (deliberate E2 legacy path for existing connectors), so a key pasted directly into a connector still circulates; the hygiene rule therefore stands: create a **dedicated admin key that is never used as an MCP/OAuth credential**; the claude.ai MCP key stays non-admin. Test/eval script keys stay non-admin too (least privilege). Revoking a key (or deactivating its principal) kills every token minted from it instantly — token resolution runs through the same `ctx_auth_by_id` gates as key auth.
 
 ## Sealed secrets & break-glass
 

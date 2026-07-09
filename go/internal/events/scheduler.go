@@ -643,6 +643,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.runWebChatRetention(ctx)
 			s.runWebhookRetention(ctx)
 			s.runOAuthCodeGC(ctx)
+			s.runOAuthTokenGC(ctx)
 			s.runSSOStateGC(ctx)
 
 		case <-webhookInboxTicker.C:
@@ -999,6 +1000,26 @@ func (s *Scheduler) runOAuthCodeGC(ctx context.Context) {
 	}
 	if deleted > 0 {
 		slog.Info("scheduler: oauth codes evicted", "rows", deleted)
+	}
+}
+
+// runOAuthTokenGC sweeps opaque-token rows 7 days past expiry (099, design 03
+// §4; shares the embed-cache janitor tick). Correctness never depends on this
+// sweep — LookupAccessToken rejects stale tokens regardless; the long grace
+// deliberately preserves expired refresh rows as S4 reuse-detection evidence.
+func (s *Scheduler) runOAuthTokenGC(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in oauth token gc", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+	deleted, err := store.EvictExpiredOAuthTokens(ctx, s.pool)
+	if err != nil {
+		slog.Warn("scheduler: oauth token gc failed", "error", err)
+		return
+	}
+	if deleted > 0 {
+		slog.Info("scheduler: oauth tokens evicted", "rows", deleted)
 	}
 }
 
