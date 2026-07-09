@@ -122,7 +122,7 @@ func w9SSESeedProject(t *testing.T, pool *pgxpool.Pool, slug string) (string, st
 
 // w9SSEServer stands up the real MountProjectEvents chain with an injected
 // initial AuthResult and a fake in-stream authenticate seam.
-func w9SSEServer(t *testing.T, hub *events.ProjectHub, pool *pgxpool.Pool, cfg *config.Store, initial *auth.AuthResult, fake func(context.Context, string) (*auth.AuthResult, error)) *httptest.Server {
+func w9SSEServer(t *testing.T, hub *events.ProjectHub, pool *pgxpool.Pool, cfg *config.Store, initial *auth.AuthResult, fake func(context.Context, string, bool) (*auth.AuthResult, error)) *httptest.Server {
 	t.Helper()
 	h := NewProjectEventsHandler(hub, pool, cfg)
 	h.authenticate = fake
@@ -164,7 +164,7 @@ func TestW9SSEKeyRevoke(t *testing.T) {
 	initial := &auth.AuthResult{IsValid: true, TenantID: "tn-1", ReadScopes: []string{scopeA}}
 	var calls int
 	var mu sync.Mutex
-	fake := func(context.Context, string) (*auth.AuthResult, error) {
+	fake := func(context.Context, string, bool) (*auth.AuthResult, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		calls++
@@ -239,7 +239,7 @@ func TestW9SSEGrantRevoke(t *testing.T) {
 	initial := &auth.AuthResult{IsValid: true, TenantID: "tn-A", ReadScopes: []string{scopeA, scopeB}}
 	var revoked bool
 	var mu sync.Mutex
-	fake := func(context.Context, string) (*auth.AuthResult, error) {
+	fake := func(context.Context, string, bool) (*auth.AuthResult, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		rs := []string{scopeA, scopeB}

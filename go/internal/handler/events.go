@@ -266,7 +266,7 @@ type sseHub struct {
 	// Injectable seams (mirrors StatusCollector.queueDepth) — bound to the real
 	// pool / auth in NewEventsHandler, faked in tests.
 	llmcalls     func(ctx context.Context, cursor time.Time, limit int) ([]llmlogEntry, time.Time)
-	authenticate func(ctx context.Context, key string) (*auth.AuthResult, error)
+	authenticate func(ctx context.Context, key string, isSession bool) (*auth.AuthResult, error)
 
 	mu      sync.Mutex
 	subs    map[*sseSub]struct{}
@@ -463,12 +463,13 @@ func NewEventsHandler(life context.Context, pool *pgxpool.Pool, collector *Statu
 		llmcalls: func(ctx context.Context, cursor time.Time, limit int) ([]llmlogEntry, time.Time) {
 			return fetchLLMCalls(ctx, pool, cursor, limit)
 		},
-		authenticate: func(ctx context.Context, key string) (*auth.AuthResult, error) {
-			// resolveCredential, not auth.Authenticate: the stream may be
-			// carried by an opaque ctxt_ token (S3) — SanitizeKey would
+		authenticate: func(ctx context.Context, key string, isSession bool) (*auth.AuthResult, error) {
+			// resolveRequestCredential, not auth.Authenticate: the stream may
+			// be carried by an opaque ctxt_ token (S3) — SanitizeKey would
 			// destroy its prefix on the re-auth tick and kill the stream
-			// (design 03 §4, RVW-Vollst-F2).
-			return resolveCredential(ctx, pool, key)
+			// (design 03 §4, RVW-Vollst-F2) — or by a ctx_session cookie
+			// (R2), whose revocation must end the stream the same way.
+			return resolveRequestCredential(ctx, pool, key, isSession)
 		},
 		subs: map[*sseSub]struct{}{},
 	}}
@@ -522,7 +523,7 @@ func (h *EventsHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	key := credentialFromRequest(r)
+	key, keyIsSession := requestCredential(r)
 	pingT := time.NewTicker(ping)
 	defer pingT.Stop()
 	// Re-auth every 12th base tick (= 60s at the 5s default). The system is
@@ -552,7 +553,7 @@ func (h *EventsHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 			// T37d (anchor 6): per-tenant re-auth ends the stream on
 			// !(server-admin || tenant-admin-of-own-tenant) AND on a tenant_id/role
 			// change mid-stream (a re-pointed key must not keep the old telemetry).
-			res, err := h.hub.authenticate(r.Context(), key)
+			res, err := h.hub.authenticate(r.Context(), key, keyIsSession)
 			if err != nil || res == nil || !res.IsValid || !res.IsAdmin {
 				_ = sw.event("error", "", []byte(`{"error":"session revoked"}`))
 				return

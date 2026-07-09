@@ -52,7 +52,7 @@ type ProjectEventsHandler struct {
 	hub          *events.ProjectHub
 	pool         *pgxpool.Pool
 	cfg          ConfigStore
-	authenticate func(ctx context.Context, key string) (*auth.AuthResult, error)
+	authenticate func(ctx context.Context, key string, isSession bool) (*auth.AuthResult, error)
 }
 
 // NewProjectEventsHandler wires the hub + pool + config. cfg supplies the per-
@@ -62,10 +62,11 @@ func NewProjectEventsHandler(hub *events.ProjectHub, pool *pgxpool.Pool, cfg Con
 		hub:  hub,
 		pool: pool,
 		cfg:  cfg,
-		authenticate: func(ctx context.Context, key string) (*auth.AuthResult, error) {
-			// resolveCredential, not auth.Authenticate: a ctxt_-token-backed
-			// stream must survive the re-auth tick (design 03 §4, RVW-Vollst-F2).
-			return resolveCredential(ctx, pool, key)
+		authenticate: func(ctx context.Context, key string, isSession bool) (*auth.AuthResult, error) {
+			// resolveRequestCredential, not auth.Authenticate: a ctxt_-token-
+			// or ctx_session-cookie-backed stream must survive the re-auth
+			// tick — and die with its token/session (design 03 §4 / 05 §4.2).
+			return resolveRequestCredential(ctx, pool, key, isSession)
 		},
 	}
 }
@@ -180,7 +181,7 @@ func (h *ProjectEventsHandler) HandleProjectEvents(w http.ResponseWriter, r *htt
 		reauthEvery = flush * time.Duration(projectSSEReauthMult)
 	}
 
-	key := credentialFromRequest(r)
+	key, keyIsSession := requestCredential(r)
 	pingT := time.NewTicker(ping)
 	defer pingT.Stop()
 	reauthT := time.NewTicker(reauthEvery)
@@ -205,7 +206,7 @@ func (h *ProjectEventsHandler) HandleProjectEvents(w http.ResponseWriter, r *htt
 				return
 			}
 		case <-reauthT.C:
-			fresh, err := h.authenticate(r.Context(), key)
+			fresh, err := h.authenticate(r.Context(), key, keyIsSession)
 			// Revocation / invalid / TENANT change ends the stream outright (a
 			// re-pointed key must not keep the old tenant's domain events).
 			if err != nil || fresh == nil || !fresh.IsValid || fresh.TenantID != ar.TenantID {

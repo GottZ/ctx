@@ -228,6 +228,50 @@ func credentialFromRequest(r *http.Request) string {
 	return strings.TrimSpace(rawKey)
 }
 
+// sessionCookieName is the httpOnly web-session cookie (design 05 §4.2 path
+// 3, wave R2). Its value is the context_web_sessions row id; issuance (login)
+// lands in R3 — until then only seeded rows can resolve.
+const sessionCookieName = "ctx_session"
+
+// requestCredential extracts the request's credential with the §4.2
+// precedence: a header credential (X-Context-Key / Bearer) ALWAYS wins; only
+// a request with no header credential at all falls through to the session
+// cookie (isSession=true). The discrimination is an explicit flag, never a
+// value shape — a session id is a dashed UUID that SanitizeKey would strip
+// into a 32-hex, key-shaped string, so shape-sniffing could misroute it.
+// Shared by the Auth middleware and both SSE re-auth seams: the streams
+// capture (raw, isSession) at connect time and the tick re-resolves the
+// same pair, so a cookie-carried stream dies with its session exactly like
+// a token-carried stream dies with its token.
+func requestCredential(r *http.Request) (raw string, isSession bool) {
+	if raw = credentialFromRequest(r); raw != "" {
+		return raw, false
+	}
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		return c.Value, true
+	}
+	return "", false
+}
+
+// resolveRequestCredential resolves either credential shape onto the ONE
+// AuthResult gate: a session id runs overlay→token→ctx_auth_by_id (05 §4.2
+// path 3), everything else takes the S3 resolveCredential branches. A
+// session miss of ANY kind never falls back to the key path (fail-closed,
+// same rule as the ctxt_ branch).
+func resolveRequestCredential(ctx context.Context, pool *pgxpool.Pool, raw string, isSession bool) (*auth.AuthResult, error) {
+	if !isSession {
+		return resolveCredential(ctx, pool, raw)
+	}
+	apiKeyID, ok, err := store.ResolveWebSession(ctx, pool, raw)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return &auth.AuthResult{IsValid: false}, nil
+	}
+	return auth.AuthenticateByID(ctx, pool, apiKeyID)
+}
+
 // resolveCredential is the ONE credential→AuthResult gate for all HTTP auth
 // paths (design 03 §4, wave S3). Branching happens on the extracted value,
 // BEFORE SanitizeKey, independent of the source header:
@@ -273,12 +317,14 @@ func resolveCredential(ctx context.Context, pool *pgxpool.Pool, raw string) (*au
 }
 
 // Auth creates middleware that authenticates requests via X-Context-Key header
-// or Authorization: Bearer token. Bearer values are opaque ctxt_ tokens or raw
-// API keys — resolveCredential branches (S3).
+// or Authorization: Bearer token — resolveCredential branches on opaque ctxt_
+// tokens vs raw API keys (S3) — or, header-less, via the ctx_session cookie
+// (R2: overlay→token→ctx_auth_by_id, same downstream AuthResult shape).
 func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			result, err := resolveCredential(r.Context(), pool, credentialFromRequest(r))
+			raw, isSession := requestCredential(r)
+			result, err := resolveRequestCredential(r.Context(), pool, raw, isSession)
 			if err != nil {
 				slog.Error("auth failed",
 					"error", err,

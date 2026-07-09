@@ -75,7 +75,7 @@ func newTestHub(life context.Context, fs *fakeStatus, store *config.Store) *sseH
 		cfg:          store,
 		life:         life,
 		llmcalls:     noLLM,
-		authenticate: func(context.Context, string) (*auth.AuthResult, error) { return &auth.AuthResult{IsValid: true, IsAdmin: true}, nil },
+		authenticate: func(context.Context, string, bool) (*auth.AuthResult, error) { return &auth.AuthResult{IsValid: true, IsAdmin: true}, nil },
 		subs:         map[*sseSub]struct{}{},
 	}
 }
@@ -322,7 +322,7 @@ func TestEventsReAuthEndsStream(t *testing.T) {
 	fs := &fakeStatus{snap: statusResponse{AsOf: time.Unix(1, 0), Backends: []backends.BackendStatus{}}}
 	// tick 5ms → re-auth fires at 12*5ms = 60ms.
 	h := newTestHub(life, fs, eventsCfgStore(5*time.Millisecond, time.Second, 8))
-	h.authenticate = func(context.Context, string) (*auth.AuthResult, error) {
+	h.authenticate = func(context.Context, string, bool) (*auth.AuthResult, error) {
 		return &auth.AuthResult{IsValid: true, IsAdmin: false}, nil // admin revoked
 	}
 	eh := &EventsHandler{hub: h}
