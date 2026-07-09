@@ -46,6 +46,11 @@ type RegisterOAuthClientSpec struct {
 	TokenEndpointAuthMethod string // none | client_secret_basic | client_secret_post
 	Source                  string // admin | dcr | cimd
 	CreatedBy               string // acting api_key id ("" for open DCR)
+	// Metadata carries the RFC 7591 low-priority fields (client_uri,
+	// logo_uri, contacts, tos_uri, policy_uri, software_id) into the 097
+	// jsonb column. nil folds onto the schema default '{}' — the label-only
+	// admin path stays behavior-identical.
+	Metadata map[string]any
 }
 
 // CreateOAuthClient generates a new client_id + client_secret pair and stores it.
@@ -109,21 +114,26 @@ func RegisterOAuthClient(ctx context.Context, pool *pgxpool.Pool, spec RegisterO
 	if scopes == nil {
 		scopes = []string{}
 	}
+	metadata := spec.Metadata
+	if metadata == nil {
+		// nil would encode as jsonb `null`; the 097 column default is '{}'.
+		metadata = map[string]any{}
+	}
 
 	var client OAuthClient
 	err := pool.QueryRow(ctx,
 		`INSERT INTO context_oauth_clients
 		    (client_id, client_secret_hash, label, created_by, created_by_principal,
 		     redirect_uris, scopes, grant_types, response_types,
-		     token_endpoint_auth_method, registration_source)
+		     token_endpoint_auth_method, registration_source, metadata)
 		VALUES ($1, $2, $3, NULLIF($4, '')::uuid,
 		        (SELECT k.principal_id FROM context_api_keys k WHERE k.id = NULLIF($4, '')::uuid),
-		        $5, $6, $7, $8, $9, $10)
+		        $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id, client_id, label, active, created_at,
 		          redirect_uris, scopes, grant_types, response_types,
 		          token_endpoint_auth_method, registration_source, updated_at`,
 		clientID, secretHash, spec.Label, spec.CreatedBy,
-		redirectURIs, scopes, grantTypes, responseTypes, authMethod, source,
+		redirectURIs, scopes, grantTypes, responseTypes, authMethod, source, metadata,
 	).Scan(&client.ID, &client.ClientID, &client.Label, &client.Active, &client.CreatedAt,
 		&client.RedirectURIs, &client.Scopes, &client.GrantTypes, &client.ResponseTypes,
 		&client.TokenEndpointAuthMethod, &client.RegistrationSource, &client.UpdatedAt)

@@ -72,6 +72,11 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	r.Get("/.well-known/oauth-protected-resource", oauthH.ProtectedResource)
 	r.HandleFunc("/authorize", oauthH.Authorize) // GET = form, POST = submit
 	r.Post("/token", oauthH.Token)
+	// RFC 7591 DCR (02-W4a). Always mounted; the handler gates per request
+	// on CTX_OAUTH_DCR_MODE (off → 404, admin → server-admin key, open →
+	// unauthenticated) — auth lives IN the handler, not in middleware,
+	// because the mode decides whether auth applies at all.
+	r.Post("/register", oauthH.Register)
 
 	// Per-tenant quota accountant (T36, 04-W4): one process-wide instance, a
 	// lock-free TTL-cached per-tenant cost/call rollup feeding the synthesis
