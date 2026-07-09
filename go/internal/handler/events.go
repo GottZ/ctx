@@ -468,8 +468,10 @@ func NewEventsHandler(life context.Context, pool *pgxpool.Pool, collector *Statu
 			// be carried by an opaque ctxt_ token (S3) — SanitizeKey would
 			// destroy its prefix on the re-auth tick and kill the stream
 			// (design 03 §4, RVW-Vollst-F2) — or by a ctx_session cookie
-			// (R2), whose revocation must end the stream the same way.
-			return resolveRequestCredential(ctx, pool, key, isSession)
+			// (R2), whose revocation must end the stream the same way. The
+			// csrf secret is irrelevant on this GET-only stream.
+			ar, _, err := resolveRequestCredential(ctx, pool, key, isSession)
+			return ar, err
 		},
 		subs: map[*sseSub]struct{}{},
 	}}

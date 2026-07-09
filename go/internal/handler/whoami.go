@@ -53,6 +53,13 @@ type whoamiResponse struct {
 	// tenant (059 backfill) always resolves, so this is only a defensive seam.
 	TenantSlug        string `json:"tenant_slug"`
 	TenantDisplayName string `json:"tenant_display_name"`
+	// CSRFToken is the per-session synchronizer token (OAuth R3, design 05
+	// §4.4) — delivered ONLY on cookie-session requests (omitempty keeps
+	// every header-credential response byte-compatible, pinned by the golden
+	// shape test). The SPA holds it in memory (never a JS-readable cookie —
+	// that would undo the httpOnly hardening) and echoes it as X-CSRF-Token
+	// on every mutation; the Auth middleware enforces the match.
+	CSRFToken string `json:"csrf_token,omitempty"`
 	// Capabilities carries feature flags that are DATA, not tier-derived (the
 	// SPA derives tier caps itself from Admin/Role). workflow=true switches the
 	// workflow UI (issues/board, U04 dark-launch cap viewWorkflow) visible; it
@@ -160,6 +167,7 @@ func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 		PrincipalID:       ar.PrincipalID,
 		TenantSlug:        id.tenantSlug,
 		TenantDisplayName: id.tenantDisplayName,
+		CSRFToken:         CSRFTokenFromContext(r.Context()),
 		Capabilities:      whoamiCapabilities{Workflow: true},
 	})
 }

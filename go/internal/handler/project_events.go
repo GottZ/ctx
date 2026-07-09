@@ -66,7 +66,9 @@ func NewProjectEventsHandler(hub *events.ProjectHub, pool *pgxpool.Pool, cfg Con
 			// resolveRequestCredential, not auth.Authenticate: a ctxt_-token-
 			// or ctx_session-cookie-backed stream must survive the re-auth
 			// tick — and die with its token/session (design 03 §4 / 05 §4.2).
-			return resolveRequestCredential(ctx, pool, key, isSession)
+			// The csrf secret is irrelevant on this GET-only stream.
+			ar, _, err := resolveRequestCredential(ctx, pool, key, isSession)
+			return ar, err
 		},
 	}
 }

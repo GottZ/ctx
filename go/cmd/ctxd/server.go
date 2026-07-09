@@ -90,6 +90,15 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	r.Get("/auth/login/{provider}", ssoH.HandleLogin)
 	r.Get("/auth/callback/{provider}", ssoH.HandleCallback)
 
+	// Web-session lifecycle (OAuth R3, design 05 §4.3) — public like the SSO
+	// routes above (they ARE the auth flow; login presents a credential, the
+	// other two act only on httpOnly cookies). POST /auth/login coexists with
+	// the GET /auth/login/{provider} SSO entry (different method + path shape).
+	sessH := handler.NewSessionHandler(pool)
+	r.Post("/auth/login", sessH.HandleLogin)
+	r.Post("/auth/refresh", sessH.HandleRefresh)
+	r.Post("/auth/logout", sessH.HandleLogout)
+
 	// Per-tenant quota accountant (T36, 04-W4): one process-wide instance, a
 	// lock-free TTL-cached per-tenant cost/call rollup feeding the synthesis
 	// gate. 30s TTL (§6.2) — the cost SUM over the 1M+ llm_log hypertable is

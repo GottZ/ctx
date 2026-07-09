@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -257,19 +258,47 @@ func requestCredential(r *http.Request) (raw string, isSession bool) {
 // AuthResult gate: a session id runs overlay→token→ctx_auth_by_id (05 §4.2
 // path 3), everything else takes the S3 resolveCredential branches. A
 // session miss of ANY kind never falls back to the key path (fail-closed,
-// same rule as the ctxt_ branch).
-func resolveRequestCredential(ctx context.Context, pool *pgxpool.Pool, raw string, isSession bool) (*auth.AuthResult, error) {
+// same rule as the ctxt_ branch). csrfSecret is non-empty ONLY on a valid
+// session resolve — the Auth middleware checks it against X-CSRF-Token on
+// state-changing cookie requests (R3, 05 §4.4); header-credential paths
+// carry no ambient authority and need no CSRF.
+func resolveRequestCredential(ctx context.Context, pool *pgxpool.Pool, raw string, isSession bool) (*auth.AuthResult, string, error) {
 	if !isSession {
-		return resolveCredential(ctx, pool, raw)
+		ar, err := resolveCredential(ctx, pool, raw)
+		return ar, "", err
 	}
-	apiKeyID, ok, err := store.ResolveWebSession(ctx, pool, raw)
+	apiKeyID, csrfSecret, ok, err := store.ResolveWebSession(ctx, pool, raw)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if !ok {
-		return &auth.AuthResult{IsValid: false}, nil
+		return &auth.AuthResult{IsValid: false}, "", nil
 	}
-	return auth.AuthenticateByID(ctx, pool, apiKeyID)
+	ar, err := auth.AuthenticateByID(ctx, pool, apiKeyID)
+	return ar, csrfSecret, err
+}
+
+// csrfTokenKey carries the session's csrf_secret through the request context
+// (set by Auth on the cookie path) so whoami can hand it to the SPA — the
+// synchronizer-token delivery channel (05 §4.4).
+type csrfTokenContextKey struct{}
+
+// CSRFTokenFromContext returns the session csrf token, or "" on header-
+// credential requests.
+func CSRFTokenFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(csrfTokenContextKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// stateChanging reports whether the method mutates (the CSRF-relevant set).
+func stateChanging(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	return false
 }
 
 // resolveCredential is the ONE credential→AuthResult gate for all HTTP auth
@@ -324,7 +353,7 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw, isSession := requestCredential(r)
-			result, err := resolveRequestCredential(r.Context(), pool, raw, isSession)
+			result, csrfSecret, err := resolveRequestCredential(r.Context(), pool, raw, isSession)
 			if err != nil {
 				slog.Error("auth failed",
 					"error", err,
@@ -332,6 +361,20 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "authentication error"})
 				return
+			}
+
+			// CSRF synchronizer gate (R3, 05 §4.4) — cookie path ONLY: the
+			// cookie is ambient, so every state-changing request must echo
+			// the per-session secret in X-CSRF-Token (delivered via whoami).
+			// Header-credential requests carry no ambient authority and pass
+			// untouched (the MCP-Bearer regression gate). Comparison is
+			// constant-time — the secret is high-entropy, but the check is
+			// on the hot path and the guard costs nothing.
+			if isSession && result.IsValid && stateChanging(r.Method) {
+				if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(csrfSecret)) != 1 {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": "missing or invalid CSRF token"})
+					return
+				}
 			}
 
 			if !result.IsValid {
@@ -351,6 +394,9 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			}
 
 			ctx := context.WithValue(r.Context(), authResultKey, result)
+			if csrfSecret != "" {
+				ctx = context.WithValue(ctx, csrfTokenContextKey{}, csrfSecret)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

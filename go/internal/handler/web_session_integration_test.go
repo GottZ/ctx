@@ -147,7 +147,7 @@ func TestWebSessionR2_Integration(t *testing.T) {
 	}
 
 	// --- SSE re-auth seam: the exact tick call ------------------------------
-	if ar, err := resolveRequestCredential(ctx, pool, sessionID, true); err != nil || ar == nil || !ar.IsValid {
+	if ar, _, err := resolveRequestCredential(ctx, pool, sessionID, true); err != nil || ar == nil || !ar.IsValid {
 		t.Fatalf("SSE seam resolve: err=%v valid=%v, want valid", err, ar != nil && ar.IsValid)
 	}
 
@@ -173,7 +173,7 @@ func TestWebSessionR2_Integration(t *testing.T) {
 	if st, _ := otAuthProbe(t, pool, wsCookie(sessionID)); st != http.StatusUnauthorized {
 		t.Fatalf("revoked token via cookie: got %d, want 401", st)
 	}
-	if ar, err := resolveRequestCredential(ctx, pool, sessionID, true); err != nil || ar == nil || ar.IsValid {
+	if ar, _, err := resolveRequestCredential(ctx, pool, sessionID, true); err != nil || ar == nil || ar.IsValid {
 		t.Fatalf("SSE seam after revoke: err=%v valid=%v, want invalid (stream must die)", err, ar != nil && ar.IsValid)
 	}
 
