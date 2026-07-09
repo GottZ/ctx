@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -235,15 +236,29 @@ func ValidateOAuthClient(ctx context.Context, pool *pgxpool.Pool, clientID strin
 	return exists, err
 }
 
-// ValidateOAuthClientSecret checks client_id + secret pair.
+// ValidateOAuthClientSecret checks a client_id + secret pair (wired at
+// /token in S6/W03-7). The stored SHA-256 hash is fetched and compared in
+// Go via subtle.ConstantTimeCompare — NOT matched in SQL — so comparison
+// cost never depends on how many bytes agree (design 03 RVW-Vollst-F4;
+// design 02 §39 relies on this). An empty stored hash (public `none`
+// client, 097 default '') never validates: hashSecret output is never
+// empty, and the explicit guard keeps that invariant visible.
 func ValidateOAuthClientSecret(ctx context.Context, pool *pgxpool.Pool, clientID, secret string) (bool, error) {
-	secretHash := hashSecret(secret)
-	var exists bool
+	var storedHash string
 	err := pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM context_oauth_clients WHERE client_id = $1 AND client_secret_hash = $2 AND active = true)`,
-		clientID, secretHash,
-	).Scan(&exists)
-	return exists, err
+		`SELECT client_secret_hash FROM context_oauth_clients WHERE client_id = $1 AND active = true`,
+		clientID,
+	).Scan(&storedHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("oauth: validate client secret: %w", err)
+	}
+	if storedHash == "" {
+		return false, nil
+	}
+	return subtle.ConstantTimeCompare([]byte(hashSecret(secret)), []byte(storedHash)) == 1, nil
 }
 
 func hashSecret(secret string) string {

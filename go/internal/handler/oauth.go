@@ -50,9 +50,10 @@ func NewOAuthHandler(pool *pgxpool.Pool) *OAuthHandler {
 }
 
 // redirectAllowlist is the static exact-match set of known MCP-client
-// callback URIs (S2/W03-2, design 03 E-03e): the transitional,
-// Achse-02-independent closure of GHSA-p3jf-x27v-4jg6 — W03-7 replaces it
-// with the per-client redirect_uris registration. Extend per deployment via
+// callback URIs (S2/W03-2, design 03 E-03e): the Achse-02-independent
+// closure of GHSA-p3jf-x27v-4jg6. Since S6 (W03-7) it is the FALLBACK for
+// clients without registered redirect_uris; a non-empty registration is
+// matched exclusively (see authorizeSubmit). Extend per deployment via
 // CTX_OAUTH_REDIRECT_EXTRA (comma-separated, exact URIs). Loopback redirects
 // (RFC 8252 §7.3) are allowed by rule in redirectAllowed, not listed here.
 var redirectAllowlist = map[string]bool{
@@ -209,8 +210,8 @@ func (h *OAuthHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 		"scopes_supported": []string{"mcp"},
 		"code_challenge_methods_supported":       []string{"S256"},
 		// none | client_secret_basic | client_secret_post (design 02 §3/§4c;
-		// no private_key_jwt — there is no jwks path in the MVP). The
-		// constant-time secret ENFORCEMENT at /token is 03/S6.
+		// no private_key_jwt — there is no jwks path in the MVP). Enforced
+		// constant-time at /token since S6 (authenticateClient).
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic", "client_secret_post"},
 		// CIMD (client_id as metadata URL) is a post-MVP expansion; the
 		// SSRF-hardened fetch path does not exist yet, so: false.
@@ -337,32 +338,51 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Static redirect allowlist (S2/W03-2) — the GHSA-p3jf-x27v-4jg6 core:
-	// without it, an attacker-controlled redirect_uri carries the code (and
-	// with it the victim's key) off-site. Exact match or loopback only;
-	// per-client registration replaces this in W03-7.
-	if !redirectAllowed(redirectURI, parsedRedirect) {
-		slog.Warn("oauth: redirect_uri not in allowlist", "redirect_uri", redirectURI)
-		http.Error(w, "invalid redirect_uri: not an allowed callback", http.StatusBadRequest)
-		return
-	}
-
 	// client_id is MANDATORY (S2/W03-2; OAuth 2.1 §4.1.1). The former
 	// `if clientID != ""` anonymous flow was half the takeover surface —
 	// without a client identity there is nothing to bind the code to.
+	// Loaded as the FULL row since S6: the redirect check below keys on the
+	// client's registered redirect_uris.
 	clientID := r.FormValue("client_id")
 	if clientID == "" {
 		http.Error(w, "client_id is required", http.StatusBadRequest)
 		return
 	}
-	valid, err := store.ValidateOAuthClient(r.Context(), h.pool, clientID)
-	if err != nil || !valid {
-		slog.Warn("oauth: invalid client_id in authorize", "client_id", clientID)
+	client, found, err := store.GetOAuthClientByClientID(r.Context(), h.pool, clientID)
+	if err != nil || !found {
+		slog.Warn("oauth: invalid client_id in authorize", "client_id", clientID, "error", err)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
 			<h1>Unknown Client</h1><p>This client_id is not registered. Use <code>ctx mcp add</code> to create one.</p>
 		</body></html>`))
+		return
+	}
+
+	// Redirect allowlist — the GHSA-p3jf-x27v-4jg6 core: without it, an
+	// attacker-controlled redirect_uri carries the code (and with it the
+	// victim's key) off-site. Since S6 (W03-7) a client with REGISTERED
+	// redirect_uris is matched EXCLUSIVELY against them (exact array
+	// membership, C2 SQL — no loopback rule, no static fallback: the
+	// registration is the contract, and a fallback would let a narrowly
+	// registered client escape to the broader static list). An empty
+	// registration (plain `ctx mcp add`, pre-097 rows) keeps the static
+	// S2 allowlist + RFC 8252 loopback rule.
+	if len(client.RedirectURIs) > 0 {
+		allowed, err := store.ClientAllowsRedirectURI(r.Context(), h.pool, clientID, redirectURI)
+		if err != nil {
+			slog.Error("oauth: check registered redirect_uri", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !allowed {
+			slog.Warn("oauth: redirect_uri not in client registration", "redirect_uri", redirectURI, "client_id", clientID)
+			http.Error(w, "invalid redirect_uri: not an allowed callback", http.StatusBadRequest)
+			return
+		}
+	} else if !redirectAllowed(redirectURI, parsedRedirect) {
+		slog.Warn("oauth: redirect_uri not in allowlist", "redirect_uri", redirectURI)
+		http.Error(w, "invalid redirect_uri: not an allowed callback", http.StatusBadRequest)
 		return
 	}
 
@@ -403,11 +423,10 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect back to client with code. RFC 6749 §3.1.2 calls for matching
-	// redirect_uri against pre-registered values; until oauth_clients carries
-	// a redirect_uris column (separate wave), we mitigate open-redirect
-	// abuse to two layers: scheme-allowlist above, and reconstruction here
-	// (the Location header carries only fields that survived url.Parse).
+	// Redirect back to client with code. The target passed the registered
+	// per-client allowlist (or the static fallback) above — RFC 6749 §3.1.2
+	// satisfied since S6; reconstruction via net/url keeps the Location
+	// header free of anything that did not survive url.Parse.
 	q := parsedRedirect.Query()
 	q.Set("code", code)
 	if state != "" {
@@ -420,9 +439,8 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		q.Set("iss", h.issuer)
 	}
 	parsedRedirect.RawQuery = q.Encode()
-	// #nosec G710 -- redirectURI is validated above (scheme allowlist + Host
-	// non-empty) and reconstructed via net/url; the residual taint flow
-	// goes away once redirect_uris are pre-registered (TODO).
+	// #nosec G710 -- redirectURI is validated above (scheme check + exact
+	// per-client or static allowlist) and reconstructed via net/url.
 	http.Redirect(w, r, parsedRedirect.String(), http.StatusFound)
 }
 
@@ -440,13 +458,28 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// client_id arrives in the form body (public, auth method `none`) or as
-	// the Basic-Auth username (confidential, enforcement wired in S6). Both
-	// grants bind on it: the code binding (S2) and the refresh binding (S4).
+	// the Basic-Auth username (confidential). Both grants bind on it: the
+	// code binding (S2) and the refresh binding (S4). A Basic username that
+	// CONTRADICTS a form client_id is rejected below — the secret check and
+	// the code/refresh binding must run against the same identity, never a
+	// mix of two (RFC 6749 §2.3: one authentication, one client).
 	presentedClient := r.FormValue("client_id")
-	if presentedClient == "" {
-		if u, _, ok := r.BasicAuth(); ok {
-			presentedClient = u
+	presentedSecret := r.FormValue("client_secret")
+	basicUser, basicSecret, basicAuthUsed := r.BasicAuth()
+	if basicAuthUsed {
+		if presentedClient != "" && basicUser != presentedClient {
+			oauthUnauthorized(w, true, "client_id does not match Basic auth username")
+			return
 		}
+		if presentedClient == "" {
+			presentedClient = basicUser
+		}
+		if presentedSecret == "" {
+			presentedSecret = basicSecret
+		}
+	}
+	if !h.authenticateClient(w, r, presentedClient, presentedSecret, basicAuthUsed) {
+		return
 	}
 
 	// All form values are extracted HERE, behind the MaxBytesReader +
@@ -469,6 +502,83 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 	default:
 		oauthError(w, "unsupported_grant_type", "only authorization_code and refresh_token are supported")
 	}
+}
+
+// authenticateClient enforces the registered token_endpoint_auth_method at
+// /token (S6/W03-7, design 03 §4 — the C3 metadata advertised basic/post,
+// THIS is the enforcement): confidential clients (client_secret_basic /
+// client_secret_post) MUST present their secret, verified constant-time
+// against the stored hash; public clients (`none`) MUST NOT present one
+// (fail-closed — a `none` registration HAS no secret, so a presented one
+// can only be a misconfiguration or a guessing attempt). An UNREGISTERED
+// client_id passes only when no secret is presented: the grant handlers
+// bind code/refresh rows on the client_id anyway (invalid_grant, the S4
+// no-oracle path), while a presented secret is an authentication attempt
+// against a client this server never issued — invalid_client (RFC 6749
+// §5.2). Both secret channels (form + Basic) are accepted for confidential
+// clients; both are advertised in the metadata, and channel strictness
+// would add breakage without a security gain (the identity consistency is
+// enforced by the caller). Returns false after writing the 401.
+func (h *OAuthHandler) authenticateClient(w http.ResponseWriter, r *http.Request, clientID, secret string, basicAuthUsed bool) bool {
+	if clientID == "" {
+		if secret != "" {
+			oauthUnauthorized(w, basicAuthUsed, "client_secret without client_id")
+			return false
+		}
+		return true // pre-S2 shape; the code/refresh binding rejects downstream
+	}
+	client, found, err := store.GetOAuthClientByClientID(r.Context(), h.pool, clientID)
+	if err != nil {
+		slog.Error("oauth: load client for token auth", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return false
+	}
+	if !found {
+		if secret != "" {
+			oauthUnauthorized(w, basicAuthUsed, "client authentication failed")
+			return false
+		}
+		return true // unregistered + public shape: binding checks answer invalid_grant
+	}
+	if client.TokenEndpointAuthMethod == "none" {
+		if secret != "" {
+			oauthUnauthorized(w, basicAuthUsed, "public client must not present a client_secret")
+			return false
+		}
+		return true
+	}
+	// client_secret_basic | client_secret_post (the 097 CHECK bounds the set).
+	if secret == "" {
+		oauthUnauthorized(w, basicAuthUsed, "confidential client requires client authentication")
+		return false
+	}
+	ok, err := store.ValidateOAuthClientSecret(r.Context(), h.pool, clientID, secret)
+	if err != nil {
+		slog.Error("oauth: validate client secret", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return false
+	}
+	if !ok {
+		slog.Warn("oauth: client secret mismatch", "client_id", clientID)
+		oauthUnauthorized(w, basicAuthUsed, "client authentication failed")
+		return false
+	}
+	return true
+}
+
+// oauthUnauthorized emits the RFC 6749 §5.2 invalid_client response: 401,
+// and — when the client attempted Basic auth — the WWW-Authenticate
+// challenge the spec REQUIRES on that path.
+func oauthUnauthorized(w http.ResponseWriter, basicAuthUsed bool, desc string) {
+	if basicAuthUsed {
+		w.Header().Set("WWW-Authenticate", `Basic realm="ctx-oauth", charset="UTF-8"`)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":             "invalid_client",
+		"error_description": desc,
+	})
 }
 
 // tokenRequest carries the /token form values across the grant handlers —
