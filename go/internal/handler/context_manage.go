@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -56,6 +57,11 @@ type ManageHandler struct {
 	// (server.go, same rationale as SetForgeController); nil ⇒ the probe
 	// reports an admission error instead of making an unadmitted wire call.
 	admitter dispatch.Admitter
+	// openBox builds the sealbox for oauth-provider-create's client_secret
+	// sealing (OAuth L3, 04-W4). A field so tests can inject keys without
+	// mutating process env (SecretsHandler pattern); nil falls back to
+	// sealbox.FromEnv lazily (sealboxOrNil) — no constructor churn.
+	openBox func() (*sealbox.Box, error)
 }
 
 // SetAdmitter wires the ONE process-wide dispatch admission layer (MW3).
@@ -167,7 +173,13 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// '_global'/'eject'); die disable-profile-* Actions sind tierTenantAdmin
 		// (actionTierExplicit + S9-Gate), Isolation liegt im Handler+Store.
 		h.dispatchDisableProfileAction(w, r, authResult, req)
-	case "mcp-client-create", "mcp-client-list", "mcp-client-delete":
+	case "mcp-client-create", "mcp-client-list", "mcp-client-delete",
+		// oauth-provider-* (OAuth Achse 04 W4/L3, design/04 §3.2): folded into
+		// this case arm to add NO new HandleManage branch (cyclop budget,
+		// max-complexity 25). Both families are the operator-global OAuth
+		// config surface and share the tier: tierServerAdmin in actionTier
+		// (routing ⟂ tier), pinned by the S9 enumeration gate.
+		"oauth-provider-create", "oauth-provider-list", "oauth-provider-delete":
 		h.dispatchMCPClientAction(w, r, authResult, req)
 	case "backend-create", "backend-update", "backend-delete", "backend-list", "backend-test":
 		h.dispatchBackendAction(w, r, authResult, req)
@@ -252,8 +264,10 @@ func (h *ManageHandler) dispatchGuardAction(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// dispatchMCPClientAction fans the mcp-client-* actions out (split from
-// HandleManage's switch for cyclomatic budget; all admin-gated upstream).
+// dispatchMCPClientAction fans the mcp-client-* AND oauth-provider-* actions
+// out (split from HandleManage's switch for cyclomatic budget; all
+// server-admin-gated upstream). The oauth-provider family (OAuth L3, 04-W4)
+// rides this dispatcher because both are operator-global OAuth config.
 func (h *ManageHandler) dispatchMCPClientAction(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	switch req.Action {
 	case "mcp-client-create":
@@ -262,6 +276,12 @@ func (h *ManageHandler) dispatchMCPClientAction(w http.ResponseWriter, r *http.R
 		h.handleMCPClientList(w, r)
 	case "mcp-client-delete":
 		h.handleMCPClientDelete(w, r, req)
+	case "oauth-provider-create":
+		h.handleOAuthProviderCreate(w, r, ar, req)
+	case "oauth-provider-list":
+		h.handleOAuthProviderList(w, r)
+	case "oauth-provider-delete":
+		h.handleOAuthProviderDelete(w, r, req)
 	}
 }
 
@@ -410,6 +430,15 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 		"forge-token-set", "forge-sync-start", "forge-sync-status":
 		return tierTenantAdmin, true
 	case "mcp-client-create", "mcp-client-list", "mcp-client-delete",
+		// oauth-provider-* (OAuth L3, 04-W4): the external-login IdP allowlist
+		// is the INV-C trust anchor — whoever writes it decides which issuers
+		// ctx trusts (an attacker-registered IdP would mint arbitrary
+		// identities), and the rows are operator-global (tenant-blind, like
+		// context_oauth_clients). create carries the client_secret in transit,
+		// list discloses the IdP topology → ALL THREE server-admin. The
+		// EXPLICIT entries are mandatory (§5.1, fail-open tierOpen default);
+		// the S9 enumeration gate pins them.
+		"oauth-provider-create", "oauth-provider-list", "oauth-provider-delete",
 		// backend-test: reads/probes a backend by id with its resolved key and
 		// is NOT tenant-filtered (poolBackendByID scans all) → server-admin.
 		"backend-test",

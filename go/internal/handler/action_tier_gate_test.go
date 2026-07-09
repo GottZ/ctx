@@ -30,6 +30,11 @@ func TestActionTier_Classification(t *testing.T) {
 		{"mcp-client-create", "", tierServerAdmin},
 		{"mcp-client-list", "", tierServerAdmin},
 		{"mcp-client-delete", "", tierServerAdmin},
+		// oauth-provider-* (OAuth L3, 04-W4): the external-login IdP allowlist
+		// is the INV-C trust anchor and operator-global → all server-admin.
+		{"oauth-provider-create", "", tierServerAdmin},
+		{"oauth-provider-list", "", tierServerAdmin},
+		{"oauth-provider-delete", "", tierServerAdmin},
 		// backend-test reaches an arbitrary backend by id with its resolved key
 		// and is NOT tenant-filtered → stays server-admin (T37 isolated the
 		// CRUD/list, deliberately not the probe).
@@ -185,6 +190,24 @@ func TestActionTier_ProvisionExplicitlyTiered(t *testing.T) {
 	}
 }
 
+// TestActionTier_OAuthProviderFamilyExplicitlyTiered is the OAuth-L3 (04-W4)
+// S9 fail-open probe (design/02 §5.1 pattern): every oauth-provider-* action
+// this wave dispatches MUST be EXPLICITLY classified tierServerAdmin — the
+// provider table is the INV-C trust anchor (an attacker-registered IdP would
+// mint arbitrary identities). Remove any arm from actionTier and its row here
+// turns RED (the entries + dispatch arm land in the SAME commit).
+func TestActionTier_OAuthProviderFamilyExplicitlyTiered(t *testing.T) {
+	for _, a := range []string{"oauth-provider-create", "oauth-provider-list", "oauth-provider-delete"} {
+		tier, explicit := actionTierExplicit(manageRequest{Action: a})
+		if !explicit {
+			t.Errorf("action %q is dispatched but NOT explicitly tiered (fail-open tierOpen default, S9)", a)
+		}
+		if tier != tierServerAdmin {
+			t.Errorf("action %q tier = %d, want tierServerAdmin (INV-C trust anchor, operator-global)", a, tier)
+		}
+	}
+}
+
 // TestActionTier_DisableProfileFamilyExplicitlyTiered is the U01-W3 S9 fail-open
 // probe (design/01 §4.3): every disable-profile-* action this wave dispatches
 // MUST be EXPLICITLY classified tierTenantAdmin. Remove any arm from actionTier
@@ -301,6 +324,9 @@ func TestActionTier_TenantAdmin_ServerAdminActions_403(t *testing.T) {
 		{"action": "backend-test", "id": "x"},
 		{"action": "mcp-client-list"},
 		{"action": "mcp-client-create", "data": map[string]any{"label": "x"}},
+		{"action": "oauth-provider-list"},
+		{"action": "oauth-provider-create", "data": map[string]any{"slug": "x"}},
+		{"action": "oauth-provider-delete", "data": map[string]any{"slug": "x"}},
 		{"action": "blocks-audit-status"},
 		{"action": "blocks-classify-status"},
 		{"action": "tenant-list"},

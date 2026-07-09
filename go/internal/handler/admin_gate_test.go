@@ -125,6 +125,39 @@ func TestManageAdminGate_MCPClientDelete_NonAdmin403(t *testing.T) {
 	assertForbiddenAdmin(t, rec)
 }
 
+// oauth-provider-* (OAuth L3, 04-W4): the external-login IdP allowlist is the
+// INV-C trust anchor — server-admin only. DB-less probes (nil pool, no
+// sealbox key): a 403 proves the tier gate fires BEFORE store or sealbox.
+func TestManageAdminGate_OAuthProviderCreate_NonAdmin403(t *testing.T) {
+	rec := manageReqAs(t, nonAdminAR(), map[string]any{
+		"action": "oauth-provider-create",
+		"data":   map[string]any{"slug": "evil-idp", "type": "oidc"},
+	})
+	assertForbiddenAdmin(t, rec)
+}
+
+func TestManageAdminGate_OAuthProviderList_NonAdmin403(t *testing.T) {
+	rec := manageReqAs(t, nonAdminAR(), map[string]any{"action": "oauth-provider-list"})
+	assertForbiddenAdmin(t, rec)
+}
+
+func TestManageAdminGate_OAuthProviderDelete_NonAdmin403(t *testing.T) {
+	rec := manageReqAs(t, nonAdminAR(), map[string]any{
+		"action": "oauth-provider-delete",
+		"data":   map[string]any{"slug": "x"},
+	})
+	assertForbiddenAdmin(t, rec)
+}
+
+// Admin keys pass the gate and reach the store validation layer (400 on the
+// empty spec = past the gate, BEFORE pool/sealbox — validation precedes both).
+func TestManageAdminGate_OAuthProviderCreate_AdminPassesGate(t *testing.T) {
+	rec := manageReqAs(t, adminAR(), map[string]any{"action": "oauth-provider-create"})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (required-field validation, i.e. past the admin gate)", rec.Code)
+	}
+}
+
 func TestManageAdminGate_DreamModeMutation_NonAdmin403(t *testing.T) {
 	rec := manageReqAs(t, nonAdminAR(), map[string]any{
 		"action": "dream-mode",
