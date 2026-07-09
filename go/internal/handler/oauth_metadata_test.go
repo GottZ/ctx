@@ -55,8 +55,11 @@ func TestMetadataDocument(t *testing.T) {
 
 	t.Run("no unserved statements", func(t *testing.T) {
 		doc := fetch(t)
-		if _, ok := doc["scopes_supported"]; ok {
-			t.Error("scopes_supported advertised without an enforced catalog")
+		// Since S5 the requestable catalog IS served (scopes_supported
+		// ["mcp"], E-03d) — flipped from forbidden to required, same
+		// coupling rule as the refresh_token flip below.
+		if sc := toStrings(doc["scopes_supported"]); !slices.Equal(sc, []string{"mcp"}) {
+			t.Errorf("scopes_supported = %v (want [mcp] since S5)", sc)
 		}
 		if gt := toStrings(doc["grant_types_supported"]); !slices.Equal(gt, []string{"authorization_code", "refresh_token"}) {
 			t.Errorf("grant_types_supported = %v (S4 serves refresh_token — advertise exactly what is served)", gt)

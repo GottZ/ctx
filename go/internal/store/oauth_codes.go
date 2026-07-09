@@ -22,22 +22,26 @@ type OAuthCode struct {
 	ClientID      string // "" → NULL (client_id becomes mandatory in S2/W03-2)
 	RedirectURI   string
 	CodeChallenge string
+	Resource      string // "" → NULL; only ever the VALIDATED canonical MCP resource (S5/W03-6), never raw client input
 	ExpiresAt     time.Time
 }
 
 // PutOAuthCode persists one pending authorization code under its SHA-256
-// (the plaintext code never reaches the DB). resource/scope stay NULL until
-// W03-6 populates them.
+// (the plaintext code never reaches the DB). scope stays NULL (INV-B: no
+// token scope model — authorisation is the full key scope).
 func PutOAuthCode(ctx context.Context, pool *pgxpool.Pool, codeHash string, c OAuthCode) error {
-	var clientID any // "" must become NULL, not the empty string
+	var clientID, resource any // "" must become NULL, not the empty string
 	if c.ClientID != "" {
 		clientID = c.ClientID
 	}
+	if c.Resource != "" {
+		resource = c.Resource
+	}
 	_, err := pool.Exec(ctx,
 		`INSERT INTO context_oauth_codes
-		     (code_hash, api_key_id, principal_id, client_id, redirect_uri, code_challenge, expires_at)
-		 VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7)`,
-		codeHash, c.APIKeyID, c.PrincipalID, clientID, c.RedirectURI, c.CodeChallenge, c.ExpiresAt,
+		     (code_hash, api_key_id, principal_id, client_id, redirect_uri, code_challenge, resource, expires_at)
+		 VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8)`,
+		codeHash, c.APIKeyID, c.PrincipalID, clientID, c.RedirectURI, c.CodeChallenge, resource, c.ExpiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("oauth codes: put: %w", err)
@@ -52,15 +56,15 @@ func PutOAuthCode(ctx context.Context, pool *pgxpool.Pool, codeHash string, c OA
 // gone either way — a replayed expired code stays a miss).
 func TakeOAuthCode(ctx context.Context, pool *pgxpool.Pool, codeHash string) (*OAuthCode, error) {
 	var (
-		c        OAuthCode
-		clientID *string
+		c                  OAuthCode
+		clientID, resource *string
 	)
 	err := pool.QueryRow(ctx,
 		`DELETE FROM context_oauth_codes
 		  WHERE code_hash = $1
-		 RETURNING api_key_id, principal_id, client_id, redirect_uri, code_challenge, expires_at`,
+		 RETURNING api_key_id, principal_id, client_id, redirect_uri, code_challenge, resource, expires_at`,
 		codeHash,
-	).Scan(&c.APIKeyID, &c.PrincipalID, &clientID, &c.RedirectURI, &c.CodeChallenge, &c.ExpiresAt)
+	).Scan(&c.APIKeyID, &c.PrincipalID, &clientID, &c.RedirectURI, &c.CodeChallenge, &resource, &c.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil // unknown or already consumed — the caller answers invalid_grant
 	}
@@ -69,6 +73,9 @@ func TakeOAuthCode(ctx context.Context, pool *pgxpool.Pool, codeHash string) (*O
 	}
 	if clientID != nil {
 		c.ClientID = *clientID
+	}
+	if resource != nil {
+		c.Resource = *resource
 	}
 	return &c, nil
 }

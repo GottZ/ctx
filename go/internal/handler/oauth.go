@@ -202,6 +202,11 @@ func (h *OAuthHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 		"token_endpoint":                        issuer + "/token",
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		// The requestable scope catalog (S5/W03-5, E-03d): "mcp" is what a
+		// client MAY ask for; it is NEVER an authorisation input (INV-B —
+		// the key's own scope stays the hard authority, token.scope is not
+		// read by any authorisation decision).
+		"scopes_supported": []string{"mcp"},
 		"code_challenge_methods_supported":       []string{"S256"},
 		// none | client_secret_basic | client_secret_post (design 02 §3/§4c;
 		// no private_key_jwt — there is no jwks path in the MVP). The
@@ -219,7 +224,11 @@ func (h *OAuthHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(doc)
 }
 
-// ProtectedResource serves GET /.well-known/oauth-protected-resource.
+// ProtectedResource serves GET /.well-known/oauth-protected-resource — both
+// the root form and the RFC 9728 §3.1 path-insertion form for the /mcp
+// resource (/.well-known/oauth-protected-resource/mcp, S5/W03-5): clients
+// derive the latter from the resource URL <issuer>/mcp, so both spellings
+// must answer with the same document.
 func (h *OAuthHandler) ProtectedResource(w http.ResponseWriter, r *http.Request) {
 	issuer := h.canonicalOrHostIssuer(r)
 
@@ -228,6 +237,7 @@ func (h *OAuthHandler) ProtectedResource(w http.ResponseWriter, r *http.Request)
 		"resource":                issuer + "/mcp",
 		"authorization_servers":   []string{issuer},
 		"bearer_methods_supported": []string{"header"},
+		"scopes_supported":        []string{"mcp"},
 	})
 }
 
@@ -272,6 +282,7 @@ func (h *OAuthHandler) authorizeForm(w http.ResponseWriter, r *http.Request) {
   <input type="hidden" name="redirect_uri" value="` + e(q.Get("redirect_uri")) + `">
   <input type="hidden" name="code_challenge" value="` + e(q.Get("code_challenge")) + `">
   <input type="hidden" name="code_challenge_method" value="` + e(q.Get("code_challenge_method")) + `">
+  <input type="hidden" name="resource" value="` + e(q.Get("resource")) + `">
   <input type="hidden" name="state" value="` + e(q.Get("state")) + `">
   <button type="submit">Authorize</button>
 </form>
@@ -292,6 +303,27 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 
 	if redirectURI == "" || codeChallenge == "" {
 		http.Error(w, "missing redirect_uri or code_challenge", http.StatusBadRequest)
+		return
+	}
+
+	// PKCE method MUST be S256 (S5/W03-6; OAuth 2.1 §7.5.2 — `plain` leaks
+	// the verifier to anything that sees the authorization request, and an
+	// ABSENT method defaults to plain per RFC 7636 §4.3, so both reject).
+	// The /token side verifies with SHA-256 unconditionally, but rejecting
+	// here beats a doomed round trip through the user's key entry.
+	if r.FormValue("code_challenge_method") != "S256" {
+		oauthError(w, "invalid_request", "code_challenge_method must be S256")
+		return
+	}
+
+	// RFC 8707 resource validation (S5/W03-6, RVW-Spec-F2/Vollst-F5): ctx is
+	// a single-resource server — a present `resource` that is not OUR
+	// canonical MCP resource is a mix-up vector and answers invalid_target;
+	// the value stored on the code row is only ever the validated canonical
+	// one, never the raw client input.
+	resource := r.FormValue("resource")
+	if resource != "" && resource != h.canonicalOrHostIssuer(r)+"/mcp" {
+		oauthError(w, "invalid_target", "unknown resource")
 		return
 	}
 
@@ -363,6 +395,7 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
+		Resource:      resource, // validated above — canonical or empty
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	}); err != nil {
 		slog.Error("oauth: persist authorization code", "error", err)
@@ -420,26 +453,45 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 	// ParseForm above — the grant handlers receive plain strings (gosec
 	// G120 cannot see the cap across the function boundary, and neither
 	// should a future caller have to remember it).
+	req := tokenRequest{
+		client:       presentedClient,
+		code:         r.FormValue("code"),
+		codeVerifier: r.FormValue("code_verifier"),
+		refreshToken: r.FormValue("refresh_token"),
+		redirectURI:  r.FormValue("redirect_uri"),
+		resource:     r.FormValue("resource"),
+	}
 	switch r.FormValue("grant_type") {
 	case "authorization_code":
-		h.tokenAuthorizationCode(w, r, presentedClient, r.FormValue("code"), r.FormValue("code_verifier"))
+		h.tokenAuthorizationCode(w, r, req)
 	case "refresh_token":
-		h.tokenRefresh(w, r, presentedClient, r.FormValue("refresh_token"))
+		h.tokenRefresh(w, r, req)
 	default:
 		oauthError(w, "unsupported_grant_type", "only authorization_code and refresh_token are supported")
 	}
+}
+
+// tokenRequest carries the /token form values across the grant handlers —
+// extracted once in Token() behind the body cap (gosec G120 boundary).
+type tokenRequest struct {
+	client       string
+	code         string
+	codeVerifier string
+	refreshToken string
+	redirectURI  string
+	resource     string
 }
 
 // tokenRefresh handles the refresh_token grant (S4/W03-4): rotation with
 // reuse detection. Every failure class — unknown, expired, wrong client,
 // capped-out family AND detected reuse — answers the SAME invalid_grant (no
 // oracle); the reuse case additionally revoked the whole family server-side.
-func (h *OAuthHandler) tokenRefresh(w http.ResponseWriter, r *http.Request, presentedClient, presented string) {
-	if presented == "" || !strings.HasPrefix(presented, store.RefreshTokenPrefix) {
+func (h *OAuthHandler) tokenRefresh(w http.ResponseWriter, r *http.Request, req tokenRequest) {
+	if req.refreshToken == "" || !strings.HasPrefix(req.refreshToken, store.RefreshTokenPrefix) {
 		oauthError(w, "invalid_grant", "refresh token invalid or expired")
 		return
 	}
-	pair, outcome, err := store.RotateRefreshToken(r.Context(), h.pool, presented, presentedClient,
+	pair, outcome, err := store.RotateRefreshToken(r.Context(), h.pool, req.refreshToken, req.client,
 		accessTokenTTL(), refreshTokenTTL(), refreshFamilyCap())
 	if err != nil {
 		slog.Error("oauth: rotate refresh token", "error", err)
@@ -453,7 +505,7 @@ func (h *OAuthHandler) tokenRefresh(w http.ResponseWriter, r *http.Request, pres
 		// Theft signal: family already revoked inside the rotation tx. Log
 		// loudly server-side, answer the standard invalid_grant (RFC 6749
 		// §5.2) — the wire carries no detection oracle.
-		slog.Warn("oauth: refresh token reuse detected — family revoked", "client_id", presentedClient)
+		slog.Warn("oauth: refresh token reuse detected — family revoked", "client_id", req.client)
 		oauthError(w, "invalid_grant", "refresh token invalid or expired")
 	default:
 		oauthError(w, "invalid_grant", "refresh token invalid or expired")
@@ -462,13 +514,12 @@ func (h *OAuthHandler) tokenRefresh(w http.ResponseWriter, r *http.Request, pres
 
 // tokenAuthorizationCode handles the authorization_code grant: the S1/S2
 // hardened code redemption, minting the S3 opaque pair (S4: + refresh).
-func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request, presentedClient, code, codeVerifier string) {
-
+func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request, req tokenRequest) {
 	// Atomic single-use take (098, S1): DELETE … RETURNING — of two racing
 	// /token calls exactly one gets the row, on ANY instance sharing the DB
 	// (the in-memory map's single-instance gap, closed). Expiry check follows
 	// the same order as the previous in-memory take (consume, then reject).
-	ac, err := store.TakeOAuthCode(r.Context(), h.pool, codeHash(code))
+	ac, err := store.TakeOAuthCode(r.Context(), h.pool, codeHash(req.code))
 	if err != nil {
 		slog.Error("oauth: take authorization code", "error", err)
 		oauthError(w, "invalid_grant", "code expired or not found")
@@ -480,7 +531,7 @@ func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Req
 	}
 
 	// Verify PKCE: SHA256(code_verifier) must match code_challenge.
-	hash := sha256.Sum256([]byte(codeVerifier))
+	hash := sha256.Sum256([]byte(req.codeVerifier))
 	computed := base64.RawURLEncoding.EncodeToString(hash[:])
 	if computed != ac.CodeChallenge {
 		oauthError(w, "invalid_grant", "code_verifier mismatch")
@@ -493,8 +544,30 @@ func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Req
 	// redeem client A's code. Since S2 makes client_id mandatory at
 	// /authorize, every code row carries one — an empty ac.ClientID can
 	// only be a pre-S2 leftover row and fails closed.
-	if ac.ClientID == "" || presentedClient != ac.ClientID {
+	if ac.ClientID == "" || req.client != ac.ClientID {
 		oauthError(w, "invalid_grant", "code was not issued to this client")
+		return
+	}
+
+	// redirect_uri rebind (S5/W03-6; RFC 6749 §4.1.3): a redirect_uri
+	// presented at /token must equal the one the code was issued for. An
+	// ABSENT parameter is accepted — OAuth 2.1 drops the token-side
+	// requirement in favour of PKCE (which S2/S5 enforce), so requiring it
+	// would break spec-current clients for no security gain; the check bites
+	// exactly the historic code-injection shape it exists for (a presented
+	// but different URI).
+	if req.redirectURI != "" && req.redirectURI != ac.RedirectURI {
+		oauthError(w, "invalid_grant", "redirect_uri does not match the authorization request")
+		return
+	}
+
+	// resource consistency (S5/W03-6; RFC 8707 §2.2): a resource presented
+	// at /token must be OUR canonical MCP resource — same single-resource
+	// rule as at /authorize. (The code row's stored value is already
+	// validated-or-empty, so equality against the canonical value covers
+	// both the rebind and the fresh-parameter case.)
+	if req.resource != "" && req.resource != h.canonicalOrHostIssuer(r)+"/mcp" {
+		oauthError(w, "invalid_target", "unknown resource")
 		return
 	}
 

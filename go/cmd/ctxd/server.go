@@ -70,6 +70,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	oauthH := handler.NewOAuthHandler(pool)
 	r.Get("/.well-known/oauth-authorization-server", oauthH.Metadata)
 	r.Get("/.well-known/oauth-protected-resource", oauthH.ProtectedResource)
+	// RFC 9728 §3.1 path-insertion form for the /mcp resource (S5/W03-5) —
+	// clients derive this spelling from the resource URL <issuer>/mcp.
+	r.Get("/.well-known/oauth-protected-resource/mcp", oauthH.ProtectedResource)
 	r.HandleFunc("/authorize", oauthH.Authorize) // GET = form, POST = submit
 	r.Post("/token", oauthH.Token)
 	// RFC 7591 DCR (02-W4a). Always mounted; the handler gates per request

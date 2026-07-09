@@ -50,19 +50,25 @@ func TokenHash(token string) string {
 }
 
 // LookupAccessToken resolves a presented ctxt_ token to its INV-A single-key
-// selector. Fail-closed by predicate: unknown hash, wrong type, revoked or
-// expired rows are all the same miss ("", false, nil) — the caller answers
-// 401 without an oracle. The key/principal gates themselves live downstream
-// in ctx_auth_by_id (one gate location, design 03 §4).
-func LookupAccessToken(ctx context.Context, pool *pgxpool.Pool, token string) (apiKeyID string, ok bool, err error) {
+// selector. Fail-closed by predicate: unknown hash, wrong type, revoked,
+// expired — and, when requiredAudience is non-empty, a row whose audiences
+// do NOT contain it (RFC 8707 membership check at /mcp, S5/W03-6) — are all
+// the same miss ("", false, nil); the caller answers 401 without an oracle.
+// An empty requiredAudience skips the audience gate: without a configured
+// canonical issuer there is no trustworthy expected value (rows were minted
+// with an r.Host-derived audience), and inventing one would 401 every
+// legitimate token. The key/principal gates themselves live downstream in
+// ctx_auth_by_id (one gate location, design 03 §4).
+func LookupAccessToken(ctx context.Context, pool *pgxpool.Pool, token, requiredAudience string) (apiKeyID string, ok bool, err error) {
 	err = pool.QueryRow(ctx,
 		`SELECT api_key_id
 		   FROM context_access_tokens
 		  WHERE token_hash = $1
 		    AND token_type = 'access'
 		    AND revoked_at IS NULL
-		    AND expires_at > now()`,
-		TokenHash(token),
+		    AND expires_at > now()
+		    AND ($2 = '' OR $2 = ANY(audiences))`,
+		TokenHash(token), requiredAudience,
 	).Scan(&apiKeyID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil

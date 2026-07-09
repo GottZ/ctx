@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"runtime/debug"
 	"strings"
@@ -246,7 +248,16 @@ func credentialFromRequest(r *http.Request) string {
 func resolveCredential(ctx context.Context, pool *pgxpool.Pool, raw string) (*auth.AuthResult, error) {
 	switch {
 	case strings.HasPrefix(raw, store.AccessTokenPrefix):
-		apiKeyID, ok, err := store.LookupAccessToken(ctx, pool, raw)
+		// RFC 8707 audience membership (S5/W03-6): the token's audiences
+		// must contain OUR canonical MCP resource. Enforceable only with a
+		// configured canonical issuer (S2) — unset skips the gate (see
+		// LookupAccessToken doc); raw api keys bypass it by design (the
+		// documented E2 spec deviation, design 03 §4).
+		requiredAudience := ""
+		if issuer := strings.TrimRight(strings.TrimSpace(os.Getenv(EnvCanonicalIssuer)), "/"); issuer != "" {
+			requiredAudience = issuer + "/mcp"
+		}
+		apiKeyID, ok, err := store.LookupAccessToken(ctx, pool, raw, requiredAudience)
 		if err != nil {
 			return nil, err
 		}
@@ -278,6 +289,17 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			}
 
 			if !result.IsValid {
+				// RFC 9728 §5.1 (S5/W03-5): the 401 points the client at
+				// the protected-resource metadata AND names the scope to
+				// request — MCP clients bootstrap their auth flow from
+				// exactly this header.
+				issuer := strings.TrimRight(strings.TrimSpace(os.Getenv(EnvCanonicalIssuer)), "/")
+				if issuer == "" {
+					issuer = "https://" + r.Host
+				}
+				w.Header().Set("WWW-Authenticate",
+					fmt.Sprintf(`Bearer resource_metadata=%q, scope="mcp"`,
+						issuer+"/.well-known/oauth-protected-resource/mcp"))
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 				return
 			}
