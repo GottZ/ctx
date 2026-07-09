@@ -78,6 +78,15 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// because the mode decides whether auth applies at all.
 	r.Post("/register", oauthH.Register)
 
+	// External-login consumer routes (OAuth L5, design 04 §4.2/§4.3) — public
+	// like the OAuth server endpoints above (these ARE the auth flow). The
+	// fail-closed provider allowlist, per-IP rate limit (F7) and the
+	// ssrfguard-hardened upstream client live inside the handler. The SPA
+	// reserves the /auth prefix (index.ts RESERVED_SERVER_PREFIXES).
+	ssoH := handler.NewSSOHandler(pool)
+	r.Get("/auth/login/{provider}", ssoH.HandleLogin)
+	r.Get("/auth/callback/{provider}", ssoH.HandleCallback)
+
 	// Per-tenant quota accountant (T36, 04-W4): one process-wide instance, a
 	// lock-free TTL-cached per-tenant cost/call rollup feeding the synthesis
 	// gate. 30s TTL (§6.2) — the cost SUM over the 1M+ llm_log hypertable is

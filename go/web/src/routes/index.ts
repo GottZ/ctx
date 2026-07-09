@@ -23,6 +23,10 @@ export const RESERVED_SERVER_PREFIXES = [
   // the ingress lives OUTSIDE /api, so the SPA must never claim it as a client
   // route. Pinned now (prefix only) — the handler lands with the W13 sync wave.
   '/webhooks',
+  // External-login consumer flow (OAuth L5, design 04-oauth §4.2/§4.3):
+  // /auth/login/{provider} + /auth/callback/{provider} are server routes —
+  // the SPA must never claim the prefix or a deep link would shadow the flow.
+  '/auth',
 ] as const
 
 /**
