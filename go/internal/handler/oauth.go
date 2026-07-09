@@ -181,20 +181,53 @@ func (h *OAuthHandler) canonicalOrHostIssuer(r *http.Request) string {
 	return "https://" + r.Host
 }
 
-// Metadata serves GET /.well-known/oauth-authorization-server.
+// EnvDCRMode names the DCR mode flag (design 02 §4b/E3): open | admin | off.
+// Empty/unset counts as off — the /register route only exists once 02-W4
+// mounts it, so the default advertises nothing that is not served.
+const EnvDCRMode = "CTX_OAUTH_DCR_MODE"
+
+// dcrMode returns the normalized DCR mode. Unknown values fall back to off
+// (fail-closed: a typo must never open registration).
+func dcrMode() string {
+	switch mode := strings.TrimSpace(os.Getenv(EnvDCRMode)); mode {
+	case "open", "admin":
+		return mode
+	default:
+		return "off"
+	}
+}
+
+// Metadata serves GET /.well-known/oauth-authorization-server (RFC 8414).
+// Coupling rules (design 02 §4c, 02-W3): grant_types_supported stays
+// ["authorization_code"] until 03/S4 actually issues refresh tokens, and
+// scopes_supported is omitted until a scope catalog exists that /token
+// enforces — the discovery document never advertises what the server does
+// not do. registration_endpoint appears only when DCR is switched on
+// (route lands in 02-W4; the flag default is off).
 func (h *OAuthHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 	issuer := h.canonicalOrHostIssuer(r)
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	doc := map[string]any{
 		"issuer":                                issuer,
 		"authorization_endpoint":                issuer + "/authorize",
 		"token_endpoint":                        issuer + "/token",
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code"},
 		"code_challenge_methods_supported":       []string{"S256"},
-		"token_endpoint_auth_methods_supported": []string{"none"},
-	})
+		// none | client_secret_basic | client_secret_post (design 02 §3/§4c;
+		// no private_key_jwt — there is no jwks path in the MVP). The
+		// constant-time secret ENFORCEMENT at /token is 03/S6.
+		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic", "client_secret_post"},
+		// CIMD (client_id as metadata URL) is a post-MVP expansion; the
+		// SSRF-hardened fetch path does not exist yet, so: false.
+		"client_id_metadata_document_supported": false,
+	}
+	if dcrMode() != "off" {
+		doc["registration_endpoint"] = issuer + "/register"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(doc)
 }
 
 // ProtectedResource serves GET /.well-known/oauth-protected-resource.
