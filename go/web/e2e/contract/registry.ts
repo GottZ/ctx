@@ -341,7 +341,9 @@ export const contracts: PageContract[] = [
         prepare: async (page) => {
           await page.getByLabel('API key').fill('wrong-key')
           await page.getByRole('button', { name: 'Sign in' }).click()
-          await expect(page.getByRole('alert')).toContainText('invalid or revoked API key')
+          // R4: the reject comes from POST /auth/login — the real handler's
+          // uniform sessionError string (auth_session.go).
+          await expect(page.getByRole('alert')).toContainText('authentication failed')
         },
       },
     ],
@@ -349,7 +351,7 @@ export const contracts: PageContract[] = [
       exempt: 'Login-Maske: ein einzelnes Formular ohne Datenliste — es existiert kein 10k-Wachstumspfad.',
     },
     flowDoc:
-      'Nutzer fügt den API-Key ein und meldet sich an: whoami-Probe → Shell mountet → Member-Landing /home. Der Fehl-Key-Pfad (Fehlerband, NIE Shell) ist der deklarierte error-State + freie Negativ-Probe in smoke.spec.ts.',
+      'Nutzer fügt den API-Key ein und meldet sich an: POST /auth/login tauscht ihn gegen httpOnly-Cookies (R4) → whoami hydriert → Shell mountet → Member-Landing /home. Der Fehl-Key-Pfad (Fehlerband, NIE Shell) ist der deklarierte error-State + freie Negativ-Probe in smoke.spec.ts.',
     primaryFlow: async (page) => {
       await page.getByLabel('API key').fill(KEY)
       await page.getByRole('button', { name: 'Sign in' }).click()

@@ -44,12 +44,14 @@ test.describe('login negative path (PV7)', () => {
     await page.getByLabel('API key').fill('wrong-key')
     await page.getByRole('button', { name: 'Sign in' }).click()
 
-    // 401 error band from the whoami auth-header branch — the real handler string.
-    await expect(page.getByRole('alert')).toContainText('invalid or revoked API key')
+    // 401 error band from the /auth/login mock — the real handler's uniform
+    // sessionError string (auth_session.go, R3/R4).
+    await expect(page.getByRole('alert')).toContainText('authentication failed')
     // NEVER the shell: no .shell, no rail, still the login screen.
     await expect(page.locator('.shell')).toHaveCount(0)
     await expect(page.locator('nav.rail')).toHaveCount(0)
-    // The rejected key is not persisted (login() persists only on success).
+    // R4 invariant: the raw key touches NO client storage — neither on
+    // failure nor ever (login exchanges it for httpOnly cookies).
     expect(await page.evaluate(() => sessionStorage.getItem('ctx.api-key'))).toBeNull()
 
     // The mask stays operable: the correct key still signs in.

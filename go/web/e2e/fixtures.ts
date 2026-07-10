@@ -636,24 +636,62 @@ export interface SeededSession {
 }
 
 /**
- * Seed an authenticated session (sessionStorage key, restored on App mount) +
- * a deterministic theme pref (localStorage, read by theme-boot.js before first
- * paint), then install the `/api/**` mocks. Must run BEFORE page.goto().
+ * Seed an authenticated session (cookie-session shape since R4: the whoami
+ * mock answers the header-less probe with the session envelope + csrf_token;
+ * `anonymous` seeds boot to the login mask instead) + a deterministic theme
+ * pref (localStorage, read by theme-boot.js before first paint), then
+ * install the `/auth/*` + `/api/**` mocks. Must run BEFORE page.goto().
+ * The raw key touches NO client storage anymore (R4 — sessionStorage seed
+ * removed); the login contract runs through the mocked POST /auth/login.
  * Returns the mock-call recorder handle (every /api/** request is logged) —
  * existing call sites may ignore it (non-breaking).
  */
 export async function seedSession(page: Page, opts: SeedOptions): Promise<SeededSession> {
   await page.addInitScript(
-    ({ key, theme }) => {
+    ({ theme }) => {
       try {
-        if (key !== null) sessionStorage.setItem('ctx.api-key', key)
         localStorage.setItem('ctx.theme', theme)
       } catch {
         /* storage blocked — test will surface it as a render failure */
       }
     },
-    { key: opts.anonymous === true ? null : KEY, theme: opts.theme },
+    { theme: opts.theme },
   )
+
+  // Cookie-session state (R4): logged-in seeds answer the header-less whoami
+  // with the session envelope; the login/logout mocks flip this flag so the
+  // PV7 login contract and teardown flows stay provable.
+  let cookieAuthed = opts.anonymous !== true
+  /** The per-session csrf secret whoami + login hand to the SPA (05 §4.4). */
+  const CSRF = 'e2e-csrf-secret'
+
+  // Session lifecycle routes (auth_session.go). Login authenticates ONLY the
+  // canonical fixture key — a wrong key gets the real handler's uniform 401
+  // envelope (sessionError: "authentication failed"). Refresh answers 401
+  // unless the seed is authenticated, so the api layer's single-flight
+  // refresh path terminates deterministically (no hanging request).
+  await page.route('**/auth/login', async (route: Route) => {
+    let apiKey = ''
+    try {
+      apiKey = (route.request().postDataJSON() as { api_key?: string })?.api_key ?? ''
+    } catch {
+      /* malformed body → stays '' → 401 */
+    }
+    if (apiKey.trim() === KEY) {
+      cookieAuthed = true
+      return route.fulfill({ json: { success: true, csrf_token: CSRF } })
+    }
+    return route.fulfill({ status: 401, json: { success: false, error: 'authentication failed' } })
+  })
+  await page.route('**/auth/refresh', (route: Route) =>
+    cookieAuthed
+      ? route.fulfill({ json: { success: true } })
+      : route.fulfill({ status: 401, json: { success: false, error: 'authentication failed' } }),
+  )
+  await page.route('**/auth/logout', (route: Route) => {
+    cookieAuthed = false
+    return route.fulfill({ json: { success: true } })
+  })
 
   const tkey: TenantKey = opts.tenant ?? 'A'
   const t = TENANTS[tkey]
@@ -713,17 +751,22 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
     if (path === '/api/events') return route.abort()
 
     if (path === '/api/whoami') {
-      // Auth-header branch (PV7 login contract): whoami authenticates ONLY the
-      // canonical fixture key. A login attempt with any other key gets the real
-      // handler's 401 envelope — the Fehl-Key path renders the error band and
-      // NEVER the shell. Every pre-existing spec seeds KEY, so the happy path
-      // is byte-identical for them. 401 with an EXPLICIT key does not fire
-      // hooks.onUnauthorized (api.ts:96) — no session teardown side effects.
+      // Cookie-session branch (R4): the SPA probes whoami header-less — the
+      // ambient cookie is invisible to the mock, so the seed flag decides.
+      // Authenticated seeds get the session envelope INCLUDING csrf_token
+      // (the 05 §4.4 synchronizer delivery); anonymous seeds get the 401 and
+      // boot to the login mask. An EXPLICIT Authorization header (legacy
+      // probe shape, opts.key overrides) still authenticates only the
+      // canonical KEY — the PV7 error-band contract now lives on the
+      // /auth/login mock above.
       const auth = req.headers()['authorization']
-      if (auth !== `Bearer ${KEY}`) {
+      if (auth !== undefined && auth !== `Bearer ${KEY}`) {
         return route.fulfill({ status: 401, json: { success: false, error: 'invalid or revoked API key' } })
       }
-      return route.fulfill({ json: whoamiFor(opts.role, tkey, opts.capabilities) })
+      if (auth === undefined && !cookieAuthed) {
+        return route.fulfill({ status: 401, json: { error: 'unauthorized' } })
+      }
+      return route.fulfill({ json: { ...whoamiFor(opts.role, tkey, opts.capabilities), csrf_token: CSRF } })
     }
 
     // 'error' state (declarative, §4.6): the core READ surfaces fail with a 500

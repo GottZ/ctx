@@ -217,6 +217,9 @@ func (h *SSOHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// §4.2.5 — the `state` URL param carries state_data.state, NOT the
 	// cookie row id.
+	// #nosec G710 -- the redirect target is built EXCLUSIVELY from the
+	// operator-registered provider row (INV-C allowlist) and its validated
+	// discovery document — never from request input.
 	http.Redirect(w, r, buildAuthorizeURL(authURL, p, redirectURI, challenge, state, nonce), http.StatusFound)
 }
 
@@ -455,6 +458,9 @@ func (h *SSOHandler) issueWebSession(w http.ResponseWriter, r *http.Request, slu
 	if returnTo == "" {
 		returnTo = "/"
 	}
+	// #nosec G710 -- returnTo passed the login-time open-redirect filter
+	// (^/[^/\\], sealed into the single-use state row) and reaches this
+	// point only from the consumed state — never raw request input.
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 

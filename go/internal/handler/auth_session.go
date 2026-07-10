@@ -84,11 +84,17 @@ func (h *SessionHandler) audienceBase(r *http.Request) string {
 // total regardless of rolling refreshes.
 func (h *SessionHandler) setSessionCookies(w http.ResponseWriter, sessionID, refreshToken string) {
 	maxAge := int(refreshTokenTTL().Seconds())
+	// #nosec G124 -- HttpOnly+SameSite are set; Secure is DELIBERATELY
+	// config-derived (secureCookies: https canonical issuer → true), not a
+	// hard literal — a hard true would break plain-http dev/loopback logins
+	// while production behind TLS always derives true (design 05 §4.3,
+	// cookies.go-Destillat "Secure-in-Prod").
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: sessionID,
 		Path: "/", HttpOnly: true, Secure: h.secureCookies(),
 		SameSite: http.SameSiteLaxMode, MaxAge: maxAge,
 	})
+	// #nosec G124 -- same rationale; additionally Path=/auth + SameSite=Strict.
 	http.SetCookie(w, &http.Cookie{
 		Name: refreshCookieName, Value: refreshToken,
 		Path: "/auth", HttpOnly: true, Secure: h.secureCookies(),
@@ -102,6 +108,8 @@ func (h *SessionHandler) clearSessionCookies(w http.ResponseWriter) {
 		{sessionCookieName, "/"},
 		{refreshCookieName, "/auth"},
 	} {
+		// #nosec G124 -- expiry cookie (MaxAge -1, empty value); Secure is
+		// config-derived, see setSessionCookies.
 		http.SetCookie(w, &http.Cookie{
 			Name: c.name, Value: "", Path: c.path, HttpOnly: true,
 			Secure: h.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: -1,

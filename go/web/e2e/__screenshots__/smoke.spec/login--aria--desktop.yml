@@ -6,8 +6,6 @@
   - /placeholder: paste an API key
 - button "Sign in" [disabled]
 - paragraph:
-  - text: The key is held for this tab only (sessionStorage) and sent as a
+  - text: The key is exchanged for an httpOnly session cookie and never stored in the browser. Scripts and MCP clients keep using it directly as a
   - code: Bearer
-  - text: token to
-  - code: /api/*
-  - text: .
+  - text: token.
