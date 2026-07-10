@@ -27,7 +27,7 @@
     "@tsconfig/svelte": "5.0.8",
     "@types/markdown-it": "14.1.2",
     "@types/node": "24.12.3",
-    "dompurify": "3.4.10",
+    "dompurify": "3.4.11",
     "eventsource-parser": "3.1.0",
     "graphology": "0.26.0",
     "graphology-layout-forceatlas2": "0.10.1",
