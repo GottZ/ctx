@@ -229,6 +229,12 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		handler.MountGraphCategoryHues(r, handler.NewGraphCategoryHuesHandler(pool))
 		// Whoami — key identity for the SPA login gate (F4-W3)
 		r.Get("/api/whoami", whoamiH.HandleWhoami)
+		// Key-/Tenant-Selektor (OAuth R6, design 05 §4.6): Keys des
+		// Session-Principals listen + mint-fresh auf einen anderen eigenen
+		// Key wechseln. select-key ist Cookie-only (400 am Header-Pfad);
+		// das CSRF-Gate der Auth-Middleware greift beim POST automatisch.
+		r.Get("/api/session/keys", sessH.HandleSessionKeys)
+		r.Post("/api/session/select-key", sessH.HandleSelectKey)
 		// Manage — CRUD + Guard API
 		r.Post("/api/manage", manageH.HandleManage)
 		// Camo image proxy — MINT half (auth-gated, rate-limited). The FE has no
