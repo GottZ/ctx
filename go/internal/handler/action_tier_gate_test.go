@@ -35,6 +35,12 @@ func TestActionTier_Classification(t *testing.T) {
 		{"oauth-provider-create", "", tierServerAdmin},
 		{"oauth-provider-list", "", tierServerAdmin},
 		{"oauth-provider-delete", "", tierServerAdmin},
+		// oauth-identity-* (OAuth R5, 05 §4.5, E4b admin-invite): identity
+		// bindings decide WHO a login resolves to — provider-allowlist trust
+		// altitude.
+		{"oauth-identity-link", "", tierServerAdmin},
+		{"oauth-identity-list", "", tierServerAdmin},
+		{"oauth-identity-unlink", "", tierServerAdmin},
 		// backend-test reaches an arbitrary backend by id with its resolved key
 		// and is NOT tenant-filtered → stays server-admin (T37 isolated the
 		// CRUD/list, deliberately not the probe).
@@ -204,6 +210,22 @@ func TestActionTier_OAuthProviderFamilyExplicitlyTiered(t *testing.T) {
 		}
 		if tier != tierServerAdmin {
 			t.Errorf("action %q tier = %d, want tierServerAdmin (INV-C trust anchor, operator-global)", a, tier)
+		}
+	}
+}
+
+// TestActionTier_OAuthIdentityFamilyExplicitlyTiered is the R5 S9 fail-open
+// probe (design/05 §4.5, E4b admin-invite): every oauth-identity-* action
+// MUST be EXPLICITLY tierServerAdmin — identity bindings decide WHO a login
+// resolves to.
+func TestActionTier_OAuthIdentityFamilyExplicitlyTiered(t *testing.T) {
+	for _, a := range []string{"oauth-identity-link", "oauth-identity-list", "oauth-identity-unlink"} {
+		tier, explicit := actionTierExplicit(manageRequest{Action: a})
+		if !explicit {
+			t.Errorf("action %q is dispatched but NOT explicitly tiered (fail-open tierOpen default, S9)", a)
+		}
+		if tier != tierServerAdmin {
+			t.Errorf("action %q tier = %d, want tierServerAdmin (login-resolution trust anchor)", a, tier)
 		}
 	}
 }

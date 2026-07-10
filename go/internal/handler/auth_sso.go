@@ -36,6 +36,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,6 +50,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/oidc"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/ssrfguard"
@@ -107,6 +109,9 @@ type SSOHandler struct {
 	cache *oidc.Cache
 	// limiter is the per-IP fixed-window limiter for both routes.
 	limiter *ipLimiter
+	// session issues the web session at the callback end (R5, 05 §4.5) —
+	// the same cookie/mint helpers the key-entry login uses (R3).
+	session *SessionHandler
 }
 
 // NewSSOHandler wires the production SSO flow handler: ssrfguard-hardened
@@ -129,6 +134,7 @@ func NewSSOHandler(pool *pgxpool.Pool) *SSOHandler {
 		client:       client,
 		cache:        oidc.NewCache(oidc.Options{Client: client}),
 		limiter:      newIPLimiter(ssoRateLimit, ssoRateWindow),
+		session:      NewSessionHandler(pool),
 	}
 }
 
@@ -375,15 +381,81 @@ func (h *SSOHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// §4.3.10 — handover stub to Achse 05: R2 replaces this response with the
-	// session issuance. principal_id carries NO authority (INV-B) — no key,
-	// no token, no scopes; return_to was open-redirect-filtered at login and
-	// is consumed by the session wave.
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success":      true,
-		"principal_id": principalID,
-		"return_to":    data.ReturnTo,
-	})
+	// §4.3.10 / 05 §4.5 (R5) — session issuance (extracted for the cyclop
+	// budget; the callback above stays the validation spine).
+	h.issueWebSession(w, r, p.Slug, principalID, data.ReturnTo)
+}
+
+// issueWebSession ends a successful SSO callback in a real web session (R5,
+// 05 §4.5): the identity is established; authorization is the principal's
+// KEY (INV-B — SSO never grants access). A key-less principal answers
+// fail-closed: the session row structurally requires a key (INV-A), so
+// "logged in but sees nothing" materialises as no-session-at-all plus an
+// honest operator hint. The key choice is the most recently used active key
+// (PickPrincipalKey); the R6 selector switches tenants afterwards. The
+// inactive-key shape is double-gated: the pick predicate AND the full
+// AuthenticateByID gate set (key active / tenant status / principal
+// is_active) both stand before anything is minted.
+func (h *SSOHandler) issueWebSession(w http.ResponseWriter, r *http.Request, slug, principalID, returnTo string) {
+	ctx := r.Context()
+	apiKeyID, hasKey, err := store.PickPrincipalKey(ctx, h.pool, principalID)
+	if err != nil {
+		slog.Error("sso: pick principal key", "provider", slug, "error", err, "request_id", RequestIDFromContext(ctx))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+	noAccess := func() {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"success": false,
+			"error":   "no access yet — ask an operator to mint an api key for this account",
+		})
+	}
+	if !hasKey {
+		noAccess()
+		return
+	}
+	result, err := auth.AuthenticateByID(ctx, h.pool, apiKeyID)
+	if err != nil || !result.IsValid {
+		slog.Warn("sso: picked key fails the auth gates", "provider", slug, "request_id", RequestIDFromContext(ctx))
+		noAccess()
+		return
+	}
+
+	base := h.session.audienceBase(r)
+	pair, err := store.MintTokenPair(ctx, h.pool, store.OAuthToken{
+		APIKeyID:    result.ApiKeyID,
+		PrincipalID: result.PrincipalID,
+		ClientID:    "", // web session, no OAuth client (same shape as key login)
+		Audiences:   []string{base + "/mcp", base + "/web"},
+		IssuedVia:   "login",
+	}, accessTokenTTL(), refreshTokenTTL())
+	if err != nil {
+		slog.Error("sso: mint login pair", "provider", slug, "error", err, "request_id", RequestIDFromContext(ctx))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+	csrfBytes := make([]byte, 32)
+	if _, err := rand.Read(csrfBytes); err != nil {
+		slog.Error("sso: csrf rand", "error", err, "request_id", RequestIDFromContext(ctx))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+	sessionID, err := store.CreateWebSession(ctx, h.pool,
+		pair.AccessToken, result.PrincipalID, hex.EncodeToString(csrfBytes), r.UserAgent(), clientIP(r, h.trustedProxy))
+	if err != nil {
+		slog.Error("sso: create overlay", "provider", slug, "error", err, "request_id", RequestIDFromContext(ctx))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		return
+	}
+	h.session.setSessionCookies(w, sessionID, pair.RefreshToken)
+
+	// Browser flow: land the person where they wanted to go (return_to was
+	// open-redirect-filtered at login, "" folds to "/"); the SPA picks the
+	// csrf token up from whoami.
+	if returnTo == "" {
+		returnTo = "/"
+	}
+	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
 // reject writes the ONE generic callback reject and logs the real reason

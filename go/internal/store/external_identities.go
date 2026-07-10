@@ -49,3 +49,119 @@ func TouchExternalIdentityLogin(ctx context.Context, pool *pgxpool.Pool, issuer,
 	}
 	return principalID, true, nil
 }
+
+// PickPrincipalKey chooses the api key a fresh SSO session materialises on
+// (R5, design/05 §4.5): the principal's most recently USED active key —
+// "continue where the person last was" — falling back to the oldest key for
+// never-used ones. Deterministic; the R6 key selector switches afterwards.
+// ok=false means the principal holds NO active key: SSO established an
+// identity but no authorization exists (INV-B) — the login answers
+// fail-closed, since a session row structurally requires a key (INV-A).
+func PickPrincipalKey(ctx context.Context, pool *pgxpool.Pool, principalID string) (apiKeyID string, ok bool, err error) {
+	err = pool.QueryRow(ctx,
+		`SELECT id::text
+		   FROM context_api_keys
+		  WHERE principal_id = $1::uuid AND active = true
+		  ORDER BY last_used_at DESC NULLS LAST, created_at ASC
+		  LIMIT 1`,
+		principalID,
+	).Scan(&apiKeyID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("external identities: pick key: %w", err)
+	}
+	return apiKeyID, true, nil
+}
+
+// ErrIdentityConflict marks a link attempt on an (issuer, subject) that is
+// already bound to a DIFFERENT principal — never silently re-bound (account-
+// takeover shape); the operator must unlink explicitly first.
+var ErrIdentityConflict = errors.New("external identity already linked to another principal")
+
+// LinkExternalIdentity binds one (issuer, subject) to a principal (R5 E4b
+// admin-invite: the operator pre-links identities; the login path itself
+// never creates rows). Idempotent for the SAME principal (refreshes email/
+// display_name), conflict error for a different one. The issuer is the
+// caller-resolved trust value (provider row / GitHub constant) — never raw
+// user input.
+func LinkExternalIdentity(ctx context.Context, pool *pgxpool.Pool, provider, issuer, subject, principalID, email, displayName string) error {
+	if provider == "" || issuer == "" || subject == "" {
+		return fmt.Errorf("external identities: provider, issuer and subject are required")
+	}
+	var boundTo string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO context_external_identities (principal_id, provider, issuer, subject, email, display_name)
+		 VALUES ($1::uuid, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''))
+		 ON CONFLICT (issuer, subject) DO UPDATE
+		    SET email        = COALESCE(NULLIF(EXCLUDED.email, ''), context_external_identities.email),
+		        display_name = COALESCE(NULLIF(EXCLUDED.display_name, ''), context_external_identities.display_name)
+		  WHERE context_external_identities.principal_id = EXCLUDED.principal_id
+		 RETURNING principal_id::text`,
+		principalID, provider, issuer, subject, email, displayName,
+	).Scan(&boundTo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The ON CONFLICT WHERE clause filtered: the row exists with a
+		// different principal.
+		return ErrIdentityConflict
+	}
+	if err != nil {
+		return fmt.Errorf("external identities: link: %w", err)
+	}
+	return nil
+}
+
+// UnlinkExternalIdentity removes one (issuer, subject) binding. Returns
+// whether a row was removed (false = nothing was linked — idempotent).
+func UnlinkExternalIdentity(ctx context.Context, pool *pgxpool.Pool, issuer, subject string) (bool, error) {
+	tag, err := pool.Exec(ctx,
+		`DELETE FROM context_external_identities WHERE issuer = $1 AND subject = $2`,
+		issuer, subject,
+	)
+	if err != nil {
+		return false, fmt.Errorf("external identities: unlink: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ExternalIdentity is the operator-facing list row (no secret material — the
+// table holds none).
+type ExternalIdentity struct {
+	PrincipalID string  `json:"principal_id"`
+	Provider    string  `json:"provider"`
+	Issuer      string  `json:"issuer"`
+	Subject     string  `json:"subject"`
+	Email       *string `json:"email,omitempty"`
+	DisplayName *string `json:"display_name,omitempty"`
+	VerifiedAt  *string `json:"verified_at,omitempty"`
+	LastLoginAt *string `json:"last_login_at,omitempty"`
+	CreatedAt   string  `json:"created_at"`
+}
+
+// ListExternalIdentities returns the identity bindings, optionally filtered
+// to one principal ("" = all).
+func ListExternalIdentities(ctx context.Context, pool *pgxpool.Pool, principalID string) ([]ExternalIdentity, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT principal_id::text, provider, issuer, subject, email, display_name,
+		        verified_at::text, last_login_at::text, created_at::text
+		   FROM context_external_identities
+		  WHERE $1 = '' OR principal_id = NULLIF($1, '')::uuid
+		  ORDER BY created_at DESC`,
+		principalID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("external identities: list: %w", err)
+	}
+	defer rows.Close()
+	var out []ExternalIdentity
+	for rows.Next() {
+		var e ExternalIdentity
+		if err := rows.Scan(&e.PrincipalID, &e.Provider, &e.Issuer, &e.Subject,
+			&e.Email, &e.DisplayName, &e.VerifiedAt, &e.LastLoginAt, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("external identities: scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

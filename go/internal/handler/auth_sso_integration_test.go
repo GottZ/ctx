@@ -37,6 +37,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -153,6 +154,7 @@ func newSSOTestHandler(pool *pgxpool.Pool, box *sealbox.Box, limit int) (*SSOHan
 		client:  client,
 		cache:   oidc.NewCache(oidc.Options{Client: client}),
 		limiter: newIPLimiter(limit, time.Minute),
+		session: NewSessionHandler(pool), // R5: callback issues the web session
 	}
 	r := chi.NewRouter()
 	r.Get("/auth/login/{provider}", h.HandleLogin)
@@ -248,6 +250,10 @@ func TestSSOLoginFlowOIDC_Integration(t *testing.T) {
 		t.Fatalf("create provider: %v", err)
 	}
 	alicePID := seedIdentity(t, pool, idp.srv.URL, "alice-sub", "old@example.com")
+	// R5: the callback issues a real session — alice needs an active key
+	// (the key-less shape is probed by TestSSOSessionR5_Integration).
+	aliceKey := "aa77" + strings.Repeat("cd", 30)
+	_, _ = otSeedTenantKey(t, pool, "sso-x", "sso-scope-x", aliceKey, alicePID)
 
 	_, router := newSSOTestHandler(pool, box, 1000)
 
@@ -272,25 +278,35 @@ func TestSSOLoginFlowOIDC_Integration(t *testing.T) {
 		idp.nonce = q.Get("nonce")
 
 		rr := doCallback(t, router, "corp", cookieVal, "?code="+ssoTestCode+"&state="+q.Get("state")+"&iss="+url.QueryEscape(idp.srv.URL))
-		if rr.Code != http.StatusOK {
-			t.Fatalf("callback: status %d, body %s", rr.Code, rr.Body.String())
+		// R5: the callback issues the web session and redirects to return_to.
+		if rr.Code != http.StatusFound {
+			t.Fatalf("callback: status %d, want 302 (body %s)", rr.Code, rr.Body.String())
 		}
-		var resp struct {
-			Success     bool   `json:"success"`
-			PrincipalID string `json:"principal_id"`
-			ReturnTo    string `json:"return_to"`
+		if loc := rr.Header().Get("Location"); loc != "/blocks?q=test" {
+			t.Fatalf("callback Location = %q, want /blocks?q=test", loc)
 		}
-		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("decode stub: %v", err)
+		if loc := rr.Header().Get("Location"); strings.Contains(loc, "ctxt_") || strings.Contains(loc, "ctxr_") {
+			t.Fatalf("callback Location leaks a token: %s", loc)
 		}
-		if !resp.Success || resp.PrincipalID != alicePID {
-			t.Fatalf("stub principal_id = %q, want %q (success %v)", resp.PrincipalID, alicePID, resp.Success)
+		res := rr.Result()
+		defer res.Body.Close()
+		var ssoSess, ssoRef string
+		for _, c := range res.Cookies() {
+			switch c.Name {
+			case sessionCookieName:
+				ssoSess = c.Value
+			case refreshCookieName:
+				ssoRef = c.Value
+			}
 		}
-		if resp.ReturnTo != "/blocks?q=test" {
-			t.Fatalf("return_to = %q, want /blocks?q=test", resp.ReturnTo)
+		if ssoSess == "" || !strings.HasPrefix(ssoRef, store.RefreshTokenPrefix) {
+			t.Fatalf("callback must set session + ctxr_ refresh cookies (session=%q ref-prefix=%v)", ssoSess, strings.HasPrefix(ssoRef, "ctxr_"))
 		}
-		if strings.Contains(rr.Body.String(), "token") || strings.Contains(rr.Body.String(), "key") {
-			t.Fatalf("handover stub leaks credential-ish fields (INV-B): %s", rr.Body.String())
+		// The session materialises alice's key identity end-to-end.
+		if st, body := otAuthProbe(t, pool, func(r *http.Request) {
+			r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: ssoSess})
+		}); st != http.StatusOK || !strings.Contains(body, "sso-scope-x") {
+			t.Fatalf("SSO session probe: status %d body %s, want 200 with alice's scope", st, body)
 		}
 
 		// The exchange carried the matching PKCE verifier + secret + redirect_uri.
@@ -441,7 +457,7 @@ func TestSSOLoginFlowOIDC_Integration(t *testing.T) {
 		defer func() { idp.emailVerified = true }()
 
 		rr := doCallback(t, router, "corp", cookieVal, "?code="+ssoTestCode+"&state="+loc.Query().Get("state"))
-		if rr.Code != http.StatusOK {
+		if rr.Code != http.StatusFound {
 			t.Fatalf("unverified email must not block the login itself: status %d", rr.Code)
 		}
 		var email string
@@ -579,6 +595,8 @@ func TestSSOLoginFlowGitHub_Integration(t *testing.T) {
 		t.Fatalf("create github provider: %v", err)
 	}
 	pid := seedIdentity(t, pool, "https://github.com", "4242", "")
+	// R5: the callback issues a real session — the principal needs a key.
+	_, _ = otSeedTenantKey(t, pool, "gh-x", "gh-scope-x", "bb88"+strings.Repeat("ef", 30), pid)
 
 	_, router := newSSOTestHandler(pool, box, 1000)
 
@@ -592,18 +610,25 @@ func TestSSOLoginFlowGitHub_Integration(t *testing.T) {
 	}
 
 	rr := doCallback(t, router, "github", cookieVal, "?code="+ssoTestCode+"&state="+q.Get("state"))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("github callback: status %d, body %s", rr.Code, rr.Body.String())
+	// R5: success is now the session redirect (return_to unset → "/").
+	if rr.Code != http.StatusFound {
+		t.Fatalf("github callback: status %d, want 302 (body %s)", rr.Code, rr.Body.String())
 	}
-	var resp struct {
-		Success     bool   `json:"success"`
-		PrincipalID string `json:"principal_id"`
+	res := rr.Result()
+	defer res.Body.Close()
+	var ghSess string
+	for _, c := range res.Cookies() {
+		if c.Name == sessionCookieName {
+			ghSess = c.Value
+		}
 	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode stub: %v", err)
+	if ghSess == "" {
+		t.Fatal("github callback set no session cookie")
 	}
-	if !resp.Success || resp.PrincipalID != pid {
-		t.Fatalf("principal_id = %q, want %q", resp.PrincipalID, pid)
+	if st, body := otAuthProbe(t, pool, func(r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: ghSess})
+	}); st != http.StatusOK || !strings.Contains(body, "gh-scope-x") {
+		t.Fatalf("github session probe: status %d body %s, want 200 with the principal's scope", st, body)
 	}
 	if exchanges.Load() != 1 {
 		t.Fatalf("exchanges = %d, want 1", exchanges.Load())
@@ -632,4 +657,98 @@ func s256of(verifier string) string {
 func sha256Sum(s string) []byte {
 	h := sha256.Sum256([]byte(s))
 	return h[:]
+}
+
+// TestSSOSessionR5_Integration proves the R5 onboarding gates (design/05
+// §4.5, E4b admin-invite):
+//
+//   - a linked identity whose principal holds NO active key → 403 and NO
+//     session cookie ("null Autorität bis gekeyt" — SSO is identity, never
+//     authorization; the LOOP gate)
+//   - an INACTIVE key is the same 403 (PickPrincipalKey's active predicate,
+//     the Rot-Probe target)
+//   - store-level link semantics: idempotent re-link (same principal),
+//     ErrIdentityConflict for a different principal, unlink → the login
+//     path answers the admin-invite 403 again
+func TestSSOSessionR5_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	box := newSSOTestBox(t)
+	idp := newMockIdP(t)
+	ctx := context.Background()
+
+	if _, err := store.CreateOAuthProvider(ctx, pool, box, store.CreateOAuthProviderSpec{
+		Slug: "corp5", Type: "oidc", DisplayName: "Corp5 SSO",
+		Issuer: idp.srv.URL, ClientID: ssoTestClientID, ClientSecret: ssoTestSecret,
+		RedirectBase: ssoRedirectBase, SingleTenantIssuer: true,
+	}); err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	_, router := newSSOTestHandler(pool, box, 1000)
+
+	// login helper: full round trip for the seeded identity, returns the
+	// callback recorder.
+	roundTrip := func(subject string) *httptest.ResponseRecorder {
+		cookieVal, loc := doLogin(t, router, "corp5", "")
+		q := loc.Query()
+		idp.nonce = q.Get("nonce")
+		idp.subject = subject
+		return doCallback(t, router, "corp5", cookieVal, "?code="+ssoTestCode+"&state="+q.Get("state")+"&iss="+url.QueryEscape(idp.srv.URL))
+	}
+
+	// --- key-less principal → 403, no cookie ---------------------------------
+	keylessPID := seedIdentity(t, pool, idp.srv.URL, "keyless-sub", "")
+	rr := roundTrip("keyless-sub")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("key-less login: status %d, want 403 (body %s)", rr.Code, rr.Body.String())
+	}
+	res := rr.Result()
+	defer res.Body.Close()
+	for _, c := range res.Cookies() {
+		if c.Name == sessionCookieName && c.Value != "" {
+			t.Fatal("key-less login must not set a session cookie (null authority until keyed)")
+		}
+	}
+
+	// --- inactive key is the same 403 (active predicate) ----------------------
+	inactiveKey := "cc99" + strings.Repeat("ab", 30)
+	_, inactiveKeyID := otSeedTenantKey(t, pool, "r5-x", "r5-scope-x", inactiveKey, keylessPID)
+	if _, err := pool.Exec(ctx, `UPDATE context_api_keys SET active=false WHERE id=$1::uuid`, inactiveKeyID); err != nil {
+		t.Fatalf("deactivate key: %v", err)
+	}
+	if rr := roundTrip("keyless-sub"); rr.Code != http.StatusForbidden {
+		t.Fatalf("inactive-key login: status %d, want 403", rr.Code)
+	}
+	// Re-activating turns the SAME identity into a full session (302).
+	if _, err := pool.Exec(ctx, `UPDATE context_api_keys SET active=true WHERE id=$1::uuid`, inactiveKeyID); err != nil {
+		t.Fatalf("re-activate key: %v", err)
+	}
+	if rr := roundTrip("keyless-sub"); rr.Code != http.StatusFound {
+		t.Fatalf("keyed login: status %d, want 302", rr.Code)
+	}
+
+	// --- link semantics (store level) -----------------------------------------
+	issuer := idp.srv.URL
+	if err := store.LinkExternalIdentity(ctx, pool, "oidc", issuer, "keyless-sub", keylessPID, "", ""); err != nil {
+		t.Fatalf("idempotent re-link (same principal): %v", err)
+	}
+	var otherPID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO context_principals (display_name) VALUES ('other') RETURNING id::text`).Scan(&otherPID); err != nil {
+		t.Fatalf("seed other principal: %v", err)
+	}
+	if err := store.LinkExternalIdentity(ctx, pool, "oidc", issuer, "keyless-sub", otherPID, "", ""); !errors.Is(err, store.ErrIdentityConflict) {
+		t.Fatalf("re-link to different principal: err=%v, want ErrIdentityConflict", err)
+	}
+
+	// --- unlink → the admin-invite 403 returns --------------------------------
+	removed, err := store.UnlinkExternalIdentity(ctx, pool, issuer, "keyless-sub")
+	if err != nil || !removed {
+		t.Fatalf("unlink: removed=%v err=%v", removed, err)
+	}
+	if rr := roundTrip("keyless-sub"); rr.Code != http.StatusForbidden {
+		t.Fatalf("login after unlink: status %d, want 403 (admin-invite reject)", rr.Code)
+	}
 }

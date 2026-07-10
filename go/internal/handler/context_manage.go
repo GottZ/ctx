@@ -179,7 +179,12 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// max-complexity 25). Both families are the operator-global OAuth
 		// config surface and share the tier: tierServerAdmin in actionTier
 		// (routing ⟂ tier), pinned by the S9 enumeration gate.
-		"oauth-provider-create", "oauth-provider-list", "oauth-provider-delete":
+		"oauth-provider-create", "oauth-provider-list", "oauth-provider-delete",
+		// oauth-identity-* (OAuth R5, design/05 §4.5, E4b admin-invite): the
+		// operator pre-links external identities to principals — the only
+		// provisioning path. Folded into this arm (cyclop budget, same
+		// pattern as oauth-provider-*); tierServerAdmin, S9-pinned.
+		"oauth-identity-link", "oauth-identity-list", "oauth-identity-unlink":
 		h.dispatchMCPClientAction(w, r, authResult, req)
 	case "backend-create", "backend-update", "backend-delete", "backend-list", "backend-test":
 		h.dispatchBackendAction(w, r, authResult, req)
@@ -282,6 +287,10 @@ func (h *ManageHandler) dispatchMCPClientAction(w http.ResponseWriter, r *http.R
 		h.handleOAuthProviderList(w, r)
 	case "oauth-provider-delete":
 		h.handleOAuthProviderDelete(w, r, req)
+	case "oauth-identity-link", "oauth-identity-list", "oauth-identity-unlink":
+		// R5 identity family (05 §4.5) — rides this dispatcher like the
+		// provider family: both are operator-global OAuth trust config.
+		h.dispatchOAuthIdentityAction(w, r, ar, req)
 	}
 }
 
@@ -439,6 +448,10 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 		// EXPLICIT entries are mandatory (§5.1, fail-open tierOpen default);
 		// the S9 enumeration gate pins them.
 		"oauth-provider-create", "oauth-provider-list", "oauth-provider-delete",
+		// oauth-identity-* (OAuth R5, 05 §4.5): identity bindings decide WHO
+		// a login resolves to — the same trust altitude as the provider
+		// allowlist, so ALL THREE are server-admin (S9-pinned).
+		"oauth-identity-link", "oauth-identity-list", "oauth-identity-unlink",
 		// backend-test: reads/probes a backend by id with its resolved key and
 		// is NOT tenant-filtered (poolBackendByID scans all) → server-admin.
 		"backend-test",
