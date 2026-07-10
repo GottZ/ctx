@@ -42,6 +42,11 @@ export interface WhoamiResponse {
     /** The issue/board workflow surface is enabled for this key's tenant. */
     workflow?: boolean
   }
+  // Per-Session CSRF-Synchronizer (design 05 §4.4, OAuth R4). NUR am Cookie-
+  // Pfad gesetzt (whoami.go, omitempty) — Header-Credential-Calls sehen das
+  // Feld nie. OPTIONAL + additiv wie `capabilities`; der SPA hält den Wert
+  // in-memory und sendet ihn als X-CSRF-Token bei Mutationen.
+  csrf_token?: string
 }
 
 /** Effective-value provenance (handler/settings.go apiSource). */

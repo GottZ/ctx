@@ -55,15 +55,18 @@ describe('streamTurn', () => {
     ).rejects.toMatchObject({ status: 409, code: 'conflict' })
   })
 
-  it('sends the bearer key and the message body', async () => {
+  it('sends the CSRF synchronizer token and the message body (cookie session, OAuth R4)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(sseResponse('event: done\ndata: {"finish_reason":"stop"}\n\n'))
     vi.stubGlobal('fetch', fetchMock)
-    await streamTurn({ message: 'hello', session_id: 's9' }, 'my-key', () => {}, new AbortController().signal)
+    await streamTurn({ message: 'hello', session_id: 's9' }, 'my-csrf', () => {}, new AbortController().signal)
 
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('/api/chat/stream')
     expect(init.method).toBe('POST')
-    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer my-key')
+    // Auth fährt als Cookie mit — kein Authorization-Header mehr, nur der
+    // Synchronizer gegen CSRF (design 05 §4.4).
+    expect((init.headers as Record<string, string>)['X-CSRF-Token']).toBe('my-csrf')
+    expect((init.headers as Record<string, string>).Authorization).toBeUndefined()
     expect(JSON.parse(init.body as string)).toEqual({ message: 'hello', session_id: 's9' })
   })
 

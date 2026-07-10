@@ -1,13 +1,19 @@
-// Session gates (design 04-§3.4): login probe, sessionStorage lifetime,
-// restore semantics and the 401-interceptor wiring. sessionStorage and fetch
-// are stubbed — plain node environment. Test keys assembled at runtime.
+// Session gates (design 05 §4.3/§4.4, OAuth R4/05-W5): Key→Cookie-Exchange am
+// POST /auth/login, in-memory CSRF-Synchronizer, Cookie-Restore mit EINEM
+// stillen /auth/refresh-Fallback und die 401-Interceptor-Verdrahtung. fetch
+// ist gestubbt — plain node environment; der rohe Key berührt keinen
+// Client-Storage mehr (kein sessionStorage-Stub nötig). Test keys assembled
+// at runtime.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Session, session } from './auth.svelte'
 import { apiFetch } from './api'
 
 const TEST_KEY = ['dead', 'beef'].join('') // doc-value, assembled at runtime
-const STORAGE_KEY = 'ctx.api-key'
+const TEST_CSRF = ['c5', '4f', '01'].join('') // doc-value, assembled at runtime
+
+/** Wire-Shape von POST /auth/login (handler/auth_session.go). */
+const LOGIN_OK = { success: true, csrf_token: TEST_CSRF }
 
 const WHOAMI_ADMIN = {
   success: true,
@@ -15,6 +21,7 @@ const WHOAMI_ADMIN = {
   home_scope: 'private',
   read_scopes: ['private', 'shared'],
   admin: true,
+  csrf_token: TEST_CSRF,
 }
 
 // Full-shape whoami fixtures per derived tier (N2). Server-admin is role='owner'
@@ -30,6 +37,7 @@ const WHOAMI_SERVER_ADMIN = {
   api_key_id: 'key-server-admin',
   tenant_slug: 'default',
   tenant_display_name: 'Default Tenant',
+  csrf_token: TEST_CSRF,
 }
 
 const WHOAMI_TENANT_ADMIN = {
@@ -43,6 +51,7 @@ const WHOAMI_TENANT_ADMIN = {
   api_key_id: 'key-tenant-admin',
   tenant_slug: 'acme',
   tenant_display_name: 'ACME Corp',
+  csrf_token: TEST_CSRF,
 }
 
 const WHOAMI_MEMBER = {
@@ -56,20 +65,7 @@ const WHOAMI_MEMBER = {
   api_key_id: 'key-member',
   tenant_slug: 'acme',
   tenant_display_name: 'ACME Corp',
-}
-
-function memoryStorage(): Storage {
-  const store = new Map<string, string>()
-  return {
-    getItem: (k: string) => store.get(k) ?? null,
-    setItem: (k: string, v: string) => void store.set(k, v),
-    removeItem: (k: string) => void store.delete(k),
-    clear: () => store.clear(),
-    key: (i: number) => [...store.keys()][i] ?? null,
-    get length() {
-      return store.size
-    },
-  }
+  csrf_token: TEST_CSRF,
 }
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -79,22 +75,26 @@ function jsonResponse(status: number, body: unknown): Response {
   })
 }
 
-let storage: Storage
+/** Stubbt fetch mit einer geordneten Antwort-Sequenz. */
+function stubFetch(...responses: Response[]): ReturnType<typeof vi.fn> {
+  const mock = vi.fn()
+  for (const res of responses) mock.mockResolvedValueOnce(res)
+  vi.stubGlobal('fetch', mock)
+  return mock
+}
 
 beforeEach(() => {
   vi.unstubAllGlobals()
-  storage = memoryStorage()
-  vi.stubGlobal('sessionStorage', storage)
   // The module-scope configureApi binds the api client to the singleton —
-  // reset it between tests.
+  // reset it between tests. logout feuert einen best-effort POST /auth/logout,
+  // der im node-Env am relativen Pfad scheitert und verschluckt wird.
   session.logout()
   session.notice = null
 })
 
 describe('Session.login', () => {
-  it('probes whoami with the entered key and persists it on success', async () => {
-    const mock = vi.fn().mockResolvedValueOnce(jsonResponse(200, WHOAMI_ADMIN))
-    vi.stubGlobal('fetch', mock)
+  it('exchanges the key at /auth/login and hydrates whoami over the cookies', async () => {
+    const mock = stubFetch(jsonResponse(200, LOGIN_OK), jsonResponse(200, WHOAMI_ADMIN))
 
     const s = new Session()
     await s.login(`  ${TEST_KEY}  `) // trimmed before use
@@ -102,24 +102,28 @@ describe('Session.login', () => {
     expect(s.active).toBe(true)
     expect(s.admin).toBe(true)
     expect(s.label).toBe('example-admin')
-    expect(storage.getItem(STORAGE_KEY)).toBe(TEST_KEY)
-    const init = mock.mock.calls[0]?.[1] as RequestInit
-    expect(new Headers(init.headers).get('Authorization')).toBe(`Bearer ${TEST_KEY}`)
+    expect(s.csrfToken).toBe(TEST_CSRF)
+
+    const [loginUrl, loginInit] = mock.mock.calls[0] as [string, RequestInit]
+    expect(loginUrl).toBe('/auth/login')
+    expect(loginInit.method).toBe('POST')
+    expect(JSON.parse(loginInit.body as string)).toEqual({ api_key: TEST_KEY })
+    // Der rohe Key wandert NUR in den Login-Body — nie in einen Header.
+    expect(new Headers(loginInit.headers).get('Authorization')).toBeNull()
+    expect(mock.mock.calls[1]?.[0]).toBe('/api/whoami')
   })
 
-  it('throws on a rejected key and persists nothing', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse(401, { error: 'unauthorized' })))
+  it('throws on a rejected key and stays logged out (no refresh attempt)', async () => {
+    const mock = stubFetch(jsonResponse(401, { success: false, error: 'authentication failed' }))
     const s = new Session()
     await expect(s.login(TEST_KEY)).rejects.toMatchObject({ status: 401, code: 'unauthorized' })
     expect(s.active).toBe(false)
-    expect(storage.getItem(STORAGE_KEY)).toBeNull()
+    expect(s.csrfToken).toBeNull()
+    expect(mock).toHaveBeenCalledTimes(1) // Login besitzt den 401 selbst
   })
 
   it('reflects admin:false for read-only keys', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValueOnce(jsonResponse(200, { ...WHOAMI_ADMIN, admin: false })),
-    )
+    stubFetch(jsonResponse(200, LOGIN_OK), jsonResponse(200, { ...WHOAMI_ADMIN, admin: false }))
     const s = new Session()
     await s.login(TEST_KEY)
     expect(s.active).toBe(true)
@@ -128,79 +132,89 @@ describe('Session.login', () => {
 })
 
 describe('Session.logout', () => {
-  it('clears state and storage', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse(200, WHOAMI_ADMIN)))
+  it('revokes the server session and clears local state', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, LOGIN_OK),
+      jsonResponse(200, WHOAMI_ADMIN),
+      jsonResponse(200, { success: true }), // POST /auth/logout
+    )
     const s = new Session()
     await s.login(TEST_KEY)
     s.logout()
     expect(s.active).toBe(false)
-    expect(s.key).toBeNull()
-    expect(storage.getItem(STORAGE_KEY)).toBeNull()
+    expect(s.csrfToken).toBeNull()
+    expect(mock.mock.calls[2]?.[0]).toBe('/auth/logout')
+    expect((mock.mock.calls[2]?.[1] as RequestInit).method).toBe('POST')
   })
 })
 
 describe('Session.restore', () => {
-  it('re-probes a stored key on tab reload', async () => {
-    storage.setItem(STORAGE_KEY, TEST_KEY)
-    const mock = vi.fn().mockResolvedValueOnce(jsonResponse(200, WHOAMI_ADMIN))
-    vi.stubGlobal('fetch', mock)
-
+  it('adopts a living cookie session (whoami 200 with csrf_token)', async () => {
+    const mock = stubFetch(jsonResponse(200, WHOAMI_ADMIN))
     const s = new Session()
     await s.restore()
     expect(s.active).toBe(true)
-    const init = mock.mock.calls[0]?.[1] as RequestInit
-    expect(new Headers(init.headers).get('Authorization')).toBe(`Bearer ${TEST_KEY}`)
+    expect(s.csrfToken).toBe(TEST_CSRF)
+    expect(mock.mock.calls[0]?.[0]).toBe('/api/whoami')
   })
 
-  it('does nothing in a fresh tab (no stored key)', async () => {
-    const mock = vi.fn()
-    vi.stubGlobal('fetch', mock)
+  it('rides ONE silent refresh when the access token expired', async () => {
+    const mock = stubFetch(
+      jsonResponse(401, { success: false, error: 'authentication failed' }), // whoami: Access tot
+      jsonResponse(200, { success: true }), // POST /auth/refresh rotiert
+      jsonResponse(200, WHOAMI_ADMIN), // whoami über die frischen Cookies
+    )
+    const s = new Session()
+    await s.restore()
+    expect(s.active).toBe(true)
+    expect(s.csrfToken).toBe(TEST_CSRF)
+    expect(mock.mock.calls[1]?.[0]).toBe('/auth/refresh')
+  })
+
+  it('stays on the login screen when session AND refresh are dead', async () => {
+    const mock = stubFetch(
+      jsonResponse(401, { success: false, error: 'authentication failed' }),
+      jsonResponse(401, { success: false, error: 'authentication failed' }),
+    )
     const s = new Session()
     await s.restore()
     expect(s.active).toBe(false)
-    expect(mock).not.toHaveBeenCalled()
+    expect(s.csrfToken).toBeNull()
+    expect(mock).toHaveBeenCalledTimes(2) // whoami + refresh, KEIN drittes whoami
+    // Kein Cookie ↔ abgelaufene Session ist client-seitig ununterscheidbar —
+    // ein frischer Besucher bekommt keine Fehlermeldung.
+    expect(s.notice).toBeNull()
   })
 
-  it('drops a revoked key (401) and leaves a notice', async () => {
-    storage.setItem(STORAGE_KEY, TEST_KEY)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse(401, { error: 'unauthorized' })))
+  it('stays logged out on transient failures (network) without a notice', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')))
     const s = new Session()
     await s.restore()
     expect(s.active).toBe(false)
-    expect(storage.getItem(STORAGE_KEY)).toBeNull()
-    expect(s.notice).not.toBeNull()
-  })
-
-  it('keeps the stored key on transient failures (network)', async () => {
-    storage.setItem(STORAGE_KEY, TEST_KEY)
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new TypeError('fetch failed')))
-    const s = new Session()
-    await s.restore()
-    expect(s.active).toBe(false)
-    expect(storage.getItem(STORAGE_KEY)).toBe(TEST_KEY)
+    expect(s.notice).toBeNull()
+    expect(s.restoring).toBe(false)
   })
 })
 
 describe('401 interceptor wiring (singleton)', () => {
-  it('tears the session down when the stored key gets revoked mid-session', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValueOnce(jsonResponse(200, WHOAMI_ADMIN))
-        .mockResolvedValueOnce(jsonResponse(401, { error: 'unauthorized' })),
+  it('tears the session down when refresh cannot revive a dead cookie session', async () => {
+    stubFetch(
+      jsonResponse(200, LOGIN_OK),
+      jsonResponse(200, WHOAMI_ADMIN),
+      jsonResponse(401, { success: false, error: 'authentication failed' }), // Daten-Request
+      jsonResponse(401, { success: false, error: 'authentication failed' }), // Refresh tot
     )
 
     await session.login(TEST_KEY)
     expect(session.active).toBe(true)
 
-    // Any later call with the stored key → 401 → interceptor → login screen.
+    // Any later call on the dead session → 401 → ein Refresh-Versuch → 401 →
+    // interceptor → login screen.
     await expect(apiFetch('/api/manage', { method: 'POST', body: '{}' })).rejects.toMatchObject({
       status: 401,
     })
     expect(session.active).toBe(false)
-    expect(session.key).toBeNull()
-    expect(storage.getItem(STORAGE_KEY)).toBeNull()
+    expect(session.csrfToken).toBeNull()
     expect(session.notice).not.toBeNull()
   })
 })
@@ -231,7 +245,7 @@ describe('Session capability deriveds (N2)', () => {
   })
 
   it('derives the server-admin tier + full caps from an admin whoami', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse(200, WHOAMI_SERVER_ADMIN)))
+    stubFetch(jsonResponse(200, LOGIN_OK), jsonResponse(200, WHOAMI_SERVER_ADMIN))
     const s = new Session()
     await s.login(TEST_KEY)
 
@@ -254,7 +268,7 @@ describe('Session capability deriveds (N2)', () => {
   })
 
   it('derives the tenant-admin tier (role=owner, admin=false) without cross-tenant caps', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse(200, WHOAMI_TENANT_ADMIN)))
+    stubFetch(jsonResponse(200, LOGIN_OK), jsonResponse(200, WHOAMI_TENANT_ADMIN))
     const s = new Session()
     await s.login(TEST_KEY)
 
@@ -278,7 +292,7 @@ describe('Session capability deriveds (N2)', () => {
   })
 
   it('derives the member tier with corpus-only caps', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse(200, WHOAMI_MEMBER)))
+    stubFetch(jsonResponse(200, LOGIN_OK), jsonResponse(200, WHOAMI_MEMBER))
     const s = new Session()
     await s.login(TEST_KEY)
 
@@ -298,7 +312,11 @@ describe('Session capability deriveds (N2)', () => {
   })
 
   it('reverts to tier=loading after logout', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse(200, WHOAMI_MEMBER)))
+    stubFetch(
+      jsonResponse(200, LOGIN_OK),
+      jsonResponse(200, WHOAMI_MEMBER),
+      jsonResponse(200, { success: true }), // POST /auth/logout
+    )
     const s = new Session()
     await s.login(TEST_KEY)
     expect(s.tier).toBe('member')

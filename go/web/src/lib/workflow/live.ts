@@ -5,12 +5,11 @@
 // running as the permanent fallback (E04-7: SSE is a swap over the same
 // interface, the poll never leaves).
 //
-// TRANSPORT = SseClient, NOT native EventSource. ctx auth is Bearer and native
-// EventSource can send neither an Authorization header nor anything but GET
-// (sse.svelte.ts:1-14 / design §3.6). The briefing note "EventSource ist Browser-
-// nativ" does not apply here — the sanctioned Bearer-capable client is SseClient,
-// which is exactly what this reuses. NO new dependency (eventsource-parser ships
-// already, used by the SseClient).
+// TRANSPORT = SseClient, NOT native EventSource (historische Begründung: die
+// Bearer-Ära brauchte einen Authorization-Header, den EventSource nicht senden
+// kann, sse.svelte.ts:1-14 / design §3.6; seit OAuth R4 fährt die Auth als
+// Cookie mit, der etablierte Client bleibt trotzdem der Transport). NO new
+// dependency (eventsource-parser ships already, used by the SseClient).
 //
 // WIRE TRUTH (go/internal/events/project_hub.go:69-73 + handler/project_events.go:
 // 195-201). Every domain frame arrives under the SSE event NAME 'project'
@@ -72,8 +71,9 @@ export interface LiveOptions {
   /** Pins the stream to one project's scope (?project_id=), used by the default
    * factory only. */
   projectId?: string
-  /** Auth/init for the default SseClient (Bearer header), used by the default
-   * factory only. */
+  /** Extra fetch init for the default SseClient, used by the default factory
+   * only. Seit OAuth R4 fährt die Auth als Session-Cookie mit — die Pages
+   * brauchen kein Init mehr; der Hook bleibt für Tests/Sonderfälle. */
   getInit?: () => RequestInit
   pollMs?: number
   debounceMs?: number

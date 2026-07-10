@@ -80,14 +80,16 @@ export class ChatStore {
   loadError = $state<ApiError | null>(null)
 
   #ctrl: AbortController | null = null
-  #key: () => string | null
+  // CSRF-Synchronizer-Getter (ex Bearer-Key-Getter, OAuth R4): Auth fährt als
+  // Session-Cookie mit, der Stream-POST braucht nur noch den X-CSRF-Token.
+  #csrf: () => string | null
   // Retry plumbing for the saturation state (B2): the last turn to re-send and
   // the countdown ticker driving the jittered auto-retry.
   #satTimer: ReturnType<typeof setInterval> | null = null
   #lastTurn: { text: string; opts: Partial<StreamRequest> } | null = null
 
-  constructor(getKey: () => string | null) {
-    this.#key = getKey
+  constructor(getCsrfToken: () => string | null) {
+    this.#csrf = getCsrfToken
   }
 
   /** GET the session list (metadata only). */
@@ -180,7 +182,7 @@ export class ChatStore {
     this.#ctrl = new AbortController()
 
     try {
-      await streamTurn(req, this.#key(), (n, d) => this.applyEvent(n, d), this.#ctrl.signal)
+      await streamTurn(req, this.#csrf(), (n, d) => this.applyEvent(n, d), this.#ctrl.signal)
     } catch (err) {
       // Pre-stream failure: drop the optimistic message.
       this.messages = this.messages.filter((m) => m.seq !== OPTIMISTIC_SEQ)

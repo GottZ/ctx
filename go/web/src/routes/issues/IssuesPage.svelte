@@ -29,7 +29,6 @@
   import { projectForScope, resolveScope } from './picker'
   import { computeWindow, isNearBottom } from '../../lib/ui/virtual-window'
   import { LiveSource } from '../../lib/workflow/live'
-  import { session } from '../../lib/auth.svelte'
 
   // Fixed row geometry (§4.3): the constant that makes the window pure math.
   // MUST match the .issue-row height in the style block (44px) — the spacer
@@ -110,7 +109,8 @@
     live?.stop()
     live = new LiveSource({
       projectId,
-      getInit: () => (session.key ? { headers: { Authorization: `Bearer ${session.key}` } } : {}),
+      // Auth fährt als httpOnly-Session-Cookie mit (OAuth R4); der GET-Stream
+      // braucht weder Bearer noch CSRF.
       onBatch: () => {
         if (model !== null) void model.load(queryFrom(filters))
       },

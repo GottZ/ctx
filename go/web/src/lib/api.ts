@@ -1,7 +1,10 @@
-// Typed fetch wrapper (design 04-§2.4): injects the Bearer key, normalizes
-// every failure shape into ApiError and carries the X-Request-ID so browser
-// errors stay greppable in the ctxd logs. The 401 interceptor routes a
-// rejected stored key back to the login screen via the configured hook.
+// Typed fetch wrapper (design 04-§2.4; Cookie-Session seit OAuth R4, 05-W5):
+// die httpOnly-Session-Cookies fahren same-origin automatisch mit, state-
+// changing Methoden tragen den in-memory CSRF-Synchronizer als X-CSRF-Token
+// (design 05 §4.4). Jede Fehlerform wird zu ApiError normalisiert und trägt
+// die X-Request-ID, damit Browser-Fehler in den ctxd-Logs greppbar bleiben.
+// Ein 401 auf einem Session-Request bekommt EINEN stillen POST /auth/refresh
+// + Replay, bevor der unauthorized-Hook zur Login-Maske abräumt.
 
 /** Normalized API failure. `status` 0 means the request never got a response. */
 export class ApiError extends Error {
@@ -38,14 +41,14 @@ export function toApiError(err: unknown): ApiError {
 }
 
 interface ApiHooks {
-  /** Returns the session key injected as `Authorization: Bearer`. */
-  getKey: () => string | null
-  /** Fired when the STORED key is rejected (401) — session teardown. */
+  /** Liefert den per-Session CSRF-Synchronizer (X-CSRF-Token bei Mutationen). */
+  getCsrfToken: () => string | null
+  /** Fired when the cookie session is dead (401 nach gescheitertem Refresh). */
   onUnauthorized: () => void
 }
 
 const hooks: ApiHooks = {
-  getKey: () => null,
+  getCsrfToken: () => null,
   onUnauthorized: () => {},
 }
 
@@ -56,10 +59,40 @@ export function configureApi(next: Partial<ApiHooks>): void {
 
 export interface ApiFetchOptions {
   /**
-   * Explicit key override (login/restore probe). A 401 with an explicit key
-   * does NOT fire the unauthorized hook — the caller owns that failure.
+   * Explizites Bearer-Key-Override (Key-Probe-Pfade). Ein 401 mit explizitem
+   * Key macht weder Refresh noch unauthorized-Hook — der Caller besitzt den
+   * Fehler. Header-Credentials sind NIE CSRF-gepflichtig (design 05 §4.4).
    */
   key?: string
+  /**
+   * Caller besitzt den 401 (kein Refresh-Replay, kein unauthorized-Hook) —
+   * die Session-Lifecycle-Calls (login/restore-Probe/logout) setzen das.
+   */
+  skipRefresh?: boolean
+}
+
+/** Cookie-Requests dieser Methoden tragen den X-CSRF-Token-Header (§4.4). */
+const csrfMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+// Single-flight-Refresh: konkurrierende 401s teilen sich EINEN POST
+// /auth/refresh — die Rotation ist single-use pro Refresh-Token, eine
+// parallele Zweit-Rotation würde 03s Reuse-Detection auslösen und die
+// ganze Familie killen.
+let refreshInflight: Promise<boolean> | null = null
+
+/** POST /auth/refresh (Cookie-authentifiziert). true ⇔ Session rotiert. */
+export function refreshSession(): Promise<boolean> {
+  refreshInflight ??= (async () => {
+    try {
+      const res = await fetch('/auth/refresh', { method: 'POST' })
+      return res.ok
+    } catch {
+      return false
+    } finally {
+      refreshInflight = null
+    }
+  })()
+  return refreshInflight
 }
 
 /**
@@ -72,42 +105,57 @@ export async function apiFetch<T>(
   init: RequestInit = {},
   opts: ApiFetchOptions = {},
 ): Promise<T> {
-  const key = opts.key ?? hooks.getKey()
   const headers = new Headers(init.headers)
-  if (key) headers.set('Authorization', `Bearer ${key}`)
+  if (opts.key !== undefined) {
+    if (opts.key !== '') headers.set('Authorization', `Bearer ${opts.key}`)
+  } else {
+    // Cookie-Pfad: Mutationen tragen den Synchronizer; GET braucht nichts.
+    const csrf = hooks.getCsrfToken()
+    const method = (init.method ?? 'GET').toUpperCase()
+    if (csrf !== null && csrfMethods.has(method)) headers.set('X-CSRF-Token', csrf)
+  }
   if (init.body !== undefined && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
+  // manual = der Caller behandelt den 401 selbst (Probe-/Lifecycle-Pfade).
+  const manual = opts.key !== undefined || opts.skipRefresh === true
 
-  let res: Response
-  try {
-    res = await fetch(path, { ...init, headers })
-  } catch (cause) {
-    const detail = cause instanceof Error ? cause.message : String(cause)
-    throw new ApiError(0, 'network', `ctxd unreachable: ${detail}`)
-  }
+  let retried = false
+  for (;;) {
+    let res: Response
+    try {
+      res = await fetch(path, { ...init, headers })
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      throw new ApiError(0, 'network', `ctxd unreachable: ${detail}`)
+    }
 
-  const requestId = res.headers.get('X-Request-ID')
-  const body = await parseBody(res)
-  const serverError = envelopeError(body)
-  const details = asRecord(body)
+    const requestId = res.headers.get('X-Request-ID')
+    const body = await parseBody(res)
+    const serverError = envelopeError(body)
+    const details = asRecord(body)
 
-  if (res.status === 401) {
-    if (opts.key === undefined) hooks.onUnauthorized()
-    throw new ApiError(401, 'unauthorized', serverError ?? 'invalid or revoked API key', requestId, details)
+    if (res.status === 401) {
+      if (!manual && !retried && (await refreshSession())) {
+        retried = true // Cookies wurden unter uns rotiert — EIN stilles Replay
+        continue
+      }
+      if (!manual) hooks.onUnauthorized()
+      throw new ApiError(401, 'unauthorized', serverError ?? 'invalid or expired session', requestId, details)
+    }
+    if (!res.ok) {
+      const message = serverError ?? `request failed (HTTP ${res.status})`
+      throw new ApiError(res.status, codeFor(res.status), message, requestId, details)
+    }
+    if (serverError !== null) {
+      // success:false inside a 2xx body — surfaced as an error, never as data.
+      throw new ApiError(res.status, 'api_error', serverError, requestId, details)
+    }
+    if (body === undefined) {
+      throw new ApiError(res.status, 'invalid_response', 'response was not valid JSON', requestId)
+    }
+    return body as T
   }
-  if (!res.ok) {
-    const message = serverError ?? `request failed (HTTP ${res.status})`
-    throw new ApiError(res.status, codeFor(res.status), message, requestId, details)
-  }
-  if (serverError !== null) {
-    // success:false inside a 2xx body — surfaced as an error, never as data.
-    throw new ApiError(res.status, 'api_error', serverError, requestId, details)
-  }
-  if (body === undefined) {
-    throw new ApiError(res.status, 'invalid_response', 'response was not valid JSON', requestId)
-  }
-  return body as T
 }
 
 /**

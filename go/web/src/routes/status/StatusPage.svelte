@@ -43,11 +43,9 @@
     }
   }
 
-  const sse = new SseClient('/api/events', onSseEvent, () => {
-    const headers: Record<string, string> = {}
-    if (session.key) headers.Authorization = `Bearer ${session.key}`
-    return { headers }
-  })
+  // Auth fährt als httpOnly-Session-Cookie mit (OAuth R4); der GET-Stream
+  // braucht weder Bearer noch CSRF — kein Extra-Init nötig.
+  const sse = new SseClient('/api/events', onSseEvent)
 
   // Admin: hold one SSE stream open for the tab's life. Non-admin keys get 403
   // and never open one (the read-only branch shows the public /health tile).

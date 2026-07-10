@@ -3,7 +3,7 @@
   // the human-in-the-loop mechanism of the chat harness. Rendered for every
   // staged ctx_store result — live from the tool_result event and after a
   // session reload from the persisted tool message (render.ts). Confirm calls
-  // POST /api/confirm (Bearer header via apiFetch — no cookie path, D1-m4);
+  // POST /api/confirm (Cookie-Session + X-CSRF-Token via apiFetch, OAuth R4);
   // dismiss is CLIENT-side only: the stage simply expires server-side
   // (confirm_ttl) and the retention ticker evicts it — no discard endpoint.
   import { toApiError } from '../../lib/api'

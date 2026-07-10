@@ -34,7 +34,7 @@ function path(mock: ReturnType<typeof vi.fn>): unknown {
 
 beforeEach(() => {
   vi.unstubAllGlobals()
-  configureApi({ getKey: () => null, onUnauthorized: () => {} })
+  configureApi({ getCsrfToken: () => null, onUnauthorized: () => {} })
 })
 afterEach(() => vi.unstubAllGlobals())
 

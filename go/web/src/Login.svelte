@@ -62,8 +62,9 @@
     {/if}
 
     <p class="hint">
-      The key is held for this tab only (sessionStorage) and sent as a
-      <code>Bearer</code> token to <code>/api/*</code>.
+      The key is exchanged for an httpOnly session cookie and never stored
+      in the browser. Scripts and MCP clients keep using it directly as a
+      <code>Bearer</code> token.
     </p>
   </form>
 </div>

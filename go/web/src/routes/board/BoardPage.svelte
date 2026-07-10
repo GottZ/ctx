@@ -119,7 +119,8 @@
     live?.stop()
     live = new LiveSource({
       projectId,
-      getInit: () => (session.key ? { headers: { Authorization: `Bearer ${session.key}` } } : {}),
+      // Auth fährt als httpOnly-Session-Cookie mit (OAuth R4); der GET-Stream
+      // braucht weder Bearer noch CSRF.
       onBatch: () => {
         if (model !== null) void model.load()
       },

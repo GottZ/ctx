@@ -11,7 +11,7 @@
   import SessionSidebar from './SessionSidebar.svelte'
   import EmptyState from '../../lib/ui/EmptyState.svelte'
 
-  const store = new ChatStore(() => session.key)
+  const store = new ChatStore(() => session.csrfToken)
 
   // Onboarding empty-state (Welle N8): a genuinely fresh corpus — no saved
   // sessions and no draft turn — gets a friendly entry point instead of the bare

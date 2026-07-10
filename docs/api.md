@@ -292,7 +292,7 @@ A per-`home_scope` semaphore (`CTX_WEBCHAT_CONCURRENT_TURNS`, default 1) bounds 
 
 **Why a proxy, not an `img-src` widening.** The markdown renderer runs entirely client-side and the CSP pins `img-src 'self' data:` (byte-pinned by `TestCSPByteLiteralPin`). A proxied image is re-hosted under `/api/img/…` = `'self'`, so it is already allowed — the CSP is never touched. The server fetches the bytes; the browser only ever talks to `'self'`.
 
-**Two surfaces, opposite auth (design §4.2, D2b).** The SPA has no signing secret, so it cannot mint proxy URLs itself; a browser `<img>` request carries no api key (ctx auth lives in `sessionStorage`, not cookies), so the fetch endpoint cannot be api-key-authed. Hence:
+**Two surfaces, opposite auth (design §4.2, D2b).** The SPA has no signing secret, so it cannot mint proxy URLs itself; a browser `<img>` request carries no api key (at design time SPA auth lived in `sessionStorage`; since OAuth R4 a session cookie does ride same-origin subresource requests, but the HMAC signature stays the capability — the fetch route is deliberately credential-free), so the fetch endpoint cannot be api-key-authed. Hence:
 
 | Route | Auth | What |
 |---|---|---|

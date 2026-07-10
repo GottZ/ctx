@@ -1,23 +1,32 @@
-// Session state (design 04-§3.4): API-key login via a GET /api/whoami probe,
-// key held in sessionStorage (tab lifetime — reload keeps it, a new tab does
-// not), read-only degradation derived from whoami.admin. The api client's
-// 401 interceptor tears the session down when the stored key gets revoked.
+// Session state (design 05 §4.3/§4.4, OAuth R4/05-W5): der eingegebene Key
+// wird bei POST /auth/login gegen httpOnly-Cookies (ctx_session + ctx_refresh)
+// eingetauscht — der rohe Key berührt keinen Client-Storage mehr. Der CSRF-
+// Synchronizer lebt NUR in-memory (Modul-State; eine JS-lesbare Kopie würde
+// die httpOnly-Härtung untergraben) und erreicht den api-Layer via
+// configureApi. Reload-Restore = whoami-Probe auf dem Cookie mit EINEM
+// stillen /auth/refresh-Fallback; der 401-Interceptor räumt ab, wenn auch
+// der Refresh tot ist.
 
-import { ApiError, apiFetch, configureApi } from './api'
+import { apiFetch, configureApi, refreshSession } from './api'
 import type { WhoamiResponse } from './api/types'
 import { capabilitiesFor } from './auth/capabilities'
 
-const STORAGE_KEY = 'ctx.api-key'
+/** Wire-Shape von POST /auth/login (handler/auth_session.go HandleLogin). */
+interface LoginResponse {
+  success: true
+  csrf_token: string
+}
 
 export class Session {
-  key = $state<string | null>(null)
+  /** Per-Session CSRF-Synchronizer (design 05 §4.4) — nur in-memory. */
+  csrfToken = $state<string | null>(null)
   whoami = $state<WhoamiResponse | null>(null)
-  /** True while the boot-time sessionStorage probe is in flight. */
+  /** True while the boot-time cookie probe is in flight. */
   restoring = $state(false)
   /** Why the previous session ended — rendered on the login screen. */
   notice = $state<string | null>(null)
 
-  readonly active = $derived(this.key !== null && this.whoami !== null)
+  readonly active = $derived(this.whoami !== null)
   readonly admin = $derived(this.whoami?.admin ?? false)
   readonly label = $derived(this.whoami?.label ?? null)
 
@@ -37,61 +46,74 @@ export class Session {
   readonly tenantDisplayName = $derived(this.whoami?.tenant_display_name ?? null)
   readonly apiKeyId = $derived(this.whoami?.api_key_id ?? null)
 
-  /** Probe the key against /api/whoami; persist it only on success. */
+  /**
+   * Exchange the entered key for a cookie session (POST /auth/login), then
+   * hydrate the identity over the fresh cookies. The raw key is used for the
+   * exchange only — it is never kept client-side.
+   */
   async login(rawKey: string): Promise<void> {
-    const key = rawKey.trim()
-    const whoami = await apiFetch<WhoamiResponse>('/api/whoami', {}, { key })
-    this.key = key
+    const body = JSON.stringify({ api_key: rawKey.trim() })
+    const login = await apiFetch<LoginResponse>('/auth/login', { method: 'POST', body }, { skipRefresh: true })
+    const whoami = await apiFetch<WhoamiResponse>('/api/whoami', {}, { skipRefresh: true })
+    this.csrfToken = login.csrf_token
     this.whoami = whoami
     this.notice = null
-    sessionStorage.setItem(STORAGE_KEY, key)
   }
 
   /**
-   * Boot-time restore: re-probe a key surviving in sessionStorage (tab
-   * reload). A rejected key (401/403) is dropped; transient failures
-   * (network, 5xx) keep it so a later reload can retry.
+   * Boot-time restore (Reload): whoami-Probe auf dem Session-Cookie. Ein
+   * toter Access-Token bekommt EINEN /auth/refresh-Versuch (Refresh-Cookie
+   * lebt evtl. noch), dann whoami erneut; sonst Login-Maske. Transiente
+   * Fehler (Netz, 5xx) landen ebenfalls dort — die Cookies überleben, ein
+   * späterer Reload probiert erneut.
    */
   async restore(): Promise<void> {
     if (this.active || this.restoring) return
-    const stored = sessionStorage.getItem(STORAGE_KEY)
-    if (stored === null || stored === '') return
     this.restoring = true
     try {
-      const whoami = await apiFetch<WhoamiResponse>('/api/whoami', {}, { key: stored })
-      this.key = stored
-      this.whoami = whoami
-    } catch (err) {
-      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-        sessionStorage.removeItem(STORAGE_KEY)
-        this.notice = 'Stored key was rejected — sign in again.'
+      let whoami = await this.probe()
+      if (whoami === null && (await refreshSession())) whoami = await this.probe()
+      if (whoami !== null) {
+        this.csrfToken = whoami.csrf_token ?? null
+        this.whoami = whoami
       }
     } finally {
       this.restoring = false
     }
   }
 
-  /** User-initiated logout. */
+  /** whoami über das Cookie; null wenn die Session tot/unerreichbar ist. */
+  private async probe(): Promise<WhoamiResponse | null> {
+    try {
+      return await apiFetch<WhoamiResponse>('/api/whoami', {}, { skipRefresh: true })
+    } catch {
+      return null
+    }
+  }
+
+  /** User-initiated logout: revoke the server session, drop local state. */
   logout(): void {
+    void apiFetch('/auth/logout', { method: 'POST' }, { skipRefresh: true }).catch(() => {
+      // Best-effort — die Cookies clearen server-seitig; lokal wird immer abgeräumt.
+    })
     this.clear()
   }
 
-  /** Interceptor path: the stored key stopped working mid-session. */
+  /** Interceptor path: the cookie session died mid-flight (failed refresh). */
   invalidate(reason: string): void {
     this.clear()
     this.notice = reason
   }
 
   private clear(): void {
-    this.key = null
+    this.csrfToken = null
     this.whoami = null
-    sessionStorage.removeItem(STORAGE_KEY)
   }
 }
 
 export const session = new Session()
 
 configureApi({
-  getKey: () => session.key,
-  onUnauthorized: () => session.invalidate('Session ended: the API key is no longer valid.'),
+  getCsrfToken: () => session.csrfToken,
+  onUnauthorized: () => session.invalidate('Session expired — sign in again.'),
 })

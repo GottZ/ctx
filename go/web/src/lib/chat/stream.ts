@@ -36,15 +36,17 @@ export function parseRetryAfter(res: Response): number | null {
  */
 export async function streamTurn(
   req: StreamRequest,
-  key: string | null,
+  csrfToken: string | null,
   onEvent: StreamCallback,
   signal: AbortSignal,
 ): Promise<void> {
+  // Auth fährt als Session-Cookie mit (same-origin); der POST braucht den
+  // CSRF-Synchronizer als Header (design 05 §4.4, OAuth R4).
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'text/event-stream',
   }
-  if (key) headers.Authorization = `Bearer ${key}`
+  if (csrfToken) headers['X-CSRF-Token'] = csrfToken
 
   let res: Response
   try {

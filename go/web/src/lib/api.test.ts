@@ -1,11 +1,13 @@
-// api.ts gates (design 04-§5.5): envelope normalization, error mapping and
-// the 401 interceptor — pure node, fetch stubbed. Test keys are assembled at
-// runtime; no secret-shaped literals (repo rule).
+// api.ts gates (design 04-§5.5; Cookie-Session seit OAuth R4): envelope
+// normalization, error mapping, CSRF-Synchronizer-Injektion und der
+// 401-Refresh-Interceptor — pure node, fetch stubbed. Test keys are
+// assembled at runtime; no secret-shaped literals (repo rule).
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, apiFetch, configureApi, toApiError } from './api'
 
 const TEST_KEY = ['cafe', 'f00d'].join('') // doc-value, assembled at runtime
+const TEST_CSRF = ['c5', '4f'].join('') // doc-value, assembled at runtime
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -23,7 +25,7 @@ function stubFetch(...responses: Response[]): ReturnType<typeof vi.fn> {
 
 beforeEach(() => {
   vi.unstubAllGlobals()
-  configureApi({ getKey: () => null, onUnauthorized: () => {} })
+  configureApi({ getCsrfToken: () => null, onUnauthorized: () => {} })
 })
 
 describe('apiFetch', () => {
@@ -33,20 +35,34 @@ describe('apiFetch', () => {
     expect(got).toEqual({ success: true, label: 'example' })
   })
 
-  it('sends the stored key as a Bearer header', async () => {
+  it('sends the CSRF synchronizer on state-changing methods (cookie path)', async () => {
     const mock = stubFetch(jsonResponse(200, { success: true }))
-    configureApi({ getKey: () => TEST_KEY })
-    await apiFetch('/api/whoami')
+    configureApi({ getCsrfToken: () => TEST_CSRF })
+    await apiFetch('/api/manage', { method: 'POST', body: '{}' })
     const init = mock.mock.calls[0]?.[1] as RequestInit
-    expect(new Headers(init.headers).get('Authorization')).toBe(`Bearer ${TEST_KEY}`)
+    const headers = new Headers(init.headers)
+    expect(headers.get('X-CSRF-Token')).toBe(TEST_CSRF)
+    // Kein gespeicherter Key mehr — das Cookie fährt automatisch mit.
+    expect(headers.get('Authorization')).toBeNull()
   })
 
-  it('prefers an explicit key over the stored one', async () => {
+  it('sends no CSRF header on GET', async () => {
     const mock = stubFetch(jsonResponse(200, { success: true }))
-    configureApi({ getKey: () => 'stored-key' })
-    await apiFetch('/api/whoami', {}, { key: TEST_KEY })
+    configureApi({ getCsrfToken: () => TEST_CSRF })
+    await apiFetch('/api/whoami')
     const init = mock.mock.calls[0]?.[1] as RequestInit
-    expect(new Headers(init.headers).get('Authorization')).toBe(`Bearer ${TEST_KEY}`)
+    expect(new Headers(init.headers).get('X-CSRF-Token')).toBeNull()
+  })
+
+  it('sends an explicit key as Bearer and never a CSRF header (probe path)', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true }))
+    configureApi({ getCsrfToken: () => TEST_CSRF })
+    await apiFetch('/api/whoami', { method: 'POST', body: '{}' }, { key: TEST_KEY })
+    const init = mock.mock.calls[0]?.[1] as RequestInit
+    const headers = new Headers(init.headers)
+    expect(headers.get('Authorization')).toBe(`Bearer ${TEST_KEY}`)
+    // Header-Credentials sind nie CSRF-gepflichtig (design 05 §4.4).
+    expect(headers.get('X-CSRF-Token')).toBeNull()
   })
 
   it('sends no Authorization header without a key', async () => {
@@ -78,33 +94,75 @@ describe('apiFetch', () => {
     await expect(apiFetch('/api/query')).resolves.toEqual({ success: true, n: 1 })
   })
 
-  it('fires the unauthorized hook on 401 with the stored key', async () => {
-    stubFetch(jsonResponse(401, { error: 'unauthorized' }, { 'X-Request-ID': 'req-9' }))
+  it('replays the request ONCE after a successful silent refresh on 401', async () => {
+    const mock = stubFetch(
+      jsonResponse(401, { error: 'unauthorized' }), // Daten-Request, Access-Token tot
+      jsonResponse(200, { success: true }), // POST /auth/refresh
+      jsonResponse(200, { success: true, n: 2 }), // Replay
+    )
     const onUnauthorized = vi.fn()
-    configureApi({ getKey: () => TEST_KEY, onUnauthorized })
+    configureApi({ onUnauthorized })
+    await expect(apiFetch('/api/search')).resolves.toEqual({ success: true, n: 2 })
+    expect(mock.mock.calls[1]?.[0]).toBe('/auth/refresh')
+    expect(mock).toHaveBeenCalledTimes(3)
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+
+  it('fires the unauthorized hook when the refresh fails too (dead session)', async () => {
+    const mock = stubFetch(
+      jsonResponse(401, { error: 'unauthorized' }, { 'X-Request-ID': 'req-9' }),
+      jsonResponse(401, { success: false, error: 'authentication failed' }), // refresh tot
+    )
+    const onUnauthorized = vi.fn()
+    configureApi({ onUnauthorized })
     await expect(apiFetch('/api/whoami')).rejects.toMatchObject({
       status: 401,
       code: 'unauthorized',
-      requestId: 'req-9',
     })
+    expect(mock).toHaveBeenCalledTimes(2)
     expect(onUnauthorized).toHaveBeenCalledTimes(1)
   })
 
-  it('does NOT fire the unauthorized hook on 401 with an explicit key (login probe)', async () => {
-    stubFetch(jsonResponse(401, { error: 'unauthorized' }))
+  it('fires the hook when the replay after a good refresh still 401s (no loop)', async () => {
+    const mock = stubFetch(
+      jsonResponse(401, { error: 'unauthorized' }),
+      jsonResponse(200, { success: true }), // refresh ok …
+      jsonResponse(401, { error: 'unauthorized' }), // … aber Replay wieder 401
+    )
+    const onUnauthorized = vi.fn()
+    configureApi({ onUnauthorized })
+    await expect(apiFetch('/api/whoami')).rejects.toMatchObject({ status: 401 })
+    expect(mock).toHaveBeenCalledTimes(3) // genau EIN Replay, kein Loop
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT refresh or fire the hook on 401 with an explicit key (probe)', async () => {
+    const mock = stubFetch(jsonResponse(401, { error: 'unauthorized' }))
     const onUnauthorized = vi.fn()
     configureApi({ onUnauthorized })
     await expect(apiFetch('/api/whoami', {}, { key: TEST_KEY })).rejects.toMatchObject({
       status: 401,
       code: 'unauthorized',
     })
+    expect(mock).toHaveBeenCalledTimes(1)
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+
+  it('does NOT refresh or fire the hook with skipRefresh (lifecycle calls)', async () => {
+    const mock = stubFetch(jsonResponse(401, { error: 'unauthorized' }))
+    const onUnauthorized = vi.fn()
+    configureApi({ onUnauthorized })
+    await expect(apiFetch('/auth/login', { method: 'POST', body: '{}' }, { skipRefresh: true })).rejects.toMatchObject(
+      { status: 401 },
+    )
+    expect(mock).toHaveBeenCalledTimes(1)
     expect(onUnauthorized).not.toHaveBeenCalled()
   })
 
   it('maps 403 to forbidden without touching the session', async () => {
     stubFetch(jsonResponse(403, { success: false, error: 'admin key required' }))
     const onUnauthorized = vi.fn()
-    configureApi({ getKey: () => TEST_KEY, onUnauthorized })
+    configureApi({ onUnauthorized })
     await expect(apiFetch('/api/settings')).rejects.toMatchObject({
       status: 403,
       code: 'forbidden',

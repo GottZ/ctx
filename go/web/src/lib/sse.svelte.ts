@@ -1,9 +1,10 @@
 // SSE client (design 04-§3.6 / inventory web-svelte.md §6). `.svelte.ts`
 // enables runes in a module so `status` is reactive in consuming components.
 //
-// fetch + ReadableStream + eventsource-parser, NOT native EventSource: the
-// latter cannot send an Authorization header (ctx auth is Bearer; `?token=`
-// would land in request logs) and is GET-only. This client streams named
+// fetch + ReadableStream + eventsource-parser, NOT native EventSource: der
+// Client entstand in der Bearer-Ära (EventSource kann keinen Authorization-
+// Header senden; `?token=` würde in Request-Logs landen) und bleibt seit der
+// Cookie-Session (OAuth R4) der etablierte Transport. This client streams named
 // events (status | backends | llmcall | error) to an onEvent dispatcher and
 // reconnects with exponential backoff + jitter (cap 30s) after any non-clean
 // end, until close() is called. The status field drives the page's poll

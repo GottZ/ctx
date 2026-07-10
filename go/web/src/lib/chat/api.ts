@@ -29,9 +29,10 @@ export function deleteSession(id: string): Promise<{ success: true }> {
 }
 
 /**
- * POST /api/confirm — execute a staged write (F6-C6 D-W6b). Auth is the
- * Bearer header apiFetch always sets (no cookie path exists, D1-m4). Misses
- * (expired / consumed / foreign / unknown) are a generic 404 ApiError.
+ * POST /api/confirm — execute a staged write (F6-C6 D-W6b). Auth fährt als
+ * Session-Cookie mit; apiFetch setzt den X-CSRF-Token-Synchronizer (OAuth R4,
+ * löst das Bearer-only D1-m4 ab). Misses (expired / consumed / foreign /
+ * unknown) are a generic 404 ApiError.
  */
 export function confirmWrite(payloadHash: string): Promise<ConfirmResponse> {
   return apiFetch<ConfirmResponse>('/api/confirm', {
