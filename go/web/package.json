@@ -23,30 +23,35 @@
     "@axe-core/playwright": "4.12.1",
     "@lhci/cli": "0.15.1",
     "@playwright/test": "1.61.1",
-    "@sveltejs/vite-plugin-svelte": "7.1.2",
+    "@sveltejs/vite-plugin-svelte": "7.2.0",
     "@tsconfig/svelte": "5.0.8",
     "@types/markdown-it": "14.1.2",
-    "@types/node": "24.12.3",
+    "@types/node": "26.1.1",
     "dompurify": "3.4.11",
     "eventsource-parser": "3.1.0",
     "graphology": "0.26.0",
     "graphology-layout-forceatlas2": "0.10.1",
     "jsdom": "29.1.1",
-    "markdown-it": "14.2.0",
-    "postcss-html": "1.8.0",
+    "markdown-it": "14.3.0",
+    "postcss-html": "1.8.1",
     "sigma": "3.0.3",
     "stylelint": "17.14.0",
     "stylelint-config-html": "1.1.0",
     "stylelint-declaration-strict-value": "1.11.1",
-    "sv-router": "0.16.3",
-    "svelte": "5.56.3",
-    "svelte-check": "4.6.0",
+    "sv-router": "0.18.0",
+    "svelte": "5.56.4",
+    "svelte-check": "4.7.2",
     "typescript": "6.0.3",
-    "vite": "8.0.16",
+    "vite": "8.1.4",
     "vite-plugin-compression2": "2.5.3",
-    "vitest": "4.1.8"
+    "vitest": "4.1.10"
   },
   "dependencies": {
     "@atlaskit/pragmatic-drag-and-drop": "2.0.1"
+  },
+  "overrides": {
+    "undici": "7.28.0",
+    "uuid": "11.1.1",
+    "tmp": "0.2.7"
   }
 }
