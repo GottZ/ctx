@@ -71,6 +71,12 @@ type dailyNewBlock struct {
 	Category string
 }
 
+// dailySynthesisHourUTC mirrors the scheduler's dailySynthesisHour (events
+// package, local clock — the container runs UTC): the hour at which the 03:00
+// iteration generates "Tagesbericht <today>" over the previous 24h. Backfill
+// windows reproduce exactly that shape.
+const dailySynthesisHourUTC = 3
+
 // GenerateDailyReport queries the last-24h activity (decisions, dream-links,
 // fresh blocks), asks the LLM for a free-text German summary, and persists
 // the result as a synthesis/audit-trail block. Returns the new block_id, or
@@ -81,28 +87,49 @@ type dailyNewBlock struct {
 // digest callers (03:00 scheduler iteration and the manual
 // POST /api/synthesize/daily trigger) gate identically through here.
 func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string) (string, error) {
-	decisions, err := fetchDailyDecisions(ctx, pool, scope)
+	now := time.Now().UTC()
+	return generateDailyReportWindow(ctx, pool, r, scope,
+		now.Add(-24*time.Hour), now, now.Format("2006-01-02"))
+}
+
+// GenerateDailyReportFor re-synthesizes the report titled day (backfill): the
+// window is [day-1 03:00 UTC, day 03:00 UTC) — exactly what the 03:00
+// scheduler covered when it generated "Tagesbericht <day>". The upsert key
+// (category, title, scope) replaces an existing report in place: same block
+// id, inbound edges survive, the embedding regenerates from the new content.
+func GenerateDailyReportFor(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string, day time.Time) (string, error) {
+	day = day.UTC()
+	end := time.Date(day.Year(), day.Month(), day.Day(), dailySynthesisHourUTC, 0, 0, 0, time.UTC)
+	return generateDailyReportWindow(ctx, pool, r, scope,
+		end.Add(-24*time.Hour), end, day.Format("2006-01-02"))
+}
+
+// generateDailyReportWindow is the shared core: aggregate the [from, to)
+// activity, synthesize, upsert "Tagesbericht <date>" and anchor its source
+// edges. date is the title/prompt day (not derived from the window bounds —
+// the rolling path's window ends now, the backfill path's at 03:00).
+func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string, from, to time.Time, date string) (string, error) {
+	decisions, err := fetchDailyDecisions(ctx, pool, scope, from, to)
 	if err != nil {
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
 
-	newBlocks, err := fetchDailyNewBlocks(ctx, pool, scope)
+	newBlocks, err := fetchDailyNewBlocks(ctx, pool, scope, from, to)
 	if err != nil {
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
 
-	dreamLinks, err := fetchDailyDreamLinks(ctx, pool)
+	dreamLinks, err := fetchDailyDreamLinks(ctx, pool, from, to)
 	if err != nil {
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
 
 	if len(decisions) == 0 && len(newBlocks) == 0 && len(dreamLinks) == 0 {
-		slog.Info("dream: daily synthesis skipped (no activity)", "scope", scope)
+		slog.Info("dream: daily synthesis skipped (no activity)", "scope", scope, "date", date)
 		return "", nil
 	}
 
-	today := time.Now().UTC().Format("2006-01-02")
-	userPrompt := buildDailyPrompt(today, decisions, dreamLinks, newBlocks)
+	userPrompt := buildDailyPrompt(date, decisions, dreamLinks, newBlocks)
 
 	dreamVer := int16(Version)
 	entry := &llmlog.Entry{
@@ -135,7 +162,7 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, sco
 		return "", fmt.Errorf("dream: synthesize report: empty LLM response")
 	}
 
-	title := "Tagesbericht " + today
+	title := "Tagesbericht " + date
 	tags := []string{"synthesis", "tagesbericht", "auto"}
 	metadata := map[string]any{
 		"source":       "dream-synthesis",
@@ -195,15 +222,15 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, sco
 }
 
 // fetchDailyDecisions reports counts per decision label from context_write_log
-// for the supplied scope, ordered by frequency descending.
-func fetchDailyDecisions(ctx context.Context, pool *pgxpool.Pool, scope string) ([]dailyDecisionStat, error) {
+// for the supplied scope and [from, to) window, ordered by frequency descending.
+func fetchDailyDecisions(ctx context.Context, pool *pgxpool.Pool, scope string, from, to time.Time) ([]dailyDecisionStat, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT decision, COUNT(*)::int FROM context_write_log
-		 WHERE created_at > now() - interval '24 hours'
+		 WHERE created_at >= $2 AND created_at < $3
 		   AND scope = $1
 		 GROUP BY decision
 		 ORDER BY COUNT(*) DESC`,
-		scope,
+		scope, from, to,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query decisions: %w", err)
@@ -221,17 +248,19 @@ func fetchDailyDecisions(ctx context.Context, pool *pgxpool.Pool, scope string) 
 	return out, rows.Err()
 }
 
-// fetchDailyNewBlocks lists up to 10 freshly created blocks in the last 24h
-// for the supplied scope, newest first.
-func fetchDailyNewBlocks(ctx context.Context, pool *pgxpool.Pool, scope string) ([]dailyNewBlock, error) {
+// fetchDailyNewBlocks lists up to 10 blocks created in the [from, to) window
+// for the supplied scope, newest first. Backfill fidelity note: is_archived is
+// evaluated at query time — a block archived since its window day no longer
+// appears in a re-synthesized report.
+func fetchDailyNewBlocks(ctx context.Context, pool *pgxpool.Pool, scope string, from, to time.Time) ([]dailyNewBlock, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT id::text, title, category FROM context_blocks
 		 WHERE NOT is_archived
-		   AND created_at > now() - interval '24 hours'
+		   AND created_at >= $2 AND created_at < $3
 		   AND scope = $1
 		 ORDER BY created_at DESC
 		 LIMIT 10`,
-		scope,
+		scope, from, to,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query new blocks: %w", err)
@@ -301,15 +330,18 @@ func writeReportSourceLinks(ctx context.Context, pool *pgxpool.Pool, set *blockt
 }
 
 // fetchDailyDreamLinks reports counts per relationship class from
-// context_dream_links produced in the last 24h, ordered by frequency.
+// context_dream_links produced in the [from, to) window, ordered by frequency.
 // Dream-links are scope-bound on the source block, but the link table itself
 // has no scope column — aggregation is global across scopes for the report.
-func fetchDailyDreamLinks(ctx context.Context, pool *pgxpool.Pool) ([]dailyDreamLinkStat, error) {
+// Backfill fidelity note: created_at is bumped on link replace (WriteLinks
+// upsert), so a historical window counts the links as they stand today.
+func fetchDailyDreamLinks(ctx context.Context, pool *pgxpool.Pool, from, to time.Time) ([]dailyDreamLinkStat, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT relationship, COUNT(*)::int FROM context_dream_links
-		 WHERE created_at > now() - interval '24 hours'
+		 WHERE created_at >= $1 AND created_at < $2
 		 GROUP BY relationship
 		 ORDER BY COUNT(*) DESC`,
+		from, to,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query dream links: %w", err)

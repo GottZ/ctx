@@ -170,6 +170,59 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 	}
 }
 
+func TestGenerateDailyReportFor_Backfill(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	// Activity INSIDE the historical window of 2026-01-15
+	// ([2026-01-14 03:00, 2026-01-15 03:00) UTC) — and nothing anywhere else.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO context_write_log (decision, scope, created_at)
+		 VALUES ('dream_link', $1, '2026-01-14T12:00:00Z')`,
+		reportScope,
+	); err != nil {
+		t.Fatalf("seed historical write log: %v", err)
+	}
+
+	mockChatJSONExternal(t, func(_ context.Context, _, _, _ string, _ *bool, _, userPrompt string, _ llm.Options, _ time.Duration) (*llm.ChatResponse, error) {
+		if !strings.Contains(userPrompt, "Datum: 2026-01-15") {
+			t.Errorf("prompt must carry the backfill date, got: %q", userPrompt)
+		}
+		return &llm.ChatResponse{
+			Message: llm.Message{Role: "assistant", Content: "Historischer Tagesbericht."},
+		}, nil
+	})
+
+	day := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	blockID, err := dream.GenerateDailyReportFor(ctx, pool, reportRouter(t, ctx, pool), reportScope, day)
+	if err != nil {
+		t.Fatalf("backfill report: %v", err)
+	}
+	if blockID == "" {
+		t.Fatal("want block_id for window with activity, got empty")
+	}
+
+	var title string
+	if err := pool.QueryRow(ctx,
+		`SELECT title FROM context_blocks WHERE id = $1::uuid`, blockID,
+	).Scan(&title); err != nil {
+		t.Fatalf("read backfilled block: %v", err)
+	}
+	if title != "Tagesbericht 2026-01-15" {
+		t.Errorf("title mismatch: got %q, want %q", title, "Tagesbericht 2026-01-15")
+	}
+
+	// A day whose window holds NO activity skips without an LLM call.
+	empty := time.Date(2026, 2, 15, 0, 0, 0, 0, time.UTC)
+	blockID, err = dream.GenerateDailyReportFor(ctx, pool, reportRouter(t, ctx, pool), reportScope, empty)
+	if err != nil {
+		t.Fatalf("empty-window backfill: %v", err)
+	}
+	if blockID != "" {
+		t.Errorf("empty window must yield no block, got %q", blockID)
+	}
+}
+
 func TestGenerateDailyReport_NoActivity(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
@@ -92,6 +93,12 @@ func (h *SynthesizeHandler) dailyAdmission() llm.Admission {
 // home_scope. Returns the new block_id (or empty string + ok=true when there
 // was no activity in the last 24h). An empty digest chain stays a generic
 // 500 — backend topology is admin-only (design 03 §2.4 digest row).
+//
+// Optional ?date=YYYY-MM-DD re-synthesizes the report titled that day over
+// its historical window [date-1 03:00 UTC, date 03:00 UTC) — the backfill
+// path (M103 wave). The upsert key replaces an existing report in place. A
+// date whose window has not closed yet (03:00 UTC still in the future) is a
+// 400: a partial re-synthesis would silently shadow the scheduler's run.
 func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	requestID := RequestIDFromContext(ctx)
@@ -117,6 +124,21 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 	}
 	defer h.releaseDaily(authResult.ApiKeyID)
 
+	var day time.Time
+	if raw := r.URL.Query().Get("date"); raw != "" {
+		parsed, perr := time.Parse("2006-01-02", raw)
+		if perr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid date — want YYYY-MM-DD"})
+			return
+		}
+		windowEnd := time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 3, 0, 0, 0, time.UTC)
+		if windowEnd.After(time.Now().UTC()) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "date window not closed yet"})
+			return
+		}
+		day = parsed
+	}
+
 	// Digest needs no scope floor — the role gates at constant internal,
 	// block contents never enter the prompt (E6). The API path classifies
 	// interactive (a human waits synchronously — E-U2); the 03:00 scheduler
@@ -128,7 +150,13 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		Blocktypes: h.blocktypes,
 	}
 
-	blockID, err := dream.GenerateDailyReport(ctx, h.pool, router, scope)
+	var blockID string
+	var err error
+	if day.IsZero() {
+		blockID, err = dream.GenerateDailyReport(ctx, h.pool, router, scope)
+	} else {
+		blockID, err = dream.GenerateDailyReportFor(ctx, h.pool, router, scope, day)
+	}
 	if err != nil {
 		if dispatch.IsRejection(err) {
 			// Dispatcher capacity rejection (design/03 §4.5.2 daily row): 429
@@ -155,6 +183,9 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		"ok":       true,
 		"block_id": blockID,
 		"scope":    scope,
+	}
+	if !day.IsZero() {
+		resp["date"] = day.Format("2006-01-02")
 	}
 	if blockID == "" {
 		resp["reason"] = "no_activity"
