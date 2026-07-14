@@ -194,8 +194,15 @@ func (r *Registry) snapshotForScope(ctx context.Context, tenantScope string) *Se
 		return set, nil
 	})
 	// Fail-safe, self-healing: a build error yields the base generation and is
-	// NOT cached, so the next access retries.
+	// NOT cached, so the next access retries. LOUD (GA7): silently serving base
+	// would mask a poisoned tenant overlay — e.g. a pre-existing row that the
+	// GA6 reservedGraphClasses guard now rejects on load (M105 preflights the
+	// deploy, but psql can still plant one afterwards).
 	if err != nil || res == nil {
+		if err != nil {
+			slog.Warn("blocktype: tenant set build failed — serving base (self-healing, retried on next access)",
+				"tenant", tenantScope, "err", err)
+		}
 		return base
 	}
 	return res.(*Set)
