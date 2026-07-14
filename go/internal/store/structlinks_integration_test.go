@@ -1,7 +1,7 @@
 //go:build integration
 
 // Integration tests for Achse-02 Welle I-A: context_structural_links (migration
-// 076), the PutStructuralLink/DeleteStructuralLink/StructuralNeighbors store
+// 076), the PutStructuralLink/DeleteStructuralLink store
 // layer, the parent_id FK+CASCADE (E8) and the parent_id write path
 // (PutBlockParent). testcontainers PG18, full migration chain (T3 house
 // pattern). pgCode is declared in tenants_hybrid_integration_test.go (same
@@ -17,14 +17,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
-
-// slVisibleTypes is the resolved builtin visible allowlist (WF T6) — seeded
-// blocks default to type_name='knowledge' (035), which is visible.
-var slVisibleTypes = blocktype.NewRegistry().Snapshot().VisibleTypes()
 
 func TestStructuralLinks_Integration(t *testing.T) {
 	if testing.Short() {
@@ -182,46 +177,12 @@ func TestStructuralLinks_Integration(t *testing.T) {
 		}
 	})
 
-	// (7) READ second line: an injected cross-scope edge (raw SQL, bypassing the
-	// write gate) is NEVER surfaced by StructuralNeighbors — the visibility
-	// predicate filters the far endpoint. A same-scope neighbour IS returned.
-	t.Run("neighbors_visibility_filters_injected_cross_scope", func(t *testing.T) {
-		s := seed(t, "sl-v", "s")
-		local := seed(t, "sl-v", "local")
-		foreign := seed(t, "sl-v-foreign", "foreign")
-		// Legit same-scope edge via the store layer.
-		if err := inTx(t, func(tx pgx.Tx) error {
-			return store.PutStructuralLink(ctx, tx,
-				store.StructuralLink{SourceID: s, TargetID: local, LinkClass: "references"}, []string{"sl-v"})
-		}); err != nil {
-			t.Fatalf("put local edge: %v", err)
-		}
-		// Injected cross-scope edge — only raw SQL can do this (write gate blocks it).
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO context_structural_links (source_block_id,target_block_id,link_class,scope)
-			 VALUES ($1::uuid,$2::uuid,'references','sl-v')`, s, foreign); err != nil {
-			t.Fatalf("inject cross-scope edge: %v", err)
-		}
-		neigh, err := store.StructuralNeighbors(ctx, pool, s, nil, []string{"sl-v"}, nil, slVisibleTypes)
-		if err != nil {
-			t.Fatalf("neighbors: %v", err)
-		}
-		var sawLocal, sawForeign bool
-		for _, n := range neigh {
-			if n.TargetID == local {
-				sawLocal = true
-			}
-			if n.TargetID == foreign {
-				sawForeign = true
-			}
-		}
-		if !sawLocal {
-			t.Fatalf("neighbors: same-scope neighbour missing (got %d edges)", len(neigh))
-		}
-		if sawForeign {
-			t.Fatalf("neighbors: LEAK — injected cross-scope neighbour %s surfaced", foreign)
-		}
-	})
+	// (7) READ second line — PORTED (GB6/E7): the former StructuralNeighbors
+	// visibility subtest retired with the function. Its invariant (an injected
+	// cross-scope edge never surfaces a foreign neighbour; same-scope IS
+	// returned) lives on in the ego batch readers' gates with per-leg red
+	// proofs: TestStructuralHop_VisibilityInLegs (Q1s, W2-G1 arms i/ii) and
+	// TestEgoGraph_StructEdgesInduced's out-of-set arm (Q2s).
 
 	// (8) parent_id write path: comment-scope invariant — cross-scope parent
 	// rejected; same-scope accepted.

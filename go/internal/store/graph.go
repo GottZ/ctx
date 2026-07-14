@@ -559,7 +559,7 @@ ORDER BY h.link_created DESC, h.neighbor_id`, vis, vis)
 // constant 1), the GB3 merge consumes it positionally.
 //
 // Fail-closed entry is SELF-CONTAINED (RequireScopes + visible-types check +
-// grant normalization live HERE, parity with StructuralNeighbors): the SQL
+// grant normalization live HERE — self-contained entry discipline): the SQL
 // alone would return an EMPTY graph on empty scopes/types — a silent mask of
 // a wiring bug, exactly what the EgoGraph entry refuses loudly.
 func structuralHopNeighbors(ctx context.Context, pool *pgxpool.Pool,

@@ -298,7 +298,7 @@ func TestStructuralHop_IndexPlan(t *testing.T) {
 	// K4 consolidation evidence (decision, review F3: PREFERENCE alone does not
 	// prove REPLACEABILITY — the drop probe does): after dropping
 	// idx_struct_links_rev (in-tx, rolled back), graph_rev must still serve the
-	// StructuralNeighbors reverse lookup via an index scan (link_class as a
+	// former-idx_struct_links_rev reverse lookup shape (target-leading + class filter, the Q1s reverse leg's access pattern; the single-block reader retired in GB6) via an index scan (link_class as a
 	// filter instead of an index cond is acceptable — the prefix carries the
 	// selectivity). M104 executes the consolidation; this assert keeps the
 	// decision's evidence alive.
@@ -335,7 +335,7 @@ func TestStructuralHop_IndexPlan(t *testing.T) {
 	if !strings.Contains(plan, "idx_struct_links_graph_rev") {
 		t.Errorf("K4 consolidation broken: without idx_struct_links_rev the reverse lookup does not use graph_rev:\n%s", plan)
 	}
-	t.Logf("K4 consolidation evidence (StructuralNeighbors reverse lookup WITHOUT idx_struct_links_rev):\n%s", plan)
+	t.Logf("K4 consolidation evidence (former-idx_struct_links_rev reverse lookup shape (target-leading + class filter, the Q1s reverse leg's access pattern; the single-block reader retired in GB6) WITHOUT idx_struct_links_rev):\n%s", plan)
 }
 
 // hasLegSortNode reports whether the plan contains a Sort NODE whose key is

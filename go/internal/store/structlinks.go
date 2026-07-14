@@ -18,9 +18,13 @@
 //     the source — never trusts a caller-supplied scope. Unknown, invisible and
 //     cross-scope targets all collapse to ONE error (ErrLinkScopeViolation →
 //     handler 404): no existence oracle for foreign block UUIDs.
-//   - READ: StructuralNeighbors filters neighbours through the shared
-//     visibility.Predicate (readScopes + block-grants), so a cross-scope edge
-//     that only raw SQL could have injected never yields a foreign title.
+//   - READ: the ego-graph batch readers (structuralHopNeighbors/Q1s and
+//     inducedStructEdges/Q2s, store/graph.go) filter through the shared
+//     visibility.Predicate, so a cross-scope edge that only raw SQL could
+//     have injected never yields a foreign title (per-leg red-proven, GB1
+//     W2-G1). The former single-block reader StructuralNeighbors was retired
+//     in GB6 (E7): unwired since M076, its visibility gate lives on in the
+//     batch readers' tests.
 package store
 
 import (
@@ -29,7 +33,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ErrLinkScopeViolation is the UNIFIED error for every structural-link write
@@ -152,59 +155,6 @@ func DeleteStructuralLink(ctx context.Context, tx pgx.Tx, sourceID, targetID, cl
 		return fmt.Errorf("structural link: delete: %w", err)
 	}
 	return nil
-}
-
-// StructuralNeighbors returns the structural edges incident to blockID in BOTH
-// directions, filtering the far endpoint through the shared visibility predicate
-// (readScopes + block-grants + type allowlist) — the second line of defence:
-// an edge that only raw SQL could inject across scopes never yields a foreign
-// neighbour. classes nil/empty = all classes. Fail-closed on empty readScopes.
-//
-// visibleTypes is the resolved type allowlist (blocktype.Set.VisibleTypes) — it
-// is REQUIRED because visibility.Predicate gates on the type conjunct
-// (fail-closed: an unregistered/empty allowlist matches zero rows). The design
-// §4.2 signature omitted it for brevity; it is threaded explicitly here exactly
-// as store.EgoGraph does (graph.go:163). See the return note in I-A.
-func StructuralNeighbors(ctx context.Context, pool *pgxpool.Pool, blockID string, classes []string,
-	readScopes []string, grantedIDs []string, visibleTypes []string) ([]StructuralLink, error) {
-	if err := RequireScopes(readScopes); err != nil {
-		return nil, err
-	}
-	// Empty class filter ⇒ NULL bind ⇒ "all classes" ($2::text[] IS NULL branch).
-	var classArg any
-	if len(classes) > 0 {
-		classArg = classes
-	}
-	vis := VisibilityPredicate("nb", "$5", "$3", "$4")
-	q := fmt.Sprintf(`
-		SELECT sl.source_block_id::text, sl.target_block_id::text, sl.link_class, sl.scope, sl.origin
-		FROM context_structural_links sl
-		JOIN context_blocks nb ON nb.id = sl.target_block_id
-		WHERE sl.source_block_id = $1::uuid
-		  AND ($2::text[] IS NULL OR sl.link_class = ANY($2::text[]))
-		  AND %[1]s
-		UNION
-		SELECT sl.source_block_id::text, sl.target_block_id::text, sl.link_class, sl.scope, sl.origin
-		FROM context_structural_links sl
-		JOIN context_blocks nb ON nb.id = sl.source_block_id
-		WHERE sl.target_block_id = $1::uuid
-		  AND ($2::text[] IS NULL OR sl.link_class = ANY($2::text[]))
-		  AND %[1]s`, vis)
-
-	rows, err := pool.Query(ctx, q, blockID, classArg, readScopes, grantedIDs, visibleTypes)
-	if err != nil {
-		return nil, fmt.Errorf("structural neighbors: query: %w", err)
-	}
-	defer rows.Close()
-	var out []StructuralLink
-	for rows.Next() {
-		var l StructuralLink
-		if err := rows.Scan(&l.SourceID, &l.TargetID, &l.LinkClass, &l.Scope, &l.Origin); err != nil {
-			return nil, fmt.Errorf("structural neighbors: scan: %w", err)
-		}
-		out = append(out, l)
-	}
-	return out, rows.Err()
 }
 
 // PutBlockParent sets context_blocks.parent_id (the ONE structural parent, K3)
