@@ -36,7 +36,9 @@ import (
 // bind parameters (mechanism = code, policy = data). Deliberately NOT API
 // parameters (design §3.3 Q3).
 const (
-	// DegreeScanBudget caps how many RAW link rows per direction the visible-
+	// DegreeScanBudget caps how many RAW link rows per direction PER CLASS
+	// (dream/structural — four Q3 legs since GB4, design/01 §4.7: worst case
+	// factor ≤2 over the dream-only baseline, ledgered in §6.3) the visible-
 	// degree count scans BEFORE the block visibility join. Without it a
 	// degree-10^4 hub whose neighborhood is mostly invisible to the caller
 	// (normal after scope promotion, and the friend-tenant default at 1M+
@@ -799,15 +801,18 @@ func mapStructEdges(rows []structEdgeRow, index map[string]int) ([]StructGraphEd
 
 // fillDegrees is Q3: the visible degree per node, batched, double-budgeted.
 // The inner LIMIT (DegreeScanBudget) is a SCAN budget — it caps how many RAW
-// link rows per direction ever reach the block join (cost ceiling in the
-// visible-poor case). The outer LIMIT (DegreeHitCap) is a HIT budget — it
+// link rows per direction PER CLASS ever reach the block join (cost ceiling
+// in the visible-poor case; 4 legs × 1000 since GB4, ledgered §6.3). The outer LIMIT (DegreeHitCap) is a HIT budget — it
 // stops after 201 VISIBLE neighbors (renders as "200+", visible-rich case).
-// Degree counts all five relationship types; the count is scope-visible —
-// a raw count would leak the existence of foreign private links on shared
-// blocks (design §6.3, decision §7.2).
+// Degree counts link ROWS of BOTH data classes (GB4, K5 semantics: per
+// direction, per class — NOT distinct neighbors, which would break the
+// client badge math `degree - loadedDeg` on every collision pair): all five
+// dream relationship types plus every structural class, four UNION-ALL legs.
+// Every leg is scope-visible at the far endpoint — a raw count would leak
+// the existence of foreign private links on shared blocks (design §6.3).
 func fillDegrees(ctx context.Context, pool *pgxpool.Pool, ids, readScopes, grantedBlockIDs, visibleTypes []string, nodes []GraphNode) error {
 	// $5 = grantedBlockIDs (T40a): a granted neighbor counts toward the VISIBLE
-	// degree via the shared VisibilityPredicate OR-arm (both UNION legs).
+	// degree via the shared VisibilityPredicate OR-arm (all four UNION legs).
 	// $6 = visibleTypes (T6): only allowlisted neighbors count.
 	vis := VisibilityPredicate("nb", "$6", "$2", "$5")
 	q := fmt.Sprintf(`
@@ -819,7 +824,7 @@ SELECT n.id::text,
                   WHERE l.source_block_id = n.id
                   LIMIT $3) raw
             JOIN context_blocks nb ON nb.id = raw.nb_id
-            WHERE %s
+            WHERE %[1]s
             UNION ALL
             SELECT 1
             FROM (SELECT l.source_block_id AS nb_id
@@ -827,10 +832,26 @@ SELECT n.id::text,
                   WHERE l.target_block_id = n.id
                   LIMIT $3) raw
             JOIN context_blocks nb ON nb.id = raw.nb_id
-            WHERE %s
+            WHERE %[1]s
+            UNION ALL
+            SELECT 1
+            FROM (SELECT sl.target_block_id AS nb_id
+                  FROM context_structural_links sl
+                  WHERE sl.source_block_id = n.id
+                  LIMIT $3) raw
+            JOIN context_blocks nb ON nb.id = raw.nb_id
+            WHERE %[1]s
+            UNION ALL
+            SELECT 1
+            FROM (SELECT sl.source_block_id AS nb_id
+                  FROM context_structural_links sl
+                  WHERE sl.target_block_id = n.id
+                  LIMIT $3) raw
+            JOIN context_blocks nb ON nb.id = raw.nb_id
+            WHERE %[1]s
             LIMIT $4
         ) c)::int AS degree
-FROM unnest($1::uuid[]) AS n(id)`, vis, vis)
+FROM unnest($1::uuid[]) AS n(id)`, vis)
 
 	rows, err := pool.Query(ctx, q, ids, readScopes, DegreeScanBudget, DegreeHitCap, grantedBlockIDs, visibleTypes)
 	if err != nil {
