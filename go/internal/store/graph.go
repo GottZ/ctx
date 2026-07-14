@@ -275,7 +275,7 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		index[nodes[i].ID] = i
 	}
 
-	edges, edgesTruncated, err := inducedEdges(ctx, pool, ids, index, p)
+	edges, edgesTruncated, err := resolveDreamEdges(ctx, pool, ids, index, p)
 	if err != nil {
 		return nil, err
 	}
@@ -659,6 +659,18 @@ LIMIT $4`
 		return edges[:p.EdgeLimit], true, nil
 	}
 	return edges, false, nil
+}
+
+// resolveDreamEdges is the Q2 stage of EgoGraph with the GB5 skip: an empty
+// dream partition (non-nil-EMPTY LinkClasses, §4.6 sentinel) costs NO
+// roundtrip — without the skip `link_class=<structural>` would bind $3='{}',
+// match nothing, and still scan (design/02 §4.2b). Symmetric to the Q2s skip
+// in resolveStructEdges.
+func resolveDreamEdges(ctx context.Context, pool *pgxpool.Pool, ids []string, index map[string]int, p EgoParams) ([]GraphEdge, bool, error) {
+	if p.LinkClasses != nil && len(p.LinkClasses) == 0 {
+		return nil, false, nil
+	}
+	return inducedEdges(ctx, pool, ids, index, p)
 }
 
 // resolveStructEdges is the Q2s stage of EgoGraph (GB2): structural facts

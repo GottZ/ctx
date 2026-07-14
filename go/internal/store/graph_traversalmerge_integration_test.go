@@ -244,19 +244,30 @@ func TestEgoGraph_ClassCombinatorics(t *testing.T) {
 	}
 }
 
-// countingTracer counts hop-query roundtrips per link table (W4-G4 query-count
-// arm — proves the SYMMETRIC short circuits: a skipped class costs zero
-// roundtrips, not just zero rows).
+// countingTracer counts link-table roundtrips (W4-G4 + GB5 query-count arms —
+// proves the SYMMETRIC short circuits: a skipped class costs zero roundtrips
+// across hop (Q1/Q1s) AND induced (Q2/Q2s), not just zero rows). Q3
+// (fillDegrees) reads both tables in ONE query by design and is excluded via
+// its unique "AS n(id)" unnest alias.
 type countingTracer struct {
-	dreamHops, structHops atomic.Int64
+	dreamHops, structHops       atomic.Int64
+	dreamQueries, structQueries atomic.Int64
 }
 
 func (c *countingTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	if strings.Contains(data.SQL, "WITH hop AS") {
-		if strings.Contains(data.SQL, "context_dream_links") {
+	if strings.Contains(data.SQL, "AS n(id)") {
+		return ctx // Q3 — both tables by design, not a class roundtrip
+	}
+	isHop := strings.Contains(data.SQL, "WITH hop AS")
+	if strings.Contains(data.SQL, "context_dream_links") {
+		c.dreamQueries.Add(1)
+		if isHop {
 			c.dreamHops.Add(1)
 		}
-		if strings.Contains(data.SQL, "context_structural_links") {
+	}
+	if strings.Contains(data.SQL, "context_structural_links") {
+		c.structQueries.Add(1)
+		if isHop {
 			c.structHops.Add(1)
 		}
 	}
@@ -288,23 +299,27 @@ func TestEgoGraph_ShortCircuitRoundtrips(t *testing.T) {
 	run := func(link, structIn []string) (int64, int64) {
 		tracer.dreamHops.Store(0)
 		tracer.structHops.Store(0)
+		tracer.dreamQueries.Store(0)
+		tracer.structQueries.Store(0)
 		if _, err := store.EgoGraph(context.Background(), pool,
 			store.EgoParams{Focus: w4Report, Hops: 2, PerNodeCap: 25, Limit: 500, EdgeLimit: 4000,
 				LinkClasses: link, StructClasses: structIn},
 			[]string{"private"}, nil, []string{"knowledge"}); err != nil {
 			t.Fatalf("EgoGraph: %v", err)
 		}
-		return tracer.dreamHops.Load(), tracer.structHops.Load()
+		return tracer.dreamQueries.Load(), tracer.structQueries.Load()
 	}
 
+	// GB5: the counters cover Q1+Q2 (dream) and Q1s+Q2s (structural) — a
+	// skipped class costs ZERO roundtrips of any kind (hop AND induced).
 	if d, s := run([]string{}, []string{"references"}); d != 0 {
-		t.Errorf("structural-only: %d dream hop roundtrips, want 0 (short circuit dead)", d)
+		t.Errorf("structural-only: %d dream roundtrips (hop+induced), want 0 (short circuit dead)", d)
 	} else if s == 0 {
-		t.Error("structural-only: 0 structural hop roundtrips — control broken, tracer sees nothing")
+		t.Error("structural-only: 0 structural roundtrips — control broken, tracer sees nothing")
 	}
 	if d, s := run([]string{"topical"}, []string{}); s != 0 {
-		t.Errorf("dream-only: %d structural hop roundtrips, want 0 (short circuit dead)", s)
+		t.Errorf("dream-only: %d structural roundtrips (hop+induced), want 0 (short circuit dead)", s)
 	} else if d == 0 {
-		t.Error("dream-only: 0 dream hop roundtrips — control broken")
+		t.Error("dream-only: 0 dream roundtrips — control broken")
 	}
 }

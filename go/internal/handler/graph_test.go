@@ -24,7 +24,7 @@ const egoTestUUID = "019c9629-faac-75a5-98b6-de04dbfc8404"
 // Defaults: only block set → hops=1, per_node_cap=25, limit=500,
 // edge_limit=4000, min_confidence=0, all filters nil.
 func TestParseEgoParams_Defaults(t *testing.T) {
-	p, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID))
+	p, _, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestParseEgoParams_Ceilings(t *testing.T) {
 		"block=" + egoTestUUID + "&created_before=2026-13-45",
 	}
 	for _, raw := range bad {
-		if _, err := parseEgoParams(egoQuery(t, raw)); err == nil {
+		if _, _, err := parseEgoParams(egoQuery(t, raw), nil); err == nil {
 			t.Errorf("query %q: expected error, got nil", raw)
 		}
 	}
@@ -72,7 +72,7 @@ func TestParseEgoParams_Ceilings(t *testing.T) {
 	// Boundary values are valid. limit max = 1500 (G39: lowered from 5000 — the
 	// 1M bench proved larger ceilings indefensible under the 500ms p95 bar).
 	good := "block=" + egoTestUUID + "&hops=3&per_node_cap=100&limit=1500&edge_limit=20000&min_confidence=1"
-	p, err := parseEgoParams(egoQuery(t, good))
+	p, _, err := parseEgoParams(egoQuery(t, good), nil)
 	if err != nil {
 		t.Fatalf("boundary values rejected: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestParseEgoParams_Ceilings(t *testing.T) {
 		t.Errorf("boundary parse wrong: %+v", p)
 	}
 	// limit just past the ceiling is a 400, never clamped.
-	if _, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&limit=1501")); err == nil {
+	if _, _, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&limit=1501"), nil); err == nil {
 		t.Error("limit=1501 must be rejected (ceiling is 1500)")
 	}
 }
@@ -88,7 +88,7 @@ func TestParseEgoParams_Ceilings(t *testing.T) {
 // link_class CSV: all five classes are valid, whitespace tolerated, unknown
 // rejected; category CSV is free-form.
 func TestParseEgoParams_CSVFilters(t *testing.T) {
-	p, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&link_class=topical,%20causal,supersedes&category=learnings,decisions"))
+	p, _, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&link_class=topical,%20causal,supersedes&category=learnings,decisions"), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,9 +100,67 @@ func TestParseEgoParams_CSVFilters(t *testing.T) {
 	}
 }
 
+// GB5 (design/02 §4.2): the link_class CSV partitions by vocabulary — dream
+// names → LinkClasses, registry structural names → StructClasses; a set param
+// makes BOTH sides non-nil (an empty side matches nothing on its class).
+// RED on the pre-GB5 state: link_class=references was a 400.
+func TestParseEgoParams_LinkClassPartition(t *testing.T) {
+	vocab := []string{"references", "duplicate-of"}
+
+	// The former 400 pin, inverted: a structural class is now valid.
+	p, raw, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&link_class=references"), vocab)
+	if err != nil {
+		t.Fatalf("link_class=references rejected (pre-GB5 400 behavior): %v", err)
+	}
+	if p.LinkClasses == nil || len(p.LinkClasses) != 0 {
+		t.Errorf("dream side = %#v, want non-nil EMPTY (references is structural-only)", p.LinkClasses)
+	}
+	if len(p.StructClasses) != 1 || p.StructClasses[0] != "references" {
+		t.Errorf("struct side = %#v, want [references]", p.StructClasses)
+	}
+	if len(raw) != 1 || raw[0] != "references" {
+		t.Errorf("raw echo = %#v, want [references]", raw)
+	}
+
+	// Mixed CSV splits by vocabulary, echo keeps request order.
+	p, raw, err = parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&link_class=references,topical,duplicate-of"), vocab)
+	if err != nil {
+		t.Fatalf("mixed CSV rejected: %v", err)
+	}
+	if len(p.LinkClasses) != 1 || p.LinkClasses[0] != "topical" {
+		t.Errorf("dream side = %#v, want [topical]", p.LinkClasses)
+	}
+	if len(p.StructClasses) != 2 {
+		t.Errorf("struct side = %#v, want [references duplicate-of]", p.StructClasses)
+	}
+	if len(raw) != 3 || raw[1] != "topical" {
+		t.Errorf("raw echo = %#v, want request order", raw)
+	}
+
+	// Absent param: both sides nil (= all classes, default visibility).
+	p, raw, err = parseEgoParams(egoQuery(t, "block="+egoTestUUID), vocab)
+	if err != nil {
+		t.Fatalf("absent link_class: %v", err)
+	}
+	if p.LinkClasses != nil || p.StructClasses != nil || raw != nil {
+		t.Errorf("absent param: dream=%#v struct=%#v raw=%#v, want all nil", p.LinkClasses, p.StructClasses, raw)
+	}
+
+	// Unknown class stays a 400 and names the FULL vocabulary.
+	_, _, err = parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&link_class=bogus"), vocab)
+	if err == nil {
+		t.Fatal("unknown class accepted")
+	}
+	for _, part := range []string{"topical", "references"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("400 message lacks vocabulary part %q: %v", part, err)
+		}
+	}
+}
+
 // created_after / created_before parse RFC3339 into the params.
 func TestParseEgoParams_CreatedWindow(t *testing.T) {
-	p, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&created_after=2026-01-01T00:00:00Z&created_before=2026-06-01T12:30:00%2B02:00"))
+	p, _, err := parseEgoParams(egoQuery(t, "block="+egoTestUUID+"&created_after=2026-01-01T00:00:00Z&created_before=2026-06-01T12:30:00%2B02:00"), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -139,7 +197,7 @@ func TestEgoResponse_EnvelopeGolden(t *testing.T) {
 	}
 	p := store.EgoParams{Hops: 2, PerNodeCap: 25, Limit: 500, EdgeLimit: 4000}
 
-	got, err := json.Marshal(buildEgoResponse(res, p, 4))
+	got, err := json.Marshal(buildEgoResponse(res, p, nil, 4))
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
 	}
@@ -175,7 +233,7 @@ func TestEgoResponse_EmptyCollectionsAreArrays(t *testing.T) {
 	res := &store.EgoResult{Focus: egoTestUUID, Rels: store.GraphRels}
 	p := store.EgoParams{Hops: 1, PerNodeCap: 25, Limit: 500, EdgeLimit: 4000}
 
-	got, err := json.Marshal(buildEgoResponse(res, p, 1))
+	got, err := json.Marshal(buildEgoResponse(res, p, nil, 1))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

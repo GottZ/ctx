@@ -141,7 +141,11 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	params, err := parseEgoParams(r.URL.Query())
+	// ONE registry snapshot per request feeds both the structural vocabulary
+	// (link_class partition, GB5) and the type allowlist — a mid-request
+	// registry edit can never split the two.
+	snap := h.blocktypes.SnapshotForRequest(ctx)
+	params, rawLinkClass, err := parseEgoParams(r.URL.Query(), snap.StructuralClasses())
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		return
@@ -153,7 +157,7 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 	// resolution is a later wave) — nil ⇒ no-op OR-arm.
 	// T6: the type allowlist comes from the REGISTRY snapshot per request —
 	// a live registry edit changes graph visibility without a restart.
-	visibleTypes := h.blocktypes.SnapshotForRequest(ctx).VisibleTypes()
+	visibleTypes := snap.VisibleTypes()
 	result, err := store.EgoGraph(ctx, h.pool, params, authResult.ReadScopes, nil, visibleTypes)
 	if err != nil {
 		if errors.Is(err, store.ErrNotVisible) {
@@ -175,12 +179,17 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 		slog.Error("graph: access log error", "error", err, "request_id", reqID)
 	}
 
-	writeJSON(w, http.StatusOK, buildEgoResponse(result, params, elapsedMs))
+	writeJSON(w, http.StatusOK, buildEgoResponse(result, params, rawLinkClass, elapsedMs))
 }
 
 // buildEgoResponse assembles the wire envelope from the store result and the
 // validated params. Pure — pinned by the envelope golden unit test.
-func buildEgoResponse(res *store.EgoResult, p store.EgoParams, elapsedMs int64) egoResponse {
+// buildEgoResponse renders the wire envelope. rawLinkClass is the RAW parsed
+// link_class CSV for the params echo (GB5: after the vocabulary partition,
+// p.LinkClasses carries only the dream side — echoing it would render
+// `link_class=references` as an empty echo; the raw list keeps request order
+// across both vocabularies, nil → null).
+func buildEgoResponse(res *store.EgoResult, p store.EgoParams, rawLinkClass []string, elapsedMs int64) egoResponse {
 	nodes := res.Nodes
 	if nodes == nil {
 		nodes = []store.GraphNode{}
@@ -209,7 +218,7 @@ func buildEgoResponse(res *store.EgoResult, p store.EgoParams, elapsedMs int64) 
 			PerNodeCap:    p.PerNodeCap,
 			Limit:         p.Limit,
 			MinConfidence: p.MinConfidence,
-			LinkClass:     p.LinkClasses,
+			LinkClass:     rawLinkClass,
 			EdgeLimit:     p.EdgeLimit,
 			Category:      p.Categories,
 			CreatedAfter:  p.CreatedAfter,
@@ -234,45 +243,50 @@ func buildEgoResponse(res *store.EgoResult, p store.EgoParams, elapsedMs int64) 
 // parseEgoParams validates the query string into store.EgoParams. Ceilings
 // are enforced, not clamped: out-of-range values are an explicit 400 with a
 // plain-text reason (design §3.1).
-func parseEgoParams(q url.Values) (store.EgoParams, error) {
+// parseEgoParams validates the query. structVocab is the request-snapshot
+// structural vocabulary (Set.StructuralClasses) for the link_class partition
+// (GB5); the second return is the RAW parsed CSV for the params echo (the
+// partitioned EgoParams fields stay store-internal, design/02 §4.2).
+func parseEgoParams(q url.Values, structVocab []string) (store.EgoParams, []string, error) {
 	p := store.EgoParams{}
 
 	p.Focus = q.Get("block")
 	if p.Focus == "" {
-		return p, errors.New("block parameter is required")
+		return p, nil, errors.New("block parameter is required")
 	}
 	if !fullUUIDRe.MatchString(p.Focus) {
-		return p, errors.New("block must be a full UUID")
+		return p, nil, errors.New("block must be a full UUID")
 	}
 
 	var err error
 	if p.Hops, err = egoIntParam(q, "hops", egoDefaultHops, 1, egoMaxHops); err != nil {
-		return p, err
+		return p, nil, err
 	}
 	if p.PerNodeCap, err = egoIntParam(q, "per_node_cap", egoDefaultCap, 1, egoMaxCap); err != nil {
-		return p, err
+		return p, nil, err
 	}
 	if p.Limit, err = egoIntParam(q, "limit", egoDefaultLimit, 1, egoMaxLimit); err != nil {
-		return p, err
+		return p, nil, err
 	}
 	if p.EdgeLimit, err = egoIntParam(q, "edge_limit", egoDefaultEdgeLimit, 1, egoMaxEdgeLimit); err != nil {
-		return p, err
+		return p, nil, err
 	}
 	if p.MinConfidence, err = egoFloatParam(q, "min_confidence", 0, 0, 1); err != nil {
-		return p, err
+		return p, nil, err
 	}
-	if p.LinkClasses, err = egoLinkClasses(q.Get("link_class")); err != nil {
-		return p, err
+	var rawLinkClass []string
+	if p.LinkClasses, p.StructClasses, rawLinkClass, err = egoLinkClassPartition(q.Get("link_class"), structVocab); err != nil {
+		return p, nil, err
 	}
 	p.Categories = egoCSV(q.Get("category"))
 	if p.CreatedAfter, err = egoTimeParam(q, "created_after"); err != nil {
-		return p, err
+		return p, nil, err
 	}
 	if p.CreatedBefore, err = egoTimeParam(q, "created_before"); err != nil {
-		return p, err
+		return p, nil, err
 	}
 
-	return p, nil
+	return p, rawLinkClass, nil
 }
 
 // egoIntParam parses an optional integer query parameter with inclusive
@@ -322,23 +336,45 @@ func egoTimeParam(q url.Values, name string) (*time.Time, error) {
 	return &t, nil
 }
 
-// egoLinkClasses parses the link_class CSV against the fixed legend; an
-// unknown class is a 400. Empty → nil (= all five).
-func egoLinkClasses(raw string) ([]string, error) {
+// egoLinkClassPartition parses the link_class CSV against the FULL vocabulary
+// (fixed dream legend ∪ registry structural classes) and partitions it by
+// data class (GB5, design/02 §4.2): dream names → LinkClasses, structural
+// names → StructClasses. Absent param → nil/nil (= everything, default
+// visibility without any new parameter). A SET param makes both sides
+// non-nil — an empty side matches NOTHING on its class ("only topical" means
+// only topical; every class name belongs to exactly ONE data class, one
+// parameter, one selection logic). Unknown class stays a 400 naming the full
+// vocabulary. The third return is the raw parsed CSV (params echo).
+func egoLinkClassPartition(raw string, structVocab []string) (dream, structural, rawClasses []string, err error) {
 	classes := egoCSV(raw)
 	if classes == nil {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
-	known := make(map[string]bool, len(store.GraphRels))
+	dreamKnown := make(map[string]bool, len(store.GraphRels))
 	for _, r := range store.GraphRels {
-		known[r] = true
+		dreamKnown[r] = true
 	}
+	structKnown := make(map[string]bool, len(structVocab))
+	for _, c := range structVocab {
+		structKnown[c] = true
+	}
+	dream = []string{}      // non-nil: "none of this class" once the param is set
+	structural = []string{} // non-nil, same semantics (§4.6 sentinel)
 	for _, c := range classes {
-		if !known[c] {
-			return nil, fmt.Errorf("unknown link_class %q (valid: %s)", c, strings.Join(store.GraphRels, ","))
+		switch {
+		case dreamKnown[c]:
+			dream = append(dream, c)
+		case structKnown[c]:
+			structural = append(structural, c)
+		default:
+			vocab := strings.Join(store.GraphRels, ",")
+			if len(structVocab) > 0 {
+				vocab += "," + strings.Join(structVocab, ",")
+			}
+			return nil, nil, nil, fmt.Errorf("unknown link_class %q (valid: %s)", c, vocab)
 		}
 	}
-	return classes, nil
+	return dream, structural, classes, nil
 }
 
 // egoCSV splits a comma-separated value, trimming whitespace and dropping

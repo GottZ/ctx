@@ -2,6 +2,7 @@ package blocktype
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,6 +28,10 @@ type Set struct {
 	aggregate      []string // retrieval == aggregate-to-parent
 	damped         []dampedEntry
 	classifyOrder  []Policy // sorted by (priority, name)
+	// structuralClasses is the sorted DISTINCT union of every type's
+	// structural_link_classes — the request-snapshot vocabulary for the
+	// link_class partition (GB5, design/02 §4.2/§4.5).
+	structuralClasses []string
 }
 
 // dampedEntry holds the per-type damping data for DampedTypesFor. Matching
@@ -69,8 +74,20 @@ func NewSet(policies []Policy) (*Set, error) {
 	}
 	sort.Strings(names)
 
+	structSet := map[string]bool{}
 	for _, n := range names {
 		p := s.policies[n]
+		for _, c := range p.StructuralLinkClasses {
+			// Defense-in-depth (split precedence, design/01 §4.6(b)): a dream
+			// name can never route into the structural vocabulary. DecodePolicy
+			// already rejects reserved names (GA6) — this arm only matters for
+			// a hypothetical decode-bypass and is deliberately silent (the
+			// loud path is the GA7 tenant-fallback warn).
+			if slices.Contains(reservedGraphClasses, c) {
+				continue
+			}
+			structSet[c] = true
+		}
 		switch p.Retrieval.Kind {
 		case RetrievalFullPass, RetrievalDamped, RetrievalAggregateToParent:
 			s.visible = append(s.visible, n)
@@ -104,8 +121,17 @@ func NewSet(policies []Policy) (*Set, error) {
 		}
 		return s.classifyOrder[i].Name < s.classifyOrder[j].Name
 	})
+	for c := range structSet {
+		s.structuralClasses = append(s.structuralClasses, c)
+	}
+	sort.Strings(s.structuralClasses)
 	return s, nil
 }
+
+// StructuralClasses returns the sorted distinct union of every registered
+// type's structural_link_classes — the accepted structural vocabulary for the
+// link_class partition (GB5). Precomputed, no allocation on the hot path.
+func (s *Set) StructuralClasses() []string { return s.structuralClasses }
 
 // Resolve returns the policy for name. ok=false means the name is not
 // registered — callers treat that fail-closed (§5.1: invisible, no

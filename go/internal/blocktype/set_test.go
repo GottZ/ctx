@@ -222,3 +222,47 @@ func TestClassifySourceProperPrefix(t *testing.T) {
 		t.Errorf("proper-prefix source = (%q, %v), want (audit-trail, true)", name, matched)
 	}
 }
+
+// GB5: StructuralClasses is the sorted distinct union of every type's
+// structural_link_classes — the link_class partition vocabulary.
+func TestSetStructuralClasses(t *testing.T) {
+	mk := func(name string, def bool, classes ...string) Policy {
+		p := Policy{Name: name, IsDefault: def}
+		p.Retrieval.Kind = RetrievalFullPass
+		p.StructuralLinkClasses = classes
+		return p
+	}
+	s, err := NewSet([]Policy{
+		mk("knowledge", true),
+		mk("issue", false, "references", "duplicate-of"),
+		mk("audit-trail", false, "references"),
+	})
+	if err != nil {
+		t.Fatalf("NewSet: %v", err)
+	}
+	got := s.StructuralClasses()
+	want := []string{"duplicate-of", "references"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("StructuralClasses = %v, want %v (sorted distinct union)", got, want)
+	}
+
+	// Split precedence (design/01 §4.6(b)): a reserved dream name never routes
+	// into the structural vocabulary — even if it somehow bypassed the
+	// DecodePolicy guard (this Set-level filter is the second defense line;
+	// GB5 review: previously untested, a filter removal stayed green).
+	s2, err := NewSet([]Policy{
+		mk("knowledge", true),
+		mk("legacy", false, "topical", "references"),
+	})
+	if err != nil {
+		t.Fatalf("NewSet (reserved): %v", err)
+	}
+	for _, c := range s2.StructuralClasses() {
+		if c == "topical" {
+			t.Fatal("reserved dream name routed into the structural vocabulary — Set filter dead")
+		}
+	}
+	if got := s2.StructuralClasses(); len(got) != 1 || got[0] != "references" {
+		t.Errorf("StructuralClasses = %v, want [references] (reserved filtered)", got)
+	}
+}
