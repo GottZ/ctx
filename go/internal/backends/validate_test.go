@@ -235,6 +235,16 @@ func TestDreamOnLocalWarns(t *testing.T) {
 	if !found {
 		t.Errorf("dream-on-local warning missing: %v", warnings)
 	}
+
+	// A per-role dream timeout override is the designed CPU path — the
+	// warning must fall silent for a correctly configured backend.
+	b.Timeouts = map[string]int{RoleDream: 900}
+	warnings, _ = ValidateBackend(&b)
+	for _, w := range warnings {
+		if strings.Contains(w, "dream role on a local backend") {
+			t.Errorf("warning must be suppressed by a dream timeout override: %v", warnings)
+		}
+	}
 }
 
 func TestValidateEnums(t *testing.T) {

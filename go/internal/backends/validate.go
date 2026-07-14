@@ -208,11 +208,19 @@ func validateRoles(b *Backend) (warnings []string, errs []FieldError) {
 			"classify role is hard-local — an external backend can never audit unclassified block content"})
 	}
 
-	// Dream evaluation on a local (CPU-class) backend: DreamTimeout tears at
-	// CPU token rates → cooldown churn + corrupted back-off statistics
-	// (risk 6.5). Warning, not error — policy is data.
+	// Dream evaluation on a local (CPU-class) backend: the DreamTimeout code
+	// default (180s, GPU-calibrated p99+margin) tears at CPU token rates →
+	// cooldown churn + corrupted back-off statistics (risk 6.5). Warning, not
+	// error — policy is data. A per-role dream timeout override on the row is
+	// the designed CPU path (TimeoutFor beats the code default at every chain
+	// call), so a configured override silences the warning. Locality=local is
+	// the CPU-class heuristic; lan stays out deliberately — it carries no
+	// CPU/GPU signal (herbert-chat is lan+GPU) and would false-positive on
+	// every healthy dream backend.
 	if b.HasRole(RoleDream) && b.Locality == LocalityLocal {
-		warnings = append(warnings, "dream role on a local backend: CPU-class inference tears DreamTimeout and corrupts back-off statistics")
+		if secs, ok := b.Timeouts[RoleDream]; !ok || secs <= 0 {
+			warnings = append(warnings, "dream role on a local backend without a dream timeout override: CPU-class inference tears the DreamTimeout code default and corrupts back-off statistics")
+		}
 	}
 	return warnings, errs
 }
