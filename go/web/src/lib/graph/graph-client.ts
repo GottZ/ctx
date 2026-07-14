@@ -34,8 +34,17 @@ export interface NodeAttrs {
   color: string
 }
 
+/** The two data classes on the wire — dream links carry confidence, structural
+ *  links are facts (conf 1.0 by definition, M076) and stay a separate class
+ *  end-to-end (never materialized into dream links, architecture.md:80). */
+export type EdgeKind = 'dream' | 'structural'
+
 export interface EdgeAttrs {
+  /** dream class OR structural link_class. */
   rel: string
+  kind: EdgeKind
+  /** Structural only: system | forge-sync | manual | … (absent on dream). */
+  origin?: string
   conf: number
   size: number
   color: string
@@ -169,11 +178,36 @@ export function mergeEgo(
     if (source === undefined || target === undefined || relName === undefined) continue
     graph.mergeDirectedEdgeWithKey(dreamKey(source, target), source, target, {
       rel: relName,
+      kind: 'dream',
       conf,
       size: relName === 'supersedes' ? 1 : 1 + conf,
       color: edgeColor(relName, palette),
     })
   }
+  // Structural facts (GA2 INTERIM): data attributes only — NO `type` and no
+  // own color until the render program is registered in the same commit (GC1;
+  // sigma 3.0.3 throws hard on an unregistered edge type, even hidden).
+  // Missing fields = old server → the loop runs empty (tolerance invariant).
+  for (const [src, dst, cls, org] of resp.structural_edges ?? []) {
+    const source = resp.nodes[src]?.id
+    const target = resp.nodes[dst]?.id
+    const clsName = resp.struct_rels?.[cls]
+    if (source === undefined || target === undefined || clsName === undefined) continue
+    // origin is ALWAYS written (undefined overwrites): mergeDirectedEdgeWithKey
+    // shallow-merges, so an omitted key would leave a stale origin from an
+    // earlier response alive across re-merges (GA2 review finding).
+    graph.mergeDirectedEdgeWithKey(structKey(source, target, clsName), source, target, {
+      rel: clsName,
+      kind: 'structural',
+      origin: resp.origins?.[org],
+      conf: 1,
+      size: 1.5,
+      color: edgeColor(clsName, palette),
+    })
+  }
+  // AFTER both edge loops: the badge (degree - loadedDeg) counts link ROWS of
+  // both data classes (K5/U4) — a dream-only snapshot would under-report on
+  // every collision pair.
   for (const n of resp.nodes) {
     graph.setNodeAttribute(n.id, 'loadedDeg', graph.degree(n.id))
   }

@@ -49,7 +49,12 @@ export function nodeVisible(attrs: Pick<NodeAttrs, 'category' | 'createdAt'>, f:
 }
 
 /** Client-side edge predicate; an edge with a hidden endpoint hides too. */
-export function edgeVisible(attrs: Pick<EdgeAttrs, 'rel' | 'conf'>, f: GraphFilters): boolean {
+export function edgeVisible(attrs: Pick<EdgeAttrs, 'rel' | 'conf' | 'kind'>, f: GraphFilters): boolean {
+  // INTERIM hard branch (GA2, design 03-§7 cut rule b): structural edges are
+  // always visible — the dream allowlist below would hide every structural
+  // class, breaking default-visibility without an extra click. GC2 replaces
+  // this branch with the structClassesHidden blocklist model.
+  if (attrs.kind === 'structural') return true
   if (!f.linkClasses.includes(attrs.rel)) return false
   if (f.minConfidence > 0 && attrs.conf < f.minConfidence) return false
   return true

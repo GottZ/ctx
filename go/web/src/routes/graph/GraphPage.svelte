@@ -29,6 +29,9 @@
   // Explicit counters: graph.order/size are non-reactive by design.
   let nodeCount = $state(0)
   let edgeCount = $state(0)
+  // Structural-edge count (GA2): tracked from the merge on; the stats line
+  // renders it in GC3 together with the legend/a11y wave.
+  let structCount = $state(0)
   // W4: filters drive the reducers instantly AND the params of new expands.
   let filters = $state(defaultFilters())
   // G5: node-click opens a floating window (multiple blocks open at once) instead
@@ -112,6 +115,11 @@
     layout.run(graph)
     nodeCount = graph.order
     edgeCount = graph.size
+    let structural = 0
+    graph.forEachEdge((_id, attrs) => {
+      if (attrs.kind === 'structural') structural++
+    })
+    structCount = structural
     const cats = new Set<string>()
     graph.forEachNode((_id, attrs) => cats.add(attrs.category))
     loadedCategories = [...cats].sort()

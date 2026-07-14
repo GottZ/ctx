@@ -333,7 +333,15 @@ function egoFixture(): Record<string, unknown> {
       [0, 1, 0, 0.95],
       [0, 2, 1, 0.87],
     ],
-    stats: { nodes: 3, edges: 2, truncated: false, elapsed_ms: 28 },
+    // Structural facts (GA2, additive — old specs unaffected): one collision
+    // pair (0→1 also carries a dream edge) + one structural-only edge.
+    struct_rels: ['references'],
+    origins: ['system'],
+    structural_edges: [
+      [0, 1, 0, 0],
+      [0, 2, 0, 0],
+    ],
+    stats: { nodes: 3, edges: 2, structural_edges: 2, truncated: false, elapsed_ms: 28 },
   }
 }
 

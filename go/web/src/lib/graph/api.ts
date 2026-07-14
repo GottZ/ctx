@@ -14,7 +14,23 @@ export interface EgoResponse {
   rels: string[]
   nodes: ApiNode[]
   edges: [src: number, dst: number, rel: number, conf: number][]
-  stats: { nodes: number; edges: number; truncated: boolean; elapsed_ms: number }
+  /** Legend for structural_edges[i][2] — delivered link classes (dynamic,
+   *  registry-driven; NOT the fixed dream five). Absent on old servers. */
+  struct_rels?: string[]
+  /** Legend for structural_edges[i][3] (system | forge-sync | manual | …). */
+  origins?: string[]
+  /** Structural facts as index tuples into the SAME nodes array; no conf slot —
+   *  structural links are 1.0 by definition (M076). Absent on old servers →
+   *  the merge loop runs empty (tolerance invariant, design 03-§4.1). */
+  structural_edges?: [src: number, dst: number, cls: number, origin: number][]
+  stats: {
+    nodes: number
+    edges: number
+    /** Delivered structural-edge count; stats.edges stays dream-only (E4). */
+    structural_edges?: number
+    truncated: boolean
+    elapsed_ms: number
+  }
 }
 
 export interface ApiNode {

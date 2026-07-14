@@ -26,9 +26,18 @@ describe('nodeVisible', () => {
 describe('edgeVisible', () => {
   it('gates on link class and confidence', () => {
     const f = { ...defaultFilters(), linkClasses: ['causal'], minConfidence: 0.8 }
-    expect(edgeVisible({ rel: 'causal', conf: 0.9 }, f)).toBe(true)
-    expect(edgeVisible({ rel: 'causal', conf: 0.7 }, f)).toBe(false)
-    expect(edgeVisible({ rel: 'topical', conf: 0.9 }, f)).toBe(false)
+    expect(edgeVisible({ rel: 'causal', conf: 0.9, kind: 'dream' }, f)).toBe(true)
+    expect(edgeVisible({ rel: 'causal', conf: 0.7, kind: 'dream' }, f)).toBe(false)
+    expect(edgeVisible({ rel: 'topical', conf: 0.9, kind: 'dream' }, f)).toBe(false)
+  })
+
+  it('structural edges pass unconditionally — interim default-visibility (GA2, until the GC2 blocklist)', () => {
+    // The dream allowlist (linkClasses) must NOT hide structural classes, and
+    // min_confidence has no defined meaning on 1.0-by-definition facts: the
+    // user directive "sichtbar ohne Extraklick" would break on both gates.
+    const f = { ...defaultFilters(), linkClasses: ['causal'], minConfidence: 0.9 }
+    expect(edgeVisible({ rel: 'references', conf: 1, kind: 'structural' }, f)).toBe(true)
+    expect(edgeVisible({ rel: 'causal', conf: 0.5, kind: 'dream' }, f)).toBe(false)
   })
 })
 

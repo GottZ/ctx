@@ -124,6 +124,7 @@ describe('mergeEgo', () => {
     // Same directed pair, own key — one row per (pair, class), PK of M076.
     graph.mergeDirectedEdgeWithKey(structKey('a', 'b', 'references'), 'a', 'b', {
       rel: 'references',
+      kind: 'structural',
       conf: 1,
       size: 1.5,
       color: palette.edgeColor,
@@ -136,6 +137,98 @@ describe('mergeEgo', () => {
     expect(graph.degree('a')).toBe(2)
     expect(remainingDegree({ degree: 2, loadedDeg: graph.degree('a') })).toBeNull()
     expect(remainingDegree({ degree: 5, loadedDeg: graph.degree('a') })).toBe('3')
+  })
+
+  it('consumes structural_edges into kind-tagged keyed edges (GA2 wire contract)', () => {
+    const graph = createGraph()
+    mergeEgo(
+      graph,
+      ego({
+        nodes: [node('a', 0), node('b', 1)],
+        edges: [[0, 1, 0, 0.5]],
+        struct_rels: ['references'],
+        origins: ['system'],
+        structural_edges: [[0, 1, 0, 0]],
+      }),
+      palette,
+    )
+    expect(graph.size).toBe(2)
+    const k = structKey('a', 'b', 'references')
+    expect(graph.getEdgeAttribute(k, 'kind')).toBe('structural')
+    expect(graph.getEdgeAttribute(k, 'rel')).toBe('references')
+    expect(graph.getEdgeAttribute(k, 'origin')).toBe('system')
+    expect(graph.getEdgeAttribute(k, 'conf')).toBe(1)
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'kind')).toBe('dream')
+  })
+
+  it('updates loadedDeg including structural incidences (GA1 review carry)', () => {
+    const graph = createGraph()
+    mergeEgo(
+      graph,
+      ego({
+        nodes: [node('a', 0), node('b', 1)],
+        edges: [[0, 1, 0, 0.5]],
+        struct_rels: ['references'],
+        structural_edges: [[0, 1, 0, 0]],
+      }),
+      palette,
+    )
+    // Badge math (degree - loadedDeg) reads the STORED attribute — it must
+    // count both data classes, or the badge under-reports on collision pairs.
+    expect(graph.getNodeAttribute('a', 'loadedDeg')).toBe(2)
+    expect(graph.getNodeAttribute('b', 'loadedDeg')).toBe(2)
+  })
+
+  it('tolerates an old server without structural fields (byte-identical behavior)', () => {
+    const graph = createGraph()
+    mergeEgo(graph, ego({ nodes: [node('a', 0), node('b', 1)], edges: [[0, 1, 0, 0.5]] }), palette)
+    expect(graph.size).toBe(1)
+    let structural = 0
+    graph.forEachEdge((_id, attrs) => {
+      if (attrs.kind === 'structural') structural++
+    })
+    expect(structural).toBe(0)
+  })
+
+  it('skips malformed structural tuples and omits unknown origins (tolerance)', () => {
+    const graph = createGraph()
+    mergeEgo(
+      graph,
+      ego({
+        nodes: [node('a', 0), node('b', 1)],
+        edges: [],
+        struct_rels: ['references'],
+        origins: [],
+        structural_edges: [
+          [0, 9, 0, 0], // unknown target index → skipped
+          [0, 1, 7, 0], // unknown class index → skipped
+          [0, 1, 0, 5], // unknown origin index → edge lands, origin omitted
+        ],
+      }),
+      palette,
+    )
+    expect(graph.size).toBe(1)
+    const k = structKey('a', 'b', 'references')
+    expect(graph.getEdgeAttribute(k, 'kind')).toBe('structural')
+    expect(graph.getEdgeAttribute(k, 'origin')).toBeUndefined()
+  })
+
+  it('re-merge with an unresolvable origin clears the stale value (shallow-merge trap)', () => {
+    const graph = createGraph()
+    const base = {
+      nodes: [node('a', 0), node('b', 1)],
+      edges: [] as EgoResponse['edges'],
+      struct_rels: ['references'],
+      structural_edges: [[0, 1, 0, 0]] as [number, number, number, number][],
+    }
+    mergeEgo(graph, ego({ ...base, origins: ['system'] }), palette)
+    const k = structKey('a', 'b', 'references')
+    expect(graph.getEdgeAttribute(k, 'origin')).toBe('system')
+    // Second response: legend no longer resolves index 0 → origin must NOT
+    // survive from the first merge (mergeDirectedEdgeWithKey shallow-merges;
+    // an omitted key would keep the stale value).
+    mergeEgo(graph, ego({ ...base, origins: [] }), palette)
+    expect(graph.getEdgeAttribute(k, 'origin')).toBeUndefined()
   })
 
   it('tracks loadedDeg from the merged incidences', () => {
