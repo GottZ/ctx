@@ -31,13 +31,30 @@ describe('edgeVisible', () => {
     expect(edgeVisible({ rel: 'topical', conf: 0.9, kind: 'dream' }, f)).toBe(false)
   })
 
-  it('structural edges pass unconditionally — interim default-visibility (GA2, until the GC2 blocklist)', () => {
-    // The dream allowlist (linkClasses) must NOT hide structural classes, and
-    // min_confidence has no defined meaning on 1.0-by-definition facts: the
-    // user directive "sichtbar ohne Extraklick" would break on both gates.
+  // GC2 blocklist model (design 03-§4.3): [] = everything visible; hiding is
+  // EXACT (only the deselected class); unknown classes stay visible in EVERY
+  // filter state — a materialized allowlist variant fails both pins below
+  // (extra-click regression made structurally impossible).
+  it('default ([]) shows UNKNOWN structural classes; dream gates never apply', () => {
     const f = { ...defaultFilters(), linkClasses: ['causal'], minConfidence: 0.9 }
+    // never-deselected class from a future registry extension → visible
+    expect(edgeVisible({ rel: 'brand-new-class', conf: 1, kind: 'structural' }, f)).toBe(true)
     expect(edgeVisible({ rel: 'references', conf: 1, kind: 'structural' }, f)).toBe(true)
     expect(edgeVisible({ rel: 'causal', conf: 0.5, kind: 'dream' }, f)).toBe(false)
+  })
+
+  it('hides EXACTLY the deselected class; a class arriving AFTER a deselection stays visible', () => {
+    const f = { ...defaultFilters(), structClassesHidden: ['references'] }
+    expect(edgeVisible({ rel: 'references', conf: 1, kind: 'structural' }, f)).toBe(false)
+    // the after-deselection case: duplicate-of loads later — never deselected → visible
+    expect(edgeVisible({ rel: 'duplicate-of', conf: 1, kind: 'structural' }, f)).toBe(true)
+    expect(edgeVisible({ rel: 'brand-new-class', conf: 1, kind: 'structural' }, f)).toBe(true)
+  })
+
+  it('minConfidence exempts structural facts (no confidence dimension, M076)', () => {
+    const f = { ...defaultFilters(), minConfidence: 0.9 }
+    expect(edgeVisible({ rel: 'references', conf: 0, kind: 'structural' }, f)).toBe(true)
+    expect(edgeVisible({ rel: 'topical', conf: 0.5, kind: 'dream' }, f)).toBe(false)
   })
 })
 
@@ -47,20 +64,84 @@ describe('toEgoQuery', () => {
     expect(isDefault(defaultFilters())).toBe(true)
   })
 
-  it('mirrors active filters as ego params', () => {
-    const q = toEgoQuery({
-      categories: ['learnings'],
-      minConfidence: 0.5,
-      linkClasses: ['topical', 'causal'],
-      createdAfter: '2026-01-01',
-      createdBefore: '2026-06-01',
-    })
+  it('mirrors active filters as ego params (unified link_class carries both sides)', () => {
+    const q = toEgoQuery(
+      {
+        categories: ['learnings'],
+        minConfidence: 0.5,
+        linkClasses: ['topical', 'causal'],
+        createdAfter: '2026-01-01',
+        createdBefore: '2026-06-01',
+        structClassesHidden: [],
+      },
+      ['references'],
+    )
     expect(q).toEqual({
       category: ['learnings'],
       min_confidence: 0.5,
-      link_class: ['topical', 'causal'],
+      // GB5 contract: a set link_class partitions BOTH sides, an empty side
+      // matches nothing — the known structural classes ride along.
+      link_class: ['topical', 'causal', 'references'],
       created_after: '2026-01-01T00:00:00Z',
       created_before: '2026-06-01T23:59:59Z',
     })
+  })
+
+  // GC2 server mirror, amended to the GB5 unified-channel contract
+  // ("absent = everything; set = both sides partitioned, empty side matches
+  // NOTHING"). The mirror never sends a one-sided CSV: whenever either side
+  // filters, active dream classes + (known minus hidden) go together.
+  describe('unified link_class derivation (GB5 contract)', () => {
+    const known = ['references', 'duplicate-of']
+
+    it('full default → no param (server delivers everything, unknown classes included)', () => {
+      expect(toEgoQuery(defaultFilters(), known)).toEqual({})
+      expect(toEgoQuery(defaultFilters(), [])).toEqual({})
+    })
+
+    it('structural hidden → dream side rides along untouched', () => {
+      const f = { ...defaultFilters(), structClassesHidden: ['duplicate-of'] }
+      expect(toEgoQuery(f, known)).toEqual({
+        link_class: ['topical', 'factual', 'causal', 'recurrent', 'supersedes', 'references'],
+      })
+    })
+
+    it('dream deselection NEVER drops structural silently — known classes ride along', () => {
+      // The regression the GB5 semantics would cause with a dream-only CSV:
+      // deselecting 'causal' (a dream concern) must not empty the structural
+      // side ("leere Seite matcht nichts").
+      const f = { ...defaultFilters(), linkClasses: ['topical', 'factual', 'recurrent', 'supersedes'] }
+      expect(toEgoQuery(f, known)).toEqual({
+        link_class: ['topical', 'factual', 'recurrent', 'supersedes', 'references', 'duplicate-of'],
+      })
+    })
+
+    it('dream filtered but NO structural class known yet → param suppressed (visibility beats mirror)', () => {
+      // A dream-only CSV before the first structural load would lock ALL
+      // structural classes out of every subsequent fetch.
+      const f = { ...defaultFilters(), linkClasses: ['topical'] }
+      expect(toEgoQuery(f, [])).toEqual({})
+    })
+
+    it('ALL known structural hidden → dream-only CSV is the user intent', () => {
+      const f = { ...defaultFilters(), structClassesHidden: known }
+      expect(toEgoQuery(f, known)).toEqual({
+        link_class: ['topical', 'factual', 'causal', 'recurrent', 'supersedes'],
+      })
+    })
+
+    it('everything deselected on both sides → no param (client reducers hide locally)', () => {
+      const f = { ...defaultFilters(), linkClasses: [], structClassesHidden: known }
+      expect(toEgoQuery(f, known)).toEqual({})
+    })
+
+    it('all dream deselected, structural default → structural-only CSV', () => {
+      const f = { ...defaultFilters(), linkClasses: [] }
+      expect(toEgoQuery(f, known)).toEqual({ link_class: known })
+    })
+  })
+
+  it('isDefault requires an empty blocklist', () => {
+    expect(isDefault({ ...defaultFilters(), structClassesHidden: ['references'] })).toBe(false)
   })
 })

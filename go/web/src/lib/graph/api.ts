@@ -49,6 +49,11 @@ export interface EgoQuery {
   per_node_cap?: number
   limit?: number
   min_confidence?: number
+  /** ONE unified class channel (GB5, User-Direktive „kein neuer Parameter"):
+   *  dream legend ∪ structural registry vocabulary in one CSV. Server
+   *  semantics: absent = everything; set = both sides partitioned, an empty
+   *  side matches NOTHING — toEgoQuery therefore always derives BOTH sides
+   *  together (design 03-§4.3, GC2-amended). */
   link_class?: string[]
   category?: string[]
   created_after?: string

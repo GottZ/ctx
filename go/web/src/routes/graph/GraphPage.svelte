@@ -48,6 +48,9 @@
   // Surface (timing-unabhängig von der WindowManager-Mount-Ordnung).
   let stageEl = $state<HTMLElement>()
   let loadedCategories = $state<string[]>([])
+  // Structural classes loaded in the client (GC2) — panel checkbox source +
+  // toEgoQuery's known set for the unified link_class channel (GB5 contract).
+  let loadedStructClasses = $state<string[]>([])
   // Theme-aware graph colors read once from the CSS tokens (dark fallback if
   // the theme axis hasn't shipped). G1 only seeds merges/Sigma from this; the
   // re-color-on-theme-switch listener is G2 (design 03-§4).
@@ -118,10 +121,15 @@
     nodeCount = graph.order
     edgeCount = graph.size
     let structural = 0
+    const structCls = new Set<string>()
     graph.forEachEdge((_id, attrs) => {
-      if (attrs.kind === 'structural') structural++
+      if (attrs.kind === 'structural') {
+        structural++
+        structCls.add(attrs.rel)
+      }
     })
     structCount = structural
+    loadedStructClasses = [...structCls].sort()
     // GC1 §4.2: struct↔struct-Parallelkanten (references UND duplicate-of auf
     // demselben Paar, PK M076) trennen sich per parallel-index-skalierter
     // Curvature — mit identischem Default rendern sie pixel-identisch
@@ -161,7 +169,7 @@
     busy = true
     error = null
     try {
-      const resp = await fetchEgo(id, { hops: 2, ...toEgoQuery(filters) })
+      const resp = await fetchEgo(id, { hops: 2, ...toEgoQuery(filters, loadedStructClasses) })
       focus = id
       mergeEgo(graph, resp, palette, categoryHues)
       truncated = resp.stats.truncated
@@ -196,7 +204,7 @@
     error = null
     try {
       touch(graph, id)
-      const resp = await fetchEgo(id, { hops: 1, ...toEgoQuery(filters) })
+      const resp = await fetchEgo(id, { hops: 1, ...toEgoQuery(filters, loadedStructClasses) })
       mergeEgo(graph, resp, palette, categoryHues)
       truncated = resp.stats.truncated
       settle()
@@ -293,7 +301,7 @@
           {nodeCount} nodes · {edgeCount} edges{truncated ? ' · server truncated' : ''}
         </span>
       </div>
-      <FilterPanel {filters} categories={loadedCategories} onchange={(next) => (filters = next)} />
+      <FilterPanel {filters} categories={loadedCategories} structClasses={loadedStructClasses} onchange={(next) => (filters = next)} />
     {/if}
   </div>
 

@@ -37,7 +37,7 @@ async function enterFocusStage(page: Page): Promise<void> {
   )
 }
 
-test.describe('structural edges (GA2 interim consumption)', () => {
+test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)', () => {
   test('mount with structural_edges does not throw; edges land kind-tagged', async ({ page }) => {
     const errors = trackPageErrors(page)
     await seedSession(page, { theme: 'dark' })
@@ -114,6 +114,81 @@ test.describe('structural edges (GA2 interim consumption)', () => {
     // negatives Vorzeichen = Gegenbogen, legitim getrennt
     expect(curvatures.every((c) => Number.isFinite(c) && c !== 0)).toBe(true)
     expect(new Set(curvatures).size).toBe(2) // getrennte Geometrien
+  })
+
+  // GC2 (FE-W4): blocklist checkboxes — unchecking hides EXACTLY that class
+  // (reducer level, via the display data), other structural classes stay
+  // visible; re-checking restores. Red before the wave: no structural
+  // checkbox existed in the panel (locator absent).
+  test('structural class checkbox hides exactly that class and restores on re-check (GC2)', async ({ page }) => {
+    await seedSession(page, { theme: 'dark' })
+    await enterFocusStage(page)
+
+    const visibleByClass = () =>
+      page.evaluate(() => {
+        const g = (window as unknown as { __ctxGraph?: CtxGraph }).__ctxGraph!
+        const out: Record<string, boolean[]> = {}
+        for (const e of g.graph.edges()) {
+          if (g.graph.getEdgeAttribute(e, 'kind') !== 'structural') continue
+          const cls = String(g.graph.getEdgeAttribute(e, 'rel'))
+          const dd = g.renderer.getEdgeDisplayData(e)
+          ;(out[cls] ??= []).push(!!dd && dd.hidden !== true)
+        }
+        return out
+      })
+
+    // Das Fokus-Detail-Fenster des Deep-Links überlappt das Panel — schließen,
+    // sonst fängt es den Checkbox-Klick ab (pointer-events-Intercept).
+    const closeBtn = page.getByRole('button', { name: 'close' })
+    if ((await closeBtn.count()) > 0) await closeBtn.first().click()
+
+    const referencesBox = page.locator('label.check', { hasText: 'references' }).locator('input[type=checkbox]')
+    await expect(referencesBox).toBeChecked()
+
+    await referencesBox.uncheck()
+    await expect(referencesBox).not.toBeChecked()
+    const afterHide = await visibleByClass()
+    expect(afterHide['references'].every((v) => v === false)).toBe(true)
+    expect(afterHide['duplicate-of'].every((v) => v === true)).toBe(true) // exakt, nicht pauschal
+
+    await referencesBox.check()
+    await expect(referencesBox).toBeChecked()
+    const afterRestore = await visibleByClass()
+    expect(afterRestore['references'].every((v) => v === true)).toBe(true)
+  })
+
+  // GC2 review carry (GB5 unified channel): deselecting a DREAM class must
+  // not drop structural from the server mirror — the expand request's
+  // link_class carries the loaded structural classes alongside the remaining
+  // dream classes ("leere Seite matcht nichts", handler egoLinkClassPartition).
+  // Red before the fix: the request carried a dream-only CSV.
+  test('dream deselection keeps structural classes in the expand request (GC2/GB5)', async ({ page }) => {
+    await seedSession(page, { theme: 'dark' })
+    await enterFocusStage(page)
+
+    const closeBtn = page.getByRole('button', { name: 'close' })
+    if ((await closeBtn.count()) > 0) await closeBtn.first().click()
+
+    // 'causal' ist eine reine dream-Klasse — mit structural hat sie nichts zu tun.
+    const causalBox = page.locator('label.check', { hasText: 'causal' }).locator('input[type=checkbox]')
+    await causalBox.uncheck()
+
+    const reqPromise = page.waitForRequest((r) => r.url().includes('/api/graph/ego') && r.url().includes('link_class='))
+    await page.evaluate(() => {
+      const g = (window as unknown as { __ctxGraph: { renderer: { emit(ev: string, p: unknown): void } } }).__ctxGraph
+      g.renderer.emit('doubleClickNode', {
+        node: '550e8400-e29b-41d4-a716-446655440001',
+        event: { preventSigmaDefault: () => {} },
+      })
+    })
+    const req = await reqPromise
+    const url = new URL(req.url())
+    const classes = (url.searchParams.get('link_class') ?? '').split(',')
+    expect(classes).toContain('references')
+    expect(classes).toContain('duplicate-of')
+    expect(classes).not.toContain('causal')
+    expect(classes).toContain('topical')
+    expect(url.searchParams.has('struct_class')).toBe(false)
   })
 
   test('structural edges render default-visible (no extra click, no filter change)', async ({ page }) => {

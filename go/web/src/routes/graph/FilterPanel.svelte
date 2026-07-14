@@ -4,19 +4,40 @@
   let {
     filters,
     categories,
+    structClasses = [],
     onchange,
   }: {
     filters: GraphFilters
     /** Categories present in the loaded graph (panel options). */
     categories: string[]
+    /** Structural link classes loaded in the client (GraphPage settle sweep) —
+     *  registry-driven, no hardcoded vocabulary (GC2, design 03-§4.3). */
+    structClasses?: string[]
     /** Always emits a NEW object — the page/view react on reference change. */
     onchange: (next: GraphFilters) => void
   } = $props()
+
+  // Checkbox source = loaded classes ∪ currently hidden — a hidden class must
+  // keep its (unchecked) checkbox even after its last edge left the client,
+  // or the user could never re-enable it (same pattern as the category list).
+  const structClassOptions = $derived(
+    [...new Set([...structClasses, ...filters.structClassesHidden])].sort(),
+  )
 
   function toggleLinkClass(rel: string): void {
     const has = filters.linkClasses.includes(rel)
     const next = has ? filters.linkClasses.filter((r) => r !== rel) : [...filters.linkClasses, rel]
     onchange({ ...filters, linkClasses: next })
+  }
+
+  // Blocklist toggle (GC2): unchecking ADDS to structClassesHidden, checking
+  // removes — no materialization step, no special state.
+  function toggleStructClass(cls: string): void {
+    const hidden = filters.structClassesHidden.includes(cls)
+    const next = hidden
+      ? filters.structClassesHidden.filter((c) => c !== cls)
+      : [...filters.structClassesHidden, cls]
+    onchange({ ...filters, structClassesHidden: next })
   }
 
   function toggleCategory(cat: string): void {
@@ -35,10 +56,23 @@
         {rel}
       </label>
     {/each}
+    <!-- structural sub-block (GC2): same .check interaction pattern, checked =
+         NOT in the blocklist. Options are registry-driven (loaded ∪ hidden) —
+         swatches + a11y texts land with GC3. -->
+    {#each structClassOptions as cls (cls)}
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={!filters.structClassesHidden.includes(cls)}
+          onchange={() => toggleStructClass(cls)}
+        />
+        {cls}
+      </label>
+    {/each}
   </fieldset>
 
   <fieldset>
-    <legend>min confidence</legend>
+    <legend>min confidence (dream)</legend>
     <input
       class="conf"
       type="number"
