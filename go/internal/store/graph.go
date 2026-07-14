@@ -213,6 +213,15 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 	}
 	truncated := false
 
+	// Symmetric class short circuits (design/01 §4.6, W4-G4): a non-nil-EMPTY
+	// class filter means "none of this class" — the leg would bind ANY('{}'),
+	// match nothing, and (worse) leave the M050/M104 early termination dead
+	// while scanning to prefix exhaustion on every hub. Skip the roundtrip.
+	// dreamSkip also covers the legacy `link_class=supersedes` case
+	// (traversalClasses collapses it to non-nil-empty).
+	dreamSkip := p.LinkClasses != nil && len(traversalClasses(p.LinkClasses)) == 0
+	structSkip := p.StructClasses != nil && len(p.StructClasses) == 0
+
 	for hop := 1; hop <= p.Hops; hop++ {
 		if len(frontier) == 0 {
 			break // natural exhaustion — nothing left to expand
@@ -223,11 +232,22 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 			truncated = true
 			break
 		}
-		cands, herr := hopNeighbors(ctx, pool, frontier, readScopes, grantedBlockIDs, visibleTypes, p)
-		if herr != nil {
-			return nil, herr
+		var dreamCands, structCands []hopCandidate
+		if !dreamSkip {
+			var herr error
+			dreamCands, herr = hopNeighbors(ctx, pool, frontier, readScopes, grantedBlockIDs, visibleTypes, p)
+			if herr != nil {
+				return nil, herr
+			}
 		}
-		added, hopTruncated := takeHop(cands, visited, p.Limit-len(nodes), hop)
+		if !structSkip {
+			var serr error
+			structCands, serr = structuralHopNeighbors(ctx, pool, frontier, readScopes, grantedBlockIDs, visibleTypes, p)
+			if serr != nil {
+				return nil, serr
+			}
+		}
+		added, hopTruncated := takeHopMerged(dreamCands, structCands, visited, p.Limit-len(nodes), hop)
 		frontier = make([]string, 0, len(added))
 		for i := range added {
 			nodes = append(nodes, added[i])
@@ -261,26 +281,12 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		truncated = true
 	}
 
-	// Q2s (GB2): structural facts between the ALREADY delivered nodes —
-	// traversal itself stays dream-only until GB3. Go short-circuit on the
-	// §4.6 "none selected" sentinel: a non-nil-EMPTY StructClasses would bind
-	// ANY('{}') and match nothing — skip the roundtrip entirely.
-	var structEdges []StructGraphEdge
-	var structRels, origins []string
-	if p.StructClasses == nil || len(p.StructClasses) != 0 {
-		structRows, structOverflow, err := inducedStructEdges(ctx, pool, ids, p)
-		if err != nil {
-			return nil, err
-		}
-		if structOverflow {
-			truncated = true
-		}
-		var arbTruncated bool
-		edges, structRows, arbTruncated = arbitrateEdgeBudget(edges, structRows, p.EdgeLimit)
-		if arbTruncated {
-			truncated = true
-		}
-		structEdges, structRels, origins = mapStructEdges(structRows, index)
+	edges, structEdges, structRels, origins, structTruncated, err := resolveStructEdges(ctx, pool, ids, index, p, edges)
+	if err != nil {
+		return nil, err
+	}
+	if structTruncated {
+		truncated = true
 	}
 
 	if err := fillDegrees(ctx, pool, ids, readScopes, grantedBlockIDs, visibleTypes, nodes); err != nil {
@@ -305,18 +311,61 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 // visited updated). The second return is true iff a NEW candidate had to be
 // dropped because the budget was exhausted. Pure (no DB) — unit-testable.
 func takeHop(cands []hopCandidate, visited map[string]bool, budget, hop int) ([]GraphNode, bool) {
-	sort.SliceStable(cands, func(i, j int) bool {
-		if cands[i].conf != cands[j].conf {
-			return cands[i].conf > cands[j].conf
+	return takeHopMerged(cands, nil, visited, budget, hop)
+}
+
+// takeHopMerged arbitrates one hop's node budget FAIRLY between the two data
+// classes (E2 zipper, design/01 §4.3): dream candidates re-sort internally by
+// conf DESC / id ASC (the takeHop legacy), the structural list is consumed in
+// SQL order — Q1s' ORDER BY (link_created DESC, neighbor_id) IS the total
+// order, there is deliberately NO Go re-sort (hopCandidate.conf carries no
+// ordering content for structural, constant 1.0). The zipper alternates
+// (dream starts — deterministic convention); a visited skip does not consume
+// the side's turn (a node present in BOTH lists takes ONE budget slot and
+// must not shift fairness); an exhausted side drains the other. Naively
+// sorting structural conf=1.0 into the single takeHop list would push every
+// fact ahead of every dream candidate at the budget cut — the displacement
+// the user request names, moved from the per-node cap to the global budget.
+// truncated turns true as soon as ANY unvisited candidate fails the budget
+// (unchanged semantics). Pure — unit-tested including the zipper fairness
+// and the empty-structural regression anchor (byte-identical to old takeHop).
+func takeHopMerged(dream, structural []hopCandidate, visited map[string]bool, budget, hop int) ([]GraphNode, bool) {
+	sort.SliceStable(dream, func(i, j int) bool {
+		if dream[i].conf != dream[j].conf {
+			return dream[i].conf > dream[j].conf
 		}
-		return cands[i].node.ID < cands[j].node.ID
+		return dream[i].node.ID < dream[j].node.ID
 	})
 
-	out := make([]GraphNode, 0, len(cands))
+	out := make([]GraphNode, 0, len(dream)+len(structural))
 	truncated := false
-	for _, c := range cands {
-		if visited[c.node.ID] {
-			continue
+	var di, si int
+	// next yields the side's first unvisited candidate — skips cost nothing.
+	next := func(list []hopCandidate, i *int) (hopCandidate, bool) {
+		for *i < len(list) {
+			c := list[*i]
+			*i++
+			if !visited[c.node.ID] {
+				return c, true
+			}
+		}
+		return hopCandidate{}, false
+	}
+	dreamTurn := true
+	for {
+		var c hopCandidate
+		var ok bool
+		if dreamTurn {
+			if c, ok = next(dream, &di); !ok {
+				c, ok = next(structural, &si) // drain the other side
+			}
+		} else {
+			if c, ok = next(structural, &si); !ok {
+				c, ok = next(dream, &di)
+			}
+		}
+		if !ok {
+			break // both exhausted
 		}
 		if budget <= 0 {
 			truncated = true
@@ -327,6 +376,7 @@ func takeHop(cands []hopCandidate, visited map[string]bool, budget, hop int) ([]
 		visited[n.ID] = true
 		out = append(out, n)
 		budget--
+		dreamTurn = !dreamTurn
 	}
 	return out, truncated
 }
@@ -609,6 +659,26 @@ LIMIT $4`
 	return edges, false, nil
 }
 
+// resolveStructEdges is the Q2s stage of EgoGraph (GB2): structural facts
+// between the ALREADY delivered nodes, budget-arbitrated against the dream
+// edges (fact precedence with dream floor), index-mapped with post-truncation
+// legends. Go short circuit on the §4.6 "none selected" sentinel: a
+// non-nil-EMPTY StructClasses would bind ANY('{}') and match nothing — skip
+// the roundtrip entirely. Returns the (possibly arbitration-cut) dream edges.
+func resolveStructEdges(ctx context.Context, pool *pgxpool.Pool, ids []string, index map[string]int, p EgoParams, edges []GraphEdge) ([]GraphEdge, []StructGraphEdge, []string, []string, bool, error) {
+	if p.StructClasses != nil && len(p.StructClasses) == 0 {
+		return edges, nil, nil, nil, false, nil
+	}
+	structRows, structOverflow, err := inducedStructEdges(ctx, pool, ids, p)
+	if err != nil {
+		return nil, nil, nil, nil, false, err
+	}
+	var arbTruncated bool
+	edges, structRows, arbTruncated = arbitrateEdgeBudget(edges, structRows, p.EdgeLimit)
+	structEdges, structRels, origins := mapStructEdges(structRows, index)
+	return edges, structEdges, structRels, origins, structOverflow || arbTruncated, nil
+}
+
 // structEdgeRow is one raw Q2s row before index mapping — endpoints as UUIDs,
 // class/origin as names (legends are built AFTER budget arbitration from the
 // delivered rows only, E3 dynamic).
@@ -852,12 +922,13 @@ func normalizeClassFilters(p *EgoParams) {
 // AFTER the focus visibility check; the 404 path writes nothing, so foreign
 // private blocks cannot be telemetrically "bumped" by UUID probing (the
 // manage-get pre-check logging is the anti-pattern F5 deliberately avoids).
-func LogGraphAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID, focus string, hops, limit, nodeCount int) error {
+func LogGraphAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID, focus string, hops, limit, nodeCount, structEdgeCount int) error {
 	meta, err := json.Marshal(map[string]any{
-		"focus":      focus,
-		"hops":       hops,
-		"limit":      limit,
-		"node_count": nodeCount,
+		"focus":             focus,
+		"hops":              hops,
+		"limit":             limit,
+		"node_count":        nodeCount,
+		"struct_edge_count": structEdgeCount, // GB3 telemetry (§4.9) — additive, same bucket
 	})
 	if err != nil {
 		return fmt.Errorf("store: graph access metadata: %w", err)

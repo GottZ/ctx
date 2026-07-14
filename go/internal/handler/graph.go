@@ -171,7 +171,7 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 
 	// Telemetry strictly AFTER the successful visibility check (design §2.7).
 	// Best effort: a failed audit insert must not fail a completed read.
-	if err := store.LogGraphAccess(ctx, h.pool, authResult.ApiKeyID, result.Focus, params.Hops, params.Limit, len(result.Nodes)); err != nil {
+	if err := store.LogGraphAccess(ctx, h.pool, authResult.ApiKeyID, result.Focus, params.Hops, params.Limit, len(result.Nodes), len(result.StructEdges)); err != nil {
 		slog.Error("graph: access log error", "error", err, "request_id", reqID)
 	}
 

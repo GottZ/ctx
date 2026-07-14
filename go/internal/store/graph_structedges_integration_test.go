@@ -50,19 +50,21 @@ func w3Seed(t *testing.T, pool *pgxpool.Pool) {
 			t.Fatalf("insert structural link %s: %v", cls, err)
 		}
 	}
-	// Out-of-set arm: w3Outside is structurally referenced by the report but
-	// has NO dream path — it never enters the node set (Q1s stays unwired
-	// until GB3), so Q2s must never deliver this edge. This row is also the
-	// substrate of the W3-G1 red probe (b): removing one side's $1 node-set
-	// predicate ALONE already goes red — the legend is built before the
-	// defensive index skip, so the leaked row's origin (forge-sync) appears in
-	// Origins and trips the legend assert; neutralizing the skip additionally
-	// makes the tuple itself appear (3 instead of 2). The pre-skip legend
-	// construction is thus deliberately the probe's tripwire — do not "fix" it
-	// without re-proving the probe (GB2 review interlock note).
+	// Out-of-set arm: w3Outside lives in an INVISIBLE foreign scope — it never
+	// enters the node set (since GB3 the traversal follows structural edges,
+	// so mere absence of a dream path no longer keeps a block out; scope
+	// invisibility does, gate GB1/W2-G1), and Q2s must never deliver its edge.
+	// This row is also the substrate of the W3-G1 red probe (b): removing one
+	// side's $1 node-set predicate ALONE already goes red — the legend is
+	// built before the defensive index skip, so the leaked row's origin
+	// (forge-sync) appears in Origins and trips the legend assert;
+	// neutralizing the skip additionally makes the tuple itself appear
+	// (3 instead of 2). The pre-skip legend construction is thus deliberately
+	// the probe's tripwire — do not "fix" it without re-proving the probe
+	// (GB2 review interlock note).
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO context_blocks (id, category, title, content, scope)
-		 VALUES ($1::uuid,'learnings','W3 outside','w3 fixture','private')`, w3Outside); err != nil {
+		 VALUES ($1::uuid,'learnings','W3 outside','w3 fixture','w3foreign')`, w3Outside); err != nil {
 		t.Fatalf("insert outside block: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
