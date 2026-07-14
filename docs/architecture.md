@@ -86,8 +86,8 @@ The **one** structural parent (comment→issue) is not stored here — it lives 
 | Edge consumer | Category | Doctrine | Status |
 |---|---|---|---|
 | Ego graph `/api/graph/ego` | show | dream + structural — only behind the focus visibility check (hydrateFocus pattern, `store/graph.go:173-176`) AND the visibility predicate at the far endpoint | planned (backend waves GB1–GB3; the SPA consumes tolerantly since GA2 — today the store queries dream only) |
-| Overview/Louvain clustering | infer | dream-only | doctrine live (code never read structural); negative gate `overview/structlinks_isolation_integration_test.go` lands with GA4 |
-| RRF graph boost (query-time expansion) | infer | dream-only | doctrine live (code never read structural); negative gate `rrf/structlinks_isolation_integration_test.go` lands with GA5 |
+| Overview/Louvain clustering | infer | dream-only | live, negative-gated (`overview/structlinks_isolation_integration_test.go` — input + aggregate read path, separate red probes) |
+| RRF graph boost (query-time expansion) | infer | dream-only | live, negative-gated (`rrf/structlinks_isolation_integration_test.go` — isolation + cap-displacement assert) |
 | `UpdateQualityScore` (dream loop) | infer (scoring) | dream-only | live |
 | manage dream-review | infer (curation of inferred edges; facts carry no confidence to review) | dream-only | live |
 | Daily-report statistics | count | dream + structural, separate prompt sections; the structural count is scope-filtered | planned (GD2); the existing dream count stays globally aggregated until GD3 |
