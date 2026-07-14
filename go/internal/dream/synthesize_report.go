@@ -61,6 +61,16 @@ type dailyDreamLinkStat struct {
 	Count        int
 }
 
+// dailyStructuralLinkStat aggregates the count for one (link_class, origin)
+// pair of structural links created in the window — the deterministic fact
+// edges (M076/M103), reported SEPARATELY from dream links (strictly separate
+// data classes, architecture.md §Structural links). GD2 (W04-5).
+type dailyStructuralLinkStat struct {
+	LinkClass string
+	Origin    string
+	Count     int
+}
+
 // dailyNewBlock identifies a fresh block (created in the last 24h) by its
 // category and title — sufficient context for the LLM without dragging full
 // content into the synthesis prompt. ID feeds the deterministic report→source
@@ -124,12 +134,21 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
 
+	structLinks, err := fetchDailyStructuralLinks(ctx, pool, scope, from, to)
+	if err != nil {
+		return "", fmt.Errorf("dream: synthesize report: %w", err)
+	}
+
+	// Skip gate DELIBERATELY unchanged (GD2, design/04 §4.3 pt. 3):
+	// structural-only activity (e.g. a forge re-sync touching only references)
+	// produces NO LLM report — a report without content activity would be
+	// noise. The structural section only appears when we report anyway.
 	if len(decisions) == 0 && len(newBlocks) == 0 && len(dreamLinks) == 0 {
 		slog.Info("dream: daily synthesis skipped (no activity)", "scope", scope, "date", date)
 		return "", nil
 	}
 
-	userPrompt := buildDailyPrompt(date, decisions, dreamLinks, newBlocks)
+	userPrompt := buildDailyPrompt(date, decisions, dreamLinks, structLinks, newBlocks)
 
 	dreamVer := int16(Version)
 	entry := &llmlog.Entry{
@@ -214,6 +233,7 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		"scope", scope,
 		"decisions", len(decisions),
 		"dream_links", len(dreamLinks),
+		"structural_links", len(structLinks),
 		"new_blocks", len(newBlocks),
 		"source_links", linkCount,
 	)
@@ -331,8 +351,10 @@ func writeReportSourceLinks(ctx context.Context, pool *pgxpool.Pool, set *blockt
 
 // fetchDailyDreamLinks reports counts per relationship class from
 // context_dream_links produced in the [from, to) window, ordered by frequency.
-// Dream-links are scope-bound on the source block, but the link table itself
-// has no scope column — aggregation is global across scopes for the report.
+// The link table DOES carry a scope column (writelinks.go, dream.go filter on
+// it) — this aggregation is deliberately still global across scopes: a known
+// multi-tenant fidelity seam, see design/04 D04-5 (the scope filter is its
+// own wave, GD3/W04-6, because it changes report numbers AND the skip gate).
 // Backfill fidelity note: created_at is bumped on link replace (WriteLinks
 // upsert), so a historical window counts the links as they stand today.
 func fetchDailyDreamLinks(ctx context.Context, pool *pgxpool.Pool, from, to time.Time) ([]dailyDreamLinkStat, error) {
@@ -359,10 +381,44 @@ func fetchDailyDreamLinks(ctx context.Context, pool *pgxpool.Pool, from, to time
 	return out, rows.Err()
 }
 
+// fetchDailyStructuralLinks reports counts per (link_class, origin) pair from
+// context_structural_links created in the [from, to) window, SCOPE-FILTERED
+// like fetchDailyDecisions/fetchDailyNewBlocks (not like the still-global
+// dream aggregation above — design/04 §5 B1). Runs as an index-only scan on
+// idx_struct_links_scope_created (M106 covering, GD1).
+// Time semantics: the current report's own edges are written AFTER the prompt
+// build and never land in their own window; a follow-up/backfill run's
+// yesterday window counts them correctly. Unlike dream links (created_at
+// bumped on replace) structural rows are insert-only with ON CONFLICT DO
+// NOTHING — the window count is backfill-faithful.
+func fetchDailyStructuralLinks(ctx context.Context, pool *pgxpool.Pool, scope string, from, to time.Time) ([]dailyStructuralLinkStat, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT link_class, origin, COUNT(*)::int FROM context_structural_links
+		 WHERE scope = $1 AND created_at >= $2 AND created_at < $3
+		 GROUP BY 1, 2
+		 ORDER BY COUNT(*) DESC`,
+		scope, from, to,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query structural links: %w", err)
+	}
+	defer rows.Close()
+
+	var out []dailyStructuralLinkStat
+	for rows.Next() {
+		var s dailyStructuralLinkStat
+		if err := rows.Scan(&s.LinkClass, &s.Origin, &s.Count); err != nil {
+			return nil, fmt.Errorf("scan structural link: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // buildDailyPrompt assembles the structured user-prompt block fed to the LLM.
 // Sections are omitted when their slice is empty so the prompt does not
 // suggest that the missing axis was zero by mistake.
-func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []dailyDreamLinkStat, newBlocks []dailyNewBlock) string {
+func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []dailyDreamLinkStat, structLinks []dailyStructuralLinkStat, newBlocks []dailyNewBlock) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Datum: %s\n", date)
 
@@ -377,6 +433,15 @@ func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []d
 		b.WriteString("\nDream-Links 24h:\n")
 		for _, d := range dreamLinks {
 			fmt.Fprintf(&b, "- %s: %d\n", d.Relationship, d.Count)
+		}
+	}
+
+	// Structural facts after the dream section (GD2): the origin split shows
+	// what is pipeline self-description (system) vs sync/operator activity.
+	if len(structLinks) > 0 {
+		b.WriteString("\nStructural-Links 24h:\n")
+		for _, s := range structLinks {
+			fmt.Fprintf(&b, "- %s (%s): %d\n", s.LinkClass, s.Origin, s.Count)
 		}
 	}
 

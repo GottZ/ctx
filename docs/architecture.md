@@ -90,7 +90,7 @@ The **one** structural parent (comment→issue) is not stored here — it lives 
 | RRF graph boost (query-time expansion) | infer | dream-only | live, negative-gated (`rrf/structlinks_isolation_integration_test.go` — isolation + cap-displacement assert) |
 | `UpdateQualityScore` (dream loop) | infer (scoring) | dream-only | live |
 | manage dream-review | infer (curation of inferred edges; facts carry no confidence to review) | dream-only | live |
-| Daily-report statistics | count | dream + structural, separate prompt sections; the structural count is scope-filtered | planned (GD2); the existing dream count stays globally aggregated until GD3 |
+| Daily-report statistics | count | dream + structural, separate prompt sections; the structural count is scope-filtered | built (GD2): `fetchDailyStructuralLinks` rides the M106 covering index, own prompt section `- <class> (<origin>): N`, skip gate deliberately dream-bound; the existing dream count stays globally aggregated until GD3 |
 | Digest/topic map | none (edge-free) | untouched | live |
 | Tenant prune | lifecycle | dream explicit in the delete list (`store/tenant.go:475`), structural via `ON DELETE CASCADE` (`076:35-36`) | live (verified) |
 
