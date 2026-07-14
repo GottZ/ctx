@@ -261,16 +261,41 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		truncated = true
 	}
 
+	// Q2s (GB2): structural facts between the ALREADY delivered nodes —
+	// traversal itself stays dream-only until GB3. Go short-circuit on the
+	// §4.6 "none selected" sentinel: a non-nil-EMPTY StructClasses would bind
+	// ANY('{}') and match nothing — skip the roundtrip entirely.
+	var structEdges []StructGraphEdge
+	var structRels, origins []string
+	if p.StructClasses == nil || len(p.StructClasses) != 0 {
+		structRows, structOverflow, err := inducedStructEdges(ctx, pool, ids, p)
+		if err != nil {
+			return nil, err
+		}
+		if structOverflow {
+			truncated = true
+		}
+		var arbTruncated bool
+		edges, structRows, arbTruncated = arbitrateEdgeBudget(edges, structRows, p.EdgeLimit)
+		if arbTruncated {
+			truncated = true
+		}
+		structEdges, structRels, origins = mapStructEdges(structRows, index)
+	}
+
 	if err := fillDegrees(ctx, pool, ids, readScopes, grantedBlockIDs, visibleTypes, nodes); err != nil {
 		return nil, err
 	}
 
 	return &EgoResult{
-		Focus:     focus.ID,
-		Rels:      GraphRels,
-		Nodes:     nodes,
-		Edges:     edges,
-		Truncated: truncated,
+		Focus:       focus.ID,
+		Rels:        GraphRels,
+		StructRels:  structRels,
+		Origins:     origins,
+		Nodes:       nodes,
+		Edges:       edges,
+		StructEdges: structEdges,
+		Truncated:   truncated,
 	}, nil
 }
 
@@ -582,6 +607,124 @@ LIMIT $4`
 		return edges[:p.EdgeLimit], true, nil
 	}
 	return edges, false, nil
+}
+
+// structEdgeRow is one raw Q2s row before index mapping — endpoints as UUIDs,
+// class/origin as names (legends are built AFTER budget arbitration from the
+// delivered rows only, E3 dynamic).
+type structEdgeRow struct {
+	src, dst, class, origin string
+}
+
+// inducedStructEdges is Q2s: ALL structural edges whose BOTH endpoints are
+// inside the delivered node set. Scope-safe by construction (every endpoint
+// passed the visibility triple — the Q2 invariant, verbatim). No
+// MinConfidence bind (facts are 1.0 by definition and pass every threshold).
+// Parallel classes are correct and wanted: the PK carries link_class, so one
+// pair may deliver references AND duplicate-of as separate tuples — plus a
+// dream edge in Edges (separate arrays). Reads one row beyond the budget so
+// the overflow flag is exact; newest-first (fact precedence order for the
+// arbitration cut).
+func inducedStructEdges(ctx context.Context, pool *pgxpool.Pool, ids []string, p EgoParams) ([]structEdgeRow, bool, error) {
+	const q = `
+SELECT sl.source_block_id::text, sl.target_block_id::text, sl.link_class, sl.origin
+FROM context_structural_links sl
+WHERE sl.source_block_id = ANY($1::uuid[])
+  AND sl.target_block_id = ANY($1::uuid[])
+  AND ($2::text[] IS NULL OR sl.link_class = ANY($2))
+ORDER BY sl.created_at DESC, sl.source_block_id, sl.target_block_id, sl.link_class
+LIMIT $3`
+
+	rows, err := pool.Query(ctx, q,
+		ids,                             // $1
+		displayClasses(p.StructClasses), // $2 nil = all; non-nil-empty = none (§4.6)
+		p.EdgeLimit+1,                   // $3 one extra row → exact overflow flag
+	)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: graph induced struct edges query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []structEdgeRow
+	for rows.Next() {
+		var r structEdgeRow
+		if err := rows.Scan(&r.src, &r.dst, &r.class, &r.origin); err != nil {
+			return nil, false, fmt.Errorf("store: graph induced struct edges scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("store: graph induced struct edges rows: %w", err)
+	}
+	if len(out) > p.EdgeLimit {
+		return out[:p.EdgeLimit], true, nil
+	}
+	return out, false, nil
+}
+
+// arbitrateEdgeBudget shares ONE EdgeLimit between both edge classes: fact
+// precedence WITH a dream floor (design/01 §4.5 — the edge analogue of the E2
+// zipper, coarser but starvation-free in both directions). If both lists fit,
+// everything ships. Otherwise dream keeps min(|D|, EdgeLimit/2) slots (its
+// list is conf-DESC, the cut hits the weakest edges by definition), structural
+// takes min(|S|, EdgeLimit−floor) in newest-first order, dream fills the rest.
+// Degenerates correctly: little dream → the unused floor flows to structural
+// via min; empty structural → byte-identical to the pre-GB2 behavior. Pure —
+// unit-tested including the degeneration arm (red against a floorless cut).
+func arbitrateEdgeBudget(dream []GraphEdge, structRows []structEdgeRow, edgeLimit int) ([]GraphEdge, []structEdgeRow, bool) {
+	if len(dream)+len(structRows) <= edgeLimit {
+		return dream, structRows, false
+	}
+	dreamFloor := min(len(dream), edgeLimit/2)
+	structSlots := min(len(structRows), edgeLimit-dreamFloor)
+	dreamSlots := edgeLimit - structSlots
+	return dream[:dreamSlots], structRows[:structSlots], true
+}
+
+// mapStructEdges resolves raw Q2s rows into wire tuples: legends are the
+// sorted distinct class/origin sets of the DELIVERED rows (built after
+// truncation — a legend must never describe an edge the response dropped),
+// endpoints resolve through the node index (out-of-set endpoints cannot occur
+// by the ANY(ids) predicate; skipped defensively like Q2).
+func mapStructEdges(rows []structEdgeRow, index map[string]int) ([]StructGraphEdge, []string, []string) {
+	if len(rows) == 0 {
+		return nil, nil, nil
+	}
+	classSet := map[string]bool{}
+	originSet := map[string]bool{}
+	for _, r := range rows {
+		classSet[r.class] = true
+		originSet[r.origin] = true
+	}
+	classes := make([]string, 0, len(classSet))
+	for c := range classSet {
+		classes = append(classes, c)
+	}
+	sort.Strings(classes)
+	origins := make([]string, 0, len(originSet))
+	for o := range originSet {
+		origins = append(origins, o)
+	}
+	sort.Strings(origins)
+	classIdx := make(map[string]int, len(classes))
+	for i, c := range classes {
+		classIdx[c] = i
+	}
+	originIdx := make(map[string]int, len(origins))
+	for i, o := range origins {
+		originIdx[o] = i
+	}
+
+	edges := make([]StructGraphEdge, 0, len(rows))
+	for _, r := range rows {
+		si, sok := index[r.src]
+		di, dok := index[r.dst]
+		if !sok || !dok {
+			continue
+		}
+		edges = append(edges, StructGraphEdge{Src: si, Dst: di, Class: classIdx[r.class], Origin: originIdx[r.origin]})
+	}
+	return edges, classes, origins
 }
 
 // fillDegrees is Q3: the visible degree per node, batched, double-budgeted.
