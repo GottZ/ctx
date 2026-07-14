@@ -200,7 +200,7 @@ GET /api/graph/ego?block=<uuid>&hops=2&per_node_cap=25&limit=500
 | `hops` | 1 | 1–3 | BFS depth |
 | `per_node_cap` | 25 | 1–100 | top-N edges per frontier node by `raw_confidence` — slots count only visible, filter-passing edges |
 | `limit` | 500 | 1–1500 | total node budget (truncation: closer hop wins, then higher confidence, then id) — ceiling set by the G39 1M benchmark (p95 < 500ms) |
-| `min_confidence` | 0 | 0–1 | gate on weighted confidence (traversal + displayed edges) |
+| `min_confidence` | 0 | 0–1 | gates dream edges only (traversal + display); structural facts are 1.0 by definition and always pass (GD4) |
 | `link_class` | all classes | dream five + registry structural classes (e.g. `references`, `duplicate-of`) | ONE parameter over both vocabularies (GB5): the CSV partitions by data class — `link_class=references` shows only that fact class, `link_class=topical` only that dream class; absent = everything. `supersedes` is display-only, never traversed; unknown class → 400 naming the full vocabulary |
 | `category` | all | CSV | filter on neighbor blocks (focus always included) |
 | `created_after` / `created_before` | open | RFC3339 | window on neighbor `created_at` |

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -604,19 +605,104 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	)
 
 	b := &Block{}
-	err := pool.QueryRow(ctx, query, args...).Scan(
+	// Scope moves run the update + link sweep in ONE transaction (GD5/K8):
+	// the link tables' row-scope invariant (both endpoints + row in the same
+	// scope) would otherwise break post-hoc. Non-scope updates keep the plain
+	// single-query path.
+	if data.Scope == nil {
+		err := pool.QueryRow(ctx, query, args...).Scan(
+			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
+			&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("store: update block: %w", err)
+		}
+		needsReEmbed := contentChanged || data.Title != nil
+		return b, needsReEmbed, nil
+	}
+
+	ok, err := updateBlockScopeMove(ctx, pool, b, id, query, args)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	needsReEmbed := contentChanged || data.Title != nil
+	return b, needsReEmbed, nil
+}
+
+// updateBlockScopeMove runs a scope-carrying block update as ONE transaction:
+// the UPDATE…RETURNING scan into b plus the GD5 link sweep. Returns ok=false
+// (no error) when the block was not found in the caller's write scopes —
+// mirroring the ErrNoRows contract of the plain path.
+func updateBlockScopeMove(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any) (bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("store: update block: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	err = tx.QueryRow(ctx, query, args...).Scan(
 		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("store: update block: %w", err)
+		return false, fmt.Errorf("store: update block: %w", err)
 	}
 
-	needsReEmbed := contentChanged || data.Title != nil
-	return b, needsReEmbed, nil
+	swept, err := sweepScopeMoveLinks(ctx, tx, id, b.Scope)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("store: update block: commit: %w", err)
+	}
+	if swept > 0 {
+		slog.Info("store: scope move swept divergent links", "block_id", id, "new_scope", b.Scope, "links_deleted", swept)
+	}
+	return true, nil
+}
+
+// sweepScopeMoveLinks restores the link tables' row-scope invariant after a
+// block scope move (GD5/K8; design at build time — sweep over update-gate,
+// which would block practically every move): per link table, links whose far
+// endpoint already lives in the target scope FOLLOW (row.scope update — also
+// heals raw-injected legacy rows, the K8 audit case); links whose far
+// endpoint stays behind are DELETED. Dream links regenerate through the dream
+// cycle; a structural link with scope-divergent endpoints could never be
+// re-written under the write invariant, so keeping the row would be dead,
+// wrongly-scoped ballast the read paths must filter forever. Returns the
+// number of deleted rows.
+func sweepScopeMoveLinks(ctx context.Context, tx pgx.Tx, id, newScope string) (int, error) {
+	swept := 0
+	for _, table := range []string{"context_dream_links", "context_structural_links"} {
+		if _, err := tx.Exec(ctx, `
+			UPDATE `+table+` l SET scope = $2
+			WHERE (l.source_block_id = $1 OR l.target_block_id = $1)
+			  AND (SELECT cb.scope FROM context_blocks cb
+			       WHERE cb.id = CASE WHEN l.source_block_id = $1 THEN l.target_block_id ELSE l.source_block_id END) = $2`,
+			id, newScope); err != nil {
+			return 0, fmt.Errorf("store: update block: move %s: %w", table, err)
+		}
+		tag, err := tx.Exec(ctx, `
+			DELETE FROM `+table+` l
+			WHERE (l.source_block_id = $1 OR l.target_block_id = $1)
+			  AND (SELECT cb.scope FROM context_blocks cb
+			       WHERE cb.id = CASE WHEN l.source_block_id = $1 THEN l.target_block_id ELSE l.source_block_id END) IS DISTINCT FROM $2`,
+			id, newScope)
+		if err != nil {
+			return 0, fmt.Errorf("store: update block: sweep %s: %w", table, err)
+		}
+		swept += int(tag.RowsAffected())
+	}
+	return swept, nil
 }
 
 // SearchCursor is the keyset-pagination position for the empty-query
