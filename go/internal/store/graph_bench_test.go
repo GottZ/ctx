@@ -194,6 +194,51 @@ func TestGraphBench1M(t *testing.T) {
 		}
 	}
 
+	// --- W5-G2 (plan graph-structural 2026-07-14): the 4-leg-Q3/zipper rerun
+	// against the 10^5 structural corpus (seed-05). Gate: p95 < 500ms at
+	// limit 1500 on all three arms (design/01 §6.2/§6.3); pre-decided escape
+	// routes on red: structural DegreeScanBudget 500 (Q3) / §6.2 second index
+	// (class filter) — never an improvised limit-ceiling debate.
+	{
+		p := EgoParams{Focus: focusQ2, Hops: 3, PerNodeCap: 100, Limit: 1500, EdgeLimit: 20000}
+		var last *EgoResult
+		p50, p95, mx := benchMeasure(t, 50, 3, func() error {
+			r, err := EgoGraph(context.Background(), pool, p, []string{"private"}, nil, benchVisibleTypes)
+			last = r
+			return err
+		})
+		results = append(results, result{"5 W5-G2 worst-case + structural (zipper, 4-leg Q3)", p50, p95, mx, 500 * time.Millisecond,
+			fmt.Sprintf("nodes=%d edges=%d struct=%d trunc=%v", len(last.Nodes), len(last.Edges), len(last.StructEdges), last.Truncated)})
+		if len(last.StructEdges) == 0 {
+			t.Errorf("Arm5 delivered no structural edges — zipper not exercised (seed-05 loaded? FOCUS-Q2→HUB-SL-DUP link present?)")
+		}
+	}
+	{
+		hubCLS := benchHubID(t, pool, "HUB-SL-CLS")
+		p := EgoParams{Focus: hubCLS, Hops: 3, PerNodeCap: 100, Limit: 1500, EdgeLimit: 20000,
+			StructClasses: []string{"duplicate-of"}}
+		var last *EgoResult
+		p50, p95, mx := benchMeasure(t, 50, 3, func() error {
+			r, err := EgoGraph(context.Background(), pool, p, []string{"private"}, nil, benchVisibleTypes)
+			last = r
+			return err
+		})
+		results = append(results, result{"6 W5-G2 class-filter hub (10k refs skip, §6.2a)", p50, p95, mx, 500 * time.Millisecond,
+			fmt.Sprintf("nodes=%d struct=%d", len(last.Nodes), len(last.StructEdges))})
+	}
+	{
+		hubVP := benchHubID(t, pool, "HUB-SL-VP")
+		p := EgoParams{Focus: hubVP, Hops: 3, PerNodeCap: 100, Limit: 1500, EdgeLimit: 20000}
+		var last *EgoResult
+		p50, p95, mx := benchMeasure(t, 50, 3, func() error {
+			r, err := EgoGraph(context.Background(), pool, p, []string{"private"}, nil, benchVisibleTypes)
+			last = r
+			return err
+		})
+		results = append(results, result{"7 W5-G2 visible-poor hub (9.9k invisible, §6.2b)", p50, p95, mx, 500 * time.Millisecond,
+			fmt.Sprintf("nodes=%d struct=%d", len(last.Nodes), len(last.StructEdges))})
+	}
+
 	// --- Report ---
 	t.Logf("=== G39 / F5-W5 — ego latency on ~1M nodes / ~3.2M edges (warm, readScopes=[private]) ===")
 	t.Logf("%-50s %9s %9s %9s %8s  %-4s  %s", "arm", "p50", "p95", "max", "thr", "stat", "detail")
