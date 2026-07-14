@@ -418,6 +418,117 @@ ORDER BY h.confidence DESC, h.neighbor_id`, vis, vis)
 	return cands, nil
 }
 
+// structuralHopSQL is the Q1s query text, factored out so the W2-G3 EXPLAIN
+// gate proves the plan of EXACTLY the shipped SQL (no test-local copy drift).
+func structuralHopSQL() string {
+	// $8 = grantedBlockIDs, $9 = visibleTypes — same predicate discipline as Q1.
+	vis := VisibilityPredicate("b", "$9", "$2", "$8")
+	return fmt.Sprintf(`
+WITH hop AS (
+    SELECT DISTINCT ON (e.neighbor_id)
+           e.neighbor_id, e.link_created, e.title, e.category, e.scope, e.created_at
+    FROM unnest($1::uuid[]) AS f(seed_id)
+    CROSS JOIN LATERAL (
+        (SELECT sl.target_block_id AS neighbor_id, sl.created_at AS link_created,
+                left(b.title, 120) AS title, b.category, b.scope::text AS scope, b.created_at
+         FROM context_structural_links sl
+         JOIN context_blocks b ON b.id = sl.target_block_id
+         WHERE sl.source_block_id = f.seed_id
+           AND ($3::text[] IS NULL OR sl.link_class = ANY($3))
+           AND %s
+           AND ($5::text[] IS NULL OR b.category = ANY($5))
+           AND ($6::timestamptz IS NULL OR b.created_at >= $6)
+           AND ($7::timestamptz IS NULL OR b.created_at <  $7)
+         ORDER BY sl.created_at DESC
+         LIMIT $4)
+        UNION ALL
+        (SELECT sl.source_block_id, sl.created_at,
+                left(b.title, 120), b.category, b.scope::text, b.created_at
+         FROM context_structural_links sl
+         JOIN context_blocks b ON b.id = sl.source_block_id
+         WHERE sl.target_block_id = f.seed_id
+           AND ($3::text[] IS NULL OR sl.link_class = ANY($3))
+           AND %s
+           AND ($5::text[] IS NULL OR b.category = ANY($5))
+           AND ($6::timestamptz IS NULL OR b.created_at >= $6)
+           AND ($7::timestamptz IS NULL OR b.created_at <  $7)
+         ORDER BY sl.created_at DESC
+         LIMIT $4)
+        ORDER BY link_created DESC
+        LIMIT $4
+    ) e
+    ORDER BY e.neighbor_id, e.link_created DESC
+)
+SELECT h.neighbor_id::text, h.link_created, h.title, h.category, h.scope, h.created_at
+FROM hop h
+ORDER BY h.link_created DESC, h.neighbor_id`, vis, vis)
+}
+
+// structuralHopNeighbors is Q1s: ONE batched hop over the frontier on
+// context_structural_links — the structural sibling of hopNeighbors (Q1),
+// UNWIRED until the traversal-merge wave (GB3). Ordering key is created_at
+// DESC ("newest reference first", E5) — structural links carry no confidence
+// (1.0 by definition, 076), so there is deliberately NO MinConfidence bind:
+// for every valid threshold in [0,1], 1.0 passes — omitting the gate IS the
+// semantics, not a special case. All neighbor-side predicates (class filter
+// $3 = displayClasses(StructClasses), visibility triple, category, created
+// window) sit INSIDE the LATERAL legs BEFORE the per-node LIMIT — identical
+// anti-starvation / no-counting-channel discipline as Q1: an invisible edge
+// never consumes a cap slot. PerNodeCap is SHARED as a value but a SEPARATE
+// slot pool (E10): up to cap dream candidates (Q1) plus up to cap structural
+// candidates (Q1s) per frontier node; the global node budget arbitrates in Go
+// (GB3). DISTINCT ON keeps each neighbor once with its newest edge; the
+// returned slice is newest-first — order carries the ranking (conf is a
+// constant 1), the GB3 merge consumes it positionally.
+//
+// Fail-closed entry is SELF-CONTAINED (RequireScopes + visible-types check +
+// grant normalization live HERE, parity with StructuralNeighbors): the SQL
+// alone would return an EMPTY graph on empty scopes/types — a silent mask of
+// a wiring bug, exactly what the EgoGraph entry refuses loudly.
+func structuralHopNeighbors(ctx context.Context, pool *pgxpool.Pool,
+	frontier, readScopes, grantedBlockIDs, visibleTypes []string, p EgoParams) ([]hopCandidate, error) {
+	if err := RequireScopes(readScopes); err != nil {
+		return nil, err
+	}
+	if len(visibleTypes) == 0 {
+		return nil, errors.New("store: empty visible-types allowlist (block-type registry not wired?)")
+	}
+	if grantedBlockIDs == nil {
+		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
+	}
+
+	rows, err := pool.Query(ctx, structuralHopSQL(),
+		frontier,                        // $1
+		readScopes,                      // $2
+		displayClasses(p.StructClasses), // $3 nil = all classes; non-nil-empty = none (§4.6)
+		p.PerNodeCap,                    // $4 shared value, separate slot pool (E10)
+		nilIfEmpty(p.Categories),        // $5
+		p.CreatedAfter,                  // $6
+		p.CreatedBefore,                 // $7
+		grantedBlockIDs,                 // $8 block-grant OR-arm
+		visibleTypes,                    // $9 registry type allowlist
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: graph structural hop query: %w", err)
+	}
+	defer rows.Close()
+
+	var cands []hopCandidate
+	for rows.Next() {
+		var c hopCandidate
+		var linkCreated time.Time // ordering key only — position in the slice carries it
+		if err := rows.Scan(&c.node.ID, &linkCreated, &c.node.Title, &c.node.Category, &c.node.Scope, &c.node.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: graph structural hop scan: %w", err)
+		}
+		c.conf = 1 // facts are 1.0 by definition (076)
+		cands = append(cands, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: graph structural hop rows: %w", err)
+	}
+	return cands, nil
+}
+
 // inducedEdges is Q2: ALL edges whose BOTH endpoints are inside the delivered
 // node set — including supersedes (display-only; rendered dashed client-side).
 // Scope safety holds by construction: every endpoint already passed the
