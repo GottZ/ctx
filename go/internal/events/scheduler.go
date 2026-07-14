@@ -685,8 +685,8 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 		// boot copy. The LLM call chains over the pool's digest role (G28) —
 		// num_ctx comes from the serving backend's row, so every chat-model
 		// call site that resolves onto the same row shares the single runner
-		// (distinct num_ctx → extra 27B runner → VRAM OOM).
-		dreamOpts := dream.DreamOptions()
+		// (distinct num_ctx → extra 27B runner → VRAM OOM). Sampling options
+		// live in the pipeline (dream.dailySynthesisOptions).
 
 		// Welle 45: hygiene pass before synthesis — remove dream_links pointing
 		// to or from archived blocks. Scope-blind + cheap DELETE, runs once per
@@ -711,7 +711,7 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 
 			slog.Info("scheduler: daily synthesis started", "scope", scope)
 
-			blockID, err := dream.GenerateDailyReport(ctx, s.pool, router, dreamOpts, scope)
+			blockID, err := dream.GenerateDailyReport(ctx, s.pool, router, scope)
 			if err != nil {
 				slog.Error("scheduler: daily synthesis failed", "error", err, "scope", scope)
 				continue

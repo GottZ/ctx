@@ -128,7 +128,7 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		Blocktypes: h.blocktypes,
 	}
 
-	blockID, err := dream.GenerateDailyReport(ctx, h.pool, router, dream.DreamOptions(), scope)
+	blockID, err := dream.GenerateDailyReport(ctx, h.pool, router, scope)
 	if err != nil {
 		if dispatch.IsRejection(err) {
 			// Dispatcher capacity rejection (design/03 §4.5.2 daily row): 429

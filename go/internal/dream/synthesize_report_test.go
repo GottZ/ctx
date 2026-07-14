@@ -110,7 +110,12 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 	seedDecisionRows(t, pool, reportScope)
 	seedSynthesisBlock(t, pool, reportScope)
 
-	mockChatJSONExternal(t, func(_ context.Context, _, _, _ string, _ *bool, _, _ string, _ llm.Options, _ time.Duration) (*llm.ChatResponse, error) {
+	mockChatJSONExternal(t, func(_ context.Context, _, _, _ string, _ *bool, _, _ string, opts llm.Options, _ time.Duration) (*llm.ChatResponse, error) {
+		// Report length is EOS-terminated: a NumPredict cap on the synthesis
+		// call truncated every report mid-sentence (66× completion_tokens=400).
+		if opts.NumPredict != 0 {
+			t.Errorf("daily synthesis must not cap NumPredict, got %d", opts.NumPredict)
+		}
 		return &llm.ChatResponse{
 			Message:      llm.Message{Role: "assistant", Content: "Tagesbericht-content. Test fix: dream-link 52, clean 5, neue blocks 5."},
 			EvalCount:    100,
@@ -118,7 +123,7 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 		}, nil
 	})
 
-	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), llm.Options{}, reportScope)
+	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), reportScope)
 	if err != nil {
 		t.Fatalf("generate report: %v", err)
 	}
@@ -161,7 +166,7 @@ func TestGenerateDailyReport_NoActivity(t *testing.T) {
 		return nil, nil
 	})
 
-	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), llm.Options{}, reportScope)
+	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), reportScope)
 	if err != nil {
 		t.Fatalf("expected nil error on empty activity, got %v", err)
 	}
@@ -193,7 +198,7 @@ func TestGenerateDailyReport_LLMError(t *testing.T) {
 		return nil, errors.New("ollama exploded")
 	})
 
-	_, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), llm.Options{}, reportScope)
+	_, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), reportScope)
 	if err == nil {
 		t.Fatal("want wrapped error, got nil")
 	}
