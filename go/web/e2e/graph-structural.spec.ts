@@ -215,6 +215,121 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
     await expect(page.locator('.hint')).toContainText('curved arrow = reference')
   })
 
+  // GC4 (FE-W6): the detail window carries a "structural links" section —
+  // direction glyph + far-node button (focus path) + class/origin badges.
+  // Red before the wave: section locator absent.
+  test('window shows the structural links section with origin badge; click focuses (GC4)', async ({ page }) => {
+    await seedSession(page, { theme: 'dark' })
+    await enterFocusStage(page)
+
+    const win = page.getByRole('dialog').first()
+    await expect(win).toBeVisible()
+    const section = win.locator('section[aria-label="structural links"]')
+    await expect(section).toBeVisible()
+    // focus node 0 carries 3 outbound structural edges (2× references + 1× duplicate-of)
+    await expect(section.locator('li:not(.more)')).toHaveCount(3)
+    await expect(section.locator('code.origin').first()).toHaveText('system')
+    await expect(section.locator('li', { hasText: 'duplicate-of' })).toHaveCount(1)
+
+    // click a far-node button → focus jumps there (same setFocus path)
+    await section.locator('button', { hasText: 'Findings' }).first().click()
+    await expect(page.locator('code.focus')).toContainText('550e8400-e29b-41d4-a716-446655440003')
+  })
+
+  // GC4 invalidation gate: the graphology instance is deliberately non-reactive
+  // — a pure $derived over the graph would freeze the list at window-mount.
+  // graphRev (incremented in settle()) re-evaluates it after every merge.
+  // Red against the graphRev-less variant (mutation probe, documented in the
+  // commit body); the fixture route below serves GROWN structural edges on the
+  // second ego call, so the open window's list must grow after Expand.
+  test('structural links list grows after expand while the window stays open (GC4)', async ({ page }) => {
+    await seedSession(page, { theme: 'dark' })
+    // Second-call override: same fixture + one extra node/edge from call 2 on.
+    let egoCalls = 0
+    await page.route('**/api/graph/ego**', async (route) => {
+      egoCalls++
+      const base = {
+        success: true,
+        focus: FOCUS,
+        params: { hops: 2 },
+        rels: ['references', 'links_to', 'supersedes'],
+        nodes: [
+          { id: '550e8400-e29b-41d4-a716-446655440001', title: 'Architecture', category: 'design', scope: 'home', degree: 5, hop: 0, created_at: '2026-06-01T08:00:00Z' },
+          { id: '550e8400-e29b-41d4-a716-446655440002', title: 'API Spec', category: 'reference', scope: 'home', degree: 2, hop: 1, created_at: '2026-06-02T09:30:00Z' },
+          { id: '550e8400-e29b-41d4-a716-446655440003', title: 'Findings', category: 'learnings', scope: 'home', degree: 1, hop: 1, created_at: '2026-06-03T10:15:00Z' },
+        ],
+        edges: [
+          [0, 1, 0, 0.95],
+          [0, 2, 1, 0.87],
+        ],
+        struct_rels: ['references', 'duplicate-of'],
+        origins: ['system'],
+        structural_edges: [
+          [0, 1, 0, 0],
+          [0, 2, 0, 0],
+          [0, 1, 1, 0],
+        ],
+        stats: { nodes: 3, edges: 2, structural_edges: 3, truncated: false, elapsed_ms: 28 },
+      }
+      if (egoCalls >= 2) {
+        base.nodes.push({ id: '550e8400-e29b-41d4-a716-446655440004', title: 'Late Issue', category: 'projects', scope: 'home', degree: 1, hop: 1, created_at: '2026-06-04T10:15:00Z' })
+        base.structural_edges.push([0, 3, 0, 0])
+        base.stats.structural_edges = 4
+      }
+      await route.fulfill({ json: base })
+    })
+    await enterFocusStage(page)
+
+    const win = page.getByRole('dialog').first()
+    const section = win.locator('section[aria-label="structural links"]')
+    await expect(section.locator('li:not(.more)')).toHaveCount(3)
+
+    await win.getByRole('button', { name: 'Expand' }).click()
+    await expect(section.locator('li:not(.more)')).toHaveCount(4)
+    await expect(section.locator('button', { hasText: 'Late Issue' })).toBeVisible()
+  })
+
+  // GC4 negative path: a node with NO structural incidences and NO unloaded-
+  // degree badge renders NO section at all ("keine Referenzen" must stay
+  // distinguishable from "nicht geladen"). Mutation-probed: an unconditional
+  // section render fails this pin.
+  test('window of a node without structural links and without badge shows no section (GC4)', async ({ page }) => {
+    await seedSession(page, { theme: 'dark' })
+    await page.route('**/api/graph/ego**', async (route) => {
+      await route.fulfill({
+        json: {
+          success: true,
+          focus: FOCUS,
+          params: { hops: 2 },
+          rels: ['references', 'links_to', 'supersedes'],
+          nodes: [
+            { id: FOCUS, title: 'Architecture', category: 'design', scope: 'home', degree: 1, hop: 0, created_at: '2026-06-01T08:00:00Z' },
+            { id: '550e8400-e29b-41d4-a716-446655440002', title: 'API Spec', category: 'reference', scope: 'home', degree: 1, hop: 1, created_at: '2026-06-02T09:30:00Z' },
+          ],
+          edges: [[0, 1, 0, 0.95]],
+          struct_rels: [],
+          origins: [],
+          structural_edges: [],
+          stats: { nodes: 2, edges: 1, structural_edges: 0, truncated: false, elapsed_ms: 5 },
+        },
+      })
+    })
+    await gotoArea(page, `/graph?focus=${FOCUS}`)
+    await page.waitForFunction(
+      () => {
+        const g = (window as unknown as { __ctxGraph?: CtxGraph }).__ctxGraph
+        return !!g && g.graph.edges().length >= 1
+      },
+      null,
+      { timeout: 10_000 },
+    )
+
+    const win = page.getByRole('dialog').first()
+    await expect(win).toBeVisible()
+    // degree 1 == loadedDeg 1 → badge null; 0 structural → section absent
+    await expect(win.locator('section[aria-label="structural links"]')).toHaveCount(0)
+  })
+
   // GC3 axe gate on the FOCUS stage: the registry contract for /graph only
   // mounts the overview (cluster map) — the filter panel (legend swatches,
   // structural checkboxes) never enters that DOM. These free @a11y tests run

@@ -13,6 +13,7 @@
   let {
     id,
     graph,
+    graphRev = 0,
     onfocus,
     onexpand,
     headerActions,
@@ -20,6 +21,11 @@
   }: {
     id: string
     graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>
+    /** Merge revision (GC4, design 03-§4.5): the graph instance is non-reactive
+     *  and `id` is window-constant — graph-sourced deriveds below read THIS so
+     *  an expand() re-evaluates them (a pure $derived would freeze at mount).
+     *  Optional: non-graph hosts simply never bump it. */
+    graphRev?: number
     onfocus: (id: string) => void
     onexpand: (id: string) => void
     /** Host-supplied chrome actions rendered in the header (e.g. close/minimize). */
@@ -30,9 +36,61 @@
 
   // Metadata straight from the loaded attrs; full content arrives lazily
   // through the existing scope-checked manage-get (design 05-§3.1) — the
-  // graph payload itself never carries content.
-  const attrs = $derived(graph.hasNode(id) ? graph.getNodeAttributes(id) : null)
+  // graph payload itself never carries content. graphRev repairs the
+  // previously stale degree/badge line after an expand (GC4 side effect).
+  const attrs = $derived.by(() => {
+    void graphRev
+    return graph.hasNode(id) ? graph.getNodeAttributes(id) : null
+  })
   const badge = $derived(attrs === null ? null : remainingDegree(attrs))
+
+  interface StructLink {
+    key: string
+    outbound: boolean
+    farId: string
+    farLabel: string
+    linkClass: string
+    origin?: string
+  }
+
+  // Loaded structural incidences of this node, straight from the multigraph
+  // (client-side only, no endpoint; design 03-§4.5). Far labels come from node
+  // attrs — server-side visibility-checked and title-capped already.
+  const structLinks = $derived.by<StructLink[]>(() => {
+    void graphRev // invalidation source — see the prop doc above (mutation-probed)
+    if (!graph.hasNode(id)) return []
+    const out: StructLink[] = []
+    graph.forEachOutEdge(id, (key, eattrs, _src, target) => {
+      if (eattrs.kind !== 'structural') return
+      out.push({
+        key,
+        outbound: true,
+        farId: target,
+        farLabel: graph.getNodeAttribute(target, 'label'),
+        linkClass: eattrs.rel,
+        origin: eattrs.origin,
+      })
+    })
+    graph.forEachInEdge(id, (key, eattrs, source) => {
+      if (eattrs.kind !== 'structural') return
+      out.push({
+        key,
+        outbound: false,
+        farId: source,
+        farLabel: graph.getNodeAttribute(source, 'label'),
+        linkClass: eattrs.rel,
+        origin: eattrs.origin,
+      })
+    })
+    // Stable order: outbound first, then label, then class (deterministic
+    // across re-merges — edge iteration order is insertion-dependent).
+    return out.sort(
+      (a, b) =>
+        Number(b.outbound) - Number(a.outbound) ||
+        a.farLabel.localeCompare(b.farLabel) ||
+        a.linkClass.localeCompare(b.linkClass),
+    )
+  })
 
   let pinned = $state(false)
   let detail = $state<BlockDetail | null>(null)
@@ -41,7 +99,10 @@
 
   // Effect 1: nur der attrs→pinned-Sync. Getrennt vom Load, damit eine
   // Invalidierung (WinState-.map bei focus/move/resize/restore) diesen billigen
-  // Sync auslösen darf, ohne den Content-Load anzustoßen.
+  // Sync auslösen darf, ohne den Content-Load anzustoßen. Seit GC4 feuert er
+  // zusätzlich bei jedem graphRev-Bump (attrs re-deriviert nach JEDEM settle,
+  // auch fremder Nodes) — harmlos: togglePin schreibt das Graph-Attribut
+  // synchron, der Resync trifft denselben Wert.
   $effect(() => {
     pinned = attrs?.pinned ?? false
   })
@@ -113,6 +174,34 @@
         {/if}
       {/if}
     </dl>
+  {/if}
+
+  {#if structLinks.length > 0 || badge !== null}
+    <!-- GC4 (design 03-§4.5): the textual truth of the canvas arrows — loaded
+         structural facts as a navigable list (class-neutral heading: it spans
+         ALL registry classes, not just references). The incompleteness hint is
+         a documented approximation: the server degree is kind-agnostic, so it
+         may show although only dream links are unloaded. -->
+    <section class="struct" aria-label="structural links">
+      <h3>structural links</h3>
+      <ul>
+        {#each structLinks.slice(0, 50) as l (l.key)}
+          <li>
+            <span aria-hidden="true">{l.outbound ? '→' : '←'}</span>
+            <span class="sr-only">{l.outbound ? 'references' : 'referenced by'}</span>
+            <button type="button" onclick={() => onfocus(l.farId)}>{l.farLabel}</button>
+            <code>{l.linkClass}</code>
+            {#if l.origin}<code class="origin">{l.origin}</code>{/if}
+          </li>
+        {/each}
+        {#if structLinks.length > 50}
+          <li class="more">… {structLinks.length - 50} more (expand to load)</li>
+        {/if}
+        {#if badge !== null}
+          <li class="more">may be incomplete — expand to load</li>
+        {/if}
+      </ul>
+    </section>
   {/if}
 
   <div class="actions">
@@ -209,6 +298,65 @@
   .actions button.pinned {
     border-color: var(--accent);
     color: var(--accent);
+  }
+
+  /* GC4: structural-links section — mono list, tight rhythm. */
+  .struct h3 {
+    margin: 0 0 var(--space-1);
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+    font-weight: var(--fw-semibold);
+    color: var(--text-faint);
+  }
+  .struct ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: var(--fs-sm);
+  }
+  .struct li {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    color: var(--text-dim);
+  }
+  .struct li button {
+    font-size: var(--fs-sm);
+    padding: 0 var(--space-1);
+    overflow-wrap: anywhere;
+    text-align: left;
+    /* SC 2.5.8 target-size (24×24) — the GC3 focus-stage axe matrix enforces
+       this; without the floor the compact list rows undercut it. */
+    min-height: 24px;
+    min-width: 24px;
+  }
+  .struct code {
+    font-size: var(--fs-2xs);
+    color: var(--text-faint);
+  }
+  .struct code.origin {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0 var(--space-1);
+  }
+  .struct .more {
+    color: var(--text-faint);
+    font-size: var(--fs-xs);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .state {

@@ -51,6 +51,10 @@
   // Structural classes loaded in the client (GC2) — panel checkbox source +
   // toEgoQuery's known set for the unified link_class channel (GB5 contract).
   let loadedStructClasses = $state<string[]>([])
+  // Merge revision (GC4): the graphology instance is deliberately non-reactive
+  // — open windows re-derive their graph-sourced lists off THIS counter, or
+  // they would freeze at window-mount (design 03-§4.5 invalidation source).
+  let graphRev = $state(0)
   // Theme-aware graph colors read once from the CSS tokens (dark fallback if
   // the theme axis hasn't shipped). G1 only seeds merges/Sigma from this; the
   // re-color-on-theme-switch listener is G2 (design 03-§4).
@@ -120,6 +124,7 @@
     layout.run(graph)
     nodeCount = graph.order
     edgeCount = graph.size
+    graphRev++
     let structural = 0
     const structCls = new Set<string>()
     graph.forEachEdge((_id, attrs) => {
@@ -258,6 +263,7 @@
           <BlockDetailContent
             id={win.id}
             {graph}
+            {graphRev}
             onfocus={(id) => void setFocus(id)}
             onexpand={(id) => void expand(id)}
             {titleId}
