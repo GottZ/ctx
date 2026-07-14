@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte'
+  // GC1 §4.2: edge-curve-Import nur in Svelte-Komponenten (vitest-node-frei).
+  import { DEFAULT_EDGE_CURVATURE, indexParallelEdgesIndex } from '@sigma/edge-curve'
   import { toApiError, type ApiError } from '../../lib/api'
   import { fetchCategoryHues, fetchEgo } from '../../lib/graph/api'
   import { LayoutRunner } from '../../lib/graph/fa2'
@@ -120,6 +122,26 @@
       if (attrs.kind === 'structural') structural++
     })
     structCount = structural
+    // GC1 §4.2: struct↔struct-Parallelkanten (references UND duplicate-of auf
+    // demselben Paar, PK M076) trennen sich per parallel-index-skalierter
+    // Curvature — mit identischem Default rendern sie pixel-identisch
+    // übereinander. dream↔structural trennt schon Kurve-vs-Linie; dream-Kanten
+    // (line-Programm) lesen curvature nicht, nur structural wird geschrieben.
+    // O(size) ≤ 20k pro Merge — gleiche Klasse wie die Sweeps oben (§6);
+    // ohne structural-Kanten (Alt-Server) entfällt der Pass komplett.
+    if (structural > 0) {
+      indexParallelEdgesIndex(graph)
+      graph.forEachEdge((id, attrs) => {
+        if (attrs.kind !== 'structural') return
+        // parallelIndex ist um 0 symmetrisch (Paket vergibt -(n-1)/2 + i für
+        // gleichgerichtete Gruppen, null für Solo-Kanten). Die Abbildung ist
+        // vorzeichen-erhaltend und NULLFREI (negativ → Gegenbogen): eine
+        // curvature 0 wäre eine GERADE structural-Kante — pixel-identisch
+        // unter einer dream-line, exakt der Bruchpfad, den die Kurve trennt.
+        const idx = typeof attrs.parallelIndex === 'number' ? attrs.parallelIndex : 0
+        graph.setEdgeAttribute(id, 'curvature', DEFAULT_EDGE_CURVATURE * (idx >= 0 ? 1 + idx : idx))
+      })
+    }
     const cats = new Set<string>()
     graph.forEachNode((_id, attrs) => cats.add(attrs.category))
     loadedCategories = [...cats].sort()

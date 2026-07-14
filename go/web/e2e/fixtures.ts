@@ -335,13 +335,17 @@ function egoFixture(): Record<string, unknown> {
     ],
     // Structural facts (GA2, additive — old specs unaffected): one collision
     // pair (0→1 also carries a dream edge) + one structural-only edge.
-    struct_rels: ['references'],
+    // GC1: plus a struct↔struct parallel pair (duplicate-of on the SAME 0→1
+    // pair, legal per PK source,target,link_class M076) — pins the
+    // parallel-index curvature separation (design 03-§4.2).
+    struct_rels: ['references', 'duplicate-of'],
     origins: ['system'],
     structural_edges: [
       [0, 1, 0, 0],
       [0, 2, 0, 0],
+      [0, 1, 1, 0],
     ],
-    stats: { nodes: 3, edges: 2, structural_edges: 2, truncated: false, elapsed_ms: 28 },
+    stats: { nodes: 3, edges: 2, structural_edges: 3, truncated: false, elapsed_ms: 28 },
   }
 }
 

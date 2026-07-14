@@ -30,7 +30,7 @@ async function enterFocusStage(page: Page): Promise<void> {
   await page.waitForFunction(
     () => {
       const g = (window as unknown as { __ctxGraph?: CtxGraph }).__ctxGraph
-      return !!g && g.graph.edges().length >= 4 // 2 dream + 2 structural (egoFixture)
+      return !!g && g.graph.edges().length >= 5 // 2 dream + 3 structural (egoFixture, GC1)
     },
     null,
     { timeout: 10_000 },
@@ -52,8 +52,68 @@ test.describe('structural edges (GA2 interim consumption)', () => {
       }
     })
     expect(counts.dream).toBe(2)
-    expect(counts.structural).toBe(2)
+    expect(counts.structural).toBe(3)
     expect(errors).toEqual([])
+  })
+
+  // GC1 (FE-W3): structural edges render as curved arrows in the structural
+  // color — `type` selects the EdgeCurvedArrowProgram registered in GraphView,
+  // the color is the Teal token, distinct from BOTH dream edge colors. Dream
+  // edges stay type-less (defaultEdgeType 'line'). Red before the wave: the
+  // GA2 interim loop wrote no `type` and the dream edgeColor.
+  test('structural edges carry type=curvedArrow and the structural color (GC1)', async ({ page }) => {
+    const errors = trackPageErrors(page)
+    await seedSession(page, { theme: 'dark' })
+    await enterFocusStage(page)
+
+    const probe = await page.evaluate(() => {
+      const g = (window as unknown as { __ctxGraph?: CtxGraph }).__ctxGraph!
+      const edges = g.graph.edges()
+      const attrs = (e: string, k: string) => g.graph.getEdgeAttribute(e, k)
+      const structural = edges.filter((e) => attrs(e, 'kind') === 'structural')
+      const dream = edges.filter((e) => attrs(e, 'kind') === 'dream')
+      const styles = getComputedStyle(document.documentElement)
+      return {
+        structTypes: structural.map((e) => String(attrs(e, 'type'))),
+        structColors: structural.map((e) => String(attrs(e, 'color'))),
+        dreamTypes: dream.map((e) => attrs(e, 'type')),
+        dreamColors: dream.map((e) => String(attrs(e, 'color'))),
+        tokenStructural: styles.getPropertyValue('--graph-edge-structural').trim(),
+        tokenEdge: styles.getPropertyValue('--graph-edge').trim(),
+        tokenStrong: styles.getPropertyValue('--graph-edge-strong').trim(),
+      }
+    })
+    expect(probe.structTypes).toHaveLength(3)
+    expect(probe.structTypes.every((t) => t === 'curvedArrow')).toBe(true)
+    // Farbe = Live-Token, ≠ beide dream-Farben (Wellen-Gate „Farbe ≠ edge/edgeStrong")
+    expect(probe.structColors.every((c) => c === probe.tokenStructural)).toBe(true)
+    expect(probe.tokenStructural).not.toBe(probe.tokenEdge)
+    expect(probe.tokenStructural).not.toBe(probe.tokenStrong)
+    expect(probe.dreamTypes.every((t) => t === undefined)).toBe(true)
+    expect(probe.dreamColors.every((c) => c === probe.tokenStructural)).toBe(false)
+    expect(errors).toEqual([])
+  })
+
+  // GC1 §4.2: the struct↔struct parallel pair (references + duplicate-of on
+  // the same 0→1 pair) must NOT render pixel-identical — the settle() pass
+  // separates them via parallel-index-scaled curvature.
+  test('struct↔struct parallel edges get distinct curvature (GC1)', async ({ page }) => {
+    await seedSession(page, { theme: 'dark' })
+    await enterFocusStage(page)
+
+    const curvatures = await page.evaluate(() => {
+      const g = (window as unknown as { __ctxGraph?: CtxGraph }).__ctxGraph!
+      return g.graph
+        .edges()
+        .filter((e) => g.graph.getEdgeAttribute(e, 'kind') === 'structural')
+        .filter((e) => String(e).endsWith('|550e8400-e29b-41d4-a716-446655440001|550e8400-e29b-41d4-a716-446655440002'))
+        .map((e) => Number(g.graph.getEdgeAttribute(e, 'curvature')))
+    })
+    expect(curvatures).toHaveLength(2)
+    // nullfrei (0 = gerade Kante läge pixel-identisch unter der dream-line);
+    // negatives Vorzeichen = Gegenbogen, legitim getrennt
+    expect(curvatures.every((c) => Number.isFinite(c) && c !== 0)).toBe(true)
+    expect(new Set(curvatures).size).toBe(2) // getrennte Geometrien
   })
 
   test('structural edges render default-visible (no extra click, no filter change)', async ({ page }) => {
@@ -68,7 +128,7 @@ test.describe('structural edges (GA2 interim consumption)', () => {
         return !!dd && dd.hidden !== true
       })
     })
-    expect(vis).toHaveLength(2)
+    expect(vis).toHaveLength(3)
     expect(vis.every(Boolean)).toBe(true)
   })
 })

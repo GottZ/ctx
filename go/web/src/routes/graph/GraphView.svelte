@@ -2,6 +2,10 @@
   import { onMount } from 'svelte'
   import Sigma from 'sigma'
   import type { MouseCoords, WheelCoords } from 'sigma/types'
+  import type { EdgeProgramType } from 'sigma/rendering'
+  // GC1: der einzige edge-curve-Import lebt HIER (design 03-§4.2) —
+  // graph-client.ts bleibt vitest-node-tauglich ohne WebGL-Shim-Erweiterung.
+  import { EdgeCurvedArrowProgram } from '@sigma/edge-curve'
   import type { MultiDirectedGraph } from 'graphology'
   import { edgeVisible, nodeVisible, type GraphFilters } from '../../lib/graph/filters'
   import { remainingDegree, type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
@@ -39,10 +43,18 @@
   // graphology instance directly; data changes go through graph mutations,
   // sigma picks them up via graphology events — no Svelte reactivity here).
   onMount(() => {
-    const r = new Sigma(graph, container, {
+    // Generics explizit gepinnt (GC1): das Attributes-generische
+    // EdgeCurvedArrowProgram würde die Inferenz sonst auf Sigma<Attributes,…>
+    // kollabieren lassen und die Reducer-Signaturen (NodeAttrs/EdgeAttrs) brechen.
+    const r = new Sigma<NodeAttrs, EdgeAttrs>(graph, container, {
       labelRenderedSizeThreshold: 6,
       labelDensity: 0.7,
       hideEdgesOnMove: true, // LOD (W4): edges drop during pan/zoom
+      // GC1: structural edges select this program via edge-attr `type` —
+      // resolveSettings merged mit den Defaults, line/arrow bleiben registriert.
+      // Registrierung + type-Write (graph-client mergeEgo) = SELBER Commit
+      // (sigma 3.0.3 wirft hart bei unregistriertem Typ, auch hidden).
+      edgeProgramClasses: { curvedArrow: EdgeCurvedArrowProgram as EdgeProgramType<NodeAttrs, EdgeAttrs> },
       labelColor: { color: palette.labelColor },
       labelFont: 'ui-monospace, monospace',
       labelSize: 11,

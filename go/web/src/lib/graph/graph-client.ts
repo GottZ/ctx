@@ -48,6 +48,14 @@ export interface EdgeAttrs {
   conf: number
   size: number
   color: string
+  /** Sigma edge-program selector: structural = 'curvedArrow' (registered in
+   *  GraphView); absent on dream → defaultEdgeType 'line' (GC1). */
+  type?: 'curvedArrow'
+  /** Parallel-edge separation (GC1 §4.2): curvature written in GraphPage.settle
+   *  from the indexParallelEdgesIndex pass; only curved programs read it. */
+  curvature?: number
+  parallelIndex?: number | null
+  parallelMaxIndex?: number | null
 }
 
 /**
@@ -103,8 +111,12 @@ export function categoryHue(category: string, overrides?: Map<string, number>): 
   return ((hash % 360) + 360) % 360
 }
 
-/** supersedes renders dim/strong — it is displayed, never traversed. */
-export function edgeColor(rel: string, palette: GraphPalette): string {
+/** supersedes renders dim/strong — it is displayed, never traversed.
+ *  GC1: kind-aware — structural facts render in ONE own color (Teal token,
+ *  E9); the dream split (normal/strong) stays untouched. Default 'dream'
+ *  keeps every pre-GC1 call site bit-identical. */
+export function edgeColor(rel: string, palette: GraphPalette, kind: EdgeKind = 'dream'): string {
+  if (kind === 'structural') return palette.edgeStructuralColor
   return rel === 'supersedes' ? palette.edgeStrongColor : palette.edgeColor
 }
 
@@ -184,9 +196,11 @@ export function mergeEgo(
       color: edgeColor(relName, palette),
     })
   }
-  // Structural facts (GA2 INTERIM): data attributes only — NO `type` and no
-  // own color until the render program is registered in the same commit (GC1;
-  // sigma 3.0.3 throws hard on an unregistered edge type, even hidden).
+  // Structural facts render as curved arrows in the structural color (GC1):
+  // `type` selects the EdgeCurvedArrowProgram registered in GraphView — the
+  // registration and this write land in the SAME commit (sigma 3.0.3 throws
+  // hard on an unregistered edge type, even hidden). Width fix 1.5: mid of the
+  // dream band (1.0–2.0), no fake-conf derivation.
   // Missing fields = old server → the loop runs empty (tolerance invariant).
   for (const [src, dst, cls, org] of resp.structural_edges ?? []) {
     const source = resp.nodes[src]?.id
@@ -202,7 +216,8 @@ export function mergeEgo(
       origin: resp.origins?.[org],
       conf: 1,
       size: 1.5,
-      color: edgeColor(clsName, palette),
+      color: edgeColor(clsName, palette, 'structural'),
+      type: 'curvedArrow',
     })
   }
   // AFTER both edge loops: the badge (degree - loadedDeg) counts link ROWS of

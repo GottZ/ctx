@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url'
 import { expect, test } from 'vitest'
 import { colorToArray } from 'sigma/utils'
 import { categoryColor, hslToHex } from '../src/lib/graph/graph-client'
+import { hexToOklchHue } from '../src/lib/graph/color-space'
 import type { GraphPalette } from '../src/lib/graph/graph-theme'
 
 type ThemePair = { dark: string; light: string }
@@ -108,6 +109,7 @@ function palette(theme: 'dark' | 'light'): GraphPalette {
     labelColor: tok('graph-label', theme),
     edgeColor: tok('graph-edge', theme),
     edgeStrongColor: tok('graph-edge-strong', theme),
+    edgeStructuralColor: tok('graph-edge-structural', theme),
     nodeSat: num('graph-node-sat', theme),
     nodeLum: num('graph-node-lum', theme),
     // Hover-Felder (U02-W3): alias-aufgelöst aus tokens.json über tok().
@@ -141,17 +143,46 @@ const NODE_MIN = 3.0
 const NODE_FLOOR_PIN = { dark: 5.0, light: 3.1 } as const
 
 // G1b — Edge-Kontrast gegen den Canvas ≥ 3.0 in BEIDEN Themes (AM-1 symmetrisch).
-test('G1b: --graph-edge Kontrast gegen --graph-bg ≥ 3.0 in beiden Themes', () => {
+// GC1-Erweiterung (design graph-structural 03-§3.3): die structural-Kante läuft
+// in derselben Schleife — dritte Kanten-Farbe, gleiche Politik.
+const EDGE_TOKENS = ['graph-edge', 'graph-edge-structural'] as const
+test('G1b: Edge-Tokens (edge, edge-structural) Kontrast gegen --graph-bg ≥ 3.0 in beiden Themes', () => {
   const failures: string[] = []
   for (const theme of THEMES) {
-    const edge = tok('graph-edge', theme)
     const bg = tok('graph-bg', theme)
-    const ratio = contrast(edge, bg)
-    if (ratio < EDGE_MIN) {
-      failures.push(`${theme} --graph-edge (${edge}) auf --graph-bg (${bg}): ${ratio.toFixed(2)} < ${EDGE_MIN}`)
+    for (const name of EDGE_TOKENS) {
+      const edge = tok(name, theme)
+      const ratio = contrast(edge, bg)
+      if (ratio < EDGE_MIN) {
+        failures.push(`${theme} --${name} (${edge}) auf --graph-bg (${bg}): ${ratio.toFixed(2)} < ${EDGE_MIN}`)
+      }
     }
   }
-  expect(failures, `graph-edge unter ${EDGE_MIN}:\n${failures.join('\n')}`).toEqual([])
+  expect(failures, `Edge-Token unter ${EDGE_MIN}:\n${failures.join('\n')}`).toEqual([])
+})
+
+// G1f (GC1, design graph-structural 03-§3.3) — OKLCH-Hue-Distanz: der Farbkanal
+// dream↔structural darf unter Token-Drift nicht unsichtbar kollabieren. ΔHue
+// (zirkulär) zwischen structural und BEIDEN dream-Kanten-Tokens ≥ 60° je Theme.
+// Mathematik = Ship-Funktion hexToOklchHue (color-space.ts, Ottosson-referenz-
+// getestet in color-space.test.ts) — keine test-lokale Farbraum-Kopie.
+const HUE_MIN = 60
+function hueDist(a: string, b: string): number {
+  const d = Math.abs(hexToOklchHue(a) - hexToOklchHue(b))
+  return Math.min(d, 360 - d)
+}
+test('G1f: OKLCH-ΔHue structural↔edge und structural↔edge-strong ≥ 60° in beiden Themes', () => {
+  const failures: string[] = []
+  for (const theme of THEMES) {
+    const structural = tok('graph-edge-structural', theme)
+    for (const other of ['graph-edge', 'graph-edge-strong'] as const) {
+      const dist = hueDist(structural, tok(other, theme))
+      if (dist < HUE_MIN) {
+        failures.push(`${theme} ΔHue(graph-edge-structural, ${other}) = ${dist.toFixed(1)}° < ${HUE_MIN}°`)
+      }
+    }
+  }
+  expect(failures, `structural-Hue-Abstand unter ${HUE_MIN}°:\n${failures.join('\n')}`).toEqual([])
 })
 
 // G1c — supersedes-Split-Guard: edge-strong-Kontrast ≥ 1.4× edge-Kontrast, beide Themes.
@@ -262,7 +293,7 @@ test('G2: colorToArray aller String-Farbfelder der Palette ≠ schwarz, beide Th
   const failures: string[] = []
   for (const theme of THEMES) {
     const p = palette(theme)
-    for (const field of ['labelColor', 'edgeColor', 'edgeStrongColor'] as const) {
+    for (const field of ['labelColor', 'edgeColor', 'edgeStrongColor', 'edgeStructuralColor'] as const) {
       const hex = p[field]
       const [r, g, b] = colorToArray(hex)
       if (r === 0 && g === 0 && b === 0) {

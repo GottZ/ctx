@@ -18,6 +18,8 @@ export interface GraphPalette {
   labelColor: string
   edgeColor: string
   edgeStrongColor: string
+  /** structural-Kanten (facts) — EINE Farbe für alle Klassen (Teal, GC1/E9). */
+  edgeStructuralColor: string
   nodeSat: number
   nodeLum: number
   /** Hover-/Highlight-Kasten: opake Rückfläche (U02-W3, node-hover.ts). */
@@ -35,6 +37,7 @@ const DARK_FALLBACK: GraphPalette = {
   labelColor: '#9aa0bb',
   edgeColor: '#5d5f80',
   edgeStrongColor: '#7d80a8',
+  edgeStructuralColor: '#3d9478',
   nodeSat: 70,
   nodeLum: 68,
   // Spiegel der aufgelösten Dark-Aliasse (graph-hover-*): surface-3 / edge-strong
@@ -67,6 +70,7 @@ export function readGraphPalette(): GraphPalette {
     labelColor: str('--graph-label', DARK_FALLBACK.labelColor),
     edgeColor: str('--graph-edge', DARK_FALLBACK.edgeColor),
     edgeStrongColor: str('--graph-edge-strong', DARK_FALLBACK.edgeStrongColor),
+    edgeStructuralColor: str('--graph-edge-structural', DARK_FALLBACK.edgeStructuralColor),
     nodeSat: num('--graph-node-sat', DARK_FALLBACK.nodeSat),
     nodeLum: num('--graph-node-lum', DARK_FALLBACK.nodeLum),
     // Alias-Tokens: getComputedStyle liefert den var()-substituierten Hex-Wert
@@ -92,7 +96,9 @@ export function recolorGraph(
     graph.setNodeAttribute(id, 'color', categoryColor(attrs.category, palette, overrides))
   })
   graph.forEachEdge((id, attrs) => {
-    graph.setEdgeAttribute(id, 'color', edgeColor(attrs.rel, palette))
+    // kind durchgereicht (GC1): ein Theme-Wechsel färbt structural auf den
+    // Teal-Token des neuen Themes um, nicht auf die dream-Farbe.
+    graph.setEdgeAttribute(id, 'color', edgeColor(attrs.rel, palette, attrs.kind))
   })
 }
 

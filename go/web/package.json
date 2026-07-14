@@ -47,7 +47,8 @@
     "vitest": "4.1.10"
   },
   "dependencies": {
-    "@atlaskit/pragmatic-drag-and-drop": "2.0.1"
+    "@atlaskit/pragmatic-drag-and-drop": "2.0.1",
+    "@sigma/edge-curve": "^3.1.0"
   },
   "overrides": {
     "undici": "7.28.0",

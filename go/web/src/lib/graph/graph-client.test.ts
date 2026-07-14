@@ -161,6 +161,30 @@ describe('mergeEgo', () => {
     expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'kind')).toBe('dream')
   })
 
+  it('bakes structural edges as curvedArrow in the structural color, width 1.5 (GC1)', () => {
+    // `type` selects the sigma edge program — registered in GraphView in the
+    // SAME commit (sigma 3.0.3 throws hard on unregistered types). Dream edges
+    // stay type-less (defaultEdgeType 'line') in the dream color.
+    const graph = createGraph()
+    mergeEgo(
+      graph,
+      ego({
+        nodes: [node('a', 0), node('b', 1)],
+        edges: [[0, 1, 0, 0.5]],
+        struct_rels: ['references'],
+        origins: ['system'],
+        structural_edges: [[0, 1, 0, 0]],
+      }),
+      palette,
+    )
+    const k = structKey('a', 'b', 'references')
+    expect(graph.getEdgeAttribute(k, 'type')).toBe('curvedArrow')
+    expect(graph.getEdgeAttribute(k, 'color')).toBe(palette.edgeStructuralColor)
+    expect(graph.getEdgeAttribute(k, 'size')).toBe(1.5)
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'type')).toBeUndefined()
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'color')).toBe(palette.edgeColor)
+  })
+
   it('updates loadedDeg including structural incidences (GA1 review carry)', () => {
     const graph = createGraph()
     mergeEgo(

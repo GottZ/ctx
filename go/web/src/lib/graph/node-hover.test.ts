@@ -74,6 +74,7 @@ const PALETTE: GraphPalette = {
   labelColor: '#9aa0bb',
   edgeColor: '#5d5f80',
   edgeStrongColor: '#7d80a8',
+  edgeStructuralColor: '#3d9478',
   nodeSat: 70,
   nodeLum: 68,
   hoverBg: '#1e1e28',

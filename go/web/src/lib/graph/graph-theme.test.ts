@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ApiNode, EgoResponse, OverviewNode, OverviewResponse } from './api'
-import { createGraph, dreamKey, hslToHex, mergeEgo } from './graph-client'
+import { createGraph, dreamKey, hslToHex, mergeEgo, structKey } from './graph-client'
 import { buildOverviewGraph } from './overview-map'
 import {
   categoryColor,
@@ -45,6 +45,7 @@ const dark: GraphPalette = {
   labelColor: tok('graph-label', 'dark'),
   edgeColor: tok('graph-edge', 'dark'),
   edgeStrongColor: tok('graph-edge-strong', 'dark'),
+  edgeStructuralColor: tok('graph-edge-structural', 'dark'),
   nodeSat: Number(tok('graph-node-sat', 'dark')),
   nodeLum: Number(tok('graph-node-lum', 'dark')),
   hoverBg: resolved('graph-hover-bg', 'dark'),
@@ -58,6 +59,7 @@ const light: GraphPalette = {
   labelColor: tok('graph-label', 'light'),
   edgeColor: tok('graph-edge', 'light'),
   edgeStrongColor: tok('graph-edge-strong', 'light'),
+  edgeStructuralColor: tok('graph-edge-structural', 'light'),
   nodeSat: Number(tok('graph-node-sat', 'light')),
   nodeLum: Number(tok('graph-node-lum', 'light')),
   hoverBg: resolved('graph-hover-bg', 'light'),
@@ -159,6 +161,19 @@ describe('edgeColor', () => {
     expect(edgeColor('topical', dark)).toBe(dark.edgeColor)
     expect(edgeColor('factual', dark)).toBe(dark.edgeColor)
   })
+
+  // GC1: kind='structural' → EINE eigene Farbe (Teal-Token, E9), klassen-
+  // unabhängig — auch eine Klasse, die zufällig 'supersedes' hieße, bliebe Teal.
+  it('maps structural kind to the structural color regardless of class', () => {
+    expect(edgeColor('references', dark, 'structural')).toBe(dark.edgeStructuralColor)
+    expect(edgeColor('duplicate-of', dark, 'structural')).toBe(dark.edgeStructuralColor)
+    expect(edgeColor('supersedes', dark, 'structural')).toBe(dark.edgeStructuralColor)
+    // Default-Param bleibt bit-identisch zum Alt-Verhalten (kein Call-Site-Bruch).
+    expect(edgeColor('references', dark)).toBe(dark.edgeColor)
+    // beide Themes tragen einen eigenen structural-Wert
+    expect(edgeColor('references', light, 'structural')).toBe(light.edgeStructuralColor)
+    expect(light.edgeStructuralColor).not.toBe(dark.edgeStructuralColor)
+  })
 })
 
 describe('readGraphPalette', () => {
@@ -190,6 +205,7 @@ describe('readGraphPalette', () => {
       '--graph-label': '  #54586a ',
       '--graph-edge': '#767b91',
       '--graph-edge-strong': '#54597a',
+      '--graph-edge-structural': '#2a7562',
       '--graph-node-sat': '62',
       '--graph-node-lum': '33',
       // getComputedStyle liefert für die Alias-Hover-Tokens den substituierten
@@ -202,6 +218,7 @@ describe('readGraphPalette', () => {
       labelColor: '#54586a',
       edgeColor: '#767b91',
       edgeStrongColor: '#54597a',
+      edgeStructuralColor: '#2a7562',
       nodeSat: 62,
       nodeLum: 33,
       hoverBg: '#ffffff',
@@ -277,11 +294,38 @@ describe('recolorGraph', () => {
 
     let allLight = true
     graph.forEachEdge((_id, attrs) => {
-      if (attrs.color !== edgeColor(attrs.rel, light)) allLight = false
+      if (attrs.color !== edgeColor(attrs.rel, light, attrs.kind)) allLight = false
     })
     expect(allLight).toBe(true)
     expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'color')).toBe(light.edgeStrongColor) // supersedes
     expect(graph.getEdgeAttribute(dreamKey('b', 'a'), 'color')).toBe(light.edgeColor) // topical
+  })
+
+  // GC1: recolorGraph reicht attrs.kind durch — ein Theme-Wechsel färbt die
+  // structural-Kante auf den Teal-Token des NEUEN Themes, nie auf die
+  // dream-Farbe (die Regression wäre still: beide sind valide Hex).
+  it('re-paints structural edges to the NEW theme structural color (kind passthrough)', () => {
+    const graph = createGraph()
+    mergeEgo(
+      graph,
+      ego({
+        nodes: [apiNode('a', 0), apiNode('b', 1)],
+        edges: [[0, 1, 0, 0.5]],
+        struct_rels: ['references'],
+        origins: ['system'],
+        structural_edges: [[0, 1, 0, 0]],
+      }),
+      dark,
+    )
+    const k = structKey('a', 'b', 'references')
+    expect(graph.getEdgeAttribute(k, 'color')).toBe(dark.edgeStructuralColor)
+
+    recolorGraph(graph, light)
+
+    expect(graph.getEdgeAttribute(k, 'color')).toBe(light.edgeStructuralColor)
+    expect(graph.getEdgeAttribute(k, 'color')).not.toBe(light.edgeColor)
+    // dream-Nachbar auf demselben Paar bleibt in der dream-Farbe
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'color')).toBe(light.edgeColor)
   })
 
   // The GraphPage THEME_CHANGE_EVENT handler is exactly `readGraphPalette()`
