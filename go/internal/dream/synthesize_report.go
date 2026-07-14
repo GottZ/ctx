@@ -129,7 +129,7 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
 
-	dreamLinks, err := fetchDailyDreamLinks(ctx, pool, from, to)
+	dreamLinks, err := fetchDailyDreamLinks(ctx, pool, scope, from, to)
 	if err != nil {
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
@@ -139,10 +139,13 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
 
-	// Skip gate DELIBERATELY unchanged (GD2, design/04 §4.3 pt. 3):
+	// Skip gate DELIBERATELY unchanged in shape (GD2, design/04 §4.3 pt. 3):
 	// structural-only activity (e.g. a forge re-sync touching only references)
 	// produces NO LLM report — a report without content activity would be
 	// noise. The structural section only appears when we report anyway.
+	// Since GD3 the gate is scope-LOCAL (dreamLinks is scope-filtered):
+	// inactive scopes no longer report just because another tenant dreamed —
+	// deliberate behavior change, decision E14.
 	if len(decisions) == 0 && len(newBlocks) == 0 && len(dreamLinks) == 0 {
 		slog.Info("dream: daily synthesis skipped (no activity)", "scope", scope, "date", date)
 		return "", nil
@@ -350,20 +353,20 @@ func writeReportSourceLinks(ctx context.Context, pool *pgxpool.Pool, set *blockt
 }
 
 // fetchDailyDreamLinks reports counts per relationship class from
-// context_dream_links produced in the [from, to) window, ordered by frequency.
-// The link table DOES carry a scope column (writelinks.go, dream.go filter on
-// it) — this aggregation is deliberately still global across scopes: a known
-// multi-tenant fidelity seam, see design/04 D04-5 (the scope filter is its
-// own wave, GD3/W04-6, because it changes report numbers AND the skip gate).
+// context_dream_links produced in the [from, to) window, ordered by frequency,
+// SCOPE-FILTERED since GD3 (decision E14): the former global aggregation made
+// report numbers a cross-tenant blur AND turned the skip gate into a foreign-
+// activity oracle (any tenant's dream links kept every scope reporting). Rides
+// idx_dream_links_scope_created (M106).
 // Backfill fidelity note: created_at is bumped on link replace (WriteLinks
 // upsert), so a historical window counts the links as they stand today.
-func fetchDailyDreamLinks(ctx context.Context, pool *pgxpool.Pool, from, to time.Time) ([]dailyDreamLinkStat, error) {
+func fetchDailyDreamLinks(ctx context.Context, pool *pgxpool.Pool, scope string, from, to time.Time) ([]dailyDreamLinkStat, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT relationship, COUNT(*)::int FROM context_dream_links
-		 WHERE created_at >= $1 AND created_at < $2
+		 WHERE scope = $1 AND created_at >= $2 AND created_at < $3
 		 GROUP BY relationship
 		 ORDER BY COUNT(*) DESC`,
-		from, to,
+		scope, from, to,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query dream links: %w", err)
@@ -383,7 +386,7 @@ func fetchDailyDreamLinks(ctx context.Context, pool *pgxpool.Pool, from, to time
 
 // fetchDailyStructuralLinks reports counts per (link_class, origin) pair from
 // context_structural_links created in the [from, to) window, SCOPE-FILTERED
-// like fetchDailyDecisions/fetchDailyNewBlocks (not like the still-global
+// like fetchDailyDecisions/fetchDailyNewBlocks (and, since GD3, like the
 // dream aggregation above — design/04 §5 B1). Runs as an index-only scan on
 // idx_struct_links_scope_created (M106 covering, GD1).
 // Time semantics: the current report's own edges are written AFTER the prompt
