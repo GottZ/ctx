@@ -103,6 +103,43 @@ func seedSynthesisBlock(t *testing.T, pool *pgxpool.Pool, scope string) {
 	}
 }
 
+// seedLinkAnchorBlock inserts one block OUTSIDE the 24h window (2 days old)
+// so it can anchor structural links without polluting the "Neue Blocks 24h"
+// prompt section.
+func seedLinkAnchorBlock(t *testing.T, pool *pgxpool.Pool, scope, title string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var id string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO context_blocks (category, title, content, scope, created_at, updated_at)
+		 VALUES ('reference', $2, 'link anchor', $1, now() - interval '2 days', now() - interval '2 days')
+		 RETURNING id::text`,
+		scope, title,
+	).Scan(&id); err != nil {
+		t.Fatalf("seed link anchor block: %v", err)
+	}
+	return id
+}
+
+// seedStructuralLink raw-inserts one structural edge with a chosen age. Raw
+// SQL on purpose: the aggregation under test must count whatever the table
+// holds, independent of the write-path guards.
+func seedStructuralLink(t *testing.T, pool *pgxpool.Pool, scope, src, dst, class, origin, age string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO context_structural_links (source_block_id, target_block_id, link_class, scope, origin, created_at)
+		 VALUES ($1::uuid, $2::uuid, $3, $4, $5, now() - $6::interval)`,
+		src, dst, class, scope, origin, age,
+	); err != nil {
+		t.Fatalf("seed structural link %s→%s: %v", src, dst, err)
+	}
+}
+
 func TestGenerateDailyReport_HappyPath(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -167,6 +204,57 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 	}
 	if links != 1 {
 		t.Errorf("report source links: got %d, want 1", links)
+	}
+}
+
+// TestGenerateDailyReport_StructuralSectionInPrompt is the GD2 end-to-end
+// probe the unit golden test cannot give: real DB aggregation
+// (fetchDailyStructuralLinks) feeding the wire-bound userPrompt. The seeded
+// counts double as leak probes — an out-of-window edge or a foreign-scope
+// edge would bump "references (system)" past 2 and fail the exact match.
+func TestGenerateDailyReport_StructuralSectionInPrompt(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	seedDecisionRows(t, pool, reportScope) // activity so the skip gate reports
+
+	a := seedLinkAnchorBlock(t, pool, reportScope, "anchor a")
+	b := seedLinkAnchorBlock(t, pool, reportScope, "anchor b")
+	c := seedLinkAnchorBlock(t, pool, reportScope, "anchor c")
+	d := seedLinkAnchorBlock(t, pool, reportScope, "anchor d")
+	w1 := seedLinkAnchorBlock(t, pool, "work", "anchor w1")
+	w2 := seedLinkAnchorBlock(t, pool, "work", "anchor w2")
+
+	// In-window, home scope: 2× references(system), 1× duplicate-of(forge-sync).
+	seedStructuralLink(t, pool, reportScope, a, b, "references", "system", "1 hour")
+	seedStructuralLink(t, pool, reportScope, a, c, "references", "system", "2 hours")
+	seedStructuralLink(t, pool, reportScope, a, b, "duplicate-of", "forge-sync", "3 hours")
+	// Window leak probe: same class/origin but 25h old — must not be counted.
+	seedStructuralLink(t, pool, reportScope, a, d, "references", "system", "25 hours")
+	// Scope leak probe: same class/origin, in-window, foreign scope.
+	seedStructuralLink(t, pool, "work", w1, w2, "references", "system", "1 hour")
+
+	var gotPrompt string
+	mockChatJSONExternal(t, func(_ context.Context, _, _, _ string, _ *bool, _, userPrompt string, _ llm.Options, _ time.Duration) (*llm.ChatResponse, error) {
+		gotPrompt = userPrompt
+		return &llm.ChatResponse{
+			Message: llm.Message{Role: "assistant", Content: "Tagesbericht mit Structural-Statistik."},
+		}, nil
+	})
+
+	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), reportScope)
+	if err != nil {
+		t.Fatalf("generate report: %v", err)
+	}
+	if blockID == "" {
+		t.Fatal("want block_id, got empty string")
+	}
+
+	// Contiguous match pins section header, per-line format, and the
+	// COUNT DESC order (2 before 1) in the exact GD2 shape.
+	want := "\nStructural-Links 24h:\n- references (system): 2\n- duplicate-of (forge-sync): 1\n"
+	if !strings.Contains(gotPrompt, want) {
+		t.Errorf("wire prompt is missing the GD2 structural section\nwant substring:\n%s\ngot prompt:\n%s", want, gotPrompt)
 	}
 }
 
