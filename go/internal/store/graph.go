@@ -102,7 +102,8 @@ type EgoParams struct {
 	Limit         int      // 1..1500 nodes (G39: ceiling lowered from 5000, see handler)
 	EdgeLimit     int      // 1..20000 induced edges
 	MinConfidence float64  // gate on weighted confidence (traversal + induced)
-	LinkClasses   []string // nil = all five
+	LinkClasses   []string // dream classes: nil = all five; non-nil-EMPTY = none (§4.6)
+	StructClasses []string // structural classes: nil = all; non-nil-EMPTY = none (§4.6)
 	Categories    []string // nil = all
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
@@ -170,6 +171,7 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
+	normalizeClassFilters(&p)
 	focus, err := hydrateFocus(ctx, pool, p.Focus, readScopes, grantedBlockIDs, visibleTypes)
 	if err != nil {
 		return nil, err
@@ -411,10 +413,10 @@ ORDER BY l.confidence DESC, l.source_block_id, l.target_block_id
 LIMIT $4`
 
 	rows, err := pool.Query(ctx, q,
-		ids,                       // $1
-		p.MinConfidence,           // $2
-		nilIfEmpty(p.LinkClasses), // $3 NULL = all five (display set)
-		p.EdgeLimit+1,             // $4 one extra row → exact truncation flag
+		ids,                           // $1
+		p.MinConfidence,               // $2
+		displayClasses(p.LinkClasses), // $3 nil = all five; non-nil-empty = none (§4.6)
+		p.EdgeLimit+1,                 // $4 one extra row → exact truncation flag
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("store: graph induced edges query: %w", err)
@@ -526,12 +528,40 @@ func traversalClasses(requested []string) []string {
 }
 
 // nilIfEmpty maps an empty slice to nil so pgx binds SQL NULL ("no filter")
-// instead of an empty array (which would match nothing).
+// instead of an empty array (which would match nothing). Kept for Categories,
+// where empty stays "no filter" (egoCSV contract) — NEVER use it on class
+// binds (see displayClasses).
 func nilIfEmpty(s []string) []string {
 	if len(s) == 0 {
 		return nil
 	}
 	return s
+}
+
+// displayClasses is the class-filter bind semantic (design/01 §4.6): nil binds
+// SQL NULL ("no filter"); non-nil — INCLUDING empty — binds the array (empty
+// matches nothing). Collapsing non-nil-empty to NULL (nilIfEmpty) would turn
+// the filter "no dream classes selected" into "all five" — after the handler's
+// vocabulary split, `link_class=<structural class>` would then show every
+// dream edge (W1-G1 bug path, red-proven against the old binding).
+func displayClasses(s []string) []string {
+	return s
+}
+
+// normalizeClassFilters enforces the §4.6 input invariant on EgoGraph entry:
+// a class filter is set all-or-nothing across BOTH vocabularies. If exactly
+// one side is filtered (non-nil) and the other is nil, the nil side becomes
+// non-nil-EMPTY ("none") — `link_class=topical` means ONLY topical, not
+// "filtered dream plus ALL structural". The final handler sets both fields
+// after its vocabulary split anyway (no-op there); this protects direct store
+// consumers and pins the build-phase semantics while the split is unwired.
+func normalizeClassFilters(p *EgoParams) {
+	if p.LinkClasses != nil && p.StructClasses == nil {
+		p.StructClasses = []string{}
+	}
+	if p.StructClasses != nil && p.LinkClasses == nil {
+		p.LinkClasses = []string{}
+	}
 }
 
 // LogGraphAccess writes the single telemetry row for a successful ego call:

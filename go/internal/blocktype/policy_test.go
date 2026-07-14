@@ -74,6 +74,12 @@ func TestDecodePolicyRejects(t *testing.T) {
 		// I-C structural_link_classes (design/02 §4.1).
 		{"structural_link_classes bad format", `{"v":1,"structural_link_classes":["Bad Class"]}`, "structural_link_classes"},
 		{"structural_link_classes duplicate", `{"v":1,"structural_link_classes":["references","references"]}`, "duplicate"},
+		// W1-G2 (graph-structural GA6, design/01 §4.6a): the five dream
+		// GraphRels names are reserved — a structural class `causal` would make
+		// the link_class filter ambiguous and let a structural `supersedes`
+		// traverse while dream-supersedes is display-only (B6 gate class).
+		{"structural_link_classes reserved dream name", `{"v":1,"structural_link_classes":["causal"]}`, "reserved"},
+		{"structural_link_classes reserved supersedes", `{"v":1,"structural_link_classes":["references","supersedes"]}`, "reserved"},
 		// Typo of the new key still rejects as unknown (strict decode, key path):
 		// this is the negative counterpart proving structural_link_classes had to
 		// be ADDED to the envelope — a config carrying it would reject before I-C.

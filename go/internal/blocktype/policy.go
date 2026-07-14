@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
+	"strings"
 )
 
 // Retrieval policy kinds (config vocabulary v1, design §3.3).
@@ -86,6 +88,16 @@ const DefaultClassifyPriority = 100
 // for store.GlobalScope would arm an import cycle once store consumes this
 // package in T4.
 const globalScope = "_global"
+
+// reservedGraphClasses are the five dream relationship names (graph-structural
+// GA6, design/01 §4.6a): a structural_link_classes entry colliding with them
+// would make the link_class filter ambiguous (dream-only? both?) and let a
+// structural `supersedes` traverse while dream-supersedes is display-only.
+// Deliberately a LOCAL copy of store.GraphRels (globalScope precedent above —
+// importing internal/store would arm an import cycle: store consumes this
+// package via store/classify.go). Equality is pinned by an external-package
+// sync test (policy_reserved_sync_test.go).
+var reservedGraphClasses = []string{"topical", "factual", "causal", "recurrent", "supersedes"}
 
 // maxConfigBytes caps one config JSONB (R1 resource-exhaustion guard, §3.3:
 // the Set cache is server-shared memory across N tenants).
@@ -512,6 +524,9 @@ func validatePolicy(p *Policy) error {
 	for _, c := range p.StructuralLinkClasses {
 		if !linkClassFormat.MatchString(c) {
 			return fmt.Errorf("blocktype %q: structural_link_classes entry %q violates format ^[a-z0-9][a-z0-9-]{0,49}$", p.Name, c)
+		}
+		if slices.Contains(reservedGraphClasses, c) {
+			return fmt.Errorf("blocktype %q: structural_link_classes entry %q is a reserved dream relationship name (reserved: %s)", p.Name, c, strings.Join(reservedGraphClasses, ", "))
 		}
 		if seenClass[c] {
 			return fmt.Errorf("blocktype %q: structural_link_classes contains duplicate %q", p.Name, c)
