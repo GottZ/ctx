@@ -50,15 +50,22 @@
 <div class="panel">
   <fieldset>
     <legend>link class</legend>
+    <!-- GC3: the fieldset IS the edge legend (design 03-§4.4) — every checkbox
+         carries an aria-hidden swatch mirroring the canvas form language:
+         straight line (dream), strong line (supersedes), curved arrow
+         (structural). Colors come from the SAME --graph-* tokens the canvas
+         bakes, so the legend can never drift from the render. -->
     {#each ALL_LINK_CLASSES as rel (rel)}
       <label class="check">
         <input type="checkbox" checked={filters.linkClasses.includes(rel)} onchange={() => toggleLinkClass(rel)} />
+        <svg class="sw {rel === 'supersedes' ? 'sw-strong' : 'sw-edge'}" viewBox="0 0 20 10" aria-hidden="true">
+          <line x1="1" y1="5" x2="19" y2="5" />
+        </svg>
         {rel}
       </label>
     {/each}
     <!-- structural sub-block (GC2): same .check interaction pattern, checked =
-         NOT in the blocklist. Options are registry-driven (loaded ∪ hidden) —
-         swatches + a11y texts land with GC3. -->
+         NOT in the blocklist. Options are registry-driven (loaded ∪ hidden). -->
     {#each structClassOptions as cls (cls)}
       <label class="check">
         <input
@@ -66,19 +73,27 @@
           checked={!filters.structClassesHidden.includes(cls)}
           onchange={() => toggleStructClass(cls)}
         />
-        {cls}
+        <svg class="sw sw-structural" viewBox="0 0 20 10" aria-hidden="true">
+          <path d="M1 8 Q 9 0 16 4" />
+          <path d="M12 2 L 16 4 L 12 7" />
+        </svg>
+        {cls}<span class="sr-only"> structural — deterministic reference</span>
       </label>
     {/each}
   </fieldset>
 
   <fieldset>
     <legend>min confidence (dream)</legend>
+    <!-- GC3: fieldset legends give inputs NO accessible name — the three
+         controls below carry explicit aria-labels (first axe pass over the
+         focus stage surfaced them as pre-existing label violations). -->
     <input
       class="conf"
       type="number"
       min="0"
       max="1"
       step="0.05"
+      aria-label="min confidence (dream)"
       value={filters.minConfidence}
       oninput={(e) => onchange({ ...filters, minConfidence: Number(e.currentTarget.value) || 0 })}
     />
@@ -100,12 +115,14 @@
     <legend>created</legend>
     <input
       type="date"
+      aria-label="created after"
       value={filters.createdAfter}
       oninput={(e) => onchange({ ...filters, createdAfter: e.currentTarget.value })}
     />
     <span class="sep">–</span>
     <input
       type="date"
+      aria-label="created before"
       value={filters.createdBefore}
       oninput={(e) => onchange({ ...filters, createdBefore: e.currentTarget.value })}
     />
@@ -158,6 +175,40 @@
   .check input {
     accent-color: var(--accent);
     margin: 0;
+  }
+
+  /* Legend swatches (GC3): token-bound stroke = the exact canvas colors. */
+  .sw {
+    width: 20px;
+    height: 10px;
+    flex: none;
+  }
+  .sw line,
+  .sw path {
+    fill: none;
+    stroke-width: 1.5;
+  }
+  .sw-edge {
+    stroke: var(--graph-edge);
+  }
+  .sw-strong {
+    stroke: var(--graph-edge-strong);
+  }
+  .sw-structural {
+    stroke: var(--graph-edge-structural);
+  }
+
+  /* Screen-reader-only semantics suffix (visually hidden, still in the
+     accessible name) — same pattern as BoardPage .sr-only. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .conf {

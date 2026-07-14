@@ -1,4 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
+import { runAxeGate } from './contract/axe'
+import { THEMES, VIEWPORTS, type ViewportName } from './contract/contract'
+import { contracts } from './contract/registry'
 import { gotoArea, seedSession, trackPageErrors } from './fixtures'
 
 // Structural edges in the ego graph (plan graph-structural 2026-07-14).
@@ -190,6 +193,48 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
     expect(classes).toContain('topical')
     expect(url.searchParams.has('struct_class')).toBe(false)
   })
+
+  // GC3 (FE-W5): legend + a11y — the structural checkbox carries the class
+  // semantics in its accessible name (visually-hidden suffix), the stats line
+  // surfaces the structural count without a click, the onboarding hint names
+  // the curved-arrow form. Red before the wave: none of the three existed.
+  test('legend semantics: accessible name, stats line, onboarding hint (GC3)', async ({ page }) => {
+    await seedSession(page, { theme: 'dark' })
+    await enterFocusStage(page)
+
+    // structural checkbox: label text + visually-hidden semantics suffix
+    const refBox = page.getByRole('checkbox', { name: /references structural — deterministic reference/ })
+    await expect(refBox).toBeVisible()
+    // dream checkbox keeps its plain name (no structural suffix)
+    await expect(page.getByRole('checkbox', { name: 'topical', exact: true })).toBeVisible()
+
+    // stats line shows the structural count (fixture: 3 structural edges)
+    await expect(page.locator('.stats')).toContainText('· 3 structural')
+
+    // onboarding hint names the curved-arrow form language
+    await expect(page.locator('.hint')).toContainText('curved arrow = reference')
+  })
+
+  // GC3 axe gate on the FOCUS stage: the registry contract for /graph only
+  // mounts the overview (cluster map) — the filter panel (legend swatches,
+  // structural checkboxes) never enters that DOM. These free @a11y tests run
+  // the SAME axe matrix (runAxeGate: WCAG tags + target-size, /graph ledger
+  // context) on the focus stage, over the FULL project matrix (2 themes × 2
+  // viewports — target-size bites hardest at 390 px, color-contrast differs
+  // per theme). Negative probe (red-proven): removing a structural checkbox's
+  // accessible name fails the label rule here.
+  for (const theme of THEMES) {
+    for (const viewport of Object.keys(VIEWPORTS) as ViewportName[]) {
+      test(`focus stage axe matrix ${theme} ${viewport} (GC3)`, { tag: '@a11y' }, async ({ page }, testInfo) => {
+        await page.setViewportSize(VIEWPORTS[viewport])
+        await seedSession(page, { theme })
+        await enterFocusStage(page)
+        const contract = contracts.find((c) => c.route === '/graph')
+        if (!contract) throw new Error('graph contract missing from registry')
+        await runAxeGate(page, contract, theme, viewport, testInfo)
+      })
+    }
+  }
 
   test('structural edges render default-visible (no extra click, no filter change)', async ({ page }) => {
     await seedSession(page, { theme: 'dark' })

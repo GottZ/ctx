@@ -298,7 +298,12 @@
           <span class="loading" aria-busy="true">loading…</span>
         {/if}
         <span class="stats">
-          {nodeCount} nodes · {edgeCount} edges{truncated ? ' · server truncated' : ''}
+          <!-- GC3: structural count surfaces without a click; class-neutral
+               wording ("structural", not "refs") — the count spans ALL
+               registry classes (design 03-§4.4). -->
+          {nodeCount} nodes · {edgeCount} edges{structCount > 0 ? ` · ${structCount} structural` : ''}{truncated
+            ? ' · server truncated'
+            : ''}
         </span>
       </div>
       <FilterPanel {filters} categories={loadedCategories} structClasses={loadedStructClasses} onchange={(next) => (filters = next)} />
@@ -306,7 +311,10 @@
   </div>
 
   {#if focus !== null}
-    <p class="hint">click a node for details · double-click to expand (+1 hop) · “· +N” = links not loaded yet</p>
+    <p class="hint">
+      click a node for details · double-click to expand (+1 hop) · “· +N” = links not loaded yet · curved arrow =
+      reference
+    </p>
   {/if}
 </section>
 
