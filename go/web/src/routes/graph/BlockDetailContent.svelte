@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte'
-  import type { DirectedGraph } from 'graphology'
+  import type { MultiDirectedGraph } from 'graphology'
   import { toApiError, type ApiError } from '../../lib/api'
   import { getBlock, type BlockDetail } from '../../lib/graph/api'
   import { remainingDegree, type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
@@ -19,7 +19,7 @@
     titleId,
   }: {
     id: string
-    graph: DirectedGraph<NodeAttrs, EdgeAttrs>
+    graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>
     onfocus: (id: string) => void
     onexpand: (id: string) => void
     /** Host-supplied chrome actions rendered in the header (e.g. close/minimize). */

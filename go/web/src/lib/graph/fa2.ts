@@ -3,7 +3,7 @@
 // runs 3–10s after every merge, scaled by graph size, then stops. A re-merge
 // during a run extends it instead of stacking workers.
 
-import type { DirectedGraph } from 'graphology'
+import type { MultiDirectedGraph } from 'graphology'
 import forceAtlas2 from 'graphology-layout-forceatlas2'
 import FA2Layout from 'graphology-layout-forceatlas2/worker'
 import type { EdgeAttrs, NodeAttrs } from './graph-client'
@@ -13,7 +13,7 @@ export class LayoutRunner {
   #stopTimer: ReturnType<typeof setTimeout> | null = null
 
   /** (Re)start the layout for a size-scaled duration. */
-  run(graph: DirectedGraph<NodeAttrs, EdgeAttrs>): void {
+  run(graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>): void {
     if (graph.order < 2) return
     if (this.#layout === null) {
       this.#layout = new FA2Layout(graph, {

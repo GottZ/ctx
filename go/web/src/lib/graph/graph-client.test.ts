@@ -4,7 +4,16 @@
 
 import { describe, expect, it } from 'vitest'
 import type { ApiNode, EgoResponse } from './api'
-import { createGraph, evict, mergeEgo, recomputeHops, remainingDegree, touch } from './graph-client'
+import {
+  createGraph,
+  dreamKey,
+  evict,
+  mergeEgo,
+  recomputeHops,
+  remainingDegree,
+  structKey,
+  touch,
+} from './graph-client'
 import { readGraphPalette } from './graph-theme'
 
 // In the node test env there is no document → readGraphPalette() returns the
@@ -51,8 +60,8 @@ describe('mergeEgo', () => {
     expect(graph.order).toBe(2)
     expect(graph.size).toBe(1)
     expect(graph.hasDirectedEdge('a', 'b')).toBe(true)
-    expect(graph.getEdgeAttribute('a', 'b', 'rel')).toBe('supersedes')
-    expect(graph.getEdgeAttribute('a', 'b', 'conf')).toBe(0.83)
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'rel')).toBe('supersedes')
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'conf')).toBe(0.83)
   })
 
   it('treats indices as response-local: a second response reuses index 0 for a different node', () => {
@@ -92,8 +101,41 @@ describe('mergeEgo', () => {
       palette,
     )
     expect(graph.size).toBe(2)
-    expect(graph.getEdgeAttribute('a', 'b', 'rel')).toBe('topical')
-    expect(graph.getEdgeAttribute('b', 'a', 'rel')).toBe('factual')
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'rel')).toBe('topical')
+    expect(graph.getEdgeAttribute(dreamKey('b', 'a'), 'rel')).toBe('factual')
+  })
+
+  it('re-merging the same response keeps the edge count stable (multigraph keyed merge, N4)', () => {
+    const graph = createGraph()
+    const resp = ego({ nodes: [node('a', 0), node('b', 1)], edges: [[0, 1, 0, 0.5]] })
+    mergeEgo(graph, resp, palette)
+    mergeEgo(graph, resp, palette)
+    expect(graph.order).toBe(2)
+    expect(graph.size).toBe(1)
+  })
+
+  it('holds a dream and a structural edge apart on the same directed pair (collision pair, U4)', () => {
+    const graph = createGraph()
+    mergeEgo(
+      graph,
+      ego({ nodes: [node('a', 0, { degree: 2 }), node('b', 1, { degree: 2 })], edges: [[0, 1, 0, 0.5]] }),
+      palette,
+    )
+    // Same directed pair, own key — one row per (pair, class), PK of M076.
+    graph.mergeDirectedEdgeWithKey(structKey('a', 'b', 'references'), 'a', 'b', {
+      rel: 'references',
+      conf: 1,
+      size: 1.5,
+      color: palette.edgeColor,
+    })
+    expect(graph.size).toBe(2)
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'rel')).toBe('topical')
+    expect(graph.getEdgeAttribute(structKey('a', 'b', 'references'), 'rel')).toBe('references')
+    // Badge math counts link ROWS of both data classes (K5/U4): degree - loadedDeg
+    // must reach zero on the collision pair, not go negative or leave a ghost badge.
+    expect(graph.degree('a')).toBe(2)
+    expect(remainingDegree({ degree: 2, loadedDeg: graph.degree('a') })).toBeNull()
+    expect(remainingDegree({ degree: 5, loadedDeg: graph.degree('a') })).toBe('3')
   })
 
   it('tracks loadedDeg from the merged incidences', () => {

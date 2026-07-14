@@ -1,9 +1,12 @@
-// Graph state holder (design 05-§3.5): ONE graphology DirectedGraph instance
-// is the single source of truth, sigma renders it directly. Plain TS, no
-// Svelte reactivity on graph data — the runes proxy overhead on 5k node
-// objects is the documented reason (web-graph.md (e)).
+// Graph state holder (design 05-§3.5): ONE graphology MultiDirectedGraph
+// instance is the single source of truth, sigma renders it directly. Plain TS,
+// no Svelte reactivity on graph data — the runes proxy overhead on 5k node
+// objects is the documented reason (web-graph.md (e)). Multi because dream and
+// structural links coexist on the same directed pair (one row per data class,
+// design graph-structural 03-§4.1); edges merge under deterministic keys so a
+// re-merge of the same response stays idempotent.
 
-import { DirectedGraph } from 'graphology'
+import { MultiDirectedGraph } from 'graphology'
 import type { EgoResponse } from './api'
 // Type-only import — erased at build, so no runtime cycle with graph-theme
 // (which re-exports the colorers below). graph-theme owns the palette reads;
@@ -102,8 +105,22 @@ export function nodeSize(degree: number): number {
 
 let touchSeq = 0
 
-export function createGraph(): DirectedGraph<NodeAttrs, EdgeAttrs> {
-  return new DirectedGraph<NodeAttrs, EdgeAttrs>()
+/** Deterministic edge key: ONE dream link per directed pair (PK source,target
+ *  on context_dream_links) — keyed merge keeps re-merges idempotent on the
+ *  multigraph (N4: keyless mergeDirectedEdge cannot address an existing edge
+ *  once the graph is multi). */
+export function dreamKey(source: string, target: string): string {
+  return `d|${source}|${target}`
+}
+
+/** Deterministic edge key: ONE structural link per (directed pair, class) —
+ *  PK (source, target, link_class) on context_structural_links (M076). */
+export function structKey(source: string, target: string, cls: string): string {
+  return `s|${cls}|${source}|${target}`
+}
+
+export function createGraph(): MultiDirectedGraph<NodeAttrs, EdgeAttrs> {
+  return new MultiDirectedGraph<NodeAttrs, EdgeAttrs>()
 }
 
 /**
@@ -113,7 +130,7 @@ export function createGraph(): DirectedGraph<NodeAttrs, EdgeAttrs> {
  * existing nodes keep their position so the layout never jumps.
  */
 export function mergeEgo(
-  graph: DirectedGraph<NodeAttrs, EdgeAttrs>,
+  graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>,
   resp: EgoResponse,
   palette: GraphPalette,
   overrides?: Map<string, number>,
@@ -150,7 +167,7 @@ export function mergeEgo(
     const target = resp.nodes[dst]?.id
     const relName = resp.rels[rel]
     if (source === undefined || target === undefined || relName === undefined) continue
-    graph.mergeDirectedEdge(source, target, {
+    graph.mergeDirectedEdgeWithKey(dreamKey(source, target), source, target, {
       rel: relName,
       conf,
       size: relName === 'supersedes' ? 1 : 1 + conf,
@@ -163,7 +180,7 @@ export function mergeEgo(
 }
 
 /** Recompute hopFromFocus by client-side BFS (design 05-§3.5). */
-export function recomputeHops(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, focus: string): void {
+export function recomputeHops(graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>, focus: string): void {
   graph.forEachNode((node) => graph.setNodeAttribute(node, 'hopFromFocus', Infinity))
   if (!graph.hasNode(focus)) return
   graph.setNodeAttribute(focus, 'hopFromFocus', 0)
@@ -185,7 +202,7 @@ export function recomputeHops(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, focus:
 }
 
 /** Mark a node as freshly used (LRU input for eviction). */
-export function touch(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, node: string): void {
+export function touch(graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>, node: string): void {
   if (graph.hasNode(node)) graph.setNodeAttribute(node, 'lastTouched', ++touchSeq)
 }
 
@@ -211,7 +228,7 @@ export interface EvictOptions {
  * pinned nodes are never evicted. Returns the number of nodes removed.
  */
 export function evict(
-  graph: DirectedGraph<NodeAttrs, EdgeAttrs>,
+  graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>,
   focus: string,
   { maxNodes = 5000, maxEdges = 20000, targetNodes = 4000 }: EvictOptions = {},
 ): number {
@@ -235,7 +252,7 @@ export function evict(
 }
 
 /** Where new nodes spawn: the focus position if loaded, else the origin. */
-function seedPosition(graph: DirectedGraph<NodeAttrs, EdgeAttrs>, focus: string): [number, number] {
+function seedPosition(graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>, focus: string): [number, number] {
   if (graph.hasNode(focus)) {
     return [graph.getNodeAttribute(focus, 'x'), graph.getNodeAttribute(focus, 'y')]
   }

@@ -7,7 +7,7 @@
 // palette + colorers from one import. G1 seeds new merges from the palette;
 // recolorGraph is the O(order+size) re-paint pass G2 runs on a theme switch.
 
-import type { DirectedGraph, UndirectedGraph } from 'graphology'
+import type { MultiDirectedGraph, UndirectedGraph } from 'graphology'
 import type { OverviewResponse } from './api'
 import { categoryColor, edgeColor, type EdgeAttrs, type NodeAttrs } from './graph-client'
 import type { MetaEdgeAttrs, MetaNodeAttrs } from './overview-map'
@@ -84,7 +84,7 @@ export function readGraphPalette(): GraphPalette {
  * baked attribute. G2 calls this on THEME_CHANGE; G1 only ships it.
  */
 export function recolorGraph(
-  graph: DirectedGraph<NodeAttrs, EdgeAttrs>,
+  graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>,
   palette: GraphPalette,
   overrides?: Map<string, number>,
 ): void {

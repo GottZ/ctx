@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import Sigma from 'sigma'
   import type { MouseCoords, WheelCoords } from 'sigma/types'
-  import type { DirectedGraph } from 'graphology'
+  import type { MultiDirectedGraph } from 'graphology'
   import { edgeVisible, nodeVisible, type GraphFilters } from '../../lib/graph/filters'
   import { remainingDegree, type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
   import type { GraphPalette } from '../../lib/graph/graph-theme'
@@ -17,7 +17,7 @@
     onnodeclick,
     onnodedoubleclick,
   }: {
-    graph: DirectedGraph<NodeAttrs, EdgeAttrs>
+    graph: MultiDirectedGraph<NodeAttrs, EdgeAttrs>
     /** Instant client-side filtering via the reducers — no server roundtrip. */
     filters: GraphFilters
     /** Theme-aware colors (label/edge Sigma settings); from readGraphPalette. */

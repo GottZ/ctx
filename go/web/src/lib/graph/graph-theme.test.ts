@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ApiNode, EgoResponse, OverviewNode, OverviewResponse } from './api'
-import { createGraph, hslToHex, mergeEgo } from './graph-client'
+import { createGraph, dreamKey, hslToHex, mergeEgo } from './graph-client'
 import { buildOverviewGraph } from './overview-map'
 import {
   categoryColor,
@@ -271,7 +271,7 @@ describe('recolorGraph', () => {
 
   it('re-paints ALL edge color attrs, keeping the supersedes/normal split', () => {
     const graph = builtGraph(dark)
-    expect(graph.getEdgeAttribute('a', 'b', 'color')).toBe(dark.edgeStrongColor)
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'color')).toBe(dark.edgeStrongColor)
 
     recolorGraph(graph, light)
 
@@ -280,8 +280,8 @@ describe('recolorGraph', () => {
       if (attrs.color !== edgeColor(attrs.rel, light)) allLight = false
     })
     expect(allLight).toBe(true)
-    expect(graph.getEdgeAttribute('a', 'b', 'color')).toBe(light.edgeStrongColor) // supersedes
-    expect(graph.getEdgeAttribute('b', 'a', 'color')).toBe(light.edgeColor) // topical
+    expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'color')).toBe(light.edgeStrongColor) // supersedes
+    expect(graph.getEdgeAttribute(dreamKey('b', 'a'), 'color')).toBe(light.edgeColor) // topical
   })
 
   // The GraphPage THEME_CHANGE_EVENT handler is exactly `readGraphPalette()`
@@ -313,7 +313,7 @@ describe('recolorGraph', () => {
       recolorGraph(graph, palette)
 
       expect(graph.getNodeAttribute('a', 'color')).toBe(categoryColor('learnings', light))
-      expect(graph.getEdgeAttribute('a', 'b', 'color')).toBe(light.edgeStrongColor)
+      expect(graph.getEdgeAttribute(dreamKey('a', 'b'), 'color')).toBe(light.edgeStrongColor)
     } finally {
       if (savedDoc) Object.defineProperty(globalThis, 'document', savedDoc)
       else delete (globalThis as { document?: unknown }).document
