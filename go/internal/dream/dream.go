@@ -413,8 +413,13 @@ func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string)
 // is a code-owned bind placeholder at every call site, never user input.
 // Embedding/cooldown/checked/scope conjuncts stay call-site-specific.
 func dreamEligibleWhere(typesParam string) string {
+	// 'synthesis' (daily reports, synthesize_report.go) dreams since 2026-07-14:
+	// the ego graph renders context_dream_links only, so synthesis blocks were
+	// edge-less islands (66 reports, zero out-edges). Their type audit-trail is
+	// dream.linkable=true; the lifecycle conjunct was the sole blocker.
+	// 'snapshot' stays excluded — superseded content must not grow new edges.
 	return `NOT is_archived
-		  AND lifecycle_state IN ('knowledge', 'canonical')
+		  AND lifecycle_state IN ('knowledge', 'canonical', 'synthesis')
 		  AND type_name = ANY(` + typesParam + `::text[])`
 }
 

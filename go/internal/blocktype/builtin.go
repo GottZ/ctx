@@ -75,6 +75,10 @@ func builtinPolicies() []Policy {
 			Digest:   DigestPolicy{Include: true},
 			Overview: OverviewPolicy{Include: true},
 			Parent:   ParentPolicy{Mode: ParentModeNone},
+			// M103: the daily synthesis report writes deterministic
+			// report→source edges (writeReportSourceLinks); the class must be
+			// declared on the source type (design/02 §4.1 fail-closed).
+			StructuralLinkClasses: []string{"references"},
 			Classify: ClassifyRules{
 				Priority:       20,
 				SourcePrefixes: []string{"dream-"},

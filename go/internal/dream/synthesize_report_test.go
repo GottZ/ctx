@@ -154,6 +154,20 @@ func TestGenerateDailyReport_HappyPath(t *testing.T) {
 	if typeName != "audit-trail" {
 		t.Errorf("type_name mismatch: got %q, want %q", typeName, "audit-trail")
 	}
+
+	// M103: the report persists its enumerated sources as deterministic
+	// references edges (report → seeded fresh block, exactly one here).
+	var links int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*)::int FROM context_structural_links
+		 WHERE source_block_id = $1::uuid AND link_class = 'references' AND origin = 'system'`,
+		blockID,
+	).Scan(&links); err != nil {
+		t.Fatalf("count structural links: %v", err)
+	}
+	if links != 1 {
+		t.Errorf("report source links: got %d, want 1", links)
+	}
 }
 
 func TestGenerateDailyReport_NoActivity(t *testing.T) {
