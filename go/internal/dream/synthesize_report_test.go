@@ -343,6 +343,58 @@ func TestGenerateDailyReport_NoActivity(t *testing.T) {
 	}
 }
 
+// TestGenerateDailyReport_InactiveScopeSkipsDespiteForeignDreams is the GD3-F3
+// probe: before E14 the dream aggregation was global, so ANY tenant's dream
+// links kept EVERY scope reporting. Seed dream activity only under 'work',
+// then ask for the 'private' report — it must skip without an LLM call. The
+// 'work' counter-run on the same data proves the seed constitutes real
+// activity (guards against a green-by-broken-fixture skip).
+func TestGenerateDailyReport_InactiveScopeSkipsDespiteForeignDreams(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	w1 := seedLinkAnchorBlock(t, pool, "work", "dream anchor w1")
+	w2 := seedLinkAnchorBlock(t, pool, "work", "dream anchor w2")
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, scope, created_at)
+		 VALUES ($1::uuid, $2::uuid, 'topical', 'work', now() - interval '1 hour')`,
+		w1, w2,
+	); err != nil {
+		t.Fatalf("seed foreign dream link: %v", err)
+	}
+
+	called := false
+	mockChatJSONExternal(t, func(_ context.Context, _, _, _ string, _ *bool, _, _ string, _ llm.Options, _ time.Duration) (*llm.ChatResponse, error) {
+		called = true
+		return &llm.ChatResponse{
+			Message: llm.Message{Role: "assistant", Content: "Tagesbericht work."},
+		}, nil
+	})
+
+	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), reportScope)
+	if err != nil {
+		t.Fatalf("inactive scope: want nil error, got %v", err)
+	}
+	if blockID != "" {
+		t.Errorf("inactive scope must skip despite foreign dream links, got block %q", blockID)
+	}
+	if called {
+		t.Error("LLM must not be invoked for a scope whose own 24h window is empty")
+	}
+
+	// Counter-run: the scope that owns the seeded dream link DOES report.
+	blockID, err = dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), "work")
+	if err != nil {
+		t.Fatalf("active scope: %v", err)
+	}
+	if blockID == "" {
+		t.Fatal("active scope with in-window dream links must report, got empty block_id")
+	}
+	if !called {
+		t.Error("counter-run must reach the LLM — otherwise the seed never constituted activity and the skip assertion above was vacuous")
+	}
+}
+
 func TestGenerateDailyReport_LLMError(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
