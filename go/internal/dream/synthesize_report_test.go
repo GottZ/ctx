@@ -216,23 +216,28 @@ func TestGenerateDailyReport_StructuralSectionInPrompt(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 
-	seedDecisionRows(t, pool, reportScope) // activity so the skip gate reports
+	// Home scope is DELIBERATELY not 'private' (the plausible hardcode value):
+	// with 'work' as the reporting scope and the leak edge under 'private', a
+	// regression from `scope = $1` to a literal would fail this test either
+	// way — missing section (fetch pinned elsewhere) or count 3 (leak counted).
+	const homeScope = "work"
+	seedDecisionRows(t, pool, homeScope) // activity so the skip gate reports
 
-	a := seedLinkAnchorBlock(t, pool, reportScope, "anchor a")
-	b := seedLinkAnchorBlock(t, pool, reportScope, "anchor b")
-	c := seedLinkAnchorBlock(t, pool, reportScope, "anchor c")
-	d := seedLinkAnchorBlock(t, pool, reportScope, "anchor d")
-	w1 := seedLinkAnchorBlock(t, pool, "work", "anchor w1")
-	w2 := seedLinkAnchorBlock(t, pool, "work", "anchor w2")
+	a := seedLinkAnchorBlock(t, pool, homeScope, "anchor a")
+	b := seedLinkAnchorBlock(t, pool, homeScope, "anchor b")
+	c := seedLinkAnchorBlock(t, pool, homeScope, "anchor c")
+	d := seedLinkAnchorBlock(t, pool, homeScope, "anchor d")
+	p1 := seedLinkAnchorBlock(t, pool, reportScope, "anchor p1")
+	p2 := seedLinkAnchorBlock(t, pool, reportScope, "anchor p2")
 
 	// In-window, home scope: 2× references(system), 1× duplicate-of(forge-sync).
-	seedStructuralLink(t, pool, reportScope, a, b, "references", "system", "1 hour")
-	seedStructuralLink(t, pool, reportScope, a, c, "references", "system", "2 hours")
-	seedStructuralLink(t, pool, reportScope, a, b, "duplicate-of", "forge-sync", "3 hours")
+	seedStructuralLink(t, pool, homeScope, a, b, "references", "system", "1 hour")
+	seedStructuralLink(t, pool, homeScope, a, c, "references", "system", "2 hours")
+	seedStructuralLink(t, pool, homeScope, a, b, "duplicate-of", "forge-sync", "3 hours")
 	// Window leak probe: same class/origin but 25h old — must not be counted.
-	seedStructuralLink(t, pool, reportScope, a, d, "references", "system", "25 hours")
-	// Scope leak probe: same class/origin, in-window, foreign scope.
-	seedStructuralLink(t, pool, "work", w1, w2, "references", "system", "1 hour")
+	seedStructuralLink(t, pool, homeScope, a, d, "references", "system", "25 hours")
+	// Scope leak probe: same class/origin, in-window, foreign scope ('private').
+	seedStructuralLink(t, pool, reportScope, p1, p2, "references", "system", "1 hour")
 
 	var gotPrompt string
 	mockChatJSONExternal(t, func(_ context.Context, _, _, _ string, _ *bool, _, userPrompt string, _ llm.Options, _ time.Duration) (*llm.ChatResponse, error) {
@@ -242,7 +247,7 @@ func TestGenerateDailyReport_StructuralSectionInPrompt(t *testing.T) {
 		}, nil
 	})
 
-	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), reportScope)
+	blockID, err := dream.GenerateDailyReport(ctx, pool, reportRouter(t, ctx, pool), homeScope)
 	if err != nil {
 		t.Fatalf("generate report: %v", err)
 	}
