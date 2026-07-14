@@ -12,8 +12,9 @@ import { gotoArea, seedSession, trackPageErrors } from './fixtures'
 //       even on hidden edges (sigma.esm.js:2006/:2736).
 //   (b) structural edges are DEFAULT-VISIBLE (user directive: no extra click)
 //       — the interim kind-branch in edgeVisible keeps them out of the dream
-//       allowlist. GC2 replaces the branch with the blocklist model; FE-W7
-//       extends this spec with the post-rels-sync default-visibility pin.
+//       allowlist. GC2 replaces the branch with the blocklist model; GC5 syncs
+//       the fixture rels to the real 5-class dream legend and pins EVERY edge
+//       default-visible (the N16 drift became a tested invariant).
 
 const FOCUS = '550e8400-e29b-41d4-a716-446655440001' // egoFixture focus node
 
@@ -215,6 +216,25 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
     await expect(page.locator('.hint')).toContainText('curved arrow = reference')
   })
 
+  // GC5 (FE-W7): EVERY fixture edge — dream AND structural — renders
+  // default-visible, no filter touched. Red against the pre-sync fixture
+  // legend (['references','links_to','supersedes']): those dream rels are not
+  // real dream classes, so the default allowlist silently hid the fixture's
+  // dream edges (N16 drift) — mutation-probed by reverting the legend.
+  test('all fixture edges render default-visible after the rels sync (GC5)', async ({ page }) => {
+    await seedSession(page, { theme: 'dark' })
+    await enterFocusStage(page)
+
+    const hidden = await page.evaluate(() => {
+      const g = (window as unknown as { __ctxGraph?: CtxGraph }).__ctxGraph!
+      return g.graph.edges().filter((e) => {
+        const dd = g.renderer.getEdgeDisplayData(e)
+        return !dd || dd.hidden === true
+      })
+    })
+    expect(hidden).toEqual([])
+  })
+
   // GC4 (FE-W6): the detail window carries a "structural links" section —
   // direction glyph + far-node button (focus path) + class/origin badges.
   // Red before the wave: section locator absent.
@@ -252,7 +272,7 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
         success: true,
         focus: FOCUS,
         params: { hops: 2 },
-        rels: ['references', 'links_to', 'supersedes'],
+        rels: ['topical', 'factual', 'causal', 'recurrent', 'supersedes'],
         nodes: [
           { id: '550e8400-e29b-41d4-a716-446655440001', title: 'Architecture', category: 'design', scope: 'home', degree: 5, hop: 0, created_at: '2026-06-01T08:00:00Z' },
           { id: '550e8400-e29b-41d4-a716-446655440002', title: 'API Spec', category: 'reference', scope: 'home', degree: 2, hop: 1, created_at: '2026-06-02T09:30:00Z' },
@@ -301,7 +321,7 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
           success: true,
           focus: FOCUS,
           params: { hops: 2 },
-          rels: ['references', 'links_to', 'supersedes'],
+          rels: ['topical', 'factual', 'causal', 'recurrent', 'supersedes'],
           nodes: [
             { id: FOCUS, title: 'Architecture', category: 'design', scope: 'home', degree: 1, hop: 0, created_at: '2026-06-01T08:00:00Z' },
             { id: '550e8400-e29b-41d4-a716-446655440002', title: 'API Spec', category: 'reference', scope: 'home', degree: 1, hop: 1, created_at: '2026-06-02T09:30:00Z' },

@@ -323,7 +323,7 @@ function egoFixture(): Record<string, unknown> {
     success: true,
     focus: '550e8400-e29b-41d4-a716-446655440001',
     params: { hops: 2 },
-    rels: ['references', 'links_to', 'supersedes'],
+    rels: ['topical', 'factual', 'causal', 'recurrent', 'supersedes'],
     nodes: [
       { id: '550e8400-e29b-41d4-a716-446655440001', title: 'Architecture', category: 'design', scope: 'home', degree: 5, hop: 0, created_at: '2026-06-01T08:00:00Z' },
       { id: '550e8400-e29b-41d4-a716-446655440002', title: 'API Spec', category: 'reference', scope: 'home', degree: 2, hop: 1, created_at: '2026-06-02T09:30:00Z' },
