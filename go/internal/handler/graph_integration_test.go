@@ -209,12 +209,27 @@ func TestHandleEgo_WireContract(t *testing.T) {
 			t.Errorf("envelope missing %q", k)
 		}
 	}
+	// GA8: the structural fields are additive, present and ARRAYS (never
+	// null) over the real stack — empty until the traversal waves deliver.
+	for _, k := range []string{"struct_rels", "origins", "structural_edges"} {
+		v, ok := resp[k]
+		if !ok {
+			t.Errorf("envelope missing structural field %q", k)
+			continue
+		}
+		if _, isArr := v.([]any); !isArr {
+			t.Errorf("envelope field %q is %T, want array (null breaks prefix-destructuring clients)", k, v)
+		}
+	}
 	stats, ok := resp["stats"].(map[string]any)
 	if !ok {
 		t.Fatal("stats is not an object")
 	}
 	if _, ok := stats["truncated"]; !ok {
 		t.Error("stats.truncated missing")
+	}
+	if _, ok := stats["structural_edges"]; !ok {
+		t.Error("stats.structural_edges missing (GA8; stats.edges stays dream-only)")
 	}
 	nodes, ok := resp["nodes"].([]any)
 	if !ok || len(nodes) == 0 {

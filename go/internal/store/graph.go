@@ -93,6 +93,22 @@ func (e GraphEdge) MarshalJSON() ([]byte, error) {
 	return fmt.Appendf(nil, "[%d,%d,%d,%.3f]", e.Src, e.Dst, e.Rel, e.Conf), nil
 }
 
+// StructGraphEdge is one structural fact edge as the all-integer wire tuple
+// [srcIdx, dstIdx, classIdx, originIdx] — src/dst point into nodes (same
+// response-local indexes as GraphEdge), classIdx into StructRels, originIdx
+// into Origins. Deliberately NO confidence slot: structural links are 1.0 by
+// definition (076), a positional slot for a constant would be dead wire
+// weight at the 1M+ target. Tuple positions are only ever APPENDED, never
+// reinterpreted — clients destructure prefixes (design/02 §4.1).
+type StructGraphEdge struct {
+	Src, Dst, Class, Origin int
+}
+
+// MarshalJSON renders the fixed-width integer tuple.
+func (e StructGraphEdge) MarshalJSON() ([]byte, error) {
+	return fmt.Appendf(nil, "[%d,%d,%d,%d]", e.Src, e.Dst, e.Class, e.Origin), nil
+}
+
 // EgoParams are the validated request parameters (ceilings enforced in the
 // handler; out-of-range is a 400 there, never silently clamped).
 type EgoParams struct {
@@ -113,11 +129,18 @@ type EgoParams struct {
 // handler (egoResponse) — three places, ONE shape: design §3.1 example ==
 // handler egoResponse == client EgoResponse.
 type EgoResult struct {
-	Focus     string
-	Rels      []string // legend for edge rel indexes
-	Nodes     []GraphNode
-	Edges     []GraphEdge
-	Truncated bool
+	Focus string
+	Rels  []string // legend for edge rel indexes
+	// StructRels/Origins are the response-local legends for StructEdges
+	// (delivered classes/origins only, dynamic — NOT the fixed dream five).
+	// Empty until the structural traversal waves (GB1–GB3) populate them;
+	// the handler marshals them as [] unconditionally (GA8).
+	StructRels  []string
+	Origins     []string
+	Nodes       []GraphNode
+	Edges       []GraphEdge
+	StructEdges []StructGraphEdge
+	Truncated   bool
 }
 
 // hopCandidate is one Q1 row: a visible, filter-passing neighbor with the

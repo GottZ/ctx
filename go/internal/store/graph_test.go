@@ -33,6 +33,32 @@ func TestGraphEdgeMarshalJSON(t *testing.T) {
 	}
 }
 
+// WIRE PROPERTY (GA8): StructGraphEdge marshals as the all-integer tuple
+// [srcIdx, dstIdx, classIdx, originIdx] — no conf slot (1.0 by definition,
+// 076); pins the §4.1 example format before the traversal waves deliver
+// non-empty payloads.
+func TestStructGraphEdgeMarshalJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		edge StructGraphEdge
+		want string
+	}{
+		{"spec example", StructGraphEdge{Src: 0, Dst: 2, Class: 0, Origin: 0}, "[0,2,0,0]"},
+		{"all positions distinct", StructGraphEdge{Src: 3, Dst: 1, Class: 2, Origin: 1}, "[3,1,2,1]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := json.Marshal(tc.edge)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 // WIRE PROPERTY: the visibility triple is byte-exactly the canonical fragment
 // from the design (§3.2, extended in design/07 §4 with the block-grant OR-arm
 // and in WF T6 with the registry type allowlist replacing the system-meta

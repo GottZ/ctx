@@ -208,6 +208,8 @@ GET /api/graph/ego?block=<uuid>&hops=2&per_node_cap=25&limit=500
 
 Out-of-range values are a `400`, never silently clamped. Response: `nodes` (id, title capped at 120 chars, category, scope, visible `degree` — capped at 201, rendered "200+" — and `hop`), `edges` as compact index tuples `[srcIdx, dstIdx, relIdx, confidence]`, and `stats`. The payload never contains block `content` (load it lazily via `manage get`).
 
+Since graph-structural GA8 the envelope additionally carries `struct_rels` + `origins` (response-local legends) and `structural_edges` (all-integer tuples `[srcIdx, dstIdx, classIdx, originIdx]` — no confidence slot, structural facts are 1.0 by definition), plus `stats.structural_edges` (`stats.edges` stays dream-only). All three are arrays unconditionally, currently **delivered empty** — the structural traversal lands with the GB backend waves; old clients ignore the fields.
+
 **Security semantics.** The visibility triple (not archived, block type on the registry visibility allowlist, scope readable by the key) is applied inside every hop AND inside the per-node cap legs — a node reachable only through a foreign private bridge is never delivered, and invisible edges never consume cap slots. `degree` counts only visible neighbors (scan budget 1000 raw edges/direction). "Does not exist" and "not visible" answer with an identical `404` (no existence oracle); only successful calls write an access-log row (`action='graph'`, `block_id=NULL`).
 
 ### Overview (cluster "landkarte")

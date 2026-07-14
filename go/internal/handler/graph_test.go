@@ -144,17 +144,24 @@ func TestEgoResponse_EnvelopeGolden(t *testing.T) {
 		t.Fatalf("marshal envelope: %v", err)
 	}
 
+	// GA8 (design/02 §4.1): the structural envelope fields ship EMPTY but
+	// unconditional — struct_rels/origins after rels, structural_edges after
+	// edges, stats.structural_edges between edges and truncated. stats.edges
+	// stays dream-only (E4).
 	want := `{` +
 		`"success":true,` +
 		`"focus":"019c9629-faac-75a5-98b6-de04dbfc8404",` +
 		`"params":{"hops":2,"per_node_cap":25,"limit":500,"min_confidence":0,"link_class":null,"edge_limit":4000},` +
 		`"rels":["topical","factual","causal","recurrent","supersedes"],` +
+		`"struct_rels":[],` +
+		`"origins":[],` +
 		`"nodes":[` +
 		`{"id":"019c9629-faac-75a5-98b6-de04dbfc8404","title":"Hub","category":"infrastructure","scope":"private","degree":18,"hop":0,"created_at":"2026-02-23T11:02:41Z"},` +
 		`{"id":"019c5ea2-0000-7000-9000-000000000001","title":"Neighbor","category":"learnings","scope":"private","degree":17,"hop":1,"created_at":"2026-02-12T08:00:00Z"}` +
 		`],` +
 		`"edges":[[0,1,0,0.830]],` +
-		`"stats":{"nodes":2,"edges":1,"truncated":false,"elapsed_ms":4}` +
+		`"structural_edges":[],` +
+		`"stats":{"nodes":2,"edges":1,"structural_edges":0,"truncated":false,"elapsed_ms":4}` +
 		`}`
 
 	if string(got) != want {
@@ -175,5 +182,17 @@ func TestEgoResponse_EmptyCollectionsAreArrays(t *testing.T) {
 	s := string(got)
 	if strings.Contains(s, `"nodes":null`) || strings.Contains(s, `"edges":null`) {
 		t.Errorf("empty collections must marshal as [], got %s", s)
+	}
+	// GA8: the three structural collections are arrays unconditionally too —
+	// old clients destructure prefixes, null would throw in the FE merge loop.
+	for _, f := range []string{`"struct_rels":null`, `"origins":null`, `"structural_edges":null`} {
+		if strings.Contains(s, f) {
+			t.Errorf("structural collection marshaled as null (%s), want []: %s", f, s)
+		}
+	}
+	for _, f := range []string{`"struct_rels":[]`, `"origins":[]`, `"structural_edges":[]`} {
+		if !strings.Contains(s, f) {
+			t.Errorf("structural collection %s missing from empty envelope: %s", f, s)
+		}
 	}
 }

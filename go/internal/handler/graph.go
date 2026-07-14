@@ -71,13 +71,19 @@ var fullUUIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 // Store result and wire format must not drift apart silently (truncated lives
 // in stats on the wire); the envelope golden test pins this.
 type egoResponse struct {
-	Success bool              `json:"success"`
-	Focus   string            `json:"focus"`
-	Params  egoParamsEcho     `json:"params"`
-	Rels    []string          `json:"rels"`
-	Nodes   []store.GraphNode `json:"nodes"`
-	Edges   []store.GraphEdge `json:"edges"`
-	Stats   egoStats          `json:"stats"`
+	Success bool          `json:"success"`
+	Focus   string        `json:"focus"`
+	Params  egoParamsEcho `json:"params"`
+	Rels    []string      `json:"rels"`
+	// GA8 (design/02 §4.1): structural legends + edges are ADDITIVE and
+	// unconditional arrays (never null) — old clients ignore them, the SPA
+	// consumes them tolerantly since GA2. Empty until GB1–GB3 deliver.
+	StructRels  []string                `json:"struct_rels"`
+	Origins     []string                `json:"origins"`
+	Nodes       []store.GraphNode       `json:"nodes"`
+	Edges       []store.GraphEdge       `json:"edges"`
+	StructEdges []store.StructGraphEdge `json:"structural_edges"`
+	Stats       egoStats                `json:"stats"`
 }
 
 // egoParamsEcho echoes the validated parameters. A typed struct (not a map)
@@ -95,10 +101,13 @@ type egoParamsEcho struct {
 }
 
 type egoStats struct {
-	Nodes     int   `json:"nodes"`
-	Edges     int   `json:"edges"`
-	Truncated bool  `json:"truncated"`
-	ElapsedMs int64 `json:"elapsed_ms"`
+	Nodes int `json:"nodes"`
+	// Edges stays dream-only (E4) — existing consumers keep their semantics;
+	// StructuralEdges is the separate fact-edge counter.
+	Edges           int   `json:"edges"`
+	StructuralEdges int   `json:"structural_edges"`
+	Truncated       bool  `json:"truncated"`
+	ElapsedMs       int64 `json:"elapsed_ms"`
 }
 
 // HandleEgo processes GET /api/graph/ego requests.
@@ -180,6 +189,18 @@ func buildEgoResponse(res *store.EgoResult, p store.EgoParams, elapsedMs int64) 
 	if edges == nil {
 		edges = []store.GraphEdge{}
 	}
+	structRels := res.StructRels
+	if structRels == nil {
+		structRels = []string{}
+	}
+	origins := res.Origins
+	if origins == nil {
+		origins = []string{}
+	}
+	structEdges := res.StructEdges
+	if structEdges == nil {
+		structEdges = []store.StructGraphEdge{}
+	}
 	return egoResponse{
 		Success: true,
 		Focus:   res.Focus,
@@ -194,14 +215,18 @@ func buildEgoResponse(res *store.EgoResult, p store.EgoParams, elapsedMs int64) 
 			CreatedAfter:  p.CreatedAfter,
 			CreatedBefore: p.CreatedBefore,
 		},
-		Rels:  res.Rels,
-		Nodes: nodes,
-		Edges: edges,
+		Rels:        res.Rels,
+		StructRels:  structRels,
+		Origins:     origins,
+		Nodes:       nodes,
+		Edges:       edges,
+		StructEdges: structEdges,
 		Stats: egoStats{
-			Nodes:     len(res.Nodes),
-			Edges:     len(res.Edges),
-			Truncated: res.Truncated,
-			ElapsedMs: elapsedMs,
+			Nodes:           len(res.Nodes),
+			Edges:           len(res.Edges),
+			StructuralEdges: len(res.StructEdges),
+			Truncated:       res.Truncated,
+			ElapsedMs:       elapsedMs,
 		},
 	}
 }
