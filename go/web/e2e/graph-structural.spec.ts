@@ -364,6 +364,10 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
         await page.setViewportSize(VIEWPORTS[viewport])
         await seedSession(page, { theme })
         await enterFocusStage(page)
+        // Mirror the contract-runner mountState guard: axe must scan against
+        // the APPLIED theme — without this assert a light/mobile cell would
+        // silently scan whatever theme-boot fell back to.
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
         const contract = contracts.find((c) => c.route === '/graph')
         if (!contract) throw new Error('graph contract missing from registry')
         await runAxeGate(page, contract, theme, viewport, testInfo)
