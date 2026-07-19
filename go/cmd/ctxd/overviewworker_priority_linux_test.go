@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,20 @@ import (
 
 	"github.com/GottZ/ctx/internal/overview"
 )
+
+// truncated renders captured child output for a failure message, capped so a
+// chatty child cannot flood the test log.
+func truncated(b *bytes.Buffer) string {
+	const maxLen = 4096
+	s := b.String()
+	if s == "" {
+		return "(empty)"
+	}
+	if len(s) > maxLen {
+		return s[:maxLen] + "\n… (truncated)"
+	}
+	return s
+}
 
 // priorityHelperEnv routes TestOverviewWorkerPriorityHelperProcess into the
 // helper body when the /proc probe below re-execs the test binary. Unset in a
@@ -98,6 +113,14 @@ func probeDeadline(t *testing.T) time.Time {
 func TestOverviewWorkerSelfDeprioritization_Proc(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestOverviewWorkerPriorityHelperProcess$") //nolint:gosec // re-exec of the own test binary
 	cmd.Env = append(os.Environ(), priorityHelperEnv+"=1")
+	// Child output is CAPTURED, not discarded: when the probe fails, whatever
+	// the child printed (test-framework banner, panic, race-runtime error) is
+	// the primary diagnostic — the CI incidents 2026-07-19 (nightly + v4.17.1,
+	// child sat 5s/90s at nice 0, never a zombie) were undebuggable with the
+	// child's stderr routed to /dev/null.
+	var childOut bytes.Buffer
+	cmd.Stdout = &childOut
+	cmd.Stderr = &childOut
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("stdin pipe: %v", err)
@@ -131,10 +154,10 @@ func TestOverviewWorkerSelfDeprioritization_Proc(t *testing.T) {
 		}
 	}
 	if !ok || state == "Z" {
-		t.Fatalf("worker child exited before deprioritizing (state %q, /proc readable %v) — helper body did not reach the dispatch entry", state, ok)
+		t.Fatalf("worker child exited before deprioritizing (state %q, /proc readable %v) — helper body did not reach the dispatch entry\nchild output:\n%s", state, ok, truncated(&childOut))
 	}
 	if nice != 19 {
-		t.Fatalf("worker child runs at nice %d, want 19 — deprioritizeSelf missing from the dispatch entry, or broken", nice)
+		t.Fatalf("worker child runs at nice %d, want 19 (state %q) — deprioritizeSelf missing from the dispatch entry, unreached, or broken\nchild output:\n%s", nice, state, truncated(&childOut))
 	}
 
 	want := ioprioClassIdle << ioprioClassShift
