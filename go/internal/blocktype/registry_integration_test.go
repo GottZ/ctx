@@ -166,10 +166,10 @@ func TestRegistryGolden_Integration(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_block_types`).Scan(&n); err != nil {
 			t.Fatalf("count: %v", err)
 		}
-		// 6 since Welle I-C: 072 seeds 4, 084 seeds issue+comment; re-running 072
-		// (ON CONFLICT DO NOTHING) adds none.
-		if n != 6 {
-			t.Errorf("rows after double-run = %d, want 6", n)
+		// 7 since M107: 072 seeds 4, 084 seeds issue+comment, 107 seeds
+		// checkpoint; re-running 072 (ON CONFLICT DO NOTHING) adds none.
+		if n != 7 {
+			t.Errorf("rows after double-run = %d, want 7", n)
 		}
 	})
 
@@ -181,10 +181,10 @@ func TestRegistryGolden_Integration(t *testing.T) {
 			    AND metadata->>'via' = 'sql'`).Scan(&n); err != nil {
 			t.Fatalf("audit count: %v", err)
 		}
-		// 6 since Welle I-C: 4 seed inserts from 072 + issue/comment from 084,
-		// all via=sql (migration path, no api_key_id).
-		if n != 6 {
-			t.Errorf("block_type insert audit rows = %d, want 6 (seed inserts, via=sql)", n)
+		// 7 since M107: 4 seed inserts from 072 + issue/comment from 084 +
+		// checkpoint from 107, all via=sql (migration path, no api_key_id).
+		if n != 7 {
+			t.Errorf("block_type insert audit rows = %d, want 7 (seed inserts, via=sql)", n)
 		}
 	})
 

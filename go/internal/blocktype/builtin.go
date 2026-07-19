@@ -146,6 +146,29 @@ func builtinPolicies() []Policy {
 			Parent:    ParentPolicy{Mode: ParentModeRequired, Relationship: "comment-of"},
 			Classify:  ClassifyRules{Priority: DefaultClassifyPriority},
 		},
+		// checkpoint: ID-anchored evidence blocks (compaction-checkpoint
+		// manifests + transcript source parts, migration 107). Resolution runs
+		// EXCLUSIVELY over exact block IDs (manifest content/metadata carry the
+		// source_block_ids + parent_manifest chain), so the type stays out of
+		// every autonomous pipeline: retrieval=excluded (transcript parts are
+		// token-dense near-duplicates — in retrieval they flood candidate sets
+		// and overflow the reranker slot window), guard.check=false AND
+		// guard.candidate=false (consecutive checkpoints of one session are
+		// near-duplicates BY CONSTRUCTION — the default archive lane silently
+		// broke ID chains, the 2026-07-20 dangling-manifest incident),
+		// dream/digest/overview all false. Classified by the stable writer
+		// title prefix ("Compaction source …", priority 30 after system-meta/
+		// audit-trail); writers SHOULD still set type=checkpoint explicitly.
+		{
+			Name: "checkpoint", Scope: globalScope, Builtin: true,
+			Retrieval: RetrievalPolicy{Kind: RetrievalExcluded},
+			Guard:     GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
+			Dream:     DreamPolicy{Linkable: false},
+			Digest:    DigestPolicy{Include: false},
+			Overview:  OverviewPolicy{Include: false},
+			Parent:    ParentPolicy{Mode: ParentModeNone},
+			Classify:  ClassifyRules{Priority: 30, TitlePatterns: []string{"compaction source"}},
+		},
 	}
 }
 

@@ -16,8 +16,9 @@ func builtinTestSet(t *testing.T) *Set {
 
 func TestBuiltinSetShape(t *testing.T) {
 	s := builtinTestSet(t)
-	// Six builtins since Welle I-C: the four M035 enum classes + issue/comment.
-	want := []string{"audit-trail", "comment", "issue", "knowledge", "reference", "system-meta"}
+	// Seven builtins since M107: the four M035 enum classes + issue/comment
+	// (Welle I-C) + checkpoint (ID-anchored evidence, out of every pipeline).
+	want := []string{"audit-trail", "checkpoint", "comment", "issue", "knowledge", "reference", "system-meta"}
 	if got := s.Names(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Names() = %v, want %v", got, want)
 	}
@@ -26,16 +27,19 @@ func TestBuiltinSetShape(t *testing.T) {
 	}
 	// Retrieval-visible = full-pass|damped|aggregate. issue is full-pass; comment
 	// is aggregate-to-parent (I-E flip) — hence VISIBLE (it ranks in RRF, then
-	// folds onto its parent issue). Only system-meta stays excluded.
+	// folds onto its parent issue). system-meta + checkpoint stay excluded
+	// (checkpoint evidence resolves over exact IDs only, M107).
 	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "comment", "issue", "knowledge", "reference"}) {
-		t.Errorf("VisibleTypes() = %v (only system-meta must be excluded; comment is aggregate-visible)", got)
+		t.Errorf("VisibleTypes() = %v (system-meta + checkpoint must be excluded; comment is aggregate-visible)", got)
 	}
-	// guard.check: the 4 builtins + issue; comment is OUT (guard.check=false).
+	// guard.check: the 4 builtins + issue; comment + checkpoint are OUT
+	// (guard.check=false — consecutive checkpoints are near-duplicates by
+	// construction, the default archive lane broke ID chains, M107).
 	if got := s.GuardCheckTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference", "system-meta"}) {
-		t.Errorf("GuardCheckTypes() = %v, want 4 builtins + issue (comment out)", got)
+		t.Errorf("GuardCheckTypes() = %v, want 4 builtins + issue (comment + checkpoint out)", got)
 	}
 	if got := s.GuardCandidateTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference", "system-meta"}) {
-		t.Errorf("GuardCandidateTypes() = %v, want 4 builtins + issue (comment out)", got)
+		t.Errorf("GuardCandidateTypes() = %v, want 4 builtins + issue (comment + checkpoint out)", got)
 	}
 	// The four M035 classes keep the guard bestand — archive persist + cross-
 	// scope candidates. Builtins are constructed directly (not via DecodePolicy),
@@ -160,6 +164,11 @@ func TestClassifyMirrorsDecisionTree(t *testing.T) {
 		{"title pattern", "Welle 41 Ergebnisse", nil, "audit-trail", true},
 		{"title pattern case-insensitive", "SELF-AUDIT protokoll", nil, "audit-trail", true},
 		{"no match falls to default", "pgvector tuning notes", map[string]any{"source": "claude-code"}, "knowledge", false},
+		// checkpoint (M107): the stable writer title prefix classifies both
+		// manifest and part rows; is_meta (priority 10) still wins over it.
+		{"checkpoint manifest title", "Compaction source 20260712_205012_837f2c 1816f6b3ce6fc7e8 5e6b1698beab7814 manifest", nil, "checkpoint", true},
+		{"checkpoint part title", "Compaction source candidate-e2e-x 00ff 00ff part 001 of 002", nil, "checkpoint", true},
+		{"is_meta beats checkpoint pattern", "Compaction source irrelevant", map[string]any{"is_meta": true}, "system-meta", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
