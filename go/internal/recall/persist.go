@@ -10,6 +10,7 @@ package recall
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -20,9 +21,10 @@ import (
 // "all", and the four *_ms/recall_* metrics are NULL whenever Valid is false
 // (an aborted or plan-assertion-violating probe has nothing to report).
 type Run struct {
-	ID             string // set by the DB default (uuidv7()); empty on Insert input
-	RunGroup       string // uuid — one scheduler run = one group across all strata
-	Stratum        string // "small" | "medium" | "large" | "all"
+	ID             string    // set by the DB default (uuidv7()); empty on Insert input
+	RanAt          time.Time // set by the DB default (now()); zero on Insert input, filled by LatestByStratum for the status age_ms (design/01 §4.4)
+	RunGroup       string    // uuid — one scheduler run = one group across all strata
+	Stratum        string    // "small" | "medium" | "large" | "all"
 	Scope          *string
 	CorpusEmbedded int
 	K              int16
@@ -155,7 +157,7 @@ func DeleteOlderThan(ctx context.Context, q Querier, retentionDays int) (int64, 
 // pass needed.
 func LatestByStratum(ctx context.Context, q RowsQuerier, limit int) ([]Run, error) {
 	rows, err := q.Query(ctx,
-		`SELECT id, run_group, stratum, scope, corpus_embedded, k, n_queries,
+		`SELECT id, ran_at, run_group, stratum, scope, corpus_embedded, k, n_queries,
 		        query_source, ef_search, iterative_scan, valid,
 		        recall_avg, recall_min, ann_ms_p50, ann_ms_p95, exact_ms_p50, meta
 		 FROM (
@@ -180,7 +182,7 @@ func LatestByStratum(ctx context.Context, q RowsQuerier, limit int) ([]Run, erro
 	for rows.Next() {
 		var r Run
 		if err := rows.Scan(
-			&r.ID, &r.RunGroup, &r.Stratum, &r.Scope, &r.CorpusEmbedded, &r.K, &r.NQueries,
+			&r.ID, &r.RanAt, &r.RunGroup, &r.Stratum, &r.Scope, &r.CorpusEmbedded, &r.K, &r.NQueries,
 			&r.QuerySource, &r.EfSearch, &r.IterativeScan, &r.Valid,
 			&r.RecallAvg, &r.RecallMin, &r.AnnMsP50, &r.AnnMsP95, &r.ExactMsP50, &r.Meta,
 		); err != nil {

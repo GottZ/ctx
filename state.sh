@@ -29,6 +29,11 @@ col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE ta
 categories=$($DB_CMD -c "SELECT string_agg(category, ', ' ORDER BY category) FROM (SELECT DISTINCT category FROM context_blocks WHERE NOT is_archived) t;")
 blob_count=$($DB_CMD -c "SELECT count(*) FROM context_blobs;")
 api_keys=$($DB_CMD -c "SELECT string_agg(label || ' (' || home_scope || ')', ', ' ORDER BY label) FROM context_api_keys;")
+# recall_check last valid run (Achse 01, Mig 108). n/a on pre-108 DBs — the
+# table-missing psql error is swallowed by 2>/dev/null + the || fallback, so
+# state.sh never aborts under set -e on an older schema (design/01 §4.4).
+recall_last=$($DB_CMD -c "SELECT to_char(max(ran_at),'YYYY-MM-DD')||' avg='||coalesce(round(avg(recall_avg)::numeric,3)::text,'n/a') FROM context_recall_runs WHERE valid AND run_group=(SELECT run_group FROM context_recall_runs WHERE valid ORDER BY ran_at DESC LIMIT 1);" 2>/dev/null || echo "n/a")
+recall_last=${recall_last:-n/a}
 
 # --- Migrations ---
 migration_count=$(ls "$SCRIPT_DIR"/go/migrations/*.sql 2>/dev/null | wc -l)
@@ -146,6 +151,7 @@ echo "  Columns (blocks):   $col_count"
 echo "  Categories:         $categories"
 echo "  Blobs:              $blob_count"
 echo "  API Keys:           $api_keys"
+echo "  Recall (last valid):$recall_last"
 echo ""
 echo "--- Migrations ---"
 echo "  Count:              $migration_count"

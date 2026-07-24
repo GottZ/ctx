@@ -157,6 +157,9 @@ func mustField(t *testing.T, raw json.RawMessage, key string) json.RawMessage {
 // is a deliberate contract change that must update both sides.
 func TestStatusGoldenKeys(t *testing.T) {
 	next := time.Date(2026, 6, 13, 14, 31, 0, 0, time.UTC)
+	// recall fixture pointers (no address-of-literal in composite literals).
+	recallScope := "shared"
+	recallAvg, recallMin := 0.98, 0.91
 	resp := statusResponse{
 		Success:  true,
 		Health:   healthResponse{Status: "ok", Services: map[string]string{"database": "ok"}},
@@ -200,6 +203,19 @@ func TestStatusGoldenKeys(t *testing.T) {
 			State: "Fresh", Seq: 7, StalenessMs: 0, Nodes: 42,
 			DreamEdges: 100, StructEdges: 20, LastBuildMs: 12, Fails: 0,
 		},
+		// W01-4 (design/01 §4.4): the recall_check section is server-admin PRESENT
+		// (this fixture); TestStatusPerTenantView's server_global_fields_zero_for_
+		// tenant subtest pins ABSENT on the tenant path. last_run_at + strata rows
+		// pin the wire shape (recall_avg/recall_min are *float64 → null-capable).
+		Recall: &recallStatus{
+			LastRunAt: &next,
+			Strata: []recallStratumRow{{
+				Stratum: "large", Scope: &recallScope, K: 10,
+				RecallAvg: &recallAvg, RecallMin: &recallMin,
+				NQueries: 20, Valid: true, AgeMs: 3600000, ScopeChanged: false,
+			}},
+			Invalid: 0,
+		},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -207,7 +223,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
-		"dispatch", "dispatch_tenant", "db", "graph_cache",
+		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall",
 	})
 
 	var top map[string]json.RawMessage
@@ -235,6 +251,21 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "graph_cache", top["graph_cache"], []string{
 		"state", "seq", "built_at", "staleness_ms", "nodes", "dream_edges",
 		"struct_edges", "last_build_ms", "last_error_class", "fails",
+	})
+
+	// W01-4 (design/01 §4.4): the recall_check section wire shape. last_run_at is
+	// PRESENT (null-capable *time.Time); strata is an array whose rows carry the
+	// pinned per-(stratum,scope,k) shape (recall_avg/recall_min are null-capable).
+	assertKeys(t, "recall", top["recall"], []string{
+		"last_run_at", "strata", "invalid_runs_7d",
+	})
+	var rss []json.RawMessage
+	if err := json.Unmarshal(mustField(t, top["recall"], "strata"), &rss); err != nil {
+		t.Fatalf("unmarshal recall.strata: %v", err)
+	}
+	assertKeys(t, "recall.strata row", rss[0], []string{
+		"stratum", "scope", "k", "recall_avg", "recall_min", "n_queries",
+		"valid", "age_ms", "scope_changed",
 	})
 
 	// MW12 dispatch section (server-admin) wire pins.

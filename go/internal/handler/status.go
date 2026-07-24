@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/graphcache"
+	"github.com/GottZ/ctx/internal/recall"
 	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -44,6 +45,18 @@ type armRunSource interface {
 // unwired.
 type graphCacheSource interface {
 	GraphCacheStatus() (graphcache.Status, bool)
+}
+
+// recallRunSource is the OPTIONAL scheduler slice for the Achse-01 recall_check
+// last-run stamp (design/01 §4.4). *events.Scheduler satisfies it; a
+// dreamModeSource that does not (test fakes) yields no recall section — the
+// collector type-asserts and degrades, never a hard dependency. It is its OWN
+// narrow interface, deliberately kept OFF armRunSource so the byte-identical
+// LastArmRuns signature — and the armRunSource assertion — stays untouched (the
+// armRunSource trap, §4.3: folding LastRecallRun into LastArmRuns would silently
+// drop the guard/digest/overview stamps from /api/status with no compile error).
+type recallRunSource interface {
+	LastRecallRun() time.Time
 }
 
 // DispatchSource is the in-memory admission-registry view the collector adds as
@@ -114,6 +127,51 @@ type statusResponse struct {
 	// per-tenant path (SnapshotForTenant never sets it — cache interna are
 	// server-global) and when no graphCacheSource is wired (test fakes).
 	GraphCache *graphCacheStatus `json:"graph_cache,omitempty"`
+	// Recall is the server-admin-only Achse-01 recall_check section (design/01
+	// §4.4, W01-4). Pointer + omitempty, the Profiles/DB/GraphCache convention
+	// (:80/:96/:110): PRESENT on the server-admin path when a recallRunSource is
+	// wired (even before the first run — last_run_at then reads null and strata is
+	// empty []), ABSENT on the per-tenant path (SnapshotForTenant never sets it —
+	// recall metrics reveal scope existence/size and go tenants nothing, §5.3) and
+	// when no recallRunSource is wired (test fakes).
+	Recall *recallStatus `json:"recall,omitempty"`
+}
+
+// recallStatus is the /api/status recall_check block wire shape (design/01
+// §4.4): the ANN-vs-exact HNSW recall telemetry. last_run_at is the in-memory
+// PROCESS stamp (recallRunSource.LastRecallRun; nil = the arm never ran this
+// process life), a different source than the persisted strata below (a run that
+// aborted before its first insert stamps the process clock but writes no row).
+// strata is the latest measurement per (stratum,scope,k) from
+// context_recall_runs; invalid_runs_7d counts the valid=false rows of the last
+// 7 days — plan-assertion violations + demand/budget aborts surfaced fail-closed
+// (§4.2.4/§4.3), so a silently-degrading measurement is visible as a rising
+// count, never as a missing reading.
+type recallStatus struct {
+	LastRunAt *time.Time         `json:"last_run_at"`
+	Strata    []recallStratumRow `json:"strata"`
+	Invalid   int                `json:"invalid_runs_7d"`
+}
+
+// recallStratumRow is one latest (stratum,scope,k) measurement in the recall
+// section. scope is null for the pseudo-stratum "all". recall_avg/recall_min are
+// null when the latest run of the group was invalid (valid=false → no recall
+// number was written). age_ms is the age of ran_at at snapshot time (staleness,
+// the graph_cache staleness_ms convention — a stale group is visible, never
+// hidden). scope_changed mirrors meta.scope_changed: the largest scope of a
+// class shifted between runs, so this reading measures a DIFFERENT object than
+// the prior one in the same (stratum,k) series — surfaced as its own flag so a
+// trend reader never treats a scope hop as a recall regression (§4.2.1).
+type recallStratumRow struct {
+	Stratum      string   `json:"stratum"`
+	Scope        *string  `json:"scope"`
+	K            int      `json:"k"`
+	RecallAvg    *float64 `json:"recall_avg"`
+	RecallMin    *float64 `json:"recall_min"`
+	NQueries     int      `json:"n_queries"`
+	Valid        bool     `json:"valid"`
+	AgeMs        int64    `json:"age_ms"`
+	ScopeChanged bool     `json:"scope_changed"`
 }
 
 // graphCacheStatus is the /api/status graph_cache block wire shape (design/05
@@ -220,6 +278,11 @@ type cheapSnapshot struct {
 	// tick (like the dispatch/arm stamps). nil when no graphCacheSource is wired
 	// or its manager is absent — no section emitted (design/05 §4.6).
 	graphCache *graphCacheStatus
+	// recall is the Achse-01 recall_check section (design/01 §4.4): the process
+	// last-run stamp (recallRunSource) plus the latest-per-(stratum,scope,k) DB
+	// read + the 7d invalid count, assembled at the tick. nil when no
+	// recallRunSource is wired (test fakes) — no section emitted.
+	recall *recallStatus
 }
 
 // StatusCollector is the process-wide status aggregator (design 04 §3.6, W6).
@@ -580,7 +643,84 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 			snap.graphCache = buildGraphCacheStatus(gcs)
 		}
 	}
+	// Achse-01 recall_check section (design/01 §4.4): the in-memory last-run
+	// stamp via its OWN narrow recallRunSource assertion (armRunSource stays
+	// byte-identical, the armRunSource trap §4.3) plus the latest-per-(stratum,
+	// scope,k) DB read over idx_recall_runs_stratum and the 7d invalid count. The
+	// read runs HERE in buildCheap — single-digit rows over the index, cheap
+	// enough for the tick cadence, no own cadence source (that stays reserved for
+	// the O(n) queue scan). Absent when no recallRunSource is wired (test fakes).
+	if src, ok := c.dreams.(recallRunSource); ok {
+		snap.recall = c.buildRecallStatus(ctx, src.LastRecallRun())
+	}
 	return snap
+}
+
+// recallStrataLimit caps the latest-by-stratum read for the status section:
+// strata (small/medium/large/all) × k_list (10,75) plus a margin for scope-
+// change event rows — a single-digit row count over idx_recall_runs_stratum,
+// far below any cost that would matter at the per-tick cadence (design/01 §4.4).
+const recallStrataLimit = 32
+
+// buildRecallStatus assembles the recall_check section: the process last-run
+// stamp (already read from the recallRunSource by the caller), the latest
+// measurement per (stratum,scope,k), and the 7d invalid count. DB errors degrade
+// to an empty/partial section (WARN) rather than failing the whole refresh — the
+// same read-driven posture the neighbouring cheap sources take.
+func (c *StatusCollector) buildRecallStatus(ctx context.Context, lastRun time.Time) *recallStatus {
+	rs := &recallStatus{
+		LastRunAt: timePtr(lastRun),
+		Strata:    []recallStratumRow{},
+	}
+	runs, err := recall.LatestByStratum(ctx, c.pool, recallStrataLimit)
+	if err != nil {
+		slog.Warn("status: recall latest-by-stratum failed", "error", err)
+	} else {
+		now := time.Now()
+		for _, r := range runs {
+			row := recallStratumRow{
+				Stratum:      r.Stratum,
+				Scope:        r.Scope,
+				K:            int(r.K),
+				RecallAvg:    r.RecallAvg,
+				RecallMin:    r.RecallMin,
+				NQueries:     int(r.NQueries),
+				Valid:        r.Valid,
+				ScopeChanged: metaBool(r.Meta, "scope_changed"),
+			}
+			if !r.RanAt.IsZero() {
+				row.AgeMs = now.Sub(r.RanAt).Milliseconds()
+			}
+			rs.Strata = append(rs.Strata, row)
+		}
+	}
+	rs.Invalid = c.queryInvalidRecallRuns7d(ctx)
+	return rs
+}
+
+// queryInvalidRecallRuns7d counts the invalid (valid=false) recall runs of the
+// last 7 days — plan-assertion violations + demand/budget aborts surfaced
+// fail-closed (design/01 §4.2.4/§4.3). A small ran_at-index-bound count; 0 on
+// error (logged), never a failed refresh.
+func (c *StatusCollector) queryInvalidRecallRuns7d(ctx context.Context) int {
+	var n int
+	err := c.pool.QueryRow(ctx,
+		`SELECT count(*)::int FROM context_recall_runs
+		 WHERE NOT valid AND ran_at > now() - interval '7 days'`).Scan(&n)
+	if err != nil {
+		slog.Warn("status: recall invalid_runs_7d query failed", "error", err)
+		return 0
+	}
+	return n
+}
+
+// metaBool reads a boolean flag from a recall run's meta map (jsonb → bool via
+// pgx). Missing key or non-bool value → false.
+func metaBool(meta map[string]any, key string) bool {
+	if v, ok := meta[key].(bool); ok {
+		return v
+	}
+	return false
 }
 
 // buildGraphCacheStatus maps the graphcache.Status manager view onto the slim
@@ -685,6 +825,10 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		// nil → omitted when no graphCacheSource is wired). The per-tenant
 		// SnapshotForTenant never calls assemble, so its field stays nil → absent.
 		GraphCache: cheap.graphCache,
+		// recall is server-admin-only and PRESENT when captured (pointer; nil →
+		// omitted when no recallRunSource is wired). The per-tenant
+		// SnapshotForTenant never calls assemble, so its field stays nil → absent.
+		Recall: cheap.recall,
 	}
 }
 
