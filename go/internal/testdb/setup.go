@@ -51,6 +51,54 @@ func SetupTestDB(t *testing.T) *pgxpool.Pool {
 // same, already-migrated-and-drift-induced database the parent set up).
 func SetupTestDBWithDSN(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
+	pool, dsn := provisionContainer(t)
+
+	if err := store.RunMigrations(context.Background(), pool); err != nil {
+		t.Fatalf("testdb: apply migrations: %v", err)
+	}
+
+	// Mirrors the ctxd boot sequence (migration 108, W03-1): every fresh
+	// test DB gets its _migrations checksums stamped, so tests exercising
+	// that column see the same post-boot state as production.
+	if err := store.BackfillChecksums(context.Background(), pool); err != nil {
+		t.Fatalf("testdb: backfill migration checksums: %v", err)
+	}
+
+	return pool, dsn
+}
+
+// SetupTestDBUpTo starts a fresh Postgres container and applies only
+// embedded migrations with version <= maxVersion, in version order — every
+// higher-numbered migration (e.g. one newly authored file under test)
+// stays unapplied. Unlike SetupTestDB it does NOT run BackfillChecksums on
+// its own: callers that later complete the chain via store.RunMigrations
+// get the normal boot-sequence backfill for free at that point; callers
+// that inspect the capped state directly (design/03 §7 W03-6 Gate 1) want
+// exactly the not-yet-115 database, nothing implicitly stamped ahead of it.
+//
+// Design/03 §7 W03-6 Gate 1: reproduces the exact pre-115 Prod state (chain
+// applied through 114, HNSW index then rebuilt out-of-band to
+// ef_construction=128 the way Session 3 really did it) that the historic
+// drift Migration 115 reconciles was never visible against — SetupTestDB's
+// "always full embedded chain" contract cannot express "one migration short
+// of head".
+func SetupTestDBUpTo(t *testing.T, maxVersion int) *pgxpool.Pool {
+	t.Helper()
+	pool, _ := provisionContainer(t)
+
+	if err := store.RunMigrationsUpTo(context.Background(), pool, maxVersion); err != nil {
+		t.Fatalf("testdb: apply migrations up to %d: %v", maxVersion, err)
+	}
+
+	return pool
+}
+
+// provisionContainer starts a fresh Postgres container (extensions enabled,
+// no migrations applied yet) and returns a connected pool + its DSN. Shared
+// by SetupTestDBWithDSN and SetupTestDBUpTo — the only difference between
+// them is which store.RunMigrations* call runs on top.
+func provisionContainer(t *testing.T) (*pgxpool.Pool, string) {
+	t.Helper()
 
 	image := defaultImage
 	if v := os.Getenv("CTX_TEST_PG_IMAGE"); v != "" {
@@ -103,17 +151,6 @@ func SetupTestDBWithDSN(t *testing.T) (*pgxpool.Pool, string) {
 	// any migration — production relies on the bootstrap script.
 	if _, err := pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb"); err != nil {
 		t.Fatalf("testdb: enable timescaledb: %v", err)
-	}
-
-	if err := store.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("testdb: apply migrations: %v", err)
-	}
-
-	// Mirrors the ctxd boot sequence (migration 108, W03-1): every fresh
-	// test DB gets its _migrations checksums stamped, so tests exercising
-	// that column see the same post-boot state as production.
-	if err := store.BackfillChecksums(ctx, pool); err != nil {
-		t.Fatalf("testdb: backfill migration checksums: %v", err)
 	}
 
 	return pool, dsn

@@ -267,8 +267,8 @@ func TestStatusDBHNSWReltuplesDenominator(t *testing.T) {
 	if diff := *row.BytesPerRow - expected; diff > 0.001 || diff < -0.001 {
 		t.Errorf("bytes_per_row = %v, want index_bytes/%d = %v (index-own reltuples denominator)", *row.BytesPerRow, k, expected)
 	}
-	if row.M != 16 || row.EfConstruction != 64 {
-		t.Errorf("m/ef_construction from reloptions = %d/%d, want 16/64 (001_initial.sql:250-252 fresh-chain default)", row.M, row.EfConstruction)
+	if row.M != 16 || row.EfConstruction != 128 {
+		t.Errorf("m/ef_construction from reloptions = %d/%d, want 16/128 (001_initial.sql:250-252 built 64, but a fresh chain now includes migration 115 — design/03 §3.3/E-03-2 — which reconciles an empty/small table's index inline to the canonical 128 before any test body runs)", row.M, row.EfConstruction)
 	}
 
 	// reltuples<0 (design/03 §3.3's "nie analysiert" sentinel): synthetically

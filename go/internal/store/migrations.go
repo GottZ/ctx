@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +35,23 @@ CREATE TABLE IF NOT EXISTS _migrations (
 // Each migration runs in its own transaction. Already-applied migrations
 // (tracked by version number in _migrations) are skipped.
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	return RunMigrationsUpTo(ctx, pool, math.MaxInt)
+}
+
+// RunMigrationsUpTo applies pending SQL migrations from the embedded FS
+// whose version is <= maxVersion, in version order (each in its own
+// transaction, already-applied versions skipped exactly like RunMigrations).
+// RunMigrations is simply the maxVersion=unbounded case.
+//
+// The capped variant exists for integration tests that need to reproduce a
+// database at a specific point in the migration chain rather than at HEAD —
+// most concretely, Evokoa-Clean-Room design/03 §7 W03-6 Gate 1, which
+// simulates the exact pre-115 Prod state (chain applied through 114, HNSW
+// index rebuilt out-of-band to ef_construction=128 the way Session 3 really
+// did it) that the historic ef_construction drift Migration 115 reconciles
+// was never visible against. No production caller needs this — main.go's
+// boot path and every other test keep calling RunMigrations.
+func RunMigrationsUpTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) error {
 	// Ensure the tracking table exists (idempotent).
 	if _, err := pool.Exec(ctx, migrationsTable); err != nil {
 		return fmt.Errorf("creating _migrations table: %w", err)
@@ -64,6 +82,9 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		v, err := strconv.Atoi(parts[0])
 		if err != nil {
 			slog.Warn("skipping migration file with non-numeric prefix", "file", name)
+			continue
+		}
+		if v > maxVersion {
 			continue
 		}
 		migs = append(migs, migration{version: v, filename: name})

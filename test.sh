@@ -244,81 +244,66 @@ if ! $t06_ok; then
   fail "$T" "$t06_msg"
 fi
 
-# T07 SCHEMA_INTEGRITY — counts exclude manual snapshot tables (name pattern "*_snapshot_*")
-# which accumulate over time (e.g. context_dream_links_snapshot_20260423_prev5).
-# 39 columns since M055 (sensitivity + sensitivity_source + sensitivity_audited_at,
-# F3-P3 trust gating); 36 was M044 (ts_de/ts_en) + M049 (dream_eval_count).
-# 27 tables: 18 since M051/M052/M053 (context_settings, context_settings_audit,
-# context_secrets, context_backends) + 2 since M056 (context_chat_sessions,
-# context_chat_messages, F6-C2 web-chat) + 4 since M057 (graph_cluster_node,
-# graph_cluster_edge, graph_cluster_member, graph_overview_meta, F5-W6 landkarte)
-# + 2 since M059 (context_tenants, context_tenant_scopes, MT-T02 tenants_hybrid;
-# Modell C — context_blocks unangetastet, col_count BLEIBT 39)
-# + 1 since M061 (context_tenant_grants, MT-T14 cross-tenant read channel)
-# + 1 since M063 (context_tenant_quota, MT quota; extended by M069 tenant_limits)
-# + 1 M023 (context_oauth_clients, MCP OAuth — live since 2026-04-09 per
-# _migrations but missing from every earlier count; stale-expectation fix
-# 2026-07-02, verified against information_schema table list).
-# M070 renames block_type→lifecycle_state: table count unchanged, 39 columns hold.
-# 40 columns since M071 (type_source, WF T2 provenance column — the rename
-# itself is count-neutral; the added column was missed in the T2 wave commit,
-# caught by this test post-deploy 2026-07-02).
-# + 1 since M072 (context_block_types, WF T3 dynamic block-type registry;
-# context_blocks untouched, col_count stays 40).
-# 39 columns since M075 (WF T9: is_meta dropped — the dream-exclude semantics
-# live in the block-type registry as dream.linkable=false on system-meta;
-# metadata.is_meta stays as a JSONB classify-input key, not a column).
-# + 1 table since M076 (context_structural_links, Achse-02 I-A structural link
-# layer — deterministic fact edges, separate from context_dream_links). The
-# parent_id FK (E8) added by the same migration touches NO column: parent_id
-# ALREADY exists since 001:39 (M076 only adds the constraint) — col_count STAYS
-# 39, table_count 30→31.
-# + 2 tables since M079 (context_projects + context_project_sync_runs, workflow
-# W4 project register + sync-run history; design/03 §3.1, masterplan K1). Both
-# are NEW tables; context_blocks untouched by 079 — table_count 31→33.
-# + 1 table since M080 (context_project_sync_map, Achse-02 I-F issue↔block mapping;
-# design/02 §3.5, masterplan K14). M080 also adds 5 sync-state COLUMNS to
-# context_projects (token_secret/sync_enabled/push_enabled/last_error/backoff_until)
-# but NONE to context_blocks — so table_count 33→34, context_blocks col_count STAYS 40.
-# 40 columns since M077 (Achse-02 I-B workflow_status VARCHAR(50) nullable, the
-# per-block workflow value; the partial board index idx_blocks_workflow_board is
-# added by the same migration but adds no column and no table — verified live
-# against the migration chain in migration077_integration_test).
-# + 1 table since M082 (context_webhook_events, workflow W13 webhook inbound queue;
-# design/03 §3.4, masterplan K1 reserved 082 for W13). NEW table, context_blocks
-# untouched — table_count 34→35, col_count STAYS 40.
-# + 4 tables M089–M093 (context_pending_writes M089 stage-then-confirm;
-# context_disable_profiles + context_disable_profile_backends M092;
-# context_graph_category_hues M093) — stale expectation caught 2026-07-09 by the
-# OAuth-F1/F2 verification sweep: the count was not updated across v4.7.0–v4.11.0.
-# + 2 tables since M094 (context_principals + context_external_identities, OAuth
-# F1 principal foundation; api_keys gains principal_id but context_blocks is
-# untouched) — table_count 35→41, col_count STAYS 40. M095 (ctx_auth function
-# DDL) and M096 (additive audit-FK COLUMNS on 11 existing tables) add NO tables.
-# + 1 table since M098 (context_oauth_codes, OAuth S1/W03-1 persistent code
-# store — the in-memory map goes to DB; design 03 §3, masterplan K1: 097 stays
-# reserved for C1/02-W1) — table_count 41→42, col_count STAYS 40
-# + 2 tables since M100/M101 (context_oauth_providers + context_sso_states,
-# OAuth L1/04-W1a+W1b consumer-strand schema; design 04 §3.2/§3.3 — M097/C1
-# adds only columns on context_oauth_clients) — table_count 42→44, col_count
-# STAYS 40.
-# + 1 table since M099 (context_access_tokens, OAuth S3/W03-3 universal opaque
-# token store — Masterplan K2: the ONE credential store, Achse 05 adds only
-# the web overlay in M102; M099 also DROPS the transitional
-# context_oauth_codes.api_key_sealed column, no table change from that) —
-# table_count 44→45, col_count STAYS 40.
-# + 1 table since M102 (context_web_sessions, OAuth R1/05-W1 web overlay over
-# the M099 token store — Masterplan K2 E-05-3 variant (a): own table, no token
-# cleartext/hash, only FK refs + CSRF/forensics; context_blocks untouched) —
-# table_count 45→46, col_count STAYS 40.
+# T07 SCHEMA_INTEGRITY — Evokoa-Clean-Room design/03 §4.6/§7 W03-6: the
+# handgepflegte COUNT-Check (46 tables / 40 context_blocks columns, ~80
+# Zeilen Änderungs-Chronik, zwei dokumentierte Stale-Vorfälle — Historie in
+# git blame dieser Datei) ist durch `ctx contract` abgelöst. Ein generiertes
+# Manifest (internal/schemacontract, go/internal/schemacontract/manifest.json)
+# ersetzt die Hand-Erwartung strukturell: neue Migrationen ändern das
+# Manifest per Regeneration, keine Zeile hier muss je wieder von Hand
+# nachgezogen werden. `ctx contract` ruft per Default `?refresh=1` — das
+# Gate validiert den IST-Stand, nie einen gecachten Boot-Report.
+#
+# Fallback (KEINE Gate-Abschwächung): solange die installierte CLI älter
+# als W03-4 ist ("contract" unbekannt) oder Transport/Auth fehlschlägt,
+# fällt T07 auf exakt die alte Zähl-Probe zurück (46 Tabellen / 40 Spalten
+# context_blocks) — dieselbe Prüfstärke wie vor dieser Welle, nicht
+# schwächer. Das Upgrade auf den generierten Contract greift automatisch,
+# sobald die deployte CLI "contract" kennt — kein Script-Change nötig.
 T="T07 SCHEMA_INTEGRITY"
-table_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
-col_count=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-if [[ "$table_count" == "46" ]] && [[ "$col_count" == "40" ]]; then
-  pass "$T (tables=$table_count, columns=$col_count)"
+
+t07_count_fallback() {
+  local reason="$1"
+  local tc col
+  tc=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
+  col=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
+  if [[ "$tc" == "46" ]] && [[ "$col" == "40" ]]; then
+    pass "$T (contract-CLI nicht verfügbar — Zähl-Fallback (Prä-Deploy); tables=$tc, columns=$col; $reason)"
+  else
+    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected 46 tables + 40 columns, got tables=$tc columns=$col"
+  fi
+}
+
+# set -e-sicher: der if/else fängt den Exit-Code ab, BEVOR eine Pipe/Zuweisung
+# ihn verschlucken könnte (Projekt-Quirk "EXIT nach Pipe misst die Pipe";
+# dasselbe Muster wie state.sh's Contract-Zeile, W03-5).
+if t07_out=$(ctx contract 2>&1); then
+  t07_rc=0
 else
-  fail "$T" "expected 46 tables + 40 columns, got tables=$table_count columns=$col_count"
+  t07_rc=$?
 fi
+
+case "$t07_rc" in
+  0)
+    pass "$T (ctx contract: ok)"
+    ;;
+  1)
+    if [[ "$t07_out" == *"unknown command"* ]]; then
+      t07_count_fallback "Exit 1/unknown command — installierte CLI kennt \"contract\" nicht, Vor-W03-4-Stand"
+    else
+      fail "$T" "ctx contract: DRIFT -- $(echo "$t07_out" | head -5 | tr '\n' ' ')"
+    fi
+    ;;
+  2)
+    fail "$T" "ctx contract: UNCHECKED -- $(echo "$t07_out" | head -5 | tr '\n' ' ')"
+    ;;
+  3)
+    t07_count_fallback "Exit 3/Transport-Auth-Fehler"
+    ;;
+  *)
+    t07_count_fallback "unerwarteter Exit $t07_rc"
+    ;;
+esac
 
 # T08 GUARD_STATS
 T="T08 GUARD_STATS"
