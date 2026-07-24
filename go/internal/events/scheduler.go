@@ -160,6 +160,13 @@ type Scheduler struct {
 	lastGuardNs    atomic.Int64
 	lastDigestNs   atomic.Int64
 	lastOverviewNs atomic.Int64
+	// lastRecallNs is the ADDITIVE Achse-01 W01-3 stamp (design/01 §4.3). It is
+	// exposed through the SEPARATE LastRecallRun() method, never folded into
+	// LastArmRuns() — a signature change there would silently break the OPTIONAL
+	// armRunSource assertion in status.go (:31-33) and drop the guard/digest/
+	// overview stamps from /api/status without a compile error (the armRunSource
+	// trap). W01-4 asserts its own narrow recallRunSource interface.
+	lastRecallNs atomic.Int64
 
 	// embedVerifyActive is the single-flight guard of the W04-5 re-embed
 	// verify runner: the migration cycle keeps ticking (drain semantics,
@@ -248,6 +255,16 @@ func (s *Scheduler) GetDreamMode() (mode int32, throttleInterval time.Duration) 
 // (nil when zero) for the server-admin dispatch section.
 func (s *Scheduler) LastArmRuns() (guard, digest, overview time.Time) {
 	return nsToTime(s.lastGuardNs.Load()), nsToTime(s.lastDigestNs.Load()), nsToTime(s.lastOverviewNs.Load())
+}
+
+// LastRecallRun returns the last-run wall-clock time of the Achse-01 recall_check
+// arm (design/01 §4.3). Zero time.Time = the arm has not run this process. It is
+// a SEPARATE method by design (not an extra return of LastArmRuns): the status
+// collector reads it through its own narrow recallRunSource assertion (W01-4),
+// so the byte-identical LastArmRuns signature — and the armRunSource assertion
+// that feeds guard/digest/overview into /api/status — stays untouched.
+func (s *Scheduler) LastRecallRun() time.Time {
+	return nsToTime(s.lastRecallNs.Load())
 }
 
 // nsToTime converts a stored unix-nano stamp to wall-clock time; 0 → zero time.
@@ -626,6 +643,12 @@ func (s *Scheduler) Run(ctx context.Context) {
 	go s.runDailySynthesis(ctx)
 	go s.runOverviewRebuild(ctx)
 
+	// Achse 01 W01-3: the recall_check arm (design/01 §4.3). Own goroutine (no
+	// new ticker case): two cadence anchors — cheap strata on the hot interval,
+	// expensive strata on the off-peak hour — with per-run config snapshot,
+	// mid-run demand park and touch/time budget rotation.
+	go s.runRecallCheck(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -661,6 +684,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.runOAuthCodeGC(ctx)
 			s.runOAuthTokenGC(ctx)
 			s.runSSOStateGC(ctx)
+			s.runRecallRetention(ctx)
 
 		case <-webhookInboxTicker.C:
 			s.runWebhookInbox(ctx)

@@ -131,6 +131,24 @@ func Insert(ctx context.Context, q Querier, run Run) error {
 	return nil
 }
 
+// DeleteOlderThan removes recall-run rows older than retentionDays (§3.3, the
+// W01-3 janitor line). retentionDays <= 0 is a no-op (kept forever) — the same
+// opt-out convention as the other janitor retentions. Returns the deleted row
+// count. context_recall_runs is aggregate-only, so this is a plain bounded
+// DELETE, never a hypertable drop.
+func DeleteOlderThan(ctx context.Context, q Querier, retentionDays int) (int64, error) {
+	if retentionDays <= 0 {
+		return 0, nil
+	}
+	tag, err := q.Exec(ctx,
+		`DELETE FROM context_recall_runs WHERE ran_at < now() - make_interval(days => $1)`,
+		retentionDays)
+	if err != nil {
+		return 0, fmt.Errorf("recall: retention delete: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // LatestByStratum returns the newest row per (stratum, scope, k), newest
 // group first, capped at limit. DISTINCT ON rides idx_recall_runs_stratum
 // (stratum, scope, k, ran_at DESC) directly — no separate window-function

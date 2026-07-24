@@ -40,6 +40,15 @@ type Config struct {
 	LegTimeoutMS      int     // hard per-leg statement_timeout cap
 	EfSearch          int     // ANN-leg hnsw.ef_search; 0 = pgvector default 40
 	Epsilon           float64 // tie tolerance of the recall definition
+	// ExactTouchBudgetBytes is the second budget dimension (§6.2): the capped
+	// heap+TOAST read volume of the exact legs over the whole run. <=0 =
+	// unlimited. The scheduler RESOLVES the auto value (0 → 25% of
+	// shared_buffers) and passes the concrete byte count here; recall ENFORCES
+	// it — per stratum it estimates corpus_embedded × touchBytesPerRow × N,
+	// scales N down to fit, marks budget_exhausted on overshoot and stamps
+	// meta.exact_touch_bytes. Keeping the resolution on the events side and the
+	// enforcement here is the split the config-mirror comment intends.
+	ExactTouchBudgetBytes int64
 }
 
 // Additional invalid-reason codes of the orchestration layer (the plan-proof
@@ -75,7 +84,25 @@ type Hooks struct {
 	// PrevScopes maps stratum → the scope measured in the previous run
 	// (W01-3 feeds it from LatestByStratum) for the scope_changed stamp.
 	PrevScopes map[string]string
+	// SelectStrata filters/reorders the planned strata before measurement
+	// (W01-3 cadence + rotation). The scheduler passes cheap-only on the
+	// interval tick and cheap + ONE rotated expensive stratum on the off-peak
+	// tick (§4.3 two cadence anchors, §6.2 rotation). nil = measure every
+	// planned stratum (W01-2 behaviour — existing tests stay unchanged). A
+	// stratum dropped here gets NO row this run (coverage-age visibility), NOT
+	// an invalid row: cadence deferral differs from a budget/demand abort.
+	SelectStrata func([]StratumPlan) []StratumPlan
 }
+
+const (
+	// touchBytesPerRow is the per-row heap+TOAST read volume of an exact leg
+	// (§6.1: ~1.4 kB heap + ~4.1 kB out-of-line halfvec TOAST ≈ 5.5 kB). Used
+	// for the pre-run touch estimate that drives N-reduction and rotation.
+	touchBytesPerRow int64 = 5632 // 5.5 * 1024
+	// minMeasurableQueries is the §6.2 floor: below this the run refuses to
+	// publish a pseudo-statistic and writes valid=false/budget_exhausted.
+	minMeasurableQueries = 5
+)
 
 // RunOnce executes one full measurement run with default hooks (§4.2.5).
 func RunOnce(ctx context.Context, pool *pgxpool.Pool, cfg Config, registry *blocktype.Registry) (RunResult, error) {
@@ -104,6 +131,7 @@ func RunOnceWithHooks(ctx context.Context, pool *pgxpool.Pool, cfg Config, regis
 	}
 
 	clock := newBudgetClock(time.Duration(cfg.ExactBudgetMS) * time.Millisecond)
+	touch := newTouchClock(cfg.ExactTouchBudgetBytes)
 	legTimeout := time.Duration(cfg.LegTimeoutMS) * time.Millisecond
 	if legTimeout <= 0 {
 		legTimeout = time.Minute
@@ -125,10 +153,31 @@ func RunOnceWithHooks(ctx context.Context, pool *pgxpool.Pool, cfg Config, regis
 	if err != nil {
 		return RunResult{}, err
 	}
+	if hooks.SelectStrata != nil {
+		// Cadence + rotation: the scheduler keeps the cheap strata every run and
+		// rotates ONE expensive stratum onto the off-peak run (§4.3/§6.2). A
+		// dropped stratum simply gets no row this run.
+		plans = hooks.SelectStrata(plans)
+	}
 
 	logVecs, err := SampleLogQueries(ctx, pool, hooks.EmbedModel, cfg.QueriesPerStratum)
 	if err != nil {
 		return RunResult{}, err
+	}
+
+	// buffercache_delta (§6.2) is measured around the biggest exact leg of the
+	// run — the one that displaces the interactive working set — and only when
+	// pg_buffercache is installed (testcontainers may lack it: degrade, never
+	// crash). "Biggest" = the largest measured corpus.
+	bufCacheStratum := ""
+	if bufferCacheAvailable(ctx, pool) {
+		var maxCorpus int
+		for _, plan := range plans {
+			if plan.CorpusEmbedded > maxCorpus {
+				maxCorpus = plan.CorpusEmbedded
+				bufCacheStratum = plan.Stratum
+			}
+		}
 	}
 
 	result := RunResult{RunGroup: uuid.NewString()}
@@ -152,7 +201,7 @@ func RunOnceWithHooks(ctx context.Context, pool *pgxpool.Pool, cfg Config, regis
 
 			if stopReason != "" {
 				markInvalid(&run, stopReason)
-			} else if err := measureStratum(ctx, pool, cfg, plan, k, logVecs, hooks, clock, legTimeout, &run); err != nil {
+			} else if err := measureStratum(ctx, pool, cfg, plan, k, logVecs, hooks, clock, touch, legTimeout, plan.Stratum == bufCacheStratum, &run); err != nil {
 				return result, err
 			} else if run.Meta["invalid_reason"] == ReasonBudgetExhausted ||
 				run.Meta["invalid_reason"] == ReasonDemandDeferred {
@@ -185,42 +234,32 @@ func markInvalid(run *Run, reason string) {
 
 // measureStratum runs the probe set for one stratum × k and fills run with
 // either the aggregate or the fail-closed invalid shape.
-func measureStratum(ctx context.Context, pool *pgxpool.Pool, cfg Config, plan StratumPlan, k int, logVecs [][]float32, hooks Hooks, clock *budgetClock, legTimeout time.Duration, run *Run) error {
-	// Query set: logged queries first (real production profile), loo fills
-	// the remainder — the small-scope normal case (§4.2.2).
-	type probeInput struct {
-		vec    []float32
-		selfID *string
+func measureStratum(ctx context.Context, pool *pgxpool.Pool, cfg Config, plan StratumPlan, k int, logVecs [][]float32, hooks Hooks, clock *budgetClock, touch *touchClock, legTimeout time.Duration, measureBufCache bool, run *Run) error {
+	// N-reduction (§6.2): queries_per_stratum is the CEILING; the touch budget
+	// scales it down per stratum. Below minMeasurableQueries we refuse a
+	// pseudo-statistic — valid=false/budget_exhausted, no recall number.
+	targetN, estPerLeg := touchScaledN(cfg, plan.CorpusEmbedded, touch)
+	if targetN < minMeasurableQueries {
+		markInvalid(run, ReasonBudgetExhausted)
+		run.Meta["exact_touch_bytes"] = estPerLeg * int64(cfg.QueriesPerStratum) // the volume this stratum WOULD need
+		return nil
 	}
-	var inputs []probeInput
-	for _, v := range logVecs {
-		if len(inputs) >= cfg.QueriesPerStratum {
-			break
-		}
-		inputs = append(inputs, probeInput{vec: v})
+
+	inputs, source, err := buildProbeInputs(ctx, pool, plan, logVecs, targetN)
+	if err != nil {
+		return err
 	}
-	nLog := len(inputs)
-	if need := cfg.QueriesPerStratum - nLog; need > 0 {
-		loo, err := SampleLOO(ctx, pool, plan.Scopes, plan.VisibleTypes, need)
-		if err != nil {
-			return err
-		}
-		for i := range loo {
-			inputs = append(inputs, probeInput{vec: loo[i].Vec, selfID: &loo[i].ID})
-		}
-	}
-	switch {
-	case nLog > 0 && len(inputs) > nLog:
-		run.QuerySource = "mixed"
-	case nLog > 0:
-		run.QuerySource = "log"
-	default:
-		run.QuerySource = "loo"
-	}
+	run.QuerySource = source
 	if len(inputs) == 0 {
 		markInvalid(run, ReasonNoMeasurableQueries)
 		return nil
 	}
+
+	// buffercache_delta (§6.2): resident context_blocks heap+TOAST pages before
+	// and after this stratum's exact legs — the interactive-set displacement as
+	// a number, not a guess. Best-effort: biggest stratum only, pg_buffercache
+	// only (both decided in RunOnce).
+	bufBefore, bufOK := bufferCacheSnapshot(ctx, pool, measureBufCache)
 
 	var (
 		recalls, annMs, exactMs []float64
@@ -289,7 +328,80 @@ func measureStratum(ctx context.Context, pool *pgxpool.Pool, cfg Config, plan St
 	run.AnnMsP95 = ptrOf(percentile(annMs, 0.95))
 	run.ExactMsP50 = ptrOf(percentile(exactMs, 0.50))
 	run.Meta["n_eff_min"] = nEffMin
+
+	// Touch accounting (§6.2): decrement the run-wide byte budget by this
+	// stratum's measured exact-leg volume and stamp it, so later strata see the
+	// drain (rotation pressure) and the row carries the number.
+	consumed := estPerLeg * int64(len(recalls))
+	touch.consume(consumed)
+	run.Meta["exact_touch_bytes"] = consumed
+	if after, ok := bufferCacheSnapshot(ctx, pool, bufOK); ok {
+		run.Meta["buffercache_delta"] = after - bufBefore
+	}
 	return nil
+}
+
+// probeInput is one query fed to the two-leg probe: a query vector plus an
+// optional loo self-exclusion ID (nil for logged queries).
+type probeInput struct {
+	vec    []float32
+	selfID *string
+}
+
+// touchScaledN applies the §6.2 N-reduction: queries_per_stratum capped by what
+// the run's remaining touch budget affords for this stratum (estimate =
+// corpus_embedded × touchBytesPerRow per exact leg). Returns the target N and
+// the per-leg byte estimate.
+func touchScaledN(cfg Config, corpusEmbedded int, touch *touchClock) (targetN int, estPerLeg int64) {
+	estPerLeg = int64(corpusEmbedded) * touchBytesPerRow
+	targetN = cfg.QueriesPerStratum
+	if touch.limited && estPerLeg > 0 {
+		if allowed := int(touch.remaining / estPerLeg); allowed < targetN {
+			targetN = allowed
+		}
+	}
+	return targetN, estPerLeg
+}
+
+// buildProbeInputs assembles up to targetN probe inputs — logged query vectors
+// first (real production profile), leave-one-out document vectors filling the
+// rest (the small-scope normal case, §4.2.2) — and reports the query_source
+// mix ("log" | "loo" | "mixed").
+func buildProbeInputs(ctx context.Context, pool *pgxpool.Pool, plan StratumPlan, logVecs [][]float32, targetN int) ([]probeInput, string, error) {
+	var inputs []probeInput
+	for _, v := range logVecs {
+		if len(inputs) >= targetN {
+			break
+		}
+		inputs = append(inputs, probeInput{vec: v})
+	}
+	nLog := len(inputs)
+	if need := targetN - nLog; need > 0 {
+		loo, err := SampleLOO(ctx, pool, plan.Scopes, plan.VisibleTypes, need)
+		if err != nil {
+			return nil, "", err
+		}
+		for i := range loo {
+			inputs = append(inputs, probeInput{vec: loo[i].Vec, selfID: &loo[i].ID})
+		}
+	}
+	source := "loo"
+	switch {
+	case nLog > 0 && len(inputs) > nLog:
+		source = "mixed"
+	case nLog > 0:
+		source = "log"
+	}
+	return inputs, source, nil
+}
+
+// bufferCacheSnapshot reads the resident-page count when enabled; ok=false when
+// disabled or unavailable (the caller then omits the delta stamp).
+func bufferCacheSnapshot(ctx context.Context, pool *pgxpool.Pool, enabled bool) (int, bool) {
+	if !enabled {
+		return 0, false
+	}
+	return bufferCachePages(ctx, pool)
 }
 
 // envStamp collects the drift-aware environment stamp of a run (§4.2.6):
@@ -379,6 +491,54 @@ func (b *budgetClock) remaining() time.Duration {
 		return time.Duration(math.MaxInt64)
 	}
 	return b.total - time.Since(b.start)
+}
+
+// touchClock is the §6.2 touch budget: a run-wide heap+TOAST byte allowance the
+// exact legs draw down. total <= 0 means unlimited (tests / manual runs); a
+// limited clock feeds both the per-stratum N-reduction and the rotation
+// pressure (a drained clock forces later strata to budget_exhausted).
+type touchClock struct {
+	remaining int64
+	limited   bool
+}
+
+func newTouchClock(total int64) *touchClock {
+	return &touchClock{remaining: total, limited: total > 0}
+}
+
+func (t *touchClock) consume(n int64) {
+	if t.limited {
+		t.remaining -= n
+	}
+}
+
+// bufferCacheAvailable reports whether pg_buffercache is installed — the
+// prerequisite for the §6.2 cache-displacement measurement. Any probe error
+// (missing extension, permission) degrades to "unavailable", never a run abort.
+func bufferCacheAvailable(ctx context.Context, pool *pgxpool.Pool) bool {
+	var present bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_buffercache')`,
+	).Scan(&present); err != nil {
+		return false
+	}
+	return present
+}
+
+// bufferCachePages returns the number of shared-buffer pages currently holding
+// context_blocks heap OR its TOAST relation (the out-of-line halfvec storage,
+// §6.1). Best-effort: any error returns ok=false so the caller omits the stamp.
+func bufferCachePages(ctx context.Context, pool *pgxpool.Pool) (int, bool) {
+	var pages int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_buffercache
+		 WHERE relfilenode = pg_relation_filenode('context_blocks'::regclass)
+		    OR relfilenode = pg_relation_filenode(
+		         (SELECT reltoastrelid FROM pg_class WHERE oid = 'context_blocks'::regclass))`,
+	).Scan(&pages); err != nil {
+		return 0, false
+	}
+	return pages, true
 }
 
 func ptrOf[T any](v T) *T { return &v }
