@@ -543,7 +543,9 @@ ORDER BY h.link_created DESC, h.neighbor_id`, vis, vis)
 
 // structuralHopNeighbors is Q1s: ONE batched hop over the frontier on
 // context_structural_links — the structural sibling of hopNeighbors (Q1),
-// UNWIRED until the traversal-merge wave (GB3). Ordering key is created_at
+// live wired into the per-hop traversal: the EgoGraph hop loop calls it
+// and merges its candidates with Q1 dream candidates via takeHopMerged.
+// Ordering key is created_at
 // DESC ("newest reference first", E5) — structural links carry no confidence
 // (1.0 by definition, 076), so there is deliberately NO MinConfidence bind:
 // for every valid threshold in [0,1], 1.0 passes — omitting the gate IS the
