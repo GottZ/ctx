@@ -104,6 +104,7 @@ type Config struct {
 	EmbedBackfill  EmbedBackfillConfig
 	EmbedMigration EmbedMigrationConfig
 	RecallCheck    RecallCheckConfig
+	Selector       SelectorConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -921,6 +922,36 @@ type RecallCheckConfig struct {
 	RetentionDays int `key:"recall_check.retention_days" env:"CTX_RECALL_CHECK_RETENTION_DAYS" default:"365" mut:"hot" tenancy:"global-only"`
 }
 
+// SelectorConfig is the semantic strategy dispatch (Achse 02, design/02
+// §3.4). Doctrine "Mechanismus = Code / Policy = Daten": the two SQL arms,
+// the bounded probe, the clamps and the dispatch algorithm are code in
+// internal/rrf; WHICH thresholds apply and whether the selector runs at all
+// is data here.
+//
+// EVERY key is global-only (the fail-closed default of the registry
+// doctrine, registry.go:50-57): ExactMax/GreyScanTuples dimension buffer
+// touch and materialisation of the SHARED database — a tenant override would
+// very much touch something process-shared (config.go:62-77: then
+// global-only). The GraphConfig rationale (config.go:226-229, "zero
+// cross-tenant effect") does NOT carry here: graph knobs are capped at ~10
+// injected blocks, these knobs at tens of thousands of index/heap accesses
+// per query. Enabled is global-only so the measurement-reservation gate
+// (E-02-2) is technically enforced. Tenant opening = follow-up wave W02-8
+// (two-stage ceilings).
+//
+// StatsTTL follows the house convention for duration defaults: UNITLESS
+// SECONDS (parseDurationSeconds, load.go:141-148) — hence default:"60", not
+// "60s". The pg_stats snapshot behind it is a process resource anyway (one
+// cache for all tenants; it holds only scope names × frequencies, which the
+// same catalog shows every DB user — no tenant datum, §5.5).
+type SelectorConfig struct {
+	Enabled        bool          `key:"retrieval.selector.enabled" env:"CTX_RETRIEVAL_SELECTOR_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+	ExactMax       int           `key:"retrieval.selector.exact_max" env:"CTX_RETRIEVAL_SELECTOR_EXACT_MAX" default:"4096" mut:"hot" tenancy:"global-only"`
+	GreyMax        int           `key:"retrieval.selector.grey_max" env:"CTX_RETRIEVAL_SELECTOR_GREY_MAX" default:"65536" mut:"hot" tenancy:"global-only"`
+	GreyScanTuples int           `key:"retrieval.selector.grey_scan_tuples" env:"CTX_RETRIEVAL_SELECTOR_GREY_SCAN_TUPLES" default:"60000" mut:"hot" tenancy:"global-only"`
+	StatsTTL       time.Duration `key:"retrieval.selector.stats_ttl" env:"CTX_RETRIEVAL_SELECTOR_STATS_TTL" default:"60" mut:"hot" tenancy:"global-only"`
+}
+
 // Source reports the origin of a registry key in this snapshot:
 // "env" | "default" (F2 adds "settings"). Unknown keys return "".
 func (c *Config) Source(key string) string {
@@ -1051,6 +1082,21 @@ func (c *Config) GraphRRF() rrf.GraphConfig {
 		WeightCausal:           c.Graph.WeightCausal,
 		WeightRecurrent:        c.Graph.WeightRecurrent,
 		NewPlacementFrac:       c.Graph.NewPlacementFrac,
+	}
+}
+
+// SelectorRRF converts the selector group to the rrf-stage policy struct
+// (same converter pattern as RerankRRF/GraphRRF — the rrf package never reads
+// internal/config, F1 layering: policy travels as a parameter). The zero
+// config produces Enabled=false, i.e. rrf's Ist path: no probe roundtrip,
+// Decision{ann, disabled} (design/02 §4.2).
+func (c *Config) SelectorRRF() rrf.SelectorPolicy {
+	return rrf.SelectorPolicy{
+		Enabled:        c.Selector.Enabled,
+		ExactMax:       c.Selector.ExactMax,
+		GreyMax:        c.Selector.GreyMax,
+		GreyScanTuples: c.Selector.GreyScanTuples,
+		StatsTTL:       c.Selector.StatsTTL,
 	}
 }
 

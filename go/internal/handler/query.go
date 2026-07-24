@@ -366,6 +366,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfg.SnapshotForRequest(r.Context())
 	rerankCfg := cfg.RerankRRF()
 	graphCfg := cfg.GraphRRF()
+	// Achse 02 (design/02 §3.4/§7 W02-3): the semantic strategy policy comes
+	// from the SAME frozen generation as every other stage — a settings flip
+	// (mut:hot, global-only) is live from the next request on, never mid-request.
+	// Default enabled=false ⇒ rrf's Ist path, byte-identical to pre-selector.
+	selectorPolicy := cfg.SelectorRRF()
 
 	ctx := r.Context()
 	requestID := RequestIDFromContext(ctx)
@@ -622,7 +627,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Wire compat (seam 17, closed in WF T10): types_exclude is the canonical
 	// wire name for the request-level p_types_exclude; block_roles_exclude
 	// stays as the documented legacy alias — both present ⇒ union.
-	results, _, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, req.CategoriesExclude, unionExcludes(req.TypesExclude, req.BlockRolesExclude), grantedBlockIDs, rrf.SelectorPolicy{})
+	results, selectorDec, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, req.CategoriesExclude, unionExcludes(req.TypesExclude, req.BlockRolesExclude), grantedBlockIDs, selectorPolicy)
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,
@@ -632,12 +637,26 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("rrf search complete",
+	// Achse-02 instrumentation (design/02 §4.7 #1): the decision rides the
+	// EXISTING search log — but only while the selector is armed. With the
+	// master gate closed the decision is {ann, disabled} and this line stays
+	// byte-identical to the pre-selector state, same doctrine as the
+	// access-log metadata in logAccess.
+	searchAttrs := []any{
 		"result_count", len(results),
 		"internal_limit", internalLimit,
 		"user_limit", limit,
 		"request_id", requestID,
-	)
+	}
+	if selectorInstrumented(selectorDec) {
+		searchAttrs = append(searchAttrs,
+			"selector_mode", selectorDec.Mode,
+			"selector_reason", selectorDec.Reason,
+			"selector_estimate", selectorDec.Estimate,
+			"probe_ms", math.Round(selectorDec.ProbeMs*100)/100,
+		)
+	}
+	slog.Info("rrf search complete", searchAttrs...)
 
 	// RRF (the last 500-capable stage) has succeeded. From here the keepalive
 	// heartbeat runs UNCONDITIONALLY for the synthesis path (X4, F3-P2): with
@@ -926,7 +945,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				maxScore = raw
 			}
 		}
-		go h.logAccess(ar, results, query)
+		go h.logAccess(ar, results, query, selectorDec)
 		slog.Info("query pipeline complete (retrieval-only)",
 			"source_count", len(sources),
 			"translated", translated,
@@ -994,7 +1013,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 9: Access log (async, non-blocking).
-	go h.logAccess(ar, results, query)
+	go h.logAccess(ar, results, query, selectorDec)
 
 	// Step 10: Build response.
 	respSources := buildSourceResponses(synthResult.Sources, supersedesMap, false)
@@ -1027,10 +1046,28 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	hb.finish(http.StatusOK, resp)
 }
 
+// selectorInstrumented reports whether an Achse-02 decision carries strategy
+// information worth recording (design/02 §4.7). A disabled selector yields
+// {ann, disabled} and a path that never reached rrf yields the zero value — in
+// both cases NOTHING is recorded, so the search log line and every
+// context_access_log row stay byte-identical to the pre-selector state while
+// the master gate is closed (W02-3 wires the policy, it never arms it).
+func selectorInstrumented(dec rrf.SelectorDecision) bool {
+	return dec.Reason != "" && dec.Reason != rrf.ReasonDisabled
+}
+
 // logAccess inserts access log entries asynchronously.
 // One row per block returned in the search results.
 // Errors are logged but never surface to the caller.
-func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult, queryText string) {
+//
+// dec is the Achse-02 selector decision of THIS query (design/02 §4.7 #2):
+// while the selector is armed, every row carries the three compact strategy
+// keys sel_mode/sel_reason/sel_est, so Achse 01 can correlate recall@k per
+// (mode × reason × estimate bucket) straight out of the existing table. The
+// per-row redundancy (~40 B JSONB) is the price for zero new tables; a
+// query-level telemetry sink is Achse-03 territory (§9.2). The decision is
+// strategy metadata only — never query content, titles or block ids (§5.5).
+func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult, queryText string, dec rrf.SelectorDecision) {
 	if ar == nil || ar.ApiKeyID == "" || len(results) == 0 {
 		return
 	}
@@ -1039,11 +1076,18 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	withSelector := selectorInstrumented(dec)
+
 	for _, r := range results {
 		metadata := map[string]interface{}{
 			"score":  math.Round(r.RRFScore*10000) / 10000,
 			"scope":  r.Scope,
 			"source": "agent",
+		}
+		if withSelector {
+			metadata["sel_mode"] = dec.Mode
+			metadata["sel_reason"] = dec.Reason
+			metadata["sel_est"] = dec.Estimate
 		}
 		metaJSON, err := json.Marshal(metadata)
 		if err != nil {

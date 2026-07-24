@@ -150,6 +150,35 @@ func TestSelectorG2_StatsStubIsStale(t *testing.T) {
 	}
 }
 
+// TestSelectorDisabledWithThresholds is the rrf side of W02-3 gate G4: the
+// SHIPPED config generation is not the zero policy — it carries the §3.4
+// thresholds (exact_max 4096, grey_max 65536, grey_scan_tuples 60000,
+// stats_ttl 60s) with Enabled=false. That combination must behave exactly like
+// the zero policy: {ann, disabled}, no probe roundtrip, Ist parameter surface.
+// Otherwise merely SHIPPING W02-3 would move the eval.sh baseline.
+func TestSelectorDisabledWithThresholds(t *testing.T) {
+	p := testPolicy()
+	p.Enabled = false // the config default; every other field stays at its default
+
+	probe, calls, _ := countingProbe(1, nil)
+	dec := decide(context.Background(), probe, []string{"private"}, []string{"granted-1"}, p)
+
+	if dec.Mode != ModeANN || dec.Reason != ReasonDisabled {
+		t.Errorf("decision = {%q, %q}, want {ann, disabled}", dec.Mode, dec.Reason)
+	}
+	if dec.Estimate != 0 || dec.ProbeMs != 0 {
+		t.Errorf("estimate=%d probe_ms=%v, want 0/0", dec.Estimate, dec.ProbeMs)
+	}
+	if *calls != 0 {
+		t.Errorf("disabled policy issued %d probe queries, want 0", *calls)
+	}
+	mode, scanTuples, exactCap := selectorSQLArgs(dec, p)
+	if !isIstParams(mode, scanTuples, exactCap) {
+		t.Errorf("disabled policy SQL args = (%q, %v, %v), want the Ist surface (ann, nil, nil)",
+			mode, scanTuples, exactCap)
+	}
+}
+
 // TestSelectorG2_Clamps covers §5.4: both knobs are clamped into their
 // mechanism bounds, out-of-range values are CLAMPED AND WARNED, never
 // rejected (hot reload must not break).
