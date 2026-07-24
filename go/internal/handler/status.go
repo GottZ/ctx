@@ -224,6 +224,21 @@ type StatusCollector struct {
 	dbStatsAt    atomic.Int64 // unix nano of last db-section refresh
 	dbStatsBuild func(ctx context.Context, pool *pgxpool.Pool) *dbStatus
 
+	// channelProbeAt/channelProbe hold the W03-8 ChannelProbe's OWN cadence
+	// state (status.channel_probe_interval, design/03 §4.7) — a cadence
+	// INDEPENDENT of dbStatsAt/DBStatsInterval above, gated inside
+	// scanDBStatsAsync's already-CAS-guarded goroutine (no separate
+	// single-flight bool needed: dbStatsScan already ensures only one
+	// scanDBStatsAsync goroutine runs at a time, and the channel probe only
+	// ever runs from inside that goroutine). "0 = off" has no fallback
+	// default (unlike DBStatsInterval/RecheckInterval's <=0-falls-back-to-N
+	// convention) — see channelProbeIfDue. channelProbeRun defaults to
+	// runChannelProbe (status_db.go) and is swappable in tests, the same
+	// injection point dbStatsBuild/queueDepth already are.
+	channelProbeAt  atomic.Int64
+	channelProbe    atomic.Pointer[probeRow]
+	channelProbeRun func(ctx context.Context, pool *pgxpool.Pool, embedModel string, scopes, visibleTypes []string) *probeRow
+
 	// Per-tenant 24h rollup cache (T37c, 04-W4/§4.6): the global cheapSnapshot
 	// can't carry N per-tenant-filtered rollups, so a tenant-admin's view comes
 	// from a SEPARATE lock-free generation (map[scope][]llm24hRow, one query +
@@ -245,14 +260,15 @@ type StatusCollector struct {
 // dream-queue scan runs with an empty allowlist (fail-closed zeros + WARN).
 func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams dreamModeSource, cfg ConfigStore, blocktypes BlocktypeSource, dispatchSrc DispatchSource) *StatusCollector {
 	return &StatusCollector{
-		pool:         pool,
-		backendPool:  backendPool,
-		dreams:       dreams,
-		cfg:          cfg,
-		blocktypes:   blocktypes,
-		queueDepth:   dream.QueueDepth,
-		dispatch:     dispatchSrc,
-		dbStatsBuild: buildDBStatus,
+		pool:            pool,
+		backendPool:     backendPool,
+		dreams:          dreams,
+		cfg:             cfg,
+		blocktypes:      blocktypes,
+		queueDepth:      dream.QueueDepth,
+		dispatch:        dispatchSrc,
+		dbStatsBuild:    buildDBStatus,
+		channelProbeRun: runChannelProbe,
 	}
 }
 
@@ -276,7 +292,7 @@ func (c *StatusCollector) Snapshot(ctx context.Context) statusResponse {
 		dbInterval = 60 * time.Second
 	}
 	if !c.broadcasting.Load() && stale(c.dbStatsAt.Load(), dbInterval) {
-		c.scanDBStatsAsync()
+		c.scanDBStatsAsync(cfg)
 	}
 
 	return c.assemble(cur, c.qs.Load(), c.dbStats.Load())
@@ -333,7 +349,7 @@ func (c *StatusCollector) refreshForBroadcast(ctx context.Context) statusRespons
 		dbInterval = 60 * time.Second
 	}
 	if stale(c.dbStatsAt.Load(), dbInterval) {
-		c.scanDBStatsAsync()
+		c.scanDBStatsAsync(cfg)
 	}
 	return c.assemble(snap, c.qs.Load(), c.dbStats.Load())
 }
@@ -409,7 +425,7 @@ func (c *StatusCollector) scanQueueAsync(scopes []string) {
 // it stays with its sibling QueueStats source that already owns this lazy,
 // read-triggered refresh shape (Snapshot/refreshForBroadcast call it on
 // staleness; nothing runs on a bare timer while no one is polling).
-func (c *StatusCollector) scanDBStatsAsync() {
+func (c *StatusCollector) scanDBStatsAsync(cfg *config.Config) {
 	if !c.dbStatsScan.CompareAndSwap(false, true) {
 		return
 	}
@@ -418,9 +434,51 @@ func (c *StatusCollector) scanDBStatsAsync() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		db := c.dbStatsBuild(ctx, c.pool)
+		// W03-8: layered on top of buildDBStatus's own fields, gated by ITS
+		// OWN cadence (channelProbeIfDue), not by db_stats_interval above —
+		// see the StatusCollector field doc and buildDBStatus's comment. Guard
+		// against a nil db (buildDBStatus/dbStatsBuild never returns one
+		// today, but a future injected test double is one typo away) rather
+		// than let a field-assignment panic take down the refresh goroutine.
+		if db != nil {
+			db.ChannelProbe = c.channelProbeIfDue(ctx, cfg)
+		}
 		c.dbStats.Store(db)
 		c.dbStatsAt.Store(time.Now().UnixNano())
 	}()
+}
+
+// channelProbeIfDue is the W03-8 ChannelProbe's own cadence gate
+// (status.channel_probe_interval, design/03 §4.7): "die Probe läuft
+// höchstens einmal je channel_probe_interval, nicht bei jedem
+// db-Stats-Refresh" — scanDBStatsAsync's goroutine calls this on EVERY
+// db-section rebuild (default every 60s), but the probe itself only
+// actually executes when its own, independently-configured interval has
+// elapsed since the last run; in between it returns the LAST measured
+// result unchanged (not null — a stale-but-real reading beats no reading,
+// same posture cheapNow/qs already take for their own caches). Interval<=0
+// is the one case with NO such reuse: it means "permanently off" (E-03-5),
+// so it always returns nil, never touching channelProbeAt/channelProbe at
+// all — the Default-off Golden (Gate 1) holds regardless of how many times
+// this is called or how long the process has run.
+func (c *StatusCollector) channelProbeIfDue(ctx context.Context, cfg *config.Config) *probeRow {
+	interval := cfg.Status.ChannelProbeInterval
+	if interval <= 0 {
+		return nil
+	}
+	if !stale(c.channelProbeAt.Load(), interval) {
+		return c.channelProbe.Load()
+	}
+	// WF T8 convention (scanQueueAsync above): nil registry = test wiring,
+	// fail-closed empty allowlist rather than a panic or an unfiltered probe.
+	var visible []string
+	if c.blocktypes != nil {
+		visible = c.blocktypes.Snapshot().VisibleTypes()
+	}
+	row := c.channelProbeRun(ctx, c.pool, cfg.Embed.Model, cfg.Scheduler.ReadScopes, visible)
+	c.channelProbe.Store(row)
+	c.channelProbeAt.Store(time.Now().UnixNano())
+	return row
 }
 
 // buildCheap gathers everything except the dream-queue scan.

@@ -2,13 +2,16 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/schemacontract"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgvec "github.com/pgvector/pgvector-go"
 )
 
 // dbStatus is the server-admin-only /api/status "db" section (Evokoa-Clean-
@@ -33,9 +36,12 @@ type dbStatus struct {
 	// finds no partial index covering the backfill predicate — NEVER a
 	// scanned/scan-avoided 0, that would be a Schein-Wert (Gate G3).
 	EmbedBacklog *int `json:"embed_backlog"`
-	// ChannelProbe is reserved for W03-8 (status.channel_probe_interval) and
-	// stays null for the entirety of this wave (task brief: "bleibt in
-	// dieser Welle IMMER null").
+	// ChannelProbe is the W03-8 per-channel latency probe (design/03 §4.7,
+	// E-03-5). Pointer, null in THREE cases, all deliberate: the interval is
+	// 0 (default-off, Gate 1), the interval hasn't elapsed yet since the last
+	// run (channelProbeIfDue's own cadence gate — see status.go), or the
+	// probe ran but found no matching context_embed_cache row (Gate 3, never
+	// an error). NEVER a zero-valued probeRow standing in for "not measured".
 	ChannelProbe *probeRow `json:"channel_probe"`
 }
 
@@ -81,13 +87,20 @@ type hnswRow struct {
 	EfSearchEffective string   `json:"ef_search_effective"`
 }
 
-// probeRow is the RESERVED shape for the per-channel latency probe
-// (status.channel_probe_interval, W03-8 — not built in this wave).
-// dbStatus.ChannelProbe is always nil here; this type exists purely so the
-// pointer/wire convention is already correct before W03-8 lands. W03-8 owns
-// the real field set and may redefine this freely (no consumer depends on
-// its shape yet).
-type probeRow struct{}
+// probeRow is the per-channel latency probe result (design/03 §4.7, W03-8):
+// one wall-clock measurement per ctx_rrf CTE (semantic_ann/fulltext_de/
+// fulltext_en/trigram_title), plus the instant they were measured. A channel
+// pointer is nil if that channel's own query failed (best-effort per-channel,
+// mirroring the rest of this file's resilience posture) — MeasuredAt is only
+// set when the probe transaction actually ran (nil dbStatus.ChannelProbe
+// covers both "off" and "cache miss", design/03 §4.7's documented skip).
+type probeRow struct {
+	SemanticMs *float64  `json:"semantic_ms"`
+	FtsDeMs    *float64  `json:"fts_de_ms"`
+	FtsEnMs    *float64  `json:"fts_en_ms"`
+	TrigramMs  *float64  `json:"trigram_ms"`
+	MeasuredAt time.Time `json:"measured_at"`
+}
 
 // hnswIndexName is the one ANN index this section reports on (design/03
 // §4.7's HNSW row; 001_initial.sql:250-252).
@@ -121,6 +134,18 @@ var dbStatusServerGUCNames = []string{
 // best-effort: a single relation/extension/GUC failure logs a WARN and
 // degrades that slice/row rather than failing the whole section (the same
 // resilience posture buildCheap already applies to llm24h/last-cycle).
+//
+// ChannelProbe is deliberately NOT built here (design/03 §4.7's own
+// "eigener Zeitstempel-Gate ... die Probe läuft höchstens einmal je
+// channel_probe_interval, nicht bei jedem db-Stats-Refresh"): db_stats_
+// interval and channel_probe_interval are two INDEPENDENT cadences, and
+// dbStatsBuild's signature (ctx, pool) *dbStatus is a stable injection point
+// several tests already override — see status.go's scanDBStatsAsync, which
+// calls buildDBStatus and then layers db.ChannelProbe = c.channelProbeIfDue
+// (...) on top, its OWN gate against the collector's channelProbeAt cadence
+// state (a THIRD qs/dbStats-shaped single-flight source, but merged into the
+// SAME dbStatus wire object rather than a new top-level statusResponse
+// field, per design/03's struct literal).
 func buildDBStatus(ctx context.Context, pool *pgxpool.Pool) *dbStatus {
 	db := &dbStatus{
 		Extensions:   queryExtensions(ctx, pool),
@@ -128,7 +153,7 @@ func buildDBStatus(ctx context.Context, pool *pgxpool.Pool) *dbStatus {
 		Relations:    queryRelations(ctx, pool),
 		HNSW:         queryHNSW(ctx, pool),
 		EmbedBacklog: queryEmbedBacklog(ctx, pool),
-		// ChannelProbe intentionally left nil — W03-8.
+		// ChannelProbe: see the func comment above — filled in by the caller.
 	}
 
 	if applied, maxVer, err := queryMigrationsCounts(ctx, pool); err != nil {
@@ -465,4 +490,154 @@ func embedBacklogIndexExists(ctx context.Context, pool *pgxpool.Pool) (bool, err
 		)`,
 	).Scan(&exists)
 	return exists, err
+}
+
+// channelProbeSemanticSQL/channelProbeFtsDeSQL/channelProbeFtsEnSQL/
+// channelProbeTrigramSQL are the four ctx_rrf CTEs (112_rrf_gen15_dual_arm.sql,
+// the wave brief's pinned reference: semantic_ann LIMIT 75 / fulltext_de
+// LIMIT 100 / fulltext_en LIMIT 100 / trigram_title LIMIT 30) rebuilt as
+// standalone statements (design/03 §4.7: "die Query-Formen dort 1:1 als
+// Einzel-Statements nachbilden, mit repräsentativem Filter-Satz
+// p_scopes/p_types_visible analog Prod-Aufruf"). Deliberately narrower than
+// the full ctx_rrf predicate block: category/tags/damped-types/excludes are
+// always NULL in a representative unscoped call (their SQL conjuncts are
+// `<param> IS NULL OR ...`, i.e. no-ops when NULL) — the probe reproduces
+// them by omission rather than by passing NULL through six extra params.
+// query_or/temporal are the same NULL no-op story on the fulltext GREATEST()
+// arms, so fulltext narrows to a single ts_rank_cd/plainto_tsquery term (the
+// row-matching predicate, and therefore the planner's selectivity estimate,
+// is unchanged — only the additional OR-arms used purely for rank blending
+// are dropped). The `p_semantic_mode = 'ann'` one-time-filter-gate literal
+// (112) is dropped too: that gate exists so ONE function body can hold two
+// arms, it has no meaning for a standalone ann-only statement.
+const (
+	channelProbeSemanticSQL = `
+		SELECT cb.id
+		  FROM context_blocks cb
+		 WHERE NOT cb.is_archived
+		   AND cb.type_name = ANY($1)
+		   AND cb.scope = ANY($2)
+		 ORDER BY cb.embedding::halfvec(1024) <=> $3
+		 LIMIT 75`
+	channelProbeFtsDeSQL = `
+		SELECT cb.id
+		  FROM context_blocks cb
+		 WHERE NOT cb.is_archived
+		   AND cb.type_name = ANY($1)
+		   AND cb.scope = ANY($2)
+		   AND cb.ts_de @@ plainto_tsquery('german', $3)
+		 ORDER BY ts_rank_cd(cb.ts_de, plainto_tsquery('german', $3)) DESC
+		 LIMIT 100`
+	channelProbeFtsEnSQL = `
+		SELECT cb.id
+		  FROM context_blocks cb
+		 WHERE NOT cb.is_archived
+		   AND cb.type_name = ANY($1)
+		   AND cb.scope = ANY($2)
+		   AND cb.ts_en @@ plainto_tsquery('english', $3)
+		 ORDER BY ts_rank_cd(cb.ts_en, plainto_tsquery('english', $3)) DESC
+		 LIMIT 100`
+	channelProbeTrigramSQL = `
+		SELECT cb.id
+		  FROM context_blocks cb
+		 WHERE NOT cb.is_archived
+		   AND cb.type_name = ANY($1)
+		   AND cb.scope = ANY($2)
+		   AND similarity(cb.title, $3) > 0.05
+		 ORDER BY similarity(cb.title, $3) DESC
+		 LIMIT 30`
+)
+
+// runChannelProbe is the design/03 §4.7 ChannelProbe (W03-8, off by default —
+// status.channel_probe_interval). It measures the four ctx_rrf retrieval
+// channels' Go-side wall-clock latency, plan-paritätisch to the real
+// function (the same `SET LOCAL hnsw.iterative_scan = 'relaxed_order'` 073/
+// 112 set unconditionally in ann mode, in the SAME transaction as the four
+// probe statements so they share the exact GUC state a real query would).
+//
+// Probe-Input: the query vector comes from context_embed_cache, filtered to
+// the CURRENT embed model (Gate 5 — a foreign-model row must never win, even
+// with the highest hit_count: cross-model rows can carry a different vector
+// dimension, turning a latency probe into a SQL error) and ordered by
+// hit_count DESC (the most representative real query the corpus has seen).
+// The SAME row's text_preview doubles as the representative query TEXT for
+// the fulltext/trigram channels — a deliberate reuse (not in the design
+// doc's literal wording, documented here as a judgment call): text_preview
+// is the verbatim text that produced the embedding, already at hand from
+// the one cache lookup, and using it keeps all four channels probing the
+// SAME coherent query rather than inventing an unrelated fixed string.
+//
+// No cache row for the current model ⇒ nil, no error, no wire call (Gate 3):
+// this function never holds an embed/LLM client, so it is STRUCTURALLY
+// incapable of making one — there is nothing to mock or count.
+func runChannelProbe(ctx context.Context, pool *pgxpool.Pool, embedModel string, scopes, visibleTypes []string) *probeRow {
+	var raw pgvec.Vector
+	var text string
+	err := pool.QueryRow(ctx, `
+		SELECT embedding, text_preview FROM context_embed_cache
+		 WHERE model = $1
+		 ORDER BY hit_count DESC, last_access DESC
+		 LIMIT 1`, embedModel,
+	).Scan(&raw, &text)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("status: channel probe embed-cache lookup failed", "error", err)
+		}
+		return nil // cache-empty (or no row for the current model) — documented skip, never an error
+	}
+
+	// Fail-closed the same way rrf.Search's own guard does: an empty
+	// scopes/visible-types allowlist cannot form a representative probe (it
+	// would measure ctx_rrf's OWN "0 hits by design" fast path, not retrieval
+	// latency) — skip rather than report a meaningless near-zero number.
+	if len(scopes) == 0 || len(visibleTypes) == 0 {
+		slog.Warn("status: channel probe skipped — empty scopes or visible-types allowlist")
+		return nil
+	}
+
+	hv := pgvec.NewHalfVector(raw.Slice())
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		slog.Warn("status: channel probe begin failed", "error", err)
+		return nil
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // read-only throughout; rollback is cleanup, not a correctness requirement
+
+	if _, err := tx.Exec(ctx, `SET LOCAL hnsw.iterative_scan = 'relaxed_order'`); err != nil {
+		slog.Warn("status: channel probe SET LOCAL failed", "error", err)
+		return nil
+	}
+
+	row := &probeRow{MeasuredAt: time.Now().UTC()}
+	row.SemanticMs = timeChannelProbeQuery(ctx, tx, "semantic", channelProbeSemanticSQL, visibleTypes, scopes, hv)
+	row.FtsDeMs = timeChannelProbeQuery(ctx, tx, "fts_de", channelProbeFtsDeSQL, visibleTypes, scopes, text)
+	row.FtsEnMs = timeChannelProbeQuery(ctx, tx, "fts_en", channelProbeFtsEnSQL, visibleTypes, scopes, text)
+	row.TrigramMs = timeChannelProbeQuery(ctx, tx, "trigram", channelProbeTrigramSQL, visibleTypes, scopes, text)
+	return row
+}
+
+// timeChannelProbeQuery executes sql to completion (draining every row —
+// Postgres streams rows lazily, so a wall-clock measurement that stops at
+// Query() rather than after the last Next() would only time planning + the
+// first row, not the full scan/sort) and returns the elapsed milliseconds,
+// or nil if the channel's own query failed (best-effort per channel, this
+// file's established resilience posture — one bad channel must not blank
+// out the other three).
+func timeChannelProbeQuery(ctx context.Context, tx pgx.Tx, channel, sql string, args ...any) *float64 {
+	start := time.Now()
+	rows, err := tx.Query(ctx, sql, args...)
+	if err != nil {
+		slog.Warn("status: channel probe query failed", "channel", channel, "error", err)
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("status: channel probe row iteration failed", "channel", channel, "error", err)
+		return nil
+	}
+	ms := float64(time.Since(start)) / float64(time.Millisecond)
+	return &ms
 }

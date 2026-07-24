@@ -99,6 +99,7 @@ type Config struct {
 	Tenant        TenantConfig
 	Dispatch      DispatchConfig
 	Contract      ContractConfig
+	Status        StatusConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -679,6 +680,24 @@ type ContractConfig struct {
 	// instead of aborting boot — a re-check cadence is not a security
 	// ceiling (unlike the dispatch.*/events.max_connections int caps).
 	RecheckInterval time.Duration `key:"contract.recheck_interval" env:"CTX_CONTRACT_RECHECK_INTERVAL" default:"60" mut:"hot" tenancy:"global-only"`
+}
+
+// StatusConfig is the /api/status observability surface OUTSIDE the
+// events.db_stats_interval cadence (design/03 §4.7, W03-8): the four-channel
+// (semantic/fts_de/fts_en/trigram) latency probe against ctx_rrf's own CTEs.
+type StatusConfig struct {
+	// ChannelProbeInterval gates the ChannelProbe (design/03 §4.7/E-03-5).
+	// Default 0 = OFF, deliberately WITHOUT the <=0-falls-back-to-N convention
+	// events.db_stats_interval/contract.recheck_interval use: 0 here means the
+	// probe NEVER runs and dbStatus.ChannelProbe stays permanently null (Gate
+	// 1 default-off golden) — not "runs on some default cadence". The probe
+	// shares recall_check's Probe-Input-Quelle (context_embed_cache) and the
+	// same "wieviel Eigenlast ist akzeptabel" question; E-03-5's recommendation
+	// is to flip this on together with the Achse-01 recall_check rollout, not
+	// on deploy. Non-strict, same cadence-field convention as
+	// RecheckInterval/DBStatsInterval — a malformed value falls back to the
+	// default (off) rather than aborting boot.
+	ChannelProbeInterval time.Duration `key:"status.channel_probe_interval" env:"CTX_STATUS_CHANNEL_PROBE_INTERVAL" default:"0" mut:"hot" tenancy:"global-only"`
 }
 
 // Source reports the origin of a registry key in this snapshot:

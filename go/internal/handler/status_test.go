@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestDreamModeString(t *testing.T) {
@@ -306,7 +308,57 @@ func TestStatusGoldenKeys(t *testing.T) {
 		t.Errorf("db.embed_backlog = %s, want null (this fixture leaves it unset)", got)
 	}
 	if got := string(dbTop["channel_probe"]); got != "null" {
-		t.Errorf("db.channel_probe = %s, want null (W03-8 not built yet — always null this wave)", got)
+		t.Errorf("db.channel_probe = %s, want null (this fixture leaves ChannelProbe unset — the default-off shape, design/03 §4.7 Gate 1)", got)
+	}
+}
+
+// W03-8 Gate 1 (design/03 §4.7): probeRow's OWN wire shape, pinned
+// independently of the null-in-the-default-fixture case above — a populated
+// probe (status.channel_probe_interval > 0, a real run) must carry exactly
+// these five keys, all PRESENT even when a channel's own measurement failed
+// (nil *float64 marshals to null, not an absent key).
+func TestChannelProbeRowGoldenKeys(t *testing.T) {
+	measured := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	ms := 1.5
+	pbBytes, err := json.Marshal(probeRow{SemanticMs: &ms, MeasuredAt: measured})
+	if err != nil {
+		t.Fatalf("marshal probeRow: %v", err)
+	}
+	assertKeys(t, "db.channel_probe", pbBytes, []string{
+		"semantic_ms", "fts_de_ms", "fts_en_ms", "trigram_ms", "measured_at",
+	})
+	var pbFields map[string]json.RawMessage
+	if err := json.Unmarshal(pbBytes, &pbFields); err != nil {
+		t.Fatalf("unmarshal probeRow: %v", err)
+	}
+	if got := string(pbFields["fts_de_ms"]); got != "null" {
+		t.Errorf("probeRow.fts_de_ms = %s, want null (a channel that never ran/failed stays null, PRESENT as a key)", got)
+	}
+}
+
+// TestChannelProbeIfDueDefaultOffNeverInvoked is Gate 1's behavioral half
+// (design/03 §4.7/E-03-5): with status.channel_probe_interval <= 0,
+// channelProbeIfDue must return nil WITHOUT ever calling channelProbeRun —
+// not just "the field happens to be nil in a fixture that didn't set it"
+// (TestStatusGoldenKeys' shape pin above), but "the probe function is
+// structurally unreachable while off". A panicking channelProbeRun proves a
+// call would fail the test rather than silently succeed. No DB, no
+// testcontainer needed: the interval<=0 branch returns before touching
+// c.pool.
+func TestChannelProbeIfDueDefaultOffNeverInvoked(t *testing.T) {
+	c := &StatusCollector{}
+	c.channelProbeRun = func(context.Context, *pgxpool.Pool, string, []string, []string) *probeRow {
+		t.Fatal("channelProbeRun must never be called while status.channel_probe_interval <= 0")
+		return nil
+	}
+	for _, interval := range []time.Duration{0, -1 * time.Second} {
+		cfg := &config.Config{Status: config.StatusConfig{ChannelProbeInterval: interval}}
+		if got := c.channelProbeIfDue(context.Background(), cfg); got != nil {
+			t.Errorf("channelProbeIfDue(interval=%v) = %+v, want nil", interval, got)
+		}
+	}
+	if c.channelProbeAt.Load() != 0 {
+		t.Errorf("channelProbeAt must stay 0 (untouched) while the probe is off, got %d", c.channelProbeAt.Load())
 	}
 }
 
