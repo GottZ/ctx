@@ -115,8 +115,8 @@ func TestStatusPerTenantView(t *testing.T) {
 		snap := col.SnapshotForTenant(ctx, "st-a")
 		// profiles is server-admin-only (N8): the per-tenant snapshot never sets
 		// it, so the pointer stays nil → the wire key is omitted entirely.
-		if snap.Dream.Mode != "" || snap.Profiles != nil || snap.Activity != nil || snap.DB != nil {
-			t.Errorf("tenant view leaked server-global fields: dream=%+v profiles=%v activity=%v db=%v", snap.Dream, snap.Profiles, snap.Activity, snap.DB)
+		if snap.Dream.Mode != "" || snap.Profiles != nil || snap.Activity != nil || snap.DB != nil || snap.GraphCache != nil {
+			t.Errorf("tenant view leaked server-global fields: dream=%+v profiles=%v activity=%v db=%v graph_cache=%v", snap.Dream, snap.Profiles, snap.Activity, snap.DB, snap.GraphCache)
 		}
 		// G5 (design/03 §4.7/§5, W03-7 K4 slot 1b): the db section is server
 		// DB interna and must never reach a tenant response — the nil check
@@ -130,6 +130,11 @@ func TestStatusPerTenantView(t *testing.T) {
 		}
 		if strings.Contains(string(b), `"db"`) {
 			t.Errorf("tenant /api/status wire payload carries a db key (topology leak): %s", b)
+		}
+		// W05.2 (design/05 §4.6): the graph_cache section is server-global cache
+		// interna — same wire-absence pin as db above.
+		if strings.Contains(string(b), `"graph_cache"`) {
+			t.Errorf("tenant /api/status wire payload carries a graph_cache key (server-global leak): %s", b)
 		}
 	})
 

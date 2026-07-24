@@ -88,6 +88,7 @@ type Config struct {
 	Rerank         RerankConfig
 	Graph          GraphConfig
 	GraphOverview  GraphOverviewConfig
+	GraphCache     GraphCacheConfig
 	Query          QueryConfig
 	Scheduler      SchedulerConfig
 	Pool           PoolConfig
@@ -273,6 +274,63 @@ type GraphOverviewConfig struct {
 	// interrupted — the timeout abandons it (documented goroutine leak) and
 	// keeps the scheduler loop alive. 0 → 900s.
 	RebuildTimeout time.Duration `key:"graph_overview.rebuild_timeout" env:"CTX_GRAPH_OVERVIEW_REBUILD_TIMEOUT" default:"900" mut:"hot" tenancy:"global-only"`
+}
+
+// GraphCacheConfig is the Achse-05 CSR graph-cache track (design/05 §4.7). It
+// governs the in-process adjacency cache over BOTH link tables (dream +
+// structural) and its rebuild job (W05.2). Doctrine "Mechanismus = Code / Policy
+// = Daten": the CSR build, the state automaton and the dirty clock are code in
+// internal/graphcache; every numeric knob lives here.
+//
+// EVERY key is global-only — including the future serve flags — and the §4.7
+// rationale is deliberately explicit (not just the fail-closed default): the
+// cache is ONE process-global heap structure (a single CSR snapshot over the
+// whole corpus) served by ONE rebuild goroutine. A per-tenant override would
+// touch NOTHING tenant-private (config.go:62-67 tenancy rule) — enabled and the
+// cadence own a shared process resource, and a tenant-tunable rebuild cadence or
+// staleness ceiling could only mis-tune or disarm the one shared cache the whole
+// process serves from (the OOM-Guard / Prozess-Ressource argument, §4.7). Unlike
+// the security-ceiling caps, this group carries NO parse:"strict" (RecallCheck
+// precedent): an operational tuning knob falling back to its protective default
+// on a malformed value is the right degradation, never a boot-abort.
+type GraphCacheConfig struct {
+	// Enabled is the master gate (default FALSE, §4.7): the rebuild job stays
+	// inert until enabled, and every consumer path (W05.5+) reads a nil Current()
+	// → SQL fallback. A hot enable triggers a fresh boot-build on the next loop.
+	Enabled bool `key:"graph_cache.enabled" env:"CTX_GRAPH_CACHE_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+	// RebuildInterval is the HARD interval (§4.3): an unconditional rebuild at
+	// least this often, measured from the last build START — it covers missed
+	// NOTIFYs (listener reconnect) and the signal-free past. Seconds (6h default),
+	// like the other duration keys.
+	RebuildInterval time.Duration `key:"graph_cache.rebuild_interval" env:"CTX_GRAPH_CACHE_REBUILD_INTERVAL" default:"21600" mut:"hot" tenancy:"global-only"`
+	// DebounceWindow is the quiet period a dirty signal must age before a
+	// signal-driven rebuild fires (§4.3, quiet = now − lastDirtyAt). Seconds.
+	DebounceWindow time.Duration `key:"graph_cache.debounce_window" env:"CTX_GRAPH_CACHE_DEBOUNCE_WINDOW" default:"60" mut:"hot" tenancy:"global-only"`
+	// MinRebuildInterval is the upper bound on rebuild FREQUENCY (§4.3): a
+	// signal-driven rebuild is suppressed until this long since the last build
+	// start, so periodic link-writes cannot trigger a rebuild storm. Seconds.
+	MinRebuildInterval time.Duration `key:"graph_cache.min_rebuild_interval" env:"CTX_GRAPH_CACHE_MIN_REBUILD_INTERVAL" default:"300" mut:"hot" tenancy:"global-only"`
+	// MaxPendingAge is the starvation bound (§4.3): a rebuild fires no later than
+	// this after the OLDEST unconsumed signal (firstPendingAt), even under writes
+	// denser than DebounceWindow. Seconds.
+	MaxPendingAge time.Duration `key:"graph_cache.max_pending_age" env:"CTX_GRAPH_CACHE_MAX_PENDING_AGE" default:"600" mut:"hot" tenancy:"global-only"`
+	// MaxStaleness is the Dirty-Age degradation threshold (§4.3/§4.6): once a
+	// signal is pending AND its Dirty-Age (now − firstPendingAt) exceeds this, the
+	// automaton goes Degraded and consumers fall back to SQL. It bounds the
+	// maximum cache lie. Seconds (15 min default). It is Dirty-Age, NOT build age
+	// — an idle DB never degrades (§4.3 idle regime).
+	MaxStaleness time.Duration `key:"graph_cache.max_staleness" env:"CTX_GRAPH_CACHE_MAX_STALENESS" default:"900" mut:"hot" tenancy:"global-only"`
+	// FailedThreshold is the number of consecutive build failures after which the
+	// state turns Failed (status red + an error log per attempt, §4.6).
+	FailedThreshold int `key:"graph_cache.failed_threshold" env:"CTX_GRAPH_CACHE_FAILED_THRESHOLD" default:"3" mut:"hot" tenancy:"global-only"`
+	// DegreeWalkBudget caps the hint-filtered degree walk (§4.1, E-05-3a); the
+	// degree becomes a lower bound past it. Consumed by the W05.6 degree path;
+	// laid down here so the whole graph_cache.* group is one surface.
+	DegreeWalkBudget int `key:"graph_cache.degree_walk_budget" env:"CTX_GRAPH_CACHE_DEGREE_WALK_BUDGET" default:"4000" mut:"hot" tenancy:"global-only"`
+	// ServeEgo / ServeExpand are the W05.5 / W05.7 consumer flags (default false):
+	// laid down here so the surface is complete, but no consumer reads them yet.
+	ServeEgo    bool `key:"graph_cache.serve_ego" env:"CTX_GRAPH_CACHE_SERVE_EGO" default:"false" mut:"hot" tenancy:"global-only"`
+	ServeExpand bool `key:"graph_cache.serve_expand" env:"CTX_GRAPH_CACHE_SERVE_EXPAND" default:"false" mut:"hot" tenancy:"global-only"`
 }
 
 // QueryConfig is the query-path tuning surface: synthesis thresholds, prompt

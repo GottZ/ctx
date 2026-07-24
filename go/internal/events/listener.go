@@ -25,6 +25,12 @@ const (
 	// channelBlockWrite is the PG NOTIFY channel fired by the trg_block_write trigger.
 	channelBlockWrite = "ctx_block_write"
 
+	// channelLinkWrite is the graph-cache dirty signal (design/05 §4.3). The
+	// DB-side triggers on both link tables + the block visibility-attribute flip
+	// arrive with Migration 116 (W05.3); until then this LISTEN is registered but
+	// NEVER fires — the hard rebuild interval + reconnect backlog cover the gap.
+	channelLinkWrite = "ctx_link_write"
+
 	// channelSettingsWrite is fired by the 051 notify triggers on
 	// context_settings AND context_secrets (payload: entity/key/op — never
 	// values). It is what makes psql direct edits and break-glass resets hot:
@@ -60,6 +66,27 @@ func (h *WriteHandler) HandleNotification(ctx context.Context, notification *pgc
 func (h *WriteHandler) HandleBacklog(ctx context.Context, channel string, conn *pgx.Conn) error {
 	slog.Info("listener: processing backlog, signaling guard+digest")
 	h.scheduler.NotifyWrite()
+	return nil
+}
+
+// LinkWriteHandler marks the graph cache dirty on ctx_link_write notifications
+// (design/05 §4.3). Payload is irrelevant — the consumer is a debounce that only
+// needs "dirty", not row identity (a constant per-table payload, §3.1 Nr. 1).
+type LinkWriteHandler struct {
+	scheduler *Scheduler
+}
+
+// HandleNotification marks dirty on every ctx_link_write NOTIFY.
+func (h *LinkWriteHandler) HandleNotification(ctx context.Context, notification *pgconn.Notification, conn *pgx.Conn) error {
+	h.scheduler.NotifyLinkWrite()
+	return nil
+}
+
+// HandleBacklog marks dirty once after a reconnect: a link write during the
+// disconnect window would otherwise stay invisible until the hard interval
+// (HandleBacklog pattern, design/05 §4.3 backlog semantics).
+func (h *LinkWriteHandler) HandleBacklog(ctx context.Context, channel string, conn *pgx.Conn) error {
+	h.scheduler.NotifyLinkWrite()
 	return nil
 }
 
@@ -255,6 +282,9 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 
 	handler := &WriteHandler{scheduler: scheduler}
 	listener.Handle(channelBlockWrite, handler)
+	// W05.2: the graph-cache dirty signal. Registered now (LISTEN is harmless
+	// while no NOTIFY fires); Migration 116 (W05.3) wires the DB-side triggers.
+	listener.Handle(channelLinkWrite, &LinkWriteHandler{scheduler: scheduler})
 	// dispatcher comes from the owning scheduler (SetDispatcher, boot
 	// happens-before Run): the reload owner pushes re-mapped settings/policy
 	// into it (MW2; nil = inert, exactly like blocktypes).

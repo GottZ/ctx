@@ -193,6 +193,13 @@ func TestStatusGoldenKeys(t *testing.T) {
 			EmbedBacklog: nil,
 			ChannelProbe: nil,
 		},
+		// W05.2 (design/05 §4.6): the graph_cache section is server-admin PRESENT
+		// (this fixture); TestStatusPerTenantView's server_global_fields_zero_for_
+		// tenant subtest pins ABSENT on the tenant path.
+		GraphCache: &graphCacheStatus{
+			State: "Fresh", Seq: 7, StalenessMs: 0, Nodes: 42,
+			DreamEdges: 100, StructEdges: 20, LastBuildMs: 12, Fails: 0,
+		},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -200,7 +207,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
-		"dispatch", "dispatch_tenant", "db",
+		"dispatch", "dispatch_tenant", "db", "graph_cache",
 	})
 
 	var top map[string]json.RawMessage
@@ -220,6 +227,14 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "profiles.row", pfs[0], []string{
 		"name", "scope", "label", "active", "member_count",
+	})
+
+	// W05.2 (design/05 §4.6): the graph_cache section wire shape. built_at is
+	// PRESENT (null in this fixture — no omitempty on the inner field; a never-
+	// built cache reads null, not the epoch).
+	assertKeys(t, "graph_cache", top["graph_cache"], []string{
+		"state", "seq", "built_at", "staleness_ms", "nodes", "dream_edges",
+		"struct_edges", "last_build_ms", "last_error_class", "fails",
 	})
 
 	// MW12 dispatch section (server-admin) wire pins.

@@ -21,6 +21,7 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
+	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
@@ -55,7 +56,6 @@ const (
 	embedCacheTTLDays = 30
 	// embedCacheMaxRows: size cap — oldest rows above this are pruned.
 	embedCacheMaxRows = 50000
-
 
 	// overviewYieldWait is the re-check cadence while the overview rebuild
 	// defers to active queries (B-W1 demand interruption). Coarser than
@@ -117,14 +117,14 @@ type dreamCycleFunc func(ctx context.Context, pool *pgxpool.Pool, r *dream.Route
 // Scheduler orchestrates Guard + Digest as background jobs.
 // Reacts to LISTEN/NOTIFY events via pgxlisten and uses time-based fallbacks.
 type Scheduler struct {
-	pool          *pgxpool.Pool
-	cfg           *config.Store       // hot config: one Snapshot per cycle/run
-	backendPool   *backends.Pool      // F3 pool; listener reloads it on context_backends NOTIFYs
-	blocktypes    *blocktype.Registry // WF T3: the listener hot-reloads it on context_block_types NOTIFYs; nil until SetBlocktypeRegistry
-	projectHub    *ProjectHub         // W9: the listener forwards ctx_project_write NOTIFYs to it; nil until SetProjectHub (then the channel is inert)
-	webhookSync   WebhookSyncTrigger  // W13: the inbox arm fires this per drained project; mu-guarded (wired from NewRouter post-Run); inbox arm inert while nil
-	startup       StartupConfig
-	runCycle      dreamCycleFunc
+	pool        *pgxpool.Pool
+	cfg         *config.Store       // hot config: one Snapshot per cycle/run
+	backendPool *backends.Pool      // F3 pool; listener reloads it on context_backends NOTIFYs
+	blocktypes  *blocktype.Registry // WF T3: the listener hot-reloads it on context_block_types NOTIFYs; nil until SetBlocktypeRegistry
+	projectHub  *ProjectHub         // W9: the listener forwards ctx_project_write NOTIFYs to it; nil until SetProjectHub (then the channel is inert)
+	webhookSync WebhookSyncTrigger  // W13: the inbox arm fires this per drained project; mu-guarded (wired from NewRouter post-Run); inbox arm inert while nil
+	startup     StartupConfig
+	runCycle    dreamCycleFunc
 
 	// dispatcher is the process-wide admission layer (Vorhaben E) and, since
 	// A5-W0 (MW15), the SOLE source of the interactive-demand signal the
@@ -214,6 +214,14 @@ type Scheduler struct {
 	// rebuild stays in-process (pre-E-A behaviour + fallback target).
 	// Boot happens-before contract, never mutated after Run.
 	overviewWorkerArgv []string
+
+	// graphCache is the Achse-05 W05.2 CSR-cache manager (double-buffer store +
+	// Dirty-Age clock + state automaton, design/05 §4.6). graphcache owns the
+	// state, this scheduler owns the cadence (runGraphCacheRebuild). Created in
+	// NewScheduler so it is never nil on the production path; the ctx_link_write
+	// listener marks it dirty and /api/status reads its Status. Inert while
+	// graph_cache.enabled is false (the rebuild loop sleeps + re-checks).
+	graphCache *graphcache.Manager
 }
 
 // SetDreamMode sets the dream operating mode and optional silent interval.
@@ -294,6 +302,7 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 		runCycle:    dream.RunDreamCycle,
 		classify:    llm.ClassifyBlockBool,
 		runDone:     make(chan struct{}),
+		graphCache:  graphcache.NewManager(),
 	}
 	s.backgroundTenantsFn = s.backgroundTenants
 	return s
@@ -642,6 +651,13 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// blocks the daily-summary cadence.
 	go s.runDailySynthesis(ctx)
 	go s.runOverviewRebuild(ctx)
+
+	// Achse 05 W05.2: the graph-cache rebuild job (design/05 §4.3). Own goroutine
+	// (like overview): boot-build on enable, hard interval + Dirty-Age-debounced
+	// signal rebuilds, double-buffer swap. Inert while graph_cache.enabled is
+	// false; the dirty signal (ctx_link_write) is only wired to the DB by Mig 116
+	// (W05.3), so today the hard interval + reconnect backlog drive it.
+	go s.runGraphCacheRebuild(ctx)
 
 	// Achse 01 W01-3: the recall_check arm (design/01 §4.3). Own goroutine (no
 	// new ticker case): two cadence anchors — cheap strata on the hot interval,

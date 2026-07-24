@@ -14,6 +14,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -31,6 +32,18 @@ type dreamModeSource interface {
 // type-asserts and degrades to nil stamps, never a hard dependency.
 type armRunSource interface {
 	LastArmRuns() (guard, digest, overview time.Time)
+}
+
+// graphCacheSource is the OPTIONAL scheduler slice for the Achse-05 graph-cache
+// status block (design/05 §4.6). *events.Scheduler satisfies it; a dreamModeSource
+// that does not (test fakes) yields no block — the collector type-asserts and
+// degrades to a nil section, never a hard dependency. It is its OWN narrow
+// interface (the recallRunSource doctrine), kept off armRunSource so the
+// byte-identical LastArmRuns signature — and the armRunSource assertion — stays
+// untouched (the armRunSource trap, §4.5). The bool is false when the manager is
+// unwired.
+type graphCacheSource interface {
+	GraphCacheStatus() (graphcache.Status, bool)
 }
 
 // DispatchSource is the in-memory admission-registry view the collector adds as
@@ -94,6 +107,31 @@ type statusResponse struct {
 	// statusResponse directly, never sets it — DB interna are server-global
 	// and go tenants nothing, design/03 §5).
 	DB *dbStatus `json:"db,omitempty"`
+	// GraphCache is the server-admin-only Achse-05 graph-cache section (design/05
+	// §4.6, W05.2). Pointer + omitempty, the Profiles/DB convention (:80/:96):
+	// PRESENT on the server-admin path when the cache manager is wired (even when
+	// the cache is disabled — the block then reads state="Empty"), ABSENT on the
+	// per-tenant path (SnapshotForTenant never sets it — cache interna are
+	// server-global) and when no graphCacheSource is wired (test fakes).
+	GraphCache *graphCacheStatus `json:"graph_cache,omitempty"`
+}
+
+// graphCacheStatus is the /api/status graph_cache block wire shape (design/05
+// §4.6): the CSR cache's lifecycle state, publication seq, Dirty-Age staleness
+// and the live node/edge counts + last-build diagnostics. staleness_ms is the
+// Dirty-Age (§4.3), NOT built_at age. built_at is a *time.Time (null before the
+// first build) — a pure diagnostic, never the staleness anchor.
+type graphCacheStatus struct {
+	State          string     `json:"state"`
+	Seq            uint64     `json:"seq"`
+	BuiltAt        *time.Time `json:"built_at"`
+	StalenessMs    int64      `json:"staleness_ms"`
+	Nodes          int        `json:"nodes"`
+	DreamEdges     int        `json:"dream_edges"`
+	StructEdges    int        `json:"struct_edges"`
+	LastBuildMs    int64      `json:"last_build_ms"`
+	LastErrorClass string     `json:"last_error_class"`
+	Fails          int        `json:"fails"`
 }
 
 // dreamStatus flattens scheduler mode + the dream.QueueStats fields (names 1:1,
@@ -178,6 +216,10 @@ type cheapSnapshot struct {
 	lastGuardAt       *time.Time
 	lastDigestAt      *time.Time
 	lastOverviewAt    *time.Time
+	// graphCache is the Achse-05 graph-cache section, captured in-memory at the
+	// tick (like the dispatch/arm stamps). nil when no graphCacheSource is wired
+	// or its manager is absent — no section emitted (design/05 §4.6).
+	graphCache *graphCacheStatus
 }
 
 // StatusCollector is the process-wide status aggregator (design 04 §3.6, W6).
@@ -529,7 +571,34 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 		snap.lastDigestAt = timePtr(d)
 		snap.lastOverviewAt = timePtr(o)
 	}
+	// Achse-05 graph-cache section (design/05 §4.6): captured HERE so every reader
+	// within a tick serves the same stand. Its own narrow assertion (graphCache-
+	// Source), independent of armRunSource — a fake dreamMode source that does not
+	// satisfy it simply yields no section.
+	if src, ok := c.dreams.(graphCacheSource); ok {
+		if gcs, wired := src.GraphCacheStatus(); wired {
+			snap.graphCache = buildGraphCacheStatus(gcs)
+		}
+	}
 	return snap
+}
+
+// buildGraphCacheStatus maps the graphcache.Status manager view onto the slim
+// status-frame wire shape (design/05 §4.6). DB-free pure function. built_at folds
+// the zero time to nil (no build yet → null on the wire, not the Unix epoch).
+func buildGraphCacheStatus(s graphcache.Status) *graphCacheStatus {
+	return &graphCacheStatus{
+		State:          s.State.String(),
+		Seq:            s.Seq,
+		BuiltAt:        timePtr(s.BuiltAt),
+		StalenessMs:    s.Staleness.Milliseconds(),
+		Nodes:          s.Nodes,
+		DreamEdges:     s.DreamEdges,
+		StructEdges:    s.StructEdges,
+		LastBuildMs:    s.LastBuildDur.Milliseconds(),
+		LastErrorClass: s.LastErrorClass,
+		Fails:          s.Fails,
+	}
 }
 
 // buildStatusProfiles maps the pool's disable-profile snapshot onto the slim
@@ -612,6 +681,10 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		Activity:       nil,
 		Dispatch:       disp,
 		DB:             db,
+		// graph_cache is server-admin-only and PRESENT when captured (pointer;
+		// nil → omitted when no graphCacheSource is wired). The per-tenant
+		// SnapshotForTenant never calls assemble, so its field stays nil → absent.
+		GraphCache: cheap.graphCache,
 	}
 }
 
