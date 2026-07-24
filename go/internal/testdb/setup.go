@@ -93,5 +93,12 @@ func SetupTestDB(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("testdb: apply migrations: %v", err)
 	}
 
+	// Mirrors the ctxd boot sequence (migration 108, W03-1): every fresh
+	// test DB gets its _migrations checksums stamped, so tests exercising
+	// that column see the same post-boot state as production.
+	if err := store.BackfillChecksums(ctx, pool); err != nil {
+		t.Fatalf("testdb: backfill migration checksums: %v", err)
+	}
+
 	return pool
 }

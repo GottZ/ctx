@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -14,11 +16,18 @@ import (
 	"github.com/GottZ/ctx/migrations"
 )
 
+// checksum is carried in the CREATE from the start (not added via ALTER
+// here) because a fresh DB applies 001-107 before 108 ever runs — the
+// record-INSERT below writes checksum from migration 001 onward, so the
+// column must exist before the first INSERT. Migration 108 backfills it
+// idempotently (ADD COLUMN IF NOT EXISTS) for pre-existing databases; both
+// paths converge on the same schema.
 const migrationsTable = `
 CREATE TABLE IF NOT EXISTS _migrations (
     version     INT          PRIMARY KEY,
     filename    TEXT         NOT NULL,
-    applied_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+    applied_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    checksum    CHAR(64)
 );`
 
 // RunMigrations applies all pending SQL migrations from the embedded FS.
@@ -97,9 +106,10 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		// ON CONFLICT DO NOTHING tolerates migrations that record themselves
 		// in the file body (M031+ pattern). Without it, the file's INSERT and
 		// this INSERT collide on the version primary key.
+		sum := sha256.Sum256(sql)
 		if _, err := tx.Exec(ctx,
-			"INSERT INTO _migrations (version, filename) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
-			m.version, m.filename,
+			"INSERT INTO _migrations (version, filename, checksum) VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
+			m.version, m.filename, hex.EncodeToString(sum[:]),
 		); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("recording migration %d: %w", m.version, err)
@@ -110,6 +120,51 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 
 		slog.Info("migration applied", "version", m.version, "file", m.filename)
+	}
+
+	return nil
+}
+
+// BackfillChecksums stamps sha256(hex) checksums onto _migrations rows that
+// still carry NULL — pre-108 applies (the column did not exist yet) and
+// M031+ self-record rows (the file's own INSERT predates this package's
+// checksum write). It attests the file AS IT EXISTS TODAY in the embedded
+// FS, not the historic apply (W11 boundary): a row's checksum can outlive
+// the SQL that originally produced it if the migration file is later edited
+// (it should not be, but this function cannot see history, only the present
+// binary). Idempotent — after the first boot, every UPDATE affects 0 rows.
+func BackfillChecksums(ctx context.Context, pool *pgxpool.Pool) error {
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	if err != nil {
+		return fmt.Errorf("reading embedded migrations: %w", err)
+	}
+
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		parts := strings.SplitN(name, "_", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		v, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+
+		sql, err := fs.ReadFile(migrations.FS, name)
+		if err != nil {
+			return fmt.Errorf("reading migration %s: %w", name, err)
+		}
+		sum := sha256.Sum256(sql)
+
+		if _, err := pool.Exec(ctx,
+			"UPDATE _migrations SET checksum = $1 WHERE version = $2 AND checksum IS NULL",
+			hex.EncodeToString(sum[:]), v,
+		); err != nil {
+			return fmt.Errorf("backfilling checksum for migration %d: %w", v, err)
+		}
 	}
 
 	return nil

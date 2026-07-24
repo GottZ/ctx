@@ -174,6 +174,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// W03-1 (Achse 03 Contract/Observability, migration 108): stamp the
+	// _migrations checksum column for rows still NULL (pre-108 applies and
+	// M031+ self-record rows). Non-fatal in the boot sequence's established
+	// idiom (see normalizeInterruptedSyncsBoot/bootstrapAdminKeyBoot below) —
+	// a missing checksum degrades a future audit, not today's serving.
+	if err := store.BackfillChecksums(ctx, pool); err != nil {
+		slog.Error("migration checksum backfill failed", "error", err)
+	}
+
 	// W11 (design/03 §3.1): normalise crash-orphaned sync run-state (running ⇒
 	// interrupted) before the router serves — the in-memory state does not survive
 	// a restart. Extracted to keep main() under the cyclop budget.
