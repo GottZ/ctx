@@ -52,9 +52,9 @@ func TestT12_ReaderOverlayWins_GrantedForeignBlock(t *testing.T) {
 	// The grant arm: B's block is reachable to A (p_grant_ids); scope filter is
 	// A's own scope only. The TYPE gate (p_types_visible) still decides.
 	query := func(visible []string) map[string]bool {
-		res, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+		res, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
 			[]string{scopeGrantee}, nil, nil, 10, "", "", visible, nil, nil, nil, nil,
-			[]string{idForeignMeta})
+			[]string{idForeignMeta}, rrf.SelectorPolicy{})
 		if err != nil {
 			t.Fatalf("rrf.Search: %v", err)
 		}

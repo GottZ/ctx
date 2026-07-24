@@ -95,21 +95,31 @@ type MatchedComment struct {
 // Temporal gravity is applied Post-RRF in the handler layer via
 // ApplyGravityBoost (linear) and ApplyCyclicGravityBoost (multi-dim cyclic).
 // The 5th RRF channel was removed in M020 (never activated from Go).
-func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, visibleTypes []string, dampedTypes []string, dampedFactors []float64, categoriesExclude []string, typesExclude []string, grantedBlockIDs []string) ([]SearchResult, error) {
+//
+// policy is the semantic strategy policy (Achse 02, design/02 §4.2). The ZERO
+// VALUE is off and reproduces the Ist path exactly: no probe roundtrip, the
+// legacy 15-argument ctx_rrf statement, Decision{ann, disabled}. The returned
+// SelectorDecision is the Achse-01 correlation input (slog + access-log
+// metadata are wired in W02-3) — it carries strategy metadata only, never
+// content (§5.5).
+func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, visibleTypes []string, dampedTypes []string, dampedFactors []float64, categoriesExclude []string, typesExclude []string, grantedBlockIDs []string, policy SelectorPolicy) ([]SearchResult, SelectorDecision, error) {
+	// Fail-closed core BEFORE the selector (§5.3): empty scopes / empty type
+	// allowlist reject, and no probe ever runs for a request that must not
+	// retrieve anything.
 	if len(embedding) == 0 {
-		return nil, fmt.Errorf("rrf: empty embedding")
+		return nil, SelectorDecision{}, fmt.Errorf("rrf: empty embedding")
 	}
 	if len(scopes) == 0 {
-		return nil, fmt.Errorf("rrf: empty scopes")
+		return nil, SelectorDecision{}, fmt.Errorf("rrf: empty scopes")
 	}
 	// Fail-closed allowlist guard (§3.5 invariant 1): NULL/empty
 	// p_types_visible means 0 hits by design — a caller that reaches this
 	// point without a resolved type set has a wiring bug, surface it loudly.
 	if len(visibleTypes) == 0 {
-		return nil, fmt.Errorf("rrf: empty visible-types allowlist (block-type registry not wired?)")
+		return nil, SelectorDecision{}, fmt.Errorf("rrf: empty visible-types allowlist (block-type registry not wired?)")
 	}
 	if len(dampedTypes) != len(dampedFactors) {
-		return nil, fmt.Errorf("rrf: damped types/factors length mismatch (%d != %d)", len(dampedTypes), len(dampedFactors))
+		return nil, SelectorDecision{}, fmt.Errorf("rrf: damped types/factors length mismatch (%d != %d)", len(dampedTypes), len(dampedFactors))
 	}
 	if limit < 1 || limit > 200 {
 		limit = 5
@@ -162,11 +172,48 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 		grantedBlockIDsParam = grantedBlockIDs
 	}
 
-	rows, err := pool.Query(ctx,
-		`SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at, type_name
-		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10::text[], $11::text[], $12::float8[], $13::text[], $14::text[], $15::uuid[])`,
-		hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam, visibleTypes, dampedTypesParam, dampedFactorsParam, categoriesExcludeParam, typesExcludeParam, grantedBlockIDsParam,
-	)
+	// Achse 02: the strategy dispatch. The policy clamps (§5.4) are applied
+	// ONCE here so the warn logs fire once per search, not once per derivation.
+	if policy.Enabled {
+		policy = clampPolicy(policy)
+	}
+	probe := func(ctx context.Context, scopes []string, limit int) (int, error) {
+		return boundedProbe(ctx, pool, scopes, limit)
+	}
+	decision := decide(ctx, probe, scopes, grantedBlockIDs, policy)
+
+	exec := func(ctx context.Context, mode string, scanTuples, exactCap any) ([]SearchResult, error) {
+		args := []any{hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam,
+			visibleTypes, dampedTypesParam, dampedFactorsParam, categoriesExcludeParam, typesExcludeParam, grantedBlockIDsParam}
+		sql := rrfQueryLegacy
+		if !isIstParams(mode, scanTuples, exactCap) {
+			// Only a non-Ist strategy needs the Gen-15 parameter surface. The
+			// Ist path keeps the literal legacy statement — byte-identical wire
+			// behaviour AND callable against a pre-Gen-15 function.
+			sql = rrfQueryGen15
+			args = append(args, mode, scanTuples, exactCap)
+		}
+		return queryRRF(ctx, pool, sql, args)
+	}
+
+	return runSelected(ctx, decision, policy, exec)
+}
+
+const rrfQueryCols = `SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at, type_name`
+
+// rrfQueryLegacy is the Ist statement (15 arguments, Gen-15 parameters left on
+// their DEFAULTS: 'ann'/NULL/NULL). Unchanged since Gen 3.
+const rrfQueryLegacy = rrfQueryCols + `
+		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10::text[], $11::text[], $12::float8[], $13::text[], $14::text[], $15::uuid[])`
+
+// rrfQueryGen15 carries the explicit strategy surface (migration 112 §3.2):
+// $16 p_semantic_mode, $17 p_scan_tuples, $18 p_exact_cap.
+const rrfQueryGen15 = rrfQueryCols + `
+		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10::text[], $11::text[], $12::float8[], $13::text[], $14::text[], $15::uuid[], $16::text, $17::int, $18::int)`
+
+// queryRRF runs one ctx_rrf statement and scans the result rows.
+func queryRRF(ctx context.Context, pool *pgxpool.Pool, sql string, args []any) ([]SearchResult, error) {
+	rows, err := pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: query ctx_rrf: %w", err)
 	}

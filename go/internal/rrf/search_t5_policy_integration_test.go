@@ -78,8 +78,8 @@ func TestT5_CheckDropAndRogueFailClosed(t *testing.T) {
 	t40bInsertBlock(t, pool, idRogue, "private", "rogue", false, emb, now) // t.Fatal on error
 
 	// Allowlist semantics: rogue invisible, knowledge control visible.
-	res, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", visible, nil, nil, nil, nil, nil)
+	res, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+		[]string{"private"}, nil, nil, 10, "", "", visible, nil, nil, nil, nil, nil, rrf.SelectorPolicy{})
 	if err != nil {
 		t.Fatalf("rrf.Search: %v", err)
 	}
@@ -96,9 +96,9 @@ func TestT5_CheckDropAndRogueFailClosed(t *testing.T) {
 	// conjunct is refactored behind the bracket.
 	const idForeignRogue = "019f2205-0000-7000-9000-00000000a003"
 	t40bInsertBlock(t, pool, idForeignRogue, "t5-foreign", "rogue", false, emb, now)
-	res, err = rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+	res, _, err = rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
 		[]string{"private"}, nil, nil, 10, "", "", visible, nil, nil, nil, nil,
-		[]string{idForeignRogue})
+		[]string{idForeignRogue}, rrf.SelectorPolicy{})
 	if err != nil {
 		t.Fatalf("rrf.Search (grant): %v", err)
 	}
@@ -134,14 +134,14 @@ func TestT5_AllowlistFailClosedHard(t *testing.T) {
 	t40bInsertBlock(t, pool, idKnow, "private", "knowledge", false, emb, now)
 
 	// Go layer: empty allowlist = error, not empty result.
-	if _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{"private"}, nil, nil, 10, "", "", nil, nil, nil, nil, nil, nil); err == nil {
+	if _, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+		[]string{"private"}, nil, nil, 10, "", "", nil, nil, nil, nil, nil, nil, rrf.SelectorPolicy{}); err == nil {
 		t.Error("empty visibleTypes accepted by rrf.Search — fail-closed guard missing")
 	}
 	// Mismatched damping arrays = error.
-	if _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+	if _, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
 		[]string{"private"}, nil, nil, 10, "", "", []string{"knowledge"},
-		[]string{"audit-trail"}, nil, nil, nil, nil); err == nil {
+		[]string{"audit-trail"}, nil, nil, nil, nil, rrf.SelectorPolicy{}); err == nil {
 		t.Error("damped types/factors length mismatch accepted")
 	}
 
@@ -195,8 +195,8 @@ func TestT5_DampingPolicyFromDB(t *testing.T) {
 	rank := func(query string) []string {
 		set := reg.Snapshot()
 		damped, factors := set.DampedTypesFor(query)
-		res, err := rrf.Search(ctx, pool, embQ, query, query,
-			[]string{"private"}, nil, nil, 10, "", "", set.VisibleTypes(), damped, factors, nil, nil, nil)
+		res, _, err := rrf.Search(ctx, pool, embQ, query, query,
+			[]string{"private"}, nil, nil, 10, "", "", set.VisibleTypes(), damped, factors, nil, nil, nil, rrf.SelectorPolicy{})
 		if err != nil {
 			t.Fatalf("rrf.Search(%q): %v", query, err)
 		}

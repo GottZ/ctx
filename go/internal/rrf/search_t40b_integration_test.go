@@ -83,8 +83,8 @@ func TestSearchT40b_GrantArm_Findability(t *testing.T) {
 	t40bInsertBlock(t, pool, idGrant, foreign, "knowledge", false, emb, now)
 
 	// Without a grant: the foreign block is invisible (scope-only).
-	res, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, nil)
+	res, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, nil, rrf.SelectorPolicy{})
 	if err != nil {
 		t.Fatalf("rrf.Search (no grant): %v", err)
 	}
@@ -97,8 +97,8 @@ func TestSearchT40b_GrantArm_Findability(t *testing.T) {
 	}
 
 	// With the grant: the foreign block surfaces via the RRF OR-arm.
-	res, err = rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, []string{idGrant})
+	res, _, err = rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, []string{idGrant}, rrf.SelectorPolicy{})
 	if err != nil {
 		t.Fatalf("rrf.Search (with grant): %v", err)
 	}
@@ -133,9 +133,9 @@ func TestSearchT40b_HardExclusion_ArchivedAndSystemMeta(t *testing.T) {
 	t40bInsertBlock(t, pool, idSysMeta, foreign, "system-meta", false, emb, now)
 
 	// Grant BOTH the archived and the system-meta block. Neither may surface.
-	res, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+	res, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
 		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil,
-		[]string{idArch, idSysMeta})
+		[]string{idArch, idSysMeta}, rrf.SelectorPolicy{})
 	if err != nil {
 		t.Fatalf("rrf.Search (grant archived+system-meta): %v", err)
 	}
@@ -171,13 +171,13 @@ func TestSearchT40b_GrantNoOp_ByteIdentical(t *testing.T) {
 	t40bInsertBlock(t, pool, idHome, homeScope, "knowledge", false, emb, now)
 	t40bInsertBlock(t, pool, idForeign, foreign, "knowledge", false, emb, now)
 
-	resNil, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, nil)
+	resNil, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, nil, rrf.SelectorPolicy{})
 	if err != nil {
 		t.Fatalf("rrf.Search (nil grant): %v", err)
 	}
-	resEmpty, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, []string{})
+	resEmpty, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+		[]string{homeScope}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, []string{}, rrf.SelectorPolicy{})
 	if err != nil {
 		t.Fatalf("rrf.Search (empty grant): %v", err)
 	}
@@ -206,8 +206,8 @@ func TestSearchT40b_EmptyScopeRejectStays(t *testing.T) {
 	t40bInsertBlock(t, pool, idGrant, "t40b-foreign", "knowledge", false, emb,
 		time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC))
 
-	_, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-		[]string{}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, []string{idGrant})
+	_, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+		[]string{}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, []string{idGrant}, rrf.SelectorPolicy{})
 	if err == nil {
 		t.Errorf("empty scope + non-empty grant must still be rejected (got nil error) — grant arm must not replace the scope-gate")
 	}

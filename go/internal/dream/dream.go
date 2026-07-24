@@ -751,7 +751,7 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 		// visible type. T40b: nil grant set — dream-cycle is an internal,
 		// scope-only retrieval pass (no per-tenant grantee identity), so the
 		// block-grant OR-arm is a no-op here.
-		results, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", visibleTypes, nil, nil, nil, nil, nil)
+		results, _, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", visibleTypes, nil, nil, nil, nil, nil, rrf.SelectorPolicy{})
 		if err != nil {
 			slog.Debug("dream: rrf search failed", "keyword", kw, "error", err)
 			continue

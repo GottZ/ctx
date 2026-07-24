@@ -118,8 +118,8 @@ func TestFoldAggregates_FullChain_Integration(t *testing.T) {
 	readScopes := []string{foldHome}
 	visible := set.VisibleTypes()
 
-	results, err := rrf.Search(ctx, pool, foldEmbedding(), "zzqqxx", "zzqqxx",
-		readScopes, nil, nil, 50, "", "", visible, nil, nil, nil, nil, nil)
+	results, _, err := rrf.Search(ctx, pool, foldEmbedding(), "zzqqxx", "zzqqxx",
+		readScopes, nil, nil, 50, "", "", visible, nil, nil, nil, nil, nil, rrf.SelectorPolicy{})
 	if err != nil {
 		t.Fatalf("rrf.Search: %v", err)
 	}

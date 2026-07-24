@@ -215,8 +215,8 @@ func TestGen15W021_G1_DefaultCompat(t *testing.T) {
 		return n, err
 	}
 	call15 := func() []rrf.SearchResult {
-		res, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
-			[]string{"w021"}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, nil)
+		res, _, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
+			[]string{"w021"}, nil, nil, 10, "", "", testVisibleTypes, nil, nil, nil, nil, nil, rrf.SelectorPolicy{})
 		if err != nil {
 			t.Fatalf("15-arg rrf.Search: %v", err)
 		}
