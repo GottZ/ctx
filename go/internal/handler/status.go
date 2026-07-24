@@ -14,6 +14,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -368,6 +369,12 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	hctx, hcancel := context.WithTimeout(ctx, 4*time.Second)
 	health := HealthStatus(hctx, c.pool, c.backendPool.Snapshot(), cfg.Dream.Enabled, blocktypeHealthValue(c.blocktypes))
 	hcancel()
+	// N3 doctrine ("same source, same shape" — never drift between /health
+	// and /api/status's health section): the same post-pass health.go's
+	// Health() applies, design/03 §4.6.
+	contractReport, hasReport := schemacontract.LatestReport()
+	health.SchemaContract = schemaContractHealthValue(contractReport, hasReport)
+	health.Status = foldSchemaContractStatus(health.Status, health.SchemaContract)
 
 	mode, throttle := c.dreams.GetDreamMode()
 	llm24h, complete := c.queryLLM24h(ctx)

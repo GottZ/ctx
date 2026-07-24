@@ -123,6 +123,7 @@ func assertHealthBody(t *testing.T, body []byte, needles []string) {
 		Status            string            `json:"status"`
 		Services          map[string]string `json:"services"`
 		BlocktypeRegistry string            `json:"blocktype_registry"`
+		SchemaContract    string            `json:"schema_contract"`
 	}
 	if err := dec.Decode(&resp); err != nil {
 		t.Fatalf("health body has unknown fields or bad shape: %v\nbody: %s", err, body)
@@ -139,6 +140,15 @@ func assertHealthBody(t *testing.T, body []byte, needles []string) {
 	case "ok", "builtin-fallback":
 	default:
 		t.Errorf("blocktype_registry %q outside the fixed vocabulary", resp.BlocktypeRegistry)
+	}
+	// Evokoa design/03 §4.6/E-03-4 (D03): public schema_contract collapses
+	// drift|unchecked into ONE value "attention" (Timing-Orakel-Argument) —
+	// ok|attention|off is the full public vocabulary, name-free, never an
+	// object name or hash.
+	switch resp.SchemaContract {
+	case "ok", "attention", "off":
+	default:
+		t.Errorf("schema_contract %q outside the fixed vocabulary", resp.SchemaContract)
 	}
 	roles := map[string]bool{"database": true, "embed": true, "chat": true, "dream": true}
 	for k, v := range resp.Services {

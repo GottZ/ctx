@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -66,6 +67,15 @@ type healthResponse struct {
 	// ping-based role reachability, this is process-internal degradation
 	// state. Name-free like everything else in this body.
 	BlocktypeRegistry string `json:"blocktype_registry"`
+	// SchemaContract is the schema-contract check's public projection
+	// (Evokoa-Clean-Room design/03 §4.6, E-03-4/D03): "ok"|"attention"|"off",
+	// name-free — never an object name, hash or drift count. D03 collapses
+	// the admin-only drift/unchecked distinction into ONE public value
+	// "attention" (a Timing-Orakel-Argument: "the integrity watchdog is
+	// currently down" is its own information class an unauthenticated
+	// poller must not get for free). The full Report — mode, mode_source,
+	// per-object drifts — is admin-only behind GET /api/contract.
+	SchemaContract string `json:"schema_contract"`
 }
 
 // HealthStatus computes the service-class health aggregate from ONE pool
@@ -121,6 +131,59 @@ func aggregateHealthStatus(services map[string]string, blocktypeRegistry string)
 	}
 }
 
+// schemaContractHealthValue derives the public /health schema_contract
+// value from the process-wide schema-contract report (design/03 §4.6,
+// E-03-4/D03). hasReport=false — no check has ever completed in this
+// process yet (the boot-time RunCheckSingleFlight call in
+// cmd/ctxd/schemaContractBoot always runs before the router accepts
+// traffic, so this branch is a startup-window-only theoretical, never a
+// steady-state case) — resolves fail-closed to "attention": design/03
+// §4.4's last row ("ein Prüfer, der nicht laufen kann, darf nicht 'ok'
+// implizieren") applies just as much to "never ran" as to "ran and
+// failed". Mode=off takes precedence over Status (an operator's own
+// decision, not a degradation, design/03 §4.6) before the ok/attention
+// split; D03 collapses drift and unchecked into the single public
+// "attention" value (the admin-only distinction lives in Report.Status via
+// GET /api/contract).
+func schemaContractHealthValue(report schemacontract.Report, hasReport bool) string {
+	if !hasReport {
+		return "attention"
+	}
+	if report.Mode == schemacontract.ModeOff {
+		return "off"
+	}
+	if report.Status == schemacontract.StatusOK {
+		return "ok"
+	}
+	return "attention" // drift | unchecked, D03-collapsed
+}
+
+// foldSchemaContractStatus folds the schema_contract value into an
+// already-computed health aggregate (design/03 §4.6: "attention" ⇒
+// mindestens degraded, exactly the blocktype_registry builtin-fallback
+// precedence in aggregateHealthStatus above — never downgrades an existing
+// "unhealthy"; "off"/"ok" never change the aggregate, design/03 D03:
+// "off ⇒ NICHT degraded").
+//
+// This runs as a SEPARATE post-pass at each of HealthStatus's two call
+// sites (Health below, StatusCollector.buildCheap in status.go) rather
+// than as a new HealthStatus parameter: K4's status-merge-slot rule for
+// this wave is additive-only, no existing signature changes (the
+// armRunSource/LastArmRuns trap is the named example, but the rule is
+// general — three more status waves land on this same file set after
+// W03-4). blocktype_registry threading through HealthStatus's own
+// parameter list was an earlier wave's (K9) deliberate choice under a
+// different constraint; this wave does not repeat that shape.
+func foldSchemaContractStatus(status, schemaContract string) string {
+	if status == "unhealthy" {
+		return status
+	}
+	if schemaContract == "attention" {
+		return "degraded"
+	}
+	return status
+}
+
 // Health serves the public /health endpoint, wrapping HealthStatus with the
 // HTTP status-code mapping (unhealthy → 503, else 200).
 func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
@@ -130,6 +193,13 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: /health is public/anonymous — no tenant in reach; dream.enabled is server-global.
 	snap := h.backendPool.Snapshot()
 	resp := HealthStatus(ctx, h.pool, snap, cfg.Dream.Enabled, blocktypeHealthValue(h.blocktypes))
+
+	// Evokoa-Clean-Room design/03 §4.6: fold in the schema-contract report
+	// AFTER HealthStatus returns (HealthStatus's own signature stays
+	// untouched, see foldSchemaContractStatus's doc).
+	contractReport, hasReport := schemacontract.LatestReport()
+	resp.SchemaContract = schemaContractHealthValue(contractReport, hasReport)
+	resp.Status = foldSchemaContractStatus(resp.Status, resp.SchemaContract)
 
 	statusCode := http.StatusOK
 	if resp.Status == "unhealthy" {

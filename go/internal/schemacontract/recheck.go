@@ -64,6 +64,17 @@ var checkRunning atomic.Bool
 // of the winning branch structurally impossible, not just improbable).
 var checkRunCount atomic.Int64
 
+// CheckRunCountForTest exposes checkRunCount to callers outside this
+// package. Test-only accessor (design/03 §7 W03-4 Gate 3 brief: "falls
+// nötig, einen kleinen testonly-Accessor im Paket ergänzen statt den
+// Zähler zu exportieren") — the W03-4 handler-level parallel-refresh gate
+// (N concurrent GET /api/contract?refresh=1 ⇒ exactly one Check execution)
+// lives in package handler and cannot reach the unexported counter
+// otherwise. No production caller.
+func CheckRunCountForTest() int64 {
+	return checkRunCount.Load()
+}
+
 // RunCheckSingleFlight runs one full check cycle (Check + the §4.4 mode
 // resolution + the mode_source_db_off drift injection) and publishes the
 // result via StoreReport — UNLESS a check is already in flight, in which

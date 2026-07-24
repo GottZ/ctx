@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -34,6 +35,15 @@ func main() {
 	})
 
 	if err := root.Execute(); err != nil {
+		// design/03 §7 W03-4 Gate 5: `ctx contract` needs differentiated
+		// exit codes (0/1/2/3), not cobra's uniform exit(1) — an
+		// ExitCodeError carries its own code through here. ADDITIVE: every
+		// command that does not return this type keeps the prior exit(1)
+		// (cli.ExitCodeError doc has the full rationale).
+		var ece *cli.ExitCodeError
+		if errors.As(err, &ece) {
+			os.Exit(ece.Code)
+		}
 		os.Exit(1)
 	}
 }

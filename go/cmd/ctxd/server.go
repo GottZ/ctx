@@ -287,6 +287,11 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		handler.MountSettings(r, handler.NewSettingsHandler(pool, cfgStore))
 		// Secrets — write-only sealed credentials (F2-W6); admin-gated inside.
 		handler.MountSecrets(r, handler.NewSecretsHandler(pool, cfgStore))
+		// Schema contract — full drift report, admin-gated inside the mount
+		// (Evokoa-Clean-Room design/03 §4.6, W03-4). The public projection is
+		// /health's name-free schema_contract field; this is the admin-only
+		// object-level detail (mode/mode_source/excluded_snapshot_tables/drifts).
+		handler.MountContract(r, handler.NewContractHandler(pool))
 		// SSE live stream (F4-W7/G34) — SERVER-admin only: the broadcast fans
 		// ONE global diff (status + backends + EVERY tenant's llmcalls) to all
 		// subscribers; a per-tenant SSE broadcast is an architecture change

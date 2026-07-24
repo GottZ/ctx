@@ -57,6 +57,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(kanbanCmd(getClient))
 	root.AddCommand(apiCmd(getClient))
 	root.AddCommand(initCmd())
+	root.AddCommand(contractCmd(getClient))
 }
 
 // ── query ────────────────────────────────────────────────────────────.
