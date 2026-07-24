@@ -86,6 +86,14 @@ type statusResponse struct {
 	// tenant response can therefore never carry a foreign fairKey (F-B3).
 	Dispatch       *dispatchStatus       `json:"dispatch"`
 	DispatchTenant *dispatchTenantStatus `json:"dispatch_tenant"`
+	// DB is the server-admin-only schema/observability section (Evokoa-
+	// Clean-Room design/03 §4.7, K4 status-merge-slot 1b): migrations/
+	// contract/extensions/relations/HNSW/embed-backlog. Pointer + omitempty,
+	// exactly the Profiles convention (:80) — PRESENT on the server-admin
+	// path (assemble), ABSENT on the tenant path (SnapshotForTenant builds
+	// statusResponse directly, never sets it — DB interna are server-global
+	// and go tenants nothing, design/03 §5).
+	DB *dbStatus `json:"db,omitempty"`
 }
 
 // dreamStatus flattens scheduler mode + the dream.QueueStats fields (names 1:1,
@@ -205,6 +213,17 @@ type StatusCollector struct {
 	qs     atomic.Pointer[dream.QueueStats]
 	qsAt   atomic.Int64 // unix nano of last queue scan
 
+	// dbStats* is the W03-7 db-section source (design/03 §4.7), wired as a
+	// SECOND instance of the exact qs/qsAt/qsScan pattern above — its own
+	// async cadence (events.db_stats_interval), CAS single-flight guarded,
+	// read-driven from Snapshot/refreshForBroadcast on staleness. dbStatsBuild
+	// defaults to buildDBStatus (status_db.go) and is swappable in tests, the
+	// same injection point queueDepth already is.
+	dbStatsScan  atomic.Bool
+	dbStats      atomic.Pointer[dbStatus]
+	dbStatsAt    atomic.Int64 // unix nano of last db-section refresh
+	dbStatsBuild func(ctx context.Context, pool *pgxpool.Pool) *dbStatus
+
 	// Per-tenant 24h rollup cache (T37c, 04-W4/§4.6): the global cheapSnapshot
 	// can't carry N per-tenant-filtered rollups, so a tenant-admin's view comes
 	// from a SEPARATE lock-free generation (map[scope][]llm24hRow, one query +
@@ -226,13 +245,14 @@ type StatusCollector struct {
 // dream-queue scan runs with an empty allowlist (fail-closed zeros + WARN).
 func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams dreamModeSource, cfg ConfigStore, blocktypes BlocktypeSource, dispatchSrc DispatchSource) *StatusCollector {
 	return &StatusCollector{
-		pool:        pool,
-		backendPool: backendPool,
-		dreams:      dreams,
-		cfg:         cfg,
-		blocktypes:  blocktypes,
-		queueDepth:  dream.QueueDepth,
-		dispatch:    dispatchSrc,
+		pool:         pool,
+		backendPool:  backendPool,
+		dreams:       dreams,
+		cfg:          cfg,
+		blocktypes:   blocktypes,
+		queueDepth:   dream.QueueDepth,
+		dispatch:     dispatchSrc,
+		dbStatsBuild: buildDBStatus,
 	}
 }
 
@@ -251,7 +271,15 @@ func (c *StatusCollector) Snapshot(ctx context.Context) statusResponse {
 		c.scanQueueAsync(cfg.Scheduler.ReadScopes)
 	}
 
-	return c.assemble(cur, c.qs.Load())
+	dbInterval := cfg.Events.DBStatsInterval
+	if dbInterval <= 0 {
+		dbInterval = 60 * time.Second
+	}
+	if !c.broadcasting.Load() && stale(c.dbStatsAt.Load(), dbInterval) {
+		c.scanDBStatsAsync()
+	}
+
+	return c.assemble(cur, c.qs.Load(), c.dbStats.Load())
 }
 
 // cheapNow returns the current cheap snapshot, cold-starting it or triggering a
@@ -300,7 +328,14 @@ func (c *StatusCollector) refreshForBroadcast(ctx context.Context) statusRespons
 	if stale(c.qsAt.Load(), qInterval) {
 		c.scanQueueAsync(cfg.Scheduler.ReadScopes)
 	}
-	return c.assemble(snap, c.qs.Load())
+	dbInterval := cfg.Events.DBStatsInterval
+	if dbInterval <= 0 {
+		dbInterval = 60 * time.Second
+	}
+	if stale(c.dbStatsAt.Load(), dbInterval) {
+		c.scanDBStatsAsync()
+	}
+	return c.assemble(snap, c.qs.Load(), c.dbStats.Load())
 }
 
 // coldStart builds the first cheap snapshot under a mutex so concurrent
@@ -358,6 +393,33 @@ func (c *StatusCollector) scanQueueAsync(scopes []string) {
 		}
 		c.qs.Store(qs)
 		c.qsAt.Store(time.Now().UnixNano())
+	}()
+}
+
+// scanDBStatsAsync refreshes the W03-7 db-section in the background; the CAS
+// guard makes N concurrent stale readers trigger ONE refresh per interval —
+// the SAME single-flight idiom as scanQueueAsync above, which design/03 §4.7
+// names as the "Nachbar-Refresher" muster to follow. It stays inside this
+// collector (handler package), NOT a boot-time ticker goroutine in cmd/ctxd
+// like schemaContractBoot's periodic re-check (cmd/ctxd/contract.go,
+// startContractRecheckTicker): that ticker owns a process-lifecycle decision
+// (enforce mode's os.Exit) that only cmd/ctxd may make, so it lives where
+// main() can call os.Exit. The db-section carries no such decision — it is
+// pure read-driven telemetry exactly like the dream-queue scan beside it, so
+// it stays with its sibling QueueStats source that already owns this lazy,
+// read-triggered refresh shape (Snapshot/refreshForBroadcast call it on
+// staleness; nothing runs on a bare timer while no one is polling).
+func (c *StatusCollector) scanDBStatsAsync() {
+	if !c.dbStatsScan.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer c.dbStatsScan.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		db := c.dbStatsBuild(ctx, c.pool)
+		c.dbStats.Store(db)
+		c.dbStatsAt.Store(time.Now().UnixNano())
 	}()
 }
 
@@ -445,7 +507,7 @@ func timePtr(t time.Time) *time.Time {
 
 // assemble merges the cheap snapshot with the latest queue scan into the wire
 // shape. backends/llm_24h render as [] (never null) for a stable client shape.
-func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats) statusResponse {
+func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, db *dbStatus) statusResponse {
 	d := dreamStatus{
 		Mode:              cheap.dreamMode,
 		ThrottleIntervalS: cheap.dreamThrottleS,
@@ -491,6 +553,7 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats) s
 		Profiles:       &pf,
 		Activity:       nil,
 		Dispatch:       disp,
+		DB:             db,
 	}
 }
 

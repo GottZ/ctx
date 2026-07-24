@@ -115,8 +115,21 @@ func TestStatusPerTenantView(t *testing.T) {
 		snap := col.SnapshotForTenant(ctx, "st-a")
 		// profiles is server-admin-only (N8): the per-tenant snapshot never sets
 		// it, so the pointer stays nil → the wire key is omitted entirely.
-		if snap.Dream.Mode != "" || snap.Profiles != nil || snap.Activity != nil {
-			t.Errorf("tenant view leaked server-global fields: dream=%+v profiles=%v activity=%v", snap.Dream, snap.Profiles, snap.Activity)
+		if snap.Dream.Mode != "" || snap.Profiles != nil || snap.Activity != nil || snap.DB != nil {
+			t.Errorf("tenant view leaked server-global fields: dream=%+v profiles=%v activity=%v db=%v", snap.Dream, snap.Profiles, snap.Activity, snap.DB)
+		}
+		// G5 (design/03 §4.7/§5, W03-7 K4 slot 1b): the db section is server
+		// DB interna and must never reach a tenant response — the nil check
+		// above is structural (SnapshotForTenant never touches the field),
+		// this marshal probe pins the WIRE absence too (a future refactor
+		// that accidentally sets DB on the tenant path must fail here, not
+		// just leak silently past a Go-level nil check).
+		b, err := json.Marshal(snap)
+		if err != nil {
+			t.Fatalf("marshal tenant snapshot: %v", err)
+		}
+		if strings.Contains(string(b), `"db"`) {
+			t.Errorf("tenant /api/status wire payload carries a db key (topology leak): %s", b)
 		}
 	})
 

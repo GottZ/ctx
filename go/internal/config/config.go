@@ -349,6 +349,17 @@ type EventsConfig struct {
 	// overridable, while the cadences above stay process-global (one collector,
 	// one proxy-bound ping window).
 	MaxConnections int `key:"events.max_connections" env:"CTX_EVENTS_MAX_CONNECTIONS" default:"8" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	// DBStatsInterval decouples the /api/status "db" section (Evokoa-Clean-
+	// Room design/03 §4.7 — migrations/contract/extensions/relations/HNSW/
+	// embed-backlog) from the base tick, the QueueStatsInterval pattern
+	// applied to a second source: catalog/pg_stat reads are cheap but
+	// pointless at the 5s cadence. 60s mirrors contract.recheck_interval's
+	// own default — both cadences answer "how fresh does drift/ops
+	// visibility over the SAME schema need to be". global-only: the db
+	// section is server-wide schema/relation telemetry with no per-tenant
+	// dimension (classification mirrors QueueStatsInterval, not
+	// MaxConnections).
+	DBStatsInterval time.Duration `key:"events.db_stats_interval" env:"CTX_EVENTS_DB_STATS_INTERVAL" default:"60" mut:"hot" tenancy:"global-only"`
 }
 
 // ProjectConfig is the workflow project surface (design/03 §4.4). The forge SYNC

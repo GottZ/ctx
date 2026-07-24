@@ -46,7 +46,7 @@ func TestStatusAssembleNilQueue(t *testing.T) {
 		lastCycleAt: &last,
 		llm24h:      nil,
 	}
-	resp := c.assemble(cheap, nil)
+	resp := c.assemble(cheap, nil, nil)
 
 	if resp.Dream.PickableNow != 0 || resp.Dream.NextPendingAt != nil {
 		t.Errorf("nil QueueStats must yield zero queue fields, got %+v", resp.Dream)
@@ -76,7 +76,7 @@ func TestStatusAssembleWithQueue(t *testing.T) {
 		PickableNow: 14, InCooldown: 213, NeverDreamed: 3,
 		AwaitingEmbed: 1, Incoming1h: 4, Incoming6h: 31, NextPendingAt: &next,
 	}
-	resp := c.assemble(&cheapSnapshot{dreamMode: "throttled", dreamThrottleS: 20}, qs)
+	resp := c.assemble(&cheapSnapshot{dreamMode: "throttled", dreamThrottleS: 20}, qs, nil)
 	if resp.Dream.PickableNow != 14 || resp.Dream.InCooldown != 213 ||
 		resp.Dream.NeverDreamed != 3 || resp.Dream.AwaitingEmbed != 1 ||
 		resp.Dream.Incoming1h != 4 || resp.Dream.Incoming6h != 31 {
@@ -172,6 +172,25 @@ func TestStatusGoldenKeys(t *testing.T) {
 				Buckets: []dispatchBucket{{FairKey: "private"}},
 			}},
 		},
+		// W03-7 (Evokoa-Clean-Room design/03 §4.7, K4 slot 1b): the db section
+		// is server-admin PRESENT (this fixture); TestStatusPerTenantView's
+		// server_global_fields_zero_for_tenant subtest pins ABSENT.
+		DB: &dbStatus{
+			MigrationsApplied: 111,
+			MigrationsMax:     111,
+			Contract:          "ok",
+			ContractDrifts:    0,
+			Extensions:        []extRow{{Name: "vector", Version: "0.8.2"}},
+			ServerGUCs:        []gucRow{{Name: "shared_buffers", Value: "2052736", Source: "configuration file"}},
+			Relations: []relRow{{
+				Name: "context_blocks", TotalBytes: 8192, DeadTuples: 0, LiveTuples: 42, Hypertable: false,
+			}},
+			HNSW: hnswRow{
+				IndexBytes: 90112, M: 16, EfConstruction: 64, EfSearchEffective: "40 (default)",
+			},
+			EmbedBacklog: nil,
+			ChannelProbe: nil,
+		},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -179,7 +198,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
-		"dispatch", "dispatch_tenant",
+		"dispatch", "dispatch_tenant", "db",
 	})
 
 	var top map[string]json.RawMessage
@@ -245,6 +264,50 @@ func TestStatusGoldenKeys(t *testing.T) {
 		"backend", "pipeline", "calls", "avg_ms", "errors", "prompt_tokens", "completion_tokens",
 		"cost_usd", // T37c: per-tenant rollup needs it; global rollup carries it too
 	})
+
+	// W03-7 (design/03 §4.7): the db section's wire shape, VERBINDLICH per the
+	// design's struct literal — embed_backlog/channel_probe are PRESENT keys
+	// even though this fixture's values are null (no omitempty on either).
+	assertKeys(t, "db", top["db"], []string{
+		"migrations_applied", "migrations_max", "contract", "contract_drifts",
+		"extensions", "server_gucs", "relations", "hnsw", "embed_backlog", "channel_probe",
+	})
+	var dbTop map[string]json.RawMessage
+	if err := json.Unmarshal(top["db"], &dbTop); err != nil {
+		t.Fatalf("unmarshal db: %v", err)
+	}
+	var exts []json.RawMessage
+	if err := json.Unmarshal(dbTop["extensions"], &exts); err != nil {
+		t.Fatalf("unmarshal db.extensions: %v", err)
+	}
+	assertKeys(t, "db.extensions row", exts[0], []string{"name", "version"})
+
+	var gucs []json.RawMessage
+	if err := json.Unmarshal(dbTop["server_gucs"], &gucs); err != nil {
+		t.Fatalf("unmarshal db.server_gucs: %v", err)
+	}
+	assertKeys(t, "db.server_gucs row", gucs[0], []string{"name", "value", "source"})
+
+	var rels []json.RawMessage
+	if err := json.Unmarshal(dbTop["relations"], &rels); err != nil {
+		t.Fatalf("unmarshal db.relations: %v", err)
+	}
+	assertKeys(t, "db.relations row", rels[0], []string{
+		"name", "total_bytes", "dead_tuples", "live_tuples", "last_autovacuum", "hypertable",
+	})
+
+	assertKeys(t, "db.hnsw", dbTop["hnsw"], []string{
+		"index_bytes", "bytes_per_row", "m", "ef_construction", "ef_search_effective",
+	})
+
+	// embed_backlog/channel_probe are null in this fixture — asserted as the
+	// literal JSON value, not via assertKeys (they are not objects).
+	if got := string(dbTop["embed_backlog"]); got != "null" {
+		t.Errorf("db.embed_backlog = %s, want null (this fixture leaves it unset)", got)
+	}
+	if got := string(dbTop["channel_probe"]); got != "null" {
+		t.Errorf("db.channel_probe = %s, want null (W03-8 not built yet — always null this wave)", got)
+	}
 }
 
 // TestBuildStatusProfiles is the U01-W7 status-frame gate (replaces the retired
