@@ -275,13 +275,83 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 		RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at`,
 		insertCols, insertVals, strings.Join(setClauses, ",\n\t\t\t"))
 
+	// Achse 04 W04-8 (design/04-reembed-migration.md §3.4/§7, Inventur §3.4
+	// point 8): a conflicting upsert that CHANGES content must invalidate the
+	// stale vector the same way manage-update/MCP-update always did — before
+	// this fix, ON CONFLICT only ever set content = EXCLUDED.content, never
+	// touched embedding/embed_model, so `ctx save` on an existing title with
+	// new content left the OLD vector attributed to the NEW content
+	// (context_store.go:184-236 → blocks.go). W04-4's re-embed migration
+	// convergence invariant (design §4.3) has this as a hard precondition:
+	// without it, an in-flight migration's embedding_next could go stale the
+	// same way.
+	//
+	// Everything below runs in ONE tx: the pre-read, the upsert, and (on a
+	// real content change) the clear are atomic together — "der Upsert und
+	// das Clear gehören in EINE Tx" (design §7).
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: upsert block: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Content-change detection mechanic: "vorheriges SELECT in der Upsert-Tx"
+	// (one of the three mechanics the design explicitly allows). Locks the
+	// conflicting row (if any) with FOR UPDATE BEFORE the upsert runs, using
+	// the exact (category, title, scope) WHERE NOT is_archived predicate the
+	// ON CONFLICT target itself uses — so hadRow is true iff this write will
+	// take the conflict-update branch, false iff it will INSERT a fresh row.
+	//
+	// Race-safety: a second, concurrent UpsertBlock on the SAME key blocks on
+	// this SELECT ... FOR UPDATE until this tx commits or rolls back, then
+	// re-reads the now-current row for ITS comparison — so two concurrent
+	// content-changing upserts on the same block serialize correctly instead
+	// of one silently missing the other's change. The only case where this
+	// SELECT sees no row (hadRow=false) for what turns out to be a
+	// conflicting write is two simultaneous FIRST-time creates racing each
+	// other — and a block that has never been through UpsertBlock before
+	// never carries an embedding yet (StoreEmbedding is always a separate,
+	// later call), so there is nothing stale to clear in that window.
+	var oldContent string
+	hadRow := true
+	if err := tx.QueryRow(ctx,
+		`SELECT content FROM context_blocks
+		 WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
+		 FOR UPDATE`,
+		category, title, scope,
+	).Scan(&oldContent); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: upsert block: pre-read: %w", err)
+		}
+		hadRow = false
+	}
+
 	b := &Block{}
-	err := pool.QueryRow(ctx, query, args...).Scan(
+	if err := tx.QueryRow(ctx, query, args...).Scan(
 		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("store: upsert block: %w", err)
+	}
+
+	// Only a REAL content change on an existing row invalidates the vector.
+	// An idempotent upsert with identical content must NOT throw the
+	// embedding away — that would make the backfill re-embed on every no-op
+	// `ctx save` at the 1M-10M target scale (organic growth means repeat
+	// saves of unchanged titles are routine, not rare).
+	//
+	// Reuses ClearEmbeddingTx — the same primitive manage-update/MCP-update
+	// call via ClearEmbedding — rather than duplicating its SQL, so any
+	// future extension of that primitive (it already nulls BOTH vector pairs
+	// and deletes the backfill memo, W04-3) is inherited here automatically.
+	if hadRow && oldContent != content {
+		if err := ClearEmbeddingTx(ctx, tx, b.ID); err != nil {
+			return nil, fmt.Errorf("store: upsert block: clear stale embedding: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("store: upsert block: commit: %w", err)
 	}
 	return b, nil
 }
@@ -318,7 +388,7 @@ func StoreEmbedding(ctx context.Context, q execQuerier, blockID, model string, v
 	return nil
 }
 
-// ClearEmbedding sets BOTH vector pairs (embedding/embed_model AND, since
+// ClearEmbeddingTx sets BOTH vector pairs (embedding/embed_model AND, since
 // Achse 04 W04-3 / migration 114, embedding_next/embed_model_next) to NULL,
 // and deletes the block's regular-backfill memo row (context_embed_failures,
 // migration_id IS NULL), so a content change converges cleanly on every
@@ -337,20 +407,23 @@ func StoreEmbedding(ctx context.Context, q execQuerier, blockID, model string, v
 //     that block.
 //   - Backfill memo delete: W04-2/W04-3 coupling resolution (Lead-Entscheid,
 //     wave briefing). The oversize infinity-memo's semantics are "parked
-//     UNTIL content changes" (design §4.4); ClearEmbedding is the
-//     content-change path. Without the delete, a block shrunk below the
-//     token limit stayed parked forever — no code path ever revisited it.
+//     UNTIL content changes" (design §4.4); this IS the content-change
+//     path. Without the delete, a block shrunk below the token limit
+//     stayed parked forever — no code path ever revisited it.
 //     Migration-scoped memos (migration_id NOT NULL) are untouched: those
 //     belong to a specific migration's bookkeeping, not the regular
 //     backfill, and are the migration worker's (W04-4+) concern.
-func ClearEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("store: clear embedding: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if _, err := tx.Exec(ctx,
+//
+// This is the execQuerier-parameterized primitive (same pattern as
+// StoreEmbedding): it does NOT own a transaction, so a caller that needs the
+// clear to be atomic with another write — UpsertBlock's content-change path,
+// W04-8 — passes its own pgx.Tx. ClearEmbedding (below) is the pool-owned
+// convenience wrapper for callers that just need a standalone clear
+// (manage-update, MCP update). Kept as ONE implementation so future
+// extensions of the clear semantics (e.g. a migration-scoped memo delete)
+// land in both call shapes automatically, never just one.
+func ClearEmbeddingTx(ctx context.Context, q execQuerier, blockID string) error {
+	if _, err := q.Exec(ctx,
 		`UPDATE context_blocks
 		 SET embedding = NULL, embed_model = NULL,
 		     embedding_next = NULL, embed_model_next = NULL
@@ -359,11 +432,29 @@ func ClearEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string) err
 	); err != nil {
 		return fmt.Errorf("store: clear embedding: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
+	if _, err := q.Exec(ctx,
 		`DELETE FROM context_embed_failures WHERE block_id = $1 AND migration_id IS NULL`,
 		blockID,
 	); err != nil {
 		return fmt.Errorf("store: clear embedding: delete backfill memo: %w", err)
+	}
+	return nil
+}
+
+// ClearEmbedding is the pool-owned wrapper around ClearEmbeddingTx: it opens
+// its own transaction, runs the clear, and commits. Use this when the clear
+// does not need to compose with another write in the same transaction
+// (manage-update, MCP update); use ClearEmbeddingTx directly when it does
+// (UpsertBlock's content-change path).
+func ClearEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: clear embedding: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := ClearEmbeddingTx(ctx, tx, blockID); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
