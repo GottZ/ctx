@@ -44,6 +44,7 @@ var (
 	ErrRestEmbeddingNextData   = errors.New("embedmigration: create: context_blocks has leftover embedding_next data from a prior migration — pass ReuseExisting or purge it first")
 	ErrReuseModelMismatch      = errors.New("embedmigration: create: ReuseExisting set but leftover embedding_next data's embed_model_next does not match to_model")
 	ErrReuseAfterRollback      = errors.New("embedmigration: create: ReuseExisting set but the last migration ended rolled_back — rollback data is never silently reused (§4.10)")
+	ErrReuseRequiresAborted    = errors.New("embedmigration: create: ReuseExisting set but the last migration did not end aborted — only abort leftovers are unsuspicious partial work (§4.10); anything else is of unknown provenance and must be purged instead")
 	ErrActiveMigrationExists   = errors.New("embedmigration: create: another migration is already active (idx_embed_migration_single_active)")
 	ErrDiskCheckFailed         = errors.New("embedmigration: create: disk pre-flight check itself failed — fail-closed, refusing to start blind")
 	ErrDiskInsufficient        = errors.New("embedmigration: create: disk pre-flight estimate exceeds free space")
@@ -273,6 +274,16 @@ func validateNoLeftoverNextData(ctx context.Context, q Querier, p CreateParams) 
 	}
 	if lastStatus == string(StatusRolledBack) {
 		return ErrReuseAfterRollback
+	}
+	// W04-6 tightening (design §4.10 point 1): reuse is only legitimate on
+	// top of ABORT leftovers — an abort is unsuspicious partial work of a
+	// known migration. Any other last status (done, or no migration row at
+	// all despite leftover data) means the _next data's provenance is
+	// unknown; refusing here forces the operator through purge instead of
+	// silently adopting vectors nobody can attribute. The rolled_back case
+	// keeps its own, more specific error above (Rot-4 gate wording).
+	if lastStatus != string(StatusAborted) {
+		return ErrReuseRequiresAborted
 	}
 	return nil
 }
