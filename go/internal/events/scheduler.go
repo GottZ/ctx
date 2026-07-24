@@ -1202,7 +1202,7 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 		readWindow := intersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 
 		// Top priority: backfill blocks with missing embeddings.
-		if backfilled, err := s.backfillOneEmbedding(ctx, router); err != nil {
+		if backfilled, err := s.backfillOneEmbedding(ctx, router, cfg); err != nil {
 			slog.Error("scheduler: embed backfill error", "error", err)
 		} else if backfilled {
 			continue // Loop immediately to backfill more before dream runs.
@@ -1372,11 +1372,11 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 // failover links, or a pick that landed on a block whose chain starts
 // elsewhere — goes through non-blocking TryAcquire (mechanical rule); a busy
 // follow-up target DEFERS the block to a later cycle instead of waiting.
-func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Router) (bool, error) {
+func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Router, cfg *config.Config) (bool, error) {
 	var peekID, peekSens, peekScope string
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, sensitivity, scope FROM context_blocks
-		WHERE embedding IS NULL AND NOT is_archived
+		WHERE embedding IS NULL AND NOT is_archived`+store.EmbedFailureExcludedPredicate+`
 		ORDER BY created_at ASC
 		LIMIT 1`,
 	).Scan(&peekID, &peekSens, &peekScope)
@@ -1410,7 +1410,7 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 	var blockID, title, content, sens, scope string
 	err = tx.QueryRow(ctx,
 		`SELECT id, title, content, sensitivity, scope FROM context_blocks
-		WHERE embedding IS NULL AND NOT is_archived
+		WHERE embedding IS NULL AND NOT is_archived`+store.EmbedFailureExcludedPredicate+`
 		ORDER BY created_at ASC
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED`,
@@ -1437,6 +1437,29 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 	}
 
 	embedText := title + "\n\n" + content
+
+	// Oversize-Gate (Achse 04 W04-2, design/04 §4.4): a conservative
+	// pre-wire token estimate skips a block that cannot fit the backend's
+	// slot window WITHOUT spending a wire call — memoized with
+	// next_attempt_at='infinity' (permanently parked, never a blind
+	// 24h-in-slow-motion retry; see store.RecordEmbedFailure). MaxTokens<=0
+	// disables the check (explicit opt-out, same convention as SyncCap).
+	if maxTokens := cfg.EmbedBackfill.MaxTokens; maxTokens > 0 {
+		if estimated := len(embedText) / 4; estimated > maxTokens {
+			msg := store.NormalizeEmbedError(store.EmbedFailureOversize, store.OversizeEstimateMessage(estimated, maxTokens))
+			slog.Warn("scheduler: backfill oversize pre-check — skipped, memoized",
+				"block_id", blockID, "estimated_tokens", estimated, "max_tokens", maxTokens)
+			if ferr := store.RecordEmbedFailure(ctx, tx, blockID, store.EmbedFailureOversize, msg,
+				cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
+				return false, fmt.Errorf("backfill: oversize memo: %w", ferr)
+			}
+			if cerr := tx.Commit(ctx); cerr != nil {
+				return false, fmt.Errorf("backfill: commit oversize memo: %w", cerr)
+			}
+			return false, nil
+		}
+	}
+
 	// pool=nil: document embeddings land in the block row, not the cache.
 	// MW5: background admission per attempt (design/01 §4.6 N3) — the
 	// scheduler backfill waits AT THE TARGET and any interactive embed
@@ -1472,7 +1495,26 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 				"block_id", blockID)
 			return false, nil
 		}
-		return false, fmt.Errorf("backfill: embed: %w", err)
+		// Fehler-Memo statt Blind-Retry (Achse 04 W04-2, design/04 §4.3/§4.4):
+		// pre-W04-2 this returned the raw error and let the deferred
+		// tx.Rollback discard the pick — the NEXT cycle's peek re-picked the
+		// SAME oldest block (Vorfall 2026-07-10, an oversize block looped
+		// every cycle and starved every younger pending block behind it).
+		// The memo is written IN THE SAME tx that holds the row lock (so no
+		// other worker can grab the row between the failed attempt and the
+		// memo commit) and the tx is COMMITTED here — never rolled back —
+		// so the memo persists even though the embed itself failed.
+		class, normalized := store.ClassifyEmbedError(err)
+		if ferr := store.RecordEmbedFailure(ctx, tx, blockID, class, normalized,
+			cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
+			return false, fmt.Errorf("backfill: embed: %w (memo write also failed: %w)", err, ferr)
+		}
+		if cerr := tx.Commit(ctx); cerr != nil {
+			return false, fmt.Errorf("backfill: commit failure memo: %w", cerr)
+		}
+		slog.Warn("scheduler: backfill embed failed — memoized",
+			"block_id", blockID, "class", class, "error", err)
+		return false, nil
 	}
 
 	// StoreEmbedding within tx (execQuerier: pgx.Tx satisfies it too).

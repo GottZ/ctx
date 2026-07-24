@@ -531,7 +531,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// chain resolves with THAT block's floor-adjusted sensitivity (F3 §2.3
 	// gate table, embed-backfill row).
 	floor := cfg.Pool.ScopeSensitivityFloor
-	if backfilled := h.backfillPending(ctx, floor, ar.HomeScope, h.embedAdmission()); backfilled > 0 {
+	if backfilled := h.backfillPending(ctx, floor, ar.HomeScope, h.embedAdmission(), cfg); backfilled > 0 {
 		slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
 	}
 
@@ -1085,13 +1085,14 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // position — a younger interactive query embed overtakes the waiting
 // backfill rest between two blocks. (Dispatch attribution is separate from
 // the T35b llmlog attribution below, which stays NULL/background in nature.)
-func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, scope string, adm embedcache.Admission) int {
+func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, scope string, adm embedcache.Admission, cfg *config.Config) int {
 	count := 0
-	for {
+	syncCap := cfg.EmbedBackfill.SyncCap
+	for attempts := 0; syncCap <= 0 || attempts < syncCap; attempts++ {
 		var blockID, title, content, sens, scope string
 		err := h.pool.QueryRow(ctx,
 			`SELECT id, title, content, sensitivity, scope FROM context_blocks
-			WHERE embedding IS NULL AND NOT is_archived
+			WHERE embedding IS NULL AND NOT is_archived`+store.EmbedFailureExcludedPredicate+`
 			LIMIT 1`).Scan(&blockID, &title, &content, &sens, &scope)
 		if err != nil {
 			break // No more pending blocks (or error).
@@ -1107,9 +1108,29 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		}
 
 		embedText := title + "\n\n" + content
+
+		// Oversize-Gate (Achse 04 W04-2, design/04 §4.4 — the Pfad-A twin of
+		// the scheduler's pre-wire estimate): skip WITHOUT a wire call,
+		// memoized with next_attempt_at='infinity'. Unlike a wire failure
+		// below this does NOT break the loop — an oversize block is a
+		// block-specific dead end, not a sign the backend is down, so the
+		// remaining sync-cap budget still goes to other pending blocks.
+		if maxTokens := cfg.EmbedBackfill.MaxTokens; maxTokens > 0 {
+			if estimated := len(embedText) / 4; estimated > maxTokens {
+				msg := store.NormalizeEmbedError(store.EmbedFailureOversize, store.OversizeEstimateMessage(estimated, maxTokens))
+				slog.Warn("query backfill: oversize pre-check — skipped, memoized",
+					"block_id", blockID, "estimated_tokens", estimated, "max_tokens", maxTokens)
+				if ferr := store.RecordEmbedFailure(ctx, h.pool, blockID, store.EmbedFailureOversize, msg,
+					cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
+					slog.Warn("query backfill: oversize memo write failed", "block_id", blockID, "error", ferr)
+				}
+				continue
+			}
+		}
+
 		// pool=nil: document embeddings land in the block row, not the cache
 		// (today's semantics — the cache is for repeated query/keyword text).
-		vec, served, attempts, wired, err := embedcache.EmbedChain(
+		vec, served, wireAttempts, wired, err := embedcache.EmbedChain(
 			ctx, nil, chain, backends.RoleEmbed, embedText, embed.PrefixDocument,
 			embedcache.ReportFunc(llm.PoolReporter(h.backendPool)), adm)
 		if wired {
@@ -1121,10 +1142,24 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			// embed calls). Treated as background, same as the scheduler backfill.
 			// Reversible if backfill cost should follow the triggering caller (then
 			// backfillPending gains an apiKeyID param alongside its T34 scope param).
-			h.logEmbedWire(ctx, "embed-backfill", required, served, attempts, []string{blockID}, err, "")
+			h.logEmbedWire(ctx, "embed-backfill", required, served, wireAttempts, []string{blockID}, err, "")
 		}
 		if err != nil {
-			slog.Warn("query backfill: embed failed", "block_id", blockID, "error", err)
+			// Fehler-Memo statt Blind-Retry (Achse 04 W04-2, design/04 §4.3/
+			// §4.4): pre-W04-2 this block stayed eligible for the very next
+			// backfillPending call (a later request would re-pick and
+			// re-fail it identically). The memo now excludes it from the
+			// pending predicate above until its backoff lapses. The loop
+			// still BREAKS here (unchanged from pre-W04-2): a genuine wire
+			// failure most often means the backend itself is unavailable,
+			// and hammering it for the rest of the sync-cap budget within
+			// one request helps nobody.
+			class, normalized := store.ClassifyEmbedError(err)
+			if ferr := store.RecordEmbedFailure(ctx, h.pool, blockID, class, normalized,
+				cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
+				slog.Warn("query backfill: failure memo write failed", "block_id", blockID, "error", ferr)
+			}
+			slog.Warn("query backfill: embed failed — memoized", "block_id", blockID, "class", class, "error", err)
 			break // Embed backend likely unavailable, don't retry.
 		}
 		// Model is the ACTUALLY SERVING backend's role model (served, not the

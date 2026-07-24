@@ -100,6 +100,7 @@ type Config struct {
 	Dispatch      DispatchConfig
 	Contract      ContractConfig
 	Status        StatusConfig
+	EmbedBackfill EmbedBackfillConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -698,6 +699,49 @@ type StatusConfig struct {
 	// RecheckInterval/DBStatsInterval — a malformed value falls back to the
 	// default (off) rather than aborting boot.
 	ChannelProbeInterval time.Duration `key:"status.channel_probe_interval" env:"CTX_STATUS_CHANNEL_PROBE_INTERVAL" default:"0" mut:"hot" tenancy:"global-only"`
+}
+
+// EmbedBackfillConfig is the Achse-04 W04-2 safety-valve surface for the two
+// regular (non-migration) embed-backfill paths: the scheduler arm
+// (backfillOneEmbedding, Pfad B) and the query-path pre-search loop
+// (backfillPending, Pfad A). Both share the same context_embed_failures memo
+// mechanic (migration_id NULL) that closes the Vorfall-2026-07-10 head-of-
+// line class (design/04 §4.4). global-only: this governs a single shared
+// physical resource (the embed backend pool + one process-wide failures
+// table) the same way scheduler.llmlog_retention_days and
+// events.db_stats_interval do — not a per-tenant query-time knob.
+type EmbedBackfillConfig struct {
+	// SyncCap bounds Pfad A's synchronous per-request work (design/04 §4.3
+	// "Pfad-A-Kappung"): the query-path backfill loop today has no cap and
+	// embeds EVERY pending block inline before the triggering search runs —
+	// after a large rest-transient the FIRST interactive query pays the
+	// entire nachzug. 0 = uncapped (explicit opt-out, GraphOverview.MaxNodes
+	// convention), never the accidental zero-value: a raw &Config{} in a
+	// unit test that never sets this field disables the cap rather than
+	// silently blocking every backfillPending call.
+	SyncCap int `key:"embed_backfill.sync_cap" env:"CTX_EMBED_BACKFILL_SYNC_CAP" default:"4" mut:"hot" tenancy:"global-only"`
+	// MaxTokens is the pre-wire Oversize-Gate estimate threshold
+	// (design/04 §4.4): len(embedText)/4 above this skips the block WITHOUT
+	// a wire call (last_class='oversize', next_attempt_at='infinity' —
+	// permanently parked, never a blind 24h-in-slow-motion retry). Default
+	// 24000 sits below the live kv-unified pool's 32k (docker-
+	// compose.override.yml) minus interactive headroom minus margin — see
+	// docs/operations.md "Embedding backend tuning". 0 = pre-check disabled
+	// (same explicit-opt-out convention as SyncCap); HTTP 400
+	// exceed_context_size responses are still classified as oversize on the
+	// wire-error path regardless of this gate (the estimate is the vorab-
+	// filter, the classification is the net behind it).
+	MaxTokens int `key:"embed_backfill.max_tokens" env:"CTX_EMBED_BACKFILL_MAX_TOKENS" default:"24000" mut:"hot" tenancy:"global-only"`
+	// BackoffBase/BackoffCap shape the exponential retry backoff
+	// (base * 2^(attempts-1), capped) a non-oversize embed failure (backend
+	// down, transient wire error) gets memoized with — the SAME curve
+	// class as dream.backoff_* but scoped to embed failures, computed
+	// server-side in the upsert (store.RecordEmbedFailure) to avoid a
+	// read-then-write race across concurrent pickers. Bare seconds, like
+	// the other duration keys (contract.recheck_interval convention).
+	// Default 1min base / 24h cap (design/04 §4.4).
+	BackoffBase time.Duration `key:"embed_backfill.backoff_base" env:"CTX_EMBED_BACKFILL_BACKOFF_BASE" default:"60" mut:"hot" tenancy:"global-only"`
+	BackoffCap  time.Duration `key:"embed_backfill.backoff_cap" env:"CTX_EMBED_BACKFILL_BACKOFF_CAP" default:"86400" mut:"hot" tenancy:"global-only"`
 }
 
 // Source reports the origin of a registry key in this snapshot:

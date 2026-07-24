@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 112,
-    "migration_count": 111,
+    "migration_max": 113,
+    "migration_count": 112,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1264,6 +1264,53 @@
         },
         {
           "name": "last_access",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_embed_failures": {
+      "columns": [
+        {
+          "name": "block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "migration_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "attempts",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "last_error",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "last_class",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "next_attempt_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "first_seen",
           "type": "timestamp with time zone",
           "not_null": true,
           "storage": "p"
@@ -3581,6 +3628,15 @@
     },
     "idx_embed_cache_last_access": {
       "def_hash": "25abc0cee37fbb08777749458061e452b27272ba5d8af8bfd06e1b6e9677e62f"
+    },
+    "idx_embed_failures_backfill": {
+      "def_hash": "3d0d6b991371477bfbd6196b03c7a4ef855c6a1dd2bd6351deb1c70bc2fd2621"
+    },
+    "idx_embed_failures_migration": {
+      "def_hash": "7df95cca97401af3b9f21c5a36d2d60bc33313d2e058d1dc2759f5b820def4d8"
+    },
+    "idx_embed_failures_next_attempt": {
+      "def_hash": "8d5a601437190054066262f24dfb14bfa0aa1d12b11348a929d930fddeeb802a"
     },
     "idx_embedding_hnsw": {
       "def_hash": "217601859ed923187afc2b5c3a33ba7271d2f09732366d889ab3e82334821542",

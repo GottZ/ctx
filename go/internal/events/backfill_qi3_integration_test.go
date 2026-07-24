@@ -215,6 +215,17 @@ func backfillRouter(bpool *backends.Pool, adm dispatch.Admitter) *dream.Router {
 	}
 }
 
+// qi3Cfg is the zero-value EmbedBackfill config for this file's pre-existing
+// QI3 probes (Achse 04 W04-2 signature addition): MaxTokens=0 disables the
+// new oversize pre-check (none of these fixtures exercise it) and none of
+// them reach the new post-wire failure-memo branch (their only non-2xx
+// response, downSrv in failover_tryacquire_defers, resolves via
+// dispatch.ErrWouldBlock before the memo path, unchanged from pre-W04-2
+// behavior) — so the zero value is behavior-neutral here.
+func qi3Cfg() *config.Config {
+	return &config.Config{}
+}
+
 func TestBackfillQI3_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -281,7 +292,7 @@ func TestBackfillQI3_Integration(t *testing.T) {
 		}
 		done := make(chan result, 1)
 		go func() {
-			ok, err := s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec))
+			ok, err := s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec), qi3Cfg())
 			done <- result{ok, err}
 		}()
 
@@ -356,7 +367,7 @@ func TestBackfillQI3_Integration(t *testing.T) {
 		}
 
 		start := time.Now()
-		ok, err := s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec))
+		ok, err := s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec), qi3Cfg())
 		elapsed := time.Since(start)
 		if err != nil || ok {
 			t.Fatalf("deferred backfill = (%v, %v), want (false, nil) — Q-I3 defer, not an error loop", ok, err)
@@ -379,7 +390,7 @@ func TestBackfillQI3_Integration(t *testing.T) {
 
 		// Defer means LATER works: free the follow-up target, run again.
 		holder.Release()
-		ok, err = s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec))
+		ok, err = s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec), qi3Cfg())
 		if err != nil || !ok {
 			t.Fatalf("retry after defer = (%v, %v), want (true, nil)", ok, err)
 		}
@@ -427,7 +438,7 @@ func TestBackfillQI3_Integration(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				ok, err := s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec))
+				ok, err := s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec), qi3Cfg())
 				if err == nil && !ok {
 					err = context.DeadlineExceeded // marker: nothing picked
 				}
@@ -464,7 +475,7 @@ func TestBackfillQI3_Integration(t *testing.T) {
 		t.Cleanup(d.Close)
 		rec := newQI3Admitter(t, d, pool)
 
-		ok, err := s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec))
+		ok, err := s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec), qi3Cfg())
 		if err != nil || !ok {
 			t.Fatalf("baseline backfill = (%v, %v), want (true, nil)", ok, err)
 		}
@@ -474,7 +485,7 @@ func TestBackfillQI3_Integration(t *testing.T) {
 		if got := pendingCount(t, pool); got != 0 {
 			t.Fatalf("pending after baseline = %d, want 0", got)
 		}
-		ok, err = s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec))
+		ok, err = s.backfillOneEmbedding(ctx, backfillRouter(bpool, rec), qi3Cfg())
 		if err != nil || ok {
 			t.Fatalf("empty-table backfill = (%v, %v), want (false, nil)", ok, err)
 		}
