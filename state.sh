@@ -34,6 +34,67 @@ api_keys=$($DB_CMD -c "SELECT string_agg(label || ' (' || home_scope || ')', ', 
 migration_count=$(ls "$SCRIPT_DIR"/go/migrations/*.sql 2>/dev/null | wc -l)
 migration_last=$(ls "$SCRIPT_DIR"/go/migrations/*.sql 2>/dev/null | sort | tail -1 | xargs basename 2>/dev/null || echo "none")
 
+# _migrations-DB-Abgleich (read-only psql-Kurzcheck, funktioniert auch bei
+# totem Daemon — design/03 §4.8). Repo-Dateistand vs. Live-Tabellenstand.
+migration_last_num=$(echo "$migration_last" | grep -oP '^\d+' || echo "0")
+db_migration_count=$($DB_CMD -c "SELECT count(*) FROM _migrations;" 2>/dev/null || echo "?")
+db_migration_max=$($DB_CMD -c "SELECT max(version) FROM _migrations;" 2>/dev/null || echo "?")
+if [[ "$migration_last_num" =~ ^[0-9]+$ && "$db_migration_max" =~ ^[0-9]+$ ]]; then
+  migration_pending=$((migration_last_num - db_migration_max))
+  if [[ "$migration_pending" -eq 0 ]]; then
+    migration_sync="in sync"
+  else
+    migration_sync="${migration_pending} PENDING"
+  fi
+else
+  migration_sync="unbekannt (DB-Abfrage fehlgeschlagen)"
+fi
+
+# checksums_missing (bedingt, Forward-Kompatibilität — design/03 §4.8: die
+# Spalte _migrations.checksum existiert erst nach dem 108–112-Deploy. Ohne
+# sie KEIN vorgetäuschter Wert, die Zeile bleibt schlicht weg statt "0" zu
+# lügen; set -e-sicheres Bestandsmuster wie die Zeilen darüber).
+checksum_col_exists=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='_migrations' AND column_name='checksum';" 2>/dev/null || echo "0")
+checksums_missing_suffix=""
+if [[ "$checksum_col_exists" == "1" ]]; then
+  checksums_missing=$($DB_CMD -c "SELECT count(*) FROM _migrations WHERE checksum IS NULL;" 2>/dev/null || echo "?")
+  checksums_missing_suffix=" checksums_missing=${checksums_missing}"
+fi
+
+# --- Contract (Schema-Contract-Check via `ctx contract`, W03-4 CLI) ---
+# set -e-sicher: der if/else fängt den Exit-Code ab, BEVOR eine Pipe/Zuweisung
+# ihn verschlucken könnte (bekannter Projekt-Quirk: "EXIT nach Pipe misst die
+# Pipe"). ctx contract liefert heute (Alt-CLI, kein W03-4-Deploy) planmäßig
+# Exit 1 mit "unknown command" statt 0 — das ist explizit KEIN "ok".
+if contract_out=$(ctx contract 2>&1); then
+  contract_rc=0
+else
+  contract_rc=$?
+fi
+contract_detail=""
+case "$contract_rc" in
+  0)
+    contract_line="ok"
+    ;;
+  1)
+    if [[ "$contract_out" == *"unknown command"* ]]; then
+      contract_line="nicht verfügbar (installierte CLI kennt \"contract\" nicht — Exit 1/unknown command, Vor-W03-4-Stand)"
+    else
+      contract_line="DRIFT"
+      contract_detail=$(echo "$contract_out" | head -5)
+    fi
+    ;;
+  2)
+    contract_line="UNCHECKED"
+    ;;
+  3)
+    contract_line="nicht verfügbar (CLI/Endpoint, Exit 3)"
+    ;;
+  *)
+    contract_line="nicht verfügbar (unerwarteter Exit $contract_rc)"
+    ;;
+esac
+
 # --- Go ---
 go_version=$(grep '^go ' "$SCRIPT_DIR/go/go.mod" | awk '{print $2}')
 go_deps_direct=$(grep -Pv '// indirect' "$SCRIPT_DIR/go/go.mod" | grep -Pc '^\t' 2>/dev/null || echo "0")
@@ -89,6 +150,13 @@ echo ""
 echo "--- Migrations ---"
 echo "  Count:              $migration_count"
 echo "  Latest:             $migration_last"
+echo "  DB-Abgleich:        repo $migration_count files (max $migration_last_num) / live $db_migration_count rows (max $db_migration_max) — $migration_sync${checksums_missing_suffix}"
+echo ""
+echo "--- Contract ---"
+echo "  contract:           $contract_line"
+if [[ -n "$contract_detail" ]]; then
+  echo "$contract_detail" | sed 's/^/                      /'
+fi
 echo ""
 echo "--- Go ---"
 echo "  Version:            $go_version"
