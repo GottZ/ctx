@@ -318,15 +318,56 @@ func StoreEmbedding(ctx context.Context, q execQuerier, blockID, model string, v
 	return nil
 }
 
-// ClearEmbedding sets the embedding (and its now-stale embed_model) to NULL
-// so the scheduler backfill regenerates both together.
+// ClearEmbedding sets BOTH vector pairs (embedding/embed_model AND, since
+// Achse 04 W04-3 / migration 114, embedding_next/embed_model_next) to NULL,
+// and deletes the block's regular-backfill memo row (context_embed_failures,
+// migration_id IS NULL), so a content change converges cleanly on every
+// axis that content invalidates:
+//
+//   - Live pair: unchanged W04-1 doctrine — the scheduler backfill
+//     regenerates it.
+//   - _next pair: design/04 §3.2b/§4.3 "Konvergenz-Invariante" — this IS the
+//     content-change path a re-embed migration's dual-column cutover
+//     depends on. Without nulling embedding_next here, a content update
+//     during an active migration would leave a stale migrated vector next
+//     to fresh content: the migration's pending predicate
+//     (embedding_next IS NULL) would never re-pick the block, and Verify
+//     (which checks model/norm, never content) would count it complete —
+//     the new space would permanently serve a content-foreign vector for
+//     that block.
+//   - Backfill memo delete: W04-2/W04-3 coupling resolution (Lead-Entscheid,
+//     wave briefing). The oversize infinity-memo's semantics are "parked
+//     UNTIL content changes" (design §4.4); ClearEmbedding is the
+//     content-change path. Without the delete, a block shrunk below the
+//     token limit stayed parked forever — no code path ever revisited it.
+//     Migration-scoped memos (migration_id NOT NULL) are untouched: those
+//     belong to a specific migration's bookkeeping, not the regular
+//     backfill, and are the migration worker's (W04-4+) concern.
 func ClearEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string) error {
-	_, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET embedding = NULL, embed_model = NULL WHERE id = $1`,
-		blockID,
-	)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("store: clear embedding: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE context_blocks
+		 SET embedding = NULL, embed_model = NULL,
+		     embedding_next = NULL, embed_model_next = NULL
+		 WHERE id = $1`,
+		blockID,
+	); err != nil {
 		return fmt.Errorf("store: clear embedding: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM context_embed_failures WHERE block_id = $1 AND migration_id IS NULL`,
+		blockID,
+	); err != nil {
+		return fmt.Errorf("store: clear embedding: delete backfill memo: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: clear embedding: commit: %w", err)
 	}
 	return nil
 }

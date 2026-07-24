@@ -36,20 +36,21 @@ func TestMigration077_WorkflowStatus(t *testing.T) {
 		t.Errorf("workflow_status = %s nullable=%s len=%d, want character varying/YES/50", dataType, nullable, maxLen)
 	}
 
-	// (2) T07 oracle live-verification: context_blocks column count = 39
-	// since M109 dropped the dead embed_status column (was 40: 39 pre-077 +
-	// workflow_status; M109 W04-1 provenance repair removes embed_status).
-	// test.sh T07 still pins 40 against the LIVE DB — that flip belongs to
-	// the 108-112 live-migration runbook (or the W03-6 T07 replacement),
-	// not to the fresh-chain truth asserted here.
+	// (2) T07 oracle live-verification: context_blocks column count = 41
+	// since M114 (Achse 04 W04-3) added the dual-column cutover pair
+	// embedding_next/embed_model_next (was 39: 40 pre-109 minus
+	// embed_status, M109 W04-1 provenance repair removes embed_status; +2
+	// for M114's pair). test.sh T07 pins the LIVE DB count separately —
+	// that flip belongs to the live-migration runbook, not to the
+	// fresh-chain truth asserted here.
 	var colCount int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks'`,
 	).Scan(&colCount); err != nil {
 		t.Fatalf("col count: %v", err)
 	}
-	if colCount != 39 {
-		t.Errorf("context_blocks column count = %d, want 39 (40 pre-109 minus embed_status)", colCount)
+	if colCount != 41 {
+		t.Errorf("context_blocks column count = %d, want 41 (39 post-109 + M114 embedding_next/embed_model_next)", colCount)
 	}
 
 	// (3) Partial keyset board index exists with the design/02 §3.3 shape.

@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 113,
-    "migration_count": 112,
+    "migration_max": 114,
+    "migration_count": 113,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -884,6 +884,18 @@
           "type": "character varying(50)",
           "not_null": false,
           "storage": "x"
+        },
+        {
+          "name": "embedding_next",
+          "type": "vector(1024)",
+          "not_null": false,
+          "storage": "e"
+        },
+        {
+          "name": "embed_model_next",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
         }
       ],
       "row_security": false
@@ -1311,6 +1323,178 @@
         },
         {
           "name": "first_seen",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_embed_migrations": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "from_model",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "to_model",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "to_backend",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "mode",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "total_blocks",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "migrated_count",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "failed_count",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "skipped_count",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "cursor_created_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "verify_started_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "verify_report",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "last_error",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "abort_reason",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "rollback_reason",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_embed_models": {
+      "columns": [
+        {
+          "name": "model_key",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "family",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "native_dims",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "stored_dims",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "matryoshka",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "quantization",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "registered_at",
           "type": "timestamp with time zone",
           "not_null": true,
           "storage": "p"
@@ -3353,6 +3537,12 @@
     "context_embed_cache_pkey": {
       "def_hash": "4f1bd9c1ec05f655c3c25785f75ecc4fa840f92a7db43181be0f8e30d4121b6f"
     },
+    "context_embed_migrations_pkey": {
+      "def_hash": "492240df3c0927d8466d6850e9dde7a62bc188026728dde698547bbc24ece6fd"
+    },
+    "context_embed_models_pkey": {
+      "def_hash": "2664c9536a1fb8ecbfadab1baaaffda52259f16371d5959bb4dd9f0c4796d872"
+    },
     "context_external_identities_issuer_subject_key": {
       "def_hash": "a908fdac45653a96013db57bd52d7fed5eb497aac9ad99adec26764a13e7cd27"
     },
@@ -3637,6 +3827,9 @@
     },
     "idx_embed_failures_next_attempt": {
       "def_hash": "8d5a601437190054066262f24dfb14bfa0aa1d12b11348a929d930fddeeb802a"
+    },
+    "idx_embed_migration_single_active": {
+      "def_hash": "f3fa679bc8d2f22de9d03802ee8e1609f5919e8b3b6c7d7d50dc604541026b82"
     },
     "idx_embedding_hnsw": {
       "def_hash": "217601859ed923187afc2b5c3a33ba7271d2f09732366d889ab3e82334821542",
