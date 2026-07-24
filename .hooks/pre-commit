@@ -160,7 +160,34 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 # ============================================================
-# Gate 3: golangci-lint + integration-tag vet on staged Go files
+# Gate 3: schema-contract manifest sync (W03-2, design/03 §4.9)
+# ============================================================
+#
+# A staged migration without a staged manifest regeneration would ship a
+# checked-in contract that no longer describes the migration chain it
+# claims to — silently, until some unrelated later commit happens to
+# regenerate it. Forces the two to land in the same commit.
+
+STAGED_MIGRATIONS=$(git diff --cached --name-only --diff-filter=ACMR -- 'go/migrations/*.sql' 2>/dev/null)
+if [ -n "$STAGED_MIGRATIONS" ]; then
+    MANIFEST_STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- 'go/internal/schemacontract/manifest.json' 2>/dev/null)
+    if [ -z "$MANIFEST_STAGED" ]; then
+        printf '\n'
+        printf 'pre-commit: REJECTED — migration(s) staged without a manifest regeneration:\n'
+        printf '%s\n' "$STAGED_MIGRATIONS" | sed 's/^/  /'
+        printf '\n'
+        printf 'Regenerate and stage the contract manifest:\n'
+        printf '  cd go && go test -tags=genmanifest ./internal/schemacontract -run TestGenerateManifest\n'
+        printf '  git add go/internal/schemacontract/manifest.json\n'
+        printf '\n'
+        printf 'Emergency bypass (logged in commit metadata): git commit --no-verify\n'
+        printf '\n'
+        exit 1
+    fi
+fi
+
+# ============================================================
+# Gate 4: golangci-lint + integration-tag vet on staged Go files
 # ============================================================
 #
 # go vet -tags=integration is the local mirror of the CI matrix leg that

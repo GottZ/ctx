@@ -1,0 +1,3953 @@
+{
+  "manifest_version": 1,
+  "generated_against": {
+    "migration_max": 112,
+    "migration_count": 111,
+    "pg_major": 18,
+    "image": "pgvector-timescaledb:pg18"
+  },
+  "extensions": {
+    "pg_trgm": {
+      "min_version": "1.6"
+    },
+    "pgcrypto": {
+      "min_version": "1.4"
+    },
+    "plpgsql": {
+      "min_version": "1.0"
+    },
+    "timescaledb": {
+      "min_version": "2.26.0"
+    },
+    "vector": {
+      "min_version": "0.8.2"
+    }
+  },
+  "tables": {
+    "_migrations": {
+      "columns": [
+        {
+          "name": "version",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "filename",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "applied_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "checksum",
+          "type": "character(64)",
+          "not_null": false,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_access_log": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "block_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "api_key_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "action",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "query_text",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "principal_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_access_tokens": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "token_hash",
+          "type": "character varying(64)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "token_type",
+          "type": "character varying(16)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "api_key_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "principal_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "client_id",
+          "type": "character varying(64)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "audiences",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "refresh_family",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "parent_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "issued_via",
+          "type": "character varying(16)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "revoked_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_api_keys": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "key_hash",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "label",
+          "type": "character varying(100)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "home_scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "allowed_scopes",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "last_used_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "is_admin",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "tenant_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "tenant_role",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "write_scopes",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "confirm_writes",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "principal_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_backends": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "base_url",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "protocol",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "provider_class",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "api_key_ref",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "trust",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "locality",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "roles",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "model_map",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "timeouts",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "num_ctx",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "priority",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "extra_headers",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "extra_body",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "limits",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_blobs": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "context_block_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "category",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "filename",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "mime_type",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "file_size",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "checksum",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "storage_type",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "data",
+          "type": "bytea",
+          "not_null": false,
+          "storage": "e"
+        },
+        {
+          "name": "file_path",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "tags",
+          "type": "text[]",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_block_grants": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "grantee_tenant",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "granted_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "granted_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_block_types": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "name",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "display_name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "builtin",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "is_default",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "config",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_blocks": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "category",
+          "type": "character varying(100)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "tags",
+          "type": "text[]",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "content",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "embedding",
+          "type": "vector(1024)",
+          "not_null": false,
+          "storage": "e"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "content_hash",
+          "type": "character varying(64)",
+          "not_null": false,
+          "generated_expr_hash": "912e4021697f37491e87076ca2b5b246dbe0e1abaedb600866b2e902fc2a6c27",
+          "storage": "x"
+        },
+        {
+          "name": "is_archived",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "superseded_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "temporal",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "embed_model",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "guard_status",
+          "type": "character varying(20)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "source_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "parent_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "lifecycle_state",
+          "type": "character varying(30)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "chunk_index",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "quality_score",
+          "type": "real",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "auto_tags",
+          "type": "text[]",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "language",
+          "type": "character varying(10)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "dream_checked_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "dream_cooldown_until",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "content_times",
+          "type": "timestamp with time zone[]",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "dream_keywords",
+          "type": "text[]",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "dream_keywords_generated_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "dream_temporal_validated_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "type_name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "ts_de",
+          "type": "tsvector",
+          "not_null": false,
+          "generated_expr_hash": "9bf1ba341d7a10dc7280f8b151bdb534c85a9d13151927cf96f1d4e83676b3ea",
+          "storage": "x"
+        },
+        {
+          "name": "ts_en",
+          "type": "tsvector",
+          "not_null": false,
+          "generated_expr_hash": "046e8339821c22198f544263fa10d5bcce739515aad106d4add3f4f08f2bf63a",
+          "storage": "x"
+        },
+        {
+          "name": "dream_eval_count",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "sensitivity",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "sensitivity_source",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "sensitivity_audited_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "type_source",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "workflow_status",
+          "type": "character varying(50)",
+          "not_null": false,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_chat_messages": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "session_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "seq",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "role",
+          "type": "character varying(20)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "content",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "sensitivity",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "tool_calls",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "tool_call_id",
+          "type": "character varying(64)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "tool_name",
+          "type": "character varying(64)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "backend",
+          "type": "character varying(100)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "model",
+          "type": "character varying(200)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "prompt_tokens",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "completion_tokens",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "duration_ms",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_chat_sessions": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "read_scopes",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "title",
+          "type": "character varying(200)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "max_sensitivity",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "busy_until",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "archived_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_digest_state": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "dirty_since",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "last_digest_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_disable_profile_backends": {
+      "columns": [
+        {
+          "name": "profile_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "backend_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_disable_profiles": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "label",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "reserved",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_dream_links": {
+      "columns": [
+        {
+          "name": "source_block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "target_block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "relationship",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "confidence",
+          "type": "real",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "raw_confidence",
+          "type": "real",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "dream_version",
+          "type": "smallint",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_embed_cache": {
+      "columns": [
+        {
+          "name": "text_hash",
+          "type": "bytea",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "model",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "embedding",
+          "type": "vector(1024)",
+          "not_null": true,
+          "storage": "e"
+        },
+        {
+          "name": "text_preview",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "hit_count",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "first_seen",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "last_access",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_external_identities": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "principal_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "provider",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "issuer",
+          "type": "character varying",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "subject",
+          "type": "character varying",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "email",
+          "type": "character varying",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "verified_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "last_login_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "display_name",
+          "type": "character varying",
+          "not_null": false,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_graph_category_hues": {
+      "columns": [
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "category",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "hue",
+          "type": "smallint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_guard_state": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "dirty_since",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "last_guard_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "pending_count",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_llm_log": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "pipeline",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "model",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "host",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "duration_ms",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "error",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "prompt_tokens",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "completion_tokens",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "request_system",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "request_user",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "response_content",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "block_ids",
+          "type": "uuid[]",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "dream_version",
+          "type": "smallint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "backend_name",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "backend_trust",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "backend_locality",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "required_sensitivity",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "attempt",
+          "type": "smallint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "cost_usd",
+          "type": "numeric(14,8)",
+          "not_null": false,
+          "storage": "m"
+        },
+        {
+          "name": "api_key_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "queue_wait_ms",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "dispatch_class",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "dispatch_abort",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_oauth_clients": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "client_id",
+          "type": "character varying(64)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "client_secret_hash",
+          "type": "character varying(128)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "label",
+          "type": "character varying(200)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "redirect_uris",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scopes",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "grant_types",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "response_types",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "token_endpoint_auth_method",
+          "type": "character varying(32)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "registration_source",
+          "type": "character varying(16)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_oauth_codes": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "code_hash",
+          "type": "character varying(64)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "api_key_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "principal_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "client_id",
+          "type": "character varying(64)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "redirect_uri",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "code_challenge",
+          "type": "character varying(128)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "resource",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_oauth_providers": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "slug",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "type",
+          "type": "character varying(20)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "display_name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "issuer",
+          "type": "character varying",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "client_id",
+          "type": "character varying",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "token_auth",
+          "type": "character varying(20)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "redirect_base",
+          "type": "character varying",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "scopes",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "auth_url",
+          "type": "character varying",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "token_url",
+          "type": "character varying",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "userinfo_url",
+          "type": "character varying",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "id_token_algs",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "single_tenant_issuer",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "allowed_claim",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_pending_writes": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "api_key_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "op",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "origin",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "payload",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "payload_hash",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "consumed_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "principal_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_principals": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "display_name",
+          "type": "character varying",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "primary_email",
+          "type": "character varying",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_project_sync_map": {
+      "columns": [
+        {
+          "name": "project_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "entity_kind",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "forge_id",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "base_hash",
+          "type": "character varying(64)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "conflict",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "conflict_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "forge_updated_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "synced_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_project_sync_runs": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "project_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "error",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "stats",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_projects": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "tenant_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "identity",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "display_name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "forge",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "webhook_secret_ref",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "sync_status",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "last_sync_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "sync_cursor",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "token_secret",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "sync_enabled",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "push_enabled",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "last_error",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "backoff_until",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_recall_runs": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "ran_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "run_group",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "stratum",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "corpus_embedded",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "k",
+          "type": "smallint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "n_queries",
+          "type": "smallint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "query_source",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "ef_search",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "iterative_scan",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "valid",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "recall_avg",
+          "type": "double precision",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "recall_min",
+          "type": "double precision",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "ann_ms_p50",
+          "type": "double precision",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "ann_ms_p95",
+          "type": "double precision",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "exact_ms_p50",
+          "type": "double precision",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "meta",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_secrets": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "ciphertext",
+          "type": "bytea",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "nonce",
+          "type": "bytea",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "key_version",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "rotated_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "rotated_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "rotated_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_settings": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "key",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "value",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "updated_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_settings_audit": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "entity_type",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "entity_key",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "action",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "old_value",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "new_value",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "api_key_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "actor_label",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_sources": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "file_path",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "file_hash",
+          "type": "character varying(64)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "file_size",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "mime_type",
+          "type": "character varying(100)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "chunk_count",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "status",
+          "type": "character varying(20)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "error_message",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_sso_states": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "purpose",
+          "type": "character varying(10)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "state_data",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_structural_links": {
+      "columns": [
+        {
+          "name": "source_block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "target_block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "link_class",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "origin",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_temporal": {
+      "columns": [
+        {
+          "name": "block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "dimension",
+          "type": "character varying(20)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "value",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "source_time",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_tenant_grants": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "grantee_tenant",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "granted_scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_tenant_quota": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "daily_cost_usd",
+          "type": "numeric(14,8)",
+          "not_null": false,
+          "storage": "m"
+        },
+        {
+          "name": "monthly_cost_usd",
+          "type": "numeric(14,8)",
+          "not_null": false,
+          "storage": "m"
+        },
+        {
+          "name": "daily_calls",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "on_exceed",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "updated_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_tenant_scopes": {
+      "columns": [
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "tenant_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_tenants": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "slug",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "display_name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "max_scopes",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "max_keys",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_web_sessions": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "principal_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "access_token_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "refresh_family",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "csrf_secret",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "last_used_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "user_agent",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "client_ip",
+          "type": "inet",
+          "not_null": false,
+          "storage": "m"
+        }
+      ],
+      "row_security": false
+    },
+    "context_webhook_events": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "project_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "delivery_id",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "event",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "payload",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "received_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "processed_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "error",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_write_log": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "block_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "matched_block_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "decision",
+          "type": "character varying(20)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "similarity",
+          "type": "real",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "block_title",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "block_category",
+          "type": "character varying(100)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "api_key_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "principal_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "graph_cluster_edge": {
+      "columns": [
+        {
+          "name": "cluster_a",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "cluster_b",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope_s",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope_t",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "link_count",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "weight_sum",
+          "type": "real",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "graph_cluster_member": {
+      "columns": [
+        {
+          "name": "block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "cluster_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "graph_cluster_node": {
+      "columns": [
+        {
+          "name": "cluster_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "size",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "category_counts",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "repr_block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "repr_title",
+          "type": "character varying(120)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "repr_quality",
+          "type": "real",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "graph_overview_meta": {
+      "columns": [
+        {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "modularity",
+          "type": "real",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "cluster_n",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "node_n",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "edge_n",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "resolution",
+          "type": "real",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    }
+  },
+  "indexes": {
+    "_migrations_pkey": {
+      "def_hash": "2c18e8af5f5382f1542cfe75da781ae7d424d0a9d8fc3f6df348ca6f74d0211e"
+    },
+    "context_access_log_pkey": {
+      "def_hash": "cad3b88fdcde6721aabbc301eb3efe9b4f7528ecc96337a7ba3be3f4c16e3147"
+    },
+    "context_access_tokens_pkey": {
+      "def_hash": "ede3251e60af251cb57f16bbef8c8b9b0cecf4d21ce6b85872f247b70d2334e7"
+    },
+    "context_access_tokens_token_hash_key": {
+      "def_hash": "6aa33befba68d2ef393a6f5991070fcbe3fe73fd5ddc157f1aa0342b94a0e1ee"
+    },
+    "context_api_keys_pkey": {
+      "def_hash": "d19ac3c2a02116d73b0238d92977cdc4ea4b902f09e42f006451ccf8fe127b76"
+    },
+    "context_backends_pkey": {
+      "def_hash": "32395fc19fe2783fbd4c251fef7203ee1cfdeeed11a7319adc2a3aa5d7728474"
+    },
+    "context_blobs_pkey": {
+      "def_hash": "ad97ef3f7a1288a28f0335311c150b09aa39d37161e1b027b950db5fb8c20f33"
+    },
+    "context_block_grants_pkey": {
+      "def_hash": "34b1826f7c10fd7ca609ae18101a00e74a3b263715374d7c46ad129a6e1a74e0"
+    },
+    "context_block_types_pkey": {
+      "def_hash": "aa2966ad8daa35b6f6d1debef14ee700f8257bde659198155f0c5e05f939291a"
+    },
+    "context_blocks_pkey": {
+      "def_hash": "4000194f82c719f914999715ffa4714b07c9a15ea9a69ea2f384a3f0c83d7e3e"
+    },
+    "context_chat_messages_pkey": {
+      "def_hash": "7566dec432d98f353e75f28aab1a66e2527184d177b691e82d79b4bd4a5c7959"
+    },
+    "context_chat_messages_session_id_seq_key": {
+      "def_hash": "7779724aaa4356278601efd2d1151b6d69230d7f10548b2b5b18cab286b2692c"
+    },
+    "context_chat_sessions_pkey": {
+      "def_hash": "3ff3529f2187d15706cb945ddf874f80b35088f4139822fd48723fc83b889c19"
+    },
+    "context_digest_state_pkey": {
+      "def_hash": "d70418e08585b67bb97b87d022552c4df53ebdb6b7ecc2ce6fd22f176cce4178"
+    },
+    "context_disable_profile_backends_pkey": {
+      "def_hash": "7c8149077819a9e23893d1490571d4846b7b4bc42f5a34cf5bd160b64306d2f0"
+    },
+    "context_disable_profiles_pkey": {
+      "def_hash": "842b865c1c85fdf83a708937492c7334e3b34020fea6235c587ae4f914273cfe"
+    },
+    "context_dream_links_pkey": {
+      "def_hash": "55d64774e009cb873d103d3c7aa445304fddbf25cd8a1791f0c9c3ffff3dd109"
+    },
+    "context_embed_cache_pkey": {
+      "def_hash": "4f1bd9c1ec05f655c3c25785f75ecc4fa840f92a7db43181be0f8e30d4121b6f"
+    },
+    "context_external_identities_issuer_subject_key": {
+      "def_hash": "a908fdac45653a96013db57bd52d7fed5eb497aac9ad99adec26764a13e7cd27"
+    },
+    "context_external_identities_pkey": {
+      "def_hash": "936972b554cecd1cf896ebf5d431f8c9d253b8a883a60edb8c1ab55011b54bfa"
+    },
+    "context_guard_state_pkey": {
+      "def_hash": "4f029a2e2fbfd3d351585f6bd8577bf4738e452a548a0640005e82f9516ce488"
+    },
+    "context_llm_log_created_at_idx": {
+      "def_hash": "69a09678bea2cc122b85b7c27c65a0237ed4dab75b1d59d6467e0afc3c6a89b9"
+    },
+    "context_llm_log_pkey": {
+      "def_hash": "71bc1db96f8018863b268c53999b6e62059c08f2db9b05631d8ebf2f184eef7b"
+    },
+    "context_oauth_clients_client_id_key": {
+      "def_hash": "084277c83406160d1d5d976e0c81dd2aee4c7f6a50d77924174f8871383b6f34"
+    },
+    "context_oauth_clients_pkey": {
+      "def_hash": "9fe47fa54c0f5520ac45ea3373984630d79aeb580573e1748b0bdb1a3c6a4f45"
+    },
+    "context_oauth_codes_code_hash_key": {
+      "def_hash": "c13a5c265d15f0cbfbc942dd002c2d1e990a9c8d79a5adc35dd31fec14267ca5"
+    },
+    "context_oauth_codes_pkey": {
+      "def_hash": "06f304450a1a03a0920801eee6f9694d360e2e87ee13224b851a1797e584c63f"
+    },
+    "context_oauth_providers_pkey": {
+      "def_hash": "fb5f969c4580dea28892b64bf65248c87616849d782dd88a94e1cb3a7b86d610"
+    },
+    "context_oauth_providers_slug_key": {
+      "def_hash": "42f99ac840173810ada771aa3f3d4d92dc3d904113bd38d1cd852afd06414a37"
+    },
+    "context_pending_writes_created_at_idx": {
+      "def_hash": "f07a58793aae518496fd65b85e921a19d57d4d9f6172beca7c407ece4e71fff1"
+    },
+    "context_pending_writes_pkey": {
+      "def_hash": "b37d8a8983938b727a2ce859e75304ff2f259adbaff29af515f31423461e75ec"
+    },
+    "context_principals_pkey": {
+      "def_hash": "838d76270fc54395370397e496c699799f92d597e2ae11d2b9ac0e7661b19160"
+    },
+    "context_project_sync_map_pkey": {
+      "def_hash": "2f22b2c2238fc3cfa7c3b9972927f9bb1c2c4b711ff492e86909c05f8baddbc5"
+    },
+    "context_project_sync_runs_pkey": {
+      "def_hash": "4f5b948180db97edacb971b3bff3639cefe0a32063d390eafa982a7da4672855"
+    },
+    "context_projects_pkey": {
+      "def_hash": "c6b4c4fe24c5c546ffde463c1bacc57716d3f8ccbd1c895cec4ee74bbe0489ef"
+    },
+    "context_recall_runs_pkey": {
+      "def_hash": "96f7d3257fac249b0a7dcae2962e1e297ed75450980a50cababf0e4bef99a082"
+    },
+    "context_secrets_pkey": {
+      "def_hash": "d57f945000acc919c5a2e4936c702100d223e1fdd93f1476d410b83216e54677"
+    },
+    "context_settings_audit_pkey": {
+      "def_hash": "e2987691a055e0b75a641be091fea5c8d9912c7db17993b317426d0ff09de984"
+    },
+    "context_settings_pkey": {
+      "def_hash": "c59e25137a5c957829b8572e0d75d74a3c9a84158424fe65a79fbba91d4b98e7"
+    },
+    "context_sources_file_path_scope_key": {
+      "def_hash": "a846d227278ceee013d8223ef976d9192dec2913c0eff65b71fa71c195285e13"
+    },
+    "context_sources_pkey": {
+      "def_hash": "bc609e2b0f5545c62737272451bee113dc654dbc000cb9a4e3526fa63841c426"
+    },
+    "context_sso_states_pkey": {
+      "def_hash": "274fd63dedca88c0f0ee9495f8e96d6c016849e2e05406089f33aa68bb4a7c84"
+    },
+    "context_structural_links_pkey": {
+      "def_hash": "884ac337b287c2e23a3caeaa807d9059d3e64b6d9d47763aa3994929c0cabd81"
+    },
+    "context_temporal_block_id_source_time_dimension_key": {
+      "def_hash": "5b46345db185a90edd6918d08d6ff1c78b33c572f1e15acbb77f980d9c7edfc2"
+    },
+    "context_tenant_grants_pkey": {
+      "def_hash": "732c3fdbc2b6965170edbacf897f67ad9f2d141af5528a2f1d3726e677b6953a"
+    },
+    "context_tenant_quota_pkey": {
+      "def_hash": "cc1ff3c456f289b52b711614e23ed39e8fb47973dbd911e4c7e328461f5982a4"
+    },
+    "context_tenant_scopes_pkey": {
+      "def_hash": "0254f5b9d555917698ae3930fb21cf26bdf179949cf9a3f11592c6673df5e433"
+    },
+    "context_tenants_pkey": {
+      "def_hash": "f7c79d8c6c21cec38609c3f4f4c052f2f7dd7d388b759b80a6368d2223787ddc"
+    },
+    "context_web_sessions_pkey": {
+      "def_hash": "eb788c1fc44414e15a04940cc9566a15846771f96b1a1f112b67a33f4e13c807"
+    },
+    "context_webhook_events_pkey": {
+      "def_hash": "8552e43a5ed53eaec6eb1a913e46f88cafe61af7fb65347aa52e0b6ca9aa4d7f"
+    },
+    "context_write_log_pkey": {
+      "def_hash": "d6b8348197b1d21d56683fe93c2efcbc8726541f0a1ea2a760cda1ff092338b9"
+    },
+    "graph_cluster_edge_pkey": {
+      "def_hash": "9e4533c2625d901c1ae123bb26e7a508ccf0e21c18d0625b23028d32e1187d85"
+    },
+    "graph_cluster_member_pkey": {
+      "def_hash": "81f7897cdf18b30efe3181330b3ce42c27b6d53e7f3cf7b5509a2101f1fbd745"
+    },
+    "graph_cluster_node_pkey": {
+      "def_hash": "797efb13122558310393381bcdc4f60aa045c4c24a9eba5153b07ea5c93ef01b"
+    },
+    "graph_overview_meta_pkey": {
+      "def_hash": "1a8606799ebd429c96ef43977558928d3b268410c6e33547f2ad7f5fb43cce52"
+    },
+    "idx_access_log_action": {
+      "def_hash": "95de89559cb218e54b5901edd8bb74793c15f62808a1d97498bc9c331ddce562"
+    },
+    "idx_access_log_api_key": {
+      "def_hash": "74e0436f585d3d936561e7a50f83d8437b885ec4442d5a3dd0ac034e870ca5bc"
+    },
+    "idx_access_log_block": {
+      "def_hash": "1fea4bb5109bdcaf9086503f4e6334aa3045c9797e6509d8a933f894d28c02be"
+    },
+    "idx_access_log_created": {
+      "def_hash": "2777dcd12ce06231a8009abb7c0274e4644ed4dcac47ec6f36e28f25dc0db51c"
+    },
+    "idx_access_log_principal": {
+      "def_hash": "147bad6930aace15daf9cb717f6240b983a0f7dfb773aed0f8ecf211f29915a8"
+    },
+    "idx_access_log_ratelimit": {
+      "def_hash": "1c97861d8f45f122f168684e4f15204712182d7f2b5e0ce4e817880f7e5575e5"
+    },
+    "idx_access_tokens_api_key": {
+      "def_hash": "3ae1bfebaa32477f38046c70e55acd9e75bb0de55a43ca16f2e192bd93e28055"
+    },
+    "idx_access_tokens_expires": {
+      "def_hash": "888899ab4acc797531dcbaab29ee474d5ddfd7cde0f16ce0beef0b0e41a35e44"
+    },
+    "idx_access_tokens_family": {
+      "def_hash": "e2d6e9b80b15937e174b092dd8e97b02d09a09bb904bcca97ea2e6daba228f7a"
+    },
+    "idx_api_keys_hash": {
+      "def_hash": "8a7ac97d6d567cdd127f44a9ba94c4d376c7361243e5160084cc011e127f567e"
+    },
+    "idx_api_keys_hash_unique": {
+      "def_hash": "88cba208a5180e0ecdf4779011c682c2bf681f6cebdbb746889a0816b3fa5f4c"
+    },
+    "idx_api_keys_tenant": {
+      "def_hash": "e5a7b4183c2749cb398dc25f201a28b633e51d3bcb60d7c6f9f18eac0b252c74"
+    },
+    "idx_archived": {
+      "def_hash": "e5107da92a083e4725c0737455134ee5dc892089b0e7d5e45053d3c63dbb4d35"
+    },
+    "idx_auto_tags": {
+      "def_hash": "e40d5e1aa2753dd3ed3c5654ede30e6e37be16d4c5b7be9c7071b14568b8263e"
+    },
+    "idx_backends_scope": {
+      "def_hash": "23bbfce672db0b4f2ce609135fabd04d79c244c70b1ef3374ac29bf2e632e3e0"
+    },
+    "idx_blobs_block_ref": {
+      "def_hash": "a38cc8c073ca841103a8403e5e300a8b75446b3e0ea5d3825493d74c2f53af60"
+    },
+    "idx_blobs_category_created": {
+      "def_hash": "428b3b20a411bf86822287069c3f39564181221e9a21734b0b32b911e7df5ffc"
+    },
+    "idx_blobs_metadata": {
+      "def_hash": "b0a438ea1220a04d59b35e3488c12bf858499a1e79b22d0556b28172b6562b5a"
+    },
+    "idx_blobs_mime": {
+      "def_hash": "64555b21e0f6326aa100b75b36ec62712d02826e3d7b3b100bd77a77092642fa"
+    },
+    "idx_blobs_scope": {
+      "def_hash": "03cd15895120dc983db381662aaa1e33f86c3f7ed4e2434072a9b1dd8464163b"
+    },
+    "idx_blobs_storage": {
+      "def_hash": "4ea694619e0b9281ef8db0e78772fa36d11a1c640401be243efd1949b49b737f"
+    },
+    "idx_blobs_tags": {
+      "def_hash": "47035484d4f7bd37e8cb4f473a558c4052453149bdfeb7421cfa28643f2495f7"
+    },
+    "idx_block_grants_grantee": {
+      "def_hash": "60ed333ebc1e8e0cd0dbaf26eaee44f0497c0ef02de59f67dc4e07eeab75d0ac"
+    },
+    "idx_block_type": {
+      "def_hash": "e1a70683f83d8b5188d741975e6081a8646b535068216ef164d52b954949e4be"
+    },
+    "idx_blocks_dream_keywords_pending": {
+      "def_hash": "96b81ec6793fb5c9a1ad34b52f78213f215af1bbcf93bf108118b0a48b80043e"
+    },
+    "idx_blocks_dream_temporal_pending": {
+      "def_hash": "69a2610cbcf0ae402349859dfc9ce4b5c1fce0c4c725405aec07200fb6eb1eb4"
+    },
+    "idx_blocks_sensitivity": {
+      "def_hash": "2a00f9e1404aebddc150557068562c6472f426d2745376bf6af44664cbe25a80"
+    },
+    "idx_blocks_stratify_covering": {
+      "def_hash": "6da851540e542a4cba49c0f6ed61aa327f5077ee4a85c09f83a16f048eede467"
+    },
+    "idx_blocks_type_name": {
+      "def_hash": "4fc12e613dd23cbddf80a5a3b3a31abae79d978c02c5bffd9a02134e75f8bfa4"
+    },
+    "idx_blocks_workflow_board": {
+      "def_hash": "70599c0dabe0b0cea13c812c41a837d654bf6748269da93629439e23304217c3"
+    },
+    "idx_blocks_workflow_created": {
+      "def_hash": "71f4fd1b721c325c93a095d2f83ee15aa8f6b3e0ca98de4a1b368dff03e94696"
+    },
+    "idx_chat_sessions_scope": {
+      "def_hash": "f32c4acc1bb4aa7062a4675ea831a3744113fae0d00c5a76920a881cb92b938f"
+    },
+    "idx_content_hash": {
+      "def_hash": "09856dabe5d8f30354b6c362488850067076894058993ef302fac103d575a37b"
+    },
+    "idx_content_times": {
+      "def_hash": "f56a81bfb0672227a4733c5498c1c2c305a3741b68ff888952df595ac00fe96a"
+    },
+    "idx_context_blocks_block_role": {
+      "def_hash": "8d56c175c610cb9bada8584fb0b553ee8366cfee58ddc9cdc537e272326862f8"
+    },
+    "idx_context_category": {
+      "def_hash": "9b7459a31bb19b3a6819c19541a48c01480e20d616acbb4e519f81a047cc42f9"
+    },
+    "idx_context_created": {
+      "def_hash": "c181d7579b44cb84cdc533c2e0e24edb1fe7fe8a1dd3646fcbb45bdf507434b9"
+    },
+    "idx_context_metadata": {
+      "def_hash": "e5a94e1f7e2069aa51978cca91c20dce54d6971777c5592eaea0a1fe99a0bc46"
+    },
+    "idx_context_scope": {
+      "def_hash": "04b00cd94d2121f3ba3072f7ede99f4e2f6634f8e0ff29e450d41284bb109601"
+    },
+    "idx_context_scope_active": {
+      "def_hash": "ea7918f878a04148b98c549e859499412c80840b41152dc51a1c0b40b034d92a"
+    },
+    "idx_context_tags": {
+      "def_hash": "1e9ab8e85a0fdabfded48e74c9dc66747aea3b6b8dafe1548b7ff89cfd9bbf7a"
+    },
+    "idx_context_ts_de": {
+      "def_hash": "30e4e2a296e869e2ee4a75adf6fc0b53ac007141a1c73a6ac13ef12fe85bced0"
+    },
+    "idx_context_ts_en": {
+      "def_hash": "bf74ac9715e82e8452e3f44f1df317a3b9ad9bf3768f8ed9f7c3bd50eb5375d6"
+    },
+    "idx_dream_links_confidence": {
+      "def_hash": "6116a7b2554f0dad8821c872653fba21b7fafc391e64a951602dbcf5deb0743c"
+    },
+    "idx_dream_links_graph_fwd": {
+      "def_hash": "2506f8961853da41090df223c4205a31496ec2e68510ca0b8c8b5319ea6e158d"
+    },
+    "idx_dream_links_graph_rev": {
+      "def_hash": "8517182964b18e21afbb95e319dde03f311bc2257c9b5f86a836ee8cb011dbb2"
+    },
+    "idx_dream_links_raw_confidence": {
+      "def_hash": "e7c858a4182b1f099104d2e780f747e0ea35421354ceb3158dd870b934f38535"
+    },
+    "idx_dream_links_recurrent": {
+      "def_hash": "4b9052366889e73afc95aa5e74ed5d3f7d68c05c34a83ccd1a49c752c7826d90"
+    },
+    "idx_dream_links_scope_created": {
+      "def_hash": "b85f6ce479bee6249c9c6ff6e1deb99195caf1e8130d95f1bb57c7761553197b"
+    },
+    "idx_dream_links_supersedes": {
+      "def_hash": "e6dbaea1f815fd4685c24fe68bea98a6e4199f1af26108c77ae4f5b5d85cfbc6"
+    },
+    "idx_dream_links_target": {
+      "def_hash": "e003669db5f8e1c02f707b8577b3773e748355eecef2b5c1b71cf84cf33a7b8c"
+    },
+    "idx_dream_links_version": {
+      "def_hash": "88389c881b5e772a093845d2fc414cdc7cdd2466956c7e5f2528064473dfe553"
+    },
+    "idx_dream_pending": {
+      "def_hash": "f10f53b320ee44be61c11c1d24e1b110ca8ac174994fb63b79c2b9e263f7a3a5"
+    },
+    "idx_embed_cache_hit_count": {
+      "def_hash": "86b675d033069174795c856180b88de4a5a9b03d5ac2636eefc216c27eab7e83"
+    },
+    "idx_embed_cache_last_access": {
+      "def_hash": "25abc0cee37fbb08777749458061e452b27272ba5d8af8bfd06e1b6e9677e62f"
+    },
+    "idx_embedding_hnsw": {
+      "def_hash": "217601859ed923187afc2b5c3a33ba7271d2f09732366d889ab3e82334821542",
+      "rel_options": {
+        "ef_construction": "64",
+        "m": "16"
+      }
+    },
+    "idx_embedding_pending": {
+      "def_hash": "d3387ab8aa9e7ee3dba5d7713da03c2ec9eeac082882d7fe41b535860455280a"
+    },
+    "idx_external_identities_principal": {
+      "def_hash": "38010d6b84a4c18c2bb294974a3612326e8e3d9f908e4b6cdde085a633f2d766"
+    },
+    "idx_gce_scopes": {
+      "def_hash": "2671d12f8296731b8cda1fcf0cca9b0e0c06adfadd413b5b3cd1242793656c4c"
+    },
+    "idx_gcm_cluster": {
+      "def_hash": "8044dcd7456347133e14064df62deae2295cad654802a15053671485cc4cfdce"
+    },
+    "idx_gcm_scope": {
+      "def_hash": "83443a1e74f9e6ef228926bf485c3a7eefdaefd6467fa4956de1d025791f3e79"
+    },
+    "idx_gcn_scope": {
+      "def_hash": "00a95a5e65983caf08fe4846674957d83bc46d7cd0ab73460e8b2f02372fad6e"
+    },
+    "idx_guard_pending": {
+      "def_hash": "4770580d194390a0c4f5069487f1f2697690a2030fe6939233b1ab6eea532608"
+    },
+    "idx_guard_status": {
+      "def_hash": "11139e0805406100f22504089396e702e16835f49af34815d1686a3f3b73fb68"
+    },
+    "idx_language": {
+      "def_hash": "4b58f92a551a8e4670f283a6f61ff22292a035dd10349b7ba5f5ef5f93327813"
+    },
+    "idx_llm_log_apikey": {
+      "def_hash": "c22941b9c07df458b50c63bcfcc0c5e8855f24f5decaa607afeb9cd04885e04f"
+    },
+    "idx_llm_log_backend": {
+      "def_hash": "af43878e4c2b9f69f495b80c41f678f37ce4de54f2dd4c877fe7aae5a51e5789"
+    },
+    "idx_llm_log_block_ids": {
+      "def_hash": "1c5ed9c73e7b3da27a5c11a851b800f04c7a9c5a58d67edceafa9546b823c50f"
+    },
+    "idx_llm_log_cost": {
+      "def_hash": "1dd3f64df629d6894002c4e873a220c6a02a823db4ed7993200291d90a2cb2e8"
+    },
+    "idx_llm_log_dispatch_abort": {
+      "def_hash": "6645c42b156cdc56470cdf8d70a99bcc386b41f349eef162aaf27c09b97c8165"
+    },
+    "idx_llm_log_dream_version": {
+      "def_hash": "2c9f77c2f5dead109631639faf15c354710643143bfd29b2e61946c3bb38edda"
+    },
+    "idx_llm_log_error": {
+      "def_hash": "b7dbcecdeaae1a796777a58e18a00359fa301921b08885afa0ce76fe6cb352e9"
+    },
+    "idx_llm_log_external": {
+      "def_hash": "6e85f84387e18cf8a40fed7ebb907053c98b5e33810fbc5e673272a07e06aa58"
+    },
+    "idx_llm_log_pipeline": {
+      "def_hash": "1020ca37593bb524a6fd456e8c4a241d30b313aed45a98c4cf83fdbab3d37eea"
+    },
+    "idx_oauth_clients_active": {
+      "def_hash": "fb7988c8823da82ba293af0240e08c4e1dfb9bd682bd803b1e3d4328a8df9882"
+    },
+    "idx_oauth_codes_expires": {
+      "def_hash": "6edf0360f95fb1295b1d478d481b2b82111813ccaff1fdc4e91df53f625e15e2"
+    },
+    "idx_parent_id": {
+      "def_hash": "a653cef404fc5af43ce149140c2d015b1d5d435b2c52b862d6793381fe313b6f"
+    },
+    "idx_pending_open": {
+      "def_hash": "abe1847dc3ea334e9596d2ac85206f2528efcb766f23660f162147e6070af724"
+    },
+    "idx_projects_tenant": {
+      "def_hash": "de3fa6fe9e0e399999d476b61b563b619e2ac8994cf7f72cd95fd84568a0909c"
+    },
+    "idx_recall_runs_ran_at": {
+      "def_hash": "e0904061eb2a2b8642fbbc3698f1569dd7bdc9a1123041f35a373ce3ed76097f"
+    },
+    "idx_recall_runs_stratum": {
+      "def_hash": "94a2092c0370f0b2e2164e44d5e394676f3c0e51d26b92e6bd9f5604efc44dab"
+    },
+    "idx_secrets_scope_name": {
+      "def_hash": "91e61a374ee12ca5eb73fbe50d616fb46f12ada8179d76003371639b1008ba18"
+    },
+    "idx_settings_audit_key": {
+      "def_hash": "70f7310bb22a4e5ba8a89713687e5be49f31437d98411cf9027b362486133f92"
+    },
+    "idx_settings_scope_key": {
+      "def_hash": "508c7a2264192b8ee1417453744844e0cda2cbd70223869a71d1387523d6bde0"
+    },
+    "idx_source_chunks": {
+      "def_hash": "c5d565234ce5f3e10e490c5868517c41f670c7bdcb55c2024d20d141aa8b3bd3"
+    },
+    "idx_source_id": {
+      "def_hash": "e31b4193038f9c50f29aa20c045b73736d310383287113a9a265ec44f6167eab"
+    },
+    "idx_sources_file_hash": {
+      "def_hash": "51cfa463d0d66794566d22e14a93ff5f91fc40042dbb813ecac08290302fdcdf"
+    },
+    "idx_sources_status": {
+      "def_hash": "bdf517bcdc8603d87f7492e45582d43d49c6d48cd4a797efb52fb618f5f4575d"
+    },
+    "idx_sso_states_expires": {
+      "def_hash": "01494b750559114394480856fd2cbb46ffdb72e0b21a9e48fe753bf66016c66e"
+    },
+    "idx_struct_links_graph_fwd": {
+      "def_hash": "e08a377620079331a066e5a1331c78ca449112afad0d804c198a645664c686d0"
+    },
+    "idx_struct_links_graph_rev": {
+      "def_hash": "ef4fe5186c6df6f742e179445e91284ac2e850d84ed8d833823d3a7bbb580e8b"
+    },
+    "idx_struct_links_scope": {
+      "def_hash": "221a5c1d0200dfebd08e0739718cb49ff013a28f8de0c671b45b6fe81daff17e"
+    },
+    "idx_struct_links_scope_created": {
+      "def_hash": "5a80b67e7dfb6fd6297d65fd8467a0da4fcf16c590a81f25c5a7781b52d3f7bd"
+    },
+    "idx_sync_map_conflict": {
+      "def_hash": "ead3550985cfc85e5d7d471840bf12b8adfe9e331452d25c7e962564b3f16af7"
+    },
+    "idx_sync_runs_project": {
+      "def_hash": "1de9371b0379bbc955fa10744c398c82140e4520e7bfc11daede078c97f61384"
+    },
+    "idx_temporal_block_id": {
+      "def_hash": "9f6a31d805cd8b9e5ac994a900baf0e8c3a8a87449e0b1ab021038c350979664"
+    },
+    "idx_temporal_daily": {
+      "def_hash": "b7abcb60d2c04cf7a7d1446d90cfb55f4abad777b09e2ce00655039f458154a3"
+    },
+    "idx_temporal_link": {
+      "def_hash": "2422d0370c4e363891b84a2585576e1e12157a20a409428b584e87d1fe570ece"
+    },
+    "idx_temporal_month": {
+      "def_hash": "316e617c0f52b28e1d71c967cf6a2f665823d896c57e732c758d2315f426cb3d"
+    },
+    "idx_temporal_monthday": {
+      "def_hash": "91117ddbacf40c1b1c88377ae5a87f2cc7e6c9db554d41629be280e4955787d3"
+    },
+    "idx_temporal_quarter": {
+      "def_hash": "f6eeb8744625737da52abb2354f130d07547edd81521c0f748af81d6b621e304"
+    },
+    "idx_temporal_seasonal": {
+      "def_hash": "3a7213aacf105230e39ccc08569aad653041ea722650c098ff484df96d27da4f"
+    },
+    "idx_temporal_source_time": {
+      "def_hash": "dbd7f22b7f5f331a88f70e799b8480c2096625257a0b95515a93c16486c8d2e1"
+    },
+    "idx_temporal_week": {
+      "def_hash": "47be8a4ceb8d2ed1c180ac400980f29868fc6c57871b73c3db755b52e5c28f67"
+    },
+    "idx_temporal_weekday": {
+      "def_hash": "85d7b042ae84a3c707803181fda2522322d0dbaf3aee92d0ec555aae51ab7481"
+    },
+    "idx_temporal_year": {
+      "def_hash": "c9ea9f55d9a8029dc5f8404d3d5a8d7a2c8ca5d982713ce81f92d0cc9a5339f2"
+    },
+    "idx_tenant_grants_grantee": {
+      "def_hash": "31822253839b44dcc859eb3aa557614b342ff11abe490b3e91e8960cff795f4d"
+    },
+    "idx_tenant_scopes_tenant": {
+      "def_hash": "f683d6fc30cc52355592668df73defb45d2ba42c0c19f85cfc4f1105eb0c3917"
+    },
+    "idx_trgm_title": {
+      "def_hash": "c2ff3765d84a4db2a5cfcf5faf6987290ffc2f1fb149fb1773882269d7e94aa8"
+    },
+    "idx_web_sessions_family": {
+      "def_hash": "92437c88975964778b40587f074694d90fd6cf02d2bccfdefbe7bbff11b2b7c8"
+    },
+    "idx_web_sessions_principal": {
+      "def_hash": "988ebeda4c2fe03095c5e05d7db3f12080dfc3148b65748e0fb7fbc2e760c571"
+    },
+    "idx_webhook_done": {
+      "def_hash": "239fb0aa7481f007acfe50f320a4884b30db2892716e6463acd72391a1d0bb67"
+    },
+    "idx_webhook_pending": {
+      "def_hash": "4e84d43586bfab7d2e2e3d0a921a837e59d3bcbaece37feeb71ff818e4728ebb"
+    },
+    "idx_webhook_project_recent": {
+      "def_hash": "48e8a777f96045d7ee34666e3a110135b1d0cbe21225155e8b1efc93985e57b4"
+    },
+    "idx_write_log_block": {
+      "def_hash": "a6aa1367bfb274b81cd54fc09fc76cf4677ebec7de978718ef21797f766005db"
+    },
+    "idx_write_log_created": {
+      "def_hash": "fd6d4081bbfdc405e9af43bbc67dec29ec380e41bdfa4358f219851429884216"
+    },
+    "idx_write_log_decision": {
+      "def_hash": "9e7c8136592042757db56aa1e7ad5581fb03651c45c80ce10be9886fdc4c6f6b"
+    },
+    "idx_write_log_scope": {
+      "def_hash": "1804e1562c902dabe2e1807bd00cfd51dcd34b5aa83482d89aecd68dccb1f62b"
+    },
+    "uq_backends_scope_name": {
+      "def_hash": "381d90961735938a0c39ad754e0cb1dcad5b9d58ab69ad8fd686a8befab06981"
+    },
+    "uq_blobs_category_title_scope": {
+      "def_hash": "c4295d3a63efff0b195d9591619d49ef5795294a1e1ebe8fba42f0799ce48ccb"
+    },
+    "uq_block_grant": {
+      "def_hash": "3b45a62c03db6ab1c687ee6b34477d457f7acdb1d3c3896e3c2b8411d5988bb4"
+    },
+    "uq_block_types_default": {
+      "def_hash": "66441dd0e0c37c6c4a00457444b2dde18c27547773d09faac94bc939b3ff2da6"
+    },
+    "uq_block_types_name_scope": {
+      "def_hash": "11ca7d84500c06a2ebaebfdbc93a1fdd1ce098712e9be3bad9a58c2295e0a9c9"
+    },
+    "uq_context_category_title_scope": {
+      "def_hash": "e9e33e3c080e0e6827b109a512a902c9b0c3e107b095db96360e78fd34856494"
+    },
+    "uq_disable_profiles_scope_name": {
+      "def_hash": "4b9cd6b34bb3bd4afa96eb95b3c99f8c4c70c9c8d72d5425aa3b93f2280562ab"
+    },
+    "uq_graph_cat_hue_scope_cat": {
+      "def_hash": "e80cfb6737f8b7faa3d0f6c8deacf3dc4c8b83544b289e0d9cbd2bdff066fb5a"
+    },
+    "uq_projects_identity": {
+      "def_hash": "a510155665d945fb7cf6d59cc3f4016355a00a2e196e9b913f2fb976f179a0ee"
+    },
+    "uq_projects_scope": {
+      "def_hash": "75b2c75b923f41b98625fc12722378b9e3304174358c3305c983bde5bcf575a8"
+    },
+    "uq_secrets_name_scope": {
+      "def_hash": "60c477b96ea3af0bdfdb2d14088a9e8753c54c411c8d73464c423c108bb122d6"
+    },
+    "uq_settings_key_scope": {
+      "def_hash": "cb18c74af0b8fb49150b346a19ce16f5dc08809049101cb3363c9e670958d491"
+    },
+    "uq_source_chunk": {
+      "def_hash": "38fcbdece267816f170239a3c0003368d9e26be139a79d8b9618790c2516767d"
+    },
+    "uq_sync_map_block": {
+      "def_hash": "68b1e94883cbc5cdb0665fe11ba7fbfef78de91436d6dce1a4d06baf7578400d"
+    },
+    "uq_tenant_grant": {
+      "def_hash": "d78129c0d1d2fed80c2965d95ce5a7a4dd7d89bbe05444726d90134051d3cf26"
+    },
+    "uq_tenant_quota_scope": {
+      "def_hash": "260f4bb2182d06529e69ba697b185ad26f23755dca1421485a38aa947a9cff8e"
+    },
+    "uq_tenants_slug": {
+      "def_hash": "7bb9df31fc7d1767e81435428b9f36dcb35e44a446e8e3f1e55930f24b8f87ca"
+    },
+    "uq_webhook_delivery": {
+      "def_hash": "22b601d8cb6815dfceba6280d47f01cfe02f348f902c3853704a3a591825ecfb"
+    }
+  },
+  "functions": {
+    "audit_backends_write()": {
+      "src_hash": "94350fcfb95a525c83c5d4bf5161e784b540f9c1a6248f45344abd474ec60cda"
+    },
+    "audit_block_type_write()": {
+      "src_hash": "5dcdd6a7f5f256865c13088af70efef727758fb47d97bdb91332a22daa1791de"
+    },
+    "audit_disable_profile_backends_write()": {
+      "src_hash": "da2377cc97b7f92e5a903b5e580c713fb4e5fff12d6ca0efabb89a1d5b1051ac"
+    },
+    "audit_disable_profiles_write()": {
+      "src_hash": "7433f104d3dc77eca0ec9fd753f3bf8206dcf9b659205b2b5c0f7f4d07eac90b"
+    },
+    "audit_graph_category_hues_write()": {
+      "src_hash": "642caf7533f79abd18190506b1b490998a597e776f8f90b952c5a0347e1ee4ba"
+    },
+    "audit_settings_write()": {
+      "src_hash": "5870753fc1fca4c236350687b007a4a5e3718f2b0c24c7ff7ab7c692934c50f1"
+    },
+    "ctx_auth(p_api_key text)": {
+      "src_hash": "a5b51033a10c0016c1e560c15721d218bad483757fc31e49706ce5c660c01d58"
+    },
+    "ctx_auth_by_id(p_api_key_id uuid)": {
+      "src_hash": "4b5add16d06a48cb0783435e48748263c962ed6c33c9f7bb1e7fb270a4deff4e"
+    },
+    "ctx_guard_check(p_block_id uuid, p_threshold_duplicate real, p_threshold_review real, p_candidate_types text[], p_same_scope_only boolean)": {
+      "src_hash": "979a26794c4f6b5d723c9065d848cb1e715987fc6b8778174d974661da727ec7"
+    },
+    "ctx_rrf(p_embedding halfvec, p_query text, p_query_spaced text, p_scopes text[], p_category text, p_tags text[], p_limit integer, p_temporal text, p_query_or text, p_types_visible text[], p_damped_types text[], p_damped_factors double precision[], p_categories_exclude text[], p_types_exclude text[], p_granted_block_ids uuid[], p_semantic_mode text, p_scan_tuples integer, p_exact_cap integer)": {
+      "src_hash": "eb40de236db982a91811283d508693c1d1dca17c66ace2a9037de6cbe6963a0f"
+    },
+    "mark_digest_dirty()": {
+      "src_hash": "f92c2c7b093dcb3c054964c14fcfdbed2000682fad07006078611a1cc546d170"
+    },
+    "mark_guard_dirty()": {
+      "src_hash": "bb49dcca30b0f002ce40fd258d63330f6c62cd3de3d09740520cfb1f15bae09d"
+    },
+    "notify_block_write()": {
+      "src_hash": "3bc9e9099f5bac1083e3a426edd6805396bcef8aa3f8ad53900c4f28cbaf4c0c"
+    },
+    "notify_project_delete()": {
+      "src_hash": "94444f2e3d1184fecb5b61c4d80e17e7f4a80fc9a47bba7845d644339cd96a60"
+    },
+    "notify_project_write()": {
+      "src_hash": "e2dae3477515ce32b4a03006f2270254c0028df8621aec1f9c4acff38e6bb9d2"
+    },
+    "notify_settings_write()": {
+      "src_hash": "d984c5584f21697191fff252eeb731cda69dda554caca4dcb6f31e3485c09884"
+    }
+  },
+  "triggers": {
+    "context_backends.trg_backends_audit": {
+      "def_hash": "fd75674ba3bbb9cb40428f944ccf4b72789f81f0e1bc57ca9907bf821a60d3d2"
+    },
+    "context_backends.trg_backends_notify": {
+      "def_hash": "810f45120e4422e467373302a604c1a5ca56dcc95697a4e8d720a63409bacfb0"
+    },
+    "context_block_types.trg_block_types_audit": {
+      "def_hash": "5e7c5fe98f09746deb550496a2e7220eb6770203a6900584b59d12d354aea7e3"
+    },
+    "context_block_types.trg_block_types_notify": {
+      "def_hash": "bcdb355eb429d68b7c32db9216e0cf4c4e8210aa82bc6cc550b13b0f9591da23"
+    },
+    "context_blocks.trg_block_write": {
+      "def_hash": "87078ebbfc30decd6abebdaca03f3e478ff1b880615144428d477ebd60ac0508"
+    },
+    "context_blocks.trg_digest_dirty": {
+      "def_hash": "57b56a12223d204a3b0f3ca0d35c1164f9a180be8317f250ca6cdba8676823da"
+    },
+    "context_blocks.trg_guard_dirty": {
+      "def_hash": "4f714faebd882cc2f85e93e25c6e5b4fc976a0f7e1aa4dc2483caac9c321560e"
+    },
+    "context_blocks.trg_project_delete": {
+      "def_hash": "39771d9e83571827dc6765024f18ede97903d84b2308a198e79c5427f5c62d26"
+    },
+    "context_blocks.trg_project_write": {
+      "def_hash": "224f35d2e67fae901564896504e2aacf0dd3f9a0ee9d2aa6662e1b4edbe347ca"
+    },
+    "context_disable_profile_backends.trg_disable_profile_backends_audit": {
+      "def_hash": "a1e34fd73353c7aa7ae6b228b3d203c785a63e6f7890af8e7b9310a7c9d56d3c"
+    },
+    "context_disable_profile_backends.trg_disable_profile_backends_notify": {
+      "def_hash": "0772856643640af92c4ea41d3ada8168a8f7bb3832f71bcecb44800f18046113"
+    },
+    "context_disable_profiles.trg_disable_profiles_audit": {
+      "def_hash": "2221ce98886853087d86ab83f1159b050589d9a6c929d529e0920e26a39a9f0e"
+    },
+    "context_disable_profiles.trg_disable_profiles_notify": {
+      "def_hash": "734cf0198fe9d3e4be7f60f2169579533fd8a34746ec52779988e3e057a1c417"
+    },
+    "context_graph_category_hues.trg_graph_category_hues_audit": {
+      "def_hash": "3b8fa57135a109cf1dd6e6677ae6e845e1302320227d2e67ff3c8093e86097c9"
+    },
+    "context_secrets.trg_secrets_audit": {
+      "def_hash": "e2a7cc38641a5f9928702777f76a2d2e2cd15cf0c760f83a2fa2ac57323207a1"
+    },
+    "context_secrets.trg_secrets_notify": {
+      "def_hash": "e92f394054680a455db006e083c02c15f0c6ec3058353a8e284f0726828c58a6"
+    },
+    "context_settings.trg_settings_audit": {
+      "def_hash": "fda8a774c8669e384037ed865d17d38ad80a66c3c35bd5b57e2d75e84856f324"
+    },
+    "context_settings.trg_settings_notify": {
+      "def_hash": "f963c61ba48448d9b12188ff2a9fa3fac3b8514d97663a2e1188204b98317d32"
+    },
+    "context_tenant_quota.trg_tenant_quota_notify": {
+      "def_hash": "ca700af91d2761d07412425be0b9c3b889c3487d8ad77b3f8537e8ee127f38bc"
+    }
+  },
+  "rules": {},
+  "hypertables": [
+    "context_llm_log",
+    "context_pending_writes"
+  ],
+  "guc_probes": [
+    {
+      "name": "hnsw.iterative_scan",
+      "probe_value": "relaxed_order"
+    }
+  ]
+}
