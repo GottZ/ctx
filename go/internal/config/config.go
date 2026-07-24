@@ -102,6 +102,7 @@ type Config struct {
 	Status         StatusConfig
 	EmbedBackfill  EmbedBackfillConfig
 	EmbedMigration EmbedMigrationConfig
+	RecallCheck    RecallCheckConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -795,6 +796,71 @@ type EmbedMigrationConfig struct {
 	// blocks-as-queries, both space vectors exact and wire-free). <=0
 	// disables Stufe 4 (section reports "skipped").
 	VerifyOverlapSamples int `key:"embed_migration.verify_overlap_samples" env:"CTX_EMBED_MIGRATION_VERIFY_OVERLAP_SAMPLES" default:"16" mut:"hot" tenancy:"global-only"`
+}
+
+// RecallCheckConfig is the Achse-01 recall_check surface (design/01 §3.2):
+// the periodic ANN-vs-exact recall measurement on the live corpus. Doctrine
+// "Mechanismus = Code / Policy = Daten": the probe mechanics (two-leg
+// measurement, plan assertion, recall arithmetic, stratification) are code in
+// internal/recall; every tunable (k, N, bounds, budgets, cadence, off-peak
+// anchor, ef, epsilon) lives here. The whole group is laid down in W01-2; the
+// core (internal/recall.RunOnce) consumes k_list/queries_per_stratum/
+// strata_bounds/epsilon/ef_search plus the two leg-budget values, the
+// scheduler keys (enabled/interval/offpeak_hour/park_max_ms/retention_days
+// and the budget ROTATION semantics) are wired in W01-3. global-only: the
+// arm measures a single shared physical resource (the one HNSW index + one
+// shared buffer pool); recall metrics are server-admin-only (§5.3).
+// Deliberately NO parse:"strict" anywhere in this group (the
+// TestRegistryStrictSet pin stays untouched): recall_check is a trend
+// monitor, not a security ceiling — a malformed value falling back to its
+// protective default (E-01-7 spirit: never boot-abort power for the
+// measuring arm) is the right degradation, unlike the dispatch/quota caps.
+type RecallCheckConfig struct {
+	// Enabled is the master gate of the arm (E-01-1: default on — "erst
+	// messen"; a default-off measuring system recreates the GAP-D hole).
+	Enabled bool `key:"recall_check.enabled" env:"CTX_RECALL_CHECK_ENABLED" default:"true" mut:"hot" tenancy:"global-only"`
+	// Interval is the run cadence of the cheap strata (small/medium),
+	// hot-reloaded per iteration (Overview pattern). Seconds.
+	Interval time.Duration `key:"recall_check.interval" env:"CTX_RECALL_CHECK_INTERVAL" default:"86400" mut:"hot" tenancy:"global-only"`
+	// OffpeakHour anchors the expensive strata (large/all) to a local wall-
+	// clock hour (runDailySynthesis pattern); 4 is deliberately offset from
+	// the daily synthesis at 03:00.
+	OffpeakHour int `key:"recall_check.offpeak_hour" env:"CTX_RECALL_CHECK_OFFPEAK_HOUR" default:"4" mut:"hot" tenancy:"global-only"`
+	// KList is the comma-separated measurement k set: 10 = comparability with
+	// the R@10 history, 75 = the productive semantic-CTE window (073 LIMIT 75).
+	KList string `key:"recall_check.k_list" env:"CTX_RECALL_CHECK_K_LIST" default:"10,75" mut:"hot" tenancy:"global-only"`
+	// QueriesPerStratum is the target sample size per stratum (budget may cut).
+	QueriesPerStratum int `key:"recall_check.queries_per_stratum" env:"CTX_RECALL_CHECK_QUERIES" default:"20" mut:"hot" tenancy:"global-only"`
+	// StrataBounds are the class boundaries "b1,b2": small n<=b1 < medium
+	// n<=b2 < large (embedded active blocks per scope). The default is PINNED
+	// to the E-02-1 selector thresholds exact_max=4096 / grey_max=65536
+	// (masterplan K3): the strata boundaries ARE the dispatch thresholds, so
+	// the measurement calibrates the selector's buckets directly.
+	StrataBounds string `key:"recall_check.strata_bounds" env:"CTX_RECALL_CHECK_STRATA_BOUNDS" default:"4096,65536" mut:"hot" tenancy:"global-only"`
+	// ExactBudgetMS caps the sum of all exact legs of one run INCLUDING the
+	// stratification count and the log-sampling scan (§6.2 budget clock).
+	ExactBudgetMS int `key:"recall_check.exact_budget_ms" env:"CTX_RECALL_CHECK_EXACT_BUDGET_MS" default:"300000" mut:"hot" tenancy:"global-only"`
+	// ExactTouchBudgetBytes is the second budget dimension: capped heap+TOAST
+	// read volume of the exact legs per run. 0 = auto (25% of shared_buffers,
+	// resolved at runtime — W01-3 wiring).
+	ExactTouchBudgetBytes int `key:"recall_check.exact_touch_budget_bytes" env:"CTX_RECALL_CHECK_EXACT_TOUCH_BUDGET" default:"0" mut:"hot" tenancy:"global-only"`
+	// LegTimeoutMS is the hard single-leg maximum (statement_timeout cap on
+	// top of the remaining run budget) — one 10M leg must never eat the rest.
+	LegTimeoutMS int `key:"recall_check.leg_timeout_ms" env:"CTX_RECALL_CHECK_LEG_TIMEOUT_MS" default:"60000" mut:"hot" tenancy:"global-only"`
+	// ParkMaxMS bounds the mid-run demand park loop (§4.3, W01-3); beyond it
+	// the run aborts with invalid_reason='demand_deferred'.
+	ParkMaxMS int `key:"recall_check.park_max_ms" env:"CTX_RECALL_CHECK_PARK_MAX_MS" default:"600000" mut:"hot" tenancy:"global-only"`
+	// EfSearch is the ANN-leg hnsw.ef_search; 0 = pgvector default (40).
+	// Non-zero enables live tuning probes without a deploy.
+	EfSearch int `key:"recall_check.ef_search" env:"CTX_RECALL_CHECK_EF_SEARCH" default:"0" mut:"hot" tenancy:"global-only"`
+	// Epsilon is the tie tolerance of the distance-based recall definition
+	// (§4.2.3: hit = dist(a) <= d_ref + epsilon). Default 0; stamped into
+	// meta.epsilon of every row. A config key, not a code constant — the
+	// doctrine "kein Schwellwert hart kodiert" applies to the tie window too.
+	Epsilon float64 `key:"recall_check.epsilon" env:"CTX_RECALL_CHECK_EPSILON" default:"0" mut:"hot" tenancy:"global-only"`
+	// RetentionDays is the janitor delete horizon for context_recall_runs
+	// (§3.3, W01-3 janitor line).
+	RetentionDays int `key:"recall_check.retention_days" env:"CTX_RECALL_CHECK_RETENTION_DAYS" default:"365" mut:"hot" tenancy:"global-only"`
 }
 
 // Source reports the origin of a registry key in this snapshot:

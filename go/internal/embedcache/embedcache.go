@@ -19,6 +19,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 )
@@ -27,10 +28,12 @@ import (
 // entries when inspecting the table, not enough to reconstruct prompts.
 const previewLen = 200
 
-// hashKey derives the cache key from the raw text plus the prefix role.
+// HashKey derives the cache key from the raw text plus the prefix role.
 // Including the prefix prevents query-embeddings from colliding with
-// document-embeddings of the same string.
-func hashKey(prefix embed.Prefix, text string) []byte {
+// document-embeddings of the same string. Exported for the recall_check
+// sampler (internal/recall, design/01 §4.2.2), which joins real logged query
+// texts against this cache without ever computing an embedding itself.
+func HashKey(prefix embed.Prefix, text string) []byte {
 	h := sha256.New()
 	h.Write([]byte{byte(prefix)})
 	h.Write([]byte{0})
@@ -155,6 +158,39 @@ var cacheProbe = func(ctx context.Context, pool *pgxpool.Pool, key []byte, model
 	return cached.Slice(), true
 }
 
+// RowQuerier is the minimal read surface PeekByHash needs — satisfied by
+// *pgxpool.Pool, *pgx.Conn and pgx.Tx alike (recall's probe transactions
+// included).
+type RowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// PeekByHash is the TOUCH-FREE cache read for the recall_check sampler
+// (design/01 §4.2.2): a plain SELECT, deliberately NOT the cacheProbe
+// UPDATE...RETURNING path above. Two reasons the probe must never touch:
+// (a) the recall arm's §5.4 pledge is "the only write of a run is the
+// context_recall_runs insert" — a hit_count/last_access touch would break
+// it; (b) a touch would refresh last_access of every sampled entry on every
+// 24h run, making the sample eviction-immune: the cache composition would
+// drift toward the measurement's own query set (self-reinforcing sample —
+// measurement distorting the measured). Returns (nil, false, nil) on a miss;
+// a non-ErrNoRows failure is surfaced, not swallowed, because the sampler
+// (unlike the hot query path) wants to know when the cache is unreadable.
+func PeekByHash(ctx context.Context, q RowQuerier, hash []byte, model string) ([]float32, bool, error) {
+	var cached pgvector.Vector
+	err := q.QueryRow(ctx,
+		`SELECT embedding FROM context_embed_cache WHERE text_hash = $1 AND model = $2`,
+		hash, model,
+	).Scan(&cached)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("embedcache: peek by hash: %w", err)
+	}
+	return cached.Slice(), true, nil
+}
+
 // EmbedChain is the chained Embed (F3-P3): cache first (keyed on the FIRST
 // backend's resolved model — the chain's preferred model), then wire attempts
 // over the chain with Classify deciding continuation. role resolves the
@@ -192,7 +228,7 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 		return nil, nil, nil, false, fmt.Errorf("embedcache: chain is empty")
 	}
 
-	key := hashKey(prefix, text)
+	key := HashKey(prefix, text)
 	if cached, hit := cacheProbe(ctx, pool, key, chain[0].ModelFor(role).Model); hit {
 		return cached, nil, nil, false, nil
 	}
