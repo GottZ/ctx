@@ -10,7 +10,7 @@
 # Runtime: ~3-5 minutes (Ollama on-prem, sequential queries)
 #
 # ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
-# Evaluates GottZ 4-Way RRF retrieval quality across 35 test queries.
+# Evaluates GottZ 4-Way RRF retrieval quality across 47 test queries.
 # Source: https://github.com/GottZ/ctx
 
 set -uo pipefail

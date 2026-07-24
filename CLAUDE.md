@@ -59,7 +59,7 @@ docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 psql -U "$CONTEXT_DB_U
 ```bash
 bash state.sh                       # Live-Systemzustand
 bash test.sh --with-ollama          # 18 System + Retrieval + MCP Tests
-bash eval.sh                        # 43 Eval Tests (Baseline-Regression)
+bash eval.sh                        # 47 Eval Tests (Baseline-Regression)
 bash eval.sh --update-baseline      # Neue Baseline setzen
 cd go && go test ./... -short       # Go Unit-Tests
 ```
