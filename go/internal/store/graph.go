@@ -30,6 +30,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/graphcache"
 )
 
 // Degree budgets: policy values with a single definition, passed to SQL as
@@ -143,6 +145,11 @@ type EgoResult struct {
 	Edges       []GraphEdge
 	StructEdges []StructGraphEdge
 	Truncated   bool
+	// Budget differentiates Truncated by CAUSE and LAYER (design/05 §4.5,
+	// W05.4). Truncated stays exactly as it was — it is the FE contract; the
+	// report is the additive refinement beside it, never a replacement. Nil is
+	// tolerated by every consumer (a hand-built EgoResult in a unit test).
+	Budget *graphcache.BudgetReport
 }
 
 // hopCandidate is one Q1 row: a visible, filter-passing neighbor with the
@@ -214,6 +221,11 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		frontier = []string{}
 	}
 	truncated := false
+	// budget collects the SAME truncation events Truncated already collapses,
+	// differentiated by cause (§4.5). Source is constant "sql" here: the ego
+	// cache arm is W05.5, so this path is always the SQL arm. Nothing about the
+	// traversal changes — every Add sits beside an existing `truncated = true`.
+	budget := graphcache.NewBudgetReport(graphcache.SourceSQL)
 
 	// Symmetric class short circuits (design/01 §4.6, W4-G4): a non-nil-EMPTY
 	// class filter means "none of this class" — the leg would bind ANY('{}'),
@@ -230,8 +242,12 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		}
 		if len(nodes) >= p.Limit {
 			// Node budget exhausted while an unexpanded frontier remains:
-			// the budget cut the traversal short.
+			// the budget cut the traversal short. LAYER LIMITS, not BUDGETS:
+			// p.Limit is what the CLIENT asked for (API contract, ceiling
+			// enforced in the handler) — a server-side visited guard would be
+			// TravVisitedCapped, and that guard does not exist yet (W05.5+).
 			truncated = true
+			budget.Add(graphcache.TravNodeLimitReached)
 			break
 		}
 		var dreamCands, structCands []hopCandidate
@@ -263,7 +279,10 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 			frontier = append(frontier, added[i].ID)
 		}
 		if hopTruncated {
+			// takeHopMerged had to drop an unvisited candidate: same cause,
+			// same layer as the pre-hop check above (p.Limit).
 			truncated = true
+			budget.Add(graphcache.TravNodeLimitReached)
 			break
 		}
 	}
@@ -280,7 +299,10 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		return nil, err
 	}
 	if edgesTruncated {
+		// Q2 read one row beyond p.EdgeLimit — the client's edge contract is
+		// exhausted (LAYER LIMITS).
 		truncated = true
+		budget.Add(graphcache.TravEdgeLimitReached)
 	}
 
 	edges, structEdges, structRels, origins, structTruncated, err := resolveStructEdges(ctx, pool, ids, index, p, edges)
@@ -288,7 +310,12 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		return nil, err
 	}
 	if structTruncated {
+		// Q2s overflow OR the cross-class arbitration cut (arbitrateEdgeBudget)
+		// — both are p.EdgeLimit exhaustion, so both are the SAME class. The
+		// report counts trips, not dropped rows: a per-cause split here would
+		// buy nothing and a row count would be a quantity oracle (§5.1 Nr. 3b).
 		truncated = true
+		budget.Add(graphcache.TravEdgeLimitReached)
 	}
 
 	if err := fillDegrees(ctx, pool, ids, readScopes, grantedBlockIDs, visibleTypes, nodes); err != nil {
@@ -304,6 +331,7 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		Edges:       edges,
 		StructEdges: structEdges,
 		Truncated:   truncated,
+		Budget:      budget,
 	}, nil
 }
 

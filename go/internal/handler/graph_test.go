@@ -219,7 +219,13 @@ func TestEgoResponse_EnvelopeGolden(t *testing.T) {
 		`],` +
 		`"edges":[[0,1,0,0.830]],` +
 		`"structural_edges":[],` +
-		`"stats":{"nodes":2,"edges":1,"structural_edges":0,"truncated":false,"elapsed_ms":4}` +
+		`"stats":{"nodes":2,"edges":1,"structural_edges":0,"truncated":false,"elapsed_ms":4},` +
+		// W05.4 (design/05 §4.5): budget_report is the LAST key, ADDITIVE after
+		// stats — stats.truncated keeps its exact old meaning, the report
+		// differentiates it by cause/layer. A nil store report (this hand-built
+		// EgoResult) renders as the empty SQL-arm report, so the key is
+		// unconditional: no client has to distinguish absent from empty.
+		`"budget_report":{"limits":[],"budgets":[],"counts":{},"source":"sql","cache_age_ms":0}` +
 		`}`
 
 	if string(got) != want {

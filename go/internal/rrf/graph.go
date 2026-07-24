@@ -36,12 +36,14 @@ package rrf
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"slices"
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/visibility"
 )
 
@@ -176,7 +178,10 @@ func isGrantOnlyVisible(scope string, readScopes []string) bool {
 // The grant-only check is a per-result CONTINUE, orthogonal to the score-sorted
 // floor break (a skipped result does not change later results' scores). No-op in
 // the live pipeline until T40b makes a grant block an RRF result.
-func selectSeeds(results []SearchResult, readScopes []string, cfg GraphConfig) ([]string, map[string]float64, map[string]float64) {
+// rep collects the traversal trips (design/05 §4.5, W05.4) and may be nil —
+// BudgetReport.Add is nil-safe, so the pure-function unit tests keep calling
+// this with no telemetry sink.
+func selectSeeds(results []SearchResult, readScopes []string, cfg GraphConfig, rep *graphcache.BudgetReport) ([]string, map[string]float64, map[string]float64) {
 	topScore := results[0].RRFScore
 	floor := cfg.SeedScoreFloor * topScore
 
@@ -197,6 +202,11 @@ func selectSeeds(results []SearchResult, readScopes []string, cfg GraphConfig) (
 	for i := 0; i < seedCount && i < len(results); i++ {
 		r := results[i]
 		if r.RRFScore < floor {
+			// SILENT UNTIL W05.4: seeds under the floor were simply dropped
+			// with no flag and no telemetry. Now DECLARED — telemetry only,
+			// never wire: retrieval quality is a blend, not a completeness
+			// contract (§4.5 behaviour matrix, query path).
+			rep.Add(graphcache.TravSeedFloorCapped)
 			break // results are sorted desc, so everything after also fails
 		}
 		if isGrantOnlyVisible(r.Scope, readScopes) {
@@ -224,23 +234,42 @@ func selectSeeds(results []SearchResult, readScopes []string, cfg GraphConfig) (
 // FAIL-OPEN: on ANY error (no seeds is NOT an error — it returns results, nil)
 // the ORIGINAL input slice is returned unchanged alongside the error. No panics.
 func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig) ([]SearchResult, error) {
+	out, _, err := GraphExpandWithReport(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, cfg)
+	return out, err
+}
+
+// GraphExpandWithReport is GraphExpand plus the traversal budget report
+// (design/05 §4.5, W05.4). The report is SERVER TELEMETRY: it is logged here
+// and returned for tests/callers that want it — it MUST NOT reach the query
+// wire envelope. Per the §4.5 behaviour matrix the query path is fail-open and
+// its capping classes are a retrieval-quality signal, not a user-facing
+// completeness claim (unlike the ego/UI path, where the report IS wire).
+//
+// The returned slice, error and every branch are byte-identical to GraphExpand
+// before W05.4 — the only additions are Add calls on a telemetry sink and one
+// Debug log.
+func GraphExpandWithReport(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig) ([]SearchResult, *graphcache.BudgetReport, error) {
+	// Source is constant "sql" until the expand cache arm (W05.7).
+	rep := graphcache.NewBudgetReport(graphcache.SourceSQL)
+	defer logExpandBudget(rep)
+
 	if !cfg.Enabled || len(results) == 0 || len(readScopes) == 0 {
-		return results, nil
+		return results, rep, nil
 	}
 	// grantedBlockIDs is nil-coalesced to '{}'::uuid[] inside fetchNeighbors (the
 	// single DB chokepoint) so the deterministic-empty guard lives at one place
 	// and GraphExpand stays under the cyclomatic budget.
 
 	// --- Seed selection -------------------------------------------------------
-	seedIDs, seedRRF, seedReal := selectSeeds(results, readScopes, cfg)
+	seedIDs, seedRRF, seedReal := selectSeeds(results, readScopes, cfg, rep)
 	if len(seedIDs) == 0 {
-		return results, nil // nothing qualifies — not an error
+		return results, rep, nil // nothing qualifies — not an error
 	}
 
 	// --- Hop 1 ----------------------------------------------------------------
 	edges, err := fetchNeighbors(ctx, pool, seedIDs, readScopes, grantedBlockIDs, visibleTypes, cfg, 1.0)
 	if err != nil {
-		return results, fmt.Errorf("rrf: graph expand hop 1: %w", err)
+		return results, rep, fmt.Errorf("rrf: graph expand hop 1: %w", err)
 	}
 	// Stamp each hop-1 edge with its seed's scores. fetchNeighbors is DB-only and
 	// does not know the seed scores; without this stamping seedRRFScore stays 0,
@@ -304,7 +333,7 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 			}
 			hopEdges, herr := fetchNeighbors(ctx, pool, nextSeedIDs, readScopes, grantedBlockIDs, visibleTypes, cfg, decay)
 			if herr != nil {
-				return results, fmt.Errorf("rrf: graph expand hop %d: %w", hop, herr)
+				return results, rep, fmt.Errorf("rrf: graph expand hop %d: %w", hop, herr)
 			}
 			// Rewrite each hop-N edge's seedRRFScore to the originating-seed
 			// derived score carried on the frontier, and drop edges that loop
@@ -329,10 +358,22 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 	}
 
 	if len(edges) == 0 {
-		return results, nil // seeds had no qualifying neighbors — not an error
+		return results, rep, nil // seeds had no qualifying neighbors — not an error
 	}
 
-	return fuseNeighbors(results, edges, cfg), nil
+	return fuseNeighborsReport(results, edges, cfg, rep), rep, nil
+}
+
+// logExpandBudget emits the traversal trips as server telemetry. Debug level:
+// on a hot query path a capped injection is normal operation, not an incident
+// — the point is that the cap is no longer INVISIBLE. The full report is
+// logged (LogValue), pre-recheck classes included: logs are exactly where
+// §4.5 wants the candidate cap to remain visible.
+func logExpandBudget(rep *graphcache.BudgetReport) {
+	if !rep.Tripped() {
+		return
+	}
+	slog.Debug("rrf: graph expand budget trips", "budget", rep)
 }
 
 // fetchNeighbors does ONE batched edge-fetch + ONE batched row-hydrate for the
@@ -498,6 +539,14 @@ type accumulator struct {
 //
 // Results are re-sorted by RRFScore desc before returning.
 func fuseNeighbors(results []SearchResult, edges []graphEdge, cfg GraphConfig) []SearchResult {
+	return fuseNeighborsReport(results, edges, cfg, nil)
+}
+
+// fuseNeighborsReport is fuseNeighbors with a traversal-budget sink (§4.5,
+// W05.4). rep may be nil (Add is nil-safe) — fuseNeighbors is exactly that
+// call, so the pure-fusion unit tests stay untouched and keep acting as the
+// regression anchor for "output byte-identical to before W05.4".
+func fuseNeighborsReport(results []SearchResult, edges []graphEdge, cfg GraphConfig, rep *graphcache.BudgetReport) []SearchResult {
 	if len(results) == 0 || len(edges) == 0 {
 		return results
 	}
@@ -592,6 +641,11 @@ func fuseNeighbors(results []SearchResult, edges []graphEdge, cfg GraphConfig) [
 		return news[i].acc.sample.ID < news[j].acc.sample.ID
 	})
 	if cfg.MaxInjected >= 0 && len(news) > cfg.MaxInjected {
+		// SILENT UNTIL W05.4: the surplus new neighbours were dropped here with
+		// no flag and no telemetry. Now DECLARED — telemetry only (never the
+		// query wire envelope, §4.5 behaviour matrix). The cut itself is
+		// unchanged: same sort, same slice bound.
+		rep.Add(graphcache.TravInjectCapped)
 		news = news[:cfg.MaxInjected]
 	}
 

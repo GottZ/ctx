@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -84,6 +85,13 @@ type egoResponse struct {
 	Edges       []store.GraphEdge       `json:"edges"`
 	StructEdges []store.StructGraphEdge `json:"structural_edges"`
 	Stats       egoStats                `json:"stats"`
+	// BudgetReport (design/05 §4.5, W05.4) differentiates stats.truncated by
+	// CAUSE and LAYER. ADDITIVE like the GA8 structural arrays: stats.truncated
+	// keeps its exact meaning, old clients (and the current SPA) ignore the new
+	// key. The type is the WIRE projection, never the full server report — that
+	// is the structural half of the oracle barrier (graphcache.WireReport drops
+	// every pre-recheck class).
+	BudgetReport graphcache.WireBudgetReport `json:"budget_report"`
 }
 
 // egoParamsEcho echoes the validated parameters. A typed struct (not a map)
@@ -210,6 +218,13 @@ func buildEgoResponse(res *store.EgoResult, p store.EgoParams, rawLinkClass []st
 	if structEdges == nil {
 		structEdges = []store.StructGraphEdge{}
 	}
+	// A nil report (hand-built EgoResult in a unit test) renders as the empty
+	// SQL-arm report, so the envelope key is unconditional: a client never has
+	// to distinguish "field absent" from "nothing tripped".
+	budget := res.Budget
+	if budget == nil {
+		budget = graphcache.NewBudgetReport(graphcache.SourceSQL)
+	}
 	return egoResponse{
 		Success: true,
 		Focus:   res.Focus,
@@ -237,6 +252,7 @@ func buildEgoResponse(res *store.EgoResult, p store.EgoParams, rawLinkClass []st
 			Truncated:       res.Truncated,
 			ElapsedMs:       elapsedMs,
 		},
+		BudgetReport: budget.WireReport(),
 	}
 }
 
