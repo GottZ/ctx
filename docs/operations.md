@@ -155,3 +155,14 @@ The `create` disk pre-flight statfs's the ctx container's own root filesystem (`
 ## Deploy & migrations
 
 `docker compose build ctx` builds the multi-stage Go binary (incl. the embedded Svelte SPA — see [development](development.md)); `docker compose up -d ctx` starts ctx + PostgreSQL. Migrations run at boot in order. Since migration 108 every applied migration is pinned by a sha256 checksum in `_migrations.checksum`; rows from before 108 (and M031+-style self-record rows) are stamped by an idempotent boot backfill. The backfill attests the embedded file *as shipped in the running binary*, not the historic apply — editing an already-applied migration file surfaces as a `migration_integrity` drift once the schema-contract check (Achse 03) lands. Rolling the multi-tenant line out to a running deployment (migrating the production DB from 057 across the 058–068 chain) is a separate operational step; the single-tenant default tenant keeps every path byte-identical until tenants are provisioned — see [multi-tenancy](multi-tenancy.md#self-service-onboarding-v411).
+
+### Migration 116 (link-write NOTIFY): prefer a write-quiet window
+
+Migration 116 installs the graph-cache dirty signal — five triggers plus one function across `context_dream_links`, `context_structural_links` and `context_blocks`. `CREATE`/`DROP TRIGGER` is a **metadata-only** change (milliseconds of actual work once the lock is held), but it takes `ACCESS EXCLUSIVE` on all three tables. Behind a long-running reader or writer — an Ego-graph hop, a dream batch, a bulk import — the migration queues on that lock and every subsequent reader and writer queues behind *it*. At 1M+ blocks that is the difference between an unnoticed boot step and a stalled instance.
+
+Two consequences for the deploy:
+
+- **The file carries `SET LOCAL lock_timeout = '2s'`.** If the lock is not granted within two seconds the migration aborts with SQLSTATE `55P03` (`lock_not_available`) instead of holding the queue open. The migration runner (`internal/store/migrations.go`) has **no** `55P03` retry: the failure propagates and boot fails. That is deliberate — the recovery is the next boot attempt, not a retry loop that keeps re-queuing for the same lock.
+- **The re-run is safe.** Each migration file runs inside its own transaction; on any error the runner rolls that transaction back and does not record the version, so a `55P03` abort leaves the schema exactly as it was — no half-installed trigger set. Simply restarting ctx re-runs 116 from a clean state. Doing that in a write-quiet window (no dream cycle, no forge sync, no bulk import in flight) is what makes the first attempt succeed.
+
+The migration is idempotent beyond that (`CREATE OR REPLACE FUNCTION` + `DROP TRIGGER IF EXISTS`), adds no table and no column, and needs no backfill: the graph cache is derived in-process state whose baseline is the boot rebuild.

@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 115,
-    "migration_count": 114,
+    "migration_max": 116,
+    "migration_count": 115,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -4119,6 +4119,9 @@
     "notify_block_write()": {
       "src_hash": "3bc9e9099f5bac1083e3a426edd6805396bcef8aa3f8ad53900c4f28cbaf4c0c"
     },
+    "notify_link_write()": {
+      "src_hash": "8b27e29afab05b2175ab8d22ad88de901da9e7e8f5038df554c208ed0b8615fd"
+    },
     "notify_project_delete()": {
       "src_hash": "94444f2e3d1184fecb5b61c4d80e17e7f4a80fc9a47bba7845d644339cd96a60"
     },
@@ -4141,6 +4144,9 @@
     },
     "context_block_types.trg_block_types_notify": {
       "def_hash": "bcdb355eb429d68b7c32db9216e0cf4c4e8210aa82bc6cc550b13b0f9591da23"
+    },
+    "context_blocks.trg_block_visattr_write": {
+      "def_hash": "0ef673e7cc61c93db7f694cd51463169caf5ded2bf368a0b19069ff55be551b5"
     },
     "context_blocks.trg_block_write": {
       "def_hash": "87078ebbfc30decd6abebdaca03f3e478ff1b880615144428d477ebd60ac0508"
@@ -4169,6 +4175,12 @@
     "context_disable_profiles.trg_disable_profiles_notify": {
       "def_hash": "734cf0198fe9d3e4be7f60f2169579533fd8a34746ec52779988e3e057a1c417"
     },
+    "context_dream_links.trg_dream_link_truncate": {
+      "def_hash": "bd3568f28bda3135ba260ed6118f6f9f4e0db78a576809fce84c1f2432eb2fda"
+    },
+    "context_dream_links.trg_dream_link_write": {
+      "def_hash": "29d8b95cf9b3a96a121ecf242dd43b85f642a332e7e93529daaad1193965cbbc"
+    },
     "context_graph_category_hues.trg_graph_category_hues_audit": {
       "def_hash": "3b8fa57135a109cf1dd6e6677ae6e845e1302320227d2e67ff3c8093e86097c9"
     },
@@ -4183,6 +4195,12 @@
     },
     "context_settings.trg_settings_notify": {
       "def_hash": "f963c61ba48448d9b12188ff2a9fa3fac3b8514d97663a2e1188204b98317d32"
+    },
+    "context_structural_links.trg_struct_link_truncate": {
+      "def_hash": "74241a5ff09c23ec23bb1da565ebb99af262023307b1a5d996a6edee8b987abe"
+    },
+    "context_structural_links.trg_struct_link_write": {
+      "def_hash": "1e9e54fea2ee5a5fd5c249601df4ffe57bba1752f3e959fc601743246db4df7f"
     },
     "context_tenant_quota.trg_tenant_quota_notify": {
       "def_hash": "ca700af91d2761d07412425be0b9c3b889c3487d8ad77b3f8537e8ee127f38bc"

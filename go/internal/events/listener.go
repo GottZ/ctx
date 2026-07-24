@@ -25,10 +25,11 @@ const (
 	// channelBlockWrite is the PG NOTIFY channel fired by the trg_block_write trigger.
 	channelBlockWrite = "ctx_block_write"
 
-	// channelLinkWrite is the graph-cache dirty signal (design/05 §4.3). The
-	// DB-side triggers on both link tables + the block visibility-attribute flip
-	// arrive with Migration 116 (W05.3); until then this LISTEN is registered but
-	// NEVER fires — the hard rebuild interval + reconnect backlog cover the gap.
+	// channelLinkWrite is the graph-cache dirty signal (design/05 §4.3). Fed since
+	// Migration 116 (W05.3) by the row-level triggers on both link tables, their
+	// statement-level TRUNCATE triggers, and the column-filtered
+	// is_archived/scope flip trigger on context_blocks — every cache-relevant
+	// mutation, and nothing else (a dream_checked_at stamp stays off the wire).
 	channelLinkWrite = "ctx_link_write"
 
 	// channelSettingsWrite is fired by the 051 notify triggers on
@@ -282,8 +283,8 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 
 	handler := &WriteHandler{scheduler: scheduler}
 	listener.Handle(channelBlockWrite, handler)
-	// W05.2: the graph-cache dirty signal. Registered now (LISTEN is harmless
-	// while no NOTIFY fires); Migration 116 (W05.3) wires the DB-side triggers.
+	// The graph-cache dirty signal: registered in W05.2, fed by the Migration 116
+	// triggers since W05.3.
 	listener.Handle(channelLinkWrite, &LinkWriteHandler{scheduler: scheduler})
 	// dispatcher comes from the owning scheduler (SetDispatcher, boot
 	// happens-before Run): the reload owner pushes re-mapped settings/policy

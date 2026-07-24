@@ -3,9 +3,10 @@
 // the hard interval, the Dirty-Age-debounced signal rebuild, and the double-
 // buffer swap. graphcache owns the state automaton + dirty clock (§4.6); this
 // file only decides WHEN to build and drives the lifecycle. The dirty signal
-// itself arrives via the ctx_link_write listener handler (listener.go) — until
-// Migration 116 (W05.3) installs the DB-side NOTIFY triggers that channel never
-// fires, so today the hard interval + reconnect backlog cover invalidation.
+// itself arrives via the ctx_link_write listener handler (listener.go), fed by
+// the Migration 116 (W05.3) triggers on both link tables and on the block
+// visibility attributes; the hard interval + reconnect backlog remain the
+// backstop for NOTIFYs missed during a listener disconnect.
 //
 // Source: https://github.com/GottZ/ctx
 package events
@@ -161,11 +162,9 @@ func classifyGraphBuildErr(err error) string {
 }
 
 // NotifyLinkWrite marks the graph cache dirty (design/05 §4.3). Fired by the
-// ctx_link_write listener handler on every link-table mutation and once per
-// listener reconnect (backlog semantics). Until Migration 116 (W05.3) installs
-// the DB-side NOTIFY triggers the channel never fires, so today only the hard
-// interval + reconnect backlog drive rebuilds. nil-safe (pre-wire tests /
-// disabled cache).
+// ctx_link_write listener handler on every link-table mutation, on every
+// is_archived/scope flip (Migration 116, W05.3) and once per listener reconnect
+// (backlog semantics). nil-safe (pre-wire tests / disabled cache).
 func (s *Scheduler) NotifyLinkWrite() {
 	if s.graphCache == nil {
 		return
