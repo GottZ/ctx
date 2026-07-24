@@ -586,6 +586,12 @@ func (s *Scheduler) Run(ctx context.Context) {
 	pendingWriteTicker := time.NewTicker(pendingWriteEvictInterval)
 	defer pendingWriteTicker.Stop()
 
+	// Achse 04 W04-4: the re-embed migration arm (design/04 §4.3 Takt —
+	// its own ticker case, BACKGROUND class, batch per cycle from hot
+	// config). Inert per cheap catalog probe while no migration is active.
+	embedMigrateTicker := time.NewTicker(embedMigrateInterval)
+	defer embedMigrateTicker.Stop()
+
 	// Dream runs in its own goroutine(s) as continuous loop(s).
 	// DreamParallelism workers all share the same DB; PickBlock's FOR UPDATE
 	// SKIP LOCKED ensures distinct blocks per worker. Backfill stays single-
@@ -651,6 +657,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 		case <-pendingWriteTicker.C:
 			s.runPendingWriteEviction(ctx)
+
+		case <-embedMigrateTicker.C:
+			s.runEmbedMigration(ctx)
 		}
 	}
 }

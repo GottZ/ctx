@@ -80,27 +80,28 @@ type Hours float64
 // generation; consumers take one snapshot per operation and pass values down
 // as parameters.
 type Config struct {
-	Server        ServerConfig
-	Chat          ChatConfig
-	Fallback      FallbackConfig
-	Embed         EmbedConfig
-	Dream         DreamConfig
-	Rerank        RerankConfig
-	Graph         GraphConfig
-	GraphOverview GraphOverviewConfig
-	Query         QueryConfig
-	Scheduler     SchedulerConfig
-	Pool          PoolConfig
-	Events        EventsConfig
-	Project       ProjectConfig
-	LLMLog        LLMLogConfig
-	WebChat       WebChatConfig
-	Writes        WritesConfig
-	Tenant        TenantConfig
-	Dispatch      DispatchConfig
-	Contract      ContractConfig
-	Status        StatusConfig
-	EmbedBackfill EmbedBackfillConfig
+	Server         ServerConfig
+	Chat           ChatConfig
+	Fallback       FallbackConfig
+	Embed          EmbedConfig
+	Dream          DreamConfig
+	Rerank         RerankConfig
+	Graph          GraphConfig
+	GraphOverview  GraphOverviewConfig
+	Query          QueryConfig
+	Scheduler      SchedulerConfig
+	Pool           PoolConfig
+	Events         EventsConfig
+	Project        ProjectConfig
+	LLMLog         LLMLogConfig
+	WebChat        WebChatConfig
+	Writes         WritesConfig
+	Tenant         TenantConfig
+	Dispatch       DispatchConfig
+	Contract       ContractConfig
+	Status         StatusConfig
+	EmbedBackfill  EmbedBackfillConfig
+	EmbedMigration EmbedMigrationConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -742,6 +743,39 @@ type EmbedBackfillConfig struct {
 	// Default 1min base / 24h cap (design/04 §4.4).
 	BackoffBase time.Duration `key:"embed_backfill.backoff_base" env:"CTX_EMBED_BACKFILL_BACKOFF_BASE" default:"60" mut:"hot" tenancy:"global-only"`
 	BackoffCap  time.Duration `key:"embed_backfill.backoff_cap" env:"CTX_EMBED_BACKFILL_BACKOFF_CAP" default:"86400" mut:"hot" tenancy:"global-only"`
+}
+
+// EmbedMigrationConfig is the Achse-04 W04-4 knob surface for the re-embed
+// MIGRATION worker (migrateOneEmbedding, design/04 §4.3/§4.4) — the
+// dual-column sibling of EmbedBackfillConfig above, kept as its own key
+// group because the two arms are tuned independently (a migration may want
+// a larger batch while the regular backfill stays untouched, and vice
+// versa). global-only for the same reason: one shared embed pool, one
+// system-wide migration (idx_embed_migration_single_active).
+type EmbedMigrationConfig struct {
+	// BatchPerCycle bounds how many blocks one scheduler tick migrates
+	// (design §4.3 Takt: BACKGROUND class + per-attempt admission make the
+	// DURATION harmless — this cap bounds how long a single tick can hold
+	// the scheduler loop and how much counter delta a crash can lose).
+	// <=0 disables the arm's per-cycle work entirely (explicit opt-out,
+	// SyncCap convention — a raw &Config{} in a unit test does nothing
+	// rather than silently running an 8er batch against a half-built
+	// fixture).
+	BatchPerCycle int `key:"embed_migration.batch_per_cycle" env:"CTX_EMBED_MIGRATION_BATCH_PER_CYCLE" default:"8" mut:"hot" tenancy:"global-only"`
+	// MaxTokens is the migration worker's pre-wire Oversize-Gate threshold
+	// (design §4.4) — same len/4 estimate, same infinity-park semantics as
+	// embed_backfill.max_tokens, same 24000 default (32k kv-unified pool
+	// minus interactive headroom minus margin; len/4 underestimates
+	// hex-dense content ~2×, the wire-error classification is the net
+	// behind this gate). 0 = pre-check disabled.
+	MaxTokens int `key:"embed_migration.max_tokens" env:"CTX_EMBED_MIGRATION_MAX_TOKENS" default:"24000" mut:"hot" tenancy:"global-only"`
+	// BackoffBase/BackoffCap shape the exponential retry curve for
+	// migration-scoped failure memos (context_embed_failures rows with
+	// migration_id set) — server-side exponent, bare seconds, exactly the
+	// embed_backfill.backoff_* mechanics. Default 1min base / 24h cap
+	// (design §4.4).
+	BackoffBase time.Duration `key:"embed_migration.backoff_base" env:"CTX_EMBED_MIGRATION_BACKOFF_BASE" default:"60" mut:"hot" tenancy:"global-only"`
+	BackoffCap  time.Duration `key:"embed_migration.backoff_cap" env:"CTX_EMBED_MIGRATION_BACKOFF_CAP" default:"86400" mut:"hot" tenancy:"global-only"`
 }
 
 // Source reports the origin of a registry key in this snapshot:

@@ -67,6 +67,21 @@ func TestClassifyEmbedError_StatusErrorOther_Wire(t *testing.T) {
 	}
 }
 
+// W04-4 (Lead-Messung 2026-07-24): oversize is the 400-AND-substring
+// contract — a 5xx that merely ECHOES the token in its body is a transient
+// server condition and must keep the retryable wire class, never the
+// permanent infinity park.
+func TestClassifyEmbedError_NonBadRequestWithMarker_Wire(t *testing.T) {
+	err := fmt.Errorf("embed: %w", &httpx.StatusError{
+		Code: http.StatusInternalServerError,
+		Body: `{"error":"proxy log: upstream said exceed_context_size once"}`,
+	})
+	class, _ := ClassifyEmbedError(err)
+	if class != EmbedFailureWire {
+		t.Errorf("class = %q, want %q (oversize is a 400-only classification)", class, EmbedFailureWire)
+	}
+}
+
 func TestClassifyEmbedError_NonStatusError_Wire(t *testing.T) {
 	class, msg := ClassifyEmbedError(errors.New("connection refused"))
 	if class != EmbedFailureWire {

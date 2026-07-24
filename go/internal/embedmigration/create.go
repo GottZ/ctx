@@ -231,7 +231,7 @@ func validateToBackend(ctx context.Context, q Querier, backendName, toModel stri
 	if err != nil {
 		return fmt.Errorf("embedmigration: create: parse backend %q model_map: %w", backendName, err)
 	}
-	spec, ok := modelMap["embed_next"]
+	spec, ok := modelMap[ModelMapKeyEmbedNext]
 	if !ok || spec.Model != toModel {
 		return ErrBackendMissingEmbedNext
 	}

@@ -126,6 +126,19 @@ func WithRollbackReason(reason string) TransitionOption {
 	}
 }
 
+// WithLastError sets last_error in the same UPDATE as the CAS — the
+// migration worker's fail-closed pause path (design §4.2 Model-Guard:
+// `running → paused` with `last_error = "model guard: resolved <X>,
+// expected <Y>"`). The caller passes an ALREADY normalized message (the
+// column's contract mirrors context_embed_failures.last_error, §3.2a —
+// never raw wire bodies, never embed text).
+func WithLastError(msg string) TransitionOption {
+	return func(o *transitionOpts) {
+		o.cols = append(o.cols, "last_error")
+		o.args = append(o.args, msg)
+	}
+}
+
 // WithVerifyStartedAt sets verify_started_at (the Watermark, §4.7) in the
 // same UPDATE as the running → verifying CAS.
 func WithVerifyStartedAt() TransitionOption {

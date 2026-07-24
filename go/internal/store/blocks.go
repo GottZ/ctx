@@ -388,6 +388,28 @@ func StoreEmbedding(ctx context.Context, q execQuerier, blockID, model string, v
 	return nil
 }
 
+// StoreEmbeddingNext is StoreEmbedding's dual-column sister (Achse 04 W04-4,
+// design/04 §4.3 Store row): the migration worker writes the NEW space into
+// embedding_next/embed_model_next while the serving pair stays byte-identical
+// untouched until the cutover swap (§4.5 option c — zero retrieval
+// degradation during the whole backfill). Same execQuerier signature so the
+// write composes into the worker's pick-holding tx (doctrine c80869c), same
+// fail-closed model=="" rule: an unattributed _next vector would be invisible
+// to the verify gate's embed_model_next check and could cutover silently.
+func StoreEmbeddingNext(ctx context.Context, q execQuerier, blockID, model string, vec []float32) error {
+	if model == "" {
+		return fmt.Errorf("store: store embedding next: model is required (block %s)", blockID)
+	}
+	_, err := q.Exec(ctx,
+		`UPDATE context_blocks SET embedding_next = $2, embed_model_next = $3 WHERE id = $1`,
+		blockID, pgvec.NewVector(vec), model,
+	)
+	if err != nil {
+		return fmt.Errorf("store: store embedding next: %w", err)
+	}
+	return nil
+}
+
 // ClearEmbeddingTx sets BOTH vector pairs (embedding/embed_model AND, since
 // Achse 04 W04-3 / migration 114, embedding_next/embed_model_next) to NULL,
 // and deletes the block's regular-backfill memo row (context_embed_failures,

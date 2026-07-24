@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -31,6 +32,17 @@ const (
 	// structurally cannot succeed without a content change (design/04 §4.4
 	// "infinity-Semantik gilt auch für Pfad A/B").
 	EmbedFailureOversize EmbedFailureClass = "oversize"
+	// EmbedFailureSensitivityIneligible marks a block whose floor-adjusted
+	// sensitivity leaves the migration worker's embed chain EMPTY — no
+	// backend is trusted enough for the block's content (design/04 §4.4/§5
+	// Bruchpfad 3: skip with memo, NEVER escalate across the trust border).
+	// Like oversize it gets next_attempt_at = infinity: the condition is
+	// structural (content sensitivity × backend trust), not transient — a
+	// trust-config change plus operator retry is the only way out, not a
+	// timer. Migration-scoped only in W04-4 (the regular backfill keeps its
+	// memo-free "stays unembedded, retried every cycle" semantics for this
+	// case — a pool outage there must not permanently park blocks).
+	EmbedFailureSensitivityIneligible EmbedFailureClass = "sensitivity_ineligible"
 )
 
 // maxLastErrorLen mirrors migration 113's documented last_error contract:
@@ -66,22 +78,27 @@ func NormalizeEmbedError(class EmbedFailureClass, raw string) string {
 }
 
 // oversizeBodyMarker is the llama.cpp error-type substring a rejected
-// oversize embed carries in its response body (docs/operations.md "Backfill
-// head-of-line caveat" / ctx incident 2026-07-20, rerank sibling). Substring
-// match, not exact-parse: the exact JSON error envelope is not itself
-// load-bearing here, only the presence of this token is.
+// oversize embed carries in its response body. Live-vermessener Vertrag
+// (Lead-Messung 2026-07-24, W04-4): HTTP 400 with JSON body
+// {"error":{"code":400,"message":"request (N tokens) exceeds the available
+// context size (M tokens), …","type":"exceed_context_size_error",…}} — the
+// type string carries the _error SUFFIX. Substring match on the design-doc
+// stem catches both spellings and older server versions; the exact JSON
+// envelope is not itself load-bearing here, only the presence of this token.
 const oversizeBodyMarker = "exceed_context_size"
 
 // ClassifyEmbedError inspects an embed-wire error and returns the memo class
-// plus a normalized (ready-to-store) last_error. An *httpx.StatusError whose
-// body names exceed_context_size classifies as EmbedFailureOversize (the
-// Netz-Klassifikation behind the pre-wire token estimate, design/04 §4.4);
-// every other wire error — including other 4xx/5xx — classifies as
-// EmbedFailureWire.
+// plus a normalized (ready-to-store) last_error. An *httpx.StatusError with
+// HTTP 400 whose body names exceed_context_size classifies as
+// EmbedFailureOversize (the Netz-Klassifikation behind the pre-wire token
+// estimate, design/04 §4.4); every other wire error — including other
+// 4xx/5xx — classifies as EmbedFailureWire. The 400-AND-substring rule is
+// the measured llama.cpp contract (see oversizeBodyMarker): a 5xx that
+// merely ECHOES the token in its body is a transient server condition and
+// must keep the retryable wire class, never the permanent infinity park.
 func ClassifyEmbedError(err error) (EmbedFailureClass, string) {
-	var se *httpx.StatusError
-	if errors.As(err, &se) {
-		if strings.Contains(se.Body, oversizeBodyMarker) {
+	if se, ok := errors.AsType[*httpx.StatusError](err); ok {
+		if se.Code == http.StatusBadRequest && strings.Contains(se.Body, oversizeBodyMarker) {
 			msg := fmt.Sprintf("HTTP %d: %s", se.Code, se.Body)
 			return EmbedFailureOversize, NormalizeEmbedError(EmbedFailureOversize, msg)
 		}
@@ -153,6 +170,82 @@ func RecordEmbedFailure(ctx context.Context, q execQuerier, blockID string, clas
 	}
 	return nil
 }
+
+// isInfinityClass reports the classes whose memo is a permanent park
+// (next_attempt_at = 'infinity') instead of an exponential backoff: oversize
+// (block > slot window — cannot succeed without a content change, design/04
+// §4.4) and sensitivity_ineligible (block sensitivity × backend trust —
+// cannot succeed without a config change, §5 Bruchpfad 3).
+func isInfinityClass(class EmbedFailureClass) bool {
+	return class == EmbedFailureOversize || class == EmbedFailureSensitivityIneligible
+}
+
+// RecordEmbedFailureForMigration is the MIGRATION-scoped sibling of
+// RecordEmbedFailure (design/04 §4.4, W04-4): it upserts the block's memo
+// row under (block_id, migration_id) — the partial-unique index
+// idx_embed_failures_migration from migration 113 — so one block can carry
+// an independent memo per migration AND per regular backfill (migration_id
+// NULL) without the two bookkeeping streams overwriting each other.
+// Same execQuerier doctrine as RecordEmbedFailure: the migration worker
+// passes the SAME tx that holds its FOR UPDATE SKIP LOCKED pick, so the
+// memo commit is atomic with the pick. Same server-side backoff exponent
+// (base * 2^(attempts-1), capped); oversize AND sensitivity_ineligible
+// short-circuit to next_attempt_at='infinity' (permanent park, §4.4).
+func RecordEmbedFailureForMigration(ctx context.Context, q execQuerier, blockID, migrationID string, class EmbedFailureClass, normalizedErr string, backoffBase, backoffCap time.Duration) error {
+	if migrationID == "" {
+		return fmt.Errorf("store: record embed failure (migration): migration id is required (block %s)", blockID)
+	}
+	if isInfinityClass(class) {
+		_, err := q.Exec(ctx,
+			`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
+			 VALUES ($1, $2::uuid, 1, $3, $4, 'infinity')
+			 ON CONFLICT (block_id, migration_id) WHERE migration_id IS NOT NULL
+			 DO UPDATE SET attempts        = context_embed_failures.attempts + 1,
+			               last_error      = EXCLUDED.last_error,
+			               last_class      = EXCLUDED.last_class,
+			               next_attempt_at = 'infinity'`,
+			blockID, migrationID, normalizedErr, string(class),
+		)
+		if err != nil {
+			return fmt.Errorf("store: record embed failure (migration, %s): %w", class, err)
+		}
+		return nil
+	}
+
+	baseSecs := backoffBase.Seconds()
+	capSecs := backoffCap.Seconds()
+	_, err := q.Exec(ctx,
+		`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
+		 VALUES ($1, $2::uuid, 1, $3, $4, now() + make_interval(secs => least($5::float8 * power(2, 0), $6::float8)))
+		 ON CONFLICT (block_id, migration_id) WHERE migration_id IS NOT NULL
+		 DO UPDATE SET attempts        = context_embed_failures.attempts + 1,
+		               last_error      = EXCLUDED.last_error,
+		               last_class      = EXCLUDED.last_class,
+		               next_attempt_at = now() + make_interval(secs =>
+		                   least($5::float8 * power(2, context_embed_failures.attempts), $6::float8))`,
+		blockID, migrationID, normalizedErr, string(class), baseSecs, capSecs,
+	)
+	if err != nil {
+		return fmt.Errorf("store: record embed failure (migration): %w", err)
+	}
+	return nil
+}
+
+// EmbedMigrationFailureExcludedPredicate is the migration-scoped twin of
+// EmbedFailureExcludedPredicate (design/04 §3.3, Migrations-Backfill row):
+// the migration worker's peek/pick AND it in so a block with an outstanding
+// migration-scoped backoff — or a permanently parked infinity memo — is
+// skipped instead of re-picked every cycle. POSITIONAL CONTRACT: the
+// migration id must be the query's $1 (both worker queries put it there);
+// like its sibling it references context_blocks.id, so it composes only
+// into queries whose outer FROM is the bare context_blocks table.
+const EmbedMigrationFailureExcludedPredicate = `
+	AND NOT EXISTS (
+		SELECT 1 FROM context_embed_failures f
+		WHERE f.block_id = context_blocks.id
+		  AND f.migration_id = $1::uuid
+		  AND f.next_attempt_at > now()
+	)`
 
 // EmbedFailureExcludedPredicate is the shared SQL fragment both pending-pick
 // queries (scheduler.go Pfad B, query.go Pfad A) AND-in: a block with an
