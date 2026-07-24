@@ -295,12 +295,22 @@ type execQuerier interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// StoreEmbedding updates the embedding vector for a block. It accepts any
-// execQuerier so callers can run it on the pool or inside their own tx.
-func StoreEmbedding(ctx context.Context, q execQuerier, blockID string, vec []float32) error {
+// StoreEmbedding updates the embedding vector for a block, together with the
+// model that produced it (Achse 04 W04-1: embed_model is the provenance
+// trail the re-embed statemachine builds on — "NULL = no vector" only holds
+// if every write is attributed). It accepts any execQuerier so callers can
+// run it on the pool or inside their own tx.
+//
+// Fail-closed on model=="": a vector without provenance is worse than no
+// vector at all (it would silently re-inherit the DDL default or a stale
+// value) — rejected before the DB round-trip, no partial write.
+func StoreEmbedding(ctx context.Context, q execQuerier, blockID, model string, vec []float32) error {
+	if model == "" {
+		return fmt.Errorf("store: store embedding: model is required (block %s)", blockID)
+	}
 	_, err := q.Exec(ctx,
-		`UPDATE context_blocks SET embedding = $1 WHERE id = $2`,
-		pgvec.NewVector(vec), blockID,
+		`UPDATE context_blocks SET embedding = $2, embed_model = $3 WHERE id = $1`,
+		blockID, pgvec.NewVector(vec), model,
 	)
 	if err != nil {
 		return fmt.Errorf("store: store embedding: %w", err)
@@ -308,11 +318,11 @@ func StoreEmbedding(ctx context.Context, q execQuerier, blockID string, vec []fl
 	return nil
 }
 
-
-// ClearEmbedding sets the embedding to NULL so the scheduler backfill regenerates it.
+// ClearEmbedding sets the embedding (and its now-stale embed_model) to NULL
+// so the scheduler backfill regenerates both together.
 func ClearEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string) error {
 	_, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET embedding = NULL WHERE id = $1`,
+		`UPDATE context_blocks SET embedding = NULL, embed_model = NULL WHERE id = $1`,
 		blockID,
 	)
 	if err != nil {

@@ -67,7 +67,7 @@ func TestStoreEmbeddingTx_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin tx: %v", err)
 		}
-		if err := store.StoreEmbedding(ctx, tx, id, vec); err != nil {
+		if err := store.StoreEmbedding(ctx, tx, id, "test-embed-model", vec); err != nil {
 			_ = tx.Rollback(ctx)
 			t.Fatalf("StoreEmbedding within tx: %v", err)
 		}
@@ -101,7 +101,7 @@ func TestStoreEmbeddingTx_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin tx: %v", err)
 		}
-		if err := store.StoreEmbedding(ctx, tx, id, vec); err != nil {
+		if err := store.StoreEmbedding(ctx, tx, id, "test-embed-model", vec); err != nil {
 			_ = tx.Rollback(ctx)
 			t.Fatalf("StoreEmbedding within tx: %v", err)
 		}

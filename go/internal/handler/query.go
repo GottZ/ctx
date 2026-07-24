@@ -1127,7 +1127,9 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			slog.Warn("query backfill: embed failed", "block_id", blockID, "error", err)
 			break // Embed backend likely unavailable, don't retry.
 		}
-		if err := store.StoreEmbedding(ctx, h.pool, blockID, vec); err != nil {
+		// Model is the ACTUALLY SERVING backend's role model (served, not the
+		// configured/requested one — W04-1 provenance).
+		if err := store.StoreEmbedding(ctx, h.pool, blockID, served.ModelFor(backends.RoleEmbed).Model, vec); err != nil {
 			slog.Warn("query backfill: store failed", "block_id", blockID, "error", err)
 			break
 		}

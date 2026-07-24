@@ -1477,7 +1477,9 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 
 	// StoreEmbedding within tx (execQuerier: pgx.Tx satisfies it too).
 	// Atomic with the FOR UPDATE SKIP LOCKED pick: lock holds until commit.
-	if err := store.StoreEmbedding(ctx, tx, blockID, vec); err != nil {
+	// Model is the ACTUALLY SERVING backend's role model (served, not the
+	// configured/requested one — W04-1 provenance).
+	if err := store.StoreEmbedding(ctx, tx, blockID, served.ModelFor(role).Model, vec); err != nil {
 		return false, fmt.Errorf("backfill: store: %w", err)
 	}
 
