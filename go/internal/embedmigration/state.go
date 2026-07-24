@@ -148,6 +148,20 @@ func WithVerifyStartedAt() TransitionOption {
 	}
 }
 
+// WithVerifyReportCleared nulls verify_report in the same UPDATE as the
+// running → verifying CAS (W04-5): a (re-)entry into verifying invalidates
+// any previous gate result — the verify runner treats "status=verifying AND
+// verify_report IS NULL" as its start condition, so clearing the report
+// atomically with the CAS is what makes the paused→resume→verifying loop
+// re-checkable (§4.7 idempotent re-run) instead of serving a stale verdict
+// from the previous watermark.
+func WithVerifyReportCleared() TransitionOption {
+	return func(o *transitionOpts) {
+		o.cols = append(o.cols, "verify_report")
+		o.args = append(o.args, nil)
+	}
+}
+
 // WithStartedAt sets started_at (pending → running CAS).
 func WithStartedAt() TransitionOption {
 	return func(o *transitionOpts) {

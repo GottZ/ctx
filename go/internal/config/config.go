@@ -776,6 +776,25 @@ type EmbedMigrationConfig struct {
 	// (design §4.4).
 	BackoffBase time.Duration `key:"embed_migration.backoff_base" env:"CTX_EMBED_MIGRATION_BACKOFF_BASE" default:"60" mut:"hot" tenancy:"global-only"`
 	BackoffCap  time.Duration `key:"embed_migration.backoff_cap" env:"CTX_EMBED_MIGRATION_BACKOFF_CAP" default:"86400" mut:"hot" tenancy:"global-only"`
+	// VerifySampleN is the W04-5 verify gate's sampling knob (design/04
+	// §4.7): capacity of the guard-stage cosine-distribution reservoir
+	// (Stufe 5) and cap for the named lists inside verify_report (skip
+	// list). The Stufe-2 integrity checks (dims/norm/model) deliberately run
+	// FULL-coverage inside the folded single-pass scan — the pass already
+	// pays the TOAST detoast of every _next vector for the quality kNN, so
+	// a norm check per row is one fused loop at zero marginal I/O; sampling
+	// there would only re-open the exact defect class the gate exists to
+	// catch. <=0 skips the guard-stage sample (section reports "skipped").
+	VerifySampleN int `key:"embed_migration.verify_sample_n" env:"CTX_EMBED_MIGRATION_VERIFY_SAMPLE_N" default:"1000" mut:"hot" tenancy:"global-only"`
+	// VerifyOverlapK is k for the degraded Stufe-4 quality metric
+	// (Overlap@k old vs. new space, informative — the Achse-01 recall_check
+	// replaces this once it exists, see events.runVerifyQualityStage).
+	VerifyOverlapK int `key:"embed_migration.verify_overlap_k" env:"CTX_EMBED_MIGRATION_VERIFY_OVERLAP_K" default:"10" mut:"hot" tenancy:"global-only"`
+	// VerifyOverlapSamples is the number of sample queries the Overlap@k
+	// stage draws (deterministic md5-ordered draw over migrated blocks —
+	// blocks-as-queries, both space vectors exact and wire-free). <=0
+	// disables Stufe 4 (section reports "skipped").
+	VerifyOverlapSamples int `key:"embed_migration.verify_overlap_samples" env:"CTX_EMBED_MIGRATION_VERIFY_OVERLAP_SAMPLES" default:"16" mut:"hot" tenancy:"global-only"`
 }
 
 // Source reports the origin of a registry key in this snapshot:

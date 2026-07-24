@@ -216,10 +216,60 @@ func (s *Scheduler) runEmbedMigrationCycle(ctx context.Context, router *dream.Ro
 		return nil // explicit opt-out (config doc), arm inert
 	}
 
-	var migrated, failed, skipped int64
-	cursor := mig.CursorCreatedAt
-	dirty := false
-	var cycleErr error
+	// W04-5: kick the verify run when the row sits in verifying WITHOUT a
+	// verdict for the current watermark (§4.7). Fire-and-forget goroutine —
+	// the arm keeps draining below while the gate runs (drain semantics
+	// §4.1); the atomic start guard makes repeated ticks harmless.
+	if mig.Status == embedmigration.StatusVerifying && !mig.HasVerifyReport && mig.VerifyStartedAt != nil {
+		s.maybeStartEmbedVerify(ctx, mig, cfg)
+	}
+
+	b := s.runEmbedMigrationBatch(ctx, router, cfg, mig, batch)
+	cycleErr := b.err
+
+	// Flush the batch delta even when the loop broke on an error — work
+	// that HAPPENED is counted (§6.3: the counters are bookkeeping of past
+	// writes, not a progress promise).
+	if b.dirty || b.migrated+b.failed+b.skipped > 0 {
+		if err := embedmigration.ApplyCycleDelta(ctx, s.pool, mig.ID, b.migrated, b.failed, b.skipped, b.cursor); err != nil {
+			if cycleErr == nil {
+				cycleErr = err
+			} else {
+				slog.Error("scheduler: embed migration delta flush failed after cycle error", "error", err)
+			}
+		}
+	}
+
+	// W04-5 automatic running → verifying (§4.1/§4.7): probe only on a
+	// clean QueueEnd cycle — that is the sole moment the pending set can be
+	// empty, and it keeps the probe off the hot path (early in a 10M
+	// migration every cycle is a full batch, no QueueEnd, no count query;
+	// once drained, the pending set — and with it this count — is small).
+	if cycleErr == nil && mig.Status == embedmigration.StatusRunning && b.sawQueueEnd {
+		if err := s.maybeEnterVerifying(ctx, mig); err != nil {
+			cycleErr = err
+		}
+	}
+	return cycleErr
+}
+
+// migrateBatchState is one cycle's batch bookkeeping (counter deltas, the
+// in-memory cursor high-water, wrap/queue-end signals) — carried out of the
+// loop in one piece so the cycle body stays a readable pipeline.
+type migrateBatchState struct {
+	migrated, failed, skipped int64
+	cursor                    *time.Time
+	dirty                     bool
+	sawQueueEnd               bool
+	err                       error
+}
+
+// runEmbedMigrationBatch runs up to batch migrateOneEmbedding rounds and
+// accumulates their outcomes (§4.3 cursor doctrine: the cursor advances
+// with every pick — success, skip AND failure — and wraps to NULL at queue
+// end; §6.3: deltas land in ONE update, done by the caller).
+func (s *Scheduler) runEmbedMigrationBatch(ctx context.Context, router *dream.Router, cfg *config.Config, mig *embedmigration.Migration, batch int) migrateBatchState {
+	b := migrateBatchState{cursor: mig.CursorCreatedAt}
 
 	for i := 0; i < batch; i++ {
 		// Mid-cycle demand defer (wie Guard/Digest, §4.3): an interactive
@@ -231,35 +281,36 @@ func (s *Scheduler) runEmbedMigrationCycle(ctx context.Context, router *dream.Ro
 			break
 		}
 
-		out, err := s.migrateOneEmbedding(ctx, router, cfg, mig, cursor)
+		out, err := s.migrateOneEmbedding(ctx, router, cfg, mig, b.cursor)
 		if err != nil {
 			if errors.Is(err, errMigrationServedModelMismatch) {
 				s.pauseMigrationModelGuard(ctx, mig, err.Error())
 				break
 			}
-			cycleErr = err
+			b.err = err
 			break
 		}
 
 		advance := func(at time.Time) {
 			c := at
-			cursor = &c
-			dirty = true
+			b.cursor = &c
+			b.dirty = true
 		}
 		switch out.kind {
 		case migrateOutcomeMigrated:
-			migrated++
+			b.migrated++
 			advance(out.pickedAt)
 		case migrateOutcomeSkipped:
-			skipped++
+			b.skipped++
 			advance(out.pickedAt)
 		case migrateOutcomeFailed:
-			failed++
+			b.failed++
 			advance(out.pickedAt)
 		case migrateOutcomeQueueEnd:
-			if cursor != nil {
-				cursor = nil // wrap-around: next pass starts from the top (§4.3)
-				dirty = true
+			b.sawQueueEnd = true
+			if b.cursor != nil {
+				b.cursor = nil // wrap-around: next pass starts from the top (§4.3)
+				b.dirty = true
 			}
 		case migrateOutcomeDeferred:
 			// End the cycle without advancing — a later cycle retries.
@@ -268,20 +319,45 @@ func (s *Scheduler) runEmbedMigrationCycle(ctx context.Context, router *dream.Ro
 			break
 		}
 	}
+	return b
+}
 
-	// Flush the batch delta even when the loop broke on an error — work
-	// that HAPPENED is counted (§6.3: the counters are bookkeeping of past
-	// writes, not a progress promise).
-	if dirty || migrated+failed+skipped > 0 {
-		if err := embedmigration.ApplyCycleDelta(ctx, s.pool, mig.ID, migrated, failed, skipped, cursor); err != nil {
-			if cycleErr == nil {
-				cycleErr = err
-			} else {
-				slog.Error("scheduler: embed migration delta flush failed after cycle error", "error", err)
-			}
-		}
+// maybeEnterVerifying counts the CURRENT pending set (the §4.7 Stufe-1
+// predicate WITHOUT the watermark clause: live blocks that carry an
+// old-space vector, no _next vector, and no infinity memo of this
+// migration) and, at zero, performs the running → verifying CAS with a
+// fresh watermark and a cleared verify_report (§4.7: the watermark scopes
+// every completeness statement of verify AND confirm; clearing the report
+// re-arms the verify runner). Blocks with a FINITE backoff memo still count
+// as pending — only declared skips (infinity) are excepted, so the arm
+// never enters verifying while retryable failures are outstanding. A block
+// created between count and CAS is covered by the watermark scoping: it is
+// younger than verify_started_at, outside the verify scope, and the arm
+// keeps draining it in verifying (§4.1).
+func (s *Scheduler) maybeEnterVerifying(ctx context.Context, mig *embedmigration.Migration) error {
+	var pending int64
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM context_blocks WHERE `+verifyCompletenessWhere(false),
+		mig.ID).Scan(&pending); err != nil {
+		return fmt.Errorf("embed-migrate: verifying-entry pending count: %w", err)
 	}
-	return cycleErr
+	if pending != 0 {
+		return nil
+	}
+	err := embedmigration.Transition(ctx, s.pool, mig.ID,
+		embedmigration.StatusRunning, embedmigration.StatusVerifying,
+		embedmigration.WithVerifyStartedAt(), embedmigration.WithVerifyReportCleared())
+	if errors.Is(err, embedmigration.ErrTransitionRaceLost) {
+		// Operator pause/abort won the race — their transition stands, the
+		// next cycle re-reads the row (§4.1: never a silent double move).
+		slog.Info("scheduler: embed migration verifying-entry lost CAS race", "migration_id", mig.ID)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("embed-migrate: enter verifying: %w", err)
+	}
+	slog.Info("scheduler: embed migration drained — entering verifying", "migration_id", mig.ID)
+	return nil
 }
 
 // migrationModelGuard resolves the RoleEmbed chain at the weakest
@@ -501,37 +577,49 @@ func (s *Scheduler) migrateWireFailure(ctx context.Context, tx pgx.Tx, cfg *conf
 	return migrateResult{kind: migrateOutcomeFailed, pickedAt: pickedAt}, nil
 }
 
+// ensureConcurrentIndexValid is the shared CIC lifecycle helper (design
+// §3.3, reused by the W04-5 verify gate for the HNSW + sister indexes): a
+// VALID index of that name is reused as-is (reused=true — the §4.7
+// idempotent re-run doctrine: an existing valid idx_embedding_next_hnsw is
+// never rebuilt), an INVALID leftover of a crashed/canceled CIC is dropped
+// CONCURRENTLY and rebuilt, a missing index is created via ddl (which MUST
+// be a CREATE INDEX CONCURRENTLY IF NOT EXISTS statement; pool.Exec sends
+// it as a single autocommit statement outside any tx — PG requirement).
+func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl string) (reused bool, err error) {
+	var valid bool
+	err = s.pool.QueryRow(ctx,
+		`SELECT i.indisvalid FROM pg_index i
+		 JOIN pg_class c ON c.oid = i.indexrelid
+		 WHERE c.relname = $1`, name).Scan(&valid)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// fall through to create
+	case err != nil:
+		return false, fmt.Errorf("embed-migrate: index validity probe (%s): %w", name, err)
+	case valid:
+		return true, nil
+	default:
+		slog.Warn("scheduler: embed migration index INVALID — dropping for rebuild", "index", name)
+		if _, err := s.pool.Exec(ctx,
+			`DROP INDEX CONCURRENTLY IF EXISTS `+name); err != nil {
+			return false, fmt.Errorf("embed-migrate: drop invalid index (%s): %w", name, err)
+		}
+	}
+	if _, err := s.pool.Exec(ctx, ddl); err != nil {
+		return false, fmt.Errorf("embed-migrate: create index (%s): %w", name, err)
+	}
+	slog.Info("scheduler: embed migration index ready", "index", name)
+	return false, nil
+}
+
 // ensureMigrationPendingIndex creates the runtime partial index if missing
 // and recovers from an INVALID leftover (design §3.3: a crashed/canceled
 // CIC leaves an INVALID index — detect via pg_index.indisvalid, DROP
 // CONCURRENTLY, rebuild; §5 Bruchpfad 7: the index state is part of the
 // deterministically checkable recovery state, no dedicated recovery code).
 func (s *Scheduler) ensureMigrationPendingIndex(ctx context.Context) error {
-	var valid bool
-	err := s.pool.QueryRow(ctx,
-		`SELECT i.indisvalid FROM pg_index i
-		 JOIN pg_class c ON c.oid = i.indexrelid
-		 WHERE c.relname = $1`, migrationPendingIndexName).Scan(&valid)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		// fall through to create
-	case err != nil:
-		return fmt.Errorf("embed-migrate: index validity probe: %w", err)
-	case valid:
-		return nil
-	default:
-		slog.Warn("scheduler: embed migration pending index INVALID — dropping for rebuild",
-			"index", migrationPendingIndexName)
-		if _, err := s.pool.Exec(ctx,
-			`DROP INDEX CONCURRENTLY IF EXISTS `+migrationPendingIndexName); err != nil {
-			return fmt.Errorf("embed-migrate: drop invalid index: %w", err)
-		}
-	}
-	if _, err := s.pool.Exec(ctx, migrationPendingIndexDDL); err != nil {
-		return fmt.Errorf("embed-migrate: create pending index: %w", err)
-	}
-	slog.Info("scheduler: embed migration pending index ready", "index", migrationPendingIndexName)
-	return nil
+	_, err := s.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL)
+	return err
 }
 
 // dropMigrationPendingIndex removes the runtime index once no migration is

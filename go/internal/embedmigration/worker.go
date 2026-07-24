@@ -23,14 +23,24 @@ const ModelMapKeyEmbedNext = "embed_next"
 
 // Migration is the worker-facing read model of one context_embed_migrations
 // row — only the columns the scheduler arm needs per cycle (status gate,
-// model guard, peek cursor). The full row (counters, verify_report, …)
-// stays SQL-side; W04-7's status surface reads it there.
+// model guard, peek cursor, and since W04-5 the verify trigger pair:
+// watermark + report presence). The full row (counters, the verify_report
+// CONTENT, …) stays SQL-side; W04-7's status surface reads it there.
 type Migration struct {
 	ID              string
 	Status          Status
 	FromModel       string
 	ToModel         string
 	CursorCreatedAt *time.Time
+	// VerifyStartedAt is the §4.7 watermark — set atomically with the
+	// running → verifying CAS (WithVerifyStartedAt). nil outside verifying
+	// (and on legacy rows that never reached it).
+	VerifyStartedAt *time.Time
+	// HasVerifyReport reports verify_report IS NOT NULL. The verify runner's
+	// start condition is "verifying AND !HasVerifyReport" — a present report
+	// (green or red verdict) is final for the current watermark; only a new
+	// running → verifying entry clears it (WithVerifyReportCleared).
+	HasVerifyReport bool
 }
 
 // Active returns the single non-terminal migration row, or nil if none
@@ -41,11 +51,13 @@ func Active(ctx context.Context, q Querier) (*Migration, error) {
 	m := &Migration{}
 	var status string
 	err := q.QueryRow(ctx,
-		`SELECT id::text, status, from_model, to_model, cursor_created_at
+		`SELECT id::text, status, from_model, to_model, cursor_created_at,
+		        verify_started_at, verify_report IS NOT NULL
 		 FROM context_embed_migrations
 		 WHERE status IN ('pending','running','paused','verifying')
 		 LIMIT 1`,
-	).Scan(&m.ID, &status, &m.FromModel, &m.ToModel, &m.CursorCreatedAt)
+	).Scan(&m.ID, &status, &m.FromModel, &m.ToModel, &m.CursorCreatedAt,
+		&m.VerifyStartedAt, &m.HasVerifyReport)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

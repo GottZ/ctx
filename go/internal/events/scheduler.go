@@ -161,6 +161,16 @@ type Scheduler struct {
 	lastDigestNs   atomic.Int64
 	lastOverviewNs atomic.Int64
 
+	// embedVerifyActive is the single-flight guard of the W04-5 re-embed
+	// verify runner: the migration cycle keeps ticking (drain semantics,
+	// design/04 §4.1) while ONE verify goroutine works through the gate —
+	// CAS-set on start, cleared on exit, so repeated verifying-without-
+	// report ticks never stack a second runner. embedVerifySync (tests
+	// only, set before any cycle runs) makes the trigger run the verify
+	// inline for deterministic assertions.
+	embedVerifyActive atomic.Bool
+	embedVerifySync   bool
+
 	// Internal state.
 	mu            sync.Mutex
 	lastWriteAt   time.Time

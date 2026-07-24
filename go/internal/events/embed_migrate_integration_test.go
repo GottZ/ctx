@@ -240,6 +240,10 @@ func TestEmbedMigrate_Integration(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	s := NewScheduler(pool, config.NewStore(&config.Config{}), backends.NewPool(nil, nil), StartupConfig{})
+	// W04-5: the cycle now triggers the verify gate in `verifying` —
+	// synchronous here so every subtest's end state is deterministic
+	// (no background verify goroutine racing the assertions).
+	s.embedVerifySync = true
 
 	// model_guard_pauses_without_embed_next_key is G-Rot (§4.2, §5
 	// Bruchpfad 2): the backend serves the OLD model under "default" and
@@ -338,8 +342,11 @@ func TestEmbedMigrate_Integration(t *testing.T) {
 		if st.Failed != 0 || st.Skipped != 0 {
 			t.Errorf("failed/skipped = %d/%d, want 0/0", st.Failed, st.Skipped)
 		}
-		if st.Status != "running" {
-			t.Errorf("status = %q, want running", st.Status)
+		// W04-5: a fully drained queue auto-transitions running → verifying
+		// at cycle end (watermark-pending 0, §4.1/§4.7) — the verify itself
+		// runs on the NEXT cycle (report still NULL here).
+		if st.Status != "verifying" {
+			t.Errorf("status = %q, want verifying (auto-transition on drained queue, W04-5)", st.Status)
 		}
 		if st.Cursor != nil {
 			t.Errorf("cursor_created_at = %v, want NULL (wrap-around at queue end)", st.Cursor)
@@ -519,7 +526,11 @@ func TestEmbedMigrate_Integration(t *testing.T) {
 
 	// verifying_drains pins the §4.1 drain semantics: the arm keeps
 	// working in 'verifying' (organic writes never stop; a running-only
-	// arm would livelock the confirm).
+	// arm would livelock the confirm). Since W04-5 the same cycle ALSO
+	// runs the verify gate first — and this fixture (a pre-watermark block
+	// still unmigrated) is by definition a red completeness bestand, so the
+	// end state is paused with a red report. The drain pin is the counter:
+	// the block got migrated in the very cycle whose gate went red.
 	t.Run("verifying_drains", func(t *testing.T) {
 		defer resetMigrationFixture(t, pool)
 		migID := seedMigrationRow(t, pool, "verifying")
@@ -538,8 +549,11 @@ func TestEmbedMigrate_Integration(t *testing.T) {
 		if st.Migrated != 1 {
 			t.Errorf("migrated_count = %d, want 1 (arm must drain in verifying)", st.Migrated)
 		}
-		if st.Status != "verifying" {
-			t.Errorf("status = %q, want verifying (drain, not transition)", st.Status)
+		if st.Status != "paused" {
+			t.Errorf("status = %q, want paused (W04-5: the gate saw the pre-watermark rest block → red, never auto-abort)", st.Status)
+		}
+		if st.LastErr == nil || !strings.Contains(*st.LastErr, "verify red") {
+			t.Errorf("last_error = %v, want the verify-red summary", st.LastErr)
 		}
 	})
 
