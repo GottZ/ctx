@@ -76,6 +76,21 @@ func TestActionTier_Classification(t *testing.T) {
 		// to '_global' ∪ own tenant namespace (K-T1).
 		{"type-list", "", tierOpen},
 		{"type-get", "", tierOpen},
+		// embed-migration-* (Evokoa-Clean-Room design/04 §7 W04-7): the re-embed
+		// migration control surface — ALL server-admin (global/scope-free vector
+		// space; block-IDs + infra details in the rich views, §5 Bruchpfad 9/10).
+		// Removing any actionTier entry drops it to the fail-open tierOpen default
+		// → the row turns RED (the S9 probe).
+		{"embed-migration-create", "", tierServerAdmin},
+		{"embed-migration-status", "", tierServerAdmin},
+		{"embed-migration-pause", "", tierServerAdmin},
+		{"embed-migration-resume", "", tierServerAdmin},
+		{"embed-migration-abort", "", tierServerAdmin},
+		{"embed-migration-confirm", "", tierServerAdmin},
+		{"embed-migration-rollback", "", tierServerAdmin},
+		{"embed-migration-cleanup", "", tierServerAdmin},
+		{"embed-migration-purge", "", tierServerAdmin},
+		{"embed-migration-failures", "", tierServerAdmin},
 		// dream/gaming: only the mutating shape is gated; read stays open
 		{"dream-mode", "", tierOpen},
 		{"dream-mode", `{"mode":"off"}`, tierServerAdmin},
@@ -258,6 +273,30 @@ func TestActionTier_DisableProfileFamilyExplicitlyTiered(t *testing.T) {
 	}
 }
 
+// TestActionTier_EmbedMigrationFamilyExplicitlyTiered is the W04-7 S9 fail-open
+// probe (design/04 §7): every embed-migration-* action this wave dispatches MUST
+// be EXPLICITLY classified tierServerAdmin — the vector space is global and
+// scope-free (no per-tenant migration exists), and the rich status view /
+// failures list disclose block-IDs + last_error across ALL scopes (§5 Bruchpfad
+// 9/10). Remove any arm from actionTier and its row here turns RED (entries +
+// dispatch arm land in the SAME commit).
+func TestActionTier_EmbedMigrationFamilyExplicitlyTiered(t *testing.T) {
+	for _, a := range []string{
+		"embed-migration-create", "embed-migration-status", "embed-migration-pause",
+		"embed-migration-resume", "embed-migration-abort", "embed-migration-confirm",
+		"embed-migration-rollback", "embed-migration-cleanup", "embed-migration-purge",
+		"embed-migration-failures",
+	} {
+		tier, explicit := actionTierExplicit(manageRequest{Action: a})
+		if !explicit {
+			t.Errorf("action %q is dispatched but NOT explicitly tiered (fail-open tierOpen default, S9)", a)
+		}
+		if tier != tierServerAdmin {
+			t.Errorf("action %q tier = %d, want tierServerAdmin (global vector space, block-ID disclosure)", a, tier)
+		}
+	}
+}
+
 // Gate tests for Multi-Tenant wave T25 (05-A8): the action-tier cut that turns
 // the binary admin gate (actionRequiresAdmin) into a two-tier classification
 // (server-admin vs tenant-admin, design 05 §4.4). They run DB-less against a nil
@@ -351,6 +390,12 @@ func TestActionTier_TenantAdmin_ServerAdminActions_403(t *testing.T) {
 		{"action": "oauth-provider-delete", "data": map[string]any{"slug": "x"}},
 		{"action": "blocks-audit-status"},
 		{"action": "blocks-classify-status"},
+		// embed-migration-* (W04-7): a tenant-admin must never reach the re-embed
+		// control surface — the vector space is global and the rich views disclose
+		// block-IDs across all scopes (§5 Bruchpfad 9/10). status is the read probe,
+		// create the mutating one — both stay server-admin.
+		{"action": "embed-migration-status"},
+		{"action": "embed-migration-create", "data": map[string]any{"from_model": "a", "to_model": "b", "to_backend": "x"}},
 		{"action": "tenant-list"},
 		{"action": "project-provision", "data": map[string]any{"identity": "manual:x"}},
 		{"action": "tenant-grant-list"},

@@ -58,6 +58,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(apiCmd(getClient))
 	root.AddCommand(initCmd())
 	root.AddCommand(contractCmd(getClient))
+	root.AddCommand(adminCmd(getClient))
 }
 
 // ── query ────────────────────────────────────────────────────────────.

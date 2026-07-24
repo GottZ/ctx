@@ -35,6 +35,22 @@ api_keys=$($DB_CMD -c "SELECT string_agg(label || ' (' || home_scope || ')', ', 
 recall_last=$($DB_CMD -c "SELECT to_char(max(ran_at),'YYYY-MM-DD')||' avg='||coalesce(round(avg(recall_avg)::numeric,3)::text,'n/a') FROM context_recall_runs WHERE valid AND run_group=(SELECT run_group FROM context_recall_runs WHERE valid ORDER BY ran_at DESC LIMIT 1);" 2>/dev/null || echo "n/a")
 recall_last=${recall_last:-n/a}
 
+# Re-Embed-Migration (Achse 04, Mig 114) + geparkte infinity-Mengen BEIDER Pfade
+# (design/04 §4.4/§4.7 W04-7). n/a auf Vor-114-Schemas — der table-missing
+# psql-Fehler wird von 2>/dev/null + || geschluckt, set -e-sicheres Bestands-
+# muster wie die Recall-Zeile darüber. Kein vorgetäuschter Wert: fehlt die
+# Tabelle, bleibt die Zeile schlicht "n/a".
+embed_migration_active=$($DB_CMD -c "SELECT status||' '||from_model||'→'||to_model||' migrated='||migrated_count||'/'||total_blocks||' failed='||failed_count||' skipped='||skipped_count FROM context_embed_migrations WHERE status IN ('pending','running','paused','verifying') LIMIT 1;" 2>/dev/null || echo "n/a")
+embed_migration_active=${embed_migration_active:-none}
+# infinity-Menge migration-scoped (parked oversize/sensitivity der laufenden
+# Migration) — nur sinnvoll bei aktiver Migration, sonst 0.
+embed_inf_migration=$($DB_CMD -c "SELECT count(*) FROM context_embed_failures WHERE migration_id IS NOT NULL AND next_attempt_at='infinity';" 2>/dev/null || echo "n/a")
+embed_inf_migration=${embed_inf_migration:-n/a}
+# infinity-Menge backfill-scoped (Pfad A/B oversize — existiert unabhängig von
+# jeder Migration; §4.4: dauerhaft geparkte Blöcke, Operator-sichtbar statt still).
+embed_inf_backfill=$($DB_CMD -c "SELECT count(*) FROM context_embed_failures WHERE migration_id IS NULL AND next_attempt_at='infinity';" 2>/dev/null || echo "n/a")
+embed_inf_backfill=${embed_inf_backfill:-n/a}
+
 # --- Migrations ---
 migration_count=$(ls "$SCRIPT_DIR"/go/migrations/*.sql 2>/dev/null | wc -l)
 migration_last=$(ls "$SCRIPT_DIR"/go/migrations/*.sql 2>/dev/null | sort | tail -1 | xargs basename 2>/dev/null || echo "none")
@@ -152,6 +168,8 @@ echo "  Categories:         $categories"
 echo "  Blobs:              $blob_count"
 echo "  API Keys:           $api_keys"
 echo "  Recall (last valid):$recall_last"
+echo "  Re-Embed migration: $embed_migration_active"
+echo "  Parked ∞ (mig/bkfl): $embed_inf_migration / $embed_inf_backfill"
 echo ""
 echo "--- Migrations ---"
 echo "  Count:              $migration_count"

@@ -2,11 +2,14 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
@@ -135,6 +138,38 @@ type statusResponse struct {
 	// recall metrics reveal scope existence/size and go tenants nothing, §5.3) and
 	// when no recallRunSource is wired (test fakes).
 	Recall *recallStatus `json:"recall,omitempty"`
+	// EmbedMigration is the server-admin-only Achse-04 re-embed-migration section
+	// (design/04 §5 Bruchpfad 9, W04-7). Pointer + omitempty, the same Profiles/
+	// DB/GraphCache/Recall convention: PRESENT on the server-admin path ONLY when
+	// a migration is active (nil = nothing running → omitted), ABSENT on the
+	// per-tenant path (SnapshotForTenant never sets it — migration status carries
+	// model/backend names + last_error infra details and the vector space is
+	// global/scope-free, §5 Bruchpfad 9). This is the SLIM frame: status/from/to/
+	// counts + arithmetic pending + cursor/verify short-info — NO block-IDs, NO
+	// verify_report content (those live ONLY on the admin-gated manage endpoint,
+	// embed_migration_manage.go).
+	EmbedMigration *embedMigrationStatus `json:"embed_migration,omitempty"`
+}
+
+// embedMigrationStatus is the /api/status re-embed-migration block wire shape
+// (design/04 §7 W04-7, Bruchpfad 9). Deliberately block-ID-free and
+// report-content-free: it names the model/backend involved and the batch-pflegten
+// counters, and derives pending ARITHMETICALLY (§6.3: total − migrated − failed −
+// skipped, never a count(*) on context_blocks). has_verify_report is a bare bool
+// (the report CONTENT — including block-IDs over all scopes — is manage-only).
+type embedMigrationStatus struct {
+	ID              string     `json:"id"`
+	Status          string     `json:"status"`
+	FromModel       string     `json:"from_model"`
+	ToModel         string     `json:"to_model"`
+	TotalBlocks     int64      `json:"total_blocks"`
+	MigratedCount   int64      `json:"migrated_count"`
+	FailedCount     int64      `json:"failed_count"`
+	SkippedCount    int64      `json:"skipped_count"`
+	Pending         int64      `json:"pending"`
+	CursorCreatedAt *time.Time `json:"cursor_created_at"`
+	VerifyStartedAt *time.Time `json:"verify_started_at"`
+	HasVerifyReport bool       `json:"has_verify_report"`
 }
 
 // recallStatus is the /api/status recall_check block wire shape (design/01
@@ -283,6 +318,12 @@ type cheapSnapshot struct {
 	// read + the 7d invalid count, assembled at the tick. nil when no
 	// recallRunSource is wired (test fakes) — no section emitted.
 	recall *recallStatus
+	// embedMigration is the Achse-04 re-embed-migration section (design/04 §7
+	// W04-7): a SINGLE-ROW read over idx_embed_migration_single_active at the
+	// tick, arithmetic pending derived from the row's own counters. nil when no
+	// migration is active (the partial-unique index matches at most one row) —
+	// no section emitted.
+	embedMigration *embedMigrationStatus
 }
 
 // StatusCollector is the process-wide status aggregator (design 04 §3.6, W6).
@@ -653,7 +694,59 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	if src, ok := c.dreams.(recallRunSource); ok {
 		snap.recall = c.buildRecallStatus(ctx, src.LastRecallRun())
 	}
+	// Achse-04 re-embed-migration section (design/04 §7 W04-7): a DB read in
+	// buildCheap — NOT a narrow scheduler interface — because the migration state
+	// lives ENTIRELY in the context_embed_migrations row (unlike recall, whose
+	// process last-run stamp only the scheduler holds, there is no in-memory
+	// embed-migration state for /api/status to read). The read is a single-row
+	// lookup over the partial-unique idx_embed_migration_single_active (at most
+	// one active row) — cheaper than the neighbouring recall strata scan — so it
+	// rides the same tick cadence with no own source. nil (no active migration) =
+	// no section emitted (pointer + omitempty).
+	snap.embedMigration = c.buildEmbedMigrationStatus(ctx)
 	return snap
+}
+
+// embedMigrationPendingIndexGuardMsg is logged when the active-migration read
+// fails; it degrades to no section (never a failed refresh), the read-driven
+// posture the neighbouring cheap sources take.
+const embedMigrationPendingIndexGuardMsg = "status: active embed-migration read failed"
+
+// buildEmbedMigrationStatus reads the single active migration row over
+// idx_embed_migration_single_active and renders the SLIM /api/status frame:
+// status/from/to + the batch-pflegten counters + arithmetic pending (§6.3). NO
+// block-IDs, NO verify_report content — has_verify_report is a bare presence bool
+// (the report CONTENT is manage-only, §5 Bruchpfad 9). Returns nil when no
+// migration is active or the table does not exist yet (pre-114 schema): a
+// migration-less system emits no section, exactly the pointer+omitempty contract.
+func (c *StatusCollector) buildEmbedMigrationStatus(ctx context.Context) *embedMigrationStatus {
+	m := &embedMigrationStatus{}
+	var total, migrated, failed, skipped int64
+	err := c.pool.QueryRow(ctx,
+		`SELECT id::text, status, from_model, to_model,
+		        total_blocks, migrated_count, failed_count, skipped_count,
+		        cursor_created_at, verify_started_at, verify_report IS NOT NULL
+		 FROM context_embed_migrations
+		 WHERE status IN ('pending','running','paused','verifying')
+		 LIMIT 1`,
+	).Scan(&m.ID, &m.Status, &m.FromModel, &m.ToModel,
+		&total, &migrated, &failed, &skipped,
+		&m.CursorCreatedAt, &m.VerifyStartedAt, &m.HasVerifyReport)
+	if err != nil {
+		// pgx.ErrNoRows (no active migration) is the common, silent case; a
+		// missing table (pre-114) or any other error degrades identically to
+		// "no section" with a WARN — never a failed status refresh.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn(embedMigrationPendingIndexGuardMsg, "error", err)
+		}
+		return nil
+	}
+	m.TotalBlocks = total
+	m.MigratedCount = migrated
+	m.FailedCount = failed
+	m.SkippedCount = skipped
+	m.Pending = arithmeticPending(total, migrated, failed, skipped)
+	return m
 }
 
 // recallStrataLimit caps the latest-by-stratum read for the status section:
@@ -829,6 +922,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		// omitted when no recallRunSource is wired). The per-tenant
 		// SnapshotForTenant never calls assemble, so its field stays nil → absent.
 		Recall: cheap.recall,
+		// embed_migration is server-admin-only and PRESENT only while a migration
+		// is active (pointer; nil → omitted otherwise). The per-tenant
+		// SnapshotForTenant never calls assemble, so its field stays nil → absent
+		// (§5 Bruchpfad 9: model/backend names + infra details go tenants nothing).
+		EmbedMigration: cheap.embedMigration,
 	}
 }
 

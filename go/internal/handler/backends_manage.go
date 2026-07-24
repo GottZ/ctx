@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -829,6 +830,13 @@ func probeChat(ctx context.Context, adm dispatch.Admitter, b *backends.Backend, 
 // dispatchBackendAction fans the backend-* actions out (split from
 // HandleManage's switch for cyclomatic budget).
 func (h *ManageHandler) dispatchBackendAction(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+	// embed-migration-* rides this dispatcher (folded into the backend case arm
+	// in HandleManage for the cyclop budget — design/04 §7 W04-7). Re-route the
+	// prefix to its own sub-dispatcher before the backend switch.
+	if strings.HasPrefix(req.Action, "embed-migration-") {
+		h.dispatchEmbedMigrationAction(w, r, ar, req)
+		return
+	}
 	switch req.Action {
 	case "backend-create":
 		h.handleBackendCreate(w, r, ar, req)

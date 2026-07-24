@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -216,6 +217,17 @@ func TestStatusGoldenKeys(t *testing.T) {
 			}},
 			Invalid: 0,
 		},
+		// W04-7 (design/04 §7 / §5 Bruchpfad 9): the embed_migration section is
+		// server-admin PRESENT (this fixture); TestStatusPerTenantView's
+		// server_global_fields_zero_for_tenant subtest pins ABSENT on the tenant
+		// path. SLIM frame — NO block-IDs, NO verify_report content (has_verify_
+		// report is a bare bool; the report itself is manage-only).
+		EmbedMigration: &embedMigrationStatus{
+			ID: "019f0000-0000-7000-8000-000000000001", Status: "running",
+			FromModel: "qwen3-embedding-8b", ToModel: "qwen3-embedding-next",
+			TotalBlocks: 1000, MigratedCount: 400, FailedCount: 3, SkippedCount: 2,
+			Pending: 595, CursorCreatedAt: &next, VerifyStartedAt: nil, HasVerifyReport: false,
+		},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -223,7 +235,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
-		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall",
+		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall", "embed_migration",
 	})
 
 	var top map[string]json.RawMessage
@@ -267,6 +279,23 @@ func TestStatusGoldenKeys(t *testing.T) {
 		"stratum", "scope", "k", "recall_avg", "recall_min", "n_queries",
 		"valid", "age_ms", "scope_changed",
 	})
+
+	// W04-7 (design/04 §7 / §5 Bruchpfad 9): the embed_migration section wire
+	// shape. Deliberately block-ID-free and report-content-free: it names the
+	// model involved + the batch-pflegten counters + arithmetic pending, and a
+	// bare has_verify_report bool (the report CONTENT — block-IDs over all scopes
+	// — is manage-only, embed_migration_manage.go). cursor/verify are null-capable.
+	assertKeys(t, "embed_migration", top["embed_migration"], []string{
+		"id", "status", "from_model", "to_model", "total_blocks", "migrated_count",
+		"failed_count", "skipped_count", "pending", "cursor_created_at",
+		"verify_started_at", "has_verify_report",
+	})
+	// Bruchpfad-9 wire-string pin: the /api/status frame must NEVER carry the
+	// block-ID-bearing report field or a raw block_id (those ride the admin-gated
+	// manage endpoint alone). A refactor that folds the manage view in here fails.
+	if bytes.Contains(b, []byte(`"verify_report"`)) || bytes.Contains(b, []byte(`"block_id"`)) {
+		t.Errorf("/api/status embed_migration leaked a manage-only field (verify_report/block_id): %s", b)
+	}
 
 	// MW12 dispatch section (server-admin) wire pins.
 	assertKeys(t, "dispatch", top["dispatch"], []string{

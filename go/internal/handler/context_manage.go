@@ -186,7 +186,20 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// pattern as oauth-provider-*); tierServerAdmin, S9-pinned.
 		"oauth-identity-link", "oauth-identity-list", "oauth-identity-unlink":
 		h.dispatchMCPClientAction(w, r, authResult, req)
-	case "backend-create", "backend-update", "backend-delete", "backend-list", "backend-test":
+	case "backend-create", "backend-update", "backend-delete", "backend-list", "backend-test",
+		// embed-migration-* (Evokoa-Clean-Room design/04 §7 W04-7): the re-embed
+		// migration control surface — folded into the backend case arm (both are
+		// server-admin embedding/backend operator families) so HandleManage adds NO
+		// new branch (cyclop budget, max-complexity 25, the same folding idiom the
+		// guard/oauth/quota families use). dispatchBackendAction re-routes the
+		// embed-migration-* prefix to dispatchEmbedMigrationAction; the tier
+		// (tierServerAdmin, the global/scope-free vector space + block-ID
+		// disclosure, §5 Bruchpfad 9/10) is decided in actionTier, not here
+		// (routing ⟂ tier), and the EXPLICIT entries are S9-pinned.
+		"embed-migration-create", "embed-migration-status", "embed-migration-pause",
+		"embed-migration-resume", "embed-migration-abort", "embed-migration-confirm",
+		"embed-migration-rollback", "embed-migration-cleanup", "embed-migration-purge",
+		"embed-migration-failures":
 		h.dispatchBackendAction(w, r, authResult, req)
 	case "tenant-quota-get", "tenant-quota-set":
 		h.dispatchQuotaAction(w, r, authResult, req)
@@ -497,6 +510,18 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 		// hard per-block ownership gate IN the handler (design/07 §5.1) — the tier
 		// gate alone (server-global is_admin) is NOT sufficient.
 		"block-grant-create", "block-grant-list", "block-grant-revoke",
+		// embed-migration-* (Evokoa-Clean-Room design/04 §7 W04-7): the re-embed
+		// migration control surface — ALL server-admin. The vector space is global
+		// and scope-free (no per-tenant migration exists conceptually), and the
+		// rich status view / failures list disclose block-IDs and last_error infra
+		// details across ALL scopes (§5 Bruchpfad 9/10). create/confirm/rollback
+		// mutate the whole corpus' embedding space; a tenant-admin must never reach
+		// them. The EXPLICIT entries are mandatory (§5.1 fail-open tierOpen
+		// default); the S9 enumeration gate pins them RED-then-GREEN.
+		"embed-migration-create", "embed-migration-status", "embed-migration-pause",
+		"embed-migration-resume", "embed-migration-abort", "embed-migration-confirm",
+		"embed-migration-rollback", "embed-migration-cleanup", "embed-migration-purge",
+		"embed-migration-failures",
 		// type-create/update/delete (WF T10, design/01 §5.4): editing a type
 		// config SWITCHES block visibility (excluded→full-pass), and tier 1
 		// only has the server-global '_global' namespace — so the mutations
