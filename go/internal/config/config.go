@@ -98,6 +98,7 @@ type Config struct {
 	Writes        WritesConfig
 	Tenant        TenantConfig
 	Dispatch      DispatchConfig
+	Contract      ContractConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -618,6 +619,55 @@ type DispatchConfig struct {
 	// Activation is an operations decision under the aged-preempt waste
 	// metric (E-F5), not a deploy.
 	BackgroundAgingAfter time.Duration `key:"dispatch.background_aging_after" env:"CTX_DISPATCH_BACKGROUND_AGING_AFTER" default:"0" mut:"hot" parse:"strict" tenancy:"global-only"`
+}
+
+// ContractConfig is the schema-contract check surface (Evokoa-Clean-Room
+// design/03 §4.4/§4.5, wave W03-3). Both keys are global-only — the check
+// runs once per process over the one shared schema, there is no per-tenant
+// dimension.
+//
+// Mode carries a DOCUMENTED, DELIBERATE exception to this registry's normal
+// DB>env>default precedence. It is registered here — with ordinary tags —
+// only so contract.mode is a known registry entry (visible/writable through
+// the generic GET/PUT /api/settings surface, counted by
+// TestRegistryCoversEveryField, classified by TestRegistryTenancySet)
+// exactly like every other key. Its OWN merged value is deliberately NEVER
+// read by any enforcement decision: internal/schemacontract.ResolveMode
+// (called from cmd/ctxd's schemaContractBoot and
+// schemacontract.RunCheckSingleFlight) resolves the EFFECTIVE mode
+// independently, straight from os.Getenv(schemacontract.EnvContractMode)
+// and a direct context_settings read, with ENV-DOMINANT precedence (env >
+// DB > default; an "off" row written to the DB is not honored) — the
+// opposite order of this field's own registry-merged value. Consuming
+// cfg.Contract.Mode anywhere for an enforcement decision would silently
+// reinstate the exact DB>env precedence bug §4.4 documents: a DB writer —
+// the very actor migration_integrity distrusts — could then override an
+// operator's env break-glass (CTX_CONTRACT_MODE=off). See
+// internal/schemacontract's package doc and mode.go for the real
+// resolution.
+//
+// RecheckInterval carries NO such exception: cfgStore is genuinely how the
+// periodic re-check ticker (cmd/ctxd's startContractRecheckTicker) learns a
+// hot cadence change, normal DB>env>default precedence applies.
+type ContractConfig struct {
+	// Mode is registry-complete but behaviorally inert — see the type doc
+	// above. Deliberately untyped/unvalidated (plain string, no Validate
+	// entry): schemacontract.ResolveMode already treats any value outside
+	// off|warn|enforce as "unrecognized" and falls through safely, so a
+	// second validation layer here would only duplicate that logic against
+	// a value nothing ever acts on.
+	Mode string `key:"contract.mode" env:"CTX_CONTRACT_MODE" default:"warn" mut:"hot" tenancy:"global-only"`
+	// RecheckInterval (bare seconds) is the periodic re-check cadence
+	// (design/03 §4.5): 0 = off (the ticker keeps polling on its own fixed
+	// cadence so a later hot flip to a positive value is picked up without
+	// a restart, but runs no check while off). Default 60s: Introspect+Diff
+	// are catalog-only and row-count-independent (design/03 §6) — the
+	// cadence buys "drift laut binnen ≤60s am laufenden Prozess" at
+	// millisecond cost per tick. Non-strict like events.tick_interval and
+	// its cadence siblings: a malformed value falls back to the default
+	// instead of aborting boot — a re-check cadence is not a security
+	// ceiling (unlike the dispatch.*/events.max_connections int caps).
+	RecheckInterval time.Duration `key:"contract.recheck_interval" env:"CTX_CONTRACT_RECHECK_INTERVAL" default:"60" mut:"hot" tenancy:"global-only"`
 }
 
 // Source reports the origin of a registry key in this snapshot:

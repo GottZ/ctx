@@ -221,6 +221,16 @@ func main() {
 	cfgStore := config.NewStore(effCfg)
 	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...) //nolint:forbidigo // MT 06 BLIND: boot-time effective-config dump — the _global generation, no tenant exists at boot.
 
+	// Evokoa-Clean-Room Achse 03 (design/03 §4.5, wave W03-3): the
+	// schema-contract check. AFTER settings.Bootstrap — the effective
+	// contract.mode's DB layer must exist for the §4.4 special precedence
+	// to resolve correctly — and BEFORE the overlay/scheduler/router: an
+	// enforce+breaking boot must exit before the process accepts a request
+	// or starts a background arm on a schema it does not trust. Also
+	// starts the periodic re-check ticker (never enforces; stop-semantics
+	// stay boot-exclusive).
+	schemaContractBoot(ctx, pool, cfgStore)
+
 	// MT 06-C3: install the per-tenant config overlay so SnapshotForTenant /
 	// SnapshotForRequest can resolve a tenant's context_settings rows on top of
 	// the _global base (the overlay needs the pool + secret resolver, hence the

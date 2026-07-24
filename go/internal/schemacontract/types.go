@@ -1,16 +1,19 @@
 // Package schemacontract is the Clean-Room schema-contract checker
-// (Evokoa-Clean-Room design/03-contract-observability.md, W03-2). It carries
-// a generated, embedded expectation of the live Postgres schema (Manifest),
-// introspects the real catalog into the same canonical shape (LiveSnapshot),
-// and produces a bidirectional, severity-classed diff (Drift/Report).
+// (Evokoa-Clean-Room design/03-contract-observability.md, W03-2/W03-3). It
+// carries a generated, embedded expectation of the live Postgres schema
+// (Manifest), introspects the real catalog into the same canonical shape
+// (LiveSnapshot), and produces a bidirectional, severity-classed diff
+// (Drift/Report).
 //
-// This package is deliberately aufrufer-los in W03-2: no boot-wiring
-// (W03-3), no API/CLI surface (W03-4), no contract.mode settings key
-// (W03-3). Only the generator (-tags=genmanifest) and this package's own
-// tests call it. Mode/ModeSource on Report exist as fields because the wire
-// shape is pinned by design/03 §4.1 — Check populates them with static
-// placeholders (DefaultMode/DefaultModeSource) until W03-3 wires real
-// settings resolution.
+// Since W03-3 this package owns its own boot-callable surface:
+// RunCheckSingleFlight (Check + the §4.4 env-dominant contract.mode
+// resolution + the process-wide Report holder, CAS single-flight guarded)
+// is what cmd/ctxd's schemaContractBoot and periodic re-check ticker call —
+// this package deliberately stays free of internal/config/internal/settings
+// even so (mode.go reads os.Getenv + context_settings directly), so the
+// enforce/os.Exit DECISION and the boot-time LOUD logging stay in cmd/ctxd,
+// the only place entitled to end the process. No API/CLI surface yet
+// (W03-4).
 package schemacontract
 
 import "time"

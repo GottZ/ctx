@@ -76,12 +76,7 @@ func Check(ctx context.Context, pool *pgxpool.Pool) (Report, error) {
 	}
 	drifts = append(drifts, gucDrifts...)
 
-	sort.Slice(drifts, func(i, j int) bool {
-		if drifts[i].Class != drifts[j].Class {
-			return drifts[i].Class < drifts[j].Class
-		}
-		return drifts[i].Object < drifts[j].Object
-	})
+	sortDrifts(drifts)
 	report.Drifts = drifts
 
 	if len(drifts) == 0 {
@@ -90,6 +85,19 @@ func Check(ctx context.Context, pool *pgxpool.Pool) (Report, error) {
 		report.Status = StatusDrift
 	}
 	return report, nil
+}
+
+// sortDrifts orders a Drift slice deterministically (Class then Object).
+// Shared by Check (the full pipeline) and RunCheckSingleFlight (which
+// appends one more Drift — ClassModeSourceDBOff — onto an already-sorted
+// report and must re-establish the same order, W03-3 recheck.go).
+func sortDrifts(drifts []Drift) {
+	sort.Slice(drifts, func(i, j int) bool {
+		if drifts[i].Class != drifts[j].Class {
+			return drifts[i].Class < drifts[j].Class
+		}
+		return drifts[i].Object < drifts[j].Object
+	})
 }
 
 // migFile is one embedded migration file's identity + content checksum.

@@ -313,6 +313,20 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s must be global-only", k)
 		}
 	}
+	// W03-3 (Evokoa-Clean-Room design/03 §4.4/§4.5): contract.mode joins the
+	// N12-class kill-switch keys — a tenant override would let a
+	// non-server-admin actor silence the process-wide schema-integrity
+	// check. contract.recheck_interval has no such threat model on its own
+	// (it is a cadence, not a switch) but the check itself is process-wide
+	// (one shared schema, no per-tenant dimension), so both stay
+	// global-only. Named here explicitly (not just covered by the
+	// fail-closed default) per the wave brief: a deliberate, visible
+	// registry extension, not a silent gate-loosening.
+	for _, k := range []string{"contract.mode", "contract.recheck_interval"} {
+		if !IsGlobalOnly(k) {
+			t.Errorf("%s must be global-only", k)
+		}
+	}
 }
 
 // TestBuildRegistryRejectsMalformedStructs proves a broken tag is a

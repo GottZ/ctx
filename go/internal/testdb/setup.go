@@ -35,6 +35,22 @@ const defaultImage = "timescale/timescaledb-ha:pg18"
 // (built via `docker compose build` or pre-pulled).
 func SetupTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	pool, _ := SetupTestDBWithDSN(t)
+	return pool
+}
+
+// SetupTestDBWithDSN behaves exactly like SetupTestDB but also returns the
+// container's connection string. Callers that only need the in-process
+// pool (nearly everyone) should keep using SetupTestDB; this variant exists
+// for the rarer case where a test needs to hand the SAME database to a
+// SEPARATE process — e.g. a re-exec'd test binary spawned via exec.Command
+// (the Helper-Process pattern, cmd/ctxd/overviewworker_priority_linux_test.go)
+// — which cannot share this process's *pgxpool.Pool and must build its own
+// from a DSN (Evokoa-Clean-Room design/03 §7 W03-3 Gate 1: the
+// enforce-mode boot-exit probe needs a child process wired to the exact
+// same, already-migrated-and-drift-induced database the parent set up).
+func SetupTestDBWithDSN(t *testing.T) (*pgxpool.Pool, string) {
+	t.Helper()
 
 	image := defaultImage
 	if v := os.Getenv("CTX_TEST_PG_IMAGE"); v != "" {
@@ -100,5 +116,5 @@ func SetupTestDB(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("testdb: backfill migration checksums: %v", err)
 	}
 
-	return pool
+	return pool, dsn
 }
