@@ -273,13 +273,23 @@ func TestT5_SingleSignatureAndIdempotency(t *testing.T) {
 
 	// Idempotency: raw re-execution of the file body (runner skips by
 	// version; the claim is about DROP IF EXISTS / CREATE OR REPLACE /
-	// ON CONFLICT in the body).
-	sqlBytes, err := migrations.FS.ReadFile("073_rrf_policy_params.sql")
-	if err != nil {
-		t.Fatalf("read embedded migration: %v", err)
-	}
-	if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-		t.Fatalf("second run of 073 failed (not idempotent): %v", err)
+	// ON CONFLICT in the body). Since Gen 15 (M112, W02-1) the newest
+	// generation lives in 112: 073's DROP list predates the 18-param
+	// signature, so a raw 073 re-run on a migrated DB resurrects the Gen-14
+	// overload NEXT TO Gen 15. The single-signature pin therefore asserts
+	// after re-applying the current-generation file in chain order — the
+	// state every fresh DB converges on. Sentinel intention unchanged:
+	// each generation file re-executes cleanly, and the chain ends single-
+	// signature (M112 owns its own idempotency double-run in the W02-1 G1
+	// gate, gen15_w021_integration_test.go).
+	for _, file := range []string{"073_rrf_policy_params.sql", "112_rrf_gen15_dual_arm.sql"} {
+		sqlBytes, err := migrations.FS.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read embedded migration %s: %v", file, err)
+		}
+		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+			t.Fatalf("second run of %s failed (not idempotent): %v", file, err)
+		}
 	}
 	if n := countSignatures(); n != 1 {
 		t.Fatalf("ctx_rrf signatures after double-run = %d, want 1", n)
