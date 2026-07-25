@@ -1,7 +1,9 @@
 # pgvector + TimescaleDB on PostgreSQL 18 (Debian trixie)
-# Base: pgvector/pgvector:pg18-trixie (includes pgvector extension)
+# Base: pgvector/pgvector:0.8.5-pg18-trixie (includes pgvector extension)
 # Added: TimescaleDB from packagecloud timescale/timescaledb repo
-FROM pgvector/pgvector:pg18-trixie
+# pgvector fest auf 0.8.5 gepinnt (E-01-4): 0.8.3+ fixt die PG18-Distanz-Regression
+# und die HNSW-Vacuum-Korruption; recall_check (Mig 110) erwartet 0.8.5 als Baseline.
+FROM pgvector/pgvector:0.8.5-pg18-trixie
 
 # Install TimescaleDB from official packagecloud repo (trixie packages for PG18)
 RUN apt-get update \
