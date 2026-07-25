@@ -256,28 +256,41 @@ fi
 #
 # Fallback (KEINE Gate-Abschwächung): solange die installierte CLI älter
 # als W03-4 ist ("contract" unbekannt) oder Transport/Auth fehlschlägt,
-# fällt T07 auf exakt die alte Zähl-Probe zurück (46 Tabellen / 40 Spalten
+# fällt T07 auf exakt die alte Zähl-Probe zurück (50 Tabellen / 41 Spalten
 # context_blocks) — dieselbe Prüfstärke wie vor dieser Welle, nicht
 # schwächer. Das Upgrade auf den generierten Contract greift automatisch,
 # sobald die deployte CLI "contract" kennt — kein Script-Change nötig.
+#
+# ⚠ Die Fallback-Zahlen sind handgepflegt und hängen am Migrations-Stand:
+# 50/41 gilt ab Migration 118 (vorher 46/40, Stand Mig 107). Bei neuen
+# Migrationen mit Tabellen-/Spalten-Änderung müssen sie hier nachgezogen
+# werden — der `ctx contract`-Pfad oben braucht das nicht.
 T="T07 SCHEMA_INTEGRITY"
+
+# Zähl-Fallback-Erwartung, an Migration 118 gebunden (siehe Kommentar oben).
+T07_EXPECT_TABLES=50
+T07_EXPECT_COLUMNS=41
 
 t07_count_fallback() {
   local reason="$1"
   local tc col
   tc=$($DB_CMD -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name NOT LIKE '%_snapshot_%';" 2>/dev/null | tr -d '[:space:]')
   col=$($DB_CMD -c "SELECT count(*) FROM information_schema.columns WHERE table_name='context_blocks';" 2>/dev/null | tr -d '[:space:]')
-  if [[ "$tc" == "46" ]] && [[ "$col" == "40" ]]; then
+  if [[ "$tc" == "$T07_EXPECT_TABLES" ]] && [[ "$col" == "$T07_EXPECT_COLUMNS" ]]; then
     pass "$T (contract-CLI nicht verfügbar — Zähl-Fallback (Prä-Deploy); tables=$tc, columns=$col; $reason)"
   else
-    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected 46 tables + 40 columns, got tables=$tc columns=$col"
+    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 118), got tables=$tc columns=$col"
   fi
 }
 
 # set -e-sicher: der if/else fängt den Exit-Code ab, BEVOR eine Pipe/Zuweisung
 # ihn verschlucken könnte (Projekt-Quirk "EXIT nach Pipe misst die Pipe";
 # dasselbe Muster wie state.sh's Contract-Zeile, W03-5).
-if t07_out=$(ctx contract 2>&1); then
+# CTX_KEY-Override: die CLI zieht ihren Key sonst aus ~/.config/ctx/config
+# (Private-Key) — /api/contract ist admin-gated, das gäbe HTTP 403 → Exit 3 →
+# stiller Abstieg in den Zähl-Fallback. Env schlägt Datei (internal/cli:
+# LoadConfig, ENV > ~/.config/ctx/config); CTX_BASE_URL bleibt aus der Datei.
+if t07_out=$(CTX_KEY="${CTX_ADMIN_KEY:-}" ctx contract 2>&1); then
   t07_rc=0
 else
   t07_rc=$?
@@ -368,9 +381,17 @@ fi
 T="T19 GRAPH_EGO"
 # Focus: the highest-degree non-archived private/shared block (visible to
 # KEY_PRIVATE, guaranteed >= 1 edge so the edge-count assertion is meaningful).
+# Typen mit retrieval-Policy 'excluded' scheiden generisch aus — /api/graph/ego
+# antwortet für sie 404. Kein Hardcode mehr ('system-meta' war die Liste bis
+# M107 den Typ 'checkpoint' einführte, der prompt den Top-Grad-Block stellte):
+# der JOIN liest die Policy aus der Registry. context_block_types ist
+# scope-qualifiziert (name+scope unique); '_global' ist die Basis-Ebene, die
+# jeder Tenant erbt. LEFT JOIN, damit Blöcke ohne Registry-Zeile drinbleiben.
 t19_focus=$($DB_CMD -c "SELECT b.id FROM context_blocks b
   JOIN context_dream_links l ON l.source_block_id = b.id OR l.target_block_id = b.id
-  WHERE NOT b.is_archived AND b.type_name <> 'system-meta' AND b.scope IN ('private','shared')
+  LEFT JOIN context_block_types t ON t.name = b.type_name AND t.scope = '_global'
+  WHERE NOT b.is_archived AND b.scope IN ('private','shared')
+    AND t.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded'
   GROUP BY b.id ORDER BY count(*) DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
 if [[ -z "$t19_focus" ]]; then
   fail "$T" "no linked block found to use as focus"
