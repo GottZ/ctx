@@ -1205,10 +1205,15 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 				msg := store.NormalizeEmbedError(store.EmbedFailureOversize, store.OversizeEstimateMessage(estimated, maxTokens))
 				slog.Warn("query backfill: oversize pre-check — skipped, memoized",
 					"block_id", blockID, "estimated_tokens", estimated, "max_tokens", maxTokens)
-				if ferr := store.RecordEmbedFailure(ctx, h.pool, blockID, store.EmbedFailureOversize, msg,
+				// Same detached-context rule as the wire-failure memo below:
+				// a request can be canceled between the SELECT and this
+				// write, and the oversize memo must not be lost to it.
+				memoCtx, cancelMemo := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				if ferr := store.RecordEmbedFailure(memoCtx, h.pool, blockID, store.EmbedFailureOversize, msg,
 					cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
 					slog.Warn("query backfill: oversize memo write failed", "block_id", blockID, "error", ferr)
 				}
+				cancelMemo()
 				continue
 			}
 		}
@@ -1240,10 +1245,19 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			// and hammering it for the rest of the sync-cap budget within
 			// one request helps nobody.
 			class, normalized := store.ClassifyEmbedError(err)
-			if ferr := store.RecordEmbedFailure(ctx, h.pool, blockID, class, normalized,
+			// The memo write must survive the request context: the wire
+			// failure above IS frequently the request deadline itself
+			// (canceled context), and a memo lost to that same cancellation
+			// re-exposes the block to every later request — the exact loop
+			// this memo exists to break (live incident 2026-07-25:
+			// context_embed_failures stayed empty across hours of failing
+			// queries). Detached context with its own short deadline.
+			memoCtx, cancelMemo := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			if ferr := store.RecordEmbedFailure(memoCtx, h.pool, blockID, class, normalized,
 				cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
 				slog.Warn("query backfill: failure memo write failed", "block_id", blockID, "error", ferr)
 			}
+			cancelMemo()
 			slog.Warn("query backfill: embed failed — memoized", "block_id", blockID, "class", class, "error", err)
 			break // Embed backend likely unavailable, don't retry.
 		}
