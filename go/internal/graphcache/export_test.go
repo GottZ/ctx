@@ -70,3 +70,23 @@ func AssembleUnsortedForTest(u []BlockRowT, d []DreamRowT, s []StructRowT) (*Sna
 
 // CheckOrdering exposes the internal ordering invariant checker.
 func CheckOrdering(s *Snapshot) error { return checkOrdering(s) }
+
+// SupersedesSegmentSizeForTest reports how many directed edges the W05.6 display
+// segment holds per direction. Test-only: production has no accessor for the
+// segment at all, which is exactly what keeps it un-traversable (§3.2 Nr. 3).
+func SupersedesSegmentSizeForTest(s *Snapshot) (fwd, rev int) {
+	return len(s.supersedes.Fwd.Targets), len(s.supersedes.Rev.Targets)
+}
+
+// InducedEdgesMapMembershipForTest runs InducedEdges with the map membership arm
+// — the WINNER of the W05.6 micro-bench and the production choice, named
+// explicitly so the bench compares like for like.
+func InducedEdgesMapMembershipForTest(s *Snapshot, set []uint32) InducedResult {
+	return s.inducedEdgesWith(set, mapMembership(set))
+}
+
+// InducedEdgesSortedMembershipForTest runs the sorted-slice comparison arm, kept
+// permanently so the choice stays re-measurable.
+func InducedEdgesSortedMembershipForTest(s *Snapshot, set []uint32) InducedResult {
+	return s.inducedEdgesWith(set, sortedMembership(set))
+}

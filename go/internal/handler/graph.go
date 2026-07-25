@@ -73,7 +73,9 @@ func (h *GraphHandler) egoCache(cfg *config.Config) store.EgoCache {
 	if !ok || snap == nil {
 		return store.EgoCache{}
 	}
-	return store.EgoCache{Snapshot: snap, Age: age}
+	// DegreeWalkBudget rides the same per-request config snapshot (W05.6,
+	// E-05-3(3)) — a hot change takes effect on the next request, like the flag.
+	return store.EgoCache{Snapshot: snap, Age: age, DegreeWalkBudget: cfg.GraphCache.DegreeWalkBudget}
 }
 
 // Parameter ceilings (out-of-range → 400, never silently clamped).

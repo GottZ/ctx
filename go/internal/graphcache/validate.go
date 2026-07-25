@@ -39,6 +39,7 @@ func (s *Snapshot) Fingerprint() [32]byte {
 	hashStrings(h, s.originNames)
 	hashCSRPair(h, putUint, s.Dream)
 	hashCSRPair(h, putUint, s.Struct)
+	hashCSRPair(h, putUint, s.supersedes) // W05.6 display segment (§3.2 Nr. 3)
 
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
@@ -92,7 +93,13 @@ func hashCSRPair(h hash.Hash, putUint func(uint64), p CSRPair) {
 // against the sorted builder (expects nil) AND the deliberately unsorted seam
 // (expects an error, proving the check is non-vacuous: the Fixture-Gate).
 func checkOrdering(s *Snapshot) error {
-	for name, c := range map[string]CSR{"dream.fwd": s.Dream.Fwd, "dream.rev": s.Dream.Rev} {
+	for name, c := range map[string]CSR{
+		"dream.fwd": s.Dream.Fwd, "dream.rev": s.Dream.Rev,
+		// The display segment is built by the same dream builder and carries the
+		// same ordering contract — it is checked here so a future edit cannot
+		// silently leave it unsorted (§3.2 Nr. 1).
+		"supersedes.fwd": s.supersedes.Fwd, "supersedes.rev": s.supersedes.Rev,
+	} {
 		if err := checkRangeOrder(c, dreamLess, name); err != nil {
 			return err
 		}

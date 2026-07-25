@@ -208,6 +208,12 @@ type EgoCache struct {
 	Snapshot *graphcache.Snapshot
 	// Age is the snapshot's age, reported as BudgetReport.CacheAge.
 	Age time.Duration
+	// DegreeWalkBudget caps the hint-filtered degree walk of the cache Q3 stage
+	// (config graph_cache.degree_walk_budget, E-05-3(3)); 0 = unlimited. It rides
+	// this seam rather than a store constant because it is a hot-reloadable
+	// policy value read from the per-request config snapshot in the handler —
+	// mechanism here, policy there.
+	DegreeWalkBudget int
 }
 
 // errEgoCacheStale is the INTERNAL signal that the cache arm cannot answer this
@@ -245,7 +251,7 @@ func EgoGraphCached(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readSc
 		return sqlArm()
 	}
 	res, err := runEgoTraversal(ctx, pool, p, readScopes, grantedBlockIDs, visibleTypes,
-		newEgoCacheHops(cache.Snapshot, pool, p, readScopes, grantedBlockIDs, visibleTypes),
+		newEgoCacheHops(cache.Snapshot, pool, p, readScopes, grantedBlockIDs, visibleTypes, cache.DegreeWalkBudget),
 		graphcache.SourceCache, cache.Age)
 	if err == nil {
 		return res, nil
@@ -355,22 +361,20 @@ func runEgoTraversal(ctx context.Context, pool *pgxpool.Pool, p EgoParams,
 		index[nodes[i].ID] = i
 	}
 
-	edges, edgesTruncated, err := resolveDreamEdges(ctx, pool, ids, index, p)
+	// Q2/Q2s + Q3 come from the SAME arm that produced the hops (W05.6): SQL on
+	// the classic path, snapshot on the cache path. The budget accounting below
+	// is identical either way — the arm only changes where the rows come from.
+	es, err := hops.edges(ctx, ids, index)
 	if err != nil {
 		return nil, err
 	}
-	if edgesTruncated {
+	if es.DreamTrunc {
 		// Q2 read one row beyond p.EdgeLimit — the client's edge contract is
 		// exhausted (LAYER LIMITS).
 		truncated = true
 		budget.Add(graphcache.TravEdgeLimitReached)
 	}
-
-	edges, structEdges, structRels, origins, structTruncated, err := resolveStructEdges(ctx, pool, ids, index, p, edges)
-	if err != nil {
-		return nil, err
-	}
-	if structTruncated {
+	if es.StructTrunc {
 		// Q2s overflow OR the cross-class arbitration cut (arbitrateEdgeBudget)
 		// — both are p.EdgeLimit exhaustion, so both are the SAME class. The
 		// report counts trips, not dropped rows: a per-cause split here would
@@ -379,18 +383,18 @@ func runEgoTraversal(ctx context.Context, pool *pgxpool.Pool, p EgoParams,
 		budget.Add(graphcache.TravEdgeLimitReached)
 	}
 
-	if err := fillDegrees(ctx, pool, ids, readScopes, grantedBlockIDs, visibleTypes, nodes); err != nil {
+	if err := hops.degrees(ctx, ids, nodes); err != nil {
 		return nil, err
 	}
 
 	return &EgoResult{
 		Focus:       focus.ID,
 		Rels:        GraphRels,
-		StructRels:  structRels,
-		Origins:     origins,
+		StructRels:  es.StructRels,
+		Origins:     es.Origins,
 		Nodes:       nodes,
-		Edges:       edges,
-		StructEdges: structEdges,
+		Edges:       es.Dream,
+		StructEdges: es.Struct,
 		Truncated:   truncated,
 		Budget:      budget,
 	}, nil
@@ -409,12 +413,67 @@ func runEgoTraversal(ctx context.Context, pool *pgxpool.Pool, p EgoParams,
 // THROUGH invisible nodes (the bridge leak). The test-only hint-trusting stub
 // (export_egocache_test.go) violates this DELIBERATELY — it is what makes the
 // two security gates non-vacuous.
+// Since W05.6 the seam also owns the two POST-traversal stages, so an arm is
+// answered by ONE source end to end: hops (Q1/Q1s), induced edges (Q2/Q2s) and
+// degrees (Q3). There is deliberately no mixed form — the cache may serve edges
+// and degrees only for a node set the cache itself walked, because the SQL and
+// snapshot stages read different clocks (a snapshot edge between two live-
+// confirmed nodes is at most MaxStaleness old; mixing the two would make the
+// staleness window unbounded on one half of the answer).
 type egoHopFetcher interface {
 	fetch(ctx context.Context, frontier []string) (dream, structural []hopCandidate, err error)
+	// edges resolves Q2 + Q2s over the DELIVERED node set (ids in response
+	// order, index the id→position map) and applies arbitrateEdgeBudget.
+	edges(ctx context.Context, ids []string, index map[string]int) (egoEdgeSet, error)
+	// degrees fills GraphNode.Degree for the delivered nodes (Q3).
+	degrees(ctx context.Context, ids []string, nodes []GraphNode) error
 }
 
-// egoSQLHops is the classic arm: Q1 + Q1s, one batched query each per hop.
+// egoEdgeSet is the combined Q2/Q2s stage result of one arm — the same shape
+// both arms produce, so runEgoTraversal's budget accounting is arm-independent.
+type egoEdgeSet struct {
+	Dream       []GraphEdge
+	Struct      []StructGraphEdge
+	StructRels  []string // response-local legend of the DELIVERED classes
+	Origins     []string // response-local legend of the DELIVERED origins
+	DreamTrunc  bool     // Q2 hit p.EdgeLimit
+	StructTrunc bool     // Q2s overflow OR the cross-class arbitration cut
+}
+
+// egoSQLEdges is the SQL implementation of the two post-traversal stages,
+// factored out so BOTH the classic arm and the test-only stub arm share exactly
+// one copy (the stub deviates on the HOPS, never on Q2/Q2s/Q3).
+type egoSQLEdges struct {
+	pool            *pgxpool.Pool
+	p               EgoParams
+	readScopes      []string
+	grantedBlockIDs []string
+	visibleTypes    []string
+}
+
+func (e *egoSQLEdges) edges(ctx context.Context, ids []string, index map[string]int) (egoEdgeSet, error) {
+	dream, dreamTrunc, err := resolveDreamEdges(ctx, e.pool, ids, index, e.p)
+	if err != nil {
+		return egoEdgeSet{}, err
+	}
+	dream, structEdges, structRels, origins, structTrunc, err := resolveStructEdges(ctx, e.pool, ids, index, e.p, dream)
+	if err != nil {
+		return egoEdgeSet{}, err
+	}
+	return egoEdgeSet{
+		Dream: dream, Struct: structEdges, StructRels: structRels, Origins: origins,
+		DreamTrunc: dreamTrunc, StructTrunc: structTrunc,
+	}, nil
+}
+
+func (e *egoSQLEdges) degrees(ctx context.Context, ids []string, nodes []GraphNode) error {
+	return fillDegrees(ctx, e.pool, ids, e.readScopes, e.grantedBlockIDs, e.visibleTypes, nodes)
+}
+
+// egoSQLHops is the classic arm: Q1 + Q1s, one batched query each per hop, plus
+// the shared SQL Q2/Q2s/Q3 stages (egoSQLEdges).
 type egoSQLHops struct {
+	egoSQLEdges
 	pool            *pgxpool.Pool
 	p               EgoParams
 	readScopes      []string
@@ -433,6 +492,10 @@ type egoSQLHops struct {
 // newEgoSQLHops builds the SQL arm for an already-normalized EgoParams.
 func newEgoSQLHops(pool *pgxpool.Pool, p EgoParams, readScopes, grantedBlockIDs, visibleTypes []string) *egoSQLHops {
 	return &egoSQLHops{
+		egoSQLEdges: egoSQLEdges{
+			pool: pool, p: p,
+			readScopes: readScopes, grantedBlockIDs: grantedBlockIDs, visibleTypes: visibleTypes,
+		},
 		pool: pool, p: p,
 		readScopes: readScopes, grantedBlockIDs: grantedBlockIDs, visibleTypes: visibleTypes,
 		dreamSkip:  p.LinkClasses != nil && len(traversalClasses(p.LinkClasses)) == 0,

@@ -283,11 +283,25 @@ func assemble(universe []blockRow, dreamRows []dreamEdgeRow, structRows []struct
 
 	stats := BuildStats{Nodes: n}
 
-	// (4) Resolve dream edges to NodeIDs, drop supersedes + dangling.
+	// (4) Resolve dream edges to NodeIDs. supersedes leaves the traversal CSR
+	// (§3.2 Nr. 3) and enters the separate DISPLAY segment instead — Q2 shows it
+	// and Q3 counts it, but no walk may ever reach it. The counter semantics of
+	// SupersedesSkipped are unchanged (edges excluded from the traversal CSR);
+	// SupersedesDisplay counts what made it into the display segment.
 	dreamEdges := make([]dreamEdge, 0, len(dreamRows))
+	supEdges := make([]dreamEdge, 0)
 	for _, r := range dreamRows {
 		if r.rel == supersededRel {
 			stats.SupersedesSkipped++
+			si, sok := idIndex[r.src]
+			di, dok := idIndex[r.dst]
+			if !sok || !dok {
+				continue // dangling: not counted as DreamDangling (pre-W05.6 semantics)
+			}
+			supEdges = append(supEdges, dreamEdge{
+				src: si, dst: di, rel: uint8(relIndex(supersededRel)),
+				conf: ConfToFix(r.conf), rawConf: ConfToFix(r.rawConf),
+			})
 			continue
 		}
 		si, sok := idIndex[r.src]
@@ -309,6 +323,7 @@ func assemble(universe []blockRow, dreamRows []dreamEdgeRow, structRows []struct
 		})
 	}
 	stats.DreamEdges = len(dreamEdges)
+	stats.SupersedesDisplay = len(supEdges)
 
 	// (5) Resolve structural edges to NodeIDs, drop dangling.
 	structEdges := make([]structEdge, 0, len(structRows))
@@ -344,6 +359,13 @@ func assemble(universe []blockRow, dreamRows []dreamEdgeRow, structRows []struct
 		Struct: CSRPair{
 			Fwd: buildStructCSR(structEdges, n, false, sortAdj),
 			Rev: buildStructCSR(structEdges, n, true, sortAdj),
+		},
+		// Display segment (§3.2 Nr. 3): same CSR machinery, own arrays, no
+		// neighbour accessor. Fwd carries Q2 (induced display edges), Rev exists
+		// solely so Q3 counts the reverse dream rows the SQL degree legs count.
+		supersedes: CSRPair{
+			Fwd: buildDreamCSR(supEdges, n, false, sortAdj),
+			Rev: buildDreamCSR(supEdges, n, true, sortAdj),
 		},
 		Stats: stats,
 	}

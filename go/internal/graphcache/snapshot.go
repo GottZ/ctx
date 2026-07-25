@@ -31,6 +31,22 @@ type Snapshot struct {
 	Dream  CSRPair // dream links (topical/factual/causal/recurrent; supersedes excluded)
 	Struct CSRPair // structural links (facts, conf 1.0 by definition)
 
+	// supersedes is the W05.6 DISPLAY segment (§3.2 Nr. 3): the supersedes dream
+	// edges, held in their OWN CSR pair, structurally apart from the traversal
+	// adjacency above. EgoGraph shows supersedes via Q2 (induced, rendered
+	// dashed) and counts it in Q3 (fillDegrees has no relationship filter), so a
+	// cache that dropped it could serve neither stage — but NO traversal may ever
+	// walk it (rrf/graph.go:391/400, M050 partial indexes).
+	//
+	// The separation is STRUCTURAL, not conventional, exactly like the Dream/
+	// Struct split (§3.2 rationale c): the field is UNEXPORTED and there is NO
+	// neighbour accessor for it. DreamNeighbors/StructNeighbors — the only
+	// adjacency entry points any traversal consumer has — cannot reach it, so
+	// "supersedes is never traversed" holds by construction and not by a filter
+	// someone could forget. The two in-package readers are InducedEdges (forward
+	// only: display) and Degree (both directions: row count parity with Q3).
+	supersedes CSRPair
+
 	Stats BuildStats // build diagnostics (§4.6 status block, W05.2 consumer)
 }
 
@@ -64,7 +80,8 @@ type BuildStats struct {
 	StructEdges       int // directed structural edges in the CSR (dangling excluded)
 	DreamDangling     int // dream edges dropped: endpoint missing or rel off-legend
 	StructDangling    int // structural edges dropped: endpoint missing
-	SupersedesSkipped int // supersedes dream edges excluded (§3.2 Nr. 3)
+	SupersedesSkipped int // supersedes dream edges excluded from the traversal CSR (§3.2 Nr. 3)
+	SupersedesDisplay int // supersedes edges in the display segment (≤ Skipped: dangling dropped)
 }
 
 // Direction selects the forward (source→target) or reverse (target→source)
@@ -176,6 +193,11 @@ type DegreeHints struct {
 	AllowType       []bool // indexed by TypeID; nil = all allowed
 	ExcludeArchived bool
 	WalkBudget      int // 0 = unlimited; else stop after N examined edges (§4.1)
+	// HitCap mirrors the SQL hit budget (store.DegreeHitCap): stop counting after
+	// N passing neighbours. 0 = uncapped. Policy lives with the consumer; this is
+	// only the early-exit mechanism, so the cache walk stops exactly where the Q3
+	// outer LIMIT stops and the "200+" display contract is identical.
+	HitCap int
 }
 
 // MakeDegreeHints resolves request-scope read scopes + visible types into the
@@ -203,23 +225,36 @@ func (s *Snapshot) MakeDegreeHints(readScopes, visibleTypes []string, walkBudget
 }
 
 // Degree returns the degree of node n. With hints == nil it is the RAW degree:
-// O(1) from the offset differences across all four directions (dream fwd/rev +
-// struct fwd/rev), summed. The raw degree is a SERVER-INTERNAL number — it must
-// never leave the process (a raw count leaks foreign private links on shared
-// blocks, store/graph.go:823-825).
+// O(1) from the offset differences across all six legs (dream fwd/rev + struct
+// fwd/rev + the supersedes display segment fwd/rev), summed. The raw degree is a
+// SERVER-INTERNAL number — it must never leave the process (a raw count leaks
+// foreign private links on shared blocks, store/graph.go:823-825).
 //
 // With hints set it is the HINT-FILTERED degree: O(degree) RAM reads that keep
 // only neighbours passing the scope/type/archived hints, capped by
-// hints.WalkBudget. The bool return is "capped": true means the walk hit the
-// budget and the returned count is a LOWER BOUND (identical "200+" display
-// contract as fillDegrees' scan budget).
+// hints.WalkBudget (walk budget) and hints.HitCap (hit budget). The bool return
+// is "capped": true means the walk hit the WALK budget and the returned count is
+// a LOWER BOUND (identical "200+" display contract as fillDegrees' scan budget).
+//
+// Counting semantics are the Q3 semantics (store/graph.go fillDegrees, K5): link
+// ROWS per direction per class, NOT distinct neighbours — which is why the same
+// neighbour reached by two edges counts twice, and why the supersedes segment
+// participates (the Q3 legs carry no relationship filter).
+//
+// Declared residual delta vs. the SQL degree (E-05-3(2), the ONE documented
+// exception to the §4.4 rule): (i) stale scope/archived hints count wrongly until
+// the next rebuild, bounded by MaxStaleness since the attribute-flip trigger
+// (§3.1 Nr. 5); (ii) grant-only neighbours are MISSING here — the snapshot holds
+// no grants (§3.2 Nr. 5), so the count is an UNDER-count, the fail-closed
+// direction. Both are declared, neither is a leak.
 func (s *Snapshot) Degree(n uint32, hints *DegreeHints) (int, bool) {
 	if int(n) >= s.NumNodes() {
 		return 0, false
 	}
 	if hints == nil {
 		return rawDegree(s.Dream.Fwd, n) + rawDegree(s.Dream.Rev, n) +
-			rawDegree(s.Struct.Fwd, n) + rawDegree(s.Struct.Rev, n), false
+			rawDegree(s.Struct.Fwd, n) + rawDegree(s.Struct.Rev, n) +
+			rawDegree(s.supersedes.Fwd, n) + rawDegree(s.supersedes.Rev, n), false
 	}
 
 	count := 0
@@ -229,6 +264,9 @@ func (s *Snapshot) Degree(n uint32, hints *DegreeHints) (int, bool) {
 
 	visit := func(targets []uint32) bool {
 		for _, t := range targets {
+			if hints.HitCap > 0 && count >= hints.HitCap {
+				return true // hit budget reached — the count is exact AT the cap
+			}
 			if budget > 0 && examined >= budget {
 				capped = true
 				return true // stop
@@ -241,15 +279,30 @@ func (s *Snapshot) Degree(n uint32, hints *DegreeHints) (int, bool) {
 		return false
 	}
 
-	// Walk all four directions; the far endpoint of each edge is the neighbour
-	// whose hints decide the count.
+	// Walk all six legs; the far endpoint of each edge is the neighbour whose
+	// hints decide the count. The supersedes legs are read through the
+	// unexported field, NOT through a neighbour accessor — no traversal
+	// consumer has a path to them (§3.2 Nr. 3).
 	if visit(s.DreamNeighbors(n, Forward).Targets) ||
 		visit(s.DreamNeighbors(n, Reverse).Targets) ||
 		visit(s.StructNeighbors(n, Forward).Targets) ||
-		visit(s.StructNeighbors(n, Reverse).Targets) {
+		visit(s.StructNeighbors(n, Reverse).Targets) ||
+		visit(csrTargets(s.supersedes.Fwd, n)) ||
+		visit(csrTargets(s.supersedes.Rev, n)) {
 		return count, capped
 	}
 	return count, capped
+}
+
+// csrTargets is the package-internal target slice of node n in an arbitrary CSR.
+// It exists so Degree/InducedEdges can read the supersedes segment WITHOUT that
+// segment gaining an exported neighbour accessor (§3.2 Nr. 3).
+func csrTargets(c CSR, n uint32) []uint32 {
+	lo, hi, ok := edgeRange(c, n)
+	if !ok {
+		return nil
+	}
+	return c.Targets[lo:hi]
 }
 
 // hintAllows applies the scope/type/archived hint predicates to a neighbour.
@@ -295,27 +348,68 @@ type InducedResult struct {
 	Struct []InducedStructEdge
 }
 
-// InducedEdges returns all edges whose BOTH endpoints lie in set — the cache
-// equivalent of Q2/Q2s (store/graph.go:617/714). Membership is SPARSE: a sorted
-// copy of set + binary search, NOT a dense bitset over the full NodeID space.
-// Rationale (§4.1): the set is the response node list (≤1500); a dense
-// [NumNodes]bool would allocate + zero ~1.25 MB @10M PER request for ≤1500
-// members (Zeroing dominating the intersection). Sorted-array membership is one
-// small alloc + O(log m) per probe, GC-friendly and cache-linear. The
-// micro-bench between this and a pooled bitset is deferred to W05.6; the API
-// is stable across that choice.
+// Membership probes for InducedEdges. Both are SPARSE — a dense [NumNodes]bool
+// is ruled out on allocation grounds, not probe cost (§4.1: ~1.25 MB alloc +
+// zeroing @10M per request for ≤1500 members, with the zeroing dominating the
+// intersection work).
 //
-// Only forward adjacency is walked (each directed edge appears once). supersedes
-// is absent (excluded from the dream CSR) — the display segment is W05.6.
-func (s *Snapshot) InducedEdges(set []uint32) InducedResult {
+// Which of the two sparse arms is wired was MEASURED in W05.6, not assumed
+// (snapshot_membership_bench_test.go, 200k-node universe, degree 6, Xeon
+// E-2176G):
+//
+//	set=100    sorted 22.9–28.7 µs   map 23.0–29.9 µs   (a wash)
+//	set=500    sorted  255   µs      map  124–129 µs    (map ~2.0x faster)
+//	set=1500   sorted  911–988 µs    map  452–512 µs    (map ~2.0x faster)
+//
+// mapMembership is therefore the production arm. The binary search loses at the
+// sizes that matter because its ~11 probes per lookup are random accesses into
+// a 6 KB array — cache misses — while the map costs one hash and one bucket
+// touch. The extra allocation it buys is 22 KB at the 1500-node ceiling
+// (9 KB → 22 KB), three orders below the dense arm the design rejected.
+//
+// sortedMembership stays as the permanent comparison arm so the choice remains
+// re-measurable after future changes (W05.8 covers it in the 1M bench).
+
+// mapMembership is the CHOSEN probe: a hash set over the response node ids.
+func mapMembership(set []uint32) func(uint32) bool {
+	m := make(map[uint32]struct{}, len(set))
+	for _, n := range set {
+		m[n] = struct{}{}
+	}
+	return func(x uint32) bool {
+		_, ok := m[x]
+		return ok
+	}
+}
+
+// sortedMembership is the comparison arm: a sorted copy of the set + binary
+// search. Fewer allocations, ~2x slower at 500+ members.
+func sortedMembership(set []uint32) func(uint32) bool {
 	sorted := make([]uint32, len(set))
 	copy(sorted, set)
 	slices.Sort(sorted)
-	member := func(x uint32) bool {
+	return func(x uint32) bool {
 		_, ok := slices.BinarySearch(sorted, x)
 		return ok
 	}
+}
 
+// InducedEdges returns all edges whose BOTH endpoints lie in set — the cache
+// equivalent of Q2/Q2s (store/graph.go inducedEdges / inducedStructEdges).
+//
+// Only forward adjacency is walked (each directed edge appears exactly once,
+// matching the SQL `source = ANY(ids) AND target = ANY(ids)` row semantics).
+// The dream result carries the supersedes DISPLAY segment as well: Q2 selects
+// every relationship including supersedes (display-only, rendered dashed
+// client-side), so leaving it out would make the cache arm's edge set a strict
+// subset of the SQL arm's. It is read from the unexported segment, so no
+// traversal path gains access to it (§3.2 Nr. 3).
+func (s *Snapshot) InducedEdges(set []uint32) InducedResult {
+	return s.inducedEdgesWith(set, mapMembership(set))
+}
+
+// inducedEdgesWith is the membership-agnostic body (the micro-bench arm seam).
+func (s *Snapshot) inducedEdgesWith(set []uint32, member func(uint32) bool) InducedResult {
 	var res InducedResult
 	for _, n := range set {
 		if int(n) >= s.NumNodes() {
@@ -327,6 +421,16 @@ func (s *Snapshot) InducedEdges(set []uint32) InducedResult {
 				res.Dream = append(res.Dream, InducedDreamEdge{
 					Src: n, Dst: t, Rel: de.Rel[i], Conf: de.Conf[i],
 				})
+			}
+		}
+		if lo, hi, ok := edgeRange(s.supersedes.Fwd, n); ok {
+			sup := s.supersedes.Fwd
+			for i := lo; i < hi; i++ {
+				if t := sup.Targets[i]; member(t) {
+					res.Dream = append(res.Dream, InducedDreamEdge{
+						Src: n, Dst: t, Rel: sup.Rel[i], Conf: sup.Conf[i],
+					})
+				}
 			}
 		}
 		se := s.StructNeighbors(n, Forward)

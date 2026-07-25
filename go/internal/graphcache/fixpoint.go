@@ -33,6 +33,14 @@ func ConfToFix(w float64) uint16 {
 	return uint16(math.Floor(w * fixScale))
 }
 
+// FixToConf converts a u16 fixpoint back to a confidence in [0,1]. It is the
+// rendering direction (wire tuples, candidate scores) and is LOSSY by the
+// fixpoint resolution: the value is at most 1/65535 (~1.5e-5) below the original
+// weight, because ConfToFix floors. The Ego wire renders confidence with three
+// decimals, three orders of magnitude above that, so the rendered tuple is
+// unchanged for any weight not within 1.5e-5 above a rounding boundary.
+func FixToConf(v uint16) float64 { return float64(v) / fixScale }
+
 // ThresholdToFix converts a comparison threshold in [0,1] to its u16 fixpoint by
 // CEIL. Out-of-range inputs clamp to the endpoints. Compare an edge's ConfToFix
 // value against a threshold's ThresholdToFix value with >= to reproduce the SQL

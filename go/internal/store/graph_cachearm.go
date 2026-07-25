@@ -7,10 +7,18 @@
 //   - The per-hop HYDRATE stays SQL: the snapshot is a topology accelerator, not
 //     a visibility authority (§4.4). Scope/type/archived hints prune the walk;
 //     the LIVE row decides what enters the node set and the next frontier.
-//   - Q2/Q2s (induced edges) and Q3 (degrees) stay SQL — those are W05.6.
 //   - The zipper (takeHopMerged), the T41 leaf check and the budget accounting
 //     are the SHARED traversal body (runEgoTraversal). A second copy of a
 //     visibility check would be a second truth; there is none.
+//
+// W05.6 adds the two POST-traversal stages to this arm — Q2/Q2s (induced edges,
+// via Snapshot.InducedEdges + the UNCHANGED arbitrateEdgeBudget/mapStructEdges
+// helpers) and Q3 (degrees, via Snapshot.Degree with hint filtering). Both read
+// the snapshot over the node set the hydrate ALREADY confirmed, so neither can
+// introduce a node; an induced edge is by construction an edge between two
+// live-confirmed, caller-visible blocks. The degree is the one place where the
+// design accepts a declared, bounded deviation from the SQL value (E-05-3(2)) —
+// see egoCacheHops.degrees.
 //
 // The three properties that make this arm safe are all structural, not
 // conventional:
@@ -50,13 +58,27 @@ type egoCacheHops struct {
 	visibleTypes    []string
 
 	// Class short circuits — identical semantics to the SQL arm (§4.6).
-	dreamSkip  bool
-	structSkip bool
+	// dreamSkip is the TRAVERSAL short circuit (traversalClasses, supersedes
+	// stripped); dreamDisplaySkip is the Q2 one (displayClasses, all five) —
+	// `link_class=supersedes` skips the walk but NOT the induced display edges,
+	// exactly like resolveDreamEdges vs. hopNeighbors on the SQL arm.
+	dreamSkip        bool
+	dreamDisplaySkip bool
+	structSkip       bool
+
+	// degreeWalkBudget caps the Q3 hint walk (0 = unlimited), E-05-3(3).
+	degreeWalkBudget int
 
 	// Edge gates, precomputed once per request.
 	relAllow   map[string]bool // nil = all traversable dream rels
 	classAllow map[string]bool // nil = all structural classes
 	minConf    uint16          // ThresholdToFix(p.MinConfidence) — CEIL side of §3.2 Nr. 2
+	// displayRelAllow is the Q2 (DISPLAY) dream-class gate: unlike relAllow it is
+	// built from displayClasses(p.LinkClasses), i.e. ALL FIVE relationships
+	// including supersedes — Q2 renders supersedes, the traversal never walks it.
+	// Two separate maps because the two vocabularies genuinely differ; collapsing
+	// them would either hide supersedes edges or make them traversable.
+	displayRelAllow map[string]bool
 
 	// Hint pre-filter sets (pruning only, never authority — §4.4).
 	scopeOK  map[string]bool
@@ -75,21 +97,29 @@ type egoCacheHops struct {
 // newEgoCacheHops precomputes the request-constant gates. p must already be
 // normalized (normalizeClassFilters).
 func newEgoCacheHops(snap *graphcache.Snapshot, pool *pgxpool.Pool, p EgoParams,
-	readScopes, grantedBlockIDs, visibleTypes []string) *egoCacheHops {
+	readScopes, grantedBlockIDs, visibleTypes []string, degreeWalkBudget int) *egoCacheHops {
 	f := &egoCacheHops{
 		snap: snap, pool: pool, p: p,
 		readScopes: readScopes, grantedBlockIDs: grantedBlockIDs, visibleTypes: visibleTypes,
-		dreamSkip:  p.LinkClasses != nil && len(traversalClasses(p.LinkClasses)) == 0,
-		structSkip: p.StructClasses != nil && len(p.StructClasses) == 0,
-		minConf:    graphcache.ThresholdToFix(p.MinConfidence),
-		scopeOK:    make(map[string]bool, len(readScopes)),
-		typeOK:     make(map[string]bool, len(visibleTypes)),
-		classByID:  map[uint8]bool{},
+		degreeWalkBudget: degreeWalkBudget,
+		dreamSkip:        p.LinkClasses != nil && len(traversalClasses(p.LinkClasses)) == 0,
+		dreamDisplaySkip: p.LinkClasses != nil && len(p.LinkClasses) == 0,
+		structSkip:       p.StructClasses != nil && len(p.StructClasses) == 0,
+		minConf:          graphcache.ThresholdToFix(p.MinConfidence),
+		scopeOK:          make(map[string]bool, len(readScopes)),
+		typeOK:           make(map[string]bool, len(visibleTypes)),
+		classByID:        map[uint8]bool{},
 	}
 	if tc := traversalClasses(p.LinkClasses); tc != nil {
 		f.relAllow = make(map[string]bool, len(tc))
 		for _, r := range tc {
 			f.relAllow[r] = true
+		}
+	}
+	if dc := displayClasses(p.LinkClasses); dc != nil {
+		f.displayRelAllow = make(map[string]bool, len(dc))
+		for _, r := range dc {
+			f.displayRelAllow[r] = true
 		}
 	}
 	if sc := displayClasses(p.StructClasses); sc != nil {
@@ -477,7 +507,7 @@ func (c *egoMergeCursor) admit(es graphcache.EdgeSlice, i int) (egoWalkCand, boo
 			}
 		}
 		cand.ord = uint32(es.RawConf[i])
-		cand.conf = float64(es.Conf[i]) / 65535
+		cand.conf = graphcache.FixToConf(es.Conf[i])
 	} else {
 		if !c.f.structClassAllowed(es.ClassID[i]) {
 			return cand, false
