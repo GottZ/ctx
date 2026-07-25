@@ -80,11 +80,11 @@ func (h *GraphHandler) egoCache(cfg *config.Config) store.EgoCache {
 
 // Parameter ceilings (out-of-range → 400, never silently clamped).
 const (
-	egoDefaultHops      = 1
-	egoMaxHops          = 3
-	egoDefaultCap       = 25
-	egoMaxCap           = 100
-	egoDefaultLimit     = 500
+	egoDefaultHops  = 1
+	egoMaxHops      = 3
+	egoDefaultCap   = 25
+	egoMaxCap       = 100
+	egoDefaultLimit = 500
 	// egoMaxLimit was lowered from 5000 to 1500 by the G39/F5-W5 1M-synthetic
 	// benchmark: at 5000 nodes the worst-case pipeline (hops=3/cap=100, a dense
 	// region with ≥5 degree-10^4 hubs) ran p95 ~850ms — dominated by Q3 (per-node
@@ -154,6 +154,65 @@ type egoStats struct {
 	StructuralEdges int   `json:"structural_edges"`
 	Truncated       bool  `json:"truncated"`
 	ElapsedMs       int64 `json:"elapsed_ms"`
+}
+
+// HandleAll processes GET /api/graph/all requests — the flat "load all" seed
+// (store.FullGraph): every visible block up to limit, induced edges, degrees.
+// Same auth/rate-limit/registry discipline as HandleEgo; no focus, so there is
+// no 404 arm and the access log carries an empty focus.
+func (h *GraphHandler) HandleAll(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	reqID := RequestIDFromContext(ctx)
+
+	authResult := AuthResultFromContext(ctx)
+	if authResult == nil || !authResult.IsValid {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		return
+	}
+
+	cfgSnap := h.cfg.SnapshotForRequest(ctx)
+
+	// Same "graph" action bucket as ego — a load-all IS a graph read.
+	if limit := cfgSnap.Query.RateLimitRead; limit > 0 {
+		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "graph")
+		if err != nil {
+			slog.Error("graph: read rate limit check error", "error", err, "request_id", reqID)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
+			return
+		}
+		if readCount >= limit {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Rate limit exceeded: max %d graph reads per 60 seconds", limit),
+			})
+			return
+		}
+	}
+
+	snap := h.blocktypes.SnapshotForRequest(ctx)
+	params, rawLinkClass, err := parseAllParams(r.URL.Query(), snap.StructuralClasses())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+
+	start := time.Now()
+	// grantedBlockIDs nil — T40a parity with HandleEgo (grant resolution is a
+	// later wave); the type allowlist comes from the registry snapshot (T6).
+	result, err := store.FullGraph(ctx, h.pool, params, authResult.ReadScopes, nil, snap.VisibleTypes())
+	if err != nil {
+		slog.Error("graph: full query error", "error", err, "request_id", reqID)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
+		return
+	}
+	elapsedMs := time.Since(start).Milliseconds()
+
+	// Best effort, same bucket as ego (focus "" = load-all in the metadata).
+	if err := store.LogGraphAccess(ctx, h.pool, authResult.ApiKeyID, "", 0, params.Limit, len(result.Nodes), len(result.StructEdges)); err != nil {
+		slog.Error("graph: access log error", "error", err, "request_id", reqID)
+	}
+
+	writeJSON(w, http.StatusOK, buildEgoResponse(result, params, rawLinkClass, elapsedMs))
 }
 
 // HandleEgo processes GET /api/graph/ego requests.
@@ -330,6 +389,42 @@ func parseEgoParams(q url.Values, structVocab []string) (store.EgoParams, []stri
 		return p, nil, err
 	}
 	if p.EdgeLimit, err = egoIntParam(q, "edge_limit", egoDefaultEdgeLimit, 1, egoMaxEdgeLimit); err != nil {
+		return p, nil, err
+	}
+	if p.MinConfidence, err = egoFloatParam(q, "min_confidence", 0, 0, 1); err != nil {
+		return p, nil, err
+	}
+	var rawLinkClass []string
+	if p.LinkClasses, p.StructClasses, rawLinkClass, err = egoLinkClassPartition(q.Get("link_class"), structVocab); err != nil {
+		return p, nil, err
+	}
+	p.Categories = egoCSV(q.Get("category"))
+	if p.CreatedAfter, err = egoTimeParam(q, "created_after"); err != nil {
+		return p, nil, err
+	}
+	if p.CreatedBefore, err = egoTimeParam(q, "created_before"); err != nil {
+		return p, nil, err
+	}
+
+	return p, rawLinkClass, nil
+}
+
+// parseAllParams validates the /api/graph/all query: the ego params MINUS
+// block/hops/per_node_cap (no focus, no traversal). limit defaults to the
+// CEILING — "load all" wants everything the benchmark-proven envelope allows
+// (egoMaxLimit, G39); the truncation flag tells the client what was cut.
+// Same ceilings-not-clamps discipline and the same link_class partition.
+func parseAllParams(q url.Values, structVocab []string) (store.EgoParams, []string, error) {
+	p := store.EgoParams{}
+
+	var err error
+	if p.Limit, err = egoIntParam(q, "limit", egoMaxLimit, 1, egoMaxLimit); err != nil {
+		return p, nil, err
+	}
+	// edge_limit defaults to the CEILING too (not egoDefaultEdgeLimit): the
+	// max equals the client's hard edge budget (evict, design 05-§6.6), and a
+	// 4000-default would truncate the very corpus the button exists to show.
+	if p.EdgeLimit, err = egoIntParam(q, "edge_limit", egoMaxEdgeLimit, 1, egoMaxEdgeLimit); err != nil {
 		return p, nil, err
 	}
 	if p.MinConfidence, err = egoFloatParam(q, "min_confidence", 0, 0, 1); err != nil {

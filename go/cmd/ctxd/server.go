@@ -229,6 +229,8 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Post("/api/search", searchH.HandleSearch)
 		// Graph — scope-filtered k-hop ego subgraph (read-only, no LLM)
 		r.Get("/api/graph/ego", graphH.HandleEgo)
+		// Graph load-all — flat visible-corpus seed (SPA "load all" button)
+		r.Get("/api/graph/all", graphH.HandleAll)
 		// Graph overview — scope-pure Louvain cluster supergraph (F5-W6, gated)
 		r.Get("/api/graph/overview", overviewH.HandleOverview)
 		// Graph category-hue overrides (AM-2, U02-W5): GET is member-tier (the

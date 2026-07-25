@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const apiFetch = vi.fn().mockResolvedValue({ success: true })
 vi.mock('../api', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }))
 
-import { fetchEgo } from './api'
+import { fetchEgo, fetchGraphAll } from './api'
 
 describe('fetchEgo class-channel serialization', () => {
   beforeEach(() => apiFetch.mockClear())
@@ -27,5 +27,33 @@ describe('fetchEgo class-channel serialization', () => {
       expect(String(call[0])).not.toContain('link_class')
       expect(String(call[0])).not.toContain('struct_class')
     }
+  })
+})
+
+describe('fetchGraphAll serialization', () => {
+  beforeEach(() => apiFetch.mockClear())
+
+  it('hits the bare /api/graph/all without params (server defaults = ceilings)', async () => {
+    await fetchGraphAll()
+    expect(String(apiFetch.mock.calls[0][0])).toBe('/api/graph/all')
+  })
+
+  it('serializes the shared filter params, unified link_class included', async () => {
+    await fetchGraphAll({
+      limit: 100,
+      min_confidence: 0.5,
+      link_class: ['topical', 'references'],
+      category: ['infrastructure'],
+      created_after: '2026-01-01T00:00:00Z',
+    })
+    const url = String(apiFetch.mock.calls[0][0])
+    expect(url).toContain('/api/graph/all?')
+    expect(url).toContain('limit=100')
+    expect(url).toContain('min_confidence=0.5')
+    expect(url).toContain(`link_class=${encodeURIComponent('topical,references')}`)
+    expect(url).toContain('category=infrastructure')
+    // No traversal params exist on this endpoint — nothing may emit them.
+    expect(url).not.toContain('hops')
+    expect(url).not.toContain('per_node_cap')
   })
 })

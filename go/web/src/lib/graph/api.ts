@@ -60,6 +60,25 @@ export interface EgoQuery {
   created_before?: string
 }
 
+/**
+ * GET /api/graph/all — the flat "load all" seed: every visible block up to
+ * limit (server default = ceiling 1500), induced edges of both classes,
+ * degrees. Same envelope as ego with focus="" (mergeEgo tolerates it: the
+ * unknown focus seeds at the origin). hops/per_node_cap do not exist here —
+ * nothing is traversed.
+ */
+export function fetchGraphAll(query: Omit<EgoQuery, 'hops' | 'per_node_cap'> = {}): Promise<EgoResponse> {
+  const params = new URLSearchParams()
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  if (query.min_confidence !== undefined) params.set('min_confidence', String(query.min_confidence))
+  if (query.link_class?.length) params.set('link_class', query.link_class.join(','))
+  if (query.category?.length) params.set('category', query.category.join(','))
+  if (query.created_after) params.set('created_after', query.created_after)
+  if (query.created_before) params.set('created_before', query.created_before)
+  const qs = params.toString()
+  return apiFetch<EgoResponse>(`/api/graph/all${qs ? `?${qs}` : ''}`)
+}
+
 export function fetchEgo(block: string, query: EgoQuery = {}): Promise<EgoResponse> {
   const params = new URLSearchParams({ block })
   if (query.hops !== undefined) params.set('hops', String(query.hops))

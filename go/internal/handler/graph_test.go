@@ -260,3 +260,60 @@ func TestEgoResponse_EmptyCollectionsAreArrays(t *testing.T) {
 		}
 	}
 }
+
+// parseAllParams (load-all): no block/hops/per_node_cap; limit AND edge_limit
+// default to their ceilings (the button's whole point is "everything the
+// proven envelope allows"); the shared filter/partition pieces behave exactly
+// like ego.
+func TestParseAllParams(t *testing.T) {
+	t.Run("Defaults", func(t *testing.T) {
+		p, raw, err := parseAllParams(egoQuery(t, ""), nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Limit != egoMaxLimit || p.EdgeLimit != egoMaxEdgeLimit {
+			t.Errorf("defaults wrong: limit=%d edge_limit=%d (want ceilings %d/%d)", p.Limit, p.EdgeLimit, egoMaxLimit, egoMaxEdgeLimit)
+		}
+		if p.Focus != "" || p.Hops != 0 || p.PerNodeCap != 0 {
+			t.Errorf("traversal params must stay zero: %+v", p)
+		}
+		if raw != nil || p.LinkClasses != nil || p.Categories != nil {
+			t.Error("optional filters must default to nil")
+		}
+	})
+
+	t.Run("CeilingsNotClamped", func(t *testing.T) {
+		bad := []string{
+			"limit=0", "limit=1501",
+			"edge_limit=0", "edge_limit=20001",
+			"min_confidence=1.5",
+			"link_class=topical,unknown",
+			"created_after=gestern",
+		}
+		for _, raw := range bad {
+			if _, _, err := parseAllParams(egoQuery(t, raw), nil); err == nil {
+				t.Errorf("query %q: expected error, got nil", raw)
+			}
+		}
+	})
+
+	t.Run("SharedFilterPieces", func(t *testing.T) {
+		p, raw, err := parseAllParams(
+			egoQuery(t, "limit=10&min_confidence=0.5&link_class=topical,references&category=infra"),
+			[]string{"references"},
+		)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Limit != 10 || p.MinConfidence != 0.5 {
+			t.Errorf("scalars wrong: %+v", p)
+		}
+		if len(p.LinkClasses) != 1 || p.LinkClasses[0] != "topical" ||
+			len(p.StructClasses) != 1 || p.StructClasses[0] != "references" {
+			t.Errorf("link_class partition wrong: dream=%v struct=%v", p.LinkClasses, p.StructClasses)
+		}
+		if len(raw) != 2 || len(p.Categories) != 1 || p.Categories[0] != "infra" {
+			t.Errorf("raw echo / category wrong: raw=%v cat=%v", raw, p.Categories)
+		}
+	})
+}

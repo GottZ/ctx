@@ -3,7 +3,7 @@
   // GC1 §4.2: edge-curve-Import nur in Svelte-Komponenten (vitest-node-frei).
   import { DEFAULT_EDGE_CURVATURE, indexParallelEdgesIndex } from '@sigma/edge-curve'
   import { toApiError, type ApiError } from '../../lib/api'
-  import { fetchCategoryHues, fetchEgo } from '../../lib/graph/api'
+  import { fetchCategoryHues, fetchEgo, fetchGraphAll } from '../../lib/graph/api'
   import { LayoutRunner } from '../../lib/graph/fa2'
   import { defaultFilters, toEgoQuery } from '../../lib/graph/filters'
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
@@ -220,6 +220,28 @@
     }
   }
 
+  /** Load-all: merge the whole visible corpus (server-capped, newest-first)
+   *  into the live graph. Same merge/settle path as expand — the focus stays,
+   *  hops recompute against it (disconnected nodes read Infinity, which is
+   *  exactly the evict-farthest-first order). Camera resets: the result is a
+   *  corpus view, not a neighborhood. */
+  async function loadAll(): Promise<void> {
+    if (busy) return
+    busy = true
+    error = null
+    try {
+      const resp = await fetchGraphAll(toEgoQuery(filters, loadedStructClasses))
+      mergeEgo(graph, resp, palette, categoryHues)
+      truncated = resp.stats.truncated
+      settle()
+      view?.resetCamera()
+    } catch (err) {
+      error = toApiError(err)
+    } finally {
+      busy = false
+    }
+  }
+
   /** Back to the cluster map (clears the focus; the ego graph stays in memory). */
   function backToOverview(): void {
     focus = null
@@ -299,6 +321,13 @@
     {#if focus !== null}
       <div class="card meta-row">
         <button class="back" type="button" onclick={backToOverview}>← map</button>
+        <button
+          class="back"
+          type="button"
+          disabled={busy}
+          title="load every visible block (server-capped)"
+          onclick={() => void loadAll()}>load all</button
+        >
         <code class="focus" title="focused block">{focus}</code>
         {#if busy}
           <span class="loading" aria-busy="true">loading…</span>
@@ -430,6 +459,10 @@
   }
   .back:hover {
     border-color: var(--text-dim);
+  }
+  .back:disabled {
+    cursor: default;
+    opacity: 0.5;
   }
   .loading {
     color: var(--text-faint);
