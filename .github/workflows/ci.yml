@@ -490,7 +490,14 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cache/docker-images
-          key: docker-testcontainers-timescale-pg18-${{ runner.os }}
+          # Der Manifest-Hash im Key ist die Invalidierung: das Contract-Manifest
+          # pinnt u. a. die Extension-min_versions (vector, timescaledb), und der
+          # Boot-Check der Integrationstests prüft sie gegen GENAU dieses gecachte
+          # Image. Ein statischer Key fror das Image auf vector 0.8.2 ein, während
+          # Mig 118 das Manifest auf 0.8.5/2.28.3 hob — CI rot auf v4.19.0, obwohl
+          # Upstream :pg18 die Versionen längst trug (Befund 2026-07-25). Jede
+          # Manifest-Regeneration zieht jetzt einen frischen Pull nach sich.
+          key: docker-testcontainers-timescale-pg18-${{ runner.os }}-${{ hashFiles('go/internal/schemacontract/manifest.json') }}
 
       - name: Load or pull testcontainers Docker image
         run: |
