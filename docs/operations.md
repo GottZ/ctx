@@ -171,3 +171,7 @@ Two consequences for the deploy:
 - **The re-run is safe.** Each migration file runs inside its own transaction; on any error the runner rolls that transaction back and does not record the version, so a `55P03` abort leaves the schema exactly as it was — no half-installed trigger set. Simply restarting ctx re-runs 116 from a clean state. Doing that in a write-quiet window (no dream cycle, no forge sync, no bulk import in flight) is what makes the first attempt succeed.
 
 The migration is idempotent beyond that (`CREATE OR REPLACE FUNCTION` + `DROP TRIGGER IF EXISTS`), adds no table and no column, and needs no backfill: the graph cache is derived in-process state whose baseline is the boot rebuild.
+
+### Migration 118: contract-drift closure (legacy function drop)
+
+The schema-contract check (Achse 03) found `extract_dates_from_text(t text)` live without a generating migration — a leftover of the GENERATED-column phase around migration 010, referenced by nothing (indexes, triggers, views, column defaults, `pg_depend`, Go code: all zero at the 2026-07-25 sweep). Migration 118 drops it (`DROP FUNCTION IF EXISTS` — a no-op on fresh chains, which never had it), closing the one expected `unknown_active_object` drift after the 108–117 rollout; `/health`'s `schema_contract` returns to `ok` on the next boot. The full function body is archived in the migration's commit message.

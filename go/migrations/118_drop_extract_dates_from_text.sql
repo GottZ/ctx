@@ -1,0 +1,22 @@
+-- =============================================================================
+-- 118_drop_extract_dates_from_text.sql — Altlast-Funktion ohne Referenzen entfernen
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- Deploy-Runbook-Entscheid 2026-07-25 (LOOP.md §Nächste Session, Punkt
+-- "extract_dates_from_text-Entscheid"): Der W03-2-Contract-Check fand die
+-- Funktion live OHNE erzeugende Migration (Altlast der GENERATED-Phase um
+-- Mig 010, Commit 45bfe63) — sie war der eine erwartete Drift nach der
+-- Live-Migration 108–117 (Boot-Log 2026-07-25: unknown_active_object,
+-- "EXAKT ein Drift"-Gate erfüllt).
+--
+-- Referenz-Sweep vor dem Drop (Live, 2026-07-25, alle 0):
+--   Indexe, Trigger, Views, Spalten-Defaults/GENERATED (pg_attrdef),
+--   andere Funktionen (pg_proc.prosrc), pg_depend (deptype 'n'),
+--   Go-Code (grep über go/, 0 Treffer außerhalb von Tests: 0 gesamt).
+-- Die vollständige Funktionsdefinition ist im Commit-Body archiviert;
+-- Wiederherstellung im Notfall aus dem Backup context_store-20260725-134345.
+--
+-- Frische Ketten haben die Funktion nie besessen — IF EXISTS macht die
+-- Migration auf Fresh-DBs zum No-op.
+
+DROP FUNCTION IF EXISTS extract_dates_from_text(text);

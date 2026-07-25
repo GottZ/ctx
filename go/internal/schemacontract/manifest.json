@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 117,
-    "migration_count": 116,
+    "migration_max": 118,
+    "migration_count": 117,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -17,10 +17,10 @@
       "min_version": "1.0"
     },
     "timescaledb": {
-      "min_version": "2.26.0"
+      "min_version": "2.28.3"
     },
     "vector": {
-      "min_version": "0.8.2"
+      "min_version": "0.8.5"
     }
   },
   "tables": {
