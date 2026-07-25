@@ -1177,7 +1177,8 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		var blockID, title, content, sens, scope string
 		err := h.pool.QueryRow(ctx,
 			`SELECT id, title, content, sensitivity, scope FROM context_blocks
-			WHERE embedding IS NULL AND NOT is_archived`+store.EmbedFailureExcludedPredicate+`
+			WHERE embedding IS NULL AND NOT is_archived`+
+				store.EmbedFailureExcludedPredicate+store.RetrievalExcludedTypePredicate+`
 			LIMIT 1`).Scan(&blockID, &title, &content, &sens, &scope)
 		if err != nil {
 			break // No more pending blocks (or error).

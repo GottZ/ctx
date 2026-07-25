@@ -1435,7 +1435,8 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 	var peekID, peekSens, peekScope string
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, sensitivity, scope FROM context_blocks
-		WHERE embedding IS NULL AND NOT is_archived`+store.EmbedFailureExcludedPredicate+`
+		WHERE embedding IS NULL AND NOT is_archived`+
+			store.EmbedFailureExcludedPredicate+store.RetrievalExcludedTypePredicate+`
 		ORDER BY created_at ASC
 		LIMIT 1`,
 	).Scan(&peekID, &peekSens, &peekScope)
@@ -1469,7 +1470,8 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 	var blockID, title, content, sens, scope string
 	err = tx.QueryRow(ctx,
 		`SELECT id, title, content, sensitivity, scope FROM context_blocks
-		WHERE embedding IS NULL AND NOT is_archived`+store.EmbedFailureExcludedPredicate+`
+		WHERE embedding IS NULL AND NOT is_archived`+
+			store.EmbedFailureExcludedPredicate+store.RetrievalExcludedTypePredicate+`
 		ORDER BY created_at ASC
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED`,

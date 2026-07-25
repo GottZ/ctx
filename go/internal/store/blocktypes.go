@@ -63,6 +63,67 @@ func (e *BlockTypeInUseError) Error() string {
 	return fmt.Sprintf("block type is referenced by %d active and %d archived blocks", e.Active, e.Archived)
 }
 
+// RetrievalExcludedTypePredicate is the shared SQL fragment both embed-backfill
+// pick queries (query.go Pfad A `backfillPending`, scheduler.go Pfad B
+// `backfillOneEmbedding` — peek AND pick) AND-in, so a block whose TYPE carries
+// retrieval policy 'excluded' never consumes an embed slot. Such a vector has
+// NO consumer at all: every ranked path filters against the registry's
+// visible-type allowlist (`ctx_rrf` p_types_visible, fed by
+// blocktype.Set.VisibleTypes — 'excluded' is the one policy that is not in it),
+// so the embedding is written once and then read by nobody.
+//
+// Vorfall 2026-07-25 (the wave trigger, three independent sightings): 33 Hermes
+// "Compaction source" parts (type=checkpoint, ~36.5 kB each) saturated the CPU
+// embed backend for hours, and the digest rebuild rewrites topic-map-private
+// (type=system-meta, 73.7 kB ≈ ~32k real tokens) on EVERY boot → ClearEmbedding
+// → ~60 min of CPU embed for a dead vector, recurring.
+//
+// SEMANTICS, deliberately conservative in the fail-safe direction — skipping an
+// embedding is the destructive move (an unembedded block is FTS-only), so the
+// predicate skips a block only when NO reader in the system could ever rank it:
+//
+//   - The '_global' row is the base every tenant inherits; only `= 'excluded'`
+//     skips. Absent `retrieval.policy` decodes to full-pass (blocktype.DecodePolicy),
+//     and 'damped'/'aggregate-to-parent' are visible types (Set.VisibleTypes) —
+//     all of them stay embeddable.
+//   - Tenant overlay: the retrieval exclusion in the search path IS reader-aware
+//     ("Overlay gewinnt", design/01 §5.4 / D6, pinned by rrf T12) — a tenant may
+//     lift a _global exclusion to full-pass, and then blocks of that type DO have
+//     a consumer. The backfill has no reader identity (both picks are scope-free,
+//     they embed whatever is pending), so the reader-aware rule is mirrored as the
+//     UNION over all possible readers: an inner NOT EXISTS keeps the type
+//     embeddable as soon as ANY non-_global scope overrides it to a non-excluded
+//     policy. Live 2026-07-25 there are exactly 7 rows, all scope='_global'
+//     (checkpoint + system-meta excluded), so the inner clause is empty in
+//     practice today — it exists so a later tenant override cannot silently
+//     starve that tenant's own retrieval.
+//   - A block whose type has NO registry row at all stays embeddable (NOT EXISTS
+//     over the _global row): the registry, not its absence, narrows visibility.
+//
+// Defined ONCE (design/04 §3.3 "je einmal definiert in Go-Konstanten") and
+// interpolated into the call sites, exactly like its EmbedFailureExcludedPredicate
+// sibling; it carries no bind parameters and references context_blocks.type_name,
+// so it composes into any query whose outer FROM is the bare (unaliased)
+// context_blocks table.
+//
+// NOT covered on purpose (own waves): the /status `embed_backlog` metric
+// (status_db.go) still counts these blocks, so a corpus with parked
+// excluded-type blocks shows a permanent backlog floor; and the re-embed
+// migration worker (embed_cutover.go) keeps its own predicate.
+const RetrievalExcludedTypePredicate = `
+	AND NOT EXISTS (
+		SELECT 1 FROM context_block_types g
+		WHERE g.scope = '_global'
+		  AND g.name = context_blocks.type_name
+		  AND g.config->'retrieval'->>'policy' = 'excluded'
+		  AND NOT EXISTS (
+			SELECT 1 FROM context_block_types o
+			WHERE o.name = g.name
+			  AND o.scope <> '_global'
+			  AND o.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded'
+		  )
+	)`
+
 const blockTypeCols = `id, name, scope, display_name, description, builtin, is_default, config, created_at, updated_at, updated_by`
 
 func scanBlockType(row pgx.Row) (*BlockTypeRow, error) {
