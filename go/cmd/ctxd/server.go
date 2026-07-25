@@ -115,6 +115,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// graph_cache.serve_ego defaults to false, so the handler keeps offering the
 	// SQL path until the flag is flipped.
 	graphH.SetGraphCache(scheduler)
+	// W05.7: same state gate for the GraphExpand arm of the query path, behind
+	// its own flag graph_cache.serve_expand (also default false).
+	queryHandler.SetGraphCache(scheduler)
 	overviewH := handler.NewGraphOverviewHandler(pool, cfgStore)
 	// gamingReload re-builds the config snapshot from context_settings after a
 	// gaming-mode write (F3-P6), so the toggle hits the next chain without a

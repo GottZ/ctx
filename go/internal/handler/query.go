@@ -21,6 +21,7 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
+	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/rrf"
@@ -63,6 +64,42 @@ type QueryHandler struct {
 	// admitter is the ONE process-wide dispatch admission layer (MW3, I-D1);
 	// every non-stream LLM call of the query pipeline acquires through it.
 	admitter dispatch.Admitter
+	// graphCache is the OPTIONAL W05.7 expand cache arm source; nil (unwired
+	// boot, unit tests) keeps GraphExpand on its SQL path.
+	graphCache expandCacheSource
+}
+
+// expandCacheSource is the OPTIONAL scheduler slice for the W05.7 GraphExpand
+// cache arm (design/05 §4.2/§4.6). *events.Scheduler satisfies it. It is its OWN
+// narrow interface beside handler.egoCacheSource (same signature, different
+// consumer): the two serve flags are per-consumer, so sharing one declaration
+// would tie the ego and expand arms together at the type level for no gain.
+//
+// The implementation decides the STATE half (Fresh only); the flag half
+// (graph_cache.serve_expand) is read from the per-request config snapshot in
+// expandCache below, so a hot flag flip takes effect on the next request.
+type expandCacheSource interface {
+	GraphCacheServe() (*graphcache.Snapshot, time.Duration, bool)
+}
+
+// SetGraphCache wires the optional W05.7 expand cache arm (boot, cmd/ctxd;
+// pattern GraphHandler.SetGraphCache). Unwired stays SQL-only — nil-tolerant by
+// construction.
+func (h *QueryHandler) SetGraphCache(src expandCacheSource) { h.graphCache = src }
+
+// expandCache resolves the cache arm for ONE request: BOTH the state gate (the
+// source says Fresh) AND the hot flag graph_cache.serve_expand must say yes,
+// otherwise the zero value (= SQL path) is returned. Default false — this wave
+// ships the arm dark (§4.7).
+func (h *QueryHandler) expandCache(cfg *config.Config) rrf.ExpandCache {
+	if h.graphCache == nil || !cfg.GraphCache.ServeExpand {
+		return rrf.ExpandCache{}
+	}
+	snap, age, ok := h.graphCache.GraphCacheServe()
+	if !ok || snap == nil {
+		return rrf.ExpandCache{}
+	}
+	return rrf.ExpandCache{Snapshot: snap, Age: age}
 }
 
 // NewQueryHandler creates a new QueryHandler. backendPool feeds the
@@ -778,7 +815,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		// grant set here surfaces granted neighbors without traversing through them.
 		// T6: the SAME per-request visibleTypes allowlist that fed rrf.Search
 		// gates the neighbor hydrate — one policy source per request.
-		if expanded, gerr := rrf.GraphExpand(ctx, h.pool, results, ar.ReadScopes, grantedBlockIDs, visibleTypes, graphCfg); gerr != nil {
+		// W05.7: the cache arm is handed in as a seam (rrf imports neither config
+		// nor events). expandCache returns the zero value unless the snapshot is
+		// Fresh AND graph_cache.serve_expand is on, and GraphExpandCached then runs
+		// the byte-identical SQL path — same call, same fail-open handling below.
+		if expanded, gerr := rrf.GraphExpandCached(ctx, h.pool, results, ar.ReadScopes, grantedBlockIDs, visibleTypes, graphCfg, h.expandCache(cfg)); gerr != nil {
 			slog.Warn("graph expand failed; using pre-expansion results",
 				"error", gerr,
 				"request_id", requestID,

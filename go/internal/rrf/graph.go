@@ -35,6 +35,7 @@ package rrf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -238,6 +239,21 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 	return out, err
 }
 
+// GraphExpandCached is GraphExpand with the OPTIONAL W05.7 snapshot arm
+// (design/05 §4.2). A zero ExpandCache is the SQL path, byte-identical to
+// pre-W05.7 — that is the permanent fallback AND the differential oracle.
+func GraphExpandCached(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig, cache ExpandCache) ([]SearchResult, error) {
+	out, _, err := GraphExpandCachedWithReport(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, cfg, cache)
+	return out, err
+}
+
+// GraphExpandCachedWithReport is GraphExpandCached plus the traversal budget
+// report. Same telemetry contract as GraphExpandWithReport; Source is "cache"
+// exactly when the snapshot arm answered.
+func GraphExpandCachedWithReport(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig, cache ExpandCache) ([]SearchResult, *graphcache.BudgetReport, error) {
+	return graphExpandDispatch(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, cfg, cache)
+}
+
 // GraphExpandWithReport is GraphExpand plus the traversal budget report
 // (design/05 §4.5, W05.4). The report is SERVER TELEMETRY: it is logged here
 // and returned for tests/callers that want it — it MUST NOT reach the query
@@ -249,27 +265,101 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 // before W05.4 — the only additions are Add calls on a telemetry sink and one
 // Debug log.
 func GraphExpandWithReport(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig) ([]SearchResult, *graphcache.BudgetReport, error) {
-	// Source is constant "sql" until the expand cache arm (W05.7).
-	rep := graphcache.NewBudgetReport(graphcache.SourceSQL)
-	defer logExpandBudget(rep)
+	return graphExpandDispatch(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, cfg, ExpandCache{})
+}
 
+// graphExpandDispatch is the W05.7 arm selection (design/05 §4.2: "Flag-Dispatch
+// lebt in GraphExpand selbst"). It owns exactly three decisions and no traversal
+// logic:
+//
+//  1. the pre-traversal no-ops (stage off / no results / no scopes) — answered
+//     before any arm exists, so a disabled stage still reports Source="sql";
+//  2. which arm runs (snapshot handed in and non-nil ⇒ cache, else SQL);
+//  3. the COMPLETE fallback on errExpandCacheStale: the partial cache run is
+//     discarded and the whole request re-runs on SQL with a fresh SQL report
+//     carrying the TravCacheStale trip (§4.5 — operational class, Counts only,
+//     never wire). No partial merge, no per-seed fallback.
+//
+// Every OTHER error keeps the fail-open contract byte-identical to pre-W05.7:
+// the ORIGINAL slice plus the error, whichever arm produced it.
+func graphExpandDispatch(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig, cache ExpandCache) ([]SearchResult, *graphcache.BudgetReport, error) {
 	if !cfg.Enabled || len(results) == 0 || len(readScopes) == 0 {
-		return results, rep, nil
+		return results, graphcache.NewBudgetReport(graphcache.SourceSQL), nil
 	}
-	// grantedBlockIDs is nil-coalesced to '{}'::uuid[] inside fetchNeighbors (the
-	// single DB chokepoint) so the deterministic-empty guard lives at one place
-	// and GraphExpand stays under the cyclomatic budget.
+	// grantedBlockIDs is nil-coalesced to '{}'::uuid[] inside the fetchers (the
+	// single DB chokepoint per arm) so the deterministic-empty guard lives at one
+	// place and GraphExpand stays under the cyclomatic budget.
+	sqlArm := func(stale bool) ([]SearchResult, *graphcache.BudgetReport, error) {
+		rep := graphcache.NewBudgetReport(graphcache.SourceSQL)
+		if stale {
+			// Recorded BEFORE the run so the Debug log carries it too.
+			rep.Add(graphcache.TravCacheStale)
+		}
+		defer logExpandBudget(rep)
+		out, err := expandWith(ctx, sqlNeighbors{
+			pool: pool, readScopes: readScopes, grantedBlockIDs: grantedBlockIDs,
+			visibleTypes: visibleTypes, cfg: cfg,
+		}, results, readScopes, cfg, rep)
+		return out, rep, err
+	}
+	if cache.Snapshot == nil {
+		return sqlArm(false)
+	}
 
+	rep := graphcache.NewBudgetReport(graphcache.SourceCache)
+	rep.CacheAge = cache.Age
+	out, err := expandWith(ctx,
+		newExpandCacheArm(cache.Snapshot, pool, readScopes, grantedBlockIDs, visibleTypes, cfg),
+		results, readScopes, cfg, rep)
+	if !errors.Is(err, errExpandCacheStale) {
+		logExpandBudget(rep)
+		return out, rep, err
+	}
+	return sqlArm(true)
+}
+
+// neighborFetcher produces ONE hop's gate-passing, visibility-checked edges for
+// a seed set — the single injected seam of expandWith (design/05 §4.2: only the
+// edge fetch moves to the cache, everything around it stays).
+//
+// CONTRACT (load-bearing for §5.1 Nr. 2): every returned graphEdge carries a
+// DB-CONFIRMED neighbour — the SQL arm through its JOIN + visibility.Predicate,
+// the cache arm through the per-hop batch hydrate under the SAME predicate.
+// expandWith builds the next frontier and runs the T41 leaf check on the
+// HYDRATED scope of these edges, so an arm that returned unconfirmed candidates
+// would traverse THROUGH an invisible or grant-only bridge. The test-only
+// hint-trusting stub (export_expandcache_test.go) violates this DELIBERATELY —
+// that is what makes the HopDepth=2 bridge gate non-vacuous.
+type neighborFetcher interface {
+	fetch(ctx context.Context, seedIDs []string, hopDecay float64) ([]graphEdge, error)
+}
+
+// sqlNeighbors is the SQL arm of the seam: the UNCHANGED fetchNeighbors query.
+type sqlNeighbors struct {
+	pool                                      *pgxpool.Pool
+	readScopes, grantedBlockIDs, visibleTypes []string
+	cfg                                       GraphConfig
+}
+
+func (s sqlNeighbors) fetch(ctx context.Context, seedIDs []string, hopDecay float64) ([]graphEdge, error) {
+	return fetchNeighbors(ctx, s.pool, seedIDs, s.readScopes, s.grantedBlockIDs, s.visibleTypes, s.cfg, hopDecay)
+}
+
+// expandWith is the ONE traversal body behind both arms: seed selection, the
+// hop>=2 frontier construction with its T41 leaf check and visited set, and the
+// fusion. Only `f` differs between arms — which is precisely why no security
+// check exists twice.
+func expandWith(ctx context.Context, f neighborFetcher, results []SearchResult, readScopes []string, cfg GraphConfig, rep *graphcache.BudgetReport) ([]SearchResult, error) {
 	// --- Seed selection -------------------------------------------------------
 	seedIDs, seedRRF, seedReal := selectSeeds(results, readScopes, cfg, rep)
 	if len(seedIDs) == 0 {
-		return results, rep, nil // nothing qualifies — not an error
+		return results, nil // nothing qualifies — not an error
 	}
 
 	// --- Hop 1 ----------------------------------------------------------------
-	edges, err := fetchNeighbors(ctx, pool, seedIDs, readScopes, grantedBlockIDs, visibleTypes, cfg, 1.0)
+	edges, err := f.fetch(ctx, seedIDs, 1.0)
 	if err != nil {
-		return results, rep, fmt.Errorf("rrf: graph expand hop 1: %w", err)
+		return results, fmt.Errorf("rrf: graph expand hop 1: %w", err)
 	}
 	// Stamp each hop-1 edge with its seed's scores. fetchNeighbors is DB-only and
 	// does not know the seed scores; without this stamping seedRRFScore stays 0,
@@ -331,9 +421,9 @@ func GraphExpandWithReport(ctx context.Context, pool *pgxpool.Pool, results []Se
 			if len(nextSeedIDs) == 0 {
 				break
 			}
-			hopEdges, herr := fetchNeighbors(ctx, pool, nextSeedIDs, readScopes, grantedBlockIDs, visibleTypes, cfg, decay)
+			hopEdges, herr := f.fetch(ctx, nextSeedIDs, decay)
 			if herr != nil {
-				return results, rep, fmt.Errorf("rrf: graph expand hop %d: %w", hop, herr)
+				return results, fmt.Errorf("rrf: graph expand hop %d: %w", hop, herr)
 			}
 			// Rewrite each hop-N edge's seedRRFScore to the originating-seed
 			// derived score carried on the frontier, and drop edges that loop
@@ -358,10 +448,10 @@ func GraphExpandWithReport(ctx context.Context, pool *pgxpool.Pool, results []Se
 	}
 
 	if len(edges) == 0 {
-		return results, rep, nil // seeds had no qualifying neighbors — not an error
+		return results, nil // seeds had no qualifying neighbors — not an error
 	}
 
-	return fuseNeighborsReport(results, edges, cfg, rep), rep, nil
+	return fuseNeighborsReport(results, edges, cfg, rep), nil
 }
 
 // logExpandBudget emits the traversal trips as server telemetry. Debug level:

@@ -125,6 +125,19 @@ func (s *Snapshot) NodeID(id [16]byte) (uint32, bool) {
 	return uint32(i), true
 }
 
+// NodeUUID is the inverse of NodeID: the raw UUID bytes of a NodeID, or
+// ok=false when n is outside the universe. It exists so a consumer can render a
+// walked NodeID back into a hydrate parameter WITHOUT touching the UUIDs field
+// directly — that matters for the W05.7 expand arm, whose whole snapshot surface
+// is a three-method interface (a field access cannot be narrowed by an
+// interface, a method can).
+func (s *Snapshot) NodeUUID(n uint32) ([16]byte, bool) {
+	if int(n) >= s.NumNodes() {
+		return [16]byte{}, false
+	}
+	return s.UUIDs[n], true
+}
+
 // DreamNeighbors returns the zero-copy dream adjacency of node n in the given
 // direction, pre-sorted by RawConf DESC (§3.2 Nr. 1 — "take the first k" IS the
 // per-node cap). Out-of-range n yields an empty slice (defensive; NodeID is the
