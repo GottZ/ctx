@@ -180,7 +180,7 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 	probe := func(ctx context.Context, scopes []string, limit int) (int, error) {
 		return boundedProbe(ctx, pool, scopes, limit)
 	}
-	decision := decide(ctx, probe, scopes, grantedBlockIDs, policy)
+	decision := decide(ctx, probe, poolStatsEstimator(pool), scopes, grantedBlockIDs, policy)
 
 	exec := func(ctx context.Context, mode string, scanTuples, exactCap any) ([]SearchResult, error) {
 		args := []any{hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam,

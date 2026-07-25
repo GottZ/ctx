@@ -107,17 +107,22 @@ func boundedProbe(ctx context.Context, pool *pgxpool.Pool, scopes []string, limi
 	return n, nil
 }
 
-// statsEstimate is stage 2 of the cardinality estimation (§4.3b): a TTL-cached
-// pg_stats snapshot (MCV frequencies × reltuples, residual formula for
-// non-MCV scopes).
-//
-// W02-2 ships it as a STUB that constantly reports "unavailable" — the grey
-// path exists in the dispatch algorithm but is never a reachable OUTCOME yet,
-// every post-probe decision degrades to stats_stale → plain ann (Ist path).
-// Implementation, catalog read and edge-case handling: W02-4 (one change per
-// wave). Until then this function is intentionally parameter-blind.
-func statsEstimate(_ []string, _ time.Duration) (int, bool) {
-	return 0, false
+// statsEstimator is stage 2 of the cardinality estimation (§4.3b): the
+// TTL-cached pg_stats estimate for a scope set, floored at exactMax+1.
+// Injected exactly like selectorProbe so the dispatch stays DB-free testable;
+// the implementation (catalog read, snapshot cache, §4.3b edge cases) lives
+// in selector_stats.go. ok=false means "unusable" and maps onto reason
+// stats_stale → plain ann.
+type statsEstimator func(ctx context.Context, scopes []string, exactMax int, ttl time.Duration) (int, bool)
+
+// poolStatsEstimator binds the process snapshot cache to a pool. The refresh
+// is lazy: it happens inside the search path when the snapshot has expired,
+// not on a timer — a process that never searches never reads the catalog.
+func poolStatsEstimator(pool *pgxpool.Pool) statsEstimator {
+	read := poolStatsReader(pool)
+	return func(ctx context.Context, scopes []string, exactMax int, ttl time.Duration) (int, bool) {
+		return scopeStatsCache.estimate(ctx, pool, read, scopes, exactMax, ttl)
+	}
 }
 
 // clampPolicy applies the §5.4 mechanism clamps once per call site and warns
@@ -151,10 +156,10 @@ func clampInt(v, lo, hi int, key string) int {
 //	!enabled            → {ann, disabled}            (no probe roundtrip)
 //	probe error         → {ann, probe_error}         (degrade to Ist path, warn)
 //	n+grants <= exactMax → {exact, probe<=exact_max}
-//	stats unavailable   → {ann, stats_stale}         (W02-2: always, see statsEstimate)
+//	stats unavailable   → {ann, stats_stale}         (stale/absent snapshot, §4.3b)
 //	est <= GreyMax      → {grey, stats<=grey_max}
 //	otherwise           → {ann, stats>grey_max}
-func decide(ctx context.Context, probe selectorProbe, scopes, granted []string, policy SelectorPolicy) SelectorDecision {
+func decide(ctx context.Context, probe selectorProbe, stats statsEstimator, scopes, granted []string, policy SelectorPolicy) SelectorDecision {
 	if !policy.Enabled {
 		return SelectorDecision{Mode: ModeANN, Reason: ReasonDisabled}
 	}
@@ -181,7 +186,11 @@ func decide(ctx context.Context, probe selectorProbe, scopes, granted []string, 
 		return SelectorDecision{Mode: ModeExact, Reason: ReasonProbeExact, Estimate: n, ProbeMs: probeMs}
 	}
 
-	est, ok := statsEstimate(scopes, policy.StatsTTL)
+	// Stage 2 (§4.3b). The floor exactMax+1 is handed in rather than applied
+	// here: the estimator is the place that knows whether it derived a value
+	// at all, and the floor is evidence FROM the probe (the scope set is
+	// proven larger than exactMax), not a post-hoc correction.
+	est, ok := stats(ctx, scopes, exactMax, policy.StatsTTL)
 	if !ok {
 		return SelectorDecision{Mode: ModeANN, Reason: ReasonStatsStale, Estimate: n, ProbeMs: probeMs}
 	}

@@ -1,9 +1,10 @@
 // W02-2 gates G1/G2 (design/02-strategy-selektor.md §7 "W02-2", §4.2, §4.6,
 // §5.4, §5.6): the Go-side strategy selector — dispatch algorithm, clamps and
-// the exact_cap_hit retry, all DB-free (the probe and the ctx_rrf executor are
-// injected). The pg_stats stage is a W02-2 stub that constantly reports
-// "unavailable", so every post-probe decision lands on stats_stale → ann
-// (implementation: W02-4).
+// the exact_cap_hit retry, all DB-free (probe, stage-2 estimator and the
+// ctx_rrf executor are injected). W02-4 replaced the constant "unavailable"
+// stub with a real estimator and added the grey-branch cases at the bottom;
+// the interpretation of the catalog row itself is tested in
+// selector_stats_test.go.
 //
 // G1 RED probe (run BEFORE selector.go existed, `go vet ./internal/rrf/`):
 //
@@ -39,6 +40,27 @@ func countingProbe(n int, err error) (selectorProbe, *int, *int) {
 	return probe, &calls, &lastLimit
 }
 
+// unusableStats is the stage-2 double that reports "no usable estimate" — the
+// behaviour the W02-2 stub hard-coded and the behaviour a never-analysed
+// database really produces (§4.3b). Every dispatch expectation written before
+// W02-4 keeps its meaning with it.
+func unusableStats() statsEstimator {
+	return func(_ context.Context, _ []string, _ int, _ time.Duration) (int, bool) {
+		return 0, false
+	}
+}
+
+// constStats is the stage-2 double that yields a fixed estimate, plus the
+// pointer to its call counter and the exactMax floor it was handed.
+func constStats(est int) (statsEstimator, *int, *int) {
+	calls, lastFloor := 0, 0
+	return func(_ context.Context, _ []string, exactMax int, _ time.Duration) (int, bool) {
+		calls++
+		lastFloor = exactMax
+		return est, true
+	}, &calls, &lastFloor
+}
+
 func testPolicy() SelectorPolicy {
 	return SelectorPolicy{
 		Enabled:        true,
@@ -54,7 +76,7 @@ func testPolicy() SelectorPolicy {
 // (fail-closed against a forgotten wiring, §4.2).
 func TestSelectorG1_ZeroPolicyIsIstPath(t *testing.T) {
 	probe, calls, _ := countingProbe(1, nil)
-	dec := decide(context.Background(), probe, []string{"private"}, nil, SelectorPolicy{})
+	dec := decide(context.Background(), probe, unusableStats(), []string{"private"}, nil, SelectorPolicy{})
 
 	if dec.Mode != ModeANN {
 		t.Errorf("zero policy: mode = %q, want %q", dec.Mode, ModeANN)
@@ -102,7 +124,7 @@ func TestSelectorG2_DispatchThresholds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			probe, calls, lastLimit := countingProbe(tc.probeN, nil)
-			dec := decide(context.Background(), probe, []string{"private"}, tc.granted, p)
+			dec := decide(context.Background(), probe, unusableStats(), []string{"private"}, tc.granted, p)
 			if dec.Mode != tc.wantMode || dec.Reason != tc.wantReasn {
 				t.Errorf("decision = {%q, %q}, want {%q, %q}", dec.Mode, dec.Reason, tc.wantMode, tc.wantReasn)
 			}
@@ -123,7 +145,7 @@ func TestSelectorG2_DispatchThresholds(t *testing.T) {
 // it degrades to the Ist path with reason probe_error (§5.3, N5 muster).
 func TestSelectorG2_ProbeErrorDegrades(t *testing.T) {
 	probe, calls, _ := countingProbe(0, errors.New("pool exhausted"))
-	dec := decide(context.Background(), probe, []string{"private"}, []string{"g1"}, testPolicy())
+	dec := decide(context.Background(), probe, unusableStats(), []string{"private"}, []string{"g1"}, testPolicy())
 
 	if dec.Mode != ModeANN || dec.Reason != ReasonProbeError {
 		t.Errorf("decision = {%q, %q}, want {ann, probe_error}", dec.Mode, dec.Reason)
@@ -141,12 +163,68 @@ func TestSelectorG2_ProbeErrorDegrades(t *testing.T) {
 	}
 }
 
-// TestSelectorG2_StatsStubIsStale pins the W02-2 staffelung: the stage-2
-// estimator is a stub that never yields a value, so grey is a reachable code
-// path but never a reachable OUTCOME until W02-4.
-func TestSelectorG2_StatsStubIsStale(t *testing.T) {
-	if est, ok := statsEstimate([]string{"private"}, time.Minute); ok {
-		t.Errorf("W02-2 stats stub returned est=%d ok=true — the pg_stats stage belongs to W02-4", est)
+// TestSelectorW024_GreyBranchReachable is the unit-level counterpart of gate
+// W02-4-G1: with a stage-2 estimator that yields a value, the post-probe
+// dispatch splits into grey and ann along GreyMax — the branch the W02-2 stub
+// made unreachable. It also pins that the estimator is called EXACTLY ONCE,
+// only after the probe stage, and is handed the CLAMPED ExactMax as the floor.
+func TestSelectorW024_GreyBranchReachable(t *testing.T) {
+	p := testPolicy()
+	cases := []struct {
+		name      string
+		est       int
+		wantMode  string
+		wantReasn string
+	}{
+		{"est below GreyMax", p.GreyMax - 1, ModeGrey, ReasonStatsGrey},
+		{"est == GreyMax", p.GreyMax, ModeGrey, ReasonStatsGrey},
+		{"est == GreyMax+1", p.GreyMax + 1, ModeANN, ReasonStatsLarge},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			probe, _, _ := countingProbe(p.ExactMax+1, nil)
+			stats, calls, floor := constStats(tc.est)
+			dec := decide(context.Background(), probe, stats, []string{"private"}, nil, p)
+
+			if dec.Mode != tc.wantMode || dec.Reason != tc.wantReasn {
+				t.Errorf("decision = {%q, %q}, want {%q, %q}", dec.Mode, dec.Reason, tc.wantMode, tc.wantReasn)
+			}
+			if dec.Estimate != tc.est {
+				t.Errorf("estimate = %d, want the pg_stats value %d", dec.Estimate, tc.est)
+			}
+			if *calls != 1 {
+				t.Errorf("stats calls = %d, want exactly 1", *calls)
+			}
+			if *floor != p.ExactMax {
+				t.Errorf("stats floor input = %d, want the clamped ExactMax %d", *floor, p.ExactMax)
+			}
+		})
+	}
+
+	// Below the probe threshold the stage never runs at all — exact is
+	// decided on the probe alone (§4.3: the exact branch never reads stats).
+	probe, _, _ := countingProbe(p.ExactMax, nil)
+	stats, calls, _ := constStats(1)
+	dec := decide(context.Background(), probe, stats, []string{"private"}, nil, p)
+	if dec.Mode != ModeExact {
+		t.Errorf("decision = %+v, want exact", dec)
+	}
+	if *calls != 0 {
+		t.Errorf("stats calls on the exact path = %d, want 0", *calls)
+	}
+}
+
+// TestSelectorW024_ClampedExactMaxIsTheStatsFloor: the value handed to the
+// estimator as the floor is the CLAMPED ExactMax, not the policy value —
+// otherwise an out-of-range policy could produce an estimate below the count
+// the probe already proved.
+func TestSelectorW024_ClampedExactMaxIsTheStatsFloor(t *testing.T) {
+	p := SelectorPolicy{Enabled: true, ExactMax: 1, GreyMax: 65536, GreyScanTuples: 60000, StatsTTL: time.Minute}
+	probe, _, _ := countingProbe(exactMaxFloor+1, nil)
+	stats, _, floor := constStats(1000)
+	decide(context.Background(), probe, stats, []string{"private"}, nil, p)
+	if *floor != exactMaxFloor {
+		t.Errorf("stats floor input = %d, want the clamped floor %d", *floor, exactMaxFloor)
 	}
 }
 
@@ -161,7 +239,7 @@ func TestSelectorDisabledWithThresholds(t *testing.T) {
 	p.Enabled = false // the config default; every other field stays at its default
 
 	probe, calls, _ := countingProbe(1, nil)
-	dec := decide(context.Background(), probe, []string{"private"}, []string{"granted-1"}, p)
+	dec := decide(context.Background(), probe, unusableStats(), []string{"private"}, []string{"granted-1"}, p)
 
 	if dec.Mode != ModeANN || dec.Reason != ReasonDisabled {
 		t.Errorf("decision = {%q, %q}, want {ann, disabled}", dec.Mode, dec.Reason)
@@ -255,7 +333,7 @@ func TestSelectorG2_ClampedExactMaxReachesProbeAndSQL(t *testing.T) {
 	p := clampPolicy(SelectorPolicy{Enabled: true, ExactMax: 10_000_000, GreyScanTuples: 100_000_000})
 
 	probe, _, lastLimit := countingProbe(10, nil)
-	dec := decide(context.Background(), probe, []string{"private"}, nil, p)
+	dec := decide(context.Background(), probe, unusableStats(), []string{"private"}, nil, p)
 	if *lastLimit != exactMaxCeil+1 {
 		t.Errorf("probe LIMIT = %d, want clamped ExactMax+1 = %d", *lastLimit, exactMaxCeil+1)
 	}
@@ -414,7 +492,7 @@ func TestSelectorG2_ProbeMs(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 		return 1, nil
 	}
-	dec := decide(context.Background(), probe, []string{"private"}, nil, testPolicy())
+	dec := decide(context.Background(), probe, unusableStats(), []string{"private"}, nil, testPolicy())
 	if dec.ProbeMs < 1 {
 		t.Errorf("probe_ms = %v, want ≥1 for a 2ms probe", dec.ProbeMs)
 	}

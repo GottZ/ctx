@@ -1,0 +1,69 @@
+-- =============================================================================
+-- 117_selector_scope_statistics.sql — Statistik-Target für context_blocks.scope
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- Evokoa-Clean-Room design/02-strategy-selektor.md §4.3b + §6.5 (Welle W02-4),
+-- Review-Finding "grey-Stufe am Ziel-Scale wirkungslos (Sampling-Mathematik)",
+-- eingearbeitet als Option 1 (verbindlich). K1-Konfliktauflösung: die
+-- Design-Nummer 110 ist vorläufig, kanonisch ist 117.
+--
+-- ── Warum (Sampling-Mathematik) ──────────────────────────────────────────────
+-- Der Strategie-Selektor (internal/rrf/selector.go, Stufe 2) schätzt die
+-- Scope-Kardinalität aus pg_stats: MCV-Frequenz × reltuples für gelistete
+-- Scopes, Residual-Formel für den Rest. Mit dem Cluster-Default
+-- `default_statistics_target = 100` (live verifiziert) fasst die MCV-Liste
+-- höchstens ~100 Scopes und ANALYZE zieht ~30.000 Zeilen.
+--
+-- Am Ziel-Scale (10M Zeilen, ~99 % in einem Dominanz-Scope) enthält dieses
+-- Sample ~29.700 Dominanz-Zeilen und nur ~300 Rest-Zeilen. ANALYZE
+-- unterschätzt damit `n_distinct` der Long-Tail-Population systematisch, die
+-- Residual-Formel ÜBERschätzt jeden nicht gelisteten Scope entsprechend stark
+-- — und routet genau die Mittelklasse (4k–65k Blöcke), für die die
+-- grey-Stufe (gehobenes hnsw.max_scan_tuples statt Default-Budget) gebaut
+-- ist, an ihr vorbei in plain ann. Das ist das Under-fill-Fehlerbild, das die
+-- Achse beheben soll: die Überschätzung ist sicherheits-gutartig (Richtung
+-- Ist-Verhalten), macht die Stufe aber wirkungslos.
+--
+-- `SET STATISTICS 1000` hebt die MCV-Deckung auf ~1000 Scopes und das
+-- ANALYZE-Sample auf ~300.000 Zeilen. Reiner Katalog-Eingriff: keine
+-- Tabellen-/Spalten-Änderung, kein Rewrite, keine Query-Pfad-Kosten
+-- (test.sh-T07-Zähler unverändert). Die Schwellen selbst bleiben Politik
+-- (retrieval.selector.*, Settings) — hier wird nur die Datenqualität
+-- hergestellt, auf der sie überhaupt kalibrierbar sind (Achse-01-Gate
+-- "MCV-Abdeckung × est-Fehler je Scope-Klasse", design/02 §9.1).
+--
+-- ── Kosten / Betrieb (ehrlich benannt) ───────────────────────────────────────
+--  * Sperren: `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS` nimmt
+--    SHARE UPDATE EXCLUSIVE (gemessen via pg_locks, PG18) — blockiert weder
+--    Leser noch Schreiber, nur konkurrierendes ANALYZE/VACUUM/DDL. ANALYZE
+--    selbst ebenfalls SHARE UPDATE EXCLUSIVE. Kein ACCESS EXCLUSIVE, also
+--    keine Reader-Queue. `SET LOCAL lock_timeout` trotzdem nach
+--    Haus-Konvention (R-MIG2, 064/068/076/098): der Runner wrappt jede
+--    Migration in eine Transaktion, eine hängende Sperre soll die Boot-
+--    Sequenz nicht unbegrenzt stallen.
+--  * ANALYZE-Laufzeit: das Sample gilt TABELLENWEIT (Postgres nimmt das
+--    Maximum der Spalten-Targets), nicht nur für `scope` — der Lauf zieht
+--    also künftig ~300k statt ~30k Zeilen und detoastet dabei die breiten
+--    Spalten (content, embedding). @10M ist das ein Lauf im Sekunden- bis
+--    niedrigen Minutenbereich auf NVMe statt Sub-Sekunde; @434 Blöcken (Ist)
+--    unmessbar. Das Target vererbt sich auf jeden künftigen
+--    autovacuum-ANALYZE dieser Tabelle — das ist der eigentliche Dauerpreis,
+--    bewusst akzeptiert: die Kadenz ist Scale-Faktor-getrieben (0,1 → @10M
+--    alle ~1M Zeilen-Änderungen), nicht per-Query.
+--  * ANALYZE läuft hier IN der Runner-Transaktion. Zulässig: nur VACUUM
+--    (auch VACUUM ANALYZE) ist im Transaktionsblock verboten, das nackte
+--    ANALYZE nicht.
+--
+-- Idempotent (beide Statements sind Zustands-setzend, kein IF-Guard nötig),
+-- forward-only. Registrierung übernimmt der Runner (store.RunMigrations,
+-- 108+-Konvention).
+-- =============================================================================
+
+SET LOCAL lock_timeout = '3s';
+
+ALTER TABLE context_blocks ALTER COLUMN scope SET STATISTICS 1000;
+
+-- Ohne diesen Lauf wirkt das neue Target erst beim nächsten
+-- autovacuum-ANALYZE — der Selektor liefe bis dahin auf der alten,
+-- 100er-Statistik. Die Migration stellt den Zustand her, den sie zusagt.
+ANALYZE context_blocks;
