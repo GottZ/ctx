@@ -91,6 +91,12 @@ Using a shared memory *well* takes discipline against drift — see [using ctx e
 
 ctx is built by AI agents working against a published RLHF-warnings calibration — a 22-axis map of LLM failure modes (memory drift, unattributed certainty, median-user caution) with concrete exemplars. It is the methodology reference behind this project's way of working: **[gottz.de/warnings.md](https://gottz.de/warnings.md)**. Background in [using ctx effectively](docs/using-ctx-effectively.md).
 
+## Sponsoring
+
+ctx runs its retrieval decisions on measurements, not vendor benchmarks: the ANN engine question (pgvector vs. pgvectorscale, VectorChord, pgContext, or a sovereign Go binary-quantization path) sits behind a trigger framework that only escalates on evidence from the project's own corpus. The current engine is measured at 100k vectors; validating the alternatives honestly means fanning out wide benchmark runs at 1M–10M vectors — index builds in the tens-of-GB range, hours of exact ground-truth computation per lane, dedicated hardware. Empirical benchmarks of alternative engines are gated on funding, not on curiosity.
+
+If you want those numbers to exist: [GitHub Sponsors](https://github.com/sponsors/GottZ) · [Ko-fi](https://ko-fi.com/gottz) · ETH via ENS [gottz.eth](https://app.ens.domains/gottz.eth)
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=GottZ%2Fctx&type=timeline&logscale=&legend=top-left">
