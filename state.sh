@@ -85,9 +85,10 @@ fi
 # --- Contract (Schema-Contract-Check via `ctx contract`, W03-4 CLI) ---
 # set -e-sicher: der if/else fängt den Exit-Code ab, BEVOR eine Pipe/Zuweisung
 # ihn verschlucken könnte (bekannter Projekt-Quirk: "EXIT nach Pipe misst die
-# Pipe"). ctx contract liefert heute (Alt-CLI, kein W03-4-Deploy) planmäßig
-# Exit 1 mit "unknown command" statt 0 — das ist explizit KEIN "ok".
-if contract_out=$(ctx contract 2>&1); then
+# Pipe"). /api/contract ist admin-gated — ohne Admin-Key antwortet der Server
+# 403 und die CLI Exit 3 (Befund 2026-07-25, gleiche Lücke wie test.sh T07);
+# CTX_KEY aus der Env schlägt den Datei-Key (internal/cli.LoadConfig).
+if contract_out=$(CTX_KEY="${CTX_ADMIN_KEY:-}" ctx contract 2>&1); then
   contract_rc=0
 else
   contract_rc=$?
