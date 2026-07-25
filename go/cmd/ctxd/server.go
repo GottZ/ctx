@@ -110,6 +110,11 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	storeH := handler.NewStoreHandler(pool, cfgStore, blocktypeReg)
 	searchH := handler.NewSearchHandler(pool, cfgStore)
 	graphH := handler.NewGraphHandler(pool, cfgStore, blocktypeReg)
+	// W05.5: the ego cache arm reads the snapshot through the scheduler's state
+	// gate (Fresh only, design/05 §4.6). Wiring it does NOT switch anything on —
+	// graph_cache.serve_ego defaults to false, so the handler keeps offering the
+	// SQL path until the flag is flipped.
+	graphH.SetGraphCache(scheduler)
 	overviewH := handler.NewGraphOverviewHandler(pool, cfgStore)
 	// gamingReload re-builds the config snapshot from context_settings after a
 	// gaming-mode write (F3-P6), so the toggle hits the next chain without a

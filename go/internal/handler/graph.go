@@ -20,16 +20,33 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// egoCacheSource is the OPTIONAL scheduler slice for the W05.5 ego cache arm
+// (design/05 §4.2/§4.6). *events.Scheduler satisfies it; nil (pre-wire boot,
+// unit tests) means the handler never offers a snapshot and EgoGraph runs its
+// SQL path — the permanent fallback. It is its OWN narrow interface beside
+// graphCacheSource (status), following the recallRunSource doctrine: the status
+// block and the serve gate answer different questions and must not share a
+// signature.
+//
+// The implementation decides the STATE half (Fresh only); the flag half
+// (graph_cache.serve_ego) is read from the request config snapshot below, so a
+// hot flag flip takes effect on the next request without a restart.
+type egoCacheSource interface {
+	GraphCacheServe() (*graphcache.Snapshot, time.Duration, bool)
+}
 
 // GraphHandler handles GET /api/graph/ego.
 type GraphHandler struct {
 	pool       *pgxpool.Pool
 	cfg        ConfigStore
 	blocktypes *blocktype.Registry
+	graphCache egoCacheSource
 }
 
 // NewGraphHandler creates a new GraphHandler. The read rate limit comes from
@@ -38,6 +55,25 @@ type GraphHandler struct {
 // builtin set (T5 DB-sourcing doctrine).
 func NewGraphHandler(pool *pgxpool.Pool, cfg ConfigStore, blocktypes *blocktype.Registry) *GraphHandler {
 	return &GraphHandler{pool: pool, cfg: cfg, blocktypes: blocktypes}
+}
+
+// SetGraphCache wires the optional W05.5 cache arm (boot, cmd/ctxd; pattern
+// manageH.SetAdmitter). Unwired stays SQL-only — nil-tolerant by construction.
+func (h *GraphHandler) SetGraphCache(src egoCacheSource) { h.graphCache = src }
+
+// egoCache resolves the cache arm for ONE request: BOTH the state gate (source
+// says Fresh) AND the hot flag graph_cache.serve_ego must say yes, otherwise the
+// zero value (= SQL path) is returned. Default false — this wave ships the arm
+// dark (§4.7).
+func (h *GraphHandler) egoCache(cfg *config.Config) store.EgoCache {
+	if h.graphCache == nil || !cfg.GraphCache.ServeEgo {
+		return store.EgoCache{}
+	}
+	snap, age, ok := h.graphCache.GraphCacheServe()
+	if !ok || snap == nil {
+		return store.EgoCache{}
+	}
+	return store.EgoCache{Snapshot: snap, Age: age}
 }
 
 // Parameter ceilings (out-of-range → 400, never silently clamped).
@@ -130,10 +166,14 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ONE config snapshot per request (F1-W4): the rate limit and the W05.5
+	// serve flag must never come from two different generations.
+	cfgSnap := h.cfg.SnapshotForRequest(ctx)
+
 	// Read rate limit check (0 = disabled) — own action bucket "graph". MT
 	// 06-C5: per-tenant via the request context (tenant's own RateLimitRead
 	// override, else _global).
-	if limit := h.cfg.SnapshotForRequest(ctx).Query.RateLimitRead; limit > 0 {
+	if limit := cfgSnap.Query.RateLimitRead; limit > 0 {
 		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "graph")
 		if err != nil {
 			slog.Error("graph: read rate limit check error", "error", err, "request_id", reqID)
@@ -165,8 +205,11 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 	// resolution is a later wave) — nil ⇒ no-op OR-arm.
 	// T6: the type allowlist comes from the REGISTRY snapshot per request —
 	// a live registry edit changes graph visibility without a restart.
+	// W05.5: the cache arm is offered only when the state automaton says Fresh
+	// AND graph_cache.serve_ego is on; EgoGraphCached falls back to SQL for the
+	// COMPLETE request whenever the snapshot cannot answer it.
 	visibleTypes := snap.VisibleTypes()
-	result, err := store.EgoGraph(ctx, h.pool, params, authResult.ReadScopes, nil, visibleTypes)
+	result, err := store.EgoGraphCached(ctx, h.pool, params, authResult.ReadScopes, nil, visibleTypes, h.egoCache(cfgSnap))
 	if err != nil {
 		if errors.Is(err, store.ErrNotVisible) {
 			// One identical 404 for "does not exist" and "not visible" — no

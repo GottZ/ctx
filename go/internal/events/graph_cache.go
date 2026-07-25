@@ -187,3 +187,36 @@ func (s *Scheduler) GraphCacheStatus() (graphcache.Status, bool) {
 		FailedThreshold: cfg.FailedThreshold,
 	}), true
 }
+
+// GraphCacheServe is the CONSUMER gate of the state automaton (design/05 §4.6,
+// W05.5): it hands out the live snapshot ONLY in state Fresh. Degraded (dirty
+// age past MaxStaleness), Failed (build failures past the threshold) and Empty
+// (no snapshot yet) all return ok=false, and the consumer stays transparently on
+// its SQL path — the state decision lives HERE, in one place, not in each
+// consumer.
+//
+// The serve FLAG (graph_cache.serve_ego / serve_expand) is deliberately NOT read
+// here: it is per-consumer and belongs to the consumer's own request-config
+// snapshot. This method answers exactly one question — "may the cache be used at
+// all right now?".
+//
+// The second return is the snapshot's age (BuildAt-based, a diagnostic that
+// becomes BudgetReport.CacheAge). nil manager / nil snapshot ⇒ ok=false.
+func (s *Scheduler) GraphCacheServe() (*graphcache.Snapshot, time.Duration, bool) {
+	if s.graphCache == nil {
+		return nil, 0, false
+	}
+	cfg := s.cfg.Snapshot().GraphCache //nolint:forbidigo // MT 06 BLIND: the graph cache is ONE process-wide structure (global-only keys, §4.7), not tenant-scoped.
+	now := time.Now()
+	if s.graphCache.State(now, graphcache.StateConfig{
+		MaxStaleness:    cfg.MaxStaleness,
+		FailedThreshold: cfg.FailedThreshold,
+	}) != graphcache.StateFresh {
+		return nil, 0, false
+	}
+	snap := s.graphCache.Current()
+	if snap == nil {
+		return nil, 0, false
+	}
+	return snap, now.Sub(snap.BuiltAt), true
+}

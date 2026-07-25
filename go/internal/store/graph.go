@@ -194,6 +194,37 @@ func isGrantOnlyVisible(scope string, readScopes []string) bool {
 // Go error here (rrf.Search pattern) — SQL would return 0 rows, but a silent
 // empty graph would mask a wiring bug.
 func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes []string, grantedBlockIDs []string, visibleTypes []string) (*EgoResult, error) {
+	return EgoGraphCached(ctx, pool, p, readScopes, grantedBlockIDs, visibleTypes, EgoCache{})
+}
+
+// EgoCache is the OPTIONAL W05.5 cache arm handed in by the caller (design/05
+// §4.2/§4.6). A zero value (Snapshot nil) is the SQL path, byte-identical to
+// the pre-W05.5 behaviour — that is the permanent fallback AND the differential
+// oracle. The caller (handler/graph.go) decides whether the arm may run at all:
+// it passes a Snapshot ONLY when the cache state is Fresh AND graph_cache
+// .serve_ego is on. This type carries no policy, only the seam.
+type EgoCache struct {
+	// Snapshot is the live CSR snapshot; nil = SQL path.
+	Snapshot *graphcache.Snapshot
+	// Age is the snapshot's age, reported as BudgetReport.CacheAge.
+	Age time.Duration
+}
+
+// errEgoCacheStale is the INTERNAL signal that the cache arm cannot answer this
+// request (a frontier/focus id is not in the snapshot — a block younger than the
+// last build). It never escapes EgoGraphCached: the request restarts COMPLETELY
+// on the SQL arm (§4.2 — no partial fallback, no merge special cases), and the
+// server-side report records TravCacheStale.
+var errEgoCacheStale = errors.New("store: ego cache snapshot stale for this request")
+
+// EgoGraphCached is EgoGraph with the optional cache arm (design/05 §4.2, W05.5).
+// The traversal loop, the zipper, the T41 leaf check, the focus hydrate, the
+// induced edges and the degrees are SHARED with the SQL path — the arm replaces
+// exactly the two hop queries (Q1/Q1s) with snapshot walks whose candidates are
+// hydrated through the same store.VisibilityPredicate before they may enter the
+// node set or the next frontier (§5.1 Nr. 1+2). A second copy of any visibility
+// check would be a second truth; there is none.
+func EgoGraphCached(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cache EgoCache) (*EgoResult, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
@@ -204,6 +235,54 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
 	normalizeClassFilters(&p)
+
+	sqlArm := func() (*EgoResult, error) {
+		return runEgoTraversal(ctx, pool, p, readScopes, grantedBlockIDs, visibleTypes,
+			newEgoSQLHops(pool, p, readScopes, grantedBlockIDs, visibleTypes),
+			graphcache.SourceSQL, 0)
+	}
+	if cache.Snapshot == nil {
+		return sqlArm()
+	}
+	res, err := runEgoTraversal(ctx, pool, p, readScopes, grantedBlockIDs, visibleTypes,
+		newEgoCacheHops(cache.Snapshot, pool, p, readScopes, grantedBlockIDs, visibleTypes),
+		graphcache.SourceCache, cache.Age)
+	if err == nil {
+		return res, nil
+	}
+	if !errors.Is(err, errEgoCacheStale) {
+		return nil, err // a real error (recheck failure, ErrNotVisible) stays loud
+	}
+	// COMPLETE fallback: the partial cache result is discarded, the whole request
+	// re-runs on SQL (§4.2). TravCacheStale is an OPERATIONAL class — it lives in
+	// Counts (server telemetry) and is dropped by WireReport; the wire only sees
+	// source="sql", which IS the truth about the arm that answered.
+	res, err = sqlArm()
+	if err != nil {
+		return nil, err
+	}
+	res.Budget.Add(graphcache.TravCacheStale)
+	return res, nil
+}
+
+// runEgoTraversal is the ONE traversal body behind both arms: hops is the only
+// injected part (Q1/Q1s from SQL or from the snapshot walk). Every candidate a
+// fetcher returns is already DB-confirmed visible, so the node set, the frontier
+// and the T41 leaf check below are arm-independent by construction.
+//
+// The fail-closed entry checks are repeated here (self-contained entry
+// discipline, §5.2 — the same reason structuralHopNeighbors repeats them): this
+// function is reachable from two entries, and a silent empty graph would mask a
+// wiring bug.
+func runEgoTraversal(ctx context.Context, pool *pgxpool.Pool, p EgoParams,
+	readScopes, grantedBlockIDs, visibleTypes []string,
+	hops egoHopFetcher, source string, cacheAge time.Duration) (*EgoResult, error) {
+	if err := RequireScopes(readScopes); err != nil {
+		return nil, err
+	}
+	if len(visibleTypes) == 0 {
+		return nil, errors.New("store: empty visible-types allowlist (block-type registry not wired?)")
+	}
 	focus, err := hydrateFocus(ctx, pool, p.Focus, readScopes, grantedBlockIDs, visibleTypes)
 	if err != nil {
 		return nil, err
@@ -222,19 +301,12 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 	}
 	truncated := false
 	// budget collects the SAME truncation events Truncated already collapses,
-	// differentiated by cause (§4.5). Source is constant "sql" here: the ego
-	// cache arm is W05.5, so this path is always the SQL arm. Nothing about the
-	// traversal changes — every Add sits beside an existing `truncated = true`.
-	budget := graphcache.NewBudgetReport(graphcache.SourceSQL)
-
-	// Symmetric class short circuits (design/01 §4.6, W4-G4): a non-nil-EMPTY
-	// class filter means "none of this class" — the leg would bind ANY('{}'),
-	// match nothing, and (worse) leave the M050/M104 early termination dead
-	// while scanning to prefix exhaustion on every hub. Skip the roundtrip.
-	// dreamSkip also covers the legacy `link_class=supersedes` case
-	// (traversalClasses collapses it to non-nil-empty).
-	dreamSkip := p.LinkClasses != nil && len(traversalClasses(p.LinkClasses)) == 0
-	structSkip := p.StructClasses != nil && len(p.StructClasses) == 0
+	// differentiated by cause (§4.5). Source names the arm that answered: "sql"
+	// on the classic path, "cache" when the W05.5 snapshot arm produced the hops.
+	// Nothing about the traversal changes — every Add sits beside an existing
+	// `truncated = true`.
+	budget := graphcache.NewBudgetReport(source)
+	budget.CacheAge = cacheAge
 
 	for hop := 1; hop <= p.Hops; hop++ {
 		if len(frontier) == 0 {
@@ -250,20 +322,9 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 			budget.Add(graphcache.TravNodeLimitReached)
 			break
 		}
-		var dreamCands, structCands []hopCandidate
-		if !dreamSkip {
-			var herr error
-			dreamCands, herr = hopNeighbors(ctx, pool, frontier, readScopes, grantedBlockIDs, visibleTypes, p)
-			if herr != nil {
-				return nil, herr
-			}
-		}
-		if !structSkip {
-			var serr error
-			structCands, serr = structuralHopNeighbors(ctx, pool, frontier, readScopes, grantedBlockIDs, visibleTypes, p)
-			if serr != nil {
-				return nil, serr
-			}
+		dreamCands, structCands, ferr := hops.fetch(ctx, frontier)
+		if ferr != nil {
+			return nil, ferr
 		}
 		added, hopTruncated := takeHopMerged(dreamCands, structCands, visited, p.Limit-len(nodes), hop)
 		frontier = make([]string, 0, len(added))
@@ -333,6 +394,66 @@ func EgoGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes [
 		Truncated:   truncated,
 		Budget:      budget,
 	}, nil
+}
+
+// egoHopFetcher produces ONE hop's candidates from a frontier — the single
+// injected seam of runEgoTraversal (design/05 §4.2: only Q1/Q1s move to the
+// cache, everything around them stays).
+//
+// CONTRACT (load-bearing for §5.1 Nr. 1+2): every returned candidate is
+// DB-CONFIRMED visible under the canonical visibility triple — the SQL arm
+// carries the predicate inside its hop legs, the cache arm hydrates its walk
+// candidates through the same predicate before returning them. runEgoTraversal
+// builds the node set, the next frontier and the T41 leaf check from these
+// candidates, so an arm that returned unconfirmed candidates would traverse
+// THROUGH invisible nodes (the bridge leak). The test-only hint-trusting stub
+// (export_egocache_test.go) violates this DELIBERATELY — it is what makes the
+// two security gates non-vacuous.
+type egoHopFetcher interface {
+	fetch(ctx context.Context, frontier []string) (dream, structural []hopCandidate, err error)
+}
+
+// egoSQLHops is the classic arm: Q1 + Q1s, one batched query each per hop.
+type egoSQLHops struct {
+	pool            *pgxpool.Pool
+	p               EgoParams
+	readScopes      []string
+	grantedBlockIDs []string
+	visibleTypes    []string
+	// Symmetric class short circuits (design/01 §4.6, W4-G4): a non-nil-EMPTY
+	// class filter means "none of this class" — the leg would bind ANY('{}'),
+	// match nothing, and (worse) leave the M050/M104 early termination dead
+	// while scanning to prefix exhaustion on every hub. Skip the roundtrip.
+	// dreamSkip also covers the legacy `link_class=supersedes` case
+	// (traversalClasses collapses it to non-nil-empty).
+	dreamSkip  bool
+	structSkip bool
+}
+
+// newEgoSQLHops builds the SQL arm for an already-normalized EgoParams.
+func newEgoSQLHops(pool *pgxpool.Pool, p EgoParams, readScopes, grantedBlockIDs, visibleTypes []string) *egoSQLHops {
+	return &egoSQLHops{
+		pool: pool, p: p,
+		readScopes: readScopes, grantedBlockIDs: grantedBlockIDs, visibleTypes: visibleTypes,
+		dreamSkip:  p.LinkClasses != nil && len(traversalClasses(p.LinkClasses)) == 0,
+		structSkip: p.StructClasses != nil && len(p.StructClasses) == 0,
+	}
+}
+
+func (f *egoSQLHops) fetch(ctx context.Context, frontier []string) ([]hopCandidate, []hopCandidate, error) {
+	var dream, structural []hopCandidate
+	var err error
+	if !f.dreamSkip {
+		if dream, err = hopNeighbors(ctx, f.pool, frontier, f.readScopes, f.grantedBlockIDs, f.visibleTypes, f.p); err != nil {
+			return nil, nil, err
+		}
+	}
+	if !f.structSkip {
+		if structural, err = structuralHopNeighbors(ctx, f.pool, frontier, f.readScopes, f.grantedBlockIDs, f.visibleTypes, f.p); err != nil {
+			return nil, nil, err
+		}
+	}
+	return dream, structural, nil
 }
 
 // takeHop applies the deterministic truncation order to one hop's candidates:
