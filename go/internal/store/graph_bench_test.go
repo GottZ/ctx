@@ -97,9 +97,20 @@ func benchMS(d time.Duration) string {
 	return fmt.Sprintf("%.2fms", float64(d.Microseconds())/1000)
 }
 
+// benchResult is one report row. thr == 0 marks a MEASUREMENT-ONLY arm: the
+// W05.8 cache arms (graph_bench_w058_test.go) have no agreed latency ceiling —
+// their gate is E-05-1 and that decision is the user's, after these numbers
+// exist. They still assert non-vacuity, just never a threshold.
+type benchResult struct {
+	arm                string
+	p50, p95, max, thr time.Duration
+	detail             string
+}
+
 // TestGraphBench1M is the F5-W5 acceptance gate: four arms, each with its own
 // p95 threshold (design §5.3). A breach is reported as a test failure AND with
 // the documented remedy (lower the ceilings, or rebuild Q2 on per-source LATERAL).
+// Since W05.8 it also carries the cache arms 8-19 (measurement only).
 func TestGraphBench1M(t *testing.T) {
 	pool := benchPool(t)
 	ctx := context.Background()
@@ -111,11 +122,7 @@ func TestGraphBench1M(t *testing.T) {
 	hubCAP := benchHubID(t, pool, "HUB-CAP")
 	focusQ2 := benchHubID(t, pool, "FOCUS-Q2")
 
-	type result struct {
-		arm                 string
-		p50, p95, max, thr  time.Duration
-		detail              string
-	}
+	type result = benchResult
 	var results []result
 
 	// --- Arm 1: Standard (all-visible), full pipeline hops=2/cap=25/limit=500 ---
@@ -239,19 +246,26 @@ func TestGraphBench1M(t *testing.T) {
 			fmt.Sprintf("nodes=%d struct=%d", len(last.Nodes), len(last.StructEdges))})
 	}
 
+	// --- W05.8 (design/05 §7): the cache arms, measured against the SAME corpus
+	// in the SAME run so the SQL/cache pairs above and below share host load. ---
+	results = append(results, benchW058Arms(t, pool, scopes)...)
+
 	// --- Report ---
-	t.Logf("=== G39 / F5-W5 — ego latency on ~1M nodes / ~3.2M edges (warm, readScopes=[private]) ===")
+	t.Logf("=== G39 / F5-W5 + W05.8 — ego/expand latency on ~1M nodes / ~3.2M edges (warm, readScopes=[private]) ===")
 	t.Logf("%-50s %9s %9s %9s %8s  %-4s  %s", "arm", "p50", "p95", "max", "thr", "stat", "detail")
 	for _, r := range results {
 		stat := "PASS"
-		if r.p95 > r.thr {
+		switch {
+		case r.thr == 0:
+			stat = "MEAS" // measurement-only arm (W05.8) — no ceiling to breach
+		case r.p95 > r.thr:
 			stat = "FAIL"
 		}
 		t.Logf("%-50s %9s %9s %9s %8s  %-4s  %s",
 			r.arm, benchMS(r.p50), benchMS(r.p95), benchMS(r.max), benchMS(r.thr), stat, r.detail)
 	}
 	for _, r := range results {
-		if r.p95 > r.thr {
+		if r.thr > 0 && r.p95 > r.thr {
 			t.Errorf("THRESHOLD BREACH: %q p95=%s > %s — lower the ceilings (limit/edge_limit) OR rebuild Q2 on per-source LATERAL with a per-node edge budget (design §3.3 Q2 note)",
 				r.arm, benchMS(r.p95), benchMS(r.thr))
 		}
