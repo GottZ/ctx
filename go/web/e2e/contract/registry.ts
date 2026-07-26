@@ -917,7 +917,13 @@ export interface PendingContract {
  * (with reason + delivering wave) or carries a contract, otherwise the matrix
  * meta-test is red; a pending entry whose contract exists is stale ⇒ red.
  */
-export const pendingContracts: PendingContract[] = []
+export const pendingContracts: PendingContract[] = [
+  {
+    route: '/guard',
+    reason:
+      'Guard review queue (needs_review pipeline W4) — page shipped dark-launched; its PageContract (list/pair/resolve flows against a seeded flagged corpus) lands with the guard e2e wave.',
+  },
+]
 
 /** Sentinel re-export so leak-probe consumers need only the registry. */
 export { SENTINEL }

@@ -398,6 +398,21 @@ export interface StatusResponse {
   activity: ActivityStatus | null
   dispatch?: DispatchStatus | null
   dispatch_tenant?: DispatchTenantStatus | null
+  // Guard review-queue push (needs_review pipeline W2): PRESENT on BOTH paths
+  // (global counts for server-admin, home-scope-filtered for tenant-admin) —
+  // absent only when the server-side read degraded. The /guard page is the
+  // consumer surface; a status tile may ride this later.
+  guard_review?: GuardReviewStatus | null
+}
+
+// Source: go/internal/handler/status.go (guardReviewStatus), pinned by
+// TestStatusGoldenKeys. Counts per flagged state + the oldest updated_at over
+// the flagged set (aging signal; null = empty queue).
+export interface GuardReviewStatus {
+  needs_review: number
+  near_duplicate: number
+  possible_duplicate: number
+  oldest_updated_at: string | null
 }
 
 // Source: go/internal/handler/status.go (statusProfile). The slim per-tick shape

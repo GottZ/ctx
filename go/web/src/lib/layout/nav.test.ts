@@ -33,7 +33,8 @@ const hrefs = (whoamiResponse: WhoamiResponse | null) =>
 const CORPUS = ['/blocks', '/graph', '/chat']
 // U11 (design 04 §4 E04-4): /tenant/backends is re-shown in the tenant section
 // now that its route exists (items.ts, the S11 fail-closed hide is lifted).
-const TENANT = ['/tenant', '/tenant/backends']
+// Guard W4: /guard (review queue) joins the tenant section (viewOpsSurfaces).
+const TENANT = ['/tenant', '/tenant/backends', '/guard']
 const SERVER = ['/admin', '/settings', '/status', '/settings/backends']
 
 describe('visibleNav', () => {

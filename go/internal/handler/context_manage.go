@@ -1073,7 +1073,7 @@ func (h *ManageHandler) handleGuardList(w http.ResponseWriter, r *http.Request, 
 		limit = 50
 	}
 
-	items, err := store.GuardList(ctx, h.pool, ar.ReadScopes, req.Category, req.Status, limit)
+	items, err := store.GuardList(ctx, h.pool, ar.ReadScopes, req.Category, req.Status, req.Types, limit)
 	if err != nil {
 		slog.Error("manage: guard-list error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -1125,16 +1125,10 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
 
-	if req.ID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false, "error": "Missing required field: id",
-		})
-		return
-	}
-
-	// Parse resolution from data.
+	// Parse resolution (and the optional batch id list) from data.
 	var resolveData struct {
-		Resolution string `json:"resolution"`
+		Resolution string   `json:"resolution"`
+		IDs        []string `json:"ids"`
 	}
 	if len(req.Data) > 0 {
 		if err := json.Unmarshal(req.Data, &resolveData); err != nil {
@@ -1146,9 +1140,45 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	if req.ID == "" && len(resolveData.IDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": "Missing required field: id (or data.ids)",
+		})
+		return
+	}
+	if req.ID != "" && len(resolveData.IDs) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": "Provide either id or data.ids, not both",
+		})
+		return
+	}
+
 	if resolveData.Resolution != "archive" && resolveData.Resolution != "keep" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false, "error": "Resolution must be 'archive' or 'keep'",
+		})
+		return
+	}
+
+	// Batch path: every id is accounted for (resolved or skipped+reason);
+	// the single-id wire shape below stays byte-identical.
+	if len(resolveData.IDs) > 0 {
+		resolved, skipped, err := store.GuardResolveBatch(ctx, h.pool, resolveData.IDs, resolveData.Resolution, writableBlockScopes(ar))
+		if err != nil {
+			slog.Error("manage: guard-resolve batch error", "error", err, "request_id", reqID)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false, "error": "Internal server error",
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"action":         "guard-resolve",
+			"success":        true,
+			"resolution":     resolveData.Resolution,
+			"resolved_count": len(resolved),
+			"skipped_count":  len(skipped),
+			"resolved":       resolved,
+			"skipped":        skipped,
 		})
 		return
 	}

@@ -92,6 +92,12 @@ export function navItems(caps: Capabilities): NavItem[] {
   if (caps.viewTenantBackends) {
     items.push({ href: '/tenant/backends', label: 'Backends', iconKey: 'backends', section: 'tenant' })
   }
+  // Guard review queue (needs_review pipeline W4): corpus curation with ops
+  // character — gated on viewOpsSurfaces (tenant-admin-or-up), the hook the
+  // ops-relocation axis owns. Server authorization stays writableBlockScopes.
+  if (caps.viewOpsSurfaces) {
+    items.push({ href: '/guard', label: 'Guard Review', iconKey: 'guard', section: 'tenant' })
+  }
 
   // SERVER — cross-tenant admin (server-admin only). Tenants route owned by the
   // server-admin axis (A2); the ops surfaces stay here conservatively (D5/K2).

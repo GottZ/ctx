@@ -450,23 +450,56 @@ func guardCmd(getClient func() (*Client, error)) *cobra.Command {
 	return cmd
 }
 
+type guardListOpts struct {
+	status   string
+	category string
+	types    []string
+	limit    int
+	idsOnly  bool
+}
+
 func guardListCmd(getClient func() (*Client, error)) *cobra.Command {
-	return &cobra.Command{
+	opts := &guardListOpts{}
+	cmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List flagged blocks",
+		Long:    "List flagged blocks. Composable with resolve:\n  ctx guard list --status needs_review --type checkpoint --ids-only | xargs ctx guard resolve keep",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return guardListRun(getClient)
+			return guardListRunOpts(getClient, opts)
 		},
 	}
+	cmd.Flags().StringVar(&opts.status, "status", "", "filter by guard status (e.g. needs_review)")
+	cmd.Flags().StringVar(&opts.category, "category", "", "filter by category")
+	cmd.Flags().StringSliceVar(&opts.types, "type", nil, "filter by block type (repeatable)")
+	cmd.Flags().IntVar(&opts.limit, "limit", 0, "max results (server clamps to 200)")
+	cmd.Flags().BoolVar(&opts.idsOnly, "ids-only", false, "print block ids only, one per line")
+	return cmd
 }
 
 func guardListRun(getClient func() (*Client, error)) error {
+	return guardListRunOpts(getClient, &guardListOpts{})
+}
+
+func guardListRunOpts(getClient func() (*Client, error), opts *guardListOpts) error {
 	c, err := getClient()
 	if err != nil {
 		return err
 	}
-	resp, err := c.Post("manage", map[string]any{"action": "guard-list"})
+	payload := map[string]any{"action": "guard-list"}
+	if opts.status != "" {
+		payload["status"] = opts.status
+	}
+	if opts.category != "" {
+		payload["category"] = opts.category
+	}
+	if len(opts.types) > 0 {
+		payload["types"] = opts.types
+	}
+	if opts.limit > 0 {
+		payload["limit"] = opts.limit
+	}
+	resp, err := c.Post("manage", payload)
 	if err != nil {
 		return err
 	}
@@ -488,7 +521,18 @@ func guardListRun(getClient func() (*Client, error)) error {
 
 	blocks, _ := data["blocks"].([]any)
 	if len(blocks) == 0 {
-		fmt.Println("No flagged blocks.")
+		if !opts.idsOnly {
+			fmt.Println("No flagged blocks.")
+		}
+		return nil
+	}
+
+	if opts.idsOnly {
+		for _, raw := range blocks {
+			if b, ok := raw.(map[string]any); ok {
+				fmt.Printf("%v\n", b["id"])
+			}
+		}
 		return nil
 	}
 
@@ -498,7 +542,7 @@ func guardListRun(getClient func() (*Client, error)) error {
 			continue
 		}
 		fmt.Printf("[%v] %v\n", b["guard_status"], b["title"])
-		fmt.Printf("  id: %v  category: %v\n", b["id"], b["category"])
+		fmt.Printf("  id: %v  category: %v  type: %v\n", b["id"], b["category"], b["type_name"])
 		if sim, ok := b["similarity"]; ok && sim != nil {
 			matched := b["matched_title"]
 			if matched == nil {
@@ -578,18 +622,41 @@ func guardStatsCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 }
 
+// splitGuardResolveArgs separates the resolution keyword from the block ids.
+// Exactly one argument must be 'archive' or 'keep'; its position is free, so
+// both the documented form (resolve <id> keep) and the xargs-friendly form
+// (resolve keep <id...>) work.
+func splitGuardResolveArgs(args []string) (resolution string, ids []string, err error) {
+	for _, a := range args {
+		if a == "archive" || a == "keep" {
+			if resolution != "" {
+				return "", nil, fmt.Errorf("resolution given twice (%q and %q)", resolution, a)
+			}
+			resolution = a
+			continue
+		}
+		ids = append(ids, a)
+	}
+	if resolution == "" {
+		return "", nil, fmt.Errorf("resolution must be 'archive' or 'keep'")
+	}
+	if len(ids) == 0 {
+		return "", nil, fmt.Errorf("at least one block id required")
+	}
+	return resolution, ids, nil
+}
+
 func guardResolveCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
-		Use:     "resolve <block-id> <archive|keep>",
+		Use:     "resolve <block-id...> <archive|keep>",
 		Aliases: []string{"r"},
-		Short:   "Resolve a flagged block",
-		Args:    cobra.ExactArgs(2),
+		Short:   "Resolve flagged blocks (one or many)",
+		Long:    "Resolve flagged blocks. The resolution keyword may come first or last, so this composes with list --ids-only:\n  ctx guard list --status needs_review --type checkpoint --ids-only | xargs ctx guard resolve keep",
+		Args:    cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			blockID := args[0]
-			resolution := args[1]
-
-			if resolution != "archive" && resolution != "keep" {
-				return fmt.Errorf("resolution must be 'archive' or 'keep'")
+			resolution, ids, err := splitGuardResolveArgs(args)
+			if err != nil {
+				return err
 			}
 
 			c, err := getClient()
@@ -597,11 +664,16 @@ func guardResolveCmd(getClient func() (*Client, error)) *cobra.Command {
 				return err
 			}
 
-			resp, err := c.Post("manage", map[string]any{
-				"action": "guard-resolve",
-				"id":     blockID,
-				"data":   map[string]string{"resolution": resolution},
-			})
+			// Single id keeps the original wire shape; many ids use the batch.
+			payload := map[string]any{"action": "guard-resolve"}
+			if len(ids) == 1 {
+				payload["id"] = ids[0]
+				payload["data"] = map[string]any{"resolution": resolution}
+			} else {
+				payload["data"] = map[string]any{"resolution": resolution, "ids": ids}
+			}
+
+			resp, err := c.Post("manage", payload)
 			if err != nil {
 				return err
 			}
@@ -612,21 +684,36 @@ func guardResolveCmd(getClient func() (*Client, error)) *cobra.Command {
 				return nil //nolint:nilerr // raw response already printed above
 			}
 
-			if success, _ := d["success"].(bool); success {
-				resolved, _ := d["resolved"].(map[string]any)
-				if resolved != nil {
-					id := fmt.Sprintf("%v", resolved["id"])
-					if len(id) > 12 {
-						id = id[:12] + "..."
-					}
-					fmt.Printf("%v: %v (%s)\n", resolved["guard_status"], resolved["title"], id)
-				}
-			} else {
+			if success, _ := d["success"].(bool); !success {
 				errMsg, _ := d["error"].(string)
 				if errMsg == "" {
 					errMsg = "unknown"
 				}
 				return fmt.Errorf("error: %s", errMsg)
+			}
+
+			if resolved, ok := d["resolved"].(map[string]any); ok && resolved != nil {
+				// Single-id response.
+				id := fmt.Sprintf("%v", resolved["id"])
+				if len(id) > 12 {
+					id = id[:12] + "..."
+				}
+				fmt.Printf("%v: %v (%s)\n", resolved["guard_status"], resolved["title"], id)
+				return nil
+			}
+
+			// Batch response.
+			fmt.Printf("Resolved %v block(s) as %v", d["resolved_count"], resolution)
+			if sc, ok := d["skipped_count"].(float64); ok && sc > 0 {
+				fmt.Printf(", skipped %v", int(sc))
+			}
+			fmt.Println(".")
+			if skipped, ok := d["skipped"].([]any); ok {
+				for _, raw := range skipped {
+					if s, ok := raw.(map[string]any); ok {
+						fmt.Printf("  skipped %v: %v\n", s["id"], s["reason"])
+					}
+				}
 			}
 			return nil
 		},

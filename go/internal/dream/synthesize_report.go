@@ -71,6 +71,23 @@ type dailyStructuralLinkStat struct {
 	Count     int
 }
 
+// dailyGuardStat carries the guard review-queue STAND (not a window delta):
+// open flagged blocks in the report scope + the age of the queue head. It is
+// the report-side push of the needs_review pipeline (guard W2) — an unworked
+// queue surfaces in the daily report instead of waiting for a guard-stats
+// pull. nil ⇒ no section (live path only; a backfilled yesterday-report must
+// not carry today's queue stand).
+type dailyGuardStat struct {
+	NeedsReview       int
+	NearDuplicate     int
+	PossibleDuplicate int
+	OldestDays        int
+}
+
+func (g *dailyGuardStat) total() int {
+	return g.NeedsReview + g.NearDuplicate + g.PossibleDuplicate
+}
+
 // dailyNewBlock identifies a fresh block (created in the last 24h) by its
 // category and title — sufficient context for the LLM without dragging full
 // content into the synthesis prompt. ID feeds the deterministic report→source
@@ -99,7 +116,7 @@ const dailySynthesisHourUTC = 3
 func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string) (string, error) {
 	now := time.Now().UTC()
 	return generateDailyReportWindow(ctx, pool, r, scope,
-		now.Add(-24*time.Hour), now, now.Format("2006-01-02"))
+		now.Add(-24*time.Hour), now, now.Format("2006-01-02"), true)
 }
 
 // GenerateDailyReportFor re-synthesizes the report titled day (backfill): the
@@ -110,15 +127,19 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, sco
 func GenerateDailyReportFor(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string, day time.Time) (string, error) {
 	day = day.UTC()
 	end := time.Date(day.Year(), day.Month(), day.Day(), dailySynthesisHourUTC, 0, 0, 0, time.UTC)
+	// includeGuardQueue=false: the guard queue is a STAND, not window activity —
+	// a backfilled yesterday-report must not carry today's queue.
 	return generateDailyReportWindow(ctx, pool, r, scope,
-		end.Add(-24*time.Hour), end, day.Format("2006-01-02"))
+		end.Add(-24*time.Hour), end, day.Format("2006-01-02"), false)
 }
 
 // generateDailyReportWindow is the shared core: aggregate the [from, to)
 // activity, synthesize, upsert "Tagesbericht <date>" and anchor its source
 // edges. date is the title/prompt day (not derived from the window bounds —
 // the rolling path's window ends now, the backfill path's at 03:00).
-func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string, from, to time.Time, date string) (string, error) {
+// includeGuardQueue gates the guard review-queue STAND section (live path
+// only — see GenerateDailyReportFor).
+func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string, from, to time.Time, date string, includeGuardQueue bool) (string, error) {
 	decisions, err := fetchDailyDecisions(ctx, pool, scope, from, to)
 	if err != nil {
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
@@ -139,6 +160,14 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
 
+	var guardQueue *dailyGuardStat
+	if includeGuardQueue {
+		guardQueue, err = fetchDailyGuardReview(ctx, pool, scope, to)
+		if err != nil {
+			return "", fmt.Errorf("dream: synthesize report: %w", err)
+		}
+	}
+
 	// Skip gate DELIBERATELY unchanged in shape (GD2, design/04 §4.3 pt. 3):
 	// structural-only activity (e.g. a forge re-sync touching only references)
 	// produces NO LLM report — a report without content activity would be
@@ -151,7 +180,7 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		return "", nil
 	}
 
-	userPrompt := buildDailyPrompt(date, decisions, dreamLinks, structLinks, newBlocks)
+	userPrompt := buildDailyPrompt(date, decisions, dreamLinks, structLinks, newBlocks, guardQueue)
 
 	dreamVer := int16(Version)
 	entry := &llmlog.Entry{
@@ -231,6 +260,10 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 	entry.Metadata["block_id"] = block.ID
 	entry.BlockIDs = []string{block.ID}
 
+	guardOpen := 0
+	if guardQueue != nil {
+		guardOpen = guardQueue.total()
+	}
 	slog.Info("dream: daily synthesis complete",
 		"block_id", block.ID,
 		"scope", scope,
@@ -238,6 +271,7 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		"dream_links", len(dreamLinks),
 		"structural_links", len(structLinks),
 		"new_blocks", len(newBlocks),
+		"guard_review_open", guardOpen,
 		"source_links", linkCount,
 	)
 
@@ -418,10 +452,42 @@ func fetchDailyStructuralLinks(ctx context.Context, pool *pgxpool.Pool, scope st
 	return out, rows.Err()
 }
 
+// fetchDailyGuardReview reads the open guard review-queue STAND for the report
+// scope (guard W2): flagged counts per state + queue-head age in whole days,
+// measured against the window end. Single-scope (GD3 line — deliberately NOT
+// store.GetGuardStats, whose ReadScopes-array semantics belong to the manage
+// pull path). Returns nil when the queue is empty, so an empty queue keeps the
+// prompt bytes identical (omission semantics).
+func fetchDailyGuardReview(ctx context.Context, pool *pgxpool.Pool, scope string, asOf time.Time) (*dailyGuardStat, error) {
+	g := &dailyGuardStat{}
+	var oldest *time.Time
+	err := pool.QueryRow(ctx,
+		`SELECT
+			(count(*) FILTER (WHERE guard_status = 'needs_review'))::int,
+			(count(*) FILTER (WHERE guard_status = 'near_duplicate'))::int,
+			(count(*) FILTER (WHERE guard_status = 'possible_duplicate'))::int,
+			min(updated_at)
+		 FROM context_blocks
+		 WHERE scope = $1 AND NOT is_archived
+		   AND guard_status IN ('needs_review', 'near_duplicate', 'possible_duplicate')`,
+		scope,
+	).Scan(&g.NeedsReview, &g.NearDuplicate, &g.PossibleDuplicate, &oldest)
+	if err != nil {
+		return nil, fmt.Errorf("query guard review queue: %w", err)
+	}
+	if g.total() == 0 {
+		return nil, nil
+	}
+	if oldest != nil {
+		g.OldestDays = int(asOf.Sub(*oldest).Hours() / 24)
+	}
+	return g, nil
+}
+
 // buildDailyPrompt assembles the structured user-prompt block fed to the LLM.
-// Sections are omitted when their slice is empty so the prompt does not
-// suggest that the missing axis was zero by mistake.
-func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []dailyDreamLinkStat, structLinks []dailyStructuralLinkStat, newBlocks []dailyNewBlock) string {
+// Sections are omitted when their slice is empty (guard: nil) so the prompt
+// does not suggest that the missing axis was zero by mistake.
+func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []dailyDreamLinkStat, structLinks []dailyStructuralLinkStat, newBlocks []dailyNewBlock, guardQueue *dailyGuardStat) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Datum: %s\n", date)
 
@@ -453,6 +519,23 @@ func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []d
 		for _, nb := range newBlocks {
 			fmt.Fprintf(&b, "- [%s] %s\n", nb.Category, nb.Title)
 		}
+	}
+
+	// Guard review-queue STAND after the activity sections (guard W2): the
+	// open queue is a state of the corpus, not a window event — it closes the
+	// report so an unworked queue is named every day it stays open.
+	if guardQueue != nil && guardQueue.total() > 0 {
+		b.WriteString("\nGuard-Review offen (Stand heute):\n")
+		if guardQueue.NeedsReview > 0 {
+			fmt.Fprintf(&b, "- needs_review: %d\n", guardQueue.NeedsReview)
+		}
+		if guardQueue.NearDuplicate > 0 {
+			fmt.Fprintf(&b, "- near_duplicate: %d\n", guardQueue.NearDuplicate)
+		}
+		if guardQueue.PossibleDuplicate > 0 {
+			fmt.Fprintf(&b, "- possible_duplicate: %d\n", guardQueue.PossibleDuplicate)
+		}
+		fmt.Fprintf(&b, "- ältester Eintrag: %d Tage\n", guardQueue.OldestDays)
 	}
 
 	return b.String()

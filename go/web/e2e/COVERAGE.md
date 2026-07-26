@@ -144,4 +144,6 @@ Gesamt: 7 Einträge. Wachstum (neue Einträge oder Node-Zuwachs) ⇒ rot bzw.
 
 ## Ausstehende Kontrakte (Matrix-Gate: jede Route trägt Kontrakt XOR Pending-Eintrag)
 
-- keine — die Matrix ist seit PV7 vollständig über den Ist-Bestand; die Pending-Mechanik bleibt für künftige Routen bestehen.
+| Route | Grund |
+|---|---|
+| `/guard` | Guard review queue (needs_review pipeline W4) — page shipped dark-launched; its PageContract (list/pair/resolve flows against a seeded flagged corpus) lands with the guard e2e wave. |

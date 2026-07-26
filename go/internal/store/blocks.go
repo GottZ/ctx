@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -135,12 +137,21 @@ type GuardListItem struct {
 	Title        string  `json:"title"`
 	Category     string  `json:"category"`
 	Scope        string  `json:"scope"`
+	Type         string  `json:"type_name"`
 	GuardStatus  string  `json:"guard_status"`
 	Similarity   *string `json:"similarity"`
 	MatchedID    *string `json:"matched_id"`
 	MatchedTitle *string `json:"matched_title"`
 	CheckedAt    *string `json:"checked_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// GuardSkip reports why a requested id was not resolved by GuardResolveBatch.
+// Cross-scope and nonexistent ids collapse into the same reason on purpose
+// (no existence oracle — the structural-links doctrine).
+type GuardSkip struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"` // invalid_id | not_found | already_archived | not_flagged
 }
 
 // GuardStats holds guard state statistics.
@@ -1216,8 +1227,10 @@ func LogAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID, blockID, actio
 	return nil
 }
 
-// GuardList returns flagged blocks for guard review.
-func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category, status string, limit int) ([]GuardListItem, error) {
+// GuardList returns flagged blocks for guard review. types is an optional
+// server-side type_name filter (bind parameter, WF-T10 line — never a client
+// filter over paginated lists at target scale).
+func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category, status string, types []string, limit int) ([]GuardListItem, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
@@ -1244,6 +1257,12 @@ func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, cat
 		argIdx++
 	}
 
+	if len(types) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("b.type_name = ANY($%d::text[])", argIdx))
+		args = append(args, types)
+		argIdx++
+	}
+
 	args = append(args, limit)
 	limitIdx := argIdx
 	argIdx++
@@ -1254,7 +1273,7 @@ func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, cat
 
 	whereClause := strings.Join(whereClauses, " AND ")
 
-	query := fmt.Sprintf(`SELECT b.id, b.title, b.category, b.scope, b.guard_status,
+	query := fmt.Sprintf(`SELECT b.id, b.title, b.category, b.scope, b.type_name, b.guard_status,
 		b.metadata->>'guard_similarity' AS similarity,
 		CASE
 			WHEN mb.id IS NULL THEN NULL
@@ -1286,7 +1305,7 @@ func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, cat
 	for rows.Next() {
 		var item GuardListItem
 		if err := rows.Scan(
-			&item.ID, &item.Title, &item.Category, &item.Scope, &item.GuardStatus,
+			&item.ID, &item.Title, &item.Category, &item.Scope, &item.Type, &item.GuardStatus,
 			&item.Similarity, &item.MatchedID, &item.MatchedTitle,
 			&item.CheckedAt, &item.UpdatedAt,
 		); err != nil {
@@ -1369,4 +1388,167 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string
 		return nil, fmt.Errorf("store: guard resolve: %w", err)
 	}
 	return b, nil
+}
+
+// guardResolveBatchMax caps one batch call; larger queues page over the cap.
+const guardResolveBatchMax = 500
+
+// guardBatchResolvable is the set of guard states a BATCH resolve may touch.
+// Deliberately narrower than the single-id GuardResolve (which resolves any
+// non-archived block in a writable scope): a batch amplifies mistakes, so an
+// id that is not actually flagged is reported as skipped instead of silently
+// mass-archived (minimal blast radius on the destructive path).
+var guardBatchResolvable = []string{"needs_review", "near_duplicate", "possible_duplicate"}
+
+// dedupeGuardBatchIDs validates ids in Go so one malformed entry degrades to
+// a skip instead of failing the whole statement; dedup keeps the accounting
+// one-row-per-id.
+func dedupeGuardBatchIDs(ids []string) (valid []string, skipped []GuardSkip) {
+	skipped = make([]GuardSkip, 0)
+	valid = make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if _, err := uuid.Parse(id); err != nil {
+			skipped = append(skipped, GuardSkip{ID: id, Reason: "invalid_id"})
+			continue
+		}
+		valid = append(valid, id)
+	}
+	return valid, skipped
+}
+
+// classifyGuardBatch locks the candidate rows (so a concurrent guard run
+// cannot re-stamp guard_status between classification and update) and splits
+// them into resolvable ids and skips. A row invisible in writeScopes yields
+// not_found — indistinguishable from nonexistent (no existence oracle).
+func classifyGuardBatch(ctx context.Context, tx pgx.Tx, valid, writeScopes []string, skipped []GuardSkip) (resolvable []string, _ []GuardSkip, err error) {
+	rows, err := tx.Query(ctx,
+		`SELECT id, is_archived, guard_status
+		 FROM context_blocks
+		 WHERE id = ANY($1::uuid[]) AND scope = ANY($2::text[])
+		 FOR UPDATE`,
+		valid, writeScopes,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: guard resolve batch: select: %w", err)
+	}
+	defer rows.Close()
+	type rowState struct {
+		archived bool
+		status   string
+	}
+	states := make(map[string]rowState, len(valid))
+	for rows.Next() {
+		var id, status string
+		var archived bool
+		if err := rows.Scan(&id, &archived, &status); err != nil {
+			return nil, nil, fmt.Errorf("store: guard resolve batch: scan: %w", err)
+		}
+		states[id] = rowState{archived: archived, status: status}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("store: guard resolve batch: rows: %w", err)
+	}
+
+	resolvable = make([]string, 0, len(valid))
+	for _, id := range valid {
+		st, ok := states[id]
+		switch {
+		case !ok:
+			skipped = append(skipped, GuardSkip{ID: id, Reason: "not_found"})
+		case st.archived:
+			skipped = append(skipped, GuardSkip{ID: id, Reason: "already_archived"})
+		case !slices.Contains(guardBatchResolvable, st.status):
+			skipped = append(skipped, GuardSkip{ID: id, Reason: "not_flagged"})
+		default:
+			resolvable = append(resolvable, id)
+		}
+	}
+	return resolvable, skipped, nil
+}
+
+// execGuardBatchUpdate applies one resolution to the pre-classified ids and
+// returns the updated blocks (same RETURNING shape as the single-id path).
+func execGuardBatchUpdate(ctx context.Context, tx pgx.Tx, resolvable, writeScopes []string, resolution string) ([]Block, error) {
+	setClause := `guard_status = 'active'`
+	if resolution == "archive" {
+		setClause = `is_archived = true, guard_status = 'archived_dup'`
+	}
+	updated, err := tx.Query(ctx,
+		`UPDATE context_blocks SET `+setClause+`,
+			metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+				'guard_resolved_at', now()::text,
+				'guard_resolution', $3::text
+			),
+			updated_at = now()
+		WHERE id = ANY($1::uuid[]) AND scope = ANY($2::text[])
+		RETURNING id, title, category, scope, guard_status, created_at, updated_at`,
+		resolvable, writeScopes, resolution,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: guard resolve batch: update: %w", err)
+	}
+	defer updated.Close()
+	resolved := make([]Block, 0, len(resolvable))
+	for updated.Next() {
+		var b Block
+		if err := updated.Scan(&b.ID, &b.Title, &b.Category, &b.Scope, &b.GuardStatus, &b.CreatedAt, &b.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: guard resolve batch: update scan: %w", err)
+		}
+		resolved = append(resolved, b)
+	}
+	if err := updated.Err(); err != nil {
+		return nil, fmt.Errorf("store: guard resolve batch: update rows: %w", err)
+	}
+	return resolved, nil
+}
+
+// GuardResolveBatch resolves many flagged blocks with one resolution inside a
+// single transaction. Every requested id is accounted for: either in the
+// returned resolved blocks or in skipped with a reason. Cross-scope ids
+// surface as not_found (no existence oracle).
+func GuardResolveBatch(ctx context.Context, pool *pgxpool.Pool, ids []string, resolution string, writeScopes []string) ([]Block, []GuardSkip, error) {
+	if resolution != "archive" && resolution != "keep" {
+		return nil, nil, fmt.Errorf("store: guard resolve batch: invalid resolution %q (must be 'archive' or 'keep')", resolution)
+	}
+	if err := RequireScopes(writeScopes); err != nil { // T07 fail-closed
+		return nil, nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil, fmt.Errorf("store: guard resolve batch: empty id list")
+	}
+	if len(ids) > guardResolveBatchMax {
+		return nil, nil, fmt.Errorf("store: guard resolve batch: %d ids exceed the cap of %d", len(ids), guardResolveBatchMax)
+	}
+
+	valid, skipped := dedupeGuardBatchIDs(ids)
+	resolved := make([]Block, 0, len(valid))
+	if len(valid) == 0 {
+		return resolved, skipped, nil
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: guard resolve batch: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	resolvable, skipped, err := classifyGuardBatch(ctx, tx, valid, writeScopes, skipped)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(resolvable) > 0 {
+		if resolved, err = execGuardBatchUpdate(ctx, tx, resolvable, writeScopes, resolution); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, fmt.Errorf("store: guard resolve batch: commit: %w", err)
+	}
+	return resolved, skipped, nil
 }

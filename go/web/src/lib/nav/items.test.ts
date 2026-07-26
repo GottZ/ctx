@@ -41,7 +41,9 @@ const CORPUS = ['/blocks', '/graph', '/chat']
 // U11 (design 04 §4 E04-4): the /tenant/backends route exists now, so the item
 // is re-shown in the tenant section (the S11 fail-closed hide is lifted).
 const WORKFLOW = ['/issues', '/board']
-const TENANT = ['/tenant', '/tenant/backends']
+// Guard W4: /guard (review queue) joins the tenant section, gated on
+// viewOpsSurfaces (tenant-admin-or-up).
+const TENANT = ['/tenant', '/tenant/backends', '/guard']
 const SERVER = ['/admin', '/settings', '/status', '/settings/backends']
 
 describe('navItems', () => {

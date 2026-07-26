@@ -135,6 +135,9 @@ func (c *StatusCollector) SnapshotForTenant(ctx context.Context, scope string) s
 		LLM24hComplete: true,
 		// Health/Dream/Gaming/Activity intentionally left zero — server-global.
 		DispatchTenant: c.dispatchForTenant(ctx, snap, scope),
+		// guard_review scope-filtered to the tenant's home scope (guard W2):
+		// counts of the tenant's OWN flagged blocks, no foreign disclosure.
+		GuardReview: c.buildGuardReviewStatus(ctx, scope),
 	}
 }
 

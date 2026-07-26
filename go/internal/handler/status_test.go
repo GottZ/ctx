@@ -228,6 +228,13 @@ func TestStatusGoldenKeys(t *testing.T) {
 			TotalBlocks: 1000, MigratedCount: 400, FailedCount: 3, SkippedCount: 2,
 			Pending: 595, CursorCreatedAt: &next, VerifyStartedAt: nil, HasVerifyReport: false,
 		},
+		// Guard W2: the guard_review section is present on BOTH paths (global on
+		// the admin path, scope-filtered on the tenant path) — the one deliberate
+		// exception to the admin-only convention of the sections above, because
+		// a tenant's own flagged-queue counts disclose nothing foreign.
+		GuardReview: &guardReviewStatus{
+			NeedsReview: 5, NearDuplicate: 1, PossibleDuplicate: 0, OldestUpdatedAt: &next,
+		},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -235,7 +242,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
-		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall", "embed_migration",
+		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall", "embed_migration", "guard_review",
 	})
 
 	var top map[string]json.RawMessage
@@ -296,6 +303,12 @@ func TestStatusGoldenKeys(t *testing.T) {
 	if bytes.Contains(b, []byte(`"verify_report"`)) || bytes.Contains(b, []byte(`"block_id"`)) {
 		t.Errorf("/api/status embed_migration leaked a manage-only field (verify_report/block_id): %s", b)
 	}
+
+	// Guard W2: the guard_review section wire shape. oldest_updated_at is
+	// null-capable (empty queue → null).
+	assertKeys(t, "guard_review", top["guard_review"], []string{
+		"needs_review", "near_duplicate", "possible_duplicate", "oldest_updated_at",
+	})
 
 	// MW12 dispatch section (server-admin) wire pins.
 	assertKeys(t, "dispatch", top["dispatch"], []string{

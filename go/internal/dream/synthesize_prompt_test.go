@@ -21,6 +21,7 @@ func TestBuildDailyPrompt_StructuralSection(t *testing.T) {
 			{LinkClass: "duplicate-of", Origin: "forge-sync", Count: 2},
 		},
 		[]dailyNewBlock{{Category: "learnings", Title: "x"}},
+		nil,
 	)
 
 	for _, want := range []string{
@@ -38,6 +39,35 @@ func TestBuildDailyPrompt_StructuralSection(t *testing.T) {
 	}
 }
 
+// Guard W2: the daily prompt carries a review-queue STAND section — per-state
+// lines (zero states omitted) + the queue-head age — placed after the activity
+// sections. nil ⇒ no section (empty queue / backfill path).
+func TestBuildDailyPrompt_GuardSection(t *testing.T) {
+	prompt := buildDailyPrompt(
+		"2026-07-26",
+		[]dailyDecisionStat{{Decision: "approve", Count: 2}},
+		nil, nil,
+		[]dailyNewBlock{{Category: "learnings", Title: "x"}},
+		&dailyGuardStat{NeedsReview: 114, OldestDays: 6},
+	)
+
+	for _, want := range []string{
+		"Guard-Review offen (Stand heute):",
+		"- needs_review: 114",
+		"- ältester Eintrag: 6 Tage",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "near_duplicate") {
+		t.Fatalf("zero-count state must be omitted:\n%s", prompt)
+	}
+	if strings.Index(prompt, "Neue Blocks 24h:") > strings.Index(prompt, "Guard-Review offen") {
+		t.Fatalf("guard section must close the report:\n%s", prompt)
+	}
+}
+
 // GD2 gate b (golden): WITHOUT structural rows the prompt is byte-identical
 // to the pre-wave format — the existing omission semantics (empty slice ⇒ no
 // section) extend to the new axis, so corpora without structural activity
@@ -47,7 +77,7 @@ func TestBuildDailyPrompt_GoldenWithoutStructural(t *testing.T) {
 	dreamLinks := []dailyDreamLinkStat{{Relationship: "topical", Count: 5}}
 	blocks := []dailyNewBlock{{Category: "learnings", Title: "x"}}
 
-	got := buildDailyPrompt("2026-07-14", decisions, dreamLinks, nil, blocks)
+	got := buildDailyPrompt("2026-07-14", decisions, dreamLinks, nil, blocks, nil)
 
 	// pre-GD2 byte layout, pinned literally
 	want := "Datum: 2026-07-14\n" +

@@ -92,6 +92,11 @@ export const areaRoutes = {
   '/issues': () => import('./issues/IssuesPage.svelte'),
   '/issues/:id': () => import('./issues/IssueDetailPage.svelte'),
   '/board': () => import('./board/BoardPage.svelte'),
+  // Guard review queue (needs_review pipeline W4): registered unconditionally
+  // (the U04 dark-launch line — a deep link renders the page, authorization
+  // stays server-side); the nav item gates on caps.viewOpsSurfaces.
+  // areaMode('/guard') is unmapped → 'reading'.
+  '/guard': () => import('./guard/GuardReviewPage.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes
 

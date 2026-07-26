@@ -149,6 +149,27 @@ type statusResponse struct {
 	// verify_report content (those live ONLY on the admin-gated manage endpoint,
 	// embed_migration_manage.go).
 	EmbedMigration *embedMigrationStatus `json:"embed_migration,omitempty"`
+	// GuardReview is the needs_review pipeline's push signal (guard W2): the
+	// flagged-block counts + the oldest flagged stamp, so an unworked review
+	// queue is VISIBLE instead of discoverable-on-pull only (guard-stats).
+	// UNLIKE the admin-only sections above it is present on BOTH paths —
+	// global on the server-admin path, scope-filtered to the tenant's home
+	// scope on the tenant path (counts of the tenant's OWN flagged blocks
+	// leak nothing foreign). nil only when the read fails (degrade to no
+	// section, the embed_migration posture).
+	GuardReview *guardReviewStatus `json:"guard_review,omitempty"`
+}
+
+// guardReviewStatus is the /api/status guard_review block wire shape (guard
+// W2): per-flagged-state counts + the oldest updated_at over the flagged set.
+// oldest_updated_at is an AGING signal (how long has the queue head been
+// sitting), deliberately from the column — not from metadata guard_checked_at,
+// whose presence varies across historic repair migrations (M107).
+type guardReviewStatus struct {
+	NeedsReview       int        `json:"needs_review"`
+	NearDuplicate     int        `json:"near_duplicate"`
+	PossibleDuplicate int        `json:"possible_duplicate"`
+	OldestUpdatedAt   *time.Time `json:"oldest_updated_at"`
 }
 
 // embedMigrationStatus is the /api/status re-embed-migration block wire shape
@@ -324,6 +345,10 @@ type cheapSnapshot struct {
 	// migration is active (the partial-unique index matches at most one row) —
 	// no section emitted.
 	embedMigration *embedMigrationStatus
+	// guardReview is the guard W2 review-queue push signal, captured GLOBAL at
+	// the tick (the tenant path builds its own scope-filtered read instead —
+	// it never shares this cached global aggregate). nil when the read failed.
+	guardReview *guardReviewStatus
 }
 
 // StatusCollector is the process-wide status aggregator (design 04 §3.6, W6).
@@ -704,7 +729,41 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	// rides the same tick cadence with no own source. nil (no active migration) =
 	// no section emitted (pointer + omitempty).
 	snap.embedMigration = c.buildEmbedMigrationStatus(ctx)
+	// Guard W2 review-queue signal: one FILTER-aggregate over idx_guard_status,
+	// global on this (server-admin) path. Rides the tick cadence like the
+	// neighbouring embed-migration read.
+	snap.guardReview = c.buildGuardReviewStatus(ctx, "")
 	return snap
+}
+
+// buildGuardReviewStatus renders the guard_review status block. scope == ""
+// aggregates globally (server-admin path); a non-empty scope filters to that
+// single scope (tenant path, the GD3 single-scope line). Returns nil on a read
+// error — degrade to no section, never a failed refresh (embed_migration
+// posture).
+func (c *StatusCollector) buildGuardReviewStatus(ctx context.Context, scope string) *guardReviewStatus {
+	g := &guardReviewStatus{}
+	query := `SELECT
+			(count(*) FILTER (WHERE guard_status = 'needs_review'))::int,
+			(count(*) FILTER (WHERE guard_status = 'near_duplicate'))::int,
+			(count(*) FILTER (WHERE guard_status = 'possible_duplicate'))::int,
+			min(updated_at)
+		FROM context_blocks
+		WHERE NOT is_archived
+		  AND guard_status IN ('needs_review', 'near_duplicate', 'possible_duplicate')`
+	var err error
+	if scope == "" {
+		err = c.pool.QueryRow(ctx, query).
+			Scan(&g.NeedsReview, &g.NearDuplicate, &g.PossibleDuplicate, &g.OldestUpdatedAt)
+	} else {
+		err = c.pool.QueryRow(ctx, query+` AND scope = $1`, scope).
+			Scan(&g.NeedsReview, &g.NearDuplicate, &g.PossibleDuplicate, &g.OldestUpdatedAt)
+	}
+	if err != nil {
+		slog.Warn("status: guard_review read failed", "error", err)
+		return nil
+	}
+	return g
 }
 
 // embedMigrationPendingIndexGuardMsg is logged when the active-migration read
@@ -927,6 +986,10 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		// SnapshotForTenant never calls assemble, so its field stays nil → absent
 		// (§5 Bruchpfad 9: model/backend names + infra details go tenants nothing).
 		EmbedMigration: cheap.embedMigration,
+		// guard_review is present on BOTH paths (guard W2): here the global
+		// aggregate from the tick; the tenant path builds its own scope-filtered
+		// read in SnapshotForTenant.
+		GuardReview: cheap.guardReview,
 	}
 }
 

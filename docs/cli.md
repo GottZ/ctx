@@ -23,6 +23,8 @@ The `ctx` CLI reads its config from `~/.config/ctx/config` (`CTX_BASE_URL` + `CT
 | Command | Description |
 |---------|-------------|
 | `ctx guard [list\|stats\|resolve]` | Write Guard management |
+| `ctx guard list [--status S] [--category C] [--type T]... [--limit N] [--ids-only]` | List flagged blocks (similarity-sorted, with matched partner). `--ids-only` prints one id per line for piping |
+| `ctx guard resolve <id...> <archive\|keep>` | Resolve one or many flagged blocks. The resolution keyword may come first or last, so it composes with xargs: `ctx guard list --status needs_review --type checkpoint --ids-only \| xargs ctx guard resolve keep`. Batch responses report every skipped id with a reason |
 | `ctx dream [stats\|review]` | Dream Mode stats — mode, `queue` (backlog + incoming forecast), `backoff` (per-eval-count maturity distribution + effective cooldown); human-readable on a TTY, JSON when piped + link review |
 | `ctx dream enable\|disable\|throttle` | Runtime dream mode control (on/off/throttled) |
 

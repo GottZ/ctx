@@ -157,6 +157,10 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// W12: issue-content write tools (issue_create/issue_comment/issue_state,
 	// E5 (a) — create+comment+state, no delete). Registered in their own file.
 	registerIssueTools(server, cfg)
+
+	// Guard W3: review-queue tools (guard_list/guard_resolve), REST manage
+	// guard-list/guard-resolve parity incl. the ids[] batch contract.
+	registerGuardTools(server, cfg)
 }
 
 // Tool handlers.

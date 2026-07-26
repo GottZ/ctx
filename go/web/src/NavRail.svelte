@@ -92,6 +92,8 @@
         height="6"
         rx="1.4"
       /><path d="M7 7.5h.01M7 16.5h.01" />
+    {:else if key === 'guard'}
+      <path d="M12 3.5l7 2.5v5.5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6z" /><path d="M9 12l2 2 4-4" />
     {:else if key === 'tenants'}
       <path d="M4 20V8.5l6-3.5 6 3.5V20" /><path d="M3 20h18" /><path d="M9.5 20v-4.5h3V20" />
     {:else if key === 'settings'}
