@@ -7,6 +7,13 @@
 [![License](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791)](https://www.postgresql.org)
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/how-ctx-works-dark.svg">
+    <img alt="How ctx works — four access paths into one Go daemon; the store pipeline with time-anchor extraction, embedding and Guard dedup; the query pipeline with temporal parsing, 4-way RRF fusion, temporal gravity, graph expansion and LLM synthesis; and the autonomous Dream Mode loop that cross-links the corpus" src="docs/how-ctx-works.svg" width="100%">
+  </picture>
+</p>
+
 ## What it does
 
 ctx gives your LLM a persistent, searchable memory. Store knowledge blocks, query them with hybrid retrieval (semantic + bilingual fulltext + trigram), then rerank with multi-dimensional cyclic gravity — each temporal cycle (weekday, month, quarter, week, monthday, seasonal, daily) scored as its own Gaussian field. Queries like "immer dienstags" or "Weihnachten" activate specific dimensions.

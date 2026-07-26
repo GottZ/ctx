@@ -1,0 +1,386 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="2170" viewBox="0 0 1200 2170" font-family="'Segoe UI', 'Helvetica Neue', Arial, 'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif">
+  <style>
+    /* THEME-START */
+    :root {
+      --bg:#ffffff;
+      --panel:#f5f5f4; --panel-stroke:#4b5563;
+      --ink:#111827; --ink2:#374151; --ink3:#4b5563;
+      --pill:#16a34a; --pill-text:#ffffff;
+      --green-f:#e9f7ee; --green-s:#34a06b;
+      --blue-f:#e3effd; --blue-s:#5b96e8;
+      --purple-f:#efe9f8; --purple-s:#9b7fd4;
+      --yellow-f:#fdf6d9; --yellow-s:#d3b93f;
+      --white-f:#ffffff; --white-s:#9ca3af;
+      --red-f:#fdecec; --red-s:#e07575;
+      --badge-f:#fde68a; --badge-s:#ca8a04;
+      --db-f:#dff3e6; --db-top:#bfe8cf; --db-s:#2f9e63;
+      --chip-f:#ffffff;
+      --yes:#16a34a; --no:#dc2626; --warn:#b45309;
+    }
+    /* THEME-END */
+    .h1 { font-size:56px; font-weight:900; fill:var(--ink); }
+    .h2 { font-size:19px; font-weight:500; fill:var(--ink3); }
+    .pill { font-size:21px; font-weight:800; fill:var(--pill-text); }
+    .pill-bg { fill:var(--pill); }
+    .card-t { font-size:15.5px; font-weight:800; fill:var(--ink); }
+    .card-s { font-size:12px; font-weight:500; fill:var(--ink2); }
+    .card-xs { font-size:11px; font-weight:500; fill:var(--ink2); }
+    .lbl { font-size:14px; font-weight:700; fill:var(--ink); }
+    .lbl-s { font-size:12px; font-weight:600; fill:var(--ink2); }
+    .num { font-size:15px; font-weight:800; fill:var(--ink); }
+    .yes { font-size:14px; font-weight:800; fill:var(--yes); }
+    .no  { font-size:14px; font-weight:800; fill:var(--no); }
+    .warn { font-size:12px; font-weight:700; fill:var(--warn); }
+    .emoji { font-size:26px; }
+    .emoji-s { font-size:20px; }
+    .bgfill { fill:var(--bg); }
+    .lblbg { fill:var(--panel); }
+    .panel { fill:var(--panel); stroke:var(--panel-stroke); stroke-width:2; stroke-dasharray:10 7; }
+    .c-green  { fill:var(--green-f);  stroke:var(--green-s);  stroke-width:2; stroke-dasharray:6 5; }
+    .c-blue   { fill:var(--blue-f);   stroke:var(--blue-s);   stroke-width:2; stroke-dasharray:6 5; }
+    .c-purple { fill:var(--purple-f); stroke:var(--purple-s); stroke-width:2; stroke-dasharray:6 5; }
+    .c-yellow { fill:var(--yellow-f); stroke:var(--yellow-s); stroke-width:2; stroke-dasharray:6 5; }
+    .c-white  { fill:var(--white-f);  stroke:var(--white-s);  stroke-width:2; stroke-dasharray:6 5; }
+    .c-red    { fill:var(--red-f);    stroke:var(--red-s);    stroke-width:2; stroke-dasharray:6 5; }
+    .chip { fill:var(--chip-f); stroke:var(--purple-s); stroke-width:1.4; }
+    .arrow { stroke:var(--ink); stroke-width:2.2; fill:none; marker-end:url(#ah); stroke-dasharray:8 6; animation:flow 0.9s linear infinite; }
+    .ah-fill { fill:var(--ink); }
+    .badge { fill:var(--badge-f); stroke:var(--badge-s); stroke-width:2; }
+    .db-body { fill:var(--db-f); stroke:var(--db-s); stroke-width:2.5; }
+    .db-top { fill:var(--db-top); stroke:var(--db-s); stroke-width:2.5; }
+    .db-line { fill:none; stroke:var(--db-s); stroke-width:2; }
+    @keyframes flow { to { stroke-dashoffset:-14; } }
+    .moon { animation:sway 4s ease-in-out infinite; transform-origin:1100px 1616px; }
+    @keyframes sway { 0%,100% { transform:rotate(-8deg);} 50% { transform:rotate(8deg);} }
+    @media (prefers-reduced-motion: reduce) {
+      .arrow { animation:none; stroke-dasharray:none; }
+      .moon { animation:none; }
+    }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" class="ah-fill"/>
+    </marker>
+    <!-- database cylinder -->
+    <g id="db">
+      <path d="M 0 12 L 0 66 A 38 12 0 0 0 76 66 L 76 12" class="db-body"/>
+      <ellipse cx="38" cy="12" rx="38" ry="12" class="db-top"/>
+      <path d="M 0 30 A 38 12 0 0 0 76 30" class="db-line"/>
+      <path d="M 0 48 A 38 12 0 0 0 76 48" class="db-line"/>
+    </g>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="2170" rx="26" class="bgfill"/>
+
+  <!-- ================= HEADER ================= -->
+  <text x="600" y="84" text-anchor="middle" class="h1">How ctx works</text>
+  <text x="600" y="124" text-anchor="middle" class="h2">The memory your LLM pretends to have — stored, retrieved and cross-linked autonomously.</text>
+
+  <!-- ================= PANEL 1: ACCESS ================= -->
+  <rect x="28" y="158" width="1144" height="266" rx="16" class="panel"/>
+  <rect x="52" y="180" width="130" height="42" rx="21" class="pill-bg"/>
+  <text x="117" y="209" text-anchor="middle" class="pill">Access</text>
+
+  <!-- 2x2 client cards -->
+  <rect x="60" y="240" width="200" height="72" rx="12" class="c-blue"/>
+  <text x="92" y="285" text-anchor="middle" class="emoji-s">🔌</text>
+  <text x="172" y="272" text-anchor="middle" class="card-t">MCP</text>
+  <text x="172" y="292" text-anchor="middle" class="card-xs">OAuth 2.1 · remote agents</text>
+
+  <rect x="280" y="240" width="200" height="72" rx="12" class="c-blue"/>
+  <text x="312" y="285" text-anchor="middle" class="emoji-s">⌨️</text>
+  <text x="392" y="272" text-anchor="middle" class="card-t">CLI</text>
+  <text x="392" y="292" text-anchor="middle" class="card-xs">shell · cron · pipelines</text>
+
+  <rect x="60" y="330" width="200" height="72" rx="12" class="c-blue"/>
+  <text x="92" y="375" text-anchor="middle" class="emoji-s">🌐</text>
+  <text x="172" y="362" text-anchor="middle" class="card-t">HTTP API</text>
+  <text x="172" y="382" text-anchor="middle" class="card-xs">plain REST · /api/*</text>
+
+  <rect x="280" y="330" width="200" height="72" rx="12" class="c-blue"/>
+  <text x="312" y="375" text-anchor="middle" class="emoji-s">🖥️</text>
+  <text x="392" y="362" text-anchor="middle" class="card-t">Web UI</text>
+  <text x="392" y="382" text-anchor="middle" class="card-xs">embedded Svelte 5 SPA</text>
+
+  <!-- arrows into daemon -->
+  <path class="arrow" d="M 484 276 C 540 276 550 300 592 310"/>
+  <path class="arrow" d="M 484 366 C 540 366 550 342 592 330"/>
+
+  <!-- ctxd card -->
+  <rect x="600" y="262" width="250" height="118" rx="12" class="c-green"/>
+  <text x="725" y="296" text-anchor="middle" class="emoji-s">⚙️</text>
+  <text x="725" y="322" text-anchor="middle" class="card-t">ctxd — one Go daemon</text>
+  <text x="725" y="343" text-anchor="middle" class="card-xs">API · Guard · Dream · Digest</text>
+  <text x="725" y="360" text-anchor="middle" class="card-xs">MCP server · scheduler</text>
+
+  <path class="arrow" d="M 854 321 L 936 321"/>
+
+  <!-- database -->
+  <use href="#db" x="962" y="252"/>
+  <text x="1000" y="358" text-anchor="middle" class="card-t">PostgreSQL 18</text>
+  <text x="1000" y="376" text-anchor="middle" class="card-xs">pgvector · TimescaleDB</text>
+
+  <!-- ================= PANEL 2: STORE ================= -->
+  <rect x="28" y="444" width="1144" height="436" rx="16" class="panel"/>
+  <rect x="52" y="466" width="120" height="42" rx="21" class="pill-bg"/>
+  <text x="112" y="495" text-anchor="middle" class="pill">Store</text>
+
+  <!-- new finding bubble -->
+  <rect x="60" y="540" width="212" height="96" rx="12" class="c-red"/>
+  <text x="92" y="586" text-anchor="middle" class="emoji-s">💾</text>
+  <text x="172" y="572" text-anchor="middle" class="card-t">New finding</text>
+  <text x="172" y="594" text-anchor="middle" class="card-xs">ctx save decisions</text>
+  <text x="172" y="610" text-anchor="middle" class="card-xs">"pgvector tuning" - …</text>
+
+  <path class="arrow" d="M 276 588 L 336 588"/>
+  <circle cx="306" cy="570" r="13" class="badge"/><text x="306" y="575" text-anchor="middle" class="num">1</text>
+
+  <!-- time anchors -->
+  <rect x="340" y="540" width="248" height="96" rx="12" class="c-yellow"/>
+  <text x="372" y="586" text-anchor="middle" class="emoji-s">🕐</text>
+  <text x="472" y="570" text-anchor="middle" class="card-t">Time anchors</text>
+  <text x="472" y="592" text-anchor="middle" class="card-xs">dates in content ∪ created_at</text>
+  <text x="472" y="608" text-anchor="middle" class="card-xs">→ 7 cyclic dimensions (EAV)</text>
+
+  <path class="arrow" d="M 592 588 L 652 588"/>
+  <circle cx="622" cy="570" r="13" class="badge"/><text x="622" y="575" text-anchor="middle" class="num">2</text>
+
+  <!-- embedding -->
+  <rect x="656" y="540" width="220" height="96" rx="12" class="c-green"/>
+  <text x="688" y="586" text-anchor="middle" class="emoji-s">🧠</text>
+  <text x="776" y="570" text-anchor="middle" class="card-t">Embedding model</text>
+  <text x="776" y="592" text-anchor="middle" class="card-xs">1024-dim vector</text>
+  <text x="776" y="608" text-anchor="middle" class="card-xs">async, tx-wrapped backfill</text>
+
+  <path class="arrow" d="M 880 588 L 946 588"/>
+  <circle cx="912" cy="570" r="13" class="badge"/><text x="912" y="575" text-anchor="middle" class="num">3</text>
+
+  <use href="#db" x="962" y="548"/>
+
+  <!-- guard branch -->
+  <path class="arrow" d="M 1000 640 C 1000 700 900 706 884 706"/>
+  <circle cx="948" cy="688" r="13" class="badge"/><text x="948" y="693" text-anchor="middle" class="num">4</text>
+  <text x="1035" y="686" class="lbl-s">async · 60 s</text>
+
+  <rect x="656" y="664" width="224" height="86" rx="12" class="c-purple"/>
+  <text x="688" y="710" text-anchor="middle" class="emoji-s">🛡️</text>
+  <text x="780" y="696" text-anchor="middle" class="card-t">Guard</text>
+  <text x="780" y="718" text-anchor="middle" class="card-xs">semantic dedup check</text>
+  <text x="780" y="734" text-anchor="middle" class="card-xs">per-type thresholds</text>
+
+  <!-- three outcomes -->
+  <path class="arrow" d="M 652 690 C 560 682 500 664 460 664"/>
+  <path class="arrow" d="M 652 707 C 560 707 520 730 460 733"/>
+  <path class="arrow" d="M 652 724 C 560 736 520 796 460 799"/>
+
+  <rect x="496" y="640" width="70" height="20" rx="6" class="lblbg"/>
+  <text x="531" y="655" text-anchor="middle" class="no">≥ dup</text>
+  <rect x="500" y="716" width="86" height="20" rx="6" class="lblbg"/>
+  <text x="543" y="731" text-anchor="middle" class="warn">grey zone</text>
+  <rect x="470" y="778" width="64" height="20" rx="6" class="lblbg"/>
+  <text x="502" y="793" text-anchor="middle" class="yes">clean</text>
+
+  <rect x="130" y="640" width="326" height="52" rx="12" class="c-red"/>
+  <text x="160" y="672" text-anchor="middle" class="emoji-s">🗃️</text>
+  <text x="303" y="662" text-anchor="middle" class="card-t">auto-archived</text>
+  <text x="303" y="680" text-anchor="middle" class="card-xs">duplicate — original stays canonical</text>
+
+  <rect x="130" y="708" width="326" height="52" rx="12" class="c-yellow"/>
+  <text x="160" y="740" text-anchor="middle" class="emoji-s">🔍</text>
+  <text x="303" y="730" text-anchor="middle" class="card-t">flagged needs_review</text>
+  <text x="303" y="748" text-anchor="middle" class="card-xs">near-duplicate — human decides</text>
+
+  <rect x="130" y="776" width="326" height="52" rx="12" class="c-green"/>
+  <text x="160" y="808" text-anchor="middle" class="emoji-s">✅</text>
+  <text x="303" y="798" text-anchor="middle" class="card-t">stored clean</text>
+  <text x="303" y="816" text-anchor="middle" class="card-xs">upsert by category + title</text>
+
+  <!-- ================= PANEL 3: QUERY ================= -->
+  <rect x="28" y="900" width="1144" height="648" rx="16" class="panel"/>
+  <rect x="52" y="922" width="126" height="42" rx="21" class="pill-bg"/>
+  <text x="115" y="951" text-anchor="middle" class="pill">Query</text>
+
+  <!-- row 1 -->
+  <rect x="60" y="996" width="204" height="100" rx="12" class="c-red"/>
+  <text x="92" y="1044" text-anchor="middle" class="emoji-s">💬</text>
+  <text x="168" y="1028" text-anchor="middle" class="card-t">Query</text>
+  <text x="168" y="1050" text-anchor="middle" class="card-xs">"was lief immer</text>
+  <text x="168" y="1066" text-anchor="middle" class="card-xs">dienstags schief?"</text>
+
+  <path class="arrow" d="M 268 1046 L 324 1046"/>
+  <circle cx="296" cy="1028" r="13" class="badge"/><text x="296" y="1033" text-anchor="middle" class="num">1</text>
+
+  <rect x="328" y="996" width="252" height="100" rx="12" class="c-yellow"/>
+  <text x="360" y="1044" text-anchor="middle" class="emoji-s">⏰</text>
+  <text x="462" y="1024" text-anchor="middle" class="card-t">Temporal parser</text>
+  <text x="462" y="1046" text-anchor="middle" class="card-xs">18 matchers + LLM fallback</text>
+  <text x="462" y="1062" text-anchor="middle" class="card-xs">"immer dienstags" →</text>
+  <text x="462" y="1078" text-anchor="middle" class="card-xs">{weekday: 1.0}</text>
+
+  <path class="arrow" d="M 584 1046 L 640 1046"/>
+  <circle cx="612" cy="1028" r="13" class="badge"/><text x="612" y="1033" text-anchor="middle" class="num">2</text>
+
+  <rect x="644" y="996" width="200" height="100" rx="12" class="c-green"/>
+  <text x="676" y="1044" text-anchor="middle" class="emoji-s">🧠</text>
+  <text x="756" y="1032" text-anchor="middle" class="card-t">Embedding</text>
+  <text x="756" y="1054" text-anchor="middle" class="card-xs">query → 1024-dim</text>
+  <text x="756" y="1070" text-anchor="middle" class="card-xs">vector</text>
+
+  <path class="arrow" d="M 848 1046 L 904 1046"/>
+  <circle cx="876" cy="1028" r="13" class="badge"/><text x="876" y="1033" text-anchor="middle" class="num">3</text>
+
+  <!-- 4-way RRF -->
+  <rect x="908" y="980" width="232" height="176" rx="12" class="c-purple"/>
+  <text x="1024" y="1010" text-anchor="middle" class="card-t">⚡ 4-Way RRF fusion</text>
+  <rect x="924" y="1024" width="200" height="26" rx="7" class="chip"/>
+  <text x="1024" y="1042" text-anchor="middle" class="card-xs">semantic · pgvector · 0.45</text>
+  <rect x="924" y="1056" width="200" height="26" rx="7" class="chip"/>
+  <text x="1024" y="1074" text-anchor="middle" class="card-xs">EN fulltext · 0.25</text>
+  <rect x="924" y="1088" width="200" height="26" rx="7" class="chip"/>
+  <text x="1024" y="1106" text-anchor="middle" class="card-xs">DE fulltext · 0.20</text>
+  <rect x="924" y="1120" width="200" height="26" rx="7" class="chip"/>
+  <text x="1024" y="1138" text-anchor="middle" class="card-xs">trigram title · 0.10</text>
+
+  <!-- dimension weights side-channel: parser feeds the gravity stage -->
+  <path class="arrow" d="M 462 1100 C 462 1160 700 1150 900 1226"/>
+  <rect x="580" y="1122" width="150" height="20" rx="6" class="lblbg"/>
+  <text x="655" y="1137" text-anchor="middle" class="lbl-s">DimensionWeights</text>
+
+  <!-- RRF down to gravity -->
+  <path class="arrow" d="M 1024 1160 L 1024 1200"/>
+  <circle cx="1024" cy="1180" r="13" class="badge"/><text x="1024" y="1185" text-anchor="middle" class="num">4</text>
+
+  <!-- row 2: right to left -->
+  <rect x="908" y="1204" width="232" height="112" rx="12" class="c-yellow"/>
+  <text x="940" y="1258" text-anchor="middle" class="emoji-s">🧲</text>
+  <text x="1032" y="1234" text-anchor="middle" class="card-t">Temporal gravity</text>
+  <text x="1032" y="1256" text-anchor="middle" class="card-xs">linear power-law decay +</text>
+  <text x="1032" y="1272" text-anchor="middle" class="card-xs">7 cyclic Gaussian fields</text>
+  <text x="1032" y="1288" text-anchor="middle" class="card-xs">+ forward telescoping</text>
+
+  <path class="arrow" d="M 904 1260 L 848 1260"/>
+  <circle cx="876" cy="1242" r="13" class="badge"/><text x="876" y="1247" text-anchor="middle" class="num">5</text>
+
+  <rect x="642" y="1204" width="202" height="112" rx="12" class="c-green"/>
+  <text x="674" y="1258" text-anchor="middle" class="emoji-s">🕸️</text>
+  <text x="754" y="1240" text-anchor="middle" class="card-t">Graph expand</text>
+  <text x="754" y="1262" text-anchor="middle" class="card-xs">1-hop over dream links,</text>
+  <text x="754" y="1278" text-anchor="middle" class="card-xs">confidence-gated,</text>
+  <text x="754" y="1294" text-anchor="middle" class="card-xs">hub-damped boost</text>
+
+  <path class="arrow" d="M 638 1260 L 582 1260"/>
+  <circle cx="610" cy="1242" r="13" class="badge"/><text x="610" y="1247" text-anchor="middle" class="num">6</text>
+
+  <rect x="328" y="1204" width="250" height="112" rx="12" class="c-white"/>
+  <text x="360" y="1258" text-anchor="middle" class="emoji-s">⚖️</text>
+  <text x="462" y="1240" text-anchor="middle" class="card-t">Rerank &amp; fold</text>
+  <text x="462" y="1262" text-anchor="middle" class="card-xs">comment → parent issue fold,</text>
+  <text x="462" y="1278" text-anchor="middle" class="card-xs">superseded blocks filtered,</text>
+  <text x="462" y="1294" text-anchor="middle" class="card-xs">type-policy damping</text>
+
+  <!-- down to synthesis -->
+  <path class="arrow" d="M 462 1320 L 462 1372"/>
+  <circle cx="462" cy="1346" r="13" class="badge"/><text x="462" y="1351" text-anchor="middle" class="num">7</text>
+
+  <!-- row 3 -->
+  <rect x="328" y="1376" width="250" height="112" rx="12" class="c-green"/>
+  <text x="360" y="1430" text-anchor="middle" class="emoji-s">✨</text>
+  <text x="462" y="1416" text-anchor="middle" class="card-t">LLM synthesis</text>
+  <text x="462" y="1438" text-anchor="middle" class="card-xs">concise answer written from</text>
+  <text x="462" y="1454" text-anchor="middle" class="card-xs">the retrieved blocks only</text>
+
+  <path class="arrow" d="M 582 1432 L 660 1432"/>
+  <circle cx="620" cy="1414" r="13" class="badge"/><text x="620" y="1419" text-anchor="middle" class="num">8</text>
+
+  <rect x="664" y="1376" width="250" height="112" rx="12" class="c-blue"/>
+  <text x="696" y="1430" text-anchor="middle" class="emoji-s">📄</text>
+  <text x="798" y="1416" text-anchor="middle" class="card-t">Answer + sources</text>
+  <text x="798" y="1438" text-anchor="middle" class="card-xs">block ids, scores, categories,</text>
+  <text x="798" y="1454" text-anchor="middle" class="card-xs">activated_dim_weights</text>
+
+  <!-- lightweight path note -->
+  <rect x="60" y="1376" width="204" height="112" rx="12" class="c-white"/>
+  <text x="162" y="1408" text-anchor="middle" class="card-t">🔎 ctx search</text>
+  <text x="162" y="1432" text-anchor="middle" class="card-xs">same pipeline, no LLM —</text>
+  <text x="162" y="1448" text-anchor="middle" class="card-xs">compact results for</text>
+  <text x="162" y="1464" text-anchor="middle" class="card-xs">browsing &amp; scripts</text>
+
+  <!-- ================= PANEL 4: DREAM MODE ================= -->
+  <rect x="28" y="1568" width="1144" height="424" rx="16" class="panel"/>
+  <rect x="52" y="1590" width="196" height="42" rx="21" class="pill-bg"/>
+  <text x="150" y="1619" text-anchor="middle" class="pill">Dream Mode</text>
+  <text x="270" y="1619" class="h2">continuous background loop — your corpus self-organizes while you sleep</text>
+  <g class="moon"><text x="1100" y="1630" text-anchor="middle" font-size="40">🌙</text></g>
+
+  <!-- loop chain -->
+  <rect x="60" y="1668" width="192" height="104" rx="12" class="c-blue"/>
+  <text x="156" y="1698" text-anchor="middle" class="card-t">🎯 Pick block</text>
+  <text x="156" y="1720" text-anchor="middle" class="card-xs">atomic claim,</text>
+  <text x="156" y="1736" text-anchor="middle" class="card-xs">FOR UPDATE SKIP LOCKED,</text>
+  <text x="156" y="1752" text-anchor="middle" class="card-xs">N parallel workers</text>
+
+  <path class="arrow" d="M 256 1720 L 288 1720"/>
+
+  <rect x="292" y="1668" width="180" height="104" rx="12" class="c-yellow"/>
+  <text x="382" y="1698" text-anchor="middle" class="card-t">🔑 Candidates</text>
+  <text x="382" y="1720" text-anchor="middle" class="card-xs">keyword extraction</text>
+  <text x="382" y="1736" text-anchor="middle" class="card-xs">→ RRF search for</text>
+  <text x="382" y="1752" text-anchor="middle" class="card-xs">related blocks</text>
+
+  <path class="arrow" d="M 476 1720 L 508 1720"/>
+
+  <rect x="512" y="1668" width="180" height="104" rx="12" class="c-green"/>
+  <text x="602" y="1698" text-anchor="middle" class="card-t">🤔 LLM eval</text>
+  <text x="602" y="1720" text-anchor="middle" class="card-xs">relationship classes:</text>
+  <text x="602" y="1736" text-anchor="middle" class="card-xs">topical · factual ·</text>
+  <text x="602" y="1752" text-anchor="middle" class="card-xs">causal · recurrent</text>
+
+  <path class="arrow" d="M 696 1720 L 728 1720"/>
+
+  <rect x="732" y="1668" width="180" height="104" rx="12" class="c-purple"/>
+  <text x="822" y="1698" text-anchor="middle" class="card-t">🔗 Write links</text>
+  <text x="822" y="1720" text-anchor="middle" class="card-xs">≤ 5 per cycle,</text>
+  <text x="822" y="1736" text-anchor="middle" class="card-xs">confidence-gated,</text>
+  <text x="822" y="1752" text-anchor="middle" class="card-xs">type-diversity tie-break</text>
+
+  <path class="arrow" d="M 916 1720 L 948 1720"/>
+
+  <rect x="952" y="1668" width="188" height="104" rx="12" class="c-white"/>
+  <text x="1046" y="1698" text-anchor="middle" class="card-t">📌 Curate</text>
+  <text x="1046" y="1720" text-anchor="middle" class="card-xs">supersedes detection,</text>
+  <text x="1046" y="1736" text-anchor="middle" class="card-xs">outdated marked,</text>
+  <text x="1046" y="1752" text-anchor="middle" class="card-xs">quality promoted</text>
+
+  <!-- loop back -->
+  <path class="arrow" d="M 1046 1776 C 1046 1836 800 1848 600 1848 C 400 1848 156 1836 156 1780"/>
+  <rect x="428" y="1822" width="344" height="20" rx="6" class="lblbg"/>
+  <text x="600" y="1837" text-anchor="middle" class="lbl-s">adaptive cooldown · thermal throttle · next block ↻</text>
+
+  <!-- result card -->
+  <rect x="240" y="1876" width="720" height="88" rx="12" class="c-green"/>
+  <text x="284" y="1928" text-anchor="middle" class="emoji">🕸️</text>
+  <text x="620" y="1908" text-anchor="middle" class="card-t">Self-organizing knowledge graph</text>
+  <text x="620" y="1930" text-anchor="middle" class="card-xs">discovered links feed step 6 (graph expand) — dreamed knowledge becomes recall,</text>
+  <text x="620" y="1946" text-anchor="middle" class="card-xs">stale blocks sink, canonical blocks rise</text>
+
+  <!-- ================= FOOTER STRIP ================= -->
+  <rect x="28" y="2012" width="368" height="118" rx="12" class="c-purple"/>
+  <text x="212" y="2044" text-anchor="middle" class="card-t">🏢 Multi-tenancy</text>
+  <text x="212" y="2068" text-anchor="middle" class="card-xs">tenant → scope → block isolation,</text>
+  <text x="212" y="2084" text-anchor="middle" class="card-xs">block-level grants, quotas,</text>
+  <text x="212" y="2100" text-anchor="middle" class="card-xs">self-service onboarding</text>
+
+  <rect x="416" y="2012" width="368" height="118" rx="12" class="c-yellow"/>
+  <text x="600" y="2044" text-anchor="middle" class="card-t">🧩 Block-type registry</text>
+  <text x="600" y="2068" text-anchor="middle" class="card-xs">per-type retrieval / guard / dream</text>
+  <text x="600" y="2084" text-anchor="middle" class="card-xs">policy as data — hot-reloadable,</text>
+  <text x="600" y="2100" text-anchor="middle" class="card-xs">no restart, no migration</text>
+
+  <rect x="804" y="2012" width="368" height="118" rx="12" class="c-blue"/>
+  <text x="988" y="2044" text-anchor="middle" class="card-t">🔒 Sealed secrets</text>
+  <text x="988" y="2068" text-anchor="middle" class="card-xs">AES-256-GCM provider credentials,</text>
+  <text x="988" y="2084" text-anchor="middle" class="card-xs">trust × sensitivity egress gating,</text>
+  <text x="988" y="2100" text-anchor="middle" class="card-xs">break-glass audit trail</text>
+
+  <text x="600" y="2158" text-anchor="middle" class="card-xs">github.com/GottZ/ctx · MPL-2.0</text>
+</svg>

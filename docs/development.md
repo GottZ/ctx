@@ -105,6 +105,10 @@ Retries are declared infrastructure protection (CI `1`, local `0`), not a flake 
 
 **Runtime budgets** (`.github/e2e-budget.json`, calibrated) split the e2e wall time (from `report.json`) from the whole-job wall; over budget annotates, `> 10 min` fails the job. **Three consecutive runs over the e2e part budget trigger sharding** — the blob-reporter foundation is already laid, so activation is a documented YAML diff in `ci.yml` (`vars.E2E_SHARD`), currently dormant (measured e2e ≈ 77 s ≪ the trigger). Nightly, a dedicated `web-trend` job writes one duration+flaky JSON trend line per run (`e2e-trend.sh`, retention 90 d) and measures the cumulative `__screenshots__` git-history blob volume (`history-budget.sh`): it annotates from 60 MB and flags the documented escalation path (baseline orphan branch / Git-LFS) from 150 MB, but never auto-fails — that decision is taken with the measurement, not by the CI run.
 
+## README infographic (docs/how-ctx-works*.svg)
+
+The README architecture infographic is a hand-authored animated SVG in two theme variants, selected by GitHub's `<picture>` / `prefers-color-scheme` mechanism. **Edit only `docs/how-ctx-works.svg`** — all colors live in CSS custom properties inside the `/* THEME-START */ … /* THEME-END */` block, and `docs/how-ctx-works-dark.svg` is that same file with only this block swapped. To regenerate the dark variant after an edit, replace the theme block with the dark palette (GitHub dark colors: bg `#0d1117`, panel `#161b22`, accents `#3fb950`/`#58a6ff`/`#a371f7`/`#d29922`/`#f85149`) and keep everything else byte-identical — a `re.sub` over the marker block, never a hand-edit of both files. Icons are emoji (system font stack incl. Noto/Apple/Segoe emoji), arrow flow is a CSS `stroke-dashoffset` animation with a `prefers-reduced-motion` off-switch. Verify rendering with headless Chromium (`chromium --headless --screenshot=… --window-size=1200,2170 <url>`) — serve the file over HTTP, `file://` is blocked in some tools.
+
 ## Git hooks
 
 Enable with `git config core.hooksPath .hooks`:
