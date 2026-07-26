@@ -59,6 +59,8 @@ ctx health    # DB + Ollama connectivity
 
 Running the server (Go daemon + PostgreSQL 18 + pgvector) is `docker compose up -d ctx`. Full setup, env vars and Claude Code integration are in [operations](docs/operations.md); building from source in [development](docs/development.md).
 
+**Models:** the tested reference stack is qwen3.6:27b for chat/synthesis/dream/digest, Qwen3-Embedding-8B (1024-dim, CPU-sized) for embeddings, and a bge-reranker-v2-m3 cross-encoder sidecar for rerank — but ctx is engine-agnostic: any OpenAI-compatible or Ollama API works, models are per-backend configuration. CPU-only setups work; a GPU shortens chat latency. Details: [Models & hardware](docs/operations.md#models--hardware).
+
 ## How LLMs use ctx
 
 ctx is designed to be the persistent memory layer for LLM agents. Five primitives, composable:

@@ -121,6 +121,22 @@ Invalid configurations abort the boot **after logging every finding** with field
 
 To take a GPU host (e.g. `herbert`) down for maintenance without dropping in-flight work, use the eject toggle as a quiesce gate. The disable profile takes the host's backends out of every NEW chain; requests already on the wire finish normally (a 27B synthesis ≤60s, an in-flight dream cycle ≤700s). The runbook: **activate the profile → watch the DispatchTile until `inflight=0` for that origin → then service the host.** `ctx eject on` (or the disable-profiles card on the backends settings page) activates it; the status page's DispatchTile shows `inflight`/`waitQ` per origin live, so `inflight=0` is the safe-to-stop signal. `ctx eject off` restores the host to the pool. There is no active drain — a waiting lease already holds its chain, and failover + cooldown heal the dead-host case on their own; the DispatchTile is the quiesce monitor, not an automated barrier. See [security](security.md#trust--sensitivity-gating) for the toggle's admin gating and persistence semantics.
 
+## Models & hardware
+
+ctx is **engine-agnostic**: every LLM role speaks either the OpenAI-compatible or the Ollama wire protocol (per-backend `protocol`), so any provider serving one of those works — local llama.cpp / Ollama or a remote API. Models are configuration, not code: each `context_backends` row carries a per-role `model_map` (see [architecture — backend pool](architecture.md#backend-pool-f3-migrations-053055)). The models below are the **tested production reference**, not hard requirements. Beyond the LLM backends, ctx itself is a single Go daemon plus PostgreSQL 18 + pgvector — no GPU needs of its own.
+
+| Role(s) | Reference model | Host type | Purpose |
+|---|---|---|---|
+| `synthesis` / `chat` / `translate` / `digest` — `dream` inherits chat unless split | qwen3.6:27b (Q4_K_M MTP GGUF, non-thinking — `CTX_CHAT_THINK=false`) | GPU llama.cpp; CPU fallback via the `llama-cpu` compose sidecar | Query answer synthesis, web chat, query translation, digest, Dream evaluation |
+| `embed` / `dream-embed` | Qwen3-Embedding-8B (Q4_K_M GGUF), 1024-dim vectors | CPU llama.cpp sidecar (`llama-embed`) — deliberately CPU-sized | Block + query embeddings for the semantic RRF channel |
+| `rerank` | bge-reranker-v2-m3 (Q8_0 GGUF, multilingual de+en cross-encoder) | CPU llama.cpp sidecar (`ctx-rerank`, 4 GB mem limit) | Post-RRF cross-encoder rerank; with no rerank host set, LLM-as-judge on the chat model |
+
+**Minimal setup — CPU-only works.** Nothing requires a GPU; the trade is latency. Embeddings are CPU by design (~23 tok/s prefill on a Xeon E-2176G with the tuning below, ~8 GB projected memory for the sidecar). The rerank sidecar is CPU by design too (~0.85 s/doc — the query body-heartbeat keeps proxies alive on the long path). Chat/synthesis is where a GPU pays off: the same 27B GGUF answers in ≤60 s on GPU vs ≈4.5–5.5 min per answer on CPU (`llama-cpu` fallback). Fallback chains are first-class: the backend pool walks priority-ordered rows per role, so a CPU backend can back a GPU one.
+
+**Bring your own model.** The `CTX_EMBED_*` / `CTX_CHAT_*` / `CTX_DREAM_*` / `CTX_RERANK_*` env vars (see the [environment variables](#environment-variables) table) are **bootstrap-only**: on the first boot with an empty `context_backends` they seed the pool rows, then the table is the source of truth — manage backends, roles, model maps and priorities via `ctx backends`, not env edits.
+
+**Changing the embed model changes the vector space.** Every stored vector must be regenerated before the new model can serve queries — that is a supervised re-embed migration (`ctx admin embed-migration`, state machine below), not a config flip. A runtime write to the embed model is rejected (409, env-/migration-only); the chat/dream/rerank models carry no such coupling.
+
 ## Embedding backend tuning (CPU llama.cpp)
 
 The `llama-embed` sidecar (`docker-compose.override.yml`, Qwen3-Embedding-8B, `--n-gpu-layers 0`) serves the `embed` + `dream-embed` roles on CPU. The intuitive GPU tuning is **wrong on CPU** — measured on a Xeon E-2176G (AVX2 + F16C, no AVX512):
