@@ -158,12 +158,13 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// cyclop headroom (§9.2 conflict surface, max-complexity 25) — the
 		// guard trio moves to the established dispatch* helper pattern.
 		h.dispatchGuardAction(w, r, authResult, req)
-	case "dream-stats":
-		h.handleDreamStats(w, r, authResult)
-	case "dream-review":
-		h.handleDreamReview(w, r, authResult)
-	case "dream-mode":
-		h.handleDreamMode(w, r, req)
+	case "dream-stats", "dream-review", "dream-mode", "dream-link-resolve":
+		// Dream family folded into one arm (dream-link-resolve wave,
+		// 2026-07-26) — the guard-trio dispatch* idiom: the fold FREES two
+		// HandleManage branches while adding the curation action (cyclop
+		// budget, max-complexity 25). Tier split (dream-mode mutation =
+		// server-admin, rest open) lives in actionTier, not here.
+		h.dispatchDreamAction(w, r, authResult, req)
 	case "gaming-mode", "eject-mode",
 		"disable-profile-list", "disable-profile-create", "disable-profile-update",
 		"disable-profile-delete", "disable-profile-toggle":
@@ -550,6 +551,16 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 		if isDreamModeMutation(req) {
 			return tierServerAdmin, true
 		}
+		return tierOpen, true
+	case "dream-link-resolve":
+		// Dream-link curation (2026-07-26): tierOpen like guard-resolve —
+		// the write gate is writableBlockScopes in the store layer
+		// (source-block scope, uniform not found, no existence oracle), not
+		// an admin tier. The EXPLICIT entry is mandatory (§5.1: the
+		// dispatcher default is fail-open tierOpen — for an OPEN action the
+		// tier would not change, but the S9 enumeration gate pins every
+		// dispatched action as a deliberate classification, not a
+		// fall-through).
 		return tierOpen, true
 	case "gaming-mode", "eject-mode":
 		// Only the MUTATING shape is gated: an ungated toggle would let any
@@ -1301,14 +1312,18 @@ func (h *ManageHandler) handleDreamReview(w http.ResponseWriter, r *http.Request
 }
 
 func (h *ManageHandler) fetchLowConfidenceLinks(ctx context.Context, ar *auth.AuthResult) ([]map[string]any, error) {
+	// NOT pinned (M119): a pinned link IS the completed human review — it has
+	// no business re-appearing in the candidate queue, however low the LLM's
+	// self-assessment was.
 	rows, err := h.pool.Query(ctx,
 		`SELECT dl.source_block_id::text, dl.target_block_id::text, dl.relationship,
-			dl.raw_confidence, dl.confidence, dl.scope,
+			dl.raw_confidence, dl.confidence, dl.scope, dl.rationale,
 			s.title AS source_title, t.title AS target_title
 		FROM context_dream_links dl
 		JOIN context_blocks s ON s.id = dl.source_block_id
 		JOIN context_blocks t ON t.id = dl.target_block_id
 		WHERE dl.raw_confidence < 0.7
+		  AND NOT dl.pinned
 		  AND dl.scope = ANY($1::text[])
 		ORDER BY dl.raw_confidence ASC
 		LIMIT 20`,
@@ -1322,8 +1337,9 @@ func (h *ManageHandler) fetchLowConfidenceLinks(ctx context.Context, ar *auth.Au
 	var results []map[string]any
 	for rows.Next() {
 		var sourceID, targetID, rel, scope, sourceTitle, targetTitle string
+		var rationale *string
 		var rawConfidence, confidence float64
-		if err := rows.Scan(&sourceID, &targetID, &rel, &rawConfidence, &confidence, &scope, &sourceTitle, &targetTitle); err != nil {
+		if err := rows.Scan(&sourceID, &targetID, &rel, &rawConfidence, &confidence, &scope, &rationale, &sourceTitle, &targetTitle); err != nil {
 			return nil, err
 		}
 		results = append(results, map[string]any{
@@ -1332,6 +1348,7 @@ func (h *ManageHandler) fetchLowConfidenceLinks(ctx context.Context, ar *auth.Au
 			"relationship":   rel,
 			"raw_confidence": rawConfidence,
 			"confidence":     confidence,
+			"rationale":      rationale,
 			"source_title":   sourceTitle,
 			"target_title":   targetTitle,
 		})
@@ -1342,7 +1359,7 @@ func (h *ManageHandler) fetchLowConfidenceLinks(ctx context.Context, ar *auth.Au
 func (h *ManageHandler) fetchSupersedesPairs(ctx context.Context, ar *auth.AuthResult) ([]map[string]any, error) {
 	rows, err := h.pool.Query(ctx,
 		`SELECT dl.source_block_id::text, dl.target_block_id::text,
-			dl.confidence,
+			dl.confidence, dl.pinned, dl.rationale,
 			s.title AS source_title, s.quality_score AS source_quality,
 			t.title AS target_title, t.quality_score AS target_quality
 		FROM context_dream_links dl
@@ -1362,12 +1379,16 @@ func (h *ManageHandler) fetchSupersedesPairs(ctx context.Context, ar *auth.AuthR
 	var results []map[string]any
 	for rows.Next() {
 		var sourceID, targetID, sourceTitle, targetTitle string
+		var rationale *string
+		var pinned bool
 		var confidence, sourceQuality, targetQuality float64
-		if err := rows.Scan(&sourceID, &targetID, &confidence, &sourceTitle, &sourceQuality, &targetTitle, &targetQuality); err != nil {
+		if err := rows.Scan(&sourceID, &targetID, &confidence, &pinned, &rationale, &sourceTitle, &sourceQuality, &targetTitle, &targetQuality); err != nil {
 			return nil, err
 		}
 		// Welle 46 Convention-Switch (2026-05-22): "A supersedes B" → A=source=newer,
 		// B=target=outdated. Source is the new replacement, target is the retired block.
+		// source_id/target_id/relationship are the resolve identifiers for
+		// dream-link-resolve (additive — the new_/old_ shape stays untouched).
 		results = append(results, map[string]any{
 			"new_block_id": sourceID,
 			"new_title":    sourceTitle,
@@ -1376,6 +1397,11 @@ func (h *ManageHandler) fetchSupersedesPairs(ctx context.Context, ar *auth.AuthR
 			"old_title":    targetTitle,
 			"old_quality":  targetQuality,
 			"confidence":   confidence,
+			"source_id":    sourceID,
+			"target_id":    targetID,
+			"relationship": "supersedes",
+			"pinned":       pinned,
+			"rationale":    rationale,
 		})
 	}
 	return results, rows.Err()

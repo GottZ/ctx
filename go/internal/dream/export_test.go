@@ -6,6 +6,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/GottZ/ctx/internal/llm"
 )
 
@@ -22,4 +24,12 @@ func SetChatJSONForTest(fn ChatJSONFunc) ChatJSONFunc {
 	prev := chatJSON
 	chatJSON = fn
 	return prev
+}
+
+// ReplaceStaleLinksForTest exposes the unexported replace sweep so the
+// pinned-survival integration test (M119 curation wave) can drive the REAL
+// production DELETE + supersedes-revert path inside its own transaction —
+// not a re-typed copy of the SQL.
+func ReplaceStaleLinksForTest(ctx context.Context, tx pgx.Tx, sourceID string, keptTargets []string) error {
+	return replaceStaleLinks(ctx, tx, sourceID, keptTargets)
 }

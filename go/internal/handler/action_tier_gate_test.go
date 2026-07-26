@@ -133,6 +133,9 @@ func TestActionTier_Classification(t *testing.T) {
 		{"delete", "", tierOpen},
 		{"guard-list", "", tierOpen},
 		{"dream-stats", "", tierOpen},
+		// dream-link-resolve (curation wave 2026-07-26): tierOpen like
+		// guard-resolve — isolation is writableBlockScopes in the store layer.
+		{"dream-link-resolve", "", tierOpen},
 		{"unknown-action", "", tierOpen},
 	}
 	for _, c := range cases {
@@ -193,6 +196,23 @@ func TestActionTier_ForgeFamilyExplicitlyTiered(t *testing.T) {
 		if tier != tierTenantAdmin {
 			t.Errorf("action %q tier = %d, want tierTenantAdmin (credential injection / outbound trigger)", a, tier)
 		}
+	}
+}
+
+// TestActionTier_DreamLinkResolveExplicitlyTiered is the S9 probe of the
+// dream-link-curation wave (2026-07-26): dream-link-resolve is dispatched
+// (via dispatchDreamAction) and MUST be EXPLICITLY classified tierOpen —
+// isolation lives in store.DreamLinkResolve (writableBlockScopes on the
+// source block, uniform not found), never in an admin tier. Remove its
+// actionTier arm and this turns RED (entry + dispatch arm land in the SAME
+// commit).
+func TestActionTier_DreamLinkResolveExplicitlyTiered(t *testing.T) {
+	tier, explicit := actionTierExplicit(manageRequest{Action: "dream-link-resolve"})
+	if !explicit {
+		t.Error("dream-link-resolve is dispatched but NOT explicitly tiered (fail-open tierOpen default, S9)")
+	}
+	if tier != tierOpen {
+		t.Errorf("dream-link-resolve tier = %d, want tierOpen (store-layer isolation)", tier)
 	}
 }
 

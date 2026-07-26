@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 118,
-    "migration_count": 117,
+    "migration_max": 119,
+    "migration_count": 118,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1232,6 +1232,18 @@
           "type": "smallint",
           "not_null": true,
           "storage": "p"
+        },
+        {
+          "name": "pinned",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rationale",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
         }
       ],
       "row_security": false

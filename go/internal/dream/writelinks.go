@@ -29,10 +29,16 @@ type deletedLink struct {
 	Relationship string
 }
 
-// deleteStaleLinks removes context_dream_links rows for sourceID whose
-// target_block_id is not in keptTargets. If keptTargets is empty, ALL rows
-// for sourceID are deleted (caller must guard against this when the empty
-// state is a transient LLM failure rather than a deliberate clear-out).
+// deleteStaleLinks removes UNPINNED context_dream_links rows for sourceID
+// whose target_block_id is not in keptTargets. If keptTargets is empty, ALL
+// unpinned rows for sourceID are deleted (caller must guard against this when
+// the empty state is a transient LLM failure rather than a deliberate
+// clear-out). Pinned rows (M119, human-confirmed via manage
+// dream-link-resolve) are never swept — an operator verdict outlives any
+// later LLM cycle that no longer re-emits the link; the only removal path for
+// a pinned link is the explicit delete-resolve (store.DreamLinkResolve).
+// Because pinned rows are never deleted here, their supersedes side-effect is
+// never reverted here either — exactly the intended asymmetry.
 // Returns the rows that were deleted so the caller can run targeted reverse
 // effects (snapshot revert).
 func deleteStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTargets []string) ([]deletedLink, error) {
@@ -42,6 +48,7 @@ func deleteStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarge
 		rows, err = tx.Query(ctx,
 			`DELETE FROM context_dream_links
 			WHERE source_block_id = $1::uuid
+			  AND NOT pinned
 			RETURNING target_block_id::text, relationship`,
 			sourceID)
 	} else {
@@ -49,6 +56,7 @@ func deleteStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarge
 			`DELETE FROM context_dream_links
 			WHERE source_block_id = $1::uuid
 			  AND target_block_id != ALL($2::uuid[])
+			  AND NOT pinned
 			RETURNING target_block_id::text, relationship`,
 			sourceID, keptTargets)
 	}
@@ -68,9 +76,10 @@ func deleteStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarge
 	return deleted, rows.Err()
 }
 
-// replaceStaleLinks deletes context_dream_links for sourceID that are not in
-// keptTargets and reverts ApplySupersedes-side-effects for any deleted
-// supersedes-links.
+// replaceStaleLinks deletes unpinned context_dream_links for sourceID that
+// are not in keptTargets and reverts ApplySupersedes-side-effects for any
+// deleted supersedes-links (pinned links survive the sweep, see
+// deleteStaleLinks).
 //
 // Welle 46 Convention-Switch (2026-05-22): under the English convention
 // "A supersedes B" → A=source=newer, B=target=outdated. ApplySupersedes

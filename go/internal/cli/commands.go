@@ -799,6 +799,7 @@ func dreamCmd(getClient func() (*Client, error)) *cobra.Command {
 
 	cmd.AddCommand(dreamStatsCmd(getClient))
 	cmd.AddCommand(dreamReviewCmd(getClient))
+	cmd.AddCommand(dreamResolveCmd(getClient))
 	cmd.AddCommand(dreamEnableCmd(getClient))
 	cmd.AddCommand(dreamDisableCmd(getClient))
 	cmd.AddCommand(dreamThrottleCmd(getClient))
@@ -873,6 +874,82 @@ func dreamReviewCmd(getClient func() (*Client, error)) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func dreamResolveCmd(getClient func() (*Client, error)) *cobra.Command {
+	var rationale string
+	cmd := &cobra.Command{
+		Use:     "resolve <source-id> <target-id> <relationship> <confirm|delete>",
+		Aliases: []string{"r"},
+		Short:   "Confirm (pin) or delete one dream link",
+		Long: "Resolve one dream link from `ctx dream review`: confirm pins it so it survives the dream replace sweep " +
+			"(optionally recording a durable --rationale); delete removes it and reverts a supersedes snapshot-marking. " +
+			"The link is addressed as seen in the review output (source_id, target_id, relationship).",
+		Args: cobra.ExactArgs(4),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resolution := args[3]
+			if resolution != "confirm" && resolution != "delete" {
+				return fmt.Errorf("resolution must be 'confirm' or 'delete'")
+			}
+
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+
+			data := map[string]any{
+				"source_id":    args[0],
+				"target_id":    args[1],
+				"relationship": args[2],
+				"resolution":   resolution,
+			}
+			if rationale != "" {
+				data["rationale"] = rationale
+			}
+			resp, err := c.Post("manage", map[string]any{
+				"action": "dream-link-resolve",
+				"data":   data,
+			})
+			if err != nil {
+				return err
+			}
+
+			var d map[string]any
+			if err := json.Unmarshal(resp, &d); err != nil {
+				PrintRaw(resp)
+				return nil //nolint:nilerr // raw response already printed above
+			}
+
+			if success, _ := d["success"].(bool); !success {
+				errMsg, _ := d["error"].(string)
+				if errMsg == "" {
+					errMsg = "unknown"
+				}
+				return fmt.Errorf("error: %s", errMsg)
+			}
+
+			resolved, _ := d["resolved"].(map[string]any)
+			rel := args[2]
+			if r, ok := resolved["relationship"].(string); ok && r != "" {
+				rel = r
+			}
+			switch resolution {
+			case "confirm":
+				fmt.Printf("pinned: %s -[%s]-> %s\n", args[0], rel, args[1])
+				if rat, ok := resolved["rationale"].(string); ok && rat != "" {
+					fmt.Printf("  rationale: %s\n", rat)
+				}
+			case "delete":
+				fmt.Printf("deleted: %s -[%s]-> %s\n", args[0], rel, args[1])
+				if reverted, ok := resolved["supersedes_reverted"].(bool); ok && reverted {
+					fmt.Printf("  supersedes reverted: %s back to lifecycle_state=knowledge\n", args[1])
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&rationale, "rationale", "", "Durable justification stored on the link")
+	return cmd
 }
 
 func dreamEnableCmd(getClient func() (*Client, error)) *cobra.Command {
