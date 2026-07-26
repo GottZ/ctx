@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "license": "MPL-2.0",
   "//": "graph stack is sigma+graphology by decision (F5-W2). Never add @cosmograph/cosmograph: CC-BY-NC license is incompatible with this MPL-2.0 project.",
   "scripts": {
     "dev": "vite",
