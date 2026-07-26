@@ -301,9 +301,9 @@
   <!-- lightweight path note -->
   <rect x="60" y="1376" width="204" height="112" rx="12" class="c-white"/>
   <text x="162" y="1408" text-anchor="middle" class="card-t">🔎 ctx search</text>
-  <text x="162" y="1432" text-anchor="middle" class="card-xs">same pipeline, no LLM —</text>
-  <text x="162" y="1448" text-anchor="middle" class="card-xs">compact results for</text>
-  <text x="162" y="1464" text-anchor="middle" class="card-xs">browsing &amp; scripts</text>
+  <text x="162" y="1432" text-anchor="middle" class="card-xs">lightweight EN/DE fulltext</text>
+  <text x="162" y="1448" text-anchor="middle" class="card-xs">browse — no embedding,</text>
+  <text x="162" y="1464" text-anchor="middle" class="card-xs">no LLM, keyset-paginated</text>
 
   <!-- ================= PANEL 4: DREAM MODE ================= -->
   <rect x="28" y="1568" width="1144" height="424" rx="16" class="panel"/>
