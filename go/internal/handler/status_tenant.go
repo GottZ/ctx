@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 )
 
@@ -111,6 +112,7 @@ func (c *StatusCollector) buildTenantRollupInto(ctx context.Context) {
 // visible backends + its own 24h rollup. Server-global fields stay zero. A
 // server-admin never goes through here — it keeps the full global Snapshot.
 func (c *StatusCollector) SnapshotForTenant(ctx context.Context, scope string) statusResponse {
+	cfg := c.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: the cache/generation cadences read here are server-global process knobs, not tenant-scoped.
 	// Tenant-visible backends only, via the snapshot's Scope (the same egress
 	// predicate as Chain) — BackendStatus carries no scope, so the snapshot maps
 	// id → scope for the filter.
@@ -134,10 +136,14 @@ func (c *StatusCollector) SnapshotForTenant(ctx context.Context, scope string) s
 		// so completeness is not a meaningful flag here.
 		LLM24hComplete: true,
 		// Health/Dream/Gaming/Activity intentionally left zero — server-global.
-		DispatchTenant: c.dispatchForTenant(ctx, snap, scope),
+		DispatchTenant: c.dispatchForTenant(ctx, cfg, snap, scope),
 		// guard_review scope-filtered to the tenant's home scope (guard W2):
 		// counts of the tenant's OWN flagged blocks, no foreign disclosure.
-		GuardReview: c.buildGuardReviewStatus(ctx, scope),
+		// RC-1 wave S1: this is a SLOT LOOKUP in the shared per-tick generation
+		// (status_guard.go), no longer a per-request aggregate — N tenant polls
+		// inside one tick now cost ONE query, not N. An unknown scope resolves
+		// to nil (fail closed: no section rather than the global total).
+		GuardReview: c.guardReviewForScope(ctx, cfg.Events.TickInterval, scope),
 	}
 }
 
@@ -148,8 +154,7 @@ func (c *StatusCollector) SnapshotForTenant(ctx context.Context, scope string) s
 // the backend pool → origin set); the caller's fairKey is its HomeScope (scope),
 // the sole bucket whose detail is exposed. Returns nil when no dispatch source
 // is wired.
-func (c *StatusCollector) dispatchForTenant(ctx context.Context, snap []backends.Backend, scope string) *dispatchTenantStatus {
-	cfg := c.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: dispatch cheap-cache TTL is a server-global process knob, not tenant-scoped.
+func (c *StatusCollector) dispatchForTenant(ctx context.Context, cfg *config.Config, snap []backends.Backend, scope string) *dispatchTenantStatus {
 	cheap := c.cheapNow(ctx, cfg)
 	if cheap == nil || !cheap.dispatchOK {
 		return nil

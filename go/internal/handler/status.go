@@ -165,11 +165,24 @@ type statusResponse struct {
 // oldest_updated_at is an AGING signal (how long has the queue head been
 // sitting), deliberately from the column — not from metadata guard_checked_at,
 // whose presence varies across historic repair migrations (M107).
+// built_at (RC-1 wave S1) is the generation's SUCCESS stamp: the section is
+// served from ONE per-tick generation shared by every reader, and this field
+// says when that generation was last built SUCCESSFULLY — so a consumer can see
+// the counts' real age instead of assuming they are current. Additive and
+// omitempty: a section built before the generation existed simply carries no
+// stamp. Once the stamp exceeds guardGenStaleFactor ticks the whole section
+// disappears (status_guard.go), so a stale-but-present stamp is bounded.
+//
+// Note for the SSE frame (S2): built_at advances with every generation, so for
+// DIFF purposes it is an as_of-class field. A statusEvent that starts carrying
+// this section must zero it in diffKey (events.go) exactly as as_of already is,
+// or the status frame fires every tick whether or not a count moved.
 type guardReviewStatus struct {
 	NeedsReview       int        `json:"needs_review"`
 	NearDuplicate     int        `json:"near_duplicate"`
 	PossibleDuplicate int        `json:"possible_duplicate"`
 	OldestUpdatedAt   *time.Time `json:"oldest_updated_at"`
+	BuiltAt           *time.Time `json:"built_at,omitempty"`
 }
 
 // embedMigrationStatus is the /api/status re-embed-migration block wire shape
@@ -345,9 +358,11 @@ type cheapSnapshot struct {
 	// migration is active (the partial-unique index matches at most one row) —
 	// no section emitted.
 	embedMigration *embedMigrationStatus
-	// guardReview is the guard W2 review-queue push signal, captured GLOBAL at
-	// the tick (the tenant path builds its own scope-filtered read instead —
-	// it never shares this cached global aggregate). nil when the read failed.
+	// guardReview is the guard W2 review-queue push signal: the GLOBAL slot of
+	// the per-tick guardGen (RC-1 wave S1). The tenant path reads the SAME
+	// generation's per-scope slot instead of running its own query, so both
+	// paths cost ONE aggregate per tick together. nil when no generation is
+	// fresh (never built, or degraded past guardGenStaleFactor ticks).
 	guardReview *guardReviewStatus
 }
 
@@ -419,6 +434,19 @@ type StatusCollector struct {
 	tenantRollupAt      atomic.Int64 // unix nano of last per-tenant rollup refresh
 	tenantRollupRefresh atomic.Bool  // CAS single-flight guard
 
+	// guard_review generation (RC-1 wave S1, status_guard.go): ONE ROLLUP
+	// aggregate per events.tick_interval carries the global row AND every
+	// scope's row, so the server-admin path, the tenant path and every future
+	// reader (SSE frame, /guard channel) pick a slot instead of each running
+	// their own query. The generation carries its OWN success stamp (guardGen.
+	// builtAt) — hence no guardGenAt sibling to tenantRollupAt above: the age
+	// that gates the refresh is the same age that gates visible staleness.
+	// guardGenBuild defaults to buildGuardReviewGeneration and is swappable in
+	// tests, the same injection point dbStatsBuild/channelProbeRun already are.
+	guardGen        atomic.Pointer[guardGen]
+	guardGenRefresh atomic.Bool // CAS single-flight guard
+	guardGenBuild   func(ctx context.Context, pool *pgxpool.Pool) *guardGen
+
 	// broadcasting is set while an SSE broadcast loop (G34) is refreshing the
 	// cache every tick. A poll then serves that cache instead of triggering its
 	// own refresh (design §3.6: "refresh only when stale AND no SSE loop runs").
@@ -440,6 +468,7 @@ func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams d
 		dispatch:        dispatchSrc,
 		dbStatsBuild:    buildDBStatus,
 		channelProbeRun: runChannelProbe,
+		guardGenBuild:   buildGuardReviewGeneration,
 	}
 }
 
@@ -729,41 +758,12 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	// rides the same tick cadence with no own source. nil (no active migration) =
 	// no section emitted (pointer + omitempty).
 	snap.embedMigration = c.buildEmbedMigrationStatus(ctx)
-	// Guard W2 review-queue signal: one FILTER-aggregate over idx_guard_status,
-	// global on this (server-admin) path. Rides the tick cadence like the
-	// neighbouring embed-migration read.
-	snap.guardReview = c.buildGuardReviewStatus(ctx, "")
+	// Guard W2 review-queue signal, RC-1 wave S1: the GLOBAL slot of the ONE
+	// per-tick guardGen (status_guard.go). The tenant path reads the same
+	// generation's per-scope slot, so both paths share this single aggregate
+	// instead of each running their own.
+	snap.guardReview = c.guardReviewGlobal(ctx, cfg.Events.TickInterval)
 	return snap
-}
-
-// buildGuardReviewStatus renders the guard_review status block. scope == ""
-// aggregates globally (server-admin path); a non-empty scope filters to that
-// single scope (tenant path, the GD3 single-scope line). Returns nil on a read
-// error — degrade to no section, never a failed refresh (embed_migration
-// posture).
-func (c *StatusCollector) buildGuardReviewStatus(ctx context.Context, scope string) *guardReviewStatus {
-	g := &guardReviewStatus{}
-	query := `SELECT
-			(count(*) FILTER (WHERE guard_status = 'needs_review'))::int,
-			(count(*) FILTER (WHERE guard_status = 'near_duplicate'))::int,
-			(count(*) FILTER (WHERE guard_status = 'possible_duplicate'))::int,
-			min(updated_at)
-		FROM context_blocks
-		WHERE NOT is_archived
-		  AND guard_status IN ('needs_review', 'near_duplicate', 'possible_duplicate')`
-	var err error
-	if scope == "" {
-		err = c.pool.QueryRow(ctx, query).
-			Scan(&g.NeedsReview, &g.NearDuplicate, &g.PossibleDuplicate, &g.OldestUpdatedAt)
-	} else {
-		err = c.pool.QueryRow(ctx, query+` AND scope = $1`, scope).
-			Scan(&g.NeedsReview, &g.NearDuplicate, &g.PossibleDuplicate, &g.OldestUpdatedAt)
-	}
-	if err != nil {
-		slog.Warn("status: guard_review read failed", "error", err)
-		return nil
-	}
-	return g
 }
 
 // embedMigrationPendingIndexGuardMsg is logged when the active-migration read

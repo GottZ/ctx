@@ -232,8 +232,11 @@ func TestStatusGoldenKeys(t *testing.T) {
 		// the admin path, scope-filtered on the tenant path) — the one deliberate
 		// exception to the admin-only convention of the sections above, because
 		// a tenant's own flagged-queue counts disclose nothing foreign.
+		// RC-1 wave S1 adds built_at: the SUCCESS stamp of the per-tick generation
+		// every reader now shares, so a consumer sees the counts' real age.
 		GuardReview: &guardReviewStatus{
-			NeedsReview: 5, NearDuplicate: 1, PossibleDuplicate: 0, OldestUpdatedAt: &next,
+			NeedsReview: 5, NearDuplicate: 1, PossibleDuplicate: 0,
+			OldestUpdatedAt: &next, BuiltAt: &next,
 		},
 	}
 	b, err := json.Marshal(resp)
@@ -305,8 +308,17 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 
 	// Guard W2: the guard_review section wire shape. oldest_updated_at is
-	// null-capable (empty queue → null).
+	// null-capable (empty queue → null). built_at (RC-1 wave S1) is the
+	// generation's SUCCESS stamp — ADDITIVE and omitempty, so a section without
+	// one keeps the pre-S1 key set exactly (pinned right below).
 	assertKeys(t, "guard_review", top["guard_review"], []string{
+		"needs_review", "near_duplicate", "possible_duplicate", "oldest_updated_at", "built_at",
+	})
+	unstamped, err := json.Marshal(&guardReviewStatus{NeedsReview: 5, NearDuplicate: 1})
+	if err != nil {
+		t.Fatalf("marshal unstamped guard_review: %v", err)
+	}
+	assertKeys(t, "guard_review (no stamp)", unstamped, []string{
 		"needs_review", "near_duplicate", "possible_duplicate", "oldest_updated_at",
 	})
 

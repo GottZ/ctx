@@ -413,6 +413,11 @@ export interface GuardReviewStatus {
   near_duplicate: number
   possible_duplicate: number
   oldest_updated_at: string | null
+  // RC-1 wave S1: when the shared per-tick generation behind these counts was
+  // last built SUCCESSFULLY. Optional (a section built without a generation
+  // carries none); the server drops the whole section once the stamp exceeds
+  // three tick intervals, so a present stamp is bounded-stale, never ancient.
+  built_at?: string
 }
 
 // Source: go/internal/handler/status.go (statusProfile). The slim per-tick shape
