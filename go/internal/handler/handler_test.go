@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -244,6 +245,75 @@ func TestMaxBodySize_EnforcesLimit(t *testing.T) {
 		handler.ServeHTTP(w, req)
 		if w.Code != http.StatusRequestEntityTooLarge {
 			t.Errorf("over-limit request got status %d, want 413", w.Code)
+		}
+	})
+}
+
+// SECURITY PROPERTY (Gap-C6-b): MaxBodySizeStrict decides on the DECLARED
+// Content-Length before the wrapped handler runs, and answers in the house
+// envelope. This is what MaxBodySize cannot give a handler that reads the body
+// itself (the MCP SDK): there the MaxBytesError becomes the SDK's plain-text
+// 400. The isolated middleware pins what the production probe in
+// cmd/ctxd/mcp_bodycap_integration_test.go cannot see — that the handler is
+// never entered at all.
+func TestMaxBodySizeStrict_RejectsBeforeHandler(t *testing.T) {
+	const maxSize int64 = 1024
+
+	var entered bool
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entered = true
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := MaxBodySizeStrict(maxSize)(inner)
+
+	t.Run("over_cap_413_envelope_without_entering", func(t *testing.T) {
+		entered = false
+		req := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader(strings.Repeat("a", 2048)))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", w.Code)
+		}
+		if entered {
+			t.Error("wrapped handler ran — the cap did not decide up front")
+		}
+		var env struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+			t.Fatalf("body is not the house envelope: %v (%q)", err, w.Body.String())
+		}
+		if env.Success || env.Error == "" {
+			t.Errorf("envelope = %+v, want success=false with a non-empty error", env)
+		}
+	})
+
+	t.Run("under_cap_passes", func(t *testing.T) {
+		entered = false
+		req := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader(strings.Repeat("a", 512)))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || !entered {
+			t.Errorf("status = %d entered = %v, want 200 / true", w.Code, entered)
+		}
+	})
+
+	// Undeclared length (chunked): the pre-check cannot fire, so the wrapping
+	// guard has to keep the read bounded — the handler sees a MaxBytesError.
+	t.Run("undeclared_length_still_bounded", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader(strings.Repeat("a", 2048)))
+		req.ContentLength = -1
+		w := httptest.NewRecorder()
+		var readErr error
+		probe := MaxBodySizeStrict(maxSize)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			_, readErr = io.ReadAll(r.Body)
+		}))
+		probe.ServeHTTP(w, req)
+		var mbe *http.MaxBytesError
+		if !errors.As(readErr, &mbe) {
+			t.Errorf("read error = %v, want *http.MaxBytesError (body read was unbounded)", readErr)
 		}
 	})
 }

@@ -210,9 +210,16 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		Cfg:          cfgStore,
 		Blocktypes:   blocktypeReg,
 	})
-	// MCP endpoint — auth middleware injects AuthResult into context.
+	// MCP endpoint — auth middleware injects AuthResult into context. The body
+	// cap is the same DefaultMaxBodySize the REST write surface carries, in its
+	// STRICT form (Gap-C6-b): the MCP SDK reads the body itself and answers a
+	// MaxBytesError with plain-text 400, so the cap has to be enforced before
+	// the SDK handler runs to keep the house envelope. Mounted AFTER Auth on
+	// purpose — a cap that answers first would tell an anonymous caller that
+	// /mcp exists and where its limit sits.
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
+		r.Use(handler.MaxBodySizeStrict(DefaultMaxBodySize))
 		r.Handle("/mcp", mcpH)
 	})
 

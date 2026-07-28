@@ -487,3 +487,48 @@ func MaxBodySize(maxBytes int64) func(http.Handler) http.Handler {
 	}
 }
 
+// MaxBodySizeStrict is MaxBodySize for handlers that own their error surface —
+// third-party ones above all. It rejects a declared over-cap body with the
+// house envelope BEFORE the handler runs, and still wraps the body afterwards.
+//
+// Rationale (Gap-C6-b): MaxBodySize only wraps, so the verdict surfaces as a
+// MaxBytesError inside whoever reads the body. Our own handlers translate that
+// into 413 + envelope (decodeIssueBody); the MCP SDK does not — it answers
+// plain-text 400 "failed to read body" (go-sdk streamable.go:433-435). A caller
+// then cannot tell an over-cap body from a malformed one.
+//
+// Mount AFTER Auth: the pre-check answers before any handler work, so mounting
+// it first would let an anonymous caller confirm route and cap.
+//
+// Residual: a request without a declared Content-Length (chunked) still falls
+// through to the wrapping guard — memory stays bounded, only the response shape
+// is the handler's. Declared-length requests are the ones we can answer cleanly,
+// and every MCP client sends one.
+func MaxBodySizeStrict(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ContentLength > maxBytes {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+					"success": false,
+					"error":   fmt.Sprintf("request body exceeds %s cap", byteCap(maxBytes)),
+				})
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// byteCap renders a body cap the way the existing 413 messages spell it
+// ("1 MB cap") without lying about caps that are not whole MB.
+func byteCap(n int64) string {
+	switch {
+	case n >= 1<<20 && n%(1<<20) == 0:
+		return fmt.Sprintf("%d MB", n>>20)
+	case n >= 1<<10 && n%(1<<10) == 0:
+		return fmt.Sprintf("%d KB", n>>10)
+	default:
+		return fmt.Sprintf("%d bytes", n)
+	}
+}
