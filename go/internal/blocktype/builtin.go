@@ -156,9 +156,12 @@ func builtinPolicies() []Policy {
 		// guard.candidate=false (consecutive checkpoints of one session are
 		// near-duplicates BY CONSTRUCTION — the default archive lane silently
 		// broke ID chains, the 2026-07-20 dangling-manifest incident),
-		// dream/digest/overview all false. Classified by the stable writer
-		// title prefix ("Compaction source …", priority 30 after system-meta/
-		// audit-trail); writers SHOULD still set type=checkpoint explicitly.
+		// dream/digest/overview all false. Classified by the two stable writer
+		// title prefixes ("Compaction source …" for transcript parts, M107;
+		// "Compaction checkpoint head …" for the ID-anchoring manifest, M120 —
+		// heads used to fall through to the default type and re-entered exactly
+		// the pipelines this type closes), priority 30 after system-meta/
+		// audit-trail; writers SHOULD still set type=checkpoint explicitly.
 		{
 			Name: "checkpoint", Scope: globalScope, Builtin: true,
 			Retrieval: RetrievalPolicy{Kind: RetrievalExcluded},
@@ -167,7 +170,7 @@ func builtinPolicies() []Policy {
 			Digest:    DigestPolicy{Include: false},
 			Overview:  OverviewPolicy{Include: false},
 			Parent:    ParentPolicy{Mode: ParentModeNone},
-			Classify:  ClassifyRules{Priority: 30, TitlePatterns: []string{"compaction source"}},
+			Classify:  ClassifyRules{Priority: 30, TitlePatterns: []string{"compaction source", "compaction checkpoint"}},
 		},
 	}
 }
