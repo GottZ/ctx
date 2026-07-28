@@ -145,6 +145,18 @@ type statusEvent struct {
 	// load it diffs every tick — the broadcast loop already refreshes at that
 	// cadence; no diff-exception logic (more code without a measured problem).
 	Dispatch *dispatchStatus `json:"dispatch"`
+	// GuardReview is the needs_review queue section (guard W2, RC-1 wave S2).
+	// It is the one section BOTH pull paths carry (status.go assemble +
+	// status_tenant.go SnapshotForTenant), so the push signal owes it too —
+	// without it a growing review queue only became visible on the next poll,
+	// on a stream whose whole point is that it does not need one.
+	// Pointer + omitempty, deliberately: three states must stay
+	// DISTINGUISHABLE on the wire — section absent (no fresh generation, the
+	// server cannot say), section with zero counts (the queue is genuinely
+	// empty), section with an older built_at (counts are real but aging). A
+	// value type or a missing omitempty would collapse the first into the
+	// second and render "0 open" for "I do not know".
+	GuardReview *guardReviewStatus `json:"guard_review,omitempty"`
 }
 
 func statusEventOf(s statusResponse) statusEvent {
@@ -157,6 +169,7 @@ func statusEventOf(s statusResponse) statusEvent {
 		Profiles:       derefProfiles(s.Profiles),
 		Activity:       s.Activity,
 		Dispatch:       s.Dispatch,
+		GuardReview:    s.GuardReview,
 	}
 }
 
@@ -172,12 +185,24 @@ func derefProfiles(p *[]statusProfile) []statusProfile {
 	return *p
 }
 
-// diffKey marshals the status event with as_of zeroed: as_of advances every
-// tick and would otherwise defeat the diff (status would fire every cycle even
-// when nothing meaningful changed). The remaining fields only move on real
-// events (dream-queue counts, llm-24h aggregate, gaming, health class).
+// diffKey marshals the status event with the two as_of-CLASS stamps zeroed:
+// as_of advances every tick, and guard_review.built_at advances with every
+// generation the collector builds (status_guard.go) — either one left in would
+// defeat the diff and fire a status frame every cycle even when nothing
+// meaningful changed. The remaining fields only move on real events (dream-queue
+// counts, llm-24h aggregate, flagged-block counts, health class).
+//
+// The guard section is zeroed on a COPY. The value receiver copies the frame,
+// not the struct behind its pointer — and that struct is the SHARED per-tick
+// generation every reader holds, so zeroing in place would blank built_at for
+// the pull paths and for every other connection too.
 func (e statusEvent) diffKey() []byte {
 	e.AsOf = time.Time{}
+	if e.GuardReview != nil {
+		gr := *e.GuardReview
+		gr.BuiltAt = nil
+		e.GuardReview = &gr
+	}
 	b, _ := json.Marshal(e)
 	return b
 }
