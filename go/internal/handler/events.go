@@ -342,7 +342,7 @@ type sseHub struct {
 	life   context.Context
 	// Injectable seams (mirrors StatusCollector.queueDepth) — bound to the real
 	// pool / auth in NewEventsHandler, faked in tests.
-	llmcalls     func(ctx context.Context, cursor time.Time, limit int) ([]llmlogEntry, time.Time)
+	llmcalls     func(ctx context.Context, cursor llmCursor, limit int) ([]llmlogEntry, llmCursor)
 	authenticate func(ctx context.Context, key string, isSession bool) (*auth.AuthResult, error)
 
 	mu      sync.Mutex
@@ -449,7 +449,7 @@ func (h *sseHub) runLoop() {
 	var lastStatus, lastBackends []byte
 	// New llmlog rows are streamed forward only — the table fetches its history
 	// over HTTP, so the cursor starts at "now" and never replays the backlog.
-	llmCursor := time.Now().UTC()
+	llmCur := newLLMCursor(time.Now())
 
 	for {
 		select {
@@ -480,9 +480,9 @@ func (h *sseHub) runLoop() {
 				}
 			}
 
-			rows, next := h.llmcalls(opCtx, llmCursor, cfg.LLMLog.MaxLimit)
+			rows, next := h.llmcalls(opCtx, llmCur, cfg.LLMLog.MaxLimit)
 			cancel()
-			llmCursor = next
+			llmCur = next
 			if len(rows) > 0 {
 				if data, err := json.Marshal(llmcallsFrameOf(rows, h.llmcallCoalesceThreshold())); err == nil {
 					h.broadcast(sseFrame{name: "llmcalls", data: data})
@@ -505,41 +505,109 @@ type llmcallsFrame struct {
 }
 
 // llmcallsFrameOf collapses one tick's rows into that payload. rows arrive
-// oldest-first (fetchLLMCalls orders created_at ASC), so the LAST row is the
-// tick's newest and its "<created_at>|<id>" is the position the client refetches
-// from over GET /api/llmlog (capped, per-tenant filtered).
+// oldest-first (fetchLLMCalls orders (created_at, id) ASC), so the LAST row is
+// the tick's newest and its cursor is the position the client refetches from
+// over GET /api/llmlog (capped, per-tenant filtered) — the same tuple the loop
+// itself resumes at, rendered once by llmCursor.String().
 func llmcallsFrameOf(rows []llmlogEntry, threshold int) llmcallsFrame {
 	if len(rows) > threshold {
-		newest := rows[len(rows)-1]
 		return llmcallsFrame{
 			Count:  len(rows),
 			Kind:   "llmcalls-bulk",
-			Cursor: newest.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + newest.ID,
+			Cursor: llmCursorOf(rows[len(rows)-1]).String(),
 		}
 	}
 	return llmcallsFrame{Rows: rows, Count: len(rows)}
 }
 
-// fetchLLMCalls returns the telemetry rows newer than cursor (oldest first) and
-// the advanced cursor. It reuses llmlogEntry + normalizeLLMError so the SSE
-// stream and GET /api/llmlog share one row shape and one error-normalization
-// (class + ≤256-char detail) — and the same body-free SELECT list: llmlogEntry
-// has no request_*/response_content fields, so a body leak is structurally
-// impossible regardless of the query.
-func fetchLLMCalls(ctx context.Context, pool *pgxpool.Pool, cursor time.Time, limit int) ([]llmlogEntry, time.Time) {
+// llmCursorZeroID is the lowest uuid there is — the id half of a cursor that has
+// not seen a row yet. (t, zero) sorts before every real row carrying t, so a
+// stream starting at "now" cannot lose a row written in that very instant.
+const llmCursorZeroID = "00000000-0000-0000-0000-000000000000"
+
+// llmCursor is the telemetry stream position: the TUPLE (created_at, id).
+//
+// created_at alone is not a total order on context_llm_log. Its PK is
+// (id, created_at) with gen_random_uuid() (migrations/025_llm_log.sql:9,24) —
+// there is no monotonic secondary key, and two rows written in the same
+// microsecond tie. Before S14 the loop carried max(created_at) and asked for
+// `created_at > $1`: when the LIMIT cut fell between two tied rows, the cursor
+// advanced past BOTH and the second one was never delivered on any later tick
+// (design 05 §4.6, F4b).
+type llmCursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+// newLLMCursor is the stream-start position at a wall-clock instant.
+func newLLMCursor(at time.Time) llmCursor {
+	return llmCursor{CreatedAt: at.UTC(), ID: llmCursorZeroID}
+}
+
+// llmCursorOf is the position OF a fetched row.
+func llmCursorOf(e llmlogEntry) llmCursor {
+	return llmCursor{CreatedAt: e.CreatedAt.UTC(), ID: e.ID}
+}
+
+// String renders the position for the wire: "<RFC3339Nano>|<uuid>".
+func (c llmCursor) String() string {
+	return c.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + c.ID
+}
+
+// before reports whether c sorts strictly before o under the SAME order the
+// query applies. It is the Go-side mirror of the row comparison, so a scan
+// error mid-page can never roll the cursor backwards and replay rows.
+// Comparing the id halves as text matches PostgreSQL's uuid byte order: pgx
+// renders uuids canonically (fixed width, lower-case hex, dashes at fixed
+// positions), and over that alphabet lexicographic order IS byte order.
+func (c llmCursor) before(o llmCursor) bool {
+	if !c.CreatedAt.Equal(o.CreatedAt) {
+		return c.CreatedAt.Before(o.CreatedAt)
+	}
+	return c.ID < o.ID
+}
+
+// llmcallCursorSQL is the SSE telemetry page, keyset-paginated on the tuple
+// (created_at, id). It is a named const so the EXPLAIN gate plans the SHIPPED
+// statement instead of a copy of it.
+//
+// Why `created_at >= $1` is spelled out although the row comparison implies it:
+// it is the qual TimescaleDB prunes chunks on. Measured on a 7-chunk / 60k-row
+// fixture, the row comparison ALONE plans a ChunkAppend across EVERY chunk
+// (18 shared buffers, 1.59 ms planning); with the redundant leading qual the
+// plan touches the single qualifying chunk (6 buffers, 0.17 ms). At 1M+ rows
+// spanning years of 7-day chunks that is the difference between a per-tick
+// sweep over the whole hypertable and one range scan. Being implied by the row
+// comparison, the qual cannot change the result set — only the plan.
+//
+// `id::text AS id_text` is deliberate, not cosmetic: without the alias the bare
+// `id` in ORDER BY binds to the OUTPUT column (the text cast) instead of the
+// uuid column, and the sort order would stop matching the WHERE comparison.
+const llmcallCursorSQL = `
+	SELECT id::text AS id_text, created_at, pipeline, model,
+	       COALESCE(backend_name, host) AS backend,
+	       duration_ms, error, prompt_tokens, completion_tokens, cost_usd
+	FROM context_llm_log
+	WHERE created_at >= $1 AND (created_at, id) > ($1, $2::uuid)
+	ORDER BY created_at ASC, id ASC
+	LIMIT $3`
+
+// fetchLLMCalls returns the telemetry rows past cursor (oldest first) and the
+// advanced cursor. It reuses llmlogEntry + normalizeLLMError so the SSE stream
+// and GET /api/llmlog share one row shape and one error-normalization (class +
+// ≤256-char detail) — and the same body-free SELECT list: llmlogEntry has no
+// request_*/response_content fields, so a body leak is structurally impossible
+// regardless of the query.
+func fetchLLMCalls(ctx context.Context, pool *pgxpool.Pool, cursor llmCursor, limit int) ([]llmlogEntry, llmCursor) {
 	if limit <= 0 {
 		limit = 200
 	}
+	if cursor.ID == "" {
+		cursor.ID = llmCursorZeroID
+	}
 	// T37d (anchor 4): the per-tenant variant adds the `api_key_id = ANY($keys)`
 	// filter llmlog.go already uses — server-admin = all rows, tenant = own keys.
-	rows, err := pool.Query(ctx, `
-		SELECT id::text, created_at, pipeline, model,
-		       COALESCE(backend_name, host) AS backend,
-		       duration_ms, error, prompt_tokens, completion_tokens, cost_usd
-		FROM context_llm_log
-		WHERE created_at > $1
-		ORDER BY created_at ASC
-		LIMIT $2`, cursor, limit)
+	rows, err := pool.Query(ctx, llmcallCursorSQL, cursor.CreatedAt, cursor.ID, limit)
 	if err != nil {
 		slog.Warn("sse: llmcall fetch failed", "error", err)
 		return nil, cursor
@@ -557,8 +625,8 @@ func fetchLLMCalls(ctx context.Context, pool *pgxpool.Pool, cursor time.Time, li
 			return out, next
 		}
 		e.Error = normalizeLLMError(rawErr)
-		if e.CreatedAt.After(next) {
-			next = e.CreatedAt
+		if pos := llmCursorOf(e); next.before(pos) {
+			next = pos
 		}
 		out = append(out, e)
 	}
@@ -582,7 +650,7 @@ func NewEventsHandler(life context.Context, pool *pgxpool.Pool, collector *Statu
 		status: collector,
 		cfg:    cfg,
 		life:   life,
-		llmcalls: func(ctx context.Context, cursor time.Time, limit int) ([]llmlogEntry, time.Time) {
+		llmcalls: func(ctx context.Context, cursor llmCursor, limit int) ([]llmlogEntry, llmCursor) {
 			return fetchLLMCalls(ctx, pool, cursor, limit)
 		},
 		authenticate: func(ctx context.Context, key string, isSession bool) (*auth.AuthResult, error) {

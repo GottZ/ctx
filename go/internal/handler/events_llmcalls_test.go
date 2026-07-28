@@ -19,7 +19,8 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 )
 
-// llmRows builds n telemetry rows in the loop's fetch order (created_at ASC).
+// llmRows builds n telemetry rows in the loop's fetch order ((created_at, id)
+// ASC).
 func llmRows(n int, base time.Time) []llmlogEntry {
 	rows := make([]llmlogEntry, n)
 	for i := range rows {
@@ -36,15 +37,15 @@ func llmRows(n int, base time.Time) []llmlogEntry {
 
 // burstLLM is an llmcalls seam that yields n rows on the FIRST tick and nothing
 // afterwards — one deterministic burst, no timing dependency on the fetch.
-func burstLLM(n int) func(context.Context, time.Time, int) ([]llmlogEntry, time.Time) {
+func burstLLM(n int) func(context.Context, llmCursor, int) ([]llmlogEntry, llmCursor) {
 	var once sync.Once
-	return func(_ context.Context, cursor time.Time, _ int) ([]llmlogEntry, time.Time) {
+	return func(_ context.Context, cursor llmCursor, _ int) ([]llmlogEntry, llmCursor) {
 		var rows []llmlogEntry
-		once.Do(func() { rows = llmRows(n, cursor) })
+		once.Do(func() { rows = llmRows(n, cursor.CreatedAt) })
 		if len(rows) == 0 {
 			return nil, cursor
 		}
-		return rows, rows[len(rows)-1].CreatedAt
+		return rows, llmCursorOf(rows[len(rows)-1])
 	}
 }
 

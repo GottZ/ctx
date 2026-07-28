@@ -75,7 +75,7 @@ func (f *fakeStatus) loopCount() int   { f.mu.Lock(); defer f.mu.Unlock(); retur
 func (f *fakeStatus) refreshCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.refreshes }
 
 // noLLM is the injected llmcalls seam for tests with no telemetry rows.
-func noLLM(_ context.Context, cursor time.Time, _ int) ([]llmlogEntry, time.Time) {
+func noLLM(_ context.Context, cursor llmCursor, _ int) ([]llmlogEntry, llmCursor) {
 	return nil, cursor
 }
 
