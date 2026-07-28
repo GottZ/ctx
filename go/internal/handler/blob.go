@@ -110,19 +110,30 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Scope validation: write scope must be home_scope or "shared" if allowed.
+	// Scope validation through writableBlockScopes — the SINGLE eval point of
+	// the write gate (078/E4b), shared verbatim with the block write path.
+	// This surface used to carry a second, narrower formula of its own
+	// (home_scope | 'shared'-if-allowed), which ignored ar.WriteScopes: a key
+	// minted with write_scopes=[b] wrote BLOCKS in b but was refused every
+	// BLOB in b — one principal, two authorisation answers for one scope
+	// (Gap-C0-c). Reusing the function, not restating its formula, is what
+	// keeps the two surfaces from drifting apart again; the home_scope,
+	// 'shared'-if-allowed and stale-write_scope semantics all come along
+	// unchanged because they ARE that function's semantics.
+	//
+	// The gate stays AHEAD of meterBlobWrite on purpose: a scope the key may
+	// not write is refused before any budget is booked, so spraying foreign
+	// scopes cannot drain a legitimate key's quota (B2 books the intent
+	// synchronously, before the upsert).
 	writeScope := authResult.HomeScope
 	if req.Scope != "" {
-		if req.Scope == authResult.HomeScope {
-			writeScope = req.Scope
-		} else if req.Scope == "shared" && contains(authResult.AllowedScopes, "shared") {
-			writeScope = "shared"
-		} else {
+		if !contains(writableBlockScopes(authResult), req.Scope) {
 			writeJSON(w, http.StatusForbidden, map[string]any{
 				"success": false, "error": "Cannot write to requested scope",
 			})
 			return
 		}
+		writeScope = req.Scope
 	}
 
 	logID, ok := h.meterBlobWrite(ctx, w, authResult, reqID)

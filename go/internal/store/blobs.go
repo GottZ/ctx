@@ -288,7 +288,19 @@ func GetBlobStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) 
 }
 
 // DeleteBlob deletes a blob by ID. Only home_scope blobs can be deleted.
+//
+// An EMPTY homeScope fails closed with ErrNoScopes instead of reaching the
+// statement: `scope = ''` matches nothing, pgx.ErrNoRows collapses to
+// (nil, nil), and the caller is answered "not found" — the silent-empty-scope
+// shape RequireScopes exists to forbid everywhere else (design/01 §5.4). A
+// non-empty scope that simply owns no such blob keeps that not-found contract;
+// only "no scope at all" is the error. The binding itself is unchanged: delete
+// stays pinned to home_scope (widening it to writableBlockScopes is a separate
+// decision, §8-E3).
 func DeleteBlob(ctx context.Context, pool *pgxpool.Pool, id, homeScope string) (*BlobMeta, error) {
+	if homeScope == "" {
+		return nil, ErrNoScopes
+	}
 	bm := &BlobMeta{}
 	err := pool.QueryRow(ctx,
 		`DELETE FROM context_blobs
