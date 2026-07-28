@@ -11,6 +11,7 @@
   import { Resource } from '../../lib/resource.svelte'
   import { SseClient } from '../../lib/sse.svelte'
   import BlackoutConfirm from '../../lib/components/BlackoutConfirm.svelte'
+  import ConnState from '../../lib/ui/ConnState.svelte'
   import { LlmcallFeed } from './llmcall-feed.svelte'
   import { StatusStore } from './status-store.svelte'
   import BackendsTile from './BackendsTile.svelte'
@@ -50,7 +51,12 @@
 
   // Auth fährt als httpOnly-Session-Cookie mit (OAuth R4); der GET-Stream
   // braucht weder Bearer noch CSRF — kein Extra-Init nötig.
-  const sse = new SseClient('/api/events', onSseEvent)
+  //
+  // heartbeat: /api/events sendet seit S3 alle 25 s ein `hb` mit Erfolgs-
+  // Stempel — damit ist Stille auf DIESEM Strom eine Aussage und der Wachhund
+  // darf scharf sein (design 05-§4.3-c). Der Workflow-Strom hat den Vertrag
+  // nicht und bleibt ungewacht.
+  const sse = new SseClient('/api/events', onSseEvent, undefined, { heartbeat: true })
 
   // Admin: hold one SSE stream open for the tab's life. Non-admin keys get 403
   // and never open one (the read-only branch shows the public /health tile).
@@ -177,7 +183,14 @@
 
 <section class="area">
   <header>
-    <h1>Status</h1>
+    <div class="head">
+      <h1>Status</h1>
+      <!-- Only where a stream exists: a non-admin key never opens one (403), so
+           rendering a permanent 'idle' for it would be noise, not a state. -->
+      {#if session.admin}
+        <ConnState {sse} />
+      {/if}
+    </div>
     <p class="sub">live system health, backend pool, dream queue and LLM telemetry</p>
   </header>
 
@@ -298,6 +311,13 @@
   header {
     border-bottom: 1px solid var(--border);
     padding-bottom: var(--space-2);
+  }
+  .head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
   }
   h1 {
     margin: 0;
