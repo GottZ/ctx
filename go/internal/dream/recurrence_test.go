@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/promptguard"
 )
 
 func TestParseRecurrenceResponse_Plain(t *testing.T) {
@@ -71,19 +73,33 @@ func TestBuildRecurrencePrompt_ContainsBoth(t *testing.T) {
 		TargetText:  "Discord bridge config including bot token rotation.",
 		TitleSim:    0.63,
 	}
-	out := buildRecurrencePrompt(src, cand)
+	system, out := buildRecurrencePrompt(src, cand)
 
-	if !strings.Contains(out, src.ID) {
-		t.Errorf("source ID missing")
+	// H5 re-pin: the prompt carries a per-build nonce, so the golden is taken
+	// through promptguard.Canonicalize — the function exists for exactly this
+	// (design 04 §4.1-e). The ad-hoc <block_a>/<block_b> elements are gone;
+	// the role now rides on the guard marker as kind=, and the metadata that
+	// cannot survive the marker-attribute clamp (36-char uuid, spaced title)
+	// sits on the header line above it.
+	want := `block_a: id=019d0000-0000-7000-9000-000000000001 title="mautrix-signal Bridge (gottz.de)" updated="2026-04-01"` + "\n" +
+		`<untrusted_block id=0000000000000000 kind="block_a">` + "\n" +
+		"Signal bridge config and pairing-token rotation procedure for the matrix server at gottz.de.\n" +
+		`</untrusted_block id=0000000000000000>` + "\n\n" +
+		`block_b: id=019d0000-0000-7000-9000-000000000002 title="mautrix-discord Bridge (gottz.de)" title_sim="0.63"` + "\n" +
+		`<untrusted_block id=0000000000000000 kind="block_b">` + "\n" +
+		"Discord bridge config including bot token rotation.\n" +
+		`</untrusted_block id=0000000000000000>`
+	if got := promptguard.Canonicalize(out); got != want {
+		t.Fatalf("prompt drifted:\ngot:\n%s\nwant:\n%s", got, want)
 	}
-	if !strings.Contains(out, cand.TargetID) {
-		t.Errorf("target ID missing")
+
+	// The rule that makes the boundary verifiable travels with the prompt and
+	// names the SAME id as the markers.
+	if !strings.HasPrefix(system, recurrenceSystemPrompt) {
+		t.Errorf("system prompt lost its classification instructions:\n%s", system)
 	}
-	if !strings.Contains(out, "title_sim=\"0.63\"") {
-		t.Errorf("title_sim missing or unformatted: %s", out)
-	}
-	if !strings.Contains(out, "<block_a") || !strings.Contains(out, "<block_b") {
-		t.Errorf("block tags missing: %s", out)
+	if !strings.Contains(promptguard.Canonicalize(system), "id=0000000000000000") {
+		t.Errorf("system prompt carries no nonce-bound rule:\n%s", system)
 	}
 }
 
@@ -101,7 +117,7 @@ func TestBuildRecurrencePrompt_TruncatesContent(t *testing.T) {
 		TargetText:  long,
 		TitleSim:    0.6,
 	}
-	out := buildRecurrencePrompt(src, cand)
+	_, out := buildRecurrencePrompt(src, cand)
 	if len(out) > 4*maxContentLen {
 		t.Errorf("prompt too long: %d bytes (truncate not effective)", len(out))
 	}

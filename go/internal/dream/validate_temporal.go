@@ -20,6 +20,7 @@ import (
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,6 +28,12 @@ const (
 	// ValidateTimeout is the LLM timeout for temporal validation.
 	// Must accommodate Ollama model cold-starts (swap from embedding model).
 	ValidateTimeout = 90 * time.Second
+
+	// temporalContentLimit caps the content the temporal review sees. Same
+	// trigger threshold as the pre-H5 byte cut (3000), now counted in RUNES —
+	// the number is unchanged so the prompt budget of the pipeline is, for the
+	// ASCII-dominated corpus, unchanged too.
+	temporalContentLimit = 3000
 )
 
 // temporalValidationPrompt is the system prompt for LLM temporal review.
@@ -200,18 +207,26 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 }
 
 // buildTemporalReviewPrompt creates the user prompt for LLM temporal review.
+//
+// Single foreign-text block, no boundary semantics ⇒ FIXED marker, no nonce
+// (design 04 §4.3). The marker is what the pre-H5 form lacked entirely: title
+// and content sat as bare lines next to the instruction, so a newline in
+// either was indistinguishable from prompt structure. guardText neutralises
+// the control tokens before the existing XML escaping runs (§4.2 order).
 func buildTemporalReviewPrompt(block *BlockInfo) string {
 	var sb strings.Builder
 	sb.WriteString("Block created: ")
 	sb.WriteString(block.CreatedAt.Format("2006-01-02"))
-	sb.WriteString("\nTitle: ")
-	sb.WriteString(llm.EscapeXml(block.Title))
+	sb.WriteString("\n<block>\nTitle: ")
+	sb.WriteString(guardText(block.Title))
 	sb.WriteString("\nContent:\n")
-	content := block.Content
-	if len(content) > 3000 {
-		content = content[:3000]
-	}
-	sb.WriteString(llm.EscapeXml(content))
+	// Rune-aware: a byte slice can split a multi-byte rune and emit invalid
+	// UTF-8 into the prompt (internal/llm/synthesize.go:304-308 names the same
+	// defect). Empty suffix keeps the byte image of ASCII content identical to
+	// the pre-H5 cut — the only behavioural change is the rune boundary.
+	content := util.TruncateRunesWithSuffix(block.Content, "", temporalContentLimit)
+	sb.WriteString(guardText(content))
+	sb.WriteString("\n</block>")
 	return sb.String()
 }
 

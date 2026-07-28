@@ -140,6 +140,13 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 }
 
 // buildKeywordPrompt wraps the block in the XML-escaped template the prompt expects.
+//
+// Single foreign-text block with no boundary semantics, so it carries a FIXED
+// marker and no nonce (design 04 §4.3): the model never has to tell two blocks
+// apart here, and <block> cannot be forged from the payload because guardText
+// escapes every "<" it contains. What guardText adds over the pre-H5 escaping
+// is the token half — the Anthropic turn markers and the ChatML openers, which
+// carry no XML metacharacter and used to reach the model contiguous.
 func buildKeywordPrompt(title, content string) string {
 	truncated := content
 	if len(truncated) > maxContentLen {
@@ -147,9 +154,9 @@ func buildKeywordPrompt(title, content string) string {
 	}
 	var b strings.Builder
 	b.WriteString("<block>\nTitle: ")
-	b.WriteString(llm.EscapeXml(title))
+	b.WriteString(guardText(title))
 	b.WriteString("\n\nContent: ")
-	b.WriteString(llm.EscapeXml(truncated))
+	b.WriteString(guardText(truncated))
 	b.WriteString("\n</block>")
 	return b.String()
 }

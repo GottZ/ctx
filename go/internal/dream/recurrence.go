@@ -13,6 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -177,13 +178,15 @@ func pickRecurrenceCandidates(ctx context.Context, pool *pgxpool.Pool, r *Router
 // for audit-trail consistency with EvaluateRelationships. The prompt carries
 // both block contents, so the chain resolves at max(source, target).
 func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, source BlockInfo, c recurrenceCandidate) (recurrenceVerdict, error) {
-	userPrompt := buildRecurrencePrompt(source, c)
+	// The nonce lives inside the pair: system prompt and user prompt are built
+	// together so the rule can never name a different id than the markers do.
+	systemPrompt, userPrompt := buildRecurrencePrompt(source, c)
 	required := backends.MaxSensitivity(source.Sensitivity, c.TargetSens)
 	dreamVer := int16(Version)
 
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-recurrence",
-		RequestSystem: recurrenceSystemPrompt,
+		RequestSystem: systemPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      []string{source.ID, c.TargetID},
 		DreamVersion:  &dreamVer,
@@ -192,7 +195,7 @@ func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts 
 
 	start := time.Now()
 	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, required,
-		recurrenceSystemPrompt, userPrompt, opts, DreamTimeout)
+		systemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 	r.applyChainTelemetry(entry, backends.RoleDream, required, served, attempts, err)
@@ -213,18 +216,37 @@ func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts 
 	return verdict, nil
 }
 
-// buildRecurrencePrompt formats the per-pair Phase-2 input.
-func buildRecurrencePrompt(source BlockInfo, c recurrenceCandidate) string {
+// buildRecurrencePrompt formats the per-pair Phase-2 input and returns the
+// system prompt that belongs to it.
+//
+// Two foreign-text blocks with FIXED roles, so exactly ONE nonce binds both
+// wraps and the rule that names it (design 04 §4.3, row "zwei Blöcke mit
+// fester Rolle"). A second nonce would make Rule() unspeakable — it can name
+// one genuine id, not two — which is the H5-b mutation probe.
+//
+// The block metadata (ids, titles, similarity) stays OUTSIDE the wrap, on a
+// header line: a uuid is 36 characters and a title carries spaces, so neither
+// survives the marker-attribute clamp of promptguard.Wrap — and it is the
+// clamp that keeps the marker line unforgeable. That header is a LINE-BASED
+// position, so the title runs through guardLine, not guardText: XML escaping
+// stops "<block_b" but not a bare newline, and this line needs no "<" to be
+// forged. The payloads are pre-neutralised, so the Neutralize inside Wrap is
+// a no-op by construction.
+func buildRecurrencePrompt(source BlockInfo, c recurrenceCandidate) (system, user string) {
+	nonce := promptguard.NewNonce()
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "<block_a id=\"%s\" title=\"%s\" updated=\"%s\">\n",
-		source.ID, llm.EscapeXml(source.Title), source.UpdatedAt.Format("2006-01-02"))
-	b.WriteString(llm.EscapeXml(truncate(source.Content, maxContentLen)))
-	b.WriteString("\n</block_a>\n\n")
-	fmt.Fprintf(&b, "<block_b id=\"%s\" title=\"%s\" title_sim=\"%.2f\">\n",
-		c.TargetID, llm.EscapeXml(c.TargetTitle), c.TitleSim)
-	b.WriteString(llm.EscapeXml(truncate(c.TargetText, maxContentLen)))
-	b.WriteString("\n</block_b>")
-	return b.String()
+	fmt.Fprintf(&b, "block_a: id=%s title=\"%s\" updated=\"%s\"\n",
+		source.ID, guardLine(source.Title), source.UpdatedAt.Format("2006-01-02"))
+	b.WriteString(promptguard.Wrap(nonce, "block_a",
+		guardText(truncate(source.Content, maxContentLen))))
+	b.WriteString("\n\n")
+	fmt.Fprintf(&b, "block_b: id=%s title=\"%s\" title_sim=\"%.2f\"\n",
+		c.TargetID, guardLine(c.TargetTitle), c.TitleSim)
+	b.WriteString(promptguard.Wrap(nonce, "block_b",
+		guardText(truncate(c.TargetText, maxContentLen))))
+
+	return recurrenceSystemPrompt + "\n\n" + promptguard.Rule(nonce), b.String()
 }
 
 // parseRecurrenceResponse tolerates code-fence wrapping and whitespace.
