@@ -21,8 +21,46 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/store"
 )
+
+// guardText neutralises one foreign-text field of a tool result BEFORE it is
+// serialised (design/04 §4.4 row 9, wave H7).
+//
+// A tool result is prompt material: it becomes the tool message of the next
+// model call (engine.go RunTurn), and every title/category/tag/content in it
+// was written by somebody else (§1.3). mustJSON alone is not the guard it looks
+// like — it stops a quote break-out and it kills the Anthropic turn-marker FORM
+// (a real newline becomes the two characters \ and n), but the ChatML opener
+// "<|" survives JSON string escaping untouched (§2.5-e). encoding/json's
+// HTML-escaping default currently renders '<' as the escape sequence
+// backslash-u-003c and hides that — which makes the situation worse, not
+// better: the property then rests on an encoder default that a routine
+// json.Encoder + SetEscapeHTML(false) drops without a review flag (measured
+// both ways in tool_result_guard_test.go). guardText puts it in the field
+// itself, where no serialiser choice can undo it.
+//
+// Neutralize ONLY — never ClampLine: inside a JSON string a newline is already
+// inert (mustJSON escapes it), and clamping would rewrite legitimate block
+// content that the model is meant to read back verbatim.
+func guardText(s string) string {
+	out, _ := promptguard.Neutralize(s)
+	return out
+}
+
+// guardTexts is the slice form (tag lists). It preserves nil-ness: a nil slice
+// marshals to null and an empty one to [], and H7 must not change either shape.
+func guardTexts(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = guardText(s)
+	}
+	return out
+}
 
 // QueryRunner runs a retrieval-only query under the given read-scopes and
 // returns the ranked blocks. The handler (C4) implements it by delegating to
@@ -213,7 +251,13 @@ func (ex *Executor) runQuery(ctx context.Context, readScopes []string, raw json.
 	ids := make([]string, len(res.Blocks))
 	events := make([]EventBlock, len(res.Blocks))
 	for i, b := range res.Blocks {
-		blocks[i] = qb(b)
+		// H7: the model-facing row is guarded field by field; the event row
+		// below stays verbatim — it is display material for the SPA, not prompt
+		// material (design/04 §9-N5 owns the Ops-surface half).
+		blocks[i] = qb{
+			ID: b.ID, Title: guardText(b.Title), Category: guardText(b.Category),
+			Score: b.Score, AgeDays: b.AgeDays, Content: guardText(b.Content),
+		}
 		ids[i] = b.ID
 		events[i] = EventBlock{ID: b.ID, Title: b.Title, Category: b.Category, Score: b.Score}
 	}
@@ -256,7 +300,7 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 	ids := make([]string, len(previews))
 	events := make([]EventBlock, len(previews))
 	for i, p := range previews {
-		blocks[i] = sb{ID: p.ID, Title: p.Title, Category: p.Category, Tags: p.Tags, Preview: p.ContentPreview, UpdatedAt: p.UpdatedAt.Format(time.RFC3339)}
+		blocks[i] = sb{ID: p.ID, Title: guardText(p.Title), Category: guardText(p.Category), Tags: guardTexts(p.Tags), Preview: guardText(p.ContentPreview), UpdatedAt: p.UpdatedAt.Format(time.RFC3339)} // H7
 		ids[i] = p.ID
 		events[i] = EventBlock{ID: p.ID, Title: p.Title, Category: p.Category}
 	}
@@ -297,15 +341,18 @@ func (ex *Executor) runGet(ctx context.Context, readScopes []string, apiKeyID st
 	_ = store.LogAccess(ctx, ex.pool, apiKeyID, resolvedID, "chat-tool")
 
 	window, truncated, nextOffset := windowContent(block.Content, a.Offset, ex.maxContentWindow)
+	// H7 guards the WINDOW, not the content before windowing: next_offset is a
+	// rune index into the ORIGINAL content, and inserting CGJ ahead of the cut
+	// would shift it and silently break the paging contract.
 	result := map[string]any{
 		"id":         block.ID,
-		"title":      block.Title,
-		"category":   block.Category,
-		"tags":       block.Tags,
+		"title":      guardText(block.Title),
+		"category":   guardText(block.Category),
+		"tags":       guardTexts(block.Tags),
 		"scope":      block.Scope,
 		"created_at": block.CreatedAt.Format(time.RFC3339),
 		"updated_at": block.UpdatedAt.Format(time.RFC3339),
-		"content":    window,
+		"content":    guardText(window),
 	}
 	if truncated {
 		result["next_offset"] = nextOffset
@@ -343,7 +390,7 @@ func (ex *Executor) runRecent(ctx context.Context, readScopes []string, raw json
 	ids := make([]string, len(previews))
 	events := make([]EventBlock, len(previews))
 	for i, p := range previews {
-		blocks[i] = rb{ID: p.ID, Title: p.Title, Category: p.Category, Preview: p.ContentPreview, UpdatedAt: p.UpdatedAt.Format(time.RFC3339)}
+		blocks[i] = rb{ID: p.ID, Title: guardText(p.Title), Category: guardText(p.Category), Preview: guardText(p.ContentPreview), UpdatedAt: p.UpdatedAt.Format(time.RFC3339)} // H7
 		ids[i] = p.ID
 		events[i] = EventBlock{ID: p.ID, Title: p.Title, Category: p.Category}
 	}
