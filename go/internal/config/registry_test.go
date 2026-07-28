@@ -225,6 +225,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"pool.default_query_sensitivity":        true,
 		"pool.default_block_sensitivity":        true,
 		"pool.scope_sensitivity_floor":          true,
+		"pool.llm_audit_min_sensitivity":        true, // D4 §4.5-c: G41 audit verdict floor, born in settings like its pool siblings
 		"pool.blob_rate_limit_write":            true, // B2: blob write budget, born in settings like its pool siblings
 		"gaming.active":                         true,
 		"gaming.disabled_backends":              true,
@@ -284,6 +285,10 @@ func TestRegistryTenancySet(t *testing.T) {
 		// per-tenant trust policy
 		"pool.default_query_sensitivity": true, "pool.default_block_sensitivity": true,
 		"pool.scope_sensitivity_floor": true,
+		// D4 §4.5-c G41 audit verdict floor — same class as the scope floor
+		// above: it can only make the OWN tenant stricter (MaxSensitivity is
+		// monotone), and the audit reads it from the per-tenant snapshot.
+		"pool.llm_audit_min_sensitivity": true,
 		// B2 per-tenant blob write budget — same class as the block budget it
 		// falls back to (query.rate_limit_write, above)
 		"pool.blob_rate_limit_write": true,
@@ -314,8 +319,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 56 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 56 (change it with intent)", got)
+	if got := len(overridable); got != 57 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 57 (change it with intent)", got)
 	}
 	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
 	// a tenant override here would flush the process-wide embed cache / flip the

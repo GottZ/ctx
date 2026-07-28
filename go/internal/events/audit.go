@@ -14,6 +14,12 @@
 // not a verdict about a block: aborting beats stamping cooldowns across the
 // corpus while the chain is down.
 //
+// Every non-abort verdict then passes clampVerdict (design 04 §4.5-b/-c): a
+// deterministic detector hit on the FULL content overrides the model, and the
+// per-tenant policy floor caps how far a verdict may lower a block. The clamp
+// runs BEFORE the dry-run return, so the N=30 operator sample shows what the
+// live run would write, not what the model said.
+//
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package events
@@ -28,7 +34,9 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -65,6 +73,11 @@ type AuditSample struct {
 	Credentials *bool  `json:"credentials"` // nil = question not reached / no verdict
 	Personal    *bool  `json:"personal"`
 	Verdict     string `json:"verdict"` // credentials|personal|internal|no-verdict
+	// Detector carries the structural veto that overrode the model, nil when
+	// none fired. sensitivity.Match is secret-free BY CONSTRUCTION (kind +
+	// reason, never the matched bytes — internal/sensitivity/sensitivity.go),
+	// which is why it may ride an operator-visible sample at all.
+	Detector *sensitivity.Match `json:"detector,omitempty"`
 }
 
 // AuditStatus is the in-memory state of the current/last run. Pending counts
@@ -223,7 +236,9 @@ func (s *Scheduler) auditTenantScope(ctx context.Context, bt backgroundTenant, d
 				s.auditAbort("shutdown")
 				return true
 			}
-			sample, abort := s.auditOneBlock(ctx, blk, dryRun)
+			// cfg is THIS tenant's generation (:194) — the audit floor is
+			// tenant-overridable and must not be read process-wide.
+			sample, abort := s.auditOneBlock(ctx, cfg, blk, dryRun)
 			if abort {
 				return true
 			}
@@ -240,10 +255,53 @@ func (s *Scheduler) auditTenantScope(ctx context.Context, bt backgroundTenant, d
 	}
 }
 
+// clampVerdict is the structural counterweight to the model verdict (design 04
+// §4.5-b/-c). Pure: no DB, no clock, no config lookup — the caller supplies the
+// content and the policy floor, so the whole decision is reproducible from its
+// three arguments.
+//
+// Two independent clamps, both in the SAFE direction only:
+//
+//  1. Detector veto. sensitivity.Scan is deterministic and reads the FULL
+//     content — not the ClassifyContentLimit excerpt the model saw
+//     (internal/llm/classify.go). A hit means credentials no matter what the
+//     model answered. This is the condition under which the H8 truncation is
+//     admissible at all: a secret past rune 8 000 is invisible to the model and
+//     still visible here. It is also what makes the verdict body-blind — an
+//     instruction embedded in the content cannot change a scan result, so a
+//     block with a key classifies identically whether or not it also carries a
+//     prompt-injection payload.
+//
+//  2. Policy floor. backends.MaxSensitivity is monotone (internal/backends/
+//     trust.go), the same composition ScopeFloor.Apply uses: it can only raise.
+//     An empty/unknown floor ranks as credentials, so a config generation that
+//     never went through the registry parser fails CLOSED (no downgrade at all)
+//     instead of silently removing the floor.
+//
+// The scan is skipped when the verdict is already credentials — nothing left to
+// raise, and the audit's common case does not pay for the regex sweep.
+//
+// The returned Match is nil unless the veto fired; it is secret-free by
+// construction and is what the operator sample shows as the reason.
+func clampVerdict(v backends.Sensitivity, content string, floor backends.Sensitivity) (backends.Sensitivity, *sensitivity.Match) {
+	if v.Rank() < backends.SensCredentials.Rank() {
+		if m, hit := sensitivity.Scan(content); hit {
+			return backends.SensCredentials, &m
+		}
+	}
+	return backends.MaxSensitivity(v, floor), nil
+}
+
 // auditOneBlock asks the two questions and applies (or records) the verdict.
 // abort=true when the chain/backend failed — that is an infrastructure
 // condition, not a block verdict.
-func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, dryRun bool) (AuditSample, bool) {
+//
+// cfg is the ITERATED TENANT's generation, handed down from auditTenantScope —
+// never s.cfg.Snapshot(). pool.llm_audit_min_sensitivity is tenant-overridable,
+// so reading the process-wide base here would serve the _global value to every
+// tenant and turn "a tenant can be stricter for itself" into a false promise at
+// exactly the security-relevant seam (design 04 §4.5-c).
+func (s *Scheduler) auditOneBlock(ctx context.Context, cfg *config.Config, blk store.AuditBlock, dryRun bool) (AuditSample, bool) {
 	sample := AuditSample{ID: blk.ID, Title: blk.Title}
 
 	cred, err := s.classify(ctx, s.pool, s.backendPool, llm.QuestionCredentials, blk.Title, blk.Content, blk.ID, s.backgroundAdmission())
@@ -288,6 +346,16 @@ func (s *Scheduler) auditOneBlock(ctx context.Context, blk store.AuditBlock, dry
 		}
 		return sample, false
 	}
+
+	// The clamp sits BEFORE sample.Verdict and therefore before the dry-run
+	// return: sample and live write carry the SAME result, which is the only
+	// reason the N=30 gate predicts live behaviour (design 04 §4.5-b).
+	floor := backends.SensCredentials // no config generation ⇒ no downgrade
+	if cfg != nil {
+		floor = cfg.Pool.LLMAuditMinSensitivity
+	}
+	verdict, detected := clampVerdict(verdict, blk.Content, floor)
+	sample.Detector = detected
 
 	sample.Verdict = string(verdict)
 	if dryRun {

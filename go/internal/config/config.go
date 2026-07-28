@@ -617,6 +617,25 @@ type PoolConfig struct {
 	DefaultQuerySensitivity backends.Sensitivity `key:"pool.default_query_sensitivity" env:"-" default:"personal" mut:"hot" guard:"sensitivity-downgrade" tenancy:"tenant-overridable"`
 	DefaultBlockSensitivity backends.Sensitivity `key:"pool.default_block_sensitivity" env:"-" default:"credentials" mut:"hot" guard:"sensitivity-downgrade" tenancy:"tenant-overridable"`
 	ScopeSensitivityFloor   ScopeFloor           `key:"pool.scope_sensitivity_floor" env:"-" default:"{}" mut:"hot" tenancy:"tenant-overridable"`
+	// LLMAuditMinSensitivity is the floor of the G41 audit verdict (design 04
+	// §4.5-c): the LLM classification may go HIGHER than this value, never
+	// lower. Composed with backends.MaxSensitivity, which is monotone — the
+	// same shape ScopeFloor.Apply already uses one line up.
+	//
+	// DEFENSE IN DEPTH: at the default this key closes NO reachable path.
+	// auditOneBlock can only produce credentials, personal or internal
+	// (internal/events/audit.go — public stays a manual decision by
+	// construction), so 'internal' is exactly today's code floor, written down
+	// as policy instead of living implicitly in a control flow. It starts
+	// biting the day the verdict set is ever extended — or the day a tenant
+	// raises it to 'personal' to keep its corpus off no-credentials backends.
+	//
+	// tenant-overridable like its pool siblings, and for the same reason: a
+	// tenant may only make ITSELF stricter. That promise is only true if the
+	// read point is the per-tenant snapshot the audit batch already takes
+	// (internal/events/audit.go auditTenantScope) — reading the process-wide
+	// base generation would silently serve the _global value.
+	LLMAuditMinSensitivity backends.Sensitivity `key:"pool.llm_audit_min_sensitivity" env:"-" default:"internal" mut:"hot" guard:"sensitivity-downgrade" tenancy:"tenant-overridable"`
 	// BlobRateLimitWrite caps /api/blob/store per api key and 60-second window
 	// (B2/E1-A). It counts its OWN action (store.ActionBlobWrite), NOT the
 	// block-write action query.rate_limit_write gates: a 50 MB binary upload and

@@ -68,6 +68,12 @@ func TestPoolKeysGuardAndDefaults(t *testing.T) {
 		"pool.default_query_sensitivity": {"sensitivity-downgrade", "personal"},
 		"pool.default_block_sensitivity": {"sensitivity-downgrade", "credentials"},
 		"pool.scope_sensitivity_floor":   {"", nil},
+		// D4 §4.5-c: the G41 audit verdict floor carries the SAME downgrade
+		// guard as its two default siblings — lowering it widens what a model
+		// verdict may mark external-eligible, which is the identical border.
+		// Default 'internal' = today's code floor (auditOneBlock cannot emit
+		// public), written down instead of implied.
+		"pool.llm_audit_min_sensitivity": {"sensitivity-downgrade", "internal"},
 		// B2: the blob write budget joined the pool surface. No downgrade guard
 		// (a rate limit is not an egress border), but the same settings-only
 		// birth and a default that must stay POSITIVE — 0 would hand the

@@ -32,7 +32,7 @@ func TestAuditPreemptedClassifyAbortsDrain(t *testing.T) {
 		llm.QuestionCredentials: {err: preempted},
 	})
 
-	sample, abort := s.auditOneBlock(context.Background(), auditBlockFixture(), true)
+	sample, abort := s.auditOneBlock(context.Background(), auditFixtureCfg(), auditBlockFixture(), true)
 	if !abort {
 		t.Fatal("preempted classify must abort the drain run (infrastructure condition, not a verdict)")
 	}
