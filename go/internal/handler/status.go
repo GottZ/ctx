@@ -321,7 +321,20 @@ type activityStatus struct {
 // cheapSnapshot is everything gathered at the base tick — everything EXCEPT the
 // O(n) dream-queue scan, which refreshes on its own slower cadence.
 type cheapSnapshot struct {
-	asOf           time.Time
+	asOf time.Time
+	// lastGoodAt is the SUCCESS stamp (RC-1 wave S3): the newest tick whose
+	// DB-backed reads ALL answered. asOf is a "when did we last TRY" stamp — it
+	// advances unconditionally, failed reads included — so it cannot report
+	// health. When a pass degrades, this value is carried over from the previous
+	// snapshot rather than advanced, exactly the doctrine the guard generation
+	// already runs on (status_guard.go: a nil build never refreshes builtAt).
+	lastGoodAt time.Time
+	// degraded says whether THIS pass's DB-backed reads all answered. It is the
+	// tick-local companion to lastGoodAt: the pair distinguishes "measured, and
+	// the numbers are these" from "could not measure, these are the last ones we
+	// could" — a distinction the section-level degradations (a nil section, an
+	// empty aggregate) each swallow on their own.
+	degraded       bool
 	health         healthResponse
 	backends       []backends.BackendStatus
 	dreamMode      string
@@ -394,6 +407,11 @@ type StatusCollector struct {
 	rebuild atomic.Bool
 	cache   atomic.Pointer[cheapSnapshot]
 	cacheAt atomic.Int64 // unix nano of last cheap refresh
+	// dbFails counts DB-backed reads of the cheap path that failed and were
+	// swallowed into a partial section (noteDBFail). Monotone since boot and
+	// never read as a number — buildCheap only DIFFS it across one pass to learn
+	// whether that pass was measured or guessed (stampLiveness).
+	dbFails atomic.Uint64
 
 	qsScan atomic.Bool
 	qs     atomic.Pointer[dream.QueueStats]
@@ -525,6 +543,64 @@ func (c *StatusCollector) cheapNow(ctx context.Context, cfg *config.Config) *che
 
 // setBroadcasting toggles the SSE-loop-active flag (see broadcasting).
 func (c *StatusCollector) setBroadcasting(on bool) { c.broadcasting.Store(on) }
+
+// noteDBFail logs a swallowed DB-read failure of the cheap path AND counts it.
+// Every cheap source deliberately degrades to a partial section rather than
+// failing the whole refresh (each says so at its own call site) — which is
+// precisely why the refresh cannot report its own health from asOf: that stamp
+// advances whether the reads answered or not. The counter is the one thing that
+// remembers they did not.
+func (c *StatusCollector) noteDBFail(msg string, err error) {
+	slog.Warn(msg, "error", err)
+	c.dbFails.Add(1)
+}
+
+// stampLiveness folds ONE buildCheap pass into the snapshot's success stamp:
+// degraded when any DB-backed read of the pass failed (the counter moved) or the
+// pool ping itself did, and last_good_at then KEEPS the previous snapshot's
+// value — a stand that was actually measured — instead of walking with asOf.
+//
+// The counter is process-wide, so a failure raised OUTSIDE this pass — a
+// background refreshCheapAsync, or a guard-generation build triggered by the
+// per-tenant read path (status_guard.go) — can land inside its window and be
+// attributed here. That errs toward degraded=true, which is the fail-closed
+// direction: a heartbeat that under-claims health costs a client watchdog one
+// extra probe, while one that over-claims it is the exact defect this stamp
+// exists to remove.
+func (c *StatusCollector) stampLiveness(snap *cheapSnapshot, failsBefore uint64) {
+	snap.degraded = c.dbFails.Load() != failsBefore || snap.health.Services["database"] != "ok"
+	if !snap.degraded {
+		snap.lastGoodAt = snap.asOf
+		return
+	}
+	if prev := c.cache.Load(); prev != nil {
+		snap.lastGoodAt = prev.lastGoodAt
+	}
+}
+
+// livenessStamp is the DB-free health slice behind the SSE heartbeat. It is
+// deliberately NOT a statusResponse: the heartbeat writes once per connection
+// per ping interval, and a payload that grew into the full status would
+// re-introduce the per-connection build the hub exists to avoid.
+type livenessStamp struct {
+	lastGoodAt time.Time
+	degraded   bool
+	health     string
+}
+
+// liveness reads the cached stand and nothing else — no query, no assemble, and
+// deliberately no cold start (a cold start IS a DB build, and the keepalive must
+// never be the thing that goes to the database: it fires on a per-connection
+// timer that has no relation to the tick cadence). Before the first tick there
+// is no measured stand at all; that reports degraded with an unknown health
+// class and a zero stamp, which is the honest answer rather than "ok".
+func (c *StatusCollector) liveness() livenessStamp {
+	cur := c.cache.Load()
+	if cur == nil {
+		return livenessStamp{degraded: true, health: "unknown"}
+	}
+	return livenessStamp{lastGoodAt: cur.lastGoodAt, degraded: cur.degraded, health: cur.health.Status}
+}
 
 // refreshForBroadcast rebuilds the cheap snapshot synchronously and returns the
 // assembled status. Called only by the single SSE broadcast loop (G34) — there
@@ -683,6 +759,10 @@ func (c *StatusCollector) channelProbeIfDue(ctx context.Context, cfg *config.Con
 
 // buildCheap gathers everything except the dream-queue scan.
 func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *cheapSnapshot {
+	// Success-stamp baseline (S3): every DB-backed read below that fails goes
+	// through noteDBFail, so a counter that has not moved by the end of this pass
+	// means every source answered. Captured FIRST — before the health ping.
+	failsBefore := c.dbFails.Load()
 	// Health: same source + shape as /health (shared HealthStatus), from ONE
 	// pool snapshot. The ping context is capped so a hung backend cannot stall
 	// the dashboard refresh.
@@ -763,6 +843,7 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	// generation's per-scope slot, so both paths share this single aggregate
 	// instead of each running their own.
 	snap.guardReview = c.guardReviewGlobal(ctx, cfg.Events.TickInterval)
+	c.stampLiveness(snap, failsBefore)
 	return snap
 }
 
@@ -796,7 +877,7 @@ func (c *StatusCollector) buildEmbedMigrationStatus(ctx context.Context) *embedM
 		// missing table (pre-114) or any other error degrades identically to
 		// "no section" with a WARN — never a failed status refresh.
 		if !errors.Is(err, pgx.ErrNoRows) {
-			slog.Warn(embedMigrationPendingIndexGuardMsg, "error", err)
+			c.noteDBFail(embedMigrationPendingIndexGuardMsg, err)
 		}
 		return nil
 	}
@@ -826,7 +907,7 @@ func (c *StatusCollector) buildRecallStatus(ctx context.Context, lastRun time.Ti
 	}
 	runs, err := recall.LatestByStratum(ctx, c.pool, recallStrataLimit)
 	if err != nil {
-		slog.Warn("status: recall latest-by-stratum failed", "error", err)
+		c.noteDBFail("status: recall latest-by-stratum failed", err)
 	} else {
 		now := time.Now()
 		for _, r := range runs {
@@ -860,7 +941,7 @@ func (c *StatusCollector) queryInvalidRecallRuns7d(ctx context.Context) int {
 		`SELECT count(*)::int FROM context_recall_runs
 		 WHERE NOT valid AND ran_at > now() - interval '7 days'`).Scan(&n)
 	if err != nil {
-		slog.Warn("status: recall invalid_runs_7d query failed", "error", err)
+		c.noteDBFail("status: recall invalid_runs_7d query failed", err)
 		return 0
 	}
 	return n
@@ -1016,7 +1097,7 @@ func (c *StatusCollector) queryLLM24h(ctx context.Context) ([]llm24hRow, bool) {
 		GROUP BY 1, 2
 		ORDER BY calls DESC`)
 	if err != nil {
-		slog.Warn("status: llm_24h query failed", "error", err)
+		c.noteDBFail("status: llm_24h query failed", err)
 		return nil, false
 	}
 	defer rows.Close()
@@ -1028,7 +1109,7 @@ func (c *StatusCollector) queryLLM24h(ctx context.Context) ([]llm24hRow, bool) {
 		var attributed bool
 		if err := rows.Scan(&r.Backend, &r.Pipeline, &r.Calls, &r.AvgMs, &r.Errors,
 			&r.PromptTokens, &r.CompletionTokens, &r.CostUSD, &attributed); err != nil {
-			slog.Warn("status: llm_24h scan failed", "error", err)
+			c.noteDBFail("status: llm_24h scan failed", err)
 			return out, false
 		}
 		if !attributed {
@@ -1037,7 +1118,7 @@ func (c *StatusCollector) queryLLM24h(ctx context.Context) ([]llm24hRow, bool) {
 		out = append(out, r)
 	}
 	if rows.Err() != nil {
-		slog.Warn("status: llm_24h rows error", "error", rows.Err())
+		c.noteDBFail("status: llm_24h rows error", rows.Err())
 		return out, false
 	}
 	return out, complete
@@ -1052,7 +1133,7 @@ func (c *StatusCollector) queryLastCycleAt(ctx context.Context) *time.Time {
 		SELECT max(created_at) FROM context_llm_log
 		WHERE pipeline IN ('dream-eval', 'dream-keywords', 'dream-temporal', 'dream-recurrence')`).Scan(&t)
 	if err != nil {
-		slog.Warn("status: last_cycle_at query failed", "error", err)
+		c.noteDBFail("status: last_cycle_at query failed", err)
 		return nil
 	}
 	return t

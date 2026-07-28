@@ -40,7 +40,7 @@ import (
 
 // sseWriteWindow is the rolling write-deadline budget per frame. http.Server's
 // WriteTimeout (main.go: 120s) is an ABSOLUTE response deadline that would kill
-// any long-lived stream at 120s; while the stream writes (diffs + pings) it
+// any long-lived stream at 120s; while the stream writes (diffs + heartbeats) it
 // proves liveness, so every frame pushes the deadline one window ahead instead
 // — the exact mechanism the query heartbeat uses against the same cap
 // (query.go: heartbeatWriteWindow). Package var so tests can shrink it.
@@ -52,18 +52,25 @@ var sseWriteWindow = 90 * time.Second
 const sseMailbox = 16
 
 // statusProvider is the slice of *StatusCollector the SSE layer needs: serve a
-// cached snapshot, drive a synchronous per-tick refresh, and flip the
-// broadcasting flag. *StatusCollector satisfies it; tests inject a fake that
-// returns canned snapshots without a pool.
+// cached snapshot, drive a synchronous per-tick refresh, flip the broadcasting
+// flag, and answer the DB-free liveness read behind the heartbeat.
+// *StatusCollector satisfies it; tests inject a fake that returns canned
+// snapshots without a pool.
+//
+// liveness is deliberately ctx-LESS: it must not query, cold-start or assemble
+// (status.go), because it is called per connection on the ping timer — a
+// cadence unrelated to the tick. A method without a context structurally cannot
+// carry a DB deadline, which is the cheapest way to keep that property true.
 type statusProvider interface {
 	Snapshot(ctx context.Context) statusResponse
 	refreshForBroadcast(ctx context.Context) statusResponse
 	setBroadcasting(on bool)
+	liveness() livenessStamp
 }
 
 // sseWriter frames server-sent events onto one connection and keeps the rolling
 // write deadline ahead of the absolute server WriteTimeout. Every write is
-// mutex-serialized: the diff fan-out, the keepalive ping and the re-auth
+// mutex-serialized: the diff fan-out, the keepalive heartbeat and the re-auth
 // teardown can all target the same connection.
 type sseWriter struct {
 	w  http.ResponseWriter
@@ -118,8 +125,53 @@ func (sw *sseWriter) event(name, id string, data []byte) error {
 // ping writes an SSE comment keepalive (": ping"). The client ignores it; it
 // resets the fronting proxy's read timeout and the connection write deadline.
 // Thin wrapper over the generic comment() (sse.go) — same line, one writer.
+//
+// /api/events no longer uses it: an ignored keepalive proves liveness to the
+// SOCKET and to the proxy, and nothing at all to the client, so the telemetry
+// stream sends hb() instead (S3). It remains the keepalive of the domain-event
+// stream (project_events.go), whose frames are ids-only refetch signals with no
+// server-health payload to carry.
 func (sw *sseWriter) ping() error {
 	return sw.comment("ping")
+}
+
+// hbEvent is the /api/events keepalive payload (RC-1 wave S3). The keepalive is
+// a REAL named event, not an SSE comment: eventsource parsers drop comment lines
+// natively (the repo's own client does — sse.svelte.ts), so a ": ping" keepalive
+// fires nothing client-side and leaves the page unable to tell "the pipe is
+// warm" from "the server is answering".
+//
+// Carrying the SUCCESS stamp turns that same frame into the signal a client
+// watchdog can act on (wave S4): last_good_at is the newest tick whose DB reads
+// ANSWERED, so a stream that keeps arriving while the stamp freezes reads
+// "transport fine, server blind" — the state as_of can never express, because
+// as_of advances on failed reads too.
+//
+// No subs field, deliberately: connection bookkeeping is hub-internal, and a
+// frame fanned to every open admin panel is the wrong place to disclose how many
+// other sessions are watching.
+type hbEvent struct {
+	// LastGoodAt is null until the first measured tick — a zero time would
+	// marshal as the Unix epoch and read like a real, very old measurement.
+	LastGoodAt *time.Time `json:"last_good_at"`
+	Degraded   bool       `json:"degraded"`
+	Health     string     `json:"health"`
+}
+
+func hbEventOf(l livenessStamp) hbEvent {
+	return hbEvent{LastGoodAt: timePtr(l.lastGoodAt), Degraded: l.degraded, Health: l.health}
+}
+
+// hb writes the keepalive through the NORMAL frame path, so it rolls the write
+// deadline exactly like a diff frame: a keepalive written past sseWriter would
+// keep the fronting proxy happy and still let http.Server's ABSOLUTE WriteTimeout
+// kill the stream at 120s (sseWriteWindow).
+func (sw *sseWriter) hb(l livenessStamp) error {
+	data, err := json.Marshal(hbEventOf(l))
+	if err != nil {
+		return err
+	}
+	return sw.event("hb", "", data)
 }
 
 // statusEvent is the per-tick status payload: the full /api/status shape MINUS
@@ -549,7 +601,7 @@ func NewEventsHandler(life context.Context, pool *pgxpool.Pool, collector *Statu
 
 // HandleEvents serves the admin SSE stream. Admin-gated upstream (RequireAdmin)
 // — same payload as /api/status. Flow: cap-check → commit stream header →
-// initial full status + backends → fan-out diffs / pings / periodic re-auth
+// initial full status + backends → fan-out diffs / hb heartbeats / periodic re-auth
 // until the client disconnects, the server shuts down, the hub drops a slow
 // consumer, or the key is revoked.
 func (h *EventsHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
@@ -618,7 +670,11 @@ func (h *EventsHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-pingT.C:
-			if sw.ping() != nil {
+			// The keepalive is an OBSERVABLE hb event carrying the success stamp,
+			// not a ": ping" comment the client's parser drops (S3). liveness() is
+			// an in-memory cache read, so N connections firing on their own timers
+			// cost N marshals and zero DB work.
+			if sw.hb(h.hub.status.liveness()) != nil {
 				return
 			}
 		case <-reauthT.C:

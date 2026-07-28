@@ -22,6 +22,10 @@ type fakeStatus struct {
 	snap      statusResponse
 	refreshes int
 	loops     int
+	// live is the canned liveness stamp behind the hb heartbeat. Its zero value
+	// is the honest "no measured stand yet" answer, so tests that do not care
+	// about the heartbeat need not set it.
+	live livenessStamp
 }
 
 func (f *fakeStatus) Snapshot(context.Context) statusResponse {
@@ -46,10 +50,25 @@ func (f *fakeStatus) setBroadcasting(on bool) {
 	f.loops++
 }
 
+// liveness is the DB-free stand read: it returns the canned stamp and, unlike
+// Snapshot/refreshForBroadcast, counts nothing — a probe can therefore assert
+// that the heartbeat did NOT drive a refresh.
+func (f *fakeStatus) liveness() livenessStamp {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.live
+}
+
 func (f *fakeStatus) set(s statusResponse) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snap = s
+}
+
+func (f *fakeStatus) setLive(l livenessStamp) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.live = l
 }
 
 func (f *fakeStatus) loopCount() int   { f.mu.Lock(); defer f.mu.Unlock(); return f.loops }

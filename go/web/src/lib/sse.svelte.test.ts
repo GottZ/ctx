@@ -87,4 +87,55 @@ describe('SseClient', () => {
     // The malformed status frame is skipped; the valid backends frame survives.
     expect(got).toEqual([['backends', []]])
   })
+
+  // Dead-branch gate (RC-1 wave S3): a keepalive framed as an SSE COMMENT is
+  // invisible to this client — eventsource-parser drops comment lines natively,
+  // so no amount of ": ping" traffic ever reaches onEvent. That is why the
+  // server's telemetry keepalive is the named `hb` event: only the second
+  // framing below gives the page anything to act on.
+  it('never fires on a ": ping" comment, always fires on an "hb" event', async () => {
+    const hbData = { last_good_at: '2026-07-28T10:00:00Z', degraded: false, health: 'ok' }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        sseResponse(
+          ': ping\n\n',
+          ': ping\n\n',
+          `event: hb\ndata: ${JSON.stringify(hbData)}\n\n`,
+        ),
+      ),
+    )
+    const got: Array<[string, unknown]> = []
+    const sse = new SseClient('/api/events', (name, data) => got.push([name, data]))
+    await sse.connect()
+    sse.close()
+
+    // Two comments + one event ⇒ exactly one dispatch, carrying the stamp.
+    expect(got).toEqual([['hb', hbData]])
+  })
+
+  // Backward compatibility of the new frame (S3; the StatusPage watchdog is S4):
+  // this client dispatches EVERY named event verbatim and knows nothing about
+  // the name set, so `hb` rides an unchanged parser and the consumer's unknown-
+  // name branch drops it silently (llmcall-feed.svelte.test.ts pins that half).
+  it('dispatches an unknown event name verbatim (hb needs no client change)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        sseResponse(
+          'event: hb\ndata: {"last_good_at":null,"degraded":true,"health":"unknown"}\n\n',
+          'event: backends\ndata: []\n\n',
+        ),
+      ),
+    )
+    const got: Array<[string, unknown]> = []
+    const sse = new SseClient('/api/events', (name, data) => got.push([name, data]))
+    await sse.connect()
+    sse.close()
+
+    expect(got).toEqual([
+      ['hb', { last_good_at: null, degraded: true, health: 'unknown' }],
+      ['backends', []],
+    ])
+  })
 })

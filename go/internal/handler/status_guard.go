@@ -219,9 +219,15 @@ func (c *StatusCollector) buildGuardGenInto(ctx context.Context) {
 	if build == nil {
 		build = buildGuardReviewGeneration
 	}
-	if gen := build(ctx, c.pool); gen != nil {
-		c.guardGen.Store(gen)
+	gen := build(ctx, c.pool)
+	if gen == nil {
+		// The build already logged its own reason; count it so the tick's success
+		// stamp (status.go stampLiveness) sees this read failed too — dropping the
+		// generation keeps the SECTION honest, the counter keeps the TICK honest.
+		c.dbFails.Add(1)
+		return
 	}
+	c.guardGen.Store(gen)
 }
 
 // refreshGuardGenAsync rebuilds the generation in the background; the CAS guard

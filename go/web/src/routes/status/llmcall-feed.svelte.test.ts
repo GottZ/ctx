@@ -70,6 +70,11 @@ describe('LlmcallFeed — tolerance', () => {
     const feed = new LlmcallFeed()
     expect(() => feed.apply('llmcall', row('legacy'))).not.toThrow() // the retired per-row name
     expect(() => feed.apply('quota', { rows: [row('x')], count: 1 })).not.toThrow()
+    // The S3 heartbeat lands here too: StatusPage routes every name it does not
+    // handle into the feed, so `hb` must be a silent drop until S4 claims it.
+    expect(() =>
+      feed.apply('hb', { last_good_at: '2026-07-28T10:00:00Z', degraded: false, health: 'ok' }),
+    ).not.toThrow()
     expect(feed.rows).toHaveLength(0)
     expect(feed.refetchToken).toBe(0)
   })
