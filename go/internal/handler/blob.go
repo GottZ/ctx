@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -144,6 +147,17 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 	// Execute upsert.
 	blob, err := store.UpsertBlob(ctx, h.pool, req.Category, req.Title, req.Filename, req.MimeType, writeScope, data, req.Tags, req.Metadata)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "23") {
+			status, reason := blobConstraintError(pgErr)
+			slog.Warn("blob-store: constraint violation", "error", err,
+				"sqlstate", pgErr.Code, "constraint", pgErr.ConstraintName, "request_id", reqID)
+			writeJSON(w, status, map[string]any{
+				"success": false, "error": reason,
+				"sqlstate": pgErr.Code, "constraint": pgErr.ConstraintName,
+			})
+			return
+		}
 		slog.Error("blob-store: upsert error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
@@ -164,6 +178,31 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"blob":    blob,
 	})
+}
+
+// blobConstraintError maps a Postgres integrity-constraint violation (SQLSTATE
+// class 23) onto an HTTP status and a named reason. Such a violation is a
+// property of the REQUEST, not of the server: a uniqueness collision is the
+// caller's to resolve (409), every other class-23 violation means the payload
+// itself cannot be stored as sent (422). Callers outside class 23 keep the
+// opaque 500 — those are server faults and must not leak SQL detail.
+func blobConstraintError(pgErr *pgconn.PgError) (int, string) {
+	name := pgErr.ConstraintName
+	if name == "" {
+		name = "unknown"
+	}
+	switch pgErr.Code {
+	case "23505":
+		return http.StatusConflict, fmt.Sprintf("Blob violates unique constraint %q", name)
+	case "23503":
+		return http.StatusUnprocessableEntity, fmt.Sprintf("Blob violates foreign key constraint %q", name)
+	case "23502":
+		return http.StatusUnprocessableEntity, fmt.Sprintf("Blob is missing a required value for column %q", pgErr.ColumnName)
+	case "23514":
+		return http.StatusUnprocessableEntity, fmt.Sprintf("Blob violates check constraint %q", name)
+	default:
+		return http.StatusUnprocessableEntity, fmt.Sprintf("Blob violates constraint %q", name)
+	}
 }
 
 // -- blob-fetch --.

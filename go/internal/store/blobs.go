@@ -60,6 +60,12 @@ type BlobStats struct {
 
 // UpsertBlob inserts or updates a blob by (category, title, scope).
 // SHA-256 checksum is computed via pgcrypto.
+//
+// $6 carries an explicit ::bytea cast in BOTH positions: without it the data
+// column infers bytea while digest($6, 'sha256') infers text, and PostgreSQL
+// rejects the PREPARE with "inconsistent types deduced for parameter $6"
+// (42P08) — which the pgx default exec mode (prepared statements) hits on
+// every single call.
 func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filename, mimeType, scope string, data []byte, tags []string, metadata map[string]any) (*BlobMeta, error) {
 	if tags == nil {
 		tags = []string{}
@@ -71,7 +77,7 @@ func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filena
 	bm := &BlobMeta{}
 	err := pool.QueryRow(ctx,
 		`INSERT INTO context_blobs (category, title, filename, mime_type, file_size, data, checksum, tags, metadata, scope)
-		VALUES ($1, $2, $3, $4, $5, $6, encode(digest($6, 'sha256'), 'hex'), $7, $8, $9)
+		VALUES ($1, $2, $3, $4, $5, $6::bytea, encode(digest($6::bytea, 'sha256'), 'hex'), $7, $8, $9)
 		ON CONFLICT (category, title, scope) DO UPDATE SET
 			filename = EXCLUDED.filename,
 			mime_type = EXCLUDED.mime_type,
