@@ -1239,6 +1239,59 @@ func LogAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID, blockID, actio
 	return nil
 }
 
+// ActionBlobWrite is the context_access_log action of a /api/blob/store write.
+// It is SEPARATE from the block-write action ("write") by decision (B2/E1-A):
+// the two budgets count disjoint populations, so a key at its block-write limit
+// can still store blobs and a burst of blob writes cannot starve block writes.
+// Metering (LogAccessRef) and gate (CheckRateLimitByAction) read this one
+// constant — they cannot drift into a budget that is fed under one name and
+// counted under another, which is exactly how the blob budget was dead before.
+const ActionBlobWrite = "blob-write"
+
+// LogAccessRef inserts an access log entry that references a BLOB instead of a
+// block: block_id stays NULL (it is FK-bound to context_blocks, so a blob id in
+// that column raises 23503 — the Gap-C0-b defect) and blob_id carries the
+// reference, unconstrained by migration 122 so the row outlives its blob.
+//
+// blobID may be empty. A blob write books its row BEFORE the upsert runs, as
+// an INTENT: the expensive work must cost budget even when it ends in a
+// constraint violation, and the id it would carry is not known yet. The caller
+// fills it in afterwards via AttributeAccessBlob, addressing the returned id.
+//
+// principal_id is derived from the acting key in SQL exactly as in LogAccess.
+func LogAccessRef(ctx context.Context, pool *pgxpool.Pool, apiKeyID, blobID, action string) (string, error) {
+	var blob *string
+	if blobID != "" {
+		blob = &blobID
+	}
+	var logID string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO context_access_log (api_key_id, blob_id, action, metadata, principal_id)
+		 VALUES ($1::uuid, $2::uuid, $3, '{}'::jsonb,
+		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid))
+		 RETURNING id::text`,
+		apiKeyID, blob, action,
+	).Scan(&logID)
+	if err != nil {
+		return "", fmt.Errorf("store: log access ref: %w", err)
+	}
+	return logID, nil
+}
+
+// AttributeAccessBlob attaches a blob id to an access log row booked earlier by
+// LogAccessRef. By primary key, so it stays a single-row update no matter how
+// large the audit trail grows.
+func AttributeAccessBlob(ctx context.Context, pool *pgxpool.Pool, logID, blobID string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE context_access_log SET blob_id = $2::uuid WHERE id = $1::uuid`,
+		logID, blobID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: attribute access blob: %w", err)
+	}
+	return nil
+}
+
 // GuardList returns flagged blocks for guard review. types is an optional
 // server-side type_name filter (bind parameter, WF-T10 line — never a client
 // filter over paginated lists at target scale).

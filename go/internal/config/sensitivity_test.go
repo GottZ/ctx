@@ -68,6 +68,11 @@ func TestPoolKeysGuardAndDefaults(t *testing.T) {
 		"pool.default_query_sensitivity": {"sensitivity-downgrade", "personal"},
 		"pool.default_block_sensitivity": {"sensitivity-downgrade", "credentials"},
 		"pool.scope_sensitivity_floor":   {"", nil},
+		// B2: the blob write budget joined the pool surface. No downgrade guard
+		// (a rate limit is not an egress border), but the same settings-only
+		// birth and a default that must stay POSITIVE — 0 would hand the
+		// fallback to query.rate_limit_write for every fresh install.
+		"pool.blob_rate_limit_write": {"", 10},
 	}
 	for key, want := range cases {
 		info, ok := KeyByName(key)

@@ -170,6 +170,7 @@ func validateQuery(c *Config) []Issue {
 	}{
 		{"query.rate_limit_write", c.Query.RateLimitWrite},
 		{"query.rate_limit_read", c.Query.RateLimitRead},
+		{"pool.blob_rate_limit_write", c.Pool.BlobRateLimitWrite},
 	} {
 		if r.val < 0 {
 			issues = append(issues, Issue{Field: r.key, Severity: SeverityError,

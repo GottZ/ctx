@@ -141,6 +141,10 @@ func TestRegistryStrictSet(t *testing.T) {
 		// to 0 would hide an intended activation, a malformed one must never
 		// guess a weakening window, so it aborts loudly.
 		"dispatch.background_aging_after": true,
+		// B2: the blob write budget is a CEILING like its rate-limit siblings —
+		// a typo'd value silently defaulting to 10 would hide the intended cap
+		// on the one write surface that costs disk per request.
+		"pool.blob_rate_limit_write": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {
@@ -221,6 +225,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"pool.default_query_sensitivity":        true,
 		"pool.default_block_sensitivity":        true,
 		"pool.scope_sensitivity_floor":          true,
+		"pool.blob_rate_limit_write":            true, // B2: blob write budget, born in settings like its pool siblings
 		"gaming.active":                         true,
 		"gaming.disabled_backends":              true,
 		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
@@ -279,6 +284,9 @@ func TestRegistryTenancySet(t *testing.T) {
 		// per-tenant trust policy
 		"pool.default_query_sensitivity": true, "pool.default_block_sensitivity": true,
 		"pool.scope_sensitivity_floor": true,
+		// B2 per-tenant blob write budget — same class as the block budget it
+		// falls back to (query.rate_limit_write, above)
+		"pool.blob_rate_limit_write": true,
 		// per-tenant SSE cap
 		"events.max_connections": true,
 		// W11 per-project sync rate (max_concurrent is a PROCESS-global semaphore →
@@ -306,8 +314,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 55 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 55 (change it with intent)", got)
+	if got := len(overridable); got != 56 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 56 (change it with intent)", got)
 	}
 	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
 	// a tenant override here would flush the process-wide embed cache / flip the

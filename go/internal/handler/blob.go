@@ -125,23 +125,9 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Rate limit check (writes/min, 0 = disabled). MT 06-C5: per-tenant via the
-	// request context (tenant's own RateLimitWrite override, else _global).
-	if limit := h.cfg.SnapshotForRequest(ctx).Query.RateLimitWrite; limit > 0 {
-		writeCount, err := store.CheckRateLimit(ctx, h.pool, authResult.ApiKeyID)
-		if err != nil {
-			slog.Error("blob-store: rate limit check error", "error", err, "request_id", reqID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"success": false, "error": "Internal server error",
-			})
-			return
-		}
-		if writeCount >= limit {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false, "error": fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", limit),
-			})
-			return
-		}
+	logID, ok := h.meterBlobWrite(ctx, w, authResult, reqID)
+	if !ok {
+		return
 	}
 
 	// Execute upsert.
@@ -165,12 +151,14 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log write (fire-and-forget).
+	// Attribute the stored blob to the row booked above (fire-and-forget). Only
+	// the ATTRIBUTION is async — the metering row itself already exists, so a
+	// lost goroutine costs the audit trail one reference, never a budget entry.
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if logErr := store.LogAccess(bgCtx, h.pool, authResult.ApiKeyID, blob.ID, "blob-write"); logErr != nil {
-			slog.Error("blob-store: write log error", "error", logErr, "request_id", reqID)
+		if logErr := store.AttributeAccessBlob(bgCtx, h.pool, logID, blob.ID); logErr != nil {
+			slog.Error("blob-store: write attribution error", "error", logErr, "request_id", reqID)
 		}
 	}()
 
@@ -178,6 +166,55 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"blob":    blob,
 	})
+}
+
+// meterBlobWrite applies the blob write budget and books the row that pays into
+// it, returning that row's id for the later blob attribution. ok=false means
+// the response is already written and the caller must stop.
+//
+// Gate and booking live in ONE function because they are one mechanism: the
+// gate counts exactly the rows the booking writes (store.ActionBlobWrite), and
+// a caller that ran one without the other would either meter an ungated surface
+// or gate an unfed counter — the second is precisely the Ist-Stand this wave
+// repairs. The budget is the blob's OWN (pool.blob_rate_limit_write, with
+// Config.BlobWriteLimit owning the fallback to query.rate_limit_write; 0 =
+// disabled), NOT the block-write budget this path used to borrow. MT 06-C5:
+// per-tenant via the request context (tenant's own override, else _global).
+//
+// The booking is SYNCHRONOUS and precedes the upsert, on purpose. A write that
+// dies in a constraint violation has already cost the decode, the checksum and
+// an INSERT attempt of up to 50 MB, so it must cost budget too — otherwise the
+// surface is free to hammer with payloads that never commit. And the row IS the
+// budget: booked after the fact, the gate reads a counter that lags its own
+// writes and N concurrent requests all pass an empty one. A booking failure is
+// fail-closed (500) for the same reason: an unbookable write is an ungated one.
+func (h *BlobHandler) meterBlobWrite(ctx context.Context, w http.ResponseWriter, ar *auth.AuthResult, reqID string) (string, bool) {
+	if limit := h.cfg.SnapshotForRequest(ctx).BlobWriteLimit(); limit > 0 {
+		writeCount, err := store.CheckRateLimitByAction(ctx, h.pool, ar.ApiKeyID, store.ActionBlobWrite)
+		if err != nil {
+			slog.Error("blob-store: rate limit check error", "error", err, "request_id", reqID)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false, "error": "Internal server error",
+			})
+			return "", false
+		}
+		if writeCount >= limit {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"success": false, "error": fmt.Sprintf("Rate limit exceeded: max %d blob writes per 60 seconds", limit),
+			})
+			return "", false
+		}
+	}
+
+	logID, err := store.LogAccessRef(ctx, h.pool, ar.ApiKeyID, "", store.ActionBlobWrite)
+	if err != nil {
+		slog.Error("blob-store: write metering error", "error", err, "request_id", reqID)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "Internal server error",
+		})
+		return "", false
+	}
+	return logID, true
 }
 
 // blobConstraintError maps a Postgres integrity-constraint violation (SQLSTATE

@@ -601,9 +601,10 @@ func (f ScopeFloor) Apply(s backends.Sensitivity, scope string) backends.Sensiti
 	return s
 }
 
-// PoolConfig is the F3 trust-gating policy surface (settings-only, no env
+// PoolConfig holds the per-tenant POOL policy: the F3 trust-gating surface it
+// was born as, plus the blob write budget B2 added to it (settings-only, no env
 // source — these keys are born in F2, not migrated from env vars).
-// The default keys are guard:"sensitivity-downgrade": LOWERING them needs a
+// The sensitivity keys are guard:"sensitivity-downgrade": LOWERING them needs a
 // confirm flag in the settings write (one wrong F4 dropdown / CLI typo on
 // 'public' would silently mark ALL new unclassified blocks external-eligible
 // until the first failover — F3 §3.5).
@@ -616,11 +617,40 @@ type PoolConfig struct {
 	DefaultQuerySensitivity backends.Sensitivity `key:"pool.default_query_sensitivity" env:"-" default:"personal" mut:"hot" guard:"sensitivity-downgrade" tenancy:"tenant-overridable"`
 	DefaultBlockSensitivity backends.Sensitivity `key:"pool.default_block_sensitivity" env:"-" default:"credentials" mut:"hot" guard:"sensitivity-downgrade" tenancy:"tenant-overridable"`
 	ScopeSensitivityFloor   ScopeFloor           `key:"pool.scope_sensitivity_floor" env:"-" default:"{}" mut:"hot" tenancy:"tenant-overridable"`
+	// BlobRateLimitWrite caps /api/blob/store per api key and 60-second window
+	// (B2/E1-A). It counts its OWN action (store.ActionBlobWrite), NOT the
+	// block-write action query.rate_limit_write gates: a 50 MB binary upload and
+	// a text block are different costs on different paths, and coupling them
+	// meant a key at its block limit could not store a blob while blob writes
+	// paid nothing back — a budget that only ever bit from the outside.
+	//
+	// This key does NOT follow the 0-is-off convention of its rate-limit
+	// siblings: 0/unset falls back to the VALUE of query.rate_limit_write, so an
+	// operator who only ever tuned the block limit keeps a bounded blob surface
+	// instead of silently unlimited uploads. Off needs BOTH at 0 — deliberate,
+	// because this is the surface where "unlimited" costs disk, not rows.
+	// Settings-only like its PoolConfig siblings; tenant-overridable like the
+	// block limit it falls back to.
+	BlobRateLimitWrite int `key:"pool.blob_rate_limit_write" env:"-" default:"10" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	// The legacy gaming.active / gaming.disabled_backends settings keys were
 	// retired in Web-UX U01-W5 (AM-7 cutover): chain-time exclusion is now the
 	// eject disable-profile (092), read live from the pool snapshot. Any leftover
 	// gaming.* rows in context_settings are inert — admitOverride drops them as
 	// unknown keys (build.go), so no delete-migration is needed.
+}
+
+// BlobWriteLimit resolves the effective /api/blob/store budget of this
+// snapshot: the dedicated pool.blob_rate_limit_write when it is set, otherwise
+// the VALUE of query.rate_limit_write as a fallback ceiling (B2/E1-A, see the
+// field doc). 0 means no limit — reachable only when BOTH keys are 0.
+//
+// Resolution lives here, not in the handler, so the fallback cannot drift
+// between the gate that refuses a request and any later reader of the budget.
+func (c *Config) BlobWriteLimit() int {
+	if c.Pool.BlobRateLimitWrite > 0 {
+		return c.Pool.BlobRateLimitWrite
+	}
+	return c.Query.RateLimitWrite
 }
 
 // TenantConfig holds per-tenant POLICY switches the OPERATOR sets, never the

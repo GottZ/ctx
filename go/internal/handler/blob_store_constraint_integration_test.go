@@ -29,13 +29,30 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
-// blobAR is a plain, valid private-scope key.
-func blobAR(homeScope string) *auth.AuthResult {
+// blobProbeKey mints a REAL context_api_keys row. Since B2 the blob-store
+// handler books its metering row SYNCHRONOUSLY and context_access_log.api_key_id
+// is FK-bound, so a synthetic key id would collapse every write into a 500 —
+// and in production ctx_auth reports is_valid=true only for a key row that
+// exists (095), so this is the only shape the handler can ever see. The key's
+// own home_scope stays 'private' (the column is VARCHAR(50)); the oversize
+// probe below needs 60 chars, which only the AuthResult carries.
+func blobProbeKey(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	row, _, err := store.CreateApiKey(context.Background(), pool, "b1-blob-probe", "private", nil, store.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("create probe api key: %v", err)
+	}
+	return row.ID
+}
+
+// blobAR is a plain, valid AuthResult for the given write scope.
+func blobAR(keyID, homeScope string) *auth.AuthResult {
 	return &auth.AuthResult{
-		ApiKeyID:      "11111111-2222-7333-8444-555555555555",
+		ApiKeyID:      keyID,
 		IsValid:       true,
 		HomeScope:     homeScope,
 		AllowedScopes: []string{},
@@ -87,7 +104,8 @@ func TestBlobStoreHandler_ConstraintViolationsAreDifferentiated(t *testing.T) {
 	}
 	pool := testdb.SetupTestDB(t)
 	h := NewBlobHandler(pool, staticConfigStore{cfg: &config.Config{}})
-	ar := blobAR("private")
+	keyID := blobProbeKey(t, pool)
+	ar := blobAR(keyID, "private")
 
 	t.Run("valid write succeeds", func(t *testing.T) {
 		code, resp := postBlobStore(t, h, ar,
@@ -160,7 +178,7 @@ func TestBlobStoreHandler_ConstraintViolationsAreDifferentiated(t *testing.T) {
 	t.Run("non-constraint failure stays 500", func(t *testing.T) {
 		// 60-char home scope → 22001 on context_blobs.scope VARCHAR(50).
 		longScope := strings.Repeat("s", 60)
-		code, resp := postBlobStore(t, h, blobAR(longScope),
+		code, resp := postBlobStore(t, h, blobAR(keyID, longScope),
 			blobPayload("reference", "b1-oversize-scope", "oversize.bin", "application/octet-stream", []byte("x")))
 		if code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500 (body %v)", code, resp)
