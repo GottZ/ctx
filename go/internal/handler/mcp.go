@@ -249,14 +249,42 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			return mcpStageStore(ctx, cfg, ar, input)
 		}
 
-		// Sensitivity: request > settings default (mirrors /api/store, F3 §3.5).
-		// MT 06-C5: per-tenant via the request context (the MCP ctx carries the
-		// resolved AuthResult, used for the scope above) — the tenant's own
-		// DefaultBlockSensitivity override applies, else the _global default.
-		var sens store.SensitivityWrite
+		// One config snapshot for both write gates below. MT 06-C5: per-tenant
+		// via the request context (the MCP ctx carries the resolved AuthResult,
+		// used for the scope above) — the tenant's own overrides apply, else the
+		// _global values.
+		rateLimit := 0
+		var defaultSens backends.Sensitivity
 		if cfg.Cfg != nil {
-			sens.Value = cfg.Cfg.SnapshotForRequest(ctx).Pool.DefaultBlockSensitivity
+			snap := cfg.Cfg.SnapshotForRequest(ctx)
+			rateLimit = snap.Query.RateLimitWrite
+			defaultSens = snap.Pool.DefaultBlockSensitivity
 		}
+
+		// H-W8: write rate limit on the DIRECT MCP arm (query.rate_limit_write,
+		// same 60 s window and message as /api/store). Until now the throttle was
+		// REST-only — the asymmetry stage_gates.go names: store.CheckRateLimit
+		// counts context_access_log rows with action='write', and no MCP path ever
+		// booked one, so a purely MCP-writing key sat at writeCount 0 forever and
+		// the limit could never bite. 0 = disabled, never "no writes".
+		//
+		// Placed AFTER the confirm_writes branch on purpose: the staged path runs
+		// its own copy of this gate (runStageWriteGates) and must not be charged
+		// twice. Placed after the hash NOOP check for the same reason it books no
+		// write log: a no-op changes nothing, so it must not consume budget.
+		if rateLimit > 0 {
+			writeCount, err := store.CheckRateLimit(ctx, cfg.Pool, ar.ApiKeyID)
+			if err != nil {
+				slog.Error("mcp: store rate limit check error", "error", err)
+				return errResult("store failed: internal error"), nil, nil
+			}
+			if writeCount >= rateLimit {
+				return errResult(fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", rateLimit)), nil, nil
+			}
+		}
+
+		// Sensitivity: request > settings default (mirrors /api/store, F3 §3.5).
+		sens := store.SensitivityWrite{Value: defaultSens}
 		if input.Sensitivity != "" {
 			s := backends.Sensitivity(input.Sensitivity)
 			if !backends.ValidSensitivity(s) {
@@ -282,6 +310,20 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		}
 		if _, err := store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 			slog.Warn("mcp: auto-classify failed", "error", err, "block_id", block.ID)
+		}
+
+		// H-W8: book the write, same (api_key_id, block_id, 'write') shape the
+		// REST arm books in context_store.go. This row IS the rate-limit counter
+		// — without it the gate above can never see an MCP write. Inline rather
+		// than the REST arm's fire-and-forget goroutine, matching this handler's
+		// established style (temporal enrichment below is inline too — MCP calls
+		// are not latency-sensitive) and closing the race a detached booking
+		// would leave: back-to-back MCP writes can no longer slip past the limit
+		// while the counter is still in flight. A failed booking is logged, never
+		// fatal: the block is written, and losing an audit row must not turn a
+		// completed write into an error result.
+		if err := store.LogAccess(ctx, cfg.Pool, ar.ApiKeyID, block.ID, "write"); err != nil {
+			slog.Error("mcp: write log error", "error", err, "block_id", block.ID)
 		}
 
 		// Temporal enrichment (inline, not async — MCP calls are not latency-sensitive).
