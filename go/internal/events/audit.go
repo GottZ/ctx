@@ -362,14 +362,19 @@ func (s *Scheduler) auditOneBlock(ctx context.Context, cfg *config.Config, blk s
 		return sample, false
 	}
 
-	applied, err := store.ApplyAuditVerdict(ctx, s.pool, blk.ID, verdict)
+	// blk.ContentMD5 is the digest of the content the model was asked about AND
+	// the content clampVerdict scanned — binding it here is what keeps the
+	// verdict about a content version, not about a row id (design 04 §2.4-C).
+	applied, err := store.ApplyAuditVerdict(ctx, s.pool, blk.ID, verdict, blk.ContentMD5)
 	if err != nil {
 		s.auditAbort(fmt.Sprintf("verdict write: %v", err))
 		return sample, true
 	}
 	if !applied {
-		// Reclassified (e.g. manually) between pick and write — the source
-		// predicate discarded the verdict. Correct, count it, move on.
+		// Reclassified (e.g. manually) or rewritten between pick and write —
+		// the source predicate or the content binding discarded the verdict.
+		// Correct, count it, move on: the block keeps source='default' and
+		// re-enters the pick set on the next run.
 		s.auditCount(func(st *AuditStatus) { st.Discarded++ })
 		return sample, false
 	}

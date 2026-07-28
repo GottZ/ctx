@@ -90,6 +90,14 @@ type AuditBlock struct {
 	ID      string
 	Title   string
 	Content string
+	// ContentMD5 is the digest of the CONTENT COLUMN AS PICKED — the version
+	// the model judged and the version the structural veto scanned. It travels
+	// back into ApplyAuditVerdict so a verdict can never be stamped on a
+	// content the run never saw (design 04 §2.4-C). md5 is a CHANGE detector
+	// here, not a security hash: the required property is "different bytes,
+	// different digest", not collision resistance against an adversary who
+	// would have to hit a digest they cannot read.
+	ContentMD5 string
 }
 
 // PickAuditBlocks loads up to limit unclassified blocks of the server's home
@@ -106,7 +114,7 @@ func PickAuditBlocks(ctx context.Context, pool *pgxpool.Pool, homeScope string,
 		order = "random()"
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT id, title, content FROM context_blocks
+		`SELECT id, title, content, md5(content) FROM context_blocks
 		 WHERE sensitivity_source = 'default' AND NOT is_archived AND scope = $1
 		   AND (sensitivity_audited_at IS NULL OR sensitivity_audited_at < now() - make_interval(secs => $2))
 		 ORDER BY `+order+` LIMIT $3`,
@@ -119,7 +127,7 @@ func PickAuditBlocks(ctx context.Context, pool *pgxpool.Pool, homeScope string,
 	var out []AuditBlock
 	for rows.Next() {
 		var b AuditBlock
-		if err := rows.Scan(&b.ID, &b.Title, &b.Content); err != nil {
+		if err := rows.Scan(&b.ID, &b.Title, &b.Content, &b.ContentMD5); err != nil {
 			return nil, fmt.Errorf("store: pick audit blocks scan: %w", err)
 		}
 		out = append(out, b)
@@ -135,12 +143,22 @@ func PickAuditBlocks(ctx context.Context, pool *pgxpool.Pool, homeScope string,
 // (negatively probed in the integration test); applied=false means the row
 // was (re)classified by someone else since the pick — the verdict is
 // discarded, never forced.
-func ApplyAuditVerdict(ctx context.Context, pool *pgxpool.Pool, id string, sens backends.Sensitivity) (applied bool, err error) {
+//
+// contentMD5 binds the verdict to the content VERSION it was formed over
+// (design 04 §2.4-C, wave H10): the LLM call happens outside any transaction,
+// and an ordinary content update does not reset sensitivity_source, so without
+// this conjunct a writer could store harmless v1, let the audit judge v1, and
+// overwrite with v2 before the verdict lands. It binds the structural veto just
+// as much as the model verdict — clampVerdict scans the SAME picked copy, so a
+// stale write would carry a "no secret here" decision about text nobody
+// scanned. A mismatch is the identical, already-modelled outcome as the manual
+// race: applied=false, Discarded++, block untouched, re-picked next run.
+func ApplyAuditVerdict(ctx context.Context, pool *pgxpool.Pool, id string, sens backends.Sensitivity, contentMD5 string) (applied bool, err error) {
 	tag, err := pool.Exec(ctx,
 		`UPDATE context_blocks
 		    SET sensitivity = $2, sensitivity_source = 'llm-audit', sensitivity_audited_at = now()
-		  WHERE id = $1 AND sensitivity_source = 'default'`,
-		id, string(sens))
+		  WHERE id = $1 AND sensitivity_source = 'default' AND md5(content) = $3`,
+		id, string(sens), contentMD5)
 	if err != nil {
 		return false, fmt.Errorf("store: apply audit verdict: %w", err)
 	}
