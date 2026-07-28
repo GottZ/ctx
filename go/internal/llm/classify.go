@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/promptguard"
+	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -84,6 +86,75 @@ func ParseClassifyAnswer(raw string) (bool, error) {
 	return *a.Answer, nil
 }
 
+// ClassifyContentLimit caps the block content that reaches the audit model, in
+// RUNES (design 04 §4.5-a). 8 000 runes ≈ 2 000 tokens — far above the
+// documented block size of 1-1.5k chars and far below the 50 KB write limit
+// (internal/handler/context_store.go:247), which this path was the only one to
+// pass on unbounded. At 1M blocks the audit is the busiest background prompt
+// path in the system, so the cap is a cost lever as much as a hardening one.
+//
+// The cap is admissible ONLY because the deterministic detector reads the FULL
+// content elsewhere: a truncation can hide a secret beyond rune 8 000, and the
+// structural veto (design 04 §4.5-b, wave H9) is the condition under which
+// this cap is allowed to exist, not an addition to it.
+const ClassifyContentLimit = 8000
+
+const (
+	// classifyTruncSuffix keeps the truncation VISIBLE to the model — it must
+	// know it is judging an excerpt, not a whole block. Same literal as the
+	// synthesis path (internal/llm/synthesize.go:308).
+	classifyTruncSuffix = "[... truncated]"
+
+	// classifySeparator divides the code-generated question from the guarded
+	// block. It stays outside the marker: a payload can reproduce the byte
+	// sequence, but a copy inside the block is data, not structure.
+	classifySeparator = "\n\n---\n\n"
+
+	// classifyMarkerID is the FIXED marker id — no nonce (design 04 §4.3):
+	// exactly one foreign block, no boundary semantics for the model to
+	// verify, so a nonce would buy nothing and cost fixture determinism. The
+	// forgery it would defend against is closed structurally instead:
+	// promptguard.Neutralize breaks a marker inside the payload, guessable id
+	// or not.
+	classifyMarkerID = "audit"
+
+	// classifyMarkerKind is the rendered kind attribute of the marker.
+	classifyMarkerKind = "block"
+
+	// classifyTitleLabel keeps the German label of the pre-hardening prompt so
+	// the wording the model was tuned on is unchanged; only its POSITION moves
+	// (inside the block, where foreign text belongs).
+	classifyTitleLabel = "Titel: "
+)
+
+// buildClassifyUser assembles the user message for one audit question.
+//
+// Shape: the code-generated question, the code separator, then EXACTLY ONE
+// guarded block carrying every byte of foreign text — title and content alike.
+// Before H8 this was a raw concat (design 04 §2.3-a): the separator
+// "\n\n---\n\nTitel: " is trivially reproducible inside a 50 KB content, and a
+// forged second section was indistinguishable from the real one to the model.
+// It is not the separator that changed, it is WHERE the foreign text sits: the
+// separator stays outside the marker, so a copy of it inside the payload is
+// data instead of structure.
+//
+// Order is load-bearing twice over:
+//
+//   - truncate BEFORE the block is built, so the cap is measured against the
+//     original text rather than against a CGJ-inflated one;
+//   - Neutralize runs LAST over the assembled payload (inside Wrap), so no
+//     later step can rejoin a broken control token across a cut or a suffix.
+//
+// No nonce and no Rule() sentence here: one foreign block, no boundary
+// semantics for the model to verify (design 04 §4.3). Whether the three
+// one-block pipelines get a nonce anyway is decision §8-E2, not this wave.
+func buildClassifyUser(question, title, content string) string {
+	body := classifyTitleLabel + title + "\n\n" +
+		util.TruncateRunesWithSuffix(content, classifyTruncSuffix, ClassifyContentLimit)
+	return question + classifySeparator +
+		promptguard.Wrap(classifyMarkerID, classifyMarkerKind, body)
+}
+
 // ClassifyBlockBool asks ONE audit question about one block over the classify
 // chain. required is ALWAYS credentials: the prompt carries unclassified
 // block content, which is potential credentials by definition — no floor
@@ -92,7 +163,7 @@ func ParseClassifyAnswer(raw string) (bool, error) {
 func ClassifyBlockBool(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool,
 	question, title, content, blockID string, adm Admission,
 ) (bool, error) {
-	user := question + "\n\n---\n\nTitel: " + title + "\n\n" + content
+	user := buildClassifyUser(question, title, content)
 	// TENANT-DECISION(classify-attribution): no APIKeyID set — the only caller
 	// is the scheduler sensitivity-audit (events/scheduler.go:190), a background
 	// job with no request-bound key. Leaving it "" keeps the row NULL, the same
