@@ -49,64 +49,50 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 
 	authResult := AuthResultFromContext(ctx)
 	if authResult == nil || !authResult.IsValid {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		writeJSONReject(w, classUnauthorized.reject("unauthorized"))
 		return
 	}
 
 	var req blobStoreRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		slog.Warn("blob-store: invalid request body", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false, "error": "Invalid request body",
-		})
+		writeJSONReject(w, classInvalidBody.reject("Invalid request body"))
 		return
 	}
 
 	// Validate required fields.
 	if req.File == "" || req.Filename == "" || req.Category == "" || req.Title == "" || req.MimeType == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false, "error": "Missing required fields: file, filename, category, title, mime_type",
-		})
+		writeJSONReject(w, classMissingFields.reject("Missing required fields: file, filename, category, title, mime_type"))
 		return
 	}
 
 	// Size limits.
 	if len(req.Category) > 100 {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "Category exceeds 100 characters",
-		})
+		writeJSONReject(w, classSizeCap.reject("Category exceeds 100 characters"))
 		return
 	}
 	if len(req.Title) > 500 {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "Title exceeds 500 characters",
-		})
+		writeJSONReject(w, classSizeCap.reject("Title exceeds 500 characters"))
 		return
 	}
 
 	// OOM pre-check: reject oversized base64 before allocating decode buffer.
 	// 70MB base64 ≈ 52.5MB decoded, which exceeds the 50MB limit.
 	if len(req.File) > 70*1024*1024 {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "File exceeds 50MB limit",
-		})
+		writeJSONReject(w, classSizeCap.reject("File exceeds 50MB limit"))
 		return
 	}
 
 	// Decode base64 data.
 	data, err := base64.StdEncoding.DecodeString(req.File)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false, "error": "Invalid base64 encoding in 'file' field",
-		})
+		writeJSONReject(w, classInvalidEncoding.reject("Invalid base64 encoding in 'file' field"))
 		return
 	}
 
 	// Check blob size limit (50 MB).
 	if len(data) > 50*1024*1024 {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": "File exceeds 50 MB limit",
-		})
+		writeJSONReject(w, classSizeCap.reject("File exceeds 50 MB limit"))
 		return
 	}
 
@@ -128,9 +114,7 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 	writeScope := authResult.HomeScope
 	if req.Scope != "" {
 		if !contains(writableBlockScopes(authResult), req.Scope) {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"success": false, "error": "Cannot write to requested scope",
-			})
+			writeJSONReject(w, classScopeDenied.reject("Cannot write to requested scope"))
 			return
 		}
 		writeScope = req.Scope
@@ -149,16 +133,17 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 			status, reason := blobConstraintError(pgErr)
 			slog.Warn("blob-store: constraint violation", "error", err,
 				"sqlstate", pgErr.Code, "constraint", pgErr.ConstraintName, "request_id", reqID)
-			writeJSON(w, status, map[string]any{
+			// Keeps the class-23 detail fields (sqlstate, constraint) the B1
+			// wave added — the code is one more field beside them, not a
+			// replacement.
+			writeJSONCode(w, status, classConstraint.code, map[string]any{
 				"success": false, "error": reason,
 				"sqlstate": pgErr.Code, "constraint": pgErr.ConstraintName,
 			})
 			return
 		}
 		slog.Error("blob-store: upsert error", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Internal server error",
-		})
+		writeJSONReject(w, classInternal.reject("Internal server error"))
 		return
 	}
 
@@ -204,15 +189,15 @@ func (h *BlobHandler) meterBlobWrite(ctx context.Context, w http.ResponseWriter,
 		writeCount, err := store.CheckRateLimitByAction(ctx, h.pool, ar.ApiKeyID, store.ActionBlobWrite)
 		if err != nil {
 			slog.Error("blob-store: rate limit check error", "error", err, "request_id", reqID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"success": false, "error": "Internal server error",
-			})
+			writeJSONReject(w, classInternal.reject("Internal server error"))
 			return "", false
 		}
 		if writeCount >= limit {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false, "error": fmt.Sprintf("Rate limit exceeded: max %d blob writes per 60 seconds", limit),
-			})
+			// Same CLASS as the block-write budget, deliberately its own
+			// wording (Gap-C6-c): the code is what a client branches on, the
+			// sentence is what a human reads.
+			writeJSONReject(w, classRateLimit.reject(
+				fmt.Sprintf("Rate limit exceeded: max %d blob writes per 60 seconds", limit)))
 			return "", false
 		}
 	}
@@ -220,9 +205,7 @@ func (h *BlobHandler) meterBlobWrite(ctx context.Context, w http.ResponseWriter,
 	logID, err := store.LogAccessRef(ctx, h.pool, ar.ApiKeyID, "", store.ActionBlobWrite)
 	if err != nil {
 		slog.Error("blob-store: write metering error", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Internal server error",
-		})
+		writeJSONReject(w, classInternal.reject("Internal server error"))
 		return "", false
 	}
 	return logID, true
@@ -473,10 +456,7 @@ func (h *BlobHandler) handleBlobManage(w http.ResponseWriter, r *http.Request, a
 	// default plus the switch default — here the miss IS the default).
 	action, ok := actions[req.Action]
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false,
-			"error":   "Unknown action (valid: stats, get, list, delete)",
-		})
+		writeJSONReject(w, classUnknownAction.reject("Unknown action (valid: stats, get, list, delete)"))
 		return
 	}
 	if !enforceBlobActionTier(w, action.tier, authResult) {

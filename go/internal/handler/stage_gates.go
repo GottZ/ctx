@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
@@ -12,16 +11,6 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// stageGateReject is a pre-card rejection from runStageWriteGates: the staged
-// write would fail at execute time, so it must never reach the ConfirmCard
-// (D1-M2 — a card is a promise that the confirmed write will succeed).
-// Status carries the direct-path HTTP status for the REST surface; MCP/Chat
-// surfaces map Msg into their error result.
-type stageGateReject struct {
-	Status int
-	Msg    string
-}
 
 // stageWriteGateResult is the post-gate write intent: exactly the values the
 // direct path would hand to store.UpsertBlock. The stage site canonicalizes
@@ -51,6 +40,9 @@ type stageWriteGateResult struct {
 // pool is only touched when rateLimitWrite > 0 (nil pool + limit 0 is a valid
 // test wiring). set == nil fails closed on an explicit type (never lets an
 // unvalidated name reach the manual-provenance write path).
+//
+// Gap-C6-c: every verdict is built from a rejectClass (errcode.go), so it
+// carries the same machine code the REST write handlers emit for that class.
 func runStageWriteGates(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -60,27 +52,27 @@ func runStageWriteGates(
 	defaultSens backends.Sensitivity,
 	rateLimitWrite int,
 	reqID string,
-) (*stageWriteGateResult, *stageGateReject) {
+) (*stageWriteGateResult, *writeReject) {
 	// Required fields.
 	if req.Category == "" || req.Title == "" || req.Content == "" {
-		return nil, &stageGateReject{http.StatusBadRequest, "Missing required fields: category, title, content"}
+		return nil, classMissingFields.reject("Missing required fields: category, title, content")
 	}
 
 	// Size limits.
 	if msg := blockSizeLimit(req.Category, req.Title, req.Content); msg != "" {
-		return nil, &stageGateReject{http.StatusRequestEntityTooLarge, msg}
+		return nil, classSizeCap.reject(msg)
 	}
 
 	// Sensitivity: request > settings default.
 	sens, sensErr := storeSensitivity(defaultSens, req.Sensitivity)
 	if sensErr != "" {
-		return nil, &stageGateReject{http.StatusBadRequest, sensErr}
+		return nil, classInvalidSensitivity.reject(sensErr)
 	}
 
 	// Explicit type: validate against the policy set BEFORE staging.
 	if req.Type != "" {
 		if msg := validateTypeNameAgainstSet(set, req.Type); msg != "" {
-			return nil, &stageGateReject{http.StatusUnprocessableEntity, msg}
+			return nil, classUnknownType.reject(msg)
 		}
 	}
 
@@ -96,7 +88,7 @@ func runStageWriteGates(
 		if contains(writableBlockScopes(ar), req.Scope) {
 			writeScope = req.Scope
 		} else {
-			return nil, &stageGateReject{http.StatusForbidden, "Cannot write to requested scope"}
+			return nil, classScopeDenied.reject("Cannot write to requested scope")
 		}
 	}
 
@@ -106,11 +98,11 @@ func runStageWriteGates(
 		writeCount, err := store.CheckRateLimit(ctx, pool, ar.ApiKeyID)
 		if err != nil {
 			slog.Error("stage gates: rate limit check error", "error", err, "request_id", reqID)
-			return nil, &stageGateReject{http.StatusInternalServerError, "Internal server error"}
+			return nil, classInternal.reject("Internal server error")
 		}
 		if writeCount >= rateLimitWrite {
-			return nil, &stageGateReject{http.StatusTooManyRequests,
-				fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", rateLimitWrite)}
+			return nil, classRateLimit.reject(
+				fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", rateLimitWrite))
 		}
 	}
 

@@ -192,9 +192,15 @@ func TestBlobManage_UnknownActionMessage_MatchesTable(t *testing.T) {
 // verbatim; the four action rows pin that a plain member still passes the gate
 // (stats/list/get-by-id/delete-by-id reach the store) and that the pre-store
 // validation still answers first (get/delete without id ⇒ 400).
+//
+// Gap-C6-c (B7) widened EXACTLY ONE of these rows on purpose: the
+// unknown-action verdict now carries the machine code of its class. The
+// missing-id rows are the counter-evidence that the widening is confined to
+// the coded class — the per-action handlers were deliberately left uncoded
+// (they answer for reads too; coding them is a separate sweep).
 func TestBlobManage_MemberGolden(t *testing.T) {
 	const missingID = `{"error":"Missing required field: id","success":false}`
-	const unknown = `{"error":"Unknown action (valid: stats, get, list, delete)","success":false}`
+	const unknown = `{"code":"unknown_action","error":"Unknown action (valid: stats, get, list, delete)","success":false}`
 	const probeID = "0198b0d2-0000-7000-8000-000000000001"
 
 	cases := []struct {

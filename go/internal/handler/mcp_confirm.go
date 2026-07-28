@@ -66,7 +66,7 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		Sensitivity: input.Sensitivity,
 	}, defaultSens, rateLimit, reqID)
 	if rej != nil {
-		return errResult(rej.Msg), nil, nil
+		return errResultReject(rej), nil, nil
 	}
 
 	cw := store.CanonicalWrite{
@@ -84,13 +84,13 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 	hash, canonical, err := cw.PayloadHash()
 	if err != nil {
 		slog.Error("mcp: canonicalize staged write failed", "error", err, "request_id", reqID)
-		return errResult("stage failed: cannot canonicalize payload"), nil, nil
+		return classInternal.errResult("stage failed: cannot canonicalize payload"), nil, nil
 	}
 
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, res.WriteScope, "store", "mcp", canonical, hash, ttl)
 	if err != nil {
 		slog.Error("mcp: stage pending write failed", "error", err, "request_id", reqID)
-		return errResult("stage failed: could not persist the staged write"), nil, nil
+		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 
 	// Gap-C6-a: book the write INTENT. runStageWriteGates CHECKED the budget
@@ -116,7 +116,10 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		expiry = fmt.Sprintf("%s (in %s)", pw.ExpiresAt.UTC().Format(time.RFC3339), time.Until(*pw.ExpiresAt).Round(time.Second))
 	}
 	// IsError=true is deliberate (D3-C3), not a failure signal: the write has
-	// NOT happened, and a client that cannot confirm must surface that.
+	// NOT happened, and a client that cannot confirm must surface that. And
+	// therefore deliberately UNCODED (Gap-C6-c): the gates PASSED, so this is
+	// no rejection — the absence of a code is how a client tells a staged
+	// write from a refused one.
 	return errResult(fmt.Sprintf(
 		"STAGED — NOT saved yet. This key requires write confirmation (confirm_writes).\n"+
 			"payload_hash: %s\n"+

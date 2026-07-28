@@ -26,7 +26,7 @@ func gateReq() storeRequest {
 
 // run wraps runStageWriteGates with the common test wiring: nil pool + rate
 // limit 0 (the only DB-touching gate stays off), nil blocktype set.
-func run(t *testing.T, req storeRequest, set *blocktype.Set) (*stageWriteGateResult, *stageGateReject) {
+func run(t *testing.T, req storeRequest, set *blocktype.Set) (*stageWriteGateResult, *writeReject) {
 	t.Helper()
 	return runStageWriteGates(context.Background(), nil, set, gateAuth(), req, backends.SensInternal, 0, "test-req")
 }

@@ -219,13 +219,18 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 
 func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input storeInput) (*mcp.CallToolResult, any, error) {
+		// Gap-C6-c: the store tool's rejections carry the machine code of
+		// their class in StructuredContent — the same code /api/store emits
+		// for the same class, even where the two surfaces word it differently
+		// (this sentence vs "Missing required fields: …"). The text itself is
+		// untouched.
 		if input.Category == "" || input.Title == "" || input.Content == "" {
-			return errResult("category, title, and content are required"), nil, nil
+			return classMissingFields.errResult("category, title, and content are required"), nil, nil
 		}
 
 		ar := AuthResultFromContext(ctx)
 		if ar == nil { // T07/L7 fail-closed (design/01 §5.4): never fall back to the default tenant
-			return errResult("unauthorized: no resolved tenant identity"), nil, nil
+			return classUnauthorized.errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
 		scope := ar.HomeScope
 
@@ -294,13 +299,13 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			Sensitivity: input.Sensitivity,
 		}, defaultSens, rateLimit, RequestIDFromContext(ctx))
 		if rej != nil {
-			return errResult(rej.Msg), nil, nil
+			return errResultReject(rej), nil, nil
 		}
 
 		// Upsert.
 		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, "")
 		if err != nil {
-			return errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
+			return classInternal.errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
 		}
 
 		// Welle 44 / WF T4: Auto-classify type_name from the registry

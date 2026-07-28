@@ -60,7 +60,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// Auth from middleware context.
 	authResult := AuthResultFromContext(ctx)
 	if authResult == nil || !authResult.IsValid {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "error": "unauthorized"})
+		writeJSONReject(w, classUnauthorized.reject("unauthorized"))
 		return
 	}
 
@@ -68,25 +68,19 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	var req storeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		slog.Warn("store: invalid request body", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false, "error": "Invalid request body",
-		})
+		writeJSONReject(w, classInvalidBody.reject("Invalid request body"))
 		return
 	}
 
 	// Validate required fields.
 	if req.Category == "" || req.Title == "" || req.Content == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success": false, "error": "Missing required fields: category, title, content",
-		})
+		writeJSONReject(w, classMissingFields.reject("Missing required fields: category, title, content"))
 		return
 	}
 
 	// Size limits (HTTP 413).
 	if msg := blockSizeLimit(req.Category, req.Title, req.Content); msg != "" {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"success": false, "error": msg,
-		})
+		writeJSONReject(w, classSizeCap.reject(msg))
 		return
 	}
 
@@ -95,7 +89,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// from the auth result), so the default honors a tenant's own override.
 	sens, sensErr := storeSensitivity(h.cfg.SnapshotForRequest(ctx).Pool.DefaultBlockSensitivity, req.Sensitivity)
 	if sensErr != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": sensErr})
+		writeJSONReject(w, classInvalidSensitivity.reject(sensErr))
 		return
 	}
 
@@ -104,9 +98,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// name must never reach the manual-provenance write path.
 	if req.Type != "" {
 		if msg := h.validateStoreTypeName(ctx, req.Type); msg != "" {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
-				"success": false, "error": msg,
-			})
+			writeJSONReject(w, classUnknownType.reject(msg))
 			return
 		}
 	}
@@ -125,9 +117,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		if contains(writableBlockScopes(authResult), req.Scope) {
 			writeScope = req.Scope
 		} else {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"success": false, "error": "Cannot write to requested scope",
-			})
+			writeJSONReject(w, classScopeDenied.reject("Cannot write to requested scope"))
 			return
 		}
 	}
@@ -139,15 +129,12 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		writeCount, err := store.CheckRateLimit(ctx, h.pool, authResult.ApiKeyID)
 		if err != nil {
 			slog.Error("store: rate limit check error", "error", err, "request_id", reqID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"success": false, "error": "Internal server error",
-			})
+			writeJSONReject(w, classInternal.reject("Internal server error"))
 			return
 		}
 		if writeCount >= limit {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false, "error": fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", limit),
-			})
+			writeJSONReject(w, classRateLimit.reject(
+				fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", limit)))
 			return
 		}
 	}
@@ -156,9 +143,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	existingID, err := store.HashNOOPCheck(ctx, h.pool, req.Content, writeScope, req.Category, req.Title)
 	if err != nil {
 		slog.Error("store: hash noop check error", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Internal server error",
-		})
+		writeJSONReject(w, classInternal.reject("Internal server error"))
 		return
 	}
 	if existingID != "" {
@@ -184,9 +169,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	block, err := store.UpsertBlock(ctx, h.pool, req.Category, req.Title, req.Content, req.Tags, req.Metadata, writeScope, scopeExplicit, sens, req.Type)
 	if err != nil {
 		slog.Error("store: upsert error", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Internal server error",
-		})
+		writeJSONReject(w, classInternal.reject("Internal server error"))
 		return
 	}
 
