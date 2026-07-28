@@ -13,6 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -584,6 +585,22 @@ func fetchDailyGuardReview(ctx context.Context, pool *pgxpool.Pool, scope string
 	return g, nil
 }
 
+// clampField is the daily-prompt wiring of promptguard (design 04 §4.4 row 8).
+//
+// ClampLine FIRST, Neutralize second — the same order promptguard uses for its
+// own marker attributes. The daily prompt is LINE-BASED: every foreign value
+// is one item on one line, so the line break is the structural character here
+// and a turn marker without its newlines is already inert. Neutralize still
+// runs because the ChatML openers carry no newline at all, and this prompt
+// escapes nothing (there is no XML here to escape into).
+//
+// No truncation: every value in this prompt is an aggregate label or a block
+// title, both length-capped on the write path.
+func clampField(s string) string {
+	n, _ := promptguard.Neutralize(promptguard.ClampLine(s))
+	return n
+}
+
 // buildDailyPrompt assembles the structured user-prompt block fed to the LLM.
 // Sections are omitted when their slice is empty (guard: nil) so the prompt
 // does not suggest that the missing axis was zero by mistake.
@@ -594,6 +611,11 @@ func fetchDailyGuardReview(ctx context.Context, pool *pgxpool.Pool, scope string
 // LLM translates the content it reads. Localizing the labels would move a
 // frozen prompt surface (and its 66-day-tuned behavior) for zero gain, and
 // make the German↔English prompt pair diff-noisy for no functional reason.
+//
+// Every DB-sourced value below runs through clampField: decisions,
+// relationships, link classes, origins, categories and block titles are all
+// foreign text, and a newline in any of them used to forge an extra item line
+// (design 04 §2.3-b).
 func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []dailyDreamLinkStat, structLinks []dailyStructuralLinkStat, newBlocks []dailyNewBlock, guardQueue *dailyGuardStat) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Datum: %s\n", date)
@@ -601,14 +623,14 @@ func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []d
 	if len(decisions) > 0 {
 		b.WriteString("\nDecisions (write-log):\n")
 		for _, d := range decisions {
-			fmt.Fprintf(&b, "- %s: %d\n", d.Decision, d.Count)
+			fmt.Fprintf(&b, "- %s: %d\n", clampField(d.Decision), d.Count)
 		}
 	}
 
 	if len(dreamLinks) > 0 {
 		b.WriteString("\nDream-Links 24h:\n")
 		for _, d := range dreamLinks {
-			fmt.Fprintf(&b, "- %s: %d\n", d.Relationship, d.Count)
+			fmt.Fprintf(&b, "- %s: %d\n", clampField(d.Relationship), d.Count)
 		}
 	}
 
@@ -617,14 +639,14 @@ func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []d
 	if len(structLinks) > 0 {
 		b.WriteString("\nStructural-Links 24h:\n")
 		for _, s := range structLinks {
-			fmt.Fprintf(&b, "- %s (%s): %d\n", s.LinkClass, s.Origin, s.Count)
+			fmt.Fprintf(&b, "- %s (%s): %d\n", clampField(s.LinkClass), clampField(s.Origin), s.Count)
 		}
 	}
 
 	if len(newBlocks) > 0 {
 		b.WriteString("\nNeue Blocks 24h:\n")
 		for _, nb := range newBlocks {
-			fmt.Fprintf(&b, "- [%s] %s\n", nb.Category, nb.Title)
+			fmt.Fprintf(&b, "- [%s] %s\n", clampField(nb.Category), clampField(nb.Title))
 		}
 	}
 
