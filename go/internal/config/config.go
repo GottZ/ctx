@@ -432,6 +432,19 @@ type EventsConfig struct {
 	// dimension (classification mirrors QueueStatsInterval, not
 	// MaxConnections).
 	DBStatsInterval time.Duration `key:"events.db_stats_interval" env:"CTX_EVENTS_DB_STATS_INTERVAL" default:"60" mut:"hot" tenancy:"global-only"`
+	// LLMCallCoalesceThreshold is the per-tick llmlog row count above which the
+	// stream's `llmcalls` frame degrades to a content-free {kind:'llmcalls-bulk',
+	// count, cursor} refetch signal instead of carrying the rows — the exact
+	// contract project.events.coalesce_threshold runs on the domain-event hub
+	// (issues-bulk), so both SSE hubs share ONE coalescing doctrine. Below it the
+	// rows ride the frame; the tick ALWAYS costs one frame per connection, never
+	// one per row (the per-row fan-out overflowed a 16-deep mailbox above ~14
+	// rows and dropped every open panel). global-only + strict for the same
+	// reasons the sibling carries: a process-global fan-out knob, and a typo'd
+	// threshold silently falling back to the default would hide the intended
+	// degradation point. The cadences above stay non-strict (a stream cadence is
+	// not a ceiling).
+	LLMCallCoalesceThreshold int `key:"events.llmcall_coalesce_threshold" env:"CTX_EVENTS_LLMCALL_COALESCE_THRESHOLD" default:"20" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // ProjectConfig is the workflow project surface (design/03 §4.4). The forge SYNC

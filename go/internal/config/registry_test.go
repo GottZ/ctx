@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -102,6 +103,10 @@ func TestRegistryStrictSet(t *testing.T) {
 		// a security ceiling).
 		"project.events.max_connections":    true,
 		"project.events.coalesce_threshold": true,
+		// S0 telemetry SSE hub: the per-tick coalesce threshold of /api/events,
+		// mirroring its project.events sibling one line up — same doctrine, same
+		// loud abort on a typo'd degradation point.
+		"events.llmcall_coalesce_threshold": true,
 		// B-W1 overview liveness cap: the load-bearing guard against the
 		// Louvain convergence wall — an int ceiling like the caps above; a
 		// typo'd cap silently falling back to the default would hide the
@@ -377,5 +382,31 @@ func TestBuildRegistryRejectsMalformedStructs(t *testing.T) {
 		if _, err := buildRegistry(rt); err == nil {
 			t.Errorf("%s: buildRegistry must reject, got nil error", name)
 		}
+	}
+}
+
+// TestLLMCallCoalesceThresholdMirrorsProjectHub pins the S0 telemetry-coalescing
+// knob to the SAME registry contract its ProjectHub sibling carries: ONE
+// coalescing doctrine, two SSE hubs. A drift here would let /api/events and
+// /api/project/events degrade their bursts by different rules.
+func TestLLMCallCoalesceThresholdMirrorsProjectHub(t *testing.T) {
+	sibling, ok := KeyByName("project.events.coalesce_threshold")
+	if !ok {
+		t.Fatal("project.events.coalesce_threshold missing — the coalescing doctrine has no reference")
+	}
+	got, ok := KeyByName("events.llmcall_coalesce_threshold")
+	if !ok {
+		t.Fatal("events.llmcall_coalesce_threshold is not registered")
+	}
+	if got.Type != sibling.Type || got.Mutability != sibling.Mutability || got.Tenancy != sibling.Tenancy {
+		t.Errorf("contract drift: got type=%s mut=%s tenancy=%s, want %s/%s/%s (like %s)",
+			got.Type, got.Mutability, got.Tenancy,
+			sibling.Type, sibling.Mutability, sibling.Tenancy, sibling.Key)
+	}
+	if fmt.Sprint(got.Default) != "20" {
+		t.Errorf("default = %v, want 20", got.Default)
+	}
+	if got.EnvVar != "CTX_EVENTS_LLMCALL_COALESCE_THRESHOLD" {
+		t.Errorf("env var = %q, want CTX_EVENTS_LLMCALL_COALESCE_THRESHOLD", got.EnvVar)
 	}
 }

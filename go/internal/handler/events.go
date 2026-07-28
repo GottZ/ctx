@@ -311,6 +311,18 @@ func (h *sseHub) subCount() int {
 	return len(h.subs)
 }
 
+// llmcallCoalesceThreshold is the per-tick row count above which the collapsed
+// telemetry frame degrades to a content-free refetch signal. Read per tick (the
+// key is hot) and floored at the default, exactly the way ProjectHub reads
+// project.events.coalesce_threshold — one coalescing doctrine, two hubs.
+func (h *sseHub) llmcallCoalesceThreshold() int {
+	n := h.cfg.Snapshot().Events.LLMCallCoalesceThreshold //nolint:forbidigo // MT 06 BLIND: process-global coalescing knob of the server-admin telemetry hub, shared across all connections.
+	if n <= 0 {
+		n = 20
+	}
+	return n
+}
+
 // broadcast fans one frame to every subscriber without blocking. A full mailbox
 // means the client cannot keep up: drop it (close done + remove) so the slow
 // connection cannot stall the fan-out to the rest. Deleting during range is
@@ -332,9 +344,14 @@ func (h *sseHub) broadcast(f sseFrame) {
 
 // runLoop is the single broadcast loop. One tick: refresh the collector cache,
 // diff status + backends against the last sent state and broadcast only the
-// changed ones, then drain new llmlog rows since the cursor as individual
-// llmcall events. Stops on lifecycle cancel (shutdown) or one tick after the
+// changed ones, then collapse the new llmlog rows since the cursor into ONE
+// llmcalls event. Stops on lifecycle cancel (shutdown) or one tick after the
 // last subscriber leaves.
+//
+// The frame count per tick is bounded by the EVENT KINDS (<= 3), never by the
+// row count: the pre-S0 per-row fan-out pushed llmlog.max_limit (200) frames
+// into a 16-deep mailbox, so any burst above ~14 rows dropped every open
+// connection at once.
 func (h *sseHub) runLoop() {
 	h.status.setBroadcasting(true)
 	defer h.status.setBroadcasting(false)
@@ -389,13 +406,41 @@ func (h *sseHub) runLoop() {
 			rows, next := h.llmcalls(opCtx, llmCursor, cfg.LLMLog.MaxLimit)
 			cancel()
 			llmCursor = next
-			for i := range rows {
-				if data, err := json.Marshal(rows[i]); err == nil {
-					h.broadcast(sseFrame{name: "llmcall", data: data})
+			if len(rows) > 0 {
+				if data, err := json.Marshal(llmcallsFrameOf(rows, h.llmcallCoalesceThreshold())); err == nil {
+					h.broadcast(sseFrame{name: "llmcalls", data: data})
 				}
 			}
 		}
 	}
+}
+
+// llmcallsFrame is the collapsed telemetry payload of ONE tick. Below the
+// coalesce threshold it carries the rows themselves; above it Rows/Kind/Cursor
+// swap roles — the rows are dropped and only the count plus the tick's newest
+// position remain, so a burst costs a fixed-size frame instead of an unbounded
+// push. Same wire idea as the domain hub's issues-bulk frame (project_hub.go).
+type llmcallsFrame struct {
+	Rows   []llmlogEntry `json:"rows,omitempty"`
+	Count  int           `json:"count"`
+	Kind   string        `json:"kind,omitempty"`
+	Cursor string        `json:"cursor,omitempty"`
+}
+
+// llmcallsFrameOf collapses one tick's rows into that payload. rows arrive
+// oldest-first (fetchLLMCalls orders created_at ASC), so the LAST row is the
+// tick's newest and its "<created_at>|<id>" is the position the client refetches
+// from over GET /api/llmlog (capped, per-tenant filtered).
+func llmcallsFrameOf(rows []llmlogEntry, threshold int) llmcallsFrame {
+	if len(rows) > threshold {
+		newest := rows[len(rows)-1]
+		return llmcallsFrame{
+			Count:  len(rows),
+			Kind:   "llmcalls-bulk",
+			Cursor: newest.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + newest.ID,
+		}
+	}
+	return llmcallsFrame{Rows: rows, Count: len(rows)}
 }
 
 // fetchLLMCalls returns the telemetry rows newer than cursor (oldest first) and

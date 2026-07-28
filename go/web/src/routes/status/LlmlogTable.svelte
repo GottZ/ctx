@@ -7,7 +7,7 @@
   // behind the gated per-id detail fetch (LlmlogDetailModel) reached by a row
   // click — and are never cached past the open card (D1b). The scroll+table
   // shell comes from the shared lib/ui/Table primitive (Q10).
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { fetchLLMLog } from '../../lib/api/status'
   import type { LLMLogEntry, LLMLogResponse } from '../../lib/api/types'
   import { Resource } from '../../lib/resource.svelte'
@@ -18,8 +18,14 @@
 
   // `live` carries SSE-pushed llmcall rows (G34); merged on top of the fetched
   // history below. Unfiltered upstream, so the current pipeline/errors filter
-  // is reapplied client-side, and the fetched ids dedup the overlap.
-  let { complete, live = [] }: { complete: boolean; live?: LLMLogEntry[] } = $props()
+  // is reapplied client-side, and the fetched ids dedup the overlap. `refetch`
+  // is the coalescing counterpart (S0): a tick above events.llmcall_coalesce_
+  // threshold pushes NO rows, only a count — the table reloads its own page.
+  let {
+    complete,
+    live = [],
+    refetch = 0,
+  }: { complete: boolean; live?: LLMLogEntry[]; refetch?: number } = $props()
 
   let pipeline = $state('')
   let errorsOnly = $state(false)
@@ -28,6 +34,12 @@
     fetchLLMLog({ limit: 50, pipeline: pipeline.trim() || undefined, errorsOnly }),
   )
   onMount(() => void log.load())
+
+  // One reload per raised token — untrack keeps the reload's own state reads out
+  // of the dependency set, so the effect fires on the signal and nothing else.
+  $effect(() => {
+    if (refetch > 0) untrack(() => void log.reload())
+  })
 
   // The gated body fetch behind a row click. Body-free-at-rest: the model holds
   // the fetched prompt/reply ONLY while its card is open and drops them on close.

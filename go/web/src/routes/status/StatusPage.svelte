@@ -1,16 +1,17 @@
 <script lang="ts">
   // Status dashboard (design 04-§3.6, W6/G33 + W7/G34). Live updates over SSE
   // (GET /api/events): the server diffs the shared collector snapshot once per
-  // tick and pushes `status`/`backends`/`llmcall` events through ONE render
+  // tick and pushes `status`/`backends`/`llmcalls` events through ONE render
   // path. A poll of GET /api/status is the fallback whenever the stream is not
   // open (connection cap → 429, network blip, server restart).
   import { fetchPublicHealth } from '../../lib/api/status'
   import { toggleDisableProfile } from '../../lib/api/profiles'
-  import type { BackendStatus, HealthStatus, LLMLogEntry, StatusEvent, StatusProfile } from '../../lib/api/types'
+  import type { BackendStatus, HealthStatus, StatusEvent, StatusProfile } from '../../lib/api/types'
   import { session } from '../../lib/auth.svelte'
   import { Resource } from '../../lib/resource.svelte'
   import { SseClient } from '../../lib/sse.svelte'
   import BlackoutConfirm from '../../lib/components/BlackoutConfirm.svelte'
+  import { LlmcallFeed } from './llmcall-feed.svelte'
   import { StatusStore } from './status-store.svelte'
   import BackendsTile from './BackendsTile.svelte'
   import DispatchTile from './DispatchTile.svelte'
@@ -26,20 +27,24 @@
   const publicHealth = new Resource<HealthStatus>(() => fetchPublicHealth())
 
   // Live llmcall rows pushed since connect; LlmlogTable merges them with its
-  // own fetched history (client-side filter + dedup by id).
-  let liveLlmcalls = $state<LLMLogEntry[]>([])
+  // own fetched history (client-side filter + dedup by id). A tick above the
+  // coalesce threshold arrives content-free instead (S0) and raises the feed's
+  // refetch token, which the table answers with its own GET /api/llmlog.
+  const llmcalls = new LlmcallFeed()
 
   function onSseEvent(name: string, data: unknown): void {
     if (name === 'status') {
       status.applyStatusFrame(data as StatusEvent)
     } else if (name === 'backends') {
       status.applyBackends(data as BackendStatus[])
-    } else if (name === 'llmcall') {
-      liveLlmcalls = [data as LLMLogEntry, ...liveLlmcalls].slice(0, 200)
     } else if (name === 'error') {
       // Server ended the stream (revoked key, §3.6 re-auth). A reload returns
       // 401 → the api client's interceptor tears the session down → login.
       void status.reload()
+    } else {
+      // `llmcalls` — and every name this client does not know, which the feed
+      // drops silently rather than crash the render path.
+      llmcalls.apply(name, data)
     }
   }
 
@@ -280,7 +285,7 @@
     <DreamTile dream={s.dream} onApplied={(r) => status.applyDream(r)} />
     <BackendsTile backends={s.backends} />
     <DispatchTile dispatch={s.dispatch} dispatchTenant={s.dispatch_tenant} />
-    <LlmlogTable complete={s.llm_24h_complete} live={liveLlmcalls} />
+    <LlmlogTable complete={s.llm_24h_complete} live={llmcalls.rows} refetch={llmcalls.refetchToken} />
   {/if}
 </section>
 

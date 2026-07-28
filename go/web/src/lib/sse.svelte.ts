@@ -5,7 +5,7 @@
 // Client entstand in der Bearer-Ära (EventSource kann keinen Authorization-
 // Header senden; `?token=` würde in Request-Logs landen) und bleibt seit der
 // Cookie-Session (OAuth R4) der etablierte Transport. This client streams named
-// events (status | backends | llmcall | error) to an onEvent dispatcher and
+// events (status | backends | llmcalls | error) to an onEvent dispatcher and
 // reconnects with exponential backoff + jitter (cap 30s) after any non-clean
 // end, until close() is called. The status field drives the page's poll
 // fallback: callers poll while it is not 'open'.
