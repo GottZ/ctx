@@ -42,10 +42,11 @@ type stageWriteGateResult struct {
 // validateTypeNameAgainstSet, applyWriteDetector, writableBlockScopes,
 // store.CheckRateLimit) so stage and execute can never diverge.
 //
-// Note the deliberate asymmetry repair: today's MCP store path has NEITHER
-// the detector NOR the rate limit (REST-only). The staged path pulls MCP up
-// to the full gate set — that behaviour change goes live with the D-W5
-// branch, not with this function.
+// It started as the STAGED path's copy of that order, while the direct MCP
+// store arm still ran a hand-rolled subset. Gap-C6-a removed the split: the
+// direct arm (mcpStoreHandler) calls THIS function too, so REST, MCP-direct
+// and MCP-staged share one gate order and one set of rejection messages, and
+// a gate added here reaches all three at once.
 //
 // pool is only touched when rateLimitWrite > 0 (nil pool + limit 0 is a valid
 // test wiring). set == nil fails closed on an explicit type (never lets an

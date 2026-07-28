@@ -240,18 +240,19 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		}
 
 		// D-W5 branch (F6-C6): a confirm_writes key (090) stages instead of
-		// executing — the staged path runs the FULL direct-path gate set
-		// (runStageWriteGates) and answers IsError=true (D3-C3). Handler-level
-		// on purpose — digest/dream write through store.UpsertBlock internally
-		// and must never self-stage. Keys without the flag fall through to the
-		// unchanged direct path below (fail-open, D-E2).
+		// executing — and answers IsError=true (D3-C3). Handler-level on
+		// purpose — digest/dream write through store.UpsertBlock internally and
+		// must never self-stage. Keys without the flag fall through to the
+		// direct path below (fail-open, D-E2). Since Gap-C6-a the two arms run
+		// the IDENTICAL gate chain (runStageWriteGates) and differ only in what
+		// they do with the verdict: execute now, or stage for a confirm.
 		if ar.ConfirmWrites {
 			return mcpStageStore(ctx, cfg, ar, input)
 		}
 
-		// One config snapshot for both write gates below. MT 06-C5: per-tenant
-		// via the request context (the MCP ctx carries the resolved AuthResult,
-		// used for the scope above) — the tenant's own overrides apply, else the
+		// One config snapshot for the whole gate chain. MT 06-C5: per-tenant via
+		// the request context (the MCP ctx carries the resolved AuthResult, used
+		// for the scope above) — the tenant's own overrides apply, else the
 		// _global values.
 		rateLimit := 0
 		var defaultSens backends.Sensitivity
@@ -260,41 +261,44 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			rateLimit = snap.Query.RateLimitWrite
 			defaultSens = snap.Pool.DefaultBlockSensitivity
 		}
-
-		// H-W8: write rate limit on the DIRECT MCP arm (query.rate_limit_write,
-		// same 60 s window and message as /api/store). Until now the throttle was
-		// REST-only — the asymmetry stage_gates.go names: store.CheckRateLimit
-		// counts context_access_log rows with action='write', and no MCP path ever
-		// booked one, so a purely MCP-writing key sat at writeCount 0 forever and
-		// the limit could never bite. 0 = disabled, never "no writes".
-		//
-		// Placed AFTER the confirm_writes branch on purpose: the staged path runs
-		// its own copy of this gate (runStageWriteGates) and must not be charged
-		// twice. Placed after the hash NOOP check for the same reason it books no
-		// write log: a no-op changes nothing, so it must not consume budget.
-		if rateLimit > 0 {
-			writeCount, err := store.CheckRateLimit(ctx, cfg.Pool, ar.ApiKeyID)
-			if err != nil {
-				slog.Error("mcp: store rate limit check error", "error", err)
-				return errResult("store failed: internal error"), nil, nil
-			}
-			if writeCount >= rateLimit {
-				return errResult(fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", rateLimit)), nil, nil
-			}
+		// One registry snapshot for the gate chain AND the classify hook below —
+		// a single per-call view, never the compiled-in builtin set.
+		var set *blocktype.Set
+		if cfg.Blocktypes != nil {
+			set = cfg.Blocktypes.SnapshotForRequest(ctx)
 		}
 
-		// Sensitivity: request > settings default (mirrors /api/store, F3 §3.5).
-		sens := store.SensitivityWrite{Value: defaultSens}
-		if input.Sensitivity != "" {
-			s := backends.Sensitivity(input.Sensitivity)
-			if !backends.ValidSensitivity(s) {
-				return errResult("invalid sensitivity: must be credentials|personal|internal|public"), nil, nil
-			}
-			sens = store.SensitivityWrite{Value: s, Manual: true}
+		// Gap-C6-a: the direct arm runs the SAME chain as the staged one
+		// (runStageWriteGates) instead of a hand-rolled subset. H-W8 wired up
+		// only the rate limit, which left the direct arm without the size cap
+		// and without the G40 credentials detector: a 51 KB block and a leaked
+		// vendor token both walked in here, while the identical payload was
+		// rejected / upgraded on REST /api/store and on the staged MCP arm.
+		// Running the chain closes that split by construction — a gate added to
+		// the chain now reaches all three surfaces at once.
+		//
+		// The MCP store tool carries no scope/type field (decision D4), so the
+		// storeRequest mapping leaves both empty: WriteScope resolves to the
+		// home scope with ScopeExplicit=false — byte-identical to the value this
+		// handler passed before — and the type stays auto-classify.
+		//
+		// res is threaded into the upsert (sensitivity, detector metadata,
+		// scope): the gates must DECIDE the write, not merely veto it. The chain
+		// checks the rate limit exactly ONCE; the booking below is what feeds it.
+		res, rej := runStageWriteGates(ctx, cfg.Pool, set, ar, storeRequest{
+			Category:    input.Category,
+			Title:       input.Title,
+			Content:     input.Content,
+			Tags:        input.Tags,
+			Metadata:    input.Metadata,
+			Sensitivity: input.Sensitivity,
+		}, defaultSens, rateLimit, RequestIDFromContext(ctx))
+		if rej != nil {
+			return errResult(rej.Msg), nil, nil
 		}
 
 		// Upsert.
-		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, input.Metadata, scope, false, sens, "")
+		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, "")
 		if err != nil {
 			return errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
 		}
@@ -304,11 +308,7 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		// need a follow-up SQL UPDATE — handled inline. Errors are LOGGED, not
 		// silently dropped (T4 gate: the pre-T4 `_, _, _ =` discarded a failed
 		// classification without a trace).
-		var classifySet *blocktype.Set
-		if cfg.Blocktypes != nil {
-			classifySet = cfg.Blocktypes.SnapshotForRequest(ctx)
-		}
-		if _, err := store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
+		if _, err := store.ClassifyBlockAfterUpsert(ctx, cfg.Pool, set, block.ID, block.Title, block.Metadata); err != nil {
 			slog.Warn("mcp: auto-classify failed", "error", err, "block_id", block.ID)
 		}
 

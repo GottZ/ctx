@@ -1214,12 +1214,24 @@ func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string, type
 // LogAccess inserts an access log entry (read or write). principal_id is
 // derived from the acting key in SQL (096, F3): key→principal is 1:1 NOT NULL
 // since 094, so the person anchor can never drift from the key anchor (INV-A).
+//
+// An EMPTY blockID books the row with block_id NULL — the column is nullable
+// by design (001_initial.sql). That is the write-INTENT shape (Gap-C6-a): a
+// staged write has no block yet and may never get one, but the intent must
+// still count against the write budget. Every reader of this table is either
+// block_id-keyed (temporal gravity, grant probes — a NULL row simply never
+// joins) or a (api_key_id, action) aggregate like CheckRateLimitByAction, which
+// is precisely the consumer this shape exists for.
 func LogAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID, blockID, action string) error {
+	var block *string
+	if blockID != "" {
+		block = &blockID
+	}
 	_, err := pool.Exec(ctx,
 		`INSERT INTO context_access_log (api_key_id, block_id, action, metadata, principal_id)
 		 VALUES ($1::uuid, $2::uuid, $3, '{}'::jsonb,
 		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid))`,
-		apiKeyID, blockID, action,
+		apiKeyID, block, action,
 	)
 	if err != nil {
 		return fmt.Errorf("store: log access: %w", err)

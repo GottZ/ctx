@@ -93,6 +93,24 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		return errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 
+	// Gap-C6-a: book the write INTENT. runStageWriteGates CHECKED the budget
+	// above, but nothing ever SPENT it — store.CheckRateLimit counts
+	// context_access_log rows with action='write', and no staged write booked
+	// one, so a purely staging key sat at writeCount 0 forever and the limit
+	// could not bite the exact abuse it exists for (an LLM stage-storm).
+	//
+	// block_id stays NULL: at stage time no block exists, and an unconfirmed
+	// stage may never produce one. Charging at INTENT time — not at confirm —
+	// is the deliberate semantics: the budget guards the flood of proposals,
+	// and executeConfirm therefore books nothing (a confirmed write is already
+	// paid for). Booked only AFTER a successful stage, so a failed stage costs
+	// nothing; a re-armed duplicate stage IS a fresh call and is charged like
+	// one. Logged, never fatal: losing an audit row must not turn a persisted
+	// stage into an error result.
+	if err := store.LogAccess(ctx, cfg.Pool, ar.ApiKeyID, "", "write"); err != nil {
+		slog.Error("mcp: staged write log error", "error", err, "request_id", reqID)
+	}
+
 	expiry := "never (writes.confirm_ttl = 0)"
 	if pw.ExpiresAt != nil {
 		expiry = fmt.Sprintf("%s (in %s)", pw.ExpiresAt.UTC().Format(time.RFC3339), time.Until(*pw.ExpiresAt).Round(time.Second))
