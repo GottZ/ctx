@@ -403,6 +403,15 @@ export interface StatusResponse {
   // absent only when the server-side read degraded. The /guard page is the
   // consumer surface; a status tile may ride this later.
   guard_review?: GuardReviewStatus | null
+  // RC-1 wave S6 (design/05 §4.5, Weg A): guard_review's READ-scope twin — one
+  // row per scope the caller may READ, keyed by scope name. It exists because
+  // the /guard LIST filters on ReadScopes while guard_review above counts the
+  // HOME scope alone, so a guard decision in a non-home read scope moves the
+  // list without moving that counter. The /guard live channel therefore
+  // compares THIS vector, not guard_review. ABSENT (not empty) when the caller
+  // has no read scopes or the server's generation went stale — an absent
+  // section must render '—', never '0'.
+  guard_review_by_scope?: Record<string, GuardReviewStatus>
 }
 
 // Source: go/internal/handler/status.go (guardReviewStatus), pinned by

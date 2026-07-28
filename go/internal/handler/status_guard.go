@@ -282,3 +282,56 @@ func (c *StatusCollector) guardReviewForScope(ctx context.Context, tickCfg time.
 	tick := guardTick(tickCfg)
 	return guardSectionForScope(c.guardGenNow(ctx, tick), scope, time.Now(), tick)
 }
+
+// guardScopeVector picks one slot per READ scope out of a generation under the
+// same staleness rule the single-slot readers use. Pure — the collector methods
+// below add only the refresh trigger (RC-1 wave S6).
+//
+// Absent (nil) rather than partial when the generation is stale: the /guard live
+// channel compares this whole vector, and half a vector is a diff signal that
+// says "something changed" when nothing did.
+//
+// A scope the generation does not KNOW is omitted, never seeded with a zero row.
+// The generation materializes every scope in context_tenant_scopes plus every
+// scope carrying flagged blocks (status_guard.go guardGenScopesSQL), so an
+// unknown key is a scope that does not exist — and {0,0,0,null} for it would be
+// an invention, the forScope fail-closed rule applied per element. An empty
+// scope string is likewise skipped (it is the ABSENCE of a scope, never a key).
+func guardScopeVector(g *guardGen, readScopes []string, now time.Time, tick time.Duration) map[string]*guardReviewStatus {
+	if len(readScopes) == 0 || !guardGenFresh(g, now, tick) {
+		return nil
+	}
+	out := make(map[string]*guardReviewStatus, len(readScopes))
+	for _, scope := range readScopes {
+		if row := g.forScope(scope); row != nil {
+			out[scope] = row
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// guardReviewByScope serves the /guard live channel's per-scope vector out of
+// the SAME generation guardReviewGlobal/guardReviewForScope read: N map lookups,
+// zero additional queries (RC-1 wave S6, design/05 §4.5 Weg A).
+func (c *StatusCollector) guardReviewByScope(ctx context.Context, tickCfg time.Duration, readScopes []string) map[string]*guardReviewStatus {
+	if len(readScopes) == 0 {
+		return nil // no generation touch at all for a caller that cannot read
+	}
+	tick := guardTick(tickCfg)
+	return guardScopeVector(c.guardGenNow(ctx, tick), readScopes, time.Now(), tick)
+}
+
+// guardReviewByScopeNow is the request-path entry for callers that hold no
+// config snapshot of their own — the server-admin branch of HandleStatus, whose
+// response comes from the SHARED cached Snapshot and therefore cannot carry a
+// per-caller section from inside assemble().
+func (c *StatusCollector) guardReviewByScopeNow(ctx context.Context, readScopes []string) map[string]*guardReviewStatus {
+	if len(readScopes) == 0 {
+		return nil
+	}
+	cfg := c.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: only the collector's own tick cadence is read here; the tenant-scoping of this section is ar.ReadScopes, passed in by the caller.
+	return c.guardReviewByScope(ctx, cfg.Events.TickInterval, readScopes)
+}

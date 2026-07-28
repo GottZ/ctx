@@ -108,7 +108,7 @@ func TestGuardReviewGenerationCadence(t *testing.T) {
 
 	const pulls = 10
 	for i := 0; i < pulls; i++ {
-		snap := col.SnapshotForTenant(ctx, "gg-a")
+		snap := col.SnapshotForTenant(ctx, "gg-a", nil)
 		if snap.GuardReview == nil {
 			t.Fatalf("pull %d: guard_review section missing", i)
 		}
@@ -205,20 +205,20 @@ func TestGuardReviewGenerationRollup(t *testing.T) {
 	// nil — fail closed, never the grand total (Verschärfung 1 end to end).
 	col := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{},
 		config.NewStore(&config.Config{}), nil, nil)
-	if s := col.SnapshotForTenant(ctx, "gr-nonexistent").GuardReview; s != nil {
+	if s := col.SnapshotForTenant(ctx, "gr-nonexistent", nil).GuardReview; s != nil {
 		t.Errorf("unknown scope produced a guard_review section %+v (must fail closed)", *s)
 	}
 	// The EMPTY scope is the live leak path this closes: HandleStatus passes
 	// scope="" when the request carries no AuthResult, and the pre-S1 builder
 	// read "" as "aggregate globally" — a tenant-path response with every
 	// tenant's flagged counts in it. It must now be a section-less response.
-	if s := col.SnapshotForTenant(ctx, "").GuardReview; s != nil {
+	if s := col.SnapshotForTenant(ctx, "", nil).GuardReview; s != nil {
 		t.Errorf("empty scope produced a guard_review section %+v — the tenant path must never serve the global total", *s)
 	}
-	if s := col.SnapshotForTenant(ctx, "gr-empty").GuardReview; s == nil || s.NeedsReview != 0 {
+	if s := col.SnapshotForTenant(ctx, "gr-empty", nil).GuardReview; s == nil || s.NeedsReview != 0 {
 		t.Errorf("empty scope through the tenant path: %+v, want a zero section", s)
 	}
-	if s := col.SnapshotForTenant(ctx, "gr-a").GuardReview; s == nil || s.NeedsReview != 4 || s.PossibleDuplicate != 1 {
+	if s := col.SnapshotForTenant(ctx, "gr-a", nil).GuardReview; s == nil || s.NeedsReview != 4 || s.PossibleDuplicate != 1 {
 		t.Errorf("gr-a through the tenant path: %+v, want {4,0,1}", s)
 	}
 }

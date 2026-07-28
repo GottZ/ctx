@@ -111,7 +111,14 @@ func (c *StatusCollector) buildTenantRollupInto(ctx context.Context) {
 // SnapshotForTenant assembles the reduced per-tenant status: only the tenant's
 // visible backends + its own 24h rollup. Server-global fields stay zero. A
 // server-admin never goes through here — it keeps the full global Snapshot.
-func (c *StatusCollector) SnapshotForTenant(ctx context.Context, scope string) statusResponse {
+//
+// readScopes is the caller's READ set (auth.AuthResult.ReadScopes) and feeds the
+// guard_review_by_scope section alone (RC-1 wave S6). It is a SEPARATE parameter
+// from scope on purpose: scope is the caller's HOME scope and stays the sole
+// input of every pre-S6 field, so a caller that passes nil gets exactly the
+// pre-S6 response. Nothing here derives visibility FROM readScopes — the section
+// it feeds is a projection of what the /guard list already shows.
+func (c *StatusCollector) SnapshotForTenant(ctx context.Context, scope string, readScopes []string) statusResponse {
 	cfg := c.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: the cache/generation cadences read here are server-global process knobs, not tenant-scoped.
 	// Tenant-visible backends only, via the snapshot's Scope (the same egress
 	// predicate as Chain) — BackendStatus carries no scope, so the snapshot maps
@@ -144,6 +151,10 @@ func (c *StatusCollector) SnapshotForTenant(ctx context.Context, scope string) s
 		// inside one tick now cost ONE query, not N. An unknown scope resolves
 		// to nil (fail closed: no section rather than the global total).
 		GuardReview: c.guardReviewForScope(ctx, cfg.Events.TickInterval, scope),
+		// RC-1 wave S6: the same generation, one slot per READ scope — the
+		// predicate the /guard list actually runs on. Additive; guard_review
+		// above keeps counting the home scope alone.
+		GuardReviewByScope: c.guardReviewByScope(ctx, cfg.Events.TickInterval, readScopes),
 	}
 }
 

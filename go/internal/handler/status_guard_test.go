@@ -137,3 +137,97 @@ func TestGuardTickFallback(t *testing.T) {
 		t.Errorf("guardTick(2s) = %v, want 2s", got)
 	}
 }
+
+// TestGuardScopeVector pins the RC-1 wave S6 read-scope vector — the compare
+// surface of the /guard live channel — against the four ways it could quietly
+// lie to that channel.
+//
+// Mutation probes for this test (each one turns it red):
+//   - seeding an unknown scope with &guardReviewStatus{} → unknown_scope_omitted
+//     fails: a scope that does not exist would render as "queue clear".
+//   - dropping the guardGenFresh gate → stale_generation_yields_nothing fails:
+//     a stale vector is a diff signal that says "something changed" when nothing
+//     did, and frozen counts presented as current (the S1(e) posture).
+//   - reading g.byScope directly instead of g.forScope → empty_scope_never_a_key
+//     fails: "" would resolve to whatever a build path files under it — on the
+//     magic-key shape below, the grand total.
+func TestGuardScopeVector(t *testing.T) {
+	tick := time.Second
+	built := time.Now()
+	home := &guardReviewStatus{NeedsReview: 2}
+	shared := &guardReviewStatus{NeedsReview: 1, NearDuplicate: 3}
+	total := &guardReviewStatus{NeedsReview: 10}
+	gen := &guardGen{
+		global: total,
+		byScope: map[string]*guardReviewStatus{
+			// The magic-key shape again (S1(c)): "" must never be a lookup key.
+			"":       total,
+			"privat": home,
+			"shared": shared,
+			"work":   {},
+		},
+		builtAt: built,
+	}
+
+	t.Run("carries_one_row_per_read_scope", func(t *testing.T) {
+		got := guardScopeVector(gen, []string{"privat", "shared", "work"}, built, tick)
+		if len(got) != 3 {
+			t.Fatalf("vector has %d rows, want 3: %v", len(got), got)
+		}
+		if got["privat"] != home || got["shared"] != shared {
+			t.Errorf("vector rows are not the generation's own rows: %v", got)
+		}
+		// A read scope with nothing flagged is PRESENT with zeros — the client
+		// must be able to tell "queue clear" from "no data" (B10).
+		if row, ok := got["work"]; !ok || row.NeedsReview != 0 {
+			t.Errorf("an empty read scope must render {0,0,0,null}, got %v (present=%v)", row, ok)
+		}
+	})
+
+	t.Run("unknown_scope_omitted", func(t *testing.T) {
+		got := guardScopeVector(gen, []string{"privat", "does-not-exist"}, built, tick)
+		if _, ok := got["does-not-exist"]; ok {
+			t.Errorf("a scope the generation does not know was seeded with a row: %v", got)
+		}
+		if len(got) != 1 {
+			t.Errorf("vector = %v, want only the known scope", got)
+		}
+	})
+
+	t.Run("empty_scope_never_a_key", func(t *testing.T) {
+		got := guardScopeVector(gen, []string{""}, built, tick)
+		if got != nil {
+			t.Errorf("an empty scope resolved to %v — never a lookup key, least of all onto the grand total", got)
+		}
+	})
+
+	t.Run("no_read_scopes_no_vector", func(t *testing.T) {
+		if got := guardScopeVector(gen, nil, built, tick); got != nil {
+			t.Errorf("a caller without read scopes got a vector: %v", got)
+		}
+	})
+
+	t.Run("stale_generation_yields_nothing", func(t *testing.T) {
+		// Same staleness budget the single-slot readers use: past
+		// guardGenStaleFactor ticks the WHOLE vector disappears rather than
+		// serving frozen counts as current (S1(e) carried into S6).
+		past := built.Add(time.Duration(guardGenStaleFactor)*tick + time.Millisecond)
+		if got := guardScopeVector(gen, []string{"privat", "shared"}, past, tick); got != nil {
+			t.Errorf("a stale generation still served a vector: %v", got)
+		}
+		edge := built.Add(time.Duration(guardGenStaleFactor) * tick)
+		if got := guardScopeVector(gen, []string{"privat"}, edge, tick); got == nil {
+			t.Errorf("the vector vanished AT the %dx tick budget — the boundary is inclusive", guardGenStaleFactor)
+		}
+		if got := guardScopeVector(nil, []string{"privat"}, built, tick); got != nil {
+			t.Errorf("a nil generation served a vector: %v", got)
+		}
+	})
+
+	t.Run("duplicate_read_scopes_collapse", func(t *testing.T) {
+		got := guardScopeVector(gen, []string{"privat", "privat", "shared"}, built, tick)
+		if len(got) != 2 {
+			t.Errorf("duplicate read scopes produced %d rows, want 2: %v", len(got), got)
+		}
+	})
+}

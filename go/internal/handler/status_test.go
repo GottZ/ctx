@@ -238,6 +238,14 @@ func TestStatusGoldenKeys(t *testing.T) {
 			NeedsReview: 5, NearDuplicate: 1, PossibleDuplicate: 0,
 			OldestUpdatedAt: &next, BuiltAt: &next,
 		},
+		// RC-1 wave S6: guard_review_by_scope is the READ-scope twin of the
+		// section above — one row per scope in the caller's ReadScopes, keyed by
+		// scope, out of the same generation. Additive + omitempty: a caller
+		// without read scopes keeps the pre-S6 key set exactly (pinned below).
+		GuardReviewByScope: map[string]*guardReviewStatus{
+			"shared": {NeedsReview: 3, NearDuplicate: 0, PossibleDuplicate: 1,
+				OldestUpdatedAt: &next, BuiltAt: &next},
+		},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -246,6 +254,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
 		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall", "embed_migration", "guard_review",
+		"guard_review_by_scope",
 	})
 
 	var top map[string]json.RawMessage
@@ -321,6 +330,28 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "guard_review (no stamp)", unstamped, []string{
 		"needs_review", "near_duplicate", "possible_duplicate", "oldest_updated_at",
 	})
+
+	// RC-1 wave S6: guard_review_by_scope is a scope-keyed MAP of the very same
+	// row shape — the /guard live channel compares the four-tuple per scope, so a
+	// row that drifts from guard_review would silently split the two readers.
+	var byScope map[string]json.RawMessage
+	if err := json.Unmarshal(top["guard_review_by_scope"], &byScope); err != nil {
+		t.Fatalf("unmarshal guard_review_by_scope: %v", err)
+	}
+	if _, ok := byScope["shared"]; !ok {
+		t.Fatalf("guard_review_by_scope is not keyed by scope name: %s", top["guard_review_by_scope"])
+	}
+	assertKeys(t, "guard_review_by_scope.row", byScope["shared"], []string{
+		"needs_review", "near_duplicate", "possible_duplicate", "oldest_updated_at", "built_at",
+	})
+	// Absent, not empty: a caller with no read scopes keeps the pre-S6 key set.
+	noScopes, err := json.Marshal(statusResponse{Success: true})
+	if err != nil {
+		t.Fatalf("marshal scope-less status: %v", err)
+	}
+	if bytes.Contains(noScopes, []byte(`"guard_review_by_scope"`)) {
+		t.Errorf("guard_review_by_scope must be omitted when empty (a present-but-empty section renders as 'queue clear'): %s", noScopes)
+	}
 
 	// MW12 dispatch section (server-admin) wire pins.
 	assertKeys(t, "dispatch", top["dispatch"], []string{

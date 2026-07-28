@@ -5,11 +5,20 @@
   // archive per row and a batch bar over the checkbox selection (the W1 ids[]
   // contract). Authorization stays server-side (writableBlockScopes) — this
   // page is UX only; the nav gates visibility on viewOpsSurfaces.
+  //
+  // LIVE (RC-1 wave S6, design/05 §4.5): the page used to load exactly twice —
+  // the statusFilter effect and the post-resolve reload — so a decision made by
+  // anyone else stayed invisible until someone pressed Reload. GuardLive polls
+  // GET /api/status and reloads when the READ-SCOPE vector moves (not the
+  // home-scope counter: list and counter run on two different scope predicates).
+  // Stufe 2 (S13) swaps the transport for SSE and keeps the poll as fallback.
   import { toApiError } from '../../lib/api'
   import { guardList, guardResolve, type GuardListItem, type GuardSkip } from '../../lib/api/guard'
   import { getBlock, type BlockDetail } from '../../lib/api/blocks'
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
+  import ConnState from '../../lib/ui/ConnState.svelte'
   import Table from '../../lib/ui/Table.svelte'
+  import { GuardLive } from './guard-live.svelte'
 
   let items = $state<GuardListItem[]>([])
   let loading = $state(false)
@@ -48,6 +57,23 @@
     void reload()
   })
 
+  // The live channel. Reads nothing reactive here, so it is armed ONCE for the
+  // page's life and torn down on unmount — the statusFilter effect above must
+  // not restart the poll.
+  const live = new GuardLive({ onChanged: () => void reload() })
+  $effect(() => {
+    live.start()
+    return () => live.stop()
+  })
+
+  // Queue counters from the server's guard generation. Three states, never
+  // conflated (B10): fresh renders digits (0 is a real answer — "queue clear"),
+  // missing/stale render '—' plus how old the data is, so a degraded read can
+  // never be misread as an empty queue.
+  const queueAge = $derived(
+    live.section.ageMs === null ? 'no data' : `${Math.round(live.section.ageMs / 1000)}s old`,
+  )
+
   function togglePick(id: string) {
     const next = new Set(picked)
     if (next.has(id)) next.delete(id)
@@ -82,6 +108,10 @@
   async function resolve(ids: string[], resolution: 'archive' | 'keep') {
     busy = true
     error = ''
+    // Order guard (N14): a poll answer that predates this mutation must not
+    // become the compare baseline, and the reload below is the one this
+    // resolution owes the operator — the next poll adopts its result silently.
+    live.markMutation()
     try {
       const resp = await guardResolve(ids, resolution)
       lastSkipped = resp.skipped
@@ -108,6 +138,17 @@
   <header class="card-head">
     <h2>guard review</h2>
     <span class="count">{visible.length} flagged</span>
+    {#if live.section.counts}
+      <span class="queue" title="needs_review / near_duplicate / possible_duplicate in your home scope">
+        {live.section.counts.needs_review} / {live.section.counts.near_duplicate} / {live.section.counts
+          .possible_duplicate}
+      </span>
+    {:else}
+      <span class="queue" title="the server's flagged-block counts are unavailable — this is NOT an empty queue">
+        — <span class="age">{queueAge}</span>
+      </span>
+    {/if}
+    <span class="live"><ConnState sse={live} /></span>
   </header>
 
   <p class="note">
@@ -270,6 +311,18 @@
     font-size: var(--label-size);
     letter-spacing: var(--label-tracking);
     color: var(--text-dim);
+  }
+  .queue {
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    letter-spacing: var(--label-tracking);
+    color: var(--text-faint);
+  }
+  .age {
+    font-style: italic;
+  }
+  .live {
+    margin-left: auto;
   }
   .note {
     margin: 0;

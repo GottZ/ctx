@@ -158,6 +158,37 @@ type statusResponse struct {
 	// leak nothing foreign). nil only when the read fails (degrade to no
 	// section, the embed_migration posture).
 	GuardReview *guardReviewStatus `json:"guard_review,omitempty"`
+	// GuardReviewByScope is GuardReview's READ-PREDICATE twin (RC-1 wave S6,
+	// design/05 §4.5 Weg A): one row per scope the caller may READ
+	// (auth.AuthResult.ReadScopes), keyed by scope name.
+	//
+	// Why it exists: the /guard LIST filters on `b.scope = ANY(ReadScopes)`
+	// (store.GuardList) while GuardReview above counts the HOME scope alone.
+	// Every guard decision on a block in a non-home read scope therefore moves
+	// the list without moving the counter — a live channel watching only the
+	// counter misses it silently (live: 24 of 4231 blocks sit in non-home
+	// scopes). This section makes the two predicates congruent WITHOUT
+	// redefining GuardReview, whose home-scope meaning above stays literally
+	// true (Weg B — widening that predicate — would have changed a shipped
+	// field's meaning silently).
+	//
+	// Cost: ZERO extra queries. It is N slot lookups in the SAME per-tick
+	// generation GuardReview reads (status_guard.go), so C open /guard tabs on a
+	// 10s poll still cost one aggregate per tick, not C/10 per second.
+	//
+	// Visibility does not grow: ReadScopes IS what the caller may read
+	// (auth.AuthResult.ReadScopes) and the /guard list already shows those
+	// blocks. omitempty + fail closed: no read scopes, and a generation past its
+	// staleness budget, both render the section ABSENT — never a fabricated zero
+	// that would read as "queue clear" (B10).
+	//
+	// Per-CALLER, therefore NOT in assemble(): the value depends on the request's
+	// credential, so it is stamped onto the response in HandleStatus and can
+	// never live in the shared per-tick snapshot the collector caches or the SSE
+	// hub fans out. A wave that moves it into assemble() will (correctly) trip
+	// TestStatusEventCarriesEveryDualPathField — the push frame cannot carry a
+	// per-caller predicate before the per-scope frame build (S11).
+	GuardReviewByScope map[string]*guardReviewStatus `json:"guard_review_by_scope,omitempty"`
 }
 
 // guardReviewStatus is the /api/status guard_review block wire shape (guard
@@ -1178,13 +1209,28 @@ func (h *StatusHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	// only its own backends + its own 24h rollup, no server-global telemetry.
 	// fail-closed: anything that is not a proven server-admin is tenant-scoped.
 	ar := AuthResultFromContext(r.Context())
+	// RC-1 wave S6: the /guard live channel's compare vector is keyed on the
+	// caller's READ set, because that is what the /guard list filters on
+	// (store.GuardList). It is per-CREDENTIAL, so it is resolved here on both
+	// branches rather than inside the shared, cached snapshot builders.
+	var readScopes []string
+	if ar != nil {
+		readScopes = ar.ReadScopes
+	}
 	if ar != nil && ar.IsServerAdmin() {
-		writeJSON(w, http.StatusOK, h.collector.Snapshot(r.Context()))
+		resp := h.collector.Snapshot(r.Context())
+		// A server-admin's guard_review is the GLOBAL total while its /guard list
+		// is still ReadScopes-filtered — the same predicate divergence the tenant
+		// path has, so it gets the same answer. Stamped on the RETURNED COPY:
+		// Snapshot() reads shared per-tick caches, and a per-caller field must
+		// never be written into one.
+		resp.GuardReviewByScope = h.collector.guardReviewByScopeNow(r.Context(), readScopes)
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	scope := ""
 	if ar != nil {
 		scope = ar.HomeScope
 	}
-	writeJSON(w, http.StatusOK, h.collector.SnapshotForTenant(r.Context(), scope))
+	writeJSON(w, http.StatusOK, h.collector.SnapshotForTenant(r.Context(), scope, readScopes))
 }

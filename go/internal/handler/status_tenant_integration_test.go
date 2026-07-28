@@ -81,7 +81,7 @@ func TestStatusPerTenantView(t *testing.T) {
 	col := NewStatusCollector(pool, bp, fakeDreamMode{}, config.NewStore(&config.Config{}), nil, nil)
 
 	t.Run("tenant_rollup_isolated_and_costed", func(t *testing.T) {
-		snap := col.SnapshotForTenant(ctx, "st-a")
+		snap := col.SnapshotForTenant(ctx, "st-a", nil)
 		backendsSeen := map[string]float64{}
 		for _, r := range snap.LLM24h {
 			backendsSeen[r.Backend] = r.CostUSD
@@ -98,7 +98,7 @@ func TestStatusPerTenantView(t *testing.T) {
 	})
 
 	t.Run("tenant_backends_filtered", func(t *testing.T) {
-		snap := col.SnapshotForTenant(ctx, "st-a")
+		snap := col.SnapshotForTenant(ctx, "st-a", nil)
 		names := map[string]bool{}
 		for _, b := range snap.Backends {
 			names[b.Name] = true
@@ -112,7 +112,7 @@ func TestStatusPerTenantView(t *testing.T) {
 	})
 
 	t.Run("server_global_fields_zero_for_tenant", func(t *testing.T) {
-		snap := col.SnapshotForTenant(ctx, "st-a")
+		snap := col.SnapshotForTenant(ctx, "st-a", nil)
 		// profiles is server-admin-only (N8): the per-tenant snapshot never sets
 		// it, so the pointer stays nil → the wire key is omitted entirely.
 		if snap.Dream.Mode != "" || snap.Profiles != nil || snap.Activity != nil || snap.DB != nil || snap.GraphCache != nil || snap.Recall != nil || snap.EmbedMigration != nil {
@@ -178,7 +178,7 @@ func TestStatusPerTenantView(t *testing.T) {
 
 		// tenant st-a: coarsened section, own bucket detail, NO foreign fairKey,
 		// sidecar target absent (not visible), no server-admin dispatch field.
-		ten := dcol.SnapshotForTenant(ctx, "st-a")
+		ten := dcol.SnapshotForTenant(ctx, "st-a", nil)
 		if ten.Dispatch != nil || ten.DispatchTenant == nil {
 			t.Fatalf("tenant: want dispatch nil + dispatch_tenant set, got %+v / %+v", ten.Dispatch, ten.DispatchTenant)
 		}
@@ -198,7 +198,7 @@ func TestStatusPerTenantView(t *testing.T) {
 
 		// abtast-probe: two tenant pulls within one tick read the SAME cached
 		// snapshot (cheapSnapshot binding, design/05 §4.5).
-		ten2 := dcol.SnapshotForTenant(ctx, "st-a")
+		ten2 := dcol.SnapshotForTenant(ctx, "st-a", nil)
 		a, _ := json.Marshal(ten.DispatchTenant)
 		b, _ := json.Marshal(ten2.DispatchTenant)
 		if string(a) != string(b) {
