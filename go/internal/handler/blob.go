@@ -340,8 +340,68 @@ type blobManageRequest struct {
 	Limit  int    `json:"limit"`
 }
 
+// blobActionFunc is the uniform shape of a blob-manage action handler. It is a
+// METHOD EXPRESSION signature (the receiver is the first parameter) so the
+// dispatch table can name the existing methods directly — no closure per row,
+// no place for a row to drift away from the method it claims to call.
+type blobActionFunc func(*BlobHandler, http.ResponseWriter, *http.Request, *auth.AuthResult, blobManageRequest)
+
+// blobAction binds ONE dispatchable /api/blob/manage action to its admin tier
+// and its handler. Tier and routing living in the same row is the point (Gap-
+// C0-d): in the manage dispatcher they are two structures that must agree
+// (actionTierExplicit's table vs. HandleManage's switch), which is why that one
+// needs an enumeration gate to catch a dispatch arm added without a tier entry.
+// Here a row without a tier does not compile.
+type blobAction struct {
+	tier   adminTier
+	handle blobActionFunc
+}
+
+// blobActions is the SINGLE dispatch source of /api/blob/manage: the switch it
+// replaced could route an action the tier table never saw, this table cannot.
+//
+// All four actions are tierOpen — the pre-table behaviour, unchanged: they are
+// auth+scope gated only, and every read path resolves through ar.ReadScopes
+// while delete is pinned to ar.HomeScope in the store layer. The tier column
+// exists so a future blob action can be gated in the row that declares it,
+// NOT to re-cut today's permissions (that would be a separate, arguable wave).
+var blobActions = map[string]blobAction{
+	"stats":  {tier: tierOpen, handle: (*BlobHandler).handleBlobStats},
+	"get":    {tier: tierOpen, handle: (*BlobHandler).handleBlobGet},
+	"list":   {tier: tierOpen, handle: (*BlobHandler).handleBlobList},
+	"delete": {tier: tierOpen, handle: (*BlobHandler).handleBlobDelete},
+}
+
+// enforceBlobActionTier applies the admin tier of a blob-manage action and
+// reports whether dispatch may proceed; on a violation it has already written
+// the 403. Mirror of enforceActionTier (context_manage.go) with the tier taken
+// from the dispatch row instead of a parallel classification: server-global
+// actions need a server-admin, per-tenant actions also admit a tenant-admin of
+// the caller's OWN tenant (the per-resource target check then belongs IN the
+// handler), tierOpen skips the gate. The 403 body is the shared
+// requireAdminAction text — no tier oracle for the caller.
+func enforceBlobActionTier(w http.ResponseWriter, tier adminTier, ar *auth.AuthResult) bool {
+	switch tier {
+	case tierServerAdmin:
+		return requireAdminAction(w, ar)
+	case tierTenantAdmin:
+		return requireTenantAdmin(w, ar, ar.TenantID)
+	}
+	return true // tierOpen
+}
+
 // HandleBlobManage processes POST /api/blob/manage.
 func (h *BlobHandler) HandleBlobManage(w http.ResponseWriter, r *http.Request) {
+	h.handleBlobManage(w, r, blobActions)
+}
+
+// handleBlobManage is HandleBlobManage against an INJECTED action table. The
+// seam exists for the wiring probe (blob_action_tier_gate_test.go): with every
+// production action on tierOpen, a dispatcher that classifies the tier but
+// never calls enforceBlobActionTier would be indistinguishable from a correct
+// one — the probe dispatches a table carrying gated rows through this very
+// function and pins that a member is stopped before the handler runs.
+func (h *BlobHandler) handleBlobManage(w http.ResponseWriter, r *http.Request, actions map[string]blobAction) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
 
@@ -360,24 +420,26 @@ func (h *BlobHandler) HandleBlobManage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch req.Action {
-	case "stats":
-		h.handleBlobStats(w, r, authResult)
-	case "get":
-		h.handleBlobGet(w, r, authResult, req)
-	case "list":
-		h.handleBlobList(w, r, authResult, req)
-	case "delete":
-		h.handleBlobDelete(w, r, authResult, req)
-	default:
+	// Unknown first: an action that is not in the table has no tier to enforce
+	// (the manage dispatcher reaches the same outcome via its fail-open tierOpen
+	// default plus the switch default — here the miss IS the default).
+	action, ok := actions[req.Action]
+	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
 			"error":   "Unknown action (valid: stats, get, list, delete)",
 		})
+		return
 	}
+	if !enforceBlobActionTier(w, action.tier, authResult) {
+		return
+	}
+	action.handle(h, w, r, authResult, req)
 }
 
-func (h *BlobHandler) handleBlobStats(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
+// handleBlobStats takes the unused blobManageRequest to match blobActionFunc —
+// a uniform row shape is worth one ignored parameter.
+func (h *BlobHandler) handleBlobStats(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, _ blobManageRequest) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
 
