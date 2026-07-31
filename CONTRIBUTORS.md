@@ -44,7 +44,11 @@ else's environment — that led to a fix landing in the repository.
   from the probe. Also PR
   [#10](https://github.com/GottZ/ctx/pull/10): `dream.language`, a hot-mutable
   server setting that makes the daily-synthesis report language configurable
-  instead of hardcoded.
+  instead of hardcoded. Also PR
+  [#11](https://github.com/GottZ/ctx/pull/11): cloud relays answer the dream
+  link prompt in a named-wrapper drift form (`{"analysis": [...]}`) that the
+  parser rejected; the shipped fix keeps his parser-side solution and leaves
+  the wire format untouched.
 
 ## How to be listed
 

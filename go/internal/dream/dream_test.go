@@ -368,6 +368,122 @@ func TestCoerceConfidence(t *testing.T) {
 	}
 }
 
+// --- parseLinks Named-Wrapper Drift Tests (drift form 0, PR #11 review) ---.
+//
+// Cloud relays under response_format json_object wrap the requested array in a
+// named key. Every case runs repeatedly: the branch scans a Go map, so a single
+// pass would not distinguish "picks the right array" from "picked it by chance"
+// (the unpinned version returned a different array per run, 25/30 vs 5/30).
+func TestParseLinks_WrapperForm(t *testing.T) {
+	const linkA = `{"target_id":"a","type":"topical","confidence":0.9}`
+	const linkB = `{"target_id":"b","type":"causal","confidence":0.8}`
+
+	cases := []struct {
+		name       string
+		raw        string
+		wantIDs    []string
+		wantFormat string
+		wantErr    bool
+	}{
+		{
+			name:       "single-key",
+			raw:        `{"analysis":[` + linkA + `]}`,
+			wantIDs:    []string{"a"},
+			wantFormat: formatWrapped,
+		},
+		{
+			name:       "multi-key-with-prose",
+			raw:        `{"analysis":"the blocks share a topic","relationships":[` + linkA + `,` + linkB + `]}`,
+			wantIDs:    []string{"a", "b"},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Empty sibling arrays must not end the scan: a (nil, nil) return
+			// here would book a multi-day dream cooldown instead of a retry.
+			name:       "empty-sibling-array",
+			raw:        `{"warnings":[],"relationships":[` + linkA + `,` + linkB + `]}`,
+			wantIDs:    []string{"a", "b"},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Same, with the empty array sorting FIRST — proves the skip is
+			// real and not an artifact of the key order.
+			name:       "empty-array-sorts-first",
+			raw:        `{"aaa_warnings":[],"zzz_relationships":[` + linkA + `]}`,
+			wantIDs:    []string{"a"},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Ambiguous input: pick deterministically, alphabetically first.
+			name:       "two-populated-arrays",
+			raw:        `{"beta":[` + linkB + `],"alpha":[` + linkA + `]}`,
+			wantIDs:    []string{"a"},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Regression pin: drift form 1 with a side array. The wrapper
+			// branch must defer on the top-level target_id signature.
+			name:       "form1-with-evidence-side-array",
+			raw:        `{"target_id":"u1","type":"topical","confidence":0.9,"evidence":[{"target_id":"nope","type":"factual","confidence":0.95}]}`,
+			wantIDs:    []string{"u1"},
+			wantFormat: formatObject,
+		},
+		{
+			name:    "only-empty-arrays-errors",
+			raw:     `{"warnings":[],"notes":[]}`,
+			wantErr: true,
+		},
+		{
+			// Array present but every entry drops on confidence coercion:
+			// no links means no wrapper match, so the error path stays reachable.
+			name:    "link-less-array-errors",
+			raw:     `{"relationships":[{"target_id":"x","type":"topical","confidence":"vibes"}]}`,
+			wantErr: true,
+		},
+		{
+			name:       "fenced",
+			raw:        "```json\n{\"relationships\":[" + linkA + "]}\n```",
+			wantIDs:    []string{"a"},
+			wantFormat: formatFencedWrapped,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for i := 0; i < 20; i++ {
+				links, format, err := parseLinks(c.raw)
+				if c.wantErr {
+					if err == nil {
+						t.Fatalf("iter %d: want error, got links=%+v format=%q", i, links, format)
+					}
+					if format != "" {
+						t.Fatalf("iter %d: parse error must report empty format, got %q", i, format)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("iter %d: unexpected error: %v", i, err)
+				}
+				if format != c.wantFormat {
+					t.Fatalf("iter %d: format = %q, want %q", i, format, c.wantFormat)
+				}
+				got := make([]string, 0, len(links))
+				for _, l := range links {
+					got = append(got, l.TargetID)
+				}
+				if len(got) != len(c.wantIDs) {
+					t.Fatalf("iter %d: got IDs %v, want %v", i, got, c.wantIDs)
+				}
+				for j := range got {
+					if got[j] != c.wantIDs[j] {
+						t.Fatalf("iter %d: got IDs %v, want %v", i, got, c.wantIDs)
+					}
+				}
+			}
+		})
+	}
+}
+
 // --- parseLinks Format-Tag Tests (S25 drift-counter) ---.
 
 func TestParseLinks_FormatTag(t *testing.T) {
@@ -380,6 +496,8 @@ func TestParseLinks_FormatTag(t *testing.T) {
 		{"fenced-array", "```json\n[{\"target_id\":\"a\",\"type\":\"factual\",\"confidence\":0.9}]\n```", "fenced-array"},
 		{"object", `{"a":{"type":"topical","confidence":0.9}}`, "object"},
 		{"fenced-object", "```\n{\"a\":{\"type\":\"causal\",\"confidence\":\"high\"}}\n```", "fenced-object"},
+		{"wrapped", `{"relationships":[{"target_id":"a","type":"factual","confidence":0.9}]}`, "wrapped"},
+		{"fenced-wrapped", "```json\n{\"relationships\":[{\"target_id\":\"a\",\"type\":\"factual\",\"confidence\":0.9}]}\n```", "fenced-wrapped"},
 		{"empty-array", "[]", ""},
 		{"empty-object", "{}", ""},
 		{"empty-string", "", ""},

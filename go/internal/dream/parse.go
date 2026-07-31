@@ -11,16 +11,19 @@ import (
 // to track LLM drift patterns over time. Empty string means "no parseable shape"
 // (parse error or empty/sentinel input — distinguishable via the returned error).
 const (
-	formatArray        = "array"
-	formatObject       = "object"
-	formatFencedArray  = "fenced-array"
-	formatFencedObject = "fenced-object"
+	formatArray         = "array"
+	formatObject        = "object"
+	formatFencedArray   = "fenced-array"
+	formatFencedObject  = "fenced-object"
+	formatWrapped       = "wrapped"
+	formatFencedWrapped = "fenced-wrapped"
 )
 
 // parseLinks parses the LLM JSON response into Link structs.
-// Tolerates two qwen3.6:27b drift patterns observed in V3 production
-// (audit S25, 2026-05-03):
-//   - Object-map form: {"<uuid>": {"type": "...", "confidence": <float|string>}, ...}
+// Tolerates the drift patterns observed in production:
+//   - Named-wrapper form (cloud relays, PR #11 review): {"<key>": [ <links> ], ...}
+//   - Single flat object form (Welle 49): {"target_id": "...", "type": ..., ...}
+//   - Object-map form (audit S25, 2026-05-03): {"<uuid>": {"type": "...", "confidence": <float|string>}, ...}
 //   - String-encoded confidence labels: "high"|"medium"|"low" → 0.9/0.6/0.3
 //
 // Strips a leading ```json fence if present (43/1481 historical cases). The fence
@@ -28,9 +31,9 @@ const (
 // in the returned format token.
 //
 // Returns (links, format, err). format is one of formatArray | formatObject |
-// formatFencedArray | formatFencedObject; empty for empty/sentinel inputs and
-// for parse errors. Map→slice conversion sorts by TargetID for deterministic
-// downstream behavior.
+// formatWrapped | formatFencedArray | formatFencedObject | formatFencedWrapped;
+// empty for empty/sentinel inputs and for parse errors. Map→slice conversion
+// sorts by TargetID for deterministic downstream behavior.
 func parseLinks(raw string) ([]Link, string, error) {
 	trimmed := strings.TrimSpace(raw)
 	wasFenced := strings.HasPrefix(trimmed, "```")
@@ -61,31 +64,21 @@ func parseLinks(raw string) ([]Link, string, error) {
 	}
 
 	if strings.HasPrefix(body, "{") {
-		// Drift form 0 (cloud API models): models wrap the requested array
-		// in a named-key object — {"analysis": [...]} (single key) or
-		// {"analysis": "prose...", "relationships": [...]} (multi-key with
-		// reasoning). Scan all values; the first array is the link list.
-		var wrapper map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(body), &wrapper); err == nil && len(wrapper) > 0 {
-			for _, v := range wrapper {
-				trimmed := strings.TrimSpace(string(v))
-				if strings.HasPrefix(trimmed, "[") {
-					if links, _, innerErr := parseLinks(trimmed); innerErr == nil {
-						if wasFenced {
-							return links, formatFencedObject, nil
-						}
-						return links, formatObject, nil
-					}
-				}
+		// Drift form 0 (cloud relays, PR #11 review) — see parseWrappedLinks.
+		if links, ok := parseWrappedLinks(body); ok {
+			if wasFenced {
+				return links, formatFencedWrapped, nil
 			}
+			return links, formatWrapped, nil
 		}
 
 		// Drift form 1 (Welle-49, qwen3.6:27b via OpenRouter): single flat
 		// object with top-level target_id/type/confidence fields. LLM emits
 		// this when there's exactly one link instead of wrapping it in an
-		// array. Try this first because format-detection by the wrapper-map
-		// path (next block) would mis-interpret `target_id`/`type`/`confidence`
-		// as map-keys pointing at nested structs.
+		// array. Tried before the wrapper-map path below, which would
+		// mis-interpret `target_id`/`type`/`confidence` as map-keys pointing
+		// at nested structs. The wrapper branch above defers to it by key
+		// signature for the same reason.
 		var single struct {
 			TargetID   string          `json:"target_id"`
 			Type       string          `json:"type"`
@@ -127,6 +120,55 @@ func parseLinks(raw string) ([]Link, string, error) {
 	}
 
 	return nil, "", fmt.Errorf("parse links: %w", arrErr)
+}
+
+// parseWrappedLinks handles drift form 0 (cloud relays via response_format
+// json_object, PR #11 review): the OpenAI-style object constraint contradicts
+// the prompt's "output a JSON array", and models resolve the conflict by
+// wrapping the array under a named key — {"analysis": [...]} (single key) or
+// {"reasoning": "prose...", "relationships": [...]} (array plus commentary
+// fields). Returns ok=false when body is not such a wrapper, leaving the
+// caller on its remaining drift forms. Three hard constraints, each from an
+// empirical finding of the PR #11 review:
+//
+//  1. A top-level `target_id` key means this is drift form 1 (flat single
+//     link), whose side arrays (e.g. "evidence") would otherwise be stolen as
+//     the link list — 30/30 probes lost the link. Decline outright.
+//  2. Keys are scanned in sorted order. Go map iteration is randomised, so an
+//     unsorted scan picked a different array per run when several were present
+//     (25/30 vs 5/30) — the same reason drift form 2 pins its key order.
+//  3. A candidate array only counts when it yields at least one link. An empty
+//     or link-less array (a `"warnings": []` sibling was the observed case,
+//     28/30 probes returning 0 links) must NOT terminate the scan: reporting
+//     success with no links reads downstream as "nothing to link" and books a
+//     multi-day dream cooldown on the block, instead of the transient error
+//     retry the situation deserves. If no array yields links we decline, and
+//     the caller ultimately reaches its hard parse error.
+func parseWrappedLinks(body string) ([]Link, bool) {
+	var wrapper map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &wrapper); err != nil || len(wrapper) == 0 {
+		return nil, false
+	}
+	if _, isFlatSingle := wrapper["target_id"]; isFlatSingle {
+		return nil, false
+	}
+	keys := make([]string, 0, len(wrapper))
+	for k := range wrapper {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		val := strings.TrimSpace(string(wrapper[k]))
+		if !strings.HasPrefix(val, "[") {
+			continue
+		}
+		links, _, err := parseLinks(val)
+		if err != nil || len(links) == 0 {
+			continue
+		}
+		return links, true
+	}
+	return nil, false
 }
 
 // stripCodeFence removes a leading ```json (or ```) fence and trailing ```
