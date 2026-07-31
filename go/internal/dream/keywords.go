@@ -38,7 +38,7 @@ Rules:
 1. Output ONLY a JSON array of strings. No explanation, no markdown.
 2. Return 5 to 8 concepts. Not more, not fewer.
 3. Each concept is 1 to 4 words. No full sentences.
-4. Prefer the dominant language of the block (usually German or English, follow the content).
+4. Prefer the dominant language of the block (follow the content).
 5. Concepts, not syntax: "MCP server" not "mcp.NewServer(".
 6. No stopwords, no generic fillers ("system", "data", "thing"). Be specific.
 7. Prefer proper nouns, technical terms, domain vocabulary, named entities.

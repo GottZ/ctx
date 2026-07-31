@@ -186,6 +186,9 @@ type DreamConfig struct {
 	// restart) are background-pipeline infrastructure — global-only.
 	IdleWait    time.Duration `key:"dream.idle_wait" env:"CTX_DREAM_IDLE_WAIT" default:"20" mut:"hot" tenancy:"global-only"`
 	Parallelism int           `key:"dream.parallelism" env:"CTX_DREAM_PARALLELISM" default:"1" mut:"restart" tenancy:"global-only"`
+	// Language selects the daily-synthesis report language: "en" (default),
+	// "de" (legacy), or any BCP-47 tag the LLM understands. Hot-swappable.
+	Language string `key:"dream.language" env:"CTX_DREAM_LANGUAGE" default:"en" mut:"hot" tenancy:"global-only"`
 
 	Backoff BackoffConfig
 }

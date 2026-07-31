@@ -21,6 +21,10 @@ type SynthesizeHandler struct {
 	pool        *pgxpool.Pool
 	backendPool *backends.Pool
 	blocktypes  *blocktype.Registry
+	// Language is the daily-synthesis report language from
+	// config Dream.Language ("en", "de", or any BCP-47 tag).
+	// Empty defaults to "en".
+	language string
 	// admitter is the dispatch admission layer (MW3, I-D1): the API path
 	// classifies interactive — valid ONLY together with the dailyInflight
 	// brake below (E-U2 coupling, design/01 §4.6 N8a).
@@ -45,11 +49,12 @@ type SynthesizeHandler struct {
 // signature break and become a permanent Chain() bypass (gaming toggle and
 // trust gate dead on this path — design 03 P4 step). admitter is the ONE
 // process-wide dispatch admission layer (MW3).
-func NewSynthesizeHandler(pool *pgxpool.Pool, backendPool *backends.Pool, blocktypes *blocktype.Registry, admitter dispatch.Admitter) *SynthesizeHandler {
+func NewSynthesizeHandler(pool *pgxpool.Pool, backendPool *backends.Pool, blocktypes *blocktype.Registry, admitter dispatch.Admitter, language string) *SynthesizeHandler {
 	return &SynthesizeHandler{
 		pool:          pool,
 		backendPool:   backendPool,
 		blocktypes:    blocktypes,
+		language:      language,
 		admitter:      admitter,
 		dailyInflight: map[string]struct{}{},
 	}
@@ -148,6 +153,7 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		Report:     llm.PoolReporter(h.backendPool),
 		Admit:      h.dailyAdmission(),
 		Blocktypes: h.blocktypes,
+		Language:   h.language,
 	}
 
 	var blockID string

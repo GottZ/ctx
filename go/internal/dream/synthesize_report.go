@@ -23,12 +23,57 @@ const (
 	// the same Ollama dream model and inherits the same cold-start +
 	// queue-wait constraints (Welle 38c / Welle 42).
 	DailySynthesisTimeout = DreamTimeout
-
-	// dailySynthesisSystemPrompt instructs the LLM to compose a compact German
-	// activity report for the last 24h based on the aggregate statistics
-	// supplied in the user prompt.
-	dailySynthesisSystemPrompt = `Erzeuge einen kompakten Tagesbericht (200-400 Worte) für ein Knowledge-Store-System. Schreibe als Fließtext in Deutsch. Zähle Schwerpunkte der letzten 24h auf, nenne neue Themen, betone Patterns oder Anomalien.`
 )
+
+// dailySynthesisPromptFor returns the system prompt for the given language.
+// "de" preserves the legacy German prompt; "en" (default) and any other
+// BCP-47 tag produce a language-appropriate instruction.
+func dailySynthesisPromptFor(lang string) string {
+	switch strings.ToLower(strings.TrimSpace(lang)) {
+	case "de":
+		return `Erzeuge einen kompakten Tagesbericht (200-400 Worte) für ein Knowledge-Store-System. Schreibe als Fließtext in Deutsch. Zähle Schwerpunkte der letzten 24h auf, nenne neue Themen, betone Patterns oder Anomalien.`
+	default: // "en", "tr", or any BCP-47 tag
+		return `Generate a compact daily report (200-400 words) for a knowledge-store system. Write as continuous prose in ` + langName(lang) + `. List the main focus areas of the last 24 hours, name new topics, and highlight patterns or anomalies.`
+	}
+}
+
+// dailyReportTitleFor returns the block title for the given language.
+func dailyReportTitleFor(lang, date string) string {
+	switch strings.ToLower(strings.TrimSpace(lang)) {
+	case "de":
+		return "Tagesbericht " + date
+	default:
+		return "Daily Report " + date
+	}
+}
+
+// langName maps common BCP-47 tags to English language names for the
+// prompt; unknown tags are passed through as-is (the LLM understands
+// most language names).
+func langName(lang string) string {
+	switch strings.ToLower(strings.TrimSpace(lang)) {
+	case "", "en":
+		return "English"
+	case "de":
+		return "German"
+	case "tr":
+		return "Turkish"
+	case "fr":
+		return "French"
+	case "es":
+		return "Spanish"
+	case "pt":
+		return "Portuguese"
+	case "ru":
+		return "Russian"
+	case "zh":
+		return "Chinese"
+	case "ja":
+		return "Japanese"
+	default:
+		return lang
+	}
+}
 
 // dailySynthesisOptions are the LLM sampling options for the daily report.
 // Sampling params match DreamOptions (qwen3.6:27b non-thinking tuning), but
@@ -182,10 +227,11 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 
 	userPrompt := buildDailyPrompt(date, decisions, dreamLinks, structLinks, newBlocks, guardQueue)
 
+	sysPrompt := dailySynthesisPromptFor(r.Language)
 	dreamVer := int16(Version)
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-daily-synthesis",
-		RequestSystem: dailySynthesisSystemPrompt,
+		RequestSystem: sysPrompt,
 		RequestUser:   userPrompt,
 		DreamVersion:  &dreamVer,
 	}
@@ -193,7 +239,7 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 
 	start := time.Now()
 	resp, served, attempts, err := r.chat(ctx, backends.RoleDigest, backends.SensInternal,
-		dailySynthesisSystemPrompt, userPrompt, dailySynthesisOptions(), DailySynthesisTimeout)
+		sysPrompt, userPrompt, dailySynthesisOptions(), DailySynthesisTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 	r.applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, served, attempts, err)
@@ -213,8 +259,8 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		return "", fmt.Errorf("dream: synthesize report: empty LLM response")
 	}
 
-	title := "Tagesbericht " + date
-	tags := []string{"synthesis", "tagesbericht", "auto"}
+	title := dailyReportTitleFor(r.Language, date)
+	tags := []string{"synthesis", "daily-report", "auto"}
 	metadata := map[string]any{
 		"source":       "dream-synthesis",
 		"generated_at": time.Now().UTC().Format(time.RFC3339),

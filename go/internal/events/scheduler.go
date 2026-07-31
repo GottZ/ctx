@@ -569,6 +569,7 @@ func (s *Scheduler) newRouter(cfg *config.Config, tenant string) *dream.Router {
 		Report:     llm.PoolReporter(s.backendPool),
 		Admit:      s.backgroundAdmission(), // MW3: dream + 03:00 daily are background (N1/N8a)
 		Blocktypes: s.blocktypes,
+		Language:   cfg.Dream.Language,
 	}
 }
 

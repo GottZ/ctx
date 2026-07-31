@@ -81,7 +81,7 @@ func TestQueryAdmissionBindsInteractive(t *testing.T) {
 // acquireDaily brake. Principal: ctx-derived, see TestRequestPrincipal.
 func TestDailyAdmissionBindsInteractive(t *testing.T) {
 	rec := newHandlerRecordingAdmitter(t)
-	h := NewSynthesizeHandler(nil, nil, nil, rec)
+	h := NewSynthesizeHandler(nil, nil, nil, rec, "")
 	adm := h.dailyAdmission()
 	if adm.Class != dispatch.ClassInteractive {
 		t.Fatalf("daily API class = %v, want interactive", adm.Class)
@@ -107,7 +107,7 @@ func TestRequestPrincipal(t *testing.T) {
 // TestDailyDeckelPerPrincipal pins the E-U2 brake semantics: cap 1 per
 // ApiKeyID, foreign keys unaffected, release frees the slot.
 func TestDailyDeckelPerPrincipal(t *testing.T) {
-	h := NewSynthesizeHandler(nil, nil, nil, nil)
+	h := NewSynthesizeHandler(nil, nil, nil, nil, "")
 	if !h.acquireDaily("key-a") {
 		t.Fatal("first acquire of key-a must pass")
 	}
@@ -129,7 +129,7 @@ func TestDailyDeckelPerPrincipal(t *testing.T) {
 // reached GenerateDailyReport would nil-panic) and the untouched admitter.
 func TestHandleDailySecondConcurrentCall429(t *testing.T) {
 	rec := newHandlerRecordingAdmitter(t)
-	h := NewSynthesizeHandler(nil, nil, nil, rec)
+	h := NewSynthesizeHandler(nil, nil, nil, rec, "")
 
 	// Call 1 in flight: hold the key's slot exactly as HandleDaily would.
 	if !h.acquireDaily("key-1") {

@@ -48,6 +48,10 @@ type Router struct {
 	// set. Set by scheduler.newRouter and the synthesize handler; nil in tests
 	// without classify/retrieval wiring.
 	Blocktypes *blocktype.Registry
+	// Language is the daily-synthesis report language from
+	// config Dream.Language ("en", "de", or any BCP-47 tag).
+	// Empty defaults to "en".
+	Language string
 }
 
 // TypeSet resolves the tenant's block-type policy set for this router's
