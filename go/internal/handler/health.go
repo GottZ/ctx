@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -224,7 +227,7 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string) st
 			continue
 		}
 		candidates++
-		if err := pingHost(ctx, b.Host); err != nil {
+		if err := pingBackend(ctx, b); err != nil {
 			slog.Warn("health check: backend ping failed", "backend", b.Name, "role", role, "error", err)
 			continue
 		}
@@ -236,13 +239,50 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string) st
 	return "error"
 }
 
-func pingHost(ctx context.Context, host string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, host, nil) //nolint:gosec // G704: host is a context_backends pool row (admin-gated, locality-validated), not free user input — same false positive as the Do() below. The G34 SSE path (HandleEvents → Snapshot(r.Context()) → HealthStatus → pingHost) lets gosec's taint analysis reach this line too.
+// pingBackend probes a backend through two strategies, requiring HTTP 200:
+//
+//	Phase 1: GET {host}           → 200 for local servers (llama.cpp, Ollama)
+//	Phase 2: GET {host}/v1/models → 200 for OpenAI-compatible cloud APIs
+//
+// Both phases send the backend's configured auth headers. Only HTTP 200
+// counts as reachable.
+func pingBackend(ctx context.Context, b *backends.Backend) error {
+	// Phase 1: GET base URL (local llama.cpp / Ollama servers).
+	if err := doPing(ctx, b, http.MethodGet, b.Host, nil); err == nil {
+		return nil
+	}
+
+	// Phase 2: GET /v1/models (OpenAI-compatible cloud APIs).
+	modelsURL := strings.TrimRight(b.Host, "/") + "/v1/models"
+	if err := doPing(ctx, b, http.MethodGet, modelsURL, nil); err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("no health endpoint returned 200 for %s", b.Host)
+}
+
+// doPing sends a single HTTP request with the backend's auth headers and
+// returns nil only on HTTP 200.
+func doPing(ctx context.Context, b *backends.Backend, method, url string, body []byte) error {
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader) //nolint:gosec // G704: pool row, admin-gated.
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
+	for k, v := range b.ExtraHeaders {
+		req.Header.Set(k, v)
+	}
+	if b.APIKey != "" && req.Header.Get("Authorization") == "" {
+		req.Header.Set("Authorization", "Bearer "+b.APIKey)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: pool rows are admin-gated runtime data (locality-validated)
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: pool rows are admin-gated runtime data.
 	if err != nil {
 		return fmt.Errorf("connecting to host: %w", err)
 	}
@@ -255,6 +295,5 @@ func pingHost(ctx context.Context, host string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
-
 	return nil
 }
