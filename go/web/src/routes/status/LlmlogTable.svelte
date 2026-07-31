@@ -55,10 +55,12 @@
     }
   }
   // The human-readable reason a body is absent (sealed = credentials-class row,
-  // never stored; evicted = retention NULLed it / bodyless rejection line).
+  // never stored; evicted = retention removed once-stored bodies; bodyless =
+  // this pipeline never records prompt/reply — llmlog W1 split).
   function bodyStateReason(state: string): string {
     if (state === 'sealed') return 'sealed — credentials-class call, prompt/reply never stored'
-    if (state === 'evicted') return 'evicted — bodies removed by retention (or none recorded)'
+    if (state === 'evicted') return 'evicted — bodies removed by retention'
+    if (state === 'bodyless') return 'bodyless — this pipeline never records prompt/reply (embed, translate, rejection lines)'
     return ''
   }
 

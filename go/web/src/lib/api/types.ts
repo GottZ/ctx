@@ -498,10 +498,12 @@ export interface LLMLogResponse {
 }
 
 // The reason a detail body is absent (llmlog.go bodyPresent/bodySealed/
-// bodyEvicted): 'present' = bodies returned; 'sealed' = credentials-class row,
-// bodies never stored (E4 no-shadow-corpus); 'evicted' = retention NULLed them
-// (or a bodyless rejection line). The UI shows WHY rather than a blank card.
-export type LLMLogBodyState = 'present' | 'sealed' | 'evicted'
+// bodyEvicted/bodyBodyless): 'present' = bodies returned; 'sealed' =
+// credentials-class row, bodies never stored (E4 no-shadow-corpus); 'evicted' =
+// retention NULLed once-stored bodies (llmlog.EvictBodies); 'bodyless' = the
+// pipeline never records a wire body (embed/translate/backfill, rejection
+// lines) — nothing was removed (llmlog W1). The UI shows WHY, not a blank card.
+export type LLMLogBodyState = 'present' | 'sealed' | 'evicted' | 'bodyless'
 
 // Source: go/internal/handler/llmlog.go (llmlogDetail),
 // pinned by TestLLMLogDetailGoldenKeys. The ONLY llmlog shape that MAY carry the

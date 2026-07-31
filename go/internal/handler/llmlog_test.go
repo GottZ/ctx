@@ -132,8 +132,9 @@ func TestLLMLogDetailGoldenKeys(t *testing.T) {
 }
 
 // TestClassifyBodies pins the body_state decision: credentials ⇒ sealed (bodies
-// dropped), any body ⇒ present (bodies returned), all-empty ⇒ evicted (bodies
-// dropped). A regression that leaked a sealed/evicted body would turn this red.
+// dropped), any body ⇒ present (bodies returned), a NULL column ⇒ evicted
+// (retention's signature), all-empty-not-NULL ⇒ bodyless (never recorded).
+// A regression that leaked a sealed/evicted body would turn this red.
 func TestClassifyBodies(t *testing.T) {
 	s := "sys"
 	u := "user"
@@ -147,8 +148,17 @@ func TestClassifyBodies(t *testing.T) {
 	if state, os, _, _ := classifyBodies("internal", &s, &u, nil); state != bodyPresent || os != &s {
 		t.Fatalf("present: got state=%q os=%v; want present + passthrough", state, os)
 	}
-	// non-credentials, all bodies nil/empty: EVICTED, bodies nil.
+	// non-credentials with a NULL column: EVICTED — only EvictBodies writes
+	// NULL (the insert path stores Go strings), so nil proves retention ran.
 	if state, os, ou, or := classifyBodies("internal", nil, &empty, nil); state != bodyEvicted || os != nil || ou != nil || or != nil {
 		t.Fatalf("evicted: got state=%q os=%v ou=%v or=%v; want evicted + all nil", state, os, ou, or)
+	}
+	if state, _, _, _ := classifyBodies("internal", nil, nil, nil); state != bodyEvicted {
+		t.Fatalf("all-nil: got state=%q; want evicted", state)
+	}
+	// non-credentials, all bodies EMPTY but none NULL: BODYLESS (llmlog W1) —
+	// the pipeline never recorded a wire body; nothing was removed.
+	if state, os, ou, or := classifyBodies("internal", &empty, &empty, &empty); state != bodyBodyless || os != nil || ou != nil || or != nil {
+		t.Fatalf("bodyless: got state=%q os=%v ou=%v or=%v; want bodyless + all nil", state, os, ou, or)
 	}
 }

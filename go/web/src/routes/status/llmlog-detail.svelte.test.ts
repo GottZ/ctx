@@ -156,4 +156,17 @@ describe('LlmlogDetailModel — error + absent-body states', () => {
     expect(m.detail?.body_state).toBe('sealed')
     expect(m.detail?.request_user).toBeNull()
   })
+
+  it('a bodyless row (pipeline never records bodies, llmlog W1) is ready with its own state', async () => {
+    const api: LlmlogDetailApi = {
+      fetchDetail: vi.fn(async () =>
+        ok(detail({ body_state: 'bodyless', request_system: null, request_user: null, response_content: null })),
+      ),
+    }
+    const m = new LlmlogDetailModel(api)
+    await m.open('x')
+    expect(m.status).toBe('ready')
+    expect(m.detail?.body_state).toBe('bodyless')
+    expect(m.detail?.response_content).toBeNull()
+  })
 })

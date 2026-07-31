@@ -164,10 +164,18 @@ const (
 	// (Entry.Slimmed at write time, E4). Not a loss — a deliberate no-shadow-
 	// corpus policy for the hottest tier.
 	bodySealed = "sealed"
-	// bodyEvicted — a non-credentials row whose bodies are all NULL: retention
-	// NULLed them (llmlog.EvictBodies) or the row never carried a wire body (a
-	// K9 rejection line). Either way there is nothing to show.
+	// bodyEvicted — a non-credentials row with a NULL body column: only
+	// llmlog.EvictBodies writes NULL (the insert path stores Go strings, so an
+	// unrecorded body lands as ''), so NULL is proof that retention removed
+	// bodies that once existed.
 	bodyEvicted = "evicted"
+	// bodyBodyless — a non-credentials row whose bodies are all EMPTY ('' —
+	// never NULL): the pipeline never records a wire body (embed, translate,
+	// backfill, K9 rejection lines). Nothing was removed; there was never
+	// anything to show. Split from bodyEvicted (llmlog W1): with retention
+	// disabled the live corpus carried thousands of these rows, and labeling
+	// them "evicted" claimed a loss that never happened.
+	bodyBodyless = "bodyless"
 )
 
 // llmlogDetail is the STRICTLY GATED per-id body view (D1b, design/05 §4.5 /
@@ -264,10 +272,12 @@ func (h *LLMLogHandler) HandleLLMLogDetail(w http.ResponseWriter, r *http.Reques
 
 // classifyBodies decides the body_state and which bodies to return. A
 // credentials-class row is SEALED (bodies never stored — Entry.Slimmed, E4);
-// otherwise a row with any non-empty body is PRESENT and returns them, and a row
-// with all-empty bodies is EVICTED (retention NULLed them or it was a bodyless
-// rejection line). Returning nil pointers for a non-present row keeps the wire
-// bodies null, never "".
+// otherwise a row with any non-empty body is PRESENT and returns them. For the
+// rest, NULL vs '' is the discriminator (llmlog W1): the insert path stores Go
+// strings and therefore never writes NULL, so a nil column is EvictBodies'
+// signature — EVICTED. All-empty-but-not-nil means the pipeline never recorded
+// a wire body — BODYLESS. Returning nil pointers for a non-present row keeps
+// the wire bodies null, never "".
 func classifyBodies(sensitivity string, sys, user, resp *string) (state string, outSys, outUser, outResp *string) {
 	if sensitivity == "credentials" {
 		return bodySealed, nil, nil, nil
@@ -275,7 +285,10 @@ func classifyBodies(sensitivity string, sys, user, resp *string) (state string, 
 	if nonEmpty(sys) || nonEmpty(user) || nonEmpty(resp) {
 		return bodyPresent, sys, user, resp
 	}
-	return bodyEvicted, nil, nil, nil
+	if sys == nil || user == nil || resp == nil {
+		return bodyEvicted, nil, nil, nil
+	}
+	return bodyBodyless, nil, nil, nil
 }
 
 // nonEmpty reports whether a *string carries actual content (non-nil, non-"").
