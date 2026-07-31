@@ -64,7 +64,7 @@ func TestHandleDailyRejection429WithRetryAfter(t *testing.T) {
 	}})
 
 	adm := rejectHintAdmitter{origin: origin, hint: 7 * time.Second}
-	h := NewSynthesizeHandler(pool, bpool, blocktype.NewRegistry(), adm, "")
+	h := NewSynthesizeHandler(pool, bpool, blocktype.NewRegistry(), adm, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/synthesize/daily", nil)
 	req = req.WithContext(context.WithValue(req.Context(), authResultKey, &auth.AuthResult{

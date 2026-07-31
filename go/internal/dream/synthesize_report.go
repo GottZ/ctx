@@ -23,39 +23,91 @@ const (
 	// the same Ollama dream model and inherits the same cold-start +
 	// queue-wait constraints (Welle 38c / Welle 42).
 	DailySynthesisTimeout = DreamTimeout
+
+	// dailySynthesisSystemPrompt is the LEGACY (empty / "de") system prompt:
+	// a compact German activity report for the last 24h over the aggregate
+	// statistics of the user prompt. Byte-frozen — every deployment that has
+	// not set dream.language keeps generating exactly this.
+	dailySynthesisSystemPrompt = `Erzeuge einen kompakten Tagesbericht (200-400 Worte) für ein Knowledge-Store-System. Schreibe als Fließtext in Deutsch. Zähle Schwerpunkte der letzten 24h auf, nenne neue Themen, betone Patterns oder Anomalien.`
+
+	// legacyReportTitlePrefix / legacyReportTag are the German report's
+	// identity. The title is HALF THE UPSERT KEY ((category, title, scope),
+	// store.UpsertBlock) — changing it does not rename anything, it starts a
+	// SECOND series next to the existing one and makes every backfill of an
+	// old day a duplicate. Hence the empty default in config: no existing
+	// deployment moves off these two strings unless an operator says so.
+	legacyReportTitlePrefix = "Tagesbericht "
+	legacyReportTag         = "tagesbericht"
 )
 
-// dailySynthesisPromptFor returns the system prompt for the given language.
-// "de" preserves the legacy German prompt; "en" (default) and any other
-// BCP-47 tag produce a language-appropriate instruction.
-func dailySynthesisPromptFor(lang string) string {
-	switch strings.ToLower(strings.TrimSpace(lang)) {
-	case "de":
-		return `Erzeuge einen kompakten Tagesbericht (200-400 Worte) für ein Knowledge-Store-System. Schreibe als Fließtext in Deutsch. Zähle Schwerpunkte der letzten 24h auf, nenne neue Themen, betone Patterns oder Anomalien.`
-	default: // "en", "tr", or any BCP-47 tag
-		return `Generate a compact daily report (200-400 words) for a knowledge-store system. Write as continuous prose in ` + langName(lang) + `. List the main focus areas of the last 24 hours, name new topics, and highlight patterns or anomalies.`
+// reportLanguage normalizes a dream.language value to its PRIMARY SUBTAG:
+// trim + lower, then everything before the first "-" ("de-DE" → "de"). The
+// primary subtag is what the report surface switches on — a regional variant
+// must not silently fall out of its language's branch. config.Validate (V14)
+// already normalizes and shape-checks the stored value; doing it again here
+// keeps the dream package parameter-pure and total for direct callers
+// (scheduler, handler, tests).
+func reportLanguage(lang string) string {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if i := strings.IndexByte(lang, '-'); i >= 0 {
+		lang = lang[:i]
 	}
+	return lang
 }
 
-// dailyReportTitleFor returns the block title for the given language.
-func dailyReportTitleFor(lang, date string) string {
-	switch strings.ToLower(strings.TrimSpace(lang)) {
-	case "de":
-		return "Tagesbericht " + date
+// isLegacyReportLanguage reports whether lang keeps the pre-config German
+// report surface: unset (the default) or a German tag. This ONE predicate
+// gates title, tag and system prompt together — they are one identity, and a
+// half-localized report (English title, German body) would be worse than
+// either side alone.
+func isLegacyReportLanguage(lang string) bool {
+	switch reportLanguage(lang) {
+	case "", "de":
+		return true
 	default:
-		return "Daily Report " + date
+		return false
 	}
 }
 
-// langName maps common BCP-47 tags to English language names for the
-// prompt; unknown tags are passed through as-is (the LLM understands
-// most language names).
-func langName(lang string) string {
-	switch strings.ToLower(strings.TrimSpace(lang)) {
-	case "", "en":
+// dailySynthesisPromptFor returns the system prompt for the configured
+// language: the byte-frozen German legacy prompt for ""/"de*", else an
+// English instruction naming the target language.
+func dailySynthesisPromptFor(lang string) string {
+	if isLegacyReportLanguage(lang) {
+		return dailySynthesisSystemPrompt
+	}
+	return `Generate a compact daily report (200-400 words) for a knowledge-store system. Write as continuous prose in ` + langName(reportLanguage(lang)) + `. List the main focus areas of the last 24 hours, name new topics, and highlight patterns or anomalies.`
+}
+
+// dailyReportTitleFor returns the block title — half the upsert key, see
+// legacyReportTitlePrefix.
+func dailyReportTitleFor(lang, date string) string {
+	if isLegacyReportLanguage(lang) {
+		return legacyReportTitlePrefix + date
+	}
+	return "Daily Report " + date
+}
+
+// dailyReportTags returns the report's tag set. The language-dependent slot
+// travels WITH the title: a de-tagged report keeps "tagesbericht" so existing
+// tag queries and dashboards keep matching the series they were written for.
+func dailyReportTags(lang string) []string {
+	if isLegacyReportLanguage(lang) {
+		return []string{"synthesis", legacyReportTag, "auto"}
+	}
+	return []string{"synthesis", "daily-report", "auto"}
+}
+
+// langName maps a language's PRIMARY SUBTAG to the English language name
+// interpolated into the system prompt. Callers pass reportLanguage(...) of a
+// NON-legacy tag, so ""/"de" never arrive here (they take the frozen German
+// prompt) — no case for them. Unknown tags pass through as-is: the LLM knows
+// far more language codes than this table, and V14 has already constrained
+// the value to [a-z0-9-], so the passthrough carries no free text.
+func langName(primary string) string {
+	switch primary {
+	case "en":
 		return "English"
-	case "de":
-		return "German"
 	case "tr":
 		return "Turkish"
 	case "fr":
@@ -71,13 +123,13 @@ func langName(lang string) string {
 	case "ja":
 		return "Japanese"
 	default:
-		return lang
+		return primary
 	}
 }
 
 // dailySynthesisOptions are the LLM sampling options for the daily report.
 // Sampling params match DreamOptions (qwen3.6:27b non-thinking tuning), but
-// deliberately WITHOUT NumPredict: the prompt requests 200-400 German words
+// deliberately WITHOUT NumPredict: the prompt requests a 200-400 word report
 // (~600-900 tokens) and the model terminates via EOS — the shared 400-token
 // dream-eval cap truncated every report mid-sentence for 66 days (all
 // dream-daily-synthesis llm_log rows at exactly completion_tokens=400).
@@ -145,12 +197,13 @@ type dailyNewBlock struct {
 
 // dailySynthesisHourUTC mirrors the scheduler's dailySynthesisHour (events
 // package, local clock — the container runs UTC): the hour at which the 03:00
-// iteration generates "Tagesbericht <today>" over the previous 24h. Backfill
-// windows reproduce exactly that shape.
+// iteration generates the report titled <today> over the previous 24h.
+// Backfill windows reproduce exactly that shape.
 const dailySynthesisHourUTC = 3
 
 // GenerateDailyReport queries the last-24h activity (decisions, dream-links,
-// fresh blocks), asks the LLM for a free-text German summary, and persists
+// fresh blocks), asks the LLM for a free-text summary in the router's report
+// language (Router.Language; empty = the legacy German report), and persists
 // the result as a synthesis/audit-trail block. Returns the new block_id, or
 // an empty string + nil error when there was zero activity to report.
 // The chain resolves for role digest at CONSTANT internal (E6): the prompt
@@ -166,7 +219,7 @@ func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, sco
 
 // GenerateDailyReportFor re-synthesizes the report titled day (backfill): the
 // window is [day-1 03:00 UTC, day 03:00 UTC) — exactly what the 03:00
-// scheduler covered when it generated "Tagesbericht <day>". The upsert key
+// scheduler covered when it generated the report for <day>. The upsert key
 // (category, title, scope) replaces an existing report in place: same block
 // id, inbound edges survive, the embedding regenerates from the new content.
 func GenerateDailyReportFor(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string, day time.Time) (string, error) {
@@ -179,9 +232,10 @@ func GenerateDailyReportFor(ctx context.Context, pool *pgxpool.Pool, r *Router, 
 }
 
 // generateDailyReportWindow is the shared core: aggregate the [from, to)
-// activity, synthesize, upsert "Tagesbericht <date>" and anchor its source
-// edges. date is the title/prompt day (not derived from the window bounds —
-// the rolling path's window ends now, the backfill path's at 03:00).
+// activity, synthesize, upsert the report titled <date> (see
+// dailyReportTitleFor) and anchor its source edges. date is the title/prompt
+// day (not derived from the window bounds — the rolling path's window ends
+// now, the backfill path's at 03:00).
 // includeGuardQueue gates the guard review-queue STAND section (live path
 // only — see GenerateDailyReportFor).
 func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string, from, to time.Time, date string, includeGuardQueue bool) (string, error) {
@@ -260,7 +314,7 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 	}
 
 	title := dailyReportTitleFor(r.Language, date)
-	tags := []string{"synthesis", "daily-report", "auto"}
+	tags := dailyReportTags(r.Language)
 	metadata := map[string]any{
 		"source":       "dream-synthesis",
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
@@ -533,6 +587,13 @@ func fetchDailyGuardReview(ctx context.Context, pool *pgxpool.Pool, scope string
 // buildDailyPrompt assembles the structured user-prompt block fed to the LLM.
 // Sections are omitted when their slice is empty (guard: nil) so the prompt
 // does not suggest that the missing axis was zero by mistake.
+//
+// The data-section labels ("Datum:", "Neue Blocks 24h:", …) stay GERMAN in
+// every language — deliberate. They are stable structural markers of the data
+// frame, not report text: the system prompt sets the OUTPUT language and the
+// LLM translates the content it reads. Localizing the labels would move a
+// frozen prompt surface (and its 66-day-tuned behavior) for zero gain, and
+// make the German↔English prompt pair diff-noisy for no functional reason.
 func buildDailyPrompt(date string, decisions []dailyDecisionStat, dreamLinks []dailyDreamLinkStat, structLinks []dailyStructuralLinkStat, newBlocks []dailyNewBlock, guardQueue *dailyGuardStat) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Datum: %s\n", date)

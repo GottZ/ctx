@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -21,10 +22,14 @@ type SynthesizeHandler struct {
 	pool        *pgxpool.Pool
 	backendPool *backends.Pool
 	blocktypes  *blocktype.Registry
-	// Language is the daily-synthesis report language from
-	// config Dream.Language ("en", "de", or any BCP-47 tag).
-	// Empty defaults to "en".
-	language string
+	// cfg is the snapshot source for request-scoped configuration — the
+	// handler holds NO config VALUES (F1-W4 pattern, same as QueryHandler):
+	// a captured boot value would make every mut:"hot" dream key a lie on
+	// this path, and reading config.Store.Snapshot() here instead of
+	// SnapshotForRequest(ctx) would serve the _global generation to a tenant
+	// request (MT 06-C5, the forbidigo gate). May be nil in unit tests that
+	// wire no config at all — see reportLanguage.
+	cfg ConfigStore
 	// admitter is the dispatch admission layer (MW3, I-D1): the API path
 	// classifies interactive — valid ONLY together with the dailyInflight
 	// brake below (E-U2 coupling, design/01 §4.6 N8a).
@@ -48,16 +53,31 @@ type SynthesizeHandler struct {
 // pool wiring the handler would re-attach to an env tuple on the next
 // signature break and become a permanent Chain() bypass (gaming toggle and
 // trust gate dead on this path — design 03 P4 step). admitter is the ONE
-// process-wide dispatch admission layer (MW3).
-func NewSynthesizeHandler(pool *pgxpool.Pool, backendPool *backends.Pool, blocktypes *blocktype.Registry, admitter dispatch.Admitter, language string) *SynthesizeHandler {
+// process-wide dispatch admission layer (MW3). cfg is the config STORE, not a
+// snapshot: the daily report's language is a hot key and must be read per
+// request (see the cfg field).
+func NewSynthesizeHandler(pool *pgxpool.Pool, backendPool *backends.Pool, blocktypes *blocktype.Registry, admitter dispatch.Admitter, cfg ConfigStore) *SynthesizeHandler {
 	return &SynthesizeHandler{
 		pool:          pool,
 		backendPool:   backendPool,
 		blocktypes:    blocktypes,
-		language:      language,
+		cfg:           cfg,
 		admitter:      admitter,
 		dailyInflight: map[string]struct{}{},
 	}
+}
+
+// reportLanguage takes THE one config snapshot of a daily-synthesis request
+// and returns dream.language from it (F1-W4: one snapshot per request; the
+// value is consumed once, when the router is built). An unwired handler (nil
+// store — unit tests that assert admission/brake semantics only) reports the
+// empty legacy language, which is also the registry default: the fallback
+// cannot silently switch a report's identity.
+func (h *SynthesizeHandler) reportLanguage(ctx context.Context) string {
+	if h.cfg == nil {
+		return ""
+	}
+	return h.cfg.SnapshotForRequest(ctx).Dream.Language
 }
 
 // acquireDaily reserves the single daily-synthesis slot of one ApiKeyID;
@@ -91,6 +111,24 @@ func (h *SynthesizeHandler) dailyAdmission() llm.Admission {
 	return llm.Admission{
 		Admitter: h.admitter,
 		Class:    dispatch.ClassInteractive,
+	}
+}
+
+// dailyRouter builds the per-request dream router. Digest needs no scope
+// floor — the role gates at constant internal, block contents never enter the
+// prompt (E6). The API path classifies interactive (a human waits
+// synchronously — E-U2); the 03:00 scheduler path binds background through
+// the same GenerateDailyReport. The report language is read HERE, per
+// request, not captured at wiring time: dream.language is mut:"hot", and the
+// scheduler's newRouter reads it per iteration — the two trigger paths of one
+// pipeline must not disagree about how hot a hot key is.
+func (h *SynthesizeHandler) dailyRouter(ctx context.Context) *dream.Router {
+	return &dream.Router{
+		Pool:       h.backendPool,
+		Report:     llm.PoolReporter(h.backendPool),
+		Admit:      h.dailyAdmission(),
+		Blocktypes: h.blocktypes,
+		Language:   h.reportLanguage(ctx),
 	}
 }
 
@@ -144,17 +182,7 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		day = parsed
 	}
 
-	// Digest needs no scope floor — the role gates at constant internal,
-	// block contents never enter the prompt (E6). The API path classifies
-	// interactive (a human waits synchronously — E-U2); the 03:00 scheduler
-	// path binds background through the same GenerateDailyReport.
-	router := &dream.Router{
-		Pool:       h.backendPool,
-		Report:     llm.PoolReporter(h.backendPool),
-		Admit:      h.dailyAdmission(),
-		Blocktypes: h.blocktypes,
-		Language:   h.language,
-	}
+	router := h.dailyRouter(ctx)
 
 	var blockID string
 	var err error

@@ -188,7 +188,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// role at constant internal (G28/E6) — the same gate as the scheduler's
 	// 03:00 iteration. MW3/E-U2: interactive classification + per-principal
 	// concurrency brake live in the handler.
-	synthH := handler.NewSynthesizeHandler(pool, backendPool, blocktypeReg, dispatcher, cfgStore.Snapshot().Dream.Language)
+	synthH := handler.NewSynthesizeHandler(pool, backendPool, blocktypeReg, dispatcher, cfgStore)
 
 	// Status dashboard (F4-W6/G33): ONE process-wide collector feeds GET
 	// /api/status (and, in W7/G34, SSE) from a cache — N pollers cost one

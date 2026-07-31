@@ -48,9 +48,13 @@ type Router struct {
 	// set. Set by scheduler.newRouter and the synthesize handler; nil in tests
 	// without classify/retrieval wiring.
 	Blocktypes *blocktype.Registry
-	// Language is the daily-synthesis report language from
-	// config Dream.Language ("en", "de", or any BCP-47 tag).
-	// Empty defaults to "en".
+	// Language is the daily-synthesis report language, read from config
+	// Dream.Language by the caller that builds the router (scheduler:
+	// per-iteration; synthesize handler: per-request — so the hot key is
+	// really hot on both paths). EMPTY = the legacy German report; any other
+	// BCP-47-style tag localizes title, tag and system prompt together (see
+	// dream/synthesize_report.go). Only the daily-synthesis path reads it;
+	// the per-block dream pipeline is language-agnostic.
 	Language string
 }
 

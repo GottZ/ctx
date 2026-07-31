@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -16,7 +17,19 @@ const (
 	promptVersionV6  = "v6"
 )
 
-// Validate checks the cross-field invariants V1–V13 and returns all findings.
+// V14 shape gate for dream.language (validateDream). The tag is the ONLY
+// config value that reaches an LLM system prompt verbatim, so the accepted
+// alphabet is deliberately narrower than full BCP-47: primary subtag +
+// optional alphanumeric subtags, nothing else — no spaces, no quotes, no
+// newlines, no non-ASCII. The length cap bounds the interpolation.
+const (
+	dreamLanguagePattern = `^[a-z]{2,3}(-[a-z0-9]{2,8})*$`
+	dreamLanguageMaxLen  = 35
+)
+
+var dreamLanguageRe = regexp.MustCompile(dreamLanguagePattern)
+
+// Validate checks the cross-field invariants V1–V14 and returns all findings.
 // WARN classes with "today's silent fallback" semantics (V5 prompt version,
 // V6 back-off, V10 parallelism clamp) NORMALIZE the config in place — exactly
 // what llm's init(), dream.SetBackoffConfig and the scheduler clamp did
@@ -27,7 +40,7 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateBackendTuples(c)...) // V1, V4, V7, V12
 	issues = append(issues, validateQuery(c)...)         // V2, V5, V11
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V8, V9, V13
-	issues = append(issues, validateDream(c)...)         // V6, V10
+	issues = append(issues, validateDream(c)...)         // V6, V10, V14
 	return issues
 }
 
@@ -269,6 +282,26 @@ func validateDream(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "dream.parallelism", Severity: SeverityWarn,
 			Msg: fmt.Sprintf("parallelism %d clamped to 16", c.Dream.Parallelism)})
 		c.Dream.Parallelism = 16
+	}
+
+	// V14 — dream.language shape. The value is INTERPOLATED into the daily
+	// synthesis SYSTEM PROMPT (dream.langName), so free text here is a prompt
+	// injection + prompt-length vector on a background pipeline nobody reads
+	// before it runs. Normalize like every other case-insensitive key (trim +
+	// lower, in place — the V-order normalization pattern above), then hard
+	// ERROR on anything that is not a BCP-47-shaped tag: boot aborts, and a
+	// Settings write is rejected instead of silently reaching the LLM.
+	// Empty stays legal — it is the legacy-behavior default.
+	c.Dream.Language = strings.ToLower(strings.TrimSpace(c.Dream.Language))
+	if lang := c.Dream.Language; lang != "" {
+		switch {
+		case len(lang) > dreamLanguageMaxLen:
+			issues = append(issues, Issue{Field: "dream.language", Severity: SeverityError,
+				Msg: fmt.Sprintf("language %q is %d chars — max %d", lang, len(lang), dreamLanguageMaxLen)})
+		case !dreamLanguageRe.MatchString(lang):
+			issues = append(issues, Issue{Field: "dream.language", Severity: SeverityError,
+				Msg: fmt.Sprintf("language %q must be a BCP-47-style tag (%s), e.g. \"de\", \"en\", \"pt-br\" — empty = legacy German report", lang, dreamLanguagePattern)})
+		}
 	}
 
 	return issues
