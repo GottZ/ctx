@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -217,8 +216,11 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 // roleReachable reports ok when at least one enabled backend of the role
-// answers its base URL. Errors log the backend name to slog ONLY — the
-// response carries the aggregate.
+// answers its base URL. This is a REACHABILITY probe, not a model-availability
+// check: any HTTP response below 500 counts as reachable — cloud API roots
+// answer 404/405 on GET / and auth-gated APIs answer 401/403, all of which
+// prove the host is up and serving (see pingHost). Errors log the backend name
+// to slog ONLY — the response carries the aggregate.
 func roleReachable(ctx context.Context, snap []backends.Backend, role string) string {
 	candidates := 0
 	for i := range snap {
@@ -227,7 +229,7 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string) st
 			continue
 		}
 		candidates++
-		if err := pingBackend(ctx, b); err != nil {
+		if err := pingHost(ctx, b.Host); err != nil {
 			slog.Warn("health check: backend ping failed", "backend", b.Name, "role", role, "error", err)
 			continue
 		}
@@ -239,50 +241,40 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string) st
 	return "error"
 }
 
-// pingBackend probes a backend through two strategies, requiring HTTP 200:
+// pingHost issues ONE credential-free GET against the backend's base URL and
+// decides reachability by status class: every HTTP response below 500 means
+// "the host is up and serving", 5xx and transport failures (DNS, connection
+// refused, timeout) mean unreachable.
 //
-//	Phase 1: GET {host}           → 200 for local servers (llama.cpp, Ollama)
-//	Phase 2: GET {host}/v1/models → 200 for OpenAI-compatible cloud APIs
+// Why < 500 instead of == 200 (PR #9, cloud-API false negative): only local
+// servers (llama.cpp, Ollama) answer 200 on GET /. Cloud inference APIs route
+// nothing at the root and answer 404/405 (Voyage, OpenAI-compatible
+// gateways), and an auth-gated API answers 401/403 to an anonymous probe. All
+// of those are HTTP responses from a live host — treating them as "down"
+// marked every cloud backend permanently unhealthy. /health aggregates
+// reachability only; whether a MODEL is servable is the chain's business, not
+// this probe's.
 //
-// Both phases send the backend's configured auth headers. Only HTTP 200
-// counts as reachable.
-func pingBackend(ctx context.Context, b *backends.Backend) error {
-	// Phase 1: GET base URL (local llama.cpp / Ollama servers).
-	if err := doPing(ctx, b, http.MethodGet, b.Host, nil); err == nil {
-		return nil
-	}
+// Why credential-free: /health is unauthenticated, uncached and public, so
+// every byte this function sends is attacker-triggerable egress. Sending the
+// backend's Authorization/ExtraHeaders here would push real credentials to
+// third-party hosts (and across their redirects) on an anonymous request,
+// bypassing the chain egress gates in backends.Pool (VisibleTo/disabledBy/
+// Trust) that guard genuine inference traffic. An anonymous probe answers the
+// health question without ever putting a secret on the wire — a 401 is proof
+// of life just like a 200. Keep it that way.
+//
+// The returned error carries the cause class ("status 503" vs. the wrapped
+// transport error) because it is the only diagnostic the /health warn log has.
+func pingHost(ctx context.Context, host string) error {
+	url := strings.TrimRight(host, "/")
 
-	// Phase 2: GET /v1/models (OpenAI-compatible cloud APIs).
-	modelsURL := strings.TrimRight(b.Host, "/") + "/v1/models"
-	if err := doPing(ctx, b, http.MethodGet, modelsURL, nil); err == nil {
-		return nil
-	}
-
-	return fmt.Errorf("no health endpoint returned 200 for %s", b.Host)
-}
-
-// doPing sends a single HTTP request with the backend's auth headers and
-// returns nil only on HTTP 200.
-func doPing(ctx context.Context, b *backends.Backend, method, url string, body []byte) error {
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader) //nolint:gosec // G704: pool row, admin-gated.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G704: host is a context_backends pool row (admin-gated, locality-validated), not free user input — same false positive as the Do() below. The G34 SSE path (HandleEvents → Snapshot(r.Context()) → HealthStatus → roleReachable → pingHost) lets gosec's taint analysis reach this line too. Since the probe carries no credentials, an SSRF through a poisoned pool row cannot exfiltrate a backend secret either.
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
-	for k, v := range b.ExtraHeaders {
-		req.Header.Set(k, v)
-	}
-	if b.APIKey != "" && req.Header.Get("Authorization") == "" {
-		req.Header.Set("Authorization", "Bearer "+b.APIKey)
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
 
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: pool rows are admin-gated runtime data.
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: pool rows are admin-gated runtime data (locality-validated); the request is credential-free, so nothing sensitive travels this hop or its redirect chain.
 	if err != nil {
 		return fmt.Errorf("connecting to host: %w", err)
 	}
@@ -292,8 +284,14 @@ func doPing(ctx context.Context, b *backends.Backend, method, url string, body [
 		}
 	}()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	// Drain a bounded prefix before Close so the transport can reuse the
+	// connection; an unread body makes it drop the socket. The cap keeps a
+	// chatty/hostile endpoint from streaming into the health path.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return fmt.Errorf("host unhealthy: status %d", resp.StatusCode)
 	}
+
 	return nil
 }

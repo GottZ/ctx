@@ -34,6 +34,17 @@ else's environment — that led to a fix landing in the repository.
   hardcoded `~/.claude/settings.json` that ignored `CLAUDE_CONFIG_DIR`. A/B/A
   probe-script reproduction isolating schema-vs-path, root-cause to the exact
   functions, and a verified fix delivered as a pull request.
+- **TurgutKural** ([@TurgutKural](https://github.com/TurgutKural)) — PR
+  [#9](https://github.com/GottZ/ctx/pull/9): `/health` reported every cloud
+  inference backend as down. The probe demanded HTTP 200 on `GET /`, which only
+  local servers (llama.cpp, Ollama) answer — cloud APIs route nothing at their
+  root and reply 404/405, so a perfectly healthy backend read as unreachable.
+  Diagnosis and a pull request; the shipped fix keeps the reachability
+  semantics he identified (any response below 500) and drops the credentials
+  from the probe. Also PR
+  [#10](https://github.com/GottZ/ctx/pull/10): `dream.language`, a hot-mutable
+  server setting that makes the daily-synthesis report language configurable
+  instead of hardcoded.
 
 ## How to be listed
 
