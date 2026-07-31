@@ -31,15 +31,21 @@ var chatJSON func(ctx context.Context, host, apiKey, model string, think *bool, 
 
 // dreamChatJSON routes one dream LLM call. With the chatJSON test seam
 // installed it forwards the backend's loose tuple there; in production it
-// calls llm.ChatJSON with the full backend, whose Protocol selects the wire
-// path (/api/chat vs /v1/chat/completions). The dream.Protocol package var
-// died here in F1-W6: the protocol now arrives only inside the
-// backends.Backend parameter of the public dream entry points.
+// calls llm.Chat with the full backend, whose Protocol selects the wire
+// path (/api/chat vs /v1/chat/completions). Deliberately NOT ChatJSON:
+// the OpenAI response_format json_object constraint forces an object
+// wrapper, contradicting the prompt's "Output a JSON array" instruction
+// — models resolve the conflict by wrapping the array in a named key
+// ({"analysis": [...]}), which parseLinks must then unwrap. Without
+// response_format the model follows the prompt directly (bare array),
+// and parseLinks already absorbs format drift (code fences, object-map,
+// single-object forms). Ollama's format:"json" accepted both shapes,
+// which is why this was invisible on the reference deployment.
 func dreamChatJSON(ctx context.Context, chatB backends.Backend, systemPrompt, userPrompt string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error) {
 	if chatJSON != nil {
 		return chatJSON(ctx, chatB.Host, chatB.APIKey, chatB.Model, chatB.Think.Ptr(), systemPrompt, userPrompt, opts, timeout)
 	}
-	return llm.ChatJSON(ctx, chatB, systemPrompt, userPrompt, opts, timeout)
+	return llm.Chat(ctx, chatB, systemPrompt, userPrompt, opts, timeout)
 }
 
 const (

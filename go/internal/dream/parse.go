@@ -61,6 +61,25 @@ func parseLinks(raw string) ([]Link, string, error) {
 	}
 
 	if strings.HasPrefix(body, "{") {
+		// Drift form 0 (cloud API models): models wrap the requested array
+		// in a named-key object — {"analysis": [...]} (single key) or
+		// {"analysis": "prose...", "relationships": [...]} (multi-key with
+		// reasoning). Scan all values; the first array is the link list.
+		var wrapper map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(body), &wrapper); err == nil && len(wrapper) > 0 {
+			for _, v := range wrapper {
+				trimmed := strings.TrimSpace(string(v))
+				if strings.HasPrefix(trimmed, "[") {
+					if links, _, innerErr := parseLinks(trimmed); innerErr == nil {
+						if wasFenced {
+							return links, formatFencedObject, nil
+						}
+						return links, formatObject, nil
+					}
+				}
+			}
+		}
+
 		// Drift form 1 (Welle-49, qwen3.6:27b via OpenRouter): single flat
 		// object with top-level target_id/type/confidence fields. LLM emits
 		// this when there's exactly one link instead of wrapping it in an
