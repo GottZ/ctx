@@ -346,8 +346,8 @@ func TestParseLinks_StringMap_Basic(t *testing.T) {
 	if len(links) != 2 {
 		t.Fatalf("want 2 links, got %d", len(links))
 	}
-	if format != formatObject {
-		t.Errorf("want format %q, got %q", formatObject, format)
+	if format != formatStringMap {
+		t.Errorf("want format %q, got %q", formatStringMap, format)
 	}
 	seen := map[string]string{}
 	for _, l := range links {
@@ -409,8 +409,8 @@ func TestParseLinks_StringMap_Fenced(t *testing.T) {
 	if err != nil || len(links) != 1 || links[0].TargetID != "019fb992-ea5a-7ef8-aa5c-ed7db94699ca" {
 		t.Fatalf("err=%v links=%+v", err, links)
 	}
-	if format != formatFencedObject {
-		t.Errorf("want format %q, got %q", formatFencedObject, format)
+	if format != formatFencedStringMap {
+		t.Errorf("want format %q, got %q", formatFencedStringMap, format)
 	}
 }
 

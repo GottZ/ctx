@@ -11,12 +11,14 @@ import (
 // to track LLM drift patterns over time. Empty string means "no parseable shape"
 // (parse error or empty/sentinel input — distinguishable via the returned error).
 const (
-	formatArray         = "array"
-	formatObject        = "object"
-	formatFencedArray   = "fenced-array"
-	formatFencedObject  = "fenced-object"
-	formatWrapped       = "wrapped"
-	formatFencedWrapped = "fenced-wrapped"
+	formatArray           = "array"
+	formatObject          = "object"
+	formatFencedArray     = "fenced-array"
+	formatFencedObject    = "fenced-object"
+	formatWrapped         = "wrapped"
+	formatFencedWrapped   = "fenced-wrapped"
+	formatStringMap       = "string-map"
+	formatFencedStringMap = "fenced-string-map"
 )
 
 // parseLinks parses the LLM JSON response into Link structs.
@@ -24,6 +26,7 @@ const (
 //   - Named-wrapper form (cloud relays, PR #11 review): {"<key>": [ <links> ], ...}
 //   - Single flat object form (Welle 49): {"target_id": "...", "type": ..., ...}
 //   - Object-map form (audit S25, 2026-05-03): {"<uuid>": {"type": "...", "confidence": <float|string>}, ...}
+//   - String-map form (deepseek-v4-flash, PR #12): {"<uuid>": "<type>", ...} — no confidence field
 //   - String-encoded confidence labels: "high"|"medium"|"low" → 0.9/0.6/0.3
 //
 // Strips a leading ```json fence if present (43/1481 historical cases). The fence
@@ -31,7 +34,7 @@ const (
 // in the returned format token.
 //
 // Returns (links, format, err). format is one of formatArray | formatObject |
-// formatWrapped | formatFencedArray | formatFencedObject | formatFencedWrapped;
+// formatWrapped | formatStringMap or their fenced-* variants;
 // empty for empty/sentinel inputs and for parse errors. Map→slice conversion
 // sorts by TargetID for deterministic downstream behavior.
 func parseLinks(raw string) ([]Link, string, error) {
@@ -118,15 +121,18 @@ func parseLinks(raw string) ([]Link, string, error) {
 			return out, formatObject, nil
 		}
 
-		// Drift form 3 — see parseStringMapLinks.
+		// Drift form 3 — see parseStringMapLinks. Distinct format token: the
+		// whole point of parse_format telemetry is tracking WHICH drift form a
+		// model emits; reusing formatObject (already shared by forms 1 and 2)
+		// would make this form invisible in the drift log.
 		if links, ok := parseStringMapLinks(body); ok {
 			if len(links) == 0 {
 				return nil, "", fmt.Errorf("parse links: string map has no uuid→relationship entries (prose or degenerate object): %w", arrErr)
 			}
 			if wasFenced {
-				return links, formatFencedObject, nil
+				return links, formatFencedStringMap, nil
 			}
-			return links, formatObject, nil
+			return links, formatStringMap, nil
 		}
 	}
 
