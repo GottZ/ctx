@@ -54,11 +54,18 @@ func parseLinks(raw string) ([]Link, string, error) {
 	if arrErr == nil {
 		out := make([]Link, 0, len(rawArr))
 		for _, r := range rawArr {
-			conf, ok := coerceConfidence(r.Confidence)
+			conf, ok := confidenceOrFloor(r.Confidence, r.Type)
 			if !ok {
 				continue
 			}
 			out = append(out, Link{TargetID: r.TargetID, Relationship: r.Type, Confidence: conf})
+		}
+		// Zero-link contract: a non-empty structure that yields no usable link
+		// is degenerate output, not a "nothing to link" verdict — surface it as
+		// a parse error (transient retry) instead of a success that books the
+		// multi-day inert cooldown. The empty-array sentinel returned early.
+		if len(rawArr) > 0 && len(out) == 0 {
+			return nil, "", fmt.Errorf("parse links: %d array entries, none usable", len(rawArr))
 		}
 		if wasFenced {
 			return out, formatFencedArray, nil
@@ -88,37 +95,29 @@ func parseLinks(raw string) ([]Link, string, error) {
 			Confidence json.RawMessage `json:"confidence"`
 		}
 		if err := json.Unmarshal([]byte(body), &single); err == nil && single.TargetID != "" && single.Type != "" {
-			conf, ok := coerceConfidence(single.Confidence)
+			conf, ok := confidenceOrFloor(single.Confidence, single.Type)
 			if !ok {
-				return nil, "", nil
+				// Zero-link contract (see array branch): the model named a link
+				// but its confidence is unusable — error (retry), not a silent
+				// zero-link success that books the inert cooldown.
+				return nil, "", fmt.Errorf("parse links: flat single link with unusable confidence: %w", arrErr)
 			}
 			return []Link{{TargetID: single.TargetID, Relationship: single.Type, Confidence: conf}}, formatObject, nil
 		}
 
-		// Drift form 2 (Welle-25, qwen3.6:27b ollama): wrapper-map with IDs as keys.
-		var obj map[string]struct {
-			Type       string          `json:"type"`
-			Confidence json.RawMessage `json:"confidence"`
-		}
-		if err := json.Unmarshal([]byte(body), &obj); err == nil {
-			ids := make([]string, 0, len(obj))
-			for id := range obj {
-				ids = append(ids, id)
-			}
-			sort.Strings(ids)
-			out := make([]Link, 0, len(obj))
-			for _, id := range ids {
-				v := obj[id]
-				conf, ok := coerceConfidence(v.Confidence)
-				if !ok {
-					continue
-				}
-				out = append(out, Link{TargetID: id, Relationship: v.Type, Confidence: conf})
+		// Drift form 2 (Welle-25, qwen3.6:27b ollama): wrapper-map with IDs as
+		// keys — see parseObjectMapLinks.
+		if links, degenerate, ok := parseObjectMapLinks(body); ok {
+			// Zero-link contract (see array branch): covers {"<uuid>": null}
+			// and maps whose every entry lost its confidence — error (retry),
+			// not inert cooldown. The empty-object sentinel returned early.
+			if degenerate {
+				return nil, "", fmt.Errorf("parse links: object map entries present, none usable: %w", arrErr)
 			}
 			if wasFenced {
-				return out, formatFencedObject, nil
+				return links, formatFencedObject, nil
 			}
-			return out, formatObject, nil
+			return links, formatObject, nil
 		}
 
 		// Drift form 3 — see parseStringMapLinks. Distinct format token: the
@@ -249,6 +248,55 @@ func stripCodeFence(raw string) string {
 	raw = strings.TrimPrefix(raw, "```")
 	raw = strings.TrimSuffix(raw, "```")
 	return strings.TrimSpace(raw)
+}
+
+// parseObjectMapLinks handles drift form 2 (Welle-25, qwen3.6:27b ollama):
+// wrapper-map with IDs as keys and {type, confidence} struct values.
+// Returns ok=false when body is not such a map; degenerate=true when it IS
+// one with entries but none was usable (the caller surfaces that as a parse
+// error under the zero-link contract). Map→slice conversion sorts by
+// TargetID for deterministic downstream behavior.
+func parseObjectMapLinks(body string) (links []Link, degenerate, ok bool) {
+	var obj map[string]struct {
+		Type       string          `json:"type"`
+		Confidence json.RawMessage `json:"confidence"`
+	}
+	if err := json.Unmarshal([]byte(body), &obj); err != nil {
+		return nil, false, false
+	}
+	ids := make([]string, 0, len(obj))
+	for id := range obj {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]Link, 0, len(obj))
+	for _, id := range ids {
+		v := obj[id]
+		conf, confOK := confidenceOrFloor(v.Confidence, v.Type)
+		if !confOK {
+			continue
+		}
+		out = append(out, Link{TargetID: id, Relationship: v.Type, Confidence: conf})
+	}
+	return out, len(obj) > 0 && len(out) == 0, true
+}
+
+// confidenceOrFloor resolves an entry's confidence. A present value goes
+// through coerceConfidence unchanged. An ABSENT one (missing key or JSON
+// null) falls back to the per-type minRawConfidence floor when the type
+// names a known relationship — the model committed to a relationship but
+// gave no strength signal, the same doctrine the string-map form applies
+// (PR #12). Present-but-unparseable values stay dropped (the model DID emit
+// a strength signal, it is just unreadable — retry may fix it), and absent
+// values with an unknown type cannot be floored.
+func confidenceOrFloor(raw json.RawMessage, rel string) (float64, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		if validRelationships[rel] {
+			return minRawConfidence[rel], true
+		}
+		return 0, false
+	}
+	return coerceConfidence(raw)
 }
 
 // coerceConfidence accepts a json.RawMessage and returns a float64 confidence.
