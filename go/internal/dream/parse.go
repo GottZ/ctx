@@ -117,6 +117,43 @@ func parseLinks(raw string) ([]Link, string, error) {
 			}
 			return out, formatObject, nil
 		}
+
+		// Drift form 3 (deepseek-v4-flash via opencode.ai, 2026-08-01): compact
+		// string-map with IDs as keys and the relationship type as a bare string
+		// value, no confidence field — {"<uuid>": "topical", ...}. The model emits
+		// this when it collapses the array-of-objects into a terse id→type map.
+		// Confidence is ABSENT: the model named a relationship type but gave no
+		// strength signal. We must not invent one (assigning "high"/0.9 would be
+		// self-reported confidence the model never produced). Assign the gate
+		// floor 0.7 instead — the lowest honest value that still lets the link
+		// through the per-type minRawConfidence gate, preserving the relationship
+		// the model DID commit to (the type name) while flagging it as unweighted.
+		// Downstream weighting treats 0.7 as the weakest surviving link. Tried
+		// after the object-map form, whose struct-valued unmarshal fails on the
+		// bare-string values and falls through to here.
+		var strMap map[string]string
+		if err := json.Unmarshal([]byte(body), &strMap); err == nil {
+			ids := make([]string, 0, len(strMap))
+			for id := range strMap {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			out := make([]Link, 0, len(strMap))
+			for _, id := range ids {
+				rel := strings.TrimSpace(strMap[id])
+				if rel == "" {
+					continue
+				}
+				out = append(out, Link{TargetID: id, Relationship: rel, Confidence: 0.7})
+			}
+			if len(out) == 0 {
+				return nil, "", fmt.Errorf("parse links: %w", arrErr)
+			}
+			if wasFenced {
+				return out, formatFencedObject, nil
+			}
+			return out, formatObject, nil
+		}
 	}
 
 	return nil, "", fmt.Errorf("parse links: %w", arrErr)
