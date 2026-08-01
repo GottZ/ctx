@@ -58,9 +58,25 @@ export interface CaptureOptions {
  * document.fonts.ready ourselves instead of attributing it to the framework
  * (research §7.4 — costs nothing). Motion: animations:'disabled' is already
  * the toHaveScreenshot default policy (playwright.config.ts expect block).
+ * Scrollbars: removed from rendering entirely (idempotent style tag). A
+ * transient overflow — e.g. the login error band pushing the page past the
+ * viewport for a frame — makes classic Chromium scrollbars STEAL layout
+ * width, shifting every pixel left and failing the whole shot (v4.22.2
+ * root-run: login--error--dark flaked across desktop AND mobile, diff =
+ * uniform horizontal offset). Hiding via ::-webkit-scrollbar/display:none
+ * takes no layout space, so overflowing and non-overflowing captures render
+ * identically to the committed scrollbar-free baselines.
  */
 export async function stabilize(page: Page): Promise<void> {
-  await page.evaluate(() => document.fonts.ready)
+  await page.evaluate(() => {
+    if (!document.getElementById('e2e-scrollbar-stabilizer')) {
+      const s = document.createElement('style')
+      s.id = 'e2e-scrollbar-stabilizer'
+      s.textContent = '::-webkit-scrollbar { display: none; } html { scrollbar-width: none; }'
+      document.head.appendChild(s)
+    }
+    return document.fonts.ready
+  })
 }
 
 interface MaskAudit {

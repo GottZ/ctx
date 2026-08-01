@@ -410,7 +410,20 @@ export const contracts: PageContract[] = [
     // load-more affordance). The 10k DOM-cap proof is the scale dimension.
     states: [
       { name: 'default', seed: {} },
-      { name: 'empty', seed: { empty: true } },
+      {
+        name: 'empty',
+        seed: { empty: true },
+        // Dritter Fall der 1-px-AA-Klasse (nach Q11 und den settings-Shots):
+        // eine Kantenzelle wobbelt ±1 LSB zwischen Läufen im selben pinned
+        // Container (1 px, light mobile — v4.22.2 Rebaseline-Verify-Läufe).
+        // Gleiche Stufe, gleiche Schranke: 4 ≫ 1, ≪ jede echte Regression.
+        visualTolerance: {
+          maxDiffPixels: 4,
+          reason:
+            'Edge-pixel AA wobbles ±1 LSB between runs in the same pinned container (1 px, light mobile; v4.22.2 rebaseline verify runs).',
+          issue: 'design 06-§4.3 rung 3; PR #12 follow-up (scrollbar stabilizer rebaseline, root run 30718783042)',
+        },
+      },
       {
         name: 'search',
         seed: {},
@@ -641,7 +654,22 @@ export const contracts: PageContract[] = [
     // ist server-admin (fixtures: nur server-admin trägt admin:true).
     role: 'member',
     mode: 'reading',
-    states: [{ name: 'default', seed: { role: 'server-admin' } }],
+    states: [
+      {
+        name: 'default',
+        seed: { role: 'server-admin' },
+        // Gleiche 1-px-AA-Klasse wie settings-hues (und Q11): eine Kantenzelle
+        // wobbelt ±1 LSB zwischen Läufen im SELBEN pinned Container (v4.22.2
+        // Scrollbar-Stabilizer-Rebaseline, light mobile). 4 ≫ beobachtete 1,
+        // ≪ jede echte Regression; alle anderen Shots behalten 0.
+        visualTolerance: {
+          maxDiffPixels: 4,
+          reason:
+            'Edge-pixel AA wobbles ±1 LSB between runs in the same pinned container (1 px, light mobile; v4.22.2 rebaseline).',
+          issue: 'design 06-§4.3 rung 3; PR #12 follow-up (scrollbar stabilizer rebaseline, root run 30718783042)',
+        },
+      },
+    ],
     scale: {
       exempt:
         'Backend-Pool + Vault sind bounded Betreiber-Listen (Provider-Backends, Secret-Namen) — kein nutzergetriebenes 10k-Wachstum.',
@@ -671,7 +699,24 @@ export const contracts: PageContract[] = [
     // der Inhalt braucht admin (fixtures: nur server-admin trägt admin:true).
     role: 'member',
     mode: 'reading',
-    states: [{ name: 'default', seed: { role: 'server-admin' } }],
+    states: [
+      {
+        name: 'default',
+        seed: { role: 'server-admin' },
+        // Hue-Rad-AA: der große SVG-Kreisbogen wobbelt ±1 LSB an einer
+        // Kantenzelle — 1 px Diff würfelte über --update- und Verify-Lauf im
+        // SELBEN pinned Container verschieden (v4.22.2 Scrollbar-Stabilizer-
+        // Rebaseline, light mobile). Gleiche Eskalationsstufe wie Q11:
+        // 4 ≫ beobachtete 1 und ≪ jede echte Regression; alle anderen Shots
+        // behalten 0.
+        visualTolerance: {
+          maxDiffPixels: 4,
+          reason:
+            'SVG hue-wheel arc AA wobbles ±1 LSB on one edge pixel (1 px, mobile); differed between --update and verify runs in the same pinned container (v4.22.2 rebaseline).',
+          issue: 'design 06-§4.3 rung 3; PR #12 follow-up (scrollbar stabilizer rebaseline, root run 30718783042)',
+        },
+      },
+    ],
     scale: {
       exempt:
         'Kategorie-Liste ist eine bounded Betreiber-/Tenant-Menge (Block-Kategorien) — die Override-Zeilen skalieren mit der Kategorie-Anzahl, nicht mit Blöcken (kein 10k-Nutzerpfad).',
