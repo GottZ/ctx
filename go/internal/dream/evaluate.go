@@ -139,16 +139,17 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 		return nil, fmt.Errorf("dream: parse links: %w", err)
 	}
 
-	// Welle 46 (2026-05-22): post-parse hard-constraint on supersedes direction.
-	// Drops links where source is not strictly newer than target. Runs before
-	// filterValidCandidates so a dropped supersedes does not occupy a cap slot.
-	preDirCount := len(links)
-	links = enforceSupersedesDirection(links, source.CreatedAt, candidates)
-	if dropped := preDirCount - len(links); dropped > 0 {
+	// Welle 46 (2026-05-22): post-parse hard-constraint on supersedes
+	// direction. Downgrades inverted supersedes links to topical. The old
+	// len-diff telemetry here was structurally dead (downgrade never changes
+	// the count) — the function now reports the downgrade count itself.
+	var dirDowngraded int
+	links, dirDowngraded = enforceSupersedesDirection(links, source.CreatedAt, candidates)
+	if dirDowngraded > 0 {
 		if entry.Metadata == nil {
 			entry.Metadata = map[string]any{}
 		}
-		entry.Metadata["supersedes_direction_dropped"] = dropped
+		entry.Metadata["supersedes_direction_downgraded"] = dirDowngraded
 	}
 
 	candidateIDs := make(map[string]bool)
