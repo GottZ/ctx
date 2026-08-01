@@ -12,11 +12,24 @@
 #      substantial body (>= 80 chars). GitHub Releases inline the tag
 #      annotation; lightweight or terse tags become useless release notes.
 #
+# Rule 1 applies to the canonical repo only (GottZ/ctx). Pushing refinement
+# commits onto a contributor's fork branch (maintainerCanModify PR flow,
+# established with PRs #9-#12) is not a release channel — those pushes land
+# on origin later via the PR merge, which IS tagged. The tag-quality rule 2
+# stays global (a bad v* tag is bad wherever it lands).
+#
 # Bypass: `git push --no-verify` — use sparingly, and only when an emergency
 # revert needs to land before tagging is feasible. Routine work tags first.
 
 MIN_MSG_LENGTH=80
 REJECTED=0
+
+# pre-push receives the remote name and URL as arguments.
+REMOTE_URL="$2"
+case "$REMOTE_URL" in
+    *github.com[:/]GottZ/ctx*) ENFORCE_BRANCH_RULE=1 ;;
+    *) ENFORCE_BRANCH_RULE=0 ;;
+esac
 
 # First pass: collect all refs being pushed in this invocation. We need the
 # tag set to know whether a branch push is paired with its tag.
@@ -91,6 +104,9 @@ while read local_ref local_sha remote_ref remote_sha; do
             ;;
 
         refs/heads/*)
+            # Release discipline binds the canonical repo, not fork branches.
+            [ "$ENFORCE_BRANCH_RULE" -eq 0 ] && continue
+
             BRANCH_NAME=$(echo "$remote_ref" | sed 's|refs/heads/||')
 
             # Skip branch-deletion pushes (local_sha is all-zeros).
