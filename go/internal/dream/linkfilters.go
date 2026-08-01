@@ -198,8 +198,11 @@ func acceptSupersedes(srcCat, tgtCat string, srcCreated, tgtCreated time.Time, t
 // the edge in the graph at the conservative cost of one relationship class:
 // 'topical' is the documented fallback per V5 prompt ("when in doubt: topical")
 // and matches what coerceCategoryFactual does for same-category factual links.
-// Audit-Trail: entry.Metadata["supersedes_direction_downgraded"] is set by
-// the caller (evaluate.go) so the rate of inversion stays observable.
+// Audit-Trail: the returned downgrade count feeds
+// entry.Metadata["supersedes_direction_downgraded"] in the caller
+// (evaluate.go) so the rate of inversion stays observable. (The caller
+// previously measured len(in)-len(out), which is structurally zero since the
+// Welle-46 switch from drop to downgrade — the telemetry was dead.)
 //
 // candidates[].UpdatedAt is used as approximation for CreatedAt because the
 // rrf.SearchResult struct only carries UpdatedAt. For the Dream corpus,
@@ -207,14 +210,15 @@ func acceptSupersedes(srcCat, tgtCat string, srcCreated, tgtCreated time.Time, t
 // CreatedAt (exception: blocks updated after creation can flip the inequality;
 // rare and conservative). The final created_at check in acceptSupersedes
 // (writelinks.go) is the authoritative gate — this is defense in depth.
-func enforceSupersedesDirection(links []Link, sourceCreated time.Time, candidates []BlockInfo) []Link {
+func enforceSupersedesDirection(links []Link, sourceCreated time.Time, candidates []BlockInfo) ([]Link, int) {
 	if len(links) == 0 {
-		return links
+		return links, 0
 	}
 	candByID := make(map[string]time.Time, len(candidates))
 	for _, c := range candidates {
 		candByID[c.ID] = c.UpdatedAt
 	}
+	downgraded := 0
 	out := make([]Link, 0, len(links))
 	for _, l := range links {
 		if l.Relationship == "supersedes" {
@@ -234,11 +238,12 @@ func enforceSupersedesDirection(links []Link, sourceCreated time.Time, candidate
 					"target_updated", tgtTS,
 				)
 				l.Relationship = "topical"
+				downgraded++
 			}
 		}
 		out = append(out, l)
 	}
-	return out
+	return out, downgraded
 }
 
 // V9 check: causal requires source predates target by created_at.

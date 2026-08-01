@@ -999,6 +999,29 @@ func TestAcceptCausal(t *testing.T) {
 	}
 }
 
+// TestParseLinks_StringMap_SurvivesFilterPipeline runs the string-map form
+// through the ACTUAL downstream gate (filterValidCandidates) instead of only
+// asserting parser output — the review found every string-map test stopped at
+// the parser while the real failure modes (uuid gate, per-type confidence
+// floor) live one call later.
+func TestParseLinks_StringMap_SurvivesFilterPipeline(t *testing.T) {
+	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"topical","019fb98f-cad3-7bbe-b3be-ccf74d5ba05f":"recurrent"}`
+	links, _, err := parseLinks(raw)
+	if err != nil || len(links) != 2 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	candidateIDs := map[string]bool{
+		"019fb992-ea5a-7ef8-aa5c-ed7db94699ca": true,
+		"019fb98f-cad3-7bbe-b3be-ccf74d5ba05f": true,
+	}
+	valid := filterValidCandidates(links, candidateIDs)
+	// BOTH must survive: the topical link at floor 0.7 and the recurrent link
+	// at its per-type floor 0.8 (a hardcoded 0.7 would silently lose it here).
+	if len(valid) != 2 {
+		t.Fatalf("string-map links must clear filterValidCandidates, got %d of 2: %+v", len(valid), valid)
+	}
+}
+
 // --- enforceSupersedesDirection Tests ---.
 
 // TestEnforceSupersedesDirection_DowngradesInverted verifies that supersedes
@@ -1025,11 +1048,16 @@ func TestEnforceSupersedesDirection_DowngradesInverted(t *testing.T) {
 		{TargetID: "tgt-invert", Relationship: "causal", Confidence: 0.8},
 	}
 
-	out := enforceSupersedesDirection(links, srcCreated, candidates)
+	out, downgraded := enforceSupersedesDirection(links, srcCreated, candidates)
 
 	// All 5 input links must survive — none are dropped.
 	if len(out) != 5 {
 		t.Fatalf("got %d kept, want 5 (downgrade, never drop)", len(out))
+	}
+	// The downgrade count feeds the supersedes_direction_downgraded telemetry
+	// (previously dead: the caller measured a len-diff that never changes).
+	if downgraded != 2 {
+		t.Errorf("downgrade count: got %d, want 2", downgraded)
 	}
 
 	// Correctly oriented supersedes stays as supersedes.
@@ -1067,9 +1095,12 @@ func TestEnforceSupersedesDirection_KeepsCorrect(t *testing.T) {
 		{TargetID: "tgt", Relationship: "supersedes", Confidence: 0.92},
 	}
 
-	out := enforceSupersedesDirection(links, srcCreated, candidates)
+	out, downgraded := enforceSupersedesDirection(links, srcCreated, candidates)
 	if len(out) != 1 {
 		t.Fatalf("got %d, want 1", len(out))
+	}
+	if downgraded != 0 {
+		t.Errorf("downgrade count: got %d, want 0", downgraded)
 	}
 	if out[0].Relationship != "supersedes" {
 		t.Errorf("relationship changed: got %q, want supersedes", out[0].Relationship)
@@ -1090,7 +1121,7 @@ func TestEnforceSupersedesDirection_UnknownTargetPassThrough(t *testing.T) {
 	links := []Link{
 		{TargetID: "tgt-unknown", Relationship: "supersedes", Confidence: 0.9},
 	}
-	out := enforceSupersedesDirection(links, srcCreated, candidates)
+	out, _ := enforceSupersedesDirection(links, srcCreated, candidates)
 	if len(out) != 1 {
 		t.Fatalf("unknown-target supersedes was dropped by direction filter (must defer to filterValidCandidates)")
 	}
@@ -1102,11 +1133,11 @@ func TestEnforceSupersedesDirection_UnknownTargetPassThrough(t *testing.T) {
 // TestEnforceSupersedesDirection_EmptyInput verifies the filter handles nil
 // and empty inputs without panicking.
 func TestEnforceSupersedesDirection_EmptyInput(t *testing.T) {
-	out := enforceSupersedesDirection(nil, time.Now(), nil)
+	out, _ := enforceSupersedesDirection(nil, time.Now(), nil)
 	if len(out) != 0 {
 		t.Errorf("got %v, want empty/nil", out)
 	}
-	out = enforceSupersedesDirection([]Link{}, time.Now(), []BlockInfo{})
+	out, _ = enforceSupersedesDirection([]Link{}, time.Now(), []BlockInfo{})
 	if len(out) != 0 {
 		t.Errorf("got %d links, want 0", len(out))
 	}
