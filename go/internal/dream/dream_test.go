@@ -297,13 +297,87 @@ func TestParseLinks_ObjectForm_GarbageKey(t *testing.T) {
 }
 
 func TestParseLinks_ObjectForm_UnknownStringConf(t *testing.T) {
+	// Contract change (PR #12 review, finding: zero-link contract): the entry
+	// itself is still dropped, but a non-empty map whose EVERY entry drops is
+	// degenerate output and must surface as a parse error (transient retry) —
+	// previously this returned a zero-link success, which books the multi-day
+	// inert cooldown and contradicted TestParseLinks_StringMap_AllEmptyErrors'
+	// contract for the same downstream consequence.
 	raw := `{"id":{"type":"topical","confidence":"vibes"}}`
-	links, _, err := parseLinks(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if _, _, err := parseLinks(raw); err == nil {
+		t.Fatal("map with only unusable entries must be a parse error")
 	}
-	if len(links) != 0 {
-		t.Fatalf("unparseable confidence must drop entry, got %+v", links)
+	// A sibling entry with usable confidence keeps the map parseable; only
+	// the unusable entry is dropped.
+	raw = `{"a":{"type":"topical","confidence":"vibes"},"b":{"type":"factual","confidence":0.9}}`
+	links, _, err := parseLinks(raw)
+	if err != nil || len(links) != 1 || links[0].TargetID != "b" {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+}
+
+func TestParseLinks_ObjectForm_NullValueErrors(t *testing.T) {
+	// {"<uuid>": null} unmarshals into the struct-map form as a zero-value
+	// no-op entry; without the zero-link guard it returned a silent success
+	// (inert cooldown) instead of the transient retry it deserves.
+	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":null}`
+	if _, _, err := parseLinks(raw); err == nil {
+		t.Fatal("null-valued map entry must be a parse error")
+	}
+}
+
+func TestParseLinks_ObjectForm_MissingConfidenceFloored(t *testing.T) {
+	// Absent confidence (key missing entirely) on a known type takes the
+	// per-type floor — the model committed to a relationship, it just gave no
+	// strength signal (string-map doctrine applied to the object-map form).
+	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":{"type":"topical"}}`
+	links, _, err := parseLinks(raw)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	if links[0].Confidence != minRawConfidence["topical"] {
+		t.Fatalf("want per-type floor %.2f, got %.2f", minRawConfidence["topical"], links[0].Confidence)
+	}
+}
+
+func TestParseLinks_FlatSingle_MissingConfidenceFloored(t *testing.T) {
+	raw := `{"target_id":"019fb992-ea5a-7ef8-aa5c-ed7db94699ca","type":"causal"}`
+	links, _, err := parseLinks(raw)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	if links[0].Confidence != minRawConfidence["causal"] {
+		t.Fatalf("want per-type floor %.2f, got %.2f", minRawConfidence["causal"], links[0].Confidence)
+	}
+}
+
+func TestParseLinks_FlatSingle_UnusableConfidenceErrors(t *testing.T) {
+	// Present-but-unparseable confidence on the single-link form leaves zero
+	// links — parse error (retry), not a silent zero-link success. Was a
+	// (nil, "", nil) return before the zero-link contract.
+	raw := `{"target_id":"019fb992-ea5a-7ef8-aa5c-ed7db94699ca","type":"topical","confidence":"vibes"}`
+	if _, _, err := parseLinks(raw); err == nil {
+		t.Fatal("unusable confidence on flat single link must be a parse error")
+	}
+}
+
+func TestParseLinks_Array_AllUnusableErrors(t *testing.T) {
+	// Same contract on the canonical array form: entries exist but none is
+	// usable (unknown type + no confidence, or unparseable confidence).
+	raw := `[{"target_id":"019fb992-ea5a-7ef8-aa5c-ed7db94699ca","type":"topical","confidence":"vibes"}]`
+	if _, _, err := parseLinks(raw); err == nil {
+		t.Fatal("array with only unusable entries must be a parse error")
+	}
+}
+
+func TestParseLinks_Array_MissingConfidenceFloored(t *testing.T) {
+	raw := `[{"target_id":"019fb992-ea5a-7ef8-aa5c-ed7db94699ca","type":"supersedes"}]`
+	links, _, err := parseLinks(raw)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	if links[0].Confidence != minRawConfidence["supersedes"] {
+		t.Fatalf("want per-type floor %.2f, got %.2f", minRawConfidence["supersedes"], links[0].Confidence)
 	}
 }
 
