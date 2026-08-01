@@ -48,7 +48,13 @@ else's environment — that led to a fix landing in the repository.
   [#11](https://github.com/GottZ/ctx/pull/11): cloud relays answer the dream
   link prompt in a named-wrapper drift form (`{"analysis": [...]}`) that the
   parser rejected; the shipped fix keeps his parser-side solution and leaves
-  the wire format untouched.
+  the wire format untouched. Also PR
+  [#12](https://github.com/GottZ/ctx/pull/12): a fifth link-response drift
+  form — deepseek-v4-flash collapses the array into a bare `{"<uuid>":
+  "<type>"}` string map with no confidence field, losing every link in the
+  cycle; the shipped fix keeps his recover-the-type approach and floor
+  doctrine, hardened with entry discrimination so prose envelopes still
+  surface as retryable parse errors.
 
 ## How to be listed
 
