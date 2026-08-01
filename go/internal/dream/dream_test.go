@@ -327,6 +327,84 @@ func TestParseLinks_ObjectForm_DeterministicOrder(t *testing.T) {
 	}
 }
 
+// --- parseLinks String-Map Drift Tests (deepseek-v4-flash, 2026-08-01) ---.
+//
+// Drift form 3: the model collapses the array-of-objects into a terse
+// {"<uuid>": "<type>"} map with NO confidence field. The parser must recover
+// the relationship the model committed to (the type name) and assign the gate
+// floor 0.7 — not invent a "high" 0.9 the model never produced.
+
+func TestParseLinks_StringMap_Basic(t *testing.T) {
+	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"topical","019fb98f-cad3-7bbe-b3be-ccf74d5ba05f":"factual"}`
+	links, format, err := parseLinks(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(links) != 2 {
+		t.Fatalf("want 2 links, got %d", len(links))
+	}
+	if format != formatObject {
+		t.Errorf("want format %q, got %q", formatObject, format)
+	}
+	seen := map[string]string{}
+	for _, l := range links {
+		seen[l.TargetID] = l.Relationship
+		if l.Confidence != 0.7 {
+			t.Errorf("%s: confidence must be gate floor 0.7 (model gave none), got %.2f", l.TargetID, l.Confidence)
+		}
+	}
+	if seen["019fb992-ea5a-7ef8-aa5c-ed7db94699ca"] != "topical" ||
+		seen["019fb98f-cad3-7bbe-b3be-ccf74d5ba05f"] != "factual" {
+		t.Errorf("relationship types lost: %v", seen)
+	}
+}
+
+func TestParseLinks_StringMap_DeterministicOrder(t *testing.T) {
+	raw := `{"c-3":"topical","a-1":"causal","b-2":"factual"}`
+	for i := 0; i < 20; i++ {
+		links, _, err := parseLinks(raw)
+		if err != nil || len(links) != 3 {
+			t.Fatalf("iter %d: err=%v len=%d", i, err, len(links))
+		}
+		if links[0].TargetID != "a-1" || links[1].TargetID != "b-2" || links[2].TargetID != "c-3" {
+			t.Fatalf("iter %d: order not lex-sorted: %+v", i, links)
+		}
+	}
+}
+
+func TestParseLinks_StringMap_EmptyValueDropped(t *testing.T) {
+	raw := `{"a":"topical","b":"   ","c":""}`
+	links, _, err := parseLinks(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(links) != 1 || links[0].TargetID != "a" {
+		t.Fatalf("blank relationship values must be dropped, got %+v", links)
+	}
+}
+
+func TestParseLinks_StringMap_AllEmptyErrors(t *testing.T) {
+	// A map whose values are all blank yields zero links; that must surface as
+	// a parse error (transient retry) rather than a silent "no links" success
+	// that would book a multi-day dream cooldown on the block.
+	raw := `{"a":"","b":"  "}`
+	_, _, err := parseLinks(raw)
+	if err == nil {
+		t.Error("expected error when all string-map values are blank")
+	}
+}
+
+func TestParseLinks_StringMap_Fenced(t *testing.T) {
+	raw := "```json\n{\"id-1\":\"supersedes\"}\n```"
+	links, format, err := parseLinks(raw)
+	if err != nil || len(links) != 1 || links[0].TargetID != "id-1" {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	if format != formatFencedObject {
+		t.Errorf("want format %q, got %q", formatFencedObject, format)
+	}
+}
+
 func TestParseLinks_CodeFenceArray(t *testing.T) {
 	raw := "```json\n[{\"target_id\":\"id-1\",\"type\":\"factual\",\"confidence\":0.9}]\n```"
 	links, _, err := parseLinks(raw)
