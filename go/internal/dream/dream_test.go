@@ -331,8 +331,11 @@ func TestParseLinks_ObjectForm_DeterministicOrder(t *testing.T) {
 //
 // Drift form 3: the model collapses the array-of-objects into a terse
 // {"<uuid>": "<type>"} map with NO confidence field. The parser must recover
-// the relationship the model committed to (the type name) and assign the gate
-// floor 0.7 — not invent a "high" 0.9 the model never produced.
+// the relationship the model committed to (the type name) and assign the
+// per-type minRawConfidence floor — not invent a "high" 0.9 the model never
+// produced. Because ANY flat string→string object matches this shape, entries
+// are discriminated (uuid key + known relationship value); prose/status
+// envelopes must remain parse errors (transient retry, not inert cooldown).
 
 func TestParseLinks_StringMap_Basic(t *testing.T) {
 	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"topical","019fb98f-cad3-7bbe-b3be-ccf74d5ba05f":"factual"}`
@@ -360,25 +363,31 @@ func TestParseLinks_StringMap_Basic(t *testing.T) {
 }
 
 func TestParseLinks_StringMap_DeterministicOrder(t *testing.T) {
-	raw := `{"c-3":"topical","a-1":"causal","b-2":"factual"}`
+	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699cc":"topical","019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"causal","019fb992-ea5a-7ef8-aa5c-ed7db94699cb":"factual"}`
 	for i := 0; i < 20; i++ {
 		links, _, err := parseLinks(raw)
 		if err != nil || len(links) != 3 {
 			t.Fatalf("iter %d: err=%v len=%d", i, err, len(links))
 		}
-		if links[0].TargetID != "a-1" || links[1].TargetID != "b-2" || links[2].TargetID != "c-3" {
+		if links[0].TargetID != "019fb992-ea5a-7ef8-aa5c-ed7db94699ca" ||
+			links[1].TargetID != "019fb992-ea5a-7ef8-aa5c-ed7db94699cb" ||
+			links[2].TargetID != "019fb992-ea5a-7ef8-aa5c-ed7db94699cc" {
 			t.Fatalf("iter %d: order not lex-sorted: %+v", i, links)
+		}
+		// Key→value pairing must survive the sort, not just the ordering.
+		if links[0].Relationship != "causal" || links[1].Relationship != "factual" || links[2].Relationship != "topical" {
+			t.Fatalf("iter %d: key→value pairing broken: %+v", i, links)
 		}
 	}
 }
 
 func TestParseLinks_StringMap_EmptyValueDropped(t *testing.T) {
-	raw := `{"a":"topical","b":"   ","c":""}`
+	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"topical","019fb992-ea5a-7ef8-aa5c-ed7db94699cb":"   ","019fb992-ea5a-7ef8-aa5c-ed7db94699cc":""}`
 	links, _, err := parseLinks(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(links) != 1 || links[0].TargetID != "a" {
+	if len(links) != 1 || links[0].TargetID != "019fb992-ea5a-7ef8-aa5c-ed7db94699ca" {
 		t.Fatalf("blank relationship values must be dropped, got %+v", links)
 	}
 }
@@ -387,7 +396,7 @@ func TestParseLinks_StringMap_AllEmptyErrors(t *testing.T) {
 	// A map whose values are all blank yields zero links; that must surface as
 	// a parse error (transient retry) rather than a silent "no links" success
 	// that would book a multi-day dream cooldown on the block.
-	raw := `{"a":"","b":"  "}`
+	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"","019fb992-ea5a-7ef8-aa5c-ed7db94699cb":"  "}`
 	_, _, err := parseLinks(raw)
 	if err == nil {
 		t.Error("expected error when all string-map values are blank")
@@ -395,13 +404,95 @@ func TestParseLinks_StringMap_AllEmptyErrors(t *testing.T) {
 }
 
 func TestParseLinks_StringMap_Fenced(t *testing.T) {
-	raw := "```json\n{\"id-1\":\"supersedes\"}\n```"
+	raw := "```json\n{\"019fb992-ea5a-7ef8-aa5c-ed7db94699ca\":\"supersedes\"}\n```"
 	links, format, err := parseLinks(raw)
-	if err != nil || len(links) != 1 || links[0].TargetID != "id-1" {
+	if err != nil || len(links) != 1 || links[0].TargetID != "019fb992-ea5a-7ef8-aa5c-ed7db94699ca" {
 		t.Fatalf("err=%v links=%+v", err, links)
 	}
 	if format != formatFencedObject {
 		t.Errorf("want format %q, got %q", formatFencedObject, format)
+	}
+}
+
+func TestParseLinks_StringMap_ProseEnvelopeStaysError(t *testing.T) {
+	// The critical boundary of this drift form: ANY flat string→string object
+	// unmarshals into map[string]string, including prose/status envelopes.
+	// Those carried a parse error (transient ~5-min retry) before this form
+	// existed; they must KEEP erroring — a pseudo-link parse would be filtered
+	// by filterValidCandidates into a zero-link success and book the multi-day
+	// inert cooldown instead (observed classes: reasoning envelopes, status
+	// envelopes, stringified arrays).
+	for _, raw := range []string{
+		`{"reasoning":"the blocks are unrelated","conclusion":"no links"}`,
+		`{"analysis":"I found no relationships between the source and the candidates."}`,
+		`{"status":"ok","links":"none"}`,
+		`{"relationships":"none"}`,
+		`{"result":"no relationships found"}`,
+		`{"relationships":"[{\"target_id\":\"019fb992-ea5a-7ef8-aa5c-ed7db94699ca\"}]"}`,
+	} {
+		if _, _, err := parseLinks(raw); err == nil {
+			t.Errorf("prose envelope must stay a parse error, got success for %s", raw)
+		}
+	}
+}
+
+func TestParseLinks_StringMap_UnknownRelationshipErrors(t *testing.T) {
+	// A uuid key with an unknown relationship value is indistinguishable from
+	// prose; with no qualifying entry left the map must decline to the parse
+	// error (retry may yield the canonical array with a known type).
+	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"related"}`
+	if _, _, err := parseLinks(raw); err == nil {
+		t.Error("unknown relationship value must not produce a link")
+	}
+}
+
+func TestParseLinks_StringMap_MixedProseEntriesIgnored(t *testing.T) {
+	// Commentary keys next to a valid uuid→type entry are dropped, the valid
+	// entry survives — mirrors the wrapped form skipping sibling prose fields.
+	raw := `{"note":"weak but real","019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"topical"}`
+	links, _, err := parseLinks(raw)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	if links[0].TargetID != "019fb992-ea5a-7ef8-aa5c-ed7db94699ca" || links[0].Relationship != "topical" {
+		t.Fatalf("valid entry lost among prose keys: %+v", links[0])
+	}
+}
+
+func TestParseLinks_StringMap_CaseAndWhitespaceNormalised(t *testing.T) {
+	// deepseek drift includes cased type names and cased UUIDs; both are
+	// normalised so the entry clears filterValidCandidates unchanged.
+	raw := `{"019FB992-EA5A-7EF8-AA5C-ED7DB94699CA":" Topical "}`
+	links, _, err := parseLinks(raw)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	if links[0].TargetID != "019fb992-ea5a-7ef8-aa5c-ed7db94699ca" || links[0].Relationship != "topical" {
+		t.Fatalf("case/whitespace not normalised: %+v", links[0])
+	}
+}
+
+func TestParseLinks_StringMap_PerTypeFloor(t *testing.T) {
+	// The assigned confidence is the per-type minRawConfidence floor, not a
+	// hardcoded 0.7 — 'recurrent' has floor 0.8 and would be silently dropped
+	// by filterValidCandidates at 0.7.
+	raw := `{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"recurrent"}`
+	links, _, err := parseLinks(raw)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("err=%v links=%+v", err, links)
+	}
+	if links[0].Confidence != minRawConfidence["recurrent"] {
+		t.Fatalf("want per-type floor %.2f, got %.2f", minRawConfidence["recurrent"], links[0].Confidence)
+	}
+}
+
+func TestParseLinks_StringMap_FlatSingleShapeStaysError(t *testing.T) {
+	// {"target_id": "<uuid>", "type": ""} misses the flat-single form (empty
+	// type) and is all-strings — without key discrimination it would parse as
+	// a garbage link with TargetID "target_id".
+	raw := `{"target_id":"019fb992-ea5a-7ef8-aa5c-ed7db94699ca","type":""}`
+	if _, _, err := parseLinks(raw); err == nil {
+		t.Error("degenerate flat-single shape must stay a parse error")
 	}
 }
 

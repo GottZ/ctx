@@ -118,45 +118,70 @@ func parseLinks(raw string) ([]Link, string, error) {
 			return out, formatObject, nil
 		}
 
-		// Drift form 3 (deepseek-v4-flash via opencode.ai, 2026-08-01): compact
-		// string-map with IDs as keys and the relationship type as a bare string
-		// value, no confidence field — {"<uuid>": "topical", ...}. The model emits
-		// this when it collapses the array-of-objects into a terse id→type map.
-		// Confidence is ABSENT: the model named a relationship type but gave no
-		// strength signal. We must not invent one (assigning "high"/0.9 would be
-		// self-reported confidence the model never produced). Assign the gate
-		// floor 0.7 instead — the lowest honest value that still lets the link
-		// through the per-type minRawConfidence gate, preserving the relationship
-		// the model DID commit to (the type name) while flagging it as unweighted.
-		// Downstream weighting treats 0.7 as the weakest surviving link. Tried
-		// after the object-map form, whose struct-valued unmarshal fails on the
-		// bare-string values and falls through to here.
-		var strMap map[string]string
-		if err := json.Unmarshal([]byte(body), &strMap); err == nil {
-			ids := make([]string, 0, len(strMap))
-			for id := range strMap {
-				ids = append(ids, id)
-			}
-			sort.Strings(ids)
-			out := make([]Link, 0, len(strMap))
-			for _, id := range ids {
-				rel := strings.TrimSpace(strMap[id])
-				if rel == "" {
-					continue
-				}
-				out = append(out, Link{TargetID: id, Relationship: rel, Confidence: 0.7})
-			}
-			if len(out) == 0 {
-				return nil, "", fmt.Errorf("parse links: %w", arrErr)
+		// Drift form 3 — see parseStringMapLinks.
+		if links, ok := parseStringMapLinks(body); ok {
+			if len(links) == 0 {
+				return nil, "", fmt.Errorf("parse links: string map has no uuid→relationship entries (prose or degenerate object): %w", arrErr)
 			}
 			if wasFenced {
-				return out, formatFencedObject, nil
+				return links, formatFencedObject, nil
 			}
-			return out, formatObject, nil
+			return links, formatObject, nil
 		}
 	}
 
 	return nil, "", fmt.Errorf("parse links: %w", arrErr)
+}
+
+// parseStringMapLinks handles drift form 3 (deepseek-v4-flash via opencode.ai,
+// 2026-08-01): compact string-map with IDs as keys and the relationship type
+// as a bare string value, no confidence field — {"<uuid>": "topical", ...}.
+// The model emits this when it collapses the array-of-objects into a terse
+// id→type map. Tried after the object-map form, whose struct-valued unmarshal
+// fails on the bare-string values and falls through to here.
+//
+// This shape is maximally ambiguous: ANY flat string→string object matches
+// map[string]string, including prose/status envelopes like
+// {"reasoning": "the blocks are unrelated"} that MUST stay parse errors
+// (transient retry) — accepting them as pseudo-links would read downstream as
+// "nothing to link" and book the multi-day inert cooldown the
+// parseWrappedLinks constraints exist to prevent. So unlike the other drift
+// forms, entries are discriminated HERE: the key must look like a block UUID
+// and the value must name a known relationship type (both case-normalised so
+// the entry clears filterValidCandidates unchanged). Returns ok=false when
+// body is not a flat string map at all; ok=true with an empty slice when it
+// is one but no entry qualifies — the caller turns that into the hard parse
+// error (this is not a link map).
+//
+// Confidence is ABSENT: the model named a relationship type but gave no
+// strength signal. We must not invent one (assigning "high"/0.9 would be
+// self-reported confidence the model never produced). Assign the per-type
+// minRawConfidence floor — the lowest honest value that still clears the
+// dream write gate for that type (0.7; 'recurrent' 0.8). Note this floor sits
+// BELOW the RRF graph-expansion retrieval gate (graph.min_confidence, default
+// 0.75): floored links are persisted and visible in the ego graph, but stay
+// out of RRF expansion until a later dream cycle re-classifies them with a
+// real confidence signal.
+func parseStringMapLinks(body string) ([]Link, bool) {
+	var strMap map[string]string
+	if err := json.Unmarshal([]byte(body), &strMap); err != nil {
+		return nil, false
+	}
+	ids := make([]string, 0, len(strMap))
+	for id := range strMap {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]Link, 0, len(strMap))
+	for _, rawID := range ids {
+		id := strings.ToLower(strings.TrimSpace(rawID))
+		rel := strings.ToLower(strings.TrimSpace(strMap[rawID]))
+		if !uuidPattern.MatchString(id) || !validRelationships[rel] {
+			continue
+		}
+		out = append(out, Link{TargetID: id, Relationship: rel, Confidence: minRawConfidence[rel]})
+	}
+	return out, true
 }
 
 // parseWrappedLinks handles drift form 0 (cloud relays via response_format
