@@ -999,6 +999,75 @@ func TestAcceptCausal(t *testing.T) {
 	}
 }
 
+// --- applyLinkFloor Tests (dream.link_floor_confidence, PR #12 follow-up) ---.
+
+func TestApplyLinkFloor_LiftsFlooredToConfiguredValue(t *testing.T) {
+	// Default operator floor 0.9: type-only links become retrieval-live
+	// (above the RRF graph gate 0.75); model-emitted confidences untouched.
+	links := []Link{
+		{TargetID: "a", Relationship: "topical", Confidence: 0.7, Floored: true},
+		{TargetID: "b", Relationship: "factual", Confidence: 0.85}, // model-emitted
+	}
+	out := applyLinkFloor(links, 0.9)
+	if out[0].Confidence != 0.9 {
+		t.Errorf("floored link must lift to configured 0.9, got %.2f", out[0].Confidence)
+	}
+	if out[1].Confidence != 0.85 {
+		t.Errorf("model-emitted confidence must stay untouched, got %.2f", out[1].Confidence)
+	}
+}
+
+func TestApplyLinkFloor_PerTypeGateStaysLowerBound(t *testing.T) {
+	// A configured floor below a type's minRawConfidence write gate is lifted
+	// to that gate — otherwise the link would be a silent write-path no-op.
+	links := []Link{
+		{TargetID: "a", Relationship: "recurrent", Confidence: 0.8, Floored: true},
+		{TargetID: "b", Relationship: "topical", Confidence: 0.7, Floored: true},
+	}
+	out := applyLinkFloor(links, 0.7)
+	if out[0].Confidence != 0.8 {
+		t.Errorf("recurrent floored link must stay at its 0.8 gate under floor 0.7, got %.2f", out[0].Confidence)
+	}
+	if out[1].Confidence != 0.7 {
+		t.Errorf("topical floored link must take configured 0.7, got %.2f", out[1].Confidence)
+	}
+}
+
+func TestApplyLinkFloor_ZeroKeepsParserFloors(t *testing.T) {
+	// floor <= 0 (unwired routers, tests) keeps the parser's per-type floors.
+	links := []Link{{TargetID: "a", Relationship: "topical", Confidence: 0.7, Floored: true}}
+	out := applyLinkFloor(links, 0)
+	if out[0].Confidence != 0.7 {
+		t.Errorf("zero floor must keep parser value, got %.2f", out[0].Confidence)
+	}
+}
+
+func TestApplyLinkFloor_ClampsAboveOne(t *testing.T) {
+	links := []Link{{TargetID: "a", Relationship: "causal", Confidence: 0.7, Floored: true}}
+	out := applyLinkFloor(links, 1.5)
+	if out[0].Confidence != 1.0 {
+		t.Errorf("floor must clamp to 1.0, got %.2f", out[0].Confidence)
+	}
+}
+
+// TestParseLinks_StringMap_FlooredMarking pins the parser-side contract the
+// operator floor depends on: absent-confidence entries carry Floored=true,
+// model-emitted confidences carry Floored=false.
+func TestParseLinks_StringMap_FlooredMarking(t *testing.T) {
+	links, _, err := parseLinks(`{"019fb992-ea5a-7ef8-aa5c-ed7db94699ca":"topical"}`)
+	if err != nil || len(links) != 1 || !links[0].Floored {
+		t.Fatalf("string-map link must be marked Floored, err=%v links=%+v", err, links)
+	}
+	links, _, err = parseLinks(`[{"target_id":"019fb992-ea5a-7ef8-aa5c-ed7db94699ca","type":"topical","confidence":0.9}]`)
+	if err != nil || len(links) != 1 || links[0].Floored {
+		t.Fatalf("model-emitted confidence must not be Floored, err=%v links=%+v", err, links)
+	}
+	links, _, err = parseLinks(`[{"target_id":"019fb992-ea5a-7ef8-aa5c-ed7db94699ca","type":"topical"}]`)
+	if err != nil || len(links) != 1 || !links[0].Floored {
+		t.Fatalf("absent-confidence array entry must be Floored, err=%v links=%+v", err, links)
+	}
+}
+
 // TestParseLinks_StringMap_SurvivesFilterPipeline runs the string-map form
 // through the ACTUAL downstream gate (filterValidCandidates) instead of only
 // asserting parser output — the review found every string-map test stopped at

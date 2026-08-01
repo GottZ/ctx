@@ -195,6 +195,18 @@ type DreamConfig struct {
 	// other tag switches title/tag/system-prompt to English + the named
 	// language. V14 validates the shape (see validateDream).
 	Language string `key:"dream.language" env:"CTX_DREAM_LANGUAGE" default:"" mut:"hot" tenancy:"global-only"`
+	// LinkFloorConfidence is the raw confidence assigned to relationship
+	// links the LLM names WITHOUT a strength signal (string-map drift form,
+	// absent confidence fields — PR #12). The default 0.9 keeps such links
+	// above the RRF graph-expansion retrieval gate (graph.min_confidence,
+	// default 0.75), so a type-only answer still yields retrieval-live
+	// edges. Set 0.7 for the conservative PR-#12 semantics — links persist
+	// and show in the ego graph but stay out of RRF expansion until a later
+	// dream cycle re-classifies them — or any other [0,1] float. Values
+	// below a type's minRawConfidence write gate are lifted to that gate
+	// per type (a floored link that cannot clear the write gate would be a
+	// silent no-op). Out-of-range values are fatal at boot (V15).
+	LinkFloorConfidence float64 `key:"dream.link_floor_confidence" env:"CTX_DREAM_LINK_FLOOR_CONFIDENCE" default:"0.9" mut:"hot" tenancy:"global-only"`
 
 	Backoff BackoffConfig
 }

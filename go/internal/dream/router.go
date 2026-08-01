@@ -56,6 +56,15 @@ type Router struct {
 	// dream/synthesize_report.go). Only the daily-synthesis path reads it;
 	// the per-block dream pipeline is language-agnostic.
 	Language string
+	// LinkFloor is the raw confidence assigned to links the LLM named
+	// without a strength signal (drift forms with absent confidence — PR
+	// #12), read from config Dream.LinkFloorConfidence by the caller that
+	// builds the router (scheduler: per-iteration, so the hot key is hot).
+	// Applied in EvaluateRelationships via applyLinkFloor; per-type
+	// minRawConfidence stays the lower bound. The zero value keeps the
+	// parser's per-type floors (the conservative PR-#12 semantics) — routers
+	// built without config wiring (tests) change nothing.
+	LinkFloor float64
 }
 
 // TypeSet resolves the tenant's block-type policy set for this router's

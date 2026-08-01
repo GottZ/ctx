@@ -54,11 +54,11 @@ func parseLinks(raw string) ([]Link, string, error) {
 	if arrErr == nil {
 		out := make([]Link, 0, len(rawArr))
 		for _, r := range rawArr {
-			conf, ok := confidenceOrFloor(r.Confidence, r.Type)
+			conf, floored, ok := confidenceOrFloor(r.Confidence, r.Type)
 			if !ok {
 				continue
 			}
-			out = append(out, Link{TargetID: r.TargetID, Relationship: r.Type, Confidence: conf})
+			out = append(out, Link{TargetID: r.TargetID, Relationship: r.Type, Confidence: conf, Floored: floored})
 		}
 		// Zero-link contract: a non-empty structure that yields no usable link
 		// is degenerate output, not a "nothing to link" verdict — surface it as
@@ -95,14 +95,14 @@ func parseLinks(raw string) ([]Link, string, error) {
 			Confidence json.RawMessage `json:"confidence"`
 		}
 		if err := json.Unmarshal([]byte(body), &single); err == nil && single.TargetID != "" && single.Type != "" {
-			conf, ok := confidenceOrFloor(single.Confidence, single.Type)
+			conf, floored, ok := confidenceOrFloor(single.Confidence, single.Type)
 			if !ok {
 				// Zero-link contract (see array branch): the model named a link
 				// but its confidence is unusable — error (retry), not a silent
 				// zero-link success that books the inert cooldown.
 				return nil, "", fmt.Errorf("parse links: flat single link with unusable confidence: %w", arrErr)
 			}
-			return []Link{{TargetID: single.TargetID, Relationship: single.Type, Confidence: conf}}, formatObject, nil
+			return []Link{{TargetID: single.TargetID, Relationship: single.Type, Confidence: conf, Floored: floored}}, formatObject, nil
 		}
 
 		// Drift form 2 (Welle-25, qwen3.6:27b ollama): wrapper-map with IDs as
@@ -159,14 +159,14 @@ func parseLinks(raw string) ([]Link, string, error) {
 // error (this is not a link map).
 //
 // Confidence is ABSENT: the model named a relationship type but gave no
-// strength signal. We must not invent one (assigning "high"/0.9 would be
-// self-reported confidence the model never produced). Assign the per-type
-// minRawConfidence floor — the lowest honest value that still clears the
-// dream write gate for that type (0.7; 'recurrent' 0.8). Note this floor sits
-// BELOW the RRF graph-expansion retrieval gate (graph.min_confidence, default
-// 0.75): floored links are persisted and visible in the ego graph, but stay
-// out of RRF expansion until a later dream cycle re-classifies them with a
-// real confidence signal.
+// strength signal. The parser assigns the per-type minRawConfidence floor —
+// the lowest value that still clears the dream write gate for that type
+// (0.7; 'recurrent' 0.8) — and marks the link Floored. The OPERATOR decides
+// what a type-only answer is worth: applyLinkFloor (evaluate.go) lifts
+// floored links to dream.link_floor_confidence (default 0.9 — above the RRF
+// graph-expansion retrieval gate graph.min_confidence 0.75, so the edges are
+// retrieval-live; set 0.7 to keep them write-only until a later cycle
+// re-classifies them with a real signal).
 func parseStringMapLinks(body string) ([]Link, bool) {
 	var strMap map[string]string
 	if err := json.Unmarshal([]byte(body), &strMap); err != nil {
@@ -184,7 +184,7 @@ func parseStringMapLinks(body string) ([]Link, bool) {
 		if !uuidPattern.MatchString(id) || !validRelationships[rel] {
 			continue
 		}
-		out = append(out, Link{TargetID: id, Relationship: rel, Confidence: minRawConfidence[rel]})
+		out = append(out, Link{TargetID: id, Relationship: rel, Confidence: minRawConfidence[rel], Floored: true})
 	}
 	return out, true
 }
@@ -272,31 +272,34 @@ func parseObjectMapLinks(body string) (links []Link, degenerate, ok bool) {
 	out := make([]Link, 0, len(obj))
 	for _, id := range ids {
 		v := obj[id]
-		conf, confOK := confidenceOrFloor(v.Confidence, v.Type)
+		conf, floored, confOK := confidenceOrFloor(v.Confidence, v.Type)
 		if !confOK {
 			continue
 		}
-		out = append(out, Link{TargetID: id, Relationship: v.Type, Confidence: conf})
+		out = append(out, Link{TargetID: id, Relationship: v.Type, Confidence: conf, Floored: floored})
 	}
 	return out, len(obj) > 0 && len(out) == 0, true
 }
 
 // confidenceOrFloor resolves an entry's confidence. A present value goes
-// through coerceConfidence unchanged. An ABSENT one (missing key or JSON
-// null) falls back to the per-type minRawConfidence floor when the type
-// names a known relationship — the model committed to a relationship but
-// gave no strength signal, the same doctrine the string-map form applies
-// (PR #12). Present-but-unparseable values stay dropped (the model DID emit
-// a strength signal, it is just unreadable — retry may fix it), and absent
-// values with an unknown type cannot be floored.
-func confidenceOrFloor(raw json.RawMessage, rel string) (float64, bool) {
+// through coerceConfidence unchanged (floored=false). An ABSENT one (missing
+// key or JSON null) falls back to the per-type minRawConfidence floor when
+// the type names a known relationship — the model committed to a
+// relationship but gave no strength signal, the same doctrine the string-map
+// form applies (PR #12); such entries report floored=true so applyLinkFloor
+// can lift them to the configured dream.link_floor_confidence. Present-but-
+// unparseable values stay dropped (the model DID emit a strength signal, it
+// is just unreadable — retry may fix it), and absent values with an unknown
+// type cannot be floored.
+func confidenceOrFloor(raw json.RawMessage, rel string) (conf float64, floored, ok bool) {
 	if len(raw) == 0 || string(raw) == "null" {
 		if validRelationships[rel] {
-			return minRawConfidence[rel], true
+			return minRawConfidence[rel], true, true
 		}
-		return 0, false
+		return 0, false, false
 	}
-	return coerceConfidence(raw)
+	conf, ok = coerceConfidence(raw)
+	return conf, false, ok
 }
 
 // coerceConfidence accepts a json.RawMessage and returns a float64 confidence.

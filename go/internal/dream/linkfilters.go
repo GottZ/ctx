@@ -40,6 +40,35 @@ var minRawConfidence = map[string]float64{
 // supersedesTitleSimThreshold is the pg_trgm similarity floor for V8.
 const supersedesTitleSimThreshold = 0.25
 
+// applyLinkFloor lifts every Floored link (confidence assigned by the
+// parser because the model gave none — PR #12 drift forms) to the
+// operator-configured floor (dream.link_floor_confidence, default 0.9),
+// keeping the per-type minRawConfidence write gate as the lower bound so a
+// configured floor below a type's gate cannot turn the link into a silent
+// write-path no-op. floor <= 0 (unwired routers, tests) keeps the parser's
+// per-type floors — the conservative PR-#12 semantics. Links whose
+// confidence the model actually emitted are never touched.
+// Pure function — no I/O, no shared state.
+func applyLinkFloor(links []Link, floor float64) []Link {
+	if floor <= 0 {
+		return links
+	}
+	if floor > 1 {
+		floor = 1
+	}
+	for i := range links {
+		if !links[i].Floored {
+			continue
+		}
+		f := floor
+		if mr := minRawConfidence[links[i].Relationship]; f < mr {
+			f = mr
+		}
+		links[i].Confidence = f
+	}
+	return links
+}
+
 // filterValidCandidates rejects LLM links that fail any of:
 //   - target_id not in UUID format (LLM emitted free-text)
 //   - target_id not present in the candidate set (LLM hallucinated an ID)

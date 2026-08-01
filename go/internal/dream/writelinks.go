@@ -330,6 +330,9 @@ func WriteLinks(ctx context.Context, pool linkPool, set *blocktype.Set, sourceID
 			TargetID     string  `json:"target_id"`
 			Relationship string  `json:"relationship"`
 			Confidence   float64 `json:"confidence"`
+			// Floored: confidence is the operator floor (dream.link_floor_
+			// confidence), not a model-emitted value — see Link.Floored.
+			Floored bool `json:"floored,omitempty"`
 		}
 		auditLinks := make([]auditLink, 0, written)
 		for _, l := range links {

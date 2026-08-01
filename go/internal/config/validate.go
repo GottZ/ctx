@@ -305,6 +305,16 @@ func validateDream(c *Config) []Issue {
 		}
 	}
 
+	// V15 — dream.link_floor_confidence range. The value becomes the raw
+	// confidence of every link the LLM names without a strength signal; an
+	// out-of-range float would either die at the write gate (silent no-op
+	// pipeline) or claim impossible certainty. Same fatal class as the other
+	// out-of-range knobs (e.g. _BLEND_WEIGHT outside [0,1]).
+	if f := c.Dream.LinkFloorConfidence; f < 0 || f > 1 {
+		issues = append(issues, Issue{Field: "dream.link_floor_confidence", Severity: SeverityError,
+			Msg: fmt.Sprintf("link floor confidence %g must be within [0,1]", f)})
+	}
+
 	return issues
 }
 

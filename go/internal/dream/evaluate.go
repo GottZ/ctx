@@ -71,6 +71,11 @@ type Link struct {
 	TargetID     string  `json:"target_id"`
 	Relationship string  `json:"type"`
 	Confidence   float64 `json:"confidence"`
+	// Floored marks a link whose confidence was NOT emitted by the model:
+	// the parser assigned the per-type minRawConfidence floor (absent
+	// confidence, string-map drift form — PR #12). applyLinkFloor lifts such
+	// links to the configured dream.link_floor_confidence before filtering.
+	Floored bool `json:"-"`
 }
 
 // EvaluateRelationships asks the LLM to classify relationships between a source block
@@ -138,6 +143,12 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 		slog.Warn("dream: failed to parse LLM response", "error", err, "raw", resp.Message.Content)
 		return nil, fmt.Errorf("dream: parse links: %w", err)
 	}
+
+	// Operator floor for links the model named without a strength signal
+	// (Floored, PR #12): lift to dream.link_floor_confidence (default 0.9,
+	// hot via the per-iteration router) before direction enforcement and
+	// filtering, so downstream gates and the write path see the final value.
+	links = applyLinkFloor(links, r.LinkFloor)
 
 	// Welle 46 (2026-05-22): post-parse hard-constraint on supersedes
 	// direction. Downgrades inverted supersedes links to topical. The old

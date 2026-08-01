@@ -570,6 +570,7 @@ func (s *Scheduler) newRouter(cfg *config.Config, tenant string) *dream.Router {
 		Admit:      s.backgroundAdmission(), // MW3: dream + 03:00 daily are background (N1/N8a)
 		Blocktypes: s.blocktypes,
 		Language:   cfg.Dream.Language,
+		LinkFloor:  cfg.Dream.LinkFloorConfidence,
 	}
 }
 
