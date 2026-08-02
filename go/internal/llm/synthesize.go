@@ -90,6 +90,13 @@ type SynthesisSettings struct {
 	// for it (promptguard.ErrUndeclaredWindow). Travels through the call chain
 	// like the thresholds above; the llm package holds no config state.
 	ExternalNumCtxFallback int
+
+	// OpenRouterWindowTTL is the cache lifetime, in SECONDS, of the
+	// per-provider endpoint discovery that resolves AUTO windows — settings
+	// key pool.openrouter_window_ttl (E10-W2). 0 = discovery off: an
+	// openrouter row with NULL num_ctx then falls back to
+	// ExternalNumCtxFallback and, without one, refuses (the H12 floor).
+	OpenRouterWindowTTL int
 }
 
 // selectSystemPrompt resolves the active system prompt from the settings.
@@ -624,8 +631,17 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 	// (decision E10, fail-closed): the alternative is a compiled-in rate value,
 	// and for a router that spreads one model over providers with 32k-262k
 	// windows a rate value is wrong, not merely imprecise.
+	//
+	// E10-W2 inserts the AUTO resolution in front of it: an openrouter-class
+	// member with NULL num_ctx contributes the best window its DISCOVERED
+	// providers offer instead of nothing. baseOpts is resolved here rather
+	// than at the wire call because the plan needs the request's output bound
+	// (autowindow.go, reserveFor).
+	baseOpts := SynthesisOptions(0)
+	plan := planAutoWindows(ctx, chain, backends.RoleSynthesis, baseOpts,
+		time.Duration(settings.OpenRouterWindowTTL)*time.Second)
 	budget, budgetErr := promptguard.ChainRuneBudget(
-		chainWindows(chain), settings.ExternalNumCtxFallback, promptguard.BudgetSynthesis)
+		plan.windows, settings.ExternalNumCtxFallback, promptguard.BudgetSynthesis)
 	if budgetErr != nil {
 		return nil, fmt.Errorf("llm: synthesize: %w", budgetErr)
 	}
@@ -637,8 +653,21 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 	// Step 8: Build prompt over the fitted source set.
 	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates, settings)
 
+	// Step 8b (E10-W2): the per-request provider constraint. Measured on the
+	// RENDERED prompt — the budget charged the parts, the builder wrapped
+	// markup around them, and the provider has to hold the document. AUTO
+	// members whose providers cannot carry it drop out of THIS request's
+	// chain; a chain that empties out has no leg left to walk.
+	chain = plan.constrain(chain, utf8.RuneCountInString(systemPrompt)+utf8.RuneCountInString(userPrompt))
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("llm: synthesize: %w", &backends.ErrNoEligibleBackend{
+			Role: backends.RoleSynthesis, Required: required,
+			Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "auto-window: no provider holds this prompt"}},
+		})
+	}
+
 	resp, served, attempts, err := ChatChain(ctx, chain, backends.RoleSynthesis,
-		systemPrompt, userPrompt, SynthesisOptions(0), "", ChatTimeout, PoolReporter(bpool), adm)
+		systemPrompt, userPrompt, baseOpts, "", ChatTimeout, PoolReporter(bpool), adm)
 
 	if err != nil && len(attempts) == 0 && IsAdmissionError(err) {
 		// Never admitted, no wire contact: no regular llmlog row

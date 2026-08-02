@@ -83,8 +83,14 @@ const (
 // are exactly two: an operator-declared floor
 // (pool.external_num_ctx_fallback / the row's own num_ctx), or refusal.
 //
-// Discovering the window when the backend is CREATED is the proper fix and a
-// separate wave — it is not something this budget pass can do at call time.
+// Since E10-W2 there is a THIRD option for openrouter-class rows, and it is
+// the one that answers the objection above rather than working around it:
+// discover the per-provider windows (GET …/endpoints), plan against the best
+// of them, and constrain the request to the providers that can actually hold
+// it (provider.only). That resolution happens BEFORE this function — it hands
+// the resolved window in as a normal windows entry. This error therefore keeps
+// its exact meaning: no declared window, no discovered one, no operator floor
+// — refuse.
 var ErrUndeclaredWindow = errors.New("promptguard: chain member without a declared context window")
 
 // RuneBudget converts a context window in TOKENS to a rune budget using the
@@ -95,6 +101,31 @@ func RuneBudget(tokens int) int {
 		return 0
 	}
 	return tokens * runesPerTokenNum / runesPerTokenDen
+}
+
+// TokenEstimate converts a rune count to a TOKEN count — the inverse
+// direction of RuneBudget, over the SAME 9/5 fraction, and conservative for
+// the same reason.
+//
+// Why one constant serves both directions without one of them becoming
+// optimistic: 1.8 runes/token is the DENSEST tokenisation measured in the
+// corpus (budget.go head), i.e. the worst case. Worst-case density is
+// pessimistic whichever way it is read — forward it says "this window holds
+// only 1.8 runes per token" (RuneBudget under-estimates what fits), backward
+// it says "these runes may cost as much as one token per 1.8 of them"
+// (TokenEstimate over-estimates what a prompt costs). At the observed means
+// (2.53-3.24) the real prompt is 29-44 % cheaper than this estimate, so a
+// provider admitted by TokenEstimate has head-room, never a deficit. An
+// average-case constant would be the mistake in both directions at once.
+//
+// Rounds UP: a fractional token is a whole token on the wire, and rounding a
+// size estimate down is how an overflow becomes a surprise. Non-positive
+// input yields 0.
+func TokenEstimate(runes int) int {
+	if runes <= 0 {
+		return 0
+	}
+	return (runes*runesPerTokenDen + runesPerTokenNum - 1) / runesPerTokenNum
 }
 
 // ChainRuneBudget resolves the prompt budget of a RESOLVED chain.

@@ -187,6 +187,14 @@ func validateQuery(c *Config) []Issue {
 			Msg: fmt.Sprintf("context window fallback %d must be >= 0 (0 = unset)", c.Pool.ExternalNumCtxFallback)})
 	}
 
+	// V9c (E10-W2) — same shape as V9b for the same reason: the discovery TTL
+	// reads <= 0 as "discovery off", so a negative value would silently mean
+	// off while presenting as a configured duration.
+	if c.Pool.OpenRouterWindowTTL < 0 {
+		issues = append(issues, Issue{Field: "pool.openrouter_window_ttl", Severity: SeverityError,
+			Msg: fmt.Sprintf("endpoint discovery TTL %d must be >= 0 (0 = off)", c.Pool.OpenRouterWindowTTL)})
+	}
+
 	return issues
 }
 

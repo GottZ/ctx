@@ -682,6 +682,28 @@ type PoolConfig struct {
 	// value only ever bounds the tenant's OWN prompts, and a tenant on a
 	// stricter provider tier must be able to declare its own floor.
 	ExternalNumCtxFallback int `key:"pool.external_num_ctx_fallback" env:"-" default:"0" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	// OpenRouterWindowTTL is the cache lifetime, in SECONDS, of the
+	// per-provider endpoint discovery behind AUTO context windows (E10-W2):
+	// an openrouter-class row with num_ctx NULL asks
+	// GET {base_url}/v1/models/{model}/endpoints which providers serve the
+	// routed model and how large their windows are, plans against the best of
+	// them, and constrains each request to the providers that can hold it.
+	//
+	// Default 3600 s: the provider mix of a model changes on the order of
+	// days, and the cost of being an hour behind is bounded on both sides —
+	// a provider that vanished is caught by ordinary failover, a provider that
+	// appeared merely goes unused until the refresh. Refreshes are
+	// stale-while-error (a transient API failure keeps the last known mix
+	// serving, up to a hard 24 h age limit inside the cache).
+	//
+	// 0 = OFF, following the 0-is-off convention of its rate-limit siblings:
+	// discovery stops, and a NULL window falls back to
+	// pool.external_num_ctx_fallback — or refuses, which is the H12 floor this
+	// key can raise but never lower.
+	//
+	// tenant-overridable like its pool siblings: the value only affects how
+	// often the tenant's OWN requests re-read a public metadata route.
+	OpenRouterWindowTTL int `key:"pool.openrouter_window_ttl" env:"-" default:"3600" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	// The legacy gaming.active / gaming.disabled_backends settings keys were
 	// retired in Web-UX U01-W5 (AM-7 cutover): chain-time exclusion is now the
 	// eject disable-profile (092), read live from the pool snapshot. Any leftover
@@ -1229,6 +1251,7 @@ func (c *Config) SynthesisSettings() llm.SynthesisSettings {
 		ConfidentThreshold:     c.Query.ConfidentThreshold,
 		PromptVersion:          c.Query.PromptVersion,
 		ExternalNumCtxFallback: c.Pool.ExternalNumCtxFallback,
+		OpenRouterWindowTTL:    c.Pool.OpenRouterWindowTTL,
 	}
 }
 

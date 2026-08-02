@@ -151,6 +151,11 @@ func TestRegistryStrictSet(t *testing.T) {
 		// pass from "operator declared a floor" to "refuse" (or, read the other
 		// way, hide that no floor was ever declared) — it aborts loudly.
 		"pool.external_num_ctx_fallback": true,
+		// E10-W2: the discovery TTL decides whether AUTO windows exist at all
+		// (0 = off → back to the H12 refusal path). A typo'd value silently
+		// defaulting to 3600 would present as "discovery running" while the
+		// operator meant to turn it off — it aborts loudly.
+		"pool.openrouter_window_ttl": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {
@@ -234,6 +239,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"pool.llm_audit_min_sensitivity":        true, // D4 §4.5-c: G41 audit verdict floor, born in settings like its pool siblings
 		"pool.blob_rate_limit_write":            true, // B2: blob write budget, born in settings like its pool siblings
 		"pool.external_num_ctx_fallback":        true, // H12: prompt-budget window floor, born in settings like its pool siblings
+		"pool.openrouter_window_ttl":            true, // E10-W2: AUTO-window discovery TTL, born in settings like its pool siblings
 		"gaming.active":                         true,
 		"gaming.disabled_backends":              true,
 		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
@@ -303,6 +309,9 @@ func TestRegistryTenancySet(t *testing.T) {
 		// tenant's OWN prompts, so a tenant on a stricter provider tier may
 		// declare its own
 		"pool.external_num_ctx_fallback": true,
+		// E10-W2 per-tenant AUTO-window discovery TTL — it only changes how
+		// often the tenant's OWN requests re-read a public metadata route
+		"pool.openrouter_window_ttl": true,
 		// per-tenant SSE cap
 		"events.max_connections": true,
 		// W11 per-project sync rate (max_concurrent is a PROCESS-global semaphore →
@@ -330,8 +339,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 58 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 58 (change it with intent)", got)
+	if got := len(overridable); got != 59 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 59 (change it with intent)", got)
 	}
 	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
 	// a tenant override here would flush the process-wide embed cache / flip the
