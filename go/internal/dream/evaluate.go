@@ -10,6 +10,8 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/promptguard"
+	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -89,7 +91,7 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 		return nil, nil
 	}
 
-	userPrompt := buildEvalPrompt(source, candidates)
+	systemPrompt, userPrompt := buildEvalPrompt(source, candidates)
 	blockIDs := make([]string, 0, 1+len(candidates))
 	blockIDs = append(blockIDs, source.ID)
 	sensParts := make([]backends.Sensitivity, 0, 1+len(candidates))
@@ -107,7 +109,7 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 	// no zero-duration no-op rows pollute the log.
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-eval",
-		RequestSystem: dreamSystemPrompt,
+		RequestSystem: systemPrompt,
 		RequestUser:   userPrompt,
 		BlockIDs:      blockIDs,
 		DreamVersion:  &dreamVer,
@@ -116,7 +118,7 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 
 	start := time.Now()
 	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, required,
-		dreamSystemPrompt, userPrompt, opts, DreamTimeout)
+		systemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 	r.applyChainTelemetry(entry, backends.RoleDream, required, served, attempts, err)
@@ -180,35 +182,71 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 	return valid, nil
 }
 
-// buildEvalPrompt constructs the user prompt for relationship evaluation.
-func buildEvalPrompt(source BlockInfo, candidates []BlockInfo) string {
+// buildEvalPrompt constructs the user prompt for relationship evaluation and
+// the system prompt that belongs to it.
+//
+// ONE source and N candidates whose boundaries CARRY MEANING: the model answers
+// with a target_id, so a block it cannot delimit is a link it can misattribute.
+// That is the nonce case (design 04 §4.3) — one per build, binding every wrap
+// and the rule that names it in the system prompt.
+//
+// The two metadata positions are guarded differently because they break
+// differently (§2.3-c). Category is the carrier in both: a free string whose
+// only constraint is len<=100, no format CHECK, foreign-written by definition.
+//   - candidate side: the value sits in a double-quoted ATTRIBUTE and used to
+//     reach it unescaped — a quote closed the element and opened a forged one.
+//   - source side: the value sits on a LINE-BASED key:value line, where a bare
+//     newline forges the next line without needing a single "<". XML escaping
+//     provably does not cover this one, which is why both positions run through
+//     guardLine (ClampLine AND EscapeXml), not through EscapeXml alone.
+//
+// The ids stay raw: they are DB uuids, not foreign text, and the answer path
+// re-checks them against the candidate set anyway (filterValidCandidates) —
+// the guard reduces the surface, that filter is the defence.
+func buildEvalPrompt(source BlockInfo, candidates []BlockInfo) (system, user string) {
+	nonce := promptguard.NewNonce()
+
 	var b strings.Builder
 	b.WriteString("<source>\n")
 	fmt.Fprintf(&b, "ID: %s\nTitle: %s\nCategory: %s\nUpdated: %s\n",
-		source.ID, llm.EscapeXml(source.Title), source.Category, source.UpdatedAt.Format("2006-01-02"))
-	b.WriteString("Content: ")
-	b.WriteString(llm.EscapeXml(truncate(source.Content, maxContentLen)))
+		source.ID, guardLine(source.Title), guardLine(source.Category),
+		source.UpdatedAt.Format("2006-01-02"))
+	b.WriteString(promptguard.Wrap(nonce, "source",
+		guardText(truncate(source.Content, maxContentLen))))
 	b.WriteString("\n</source>\n\n<candidates>\n")
 
 	for _, c := range candidates {
 		fmt.Fprintf(&b, "<block id=\"%s\" title=\"%s\" category=\"%s\" updated=\"%s\">\n",
-			c.ID, llm.EscapeXml(c.Title), c.Category, c.UpdatedAt.Format("2006-01-02"))
-		b.WriteString(llm.EscapeXml(truncate(c.Content, maxContentLen/2)))
+			c.ID, guardLine(c.Title), guardLine(c.Category), c.UpdatedAt.Format("2006-01-02"))
+		b.WriteString(promptguard.Wrap(nonce, "candidate",
+			guardText(truncate(c.Content, maxContentLen/2))))
 		b.WriteString("\n</block>\n")
 	}
 	b.WriteString("</candidates>")
-	return b.String()
+
+	return dreamSystemPrompt + "\n\n" + promptguard.Rule(nonce), b.String()
 }
 
-// truncate limits string length to n bytes, cutting at word boundary.
+// truncate limits string length to n, cutting at a word boundary when one sits
+// in the second half of the budget.
+//
+// The fallback cut is rune-aware: a byte slice can split a multi-byte rune and
+// emit invalid UTF-8 into the prompt (internal/llm/synthesize.go names the same
+// defect). Consequence worth knowing: on that path n is a RUNE budget, so
+// non-ASCII content may exceed n bytes. The trigger threshold stays byte-based
+// and on ASCII the byte image is exactly the pre-guard one.
+//
+// Shared with the keyword and recurrence builders — the rune boundary lands
+// there too.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	// Find last space before limit.
-	cut := strings.LastIndex(s[:n], " ")
+	head := util.TruncateRunesWithSuffix(s, "", n)
+	// A space is single-byte, so cutting at one can never split a rune.
+	cut := strings.LastIndex(head, " ")
 	if cut < n/2 {
-		cut = n
+		return head
 	}
-	return s[:cut]
+	return head[:cut]
 }

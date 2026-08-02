@@ -1267,7 +1267,7 @@ func TestBuildEvalPrompt_ContainsSourceAndCandidates(t *testing.T) {
 	candidates := []BlockInfo{
 		{ID: "c-1", Title: "Candidate 1", Category: "test", Content: "candidate content"},
 	}
-	prompt := buildEvalPrompt(source, candidates)
+	_, prompt := buildEvalPrompt(source, candidates)
 
 	if !contains(prompt, "src-1") {
 		t.Error("prompt should contain source ID")
@@ -1285,7 +1285,7 @@ func TestBuildEvalPrompt_ContainsSourceAndCandidates(t *testing.T) {
 
 func TestBuildEvalPrompt_EscapesContent(t *testing.T) {
 	source := BlockInfo{ID: "s", Title: "<injected>", Category: "test", Content: "a & b"}
-	prompt := buildEvalPrompt(source, nil)
+	_, prompt := buildEvalPrompt(source, nil)
 
 	if contains(prompt, "<injected>") {
 		t.Error("prompt should escape title XML chars")
