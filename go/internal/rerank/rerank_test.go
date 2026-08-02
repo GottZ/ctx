@@ -128,3 +128,164 @@ func TestScore_EmptyDocs(t *testing.T) {
 		t.Errorf("empty docs: got (%v, %v), want (nil, nil)", scores, err)
 	}
 }
+
+// --- Voyage AI format compatibility tests ---
+
+// voyageResults builds a Voyage-style response body: results under "data"
+// (OpenAPI RerankingObject schema) with "total_tokens" usage.
+func voyageResults(rs ...map[string]any) map[string]any {
+	return map[string]any{
+		"object": "list",
+		"data":   rs,
+		"model":  "rerank-2.5",
+		"usage":  map[string]any{"total_tokens": 42},
+	}
+}
+
+// TestScore_VoyageDataFallback is the load-bearing regression test: Voyage AI
+// returns results under "data" instead of "results". Before the fix, Score
+// decoded an empty Results slice and failed with "got 0 scores for N documents".
+func TestScore_VoyageDataFallback(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, voyageResults(
+			map[string]any{"index": 0, "relevance_score": 0.95},
+			map[string]any{"index": 1, "relevance_score": 0.42},
+			map[string]any{"index": 2, "relevance_score": 0.11},
+		)
+	})
+
+	scores, ptoks, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("Voyage data fallback failed: %v", err)
+	}
+	want := []float64{0.95, 0.42, 0.11}
+	for i := range want {
+		if scores[i] != want[i] {
+			t.Errorf("scores[%d] = %v, want %v", i, scores[i], want[i])
+		}
+	}
+	// Voyage reports total_tokens; Score must surface it as promptTokens.
+	if ptoks != 42 {
+		t.Errorf("promptTokens = %d, want 42 (total_tokens fallback)", ptoks)
+	}
+}
+
+// TestScore_VoyageDataReAlignsByIndex verifies index re-alignment works through
+// the "data" path too (Voyage sorts descending by score, not input order).
+func TestScore_VoyageDataReAlignsByIndex(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		// Server returns sorted DESC: doc2 (best), doc0, doc1 (worst).
+		return http.StatusOK, voyageResults(
+			map[string]any{"index": 2, "relevance_score": 0.99},
+			map[string]any{"index": 0, "relevance_score": 0.50},
+			map[string]any{"index": 1, "relevance_score": 0.05},
+		)
+	})
+
+	scores, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"apple", "bear", "exact"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Must be re-aligned to INPUT order: doc0=0.50, doc1=0.05, doc2=0.99.
+	want := []float64{0.50, 0.05, 0.99}
+	for i := range want {
+		if scores[i] != want[i] {
+			t.Errorf("scores[%d] = %v, want %v (index re-alignment via data broken)", i, scores[i], want[i])
+		}
+	}
+}
+
+// TestScore_PrefersResultsOverData: when both "results" and "data" are present
+// (hypothetical server that sends both), "results" wins (cohere/llama.cpp path).
+func TestScore_PrefersResultsOverData(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, map[string]any{
+			"object": "list",
+			"results": []map[string]any{
+				{"index": 0, "relevance_score": 1.0},
+				{"index": 1, "relevance_score": 2.0},
+			},
+			"data": []map[string]any{
+				{"index": 0, "relevance_score": 9.0},
+				{"index": 1, "relevance_score": 8.0},
+			},
+			"usage": map[string]any{"prompt_tokens": 10},
+		}
+	})
+
+	scores, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Must use "results" values (1.0, 2.0), NOT "data" values (9.0, 8.0).
+	if scores[0] != 1.0 || scores[1] != 2.0 {
+		t.Errorf("scores = %v, want [1.0 2.0] (results must take precedence over data)", scores)
+	}
+	if ptoks != 10 {
+		t.Errorf("promptTokens = %d, want 10 (prompt_tokens preferred over total_tokens)", ptoks)
+	}
+}
+
+// TestScore_VoyageTotalTokensFallback: when prompt_tokens is absent but
+// total_tokens is present (Voyage), Score returns total_tokens as the usage.
+func TestScore_VoyageTotalTokensFallback(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, map[string]any{
+			"object": "list",
+			"results": []map[string]any{
+				{"index": 0, "relevance_score": 0.5},
+			},
+			"usage": map[string]any{"total_tokens": 77},
+		}
+	})
+
+	_, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ptoks != 77 {
+		t.Errorf("promptTokens = %d, want 77 (total_tokens fallback)", ptoks)
+	}
+}
+
+// TestScore_VoyageDataRejectsCountMismatch: the "data" path must enforce the
+// same count-mismatch validation as "results" (no silent partial scoring).
+func TestScore_VoyageDataRejectsCountMismatch(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		// Only 1 result in "data" for 3 docs.
+		return http.StatusOK, voyageResults(
+			map[string]any{"index": 0, "relevance_score": 0.9},
+		)
+	})
+
+	if _, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b", "c"}); err == nil {
+		t.Fatal("expected count mismatch error via data path, got nil")
+	}
+}
+
+// TestScore_VoyageDataRejectsDuplicateIndex: duplicate index validation applies
+// through the "data" fallback path too.
+func TestScore_VoyageDataRejectsDuplicateIndex(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, voyageResults(
+			map[string]any{"index": 0, "relevance_score": 0.9},
+			map[string]any{"index": 0, "relevance_score": 0.8}, // dup
+		)
+	})
+
+	if _, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b"}); err == nil {
+		t.Fatal("expected duplicate index error via data path, got nil")
+	}
+}
+
+// TestScore_NeitherResultsNorData: a response with neither "results" nor "data"
+// must fail with count mismatch (got 0), not silently succeed.
+func TestScore_NeitherResultsNorData(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, map[string]any{"object": "list", "model": "m"}
+	})
+
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}); err == nil {
+		t.Fatal("expected error when neither results nor data present, got nil")
+	}
+}
