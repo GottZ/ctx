@@ -3,6 +3,7 @@ package rerank
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -129,7 +130,14 @@ func TestScore_EmptyDocs(t *testing.T) {
 	}
 }
 
-// --- Voyage AI format compatibility tests ---
+// Voyage AI format compatibility tests.
+
+// logit is the test-side mirror of probabilityToLogit: the expected wire
+// transform for Voyage's calibrated [0,1] scores (no clamping — tests use
+// interior probabilities).
+func logit(p float64) float64 {
+	return math.Log(p / (1 - p))
+}
 
 // voyageResults builds a Voyage-style response body: results under "data"
 // (OpenAPI RerankingObject schema) with "total_tokens" usage.
@@ -158,10 +166,13 @@ func TestScore_VoyageDataFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Voyage data fallback failed: %v", err)
 	}
-	want := []float64{0.95, 0.42, 0.11}
+	// Voyage scores are calibrated [0,1] probabilities; Score() maps them
+	// to logits at the wire boundary so its raw-logit return contract
+	// holds for every backend (the caller's sigmoid reconstructs p).
+	want := []float64{logit(0.95), logit(0.42), logit(0.11)}
 	for i := range want {
 		if scores[i] != want[i] {
-			t.Errorf("scores[%d] = %v, want %v", i, scores[i], want[i])
+			t.Errorf("scores[%d] = %v, want %v (logit of Voyage probability)", i, scores[i], want[i])
 		}
 	}
 	// Voyage reports total_tokens; Score must surface it as promptTokens.
@@ -186,8 +197,9 @@ func TestScore_VoyageDataReAlignsByIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Must be re-aligned to INPUT order: doc0=0.50, doc1=0.05, doc2=0.99.
-	want := []float64{0.50, 0.05, 0.99}
+	// Must be re-aligned to INPUT order (as logits of the Voyage
+	// probabilities): doc0=0.50, doc1=0.05, doc2=0.99.
+	want := []float64{logit(0.50), logit(0.05), logit(0.99)}
 	for i := range want {
 		if scores[i] != want[i] {
 			t.Errorf("scores[%d] = %v, want %v (index re-alignment via data broken)", i, scores[i], want[i])
@@ -287,5 +299,71 @@ func TestScore_NeitherResultsNorData(t *testing.T) {
 
 	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}); err == nil {
 		t.Fatal("expected error when neither results nor data present, got nil")
+	}
+}
+
+// TestScore_VoyageLogitRoundTrip pins the cross-backend score contract: the
+// caller's sigmoid (rrf.RerankCrossEncoder) applied to what Score() returns
+// for a Voyage "data" response must reconstruct the original probability.
+// This is the regression fence against double-sigmoiding calibrated scores,
+// which compresses the rerank signal into [0.5,0.73] and lets RRF outvote
+// the reranker at blend_weight < 1.
+func TestScore_VoyageLogitRoundTrip(t *testing.T) {
+	probs := []float64{0.05, 0.10, 0.20, 0.98}
+	rs := make([]map[string]any, len(probs))
+	for i, p := range probs {
+		rs[i] = map[string]any{"index": i, "relevance_score": p}
+	}
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, voyageResults(rs...)
+	})
+
+	scores, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b", "c", "d"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for i, p := range probs {
+		got := 1.0 / (1.0 + math.Exp(-scores[i]))
+		if math.Abs(got-p) > 1e-9 {
+			t.Errorf("sigmoid(scores[%d]) = %v, want %v (logit round-trip broken)", i, got, p)
+		}
+	}
+}
+
+// TestScore_VoyageEndpointScoresStayFinite: exact 0 and 1 are legitimately
+// producible by a quantized probability; they must clamp to large finite
+// logits, never ±Inf (which would poison the downstream blend arithmetic).
+func TestScore_VoyageEndpointScoresStayFinite(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, voyageResults(
+			map[string]any{"index": 0, "relevance_score": 0.0},
+			map[string]any{"index": 1, "relevance_score": 1.0},
+		)
+	})
+
+	scores, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if math.IsInf(scores[0], 0) || math.IsInf(scores[1], 0) || math.IsNaN(scores[0]) || math.IsNaN(scores[1]) {
+		t.Errorf("endpoint probabilities must clamp to finite logits, got %v", scores)
+	}
+	if scores[0] >= 0 || scores[1] <= 0 {
+		t.Errorf("clamped endpoint logits lost their sign: got %v, want [negative, positive]", scores)
+	}
+}
+
+// TestScore_VoyageDataRejectsOutOfRangeScore: a "data" entry outside [0,1]
+// breaks the documented Voyage schema — Score must error (caller fails open)
+// rather than feed a bogus value through the probability→logit transform.
+func TestScore_VoyageDataRejectsOutOfRangeScore(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, voyageResults(
+			map[string]any{"index": 0, "relevance_score": 4.2},
+		)
+	})
+
+	if _, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a"}); err == nil {
+		t.Fatal("expected error for data score outside [0,1], got nil")
 	}
 }

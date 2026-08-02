@@ -15,6 +15,13 @@
 //     0-1 probability. Score() returns it verbatim; the caller decides whether
 //     to sigmoid / normalize (the rrf layer does, see RerankCrossEncoder).
 //
+// Voyage AI (rerank-2.5/-lite) is supported as an alternative backend. Its
+// wire format differs in two coupled ways: results live under "data" (OpenAPI
+// RerankingObject) and relevance_score is a calibrated [0,1] relevance — not
+// a logit. Score() maps those probabilities through the logit function at the
+// wire boundary so the return contract above (raw logits) holds for every
+// backend and the caller's sigmoid reconstructs the original probability.
+//
 // Source: https://github.com/GottZ/ctx
 package rerank
 
@@ -24,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"time"
 
@@ -126,10 +134,14 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 
 	// Voyage AI returns results under "data" (OpenAPI RerankingObject),
 	// while cohere/llama.cpp uses "results". Prefer "results"; fall back
-	// to "data" when "results" is absent.
+	// to "data" when "results" is absent. The container name is coupled to
+	// the score domain: "data" backends (Voyage) report calibrated [0,1]
+	// relevance, "results" backends (cohere/llama.cpp) report raw logits.
 	entries := result.Results
+	fromData := false
 	if len(entries) == 0 && len(result.Data) > 0 {
 		entries = result.Data
+		fromData = true
 	}
 
 	// Re-align strictly by result.Index into input order. The server sorts
@@ -148,7 +160,21 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 			return nil, 0, fmt.Errorf("rerank: duplicate result index %d", r.Index)
 		}
 		seen[r.Index] = true
-		scores[r.Index] = r.RelevanceScore
+		score := r.RelevanceScore
+		if fromData {
+			// Voyage's calibrated [0,1] relevance would be sigmoided a
+			// second time by the caller (rrf treats every score as a
+			// logit), compressing the signal into [0.5,0.73] and letting
+			// RRF outvote the reranker at blend_weight < 1. Map the
+			// probability to its logit here so the downstream sigmoid
+			// reconstructs it exactly. A score outside [0,1] breaks the
+			// documented Voyage schema — error → caller fails open.
+			if score < 0 || score > 1 {
+				return nil, 0, fmt.Errorf("rerank: data score %g at index %d outside [0,1] (voyage schema violation)", score, r.Index)
+			}
+			score = probabilityToLogit(score)
+		}
+		scores[r.Index] = score
 		got++
 	}
 	if got != len(docs) {
@@ -162,4 +188,20 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 	}
 
 	return scores, promptTokens, nil
+}
+
+// probabilityToLogit maps a calibrated probability to its logit,
+// logit(p) = ln(p/(1-p)), the exact inverse of the caller's sigmoid.
+// p is clamped away from the exact endpoints so 0 and 1 (legitimately
+// producible by a quantized probability) yield large finite logits
+// instead of ±Inf, which would poison the downstream blend arithmetic.
+func probabilityToLogit(p float64) float64 {
+	const eps = 1e-7
+	if p < eps {
+		p = eps
+	}
+	if p > 1-eps {
+		p = 1 - eps
+	}
+	return math.Log(p / (1 - p))
 }
