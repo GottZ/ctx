@@ -62,12 +62,18 @@ type rerankResult struct {
 
 type rerankResponse struct {
 	Results []rerankResult `json:"results"`
+	// Voyage AI returns results under "data" instead of "results"
+	// (OpenAPI RerankingObject schema). If Results is empty after
+	// decode, fall back to Data.
+	Data []rerankResult `json:"data"`
 	// Usage is llama.cpp's Jina-style token accounting on the rerank
 	// response. prompt_tokens covers ALL query+document pairs of the request
 	// — the MW22/C1 charge dimension of the sidecar call. Absent field ⇒ 0 ⇒
 	// the call site charges nothing (uncharged, never an estimate).
+	// Voyage reports total_tokens instead of prompt_tokens.
 	Usage struct {
 		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
 	} `json:"usage"`
 }
 
@@ -118,6 +124,14 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 		return nil, 0, fmt.Errorf("rerank: decode: %w", err)
 	}
 
+	// Voyage AI returns results under "data" (OpenAPI RerankingObject),
+	// while cohere/llama.cpp uses "results". Prefer "results"; fall back
+	// to "data" when "results" is absent.
+	entries := result.Results
+	if len(entries) == 0 && len(result.Data) > 0 {
+		entries = result.Data
+	}
+
 	// Re-align strictly by result.Index into input order. The server sorts
 	// results by score descending (and may resize to top_n), so array position
 	// is meaningless — only Index maps a score back to its document. Validate
@@ -126,7 +140,7 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 	scores := make([]float64, len(docs))
 	seen := make([]bool, len(docs))
 	got := 0
-	for _, r := range result.Results {
+	for _, r := range entries {
 		if r.Index < 0 || r.Index >= len(docs) {
 			return nil, 0, fmt.Errorf("rerank: result index %d out of range [0,%d)", r.Index, len(docs))
 		}
@@ -141,5 +155,11 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 		return nil, 0, fmt.Errorf("rerank: result count mismatch: got %d scores for %d documents", got, len(docs))
 	}
 
-	return scores, result.Usage.PromptTokens, nil
+	// Voyage reports total_tokens; llama.cpp reports prompt_tokens.
+	promptTokens := result.Usage.PromptTokens
+	if promptTokens == 0 && result.Usage.TotalTokens > 0 {
+		promptTokens = result.Usage.TotalTokens
+	}
+
+	return scores, promptTokens, nil
 }
