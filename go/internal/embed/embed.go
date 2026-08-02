@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -219,10 +221,20 @@ func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]floa
 	promptTokens := result.Usage.PromptTokens
 	if promptTokens == 0 && result.Usage.TotalTokens > 0 {
 		promptTokens = result.Usage.TotalTokens
+		// This flips the MW22 meter semantics for total_tokens-only
+		// backends from "uncharged" to a real measured charge — same
+		// one-time visibility as the rerank pendant (4970856): embeds
+		// run per query and per backfill batch, per-call INFO would
+		// be noise.
+		embedTotalTokensFallbackOnce.Do(func() {
+			slog.Info("embed: backend reports usage.total_tokens only; charging it as prompt tokens (previously uncharged)")
+		})
 	}
 
 	return result.Data[0].Embedding, promptTokens, nil
 }
+
+var embedTotalTokensFallbackOnce sync.Once
 
 func l2Normalize(v []float64) []float32 {
 	var sumSq float64
