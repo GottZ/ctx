@@ -142,6 +142,7 @@ func TestSynthesizeWirePath(t *testing.T) {
 			b.ID, b.Name = "wire", "wire"
 			b.Trust = backends.TrustFull
 			b.Enabled = true
+			b.NumCtx = 8192 // H12: a synthesis chain member must declare its window
 			b.Roles = []string{backends.RoleSynthesis}
 			bpool := backends.NewPool(nil, nil)
 			bpool.SeedSnapshotForTest([]backends.Backend{b})

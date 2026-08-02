@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llmlog"
@@ -18,6 +19,14 @@ import (
 const (
 	// MaxBlockChars is the maximum content length per source in the LLM prompt.
 	MaxBlockChars = 1500
+
+	// MaxPromptSources is the upper end of the query handler's limit clamp and
+	// therefore the maximum number of sources one synthesis prompt can carry.
+	// Named here rather than left as a literal in internal/handler/query.go
+	// because the prompt-budget gate (H12) multiplies it against MaxBlockChars:
+	// raising the clamp raises the worst-case prompt, and the gate must be able
+	// to SEE that number.
+	MaxPromptSources = 20
 
 	// LowConfidenceMaxSources limits sources for low-confidence queries.
 	LowConfidenceMaxSources = 2
@@ -73,6 +82,14 @@ type SynthesisSettings struct {
 	// refusal) — see systemPromptV6 for the motivation. Unknown values fall
 	// back to v5.2 in selectSystemPrompt.
 	PromptVersion string
+
+	// ExternalNumCtxFallback is the operator-declared context window (TOKENS)
+	// for chain members whose row declares none — settings key
+	// pool.external_num_ctx_fallback (H12, decision E10). 0 = unset: an
+	// undeclared window then REFUSES the prompt rather than guessing a size
+	// for it (promptguard.ErrUndeclaredWindow). Travels through the call chain
+	// like the thresholds above; the llm package holds no config state.
+	ExternalNumCtxFallback int
 }
 
 // selectSystemPrompt resolves the active system prompt from the settings.
@@ -275,6 +292,12 @@ const (
 	// line the model can verify (design 04 §4.4 row 1).
 	sourceMarkerKind = "source"
 
+	// minSourceContentRunes is the floor under which a budget-shortened source
+	// is dropped instead of rendered. Below it the element carries a title, a
+	// citable id and a fragment — the model would weigh it as evidence it does
+	// not have. Mirrors the same floor inside promptguard.Assemble.
+	minSourceContentRunes = 64
+
 	// securityClose is the tail both prompt literals end on. The nonce rule is
 	// spliced in FRONT of it so the prompt keeps exactly ONE <security>
 	// element — promptguard.Rule returns its sentence bare for this reason; a
@@ -385,6 +408,118 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 	return systemPrompt, userPrompt
 }
 
+// chainWindows projects a resolved chain onto its declared context windows in
+// token units. NumCtx is the ONLY window source on a backend row (model_map
+// params carry sampling knobs, not the window — applyModelParams), and a SQL
+// NULL scans to the zero value, which is exactly the "undeclared" case
+// promptguard.ChainRuneBudget refuses.
+func chainWindows(chain []backends.Backend) []int {
+	out := make([]int, len(chain))
+	for i := range chain {
+		out[i] = chain[i].NumCtx
+	}
+	return out
+}
+
+// fitSourcesToBudget shortens the source set until the prompt fits the budget,
+// using promptguard.Assemble as the POLICY and applying its verdict back onto
+// the sources — rather than using its joined string.
+//
+// Why not assemble the prompt itself: BuildPrompt renders a structured XML
+// document (per-source <source id=… title=… score=…> elements the model is
+// told to cite by ordinal, plus the nonce-carrying markers inside them). A
+// part-wise join cannot reproduce that shape, and reproducing it would move
+// the golden prompt bytes of H2 for a code path that does not fire at today's
+// volumes. So Assemble decides WHAT survives and at what length; BuildPrompt
+// keeps rendering it, byte-identically to before whenever nothing was cut.
+//
+// The unshortenable part is the SELECTED SYSTEM PROMPT plus the nonce rule
+// that gets spliced into it: both are code-generated and both carry the
+// security element, so charging them at their real length is what makes
+// "budget below the rule is an error" mean something here.
+func fitSourcesToBudget(systemPrompt, question string, sources []Source, budget int) ([]Source, promptguard.Report) {
+	parts := make([]promptguard.Part, 0, len(sources)+2)
+	parts = append(parts,
+		promptguard.Part{Kind: "system", Payload: systemPrompt + promptguard.CanonicalRule(), Priority: promptguard.PriorityRule},
+		promptguard.Part{Kind: "question", Payload: question, Priority: promptguard.PriorityQuestion})
+	for i, src := range sources {
+		// The item as it will be rendered: the content at its own cap plus the
+		// per-source markup the builder wraps around it. Charging the markup
+		// here is what keeps a 20-source prompt from passing the budget and
+		// then overflowing on the element boundaries alone.
+		parts = append(parts, promptguard.Part{
+			Kind:     sourceMarkerKind,
+			Ref:      strconv.Itoa(i + 1),
+			Payload:  util.TruncateRunesWithSuffix(src.Content, "[... truncated]", MaxBlockChars) + src.Title + src.Category,
+			Priority: promptguard.PriorityContent,
+		})
+	}
+
+	_, rep := promptguard.Assemble(parts, budget)
+	if rep.Err != nil || !rep.Cut() {
+		return sources, rep
+	}
+
+	// Apply the verdict: keep the sources whose part survived, in input order.
+	// The assembled payload is the MEASUREMENT form (content + the two attribute
+	// values), not prompt text, so the surviving rune count is mapped back onto
+	// the content by subtracting what the attributes cost. Subtracting is the
+	// conservative direction: charging the attributes and then cutting only the
+	// content would leave the prompt larger than the budget it passed.
+	survivors := make(map[string]int, len(rep.Parts))
+	for _, p := range rep.Parts {
+		if p.Priority == promptguard.PriorityContent {
+			survivors[p.Ref] = utf8.RuneCountInString(p.Payload)
+		}
+	}
+	kept := make([]Source, 0, len(sources))
+	var droppedRefs []string
+	truncated := 0
+	for i, src := range sources {
+		ref := strconv.Itoa(i + 1)
+		room, ok := survivors[ref]
+		if ok {
+			room -= utf8.RuneCountInString(src.Title) + utf8.RuneCountInString(src.Category)
+		}
+		if !ok || room < minSourceContentRunes {
+			// Either Assemble evicted the part, or nothing meaningful is left
+			// once the attributes are paid for. A source rendered with a title
+			// and an empty body is not a shorter source — it is a citation
+			// target with no evidence behind it.
+			droppedRefs = append(droppedRefs, ref)
+			continue
+		}
+		if room < utf8.RuneCountInString(src.Content) {
+			src.Content = util.TruncateRunesSuffix(src.Content, "[... truncated]", room)
+			truncated++
+		}
+		kept = append(kept, src)
+	}
+
+	// Counts recomputed from the RESULT, not adjusted from Assemble's: this
+	// pass can drop a part Assemble had merely shortened, and an adjusted
+	// counter would double-count it (or go negative).
+	rep.Dropped, rep.Truncated, rep.DroppedRefs = len(droppedRefs), truncated, droppedRefs
+	return kept, rep
+}
+
+// applyBudgetTelemetry stamps the H12 prompt-budget outcome onto an llmlog
+// entry as metadata.promptguard_dropped — the count of source parts the budget
+// pass removed or shortened.
+//
+// Set ONLY when the budget actually bit. An absent key is the normal case and
+// stays absent: a constant 0 on every row would bury the one interesting case
+// in noise, and "column exists" is not the same signal as "cap fired".
+func applyBudgetTelemetry(entry *llmlog.Entry, rep promptguard.Report) {
+	if !rep.Cut() {
+		return
+	}
+	if entry.Metadata == nil {
+		entry.Metadata = map[string]any{}
+	}
+	entry.Metadata["promptguard_dropped"] = rep.Dropped + rep.Truncated
+}
+
 // Synthesize runs the full LLM synthesis pipeline:
 // filter -> confidence -> low-confidence limiting -> reorder -> gate ->
 // prompt -> chain.
@@ -452,10 +587,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 	}
 	required := backends.MaxSensitivity(parts...)
 
-	// Step 6: Build prompt.
-	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates, settings)
-
-	// Step 7: Resolve the chain and walk it. The gate is structural: a
+	// Step 6: Resolve the chain and walk it. The gate is structural: a
 	// backend the trust matrix excludes is not in the chain.
 	chain, chainErr := bpool.Chain(backends.RoleSynthesis, required, scope)
 	if chainErr != nil {
@@ -484,6 +616,26 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 		}
 		chain = gated
 	}
+
+	// Step 7 (H12): the prompt budget of the RESOLVED chain, then the prompt.
+	// Order is the whole point — the budget is a property of the chain the
+	// prompt will be walked over, so it cannot be known before the chain is.
+	// A chain member without a declared context window refuses the prompt
+	// (decision E10, fail-closed): the alternative is a compiled-in rate value,
+	// and for a router that spreads one model over providers with 32k-262k
+	// windows a rate value is wrong, not merely imprecise.
+	budget, budgetErr := promptguard.ChainRuneBudget(
+		chainWindows(chain), settings.ExternalNumCtxFallback, promptguard.BudgetSynthesis)
+	if budgetErr != nil {
+		return nil, fmt.Errorf("llm: synthesize: %w", budgetErr)
+	}
+	llmSources, budgetReport := fitSourcesToBudget(selectSystemPrompt(settings), originalQuery, llmSources, budget)
+	if budgetReport.Err != nil {
+		return nil, fmt.Errorf("llm: synthesize: %w", budgetReport.Err)
+	}
+
+	// Step 8: Build prompt over the fitted source set.
+	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates, settings)
 
 	resp, served, attempts, err := ChatChain(ctx, chain, backends.RoleSynthesis,
 		systemPrompt, userPrompt, SynthesisOptions(0), "", ChatTimeout, PoolReporter(bpool), adm)
@@ -516,6 +668,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 		Metadata:            map[string]any{"chain": attempts},
 		APIKeyID:            apiKeyID, // T35a: caller attribution (NULL for background)
 	}
+	applyBudgetTelemetry(&entry, budgetReport)
 	servedModel := ""
 	if served != nil {
 		servedModel = served.ModelFor(backends.RoleSynthesis).Model

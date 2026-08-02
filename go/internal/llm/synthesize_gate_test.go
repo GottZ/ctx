@@ -32,11 +32,16 @@ func countingOllama(t *testing.T, answer string) (*httptest.Server, *atomic.Int6
 	return srv, &hits
 }
 
+// NumCtx is DECLARED on purpose (H12): since the prompt budget resolves over
+// the chain, a synthesis backend without a declared context window refuses the
+// prompt instead of guessing a window size for it. A fixture that leaves it at
+// zero would test the budget refusal, not the trust gate these cases are about.
 func gateBackend(id string, host string, trust backends.Trust, priority int) backends.Backend {
 	return backends.Backend{
 		ID: id, Name: id, Host: host, Protocol: backends.ProtocolOllama,
 		Model: "m", Trust: trust, Enabled: true, Priority: priority,
-		Roles: []string{backends.RoleSynthesis},
+		NumCtx: 8192,
+		Roles:  []string{backends.RoleSynthesis},
 	}
 }
 

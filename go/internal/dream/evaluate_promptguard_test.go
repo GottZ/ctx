@@ -89,8 +89,8 @@ func TestBuildEvalPrompt_SourceLineNotForgeable(t *testing.T) {
 // all, so truncate falls through to the byte cut s[:n] and splits the 3-byte
 // rune that starts one byte before the limit.
 func TestBuildEvalPrompt_RuneSafeTruncation(t *testing.T) {
-	srcContent := strings.Repeat("a", maxContentLen-1) + "€" + strings.Repeat("b", 64)
-	candContent := strings.Repeat("a", maxContentLen/2-1) + "€" + strings.Repeat("b", 64)
+	srcContent := strings.Repeat("a", MaxContentLen-1) + "€" + strings.Repeat("b", 64)
+	candContent := strings.Repeat("a", MaxContentLen/2-1) + "€" + strings.Repeat("b", 64)
 	_, prompt := buildEvalPrompt(evalSource("reference", srcContent),
 		[]BlockInfo{evalCandidate("reference", candContent)})
 
@@ -100,8 +100,8 @@ func TestBuildEvalPrompt_RuneSafeTruncation(t *testing.T) {
 }
 
 func TestTruncate_RuneSafeAtByteBoundary(t *testing.T) {
-	s := strings.Repeat("a", maxContentLen-1) + "€" + strings.Repeat("b", 64)
-	got := truncate(s, maxContentLen)
+	s := strings.Repeat("a", MaxContentLen-1) + "€" + strings.Repeat("b", 64)
+	got := truncate(s, MaxContentLen)
 	if !utf8.ValidString(got) {
 		t.Fatalf("truncate split a multi-byte rune (tail %q)", got[max(0, len(got)-8):])
 	}

@@ -26,8 +26,12 @@ const (
 	// ~0.71% of legitimate calls a re-queue (the 42 successes that ran 180-600s).
 	DreamTimeout = 180 * time.Second
 
-	// maxContentLen limits content passed to LLM to reduce prompt injection surface.
-	maxContentLen = 800
+	// MaxContentLen limits content passed to LLM to reduce prompt injection
+	// surface. Candidates get half of it (buildEvalPrompt). Exported since H12:
+	// the prompt-budget gate multiplies it against the candidate count and has
+	// to be able to SEE it — a cap that only the package can read is a cap the
+	// budget cannot be held to.
+	MaxContentLen = 800
 
 	// dreamSystemPrompt instructs the LLM how to evaluate block relationships.
 	// Session 24 (2026-04-23): V5 prompt — topical-as-fallback default, supersedes hard-tightened,
@@ -212,14 +216,14 @@ func buildEvalPrompt(source BlockInfo, candidates []BlockInfo) (system, user str
 		source.ID, guardLine(source.Title), guardLine(source.Category),
 		source.UpdatedAt.Format("2006-01-02"))
 	b.WriteString(promptguard.Wrap(nonce, "source",
-		guardText(truncate(source.Content, maxContentLen))))
+		guardText(truncate(source.Content, MaxContentLen))))
 	b.WriteString("\n</source>\n\n<candidates>\n")
 
 	for _, c := range candidates {
 		fmt.Fprintf(&b, "<block id=\"%s\" title=\"%s\" category=\"%s\" updated=\"%s\">\n",
 			c.ID, guardLine(c.Title), guardLine(c.Category), c.UpdatedAt.Format("2006-01-02"))
 		b.WriteString(promptguard.Wrap(nonce, "candidate",
-			guardText(truncate(c.Content, maxContentLen/2))))
+			guardText(truncate(c.Content, MaxContentLen/2))))
 		b.WriteString("\n</block>\n")
 	}
 	b.WriteString("</candidates>")

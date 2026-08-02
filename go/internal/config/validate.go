@@ -178,6 +178,15 @@ func validateQuery(c *Config) []Issue {
 		}
 	}
 
+	// V9b (H12) — a negative context-window fallback is range garbage in the
+	// one direction that matters: ChainRuneBudget reads <= 0 as "unset" and
+	// refuses, so a negative value would silently mean "off" while reading as
+	// a configured number in the settings surface.
+	if c.Pool.ExternalNumCtxFallback < 0 {
+		issues = append(issues, Issue{Field: "pool.external_num_ctx_fallback", Severity: SeverityError,
+			Msg: fmt.Sprintf("context window fallback %d must be >= 0 (0 = unset)", c.Pool.ExternalNumCtxFallback)})
+	}
+
 	return issues
 }
 

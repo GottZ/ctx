@@ -663,6 +663,25 @@ type PoolConfig struct {
 	// Settings-only like its PoolConfig siblings; tenant-overridable like the
 	// block limit it falls back to.
 	BlobRateLimitWrite int `key:"pool.blob_rate_limit_write" env:"-" default:"10" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	// ExternalNumCtxFallback is the operator-declared context window, in
+	// TOKENS, for chain members whose row declares none (context_backends
+	// .num_ctx IS NULL — H12 / decision E10). It is the ONLY way a prompt
+	// carrying foreign text may be built for such a chain; without it the
+	// budget pass refuses (promptguard.ErrUndeclaredWindow).
+	//
+	// Default 0 = UNSET = no fallback = refuse. Conservative on purpose: the
+	// alternative — a compiled-in rate value — is not a conservative guess but
+	// a wrong one. For the live openrouter row the routed model's per-provider
+	// windows span 32 768 to 262 144, and the model-level context_length is the
+	// MAXIMUM over providers, not the minimum; sizing a prompt against it
+	// overflows on every provider below the top. An operator who knows which
+	// floor their routing actually guarantees can declare it here (or, better,
+	// put num_ctx on the row itself, which is per-backend rather than global).
+	//
+	// tenant-overridable like its pool siblings and for the same reason: the
+	// value only ever bounds the tenant's OWN prompts, and a tenant on a
+	// stricter provider tier must be able to declare its own floor.
+	ExternalNumCtxFallback int `key:"pool.external_num_ctx_fallback" env:"-" default:"0" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	// The legacy gaming.active / gaming.disabled_backends settings keys were
 	// retired in Web-UX U01-W5 (AM-7 cutover): chain-time exclusion is now the
 	// eject disable-profile (092), read live from the pool snapshot. Any leftover
@@ -1206,9 +1225,10 @@ func (c *Config) DreamBackoff() dream.BackoffConfig {
 // copy).
 func (c *Config) SynthesisSettings() llm.SynthesisSettings {
 	return llm.SynthesisSettings{
-		ScoreThreshold:     c.Query.ScoreThreshold,
-		ConfidentThreshold: c.Query.ConfidentThreshold,
-		PromptVersion:      c.Query.PromptVersion,
+		ScoreThreshold:         c.Query.ScoreThreshold,
+		ConfidentThreshold:     c.Query.ConfidentThreshold,
+		PromptVersion:          c.Query.PromptVersion,
+		ExternalNumCtxFallback: c.Pool.ExternalNumCtxFallback,
 	}
 }
 

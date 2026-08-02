@@ -104,7 +104,7 @@ func TestBuildRecurrencePrompt_ContainsBoth(t *testing.T) {
 }
 
 func TestBuildRecurrencePrompt_TruncatesContent(t *testing.T) {
-	long := strings.Repeat("abcdefghij ", 200) // 2200 bytes — exceeds maxContentLen 800
+	long := strings.Repeat("abcdefghij ", 200) // 2200 bytes — exceeds MaxContentLen 800
 	src := BlockInfo{
 		ID:        "019d0000-0000-7000-9000-000000000001",
 		Title:     "Long block",
@@ -118,7 +118,7 @@ func TestBuildRecurrencePrompt_TruncatesContent(t *testing.T) {
 		TitleSim:    0.6,
 	}
 	_, out := buildRecurrencePrompt(src, cand)
-	if len(out) > 4*maxContentLen {
+	if len(out) > 4*MaxContentLen {
 		t.Errorf("prompt too long: %d bytes (truncate not effective)", len(out))
 	}
 }

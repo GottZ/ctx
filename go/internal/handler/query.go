@@ -483,15 +483,17 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"kind", m.Kind, "request_id", requestID)
 	}
 
-	// Clamp limit: 1-20, default 5.
+	// Clamp limit: 1-MaxPromptSources, default 5. The upper bound is named in
+	// internal/llm because it is half of the synthesis prompt's worst case
+	// (MaxPromptSources x MaxBlockChars) and the H12 budget gate reads it there.
 	limit := 5
 	if req.Limit != nil {
 		limit = *req.Limit
 		if limit < 1 {
 			limit = 1
 		}
-		if limit > 20 {
-			limit = 20
+		if limit > llm.MaxPromptSources {
+			limit = llm.MaxPromptSources
 		}
 	}
 

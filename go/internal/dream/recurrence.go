@@ -153,7 +153,7 @@ func pickRecurrenceCandidates(ctx context.Context, pool *pgxpool.Pool, r *Router
 		   AND similarity(b.title, $2) > $5
 		 ORDER BY title_sim DESC
 		 LIMIT $6`,
-		sourceID, sourceTitle, sourceScope, maxContentLen,
+		sourceID, sourceTitle, sourceScope, MaxContentLen,
 		recurrenceTitleSimThreshold, MaxRecurrenceCandidates,
 	)
 	if err != nil {
@@ -239,12 +239,12 @@ func buildRecurrencePrompt(source BlockInfo, c recurrenceCandidate) (system, use
 	fmt.Fprintf(&b, "block_a: id=%s title=\"%s\" updated=\"%s\"\n",
 		source.ID, guardLine(source.Title), source.UpdatedAt.Format("2006-01-02"))
 	b.WriteString(promptguard.Wrap(nonce, "block_a",
-		guardText(truncate(source.Content, maxContentLen))))
+		guardText(truncate(source.Content, MaxContentLen))))
 	b.WriteString("\n\n")
 	fmt.Fprintf(&b, "block_b: id=%s title=\"%s\" title_sim=\"%.2f\"\n",
 		c.TargetID, guardLine(c.TargetTitle), c.TitleSim)
 	b.WriteString(promptguard.Wrap(nonce, "block_b",
-		guardText(truncate(c.TargetText, maxContentLen))))
+		guardText(truncate(c.TargetText, MaxContentLen))))
 
 	return recurrenceSystemPrompt + "\n\n" + promptguard.Rule(nonce), b.String()
 }

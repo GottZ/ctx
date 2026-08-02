@@ -149,8 +149,8 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 // carry no XML metacharacter and used to reach the model contiguous.
 func buildKeywordPrompt(title, content string) string {
 	truncated := content
-	if len(truncated) > maxContentLen {
-		truncated = truncate(truncated, maxContentLen)
+	if len(truncated) > MaxContentLen {
+		truncated = truncate(truncated, MaxContentLen)
 	}
 	var b strings.Builder
 	b.WriteString("<block>\nTitle: ")
