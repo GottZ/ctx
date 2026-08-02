@@ -156,7 +156,7 @@ func TestEmbedWirePathDocumentPrefix(t *testing.T) {
 	}
 }
 
-// --- Voyage AI total_tokens fallback tests ---
+// Voyage AI total_tokens fallback tests.
 
 // newUsageServer returns an OpenAI-wire embed stub whose response carries the
 // given raw JSON usage fragment (e.g. `"usage":{"total_tokens":42}`). Pass ""
