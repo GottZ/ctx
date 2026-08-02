@@ -122,6 +122,95 @@ func TestBackendUpdateConfirmRequired(t *testing.T) {
 	}
 }
 
+// seedRerankBackend returns a pool with one rerank-capable backend without
+// an explicit score_domain (⇒ effective auto).
+func seedRerankBackend() *backends.Pool {
+	bp := backends.NewPool(nil, nil)
+	bp.SeedSnapshotForTest([]backends.Backend{{
+		ID: "0190-rr", Name: "reranker", Host: "https://rerank.example.com",
+		Protocol: "rerank", ProviderClass: backends.ProviderGeneric,
+		Trust: backends.TrustNoCredentials, Locality: backends.LocalityExternal,
+		Roles:    []string{backends.RoleRerank},
+		ModelMap: map[string]backends.ModelSpec{"rerank": {Model: "rerank-2.5"}},
+		Enabled:  true,
+	}})
+	return bp
+}
+
+// TestBackendScoreDomainConfirmRequired: flipping the EFFECTIVE score domain
+// of a rerank-capable backend without confirm_score_domain_change is a 400
+// carrying the chain of change; the create side is gated too (delete+create
+// bypass, same doctrine as the trust confirm).
+func TestBackendScoreDomainConfirmRequired(t *testing.T) {
+	rec := manageReqWithPool(t, adminAR(), seedRerankBackend(), map[string]any{
+		"action": "backend-update", "id": "0190-rr",
+		"data": map[string]any{"metadata": map[string]any{"score_domain": "probability"}},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("domain change without confirm: status %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "confirm_score_domain_change") {
+		t.Fatalf("error does not name the confirm flag: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "chain of change") {
+		t.Fatalf("error does not carry the chain of change: %s", rec.Body.String())
+	}
+
+	rec = manageReqWithPool(t, adminAR(), backends.NewPool(nil, nil), map[string]any{
+		"action": "backend-create",
+		"data": map[string]any{
+			"name": "voyage", "base_url": "https://api.voyageai.com",
+			"protocol": "rerank", "roles": []string{"rerank"},
+			"model_map": map[string]any{"rerank": "rerank-2.5"},
+			"metadata":  map[string]any{"score_domain": "probability"},
+		},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create with explicit domain, no confirm: status %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "confirm_score_domain_change") {
+		t.Fatalf("create error does not name the confirm flag: %s", rec.Body.String())
+	}
+}
+
+// TestBackendScoreDomainFrictionFree: edits that do NOT flip the effective
+// domain need no confirm — absent → explicit "auto" resolves identically,
+// and non-rerank backends are out of scope entirely. Both probes stop at a
+// deliberate validation 422 (empty model_map), proving the 400 guard did
+// not fire and the store was never reached.
+func TestBackendScoreDomainFrictionFree(t *testing.T) {
+	rec := manageReqWithPool(t, adminAR(), seedRerankBackend(), map[string]any{
+		"action": "backend-update", "id": "0190-rr",
+		"data": map[string]any{
+			"metadata":  map[string]any{"score_domain": "auto"},
+			"model_map": map[string]any{},
+		},
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("absent→auto: status %d, want 422 validation stop (body %s)", rec.Code, rec.Body.String())
+	}
+
+	bp := backends.NewPool(nil, nil)
+	bp.SeedSnapshotForTest([]backends.Backend{{
+		ID: "0190-syn", Name: "synth", Host: "https://api.example.com/v1",
+		Protocol: backends.ProtocolOpenAI, ProviderClass: backends.ProviderGeneric,
+		Trust: backends.TrustNoCredentials, Locality: backends.LocalityExternal,
+		Roles:    []string{backends.RoleSynthesis},
+		ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
+		Enabled:  true,
+	}})
+	rec = manageReqWithPool(t, adminAR(), bp, map[string]any{
+		"action": "backend-update", "id": "0190-syn",
+		"data": map[string]any{
+			"metadata":  map[string]any{"score_domain": "logit"},
+			"model_map": map[string]any{},
+		},
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("non-rerank backend: status %d, want 422 validation stop (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
 // TestBackendCreateValidation422: the 3.4 validation classes surface as 422
 // with field errors — denylist header, bad locality, embed+external.
 func TestBackendCreateValidation422(t *testing.T) {

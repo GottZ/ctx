@@ -44,6 +44,11 @@ type backendSpec struct {
 	// the ONLY way to lift the forced zdr/deny of an openrouter-class
 	// backend (never implicit via trust elevation, design 03 §3.3).
 	ConfirmDataCollection bool    `json:"confirm_data_collection"`
+	// ConfirmScoreDomainChange guards changing the effective
+	// metadata.score_domain of a rerank-capable backend — the change
+	// reinterprets every future ranking this backend produces and cuts
+	// the comparability of the access-log score trail at the switch.
+	ConfirmScoreDomainChange bool `json:"confirm_score_domain_change"`
 	Locality              *string `json:"locality"`
 	// Scope is the tenant dimension (062, Modell C). HONORED ONLY for a
 	// server-admin on create (free choice, defaults to _global); a tenant-admin
@@ -357,6 +362,17 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 		})
 		return
 	}
+	// Non-auto score_domain needs the confirm ON CREATE TOO — otherwise the
+	// update-confirm is trivially bypassed via delete+create (same doctrine
+	// as the trust confirm above).
+	if b.HasRole(backends.RoleRerank) && b.ScoreDomain() != backends.ScoreDomainAuto && !spec.ConfirmScoreDomainChange {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error": fmt.Sprintf("creating a rerank-capable backend with score_domain %q requires confirm_score_domain_change:true — %s",
+				b.ScoreDomain(), scoreDomainChainOfChange),
+		})
+		return
+	}
 	// Same bypass logic as the trust confirm: without the create-side check
 	// the update-confirm would fall to a direct create.
 	if dataCollectionEscapeOn(b) && !spec.ConfirmDataCollection {
@@ -463,11 +479,29 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 		})
 		return
 	}
+	// Changing the EFFECTIVE score domain of a rerank-capable backend
+	// reinterprets every future ranking it produces. The confirm reply
+	// carries the full chain of change so the operator decides informed.
+	if scoreDomainChanged(prev, &next) && !spec.ConfirmScoreDomainChange {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error": fmt.Sprintf("changing score_domain %q → %q on a rerank-capable backend requires confirm_score_domain_change:true — %s",
+				prev.ScoreDomain(), next.ScoreDomain(), scoreDomainChainOfChange),
+		})
+		return
+	}
 
 	warnings, fieldErrs := backends.ValidateBackend(&next)
 	if len(fieldErrs) > 0 {
 		writeBackendValidation(w, fieldErrs)
 		return
+	}
+	if scoreDomainChanged(prev, &next) {
+		slog.Warn("backends: confirmed score_domain change",
+			"backend", next.Name, "from", prev.ScoreDomain(), "to", next.ScoreDomain())
+		warnings = append(warnings, fmt.Sprintf(
+			"score_domain changed %s → %s (confirmed) — %s",
+			prev.ScoreDomain(), next.ScoreDomain(), scoreDomainChainOfChange))
 	}
 
 	// disable_profiles rides on backend-update and inherits its write scope: the
@@ -726,6 +760,27 @@ func openRouterGET(ctx context.Context, url, apiKey string) ([]byte, bool) {
 
 // dataCollectionEscapeOn mirrors llm.allowsDataCollection: only a literal
 // bool true on an openrouter-class row arms the non-ZDR escape.
+// scoreDomainChainOfChange is the operator-facing consequence chain of a
+// score-domain switch, shipped in both the confirm-required error and the
+// post-confirm warning. The corpus claim is inventory-backed (2026-08-02):
+// dream, guard, digest and overview all persist without rerank — the only
+// persisted rerank traces are the blended access-log scores and the
+// scorefree llmlog telemetry row. Should a future pipeline persist
+// rerank-derived artifacts, its reprocessing trigger belongs HERE.
+const scoreDomainChainOfChange = "chain of change: (1) effective immediately (hot) — every future query ranking interprets this backend's scores under the new domain; (2) the context_access_log score trail was computed under the previous domain and is only comparable up to this switch; (3) no corpus reprocessing is required — no curation artifact (dream links, guard status, digest, overview) persists rerank-derived data"
+
+// scoreDomainChanged reports whether the update flips the EFFECTIVE rerank
+// score domain: raw metadata edits that resolve to the same domain (e.g.
+// absent → explicit "auto") stay friction-free, mirroring trustRankRose.
+// The role check covers both sides so dropping the rerank role in the same
+// patch cannot smuggle the switch past the confirm.
+func scoreDomainChanged(prev, next *backends.Backend) bool {
+	if !prev.HasRole(backends.RoleRerank) && !next.HasRole(backends.RoleRerank) {
+		return false
+	}
+	return prev.ScoreDomain() != next.ScoreDomain()
+}
+
 func dataCollectionEscapeOn(b *backends.Backend) bool {
 	if b.ProviderClass != backends.ProviderOpenRouter {
 		return false

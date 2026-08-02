@@ -75,7 +75,7 @@ func backendsCmd(getClient func() (*Client, error)) *cobra.Command {
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use:   "update <id> [json|-]",
-		Short: "Patch a backend (single-field updates; trust elevation needs confirm_trust_elevation)",
+		Short: "Patch a backend (single-field updates; trust elevation needs confirm_trust_elevation, rerank score_domain changes need confirm_score_domain_change)",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			spec, err := backendSpecArg(args, 1)
