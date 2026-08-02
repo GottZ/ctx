@@ -258,6 +258,26 @@ func TestScore_UsageAbsentChargesNothing(t *testing.T) {
 	}
 }
 
+// TestScore_NegativePromptTokensFallsBack: a negative prompt_tokens is a
+// sentinel, not a measurement — it must not block the total_tokens fallback.
+// Guard is <= 0, symmetric with the embed pendant.
+func TestScore_NegativePromptTokensFallsBack(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, map[string]any{
+			"results": []map[string]any{{"index": 0, "relevance_score": 1.0}},
+			"usage":   map[string]any{"prompt_tokens": -1, "total_tokens": 50},
+		}
+	})
+
+	_, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ptoks != 50 {
+		t.Errorf("promptTokens = %d, want 50 (negative sentinel must not block the fallback)", ptoks)
+	}
+}
+
 // TestScore_AuthorizationHeader: Voyage is a remote authenticated backend, so
 // the bearer header becomes load-bearing — sent when a key is configured,
 // absent otherwise (local llama.cpp sidecars reject no auth, they get none).
