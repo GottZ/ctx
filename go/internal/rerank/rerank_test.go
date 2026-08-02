@@ -222,7 +222,9 @@ func TestScore_PrefersResultsOverData(t *testing.T) {
 				{"index": 0, "relevance_score": 9.0},
 				{"index": 1, "relevance_score": 8.0},
 			},
-			"usage": map[string]any{"prompt_tokens": 10},
+			// total_tokens deliberately differs: the assertion below is
+			// only discriminating if both fields are present and unequal.
+			"usage": map[string]any{"prompt_tokens": 10, "total_tokens": 999},
 		}
 	})
 
@@ -236,6 +238,55 @@ func TestScore_PrefersResultsOverData(t *testing.T) {
 	}
 	if ptoks != 10 {
 		t.Errorf("promptTokens = %d, want 10 (prompt_tokens preferred over total_tokens)", ptoks)
+	}
+}
+
+// TestScore_UsageAbsentChargesNothing pins the documented metering contract:
+// "Absent field ⇒ 0 ⇒ the call site charges nothing (uncharged, never an
+// estimate)". A regression here would silently invent charges.
+func TestScore_UsageAbsentChargesNothing(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, okResults(map[string]any{"index": 0, "relevance_score": 1.0})
+	})
+
+	_, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ptoks != 0 {
+		t.Errorf("promptTokens = %d, want 0 (absent usage must charge nothing)", ptoks)
+	}
+}
+
+// TestScore_AuthorizationHeader: Voyage is a remote authenticated backend, so
+// the bearer header becomes load-bearing — sent when a key is configured,
+// absent otherwise (local llama.cpp sidecars reject no auth, they get none).
+func TestScore_AuthorizationHeader(t *testing.T) {
+	var gotAuth string
+	handler := func(r *http.Request) (int, any) {
+		gotAuth = r.Header.Get("Authorization")
+		return http.StatusOK, okResults(map[string]any{"index": 0, "relevance_score": 1.0})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status, body := handler(r)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, _, err := Score(context.Background(), srv.URL, "sk-test-key", "m", "q", []string{"a"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth != "Bearer sk-test-key" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer sk-test-key")
+	}
+
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty when no apiKey configured", gotAuth)
 	}
 }
 
