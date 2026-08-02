@@ -353,6 +353,39 @@ func TestScore_VoyageEndpointScoresStayFinite(t *testing.T) {
 	}
 }
 
+// TestScore_MissingRelevanceScoreFailsOpen: sibling rerank dialects name the
+// score field "score" instead of "relevance_score" (mixedbread, gateways).
+// Decoding such a body must error — never silently score every document 0.0,
+// which would neutralize the reranker while telemetry reports success. Both
+// container paths are covered; the "results" case guards the pre-existing
+// lattice, the "data" case the one this PR's fallback newly reaches.
+func TestScore_MissingRelevanceScoreFailsOpen(t *testing.T) {
+	for name, body := range map[string]any{
+		"results": map[string]any{
+			"results": []map[string]any{
+				{"index": 0, "score": 0.9},
+				{"index": 1, "score": 0.5},
+			},
+		},
+		"data": map[string]any{
+			"data": []map[string]any{
+				{"index": 0, "score": 0.9},
+				{"index": 1, "score": 0.5},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := body
+			srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+				return http.StatusOK, b
+			})
+			if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
+				t.Fatalf("%s path: expected missing relevance_score error, got nil", name)
+			}
+		})
+	}
+}
+
 // TestScore_VoyageDataRejectsOutOfRangeScore: a "data" entry outside [0,1]
 // breaks the documented Voyage schema — Score must error (caller fails open)
 // rather than feed a bogus value through the probability→logit transform.
