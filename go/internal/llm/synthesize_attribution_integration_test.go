@@ -71,7 +71,12 @@ func TestSynthesize_AttributesAPIKeyID(t *testing.T) {
 	bpool := backends.NewPool(nil, nil)
 	bpool.SeedSnapshotForTest([]backends.Backend{{
 		ID: "wire", Name: "wire", Host: srv.URL, Protocol: backends.ProtocolOpenAI, Model: "m",
-		Trust: backends.TrustFull, Enabled: true, Roles: []string{backends.RoleSynthesis},
+		// NumCtx is DECLARED (H12): the prompt budget resolves over the chain,
+		// so a synthesis member without a window refuses the prompt before this
+		// test reaches the attribution it exists to measure. The refusal itself
+		// has its own probe (TestSynthesizeRefusesUndeclaredWindow).
+		NumCtx: 8192,
+		Trust:  backends.TrustFull, Enabled: true, Roles: []string{backends.RoleSynthesis},
 	}})
 
 	settings := llm.SynthesisSettings{ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: llm.PromptVersionV52}

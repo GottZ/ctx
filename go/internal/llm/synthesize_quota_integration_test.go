@@ -72,7 +72,11 @@ func TestSynthesize_QuotaBlocksOverBudget(t *testing.T) {
 	bpool := backends.NewPool(nil, nil)
 	bpool.SeedSnapshotForTest([]backends.Backend{{
 		ID: "ext", Name: "cloud", Host: srv.URL, Protocol: backends.ProtocolOpenAI, Model: "m",
-		Trust: backends.TrustFull, Enabled: true, Locality: backends.LocalityExternal,
+		// NumCtx is DECLARED (H12): the prompt budget resolves over the chain,
+		// so a synthesis member without a window refuses the prompt before the
+		// quota gate this test exists to measure ever runs.
+		NumCtx: 8192,
+		Trust:  backends.TrustFull, Enabled: true, Locality: backends.LocalityExternal,
 		Roles: []string{backends.RoleSynthesis}, Scope: backends.GlobalScope,
 	}})
 
