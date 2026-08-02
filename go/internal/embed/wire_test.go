@@ -155,3 +155,109 @@ func TestEmbedWirePathDocumentPrefix(t *testing.T) {
 		t.Errorf("document embed must not carry the query prefix; body = %s", body)
 	}
 }
+
+// --- Voyage AI total_tokens fallback tests ---
+
+// newUsageServer returns an OpenAI-wire embed stub whose response carries the
+// given raw JSON usage fragment (e.g. `"usage":{"total_tokens":42}`). Pass ""
+// for no usage field at all.
+func newUsageServer(t *testing.T, usageJSON string) *httptest.Server {
+	t.Helper()
+	vec := wireVectorJSON()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/embeddings" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if usageJSON != "" {
+			fmt.Fprintf(w, `{"data":[{"embedding":[%s]}],%s}`, vec, usageJSON)
+		} else {
+			fmt.Fprintf(w, `{"data":[{"embedding":[%s]}]}`, vec)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func openAIBackend(host string) backends.Backend {
+	return backends.Backend{Host: host, Protocol: backends.ProtocolOpenAI, Model: "voyage-4"}
+}
+
+// TestEmbedOpenAI_VoyageTotalTokensFallback is the load-bearing regression
+// test: Voyage AI reports usage.total_tokens instead of usage.prompt_tokens
+// on the /v1/embeddings endpoint. Before the fix, promptTokens was always 0
+// for Voyage, so llmlog rows carried no token accounting.
+func TestEmbedOpenAI_VoyageTotalTokensFallback(t *testing.T) {
+	srv := newUsageServer(t, `"usage":{"total_tokens":42}`)
+	_, ptoks, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if ptoks != 42 {
+		t.Errorf("promptTokens = %d, want 42 (total_tokens fallback)", ptoks)
+	}
+}
+
+// TestEmbedOpenAI_PromptTokensPreferred: when both prompt_tokens and
+// total_tokens are present (OpenAI sends both), prompt_tokens wins.
+func TestEmbedOpenAI_PromptTokensPreferred(t *testing.T) {
+	srv := newUsageServer(t, `"usage":{"prompt_tokens":10,"total_tokens":10}`)
+	_, ptoks, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if ptoks != 10 {
+		t.Errorf("promptTokens = %d, want 10 (prompt_tokens preferred)", ptoks)
+	}
+}
+
+// TestEmbedOpenAI_PromptTokensOnly: standard OpenAI-compatible servers that
+// send only prompt_tokens must keep working unchanged.
+func TestEmbedOpenAI_PromptTokensOnly(t *testing.T) {
+	srv := newUsageServer(t, `"usage":{"prompt_tokens":77}`)
+	_, ptoks, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if ptoks != 77 {
+		t.Errorf("promptTokens = %d, want 77", ptoks)
+	}
+}
+
+// TestEmbedOpenAI_NoUsage: a server that omits usage entirely must return 0
+// tokens (uncharged, never an estimate — C1 doctrine).
+func TestEmbedOpenAI_NoUsage(t *testing.T) {
+	srv := newUsageServer(t, "")
+	_, ptoks, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if ptoks != 0 {
+		t.Errorf("promptTokens = %d, want 0 (no usage field)", ptoks)
+	}
+}
+
+// TestEmbedOpenAI_EmptyUsage: usage present but both fields zero.
+func TestEmbedOpenAI_EmptyUsage(t *testing.T) {
+	srv := newUsageServer(t, `"usage":{"prompt_tokens":0,"total_tokens":0}`)
+	_, ptoks, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if ptoks != 0 {
+		t.Errorf("promptTokens = %d, want 0", ptoks)
+	}
+}
+
+// TestEmbedOpenAI_VectorStillCorrect: the token fallback must not disturb the
+// embedding vector itself — verify dimensionality and quality gate pass.
+func TestEmbedOpenAI_VectorStillCorrect(t *testing.T) {
+	srv := newUsageServer(t, `"usage":{"total_tokens":99}`)
+	vec, _, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(vec) != TargetDims {
+		t.Errorf("len(vec) = %d, want %d", len(vec), TargetDims)
+	}
+}
