@@ -31,8 +31,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/GottZ/ctx/internal/httpx"
@@ -214,10 +216,19 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 	promptTokens := result.Usage.PromptTokens
 	if promptTokens == 0 && result.Usage.TotalTokens > 0 {
 		promptTokens = result.Usage.TotalTokens
+		// This flips the MW22 meter semantics for total_tokens-only
+		// backends from "uncharged" to a real measured charge — make
+		// the switch findable in the log, once per process (rerank
+		// runs per query; per-call INFO would be noise).
+		totalTokensFallbackOnce.Do(func() {
+			slog.Info("rerank: backend reports usage.total_tokens only; charging it as prompt tokens (previously uncharged)")
+		})
 	}
 
 	return scores, promptTokens, nil
 }
+
+var totalTokensFallbackOnce sync.Once
 
 // probabilityToLogit maps a calibrated probability to its logit,
 // logit(p) = ln(p/(1-p)), the exact inverse of the caller's sigmoid.
