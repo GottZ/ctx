@@ -219,7 +219,7 @@ func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]floa
 	// Voyage AI reports total_tokens; OpenAI-compatible servers report
 	// prompt_tokens. Prefer prompt_tokens; fall back to total_tokens.
 	promptTokens := result.Usage.PromptTokens
-	if promptTokens == 0 && result.Usage.TotalTokens > 0 {
+	if promptTokens <= 0 && result.Usage.TotalTokens > 0 {
 		promptTokens = result.Usage.TotalTokens
 		// This flips the MW22 meter semantics for total_tokens-only
 		// backends from "uncharged" to a real measured charge — same

@@ -215,7 +215,7 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 
 	// Voyage reports total_tokens; llama.cpp reports prompt_tokens.
 	promptTokens := result.Usage.PromptTokens
-	if promptTokens == 0 && result.Usage.TotalTokens > 0 {
+	if promptTokens <= 0 && result.Usage.TotalTokens > 0 {
 		promptTokens = result.Usage.TotalTokens
 		// This flips the MW22 meter semantics for total_tokens-only
 		// backends from "uncharged" to a real measured charge — make

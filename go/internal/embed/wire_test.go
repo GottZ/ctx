@@ -214,6 +214,21 @@ func TestEmbedOpenAI_PromptTokensPreferred(t *testing.T) {
 	}
 }
 
+// TestEmbedOpenAI_NegativePromptTokensFallsBack: a negative prompt_tokens is
+// a sentinel, not a measurement — it must not block the total_tokens
+// fallback (and must never be charged itself). Guard is <= 0, symmetric
+// with the rerank pendant.
+func TestEmbedOpenAI_NegativePromptTokensFallsBack(t *testing.T) {
+	srv := newUsageServer(t, `"usage":{"prompt_tokens":-1,"total_tokens":50}`)
+	_, ptoks, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if ptoks != 50 {
+		t.Errorf("promptTokens = %d, want 50 (negative sentinel must not block the fallback)", ptoks)
+	}
+}
+
 // TestEmbedOpenAI_PromptTokensOnly: standard OpenAI-compatible servers that
 // send only prompt_tokens must keep working unchanged.
 func TestEmbedOpenAI_PromptTokensOnly(t *testing.T) {
