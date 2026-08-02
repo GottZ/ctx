@@ -463,7 +463,9 @@ jobs:
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 25 (was 20): the handler package alone may take up to its 15m package
+    # budget on slow nightly runners — see the -timeout note below.
+    timeout-minutes: 25
     needs: [unit-tests]
     permissions:
       contents: read
@@ -512,11 +514,17 @@ jobs:
       - name: Run integration tests
         working-directory: go
         run: |
+          # -timeout is PER PACKAGE. internal/handler legitimately exceeded
+          # 10m on nightly runners twice (2026-07-26 + 2026-08-02): ~500
+          # testcontainer starts across the suite under slow shared-runner
+          # I/O — the "hanging" test in both panic dumps had run for only
+          # 2s, it was merely the one on the clock when the package budget
+          # expired. 15m absorbs runner weather; a REAL hang still fails.
           go test \
             -v \
             -tags=integration \
             -count=1 \
-            -timeout=10m \
+            -timeout=15m \
             -coverprofile=coverage-integration.out \
             -covermode=atomic \
             ./...
