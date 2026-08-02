@@ -64,8 +64,13 @@ type rerankRequest struct {
 }
 
 type rerankResult struct {
-	Index          int     `json:"index"`
-	RelevanceScore float64 `json:"relevance_score"`
+	Index int `json:"index"`
+	// RelevanceScore is a pointer so an absent field is distinguishable
+	// from a legitimate 0.0: sibling rerank dialects name this field
+	// "score" (mixedbread, some gateways), and silently scoring every
+	// document 0 would neutralize the reranker while telemetry reports a
+	// successful call. Absent ⇒ error ⇒ caller fails open.
+	RelevanceScore *float64 `json:"relevance_score"`
 }
 
 type rerankResponse struct {
@@ -160,7 +165,10 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 			return nil, 0, fmt.Errorf("rerank: duplicate result index %d", r.Index)
 		}
 		seen[r.Index] = true
-		score := r.RelevanceScore
+		if r.RelevanceScore == nil {
+			return nil, 0, fmt.Errorf("rerank: result index %d missing relevance_score (unknown score field name?)", r.Index)
+		}
+		score := *r.RelevanceScore
 		if fromData {
 			// Voyage's calibrated [0,1] relevance would be sigmoided a
 			// second time by the caller (rrf treats every score as a
