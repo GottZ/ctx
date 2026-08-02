@@ -201,7 +201,10 @@ func TestEmbedOpenAI_VoyageTotalTokensFallback(t *testing.T) {
 // TestEmbedOpenAI_PromptTokensPreferred: when both prompt_tokens and
 // total_tokens are present (OpenAI sends both), prompt_tokens wins.
 func TestEmbedOpenAI_PromptTokensPreferred(t *testing.T) {
-	srv := newUsageServer(t, `"usage":{"prompt_tokens":10,"total_tokens":10}`)
+	// total_tokens deliberately differs from prompt_tokens: with equal
+	// values the assertion below cannot distinguish which field won, and
+	// a precedence inversion survives the suite (the PR #13 lesson).
+	srv := newUsageServer(t, `"usage":{"prompt_tokens":10,"total_tokens":99}`)
 	_, ptoks, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
@@ -253,11 +256,16 @@ func TestEmbedOpenAI_EmptyUsage(t *testing.T) {
 // embedding vector itself — verify dimensionality and quality gate pass.
 func TestEmbedOpenAI_VectorStillCorrect(t *testing.T) {
 	srv := newUsageServer(t, `"usage":{"total_tokens":99}`)
-	vec, _, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
+	vec, ptoks, err := Embed(context.Background(), openAIBackend(srv.URL), "hello", PrefixQuery)
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
 	if len(vec) != TargetDims {
 		t.Errorf("len(vec) = %d, want %d", len(vec), TargetDims)
+	}
+	// Assert the token count too so this test kills mutants on its own
+	// instead of always failing/passing together with the fallback test.
+	if ptoks != 99 {
+		t.Errorf("promptTokens = %d, want 99 (fallback must feed through unchanged)", ptoks)
 	}
 }
