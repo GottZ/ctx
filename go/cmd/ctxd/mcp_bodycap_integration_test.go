@@ -153,9 +153,15 @@ func TestMCPBodyCapOnProductionMount_Integration(t *testing.T) {
 	})
 
 	// (b) Under-cap store ⇒ 200 and an actual write: the strict cap must not
-	// turn a legitimate large-but-allowed call into a false positive.
+	// turn a legitimate large-but-allowed call into a false positive. The
+	// upper bound of "legitimate" is NOT the transport cap: since B5
+	// (8c597e6) the direct MCP store arm runs the full REST write-gate
+	// chain, whose blockSizeLimit rejects content > 50 KiB — so the largest
+	// allowed call is a hair under that content gate, well below the 1 MiB
+	// body cap this test guards. (The original 900 KiB fixture predates the
+	// B5 gate parity and became a size_cap reject once both waves merged.)
 	t.Run("undersize_authenticated_stores", func(t *testing.T) {
-		body := mcpStoreBody("b6-undersize", 900<<10)
+		body := mcpStoreBody("b6-undersize", 45<<10)
 		if len(body) >= 1<<20 {
 			t.Fatalf("fixture body is %d bytes, want < 1 MB", len(body))
 		}
