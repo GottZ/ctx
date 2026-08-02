@@ -8,13 +8,16 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/rerank"
+	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,7 +26,9 @@ const (
 	RerankMinResults = 3
 	// RerankMaxDocs is the maximum number of documents to send to the LLM judge.
 	RerankMaxDocs = 15
-	// RerankContentLimit is the maximum content chars per doc in the judge prompt.
+	// RerankContentLimit is the maximum content chars per doc in the judge
+	// prompt. Counted in RUNES: a byte cut splits a multi-byte rune and the
+	// prompt stops being valid UTF-8 (H3).
 	RerankContentLimit = 400
 	// RerankWeight is the LLM judge's blend weight (rerank vs RRF). The RRF
 	// share is 1-RerankWeight, so 0.6 reproduces the historical 0.6/0.4 split.
@@ -36,6 +41,9 @@ const (
 	// RerankCrossEncoderContentLimit caps doc chars per document. Larger than the
 	// judge's 400 — the cross-encoder attends over the whole pair and ctx blocks
 	// run ~1-1.5k chars; stays well under the sidecar's 8192-token ubatch.
+	// Counted in RUNES since H3, so a CJK doc reaches ~3x the bytes at the same
+	// cap — still inside the ubatch, and the alternative was invalid UTF-8 in
+	// the request body.
 	RerankCrossEncoderContentLimit = 2048
 )
 
@@ -97,21 +105,11 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, require
 		docsToRerank = docsToRerank[:RerankMaxDocs]
 	}
 
-	// Build the user prompt with formatted docs.
-	var sb strings.Builder
-	sb.WriteString("Query: ")
-	sb.WriteString(llm.EscapeXml(query))
-	sb.WriteString("\n\n")
-
 	blockIDs := make([]string, len(docsToRerank))
 	for i, r := range docsToRerank {
 		blockIDs[i] = r.ID
-		content := r.Content
-		if len(content) > RerankContentLimit {
-			content = content[:RerankContentLimit]
-		}
-		fmt.Fprintf(&sb, "Doc %d [%s/%s]: %s\n\n", i+1, llm.EscapeXml(r.Category), llm.EscapeXml(r.Title), llm.EscapeXml(content))
 	}
+	system, user := buildRerankJudgePrompt(query, docsToRerank)
 
 	// Call the LLM over the synthesis chain (fail-open on any error).
 	resp, err := llm.ChainCall{
@@ -119,8 +117,8 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, require
 		Role:       backends.RoleSynthesis,
 		Required:   required,
 		Pipeline:   "query-rerank-judge",
-		System:     rerankSystemPrompt,
-		User:       sb.String(),
+		System:     system,
+		User:       user,
 		Opts:       llm.RerankOptions(0),
 		DefTimeout: llm.RerankTimeout,
 		BlockIDs:   blockIDs,
@@ -140,6 +138,106 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, require
 
 	// Apply blending and re-sort.
 	return applyRerankScores(results, scores, len(docsToRerank), RerankWeight), nil
+}
+
+// guardText is the wiring order for foreign text inside a judge block (design
+// 04 §4.2): Neutralize FIRST, EscapeXml second — reversed, Neutralize would run
+// against "&lt;|" and never see "<|", a silent no-op with nothing turning red
+// (pinned by TestRerankJudgePrompt_NeutralizeRunsBeforeEscape).
+//
+// EscapeXml STAYS: this is an additive wiring wave. Whether Neutralize replaces
+// it for content positions is the eval-backed decision 04 §8-E1.
+func guardText(s string) string {
+	n, _ := promptguard.Neutralize(s)
+	return llm.EscapeXml(n)
+}
+
+// guardLine is guardText for a LINE-BASED position — the "Query:" line and the
+// "Doc n [category/title]:" header, which sit outside every block. A bare
+// newline there opens a line that reads as a doc header, and EscapeXml provably
+// does not touch it; ClampLine does, and it runs FIRST so the turn markers are
+// inert regardless of what Neutralize can still match.
+func guardLine(s string) string {
+	n, _ := promptguard.Neutralize(promptguard.ClampLine(s))
+	return llm.EscapeXml(n)
+}
+
+// rerankDocKind is the rendered kind attribute of a judged document block.
+const rerankDocKind = "doc"
+
+// truncRunes is the rune-safe twin of the byte slice s[:n] both rerank paths
+// used before H3: same trigger threshold, same output, and deliberately NO
+// truncation suffix.
+//
+// util.TruncateRunes would append "..." — on the judge that would rewrite the
+// prompt for nearly every doc (ctx blocks run ~1-1.5k chars against a 400 cap),
+// and on the cross-encoder it would change the scored text itself. Making the
+// excerpt visible to the judge is a prompt change with an eval cost attached,
+// not part of a rune-safety fix.
+func truncRunes(s string, n int) string {
+	return util.TruncateRunesWithSuffix(s, "", n)
+}
+
+// buildRerankJudgePrompt formats the judge input and returns the system prompt
+// that belongs to it.
+//
+// N foreign-text blocks with POSITIONAL roles, so exactly ONE nonce binds every
+// wrap and the rule that names it (design 04 §4.3): the judge answers with a
+// JSON array of exactly len(docsToRerank) scores read back by index, so a doc
+// that forges a block boundary does not merely inject an instruction — it
+// desynchronizes the array against the result slice. The ordinal therefore
+// rides ON the unforgeable marker line as ref="n" (digits survive the
+// attribute clamp), not only on the human-readable header above it.
+//
+// Block metadata stays OUTSIDE the wrap on that header line: a category and a
+// title carry spaces and arbitrary punctuation, so neither survives the
+// marker-attribute clamp — and it is the clamp that keeps the marker line
+// unforgeable. Those positions are line-based, hence guardLine; the content
+// inside a block is not, hence guardText (newlines are legitimate there).
+//
+// The query runs through guardLine as well. It sits outside every block and is
+// the most reachable field in the whole prompt — at 1M+ blocks with autonomous
+// writers it arrives from bindings and webhooks, not only from a human.
+//
+// Order is load-bearing: truncate BEFORE guarding, so the cap is measured
+// against the original text and not against a CGJ-inflated one, and no later
+// step can rejoin a control token across the cut.
+func buildRerankJudgePrompt(query string, docsToRerank []SearchResult) (system, user string) {
+	nonce := promptguard.NewNonce()
+
+	var sb strings.Builder
+	sb.WriteString("Query: ")
+	sb.WriteString(guardLine(query))
+	sb.WriteString("\n\n")
+
+	for i, r := range docsToRerank {
+		fmt.Fprintf(&sb, "Doc %d [%s/%s]:\n", i+1, guardLine(r.Category), guardLine(r.Title))
+		sb.WriteString(promptguard.Wrap(nonce, rerankDocKind,
+			guardText(truncRunes(r.Content, RerankContentLimit)),
+			promptguard.Attr{Name: "ref", Value: strconv.Itoa(i + 1)}))
+		sb.WriteString("\n\n")
+	}
+
+	return rerankSystemPrompt + "\n\n" + promptguard.Rule(nonce), sb.String()
+}
+
+// buildCrossEncoderDocs builds one query/document pair body per candidate.
+//
+// NO Wrap and NO Neutralize here, deliberately (design 04 §7): rerank.Score
+// posts these strings verbatim as JSON documents to a scoring endpoint. There
+// is no chat template, no role, nothing a payload could switch — the only
+// output is a relevance logit per pair. A marker line or a CGJ would buy no
+// defence and would change the model input on every reranked query, i.e. shift
+// every score. Pinned by TestCrossEncoderDocs_NoGuardApplied.
+//
+// The cut is rune-safe all the same: that is a UTF-8 defect, not a prompt
+// concern — the truncated text goes into a JSON body.
+func buildCrossEncoderDocs(docsToRerank []SearchResult) []string {
+	docs := make([]string, len(docsToRerank))
+	for i, r := range docsToRerank {
+		docs[i] = r.Title + "\n" + truncRunes(r.Content, RerankCrossEncoderContentLimit)
+	}
+	return docs
 }
 
 // RerankCrossEncoder re-scores RRF results with a local cross-encoder reranker
@@ -210,14 +308,7 @@ func RerankCrossEncoder(ctx context.Context, host, apiKey, model, scoreDomain st
 
 	// Build one query/document pair per candidate. Title carries strong relevance
 	// signal and is cheap, so prepend it to the (truncated) content.
-	docs := make([]string, len(docsToRerank))
-	for i, r := range docsToRerank {
-		content := r.Content
-		if len(content) > RerankCrossEncoderContentLimit {
-			content = content[:RerankCrossEncoderContentLimit]
-		}
-		docs[i] = r.Title + "\n" + content
-	}
+	docs := buildCrossEncoderDocs(docsToRerank)
 
 	lease, runCtx, admErr := adm.Acquire(ctx, &backends.Backend{Host: host}, backends.RoleRerank, rerank.Timeout)
 	if admErr != nil {
