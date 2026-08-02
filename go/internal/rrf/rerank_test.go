@@ -159,7 +159,7 @@ func TestRerankCrossEncoder_ReordersByRelevance(t *testing.T) {
 	url := crossEncoderServer(t, http.StatusOK, map[string]float64{
 		"apples": -2.0, "bears": -6.0, "EXACT": 6.0,
 	})
-	out, tel, err := RerankCrossEncoder(context.Background(), url, "", "m", 50, 1.0, "q", results, rerankTestAdmission(t))
+	out, tel, err := RerankCrossEncoder(context.Background(), url, "", "m", "", 50, 1.0, "q", results, rerankTestAdmission(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestRerankCrossEncoder_ReordersByRelevance(t *testing.T) {
 func TestRerankCrossEncoder_FailOpen(t *testing.T) {
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
 	url := crossEncoderServer(t, http.StatusInternalServerError, nil)
-	out, _, err := RerankCrossEncoder(context.Background(), url, "", "m", 50, 1.0, "q", results, rerankTestAdmission(t))
+	out, _, err := RerankCrossEncoder(context.Background(), url, "", "m", "", 50, 1.0, "q", results, rerankTestAdmission(t))
 	if err == nil {
 		t.Fatal("expected error from failing sidecar, got nil")
 	}
@@ -194,7 +194,7 @@ func TestRerankCrossEncoder_FailOpen(t *testing.T) {
 // Below RerankMinResults the stage is a no-op (no sidecar call — host is bogus).
 func TestRerankCrossEncoder_BelowMin(t *testing.T) {
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b")}
-	out, tel, err := RerankCrossEncoder(context.Background(), "http://unused.invalid", "", "m", 50, 1.0, "q", results, llm.Admission{})
+	out, tel, err := RerankCrossEncoder(context.Background(), "http://unused.invalid", "", "m", "", 50, 1.0, "q", results, llm.Admission{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

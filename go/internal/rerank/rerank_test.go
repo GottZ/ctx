@@ -47,7 +47,7 @@ func TestScore_ReAlignsByIndex(t *testing.T) {
 		)
 	})
 
-	scores, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"apple", "bear", "exact"})
+	scores, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"apple", "bear", "exact"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestScore_SendsDocumentsAndQuery(t *testing.T) {
 			map[string]any{"index": 2, "relevance_score": 3.0},
 		)
 	})
-	if _, _, err := Score(context.Background(), srv.URL, "", "mymodel", "myquery", []string{"d0", "d1", "d2"}); err != nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "mymodel", "myquery", []string{"d0", "d1", "d2"}, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Model != "mymodel" || got.Query != "myquery" || len(got.Documents) != 3 || got.Documents[2] != "d2" {
@@ -88,7 +88,7 @@ func TestScore_RejectsOutOfRangeIndex(t *testing.T) {
 			map[string]any{"index": 9, "relevance_score": 2.0}, // out of range for 2 docs
 		)
 	})
-	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}, ""); err == nil {
 		t.Fatal("expected error for out-of-range index, got nil")
 	}
 }
@@ -100,7 +100,7 @@ func TestScore_RejectsDuplicateIndex(t *testing.T) {
 			map[string]any{"index": 0, "relevance_score": 2.0}, // dup → index 1 never filled
 		)
 	})
-	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}, ""); err == nil {
 		t.Fatal("expected error for duplicate index, got nil")
 	}
 }
@@ -110,7 +110,7 @@ func TestScore_RejectsCountMismatch(t *testing.T) {
 		// Only one result for two docs (e.g. server truncated to top_n).
 		return http.StatusOK, okResults(map[string]any{"index": 0, "relevance_score": 1.0})
 	})
-	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}, ""); err == nil {
 		t.Fatal("expected error for count mismatch, got nil")
 	}
 }
@@ -119,13 +119,13 @@ func TestScore_RejectsNon200(t *testing.T) {
 	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
 		return http.StatusInternalServerError, map[string]any{"error": "boom"}
 	})
-	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b", "c"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b", "c"}, ""); err == nil {
 		t.Fatal("expected error for non-200, got nil")
 	}
 }
 
 func TestScore_EmptyDocs(t *testing.T) {
-	scores, _, err := Score(context.Background(), "http://unused.invalid", "", "m", "q", nil)
+	scores, _, err := Score(context.Background(), "http://unused.invalid", "", "m", "q", nil, "")
 	if err != nil || scores != nil {
 		t.Errorf("empty docs: got (%v, %v), want (nil, nil)", scores, err)
 	}
@@ -163,7 +163,7 @@ func TestScore_VoyageDataFallback(t *testing.T) {
 		)
 	})
 
-	scores, ptoks, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b", "c"})
+	scores, ptoks, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b", "c"}, "")
 	if err != nil {
 		t.Fatalf("Voyage data fallback failed: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestScore_VoyageDataReAlignsByIndex(t *testing.T) {
 		)
 	})
 
-	scores, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"apple", "bear", "exact"})
+	scores, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"apple", "bear", "exact"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestScore_PrefersResultsOverData(t *testing.T) {
 		}
 	})
 
-	scores, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"})
+	scores, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestScore_UsageAbsentChargesNothing(t *testing.T) {
 		return http.StatusOK, okResults(map[string]any{"index": 0, "relevance_score": 1.0})
 	})
 
-	_, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	_, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -275,14 +275,14 @@ func TestScore_AuthorizationHeader(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if _, _, err := Score(context.Background(), srv.URL, "sk-test-key", "m", "q", []string{"a"}); err != nil {
+	if _, _, err := Score(context.Background(), srv.URL, "sk-test-key", "m", "q", []string{"a"}, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if gotAuth != "Bearer sk-test-key" {
 		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer sk-test-key")
 	}
 
-	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}); err != nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if gotAuth != "" {
@@ -303,7 +303,7 @@ func TestScore_VoyageTotalTokensFallback(t *testing.T) {
 		}
 	})
 
-	_, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	_, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestScore_VoyageDataRejectsCountMismatch(t *testing.T) {
 		)
 	})
 
-	if _, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b", "c"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b", "c"}, ""); err == nil {
 		t.Fatal("expected count mismatch error via data path, got nil")
 	}
 }
@@ -337,7 +337,7 @@ func TestScore_VoyageDataRejectsDuplicateIndex(t *testing.T) {
 		)
 	})
 
-	if _, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b"}, ""); err == nil {
 		t.Fatal("expected duplicate index error via data path, got nil")
 	}
 }
@@ -351,7 +351,7 @@ func TestScore_NeitherResultsNorData(t *testing.T) {
 		return http.StatusOK, map[string]any{"object": "list", "model": "m"}
 	})
 
-	_, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	_, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}, "")
 	if err == nil {
 		t.Fatal("expected error when neither results nor data present, got nil")
 	}
@@ -371,7 +371,7 @@ func TestScore_SchemaErrorEchoesBodySnippet(t *testing.T) {
 		return http.StatusOK, map[string]any{"detail": "quota exceeded for rerank-2.5"}
 	})
 
-	_, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	_, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}, "")
 	if err == nil {
 		t.Fatal("expected schema error, got nil")
 	}
@@ -396,7 +396,7 @@ func TestScore_VoyageLogitRoundTrip(t *testing.T) {
 		return http.StatusOK, voyageResults(rs...)
 	})
 
-	scores, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b", "c", "d"})
+	scores, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b", "c", "d"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestScore_VoyageEndpointScoresStayFinite(t *testing.T) {
 		)
 	})
 
-	scores, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b"})
+	scores, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a", "b"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -448,7 +448,7 @@ func TestScore_ForeignDataFieldDoesNotBreakResultsPath(t *testing.T) {
 		}
 	})
 
-	scores, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"})
+	scores, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}, "")
 	if err != nil {
 		t.Fatalf("foreign data field broke the results path: %v", err)
 	}
@@ -465,7 +465,7 @@ func TestScore_NonArrayDataWithoutResultsErrors(t *testing.T) {
 		return http.StatusOK, map[string]any{"data": "unexpected string"}
 	})
 
-	_, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	_, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}, "")
 	if err == nil {
 		t.Fatal("expected decode error for non-array data, got nil")
 	}
@@ -500,7 +500,7 @@ func TestScore_MissingRelevanceScoreFailsOpen(t *testing.T) {
 			srv := rerankServer(t, func(_ rerankRequest) (int, any) {
 				return http.StatusOK, b
 			})
-			if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}); err == nil {
+			if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}, ""); err == nil {
 				t.Fatalf("%s path: expected missing relevance_score error, got nil", name)
 			}
 		})
@@ -517,7 +517,87 @@ func TestScore_VoyageDataRejectsOutOfRangeScore(t *testing.T) {
 		)
 	})
 
-	if _, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a"}); err == nil {
+	if _, _, err := Score(context.Background(), srv.URL, "", "rerank-2.5", "q", []string{"a"}, ""); err == nil {
 		t.Fatal("expected error for data score outside [0,1], got nil")
+	}
+}
+
+// Score-domain override tests: the backend's score_domain slot decouples
+// the score interpretation from the wire container when set.
+
+// TestScore_DomainProbabilityOnResultsContainer: a gateway speaking the
+// cohere "results" dialect but scoring in calibrated probabilities gets the
+// logit mapping when the backend declares score_domain=probability.
+func TestScore_DomainProbabilityOnResultsContainer(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, okResults(
+			map[string]any{"index": 0, "relevance_score": 0.95},
+			map[string]any{"index": 1, "relevance_score": 0.11},
+		)
+	})
+
+	scores, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}, DomainProbability)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []float64{logit(0.95), logit(0.11)}
+	if scores[0] != want[0] || scores[1] != want[1] {
+		t.Errorf("scores = %v, want %v (probability domain must map results-container scores)", scores, want)
+	}
+
+	// The same domain enforces the [0,1] contract on this container too.
+	srvBad := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, okResults(map[string]any{"index": 0, "relevance_score": 5.97})
+	})
+	if _, _, err := Score(context.Background(), srvBad.URL, "", "m", "q", []string{"a"}, DomainProbability); err == nil {
+		t.Fatal("expected out-of-range error for logit-valued score under probability domain, got nil")
+	}
+}
+
+// TestScore_DomainLogitOnDataContainer: a backend answering in the "data"
+// container but scoring in raw logits passes verbatim (no [0,1] validation,
+// no mapping) when the backend declares score_domain=logit.
+func TestScore_DomainLogitOnDataContainer(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, voyageResults(
+			map[string]any{"index": 0, "relevance_score": -2.0},
+			map[string]any{"index": 1, "relevance_score": 5.97},
+		)
+	})
+
+	scores, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"}, DomainLogit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if scores[0] != -2.0 || scores[1] != 5.97 {
+		t.Errorf("scores = %v, want [-2 5.97] verbatim (logit domain must bypass the mapping)", scores)
+	}
+}
+
+// TestScore_DomainAutoKeepsContainerCoupling: explicit "auto" and the empty
+// string behave identically — results verbatim, data mapped.
+func TestScore_DomainAutoKeepsContainerCoupling(t *testing.T) {
+	for _, domain := range []string{"", DomainAuto} {
+		srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+			return http.StatusOK, voyageResults(map[string]any{"index": 0, "relevance_score": 0.5})
+		})
+		scores, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}, domain)
+		if err != nil {
+			t.Fatalf("domain %q: unexpected error: %v", domain, err)
+		}
+		if scores[0] != logit(0.5) {
+			t.Errorf("domain %q: data score = %v, want logit(0.5)", domain, scores[0])
+		}
+
+		srvR := rerankServer(t, func(_ rerankRequest) (int, any) {
+			return http.StatusOK, okResults(map[string]any{"index": 0, "relevance_score": -8.41})
+		})
+		scores, _, err = Score(context.Background(), srvR.URL, "", "m", "q", []string{"a"}, domain)
+		if err != nil {
+			t.Fatalf("domain %q: unexpected error: %v", domain, err)
+		}
+		if scores[0] != -8.41 {
+			t.Errorf("domain %q: results score = %v, want -8.41 verbatim", domain, scores[0])
+		}
 	}
 }

@@ -188,7 +188,10 @@ type RerankWire struct {
 // Classify, no health report, no llmlog row). The sidecar's reported
 // usage.prompt_tokens charge into the lease (MW22/C1); a server without
 // counts stays uncharged.
-func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs int, blendWeight float64, query string, results []SearchResult, adm llm.Admission) ([]SearchResult, RerankWire, error) {
+// scoreDomain is the backend's rerank dialect slot (Backend.ScoreDomain():
+// auto keeps the wire-container coupling, logit/probability override it) —
+// passed through verbatim to rerank.Score.
+func RerankCrossEncoder(ctx context.Context, host, apiKey, model, scoreDomain string, maxDocs int, blendWeight float64, query string, results []SearchResult, adm llm.Admission) ([]SearchResult, RerankWire, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("cross-encoder rerank: skipping, fewer than min results",
 			"result_count", len(results),
@@ -227,7 +230,7 @@ func RerankCrossEncoder(ctx context.Context, host, apiKey, model string, maxDocs
 	logits, err := func() ([]float64, error) {
 		// defer is the only allowed release form (B1: panic-safe).
 		defer lease.Release()
-		logits, ptoks, err := rerank.Score(runCtx, host, apiKey, model, query, docs)
+		logits, ptoks, err := rerank.Score(runCtx, host, apiKey, model, query, docs, scoreDomain)
 		if err == nil && ptoks > 0 {
 			lease.ReportUsage(dispatch.Usage{PromptTokens: ptoks})
 		}

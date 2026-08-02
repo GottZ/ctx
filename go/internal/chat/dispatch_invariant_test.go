@@ -208,7 +208,7 @@ func TestDispatchAcquireEqualsWireAllSites(t *testing.T) {
 		{ID: "B", Content: "b", RRFScore: 0.006},
 		{ID: "C", Content: "c", RRFScore: 0.004},
 	}
-	if _, tel, err := rrf.RerankCrossEncoder(ctx, srv.URL, "", "m", 50, 1.0, "q", rrIn, llmAdm); err != nil || !tel.Wired {
+	if _, tel, err := rrf.RerankCrossEncoder(ctx, srv.URL, "", "m", "", 50, 1.0, "q", rrIn, llmAdm); err != nil || !tel.Wired {
 		t.Fatalf("rerank: wired=%v err=%v", tel.Wired, err)
 	}
 
@@ -241,7 +241,7 @@ func TestDispatchAcquireEqualsWireAllSites(t *testing.T) {
 	// backend. Neither counter moves. ---
 	beforeAcq, beforeWire := ca.count(), atomic.LoadInt64(&wireHits)
 	tooFew := []rrf.SearchResult{{ID: "A", Content: "a", RRFScore: 0.008}, {ID: "B", Content: "b", RRFScore: 0.006}}
-	if _, tel, err := rrf.RerankCrossEncoder(ctx, "http://unused.invalid", "", "m", 50, 1.0, "q", tooFew, llmAdm); err != nil || tel.Wired {
+	if _, tel, err := rrf.RerankCrossEncoder(ctx, "http://unused.invalid", "", "m", "", 50, 1.0, "q", tooFew, llmAdm); err != nil || tel.Wired {
 		t.Fatalf("early-out: wired=%v err=%v, want lease-free no-wire", tel.Wired, err)
 	}
 	if ca.count() != beforeAcq || atomic.LoadInt64(&wireHits) != beforeWire {

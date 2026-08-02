@@ -888,7 +888,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				b := chain[0]
 				model := b.ModelFor(backends.RoleRerank).Model
 				rrStart := time.Now()
-				reranked, rerankTel, rerr := rrf.RerankCrossEncoder(ctx, b.Host, b.APIKey, model, maxDocs, rerankCfg.BlendWeight, originalQuery, results, h.admission())
+				reranked, rerankTel, rerr := rrf.RerankCrossEncoder(ctx, b.Host, b.APIKey, model, b.ScoreDomain(), maxDocs, rerankCfg.BlendWeight, originalQuery, results, h.admission())
 				if llm.IsAdmissionError(rerr) {
 					// Acquire-error doctrine (MW5, design/01 §4.3): a rejected
 					// admission is NOT an attempt — no Classify, no health

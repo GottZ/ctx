@@ -94,16 +94,34 @@ type rerankResponse struct {
 	} `json:"usage"`
 }
 
+// Score domains — the caller passes the backend's configured domain
+// (backends.Backend.ScoreDomain()); the strings are duplicated here so
+// this low-level wire package does not import the pool model.
+//
+//	"auto" / "":  container-coupled — "results" entries pass verbatim
+//	              (raw logits), "data" entries are calibrated [0,1]
+//	              probabilities and get the logit mapping.
+//	"logit":      every entry passes verbatim, both containers.
+//	"probability": every entry is validated to [0,1] and logit-mapped,
+//	              both containers.
+const (
+	DomainAuto        = "auto"
+	DomainLogit       = "logit"
+	DomainProbability = "probability"
+)
+
 // Score returns one relevance score per document, in the SAME order as docs
 // (scores[i] is the score for docs[i]). Scores are raw cross-encoder logits
-// (higher = more relevant; may be negative). promptTokens is the sidecar's
+// (higher = more relevant; may be negative); scoreDomain (see the Domain
+// constants) decides whether wire values are already logits or calibrated
+// probabilities that need the logit mapping. promptTokens is the sidecar's
 // reported usage.prompt_tokens (MW5: rerank charges prompt tokens into the
 // dispatch usage meter); 0 when the server reports none.
 //
 // Returns an error on transport failure, non-200, malformed JSON, or any
 // index the server returns that does not cleanly cover the input set — the
 // caller fails open and keeps the pre-rerank order.
-func Score(ctx context.Context, host, apiKey, model, query string, docs []string) ([]float64, int, error) {
+func Score(ctx context.Context, host, apiKey, model, query string, docs []string, scoreDomain string) ([]float64, int, error) {
 	if len(docs) == 0 {
 		return nil, 0, nil
 	}
@@ -150,26 +168,9 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 		return nil, 0, fmt.Errorf("rerank: decode: %w", err)
 	}
 
-	// Voyage AI returns results under "data" (OpenAPI RerankingObject),
-	// while cohere/llama.cpp uses "results". Prefer "results"; fall back
-	// to "data" when "results" is absent. The container name is coupled to
-	// the score domain: "data" backends (Voyage) report calibrated [0,1]
-	// relevance, "results" backends (cohere/llama.cpp) report raw logits.
-	entries := result.Results
-	fromData := false
-	if len(entries) == 0 && len(result.Data) > 0 {
-		if err := json.Unmarshal(result.Data, &entries); err != nil {
-			return nil, 0, fmt.Errorf("rerank: decode data: %w; body: %.256s", err, raw)
-		}
-		fromData = true
-	}
-	if len(entries) == 0 {
-		// Neither container decoded any entries: an unknown backend
-		// dialect, a gateway error object behind HTTP 200, or a renamed
-		// results field. Name the schema break and echo a body snippet —
-		// "count mismatch" would misdiagnose this as a counting problem
-		// (the exact failure mode that masked the Voyage incident).
-		return nil, 0, fmt.Errorf("rerank: response contains neither \"results\" nor \"data\" entries (unknown backend dialect?); body: %.256s", raw)
+	entries, isProbability, err := resolveEntries(&result, raw, scoreDomain)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	// Re-align strictly by result.Index into input order. The server sorts
@@ -192,16 +193,16 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 			return nil, 0, fmt.Errorf("rerank: result index %d missing relevance_score (unknown score field name?)", r.Index)
 		}
 		score := *r.RelevanceScore
-		if fromData {
-			// Voyage's calibrated [0,1] relevance would be sigmoided a
-			// second time by the caller (rrf treats every score as a
-			// logit), compressing the signal into [0.5,0.73] and letting
-			// RRF outvote the reranker at blend_weight < 1. Map the
+		if isProbability {
+			// A calibrated [0,1] relevance would be sigmoided a second
+			// time by the caller (rrf treats every score as a logit),
+			// compressing the signal into [0.5,0.73] and letting RRF
+			// outvote the reranker at blend_weight < 1. Map the
 			// probability to its logit here so the downstream sigmoid
 			// reconstructs it exactly. A score outside [0,1] breaks the
-			// documented Voyage schema — error → caller fails open.
+			// probability-domain contract — error → caller fails open.
 			if score < 0 || score > 1 {
-				return nil, 0, fmt.Errorf("rerank: data score %g at index %d outside [0,1] (voyage schema violation)", score, r.Index)
+				return nil, 0, fmt.Errorf("rerank: score %g at index %d outside [0,1] (probability score domain)", score, r.Index)
 			}
 			score = probabilityToLogit(score)
 		}
@@ -229,6 +230,42 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 }
 
 var totalTokensFallbackOnce sync.Once
+
+// resolveEntries picks the wire container and the score interpretation.
+//
+// Voyage AI returns results under "data" (OpenAPI RerankingObject), while
+// cohere/llama.cpp uses "results". Prefer "results"; fall back to "data"
+// when "results" is absent. The container name is coupled to the score
+// domain: "data" backends (Voyage) report calibrated [0,1] relevance,
+// "results" backends (cohere/llama.cpp) report raw logits. DomainAuto
+// keeps that coupling; the explicit domains override it for
+// dialect-mixing backends.
+func resolveEntries(result *rerankResponse, raw []byte, scoreDomain string) ([]rerankResult, bool, error) {
+	entries := result.Results
+	fromData := false
+	if len(entries) == 0 && len(result.Data) > 0 {
+		if err := json.Unmarshal(result.Data, &entries); err != nil {
+			return nil, false, fmt.Errorf("rerank: decode data: %w; body: %.256s", err, raw)
+		}
+		fromData = true
+	}
+	if len(entries) == 0 {
+		// Neither container decoded any entries: an unknown backend
+		// dialect, a gateway error object behind HTTP 200, or a renamed
+		// results field. Name the schema break and echo a body snippet —
+		// "count mismatch" would misdiagnose this as a counting problem
+		// (the exact failure mode that masked the Voyage incident).
+		return nil, false, fmt.Errorf("rerank: response contains neither \"results\" nor \"data\" entries (unknown backend dialect?); body: %.256s", raw)
+	}
+	isProbability := fromData
+	switch scoreDomain {
+	case DomainLogit:
+		isProbability = false
+	case DomainProbability:
+		isProbability = true
+	}
+	return entries, isProbability, nil
+}
 
 // probabilityToLogit maps a calibrated probability to its logit,
 // logit(p) = ln(p/(1-p)), the exact inverse of the caller's sigmoid.
