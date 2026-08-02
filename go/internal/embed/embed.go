@@ -85,9 +85,12 @@ type openAIEmbedResponse struct {
 		Embedding []float64 `json:"embedding"`
 	} `json:"data"`
 	// Usage carries the standard OpenAI-wire token accounting (same charge
-	// role as ollama's prompt_eval_count above).
+	// role as ollama's prompt_eval_count above). Voyage AI reports
+	// total_tokens instead of prompt_tokens on the embed endpoint; the
+	// fallback in embedOpenAI handles both wire formats.
 	Usage struct {
 		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
 	} `json:"usage"`
 }
 
@@ -211,7 +214,14 @@ func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]floa
 		return nil, 0, fmt.Errorf("embed: empty embedding returned")
 	}
 
-	return result.Data[0].Embedding, result.Usage.PromptTokens, nil
+	// Voyage AI reports total_tokens; OpenAI-compatible servers report
+	// prompt_tokens. Prefer prompt_tokens; fall back to total_tokens.
+	promptTokens := result.Usage.PromptTokens
+	if promptTokens == 0 && result.Usage.TotalTokens > 0 {
+		promptTokens = result.Usage.TotalTokens
+	}
+
+	return result.Data[0].Embedding, promptTokens, nil
 }
 
 func l2Normalize(v []float64) []float32 {
