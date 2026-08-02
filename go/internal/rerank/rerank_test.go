@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -290,15 +291,41 @@ func TestScore_VoyageDataRejectsDuplicateIndex(t *testing.T) {
 	}
 }
 
-// TestScore_NeitherResultsNorData: a response with neither "results" nor "data"
-// must fail with count mismatch (got 0), not silently succeed.
+// TestScore_NeitherResultsNorData: a response with neither "results" nor
+// "data" must fail with a dedicated schema error naming both fields — not a
+// "count mismatch", which misdiagnoses a dialect break as a counting problem
+// (the failure mode that masked the original Voyage incident).
 func TestScore_NeitherResultsNorData(t *testing.T) {
 	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
 		return http.StatusOK, map[string]any{"object": "list", "model": "m"}
 	})
 
-	if _, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"}); err == nil {
+	_, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	if err == nil {
 		t.Fatal("expected error when neither results nor data present, got nil")
+	}
+	if !strings.Contains(err.Error(), "neither") {
+		t.Errorf("error should name the schema break, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "count mismatch") {
+		t.Errorf("schema break must not masquerade as a count mismatch, got: %v", err)
+	}
+}
+
+// TestScore_SchemaErrorEchoesBodySnippet: a gateway that answers HTTP 200
+// with an error object must surface what it actually sent — the operator's
+// only trace is the fail-open log line carrying this error string.
+func TestScore_SchemaErrorEchoesBodySnippet(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, map[string]any{"detail": "quota exceeded for rerank-2.5"}
+	})
+
+	_, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	if err == nil {
+		t.Fatal("expected schema error, got nil")
+	}
+	if !strings.Contains(err.Error(), "quota exceeded") {
+		t.Errorf("error should echo a body snippet for diagnosis, got: %v", err)
 	}
 }
 
