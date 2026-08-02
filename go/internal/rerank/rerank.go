@@ -132,8 +132,17 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 		return nil, 0, fmt.Errorf("rerank: %w", httpx.NewStatusError(resp, errBody))
 	}
 
+	// Buffer the body (rerank responses are a few KB — MAX_DOCS entries of
+	// ~100 bytes; 1 MiB is a generous ceiling) so an unrecognized dialect
+	// can echo a snippet of what the server actually sent. The original
+	// Voyage incident hid behind a generic "count mismatch" for six
+	// production calls because the response was decoded blind.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, 0, fmt.Errorf("rerank: read body: %w", err)
+	}
 	var result rerankResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, 0, fmt.Errorf("rerank: decode: %w", err)
 	}
 
@@ -147,6 +156,14 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 	if len(entries) == 0 && len(result.Data) > 0 {
 		entries = result.Data
 		fromData = true
+	}
+	if len(entries) == 0 {
+		// Neither container decoded any entries: an unknown backend
+		// dialect, a gateway error object behind HTTP 200, or a renamed
+		// results field. Name the schema break and echo a body snippet —
+		// "count mismatch" would misdiagnose this as a counting problem
+		// (the exact failure mode that masked the Voyage incident).
+		return nil, 0, fmt.Errorf("rerank: response contains neither \"results\" nor \"data\" entries (unknown backend dialect?); body: %.256s", raw)
 	}
 
 	// Re-align strictly by result.Index into input order. The server sorts
