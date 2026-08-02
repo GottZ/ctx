@@ -380,6 +380,49 @@ func TestScore_VoyageEndpointScoresStayFinite(t *testing.T) {
 	}
 }
 
+// TestScore_ForeignDataFieldDoesNotBreakResultsPath: "data" is also the
+// generic OpenAI-style list container. A backend serving valid "results"
+// alongside a non-array "data" field (object, string, whatever) must decode
+// exactly as before the Voyage fallback existed — the primary llama.cpp
+// path may never regress over a field we ignore.
+func TestScore_ForeignDataFieldDoesNotBreakResultsPath(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, map[string]any{
+			"results": []map[string]any{
+				{"index": 0, "relevance_score": -2.0},
+				{"index": 1, "relevance_score": 5.97},
+			},
+			"data":  map[string]any{"note": "not an array"},
+			"usage": map[string]any{"prompt_tokens": 10},
+		}
+	})
+
+	scores, ptoks, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("foreign data field broke the results path: %v", err)
+	}
+	if scores[0] != -2.0 || scores[1] != 5.97 || ptoks != 10 {
+		t.Errorf("results path changed: scores=%v ptoks=%d, want [-2 5.97] 10", scores, ptoks)
+	}
+}
+
+// TestScore_NonArrayDataWithoutResultsErrors: when "data" is the only
+// container present but is not an array of rerank entries, the decode error
+// must say so (and echo the body) instead of pretending a count mismatch.
+func TestScore_NonArrayDataWithoutResultsErrors(t *testing.T) {
+	srv := rerankServer(t, func(_ rerankRequest) (int, any) {
+		return http.StatusOK, map[string]any{"data": "unexpected string"}
+	})
+
+	_, _, err := Score(context.Background(), srv.URL, "", "m", "q", []string{"a"})
+	if err == nil {
+		t.Fatal("expected decode error for non-array data, got nil")
+	}
+	if !strings.Contains(err.Error(), "decode data") {
+		t.Errorf("error should name the data decode failure, got: %v", err)
+	}
+}
+
 // TestScore_MissingRelevanceScoreFailsOpen: sibling rerank dialects name the
 // score field "score" instead of "relevance_score" (mixedbread, gateways).
 // Decoding such a body must error — never silently score every document 0.0,

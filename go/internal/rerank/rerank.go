@@ -76,9 +76,11 @@ type rerankResult struct {
 type rerankResponse struct {
 	Results []rerankResult `json:"results"`
 	// Voyage AI returns results under "data" instead of "results"
-	// (OpenAPI RerankingObject schema). If Results is empty after
-	// decode, fall back to Data.
-	Data []rerankResult `json:"data"`
+	// (OpenAPI RerankingObject schema). Kept raw and decoded lazily:
+	// "data" is also the generic OpenAI-style list container, so a
+	// backend serving valid "results" alongside a non-array "data"
+	// field must not fail the whole decode over a field we ignore.
+	Data json.RawMessage `json:"data"`
 	// Usage is llama.cpp's Jina-style token accounting on the rerank
 	// response. prompt_tokens covers ALL query+document pairs of the request
 	// — the MW22/C1 charge dimension of the sidecar call. Absent field ⇒ 0 ⇒
@@ -154,7 +156,9 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 	entries := result.Results
 	fromData := false
 	if len(entries) == 0 && len(result.Data) > 0 {
-		entries = result.Data
+		if err := json.Unmarshal(result.Data, &entries); err != nil {
+			return nil, 0, fmt.Errorf("rerank: decode data: %w; body: %.256s", err, raw)
+		}
 		fromData = true
 	}
 	if len(entries) == 0 {
