@@ -61,7 +61,12 @@ else's environment — that led to a fix landing in the repository.
   into the un-reranked fail-open order; the shipped fix keeps his
   prefer-results-fall-back-to-data approach, hardened with a probability→
   logit mapping at the wire boundary so Voyage's calibrated [0,1] scores
-  survive the downstream sigmoid+blend unmangled.
+  survive the downstream sigmoid+blend unmangled. Also PR
+  [#14](https://github.com/GottZ/ctx/pull/14): the embed twin of the same
+  dialect — Voyage reports `usage.total_tokens` on `/v1/embeddings`, so
+  every Voyage embed call went unmetered; the shipped fix keeps his
+  prefer-prompt_tokens fallback, hardened with metering visibility and a
+  discriminating precedence fixture.
 
 ## How to be listed
 
