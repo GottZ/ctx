@@ -54,7 +54,14 @@ else's environment — that led to a fix landing in the repository.
   "<type>"}` string map with no confidence field, losing every link in the
   cycle; the shipped fix keeps his recover-the-type approach and floor
   doctrine, hardened with entry discrimination so prose envelopes still
-  surface as retryable parse errors.
+  surface as retryable parse errors. Also PR
+  [#13](https://github.com/GottZ/ctx/pull/13): Voyage AI rerankers answer in
+  their OpenAPI dialect (`data` container, `usage.total_tokens`), which the
+  cohere-shaped client decoded to zero results — every Voyage call failed
+  into the un-reranked fail-open order; the shipped fix keeps his
+  prefer-results-fall-back-to-data approach, hardened with a probability→
+  logit mapping at the wire boundary so Voyage's calibrated [0,1] scores
+  survive the downstream sigmoid+blend unmangled.
 
 ## How to be listed
 
