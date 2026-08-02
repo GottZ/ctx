@@ -182,6 +182,41 @@ func (b *Backend) ModelFor(role string) ModelSpec {
 	return ModelSpec{Model: b.Model}
 }
 
+// Rerank score domains. The wire container name and the score domain are
+// coupled backend properties (cohere/llama.cpp: "results" + raw logits;
+// Voyage: "data" + calibrated [0,1] probability). ScoreDomainAuto keeps
+// exactly that coupling — the behaviour every existing configuration has
+// today; the explicit values override it for dialect-mixing backends
+// (a gateway speaking "results" but scoring in probabilities, or vice
+// versa). Changing the domain on a rerank-capable backend is guarded by
+// the handler's confirm flow: it changes how every future query ranking
+// interprets this backend's scores.
+const (
+	ScoreDomainAuto        = "auto"
+	ScoreDomainLogit       = "logit"
+	ScoreDomainProbability = "probability"
+)
+
+// scoreDomainKey is the metadata slot carrying the override. Metadata
+// (JSONB) is the deliberate home: the slot is a rerank-role dialect
+// property, not a wire-merge field (extra_body) — and it needs no schema
+// migration.
+const scoreDomainKey = "score_domain"
+
+// ScoreDomain resolves the backend's rerank score domain: the
+// metadata.score_domain override when set, ScoreDomainAuto otherwise.
+// An invalid stored value also resolves to auto — ValidateBackend rejects
+// it at write time, so this is belt-and-suspenders for hand-edited rows.
+func (b *Backend) ScoreDomain() string {
+	if v, ok := b.Metadata[scoreDomainKey].(string); ok {
+		switch v {
+		case ScoreDomainLogit, ScoreDomainProbability:
+			return v
+		}
+	}
+	return ScoreDomainAuto
+}
+
 // TimeoutFor resolves the per-role timeout override, falling back to def.
 func (b *Backend) TimeoutFor(role string, def time.Duration) time.Duration {
 	if secs, ok := b.Timeouts[role]; ok && secs > 0 {

@@ -133,6 +133,16 @@ func validateIdentity(b *Backend) (errs []FieldError) {
 		errs = append(errs, FieldError{"provider_class", "must be one of: generic, llamacpp, openrouter"})
 	}
 
+	// metadata.score_domain is the rerank dialect slot (see ScoreDomain).
+	// Reject unknown values at write time so the runtime auto-fallback in
+	// ScoreDomain never silently swallows a typo like "probabilty".
+	if raw, ok := b.Metadata[scoreDomainKey]; ok {
+		v, isStr := raw.(string)
+		if !isStr || (v != ScoreDomainAuto && v != ScoreDomainLogit && v != ScoreDomainProbability) {
+			errs = append(errs, FieldError{"metadata.score_domain", "must be one of: auto, logit, probability"})
+		}
+	}
+
 	if !ValidTrust(b.Trust) {
 		errs = append(errs, FieldError{"trust", "must be one of: full-trust, no-credentials, non-personal, public"})
 	}

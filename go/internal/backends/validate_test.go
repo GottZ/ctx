@@ -277,4 +277,45 @@ func TestValidateEnums(t *testing.T) {
 	if _, errs := ValidateBackend(&b); !fieldHit(errs, "timeouts") {
 		t.Error("negative timeout passed")
 	}
+
+	b = validBackend()
+	b.Metadata = map[string]any{"score_domain": "probabilty"} // typo must be caught at write time
+	if _, errs := ValidateBackend(&b); !fieldHit(errs, "metadata.score_domain") {
+		t.Error("bad score_domain passed")
+	}
+
+	b = validBackend()
+	b.Metadata = map[string]any{"score_domain": 42} // non-string is invalid too
+	if _, errs := ValidateBackend(&b); !fieldHit(errs, "metadata.score_domain") {
+		t.Error("non-string score_domain passed")
+	}
+
+	for _, v := range []string{ScoreDomainAuto, ScoreDomainLogit, ScoreDomainProbability} {
+		b = validBackend()
+		b.Metadata = map[string]any{"score_domain": v}
+		if _, errs := ValidateBackend(&b); fieldHit(errs, "metadata.score_domain") {
+			t.Errorf("valid score_domain %q rejected", v)
+		}
+	}
+}
+
+func TestScoreDomainResolution(t *testing.T) {
+	b := Backend{}
+	if got := b.ScoreDomain(); got != ScoreDomainAuto {
+		t.Errorf("no metadata: ScoreDomain() = %q, want auto", got)
+	}
+	b.Metadata = map[string]any{"score_domain": "probability"}
+	if got := b.ScoreDomain(); got != ScoreDomainProbability {
+		t.Errorf("ScoreDomain() = %q, want probability", got)
+	}
+	b.Metadata = map[string]any{"score_domain": "logit"}
+	if got := b.ScoreDomain(); got != ScoreDomainLogit {
+		t.Errorf("ScoreDomain() = %q, want logit", got)
+	}
+	// Hand-edited garbage resolves to auto at runtime (validation rejects
+	// it at write time; this is the belt-and-suspenders path).
+	b.Metadata = map[string]any{"score_domain": "bogus"}
+	if got := b.ScoreDomain(); got != ScoreDomainAuto {
+		t.Errorf("invalid value: ScoreDomain() = %q, want auto fallback", got)
+	}
 }
