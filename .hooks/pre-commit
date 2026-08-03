@@ -132,10 +132,12 @@ if [ -f "$ENV_FILE" ]; then
                 val=${line#*=}
                 val=${val%\"}; val=${val#\"}
                 val=${val%\'}; val=${val#\'}
-                case "$key" in
-                    *PASSWORD*|*PASSWD*|*SECRET*|*TOKEN*|*API_KEY*|*APIKEY*|*_KEY|*CREDENTIAL*|*_PW) : ;;
-                    *) continue ;;
-                esac
+                # No case-in-$() here: bash 3.2's command-substitution parser
+                # is not recursive — the first unquoted ')' of a case arm inside
+                # $( ... ) is read as the closing paren of the $( (issue #20).
+                # grep -E mirrors the old globs exactly: all substrings, except
+                # _KEY/_PW which were suffix globs and stay $-anchored.
+                printf '%s\n' "$key" | grep -Eq 'PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|CREDENTIAL|(_KEY|_PW)$' || continue
                 [ "${#val}" -ge 8 ] || continue
                 printf '%s\n' "$STAGED" | while IFS= read -r f; do
                     [ -z "$f" ] && continue

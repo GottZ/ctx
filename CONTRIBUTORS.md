@@ -84,7 +84,9 @@ else's environment — that led to a fix landing in the repository.
   deployment: container name, absolute paths, host CLI, corpus shape) and
   [#20](https://github.com/GottZ/ctx/issues/20) (pre-commit hook unparseable
   by stock macOS bash 3.2 — case arm inside `$( )`), each verified against
-  the shipped artifacts.
+  the shipped artifacts. The #20 report's suggested grep rewrite shipped as
+  the fix (v4.25.2), equivalence-proven against the old globs under real
+  bash 3.2.
 
 ## How to be listed
 
