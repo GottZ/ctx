@@ -72,7 +72,7 @@ func Bootstrap(ctx context.Context, q ExecQuerier, in BootstrapInput) (int, erro
 			    (name, base_url, protocol, provider_class, trust, locality,
 			     roles, model_map, timeouts, num_ctx, priority, enabled)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true)
-			ON CONFLICT (name) DO NOTHING`,
+			ON CONFLICT (scope, name) DO NOTHING`,
 			b.Name, b.Host, string(b.Protocol), b.ProviderClass, string(b.Trust),
 			b.Locality, b.Roles, marshalModelMap(b.ModelMap), timeouts,
 			nullableInt(b.NumCtx), b.Priority)
