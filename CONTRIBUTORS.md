@@ -67,6 +67,24 @@ else's environment — that led to a fix landing in the repository.
   every Voyage embed call went unmetered; the shipped fix keeps his
   prefer-prompt_tokens fallback, hardened with metering visibility and a
   discriminating precedence fixture.
+- **DojoGenesis** ([@DojoGenesis](https://github.com/DojoGenesis)) —
+  [#16](https://github.com/GottZ/ctx/issues/16) / PR
+  [#17](https://github.com/GottZ/ctx/pull/17): first boot on a fresh database
+  never seeded the backend pool — migration 062's UNIQUE swap
+  (`uq_backends_name` → `uq_backends_scope_name`) left the bootstrap INSERT's
+  `ON CONFLICT (name)` without an arbiter (SQLSTATE 42P10), so a brand-new
+  install came up with an empty pool and a permanent 503 while populated
+  deployments never hit the path. Deterministic reproduction, root-cause to
+  the exact line, and a one-line fix with an integration regression test
+  (red on the old code with the exact live SQLSTATE, green on the fix)
+  delivered as a pull request. Also filed the fresh-install audit trio
+  [#18](https://github.com/GottZ/ctx/issues/18) (bootstrap admin key missing
+  from the compose environment block — G17 compose-gap class),
+  [#19](https://github.com/GottZ/ctx/issues/19) (ops scripts assume the home
+  deployment: container name, absolute paths, host CLI, corpus shape) and
+  [#20](https://github.com/GottZ/ctx/issues/20) (pre-commit hook unparseable
+  by stock macOS bash 3.2 — case arm inside `$( )`), each verified against
+  the shipped artifacts.
 
 ## How to be listed
 
