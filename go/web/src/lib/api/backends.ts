@@ -11,6 +11,7 @@ import type {
   BackendMutateResponse,
   BackendSpec,
   BackendTestResult,
+  EmbedEquivalenceResult,
 } from './types'
 
 /**
@@ -60,6 +61,25 @@ export function deleteBackend(id: string): Promise<BackendDeleteResponse> {
   return apiFetch<BackendDeleteResponse>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'backend-delete', id }),
+  })
+}
+
+/**
+ * Cosine equivalence probe against the local reference embed backend. The
+ * candidate may be UNSAVED — the dialog sends its full current spec (the
+ * server builds an ephemeral backend from it), so the proof can be earned
+ * BEFORE create, which the validate.go 422 otherwise blocks. id is passed
+ * when editing an existing backend without base_url changes.
+ */
+export function testEmbedEquivalence(spec: BackendSpec, id?: string): Promise<EmbedEquivalenceResult> {
+  const req: Record<string, unknown> = {
+    action: 'backend-test',
+    data: { ...spec, probe: 'embed-equivalence' },
+  }
+  if (id) req.id = id
+  return apiFetch<EmbedEquivalenceResult>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify(req),
   })
 }
 

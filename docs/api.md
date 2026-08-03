@@ -277,7 +277,24 @@ POST /api/manage {"action":"backend-create","data":{…}}    # full validation, 
 POST /api/manage {"action":"backend-update","id":…,"data":{…}}   # single-field patch
 POST /api/manage {"action":"backend-delete","id":…}        # hard delete (llmlog history stays readable)
 POST /api/manage {"action":"backend-test","id":…,"data":{"probe":"chat"}}  # reachability dry-run
+POST /api/manage {"action":"backend-test","data":{"probe":"embed-equivalence",…spec}}  # cosine proof, id optional
 ```
+
+**Embed-equivalence probe.** `probe:"embed-equivalence"` embeds a fixed canonical
+sample set (both asymmetric prefixes, Umlaute, code, symbol noise) on the local
+reference embed backend AND on the candidate, compares the DB-relevant vectors
+(1024-truncated, L2-normalized — the exact ingest path) per sample and verdicts
+`verified` against a threshold of `0.995` min-cosine (empirically anchored:
+same weights across a precision/quantization boundary measure ≥ 0.997, a
+different model lands far below 0.99). The candidate may be **unsaved**: send
+the full spec instead of an `id` — validation blocks persisting an external
+embed backend unverified, so test-before-create is the intended order (the
+backend dialog's *cosine-test* button does exactly this). On `verified` the
+response carries a ready-to-merge `metadata_patch` with
+`embed_equivalence_verified:true` plus an `embed_equivalence_proof` object
+(reference, models, `min_cosine`, `checked_at`); the dialog folds it into the
+save payload. Failures answer HTTP 200 with `verified:false` and a `failure`
+message — the verdict lives in the body, like every `backend-test` outcome.
 
 **Validation guards** (create AND update, `422` with field errors): credential-carrier headers in `extra_headers` (`Authorization`, `Cookie`, `*-key`, `*-token`, …) and credential-semantic `extra_body` fields are rejected — provider keys go through `api_key_ref` (the *name* of a sealed secret, resolved in-memory only); `locality` is cross-validated against `base_url` (a publicly routable host must be `external`); embed roles on external backends are blocked without `metadata.embed_equivalence_verified=true` (foreign quantization corrupts the shared vector space). `metadata.score_domain` (rerank dialect slot) must be one of `auto` | `logit` | `probability` — `auto` (the default for every row that does not set it) keeps the wire-container coupling: `results` ⇒ raw logits, `data` ⇒ calibrated [0,1] probability; explicit values override the coupling for dialect-mixing backends. Changing the *effective* score domain of a rerank-capable backend (create with a non-`auto` value included — the delete+create bypass is closed like the trust confirm's) requires `confirm_score_domain_change:true`; the 400 carries the full chain of change (effective immediately on all future rankings; the access-log score trail is only comparable up to the switch; no corpus reprocessing — no curation artifact persists rerank-derived data) and the confirmed write echoes it as a warning. Raising `trust` requires `confirm_trust_elevation:true`. Every mutation reloads the pool snapshot synchronously — `backend-update {"enabled":false}` is an instant brake, no restart; psql edits converge via the 053 NOTIFY trigger.
 

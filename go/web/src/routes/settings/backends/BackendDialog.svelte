@@ -8,7 +8,8 @@
   // changed fields are PATCHed (backendDiff).
   import { untrack } from 'svelte'
   import { toApiError } from '../../../lib/api'
-  import type { BackendListItem } from '../../../lib/api/types'
+  import { testEmbedEquivalence } from '../../../lib/api/backends'
+  import type { BackendListItem, EmbedEquivalenceResult } from '../../../lib/api/types'
   import {
     backendDiff,
     createSpec,
@@ -97,6 +98,38 @@
   let fieldErrs = $state<BackendFieldError[]>([])
   let confirmStep = $state(false)
 
+  // Embed-equivalence probe (backends_embed_equiv.go): earns the
+  // metadata.embed_equivalence_verified flag the validate.go 422 demands of an
+  // external embed backend. The verified result's metadata_patch is folded into
+  // the save payload; any spec edit after a verdict invalidates it (the proof
+  // covered a different tuple).
+  let equiv = $state<EmbedEquivalenceResult | null>(null)
+  let equivRunning = $state(false)
+  let equivFingerprint = $state<string | null>(null)
+  const embedRoleSelected = $derived(roles.includes('embed') || roles.includes('dream-embed'))
+
+  // The proof covers ONE spec tuple: any edit after the verdict makes it
+  // stale — the badge greys out and the patch is NOT sent on save.
+  const specFingerprint = $derived(
+    JSON.stringify([baseUrl, protocol, providerClass, apiKeyRef, locality, numCtx, roles, mmRows]),
+  )
+  const equivStale = $derived(equiv !== null && equivFingerprint !== specFingerprint)
+  const equivArmed = $derived(equiv?.verified === true && equiv.metadata_patch !== undefined && !equivStale)
+
+  async function runEquivTest(): Promise<void> {
+    equivRunning = true
+    error = null
+    const fingerprint = specFingerprint
+    try {
+      equiv = await testEmbedEquivalence({ name: name.trim() || undefined, ...collectDraft() }, backend?.id)
+      equivFingerprint = fingerprint
+    } catch (err) {
+      error = toApiError(err).message
+    } finally {
+      equivRunning = false
+    }
+  }
+
   // Locality is auto-derived from base_url on create, so offer "(auto)" there;
   // on edit the backend already has one (LOCALITIES only).
   const localityOptions = $derived(mode === 'create' ? ['', ...LOCALITIES] : [...LOCALITIES])
@@ -112,7 +145,7 @@
   let dialogEl: HTMLDialogElement | undefined = $state()
 
   function collectDraft() {
-    return {
+    const d: ReturnType<typeof draftFromBackend> = {
       base_url: baseUrl.trim(),
       protocol,
       provider_class: providerClass,
@@ -124,6 +157,8 @@
       model_map: rowsToModelMap(mmRows),
       disable_profiles: disableProfiles,
     }
+    if (equivArmed && equiv?.metadata_patch) d.metadata = equiv.metadata_patch
+    return d
   }
 
   function clientError(): string | null {
@@ -306,6 +341,24 @@
     </div>
 
     <footer>
+      {#if embedRoleSelected && equiv}
+        {#if equiv.verified && !equivStale}
+          <p class="equiv ok" role="status">
+            vector-space equivalence verified — min cosine {equiv.min_cosine?.toFixed(6)} (threshold {equiv.threshold})
+            vs <code>{equiv.reference?.name}</code>; <code>metadata.embed_equivalence_verified</code> rides on save
+          </p>
+        {:else if equiv.verified && equivStale}
+          <p class="equiv stale" role="status">
+            equivalence proof is stale — the spec changed after the test; run the cosine-test again
+          </p>
+        {:else}
+          <p class="equiv fail" role="status">
+            {equiv.failure
+              ? `cosine-test failed: ${equiv.failure}`
+              : `not equivalent — min cosine ${equiv.min_cosine?.toFixed(6)} below threshold ${equiv.threshold} vs ${equiv.reference?.name}`}
+          </p>
+        {/if}
+      {/if}
       {#if confirmStep}
         <p class="confirm-text">trust decides which content may flow here. Confirm the elevation?</p>
         <div class="actions">
@@ -314,6 +367,17 @@
         </div>
       {:else}
         <div class="actions">
+          {#if embedRoleSelected}
+            <button
+              type="button"
+              class="ghost equiv-btn"
+              disabled={saving || equivRunning || baseUrl.trim() === ''}
+              title="embed the canonical sample set on the local reference and this backend, compare the vector spaces"
+              onclick={() => void runEquivTest()}
+            >
+              {equivRunning ? 'testing…' : 'cosine-test'}
+            </button>
+          {/if}
           <button type="button" class="ghost" disabled={saving} onclick={() => dialogEl?.close()}>Cancel</button>
           <button type="submit" disabled={saving}>{saving ? 'saving…' : mode === 'create' ? 'Create' : 'Save'}</button>
         </div>
@@ -424,6 +488,23 @@
     margin: 0;
     font-size: var(--fs-sm);
     color: var(--warn);
+  }
+  .equiv {
+    margin: 0;
+    font-size: var(--fs-xs);
+    font-family: var(--font-mono);
+  }
+  .equiv.ok {
+    color: var(--ok);
+  }
+  .equiv.stale {
+    color: var(--text-faint);
+  }
+  .equiv.fail {
+    color: var(--danger);
+  }
+  .equiv-btn {
+    margin-right: auto;
   }
   .actions {
     display: flex;

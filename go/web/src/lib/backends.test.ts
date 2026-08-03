@@ -121,6 +121,13 @@ describe('createSpec', () => {
     expect(spec.locality).toBe('external')
     expect(spec.api_key_ref).toBe('or.key')
   })
+
+  it('carries an in-dialog metadata patch, omits it when absent', () => {
+    const draft = draftFromBackend(bv({ name: 'x' }))
+    expect(createSpec('x', draft).metadata).toBeUndefined()
+    draft.metadata = { embed_equivalence_verified: true }
+    expect(createSpec('x', draft).metadata).toEqual({ embed_equivalence_verified: true })
+  })
 })
 
 describe('backendDiff', () => {
@@ -155,6 +162,18 @@ describe('backendDiff', () => {
     expect(isEmptySpec(backendDiff(orig, draft))).toBe(true)
     draft.model_map = { chat: { model: 'b' } }
     expect(backendDiff(orig, draft).model_map).toEqual({ chat: { model: 'b' } })
+  })
+
+  it('MERGES a metadata patch over the stored object (applySpec replaces wholesale)', () => {
+    const orig = bv({ name: 'x', metadata: { score_domain: 'logit', other: 1 } })
+    const draft = draftFromBackend(orig)
+    expect(backendDiff(orig, draft).metadata).toBeUndefined()
+    draft.metadata = { embed_equivalence_verified: true }
+    expect(backendDiff(orig, draft).metadata).toEqual({
+      score_domain: 'logit',
+      other: 1,
+      embed_equivalence_verified: true,
+    })
   })
 })
 

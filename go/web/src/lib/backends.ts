@@ -139,6 +139,10 @@ export interface BackendDraft {
   // belongs to. The dialog checkbox section edits it; it rides on the same
   // create/update patch (raw-key presence — see createSpec/backendDiff).
   disable_profiles: string[]
+  // metadata additions earned in-dialog (today: the embed-equivalence
+  // metadata_patch). Absent = untouched; the dialog never edits metadata
+  // directly, it only merges server-produced patches in.
+  metadata?: Record<string, unknown>
 }
 
 export function draftFromBackend(b: BackendView): BackendDraft {
@@ -174,6 +178,7 @@ export function createSpec(name: string, d: BackendDraft): BackendSpec {
   // Membership is always sent on create so the join is set from the start; []
   // is the harmless no-op (clears nothing on a fresh backend).
   spec.disable_profiles = d.disable_profiles
+  if (d.metadata) spec.metadata = d.metadata
   return spec
 }
 
@@ -193,6 +198,9 @@ export function backendDiff(original: BackendView, d: BackendDraft): BackendSpec
   // Only patch membership when it changed — an absent key leaves the join
   // untouched server-side (§4.3); an explicit [] clears all memberships.
   if (!sameSet(d.disable_profiles, original.disable_profiles ?? [])) spec.disable_profiles = d.disable_profiles
+  // metadata REPLACES server-side (applySpec) — merge over the stored object
+  // so an in-dialog patch never drops score_domain & friends.
+  if (d.metadata) spec.metadata = { ...original.metadata, ...d.metadata }
   return spec
 }
 

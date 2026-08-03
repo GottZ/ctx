@@ -13,6 +13,17 @@ type FieldError struct {
 	Message string `json:"message"`
 }
 
+// EmbedEquivalenceThreshold is the minimum per-sample cosine (over the
+// DB-relevant 1024-truncated, L2-normalized vectors) at which the
+// embed-equivalence probe declares an external backend's vector space
+// equivalent to the local reference. Empirically anchored (2026-08-04,
+// llama-embed CPU-quant vs DGX qwen3-embedding-8b): same weights across a
+// precision/quantization boundary measure 0.9972–0.9986 over a 7-sample
+// corpus incl. Umlaute, code and symbol noise; a genuinely different model
+// lands far below 0.99. 0.995 separates the two populations with margin on
+// both sides.
+const EmbedEquivalenceThreshold = 0.995
+
 // headerDenylist blocks credential-carrier headers in extra_headers
 // (case-insensitive exact matches; suffix patterns below). The escape hatch
 // is api_key_ref — same pattern as F2's secret_ref rule ("create the secret
@@ -199,8 +210,8 @@ func validateRoles(b *Backend) (warnings []string, errs []FieldError) {
 	// Embed roles write into the shared vector(1024) space. A foreign
 	// quantization corrupts retrieval silently; repair at 1M+ blocks is a
 	// full re-embed — more irreversible than any cooldown damage. Hard 422,
-	// liftable only via the documented embed-failover wave (cosine test →
-	// metadata.embed_equivalence_verified).
+	// liftable only via the cosine equivalence probe (backend-test
+	// probe:"embed-equivalence" → metadata.embed_equivalence_verified).
 	if hasEmbedRole && b.Locality == LocalityExternal {
 		if verified, _ := b.Metadata["embed_equivalence_verified"].(bool); !verified {
 			errs = append(errs, FieldError{"roles",

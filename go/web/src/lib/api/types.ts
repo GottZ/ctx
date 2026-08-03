@@ -198,6 +198,27 @@ export interface BackendSpec {
   // like the rest of the patch — an absent key leaves membership untouched, an
   // explicit [] clears ALL memberships of this backend.
   disable_profiles?: string[]
+  // metadata REPLACES the whole stored object when present (applySpec) — an
+  // update patch must merge the previous metadata in (backendDiff does).
+  metadata?: Record<string, unknown>
+}
+
+// Source: go/internal/handler/backends_embed_equiv.go. The cosine probe that
+// earns metadata.embed_equivalence_verified for an external embed backend
+// (validate.go hard 422). Always HTTP 200 — config/wire failures land in
+// `failure` with verified:false. metadata_patch is present ONLY on verified
+// and is merged verbatim into the save payload by the dialog.
+export interface EmbedEquivalenceResult {
+  success: true
+  probe: 'embed-equivalence'
+  verified: boolean
+  failure?: string
+  reference?: { id: string; name: string; model: string }
+  candidate?: { name: string; model: string }
+  samples?: { label: string; cosine: number }[]
+  min_cosine?: number
+  threshold?: number
+  metadata_patch?: Record<string, unknown>
 }
 
 export interface BackendListResponse {

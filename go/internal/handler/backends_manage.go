@@ -642,6 +642,13 @@ func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request
 // forced zdr:true leaves a non-empty provider set.
 func (h *ManageHandler) handleBackendTest(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
+	// The embed-equivalence probe dispatches BEFORE the id gate: its candidate
+	// may be an UNSAVED dialog spec (validation rejects persisting an external
+	// embed backend unverified — test-before-create is the only viable order).
+	if spec := equivSpecFromRequest(req.Data); spec.Probe == "embed-equivalence" {
+		h.handleEmbedEquivalence(w, r, ar, req, spec)
+		return
+	}
 	if req.ID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id required"})
 		return
