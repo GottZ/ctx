@@ -25,10 +25,17 @@ WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost}"
 KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}"
 KEY_WORK="${CONTEXT_API_KEY_WORK:?CONTEXT_API_KEY_WORK not set in .env}"
 KEY_INVALID="deadbeef_invalid_key_0000000000000000000000000000000000000000"
-DB_CMD="docker exec -e PGPASSWORD=${CONTEXT_DB_PASSWORD:?CONTEXT_DB_PASSWORD not set in .env} n8n-db-1 psql -U ${CONTEXT_DB_USER:-context_user} -d ${CONTEXT_DB:-context_store} -t -A"
+
+# DB container resolution: env → compose → literal (issue #19).
+DB_CONTAINER="${CTX_DB_CONTAINER:-}"
+[[ -z "$DB_CONTAINER" ]] && DB_CONTAINER="$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps -q db 2>/dev/null | head -1)"
+[[ -z "$DB_CONTAINER" ]] && DB_CONTAINER="n8n-db-1"
+
+DB_CMD="docker exec -e PGPASSWORD=${CONTEXT_DB_PASSWORD:?CONTEXT_DB_PASSWORD not set in .env} ${DB_CONTAINER} psql -U ${CONTEXT_DB_USER:-context_user} -d ${CONTEXT_DB:-context_store} -t -A"
 
 PASS=0
 FAIL=0
+SKIP=0
 CLEANUP_ID=""
 TEST_TITLE="__benchmark_test_$(date +%s)__"
 
@@ -47,6 +54,11 @@ pass() {
 fail() {
   echo "[FAIL] $1 -- $2"
   ((FAIL++))
+}
+
+skip() {
+  echo "[SKIP] $1 -- $2"
+  ((SKIP++))
 }
 
 # curl wrapper: $1=url, $2=key, $3=body, $4=timeout (default 10)
@@ -77,9 +89,23 @@ echo "Config: ollama=$(echo "${OLLAMA_HOST:-unset}" | sed 's|^\(https\?://[^@]*@
 echo "Config: embed_model=${OLLAMA_EMBED_MODEL:-unset}"
 echo "Config: embed_dims=${OLLAMA_EMBED_DIMS:-unset}"
 echo "Config: chat_model=${OLLAMA_CHAT_MODEL:-unset}"
-db_status=$(docker inspect --format '{{.State.Health.Status}}' n8n-db-1 2>/dev/null || echo "unknown")
-echo "Config: db=n8n-db-1 ($db_status)"
+db_status=$(docker inspect --format '{{.State.Health.Status}}' "$DB_CONTAINER" 2>/dev/null || echo "unknown")
+echo "Config: db=$DB_CONTAINER ($db_status)"
 echo ""
+
+# Corpus gate: corpus-bound tests (T02, T10, T13, T14, T19, T23) assume a
+# grown store (home deployment: thousands of blocks). Fresh deployments would
+# fail them spuriously — below CORPUS_MIN blocks they SKIP instead. Behavior
+# tests (auth, CRUD, settings, …) always run. Same stats surface as T02.
+CORPUS_MIN=100
+corpus_resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"stats"}')
+CORPUS_TOTAL=$(echo "$corpus_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
+CORPUS_OK=true
+if [[ -z "$CORPUS_TOTAL" ]] || (( CORPUS_TOTAL < CORPUS_MIN )); then
+  CORPUS_OK=false
+  echo "Corpus: total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN — corpus-bound tests will SKIP"
+  echo ""
+fi
 
 # =====================================================================
 # PART 1: System Tests (no Ollama)
@@ -111,12 +137,16 @@ fi
 
 # T02 AUTH_PRIVATE
 T="T02 AUTH_PRIVATE"
+if ! $CORPUS_OK; then
+  skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
+else
 resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"stats"}')
 total=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
 if [[ -n "$total" ]] && (( total >= 180 )); then
   pass "$T (total_blocks=$total)"
 else
   fail "$T" "expected total_blocks >= 180, got: $total"
+fi
 fi
 
 # T03 AUTH_WORK
@@ -290,13 +320,21 @@ t07_count_fallback() {
 # (Private-Key) — /api/contract ist admin-gated, das gäbe HTTP 403 → Exit 3 →
 # stiller Abstieg in den Zähl-Fallback. Env schlägt Datei (internal/cli:
 # LoadConfig, ENV > ~/.config/ctx/config); CTX_BASE_URL bleibt aus der Datei.
-if t07_out=$(CTX_KEY="${CTX_ADMIN_KEY:-}" ctx contract 2>&1); then
+# CLI-Guard (issue #19): ohne installierte ctx-CLI wäre das ein Exit-127-
+# Rauschen im Zähl-Fallback — expliziter SKIP statt Pseudo-Diagnose.
+if ! command -v ctx >/dev/null 2>&1; then
+  skip "$T" "ctx CLI not installed (command -v ctx empty)"
+  t07_rc="skipped"
+elif t07_out=$(CTX_KEY="${CTX_ADMIN_KEY:-}" ctx contract 2>&1); then
   t07_rc=0
 else
   t07_rc=$?
 fi
 
 case "$t07_rc" in
+  skipped)
+    : # already counted via skip()
+    ;;
   0)
     pass "$T (ctx contract: ok)"
     ;;
@@ -346,12 +384,16 @@ fi
 
 # T10 BACKUP_EXISTS
 T="T10 BACKUP_EXISTS"
-recent_dump=$(find /compose/n8n/backups/ -name '*.dump' -mmin -1500 -type f 2>/dev/null | head -1)
+if ! $CORPUS_OK; then
+  skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
+else
+recent_dump=$(find "$SCRIPT_DIR/backups/" -name '*.dump' -mmin -1500 -type f 2>/dev/null | head -1)
 if [[ -n "$recent_dump" ]]; then
   age_h=$(( ( $(date +%s) - $(stat -c %Y "$recent_dump") ) / 3600 ))
   pass "$T ($(basename "$recent_dump"), ${age_h}h old)"
 else
-  fail "$T" "no .dump file younger than 25h in /compose/n8n/backups/"
+  fail "$T" "no .dump file younger than 25h in $SCRIPT_DIR/backups/"
+fi
 fi
 
 # T11 DREAM_STATS
@@ -379,6 +421,9 @@ fi
 # stats.truncated present, and 404-equality (invisible private block vs
 # nonexistent UUID must answer byte-identically — no existence oracle).
 T="T19 GRAPH_EGO"
+if ! $CORPUS_OK; then
+  skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
+else
 # Focus: the highest-degree non-archived private/shared block (visible to
 # KEY_PRIVATE, guaranteed >= 1 edge so the edge-count assertion is meaningful).
 # Typen mit retrieval-Policy 'excluded' scheiden generisch aus — /api/graph/ego
@@ -429,6 +474,7 @@ print(';'.join(problems) if problems else 'OK ' + str(stats.get('nodes')) + ' no
       fail "$T" "404-oracle: invisible=$t19_code1 missing=$t19_code2 bodies_equal=$([[ "$t19_body1" == "$t19_body2" ]] && echo yes || echo no)"
     fi
   fi
+fi
 fi
 
 # T20 SETTINGS_ROUNDTRIP — /api/settings (G16/F2-W5). Admin-gated runtime
@@ -563,6 +609,9 @@ if $WITH_OLLAMA; then
 
   # T13 SEARCH_BASIC
   T="T13 SEARCH_BASIC"
+  if ! $CORPUS_OK; then
+    skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
+  else
   resp=$(api "$WEBHOOK/api/search" "$KEY_PRIVATE" \
     '{"query":"Write Guard"}' 120)
   count=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
@@ -571,9 +620,13 @@ if $WITH_OLLAMA; then
   else
     fail "$T" "expected >= 1 result, got count=$count"
   fi
+  fi
 
   # T14 AGENT_CONFIDENT
   T="T14 AGENT_CONFIDENT"
+  if ! $CORPUS_OK; then
+    skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
+  else
   resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
     '{"query":"How does the Write Guard work?"}' 120)
   confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
@@ -582,6 +635,7 @@ if $WITH_OLLAMA; then
     pass "$T (confidence=$confidence)"
   else
     fail "$T" "expected confidence=confident + nonempty answer, got confidence=$confidence answer=$answer"
+  fi
   fi
 
   # T15 AGENT_NEGATIVE
@@ -656,6 +710,9 @@ if $WITH_OLLAMA; then
   # host=primary even on fallback) and required_sensitivity=internal (E6).
   # llmlog writes are async — poll briefly after the 200.
   T="T23 DIGEST_TRIGGER_LLMLOG"
+  if ! $CORPUS_OK; then
+    skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
+  else
   t23_resp=$(api "$WEBHOOK/api/synthesize/daily" "$KEY_PRIVATE" '{}' 200)
   t23_block=$(echo "$t23_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('block_id','') if d.get('ok') else '')" 2>/dev/null)
   if [[ -z "$t23_block" ]]; then
@@ -677,6 +734,7 @@ if $WITH_OLLAMA; then
       pass "$T (block=$t23_block via backend=$t23_backend, required=internal)"
     fi
   fi
+  fi
 else
   echo ""
   echo "--- Part 2: Retrieval Tests SKIPPED (use --with-ollama) ---"
@@ -687,7 +745,11 @@ fi
 # =====================================================================
 echo ""
 TOTAL=$((PASS + FAIL))
-echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
+if (( SKIP > 0 )); then
+  echo "=== Results: $PASS/$TOTAL passed, $FAIL failed, $SKIP skipped ==="
+else
+  echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
+fi
 
 if (( FAIL > 0 )); then
   exit 1

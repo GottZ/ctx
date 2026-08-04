@@ -25,8 +25,10 @@ fi
 set -a; source "$ENV_FILE"; set +a
 
 KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}"
-BASELINE_FILE="/compose/n8n/.eval-baseline.json"
-RESULTS_FILE="/tmp/eval-results-$(date +%s).json"
+BASELINE_FILE="${SCRIPT_DIR}/.eval-baseline.json"
+RESULTS_DIR="${SCRIPT_DIR}/.eval-results"
+mkdir -p "$RESULTS_DIR"
+RESULTS_FILE="${RESULTS_DIR}/eval-results-$(date +%s).json"
 
 RETRIEVAL_ONLY=false
 UPDATE_BASELINE=false

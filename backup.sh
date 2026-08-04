@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_DIR="${SCRIPT_DIR}/backups"
 ENV_FILE="${SCRIPT_DIR}/.env"
-CONTAINER="n8n-db-1"
+CONTAINER="${CTX_DB_CONTAINER:-n8n-db-1}"
 RETENTION_DAYS=7
 DATE=$(date +%Y%m%d-%H%M%S)
 

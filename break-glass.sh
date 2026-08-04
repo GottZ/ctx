@@ -11,6 +11,12 @@
 #         ./break-glass.sh reset-settings [key]
 set -euo pipefail
 cd "$(dirname "$0")"; set -a; source .env; set +a
+# DB container resolution: env → compose → literal (issue #19); set -e-safe forms.
+DB_CONTAINER="${CTX_DB_CONTAINER:-}"
+if [[ -z "$DB_CONTAINER" ]]; then
+  DB_CONTAINER="$(docker compose -f docker-compose.yml ps -q db 2>/dev/null | head -1)"
+fi
+[[ -n "$DB_CONTAINER" ]] || DB_CONTAINER="n8n-db-1"
 case "${1:?usage: secret <name> [scope] | reset-settings [key]}" in
   secret)
     # replace(…, E'\n','') strips the MIME line wraps from encode(): PG
@@ -18,7 +24,7 @@ case "${1:?usage: secret <name> [scope] | reset-settings [key]}" in
     # realistic provider key arrives multi-line. The decrypt mode reads
     # stdin to EOF and strips CR/LF anyway (belt and braces), but the
     # record should leave psql in one piece.
-    docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 \
+    docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" "$DB_CONTAINER" \
       psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -At -c \
       "SELECT replace(encode(nonce,'base64'), E'\n', '')
               ||':'|| replace(encode(ciphertext,'base64'), E'\n', '')
@@ -32,7 +38,7 @@ case "${1:?usage: secret <name> [scope] | reset-settings [key]}" in
     # metadata.via='sql') — even the most drastic intervention leaves
     # history, not just NOTIFYs.
     WHERE="scope='_global'"; [ -n "${2:-}" ] && WHERE="$WHERE AND key='$2'"
-    docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 \
+    docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" "$DB_CONTAINER" \
       psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c "DELETE FROM context_settings WHERE $WHERE;"
     ;;
   *)

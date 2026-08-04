@@ -88,7 +88,10 @@ else's environment — that led to a fix landing in the repository.
   the fix (v4.25.2), equivalence-proven against the old globs under real
   bash 3.2; the #18 report's compose declaration + first-run docs shipped in
   v4.25.3, and its G17-class framing directly surfaced the next instance
-  (`CTX_SETTINGS_DISABLE`), closed in the same release.
+  (`CTX_SETTINGS_DISABLE`), closed in the same release; the #19 report's
+  resolution order (env → compose-derived → literal) shipped in v4.25.5
+  across all six ops scripts, together with its corpus-threshold SKIP split
+  that turns test.sh into a fresh-install acceptance suite.
 - **TresPies-source** ([@TresPies-source](https://github.com/TresPies-source)) —
   [#21](https://github.com/GottZ/ctx/issues/21): a `/v1`-suffixed
   `base_url` — the root shape every other OpenAI-compatible integration

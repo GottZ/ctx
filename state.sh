@@ -18,7 +18,17 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 set -a; source "$ENV_FILE"; set +a
 
-DB_CMD="docker exec -e PGPASSWORD=${CONTEXT_DB_PASSWORD:?} n8n-db-1 psql -U ${CONTEXT_DB_USER:-context_user} -d ${CONTEXT_DB:-context_store} -t -A"
+# DB container resolution: env → compose → literal (issue #19).
+# if-form, not `[[ ]] &&` — this script runs under set -e.
+DB_CONTAINER="${CTX_DB_CONTAINER:-}"
+if [[ -z "$DB_CONTAINER" ]]; then
+  DB_CONTAINER="$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps -q db 2>/dev/null | head -1)"
+fi
+if [[ -z "$DB_CONTAINER" ]]; then
+  DB_CONTAINER="n8n-db-1"
+fi
+
+DB_CMD="docker exec -e PGPASSWORD=${CONTEXT_DB_PASSWORD:?} ${DB_CONTAINER} psql -U ${CONTEXT_DB_USER:-context_user} -d ${CONTEXT_DB:-context_store} -t -A"
 
 # --- Database ---
 block_active=$($DB_CMD -c "SELECT count(*) FROM context_blocks WHERE NOT is_archived;")
@@ -132,7 +142,7 @@ cli_commands=$((cli_register + cli_main))
 
 # --- Containers ---
 ctx_status=$(docker inspect --format='{{.State.Health.Status}}' ctx 2>/dev/null || echo "not running")
-db_status=$(docker inspect --format='{{.State.Health.Status}}' n8n-db-1 2>/dev/null || echo "not running")
+db_status=$(docker inspect --format='{{.State.Health.Status}}' "$DB_CONTAINER" 2>/dev/null || echo "not running")
 
 # --- Config ---
 embed_model="${OLLAMA_EMBED_MODEL:-not set}"
@@ -197,7 +207,7 @@ echo "  TODO(multi-tenant): $mt_markers markers"
 echo ""
 echo "--- Containers ---"
 echo "  ctx:                $ctx_status"
-echo "  n8n-db-1:           $db_status"
+echo "  db:                 $db_status ($DB_CONTAINER)"
 echo ""
 echo "--- Config ---"
 echo "  Embed model:        $embed_model"
