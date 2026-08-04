@@ -123,7 +123,28 @@
           <button type="button" onclick={() => void profiles.reload()}>Retry</button>
         </div>
       {:else if profiles.status === 'ready'}
-        <ProfilesCard {profiles} />
+        <!-- Render-Blast-Radius-Grenze: ein Crash IN der Karte (z.B. ein
+             Wire-Vertragsbruch wie roles_blacked_out:null) riss vorher den
+             ganzen {:else}-Ast mit — die Backend-Tabelle im selben Flush
+             renderte nie ("alle ausgeblendet bis F5"). Der Fehler bleibt
+             SICHTBAR (Band statt stiller Verlust), die Tabelle lebt weiter. -->
+        <svelte:boundary>
+          <ProfilesCard {profiles} />
+          {#snippet failed(error, reset)}
+            <div class="error" role="alert">
+              <p>Abschaltprofile-Karte fehlerhaft: {error instanceof Error ? error.message : String(error)}</p>
+              <!-- fresh data FIRST, then reset — resetting onto the same broken
+                   state would just re-throw into this boundary -->
+              <button
+                type="button"
+                onclick={async () => {
+                  await profiles.reload()
+                  reset()
+                }}
+              >Retry</button>
+            </div>
+          {/snippet}
+        </svelte:boundary>
       {/if}
       <BackendTable {pool} {knownSecrets} {profileOptions} />
     {/if}
