@@ -86,7 +86,9 @@ else's environment — that led to a fix landing in the repository.
   by stock macOS bash 3.2 — case arm inside `$( )`), each verified against
   the shipped artifacts. The #20 report's suggested grep rewrite shipped as
   the fix (v4.25.2), equivalence-proven against the old globs under real
-  bash 3.2.
+  bash 3.2; the #18 report's compose declaration + first-run docs shipped in
+  v4.25.3, and its G17-class framing directly surfaced the next instance
+  (`CTX_SETTINGS_DISABLE`), closed in the same release.
 
 ## How to be listed
 

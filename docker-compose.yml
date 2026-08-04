@@ -25,6 +25,18 @@ services:
       # 503 although .env carries the key (compose gap, found live G17).
       CTX_SECRETS_KEY: ${CTX_SECRETS_KEY:-}
       CTX_SECRETS_KEY_PREV: ${CTX_SECRETS_KEY_PREV:-}
+      # First-boot admin mint (design: henhouse egg). Same compose-gap class
+      # as CTX_SECRETS_KEY above (G17): .env alone is not enough, the
+      # declaration must exist here. Unset => no-op; populated key table =>
+      # the mint refuses (fail-closed, cmd/ctxd bootstrapAdminKeyBoot).
+      # RUN_ID only names the label e2e-bootstrap-<run-id> (default: unknown).
+      CTX_BOOTSTRAP_ADMIN_KEY: ${CTX_BOOTSTRAP_ADMIN_KEY:-}
+      CTX_BOOTSTRAP_RUN_ID: ${CTX_BOOTSTRAP_RUN_ID:-}
+      # Settings-layer kill switch (settings/reload.go EnvDisable). Env-only
+      # BY DESIGN — the switch that turns off DB overrides cannot itself be a
+      # DB override — hence the same compose-gap class: undeclared here, a
+      # .env value never reaches the daemon. Empty = layer active.
+      CTX_SETTINGS_DISABLE: ${CTX_SETTINGS_DISABLE:-}
       # Camo image proxy (design 07-camo). Fail-closed: without ENABLED=true
       # both /api/img routes 404 and the SPA keeps its placeholder. Same
       # compose-gap class as CTX_SECRETS_KEY above (G17): .env alone is not
