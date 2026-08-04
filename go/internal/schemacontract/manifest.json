@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 123,
+    "migration_max": 124,
     "migration_count": 122,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
@@ -3448,6 +3448,83 @@
           "type": "real",
           "not_null": true,
           "storage": "p"
+        },
+        {
+          "name": "topic_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "core_hash",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "core_blocks",
+          "type": "uuid[]",
+          "not_null": true,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "graph_cluster_topic": {
+      "columns": [
+        {
+          "name": "topic_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "last_seen_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "retired_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "origin_kind",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "origin_topic_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "merged_into",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "core_blocks",
+          "type": "uuid[]",
+          "not_null": true,
+          "storage": "x"
         }
       ],
       "row_security": false
@@ -3457,7 +3534,7 @@
         {
           "name": "computed_at",
           "type": "timestamp with time zone",
-          "not_null": false,
+          "not_null": true,
           "storage": "p"
         },
         {
@@ -3495,24 +3572,6 @@
           "type": "text",
           "not_null": true,
           "storage": "x"
-        },
-        {
-          "name": "last_attempt_at",
-          "type": "timestamp with time zone",
-          "not_null": false,
-          "storage": "p"
-        },
-        {
-          "name": "skip_reason",
-          "type": "text",
-          "not_null": false,
-          "storage": "x"
-        },
-        {
-          "name": "candidate_n",
-          "type": "integer",
-          "not_null": false,
-          "storage": "p"
         }
       ],
       "row_security": false
@@ -3686,6 +3745,9 @@
     },
     "graph_cluster_node_pkey": {
       "def_hash": "797efb13122558310393381bcdc4f60aa045c4c24a9eba5153b07ea5c93ef01b"
+    },
+    "graph_cluster_topic_pkey": {
+      "def_hash": "1c5ab1536b2056d754fb2a8a223acbec9a211ea1b8a18ff995ab7e6481109fa6"
     },
     "graph_overview_meta_pkey": {
       "def_hash": "1a8606799ebd429c96ef43977558928d3b268410c6e33547f2ad7f5fb43cce52"
@@ -3892,6 +3954,15 @@
     "idx_gcn_scope": {
       "def_hash": "00a95a5e65983caf08fe4846674957d83bc46d7cd0ab73460e8b2f02372fad6e"
     },
+    "idx_gct_merged_into": {
+      "def_hash": "12c9848aed1bb39ba81d98484dd174a1b1bbcee7db56e3b9df9127685e8346f0"
+    },
+    "idx_gct_origin": {
+      "def_hash": "99c673d987882ec6991a698edaf4c2355a567c9d2ae85b1b1a4cda4bfcbdbaad"
+    },
+    "idx_gct_retired": {
+      "def_hash": "359559e070c27dd78f8845ccf5aa6748861ea7ef14d562c2f9975079453ee65f"
+    },
     "idx_guard_pending": {
       "def_hash": "4770580d194390a0c4f5069487f1f2697690a2030fe6939233b1ab6eea532608"
     },
@@ -4080,6 +4151,9 @@
     },
     "uq_disable_profiles_scope_name": {
       "def_hash": "4b9cd6b34bb3bd4afa96eb95b3c99f8c4c70c9c8d72d5425aa3b93f2280562ab"
+    },
+    "uq_gcn_scope_topic": {
+      "def_hash": "e6466728e8c301ef0dff8c51af1bc72abf168cf33cc4202b211823aebe81700a"
     },
     "uq_graph_cat_hue_scope_cat": {
       "def_hash": "e80cfb6737f8b7faa3d0f6c8deacf3dc4c8b83544b289e0d9cbd2bdff066fb5a"
