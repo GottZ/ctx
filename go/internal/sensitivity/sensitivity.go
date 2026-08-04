@@ -60,12 +60,43 @@ var (
 	reAssign = regexp.MustCompile(`(?i)(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)["']?\s*[:=]\s*["']?([^\s"',;]+)`)
 
 	// reBase64Blob / reHexBlob: generic high-entropy blobs, the lowest-precision
-	// rules. Base64 is entropy-gated. Hex is LENGTH-gated at 64+ AND excluded
-	// when it is a bare word (git SHAs are 40, abbreviated 7-12; SHA-256 content
-	// hashes are 64 — those are handled by the surrounding-context check).
+	// rules. Base64 is entropy-gated. Hex is LENGTH-gated at 64+ (git SHAs are
+	// 40, abbreviated 7-12); a run whose immediately preceding token is a hash
+	// label (SHA256:, sha512=, checksum, digest, fingerprint — reHashLabel) is
+	// an integrity hash, not a secret, and is skipped (#22). Fail-closed: ONE
+	// unlabelled 64+ hex run still flags the whole content.
 	reBase64Blob = regexp.MustCompile(`\b[A-Za-z0-9+/]{32,}={0,2}\b`)
 	reHexBlob    = regexp.MustCompile(`\b[0-9a-fA-F]{64,}\b`)
+
+	// reHashLabel: hash-label token anchored to the END of the prefix window
+	// before a hex run — the word (plus optional -sum suffix, separator and
+	// opening quote/bracket) must directly precede the hex. Deliberate
+	// trade-off (#22 option 1): a real 64-hex secret written directly behind a
+	// hash label escapes this rule; the label context is still the strongest
+	// available discriminator (entropy cannot split SHA-256 from hex keys —
+	// both sit at ~4.0 bits/char).
+	reHashLabel = regexp.MustCompile(
+		`(?i)(?:sha-?(?:224|256|384|512)|sha3-\d{3}|blake[23][bs]?(?:-\d{3})?|checksum|digest|fingerprint|hash)` +
+			"(?:sum)?\\s*[:=]?\\s*[\"'`(<\\[]*\\s*$")
 )
+
+// hashLabelWindow is how many bytes before a hex run reHashLabel may search —
+// generous enough for `fingerprint: "` plus whitespace, small enough to keep
+// the label ADJACENT (a mention three sentences earlier must not whitelist).
+const hashLabelWindow = 32
+
+// hexBlobUnlabelled reports whether content carries a 64+ hex run WITHOUT a
+// hash label directly in front of it (#22). Byte-window slicing may cut into
+// a multi-byte rune at the window start — harmless, reHashLabel anchors at $.
+func hexBlobUnlabelled(content string) bool {
+	for _, loc := range reHexBlob.FindAllStringIndex(content, -1) {
+		start := max(loc[0]-hashLabelWindow, 0)
+		if !reHashLabel.MatchString(content[start:loc[0]]) {
+			return true
+		}
+	}
+	return false
+}
 
 // placeholderValue reports whether v is an obvious non-secret placeholder, so
 // an entropy-passing but clearly-templated assignment value does not fire.
@@ -76,8 +107,11 @@ func placeholderValue(v string) bool {
 		"your-token", "yourtoken", "todo", "none", "null", "xxxxxxxx":
 		return true
 	}
-	// Placeholder shapes: ${VAR}, $VAR, {{ var }}, all-x, your-*, *_here.
-	if strings.HasPrefix(v, "$") || strings.HasPrefix(v, "{{") ||
+	// Placeholder shapes: ${VAR}, $VAR, {{ var }}, <template>, all-x, your-*,
+	// *_here. A leading "<" is template shape even when the closing ">" falls
+	// outside the captured token (`<descriptive placeholder>` captures only
+	// `<descriptive` — the real value was never present, #22).
+	if strings.HasPrefix(v, "$") || strings.HasPrefix(v, "{{") || strings.HasPrefix(v, "<") ||
 		strings.HasPrefix(lv, "your") || strings.HasSuffix(lv, "_here") ||
 		strings.Trim(lv, "x") == "" || strings.Trim(lv, "*") == "" ||
 		strings.Trim(lv, ".") == "" {
@@ -113,7 +147,7 @@ func Scan(content string) (Match, bool) {
 			return Match{Kind: "base64-blob", Reason: "high-entropy base64 blob"}, true
 		}
 	}
-	if reHexBlob.MatchString(content) {
+	if hexBlobUnlabelled(content) {
 		return Match{Kind: "hex-blob", Reason: "long hex blob (>=64 chars)"}, true
 	}
 	return Match{}, false

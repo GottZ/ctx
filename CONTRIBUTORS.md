@@ -66,7 +66,15 @@ else's environment — that led to a fix landing in the repository.
   dialect — Voyage reports `usage.total_tokens` on `/v1/embeddings`, so
   every Voyage embed call went unmetered; the shipped fix keeps his
   prefer-prompt_tokens fallback, hardened with metering visibility and a
-  discriminating precedence fixture.
+  discriminating precedence fixture. Also
+  [#22](https://github.com/GottZ/ctx/issues/22): `sensitivity.Scan` flagged
+  hash-labelled SHA-256 integrity hashes as `credentials` — the 64-hex rule's
+  comment promised a surrounding-context check that did not exist in code,
+  silently blocking release-note blocks from every `trust=public` backend;
+  plus the `<descriptive placeholder>` assignment-value FP in the same file.
+  The shipped fix implements his option 1 (hash-label context discriminator,
+  documented as the safer choice over entropy gating in his own analysis)
+  and extends the placeholder shapes with angle-bracket templates.
 - **DojoGenesis** ([@DojoGenesis](https://github.com/DojoGenesis)) —
   [#16](https://github.com/GottZ/ctx/issues/16) / PR
   [#17](https://github.com/GottZ/ctx/pull/17): first boot on a fresh database

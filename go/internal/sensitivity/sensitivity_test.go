@@ -76,6 +76,19 @@ func TestScanNegatives(t *testing.T) {
 		{"markdown table", "| password | the user secret | required |"},
 		{"settings key name", "pool.default_block_sensitivity guard: sensitivity-downgrade"},
 		{"low-entropy assignment", "password=aaaaaaaa"},
+		// #22: hash-labelled 64-hex runs are integrity hashes, not secrets —
+		// the label context (SHA256:, sha256=, checksum, digest, …) is the
+		// discriminator the reHexBlob comment always promised.
+		{"sha256 labelled colon", "app_launcher.exe üretildi (SHA256: " + hex64() + ")"},
+		{"sha256 labelled equals", "artifact verified, sha256=" + hex64() + " matches"},
+		{"checksum labelled", "release checksum " + hex64() + " published in notes"},
+		{"digest labelled", "image digest: " + hex64()},
+		{"fingerprint labelled", "TLS fingerprint '" + hex64() + "' pinned"},
+		{"sha512 labelled", "backup integrity SHA512: " + strings.Repeat("0123456789abcdef", 8)},
+		// #22 secondary: angle-bracket placeholder VALUES never fire reAssign —
+		// the captured token is template shape, the real key was never present.
+		{"angle placeholder single word", "SERVICE_API_KEY=<descriptive>"},
+		{"angle placeholder with space", "SERVICE_API_KEY=<descriptive placeholder>"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
