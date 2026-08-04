@@ -194,6 +194,24 @@ Two consequences for the deploy:
 
 The migration is idempotent beyond that (`CREATE OR REPLACE FUNCTION` + `DROP TRIGGER IF EXISTS`), adds no table and no column, and needs no backfill: the graph cache is derived in-process state whose baseline is the boot rebuild.
 
+### Migration 123: the overview meta table records every rebuild *attempt*
+
+`graph_overview_meta` used to describe successful rebuilds only — the row is written by the persist transaction, so a run skipped by `graph_overview.max_nodes`, killed by `graph_overview.rebuild_timeout`, or returned early because the rebuild is disabled or the block-type registry is unwired left nothing behind but a log line. `computed_at` then stands still in all of those cases exactly as it does after a successful rebuild, and a consumer of the aggregates cannot tell "fresh" from "frozen for weeks".
+
+Migration 123 adds three columns and drops one default:
+
+| Column | Meaning |
+|---|---|
+| `last_attempt_at` | when a rebuild was last **attempted** for this partition — every outcome, including the skipped ones. `computed_at` keeps meaning the last **success**. |
+| `skip_reason` | `NULL` = the last attempt succeeded. Otherwise `node-cap`, `timeout`, `error`, `disabled`, `registry-unwired` (partition frozen, `computed_at` is stale) or `advisory-lock`. |
+| `candidate_n` | node candidates **of this scope** at the last attempt (`visible ∩ overview.include`) — the coverage denominator and the distance to `max_nodes`. Never a cross-scope total. |
+
+`advisory-lock` is **contention, not a freeze**: it means another instance was rebuilding that partition successfully at that moment. Treat it as an attempt timestamp, never as a cap.
+
+`computed_at` becomes nullable **and loses its `DEFAULT now()`** (from migration 057). A partition that has never built successfully but already has an attempt behind it — a fresh deploy above the node cap — needs a row without a success timestamp; with the default in place a skip upsert that does not name the column would silently claim freshness. The read path is unaffected: `max(computed_at)` ignores NULL, so "never built" stays the zero timestamp and the `stats.computed_at` wire field stays `null` exactly as before.
+
+Deploy notes, same shape as 116: the file carries `SET LOCAL lock_timeout = '3s'`, so it aborts with `55P03` rather than queueing behind a long-running persist transaction (a 400k-node rebuild measures ~465 s); every statement is idempotent, so the next boot simply re-runs it. Existing rows are backfilled with `last_attempt_at = computed_at` and `candidate_n = node_n` — historically correct, because only a successful run could have written them. No new table, no index.
+
 ### Migration 118: contract-drift closure (legacy function drop)
 
 The schema-contract check (Achse 03) found `extract_dates_from_text(t text)` live without a generating migration — a leftover of the GENERATED-column phase around migration 010, referenced by nothing (indexes, triggers, views, column defaults, `pg_depend`, Go code: all zero at the 2026-07-25 sweep). Migration 118 drops it (`DROP FUNCTION IF EXISTS` — a no-op on fresh chains, which never had it), closing the one expected `unknown_active_object` drift after the 108–117 rollout; `/health`'s `schema_contract` returns to `ok` on the next boot. The full function body is archived in the migration's commit message.

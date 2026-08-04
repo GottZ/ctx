@@ -128,7 +128,10 @@ func TestWorkerRoundtrip_IdenticalDBRows(t *testing.T) {
 	}
 	workerRows := dumpDeterministicRows(t, pool)
 
-	if statsWorker != statsInProc {
+	// DeepEqual since W-A: Stats carries the per-scope CandidateCount map and
+	// is no longer comparable with ==. The map is part of the equivalence
+	// claim — the worker must report the SAME per-scope candidate tally.
+	if !reflect.DeepEqual(statsWorker, statsInProc) {
 		t.Errorf("worker stats diverge from in-process stats:\n  in-process: %+v\n  worker    : %+v", statsInProc, statsWorker)
 	}
 	for _, table := range []string{"member", "node", "edge", "meta"} {

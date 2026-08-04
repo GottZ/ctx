@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 122,
-    "migration_count": 121,
+    "migration_max": 123,
+    "migration_count": 122,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3457,7 +3457,7 @@
         {
           "name": "computed_at",
           "type": "timestamp with time zone",
-          "not_null": true,
+          "not_null": false,
           "storage": "p"
         },
         {
@@ -3495,6 +3495,24 @@
           "type": "text",
           "not_null": true,
           "storage": "x"
+        },
+        {
+          "name": "last_attempt_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "skip_reason",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "candidate_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
         }
       ],
       "row_security": false

@@ -91,7 +91,7 @@ func TestMetaScope_B5(t *testing.T) {
 		if _, err := persist(ctx, pool, cl, Options{
 			Resolution: 1.0, VisibleTypes: types, OverviewTypes: types,
 			ScopeFilter: []string{"private"},
-		}, scopes); err != nil {
+		}, scopes, tallyScopes(scopes)); err != nil {
 			t.Fatalf("scoped persist: %v", err)
 		}
 		var privateAt, workAfter time.Time
@@ -127,7 +127,7 @@ func TestMetaScope_B5(t *testing.T) {
 		if _, err := persist(ctx, pool, cl, Options{
 			Resolution: 1.0, VisibleTypes: types, OverviewTypes: types,
 			ScopeFilter: []string{"shared"},
-		}, scopes); err != nil {
+		}, scopes, tallyScopes(scopes)); err != nil {
 			t.Fatalf("empty scoped persist: %v", err)
 		}
 		var clusterN int

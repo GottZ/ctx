@@ -893,18 +893,39 @@ func (s *Scheduler) yieldThenRebuildOverview(ctx context.Context, bt backgroundT
 	s.rebuildOverviewOnce(ctx, bt)
 }
 
-// overviewNeverBuilt reports whether the overview has never been computed
-// (zero meta rows) — the one case where a synchronous boot-time build is
-// warranted. Deliberately count(*) over ALL rows, not a per-scope read
-// (B-W5): this is the server-global boot probe with no caller scopes; any
-// row means SOME rebuild ran and the regular loop handles freshness.
+// overviewNeverBuilt reports whether the overview has never been computed —
+// the one case where a synchronous boot-time build is warranted. Deliberately
+// unscoped, not a per-scope read (B-W5): this is the server-global boot probe
+// with no caller scopes.
+//
+// W-A: the predicate is `computed_at IS NOT NULL`, no longer bare count(*).
+// Since migration 123 a meta row can also be a pure ATTEMPT stamp (skipped,
+// timed out, disabled — computed_at NULL). The old count(*) would read the
+// first such stamp as "SOME rebuild ran" and suppress the boot build FOREVER;
+// the first partition would then only appear after a full rebuild_interval
+// plus demand yield. Without this the wave would be a live regression.
 func (s *Scheduler) overviewNeverBuilt(ctx context.Context) bool {
 	var n int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM graph_overview_meta`).Scan(&n); err != nil {
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM graph_overview_meta WHERE computed_at IS NOT NULL`).Scan(&n); err != nil {
 		slog.Error("scheduler: overview meta check failed", "error", err)
 		return false
 	}
 	return n == 0
+}
+
+// stampOverviewAttempt records one non-successful rebuild attempt (W-A): the
+// four exits of rebuildOverviewOnce that used to leave nothing but a log line
+// now leave a database row, so a consumer of the aggregates can tell "fresh"
+// from "frozen for weeks" — computed_at advances in none of them.
+//
+// ctx is deliberately the OUTER scheduler context, never the rebuild's rctx:
+// on the timeout path rctx is expired exactly when the stamp is due.
+func (s *Scheduler) stampOverviewAttempt(ctx context.Context, bt backgroundTenant, reason string, candidates map[string]int, attemptStart time.Time) {
+	if err := overview.StampAttempt(ctx, s.pool, bt.owned, reason, candidates, attemptStart); err != nil {
+		slog.Error("scheduler: overview attempt stamp failed", "error", err,
+			"reason", reason, "tenant_scope", bt.scope, "scope_filter", bt.owned)
+	}
 }
 
 // rebuildOverviewOnce runs a single rebuild if enabled. The Enabled gate lives
@@ -916,8 +937,14 @@ func (s *Scheduler) overviewNeverBuilt(ctx context.Context) bool {
 // only the in-process FALLBACK still abandons a Modularize goroutine until
 // convergence (documented leak, overview.clusterWithCtx).
 func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant) {
+	// W-A: the attempt clock starts BEFORE the first gate — every one of the
+	// five exits stamps against it, and the stamp's ON CONFLICT condition
+	// (computed_at < attemptStart) uses it to discard a stamp that a
+	// concurrent successful run has already overtaken.
+	attemptStart := time.Now()
 	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: overview rebuild gate/resolution/cap/timeout are server-global policy knobs, not tenant-scoped — the B-W6 per-tenant loop varies the SCOPE FILTER per tick, not these.
 	if !cfg.GraphOverview.Enabled {
+		s.stampOverviewAttempt(ctx, bt, "disabled", nil, attemptStart)
 		return
 	}
 	// WF T6: the rebuild consumes the BASE registry snapshot (the rebuild is
@@ -927,6 +954,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// than cluster with a stale type set.
 	if s.blocktypes == nil {
 		slog.Error("scheduler: overview rebuild skipped — block-type registry not wired")
+		s.stampOverviewAttempt(ctx, bt, "registry-unwired", nil, attemptStart)
 		return
 	}
 	typeSet := s.blocktypes.Snapshot()
@@ -966,15 +994,29 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		ScopeFilter:   bt.owned,
 	})
 	if err != nil {
-		slog.Error("scheduler: overview rebuild failed", "error", err,
+		// W-A: distinguish the two failure shapes the map has to tell apart.
+		// A rebuild_timeout SIGKILLs the worker child (overview_worker.go:
+		// 89-97) and surfaces here as a plain exec failure — the DEADLINE on
+		// rctx is the discriminator, and 'timeout' is the outcome that
+		// DOMINATES at 1M+ (cluster.go:69-73), not an exotic branch.
+		reason := "error"
+		if errors.Is(rctx.Err(), context.DeadlineExceeded) {
+			reason = "timeout"
+		}
+		slog.Error("scheduler: overview rebuild failed", "error", err, "skip_reason", reason,
 			"tenant_scope", bt.scope, "scope_filter", bt.owned, "timeout", timeout, "elapsed", time.Since(start))
+		s.stampOverviewAttempt(ctx, bt, reason, stats.CandidateCount, attemptStart)
 		return
 	}
 	if stats.Skipped {
 		slog.Info("scheduler: overview rebuild skipped", "reason", stats.SkipReason,
 			"tenant_scope", bt.scope, "scope_filter", bt.owned)
+		s.stampOverviewAttempt(ctx, bt, stats.SkipReason, stats.CandidateCount, attemptStart)
 		return
 	}
+	// Fifth exit — success. It stamps too, but inside the persist tx: the
+	// metaWrite SQL sets last_attempt_at = computed_at and skip_reason = NULL
+	// in the same statement, which is how a good run CLEARS a recorded cap.
 	slog.Info("scheduler: overview rebuild complete",
 		"clusters", stats.ClusterCount, "nodes", stats.NodeCount,
 		"edge_rows", stats.EdgeRows, "modularity", stats.Modularity,

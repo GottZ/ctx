@@ -14,6 +14,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -46,6 +47,10 @@ const (
 )
 
 // Stats is the result of one rebuild for logging/telemetry.
+//
+// W-A note: this struct crosses the worker IPC boundary and BOTH decoders are
+// strict (worker.go DisallowUnknownFields) — a field addition is a protocol
+// change and must land on both sides in the same commit.
 type Stats struct {
 	Skipped      bool    // no-op run — SkipReason says why
 	SkipReason   string  // "advisory-lock" | "node-cap" (empty when not skipped)
@@ -53,6 +58,45 @@ type Stats struct {
 	ClusterCount int     // distinct communities
 	EdgeRows     int     // rows written to graph_cluster_edge (scope-pair partitioned)
 	Modularity   float64 // gonum Q-score of the partition
+
+	// CandidateCount is the node-candidate count PER SCOPE of this attempt
+	// (visible ∩ overview.include, tallied over loadNodes' nodeScopes BEFORE
+	// the MaxNodes cap) — the denominator of the root map's coverage figure
+	// and the distance to max_nodes (W-A, migration 123).
+	//
+	// A MAP, never a scalar: the meta rows are per-scope (GROUP BY n.scope),
+	// so a passed-through run total would write "1.204.331 candidates" into
+	// the persisted, backup- and export-travelling block of a tenant that
+	// only sees 3.000 — wordwise the difference channel on foreign corpus
+	// size that BP-1 forbids.
+	CandidateCount map[string]int
+}
+
+// tallyScopes counts node candidates per scope over the loadNodes output.
+// O(candidates) and free next to the load itself; runs BEFORE the MaxNodes
+// check so the skipped run can still report how far over the cap it was.
+func tallyScopes(nodeScopes map[string]string) map[string]int {
+	out := make(map[string]int, len(nodeScopes))
+	for _, scope := range nodeScopes {
+		out[scope]++
+	}
+	return out
+}
+
+// candidateArrays flattens a CandidateCount map into the two parallel arrays
+// the meta SQL binds (unnest($n::text[], $m::int[])). Sorted for a stable
+// bind order — the same reproducibility discipline as the edge insertion.
+func candidateArrays(candidates map[string]int) ([]string, []int32) {
+	scopes := make([]string, 0, len(candidates))
+	for s := range candidates {
+		scopes = append(scopes, s)
+	}
+	sort.Strings(scopes)
+	ns := make([]int32, len(scopes))
+	for i, s := range scopes {
+		ns[i] = int32(candidates[s]) //nolint:gosec // candidate counts are corpus-bounded; int32 covers 2.1e9 blocks per scope
+	}
+	return scopes, ns
 }
 
 // Options bundles the rebuild inputs (B-W1). The per-tenant scope filter
@@ -174,10 +218,13 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading nodes: %w", err)
 	}
+	// W-A: tally BEFORE the cap check — the skipped run is exactly the case
+	// where the map matters (how far over max_nodes is this partition?).
+	candidates := tallyScopes(nodeScopes)
 	if opts.MaxNodes > 0 && len(nodeUUIDs) > opts.MaxNodes {
 		slog.Warn("overview: rebuild skipped — node count exceeds cap (Louvain wall)",
 			"nodes", len(nodeUUIDs), "max_nodes", opts.MaxNodes)
-		return Stats{Skipped: true, SkipReason: "node-cap"}, nil
+		return Stats{Skipped: true, SkipReason: "node-cap", CandidateCount: candidates}, nil
 	}
 	edges, err := loadEdges(ctx, pool, opts.ScopeFilter)
 	if err != nil {
@@ -187,7 +234,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	if err != nil {
 		return Stats{}, err
 	}
-	return persist(ctx, pool, cl, opts, nodeScopes)
+	return persist(ctx, pool, cl, opts, nodeScopes, candidates)
 }
 
 // clusterWithCtx runs computeClustering in its own goroutine so a ctx
@@ -481,24 +528,105 @@ var edgeAggScopedSQL = fmt.Sprintf(edgeAggTemplate,
 // Stats are per-scope: cluster_n/node_n from the node rows, edge_n counts
 // INTRA-partition edge rows (scope_s = scope_t — a cross-scope row belongs to
 // no single partition, see 088 header); modularity/resolution are the run's.
+//
+// W-A (migration 123): the SUCCESS row also carries the attempt stamp —
+// last_attempt_at = now() (same tx timestamp as computed_at, so gate 9 reads
+// them equal) and skip_reason = NULL, which is how a successful run CLEARS a
+// previously recorded cap. candidate_n rides along as a per-scope value from
+// the parallel arrays ($n::text[], $m::int[]), never as one run total.
 const metaWriteGlobalSQL = `
-INSERT INTO graph_overview_meta (scope, computed_at, modularity, cluster_n, node_n, edge_n, resolution)
+INSERT INTO graph_overview_meta (scope, computed_at, modularity, cluster_n, node_n, edge_n, resolution,
+                                 last_attempt_at, skip_reason, candidate_n)
 SELECT n.scope, now(), $1, count(*)::int, COALESCE(sum(n.size), 0)::int,
        (SELECT count(*) FROM graph_cluster_edge e
          WHERE e.scope_s = n.scope AND e.scope_t = n.scope)::int,
-       $2
+       $2,
+       now(), NULL,
+       COALESCE((SELECT c.cn FROM unnest($3::text[], $4::int[]) AS c(cscope, cn) WHERE c.cscope = n.scope), 0)
   FROM graph_cluster_node n
  GROUP BY n.scope`
 
 const metaWriteScopedSQL = `
-INSERT INTO graph_overview_meta (scope, computed_at, modularity, cluster_n, node_n, edge_n, resolution)
+INSERT INTO graph_overview_meta (scope, computed_at, modularity, cluster_n, node_n, edge_n, resolution,
+                                 last_attempt_at, skip_reason, candidate_n)
 SELECT s.scope, now(), $1, count(n.cluster_id)::int, COALESCE(sum(n.size), 0)::int,
        (SELECT count(*) FROM graph_cluster_edge e
          WHERE e.scope_s = s.scope AND e.scope_t = s.scope)::int,
-       $2
+       $2,
+       now(), NULL,
+       COALESCE((SELECT c.cn FROM unnest($4::text[], $5::int[]) AS c(cscope, cn) WHERE c.cscope = s.scope), 0)
   FROM unnest($3::text[]) AS s(scope)
   LEFT JOIN graph_cluster_node n ON n.scope = s.scope
  GROUP BY s.scope`
+
+// stampAttemptScopedSQL records ONE rebuild attempt per named scope — the
+// four exits of rebuildOverviewOnce that write nothing today (disabled,
+// registry-unwired, error/timeout, skip). Success goes through the metaWrite
+// SQL above instead.
+//
+// Three details, each load-bearing (design/02 §3.1 point 2):
+//
+//   - computed_at is named EXPLICITLY as NULL. Without it the 057 DEFAULT
+//     now() would make a never-built partition claim freshness — the reason
+//     migration 123 drops the default. In the DO UPDATE branch the column is
+//     NOT touched: a skip does not invalidate the old partition, it makes it
+//     old. modularity/cluster_n/node_n/edge_n/resolution likewise.
+//   - candidate_n is carried forward DEFENSIVELY (COALESCE(NULLIF(…,0), old)):
+//     the advisory-lock skip is born inside persist with no candidate map, and
+//     an unconditional SET would overwrite a correct value with 0 — while
+//     candidate_n is the denominator of the coverage figure.
+//   - The WHERE clause settles the CONTENTION race: advisory-lock means
+//     ANOTHER instance is building this partition successfully right now
+//     (cluster.go "keeps serializing"). The winner commits computed_at =
+//     now(), skip_reason = NULL; an unconditional stamp by the loser would
+//     mark a seconds-old partition as frozen and the map would print a cap
+//     that does not exist. computed_at < attempt start discards the loser.
+const stampAttemptScopedSQL = `
+INSERT INTO graph_overview_meta (scope, computed_at, last_attempt_at, skip_reason, candidate_n)
+SELECT s.scope, NULL, now(), $2, COALESCE(c.n, 0)
+  FROM unnest($1::text[]) AS s(scope)
+  LEFT JOIN unnest($3::text[], $4::int[]) AS c(scope, n) ON c.scope = s.scope
+ON CONFLICT (scope) DO UPDATE
+   SET last_attempt_at = EXCLUDED.last_attempt_at,
+       skip_reason     = EXCLUDED.skip_reason,
+       candidate_n     = COALESCE(NULLIF(EXCLUDED.candidate_n, 0), graph_overview_meta.candidate_n)
+ WHERE graph_overview_meta.computed_at IS NULL
+    OR graph_overview_meta.computed_at < $5`
+
+// stampAttemptGlobalSQL is the nil-ScopeFilter variant: a global run has no
+// known scope list, so the attempt stamps every EXISTING row and creates
+// none — the same computed_at condition guards the contention race.
+const stampAttemptGlobalSQL = `
+UPDATE graph_overview_meta m
+   SET last_attempt_at = now(),
+       skip_reason     = $1,
+       candidate_n     = COALESCE(NULLIF((SELECT c.n FROM unnest($2::text[], $3::int[]) AS c(scope, n)
+                                           WHERE c.scope = m.scope), 0), m.candidate_n)
+ WHERE m.computed_at IS NULL
+    OR m.computed_at < $4`
+
+// StampAttempt records one FAILED, SKIPPED or DISABLED rebuild attempt so no
+// exit of rebuildOverviewOnce stays invisible in the database (W-A). scopes
+// is the run's partition filter — empty/nil is the global run (stamps the
+// existing rows, creates none). attemptStart is this attempt's start time and
+// discards a stamp that a concurrent, SUCCESSFUL run has already overtaken.
+//
+// Deliberately exported and pool-based (not tx-bound): the caller is the
+// scheduler, and on the timeout path it must stamp with the OUTER context —
+// the rebuild's own context is expired exactly then.
+func StampAttempt(ctx context.Context, pool *pgxpool.Pool, scopes []string, reason string, candidates map[string]int, attemptStart time.Time) error {
+	candScopes, candNs := candidateArrays(candidates)
+	if len(scopes) == 0 {
+		if _, err := pool.Exec(ctx, stampAttemptGlobalSQL, reason, candScopes, candNs, attemptStart); err != nil {
+			return fmt.Errorf("overview: stamping global rebuild attempt (%s): %w", reason, err)
+		}
+		return nil
+	}
+	if _, err := pool.Exec(ctx, stampAttemptScopedSQL, scopes, reason, candScopes, candNs, attemptStart); err != nil {
+		return fmt.Errorf("overview: stamping rebuild attempt (%s) for %v: %w", reason, scopes, err)
+	}
+	return nil
+}
 
 // teardown clears the 057 tables for one persist run: global = TRUNCATE (the
 // pre-B path), scoped = per-partition DELETEs (B-W3) — the atomic partner of
@@ -538,7 +666,12 @@ func teardown(ctx context.Context, tx pgx.Tx, scoped bool, scopeFilter []string)
 // the verified B1-C1 breakage). opts.VisibleTypes feeds the aggregation
 // re-checks (T6, $1). nodeScopes is the Louvain-input scope per block
 // (loadNodes) — denormalized onto the member row (B-W2, migration 087).
-func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Options, nodeScopes map[string]string) (Stats, error) {
+//
+// candidates is the per-scope node-candidate tally of THIS attempt (W-A). It
+// is handed down rather than recomputed because the advisory-lock skip is
+// born here (see below) and must be able to report it — persist otherwise
+// only knows the blocks that survived into the clustering.
+func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Options, nodeScopes map[string]string, candidates map[string]int) (Stats, error) {
 	scoped := len(opts.ScopeFilter) > 0
 	filterSet := make(map[string]struct{}, len(opts.ScopeFilter))
 	for _, s := range opts.ScopeFilter {
@@ -562,7 +695,7 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	if !locked {
 		slog.Info("overview: rebuild skipped — advisory lock held by another instance",
 			"lock_key", lockKey, "scope_filter", opts.ScopeFilter)
-		return Stats{Skipped: true, SkipReason: "advisory-lock"}, nil
+		return Stats{Skipped: true, SkipReason: "advisory-lock", CandidateCount: candidates}, nil
 	}
 
 	if err := teardown(ctx, tx, scoped, opts.ScopeFilter); err != nil {
@@ -636,28 +769,39 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	}
 
 	stats := Stats{
-		NodeCount:    len(cl.blockToCluster),
-		ClusterCount: len(clusterSet),
-		EdgeRows:     int(edgeTag.RowsAffected()),
-		Modularity:   cl.modularity,
+		NodeCount:      len(cl.blockToCluster),
+		ClusterCount:   len(clusterSet),
+		EdgeRows:       int(edgeTag.RowsAffected()),
+		Modularity:     cl.modularity,
+		CandidateCount: candidates,
 	}
+	candScopes, candNs := candidateArrays(candidates)
 
 	// Meta rows (B-W5, 088): replace exactly the rows this run owns, in the
 	// same tx — the global run replaces ALL rows (its scope set = every scope
 	// it just aggregated), the scoped run only its filter scopes (a foreign
 	// partition's computed_at is never touched, leak B1-m1).
 	if !scoped {
-		if _, err := tx.Exec(ctx, `DELETE FROM graph_overview_meta`); err != nil {
+		// W-A: the teardown is restricted to the scopes this run re-writes.
+		// The unconditional DELETE would erase a SKIP-ONLY row (the "fresh
+		// deploy above the cap" case: computed_at IS NULL, no cluster rows) —
+		// metaWriteGlobalSQL only re-creates scopes present in
+		// graph_cluster_node, so the skip memory would vanish on the next
+		// successful global run. The node table already carries THIS run's
+		// rows here (teardown + aggregation ran above), so the filter is
+		// exactly the set the INSERT below covers.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM graph_overview_meta WHERE scope IN (SELECT DISTINCT scope FROM graph_cluster_node)`); err != nil {
 			return Stats{}, fmt.Errorf("meta teardown: %w", err)
 		}
-		if _, err := tx.Exec(ctx, metaWriteGlobalSQL, stats.Modularity, opts.Resolution); err != nil {
+		if _, err := tx.Exec(ctx, metaWriteGlobalSQL, stats.Modularity, opts.Resolution, candScopes, candNs); err != nil {
 			return Stats{}, fmt.Errorf("meta write: %w", err)
 		}
 	} else {
 		if _, err := tx.Exec(ctx, `DELETE FROM graph_overview_meta WHERE scope = ANY($1)`, opts.ScopeFilter); err != nil {
 			return Stats{}, fmt.Errorf("scoped meta teardown: %w", err)
 		}
-		if _, err := tx.Exec(ctx, metaWriteScopedSQL, stats.Modularity, opts.Resolution, opts.ScopeFilter); err != nil {
+		if _, err := tx.Exec(ctx, metaWriteScopedSQL, stats.Modularity, opts.Resolution, opts.ScopeFilter, candScopes, candNs); err != nil {
 			return Stats{}, fmt.Errorf("scoped meta write: %w", err)
 		}
 	}

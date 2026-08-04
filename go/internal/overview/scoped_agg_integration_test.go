@@ -150,7 +150,7 @@ func TestScopedAggregation_B1C1(t *testing.T) {
 		cl, scopes := scopedInput(t, pool, types, []string{"private"})
 		stats, err := persist(ctx, pool, cl, Options{
 			Resolution: 1.0, VisibleTypes: types, ScopeFilter: []string{"private"},
-		}, scopes)
+		}, scopes, tallyScopes(scopes))
 		if err != nil {
 			t.Fatalf("scoped persist: %v", err) // 23505 here = B1-C1 regression
 		}
@@ -187,7 +187,7 @@ func TestScopedAggregation_B1C1(t *testing.T) {
 		cl, scopes := scopedInput(t, pool, types, []string{"private", "work"})
 		_, err := persist(ctx, pool, cl, Options{
 			Resolution: 1.0, VisibleTypes: types, ScopeFilter: []string{"private"},
-		}, scopes)
+		}, scopes, tallyScopes(scopes))
 		if err == nil || !strings.Contains(err.Error(), "outside ScopeFilter") {
 			t.Fatalf("out-of-filter input: err=%v, want loud input-purity error", err)
 		}
