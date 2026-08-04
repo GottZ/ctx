@@ -132,6 +132,8 @@ func validateIdentity(b *Backend) (errs []FieldError) {
 		errs = append(errs, FieldError{"base_url", "must be an absolute http(s) URL"})
 	}
 
+	errs = append(errs, validateVersionedRoot(b)...)
+
 	switch b.Protocol {
 	case ProtocolOpenAI, ProtocolOllama, "rerank":
 	default:
@@ -178,6 +180,36 @@ func validateIdentity(b *Backend) (errs []FieldError) {
 		errs = append(errs, FieldError{"num_ctx", "must be >= 0"})
 	}
 	return errs
+}
+
+// validateVersionedRoot rejects a base_url that already carries the version
+// segment. The openai and rerank wire paths append it themselves
+// (/v1/chat/completions, /v1/embeddings, /v1/rerank; openrouter additionally
+// /v1/key, /v1/endpoints/zdr and /v1/models/…/endpoints). A base_url ending
+// in /v1 — the form most cloud SDK examples teach — therefore double-segments
+// EVERY call to /v1/v1/… and fails in three disconnected-looking ways
+// (issue #21): probe unreachable, window discovery 404 → fail-closed
+// synthesis, chat 404. Silent acceptance here is what made that hard to
+// diagnose, so it is a 422. ollama protocol stays out: its wire appends
+// /api/…, so a /v1 root there is odd but does not double.
+func validateVersionedRoot(b *Backend) []FieldError {
+	// TrimSpace: copy-paste with trailing whitespace is the realistic entry
+	// path for exactly the audience this guard protects; ToLower: /V1 404s
+	// case-sensitively anyway, but with the same three disconnected symptoms
+	// this guard exists to prevent.
+	root := strings.ToLower(strings.TrimRight(strings.TrimSpace(b.Host), "/"))
+	if !strings.HasSuffix(root, "/v1") {
+		return nil
+	}
+	switch {
+	case b.ProviderClass == ProviderOpenRouter:
+		return []FieldError{{"base_url",
+			"openrouter-class base_url is the API root WITHOUT the version segment (wire paths append /v1/... themselves) — a /v1 root doubles to /v1/v1/... and breaks probe, window discovery and every synthesis"}}
+	case b.Protocol == ProtocolOpenAI || b.Protocol == "rerank":
+		return []FieldError{{"base_url",
+			"base_url is the API root WITHOUT the version segment (the openai/rerank wire paths append /v1/... themselves) — a /v1 root doubles to /v1/v1/... and 404s chat, embeddings and rerank"}}
+	}
+	return nil
 }
 
 // validateRoles covers role/model coverage, the embed+external hard block

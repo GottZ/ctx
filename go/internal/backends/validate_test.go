@@ -299,6 +299,72 @@ func TestValidateEnums(t *testing.T) {
 	}
 }
 
+// TestVersionedRootRejected (issue #21): the openai/rerank wire paths append
+// their version segment themselves — a base_url already ending in /v1 (the
+// form cloud examples teach) double-segments every call to /v1/v1/… and
+// produces three disconnected-looking failures on openrouter (probe
+// unreachable, window discovery 404 → fail-closed synthesis, chat 404).
+// Silent acceptance at create time is what made #21 hard to diagnose.
+func TestVersionedRootRejected(t *testing.T) {
+	// openrouter class: /v1 and /v1/ are both 422 — as are the two verified
+	// bypass shapes: uppercase /V1 (404s case-sensitively anyway, but with
+	// the same three disconnected symptoms) and a trailing space (the
+	// realistic copy-paste entry; url.Parse is lenient about it).
+	for _, host := range []string{
+		"https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/",
+		"https://openrouter.ai/api/V1", "https://openrouter.ai/api/v1 ",
+	} {
+		b := validBackend()
+		b.ProviderClass = ProviderOpenRouter
+		b.Host = host
+		if _, errs := ValidateBackend(&b); !fieldHit(errs, "base_url") {
+			t.Errorf("openrouter base_url %q passed validation", host)
+		}
+	}
+
+	// The correct openrouter root passes.
+	b := validBackend()
+	b.ProviderClass = ProviderOpenRouter
+	b.Host = "https://openrouter.ai/api"
+	if _, errs := ValidateBackend(&b); fieldHit(errs, "base_url") {
+		t.Error("versionless openrouter root rejected")
+	}
+
+	// Generic openai backends share the same wire (chat /v1/chat/completions,
+	// embed /v1/embeddings) — the doubling is identical, so the guard applies.
+	b = validBackend()
+	b.Host = "https://api.example.com/v1"
+	if _, errs := ValidateBackend(&b); !fieldHit(errs, "base_url") {
+		t.Error("generic openai /v1 root passed validation")
+	}
+
+	// rerank protocol appends /v1/rerank itself.
+	b = validBackend()
+	b.Protocol = "rerank"
+	b.Host = "http://10.13.37.11:8082/v1"
+	b.Locality = LocalityLAN
+	if _, errs := ValidateBackend(&b); !fieldHit(errs, "base_url") {
+		t.Error("rerank /v1 root passed validation")
+	}
+
+	// ollama protocol appends /api/… — /v1 there is odd but does NOT double,
+	// so it stays outside this guard.
+	b = validBackend()
+	b.Protocol = ProtocolOllama
+	b.Host = "http://10.13.37.11:11434/v1"
+	b.Locality = LocalityLAN
+	if _, errs := ValidateBackend(&b); fieldHit(errs, "base_url") {
+		t.Error("ollama /v1 root rejected — guard must stay bounded to the proven doubling")
+	}
+
+	// A path that merely CONTAINS v1 is fine.
+	b = validBackend()
+	b.Host = "https://api.example.com/v1proxy"
+	if _, errs := ValidateBackend(&b); fieldHit(errs, "base_url") {
+		t.Error("non-suffix v1 segment rejected")
+	}
+}
+
 func TestScoreDomainResolution(t *testing.T) {
 	b := Backend{}
 	if got := b.ScoreDomain(); got != ScoreDomainAuto {

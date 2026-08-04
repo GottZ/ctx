@@ -89,6 +89,17 @@ else's environment — that led to a fix landing in the repository.
   bash 3.2; the #18 report's compose declaration + first-run docs shipped in
   v4.25.3, and its G17-class framing directly surfaced the next instance
   (`CTX_SETTINGS_DISABLE`), closed in the same release.
+- **TresPies-source** ([@TresPies-source](https://github.com/TresPies-source)) —
+  [#21](https://github.com/GottZ/ctx/issues/21): a `/v1`-suffixed
+  `base_url` — the root shape every other OpenAI-compatible integration
+  teaches — passed `backend-create` validation silently and then failed in
+  three disconnected-looking ways (probe "unreachable", window discovery
+  404 → fail-closed synthesis naming neither backend nor URL, chat 404),
+  with a deterministic reproduction chaining all three symptoms to the one
+  URL-shape slip. The shipped fix (v4.25.4) rejects a versioned root at
+  create/update with a 422 naming the convention, for every openai- and
+  rerank-protocol backend — the wire-path sweep the report prompted showed
+  the doubling is not openrouter-specific.
 
 ## How to be listed
 
