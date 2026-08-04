@@ -445,11 +445,25 @@ type profileImpactResult struct {
 	embedDegraded bool
 }
 
+// emptyNotNull keeps append-built slices JSON-array-shaped: a nil slice
+// marshals as null, which breaks the array wire contract of types.ts.
+func emptyNotNull[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
 func (r profileImpactResult) render() map[string]any {
+	// Wire contract: every impact field is an ARRAY, never null. blackedOut is
+	// built via append on a nil var (the no-blackout NORMAL case stays nil) —
+	// marshalling that nil as null crashed the web ProfilesCard mid-flush and
+	// took the whole backends page down with it (loading-stuck / vanished
+	// table until F5).
 	out := map[string]any{
-		"backends":          r.backends,
-		"roles_affected":    r.rolesAffected,
-		"roles_blacked_out": r.blackedOut,
+		"backends":          emptyNotNull(r.backends),
+		"roles_affected":    emptyNotNull(r.rolesAffected),
+		"roles_blacked_out": emptyNotNull(r.blackedOut),
 	}
 	if r.embedDegraded {
 		out["embed_degraded"] = true
