@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 124,
-    "migration_count": 122,
+    "migration_max": 125,
+    "migration_count": 123,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3525,6 +3525,48 @@
           "type": "uuid[]",
           "not_null": true,
           "storage": "x"
+        },
+        {
+          "name": "label",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "label_source",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "label_built_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "label_core_hash",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "label_model",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "label_attempts",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "label_stale",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
         }
       ],
       "row_security": false
@@ -3953,6 +3995,9 @@
     },
     "idx_gcn_scope": {
       "def_hash": "00a95a5e65983caf08fe4846674957d83bc46d7cd0ab73460e8b2f02372fad6e"
+    },
+    "idx_gct_label_pending": {
+      "def_hash": "27713c1174337dc3b159222037733b4aa11719cf9745bc84ad45b191bac8dd2b"
     },
     "idx_gct_merged_into": {
       "def_hash": "12c9848aed1bb39ba81d98484dd174a1b1bbcee7db56e3b9df9127685e8346f0"
