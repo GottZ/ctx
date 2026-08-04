@@ -904,6 +904,8 @@ func (h *ManageHandler) dispatchBackendAction(w http.ResponseWriter, r *http.Req
 		h.handleBackendCreate(w, r, ar, req)
 	case "backend-update":
 		h.handleBackendUpdate(w, r, ar, req)
+	case "backend-reorder":
+		h.handleBackendReorder(w, r, ar, req)
 	case "backend-delete":
 		h.handleBackendDelete(w, r, ar, req)
 	case "backend-list":

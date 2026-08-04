@@ -187,7 +187,7 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// pattern as oauth-provider-*); tierServerAdmin, S9-pinned.
 		"oauth-identity-link", "oauth-identity-list", "oauth-identity-unlink":
 		h.dispatchMCPClientAction(w, r, authResult, req)
-	case "backend-create", "backend-update", "backend-delete", "backend-list", "backend-test",
+	case "backend-create", "backend-update", "backend-reorder", "backend-delete", "backend-list", "backend-test",
 		// embed-migration-* (Evokoa-Clean-Room design/04 §7 W04-7): the re-embed
 		// migration control surface — folded into the backend case arm (both are
 		// server-admin embedding/backend operator families) so HandleManage adds NO
@@ -420,6 +420,12 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 		// the resolved key — NOT tenant-filtered, so admitting a tenant-admin
 		// would be fail-OPEN, T25-LEHRE: isolate first, only then promote).
 		"backend-create", "backend-update", "backend-delete", "backend-list",
+		// backend-reorder: same T37 isolation as the sibling CRUD — the ladder
+		// rewrite locks ONLY rows matching backendWriteScopes (store scope
+		// predicate in the FOR UPDATE statement), a foreign/unknown id in
+		// data.order is a uniform 422 (no oracle). A tenant-admin reorders
+		// exactly its own subset; a server-admin the global set.
+		"backend-reorder",
 		// tenant-quota-get: a tenant-admin reads its OWN quota (transparency,
 		// OE-2; the handler pins the scope to ar.HomeScope). The mutating
 		// tenant-quota-set stays server-admin below — the quota is an operator

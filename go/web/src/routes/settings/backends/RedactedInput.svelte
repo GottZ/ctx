@@ -31,9 +31,15 @@
     void submit()
   }}
 >
+  <!-- autocomplete="new-password" (not "off"): browsers ignore "off" on
+       type=password and offer the SAVED login here; new-password is the one
+       value they honor. The data- flags mute the 1Password/LastPass overlay
+       icons on what is an API-secret field, never a login. -->
   <input
     type="password"
-    autocomplete="off"
+    autocomplete="new-password"
+    data-1p-ignore
+    data-lpignore="true"
     spellcheck="false"
     placeholder="value (write-only — never shown again)"
     bind:value

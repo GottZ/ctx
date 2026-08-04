@@ -25,6 +25,11 @@ func TestActionTier_Classification(t *testing.T) {
 		{"backend-update", "", tierTenantAdmin},
 		{"backend-delete", "", tierTenantAdmin},
 		{"backend-list", "", tierTenantAdmin},
+		// backend-reorder: same T37 isolation as the sibling CRUD (the ladder
+		// lock carries the backendWriteScopes predicate) → tenant-admin tier.
+		// Removing its actionTier entry drops it to the fail-open tierOpen
+		// default → this row turns RED (the S9 probe).
+		{"backend-reorder", "", tierTenantAdmin},
 		{"tenant-quota-get", "", tierTenantAdmin}, // read own quota (transparency)
 		// server-global (not yet isolated, or operator-level by nature)
 		{"mcp-client-create", "", tierServerAdmin},

@@ -9,6 +9,7 @@ import type {
   BackendDeleteResponse,
   BackendListResponse,
   BackendMutateResponse,
+  BackendReorderResponse,
   BackendSpec,
   BackendTestResult,
   EmbedEquivalenceResult,
@@ -54,6 +55,20 @@ export function updateBackend(
   return apiFetch<BackendMutateResponse>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'backend-update', id, data: dataWithConfirm(spec, confirm) }),
+  })
+}
+
+/**
+ * Atomic priority reorder. `order` is the FULL backend id list in the target
+ * chain order (highest priority first — the table's sort); `expected` carries
+ * the per-id priorities the client based the move on. The server answers 409
+ * when the live rows differ (stale view), so a concurrent edit gets reloaded,
+ * never clobbered by per-row priority patches racing each other.
+ */
+export function reorderBackends(order: string[], expected: Record<string, number>): Promise<BackendReorderResponse> {
+  return apiFetch<BackendReorderResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'backend-reorder', data: { order, expected } }),
   })
 }
 

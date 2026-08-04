@@ -133,6 +133,61 @@ func UpdateBackend(ctx context.Context, tx pgx.Tx, b *backends.Backend, by *stri
 	return tag.RowsAffected() > 0, nil
 }
 
+// BackendPriority is the reorder working set: the minimal projection the
+// backend-reorder handler needs to verify the client's snapshot and rewrite
+// the priority ladder (never the full row — reorder must not round-trip
+// unrelated fields through a possibly stale client copy).
+type BackendPriority struct {
+	ID       string
+	Name     string
+	Priority int
+}
+
+// LockBackendPriorities locks (FOR UPDATE) EVERY backend row the caller may
+// write — scopes as in UpdateBackend (nil = server-admin, no filter;
+// []string{ar.HomeScope} = tenant-admin, MT T37) — and returns id/name/priority
+// in Chain order (priority DESC, name ASC). The lock deliberately spans the
+// WHOLE writable set, not just the payload ids: backend-reorder rewrites the
+// complete ladder, so a concurrent reorder/update must serialize behind it and
+// the staleness check (409) reads a stable snapshot, not a moving one.
+func LockBackendPriorities(ctx context.Context, tx pgx.Tx, by *string, scopes []string) ([]BackendPriority, error) {
+	if err := setTxActor(ctx, tx, by); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id, name, priority FROM context_backends
+		 WHERE ($1::text[] IS NULL OR scope = ANY($1))
+		 ORDER BY priority DESC, name ASC
+		 FOR UPDATE`, scopes)
+	if err != nil {
+		return nil, fmt.Errorf("store: lock backend priorities: %w", err)
+	}
+	defer rows.Close()
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[BackendPriority])
+	if err != nil {
+		return nil, fmt.Errorf("store: lock backend priorities: %w", err)
+	}
+	return out, nil
+}
+
+// UpdateBackendPriority writes ONLY the priority column of one row. No scope
+// predicate here: the caller addresses exclusively ids it verified against
+// LockBackendPriorities in the SAME tx (the scope gate + row lock already
+// fired there); a vanished row is impossible under that lock, so zero affected
+// rows is a hard invariant break, not a 404.
+func UpdateBackendPriority(ctx context.Context, tx pgx.Tx, id string, priority int) error {
+	tag, err := tx.Exec(ctx,
+		`UPDATE context_backends SET priority=$2, updated_at=now() WHERE id=$1`,
+		id, priority)
+	if err != nil {
+		return fmt.Errorf("store: update backend priority: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("store: backend %s vanished during reorder despite row lock", id)
+	}
+	return nil
+}
+
 // DeleteBackend removes one row by id (hard delete — llmlog references by
 // backend_name TEXT, deliberately no FK, history stays readable). Returns
 // the deleted name for the response. scopes is the caller's permitted tenant

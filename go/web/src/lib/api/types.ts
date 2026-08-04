@@ -146,6 +146,11 @@ export interface BackendView {
   api_key_ref: string
   trust: string
   locality: string
+  // Tenant scope of the row (062, Modell C; server emits it in backendView).
+  // Drives the client-side writability split (T37): a tenant-admin SEES
+  // _global rows but may only mutate rows of its own scope — reorder must
+  // send exactly the writable subset or the server answers a uniform 422.
+  scope: string
   roles: string[]
   model_map: Record<string, ModelSpec>
   timeouts: Record<string, number>
@@ -237,6 +242,14 @@ export interface BackendMutateResponse {
 export interface BackendDeleteResponse {
   success: true
   deleted: string // the deleted backend's name, not its id
+}
+
+// Source: backend-reorder (atomic chain rewrite). The server renumbers all
+// priorities in one transaction, guarded by the client's `expected` snapshot —
+// a concurrent edit becomes HTTP 409 (stale) instead of a silent overwrite.
+// The client reconciles via backend-list, so the body carries no list.
+export interface BackendReorderResponse {
+  success: true
 }
 
 // Source: go/internal/handler/backends_manage.go (backend-test). Always HTTP

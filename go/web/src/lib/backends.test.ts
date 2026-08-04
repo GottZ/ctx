@@ -26,6 +26,7 @@ function bv(p: Partial<BackendView> & Pick<BackendView, 'name'>): BackendView {
     base_url: 'http://x',
     protocol: 'openai',
     provider_class: 'generic',
+    scope: '_global',
     api_key_ref: '',
     trust: 'public',
     locality: 'local',

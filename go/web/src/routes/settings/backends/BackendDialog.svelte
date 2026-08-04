@@ -203,7 +203,10 @@
   const trustTip = $derived(TRUST_LEVELS.find((t) => t.value === trust)?.tip ?? '')
 </script>
 
-<Modal bind:dialogEl width="42rem" {onclose}>
+<!-- dismissable={!saving}: Esc while the save round-trip runs would tear the
+     dialog down mid-flight and lose the error the server may answer with —
+     the same busy guard the header × and Cancel carry. -->
+<Modal bind:dialogEl width="42rem" dismissable={!saving} ariaLabelledby="backend-dialog-title" {onclose}>
   <form
     method="dialog"
     onsubmit={(e) => {
@@ -212,8 +215,8 @@
     }}
   >
     <header>
-      <h2>{mode === 'create' ? 'New backend' : `Edit ${backend?.name}`}</h2>
-      <button type="button" class="x" title="close" onclick={() => dialogEl?.close()}>×</button>
+      <h2 id="backend-dialog-title">{mode === 'create' ? 'New backend' : `Edit ${backend?.name}`}</h2>
+      <button type="button" class="x" title="close" aria-label="close" disabled={saving} onclick={() => dialogEl?.close()}>×</button>
     </header>
 
     <div class="body">
@@ -413,6 +416,10 @@
     line-height: var(--lh-solid);
     cursor: pointer;
     padding: 0 var(--space-1);
+  }
+  .x:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
   .body {
     display: flex;

@@ -278,7 +278,20 @@ POST /api/manage {"action":"backend-update","id":…,"data":{…}}   # single-fi
 POST /api/manage {"action":"backend-delete","id":…}        # hard delete (llmlog history stays readable)
 POST /api/manage {"action":"backend-test","id":…,"data":{"probe":"chat"}}  # reachability dry-run
 POST /api/manage {"action":"backend-test","data":{"probe":"embed-equivalence",…spec}}  # cosine proof, id optional
+POST /api/manage {"action":"backend-reorder","data":{"order":[id…],"expected":{id:prio…}}}  # atomic priority ladder
 ```
+
+**Atomic reorder.** `backend-reorder` rewrites the priority ladder in ONE
+transaction: `order` is the complete desired top-to-bottom sequence of the
+caller's *writable* backends (T37 — a tenant-admin's own rows only; visible
+`_global` rows keep their numbers and interleave), `expected` the id→priority
+snapshot the client based the move on. Priorities are reassigned in descending
+10-steps (top = n·10), which eliminates ties structurally; unchanged rows are
+skipped so the audit trail records only actual moves. A concurrent edit
+answers `409 {error:"stale", current:{…}}` instead of being overwritten; a
+foreign/unknown id or a partial order is a 422. This is what the admin table's
+drag-reorder and ▲▼ ride on — the per-row `priority` patch stays for direct
+numeric placement (the prio cell's click-to-edit).
 
 **Embed-equivalence probe.** `probe:"embed-equivalence"` embeds a fixed canonical
 sample set (both asymmetric prefixes, Umlaute, code, symbol noise) on the local

@@ -43,7 +43,7 @@ func manageReqWithPool(t *testing.T, ar *auth.AuthResult, bp *backends.Pool, bod
 // exactly the missing-gate proof.
 func TestBackendActionsRequireAdmin(t *testing.T) {
 	for _, action := range []string{
-		"backend-create", "backend-update", "backend-delete", "backend-list", "backend-test",
+		"backend-create", "backend-update", "backend-reorder", "backend-delete", "backend-list", "backend-test",
 	} {
 		rec := manageReqWithPool(t, nonAdminAR(), nil, map[string]any{
 			"action": action, "id": "0190", "data": map[string]any{"name": "x"},
@@ -208,6 +208,49 @@ func TestBackendScoreDomainFrictionFree(t *testing.T) {
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("non-rerank backend: status %d, want 422 validation stop (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestBackendReorderBadRequest400: the payload shape classes (absent data,
+// empty order, duplicate id, missing expected entry) are 400s that fire
+// BEFORE the transaction — probed against a nil store pool, where reaching
+// Begin would panic (the missing-parse-gate proof, same doctrine as above).
+func TestBackendReorderBadRequest400(t *testing.T) {
+	cases := []struct {
+		name string
+		data map[string]any
+		hint string
+	}{
+		{"empty order", map[string]any{
+			"order": []string{}, "expected": map[string]int{},
+		}, "order required"},
+		{"duplicate id", map[string]any{
+			"order": []string{"a", "a"}, "expected": map[string]int{"a": 10},
+		}, "duplicate"},
+		{"missing expected", map[string]any{
+			"order": []string{"a", "b"}, "expected": map[string]int{"a": 20},
+		}, "expected priority missing"},
+	}
+	for _, c := range cases {
+		body := map[string]any{"action": "backend-reorder"}
+		if c.data != nil {
+			body["data"] = c.data
+		}
+		rec := manageReqWithPool(t, adminAR(), backends.NewPool(nil, nil), body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 (body %s)", c.name, rec.Code, rec.Body.String())
+			continue
+		}
+		if !strings.Contains(rec.Body.String(), c.hint) {
+			t.Errorf("%s: error lacks hint %q: %s", c.name, c.hint, rec.Body.String())
+		}
+	}
+
+	// Absent data entirely is equally a 400 before any transaction.
+	rec := manageReqWithPool(t, adminAR(), backends.NewPool(nil, nil),
+		map[string]any{"action": "backend-reorder"})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("absent data: status %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
 }
 

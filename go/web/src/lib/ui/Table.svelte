@@ -41,6 +41,14 @@
   import type { Snippet } from 'svelte'
 
   let {
+    /**
+     * When true the caller emits its own <tbody> row-groups (one per item) —
+     * the animate/drag seam: Svelte's animate directive needs a SINGLE element
+     * per keyed each child, and a backend row + its expandable test row are
+     * two <tr>s, so the group element must come from the caller. Default keeps
+     * the shared single tbody (all other consumers unchanged).
+     */
+    grouped = false,
     /** Cell vertical-align: 'top' (multi-line name/scopes cells) or 'baseline'. */
     valign = 'top',
     /** Optional aria-label on the <table> element (most callers name the card). */
@@ -54,6 +62,7 @@
     /** The <tr>…</tr> body rows — the consumer owns the iteration (virtual-safe). */
     children,
   }: {
+    grouped?: boolean
     valign?: 'top' | 'baseline'
     label?: string
     empty?: boolean
@@ -69,7 +78,11 @@
   <div class="scroll">
     <table class="ctx-table" class:valign-baseline={valign === 'baseline'} aria-label={label}>
       <thead>{@render head()}</thead>
-      <tbody>{@render children()}</tbody>
+      {#if grouped}
+        {@render children()}
+      {:else}
+        <tbody>{@render children()}</tbody>
+      {/if}
     </table>
   </div>
 {/if}

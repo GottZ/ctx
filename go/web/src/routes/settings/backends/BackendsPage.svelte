@@ -33,6 +33,10 @@
   let { tenantScoped = false }: { tenantScoped?: boolean } = $props()
 
   const pool = new PoolModel()
+  // T37 writability split for the reorder surface: a server-admin moves every
+  // row; a tenant-admin only rows of its own scope (visible _global rows keep
+  // their handles hidden and never enter the reorder wire order).
+  pool.isWritable = (b) => session.admin || b.scope === session.homeScope
   const vault = new VaultModel()
   // Disable-profiles (092, U01-W6). Mounts in BOTH variants (AM-5 VOLL): the
   // tenant-admin sees _global profiles read-only + CRUDs/toggles its own. The
