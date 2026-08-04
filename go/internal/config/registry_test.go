@@ -290,6 +290,17 @@ func TestRegistryTenancySet(t *testing.T) {
 		"graph.boost_weight": true, "graph.hub_damping": true, "graph.weight_topical": true,
 		"graph.weight_factual": true, "graph.weight_causal": true, "graph.weight_recurrent": true,
 		"graph.new_placement_frac": true,
+		// C0: cluster-consumption RANKING knobs — same class as the graph.*
+		// expansion knobs above (query-time augmentation of the tenant's OWN
+		// queries). The cluster.* WIRE and OPS knobs (ego_annotate*, facet/
+		// route_enabled, max_staleness, centroid_build/timeout/batch/work_mem/
+		// ann_threshold/ef_search) are deliberately ABSENT: a per-tenant
+		// response shape is a shape no client can rely on, and the centroid
+		// build is one process-wide job over a SHARED artefact.
+		"cluster.enabled": true, "cluster.seed_count": true, "cluster.top_clusters": true,
+		"cluster.min_share": true, "cluster.boost_weight": true, "cluster.size_damping": true,
+		"cluster.centroid_enabled": true, "cluster.centroid_weight": true,
+		"cluster.centroid_top_k": true, "cluster.inject_max": true,
 		// query-path tuning
 		"query.score_threshold": true, "query.confident_threshold": true, "query.prompt_version": true,
 		"query.timezone": true, "query.rate_limit_write": true, "query.rate_limit_read": true,
@@ -339,8 +350,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 59 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 59 (change it with intent)", got)
+	if got := len(overridable); got != 69 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 69 (change it with intent)", got)
 	}
 	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
 	// a tenant override here would flush the process-wide embed cache / flip the

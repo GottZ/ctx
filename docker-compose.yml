@@ -132,6 +132,38 @@ services:
       CTX_GRAPH_OVERVIEW_ENABLED: ${CTX_GRAPH_OVERVIEW_ENABLED:-false}
       CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL: ${CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL:-21600}
       CTX_GRAPH_OVERVIEW_RESOLUTION: ${CTX_GRAPH_OVERVIEW_RESOLUTION:-1.0}
+      # Cluster consumption (Achse 03, wave C0): turns the Louvain clusters from
+      # an output-only endpoint into a retrieval signal, a graph citizen and a
+      # facet. The whole surface ships DARK — every gate below is false/0 and
+      # arming one is a deliberate data flip after its wave landed. Declared
+      # here COMPLETELY and in one place (K6) so no later wave has to touch the
+      # compose block again; a knob the container cannot receive is not a knob,
+      # which is exactly the gap the three-of-five CTX_GRAPH_OVERVIEW_* block
+      # above still has. Ranking knobs (first group) are tenant-overridable,
+      # wire/ops knobs (second group) are global-only. Durations are bare
+      # seconds. SIZE_DAMPING ships ON: without it a mega cluster wins nearly
+      # every query at scale (live Heavy-Tail: median 6 vs max 133 members).
+      CTX_CLUSTER_ENABLED: ${CTX_CLUSTER_ENABLED:-false}
+      CTX_CLUSTER_SEED_COUNT: ${CTX_CLUSTER_SEED_COUNT:-10}
+      CTX_CLUSTER_TOP_CLUSTERS: ${CTX_CLUSTER_TOP_CLUSTERS:-2}
+      CTX_CLUSTER_MIN_SHARE: ${CTX_CLUSTER_MIN_SHARE:-0.25}
+      CTX_CLUSTER_BOOST_WEIGHT: ${CTX_CLUSTER_BOOST_WEIGHT:-0.12}
+      CTX_CLUSTER_SIZE_DAMPING: ${CTX_CLUSTER_SIZE_DAMPING:-true}
+      CTX_CLUSTER_CENTROID_ENABLED: ${CTX_CLUSTER_CENTROID_ENABLED:-false}
+      CTX_CLUSTER_CENTROID_WEIGHT: ${CTX_CLUSTER_CENTROID_WEIGHT:-0.5}
+      CTX_CLUSTER_CENTROID_TOP_K: ${CTX_CLUSTER_CENTROID_TOP_K:-3}
+      CTX_CLUSTER_INJECT_MAX: ${CTX_CLUSTER_INJECT_MAX:-0}
+      CTX_CLUSTER_MAX_STALENESS: ${CTX_CLUSTER_MAX_STALENESS:-86400}
+      CTX_CLUSTER_EGO_ANNOTATE: ${CTX_CLUSTER_EGO_ANNOTATE:-false}
+      CTX_CLUSTER_EGO_ANNOTATE_MAX_NODES: ${CTX_CLUSTER_EGO_ANNOTATE_MAX_NODES:-500}
+      CTX_CLUSTER_FACET_ENABLED: ${CTX_CLUSTER_FACET_ENABLED:-false}
+      CTX_CLUSTER_ROUTE_ENABLED: ${CTX_CLUSTER_ROUTE_ENABLED:-false}
+      CTX_CLUSTER_CENTROID_BUILD: ${CTX_CLUSTER_CENTROID_BUILD:-false}
+      CTX_CLUSTER_CENTROID_TIMEOUT: ${CTX_CLUSTER_CENTROID_TIMEOUT:-300}
+      CTX_CLUSTER_CENTROID_BATCH: ${CTX_CLUSTER_CENTROID_BATCH:-500}
+      CTX_CLUSTER_CENTROID_WORK_MEM: ${CTX_CLUSTER_CENTROID_WORK_MEM:-256MB}
+      CTX_CLUSTER_CENTROID_ANN_THRESHOLD: ${CTX_CLUSTER_CENTROID_ANN_THRESHOLD:-50000}
+      CTX_CLUSTER_CENTROID_EF_SEARCH: ${CTX_CLUSTER_CENTROID_EF_SEARCH:-100}
       CTX_RATE_LIMIT_WRITE: ${CTX_RATE_LIMIT_WRITE:-100}
       CTX_RATE_LIMIT_READ: ${CTX_RATE_LIMIT_READ:-0}
       CTX_TIMEZONE: ${CTX_TIMEZONE:-}

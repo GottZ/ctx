@@ -89,6 +89,8 @@ type Config struct {
 	Graph          GraphConfig
 	GraphOverview  GraphOverviewConfig
 	GraphCache     GraphCacheConfig
+	Cluster        ClusterConfig
+	ClusterOps     ClusterOpsConfig
 	Query          QueryConfig
 	Scheduler      SchedulerConfig
 	Pool           PoolConfig
@@ -296,6 +298,94 @@ type GraphOverviewConfig struct {
 	// interrupted — the timeout abandons it (documented goroutine leak) and
 	// keeps the scheduler loop alive. 0 → 900s.
 	RebuildTimeout time.Duration `key:"graph_overview.rebuild_timeout" env:"CTX_GRAPH_OVERVIEW_REBUILD_TIMEOUT" default:"900" mut:"hot" tenancy:"global-only"`
+}
+
+// ClusterConfig is the Achse-03 cluster-consumption RANKING surface
+// (plan-cluster-topicmap design/03 §4.9): the query-time knobs of the
+// categorical retrieval stage that boosts results sharing a Louvain cluster
+// with the strong hits of a query. It is the sibling of GraphConfig (the
+// kantenbasierte dream-graph expansion) — same domain, kategorische instead of
+// kantenbasierte Evidenz — and split from ClusterOpsConfig along the same line
+// GraphConfig / GraphOverviewConfig already draw: ranking policy here,
+// wire/operations there.
+//
+// Wave C0 declares the group COMPLETELY and without a consumer (K6: the only
+// cluster.*-declaring wave); C3/C8/C9 wire their fields later. Every default is
+// therefore the SHIPPED-dark state — flipping Enabled is a data flip, not a
+// re-tuning exercise.
+type ClusterConfig struct {
+	// Every knob is query-time RRF augmentation tuning: a tenant tuning its own
+	// cluster boost affects only its own queries, zero cross-tenant effect →
+	// tenant-overridable as a group (verbatim the GraphConfig rationale above).
+	Enabled     bool    `key:"cluster.enabled" env:"CTX_CLUSTER_ENABLED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
+	SeedCount   int     `key:"cluster.seed_count" env:"CTX_CLUSTER_SEED_COUNT" default:"10" mut:"hot" tenancy:"tenant-overridable"`
+	TopClusters int     `key:"cluster.top_clusters" env:"CTX_CLUSTER_TOP_CLUSTERS" default:"2" mut:"hot" tenancy:"tenant-overridable"`
+	MinShare    float64 `key:"cluster.min_share" env:"CTX_CLUSTER_MIN_SHARE" default:"0.25" mut:"hot" tenancy:"tenant-overridable"`
+	BoostWeight float64 `key:"cluster.boost_weight" env:"CTX_CLUSTER_BOOST_WEIGHT" default:"0.12" mut:"hot" tenancy:"tenant-overridable"`
+	// SizeDamping normalises a cluster's share by its corpus share. Default TRUE
+	// (UD-04-03): at the Ziel-Scale the measured Heavy-Tail (live Median 6 vs
+	// max 133 = 11 % of all nodes) degenerates the un-damped boost — a mega
+	// cluster wins nearly every query by construction. Shipping it armed keeps
+	// the semantics identical from day one instead of changing behaviour on the
+	// way to scale; the A/B knob stays.
+	SizeDamping bool `key:"cluster.size_damping" env:"CTX_CLUSTER_SIZE_DAMPING" default:"true" mut:"hot" tenancy:"tenant-overridable"`
+	// The centroid arm (C8) is the query-INDEPENDENT prior: "where does this
+	// question live" even when RRF returns nothing usable. Read only once the
+	// centroid table (migration 127) exists and is filled.
+	CentroidEnabled bool    `key:"cluster.centroid_enabled" env:"CTX_CLUSTER_CENTROID_ENABLED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
+	CentroidWeight  float64 `key:"cluster.centroid_weight" env:"CTX_CLUSTER_CENTROID_WEIGHT" default:"0.5" mut:"hot" tenancy:"tenant-overridable"`
+	CentroidTopK    int     `key:"cluster.centroid_top_k" env:"CTX_CLUSTER_CENTROID_TOP_K" default:"3" mut:"hot" tenancy:"tenant-overridable"`
+	// InjectMax caps how many unseen blocks of the winning cluster C9 may add to
+	// a result set. Default 0 = the stage never injects — arming it is a
+	// deliberate step after the eval measurement, never a side effect of a
+	// deploy. Declared here (not in C9) because K6 keeps the namespace in ONE
+	// wave; a knob whose default is a documented no-op is not an operator trap.
+	InjectMax int `key:"cluster.inject_max" env:"CTX_CLUSTER_INJECT_MAX" default:"0" mut:"hot" tenancy:"tenant-overridable"`
+}
+
+// ClusterOpsConfig is the Achse-03 WIRE and OPERATIONS surface (design/03 §4.9)
+// — the counterpart to ClusterConfig, cut exactly like GraphOverviewConfig sits
+// next to GraphConfig.
+//
+// EVERY key is global-only, and the reason differs per group but never
+// disappears: ego_annotate / ego_annotate_max_nodes / facet_enabled /
+// route_enabled are WIRE CONTRACTS (a response shape that differs per tenant is
+// a shape no client can rely on), max_staleness guards the integrity of a
+// SHARED artefact (the landkarte), and the centroid_* knobs steer ONE
+// process-wide background build.
+type ClusterOpsConfig struct {
+	// MaxStaleness is the age past which the cluster stage switches itself off
+	// (C4): a boost computed from a frozen map is a confident wrong answer.
+	// Bare seconds like the other duration keys (24h).
+	MaxStaleness time.Duration `key:"cluster.max_staleness" env:"CTX_CLUSTER_MAX_STALENESS" default:"86400" mut:"hot" tenancy:"global-only"`
+	EgoAnnotate  bool          `key:"cluster.ego_annotate" env:"CTX_CLUSTER_EGO_ANNOTATE" default:"false" mut:"hot" tenancy:"global-only"`
+	// EgoAnnotateMaxNodes is the annotation's OWN ceiling, deliberately below
+	// the ego route ceiling (egoMaxLimit 1500): above it C2 answers with empty
+	// arrays plus a trip instead of lowering the whole route's ceiling or
+	// blowing the latency gate. /api/graph/all defaults limit to the ceiling, so
+	// this is the normal case there, not the corner case.
+	EgoAnnotateMaxNodes int  `key:"cluster.ego_annotate_max_nodes" env:"CTX_CLUSTER_EGO_ANNOTATE_MAX_NODES" default:"500" mut:"hot" tenancy:"global-only"`
+	FacetEnabled        bool `key:"cluster.facet_enabled" env:"CTX_CLUSTER_FACET_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+	RouteEnabled        bool `key:"cluster.route_enabled" env:"CTX_CLUSTER_ROUTE_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+	// The centroid build (C8) runs in its OWN transaction after the persist
+	// commit — never inside it: the rebuild is all-or-nothing under
+	// graph_overview.rebuild_timeout, so a centroid step inside would roll back
+	// a complete, good rebuild whenever the sum overruns.
+	CentroidBuild   bool          `key:"cluster.centroid_build" env:"CTX_CLUSTER_CENTROID_BUILD" default:"false" mut:"hot" tenancy:"global-only"`
+	CentroidTimeout time.Duration `key:"cluster.centroid_timeout" env:"CTX_CLUSTER_CENTROID_TIMEOUT" default:"300" mut:"hot" tenancy:"global-only"`
+	CentroidBatch   int           `key:"cluster.centroid_batch" env:"CTX_CLUSTER_CENTROID_BATCH" default:"500" mut:"hot" tenancy:"global-only"`
+	// CentroidWorkMem is the per-statement work_mem of the aggregation step (a
+	// PG memory literal, e.g. "256MB"). C8 owns its validation and its
+	// application — it is a SET LOCAL value, so the consumer must whitelist the
+	// literal form rather than interpolate it raw.
+	CentroidWorkMem string `key:"cluster.centroid_work_mem" env:"CTX_CLUSTER_CENTROID_WORK_MEM" default:"256MB" mut:"hot" tenancy:"global-only"`
+	// CentroidANNThreshold is a declared RESOURCE limit, not a semantic one
+	// (UD-02-03): below it the centroid read is an exact ~170 MB scan at the
+	// 10M ceiling — no recall question, no index churn. Above it C8 builds the
+	// HNSW index once per cycle in a build-and-swap, never maintaining it row by
+	// row through a 6h full-replace. Calibrated against the C8 measurement.
+	CentroidANNThreshold int `key:"cluster.centroid_ann_threshold" env:"CTX_CLUSTER_CENTROID_ANN_THRESHOLD" default:"50000" mut:"hot" tenancy:"global-only"`
+	CentroidEFSearch     int `key:"cluster.centroid_ef_search" env:"CTX_CLUSTER_CENTROID_EF_SEARCH" default:"100" mut:"hot" tenancy:"global-only"`
 }
 
 // GraphCacheConfig is the Achse-05 CSR graph-cache track (design/05 §4.7). It
