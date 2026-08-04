@@ -177,8 +177,15 @@ type rawEdge struct {
 // clustering is the pure (DB-free) output of the Louvain run.
 type clustering struct {
 	blockToCluster map[string]string // block uuid → cluster_id (= min member uuid)
-	modularity     float64
-	clusterCount   int
+	// intraDegree is the WITHIN-cluster weighted degree per block: the summed
+	// link confidence of a block's edges that stay inside its own community.
+	// It is the graph-native centrality the cluster core is picked by — the
+	// successor of the degenerate quality_score representative choice, where
+	// two thirds of the clusters are decided by the uuid tiebreak. Same shape
+	// as blockToCluster so persist reads it without knowing node indices.
+	intraDegree  map[string]float64
+	modularity   float64
+	clusterCount int
 }
 
 // Rebuild recomputes the cluster supergraph and replaces the 057 tables in one
@@ -288,7 +295,7 @@ func intersect(a, b []string) []string {
 func computeClustering(nodeUUIDs []string, edges []rawEdge, resolution float64) clustering {
 	n := len(nodeUUIDs)
 	if n == 0 {
-		return clustering{blockToCluster: map[string]string{}}
+		return clustering{blockToCluster: map[string]string{}, intraDegree: map[string]float64{}}
 	}
 
 	idx := make(map[string]int64, n)
@@ -353,11 +360,39 @@ func computeClustering(nodeUUIDs []string, edges []rawEdge, resolution float64) 
 		}
 	}
 
+	// Intra-cluster weighted degree — one pass over the already symmetrized,
+	// dangling- and self-loop-free edge map, so no extra SQL and no extra
+	// materialization. Edges CROSSING community boundaries are skipped: the
+	// core must describe what holds this cluster together, not what pulls at
+	// it. Every node gets an entry, isolated ones at 0 — the core selection
+	// reads this map by block id and must not have to tell a missing key from
+	// a zero. Cost: O(|agg|) time, 8 B × n memory (1.6 MB at MaxNodes=200000).
+	//
+	// The pass walks the SORTED keys, not the map: float addition is not
+	// associative, so summing in Go's randomized map order would drift the
+	// last ULP between runs — the same effect the Q score is documented to
+	// have. Here it would be load-bearing rather than cosmetic: the core is
+	// picked by degree order and hashed, so a wobbling last bit could reorder
+	// two neighbours, change core_hash and trigger a re-label of a topic that
+	// never moved.
+	deg := make(map[string]float64, n)
+	for _, u := range nodeUUIDs {
+		deg[u] = 0
+	}
+	for _, k := range keys {
+		ua, ub := nodeUUIDs[k.a], nodeUUIDs[k.b]
+		if b2c[ua] != b2c[ub] {
+			continue
+		}
+		deg[ua] += agg[k]
+		deg[ub] += agg[k]
+	}
+
 	q := community.Q(g, comms, resolution)
 	if math.IsNaN(q) || math.IsInf(q, 0) {
 		q = 0 // 0-edge graph → undefined Q; report 0 rather than NaN
 	}
-	return clustering{blockToCluster: b2c, modularity: q, clusterCount: len(comms)}
+	return clustering{blockToCluster: b2c, intraDegree: deg, modularity: q, clusterCount: len(comms)}
 }
 
 func loadNodes(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string, scopeFilter []string) ([]string, map[string]string, error) {

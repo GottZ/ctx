@@ -42,6 +42,101 @@ func TestComputeClustering_Deterministic(t *testing.T) {
 		if math.Abs(base.modularity-got.modularity) > 1e-9 {
 			t.Fatalf("modularity diverged beyond float tolerance on run %d: %v vs %v", i, base.modularity, got.modularity)
 		}
+		// W2: the core is derived from intraDegree, and the core drives both
+		// the label and the re-label trigger — a wobbling degree map would
+		// re-label a topic that never changed.
+		if !reflect.DeepEqual(base.intraDegree, got.intraDegree) {
+			t.Fatalf("intraDegree non-deterministic on run %d:\n  base=%v\n  got =%v", i, base.intraDegree, got.intraDegree)
+		}
+	}
+}
+
+// TestIntraDegree_ExcludesCrossCommunityEdges is the W2 gate: the intra-cluster
+// weighted degree describes what holds a cluster TOGETHER, not what pulls at
+// it. In the two-triangle fixture every node carries exactly two 0.9 edges
+// inside its own triangle; the 0.05 bridge belongs to neither community and
+// must not reach the two nodes it touches. Without the b2c equality filter
+// those two would come out at 1.85 and outrank their peers — the core would
+// then be picked by the bridge, i.e. by the very edge the partition rejected.
+func TestIntraDegree_ExcludesCrossCommunityEdges(t *testing.T) {
+	c := computeClustering(detNodes, detEdges, 1.0)
+	if len(c.intraDegree) != len(detNodes) {
+		t.Fatalf("expected %d degrees, got %d: %v", len(detNodes), len(c.intraDegree), c.intraDegree)
+	}
+	for _, u := range detNodes {
+		if got := c.intraDegree[u]; math.Abs(got-1.8) > 1e-9 {
+			t.Errorf("intraDegree[%s] = %v, want 1.8 (two intra-triangle edges of 0.9; the 0.05 bridge must not count)", u, got)
+		}
+	}
+}
+
+// TestIntraDegree_OrderAndDirectionInvariant: the degree map is built over the
+// symmetrized edge map, not over the raw []rawEdge, so neither the load order
+// nor the stored direction of a link may move a single weight. Both are real
+// axes — loadEdges returns whatever the query yields, and a dream link is
+// directed while the graph is not.
+func TestIntraDegree_OrderAndDirectionInvariant(t *testing.T) {
+	base := computeClustering(detNodes, detEdges, 1.0)
+
+	flipped := make([]rawEdge, len(detEdges))
+	for i, e := range detEdges {
+		flipped[len(detEdges)-1-i] = rawEdge{src: e.dst, dst: e.src, weight: e.weight}
+	}
+	got := computeClustering(detNodes, flipped, 1.0)
+
+	if !reflect.DeepEqual(base.intraDegree, got.intraDegree) {
+		t.Errorf("intraDegree changed under edge permutation + direction flip:\n  base=%v\n  got =%v", base.intraDegree, got.intraDegree)
+	}
+}
+
+// TestIntraDegree_SkipsDanglingAndSelfLoops: the degrees inherit the two
+// exclusions of the symmetrization pass. A self-loop would inflate its own
+// node's centrality out of nothing, and a dangling endpoint (link into an
+// archived or invisible block) is not part of this cluster's substance at all.
+func TestIntraDegree_SkipsDanglingAndSelfLoops(t *testing.T) {
+	nodes := []string{"aaa", "bbb"}
+	edges := []rawEdge{
+		{"aaa", "bbb", 0.9},
+		{"aaa", "ghost", 0.5}, // dangling endpoint
+		{"aaa", "aaa", 0.4},   // self-loop
+	}
+	c := computeClustering(nodes, edges, 1.0)
+	for _, u := range nodes {
+		if got := c.intraDegree[u]; math.Abs(got-0.9) > 1e-9 {
+			t.Errorf("intraDegree[%s] = %v, want 0.9 (dangling + self-loop excluded)", u, got)
+		}
+	}
+	if _, ok := c.intraDegree["ghost"]; ok {
+		t.Errorf("dangling endpoint got a degree entry: %v", c.intraDegree)
+	}
+}
+
+// TestIntraDegree_ZeroEdgeGraph: an edgeless corpus yields singletons with
+// degree 0 — an entry per node, never a missing key. The core selection reads
+// this map by block id; a nil entry and a 0 entry must not be distinguishable
+// at that call site.
+func TestIntraDegree_ZeroEdgeGraph(t *testing.T) {
+	nodes := []string{"aaa", "bbb", "ccc"}
+	c := computeClustering(nodes, nil, 1.0)
+	if len(c.intraDegree) != len(nodes) {
+		t.Fatalf("expected %d degree entries, got %v", len(nodes), c.intraDegree)
+	}
+	for _, u := range nodes {
+		if c.intraDegree[u] != 0 {
+			t.Errorf("intraDegree[%s] = %v, want 0", u, c.intraDegree[u])
+		}
+	}
+}
+
+// TestIntraDegree_EmptyInput: no nodes ⇒ an empty, non-nil map, mirroring the
+// blockToCluster early return.
+func TestIntraDegree_EmptyInput(t *testing.T) {
+	c := computeClustering(nil, nil, 1.0)
+	if c.intraDegree == nil {
+		t.Errorf("intraDegree is nil on empty input, want an empty map")
+	}
+	if len(c.intraDegree) != 0 {
+		t.Errorf("intraDegree = %v on empty input, want empty", c.intraDegree)
 	}
 }
 
