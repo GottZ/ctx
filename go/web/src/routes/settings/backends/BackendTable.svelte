@@ -66,7 +66,11 @@
     e.preventDefault() // no text selection / focus scroll while dragging
     dragId = id
     dragIds = pool.sorted.map((b) => b.id)
-    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    // NO setPointerCapture: the FLIP resort re-parents the held <tbody> mid-
+    // drag, which releases any capture on its handle — the drop then never
+    // reached the handle's listeners and the drag ghosted (order shown, never
+    // committed). move/up/cancel live on window while a drag is active
+    // instead; touch-action:none on the handle keeps touch gestures dragging.
   }
 
   function dragMove(e: PointerEvent): void {
@@ -185,6 +189,12 @@
   }
 </script>
 
+<svelte:window
+  onpointermove={dragId !== null ? dragMove : undefined}
+  onpointerup={dragId !== null ? dragEnd : undefined}
+  onpointercancel={dragId !== null ? dragCancel : undefined}
+/>
+
 <section class="card" aria-label="backend pool editor">
   <header>
     <h2>backend pool</h2>
@@ -249,9 +259,6 @@
                   title={`drag to reorder: ${b.name}`}
                   aria-label={`drag to reorder: ${b.name}`}
                   onpointerdown={(e) => dragStart(e, b.id)}
-                  onpointermove={dragMove}
-                  onpointerup={dragEnd}
-                  onpointercancel={dragCancel}
                 >⠿</button>
               {:else}
                 <!-- T37: _global row in a tenant view — visible, not mutable;
