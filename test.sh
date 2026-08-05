@@ -286,13 +286,14 @@ fi
 #
 # Fallback (KEINE Gate-Abschwächung): solange die installierte CLI älter
 # als W03-4 ist ("contract" unbekannt) oder Transport/Auth fehlschlägt,
-# fällt T07 auf exakt die alte Zähl-Probe zurück (54 Tabellen / 41 Spalten
+# fällt T07 auf exakt die alte Zähl-Probe zurück (53 Tabellen / 41 Spalten
 # context_blocks) — dieselbe Prüfstärke wie vor dieser Welle, nicht
 # schwächer. Das Upgrade auf den generierten Contract greift automatisch,
 # sobald die deployte CLI "contract" kennt — kein Script-Change nötig.
 #
 # ⚠ Die Fallback-Zahlen sind handgepflegt und hängen am Migrations-Stand:
-# 54/41 gilt ab Migration 127 (graph_cluster_topic_edge + _super + _super_member;
+# 53/41 gilt ab Migration 129 (context_digest_state fällt; 54/41 ab Mig 127 mit
+# graph_cluster_topic_edge + _super + _super_member;
 # davor 51/41 ab Mig 124, 50/41 ab Mig 118,
 # 46/40 ab Mig 107). Bei neuen Migrationen mit Tabellen-/Spalten-Änderung
 # müssen sie hier nachgezogen werden — der `ctx contract`-Pfad oben braucht
@@ -302,7 +303,7 @@ fi
 T="T07 SCHEMA_INTEGRITY"
 
 # Zähl-Fallback-Erwartung, an Migration 124 gebunden (siehe Kommentar oben).
-T07_EXPECT_TABLES=54
+T07_EXPECT_TABLES=53
 T07_EXPECT_COLUMNS=41
 
 t07_count_fallback() {
@@ -313,7 +314,7 @@ t07_count_fallback() {
   if [[ "$tc" == "$T07_EXPECT_TABLES" ]] && [[ "$col" == "$T07_EXPECT_COLUMNS" ]]; then
     pass "$T (contract-CLI nicht verfügbar — Zähl-Fallback (Prä-Deploy); tables=$tc, columns=$col; $reason)"
   else
-    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 127), got tables=$tc columns=$col"
+    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 129), got tables=$tc columns=$col"
   fi
 }
 

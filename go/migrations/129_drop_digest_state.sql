@@ -1,0 +1,61 @@
+-- =============================================================================
+-- 129_drop_digest_state.sql — der tote Digest-Zustand fällt (W-G)
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- Achse 02 / Welle W-G (plan-cluster-topicmap design/02 §3.3, §6.1, §7 "W-G";
+-- User-Entscheid E8-02 A, DECISIONS.md). context_digest_state und der Trigger
+-- trg_digest_dirty / mark_digest_dirty() stammen aus 001_initial.sql (:70-76,
+-- :264-287) und sind verifiziert tot:
+--
+--   * `grep -rn context_digest_state --include=*.go go/` liefert null Treffer
+--     im Produktionscode (ein Kommentar-Treffer im Bench). Ein Test pinnt das,
+--     damit diese Migration niemandem den Boden wegzieht.
+--   * Der Scheduler führt seinen Dirty-Zustand rein in-memory (digestPending).
+--   * Live war die Tabelle seit 2026-06-08 eingefroren, während der Digest
+--     zuletzt 2026-08-04 lief — die Zeile beschreibt seit Monaten nichts.
+--
+-- WARUM DAS NICHT NUR AUFRÄUMEN IST: der Trigger feuert bei JEDEM Block-Write
+-- (AFTER INSERT OR UPDATE OR DELETE, FOR EACH ROW) und schreibt in eine
+-- SINGLETON-Zeile. Jeder Schreiber nimmt damit dieselbe Row-Lock — bei 10M
+-- Writes ist das ein reiner Serialisierungspunkt ohne Gegenwert, gemessen in
+-- der W-B-Bench-Vorbereitung (50k Blöcke säen ist von diesem einen UPDATE
+-- dominiert, overview_rootmap_bench_test.go-Header). Der Abbau ist der einzige
+-- Punkt dieser Achse, der am SCHREIB-Pfad etwas verbessert.
+--
+-- DER TRIGGER FÄLLT MIT, ausdrücklich und zuerst: er ist der einzige Konsument
+-- der Tabelle, und ein DROP TABLE ohne ihn schlüge in einem Laufzeitfehler bei
+-- jedem Block-Write fehl (die Funktion referenziert die Tabelle per Name, was
+-- PostgreSQL erst zur Ausführungszeit auflöst — der Ausfall käme also nicht in
+-- der Migration, sondern beim nächsten Schreibvorgang). Reihenfolge ist damit
+-- load-bearing: Trigger vor Funktion vor Tabelle.
+--
+-- ⚠ ACCESS EXCLUSIVE AUF context_blocks: DROP TRIGGER nimmt die schärfste
+-- Sperre auf die zentrale Tabelle. Bei Ziel-Scale ein Wartungsfenster-Schritt
+-- (083-Header-Vokabel): ohne lock_timeout wartet die Migration hinter dem
+-- längsten offenen Statement und staut in der Lock-Queue JEDEN Leser und
+-- Schreiber hinter sich auf. Mit lock_timeout scheitert sie laut (55P03), der
+-- Runner rollt die Datei zurück, der nächste Start wiederholt.
+--
+-- ZWEI HISTORISCHE ZEITSTEMPEL (dirty_since, last_digest_at) gehen dabei
+-- unwiederbringlich verloren. Genau deshalb hängt diese Migration an einem
+-- expliziten User-Entscheid (E8-02 A) und nicht an einer Aufräum-Intuition.
+--
+-- NICHT MIT ABGEBAUT: `digest.include` als Policy-Feld bleibt (§8-E8-Nebenfrage,
+-- Empfehlung "behalten") — es ist der natürliche Schalter, falls die lineare
+-- Map je scopeweise reaktiviert werden soll, und kostet nichts.
+--
+-- NUMMER: 128 gehört dem parallel gebauten C8-Strang (Zentroide, Masterplan K3
+-- nach Ripple); diese Welle nimmt 129. Vorflug gegen den Ist-Stand: frei.
+--
+-- Idempotent per IF EXISTS in allen drei Anweisungen. Kein Backfill (nichts
+-- liest die Daten). Forward-only.
+-- ⚠ EINE TABELLE FÄLLT: test.sh T07_EXPECT_TABLES 54 → 53 nachgezogen und das
+--   Schema-Contract-Manifest regeneriert
+--   (go test ./internal/schemacontract -tags=genmanifest -run TestGenerateManifest).
+-- =============================================================================
+
+SET LOCAL lock_timeout = '3s';
+
+DROP TRIGGER IF EXISTS trg_digest_dirty ON context_blocks;
+DROP FUNCTION IF EXISTS mark_digest_dirty();
+DROP TABLE IF EXISTS context_digest_state;

@@ -176,7 +176,7 @@ func TestClusterTopicLabelSchema_Integration(t *testing.T) {
 			t.Fatalf("table count: %v", err)
 		}
 		if n != want {
-			t.Errorf("table count = %d, test.sh T07_EXPECT_TABLES = %d — nachziehen (test.sh:305)", n, want)
+			t.Errorf("table count = %d, test.sh T07_EXPECT_TABLES = %d — nachziehen (test.sh:306)", n, want)
 		}
 	})
 
