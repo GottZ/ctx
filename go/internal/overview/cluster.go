@@ -331,6 +331,11 @@ type Options struct {
 	// wirksam — gonum hat keine.
 	Refine bool
 
+	// DeltaPersist schreibt nur GEAENDERTE Member-Zeilen statt DELETE-alles +
+	// INSERT-alles (S9b). Ergebnisgleich — das ist Gate S9b-G1, nicht die
+	// Annahme. false reproduziert das heutige Verhalten exakt.
+	DeltaPersist bool
+
 	// ComponentSplit schaltet den Komponenten-Vorpass mit γ-Reskalierung (S8).
 	// Nur bei engine=ctx wirksam. Beweisbar zielfunktions-identisch (§4.4),
 	// also KEIN Qualitaets-Risiko — der Ertrag ist heute 6,3 % Rechenzeit plus
@@ -1446,6 +1451,7 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		return Stats{}, err
 	}
 	copyMS := int(time.Since(copyStart).Milliseconds())
+	var deltaWritten int64
 
 	// B-W4: the lock is per-partition — two different tenants persist in
 	// parallel, the same tenant (and the global run against old binaries)
@@ -1477,14 +1483,15 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		return Stats{}, err
 	}
 
-	if err := teardown(ctx, tx, scoped, opts.ScopeFilter); err != nil {
-		return Stats{}, err
-	}
-
-	clusterSet, err := insertMembersFromOvNew(ctx, tx, cl)
+	// S9b: bei aktivem Delta-Persist bleibt graph_cluster_member stehen und
+	// wird gejoint statt geleert; alles andere wird weiterhin voll geraeumt,
+	// weil die Aggregationen voll laufen (die inkrementelle Variante ist S9c
+	// und haengt an UD-11-04).
+	clusterSet, written, err := writeMembers(ctx, tx, cl, opts, scoped)
 	if err != nil {
 		return Stats{}, err
 	}
+	deltaWritten = written
 
 	// W3 identity phase — between members and aggregation (K5). Everything in
 	// here works on TEMP tables; no Louvain, no resolution search.
@@ -1573,6 +1580,13 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	// koennte eine spaetere Welle behaupten, die Lock-Haltezeit gesenkt zu
 	// haben, indem sie Arbeit in eine unbeobachtete Phase verschiebt.
 	stats.CopyMs = copyMS
+	// S9b: members_changed ist die Zahl der GESCHRIEBENEN Zeilen dieses Laufs.
+	// Beim Vollersatz misst W3 sie als "Member in anderem Cluster als zuvor";
+	// beim Delta-Pfad ist sie die tatsaechlich angefasste Zeilenmenge — die
+	// Groesse, die §6.5 dem WAL und dem Vacuum-Druck zuschreibt.
+	if opts.DeltaPersist {
+		stats.MembersChanged = int(deltaWritten)
+	}
 	stats.PersistMs = int(time.Since(persistStart).Milliseconds())
 	// W3 identity ledger. members_reassigned is deliberately reported NEXT TO
 	// members_changed and not folded into it (K13): the two answer different

@@ -110,9 +110,17 @@ func insertMembersFromOvNew(ctx context.Context, tx pgx.Tx, cl clustering) (map[
 		SELECT block_id, cluster_id, scope FROM ov_new`); err != nil {
 		return nil, fmt.Errorf("insert members: %w", err)
 	}
-	clusterSet := make(map[string]struct{}, len(cl.blockToCluster)/8+1)
+	return clusterSetOf(cl), nil
+}
+
+// clusterSetOf bildet die Cluster-Menge in Go statt sie zurueckzulesen: sie
+// speist die Aggregations-Filter, und ein zweiter Roundtrip fuer eine Menge,
+// die bereits im Speicher liegt, waere Arbeit INNERHALB der Lock-Haltezeit —
+// genau die Groesse, die diese Wellenfamilie senkt.
+func clusterSetOf(cl clustering) map[string]struct{} {
+	out := make(map[string]struct{}, len(cl.blockToCluster)/8+1)
 	for _, c := range cl.blockToCluster {
-		clusterSet[c] = struct{}{}
+		out[c] = struct{}{}
 	}
-	return clusterSet, nil
+	return out
 }

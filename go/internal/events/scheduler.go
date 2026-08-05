@@ -1270,6 +1270,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		// laeuft — auch auf dem In-Process-Fallback-Pfad, wo es keine
 		// Kind-Umgebung gibt.
 		ComponentSplit: cfg.GraphOverview.ComponentSplit,
+		DeltaPersist:   cfg.GraphOverview.DeltaPersist,
 		WorkerMemLimit: int64(cfg.GraphOverview.WorkerMemLimit),
 		// W3: the tombstone re-attach probe runs inside the persist tx, i.e.
 		// in the worker CHILD — the window has to cross the boundary. The

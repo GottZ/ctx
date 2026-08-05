@@ -410,6 +410,19 @@ type GraphOverviewConfig struct {
 	// giant component) and it shrinks as the corpus grows, because a giant
 	// component is the structurally enforced normal form above the percolation
 	// threshold. The lasting gain is component_n as a measurable quantity.
+	// DeltaPersist writes only CHANGED member rows instead of delete-all +
+	// insert-all (S9b). Result-identical — that is a gate, not an assumption.
+	//
+	// What it is actually for is not speed but VACUUM PRESSURE: the full
+	// replacement rewrites every member row on every run and marks every old
+	// one dead. At 9.8M members and four runs a day that is 39.2M dead tuples
+	// per day on a table with 9.8M live rows — permanent autovacuum plus index
+	// bloat on three indexes, a operational risk that has nothing to do with
+	// compute time.
+	//
+	// Default ON: it is strictly less work for an identical result. `false`
+	// reproduces the pre-S9b behaviour exactly, which is the rollback path.
+	DeltaPersist   bool `key:"graph_overview.delta_persist" env:"CTX_GRAPH_OVERVIEW_DELTA_PERSIST" default:"true" mut:"hot" tenancy:"global-only"`
 	ComponentSplit bool `key:"graph_overview.component_split" env:"CTX_GRAPH_OVERVIEW_COMPONENT_SPLIT" default:"true" mut:"hot" tenancy:"global-only"`
 	WorkerMemLimit int  `key:"graph_overview.worker_mem_limit" env:"CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT" default:"0" mut:"hot" tenancy:"global-only"`
 
