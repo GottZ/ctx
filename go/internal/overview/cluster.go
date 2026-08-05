@@ -1230,66 +1230,6 @@ func teardown(ctx context.Context, tx pgx.Tx, scoped bool, scopeFilter []string)
 	return nil
 }
 
-// insertMembers writes this run's block→cluster assignment in deterministic
-// order (unnest text[]→uuid[] cast, batched at memberBatch) and returns the set
-// of distinct cluster ids.
-//
-// scope is denormalized from the Louvain input (B-W2, 087) — the member row
-// records the partition the clustering RAN in, never a re-read a concurrent
-// scope-move could skew. block_id stays the SOLE PK: the overview input is
-// strictly owned-disjoint (no grants), so no block is a member under two
-// scopes.
-//
-// Split out of persist in W3 purely to keep that function inside the cyclop
-// budget once the identity phase joined it; the body is unchanged.
-func insertMembers(ctx context.Context, tx pgx.Tx, cl clustering, opts Options,
-	nodeScopes map[string]string, scoped bool, filterSet map[string]struct{},
-) (map[string]struct{}, error) {
-	blocks := make([]string, 0, len(cl.blockToCluster))
-	for b := range cl.blockToCluster {
-		blocks = append(blocks, b)
-	}
-	sort.Strings(blocks)
-	clusters := make([]string, len(blocks))
-	scopes := make([]string, len(blocks))
-	clusterSet := make(map[string]struct{})
-	for i, b := range blocks {
-		clusters[i] = cl.blockToCluster[b]
-		clusterSet[cl.blockToCluster[b]] = struct{}{}
-		scope, ok := nodeScopes[b]
-		if !ok || scope == "" {
-			// Fail loud: a member without an input scope would either violate
-			// NOT NULL or silently land in the wrong partition (B-W3 poison).
-			return nil, fmt.Errorf("insert members: block %s has no Louvain-input scope", b)
-		}
-		if scoped {
-			// Input-purity guard (B-W3): a scoped run whose input carries a
-			// block outside the filter would collide with the surviving
-			// foreign partition (block_id PK) or poison it. Input scoping
-			// itself (loadNodes/loadEdges) is B-W6 — until then callers must
-			// hand persist an already-cut input; fail loud, never trim.
-			if _, in := filterSet[scope]; !in {
-				return nil, fmt.Errorf("insert members: block %s scope %q outside ScopeFilter %v — input not partition-cut (B-W6 wires scoped loading)", b, scope, opts.ScopeFilter)
-			}
-		}
-		scopes[i] = scope
-	}
-	for i := 0; i < len(blocks); i += memberBatch {
-		end := min(i+memberBatch, len(blocks))
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO graph_cluster_member (block_id, cluster_id, scope)
-			 SELECT b::uuid, c::uuid, s FROM unnest($1::text[], $2::text[], $3::text[]) AS t(b, c, s)`,
-			blocks[i:end], clusters[i:end], scopes[i:end]); err != nil {
-			return nil, fmt.Errorf("insert members: %w", err)
-		}
-	}
-	return clusterSet, nil
-}
-
-// partitionHasLiveTopics reports whether this run's partition still carries at
-// least one non-retired topic. It is the discriminator of the empty-cut guard
-// (review K2-3) and deliberately an EXISTS, not a count: the answer is binary
-// and the index-free path over a small table should stop at the first row.
 func partitionHasLiveTopics(ctx context.Context, pool *pgxpool.Pool, scopeFilter []string) (bool, error) {
 	const q = `SELECT EXISTS (SELECT 1 FROM graph_cluster_topic WHERE retired_at IS NULL`
 	sql, args := q+`)`, []any(nil)
@@ -1485,6 +1425,28 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		return Stats{}, fmt.Errorf("temp_buffers: %w", err)
 	}
 
+	// S9a: ov_new wird VOR dem Lock-Erwerb gefuellt (design/04 §4.8 Punkt 1).
+	//
+	// Der CopyFrom ist der VOLLE Strom ueber alle N Member — die einzige Zeile
+	// der §6.4-Bilanz, die nicht deltaproportional ist. Laege er nach dem
+	// Lock, wanderte er bei 9,8M Membern vollstaendig in lock_held_ms.
+	//
+	// ABWEICHUNG VOM ENTWURF, mit Grund: der Entwurf verlangt den Aufbau "vor
+	// Begin". Das geht hier NICHT — persistTempBuffers wird als SET LOCAL als
+	// erste Anweisung der Tx gesetzt, und PostgreSQL verweigert eine AENDERUNG
+	// von temp_buffers (SQLSTATE 22023), sobald die Session eine TEMP-Tabelle
+	// beruehrt hat. Ein Aufbau vor Begin wuerde also entweder temp_buffers
+	// unwirksam machen oder die naechste Transaktion auf derselben
+	// Pool-Verbindung vergiften. INNERHALB der Tx, aber VOR dem Lock, erfuellt
+	// die eigentliche Anforderung exakt (der Lock-Zaehler laeuft seit S2 ab der
+	// ERTEILUNG) und bindet die Lebensdauer der Tabelle sauber an ON COMMIT
+	// DROP, statt sie in den Pool zu vererben.
+	copyStart := time.Now()
+	if err := buildOvNew(ctx, tx, cl, opts, nodeScopes, scoped, filterSet); err != nil {
+		return Stats{}, err
+	}
+	copyMS := int(time.Since(copyStart).Milliseconds())
+
 	// B-W4: the lock is per-partition — two different tenants persist in
 	// parallel, the same tenant (and the global run against old binaries)
 	// keeps serializing. See lockKeyForScopes.
@@ -1519,7 +1481,7 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		return Stats{}, err
 	}
 
-	clusterSet, err := insertMembers(ctx, tx, cl, opts, nodeScopes, scoped, filterSet)
+	clusterSet, err := insertMembersFromOvNew(ctx, tx, cl)
 	if err != nil {
 		return Stats{}, err
 	}
@@ -1607,6 +1569,10 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	// und bei einem grossen Member-Schreibweg ist der Commit-Anteil genau die
 	// Groesse, die S9a spaeter senken will.
 	stats.LockHeldMs = int(time.Since(lockAcquired).Milliseconds())
+	// copy_ms steht NEBEN lock_held_ms und nicht darin (Gate S9a-G2): sonst
+	// koennte eine spaetere Welle behaupten, die Lock-Haltezeit gesenkt zu
+	// haben, indem sie Arbeit in eine unbeobachtete Phase verschiebt.
+	stats.CopyMs = copyMS
 	stats.PersistMs = int(time.Since(persistStart).Milliseconds())
 	// W3 identity ledger. members_reassigned is deliberately reported NEXT TO
 	// members_changed and not folded into it (K13): the two answer different

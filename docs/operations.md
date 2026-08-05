@@ -312,6 +312,14 @@ The honest yield is small and shrinking: 6.3 % of live nodes sit outside the gia
 
 `graph_overview.compute_parallelism` from the design is **not implemented**. Fanning out across components would buy well under one percent at today's component distribution, paid for with threads in a nice-19 child running next to local inference. If a corpus ever shows many mid-sized components, that is its own change with its own measurement.
 
+### Where the rebuild's lock time actually goes
+
+The rebuild holds an advisory lock for the whole persist transaction, and that hold time is what serialises rebuilds of the same partition. Since migration 130 it is measured (`lock_held_ms`, from lock **grant** to commit — waiting for a lock is not holding it).
+
+The member write now streams through `pgx.CopyFrom` into a temporary table that is filled **before the lock is taken**, so the one non-delta-proportional part of the write no longer counts against the hold. `copy_ms` is recorded next to `lock_held_ms` rather than folded into it, which is deliberate: without the split, moving work into an unmeasured phase would look like an improvement.
+
+The measurement immediately shows where the time really is. On a 900-member corpus: `copy = 6 ms` against `lock_held = 776 ms`. The copy is negligible; the hold is almost entirely the topic-identity phase and the two aggregations. Anyone planning to shorten the hold should start there, not at the member write — and the run journal now says so per run instead of by intuition.
+
 `computed_at` becomes nullable **and loses its `DEFAULT now()`** (from migration 057). A partition that has never built successfully but already has an attempt behind it — a fresh deploy above the node cap — needs a row without a success timestamp; with the default in place a skip upsert that does not name the column would silently claim freshness. The read path is unaffected: `max(computed_at)` ignores NULL, so "never built" stays the zero timestamp and the `stats.computed_at` wire field stays `null` exactly as before.
 
 Deploy notes, same shape as 116: the file carries `SET LOCAL lock_timeout = '3s'`, so it aborts with `55P03` rather than queueing behind a long-running persist transaction (a 400k-node rebuild measures ~465 s); every statement is idempotent, so the next boot simply re-runs it. Existing rows are backfilled with `last_attempt_at = computed_at` and `candidate_n = node_n` — historically correct, because only a successful run could have written them. No new table, no index.
