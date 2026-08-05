@@ -446,7 +446,9 @@ type ClusterConfig struct {
 	SizeDamping bool `key:"cluster.size_damping" env:"CTX_CLUSTER_SIZE_DAMPING" default:"true" mut:"hot" tenancy:"tenant-overridable"`
 	// The centroid arm (C8) is the query-INDEPENDENT prior: "where does this
 	// question live" even when RRF returns nothing usable. Read only once the
-	// centroid table (migration 127) exists and is filled.
+	// centroid table (migration 128) exists and is filled — an empty table is a
+	// documented state, not an error: share_centroid is then 0 and the fusion
+	// falls back onto the seed arm scaled by (1-centroid_weight).
 	CentroidEnabled bool    `key:"cluster.centroid_enabled" env:"CTX_CLUSTER_CENTROID_ENABLED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
 	CentroidWeight  float64 `key:"cluster.centroid_weight" env:"CTX_CLUSTER_CENTROID_WEIGHT" default:"0.5" mut:"hot" tenancy:"tenant-overridable"`
 	CentroidTopK    int     `key:"cluster.centroid_top_k" env:"CTX_CLUSTER_CENTROID_TOP_K" default:"3" mut:"hot" tenancy:"tenant-overridable"`
@@ -495,11 +497,19 @@ type ClusterOpsConfig struct {
 	// literal form rather than interpolate it raw.
 	CentroidWorkMem string `key:"cluster.centroid_work_mem" env:"CTX_CLUSTER_CENTROID_WORK_MEM" default:"256MB" mut:"hot" tenancy:"global-only"`
 	// CentroidANNThreshold is a declared RESOURCE limit, not a semantic one
-	// (UD-02-03): below it the centroid read is an exact ~170 MB scan at the
-	// 10M ceiling — no recall question, no index churn. Above it C8 builds the
-	// HNSW index once per cycle in a build-and-swap, never maintaining it row by
-	// row through a 6h full-replace. Calibrated against the C8 measurement.
-	CentroidANNThreshold int `key:"cluster.centroid_ann_threshold" env:"CTX_CLUSTER_CENTROID_ANN_THRESHOLD" default:"50000" mut:"hot" tenancy:"global-only"`
+	// (UD-02-03): below it the centroid read is an exact scan — no recall
+	// question, no index churn — above it C8 builds the HNSW index.
+	//
+	// 5.000, CALIBRATED AGAINST THE C8 MEASUREMENT, not the 50.000 placeholder
+	// C0 shipped. Two numbers moved it (centroid_cost_integration_test.go,
+	// reproducible): halfvec(1024) is 2052 B and therefore lands JUST over the
+	// 2-kB TOAST threshold, so every centroid is an out-of-line read — 3.604 B
+	// touched per row on a full scan, 1,7× the "~2 kB/row ⇒ ~170 MB @83.000" the
+	// design assumed; and the measured exact-scan p95 holds the 25 ms retrieval
+	// budget up to ≈3.300 centroids on a warm cache. 5.000 keeps the exact scan
+	// where it is genuinely cheaper than an index and hands over before the hot
+	// path pays for it. At 50.000 one probe would have scanned ≈172 MB.
+	CentroidANNThreshold int `key:"cluster.centroid_ann_threshold" env:"CTX_CLUSTER_CENTROID_ANN_THRESHOLD" default:"5000" mut:"hot" tenancy:"global-only"`
 	CentroidEFSearch     int `key:"cluster.centroid_ef_search" env:"CTX_CLUSTER_CENTROID_EF_SEARCH" default:"100" mut:"hot" tenancy:"global-only"`
 }
 
@@ -1446,10 +1456,9 @@ func (c *Config) GraphRRF() rrf.GraphConfig {
 // The zero config is Enabled=false, i.e. the stage does not run and the pipeline
 // is byte-identical to pre-C3.
 //
-// Only the fields the C3 stage actually CONSUMES are mapped. cluster.centroid_*
-// stay unmapped until C8 wires them, for the same reason cluster.inject_max is
-// not declared until C9 (design/03 §4.9): a knob that is visibly plumbed but
-// inert is a trap for whoever tunes it.
+// Only the fields the stage actually CONSUMES are mapped. cluster.inject_max
+// stays unmapped until C9 wires it (design/03 §4.9): a knob that is visibly
+// plumbed but inert is a trap for whoever tunes it.
 func (c *Config) ClusterRRF() rrf.ClusterConfig {
 	return rrf.ClusterConfig{
 		Enabled:     c.Cluster.Enabled,
@@ -1462,6 +1471,18 @@ func (c *Config) ClusterRRF() rrf.ClusterConfig {
 		// protects a SHARED artefact, so it must not be per-tenant widenable
 		// (§4.9). The rrf stage sees one struct; the tenancy split lives here.
 		MaxStaleness: c.ClusterOps.MaxStaleness,
+
+		// C8: the centroid READ arm. centroid_enabled/weight/top_k are ranking
+		// knobs (tenant-overridable); centroid_ef_search steers the shared index
+		// and is global-only — same split as MaxStaleness above. The centroid
+		// BUILD knobs (centroid_build/timeout/batch/work_mem/ann_threshold) are
+		// deliberately absent: they belong to the background arm
+		// (overview.CentroidOptions), and a retrieval struct carrying build policy
+		// would invite exactly the coupling K5 forbids.
+		CentroidEnabled:  c.Cluster.CentroidEnabled,
+		CentroidWeight:   c.Cluster.CentroidWeight,
+		CentroidTopK:     c.Cluster.CentroidTopK,
+		CentroidEFSearch: c.ClusterOps.CentroidEFSearch,
 	}
 }
 

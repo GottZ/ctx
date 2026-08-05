@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "generated_against": {
     "migration_max": 129,
-    "migration_count": 127,
+    "migration_count": 128,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3318,6 +3318,59 @@
       ],
       "row_security": false
     },
+    "graph_cluster_centroid": {
+      "columns": [
+        {
+          "name": "topic_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "cluster_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "centroid",
+          "type": "halfvec(1024)",
+          "not_null": true,
+          "storage": "e"
+        },
+        {
+          "name": "member_n",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "embedded_n",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "member_hash",
+          "type": "bytea",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
     "graph_cluster_edge": {
       "columns": [
         {
@@ -3882,6 +3935,9 @@
     "context_write_log_pkey": {
       "def_hash": "d6b8348197b1d21d56683fe93c2efcbc8726541f0a1ea2a760cda1ff092338b9"
     },
+    "graph_cluster_centroid_pkey": {
+      "def_hash": "bf3130cbd94f5448866e9889782d3b2ec98848b3da63f3fbea53cc4fd75f3281"
+    },
     "graph_cluster_edge_pkey": {
       "def_hash": "9e4533c2625d901c1ae123bb26e7a508ccf0e21c18d0625b23028d32e1187d85"
     },
@@ -4095,6 +4151,9 @@
     },
     "idx_external_identities_principal": {
       "def_hash": "38010d6b84a4c18c2bb294974a3612326e8e3d9f908e4b6cdde085a633f2d766"
+    },
+    "idx_gcc_scope_topic": {
+      "def_hash": "044110517bc617dd1215a2b3a3ff5c4c0eaadb93ec87edad5800b515e9813ab2"
     },
     "idx_gce_scopes": {
       "def_hash": "2671d12f8296731b8cda1fcf0cca9b0e0c06adfadd413b5b3cd1242793656c4c"

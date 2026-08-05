@@ -303,7 +303,7 @@ fi
 T="T07 SCHEMA_INTEGRITY"
 
 # Zähl-Fallback-Erwartung, an Migration 124 gebunden (siehe Kommentar oben).
-T07_EXPECT_TABLES=53
+T07_EXPECT_TABLES=54
 T07_EXPECT_COLUMNS=41
 
 t07_count_fallback() {

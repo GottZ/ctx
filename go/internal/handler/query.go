@@ -125,11 +125,11 @@ func (h *QueryHandler) expandCache(cfg *config.Config) rrf.ExpandCache {
 // forbids.
 func (h *QueryHandler) SetClusterFreshness(src rrf.ClusterFreshness) { h.clusterFresh = src }
 
-func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.SearchResult, readScopes []string, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
+func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.SearchResult, embedding []float32, readScopes []string, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
 	if !cfg.Enabled {
 		return results
 	}
-	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, readScopes, cfg, h.clusterFresh)
+	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, embedding, readScopes, cfg, h.clusterFresh)
 	if err != nil {
 		slog.Warn("cluster boost failed; using pre-boost results",
 			"error", err,
@@ -140,6 +140,11 @@ func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.Sear
 	if n := rep.Count(graphcache.TravClusterBoosted); n > 0 {
 		slog.Info("cluster boost applied",
 			"boosted", n,
+			// C8: whether the query-independent centroid arm contributed to this
+			// decision. Logged next to the boost count, not folded into it — "the
+			// prior came from the hits" and "the prior came from the question" are
+			// the two things this stage can mean.
+			"centroid_probe", rep.Count(graphcache.TravClusterCentroid),
 			"request_id", requestID,
 		)
 	}
@@ -844,7 +849,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// would pay a graph-reinforced neighbour twice for one piece of evidence.
 	// Ahead of it, the stage sees only native RRF hits. Gated default-OFF,
 	// fail-open, byte-identical when off.
-	results = h.applyClusterBoost(ctx, results, ar.ReadScopes, cfg.ClusterRRF(), requestID)
+	// C8 threads the QUERY EMBEDDING through: it already exists (it was produced
+	// for rrf.Search above), so the query-independent centroid arm costs no extra
+	// model roundtrip, no backend dispatch and no LLM latency.
+	results = h.applyClusterBoost(ctx, results, embedding, ar.ReadScopes, cfg.ClusterRRF(), requestID)
 
 	// Step 6a-graph: Dream-graph expansion (GottZ Graph Expansion, Wave 1).
 	// Post-RRF, post-gravity (so seeds enter sorted by boosted RRFScore) and

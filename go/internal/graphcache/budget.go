@@ -121,6 +121,15 @@ const (
 	// at all. On the query path the report is server telemetry only (§4.5
 	// behaviour matrix), so this never reaches a client.
 	TravClusterBoosted
+	// TravClusterCentroid: the query-INDEPENDENT centroid probe (Cluster-Topic-Map
+	// C8) returned at least one match. Like TravClusterAnnotateProbe it is a
+	// declared COST POSTEN, not a cap: the probe is the one extra roundtrip the
+	// centroid arm adds to the query path, and without a token of its own it would
+	// disappear into the stage's total. Its absence while cluster.centroid_enabled
+	// is on is the signal that the table is empty or the scope has no centroids —
+	// the documented cold-start state, which is otherwise indistinguishable from
+	// "the arm is not wired".
+	TravClusterCentroid
 
 	// ── Layer OPERATIONAL ── which arm answered, and what failed.
 
@@ -214,6 +223,8 @@ func (c TravClass) String() string {
 		return "cluster_annotate_capped"
 	case TravClusterBoosted:
 		return "cluster_boosted"
+	case TravClusterCentroid:
+		return "cluster_centroid"
 	case TravClusterStale:
 		return "cluster_stale"
 	case TravCacheStale:
@@ -240,7 +251,8 @@ func (c TravClass) Layer() TravLayer {
 		return LayerLimits
 	case TravDepthCapped, TravFrontierCapped, TravVisitedCapped,
 		TravCandidatesCapped, TravInjectCapped, TravSeedFloorCapped, TravTimeCapped,
-		TravClusterAnnotateProbe, TravClusterAnnotateCapped, TravClusterBoosted:
+		TravClusterAnnotateProbe, TravClusterAnnotateCapped, TravClusterBoosted,
+		TravClusterCentroid:
 		return LayerBudgets
 	case TravClusterStale, TravCacheStale, TravRecheckError:
 		return LayerOperational

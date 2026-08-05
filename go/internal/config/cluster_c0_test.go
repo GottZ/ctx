@@ -57,7 +57,11 @@ var clusterKeys = []struct {
 	{"cluster.centroid_timeout", "CTX_CLUSTER_CENTROID_TIMEOUT", "300", "hot", TenancyGlobalOnly},
 	{"cluster.centroid_batch", "CTX_CLUSTER_CENTROID_BATCH", "500", "hot", TenancyGlobalOnly},
 	{"cluster.centroid_work_mem", "CTX_CLUSTER_CENTROID_WORK_MEM", "256MB", "hot", TenancyGlobalOnly},
-	{"cluster.centroid_ann_threshold", "CTX_CLUSTER_CENTROID_ANN_THRESHOLD", "50000", "hot", TenancyGlobalOnly},
+	// 5.000, not the 50.000 C0 shipped: C8 measured the exact-scan cost
+	// (halfvec(1024) TOASTs, ~3,6 kB touched per row, 25 ms budget reached at
+	// ≈3.300 rows) and the key is a declared RESOURCE limit, so the measurement
+	// owns its value (UD-02-03).
+	{"cluster.centroid_ann_threshold", "CTX_CLUSTER_CENTROID_ANN_THRESHOLD", "5000", "hot", TenancyGlobalOnly},
 	{"cluster.centroid_ef_search", "CTX_CLUSTER_CENTROID_EF_SEARCH", "100", "hot", TenancyGlobalOnly},
 }
 

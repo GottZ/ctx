@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgvec "github.com/pgvector/pgvector-go"
 
 	"github.com/GottZ/ctx/internal/clustersql"
 	"github.com/GottZ/ctx/internal/graphcache"
@@ -36,9 +37,8 @@ import (
 // the cluster.* namespace (design/03 §4.9, declared whole in C0). Every field is
 // a config key; no constant in this file makes a ranking decision.
 //
-// The centroid knobs (cluster.centroid_*) are deliberately ABSENT here until C8
-// wires them, for the same reason cluster.inject_max waits for C9: a field this
-// stage reads but does not act on is a trap for whoever tunes it.
+// cluster.inject_max stays unmapped until C9 wires it: a field this stage reads
+// but does not act on is a trap for whoever tunes it.
 type ClusterConfig struct {
 	// Enabled gates the whole stage. False (default) = no-op, byte-identical.
 	Enabled bool
@@ -65,6 +65,35 @@ type ClusterConfig struct {
 	// to widen it. Zero disables the age check — the missing-row and unwired-seam
 	// branches below still gate.
 	MaxStaleness time.Duration
+
+	// ── C8: the query-INDEPENDENT arm (design/03 §4.6 M2) ──────────────────
+	//
+	// The seed derivation above answers "which cluster do this query's hits live
+	// in". That is circular: a query whose RRF hits are poor gets a poor prior on
+	// top of them. The centroid arm asks the other question — "which cluster does
+	// this QUESTION live in" — by matching the query embedding against the
+	// averaged member embedding of each partition. It costs no extra model
+	// roundtrip: the embedding was already produced for rrf.Search.
+	//
+	// CentroidEnabled off (the default) ⇒ no extra roundtrip, share_final ==
+	// share_seed, bit-identical to C3.
+	CentroidEnabled bool
+	// CentroidWeight blends the two arms:
+	//
+	//	share_final(c) = (1-w)*share_seed(c) + w*share_centroid(c)
+	//
+	// An empty or partially filled centroid table therefore does not fail — it
+	// degrades to (1-w)*share_seed, the C3 signal scaled down. Cold start and
+	// partial fill are valid states, not errors (§3.2).
+	CentroidWeight float64
+	// CentroidTopK is how many centroids the probe returns. The min-max
+	// normalisation runs over exactly this window, so the weakest of the K always
+	// normalises to 0 — the window IS the discrimination.
+	CentroidTopK int
+	// CentroidEFSearch is the hnsw.ef_search of the probe. It is a no-op while the
+	// threshold index does not exist (the default) and is set ANYWAY, so that
+	// arming the index is never a silent recall change (§4.6).
+	CentroidEFSearch int
 }
 
 // ClusterFreshness is the narrow seam that answers "how old is the cluster map
@@ -331,6 +360,189 @@ func fetchClusterSizes(ctx context.Context, pool *pgxpool.Pool, clusterIDs, read
 	return sizes, total, nil
 }
 
+// centroidMatch is one row of the M2 probe: a topic, the cluster it currently
+// aggregates under, and the cosine similarity of its centroid to the query.
+type centroidMatch struct {
+	topicID   string
+	clusterID string
+	cos       float64
+}
+
+// centroidProbeSQL is the query-independent arm (design/03 §4.6 M2).
+//
+// THE SCOPE CONJUNCTION IS NOT OPTIONAL, and with an ANN index it is a
+// POST-filter: pgvector's HNSW scan produces ef_search candidates and only THEN
+// applies `scope = ANY(...)`. For a scope holding a small share of the table
+// that silently returns fewer than k rows, or none — no error, just a quiet hole
+// in the signal. hnsw.iterative_scan closes it, which is why both GUCs are set
+// even though they are inert without the index: arming the index must not be a
+// silent recall change.
+//
+// SHAPE IS LOAD-BEARING. The design's form put DISTINCT ON in the SAME select as
+// the distance ordering (`ORDER BY c.topic_id, c.centroid <=> $1`), which forces
+// a sort by topic_id and makes the ANN index unusable — the threshold index
+// would have been built and then never chosen. The distance ORDER BY + LIMIT
+// therefore lives in its own innermost select (the canonical pgvector shape the
+// planner can answer from the index), and the deduplication sits above it.
+//
+// DISTINCT ON (topic_id) is a structural guard, not a live necessity: since
+// Achse 01 an identity is scope-BOUND (masterplan K2), so (topic_id, scope) is
+// one row per topic anyway. It stays because a second row per topic would enter
+// the min-max normalisation twice and silently double one cluster's weight —
+// removing it is the red probe of gate (vi), and the guard costs a sort over K
+// rows, not over the table.
+const centroidProbeSQL = `
+SELECT d.topic_id::text, d.cluster_id::text, d.cos
+FROM (
+    SELECT DISTINCT ON (t.topic_id) t.topic_id, t.cluster_id, t.cos
+    FROM (
+        SELECT c.topic_id, c.cluster_id,
+               1 - (c.centroid <=> $1::halfvec(1024)) AS cos
+        FROM graph_cluster_centroid c
+        WHERE c.scope = ANY($2::text[])
+        ORDER BY c.centroid <=> $1::halfvec(1024)
+        LIMIT $3
+    ) t
+    ORDER BY t.topic_id, t.cos DESC
+) d
+ORDER BY d.cos DESC`
+
+// fetchCentroidMatches runs the M2 probe. It needs a TRANSACTION because
+// SET LOCAL is the only way to scope the two hnsw GUCs to this statement —
+// setting them on a pooled session would leak the state into every later query
+// on that connection.
+//
+// Read-only, so it rolls back rather than commits: nothing was written, and a
+// rollback is the cheaper and more honest close.
+func fetchCentroidMatches(ctx context.Context, pool *pgxpool.Pool, embedding []float32, readScopes []string, cfg ClusterConfig) ([]centroidMatch, error) {
+	topK := cfg.CentroidTopK
+	if topK <= 0 {
+		return nil, nil
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("rrf: centroid probe begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SET LOCAL hnsw.iterative_scan = 'relaxed_order'`); err != nil {
+		return nil, fmt.Errorf("rrf: centroid iterative_scan: %w", err)
+	}
+	if ef := cfg.CentroidEFSearch; ef > 0 {
+		// Bounded and integer-valued, so the literal is code-shaped, not
+		// user-shaped; a GUC assignment cannot take a bind parameter.
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL hnsw.ef_search = %d`, ef)); err != nil {
+			return nil, fmt.Errorf("rrf: centroid ef_search: %w", err)
+		}
+	}
+
+	rows, err := tx.Query(ctx, centroidProbeSQL, pgvec.NewHalfVector(embedding), readScopes, topK)
+	if err != nil {
+		return nil, fmt.Errorf("rrf: centroid probe: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]centroidMatch, 0, topK)
+	for rows.Next() {
+		var m centroidMatch
+		if err := rows.Scan(&m.topicID, &m.clusterID, &m.cos); err != nil {
+			return nil, fmt.Errorf("rrf: centroid probe scan: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rrf: centroid probe rows: %w", err)
+	}
+	return out, nil
+}
+
+// centroidShares is PURE: min-max normalised cosine over the probe window,
+// re-keyed from topic to cluster.
+//
+// MIN-MAX OVER THE WINDOW, not over an absolute cosine scale. Embedding cosines
+// against an averaged centroid live in a narrow band (a 133-member average is
+// close to everything and far from nothing), so an absolute threshold would
+// either admit all K or none. Normalising within the window turns "how much
+// better is the best match than the worst one I looked at" into the share — the
+// weakest of the K is 0 by construction.
+//
+// A single match, or K matches with identical similarity, normalises to 1.0:
+// there is no spread to rank by, and reporting 0 would silently discard the one
+// signal the probe actually found.
+//
+// RE-KEYED TO cluster_id because the seed arm speaks cluster_id (that is what
+// graph_cluster_member carries). Several topics can map onto one cluster — one
+// per visible scope partition — and the MAXIMUM wins: the query matched the
+// best-fitting partition of that cluster, and averaging would let a distant
+// partition dilute a close one.
+func centroidShares(matches []centroidMatch) map[string]float64 {
+	if len(matches) == 0 {
+		return map[string]float64{}
+	}
+	maxCos, minCos := matches[0].cos, matches[0].cos
+	for _, m := range matches[1:] {
+		if m.cos > maxCos {
+			maxCos = m.cos
+		}
+		if m.cos < minCos {
+			minCos = m.cos
+		}
+	}
+	spread := maxCos - minCos
+
+	out := make(map[string]float64, len(matches))
+	for _, m := range matches {
+		norm := 1.0
+		if spread > 0 {
+			norm = (m.cos - minCos) / spread
+		}
+		if norm > out[m.clusterID] {
+			out[m.clusterID] = norm
+		}
+	}
+	return out
+}
+
+// fuseShares is PURE: the §4.6 blend of the two arms over the UNION of their
+// clusters.
+//
+//	share_final(c) = (1-w)*share_seed(c) + w*share_centroid(c)
+//
+// The union, not the intersection, is the whole point: a cluster the seeds never
+// voted for can still win on centroid evidence alone — that is exactly the
+// circularity the arm exists to break. Conversely w=0 reproduces the C3 shares
+// bit for bit, which is what makes "centroid on, weight 0" a valid A/B control.
+//
+// The weight is clamped rather than rejected: an out-of-range knob must not turn
+// a working query into an error, and the ends of the range are both meaningful
+// (0 = pure seeds, 1 = pure centroid).
+//
+// AN EMPTY PROBE IS "NO ARM", NOT "SIMILARITY ZERO" — a deliberate correction of
+// design/03 §4.6, which describes the cold-start fallback as share_seed
+// "skaliert mit (1 - CentroidWeight)". That contradicts the doc's OWN gate (i)
+// ("leere Zentroid-Tabelle ⇒ das Ergebnis ist identisch zum reinen M1-Pfad"),
+// and the gate is the defensible half: scaling every seed share by (1-w) against
+// an empty table pushes winners below MinShare, so merely ARMING the centroid arm
+// would weaken the C3 signal it exists to extend — a feature whose off-state is
+// worse than its absence. The distinction kept here is exact:
+//
+//	no centroid rows visible at all   ⇒ the arm did not run ⇒ seed shares stand;
+//	rows visible, this cluster absent ⇒ the arm ran and found nothing here ⇒ 0.
+func fuseShares(seed, centroid map[string]float64, weight float64) map[string]float64 {
+	weight = max(0, min(1, weight))
+	if weight == 0 || len(centroid) == 0 {
+		return seed // the A/B control: no allocation, no rounding, no drift
+	}
+	out := make(map[string]float64, len(seed)+len(centroid))
+	for c, s := range seed {
+		out[c] = (1 - weight) * s
+	}
+	for c, s := range centroid {
+		out[c] += weight * s
+	}
+	return out
+}
+
 // ClusterBoost is the stage entry point.
 //
 // FAIL-OPEN, contract identical to graphExpandDispatch: on ANY error the
@@ -341,12 +553,15 @@ func fetchClusterSizes(ctx context.Context, pool *pgxpool.Pool, clusterIDs, read
 // The report is SERVER TELEMETRY. Unlike the ego path, the query envelope never
 // carries a budget report (§4.5 behaviour matrix) — retrieval quality is a blend,
 // not a completeness contract.
-func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, cfg ClusterConfig, fresh ClusterFreshness) ([]SearchResult, *graphcache.BudgetReport, error) {
+func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, embedding []float32, readScopes []string, cfg ClusterConfig, fresh ClusterFreshness) ([]SearchResult, *graphcache.BudgetReport, error) {
 	rep := graphcache.NewBudgetReport(graphcache.SourceSQL)
 	if !cfg.Enabled || len(results) == 0 || len(readScopes) == 0 {
 		return results, rep, nil
 	}
 	// C4: the freshness gate runs BEFORE any read — a stale map costs nothing.
+	// It gates BOTH arms: a centroid computed from a frozen partition is exactly
+	// the confidently wrong signal §4.7 forbids, and it is no fresher than the
+	// membership it was averaged from.
 	if !clusterMapUsable(cfg, fresh, readScopes, rep) {
 		return results, rep, nil
 	}
@@ -359,27 +574,29 @@ func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResul
 	if err != nil {
 		return results, rep, err
 	}
-	if len(memberOf) == 0 {
+
+	// C8: the query-independent arm. It runs even when NOTHING in the result set
+	// is clustered — that is its reason to exist. The empty-membership early
+	// return therefore only applies while the centroid arm is off.
+	var centroid map[string]float64
+	if cfg.CentroidEnabled && len(embedding) > 0 {
+		matches, err := fetchCentroidMatches(ctx, pool, embedding, readScopes, cfg)
+		if err != nil {
+			return results, rep, err
+		}
+		centroid = centroidShares(matches)
+		if len(matches) > 0 {
+			rep.Add(graphcache.TravClusterCentroid)
+		}
+	}
+	if len(memberOf) == 0 && len(centroid) == 0 {
 		return results, rep, nil // nothing clustered yet — not an error, no signal
 	}
 
-	// Only the clusters the SEEDS could vote for need a size; the candidate set
-	// is bounded by SeedCount, not by the result window.
-	seedCount := cfg.SeedCount
-	if seedCount > len(results) {
-		seedCount = len(results)
-	}
-	candidates := make([]string, 0, seedCount)
-	seen := make(map[string]bool, seedCount)
-	for i := 0; i < seedCount; i++ {
-		cid, ok := memberOf[results[i].ID]
-		if !ok || seen[cid] {
-			continue
-		}
-		seen[cid] = true
-		candidates = append(candidates, cid)
-	}
-	sort.Strings(candidates) // deterministic parameter order
+	// Only the clusters that can actually win need a size: the seed candidates
+	// (bounded by SeedCount, not by the result window) plus the centroid window
+	// (bounded by CentroidTopK). Both are small and known before the roundtrip.
+	candidates := candidateClusters(results, memberOf, centroid, cfg)
 
 	var sizes map[string]int
 	var totalSize int64
@@ -389,6 +606,36 @@ func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResul
 		}
 	}
 
-	winners := pickWinners(clusterShares(results, memberOf, sizes, totalSize, cfg), cfg)
+	seedShares := clusterShares(results, memberOf, sizes, totalSize, cfg)
+	winners := pickWinners(fuseShares(seedShares, centroid, cfg.CentroidWeight), cfg)
 	return fuseClusters(results, memberOf, winners, cfg, rep), rep, nil
+}
+
+// candidateClusters is the deduplicated, sorted union of the two arms' cluster
+// candidates — the parameter of the size read.
+//
+// Sorted so the parameter order (and therefore the query plan and the log) is
+// deterministic; a set that changes order between two identical requests makes
+// every downstream comparison unreliable for no benefit.
+func candidateClusters(results []SearchResult, memberOf map[string]string, centroid map[string]float64, cfg ClusterConfig) []string {
+	seedCount := min(cfg.SeedCount, len(results))
+	out := make([]string, 0, seedCount+len(centroid))
+	seen := make(map[string]bool, seedCount+len(centroid))
+	for i := 0; i < seedCount; i++ {
+		cid, ok := memberOf[results[i].ID]
+		if !ok || seen[cid] {
+			continue
+		}
+		seen[cid] = true
+		out = append(out, cid)
+	}
+	for cid := range centroid {
+		if seen[cid] {
+			continue
+		}
+		seen[cid] = true
+		out = append(out, cid)
+	}
+	sort.Strings(out)
+	return out
 }

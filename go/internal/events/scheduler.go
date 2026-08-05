@@ -1259,6 +1259,67 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		"clusters", stats.ClusterCount, "nodes", stats.NodeCount,
 		"edge_rows", stats.EdgeRows, "modularity", stats.Modularity,
 		"tenant_scope", bt.scope, "scope_filter", bt.owned, "elapsed", time.Since(start))
+
+	// C8: the centroid build. Placed HERE and nowhere else, on three counts:
+	//
+	//   - AFTER the persist commit, in its own transaction and under its own
+	//     budget (masterplan K5). Inside the persist tx it would put the whole
+	//     rebuild under one all-or-nothing timeout, and at the target scale the
+	//     sum would overrun reproducibly — freezing the map behind a correct
+	//     fail-safe that hides the freeze;
+	//   - in the PARENT process, like the W8 purge, so the arm needs nothing from
+	//     the worker IPC protocol (the axis keeps exactly ONE protocol change);
+	//   - only on the SUCCESS path. A skipped or failed rebuild changed no
+	//     membership, so the diff would find nothing and the run would be pure
+	//     cost against a frozen map.
+	s.buildClusterCentroids(ctx, bt, cfg)
+}
+
+// buildClusterCentroids runs the C8 arm for the partitions this tick rebuilt.
+//
+// Gated by cluster.centroid_build (default false), so the shipped state is dark:
+// the table stays empty and the rebuild's wall clock is the pre-C8 one. A
+// failure is logged and dropped — the same posture as the tombstone purge. The
+// centroid is an OPTIONAL query-independent prior, and the read path treats a
+// missing row as "no signal" (never "distance infinite"), so a failed build
+// degrades the retrieval to the pure C3 seed derivation instead of degrading the
+// rebuild to "failed".
+//
+// The timeout hangs off the OUTER scheduler context, never off the rebuild's
+// rctx: rctx is what the arm is being decoupled FROM, and on the timeout path it
+// is already dead.
+func (s *Scheduler) buildClusterCentroids(ctx context.Context, bt backgroundTenant, cfg *config.Config) {
+	if !cfg.ClusterOps.CentroidBuild { //nolint:forbidigo // MT 06 background: the centroid build steers ONE process-wide background pass over a SHARED artefact — global-only by design (§4.9).
+		return
+	}
+	if s.blocktypes == nil {
+		return // same wiring gate the rebuild itself passed through
+	}
+	cctx, cancel := context.WithTimeout(ctx, overview.CentroidTimeout(cfg.ClusterOps.CentroidTimeout))
+	defer cancel()
+
+	start := time.Now()
+	st, err := overview.BuildCentroids(cctx, s.pool, bt.owned, overview.CentroidOptions{
+		Batch:        cfg.ClusterOps.CentroidBatch,
+		WorkMem:      cfg.ClusterOps.CentroidWorkMem,
+		ANNThreshold: cfg.ClusterOps.CentroidANNThreshold,
+		VisibleTypes: s.blocktypes.Snapshot().VisibleTypes(),
+	})
+	if err != nil {
+		slog.Warn("scheduler: cluster centroid build failed", "error", err,
+			"tenant_scope", bt.scope, "scope_filter", bt.owned,
+			"dirty", st.Dirty, "recomputed", st.Recomputed, "batches", st.Batches,
+			"elapsed", time.Since(start))
+		return
+	}
+	// Logged even at zero: "the arm ran and found nothing to do" is the steady
+	// state of the incremental path and the number that proves the diff works.
+	// recomputed vs renamed is the K13 split — how much of the churn was real
+	// membership movement and how much was a minUUID rename that cost one column.
+	slog.Info("scheduler: cluster centroids built",
+		"dirty", st.Dirty, "recomputed", st.Recomputed, "renamed", st.Renamed,
+		"swept", st.Swept, "batches", st.Batches, "ann_index", st.IndexState,
+		"tenant_scope", bt.scope, "scope_filter", bt.owned, "elapsed", time.Since(start))
 }
 
 // purgeTopicTombstones removes the topics whose retention window has expired
