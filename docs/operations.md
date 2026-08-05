@@ -262,7 +262,7 @@ The name is derived deterministically, strongest source first:
 2. the three most frequent **categories**,
 3. the representative block's title — today's map text, as the last readable rung.
 
-Whatever the cascade produces is whitespace-normalised and capped at 120 characters. The cap sits outside all three stages on purpose: there is no length limit on tags anywhere in the system, and an overlong tag on a single core block would otherwise break the label CHECK *inside* the rebuild transaction and freeze that partition's map for good.
+Each stage is whitespace-normalised **before** it is tested for emptiness, and the whole cascade is capped at 120 characters with a code-owned constant as the terminal rung. Both details are load-bearing rather than cosmetic, and for the same reason: an empty or overlong label breaks the label CHECK *inside* the rebuild transaction, which rolls the whole rebuild back and freezes that partition's map for good. There is no length or content constraint on tags anywhere in the system, so a tag consisting of a single tab, or one of 200 characters, is an ordinary API write — and neither may be able to kill a map.
 
 `label_source` records where a name came from, in descending strength: `manual` (a human set it) → `llm` (the label pipeline) → `fallback` (the cascade above) → `none` (never labelled). **The rebuild only ever writes over `fallback` and `none`.** A hand-set or model-set name survives every rebuild.
 

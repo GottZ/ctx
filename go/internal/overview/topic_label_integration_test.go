@@ -138,8 +138,8 @@ func TestW5FallbackLabel(t *testing.T) {
 
 		restore := fallbackLabelTemplate
 		fallbackLabelTemplate = strings.NewReplacer(
-			fallbackCategoryStage, "NULL",
-			fallbackTitleStage, "NULL",
+			sqlStage(fallbackCategoryStage), "NULL",
+			sqlStage(fallbackTitleStage), "NULL",
 			"'"+fallbackLastResort+"'", "NULL",
 		).Replace(fallbackLabelTemplate)
 		defer func() { fallbackLabelTemplate = restore }()
@@ -168,22 +168,21 @@ func TestW5FallbackLabel(t *testing.T) {
 		}
 	})
 
-	// RED PROBE for G1b: the Revision-1 shape, which capped only the
-	// representative-title stage and let tags through unbounded ⇒ 23514 on
-	// gct_label_len, again inside the persist tx.
-	t.Run("G1b red probe — capping only the title stage ⇒ 23514", func(t *testing.T) {
+	// RED PROBE for G1b: without the cap the same fixture breaks gct_label_len
+	// with 23514, inside the persist tx — and the partition freezes. There is
+	// no length constraint on tags anywhere in the system, so the cap is the
+	// only thing standing between one long tag and a dead map.
+	t.Run("G1b red probe — no cap ⇒ 23514", func(t *testing.T) {
 		const scope = "w5g1bred"
 		ids := w3Blocks(t, pool, scope, 10300, 3)
 		w5Tag(t, pool, ids, strings.Repeat("y", 200))
 
 		restore := fallbackLabelTemplate
-		fallbackLabelTemplate = strings.NewReplacer(
-			"btrim(left(btrim(regexp_replace(COALESCE(", "(COALESCE(",
-			"), '\\s+', ' ', 'g')), 120))", "))",
-		).Replace(fallbackLabelTemplate)
+		fallbackLabelTemplate = strings.Replace(fallbackLabelTemplate,
+			fallbackLabelExpr, fallbackLabelExprUncapped, 1)
 		defer func() { fallbackLabelTemplate = restore }()
 		if fallbackLabelTemplate == restore {
-			t.Fatal("red probe did not patch the template — the capping shape drifted")
+			t.Fatal("red probe did not patch the capping shape")
 		}
 
 		err := w5PersistErr(pool, scope, retention, w3Group{members: ids})
@@ -369,6 +368,79 @@ func TestW5FallbackLabel(t *testing.T) {
 		}
 		if got := w5LabelOf(t, pool, scope, ids[0]); got.attempts == 0 {
 			t.Fatal("red probe stayed green — the CASE is not what resets the counter")
+		}
+	})
+
+	// ── K1-1: the cascade has to be total against CONTROL whitespace, not just
+	// against spaces. btrim/1 trims U+0020 and nothing else, so a tag, a title
+	// or a category key made of a tab or a newline passes every raw emptiness
+	// test — and the later \s+ normalisation then turns it into the empty
+	// string. Non-NULL but blank stops the COALESCE at a stage with no content,
+	// the last-resort constant is skipped, and gct_label_len raises 23514 INSIDE
+	// the persist transaction: the whole rebuild rolls back and the partition
+	// freezes permanently. The input needs no special privilege — there is no
+	// constraint of any kind on context_blocks.tags.
+	t.Run("K1-1 control whitespace falls through instead of freezing the map", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, scope, tag string
+			first            int
+		}{
+			{"tab tag", "w5k1tab", "\t", 11300},
+			{"newline tag", "w5k1nl", "\n", 11400},
+			{"CR+VT tag", "w5k1cr", "\r\v", 11500},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ids := w3Blocks(t, pool, tc.scope, tc.first, 1)
+				w5Tag(t, pool, ids, tc.tag)
+				if _, err := pool.Exec(context.Background(),
+					`UPDATE context_blocks SET title = $2, category = $3 WHERE id = ANY($1::uuid[])`,
+					ids, "\t\n", " \t"); err != nil {
+					t.Fatalf("blank title/category: %v", err)
+				}
+				if err := w5PersistErr(pool, tc.scope, retention, w3Group{members: ids}); err != nil {
+					t.Fatalf("rebuild rolled back on whitespace input: %v", err)
+				}
+				if got := w5LabelOf(t, pool, tc.scope, ids[0]); got.label != fallbackLastResort {
+					t.Fatalf("label = %q, want the last-resort constant %q", got.label, fallbackLastResort)
+				}
+				if n := w5Unlabelled(t, pool, tc.scope); n != 0 {
+					t.Fatalf("%d unlabelled topics", n)
+				}
+			})
+		}
+	})
+
+	// RED PROBE for K1-1: the pre-fix shape — emptiness tested raw, normalised
+	// afterwards, constant inside the COALESCE.
+	t.Run("K1-1 red probe — raw emptiness test ⇒ 23514 and a frozen partition", func(t *testing.T) {
+		const scope = "w5k1red"
+		ids := w3Blocks(t, pool, scope, 11600, 1)
+		w5Tag(t, pool, ids, "\t")
+
+		restore := fallbackLabelTemplate
+		fallbackLabelTemplate = strings.Replace(fallbackLabelTemplate,
+			fallbackLabelExpr, fallbackLabelExprLegacy, 1)
+		defer func() { fallbackLabelTemplate = restore }()
+		if fallbackLabelTemplate == restore {
+			t.Fatal("red probe did not patch the cascade expression")
+		}
+
+		err := w5PersistErr(pool, scope, retention, w3Group{members: ids})
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+			t.Fatalf("whitespace tag on the legacy shape: err=%v, want SQLSTATE 23514 (gct_label_len)", err)
+		}
+	})
+
+	// A whitespace-only stage must fall THROUGH, not shadow the next one: a
+	// blank tag may not cost a topic its perfectly good category name.
+	t.Run("K1-1 a blank stage does not shadow the next", func(t *testing.T) {
+		const scope = "w5k1shadow"
+		ids := w3Blocks(t, pool, scope, 11700, 2)
+		w5Tag(t, pool, ids, "\n\t")
+		w3Run(t, pool, scope, retention, w3Group{members: ids})
+		if got := w5LabelOf(t, pool, scope, ids[0]); got.label != "learnings" {
+			t.Fatalf("label = %q, want the category rung %q", got.label, "learnings")
 		}
 	})
 
