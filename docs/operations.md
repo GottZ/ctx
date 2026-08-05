@@ -318,6 +318,23 @@ Each map node gained two **optional** fields. `topic` is the stable identity acr
 
 One visible consequence of the scope-bound identity: a cluster whose members live in two scopes now renders as **two** nodes with disjoint `scope_mix` and disjoint `top_categories`, instead of one node with merged counts. Live that case is zero and `/api/status` counts it under `cluster_map.cross_scope_clusters`. Meta-edges keep working across the split because the identity path aggregates them per (cluster pair, **scope pair**) and resolves each endpoint to the half it actually touches — a cluster-pair-only aggregate could not say which half an edge belongs to, and the edge would have to be dropped. The scope pair is stored **oriented like the cluster pair**: `cluster_a`/`cluster_b` are normalised so the smaller UUID comes first, and `scope_s`/`scope_t` are swapped along with them. Reading the two positionally is the whole point of keeping them.
 
+### Retiring the two dead linear topic maps (ops step, not a migration)
+
+`topic-map-work` and `topic-map-hth` have not been rebuilt since 2026-03 and still show up in every `ctx search index` result; the second one additionally advertises a **wrong** bootstrap path (its title says `hth`, its scope says `work` — a pre-scope-clamp leftover). `scripts/archive-legacy-topic-maps.sh` retires them.
+
+It is deliberately **not** a migration: it touches data, and a human should see the pinned before-state before anything commits.
+
+```bash
+bash scripts/archive-legacy-topic-maps.sh          # dry run — rolls back, changes nothing
+bash scripts/archive-legacy-topic-maps.sh --apply  # commits
+```
+
+Both modes print the same pin — id, scope, content length, content SHA-256 — and a ready-to-paste rollback one-liner per row. The step sets `is_archived = true` and **never deletes**: an archived block is gone from the hit list but still readable via `ctx get <id>`, and that readability *is* the rollback path.
+
+Two belts keep it off the wrong block: an explicit title allowlist (exactly those two), and a **producer guard** — a scope is skipped as long as an *active* API key calls it home, because then something still writes that map and archiving would be fighting a live producer. The active tenant's `topic-map-private` is in neither list. Re-running the script is a no-op (it only picks up blocks that are not yet archived).
+
+Order matters: run this **after** `digest.mode=stub`, so the in-band pointer to the root map is already in place for the map that stays.
+
 ### Migration 118: contract-drift closure (legacy function drop)
 
 The schema-contract check (Achse 03) found `extract_dates_from_text(t text)` live without a generating migration — a leftover of the GENERATED-column phase around migration 010, referenced by nothing (indexes, triggers, views, column defaults, `pg_depend`, Go code: all zero at the 2026-07-25 sweep). Migration 118 drops it (`DROP FUNCTION IF EXISTS` — a no-op on fresh chains, which never had it), closing the one expected `unknown_active_object` drift after the 108–117 rollout; `/health`'s `schema_contract` returns to `ok` on the next boot. The full function body is archived in the migration's commit message.
