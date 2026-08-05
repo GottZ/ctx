@@ -350,6 +350,40 @@ type GraphOverviewConfig struct {
 	// three are the bulk of the 423 MB the current path peaks at.
 	CSRLoader bool `key:"graph_overview.csr_loader" env:"CTX_GRAPH_OVERVIEW_CSR_LOADER" default:"false" mut:"hot" tenancy:"global-only"`
 
+	// ── S6+S7: engine switch and time budget (design/04 §4.9) ──────────────
+	//
+	// Engine ships "gonum" and is meant to stay there until an announced
+	// release cut: switching it is a ONE-TIME, GLOBAL partition break — every
+	// cluster_id is recomputed, and the topic layer absorbs that through the
+	// tombstone re-attach window, which has to be widened over the cut first
+	// (UD-03-04). Flipping this key casually renames the whole map.
+	//
+	// parse:"strict" — an unknown value is a BOOT error, never a silent
+	// fallback to gonum. Someone who writes engine=leiden has an expectation;
+	// a fallback would disappoint it silently, with a partition that looks as
+	// if it had been computed as asked.
+	Engine string `key:"graph_overview.engine" env:"CTX_GRAPH_OVERVIEW_ENGINE" default:"gonum" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// TimeBudget is the PRIMARY liveness guard once engine=ctx: the own mover
+	// checks ctx between queue blocks and aborts cleanly, where gonum's
+	// Modularize can only be SIGKILLed. Seconds. 0 = off.
+	//
+	// It bounds the COMPUTE phase alone, not the load: a budget spanning both
+	// would report a slow disk as compute time. The load stays under
+	// rebuild_timeout like everything else.
+	TimeBudget time.Duration `key:"graph_overview.time_budget" env:"CTX_GRAPH_OVERVIEW_TIME_BUDGET" default:"600" mut:"hot" tenancy:"global-only"`
+	// MaxNodesCtx is the emergency stop of the own kernel — NOT a second
+	// max_nodes. The ENGINE picks which key applies (UD-07-04): max_nodes for
+	// gonum, this one for ctx. Two keys with static defaults rather than one
+	// engine-dependent default, because the struct-tag mechanism cannot
+	// express the latter and a hot engine switch would make it ambiguous.
+	// The value that actually applied is in every journal row (max_nodes_eff).
+	MaxNodesCtx int `key:"graph_overview.max_nodes_ctx" env:"CTX_GRAPH_OVERVIEW_MAX_NODES_CTX" default:"5000000" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// Refine enables the Leiden refinement pass (S5) — every delivered
+	// community is connected. Default ON, effective only at engine=ctx
+	// (UD-04-04): a disconnected community is a bad topic and a bad
+	// core_blocks core, so the quality of axes 01 and 03 depends on it.
+	Refine bool `key:"graph_overview.refine" env:"CTX_GRAPH_OVERVIEW_REFINE" default:"true" mut:"hot" tenancy:"global-only"`
+
 	// ── W6: the LLM label pipeline (design/01 §3.5/§4.8, Amendments A01-3/A01-4) ──
 	//
 	// LabelEnabled ships TRUE, unlike graph_overview.enabled — decision E7-01

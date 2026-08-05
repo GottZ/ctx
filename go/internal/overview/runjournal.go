@@ -53,6 +53,10 @@ func StartRun(ctx context.Context, pool *pgxpool.Pool, s RunStart) (string, erro
 	if scopes == nil {
 		scopes = []string{} // globaler Lauf: leeres Array, nie NULL (Spalte ist NOT NULL)
 	}
+	// Ein unbekannter Engine-Wert darf die Journal-Zeile nicht verhindern: der
+	// Rebuild scheitert daran ohnehin gleich laut, und eine fehlende Zeile
+	// waere genau der Verlust, gegen den S2 gebaut ist. Deshalb wird der
+	// Rohwert notfalls durchgereicht — die Spalte traegt keinen CHECK.
 	engine := s.Engine
 	if engine == "" {
 		engine = EngineGonum
@@ -114,6 +118,8 @@ func FinishRun(ctx context.Context, pool *pgxpool.Pool, runID string, r RunResul
 		    level_n         = $17,
 		    sweep_n         = $18,
 		    sigma_drift     = $19,
+		    engine          = COALESCE($24, engine),
+		    max_nodes_eff   = COALESCE($25, max_nodes_eff),
 		    topics_reattached = $20,
 		    topics_born     = $21,
 		    members_changed = $22,
@@ -127,6 +133,11 @@ func FinishRun(ctx context.Context, pool *pgxpool.Pool, runID string, r RunResul
 		nullIfZero(st.ComponentN), nullIfZero(st.LevelN), nullIfZero(st.SweepN), nullIfZeroF(st.SigmaDrift),
 		nullIfZero(st.TopicsReattached), nullIfZero(st.TopicsBorn),
 		nullIfZero(st.MembersChanged), nullIfZero(st.MembersReassigned),
+		// Engine und effektiver Cap koennen sich gegenueber der Start-Zeile
+		// unterscheiden: das Kind normalisiert den Engine-Wert und leitet den
+		// Cap daraus ab. COALESCE haelt die Eltern-Werte, wenn das Kind nichts
+		// gemeldet hat (Kind-Tod) — NULL wuerde sie sonst ueberschreiben.
+		nullIfEmpty(st.Engine), nullIfZero(st.MaxNodesEff),
 	)
 	if err != nil {
 		return fmt.Errorf("overview: closing run journal row %s: %w", runID, err)

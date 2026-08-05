@@ -275,6 +275,18 @@ Modularity is identical to four decimal places, and the factor grows with the co
 
 The package also carries an optional refinement pass that splits any community into its connected components before the next aggregation level, so a community can never be delivered in two pieces with no edge between them. That failure mode is documented in the Leiden literature for sweep-based Louvain; against this kernel it could not be reproduced in 2 400 runs, plausibly because re-queueing a departing node's neighbours re-evaluates them immediately instead of a full sweep later. The pass is kept as a guarantee, not as a repair — it cannot lower modularity, and on an already-connected partition it changes nothing.
 
+### Switching the engine: `graph_overview.engine`
+
+`CTX_GRAPH_OVERVIEW_ENGINE` (`gonum` | `ctx`, default **gonum**, hot) selects the clustering core. The default is deliberate and should stay until you plan a cut: **switching it recomputes every `cluster_id` in one go.** The topic layer absorbs that through the tombstone re-attach window, so raise `graph_overview.tombstone_retention` to cover at least two rebuild cycles *before* the switch, and do it as an announced release step rather than a config tweak.
+
+An unknown value is a **boot error**, not a fallback. Writing `engine=leiden` and silently getting a gonum partition would be indistinguishable from success.
+
+The engine also decides **which cap key applies** — `graph_overview.max_nodes` (200 000) for gonum, `graph_overview.max_nodes_ctx` (5 000 000) for the own kernel. There is no engine-dependent default; there are two keys with static defaults, and the value that actually applied is recorded per run in `graph_overview_run.max_nodes_eff`. That way an inherited 200 000 is distinguishable from a chosen one.
+
+**`graph_overview.time_budget`** (seconds, default 600) becomes the primary liveness guard at `engine=ctx`. It bounds the **compute phase only** — a budget spanning the load would report a slow disk as compute time — and the mover checks it between queue blocks, so exceeding it is a clean skip rather than a SIGKILL. What does *not* change: the result is discarded whole. `graph_cluster_member` stays untouched, `computed_at` does not advance, the map freezes exactly as it does at the node cap. The guard swaps the trigger (node count -> runtime, the quantity itself instead of a proxy), not the mode.
+
+The freeze reports the **existing** `skip_reason = 'timeout'` rather than a new value, so no migration is needed; the run journal carries the finer distinction. And a frozen run touches no identity: no topic is retired, renamed or relabelled.
+
 `computed_at` becomes nullable **and loses its `DEFAULT now()`** (from migration 057). A partition that has never built successfully but already has an attempt behind it — a fresh deploy above the node cap — needs a row without a success timestamp; with the default in place a skip upsert that does not name the column would silently claim freshness. The read path is unaffected: `max(computed_at)` ignores NULL, so "never built" stays the zero timestamp and the `stats.computed_at` wire field stays `null` exactly as before.
 
 Deploy notes, same shape as 116: the file carries `SET LOCAL lock_timeout = '3s'`, so it aborts with `55P03` rather than queueing behind a long-running persist transaction (a 400k-node rebuild measures ~465 s); every statement is idempotent, so the next boot simply re-runs it. Existing rows are backfilled with `last_attempt_at = computed_at` and `candidate_n = node_n` — historically correct, because only a successful run could have written them. No new table, no index.

@@ -166,6 +166,29 @@ services:
       CTX_GRAPH_OVERVIEW_LABEL_MIN_TOPICS: ${CTX_GRAPH_OVERVIEW_LABEL_MIN_TOPICS:-10}
       CTX_GRAPH_OVERVIEW_LABEL_PROMPT_MAX_TITLES: ${CTX_GRAPH_OVERVIEW_LABEL_PROMPT_MAX_TITLES:-24}
       CTX_GRAPH_OVERVIEW_LABEL_CREDENTIALS_FALLBACK_ONLY: ${CTX_GRAPH_OVERVIEW_LABEL_CREDENTIALS_FALLBACK_ONLY:-false}
+      # ── Achse 04 (Skalen-Pfad): Substrat, Engine, Guards ─────────────────
+      #
+      # ENGINE waehlt den Rechenkern: gonum (Default) oder ctx (der eigene
+      # Kern). Die Umschaltung ist ein EINMALIGER, GLOBALER Partitionsbruch —
+      # jede cluster_id wird neu vergeben — und gehoert an einen angekuendigten
+      # Release-Schnitt mit vorher erhoehtem TOMBSTONE_RETENTION, nicht in ein
+      # beilaeufiges Deploy. Ein unbekannter Wert ist ein BOOT-Fehler, nie ein
+      # stiller Fallback.
+      #
+      # Die Engine waehlt ausserdem den Knoten-Cap-KEY: MAX_NODES gilt fuer
+      # gonum, MAX_NODES_CTX fuer den eigenen Kern. Bei engine=ctx ist der Cap
+      # nur noch Not-Aus; tragender Guard ist dann TIME_BUDGET (Sekunden), das
+      # die RECHENPHASE begrenzt und sauber abbricht, statt das Kind zu killen.
+      #
+      # CSR_LOADER schaltet das Eingabe-Substrat um (ergebnisgleich, deutlich
+      # speicherguenstiger); engine=ctx impliziert es ohnehin. REFINE
+      # garantiert zusammenhaengende Communities und wirkt nur bei engine=ctx.
+      CTX_GRAPH_OVERVIEW_ENGINE: ${CTX_GRAPH_OVERVIEW_ENGINE:-gonum}
+      CTX_GRAPH_OVERVIEW_TIME_BUDGET: ${CTX_GRAPH_OVERVIEW_TIME_BUDGET:-600}
+      CTX_GRAPH_OVERVIEW_MAX_NODES_CTX: ${CTX_GRAPH_OVERVIEW_MAX_NODES_CTX:-5000000}
+      CTX_GRAPH_OVERVIEW_CSR_LOADER: ${CTX_GRAPH_OVERVIEW_CSR_LOADER:-false}
+      CTX_GRAPH_OVERVIEW_REFINE: ${CTX_GRAPH_OVERVIEW_REFINE:-true}
+      CTX_GRAPH_OVERVIEW_RUN_RETENTION: ${CTX_GRAPH_OVERVIEW_RUN_RETENTION:-7776000}
       # Cluster consumption (Achse 03, wave C0): turns the Louvain clusters from
       # an output-only endpoint into a retrieval signal, a graph citizen and a
       # facet. The whole surface ships DARK — every gate below is false/0 and

@@ -113,6 +113,17 @@ func TestRegistryStrictSet(t *testing.T) {
 		// intended liveness bound, so it aborts loudly. rebuild_timeout (a
 		// DURATION) stays non-strict like the other cadences.
 		"graph_overview.max_nodes": true,
+		// S6+S7 (Achse 04): the ctx-engine emergency stop, same class as
+		// max_nodes one line up — the ENGINE picks which of the two keys
+		// applies, so a typo'd cap silently defaulting would hide the intended
+		// bound for exactly the engine that is supposed to scale.
+		"graph_overview.max_nodes_ctx": true,
+		// S6+S7: the engine name is strict for a different reason than the caps
+		// — not a ceiling but an IDENTITY. An unknown value must abort at boot
+		// rather than fall back to gonum: switching the engine is a one-time
+		// global partition break, and someone who writes engine=leiden and gets
+		// a gonum partition would have no way to notice.
+		"graph_overview.engine": true,
 		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
 		// int cap like events.max_connections; a typo'd cap silently defaulting
 		// would hide the intended Denial-of-Sync protection, so it aborts loudly.

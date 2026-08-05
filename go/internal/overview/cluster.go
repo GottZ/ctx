@@ -179,6 +179,13 @@ type Stats struct {
 	LevelN     int
 	SweepN     int
 	SigmaDrift float64
+
+	// S6+S7: Engine und effektiver Cap dieses Laufs. Beide gehoeren ins
+	// Journal, weil sie ohne sie nicht rekonstruierbar sind — die Engine ist
+	// hot-reloadbar, und welcher der beiden Cap-Keys galt, entscheidet die
+	// Engine (UD-07-04).
+	Engine      string
+	MaxNodesEff int
 }
 
 // EngineGonum/EngineCtx benennen die beiden Rechenkerne. Der Schalter selbst
@@ -299,6 +306,30 @@ type Options struct {
 	// getauscht; das Mischversions-Fenster bleibt dokumentiert (BP-8) und
 	// scheitert laut.
 	CSRLoader bool
+
+	// ── S6+S7: Engine-Umschalter + Zeitbudget (design/04 §4.9) ─────────────
+	//
+	// Diese drei Felder bilden ZUSAMMEN ein IPC-Fenster — deshalb liegen S6
+	// und S7 in EINEM Commit statt in zweien (§3.5). Beide Decoder sind
+	// strikt; zwei Wellen waeren zwei Neustartfenster fuer denselben Nutzen.
+	//
+	// Engine leer = gonum. Der Default ist bewusst gonum und bleibt es: die
+	// Umschaltung ist ein EINMALIGER, globaler Partitionsbruch und gehoert
+	// gebuendelt an einen angekuendigten Release-Schnitt mit erhoehtem
+	// tombstone_retention (UD-03-04) — nicht in das Deploy dieser Welle.
+	Engine string
+	// TimeBudget ist der Primaer-Guard bei engine=ctx: der Mover prueft
+	// zwischen Warteschlangen-Bloecken und bricht SAUBER ab. Auf dem
+	// gonum-Pfad wirkungslos — Modularize kann ctx nicht beobachten, dort
+	// bleibt der rebuild_timeout-SIGKILL der Guard. 0 = aus.
+	TimeBudget time.Duration
+	// MaxNodesCtx ist das Not-Aus des eigenen Kerns. Die ENGINE waehlt den
+	// Key (UD-07-04), nicht der Wert: max_nodes gilt fuer gonum,
+	// max_nodes_ctx fuer ctx.
+	MaxNodesCtx int
+	// Refine schaltet die Leiden-Refinement-Phase (S5). Nur bei engine=ctx
+	// wirksam — gonum hat keine.
+	Refine bool
 }
 
 // lockKeyForScopes returns the advisory lock key for one persist run (B-W4).
@@ -369,6 +400,13 @@ type clustering struct {
 	edgePairs int
 	dangling  int
 	selfLoops int
+
+	// S6+S7: nur der eigene Kern kennt diese drei. gonum meldet weder Ebenen
+	// noch Sweeps nach aussen (localMovingHeuristic fuehrt keinen Zaehler),
+	// deshalb bleiben sie auf dem gonum-Pfad 0 ⇒ NULL im Journal.
+	levels     int
+	sweeps     int
+	sigmaDrift float64
 }
 
 // Rebuild recomputes the cluster supergraph and replaces the 057 tables in one
@@ -404,7 +442,23 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 		return Stats{}, fmt.Errorf("overview: empty type allowlist (visible=%d, overview=%d) — block-type registry not wired?",
 			len(opts.VisibleTypes), len(opts.OverviewTypes))
 	}
-	var err error
+	// S6+S7: die Engine steht VOR allem anderen fest — sie waehlt den
+	// Guard-Key, den Ladepfad und den Rechenkern. Ein unbekannter Wert ist ein
+	// Fehler und kein stiller Fallback (SP-2).
+	engine, err := NormalizeEngine(opts.Engine)
+	if err != nil {
+		return Stats{}, err
+	}
+	// engine=ctx IMPLIZIERT das CSR-Substrat: der eigene Kern konsumiert eine
+	// CSR und kann mit []rawEdge nichts anfangen. Das ist keine stille
+	// Umdeutung eines Nutzerwunsches, sondern eine Typ-Notwendigkeit — und sie
+	// steht im Log, damit niemand csr_loader=false liest und glaubt, der alte
+	// Ladepfad laufe noch.
+	useCSR := opts.CSRLoader
+	if engine == EngineCtx && !useCSR {
+		useCSR = true
+		slog.Info("overview: engine=ctx implies the CSR loader — the own kernel consumes a CSR, not an edge list")
+	}
 	loadStart := time.Now()
 	nodeTypes := intersect(opts.VisibleTypes, opts.OverviewTypes)
 	// S3: der CSR-Pfad laedt Knoten UND Kanten in EINER Transaktion, weil der
@@ -413,7 +467,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	var csr *csrGraph
 	var nodeUUIDs []string
 	var nodeScopes map[string]string
-	if opts.CSRLoader {
+	if useCSR {
 		nodeUUIDs, nodeScopes, csr, err = loadCSR(ctx, pool, nodeTypes, opts.ScopeFilter)
 	} else {
 		nodeUUIDs, nodeScopes, err = loadNodes(ctx, pool, nodeTypes, opts.ScopeFilter)
@@ -469,13 +523,18 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	// "mem-budget" (S7b, the child memory ceiling). Each of them must return
 	// on this same path, i.e. before persist opens a transaction; W3-G12 is
 	// then extended to all three instead of being duplicated per reason.
-	if opts.MaxNodes > 0 && len(nodeUUIDs) > opts.MaxNodes {
-		slog.Warn("overview: rebuild skipped — node count exceeds cap (Louvain wall)",
-			"nodes", len(nodeUUIDs), "max_nodes", opts.MaxNodes)
-		return Stats{Skipped: true, SkipReason: "node-cap", CandidateCount: candidates}, nil
+	// UD-07-04: die ENGINE waehlt den Key. Bei engine=ctx ist der Cap nur noch
+	// das Not-Aus gegen eine absurde Eingabe (Default 5M) — der tragende Guard
+	// ist dann das Zeitbudget. Er bleibt trotzdem stehen: ein Guard ohne Zahl
+	// ist kein Guard, und dieser zieht VOR dem Kantenladen und kostet nichts.
+	effMaxNodes := EffectiveMaxNodes(engine, opts.MaxNodes, opts.MaxNodesCtx)
+	if effMaxNodes > 0 && len(nodeUUIDs) > effMaxNodes {
+		slog.Warn("overview: rebuild skipped — node count exceeds cap",
+			"nodes", len(nodeUUIDs), "max_nodes_eff", effMaxNodes, "engine", engine)
+		return Stats{Skipped: true, SkipReason: "node-cap", CandidateCount: candidates, MaxNodesEff: effMaxNodes}, nil
 	}
 	var edges []rawEdge
-	if !opts.CSRLoader {
+	if !useCSR {
 		edges, err = loadEdges(ctx, pool, opts.ScopeFilter)
 		if err != nil {
 			return Stats{}, fmt.Errorf("loading edges: %w", err)
@@ -489,9 +548,27 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 
 	clusterStart := time.Now()
 	var cl clustering
-	if opts.CSRLoader {
+	switch {
+	case engine == EngineCtx:
+		cl, err = clusterCtxEngine(ctx, nodeUUIDs, csr, opts.Resolution, opts.TimeBudget, opts.Refine)
+		// ZEITBUDGET-ABBRUCH: das Ergebnis wird VOLLSTAENDIG verworfen, die
+		// Karte friert ein — exakt wie am Knoten-Cap (SP-5). Gemeldet wird der
+		// BESTEHENDE Grund 'timeout' und kein neuer: graph_overview_meta traegt
+		// dafuer seit Mig 123 einen CHECK, und ein neuer Wert waere eine
+		// Migration fuer eine Unterscheidung, die das Lauf-Journal ohnehin
+		// praeziser fuehrt (skip_reason dort ohne CHECK).
+		//
+		// Unterschieden wird am EIGENEN Budget, nicht am Kontext des Aufrufers:
+		// laeuft der aeussere ctx ab, ist das der rebuild_timeout und gehoert
+		// dem Elternprozess.
+		if err != nil && ctx.Err() == nil && opts.TimeBudget > 0 {
+			slog.Warn("overview: rebuild skipped — the compute time budget was exhausted",
+				"time_budget", opts.TimeBudget, "nodes", len(nodeUUIDs))
+			return Stats{Skipped: true, SkipReason: "timeout", CandidateCount: candidates, MaxNodesEff: effMaxNodes}, nil
+		}
+	case useCSR:
 		cl, err = clusterCSRWithCtx(ctx, nodeUUIDs, csr, opts.Resolution)
-	} else {
+	default:
 		cl, err = clusterWithCtx(ctx, nodeUUIDs, edges, opts.Resolution)
 	}
 	if err != nil {
@@ -525,6 +602,11 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	stats.DanglingN = cl.dangling
 	stats.SelfLoopN = cl.selfLoops
 	stats.PartitionHash = partitionHash(cl.blockToCluster)
+	stats.Engine = engine
+	stats.MaxNodesEff = effMaxNodes
+	stats.LevelN = cl.levels
+	stats.SweepN = cl.sweeps
+	stats.SigmaDrift = cl.sigmaDrift
 	// PeakRSSKb wird als LETZTES gelesen — VmHWM ist ein Hochwassermarker, der
 	// erst am Ende die Spitze des ganzen Laufs kennt (Laden, Symmetrisieren,
 	// gonum-Graph, persist). Genau diese Reihenfolge war der Messfehler, den

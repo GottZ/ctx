@@ -165,6 +165,18 @@ func Run(ctx context.Context, g *Graph, opts Options) (Result, error) {
 
 	cur := g
 	for level := 0; level < maxLevels; level++ {
+		// Budget-Pruefung am EBENEN-EINSTIEG, zusaetzlich zur Pruefung alle
+		// queueCheckStride Entnahmen im Mover.
+		//
+		// Ohne sie hat der Guard eine Granularitaets-Untergrenze: ein Graph mit
+		// weniger Knoten als der Stride erreicht die Pruefung im Mover NIE und
+		// laeuft trotz abgelaufenem Budget durch. Gefunden vom S67-G3-Gate, das
+		// mit einem 400-Knoten-Korpus und einem 1-ns-Budget genau das zeigte —
+		// harmlos bei 400 Knoten, aber ein Guard, der erst ab 4096 Knoten
+		// greift, ist kein Guard, sondern eine Zusage mit Kleingedrucktem.
+		if err := ctx.Err(); err != nil {
+			return Result{}, fmt.Errorf("louvain: aborted before level %d: %w", level, err)
+		}
 		lvl, err := moveLevel(ctx, cur, gamma, opts)
 		if err != nil {
 			return Result{}, err

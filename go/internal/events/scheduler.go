@@ -1235,13 +1235,17 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// leerer runID ins no-op.
 	runID, jerr := overview.StartRun(ctx, s.pool, overview.RunStart{
 		ScopeSet:   bt.owned,
-		Engine:     overview.EngineGonum,
+		Engine:     cfg.GraphOverview.Engine,
 		Resolution: cfg.GraphOverview.Resolution,
 		// candidate_n ist hier noch unbekannt (es entsteht erst in loadNodes,
 		// also im Kind) — es wird beim Abschluss nachgetragen. max_nodes_eff
 		// dagegen ist eine ELTERN-Entscheidung und gehoert deshalb in die
 		// Start-Zeile: sie gilt auch dann, wenn das Kind nie antwortet.
-		MaxNodesEff: cfg.GraphOverview.MaxNodes,
+		// UD-07-04: welcher der beiden Cap-Keys gilt, entscheidet die ENGINE.
+		// Der Elternprozess muss den effektiven Wert kennen, BEVOR das Kind
+		// startet — die Start-Zeile gilt auch dann, wenn das Kind nie antwortet.
+		MaxNodesEff: overview.EffectiveMaxNodes(cfg.GraphOverview.Engine,
+			cfg.GraphOverview.MaxNodes, cfg.GraphOverview.MaxNodesCtx),
 		ParentRSSKb: overview.ReadVmHWMkB(),
 	})
 	if jerr != nil {
@@ -1257,6 +1261,11 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		// S3: der CSR-Loader steuert den Rechenpfad IM KIND, also muss der
 		// Schalter ueber die Prozessgrenze. Default aus.
 		CSRLoader: cfg.GraphOverview.CSRLoader,
+		// S6+S7: Engine, Zeitbudget, ctx-Cap und Refinement — EIN IPC-Fenster.
+		Engine:      cfg.GraphOverview.Engine,
+		TimeBudget:  cfg.GraphOverview.TimeBudget,
+		MaxNodesCtx: cfg.GraphOverview.MaxNodesCtx,
+		Refine:      cfg.GraphOverview.Refine,
 		// W3: the tombstone re-attach probe runs inside the persist tx, i.e.
 		// in the worker CHILD — the window has to cross the boundary. The
 		// purge that consumes the same key stays in the parent (W8).
