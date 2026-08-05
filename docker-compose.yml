@@ -185,6 +185,14 @@ services:
       CTX_ROOT_MAP_SUPER_ENABLED: ${CTX_ROOT_MAP_SUPER_ENABLED:-false}
       CTX_ROOT_MAP_SUPER_MIN_RESOLUTION: ${CTX_ROOT_MAP_SUPER_MIN_RESOLUTION:-0.2}
       CTX_ROOT_MAP_SUPER_MAX_NODES: ${CTX_ROOT_MAP_SUPER_MAX_NODES:-20000}
+      # Linear topic map (one line per BLOCK — 80 KB today, ~113 MB at 10M).
+      # full = today's behaviour byte for byte (the shipped default: retiring the
+      # old map is an operational step after the root map has proven itself, not
+      # a deploy side effect) · stub = the map becomes a ~300 B pointer to
+      # root-map-<scope>, so consumers searching for it still learn where to look
+      # · off = no digest write at all, the block stays as it is. An unknown
+      # value falls back to full and says so in the log.
+      CTX_DIGEST_MODE: ${CTX_DIGEST_MODE:-full}
       CTX_RATE_LIMIT_WRITE: ${CTX_RATE_LIMIT_WRITE:-100}
       CTX_RATE_LIMIT_READ: ${CTX_RATE_LIMIT_READ:-0}
       CTX_TIMEZONE: ${CTX_TIMEZONE:-}

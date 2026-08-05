@@ -31,11 +31,24 @@ import (
 // topic-map index title/row. Pre-T12 the registry ignored its argument, so the
 // background loop passing homeScope was harmless; now the tenant key must be the
 // tenant scope (default tenant → "_global" → base generation, unchanged).
-func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, tenantScope, homeScope string, readScopes []string) error {
+func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, mode, tenantScope, homeScope string, readScopes []string) error {
 	if blocktypes == nil {
 		return fmt.Errorf("digest: nil block-type registry (wiring bug)")
 	}
 	set := blocktypes.SnapshotForTenant(ctx, tenantScope)
+
+	// W-E: the mode decides BEFORE the source query. That order is the whole
+	// point — the corpus scan (no LIMIT, no cursor, the whole result set as
+	// []store.BlockMeta) is what makes the linear map untenable at scale, so a
+	// mode that "only skips the line building" would leave the expensive half in
+	// place.
+	switch Normalize(mode) {
+	case ModeOff:
+		slog.Debug("digest: off, leaving the topic map untouched", "scope", homeScope)
+		return nil
+	case ModeStub:
+		return writeStub(ctx, pool, set, homeScope)
+	}
 
 	// Fetch block metadata (no content), sieved by digest.include (WF T8,
 	// design/01 §4.4 #13): an unregistered type is absent from the allowlist
@@ -144,6 +157,95 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 		"content_length", len(indexContent),
 	)
 
+	return nil
+}
+
+// Digest modes (design/02 §4.6, wave W-E). See config.DigestConfig for what
+// each one is FOR; this is the vocabulary the pipeline speaks.
+const (
+	ModeFull = "full"
+	ModeStub = "stub"
+	ModeOff  = "off"
+)
+
+// Normalize maps a configured mode onto the vocabulary, falling back to `full`.
+//
+// Fail-closed here means falling back to the BEHAVIOUR THAT EXISTS: a typo in
+// the mode must never silently stop the topic map (which `off` would) — the
+// operator would find out weeks later from a block that stopped moving. The
+// fallback is loud in the log and the key is hot, so the correction costs a
+// settings write, not a deploy.
+func Normalize(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case ModeStub:
+		return ModeStub
+	case ModeOff:
+		return ModeOff
+	case ModeFull, "":
+		return ModeFull
+	default:
+		slog.Warn("digest: unknown digest.mode, falling back to full", "mode", mode)
+		return ModeFull
+	}
+}
+
+// stubText is the ~300 B pointer the linear map becomes. It is a CONSTANT
+// shape on purpose: no wall clock, no counts, nothing that moves. A stub that
+// re-renders differently every minute would trade an 80 KB rewrite per cycle
+// for a 300 B one — smaller, but the same pointless write, and the content
+// comparison below could not skip it.
+func stubText(homeScope string) string {
+	return "Diese Karte wurde abgelöst.\n" +
+		"Die Wurzel-Map dieses Scopes heißt: root-map-" + homeScope + "\n" +
+		"  ctx search index query:root-map    ·    ctx get <id aus der Trefferliste>\n" +
+		"Sie gliedert nach Themen-Clustern (Louvain über den Dream-Graphen) statt nach\n" +
+		"Kategorien und ist auf ~15 KB gedeckelt. Erzeugt am Overview-Rebuild-Zyklus.\n"
+}
+
+// writeStub replaces the linear map with the pointer — the ONLY write of stub
+// mode, and only when the text is not already there.
+//
+// Why a stub rather than archiving the block: an archived block is gone from
+// `ctx get` and `ctx search`, so every consumer that looks the map up where the
+// ctx-digest skill tells them to (`ctx search index query:topic-map`) would find
+// nothing AND no hint where to go instead. 300 B is the cheapest possible
+// forwarding address, and it reaches the consumers exactly where they search
+// (E2-02/E9-02 — the stub carries the transition; archiving the two dead
+// scope blocks is its own decided wave).
+func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, homeScope string) error {
+	title := "topic-map-" + homeScope
+	text := stubText(homeScope)
+
+	old, found, err := store.MapBlockContent(ctx, pool, "index", title, homeScope)
+	if err != nil {
+		return fmt.Errorf("digest: read topic map: %w", err)
+	}
+	if found && old == text {
+		slog.Debug("digest: stub unchanged", "scope", homeScope)
+		return nil
+	}
+
+	block, err := store.UpsertBlock(ctx, pool, "index", title, text,
+		[]string{"index", "topic-map", homeScope, "auto-generated", "superseded"},
+		map[string]any{
+			"source":        "context-digest",
+			"is_meta":       true,
+			"mode":          ModeStub,
+			"superseded_by": "root-map-" + homeScope,
+			"scope":         homeScope,
+		},
+		homeScope, true, store.SensitivityWrite{}, "")
+	if err != nil {
+		return fmt.Errorf("digest: upsert topic map stub: %w", err)
+	}
+
+	// Same classify hook as the full map: is_meta=true keeps the stub on
+	// system-meta, so it stays out of retrieval and inside the browse channel
+	// that makes it findable at all.
+	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
+		slog.Warn("digest: stub auto-classify failed", "error", err, "block_id", block.ID)
+	}
+	slog.Info("digest: topic map replaced by stub", "scope", homeScope, "content_length", len(text))
 	return nil
 }
 

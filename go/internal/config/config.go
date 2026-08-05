@@ -89,6 +89,7 @@ type Config struct {
 	Graph          GraphConfig
 	GraphOverview  GraphOverviewConfig
 	RootMap        RootMapConfig
+	Digest         DigestConfig
 	GraphCache     GraphCacheConfig
 	Cluster        ClusterConfig
 	ClusterOps     ClusterOpsConfig
@@ -531,6 +532,33 @@ type QueryConfig struct {
 	Timezone           *time.Location `key:"query.timezone" env:"CTX_TIMEZONE" default:"" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	RateLimitWrite     int            `key:"query.rate_limit_write" env:"CTX_RATE_LIMIT_WRITE" default:"100" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	RateLimitRead      int            `key:"query.rate_limit_read" env:"CTX_RATE_LIMIT_READ" default:"0" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+}
+
+// DigestConfig is the LINEAR topic map's remaining knob (plan-cluster-topicmap
+// design/02 §4.6, wave W-E) — one key, and it exists to retire the artefact it
+// governs.
+//
+// The map has one line per BLOCK: 80.103 characters for 1.215 blocks today,
+// ~113 MB at the 10M target, built by materialising the whole corpus in memory
+// inside a 512 MiB container. Its replacement (root_map.*) has one line per
+// CLUSTER. The three modes are the migration path, not a preference:
+//
+//	full — today's behaviour, byte for byte. The shipped default: the switch is
+//	       an operational step after the root map has proven itself live, never
+//	       a side effect of a deploy.
+//	stub — the linear map stops growing and becomes a ~300 B pointer to the root
+//	       map. Consumers that search for it (`ctx search index query:topic-map`,
+//	       which is what the ctx-digest skill recommends) still find something
+//	       that tells them WHERE to look — the reason this is a stub and not an
+//	       archival (E2-02/E9-02: the stub carries the transition).
+//	off  — no digest write at all. The existing block stays exactly as it is.
+//
+// global-only: the digest is an offline background job over a shared pipeline
+// (the config.go tenancy rule names scheduler cadences and offline jobs
+// explicitly), and a per-tenant mode would make "is the linear map still being
+// built" unanswerable for the operator who has to retire it.
+type DigestConfig struct {
+	Mode string `key:"digest.mode" env:"CTX_DIGEST_MODE" default:"full" mut:"hot" tenancy:"global-only"`
 }
 
 // SchedulerConfig is the background-pipeline scope surface.

@@ -73,7 +73,7 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 	// Run digest. The request path resolves the policy overlay against the
 	// caller's own tenant (HomeScope) — the same scope it writes the topic-map
 	// under (T12: tenant key == write scope on the request path).
-	err := digest.RunDigest(ctx, h.pool, h.blocktypes, authResult.HomeScope, authResult.HomeScope, authResult.ReadScopes)
+	err := digest.RunDigest(ctx, h.pool, h.blocktypes, cfg.Digest.Mode, authResult.HomeScope, authResult.HomeScope, authResult.ReadScopes)
 	if err != nil {
 		slog.Error("digest: run error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
