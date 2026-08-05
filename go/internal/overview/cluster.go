@@ -1089,6 +1089,16 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		return Stats{}, err
 	}
 
+	// W5: the deterministic fallback label plus the materialized drift state.
+	// It runs AFTER the node aggregation because it reads core_blocks,
+	// category_counts and repr_title off the rows that aggregation just wrote,
+	// and INSIDE this transaction because "the map is never unnamed" has to be
+	// as atomic as the identity it names (design/01 §4.6).
+	labelled, err := phase.writeFallbackLabels(ctx, tx)
+	if err != nil {
+		return Stats{}, err
+	}
+
 	stats := Stats{
 		NodeCount:         len(cl.blockToCluster),
 		ClusterCount:      len(clusterSet),
@@ -1145,6 +1155,11 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		"scope_filter", opts.ScopeFilter,
 		"carried", stats.TopicsCarried, "reattached", stats.TopicsReattached,
 		"born", stats.TopicsBorn, "split", stats.TopicsSplit, "retired", stats.TopicsRetired,
-		"members_changed", stats.MembersChanged, "members_reassigned", stats.MembersReassigned)
+		"members_changed", stats.MembersChanged, "members_reassigned", stats.MembersReassigned,
+		// W5: deliberately a LOG field and not a Stats field — Stats crosses the
+		// worker IPC boundary with a strict decoder, and design/01 §3.6 pins the
+		// axis to exactly ONE protocol change (W3's). The number is observability,
+		// not a decision input, so it belongs where it costs nothing.
+		"labels_touched", labelled)
 	return stats, nil
 }

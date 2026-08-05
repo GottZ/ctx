@@ -243,6 +243,24 @@ Two operational consequences:
 
 The rebuild log line `overview: topic identity` reports the run: `carried`, `reattached`, `born`, `split`, `retired`, plus `members_changed` and `members_reassigned`. The last two are worth reading together — `members_reassigned` is the share of the churn that is nothing but a community rename (the block moved `cluster_id` while its topic stayed the same). A high share means the map is stable and only its internal keys are moving.
 
+### Every topic has a name, always
+
+Since migration 125 a topic carries a `label`, and the rebuild writes one for **every** living topic in the same transaction that assigns the identity. No model is involved, no backend has to exist, no pipeline has to have succeeded: the map is never a list of unnamed circles, and nothing on the display path ever waits for inference.
+
+The name is derived deterministically, strongest source first:
+
+1. the three most frequent **tags** of the topic's core blocks (not of all members — the core is the statement about the cluster, the rim is noise),
+2. the three most frequent **categories**,
+3. the representative block's title — today's map text, as the last readable rung.
+
+Whatever the cascade produces is whitespace-normalised and capped at 120 characters. The cap sits outside all three stages on purpose: there is no length limit on tags anywhere in the system, and an overlong tag on a single core block would otherwise break the label CHECK *inside* the rebuild transaction and freeze that partition's map for good.
+
+`label_source` records where a name came from, in descending strength: `manual` (a human set it) → `llm` (the label pipeline) → `fallback` (the cascade above) → `none` (never labelled). **The rebuild only ever writes over `fallback` and `none`.** A hand-set or model-set name survives every rebuild.
+
+What the rebuild *does* maintain for every row, whatever its source, is the drift state: `label_stale` becomes true when the topic's core has changed since the name was built (`label_core_hash` vs the freshly written `core_hash`), and `label_attempts` resets to zero at the same moment — a changed core is a new input, so a topic that failed to get a model-written name three times is eligible again rather than unnamed forever. Membership churn at the *rim* of a cluster changes neither, which is what keeps re-labelling rare.
+
+The counter `labels_touched` on the `overview: topic identity` log line is the number of topic rows the label pass wrote in that run.
+
 ### Migration 118: contract-drift closure (legacy function drop)
 
 The schema-contract check (Achse 03) found `extract_dates_from_text(t text)` live without a generating migration — a leftover of the GENERATED-column phase around migration 010, referenced by nothing (indexes, triggers, views, column defaults, `pg_depend`, Go code: all zero at the 2026-07-25 sweep). Migration 118 drops it (`DROP FUNCTION IF EXISTS` — a no-op on fresh chains, which never had it), closing the one expected `unknown_active_object` drift after the 108–117 rollout; `/health`'s `schema_contract` returns to `ok` on the next boot. The full function body is archived in the migration's commit message.

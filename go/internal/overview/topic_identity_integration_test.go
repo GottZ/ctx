@@ -820,14 +820,22 @@ func TestW3ScopeMoveIsolation(t *testing.T) {
 		if !w3TopicRow(t, pool, topicA).retired {
 			t.Fatal("the abandoned scope-A topic must retire")
 		}
-		var label *string
+		// Since W5 a fresh topic is never label-LESS — the deterministic
+		// fallback names it in the same transaction it is born in. The leak
+		// signal is therefore not "a label exists" but "THIS label exists":
+		// the scope-B row must carry a name built from scope-B's own tags and
+		// categories ('fallback'), never the 'llm' name minted over scope A.
+		var label, source *string
 		if err := pool.QueryRow(ctx, `
-			SELECT t.label FROM graph_cluster_node n JOIN graph_cluster_topic t ON t.topic_id = n.topic_id
-			 WHERE n.scope = 'moveB'`).Scan(&label); err != nil {
+			SELECT t.label, t.label_source FROM graph_cluster_node n JOIN graph_cluster_topic t ON t.topic_id = n.topic_id
+			 WHERE n.scope = 'moveB'`).Scan(&label, &source); err != nil {
 			t.Fatal(err)
 		}
-		if label != nil {
-			t.Fatalf("the scope-B node row serves the label %q — a private label reached a foreign scope", *label)
+		if label != nil && *label == "SECRET-A" {
+			t.Fatal("the scope-B node row serves the scope-A label — a private label reached a foreign scope")
+		}
+		if source == nil || *source != "fallback" {
+			t.Fatalf("scope-B label_source = %v, want fallback (a locally minted name, not an inherited one)", source)
 		}
 	})
 
