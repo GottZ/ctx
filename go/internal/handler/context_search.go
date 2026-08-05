@@ -43,6 +43,15 @@ type searchRequest struct {
 	Types             []string `json:"types"`
 	TypesExclude      []string `json:"types_exclude"`
 	BlockRolesExclude []string `json:"block_roles_exclude"`
+	// Cluster is the `cluster:<handle>` facet (Cluster-Topic-Map C6, design/03
+	// §4.8): a hard restriction to ONE topic — the stable handle the graph
+	// surfaces emit, never the internal cluster_id. Empty = no restriction.
+	//
+	// Gated on cluster.facet_enabled (default off). While the gate is closed the
+	// field is ignored COMPLETELY — not rejected, not echoed — so the dark state
+	// is byte-identical to the time before C6, when an unknown JSON key was
+	// simply dropped by the decoder.
+	Cluster string `json:"cluster"`
 }
 
 // HandleSearch processes lightweight search requests (no LLM).
@@ -57,9 +66,13 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ONE config snapshot per request: the rate limit and the C6 facet gate must
+	// never come from two different generations.
+	cfgSnap := h.cfg.SnapshotForRequest(ctx)
+
 	// Read rate limit check (0 = disabled). MT 06-C5: per-tenant via the
 	// request context (tenant's own RateLimitRead override, else _global).
-	if limit := h.cfg.SnapshotForRequest(ctx).Query.RateLimitRead; limit > 0 {
+	if limit := cfgSnap.Query.RateLimitRead; limit > 0 {
 		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "query")
 		if err != nil {
 			slog.Error("search: read rate limit check error", "error", err, "request_id", reqID)
@@ -106,11 +119,34 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		after = nil
 	}
 
+	// Cluster facet (C6). Order matters and is load-bearing:
+	//
+	//  1. the FLAG first — off ⇒ the field does not exist for this request. A
+	//     validation error in the dark state would be a behaviour change on a
+	//     feature that is supposed to be invisible;
+	//  2. then the FORM, before any DB roundtrip (pattern handler/graph.go
+	//     fullUUIDRe). Without it the value reaches `$n::uuid` and returns
+	//     SQLSTATE 22P02 → a 500 that tells the caller "this was not a handle";
+	//  3. never an existence check. A well-formed handle is ALWAYS a 200 with a
+	//     possibly empty list — unknown, foreign and member-less are one answer,
+	//     otherwise the handle space becomes enumerable and, since handles are
+	//     stable per topic, the NUMBER of foreign topics derivable (§5.7).
+	var clusterFacet *string
+	if cfgSnap.ClusterOps.FacetEnabled && req.Cluster != "" {
+		if !fullUUIDRe.MatchString(req.Cluster) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false, "error": "cluster must be a full UUID",
+			})
+			return
+		}
+		clusterFacet = &req.Cluster
+	}
+
 	// Search. grantedBlockIDs nil (T40a): /api/search is NOT live-wired for block
 	// grants in T40a (its grant wiring is T40b/a later wave) — nil ⇒ no-op OR-arm.
 	// Type filters (WF T10): types_exclude ∪ block_roles_exclude (legacy alias).
 	typesExclude := unionExcludes(req.TypesExclude, req.BlockRolesExclude)
-	results, err := store.SearchBlocks(ctx, h.pool, req.Query, authResult.ReadScopes, req.Category, req.Tags, limit, compact, after, nil, req.Types, typesExclude)
+	results, err := store.SearchBlocks(ctx, h.pool, req.Query, authResult.ReadScopes, req.Category, req.Tags, limit, compact, after, nil, req.Types, typesExclude, clusterFacet)
 	if err != nil {
 		slog.Error("search: query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -147,20 +183,28 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		typesExcludeFilter = typesExclude
 	}
 
+	filters := map[string]any{
+		"query":    queryFilter,
+		"category": categoryFilter,
+		"tags":     tagsFilter,
+		"limit":    limit,
+		// WF T10: the EFFECTIVE type filters (types_exclude already
+		// unioned with the legacy block_roles_exclude alias).
+		"types":         typesFilter,
+		"types_exclude": typesExcludeFilter,
+	}
+	// The facet is echoed only when it was APPLIED — an unconditional key would
+	// move a byte in the dark state, and a key echoing an ignored value would
+	// claim a filter that did not run.
+	if clusterFacet != nil {
+		filters["cluster"] = *clusterFacet
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"count":   len(results),
 		"compact": compact,
-		"filters": map[string]any{
-			"query":    queryFilter,
-			"category": categoryFilter,
-			"tags":     tagsFilter,
-			"limit":    limit,
-			// WF T10: the EFFECTIVE type filters (types_exclude already
-			// unioned with the legacy block_roles_exclude alias).
-			"types":         typesFilter,
-			"types_exclude": typesExcludeFilter,
-		},
+		"filters": filters,
 		"results": results,
 		// next_after is the cursor for the FOLLOWING page (W7 "Load more"), or
 		// null when there is no next page (last page / FTS top-matches mode).

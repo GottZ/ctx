@@ -149,6 +149,49 @@ var VisibleSizeWithTotalQuery = `
 	  AND ` + NodeVisible("n", "$2") + `
 	GROUP BY n.cluster_id`
 
+// TopicMemberSubquery is THE resolution of a public topic HANDLE to block ids
+// (C6, design/03 §4.8). It returns the body of a semi-join — the caller wraps
+// it, e.g. `id IN (<here>)` — with two code-owned placeholders:
+//
+//	topicParam — the handle (uuid)
+//	scopeParam — the caller's read scopes (text[]); usually the SAME parameter
+//	             the surrounding query already binds for its own scope filter
+//
+// THE RESOLUTION PATH IS NOT NEGOTIABLE: graph_cluster_topic → graph_cluster_node
+// → graph_cluster_member, joined on (topic_id, scope) and (cluster_id, scope),
+// with BOTH cluster tables under their scope conjunction. Three reasons, in
+// order of severity:
+//
+//  1. A handle is SCOPE-BOUND (Masterplan K2 / A03-2: "ein Handle = ein
+//     scope-reines Thema"). It names ONE partition, so the facet is
+//     partition-scharf by construction. The design's original form — resolve to
+//     the cluster and union every visible partition — would return a set no
+//     handle describes: the caller asks for a topic and gets another scope's
+//     members alongside, and the two halves may carry different labels.
+//  2. Without NodeVisible a caller who learned a foreign handle could read which
+//     of ITS blocks share that topic's cluster; without MemberOf the membership
+//     rows of a foreign partition leak directly (risk R3, §5.2). Both
+//     conjunctions come from this package, so breaking either one reddens every
+//     consumer at once instead of only this one.
+//  3. It never joins context_blocks. The restriction stays a SEMI-JOIN so the
+//     planner may choose between a hash semi-join and an index nested loop
+//     depending on cluster size; materialising the ids first would fix the plan
+//     at the shape that breaks for a mega cluster (§6.6).
+//
+// A retired topic resolves to nothing without a special case: the 057 teardown
+// deletes its node row, and the join has nothing to stand on. An unknown, a
+// foreign and a retired handle are therefore ONE outcome — the empty set — which
+// is what keeps the facet from being an existence oracle (§5.7).
+func TopicMemberSubquery(topicParam, scopeParam string) string {
+	return `SELECT m.block_id
+		FROM graph_cluster_topic t
+		JOIN graph_cluster_node n ON n.topic_id = t.topic_id AND n.scope = t.scope
+		JOIN graph_cluster_member m ON m.cluster_id = n.cluster_id AND m.scope = n.scope
+		WHERE t.topic_id = ` + topicParam + `::uuid
+		  AND ` + NodeVisible("n", scopeParam) + `
+		  AND ` + MemberOf("m", scopeParam)
+}
+
 // MembershipQuery is the batch read "which of these blocks sit in which
 // cluster, as far as the caller may see":
 //

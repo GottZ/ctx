@@ -284,7 +284,10 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 	limit := clamp(a.Limit, 10, 1, 20)
 	// grantedBlockIDs nil (T40a): the chat-tool read path is NOT live-wired for
 	// block grants in T40a (its grant resolution is a later wave) — nil ⇒ no-op.
-	previews, err := store.SearchBlocks(ctx, ex.pool, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil, nil, nil)
+	// cluster nil (C6): the chat tool has no facet argument — a model that cannot
+	// see the graph surfaces has no way to learn a handle, so exposing one here
+	// would be a knob nothing can turn.
+	previews, err := store.SearchBlocks(ctx, ex.pool, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil, nil, nil, nil)
 	if err != nil {
 		return errOutcome("search failed")
 	}

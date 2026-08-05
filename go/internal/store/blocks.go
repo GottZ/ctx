@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/clustersql"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -917,14 +918,54 @@ type SearchCursor struct {
 // browseable; only retrieval ranks them out). A client-side filter over
 // paginated lists would be functionally wrong at the 1M+/10k-issues target
 // scale (knowledge browsing would page through issue pages).
-func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string, types []string, typesExclude []string) ([]BlockPreview, error) {
+//
+// cluster (C6, design/03 §4.8) is the optional `cluster:<handle>` facet: nil or
+// empty = no restriction. The caller is responsible for the FORM check (a
+// malformed handle is a 400 before this call, never a 22P02 from the cast) and
+// for the cluster.facet_enabled gate — this layer only binds the resolution.
+func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string, types []string, typesExclude []string, cluster *string) ([]BlockPreview, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
+	sql, args := searchBlocksSQL(searchParams{
+		Query: query, ReadScopes: readScopes, Category: category, Tags: tags,
+		Limit: limit, Compact: compact, After: after, GrantedBlockIDs: grantedBlockIDs,
+		Types: types, TypesExclude: typesExclude, Cluster: cluster,
+	})
+	return runSearchBlocks(ctx, pool, sql, args, compact)
+}
+
+// searchParams is the input of the statement builder. It exists so the §6.6
+// plan gate can EXPLAIN the very statement production runs instead of a
+// hand-copied approximation of it — a copy would drift and the gate would then
+// measure the copy.
+type searchParams struct {
+	Query           string
+	ReadScopes      []string
+	Category        string
+	Tags            []string
+	Limit           int
+	Compact         bool
+	After           *SearchCursor
+	GrantedBlockIDs []string
+	Types           []string
+	TypesExclude    []string
+	Cluster         *string
+}
+
+// searchBlocksSQL composes the browse/FTS statement and its arguments. Pure —
+// no database, no context — which is what makes it explainable and testable.
+//
+//nolint:cyclop // one filter = one branch; the dynamic argIdx bookkeeping is the point and splitting it would hide the $-index discipline
+func searchBlocksSQL(p searchParams) (string, []any) {
+	query, readScopes, category, tags := p.Query, p.ReadScopes, p.Category, p.Tags
+	after, types, typesExclude := p.After, p.Types, p.TypesExclude
+	compact := p.Compact
+	grantedBlockIDs := p.GrantedBlockIDs
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
-	limit = ClampLimit(limit, 10, 50)
+	limit := ClampLimit(p.Limit, 10, 50)
 
 	// $1 stays readScopes and $2 stays the FTS query arg (the FTS orderBy
 	// hardcodes $2 — never shift it). The scope/grant OR-clause is NOT the first
@@ -970,6 +1011,21 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 	if len(typesExclude) > 0 {
 		whereClauses = append(whereClauses, fmt.Sprintf("NOT (type_name = ANY($%d::text[]))", argIdx))
 		args = append(args, typesExclude)
+		argIdx++
+	}
+
+	// Cluster facet (C6, design/03 §4.8): a SEMI-JOIN on the topic handle, never
+	// a materialised id list — the planner has to stay free to choose between a
+	// hash semi-join (mega cluster) and an index nested loop (selective cluster),
+	// §6.6. The subquery binds $1, the SAME read scopes the outer visibility
+	// clause binds, so the restriction is doubly fail-closed: membership is
+	// scope-filtered AND the outer visibility applies unchanged. An unresolvable
+	// handle yields zero rows here — indistinguishable from a resolvable one
+	// whose members are all invisible, which is the anti-oracle property (§5.7).
+	if p.Cluster != nil && *p.Cluster != "" {
+		whereClauses = append(whereClauses,
+			fmt.Sprintf("id IN (%s)", clustersql.TopicMemberSubquery(fmt.Sprintf("$%d", argIdx), "$1")))
+		args = append(args, *p.Cluster)
 		argIdx++
 	}
 
@@ -1031,11 +1087,16 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 	args = append(args, limit)
 	limitIdx := argIdx
 
-	sql := fmt.Sprintf(
+	return fmt.Sprintf(
 		`SELECT %s FROM context_blocks WHERE %s ORDER BY %s LIMIT $%d`,
 		selectFields, whereClause, orderBy, limitIdx,
-	)
+	), args
+}
 
+// runSearchBlocks executes a statement built by searchBlocksSQL and scans it
+// into the preview rows. Split from the builder purely so the builder stays
+// pure; the scan shape is unchanged.
+func runSearchBlocks(ctx context.Context, pool *pgxpool.Pool, sql string, args []any, compact bool) ([]BlockPreview, error) {
 	rows, err := pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: search blocks: %w", err)

@@ -125,7 +125,7 @@ func TestTenantScopes_Integration(t *testing.T) {
 		}
 
 		// SearchBlocks gated on A's scopes must NOT surface B's block.
-		gatedByA, err := store.SearchBlocks(ctx, pool, "", aScopes, "", nil, 50, true, nil, nil, nil, nil)
+		gatedByA, err := store.SearchBlocks(ctx, pool, "", aScopes, "", nil, 50, true, nil, nil, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("SearchBlocks(A scopes): %v", err)
 		}
@@ -140,7 +140,7 @@ func TestTenantScopes_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("TenantScopes(B): %v", err)
 		}
-		gatedByB, err := store.SearchBlocks(ctx, pool, "", bScopes, "", nil, 50, true, nil, nil, nil, nil)
+		gatedByB, err := store.SearchBlocks(ctx, pool, "", bScopes, "", nil, 50, true, nil, nil, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("SearchBlocks(B scopes): %v", err)
 		}

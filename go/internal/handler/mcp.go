@@ -86,6 +86,10 @@ type searchInput struct {
 	Category string   `json:"category,omitempty" jsonschema:"filter by category"`
 	Tags     []string `json:"tags,omitempty" jsonschema:"filter by tags"`
 	Limit    int      `json:"limit,omitempty" jsonschema:"max results (default 10)"`
+	// Cluster is the C6 topic facet — a FIELD on the existing tool, not an
+	// eighth tool: a new tool raises the selection load of every MCP client,
+	// an optional argument on a known one does not (design/03 §4.8).
+	Cluster string `json:"cluster,omitempty" jsonschema:"restrict to one topic by its stable handle (from the graph surfaces)"`
 }
 
 type getInput struct {
@@ -355,8 +359,21 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 			limit = 10
 		}
 
+		// C6 facet, same three rules as the REST handler: flag first (off ⇒ the
+		// field does not exist), then form (before the uuid cast), never an
+		// existence check. cfg.Cfg is nil in tests without config wiring — a nil
+		// there means "not configured", which reads as off, the fail-closed
+		// direction for a dark feature.
+		var clusterFacet *string
+		if cfg.Cfg != nil && cfg.Cfg.SnapshotForRequest(ctx).ClusterOps.FacetEnabled && input.Cluster != "" {
+			if !fullUUIDRe.MatchString(input.Cluster) {
+				return errResult("cluster must be a full UUID"), nil, nil
+			}
+			clusterFacet = &input.Cluster
+		}
+
 		grants := resolveGrants(ctx, cfg.Pool, ar)
-		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil, grants, nil, nil)
+		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil, grants, nil, nil, clusterFacet)
 		if err != nil {
 			return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
 		}

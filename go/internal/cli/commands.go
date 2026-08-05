@@ -243,12 +243,18 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 
 func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
-		Use:     "search [category] [query:text] [tags:a,b] [limit:N] [compact:false]",
+		Use:     "search [category] [query:text] [tags:a,b] [cluster:handle] [limit:N] [compact:false]",
 		Aliases: []string{"browse", "b"},
 		Short:   "Compact search (no LLM)",
-		Long:    "Search the context store with compact results. Key-value args for filtering.",
+		Long: "Search the context store with compact results. Key-value args for filtering.\n\n" +
+			"cluster:<handle> restricts the result to ONE topic of the cluster map — the\n" +
+			"stable handle the graph surfaces emit (`topic` on /api/graph/overview and on\n" +
+			"the ego annotation), never an internal id. The facet is server-gated\n" +
+			"(cluster.facet_enabled); while it is off the argument is ignored, so the\n" +
+			"answer is an ordinary unfiltered search.",
 		Example: `  ctx search learnings query:prompt
-  ctx search decisions query:guard tags:security limit:5`,
+  ctx search decisions query:guard tags:security limit:5
+  ctx search cluster:019c9629-0000-7000-9000-00000000a001`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient()
 			if err != nil {
@@ -266,6 +272,12 @@ func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 					body["query"] = strings.TrimPrefix(arg, "query:")
 				case strings.HasPrefix(arg, "tags:"):
 					body["tags"] = strings.Split(strings.TrimPrefix(arg, "tags:"), ",")
+				case strings.HasPrefix(arg, "cluster:"):
+					// C6 topic facet. Parsed unconditionally — the CLI cannot know
+					// the server's cluster.facet_enabled state, and probing for it
+					// would be a round trip per search. The server decides: gate off
+					// ⇒ field ignored, malformed handle ⇒ 400 with a plain reason.
+					body["cluster"] = strings.TrimPrefix(arg, "cluster:")
 				case strings.HasPrefix(arg, "limit:"):
 					if n, err := strconv.Atoi(strings.TrimPrefix(arg, "limit:")); err == nil {
 						body["limit"] = n
