@@ -891,6 +891,78 @@ func overviewGlobalSQLForProbe() func() {
 	return func() { overlapGlobalSQL, overlapScopedSQL = prevG, prevS }
 }
 
+// ── K2-3: an empty node cut in front of living topics is a config anomaly, not
+// an instruction to erase the partition's identity layer.
+func TestW3EmptyNodeCutDoesNotRetireThePartition(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	const retention = 45 * 24 * time.Hour
+
+	ids := w3Blocks(t, pool, "empty", 50000, 3)
+	for i := 0; i < len(ids)-1; i++ {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, raw_confidence, scope)
+			VALUES ($1::uuid, $2::uuid, 'topical', 0.9, 0.9, 'empty')`, ids[i], ids[i+1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opts := Options{Resolution: 1.0, VisibleTypes: w3Types, OverviewTypes: w3Types, TombstoneRetention: retention}
+	if _, err := Rebuild(ctx, pool, opts); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	topic := w3TopicOf(t, pool, "empty", ids[0])
+
+	// The anomaly: BOTH allowlists are non-empty (so the loud wiring check
+	// passes) but they do not intersect — the node cut collapses to zero rows.
+	broken := opts
+	broken.OverviewTypes = []string{"issue"}
+	st, err := Rebuild(ctx, pool, broken)
+	if err != nil {
+		t.Fatalf("empty cut returned an error instead of a fail-safe skip: %v", err)
+	}
+	if !st.Skipped || st.SkipReason != "empty-node-cut" {
+		t.Fatalf("empty cut: skipped=%v reason=%q, want true/empty-node-cut", st.Skipped, st.SkipReason)
+	}
+	var retired, nodes int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph_cluster_topic WHERE retired_at IS NOT NULL`).Scan(&retired); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph_cluster_node`).Scan(&nodes); err != nil {
+		t.Fatal(err)
+	}
+	if retired != 0 || nodes == 0 {
+		t.Fatalf("the empty cut retired %d topics and left %d node rows — want 0 retired, map intact", retired, nodes)
+	}
+	if got := w3TopicOf(t, pool, "empty", ids[0]); got != topic {
+		t.Fatalf("identity changed across the frozen run: %s → %s", topic, got)
+	}
+
+	// The stamp has to be writable — an unstampable skip is an INVISIBLE
+	// freeze, which is the state migration 123 abolished (migration 126 adds
+	// the vocabulary entry).
+	if err := StampAttempt(ctx, pool, nil, st.SkipReason, st.CandidateCount, time.Now()); err != nil {
+		t.Fatalf("stamping the empty-cut skip: %v — chk_gom_skip_reason rejects the value", err)
+	}
+
+	// Control: a partition WITHOUT identities must still persist its honest
+	// empty map instead of freezing forever.
+	t.Run("a partition with no identities still persists an empty map", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `DELETE FROM graph_cluster_node`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM graph_cluster_topic`); err != nil {
+			t.Fatal(err)
+		}
+		st, err := Rebuild(ctx, pool, broken)
+		if err != nil {
+			t.Fatalf("empty cut on a virgin partition: %v", err)
+		}
+		if st.Skipped {
+			t.Fatalf("a partition without identities must not freeze: reason=%q", st.SkipReason)
+		}
+	})
+}
+
 // ── G12 (Amendment A01-5): a frozen map keeps its identities. The node cap is
 // the only freeze reason that exists today; the TODO in Rebuild names the two
 // that Achse 04 adds.

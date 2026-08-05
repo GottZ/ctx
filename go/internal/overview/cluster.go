@@ -279,6 +279,38 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	// W-A: tally BEFORE the cap check — the skipped run is exactly the case
 	// where the map matters (how far over max_nodes is this partition?).
 	candidates := tallyScopes(nodeScopes)
+	// EMPTY CUT WITH LIVING IDENTITIES (review K2-3). loadNodes returning zero
+	// rows is reachable purely through configuration: the node set is
+	// visible ∩ overview.include, and an empty intersection compiles to
+	// `type_name = ANY('{}')` — a deterministic FALSE (visibility.go). Without
+	// this guard persist would run on an empty input and the identity phase's
+	// death statement would retire EVERY topic of the partition, starting the
+	// retention clock on all of them; one mistyped allowlist would erase the
+	// corpus' identity, and the map would be empty rather than stale.
+	//
+	// The guard is conditional on purpose. A partition that has no identities
+	// yet (fresh deploy, or genuinely never built) must still persist — that
+	// writes the honest empty map and its meta row. Only an empty cut IN FRONT
+	// OF living topics is the anomaly, and it is treated exactly like the node
+	// cap: return before persist, keep the last good map, stamp the reason.
+	//
+	// Named trade-off: a partition whose last block is legitimately archived
+	// now FREEZES instead of emptying itself, and its topics have to be retired
+	// by an explicit action. That is the deliberate direction — a visible
+	// freeze (skip_reason in graph_overview_meta) is recoverable, a silently
+	// erased identity layer is not.
+	if len(nodeUUIDs) == 0 {
+		live, err := partitionHasLiveTopics(ctx, pool, opts.ScopeFilter)
+		if err != nil {
+			return Stats{}, err
+		}
+		if live {
+			slog.Warn("overview: rebuild skipped — the node cut is empty while the partition still has living topics (check overview.include ∩ visible types)",
+				"scope_filter", opts.ScopeFilter)
+			return Stats{Skipped: true, SkipReason: "empty-node-cut", CandidateCount: candidates}, nil
+		}
+	}
+
 	// A FROZEN MAP KEEPS ITS IDENTITIES (W3-G12, amendment A01-5). The skip
 	// returns BEFORE persist, so no topic is touched: no last_seen_at moves,
 	// nothing retires, graph_cluster_node stays as it was and the route keeps
@@ -831,6 +863,23 @@ func insertMembers(ctx context.Context, tx pgx.Tx, cl clustering, opts Options,
 		}
 	}
 	return clusterSet, nil
+}
+
+// partitionHasLiveTopics reports whether this run's partition still carries at
+// least one non-retired topic. It is the discriminator of the empty-cut guard
+// (review K2-3) and deliberately an EXISTS, not a count: the answer is binary
+// and the index-free path over a small table should stop at the first row.
+func partitionHasLiveTopics(ctx context.Context, pool *pgxpool.Pool, scopeFilter []string) (bool, error) {
+	const q = `SELECT EXISTS (SELECT 1 FROM graph_cluster_topic WHERE retired_at IS NULL`
+	sql, args := q+`)`, []any(nil)
+	if len(scopeFilter) > 0 {
+		sql, args = q+` AND scope = ANY($1))`, []any{scopeFilter}
+	}
+	var live bool
+	if err := pool.QueryRow(ctx, sql, args...).Scan(&live); err != nil {
+		return false, fmt.Errorf("overview: probing live topics of %v: %w", scopeFilter, err)
+	}
+	return live, nil
 }
 
 // reachableNodesTemplate counts the (cluster, scope) groups the node
