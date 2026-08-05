@@ -173,15 +173,42 @@ func GraphOverview(ctx context.Context, pool *pgxpool.Pool, p OverviewParams, re
 // read scopes span both partitions — the shared-scope case is exactly that —
 // would otherwise get a silently halved map from the fail-closed JOIN.
 //
-// After the rollout the probe is a constant false and costs one index lookup.
+// K2-5 — WHY THIS IS A DIFFERENCE OF TWO COUNTS AND NOT AN EXISTS.
+//
+// The obvious form, `EXISTS (... AND topic_id IS NULL)`, has no index that can
+// serve it: graph_cluster_node carries idx_gcn_scope (scope) over all rows and
+// uq_gcn_scope_topic (scope, topic_id) WHERE topic_id IS NOT NULL — nothing
+// selects the NULL side. The planner therefore falls back to a sequential scan
+// over the whole table, once per REQUEST, on a read path whose entire design
+// premise is "bounded by the cluster count, never by corpus size".
+//
+// The difference of two counts is served by the two indexes that already exist:
+// the total over idx_gcn_scope, the assigned total over the partial unique
+// index. Both are index-only scans, both are bounded by the node rows of the
+// caller's scopes, and a difference greater than zero says exactly what the
+// EXISTS said — at least one readable row has no identity yet.
+//
+// The alternative would be a partial index on the NULL side, i.e. a new
+// migration for a predicate that is permanently false after the rollout. Not
+// worth a schema change; if a later wave wants the short-circuit anyway, that
+// is a lead decision about migration numbers, not a read-path detail.
+//
+// After the rollout both counts are equal and the probe is a constant false.
 func overviewLegacy(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (bool, error) {
 	var legacy bool
-	err := pool.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM graph_cluster_node n
-		                WHERE `+clustersql.NodeVisible("n", "$1")+` AND n.topic_id IS NULL)`,
-		readScopes).Scan(&legacy)
+	err := pool.QueryRow(ctx, overviewLegacyProbeSQL, readScopes).Scan(&legacy)
 	return legacy, err
 }
+
+// overviewLegacyProbeSQL is a package var so the gates can run their EXPLAIN
+// assertion against the very string production uses. The scope conjunction
+// binds clustersql.NodeVisible like every other cluster read — one site per
+// table, no inline copies.
+var overviewLegacyProbeSQL = `
+	SELECT (SELECT count(*) FROM graph_cluster_node n
+	         WHERE ` + clustersql.NodeVisible("n", "$1") + `)
+	     > (SELECT count(*) FROM graph_cluster_node n
+	         WHERE ` + clustersql.NodeVisible("n", "$1") + ` AND n.topic_id IS NOT NULL)`
 
 // overviewNodesTopicSQL is the identity path. With one topic per (cluster,
 // scope) — and uq_gcn_scope_topic enforcing it — there is exactly ONE node row

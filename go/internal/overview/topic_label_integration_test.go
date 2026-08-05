@@ -27,11 +27,18 @@ import (
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
-// w5Tag puts one tag on every listed block.
+// w5Tag puts one tag on every listed block AND classifies them internal.
+//
+// The classification is not incidental: context_blocks.sensitivity defaults to
+// 'credentials' (migration 055, fail-closed), and since K2-3 the tag rung of
+// the cascade reads only internal/public blocks. A fixture relying on the
+// column default would silently exercise the CATEGORY rung while claiming to
+// exercise the tag rung.
 func w5Tag(t *testing.T, pool *pgxpool.Pool, ids []string, tag string) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(),
-		`UPDATE context_blocks SET tags = ARRAY[$2::text] WHERE id = ANY($1::uuid[])`, ids, tag); err != nil {
+		`UPDATE context_blocks SET tags = ARRAY[$2::text], sensitivity = 'internal'
+		  WHERE id = ANY($1::uuid[])`, ids, tag); err != nil {
 		t.Fatalf("w5Tag(%s): %v", tag, err)
 	}
 }
@@ -285,7 +292,8 @@ func TestW5FallbackLabel(t *testing.T) {
 		const scope = "w5g4"
 		ids := w3Blocks(t, pool, scope, 10900, 4)
 		if _, err := pool.Exec(context.Background(),
-			`UPDATE context_blocks SET tags = ARRAY['beta','alpha','gamma'] WHERE id = ANY($1::uuid[])`, ids); err != nil {
+			`UPDATE context_blocks SET tags = ARRAY['beta','alpha','gamma'], sensitivity = 'internal'
+			  WHERE id = ANY($1::uuid[])`, ids); err != nil {
 			t.Fatalf("seed tags: %v", err)
 		}
 		w3Run(t, pool, scope, retention, w3Group{members: ids})
@@ -441,6 +449,37 @@ func TestW5FallbackLabel(t *testing.T) {
 		w3Run(t, pool, scope, retention, w3Group{members: ids})
 		if got := w5LabelOf(t, pool, scope, ids[0]); got.label != "learnings" {
 			t.Fatalf("label = %q, want the category rung %q", got.label, "learnings")
+		}
+	})
+
+	// K2-3: the fallback is display text nobody screened. Tags are free-form
+	// user input, and unlike the LLM half this path has no scan and no echo
+	// gate — so the tag rung reads only blocks classified internal/public.
+	t.Run("K2-3 a tag on a credentials core block never reaches the label", func(t *testing.T) {
+		const scope = "w5sens"
+		ids := w3Blocks(t, pool, scope, 11800, 2)
+		w5Tag(t, pool, ids, "AKIA-LOOKING-TAG")
+		if _, err := pool.Exec(context.Background(),
+			`UPDATE context_blocks SET sensitivity = 'credentials' WHERE id = ANY($1::uuid[])`, ids); err != nil {
+			t.Fatalf("classify: %v", err)
+		}
+		w3Run(t, pool, scope, retention, w3Group{members: ids})
+
+		got := w5LabelOf(t, pool, scope, ids[0])
+		if strings.Contains(got.label, "AKIA-LOOKING-TAG") {
+			t.Fatalf("a credentials block's tag reached the map label: %q", got.label)
+		}
+		if got.label != "learnings" {
+			t.Fatalf("label = %q, want the category rung", got.label)
+		}
+		// Control: the same tag on an INTERNAL block does name the topic —
+		// otherwise the gate would pass by disabling the feature.
+		const okScope = "w5sensok"
+		okIDs := w3Blocks(t, pool, okScope, 11900, 2)
+		w5Tag(t, pool, okIDs, "AKIA-LOOKING-TAG")
+		w3Run(t, pool, okScope, retention, w3Group{members: okIDs})
+		if got := w5LabelOf(t, pool, okScope, okIDs[0]); got.label != "AKIA-LOOKING-TAG" {
+			t.Fatalf("internal control: label = %q, want the tag", got.label)
 		}
 	})
 

@@ -440,11 +440,19 @@ func labelOne(ctx context.Context, d Deps, c candidate, st *Stats) time.Duration
 	took := time.Since(wire)
 	cancel()
 	if err != nil {
+		// K2-4: a PREEMPT is not an attempt. The background lease preempt and a
+		// cancelled context both mean "the system took the slot back", not "the
+		// model could not name this topic" — counting them against the
+		// three-strikes budget would let three busy ticks lock a topic out of
+		// the selection until its core happens to drift. The attempt counter
+		// exists to stop a topic the model keeps FAILING on; it must not
+		// measure how busy the GPU was.
 		if llm.IsAdmissionError(err) || errors.Is(err, context.Canceled) {
 			st.Aborted++
-		} else {
-			st.Failed++
+			slog.Warn("topiclabel: label call preempted", "error", err, "topic", c.topicID, "scope", c.scope)
+			return took
 		}
+		st.Failed++
 		slog.Warn("topiclabel: label call failed", "error", err, "topic", c.topicID, "scope", c.scope)
 		d.exec(ctx, failSQL, c.topicID)
 		return took
@@ -455,8 +463,16 @@ func labelOne(ctx context.Context, d Deps, c candidate, st *Stats) time.Duration
 		var detail string
 		rej, detail = screenLabel(label, newEchoIndex(sensitive))
 		if rej != rejectNone {
-			// The fragment is logged, the LABEL is not: a rejected name is
-			// exactly the string suspected of carrying substance.
+			// K2-2: NEITHER the label NOR the matched fragment is logged. The
+			// scan reports its RULE NAME (a closed, code-owned vocabulary); the
+			// echo gate reports a fingerprint — rune length plus a short
+			// sha256 prefix — because the fragment it matched is by definition
+			// the string suspected of carrying substance out of a
+			// credentials-classified title, and a log file is read by a wider
+			// audience than the block is.
+			if rej == rejectEcho {
+				detail = echoFingerprint(detail)
+			}
 			slog.Warn("topiclabel: label rejected", "reason", string(rej), "detail", detail,
 				"topic", c.topicID, "scope", c.scope)
 		}

@@ -370,26 +370,33 @@ type clusterMapStatus struct {
 // "off". A pipeline below its complexity threshold produces no log lines and no
 // labels, and without this field that is indistinguishable from a broken one.
 //
-// RejectedScan/RejectedEcho are the visible rejection counters decision E4-02
-// requires — the label hardening must never be a silent filter. They count, they
-// do not carry the rejected text: a name suspected of echoing a credentials
-// title is exactly the string not to put on a status surface.
+// The three Rejected* counters are the visible rejection accounting decision
+// E4-02 requires — the label hardening must never be a silent filter, and a log
+// line alone is not visibility (K3): a log has to be searched, a status field is
+// read. All three classes are separate on purpose, because they mean different
+// things operationally: shape = the model does not follow the answer contract
+// (a prompt or model problem), scan = a secret survived into a name, echo = a
+// name repeats substance out of a sensitive title.
+//
+// They COUNT, they never carry the rejected text: a name suspected of echoing a
+// credentials title is exactly the string not to put on a status surface.
 type labelingStatus struct {
-	State        string     `json:"state"`
-	LastRunAt    *time.Time `json:"last_run_at,omitempty"`
-	LivingTopics int        `json:"living_topics"`
-	MinTopics    int        `json:"min_topics"`
-	Selected     int        `json:"selected"`
-	Labeled      int        `json:"labeled"`
-	Failed       int        `json:"failed"`
-	Quiesced     int        `json:"quiesced"`
-	RejectedScan int        `json:"rejected_scan"`
-	RejectedEcho int        `json:"rejected_echo"`
-	Yielded      int        `json:"yielded"`
-	Overrun      int        `json:"overrun"`
-	Aborted      int        `json:"aborted"`
-	LatencyP50Ms int64      `json:"latency_p50_ms"`
-	LatencyP95Ms int64      `json:"latency_p95_ms"`
+	State         string     `json:"state"`
+	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
+	LivingTopics  int        `json:"living_topics"`
+	MinTopics     int        `json:"min_topics"`
+	Selected      int        `json:"selected"`
+	Labeled       int        `json:"labeled"`
+	Failed        int        `json:"failed"`
+	Quiesced      int        `json:"quiesced"`
+	RejectedScan  int        `json:"rejected_scan"`
+	RejectedEcho  int        `json:"rejected_echo"`
+	RejectedShape int        `json:"rejected_shape"`
+	Yielded       int        `json:"yielded"`
+	Overrun       int        `json:"overrun"`
+	Aborted       int        `json:"aborted"`
+	LatencyP50Ms  int64      `json:"latency_p50_ms"`
+	LatencyP95Ms  int64      `json:"latency_p95_ms"`
 }
 
 // buildLabelingStatus renders the last tick. Returns nil before the first one.
@@ -400,21 +407,22 @@ func buildLabelingStatus(src topicLabelSource) *labelingStatus {
 	}
 	ran := at
 	return &labelingStatus{
-		State:        st.State,
-		LastRunAt:    &ran,
-		LivingTopics: st.LivingTopics,
-		MinTopics:    st.MinTopics,
-		Selected:     st.Selected,
-		Labeled:      st.Labeled,
-		Failed:       st.Failed,
-		Quiesced:     st.Quiesced,
-		RejectedScan: st.RejectedScan,
-		RejectedEcho: st.RejectedEcho,
-		Yielded:      st.Yielded,
-		Overrun:      st.Overrun,
-		Aborted:      st.Aborted,
-		LatencyP50Ms: st.LatencyP50Ms,
-		LatencyP95Ms: st.LatencyP95Ms,
+		State:         st.State,
+		LastRunAt:     &ran,
+		LivingTopics:  st.LivingTopics,
+		MinTopics:     st.MinTopics,
+		Selected:      st.Selected,
+		Labeled:       st.Labeled,
+		Failed:        st.Failed,
+		Quiesced:      st.Quiesced,
+		RejectedScan:  st.RejectedScan,
+		RejectedEcho:  st.RejectedEcho,
+		RejectedShape: st.RejectedShape,
+		Yielded:       st.Yielded,
+		Overrun:       st.Overrun,
+		Aborted:       st.Aborted,
+		LatencyP50Ms:  st.LatencyP50Ms,
+		LatencyP95Ms:  st.LatencyP95Ms,
 	}
 }
 

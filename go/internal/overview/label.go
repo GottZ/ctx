@@ -89,10 +89,26 @@ func sqlStage(expr string) string {
 // scope-pure by I2 — and stands there anyway: the label goes on the wire in
 // W7, so a scope leak here would be a content leak, and this is the line a
 // negative probe removes to go red.
+//
+// b.sensitivity IN ('internal','public') is the K2-3 restriction. The fallback
+// label is display text on the map and a tag is free-form user input that no
+// pipeline ever screened: the LLM half runs every finished name through
+// sensitivity.Scan AND the echo gate, the deterministic half has neither, so it
+// must not read from blocks classified personal or credentials in the first
+// place. It is a FILTER, not a fail-closed gate — a core made entirely of
+// sensitive blocks simply falls through to the category rung, whose vocabulary
+// is a closed, operator-defined set.
+//
+// Named consequence: context_blocks.sensitivity defaults to 'credentials'
+// (migration 055, fail-closed), so on a deployment that has not run a
+// sensitivity audit the tag rung fires rarely and most topics are named by
+// their categories. That is the conservative direction and it is visible —
+// not a silent degradation.
 var fallbackTagStage = `(SELECT string_agg(x.tg, ' · ' ORDER BY x.cnt DESC, x.tg)
                  FROM (SELECT ` + sqlNorm("tg.tg") + ` AS tg, count(*) AS cnt
                          FROM unnest(n.core_blocks) AS cb
                          JOIN context_blocks b ON b.id = cb AND b.scope = n.scope
+                          AND b.sensitivity IN ('internal','public')
                          CROSS JOIN LATERAL unnest(b.tags) AS tg(tg)
                         WHERE ` + sqlNorm("tg.tg") + ` <> ''
                         GROUP BY 1
@@ -108,7 +124,10 @@ var fallbackCategoryStage = `(SELECT string_agg(y.cat, ' · ' ORDER BY y.cnt DES
                         ORDER BY (value)::int DESC, 1
                         LIMIT 3) y)`
 
-// fallbackTitleStage is today's map text.
+// fallbackTitleStage is today's map text — and repr_title was already on the
+// wire before this axis existed, so it needs no sensitivity filter of its own:
+// withholding it here would hide nothing the same response does not already
+// carry.
 var fallbackTitleStage = `n.repr_title`
 
 // fallbackLabelExpr is the cascade itself.
@@ -179,6 +198,7 @@ var fallbackTagStageLegacy = `(SELECT string_agg(x.tg, ' · ' ORDER BY x.cnt DES
                  FROM (SELECT tg.tg, count(*) AS cnt
                          FROM unnest(n.core_blocks) AS cb
                          JOIN context_blocks b ON b.id = cb AND b.scope = n.scope
+                          AND b.sensitivity IN ('internal','public')
                          CROSS JOIN LATERAL unnest(b.tags) AS tg(tg)
                         WHERE btrim(tg.tg) <> ''
                         GROUP BY tg.tg

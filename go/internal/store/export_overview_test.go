@@ -26,3 +26,16 @@ func PatchOverviewNodesTopicSQL(sql string) (previous string, restore func()) {
 // OverviewNodesTopicSQL returns the current identity-path query, so a probe can
 // patch it by substitution instead of by retyping it.
 func OverviewNodesTopicSQL() string { return overviewNodesTopicSQL }
+
+// OverviewLegacyProbeSQL is the K2-5 legacy probe, so its EXPLAIN gate runs
+// against the very string production uses instead of a copy.
+func OverviewLegacyProbeSQL() string { return overviewLegacyProbeSQL }
+
+// OverviewLegacyProbeSeqScanSQL is the pre-K2-5 shape — the EXISTS over
+// topic_id IS NULL that no index can serve. Test use only.
+const OverviewLegacyProbeSeqScanSQL = `
+	SELECT EXISTS (SELECT 1 FROM graph_cluster_node n
+	                WHERE n.scope = ANY($1::text[]) AND n.topic_id IS NULL)`
+
+// OverviewLegacyForTest exposes the legacy probe to the gates in store_test.
+var OverviewLegacyForTest = overviewLegacy

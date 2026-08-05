@@ -124,6 +124,119 @@ func TestEchoGate(t *testing.T) {
 	})
 }
 
+// K2-1 — the four evasion CLASSES the first version of the gate let through.
+// None of them needs an attacker: they are the shapes a careless summariser
+// produces by itself.
+func TestEchoGateEvasionClasses(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		title   string
+		label   string
+		because string
+	}{
+		{
+			name:    "reordered bigram",
+			title:   "Hetzner Storagebox rotieren",
+			label:   "Storagebox Hetzner",
+			because: "an ordered key called the same pair a different string — the cheapest evasion there is",
+		},
+		{
+			name:    "lone token of seven runes",
+			title:   "vaultkey rotation runbook",
+			label:   "Betrieb vaultkey",
+			because: "the old 12-rune bar left the whole middle of the identifier range uncovered",
+		},
+		{
+			name:    "NFD against NFC",
+			title:   "Passwörter der Kältetechnik", // combining diaeresis
+			label:   "Passwörter Kältetechnik",       // precomposed
+			because: "the same text in two normalisation forms compared unequal byte-wise",
+		},
+		{
+			name:    "CJK, no word boundaries",
+			title:   "本番環境の認証情報",
+			label:   "本番環境の認証情報",
+			because: "a CJK title is ONE token, so neither the bigram nor the long-token rule could ever fire",
+		},
+		{
+			name:    "full-width latin",
+			title:   "grafana1 admin token",
+			label:   "ｇｒａｆａｎａ１ Betrieb",
+			because: "NFKC folds full-width forms onto their ASCII equivalents",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idx := newEchoIndex([]string{tc.title})
+			rej, frag := screenLabel(tc.label, idx)
+			if rej != rejectEcho {
+				t.Fatalf("label %q passed the gate against title %q (rejection %q) — %s",
+					tc.label, tc.title, rej, tc.because)
+			}
+			if frag == "" {
+				t.Fatal("no fragment reported — the rejection would not be accountable")
+			}
+		})
+	}
+
+	// NEGATIVE CONTROL: the widened gate must not become a vocabulary ban.
+	// Every one of these is an abstract name over the same subject area, and
+	// every one has to pass — a gate that rejects them disables the feature
+	// instead of guarding it.
+	t.Run("harmless abstractions stay permeable", func(t *testing.T) {
+		idx := newEchoIndex([]string{
+			"Hetzner Storagebox rotieren",
+			"vaultkey rotation runbook",
+			"本番環境の認証情報",
+			"backup-runner-prod-01 SSH key",
+		})
+		for _, label := range []string{
+			"Backup-Betrieb",
+			"Schlüsselrotation und Zugriff",
+			"Infrastruktur-Wartung",
+			"Speicher und Sicherung",
+			"運用メモ", // CJK, unrelated
+			"Storage",
+		} {
+			if rej, frag := screenLabel(label, idx); rej != rejectNone {
+				t.Fatalf("abstract label %q rejected as %q (fragment %q) — the gate is a vocabulary ban",
+					label, rej, frag)
+			}
+		}
+	})
+
+	// A CJK token shorter than the containment bar is vocabulary, not substance.
+	t.Run("a two-character CJK token is below the containment bar", func(t *testing.T) {
+		idx := newEchoIndex([]string{"環境"})
+		if rej, _ := screenLabel("環境の整理", idx); rej != rejectNone {
+			t.Fatalf("a 2-rune CJK token fired: %q", rej)
+		}
+	})
+}
+
+// K2-2 — a rejected fragment is accounted for, never reproduced.
+func TestEchoFingerprintCarriesNoText(t *testing.T) {
+	const secretish = "Hetzner Storagebox"
+	fp := echoFingerprint(secretish)
+	if strings.Contains(fp, "Hetzner") || strings.Contains(fp, "Storagebox") {
+		t.Fatalf("fingerprint reproduces the fragment: %q", fp)
+	}
+	if !strings.HasPrefix(fp, "len=18 sha256=") {
+		t.Fatalf("fingerprint = %q, want a rune length plus a sha256 prefix", fp)
+	}
+	// Stable: the same fragment fingerprints identically, which is what makes
+	// "the same rejection over and over" answerable from a log.
+	if echoFingerprint(secretish) != fp {
+		t.Fatal("fingerprint is not stable")
+	}
+	if echoFingerprint("") != "" {
+		t.Fatal("empty fragment must fingerprint to nothing")
+	}
+	// Rune length, not byte length — an umlaut must not inflate the number.
+	if got := echoFingerprint("Kältetechnik"); !strings.HasPrefix(got, "len=12 ") {
+		t.Fatalf("fingerprint = %q, want len=12 (runes, not bytes)", got)
+	}
+}
+
 // B4 — a title that tries to close the guard must not reach the model intact.
 func TestPromptNeutralizesAnInjectedTitle(t *testing.T) {
 	nonce := promptguard.NewNonce()

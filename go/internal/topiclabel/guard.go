@@ -1,10 +1,15 @@
 package topiclabel
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/sensitivity"
@@ -102,12 +107,25 @@ const echoMinTokenRunes = 3
 const echoContentTokenRunes = 6
 
 // echoLongTokenRunes is the length at which a SINGLE word is substantial on its
-// own — a hostname, an identifier, a key name. Below it a lone word match is
-// far more likely to be vocabulary the two texts simply share.
-const echoLongTokenRunes = 12
+// own — a hostname, an identifier, a key name, a product name.
+//
+// Lowered from 12 to 7 (K2-1). Twelve was chosen to avoid false positives on
+// shared vocabulary, but it left the whole middle of the identifier range
+// uncovered: "vaultkey", "pgbouncer", "grafana1" are all seven to nine runes and
+// all far more likely to be a name copied out of a title than a word two texts
+// happen to share. Seven is the shortest length at which that stays true for the
+// languages this corpus is written in; below it German and English common nouns
+// dominate.
+const echoLongTokenRunes = 7
 
-// echoIndex is the deterministic echo gate: the normalised word bigrams and
-// long single words of the titles of the CREDENTIALS/PERSONAL core blocks.
+// echoCJKMinRunes is the containment threshold for scripts WITHOUT word
+// separators. Three Han characters carry roughly the information of an English
+// content word, so the bar sits where echoContentTokenRunes sits for Latin.
+const echoCJKMinRunes = 3
+
+// echoIndex is the deterministic echo gate: the normalised word bigrams, long
+// single words and separator-less (CJK) tokens of the titles of the
+// CREDENTIALS/PERSONAL core blocks.
 //
 // Deterministic on purpose. The thing being guarded is the output of a model,
 // and guarding a model's output with another model would only move the failure
@@ -115,17 +133,45 @@ const echoLongTokenRunes = 12
 type echoIndex struct {
 	grams map[string]struct{}
 	longs map[string]struct{}
+	cjk   []string
 }
 
-// normalizeEcho lowercases and reduces to word tokens: everything that is not a
-// letter or a digit is a separator. That is what makes the gate robust against
-// the obvious evasions of the SUMMARISER (not of an attacker — the model is not
-// adversarial here, it is careless): punctuation, casing and separators differ
-// between a title and a label built from it, the words do not.
+// normalizeEcho reduces a string to comparable word tokens.
+//
+// NFKC FIRST, then case folding, then tokenisation (K2-1). The order matters
+// and so does the form: a title and the label a model builds from it routinely
+// differ in Unicode normalisation alone — "Straße" vs "Strasse" stays
+// distinct (that is a real spelling difference), but "é" vs "é",
+// a full-width "ｋｅｙ" vs "key" and a ligature "ﬁ" vs "fi" are the SAME text
+// rendered differently, and a byte comparison would call them different. NFKC
+// collapses exactly those. Without it the gate is trivially evaded by the
+// SUMMARISER — not by an attacker; the model is not adversarial here, it is
+// careless — simply by echoing a title in a different normalisation form.
+//
+// Everything that is not a letter or a digit separates tokens: punctuation,
+// casing and separators differ between a title and a label built from it, the
+// words do not.
 func normalizeEcho(s string) []string {
-	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+	s = strings.ToLower(norm.NFKC.String(s))
+	return strings.FieldsFunc(s, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
+}
+
+// hasNoWordBoundaries reports whether a token is written in a script that does
+// not separate words — Han, Hiragana, Katakana, Hangul. Such a title tokenises
+// into ONE token, so neither the bigram nor the long-token rule can ever fire on
+// it, and a full echo would pass unseen. Deliberately narrow: substring
+// containment on Latin would reject "backup" for "backups" and turn the gate
+// into a vocabulary ban.
+func hasNoWordBoundaries(tok string) bool {
+	for _, r := range tok {
+		if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) ||
+			unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // newEchoIndex builds the gate from the sensitive titles of one topic's core.
@@ -139,12 +185,27 @@ func newEchoIndex(titles []string) echoIndex {
 			if utf8.RuneCountInString(tok) >= echoLongTokenRunes {
 				idx.longs[tok] = struct{}{}
 			}
+			if hasNoWordBoundaries(tok) && utf8.RuneCountInString(tok) >= echoCJKMinRunes {
+				idx.cjk = append(idx.cjk, tok)
+			}
 			if i+1 < len(toks) && substantialPair(tok, toks[i+1]) {
-				idx.grams[tok+" "+toks[i+1]] = struct{}{}
+				idx.grams[gramKey(tok, toks[i+1])] = struct{}{}
 			}
 		}
 	}
 	return idx
+}
+
+// gramKey is the ORDER-FREE key of a two-word window (K2-1): the pair sorted,
+// not the pair as written. A summariser that reorders "Hetzner Storagebox" into
+// "Storagebox Hetzner" has echoed the same substance, and an ordered key would
+// have called that a different string — which is the cheapest possible evasion
+// and the one a careless model performs by accident.
+func gramKey(a, b string) string {
+	if a > b {
+		a, b = b, a
+	}
+	return a + " " + b
 }
 
 // substantialPair reports whether a two-word window carries substance: both
@@ -157,22 +218,41 @@ func substantialPair(a, b string) bool {
 	return na >= echoContentTokenRunes || nb >= echoContentTokenRunes
 }
 
-// hit reports the first substantial echo found in the label, and what it was —
-// the counter alone would say a filter fired, the fragment says why, and that
-// difference is what makes the rejection reviewable instead of mysterious.
+// hit reports whether the label echoes indexed substance, and returns the
+// offending fragment for the caller to account for — never to print (K2-2).
 func (e echoIndex) hit(label string) (string, bool) {
 	toks := normalizeEcho(label)
 	for i, tok := range toks {
 		if _, ok := e.longs[tok]; ok {
 			return tok, true
 		}
+		for _, s := range e.cjk {
+			if strings.Contains(tok, s) || (utf8.RuneCountInString(tok) >= echoCJKMinRunes && strings.Contains(s, tok)) {
+				return tok, true
+			}
+		}
 		if i+1 >= len(toks) {
 			continue
 		}
-		gram := tok + " " + toks[i+1]
-		if _, ok := e.grams[gram]; ok {
-			return gram, true
+		if _, ok := e.grams[gramKey(tok, toks[i+1])]; ok {
+			return gramKey(tok, toks[i+1]), true
 		}
 	}
 	return "", false
+}
+
+// echoFingerprint renders a rejected fragment for the log WITHOUT the text
+// (K2-2): its rune length plus a short sha256 prefix.
+//
+// A fragment suspected of echoing a credentials title is exactly the string not
+// to write into a log file that a wider audience reads than the block itself.
+// The fingerprint still supports the two questions an operator actually has —
+// "is this the same rejection over and over" and "how much substance was it" —
+// without reproducing the substance.
+func echoFingerprint(fragment string) string {
+	if fragment == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(fragment))
+	return fmt.Sprintf("len=%d sha256=%s", utf8.RuneCountInString(fragment), hex.EncodeToString(sum[:])[:12])
 }

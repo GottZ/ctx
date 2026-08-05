@@ -225,6 +225,116 @@ func TestW7LegacySwitch(t *testing.T) {
 	})
 }
 
+// K2-5 — the legacy probe runs on EVERY request of a read path whose whole
+// design premise is "bounded by the cluster count, never by corpus size". The
+// obvious EXISTS over `topic_id IS NULL` has no index that can serve it, so the
+// planner falls back to a sequential scan over graph_cluster_node.
+//
+// The gate seeds enough rows that a sequential scan is not simply the cheapest
+// plan for a tiny table — otherwise it would prove nothing about the shape.
+func TestW7LegacyProbeUsesIndexes(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	const scope = "w7plan"
+
+	// Two partitions, the probed one the SMALLER: a fixture whose single scope
+	// fills the whole table has 100 % selectivity, so the planner reads
+	// everything anyway and the plan says nothing about the shape. A second,
+	// larger partition is what makes "use the scope index" the cheaper plan and
+	// therefore what makes this gate meaningful.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO graph_cluster_node (cluster_id, scope, size, category_counts, repr_block_id,
+		                                repr_title, repr_quality, topic_id)
+		SELECT gen_random_uuid(), $1, 1, '{"learnings":1}'::jsonb, gen_random_uuid(), 'r', 1.0, NULL
+		  FROM generate_series(1, 20000)`, scope); err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO graph_cluster_node (cluster_id, scope, size, category_counts, repr_block_id,
+		                                repr_title, repr_quality, topic_id)
+		SELECT gen_random_uuid(), $1, 1, '{"learnings":1}'::jsonb, gen_random_uuid(), 'r', 1.0, NULL
+		  FROM generate_series(1, 200000)`, scope+"-other"); err != nil {
+		t.Fatalf("seed foreign partition: %v", err)
+	}
+	// VACUUM, not just ANALYZE: an index-ONLY scan needs the visibility map.
+	if _, err := pool.Exec(ctx, `VACUUM ANALYZE graph_cluster_node`); err != nil {
+		t.Fatalf("vacuum analyze: %v", err)
+	}
+
+	plan := func(sql string) string {
+		t.Helper()
+		rows, err := pool.Query(ctx, "EXPLAIN (COSTS OFF) "+sql, []string{scope})
+		if err != nil {
+			t.Fatalf("explain: %v", err)
+		}
+		defer rows.Close()
+		var b strings.Builder
+		for rows.Next() {
+			var line string
+			if err := rows.Scan(&line); err != nil {
+				t.Fatal(err)
+			}
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return b.String()
+	}
+
+	got := plan(store.OverviewLegacyProbeSQL())
+	if strings.Contains(got, "Seq Scan on graph_cluster_node") {
+		t.Fatalf("the legacy probe falls back to a sequential scan:\n%s", got)
+	}
+	if !strings.Contains(got, "Index Only Scan using idx_gcn_scope") ||
+		!strings.Contains(got, "Index Only Scan using uq_gcn_scope_topic") {
+		t.Fatalf("the probe does not bind BOTH existing indexes index-only:\n%s", got)
+	}
+
+	// RED PROBE: the pre-K2-5 shape on the same data.
+	red := plan(store.OverviewLegacyProbeSeqScanSQL)
+	if !strings.Contains(red, "Seq Scan on graph_cluster_node") {
+		t.Fatalf("red probe did not reproduce the sequential scan — the gate proves nothing:\n%s", red)
+	}
+
+	// And it still answers the question the EXISTS answered. Unassigned rows
+	// select the legacy path...
+	legacy, err := store.OverviewLegacyForTest(ctx, pool, []string{scope})
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if !legacy {
+		t.Fatal("20000 unassigned rows must select the legacy path")
+	}
+
+	// ...and once every row carries an identity, the probe is false — the
+	// steady state after the rollout.
+	if _, err := pool.Exec(ctx, `
+		WITH minted AS (
+		    INSERT INTO graph_cluster_topic (scope)
+		    SELECT $1 FROM graph_cluster_node WHERE scope = $1
+		    RETURNING topic_id
+		), paired AS (
+		    SELECT n.ctid, m.topic_id
+		      FROM (SELECT ctid, row_number() OVER (ORDER BY ctid) rn
+		              FROM graph_cluster_node WHERE scope = $1) n
+		      JOIN (SELECT topic_id, row_number() OVER (ORDER BY topic_id) rn FROM minted) m
+		        ON m.rn = n.rn
+		)
+		UPDATE graph_cluster_node n SET topic_id = p.topic_id
+		  FROM paired p WHERE n.ctid = p.ctid`, scope); err != nil {
+		t.Fatalf("assign identities: %v", err)
+	}
+	legacy, err = store.OverviewLegacyForTest(ctx, pool, []string{scope})
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if legacy {
+		t.Fatal("every row is assigned — the probe must be false")
+	}
+}
+
 // The rollout's own transition: migration applied, no rebuild yet. Every node
 // row has topic_id NULL and the map must be readable and complete.
 func TestW7NullTopicTransition(t *testing.T) {

@@ -14,6 +14,7 @@ package topiclabel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
@@ -336,6 +338,55 @@ func TestW6LabelPipeline(t *testing.T) {
 		Run(ctx, d, []string{scope})
 		if chat.calls != maxAttempts+1 {
 			t.Fatalf("after reset: calls=%d, want %d", chat.calls, maxAttempts+1)
+		}
+	})
+
+	// ── K2-4: a PREEMPT is not an attempt. The background lease preempt and a
+	// dead context both mean "the system took the slot back", not "the model
+	// could not name this topic". Counting them against the three-strikes
+	// budget would let three busy ticks lock a topic out of the selection until
+	// its core happens to drift — the attempt counter would then measure how
+	// busy the GPU was instead of how often the naming failed.
+	t.Run("K2-4 a preempted call costs no attempt", func(t *testing.T) {
+		const scope = "w6preempt"
+		core := []string{w6Block(t, pool, scope, "busy topic", "internal", 900)}
+		topic := w6Topic(t, pool, scope, core)
+
+		chat := &fakeChat{answer: func(int) (string, error) {
+			return "", &llm.AdmissionError{Err: errors.New("queue_full")}
+		}}
+		d := w6Deps(pool, chat, nil)
+		for i := 0; i < maxAttempts; i++ {
+			st := Run(ctx, d, []string{scope})
+			if st.Aborted != 1 || st.Failed != 0 {
+				t.Fatalf("tick %d: aborted=%d failed=%d, want 1/0", i, st.Aborted, st.Failed)
+			}
+		}
+		if chat.calls != maxAttempts {
+			t.Fatalf("calls=%d, want %d — the topic must stay selectable through every preempt", chat.calls, maxAttempts)
+		}
+		if row := w6State(t, pool, topic); row.attempts != 0 {
+			t.Fatalf("label_attempts = %d after %d preempts, want 0", row.attempts, maxAttempts)
+		}
+		// And it is still selectable on the next tick, with a working backend.
+		chat.answer = nil
+		if st := Run(ctx, d, []string{scope}); st.Labeled != 1 {
+			t.Fatalf("after the preempts: labeled=%d, want 1 — the topic was locked out", st.Labeled)
+		}
+	})
+
+	// The counter still does its job for a REAL failure: three unusable answers
+	// and the topic leaves the selection. Preempt-tolerance must not become
+	// "the cap never applies".
+	t.Run("K2-4 control — a real failure still burns an attempt", func(t *testing.T) {
+		const scope = "w6preemptctl"
+		core := []string{w6Block(t, pool, scope, "unnameable too", "internal", 910)}
+		topic := w6Topic(t, pool, scope, core)
+
+		chat := &fakeChat{answer: func(int) (string, error) { return "not json", nil }}
+		Run(ctx, w6Deps(pool, chat, nil), []string{scope})
+		if row := w6State(t, pool, topic); row.attempts != 1 {
+			t.Fatalf("label_attempts = %d after one bad answer, want 1", row.attempts)
 		}
 	})
 

@@ -258,7 +258,7 @@ Since migration 125 a topic carries a `label`, and the rebuild writes one for **
 
 The name is derived deterministically, strongest source first:
 
-1. the three most frequent **tags** of the topic's core blocks (not of all members — the core is the statement about the cluster, the rim is noise),
+1. the three most frequent **tags** of the topic's core blocks (not of all members — the core is the statement about the cluster, the rim is noise). Only blocks classified `internal` or `public` contribute: a tag is free-form user input that no pipeline ever screened, and unlike the model-written name this path has neither a credentials scan nor an echo gate behind it. Note the consequence — `sensitivity` defaults to `credentials`, so on a deployment without a sensitivity audit most topics are named by their categories rather than their tags,
 2. the three most frequent **categories**,
 3. the representative block's title — today's map text, as the last readable rung.
 
@@ -285,10 +285,10 @@ It runs in the **parent** process, not in the rebuild worker: the worker child b
 **Label output hardening** (three stages, the first two unconditional):
 
 1. the finished label runs through the same credentials scan the block write path uses — a secret that survived from content into a title and from there into a name is discarded;
-2. a deterministic **echo gate**: if the label repeats a substantial word pair (or a long distinctive single word) from the title of a `credentials`/`personal` core block, it is discarded. Deterministic on purpose — guarding a model's output with another model would only move the failure one level up;
+2. a deterministic **echo gate**: if the label repeats a substantial word pair (order-independent), a distinctive single word of seven characters or more, or — for scripts without word separators such as Han, Kana and Hangul — a contained run of three characters or more from the title of a `credentials`/`personal` core block, it is discarded. Both sides are Unicode-normalised (NFKC) and case-folded first, so a different normalisation form, a full-width rendering or a reordered pair is not an escape. Deterministic on purpose — guarding a model's output with another model would only move the failure one level up;
 3. `CTX_GRAPH_OVERVIEW_LABEL_CREDENTIALS_FALLBACK_ONLY` (opt-in, default off) keeps a core containing credentials out of the model path entirely.
 
-A discarded label costs one attempt and leaves the fallback standing. Rejections are **counted, never silent**: `rejected_scan` and `rejected_echo` appear both in the arm log and in `/api/status` under `cluster_map.labeling`. The rejected text itself is never published — a name suspected of echoing a credentials title is exactly the string not to put on a status surface.
+A discarded label costs one attempt and leaves the fallback standing. A **preempted** call does not: the background lease preempt and a dead context mean the system took the slot back, not that the model failed, and counting them would let three busy ticks lock a topic out until its core happens to drift. Rejections are **counted, never silent**: `rejected_shape`, `rejected_scan` and `rejected_echo` appear both in the arm log and in `/api/status` under `cluster_map.labeling`. Neither the rejected name nor the matched fragment is ever published — the echo gate logs a fingerprint (length plus a short hash), because the fragment it matched is by definition the string suspected of carrying substance out of a credentials-classified title.
 
 The prompt carries **titles only, never content** (12–24 of them, capped by `CTX_GRAPH_OVERVIEW_LABEL_PROMPT_MAX_TITLES`), plus the topic's top tags and categories, all inside one nonce-guarded block with a fresh nonce per prompt. The answer contract is a single JSON object with exactly the key `label`; validation is purely structural (non-empty, at most 120 characters, no control markers) — **no confidence is read and none is asked for**, because the project's own measurement says a model's self-assessment is unusable as a gate. The label language follows `CTX_DREAM_LANGUAGE`: one language knob per corpus, not two.
 
