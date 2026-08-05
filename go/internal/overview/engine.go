@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"sort"
 	"time"
 
 	"github.com/GottZ/ctx/internal/louvain"
@@ -76,7 +75,7 @@ func NormalizeEngine(v string) (string, error) {
 // Das Zeitbudget ist HIER und nicht im Aufrufer: der Mover ist die einzige
 // Phase, die es beobachten kann, und ein Budget über Laden UND Rechnen würde
 // eine langsame Platte als Rechenzeit ausweisen.
-func clusterCtxEngine(ctx context.Context, uuids []string, g *csrGraph, resolution float64, budget time.Duration, refine bool) (clustering, error) {
+func clusterCtxEngine(ctx context.Context, uuids []string, g *csrGraph, resolution float64, budget time.Duration, refine, componentSplit bool) (clustering, error) {
 	n := len(uuids)
 	if n == 0 {
 		return clustering{blockToCluster: map[string]string{}, intraDegree: map[string]float64{}}, nil
@@ -90,10 +89,44 @@ func clusterCtxEngine(ctx context.Context, uuids []string, g *csrGraph, resoluti
 	}
 
 	lg := louvain.NewGraph(g.Off, g.Adj, g.W)
-	res, err := louvain.Run(mctx, lg, louvain.Options{Resolution: resolution, Refine: refine})
-	if err != nil {
-		return clustering{}, err
+	lopts := louvain.Options{Resolution: resolution, Refine: refine}
+	var (
+		memb       []int32
+		clusters   int
+		qq         float64
+		levels     int
+		sweeps     int
+		drift      float64
+		components int
+	)
+	if componentSplit {
+		// S8: komponentenweise mit γ-Reskalierung. Beweisbar dieselbe
+		// Zielfunktion (§4.4) — der Gewinn ist heute 6,3 % und damit Beiwerk,
+		// der eigentliche Ertrag ist component_n als Messgroesse.
+		res, err := louvain.RunComponents(mctx, lg, lopts)
+		if err != nil {
+			return clustering{}, err
+		}
+		memb, clusters, qq = res.Memb, res.Clusters, res.Q
+		levels, sweeps, drift, components = res.Levels, res.Sweeps, res.SigmaDrift, res.Components
+		// Die Kontrollrechnung des Aequivalenzbeweises laeuft IM BETRIEB mit,
+		// nicht nur im Test: sie kostet nichts (die Q_t liegen ohnehin vor) und
+		// sie ist die einzige Stelle, an der eine falsche γ-Reskalierung
+		// auffiele — sie aendert weder Partition noch Clusterzahl.
+		if d := math.Abs(res.Q - res.QControl); d > 1e-9 {
+			return clustering{}, fmt.Errorf(
+				"overview: component decomposition control failed — global Q %.15f vs Σ (m_t/m)·Q_t %.15f (Δ=%.3e)",
+				res.Q, res.QControl, d)
+		}
+	} else {
+		res, err := louvain.Run(mctx, lg, lopts)
+		if err != nil {
+			return clustering{}, err
+		}
+		memb, clusters, qq = res.Memb, res.Clusters, res.Q
+		levels, sweeps, drift = res.Levels, res.Sweeps, res.SigmaDrift
 	}
+	res := louvain.Result{Memb: memb, Clusters: clusters, Q: qq, Levels: levels, Sweeps: sweeps, SigmaDrift: drift}
 
 	// cluster_id bleibt die kleinste Member-UUID (cluster.go:296-307,
 	// unverändert seit 057) — die Identität lebt in Achse 01, nicht hier. Der
@@ -138,21 +171,6 @@ func clusterCtxEngine(ctx context.Context, uuids []string, g *csrGraph, resoluti
 		blockToCluster: b2c, intraDegree: deg, modularity: q, clusterCount: res.Clusters,
 		edgePairs: g.Pairs, dangling: g.Dangling, selfLoops: g.SelfLoops,
 		levels: res.Levels, sweeps: res.Sweeps, sigmaDrift: res.SigmaDrift,
+		components: components,
 	}, nil
-}
-
-// sortedClusterIDs ist ein Testhelfer-freier Determinismus-Anker für Aufrufer,
-// die eine stabile Cluster-Reihenfolge brauchen.
-func sortedClusterIDs(b2c map[string]string) []string {
-	seen := make(map[string]struct{}, len(b2c)/4+1)
-	out := make([]string, 0, len(seen))
-	for _, c := range b2c {
-		if _, ok := seen[c]; ok {
-			continue
-		}
-		seen[c] = struct{}{}
-		out = append(out, c)
-	}
-	sort.Strings(out)
-	return out
 }

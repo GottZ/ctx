@@ -300,6 +300,18 @@ Two things happen regardless of the setting, because they cost nothing and only 
 
 The pre-flight estimate runs **before any edge is loaded** — checking after the load would be checking after the expensive part — and it deliberately assumes the denser of the two design scenarios. An estimate that reads low would let the run walk into exactly the OOM it exists to prevent.
 
+### `graph_overview.component_split`: clustering components separately
+
+`CTX_GRAPH_OVERVIEW_COMPONENT_SPLIT` (default **true**, hot, effective only at `engine=ctx`) clusters each connected component on its own, with the resolution rescaled per component (γ_t = γ·m_t/m).
+
+This is **provably the same objective**, not an approximation: a community spanning two components can always be split with strictly positive ΔQ, so the global maximisation decomposes exactly. The rescaling is what makes that true — without it, a six-node component would be cut into three communities merely because the rest of the corpus is large, silently changing the resolution for small components.
+
+The run carries the decomposition identity `Q = Σ_t (m_t/m)·Q_t(γ_t)` as a **live control computation**, not just a test assertion: it costs nothing (the per-component values already exist) and a deviation beyond 1e-9 aborts the run rather than persisting a silently mis-resolved partition.
+
+The honest yield is small and shrinking: 6.3 % of live nodes sit outside the giant component, and a giant component is the structurally enforced normal form above the percolation threshold, so its share grows with the corpus. The durable gain is `component_n` in the run journal — a quantity that simply did not exist before.
+
+`graph_overview.compute_parallelism` from the design is **not implemented**. Fanning out across components would buy well under one percent at today's component distribution, paid for with threads in a nice-19 child running next to local inference. If a corpus ever shows many mid-sized components, that is its own change with its own measurement.
+
 `computed_at` becomes nullable **and loses its `DEFAULT now()`** (from migration 057). A partition that has never built successfully but already has an attempt behind it — a fresh deploy above the node cap — needs a row without a success timestamp; with the default in place a skip upsert that does not name the column would silently claim freshness. The read path is unaffected: `max(computed_at)` ignores NULL, so "never built" stays the zero timestamp and the `stats.computed_at` wire field stays `null` exactly as before.
 
 Deploy notes, same shape as 116: the file carries `SET LOCAL lock_timeout = '3s'`, so it aborts with `55P03` rather than queueing behind a long-running persist transaction (a 400k-node rebuild measures ~465 s); every statement is idempotent, so the next boot simply re-runs it. Existing rows are backfilled with `last_attempt_at = computed_at` and `candidate_n = node_n` — historically correct, because only a successful run could have written them. No new table, no index.

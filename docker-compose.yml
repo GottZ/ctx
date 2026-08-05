@@ -198,6 +198,7 @@ services:
       # Das Kind liest die Variable AUCH direkt aus der geerbten Umgebung, um
       # sich zu deckeln, bevor es Optionen hat.
       CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT: ${CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT:-0}
+      CTX_GRAPH_OVERVIEW_COMPONENT_SPLIT: ${CTX_GRAPH_OVERVIEW_COMPONENT_SPLIT:-true}
       # Cluster consumption (Achse 03, wave C0): turns the Louvain clusters from
       # an output-only endpoint into a retrieval signal, a graph citizen and a
       # facet. The whole surface ships DARK — every gate below is false/0 and

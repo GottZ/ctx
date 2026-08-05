@@ -331,6 +331,12 @@ type Options struct {
 	// wirksam — gonum hat keine.
 	Refine bool
 
+	// ComponentSplit schaltet den Komponenten-Vorpass mit γ-Reskalierung (S8).
+	// Nur bei engine=ctx wirksam. Beweisbar zielfunktions-identisch (§4.4),
+	// also KEIN Qualitaets-Risiko — der Ertrag ist heute 6,3 % Rechenzeit plus
+	// component_n als Messgroesse.
+	ComponentSplit bool
+
 	// WorkerMemLimit ist das Kind-Speicherbudget in Bytes (S7b). 0 = aus.
 	//
 	// Es reist auf DIESEM Weg mit, obwohl das Kind seinen eigenen Heap bereits
@@ -419,6 +425,7 @@ type clustering struct {
 	levels     int
 	sweeps     int
 	sigmaDrift float64
+	components int
 }
 
 // Rebuild recomputes the cluster supergraph and replaces the 057 tables in one
@@ -560,7 +567,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	var cl clustering
 	switch {
 	case engine == EngineCtx:
-		cl, err = clusterCtxEngine(ctx, nodeUUIDs, csr, opts.Resolution, opts.TimeBudget, opts.Refine)
+		cl, err = clusterCtxEngine(ctx, nodeUUIDs, csr, opts.Resolution, opts.TimeBudget, opts.Refine, opts.ComponentSplit)
 		// ZEITBUDGET-ABBRUCH: das Ergebnis wird VOLLSTAENDIG verworfen, die
 		// Karte friert ein — exakt wie am Knoten-Cap (SP-5). Gemeldet wird der
 		// BESTEHENDE Grund 'timeout' und kein neuer: graph_overview_meta traegt
@@ -617,6 +624,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	stats.LevelN = cl.levels
 	stats.SweepN = cl.sweeps
 	stats.SigmaDrift = cl.sigmaDrift
+	stats.ComponentN = cl.components
 	// PeakRSSKb wird als LETZTES gelesen — VmHWM ist ein Hochwassermarker, der
 	// erst am Ende die Spitze des ganzen Laufs kennt (Laden, Symmetrisieren,
 	// gonum-Graph, persist). Genau diese Reihenfolge war der Messfehler, den

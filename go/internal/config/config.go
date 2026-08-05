@@ -398,7 +398,20 @@ type GraphOverviewConfig struct {
 	// The child ALSO reads this through the inherited environment
 	// (overview.WorkerMemLimitEnv) to limit its own heap before it has any
 	// options — a runtime knob has to be available before the protocol is.
-	WorkerMemLimit int `key:"graph_overview.worker_mem_limit" env:"CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT" default:"0" mut:"hot" tenancy:"global-only"`
+	// ComponentSplit enables the connected-component pre-pass with γ rescaling
+	// (S8), effective only at engine=ctx. Default ON because it is PROVABLY
+	// objective-identical (design/04 §4.4), not a heuristic trade: a community
+	// spanning two components can always be split with strictly positive ΔQ, so
+	// the global maximisation decomposes exactly — provided γ is rescaled per
+	// component (γ_t = γ·m_t/m). Without the rescaling the pre-pass would
+	// silently change the resolution for small components.
+	//
+	// The honest yield today is 6.3 % (75 of 1 192 live nodes sit outside the
+	// giant component) and it shrinks as the corpus grows, because a giant
+	// component is the structurally enforced normal form above the percolation
+	// threshold. The lasting gain is component_n as a measurable quantity.
+	ComponentSplit bool `key:"graph_overview.component_split" env:"CTX_GRAPH_OVERVIEW_COMPONENT_SPLIT" default:"true" mut:"hot" tenancy:"global-only"`
+	WorkerMemLimit int  `key:"graph_overview.worker_mem_limit" env:"CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT" default:"0" mut:"hot" tenancy:"global-only"`
 
 	// ── W6: the LLM label pipeline (design/01 §3.5/§4.8, Amendments A01-3/A01-4) ──
 	//
