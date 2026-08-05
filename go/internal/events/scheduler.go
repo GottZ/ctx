@@ -1156,6 +1156,14 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		s.stampOverviewAttempt(ctx, bt, "disabled", nil, attemptStart)
 		return
 	}
+	// W8: the retention purge runs AFTER the rebuild tick, in the parent, in
+	// its own short transactions — never inside the persist transaction and
+	// never under its advisory lock (design/01 §4.8). A deferred call rather
+	// than five call sites: every exit past this gate is a completed tick, and
+	// an expired grave is expired whether the rebuild succeeded, was skipped by
+	// the node cap or timed out. ctx is the OUTER scheduler context on purpose
+	// — on the timeout path the rebuild's own context is already dead.
+	defer s.purgeTopicTombstones(ctx, bt, cfg.GraphOverview.TombstoneRetention)
 	// WF T6: the rebuild consumes the BASE registry snapshot (the rebuild is
 	// ONE global run today; the per-tenant rebuild — B-W6 — keeps consuming
 	// the BASE snapshot and varies only the scope filter; design/01 §9.6
@@ -1240,6 +1248,32 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		"clusters", stats.ClusterCount, "nodes", stats.NodeCount,
 		"edge_rows", stats.EdgeRows, "modularity", stats.Modularity,
 		"tenant_scope", bt.scope, "scope_filter", bt.owned, "elapsed", time.Since(start))
+}
+
+// purgeTopicTombstones removes the topics whose retention window has expired
+// (Cluster-Topic-Map W8).
+//
+// It reads the window straight from the config snapshot and never crosses the
+// worker boundary — that is what keeps the axis at exactly ONE IPC protocol
+// change (W3's). A failure is logged and dropped: retention is housekeeping, and
+// a background arm that propagated it would turn "the table did not shrink" into
+// "the rebuild failed".
+func (s *Scheduler) purgeTopicTombstones(ctx context.Context, bt backgroundTenant, retention time.Duration) {
+	if retention <= 0 {
+		return // documented operating state: never delete
+	}
+	start := time.Now()
+	purged, err := overview.PurgeTombstones(ctx, s.pool, bt.owned, retention)
+	if err != nil {
+		slog.Warn("scheduler: topic tombstone purge failed", "error", err,
+			"tenant_scope", bt.scope, "scope_filter", bt.owned, "purged", purged)
+		return
+	}
+	if purged > 0 {
+		slog.Info("scheduler: topic tombstones purged", "purged", purged,
+			"tenant_scope", bt.scope, "scope_filter", bt.owned,
+			"retention", retention, "elapsed", time.Since(start))
+	}
 }
 
 // runEmbedCacheEviction prunes the embed cache on a fixed interval. Combines TTL
