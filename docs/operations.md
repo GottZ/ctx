@@ -224,12 +224,14 @@ Each rebuild decides, per partition, what happened to last generation's topics:
 | Outcome | Rule | Row |
 |---|---|---|
 | continued | mutual plurality **and** the new cluster holds at least **half** of the old topic's members | `last_seen_at` moves |
-| re-attached | a would-be new cluster covers at least **half** of the core of a topic that died inside `graph_overview.tombstone_retention`, in the same scope | `retired_at` back to `NULL` |
-| split | at least half of the NEW cluster's members came out of one old topic that continued elsewhere | new row, `origin_kind='split'`, `origin_topic_id` set |
-| born | none of the above | new row, `origin_kind='birth'` |
+| re-attached | the cluster covers at least **half** of the core of a topic that died inside `graph_overview.tombstone_retention`, in the same scope | `retired_at` back to `NULL` |
+| split | at least half of the NEW cluster's members came out of one old topic **that is still alive** in this run | new row, `origin_kind='split'`, `origin_topic_id` set |
+| born | none of the above | new row, `origin_kind='birth'` — `origin_topic_id` is still recorded when the cluster came out of a topic that did *not* survive |
 | retired | no cluster continued it | `retired_at` set; `merged_into` names the topic its majority went to, or `NULL` for a plain death |
 
 There is no threshold to tune. "Half of the substance" is the rule in all three places, and it is scale-invariant on purpose: a stable one-block topic keeps its identity (1 of 1), and a 300-block topic is never inherited off a two-block overlap.
+
+**Which wins when a cluster could both continue and re-attach.** A topic that tears into three clusters — none of them holding half — dies and leaves three fragment topics behind. When the community later reassembles, the reassembled cluster *does* have something to continue: a fragment. Left alone it would keep the fragment's identity forever while the real predecessor, whose whole core lies inside it, stayed a tombstone. The rebuild therefore lets a tombstone take a cluster from a continuation candidate in exactly one case: the candidate descends from that tombstone (its `origin_topic_id` chain reaches it) and was born no earlier than the tombstone died. Against an **independent** living topic the continuation always wins — organic growth outranks old graves.
 
 Two operational consequences:
 

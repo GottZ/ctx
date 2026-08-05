@@ -21,11 +21,24 @@
 //	             carries at least half of the cluster's internal substance. No
 //	             K constant: organic knowledge is heavy-tailed (live median 6,
 //	             max 133), so a fixed K is either noise or a truncation.
-//	Re-Attach    (A01-2/E2-01): a birth candidate that covers at least half of
-//	             a tombstone's core within tombstone_retention revives that
-//	             identity instead of minting one. This is the batch-import
-//	             half of the mechanism; organic growth runs over the living
-//	             predecessor generation, both in the SAME run.
+//	Re-Attach    (A01-2/E2-01): a cluster that covers at least half of a
+//	             tombstone's core within tombstone_retention revives that
+//	             identity. This is the batch-import half of the mechanism;
+//	             organic growth runs over the living predecessor generation,
+//	             both in the SAME run.
+//
+// PRECEDENCE between the last two (K2-1). The tombstone probe runs for EVERY
+// cluster, not just for birth candidates, because the case decision E2-01 was
+// written for produces a continuation candidate: a topic that tears into three
+// clusters (none holding half) dies and leaves three fragment topics behind, so
+// the cluster that later reassembles the community HAS something to continue —
+// the fragment — and would keep the fragment's identity forever while the real
+// predecessor stayed a tombstone. A tombstone therefore takes a cluster from a
+// continuation candidate iff that candidate is a FRAGMENT of this very
+// tombstone (its origin_topic_id chain reaches it) and was born no earlier than
+// the tombstone died. Against any INDEPENDENT living topic the continuation
+// wins — that is the "organic growth and batch imports at the same time" half
+// of the decision.
 //
 // SCOPE BINDING IS NOT OPTIONAL (B1b, design/01 §5.3). Every matching query
 // carries a scope predicate, and the predicate binds the scope of the TOPIC to
@@ -320,16 +333,29 @@ var topicTempDDL = []string{
 	`CREATE TEMP TABLE ov_best_topic (
 	     topic_id UUID PRIMARY KEY, cluster_id UUID NOT NULL, scope TEXT NOT NULL,
 	     ov INT NOT NULL) ON COMMIT DROP`,
+	// ov_carry holds the CANDIDATE continuations. They only become assignments
+	// in the resolution step, because a tombstone can outrank them (K2-1).
+	`CREATE TEMP TABLE ov_carry (
+	     cluster_id UUID NOT NULL, scope TEXT NOT NULL, topic_id UUID NOT NULL, ov INT NOT NULL,
+	     PRIMARY KEY (cluster_id, scope)) ON COMMIT DROP`,
+	`CREATE UNIQUE INDEX ov_carry_topic_uq ON ov_carry (topic_id)`,
 	`CREATE TEMP TABLE ov_match (
 	     cluster_id UUID NOT NULL, scope TEXT NOT NULL, topic_id UUID NOT NULL,
 	     ov INT NOT NULL, carried BOOL NOT NULL,
 	     PRIMARY KEY (cluster_id, scope)) ON COMMIT DROP`,
 	// First line of defence against B2 (identity fusion): it breaks with 23505
-	// at the CAUSE instead of carrying the defect down to uq_gcn_scope_topic.
+	// at the CAUSE instead of carrying the defect down to uq_gcn_scope_topic
+	// (which guards the same property one level down, WITHIN a scope — the
+	// persistent index is (scope, topic_id), not (topic_id)).
 	`CREATE UNIQUE INDEX ov_match_topic_uq ON ov_match (topic_id)`,
 	`CREATE TEMP TABLE ov_unmatched (
 	     cluster_id UUID NOT NULL, scope TEXT NOT NULL, size_new INT NOT NULL,
 	     PRIMARY KEY (cluster_id, scope)) ON COMMIT DROP`,
+	// ov_run_scopes is the scope set this run actually produced clusters in.
+	// It bounds the tombstone expansion in BOTH run shapes — the global run
+	// has no ScopeFilter to bound it with, and without this it would unnest
+	// the cores of every tombstone in the database (K3-2).
+	`CREATE TEMP TABLE ov_run_scopes (scope TEXT PRIMARY KEY) ON COMMIT DROP`,
 	`CREATE TEMP TABLE ov_tomb (
 	     topic_id UUID NOT NULL, scope TEXT NOT NULL, block_id UUID NOT NULL,
 	     core_n INT NOT NULL) ON COMMIT DROP`,
@@ -343,6 +369,20 @@ var topicTempDDL = []string{
 	`CREATE TEMP TABLE ov_tomb_best_topic (
 	     topic_id UUID PRIMARY KEY, cluster_id UUID NOT NULL, scope TEXT NOT NULL,
 	     ov INT NOT NULL) ON COMMIT DROP`,
+	// ov_tomb_match is the tombstone side of the assignment, mutually plural
+	// and past the half-of-the-core bar — a CANDIDATE like ov_carry, resolved
+	// against it in the step below.
+	`CREATE TEMP TABLE ov_tomb_match (
+	     cluster_id UUID NOT NULL, scope TEXT NOT NULL, topic_id UUID NOT NULL,
+	     ov INT NOT NULL, core_n INT NOT NULL,
+	     PRIMARY KEY (cluster_id, scope)) ON COMMIT DROP`,
+	`CREATE UNIQUE INDEX ov_tomb_match_topic_uq ON ov_tomb_match (topic_id)`,
+	// ov_frag is the ancestry closure of the carry candidates: (carry topic,
+	// any topic on its origin_topic_id chain). It answers the one question the
+	// resolution needs — "is this living topic a FRAGMENT of that tombstone".
+	`CREATE TEMP TABLE ov_frag (
+	     carry_topic UUID NOT NULL, ancestor UUID NOT NULL,
+	     PRIMARY KEY (carry_topic, ancestor)) ON COMMIT DROP`,
 	`CREATE TEMP TABLE ov_core (
 	     cluster_id UUID NOT NULL, scope TEXT NOT NULL, core_hash TEXT NOT NULL,
 	     core_blocks UUID[] NOT NULL,
@@ -407,18 +447,25 @@ SELECT DISTINCT ON (topic_id) topic_id, cluster_id, scope, ov
 // mutual plurality plus the uuid tiebreak of the two DISTINCT ON orderings:
 // exactly ONE half becomes the continuation, deterministically. That is
 // documented semantics, not a coin flip.
-// Declared as a VAR, not a const, so the W3-G6 gate can swap in the
-// retired absolute-threshold criterion and prove it goes red on BOTH
-// fixtures. Production never writes to it.
+// It writes CANDIDATES (ov_carry), not assignments. Since K2-1 a tombstone can
+// outrank a continuation, and that decision needs both sides on the table.
+//
+// Declared as a VAR, not a const, so the W3-G6 gate can swap in the retired
+// absolute-threshold criterion and prove it goes red on BOTH fixtures.
+// Production never writes to it.
 var carrySQL = `
-INSERT INTO ov_match (cluster_id, scope, topic_id, ov, carried)
-SELECT c.cluster_id, c.scope, c.topic_id, c.ov, true
+INSERT INTO ov_carry (cluster_id, scope, topic_id, ov)
+SELECT c.cluster_id, c.scope, c.topic_id, c.ov
   FROM ov_best_cluster c
   JOIN ov_best_topic   t ON t.topic_id   = c.topic_id
                         AND t.cluster_id = c.cluster_id
                         AND t.scope      = c.scope
   JOIN ov_prev_size    s ON s.topic_id   = c.topic_id
  WHERE c.ov * 2 >= s.size_prev`
+
+const runScopesTemplate = `
+INSERT INTO ov_run_scopes (scope)
+SELECT DISTINCT scope FROM graph_cluster_member%s`
 
 const unmatchedTemplate = `
 INSERT INTO ov_unmatched (cluster_id, scope, size_new)
@@ -431,17 +478,15 @@ SELECT m.cluster_id, m.scope, count(*)::int
 var (
 	overlapGlobalSQL   = fmt.Sprintf(overlapTemplate, "")
 	overlapScopedSQL   = fmt.Sprintf(overlapTemplate, "\n WHERE m.scope = ANY($1)")
+	runScopesGlobalSQL = fmt.Sprintf(runScopesTemplate, "")
+	runScopesScopedSQL = fmt.Sprintf(runScopesTemplate, "\n WHERE scope = ANY($1)")
 	unmatchedGlobalSQL = fmt.Sprintf(unmatchedTemplate, "")
 	unmatchedScopedSQL = fmt.Sprintf(unmatchedTemplate, "\n   AND m.scope = ANY($1)")
 )
 
-func (p topicPhase) matchCarry(ctx context.Context, tx pgx.Tx, st *topicStats) error {
-	for _, s := range []struct{ label, sql string }{
-		{"prev sizes", prevSizeSQL},
-	} {
-		if _, err := execPlain(ctx, tx, s.label, s.sql); err != nil {
-			return err
-		}
+func (p topicPhase) matchCarry(ctx context.Context, tx pgx.Tx) error {
+	if _, err := execPlain(ctx, tx, "prev sizes", prevSizeSQL); err != nil {
+		return err
 	}
 	if _, err := p.exec(ctx, tx, "overlap", overlapGlobalSQL, overlapScopedSQL); err != nil {
 		return err
@@ -454,48 +499,57 @@ func (p topicPhase) matchCarry(ctx context.Context, tx pgx.Tx, st *topicStats) e
 			return err
 		}
 	}
-	carried, err := execPlain(ctx, tx, "carry-over", carrySQL)
-	if err != nil {
+	if _, err := execPlain(ctx, tx, "carry candidates", carrySQL); err != nil {
 		return err
 	}
-	st.carried = int(carried)
-	_, err = p.exec(ctx, tx, "unmatched clusters", unmatchedGlobalSQL, unmatchedScopedSQL)
+	_, err := p.exec(ctx, tx, "run scopes", runScopesGlobalSQL, runScopesScopedSQL)
 	return err
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 3 — tombstone re-attach (A01-2 / E2-01).
 
-// tombExpandTemplate unnests the core of every tombstone inside the retention
+// tombExpandSQL unnests the core of every tombstone inside the retention
 // window into one probe row per (topic, block). Expanded rather than probed
 // with `block_id = ANY(core_blocks)`, because the latter is a nested loop over
 // tombstones × members and the whole point of the tombstone path is that a
 // batch import may leave a LOT of tombstones behind.
 //
-// The scope predicate here restricts the tombstone set to the run's partition;
-// the per-row scope binding against the member row happens in the overlap
-// statement below (that one is the B1b half — a tombstone of scope A must not
-// be probed against a member row of scope B).
-const tombExpandTemplate = `
+// The tombstone set is bounded by ov_run_scopes — the scopes this run actually
+// produced clusters in. That is the correct bound in BOTH run shapes: the
+// scoped run's filter is a superset of it, and the GLOBAL run has no filter at
+// all and would otherwise unnest every tombstone in the database (K3-2).
+const tombExpandSQL = `
 INSERT INTO ov_tomb (topic_id, scope, block_id, core_n)
 SELECT t.topic_id, t.scope, cb, cardinality(t.core_blocks)
   FROM graph_cluster_topic t
+  JOIN ov_run_scopes s ON s.scope = t.scope
   CROSS JOIN LATERAL unnest(t.core_blocks) AS cb
  WHERE t.retired_at IS NOT NULL
    AND t.retired_at >= now() - make_interval(secs => $1)
-   AND cardinality(t.core_blocks) > 0%s`
+   AND cardinality(t.core_blocks) > 0`
 
-const tombIndexSQL = `CREATE INDEX ov_tomb_block ON ov_tomb (block_id)`
-
+// tombOverlapSQL probes the tombstone cores against THIS run's members.
+//
+// Since K2-1 it runs over ALL clusters, not only the unmatched ones: a cluster
+// that reassembles a torn-apart community WILL usually have a continuation
+// candidate (one of the fragments the tear created), and restricting the probe
+// to birth candidates made the E2-01 case unreachable exactly when it mattered.
+// The resolution step decides who wins.
+//
+// ov_tomb DRIVES the join and graph_cluster_member is probed by its primary
+// key. The work is therefore bounded by the tombstone core volume — the small
+// side — not by the member count, which is what makes the widened probe
+// cheaper than the ov_unmatched-driven one it replaces.
+//
 // g.scope = m.scope is the B1b predicate of the tombstone path. Without it a
 // tombstone from a foreign scope could be revived onto this scope's node row,
 // which is the same leak the living-generation path closes in ov_overlap.
 const tombOverlapSQL = `
 INSERT INTO ov_tomb_overlap (cluster_id, scope, topic_id, ov, core_n)
-SELECT u.cluster_id, u.scope, g.topic_id, count(*)::int, min(g.core_n)
-  FROM ov_unmatched u
-  JOIN graph_cluster_member m ON m.cluster_id = u.cluster_id AND m.scope = u.scope
-  JOIN ov_tomb            g ON g.block_id   = m.block_id   AND g.scope = m.scope
+SELECT m.cluster_id, m.scope, g.topic_id, count(*)::int, min(g.core_n)
+  FROM ov_tomb g
+  JOIN graph_cluster_member m ON m.block_id = g.block_id AND m.scope = g.scope
  GROUP BY 1, 2, 3`
 
 const tombBestClusterSQL = `
@@ -510,21 +564,92 @@ SELECT DISTINCT ON (topic_id) topic_id, cluster_id, scope, ov
   FROM ov_tomb_overlap
  ORDER BY topic_id, ov DESC, cluster_id, scope`
 
-// reattachSQL is the same "half of the substance" rule as the continuation,
+// tombMatchSQL is the same "half of the substance" rule as the continuation,
 // measured against the tombstone's core instead of the topic's last size —
 // mutual plurality plus ov*2 >= core_n. It is also the criterion the S-line's
 // engine-switch gate quotes (">= 50 % Kern-Overlap", UD-03-04).
-//
-// carried = true on purpose: a re-attached topic is a continuation of the same
-// identity, so it takes the same last_seen_at bump the living path takes.
-const reattachSQL = `
-INSERT INTO ov_match (cluster_id, scope, topic_id, ov, carried)
-SELECT c.cluster_id, c.scope, c.topic_id, c.ov, true
+const tombMatchSQL = `
+INSERT INTO ov_tomb_match (cluster_id, scope, topic_id, ov, core_n)
+SELECT c.cluster_id, c.scope, c.topic_id, c.ov, c.core_n
   FROM ov_tomb_best_cluster c
   JOIN ov_tomb_best_topic   t ON t.topic_id   = c.topic_id
                              AND t.cluster_id = c.cluster_id
                              AND t.scope      = c.scope
  WHERE c.ov * 2 >= c.core_n`
+
+// fragChainSQL builds the ancestry closure of the carry candidates by walking
+// origin_topic_id upwards. It is the evidence the resolution needs for the one
+// question that separates "a tear artefact" from "an independent topic": did
+// this living topic descend from that tombstone?
+//
+// The depth cap is a resource bound, not a semantic one: a chain longer than
+// eight generations simply is not followed, so the tombstone loses and the
+// carry wins — the conservative direction. It also makes the walk structurally
+// cycle-proof; gct_no_self_origin only rules out the one-step cycle.
+const fragChainSQL = `
+WITH RECURSIVE chain(carry_topic, ancestor, depth) AS (
+    SELECT c.topic_id, t.origin_topic_id, 1
+      FROM ov_carry c
+      JOIN graph_cluster_topic t ON t.topic_id = c.topic_id
+     WHERE t.origin_topic_id IS NOT NULL
+    UNION ALL
+    SELECT ch.carry_topic, p.origin_topic_id, ch.depth + 1
+      FROM chain ch
+      JOIN graph_cluster_topic p ON p.topic_id = ch.ancestor
+     WHERE p.origin_topic_id IS NOT NULL AND ch.depth < 8
+)
+INSERT INTO ov_frag (carry_topic, ancestor)
+SELECT DISTINCT carry_topic, ancestor FROM chain`
+
+// tombWinsSQL is the K2-1 precedence rule. A tombstone takes a cluster from a
+// living continuation candidate in exactly two situations:
+//
+//  1. There is no candidate at all — the plain re-attach (the import that
+//     dropped its blocks out of the node cut for a generation).
+//  2. The candidate is a FRAGMENT of this very tombstone AND was born no
+//     earlier than the tombstone died. That is the three-way tear: a topic of
+//     ten blocks breaks into three clusters, none of them holding half, so it
+//     retires and three fragment topics are born in its place; when the
+//     community reassembles, the reassembled cluster carries one fragment and
+//     would keep the fragment's identity forever while the real predecessor —
+//     whose core is fully contained in it — stayed a tombstone.
+//
+// Everything else keeps the carry: an INDEPENDENT living topic outranks an old
+// tombstone, which is the "organic growth and batch imports at the same time"
+// half of decision E2-01. The two conditions together are what makes the rule
+// safe — without the ancestry test a tombstone could steal a cluster from a
+// topic it never had anything to do with.
+//
+// created_at >= retired_at, not >: the tear and the births happen in ONE
+// transaction, so the fragment's created_at and the tombstone's retired_at are
+// the same now().
+// Declared as a VAR so the tear gate can reduce it to the pre-K2-1 behaviour
+// and prove the reassembled community loses its mother. Production never writes.
+var tombWinsSQL = `
+INSERT INTO ov_match (cluster_id, scope, topic_id, ov, carried)
+SELECT tm.cluster_id, tm.scope, tm.topic_id, tm.ov, true
+  FROM ov_tomb_match tm
+  LEFT JOIN ov_carry c ON c.cluster_id = tm.cluster_id AND c.scope = tm.scope
+ WHERE c.topic_id IS NULL
+    OR EXISTS (SELECT 1
+                 FROM ov_frag f
+                 JOIN graph_cluster_topic ct ON ct.topic_id = c.topic_id
+                 JOIN graph_cluster_topic tt ON tt.topic_id = tm.topic_id
+                WHERE f.carry_topic  = c.topic_id
+                  AND f.ancestor     = tm.topic_id
+                  AND ct.created_at >= tt.retired_at)`
+
+// carryWinsSQL promotes every carry candidate a tombstone did not take. The
+// losing candidates are NOT special-cased here: they fall out of ov_match, and
+// the ordinary death statement retires them with merged_into pointing at the
+// cluster's winning identity — which is the revived tombstone. The fragment
+// therefore ends up as "aufgegangen in T", which is exactly what happened.
+const carryWinsSQL = `
+INSERT INTO ov_match (cluster_id, scope, topic_id, ov, carried)
+SELECT c.cluster_id, c.scope, c.topic_id, c.ov, true
+  FROM ov_carry c
+ WHERE NOT EXISTS (SELECT 1 FROM ov_match m
+                    WHERE m.cluster_id = c.cluster_id AND m.scope = c.scope)`
 
 // reviveSQL is the resurrection design/01 Revision 2 struck out — and the
 // decision record deliberately reinstated for the tombstone form (A01-2). The
@@ -539,38 +664,48 @@ UPDATE graph_cluster_topic t
   FROM ov_match m
  WHERE m.topic_id = t.topic_id AND t.retired_at IS NOT NULL`
 
-var (
-	tombExpandGlobalSQL = fmt.Sprintf(tombExpandTemplate, "")
-	tombExpandScopedSQL = fmt.Sprintf(tombExpandTemplate, "\n   AND t.scope = ANY($2)")
-)
-
-func (p topicPhase) reattach(ctx context.Context, tx pgx.Tx, st *topicStats) error {
-	// tombstone_retention <= 0 disables the re-attach path: the run then
-	// behaves like pure one-generation matching and mints fresh identities.
-	// That is the fail-closed direction — a missing re-attach costs identity
-	// continuity, a wrong one would hand an old label to a new community.
+// probeTombstones fills the tombstone candidate side. It writes no assignment
+// — resolve does that.
+//
+// tombstone_retention <= 0 disables the whole path: the run then behaves like
+// pure one-generation matching and mints fresh identities. That is the
+// fail-closed direction — a missing re-attach costs identity continuity, a
+// wrong one would hand an old label to a new community.
+func (p topicPhase) probeTombstones(ctx context.Context, tx pgx.Tx) error {
 	if p.tombstone <= 0 {
 		return nil
 	}
-	if _, err := p.exec(ctx, tx, "tombstone cores", tombExpandGlobalSQL, tombExpandScopedSQL,
-		p.tombstone.Seconds()); err != nil {
+	if _, err := execPlain(ctx, tx, "tombstone cores", tombExpandSQL, p.tombstone.Seconds()); err != nil {
 		return err
 	}
 	for _, s := range []struct{ label, sql string }{
-		{"tombstone index", tombIndexSQL},
 		{"tombstone overlap", tombOverlapSQL},
 		{"tombstone argmax per cluster", tombBestClusterSQL},
 		{"tombstone argmax per topic", tombBestTopicSQL},
+		{"tombstone candidates", tombMatchSQL},
+		{"fragment ancestry", fragChainSQL},
 	} {
 		if _, err := execPlain(ctx, tx, s.label, s.sql); err != nil {
 			return err
 		}
 	}
-	n, err := execPlain(ctx, tx, "re-attach", reattachSQL)
+	return nil
+}
+
+// resolve turns the two candidate sets into THE assignment: tombstones first
+// (they only ever take a cluster under the two conditions of tombWinsSQL),
+// carries for everything left, then the revival of whatever tombstone won.
+func resolve(ctx context.Context, tx pgx.Tx, st *topicStats) error {
+	reattached, err := execPlain(ctx, tx, "tombstone precedence", tombWinsSQL)
 	if err != nil {
 		return err
 	}
-	st.reattached = int(n)
+	st.reattached = int(reattached)
+	carried, err := execPlain(ctx, tx, "carry-over", carryWinsSQL)
+	if err != nil {
+		return err
+	}
+	st.carried = int(carried)
 	_, err = execPlain(ctx, tx, "revive", reviveSQL)
 	return err
 }
@@ -589,19 +724,38 @@ func (p topicPhase) reattach(ctx context.Context, tx pgx.Tx, st *topicStats) err
 // (23503), fail-loud but for the wrong reason and hard to read. Negative probe:
 // W3-G4.
 //
-// SPLIT vs BIRTH (Amendment A01-6 derivation): with topic_min_overlap gone,
-// the split marker uses the MIRROR containment — at least half of the NEW
-// cluster's substance came out of that one old topic (origin_ov*2 >=
-// size_new). The forward containment cannot serve here: it is exactly the
-// continuation criterion, so by construction no unmatched cluster could ever
-// satisfy it and origin_kind='split' would be dead code. The mirror form is
-// the same "half of the substance" principle read from the other side and
-// needs no parameter either: the classic split (a topic of 11 breaking into 6
-// and 5) marks the losing half as 'split' with the mother as origin, while a
-// fresh cluster of 10 that happens to share one block with an old topic is a
-// plain birth.
-// Declared as a VAR so the W3-G4 gate can strip AS MATERIALIZED and show the
-// double evaluation of gen_random_uuid(). Production never writes to it.
+// LINEAGE (origin_topic_id) vs KIND (birth/split), split apart in K2-4:
+//
+//   - origin_topic_id is set whenever the MIRROR containment holds: at least
+//     half of the NEW cluster's substance came out of that one old topic
+//     (origin_ov*2 >= size_new). The forward containment cannot serve here —
+//     it IS the continuation criterion, and in the 50/50 case both halves
+//     satisfy it, so using it would either be dead code or reward whichever
+//     half lost the tiebreak. The mirror form is the same "half of the
+//     substance" principle read from the other side and needs no parameter.
+//   - origin_kind is 'split' ONLY if that mother is still alive in this run's
+//     assignment. Design §4.3 defines a split as "the topic went to ANOTHER
+//     cluster", which presupposes a survivor. A topic that shatters into three
+//     pieces, none of them holding half, is DEAD — calling its three
+//     successors 'split' would report a lineage branch where there was a
+//     tear, and Stats would read split=3/retired=1 for three plain births.
+//
+// The lineage pointer survives that distinction on purpose: it is exactly what
+// lets the tombstone precedence (tombWinsSQL) recognise the fragments of a torn
+// topic when the community reassembles. Migration 124 permits it — the FK is
+// nullable, gct_no_self_origin is untouched (the mother is an older row), and
+// origin_kind's CHECK vocabulary is unaffected.
+//
+// AS MATERIALIZED is the one place where a PostgreSQL planner detail is
+// correctness-bearing: gen_random_uuid() is volatile, and with a SINGLE
+// reference the planner would inline `minted` and produce two DIFFERENT uuids
+// — the graph_cluster_topic row and the ov_match row would point past each
+// other and the node insert would break the topic_id foreign key (23503).
+// Measured on PG18: the two references alone already prevent the inlining, so
+// the hint guards a future single-reference refactor rather than today's shape
+// (W3-G4 records both halves).
+//
+// Declared as a VAR so the W3-G4 gate can patch it. Production never writes.
 var mintTemplate = `
 WITH unmatched AS (
     SELECT u.cluster_id, u.scope, u.size_new,
@@ -613,6 +767,7 @@ WITH unmatched AS (
 ), minted AS MATERIALIZED (
     SELECT gen_random_uuid() AS topic_id, u.cluster_id, u.scope,
            CASE WHEN u.origin IS NOT NULL AND u.origin_ov * 2 >= u.size_new
+                     AND EXISTS (SELECT 1 FROM ov_match m WHERE m.topic_id = u.origin)
                 THEN 'split' ELSE 'birth' END AS origin_kind,
            CASE WHEN u.origin IS NOT NULL AND u.origin_ov * 2 >= u.size_new
                 THEN u.origin END              AS origin_topic_id
@@ -671,7 +826,13 @@ UPDATE graph_cluster_topic t
   FROM absorber a
  WHERE a.topic_id = t.topic_id`
 
-func mintAndRetire(ctx context.Context, tx pgx.Tx, st *topicStats) error {
+func (p topicPhase) mintAndRetire(ctx context.Context, tx pgx.Tx, st *topicStats) error {
+	// ov_unmatched is filled HERE, after the resolution: since K2-1 a cluster
+	// can lose its carry candidate to a tombstone, so "unmatched" is only
+	// knowable once ov_match is final.
+	if _, err := p.exec(ctx, tx, "unmatched clusters", unmatchedGlobalSQL, unmatchedScopedSQL); err != nil {
+		return err
+	}
 	minted, err := execPlain(ctx, tx, "birth/split", mintTemplate)
 	if err != nil {
 		return err
@@ -764,18 +925,28 @@ func (p topicPhase) measure(ctx context.Context, tx pgx.Tx, st *topicStats) erro
 // node aggregation. Order is the masterplan's K5 order — teardown, members,
 // IDENTITY, aggregation, meta — and nothing in here computes a partition or a
 // resolution: Louvain stays outside the transaction.
+//
+// Inside the phase the order is: gather BOTH candidate sets (living
+// continuations and tombstones), then decide between them, then mint what is
+// left over, then bury what got nothing. Candidates before decisions is what
+// makes the K2-1 precedence expressible at all — the previous shape wrote the
+// continuation straight into ov_match and left the tombstone nothing to argue
+// with.
 func assignTopics(ctx context.Context, tx pgx.Tx, p topicPhase, cores coreArrays) (topicStats, error) {
 	var st topicStats
 	if err := createTopicTemps(ctx, tx); err != nil {
 		return st, err
 	}
-	if err := p.matchCarry(ctx, tx, &st); err != nil {
+	if err := p.matchCarry(ctx, tx); err != nil {
 		return st, err
 	}
-	if err := p.reattach(ctx, tx, &st); err != nil {
+	if err := p.probeTombstones(ctx, tx); err != nil {
 		return st, err
 	}
-	if err := mintAndRetire(ctx, tx, &st); err != nil {
+	if err := resolve(ctx, tx, &st); err != nil {
+		return st, err
+	}
+	if err := p.mintAndRetire(ctx, tx, &st); err != nil {
 		return st, err
 	}
 	if err := p.writeCores(ctx, tx, cores); err != nil {

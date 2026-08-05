@@ -200,8 +200,8 @@ func TestW3TopicIdentity(t *testing.T) {
 
 		restore := carrySQL
 		carrySQL = `
-INSERT INTO ov_match (cluster_id, scope, topic_id, ov, carried)
-SELECT c.cluster_id, c.scope, c.topic_id, c.ov, true
+INSERT INTO ov_carry (cluster_id, scope, topic_id, ov)
+SELECT c.cluster_id, c.scope, c.topic_id, c.ov
   FROM ov_best_cluster c
   JOIN ov_prev_size    s ON s.topic_id = c.topic_id
  WHERE c.ov * 2 >= s.size_prev`
@@ -518,6 +518,127 @@ SELECT c.cluster_id, c.scope, c.topic_id, c.ov, true
 		}
 	})
 
+	// ── K2-1 + K2-4: the THREE-WAY TEAR. This is the literal E2-01 case and
+	// the one the first W3 build could not reach: the intermediate generation
+	// hands out identities, so the reassembled cluster HAS a continuation
+	// candidate and never became a birth candidate at all.
+	t.Run("three-way tear — the reassembled cluster re-attaches the mother, not a fragment", func(t *testing.T) {
+		const scope = "tear"
+		ids := w3Blocks(t, pool, scope, 14000, 10)
+		w3Run(t, pool, scope, retention, w3Group{members: ids})
+		mother := w3TopicOf(t, pool, scope, ids[0])
+		motherCore := w3TopicRow(t, pool, mother).coreBlocks
+
+		// Run 2: the import tears the community into 4/4/2. The largest piece
+		// holds 4 of 10 — below half — so nothing continues the mother.
+		st2 := w3Run(t, pool, scope, retention,
+			w3Group{members: ids[:4]}, w3Group{members: ids[4:8]}, w3Group{members: ids[8:]})
+		if st2.TopicsCarried != 0 || st2.TopicsRetired != 1 || st2.TopicsBorn != 3 {
+			t.Fatalf("tear run: carried=%d retired=%d born=%d split=%d, want 0/1/3/0",
+				st2.TopicsCarried, st2.TopicsRetired, st2.TopicsBorn, st2.TopicsSplit)
+		}
+		// K2-4: three plain births after a topic DEATH — never 'split', which
+		// would report a lineage branch where there was a tear. The lineage
+		// POINTER is kept, and it is what run 3 navigates by.
+		if st2.TopicsSplit != 0 {
+			t.Fatalf("tear produced %d splits — a split presupposes a surviving mother", st2.TopicsSplit)
+		}
+		frag := w3TopicRow(t, pool, w3TopicOf(t, pool, scope, ids[0]))
+		if frag.originKind != "birth" {
+			t.Fatalf("fragment origin_kind = %s, want birth", frag.originKind)
+		}
+		if frag.origin == nil || *frag.origin != mother {
+			t.Fatalf("fragment origin_topic_id = %v, want the torn mother %s", frag.origin, mother)
+		}
+
+		// Run 3: the community reassembles. The reassembled cluster continues
+		// a FRAGMENT by the ordinary rule (4 of 4) — the tombstone must
+		// outrank it, because 100 % of the mother's core lies inside.
+		st3 := w3Run(t, pool, scope, retention, w3Group{members: ids})
+		if st3.TopicsReattached != 1 || st3.TopicsCarried != 0 || st3.TopicsBorn != 0 {
+			t.Fatalf("reassembly: reattached=%d carried=%d born=%d, want 1/0/0",
+				st3.TopicsReattached, st3.TopicsCarried, st3.TopicsBorn)
+		}
+		if got := w3TopicOf(t, pool, scope, ids[0]); got != mother {
+			t.Fatalf("the reassembled community kept a fragment identity (%s) instead of the mother %s", got, mother)
+		}
+		back := w3TopicRow(t, pool, mother)
+		if back.retired {
+			t.Fatal("the mother is still a tombstone")
+		}
+		if len(back.coreBlocks) == 0 || len(motherCore) == 0 {
+			t.Fatal("fixture: the mother carried no core")
+		}
+		// All three fragments are gone, each pointing at the mother.
+		var frags, pointing int
+		if err := pool.QueryRow(context.Background(), `
+			SELECT count(*), count(*) FILTER (WHERE merged_into = $2::uuid)
+			  FROM graph_cluster_topic
+			 WHERE scope = $1 AND topic_id <> $2::uuid AND retired_at IS NOT NULL`,
+			scope, mother).Scan(&frags, &pointing); err != nil {
+			t.Fatal(err)
+		}
+		if frags != 3 || pointing != 3 {
+			t.Fatalf("fragments: %d retired, %d with merged_into=mother, want 3/3", frags, pointing)
+		}
+	})
+
+	// RED PROBE for the tear gate: drop the tombstone precedence — the
+	// reassembled cluster then keeps a fragment identity and the mother stays
+	// a tombstone forever.
+	t.Run("three-way tear red probe — without tombstone precedence", func(t *testing.T) {
+		const scope = "tearred"
+		ids := w3Blocks(t, pool, scope, 15000, 10)
+		w3Run(t, pool, scope, retention, w3Group{members: ids})
+		mother := w3TopicOf(t, pool, scope, ids[0])
+		w3Run(t, pool, scope, retention,
+			w3Group{members: ids[:4]}, w3Group{members: ids[4:8]}, w3Group{members: ids[8:]})
+
+		restore := tombWinsSQLForProbe()
+		defer restore()
+
+		st3 := w3Run(t, pool, scope, retention, w3Group{members: ids})
+		if st3.TopicsReattached != 0 || st3.TopicsCarried != 1 {
+			t.Fatalf("probe ineffective: reattached=%d carried=%d, want 0/1", st3.TopicsReattached, st3.TopicsCarried)
+		}
+		if got := w3TopicOf(t, pool, scope, ids[0]); got == mother {
+			t.Fatal("probe ineffective: the mother was re-attached anyway")
+		}
+		if !w3TopicRow(t, pool, mother).retired {
+			t.Fatal("probe ineffective: the mother is not a tombstone")
+		}
+	})
+
+	// K2-1 counter-gate: the precedence must NOT let a tombstone steal a
+	// cluster from an INDEPENDENT living topic. Organic growth outranks old
+	// graves — that is the other half of decision E2-01.
+	t.Run("independent living topic outranks an unrelated tombstone", func(t *testing.T) {
+		const scope = "indep"
+		grave := w3Blocks(t, pool, scope, 16000, 4)
+		other := w3Blocks(t, pool, scope, 16100, 4)
+		w3Run(t, pool, scope, retention, w3Group{members: grave}, w3Group{members: other})
+		buried := w3TopicOf(t, pool, scope, grave[0])
+
+		// The grave's community disappears entirely ⇒ tombstone with core.
+		w3Run(t, pool, scope, retention, w3Group{members: other})
+		if !w3TopicRow(t, pool, buried).retired {
+			t.Fatal("fixture: the grave topic did not retire")
+		}
+		living := w3TopicOf(t, pool, scope, other[0])
+
+		// Now the grave's blocks come back INSIDE the living community. The
+		// living topic keeps the cluster (4 of 4 continuation) — the tombstone
+		// has no ancestry claim on it.
+		st := w3Run(t, pool, scope, retention, w3Group{members: append(append([]string{}, other...), grave...)})
+		if st.TopicsCarried != 1 || st.TopicsReattached != 0 {
+			t.Fatalf("carried=%d reattached=%d, want 1/0 — an unrelated tombstone must not outrank a living topic",
+				st.TopicsCarried, st.TopicsReattached)
+		}
+		if got := w3TopicOf(t, pool, scope, other[0]); got != living {
+			t.Fatalf("the living topic lost its cluster to a tombstone: %s → %s", living, got)
+		}
+	})
+
 	// RED PROBE for the import gate: switch the tombstone window off — the
 	// same three runs then mint a fresh identity and the map's continuity
 	// across the import is gone.
@@ -680,6 +801,20 @@ func TestW3ScopeMoveIsolation(t *testing.T) {
 			t.Fatalf("red probe: scope-B row carries label %v, expected the scope-A secret", label)
 		}
 	})
+}
+
+// tombWinsSQLForProbe reduces the tombstone precedence to the pre-K2-1
+// behaviour — a tombstone only takes clusters that have no continuation
+// candidate at all — and returns the restore func. Test-only.
+func tombWinsSQLForProbe() func() {
+	prev := tombWinsSQL
+	tombWinsSQL = `
+INSERT INTO ov_match (cluster_id, scope, topic_id, ov, carried)
+SELECT tm.cluster_id, tm.scope, tm.topic_id, tm.ov, true
+  FROM ov_tomb_match tm
+  LEFT JOIN ov_carry c ON c.cluster_id = tm.cluster_id AND c.scope = tm.scope
+ WHERE c.topic_id IS NULL`
+	return func() { tombWinsSQL = prev }
 }
 
 // overviewGlobalSQLForProbe strips the B1b scope binding out of ov_overlap and
