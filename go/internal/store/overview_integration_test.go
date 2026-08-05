@@ -60,7 +60,10 @@ func TestGraphOverview_ScopeNegativeProbes(t *testing.T) {
 	ovInsLink(t, pool, D, E, 0.9)
 	ovInsLink(t, pool, E, F, 0.9)
 	ovInsLink(t, pool, D, F, 0.9)
-	ovInsLink(t, pool, C, F, 0.05) // bridge
+	// Bridge, deliberately in the NON-ALIGNED orientation: the source block F
+	// sits in the cluster with the LARGER uuid, so cluster_a/cluster_b are
+	// swapped by LEAST/GREATEST while scope_s/scope_t are not — the K1-2 case.
+	ovInsLink(t, pool, F, C, 0.05)
 
 	if _, err := overview.Rebuild(ctx, pool, overview.Options{Resolution: 1.0, VisibleTypes: []string{"knowledge"}, OverviewTypes: []string{"knowledge"}}); err != nil {
 		t.Fatalf("rebuild: %v", err)

@@ -653,11 +653,30 @@ var nodeAggScopedSQL = fmt.Sprintf(nodeAggTemplate, visibility.TypeVisible("b", 
 // rule, 057 header). Mixed cross-partition rows left over from a pre-B
 // GLOBAL run are swept by the OR edge teardown (B-W6, see teardown) and —
 // with this AND — never re-created.
+// K1-2: the scope pair is swapped TOGETHER with the cluster pair.
+//
+// cluster_a/cluster_b are normalised by LEAST/GREATEST (the 057 CHECK demands
+// cluster_a < cluster_b), but scope_s/scope_t used to stay bound to the LINK's
+// source and target. Whenever the source block's cluster carried the larger
+// uuid, the row therefore paired cluster_a with the scope of the OTHER endpoint.
+//
+// That was invisible for as long as nothing read the two together — the scope
+// filters of the read path, the teardown and the meta count are all symmetric.
+// Since W7 the identity read path resolves an endpoint as (cluster, scope),
+// because a topic is a (cluster, scope) partition; a swapped pair then either
+// resolves to no node at all (the edge silently disappears) or, in a
+// scope-crossing cluster, to the WRONG half. The whole reason the identity path
+// keeps the scope pair is to make that lookup exact, so the pair has to be
+// oriented like the cluster pair it belongs to.
+//
+// `<=` rather than `<` only for symmetry with LEAST; the equal case is excluded
+// by the WHERE (ms.cluster_id <> mt.cluster_id) anyway.
 const edgeAggTemplate = `
 INSERT INTO graph_cluster_edge (cluster_a, cluster_b, scope_s, scope_t, link_count, weight_sum)
 SELECT LEAST(ms.cluster_id, mt.cluster_id),
        GREATEST(ms.cluster_id, mt.cluster_id),
-       bs.scope, bt.scope,
+       CASE WHEN ms.cluster_id <= mt.cluster_id THEN bs.scope ELSE bt.scope END,
+       CASE WHEN ms.cluster_id <= mt.cluster_id THEN bt.scope ELSE bs.scope END,
        count(*)::int, sum(l.raw_confidence)::real
 FROM context_dream_links l
 JOIN graph_cluster_member ms ON ms.block_id = l.source_block_id
@@ -665,7 +684,7 @@ JOIN graph_cluster_member mt ON mt.block_id = l.target_block_id
 JOIN context_blocks bs ON bs.id = l.source_block_id AND %s
 JOIN context_blocks bt ON bt.id = l.target_block_id AND %s
 WHERE l.relationship <> 'supersedes' AND ms.cluster_id <> mt.cluster_id%s
-GROUP BY 1, 2, bs.scope, bt.scope`
+GROUP BY 1, 2, 3, 4`
 
 var edgeAggSQL = fmt.Sprintf(edgeAggTemplate,
 	visibility.TypeVisible("bs", "$1"), visibility.TypeVisible("bt", "$1"), "")

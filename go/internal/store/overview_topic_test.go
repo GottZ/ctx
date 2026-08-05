@@ -87,6 +87,27 @@ func TestProjectEdgesOntoTopics(t *testing.T) {
 		}
 	})
 
+	// The pairing is POSITIONAL: A belongs to ScopeA and B to ScopeB. A row
+	// whose scope pair is oriented against its cluster pair — the K1-2 defect
+	// in graph_cluster_edge — resolves to nothing, which is what made the bug
+	// look like "the edge is simply gone" instead of like a wrong answer.
+	t.Run("the scope pair is read positionally, not interchangeably", func(t *testing.T) {
+		mixed := []OverviewNode{
+			{ClusterID: "c-aaa", TopicID: "t-priv", ScopeMix: []string{"private"}},
+			{ClusterID: "c-bbb", TopicID: "t-work", ScopeMix: []string{"work"}},
+		}
+		aligned := projectEdgesOntoTopics([]OverviewEdge{
+			{A: "c-aaa", B: "c-bbb", ScopeA: "private", ScopeB: "work", LinkCount: 1, Weight: 1}}, mixed)
+		if len(aligned) != 1 || aligned[0].A != "t-priv" || aligned[0].B != "t-work" {
+			t.Fatalf("aligned pair did not resolve: %+v", aligned)
+		}
+		swapped := projectEdgesOntoTopics([]OverviewEdge{
+			{A: "c-aaa", B: "c-bbb", ScopeA: "work", ScopeB: "private", LinkCount: 1, Weight: 1}}, mixed)
+		if len(swapped) != 0 {
+			t.Fatalf("a swapped scope pair resolved anyway: %+v — the lookup is not positional", swapped)
+		}
+	})
+
 	// An endpoint whose partition is not in the result — below min_cluster_size,
 	// past the node limit — has no ordinal, so its edge is dropped.
 	t.Run("an endpoint scope that is not in the result is dropped", func(t *testing.T) {
