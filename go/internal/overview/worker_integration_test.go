@@ -145,6 +145,13 @@ func TestWorkerRoundtrip_IdenticalDBRows(t *testing.T) {
 		s.TopicsCarried, s.TopicsReattached = 0, 0
 		s.TopicsBorn, s.TopicsSplit, s.TopicsRetired = 0, 0, 0
 		s.MembersChanged, s.MembersReassigned = 0, 0
+		// Since S2 Stats also carries WALL-CLOCK telemetry (journal fields).
+		// Two runs never share a wall clock, so these are normalised out for
+		// the same reason the lifecycle counters are — they describe the RUN,
+		// not the partition. The deterministic S-fields (PartitionHash,
+		// EdgeCount, SigmaDrift, Engine, …) stay in the byte-equality claim.
+		s.LoadMs, s.ClusterMs, s.PersistMs = 0, 0, 0
+		s.LockHeldMs, s.CopyMs, s.PeakRSSKb = 0, 0, 0
 	}
 	if !reflect.DeepEqual(compWorker, compInProc) {
 		t.Errorf("worker stats diverge from in-process stats:\n  in-process: %+v\n  worker    : %+v", statsInProc, statsWorker)
