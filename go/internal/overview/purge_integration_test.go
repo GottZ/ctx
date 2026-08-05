@@ -275,9 +275,17 @@ func TestW8PurgeIsBatchedAndLockFree(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	const scope = "w8bulk"
-	// Deliberately more than two batches, so the loop is exercised rather than
-	// the single-statement case.
-	const graves = 12000
+	// The design's switch-on size, not a token amount: tombstone_retention is
+	// legitimately 0 for months, and turning it on then makes the FIRST purge a
+	// six-figure DELETE. That is the run this gate has to cover.
+	//
+	// MEASURED 2026-08-05, same host, same image, testcontainers PG18:
+	//   200.000 graves purged in 4,85 s over 40 rounds of 5.000 — the whole time
+	//   under a HELD persist advisory lock on a separate session. The lock is the
+	//   sharper half of the assertion: the Revision-1 shape, which ran the purge
+	//   inside the persist transaction, could not have made a single row of
+	//   progress here.
+	const graves = 200000
 
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO graph_cluster_topic (scope, created_at, last_seen_at, retired_at)
@@ -304,7 +312,7 @@ func TestW8PurgeIsBatchedAndLockFree(t *testing.T) {
 		}
 	}()
 
-	deadline, cancel := context.WithTimeout(ctx, 60*time.Second)
+	deadline, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	n, err := PurgeTombstones(deadline, pool, []string{scope}, w8Retention)
 	if err != nil {

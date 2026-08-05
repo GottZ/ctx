@@ -273,6 +273,25 @@ UPDATE graph_cluster_topic
 // interval and eats a slot of the batch cap against topics that could actually
 // be named. Its deterministic fallback name IS its final name for this core
 // generation; when the core drifts, W5 flips label_stale back on.
+//
+// THE QUIESCE IS STICKY, AND THAT IS A DECISION (K3). Turning
+// label_credentials_fallback_only back OFF does not re-arm the topics the knob
+// already quiesced — the arm reads a fresh config snapshot every tick and has
+// no memory of the previous value, so "the knob just changed" is not a fact it
+// can observe. Re-arming automatically would mean selecting on
+// `label_source='fallback' AND label_core_hash IS NOT NULL` whenever the knob is
+// off, i.e. a second index range next to the stale one: the selection would stop
+// being the narrow index scan idx_gct_label_pending was built for, permanently,
+// to serve a rare and deliberate transition. Rejected.
+//
+// The levers that do exist: the topic re-arms by itself on the next core drift,
+// or the operator re-arms the whole set in one statement —
+//
+//	UPDATE graph_cluster_topic SET label_stale = true
+//	 WHERE label_source = 'fallback' AND label_core_hash IS NOT NULL
+//	   AND retired_at IS NULL;
+//
+// documented in docs/operations.md next to the knob.
 const quiesceSQL = `
 UPDATE graph_cluster_topic
    SET label_core_hash = $2, label_stale = false

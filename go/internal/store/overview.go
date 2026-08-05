@@ -449,7 +449,14 @@ func fillTopCategories(ctx context.Context, pool *pgxpool.Pool, nodes []Overview
 	return nil
 }
 
-// overviewEdgesLegacySQL is the pre-W7 aggregation, byte-identical.
+// overviewEdgesLegacySQL is the pre-W7 aggregation.
+//
+// The aggregate itself — filter, GROUP BY, HAVING, ORDER BY, LIMIT — is
+// unchanged; what it gained is two empty-string literals in the projection, so
+// both paths scan into the same six-column row shape. The scope pair is
+// meaningless on this path (a legacy node is a cluster summed over its scopes)
+// and is deliberately empty rather than absent: one Scan signature, no
+// path-dependent column count to get wrong.
 const overviewEdgesLegacySQL = `
 	SELECT cluster_a::text, cluster_b::text, '', '', sum(link_count)::int, sum(weight_sum)::float8
 	FROM graph_cluster_edge
