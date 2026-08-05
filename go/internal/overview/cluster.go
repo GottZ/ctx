@@ -53,11 +53,17 @@ const (
 // transaction. That is the difference between single- and double-digit seconds
 // of lock hold time.
 //
-// Code-owned, not a config key: this is the dimensioning of a known working
-// set, not a policy. It can only be set while the session has not yet touched a
-// temp table, which makes the first statement of the persist tx the only
-// possible place. A var rather than a const solely so the W3-G11 gate can
-// measure the spill it prevents; production never writes to it.
+// Code-owned, not a config key — and it MUST NOT become one. PostgreSQL
+// rejects a CHANGE of temp_buffers once the session has touched a temp table,
+// with SQLSTATE 22023 (the same code as a range violation, so the error reads
+// like a bad value). Pool connections are reused across rebuilds, so a
+// hot-reloadable knob would work exactly once per connection and then poison
+// every persist that landed on an already-used one. The value stays a constant
+// of the code, set as the FIRST statement of the transaction — the only point
+// at which it can be set at all.
+//
+// A var rather than a const solely so the W3-G11 gate can measure the spill it
+// prevents; production never writes to it.
 var persistTempBuffers = "64MB"
 
 // Stats is the result of one rebuild for logging/telemetry.

@@ -51,10 +51,14 @@
 //
 // INJECTIVITY has three lines of defence, in this order: the mutual-plurality
 // construction itself (each cluster has at most one argmax topic and vice
-// versa), the UNIQUE index on ov_match(topic_id) which breaks with 23505 at
-// the cause, and uq_gcn_scope_topic (migration 124) which covers any path that
-// bypasses ov_match. All three roll the persist tx back and leave the previous
-// map readable.
+// versa), the UNIQUE indexes on ov_carry(topic_id) and ov_match(topic_id),
+// which break with 23505 at the cause and hold ACROSS scopes, and
+// uq_gcn_scope_topic (migration 124), which catches any path that bypasses the
+// temps but is (scope, topic_id) — it therefore guarantees uniqueness WITHIN a
+// scope only. That is not a gap: a topic belongs to exactly one scope by
+// construction (I1), so a second scope claiming the same topic_id would be a
+// different, and louder, defect. All three roll the persist tx back and leave
+// the previous map readable.
 //
 // Everything here runs INSIDE the existing advisory-locked persist tx and on
 // TEMP tables (ON COMMIT DROP, so they live in temp_buffers/pgsql_tmp, not on
@@ -66,6 +70,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -260,6 +265,28 @@ func execPlain(ctx context.Context, tx pgx.Tx, label, sql string, args ...any) (
 	return tag.RowsAffected(), nil
 }
 
+// analyze collects statistics on a freshly filled temp table.
+//
+// Autovacuum NEVER touches temp tables — they live in the session's own
+// namespace and the autovacuum worker cannot see them. Without an explicit
+// ANALYZE the planner works from its hardcoded default (a few hundred rows) for
+// EVERY one of them, no matter whether the run holds 60 clusters or 200.000
+// members. At the live corpus that guesses right by accident; at the target
+// scale it picks nested loops over hash joins inside the advisory lock, which
+// is the one place in this system where a bad plan is measured in lock hold
+// time. The cost is a sampling pass over a table that is already in
+// temp_buffers.
+//
+// A failure here is NOT fatal: statistics are an optimisation, and a rebuild
+// that dies because it could not collect them would trade a slow map for no
+// map. It is logged and the run continues.
+func analyze(ctx context.Context, tx pgx.Tx, table string) {
+	if _, err := tx.Exec(ctx, "ANALYZE "+table); err != nil {
+		slog.Warn("overview: could not analyze identity temp table — the planner keeps its default estimate",
+			"table", table, "error", err)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 0 — the predecessor snapshot, BEFORE the teardown.
 
@@ -301,8 +328,11 @@ func (p topicPhase) snapshotPrevTopics(ctx context.Context, tx pgx.Tx) error {
 	if _, err := execPlain(ctx, tx, "create ov_prev", createPrevSQL); err != nil {
 		return err
 	}
-	_, err := p.exec(ctx, tx, "predecessor snapshot", prevSnapshotGlobalSQL, prevSnapshotScopedSQL)
-	return err
+	if _, err := p.exec(ctx, tx, "predecessor snapshot", prevSnapshotGlobalSQL, prevSnapshotScopedSQL); err != nil {
+		return err
+	}
+	analyze(ctx, tx, "ov_prev")
+	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -344,9 +374,10 @@ var topicTempDDL = []string{
 	     ov INT NOT NULL, carried BOOL NOT NULL,
 	     PRIMARY KEY (cluster_id, scope)) ON COMMIT DROP`,
 	// First line of defence against B2 (identity fusion): it breaks with 23505
-	// at the CAUSE instead of carrying the defect down to uq_gcn_scope_topic
-	// (which guards the same property one level down, WITHIN a scope — the
-	// persistent index is (scope, topic_id), not (topic_id)).
+	// at the CAUSE instead of carrying the defect down to uq_gcn_scope_topic —
+	// which guards the same property but only WITHIN a scope, because the
+	// persistent index is (scope, topic_id), not (topic_id). This one is
+	// global over the run.
 	`CREATE UNIQUE INDEX ov_match_topic_uq ON ov_match (topic_id)`,
 	`CREATE TEMP TABLE ov_unmatched (
 	     cluster_id UUID NOT NULL, scope TEXT NOT NULL, size_new INT NOT NULL,
@@ -491,6 +522,7 @@ func (p topicPhase) matchCarry(ctx context.Context, tx pgx.Tx) error {
 	if _, err := p.exec(ctx, tx, "overlap", overlapGlobalSQL, overlapScopedSQL); err != nil {
 		return err
 	}
+	analyze(ctx, tx, "ov_overlap")
 	for _, s := range []struct{ label, sql string }{
 		{"argmax per cluster", bestClusterSQL},
 		{"argmax per topic", bestTopicSQL},
@@ -502,6 +534,7 @@ func (p topicPhase) matchCarry(ctx context.Context, tx pgx.Tx) error {
 	if _, err := execPlain(ctx, tx, "carry candidates", carrySQL); err != nil {
 		return err
 	}
+	analyze(ctx, tx, "ov_carry")
 	_, err := p.exec(ctx, tx, "run scopes", runScopesGlobalSQL, runScopesScopedSQL)
 	return err
 }
@@ -519,6 +552,19 @@ func (p topicPhase) matchCarry(ctx context.Context, tx pgx.Tx) error {
 // produced clusters in. That is the correct bound in BOTH run shapes: the
 // scoped run's filter is a superset of it, and the GLOBAL run has no filter at
 // all and would otherwise unnest every tombstone in the database (K3-2).
+//
+// core_n IS cardinality(core_blocks), i.e. the size of the core AT DEATH — it
+// keeps counting core blocks that have since been DELETED from context_blocks
+// (core_blocks is a plain uuid[] with no foreign key, by design: the array has
+// to survive the block, that is what makes it a tombstone). That is deliberate
+// strictness, not an oversight. The bar reads "at least half of the substance
+// this topic had when it died came back"; a block that was deleted is substance
+// that did not come back, and counting it as neutral would let a single
+// survivor of a twelve-block core resurrect the identity. Named consequence: a
+// tombstone whose core was largely deleted becomes unreattachable and the
+// re-appearing community is a birth — the conservative direction, since a
+// missed re-attach costs continuity while a wrong one hands an old label to a
+// new community.
 const tombExpandSQL = `
 INSERT INTO ov_tomb (topic_id, scope, block_id, core_n)
 SELECT t.topic_id, t.scope, cb, cardinality(t.core_blocks)
@@ -678,6 +724,7 @@ func (p topicPhase) probeTombstones(ctx context.Context, tx pgx.Tx) error {
 	if _, err := execPlain(ctx, tx, "tombstone cores", tombExpandSQL, p.tombstone.Seconds()); err != nil {
 		return err
 	}
+	analyze(ctx, tx, "ov_tomb")
 	for _, s := range []struct{ label, sql string }{
 		{"tombstone overlap", tombOverlapSQL},
 		{"tombstone argmax per cluster", tombBestClusterSQL},
@@ -706,6 +753,7 @@ func resolve(ctx context.Context, tx pgx.Tx, st *topicStats) error {
 		return err
 	}
 	st.carried = int(carried)
+	analyze(ctx, tx, "ov_match")
 	_, err = execPlain(ctx, tx, "revive", reviveSQL)
 	return err
 }
@@ -833,6 +881,7 @@ func (p topicPhase) mintAndRetire(ctx context.Context, tx pgx.Tx, st *topicStats
 	if _, err := p.exec(ctx, tx, "unmatched clusters", unmatchedGlobalSQL, unmatchedScopedSQL); err != nil {
 		return err
 	}
+	analyze(ctx, tx, "ov_unmatched")
 	minted, err := execPlain(ctx, tx, "birth/split", mintTemplate)
 	if err != nil {
 		return err
