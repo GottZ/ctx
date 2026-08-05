@@ -60,6 +60,20 @@ type SearchResult struct {
 	// §5.1), and the stable, non-block-derived handle only exists from C5.
 	ClusterBoost float64 `json:"cluster_boost,omitempty"`
 
+	// ViaCluster is the C9 injection provenance, the exact counterpart of
+	// ViaGraph one field up: true only for a block the CLUSTER stage newly
+	// introduced (a sibling of a winning cluster that RRF did not return), never
+	// for a native hit that merely got reinforced. Zero-valued and omitted
+	// everywhere else, so the wire stays byte-identical while cluster.inject_max
+	// is 0 — which is the default, and which is what "the build stays dark"
+	// means for this field.
+	//
+	// There is no ClusterSeedID counterpart to GraphSeedID: the graph stage
+	// injects along ONE edge and can name it, while cluster evidence is the
+	// membership of a whole community — the honest attribution is the community,
+	// and that is what ClusterBoost's share already carries.
+	ViaCluster bool `json:"via_cluster,omitempty"`
+
 	// MatchedComment is the aggregate-to-parent fold's issue-specific response
 	// contract (Achse-02 I-E, design/02 §4.4): when a comment folds onto its
 	// parent issue, the delivered issue row carries the best-ranked child comment

@@ -1483,6 +1483,11 @@ func (c *Config) ClusterRRF() rrf.ClusterConfig {
 		CentroidWeight:   c.Cluster.CentroidWeight,
 		CentroidTopK:     c.Cluster.CentroidTopK,
 		CentroidEFSearch: c.ClusterOps.CentroidEFSearch,
+
+		// C9: the one knob that can change the result SET instead of its order.
+		// Default 0 = the stage never injects; arming it follows the eval
+		// measurement, never a deploy.
+		InjectMax: c.Cluster.InjectMax,
 	}
 }
 

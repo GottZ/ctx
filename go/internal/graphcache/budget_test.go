@@ -32,6 +32,9 @@ func TestTravClassTokens(t *testing.T) {
 		TravClusterBoosted: "cluster_boosted",
 		// Cluster-Topic-Map C8: the query-independent centroid probe's cost posten.
 		TravClusterCentroid: "cluster_centroid",
+		// Cluster-Topic-Map C9: the injection cut of the categorical stage, kept
+		// apart from the graph stage's inject_capped so the log says WHICH knob.
+		TravClusterInjectCapped: "cluster_inject_capped",
 		// Cluster-Topic-Map C4: the staleness fail-safe of the retrieval stage.
 		TravClusterStale: "cluster_stale",
 		TravCacheStale:   "cache_stale",
@@ -64,7 +67,7 @@ func TestTravClassLayers(t *testing.T) {
 		TravDepthCapped, TravFrontierCapped, TravVisitedCapped,
 		TravCandidatesCapped, TravInjectCapped, TravSeedFloorCapped, TravTimeCapped,
 		TravClusterAnnotateProbe, TravClusterAnnotateCapped, TravClusterBoosted,
-		TravClusterCentroid,
+		TravClusterCentroid, TravClusterInjectCapped,
 	}
 	operational := []TravClass{TravClusterStale, TravCacheStale, TravRecheckError}
 

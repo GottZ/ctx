@@ -87,12 +87,12 @@ func TestCentroidColdStartFallsBackToSeeds(t *testing.T) {
 	in := c3Results(12, "private")
 	scopes := []string{"private"}
 
-	seedOnly, _, err := rrf.ClusterBoost(ctx, pool, in, nil, scopes, c3Cfg(), c3Now())
+	seedOnly, _, err := rrf.ClusterBoost(ctx, pool, in, nil, scopes, nil, c9Types(), c3Cfg(), c3Now())
 	if err != nil {
 		t.Fatalf("seed-only: %v", err)
 	}
 	// Centroid arm ON, table EMPTY, with a query embedding present.
-	cold, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), scopes, c8ReadCfg(), c3Now())
+	cold, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), scopes, nil, c9Types(), c8ReadCfg(), c3Now())
 	if err != nil {
 		t.Fatalf("cold start: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestCentroidScopeFilterFailsClosed(t *testing.T) {
 	cfg := c8ReadCfg()
 	cfg.MinShare = 0.6 // seeds alone cannot win; only the centroid could tip it
 
-	got, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), []string{"private"}, cfg, c3Now())
+	got, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), []string{"private"}, nil, c9Types(), cfg, c3Now())
 	if err != nil {
 		t.Fatalf("boost: %v", err)
 	}
@@ -155,13 +155,13 @@ func TestCentroidBreaksTheCircularity(t *testing.T) {
 
 	off := cfg
 	off.CentroidWeight = 0
-	base, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), []string{"private"}, off, c3Now())
+	base, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), []string{"private"}, nil, c9Types(), off, c3Now())
 	if err != nil {
 		t.Fatalf("weight-0 arm: %v", err)
 	}
 	c3Equal(t, base, in, "weight 0 must reproduce the seed-only outcome")
 
-	got, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), []string{"private"}, cfg, c3Now())
+	got, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), []string{"private"}, nil, c9Types(), cfg, c3Now())
 	if err != nil {
 		t.Fatalf("centroid arm: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestCentroidRespectsStalenessGate(t *testing.T) {
 	cfg.MinShare = 0.6
 
 	stale := c3Fresh{at: time.Now().Add(-7 * 24 * time.Hour)}
-	got, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), []string{"private"}, cfg, stale)
+	got, _, err := rrf.ClusterBoost(ctx, pool, in, c8OneHot(t, pool, 7), []string{"private"}, nil, c9Types(), cfg, stale)
 	if err != nil {
 		t.Fatalf("stale boost: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestCentroidReadLatencyGate(t *testing.T) {
 		var samples []time.Duration
 		for i := 0; i < 40; i++ {
 			start := time.Now()
-			if _, _, err := rrf.ClusterBoost(ctx, pool, in, embedding, scopes, cfg, c3Now()); err != nil {
+			if _, _, err := rrf.ClusterBoost(ctx, pool, in, embedding, scopes, nil, c9Types(), cfg, c3Now()); err != nil {
 				t.Fatalf("boost: %v", err)
 			}
 			samples = append(samples, time.Since(start))

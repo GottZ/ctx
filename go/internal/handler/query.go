@@ -125,11 +125,12 @@ func (h *QueryHandler) expandCache(cfg *config.Config) rrf.ExpandCache {
 // forbids.
 func (h *QueryHandler) SetClusterFreshness(src rrf.ClusterFreshness) { h.clusterFresh = src }
 
-func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.SearchResult, embedding []float32, readScopes []string, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
+func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.SearchResult, embedding []float32,
+	readScopes, grantedBlockIDs, visibleTypes []string, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
 	if !cfg.Enabled {
 		return results
 	}
-	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, embedding, readScopes, cfg, h.clusterFresh)
+	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, embedding, readScopes, grantedBlockIDs, visibleTypes, cfg, h.clusterFresh)
 	if err != nil {
 		slog.Warn("cluster boost failed; using pre-boost results",
 			"error", err,
@@ -145,6 +146,11 @@ func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.Sear
 			// prior came from the hits" and "the prior came from the question" are
 			// the two things this stage can mean.
 			"centroid_probe", rep.Count(graphcache.TravClusterCentroid),
+			// C9: how many unseen siblings the stage ADDED, reported apart from
+			// the boost count because they are different claims — one reorders
+			// what retrieval found, the other extends it.
+			"injected", len(boosted)-len(results),
+			"inject_capped", rep.Count(graphcache.TravClusterInjectCapped),
 			"request_id", requestID,
 		)
 	}
@@ -852,7 +858,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// C8 threads the QUERY EMBEDDING through: it already exists (it was produced
 	// for rrf.Search above), so the query-independent centroid arm costs no extra
 	// model roundtrip, no backend dispatch and no LLM latency.
-	results = h.applyClusterBoost(ctx, results, embedding, ar.ReadScopes, cfg.ClusterRRF(), requestID)
+	// C9 additionally threads the SAME grant set and type allowlist that gate
+	// rrf.Search and GraphExpand: the moment the stage may INTRODUCE a block, the
+	// membership scope filter alone is not enough — the block's own visibility
+	// has to hold, from the one per-request policy source (§5.4).
+	results = h.applyClusterBoost(ctx, results, embedding, ar.ReadScopes, grantedBlockIDs, visibleTypes, cfg.ClusterRRF(), requestID)
 
 	// Step 6a-graph: Dream-graph expansion (GottZ Graph Expansion, Wave 1).
 	// Post-RRF, post-gravity (so seeds enter sorted by boosted RRFScore) and

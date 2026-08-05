@@ -31,6 +31,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/clustersql"
 	"github.com/GottZ/ctx/internal/graphcache"
+	"github.com/GottZ/ctx/internal/visibility"
 )
 
 // ClusterConfig is the sweep surface of the cluster stage — the ranking half of
@@ -94,6 +95,20 @@ type ClusterConfig struct {
 	// threshold index does not exist (the default) and is set ANYWAY, so that
 	// arming the index is never a silent recall change (§4.6).
 	CentroidEFSearch int
+
+	// ── C9: the injection (design/03 §4.9/§5.4) ────────────────────────────
+	//
+	// InjectMax caps how many UNSEEN blocks of a winning cluster the stage may
+	// append — blocks RRF did not return at all. Default 0 = the stage never
+	// injects, and arming it is a deliberate step after the eval measurement,
+	// never a side effect of a deploy.
+	//
+	// This is the ONLY knob of the stage that can change the result SET rather
+	// than its order, which is why it is separate from BoostWeight: "reinforce
+	// what was found" and "add what was not" are different claims about how much
+	// the cluster map is trusted, and an operator must be able to make them
+	// independently.
+	InjectMax int
 }
 
 // ClusterFreshness is the narrow seam that answers "how old is the cluster map
@@ -553,7 +568,8 @@ func fuseShares(seed, centroid map[string]float64, weight float64) map[string]fl
 // The report is SERVER TELEMETRY. Unlike the ego path, the query envelope never
 // carries a budget report (§4.5 behaviour matrix) — retrieval quality is a blend,
 // not a completeness contract.
-func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, embedding []float32, readScopes []string, cfg ClusterConfig, fresh ClusterFreshness) ([]SearchResult, *graphcache.BudgetReport, error) {
+func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, embedding []float32,
+	readScopes, grantedBlockIDs, visibleTypes []string, cfg ClusterConfig, fresh ClusterFreshness) ([]SearchResult, *graphcache.BudgetReport, error) {
 	rep := graphcache.NewBudgetReport(graphcache.SourceSQL)
 	if !cfg.Enabled || len(results) == 0 || len(readScopes) == 0 {
 		return results, rep, nil
@@ -608,7 +624,60 @@ func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResul
 
 	seedShares := clusterShares(results, memberOf, sizes, totalSize, cfg)
 	winners := pickWinners(fuseShares(seedShares, centroid, cfg.CentroidWeight), cfg)
-	return fuseClusters(results, memberOf, winners, cfg, rep), rep, nil
+	boosted := fuseClusters(results, memberOf, winners, cfg, rep)
+
+	// C9: the injection runs AFTER the boost and inside this stage, i.e. still
+	// BEFORE GraphExpand (§4.5's stage order). Both halves of that placement are
+	// load-bearing. After the boost, because the winners and their shares are
+	// what decides who may be injected and how strongly. Before GraphExpand,
+	// because an injected sibling then becomes a legitimate graph seed — the
+	// categorical prior gets to nominate the thread the edge traversal follows,
+	// which is the whole reason the cluster stage sits ahead of the graph stage.
+	//
+	// Default 0 ⇒ this returns `boosted` unchanged, so a deployed-but-unarmed C9
+	// costs exactly one integer comparison.
+	if cfg.InjectMax > 0 && len(winners) > 0 {
+		injected, err := injectDispatch(ctx, pool, boosted, winners, readScopes, grantedBlockIDs, visibleTypes, cfg, rep)
+		if err != nil {
+			// FAIL-OPEN, as everywhere in this stage: the BOOSTED results are the
+			// honest fallback — the boost already succeeded, and discarding it
+			// because an optional addition failed would punish the caller twice.
+			return boosted, rep, err
+		}
+		return injected, rep, nil
+	}
+	return boosted, rep, nil
+}
+
+// injectDispatch is the one DB touch of the C9 half, split out so ClusterBoost
+// stays inside the cyclop budget.
+//
+// The fetch limit is InjectMax × |winners| rather than InjectMax: the SQL orders
+// by quality across ALL winning clusters, so a single high-quality cluster could
+// otherwise starve its sibling out of the candidate pool before the share-first
+// cut in injectClusterMembers ever sees it. Both factors are small and bounded
+// by config (TopClusters × InjectMax), so this is a widened window, not an
+// unbounded read.
+func injectDispatch(ctx context.Context, pool *pgxpool.Pool, boosted []SearchResult,
+	winners map[string]float64, readScopes, grantedBlockIDs, visibleTypes []string,
+	cfg ClusterConfig, rep *graphcache.BudgetReport) ([]SearchResult, error) {
+	winnerIDs := make([]string, 0, len(winners))
+	for id := range winners {
+		winnerIDs = append(winnerIDs, id)
+	}
+	sort.Strings(winnerIDs) // deterministic parameter order
+
+	seen := make([]string, len(boosted))
+	for i := range boosted {
+		seen[i] = boosted[i].ID
+	}
+
+	cands, err := fetchClusterInjection(ctx, pool, winnerIDs, seen, readScopes,
+		grantedBlockIDs, visibleTypes, cfg.InjectMax*len(winnerIDs))
+	if err != nil {
+		return nil, err
+	}
+	return injectClusterMembers(boosted, cands, winners, cfg, rep), nil
 }
 
 // candidateClusters is the deduplicated, sorted union of the two arms' cluster
@@ -637,5 +706,164 @@ func candidateClusters(results []SearchResult, memberOf map[string]string, centr
 		out = append(out, cid)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// ── C9: the injection (design/03 §4.9/§5.4, §7 "C9") ────────────────────────
+//
+// Everything above reinforces what RRF already returned. This part ADDS: unseen
+// siblings of a winning cluster, appended with a deliberately low synthetic
+// score. It is the NEW-neighbour path of the graph stage (graph.go's `news`
+// slice) on CLUSTER evidence instead of EDGE evidence, and it is the one place
+// where the stage can change the result SET rather than its order — hence its
+// own knob, its own default of 0, and its own gates.
+
+// clusterCandidate is one hydrated unseen sibling.
+type clusterCandidate struct {
+	block     SearchResult
+	clusterID string
+	quality   float64
+}
+
+// fetchClusterInjection hydrates the unseen members of the winning clusters.
+//
+// THE VISIBILITY CONTRACT IS THE SAME ONE fetchNeighbors BINDS, and for the same
+// reason: the moment a stage introduces a block the caller did not ask for, the
+// membership scope filter alone is not enough — the BLOCK's own visibility has
+// to hold too. visibility.Predicate carries the load-bearing parentheses
+// (visibility.go:52-60: AND binds tighter than OR); without them a granted
+// archived or type-invisible block leaks through the OR arm.
+//
+// Two conjunctions, not one, and they answer different questions:
+// clustersql.MemberOf gates WHICH MEMBERSHIP ROWS may be read (the community
+// side channel, R3), visibility.Predicate gates WHICH BLOCKS may be delivered.
+// Dropping either one is a leak of a different kind.
+func fetchClusterInjection(ctx context.Context, pool *pgxpool.Pool,
+	clusterIDs, excludeIDs, readScopes, grantedBlockIDs, visibleTypes []string, limit int) ([]clusterCandidate, error) {
+	if len(clusterIDs) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	if len(visibleTypes) == 0 {
+		// Fail-closed LOUD, verbatim the fetchNeighbors posture: SQL alone would
+		// return 0 rows and a silent empty result masks a wiring bug. The stage's
+		// fail-open contract turns this into "keep the pre-injection results" plus
+		// a caller-side warning — visible, not invisible.
+		return nil, fmt.Errorf("rrf: cluster injection with empty visible-types allowlist (block-type registry not wired?)")
+	}
+	if grantedBlockIDs == nil {
+		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL (T40a)
+	}
+	if excludeIDs == nil {
+		excludeIDs = []string{}
+	}
+
+	q := `
+SELECT cb.id::text, cb.title, cb.category, cb.tags, cb.content, cb.scope::text,
+       cb.updated_at, COALESCE(cb.quality_score, 0)::float8, m.cluster_id::text
+FROM graph_cluster_member m
+JOIN context_blocks cb ON cb.id = m.block_id
+WHERE m.cluster_id = ANY($1::uuid[])
+  AND ` + clustersql.MemberOf("m", "$2") + `
+  AND NOT (cb.id = ANY($3::uuid[]))
+  AND ` + visibility.Predicate("cb", "$4", "$2", "$5") + `
+ORDER BY cb.quality_score DESC NULLS LAST, cb.id
+LIMIT $6`
+
+	rows, err := pool.Query(ctx, q, clusterIDs, readScopes, excludeIDs, visibleTypes, grantedBlockIDs, limit)
+	if err != nil {
+		return nil, fmt.Errorf("rrf: cluster injection: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]clusterCandidate, 0, limit)
+	for rows.Next() {
+		var c clusterCandidate
+		if err := rows.Scan(&c.block.ID, &c.block.Title, &c.block.Category, &c.block.Tags,
+			&c.block.Content, &c.block.Scope, &c.block.UpdatedAt, &c.quality, &c.clusterID); err != nil {
+			return nil, fmt.Errorf("rrf: cluster injection scan: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rrf: cluster injection rows: %w", err)
+	}
+	return out, nil
+}
+
+// injectClusterMembers is PURE: it appends the capped candidates and re-sorts.
+//
+// PLACEMENT WITHOUT A NEW KNOB, and the rule is an argument rather than a
+// constant. The graph stage places a new neighbour at
+// `topScore * NewPlacementFrac * strength` with NewPlacementFrac a tunable. This
+// stage deliberately does NOT add a second knob (C0 owns the cluster.* namespace
+// whole, and the design gives C9 exactly one key), so the fraction is derived
+// from the authority the stage ALREADY declares:
+//
+//	score(new) = topScore * BoostWeight * share
+//
+// A stage that may move a native result by at most (1+BoostWeight) may introduce
+// a block that has ONLY cluster evidence at at most BoostWeight of the top score.
+// That is coherent in both directions: an operator who trusts the cluster map
+// more raises boost_weight, and the injection's reach follows without a second
+// dial to keep in sync. At the shipped 0.12 an injected sibling enters at <=12 %
+// of the top score — inside the candidate window the reranker judges, far below
+// every native hit.
+//
+// The cap keeps the highest-share candidates, tiebreaking on quality and then id
+// — deterministic, the same shape as the graph stage's own cut.
+func injectClusterMembers(results []SearchResult, cands []clusterCandidate,
+	winners map[string]float64, cfg ClusterConfig, rep *graphcache.BudgetReport) []SearchResult {
+	if cfg.InjectMax <= 0 || len(cands) == 0 {
+		return results
+	}
+	var topScore float64
+	for i := range results {
+		if results[i].RRFScore > topScore {
+			topScore = results[i].RRFScore
+		}
+	}
+	if topScore <= 0 {
+		return results // degenerate scores — placement undefined, add nothing
+	}
+
+	sort.Slice(cands, func(i, j int) bool {
+		si, sj := winners[cands[i].clusterID], winners[cands[j].clusterID]
+		if si != sj {
+			return si > sj
+		}
+		if cands[i].quality != cands[j].quality {
+			return cands[i].quality > cands[j].quality
+		}
+		return cands[i].block.ID < cands[j].block.ID
+	})
+	if len(cands) > cfg.InjectMax {
+		rep.Add(graphcache.TravClusterInjectCapped)
+		cands = cands[:cfg.InjectMax]
+	}
+
+	out := make([]SearchResult, len(results), len(results)+len(cands))
+	copy(out, results)
+	for _, c := range cands {
+		share := winners[c.clusterID]
+		if share <= 0 {
+			continue
+		}
+		nb := c.block
+		nb.RRFScore = topScore * cfg.BoostWeight * share
+		// Every derived score field is cleared, exactly as graph.go:749-751 does:
+		// an injected block was never ranked, reranked or embedding-compared in
+		// this request, and carrying a zero value as if it had been measured is
+		// how a synthetic result starts to look native.
+		nb.RRFScoreOriginal = nil
+		nb.RerankScore = nil
+		nb.CosineSim = nil
+		nb.ClusterBoost = share
+		nb.ViaCluster = true
+		out = append(out, nb)
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].RRFScore > out[j].RRFScore
+	})
 	return out
 }

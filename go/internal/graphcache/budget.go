@@ -130,6 +130,14 @@ const (
 	// the documented cold-start state, which is otherwise indistinguishable from
 	// "the arm is not wired".
 	TravClusterCentroid
+	// TravClusterInjectCapped: the cluster stage had more unseen siblings of a
+	// winning cluster than cluster.inject_max allows and cut the surplus
+	// (Cluster-Topic-Map C9). The graph stage's TravInjectCapped says the same
+	// thing about EDGE evidence; the two stay separate because the operator
+	// answer differs — one is a knob on graph.max_injected, the other on
+	// cluster.inject_max, and a shared token would make the log ambiguous about
+	// which one to turn.
+	TravClusterInjectCapped
 
 	// ── Layer OPERATIONAL ── which arm answered, and what failed.
 
@@ -225,6 +233,8 @@ func (c TravClass) String() string {
 		return "cluster_boosted"
 	case TravClusterCentroid:
 		return "cluster_centroid"
+	case TravClusterInjectCapped:
+		return "cluster_inject_capped"
 	case TravClusterStale:
 		return "cluster_stale"
 	case TravCacheStale:
@@ -252,7 +262,7 @@ func (c TravClass) Layer() TravLayer {
 	case TravDepthCapped, TravFrontierCapped, TravVisitedCapped,
 		TravCandidatesCapped, TravInjectCapped, TravSeedFloorCapped, TravTimeCapped,
 		TravClusterAnnotateProbe, TravClusterAnnotateCapped, TravClusterBoosted,
-		TravClusterCentroid:
+		TravClusterCentroid, TravClusterInjectCapped:
 		return LayerBudgets
 	case TravClusterStale, TravCacheStale, TravRecheckError:
 		return LayerOperational
