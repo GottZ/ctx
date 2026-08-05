@@ -118,6 +118,11 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// W05.7: same state gate for the GraphExpand arm of the query path, behind
 	// its own flag graph_cache.serve_expand (also default false).
 	queryHandler.SetGraphCache(scheduler)
+	// C4 (Cluster-Topic-Map, design/03 §4.7): the cluster stage's freshness seam.
+	// Wiring it switches nothing on — cluster.enabled defaults to false. Leaving
+	// it unwired would not switch anything on either: an unwired seam makes the
+	// stage a no-op, never "infinitely fresh".
+	queryHandler.SetClusterFreshness(scheduler)
 	overviewH := handler.NewGraphOverviewHandler(pool, cfgStore)
 	// gamingReload re-builds the config snapshot from context_settings after a
 	// gaming-mode write (F3-P6), so the toggle hits the next chain without a

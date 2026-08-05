@@ -62,6 +62,20 @@ type recallRunSource interface {
 	LastRecallRun() time.Time
 }
 
+// clusterMapSource is the OPTIONAL scheduler slice for the Cluster-Topic-Map C4
+// status section (design/03 §4.6/§4.7). Its OWN narrow interface, kept off
+// armRunSource for the documented reason (the armRunSource trap): folding a
+// method in there would silently drop the guard/digest/overview stamps from
+// /api/status without a compile error.
+//
+// The counter it exposes answers what the cluster_stale trip cannot. The trip
+// says "the retrieval signal is off"; a reproducibly timing-out rebuild produces
+// the same trip as a correctly fail-safed feature. Only this number tells them
+// apart — which is why C4 owes it, not C8.
+type clusterMapSource interface {
+	ConsecutiveOverviewFails() int
+}
+
 // DispatchSource is the in-memory admission-registry view the collector adds as
 // a "cheap source" (design/05 §4.5, MW12): Snapshot is a mutex-guarded map read
 // (no I/O — cheaper than any DB source), Enforcing is the feature-gate predicate.
@@ -138,6 +152,13 @@ type statusResponse struct {
 	// recall metrics reveal scope existence/size and go tenants nothing, §5.3) and
 	// when no recallRunSource is wired (test fakes).
 	Recall *recallStatus `json:"recall,omitempty"`
+	// ClusterMap is the server-admin-only Cluster-Topic-Map C4 section (design/03
+	// §4.6/§4.7). Same Profiles/DB/GraphCache/Recall convention: PRESENT on the
+	// server-admin path when a clusterMapSource is wired (even before the first
+	// rebuild — scopes is then an empty []), ABSENT on the per-tenant path and
+	// when no source is wired. It carries per-scope candidate counts, which are
+	// exactly the corpus-size signal §5 keeps off tenant surfaces.
+	ClusterMap *clusterMapStatus `json:"cluster_map,omitempty"`
 	// EmbedMigration is the server-admin-only Achse-04 re-embed-migration section
 	// (design/04 §5 Bruchpfad 9, W04-7). Pointer + omitempty, the same Profiles/
 	// DB/GraphCache/Recall convention: PRESENT on the server-admin path ONLY when
@@ -292,6 +313,38 @@ type graphCacheStatus struct {
 	Fails          int        `json:"fails"`
 }
 
+// clusterMapScope is one partition of the Louvain landkarte as /api/status
+// renders it (migration 123 columns). skip_reason NULL means the last attempt
+// SUCCEEDED; every other value names why the partition is frozen — except
+// "advisory-lock", which is CONTENTION (another instance built it successfully)
+// and must never be rendered as a cap.
+type clusterMapScope struct {
+	Scope         string     `json:"scope"`
+	ComputedAt    *time.Time `json:"computed_at"`
+	LastAttemptAt *time.Time `json:"last_attempt_at"`
+	SkipReason    string     `json:"skip_reason"`
+	CandidateN    int        `json:"candidate_n"`
+	StalenessMs   int64      `json:"staleness_ms"`
+}
+
+// clusterMapStatus is the /api/status cluster_map block (Cluster-Topic-Map C4).
+//
+// CrossScopeClusters is the K2/A01-1 MONITOR, mandatory in this wave: the number
+// of clusters whose members span more than one scope. Topic identity is
+// scope-BOUND by decision K2 (a handle names one scope-pure theme), and the live
+// measurement is 0 of 59. This number is what turns that invariant from an
+// assumption into an observation — if it ever leaves 0, handles and aggregates
+// have started describing different objects.
+//
+// The count is a GROUP BY over graph_cluster_node, which is bounded by the
+// CLUSTER count, not by corpus size (the same property that makes the landkarte
+// read affordable) — so it rides the normal status tick without its own cadence.
+type clusterMapStatus struct {
+	Scopes              []clusterMapScope `json:"scopes"`
+	ConsecutiveFailures int               `json:"consecutive_failures"`
+	CrossScopeClusters  int               `json:"cross_scope_clusters"`
+}
+
 // dreamStatus flattens scheduler mode + the dream.QueueStats fields (names 1:1,
 // no rename layer) + last_cycle_at (a third source: the last dream-cycle LLM
 // call timestamp).
@@ -391,6 +444,11 @@ type cheapSnapshot struct {
 	// tick (like the dispatch/arm stamps). nil when no graphCacheSource is wired
 	// or its manager is absent — no section emitted (design/05 §4.6).
 	graphCache *graphCacheStatus
+	// clusterMap is the Cluster-Topic-Map C4 section: the per-scope landkarte
+	// liveness (migration 123) plus the consecutive-failure counter and the K2
+	// cross-scope monitor. nil when no clusterMapSource is wired (test fakes) —
+	// no section emitted.
+	clusterMap *clusterMapStatus
 	// recall is the Achse-01 recall_check section (design/01 §4.4): the process
 	// last-run stamp (recallRunSource) plus the latest-per-(stratum,scope,k) DB
 	// read + the 7d invalid count, assembled at the tick. nil when no
@@ -859,6 +917,12 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	if src, ok := c.dreams.(recallRunSource); ok {
 		snap.recall = c.buildRecallStatus(ctx, src.LastRecallRun())
 	}
+	// Cluster-Topic-Map C4 section (design/03 §4.6/§4.7): the per-scope liveness
+	// read plus the in-memory failure counter. Own narrow assertion, so a fake
+	// dreamMode source simply yields no section.
+	if src, ok := c.dreams.(clusterMapSource); ok {
+		snap.clusterMap = c.buildClusterMapStatus(ctx, src.ConsecutiveOverviewFails())
+	}
 	// Achse-04 re-embed-migration section (design/04 §7 W04-7): a DB read in
 	// buildCheap — NOT a narrow scheduler interface — because the migration state
 	// lives ENTIRELY in the context_embed_migrations row (unlike recall, whose
@@ -876,6 +940,59 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	snap.guardReview = c.guardReviewGlobal(ctx, cfg.Events.TickInterval)
 	c.stampLiveness(snap, failsBefore)
 	return snap
+}
+
+// buildClusterMapStatus reads the per-scope landkarte liveness (migration 123)
+// and the K2 cross-scope monitor. Degrades to nil on any read failure — the
+// read-driven posture the neighbouring cheap sources take: no section beats a
+// half-true one, and a status refresh must never fail over an observability
+// block.
+func (c *StatusCollector) buildClusterMapStatus(ctx context.Context, fails int) *clusterMapStatus {
+	out := &clusterMapStatus{Scopes: []clusterMapScope{}, ConsecutiveFailures: fails}
+
+	rows, err := c.pool.Query(ctx, `
+		SELECT scope, computed_at, last_attempt_at,
+		       COALESCE(skip_reason, ''), COALESCE(candidate_n, 0)
+		FROM graph_overview_meta
+		ORDER BY scope`)
+	if err != nil {
+		c.noteDBFail("status: cluster_map liveness read failed", err)
+		return nil
+	}
+	defer rows.Close()
+	now := time.Now()
+	for rows.Next() {
+		var r clusterMapScope
+		if err := rows.Scan(&r.Scope, &r.ComputedAt, &r.LastAttemptAt, &r.SkipReason, &r.CandidateN); err != nil {
+			c.noteDBFail("status: cluster_map liveness scan failed", err)
+			return nil
+		}
+		// staleness_ms follows the graph_cache convention: the age of the last
+		// SUCCESS, not of the last attempt. -1 = never successfully built, which
+		// is a different statement from "0 ms old" and must not collapse into it.
+		r.StalenessMs = -1
+		if r.ComputedAt != nil {
+			r.StalenessMs = now.Sub(*r.ComputedAt).Milliseconds()
+		}
+		out.Scopes = append(out.Scopes, r)
+	}
+	if rows.Err() != nil {
+		c.noteDBFail("status: cluster_map liveness rows failed", rows.Err())
+		return nil
+	}
+
+	// K2 / amendment A01-1 monitor: clusters spanning more than one scope. Live
+	// expectation is 0 — topic identity is scope-bound, so a non-zero value means
+	// a handle and its aggregate have started describing different objects.
+	if err := c.pool.QueryRow(ctx, `
+		SELECT count(*)::int FROM (
+			SELECT cluster_id FROM graph_cluster_node
+			GROUP BY cluster_id HAVING count(DISTINCT scope) > 1
+		) spanning`).Scan(&out.CrossScopeClusters); err != nil {
+		c.noteDBFail("status: cluster_map cross-scope monitor failed", err)
+		return nil
+	}
+	return out
 }
 
 // embedMigrationPendingIndexGuardMsg is logged when the active-migration read
@@ -1093,6 +1210,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		// omitted when no recallRunSource is wired). The per-tenant
 		// SnapshotForTenant never calls assemble, so its field stays nil → absent.
 		Recall: cheap.recall,
+		// cluster_map is server-admin-only and PRESENT when captured (pointer;
+		// nil → omitted when no clusterMapSource is wired). Per-scope corpus
+		// sizes and cluster counts are server-global observability and go tenants
+		// nothing, so the per-tenant path never sets it.
+		ClusterMap: cheap.clusterMap,
 		// embed_migration is server-admin-only and PRESENT only while a migration
 		// is active (pointer; nil → omitted otherwise). The per-tenant
 		// SnapshotForTenant never calls assemble, so its field stays nil → absent

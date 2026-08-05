@@ -67,6 +67,11 @@ type QueryHandler struct {
 	// graphCache is the OPTIONAL W05.7 expand cache arm source; nil (unwired
 	// boot, unit tests) keeps GraphExpand on its SQL path.
 	graphCache expandCacheSource
+	// clusterFresh is the OPTIONAL C4 cluster-map freshness seam (design/03
+	// §4.7). nil (unwired boot, unit tests) makes the cluster stage a NO-OP —
+	// deliberately fail-safe in the same direction as every other freshness
+	// branch: no signal beats a signal from a map of unknown age.
+	clusterFresh rrf.ClusterFreshness
 }
 
 // expandCacheSource is the OPTIONAL scheduler slice for the W05.7 GraphExpand
@@ -114,11 +119,17 @@ func (h *QueryHandler) expandCache(cfg *config.Config) rrf.ExpandCache {
 //
 // Extracted as a method rather than inlined at the call site to keep the query
 // handler under the cyclop budget.
+// SetClusterFreshness wires the C4 staleness seam (boot, cmd/ctxd; the pattern
+// is SetGraphCache). UNWIRED IS A NO-OP STAGE, never "infinitely fresh": a
+// ranking signal from a map whose age nobody can name is exactly what §4.7
+// forbids.
+func (h *QueryHandler) SetClusterFreshness(src rrf.ClusterFreshness) { h.clusterFresh = src }
+
 func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.SearchResult, readScopes []string, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
 	if !cfg.Enabled {
 		return results
 	}
-	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, readScopes, cfg)
+	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, readScopes, cfg, h.clusterFresh)
 	if err != nil {
 		slog.Warn("cluster boost failed; using pre-boost results",
 			"error", err,

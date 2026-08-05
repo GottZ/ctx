@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/rrf"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -24,8 +25,21 @@ func c3Cfg() rrf.ClusterConfig {
 	return rrf.ClusterConfig{
 		Enabled: true, SeedCount: 10, TopClusters: 2,
 		MinShare: 0.25, BoostWeight: 0.12, SizeDamping: true,
+		MaxStaleness: 24 * time.Hour,
 	}
 }
+
+// c3Fresh is the C4 freshness seam as a test double: one map, one age. The
+// PRODUCTION seam is *events.Scheduler; its own gates (per-scope minimum, the
+// three refresh triggers) live in internal/events.
+type c3Fresh struct{ at time.Time }
+
+func (f c3Fresh) ClusterMapComputedAt([]string) (time.Time, bool) {
+	return f.at, !f.at.IsZero()
+}
+
+// c3Now is a map rebuilt a minute ago — the normal state.
+func c3Now() c3Fresh { return c3Fresh{at: time.Now().Add(-time.Minute)} }
 
 // c3Seed writes a block, its membership row and (once per cluster/scope) the
 // aggregate partition row the size damping reads.
@@ -115,7 +129,7 @@ func TestClusterBoostPausableAB(t *testing.T) {
 
 	off := c3Cfg()
 	off.Enabled = false
-	gotOff, _, err := rrf.ClusterBoost(ctx, pool, in, scopes, off)
+	gotOff, _, err := rrf.ClusterBoost(ctx, pool, in, scopes, off, c3Now())
 	if err != nil {
 		t.Fatalf("stage off: %v", err)
 	}
@@ -123,7 +137,7 @@ func TestClusterBoostPausableAB(t *testing.T) {
 
 	zero := c3Cfg()
 	zero.BoostWeight = 0
-	gotZero, _, err := rrf.ClusterBoost(ctx, pool, in, scopes, zero)
+	gotZero, _, err := rrf.ClusterBoost(ctx, pool, in, scopes, zero, c3Now())
 	if err != nil {
 		t.Fatalf("stage armed, weight 0: %v", err)
 	}
@@ -146,7 +160,7 @@ func TestClusterBoostPausableAB(t *testing.T) {
 
 	// Control arm: with the live default weight the stage MUST move something,
 	// otherwise the two comparisons above are vacuous.
-	gotLive, rep, err := rrf.ClusterBoost(ctx, pool, in, scopes, c3Cfg())
+	gotLive, rep, err := rrf.ClusterBoost(ctx, pool, in, scopes, c3Cfg(), c3Now())
 	if err != nil {
 		t.Fatalf("stage armed, live weight: %v", err)
 	}
@@ -211,11 +225,69 @@ func TestClusterBoostGrantOnlyResultCastsNoVote(t *testing.T) {
 		in[i].Scope = "work" // grant-visible: delivered, but outside readScopes
 	}
 
-	got, _, err := rrf.ClusterBoost(ctx, pool, in, []string{"private"}, c3Cfg())
+	got, _, err := rrf.ClusterBoost(ctx, pool, in, []string{"private"}, c3Cfg(), c3Now())
 	if err != nil {
 		t.Fatalf("ClusterBoost: %v", err)
 	}
 	c3Equal(t, got, in, "grant-only seed must not create a winner")
+}
+
+// C4 gate (i), the NEGATIVE PROBE at stage level: with the identical fixture
+// that boosts under a fresh map, a map computed seven days ago makes the whole
+// stage a no-op — and it does so BEFORE any read, so a frozen landkarte costs
+// nothing either.
+//
+// This is the §5.5 bruchpfad in one assertion: the rebuild skips the WHOLE map
+// once the node cap is exceeded (WARN, no error, no partial build), and a boost
+// on that basis would reinforce months-old topic membership while systematically
+// disadvantaging everything created since.
+//
+// ROT-PROBE: remove the clusterMapUsable call from ClusterBoost ⇒ the stale arm
+// boosts exactly like the fresh one and this test fails.
+func TestClusterBoostStaleMapIsNoOp(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 12; i++ {
+		c3Seed(t, pool, c3BlockID(i), "private", c3ClusterID(i%2))
+	}
+	in := c3Results(12, "private")
+	scopes := []string{"private"}
+
+	// Control: under a fresh map this fixture DOES move.
+	live, _, err := rrf.ClusterBoost(ctx, pool, in, scopes, c3Cfg(), c3Now())
+	if err != nil {
+		t.Fatalf("fresh arm: %v", err)
+	}
+	moved := false
+	for i := range live {
+		if live[i].RRFScore != in[i].RRFScore {
+			moved = true
+			break
+		}
+	}
+	if !moved {
+		t.Fatal("fresh arm changed nothing — the fixture proves nothing about the stale arm")
+	}
+
+	stale := c3Fresh{at: time.Now().Add(-7 * 24 * time.Hour)}
+	got, rep, err := rrf.ClusterBoost(ctx, pool, in, scopes, c3Cfg(), stale)
+	if err != nil {
+		t.Fatalf("stale arm: %v", err)
+	}
+	c3Equal(t, got, in, "stale map")
+	if rep.Count(graphcache.TravClusterStale) != 1 {
+		t.Errorf("cluster_stale trip = %d, want 1 — the no-op must say why", rep.Count(graphcache.TravClusterStale))
+	}
+
+	// And the unwired seam behaves identically (gate iii at stage level).
+	got, rep, err = rrf.ClusterBoost(ctx, pool, in, scopes, c3Cfg(), nil)
+	if err != nil {
+		t.Fatalf("unwired arm: %v", err)
+	}
+	c3Equal(t, got, in, "unwired seam")
+	if rep.Count(graphcache.TravClusterStale) != 1 {
+		t.Errorf("unwired seam: cluster_stale trip = %d, want 1", rep.Count(graphcache.TravClusterStale))
+	}
 }
 
 // Gate (viii): FAIL-OPEN. A dead pool returns the UNCHANGED input plus the error;
@@ -234,7 +306,7 @@ func TestClusterBoostFailsOpen(t *testing.T) {
 
 	pool.Close() // every query from here on fails
 
-	got, _, err := rrf.ClusterBoost(ctx, pool, in, []string{"private"}, c3Cfg())
+	got, _, err := rrf.ClusterBoost(ctx, pool, in, []string{"private"}, c3Cfg(), c3Now())
 	if err == nil {
 		t.Fatal("a dead pool must surface an error (fail-open != fail-silent)")
 	}
@@ -249,7 +321,7 @@ func TestClusterBoostEmptyScopes(t *testing.T) {
 	in := c3Results(2, "private")
 	// len(readScopes)==0 short-circuits to the untouched slice at the stage head;
 	// the hard reject lives one level down, where a caller cannot skip it.
-	got, _, err := rrf.ClusterBoost(context.Background(), pool, in, nil, c3Cfg())
+	got, _, err := rrf.ClusterBoost(context.Background(), pool, in, nil, c3Cfg(), c3Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -276,7 +348,7 @@ func TestClusterBoostLatencyAt400Candidates(t *testing.T) {
 
 	run := func() time.Duration {
 		start := time.Now()
-		if _, _, err := rrf.ClusterBoost(ctx, pool, in, scopes, c3Cfg()); err != nil {
+		if _, _, err := rrf.ClusterBoost(ctx, pool, in, scopes, c3Cfg(), c3Now()); err != nil {
 			t.Fatalf("ClusterBoost: %v", err)
 		}
 		return time.Since(start)

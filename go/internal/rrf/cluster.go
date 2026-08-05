@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -58,6 +59,57 @@ type ClusterConfig struct {
 	// share loses all discriminating power — the failure mode of the "few mega
 	// clusters" end of the §3.3 range, which is where the 10M target lives.
 	SizeDamping bool
+	// MaxStaleness is the age past which the stage refuses to boost from the map
+	// (C4, §4.7). It is the ONE field here sourced from the global-only ops
+	// group: freshness protects a SHARED artefact, so a tenant must not be able
+	// to widen it. Zero disables the age check — the missing-row and unwired-seam
+	// branches below still gate.
+	MaxStaleness time.Duration
+}
+
+// ClusterFreshness is the narrow seam that answers "how old is the cluster map
+// for these scopes" WITHOUT a per-request query (design/03 §4.7; the pattern is
+// egoCacheSource / expandCacheSource). *events.Scheduler implements it.
+//
+// AGGREGATION OVER SEVERAL SCOPES IS THE MINIMUM, NOT THE MAXIMUM (Linse 2 / B6).
+// The landkarte's read path takes max(computed_at) over the caller's scopes,
+// which is right for a DISPLAY — someone is looking at the number. For a RANKING
+// signal it is the wrong direction: max hides a frozen partition behind a fresh
+// one, and nobody is looking. A missing row for even ONE read scope is !ok, not
+// "the others are enough".
+type ClusterFreshness interface {
+	ClusterMapComputedAt(readScopes []string) (time.Time, bool)
+}
+
+// clusterMapUsable is the C4 staleness gate. THREE uncertainty branches, all
+// fail-safe in the same direction — no signal beats a signal from a frozen map:
+//
+//   - seam not wired (nil: unit tests, boot before the wiring call) ⇒ no-op;
+//   - no meta row for one of the read scopes / !ok ⇒ no-op, never "infinitely
+//     fresh" (a zero time must not read as "just built");
+//   - age beyond MaxStaleness ⇒ no-op.
+//
+// This is deliberately stricter than the landkarte's own read path, which keeps
+// serving a stale map with a 200 and lets the viewer judge by computed_at. A
+// ranking signal has no viewer to judge it.
+//
+// The trip is recorded on ALL three branches: a silently unwired seam that kills
+// the feature is exactly the quiet permanent outage the design warns about.
+func clusterMapUsable(cfg ClusterConfig, fresh ClusterFreshness, readScopes []string, rep *graphcache.BudgetReport) bool {
+	if fresh == nil {
+		rep.Add(graphcache.TravClusterStale)
+		return false
+	}
+	at, ok := fresh.ClusterMapComputedAt(readScopes)
+	if !ok || at.IsZero() {
+		rep.Add(graphcache.TravClusterStale)
+		return false
+	}
+	if cfg.MaxStaleness > 0 && time.Since(at) > cfg.MaxStaleness {
+		rep.Add(graphcache.TravClusterStale)
+		return false
+	}
+	return true
 }
 
 // clusterVote is the internal per-cluster tally: raw rank-weighted votes plus the
@@ -289,9 +341,13 @@ func fetchClusterSizes(ctx context.Context, pool *pgxpool.Pool, clusterIDs, read
 // The report is SERVER TELEMETRY. Unlike the ego path, the query envelope never
 // carries a budget report (§4.5 behaviour matrix) — retrieval quality is a blend,
 // not a completeness contract.
-func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, cfg ClusterConfig) ([]SearchResult, *graphcache.BudgetReport, error) {
+func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, cfg ClusterConfig, fresh ClusterFreshness) ([]SearchResult, *graphcache.BudgetReport, error) {
 	rep := graphcache.NewBudgetReport(graphcache.SourceSQL)
 	if !cfg.Enabled || len(results) == 0 || len(readScopes) == 0 {
+		return results, rep, nil
+	}
+	// C4: the freshness gate runs BEFORE any read — a stale map costs nothing.
+	if !clusterMapUsable(cfg, fresh, readScopes, rep) {
 		return results, rep, nil
 	}
 

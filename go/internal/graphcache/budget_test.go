@@ -30,8 +30,10 @@ func TestTravClassTokens(t *testing.T) {
 		TravClusterAnnotateCapped: "cluster_annotate_capped",
 		// Cluster-Topic-Map C3: the categorical stage's touch counter.
 		TravClusterBoosted: "cluster_boosted",
-		TravCacheStale:            "cache_stale",
-		TravRecheckError:          "recheck_error",
+		// Cluster-Topic-Map C4: the staleness fail-safe of the retrieval stage.
+		TravClusterStale: "cluster_stale",
+		TravCacheStale:   "cache_stale",
+		TravRecheckError: "recheck_error",
 	}
 	for c, tok := range want {
 		if got := c.String(); got != tok {
@@ -60,7 +62,7 @@ func TestTravClassLayers(t *testing.T) {
 		TravDepthCapped, TravFrontierCapped, TravVisitedCapped,
 		TravCandidatesCapped, TravInjectCapped, TravSeedFloorCapped, TravTimeCapped,
 	}
-	operational := []TravClass{TravCacheStale, TravRecheckError}
+	operational := []TravClass{TravClusterStale, TravCacheStale, TravRecheckError}
 
 	for _, c := range limits {
 		if c.Layer() != LayerLimits {

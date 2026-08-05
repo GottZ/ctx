@@ -168,6 +168,25 @@ type Scheduler struct {
 	// trap). W01-4 asserts its own narrow recallRunSource interface.
 	lastRecallNs atomic.Int64
 
+	// Cluster-map freshness (Cluster-Topic-Map C4, design/03 §4.7): the
+	// process-local per-scope graph_overview_meta.computed_at, so the retrieval
+	// stage can gate on freshness WITHOUT a query per request.
+	//
+	// It is NOT derived from lastOverviewNs. That stamp is set BEFORE the rebuild
+	// runs and survives every skip (node-cap, advisory-lock, timeout), so it says
+	// "the arm ran", never "the map is fresh" — the primary-source finding that
+	// made this its own state.
+	//
+	// consecutiveOverviewFails counts rebuild attempts that ended in a failure or
+	// a skip since the last success. It answers the question the staleness trip
+	// cannot: cluster_stale says "signal off", this says "the map is not being
+	// built" — without it a reproducibly timing-out rebuild is indistinguishable
+	// from a correctly fail-safed feature (§4.6).
+	clusterFreshMu           sync.RWMutex
+	clusterFreshAt           map[string]time.Time
+	clusterFreshReadAt       time.Time
+	consecutiveOverviewFails atomic.Int64
+
 	// embedVerifyActive is the single-flight guard of the W04-5 re-embed
 	// verify runner: the migration cycle keeps ticking (drain semantics,
 	// design/04 §4.1) while ONE verify goroutine works through the gate —
@@ -596,6 +615,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 		"digest_debounce", digestDebounce,
 	)
 
+	// C4 refresh trigger TWO of three (§4.7): the boot read, so a process that
+	// never gets to rebuild (another instance holds the advisory lock) still
+	// starts with a truthful map instead of "nothing is built".
+	s.refreshClusterFreshness(ctx)
+
 	// Start pgxlisten in a separate goroutine (auto-reconnect, backlog handler).
 	listener := NewPgxlistenListener(s.startup.DSN, s.startup.ReconnectDelay, s, s.pool, s.cfg, s.backendPool, s.blocktypes, s.projectHub)
 	go func() {
@@ -904,6 +928,108 @@ func (s *Scheduler) yieldThenRebuildOverview(ctx context.Context, bt backgroundT
 // first such stamp as "SOME rebuild ran" and suppress the boot build FOREVER;
 // the first partition would then only appear after a full rebuild_interval
 // plus demand yield. Without this the wave would be a live regression.
+// ClusterMapComputedAt implements rrf.ClusterFreshness (design/03 §4.7): the
+// MINIMUM computed_at over the caller's read scopes, or !ok when even one of
+// them has no successful rebuild on record.
+//
+// Minimum, not maximum: max would hide a frozen partition behind a fresh one,
+// and a ranking signal has no viewer to notice (the landkarte's display path
+// takes max for exactly the opposite reason — someone is looking at it).
+//
+// Refresh trigger THREE of three (§4.7): lazily, at most once per
+// max_staleness/4. Triggers one and two are the post-rebuild refresh and the
+// boot read. The lazy one closes a real hole in multi-instance operation, the
+// documented target state: an instance whose rebuilds always come back
+// Skipped:"advisory-lock" — because ANOTHER instance is doing the work and doing
+// it well — would otherwise never update its map after boot, switch itself off
+// after max_staleness, and report cluster_stale about a perfectly fresh map.
+func (s *Scheduler) ClusterMapComputedAt(readScopes []string) (time.Time, bool) {
+	if len(readScopes) == 0 {
+		return time.Time{}, false
+	}
+	s.maybeRefreshClusterFreshness()
+
+	s.clusterFreshMu.RLock()
+	defer s.clusterFreshMu.RUnlock()
+	if s.clusterFreshAt == nil {
+		return time.Time{}, false
+	}
+	var oldest time.Time
+	for _, scope := range readScopes {
+		at, ok := s.clusterFreshAt[scope]
+		if !ok || at.IsZero() {
+			return time.Time{}, false // one unbuilt partition disqualifies the set
+		}
+		if oldest.IsZero() || at.Before(oldest) {
+			oldest = at
+		}
+	}
+	return oldest, !oldest.IsZero()
+}
+
+// maybeRefreshClusterFreshness runs the lazy TTL refresh. The stamp is written
+// BEFORE the query so a burst of concurrent requests produces one refresh, not
+// one per request; a failed read leaves the previous map in place (degrading to
+// a stale-looking map is fail-safe, degrading to an empty one would be too).
+func (s *Scheduler) maybeRefreshClusterFreshness() {
+	ttl := s.cfg.Snapshot().ClusterOps.MaxStaleness / 4 //nolint:forbidigo // MT 06 background: cluster-map freshness protects ONE shared artefact; the key is global-only by design (§4.9).
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	s.clusterFreshMu.Lock()
+	if time.Since(s.clusterFreshReadAt) < ttl {
+		s.clusterFreshMu.Unlock()
+		return
+	}
+	s.clusterFreshReadAt = time.Now()
+	s.clusterFreshMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.refreshClusterFreshness(ctx)
+}
+
+// refreshClusterFreshness re-reads graph_overview_meta into the process-local
+// map. Unscoped by design: the scheduler is a process-global background arm, and
+// the per-caller scope filter happens in ClusterMapComputedAt — the same split
+// overviewNeverBuilt already uses.
+func (s *Scheduler) refreshClusterFreshness(ctx context.Context) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT scope, computed_at FROM graph_overview_meta WHERE computed_at IS NOT NULL`)
+	if err != nil {
+		slog.Warn("scheduler: cluster freshness refresh failed", "error", err)
+		return
+	}
+	defer rows.Close()
+
+	next := map[string]time.Time{}
+	for rows.Next() {
+		var scope string
+		var at time.Time
+		if err := rows.Scan(&scope, &at); err != nil {
+			slog.Warn("scheduler: cluster freshness scan failed", "error", err)
+			return
+		}
+		next[scope] = at
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("scheduler: cluster freshness rows failed", "error", err)
+		return
+	}
+	s.clusterFreshMu.Lock()
+	s.clusterFreshAt = next
+	s.clusterFreshReadAt = time.Now()
+	s.clusterFreshMu.Unlock()
+}
+
+// ConsecutiveOverviewFails reports how many rebuild attempts in a row ended in a
+// failure or a skip. It is the /api/status counterpart to the cluster_stale trip:
+// the trip says the SIGNAL is off, this says whether the MAP is still being
+// built (§4.6).
+func (s *Scheduler) ConsecutiveOverviewFails() int {
+	return int(s.consecutiveOverviewFails.Load())
+}
+
 func (s *Scheduler) overviewNeverBuilt(ctx context.Context) bool {
 	var n int
 	if err := s.pool.QueryRow(ctx,
@@ -922,6 +1048,12 @@ func (s *Scheduler) overviewNeverBuilt(ctx context.Context) bool {
 // ctx is deliberately the OUTER scheduler context, never the rebuild's rctx:
 // on the timeout path rctx is expired exactly when the stamp is due.
 func (s *Scheduler) stampOverviewAttempt(ctx context.Context, bt backgroundTenant, reason string, candidates map[string]int, attemptStart time.Time) {
+	// C4: every non-successful exit raises the consecutive-failure counter that
+	// /api/status renders. advisory-lock is counted too and deliberately so — it
+	// is NOT evidence of a broken map (another instance is building it), which is
+	// why the status section carries the reason alongside the number instead of
+	// the number alone.
+	s.consecutiveOverviewFails.Add(1)
 	if err := overview.StampAttempt(ctx, s.pool, bt.owned, reason, candidates, attemptStart); err != nil {
 		slog.Error("scheduler: overview attempt stamp failed", "error", err,
 			"reason", reason, "tenant_scope", bt.scope, "scope_filter", bt.owned)
@@ -1017,6 +1149,12 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// Fifth exit — success. It stamps too, but inside the persist tx: the
 	// metaWrite SQL sets last_attempt_at = computed_at and skip_reason = NULL
 	// in the same statement, which is how a good run CLEARS a recorded cap.
+	//
+	// C4 refresh trigger ONE of three (§4.7): after every NON-skipped rebuild.
+	// The counter resets here and only here — a success is the only thing that
+	// clears "the map is not being built".
+	s.consecutiveOverviewFails.Store(0)
+	s.refreshClusterFreshness(ctx)
 	slog.Info("scheduler: overview rebuild complete",
 		"clusters", stats.ClusterCount, "nodes", stats.NodeCount,
 		"edge_rows", stats.EdgeRows, "modularity", stats.Modularity,

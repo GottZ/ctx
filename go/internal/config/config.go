@@ -1316,6 +1316,10 @@ func (c *Config) ClusterRRF() rrf.ClusterConfig {
 		MinShare:    c.Cluster.MinShare,
 		BoostWeight: c.Cluster.BoostWeight,
 		SizeDamping: c.Cluster.SizeDamping,
+		// The ONE field from the global-only ops group: cluster-map freshness
+		// protects a SHARED artefact, so it must not be per-tenant widenable
+		// (§4.9). The rrf stage sees one struct; the tenancy split lives here.
+		MaxStaleness: c.ClusterOps.MaxStaleness,
 	}
 }
 

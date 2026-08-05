@@ -124,6 +124,17 @@ const (
 
 	// ── Layer OPERATIONAL ── which arm answered, and what failed.
 
+	// TravClusterStale: the cluster stage turned itself into a no-op because the
+	// landkarte it would boost from is not demonstrably fresh (Cluster-Topic-Map
+	// C4, design/03 §4.7). Operational like TravCacheStale — it names WHY a stage
+	// did not run, not a limit it hit.
+	//
+	// It fires on all three uncertainty branches (no meta row for one of the read
+	// scopes, computed_at older than cluster.max_staleness, freshness seam not
+	// wired), because they are one statement: no signal beats a signal from a
+	// frozen map. That also means the token says "signal off", NOT "rebuild
+	// broken" — the /api/status cluster_map section is what tells those apart.
+	TravClusterStale
 	// TravCacheStale: snapshot missing/too old/seed unknown → SQL fallback ran.
 	TravCacheStale
 	// TravRecheckError: the DB recheck failed — the ONLY error-valued class.
@@ -203,6 +214,8 @@ func (c TravClass) String() string {
 		return "cluster_annotate_capped"
 	case TravClusterBoosted:
 		return "cluster_boosted"
+	case TravClusterStale:
+		return "cluster_stale"
 	case TravCacheStale:
 		return "cache_stale"
 	case TravRecheckError:
@@ -229,7 +242,7 @@ func (c TravClass) Layer() TravLayer {
 		TravCandidatesCapped, TravInjectCapped, TravSeedFloorCapped, TravTimeCapped,
 		TravClusterAnnotateProbe, TravClusterAnnotateCapped, TravClusterBoosted:
 		return LayerBudgets
-	case TravCacheStale, TravRecheckError:
+	case TravClusterStale, TravCacheStale, TravRecheckError:
 		return LayerOperational
 	case TravOK:
 		return LayerNone
