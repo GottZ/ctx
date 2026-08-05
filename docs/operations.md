@@ -259,6 +259,20 @@ The CSR path reads nodes and edges in **one repeatable-read transaction** and bu
 
 Leave it off until the identity gate has been green across several deploys on your own corpus.
 
+### The clustering engine itself is not switched yet
+
+`internal/louvain` exists in the binary as of this release but has **no consumer**: the rebuild still calls gonum on both input paths. There is no configuration key to switch it, and nothing in the running system behaves differently — the package is a leaf with unit gates and benchmarks only. The engine switch, its config key and the one-time partition break it implies are a later wave.
+
+Why it is worth knowing anyway: the wall that `graph_overview.max_nodes` guards against is an implementation property, not a property of the Louvain method. gonum recomputes each community's total degree on every evaluation (its own source comments say the saving "does not appear to be compelling") and re-sweeps every node on every iteration instead of queueing the ones a move actually touched. Fixing both, measured on the same graphs at constant density:
+
+| Nodes | Pairs | gonum | own kernel | Factor |
+|---|---|---|---|---|
+| 50 000 | 112 370 | 4.6 s | 25 ms | 183× |
+| 200 000 | 449 575 | 31.7 s | 126 ms | 252× |
+| 400 000 | 899 260 | 100.7 s | 284 ms | 355× |
+
+Modularity is identical to four decimal places, and the factor grows with the corpus because gonum's cost is superlinear while the queue-based one is near-linear. Treat these as what they are: bench numbers on synthetic corpora, from a package nothing calls yet.
+
 `computed_at` becomes nullable **and loses its `DEFAULT now()`** (from migration 057). A partition that has never built successfully but already has an attempt behind it — a fresh deploy above the node cap — needs a row without a success timestamp; with the default in place a skip upsert that does not name the column would silently claim freshness. The read path is unaffected: `max(computed_at)` ignores NULL, so "never built" stays the zero timestamp and the `stats.computed_at` wire field stays `null` exactly as before.
 
 Deploy notes, same shape as 116: the file carries `SET LOCAL lock_timeout = '3s'`, so it aborts with `55P03` rather than queueing behind a long-running persist transaction (a 400k-node rebuild measures ~465 s); every statement is idempotent, so the next boot simply re-runs it. Existing rows are backfilled with `last_attempt_at = computed_at` and `candidate_n = node_n` — historically correct, because only a successful run could have written them. No new table, no index.
