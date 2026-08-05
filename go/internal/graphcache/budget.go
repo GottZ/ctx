@@ -115,6 +115,12 @@ const (
 	// The ROUTE ceiling is untouched (design/03 §6.4): the annotation declines
 	// rather than shrinking what the graph read itself may return.
 	TravClusterAnnotateCapped
+	// TravClusterBoosted: one result was reinforced by the categorical cluster
+	// stage (Cluster-Topic-Map C3). Its COUNT is how many results the stage
+	// touched — the one number that says whether a query got a categorical signal
+	// at all. On the query path the report is server telemetry only (§4.5
+	// behaviour matrix), so this never reaches a client.
+	TravClusterBoosted
 
 	// ── Layer OPERATIONAL ── which arm answered, and what failed.
 
@@ -195,6 +201,8 @@ func (c TravClass) String() string {
 		return "cluster_annotate_probe"
 	case TravClusterAnnotateCapped:
 		return "cluster_annotate_capped"
+	case TravClusterBoosted:
+		return "cluster_boosted"
 	case TravCacheStale:
 		return "cache_stale"
 	case TravRecheckError:
@@ -219,7 +227,7 @@ func (c TravClass) Layer() TravLayer {
 		return LayerLimits
 	case TravDepthCapped, TravFrontierCapped, TravVisitedCapped,
 		TravCandidatesCapped, TravInjectCapped, TravSeedFloorCapped, TravTimeCapped,
-		TravClusterAnnotateProbe, TravClusterAnnotateCapped:
+		TravClusterAnnotateProbe, TravClusterAnnotateCapped, TravClusterBoosted:
 		return LayerBudgets
 	case TravCacheStale, TravRecheckError:
 		return LayerOperational

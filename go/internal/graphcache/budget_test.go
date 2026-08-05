@@ -28,6 +28,8 @@ func TestTravClassTokens(t *testing.T) {
 		// and an operator may see what it cost on the cache arm.
 		TravClusterAnnotateProbe:  "cluster_annotate_probe",
 		TravClusterAnnotateCapped: "cluster_annotate_capped",
+		// Cluster-Topic-Map C3: the categorical stage's touch counter.
+		TravClusterBoosted: "cluster_boosted",
 		TravCacheStale:            "cache_stale",
 		TravRecheckError:          "recheck_error",
 	}

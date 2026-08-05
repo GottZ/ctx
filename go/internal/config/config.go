@@ -1299,6 +1299,26 @@ func (c *Config) GraphRRF() rrf.GraphConfig {
 	}
 }
 
+// ClusterRRF converts the cluster ranking group to the rrf-stage parameter
+// struct (same converter pattern as GraphRRF — rrf never reads internal/config).
+// The zero config is Enabled=false, i.e. the stage does not run and the pipeline
+// is byte-identical to pre-C3.
+//
+// Only the fields the C3 stage actually CONSUMES are mapped. cluster.centroid_*
+// stay unmapped until C8 wires them, for the same reason cluster.inject_max is
+// not declared until C9 (design/03 §4.9): a knob that is visibly plumbed but
+// inert is a trap for whoever tunes it.
+func (c *Config) ClusterRRF() rrf.ClusterConfig {
+	return rrf.ClusterConfig{
+		Enabled:     c.Cluster.Enabled,
+		SeedCount:   c.Cluster.SeedCount,
+		TopClusters: c.Cluster.TopClusters,
+		MinShare:    c.Cluster.MinShare,
+		BoostWeight: c.Cluster.BoostWeight,
+		SizeDamping: c.Cluster.SizeDamping,
+	}
+}
+
 // SelectorRRF converts the selector group to the rrf-stage policy struct
 // (same converter pattern as RerankRRF/GraphRRF — the rrf package never reads
 // internal/config, F1 layering: policy travels as a parameter). The zero

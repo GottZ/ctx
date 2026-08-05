@@ -49,6 +49,17 @@ type SearchResult struct {
 	GraphSeedID       string `json:"graph_seed_id,omitempty"`
 	GraphRelationship string `json:"graph_relationship,omitempty"`
 
+	// ClusterBoost is the categorical-stage provenance (Cluster-Topic-Map C3):
+	// the applied vote share of the winning cluster this result belongs to. Same
+	// convention as the graph fields above — zero-valued for every result the
+	// stage did not touch and omitted from JSON, so the wire is byte-identical
+	// while cluster.enabled is off (the default).
+	//
+	// A public cluster HANDLE deliberately does NOT ride along yet: the internal
+	// cluster_id is a block UUID and would be an existence/time oracle (design/03
+	// §5.1), and the stable, non-block-derived handle only exists from C5.
+	ClusterBoost float64 `json:"cluster_boost,omitempty"`
+
 	// MatchedComment is the aggregate-to-parent fold's issue-specific response
 	// contract (Achse-02 I-E, design/02 §4.4): when a comment folds onto its
 	// parent issue, the delivered issue row carries the best-ranked child comment

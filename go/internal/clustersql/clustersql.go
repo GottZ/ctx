@@ -89,6 +89,31 @@ var VisibleSizeQuery = `
 	  AND ` + NodeVisible("n", "$2") + `
 	GROUP BY n.cluster_id`
 
+// VisibleSizeWithTotalQuery is VisibleSizeQuery plus the caller's TOTAL visible
+// cluster mass, in one roundtrip:
+//
+//	$1 — cluster ids  (uuid[])
+//	$2 — read scopes  (text[])
+//
+// The RRF boost's size damping (design/03 §4.5) needs both numbers: a cluster's
+// share is damped by its share OF THE WHOLE visible map, not of the few clusters
+// a query happened to touch. Damping against the touched clusters alone would
+// make a single candidate cluster damp to zero — the opposite of the intent.
+//
+// Deliberately ONE statement rather than two: the retrieval path pays per query,
+// and the total is an uncorrelated scalar subquery evaluated once. It binds
+// NodeVisible for BOTH arms, so the conjunction still has exactly one site.
+var VisibleSizeWithTotalQuery = `
+	SELECT n.cluster_id::text,
+	       sum(n.size)::int,
+	       (SELECT coalesce(sum(t.size), 0)::bigint
+	          FROM graph_cluster_node t
+	         WHERE ` + NodeVisible("t", "$2") + `)
+	FROM graph_cluster_node n
+	WHERE n.cluster_id = ANY($1::uuid[])
+	  AND ` + NodeVisible("n", "$2") + `
+	GROUP BY n.cluster_id`
+
 // MembershipQuery is the batch read "which of these blocks sit in which
 // cluster, as far as the caller may see":
 //

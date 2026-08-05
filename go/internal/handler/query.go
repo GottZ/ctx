@@ -102,6 +102,39 @@ func (h *QueryHandler) expandCache(cfg *config.Config) rrf.ExpandCache {
 	return rrf.ExpandCache{Snapshot: snap, Age: age}
 }
 
+// applyClusterBoost runs the C3 categorical stage and keeps the fail-open
+// handling in one place (design/03 §4.5, mirror of the graph stage's dispatch at
+// Step 6a-graph).
+//
+// FAIL-OPEN: rrf.ClusterBoost returns the UNCHANGED input slice alongside any
+// error, so the failure path here is a warn and the pre-boost ranking — never a
+// 500. The stage's own report is server telemetry; the query envelope carries no
+// budget report (§4.5 behaviour matrix: retrieval quality is a blend, not a
+// completeness contract).
+//
+// Extracted as a method rather than inlined at the call site to keep the query
+// handler under the cyclop budget.
+func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.SearchResult, readScopes []string, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
+	if !cfg.Enabled {
+		return results
+	}
+	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, readScopes, cfg)
+	if err != nil {
+		slog.Warn("cluster boost failed; using pre-boost results",
+			"error", err,
+			"request_id", requestID,
+		)
+		return results
+	}
+	if n := rep.Count(graphcache.TravClusterBoosted); n > 0 {
+		slog.Info("cluster boost applied",
+			"boosted", n,
+			"request_id", requestID,
+		)
+	}
+	return boosted
+}
+
 // NewQueryHandler creates a new QueryHandler. backendPool feeds the
 // synthesis chain (F3-P2) — Chain() is the only way to a backend tuple. quota
 // enforces per-tenant cost/call budgets on the synthesis path (T36, 04-W4); it
@@ -792,6 +825,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Step 6-cluster: categorical prior (Cluster-Topic-Map C3, design/03 §4.5).
+	// Runs BEFORE the Dream-graph stage, and that order is a correctness
+	// argument: Louvain builds its communities from the same context_dream_links
+	// table GraphExpand traverses, so a cluster boost placed AFTER the graph
+	// would pay a graph-reinforced neighbour twice for one piece of evidence.
+	// Ahead of it, the stage sees only native RRF hits. Gated default-OFF,
+	// fail-open, byte-identical when off.
+	results = h.applyClusterBoost(ctx, results, ar.ReadScopes, cfg.ClusterRRF(), requestID)
 
 	// Step 6a-graph: Dream-graph expansion (GottZ Graph Expansion, Wave 1).
 	// Post-RRF, post-gravity (so seeds enter sorted by boosted RRFScore) and
