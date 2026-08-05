@@ -9,6 +9,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -122,7 +123,27 @@ type egoResponse struct {
 	Nodes       []store.GraphNode       `json:"nodes"`
 	Edges       []store.GraphEdge       `json:"edges"`
 	StructEdges []store.StructGraphEdge `json:"structural_edges"`
-	Stats       egoStats                `json:"stats"`
+	// Clusters/ClusterOf are the C2 cluster projection (Cluster-Topic-Map
+	// design/03 §4.2) — ADDITIVE and unconditional arrays under the same GA8
+	// contract as the structural pair above. Gated on cluster.ego_annotate
+	// (default false): off ⇒ both empty, stats.clusters 0, and the envelope is
+	// byte-identical for every request. The client never distinguishes "key
+	// absent" from "nothing found".
+	//
+	// Clusters carries a per-request ORDINAL, never cluster_id: cluster_id is the
+	// smallest member UUID and ids are uuidv7, so emitting it would leak the
+	// existence and approximate birth time of invisible blocks (§5.1). A stable
+	// handle arrives with C5, from the identity table — never from a block id.
+	Clusters []egoClusterWire `json:"clusters"`
+	// ClusterOf is positionally parallel to Nodes. -1 = no VISIBLE membership:
+	// unclustered, grant-only (its scope is not in readScopes, so the C1 scope
+	// conjunction drops the row), or created after the last rebuild. An int array
+	// rather than [nodeIdx, clusterIdx] tuples: a block has exactly one cluster
+	// (graph_cluster_member.block_id is the sole PK), so the tuple form could
+	// express a multiplicity that does not exist — and costs ~12 KB against
+	// ~4,5 KB at 1500 nodes (§6.5, same argument as the GraphEdge tuples).
+	ClusterOf []int    `json:"cluster_of"`
+	Stats     egoStats `json:"stats"`
 	// BudgetReport (design/05 §4.5, W05.4) differentiates stats.truncated by
 	// CAUSE and LAYER. ADDITIVE like the GA8 structural arrays: stats.truncated
 	// keeps its exact meaning, old clients (and the current SPA) ignore the new
@@ -146,14 +167,29 @@ type egoParamsEcho struct {
 	CreatedBefore *time.Time `json:"created_before,omitempty"`
 }
 
+// egoClusterWire is one cluster the delivered nodes sit in (§4.2). size is the
+// SCOPE-PURE size summed over all partitions of this cluster the caller may see
+// — never a single graph_cluster_node row's size, which would be a count leak
+// over foreign partitions (§5.6).
+type egoClusterWire struct {
+	Cluster       int      `json:"cluster"` // per-request ordinal (NOT cluster_id)
+	Size          int      `json:"size"`
+	TopCategories []string `json:"top_categories"`
+	ScopeMix      []string `json:"scope_mix"`
+	InResponse    int      `json:"in_response"`
+}
+
 type egoStats struct {
 	Nodes int `json:"nodes"`
 	// Edges stays dream-only (E4) — existing consumers keep their semantics;
 	// StructuralEdges is the separate fact-edge counter.
-	Edges           int   `json:"edges"`
-	StructuralEdges int   `json:"structural_edges"`
-	Truncated       bool  `json:"truncated"`
-	ElapsedMs       int64 `json:"elapsed_ms"`
+	Edges           int `json:"edges"`
+	StructuralEdges int `json:"structural_edges"`
+	// Clusters counts the delivered clusters[] entries — same counting
+	// convention as the three above (C2).
+	Clusters  int   `json:"clusters"`
+	Truncated bool  `json:"truncated"`
+	ElapsedMs int64 `json:"elapsed_ms"`
 }
 
 // HandleAll processes GET /api/graph/all requests — the flat "load all" seed
@@ -212,7 +248,13 @@ func (h *GraphHandler) HandleAll(w http.ResponseWriter, r *http.Request) {
 		slog.Error("graph: access log error", "error", err, "request_id", reqID)
 	}
 
-	writeJSON(w, http.StatusOK, buildEgoResponse(result, params, rawLinkClass, elapsedMs))
+	// C2 (§4.2, Linse 2 / B5): /api/graph/all is the SECOND fetch site, not an
+	// afterthought — its limit defaults to the CEILING (parseAllParams), so 1500
+	// nodes are the normal case here and cluster.ego_annotate_max_nodes declines
+	// by default on this route.
+	ann := h.clusterAnnotation(ctx, cfgSnap, result, authResult.ReadScopes, reqID)
+
+	writeJSON(w, http.StatusOK, buildEgoResponse(result, params, rawLinkClass, elapsedMs, ann))
 }
 
 // HandleEgo processes GET /api/graph/ego requests.
@@ -291,7 +333,13 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 		slog.Error("graph: access log error", "error", err, "request_id", reqID)
 	}
 
-	writeJSON(w, http.StatusOK, buildEgoResponse(result, params, rawLinkClass, elapsedMs))
+	// C2 (§4.2): the annotation runs on BOTH arms — the SQL path above and the
+	// snapshot path inside EgoGraphCached. A filled clusters[] on one arm and an
+	// empty one on the other for the same request would be an unexplainable,
+	// cache-state-dependent wire difference (UD-03-03).
+	ann := h.clusterAnnotation(ctx, cfgSnap, result, authResult.ReadScopes, reqID)
+
+	writeJSON(w, http.StatusOK, buildEgoResponse(result, params, rawLinkClass, elapsedMs, ann))
 }
 
 // buildEgoResponse assembles the wire envelope from the store result and the
@@ -301,7 +349,10 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 // p.LinkClasses carries only the dream side — echoing it would render
 // `link_class=references` as an empty echo; the raw list keeps request order
 // across both vocabularies, nil → null).
-func buildEgoResponse(res *store.EgoResult, p store.EgoParams, rawLinkClass []string, elapsedMs int64) egoResponse {
+// ann is the C2 cluster projection, nil whenever the feature is off, the
+// annotation ceiling tripped or the probe failed — all three render as the same
+// empty-but-present arrays.
+func buildEgoResponse(res *store.EgoResult, p store.EgoParams, rawLinkClass []string, elapsedMs int64, ann *store.ClusterAnnotationResult) egoResponse {
 	nodes := res.Nodes
 	if nodes == nil {
 		nodes = []store.GraphNode{}
@@ -329,6 +380,7 @@ func buildEgoResponse(res *store.EgoResult, p store.EgoParams, rawLinkClass []st
 	if budget == nil {
 		budget = graphcache.NewBudgetReport(graphcache.SourceSQL)
 	}
+	clusters, clusterOf := egoClusterProjection(nodes, ann)
 	return egoResponse{
 		Success: true,
 		Focus:   res.Focus,
@@ -349,15 +401,106 @@ func buildEgoResponse(res *store.EgoResult, p store.EgoParams, rawLinkClass []st
 		Nodes:       nodes,
 		Edges:       edges,
 		StructEdges: structEdges,
+		Clusters:    clusters,
+		ClusterOf:   clusterOf,
 		Stats: egoStats{
 			Nodes:           len(res.Nodes),
 			Edges:           len(res.Edges),
 			StructuralEdges: len(res.StructEdges),
+			Clusters:        len(clusters),
 			Truncated:       res.Truncated,
 			ElapsedMs:       elapsedMs,
 		},
 		BudgetReport: budget.WireReport(),
 	}
+}
+
+// egoClusterProjection turns the store annotation into the two parallel wire
+// shapes. Pure, and the ordinal assignment is a copy of buildOverviewResponse
+// (handler/overview.go) — same doctrine, same reason: the internal cluster_id
+// never leaves the server.
+//
+// A node whose cluster has no entry in ann.Clusters maps to -1, so every ordinal
+// in cluster_of resolves by construction. Both returns are non-nil so the
+// envelope keys are unconditional arrays (GA8).
+func egoClusterProjection(nodes []store.GraphNode, ann *store.ClusterAnnotationResult) ([]egoClusterWire, []int) {
+	if ann == nil || len(ann.Clusters) == 0 {
+		return []egoClusterWire{}, []int{}
+	}
+	ordinal := make(map[string]int, len(ann.Clusters))
+	clusters := make([]egoClusterWire, len(ann.Clusters))
+	for i, c := range ann.Clusters {
+		ordinal[c.ClusterID] = i
+		cats := c.TopCategories
+		if cats == nil {
+			cats = []string{}
+		}
+		mix := c.ScopeMix
+		if mix == nil {
+			mix = []string{}
+		}
+		clusters[i] = egoClusterWire{
+			Cluster:       i,
+			Size:          c.Size,
+			TopCategories: cats,
+			ScopeMix:      mix,
+			InResponse:    c.InResponse,
+		}
+	}
+
+	clusterOf := make([]int, len(nodes))
+	for i, n := range nodes {
+		o, ok := ordinal[ann.MemberOf[n.ID]]
+		if !ok {
+			o = -1
+		}
+		clusterOf[i] = o
+	}
+	return clusters, clusterOf
+}
+
+// clusterAnnotation resolves the additive C2 projection for ONE request. It
+// returns nil — meaning "empty arrays" — on every negative outcome, and records
+// the corresponding budget posten:
+//
+//   - feature off ⇒ nil, NO probe, NO posten, zero DB work;
+//   - node count over cluster.ego_annotate_max_nodes ⇒ nil + cluster_annotate_capped.
+//     The ROUTE ceiling is never lowered for this (§6.4);
+//   - probe error ⇒ nil + a warn. FAIL-OPEN on purpose: the annotation is
+//     additive decoration on a graph read that already succeeded and already
+//     wrote its telemetry — turning it into a 500 would let an optional,
+//     default-off feature take down the route it decorates.
+//
+// UD-03-03: this runs on the CACHE arm too. There it is the only remaining DB
+// roundtrip, so it is also the arm where the cost has to stay visible — hence
+// the unconditional probe posten. Skipping the cache arm instead stays a
+// one-line change (an arm test in front of the call), by design.
+func (h *GraphHandler) clusterAnnotation(ctx context.Context, cfg *config.Config, res *store.EgoResult, readScopes []string, reqID string) *store.ClusterAnnotationResult {
+	if !cfg.ClusterOps.EgoAnnotate {
+		return nil
+	}
+	// A nil store report would swallow the posten silently; give it a home
+	// BEFORE any branch can record into it (buildEgoResponse does the same
+	// nil-coalescing for its own rendering).
+	if res.Budget == nil {
+		res.Budget = graphcache.NewBudgetReport(graphcache.SourceSQL)
+	}
+	if len(res.Nodes) > cfg.ClusterOps.EgoAnnotateMaxNodes {
+		res.Budget.Add(graphcache.TravClusterAnnotateCapped)
+		return nil
+	}
+	ids := make([]string, len(res.Nodes))
+	for i := range res.Nodes {
+		ids[i] = res.Nodes[i].ID
+	}
+	res.Budget.Add(graphcache.TravClusterAnnotateProbe)
+	ann, err := store.ClusterAnnotation(ctx, h.pool, ids, readScopes)
+	if err != nil {
+		slog.Warn("graph: cluster annotation failed; serving without clusters",
+			"error", err, "request_id", reqID)
+		return nil
+	}
+	return ann
 }
 
 // parseEgoParams validates the query string into store.EgoParams. Ceilings

@@ -22,8 +22,14 @@ func TestTravClassTokens(t *testing.T) {
 		TravInjectCapped:     "inject_capped",
 		TravSeedFloorCapped:  "seed_floor_capped",
 		TravTimeCapped:       "time_capped",
-		TravCacheStale:       "cache_stale",
-		TravRecheckError:     "recheck_error",
+		// Cluster-Topic-Map C2 (design/03 §4.2, decision UD-03-03): the ego
+		// annotation's cost posten and its own ceiling. Both are budget-layer and
+		// therefore wire-visible — a client may see that the annotation declined,
+		// and an operator may see what it cost on the cache arm.
+		TravClusterAnnotateProbe:  "cluster_annotate_probe",
+		TravClusterAnnotateCapped: "cluster_annotate_capped",
+		TravCacheStale:            "cache_stale",
+		TravRecheckError:          "recheck_error",
 	}
 	for c, tok := range want {
 		if got := c.String(); got != tok {

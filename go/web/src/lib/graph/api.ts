@@ -23,14 +23,38 @@ export interface EgoResponse {
    *  structural links are 1.0 by definition (M076). Absent on old servers →
    *  the merge loop runs empty (tolerance invariant, design 03-§4.1). */
   structural_edges?: [src: number, dst: number, cls: number, origin: number][]
+  /** Clusters the delivered nodes sit in (Cluster-Topic-Map C2). `cluster` is a
+   *  RESPONSE-LOCAL ordinal, never a stable id — cluster_of[] indexes into this
+   *  array. Empty whenever cluster.ego_annotate is off (the default), the
+   *  annotation ceiling tripped, or the probe failed: one shape for "no cluster
+   *  information", so the client never branches on the reason. A stable handle
+   *  + label arrive with C5. Absent on old servers. */
+  clusters?: EgoCluster[]
+  /** Positionally parallel to nodes: cluster_of[i] indexes clusters[], or -1 for
+   *  "no visible membership" (unclustered, grant-only, or newer than the last
+   *  rebuild). Never resolve an index against a different response. */
+  cluster_of?: number[]
   stats: {
     nodes: number
     edges: number
     /** Delivered structural-edge count; stats.edges stays dream-only (E4). */
     structural_edges?: number
+    /** Delivered clusters[] length (C2). */
+    clusters?: number
     truncated: boolean
     elapsed_ms: number
   }
+}
+
+/** One entry of EgoResponse.clusters (C2). size is the SCOPE-PURE size summed
+ *  over the partitions of this cluster the caller may see — never a global
+ *  count. in_response is how many of THIS response's nodes sit in it. */
+export interface EgoCluster {
+  cluster: number
+  size: number
+  top_categories: string[]
+  scope_mix: string[]
+  in_response: number
 }
 
 export interface ApiNode {

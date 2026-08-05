@@ -197,7 +197,10 @@ func TestEgoResponse_EnvelopeGolden(t *testing.T) {
 	}
 	p := store.EgoParams{Hops: 2, PerNodeCap: 25, Limit: 500, EdgeLimit: 4000}
 
-	got, err := json.Marshal(buildEgoResponse(res, p, nil, 4))
+	// nil annotation = cluster.ego_annotate off, the DEFAULT. Every other
+	// negative outcome (ceiling tripped, probe failed) renders identically —
+	// that is the C2 pausability contract, pinned by TestEgoResponse_ClusterPausable.
+	got, err := json.Marshal(buildEgoResponse(res, p, nil, 4, nil))
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
 	}
@@ -219,7 +222,12 @@ func TestEgoResponse_EnvelopeGolden(t *testing.T) {
 		`],` +
 		`"edges":[[0,1,0,0.830]],` +
 		`"structural_edges":[],` +
-		`"stats":{"nodes":2,"edges":1,"structural_edges":0,"truncated":false,"elapsed_ms":4},` +
+		// C2 (design/03 §4.2): clusters/cluster_of follow the SAME GA8 rule —
+		// additive, unconditional, never null. With cluster.ego_annotate off
+		// (default) they are empty and stats.clusters is 0, for every request.
+		`"clusters":[],` +
+		`"cluster_of":[],` +
+		`"stats":{"nodes":2,"edges":1,"structural_edges":0,"clusters":0,"truncated":false,"elapsed_ms":4},` +
 		// W05.4 (design/05 §4.5): budget_report is the LAST key, ADDITIVE after
 		// stats — stats.truncated keeps its exact old meaning, the report
 		// differentiates it by cause/layer. A nil store report (this hand-built
@@ -239,7 +247,7 @@ func TestEgoResponse_EmptyCollectionsAreArrays(t *testing.T) {
 	res := &store.EgoResult{Focus: egoTestUUID, Rels: store.GraphRels}
 	p := store.EgoParams{Hops: 1, PerNodeCap: 25, Limit: 500, EdgeLimit: 4000}
 
-	got, err := json.Marshal(buildEgoResponse(res, p, nil, 1))
+	got, err := json.Marshal(buildEgoResponse(res, p, nil, 1, nil))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -257,6 +265,17 @@ func TestEgoResponse_EmptyCollectionsAreArrays(t *testing.T) {
 	for _, f := range []string{`"struct_rels":[]`, `"origins":[]`, `"structural_edges":[]`} {
 		if !strings.Contains(s, f) {
 			t.Errorf("structural collection %s missing from empty envelope: %s", f, s)
+		}
+	}
+	// C2: the two cluster collections join the same rule.
+	for _, f := range []string{`"clusters":null`, `"cluster_of":null`} {
+		if strings.Contains(s, f) {
+			t.Errorf("cluster collection marshaled as null (%s), want []: %s", f, s)
+		}
+	}
+	for _, f := range []string{`"clusters":[]`, `"cluster_of":[]`} {
+		if !strings.Contains(s, f) {
+			t.Errorf("cluster collection %s missing from empty envelope: %s", f, s)
 		}
 	}
 }

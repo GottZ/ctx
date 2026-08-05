@@ -98,6 +98,23 @@ const (
 	TravSeedFloorCapped
 	// TravTimeCapped: SoftDeadline exceeded (partial result).
 	TravTimeCapped
+	// TravClusterAnnotateProbe: the ego cluster annotation ran its membership
+	// probe (Cluster-Topic-Map C2, decision UD-03-03). NOT a cap — a declared
+	// COST POSTEN. It sits in the budget layer because it is the one piece of
+	// server-side work the annotation adds under its own ceiling, and because it
+	// pairs with TravClusterAnnotateCapped: "probe ran" and "probe skipped by the
+	// ceiling" are the two outcomes of one knob and belong in one place.
+	//
+	// Its whole reason to exist is the CACHE arm: there the snapshot answers
+	// without any SQL hop, so this probe is the only remaining roundtrip and
+	// would otherwise hide inside the cache win (design/03 §4.2). Source tells a
+	// reader which arm it was measured on.
+	TravClusterAnnotateProbe
+	// TravClusterAnnotateCapped: the delivered node count exceeded
+	// cluster.ego_annotate_max_nodes ⇒ empty clusters[]/cluster_of[], no probe.
+	// The ROUTE ceiling is untouched (design/03 §6.4): the annotation declines
+	// rather than shrinking what the graph read itself may return.
+	TravClusterAnnotateCapped
 
 	// ── Layer OPERATIONAL ── which arm answered, and what failed.
 
@@ -174,6 +191,10 @@ func (c TravClass) String() string {
 		return "seed_floor_capped"
 	case TravTimeCapped:
 		return "time_capped"
+	case TravClusterAnnotateProbe:
+		return "cluster_annotate_probe"
+	case TravClusterAnnotateCapped:
+		return "cluster_annotate_capped"
 	case TravCacheStale:
 		return "cache_stale"
 	case TravRecheckError:
@@ -197,7 +218,8 @@ func (c TravClass) Layer() TravLayer {
 	case TravNodeLimitReached, TravEdgeLimitReached:
 		return LayerLimits
 	case TravDepthCapped, TravFrontierCapped, TravVisitedCapped,
-		TravCandidatesCapped, TravInjectCapped, TravSeedFloorCapped, TravTimeCapped:
+		TravCandidatesCapped, TravInjectCapped, TravSeedFloorCapped, TravTimeCapped,
+		TravClusterAnnotateProbe, TravClusterAnnotateCapped:
 		return LayerBudgets
 	case TravCacheStale, TravRecheckError:
 		return LayerOperational

@@ -45,6 +45,50 @@ func MemberOf(alias, scopeParam string) string {
 	return fmt.Sprintf("%s.scope = ANY(%s::text[])", alias, scopeParam)
 }
 
+// NodeVisible returns the scope predicate for a graph_cluster_node alias:
+//
+//	<alias>.scope = ANY(<scopeParam>::text[])
+//
+// Same shape and same non-optionality as MemberOf, one table over. It exists
+// separately because the two tables answer different questions and are joined
+// against different id sets — but the conjunction they need is the same one,
+// and it must have ONE site per table, not one per query.
+//
+// graph_cluster_node is the scope-PARTITIONED aggregate: one row per
+// (cluster_id, scope), each carrying that partition's size, repr and category
+// counts (migration 057 §A). Reading a cluster's size means SUMMING the rows of
+// the caller's scopes — taking a single row's size, or summing without this
+// conjunction, is a direct count leak over foreign partitions (design/03 §5.6).
+func NodeVisible(alias, scopeParam string) string {
+	return fmt.Sprintf("%s.scope = ANY(%s::text[])", alias, scopeParam)
+}
+
+// VisibleSizeQuery is THE definition of "visible cluster size" for every
+// consumer that needs the number without the landkarte's repr/ordering
+// machinery — the ego annotation (C2) and the RRF boost's size damping (C3):
+//
+//	$1 — cluster ids  (uuid[])
+//	$2 — read scopes  (text[])
+//
+// It returns, per cluster, the scope-pure summed size and the contributing
+// scopes. NO HAVING, NO LIMIT — deliberately: both consumers pass a bounded,
+// already-known cluster set, and a limit there would silently drop entries a
+// caller is holding an index into (design/03 §4.2: "Trunkierung ist auf diesem
+// Pfad ein Fehler, kein Flag").
+//
+// Living in this package rather than in store is what makes it reachable from
+// rrf at all (rrf cannot import store) — and that reachability is precisely why
+// §4.5's size damping can bind the SAME definition the wire size uses instead of
+// growing a second one that drifts.
+var VisibleSizeQuery = `
+	SELECT n.cluster_id::text,
+	       sum(n.size)::int,
+	       array_agg(DISTINCT n.scope ORDER BY n.scope)
+	FROM graph_cluster_node n
+	WHERE n.cluster_id = ANY($1::uuid[])
+	  AND ` + NodeVisible("n", "$2") + `
+	GROUP BY n.cluster_id`
+
 // MembershipQuery is the batch read "which of these blocks sit in which
 // cluster, as far as the caller may see":
 //

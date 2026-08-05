@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/clustersql"
 )
 
 // OverviewNode is one meta-node (cluster), already scope-pure aggregated.
@@ -105,16 +107,16 @@ func GraphOverview(ctx context.Context, pool *pgxpool.Pool, p OverviewParams, re
 // invisible scope. HAVING drops clusters with no visible member (vector 4).
 func overviewNodes(ctx context.Context, pool *pgxpool.Pool, p OverviewParams, readScopes []string) ([]OverviewNode, bool, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT cluster_id::text,
-		       sum(size)::int                                                       AS visible_size,
-		       (array_agg(repr_block_id ORDER BY repr_quality DESC, repr_block_id))[1]::text AS repr_id,
-		       (array_agg(repr_title    ORDER BY repr_quality DESC, repr_block_id))[1]       AS repr_title,
-		       array_agg(DISTINCT scope ORDER BY scope)                             AS scope_mix
-		FROM graph_cluster_node
-		WHERE scope = ANY($1::text[])
-		GROUP BY cluster_id
-		HAVING sum(size) >= $2
-		ORDER BY sum(size) DESC, cluster_id
+		SELECT n.cluster_id::text,
+		       sum(n.size)::int                                                         AS visible_size,
+		       (array_agg(n.repr_block_id ORDER BY n.repr_quality DESC, n.repr_block_id))[1]::text AS repr_id,
+		       (array_agg(n.repr_title    ORDER BY n.repr_quality DESC, n.repr_block_id))[1]       AS repr_title,
+		       array_agg(DISTINCT n.scope ORDER BY n.scope)                             AS scope_mix
+		FROM graph_cluster_node n
+		WHERE `+clustersql.NodeVisible("n", "$1")+`
+		GROUP BY n.cluster_id
+		HAVING sum(n.size) >= $2
+		ORDER BY sum(n.size) DESC, n.cluster_id
 		LIMIT $3`,
 		readScopes, p.MinClusterSize, p.NodeLimit+1) // +1 detects truncation
 	if err != nil {
@@ -153,10 +155,10 @@ func fillTopCategories(ctx context.Context, pool *pgxpool.Pool, nodes []Overview
 	}
 
 	rows, err := pool.Query(ctx, `
-		SELECT cluster_id::text, kv.key, sum((kv.value)::int)::int
-		FROM graph_cluster_node, jsonb_each(category_counts) kv
-		WHERE scope = ANY($1::text[]) AND cluster_id = ANY($2::uuid[])
-		GROUP BY cluster_id, kv.key`,
+		SELECT n.cluster_id::text, kv.key, sum((kv.value)::int)::int
+		FROM graph_cluster_node n, jsonb_each(n.category_counts) kv
+		WHERE `+clustersql.NodeVisible("n", "$1")+` AND n.cluster_id = ANY($2::uuid[])
+		GROUP BY n.cluster_id, kv.key`,
 		readScopes, ids)
 	if err != nil {
 		return err
