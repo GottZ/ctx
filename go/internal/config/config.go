@@ -319,6 +319,46 @@ type GraphOverviewConfig struct {
 	// ceiling — same classification as rebuild_timeout one line up. The purge
 	// that consumes the same key is wave W8; W3 only reads it.
 	TombstoneRetention time.Duration `key:"graph_overview.tombstone_retention" env:"CTX_GRAPH_OVERVIEW_TOMBSTONE_RETENTION" default:"3888000" mut:"hot" tenancy:"global-only"`
+
+	// ── W6: the LLM label pipeline (design/01 §3.5/§4.8, Amendments A01-3/A01-4) ──
+	//
+	// LabelEnabled ships TRUE, unlike graph_overview.enabled — decision E7-01
+	// ("wir wollen ja, dass nutzer das auch verwenden"). The knob that keeps a
+	// fresh install quiet is NOT this one but LabelMinTopics one line down: a
+	// corpus with fewer living topics than the threshold is not complex enough
+	// for automatic naming to be worth an inference budget, and the
+	// deterministic W5 fallback already labels every topic. false stays the
+	// hard opt-out.
+	LabelEnabled bool `key:"graph_overview.label_enabled" env:"CTX_GRAPH_OVERVIEW_LABEL_ENABLED" default:"true" mut:"hot" tenancy:"global-only"`
+	// LabelInterval is the label arm's cadence — deliberately DECOUPLED from
+	// rebuild_interval (6 h): a label only has to follow a core drift, and the
+	// cold-start backlog needs a place to work itself off. Seconds.
+	LabelInterval time.Duration `key:"graph_overview.label_interval" env:"CTX_GRAPH_OVERVIEW_LABEL_INTERVAL" default:"3600" mut:"hot" tenancy:"global-only"`
+	// LabelBatch is the TICK cap — topics per tick, across ALL scopes of the
+	// tenant that tick serves, never per scope (design/01 §3.5). A per-scope
+	// limit would be S × batch calls for a tenant with S scopes and the cap
+	// would not cap. This is layer one of the three against the cold-start
+	// storm (B8); layer two is the demand yield INSIDE the batch loop, layer
+	// three the background lease preempt.
+	LabelBatch int `key:"graph_overview.label_batch" env:"CTX_GRAPH_OVERVIEW_LABEL_BATCH" default:"200" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// LabelMinTopics is the complexity threshold of decision E7-01: below this
+	// many LIVING topics a scope is not labelled at all — no LLM call, no
+	// error, the W5 fallback carries the map. It is what turns "default on"
+	// from a boot-time storm into an event that happens exactly once, when a
+	// corpus becomes complex enough to need names, and incrementally after.
+	LabelMinTopics int `key:"graph_overview.label_min_topics" env:"CTX_GRAPH_OVERVIEW_LABEL_MIN_TOPICS" default:"10" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// LabelPromptMaxTitles caps how many core-block titles reach one prompt.
+	// A declared RESOURCE bound (Amendment A01-7), never a semantic one: the
+	// Substanz-Kern is self-adaptive and can be large in a hub cluster, and a
+	// prompt has a token budget. ~24 titles ≈ 600–800 tokens.
+	LabelPromptMaxTitles int `key:"graph_overview.label_prompt_max_titles" env:"CTX_GRAPH_OVERVIEW_LABEL_PROMPT_MAX_TITLES" default:"24" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// LabelCredentialsFallbackOnly is stage 3 of the label output hardening
+	// (Amendment A01-3 / decision E4-02) and ships OFF by design: stages 1 and
+	// 2 — the sensitivity scan over the finished label and the deterministic
+	// echo gate — are unconditional, this one is the opt-in that takes a
+	// credentials core out of the LLM path entirely and leaves it with its
+	// deterministic fallback name.
+	LabelCredentialsFallbackOnly bool `key:"graph_overview.label_credentials_fallback_only" env:"CTX_GRAPH_OVERVIEW_LABEL_CREDENTIALS_FALLBACK_ONLY" default:"false" mut:"hot" tenancy:"global-only"`
 }
 
 // RootMapConfig is the Achse-02 root-map surface (plan-cluster-topicmap

@@ -129,9 +129,43 @@ services:
       # gates BOTH the job and the endpoint (off ⇒ 404). REBUILD_INTERVAL takes
       # seconds (default 6h); RESOLUTION is the Louvain γ (higher ⇒ more, smaller
       # clusters). First build runs at boot when ENABLED and the tables are empty.
+      #
+      # Declared COMPLETELY here since wave W6 (Cluster-Topic-Map). The block
+      # used to carry three of the group's keys — leaving out MAX_NODES and
+      # REBUILD_TIMEOUT, i.e. exactly the two liveness guards that have to be
+      # reachable FIRST at scale. A knob the container cannot receive is not a
+      # knob.
       CTX_GRAPH_OVERVIEW_ENABLED: ${CTX_GRAPH_OVERVIEW_ENABLED:-false}
       CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL: ${CTX_GRAPH_OVERVIEW_REBUILD_INTERVAL:-21600}
       CTX_GRAPH_OVERVIEW_RESOLUTION: ${CTX_GRAPH_OVERVIEW_RESOLUTION:-1.0}
+      # MAX_NODES is the load-bearing liveness cap (parse-strict): past ~200k
+      # nodes Louvain hits a convergence wall, and a node set beyond the cap
+      # skips the rebuild fail-safe rather than hanging it (0 = uncapped).
+      # REBUILD_TIMEOUT bounds one run; the worker child is SIGKILLed on expiry.
+      CTX_GRAPH_OVERVIEW_MAX_NODES: ${CTX_GRAPH_OVERVIEW_MAX_NODES:-200000}
+      CTX_GRAPH_OVERVIEW_REBUILD_TIMEOUT: ${CTX_GRAPH_OVERVIEW_REBUILD_TIMEOUT:-900}
+      # TOMBSTONE_RETENTION (seconds, 45 d) is the window in which a dead topic
+      # can still be re-attached to a re-appearing community — the batch-import
+      # guard. 0 switches the re-attach off (fresh identities, never a wrong
+      # revival). The purge of expired tombstones reads the same key.
+      CTX_GRAPH_OVERVIEW_TOMBSTONE_RETENTION: ${CTX_GRAPH_OVERVIEW_TOMBSTONE_RETENTION:-3888000}
+      # Topic labelling (wave W6): the LLM half of the cluster names, over the
+      # digest role. LABEL_ENABLED ships ON — unlike the rebuild gate — because
+      # what keeps a small install quiet is LABEL_MIN_TOPICS, not an off switch:
+      # below that many living topics per scope nothing is labelled at all, and
+      # the deterministic fallback already names every topic. Language follows
+      # CTX_DREAM_LANGUAGE (one language knob per corpus). LABEL_BATCH is the cap
+      # per TICK across all scopes of the tenant served, LABEL_PROMPT_MAX_TITLES
+      # a declared token budget. LABEL_CREDENTIALS_FALLBACK_ONLY is the opt-in
+      # third hardening stage — the scan over the finished label and the echo
+      # gate are unconditional, this one keeps credentials cores out of the model
+      # path entirely.
+      CTX_GRAPH_OVERVIEW_LABEL_ENABLED: ${CTX_GRAPH_OVERVIEW_LABEL_ENABLED:-true}
+      CTX_GRAPH_OVERVIEW_LABEL_INTERVAL: ${CTX_GRAPH_OVERVIEW_LABEL_INTERVAL:-3600}
+      CTX_GRAPH_OVERVIEW_LABEL_BATCH: ${CTX_GRAPH_OVERVIEW_LABEL_BATCH:-200}
+      CTX_GRAPH_OVERVIEW_LABEL_MIN_TOPICS: ${CTX_GRAPH_OVERVIEW_LABEL_MIN_TOPICS:-10}
+      CTX_GRAPH_OVERVIEW_LABEL_PROMPT_MAX_TITLES: ${CTX_GRAPH_OVERVIEW_LABEL_PROMPT_MAX_TITLES:-24}
+      CTX_GRAPH_OVERVIEW_LABEL_CREDENTIALS_FALLBACK_ONLY: ${CTX_GRAPH_OVERVIEW_LABEL_CREDENTIALS_FALLBACK_ONLY:-false}
       # Cluster consumption (Achse 03, wave C0): turns the Louvain clusters from
       # an output-only endpoint into a retrieval signal, a graph citizen and a
       # facet. The whole surface ships DARK — every gate below is false/0 and

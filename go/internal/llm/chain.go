@@ -592,6 +592,17 @@ type ChainCall struct {
 	// it "" — nullUUID (llmlog.go:168) drops an empty key to NULL, keeping the
 	// background invariant (Dream/Scheduler carry no caller).
 	APIKeyID string
+	// OnServed, when set, reports WHICH backend produced the response — the
+	// provenance the *ChatResponse alone cannot carry (ServedModel is filled by
+	// OpenRouter only; a local backend leaves it empty). Purely additive and
+	// purely observational: it fires once, after the walk, only when a backend
+	// answered, and no existing call site sets it.
+	//
+	// Added for the cluster-label pipeline (Cluster-Topic-Map W6), which
+	// persists label_model per topic as label PROVENANCE — "which model named
+	// this" has to be the model that actually answered, not the one the pool
+	// would have picked.
+	OnServed func(backend, model string)
 }
 
 // Do resolves the chain (the trust gate: an excluded backend does not exist
@@ -642,6 +653,9 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 		entry.BackendName = served.Name
 		entry.BackendTrust = string(served.Trust)
 		entry.BackendLocality = served.Locality
+		if c.OnServed != nil {
+			c.OnServed(served.Name, entry.Model)
+		}
 	}
 	if resp != nil {
 		entry.CompletionTokens = resp.EvalCount

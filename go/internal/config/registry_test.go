@@ -163,6 +163,17 @@ func TestRegistryStrictSet(t *testing.T) {
 		// that then travels through backups and exports.
 		"root_map.budget_bytes":    true,
 		"root_map.super_max_nodes": true,
+		// W6 (Cluster-Topic-Map): the three label-pipeline integer bounds are
+		// declared RESOURCE ceilings — the per-tick LLM-call cap, the corpus
+		// complexity threshold that decides whether any labelling happens at
+		// all, and the prompt token budget. A typo'd value silently falling
+		// back to its default would hide exactly the limit the operator meant
+		// to set, on the one arm of this axis that spends inference.
+		// graph_overview.label_enabled / label_credentials_fallback_only stay
+		// non-strict for the documented bool reason (dispatch.enabled).
+		"graph_overview.label_batch":             true,
+		"graph_overview.label_min_topics":        true,
+		"graph_overview.label_prompt_max_titles": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {

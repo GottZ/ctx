@@ -20,6 +20,7 @@ import (
 	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/recall"
 	"github.com/GottZ/ctx/internal/schemacontract"
+	"github.com/GottZ/ctx/internal/topiclabel"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -74,6 +75,19 @@ type recallRunSource interface {
 // apart — which is why C4 owes it, not C8.
 type clusterMapSource interface {
 	ConsecutiveOverviewFails() int
+}
+
+// topicLabelSource is the OPTIONAL scheduler slice for the W6 label arm. Its
+// OWN narrow interface for the same documented reason as clusterMapSource (the
+// armRunSource trap): the label state is not a timestamp and does not belong in
+// a timestamp signature.
+//
+// It answers the question a log cannot: a label arm that is doing nothing
+// produces no lines, and "switched off", "below the complexity threshold" and
+// "no chat-capable backend" are three different situations with three different
+// answers. *events.Scheduler implements it; nil = no section.
+type topicLabelSource interface {
+	LabelingState() (topiclabel.Stats, time.Time, bool)
 }
 
 // DispatchSource is the in-memory admission-registry view the collector adds as
@@ -343,6 +357,65 @@ type clusterMapStatus struct {
 	Scopes              []clusterMapScope `json:"scopes"`
 	ConsecutiveFailures int               `json:"consecutive_failures"`
 	CrossScopeClusters  int               `json:"cross_scope_clusters"`
+	// Labeling is the W6 label-arm state. nil before the arm's first tick of
+	// this process — a pointer, so "has not run yet" and "ran and did nothing"
+	// stay distinguishable.
+	Labeling *labelingStatus `json:"labeling,omitempty"`
+}
+
+// labelingStatus is the W6 label pipeline as /api/status renders it
+// (Amendment A01-4: "kein stiller Zustand").
+//
+// State is the whole point: "active" · "below-threshold (n/N)" · "no-backend" ·
+// "off". A pipeline below its complexity threshold produces no log lines and no
+// labels, and without this field that is indistinguishable from a broken one.
+//
+// RejectedScan/RejectedEcho are the visible rejection counters decision E4-02
+// requires — the label hardening must never be a silent filter. They count, they
+// do not carry the rejected text: a name suspected of echoing a credentials
+// title is exactly the string not to put on a status surface.
+type labelingStatus struct {
+	State        string     `json:"state"`
+	LastRunAt    *time.Time `json:"last_run_at,omitempty"`
+	LivingTopics int        `json:"living_topics"`
+	MinTopics    int        `json:"min_topics"`
+	Selected     int        `json:"selected"`
+	Labeled      int        `json:"labeled"`
+	Failed       int        `json:"failed"`
+	Quiesced     int        `json:"quiesced"`
+	RejectedScan int        `json:"rejected_scan"`
+	RejectedEcho int        `json:"rejected_echo"`
+	Yielded      int        `json:"yielded"`
+	Overrun      int        `json:"overrun"`
+	Aborted      int        `json:"aborted"`
+	LatencyP50Ms int64      `json:"latency_p50_ms"`
+	LatencyP95Ms int64      `json:"latency_p95_ms"`
+}
+
+// buildLabelingStatus renders the last tick. Returns nil before the first one.
+func buildLabelingStatus(src topicLabelSource) *labelingStatus {
+	st, at, ok := src.LabelingState()
+	if !ok {
+		return nil
+	}
+	ran := at
+	return &labelingStatus{
+		State:        st.State,
+		LastRunAt:    &ran,
+		LivingTopics: st.LivingTopics,
+		MinTopics:    st.MinTopics,
+		Selected:     st.Selected,
+		Labeled:      st.Labeled,
+		Failed:       st.Failed,
+		Quiesced:     st.Quiesced,
+		RejectedScan: st.RejectedScan,
+		RejectedEcho: st.RejectedEcho,
+		Yielded:      st.Yielded,
+		Overrun:      st.Overrun,
+		Aborted:      st.Aborted,
+		LatencyP50Ms: st.LatencyP50Ms,
+		LatencyP95Ms: st.LatencyP95Ms,
+	}
 }
 
 // dreamStatus flattens scheduler mode + the dream.QueueStats fields (names 1:1,
@@ -922,6 +995,12 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	// dreamMode source simply yields no section.
 	if src, ok := c.dreams.(clusterMapSource); ok {
 		snap.clusterMap = c.buildClusterMapStatus(ctx, src.ConsecutiveOverviewFails())
+	}
+	// W6 label state rides on the cluster_map section (same subject, one place
+	// to look) but comes from its OWN narrow assertion, so a source that
+	// implements only one of the two still yields the other.
+	if src, ok := c.dreams.(topicLabelSource); ok && snap.clusterMap != nil {
+		snap.clusterMap.Labeling = buildLabelingStatus(src)
 	}
 	// Achse-04 re-embed-migration section (design/04 §7 W04-7): a DB read in
 	// buildCheap — NOT a narrow scheduler interface — because the migration state

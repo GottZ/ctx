@@ -188,6 +188,18 @@ type Scheduler struct {
 	clusterFreshReadAt       time.Time
 	consecutiveOverviewFails atomic.Int64
 
+	// labelState holds the last topic-label tick (Cluster-Topic-Map W6): a
+	// labelSnapshot, read by /api/status through the narrow LabelingState()
+	// method. An atomic.Value rather than a mutex-guarded field for the same
+	// reason the arm stamps above are atomics — written by one background
+	// goroutine, read by the status collector, never both.
+	//
+	// It carries STATE, not just a timestamp, because the label arm's most
+	// important operational statement is one no timestamp can make: "I am not
+	// labelling, and here is why" (below the complexity threshold, no chat
+	// backend, switched off).
+	labelState atomic.Value
+
 	// embedVerifyActive is the single-flight guard of the W04-5 re-embed
 	// verify runner: the migration cycle keeps ticking (drain semantics,
 	// design/04 §4.1) while ONE verify goroutine works through the gate —
@@ -678,6 +690,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// blocks the daily-summary cadence.
 	go s.runDailySynthesis(ctx)
 	go s.runOverviewRebuild(ctx)
+	// W6: its own goroutine next to the rebuild, not a ticker arm — a label
+	// batch is minutes of sequential inference and would block guard/digest.
+	go s.runTopicLabeling(ctx)
 
 	// Achse 05 W05.2: the graph-cache rebuild job (design/05 §4.3). Own goroutine
 	// (like overview): boot-build on enable, hard interval + Dirty-Age-debounced
