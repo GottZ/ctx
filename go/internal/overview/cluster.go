@@ -8,6 +8,7 @@ package overview
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -127,7 +128,67 @@ type Stats struct {
 	// committed regardless, which is the whole reason the two are separate.
 	SuperN      int
 	SuperCapped bool
+
+	// ── S2: die Messfläche des Lauf-Journals (Achse 04, Migration 130) ──────
+	//
+	// PROTOKOLL-HINWEIS (K12, derselbe wie im Struct-Kopf): diese Felder kreuzen
+	// den strikten Kind→Eltern-Decoder. Sie landen in EINEM Commit auf beiden
+	// Seiten — was hier trivial ist, weil Eltern und Kind dasselbe Binary sind
+	// und ein Container-Deploy beide atomar tauscht. Das dokumentierte
+	// Mischversions-Fenster (BP-8) bleibt: ein noch laufendes altes Kind unter
+	// einem neuen Elternprozess scheitert LAUT statt still.
+	//
+	// Ohne diese Felder ist jede Skalen-Aussage der Achse eine Behauptung: die
+	// Phasendauern, die Lock-Haltezeit und der Speicher-Hochwassermarker sind
+	// heute NIRGENDS sichtbar — weder in Stats noch im Log (scheduler.go:
+	// 1258-1261). S1 hat sie extern gemessen; ab hier misst sie der Lauf selbst.
+
+	// LoadMs/ClusterMs/PersistMs zerlegen die Wall-Clock in ihre drei Phasen.
+	// Die Trennung ist die Voraussetzung dafür, dass S3 (CSR-Loader) und S4
+	// (eigener Kern) getrennt bewertbar sind — ohne sie misst jede Welle die
+	// Summe der anderen mit.
+	LoadMs    int
+	ClusterMs int
+	PersistMs int
+	// LockHeldMs ist die Haltezeit des Advisory-Locks: die Größe, an der ein
+	// Skalen-Pfad im BETRIEB scheitert, weil sie alle Rebuilds derselben
+	// Partition serialisiert. Sie wird von der ERSTEN Anweisung der persist-Tx
+	// bis zum Commit gemessen.
+	LockHeldMs int
+	// CopyMs trennt den CopyFrom-Anteil ab S9a heraus. Bis dahin 0/NULL — die
+	// Spalte existiert, damit S9a nicht behaupten kann, lock_held_ms gesenkt zu
+	// haben, indem es Arbeit in eine unbeobachtete Phase verschiebt (S9a-G2).
+	CopyMs int
+	// PeakRSSKb ist VmHWM des KINDprozesses. Momentanwerte taugen nicht: der
+	// Rebuild ist eine Sägezahn-Last, und die cgroup schlägt an der Spitze zu.
+	PeakRSSKb int64
+	// PartitionHash ist der Determinismus-Ersatzanker A1 (§4.6): SHA-256 über
+	// die kanonisierte Partition. Er ersetzt ab engine=ctx den 50-Lauf-Test,
+	// der ohne PRNG trivial grün wäre.
+	PartitionHash []byte
+	// EdgeCount/DanglingN/SelfLoopN beschreiben den KANTEN-Schnitt. dangling und
+	// Self-Loops werden heute STILL verworfen (cluster.go:462-466) — live sind
+	// das 264 von 3.519 Kanten, also 7,5 %, die niemand sieht.
+	EdgeCount int
+	DanglingN int
+	SelfLoopN int
+	// ComponentN/LevelN/SweepN/SigmaDrift füllen S4/S8. gonum meldet weder
+	// Sweeps noch Ebenen nach außen (localMovingHeuristic führt keinen Zähler),
+	// deshalb bleiben sie auf dem gonum-Pfad 0 ⇒ NULL im Journal.
+	ComponentN int
+	LevelN     int
+	SweepN     int
+	SigmaDrift float64
 }
+
+// EngineGonum/EngineCtx benennen die beiden Rechenkerne. Der Schalter selbst
+// kommt erst mit S6+S7; die Konstante existiert ab S2, weil das Lauf-Journal
+// die Engine JEDER Zeile führt — ein Journal, das erst ab dem Schalter weiß,
+// womit gerechnet wurde, könnte den Wechsel nicht belegen.
+const (
+	EngineGonum = "gonum"
+	EngineCtx   = "ctx"
+)
 
 // tallyScopes counts node candidates per scope over the loadNodes output.
 // O(candidates) and free next to the load itself; runs BEFORE the MaxNodes
@@ -278,6 +339,16 @@ type clustering struct {
 	intraDegree  map[string]float64
 	modularity   float64
 	clusterCount int
+
+	// S2: die drei Kanten-Zähler des Journals. edgePairs ist die Zahl der
+	// UNGERICHTETEN Paare nach Symmetrisierung und Deduplizierung — nicht die
+	// geladene Zeilenmenge; dangling und selfLoops sind die beiden Mengen, die
+	// der Symmetrisierungs-Schritt bisher STILL verwirft (:462-466). Live sind
+	// das 264 dangling von 3.519 Kanten. S3 baut auf denselben Zählern sein
+	// Gate S3-G4 gegen die psql-Gegenprobe auf.
+	edgePairs int
+	dangling  int
+	selfLoops int
 }
 
 // Rebuild recomputes the cluster supergraph and replaces the 057 tables in one
@@ -313,6 +384,7 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 		return Stats{}, fmt.Errorf("overview: empty type allowlist (visible=%d, overview=%d) — block-type registry not wired?",
 			len(opts.VisibleTypes), len(opts.OverviewTypes))
 	}
+	loadStart := time.Now()
 	nodeUUIDs, nodeScopes, err := loadNodes(ctx, pool, intersect(opts.VisibleTypes, opts.OverviewTypes), opts.ScopeFilter)
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading nodes: %w", err)
@@ -374,6 +446,13 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading edges: %w", err)
 	}
+	// S2: die Ladephase endet HIER, nicht nach loadNodes. Beide Loads gehören
+	// in load_ms — sie sind derselbe Kostenpfad (zwei sortierte Cursor über
+	// dieselbe Transaktion), und S3 wird genau diese Zahl gegen den CSR-Build
+	// stellen.
+	loadMS := int(time.Since(loadStart).Milliseconds())
+
+	clusterStart := time.Now()
 	cl, err := clusterWithCtx(ctx, nodeUUIDs, edges, opts.Resolution)
 	if err != nil {
 		return Stats{}, err
@@ -391,7 +470,27 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 		MaxNodes:      opts.SuperMaxNodes,
 		Resolution:    opts.Resolution,
 	})
-	return persist(ctx, pool, cl, opts, nodeScopes, candidates, super)
+	// Die Meta-Ebene liegt bewusst INNERHALB von cluster_ms: sie ist bis zu
+	// acht weitere Louvain-Proben (super.go) und damit Rechenzeit derselben
+	// Phase. Sie hier auszuklammern hieße, cluster_ms kleinzurechnen.
+	clusterMS := int(time.Since(clusterStart).Milliseconds())
+
+	stats, err := persist(ctx, pool, cl, opts, nodeScopes, candidates, super)
+	if err != nil {
+		return stats, err
+	}
+	stats.LoadMs = loadMS
+	stats.ClusterMs = clusterMS
+	stats.EdgeCount = cl.edgePairs
+	stats.DanglingN = cl.dangling
+	stats.SelfLoopN = cl.selfLoops
+	stats.PartitionHash = partitionHash(cl.blockToCluster)
+	// PeakRSSKb wird als LETZTES gelesen — VmHWM ist ein Hochwassermarker, der
+	// erst am Ende die Spitze des ganzen Laufs kennt (Laden, Symmetrisieren,
+	// gonum-Graph, persist). Genau diese Reihenfolge war der Messfehler, den
+	// der S1-Bench im ersten Anlauf hatte.
+	stats.PeakRSSKb = ReadVmHWMkB()
+	return stats, nil
 }
 
 // clusterWithCtx runs computeClustering in its own goroutine so a ctx
@@ -458,10 +557,21 @@ func computeClustering(nodeUUIDs []string, edges []rawEdge, resolution float64) 
 	// and self-loops (gonum simple graph forbids them).
 	type pair struct{ a, b int64 }
 	agg := make(map[pair]float64, len(edges))
+	// S2: die beiden Verwerfungs-Gründe werden GETRENNT gezählt statt gemeinsam
+	// verschwiegen. Getrennt, weil sie verschiedene Befunde sind: dangling heißt
+	// "der Knotenschnitt ist enger als der Kantensatz" (Archivierung, Typ-Politik,
+	// Scope-Filter), selfLoop heißt "ein Block verweist auf sich selbst". Ein
+	// gemeinsamer Zähler könnte einen Anstieg des einen nicht vom anderen trennen.
+	var dangling, selfLoops int
 	for _, e := range edges {
 		ai, okA := idx[e.src]
 		bi, okB := idx[e.dst]
-		if !okA || !okB || ai == bi {
+		if !okA || !okB {
+			dangling++
+			continue
+		}
+		if ai == bi {
+			selfLoops++
 			continue
 		}
 		if ai > bi {
@@ -542,7 +652,49 @@ func computeClustering(nodeUUIDs []string, edges []rawEdge, resolution float64) 
 	if math.IsNaN(q) || math.IsInf(q, 0) {
 		q = 0 // 0-edge graph → undefined Q; report 0 rather than NaN
 	}
-	return clustering{blockToCluster: b2c, intraDegree: deg, modularity: q, clusterCount: len(comms)}
+	return clustering{
+		blockToCluster: b2c, intraDegree: deg, modularity: q, clusterCount: len(comms),
+		edgePairs: len(agg), dangling: dangling, selfLoops: selfLoops,
+	}
+}
+
+// partitionHash ist der Determinismus-Ersatzanker A1 (design/04 §4.6):
+// SHA-256 über die KANONISIERTE Partition — Member nach block_id sortiert, je
+// Zeile block_id || cluster_id.
+//
+// Kanonisiert heißt: die Map-Iterationsordnung darf nicht eingehen. Ohne die
+// Sortierung wäre der Hash bei jedem Lauf ein anderer und der Anker wertlos —
+// derselbe Grund, aus dem die Kanteneinfügung sortiert läuft (:275-291).
+//
+// Warum der Hash den 50-Lauf-Determinismus-Test ERGÄNZT und nicht ersetzt: der
+// Test prüft WIEDERHOLBARKEIT innerhalb eines Binaries, der Hash prüft KONSTANZ
+// über die Zeit. Ab engine=ctx entfällt der PRNG, der 50-Lauf-Test wird damit
+// trivial grün — und der Hash ist dann der einzige verbliebene Anker.
+func partitionHash(b2c map[string]string) []byte {
+	blocks := make([]string, 0, len(b2c))
+	for b := range b2c {
+		blocks = append(blocks, b)
+	}
+	sort.Strings(blocks)
+	// Die 0x00-Rahmung ist NICHT kosmetisch. Ohne sie ist der Hash nicht
+	// injektiv: ("ab" → "c") und ("a" → "bc") ergaeben denselben Digest, weil
+	// nur die Konkatenation eingeht. Bei UUIDs fester Breite kann der Fall heute
+	// nicht auftreten — aber ein Anker, dessen Korrektheit an einer Annahme
+	// ueber die Eingabebreite haengt, ist ein Anker auf Widerruf, und der naechste
+	// Schluesseltyp (Topic-Handle, K13) haette ihn still gebrochen.
+	// UUID-Textform enthaelt kein NUL, die Rahmung ist damit eindeutig — dasselbe
+	// Argument, auf dem lockKeyForScopes seine Trennung baut (:230-236).
+	//
+	// Gefunden von der eigenen Praefix-Kollisionsprobe in S2-G4, nicht im Review.
+	h := sha256.New()
+	var sep = [1]byte{0}
+	for _, b := range blocks {
+		_, _ = h.Write([]byte(b))
+		_, _ = h.Write(sep[:])
+		_, _ = h.Write([]byte(b2c[b]))
+		_, _ = h.Write(sep[:])
+	}
+	return h.Sum(nil)
 }
 
 func loadNodes(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string, scopeFilter []string) ([]string, map[string]string, error) {
@@ -1133,6 +1285,7 @@ func writeMeta(ctx context.Context, tx pgx.Tx, scoped bool, opts Options, stats 
 // order inside the transaction is teardown → member → identity → aggregation →
 // topic edges → super INSERT → meta, and every one of those is a write.
 func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Options, nodeScopes map[string]string, candidates map[string]int, super superLevel) (Stats, error) {
+	persistStart := time.Now()
 	scoped := len(opts.ScopeFilter) > 0
 	filterSet := make(map[string]struct{}, len(opts.ScopeFilter))
 	for _, s := range opts.ScopeFilter {
@@ -1157,6 +1310,11 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	// keeps serializing. See lockKeyForScopes.
 	lockKey := lockKeyForScopes(opts.ScopeFilter)
 	var locked bool
+	// S2: die Lock-Uhr laeuft von der ERTEILUNG bis zum Commit — nicht ab
+	// Begin. Der Unterschied ist die Wartezeit auf den Lock selbst, und die ist
+	// keine Haltezeit: sie blockiert niemanden, sie wird blockiert. Wer beides
+	// zusammenwirft, meldet unter Konkurrenz eine Haltezeit, die nie stattfand.
+	lockAcquired := time.Now()
 	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, lockKey).Scan(&locked); err != nil {
 		return Stats{}, fmt.Errorf("advisory lock: %w", err)
 	}
@@ -1264,6 +1422,12 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	if err := tx.Commit(ctx); err != nil {
 		return Stats{}, fmt.Errorf("commit: %w", err)
 	}
+	// Nach dem Commit gelesen, nicht davor: der Commit selbst haelt den Lock
+	// noch (pg_try_advisory_XACT_lock gibt ihn erst beim Transaktionsende frei),
+	// und bei einem grossen Member-Schreibweg ist der Commit-Anteil genau die
+	// Groesse, die S9a spaeter senken will.
+	stats.LockHeldMs = int(time.Since(lockAcquired).Milliseconds())
+	stats.PersistMs = int(time.Since(persistStart).Milliseconds())
 	// W3 identity ledger. members_reassigned is deliberately reported NEXT TO
 	// members_changed and not folded into it (K13): the two answer different
 	// questions — how much of the corpus actually moved, versus how much of

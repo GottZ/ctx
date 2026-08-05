@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 129,
-    "migration_count": 128,
+    "migration_max": 130,
+    "migration_count": 129,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3776,6 +3776,245 @@
         }
       ],
       "row_security": false
+    },
+    "graph_overview_run": {
+      "columns": [
+        {
+          "name": "run_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope_set",
+          "type": "text[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope_key",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "engine",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "resolution",
+          "type": "real",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "outcome",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "skip_reason",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "candidate_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "max_nodes_eff",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "node_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "edge_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "dangling_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "selfloop_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "cross_scope_components",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "component_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "cluster_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "level_n",
+          "type": "smallint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "sweep_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "modularity",
+          "type": "real",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "load_ms",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "cluster_ms",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "persist_ms",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "copy_ms",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "lock_held_ms",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "peak_rss_kb",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "parent_rss_kb",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "wal_bytes",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "temp_bytes",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "sigma_drift",
+          "type": "real",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "partition_hash",
+          "type": "bytea",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "members_changed",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "members_reassigned",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "topics_reattached",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "topics_born",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "change_log_seq",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "delta_fallback",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "engine_switch",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
     }
   },
   "indexes": {
@@ -3961,6 +4200,9 @@
     },
     "graph_overview_meta_pkey": {
       "def_hash": "1a8606799ebd429c96ef43977558928d3b268410c6e33547f2ad7f5fb43cce52"
+    },
+    "graph_overview_run_pkey": {
+      "def_hash": "7f75fef8f2d480e1f3327e0dff9e3b78d6b666c03e2fe8da8d24d749170e68d3"
     },
     "idx_access_log_action": {
       "def_hash": "95de89559cb218e54b5901edd8bb74793c15f62808a1d97498bc9c331ddce562"
@@ -4193,6 +4435,12 @@
     },
     "idx_gcte_scope_b": {
       "def_hash": "86dcdb544a9941c3762f64a1d8ef977a4437ed493ddde1b3ca2478927c8c9c34"
+    },
+    "idx_gor_scope_started": {
+      "def_hash": "01f892b1947225ad7b2bfffdf4c5fe9788359b8d6cb4351a082da5d6ced6b5fe"
+    },
+    "idx_gor_started": {
+      "def_hash": "63620b9f2ae94e7abb7ddc595d02d68a69cfcddae2f47a58f3f1c7bb6e2a0413"
     },
     "idx_guard_pending": {
       "def_hash": "4770580d194390a0c4f5069487f1f2697690a2030fe6939233b1ab6eea532608"

@@ -320,6 +320,22 @@ type GraphOverviewConfig struct {
 	// that consumes the same key is wave W8; W3 only reads it.
 	TombstoneRetention time.Duration `key:"graph_overview.tombstone_retention" env:"CTX_GRAPH_OVERVIEW_TOMBSTONE_RETENTION" default:"3888000" mut:"hot" tenancy:"global-only"`
 
+	// RunRetention is the horizon of the run journal (Achse 04 / S2, migration
+	// 130). Seconds like every other duration key; 90 d is the design proposal.
+	//
+	// The journal is one row per rebuild ATTEMPT, and the rebuild is a
+	// background job on a fixed cadence — at 4 runs/day over 3 scopes that is
+	// ~12 rows/day, so 90 d is ~1.100 rows. The retention exists not because
+	// the table grows dangerously but because an unbounded audit table is a
+	// slow leak: the row count has to have a ceiling somebody chose.
+	//
+	// 0 keeps every row forever — a deliberate operator choice for a forensic
+	// window, not an accident: the purge is a no-op then, never an error.
+	//
+	// NOT parse:"strict": a retention horizon is a cadence, not a security
+	// ceiling — same classification as rebuild_timeout and tombstone_retention.
+	RunRetention time.Duration `key:"graph_overview.run_retention" env:"CTX_GRAPH_OVERVIEW_RUN_RETENTION" default:"7776000" mut:"hot" tenancy:"global-only"`
+
 	// ── W6: the LLM label pipeline (design/01 §3.5/§4.8, Amendments A01-3/A01-4) ──
 	//
 	// LabelEnabled ships TRUE, unlike graph_overview.enabled — decision E7-01

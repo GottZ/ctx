@@ -292,8 +292,9 @@ fi
 # sobald die deployte CLI "contract" kennt — kein Script-Change nötig.
 #
 # ⚠ Die Fallback-Zahlen sind handgepflegt und hängen am Migrations-Stand:
-# 53/41 gilt ab Migration 129 (context_digest_state fällt; 54/41 ab Mig 127 mit
-# graph_cluster_topic_edge + _super + _super_member;
+# 55/41 gilt ab Migration 130 (graph_overview_run — das Lauf-Journal der
+# Wurzel-Map, Achse 04/S2); 54/41 ab Mig 129 (context_digest_state fällt;
+# 54/41 ab Mig 127 mit graph_cluster_topic_edge + _super + _super_member;
 # davor 51/41 ab Mig 124, 50/41 ab Mig 118,
 # 46/40 ab Mig 107). Bei neuen Migrationen mit Tabellen-/Spalten-Änderung
 # müssen sie hier nachgezogen werden — der `ctx contract`-Pfad oben braucht
@@ -302,8 +303,8 @@ fi
 # gegen eine frisch migrierte DB und wird rot, wenn sie hier auseinanderlaufen.
 T="T07 SCHEMA_INTEGRITY"
 
-# Zähl-Fallback-Erwartung, an Migration 124 gebunden (siehe Kommentar oben).
-T07_EXPECT_TABLES=54
+# Zähl-Fallback-Erwartung, an Migration 130 gebunden (siehe Kommentar oben).
+T07_EXPECT_TABLES=55
 T07_EXPECT_COLUMNS=41
 
 t07_count_fallback() {

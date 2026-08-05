@@ -213,6 +213,31 @@ Migration 123 adds three columns and drops one default:
 
 `advisory-lock` is **contention, not a freeze**: it means another instance was rebuilding that partition successfully at that moment. Treat it as an attempt timestamp, never as a cap.
 
+### Migration 130: the rebuild run journal
+
+Migration 123 gave `graph_overview_meta` a per-scope *attempt* stamp. That answers "is this partition frozen?", and it is deliberately overwritten by the next attempt — it is **state**, not history. Migration 130 adds the missing half: `graph_overview_run`, one row **per rebuild attempt**, kept for `graph_overview.run_retention`.
+
+The reason it is a separate table rather than more columns on `_meta` is not tidiness. A scale path needs phase durations, peak RSS, the partition hash and the effective node cap *per run*; folding them into a row that is replaced every cycle would delete the history at every rebuild.
+
+**The row is written in two phases, by the parent process, outside the persist transaction.** The rebuild itself runs in a worker *child*, and `graph_overview.rebuild_timeout` kills it with SIGKILL and no grace period — a killed child writes no result. A journal that only recorded finished runs would therefore be blind to exactly the runs that die at the time or memory budget. So the parent inserts a row with `outcome = 'running'` *before* it spawns the child and updates it afterwards:
+
+- **an open row with no `finished_at` is the SIGKILL/OOM evidence**, not a bookkeeping glitch;
+- child-side columns stay `NULL` on that path — `NULL` means "not measured", where `0` would be a claim nobody made;
+- at boot, `running` rows older than twice the rebuild budget are closed as `failed` / `killed` (a live daemon would long since have finished them).
+
+This matters operationally right now: the current in-process compute path peaks at ~423 MB at the 200k-node cap against a 512 MiB container limit, and the parent's graph cache is not included in that figure. An OOM kill is a realistic outcome, and this table is where it becomes visible.
+
+| Column group | What it answers |
+|---|---|
+| `outcome`, `skip_reason`, `started_at`, `finished_at` | did the run finish, and why not |
+| `load_ms`, `cluster_ms`, `persist_ms`, `lock_held_ms` | where the wall clock went. `lock_held_ms` is measured from **lock grant** to commit — waiting for the lock is not holding it |
+| `peak_rss_kb`, `parent_rss_kb` | the cgroup budget is shared by parent and child, so a child peak without the parent load has no denominator |
+| `node_n`, `edge_n`, `dangling_n`, `selfloop_n` | the input cut. `dangling_n` counts edges whose other endpoint is outside the node cut — previously discarded in silence (~7.5 % live) |
+| `max_nodes_eff` | the cap value **this** run used, so an inherited default is distinguishable from a chosen one |
+| `partition_hash` | SHA-256 over the canonical partition — the anchor that turns "the clustering changed" from a suspicion into a diff |
+
+`graph_overview.run_retention` (`CTX_GRAPH_OVERVIEW_RUN_RETENTION`, seconds, default 90 d, hot) trims the journal in batches after the rebuild tick, never inside the persist transaction. `0` keeps every row — a deliberate forensic window, not an accident.
+
 `computed_at` becomes nullable **and loses its `DEFAULT now()`** (from migration 057). A partition that has never built successfully but already has an attempt behind it — a fresh deploy above the node cap — needs a row without a success timestamp; with the default in place a skip upsert that does not name the column would silently claim freshness. The read path is unaffected: `max(computed_at)` ignores NULL, so "never built" stays the zero timestamp and the `stats.computed_at` wire field stays `null` exactly as before.
 
 Deploy notes, same shape as 116: the file carries `SET LOCAL lock_timeout = '3s'`, so it aborts with `55P03` rather than queueing behind a long-running persist transaction (a 400k-node rebuild measures ~465 s); every statement is idempotent, so the next boot simply re-runs it. Existing rows are backfilled with `last_attempt_at = computed_at` and `candidate_n = node_n` — historically correct, because only a successful run could have written them. No new table, no index.

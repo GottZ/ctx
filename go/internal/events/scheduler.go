@@ -859,6 +859,17 @@ func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
 
 	var tenantCursor uint64 // round-robin position over the tenant list (B-W1 foundation)
 
+	// S2-Startup-Sweep (design/04 §4.10 Punkt 3). Genau HIER und nicht in Run():
+	// dies ist der Arm, der das Journal fuehrt, und ein Sweep ausserhalb davon
+	// liefe auch dann, wenn der Overview-Arm gar nicht aktiv ist.
+	//
+	// Eine 'running'-Zeile, die einen Daemon-Neustart ueberlebt hat, kann keinen
+	// lebenden Lauf mehr beschreiben — der Prozess, der sie geoeffnet hat, ist
+	// tot. Sie wird als 'failed'/'killed' geschlossen. Genau diese Zeilen sind
+	// der OOM-/SIGKILL-Beleg, um dessentwillen das Journal zweiphasig ist; sie
+	// duerfen nicht geloescht, sondern muessen geschlossen werden.
+	s.sweepStaleOverviewRuns(ctx)
+
 	if s.overviewNeverBuilt(ctx) {
 		// Boot (never built): build EVERY tenant partition once, sequentially —
 		// deliberately NOT one global run (B-W6 choice): a global boot run would
@@ -1165,6 +1176,12 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// the node cap or timed out. ctx is the OUTER scheduler context on purpose
 	// — on the timeout path the rebuild's own context is already dead.
 	defer s.purgeTopicTombstones(ctx, bt, cfg.GraphOverview.TombstoneRetention)
+	// S2: die Journal-Retention laeuft im selben Arm wie die Grabstein-Retention
+	// — im ELTERNprozess, nach dem Tick, in eigenen kurzen Transaktionen und
+	// niemals innerhalb der persist-Tx oder unter ihrem Advisory-Lock (Gate
+	// S2-G3). Ein Purge im Lock waere genau die Sorte Arbeit, die lock_held_ms
+	// aufblaeht, ohne dass jemand sie dort vermutet.
+	defer s.purgeOverviewRuns(ctx, cfg.GraphOverview.RunRetention)
 	// WF T6: the rebuild consumes the BASE registry snapshot (the rebuild is
 	// ONE global run today; the per-tenant rebuild — B-W6 — keeps consuming
 	// the BASE snapshot and varies only the scope filter; design/01 §9.6
@@ -1204,6 +1221,33 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// registry gates and the yield loop, so it reflects a real rebuild pass.
 	start := time.Now()
 	s.lastOverviewNs.Store(start.UnixNano())
+	// S2 (Achse 04, Mig 130): die Journal-Zeile entsteht VOR dem Spawn.
+	//
+	// Das ist die ganze Pointe der Welle: der Rebuild laeuft im Kindprozess,
+	// der rebuild_timeout ist ein SIGKILL ohne Grace (overview_worker.go:89-97),
+	// und ein per Timeout oder cgroup-OOM getoetetes Kind liefert keine Stats.
+	// Eine Zeile, die erst nach dem Lauf entstuende, fehlte genau fuer den Lauf,
+	// der am Budget stirbt. Eine 'running'-Zeile ohne Abschluss IST der Beleg.
+	//
+	// Ein Journal-Fehler ist NICHT fatal: der Rebuild ist die Arbeit, das
+	// Journal die Buchfuehrung darueber. Ein nicht schreibbares Protokoll darf
+	// keinen Lauf verhindern — es wird laut geloggt, und FinishRun laeuft mit
+	// leerer runID ins no-op.
+	runID, jerr := overview.StartRun(ctx, s.pool, overview.RunStart{
+		ScopeSet:   bt.owned,
+		Engine:     overview.EngineGonum,
+		Resolution: cfg.GraphOverview.Resolution,
+		// candidate_n ist hier noch unbekannt (es entsteht erst in loadNodes,
+		// also im Kind) — es wird beim Abschluss nachgetragen. max_nodes_eff
+		// dagegen ist eine ELTERN-Entscheidung und gehoert deshalb in die
+		// Start-Zeile: sie gilt auch dann, wenn das Kind nie antwortet.
+		MaxNodesEff: cfg.GraphOverview.MaxNodes,
+		ParentRSSKb: overview.ReadVmHWMkB(),
+	})
+	if jerr != nil {
+		slog.Error("scheduler: overview run journal not opened", "error", jerr,
+			"tenant_scope", bt.scope, "scope_filter", bt.owned)
+	}
 	stats, err := s.executeOverviewRebuild(rctx, overview.Options{
 		Resolution:    cfg.GraphOverview.Resolution,
 		VisibleTypes:  typeSet.VisibleTypes(),
@@ -1238,12 +1282,21 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		slog.Error("scheduler: overview rebuild failed", "error", err, "skip_reason", reason,
 			"tenant_scope", bt.scope, "scope_filter", bt.owned, "timeout", timeout, "elapsed", time.Since(start))
 		s.stampOverviewAttempt(ctx, bt, reason, stats.CandidateCount, attemptStart)
+		// Kind-seitige Felder bleiben hier NULL: bei einem getoeteten Kind sind
+		// sie schlicht unbekannt, und NULL ist die ehrliche Antwort. Was der
+		// Elternprozess weiss — Ausgang, Grund, Abschlusszeit — steht in der Zeile.
+		s.closeOverviewRun(ctx, runID, overview.RunResult{
+			Outcome: "failed", SkipReason: reason, Stats: stats,
+		})
 		return
 	}
 	if stats.Skipped {
 		slog.Info("scheduler: overview rebuild skipped", "reason", stats.SkipReason,
 			"tenant_scope", bt.scope, "scope_filter", bt.owned)
 		s.stampOverviewAttempt(ctx, bt, stats.SkipReason, stats.CandidateCount, attemptStart)
+		s.closeOverviewRun(ctx, runID, overview.RunResult{
+			Outcome: "skipped", SkipReason: stats.SkipReason, Stats: stats,
+		})
 		return
 	}
 	// Fifth exit — success. It stamps too, but inside the persist tx: the
@@ -1272,7 +1325,24 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	//   - only on the SUCCESS path. A skipped or failed rebuild changed no
 	//     membership, so the diff would find nothing and the run would be pure
 	//     cost against a frozen map.
+	s.closeOverviewRun(ctx, runID, overview.RunResult{Outcome: "ok", Stats: stats})
 	s.buildClusterCentroids(ctx, bt, cfg)
+}
+
+// closeOverviewRun schliesst die Journal-Zeile dieses Laufs ab (S2).
+//
+// ctx ist der AEUSSERE Scheduler-Kontext, nie rctx: auf dem Timeout-Pfad ist
+// rctx genau dann abgelaufen, wenn der Abschluss faellig ist — dieselbe Regel,
+// die stampOverviewAttempt und renderRootMap schon tragen.
+//
+// Fehler werden geloggt und fallen gelassen. Das Journal ist Beobachtung, kein
+// Steuerpfad: ein Schreibfehler darf den Rebuild-Tick nicht abbrechen und schon
+// gar nicht einen erfolgreichen Lauf nachtraeglich zum Fehler machen.
+func (s *Scheduler) closeOverviewRun(ctx context.Context, runID string, r overview.RunResult) {
+	if err := overview.FinishRun(ctx, s.pool, runID, r); err != nil {
+		slog.Error("scheduler: overview run journal not closed", "error", err,
+			"run_id", runID, "outcome", r.Outcome)
+	}
 }
 
 // buildClusterCentroids runs the C8 arm for the partitions this tick rebuilt.
@@ -1345,6 +1415,37 @@ func (s *Scheduler) purgeTopicTombstones(ctx context.Context, bt backgroundTenan
 		slog.Info("scheduler: topic tombstones purged", "purged", purged,
 			"tenant_scope", bt.scope, "scope_filter", bt.owned,
 			"retention", retention, "elapsed", time.Since(start))
+	}
+}
+
+// sweepStaleOverviewRuns closes run-journal rows orphaned by a daemon crash (S2).
+func (s *Scheduler) sweepStaleOverviewRuns(ctx context.Context) {
+	timeout := s.cfg.Snapshot().GraphOverview.RebuildTimeout //nolint:forbidigo // MT 06 background: the rebuild budget is a server-global policy knob; the sweep is a process-wide boot pass over ONE shared journal.
+	n, err := overview.SweepStaleRuns(ctx, s.pool, timeout)
+	if err != nil {
+		slog.Warn("scheduler: overview run journal sweep failed", "error", err)
+		return
+	}
+	if n > 0 {
+		// INFO, nicht DEBUG: jede dieser Zeilen ist ein Lauf, der ohne Abschluss
+		// gestorben ist — bei 512 MiB cgroup und einem Ist-Pfad, der am 200k-Cap
+		// 423 MB belegt (S1), ist das der erwartete Ort fuer einen OOM-Befund.
+		slog.Info("scheduler: overview run journal — orphaned running rows closed as killed", "rows", n)
+	}
+}
+
+// purgeOverviewRuns trims the run journal to graph_overview.run_retention (S2).
+func (s *Scheduler) purgeOverviewRuns(ctx context.Context, retention time.Duration) {
+	if retention <= 0 {
+		return // documented operating state: keep the full forensic window
+	}
+	purged, err := overview.PurgeRuns(ctx, s.pool, retention)
+	if err != nil {
+		slog.Warn("scheduler: overview run journal purge failed", "error", err, "purged", purged)
+		return
+	}
+	if purged > 0 {
+		slog.Debug("scheduler: overview run journal purged", "purged", purged, "retention", retention)
 	}
 }
 
