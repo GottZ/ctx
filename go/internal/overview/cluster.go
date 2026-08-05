@@ -833,6 +833,106 @@ func insertMembers(ctx context.Context, tx pgx.Tx, cl clustering, opts Options,
 	return clusterSet, nil
 }
 
+// reachableNodesTemplate counts the (cluster, scope) groups the node
+// aggregation CAN produce a row for: an ov_match row plus at least one member
+// that is still visible at aggregation time. It mirrors nodeAggTemplate's join
+// shape exactly — grouping on the BLOCK's scope, joining ov_match on it — so
+// the two numbers are comparable.
+//
+// Slots: the type-visibility fragment ($1) and the scope filter ($2).
+const reachableNodesTemplate = `
+SELECT count(*) FROM (
+    SELECT m.cluster_id, b.scope
+      FROM graph_cluster_member m
+      JOIN context_blocks b ON b.id = m.block_id AND %s
+      JOIN ov_match mt ON mt.cluster_id = m.cluster_id AND mt.scope = b.scope
+      %s
+     GROUP BY 1, 2) reachable`
+
+// missingNodesTemplate names the assigned clusters that produced no row, for
+// the log. Capped — the point is a diagnosis, not a dump.
+const missingNodesTemplate = `
+SELECT mt.cluster_id::text || '/' || mt.scope
+  FROM ov_match mt
+ WHERE NOT EXISTS (
+    SELECT 1 FROM graph_cluster_member m
+      JOIN context_blocks b ON b.id = m.block_id AND %s
+     WHERE m.cluster_id = mt.cluster_id AND b.scope = mt.scope %s)
+ ORDER BY 1 LIMIT 20`
+
+var (
+	reachableNodesSQL       = fmt.Sprintf(reachableNodesTemplate, visibility.TypeVisible("b", "$1"), "")
+	reachableNodesScopedSQL = fmt.Sprintf(reachableNodesTemplate, visibility.TypeVisible("b", "$1"), "WHERE m.scope = ANY($2)")
+	missingNodesSQL         = fmt.Sprintf(missingNodesTemplate, visibility.TypeVisible("b", "$1"), "")
+	missingNodesScopedSQL   = fmt.Sprintf(missingNodesTemplate, visibility.TypeVisible("b", "$1"), "AND m.scope = ANY($2)")
+)
+
+// checkNodeCoverage compares the node aggregation's output against the
+// assignment and separates the two reasons it can fall short (W3, review K2-2).
+//
+// Every (cluster, scope) of this run has an ov_match row by construction —
+// carried, re-attached or freshly minted — so in the normal case the node
+// aggregation writes exactly that many rows. A shortfall has two possible
+// causes with opposite handling:
+//
+//   - BENIGN, and reachable from outside: the aggregation joins context_blocks
+//     through the visibility fragment, the assignment does not. A block that
+//     was archived, moved scope or changed type BETWEEN loadNodes and this
+//     transaction therefore drops out of the aggregation while its member row
+//     stays. If it was the last visible member of its cluster, that cluster
+//     writes no node row. The window is the ENTIRE Louvain runtime — minutes at
+//     the target scale — so this is a race a live system will lose regularly,
+//     and failing the whole rebuild for it would trade a missing topic against
+//     a missing map. It is logged with the affected clusters and the run
+//     continues; the topic simply has no node row this generation.
+//   - A DEFECT: the identity join dropped a cluster that still HAS visible
+//     members. That is the state this axis exists to abolish, and it stays a
+//     loud rollback — the previous map remains readable and the next tick
+//     reruns.
+//
+// The discriminator is one extra query, and it only runs when the counts
+// already disagree — the happy path pays nothing.
+func checkNodeCoverage(ctx context.Context, tx pgx.Tx, opts Options, scoped bool, written, assigned int) error {
+	if written == assigned {
+		return nil
+	}
+	reachSQL, missSQL := reachableNodesSQL, missingNodesSQL
+	args := []any{opts.VisibleTypes}
+	if scoped {
+		reachSQL, missSQL = reachableNodesScopedSQL, missingNodesScopedSQL
+		args = append(args, opts.ScopeFilter)
+	}
+	var reachable int
+	if err := tx.QueryRow(ctx, reachSQL, args...).Scan(&reachable); err != nil {
+		return fmt.Errorf("node coverage check (%d rows for %d assigned clusters): %w", written, assigned, err)
+	}
+	var missing []string
+	rows, err := tx.Query(ctx, missSQL, args...)
+	if err != nil {
+		return fmt.Errorf("node coverage diagnosis (%d rows for %d assigned clusters): %w", written, assigned, err)
+	}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			rows.Close()
+			return fmt.Errorf("node coverage diagnosis: %w", err)
+		}
+		missing = append(missing, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("node coverage diagnosis: %w", err)
+	}
+
+	if written == reachable {
+		slog.Warn("overview: assigned clusters lost every visible member between the Louvain load and persist — archived, scope-moved or type-changed mid-run; those topics get no node row this generation",
+			"written", written, "assigned", assigned, "clusters", missing, "scope_filter", opts.ScopeFilter)
+		return nil
+	}
+	return fmt.Errorf("node aggregation wrote %d rows for %d assigned clusters, %d of which still have visible members — the identity join dropped a cluster (persist rolls back, previous map stays readable); affected: %v",
+		written, assigned, reachable, missing)
+}
+
 // persist replaces the 057 tables in one advisory-locked transaction —
 // globally (nil ScopeFilter: TRUNCATE + unscoped aggregation, the pre-B
 // behaviour) or for ONE partition (B-W3: scoped DELETE + scoped aggregation,
@@ -925,20 +1025,10 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		}
 	}
 
-	// W3 completeness check. Every (cluster, scope) of this run has an
-	// ov_match row by construction — carried, re-attached or freshly minted —
-	// so the node aggregation must emit exactly as many rows as ov_match
-	// holds. A shortfall means the INNER joins of nodeAggTemplate dropped a
-	// cluster, which happens if a block changed scope BETWEEN the Louvain load
-	// and this transaction: the member row keeps the input scope (087), the
-	// aggregation groups by the block's current one, and the two stop lining
-	// up. Left alone that would be a topic with no node row — invisible on the
-	// map now and, one run later, a tombstone. Loud rollback instead; the
-	// previous map stays readable and the next tick reruns.
+	// W3 completeness check.
 	assigned := topics.carried + topics.reattached + topics.born + topics.split
-	if int(nodeTag.RowsAffected()) != assigned {
-		return Stats{}, fmt.Errorf("node aggregation wrote %d rows for %d assigned clusters — a member's scope moved mid-run or the identity join is broken (persist rolls back, previous map stays readable)",
-			nodeTag.RowsAffected(), assigned)
+	if err := checkNodeCoverage(ctx, tx, opts, scoped, int(nodeTag.RowsAffected()), assigned); err != nil {
+		return Stats{}, err
 	}
 
 	stats := Stats{

@@ -705,6 +705,71 @@ SELECT c.cluster_id, c.scope, c.topic_id, c.ov
 	})
 }
 
+// ── K2-2: a member that disappears from the visibility cut BETWEEN the Louvain
+// load and persist must not take the whole rebuild down. The window is the full
+// Louvain runtime, so a live system loses this race regularly.
+func TestW3ConcurrentArchivingDoesNotBreakThePersist(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	const scope = "arch"
+	const retention = 45 * 24 * time.Hour
+
+	solo := w3Blocks(t, pool, scope, 40000, 1)
+	pair := w3Blocks(t, pool, scope, 40100, 2)
+	w3Run(t, pool, scope, retention, w3Group{members: solo}, w3Group{members: pair})
+
+	// The race: the block is archived AFTER the clustering saw it. persist is
+	// then handed the same partition the Louvain run produced.
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET is_archived = true WHERE id = $1::uuid`, solo[0]); err != nil {
+		t.Fatal(err)
+	}
+	st := w3Run(t, pool, scope, retention, w3Group{members: solo}, w3Group{members: pair})
+	if st.Skipped {
+		t.Fatalf("run skipped: %s", st.SkipReason)
+	}
+
+	var nodes int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph_cluster_node WHERE scope = $1`, scope).Scan(&nodes); err != nil {
+		t.Fatal(err)
+	}
+	if nodes != 1 {
+		t.Fatalf("node rows = %d, want 1 (the archived solo cluster has no visible member left)", nodes)
+	}
+	// The surviving cluster kept its identity — the race cost one topic its
+	// node row, not the whole map.
+	if st.TopicsCarried != 2 {
+		t.Fatalf("carried=%d, want 2 — both assignments still happened", st.TopicsCarried)
+	}
+
+	// Control: a REAL identity defect must still be a loud rollback. Forcing
+	// the aggregation to drop a cluster that HAS visible members is exactly
+	// the state the check exists for.
+	t.Run("a cluster with visible members that produces no node row still fails loud", func(t *testing.T) {
+		restore := nodeAggScopedSQL
+		nodeAggScopedSQL = strings.Replace(restore,
+			"JOIN ov_match mt ON mt.cluster_id = r.cluster_id AND mt.scope = r.scope",
+			"JOIN ov_match mt ON mt.cluster_id = r.cluster_id AND mt.scope = r.scope AND r.size > 99", 1)
+		defer func() { nodeAggScopedSQL = restore }()
+		if nodeAggScopedSQL == restore {
+			t.Fatal("probe did not patch the aggregation")
+		}
+		assign, scopes, deg := map[string]string{}, map[string]string{}, map[string]float64{}
+		for _, m := range pair {
+			assign[m], scopes[m], deg[m] = pair[0], scope, 1
+		}
+		_, err := persist(ctx, pool,
+			clustering{blockToCluster: assign, intraDegree: deg},
+			Options{Resolution: 1.0, VisibleTypes: w3Types, ScopeFilter: []string{scope}, TombstoneRetention: retention},
+			scopes, tallyScopes(scopes))
+		if err == nil {
+			t.Fatal("a dropped cluster with visible members did not fail the persist")
+		}
+		if !strings.Contains(err.Error(), "identity join dropped a cluster") {
+			t.Fatalf("wrong diagnosis: %v", err)
+		}
+	})
+}
+
 // ── G10: scope-move isolation (B1b). Runs the REAL Rebuild, because the leak
 // path is the interaction of loadNodes/loadEdges with the matching, not the
 // matching alone.
