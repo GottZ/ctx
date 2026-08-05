@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -200,7 +201,51 @@ const activeCountGrace = 500 * time.Millisecond
 // (022_stats_indexes.sql, "at 1M+ scale") as an index-only scan — no new
 // migration, no lock.
 func ActiveBlockCount(ctx context.Context, pool *pgxpool.Pool, readScopes []string, timeout time.Duration) (int, bool, error) {
+	return cappedCount(ctx, pool, "active block count", timeout,
+		`SELECT count(*)::int FROM context_blocks
+		  WHERE scope = ANY($1::text[]) AND NOT is_archived`, readScopes)
+}
+
+// OperationalBlockCount counts the blocks of the OPERATIONAL types — the ones
+// that are outside the topic map by DECISION rather than by omission (E11-02 /
+// amendment A02-2, wave W-D). Subtracting them turns the coverage figure from
+// "16,8 % of everything" into "97,9 % of the knowledge corpus", which is the
+// difference between a map that looks broken and a map that is honest.
+//
+// Same cap, same degradation as ActiveBlockCount, and deliberately its OWN
+// transaction: folding both numbers into one statement would take the count off
+// the partial index idx_context_scope_active (type_name is not in it), and a
+// shared transaction would let one timeout discard the other, correct number.
+// An empty type list is not a query — it is the (0, true) answer that says "no
+// operational types exist in this registry", so the renderer prints no line and
+// keeps the raw denominator.
+func OperationalBlockCount(ctx context.Context, pool *pgxpool.Pool, readScopes, types []string, timeout time.Duration) (int, bool, error) {
 	if err := RequireScopes(readScopes); err != nil {
+		return 0, false, err
+	}
+	if len(types) == 0 {
+		return 0, true, nil
+	}
+	return cappedCount(ctx, pool, "operational block count", timeout,
+		`SELECT count(*)::int FROM context_blocks
+		  WHERE scope = ANY($1::text[]) AND NOT is_archived
+		    AND type_name = ANY($2::text[])`, readScopes, types)
+}
+
+// cappedCount is the shared capped-count path: RequireScopes, an explicit
+// transaction for SET LOCAL to be local to, a Go backstop deadline, and the
+// (0, false, nil) degradation on the cap firing. The scope list is always the
+// FIRST bind parameter — every count of this family is scope-filtered, and the
+// signature is what makes that structural rather than a habit.
+func cappedCount(ctx context.Context, pool *pgxpool.Pool, what string, timeout time.Duration, sql string, args ...any) (int, bool, error) {
+	if len(args) == 0 {
+		return 0, false, fmt.Errorf("store: %s: no scope filter bound (fail-closed)", what)
+	}
+	scopes, ok := args[0].([]string)
+	if !ok {
+		return 0, false, fmt.Errorf("store: %s: first bind parameter is not a scope list", what)
+	}
+	if err := RequireScopes(scopes); err != nil {
 		return 0, false, err
 	}
 
@@ -211,24 +256,24 @@ func ActiveBlockCount(ctx context.Context, pool *pgxpool.Pool, readScopes []stri
 		defer cancel()
 	}
 
-	n, err := activeBlockCountTx(cctx, pool, readScopes, timeout)
+	n, err := cappedCountTx(cctx, pool, timeout, sql, args...)
 	switch {
 	case err == nil:
 		return n, true, nil
 	case ctx.Err() != nil:
 		// The CALLER's context died — that is cancellation, not a cap.
-		return 0, false, fmt.Errorf("store: active block count: %w", err)
+		return 0, false, fmt.Errorf("store: %s: %w", what, err)
 	case isStatementTimeout(err):
 		return 0, false, nil
 	default:
-		return 0, false, fmt.Errorf("store: active block count: %w", err)
+		return 0, false, fmt.Errorf("store: %s: %w", what, err)
 	}
 }
 
-// activeBlockCountTx runs the capped count in an explicit transaction so
-// SET LOCAL has a transaction block to be local to. The tx is read-only in
-// effect and always rolled back — nothing here needs to commit.
-func activeBlockCountTx(ctx context.Context, pool *pgxpool.Pool, readScopes []string, timeout time.Duration) (int, error) {
+// cappedCountTx runs one capped count in an explicit transaction so SET LOCAL
+// has a transaction block to be local to. The tx is read-only in effect and
+// always rolled back — nothing here needs to commit.
+func cappedCountTx(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration, sql string, args ...any) (int, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -247,12 +292,62 @@ func activeBlockCountTx(ctx context.Context, pool *pgxpool.Pool, readScopes []st
 	}
 
 	var n int
-	if err := tx.QueryRow(ctx,
-		`SELECT count(*)::int FROM context_blocks
-		  WHERE scope = ANY($1::text[]) AND NOT is_archived`, readScopes).Scan(&n); err != nil {
+	if err := tx.QueryRow(ctx, sql, args...).Scan(&n); err != nil {
 		return 0, err
 	}
 	return n, nil
+}
+
+// ActiveCategoryCount is the digest envelope's category number under the same
+// cap (W-D). `count(DISTINCT category)` over context_blocks is the single most
+// expensive statement of this axis at the target scale — it rode the request
+// path of POST /api/digest uncapped until this wave, next to a coverage count
+// that §6.3 caps to five seconds. Same degradation: (0, false) beats a number
+// bought with an unbounded scan.
+func ActiveCategoryCount(ctx context.Context, pool *pgxpool.Pool, readScopes []string, timeout time.Duration) (int, bool, error) {
+	return cappedCount(ctx, pool, "active category count", timeout,
+		`SELECT count(DISTINCT category)::int FROM context_blocks
+		  WHERE scope = ANY($1::text[]) AND NOT is_archived`, readScopes)
+}
+
+// MapBlockLength is the size of a map block without transferring it. The topic
+// map is 80.103 characters today, so reading its content to measure it would
+// move 80 KB through the pool for one integer.
+func MapBlockLength(ctx context.Context, pool *pgxpool.Pool, category, title, scope string) (int, error) {
+	var n int
+	err := pool.QueryRow(ctx,
+		`SELECT COALESCE((SELECT length(content)::int FROM context_blocks
+		    WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived LIMIT 1), 0)`,
+		category, title, scope).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: map block length: %w", err)
+	}
+	return n, nil
+}
+
+// MapBlockContent reads the current text of a map block — the input of the
+// content-idempotency check (design/02 §4.2 step 6). A cycle that renders the
+// same bytes must NOT write: every content-changing upsert invalidates the
+// embedding and rewrites the TOAST pages, and at the target scale that is a
+// recurring cost for no information.
+//
+// Scoped by the WRITE scope (the block's own), not by a read window: this asks
+// about one specific artefact the caller owns, and the (category, title, scope)
+// triple is exactly the upsert conflict key. Missing block ⇒ ("", false, nil).
+func MapBlockContent(ctx context.Context, pool *pgxpool.Pool, category, title, scope string) (string, bool, error) {
+	var content string
+	err := pool.QueryRow(ctx,
+		`SELECT content FROM context_blocks
+		  WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
+		  LIMIT 1`, category, title, scope).Scan(&content)
+	switch {
+	case err == nil:
+		return content, true, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("store: map block content: %w", err)
+	}
 }
 
 // isStatementTimeout reports whether the error is the cap firing: SQLSTATE 57014

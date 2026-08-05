@@ -156,6 +156,13 @@ func TestRegistryStrictSet(t *testing.T) {
 		// defaulting to 3600 would present as "discovery running" while the
 		// operator meant to turn it off — it aborts loudly.
 		"pool.openrouter_window_ttl": true,
+		// W-D: the two SIZE ceilings of the root map. budget_bytes bounds a
+		// PERSISTED artefact against the 50 KB public write cap, super_max_nodes
+		// bounds the γ-search of the meta level — a typo'd value silently
+		// defaulting would widen a ceiling nobody asked to widen, on an object
+		// that then travels through backups and exports.
+		"root_map.budget_bytes":    true,
+		"root_map.super_max_nodes": true,
 	}
 	got := map[string]bool{}
 	for _, e := range registry() {

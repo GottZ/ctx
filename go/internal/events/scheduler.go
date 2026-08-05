@@ -26,6 +26,7 @@ import (
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/overview"
+	"github.com/GottZ/ctx/internal/rootmap"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1060,6 +1061,59 @@ func (s *Scheduler) stampOverviewAttempt(ctx context.Context, bt backgroundTenan
 	}
 }
 
+// renderRootMap writes this tenant's root map after a rebuild ATTEMPT (W-D,
+// design/02 §4.2). It runs on ALL five exits — success, node-cap/advisory-lock/
+// empty-node-cut skip, timeout, error, and the two early returns — because the
+// exits that produce NO partition are exactly the ones the map has to report:
+// a map that only appears after a successful rebuild can never say "frozen".
+//
+// The tenant snapshot is taken HERE and not inherited from rebuildOverviewOnce:
+// that function reads the server-global Snapshot() (its //nolint documents why)
+// and therefore has neither HomeScope nor ReadScopes. rootmap.Run needs the full
+// BP-4 split — tenant key for the policy overlay, entitlement-clamped write
+// scope, clamped read window — and the live artefact `topic-map-hth` (title says
+// hth, scope says work) is what skipping that split leaves behind.
+//
+// Failures are WARN, never fatal: the map is an artefact of the rebuild, not a
+// precondition for it, and a scheduler arm that dies over a rendering problem
+// would take the partition with it.
+func (s *Scheduler) renderRootMap(ctx context.Context, bt backgroundTenant) {
+	cfgT := s.cfg.SnapshotForTenant(ctx, bt.scope)
+	if !cfgT.RootMap.Enabled {
+		return // flag off ⇒ no query, no block: W-D is a no-op deploy
+	}
+	if s.blocktypes == nil {
+		// The registry-unwired exit reaches this too. Deliberately no map: an
+		// index block that cannot be classified into system-meta is a retrieval
+		// candidate, so writing one here would trade a missing map for corpus
+		// pollution. The rebuild's own slog.Error already names the wiring gap.
+		slog.Warn("scheduler: root map skipped — block-type registry not wired", "tenant_scope", bt.scope)
+		return
+	}
+
+	res, err := rootmap.Run(ctx, s.pool, s.blocktypes.SnapshotForTenant(ctx, bt.scope),
+		rootmap.Config{
+			Enabled:            true,
+			BudgetBytes:        cfgT.RootMap.BudgetBytes,
+			FooterReserveBytes: cfgT.RootMap.FooterReserveBytes,
+			SmallClusterMax:    cfgT.RootMap.SmallClusterMax,
+			CountTimeout:       cfgT.RootMap.CountTimeout,
+			RebuildInterval:    cfgT.GraphOverview.RebuildInterval,
+		},
+		effectiveHomeScope(cfgT.Scheduler.HomeScope, bt.owned),
+		intersectWindow(cfgT.Scheduler.ReadScopes, bt.owned))
+	switch {
+	case err != nil:
+		slog.Warn("scheduler: root map failed", "error", err, "tenant_scope", bt.scope)
+	case res.Written:
+		slog.Info("scheduler: root map updated", "title", res.Title,
+			"content_length", res.Length, "tenant_scope", bt.scope)
+	default:
+		slog.Debug("scheduler: root map unchanged", "title", res.Title,
+			"reason", res.Reason, "tenant_scope", bt.scope)
+	}
+}
+
 // rebuildOverviewOnce runs a single rebuild if enabled. The Enabled gate lives
 // here (not the loop) so a hot toggle takes effect on the next tick. bt is the
 // round-robin tenant pick (B-W1 foundation): today it only labels the run —
@@ -1074,6 +1128,14 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// (computed_at < attemptStart) uses it to discard a stamp that a
 	// concurrent successful run has already overtaken.
 	attemptStart := time.Now()
+	// W-D: the root map is written after the rebuild ATTEMPT — every one of the
+	// five exits, which is the only way the map can report its own cap. A defer
+	// rather than five call sites: the deferred call cannot be forgotten by a
+	// sixth exit added later, and it runs AFTER the stamp of each exit, so the
+	// map reads the liveness row this very attempt just wrote. It takes the
+	// OUTER ctx on purpose — on the timeout path rctx is expired exactly when
+	// the map is due.
+	defer s.renderRootMap(ctx, bt)
 	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: overview rebuild gate/resolution/cap/timeout are server-global policy knobs, not tenant-scoped — the B-W6 per-tenant loop varies the SCOPE FILTER per tick, not these.
 	if !cfg.GraphOverview.Enabled {
 		s.stampOverviewAttempt(ctx, bt, "disabled", nil, attemptStart)

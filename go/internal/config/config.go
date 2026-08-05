@@ -88,6 +88,7 @@ type Config struct {
 	Rerank         RerankConfig
 	Graph          GraphConfig
 	GraphOverview  GraphOverviewConfig
+	RootMap        RootMapConfig
 	GraphCache     GraphCacheConfig
 	Cluster        ClusterConfig
 	ClusterOps     ClusterOpsConfig
@@ -317,6 +318,60 @@ type GraphOverviewConfig struct {
 	// ceiling — same classification as rebuild_timeout one line up. The purge
 	// that consumes the same key is wave W8; W3 only reads it.
 	TombstoneRetention time.Duration `key:"graph_overview.tombstone_retention" env:"CTX_GRAPH_OVERVIEW_TOMBSTONE_RETENTION" default:"3888000" mut:"hot" tenancy:"global-only"`
+}
+
+// RootMapConfig is the Achse-02 root-map surface (plan-cluster-topicmap
+// design/02 §4.8): the cluster-per-line map that replaces the block-per-line
+// topic map. It is the third prefix of the K6 namespace cut — `graph_overview.*`
+// owns the rebuild, `cluster.*` the consumption, `root_map.*` the MAP — and
+// wave W-D declares it ONCE and COMPLETELY, including the two knobs whose
+// consumer (W-F, the meta-cluster level) lands later. A namespace that grows
+// wave by wave forces a compose edit per wave, and a knob the container cannot
+// receive is not a knob.
+//
+// EVERY key is global-only, with the GraphOverviewConfig rationale verbatim:
+// the map is written per tenant, but its PRODUCTION is one background job over
+// one shared artefact — cadence, budget and caps steer a process resource, not
+// a tenant's own query resolution.
+type RootMapConfig struct {
+	// Enabled is the master gate. Default OFF makes W-D a no-op deploy: the
+	// scheduler's tail call returns before its first query, so the wave changes
+	// nothing observable until the flag is flipped (pausability invariant).
+	Enabled bool `key:"root_map.enabled" env:"CTX_ROOT_MAP_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+	// BudgetBytes is the map's line budget — the deckel, not the target: the
+	// renderer MEASURES and stops, so a smaller corpus simply produces a
+	// smaller map. parse:"strict" because it is a size ceiling on a persisted
+	// artefact: a malformed value must abort the boot, never silently widen the
+	// budget. Run refuses anything above the 50 KB public write cap
+	// (context_store blockSizeLimit parity) before it touches the database.
+	BudgetBytes int `key:"root_map.budget_bytes" env:"CTX_ROOT_MAP_BUDGET_BYTES" default:"15360" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// SmallClusterMax is the collector-line threshold (§4.4c): clusters at or
+	// below it are counted, never rendered as topics. At scale this is what
+	// turns tens of thousands of link-poor clusters into one honest line.
+	SmallClusterMax int `key:"root_map.small_cluster_max" env:"CTX_ROOT_MAP_SMALL_CLUSTER_MAX" default:"2" mut:"hot" tenancy:"global-only"`
+	// FooterReserveBytes is the space the measuring loop keeps free for the two
+	// accounting lines. The renderer errors instead of truncating them: a map
+	// that loses its own footer is a map that stops accounting.
+	FooterReserveBytes int `key:"root_map.footer_reserve_bytes" env:"CTX_ROOT_MAP_FOOTER_RESERVE_BYTES" default:"512" mut:"hot" tenancy:"global-only"`
+	// CountTimeout caps the coverage counts — the only O(corpus) step of the
+	// map. Bare seconds like every other duration key. On expiry the map drops
+	// the denominator instead of estimating it: pg_class.reltuples can filter
+	// neither scope nor is_archived, and a global figure inside a scope-owned
+	// block is the BP-1 difference channel.
+	CountTimeout time.Duration `key:"root_map.count_timeout" env:"CTX_ROOT_MAP_COUNT_TIMEOUT" default:"5" mut:"hot" tenancy:"global-only"`
+	// LabelBudget caps the LLM label requests per cycle (§1.4 B4). 0 = the
+	// rendered row budget (NodeLimit), which is the only value that cannot
+	// decouple label production from what the map actually shows. Declared
+	// here, consumed once axis 01 puts labels on the read path (W7) — without
+	// the cap that seam would import 8.400–84.000 inference calls per cycle at
+	// the target scale.
+	LabelBudget int `key:"root_map.label_budget" env:"CTX_ROOT_MAP_LABEL_BUDGET" default:"0" mut:"hot" tenancy:"global-only"`
+	// The three super_* knobs belong to the meta-cluster level (W-F, P3) and
+	// ship declared-without-consumer, exactly like the C0 precedent: the
+	// namespace is complete from the first wave that owns it.
+	SuperEnabled       bool    `key:"root_map.super_enabled" env:"CTX_ROOT_MAP_SUPER_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+	SuperMinResolution float64 `key:"root_map.super_min_resolution" env:"CTX_ROOT_MAP_SUPER_MIN_RESOLUTION" default:"0.2" mut:"hot" tenancy:"global-only"`
+	SuperMaxNodes      int     `key:"root_map.super_max_nodes" env:"CTX_ROOT_MAP_SUPER_MAX_NODES" default:"20000" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // ClusterConfig is the Achse-03 cluster-consumption RANKING surface

@@ -25,9 +25,16 @@ type OverviewNode struct {
 	ClusterID     string
 	Size          int      // Σ size over the caller's visible scopes
 	TopCategories []string // merged from category_counts of the visible scopes
-	ReprID        string   // representative block (highest repr_quality, visible scope)
-	ReprTitle     string
-	ScopeMix      []string // contributing scopes ⊆ readScopes
+	// TopCatCounts are the counts of TopCategories, same order and length
+	// (W-D). fillTopCategories has always computed them and threw them away;
+	// the root map prints "learnings 50 · decisions 30" rather than a bare list
+	// of names, and a mix without magnitudes says nothing about the cluster.
+	// Additive and unused by the wire envelope (handler/overview.go reads
+	// TopCategories), so no response byte moves.
+	TopCatCounts []int
+	ReprID       string // representative block (highest repr_quality, visible scope)
+	ReprTitle    string
+	ScopeMix     []string // contributing scopes ⊆ readScopes
 }
 
 // OverviewEdge is an aggregated inter-cluster meta-edge (undirected, scope-pure).
@@ -190,10 +197,13 @@ func fillTopCategories(ctx context.Context, pool *pgxpool.Pool, nodes []Overview
 			return ccs[i].cat < ccs[j].cat // deterministic tiebreak
 		})
 		top := make([]string, 0, 3)
+		counts := make([]int, 0, 3)
 		for i := 0; i < len(ccs) && i < 3; i++ {
 			top = append(top, ccs[i].cat)
+			counts = append(counts, ccs[i].cnt)
 		}
 		nodes[idx[cid]].TopCategories = top
+		nodes[idx[cid]].TopCatCounts = counts
 	}
 	return nil
 }

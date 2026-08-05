@@ -27,6 +27,12 @@ var freezeReasons = map[string]string{
 	"error":            "mit einem Fehler abgebrochen",
 	"disabled":         "abgeschaltet (graph_overview.enabled=false)",
 	"registry-unwired": "nicht gelaufen: Typ-Registry nicht verdrahtet",
+	// Migration 126 added the sixth value after this table was first written.
+	// It is the freeze that reads like a bug and is not one: the node set is the
+	// INTERSECTION of the retrieval-visible types and overview.include, and an
+	// empty intersection selects nothing — so the rebuild refuses rather than
+	// retiring every topic the partition has.
+	"empty-node-cut": "abgebrochen: der Knotenschnitt war leer (Typ-Policy) — die Partition behält ihre Themen",
 }
 
 func isFreeze(reason string) bool {

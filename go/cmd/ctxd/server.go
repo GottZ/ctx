@@ -188,7 +188,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// logs and disables rather than crashing boot. Shared by both /api/img routes.
 	camoH := handler.NewCamoHandler(camo.NewFromEnv())
 	blobH := handler.NewBlobHandler(pool, cfgStore)
-	digestH := handler.NewDigestHandler(pool, blocktypeReg)
+	digestH := handler.NewDigestHandler(pool, blocktypeReg, cfgStore)
 	// Welle 42: daily synthesis manual trigger. Chains over the pool's digest
 	// role at constant internal (G28/E6) — the same gate as the scheduler's
 	// 03:00 iteration. MW3/E-U2: interactive classification + per-principal
