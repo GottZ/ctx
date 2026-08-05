@@ -211,7 +211,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          # UD-02-04 Stufe 1 (User-Freigabe 2026-08-05): der Ist-Rechenpfad liegt
+          # am 200k-Cap bei ~254 MB — 256M war die dokumentierte OOM-Flanke (R7).
+          # Staffel: 512M heute · >=1G ab 1M@K2 · >=2G/4G am 10M-Ziel (design/04 §6.3).
+          memory: 512M
         reservations:
           memory: 32M
     logging:
