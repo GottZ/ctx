@@ -124,6 +124,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// stage a no-op, never "infinitely fresh".
 	queryHandler.SetClusterFreshness(scheduler)
 	overviewH := handler.NewGraphOverviewHandler(pool, cfgStore)
+	// C7: the cluster-ego drill-down. Double-gated (graph_overview.enabled AND
+	// cluster.route_enabled, both default off), so registering it changes
+	// nothing until an operator flips the second flag.
+	clusterH := handler.NewGraphClusterHandler(pool, cfgStore, blocktypeReg)
 	// gamingReload re-builds the config snapshot from context_settings after a
 	// gaming-mode write (F3-P6), so the toggle hits the next chain without a
 	// restart (same path PUT /api/settings uses).
@@ -245,6 +249,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Get("/api/graph/all", graphH.HandleAll)
 		// Graph overview — scope-pure Louvain cluster supergraph (F5-W6, gated)
 		r.Get("/api/graph/overview", overviewH.HandleOverview)
+		// Graph cluster ego — the members + neighbour topics of ONE handle
+		// (Cluster-Topic-Map C7). Double-gated; a closed gate answers the same
+		// 404 as an absent route.
+		r.Get("/api/graph/cluster", clusterH.HandleCluster)
 		// Graph category-hue overrides (AM-2, U02-W5): GET is member-tier (the
 		// resolved {_global, tenant} map), PUT/DELETE are tenant-admin inside the
 		// mount (design/02a §A4-W5). FE renders the map atop the hash seed (W6).
