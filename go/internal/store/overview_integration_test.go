@@ -87,14 +87,33 @@ func TestGraphOverview_ScopeNegativeProbes(t *testing.T) {
 		t.Errorf("[shared]: want 0 edges (bridge needs work), got %d", len(r.Edges))
 	}
 
-	// PROBE 2 — full Triangle1 for the owning scopes, but still no work cluster
-	// and no cross-scope edge ([private,shared] cannot see the work endpoint).
-	if r := get("private", "shared"); len(r.Nodes) != 1 {
-		t.Errorf("[private,shared]: want 1 node (A,B,C), got %d (%+v)", len(r.Nodes), r.Nodes)
-	} else if r.Nodes[0].Size != 3 {
-		t.Errorf("[private,shared]: want size 3, got %d", r.Nodes[0].Size)
-	} else if len(r.Edges) != 0 {
-		t.Errorf("[private,shared] edge leak: want 0 (bridge has a work endpoint), got %d", len(r.Edges))
+	// PROBE 2 — Triangle1 for the owning scopes, but still no work cluster and no
+	// cross-scope edge ([private,shared] cannot see the work endpoint).
+	//
+	// SEMANTIC CHANGE, wave W7 (Cluster-Topic-Map): Triangle1 is a
+	// scope-CROSSING community — {A,B} private plus {C} shared — and the identity
+	// layer is scope-BOUND, so it is now TWO scope-pure topics instead of one
+	// merged node. That is the point of the decision, not a side effect: a topic
+	// carries a label, and a label built from one scope's content must never
+	// appear on another scope's map. The scope-purity property the probe exists
+	// for is UNCHANGED and asserted below — the private half counts only A and B,
+	// the shared half only C, and the total is still exactly 3.
+	if r := get("private", "shared"); len(r.Nodes) != 2 {
+		t.Errorf("[private,shared]: want 2 scope-pure topics for the crossing triangle, got %d (%+v)", len(r.Nodes), r.Nodes)
+	} else {
+		total := 0
+		for _, n := range r.Nodes {
+			total += n.Size
+			if len(n.ScopeMix) != 1 {
+				t.Errorf("[private,shared]: a topic must be single-scope, got %v", n.ScopeMix)
+			}
+		}
+		if total != 3 {
+			t.Errorf("[private,shared]: want total size 3 (A,B,C), got %d", total)
+		}
+		if len(r.Edges) != 0 {
+			t.Errorf("[private,shared] edge leak: want 0 (bridge has a work endpoint), got %d", len(r.Edges))
+		}
 	}
 
 	// PROBE 3 — Foreign-only cluster: a [work] tenant sees ONLY Triangle2, never
@@ -107,13 +126,23 @@ func TestGraphOverview_ScopeNegativeProbes(t *testing.T) {
 		t.Errorf("[work]: want 0 edges, got %d", len(r.Edges))
 	}
 
-	// PROBE 4 — Full visibility: both clusters AND the bridge meta-edge (its two
+	// PROBE 4 — Full visibility: every cluster AND the bridge meta-edge (its two
 	// endpoint scopes shared+work are both visible).
+	//
+	// THREE nodes since W7, for the reason given at probe 2: the crossing
+	// Triangle1 is two scope-pure topics, Triangle2 is one. The bridge C-F still
+	// resolves to exactly ONE meta-edge — it is the reason the identity path
+	// keeps the scope pair in the edge aggregation instead of grouping by cluster
+	// pair alone: without it the endpoint C could not be attributed to the SHARED
+	// half of its cluster and the edge would have to be dropped.
 	r := get("private", "shared", "work")
-	if len(r.Nodes) != 2 {
-		t.Fatalf("[all]: want 2 nodes, got %d (%+v)", len(r.Nodes), r.Nodes)
+	if len(r.Nodes) != 3 {
+		t.Fatalf("[all]: want 3 nodes (crossing triangle split scope-pure + work triangle), got %d (%+v)", len(r.Nodes), r.Nodes)
 	}
-	total := r.Nodes[0].Size + r.Nodes[1].Size
+	total := 0
+	for _, n := range r.Nodes {
+		total += n.Size
+	}
 	if total != 6 {
 		t.Errorf("[all]: want total size 6, got %d", total)
 	}

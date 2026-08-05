@@ -57,8 +57,31 @@ type overviewParamsEcho struct {
 	EdgeLimit      int     `json:"edge_limit"`
 }
 
+// overviewNodeWire is one map node.
+//
+// Cluster stays the per-request ordinal and stays the key the edge tuples point
+// at — Topic joins it, it does not replace it.
+//
+// Topic is the STABLE identity across rebuilds (Cluster-Topic-Map W7). Unlike
+// cluster_id it is emittable: gen_random_uuid v4, so no block reference and no
+// timestamp component (a uuidv7 would leak when a rebuild first saw this
+// community), and scope-partitioned, so two tenants can never observe a common
+// handle. Everything else the identity knows — retired_at, merged_into,
+// origin_topic_id, created_at, label_attempts — stays server-side: those are
+// events whose timing would allow inferences about rebuild runs and corpus
+// activity.
+//
+// Label ACCOMPANIES ReprTitle rather than replacing it (decision E6-01): the
+// only interaction path of today's map is the drill-down on repr_id, and
+// repr_title is its caption. The wire grows by ≈82–102 B per node, which is a
+// deliberate and quantified cost.
+//
+// Both omitempty: before the first rebuild with the identity layer the response
+// is byte-identical to the pre-W7 one.
 type overviewNodeWire struct {
 	Cluster       int      `json:"cluster"` // per-request ordinal (NOT cluster_id)
+	Topic         string   `json:"topic,omitempty"`
+	Label         string   `json:"label,omitempty"`
 	Size          int      `json:"size"`
 	TopCategories []string `json:"top_categories"`
 	ReprID        string   `json:"repr_id"`
@@ -152,10 +175,14 @@ func (h *GraphOverviewHandler) HandleOverview(w http.ResponseWriter, r *http.Req
 // per-request ordinal (the internal cluster_id never leaves the server) and
 // remapping edges onto those ordinals. Pure — pinned by the envelope golden test.
 func buildOverviewResponse(res *store.OverviewResult, p store.OverviewParams, elapsedMs int64) overviewResponse {
+	// The ordinal map is keyed by OverviewNode.Key — the topic id where an
+	// identity exists, the cluster id otherwise. Store and handler have to agree
+	// on ONE space, because the edge endpoints live in it; a mismatch would
+	// silently drop every edge instead of failing.
 	ordinal := make(map[string]int, len(res.Nodes))
 	nodes := make([]overviewNodeWire, len(res.Nodes))
 	for i, n := range res.Nodes {
-		ordinal[n.ClusterID] = i
+		ordinal[n.Key()] = i
 		cats := n.TopCategories
 		if cats == nil {
 			cats = []string{}
@@ -166,6 +193,8 @@ func buildOverviewResponse(res *store.OverviewResult, p store.OverviewParams, el
 		}
 		nodes[i] = overviewNodeWire{
 			Cluster:       i,
+			Topic:         n.TopicID,
+			Label:         n.Label,
 			Size:          n.Size,
 			TopCategories: cats,
 			ReprID:        n.ReprID,

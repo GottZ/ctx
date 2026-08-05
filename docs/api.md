@@ -240,7 +240,9 @@ GET /api/graph/overview?min_cluster_size=1&min_inter_cluster_weight=0&node_limit
 | `node_limit` | 500 | 1–2000 | max meta-nodes (largest first) |
 | `edge_limit` | 2000 | 1–20000 | max meta-edges (strongest first) |
 
-Response: `nodes` (`cluster` ordinal, `size`, `top_categories`, `repr_id`/`repr_title`, `scope_mix`), `edges` as compact tuples `[srcOrdinal, dstOrdinal, link_count, weight]`, and `stats` (`computed_at`, `null` if never built). Gated on the hot setting `graph_overview.enabled` (default off → `404`).
+Response: `nodes` (`cluster` ordinal, optional `topic`/`label`, `size`, `top_categories`, `repr_id`/`repr_title`, `scope_mix`), `edges` as compact tuples `[srcOrdinal, dstOrdinal, link_count, weight]`, and `stats` (`computed_at`, `null` if never built). Gated on the hot setting `graph_overview.enabled` (default off → `404`).
+
+`topic` is the **stable identity** of a map node across rebuilds and `label` its name; both are omitted entirely until the server has run a rebuild with the identity layer, and omitted for the whole response while any readable partition is still without one (the server errs towards a complete map, not a complete identity). Render `label ?? repr_title` — the label accompanies the representative title rather than replacing it, because `repr_id` is the drill-down target and `repr_title` its caption. `cluster` stays the per-request ordinal the edge tuples point at. The internal `cluster_id` is still never emitted: it IS a block uuid, whereas `topic` is a v4 uuid with no block reference, no timestamp component and a scope partition, so two tenants can never observe a common handle.
 
 ### Cluster boost (categorical retrieval)
 

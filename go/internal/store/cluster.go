@@ -132,7 +132,10 @@ func ClusterAnnotation(ctx context.Context, pool *pgxpool.Pool, blockIDs, readSc
 	// fillTopCategories is REUSED verbatim from the landkarte read path: one
 	// definition of "the visible categories of a cluster", so ego annotation and
 	// overview cannot drift into two answers to the same question (§5.6).
-	if err := fillTopCategories(ctx, pool, nodes, readScopes); err != nil {
+	// byCluster=true: the ego annotation reports per CLUSTER (its wire carries
+	// cluster ordinals, not topics), so the per-scope partials are folded the
+	// way they always were.
+	if err := fillTopCategories(ctx, pool, nodes, readScopes, true); err != nil {
 		return nil, fmt.Errorf("store: cluster annotation categories: %w", err)
 	}
 

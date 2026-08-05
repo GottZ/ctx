@@ -46,6 +46,25 @@ describe('buildOverviewGraph', () => {
     expect(g.getNodeAttribute('0', 'reprId')).toBe('block-aaa')
   })
 
+  // W7 (Cluster-Topic-Map): the caption is `label ?? repr_title`. Not a
+  // replacement — a response without the identity layer has to render exactly
+  // as it did before, and repr_title stays the caption of the drill-down
+  // target. A selection rule without a test is the class of omission the whole
+  // axis exists to close.
+  it('captions with the topic label when there is one, repr_title otherwise', () => {
+    const g = buildOverviewGraph(
+      overview({
+        nodes: [
+          onode(0, { label: 'Retrieval-Pipeline & RRF-Tuning', size: 42 }),
+          onode(1, { size: 7 }),
+        ],
+      }),
+      palette,
+    )
+    expect(g.getNodeAttribute('0', 'label')).toBe('Retrieval-Pipeline & RRF-Tuning · 42')
+    expect(g.getNodeAttribute('1', 'label')).toBe('Cluster 1 · 7')
+  })
+
   it('resolves response-local ordinal edge tuples to ordinal node keys', () => {
     const g = buildOverviewGraph(
       overview({ nodes: [onode(0), onode(1), onode(2)], edges: [[0, 2, 7, 1.5]] }),

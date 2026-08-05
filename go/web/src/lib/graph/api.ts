@@ -218,6 +218,23 @@ export interface OverviewResponse {
 export interface OverviewNode {
   /** Per-request ordinal (NOT the internal cluster_id). */
   cluster: number
+  /**
+   * Stable topic identity across rebuilds (Cluster-Topic-Map W7). Optional:
+   * absent until the server has run a rebuild with the identity layer, and
+   * absent for the WHOLE response while any partition is still without one —
+   * the server errs towards a complete map, not a complete identity.
+   *
+   * Unlike cluster_id this is emittable: a v4 uuid, so no block reference and
+   * no timestamp component, and scope-partitioned, so two tenants can never
+   * observe a common handle.
+   */
+  topic?: string
+  /**
+   * The topic's name. ACCOMPANIES repr_title, it does not replace it: the
+   * drill-down hangs off repr_id and repr_title is its caption. Render
+   * `label ?? repr_title`.
+   */
+  label?: string
   /** Visible member count (scope-pure, design 07-§2). */
   size: number
   top_categories: string[]

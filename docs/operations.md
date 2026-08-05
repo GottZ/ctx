@@ -286,6 +286,18 @@ The prompt carries **titles only, never content** (12–24 of them, capped by `C
 
 `/api/status` renders the arm under `cluster_map.labeling` with a `state` of `active`, `below-threshold (n/N)`, `no-backend` or `off`, plus the tick's counters and `latency_p50_ms`/`latency_p95_ms`. A pipeline that is doing nothing produces no log lines, so the state is the signal.
 
+### `topic` and `label` on `GET /api/graph/overview`
+
+Each map node gained two **optional** fields. `topic` is the stable identity across rebuilds, `label` its name. Both `omitempty`: a database that has not yet run a rebuild with the identity layer answers byte-identically to before, which is what makes the change deployable ahead of any rebuild.
+
+`label` **accompanies** `repr_title`, it does not replace it — the only interaction path of the map is the drill-down on `repr_id`, and `repr_title` is its caption. Clients render `label ?? repr_title`. The wire grows by roughly 82–102 bytes per node; the node cap stays at 2000 (default 500), because lowering an explicitly requested parameter would be a behaviour break for existing clients.
+
+**Why `topic` may be emitted while `cluster_id` may not.** `cluster_id` *is* a block UUID — the smallest member id of the community — so emitting it would disclose the existence and identity of a possibly invisible block. `topic_id` is a v4 UUID: no block reference, and no timestamp component either (a v7 would leak when a rebuild first saw the community). It is also scope-partitioned, so two tenants can never observe a common handle. Everything else the identity knows — `retired_at`, `merged_into`, `origin_topic_id`, `created_at`, `label_attempts` — stays server-side: those are events whose timing allows inferences about rebuild runs and corpus activity.
+
+**The legacy switch decides per request, and it errs towards a complete map.** As soon as *one* readable node row lacks a `topic_id`, the whole response falls back to the pre-identity shape — no `topic`, no `label`, node set unchanged. A map without identities is exactly the old map and lossless for a client; a map with missing *nodes* would be silent data loss. The mixed state is real and lasts: the rebuild serves one tenant per tick at a 6 h cadence, so with N tenants full coverage takes N × 6 h, and a caller whose read scopes span both partitions (the `shared` case) would otherwise get a silently halved map.
+
+One visible consequence of the scope-bound identity: a cluster whose members live in two scopes now renders as **two** nodes with disjoint `scope_mix` and disjoint `top_categories`, instead of one node with merged counts. Live that case is zero and `/api/status` counts it under `cluster_map.cross_scope_clusters`. Meta-edges keep working across the split because the identity path aggregates them per (cluster pair, **scope pair**) and resolves each endpoint to the half it actually touches — a cluster-pair-only aggregate could not say which half an edge belongs to, and the edge would have to be dropped.
+
 ### Migration 118: contract-drift closure (legacy function drop)
 
 The schema-contract check (Achse 03) found `extract_dates_from_text(t text)` live without a generating migration — a leftover of the GENERATED-column phase around migration 010, referenced by nothing (indexes, triggers, views, column defaults, `pg_depend`, Go code: all zero at the 2026-07-25 sweep). Migration 118 drops it (`DROP FUNCTION IF EXISTS` — a no-op on fresh chains, which never had it), closing the one expected `unknown_active_object` drift after the 108–117 rollout; `/health`'s `schema_contract` returns to `ok` on the next boot. The full function body is archived in the migration's commit message.

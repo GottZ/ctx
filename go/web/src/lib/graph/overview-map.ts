@@ -56,7 +56,11 @@ export function buildOverviewGraph(
   resp.nodes.forEach((node, i) => {
     const angle = (i / n) * 2 * Math.PI
     g.addNode(String(node.cluster), {
-      label: `${node.repr_title} · ${node.size}`,
+      // W7: the topic label when the server has one, the representative title
+      // otherwise. Not a replacement — repr_title stays the caption of the
+      // drill-down target, and a map without an identity layer renders exactly
+      // as it did before.
+      label: `${node.label ?? node.repr_title} · ${node.size}`,
       reprId: node.repr_id,
       clusterSize: node.size,
       scopeMix: node.scope_mix,
