@@ -308,15 +308,35 @@ func rowsFrom(nodes []store.OverviewNode) []Row {
 	rows := make([]Row, 0, len(nodes))
 	for _, n := range nodes {
 		rows = append(rows, Row{
-			Size:      n.Size,
-			TopCats:   n.TopCategories,
-			CatCounts: n.TopCatCounts,
-			ReprID:    n.ReprID,
-			ReprTitle: n.ReprTitle,
-			ScopeMix:  n.ScopeMix,
+			StableID:    n.TopicID,
+			Label:       n.Label,
+			LabelSource: rendererLabelSource(n.LabelSource),
+			Size:        n.Size,
+			TopCats:     n.TopCategories,
+			CatCounts:   n.TopCatCounts,
+			ReprID:      n.ReprID,
+			ReprTitle:   n.ReprTitle,
+			ScopeMix:    n.ScopeMix,
 		})
 	}
 	return rows
+}
+
+// rendererLabelSource maps the DB provenance vocabulary (migration 125:
+// none | fallback | llm | manual) onto the renderer's (W-C: "" | heuristic |
+// llm | …). 'fallback' IS the deterministic heuristic; 'none' means the line
+// will fall back to repr_title, which labelSources already declares on its
+// own. An unknown future value passes through verbatim — the head line names
+// it rather than hiding it.
+func rendererLabelSource(dbSource string) string {
+	switch dbSource {
+	case "none", "":
+		return ""
+	case "fallback":
+		return "heuristic"
+	default:
+		return dbSource
+	}
 }
 
 // superRowsFrom projects the store's meta rows onto renderer rows. Straight

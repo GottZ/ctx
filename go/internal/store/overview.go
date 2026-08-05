@@ -38,7 +38,13 @@ type OverviewNode struct {
 	// Label is the topic's name. It ACCOMPANIES ReprTitle, it does not replace
 	// it (decision E6-01): the only interaction path of today's map is the
 	// drill-down on ReprID, and ReprTitle is its caption.
-	Label         string
+	Label string
+	// LabelSource is the label's provenance in DB vocabulary (none | fallback |
+	// llm | manual). STORE-INTERNAL: the overview wire deliberately carries no
+	// label_source (E6-01-Streichung; the detail route C7 does) — the one
+	// consumer is the root map's head line, which must not declare "repr_title"
+	// while printing an LLM label (W-D/W7 seam).
+	LabelSource   string
 	Size          int      // Σ size over the caller's visible scopes
 	TopCategories []string // merged from category_counts of the visible scopes
 	// TopCatCounts are the counts of TopCategories, same order and length
@@ -224,7 +230,8 @@ var overviewLegacyProbeSQL = `
 // here instead of serving another scope's label. It is the line the W7 scope
 // gate removes to go red.
 var overviewNodesTopicSQL = `
-	SELECT n.cluster_id::text, n.topic_id::text, COALESCE(t.label, ''), n.size,
+	SELECT n.cluster_id::text, n.topic_id::text, COALESCE(t.label, ''),
+	       COALESCE(t.label_source, 'none'), n.size,
 	       n.repr_block_id::text, n.repr_title, ARRAY[n.scope]
 	FROM graph_cluster_node n
 	JOIN graph_cluster_topic t ON t.topic_id = n.topic_id AND t.scope = n.scope
@@ -267,7 +274,7 @@ func overviewNodes(ctx context.Context, pool *pgxpool.Pool, p OverviewParams, re
 		if legacy {
 			err = rows.Scan(&n.ClusterID, &n.Size, &n.ReprID, &n.ReprTitle, &n.ScopeMix)
 		} else {
-			err = rows.Scan(&n.ClusterID, &n.TopicID, &n.Label, &n.Size, &n.ReprID, &n.ReprTitle, &n.ScopeMix)
+			err = rows.Scan(&n.ClusterID, &n.TopicID, &n.Label, &n.LabelSource, &n.Size, &n.ReprID, &n.ReprTitle, &n.ScopeMix)
 		}
 		if err != nil {
 			return nil, false, err
