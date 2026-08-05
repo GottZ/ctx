@@ -46,6 +46,20 @@ const (
 	memberBatch = 5000
 )
 
+// persistTempBuffers dimensions the temp-table working set of the W3 identity
+// phase. The PostgreSQL default is 8 MB; ov_prev (one row per member plus a PK
+// index) and ov_overlap (up to one row per member) exceed that at the node cap,
+// and the overflow lands in pgsql_tmp — on DISK, INSIDE the advisory-locked
+// transaction. That is the difference between single- and double-digit seconds
+// of lock hold time.
+//
+// Code-owned, not a config key: this is the dimensioning of a known working
+// set, not a policy. It can only be set while the session has not yet touched a
+// temp table, which makes the first statement of the persist tx the only
+// possible place. A var rather than a const solely so the W3-G11 gate can
+// measure the spill it prevents; production never writes to it.
+var persistTempBuffers = "64MB"
+
 // Stats is the result of one rebuild for logging/telemetry.
 //
 // W-A note: this struct crosses the worker IPC boundary and BOTH decoders are
@@ -70,6 +84,32 @@ type Stats struct {
 	// only sees 3.000 — wordwise the difference channel on foreign corpus
 	// size that BP-1 forbids.
 	CandidateCount map[string]int
+
+	// ── W3: the identity lifecycle of this run ──────────────────────────────
+	//
+	// Without these the topic layer is a black box from outside the worker
+	// child: a run that renames every topic and a run that changes nothing
+	// look identical in the log. They are counters, never inputs — nothing in
+	// the rebuild reads them back.
+	//
+	// PROTOCOL NOTE (same one the struct header carries): these seven fields
+	// cross the strict worker IPC decoders, so W3 must ship in the same deploy
+	// window as the other Stats-extending waves (K12: W-A, S2).
+	TopicsCarried    int // continued from the living predecessor generation
+	TopicsReattached int // revived from a tombstone (E2-01 / A01-2)
+	TopicsBorn       int // fresh identity, origin_kind='birth'
+	TopicsSplit      int // fresh identity, origin_kind='split'
+	TopicsRetired    int // died this run (plain death or merged_into)
+
+	// MembersChanged/MembersReassigned are the K13 measurement (masterplan
+	// §2): a newcomer with a smaller uuid renames the WHOLE community, so a
+	// future delta-persist would rewrite every member row of a community that
+	// did not actually move. MembersReassigned is exactly that subset — the
+	// member changed cluster_id while its TOPIC stayed the same. Pure
+	// measurement in W3; the decision whether the topic identity replaces
+	// cluster_id as the delta key belongs to Achse 04 (S9b).
+	MembersChanged    int
+	MembersReassigned int
 }
 
 // tallyScopes counts node candidates per scope over the loadNodes output.
@@ -126,6 +166,17 @@ type Options struct {
 	// loadEdges, both edge endpoints); the persist input-purity guard stays
 	// as the fail-loud backstop against an out-of-filter input.
 	ScopeFilter []string
+	// TombstoneRetention is the window in which a RETIRED topic can still be
+	// re-attached by a re-appearing community (W3, decision E2-01 / amendment
+	// A01-2). It has to cross the worker boundary because the re-attach probe
+	// runs INSIDE the persist tx, in the child process. 0 disables the path —
+	// the run then mints fresh identities, which is the fail-closed direction.
+	//
+	// This is the ONLY option the axis adds, and therefore the axis' single
+	// IPC protocol change: the retention PURGE (W8) deliberately runs in the
+	// parent process and reads cfg directly, so it never crosses this boundary
+	// a second time.
+	TombstoneRetention time.Duration
 }
 
 // lockKeyForScopes returns the advisory lock key for one persist run (B-W4).
@@ -228,6 +279,19 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	// W-A: tally BEFORE the cap check — the skipped run is exactly the case
 	// where the map matters (how far over max_nodes is this partition?).
 	candidates := tallyScopes(nodeScopes)
+	// A FROZEN MAP KEEPS ITS IDENTITIES (W3-G12, amendment A01-5). The skip
+	// returns BEFORE persist, so no topic is touched: no last_seen_at moves,
+	// nothing retires, graph_cluster_node stays as it was and the route keeps
+	// serving the last good map. That is load-bearing — a freeze that retired
+	// topics would turn a liveness guard into an identity shredder, and the
+	// label pipeline (W6) selects on graph_cluster_node, so a frozen map
+	// produces no new labels either.
+	//
+	// TODO(Achse 04, S6+S7): after the engine switch there are THREE freeze
+	// reasons, not one — "node-cap" here, "time-budget" (S6/S7) and
+	// "mem-budget" (S7b, the child memory ceiling). Each of them must return
+	// on this same path, i.e. before persist opens a transaction; W3-G12 is
+	// then extended to all three instead of being duplicated per reason.
 	if opts.MaxNodes > 0 && len(nodeUUIDs) > opts.MaxNodes {
 		slog.Warn("overview: rebuild skipped — node count exceeds cap (Louvain wall)",
 			"nodes", len(nodeUUIDs), "max_nodes", opts.MaxNodes)
@@ -487,27 +551,47 @@ func loadEdges(ctx context.Context, pool *pgxpool.Pool, scopeFilter []string) ([
 // B-W3 scope filter ("" = global run, or a WHERE on the DENORMALIZED
 // m.scope ($2) — the member column exists exactly so the scoped aggregation
 // never joins context_blocks for partition membership, 087 header).
+//
+// W3 wraps the two historical levels in a THIRD one. The reason is mechanical:
+// the identity and the core have to be attached to the FINISHED (cluster,
+// scope) rollup, and neither category_counts nor the representative exist as
+// values inside the level that produces them — they cannot be referenced from
+// the same projection list that builds them.
+//
+// Both W3 joins are INNER, and that is the fail-loud choice. A cluster without
+// an ov_match row is an assignment bug, one without an ov_core row is a core
+// bug; either shows up here as a MISSING node row, which persist's row-count
+// check turns into a loud rollback. The alternative — a LEFT JOIN writing
+// topic_id IS NULL — would be silently swallowed by the read path, and a node
+// row without identity is exactly the state this axis exists to abolish.
 const nodeAggTemplate = `
-INSERT INTO graph_cluster_node (cluster_id, scope, size, category_counts, repr_block_id, repr_title, repr_quality)
-SELECT cluster_id, scope,
-       sum(cat_cnt)::int,
-       jsonb_object_agg(category, cat_cnt),
-       (array_agg(repr_id    ORDER BY cat_max_q DESC, repr_id))[1],
-       (array_agg(repr_title ORDER BY cat_max_q DESC, repr_id))[1],
-       max(cat_max_q)
+INSERT INTO graph_cluster_node (cluster_id, scope, size, category_counts, repr_block_id, repr_title,
+                                repr_quality, topic_id, core_hash, core_blocks)
+SELECT r.cluster_id, r.scope, r.size, r.category_counts, r.repr_block_id, r.repr_title,
+       r.repr_quality, mt.topic_id, oc.core_hash, oc.core_blocks
 FROM (
-    SELECT m.cluster_id, b.scope, b.category,
-           count(*)::int        AS cat_cnt,
-           max(b.quality_score) AS cat_max_q,
-           (array_agg(b.id              ORDER BY b.quality_score DESC, b.id))[1] AS repr_id,
-           (array_agg(left(b.title,120) ORDER BY b.quality_score DESC, b.id))[1] AS repr_title
-    FROM graph_cluster_member m
-    JOIN context_blocks b ON b.id = m.block_id
-       AND %s
-    %s
-    GROUP BY m.cluster_id, b.scope, b.category
-) per_cat
-GROUP BY cluster_id, scope`
+    SELECT cluster_id, scope,
+           sum(cat_cnt)::int                                           AS size,
+           jsonb_object_agg(category, cat_cnt)                         AS category_counts,
+           (array_agg(repr_id    ORDER BY cat_max_q DESC, repr_id))[1] AS repr_block_id,
+           (array_agg(repr_title ORDER BY cat_max_q DESC, repr_id))[1] AS repr_title,
+           max(cat_max_q)                                              AS repr_quality
+    FROM (
+        SELECT m.cluster_id, b.scope, b.category,
+               count(*)::int        AS cat_cnt,
+               max(b.quality_score) AS cat_max_q,
+               (array_agg(b.id              ORDER BY b.quality_score DESC, b.id))[1] AS repr_id,
+               (array_agg(left(b.title,120) ORDER BY b.quality_score DESC, b.id))[1] AS repr_title
+        FROM graph_cluster_member m
+        JOIN context_blocks b ON b.id = m.block_id
+           AND %s
+        %s
+        GROUP BY m.cluster_id, b.scope, b.category
+    ) per_cat
+    GROUP BY cluster_id, scope
+) r
+JOIN ov_match mt ON mt.cluster_id = r.cluster_id AND mt.scope = r.scope
+JOIN ov_core  oc ON oc.cluster_id = r.cluster_id AND oc.scope = r.scope`
 
 var nodeAggSQL = fmt.Sprintf(nodeAggTemplate, visibility.TypeVisible("b", "$1"), "")
 
@@ -693,6 +777,62 @@ func teardown(ctx context.Context, tx pgx.Tx, scoped bool, scopeFilter []string)
 	return nil
 }
 
+// insertMembers writes this run's block→cluster assignment in deterministic
+// order (unnest text[]→uuid[] cast, batched at memberBatch) and returns the set
+// of distinct cluster ids.
+//
+// scope is denormalized from the Louvain input (B-W2, 087) — the member row
+// records the partition the clustering RAN in, never a re-read a concurrent
+// scope-move could skew. block_id stays the SOLE PK: the overview input is
+// strictly owned-disjoint (no grants), so no block is a member under two
+// scopes.
+//
+// Split out of persist in W3 purely to keep that function inside the cyclop
+// budget once the identity phase joined it; the body is unchanged.
+func insertMembers(ctx context.Context, tx pgx.Tx, cl clustering, opts Options,
+	nodeScopes map[string]string, scoped bool, filterSet map[string]struct{},
+) (map[string]struct{}, error) {
+	blocks := make([]string, 0, len(cl.blockToCluster))
+	for b := range cl.blockToCluster {
+		blocks = append(blocks, b)
+	}
+	sort.Strings(blocks)
+	clusters := make([]string, len(blocks))
+	scopes := make([]string, len(blocks))
+	clusterSet := make(map[string]struct{})
+	for i, b := range blocks {
+		clusters[i] = cl.blockToCluster[b]
+		clusterSet[cl.blockToCluster[b]] = struct{}{}
+		scope, ok := nodeScopes[b]
+		if !ok || scope == "" {
+			// Fail loud: a member without an input scope would either violate
+			// NOT NULL or silently land in the wrong partition (B-W3 poison).
+			return nil, fmt.Errorf("insert members: block %s has no Louvain-input scope", b)
+		}
+		if scoped {
+			// Input-purity guard (B-W3): a scoped run whose input carries a
+			// block outside the filter would collide with the surviving
+			// foreign partition (block_id PK) or poison it. Input scoping
+			// itself (loadNodes/loadEdges) is B-W6 — until then callers must
+			// hand persist an already-cut input; fail loud, never trim.
+			if _, in := filterSet[scope]; !in {
+				return nil, fmt.Errorf("insert members: block %s scope %q outside ScopeFilter %v — input not partition-cut (B-W6 wires scoped loading)", b, scope, opts.ScopeFilter)
+			}
+		}
+		scopes[i] = scope
+	}
+	for i := 0; i < len(blocks); i += memberBatch {
+		end := min(i+memberBatch, len(blocks))
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO graph_cluster_member (block_id, cluster_id, scope)
+			 SELECT b::uuid, c::uuid, s FROM unnest($1::text[], $2::text[], $3::text[]) AS t(b, c, s)`,
+			blocks[i:end], clusters[i:end], scopes[i:end]); err != nil {
+			return nil, fmt.Errorf("insert members: %w", err)
+		}
+	}
+	return clusterSet, nil
+}
+
 // persist replaces the 057 tables in one advisory-locked transaction —
 // globally (nil ScopeFilter: TRUNCATE + unscoped aggregation, the pre-B
 // behaviour) or for ONE partition (B-W3: scoped DELETE + scoped aggregation,
@@ -719,6 +859,13 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
 
+	// W3: FIRST statement of the tx — temp_buffers is only settable while the
+	// session has not touched a temp table yet (see persistTempBuffers). The
+	// value is a code-owned constant, never input.
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL temp_buffers = '%s'`, persistTempBuffers)); err != nil {
+		return Stats{}, fmt.Errorf("temp_buffers: %w", err)
+	}
+
 	// B-W4: the lock is per-partition — two different tenants persist in
 	// parallel, the same tenant (and the global run against old binaries)
 	// keeps serializing. See lockKeyForScopes.
@@ -733,60 +880,35 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		return Stats{Skipped: true, SkipReason: "advisory-lock", CandidateCount: candidates}, nil
 	}
 
+	// W3, K5 order: the predecessor snapshot has to be taken BEFORE the
+	// teardown — graph_cluster_member is the only record of the old block→
+	// topic assignment and the teardown deletes it.
+	phase := topicPhase{scoped: scoped, scopeFilter: opts.ScopeFilter, tombstone: opts.TombstoneRetention}
+	if err := phase.snapshotPrevTopics(ctx, tx); err != nil {
+		return Stats{}, err
+	}
+
 	if err := teardown(ctx, tx, scoped, opts.ScopeFilter); err != nil {
 		return Stats{}, err
 	}
 
-	// Batched member insert (deterministic order; unnest text[]→uuid[] cast).
-	// scope is denormalized from the Louvain input (B-W2, 087) — the member
-	// row records the partition the clustering RAN in. block_id stays the
-	// SOLE PK: the overview input is strictly owned-disjoint (no grants), so
-	// no block is a member under two scopes — load-bearing invariant, the
-	// input-purity assert lands in B-W6 (087 header).
-	blocks := make([]string, 0, len(cl.blockToCluster))
-	for b := range cl.blockToCluster {
-		blocks = append(blocks, b)
+	clusterSet, err := insertMembers(ctx, tx, cl, opts, nodeScopes, scoped, filterSet)
+	if err != nil {
+		return Stats{}, err
 	}
-	sort.Strings(blocks)
-	clusters := make([]string, len(blocks))
-	scopes := make([]string, len(blocks))
-	clusterSet := make(map[string]struct{})
-	for i, b := range blocks {
-		clusters[i] = cl.blockToCluster[b]
-		clusterSet[cl.blockToCluster[b]] = struct{}{}
-		scope, ok := nodeScopes[b]
-		if !ok || scope == "" {
-			// Fail loud: a member without an input scope would either violate
-			// NOT NULL or silently land in the wrong partition (B-W3 poison).
-			return Stats{}, fmt.Errorf("insert members: block %s has no Louvain-input scope", b)
-		}
-		if scoped {
-			// Input-purity guard (B-W3): a scoped run whose input carries a
-			// block outside the filter would collide with the surviving
-			// foreign partition (block_id PK) or poison it. Input scoping
-			// itself (loadNodes/loadEdges) is B-W6 — until then callers must
-			// hand persist an already-cut input; fail loud, never trim.
-			if _, in := filterSet[scope]; !in {
-				return Stats{}, fmt.Errorf("insert members: block %s scope %q outside ScopeFilter %v — input not partition-cut (B-W6 wires scoped loading)", b, scope, opts.ScopeFilter)
-			}
-		}
-		scopes[i] = scope
-	}
-	for i := 0; i < len(blocks); i += memberBatch {
-		end := min(i+memberBatch, len(blocks))
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO graph_cluster_member (block_id, cluster_id, scope)
-			 SELECT b::uuid, c::uuid, s FROM unnest($1::text[], $2::text[], $3::text[]) AS t(b, c, s)`,
-			blocks[i:end], clusters[i:end], scopes[i:end]); err != nil {
-			return Stats{}, fmt.Errorf("insert members: %w", err)
-		}
+
+	// W3 identity phase — between members and aggregation (K5). Everything in
+	// here works on TEMP tables; no Louvain, no resolution search.
+	topics, err := assignTopics(ctx, tx, phase, buildCores(cl, nodeScopes))
+	if err != nil {
+		return Stats{}, err
 	}
 
 	// Aggregation — ALWAYS the variant matching the teardown above (B1-C1:
 	// scoped DELETE + unscoped aggregation = resurrected foreign rows ⇒ 23505).
-	var edgeTag pgconn.CommandTag
+	var edgeTag, nodeTag pgconn.CommandTag
 	if !scoped {
-		if _, err := tx.Exec(ctx, nodeAggSQL, opts.VisibleTypes); err != nil {
+		if nodeTag, err = tx.Exec(ctx, nodeAggSQL, opts.VisibleTypes); err != nil {
 			return Stats{}, fmt.Errorf("node aggregation: %w", err)
 		}
 		edgeTag, err = tx.Exec(ctx, edgeAggSQL, opts.VisibleTypes)
@@ -794,7 +916,7 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 			return Stats{}, fmt.Errorf("edge aggregation: %w", err)
 		}
 	} else {
-		if _, err := tx.Exec(ctx, nodeAggScopedSQL, opts.VisibleTypes, opts.ScopeFilter); err != nil {
+		if nodeTag, err = tx.Exec(ctx, nodeAggScopedSQL, opts.VisibleTypes, opts.ScopeFilter); err != nil {
 			return Stats{}, fmt.Errorf("scoped node aggregation: %w", err)
 		}
 		edgeTag, err = tx.Exec(ctx, edgeAggScopedSQL, opts.VisibleTypes, opts.ScopeFilter)
@@ -803,12 +925,35 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		}
 	}
 
+	// W3 completeness check. Every (cluster, scope) of this run has an
+	// ov_match row by construction — carried, re-attached or freshly minted —
+	// so the node aggregation must emit exactly as many rows as ov_match
+	// holds. A shortfall means the INNER joins of nodeAggTemplate dropped a
+	// cluster, which happens if a block changed scope BETWEEN the Louvain load
+	// and this transaction: the member row keeps the input scope (087), the
+	// aggregation groups by the block's current one, and the two stop lining
+	// up. Left alone that would be a topic with no node row — invisible on the
+	// map now and, one run later, a tombstone. Loud rollback instead; the
+	// previous map stays readable and the next tick reruns.
+	assigned := topics.carried + topics.reattached + topics.born + topics.split
+	if int(nodeTag.RowsAffected()) != assigned {
+		return Stats{}, fmt.Errorf("node aggregation wrote %d rows for %d assigned clusters — a member's scope moved mid-run or the identity join is broken (persist rolls back, previous map stays readable)",
+			nodeTag.RowsAffected(), assigned)
+	}
+
 	stats := Stats{
-		NodeCount:      len(cl.blockToCluster),
-		ClusterCount:   len(clusterSet),
-		EdgeRows:       int(edgeTag.RowsAffected()),
-		Modularity:     cl.modularity,
-		CandidateCount: candidates,
+		NodeCount:         len(cl.blockToCluster),
+		ClusterCount:      len(clusterSet),
+		EdgeRows:          int(edgeTag.RowsAffected()),
+		Modularity:        cl.modularity,
+		CandidateCount:    candidates,
+		TopicsCarried:     topics.carried,
+		TopicsReattached:  topics.reattached,
+		TopicsBorn:        topics.born,
+		TopicsSplit:       topics.split,
+		TopicsRetired:     topics.retired,
+		MembersChanged:    topics.membersChanged,
+		MembersReassigned: topics.membersReassigned,
 	}
 	candScopes, candNs := candidateArrays(candidates)
 
@@ -844,5 +989,14 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	if err := tx.Commit(ctx); err != nil {
 		return Stats{}, fmt.Errorf("commit: %w", err)
 	}
+	// W3 identity ledger. members_reassigned is deliberately reported NEXT TO
+	// members_changed and not folded into it (K13): the two answer different
+	// questions — how much of the corpus actually moved, versus how much of
+	// the churn is nothing but a minUUID rename of communities that stayed put.
+	slog.Info("overview: topic identity",
+		"scope_filter", opts.ScopeFilter,
+		"carried", stats.TopicsCarried, "reattached", stats.TopicsReattached,
+		"born", stats.TopicsBorn, "split", stats.TopicsSplit, "retired", stats.TopicsRetired,
+		"members_changed", stats.MembersChanged, "members_reassigned", stats.MembersReassigned)
 	return stats, nil
 }

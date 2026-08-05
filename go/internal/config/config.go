@@ -298,6 +298,25 @@ type GraphOverviewConfig struct {
 	// interrupted — the timeout abandons it (documented goroutine leak) and
 	// keeps the scheduler loop alive. 0 → 900s.
 	RebuildTimeout time.Duration `key:"graph_overview.rebuild_timeout" env:"CTX_GRAPH_OVERVIEW_REBUILD_TIMEOUT" default:"900" mut:"hot" tenancy:"global-only"`
+	// TombstoneRetention is the window in which a RETIRED topic keeps its
+	// substance available for a re-attach (E2-01 / Amendment A01-2, wave W3):
+	// a birth candidate first probes its members against the core_blocks of
+	// tombstones of the SAME scope that died no longer ago than this, and
+	// re-attaches instead of minting a fresh identity. That is what lets a
+	// batch import which tears a partition apart across several rebuilds find
+	// its old topics again instead of renaming the whole map.
+	//
+	// Seconds like the other duration keys; 45 d is the proposal of the
+	// decision record (dream.backoff_cap order of magnitude) and covers
+	// several rebuild cycles at the 6 h cadence. 0 disables the re-attach
+	// path entirely — the run then behaves like pure one-generation matching,
+	// which mints a NEW topic and never revives a foreign identity, so the
+	// off state is the fail-closed one.
+	//
+	// NOT parse:"strict": a retention horizon is a cadence, not a security
+	// ceiling — same classification as rebuild_timeout one line up. The purge
+	// that consumes the same key is wave W8; W3 only reads it.
+	TombstoneRetention time.Duration `key:"graph_overview.tombstone_retention" env:"CTX_GRAPH_OVERVIEW_TOMBSTONE_RETENTION" default:"3888000" mut:"hot" tenancy:"global-only"`
 }
 
 // ClusterConfig is the Achse-03 cluster-consumption RANKING surface

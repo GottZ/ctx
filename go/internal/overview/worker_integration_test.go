@@ -131,8 +131,30 @@ func TestWorkerRoundtrip_IdenticalDBRows(t *testing.T) {
 	// DeepEqual since W-A: Stats carries the per-scope CandidateCount map and
 	// is no longer comparable with ==. The map is part of the equivalence
 	// claim — the worker must report the SAME per-scope candidate tally.
-	if !reflect.DeepEqual(statsWorker, statsInProc) {
+	//
+	// Since W3 the identity lifecycle counters are deliberately EXCLUDED from
+	// this comparison, and that exclusion is the claim, not a loophole: they
+	// describe the relation between this run and its PREDECESSOR, not the
+	// partition. The in-process run above is the first generation and mints
+	// three topics; the worker run is the second and continues those same
+	// three. Demanding equality there would demand that the identity layer
+	// forget the first run — the exact opposite of what this wave builds. The
+	// two runs are asserted separately, below.
+	compInProc, compWorker := statsInProc, statsWorker
+	for _, s := range []*overview.Stats{&compInProc, &compWorker} {
+		s.TopicsCarried, s.TopicsReattached = 0, 0
+		s.TopicsBorn, s.TopicsSplit, s.TopicsRetired = 0, 0, 0
+		s.MembersChanged, s.MembersReassigned = 0, 0
+	}
+	if !reflect.DeepEqual(compWorker, compInProc) {
 		t.Errorf("worker stats diverge from in-process stats:\n  in-process: %+v\n  worker    : %+v", statsInProc, statsWorker)
+	}
+	if statsInProc.TopicsBorn != 3 || statsInProc.TopicsCarried != 0 {
+		t.Errorf("first generation: born=%d carried=%d, want 3/0", statsInProc.TopicsBorn, statsInProc.TopicsCarried)
+	}
+	if statsWorker.TopicsCarried != 3 || statsWorker.TopicsBorn != 0 || statsWorker.TopicsRetired != 0 {
+		t.Errorf("second generation over an unchanged corpus: carried=%d born=%d retired=%d, want 3/0/0 — the identity must survive the process boundary",
+			statsWorker.TopicsCarried, statsWorker.TopicsBorn, statsWorker.TopicsRetired)
 	}
 	for _, table := range []string{"member", "node", "edge", "meta"} {
 		if !reflect.DeepEqual(inProcRows[table], workerRows[table]) {

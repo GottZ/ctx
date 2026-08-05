@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -38,6 +39,29 @@ func insLinkB3(t *testing.T, pool *pgxpool.Pool, src, dst string, conf float64) 
 		VALUES ($1::uuid, $2::uuid, 'topical', $3, $3, 'private')`,
 		src, dst, conf); err != nil {
 		t.Fatalf("insLinkB3: %v", err)
+	}
+}
+
+// w3AggTemps rebuilds the two identity temps the node aggregation has joined
+// since W3, filled from the node rows that already exist. It exists so the
+// B1-C1 probes below keep exercising the PARTITION breakage instead of
+// tripping over a missing relation — the identity itself has its own gates in
+// topic_identity_integration_test.go.
+func w3AggTemps(t *testing.T, ctx context.Context, tx pgx.Tx) {
+	t.Helper()
+	for _, sql := range []string{
+		`CREATE TEMP TABLE ov_match (cluster_id UUID NOT NULL, scope TEXT NOT NULL, topic_id UUID NOT NULL,
+		     ov INT NOT NULL, carried BOOL NOT NULL, PRIMARY KEY (cluster_id, scope)) ON COMMIT DROP`,
+		`INSERT INTO ov_match SELECT cluster_id, scope, topic_id, 0, true
+		   FROM graph_cluster_node WHERE topic_id IS NOT NULL`,
+		`CREATE TEMP TABLE ov_core (cluster_id UUID NOT NULL, scope TEXT NOT NULL, core_hash TEXT NOT NULL,
+		     core_blocks UUID[] NOT NULL, PRIMARY KEY (cluster_id, scope)) ON COMMIT DROP`,
+		`INSERT INTO ov_core SELECT cluster_id, scope, COALESCE(core_hash, ''), core_blocks
+		   FROM graph_cluster_node`,
+	} {
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			t.Fatalf("w3AggTemps: %v", err)
+		}
 	}
 }
 
@@ -171,6 +195,10 @@ func TestScopedAggregation_B1C1(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = tx.Rollback(ctx) }() // probe rolls back, tables stay intact
+		// Since W3 the aggregation joins the identity temps. Rebuilt here from
+		// the CURRENT node rows so the probe keeps testing what it always
+		// tested — the partition breakage, not a missing relation.
+		w3AggTemps(t, ctx, tx)
 		if _, err := tx.Exec(ctx, `DELETE FROM graph_cluster_node WHERE scope = 'private'`); err != nil {
 			t.Fatal(err)
 		}
@@ -209,6 +237,7 @@ func TestScopedAggregation_B1C1(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			w3AggTemps(t, ctx, tx) // W3: the node aggregation joins ov_match/ov_core
 			rows, err := tx.Query(ctx, "EXPLAIN "+q, args...)
 			if err != nil {
 				t.Fatalf("EXPLAIN %s: %v", name, err)

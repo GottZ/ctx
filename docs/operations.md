@@ -215,6 +215,31 @@ Migration 123 adds three columns and drops one default:
 
 Deploy notes, same shape as 116: the file carries `SET LOCAL lock_timeout = '3s'`, so it aborts with `55P03` rather than queueing behind a long-running persist transaction (a 400k-node rebuild measures ~465 s); every statement is idempotent, so the next boot simply re-runs it. Existing rows are backfilled with `last_attempt_at = computed_at` and `candidate_n = node_n` — historically correct, because only a successful run could have written them. No new table, no index.
 
+### Topic identity: what a rebuild now does to `graph_cluster_topic`
+
+Since migration 124 the map has an identity layer that the rebuild teardown does **not** touch. `cluster_id` still turns over on every run — it is the smallest member uuid of a community and changes the moment that one block leaves — but the `topic_id` on the node row stays, and it is the value a later map edge or retrieval signal refers to.
+
+Each rebuild decides, per partition, what happened to last generation's topics:
+
+| Outcome | Rule | Row |
+|---|---|---|
+| continued | mutual plurality **and** the new cluster holds at least **half** of the old topic's members | `last_seen_at` moves |
+| re-attached | a would-be new cluster covers at least **half** of the core of a topic that died inside `graph_overview.tombstone_retention`, in the same scope | `retired_at` back to `NULL` |
+| split | at least half of the NEW cluster's members came out of one old topic that continued elsewhere | new row, `origin_kind='split'`, `origin_topic_id` set |
+| born | none of the above | new row, `origin_kind='birth'` |
+| retired | no cluster continued it | `retired_at` set; `merged_into` names the topic its majority went to, or `NULL` for a plain death |
+
+There is no threshold to tune. "Half of the substance" is the rule in all three places, and it is scale-invariant on purpose: a stable one-block topic keeps its identity (1 of 1), and a 300-block topic is never inherited off a two-block overlap.
+
+Two operational consequences:
+
+- **A topic never crosses a scope.** If a group of linked blocks moves from one scope to another, the old topic dies and a new one is born in the target scope. That is deliberate: a topic carries a label, and a label built from one scope's content must not appear on another scope's map.
+- **A frozen map keeps its identities.** A run skipped by `graph_overview.max_nodes` returns before the persist transaction opens, so nothing is retired, nothing is renamed, and the last good map stays readable and labelled.
+
+`graph_overview.tombstone_retention` (`CTX_GRAPH_OVERVIEW_TOMBSTONE_RETENTION`, seconds, default 45 d, hot) is the window in which a dead topic can still be re-attached. It exists for **batch imports**: an import that tears a partition apart across several rebuilds would otherwise rename every topic it touched. `0` switches the re-attach off — the rebuild then mints fresh identities, which loses continuity but can never revive a wrong one. The purge of expired tombstones is a separate job and reads the same key.
+
+The rebuild log line `overview: topic identity` reports the run: `carried`, `reattached`, `born`, `split`, `retired`, plus `members_changed` and `members_reassigned`. The last two are worth reading together — `members_reassigned` is the share of the churn that is nothing but a community rename (the block moved `cluster_id` while its topic stayed the same). A high share means the map is stable and only its internal keys are moving.
+
 ### Migration 118: contract-drift closure (legacy function drop)
 
 The schema-contract check (Achse 03) found `extract_dates_from_text(t text)` live without a generating migration — a leftover of the GENERATED-column phase around migration 010, referenced by nothing (indexes, triggers, views, column defaults, `pg_depend`, Go code: all zero at the 2026-07-25 sweep). Migration 118 drops it (`DROP FUNCTION IF EXISTS` — a no-op on fresh chains, which never had it), closing the one expected `unknown_active_object` drift after the 108–117 rollout; `/health`'s `schema_contract` returns to `ok` on the next boot. The full function body is archived in the migration's commit message.

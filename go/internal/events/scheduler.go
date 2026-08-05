@@ -1124,6 +1124,10 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		OverviewTypes: typeSet.OverviewTypes(),
 		MaxNodes:      cfg.GraphOverview.MaxNodes,
 		ScopeFilter:   bt.owned,
+		// W3: the tombstone re-attach probe runs inside the persist tx, i.e.
+		// in the worker CHILD — the window has to cross the boundary. The
+		// purge that consumes the same key stays in the parent (W8).
+		TombstoneRetention: cfg.GraphOverview.TombstoneRetention,
 	})
 	if err != nil {
 		// W-A: distinguish the two failure shapes the map has to tell apart.
