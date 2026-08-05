@@ -1038,7 +1038,10 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 	// W3, K5 order: the predecessor snapshot has to be taken BEFORE the
 	// teardown — graph_cluster_member is the only record of the old block→
 	// topic assignment and the teardown deletes it.
-	phase := topicPhase{scoped: scoped, scopeFilter: opts.ScopeFilter, tombstone: opts.TombstoneRetention}
+	phase := topicPhase{
+		scoped: scoped, scopeFilter: opts.ScopeFilter,
+		tombstone: opts.TombstoneRetention, members: len(cl.blockToCluster),
+	}
 	if err := phase.snapshotPrevTopics(ctx, tx); err != nil {
 		return Stats{}, err
 	}

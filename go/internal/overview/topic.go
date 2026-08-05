@@ -237,6 +237,9 @@ type topicPhase struct {
 	scoped      bool
 	scopeFilter []string
 	tombstone   time.Duration
+	// members is this run's member count — the size signal the ANALYZE floor
+	// reads (see analyzeFloor).
+	members int
 }
 
 // exec runs the global or the scoped variant of a statement. The scope filter
@@ -265,22 +268,42 @@ func execPlain(ctx context.Context, tx pgx.Tx, label, sql string, args ...any) (
 	return tag.RowsAffected(), nil
 }
 
+// analyzeFloor is the member count below which the identity phase does NOT
+// collect temp-table statistics.
+//
+// A declared resource threshold, and a MEASURED one (W3-G11, 2026-08-05, same
+// host, same image, 50 clusters):
+//
+//	20.000 members   ANALYZE costs ~150 ms of a ~480 ms transaction  (+31 %)
+//	200.000 members  ANALYZE costs ~ 80 ms of a ~4.84 s transaction  (+1.6 %)
+//
+// The cost is roughly CONSTANT — ANALYZE samples a fixed number of rows once
+// the table exceeds the sample size — so it is a rounding error at the target
+// scale and a third of the transaction at the live one. The benefit could not
+// be measured at either size in this fixture; the argument for it is the
+// asymmetry, not a measured speed-up: below the floor a misestimate cannot
+// choose an expensive enough plan to matter, above it one can, and there the
+// statistics are nearly free. Spending a third of the lock hold time on a run
+// whose plan cannot go wrong is the trade this floor refuses.
+const analyzeFloor = 50000
+
 // analyze collects statistics on a freshly filled temp table.
 //
 // Autovacuum NEVER touches temp tables — they live in the session's own
 // namespace and the autovacuum worker cannot see them. Without an explicit
-// ANALYZE the planner works from its hardcoded default (a few hundred rows) for
-// EVERY one of them, no matter whether the run holds 60 clusters or 200.000
-// members. At the live corpus that guesses right by accident; at the target
-// scale it picks nested loops over hash joins inside the advisory lock, which
-// is the one place in this system where a bad plan is measured in lock hold
-// time. The cost is a sampling pass over a table that is already in
-// temp_buffers.
+// ANALYZE the planner works from its hardcoded default for EVERY one of them,
+// no matter whether the run holds 60 clusters or 200.000 members; at the target
+// scale that can pick nested loops over hash joins inside the advisory lock,
+// which is the one place in this system where a bad plan is paid for in lock
+// hold time.
 //
 // A failure here is NOT fatal: statistics are an optimisation, and a rebuild
 // that dies because it could not collect them would trade a slow map for no
 // map. It is logged and the run continues.
-func analyze(ctx context.Context, tx pgx.Tx, table string) {
+func (p topicPhase) analyze(ctx context.Context, tx pgx.Tx, table string) {
+	if p.members < analyzeFloor {
+		return
+	}
 	if _, err := tx.Exec(ctx, "ANALYZE "+table); err != nil {
 		slog.Warn("overview: could not analyze identity temp table — the planner keeps its default estimate",
 			"table", table, "error", err)
@@ -331,7 +354,7 @@ func (p topicPhase) snapshotPrevTopics(ctx context.Context, tx pgx.Tx) error {
 	if _, err := p.exec(ctx, tx, "predecessor snapshot", prevSnapshotGlobalSQL, prevSnapshotScopedSQL); err != nil {
 		return err
 	}
-	analyze(ctx, tx, "ov_prev")
+	p.analyze(ctx, tx, "ov_prev")
 	return nil
 }
 
@@ -522,7 +545,7 @@ func (p topicPhase) matchCarry(ctx context.Context, tx pgx.Tx) error {
 	if _, err := p.exec(ctx, tx, "overlap", overlapGlobalSQL, overlapScopedSQL); err != nil {
 		return err
 	}
-	analyze(ctx, tx, "ov_overlap")
+	p.analyze(ctx, tx, "ov_overlap")
 	for _, s := range []struct{ label, sql string }{
 		{"argmax per cluster", bestClusterSQL},
 		{"argmax per topic", bestTopicSQL},
@@ -534,7 +557,7 @@ func (p topicPhase) matchCarry(ctx context.Context, tx pgx.Tx) error {
 	if _, err := execPlain(ctx, tx, "carry candidates", carrySQL); err != nil {
 		return err
 	}
-	analyze(ctx, tx, "ov_carry")
+	p.analyze(ctx, tx, "ov_carry")
 	_, err := p.exec(ctx, tx, "run scopes", runScopesGlobalSQL, runScopesScopedSQL)
 	return err
 }
@@ -724,7 +747,7 @@ func (p topicPhase) probeTombstones(ctx context.Context, tx pgx.Tx) error {
 	if _, err := execPlain(ctx, tx, "tombstone cores", tombExpandSQL, p.tombstone.Seconds()); err != nil {
 		return err
 	}
-	analyze(ctx, tx, "ov_tomb")
+	p.analyze(ctx, tx, "ov_tomb")
 	for _, s := range []struct{ label, sql string }{
 		{"tombstone overlap", tombOverlapSQL},
 		{"tombstone argmax per cluster", tombBestClusterSQL},
@@ -742,7 +765,7 @@ func (p topicPhase) probeTombstones(ctx context.Context, tx pgx.Tx) error {
 // resolve turns the two candidate sets into THE assignment: tombstones first
 // (they only ever take a cluster under the two conditions of tombWinsSQL),
 // carries for everything left, then the revival of whatever tombstone won.
-func resolve(ctx context.Context, tx pgx.Tx, st *topicStats) error {
+func (p topicPhase) resolve(ctx context.Context, tx pgx.Tx, st *topicStats) error {
 	reattached, err := execPlain(ctx, tx, "tombstone precedence", tombWinsSQL)
 	if err != nil {
 		return err
@@ -753,7 +776,7 @@ func resolve(ctx context.Context, tx pgx.Tx, st *topicStats) error {
 		return err
 	}
 	st.carried = int(carried)
-	analyze(ctx, tx, "ov_match")
+	p.analyze(ctx, tx, "ov_match")
 	_, err = execPlain(ctx, tx, "revive", reviveSQL)
 	return err
 }
@@ -881,7 +904,7 @@ func (p topicPhase) mintAndRetire(ctx context.Context, tx pgx.Tx, st *topicStats
 	if _, err := p.exec(ctx, tx, "unmatched clusters", unmatchedGlobalSQL, unmatchedScopedSQL); err != nil {
 		return err
 	}
-	analyze(ctx, tx, "ov_unmatched")
+	p.analyze(ctx, tx, "ov_unmatched")
 	minted, err := execPlain(ctx, tx, "birth/split", mintTemplate)
 	if err != nil {
 		return err
@@ -992,7 +1015,7 @@ func assignTopics(ctx context.Context, tx pgx.Tx, p topicPhase, cores coreArrays
 	if err := p.probeTombstones(ctx, tx); err != nil {
 		return st, err
 	}
-	if err := resolve(ctx, tx, &st); err != nil {
+	if err := p.resolve(ctx, tx, &st); err != nil {
 		return st, err
 	}
 	if err := p.mintAndRetire(ctx, tx, &st); err != nil {
