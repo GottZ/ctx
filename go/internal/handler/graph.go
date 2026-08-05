@@ -171,8 +171,31 @@ type egoParamsEcho struct {
 // SCOPE-PURE size summed over all partitions of this cluster the caller may see
 // — never a single graph_cluster_node row's size, which would be a count leak
 // over foreign partitions (§5.6).
+//
+// Topic/Label/Topics are the C5 identity (Masterplan K2 / A03-2). Cluster stays
+// the ordinal cluster_of points at — the handle JOINS it, it does not replace
+// it: ordinals are response-local and free, handles are stable and therefore
+// only worth their bytes where a client actually keeps them.
 type egoClusterWire struct {
-	Cluster       int      `json:"cluster"` // per-request ordinal (NOT cluster_id)
+	Cluster int `json:"cluster"` // per-request ordinal (NOT cluster_id)
+	// Topic is the STABLE handle of this cluster's largest visible partition
+	// (design/03 §5.1: a v4 uuid from graph_cluster_topic — never cluster_id,
+	// which is the smallest member UUID and therefore an existence AND time
+	// oracle on invisible blocks). Absent while the identity layer has not
+	// reached this cluster, which is a normal mid-rollout state, not an error.
+	Topic string `json:"topic,omitempty"`
+	// Label is the primary partition's name; absent when unlabelled. The label
+	// PROVENANCE stays off this wire and lives on GET /api/graph/cluster (E4-02).
+	Label string `json:"label,omitempty"`
+	// Topics carries ALL visible partition handles, primary first — present ONLY
+	// when there is more than one (K2: a handle is scope-bound, so a cluster
+	// spanning two visible scopes has two of them, while the entry itself stays
+	// one because cluster_of indexes clusters, not partitions). Omitted in the
+	// single-partition case rather than repeating Topic: at 1500 nodes an
+	// always-present one-element array is dead wire weight, the same argument the
+	// edge tuples already carry (§6.5). Live shape today: never present (no
+	// cluster spans scopes).
+	Topics        []string `json:"topics,omitempty"`
 	Size          int      `json:"size"`
 	TopCategories []string `json:"top_categories"`
 	ScopeMix      []string `json:"scope_mix"`
@@ -439,8 +462,22 @@ func egoClusterProjection(nodes []store.GraphNode, ann *store.ClusterAnnotationR
 		if mix == nil {
 			mix = []string{}
 		}
+		// C5: element 0 is the primary handle (largest visible partition, store
+		// side). The full list rides along only when it says something the
+		// primary does not — i.e. when the cluster really spans partitions.
+		var primary string
+		var all []string
+		if len(c.Topics) > 0 {
+			primary = c.Topics[0]
+			if len(c.Topics) > 1 {
+				all = c.Topics
+			}
+		}
 		clusters[i] = egoClusterWire{
 			Cluster:       i,
+			Topic:         primary,
+			Label:         c.Label,
+			Topics:        all,
 			Size:          c.Size,
 			TopCategories: cats,
 			ScopeMix:      mix,

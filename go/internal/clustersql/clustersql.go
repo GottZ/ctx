@@ -70,8 +70,9 @@ func NodeVisible(alias, scopeParam string) string {
 //	$1 — cluster ids  (uuid[])
 //	$2 — read scopes  (text[])
 //
-// It returns, per cluster, the scope-pure summed size and the contributing
-// scopes. NO HAVING, NO LIMIT — deliberately: both consumers pass a bounded,
+// It returns, per cluster, the scope-pure summed size, the contributing scopes
+// and — since C5 — the STABLE HANDLES of those partitions plus the primary
+// label. NO HAVING, NO LIMIT — deliberately: both consumers pass a bounded,
 // already-known cluster set, and a limit there would silently drop entries a
 // caller is holding an index into (design/03 §4.2: "Trunkierung ist auf diesem
 // Pfad ein Fehler, kein Flag").
@@ -80,11 +81,45 @@ func NodeVisible(alias, scopeParam string) string {
 // rrf at all (rrf cannot import store) — and that reachability is precisely why
 // §4.5's size damping can bind the SAME definition the wire size uses instead of
 // growing a second one that drifts.
+//
+// THE HANDLE JOIN (C5, Masterplan K2 / Amendment A03-2). A handle is SCOPE-BOUND
+// — "ein Handle = ein scope-reines Thema" — while this aggregate is keyed by
+// CLUSTER, because the ego wire indexes blocks by cluster ordinal. A cluster
+// spanning two visible scopes is therefore ONE row carrying TWO handles, ordered
+// by visible partition size DESC (tiebreak topic_id asc, so the order is total
+// and deterministic). The consumer reads element 0 as the primary — "primär =
+// größte sichtbare size". Ordering by topic_id instead would make the primary an
+// accident of uuid generation; that substitution is the gate's red probe.
+//
+// It is a LEFT JOIN, and it carries `t.scope = n.scope`, for two different
+// fail-closed reasons that must not be conflated:
+//
+//   - LEFT, because a partition without an identity is a NORMAL state (pre-W3
+//     rows, and the mid-rollout window while the rebuild serves one tenant per
+//     tick at a 6 h cadence). An inner join would silently drop such a cluster
+//     from the annotation — and with it the size the wire needs — turning a
+//     missing label into missing DATA;
+//   - `t.scope = n.scope`, because it is the B1b closure: redundant to a correct
+//     assignment and standing there precisely for that reason. A topic that ever
+//     ended up on a foreign-scope node row degrades to "no handle" instead of
+//     serving another scope's LLM-written label to this caller (design/01 §5.3,
+//     risk R1). This is the line the C5 scope gate removes to go red.
+//
+// FILTER (WHERE t.topic_id IS NOT NULL) keeps the unresolved rows out of the
+// arrays without dropping them out of the aggregate, and COALESCE renders "no
+// handle" as an EMPTY array rather than NULL — one shape for "not identified
+// yet", never a nil the caller has to special-case.
 var VisibleSizeQuery = `
 	SELECT n.cluster_id::text,
 	       sum(n.size)::int,
-	       array_agg(DISTINCT n.scope ORDER BY n.scope)
+	       array_agg(DISTINCT n.scope ORDER BY n.scope),
+	       COALESCE(array_agg(t.topic_id::text ORDER BY n.size DESC, t.topic_id)
+	                FILTER (WHERE t.topic_id IS NOT NULL), '{}'::text[]),
+	       COALESCE((array_agg(t.label ORDER BY n.size DESC, t.topic_id)
+	                 FILTER (WHERE t.topic_id IS NOT NULL))[1], '')
 	FROM graph_cluster_node n
+	LEFT JOIN graph_cluster_topic t
+	       ON t.topic_id = n.topic_id AND t.scope = n.scope
 	WHERE n.cluster_id = ANY($1::uuid[])
 	  AND ` + NodeVisible("n", "$2") + `
 	GROUP BY n.cluster_id`

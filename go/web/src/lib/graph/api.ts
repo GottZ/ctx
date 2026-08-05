@@ -27,8 +27,9 @@ export interface EgoResponse {
    *  RESPONSE-LOCAL ordinal, never a stable id — cluster_of[] indexes into this
    *  array. Empty whenever cluster.ego_annotate is off (the default), the
    *  annotation ceiling tripped, or the probe failed: one shape for "no cluster
-   *  information", so the client never branches on the reason. A stable handle
-   *  + label arrive with C5. Absent on old servers. */
+   *  information", so the client never branches on the reason. Since C5 each
+   *  entry also carries the stable `topic` handle + `label`. Absent on old
+   *  servers. */
   clusters?: EgoCluster[]
   /** Positionally parallel to nodes: cluster_of[i] indexes clusters[], or -1 for
    *  "no visible membership" (unclustered, grant-only, or newer than the last
@@ -51,6 +52,19 @@ export interface EgoResponse {
  *  count. in_response is how many of THIS response's nodes sit in it. */
 export interface EgoCluster {
   cluster: number
+  /** Stable handle of this cluster's LARGEST visible partition (C5) — a v4
+   *  uuid from the identity table, never the internal cluster_id. Absent while
+   *  the identity layer has not reached this cluster (a normal mid-rollout
+   *  state) and on old servers. Unlike `cluster` it survives rebuilds, so it is
+   *  the only value worth persisting on the client. */
+  topic?: string
+  /** The primary partition's name; absent when unlabelled. */
+  label?: string
+  /** ALL visible partition handles, primary first — present ONLY when the
+   *  cluster spans more than one visible scope (a handle is scope-bound, so
+   *  such a cluster has several). Single-partition clusters carry `topic`
+   *  alone. */
+  topics?: string[]
   size: number
   top_categories: string[]
   scope_mix: string[]

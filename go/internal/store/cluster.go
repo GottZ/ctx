@@ -70,6 +70,24 @@ type ClusterAnnotationEntry struct {
 	TopCategories []string // merged category_counts of those partitions, top 3
 	ScopeMix      []string // the visible partitions of this cluster ⊆ readScopes
 	InResponse    int      // how many of the passed blocks sit in this cluster
+	// Topics are the STABLE handles of this cluster's visible partitions (C5),
+	// ordered by partition size desc — element 0 is the primary. A handle is
+	// scope-bound by construction (Masterplan K2 / A03-2: "ein Handle = ein
+	// scope-reines Thema"), while this entry is keyed by CLUSTER, so a cluster
+	// spanning two visible scopes carries two handles here and the caller learns
+	// which one names the bigger half without a second query.
+	//
+	// EMPTY is a normal state, never an error: a partition the identity layer has
+	// not reached yet (pre-W3, or the mid-rollout window) simply has no handle,
+	// and the entry keeps its size and categories. Unlike cluster_id these values
+	// are emittable — gen_random_uuid v4, no block reference, no timestamp
+	// component (§5.1).
+	Topics []string
+	// Label is the PRIMARY partition's label, "" when unlabelled or unidentified.
+	// It accompanies the map's other captions rather than replacing anything
+	// (E6-01); the label PROVENANCE (label_source/label_model) deliberately stays
+	// off this path and lives on the C7 detail route only (E4-02).
+	Label string
 }
 
 // ClusterAnnotationResult is the scope-pure cluster projection of a node set.
@@ -119,15 +137,22 @@ func ClusterAnnotation(ctx context.Context, pool *pgxpool.Pool, blockIDs, readSc
 	}
 	sort.Strings(clusterIDs) // deterministic parameter order, deterministic plan
 
-	nodes, err := clusterVisibleSizes(ctx, pool, clusterIDs, readScopes)
+	aggs, err := clusterVisibleSizes(ctx, pool, clusterIDs, readScopes)
 	if err != nil {
 		return nil, fmt.Errorf("store: cluster annotation sizes: %w", err)
 	}
-	if len(nodes) > len(clusterIDs) {
-		return nil, fmt.Errorf("store: cluster annotation returned %d clusters for %d probed ids", len(nodes), len(clusterIDs))
+	if len(aggs) > len(clusterIDs) {
+		return nil, fmt.Errorf("store: cluster annotation returned %d clusters for %d probed ids", len(aggs), len(clusterIDs))
 	}
-	if len(nodes) == 0 {
+	if len(aggs) == 0 {
 		return empty, nil
+	}
+	// fillTopCategories works on OverviewNode values and keys them by cluster
+	// (byCluster=true), so the aggregate rows are projected onto that shape for
+	// the one call instead of teaching the shared filler a second row type.
+	nodes := make([]OverviewNode, len(aggs))
+	for i := range aggs {
+		nodes[i] = OverviewNode{ClusterID: aggs[i].ClusterID, Size: aggs[i].Size, ScopeMix: aggs[i].ScopeMix}
 	}
 	// fillTopCategories is REUSED verbatim from the landkarte read path: one
 	// definition of "the visible categories of a cluster", so ego annotation and
@@ -139,14 +164,16 @@ func ClusterAnnotation(ctx context.Context, pool *pgxpool.Pool, blockIDs, readSc
 		return nil, fmt.Errorf("store: cluster annotation categories: %w", err)
 	}
 
-	out := make([]ClusterAnnotationEntry, len(nodes))
-	for i, n := range nodes {
+	out := make([]ClusterAnnotationEntry, len(aggs))
+	for i, a := range aggs {
 		out[i] = ClusterAnnotationEntry{
-			ClusterID:     n.ClusterID,
-			Size:          n.Size,
-			TopCategories: n.TopCategories,
-			ScopeMix:      n.ScopeMix,
-			InResponse:    inResponse[n.ClusterID],
+			ClusterID:     a.ClusterID,
+			Size:          a.Size,
+			TopCategories: nodes[i].TopCategories,
+			ScopeMix:      a.ScopeMix,
+			InResponse:    inResponse[a.ClusterID],
+			Topics:        a.Topics,
+			Label:         a.Label,
 		}
 	}
 	// Order = descending hit count in the delivered node set, tiebreak cluster_id
@@ -160,24 +187,38 @@ func ClusterAnnotation(ctx context.Context, pool *pgxpool.Pool, blockIDs, readSc
 	return &ClusterAnnotationResult{Clusters: out, MemberOf: memberOf}, nil
 }
 
+// clusterVisibleAgg is one row of clustersql.VisibleSizeQuery: a CLUSTER with
+// its scope-pure size, its visible partitions and (C5) their stable handles.
+// Deliberately its own type rather than OverviewNode: an OverviewNode is one
+// MAP node — on the identity path exactly one (cluster, scope) partition with
+// exactly one topic — while this row aggregates over partitions and can carry
+// several handles. Reusing the map type here would have made "TopicID" mean two
+// different things in one package.
+type clusterVisibleAgg struct {
+	ClusterID string
+	Size      int
+	ScopeMix  []string
+	Topics    []string
+	Label     string
+}
+
 // clusterVisibleSizes runs clustersql.VisibleSizeQuery — THE shared definition
-// of scope-pure cluster size (§5.6). It returns OverviewNode values so
-// fillTopCategories consumes them unchanged; ReprID/ReprTitle stay empty, the
-// ego annotation carries no representative on the wire.
-func clusterVisibleSizes(ctx context.Context, pool *pgxpool.Pool, clusterIDs, readScopes []string) ([]OverviewNode, error) {
+// of scope-pure cluster size (§5.6) and, since C5, of the handles that name its
+// visible partitions.
+func clusterVisibleSizes(ctx context.Context, pool *pgxpool.Pool, clusterIDs, readScopes []string) ([]clusterVisibleAgg, error) {
 	rows, err := pool.Query(ctx, clustersql.VisibleSizeQuery, clusterIDs, readScopes)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	out := make([]OverviewNode, 0, len(clusterIDs))
+	out := make([]clusterVisibleAgg, 0, len(clusterIDs))
 	for rows.Next() {
-		var n OverviewNode
-		if err := rows.Scan(&n.ClusterID, &n.Size, &n.ScopeMix); err != nil {
+		var a clusterVisibleAgg
+		if err := rows.Scan(&a.ClusterID, &a.Size, &a.ScopeMix, &a.Topics, &a.Label); err != nil {
 			return nil, err
 		}
-		out = append(out, n)
+		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
