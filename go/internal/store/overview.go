@@ -201,7 +201,12 @@ func fillTopCategories(ctx context.Context, pool *pgxpool.Pool, nodes []Overview
 // endpoint rule). Restricted to the returned clusters so every edge maps to a
 // node ordinal.
 func overviewEdges(ctx context.Context, pool *pgxpool.Pool, p OverviewParams, readScopes, clusterIDs []string) ([]OverviewEdge, bool, error) {
-	if len(clusterIDs) == 0 {
+	// EdgeLimit <= 0 short-circuits WITHOUT touching graph_cluster_edge (W-B):
+	// the root map renders cluster lines only, and asking for zero edges should
+	// cost zero queries. Unreachable from GET /api/graph/overview — its parser
+	// enforces edge_limit >= 1 (handler/overview.go) — so the wire envelope and
+	// its golden test are untouched by this branch.
+	if len(clusterIDs) == 0 || p.EdgeLimit <= 0 {
 		return nil, false, nil
 	}
 	rows, err := pool.Query(ctx, `
