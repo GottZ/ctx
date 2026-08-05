@@ -183,6 +183,17 @@ func Run(ctx context.Context, g *Graph, opts Options) (Result, error) {
 				"louvain: sigma drift %.3e exceeds %.0e·M2 at level %d — incremental sigma is not holding",
 				lvl.drift, sigmaDriftTol, level)
 		}
+		// S5: Refinement VOR dem Durchziehen des Mappings und vor der
+		// Reduktion — die Reduktion soll auf den zusammenhängenden Teilmengen
+		// arbeiten, nicht auf den zerfallenen Communities. Dadurch ist jede
+		// Ebene aus zusammenhängenden Einheiten aufgebaut, und weil eine
+		// Community der Ebene L+1 eine im reduzierten Graphen ZUSAMMENHÄNGENDE
+		// Menge von Ebene-L-Einheiten ist, überträgt sich die Garantie bis in
+		// die ausgelieferte Partition.
+		if opts.Refine {
+			refined, refinedCount := splitDisconnected(cur, lvl.memb)
+			lvl.memb, lvl.clusters = refined, refinedCount
+		}
 		// Mapping durchziehen, BEVOR über den Abbruch entschieden wird: auch
 		// die letzte Ebene hat gültige Zuordnungen.
 		for i := range mapping {
