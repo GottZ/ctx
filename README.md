@@ -10,7 +10,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/how-ctx-works-dark.svg">
-    <img alt="How ctx works — four access paths into one Go daemon; the store pipeline with time-anchor extraction, embedding and Guard dedup; the query pipeline with temporal parsing, 4-way RRF fusion, temporal gravity, graph expansion and LLM synthesis; and the autonomous Dream Mode loop that cross-links the corpus" src="docs/how-ctx-works.svg" width="100%">
+    <img alt="How ctx works — four access paths into one Go daemon; the store pipeline with time-anchor extraction, embedding and Guard dedup; the query pipeline with temporal parsing, 4-way RRF fusion, temporal gravity, cluster-topic boost, graph expansion and LLM synthesis; the topic-map layer that folds the corpus into named, stable topics feeding a root map into the digest; and the autonomous Dream Mode loop that cross-links the corpus" src="docs/how-ctx-works.svg" width="100%">
   </picture>
 </p>
 
