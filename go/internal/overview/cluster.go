@@ -330,6 +330,18 @@ type Options struct {
 	// Refine schaltet die Leiden-Refinement-Phase (S5). Nur bei engine=ctx
 	// wirksam — gonum hat keine.
 	Refine bool
+
+	// WorkerMemLimit ist das Kind-Speicherbudget in Bytes (S7b). 0 = aus.
+	//
+	// Es reist auf DIESEM Weg mit, obwohl das Kind seinen eigenen Heap bereits
+	// über die Umgebung deckelt (membudget.go): die VORAB-Abschätzung läuft im
+	// Rebuild selbst, und Rebuild wird auch IN-PROCESS aufgerufen (der
+	// Fallback-Pfad, wenn kein Worker-argv verdrahtet ist). Dort gibt es keine
+	// Kind-Umgebung, die etwas tragen könnte.
+	//
+	// Es ist KEIN neues IPC-Fenster über das aus S6+S7 hinaus: das Feld reist
+	// im selben Options-Dokument, und die Welle liegt im selben Deploy.
+	WorkerMemLimit int64
 }
 
 // lockKeyForScopes returns the advisory lock key for one persist run (B-W4).
@@ -528,10 +540,8 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	// ist dann das Zeitbudget. Er bleibt trotzdem stehen: ein Guard ohne Zahl
 	// ist kein Guard, und dieser zieht VOR dem Kantenladen und kostet nichts.
 	effMaxNodes := EffectiveMaxNodes(engine, opts.MaxNodes, opts.MaxNodesCtx)
-	if effMaxNodes > 0 && len(nodeUUIDs) > effMaxNodes {
-		slog.Warn("overview: rebuild skipped — node count exceeds cap",
-			"nodes", len(nodeUUIDs), "max_nodes_eff", effMaxNodes, "engine", engine)
-		return Stats{Skipped: true, SkipReason: "node-cap", CandidateCount: candidates, MaxNodesEff: effMaxNodes}, nil
+	if reason := preflightGuards(len(nodeUUIDs), effMaxNodes, engine, opts.WorkerMemLimit); reason != "" {
+		return Stats{Skipped: true, SkipReason: reason, CandidateCount: candidates, MaxNodesEff: effMaxNodes}, nil
 	}
 	var edges []rawEdge
 	if !useCSR {
@@ -613,6 +623,46 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	// der S1-Bench im ersten Anlauf hatte.
 	stats.PeakRSSKb = ReadVmHWMkB()
 	return stats, nil
+}
+
+// preflightGuards fasst die beiden Vorab-Deckel zusammen, die VOR dem
+// Kantenladen ziehen. Sie liefert den skip_reason oder "" fuer "weiter".
+//
+// Als eigene Funktion, nicht als Kaskade in Rebuild: Rebuild traegt bereits
+// Engine-Wahl, Ladepfad-Wahl, leeren Schnitt, Meta-Ebene und persist, und die
+// beiden Guards sind die einzige Stelle darin mit einer eigenen,
+// abgeschlossenen Entscheidungslogik. (Der cyclop-Deckel des Projekts hat es
+// erzwungen — die Trennung ist trotzdem die richtige.)
+//
+// REIHENFOLGE IST LOAD-BEARING: das Speicherbudget zieht VOR dem Knoten-Cap.
+// Beide verhindern denselben Schaden, aber das Budget ist die praezisere
+// Aussage ("dieser Korpus passt nicht in diesen Container"), waehrend der Cap
+// eine Zahl ist, die jemand einmal gewaehlt hat. Wer zuerst prueft, bestimmt
+// den gemeldeten Grund — und 'mem-budget' ist die handlungsleitendere Antwort.
+func preflightGuards(nodes, effMaxNodes int, engine string, memBudget int64) string {
+	// S7b (SP-8): die Abschaetzung laeuft, bevor eine einzige Kante geladen
+	// wird. Ein Speicher-Check NACH dem Laden kaeme zu spaet — das Laden IST
+	// der teure Teil. Die Kantenzahl ist hier noch unbekannt und wird aus der
+	// Auslegungsdichte geschaetzt (10 Paare/Knoten, K2 aus §6.1) — bewusst die
+	// OBERE der beiden Annahmen: eine Schaetzung, die zu niedrig liegt, laesst
+	// den Lauf in genau das OOM laufen, das sie verhindern soll.
+	if memBudget > 0 {
+		if want := EstimateRebuildBytes(nodes, nodes*10); want > memBudget {
+			slog.Warn("overview: rebuild skipped — the estimated peak exceeds the worker memory budget",
+				"nodes", nodes, "estimated_bytes", want, "worker_mem_limit", memBudget)
+			return "mem-budget"
+		}
+	}
+	// UD-07-04: die ENGINE waehlt den Key. Bei engine=ctx ist der Cap nur noch
+	// das Not-Aus gegen eine absurde Eingabe — tragender Guard ist dann das
+	// Zeitbudget. Er bleibt trotzdem stehen: ein Guard ohne Zahl ist kein
+	// Guard, und dieser kostet nichts.
+	if effMaxNodes > 0 && nodes > effMaxNodes {
+		slog.Warn("overview: rebuild skipped — node count exceeds cap",
+			"nodes", nodes, "max_nodes_eff", effMaxNodes, "engine", engine)
+		return "node-cap"
+	}
+	return ""
 }
 
 // clusterWithCtx runs computeClustering in its own goroutine so a ctx

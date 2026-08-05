@@ -51,6 +51,29 @@ func dispatchOverviewWorkerMode() {
 			slog.Warn("overview-worker: OS deprioritization incomplete — continuing at current priority",
 				"nice_error", niceErr, "ioprio_error", ioErr)
 		}
+		// S7b (Achse 04, SP-8): das Kind macht sich zum bevorzugten OOM-Opfer
+		// und deckelt seinen eigenen Heap.
+		//
+		// Beides HIER, am Prozess-Eintritt, und nicht in runOverviewWorker:
+		// die In-Process-Unit-Tests rufen jene Funktion direkt auf und dürfen
+		// weder das Testbinary deckeln noch es zum OOM-Opfer erklären —
+		// dieselbe Grenze, die deprioritizeSelf schon zieht.
+		//
+		// Die Reihenfolge ist load-bearing: oom_score_adj VOR dem
+		// Speicherlimit. Reisst die cgroup, WÄHREND das Limit gesetzt wird,
+		// soll der Kill bereits das Kind treffen und nicht den Daemon.
+		if err := preferSelfForOOMKill(); err != nil {
+			slog.Warn("overview-worker: oom_score_adj not writable — a cgroup OOM may hit the daemon instead of this child",
+				"error", err)
+		}
+		limit, err := overview.WorkerMemLimitBytes()
+		if err != nil {
+			slog.Warn("overview-worker: memory budget ignored", "error", err)
+		}
+		if limit > 0 {
+			overview.ApplyWorkerMemLimit(limit)
+			slog.Info("overview-worker: self memory limit applied", "limit_bytes", limit)
+		}
 		os.Exit(runOverviewWorker(os.Stdin, os.Stdout, os.Stderr))
 	}
 }

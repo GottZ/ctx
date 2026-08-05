@@ -287,6 +287,19 @@ The engine also decides **which cap key applies** — `graph_overview.max_nodes`
 
 The freeze reports the **existing** `skip_reason = 'timeout'` rather than a new value, so no migration is needed; the run journal carries the finer distinction. And a frozen run touches no identity: no topic is retired, renamed or relabelled.
 
+### The child memory budget: `graph_overview.worker_mem_limit`
+
+`CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT` (bytes, default **0 = off**, hot) caps the rebuild child's Go heap and adds a pre-flight estimate that turns "out of memory" into a clean skip with a journal row.
+
+**The default is off on purpose, and it deviates from the design.** The design proposed 160 MiB; that figure predates the measurement. The current compute path peaks at ~423 MB at the 200 000-node cap, so a 160 MiB ceiling would abort every run at today's cap — a memory guard would become a memory ban and the map would freeze permanently. Pick the value against `peak_rss_kb` in `graph_overview_run`, which exists for exactly this; ~60 % of the container limit is a reasonable starting point *after* you have seen your own numbers.
+
+Two things happen regardless of the setting, because they cost nothing and only help:
+
+- The child raises its own `oom_score_adj` to the maximum. The memory limit belongs to the **cgroup**, not to a process, and parent and child share it — without this the kernel may pick the daemon (which holds the graph cache over the whole corpus) as the OOM victim. The rebuild is the disposable work; the server is not.
+- The child renices itself and drops to the idle I/O class, as before.
+
+The pre-flight estimate runs **before any edge is loaded** — checking after the load would be checking after the expensive part — and it deliberately assumes the denser of the two design scenarios. An estimate that reads low would let the run walk into exactly the OOM it exists to prevent.
+
 `computed_at` becomes nullable **and loses its `DEFAULT now()`** (from migration 057). A partition that has never built successfully but already has an attempt behind it — a fresh deploy above the node cap — needs a row without a success timestamp; with the default in place a skip upsert that does not name the column would silently claim freshness. The read path is unaffected: `max(computed_at)` ignores NULL, so "never built" stays the zero timestamp and the `stats.computed_at` wire field stays `null` exactly as before.
 
 Deploy notes, same shape as 116: the file carries `SET LOCAL lock_timeout = '3s'`, so it aborts with `55P03` rather than queueing behind a long-running persist transaction (a 400k-node rebuild measures ~465 s); every statement is idempotent, so the next boot simply re-runs it. Existing rows are backfilled with `last_attempt_at = computed_at` and `candidate_n = node_n` — historically correct, because only a successful run could have written them. No new table, no index.

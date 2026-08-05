@@ -383,6 +383,22 @@ type GraphOverviewConfig struct {
 	// (UD-04-04): a disconnected community is a bad topic and a bad
 	// core_blocks core, so the quality of axes 01 and 03 depends on it.
 	Refine bool `key:"graph_overview.refine" env:"CTX_GRAPH_OVERVIEW_REFINE" default:"true" mut:"hot" tenancy:"global-only"`
+	// WorkerMemLimit caps the rebuild CHILD's Go heap, in bytes (S7b). 0 = off.
+	//
+	// DEFAULT IS OFF, and that deviates from design/04 §3.4 on purpose. The
+	// design proposed 160 MiB — a figure that predates the S1 measurement.
+	// The current compute path peaks at ~423 MB at the 200k node cap, so a
+	// 160 MiB ceiling would abort EVERY run at today's cap: a memory guard
+	// would become a memory ban and the map would freeze permanently.
+	//
+	// Pick the value against `peak_rss_kb` in the run journal, which exists
+	// for exactly this. UD-02-04 suggests ~60 % of the container limit as a
+	// starting point once the compute path has been measured on your corpus.
+	//
+	// The child ALSO reads this through the inherited environment
+	// (overview.WorkerMemLimitEnv) to limit its own heap before it has any
+	// options — a runtime knob has to be available before the protocol is.
+	WorkerMemLimit int `key:"graph_overview.worker_mem_limit" env:"CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT" default:"0" mut:"hot" tenancy:"global-only"`
 
 	// ── W6: the LLM label pipeline (design/01 §3.5/§4.8, Amendments A01-3/A01-4) ──
 	//

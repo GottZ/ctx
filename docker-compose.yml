@@ -189,6 +189,15 @@ services:
       CTX_GRAPH_OVERVIEW_CSR_LOADER: ${CTX_GRAPH_OVERVIEW_CSR_LOADER:-false}
       CTX_GRAPH_OVERVIEW_REFINE: ${CTX_GRAPH_OVERVIEW_REFINE:-true}
       CTX_GRAPH_OVERVIEW_RUN_RETENTION: ${CTX_GRAPH_OVERVIEW_RUN_RETENTION:-7776000}
+      # WORKER_MEM_LIMIT deckelt den Heap des Rebuild-KINDES (Bytes, 0 = aus).
+      # Default aus, und das ist Absicht: der heutige Rechenpfad hat am
+      # 200k-Cap eine gemessene Spitze von ~423 MB — ein zu klein gewaehltes
+      # Limit macht aus einem Speicher-SCHUTZ ein Speicher-VERBOT und friert
+      # die Karte dauerhaft ein. Wert gegen peak_rss_kb aus graph_overview_run
+      # waehlen; UD-02-04 nennt ~60 % des Container-Limits als Startpunkt.
+      # Das Kind liest die Variable AUCH direkt aus der geerbten Umgebung, um
+      # sich zu deckeln, bevor es Optionen hat.
+      CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT: ${CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT:-0}
       # Cluster consumption (Achse 03, wave C0): turns the Louvain clusters from
       # an output-only endpoint into a retrieval signal, a graph citizen and a
       # facet. The whole surface ships DARK — every gate below is false/0 and
