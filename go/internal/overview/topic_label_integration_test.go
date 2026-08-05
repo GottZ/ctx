@@ -109,7 +109,7 @@ func w5PersistErr(pool *pgxpool.Pool, scope string, retention time.Duration, gro
 	_, err := persist(context.Background(), pool,
 		clustering{blockToCluster: assign, intraDegree: deg, clusterCount: len(groups)},
 		Options{Resolution: 1.0, VisibleTypes: w3Types, ScopeFilter: []string{scope}, TombstoneRetention: retention},
-		scopes, tallyScopes(scopes))
+		scopes, tallyScopes(scopes), superLevel{})
 	return err
 }
 
@@ -528,7 +528,7 @@ func TestW5FallbackLabelGlobalRun(t *testing.T) {
 	if _, err := persist(context.Background(), pool,
 		clustering{blockToCluster: assign, intraDegree: deg, clusterCount: 1},
 		Options{Resolution: 1.0, VisibleTypes: w3Types},
-		scopes, tallyScopes(scopes)); err != nil {
+		scopes, tallyScopes(scopes), superLevel{}); err != nil {
 		t.Fatalf("global persist: %v", err)
 	}
 	if got := w5LabelOf(t, pool, scope, ids[0]); got.label != "global-run" || got.source != "fallback" {

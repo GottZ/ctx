@@ -82,7 +82,7 @@ func w3Run(t *testing.T, pool *pgxpool.Pool, scope string, retention time.Durati
 	st, err := persist(context.Background(), pool,
 		clustering{blockToCluster: assign, intraDegree: deg, clusterCount: len(groups)},
 		Options{Resolution: 1.0, VisibleTypes: w3Types, ScopeFilter: []string{scope}, TombstoneRetention: retention},
-		scopes, tallyScopes(scopes))
+		scopes, tallyScopes(scopes), superLevel{})
 	if err != nil {
 		t.Fatalf("w3Run(%s): %v", scope, err)
 	}
@@ -218,7 +218,7 @@ SELECT c.cluster_id, c.scope, c.topic_id, c.ov
 		_, err := persist(context.Background(), pool,
 			clustering{blockToCluster: assign, intraDegree: deg},
 			Options{Resolution: 1.0, VisibleTypes: w3Types, ScopeFilter: []string{scope}, TombstoneRetention: retention},
-			scopes, tallyScopes(scopes))
+			scopes, tallyScopes(scopes), superLevel{})
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
 			t.Fatalf("greedy carry: err=%v, want SQLSTATE 23505 on ov_match_topic_uq (B2)", err)
@@ -272,7 +272,7 @@ SELECT c.cluster_id, c.scope, c.topic_id, c.ov
 		if _, err := persist(context.Background(), pool,
 			clustering{blockToCluster: assign, intraDegree: deg},
 			Options{Resolution: 1.0, VisibleTypes: w3Types, TombstoneRetention: retention},
-			scopes, tallyScopes(scopes)); err != nil {
+			scopes, tallyScopes(scopes), superLevel{}); err != nil {
 			t.Fatalf("global persist: %v", err)
 		}
 
@@ -353,7 +353,7 @@ SELECT c.cluster_id, c.scope, c.topic_id, c.ov
 			_, err := persist(context.Background(), pool,
 				clustering{blockToCluster: assign, intraDegree: deg},
 				Options{Resolution: 1.0, VisibleTypes: w3Types, ScopeFilter: []string{scope}, TombstoneRetention: retention},
-				scopes, tallyScopes(scopes))
+				scopes, tallyScopes(scopes), superLevel{})
 			return err
 		}
 
@@ -760,7 +760,7 @@ func TestW3ConcurrentArchivingDoesNotBreakThePersist(t *testing.T) {
 		_, err := persist(ctx, pool,
 			clustering{blockToCluster: assign, intraDegree: deg},
 			Options{Resolution: 1.0, VisibleTypes: w3Types, ScopeFilter: []string{scope}, TombstoneRetention: retention},
-			scopes, tallyScopes(scopes))
+			scopes, tallyScopes(scopes), superLevel{})
 		if err == nil {
 			t.Fatal("a dropped cluster with visible members did not fail the persist")
 		}

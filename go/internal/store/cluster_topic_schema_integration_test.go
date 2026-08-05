@@ -257,7 +257,7 @@ func TestClusterTopicSchema_Integration(t *testing.T) {
 	// fehlschlägt — auf einer Maschine mit installierter CLI kann sie also weder
 	// rot werden noch die neue Zahl bestätigen. Dieselbe Zählung gegen eine
 	// frisch migrierte DB macht sie prüfbar: eine neue Tabelle ohne Nachzug in
-	// test.sh:301 färbt ab hier diesen Test rot statt still durchzugehen.
+	// test.sh:305 färbt ab hier diesen Test rot statt still durchzugehen.
 	t.Run("test_sh_table_count_matches_fresh_db", func(t *testing.T) {
 		script, err := os.ReadFile(filepath.Join("..", "..", "..", "test.sh"))
 		if err != nil {
@@ -272,7 +272,7 @@ func TestClusterTopicSchema_Integration(t *testing.T) {
 			t.Fatalf("table count: %v", err)
 		}
 		if got != want {
-			t.Errorf("fresh DB has %d tables, test.sh T07_EXPECT_TABLES = %d — nachziehen (test.sh:301)", got, want)
+			t.Errorf("fresh DB has %d tables, test.sh T07_EXPECT_TABLES = %d — nachziehen (test.sh:305)", got, want)
 		}
 
 		wantCols := grepInt(t, string(script), `T07_EXPECT_COLUMNS=(\d+)`)

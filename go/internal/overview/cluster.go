@@ -116,6 +116,17 @@ type Stats struct {
 	// cluster_id as the delta key belongs to Achse 04 (S9b).
 	MembersChanged    int
 	MembersReassigned int
+
+	// ── W-F: the meta-cluster level of this run ─────────────────────────────
+	//
+	// SuperN is the group count over ALL scopes and exists for the log line
+	// only — the per-scope truth lives in graph_overview_meta.super_n, because
+	// a run total in a tenant's own row would be the BP-1 difference channel.
+	// SuperCapped says at least one scope's supergraph was above
+	// root_map.super_max_nodes and degraded to the flat map; the main rebuild
+	// committed regardless, which is the whole reason the two are separate.
+	SuperN      int
+	SuperCapped bool
 }
 
 // tallyScopes counts node candidates per scope over the loadNodes output.
@@ -183,6 +194,30 @@ type Options struct {
 	// parent process and reads cfg directly, so it never crosses this boundary
 	// a second time.
 	TombstoneRetention time.Duration
+
+	// ── W-F: the meta-cluster level (design/02 §4.7, root_map.super_*) ──────
+	//
+	// These four cross the worker boundary for the same reason TombstoneRetention
+	// does: the resolution search runs in the compute window of the CHILD, right
+	// next to the main Louvain and outside every transaction (K5). Both decoders
+	// are strict, so they ship in one commit — and parent and child are the same
+	// binary, so there is no mixed window except a running child across a binary
+	// swap (BP-8: fails loudly, never silently).
+	//
+	// SuperEnabled off is the shipped state: the level is computed only when the
+	// operator asks for it, and until then graph_overview_meta.super_n stays NULL
+	// — "not attempted", which the map renders differently from "attempted and
+	// capped".
+	SuperEnabled bool
+	// SuperTargetRows is the map's row capacity (rootmap.NodeLimitFor). The
+	// search looks for the FINEST level that still fits it.
+	SuperTargetRows int
+	// SuperMinResolution is the lower γ bound of the search.
+	SuperMinResolution float64
+	// SuperMaxNodes caps the supergraph node count PER SCOPE. Exceeding it
+	// degrades that scope to the flat map — it never skips the main rebuild:
+	// the meta level is the quality layer, not the safety layer.
+	SuperMaxNodes int
 }
 
 // lockKeyForScopes returns the advisory lock key for one persist run (B-W4).
@@ -343,7 +378,20 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	if err != nil {
 		return Stats{}, err
 	}
-	return persist(ctx, pool, cl, opts, nodeScopes, candidates)
+	// W-F: the meta level is computed HERE — in the compute window, before
+	// persist opens its transaction (K5, design/02 §9.1 "Was NICHT in die Tx
+	// gehört"). Eight Louvain probes under the advisory lock and on top of the
+	// teardown locks of three tables would multiply the lock hold time, and a
+	// rebuild_timeout landing in that window would discard the whole rebuild
+	// instead of just the meta level. Into the transaction goes an INSERT.
+	super := computeSuperLevel(ctx, cl, nodeScopes, edges, superParams{
+		Enabled:       opts.SuperEnabled,
+		TargetRows:    opts.SuperTargetRows,
+		MinResolution: opts.SuperMinResolution,
+		MaxNodes:      opts.SuperMaxNodes,
+		Resolution:    opts.Resolution,
+	})
+	return persist(ctx, pool, cl, opts, nodeScopes, candidates, super)
 }
 
 // clusterWithCtx runs computeClustering in its own goroutine so a ctx
@@ -811,7 +859,14 @@ func StampAttempt(ctx context.Context, pool *pgxpool.Pool, scopes []string, reas
 // endpoint scopes (partition semantics, see edgeAggTemplate).
 func teardown(ctx context.Context, tx pgx.Tx, scoped bool, scopeFilter []string) error {
 	if !scoped {
-		if _, err := tx.Exec(ctx, `TRUNCATE graph_cluster_member, graph_cluster_node, graph_cluster_edge`); err != nil {
+		// W-F joins the TRUNCATE list rather than getting its own statement:
+		// one statement is one lock acquisition over all five tables, and the
+		// derived tables (topic edges, meta level) must never survive the
+		// partition they describe — a super row pointing at a topic whose node
+		// row was just removed is exactly the dangling state the atomic pairing
+		// exists to prevent.
+		if _, err := tx.Exec(ctx, `TRUNCATE graph_cluster_member, graph_cluster_node, graph_cluster_edge,
+			graph_cluster_topic_edge, graph_cluster_super, graph_cluster_super_member`); err != nil {
 			return fmt.Errorf("truncate: %w", err)
 		}
 		return nil
@@ -822,10 +877,19 @@ func teardown(ctx context.Context, tx pgx.Tx, scoped bool, scopeFilter []string)
 	// tenant can ever aggregate an edge touching one of THESE scopes — is
 	// swept by the first partition run that owns either endpoint and is never
 	// re-created. Member/node rows are single-scope; ANY() is exact there.
+	// W-F: the topic edge follows the graph_cluster_edge lifecycle verbatim (OR
+	// on both endpoint scopes — a mixed cross-partition row is swept by the first
+	// partition run that owns either endpoint and never re-created, because the
+	// scoped projection emits AND-rows). Super rows and their membership are
+	// single-scope by construction (the meta level is computed per scope), so
+	// ANY() is exact there.
 	for _, del := range []struct{ label, sql string }{
 		{"member", `DELETE FROM graph_cluster_member WHERE scope = ANY($1)`},
 		{"node", `DELETE FROM graph_cluster_node WHERE scope = ANY($1)`},
 		{"edge", `DELETE FROM graph_cluster_edge WHERE scope_s = ANY($1) OR scope_t = ANY($1)`},
+		{"topic edge", `DELETE FROM graph_cluster_topic_edge WHERE scope_a = ANY($1) OR scope_b = ANY($1)`},
+		{"super member", `DELETE FROM graph_cluster_super_member WHERE scope = ANY($1)`},
+		{"super", `DELETE FROM graph_cluster_super WHERE scope = ANY($1)`},
 	} {
 		if _, err := tx.Exec(ctx, del.sql, scopeFilter); err != nil {
 			return fmt.Errorf("scoped %s teardown: %w", del.label, err)
@@ -1007,6 +1071,49 @@ func checkNodeCoverage(ctx context.Context, tx pgx.Tx, opts Options, scoped bool
 		written, assigned, reachable, missing)
 }
 
+// writeMeta replaces the liveness rows this run owns (B-W5, migration 088) and
+// stamps the meta level's two columns behind them (W-F, migration 127).
+//
+// Split out of persist purely to keep that function inside the cyclop budget
+// once the W-F statements joined it; the body is the unchanged W-A logic plus
+// the super stamp, in that order — and the ORDER is load-bearing, see
+// writeSuperMeta.
+func writeMeta(ctx context.Context, tx pgx.Tx, scoped bool, opts Options, stats Stats,
+	candidates map[string]int, super superLevel,
+) error {
+	candScopes, candNs := candidateArrays(candidates)
+	// The global run replaces ALL rows (its scope set = every scope it just
+	// aggregated), the scoped run only its filter scopes — a foreign
+	// partition's computed_at is never touched (leak B1-m1).
+	if !scoped {
+		// W-A: the teardown is restricted to the scopes this run re-writes.
+		// The unconditional DELETE would erase a SKIP-ONLY row (the "fresh
+		// deploy above the cap" case: computed_at IS NULL, no cluster rows) —
+		// metaWriteGlobalSQL only re-creates scopes present in
+		// graph_cluster_node, so the skip memory would vanish on the next
+		// successful global run. The node table already carries THIS run's
+		// rows here (teardown + aggregation ran before), so the filter is
+		// exactly the set the INSERT below covers.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM graph_overview_meta WHERE scope IN (SELECT DISTINCT scope FROM graph_cluster_node)`); err != nil {
+			return fmt.Errorf("meta teardown: %w", err)
+		}
+		if _, err := tx.Exec(ctx, metaWriteGlobalSQL, stats.Modularity, opts.Resolution, candScopes, candNs); err != nil {
+			return fmt.Errorf("meta write: %w", err)
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `DELETE FROM graph_overview_meta WHERE scope = ANY($1)`, opts.ScopeFilter); err != nil {
+			return fmt.Errorf("scoped meta teardown: %w", err)
+		}
+		if _, err := tx.Exec(ctx, metaWriteScopedSQL, stats.Modularity, opts.Resolution, opts.ScopeFilter, candScopes, candNs); err != nil {
+			return fmt.Errorf("scoped meta write: %w", err)
+		}
+	}
+	// W-F: the meta level's two columns come LAST — the rows they belong to
+	// were only just re-created above.
+	return writeSuperMeta(ctx, tx, super)
+}
+
 // persist replaces the 057 tables in one advisory-locked transaction —
 // globally (nil ScopeFilter: TRUNCATE + unscoped aggregation, the pre-B
 // behaviour) or for ONE partition (B-W3: scoped DELETE + scoped aggregation,
@@ -1020,7 +1127,12 @@ func checkNodeCoverage(ctx context.Context, tx pgx.Tx, opts Options, scoped bool
 // is handed down rather than recomputed because the advisory-lock skip is
 // born here (see below) and must be able to report it — persist otherwise
 // only knows the blocks that survived into the clustering.
-func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Options, nodeScopes map[string]string, candidates map[string]int) (Stats, error) {
+//
+// super is the ALREADY COMPUTED meta level (W-F). It arrives as a finished
+// grouping precisely so that this function never runs a Louvain probe: the
+// order inside the transaction is teardown → member → identity → aggregation →
+// topic edges → super INSERT → meta, and every one of those is a write.
+func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Options, nodeScopes map[string]string, candidates map[string]int, super superLevel) (Stats, error) {
 	scoped := len(opts.ScopeFilter) > 0
 	filterSet := make(map[string]struct{}, len(opts.ScopeFilter))
 	for _, s := range opts.ScopeFilter {
@@ -1108,6 +1220,17 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		return Stats{}, err
 	}
 
+	// W-F, in the §9.1 order: the topic edge projection reads the edge rows the
+	// aggregation just wrote AND the identity the node rows just got, so it can
+	// only run here; the meta level then writes the grouping that was computed
+	// back in Rebuild's compute window.
+	if err := writeTopicEdges(ctx, tx, scoped, opts.ScopeFilter); err != nil {
+		return Stats{}, err
+	}
+	if err := writeSuperLevel(ctx, tx, super); err != nil {
+		return Stats{}, err
+	}
+
 	// W5: the deterministic fallback label plus the materialized drift state.
 	// It runs AFTER the node aggregation because it reads core_blocks,
 	// category_counts and repr_title off the rows that aggregation just wrote,
@@ -1131,36 +1254,11 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		TopicsRetired:     topics.retired,
 		MembersChanged:    topics.membersChanged,
 		MembersReassigned: topics.membersReassigned,
+		SuperN:            len(super.Groups),
+		SuperCapped:       len(super.Capped) > 0,
 	}
-	candScopes, candNs := candidateArrays(candidates)
-
-	// Meta rows (B-W5, 088): replace exactly the rows this run owns, in the
-	// same tx — the global run replaces ALL rows (its scope set = every scope
-	// it just aggregated), the scoped run only its filter scopes (a foreign
-	// partition's computed_at is never touched, leak B1-m1).
-	if !scoped {
-		// W-A: the teardown is restricted to the scopes this run re-writes.
-		// The unconditional DELETE would erase a SKIP-ONLY row (the "fresh
-		// deploy above the cap" case: computed_at IS NULL, no cluster rows) —
-		// metaWriteGlobalSQL only re-creates scopes present in
-		// graph_cluster_node, so the skip memory would vanish on the next
-		// successful global run. The node table already carries THIS run's
-		// rows here (teardown + aggregation ran above), so the filter is
-		// exactly the set the INSERT below covers.
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM graph_overview_meta WHERE scope IN (SELECT DISTINCT scope FROM graph_cluster_node)`); err != nil {
-			return Stats{}, fmt.Errorf("meta teardown: %w", err)
-		}
-		if _, err := tx.Exec(ctx, metaWriteGlobalSQL, stats.Modularity, opts.Resolution, candScopes, candNs); err != nil {
-			return Stats{}, fmt.Errorf("meta write: %w", err)
-		}
-	} else {
-		if _, err := tx.Exec(ctx, `DELETE FROM graph_overview_meta WHERE scope = ANY($1)`, opts.ScopeFilter); err != nil {
-			return Stats{}, fmt.Errorf("scoped meta teardown: %w", err)
-		}
-		if _, err := tx.Exec(ctx, metaWriteScopedSQL, stats.Modularity, opts.Resolution, opts.ScopeFilter, candScopes, candNs); err != nil {
-			return Stats{}, fmt.Errorf("scoped meta write: %w", err)
-		}
+	if err := writeMeta(ctx, tx, scoped, opts, stats, candidates, super); err != nil {
+		return Stats{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1180,5 +1278,16 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		// axis to exactly ONE protocol change (W3's). The number is observability,
 		// not a decision input, so it belongs where it costs nothing.
 		"labels_touched", labelled)
+	if super.Attempted {
+		// W-F: separate log line, and a LOG line rather than more Stats fields.
+		// The per-scope truth lives in graph_overview_meta; what an operator
+		// needs here is whether the level was built at all and whether a scope
+		// fell back to flat — both of which are invisible in the map when the
+		// section is simply absent.
+		slog.Info("overview: meta cluster level",
+			"scope_filter", opts.ScopeFilter,
+			"super_n", stats.SuperN, "capped_scopes", sortedKeys(super.Capped),
+			"gamma", super.Gamma)
+	}
 	return stats, nil
 }

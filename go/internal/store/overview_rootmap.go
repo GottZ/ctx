@@ -88,6 +88,16 @@ type OverviewMetaState struct {
 	Modularity    float64    // from the newest successful row
 	Resolution    float64    // from the newest successful row
 	StaleScopes   []string   // rows that outlived their partition (see below)
+
+	// SuperKnown/SuperN/SuperResolution are the W-F meta level (migration 127).
+	// The three-state encoding is the point: SuperKnown false = the level was
+	// never attempted (root_map.super_enabled off, super_n IS NULL);
+	// SuperKnown true with SuperN 0 = attempted and degraded to the flat map at
+	// root_map.super_max_nodes. A map that rendered both as "no section" would
+	// hide a cap — the same W16 failure migration 123 exists to end.
+	SuperKnown      bool
+	SuperN          int
+	SuperResolution float64
 }
 
 // overviewMetaSQL aggregates over LIVE rows only.
@@ -129,7 +139,11 @@ SELECT (SELECT max(computed_at) FROM live),
        COALESCE((SELECT l.skip_reason FROM live l
                   WHERE l.skip_reason IS NOT NULL AND l.skip_reason <> 'advisory-lock'
                   ORDER BY l.last_attempt_at DESC NULLS LAST, l.skip_reason LIMIT 1), ''),
-       EXISTS (SELECT 1 FROM live l WHERE l.skip_reason = 'advisory-lock')`
+       EXISTS (SELECT 1 FROM live l WHERE l.skip_reason = 'advisory-lock'),
+       EXISTS (SELECT 1 FROM live l WHERE l.super_n IS NOT NULL),
+       (SELECT COALESCE(sum(super_n), 0)::int FROM live),
+       COALESCE((SELECT l.super_resolution FROM live l WHERE l.super_n IS NOT NULL AND l.super_n > 0
+                  ORDER BY l.computed_at DESC NULLS LAST, l.scope LIMIT 1), 0)::float8`
 
 // overviewStaleScopesSQL names the rows overviewMetaSQL excluded — a meta row
 // that reports mass for a partition with no cluster rows left.
@@ -152,6 +166,7 @@ func OverviewMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string) 
 	if err := pool.QueryRow(ctx, overviewMetaSQL, readScopes).Scan(
 		&m.ComputedAt, &m.LastAttemptAt, &m.ClusterN, &m.NodeN, &m.CandidateN,
 		&m.Modularity, &m.Resolution, &m.SkipReason, &m.Contended,
+		&m.SuperKnown, &m.SuperN, &m.SuperResolution,
 	); err != nil {
 		return OverviewMetaState{}, fmt.Errorf("store: overview meta: %w", err)
 	}
@@ -172,6 +187,69 @@ func OverviewMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string) 
 		return OverviewMetaState{}, fmt.Errorf("store: overview meta stale scopes: %w", err)
 	}
 	return m, nil
+}
+
+// SuperTopic is one meta-cluster row of the root map's coarse level (W-F,
+// migration 127). The identifier is the super id — the level is rebuilt whole
+// with every partition, so it is a WITHIN-MAP handle, not a stable identity; the
+// stable identity a reader can follow is the lead topic's, which is why the
+// lead's label names the line.
+type SuperTopic struct {
+	SuperID string
+	Size    int // Σ blocks over the child topics
+	TopicN  int // child topics in this group
+	Label   string
+	Title   string // lead topic's repr_title — the fallback name
+}
+
+// overviewSuperSQL reads the meta level of the caller's scopes.
+//
+// Scope-pure like every other read here, and one degree stricter by
+// construction: a super row belongs to exactly ONE scope because the level is
+// computed per scope (migration 127 header), so `WHERE s.scope = ANY($1)` is not
+// a filter over a shared object but a partition selection.
+//
+// Both joins are LEFT: a lead topic whose node row vanished between the rebuild
+// and this read leaves the line without a name, not without a line. The group
+// still carries a true size and a true child count, and a nameless row beats a
+// missing one in an artefact whose whole job is accounting.
+const overviewSuperSQL = `
+SELECT s.super_id::text, s.size, s.topic_n,
+       COALESCE(t.label, ''), COALESCE(n.repr_title, '')
+  FROM graph_cluster_super s
+  LEFT JOIN graph_cluster_topic t ON t.topic_id = s.lead_topic_id AND t.scope = s.scope
+  LEFT JOIN graph_cluster_node  n ON n.topic_id = s.lead_topic_id AND n.scope = s.scope
+ WHERE s.scope = ANY($1::text[])
+ ORDER BY s.size DESC, s.super_id
+ LIMIT $2`
+
+// OverviewSuper returns the meta-cluster rows for the caller's scopes, biggest
+// first. O(groups), and the group count is capped by the resolution search's row
+// target — this read cannot grow with the corpus.
+func OverviewSuper(ctx context.Context, pool *pgxpool.Pool, readScopes []string, limit int) ([]SuperTopic, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed, same as GraphOverview
+		return nil, err
+	}
+	if limit < 1 {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx, overviewSuperSQL, readScopes, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: overview super: %w", err)
+	}
+	defer rows.Close()
+	var out []SuperTopic
+	for rows.Next() {
+		var s SuperTopic
+		if err := rows.Scan(&s.SuperID, &s.Size, &s.TopicN, &s.Label, &s.Title); err != nil {
+			return nil, fmt.Errorf("store: overview super scan: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: overview super rows: %w", err)
+	}
+	return out, nil
 }
 
 // activeCountGrace is how much longer the Go deadline runs than the database

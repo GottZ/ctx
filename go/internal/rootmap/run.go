@@ -72,6 +72,11 @@ type Config struct {
 	SmallClusterMax    int
 	CountTimeout       time.Duration
 	RebuildInterval    time.Duration
+	// SuperEnabled gates the W-F meta section — the READ side of it. The
+	// production side is the same key on the rebuild (overview.Options), so
+	// turning the flag off makes the section disappear from the next map
+	// immediately instead of waiting for the rebuild that clears the rows.
+	SuperEnabled bool
 }
 
 // Result says what the run did and, when it did nothing, why. Skipped is never
@@ -240,9 +245,22 @@ func gather(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, cfg Con
 		return Input{}, fmt.Errorf("rootmap: operational count: %w", err)
 	}
 
+	// W-F: only read the meta level when the flag asks for it. The rows outlive a
+	// flag flip until the next rebuild clears them, and a section that keeps
+	// appearing after it was switched off would make the knob a suggestion.
+	var superRows []SuperRow
+	if cfg.SuperEnabled {
+		supers, err := store.OverviewSuper(ctx, pool, readScopes, nodeLimit)
+		if err != nil {
+			return Input{}, fmt.Errorf("rootmap: super read: %w", err)
+		}
+		superRows = superRowsFrom(supers)
+	}
+
 	return Input{
-		Scope: homeScope,
-		Rows:  rowsFrom(ov.Nodes),
+		Scope:     homeScope,
+		Rows:      rowsFrom(ov.Nodes),
+		SuperRows: superRows,
 		Coverage: Coverage{
 			ClusterTotal:      totals.ClusterTotal,
 			ClusteredBlocks:   totals.ClusteredBlocks,
@@ -268,6 +286,12 @@ func gather(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, cfg Con
 			Modularity:    meta.Modularity,
 			Resolution:    meta.Resolution,
 			StaleScopes:   meta.StaleScopes,
+			// The three-state meta level, gated by the same flag as the read: a
+			// disabled section reports "never attempted" even if rows survive,
+			// so the map can never claim a level it is not showing.
+			SuperKnown:      cfg.SuperEnabled && meta.SuperKnown,
+			SuperN:          meta.SuperN,
+			SuperResolution: meta.SuperResolution,
 		},
 		BudgetBytes:          cfg.BudgetBytes,
 		FooterReserveBytes:   cfg.FooterReserveBytes,
@@ -290,6 +314,20 @@ func rowsFrom(nodes []store.OverviewNode) []Row {
 			ReprID:    n.ReprID,
 			ReprTitle: n.ReprTitle,
 			ScopeMix:  n.ScopeMix,
+		})
+	}
+	return rows
+}
+
+// superRowsFrom projects the store's meta rows onto renderer rows. Straight
+// through: the read already sorted by size and resolved the lead topic's name,
+// and the renderer's job is measuring, not deciding.
+func superRowsFrom(supers []store.SuperTopic) []SuperRow {
+	rows := make([]SuperRow, 0, len(supers))
+	for _, s := range supers {
+		rows = append(rows, SuperRow{
+			ID: s.SuperID, Label: s.Label, Title: s.Title,
+			Size: s.Size, TopicN: s.TopicN,
 		})
 	}
 	return rows
@@ -424,6 +462,14 @@ func metadataFor(in Input, r Rendered, cfg Config, homeScope string) map[string]
 	}
 	if in.Freshness.SkipReason != "" {
 		md["skip_reason"] = in.Freshness.SkipReason
+	}
+	// W-F: only when the level was actually attempted. An unconditional
+	// "super_n": 0 would read as "built, zero groups" and is the same ambiguity
+	// the three-state encoding exists to remove.
+	if in.Freshness.SuperKnown {
+		md["super_n"] = in.Freshness.SuperN
+		md["super_resolution"] = in.Freshness.SuperResolution
+		md["super_rows"] = r.SuperRows
 	}
 	return md
 }

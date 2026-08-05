@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 126,
-    "migration_count": 125,
+    "migration_max": 127,
+    "migration_count": 126,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3470,6 +3470,64 @@
       ],
       "row_security": false
     },
+    "graph_cluster_super": {
+      "columns": [
+        {
+          "name": "super_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "size",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "topic_n",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "lead_topic_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "graph_cluster_super_member": {
+      "columns": [
+        {
+          "name": "topic_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "super_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
     "graph_cluster_topic": {
       "columns": [
         {
@@ -3571,6 +3629,47 @@
       ],
       "row_security": false
     },
+    "graph_cluster_topic_edge": {
+      "columns": [
+        {
+          "name": "topic_a",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "topic_b",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope_a",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "scope_b",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "link_count",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "weight_sum",
+          "type": "real",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
     "graph_overview_meta": {
       "columns": [
         {
@@ -3630,6 +3729,18 @@
         {
           "name": "candidate_n",
           "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "super_n",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "super_resolution",
+          "type": "real",
           "not_null": false,
           "storage": "p"
         }
@@ -3805,6 +3916,15 @@
     },
     "graph_cluster_node_pkey": {
       "def_hash": "797efb13122558310393381bcdc4f60aa045c4c24a9eba5153b07ea5c93ef01b"
+    },
+    "graph_cluster_super_member_pkey": {
+      "def_hash": "b629b3912707dbbd87d13821ff252d42783bdc2e1c1ce6f0aeac04c62972b53e"
+    },
+    "graph_cluster_super_pkey": {
+      "def_hash": "d399dc21db57ed2fc72f129979324e2c6b04a79f4361e111242aa64dc57c218f"
+    },
+    "graph_cluster_topic_edge_pkey": {
+      "def_hash": "b2ac59957cf7684971df5444430173940c8a6c50bca79fab0e2ae0ab31071748"
     },
     "graph_cluster_topic_pkey": {
       "def_hash": "1c5ab1536b2056d754fb2a8a223acbec9a211ea1b8a18ff995ab7e6481109fa6"
@@ -4014,6 +4134,15 @@
     "idx_gcn_scope": {
       "def_hash": "00a95a5e65983caf08fe4846674957d83bc46d7cd0ab73460e8b2f02372fad6e"
     },
+    "idx_gcs_scope_size": {
+      "def_hash": "954a420e85c559b1621d521d9ec7fe7e9b7bd337394c05388195a185e980face"
+    },
+    "idx_gcsm_scope": {
+      "def_hash": "ad7174d4b5ca63a078a7dfb58c635c2a645a71b84fc0ff8da67f1911c7e50281"
+    },
+    "idx_gcsm_super": {
+      "def_hash": "2f2c53f44a314ef832baae9946f6c1801561b4c5942508bf9097815151fe2830"
+    },
     "idx_gct_label_pending": {
       "def_hash": "27713c1174337dc3b159222037733b4aa11719cf9745bc84ad45b191bac8dd2b"
     },
@@ -4025,6 +4154,12 @@
     },
     "idx_gct_retired": {
       "def_hash": "359559e070c27dd78f8845ccf5aa6748861ea7ef14d562c2f9975079453ee65f"
+    },
+    "idx_gcte_scope_a": {
+      "def_hash": "213ae2906bc7d46d484a530bbbf6e80694eec7a40423bea156a536ba66c75a4f"
+    },
+    "idx_gcte_scope_b": {
+      "def_hash": "86dcdb544a9941c3762f64a1d8ef977a4437ed493ddde1b3ca2478927c8c9c34"
     },
     "idx_guard_pending": {
       "def_hash": "4770580d194390a0c4f5069487f1f2697690a2030fe6939233b1ab6eea532608"

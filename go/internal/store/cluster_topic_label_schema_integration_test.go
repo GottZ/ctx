@@ -16,6 +16,8 @@ package store_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -151,8 +153,21 @@ func TestClusterTopicLabelSchema_Integration(t *testing.T) {
 		}
 	})
 
-	// Additive Spalten: die Tabellenzahl bleibt bei 51, nur Spalten kommen dazu.
+	// Additive Spalten: Migration 125 legt keine Tabelle an, nur Spalten.
+	//
+	// Die Erwartung wird aus test.sh gelesen statt hier hartkodiert. Eine
+	// absolute Zahl an dieser Stelle prüft nämlich gar nicht, was der Test
+	// behauptet — sie bricht bei JEDER späteren Migration mit neuer Tabelle,
+	// obwohl 125 dann unverändert additiv geblieben ist. Genau das ist beim
+	// Supergraph (Migration 127, drei Tabellen) passiert. Mit test.sh als
+	// einziger Quelle bleibt die Aussage „der Bestand ist der erwartete" und
+	// die Pflege liegt an EINER Stelle.
 	t.Run("no_new_table", func(t *testing.T) {
+		script, err := os.ReadFile(filepath.Join("..", "..", "..", "test.sh"))
+		if err != nil {
+			t.Skipf("test.sh not reachable from here: %v", err)
+		}
+		want := grepInt(t, string(script), `T07_EXPECT_TABLES=(\d+)`)
 		var n int
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM information_schema.tables
@@ -160,8 +175,8 @@ func TestClusterTopicLabelSchema_Integration(t *testing.T) {
 		).Scan(&n); err != nil {
 			t.Fatalf("table count: %v", err)
 		}
-		if n != 51 {
-			t.Errorf("table count = %d, want 51 (Migration 125 ist rein additiv)", n)
+		if n != want {
+			t.Errorf("table count = %d, test.sh T07_EXPECT_TABLES = %d — nachziehen (test.sh:305)", n, want)
 		}
 	})
 

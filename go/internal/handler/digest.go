@@ -122,6 +122,7 @@ func (h *DigestHandler) runRootMap(ctx context.Context, auth *auth.AuthResult, c
 			SmallClusterMax:    cfg.RootMap.SmallClusterMax,
 			CountTimeout:       cfg.RootMap.CountTimeout,
 			RebuildInterval:    cfg.GraphOverview.RebuildInterval,
+			SuperEnabled:       cfg.RootMap.SuperEnabled,
 		},
 		auth.HomeScope, auth.ReadScopes)
 	if err != nil {

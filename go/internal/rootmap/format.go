@@ -39,14 +39,20 @@ func isFreeze(reason string) bool {
 	return reason != "" && reason != "advisory-lock"
 }
 
-// renderPrefix is cap block + head + coverage section — everything above the
-// topic lines. One function so the measuring loop and the final render always
-// agree on what the prefix is.
-func renderPrefix(in Input, cov Coverage) string {
+// renderPrefix is cap block + head + coverage section + the W-F meta section —
+// everything above the topic lines. One function so the measuring loop and the
+// final render always agree on what the prefix is.
+//
+// super arrives ALREADY RENDERED (see Render): it has its own measuring loop and
+// must be byte-identical across the two prefix passes, which it cannot be if it
+// is measured against two different head lengths.
+func renderPrefix(in Input, cov Coverage, super string) string {
 	var b strings.Builder
 	writeCapBlock(&b, in)
 	writeHead(&b, in, cov)
 	writeCoverage(&b, in, cov)
+	b.WriteString(super)
+	b.WriteString("\n## Themen\n")
 	return b.String()
 }
 
@@ -220,8 +226,85 @@ func writeCoverage(b *strings.Builder, in Input, c Coverage) {
 	if s := staleNote(in.Freshness.StaleScopes); s != "" {
 		b.WriteString(s)
 	}
-	b.WriteString("Alles nach dem Cluster-Stand ist hier NICHT enthalten.\n\n## Themen\n")
+	b.WriteString("Alles nach dem Cluster-Stand ist hier NICHT enthalten.\n")
+	// The "## Themen" heading moved to renderPrefix in W-F — the meta section
+	// belongs BETWEEN the coverage block and the topic list, and with an empty
+	// section the byte sequence is unchanged.
 }
+
+// superLine renders one meta-cluster row: group id, the lead topic's name, and
+// the two numbers that make the group worth a line at all.
+func superLine(r SuperRow) string {
+	name := truncateRunes(r.Label, labelMaxRunes)
+	if name == "" {
+		name = truncateRunes(r.Title, labelMaxRunes)
+	}
+	if name == "" {
+		name = "(ohne Titel)"
+	}
+	return fmt.Sprintf("%s %s %s Blöcke · %s Themen\n", r.ID, name, num(r.Size), num(r.TopicN))
+}
+
+// renderSuper is the W-F section (design/02 §4.7 step 5) with its own measuring
+// loop. It returns "" when there is nothing to say — which is the shipped
+// default, and the reason this wave changes not one byte of a live map.
+//
+// Three states, three outputs, and telling them apart is the point:
+//
+//   - not attempted (root_map.super_enabled off) ⇒ nothing at all
+//   - attempted and CAPPED (supergraph above root_map.super_max_nodes) ⇒ one
+//     line naming the cap. A cap that renders as absence is a cap nobody sees,
+//     and the whole liveness line of this axis exists to end that
+//   - built ⇒ the section, cut at half the remaining budget with an honest
+//     "N more" line whenever the cut bites
+func renderSuper(in Input, headLen int) (string, int) {
+	f := in.Freshness
+	if !f.SuperKnown {
+		return "", 0
+	}
+	if f.SuperN == 0 {
+		return "\nMeta-Ebene: übersprungen — der Supergraph liegt über root_map.super_max_nodes;\n" +
+			"die Karte bleibt flach (der Haupt-Rebuild ist davon unberührt).\n", 0
+	}
+	if len(in.SuperRows) == 0 {
+		return "", 0
+	}
+	// Half of what the topic lines would otherwise have. The coarse level may
+	// summarise the map, never replace it.
+	room := (in.BudgetBytes - headLen - in.FooterReserveBytes) / 2
+	if room <= 0 {
+		return "", 0
+	}
+
+	head := fmt.Sprintf("\n## Themen-Gruppen (Meta-Ebene, γ=%s)\n", gamma(f.SuperResolution))
+	var b strings.Builder
+	b.WriteString(head)
+	used := len(head)
+	shown := 0
+	for _, r := range in.SuperRows {
+		line := superLine(r)
+		// The cut line has to fit too, or the section would lie by omission at
+		// exactly the moment it starts omitting.
+		if used+len(line)+superCutReserve > room {
+			break
+		}
+		b.WriteString(line)
+		used += len(line)
+		shown++
+	}
+	if shown == 0 {
+		return "", 0 // no room for a single group: silence beats a bare heading
+	}
+	if rest := f.SuperN - shown; rest > 0 {
+		fmt.Fprintf(&b, "%s weitere Gruppen (Zeilenbudget).\n", num(rest))
+	}
+	return b.String(), shown
+}
+
+// superCutReserve is the space the section keeps free for its own "N weitere
+// Gruppen" line — the same reflex as the footer reserve one level up: a section
+// that cannot afford to say it was cut must not cut.
+const superCutReserve = 48
 
 // staleNote names meta rows that outlived their partition — neither coverage
 // nor gap. Without this line such a scope is invisible: its numbers are (

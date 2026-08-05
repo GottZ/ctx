@@ -178,7 +178,7 @@ func TestW3LockBudgetBaseline(t *testing.T) {
 			clustering{blockToCluster: assign, intraDegree: deg, clusterCount: clusters},
 			Options{Resolution: 1.0, VisibleTypes: w3Types, ScopeFilter: []string{scope},
 				TombstoneRetention: 45 * 24 * time.Hour},
-			scopes, tallyScopes(scopes))
+			scopes, tallyScopes(scopes), superLevel{})
 		d := time.Since(start)
 		if err != nil {
 			t.Fatalf("%s persist: %v", label, err)

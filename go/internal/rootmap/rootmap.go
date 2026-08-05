@@ -89,6 +89,23 @@ type Coverage struct {
 	CappedBlocks   int
 }
 
+// SuperRow is one line of the META level (W-F): a group of topics the coarse
+// second Louvain put together. It is what keeps the map ABOUT something once the
+// flat cluster list stops fitting — the collector line says how much is missing,
+// this section says what it is.
+//
+// ID is the group id of THIS map generation, not a stable identity: the level is
+// rebuilt whole with every partition. The durable handle is the lead topic's,
+// and Label is that topic's name — which is why a group is never anonymous while
+// its lead has a name.
+type SuperRow struct {
+	ID     string
+	Label  string // lead topic's label; "" ⇒ Title, "" ⇒ placeholder
+	Title  string // lead topic's repr_title
+	Size   int    // Σ blocks over the child topics
+	TopicN int    // child topics
+}
+
 // Freshness mirrors graph_overview_meta 1:1 — including its caps.
 type Freshness struct {
 	ComputedAt    *time.Time // nil = never built successfully
@@ -108,6 +125,17 @@ type Freshness struct {
 	// neither fresh coverage nor a gap — the map names it and moves on, and
 	// AllowsUpsert refuses to overwrite a good map on such a window.
 	StaleScopes []string
+
+	// SuperKnown/SuperN/SuperResolution are the W-F meta level, three-state on
+	// purpose: SuperKnown false = never attempted (the section is simply absent,
+	// which is the shipped default); SuperKnown true with SuperN 0 = attempted
+	// and degraded to flat at root_map.super_max_nodes, which the map SAYS in one
+	// line rather than passing off as "no groups". SuperResolution is the γ the
+	// budget search settled on — printed because it is the one number that
+	// explains why the groups are as coarse as they are.
+	SuperKnown      bool
+	SuperN          int
+	SuperResolution float64
 }
 
 // Input is everything Render needs. Rows arrive sorted by Size DESC (the store
@@ -115,6 +143,7 @@ type Freshness struct {
 type Input struct {
 	Scope                string
 	Rows                 []Row
+	SuperRows            []SuperRow // W-F meta level, biggest group first; empty ⇒ no section
 	Coverage             Coverage
 	Freshness            Freshness
 	BudgetBytes          int    // root_map.budget_bytes
@@ -132,6 +161,11 @@ type Rendered struct {
 	Text     string
 	Coverage Coverage
 	Empty    bool // the window shows NO clusters at all; consult AllowsUpsert
+	// SuperRows is how many meta-cluster lines the section actually printed —
+	// not how many exist. The difference is the section's own cut, and the
+	// metadata contract carries the printed number for the same reason the
+	// footer prints the cut one: both halves of an accounting are the accounting.
+	SuperRows int
 }
 
 // Render builds the map text. Deterministic, allocation-light, and guaranteed
@@ -156,13 +190,25 @@ func Render(in Input) (Rendered, error) {
 	// final length check below still proves the budget.
 	bound := in.Coverage
 	bound.RenderedRows, bound.RenderedBlocks = bound.ClusterTotal, bound.ClusteredBlocks
-	if n := len(renderPrefix(in, bound)) + in.FooterReserveBytes; n > in.BudgetBytes {
+
+	// W-F: the meta section is measured ONCE, against the upper-bound head, and
+	// then reused verbatim in both prefix renderings. Measuring it twice against
+	// two different head lengths could produce two different section lengths, and
+	// the row loop would then fit rows against a prefix the final render does not
+	// have — the budget proof below would still hold, but the map would silently
+	// lose a line. The section is capped at HALF the space the topic lines would
+	// otherwise get: the coarse level must never be able to push the fine one out
+	// entirely, and half is the same relational split the identity axis uses for
+	// the substance core rather than another tuning knob.
+	super, superShown := renderSuper(in, len(renderPrefix(in, bound, "")))
+
+	if n := len(renderPrefix(in, bound, super)) + in.FooterReserveBytes; n > in.BudgetBytes {
 		return Rendered{}, fmt.Errorf("rootmap: budget %d B too small: head+coverage plus footer reserve need %d B",
 			in.BudgetBytes, n)
 	}
 
 	cov := in.Coverage
-	body, rendered, blocks := renderRows(in, len(renderPrefix(in, bound)))
+	body, rendered, blocks := renderRows(in, len(renderPrefix(in, bound, super)))
 	cov.RenderedRows, cov.RenderedBlocks = rendered, blocks
 	cov.CappedClusterN = cov.ClusterTotal - cov.RenderedRows - cov.SmallClusterN
 	cov.CappedBlocks = cov.ClusteredBlocks - cov.RenderedBlocks - cov.SmallClusterSize
@@ -177,11 +223,11 @@ func Render(in Input) (Rendered, error) {
 	// "the window shows no clusters" catches both; the wording below tells them
 	// apart, and AllowsUpsert refuses the write where it matters.
 	if rendered == 0 && cov.ClusterTotal == 0 {
-		out := renderPrefix(in, cov) + emptyStatement(in)
+		out := renderPrefix(in, cov, super) + emptyStatement(in)
 		if len(out) > in.BudgetBytes {
 			return Rendered{}, fmt.Errorf("rootmap: empty map %d B over budget %d B", len(out), in.BudgetBytes)
 		}
-		return Rendered{Text: out, Coverage: cov, Empty: true}, nil
+		return Rendered{Text: out, Coverage: cov, Empty: true, SuperRows: superShown}, nil
 	}
 
 	footer := renderFooter(in, cov)
@@ -189,14 +235,14 @@ func Render(in Input) (Rendered, error) {
 		return Rendered{}, fmt.Errorf("rootmap: footer %d B over reserve %d B", len(footer), in.FooterReserveBytes)
 	}
 
-	out := renderPrefix(in, cov) + body + footer
+	out := renderPrefix(in, cov, super) + body + footer
 	if len(out) > in.BudgetBytes {
 		return Rendered{}, fmt.Errorf("rootmap: rendered %d B over budget %d B", len(out), in.BudgetBytes)
 	}
 	// Empty is FALSE here even at zero topic lines: a corpus made only of
 	// two-block clusters produces a map that is entirely collector line — and
 	// that is a true, useful map, not the empty one BP-6 guards against.
-	return Rendered{Text: out, Coverage: cov}, nil
+	return Rendered{Text: out, Coverage: cov, SuperRows: superShown}, nil
 }
 
 // AllowsUpsert is the BP-6 rule as a pure predicate: an empty or stale map must

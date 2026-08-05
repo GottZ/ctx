@@ -1114,6 +1114,7 @@ func (s *Scheduler) renderRootMap(ctx context.Context, bt backgroundTenant) {
 			SmallClusterMax:    cfgT.RootMap.SmallClusterMax,
 			CountTimeout:       cfgT.RootMap.CountTimeout,
 			RebuildInterval:    cfgT.GraphOverview.RebuildInterval,
+			SuperEnabled:       cfgT.RootMap.SuperEnabled,
 		},
 		effectiveHomeScope(cfgT.Scheduler.HomeScope, bt.owned),
 		intersectWindow(cfgT.Scheduler.ReadScopes, bt.owned))
@@ -1213,6 +1214,16 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		// in the worker CHILD — the window has to cross the boundary. The
 		// purge that consumes the same key stays in the parent (W8).
 		TombstoneRetention: cfg.GraphOverview.TombstoneRetention,
+		// W-F: the meta level is computed in the same compute window as the
+		// main Louvain, i.e. in the child. The row target is the MAP's capacity
+		// — the level exists to fit the map, so the map's own budget formula is
+		// the only honest source for it (rootmap.NodeLimitFor, one function, no
+		// second rounding rule).
+		SuperEnabled: cfg.RootMap.SuperEnabled,
+		SuperTargetRows: rootmap.NodeLimitFor(cfg.RootMap.BudgetBytes,
+			cfg.RootMap.FooterReserveBytes),
+		SuperMinResolution: cfg.RootMap.SuperMinResolution,
+		SuperMaxNodes:      cfg.RootMap.SuperMaxNodes,
 	})
 	if err != nil {
 		// W-A: distinguish the two failure shapes the map has to tell apart.
