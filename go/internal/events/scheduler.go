@@ -1254,6 +1254,9 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		OverviewTypes: typeSet.OverviewTypes(),
 		MaxNodes:      cfg.GraphOverview.MaxNodes,
 		ScopeFilter:   bt.owned,
+		// S3: der CSR-Loader steuert den Rechenpfad IM KIND, also muss der
+		// Schalter ueber die Prozessgrenze. Default aus.
+		CSRLoader: cfg.GraphOverview.CSRLoader,
 		// W3: the tombstone re-attach probe runs inside the persist tx, i.e.
 		// in the worker CHILD — the window has to cross the boundary. The
 		// purge that consumes the same key stays in the parent (W8).

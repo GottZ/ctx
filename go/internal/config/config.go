@@ -336,6 +336,20 @@ type GraphOverviewConfig struct {
 	// ceiling — same classification as rebuild_timeout and tombstone_retention.
 	RunRetention time.Duration `key:"graph_overview.run_retention" env:"CTX_GRAPH_OVERVIEW_RUN_RETENTION" default:"7776000" mut:"hot" tenancy:"global-only"`
 
+	// CSRLoader switches the rebuild's input path from the []rawEdge
+	// materialisation to the two-pass CSR cursor build (Achse 04 / S3).
+	//
+	// Ships OFF and is meant to stay off until the identity gate has been green
+	// across several deploys. The reason is operational, not technical: on a
+	// live system whose deploys are built from tag worktrees, rolling a binary
+	// back is the most expensive form of undo there is, and flipping a config
+	// key is the cheapest. The old path stays in the binary next to it.
+	//
+	// What flipping it buys, measured: the []rawEdge slice, the symmetrisation
+	// map and the string→index map all disappear. At the 200k node cap those
+	// three are the bulk of the 423 MB the current path peaks at.
+	CSRLoader bool `key:"graph_overview.csr_loader" env:"CTX_GRAPH_OVERVIEW_CSR_LOADER" default:"false" mut:"hot" tenancy:"global-only"`
+
 	// ── W6: the LLM label pipeline (design/01 §3.5/§4.8, Amendments A01-3/A01-4) ──
 	//
 	// LabelEnabled ships TRUE, unlike graph_overview.enabled — decision E7-01

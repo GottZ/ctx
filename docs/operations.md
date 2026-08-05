@@ -238,6 +238,27 @@ This matters operationally right now: the current in-process compute path peaks 
 
 `graph_overview.run_retention` (`CTX_GRAPH_OVERVIEW_RUN_RETENTION`, seconds, default 90 d, hot) trims the journal in batches after the rebuild tick, never inside the persist transaction. `0` keeps every row — a deliberate forensic window, not an accident.
 
+### `graph_overview.csr_loader`: the rebuild's input substrate
+
+`CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.
+
+The current path materialises the graph three times before the clustering library sees it: an edge slice holding **two UUID strings per edge**, a symmetrisation map keyed by node pair, and a string→index map. Measured on a synthetic corpus at constant density, those three alone cost:
+
+| Nodes | Pairs | edge slice + maps | CSR | Factor |
+|---|---|---|---|---|
+| 50 000 | 112 370 | 41 MB | 23 MB | 1.78× |
+| 200 000 | 449 575 | 117 MB | 39 MB | 2.97× |
+| 400 000 | 899 260 | 217 MB | 62 MB | 3.50× |
+
+The factor grows with the corpus because the fixed Go runtime baseline stops dominating; between the 200k and 400k rows the *marginal* cost is 100 MB versus 23 MB. This matters against a 512 MiB container limit at which the full rebuild already peaks at ~423 MB at the 200k node cap.
+
+The CSR path reads nodes and edges in **one repeatable-read transaction** and builds compressed adjacency arrays in two cursor passes. Two consequences worth knowing before flipping it:
+
+- **It holds a read snapshot for the whole load.** That blocks vacuum on `context_blocks` and `context_dream_links` for the duration — seconds today, minutes at the 10M target. `load_ms` in the run journal is where you watch it. The snapshot is not optional: the two passes must agree, and a link written between them (dream writes in background batches) would otherwise corrupt the adjacency **silently**.
+- **Both paths stay in the binary.** Rolling back is a config flip, not a redeploy — which on a system whose deploys are built from tag worktrees is the difference between a minute and an afternoon.
+
+Leave it off until the identity gate has been green across several deploys on your own corpus.
+
 `computed_at` becomes nullable **and loses its `DEFAULT now()`** (from migration 057). A partition that has never built successfully but already has an attempt behind it — a fresh deploy above the node cap — needs a row without a success timestamp; with the default in place a skip upsert that does not name the column would silently claim freshness. The read path is unaffected: `max(computed_at)` ignores NULL, so "never built" stays the zero timestamp and the `stats.computed_at` wire field stays `null` exactly as before.
 
 Deploy notes, same shape as 116: the file carries `SET LOCAL lock_timeout = '3s'`, so it aborts with `55P03` rather than queueing behind a long-running persist transaction (a 400k-node rebuild measures ~465 s); every statement is idempotent, so the next boot simply re-runs it. Existing rows are backfilled with `last_attempt_at = computed_at` and `candidate_n = node_n` — historically correct, because only a successful run could have written them. No new table, no index.

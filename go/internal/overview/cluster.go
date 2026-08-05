@@ -279,6 +279,26 @@ type Options struct {
 	// degrades that scope to the flat map — it never skips the main rebuild:
 	// the meta level is the quality layer, not the safety layer.
 	SuperMaxNodes int
+
+	// ── S3: das CSR-Substrat (Achse 04, design/04 §4.5) ────────────────────
+	//
+	// CSRLoader schaltet den zweistufigen REPEATABLE-READ-Cursor-Build an die
+	// Stelle von loadNodes + loadEdges + Symmetrisierung. Default AUS: auf einem
+	// live produktiven System, dessen Deploys aus Tag-Worktrees gebaut werden,
+	// ist ein Binary-Rollback die teuerste Rueckabwicklungsform und ein
+	// Config-Flip die billigste. Der alte []rawEdge-Pfad bleibt daneben stehen,
+	// bis das Identitaets-Gate ueber mehrere Deploys grün war.
+	//
+	// PROTOKOLL: das ist das ZWEITE IPC-Fenster dieser Achse (nach S2s
+	// Stats-Erweiterung) und damit eines mehr, als §3.5 vorgesehen hat. Der
+	// Grund ist, dass der Rechenpfad im KIND liegt: ein Schalter, der ihn
+	// steuert, muss ueber die Grenze. Die Alternative — das Kind liest die
+	// Config selbst — scheitert daran, dass cmd/ctxd die Options dekodiert,
+	// BEVOR es Config oder Pool baut (worker.go, "no mutation"-Gate). Beide
+	// Seiten sind dasselbe Binary und werden vom Container-Deploy atomar
+	// getauscht; das Mischversions-Fenster bleibt dokumentiert (BP-8) und
+	// scheitert laut.
+	CSRLoader bool
 }
 
 // lockKeyForScopes returns the advisory lock key for one persist run (B-W4).
@@ -384,8 +404,20 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 		return Stats{}, fmt.Errorf("overview: empty type allowlist (visible=%d, overview=%d) — block-type registry not wired?",
 			len(opts.VisibleTypes), len(opts.OverviewTypes))
 	}
+	var err error
 	loadStart := time.Now()
-	nodeUUIDs, nodeScopes, err := loadNodes(ctx, pool, intersect(opts.VisibleTypes, opts.OverviewTypes), opts.ScopeFilter)
+	nodeTypes := intersect(opts.VisibleTypes, opts.OverviewTypes)
+	// S3: der CSR-Pfad laedt Knoten UND Kanten in EINER Transaktion, weil der
+	// Zwei-Pass-Build beide Passen auf demselben Snapshot braucht. Deshalb faellt
+	// hier die Entscheidung, nicht erst an der Kantenladung.
+	var csr *csrGraph
+	var nodeUUIDs []string
+	var nodeScopes map[string]string
+	if opts.CSRLoader {
+		nodeUUIDs, nodeScopes, csr, err = loadCSR(ctx, pool, nodeTypes, opts.ScopeFilter)
+	} else {
+		nodeUUIDs, nodeScopes, err = loadNodes(ctx, pool, nodeTypes, opts.ScopeFilter)
+	}
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading nodes: %w", err)
 	}
@@ -442,9 +474,12 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 			"nodes", len(nodeUUIDs), "max_nodes", opts.MaxNodes)
 		return Stats{Skipped: true, SkipReason: "node-cap", CandidateCount: candidates}, nil
 	}
-	edges, err := loadEdges(ctx, pool, opts.ScopeFilter)
-	if err != nil {
-		return Stats{}, fmt.Errorf("loading edges: %w", err)
+	var edges []rawEdge
+	if !opts.CSRLoader {
+		edges, err = loadEdges(ctx, pool, opts.ScopeFilter)
+		if err != nil {
+			return Stats{}, fmt.Errorf("loading edges: %w", err)
+		}
 	}
 	// S2: die Ladephase endet HIER, nicht nach loadNodes. Beide Loads gehören
 	// in load_ms — sie sind derselbe Kostenpfad (zwei sortierte Cursor über
@@ -453,7 +488,12 @@ func Rebuild(ctx context.Context, pool *pgxpool.Pool, opts Options) (Stats, erro
 	loadMS := int(time.Since(loadStart).Milliseconds())
 
 	clusterStart := time.Now()
-	cl, err := clusterWithCtx(ctx, nodeUUIDs, edges, opts.Resolution)
+	var cl clustering
+	if opts.CSRLoader {
+		cl, err = clusterCSRWithCtx(ctx, nodeUUIDs, csr, opts.Resolution)
+	} else {
+		cl, err = clusterWithCtx(ctx, nodeUUIDs, edges, opts.Resolution)
+	}
 	if err != nil {
 		return Stats{}, err
 	}
