@@ -177,11 +177,26 @@ func TestS14LLMCallCursor(t *testing.T) {
 		if strings.Contains(plan, "Sort Key") && !strings.Contains(plan, "Presorted Key: ") {
 			t.Errorf("plan sorts without a presorted key — the index no longer orders the scan:\n%s", plan)
 		}
-		// Chunk exclusion: only the chunk holding the cursor window may be
-		// opened. Dropping `created_at >= $1` from the statement plans a
-		// ChunkAppend across every chunk instead.
-		if n := strings.Count(plan, s14ChunkIndex); n != 1 {
-			t.Errorf("plan opens %d chunks, want 1 — chunk exclusion was lost:\n%s", n, plan)
+		// Chunk exclusion: only the chunks the cursor window actually overlaps
+		// may be opened. That count is 1 on most days and 2 when the 30 h
+		// window straddles a chunk boundary (TimescaleDB chunks are
+		// epoch-aligned 7-day ranges — a hardcoded `want 1` was red every
+		// Thursday). Compute the expectation from the chunk catalog instead:
+		// a chunk is opened iff its range_end lies after the window start.
+		// Dropping `created_at >= $1` from the statement still plans a
+		// ChunkAppend across EVERY chunk, so the exclusion probe stays sharp.
+		var expectChunks int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM timescaledb_information.chunks
+			WHERE hypertable_name = 'context_llm_log' AND range_end > $1`,
+			time.Now().UTC().Add(-30*time.Hour)).Scan(&expectChunks); err != nil {
+			t.Fatalf("count window chunks: %v", err)
+		}
+		if expectChunks >= chunks {
+			t.Fatalf("window overlaps all %d chunks — exclusion would be unmeasurable (fixture too shallow)", chunks)
+		}
+		if n := strings.Count(plan, s14ChunkIndex); n != expectChunks {
+			t.Errorf("plan opens %d chunks, want %d (window-overlapped) — chunk exclusion was lost:\n%s", n, expectChunks, plan)
 		}
 	})
 }
