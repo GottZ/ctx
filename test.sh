@@ -23,7 +23,10 @@ set -a; source "$ENV_FILE"; set +a
 
 WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost}"
 KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}"
-KEY_WORK="${CONTEXT_API_KEY_WORK:?CONTEXT_API_KEY_WORK not set in .env}"
+# Isolations-Fixture: eigener leerer Scope 'isotest' statt des 2026-08-06
+# abgebauten work-Scopes — die Isolations-Tests (T03/T04, T19-404-Equality)
+# brauchen IRGENDEINEN fremden home_scope, keinen mit Bestandsdaten.
+KEY_ISO="${CONTEXT_API_KEY_ISOTEST:?CONTEXT_API_KEY_ISOTEST not set in .env}"
 KEY_INVALID="deadbeef_invalid_key_0000000000000000000000000000000000000000"
 
 # DB container resolution: env → compose → literal (issue #19).
@@ -149,9 +152,9 @@ else
 fi
 fi
 
-# T03 AUTH_WORK
-T="T03 AUTH_WORK"
-resp=$(api "$WEBHOOK/api/manage" "$KEY_WORK" '{"action":"stats"}')
+# T03 AUTH_ISOTEST
+T="T03 AUTH_ISOTEST"
+resp=$(api "$WEBHOOK/api/manage" "$KEY_ISO" '{"action":"stats"}')
 total=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
 if [[ -n "$total" ]] && (( total < 30 )); then
   pass "$T (total_blocks=$total)"
@@ -161,7 +164,7 @@ fi
 
 # T04 SCOPE_ISOLATION
 T="T04 SCOPE_ISOLATION"
-resp=$(api "$WEBHOOK/api/manage" "$KEY_WORK" '{"action":"guard-list"}')
+resp=$(api "$WEBHOOK/api/manage" "$KEY_ISO" '{"action":"guard-list"}')
 if [[ -z "$resp" ]]; then
   # Empty response = no blocks visible (scope isolation working)
   pass "$T (empty response, no private blocks leaked)"
@@ -464,14 +467,14 @@ print(';'.join(problems) if problems else 'OK ' + str(stats.get('nodes')) + ' no
   if [[ "$t19_check" != OK* ]]; then
     fail "$T" "payload check: ${t19_check:-unparseable response: ${resp:0:100}}"
   else
-    # 404-equality: a private block (invisible to KEY_WORK) and a nonexistent
+    # 404-equality: a private block (invisible to KEY_ISO) and a nonexistent
     # UUID must produce byte-identical 404 bodies.
     t19_priv=$($DB_CMD -c "SELECT id FROM context_blocks WHERE scope='private' AND NOT is_archived LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
     t19_missing="00000000-0000-7000-8000-000000000000"
     t19_b1=$(curl -s --max-time 10 -w '\n%{http_code}' "$WEBHOOK/api/graph/ego?block=$t19_priv" \
-      -H "X-Context-Key: $KEY_WORK" 2>/dev/null)
+      -H "X-Context-Key: $KEY_ISO" 2>/dev/null)
     t19_b2=$(curl -s --max-time 10 -w '\n%{http_code}' "$WEBHOOK/api/graph/ego?block=$t19_missing" \
-      -H "X-Context-Key: $KEY_WORK" 2>/dev/null)
+      -H "X-Context-Key: $KEY_ISO" 2>/dev/null)
     t19_code1="${t19_b1##*$'\n'}"; t19_body1="${t19_b1%$'\n'*}"
     t19_code2="${t19_b2##*$'\n'}"; t19_body2="${t19_b2%$'\n'*}"
     if [[ "$t19_code1" == "404" && "$t19_code2" == "404" && "$t19_body1" == "$t19_body2" ]]; then
