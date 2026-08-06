@@ -259,11 +259,11 @@ The CSR path reads nodes and edges in **one repeatable-read transaction** and bu
 
 Leave it off until the identity gate has been green across several deploys on your own corpus.
 
-### The clustering engine itself is not switched yet
+### The clustering engine
 
-`internal/louvain` exists in the binary as of this release but has **no consumer**: the rebuild still calls gonum on both input paths. There is no configuration key to switch it, and nothing in the running system behaves differently — the package is a leaf with unit gates and benchmarks only. The engine switch, its config key and the one-time partition break it implies are a later wave.
+Since v4.31.0 the rebuild runs on `internal/louvain`, the project's own Louvain/Leiden kernel (`engine=ctx` is the shipped default; gonum remains in the binary as the rollback path — a config flip, not a redeploy). The switch was cut as an announced release step: the one-time partition break it implies is absorbed by the topic layer's tombstone re-attach window.
 
-Why it is worth knowing anyway: the wall that `graph_overview.max_nodes` guards against is an implementation property, not a property of the Louvain method. gonum recomputes each community's total degree on every evaluation (its own source comments say the saving "does not appear to be compelling") and re-sweeps every node on every iteration instead of queueing the ones a move actually touched. Fixing both, measured on the same graphs at constant density:
+Why the own kernel: the wall that `graph_overview.max_nodes` guards against is an implementation property, not a property of the Louvain method. gonum recomputes each community's total degree on every evaluation (its own source comments say the saving "does not appear to be compelling") and re-sweeps every node on every iteration instead of queueing the ones a move actually touched. Fixing both, measured on the same graphs at constant density:
 
 | Nodes | Pairs | gonum | own kernel | Factor |
 |---|---|---|---|---|
@@ -271,13 +271,13 @@ Why it is worth knowing anyway: the wall that `graph_overview.max_nodes` guards 
 | 200 000 | 449 575 | 31.7 s | 126 ms | 252× |
 | 400 000 | 899 260 | 100.7 s | 284 ms | 355× |
 
-Modularity is identical to four decimal places, and the factor grows with the corpus because gonum's cost is superlinear while the queue-based one is near-linear. Treat these as what they are: bench numbers on synthetic corpora, from a package nothing calls yet.
+Modularity is identical to four decimal places, and the factor grows with the corpus because gonum's cost is superlinear while the queue-based one is near-linear. The S12 acceptance run on a real-shaped corpus confirmed the scale target: 9.8M nodes clustered in 30.7 s (K1) / 86.5 s (K2) at σ-drift < 4e-18.
 
 The package also carries an optional refinement pass that splits any community into its connected components before the next aggregation level, so a community can never be delivered in two pieces with no edge between them. That failure mode is documented in the Leiden literature for sweep-based Louvain; against this kernel it could not be reproduced in 2 400 runs, plausibly because re-queueing a departing node's neighbours re-evaluates them immediately instead of a full sweep later. The pass is kept as a guarantee, not as a repair — it cannot lower modularity, and on an already-connected partition it changes nothing.
 
 ### Switching the engine: `graph_overview.engine`
 
-`CTX_GRAPH_OVERVIEW_ENGINE` (`gonum` | `ctx`, default **gonum**, hot) selects the clustering core. The default is deliberate and should stay until you plan a cut: **switching it recomputes every `cluster_id` in one go.** The topic layer absorbs that through the tombstone re-attach window, so raise `graph_overview.tombstone_retention` to cover at least two rebuild cycles *before* the switch, and do it as an announced release step rather than a config tweak.
+`CTX_GRAPH_OVERVIEW_ENGINE` (`gonum` | `ctx`, default **ctx** since v4.31.0, hot) selects the clustering core. **Switching it recomputes every `cluster_id` in one go.** The topic layer absorbs that through the tombstone re-attach window, so make sure `graph_overview.tombstone_retention` covers at least two rebuild cycles *before* any switch (the shipped 45 d default does), and treat a switch as an announced release step rather than a config tweak — that is how the v4.31.0 cut itself was done.
 
 An unknown value is a **boot error**, not a fallback. Writing `engine=leiden` and silently getting a gonum partition would be indistinguishable from success.
 

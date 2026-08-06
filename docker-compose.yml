@@ -183,7 +183,10 @@ services:
       # CSR_LOADER schaltet das Eingabe-Substrat um (ergebnisgleich, deutlich
       # speicherguenstiger); engine=ctx impliziert es ohnehin. REFINE
       # garantiert zusammenhaengende Communities und wirkt nur bei engine=ctx.
-      CTX_GRAPH_OVERVIEW_ENGINE: ${CTX_GRAPH_OVERVIEW_ENGINE:-gonum}
+      # v4.31.0 (UD-03-04, Board-Entscheid A2 2026-08-05): eigener Louvain/Leiden-Kern
+      # als Live-Engine — Release-gebündelte Umschaltung, tombstone_retention deckt
+      # den einmaligen Partitionsbruch (Grabstein-Gate >=80 % Re-Attach).
+      CTX_GRAPH_OVERVIEW_ENGINE: ${CTX_GRAPH_OVERVIEW_ENGINE:-ctx}
       CTX_GRAPH_OVERVIEW_TIME_BUDGET: ${CTX_GRAPH_OVERVIEW_TIME_BUDGET:-600}
       CTX_GRAPH_OVERVIEW_MAX_NODES_CTX: ${CTX_GRAPH_OVERVIEW_MAX_NODES_CTX:-5000000}
       CTX_GRAPH_OVERVIEW_CSR_LOADER: ${CTX_GRAPH_OVERVIEW_CSR_LOADER:-false}
@@ -308,10 +311,11 @@ services:
     deploy:
       resources:
         limits:
-          # UD-02-04 Stufe 1 (User-Freigabe 2026-08-05): der Ist-Rechenpfad liegt
-          # am 200k-Cap bei ~254 MB — 256M war die dokumentierte OOM-Flanke (R7).
-          # Staffel: 512M heute · >=1G ab 1M@K2 · >=2G/4G am 10M-Ziel (design/04 §6.3).
-          memory: 512M
+          # UD-02-04 Stufe 2 (Board-Entscheid C3=1g, XML-Rückgabe 2026-08-05T23:14Z):
+          # Headroom für engine=ctx-Erstlauf + centroid_build. Stufe 1 (512M) war
+          # die Freigabe vom 05.08. gegen die 256M-OOM-Flanke (R7). S12-korrigierte
+          # Staffel: >=3G K1 / >=8G K2 + Elternlast am 10M-Ziel (design/04 §6.3).
+          memory: 1G
         reservations:
           memory: 32M
     logging:

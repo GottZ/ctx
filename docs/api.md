@@ -230,7 +230,7 @@ Params are the ego set MINUS `block`/`hops`/`per_node_cap`: `limit` (default **1
 
 ### Overview (cluster "landkarte")
 
-`GET /api/graph/overview` returns the cluster supergraph: a few hundred meta-nodes (precomputed Louvain communities over the dream-link graph) with `size`, `top_categories`, a representative block, and aggregated inter-cluster meta-edges. The Louvain rebuild runs offline in the scheduler (`internal/overview`, gonum); the endpoint only reads precomputed tables. Since WF T6 the node set is policy-cut: a block becomes a Louvain node only if its type is on the registry visibility allowlist AND carries `overview.include=true`.
+`GET /api/graph/overview` returns the cluster supergraph: a few hundred meta-nodes (precomputed Louvain communities over the dream-link graph) with `size`, `top_categories`, a representative block, and aggregated inter-cluster meta-edges. The Louvain rebuild runs offline in the scheduler (`internal/overview`; clustering core selected by `graph_overview.engine`, default the own `internal/louvain` kernel since v4.31.0); the endpoint only reads precomputed tables. Since WF T6 the node set is policy-cut: a block becomes a Louvain node only if its type is on the registry visibility allowlist AND carries `overview.include=true`.
 
 ```
 GET /api/graph/overview?min_cluster_size=1&min_inter_cluster_weight=0&node_limit=500&edge_limit=2000
