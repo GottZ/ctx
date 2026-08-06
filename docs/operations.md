@@ -287,6 +287,10 @@ The engine also decides **which cap key applies** — `graph_overview.max_nodes`
 
 The freeze reports the **existing** `skip_reason = 'timeout'` rather than a new value, so no migration is needed; the run journal carries the finer distinction. And a frozen run touches no identity: no topic is retired, renamed or relabelled.
 
+### Kicking a rebuild ahead of cadence: `overview-rebuild-start`
+
+`POST /api/manage` with `{"action":"overview-rebuild-start"}` (server-admin) wakes the rebuild loop before its `rebuild_interval` elapses — built for release steps whose evidence lives in the next rebuild (an engine cut's tombstone re-attach, a centroid backfill), where waiting out a six-hour timer is dead time. The kick takes the SAME path as the interval arm: tenant rotation, yield-on-active-queries, timeout and journal semantics are identical, and the interval re-arms after the run. The response is asynchronous (`armed:true`, or `armed:false` when a kick is already pending — coalesced, not an error); progress is read from `graph_overview_run`, not from the response.
+
 ### The child memory budget: `graph_overview.worker_mem_limit`
 
 `CTX_GRAPH_OVERVIEW_WORKER_MEM_LIMIT` (bytes, default **0 = off**, hot) caps the rebuild child's Go heap and adds a pre-flight estimate that turns "out of memory" into a clean skip with a journal row.

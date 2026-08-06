@@ -247,6 +247,14 @@ type Scheduler struct {
 	// Boot happens-before contract, never mutated after Run.
 	overviewWorkerArgv []string
 
+	// overviewKick wakes runOverviewRebuild before its interval elapses — the
+	// manual trigger behind the manage action overview-rebuild-start (A2-Gate:
+	// an engine cut must not wait six hours for its tombstone evidence).
+	// Buffered(1): a kick while one is already pending coalesces; a kick
+	// DURING a running rebuild arms the next loop iteration, it never
+	// parallelizes rebuilds (the select is only reached between runs).
+	overviewKick chan struct{}
+
 	// graphCache is the Achse-05 W05.2 CSR-cache manager (double-buffer store +
 	// Dirty-Age clock + state automaton, design/05 §4.6). graphcache owns the
 	// state, this scheduler owns the cadence (runGraphCacheRebuild). Created in
@@ -331,10 +339,11 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 		cfg:         store,
 		backendPool: backendPool,
 		startup:     startup,
-		runCycle:    dream.RunDreamCycle,
-		classify:    llm.ClassifyBlockBool,
-		runDone:     make(chan struct{}),
-		graphCache:  graphcache.NewManager(),
+		runCycle:     dream.RunDreamCycle,
+		classify:     llm.ClassifyBlockBool,
+		runDone:      make(chan struct{}),
+		graphCache:   graphcache.NewManager(),
+		overviewKick: make(chan struct{}, 1),
 	}
 	s.backgroundTenantsFn = s.backgroundTenants
 	return s
@@ -896,8 +905,29 @@ func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(interval):
+		case <-s.overviewKick:
+			// Manual trigger (overview-rebuild-start). Deliberately the SAME
+			// code path as the interval arm — tenant rotation, yield-on-demand
+			// and the run journal see no difference; only the wait is skipped.
+			// time.After re-arms on the next iteration, so a kick also resets
+			// the cadence instead of stacking an extra interval run.
+			slog.Info("scheduler: overview rebuild kicked manually")
 		}
 		s.yieldThenRebuildOverview(ctx, s.nextOverviewTenant(ctx, &tenantCursor))
+	}
+}
+
+// KickOverviewRebuild requests an overview rebuild ahead of the interval.
+// Non-blocking: returns true when the kick was armed, false when one is
+// already pending (coalesced — the pending kick covers this request too).
+// Safe from any goroutine; the rebuild itself still runs on the scheduler's
+// own loop with its usual yield/journal/timeout semantics.
+func (s *Scheduler) KickOverviewRebuild() bool {
+	select {
+	case s.overviewKick <- struct{}{}:
+		return true
+	default:
+		return false
 	}
 }
 

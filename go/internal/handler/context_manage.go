@@ -26,6 +26,14 @@ type DreamController interface {
 	GetDreamMode() (mode int32, throttleInterval time.Duration)
 }
 
+// OverviewController is the scheduler surface behind overview-rebuild-start:
+// kick the cluster-overview rebuild ahead of its interval. The production
+// scheduler implements it; wired via SetOverviewController (server.go, the
+// SetForgeController pattern — no constructor churn), nil ⇒ 503.
+type OverviewController interface {
+	KickOverviewRebuild() bool
+}
+
 // ManageHandler handles POST /api/manage.
 type ManageHandler struct {
 	pool            *pgxpool.Pool
@@ -62,7 +70,14 @@ type ManageHandler struct {
 	// mutating process env (SecretsHandler pattern); nil falls back to
 	// sealbox.FromEnv lazily (sealboxOrNil) — no constructor churn.
 	openBox func() (*sealbox.Box, error)
+	// overview feeds overview-rebuild-start (A2-Gate der Scharfschaltung).
+	// Wired via SetOverviewController (server.go); nil ⇒ the action answers 503.
+	overview OverviewController
 }
+
+// SetOverviewController wires the scheduler's overview-kick surface.
+// Boot happens-before: called in server.go before the server serves.
+func (h *ManageHandler) SetOverviewController(oc OverviewController) { h.overview = oc }
 
 // SetAdmitter wires the ONE process-wide dispatch admission layer (MW3).
 // Boot happens-before: called in NewRouter before the server serves.
@@ -239,6 +254,8 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		h.dispatchTenantAction(w, r, authResult, req)
 	case "blocks-audit-start", "blocks-audit-status", "blocks-classify-start", "blocks-classify-status":
 		h.dispatchBlocksAction(w, r, req)
+	case "overview-rebuild-start":
+		h.handleOverviewRebuildStart(w)
 	case "type-list", "type-get", "type-create", "type-update", "type-delete":
 		// Block-type registry family (WF T10, design/01 §7-T10). Tier split
 		// lives in actionTier (§5.4-N1: dispatch arm AND tier entry land in
@@ -320,6 +337,25 @@ func (h *ManageHandler) dispatchAPIKeyAction(w http.ResponseWriter, r *http.Requ
 	case "api-key-update":
 		h.handleApiKeyUpdate(w, r, req)
 	}
+}
+
+// handleOverviewRebuildStart kicks the cluster-overview rebuild ahead of its
+// interval (A2-Gate: der Engine-Cut soll seine Grabstein-Evidenz nicht sechs
+// Stunden vertagen). Asynchronous by design — the rebuild runs on the
+// scheduler loop with its usual yield/journal/timeout semantics; progress is
+// read from graph_overview_run, not from this response.
+func (h *ManageHandler) handleOverviewRebuildStart(w http.ResponseWriter) {
+	if h.overview == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"success": false, "error": "overview controller not wired"})
+		return
+	}
+	armed := h.overview.KickOverviewRebuild()
+	note := "rebuild kicked — follow graph_overview_run for the journal row"
+	if !armed {
+		note = "kick already pending — coalesced, no second run queued"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "armed": armed, "note": note})
 }
 
 // dispatchBlocksAction routes the block-corpus maintenance actions (G41 audit +
@@ -492,6 +528,10 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 		// blocks-classify-* (G40): a corpus-wide mutation (even if upgrade-only)
 		// + the status/samples disclose block titles/topology — same surface.
 		"blocks-classify-start", "blocks-classify-status",
+		// overview-rebuild-start: a manual kick recomputes every tenant
+		// partition's clusters ahead of cadence — operator-scale compute
+		// spend on a server-global arm (same reasoning as blocks-audit).
+		"overview-rebuild-start",
 		// tenant-* lifecycle (MT T05a/T05b, Achse 01): the list discloses tenant
 		// topology, create/update mutate the owner register (suspend = a
 		// system-wide access cut at the next auth via the 060 ctx_auth gate),

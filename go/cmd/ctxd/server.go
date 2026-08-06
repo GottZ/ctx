@@ -137,6 +137,8 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	manageH := handler.NewManageHandler(pool, cfgStore, scheduler, backendPool, scheduler, gamingReload, quota, blocktypeReg)
 	// MW3: the backend-test chat probe acquires through the dispatcher (N8b).
 	manageH.SetAdmitter(dispatcher)
+	// overview-rebuild-start (A2): manual kick of the cluster-overview rebuild.
+	manageH.SetOverviewController(scheduler)
 	// Forge PULL sync engine (Achse-02 I-F). Fail-closed gates: the tenant gate
 	// is store.TenantStatusForScope (found=false ⇒ skip + disable, S13); the
 	// issue-policy gate refuses a run unless the registry resolves an `issue`
