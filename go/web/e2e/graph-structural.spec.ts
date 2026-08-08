@@ -41,6 +41,20 @@ async function enterFocusStage(page: Page): Promise<void> {
   )
 }
 
+/** The GC2/GC3 checkbox list lives inside the link-class MultiSelect since
+ *  the panel rework — open its popover (trigger name = "link class <summary>").
+ *  The popover stays open across toggles (multi-select contract). */
+async function openEdgeMenu(page: Page): Promise<void> {
+  await page.getByRole('button', { name: /^link class/ }).click()
+}
+
+/** The focus deep-link opens a detail window that can overlap the panel —
+ *  close it before clicking panel controls (pointer-events intercept). */
+async function closeFocusWindow(page: Page): Promise<void> {
+  const closeBtn = page.getByRole('button', { name: 'close' })
+  if ((await closeBtn.count()) > 0) await closeBtn.first().click()
+}
+
 test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)', () => {
   test('mount with structural_edges does not throw; edges land kind-tagged', async ({ page }) => {
     const errors = trackPageErrors(page)
@@ -141,10 +155,8 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
         return out
       })
 
-    // Das Fokus-Detail-Fenster des Deep-Links überlappt das Panel — schließen,
-    // sonst fängt es den Checkbox-Klick ab (pointer-events-Intercept).
-    const closeBtn = page.getByRole('button', { name: 'close' })
-    if ((await closeBtn.count()) > 0) await closeBtn.first().click()
+    await closeFocusWindow(page)
+    await openEdgeMenu(page)
 
     const referencesBox = page.locator('label.check', { hasText: 'references' }).locator('input[type=checkbox]')
     await expect(referencesBox).toBeChecked()
@@ -170,8 +182,8 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
     await seedSession(page, { theme: 'dark' })
     await enterFocusStage(page)
 
-    const closeBtn = page.getByRole('button', { name: 'close' })
-    if ((await closeBtn.count()) > 0) await closeBtn.first().click()
+    await closeFocusWindow(page)
+    await openEdgeMenu(page)
 
     // 'causal' ist eine reine dream-Klasse — mit structural hat sie nichts zu tun.
     const causalBox = page.locator('label.check', { hasText: 'causal' }).locator('input[type=checkbox]')
@@ -202,6 +214,10 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
   test('legend semantics: accessible name, stats line, onboarding hint (GC3)', async ({ page }) => {
     await seedSession(page, { theme: 'dark' })
     await enterFocusStage(page)
+
+    // The legend rows live in the link-class popover since the panel rework.
+    await closeFocusWindow(page)
+    await openEdgeMenu(page)
 
     // structural checkbox: label text + visually-hidden semantics suffix
     const refBox = page.getByRole('checkbox', { name: /references structural — deterministic reference/ })
@@ -370,6 +386,15 @@ test.describe('structural edges (GA2 consumption + GC1 rendering + GC2 filter)',
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
         const contract = contracts.find((c) => c.route === '/graph')
         if (!contract) throw new Error('graph contract missing from registry')
+        // Pass 1: the stage as it mounts (open detail window + panel triggers).
+        await runAxeGate(page, contract, theme, viewport, testInfo)
+        // Pass 2: the link-class popover open — the legend checkboxes moved in
+        // there with the panel rework, and the negative probe (a structural
+        // checkbox losing its accessible name fails the label rule) only bites
+        // while they are in the DOM.
+        await closeFocusWindow(page)
+        await openEdgeMenu(page)
+        await expect(page.getByRole('checkbox', { name: 'topical', exact: true })).toBeVisible()
         await runAxeGate(page, contract, theme, viewport, testInfo)
       })
     }

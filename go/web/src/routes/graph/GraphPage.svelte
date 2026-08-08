@@ -447,6 +447,12 @@
   }
   .focus {
     font-size: var(--fs-xs);
+    /* Ellipsize the UUID visually — the DOM keeps the full id (copyable via
+       select-all/title, asserted by the GC4 spec), the row stays compact. */
+    max-width: 9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .back {
     border: 1px solid var(--border);

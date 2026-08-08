@@ -35,6 +35,27 @@ export function defaultFilters(): GraphFilters {
   }
 }
 
+/** Dropdown presentation of the category allowlist: the DEFAULT (empty
+ *  selection = all pass) renders as "every option checked". */
+export function categoryChecked(selected: string[], cat: string): boolean {
+  return selected.length === 0 || selected.includes(cat)
+}
+
+/**
+ * Toggle a category under the all-checked presentation while keeping the
+ * model's allowlist semantics: unchecking from the default materializes the
+ * allowlist as options-minus-that; a selection that covers every option
+ * normalizes back to [] — so isDefault() holds and categories loaded LATER
+ * stay visible (no permanently materialized allowlist).
+ */
+export function toggleCategory(selected: string[], options: string[], cat: string): string[] {
+  let next: string[]
+  if (selected.length === 0) next = options.filter((c) => c !== cat)
+  else if (selected.includes(cat)) next = selected.filter((c) => c !== cat)
+  else next = [...selected, cat]
+  return options.every((c) => next.includes(c)) ? [] : next
+}
+
 export function isDefault(f: GraphFilters): boolean {
   return (
     f.categories.length === 0 &&

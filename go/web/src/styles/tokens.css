@@ -148,6 +148,7 @@
   --z-sheet: 250;
   --z-overlay: 300;
   --z-window: 350; /* Floating-Windows (G5) — über chrome-left (--z-overlay) */
+  --z-popover: 400; /* Dropdown-Popover (MultiSelect) — ordnet nur Geschwister im lokalen Stacking-Context des Hosts */
 
   color-scheme: dark;
 }

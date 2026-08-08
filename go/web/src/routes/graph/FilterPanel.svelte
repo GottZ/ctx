@@ -1,5 +1,13 @@
 <script lang="ts">
-  import { ALL_LINK_CLASSES, defaultFilters, isDefault, type GraphFilters } from '../../lib/graph/filters'
+  import MultiSelect from '../../lib/components/MultiSelect.svelte'
+  import {
+    ALL_LINK_CLASSES,
+    categoryChecked,
+    defaultFilters,
+    isDefault,
+    toggleCategory,
+    type GraphFilters,
+  } from '../../lib/graph/filters'
 
   let {
     filters,
@@ -17,70 +25,116 @@
     onchange: (next: GraphFilters) => void
   } = $props()
 
-  // Checkbox source = loaded classes ∪ currently hidden — a hidden class must
-  // keep its (unchecked) checkbox even after its last edge left the client,
-  // or the user could never re-enable it (same pattern as the category list).
+  // Option source = loaded classes ∪ currently filtered — a hidden class must
+  // keep its (unchecked) row even after its last edge left the client, or the
+  // user could never re-enable it. Same union for categories: a selected
+  // category whose last node was evicted must stay unselectable-off.
   const structClassOptions = $derived(
     [...new Set([...structClasses, ...filters.structClassesHidden])].sort(),
   )
+  const categoryOptions = $derived([...new Set([...categories, ...filters.categories])].sort())
 
-  function toggleLinkClass(rel: string): void {
-    const has = filters.linkClasses.includes(rel)
-    const next = has ? filters.linkClasses.filter((r) => r !== rel) : [...filters.linkClasses, rel]
-    onchange({ ...filters, linkClasses: next })
+  // ONE dropdown over both edge vocabularies (GC3: the list IS the edge
+  // legend): dream classes first (fixed five), then the registry-driven
+  // structural classes. The two halves keep their different filter models —
+  // dream = allowlist, structural = blocklist (GC2) — behind one checked().
+  const edgeOptions = $derived([...ALL_LINK_CLASSES, ...structClassOptions])
+
+  const isDream = (opt: string): boolean => (ALL_LINK_CLASSES as readonly string[]).includes(opt)
+
+  function edgeChecked(opt: string): boolean {
+    return isDream(opt) ? filters.linkClasses.includes(opt) : !filters.structClassesHidden.includes(opt)
   }
 
-  // Blocklist toggle (GC2): unchecking ADDS to structClassesHidden, checking
-  // removes — no materialization step, no special state.
-  function toggleStructClass(cls: string): void {
-    const hidden = filters.structClassesHidden.includes(cls)
-    const next = hidden
-      ? filters.structClassesHidden.filter((c) => c !== cls)
-      : [...filters.structClassesHidden, cls]
-    onchange({ ...filters, structClassesHidden: next })
+  function toggleEdge(opt: string): void {
+    if (isDream(opt)) {
+      const has = filters.linkClasses.includes(opt)
+      const next = has ? filters.linkClasses.filter((r) => r !== opt) : [...filters.linkClasses, opt]
+      onchange({ ...filters, linkClasses: next })
+    } else {
+      // Blocklist toggle (GC2): unchecking ADDS to structClassesHidden,
+      // checking removes — no materialization step, no special state.
+      const hidden = filters.structClassesHidden.includes(opt)
+      const next = hidden
+        ? filters.structClassesHidden.filter((c) => c !== opt)
+        : [...filters.structClassesHidden, opt]
+      onchange({ ...filters, structClassesHidden: next })
+    }
   }
 
-  function toggleCategory(cat: string): void {
-    const has = filters.categories.includes(cat)
-    const next = has ? filters.categories.filter((c) => c !== cat) : [...filters.categories, cat]
-    onchange({ ...filters, categories: next })
+  // "all" restores default edge visibility; "none"/"only" blocklist every
+  // KNOWN structural class — unknown registry growth stays visible in every
+  // filter state (the GC2 blocklist invariant holds by construction).
+  function edgesAll(): void {
+    onchange({ ...filters, linkClasses: [...ALL_LINK_CLASSES], structClassesHidden: [] })
+  }
+  function edgesNone(): void {
+    onchange({ ...filters, linkClasses: [], structClassesHidden: structClassOptions })
+  }
+  function edgeOnly(opt: string): void {
+    if (isDream(opt)) {
+      onchange({ ...filters, linkClasses: [opt], structClassesHidden: structClassOptions })
+    } else {
+      onchange({ ...filters, linkClasses: [], structClassesHidden: structClassOptions.filter((c) => c !== opt) })
+    }
+  }
+
+  // Categories: allowlist model (empty = all pass) behind the all-checked
+  // presentation — toggleCategory (filters.ts, unit-pinned) materializes and
+  // normalizes. No "none": an empty allowlist MEANS "all", so none is
+  // unrepresentable; "only" covers the isolation use case.
+  function onCategoryToggle(cat: string): void {
+    onchange({ ...filters, categories: toggleCategory(filters.categories, categoryOptions, cat) })
+  }
+  function categoriesAll(): void {
+    onchange({ ...filters, categories: [] })
+  }
+  function categoryOnly(cat: string): void {
+    onchange({ ...filters, categories: [cat] })
   }
 </script>
 
 <div class="panel">
-  <fieldset>
-    <legend>link class</legend>
-    <!-- GC3: the fieldset IS the edge legend (design 03-§4.4) — every checkbox
-         carries an aria-hidden swatch mirroring the canvas form language:
-         straight line (dream), strong line (supersedes), curved arrow
-         (structural). Colors come from the SAME --graph-* tokens the canvas
-         bakes, so the legend can never drift from the render. -->
-    {#each ALL_LINK_CLASSES as rel (rel)}
-      <label class="check">
-        <input type="checkbox" checked={filters.linkClasses.includes(rel)} onchange={() => toggleLinkClass(rel)} />
-        <svg class="sw {rel === 'supersedes' ? 'sw-strong' : 'sw-edge'}" viewBox="0 0 20 10" aria-hidden="true">
+  <!-- GC3: the dropdown IS the edge legend (design 03-§4.4) — every row
+       carries an aria-hidden swatch mirroring the canvas form language:
+       straight line (dream), strong line (supersedes), curved arrow
+       (structural). Colors come from the SAME --graph-* tokens the canvas
+       bakes, so the legend can never drift from the render. -->
+  <MultiSelect
+    label="link class"
+    options={edgeOptions}
+    checked={edgeChecked}
+    ontoggle={toggleEdge}
+    onall={edgesAll}
+    onnone={edgesNone}
+    ononly={edgeOnly}
+  >
+    {#snippet option(opt)}
+      {#if isDream(opt)}
+        <svg class="sw {opt === 'supersedes' ? 'sw-strong' : 'sw-edge'}" viewBox="0 0 20 10" aria-hidden="true">
           <line x1="1" y1="5" x2="19" y2="5" />
         </svg>
-        {rel}
-      </label>
-    {/each}
-    <!-- structural sub-block (GC2): same .check interaction pattern, checked =
-         NOT in the blocklist. Options are registry-driven (loaded ∪ hidden). -->
-    {#each structClassOptions as cls (cls)}
-      <label class="check">
-        <input
-          type="checkbox"
-          checked={!filters.structClassesHidden.includes(cls)}
-          onchange={() => toggleStructClass(cls)}
-        />
+        {opt}
+      {:else}
         <svg class="sw sw-structural" viewBox="0 0 20 10" aria-hidden="true">
           <path d="M1 8 Q 9 0 16 4" />
           <path d="M12 2 L 16 4 L 12 7" />
         </svg>
-        {cls}<span class="sr-only"> structural — deterministic reference</span>
-      </label>
-    {/each}
-  </fieldset>
+        {opt}<span class="sr-only"> structural — deterministic reference</span>
+      {/if}
+    {/snippet}
+  </MultiSelect>
+
+  {#if categoryOptions.length > 0}
+    <MultiSelect
+      label="category"
+      options={categoryOptions}
+      checked={(cat) => categoryChecked(filters.categories, cat)}
+      ontoggle={onCategoryToggle}
+      onall={categoriesAll}
+      ononly={categoryOnly}
+    />
+  {/if}
 
   <fieldset>
     <legend>min confidence (dream)</legend>
@@ -93,29 +147,21 @@
       min="0"
       max="1"
       step="0.05"
+      inputmode="decimal"
       aria-label="min confidence (dream)"
       value={filters.minConfidence}
       oninput={(e) => onchange({ ...filters, minConfidence: Number(e.currentTarget.value) || 0 })}
     />
   </fieldset>
 
-  {#if categories.length > 0}
-    <fieldset>
-      <legend>category</legend>
-      {#each categories as cat (cat)}
-        <label class="check">
-          <input type="checkbox" checked={filters.categories.includes(cat)} onchange={() => toggleCategory(cat)} />
-          {cat}
-        </label>
-      {/each}
-    </fieldset>
-  {/if}
-
   <fieldset>
     <legend>created</legend>
+    <!-- Cross-bounds: each picker excludes dates the other side already rules
+         out — an empty-by-construction range is not selectable. -->
     <input
       type="date"
       aria-label="created after"
+      max={filters.createdBefore || undefined}
       value={filters.createdAfter}
       oninput={(e) => onchange({ ...filters, createdAfter: e.currentTarget.value })}
     />
@@ -123,6 +169,7 @@
     <input
       type="date"
       aria-label="created before"
+      min={filters.createdAfter || undefined}
       value={filters.createdBefore}
       oninput={(e) => onchange({ ...filters, createdBefore: e.currentTarget.value })}
     />
@@ -137,7 +184,7 @@
   .panel {
     display: flex;
     flex-wrap: wrap;
-    align-items: flex-end;
+    align-items: center;
     gap: var(--space-3);
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border);
@@ -164,20 +211,9 @@
     color: var(--text-faint);
   }
 
-  .check {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    font-family: var(--font-mono);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .check input {
-    accent-color: var(--accent);
-    margin: 0;
-  }
-
-  /* Legend swatches (GC3): token-bound stroke = the exact canvas colors. */
+  /* Legend swatches (GC3): token-bound stroke = the exact canvas colors.
+     Rendered inside the MultiSelect popup rows via the option snippet —
+     snippet content keeps THIS component's style scope. */
   .sw {
     width: 20px;
     height: 10px;

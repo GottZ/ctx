@@ -2,7 +2,15 @@
 // server param mirror, defaults are omitted from the ego query.
 
 import { describe, expect, it } from 'vitest'
-import { defaultFilters, edgeVisible, isDefault, nodeVisible, toEgoQuery } from './filters'
+import {
+  categoryChecked,
+  defaultFilters,
+  edgeVisible,
+  isDefault,
+  nodeVisible,
+  toEgoQuery,
+  toggleCategory,
+} from './filters'
 
 describe('nodeVisible', () => {
   const attrs = { category: 'learnings', createdAt: '2026-06-01T12:00:00Z' }
@@ -55,6 +63,42 @@ describe('edgeVisible', () => {
     const f = { ...defaultFilters(), minConfidence: 0.9 }
     expect(edgeVisible({ rel: 'references', conf: 0, kind: 'structural' }, f)).toBe(true)
     expect(edgeVisible({ rel: 'topical', conf: 0.5, kind: 'dream' }, f)).toBe(false)
+  })
+})
+
+// Dropdown presentation of the category allowlist (FilterPanel MultiSelect):
+// the default [] renders as all-checked; toggling materializes/normalizes so
+// the MODEL keeps its allowlist semantics (empty = all, isDefault holds).
+describe('categoryChecked / toggleCategory', () => {
+  const options = ['decisions', 'learnings', 'projects']
+
+  it('presents the default (empty selection) as all-checked', () => {
+    expect(categoryChecked([], 'learnings')).toBe(true)
+    expect(categoryChecked(['decisions'], 'learnings')).toBe(false)
+    expect(categoryChecked(['decisions'], 'decisions')).toBe(true)
+  })
+
+  it('unchecking from the default materializes options-minus-that', () => {
+    expect(toggleCategory([], options, 'learnings')).toEqual(['decisions', 'projects'])
+  })
+
+  it('unchecking from an active selection removes exactly that category', () => {
+    expect(toggleCategory(['decisions', 'projects'], options, 'projects')).toEqual(['decisions'])
+  })
+
+  it('re-checking the last missing category normalizes back to [] (no materialized allowlist)', () => {
+    expect(toggleCategory(['decisions', 'projects'], options, 'learnings')).toEqual([])
+  })
+
+  it('a selected-but-unloaded category still counts toward normalization via the option union', () => {
+    // 'archived' left the graph but is still selected — the caller passes the
+    // union as options, so checking the remaining loaded ones normalizes.
+    const union = ['archived', 'decisions']
+    expect(toggleCategory(['archived'], union, 'decisions')).toEqual([])
+  })
+
+  it('single-option corner: unchecking the only category is a no-op (falls back to all)', () => {
+    expect(toggleCategory([], ['decisions'], 'decisions')).toEqual([])
   })
 })
 
