@@ -18,6 +18,7 @@
     palette,
     highlightedIds,
     topId = null,
+    showLabels = true,
     onnodeclick,
     onnodedoubleclick,
   }: {
@@ -30,6 +31,11 @@
     highlightedIds?: Set<string>
     /** Top (focused) window's node — rendered stronger (size bump). */
     topId?: string | null
+    /** Display option (meta-row toggle): node labels on the canvas. OFF skips
+     *  only sigma's label layer (renderLabels) — hover boxes and highlighted
+     *  (open-window) nodes keep their labels, they render through drawHover,
+     *  a separate layer sigma draws regardless of this setting. */
+    showLabels?: boolean
     /** Single click — opens a floating window for the node. */
     onnodeclick?: (id: string) => void
     /** Double click = expand (+1 hop), design 05-§2. */
@@ -58,6 +64,7 @@
       labelColor: { color: palette.labelColor },
       labelFont: 'ui-monospace, monospace',
       labelSize: 11,
+      renderLabels: showLabels,
       defaultEdgeColor: palette.edgeColor,
       // Theme-fester Hover-/Selektions-Renderer (U02-W3): ersetzt sigmas
       // hartkodierten '#FFF'-Kasten durch palette.hoverBg + hoverStroke-Rahmen.
@@ -147,6 +154,16 @@
     // Der Hover-Drawer ist eine Closure über die ALTE Palette — beim Theme-
     // Wechsel neu setzen (Settings-Funktionen lesen nicht reaktiv, M5).
     r.setSetting('defaultDrawNodeHover', makeDrawNodeHover(palette))
+    r.refresh()
+  })
+
+  // Label toggle (display option): same guarded-settings pattern as the
+  // palette effect above — the constructor seeds the initial value, the
+  // pre-mount run is a no-op, every toggle pushes the setting + repaints.
+  $effect(() => {
+    const r = renderer
+    if (!r) return
+    r.setSetting('renderLabels', showLabels)
     r.refresh()
   })
 

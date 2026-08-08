@@ -278,4 +278,44 @@ test.describe('graph theme palette', () => {
     })
     expect(bg, 'Host folgt --graph-bg (Kontrast-Gate-Quelle), nicht --surface-0').toBe('rgb(1, 2, 3)')
   })
+
+  // Labels-Toggle (Meta-Row, Display-Option): flippt sigmas renderLabels-
+  // Setting am Ego-Renderer. Bewusst KEIN GraphFilters-Feld — isDefault()/
+  // reset bleiben filter-pur (der Toggle überlebt einen Filter-Reset).
+  // Hover-/Highlight-Labels laufen über drawHover (eigene Layer) und bleiben
+  // vom Setting unberührt — hier ungetestet, sigma-intern.
+  test('labels-Toggle flippt renderLabels am Ego-Renderer (aria-pressed synchron)', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/graph?focus=550e8400-e29b-41d4-a716-446655440001')
+    await waitForShell(page)
+    // Ego-Merge abwarten (egoFixture: 5 Kanten) — NICHT nur '__ctxGraph in
+    // window': das exponiert schon die zuerst gemountete OverviewMap.
+    await page.waitForFunction(
+      () => {
+        const g = (window as unknown as { __ctxGraph?: { graph: { edges(): string[] } } }).__ctxGraph
+        return !!g && g.graph.edges().length >= 5
+      },
+      null,
+      { timeout: 10_000 },
+    )
+    const readRenderLabels = () =>
+      page.evaluate(() => {
+        const g = (window as unknown as { __ctxGraph?: { renderer: { getSetting(k: string): unknown } } }).__ctxGraph
+        return g?.renderer.getSetting('renderLabels')
+      })
+    expect(await readRenderLabels(), 'Default: Labels an').toBe(true)
+
+    // Das Deep-Link-Detailfenster kann die Meta-Row überlappen — schließen.
+    const closeBtn = page.getByRole('button', { name: 'close' })
+    if ((await closeBtn.count()) > 0) await closeBtn.first().click()
+
+    const toggle = page.getByRole('button', { name: 'labels' })
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    expect(await readRenderLabels(), 'Toggle aus: renderLabels false').toBe(false)
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    expect(await readRenderLabels(), 'Toggle wieder an').toBe(true)
+  })
 })

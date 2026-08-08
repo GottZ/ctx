@@ -36,6 +36,10 @@
   let structCount = $state(0)
   // W4: filters drive the reducers instantly AND the params of new expands.
   let filters = $state(defaultFilters())
+  // Display option, deliberately NOT part of GraphFilters: labels touch no
+  // reducer predicate and no ego-query param — isDefault()/reset stay filter-
+  // pure. Session-scoped like the graph itself (resets with the page visit).
+  let showLabels = $state(true)
   // G5: node-click opens a floating window (multiple blocks open at once) instead
   // of a single-selection sidebar scalar. The store holds windows as logical
   // units; WindowManager renders them over the canvas. openIds/topId drive the
@@ -267,6 +271,7 @@
           {graph}
           {filters}
           {palette}
+          {showLabels}
           highlightedIds={store.openIds}
           topId={store.topId}
           onnodeclick={(id) => store.open(id, null)}
@@ -327,6 +332,14 @@
           disabled={busy}
           title="load every visible block (server-capped)"
           onclick={() => void loadAll()}>load all</button
+        >
+        <button
+          class="back"
+          class:on={showLabels}
+          type="button"
+          aria-pressed={showLabels}
+          title="node labels on the canvas — hover and open windows keep theirs"
+          onclick={() => (showLabels = !showLabels)}>labels</button
         >
         <code class="focus" title="focused block">{focus}</code>
         {#if busy}
@@ -469,6 +482,12 @@
   .back:disabled {
     cursor: default;
     opacity: 0.5;
+  }
+  /* Pressed state of the labels toggle — same accent grammar as the Pin
+     button (BlockDetailContent) and the filtered MultiSelect trigger. */
+  .back.on {
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .loading {
     color: var(--text-faint);
