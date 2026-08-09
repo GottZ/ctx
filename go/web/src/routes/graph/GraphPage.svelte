@@ -8,11 +8,19 @@
   import { defaultFilters, toEgoQuery } from '../../lib/graph/filters'
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
   import { readGraphPalette, recolorGraph } from '../../lib/graph/graph-theme'
+  import {
+    RENDERERS,
+    RENDERER_IDS,
+    loadRendererPref,
+    saveRendererPref,
+    type RendererComponent,
+    type RendererExports,
+    type RendererId,
+  } from '../../lib/graph/renderers'
   import { THEME_CHANGE_EVENT } from '../../lib/theme/theme.svelte'
   import { WindowStore } from '../../lib/windows/windows.svelte'
   import BlockDetailContent from './BlockDetailContent.svelte'
   import FilterPanel from './FilterPanel.svelte'
-  import GraphView from './GraphView.svelte'
   import OverviewMap from './OverviewMap.svelte'
   import SearchBox from './SearchBox.svelte'
   import WindowManager from './WindowManager.svelte'
@@ -23,8 +31,16 @@
   const graph = createGraph()
   const layout = new LayoutRunner()
 
-  let view = $state<ReturnType<typeof GraphView> | null>(null)
+  let view = $state<RendererExports | null>(null)
   let focus = $state<string | null>(null)
+  // RV1: Renderer-Wahl (Meta-Row-Select), in localStorage persistiert. Die
+  // Komponente lädt lazy — nur der aktive Renderer landet im Bundle; Sigma
+  // bleibt Default (e2e-visual-Baselines). threeD gilt nur für caps.threeD-
+  // Renderer (deck); three ist immer 3D und ignoriert den Toggle.
+  let rendererId = $state<RendererId>(loadRendererPref())
+  let RendererComp = $state<RendererComponent | null>(null)
+  let threeD = $state(false)
+  const rendererCaps = $derived(RENDERERS[rendererId].caps)
   let busy = $state(false)
   let error = $state<ApiError | null>(null)
   let truncated = $state(false)
@@ -77,6 +93,25 @@
     store.fallbackFocusEl = viewportEl ?? null
   })
 
+  // RV1: Renderer lazy laden + Wahl persistieren. Der alive-Guard verwirft
+  // ein spät auflösendes Modul nach einem weiteren Switch (letzter gewinnt).
+  // Layout-Ownership wandert mit: cosmos simuliert selbst auf der GPU → der
+  // FA2-Worker stoppt; zurück auf einen FA2-Renderer kickt das Layout neu an.
+  $effect(() => {
+    const id = rendererId
+    saveRendererPref(id)
+    let alive = true
+    void RENDERERS[id].load().then((m) => {
+      if (!alive) return
+      RendererComp = m.default
+      if (RENDERERS[id].caps.ownsLayout) layout.stop()
+      else if (graph.order > 1) layout.run(graph)
+    })
+    return () => {
+      alive = false
+    }
+  })
+
   // Deep-link sync: /graph?focus=<uuid> survives reload and is shareable.
   onMount(() => {
     const fromUrl = new URLSearchParams(location.search).get('focus')
@@ -125,7 +160,10 @@
       recomputeHops(graph, focus)
       evict(graph, focus)
     }
-    layout.run(graph)
+    // RV1: cosmos besitzt das Layout selbst (GPU-Simulation auf eigenen
+    // Buffern) — der FA2-Worker würde auf denselben graphology-Koordinaten
+    // gegenarbeiten. Alle anderen Renderer lesen FA2-Positionen.
+    if (!rendererCaps.ownsLayout) layout.run(graph)
     nodeCount = graph.order
     edgeCount = graph.size
     graphRev++
@@ -266,17 +304,27 @@
   {#if focus !== null}
     <div class="stage" bind:this={stageEl}>
       <div class="viewport" bind:this={viewportEl} tabindex="-1">
-        <GraphView
-          bind:this={view}
-          {graph}
-          {filters}
-          {palette}
-          {showLabels}
-          highlightedIds={store.openIds}
-          topId={store.topId}
-          onnodeclick={(id) => store.open(id, null)}
-          onnodedoubleclick={(id) => void expand(id)}
-        />
+        {#if RendererComp !== null}
+          <!-- RV1: {#key} remountet beim Switch — jeder Renderer baut seinen
+               eigenen Canvas/GL-Kontext auf und räumt ihn im onMount-Teardown
+               wieder ab; ein Props-morphender Übergang zwischen GL-Stacks
+               existiert nicht. -->
+          {#key rendererId}
+            <RendererComp
+              bind:this={view}
+              {graph}
+              {filters}
+              {palette}
+              {showLabels}
+              {graphRev}
+              {threeD}
+              highlightedIds={store.openIds}
+              topId={store.topId}
+              onnodeclick={(id) => store.open(id, null)}
+              onnodedoubleclick={(id) => void expand(id)}
+            />
+          {/key}
+        {/if}
       </div>
       <!-- U02 (design 04-§4.6): die Fenster-Schicht ist graph-frei; DIESE
            Kompositions-Wurzel injiziert die beiden Graph-Kopplungen —
@@ -337,10 +385,35 @@
           class="back"
           class:on={showLabels}
           type="button"
+          disabled={!rendererCaps.labels}
           aria-pressed={showLabels}
-          title="node labels on the canvas — hover and open windows keep theirs"
+          title={rendererCaps.labels
+            ? 'node labels on the canvas — hover and open windows keep theirs'
+            : 'labels: sigma renderer only'}
           onclick={() => (showLabels = !showLabels)}>labels</button
         >
+        <!-- RV1: Renderer-Switch — vier Engines über derselben graphology-
+             Instanz; Wahl überlebt den Seitenbesuch (localStorage). -->
+        <select
+          class="renderer-select"
+          aria-label="graph renderer"
+          title="graph renderer — switch live, same data"
+          bind:value={rendererId}
+        >
+          {#each RENDERER_IDS as id (id)}
+            <option value={id}>{RENDERERS[id].label}</option>
+          {/each}
+        </select>
+        {#if rendererCaps.threeD && rendererId === 'deck'}
+          <button
+            class="back"
+            class:on={threeD}
+            type="button"
+            aria-pressed={threeD}
+            title="orbit the graph in 3D (z = semantic axis)"
+            onclick={() => (threeD = !threeD)}>3D</button
+          >
+        {/if}
         <code class="focus" title="focused block">{focus}</code>
         {#if busy}
           <span class="loading" aria-busy="true">loading…</span>
@@ -488,6 +561,19 @@
   .back.on {
     border-color: var(--accent);
     color: var(--accent);
+  }
+  /* RV1: Renderer-Select — gleiche Formensprache wie die .back-Buttons. */
+  .renderer-select {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    color: var(--text);
+    cursor: pointer;
+    font-size: var(--fs-xs);
+    padding: 0.15rem 0.35rem;
+  }
+  .renderer-select:hover {
+    border-color: var(--text-dim);
   }
   .loading {
     color: var(--text-faint);

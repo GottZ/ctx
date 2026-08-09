@@ -26,6 +26,15 @@ export class LayoutRunner {
     this.#stopTimer = setTimeout(() => this.#layout?.stop(), seconds * 1000)
   }
 
+  /** Pause without killing (RV1: renderer with own layout takes over —
+   *  cosmos simuliert auf der GPU; the worker would fight it on the same
+   *  graphology coords). run() restarts after a switch back. */
+  stop(): void {
+    if (this.#stopTimer !== null) clearTimeout(this.#stopTimer)
+    this.#stopTimer = null
+    if (this.#layout?.isRunning()) this.#layout.stop()
+  }
+
   /** Kill the worker (component unmount). */
   dispose(): void {
     if (this.#stopTimer !== null) clearTimeout(this.#stopTimer)

@@ -28,6 +28,7 @@
     "@tsconfig/svelte": "5.0.8",
     "@types/markdown-it": "14.1.2",
     "@types/node": "26.1.1",
+    "@types/three": "0.185.4",
     "dompurify": "3.4.11",
     "eventsource-parser": "3.1.0",
     "graphology": "0.26.0",
@@ -49,7 +50,11 @@
   },
   "dependencies": {
     "@atlaskit/pragmatic-drag-and-drop": "2.0.1",
-    "@sigma/edge-curve": "^3.1.0"
+    "@cosmos.gl/graph": "3.4.0",
+    "@deck.gl/core": "9.3.9",
+    "@deck.gl/layers": "9.3.9",
+    "@sigma/edge-curve": "^3.1.0",
+    "three": "0.185.1"
   },
   "overrides": {
     "undici": "7.28.0",
