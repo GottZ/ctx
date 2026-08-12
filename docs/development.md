@@ -60,6 +60,27 @@ cd go && go test ./... -short       # Go unit tests
 
 MCP tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18.
 
+### Model benchmark: ctx-goldbench
+
+`ctx-goldbench` measures how well an arbitrary OpenAI-compatible model performs ctx's
+LLM tasks — it replays the real pipeline system prompts (exported via per-package
+`bench_exports.go` accessors, no behavioural change) against a candidate model, parses
+the output with the real ctx parsers, and scores against 1127 anonymized gold cases in
+`bench/goldbench/data/` (12 axes: temporal extraction on block and query level,
+keywords, tagging, title, dream links, recurrence, sensitivity classification,
+cluster labeling, rerank judging, synthesis contract, query translation).
+
+```bash
+cd go && go build ./cmd/ctx-goldbench
+./ctx-goldbench -data ../bench/goldbench/data \
+  -endpoint http://localhost:11434/v1 -model <model> -axes all \
+  -out report.json -md report.md      # -dry-run validates the dataset without HTTP
+```
+
+`parse_rate` is a first-class metric on every axis: a model that cannot serve ctx's
+output contracts is unfit for ctx regardless of content quality. Dataset card,
+axis table and anonymization method: [bench/goldbench/README.md](../bench/goldbench/README.md).
+
 ### Wire-contract freeze (workflow UI)
 
 The workflow-UI API client (`go/web/src/lib/api/issues.ts`, `types-registry.ts`) and the SPA e2e/vitest fixtures both eat the **same** contract-freeze JSONs in `go/web/src/lib/api/__fixtures__/*.json` (issue list/detail/comments/board/mutate, project list, sync status, type list). Those files are re-serialized from the live handler structs (W6/W7/W11/W4/types) by the Go golden `TestContractFreezeGolden` (`internal/handler/contract_freeze_golden_test.go`) — a drift on either side turns it red before deploy (closes the fixture-drift gap: the FE mocks can no longer diverge silently from the Go wire). To regenerate the JSONs after an intentional wire change, review the diff from:

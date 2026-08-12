@@ -1,0 +1,244 @@
+// ctx-goldbench — Benchmark-Harness für die ctx-LLM-Pipelines.
+//
+// Spielt die echten ctx-Prompts (via bench_exports.go-Shims) gegen ein
+// beliebiges OpenAI-kompatibles Modell ab, parst mit den ctx-treuen Parsern
+// und scored gegen die Gold-Daten in bench/goldbench/data/*.jsonl.
+//
+//	go run ./cmd/ctx-goldbench -endpoint http://host:8080 -model qwen3.5:9b -axes all
+//	go run ./cmd/ctx-goldbench -data ../bench/goldbench/data -dry-run -axes all
+//
+// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Source: https://github.com/GottZ/ctx
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+	"github.com/GottZ/ctx/internal/goldbench"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "ctx-goldbench:", err)
+		os.Exit(1)
+	}
+}
+
+//nolint:cyclop // lineare Flag-Verarbeitung, keine echte Verzweigungstiefe
+func run() error {
+	var (
+		dataDir     = flag.String("data", "", "Verzeichnis der Gold-Daten (Default: bench/goldbench/data relativ zum Repo)")
+		endpoint    = flag.String("endpoint", "", "OpenAI-kompatibler Endpoint (Basis-URL oder volle /v1/chat/completions-URL)")
+		model       = flag.String("model", "", "Modellname für den Request-Body")
+		apiKey      = flag.String("api-key", "", "API-Key (optional; sonst env GOLDBENCH_API_KEY)")
+		axesFlag    = flag.String("axes", "all", "Achsen als CSV oder 'all'")
+		n           = flag.Int("n", 0, "Limit pro Achse (0 = alle Fälle)")
+		concurrency = flag.Int("concurrency", 4, "parallele LLM-Calls")
+		outPath     = flag.String("out", "goldbench-report.json", "Pfad des JSON-Reports")
+		mdPath      = flag.String("md", "", "Pfad des Markdown-Reports (optional)")
+		dryRun      = flag.Bool("dry-run", false, "kein HTTP; validiert Daten + Prompt-Bau, Scorer sehen leere Outputs")
+		seed        = flag.Int64("seed", 20260812, "Seed für Case-Sampling + Request-Seed")
+		timeoutSec  = flag.Int("timeout", 120, "HTTP-Timeout pro Call in Sekunden")
+		verbose     = flag.Bool("verbose", false, "per_case-Ergebnisse in den JSON-Report aufnehmen")
+	)
+	flag.Parse()
+
+	if !*dryRun {
+		if *endpoint == "" {
+			return fmt.Errorf("-endpoint fehlt (oder -dry-run nutzen)")
+		}
+		if *model == "" {
+			return fmt.Errorf("-model fehlt (oder -dry-run nutzen)")
+		}
+	}
+
+	key := *apiKey
+	if key == "" {
+		key = os.Getenv("GOLDBENCH_API_KEY")
+	}
+
+	dir := *dataDir
+	if dir == "" {
+		dir = defaultDataDir()
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("gold-daten-verzeichnis: %w", err)
+	}
+
+	var axes []string
+	if strings.TrimSpace(*axesFlag) != "all" {
+		for _, a := range strings.Split(*axesFlag, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				axes = append(axes, a)
+			}
+		}
+	}
+
+	cfg := goldbench.Config{
+		DataDir:     dir,
+		Endpoint:    *endpoint,
+		Model:       *model,
+		APIKey:      key,
+		Axes:        axes,
+		N:           *n,
+		Concurrency: *concurrency,
+		DryRun:      *dryRun,
+		Seed:        *seed,
+		TimeoutSec:  *timeoutSec,
+		Verbose:     *verbose,
+		GitRev:      gitRev(),
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	report, err := goldbench.Run(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
+	if err := goldbench.WriteJSON(report, *outPath); err != nil {
+		return err
+	}
+	if *mdPath != "" {
+		if err := goldbench.WriteMarkdown(report, *mdPath); err != nil {
+			return err
+		}
+	}
+
+	fmt.Print(goldbench.Markdown(report))
+	fmt.Printf("\nJSON-Report: %s\n", *outPath)
+	return nil
+}
+
+// defaultDataDir liefert bench/goldbench/data relativ zum Repo-Root.
+// Bewusst OHNE git-Subprozess (das exec-Ban-Gate des Repos erlaubt
+// Subprozesse nur als argumentierte Ausnahme): der Root wird per
+// Verzeichnis-Aufstieg ab cwd gesucht, Fallback ist der relative Pfad.
+func defaultDataDir() string {
+	dir, err := os.Getwd()
+	if err == nil {
+		for {
+			candidate := filepath.Join(dir, "bench", "goldbench", "data")
+			if st, err := os.Stat(candidate); err == nil && st.IsDir() {
+				return candidate
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return filepath.Join("bench", "goldbench", "data")
+}
+
+// gitRev liefert die kurze Revision für den Env-Stamp ("" wenn nicht
+// ermittelbar) — dateibasiert statt per git-Subprozess (exec-Ban-Gate):
+// .git/HEAD lesen, symbolische Refs über die Ref-Datei bzw. packed-refs
+// auflösen. Worktrees (".git"-DATEI mit gitdir:-Zeile) werden verfolgt.
+func gitRev() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if rev := revFromGitDir(filepath.Join(dir, ".git")); rev != "" {
+			return rev
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// revFromGitDir löst HEAD eines .git-Pfads (Verzeichnis oder Worktree-Datei) auf.
+func revFromGitDir(gitPath string) string {
+	st, err := os.Stat(gitPath)
+	if err != nil {
+		return ""
+	}
+	if !st.IsDir() {
+		// Worktree/Submodule: Datei mit "gitdir: <pfad>".
+		b, err := os.ReadFile(gitPath)
+		if err != nil {
+			return ""
+		}
+		line := strings.TrimSpace(string(b))
+		if !strings.HasPrefix(line, "gitdir:") {
+			return ""
+		}
+		target := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(gitPath), target)
+		}
+		gitPath = target
+	}
+	head, err := os.ReadFile(filepath.Join(gitPath, "HEAD")) //nolint:gosec // G703: repo-lokale git-Metadaten für den Env-Stamp, Pfad aus cwd-Aufstieg
+	if err != nil {
+		return ""
+	}
+	ref := strings.TrimSpace(string(head))
+	if !strings.HasPrefix(ref, "ref:") {
+		return shortRev(ref)
+	}
+	refName := strings.TrimSpace(strings.TrimPrefix(ref, "ref:"))
+	// Direkte Ref-Datei (auch commondir-Fälle für Worktrees prüfen).
+	for _, base := range []string{gitPath, commonGitDir(gitPath)} {
+		if base == "" {
+			continue
+		}
+		if b, err := os.ReadFile(filepath.Join(base, filepath.FromSlash(refName))); err == nil { //nolint:gosec // G703: repo-lokale Ref-Datei, refName aus HEAD des eigenen Repos
+			return shortRev(strings.TrimSpace(string(b)))
+		}
+		if rev := revFromPackedRefs(filepath.Join(base, "packed-refs"), refName); rev != "" {
+			return rev
+		}
+	}
+	return ""
+}
+
+// commonGitDir liest die commondir-Datei eines Worktree-gitdirs ("" wenn keine).
+func commonGitDir(gitPath string) string {
+	b, err := os.ReadFile(filepath.Join(gitPath, "commondir")) //nolint:gosec // G703: repo-lokale git-Metadaten, Pfad aus cwd-Aufstieg
+	if err != nil {
+		return ""
+	}
+	common := strings.TrimSpace(string(b))
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(gitPath, common)
+	}
+	return common
+}
+
+// revFromPackedRefs sucht refName in einer packed-refs-Datei.
+func revFromPackedRefs(path, refName string) string {
+	b, err := os.ReadFile(path) //nolint:gosec // G703: repo-lokale packed-refs, Pfad aus cwd-Aufstieg
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == refName {
+			return shortRev(fields[0])
+		}
+	}
+	return ""
+}
+
+// shortRev kürzt eine Commit-Hash auf die üblichen 7 Zeichen.
+func shortRev(rev string) string {
+	if len(rev) < 7 || strings.ContainsAny(rev, " \t") {
+		return ""
+	}
+	return rev[:7]
+}
