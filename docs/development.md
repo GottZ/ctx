@@ -65,8 +65,9 @@ MCP tool handlers return `Content[].text` (no structured output) — tested in `
 `ctx-goldbench` measures how well an arbitrary OpenAI-compatible model performs ctx's
 LLM tasks — it replays the real pipeline system prompts (exported via per-package
 `bench_exports.go` accessors, no behavioural change) against a candidate model, parses
-the output with the real ctx parsers, and scores against 1127 anonymized gold cases in
-`bench/goldbench/data/` (12 axes: temporal extraction on block and query level,
+the output with the real ctx parsers, and scores against 1127 anonymized gold cases from
+the [ctx-bench](https://github.com/GottZ/ctx-bench) dataset repository (12 axes:
+temporal extraction on block and query level,
 keywords, tagging, title, dream links, recurrence, sensitivity classification,
 cluster labeling, rerank judging, synthesis contract, query translation).
 
@@ -79,7 +80,7 @@ cd go && go build ./cmd/ctx-goldbench
 
 `parse_rate` is a first-class metric on every axis: a model that cannot serve ctx's
 output contracts is unfit for ctx regardless of content quality. Dataset card,
-axis table and anonymization method: [bench/goldbench/README.md](../bench/goldbench/README.md).
+axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github.com/GottZ/ctx-bench).
 
 ### Wire-contract freeze (workflow UI)
 

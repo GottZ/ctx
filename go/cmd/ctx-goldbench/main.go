@@ -2,10 +2,10 @@
 //
 // Spielt die echten ctx-Prompts (via bench_exports.go-Shims) gegen ein
 // beliebiges OpenAI-kompatibles Modell ab, parst mit den ctx-treuen Parsern
-// und scored gegen die Gold-Daten in bench/goldbench/data/*.jsonl.
+// und scored gegen die Gold-Daten aus dem ctx-bench-Repo (github.com/GottZ/ctx-bench).
 //
 //	go run ./cmd/ctx-goldbench -endpoint http://host:8080 -model qwen3.5:9b -axes all
-//	go run ./cmd/ctx-goldbench -data ../bench/goldbench/data -dry-run -axes all
+//	go run ./cmd/ctx-goldbench -data /path/to/ctx-bench/data -dry-run -axes all
 //
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
@@ -34,7 +34,7 @@ func main() {
 //nolint:cyclop // lineare Flag-Verarbeitung, keine echte Verzweigungstiefe
 func run() error {
 	var (
-		dataDir     = flag.String("data", "", "Verzeichnis der Gold-Daten (Default: bench/goldbench/data relativ zum Repo)")
+		dataDir     = flag.String("data", "", "Verzeichnis der Gold-Daten (ctx-bench-Repo, Pflicht)")
 		endpoint    = flag.String("endpoint", "", "OpenAI-kompatibler Endpoint (Basis-URL oder volle /v1/chat/completions-URL)")
 		model       = flag.String("model", "", "Modellname für den Request-Body")
 		apiKey      = flag.String("api-key", "", "API-Key (optional; sonst env GOLDBENCH_API_KEY)")
@@ -66,7 +66,7 @@ func run() error {
 
 	dir := *dataDir
 	if dir == "" {
-		dir = defaultDataDir()
+		return fmt.Errorf("-data ist Pflicht: Pfad zum data/-Verzeichnis des ctx-bench-Repos (github.com/GottZ/ctx-bench)")
 	}
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("gold-daten-verzeichnis: %w", err)
@@ -116,28 +116,6 @@ func run() error {
 	fmt.Print(goldbench.Markdown(report))
 	fmt.Printf("\nJSON-Report: %s\n", *outPath)
 	return nil
-}
-
-// defaultDataDir liefert bench/goldbench/data relativ zum Repo-Root.
-// Bewusst OHNE git-Subprozess (das exec-Ban-Gate des Repos erlaubt
-// Subprozesse nur als argumentierte Ausnahme): der Root wird per
-// Verzeichnis-Aufstieg ab cwd gesucht, Fallback ist der relative Pfad.
-func defaultDataDir() string {
-	dir, err := os.Getwd()
-	if err == nil {
-		for {
-			candidate := filepath.Join(dir, "bench", "goldbench", "data")
-			if st, err := os.Stat(candidate); err == nil && st.IsDir() {
-				return candidate
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-	}
-	return filepath.Join("bench", "goldbench", "data")
 }
 
 // gitRev liefert die kurze Revision für den Env-Stamp ("" wenn nicht

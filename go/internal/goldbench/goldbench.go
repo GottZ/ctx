@@ -4,7 +4,7 @@
 // Prompt-Builder (über die bench_exports.go-Shims der jeweiligen Pakete)
 // gegen ein beliebiges OpenAI-kompatibles Modell ab, parst die Antworten mit
 // den ctx-treuen Parsern und scored gegen Gold-Daten
-// (bench/goldbench/data/*.jsonl, 12 Achsen). Zweck: Modelle auf ihre Eignung
+// (ctx-bench-Repo data/*.jsonl, 12 Achsen). Zweck: Modelle auf ihre Eignung
 // für die einzelnen ctx-LLM-Rollen prüfen.
 //
 // Mock-Treue: Jede Abweichung vom Original ist am Ort der Abweichung als
