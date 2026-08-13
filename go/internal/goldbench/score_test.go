@@ -236,3 +236,22 @@ func TestSampleCasesDeterministic(t *testing.T) {
 		t.Fatalf("n=0 muss alle fälle liefern, got %d", len(got))
 	}
 }
+
+// TestKeywordSetF1 prüft die v2-Primärmetrik: Prediction-Cap + Mindestlänge.
+func TestKeywordSetF1(t *testing.T) {
+	gold := []string{"pgvector", "hnsw"}
+	// Exakter Doppel-Treffer → F1 1.0.
+	almostEqual(t, keywordSetF1(gold, []string{"pgvector", "hnsw"}), 1.0, "perfekt")
+	// Über-Generierung: 2 Treffer + 18 Müll-Terme. Cap 10 → precision 2/10,
+	// recall 2/2 → F1 = 2*(0.2*1)/(1.2) = 1/3. v1-Recall wäre 1.0 gewesen.
+	out := []string{"pgvector", "hnsw"}
+	for i := 0; i < 18; i++ {
+		out = append(out, "füllwort")
+	}
+	almostEqual(t, keywordSetF1(gold, out), 1.0/3.0, "cap bestraft über-generierung")
+	// SC-2: Kurz-Token matchen nur exakt — "a" darf "pgvector" nicht treffen.
+	if keywordSetF1([]string{"pgvector"}, []string{"a"}) != 0 {
+		t.Fatal("kurz-token darf nicht per substring matchen")
+	}
+	almostEqual(t, keywordSetF1([]string{"ab"}, []string{"ab"}), 1.0, "kurz exakt ok")
+}

@@ -4,17 +4,29 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Report ist das Gesamt-Ergebnis eines Benchmark-Laufs.
+// Throughput dokumentiert den gemessenen Token-Durchsatz des Laufs.
+type Throughput struct {
+	WallSeconds        float64 `json:"wall_seconds"`
+	PromptTokens       int64   `json:"prompt_tokens"`
+	CompletionTokens   int64   `json:"completion_tokens"`
+	PromptTokPerSec    float64 `json:"prompt_tok_per_sec"`
+	CompletionTokPerSec float64 `json:"completion_tok_per_sec"`
+}
+
 type Report struct {
 	Env             EnvStamp              `json:"env"`
 	Axes            map[string]AxisResult `json:"axes"`
 	Composite       float64               `json:"composite"`        // ungewichtetes Mittel aller primary_scores
 	CompositeGold   *float64              `json:"composite_gold"`   // Mittel der gold-Achsen (≤50 % silver-Cases)
 	CompositeSilver *float64              `json:"composite_silver"` // Mittel der silver-Achsen (>50 % silver-Cases)
+	Throughput      Throughput            `json:"throughput"`
 }
 
 // EnvStamp dokumentiert die Lauf-Umgebung (ohne API-Key).
@@ -26,6 +38,8 @@ type EnvStamp struct {
 	Timestamp     string         `json:"timestamp"`
 	Seed          int64          `json:"seed"`
 	DryRun        bool           `json:"dry_run,omitempty"`
+	MetricVersion int            `json:"metric_version"`
+	ServerNote    string         `json:"server_note,omitempty"`
 	NPerAxis      map[string]int `json:"n_per_axis"`
 }
 
@@ -81,7 +95,14 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 
 	// Scoren + aggregieren.
+	st := lastRunStats
+	tp := Throughput{WallSeconds: st.WallSeconds, PromptTokens: st.PromptTokens, CompletionTokens: st.CompletionTokens}
+	if st.WallSeconds > 0 {
+		tp.PromptTokPerSec = float64(st.PromptTokens) / st.WallSeconds
+		tp.CompletionTokPerSec = float64(st.CompletionTokens) / st.WallSeconds
+	}
 	report := &Report{
+		Throughput: tp,
 		Env: EnvStamp{
 			Model:         cfg.Model,
 			Endpoint:      cfg.Endpoint,
@@ -90,6 +111,8 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			Timestamp:     time.Now().UTC().Format(time.RFC3339),
 			Seed:          cfg.Seed,
 			DryRun:        cfg.DryRun,
+			MetricVersion: 2,
+			ServerNote:    cfg.ServerNote,
 			NPerAxis:      nPerAxis,
 		},
 		Axes: map[string]AxisResult{},
@@ -129,6 +152,13 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 		conc = 1
 	}
 
+	total := 0
+	for _, j := range jobs {
+		total += len(j.reqs)
+	}
+	var doneReqs, promptToks, complToks atomic.Int64
+	start := time.Now()
+
 	jobCh := make(chan job)
 	var wg sync.WaitGroup
 	for w := 0; w < conc; w++ {
@@ -142,7 +172,18 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 						run.callErr = ctx.Err()
 						break
 					}
-					out, err := client.Chat(ctx, req)
+					out, pt, ct, err := client.ChatWithUsage(ctx, req)
+					n := doneReqs.Add(1)
+					promptToks.Add(int64(pt))
+					complToks.Add(int64(ct))
+					// „Test x von y" + laufender Durchsatz auf stderr — sichtbar
+					// im Run-Log, ohne den Report zu verschmutzen.
+					if n%25 == 0 || int(n) == total {
+						el := time.Since(start).Seconds()
+						fmt.Fprintf(os.Stderr, "[fortschritt] Test %d von %d (%.1f%%) · in %.0f tok/s · out %.0f tok/s\n",
+							n, total, 100*float64(n)/float64(total),
+							float64(promptToks.Load())/el, float64(complToks.Load())/el)
+					}
 					if err != nil {
 						if run.callErr == nil {
 							run.callErr = err
@@ -162,17 +203,46 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 	}
 	close(jobCh)
 	wg.Wait()
+	// Aggregat für den Report (Paket-Variablen, vom Run gelesen).
+	lastRunStats = runStats{
+		WallSeconds:      time.Since(start).Seconds(),
+		PromptTokens:     promptToks.Load(),
+		CompletionTokens: complToks.Load(),
+	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("goldbench: run abgebrochen: %w", err)
 	}
 	return nil
 }
 
+// runStats trägt die Durchsatz-Aggregation des letzten executeJobs-Laufs.
+// Bewusst paketweit (ein Run pro Prozess — der Harness ist ein CLI-Tool).
+type runStats struct {
+	WallSeconds      float64
+	PromptTokens     int64
+	CompletionTokens int64
+}
+
+var lastRunStats runStats
+
 // scoreAxisRuns ruft den Achsen-Scorer und ergänzt die generischen Felder
 // (silver_share, label_quality, transport_errors, per_case bei verbose).
 func scoreAxisRuns(def axisDef, runs []caseRun, verbose bool) AxisResult {
 	res, perCase := def.score(runs)
 	res.Prospective = def.prospective
+
+	// Metrik v2: 95%-Bootstrap-CI über die per-Case-Scores. Bei Achsen mit
+	// micro-aggregierter Primärmetrik (temporal-*) ist das CI eine
+	// Unsicherheits-Näherung über Fälle, kein exaktes Metrik-CI — dokumentiert.
+	scores := make([]float64, 0, len(perCase))
+	for _, pc := range perCase {
+		scores = append(scores, pc.Score)
+	}
+	var ciSeed int64
+	for _, ch := range def.name {
+		ciSeed = ciSeed*31 + int64(ch)
+	}
+	res.CI95Low, res.CI95High = bootstrapCI(scores, 20260812+ciSeed)
 
 	silver, transportErrs := 0, 0
 	for _, r := range runs {

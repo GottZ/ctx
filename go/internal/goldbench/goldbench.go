@@ -69,6 +69,7 @@ type Config struct {
 	TimeoutSec  int      // HTTP-Timeout pro Call in Sekunden
 	Verbose     bool     // per_case-Ergebnisse in den Report aufnehmen
 	GitRev      string   // Env-Stamp: git-Revision des Baus
+	ServerNote    string // freier Provenienz-Text (Server-Flags/Build) für den Env-Stamp
 }
 
 // LoadCases lädt die Gold-Fälle einer Achse aus <dir>/<axis>.jsonl und

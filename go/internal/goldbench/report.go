@@ -52,10 +52,15 @@ func Markdown(report *Report) string {
 		if res.Prospective {
 			name += " *(prospective)*"
 		}
-		fmt.Fprintf(&b, "| %s | %d | %.3f | %s | %.4f | %s |\n",
-			name, res.N, res.ParseRate, res.PrimaryMetric, res.PrimaryScore, res.LabelQuality)
+		fmt.Fprintf(&b, "| %s | %d | %.3f | %s | %.4f | [%.3f–%.3f] | %s |\n",
+			name, res.N, res.ParseRate, res.PrimaryMetric, res.PrimaryScore, res.CI95Low, res.CI95High, res.LabelQuality)
 	}
 
+	if report.Throughput.WallSeconds > 0 {
+		fmt.Fprintf(&b, "\nDurchsatz: in %.0f tok/s · out %.0f tok/s · Wall %.0fs · Tokens %d/%d\n",
+			report.Throughput.PromptTokPerSec, report.Throughput.CompletionTokPerSec,
+			report.Throughput.WallSeconds, report.Throughput.PromptTokens, report.Throughput.CompletionTokens)
+	}
 	fmt.Fprintf(&b, "\n**Composite: %.4f**", report.Composite)
 	if report.CompositeGold != nil {
 		fmt.Fprintf(&b, " · gold-Achsen: %.4f", *report.CompositeGold)

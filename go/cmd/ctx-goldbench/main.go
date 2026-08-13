@@ -47,6 +47,7 @@ func run() error {
 		seed        = flag.Int64("seed", 20260812, "Seed für Case-Sampling + Request-Seed")
 		timeoutSec  = flag.Int("timeout", 120, "HTTP-Timeout pro Call in Sekunden")
 		verbose     = flag.Bool("verbose", false, "per_case-Ergebnisse in den JSON-Report aufnehmen")
+		serverNote  = flag.String("server-note", "", "Provenienz-Notiz (Server-Build/Flags) für den Env-Stamp")
 	)
 	flag.Parse()
 
@@ -93,6 +94,7 @@ func run() error {
 		Seed:        *seed,
 		TimeoutSec:  *timeoutSec,
 		Verbose:     *verbose,
+		ServerNote:  *serverNote,
 		GitRev:      gitRev(),
 	}
 

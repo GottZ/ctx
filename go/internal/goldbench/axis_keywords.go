@@ -113,7 +113,7 @@ func parseTagsOutput(raw string) ([]string, bool) {
 // Gold-Terme (Substring-Match in beide Richtungen, lowercase), sekundär
 // Jaccard. goldKey benennt das Gold-Feld ("keywords" | "tags").
 func scoreKeywordAxis(runs []caseRun, goldKey string, parse func(string) ([]string, bool)) (AxisResult, []CaseScore) {
-	var recalls, jaccards []float64
+	var f1s, recalls, jaccards []float64
 	parsed := 0
 	perCase := make([]CaseScore, 0, len(runs))
 	for _, r := range runs {
@@ -124,6 +124,7 @@ func scoreKeywordAxis(runs []caseRun, goldKey string, parse func(string) ([]stri
 		cs := CaseScore{ID: r.c.ID}
 		out, ok := parse(firstOutput(r))
 		if !ok {
+			f1s = append(f1s, 0)
 			recalls = append(recalls, 0)
 			jaccards = append(jaccards, 0)
 			perCase = append(perCase, cs)
@@ -132,7 +133,9 @@ func scoreKeywordAxis(runs []caseRun, goldKey string, parse func(string) ([]stri
 		parsed++
 		cs.Parsed = true
 		rec, jac := keywordOverlap(goldTerms, out)
-		cs.Score = rec
+		f1 := keywordSetF1(goldTerms, out)
+		cs.Score = f1
+		f1s = append(f1s, f1)
 		recalls = append(recalls, rec)
 		jaccards = append(jaccards, jac)
 		perCase = append(perCase, cs)
@@ -140,10 +143,14 @@ func scoreKeywordAxis(runs []caseRun, goldKey string, parse func(string) ([]stri
 	return AxisResult{
 		N:             len(runs),
 		ParseRate:     ratioOrZero(parsed, len(runs)),
-		PrimaryMetric: "gold_term_recall",
-		PrimaryScore:  meanOrZero(recalls),
+		// Metrik v2 (SC-1): Set-F1 mit Prediction-Cap statt Recall —
+		// Über-Generierung maximierte v1-Recall straffrei (belegt am
+		// Shootout: Recall−Jaccard-Spread bis 0.21).
+		PrimaryMetric: "capped_set_f1",
+		PrimaryScore:  meanOrZero(f1s),
 		Secondary: map[string]float64{
-			"jaccard": meanOrZero(jaccards),
+			"gold_term_recall": meanOrZero(recalls),
+			"jaccard":          meanOrZero(jaccards),
 		},
 	}, perCase
 }

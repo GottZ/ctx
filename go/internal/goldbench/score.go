@@ -2,6 +2,7 @@ package goldbench
 
 import (
 	"math"
+	"math/rand"
 	"regexp"
 	"sort"
 	"strings"
@@ -59,14 +60,64 @@ func tokenF1(pred, gold string) float64 {
 
 // keywordMatch prüft den Achsen-Vertrag für keywords/tagging: ein Gold-Term
 // gilt als getroffen, wenn er (lowercase) Substring eines Output-Terms ist
-// oder umgekehrt.
+// oder umgekehrt. Metrik v2 (SC-2): Terme unter 3 Zeichen matchen nur exakt —
+// die Substring-Richtung würde sonst von Kurz-Tokens trivial erfüllt.
 func keywordMatch(gold, out string) bool {
 	g := strings.ToLower(strings.TrimSpace(gold))
 	o := strings.ToLower(strings.TrimSpace(out))
 	if g == "" || o == "" {
 		return false
 	}
+	if len(g) < 3 || len(o) < 3 {
+		return g == o
+	}
 	return strings.Contains(o, g) || strings.Contains(g, o)
+}
+
+// keywordCapN ist der Prediction-Cap der keywords/tagging-Achsen (Metrik v2,
+// SC-1): gescored werden höchstens die ersten 10 Output-Terme — der
+// ctx-Vertrag verlangt 5–8 Konzepte (dream/keywords.go), Über-Generierung
+// darf den Recall nicht gratis maximieren.
+const keywordCapN = 10
+
+// keywordSetF1 ist die v2-Primärmetrik für keywords/tagging: Set-F1 über die
+// gecappten Output-Terme. precision = getroffene Output-Terme / |out_cap|,
+// recall = getroffene Gold-Terme / |gold|.
+func keywordSetF1(goldTerms, outTerms []string) float64 {
+	if len(goldTerms) == 0 {
+		return 0
+	}
+	out := outTerms
+	if len(out) > keywordCapN {
+		out = out[:keywordCapN]
+	}
+	matchedGold := 0
+	for _, g := range goldTerms {
+		for _, o := range out {
+			if keywordMatch(g, o) {
+				matchedGold++
+				break
+			}
+		}
+	}
+	matchedOut := 0
+	for _, o := range out {
+		for _, g := range goldTerms {
+			if keywordMatch(g, o) {
+				matchedOut++
+				break
+			}
+		}
+	}
+	if len(out) == 0 {
+		return 0
+	}
+	p := float64(matchedOut) / float64(len(out))
+	r := float64(matchedGold) / float64(len(goldTerms))
+	if p+r == 0 {
+		return 0
+	}
+	return 2 * p * r / (p + r)
 }
 
 // keywordOverlap liefert Recall der Gold-Terme + Jaccard-Näherung.
@@ -200,4 +251,26 @@ func trigramSet(s string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// bootstrapCI liefert das 95%-Perzentil-Bootstrap-CI des Mittelwerts der
+// per-Case-Scores (1000 Resamples, deterministisch geseedet). Metrik v2:
+// Achsen-Differenzen ohne CI sind bei kleinen n (23–36 Fälle) nicht
+// interpretierbar — das CI macht das Rauschen sichtbar statt es zu verstecken.
+func bootstrapCI(vals []float64, seed int64) (lo, hi float64) {
+	if len(vals) == 0 {
+		return 0, 0
+	}
+	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // Bootstrap-Resampling ist Statistik, keine Kryptographie — Determinismus (fester Seed) ist hier die Anforderung.
+	const resamples = 1000
+	means := make([]float64, resamples)
+	for i := 0; i < resamples; i++ {
+		sum := 0.0
+		for j := 0; j < len(vals); j++ {
+			sum += vals[rng.Intn(len(vals))]
+		}
+		means[i] = sum / float64(len(vals))
+	}
+	sort.Float64s(means)
+	return means[24], means[974]
 }

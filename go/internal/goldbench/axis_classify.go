@@ -168,21 +168,26 @@ func scoreClusterLabel(runs []caseRun) (AxisResult, []CaseScore) {
 
 		cs := CaseScore{ID: r.c.ID}
 		label, ok := topiclabel.BenchParseLabel(firstOutput(r))
+		f1 := 0.0
 		if ok {
 			pass++
 			cs.Parsed = true
-			cs.Score = 1
-			f1s = append(f1s, tokenF1(label, gold.Label))
+			f1 = tokenF1(label, gold.Label)
 		}
+		cs.Score = f1
+		f1s = append(f1s, f1)
 		perCase = append(perCase, cs)
 	}
 	return AxisResult{
-		N:             len(runs),
-		ParseRate:     ratioOrZero(pass, len(runs)),
-		PrimaryMetric: "constraint_pass_rate",
-		PrimaryScore:  ratioOrZero(pass, len(runs)),
+		N:         len(runs),
+		ParseRate: ratioOrZero(pass, len(runs)),
+		// Metrik v2 (SC-3): constraint_pass_rate saturierte (Baseline 1.0,
+		// keine Diskriminierung) — Primär ist jetzt der Token-F1 gegen das
+		// Gold-Label, 0 bei Constraint-Bruch.
+		PrimaryMetric: "constrained_token_f1",
+		PrimaryScore:  meanOrZero(f1s),
 		Secondary: map[string]float64{
-			"token_f1_vs_gold": meanOrZero(f1s),
+			"constraint_pass_rate": ratioOrZero(pass, len(runs)),
 		},
 	}, perCase
 }

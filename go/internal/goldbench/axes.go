@@ -28,6 +28,8 @@ type AxisResult struct {
 	ParseRate       float64                   `json:"parse_rate"`
 	PrimaryMetric   string                    `json:"primary_metric"`
 	PrimaryScore    float64                   `json:"primary_score"`
+	CI95Low         float64                   `json:"ci95_low"`
+	CI95High        float64                   `json:"ci95_high"`
 	Secondary       map[string]float64        `json:"secondary,omitempty"`
 	Confusion       map[string]map[string]int `json:"confusion,omitempty"` // nur links: gold-Typ → prädizierter Typ
 	SilverShare     float64                   `json:"silver_share"`

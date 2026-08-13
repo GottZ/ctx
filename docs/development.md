@@ -79,7 +79,12 @@ cd go && go build ./cmd/ctx-goldbench
 ```
 
 `parse_rate` is a first-class metric on every axis: a model that cannot serve ctx's
-output contracts is unfit for ctx regardless of content quality. Dataset card,
+output contracts is unfit for ctx regardless of content quality. Since metric v2
+(`metric_version` in the report env stamp) the keyword/tagging axes score a
+prediction-capped set-F1 (over-generation no longer inflates recall), cluster
+labeling scores a constraint-gated token-F1, every axis carries a bootstrap 95%
+confidence interval, and reports include token throughput (prompt/completion
+tok/s) plus a `server_note` provenance field for the serving flags. Dataset card,
 axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github.com/GottZ/ctx-bench).
 
 ### Wire-contract freeze (workflow UI)

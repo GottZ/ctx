@@ -80,6 +80,10 @@ type wireResponse struct {
 	Choices []struct {
 		Message wireMessage `json:"message"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -89,7 +93,14 @@ type wireResponse struct {
 // zurück. Fehlerpfade sind mit %w gewrappt; der Aufrufer entscheidet über
 // Retry-Politik (der Harness macht bewusst keine — ein Bench misst das
 // Modell, nicht die Netz-Resilienz).
+// Chat behält die alte Signatur; ChatWithUsage liefert zusätzlich die
+// Token-Zählung des Servers (für die Durchsatz-Aggregation im Report).
 func (c *Client) Chat(ctx context.Context, req ChatRequest) (string, error) {
+	out, _, _, err := c.ChatWithUsage(ctx, req)
+	return out, err
+}
+
+func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (content string, promptToks, completionToks int, err error) {
 	body := wireRequest{
 		Model: c.model,
 		Messages: []wireMessage{
@@ -108,12 +119,12 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (string, error) {
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return "", fmt.Errorf("goldbench: marshal request: %w", err)
+		return "", 0, 0, fmt.Errorf("goldbench: marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("goldbench: build request: %w", err)
+		return "", 0, 0, fmt.Errorf("goldbench: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -122,28 +133,28 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (string, error) {
 
 	resp, err := c.hc.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("goldbench: chat call: %w", err)
+		return "", 0, 0, fmt.Errorf("goldbench: chat call: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
 	if err != nil {
-		return "", fmt.Errorf("goldbench: read response: %w", err)
+		return "", 0, 0, fmt.Errorf("goldbench: read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("goldbench: chat HTTP %d: %s", resp.StatusCode, truncateErr(raw))
+		return "", 0, 0, fmt.Errorf("goldbench: chat HTTP %d: %s", resp.StatusCode, truncateErr(raw))
 	}
 	var wr wireResponse
 	if err := json.Unmarshal(raw, &wr); err != nil {
-		return "", fmt.Errorf("goldbench: decode response: %w", err)
+		return "", 0, 0, fmt.Errorf("goldbench: decode response: %w", err)
 	}
 	if wr.Error != nil {
-		return "", fmt.Errorf("goldbench: chat error: %s", wr.Error.Message)
+		return "", 0, 0, fmt.Errorf("goldbench: chat error: %s", wr.Error.Message)
 	}
 	if len(wr.Choices) == 0 {
-		return "", fmt.Errorf("goldbench: chat response without choices")
+		return "", 0, 0, fmt.Errorf("goldbench: chat response without choices")
 	}
-	return wr.Choices[0].Message.Content, nil
+	return wr.Choices[0].Message.Content, wr.Usage.PromptTokens, wr.Usage.CompletionTokens, nil
 }
 
 // truncateErr kürzt Fehler-Bodies für die Fehlermeldung.
