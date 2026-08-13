@@ -38,8 +38,8 @@ func Markdown(report *Report) string {
 	if report.Env.DryRun {
 		b.WriteString("- **DRY-RUN** (keine LLM-Calls)\n")
 	}
-	b.WriteString("\n| Achse | n | parse_rate | Primär-Metrik | Score | Qualität |\n")
-	b.WriteString("|---|---:|---:|---|---:|---|\n")
+	b.WriteString("\n| Achse | n | parse_rate | Primär-Metrik | Score | CI95 | Qualität |\n")
+	b.WriteString("|---|---:|---:|---|---:|---:|---|\n")
 
 	axes := make([]string, 0, len(report.Axes))
 	for a := range report.Axes {
