@@ -2,6 +2,7 @@ package goldbench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"os"
@@ -20,6 +21,16 @@ type Throughput struct {
 	CompletionTokPerSec float64 `json:"completion_tok_per_sec"`
 }
 
+// FailStats summiert die gerissenen Fälle über alle Achsen — getrennt nach
+// Ursache: Server-Ablehnung an der Context-Grenze, Output am max_tokens-Budget
+// gerissen (finish_reason "length"), echte Transport-Fehler. Context- und
+// Transport-Fälle scoren 0; Truncation kann je nach Parser trotzdem scoren.
+type FailStats struct {
+	ContextErrors    int `json:"context_errors"`
+	TruncatedOutputs int `json:"truncated_outputs"`
+	TransportErrors  int `json:"transport_errors"`
+}
+
 type Report struct {
 	Env             EnvStamp              `json:"env"`
 	Axes            map[string]AxisResult `json:"axes"`
@@ -27,6 +38,7 @@ type Report struct {
 	CompositeGold   *float64              `json:"composite_gold"`   // Mittel der gold-Achsen (≤50 % silver-Cases)
 	CompositeSilver *float64              `json:"composite_silver"` // Mittel der silver-Achsen (>50 % silver-Cases)
 	Throughput      Throughput            `json:"throughput"`
+	FailStats       FailStats             `json:"fail_stats"`
 }
 
 // EnvStamp dokumentiert die Lauf-Umgebung (ohne API-Key).
@@ -120,6 +132,9 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	for _, axis := range axes {
 		res := scoreAxisRuns(registry[axis], axisRuns[axis], cfg.Verbose)
 		report.Axes[axis] = res
+		report.FailStats.ContextErrors += res.ContextErrors
+		report.FailStats.TruncatedOutputs += res.TruncatedOutputs
+		report.FailStats.TransportErrors += res.TransportErrors
 	}
 	applyComposites(report, axes)
 	return report, nil
@@ -172,10 +187,10 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 						run.callErr = ctx.Err()
 						break
 					}
-					out, pt, ct, err := client.ChatWithUsage(ctx, req)
+					res, err := client.ChatWithUsage(ctx, req)
 					n := doneReqs.Add(1)
-					promptToks.Add(int64(pt))
-					complToks.Add(int64(ct))
+					promptToks.Add(int64(res.PromptTokens))
+					complToks.Add(int64(res.CompletionTokens))
 					// „Test x von y" + laufender Durchsatz auf stderr — sichtbar
 					// im Run-Log, ohne den Report zu verschmutzen.
 					if n%25 == 0 || int(n) == total {
@@ -185,12 +200,18 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 							float64(promptToks.Load())/el, float64(complToks.Load())/el)
 					}
 					if err != nil {
+						if errors.Is(err, ErrContextOverflow) {
+							run.contextErr = true
+						}
 						if run.callErr == nil {
 							run.callErr = err
 						}
 						continue
 					}
-					run.outputs[i] = out
+					if res.FinishReason == "length" {
+						run.truncated++
+					}
+					run.outputs[i] = res.Content
 				}
 			}
 		}()
@@ -244,13 +265,22 @@ func scoreAxisRuns(def axisDef, runs []caseRun, verbose bool) AxisResult {
 	}
 	res.CI95Low, res.CI95High = bootstrapCI(scores, 20260812+ciSeed)
 
-	silver, transportErrs := 0, 0
+	silver, transportErrs, contextErrs, truncated := 0, 0, 0, 0
 	for _, r := range runs {
 		if r.c.LabelQuality == "silver" {
 			silver++
 		}
-		if r.callErr != nil {
+		// Fail-Metrik: Context-Ablehnungen getrennt von echten Transport-Fehlern
+		// zählen — beide reißen den Fall (Score 0), aber nur einer ist ein
+		// Serving-Limit. truncated = Output am max_tokens-Budget gerissen.
+		switch {
+		case r.contextErr:
+			contextErrs++
+		case r.callErr != nil:
 			transportErrs++
+		}
+		if r.truncated > 0 {
+			truncated++
 		}
 	}
 	res.SilverShare = ratioOrZero(silver, len(runs))
@@ -259,6 +289,8 @@ func scoreAxisRuns(def axisDef, runs []caseRun, verbose bool) AxisResult {
 		res.LabelQuality = "silver"
 	}
 	res.TransportErrors = transportErrs
+	res.ContextErrors = contextErrs
+	res.TruncatedOutputs = truncated
 	if verbose {
 		res.PerCase = perCase
 	}

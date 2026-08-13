@@ -61,6 +61,8 @@ func Markdown(report *Report) string {
 			report.Throughput.PromptTokPerSec, report.Throughput.CompletionTokPerSec,
 			report.Throughput.WallSeconds, report.Throughput.PromptTokens, report.Throughput.CompletionTokens)
 	}
+	fmt.Fprintf(&b, "\nRisse: context %d · truncated %d · transport %d\n",
+		report.FailStats.ContextErrors, report.FailStats.TruncatedOutputs, report.FailStats.TransportErrors)
 	fmt.Fprintf(&b, "\n**Composite: %.4f**", report.Composite)
 	if report.CompositeGold != nil {
 		fmt.Fprintf(&b, " · gold-Achsen: %.4f", *report.CompositeGold)
@@ -85,6 +87,12 @@ func Markdown(report *Report) string {
 		}
 		if res.TransportErrors > 0 {
 			fmt.Fprintf(&b, " transport_errors=%d", res.TransportErrors)
+		}
+		if res.ContextErrors > 0 {
+			fmt.Fprintf(&b, " context_errors=%d", res.ContextErrors)
+		}
+		if res.TruncatedOutputs > 0 {
+			fmt.Fprintf(&b, " truncated_outputs=%d", res.TruncatedOutputs)
 		}
 		b.WriteString("\n")
 	}

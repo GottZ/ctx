@@ -9,9 +9,11 @@ import (
 // Im Dry-Run bleiben die outputs leere Strings (Parse schlägt fehl,
 // parse_rate 0 — der Lauf validiert Daten + Prompt-Bau ohne HTTP).
 type caseRun struct {
-	c       *Case
-	outputs []string // ein Eintrag pro ChatRequest der Achse
-	callErr error    // erster Transport-Fehler (nil im Dry-Run)
+	c          *Case
+	outputs    []string // ein Eintrag pro ChatRequest der Achse
+	callErr    error    // erster Transport-Fehler (nil im Dry-Run)
+	contextErr bool     // mind. ein Call an der Context-Grenze abgelehnt
+	truncated  int      // Calls mit finish_reason "length" (Output-Budget gerissen)
 }
 
 // CaseScore ist das per-Case-Ergebnis für den Verbose-Report.
@@ -35,6 +37,8 @@ type AxisResult struct {
 	SilverShare     float64                   `json:"silver_share"`
 	LabelQuality    string                    `json:"label_quality"` // "gold" | "silver" (>50 % silver-Cases)
 	TransportErrors int                       `json:"transport_errors"`
+	ContextErrors   int                       `json:"context_errors"`    // Fälle, vom Server an der Context-Grenze abgelehnt
+	TruncatedOutputs int                      `json:"truncated_outputs"` // Fälle mit finish_reason "length" (max_tokens gerissen)
 	Prospective     bool                      `json:"prospective,omitempty"` // Achse ohne echte ctx-Pipeline
 	PerCase         []CaseScore               `json:"per_case,omitempty"`
 }

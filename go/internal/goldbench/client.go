@@ -78,7 +78,8 @@ type wireRequest struct {
 
 type wireResponse struct {
 	Choices []struct {
-		Message wireMessage `json:"message"`
+		Message      wireMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -89,18 +90,43 @@ type wireResponse struct {
 	} `json:"error"`
 }
 
+// ChatResult trägt neben dem Content die Server-Token-Zählung (Durchsatz)
+// und den finish_reason ("length" = Output am max_tokens-Budget gerissen).
+type ChatResult struct {
+	Content          string
+	PromptTokens     int
+	CompletionTokens int
+	FinishReason     string
+}
+
+// ErrContextOverflow markiert Calls, die der Server wegen erreichter
+// Context-Grenze abgelehnt hat (Fail-Metrik: context_errors statt transport).
+var ErrContextOverflow = fmt.Errorf("context-grenze erreicht")
+
+// isContextOverflowBody erkennt Context-Überlauf-Ablehnungen am Fehler-Body.
+// llama.cpp: "the request exceeds the available context size" /
+// "exceed_context_size"; OpenAI-kompatibel: "context_length_exceeded".
+func isContextOverflowBody(body string) bool {
+	s := strings.ToLower(body)
+	return strings.Contains(s, "context size") ||
+		strings.Contains(s, "context length") ||
+		strings.Contains(s, "context_length") ||
+		strings.Contains(s, "exceed_context") ||
+		strings.Contains(s, "n_ctx")
+}
+
 // Chat führt einen Chat-Completions-Call aus und gibt den Antwort-Content
 // zurück. Fehlerpfade sind mit %w gewrappt; der Aufrufer entscheidet über
 // Retry-Politik (der Harness macht bewusst keine — ein Bench misst das
 // Modell, nicht die Netz-Resilienz).
-// Chat behält die alte Signatur; ChatWithUsage liefert zusätzlich die
-// Token-Zählung des Servers (für die Durchsatz-Aggregation im Report).
+// Chat behält die alte Signatur; ChatWithUsage liefert zusätzlich Usage
+// und finish_reason (für Durchsatz- und Fail-Aggregation im Report).
 func (c *Client) Chat(ctx context.Context, req ChatRequest) (string, error) {
-	out, _, _, err := c.ChatWithUsage(ctx, req)
-	return out, err
+	res, err := c.ChatWithUsage(ctx, req)
+	return res.Content, err
 }
 
-func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (content string, promptToks, completionToks int, err error) {
+func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult, error) {
 	body := wireRequest{
 		Model: c.model,
 		Messages: []wireMessage{
@@ -119,12 +145,12 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (content st
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("goldbench: marshal request: %w", err)
+		return ChatResult{}, fmt.Errorf("goldbench: marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("goldbench: build request: %w", err)
+		return ChatResult{}, fmt.Errorf("goldbench: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -133,28 +159,39 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (content st
 
 	resp, err := c.hc.Do(httpReq)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("goldbench: chat call: %w", err)
+		return ChatResult{}, fmt.Errorf("goldbench: chat call: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("goldbench: read response: %w", err)
+		return ChatResult{}, fmt.Errorf("goldbench: read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, 0, fmt.Errorf("goldbench: chat HTTP %d: %s", resp.StatusCode, truncateErr(raw))
+		if isContextOverflowBody(string(raw)) {
+			return ChatResult{}, fmt.Errorf("goldbench: chat HTTP %d: %s: %w", resp.StatusCode, truncateErr(raw), ErrContextOverflow)
+		}
+		return ChatResult{}, fmt.Errorf("goldbench: chat HTTP %d: %s", resp.StatusCode, truncateErr(raw))
 	}
 	var wr wireResponse
 	if err := json.Unmarshal(raw, &wr); err != nil {
-		return "", 0, 0, fmt.Errorf("goldbench: decode response: %w", err)
+		return ChatResult{}, fmt.Errorf("goldbench: decode response: %w", err)
 	}
 	if wr.Error != nil {
-		return "", 0, 0, fmt.Errorf("goldbench: chat error: %s", wr.Error.Message)
+		if isContextOverflowBody(wr.Error.Message) {
+			return ChatResult{}, fmt.Errorf("goldbench: chat error: %s: %w", wr.Error.Message, ErrContextOverflow)
+		}
+		return ChatResult{}, fmt.Errorf("goldbench: chat error: %s", wr.Error.Message)
 	}
 	if len(wr.Choices) == 0 {
-		return "", 0, 0, fmt.Errorf("goldbench: chat response without choices")
+		return ChatResult{}, fmt.Errorf("goldbench: chat response without choices")
 	}
-	return wr.Choices[0].Message.Content, wr.Usage.PromptTokens, wr.Usage.CompletionTokens, nil
+	return ChatResult{
+		Content:          wr.Choices[0].Message.Content,
+		PromptTokens:     wr.Usage.PromptTokens,
+		CompletionTokens: wr.Usage.CompletionTokens,
+		FinishReason:     wr.Choices[0].FinishReason,
+	}, nil
 }
 
 // truncateErr kürzt Fehler-Bodies für die Fehlermeldung.

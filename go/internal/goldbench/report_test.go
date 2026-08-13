@@ -26,7 +26,7 @@ func TestReportJSONFields(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, key := range []string{"env", "axes", "composite", "throughput"} {
+	for _, key := range []string{"env", "axes", "composite", "throughput", "fail_stats"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("Report-JSON ohne Top-Level-Feld %q", key)
 		}
