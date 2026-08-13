@@ -71,6 +71,17 @@ type TemporalReview struct {
 	FalsePositives []string            `json:"false_positives,omitempty"`
 }
 
+// temporalTimeout resolves the Phase-2 LLM review timeout: the router's
+// configured value wins when the scheduler sets one (config key
+// dream.temporal_timeout), otherwise the package ValidateTimeout default —
+// legacy behavior for callers that build a Router without the field.
+func temporalTimeout(r *Router) time.Duration {
+	if r != nil && r.TemporalTimeout > 0 {
+		return r.TemporalTimeout
+	}
+	return ValidateTimeout
+}
+
 // ValidateTemporal runs the two-phase temporal validation for a block.
 // Phase 1: deterministic re-extraction. Phase 2: LLM review.
 // Non-fatal — errors are logged but don't stop the dream cycle.
@@ -138,7 +149,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 
 	start := time.Now()
 	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, block.Sensitivity,
-		temporalValidationPrompt, userPrompt, validateOpts, ValidateTimeout)
+		temporalValidationPrompt, userPrompt, validateOpts, temporalTimeout(r))
 	entry.Duration = time.Since(start)
 	entry.Err = err
 	r.applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, attempts, err)

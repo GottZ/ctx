@@ -211,6 +211,10 @@ type DreamConfig struct {
 	// per type (a floored link that cannot clear the write gate would be a
 	// silent no-op). Out-of-range values are fatal at boot (V15).
 	LinkFloorConfidence float64 `key:"dream.link_floor_confidence" env:"CTX_DREAM_LINK_FLOOR_CONFIDENCE" default:"0.9" mut:"hot" tenancy:"global-only"`
+	// TemporalTimeout bounds the dream-temporal Phase-2 LLM review (seconds).
+	// Default 90 matches the legacy ValidateTimeout constant; raise for slow
+	// reasoning models (nemotron-super-trt needs >90s on full prompts).
+	TemporalTimeout time.Duration `key:"dream.temporal_timeout" env:"CTX_DREAM_TEMPORAL_TIMEOUT" default:"90" mut:"hot" tenancy:"global-only"`
 
 	Backoff BackoffConfig
 }

@@ -110,3 +110,34 @@ func stringContains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestTemporalTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		router   *Router
+		expected time.Duration
+	}{
+		{
+			name:     "nil router falls back to package default",
+			router:   nil,
+			expected: ValidateTimeout,
+		},
+		{
+			name:     "router without timeout falls back to package default",
+			router:   &Router{},
+			expected: ValidateTimeout,
+		},
+		{
+			name:     "router setting wins",
+			router:   &Router{TemporalTimeout: 180 * time.Second},
+			expected: 180 * time.Second,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := temporalTimeout(tt.router); got != tt.expected {
+				t.Errorf("temporalTimeout() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}

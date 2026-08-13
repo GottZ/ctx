@@ -48,6 +48,10 @@ type Router struct {
 	// set. Set by scheduler.newRouter and the synthesize handler; nil in tests
 	// without classify/retrieval wiring.
 	Blocktypes *blocktype.Registry
+	// TemporalTimeout bounds the dream-temporal Phase-2 LLM review. 0 = the
+	// package ValidateTimeout default (legacy behavior). Set from
+	// config.Dream.TemporalTimeout by the scheduler (newRouter).
+	TemporalTimeout time.Duration
 	// Language is the daily-synthesis report language, read from config
 	// Dream.Language by the caller that builds the router (scheduler:
 	// per-iteration; synthesize handler: per-request — so the hot key is
