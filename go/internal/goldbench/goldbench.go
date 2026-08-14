@@ -80,6 +80,10 @@ type Config struct {
 	// für Thinking-Schalter oder nicht-portable Sampler (top_k bei vLLM).
 	// Wandert in den EnvStamp (Provenienz).
 	ExtraBody string
+	// TempOverride ersetzt die per-Achse-Pipeline-Temperaturen durch einen
+	// festen Wert (<0 = aus). DOKUMENTIERTE Abweichung von der Mock-Treue
+	// („modellkarten-purer" Lauf: misst das Modell, nicht die Pipeline).
+	TempOverride float64
 }
 
 // LoadCases lädt die Gold-Fälle einer Achse aus <dir>/<axis>.jsonl und

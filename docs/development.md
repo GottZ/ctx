@@ -97,7 +97,11 @@ the ctx-fitness verdict). `-extra-body '<json>'` merges a JSON object into
 every chat request (struct fields win) for engine-specific knobs the portable
 API cannot carry — thinking switches via `chat_template_kwargs`, `top_k` or
 penalty samplers on vLLM; the object is stamped into the report env as
-`extra_body`. Dataset card,
+`extra_body`. `-temperature-override N` replaces the per-axis pipeline
+temperatures with a fixed value (stamped as `temp_override`) — a declared
+mock-fidelity deviation for "model-card-pure" runs that measure the model
+under its recommended samplers instead of the ctx pipeline contracts.
+Dataset card,
 axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github.com/GottZ/ctx-bench).
 
 ### Wire-contract freeze (workflow UI)

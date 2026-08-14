@@ -50,6 +50,7 @@ func run() error {
 		serverNote  = flag.String("server-note", "", "Provenienz-Notiz (Server-Build/Flags) für den Env-Stamp")
 		maxTokMult  = flag.Float64("max-tokens-mult", 1, "skaliert das per-Achse-max_tokens-Budget (>1 = dokumentierte Abweichung von der Pipeline-Treue, für Reasoning-Modelle)")
 		extraBody   = flag.String("extra-body", "", "JSON-Objekt, das in jeden Chat-Request gemerged wird (z. B. '{\"chat_template_kwargs\":{\"enable_thinking\":false}}')")
+		tempOv      = flag.Float64("temperature-override", -1, "fixe Temperatur statt der Pipeline-Temperaturen (<0 = aus; dokumentierte Mock-Treue-Abweichung für modellkarten-pure Läufe)")
 	)
 	flag.Parse()
 
@@ -100,6 +101,7 @@ func run() error {
 		GitRev:      gitRev(),
 		MaxTokensMult: *maxTokMult,
 		ExtraBody:     *extraBody,
+		TempOverride:  *tempOv,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

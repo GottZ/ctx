@@ -53,6 +53,7 @@ type EnvStamp struct {
 	MetricVersion int            `json:"metric_version"`
 	MaxTokensMult float64        `json:"max_tokens_mult,omitempty"` // >1 = Budget-Abweichung von der Pipeline-Treue
 	ExtraBody     string         `json:"extra_body,omitempty"`      // Request-Merge (chat_template_kwargs etc.)
+	TempOverride  *float64       `json:"temp_override,omitempty"`   // fixe Temperatur statt Pipeline-Temps (Mock-Treue-Abweichung)
 	ServerNote    string         `json:"server_note,omitempty"`
 	NPerAxis      map[string]int `json:"n_per_axis"`
 }
@@ -119,6 +120,10 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	if mult == 1 {
 		mult = 0 // omitempty: pipeline-treue Läufe tragen kein Feld
 	}
+	var tempOv *float64
+	if cfg.TempOverride >= 0 {
+		tempOv = &cfg.TempOverride
+	}
 	report := &Report{
 		Throughput: tp,
 		Env: EnvStamp{
@@ -132,6 +137,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			MetricVersion: 2,
 			MaxTokensMult: mult,
 			ExtraBody:     cfg.ExtraBody,
+			TempOverride:  tempOv,
 			ServerNote:    cfg.ServerNote,
 			NPerAxis:      nPerAxis,
 		},
@@ -199,6 +205,9 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 						break
 					}
 					req.Opts.MaxTokens = applyBudgetMult(req.Opts.MaxTokens, cfg.MaxTokensMult)
+					if cfg.TempOverride >= 0 {
+						req.Opts.Temperature = cfg.TempOverride
+					}
 					res, err := client.ChatWithUsage(ctx, req)
 					n := doneReqs.Add(1)
 					promptToks.Add(int64(res.PromptTokens))
