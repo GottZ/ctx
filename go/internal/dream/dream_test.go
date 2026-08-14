@@ -672,6 +672,33 @@ func TestParseLinks_WrapperForm(t *testing.T) {
 			wantFormat: formatObject,
 		},
 		{
+			// Single-key empty-array wrapper (deepseek-v4-flash via
+			// opencode.ai, 2026-08-14): {"classifications": []} — the model
+			// explicitly says "nothing to link", same verdict as the bare
+			// "[]" sentinel. Must NOT surface as an unmarshal error.
+			name:       "single-key-empty-array",
+			raw:        `{"classifications":[]}`,
+			wantIDs:    []string{},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Same verdict via the canonical key name.
+			name:       "single-key-empty-relationships",
+			raw:        `{"relationships":[]}`,
+			wantIDs:    []string{},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Fenced variant of the same drift.
+			name:       "fenced-single-key-empty-array",
+			raw:        "```json\n{\"classifications\":[]}\n```",
+			wantIDs:    []string{},
+			wantFormat: formatFencedWrapped,
+		},
+		{
+			// Multi-key with an empty array still errors: an empty sibling
+			// must not book a "nothing to link" verdict while a populated
+			// key may exist (constraint 3 — regression pin stays).
 			name:    "only-empty-arrays-errors",
 			raw:     `{"warnings":[],"notes":[]}`,
 			wantErr: true,
