@@ -17,6 +17,7 @@ type Throughput struct {
 	WallSeconds        float64 `json:"wall_seconds"`
 	PromptTokens       int64   `json:"prompt_tokens"`
 	CompletionTokens   int64   `json:"completion_tokens"`
+	ReasoningTokens    int64   `json:"reasoning_tokens,omitempty"` // Denk-Anteil der Completion (wo der Server es ausweist)
 	PromptTokPerSec    float64 `json:"prompt_tok_per_sec"`
 	CompletionTokPerSec float64 `json:"completion_tok_per_sec"`
 }
@@ -29,6 +30,7 @@ type FailStats struct {
 	ContextErrors    int `json:"context_errors"`
 	TruncatedOutputs int `json:"truncated_outputs"`
 	TransportErrors  int `json:"transport_errors"`
+	ThinkStripped    int `json:"think_stripped,omitempty"` // Fälle mit client-seitig entferntem <think>-Block
 }
 
 type Report struct {
@@ -111,7 +113,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 
 	// Scoren + aggregieren.
 	st := lastRunStats
-	tp := Throughput{WallSeconds: st.WallSeconds, PromptTokens: st.PromptTokens, CompletionTokens: st.CompletionTokens}
+	tp := Throughput{WallSeconds: st.WallSeconds, PromptTokens: st.PromptTokens, CompletionTokens: st.CompletionTokens, ReasoningTokens: st.ReasoningTokens}
 	if st.WallSeconds > 0 {
 		tp.PromptTokPerSec = float64(st.PromptTokens) / st.WallSeconds
 		tp.CompletionTokPerSec = float64(st.CompletionTokens) / st.WallSeconds
@@ -149,6 +151,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		report.FailStats.ContextErrors += res.ContextErrors
 		report.FailStats.TruncatedOutputs += res.TruncatedOutputs
 		report.FailStats.TransportErrors += res.TransportErrors
+		report.FailStats.ThinkStripped += res.ThinkStripped
 	}
 	applyComposites(report, axes)
 	return report, nil
@@ -188,7 +191,7 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 	for _, j := range jobs {
 		total += len(j.reqs)
 	}
-	var doneReqs, promptToks, complToks atomic.Int64
+	var doneReqs, promptToks, complToks, reasonToks atomic.Int64
 	start := time.Now()
 
 	jobCh := make(chan job)
@@ -212,6 +215,7 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 					n := doneReqs.Add(1)
 					promptToks.Add(int64(res.PromptTokens))
 					complToks.Add(int64(res.CompletionTokens))
+					reasonToks.Add(int64(res.ReasoningTokens))
 					// „Test x von y" + laufender Durchsatz auf stderr — sichtbar
 					// im Run-Log, ohne den Report zu verschmutzen. Jede Zeile:
 					// ~100 KB pro Lauf, dafür sekundenaktuelle Dashboard-Kachel
@@ -232,6 +236,9 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 					if res.FinishReason == "length" {
 						run.truncated++
 					}
+					if res.ThinkStripped {
+						run.thinkStrip++
+					}
 					run.outputs[i] = res.Content
 				}
 			}
@@ -250,6 +257,7 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 		WallSeconds:      time.Since(start).Seconds(),
 		PromptTokens:     promptToks.Load(),
 		CompletionTokens: complToks.Load(),
+		ReasoningTokens:  reasonToks.Load(),
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("goldbench: run abgebrochen: %w", err)
@@ -278,6 +286,7 @@ type runStats struct {
 	WallSeconds      float64
 	PromptTokens     int64
 	CompletionTokens int64
+	ReasoningTokens  int64
 }
 
 var lastRunStats runStats
@@ -301,10 +310,13 @@ func scoreAxisRuns(def axisDef, runs []caseRun, verbose bool) AxisResult {
 	}
 	res.CI95Low, res.CI95High = bootstrapCI(scores, 20260812+ciSeed)
 
-	silver, transportErrs, contextErrs, truncated := 0, 0, 0, 0
+	silver, transportErrs, contextErrs, truncated, thinkStripped := 0, 0, 0, 0, 0
 	for _, r := range runs {
 		if r.c.LabelQuality == "silver" {
 			silver++
+		}
+		if r.thinkStrip > 0 {
+			thinkStripped++
 		}
 		// Fail-Metrik: Context-Ablehnungen getrennt von echten Transport-Fehlern
 		// zählen — beide reißen den Fall (Score 0), aber nur einer ist ein
@@ -327,6 +339,7 @@ func scoreAxisRuns(def axisDef, runs []caseRun, verbose bool) AxisResult {
 	res.TransportErrors = transportErrs
 	res.ContextErrors = contextErrs
 	res.TruncatedOutputs = truncated
+	res.ThinkStripped = thinkStripped
 	if verbose {
 		res.PerCase = perCase
 	}

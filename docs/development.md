@@ -101,7 +101,12 @@ penalty samplers on vLLM; the object is stamped into the report env as
 temperatures with a fixed value (stamped as `temp_override`) — a declared
 mock-fidelity deviation for "model-card-pure" runs that measure the model
 under its recommended samplers instead of the ctx pipeline contracts.
-Dataset card,
+Thinking models are carried structurally: `<think>…</think>` blocks are
+stripped client-side before parsing (counted as `think_stripped` per axis and
+in `fail_stats` — no axis contract legitimately contains think tags), and
+`usage.completion_tokens_details.reasoning_tokens` is aggregated into the
+throughput block as `reasoning_tokens` where the server reports it, so the
+reasoning tax is measured instead of inferred from truncations. Dataset card,
 axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github.com/GottZ/ctx-bench).
 
 ### Wire-contract freeze (workflow UI)

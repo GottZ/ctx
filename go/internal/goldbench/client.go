@@ -99,8 +99,11 @@ type wireResponse struct {
 		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens            int `json:"prompt_tokens"`
+		CompletionTokens        int `json:"completion_tokens"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
@@ -113,7 +116,35 @@ type ChatResult struct {
 	Content          string
 	PromptTokens     int
 	CompletionTokens int
+	ReasoningTokens  int // aus usage.completion_tokens_details (0 wenn Server es nicht liefert)
 	FinishReason     string
+	ThinkStripped    bool // Content enthielt <think>-Blöcke (client-seitig entfernt)
+}
+
+// stripThink entfernt <think>…</think>-Blöcke aus dem Content — auch einen
+// unterminierten Block (Truncation mitten im Denken). Kein Achsen-Contract
+// enthält legitime Think-Tags; ohne Stripping bricht jeder strikte Parser
+// an Servern, die Reasoning nicht als eigenes Feld separieren.
+func stripThink(s string) (string, bool) {
+	if !strings.Contains(s, "<think>") {
+		return s, false
+	}
+	var b strings.Builder
+	rest, stripped := s, true
+	for {
+		start := strings.Index(rest, "<think>")
+		if start < 0 {
+			b.WriteString(rest)
+			break
+		}
+		b.WriteString(rest[:start])
+		end := strings.Index(rest[start:], "</think>")
+		if end < 0 {
+			break // unterminiert: Rest ist Denk-Text
+		}
+		rest = rest[start+end+len("</think>"):]
+	}
+	return strings.TrimSpace(b.String()), stripped
 }
 
 // ErrContextOverflow markiert Calls, die der Server wegen erreichter
@@ -217,11 +248,14 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult
 	if len(wr.Choices) == 0 {
 		return ChatResult{}, fmt.Errorf("goldbench: chat response without choices")
 	}
+	content, thinkStripped := stripThink(wr.Choices[0].Message.Content)
 	return ChatResult{
-		Content:          wr.Choices[0].Message.Content,
+		Content:          content,
 		PromptTokens:     wr.Usage.PromptTokens,
 		CompletionTokens: wr.Usage.CompletionTokens,
+		ReasoningTokens:  wr.Usage.CompletionTokensDetails.ReasoningTokens,
 		FinishReason:     wr.Choices[0].FinishReason,
+		ThinkStripped:    thinkStripped,
 	}, nil
 }
 

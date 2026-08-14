@@ -14,6 +14,7 @@ type caseRun struct {
 	callErr    error    // erster Transport-Fehler (nil im Dry-Run)
 	contextErr bool     // mind. ein Call an der Context-Grenze abgelehnt
 	truncated  int      // Calls mit finish_reason "length" (Output-Budget gerissen)
+	thinkStrip int      // Calls mit client-seitig entferntem <think>-Block
 }
 
 // CaseScore ist das per-Case-Ergebnis für den Verbose-Report.
@@ -39,6 +40,7 @@ type AxisResult struct {
 	TransportErrors int                       `json:"transport_errors"`
 	ContextErrors   int                       `json:"context_errors"`    // Fälle, vom Server an der Context-Grenze abgelehnt
 	TruncatedOutputs int                      `json:"truncated_outputs"` // Fälle mit finish_reason "length" (max_tokens gerissen)
+	ThinkStripped   int                       `json:"think_stripped,omitempty"` // Fälle mit entferntem <think>-Block
 	Prospective     bool                      `json:"prospective,omitempty"` // Achse ohne echte ctx-Pipeline
 	PerCase         []CaseScore               `json:"per_case,omitempty"`
 }

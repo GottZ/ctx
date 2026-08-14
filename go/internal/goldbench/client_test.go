@@ -38,6 +38,23 @@ func TestExtraBodyMerge(t *testing.T) {
 	}
 }
 
+// Think-Stripping: Blöcke raus, Antwort bleibt; unterminierter Block
+// (Truncation mitten im Denken) hinterlässt leeren Content statt Denk-Müll.
+func TestStripThink(t *testing.T) {
+	cases := []struct{ in, want string; stripped bool }{
+		{`{"label": "ok"}`, `{"label": "ok"}`, false},
+		{"<think>hmm, also...</think>\n{\"label\": \"ok\"}", `{"label": "ok"}`, true},
+		{"<think>abgeschnitten mitten im Denk", "", true},
+		{"vorspann <think>a</think> mitte <think>b</think> ende", "vorspann  mitte  ende", true},
+	}
+	for _, c := range cases {
+		got, stripped := stripThink(c.in)
+		if got != c.want || stripped != c.stripped {
+			t.Errorf("stripThink(%q) = (%q, %v), erwartet (%q, %v)", c.in, got, stripped, c.want, c.stripped)
+		}
+	}
+}
+
 // Die Fail-Metrik hängt an dieser Klassifikation: eine Context-Ablehnung,
 // die als Transport-Fehler durchgeht, macht das Serving-Limit unsichtbar.
 func TestIsContextOverflowBody(t *testing.T) {
