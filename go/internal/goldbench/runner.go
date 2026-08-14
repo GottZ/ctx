@@ -199,15 +199,13 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 					promptToks.Add(int64(res.PromptTokens))
 					complToks.Add(int64(res.CompletionTokens))
 					// „Test x von y" + laufender Durchsatz auf stderr — sichtbar
-					// im Run-Log, ohne den Report zu verschmutzen. Alle 5 Tests:
-					// bei langsamen Modellen (DeepSeek ~12 Tests/min) bleibt die
-					// Dashboard-Kachel sonst minutenlang stumm.
-					if n%5 == 0 || int(n) == total {
-						el := time.Since(start).Seconds()
-						fmt.Fprintf(os.Stderr, "[fortschritt] Test %d von %d (%.1f%%) · in %.0f tok/s · out %.0f tok/s\n",
-							n, total, 100*float64(n)/float64(total),
-							float64(promptToks.Load())/el, float64(complToks.Load())/el)
-					}
+					// im Run-Log, ohne den Report zu verschmutzen. Jede Zeile:
+					// ~100 KB pro Lauf, dafür sekundenaktuelle Dashboard-Kachel
+					// auch in prompt-lastigen Achsen langsamer Modelle.
+					el := time.Since(start).Seconds()
+					fmt.Fprintf(os.Stderr, "[fortschritt] Test %d von %d (%.1f%%) · in %.0f tok/s · out %.0f tok/s\n",
+						n, total, 100*float64(n)/float64(total),
+						float64(promptToks.Load())/el, float64(complToks.Load())/el)
 					if err != nil {
 						if errors.Is(err, ErrContextOverflow) {
 							run.contextErr = true
