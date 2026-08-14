@@ -235,6 +235,21 @@ func parseWrappedLinks(body string) ([]Link, bool) {
 		}
 		return links, true
 	}
+	// Single-key empty-array wrapper, e.g. {"classifications": []}: the model
+	// explicitly says "nothing to link" — the same verdict as the bare "[]"
+	// sentinel, which parseLinks accepts at its head. The multi-key scan
+	// above already declined (no array yielded a link), and a LONE key whose
+	// value is an empty array cannot hide links elsewhere, so treating it as
+	// a success with zero links is safe. Multi-key wrappers keep declining
+	// (constraint 3): an empty sibling like "warnings" must not terminate
+	// the scan while a populated "relationships" key may still exist.
+	if len(wrapper) == 1 {
+		for _, v := range wrapper {
+			if strings.TrimSpace(string(v)) == "[]" {
+				return nil, true
+			}
+		}
+	}
 	return nil, false
 }
 
