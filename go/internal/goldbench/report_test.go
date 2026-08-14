@@ -42,6 +42,21 @@ func TestReportJSONFields(t *testing.T) {
 	}
 }
 
+// Budget-Skalierung: ×1 und Budget 0 (Server-Default) bleiben unangetastet,
+// >1 rundet auf und schrumpft nie — sonst würde ein kleiner Multiplikator
+// enge Budgets (sensitivity: 32) still verkleinern.
+func TestApplyBudgetMult(t *testing.T) {
+	cases := []struct{ in int; mult float64; want int }{
+		{32, 1, 32}, {32, 0, 32}, {0, 4, 0}, {32, 4, 128},
+		{32, 1.5, 48}, {1000, 2, 2000}, {32, 0.5, 32},
+	}
+	for _, c := range cases {
+		if got := applyBudgetMult(c.in, c.mult); got != c.want {
+			t.Errorf("applyBudgetMult(%d, %g) = %d, erwartet %d", c.in, c.mult, got, c.want)
+		}
+	}
+}
+
 // Die Markdown-Tabelle muss pro Zeile so viele Zellen tragen wie der Kopf —
 // der CI95-Spalten-Drift (Kopf 6, Zeilen 7 Zellen) blieb sonst unsichtbar.
 func TestMarkdownTableAligned(t *testing.T) {

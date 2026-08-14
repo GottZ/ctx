@@ -51,6 +51,7 @@ type EnvStamp struct {
 	Seed          int64          `json:"seed"`
 	DryRun        bool           `json:"dry_run,omitempty"`
 	MetricVersion int            `json:"metric_version"`
+	MaxTokensMult float64        `json:"max_tokens_mult,omitempty"` // >1 = Budget-Abweichung von der Pipeline-Treue
 	ServerNote    string         `json:"server_note,omitempty"`
 	NPerAxis      map[string]int `json:"n_per_axis"`
 }
@@ -113,6 +114,10 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		tp.PromptTokPerSec = float64(st.PromptTokens) / st.WallSeconds
 		tp.CompletionTokPerSec = float64(st.CompletionTokens) / st.WallSeconds
 	}
+	mult := cfg.MaxTokensMult
+	if mult == 1 {
+		mult = 0 // omitempty: pipeline-treue Läufe tragen kein Feld
+	}
 	report := &Report{
 		Throughput: tp,
 		Env: EnvStamp{
@@ -124,6 +129,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			Seed:          cfg.Seed,
 			DryRun:        cfg.DryRun,
 			MetricVersion: 2,
+			MaxTokensMult: mult,
 			ServerNote:    cfg.ServerNote,
 			NPerAxis:      nPerAxis,
 		},
@@ -187,6 +193,7 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 						run.callErr = ctx.Err()
 						break
 					}
+					req.Opts.MaxTokens = applyBudgetMult(req.Opts.MaxTokens, cfg.MaxTokensMult)
 					res, err := client.ChatWithUsage(ctx, req)
 					n := doneReqs.Add(1)
 					promptToks.Add(int64(res.PromptTokens))
@@ -234,6 +241,21 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 		return fmt.Errorf("goldbench: run abgebrochen: %w", err)
 	}
 	return nil
+}
+
+// applyBudgetMult skaliert ein per-Achse-max_tokens-Budget mit dem
+// konfigurierten Multiplikator (0/1 = unverändert; MaxTokens 0 = Server-
+// Default bleibt unangetastet). Aufgerundet, damit ×1.5 auf 32 nicht
+// abrundet und kleine Budgets real wachsen.
+func applyBudgetMult(maxTokens int, mult float64) int {
+	if mult <= 0 || mult == 1 || maxTokens <= 0 {
+		return maxTokens
+	}
+	scaled := int(float64(maxTokens)*mult + 0.999999)
+	if scaled < maxTokens {
+		return maxTokens
+	}
+	return scaled
 }
 
 // runStats trägt die Durchsatz-Aggregation des letzten executeJobs-Laufs.

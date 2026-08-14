@@ -89,7 +89,11 @@ carry `fail_stats` (top-level and per axis): `context_errors` counts cases the
 server rejected at its context limit, `truncated_outputs` counts cases whose
 completion hit the max_tokens budget (`finish_reason: length`), and
 `transport_errors` the remaining call failures — so a score drop caused by a
-serving limit is distinguishable from genuine model weakness. Dataset card,
+serving limit is distinguishable from genuine model weakness. For reasoning
+models whose thinking tokens consume the answer budget, `-max-tokens-mult N`
+scales every axis budget (stamped as `max_tokens_mult` in the env; such runs
+are only comparable to runs with the same multiplier — the unscaled run stays
+the ctx-fitness verdict). Dataset card,
 axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github.com/GottZ/ctx-bench).
 
 ### Wire-contract freeze (workflow UI)

@@ -48,6 +48,7 @@ func run() error {
 		timeoutSec  = flag.Int("timeout", 120, "HTTP-Timeout pro Call in Sekunden")
 		verbose     = flag.Bool("verbose", false, "per_case-Ergebnisse in den JSON-Report aufnehmen")
 		serverNote  = flag.String("server-note", "", "Provenienz-Notiz (Server-Build/Flags) für den Env-Stamp")
+		maxTokMult  = flag.Float64("max-tokens-mult", 1, "skaliert das per-Achse-max_tokens-Budget (>1 = dokumentierte Abweichung von der Pipeline-Treue, für Reasoning-Modelle)")
 	)
 	flag.Parse()
 
@@ -96,6 +97,7 @@ func run() error {
 		Verbose:     *verbose,
 		ServerNote:  *serverNote,
 		GitRev:      gitRev(),
+		MaxTokensMult: *maxTokMult,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

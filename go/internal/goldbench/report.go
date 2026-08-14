@@ -38,6 +38,9 @@ func Markdown(report *Report) string {
 	if report.Env.DryRun {
 		b.WriteString("- **DRY-RUN** (keine LLM-Calls)\n")
 	}
+	if report.Env.MaxTokensMult > 1 {
+		fmt.Fprintf(&b, "- **Budget ×%.3g** — max_tokens der Achsen skaliert (Abweichung von der Pipeline-Treue; nur mit gleich skalierten Läufen vergleichbar)\n", report.Env.MaxTokensMult)
+	}
 	b.WriteString("\n| Achse | n | parse_rate | Primär-Metrik | Score | CI95 | Qualität |\n")
 	b.WriteString("|---|---:|---:|---|---:|---:|---|\n")
 

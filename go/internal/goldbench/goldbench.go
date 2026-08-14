@@ -70,6 +70,11 @@ type Config struct {
 	Verbose     bool     // per_case-Ergebnisse in den Report aufnehmen
 	GitRev      string   // Env-Stamp: git-Revision des Baus
 	ServerNote    string // freier Provenienz-Text (Server-Flags/Build) für den Env-Stamp
+	// MaxTokensMult skaliert das per-Achse-max_tokens-Budget (Default 1 =
+	// pipeline-treu). >1 ist eine DOKUMENTIERTE Abweichung für Reasoning-
+	// Modelle, deren Denk-Tokens das Antwort-Budget verbrauchen — Scores
+	// sind nur zwischen Läufen mit gleichem Multiplikator vergleichbar.
+	MaxTokensMult float64
 }
 
 // LoadCases lädt die Gold-Fälle einer Achse aus <dir>/<axis>.jsonl und
