@@ -93,7 +93,11 @@ serving limit is distinguishable from genuine model weakness. For reasoning
 models whose thinking tokens consume the answer budget, `-max-tokens-mult N`
 scales every axis budget (stamped as `max_tokens_mult` in the env; such runs
 are only comparable to runs with the same multiplier — the unscaled run stays
-the ctx-fitness verdict). Dataset card,
+the ctx-fitness verdict). `-extra-body '<json>'` merges a JSON object into
+every chat request (struct fields win) for engine-specific knobs the portable
+API cannot carry — thinking switches via `chat_template_kwargs`, `top_k` or
+penalty samplers on vLLM; the object is stamped into the report env as
+`extra_body`. Dataset card,
 axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github.com/GottZ/ctx-bench).
 
 ### Wire-contract freeze (workflow UI)

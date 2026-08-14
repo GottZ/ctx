@@ -42,6 +42,23 @@ type Client struct {
 	apiKey string
 	seed   int64
 	hc     *http.Client
+	// extraBody wird in jeden Request-Body gemerged (z. B. chat_template_kwargs
+	// für Thinking-Schalter oder Sampler, die die portable API nicht trägt).
+	// Kollisionen gewinnen die Struct-Felder — extraBody füllt nur Lücken.
+	extraBody map[string]json.RawMessage
+}
+
+// SetExtraBody parst das JSON-Objekt für den Request-Merge (nil bei leer).
+func (c *Client) SetExtraBody(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	m := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return fmt.Errorf("goldbench: extra-body kein JSON-Objekt: %w", err)
+	}
+	c.extraBody = m
+	return nil
 }
 
 // NewClient baut den Client. endpoint darf die Basis-URL oder bereits die
@@ -146,6 +163,20 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("goldbench: marshal request: %w", err)
+	}
+	if len(c.extraBody) > 0 {
+		merged := map[string]json.RawMessage{}
+		if err := json.Unmarshal(payload, &merged); err != nil {
+			return ChatResult{}, fmt.Errorf("goldbench: merge extra-body: %w", err)
+		}
+		for k, v := range c.extraBody {
+			if _, exists := merged[k]; !exists {
+				merged[k] = v
+			}
+		}
+		if payload, err = json.Marshal(merged); err != nil {
+			return ChatResult{}, fmt.Errorf("goldbench: marshal merged request: %w", err)
+		}
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))

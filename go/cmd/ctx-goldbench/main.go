@@ -49,6 +49,7 @@ func run() error {
 		verbose     = flag.Bool("verbose", false, "per_case-Ergebnisse in den JSON-Report aufnehmen")
 		serverNote  = flag.String("server-note", "", "Provenienz-Notiz (Server-Build/Flags) für den Env-Stamp")
 		maxTokMult  = flag.Float64("max-tokens-mult", 1, "skaliert das per-Achse-max_tokens-Budget (>1 = dokumentierte Abweichung von der Pipeline-Treue, für Reasoning-Modelle)")
+		extraBody   = flag.String("extra-body", "", "JSON-Objekt, das in jeden Chat-Request gemerged wird (z. B. '{\"chat_template_kwargs\":{\"enable_thinking\":false}}')")
 	)
 	flag.Parse()
 
@@ -98,6 +99,7 @@ func run() error {
 		ServerNote:  *serverNote,
 		GitRev:      gitRev(),
 		MaxTokensMult: *maxTokMult,
+		ExtraBody:     *extraBody,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

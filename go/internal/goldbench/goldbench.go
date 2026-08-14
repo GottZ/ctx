@@ -75,6 +75,11 @@ type Config struct {
 	// Modelle, deren Denk-Tokens das Antwort-Budget verbrauchen — Scores
 	// sind nur zwischen Läufen mit gleichem Multiplikator vergleichbar.
 	MaxTokensMult float64
+	// ExtraBody: JSON-Objekt, das in jeden Chat-Request gemerged wird
+	// (Lücken-Füller, Struct-Felder gewinnen) — z. B. chat_template_kwargs
+	// für Thinking-Schalter oder nicht-portable Sampler (top_k bei vLLM).
+	// Wandert in den EnvStamp (Provenienz).
+	ExtraBody string
 }
 
 // LoadCases lädt die Gold-Fälle einer Achse aus <dir>/<axis>.jsonl und

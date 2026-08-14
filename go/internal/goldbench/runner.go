@@ -52,6 +52,7 @@ type EnvStamp struct {
 	DryRun        bool           `json:"dry_run,omitempty"`
 	MetricVersion int            `json:"metric_version"`
 	MaxTokensMult float64        `json:"max_tokens_mult,omitempty"` // >1 = Budget-Abweichung von der Pipeline-Treue
+	ExtraBody     string         `json:"extra_body,omitempty"`      // Request-Merge (chat_template_kwargs etc.)
 	ServerNote    string         `json:"server_note,omitempty"`
 	NPerAxis      map[string]int `json:"n_per_axis"`
 }
@@ -130,6 +131,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			DryRun:        cfg.DryRun,
 			MetricVersion: 2,
 			MaxTokensMult: mult,
+			ExtraBody:     cfg.ExtraBody,
 			ServerNote:    cfg.ServerNote,
 			NPerAxis:      nPerAxis,
 		},
@@ -168,6 +170,9 @@ func resolveAxes(requested []string, registry map[string]axisDef) ([]string, err
 func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[string][]caseRun) error {
 	client := NewClient(cfg.Endpoint, cfg.Model, cfg.APIKey, cfg.Seed,
 		time.Duration(cfg.TimeoutSec)*time.Second)
+	if err := client.SetExtraBody(cfg.ExtraBody); err != nil {
+		return err
+	}
 	conc := cfg.Concurrency
 	if conc < 1 {
 		conc = 1
