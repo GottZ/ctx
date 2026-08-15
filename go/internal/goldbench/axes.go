@@ -73,6 +73,11 @@ func axisRegistry() map[string]axisDef {
 		axisRerank(),
 		axisSynthesis(),
 		axisTranslate(),
+		// Prompt-Varianten für den A/B-Test (axis_variants.go) — additiv.
+		axisTaggingV2(),
+		axisTitleV2(),
+		axisRerankV2(),
+		axisClusterLabelV2(),
 	}
 	m := make(map[string]axisDef, len(defs))
 	for _, d := range defs {
