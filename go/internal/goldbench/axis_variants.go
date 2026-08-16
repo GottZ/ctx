@@ -87,31 +87,10 @@ func axisTitleV2() axisDef {
 	}
 }
 
-// rerank-v2: Count-Match-Härtung (exakt N Integers).
-// Härtung ANGEHÄNGT an den Original-System-Prompt (bewahrt promptguard.Rule +
-// Nonce); nur Count/Positional-Klarstellung, keine Semantik-Änderung.
-
-const rerankHardenV2 = "\n\nOutput exactly one integer per document shown, in the same order, " +
-	"as a single flat JSON array of integers. If N documents are shown, the array contains " +
-	"exactly N integers — never merge, skip, summarize, or add documents."
-
-func axisRerankV2() axisDef {
-	base := axisRerank()
-	return axisDef{
-		name: "rerank-v2",
-		build: func(c *Case) ([]ChatRequest, error) {
-			reqs, err := base.build(c)
-			if err != nil {
-				return nil, err
-			}
-			for i := range reqs {
-				reqs[i].System += rerankHardenV2
-			}
-			return reqs, nil
-		},
-		score: base.score,
-	}
-}
+// rerank-v2 wurde promotet (Härtungs-A/B 2026-08-15, nemotron35-lightning:
+// parse 0.694→0.778, nDCG 0.502→0.569 same-run): der Härtungs-Satz lebt jetzt
+// als rrf.rerankHarden im Produktions-Prompt (rerank.go) und damit automatisch
+// in der Basis-Achse rerank — eine eigene Varianten-Achse würde ihn doppeln.
 
 // cluster-label-v2: single-key-Härtung.
 // single-key-Härtung angehängt (bewahrt Guard-Rule + Nonce).

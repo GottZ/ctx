@@ -109,6 +109,15 @@ throughput block as `reasoning_tokens` where the server reports it, so the
 reasoning tax is measured instead of inferred from truncations. Dataset card,
 axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github.com/GottZ/ctx-bench).
 
+Prompt changes to the production pipelines travel through the bench first:
+a candidate wording runs as an additive `-v2` variant axis side by side with
+the baseline (same model, same server, same run — the fairest A/B), and only
+a variant with measured benefit on format-breaking models and no regression
+on strong ones is promoted into the production prompt. The variant axis is
+then retired, since the base axis replays the production prompt and would
+double the change. First promoted hardening: the rerank count-match sentence
+(A/B 2026-08-15).
+
 ### Wire-contract freeze (workflow UI)
 
 The workflow-UI API client (`go/web/src/lib/api/issues.ts`, `types-registry.ts`) and the SPA e2e/vitest fixtures both eat the **same** contract-freeze JSONs in `go/web/src/lib/api/__fixtures__/*.json` (issue list/detail/comments/board/mutate, project list, sync status, type list). Those files are re-serialized from the live handler structs (W6/W7/W11/W4/types) by the Go golden `TestContractFreezeGolden` (`internal/handler/contract_freeze_golden_test.go`) — a drift on either side turns it red before deploy (closes the fixture-drift gap: the FE mocks can no longer diverge silently from the Go wire). To regenerate the JSONs after an intentional wire change, review the diff from:
