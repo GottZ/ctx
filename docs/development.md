@@ -82,7 +82,10 @@ cd go && go build ./cmd/ctx-goldbench
 output contracts is unfit for ctx regardless of content quality. Since metric v2
 (`metric_version` in the report env stamp) the keyword/tagging axes score a
 prediction-capped set-F1 (over-generation no longer inflates recall), cluster
-labeling scores a constraint-gated token-F1, every axis carries a bootstrap 95%
+labeling scores a constraint-gated token-F1 (the production label parser —
+and therefore the bench — tolerates one markdown fence wrapping the whole
+answer; the structural single-key contract still applies to the unwrapped
+body), every axis carries a bootstrap 95%
 confidence interval, and reports include token throughput (prompt/completion
 tok/s) plus a `server_note` provenance field for the serving flags. Reports also
 carry `fail_stats` (top-level and per axis): `context_errors` counts cases the

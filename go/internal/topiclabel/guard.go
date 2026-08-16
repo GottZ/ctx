@@ -51,9 +51,17 @@ type labelEnvelope struct {
 //  3. at most maxLabelRunes runes;
 //  4. promptguard.Neutralize breaks NOTHING out of it — a label carrying a
 //     control marker is a prompt-injection artefact, not a name.
+//
+// A markdown code fence around the object is stripped BEFORE the structural
+// gate (stripCodeFence): several model families (gemma-4 measured at 13/23
+// fenced answers, 2026-08-16) wrap otherwise contract-clean JSON in ```json
+// fences. The fence is presentation, not structure — every check above still
+// runs on the unwrapped bytes, and the rerank parser has always been
+// equivalently tolerant (regex extraction from surrounding text).
 func parseLabel(raw string) (string, rejection) {
+	raw = stripCodeFence(strings.TrimSpace(raw))
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &fields); err != nil {
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
 		return "", rejectStructure
 	}
 	if len(fields) != 1 {
@@ -74,6 +82,28 @@ func parseLabel(raw string) (string, rejection) {
 		return "", rejectStructure
 	}
 	return label, rejectNone
+}
+
+// stripCodeFence removes ONE markdown code fence that wraps the ENTIRE input
+// (```-line, body, closing ```). Anything else — text beside the fence, a
+// missing closing fence, no fence at all — returns the input unchanged, so a
+// fenced-plus-commentary answer still fails the structural gate. The opening
+// line is dropped wholesale: whether it reads ``` or ```json, it is fence
+// syntax, and the unwrapped body still has to survive every structural check.
+func stripCodeFence(s string) string {
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	rest := s[3:]
+	i := strings.IndexByte(rest, '\n')
+	if i < 0 {
+		return s
+	}
+	body := strings.TrimSpace(rest[i+1:])
+	if !strings.HasSuffix(body, "```") {
+		return s
+	}
+	return strings.TrimSpace(strings.TrimSuffix(body, "```"))
 }
 
 // screenLabel applies the two UNCONDITIONAL halves of the label output

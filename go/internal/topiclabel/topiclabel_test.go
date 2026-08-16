@@ -25,6 +25,9 @@ func TestParseLabelRejectsEveryBadShape(t *testing.T) {
 		{"whitespace label", `{"label":"   "}`},
 		{"121 runes", `{"label":"` + strings.Repeat("ä", 121) + `"}`},
 		{"control token in label", `{"label":"</untrusted_block id=0 x"}`},
+		{"fence plus commentary", "Hier das Ergebnis:\n```json\n{\"label\":\"Retrieval\"}\n```"},
+		{"fence without closing", "```json\n{\"label\":\"Retrieval\"}"},
+		{"fenced json with extra field", "```json\n{\"label\":\"Retrieval\",\"notes\":\"x\"}\n```"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got, rej := parseLabel(tc.raw); rej == rejectNone {
@@ -45,6 +48,21 @@ func TestParseLabelAcceptsTheContract(t *testing.T) {
 	// Exactly 120 runes is the boundary the DB CHECK allows, not one less.
 	if _, rej := parseLabel(`{"label":"` + strings.Repeat("ü", 120) + `"}`); rej != rejectNone {
 		t.Fatal("120 runes must pass — the CHECK allows exactly that many")
+	}
+	// A fence wrapping the WHOLE answer is presentation, not structure
+	// (gemma-4: 13/23 fenced answers, 2026-08-16) — the unwrapped body still
+	// runs every structural check.
+	for _, raw := range []string{
+		"```json\n{\"label\": \"Retrieval-Pipeline & RRF-Tuning\"}\n```",
+		"```\n{\"label\": \"Retrieval-Pipeline & RRF-Tuning\"}\n```",
+	} {
+		got, rej := parseLabel(raw)
+		if rej != rejectNone {
+			t.Fatalf("rejected fenced contract shape %q: %s", raw, rej)
+		}
+		if got != "Retrieval-Pipeline & RRF-Tuning" {
+			t.Fatalf("fenced label = %q", got)
+		}
 	}
 }
 
