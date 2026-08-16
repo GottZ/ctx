@@ -62,8 +62,18 @@ func systemPromptFor(lang, nonce string) string {
 		"Rules: name the common SUBJECT, not one of the documents. No sentence, no punctuation at the end, no " +
 		"quotes, at most 120 characters. Never copy an identifier, a path, a host name or a key from the input.\n\n" +
 		"Answer with JSON and nothing else: {\"label\": \"...\"}\n\n" +
-		promptguard.Rule(nonce)
+		promptguard.Rule(nonce) +
+		clusterHarden
 }
+
+// clusterHarden pins the output shape to a single-key object against chatty
+// models that add reasoning fields. Byte-identical to the goldbench
+// cluster-label-v2 A/B variant and appended in the same position (after the
+// guard rule) that the A/B measured. Evidence: parse 0.304→0.391, token-F1
+// 0.188→0.221 on a format-breaking model (nemotron35-lightning, same-run A/B
+// 2026-08-15); neutral on models that already parse at 1.0.
+const clusterHarden = "\n\nReturn exactly one JSON object with the single key \"label\" and no other keys. " +
+	"Do not add a \"reasoning\", \"explanation\", \"notes\" or any further field."
 
 // promptCore is everything the model sees about one topic.
 type promptCore struct {

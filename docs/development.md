@@ -115,8 +115,8 @@ the baseline (same model, same server, same run — the fairest A/B), and only
 a variant with measured benefit on format-breaking models and no regression
 on strong ones is promoted into the production prompt. The variant axis is
 then retired, since the base axis replays the production prompt and would
-double the change. First promoted hardening: the rerank count-match sentence
-(A/B 2026-08-15).
+double the change. Promoted hardenings so far: the rerank count-match sentence
+and the cluster-label single-key sentence (A/B 2026-08-15).
 
 ### Wire-contract freeze (workflow UI)
 

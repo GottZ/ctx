@@ -74,12 +74,13 @@ func axisRegistry() map[string]axisDef {
 		axisSynthesis(),
 		axisTranslate(),
 		// Prompt-Varianten für den A/B-Test (axis_variants.go) — additiv.
-		// rerank-v2 ist promotet: die Härtung lebt seit dem Härtungs-A/B
-		// 2026-08-15 (nemotron35: parse 0.694→0.778) im Produktions-Prompt
-		// (rrf.rerankHarden) und damit in der Basis-Achse rerank.
+		// rerank-v2 und cluster-label-v2 sind promotet: die Härtungen leben
+		// seit dem Härtungs-A/B 2026-08-15 (nemotron35: rerank-parse
+		// 0.694→0.778, cluster-parse 0.304→0.391) in den Produktions-Prompts
+		// (rrf.rerankHarden, topiclabel.clusterHarden) und damit in den
+		// Basis-Achsen rerank und cluster-label.
 		axisTaggingV2(),
 		axisTitleV2(),
-		axisClusterLabelV2(),
 	}
 	m := make(map[string]axisDef, len(defs))
 	for _, d := range defs {

@@ -92,26 +92,8 @@ func axisTitleV2() axisDef {
 // als rrf.rerankHarden im Produktions-Prompt (rerank.go) und damit automatisch
 // in der Basis-Achse rerank — eine eigene Varianten-Achse würde ihn doppeln.
 
-// cluster-label-v2: single-key-Härtung.
-// single-key-Härtung angehängt (bewahrt Guard-Rule + Nonce).
-
-const clusterHardenV2 = "\n\nReturn exactly one JSON object with the single key \"label\" and no other keys. " +
-	"Do not add a \"reasoning\", \"explanation\", \"notes\" or any further field."
-
-func axisClusterLabelV2() axisDef {
-	base := axisClusterLabel()
-	return axisDef{
-		name: "cluster-label-v2",
-		build: func(c *Case) ([]ChatRequest, error) {
-			reqs, err := base.build(c)
-			if err != nil {
-				return nil, err
-			}
-			for i := range reqs {
-				reqs[i].System += clusterHardenV2
-			}
-			return reqs, nil
-		},
-		score: base.score,
-	}
-}
+// cluster-label-v2 wurde promotet (Härtungs-A/B 2026-08-15,
+// nemotron35-lightning: parse 0.304→0.391, token-F1 0.188→0.221 same-run):
+// der single-key-Härtungs-Satz lebt jetzt als topiclabel.clusterHarden im
+// Produktions-Prompt (prompt.go) und damit automatisch in der Basis-Achse
+// cluster-label — eine eigene Varianten-Achse würde ihn doppeln.
