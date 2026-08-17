@@ -84,6 +84,12 @@ type Config struct {
 	// festen Wert (<0 = aus). DOKUMENTIERTE Abweichung von der Mock-Treue
 	// („modellkarten-purer" Lauf: misst das Modell, nicht die Pipeline).
 	TempOverride float64
+	// DumpOutputs schreibt die rohen Modell-Antworten als JSONL
+	// ({axis, id, outputs}) an den angegebenen Pfad (leer = aus). Entkoppelt
+	// Generierung (GPU, einmal) von Scoring (offline, iterierbar) — die
+	// Grundlage für Judge- und Retrieval-Re-Scoring ohne neuen Serving-Lauf
+	// (Bias-Audit 2026-08-17).
+	DumpOutputs string
 }
 
 // LoadCases lädt die Gold-Fälle einer Achse aus <dir>/<axis>.jsonl und

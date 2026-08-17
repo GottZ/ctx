@@ -51,6 +51,7 @@ func run() error {
 		maxTokMult  = flag.Float64("max-tokens-mult", 1, "skaliert das per-Achse-max_tokens-Budget (>1 = dokumentierte Abweichung von der Pipeline-Treue, für Reasoning-Modelle)")
 		extraBody   = flag.String("extra-body", "", "JSON-Objekt, das in jeden Chat-Request gemerged wird (z. B. '{\"chat_template_kwargs\":{\"enable_thinking\":false}}')")
 		tempOv      = flag.Float64("temperature-override", -1, "fixe Temperatur statt der Pipeline-Temperaturen (<0 = aus; dokumentierte Mock-Treue-Abweichung für modellkarten-pure Läufe)")
+		dumpOut     = flag.String("dump-outputs", "", "JSONL-Pfad für die rohen Modell-Antworten ({axis,id,outputs}; Basis für offline-Re-Scoring)")
 	)
 	flag.Parse()
 
@@ -102,6 +103,7 @@ func run() error {
 		MaxTokensMult: *maxTokMult,
 		ExtraBody:     *extraBody,
 		TempOverride:  *tempOv,
+		DumpOutputs:   *dumpOut,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -2,6 +2,7 @@ package goldbench
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -107,6 +108,12 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 
 	if !cfg.DryRun {
 		if err := executeJobs(ctx, cfg, jobs, axisRuns); err != nil {
+			return nil, err
+		}
+	}
+
+	if cfg.DumpOutputs != "" {
+		if err := dumpOutputs(cfg.DumpOutputs, axes, axisRuns); err != nil {
 			return nil, err
 		}
 	}
@@ -368,4 +375,35 @@ func applyComposites(report *Report, axes []string) {
 		v := meanOrZero(silver)
 		report.CompositeSilver = &v
 	}
+}
+
+// dumpOutputs persistiert die rohen Modell-Antworten aller gefahrenen Achsen
+// als JSONL — eine Zeile pro Case: {"axis","id","outputs":[...]}. Antworten
+// werden UNVERÄNDERT geschrieben (vor jedem Parse/Strip): das Dump ist die
+// Primärquelle für offline-Re-Scoring (Judge, Retrieval), nicht ein
+// Zwischenstand des Scorings.
+func dumpOutputs(path string, axes []string, axisRuns map[string][]caseRun) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("goldbench: dump-outputs: %w", err)
+	}
+	enc := json.NewEncoder(f)
+	for _, axis := range axes {
+		for _, r := range axisRuns[axis] {
+			rec := struct {
+				Axis    string   `json:"axis"`
+				ID      string   `json:"id"`
+				Outputs []string `json:"outputs"`
+			}{Axis: axis, ID: r.c.ID, Outputs: r.outputs}
+			if err := enc.Encode(rec); err != nil {
+				_ = f.Close()
+				return fmt.Errorf("goldbench: dump-outputs: %w", err)
+			}
+		}
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("goldbench: dump-outputs: %w", err)
+	}
+	return f.Close()
 }

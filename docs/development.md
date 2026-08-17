@@ -112,6 +112,11 @@ throughput block as `reasoning_tokens` where the server reports it, so the
 reasoning tax is measured instead of inferred from truncations. Dataset card,
 axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github.com/GottZ/ctx-bench).
 
+`-dump-outputs <path>` writes every raw model answer as JSONL
+(`{axis,id,outputs}`) before any parsing — the substrate for offline
+re-scoring (judge-based or retrieval-functional evaluation) without repeating
+the serving run.
+
 Prompt changes to the production pipelines travel through the bench first:
 a candidate wording runs as an additive `-v2` variant axis side by side with
 the baseline (same model, same server, same run — the fairest A/B), and only
