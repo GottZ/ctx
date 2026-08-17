@@ -63,12 +63,19 @@ Output a JSON array of {target_id, type, confidence}. Empty [] when no candidate
 // DreamOptions returns Ollama options for dream evaluation.
 // Tuned for qwen3.6:27b non-thinking mode per vendor recommendation,
 // validated against qwen3.5:27b baseline in /tmp/bench_l2 (Session 24).
+//
+// NumPredict 600 (was 400): object-map drift (form 2, qwen3.8-local) emits
+// each link as {uuid: {target_id, type, confidence}} — roughly 2x the token
+// cost of the array form the prompt requests, because the uuid repeats as both
+// map key AND target_id value. Five entries in that form need ~500-600 tokens,
+// so 400 truncated mid-JSON ("unexpected end of JSON input") and the whole
+// evaluation was lost. 600 fits the prompt's "Maximum 5 entries" with margin.
 func DreamOptions() llm.Options {
 	return llm.Options{
 		Temperature: 0.7,
 		TopP:        0.8,
 		TopK:        20,
-		NumPredict:  400,
+		NumPredict:  600,
 	}
 }
 
