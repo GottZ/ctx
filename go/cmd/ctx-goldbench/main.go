@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -52,6 +53,7 @@ func run() error {
 		extraBody   = flag.String("extra-body", "", "JSON-Objekt, das in jeden Chat-Request gemerged wird (z. B. '{\"chat_template_kwargs\":{\"enable_thinking\":false}}')")
 		tempOv      = flag.Float64("temperature-override", -1, "fixe Temperatur statt der Pipeline-Temperaturen (<0 = aus; dokumentierte Mock-Treue-Abweichung für modellkarten-pure Läufe)")
 		dumpOut     = flag.String("dump-outputs", "", "JSONL-Pfad für die rohen Modell-Antworten ({axis,id,outputs}; Basis für offline-Re-Scoring)")
+		genStamp    = flag.String("gen-stamp", "", "JSON-Objekt {engine,engine_version,image,template_sha256} — Engine-Stempel je Dump-Zeile (Dump-v2, Korpus-Homogenität)")
 	)
 	flag.Parse()
 
@@ -104,6 +106,14 @@ func run() error {
 		ExtraBody:     *extraBody,
 		TempOverride:  *tempOv,
 		DumpOutputs:   *dumpOut,
+	}
+
+	if *genStamp != "" {
+		var gs goldbench.GenStamp
+		if err := json.Unmarshal([]byte(*genStamp), &gs); err != nil {
+			return fmt.Errorf("-gen-stamp: %w", err)
+		}
+		cfg.GenStamp = &gs
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

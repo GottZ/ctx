@@ -115,7 +115,17 @@ axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github
 `-dump-outputs <path>` writes every raw model answer as JSONL
 (`{axis,id,outputs}`) before any parsing — the substrate for offline
 re-scoring (judge-based or retrieval-functional evaluation) without repeating
-the serving run.
+the serving run. Since dump v2 every line additionally carries the full
+prompt transcript and per-request attribution — `system`, `user`, `params`
+(the *effective* sampling options after `-max-tokens-mult` /
+`-temperature-override`) and `usage` (`prompt`, `completion`, `reasoning`,
+`finish`, `think_stripped`, `err`), all indexed in parallel to `outputs`
+(one slot per chat request; the sensitivity axis has two) — plus an
+optional `gen` engine stamp passed via
+`-gen-stamp '{"engine":…,"engine_version":…,"image":…,"template_sha256":…}'`.
+`outputs` stays a flat `[]string` (sample 0 per request, post client-side
+`<think>` strip), so v1 readers keep working unchanged; the file is created
+`0600` because the prompts carry corpus content.
 
 Prompt changes to the production pipelines travel through the bench first:
 a candidate wording runs as an additive `-v2` variant axis side by side with

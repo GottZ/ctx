@@ -88,8 +88,22 @@ type Config struct {
 	// ({axis, id, outputs}) an den angegebenen Pfad (leer = aus). Entkoppelt
 	// Generierung (GPU, einmal) von Scoring (offline, iterierbar) — die
 	// Grundlage für Judge- und Retrieval-Re-Scoring ohne neuen Serving-Lauf
-	// (Bias-Audit 2026-08-17).
+	// (Bias-Audit 2026-08-17). Seit Dump-v2 (design/02 §3.3) trägt jede
+	// Zeile zusätzlich system/user/params/usage je Request-Slot und den
+	// gen-Stempel — Volltext-Prompt-Träger, Datei daher immer 0600.
 	DumpOutputs string
+	// GenStamp stempelt jede Dump-Zeile mit der erzeugenden Engine
+	// (Engine, Version, Image-Digest, Template-Hash) — Homogenitäts-Beleg des
+	// Korpus (design/02 §5.4). nil = kein Stempel (v1-kompatible Zeile).
+	GenStamp *GenStamp
+}
+
+// GenStamp ist der Engine-Stempel eines Dump-Records (design/02 §3.3 `gen`).
+type GenStamp struct {
+	Engine         string `json:"engine,omitempty"`
+	EngineVersion  string `json:"engine_version,omitempty"`
+	Image          string `json:"image,omitempty"`
+	TemplateSHA256 string `json:"template_sha256,omitempty"`
 }
 
 // LoadCases lädt die Gold-Fälle einer Achse aus <dir>/<axis>.jsonl und

@@ -100,7 +100,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			if err != nil {
 				return nil, err
 			}
-			runs[i] = caseRun{c: c, outputs: make([]string, len(reqs))}
+			runs[i] = caseRun{c: c, reqs: reqs, outputs: make([]string, len(reqs)), usages: make([]CallUsage, len(reqs))}
 			jobs = append(jobs, job{axis: axis, idx: i, reqs: reqs})
 		}
 		axisRuns[axis] = runs
@@ -113,7 +113,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 
 	if cfg.DumpOutputs != "" {
-		if err := dumpOutputs(cfg.DumpOutputs, axes, axisRuns); err != nil {
+		if err := dumpOutputs(cfg.DumpOutputs, axes, axisRuns, cfg.GenStamp); err != nil {
 			return nil, err
 		}
 	}
@@ -218,6 +218,9 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 					if cfg.TempOverride >= 0 {
 						req.Opts.Temperature = cfg.TempOverride
 					}
+					// Effektive Sampling-Parameter zurückschreiben — der Dump
+					// (params) soll das tatsächlich Gesendete tragen.
+					run.reqs[i].Opts = req.Opts
 					res, err := client.ChatWithUsage(ctx, req)
 					n := doneReqs.Add(1)
 					promptToks.Add(int64(res.PromptTokens))
@@ -231,7 +234,12 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 					fmt.Fprintf(os.Stderr, "[fortschritt] Test %d von %d (%.1f%%) · in %.0f tok/s · out %.0f tok/s\n",
 						n, total, 100*float64(n)/float64(total),
 						float64(promptToks.Load())/el, float64(complToks.Load())/el)
+					run.usages[i] = CallUsage{
+						Prompt: res.PromptTokens, Completion: res.CompletionTokens, Reasoning: res.ReasoningTokens,
+						Finish: res.FinishReason, ThinkStripped: res.ThinkStripped,
+					}
 					if err != nil {
+						run.usages[i].Err = err.Error()
 						if errors.Is(err, ErrContextOverflow) {
 							run.contextErr = true
 						}
@@ -377,25 +385,38 @@ func applyComposites(report *Report, axes []string) {
 	}
 }
 
+// dumpRecord ist die Dump-Zeile (v2, design/02 §3.3): Bestandsleser lesen
+// weiterhin nur axis/id/outputs (outputs bleibt flach, Sample 0 je Request);
+// system/user/params/usage sind parallel zu outputs indiziert (ein Slot pro
+// ChatRequest — sensitivity hat zwei), gen ist der Engine-Stempel. Alle neuen
+// Felder omitempty — ohne Requests/Stempel ist die Zeile byte-gleich zu v1.
+type dumpRecord struct {
+	Axis    string         `json:"axis"`
+	ID      string         `json:"id"`
+	System  []string       `json:"system,omitempty"`
+	User    []string       `json:"user,omitempty"`
+	Params  []SamplingOpts `json:"params,omitempty"`
+	Outputs []string       `json:"outputs"`
+	Usage   []CallUsage    `json:"usage,omitempty"`
+	Gen     *GenStamp      `json:"gen,omitempty"`
+}
+
 // dumpOutputs persistiert die rohen Modell-Antworten aller gefahrenen Achsen
-// als JSONL — eine Zeile pro Case: {"axis","id","outputs":[...]}. Antworten
-// werden UNVERÄNDERT geschrieben (vor jedem Parse/Strip): das Dump ist die
-// Primärquelle für offline-Re-Scoring (Judge, Retrieval), nicht ein
-// Zwischenstand des Scorings.
-func dumpOutputs(path string, axes []string, axisRuns map[string][]caseRun) error {
-	f, err := os.Create(path)
+// als JSONL — eine Zeile pro Case (dumpRecord). Outputs sind der Content
+// NACH dem client-seitigen <think>-Strip (client.go stripThink) und VOR jedem
+// Scorer-Parse: das Dump ist die Primärquelle für offline-Re-Scoring (Judge,
+// Retrieval); ob gestrippt wurde, steht je Slot in usage.think_stripped.
+// Seit v2 trägt die Datei die Volltext-Prompts (privater Block-Content) —
+// deshalb O_CREATE|0600 statt umask-Default.
+func dumpOutputs(path string, axes []string, axisRuns map[string][]caseRun, gen *GenStamp) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("goldbench: dump-outputs: %w", err)
 	}
 	enc := json.NewEncoder(f)
 	for _, axis := range axes {
 		for _, r := range axisRuns[axis] {
-			rec := struct {
-				Axis    string   `json:"axis"`
-				ID      string   `json:"id"`
-				Outputs []string `json:"outputs"`
-			}{Axis: axis, ID: r.c.ID, Outputs: r.outputs}
-			if err := enc.Encode(rec); err != nil {
+			if err := enc.Encode(newDumpRecord(axis, r, gen)); err != nil {
 				_ = f.Close()
 				return fmt.Errorf("goldbench: dump-outputs: %w", err)
 			}
@@ -406,4 +427,20 @@ func dumpOutputs(path string, axes []string, axisRuns map[string][]caseRun) erro
 		return fmt.Errorf("goldbench: dump-outputs: %w", err)
 	}
 	return f.Close()
+}
+
+func newDumpRecord(axis string, r caseRun, gen *GenStamp) dumpRecord {
+	rec := dumpRecord{Axis: axis, ID: r.c.ID, Outputs: r.outputs, Gen: gen}
+	if len(r.reqs) > 0 {
+		rec.System = make([]string, len(r.reqs))
+		rec.User = make([]string, len(r.reqs))
+		rec.Params = make([]SamplingOpts, len(r.reqs))
+		for i, q := range r.reqs {
+			rec.System[i], rec.User[i], rec.Params[i] = q.System, q.User, q.Opts
+		}
+	}
+	if len(r.usages) > 0 {
+		rec.Usage = r.usages
+	}
+	return rec
 }

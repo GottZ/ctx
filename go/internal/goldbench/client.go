@@ -22,10 +22,10 @@ import (
 // dort nicht portabel und werden weggelassen (strikte OpenAI-Server lehnen
 // unbekannte Felder ab). Siehe README-Abschnitt „Mock-Treue".
 type SamplingOpts struct {
-	Temperature float64
-	TopP        float64 // 0 = weglassen
-	MaxTokens   int     // 0 = weglassen
-	JSONFormat  bool    // response_format {"type":"json_object"} — classify (internal/llm/classify.go:181 Format:"json")
+	Temperature float64 `json:"temperature"`
+	TopP        float64 `json:"top_p,omitempty"`       // 0 = weglassen
+	MaxTokens   int     `json:"max_tokens,omitempty"`  // 0 = weglassen
+	JSONFormat  bool    `json:"json_format,omitempty"` // response_format {"type":"json_object"} — classify (internal/llm/classify.go:181 Format:"json")
 }
 
 // ChatRequest ist ein einzelner Prompt-Abruf (System + User + Sampling).

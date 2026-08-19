@@ -10,11 +10,25 @@ import (
 // parse_rate 0 — der Lauf validiert Daten + Prompt-Bau ohne HTTP).
 type caseRun struct {
 	c          *Case
-	outputs    []string // ein Eintrag pro ChatRequest der Achse
-	callErr    error    // erster Transport-Fehler (nil im Dry-Run)
+	reqs       []ChatRequest // die gebauten Requests (Dump-v2: system/user/params je Slot)
+	outputs    []string      // ein Eintrag pro ChatRequest der Achse
+	usages     []CallUsage   // parallel zu outputs: usage/finish/think_stripped je Request
+	callErr    error         // erster Transport-Fehler (nil im Dry-Run)
 	contextErr bool     // mind. ein Call an der Context-Grenze abgelehnt
 	truncated  int      // Calls mit finish_reason "length" (Output-Budget gerissen)
 	thinkStrip int      // Calls mit client-seitig entferntem <think>-Block
+}
+
+// CallUsage ist die per-Request-Attribution eines Falls (Dump-v2, design/02
+// §3.3): Token-Zählung, finish_reason und das Client-Strip-Signal — heute nur
+// aggregiert (runner), ab KW2 je Slot persistiert.
+type CallUsage struct {
+	Prompt        int    `json:"prompt"`
+	Completion    int    `json:"completion"`
+	Reasoning     int    `json:"reasoning"`
+	Finish        string `json:"finish,omitempty"`
+	ThinkStripped bool   `json:"think_stripped"`
+	Err           string `json:"err,omitempty"` // Transport-/Server-Fehler dieses Slots
 }
 
 // CaseScore ist das per-Case-Ergebnis für den Verbose-Report.
