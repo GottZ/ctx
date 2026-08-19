@@ -111,6 +111,15 @@ else's environment — that led to a fix landing in the repository.
   create/update with a 422 naming the convention, for every openai- and
   rerank-protocol backend — the wire-path sweep the report prompted showed
   the doubling is not openrouter-specific.
+- **derLonius** ([@W4-NERF](https://github.com/W4-NERF)) — PR
+  [#23](https://github.com/GottZ/ctx/pull/23): the dream-temporal Phase-2 LLM
+  review ran under a hardcoded 90 s ceiling that slow reasoning models
+  (nemotron-super-trt, ~92 s on full prompts) exceed, silently dropping the
+  LLM-found extra dates for that block version; the shipped feature keeps his
+  hot-reloadable `dream.temporal_timeout` key with its byte-identical default,
+  hardened with the `timeouts.dream` row-precedence documentation, a V16 sign
+  check, a V16b cycle-budget warning and a wire-level test that pins both the
+  call site and the precedence.
 
 ## How to be listed
 
