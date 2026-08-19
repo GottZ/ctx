@@ -261,3 +261,49 @@ func TestParseEngLogSynthetic(t *testing.T) {
 		t.Fatalf("steady tps: %v", res.SteadyDecodeTPS)
 	}
 }
+
+// TestParseEngLogReviewRC0 pinnt die Review-Runde RC-0 (Findings F1/F5/F6/F8):
+// ein VOLLSTÄNDIGER SGLang-Boot (server_args + Uvicorn + fired-up) ist EIN
+// Boot; Zeitstempel mit Rank-Suffix/Millisekunden tragen Δt; ein no-spec-Log
+// aus lauter Running==0-Fenstern ist keine leere Messung; ErrFormat liefert
+// trotzdem ein Result (CLI druckt JSON mit error-Feld).
+func TestParseEngLogReviewRC0(t *testing.T) {
+	dec := func(ts string, reqs int, al string, tps string) string {
+		return "[" + ts + "] Decode batch, #running-req: " + strconv.Itoa(reqs) + ", #full token: 1, full token usage: 0.00, mamba num: 1, mamba usage: 0.1, accept len: " + al + ", accept rate: 0.50, cuda graph: True, gen throughput (token/s): " + tps + ", #queue-req: 0\n"
+	}
+	// F1: voller Boot = drei Signaturen, aber EIN Boot.
+	full := "[2026-08-19 10:00:00] server_args=ServerArgs(model_path='/m')\n" +
+		"INFO:     Uvicorn running on http://127.0.0.1:30000 (Press CTRL+C to quit)\n" +
+		"[2026-08-19 10:00:30] The server is fired up and ready to roll!\n" +
+		dec("2026-08-19 10:01:00", 1, "3.00", "50.0") + dec("2026-08-19 10:01:10", 1, "3.00", "50.0")
+	res, err := ParseEngLog(strings.NewReader(full))
+	if err != nil || res.BootMarkers != 1 {
+		t.Fatalf("F1 full SGLang boot: err=%v boot_markers=%d (want 1)", err, res.BootMarkers)
+	}
+	// F5: Rank-Suffix + Millisekunden — Δt aus Stempeln statt Default 10 s:
+	// Zeilen bei t=0, 2, 4, 34 ⇒ Δt 2,2,2,30, Median 2 ⇒ Cap 6 ⇒ Gewichte
+	// 2,2,2,6 (τ 3,3,3,4 ⇒ 42/12 = 3.5; steady 12 s). Mit Default-Δt wären es
+	// Gewichte 10,10,10,10 ⇒ τ 3.25 / steady 40 — das alte, stille Fehlmaß.
+	tp := dec("2026-08-19 10:00:00.000 TP0", 1, "3.00", "10.0") + dec("2026-08-19 10:00:02.000 TP0", 1, "3.00", "10.0") +
+		dec("2026-08-19 10:00:04.000 TP0", 1, "3.00", "10.0") + dec("2026-08-19 10:00:34.000 TP0", 1, "4.00", "10.0")
+	res, err = ParseEngLog(strings.NewReader(tp))
+	if err != nil || res.LinesWithoutTimestamp != 0 || math.Abs(res.Tau-3.5) > 1e-9 || math.Abs(res.SteadySeconds-12) > 1e-9 {
+		t.Fatalf("F5 TP-suffix timestamps: err=%v noTS=%d τ=%v steady=%v (want 0 / 3.5 / 12)", err, res.LinesWithoutTimestamp, res.Tau, res.SteadySeconds)
+	}
+	// Gegenprobe: ohne Zeitstempel zählt der Drift-Zähler.
+	res, _ = ParseEngLog(strings.NewReader(strings.ReplaceAll(tp, "[2026-08-19 10:00:", "[x ")))
+	if res == nil || res.LinesWithoutTimestamp != 4 {
+		t.Fatalf("lines without timestamp must be counted, got %+v", res)
+	}
+	// F6: no-spec-vLLM-Log, alle Fenster Running: 0 ⇒ kein ErrNoWindows.
+	idle := "(APIServer pid=1) INFO 08-17 19:55:36 [loggers.py:310] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 12.5 tokens/s, Running: 0 reqs, Waiting: 0 reqs\n"
+	res, err = ParseEngLog(strings.NewReader(idle + idle))
+	if err != nil || !res.NoSpecWindows || res.SteadyDroppedWindows != 2 || res.SteadyDecodeTPS != 0 {
+		t.Fatalf("F6 idle-only no-spec: err=%v res=%+v", err, res)
+	}
+	// F8: ErrFormat ⇒ Result nicht nil.
+	res, err = ParseEngLog(strings.NewReader("nothing here\n"))
+	if !errors.Is(err, ErrFormat) || res == nil || res.Source != "log-parse" {
+		t.Fatalf("F8 ErrFormat must still return a result, got res=%v err=%v", res, err)
+	}
+}

@@ -2,26 +2,26 @@ package goldbench
 
 import (
 	"context"
-	"slices"
-	"syscall"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"os"
+	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 // Report ist das Gesamt-Ergebnis eines Benchmark-Laufs.
 // Throughput dokumentiert den gemessenen Token-Durchsatz des Laufs.
 type Throughput struct {
-	WallSeconds        float64 `json:"wall_seconds"`
-	PromptTokens       int64   `json:"prompt_tokens"`
-	CompletionTokens   int64   `json:"completion_tokens"`
-	ReasoningTokens    int64   `json:"reasoning_tokens,omitempty"` // Denk-Anteil der Completion (wo der Server es ausweist)
-	PromptTokPerSec    float64 `json:"prompt_tok_per_sec"`
+	WallSeconds         float64 `json:"wall_seconds"`
+	PromptTokens        int64   `json:"prompt_tokens"`
+	CompletionTokens    int64   `json:"completion_tokens"`
+	ReasoningTokens     int64   `json:"reasoning_tokens,omitempty"` // Denk-Anteil der Completion (wo der Server es ausweist)
+	PromptTokPerSec     float64 `json:"prompt_tok_per_sec"`
 	CompletionTokPerSec float64 `json:"completion_tok_per_sec"`
 }
 
@@ -133,6 +133,16 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			jobs = append(jobs, job{axis: axis, idx: i, reqs: slices.Clone(reqs)})
 		}
 		axisRuns[axis] = runs
+	}
+
+	if cfg.DumpOutputs != "" {
+		// Preflight VOR dem Serving-Lauf (Review F7): Symlink am Pfad, fremder
+		// Eigentümer (Chmod EPERM) oder fehlendes Verzeichnis sollen sofort
+		// scheitern — nicht erst nach Stunden GPU-Zeit, wenn dumpOutputs die
+		// Datei öffnet (und per O_TRUNC den Altbestand bereits geleert hätte).
+		if err := preflightDumpPath(cfg.DumpOutputs); err != nil {
+			return nil, err
+		}
 	}
 
 	if !cfg.DryRun {
@@ -463,6 +473,23 @@ func dumpOutputs(path string, axes []string, axisRuns map[string][]caseRun, gen 
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("goldbench: dump-outputs: %w", err)
+	}
+	return f.Close()
+}
+
+// preflightDumpPath öffnet den Dump-Pfad wie dumpOutputs (O_NOFOLLOW, 0600,
+// Chmod) — aber OHNE O_TRUNC: ein vorhandener Dump bleibt unangetastet, die
+// Fehlerklassen (Symlink, EPERM, ENOENT des Verzeichnisses) zeigen sich vor
+// dem Lauf. Eine neu angelegte leere Datei ist der dokumentierte Zustand
+// „Lauf begonnen, kein Dump" (design/02 §4.3 ROT-Probe b).
+func preflightDumpPath(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return fmt.Errorf("goldbench: dump-outputs (preflight): %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("goldbench: dump-outputs (preflight): chmod: %w", err)
 	}
 	return f.Close()
 }

@@ -123,13 +123,8 @@ func run() error {
 
 	if *genStamp != "" {
 		var gs goldbench.GenStamp
-		dec := json.NewDecoder(strings.NewReader(*genStamp))
-		dec.DisallowUnknownFields() // Tippfehler im Feldnamen ⇒ Fehler, kein leerer Stempel
-		if err := dec.Decode(&gs); err != nil {
+		if err := goldbench.DecodeStrictObject(*genStamp, &gs); err != nil {
 			return fmt.Errorf("-gen-stamp: %w (erlaubt: engine, engine_version, image, template_sha256)", err)
-		}
-		if dec.More() {
-			return fmt.Errorf("-gen-stamp: Inhalt nach dem JSON-Objekt")
 		}
 		if gs == (goldbench.GenStamp{}) {
 			return fmt.Errorf("-gen-stamp: leerer Stempel")

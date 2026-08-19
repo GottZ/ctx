@@ -44,19 +44,32 @@ var ErrSpecConfig = errors.New("goldbench: spec-config ungültig")
 // trägt (SpecForge-/HF-Layout: model.safetensors im Drafter-Verzeichnis).
 const drafterWeightsFile = "model.safetensors"
 
+// ErrTrailingJSON: nach dem ersten JSON-Objekt folgt weiterer Inhalt.
+var ErrTrailingJSON = errors.New("inhalt nach dem JSON-Objekt — genau ein Objekt erwartet")
+
+// DecodeStrictObject dekodiert GENAU EIN JSON-Objekt strikt in dst: unbekannte
+// Felder ⇒ Fehler (Tippfehler im Feldnamen ⇒ kein leerer Wert), Inhalt nach
+// dem Objekt ⇒ ErrTrailingJSON (ein Konkatenations-Fehler im Treiber —
+// {…},"train_step":…} — würde sonst still den Rest verlieren). Ein Idiom für
+// alle JSON-Flags (-spec-config, -gen-stamp; Review F10).
+func DecodeStrictObject(raw string, dst any) error {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if dec.More() {
+		return ErrTrailingJSON
+	}
+	return nil
+}
+
 // ParseSpecConfig dekodiert das -spec-config-JSON strikt (unbekannte Felder
 // ⇒ Fehler, leer ⇒ Fehler, algorithm Pflicht).
 func ParseSpecConfig(raw string) (*SpecConfig, error) {
-	dec := json.NewDecoder(strings.NewReader(raw))
-	dec.DisallowUnknownFields()
 	var sc SpecConfig
-	if err := dec.Decode(&sc); err != nil {
+	if err := DecodeStrictObject(raw, &sc); err != nil {
 		return nil, fmt.Errorf("%w: %w (erlaubt: algorithm, drafter_path, drafter_sha256, gamma, engine_build, target_quant, kv_cache_dtype, train_step)", ErrSpecConfig, err)
-	}
-	// Decode liest genau EIN JSON-Objekt — ein Konkatenations-Fehler im
-	// Treiber ({…},"train_step":…}) würde sonst still den Rest verlieren.
-	if dec.More() {
-		return nil, fmt.Errorf("%w: Inhalt nach dem JSON-Objekt", ErrSpecConfig)
 	}
 	switch sc.Algorithm {
 	case "dspark", "mtp", "eagle", "none":
