@@ -125,6 +125,32 @@ Invalid configurations abort the boot **after logging every finding** with field
 
 `backup.sh` archives only the pg_dumps — the sealed-secret ciphertexts are in every dump, the master key (`CTX_SECRETS_KEY`) is in **none**, by design. Disaster recovery needs both the dump and the separately-stored master key. See [security](security.md#sealed-secrets--break-glass) for master-key setup, rotation and break-glass extraction.
 
+### LLM-log body export: ctx-llmlog-export
+
+`ctx-llmlog-export` is a SELECT-only bulk export of `context_llm_log` as JSONL — one line per
+row, 1:1 with the live schema (`to_jsonb`), meant to secure the prompt/response **bodies**
+before a retention window (`CTX_LLMLOG_RETENTION_DAYS`, hot-mutable) ever NULLs them, and as
+the raw source of a replay corpus.
+
+```bash
+cd go && go build ./cmd/ctx-llmlog-export
+CONTEXT_DB_HOST=<db> ./ctx-llmlog-export -out /secure/dir/llmlog-$(date +%F).jsonl \
+  [-since <RFC3339>] [-until <RFC3339>] [-pipeline a,b] [-strict] [-summary <path>]
+```
+
+It reads the DSN from the same config source as `ctxd` (`CONTEXT_DB*`), runs everything in one
+`READ ONLY` / `REPEATABLE READ` transaction (no write path by construction; the keyset pages and
+the final `count(*)` gate see the same snapshot), pins `-until` to the database `now()` when
+omitted, and prints a JSON summary to stderr: `rows_total`, `rows_body`, `rows_bodyless_slim`
+(credentials-class rows whose bodies were slimmed to `''`), `rows_bodyless_null` (bodies NULLed
+by retention), `count_gate`, `watermark` (max `created_at`, the `-since` of the next delta
+export). Containment is fail-closed: the target directory must be mode `0700` and must not
+resolve under `/tmp`, `/var/tmp` or `/dev/shm`; the file is created `O_EXCL` with mode `0600`
+and never overwritten. Exit codes: `0` clean · `2` NULL bodies found — the export still ran to
+completion first (rescue-first; `-strict` aborts at the first NULL instead) · `3` count gate
+violated. The export contains unanonymized prompt bodies — keep it inside the same trust
+boundary as the database itself.
+
 ## GPU-host maintenance (eject)
 
 To take a GPU host (e.g. `herbert`) down for maintenance without dropping in-flight work, use the eject toggle as a quiesce gate. The disable profile takes the host's backends out of every NEW chain; requests already on the wire finish normally (a 27B synthesis ≤60s, an in-flight dream cycle ≤700s). The runbook: **activate the profile → watch the DispatchTile until `inflight=0` for that origin → then service the host.** `ctx eject on` (or the disable-profiles card on the backends settings page) activates it; the status page's DispatchTile shows `inflight`/`waitQ` per origin live, so `inflight=0` is the safe-to-stop signal. `ctx eject off` restores the host to the pool. There is no active drain — a waiting lease already holds its chain, and failover + cooldown heal the dead-host case on their own; the DispatchTile is the quiesce monitor, not an automated barrier. See [security](security.md#trust--sensitivity-gating) for the toggle's admin gating and persistence semantics.
