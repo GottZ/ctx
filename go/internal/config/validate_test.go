@@ -157,6 +157,14 @@ func TestValidateTable(t *testing.T) {
 		{"V14 overlong rejected", map[string]string{
 			"dream.language": "de-aaaaaaaa-bbbbbbbb-cccccccc-dddddddd",
 		}, "dream.language", SeverityError},
+
+		// V16 — dream.temporal_timeout sign. 0 is the documented "package
+		// default" sentinel and must stay clean; a negative value reads as a
+		// configured duration but means the default, so it is an ERROR.
+		{"V16 default ok", map[string]string{}, "dream.temporal_timeout", -1},
+		{"V16 zero ok", map[string]string{"dream.temporal_timeout": "0"}, "dream.temporal_timeout", -1},
+		{"V16 raised ok", map[string]string{"dream.temporal_timeout": "180"}, "dream.temporal_timeout", -1},
+		{"V16 negative rejected", map[string]string{"dream.temporal_timeout": "-30"}, "dream.temporal_timeout", SeverityError},
 	}
 
 	for _, c := range cases {

@@ -132,6 +132,14 @@ func TestTemporalTimeout(t *testing.T) {
 			router:   &Router{TemporalTimeout: 180 * time.Second},
 			expected: 180 * time.Second,
 		},
+		{
+			// A negative value never reaches a wired router — config V16
+			// rejects it at boot and at the settings write. The fallback is
+			// the second line of defence for hand-built routers.
+			name:     "negative router value falls back to package default",
+			router:   &Router{TemporalTimeout: -30 * time.Second},
+			expected: ValidateTimeout,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
