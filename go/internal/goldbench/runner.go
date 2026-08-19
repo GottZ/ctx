@@ -2,6 +2,8 @@ package goldbench
 
 import (
 	"context"
+	"slices"
+	"syscall"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,8 +102,16 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			if err != nil {
 				return nil, err
 			}
-			runs[i] = caseRun{c: c, reqs: reqs, outputs: make([]string, len(reqs)), usages: make([]CallUsage, len(reqs))}
-			jobs = append(jobs, job{axis: axis, idx: i, reqs: reqs})
+			runs[i] = caseRun{c: c, reqs: reqs, outputs: make([]string, len(reqs))}
+			if !cfg.DryRun {
+				// Dry-Run schreibt KEINE usage-Slots (omitempty greift nur auf
+				// nil-Slice) — ein Leser unterscheidet so Dry-Run von Nullwerten.
+				runs[i].usages = make([]CallUsage, len(reqs))
+			}
+			// Eigene Kopie für den Worker: er schreibt die effektiven Sampling-
+			// Werte nach run.reqs zurück; ein zweiter Durchlauf (Retry/Resample)
+			// darf nicht auf bereits multiplizierten Budgets aufsetzen.
+			jobs = append(jobs, job{axis: axis, idx: i, reqs: slices.Clone(reqs)})
 		}
 		axisRuns[axis] = runs
 	}
@@ -409,9 +419,16 @@ type dumpRecord struct {
 // Seit v2 trägt die Datei die Volltext-Prompts (privater Block-Content) —
 // deshalb O_CREATE|0600 statt umask-Default.
 func dumpOutputs(path string, axes []string, axisRuns map[string][]caseRun, gen *GenStamp) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// O_NOFOLLOW: nie einem Symlink am Dump-Pfad folgen; Chmod nach dem Open:
+	// der Modus im OpenFile gilt nur bei Neuanlage — eine vorhandene 0644-Datei
+	// (Bestands-Dumps aus regen.sh) bliebe sonst welt-lesbar mit Volltext-Prompts.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return fmt.Errorf("goldbench: dump-outputs: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("goldbench: dump-outputs: chmod: %w", err)
 	}
 	enc := json.NewEncoder(f)
 	for _, axis := range axes {

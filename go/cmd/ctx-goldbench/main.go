@@ -52,7 +52,7 @@ func run() error {
 		maxTokMult  = flag.Float64("max-tokens-mult", 1, "skaliert das per-Achse-max_tokens-Budget (>1 = dokumentierte Abweichung von der Pipeline-Treue, für Reasoning-Modelle)")
 		extraBody   = flag.String("extra-body", "", "JSON-Objekt, das in jeden Chat-Request gemerged wird (z. B. '{\"chat_template_kwargs\":{\"enable_thinking\":false}}')")
 		tempOv      = flag.Float64("temperature-override", -1, "fixe Temperatur statt der Pipeline-Temperaturen (<0 = aus; dokumentierte Mock-Treue-Abweichung für modellkarten-pure Läufe)")
-		dumpOut     = flag.String("dump-outputs", "", "JSONL-Pfad für die rohen Modell-Antworten ({axis,id,outputs}; Basis für offline-Re-Scoring)")
+		dumpOut     = flag.String("dump-outputs", "", "JSONL-Pfad für die rohen Modell-Antworten (Dump-v2: axis,id,outputs + system/user/params/usage je Request-Slot, gen; 0600; Basis für offline-Re-Scoring)")
 		genStamp    = flag.String("gen-stamp", "", "JSON-Objekt {engine,engine_version,image,template_sha256} — Engine-Stempel je Dump-Zeile (Dump-v2, Korpus-Homogenität)")
 	)
 	flag.Parse()
@@ -110,8 +110,13 @@ func run() error {
 
 	if *genStamp != "" {
 		var gs goldbench.GenStamp
-		if err := json.Unmarshal([]byte(*genStamp), &gs); err != nil {
-			return fmt.Errorf("-gen-stamp: %w", err)
+		dec := json.NewDecoder(strings.NewReader(*genStamp))
+		dec.DisallowUnknownFields() // Tippfehler im Feldnamen ⇒ Fehler, kein leerer Stempel
+		if err := dec.Decode(&gs); err != nil {
+			return fmt.Errorf("-gen-stamp: %w (erlaubt: engine, engine_version, image, template_sha256)", err)
+		}
+		if gs == (goldbench.GenStamp{}) {
+			return fmt.Errorf("-gen-stamp: leerer Stempel")
 		}
 		cfg.GenStamp = &gs
 	}

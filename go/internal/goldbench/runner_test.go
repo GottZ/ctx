@@ -52,7 +52,9 @@ func fakeChatServer(t *testing.T) *httptest.Server {
 		case strings.Contains(system, "assign topical tags"):
 			answer = `{"tags":["postgresql","pgvector","embedding","retrieval"]}`
 		case strings.Contains(system, "write the title"):
-			answer = `{"title":"Kanonischer Test-Titel"}`
+			// Denk-Block vor der Antwort: der Client strippt ihn (ThinkStripped),
+			// der Dump-v2-Test sieht das Signal je Slot.
+			answer = "<think>kurz nachgedacht</think>" + `{"title":"Kanonischer Test-Titel"}`
 		case strings.Contains(system, "Classify relationships"):
 			answer = `[]`
 		case strings.Contains(system, "recurring pattern"):
@@ -79,7 +81,11 @@ func fakeChatServer(t *testing.T) *httptest.Server {
 		}
 
 		resp := map[string]any{
-			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": answer}}},
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": answer}, "finish_reason": "stop"}},
+			"usage": map[string]any{
+				"prompt_tokens": 100 + len(user)/4, "completion_tokens": 7,
+				"completion_tokens_details": map[string]any{"reasoning_tokens": 3},
+			},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
