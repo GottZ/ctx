@@ -139,6 +139,23 @@ an unreadable path keeps the declaration with `drafter_sha_verified: false`.
 Every non-dry run also stamps `env.concurrency` (the worker count — τ and
 throughput are regime-dependent). Reports without the flag are byte-stable.
 
+`-parse-englog <file>` is a standalone mode (no bench run): it parses a saved
+engine stdout log — vLLM (`SpecDecoding metrics:` interval lines + `Avg
+generation throughput`) or SGLang (`Decode batch, … accept len`), auto-detected
+— and prints a `SpecStats` JSON (`source: "log-parse"`, schema 1) with
+normalized τ (tokens per verify step incl. the bonus token) and AR (accepted ÷
+drafted draft tokens, no bonus), plus debug fields: `unweighted_line_mean` (the
+plain per-line mean used by hand-made tables), `weighted_minus_unweighted`,
+`line_tau_min/max`, `steady_decode_tps` (time-weighted over windows with
+running requests) and `boot_markers`. vLLM sums absolute interval counts (AR
+exact; τ from verify steps reconstructed as accepted/(MAL−1), flagged
+`tau_derived_drafts`); SGLang only logs ratios, so τ is weighted by `gen
+throughput × Δt` (`tau_time_weighted`) and AR is a lower bound
+(`ar_lower_bound`, the denominator assumes a full γ per round). Exit `2` when
+the log has no measurement windows (boot-only capture), `3` when it carries
+more than one engine boot (windows not attributable) or an unknown/mixed
+format. Tail-captured logs (`docker logs | tail`) carry `boot_markers: 0`.
+
 Prompt changes to the production pipelines travel through the bench first:
 a candidate wording runs as an additive `-v2` variant axis side by side with
 the baseline (same model, same server, same run — the fairest A/B), and only

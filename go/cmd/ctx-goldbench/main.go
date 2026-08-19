@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -28,6 +29,12 @@ import (
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "ctx-goldbench:", err)
+		switch {
+		case errors.Is(err, goldbench.ErrNoWindows):
+			os.Exit(2)
+		case errors.Is(err, goldbench.ErrMultiBoot), errors.Is(err, goldbench.ErrFormat):
+			os.Exit(3)
+		}
 		os.Exit(1)
 	}
 }
@@ -54,9 +61,14 @@ func run() error {
 		tempOv      = flag.Float64("temperature-override", -1, "fixe Temperatur statt der Pipeline-Temperaturen (<0 = aus; dokumentierte Mock-Treue-Abweichung für modellkarten-pure Läufe)")
 		dumpOut     = flag.String("dump-outputs", "", "JSONL-Pfad für die rohen Modell-Antworten (Dump-v2: axis,id,outputs + system/user/params/usage je Request-Slot, gen; 0600; Basis für offline-Re-Scoring)")
 		specConfig  = flag.String("spec-config", "", "JSON-Objekt {algorithm,drafter_path,drafter_sha256,gamma,engine_build,target_quant,kv_cache_dtype,train_step} — strukturierte Spec-Provenienz im Report-Env (drafter_path lokal lesbar ⇒ sha256 wird selbst berechnet und gegen die Deklaration geprüft)")
+		parseLog    = flag.String("parse-englog", "", "Standalone-Modus: Engine-Stdout-Log (vLLM/SGLang, auto-erkannt) parsen und SpecStats-JSON auf stdout ausgeben; kein Bench-Lauf (Exit 2 = keine Messfenster, 3 = mehrere Boots/Format)")
 		genStamp    = flag.String("gen-stamp", "", "JSON-Objekt {engine,engine_version,image,template_sha256} — Engine-Stempel je Dump-Zeile (Dump-v2, Korpus-Homogenität)")
 	)
 	flag.Parse()
+
+	if *parseLog != "" {
+		return parseEngLog(*parseLog)
+	}
 
 	if !*dryRun {
 		if *endpoint == "" {
@@ -90,19 +102,19 @@ func run() error {
 	}
 
 	cfg := goldbench.Config{
-		DataDir:     dir,
-		Endpoint:    *endpoint,
-		Model:       *model,
-		APIKey:      key,
-		Axes:        axes,
-		N:           *n,
-		Concurrency: *concurrency,
-		DryRun:      *dryRun,
-		Seed:        *seed,
-		TimeoutSec:  *timeoutSec,
-		Verbose:     *verbose,
-		ServerNote:  *serverNote,
-		GitRev:      gitRev(),
+		DataDir:       dir,
+		Endpoint:      *endpoint,
+		Model:         *model,
+		APIKey:        key,
+		Axes:          axes,
+		N:             *n,
+		Concurrency:   *concurrency,
+		DryRun:        *dryRun,
+		Seed:          *seed,
+		TimeoutSec:    *timeoutSec,
+		Verbose:       *verbose,
+		ServerNote:    *serverNote,
+		GitRev:        gitRev(),
 		MaxTokensMult: *maxTokMult,
 		ExtraBody:     *extraBody,
 		TempOverride:  *tempOv,
@@ -256,4 +268,21 @@ func shortRev(rev string) string {
 		return ""
 	}
 	return rev[:7]
+}
+
+// parseEngLog implementiert -parse-englog: Datei lesen, SpecStats-JSON auf
+// stdout (auch bei ErrNoWindows — dann mit windows 0, damit der Leser den
+// Grund sieht), Exit-Code über den Fehler.
+func parseEngLog(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("-parse-englog: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	res, perr := goldbench.ParseEngLog(f)
+	if res != nil {
+		b, _ := json.MarshalIndent(res, "", " ")
+		fmt.Println(string(b))
+	}
+	return perr
 }
