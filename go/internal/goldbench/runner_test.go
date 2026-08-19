@@ -133,8 +133,10 @@ func TestRunEndToEnd(t *testing.T) {
 	if report.Env.DatasetSHA256 == "" || report.Env.Timestamp == "" {
 		t.Error("env-stamp unvollständig")
 	}
-	// cluster-label: kanonisches Label besteht den Constraint immer.
-	if got := report.Axes["cluster-label"].PrimaryScore; got != 1.0 {
+	// cluster-label: kanonisches Label besteht den Constraint immer (seit
+	// Metrik v2 ist PrimaryScore der Token-F1 gegen das Gold-Label — der
+	// Constraint lebt in Secondary).
+	if got := report.Axes["cluster-label"].Secondary["constraint_pass_rate"]; got != 1.0 {
 		t.Errorf("cluster-label constraint_pass=%v, erwartet 1.0", got)
 	}
 }
