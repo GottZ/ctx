@@ -59,6 +59,7 @@ func run() error {
 		maxTokMult  = flag.Float64("max-tokens-mult", 1, "skaliert das per-Achse-max_tokens-Budget (>1 = dokumentierte Abweichung von der Pipeline-Treue, für Reasoning-Modelle)")
 		extraBody   = flag.String("extra-body", "", "JSON-Objekt, das in jeden Chat-Request gemerged wird (z. B. '{\"chat_template_kwargs\":{\"enable_thinking\":false}}')")
 		tempOv      = flag.Float64("temperature-override", -1, "fixe Temperatur statt der Pipeline-Temperaturen (<0 = aus; dokumentierte Mock-Treue-Abweichung für modellkarten-pure Läufe)")
+		dumpAppend  = flag.Bool("dump-append", false, "mit -dump-outputs: inkrementeller Dump (Fall sofort geschrieben, O_APPEND) + Fall-Resume — bereits gedumpte (axis,id) werden übersprungen; gen-Stempel muss zur Datei passen (KW3)")
 		dumpOut     = flag.String("dump-outputs", "", "JSONL-Pfad für die rohen Modell-Antworten (Dump-v2: axis,id,outputs + system/user/params/usage je Request-Slot, gen; 0600; Basis für offline-Re-Scoring)")
 		specConfig  = flag.String("spec-config", "", "JSON-Objekt {algorithm,drafter_path,drafter_sha256,gamma,engine_build,target_quant,kv_cache_dtype,train_step} — strukturierte Spec-Provenienz im Report-Env (drafter_path lokal lesbar ⇒ sha256 wird selbst berechnet und gegen die Deklaration geprüft)")
 		parseLog    = flag.String("parse-englog", "", "Standalone-Modus: Engine-Stdout-Log (vLLM/SGLang, auto-erkannt) parsen und SpecStats-JSON auf stdout ausgeben; kein Bench-Lauf (Exit 2 = keine Messfenster, 3 = mehrere Boots/Format)")
@@ -119,6 +120,11 @@ func run() error {
 		ExtraBody:     *extraBody,
 		TempOverride:  *tempOv,
 		DumpOutputs:   *dumpOut,
+		DumpAppend:    *dumpAppend,
+	}
+
+	if *dumpAppend && *dumpOut == "" {
+		return fmt.Errorf("-dump-append braucht -dump-outputs")
 	}
 
 	if *genStamp != "" {

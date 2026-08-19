@@ -125,7 +125,25 @@ optional `gen` engine stamp passed via
 `-gen-stamp '{"engine":…,"engine_version":…,"image":…,"template_sha256":…}'`.
 `outputs` stays a flat `[]string` (sample 0 per request, post client-side
 `<think>` strip), so v1 readers keep working unchanged; the file is created
-`0600` because the prompts carry corpus content.
+`0600` because the prompts carry corpus content. The dump path is validated
+(opened `O_NOFOLLOW`, chmod `0600`) *before* the serving run starts, so a
+symlinked path or a foreign-owned file fails immediately, not after hours of
+GPU time.
+
+`-dump-append` (with `-dump-outputs`) switches the dump from end-of-run to
+**incremental**: every finished case is written immediately (mutex-serialized
+`O_APPEND` line; a case with a transport error or an aborted call is *not*
+written), and before the run the existing file is read into a done-set —
+cases already present (`axis`,`id`) are neither re-called nor re-written,
+their outputs feed the report. Resuming after an abort (Ctrl-C, `kill -9`,
+crash) is therefore the identical invocation; a second full run makes zero
+calls. Stamp-resume gate: every line of the existing file must carry the same
+`gen` stamp as the live `-gen-stamp` (none == none) — a mismatch aborts
+instead of silently mixing two engine/quant/template distributions in one
+corpus file. Duplicate `(axis,id)` lines or lines without `axis`/`id` are
+refused as well (the resume never guesses). Use this for corpus generation
+(design 02, KW3); the plain `-dump-outputs` path is unchanged (truncate +
+end-of-run write).
 
 `-spec-config '<json>'` stamps structured speculative-decoding provenance
 into the report env (`env.spec`: `algorithm`, `drafter_path`,

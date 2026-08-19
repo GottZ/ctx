@@ -92,6 +92,14 @@ type Config struct {
 	// Zeile zusätzlich system/user/params/usage je Request-Slot und den
 	// gen-Stempel — Volltext-Prompt-Träger, Datei daher immer 0600.
 	DumpOutputs string
+	// DumpAppend (KW3, design/02 §4.3): statt End-of-Run-Dump schreibt jeder
+	// Worker den fertigen Fall SOFORT (mutex-serialisiert, O_APPEND) in
+	// DumpOutputs; vor dem Lauf wird die bestehende Datei gelesen — schon
+	// gedumpte Fälle (axis,id) werden weder neu gecallt noch neu geschrieben
+	// (Wiederaufnahme nach Abbruch = identischer Aufruf), ihr Output geht in
+	// den Report ein. Stamp-Resume-Gate: weicht der gen-Stempel der Datei vom
+	// Live-GenStamp ab ⇒ Abbruch statt Append. Erfordert DumpOutputs.
+	DumpAppend bool
 	// GenStamp stempelt jede Dump-Zeile mit der erzeugenden Engine
 	// (Engine, Version, Image-Digest, Template-Hash) — Homogenitäts-Beleg des
 	// Korpus (design/02 §5.4). nil = kein Stempel (v1-kompatible Zeile).

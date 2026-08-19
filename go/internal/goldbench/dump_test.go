@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -212,5 +215,167 @@ func TestDumpV1ByteShape(t *testing.T) {
 	}
 	if string(b) != `{"axis":"title","id":"c1","outputs":["o"]}` {
 		t.Fatalf("v1 shape drifted: %s", b)
+	}
+}
+
+// countLines zählt nicht-leere JSONL-Zeilen und prüft (axis,id)-Eindeutigkeit.
+func countLines(t *testing.T, path string) (n int, dups int) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		var rec struct {
+			Axis string `json:"axis"`
+			ID   string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(ln), &rec); err != nil {
+			t.Fatalf("bad line: %v", err)
+		}
+		n++
+		if seen[rec.Axis+"\x00"+rec.ID] {
+			dups++
+		}
+		seen[rec.Axis+"\x00"+rec.ID] = true
+	}
+	return n, dups
+}
+
+// TestDumpAppendResume pinnt KW3 (design/02 §4.3 + §7): ROT (a) der alte
+// End-of-Run-Writer vernichtet beim Doppel-Lauf den ersten Dump und callt alles
+// neu; ROT (b) Abbruch mitten im Lauf hinterlässt ohne -dump-append keine
+// Zeile; GRÜN: mit -dump-append überlebt jeder fertige Fall den Abbruch, der
+// identische Resume-Aufruf ergänzt nur die fehlenden Fälle (0 Duplikate, nur
+// fehlende gecallt) und ein Doppel-Lauf callt gar nichts mehr; Stamp-Probe:
+// Datei mit fremdem gen-Stempel ⇒ ErrDumpStamp statt Append.
+func TestDumpAppendResume(t *testing.T) {
+	inner := fakeChatServer(t)
+	defer inner.Close()
+	var calls atomic.Int64
+	var cancelAfter atomic.Int64 // >0: nach so vielen Calls ctx abbrechen
+	var cancelFn atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if lim := cancelAfter.Load(); lim > 0 && n > lim {
+			if c, ok := cancelFn.Load().(context.CancelFunc); ok {
+				c()
+			}
+			http.Error(w, "abgebrochen", http.StatusServiceUnavailable)
+			return
+		}
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	gen := &GenStamp{Engine: "fake", EngineVersion: "0", Image: "img@sha256:0", TemplateSHA256: "t"}
+	base := Config{
+		DataDir: testDataDir(t), Endpoint: srv.URL, Model: "fake-model",
+		N: 1, Concurrency: 1, Seed: 20260812, TimeoutSec: 30, GenStamp: gen, TempOverride: -1,
+	}
+	run := func(ctx context.Context, dump string, appendMode bool) (*Report, error) {
+		cfg := base
+		cfg.DumpOutputs, cfg.DumpAppend = dump, appendMode
+		return Run(ctx, cfg)
+	}
+
+	// Referenz: voller Lauf, n Fälle, c Calls.
+	ref := filepath.Join(dir, "ref.jsonl")
+	if _, err := run(context.Background(), ref, false); err != nil {
+		t.Fatal(err)
+	}
+	nAll, _ := countLines(t, ref)
+	cAll := calls.Load()
+	if nAll == 0 || cAll == 0 {
+		t.Fatalf("Referenz leer: n=%d calls=%d", nAll, cAll)
+	}
+
+	// ROT (a): alter Writer, Doppel-Lauf ⇒ wieder n Zeilen (Lauf 2 ersetzt Lauf 1) und ALLE Calls erneut.
+	calls.Store(0)
+	if _, err := run(context.Background(), ref, false); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := countLines(t, ref); n != nAll || calls.Load() != cAll {
+		t.Fatalf("legacy double run: lines=%d calls=%d (want %d/%d — truncate + full re-call)", n, calls.Load(), nAll, cAll)
+	}
+
+	// ROT (b): Abbruch nach der Hälfte der Calls, alter Writer ⇒ keine Zeile.
+	legacy := filepath.Join(dir, "legacy.jsonl")
+	half := cAll / 2
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelFn.Store(cancel)
+	cancelAfter.Store(half)
+	calls.Store(0)
+	if _, err := run(ctx, legacy, false); err == nil {
+		t.Fatal("aborted legacy run must return an error")
+	}
+	cancel()
+	if n, _ := countLines(t, legacy); n != 0 {
+		t.Fatalf("legacy end-of-run dump must not survive an abort, got %d lines", n)
+	}
+
+	// GRÜN: -dump-append, gleicher Abbruch ⇒ fertige Fälle stehen in der Datei.
+	app := filepath.Join(dir, "append.jsonl")
+	ctx, cancel = context.WithCancel(context.Background())
+	cancelFn.Store(cancel)
+	calls.Store(0)
+	if _, err := run(ctx, app, true); err == nil {
+		t.Fatal("aborted append run must return an error")
+	}
+	cancel()
+	nPart, dups := countLines(t, app)
+	if nPart == 0 || nPart >= nAll || dups != 0 {
+		t.Fatalf("append after abort: lines=%d (want 0<n<%d) dups=%d", nPart, nAll, dups)
+	}
+	// Resume = identischer Aufruf ⇒ nur fehlende Fälle, 0 Duplikate, Report vollständig.
+	cancelAfter.Store(0)
+	calls.Store(0)
+	rep, err := run(context.Background(), app, true)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	nRes, dups := countLines(t, app)
+	if nRes != nAll || dups != 0 {
+		t.Fatalf("resume: lines=%d dups=%d (want %d/0)", nRes, dups, nAll)
+	}
+	if c := calls.Load(); c >= cAll || c == 0 {
+		t.Fatalf("resume must call only the missing cases: calls=%d (full=%d)", c, cAll)
+	}
+	if rep == nil || len(rep.Axes) != len(Axes) {
+		t.Fatalf("resume report incomplete: %+v", rep)
+	}
+	// Doppel-Lauf mit -dump-append ⇒ 0 Calls, Datei unverändert.
+	before, _ := os.ReadFile(app)
+	calls.Store(0)
+	if _, err := run(context.Background(), app, true); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(app)
+	if calls.Load() != 0 || string(before) != string(after) {
+		t.Fatalf("append double run: calls=%d changed=%v (want 0/false)", calls.Load(), string(before) != string(after))
+	}
+	// Stamp-Probe: fremder Live-Stempel gegen die bestehende Datei ⇒ Abbruch, Datei unverändert.
+	cfg := base
+	cfg.DumpOutputs, cfg.DumpAppend = app, true
+	cfg.GenStamp = &GenStamp{Engine: "other", EngineVersion: "1", Image: "img@sha256:1", TemplateSHA256: "u"}
+	if _, err := Run(context.Background(), cfg); !errors.Is(err, ErrDumpStamp) {
+		t.Fatalf("foreign gen stamp must abort with ErrDumpStamp, got %v", err)
+	}
+	cfg.GenStamp = nil
+	if _, err := Run(context.Background(), cfg); !errors.Is(err, ErrDumpStamp) {
+		t.Fatalf("missing gen stamp against stamped file must abort, got %v", err)
+	}
+	after2, _ := os.ReadFile(app)
+	if string(after2) != string(after) {
+		t.Fatal("stamp abort must not touch the file")
+	}
+	// Resume-Dump ist v1-lesbar.
+	if n, err := v1DumpReader(app); err != nil || n != nAll {
+		t.Fatalf("v1 reader over append dump: n=%d err=%v", n, err)
 	}
 }

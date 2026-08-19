@@ -1,6 +1,7 @@
 package goldbench
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -103,36 +105,20 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		return nil, err
 	}
 
-	// Fälle laden, samplen, Prompts bauen (Build validiert die Daten auch im
-	// Dry-Run — ein Fall, dessen Prompt nicht baubar ist, ist ein Datenfehler).
-	axisRuns := map[string][]caseRun{}
-	jobs := make([]job, 0, 1024)
-	nPerAxis := map[string]int{}
-	for _, axis := range axes {
-		cases, err := LoadCases(cfg.DataDir, axis)
-		if err != nil {
+	// KW3: bestehenden Append-Dump lesen — Done-Set (axis,id) + Stamp-Gate.
+	var done map[string]map[string]dumpRecord
+	if cfg.DumpAppend {
+		if cfg.DumpOutputs == "" {
+			return nil, errors.New("goldbench: dump-append braucht dump-outputs")
+		}
+		if done, err = loadDumpDone(cfg.DumpOutputs, cfg.GenStamp); err != nil {
 			return nil, err
 		}
-		cases = SampleCases(cases, cfg.N, cfg.Seed)
-		nPerAxis[axis] = len(cases)
-		runs := make([]caseRun, len(cases))
-		for i, c := range cases {
-			reqs, err := registry[axis].build(c)
-			if err != nil {
-				return nil, err
-			}
-			runs[i] = caseRun{c: c, reqs: reqs, outputs: make([]string, len(reqs))}
-			if !cfg.DryRun {
-				// Dry-Run schreibt KEINE usage-Slots (omitempty greift nur auf
-				// nil-Slice) — ein Leser unterscheidet so Dry-Run von Nullwerten.
-				runs[i].usages = make([]CallUsage, len(reqs))
-			}
-			// Eigene Kopie für den Worker: er schreibt die effektiven Sampling-
-			// Werte nach run.reqs zurück; ein zweiter Durchlauf (Retry/Resample)
-			// darf nicht auf bereits multiplizierten Budgets aufsetzen.
-			jobs = append(jobs, job{axis: axis, idx: i, reqs: slices.Clone(reqs)})
-		}
-		axisRuns[axis] = runs
+	}
+
+	axisRuns, jobs, nPerAxis, resumed, err := buildRuns(cfg, axes, registry, done)
+	if err != nil {
+		return nil, err
 	}
 
 	if cfg.DumpOutputs != "" {
@@ -145,13 +131,29 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 
+	// KW3: Append-Writer VOR dem Lauf öffnen (jeder fertige Fall wird sofort
+	// geschrieben); geschlossen auf JEDEM Rückweg, auch nach Abbruch.
+	var sink *dumpAppender
+	if cfg.DumpAppend && !cfg.DryRun {
+		fmt.Fprintf(os.Stderr, "[resume] %d Fälle aus %s übernommen, %d offen\n", resumed, cfg.DumpOutputs, len(jobs))
+		var err error
+		if sink, err = openDumpAppender(cfg.DumpOutputs); err != nil {
+			return nil, err
+		}
+		defer func() { _ = sink.Close() }()
+	}
+
 	if !cfg.DryRun {
-		if err := executeJobs(ctx, cfg, jobs, axisRuns); err != nil {
+		if err := executeJobs(ctx, cfg, jobs, axisRuns, sink); err != nil {
 			return nil, err
 		}
 	}
 
-	if cfg.DumpOutputs != "" {
+	if sink != nil {
+		if err := sink.Close(); err != nil {
+			return nil, err
+		}
+	} else if cfg.DumpOutputs != "" {
 		if err := dumpOutputs(cfg.DumpOutputs, axes, axisRuns, cfg.GenStamp); err != nil {
 			return nil, err
 		}
@@ -221,10 +223,57 @@ func resolveAxes(requested []string, registry map[string]axisDef) ([]string, err
 	return out, nil
 }
 
+// buildRuns lädt, sampelt und baut die Fälle aller Achsen (Build validiert die
+// Daten auch im Dry-Run — ein Fall, dessen Prompt nicht baubar ist, ist ein
+// Datenfehler). Fälle aus dem Done-Set (KW3-Resume) werden übernommen statt
+// gecallt; Rückgabe: Runs je Achse, Job-Liste, n je Achse, Anzahl übernommen.
+func buildRuns(cfg Config, axes []string, registry map[string]axisDef, done map[string]map[string]dumpRecord) (
+	map[string][]caseRun, []job, map[string]int, int, error,
+) {
+	axisRuns := map[string][]caseRun{}
+	jobs := make([]job, 0, 1024)
+	nPerAxis := map[string]int{}
+	resumed := 0
+	for _, axis := range axes {
+		cases, err := LoadCases(cfg.DataDir, axis)
+		if err != nil {
+			return nil, nil, nil, 0, err
+		}
+		cases = SampleCases(cases, cfg.N, cfg.Seed)
+		nPerAxis[axis] = len(cases)
+		runs := make([]caseRun, len(cases))
+		for i, c := range cases {
+			reqs, err := registry[axis].build(c)
+			if err != nil {
+				return nil, nil, nil, 0, err
+			}
+			runs[i] = caseRun{c: c, reqs: reqs, outputs: make([]string, len(reqs))}
+			if rec, ok := done[axis][c.ID]; ok && !cfg.DryRun {
+				// Resume: Fall liegt im Dump — Output/usage übernehmen, kein
+				// Call, kein erneutes Schreiben (Skip VOR dem Job-Bau).
+				runs[i].adopt(rec)
+				resumed++
+				continue
+			}
+			if !cfg.DryRun {
+				// Dry-Run schreibt KEINE usage-Slots (omitempty greift nur auf
+				// nil-Slice) — ein Leser unterscheidet so Dry-Run von Nullwerten.
+				runs[i].usages = make([]CallUsage, len(reqs))
+			}
+			// Eigene Kopie für den Worker: er schreibt die effektiven Sampling-
+			// Werte nach run.reqs zurück; ein zweiter Durchlauf (Retry/Resample)
+			// darf nicht auf bereits multiplizierten Budgets aufsetzen.
+			jobs = append(jobs, job{axis: axis, idx: i, reqs: slices.Clone(reqs)})
+		}
+		axisRuns[axis] = runs
+	}
+	return axisRuns, jobs, nPerAxis, resumed, nil
+}
+
 // executeJobs fährt die LLM-Calls nebenläufig über einen Worker-Pool.
 // Transport-Fehler landen im caseRun (der Fall scored 0), sie brechen den
 // Lauf nicht ab — abgesehen von Context-Cancel.
-func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[string][]caseRun) error {
+func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[string][]caseRun, sink *dumpAppender) error {
 	client := NewClient(cfg.Endpoint, cfg.Model, cfg.APIKey, cfg.Seed,
 		time.Duration(cfg.TimeoutSec)*time.Second)
 	if err := client.SetExtraBody(cfg.ExtraBody); err != nil {
@@ -296,6 +345,15 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 						run.thinkStrip++
 					}
 					run.outputs[i] = res.Content
+				}
+				// KW3: fertigen Fall sofort persistieren — nur VOLLSTÄNDIGE
+				// Fälle (kein Abbruch, kein Transport-Fehler): so holt der
+				// Resume Fehlschläge nach, statt sie als erledigt zu überspringen.
+				if sink != nil && run.callErr == nil {
+					if err := sink.write(newDumpRecord(j.axis, *run, cfg.GenStamp)); err != nil {
+						run.callErr = err
+						fmt.Fprintf(os.Stderr, "[dump-append] %s/%s: %v\n", j.axis, run.c.ID, err)
+					}
 				}
 			}
 		}()
@@ -473,6 +531,155 @@ func dumpOutputs(path string, axes []string, axisRuns map[string][]caseRun, gen 
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("goldbench: dump-outputs: %w", err)
+	}
+	return f.Close()
+}
+
+// ErrDumpStamp: der gen-Stempel der bestehenden Append-Datei passt nicht zum
+// Live-Stempel — ein resumed Dump darf nie zwei Engine-/Quant-/Template-
+// Verteilungen stumm mischen (design/02 §4.3 Stamp-Resume-Gate).
+var ErrDumpStamp = errors.New("goldbench: dump-append: gen-Stempel der Datei weicht vom Live-Stempel ab — Abbruch statt Append")
+
+// loadDumpDone liest eine bestehende Append-Datei und liefert das Done-Set
+// (axis → id → Record). Stamp-Gate: JEDE Zeile muss denselben gen-Stempel
+// tragen wie der Live-Lauf (nil == nil eingeschlossen). Fehlende Datei =
+// leeres Set. Eine Zeile ohne axis/id oder ein (axis,id)-Duplikat ist ein
+// Datenfehler (fail-closed — der Resume darf nicht raten).
+func loadDumpDone(path string, gen *GenStamp) (map[string]map[string]dumpRecord, error) {
+	done := map[string]map[string]dumpRecord{}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return done, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("goldbench: dump-append: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<28)
+	n := 0
+	for sc.Scan() {
+		n++
+		line := sc.Bytes()
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+		var rec dumpRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return nil, fmt.Errorf("goldbench: dump-append: Zeile %d: %w", n, err)
+		}
+		if rec.Axis == "" || rec.ID == "" {
+			return nil, fmt.Errorf("goldbench: dump-append: Zeile %d ohne axis/id", n)
+		}
+		if !sameGenStamp(rec.Gen, gen) {
+			return nil, fmt.Errorf("%w (Zeile %d: Datei %s, Lauf %s)", ErrDumpStamp, n, genString(rec.Gen), genString(gen))
+		}
+		if done[rec.Axis] == nil {
+			done[rec.Axis] = map[string]dumpRecord{}
+		}
+		if _, dup := done[rec.Axis][rec.ID]; dup {
+			return nil, fmt.Errorf("goldbench: dump-append: Zeile %d: Duplikat (%s,%s)", n, rec.Axis, rec.ID)
+		}
+		done[rec.Axis][rec.ID] = rec
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("goldbench: dump-append: %w", err)
+	}
+	return done, nil
+}
+
+func sameGenStamp(a, b *GenStamp) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func genString(g *GenStamp) string {
+	if g == nil {
+		return "<kein Stempel>"
+	}
+	b, _ := json.Marshal(g)
+	return string(b)
+}
+
+// adopt übernimmt einen gedumpten Fall in den caseRun (Resume): Outputs und
+// usage-Slots wie persistiert, Zähler aus den Slots rekonstruiert.
+func (r *caseRun) adopt(rec dumpRecord) {
+	if len(rec.Outputs) == len(r.outputs) {
+		copy(r.outputs, rec.Outputs)
+	} else {
+		r.outputs = append([]string(nil), rec.Outputs...)
+	}
+	r.usages = append([]CallUsage(nil), rec.Usage...)
+	for _, u := range r.usages {
+		if u.Finish == "length" {
+			r.truncated++
+		}
+		if u.ThinkStripped {
+			r.thinkStrip++
+		}
+	}
+}
+
+// dumpAppender ist der inkrementelle Dump-Writer (KW3): eine JSONL-Zeile pro
+// fertigem Fall, mutex-serialisiert (alle Worker dieses Prozesses; genau ein
+// Prozess je Datei — die Treiber skippen auf Datei-Ebene), O_APPEND.
+type dumpAppender struct {
+	mu  sync.Mutex
+	f   *os.File
+	enc *json.Encoder
+	buf *bufio.Writer
+	n   int
+}
+
+func openDumpAppender(path string) (*dumpAppender, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("goldbench: dump-append: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("goldbench: dump-append: chmod: %w", err)
+	}
+	a := &dumpAppender{f: f}
+	a.buf = bufio.NewWriterSize(f, 1<<20)
+	a.enc = json.NewEncoder(a.buf)
+	return a, nil
+}
+
+// write persistiert einen Record sofort (Encode + Flush unter Mutex): nach
+// der Rückkehr steht die Zeile im Page-Cache — kill -9 verliert sie nicht,
+// nur ein Stromausfall (fsync erst in Close; das ist der bewusste Preis).
+func (a *dumpAppender) write(rec dumpRecord) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.enc.Encode(rec); err != nil {
+		return err
+	}
+	if err := a.buf.Flush(); err != nil {
+		return err
+	}
+	a.n++
+	return nil
+}
+
+// Close flusht, fsynct und schließt; idempotent (zweiter Aufruf = nil).
+func (a *dumpAppender) Close() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.f == nil {
+		return nil
+	}
+	f := a.f
+	a.f = nil
+	if err := a.buf.Flush(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("goldbench: dump-append: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("goldbench: dump-append: fsync: %w", err)
 	}
 	return f.Close()
 }
