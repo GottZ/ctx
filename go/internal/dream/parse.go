@@ -211,6 +211,19 @@ func parseStringMapLinks(body string) ([]Link, bool) {
 //     multi-day dream cooldown on the block, instead of the transient error
 //     retry the situation deserves. If no array yields links we decline, and
 //     the caller ultimately reaches its hard parse error.
+//
+// Constraint 3 has ONE exception, from the empty-verdict drift
+// (deepseek-v4-flash via opencode.ai, 2026-08-14): when the response's only
+// ARRAY-valued top-level key holds an empty array — {"classifications": []},
+// {"reasoning": "none", "relationships": []} — no sibling array is left that
+// could still hold the links, so nothing can be hidden. That is the same
+// verdict as the bare "[]" sentinel and returns ok=true with zero links, which
+// books the honest inert cooldown instead of retrying a shape the model will
+// reproduce unchanged. Wrappers carrying two or more arrays keep declining
+// even when every one of them is empty, and the keys are counted on the raw
+// TEXT so duplicate keys count separately — see isLoneEmptyArrayWrapper. The
+// emptiness itself is decided structurally, not by a byte compare against
+// "[]" — see isEmptyJSONArray.
 func parseWrappedLinks(body string) ([]Link, bool) {
 	var wrapper map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(body), &wrapper); err != nil || len(wrapper) == 0 {
