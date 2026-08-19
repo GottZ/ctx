@@ -74,7 +74,22 @@ else's environment — that led to a fix landing in the repository.
   plus the `<descriptive placeholder>` assignment-value FP in the same file.
   The shipped fix implements his option 1 (hash-label context discriminator,
   documented as the safer choice over entropy gating in his own analysis)
-  and extends the placeholder shapes with angle-bracket templates.
+  and extends the placeholder shapes with angle-bracket templates. Also PR
+  [#24](https://github.com/GottZ/ctx/pull/24): a named wrapper holding only
+  an empty link array (`{"classifications": []}`, deepseek-v4-flash via
+  opencode.ai) hard-errored in the dream parser and burned a transient retry
+  on a shape the model reproduces unchanged; the shipped fix keeps his
+  "lone empty array = explicit no-links verdict" rule, hardened to decide the
+  emptiness structurally (pretty-printed `[ ]` variants), to count keys on
+  the raw text (duplicate keys cannot fake a lone array) and to accept the
+  canonical prose-plus-empty-array relay shape while two-array wrappers keep
+  retrying. Also PR [#25](https://github.com/GottZ/ctx/pull/25): the
+  object-map drift form (qwen3.8) repeats the uuid as key and `target_id`,
+  so five links overran the 400-token dream-eval cap and the whole evaluation
+  was lost; the shipped fix keeps his 600 (re-measured with the Qwen3
+  tokenizer at ≈1.5× the array form), turns the exact pin into a lower-bound
+  guard and adds `cap_hit` / `links_parsed` llmlog telemetry so the next
+  cap-truncation is countable instead of invisible.
 - **DojoGenesis** ([@DojoGenesis](https://github.com/DojoGenesis)) —
   [#16](https://github.com/GottZ/ctx/issues/16) / PR
   [#17](https://github.com/GottZ/ctx/pull/17): first boot on a fresh database
