@@ -1,9 +1,13 @@
 package dream
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/llm"
 )
 
 func TestBuildTemporalReviewPrompt(t *testing.T) {
@@ -145,6 +149,96 @@ func TestTemporalTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := temporalTimeout(tt.router); got != tt.expected {
 				t.Errorf("temporalTimeout() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+// temporalWireRouter seeds a single dream backend whose per-role timeout map
+// is under the test's control, so the row half of the precedence rule is
+// reachable. Same shape as newTestRouter otherwise (full trust, so the
+// zero-value fixture sensitivity still resolves a chain).
+func temporalWireRouter(routerTimeout time.Duration, rowTimeouts map[string]int) *Router {
+	p := backends.NewPool(nil, nil)
+	p.SeedSnapshotForTest([]backends.Backend{{
+		ID: "test-backend-id", Name: "test-backend",
+		Host: "h", APIKey: "k",
+		Trust: backends.TrustFull, Locality: "lan",
+		Roles:    []string{backends.RoleDream},
+		ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
+		Timeouts: rowTimeouts,
+		Priority: 100, Enabled: true,
+	}})
+	return &Router{Pool: p, Admit: testAdmit(), TemporalTimeout: routerTimeout}
+}
+
+// TestTemporalReviewWireTimeout pins what the Phase-2 call actually puts on
+// the wire — the contract TestTemporalTimeout above cannot see, because
+// temporalTimeout only produces the chain walk's DEFAULT.
+//
+// Two things are pinned here. First, the call site consumes the router
+// setting at all: reverting it to the bare ValidateTimeout constant leaves
+// every other test in the package green, so without this the one mutation
+// that undoes the whole feature is invisible. Second, the precedence rule the
+// operations row documents: the Phase-2 call resolves under role dream, so a
+// timeouts.dream entry on the serving context_backends row wins over the
+// config key (Backend.TimeoutFor inside llm.ChatChainVia) — operators on such
+// a row have to raise the row value instead.
+func TestTemporalReviewWireTimeout(t *testing.T) {
+	tests := []struct {
+		name          string
+		routerTimeout time.Duration
+		rowTimeouts   map[string]int
+		want          time.Duration
+	}{
+		{
+			name:          "unwired router puts the package default on the wire",
+			routerTimeout: 0,
+			want:          ValidateTimeout,
+		},
+		{
+			name:          "router setting reaches the wire",
+			routerTimeout: 180 * time.Second,
+			want:          180 * time.Second,
+		},
+		{
+			name:          "row timeouts.dream beats the configured key",
+			routerTimeout: 180 * time.Second,
+			rowTimeouts:   map[string]int{backends.RoleDream: 90},
+			want:          90 * time.Second,
+		},
+		{
+			name:        "row timeouts.dream beats the package default too",
+			rowTimeouts: map[string]int{backends.RoleDream: 240},
+			want:        240 * time.Second,
+		},
+		{
+			name:          "a foreign role entry does not apply",
+			routerTimeout: 180 * time.Second,
+			rowTimeouts:   map[string]int{backends.RoleDigest: 30},
+			want:          180 * time.Second,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got time.Duration
+			calls := 0
+			mockChatJSON(t, func(_ context.Context, _, _, _ string, _ *bool, _, _ string, _ llm.Options, timeout time.Duration) (*llm.ChatResponse, error) {
+				calls++
+				got = timeout
+				return &llm.ChatResponse{Message: llm.Message{Role: "assistant", Content: `{"dates":[]}`}}, nil
+			})
+
+			block := srcBlock(uuidA)
+			r := temporalWireRouter(tt.routerTimeout, tt.rowTimeouts)
+			if _, _, _, err := r.temporalReview(context.Background(), &block, "user prompt", llm.Options{}); err != nil {
+				t.Fatalf("temporalReview: %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("wire calls = %d, want 1", calls)
+			}
+			if got != tt.want {
+				t.Errorf("wire timeout = %v, want %v", got, tt.want)
 			}
 		})
 	}
