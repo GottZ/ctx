@@ -96,6 +96,10 @@ type Config struct {
 	// (Engine, Version, Image-Digest, Template-Hash) — Homogenitäts-Beleg des
 	// Korpus (design/02 §5.4). nil = kein Stempel (v1-kompatible Zeile).
 	GenStamp *GenStamp
+	// SpecConfig ist die strukturierte Spec-Provenienz des Laufs (-spec-config,
+	// design/04 §3.3); Drafter-SHA vom Aufrufer via ResolveDrafterSHA
+	// verifiziert. nil = kein Stempel (v4-Protokoll-Lauf).
+	SpecConfig *SpecConfig
 }
 
 // GenStamp ist der Engine-Stempel eines Dump-Records (design/02 §3.3 `gen`).

@@ -127,6 +127,18 @@ optional `gen` engine stamp passed via
 `<think>` strip), so v1 readers keep working unchanged; the file is created
 `0600` because the prompts carry corpus content.
 
+`-spec-config '<json>'` stamps structured speculative-decoding provenance
+into the report env (`env.spec`: `algorithm`, `drafter_path`,
+`drafter_sha256`, `drafter_sha_verified`, `gamma`, `engine_build` — an image
+*digest*, never a tag —, `target_quant`, `kv_cache_dtype`, `train_step`),
+alongside the free-text `server_note`. Unknown fields are rejected. When
+`drafter_path` is readable locally, goldbench hashes `model.safetensors`
+itself and refuses to start on a mismatch with a declared `drafter_sha256`
+(provenance conflict — the stale copied hash of an automated training loop);
+an unreadable path keeps the declaration with `drafter_sha_verified: false`.
+Every non-dry run also stamps `env.concurrency` (the worker count — τ and
+throughput are regime-dependent). Reports without the flag are byte-stable.
+
 Prompt changes to the production pipelines travel through the bench first:
 a candidate wording runs as an additive `-v2` variant axis side by side with
 the baseline (same model, same server, same run — the fairest A/B), and only

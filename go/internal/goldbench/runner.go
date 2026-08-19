@@ -61,6 +61,25 @@ type EnvStamp struct {
 	TempOverride  *float64       `json:"temp_override,omitempty"`   // fixe Temperatur statt Pipeline-Temps (Mock-Treue-Abweichung)
 	ServerNote    string         `json:"server_note,omitempty"`
 	NPerAxis      map[string]int `json:"n_per_axis"`
+	// Concurrency stempelt das Lauf-Regime (τ ist regime-abhängig: c1-
+	// Diagnose ≠ c4-Promote-Report); omitempty hält Bestands-Reports stabil.
+	Concurrency int `json:"concurrency,omitempty"`
+	// Spec ist die strukturierte Spec-Provenienz (-spec-config); nil bei
+	// Läufen ohne Flag (byte-stabil zum v4-Protokoll).
+	Spec *SpecConfig `json:"spec,omitempty"`
+}
+
+// stampConcurrency liefert das Lauf-Regime für den EnvStamp: 0 im Dry-Run
+// (kein Regime, Feld bleibt weg — Bestands-Dry-Run-Reports byte-stabil),
+// sonst die effektive Worker-Zahl wie in executeJobs.
+func stampConcurrency(cfg Config) int {
+	if cfg.DryRun {
+		return 0
+	}
+	if cfg.Concurrency <= 0 {
+		return 1
+	}
+	return cfg.Concurrency
 }
 
 // job ist eine Arbeitseinheit des Worker-Pools: alle Calls EINES Falls
@@ -159,6 +178,8 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			TempOverride:  tempOv,
 			ServerNote:    cfg.ServerNote,
 			NPerAxis:      nPerAxis,
+			Concurrency:   stampConcurrency(cfg),
+			Spec:          cfg.SpecConfig,
 		},
 		Axes: map[string]AxisResult{},
 	}
