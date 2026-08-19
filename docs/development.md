@@ -168,9 +168,15 @@ call count and throughput grow); all samples land in the dump as
 `samples`/`samples_usage` matrices `[request][sample]` (including sample 0,
 omitted for `-samples 1`). Sampling runs at pipeline temperatures —
 `-temperature-override` together with `-samples >1` is refused (a corpus with
-a forced temperature is a different distribution). With `-dump-append` a case
-is only written once every sample succeeded (a failed extra sample makes the
-case incomplete and it is re-run on resume).
+a forced temperature is a different distribution); `-samples >1` also
+requires `-dump-outputs` (the samples live only there), `-seed >= 0` and no
+`seed` key in `-extra-body`. `env.samples` stamps k on the report, `params`
+carries the sample-0 seed when k>1, and `fail_stats.sample_errors` counts
+cases whose extra sample failed. With `-dump-append` a case is only written
+once every sample succeeded (a failed extra sample makes the case incomplete
+and it is re-run on resume; remaining slots of such a case are skipped), and
+the file must carry the same k as the run (k-gate: a k=3 file resumed with
+`-samples 8` aborts instead of mixing).
 
 `-spec-config '<json>'` stamps structured speculative-decoding provenance
 into the report env (`env.spec`: `algorithm`, `drafter_path`,
