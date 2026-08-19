@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dream"
 )
 
 // Prompt versions accepted by V5. Mirrors llm.PromptVersionV52/V6 — kept as
@@ -330,6 +331,16 @@ func validateDream(c *Config) []Issue {
 	if f := c.Dream.LinkFloorConfidence; f < 0 || f > 1 {
 		issues = append(issues, Issue{Field: "dream.link_floor_confidence", Severity: SeverityError,
 			Msg: fmt.Sprintf("link floor confidence %g must be within [0,1]", f)})
+	}
+
+	// V16 — dream.temporal_timeout sign. Same class as V9b/V9c: the consumer
+	// (dream.temporalTimeout) reads <= 0 as "unset" and silently substitutes
+	// the package ValidateTimeout, so a negative value would present as a
+	// configured duration in the settings surface while meaning the default.
+	// 0 stays legal — it IS the documented "package default" sentinel.
+	if d := c.Dream.TemporalTimeout; d < 0 {
+		issues = append(issues, Issue{Field: "dream.temporal_timeout", Severity: SeverityError,
+			Msg: fmt.Sprintf("temporal timeout %v must be >= 0 (0 = package default %v)", d, dream.ValidateTimeout)})
 	}
 
 	return issues
