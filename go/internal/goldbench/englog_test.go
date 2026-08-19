@@ -76,12 +76,14 @@ func TestParseEngLogInventory(t *testing.T) {
 		{"sgllog-qwen36-sgl512-eagle3-c1.log", 15, 2.17, 0.39},
 		{"sgllog-qwen36-sgl512-eagle3-c4.log", 7, 1.95, 0.32},
 	}
+	found := 0
 	for _, w := range want {
 		p := filepath.Join(d, w.file)
 		if _, err := os.Stat(p); err != nil {
 			t.Logf("%s fehlt — übersprungen", w.file)
 			continue
 		}
+		found++
 		res, err := parseFile(t, p)
 		if err != nil {
 			t.Errorf("%s: %v", w.file, err)
@@ -99,7 +101,26 @@ func TestParseEngLogInventory(t *testing.T) {
 		if res.Source != "log-parse" || res.SchemaVersion != 1 || res.BootMarkers != 0 {
 			t.Errorf("%s: source=%s schema=%d boot=%d (Bestands-Logs sind Tail-Captures)", w.file, res.Source, res.SchemaVersion, res.BootMarkers)
 		}
-		t.Logf("%-48s n=%-3d τ̄=%.3f τw=%.3f Δ=%+.3f AR̄=%.3f ARw=%.3f tps=%.1f", w.file, res.Lines, res.UnweightedLineMean, res.Tau, res.WeightedMinusUnweighted, res.UnweightedARLineMean, res.AR, res.SteadyDecodeTPS)
+		t.Logf("%-48s n=%-3d τ̄=%.3f τw=%.3f Δ=%+.3f AR̄=%.3f ARw=%.3f tps=%.1f γ=%d", w.file, res.Lines, res.UnweightedLineMean, res.Tau, res.WeightedMinusUnweighted, res.UnweightedARLineMean, res.AR, res.SteadyDecodeTPS, res.Gamma)
+	}
+	// Vakuum-Schutz: ein Stub-Submodule darf das Gate nicht leer-grün machen.
+	if found < 28 {
+		t.Fatalf("nur %d/%d Bestands-Logs gefunden — Gate nicht belegbar", found, len(want))
+	}
+	// Bestands-SGLang-Log: τ (gewichtet) und Steady-TPS gegen gepinnte Werte
+	// (Regressionsschutz des Δt-Pfads; Werte aus dem Erstlauf 2026-08-19).
+	if res, err := parseFile(t, filepath.Join(d, "sgllog-qwen38-sgl-dsparkC-c1.log")); err == nil {
+		if math.Abs(res.Tau-2.608) > 0.01 || math.Abs(res.SteadyDecodeTPS-19.2) > 0.3 {
+			t.Fatalf("dsparkC-c1 pinned: τw=%.3f (2.608) tps=%.1f (19.2)", res.Tau, res.SteadyDecodeTPS)
+		}
+	}
+	// no-spec-Baseline: kein Fehler, Flag + Steady-TPS.
+	if res, err := parseFile(t, filepath.Join(d, "englog-qwen38-sgl-base-c1.log")); err == nil {
+		if !res.NoSpecWindows || res.SteadyDecodeTPS <= 0 || res.Lines != 0 {
+			t.Fatalf("no-spec baseline: %+v", res)
+		}
+	} else {
+		t.Fatalf("no-spec baseline must parse without error: %v", err)
 	}
 }
 
@@ -135,8 +156,12 @@ func TestParseEngLogVLLMExactAR(t *testing.T) {
 		if math.Abs(res.AR-float64(acc)/float64(dr)) > 1e-12 {
 			t.Fatalf("%s: AR %.6f != %d/%d", name, res.AR, acc, dr)
 		}
-		if !res.TauDerivedDrafts || res.Tau <= 1 {
-			t.Fatalf("%s: τ must be derived from accepted/(MAL-1): %+v", name, res.SpecStats)
+		// γ ist je Lauf konstant ⇒ τ EXAKT: 1 + γ·ΣAcc/ΣDrafted (Toleranz 0 bis float).
+		if res.Gamma == 0 || res.TauDerivedDrafts {
+			t.Fatalf("%s: γ must be reconstructed consistently (gamma=%d derived=%v)", name, res.Gamma, res.TauDerivedDrafts)
+		}
+		if want := 1 + float64(res.Gamma)*float64(acc)/float64(dr); math.Abs(res.Tau-want) > 1e-12 {
+			t.Fatalf("%s: τ %.9f != 1+γ·acc/drafted %.9f", name, res.Tau, want)
 		}
 	}
 }
@@ -168,6 +193,22 @@ func TestParseEngLogRed(t *testing.T) {
 	if _, err := ParseEngLog(strings.NewReader("nothing here\n")); !errors.Is(err, ErrFormat) {
 		t.Fatalf("unknown format must be refused, got %v", err)
 	}
+	// Angeschnittener Zweit-Boot: Init-Zeile ohne Start ⇒ trotzdem 2 Boots.
+	cut := string(b) + "\n(EngineCore pid=999) INFO 08-16 21:00:00 [core.py:116] Initializing a V1 LLM engine (v0.26.1) with config: model='/model'\n"
+	if _, err := ParseEngLog(strings.NewReader(cut)); !errors.Is(err, ErrMultiBoot) {
+		t.Fatalf("cut second boot must be refused, got %v", err)
+	}
+	// Teilweiser Format-Drift: Spec-Signatur, aber Regex scheitert ⇒ ErrFormat.
+	drift := "(APIServer pid=1) INFO 08-17 19:55:36 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: nan, Accepted: 0 tokens\n"
+	if _, err := ParseEngLog(strings.NewReader(drift)); !errors.Is(err, ErrFormat) {
+		t.Fatalf("partial format drift must be refused, got %v", err)
+	}
+	// Wirkungsloser Drafter (MAL 1.00): τ = 1, kein Fehler, kein τ=0.
+	flat := "(APIServer pid=1) INFO 08-17 19:55:36 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 1.00, Accepted throughput: 0 tokens/s, Drafted throughput: 1 tokens/s, Accepted: 0 tokens, Drafted: 700 tokens, Per-position acceptance rate: 0.0, Avg Draft acceptance rate: 0.0%\n"
+	res, err = ParseEngLog(strings.NewReader(flat))
+	if err != nil || res.Tau != 1 || res.AR != 0 {
+		t.Fatalf("MAL 1.00 log: err=%v τ=%v AR=%v", err, res.Tau, res.AR)
+	}
 }
 
 // TestParseEngLogSynthetic prüft die Gewichtung deterministisch: SGLang-Fenster
@@ -187,6 +228,18 @@ func TestParseEngLogSynthetic(t *testing.T) {
 	if math.Abs(res.SteadyDecodeTPS-20.0) > 1e-9 {
 		t.Fatalf("steady tps: %v", res.SteadyDecodeTPS)
 	}
+	// Ungleiche Kadenz (Δt trägt): Stempel 0/5/10/30 s ⇒ Abstände 5,5,20,
+	// Median 5 ⇒ Cap 15 s für die Pause. Zeile 1 Δt=5 (Nachfolger), 2: 5, 3: 5,
+	// 4: 20→15. Gewichte 50,50,50,150 ⇒ τw = (2·50+2·50+2·50+4·150)/300 = 3.0;
+	// ohne Cap wäre es (300+800)/350 = 3.14, ohne Δt-Pfad 2.5.
+	row := func(ts string, tau string) string {
+		return "[2026-08-19 00:00:" + ts + "] Decode batch, #running-req: 1, #full token: 1, full token usage: 0.00, mamba num: 1, mamba usage: 0.1, accept len: " + tau + ", accept rate: 0.20, cuda graph: True, gen throughput (token/s): 10.00, #queue-req: 0\n"
+	}
+	uneven := row("00", "2.00") + row("05", "2.00") + row("10", "2.00") + row("30", "4.00")
+	res, err = ParseEngLog(strings.NewReader(uneven))
+	if err != nil || math.Abs(res.Tau-3.0) > 1e-9 {
+		t.Fatalf("uneven Δt with median cap: err=%v τ=%v (want 3.0)", err, res.Tau)
+	}
 
 	vllm := "(APIServer pid=1) INFO 08-17 19:55:36 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 3.00, Accepted throughput: 1 tokens/s, Drafted throughput: 1 tokens/s, Accepted: 200 tokens, Drafted: 400 tokens, Per-position acceptance rate: 0.8, 0.2, Avg Draft acceptance rate: 50.0%\n" +
 		"(APIServer pid=1) INFO 08-17 19:55:46 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.00, Accepted throughput: 1 tokens/s, Drafted throughput: 1 tokens/s, Accepted: 100 tokens, Drafted: 400 tokens, Per-position acceptance rate: 0.4, 0.1, Avg Draft acceptance rate: 25.0%\n" +
@@ -195,9 +248,10 @@ func TestParseEngLogSynthetic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// steps = 200/2 + 100/1 = 200 ⇒ τ = 1 + 300/200 = 2.5; AR = 300/800 = 0.375; Zeilen-Mittel 2.5/0.375.
-	if math.Abs(res.Tau-2.5) > 1e-9 || math.Abs(res.AR-0.375) > 1e-9 || res.VerifySteps != 200 || res.AcceptedTokens != 300 {
-		t.Fatalf("vllm sums: %+v", res.SpecStats)
+	// γ: Zeile 1 400/(200/2)=4, Zeile 2 400/(100/1)=4 ⇒ konsistent γ=4 ⇒
+	// steps = 800/4 = 200 ⇒ τ = 1 + 300/200 = 2.5 (exakt); AR = 300/800 = 0.375.
+	if math.Abs(res.Tau-2.5) > 1e-9 || math.Abs(res.AR-0.375) > 1e-9 || res.VerifySteps != 200 || res.AcceptedTokens != 300 || res.Gamma != 4 || res.TauDerivedDrafts {
+		t.Fatalf("vllm sums: %+v γ=%d derived=%v", res.SpecStats, res.Gamma, res.TauDerivedDrafts)
 	}
 	// Per-Position step-gewichtet: (0.8·100 + 0.4·100)/200 = 0.6, (0.2·100+0.1·100)/200 = 0.15.
 	if len(res.PerPosition) != 2 || math.Abs(res.PerPosition[0]-0.6) > 1e-9 || math.Abs(res.PerPosition[1]-0.15) > 1e-9 {

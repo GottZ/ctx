@@ -274,8 +274,7 @@ func shortRev(rev string) string {
 }
 
 // parseEngLog implementiert -parse-englog: Datei lesen, SpecStats-JSON auf
-// stdout (auch bei ErrNoWindows — dann mit windows 0, damit der Leser den
-// Grund sieht), Exit-Code über den Fehler.
+// stdout — auch bei Fehlern (dann mit `error`-Feld), Exit-Code über den Fehler.
 func parseEngLog(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -284,6 +283,9 @@ func parseEngLog(path string) error {
 	defer func() { _ = f.Close() }()
 	res, perr := goldbench.ParseEngLog(f)
 	if res != nil {
+		if perr != nil {
+			res.Error = perr.Error() // Leser von stdout sieht den Grund, nicht nur tau 0
+		}
 		b, _ := json.MarshalIndent(res, "", " ")
 		fmt.Println(string(b))
 	}

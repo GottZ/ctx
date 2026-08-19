@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -58,10 +59,22 @@ type EngLogResult struct {
 	// gerundet ⇒ τ ist eine enge Näherung, AR dagegen exakt summiert).
 	TauDerivedDrafts bool    `json:"tau_derived_drafts,omitempty"`
 	SteadySeconds    float64 `json:"steady_seconds,omitempty"` // Zeitbasis der Steady-TPS
+	// Gamma ist das aus den vLLM-Zeilen rekonstruierte, über alle Zeilen
+	// konsistente γ (drafted/steps) — dann ist τ exakt (steps = ΣDrafted/γ).
+	Gamma int `json:"gamma,omitempty"`
+	// NoSpecWindows: Log ohne Spec-Zeilen, aber mit gültiger Steady-TPS
+	// (no-spec-Baseline §4.7) — kein Fehler, Flag für den Leser.
+	NoSpecWindows bool `json:"no_spec_windows,omitempty"`
+	// UnparsedSpecLines zählt Zeilen mit Spec-Signatur, die am Regex
+	// scheitern (teilweiser Format-Drift) — >0 ⇒ ErrFormat.
+	UnparsedSpecLines int `json:"unparsed_spec_lines,omitempty"`
+	// SteadyDroppedWindows: Fenster mit tps>0, aber Running==0 (nicht gewertet).
+	SteadyDroppedWindows int    `json:"steady_dropped_windows,omitempty"`
+	Error                string `json:"error,omitempty"` // gesetzt, wenn der Parser mit Fehler endet
 }
 
-// ErrNoWindows: Log ohne Spec-Messzeilen (Boot-only-Capture).
-var ErrNoWindows = errors.New("parse-englog: keine Messfenster (keine SpecDecoding-/accept-len-Zeilen)")
+// ErrNoWindows: Log ohne Spec-Messzeilen UND ohne Steady-Fenster (Boot-only-Capture).
+var ErrNoWindows = errors.New("parse-englog: keine Messfenster (keine SpecDecoding-/accept-len-Zeilen, keine Decode-Fenster)")
 
 // ErrMultiBoot: Log trägt mehrere Boots — Fenster nicht attribuierbar.
 var ErrMultiBoot = errors.New("parse-englog: Log trägt mehrere Läufe/Boots — Fenster nicht attribuierbar")
@@ -76,8 +89,11 @@ var (
 	reVLLMGen = regexp.MustCompile(`Avg generation throughput: ([0-9.]+) tokens/s, Running: (\d+) reqs`)
 	// vLLM Zeitstempel "INFO 08-17 19:55:36".
 	reVLLMTS = regexp.MustCompile(`(?:INFO|WARNING|ERROR) (\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)`)
-	// Boot-Signatur vLLM (einmal pro API-Server-Start).
-	reVLLMBoot = regexp.MustCompile(`Starting vLLM server on |Initializing a V1 LLM engine`)
+	// Boot-Signaturen vLLM: Init (Minuten VOR dem Start) und Start — gezählt
+	// wird das MAXIMUM beider, damit ein angeschnittener Zweit-Boot (Init ohne
+	// Start) nicht als „ein Boot" durchgeht. Banner = schwaches Format-Signal.
+	reVLLMBoot   = regexp.MustCompile(`Starting vLLM server on |Initializing a V1 LLM engine`)
+	reVLLMBanner = regexp.MustCompile(`\(APIServer pid=\d+\)|\(EngineCore pid=\d+\)|vllm\.|VLLM_`)
 
 	// SGLang Decode-Batch-Zeile mit Spec-Feldern.
 	reSGLSpec = regexp.MustCompile(`Decode batch, #running-req: (\d+),.*accept len: ([0-9.]+), accept rate: ([0-9.]+),.*gen throughput \(token/s\): ([0-9.]+)`)
@@ -85,13 +101,19 @@ var (
 	reSGLGen = regexp.MustCompile(`Decode batch, #running-req: (\d+),.*gen throughput \(token/s\): ([0-9.]+)`)
 	// SGLang Zeitstempel "[2026-08-19 00:02:25]".
 	reSGLTS = regexp.MustCompile(`^\[(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\]`)
-	// Boot-Signatur SGLang (einmal pro launch_server).
-	reSGLBoot = regexp.MustCompile(`server_args=|The server is fired up and ready to roll`)
+	// Boot-Signaturen SGLang: server_args= (launch) und Uvicorn running (ready) — Maximum.
+	reSGLBoot = regexp.MustCompile(`server_args=|Uvicorn running on |The server is fired up and ready to roll`)
 )
 
-// defaultIntervalSec ist die Log-Kadenz beider Engines (10 s); sie trägt die
-// Gewichtung, wenn eine Zeile keinen auswertbaren Zeitstempel-Abstand hat.
+// defaultIntervalSec ist der Gewichts-Fallback ohne auswertbaren Zeitstempel-
+// Abstand: vLLM loggt fix alle 10 s; SGLang log_interval-abhängig (gemessen
+// 4–22 s) — dort trägt der Zeitstempel, der Fallback greift nur für Ein-Zeilen-Logs.
 const defaultIntervalSec = 10.0
+
+// maxIntervalFactor deckelt ein Fenster-Δt auf das Vielfache der Median-
+// Kadenz: eine Achsen-Pause im Voll-Log (E4) darf die erste Zeile danach
+// nicht mit der Pausenlänge gewichten.
+const maxIntervalFactor = 3.0
 
 type specLine struct {
 	t        time.Time
@@ -119,24 +141,38 @@ func ParseEngLog(r io.Reader) (*EngLogResult, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1<<20), 1<<26)
 	var (
-		vSpec, sSpec []specLine
-		vGen, sGen   []genLine
-		vBoot, sBoot int
-		vSig, sSig   bool
+		vSpec, sSpec         []specLine
+		vGen, sGen           []genLine
+		vInit, vStart        int
+		sArgs, sReady        int
+		vSig, sSig           bool
+		vUnparsed, sUnparsed int
 	)
 	for sc.Scan() {
 		ln := sc.Text()
 		if reVLLMBoot.MatchString(ln) {
 			vSig = true
 			if strings.Contains(ln, "Starting vLLM server on") {
-				vBoot++ // genau eine Zeile je API-Server-Start
+				vStart++
+			} else {
+				vInit++
 			}
+		} else if reVLLMBanner.MatchString(ln) {
+			vSig = true
 		}
 		if reSGLBoot.MatchString(ln) {
 			sSig = true
 			if strings.Contains(ln, "server_args=") {
-				sBoot++ // genau eine Zeile je launch_server
+				sArgs++
+			} else {
+				sReady++
 			}
+		}
+		if strings.Contains(ln, "SpecDecoding metrics:") && !reVLLMSpec.MatchString(ln) {
+			vUnparsed++
+		}
+		if strings.Contains(ln, "accept len:") && !reSGLSpec.MatchString(ln) {
+			sUnparsed++
 		}
 		if m := reVLLMSpec.FindStringSubmatch(ln); m != nil {
 			l := specLine{}
@@ -199,17 +235,27 @@ func ParseEngLog(r io.Reader) (*EngLogResult, error) {
 	var spec []specLine
 	var gen []genLine
 	if isV {
-		res.Engine, res.Format, res.BootMarkers, spec, gen = "vllm", "vllm-stdout", vBoot, vSpec, vGen
+		res.Engine, res.Format, res.BootMarkers, spec, gen = "vllm", "vllm-stdout", max(vInit, vStart), vSpec, vGen
+		res.UnparsedSpecLines = vUnparsed
 	} else {
-		res.Engine, res.Format, res.BootMarkers, spec, gen = "sglang", "sglang-stdout", sBoot, sSpec, sGen
+		res.Engine, res.Format, res.BootMarkers, spec, gen = "sglang", "sglang-stdout", max(sArgs, sReady), sSpec, sGen
+		res.UnparsedSpecLines = sUnparsed
 	}
 	if res.BootMarkers > 1 {
 		return res, fmt.Errorf("%w (%d Boot-Marker)", ErrMultiBoot, res.BootMarkers)
 	}
+	if res.UnparsedSpecLines > 0 {
+		return res, fmt.Errorf("%w: %d Spec-Zeilen mit Signatur, aber abweichendem Format (teilweiser Format-Drift)", ErrFormat, res.UnparsedSpecLines)
+	}
 	// Steady-Decode-TPS: zeit-/token-gewichtet über Fenster mit aktiven Requests.
-	res.SteadyDecodeTPS, res.SteadySeconds = steadyTPS(gen)
+	res.SteadyDecodeTPS, res.SteadySeconds, res.SteadyDroppedWindows = steadyTPS(gen)
 	res.Lines = len(spec)
 	if len(spec) == 0 {
+		if res.SteadySeconds > 0 {
+			// no-spec-Baseline (§4.7): gültige Steady-TPS ohne Spec-Fenster.
+			res.NoSpecWindows = true
+			return res, nil
+		}
 		return res, ErrNoWindows
 	}
 
@@ -227,18 +273,32 @@ func ParseEngLog(r io.Reader) (*EngLogResult, error) {
 	res.Windows = len(spec)
 
 	if isV {
-		// Exakte Summation absoluter Intervall-Counts; Verify-Steps aus
-		// Accepted/(MAL−1) rekonstruiert (vLLM loggt num_drafts nicht).
+		// Exakte Summation absoluter Intervall-Counts. vLLM loggt num_drafts
+		// nicht — aber γ ist je Lauf konstant: aus Zeilen mit MAL>1 folgt
+		// γ_i = drafted/(accepted/(MAL−1)); ist γ über alle Zeilen konsistent
+		// (±2 %, gerundet), dann steps = ΣDrafted/γ und τ ist EXAKT
+		// (Toleranz 0 gegen die Summation). Sonst (inkonsistent) Näherung aus
+		// accepted/(MAL−1) mit Marker tau_derived_drafts.
 		var acc, drafted int64
-		var steps float64
+		var stepsApprox float64
+		gammaConsistent, gammaVal := true, 0
 		var perPos []float64
 		var perPosW float64
 		for _, l := range spec {
 			acc += l.accepted
 			drafted += l.drafted
-			if l.tau > 1 {
+			if l.tau > 1 && l.accepted > 0 {
 				s := float64(l.accepted) / (l.tau - 1)
-				steps += s
+				stepsApprox += s
+				g := float64(l.drafted) / s
+				gi := int(g + 0.5)
+				if gi < 1 || (g-float64(gi))/float64(gi) > 0.02 || (float64(gi)-g)/float64(gi) > 0.02 {
+					gammaConsistent = false
+				} else if gammaVal == 0 {
+					gammaVal = gi
+				} else if gi != gammaVal {
+					gammaConsistent = false
+				}
 				if len(l.perPos) > 0 {
 					if perPos == nil {
 						perPos = make([]float64, len(l.perPos))
@@ -251,9 +311,20 @@ func ParseEngLog(r io.Reader) (*EngLogResult, error) {
 			}
 		}
 		res.AcceptedTokens, res.DraftTokens = acc, drafted
-		res.VerifySteps = int64(steps + 0.5)
-		if steps > 0 {
+		switch {
+		case gammaConsistent && gammaVal > 0 && drafted > 0:
+			res.Gamma = gammaVal
+			steps := float64(drafted) / float64(gammaVal)
+			res.VerifySteps = int64(steps + 0.5)
 			res.Tau = 1 + float64(acc)/steps
+		case stepsApprox > 0:
+			res.VerifySteps = int64(stepsApprox + 0.5)
+			res.Tau = 1 + float64(acc)/stepsApprox
+			res.TauDerivedDrafts = true
+		default:
+			// Alle Zeilen MAL ≤ 1 (Drafter wirkungslos): τ = 1, Steps aus γ
+			// nicht ableitbar — Drafts zählen, Accepted 0.
+			res.Tau = 1
 			res.TauDerivedDrafts = true
 		}
 		if drafted > 0 {
@@ -268,15 +339,20 @@ func ParseEngLog(r io.Reader) (*EngLogResult, error) {
 	} else {
 		// SGLang: nur Verhältnisse je Zeile → Gewicht = gen_throughput × Δt
 		// (Token des Fensters), τ zeitgewichtet (§4.2-Degradations-Marker).
-		var wSum, tauW, arW float64
+		med := medianInterval(spec)
+		var wSum, tauW, arW, steps, acc float64
 		for i, l := range spec {
-			w := l.tps * intervalSec(spec, i)
-			if w <= 0 {
-				w = l.tps * defaultIntervalSec
-			}
+			dt := intervalSec(spec, i, med)
+			w := l.tps * dt // emittierte Token des Fensters
 			wSum += w
 			tauW += l.tau * w
 			arW += l.ar * w
+			// Rekonstruierte Zählungen (Ordnungsgröße): steps ≈ tokens/τ,
+			// accepted ≈ tokens·(τ−1)/τ.
+			if l.tau > 0 {
+				steps += w / l.tau
+				acc += w * (l.tau - 1) / l.tau
+			}
 		}
 		if wSum > 0 {
 			res.Tau, res.AR = tauW/wSum, arW/wSum
@@ -285,64 +361,94 @@ func ParseEngLog(r io.Reader) (*EngLogResult, error) {
 		}
 		res.TauTimeWeighted = true
 		res.ARLowerBound = true // Nenner unterstellt volles γ je Runde (§3.1)
-		// Rekonstruierte Token-Zahlen (Ordnungsgröße, aus den Fenster-Gewichten):
-		// accepted ≈ Σ tokens × (τ−1)/τ, verify_steps ≈ Σ tokens/τ.
-		var tok, steps, acc float64
-		for i, l := range spec {
-			w := l.tps * intervalSec(spec, i)
-			if w <= 0 {
-				w = l.tps * defaultIntervalSec
-			}
-			tok += w
-			if l.tau > 0 {
-				steps += w / l.tau
-				acc += w * (l.tau - 1) / l.tau
-			}
-		}
 		res.VerifySteps, res.AcceptedTokens = int64(steps+0.5), int64(acc+0.5)
-		_ = tok
 	}
 	res.WeightedMinusUnweighted = res.Tau - res.UnweightedLineMean
 	return res, nil
 }
 
-// intervalSec liefert den Zeitabstand des Fensters i (zur Vorgängerzeile,
-// für i==0 zur Nachfolgerzeile); ohne Zeitstempel 0 (Aufrufer nutzt Default).
-func intervalSec(ls []specLine, i int) float64 {
+// medianInterval liefert den Median der Zeitstempel-Abstände (0 ohne Stempel).
+func medianInterval(ls []specLine) float64 {
+	var ds []float64
+	for i := 1; i < len(ls); i++ {
+		if ls[i].hasT && ls[i-1].hasT {
+			if d := ls[i].t.Sub(ls[i-1].t).Seconds(); d > 0 {
+				ds = append(ds, d)
+			}
+		}
+	}
+	if len(ds) == 0 {
+		return 0
+	}
+	sort.Float64s(ds)
+	return ds[len(ds)/2]
+}
+
+// intervalSec liefert das Fenster-Δt der Zeile i: Abstand zur Vorgängerzeile
+// (für i==0 zur Nachfolgerzeile), gedeckelt auf maxIntervalFactor × Median
+// (Achsen-Pausen gewichten nicht), Fallback defaultIntervalSec ohne Stempel.
+func intervalSec(ls []specLine, i int, median float64) float64 {
+	d := 0.0
 	if i > 0 && ls[i].hasT && ls[i-1].hasT {
-		if d := ls[i].t.Sub(ls[i-1].t).Seconds(); d > 0 && d < 600 {
-			return d
-		}
+		d = ls[i].t.Sub(ls[i-1].t).Seconds()
+	} else if i == 0 && len(ls) > 1 && ls[0].hasT && ls[1].hasT {
+		d = ls[1].t.Sub(ls[0].t).Seconds()
 	}
-	if i == 0 && len(ls) > 1 && ls[0].hasT && ls[1].hasT {
-		if d := ls[1].t.Sub(ls[0].t).Seconds(); d > 0 && d < 600 {
-			return d
-		}
+	if d <= 0 {
+		return defaultIntervalSec
 	}
-	return 0
+	if median > 0 && d > maxIntervalFactor*median {
+		return maxIntervalFactor * median
+	}
+	return d
 }
 
 // steadyTPS mittelt die Decode-Raten token-/zeitgewichtet über Fenster mit
-// aktiven Requests (Running > 0); Gewicht = Δt (Default 10 s).
-func steadyTPS(gen []genLine) (float64, float64) {
-	var tok, sec float64
-	for i, g := range gen {
-		if g.reqs <= 0 || g.tps <= 0 {
-			continue
-		}
-		dt := defaultIntervalSec
-		if i > 0 && g.hasT && gen[i-1].hasT {
-			if d := g.t.Sub(gen[i-1].t).Seconds(); d > 0 && d < 600 {
-				dt = d
+// aktiven Requests (Running > 0); Δt wie intervalSec (Vorgänger, erste Zeile
+// Nachfolger, Median-Cap, Default 10 s). Rückgabe: TPS, Sekunden, verworfene
+// aktive Fenster (tps>0, Running==0 — Abschlussintervalle).
+func steadyTPS(gen []genLine) (float64, float64, int) {
+	var ds []float64
+	for i := 1; i < len(gen); i++ {
+		if gen[i].hasT && gen[i-1].hasT {
+			if d := gen[i].t.Sub(gen[i-1].t).Seconds(); d > 0 {
+				ds = append(ds, d)
 			}
 		}
-		tok += g.tps * dt
-		sec += dt
+	}
+	med := 0.0
+	if len(ds) > 0 {
+		sort.Float64s(ds)
+		med = ds[len(ds)/2]
+	}
+	var tok, sec float64
+	dropped := 0
+	for i, g := range gen {
+		if g.tps <= 0 {
+			continue
+		}
+		if g.reqs <= 0 {
+			dropped++
+			continue
+		}
+		d := 0.0
+		if i > 0 && g.hasT && gen[i-1].hasT {
+			d = g.t.Sub(gen[i-1].t).Seconds()
+		} else if i == 0 && len(gen) > 1 && g.hasT && gen[1].hasT {
+			d = gen[1].t.Sub(g.t).Seconds()
+		}
+		if d <= 0 {
+			d = defaultIntervalSec
+		} else if med > 0 && d > maxIntervalFactor*med {
+			d = maxIntervalFactor * med
+		}
+		tok += g.tps * d
+		sec += d
 	}
 	if sec == 0 {
-		return 0, 0
+		return 0, 0, dropped
 	}
-	return tok / sec, sec
+	return tok / sec, sec, dropped
 }
 
 func vllmTime(ln string) (time.Time, bool) {

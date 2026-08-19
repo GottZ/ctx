@@ -149,14 +149,23 @@ normalized τ (tokens per verify step incl. the bonus token) and AR (accepted ÷
 drafted draft tokens, no bonus), plus debug fields: `unweighted_line_mean` (the
 plain per-line mean used by hand-made tables), `weighted_minus_unweighted`,
 `line_tau_min/max`, `steady_decode_tps` (time-weighted over windows with
-running requests) and `boot_markers`. vLLM sums absolute interval counts (AR
-exact; τ from verify steps reconstructed as accepted/(MAL−1), flagged
-`tau_derived_drafts`); SGLang only logs ratios, so τ is weighted by `gen
-throughput × Δt` (`tau_time_weighted`) and AR is a lower bound
-(`ar_lower_bound`, the denominator assumes a full γ per round). Exit `2` when
-the log has no measurement windows (boot-only capture), `3` when it carries
-more than one engine boot (windows not attributable) or an unknown/mixed
-format. Tail-captured logs (`docker logs | tail`) carry `boot_markers: 0`.
+running requests; windows with `Running: 0` are counted in
+`steady_dropped_windows`) and `boot_markers`. vLLM sums absolute interval
+counts (AR exact); γ is reconstructed per line as drafted/(accepted/(MAL−1))
+and, when consistent across the log, reported as `gamma` — then τ is exact
+(`1 + γ·ΣAccepted/ΣDrafted`); otherwise τ falls back to reconstructed verify
+steps and is flagged `tau_derived_drafts`. SGLang only logs ratios, so τ is
+weighted by `gen throughput × Δt` (`tau_time_weighted`; Δt from timestamps,
+capped at 3× the median cadence so pauses do not weigh, default 10 s) and AR
+is a lower bound (`ar_lower_bound`, the denominator assumes a full γ per
+round). A log with decode windows but no speculative lines (a no-spec
+baseline) parses with exit `0` and `no_spec_windows: true`. Exit `2` when the
+log has neither spec nor decode windows (boot-only capture), `3` when it
+carries more than one engine boot (counted as max of init/start signatures —
+windows not attributable), partially drifted spec lines
+(`unparsed_spec_lines`), or an unknown/mixed format. The JSON is printed even
+on failure with an `error` field. Tail-captured logs (`docker logs | tail`)
+carry `boot_markers: 0`.
 
 Prompt changes to the production pipelines travel through the bench first:
 a candidate wording runs as an additive `-v2` variant axis side by side with
