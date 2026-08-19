@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -51,9 +53,19 @@ func ParseSpecConfig(raw string) (*SpecConfig, error) {
 	if err := dec.Decode(&sc); err != nil {
 		return nil, fmt.Errorf("%w: %w (erlaubt: algorithm, drafter_path, drafter_sha256, gamma, engine_build, target_quant, kv_cache_dtype, train_step)", ErrSpecConfig, err)
 	}
-	if sc.Algorithm == "" {
-		return nil, fmt.Errorf("%w: algorithm fehlt", ErrSpecConfig)
+	// Decode liest genau EIN JSON-Objekt — ein Konkatenations-Fehler im
+	// Treiber ({…},"train_step":…}) würde sonst still den Rest verlieren.
+	if dec.More() {
+		return nil, fmt.Errorf("%w: Inhalt nach dem JSON-Objekt", ErrSpecConfig)
 	}
+	switch sc.Algorithm {
+	case "dspark", "mtp", "eagle", "none":
+	case "":
+		return nil, fmt.Errorf("%w: algorithm fehlt", ErrSpecConfig)
+	default:
+		return nil, fmt.Errorf("%w: algorithm %q (erlaubt: dspark, mtp, eagle, none)", ErrSpecConfig, sc.Algorithm)
+	}
+	sc.DrafterSHA256 = strings.ToLower(sc.DrafterSHA256)
 	if sc.DrafterSHAVerified {
 		// Verifiziert wird nur, was goldbench selbst hasht — ein deklariertes
 		// true wäre genau die Selbstbescheinigung, die der Stempel ausschließt.
@@ -62,35 +74,73 @@ func ParseSpecConfig(raw string) (*SpecConfig, error) {
 	return &sc, nil
 }
 
-// ResolveDrafterSHA verifiziert die Drafter-Provenienz: ist drafter_path lokal
-// lesbar, wird sha256(model.safetensors) berechnet — weicht ein deklarierter
-// Hash ab ⇒ ErrSpecProvenance; stimmt er oder fehlt er ⇒ Wert übernommen,
-// DrafterSHAVerified=true. Ist der Pfad nicht lesbar (Remote-Lauf), gilt die
+// ResolveDrafterSHA verifiziert die Drafter-Provenienz: existiert
+// drafter_path lokal, werden die Gewichte SELBST gehasht — model.safetensors,
+// sonst alle *.safetensors (sharded Layout, sortiert in EINEN Hash gestreamt;
+// der RadixArk-NVFP4-Target liegt so vor) — weicht ein deklarierter Hash ab
+// ⇒ ErrSpecProvenance; stimmt er oder fehlt er ⇒ Wert übernommen,
+// DrafterSHAVerified=true. Existiert der Pfad NICHT (Remote-Lauf), gilt die
 // Deklaration mit DrafterSHAVerified=false (P1 verlangt für Promote den
-// verifizierten Modus).
+// verifizierten Modus). Ein existierender Pfad ohne *.safetensors oder ein
+// Lese-/Öffnungsfehler ist ein HARTER Fehler — nur „nicht vorhanden" ist weich.
 func ResolveDrafterSHA(sc *SpecConfig) error {
 	if sc == nil || sc.DrafterPath == "" {
 		return nil
 	}
-	p := sc.DrafterPath
-	if st, err := os.Stat(p); err == nil && st.IsDir() {
-		p = filepath.Join(p, drafterWeightsFile)
-	}
-	f, err := os.Open(p)
-	if err != nil {
+	files, err := drafterWeightFiles(sc.DrafterPath)
+	if errors.Is(err, fs.ErrNotExist) {
 		sc.DrafterSHAVerified = false
 		return nil
 	}
-	defer func() { _ = f.Close() }()
+	if err != nil {
+		return fmt.Errorf("%w: drafter_path %s: %w", ErrSpecConfig, sc.DrafterPath, err)
+	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return fmt.Errorf("goldbench: spec-config: hash %s: %w", p, err)
+	for _, p := range files {
+		f, err := os.Open(p)
+		if err != nil {
+			return fmt.Errorf("%w: drafter_path: open %s: %w", ErrSpecConfig, p, err)
+		}
+		_, cerr := io.Copy(h, f)
+		_ = f.Close()
+		if cerr != nil {
+			return fmt.Errorf("goldbench: spec-config: hash %s: %w", p, cerr)
+		}
+		fmt.Fprintf(os.Stderr, "goldbench: spec-config: gehasht %s\n", p)
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	if sc.DrafterSHA256 != "" && !strings.EqualFold(sc.DrafterSHA256, sum) {
-		return fmt.Errorf("%w: deklariert %s, berechnet %s (%s)", ErrSpecProvenance, sc.DrafterSHA256, sum, p)
+		return fmt.Errorf("%w: deklariert %s, berechnet %s (%s)", ErrSpecProvenance, sc.DrafterSHA256, sum, strings.Join(files, ","))
 	}
 	sc.DrafterSHA256 = sum
 	sc.DrafterSHAVerified = true
 	return nil
+}
+
+// drafterWeightFiles liefert die zu hashenden Gewichtsdateien: eine Datei
+// direkt; ein Verzeichnis mit model.safetensors → genau diese; sonst alle
+// *.safetensors sortiert (sharded). fs.ErrNotExist, wenn der Pfad fehlt;
+// ein anderer Fehler, wenn er existiert, aber keine Gewichte trägt.
+func drafterWeightFiles(p string) ([]string, error) {
+	st, err := os.Stat(p)
+	if err != nil {
+		return nil, err // inkl. fs.ErrNotExist
+	}
+	if !st.IsDir() {
+		return []string{p}, nil
+	}
+	if one := filepath.Join(p, drafterWeightsFile); fileExists(one) {
+		return []string{one}, nil
+	}
+	shards, _ := filepath.Glob(filepath.Join(p, "*.safetensors"))
+	if len(shards) == 0 {
+		return nil, errors.New("verzeichnis ohne *.safetensors (Layout nicht unterstützt)")
+	}
+	sort.Strings(shards)
+	return shards, nil
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
 }

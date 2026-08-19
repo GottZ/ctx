@@ -132,12 +132,14 @@ into the report env (`env.spec`: `algorithm`, `drafter_path`,
 `drafter_sha256`, `drafter_sha_verified`, `gamma`, `engine_build` — an image
 *digest*, never a tag —, `target_quant`, `kv_cache_dtype`, `train_step`),
 alongside the free-text `server_note`. Unknown fields are rejected. When
-`drafter_path` is readable locally, goldbench hashes `model.safetensors`
-itself and refuses to start on a mismatch with a declared `drafter_sha256`
-(provenance conflict — the stale copied hash of an automated training loop);
-an unreadable path keeps the declaration with `drafter_sha_verified: false`.
-Every non-dry run also stamps `env.concurrency` (the worker count — τ and
-throughput are regime-dependent). Reports without the flag are byte-stable.
+`drafter_path` exists locally, goldbench hashes the weights itself
+(`model.safetensors`, or all `*.safetensors` shards in sorted order) and
+refuses to start on a mismatch with a declared `drafter_sha256` (provenance
+conflict — the stale copied hash of an automated training loop); a path that
+does not exist keeps the declaration with `drafter_sha_verified: false`, an
+existing path without weights is a hard error. Every non-dry run also stamps
+`env.concurrency` (the worker count — τ and throughput are regime-dependent).
+Reports without the flag carry no `spec`; only dry runs stay fully byte-stable.
 
 `-parse-englog <file>` is a standalone mode (no bench run): it parses a saved
 engine stdout log — vLLM (`SpecDecoding metrics:` interval lines + `Avg
