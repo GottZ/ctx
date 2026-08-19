@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -20,7 +21,7 @@ import (
 )
 
 // kw1Fixture seeds the three body classes of design/02 §3.2: a normal row,
-// a credentials-slim row (bodies '' — Slimmed()), and an evicted row (bodies
+// a credentials-slim row (bodies = empty string — Slimmed()), and an evicted row (bodies
 // NULL — EvictBodies). Ages are distinct so keyset order is deterministic.
 func kw1Fixture(t *testing.T, pool *pgxpool.Pool, withNull bool) {
 	t.Helper()
@@ -69,18 +70,19 @@ func liveColumns(t *testing.T, pool *pgxpool.Pool) []string {
 	return cols
 }
 
-// TestExportKW1 pins the KW1 gate (design/02 §7): the classifier counts ''
-// and NULL both as bodyless (2× bodyless, 1 candidate), the naive
-// IS NOT NULL reference query does NOT (reference proof of the trap),
+// TestExportKW1 pins the KW1 gate (design/02 §7): the classifier counts empty string
+// and NULL both as bodyless (2× bodyless, 1 candidate) — the RED proof is
+// the classifier subtest itself (a naive IS NOT NULL classifier yields
+// body=2/slim=0 there; the first subtest only documents the trap) —,
 // rescue-first exports everything and THEN fails, -strict aborts at once,
-// the field set equals the live schema, and count(*) in the same snapshot
+// the field set equals the live schema, and count(*) over the same window
 // equals rows_total.
 func TestExportKW1(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	kw1Fixture(t, pool, false)
 
-	t.Run("reference: naive IS NOT NULL filter lets the '' row through", func(t *testing.T) {
+	t.Run("trap documentation (not an Export probe): naive IS NOT NULL counts the '' row as body", func(t *testing.T) {
 		var naive int
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM context_llm_log
@@ -201,4 +203,115 @@ func TestExportKW1(t *testing.T) {
 			t.Fatalf("strict must stop writing at the NULL row: %d lines", got)
 		}
 	})
+}
+
+// TestExportKeysetTiesAndResume covers the two review gaps of the KW1 build:
+// (F8) rows sharing one created_at across page boundaries (hypertable, PK
+// (id, created_at)) are exported exactly once, and (F4/F9) a delta run
+// continued via -since/-since-id neither loses nor duplicates rows, whereas
+// -since alone re-exports the watermark's created_at group (documented).
+func TestExportKeysetTiesAndResume(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	// 5 rows with the SAME created_at (t0, pinned in Go — now() differs per
+	// statement transaction) + 3 rows with distinct later stamps.
+	t0 := time.Now().Add(-60 * time.Minute).Truncate(time.Microsecond)
+	for i := range 5 {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_llm_log (created_at, pipeline, model, host, request_system, request_user, response_content)
+			 VALUES ($2, 'tie', 'm', 'h', 's', 'u', $1)`, fmt.Sprintf("r%d", i), t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 3 {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_llm_log (created_at, pipeline, model, host, request_system, request_user, response_content)
+			 VALUES (now() - make_interval(mins => $1), 'later', 'm', 'h', 's', 'u', 'x')`, 30-i); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ids := func(buf *bytes.Buffer) []string {
+		var out []string
+		for _, ln := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+			if ln == "" {
+				continue
+			}
+			var m map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(ln), &m); err != nil {
+				t.Fatalf("bad line: %v", err)
+			}
+			out = append(out, string(m["id"]))
+		}
+		return out
+	}
+	distinct := func(xs []string) int {
+		seen := map[string]bool{}
+		for _, x := range xs {
+			seen[x] = true
+		}
+		return len(seen)
+	}
+
+	var full bytes.Buffer
+	sum, err := llmlog.Export(ctx, pool, &full, llmlog.ExportOptions{BatchSize: 2})
+	if err != nil {
+		t.Fatalf("full export: %v", err)
+	}
+	fullIDs := ids(&full)
+	if sum.RowsTotal != 8 || len(fullIDs) != 8 || distinct(fullIDs) != 8 {
+		t.Fatalf("ties across pages: total=%d lines=%d distinct=%d", sum.RowsTotal, len(fullIDs), distinct(fullIDs))
+	}
+
+	// Part A: only the tie group, cut by an explicit until between t0 and the
+	// later rows; its watermark is the LAST tie row.
+	var partA bytes.Buffer
+	sumA, err := llmlog.Export(ctx, pool, &partA, llmlog.ExportOptions{BatchSize: 2, Until: time.Now().Add(-45 * time.Minute)})
+	if err != nil {
+		t.Fatalf("part A: %v", err)
+	}
+	if sumA.RowsTotal != 5 || sumA.Watermark == nil || sumA.WatermarkID == "" || !sumA.Watermark.Equal(t0) {
+		t.Fatalf("part A: total=%d watermark=%v id=%q (t0=%v)", sumA.RowsTotal, sumA.Watermark, sumA.WatermarkID, t0)
+	}
+
+	// Part B (exact cursor): since+since-id — union must equal the full export.
+	var partB bytes.Buffer
+	sumB, err := llmlog.Export(ctx, pool, &partB, llmlog.ExportOptions{
+		BatchSize: 2, Since: *sumA.Watermark, SinceID: sumA.WatermarkID, Until: sum.Until,
+	})
+	if err != nil {
+		t.Fatalf("part B: %v", err)
+	}
+	union := append(ids(&partA), ids(&partB)...)
+	if sumB.RowsTotal != 3 || len(union) != 8 || distinct(union) != 8 {
+		t.Fatalf("resume via since-id: B=%d union=%d distinct=%d", sumB.RowsTotal, len(union), distinct(union))
+	}
+	if sumB.CountGate != 3 {
+		t.Fatalf("count gate must use the same cursor predicate: %d", sumB.CountGate)
+	}
+
+	// -since alone (inclusive): the whole created_at group of the watermark
+	// comes back — 5 tie rows + 3 later = 8, i.e. duplicates in a concatenation.
+	var partC bytes.Buffer
+	sumC, err := llmlog.Export(ctx, pool, &partC, llmlog.ExportOptions{BatchSize: 2, Since: *sumA.Watermark, Until: sum.Until})
+	if err != nil {
+		t.Fatalf("part C: %v", err)
+	}
+	if sumC.RowsTotal != 8 {
+		t.Fatalf("since without since-id must re-export the tie group: %d", sumC.RowsTotal)
+	}
+
+	// Cancelled context: bytes/watermark are still reported and the writer
+	// is flushed (F2) — the partial file is a valid prefix.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	var partD bytes.Buffer
+	sumD, err := llmlog.Export(cctx, pool, &partD, llmlog.ExportOptions{BatchSize: 2})
+	if err == nil {
+		t.Fatal("cancelled export must fail")
+	}
+	if int64(partD.Len()) != sumD.Bytes {
+		t.Fatalf("bytes must reflect the flushed writer even on failure: buf=%d sum=%d", partD.Len(), sumD.Bytes)
+	}
 }

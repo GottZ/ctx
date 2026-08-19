@@ -135,21 +135,35 @@ the raw source of a replay corpus.
 ```bash
 cd go && go build ./cmd/ctx-llmlog-export
 CONTEXT_DB_HOST=<db> ./ctx-llmlog-export -out /secure/dir/llmlog-$(date +%F).jsonl \
-  [-since <RFC3339>] [-until <RFC3339>] [-pipeline a,b] [-strict] [-summary <path>]
+  [-since <RFC3339> [-since-id <uuid>]] [-until <RFC3339>] [-pipeline a,b] \
+  [-batch 5000] [-strict] [-summary <path>]
 ```
 
-It reads the DSN from the same config source as `ctxd` (`CONTEXT_DB*`), runs everything in one
-`READ ONLY` / `REPEATABLE READ` transaction (no write path by construction; the keyset pages and
-the final `count(*)` gate see the same snapshot), pins `-until` to the database `now()` when
-omitted, and prints a JSON summary to stderr: `rows_total`, `rows_body`, `rows_bodyless_slim`
-(credentials-class rows whose bodies were slimmed to `''`), `rows_bodyless_null` (bodies NULLed
-by retention), `count_gate`, `watermark` (max `created_at`, the `-since` of the next delta
-export). Containment is fail-closed: the target directory must be mode `0700` and must not
-resolve under `/tmp`, `/var/tmp` or `/dev/shm`; the file is created `O_EXCL` with mode `0600`
-and never overwritten. Exit codes: `0` clean · `2` NULL bodies found — the export still ran to
-completion first (rescue-first; `-strict` aborts at the first NULL instead) · `3` count gate
-violated. The export contains unanonymized prompt bodies — keep it inside the same trust
-boundary as the database itself.
+It reads the DSN from the same config source as `ctxd` (`CONTEXT_DB*`). Every page and the
+final `count(*)` gate run in their own short `READ ONLY` transaction (no write path by
+construction; no hours-long snapshot pinning the database's xmin horizon on large tables). The
+window is stable regardless: `-until` defaults to the database `now()` **minus one minute**
+(commit margin — `created_at` is the insert's transaction start, the commit may land up to the
+insert timeout later), the table is append-only inside a closed window, and retention NULLs
+bodies without deleting rows. Keyset pagination is `ORDER BY created_at, id`; the cursor
+carries a redundant `created_at >=` so the planner uses the hypertable's `created_at` index and
+chunk exclusion.
+
+The JSON summary on stderr (always printed, also on failure) carries `rows_total`, `rows_body`,
+`rows_bodyless_slim` (credentials-class rows whose bodies were slimmed to `''`),
+`rows_bodyless_null` (bodies NULLed by retention), `count_gate`, `bytes` (what was actually
+flushed — valid even after a cancel), `watermark` + `watermark_id` (the last row). A delta run
+continues **exactly** behind the previous run with `-since <watermark> -since-id <watermark_id>`;
+`-since` alone is inclusive and re-exports every row sharing the watermark's `created_at`.
+
+Containment is fail-closed and checked before any DB connection: the target directory (and the
+`-summary` directory) must have no group/other bits (`0700` or stricter) and must not resolve
+under `/tmp`, `/var/tmp` or `/dev/shm`; the file is created `O_EXCL` with mode `0600` only after
+the connection is up (a config/DB failure leaves no empty file behind) and is never overwritten.
+Exit codes: `0` clean · `1` perimeter, config, DB or I/O error · `2` NULL bodies found — the
+export still ran to completion first (rescue-first; `-strict` aborts at the first NULL instead)
+· `3` count gate violated. The export contains unanonymized prompt bodies — keep it inside the
+same trust boundary as the database itself.
 
 ## GPU-host maintenance (eject)
 
