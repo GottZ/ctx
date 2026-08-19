@@ -240,6 +240,24 @@ func resolveAxes(requested []string, registry map[string]axisDef) ([]string, err
 	return out, nil
 }
 
+// sampleCount liefert die Zahl der Samples eines Requests (KW4): cfg.Samples
+// bei Temperatur>0, sonst genau 1 — ein temp-0-Request ist deterministisch,
+// weitere Samples wären Duplikate (Skip spart Gen-Budget statt KW7-Dedup).
+// Die Temperatur wird NACH -temperature-override bewertet (effektiver Wert).
+func sampleCount(cfg Config, req ChatRequest) int {
+	if cfg.Samples <= 1 {
+		return 1
+	}
+	temp := req.Opts.Temperature
+	if cfg.TempOverride >= 0 {
+		temp = cfg.TempOverride
+	}
+	if temp <= 0 {
+		return 1
+	}
+	return cfg.Samples
+}
+
 // buildRuns lädt, sampelt und baut die Fälle aller Achsen (Build validiert die
 // Daten auch im Dry-Run — ein Fall, dessen Prompt nicht baubar ist, ist ein
 // Datenfehler). Fälle aus dem Done-Set (KW3-Resume) werden übernommen statt
@@ -279,6 +297,10 @@ func buildRuns(cfg Config, axes []string, registry map[string]axisDef, done *dum
 				// Dry-Run schreibt KEINE usage-Slots (omitempty greift nur auf
 				// nil-Slice) — ein Leser unterscheidet so Dry-Run von Nullwerten.
 				runs[i].usages = make([]CallUsage, len(reqs))
+				if cfg.Samples > 1 {
+					runs[i].samples = make([][]string, len(reqs))
+					runs[i].samplesUsage = make([][]CallUsage, len(reqs))
+				}
 			}
 			// Eigene Kopie für den Worker: er schreibt die effektiven Sampling-
 			// Werte nach run.reqs zurück; ein zweiter Durchlauf (Retry/Resample)
@@ -288,6 +310,100 @@ func buildRuns(cfg Config, axes []string, registry map[string]axisDef, done *dum
 		axisRuns[axis] = runs
 	}
 	return axisRuns, jobs, nPerAxis, resumed, nil
+}
+
+// callStats zählt Calls/Tokens über alle Worker (Fortschritt + Durchsatz).
+type callStats struct {
+	doneReqs, promptToks, complToks, reasonToks atomic.Int64
+	total                                       int
+	start                                       time.Time
+}
+
+// record verbucht einen Call und druckt „Test x von y" + laufenden Durchsatz
+// auf stderr — sichtbar im Run-Log, ohne den Report zu verschmutzen.
+func (s *callStats) record(res ChatResult) {
+	n := s.doneReqs.Add(1)
+	s.promptToks.Add(int64(res.PromptTokens))
+	s.complToks.Add(int64(res.CompletionTokens))
+	s.reasonToks.Add(int64(res.ReasoningTokens))
+	el := time.Since(s.start).Seconds()
+	fmt.Fprintf(os.Stderr, "[fortschritt] Test %d von %d (%.1f%%) · in %.0f tok/s · out %.0f tok/s\n",
+		n, s.total, 100*float64(n)/float64(s.total),
+		float64(s.promptToks.Load())/el, float64(s.complToks.Load())/el)
+}
+
+// caller fährt die Requests EINES Falls (alle Slots, alle Samples) gegen den Server.
+type caller struct {
+	client *Client
+	cfg    Config
+	st     *callStats
+}
+
+// runCase: je Request-Slot die Sample-Schleife (KW4) — s=0 ist der bisherige
+// Request (Client-Seed, outputs/usage flach); s>0 nur bei Temperatur>0 (temp-0
+// wäre Duplikat) mit Seed cfg.Seed+s in die samples-Matrix. Sample 0 gescheitert
+// ⇒ Fall-Fehler, weitere Samples des Slots entfallen; Sample s>0 gescheitert ⇒
+// sampleErr (Fall für den Korpus unvollständig, Report unberührt).
+func (c *caller) runCase(ctx context.Context, run *caseRun, reqs []ChatRequest) {
+	for i, req := range reqs {
+		if ctx.Err() != nil {
+			run.callErr = ctx.Err()
+			return
+		}
+		req.Opts.MaxTokens = applyBudgetMult(req.Opts.MaxTokens, c.cfg.MaxTokensMult)
+		if c.cfg.TempOverride >= 0 {
+			req.Opts.Temperature = c.cfg.TempOverride
+		}
+		// Effektive Sampling-Parameter zurückschreiben — der Dump (params)
+		// soll das tatsächlich Gesendete tragen.
+		run.reqs[i].Opts = req.Opts
+		for s := 0; s < sampleCount(c.cfg, req); s++ {
+			if ctx.Err() != nil {
+				run.callErr = ctx.Err()
+				return
+			}
+			sreq := req
+			if s > 0 {
+				sreq.Opts.Seed = c.cfg.Seed + int64(s)
+			}
+			res, err := c.client.ChatWithUsage(ctx, sreq)
+			c.st.record(res)
+			u := CallUsage{
+				Prompt: res.PromptTokens, Completion: res.CompletionTokens, Reasoning: res.ReasoningTokens,
+				Finish: res.FinishReason, ThinkStripped: res.ThinkStripped,
+			}
+			if err != nil {
+				u.Err = err.Error()
+			}
+			if run.samples != nil {
+				run.samples[i] = append(run.samples[i], res.Content)
+				run.samplesUsage[i] = append(run.samplesUsage[i], u)
+			}
+			if s > 0 {
+				if err != nil {
+					run.sampleErr = true
+				}
+				continue
+			}
+			run.usages[i] = u
+			if err != nil {
+				if errors.Is(err, ErrContextOverflow) {
+					run.contextErr = true
+				}
+				if run.callErr == nil {
+					run.callErr = err
+				}
+				break
+			}
+			if res.FinishReason == "length" {
+				run.truncated++
+			}
+			if res.ThinkStripped {
+				run.thinkStrip++
+			}
+			run.outputs[i] = res.Content
+		}
+	}
 }
 
 // executeJobs fährt die LLM-Calls nebenläufig über einen Worker-Pool.
@@ -313,10 +429,12 @@ func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[st
 
 	total := 0
 	for _, j := range jobs {
-		total += len(j.reqs)
+		for _, r := range j.reqs {
+			total += sampleCount(cfg, r)
+		}
 	}
-	var doneReqs, promptToks, complToks, reasonToks atomic.Int64
-	start := time.Now()
+	st := &callStats{total: total, start: time.Now()}
+	cl := &caller{client: client, cfg: cfg, st: st}
 
 	jobCh := make(chan job)
 	var wg sync.WaitGroup
@@ -326,60 +444,14 @@ func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[st
 			defer wg.Done()
 			for j := range jobCh {
 				run := &axisRuns[j.axis][j.idx]
-				for i, req := range j.reqs {
-					if ctx.Err() != nil {
-						run.callErr = ctx.Err()
-						break
-					}
-					req.Opts.MaxTokens = applyBudgetMult(req.Opts.MaxTokens, cfg.MaxTokensMult)
-					if cfg.TempOverride >= 0 {
-						req.Opts.Temperature = cfg.TempOverride
-					}
-					// Effektive Sampling-Parameter zurückschreiben — der Dump
-					// (params) soll das tatsächlich Gesendete tragen.
-					run.reqs[i].Opts = req.Opts
-					res, err := client.ChatWithUsage(ctx, req)
-					n := doneReqs.Add(1)
-					promptToks.Add(int64(res.PromptTokens))
-					complToks.Add(int64(res.CompletionTokens))
-					reasonToks.Add(int64(res.ReasoningTokens))
-					// „Test x von y" + laufender Durchsatz auf stderr — sichtbar
-					// im Run-Log, ohne den Report zu verschmutzen. Jede Zeile:
-					// ~100 KB pro Lauf, dafür sekundenaktuelle Dashboard-Kachel
-					// auch in prompt-lastigen Achsen langsamer Modelle.
-					el := time.Since(start).Seconds()
-					fmt.Fprintf(os.Stderr, "[fortschritt] Test %d von %d (%.1f%%) · in %.0f tok/s · out %.0f tok/s\n",
-						n, total, 100*float64(n)/float64(total),
-						float64(promptToks.Load())/el, float64(complToks.Load())/el)
-					run.usages[i] = CallUsage{
-						Prompt: res.PromptTokens, Completion: res.CompletionTokens, Reasoning: res.ReasoningTokens,
-						Finish: res.FinishReason, ThinkStripped: res.ThinkStripped,
-					}
-					if err != nil {
-						run.usages[i].Err = err.Error()
-						if errors.Is(err, ErrContextOverflow) {
-							run.contextErr = true
-						}
-						if run.callErr == nil {
-							run.callErr = err
-						}
-						continue
-					}
-					if res.FinishReason == "length" {
-						run.truncated++
-					}
-					if res.ThinkStripped {
-						run.thinkStrip++
-					}
-					run.outputs[i] = res.Content
-				}
+				cl.runCase(ctx, run, j.reqs)
 				// KW3: fertigen Fall sofort persistieren — nur VOLLSTÄNDIGE
 				// Fälle (kein Abbruch, kein Transport-Fehler): so holt der
 				// Resume Fehlschläge nach, statt sie als erledigt zu überspringen.
 				// Der Fall selbst ist vollständig (kein Transport-Fehler) — ein
 				// Persistenz-Fehler ist eine eigene Klasse: Lauf abbrechen, der
 				// Fall wird beim Resume nachgeholt (er steht nicht in der Datei).
-				if sink != nil && run.callErr == nil {
+				if sink != nil && run.callErr == nil && !run.sampleErr {
 					if err := sink.write(newDumpRecord(j.axis, *run, cfg.GenStamp)); err != nil {
 						sinkErrOnce.Do(func() {
 							sinkErr = fmt.Errorf("%w: %s/%s: %w", ErrDumpWrite, j.axis, run.c.ID, err)
@@ -400,10 +472,10 @@ func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[st
 	wg.Wait()
 	// Aggregat für den Report (Paket-Variablen, vom Run gelesen).
 	lastRunStats = runStats{
-		WallSeconds:      time.Since(start).Seconds(),
-		PromptTokens:     promptToks.Load(),
-		CompletionTokens: complToks.Load(),
-		ReasoningTokens:  reasonToks.Load(),
+		WallSeconds:      time.Since(st.start).Seconds(),
+		PromptTokens:     st.promptToks.Load(),
+		CompletionTokens: st.complToks.Load(),
+		ReasoningTokens:  st.reasonToks.Load(),
 	}
 	if sinkErr != nil {
 		return sinkErr
@@ -541,7 +613,11 @@ type dumpRecord struct {
 	Params  []SamplingOpts `json:"params,omitempty"`
 	Outputs []string       `json:"outputs"`
 	Usage   []CallUsage    `json:"usage,omitempty"`
-	Gen     *GenStamp      `json:"gen,omitempty"`
+	// Samples/SamplesUsage (KW4): [Request][Sample] inkl. Sample 0; nur bei
+	// -samples N>1 vorhanden (omitempty) — outputs/usage bleiben flach.
+	Samples      [][]string    `json:"samples,omitempty"`
+	SamplesUsage [][]CallUsage `json:"samples_usage,omitempty"`
+	Gen          *GenStamp     `json:"gen,omitempty"`
 }
 
 // dumpOutputs persistiert die rohen Modell-Antworten aller gefahrenen Achsen
@@ -595,8 +671,10 @@ var ErrDumpLocked = errors.New("goldbench: dump-append: Datei von einem anderen 
 // doneRec ist der übernommene Anteil eines gedumpten Falls (nur was adopt
 // braucht — die Volltext-Prompts bleiben auf der Platte, Review KW3 F9).
 type doneRec struct {
-	Outputs []string
-	Usage   []CallUsage
+	Outputs      []string
+	Usage        []CallUsage
+	Samples      [][]string
+	SamplesUsage [][]CallUsage
 }
 
 // dumpDone ist das Done-Set einer Append-Datei.
@@ -632,6 +710,22 @@ func recComplete(rec dumpRecord) bool {
 	for _, u := range rec.Usage {
 		if u.Err != "" {
 			return false
+		}
+	}
+	// KW4: ein gescheitertes oder leeres Sample macht den Fall unvollständig —
+	// der Resume fährt ihn komplett neu (Korpus-Vollständigkeit vor Sparsamkeit).
+	for _, row := range rec.SamplesUsage {
+		for _, u := range row {
+			if u.Err != "" {
+				return false
+			}
+		}
+	}
+	for _, row := range rec.Samples {
+		for _, o := range row {
+			if o == "" {
+				return false
+			}
 		}
 	}
 	return true
@@ -694,7 +788,7 @@ func loadDumpDone(path string, gen *GenStamp) (*dumpDone, error) {
 			if _, dup := d.recs[rec.Axis][rec.ID]; dup {
 				return nil, fmt.Errorf("goldbench: dump-append: Zeile %d: Duplikat (%s,%s) — zwei vollständige Records", n, rec.Axis, rec.ID)
 			}
-			d.recs[rec.Axis][rec.ID] = doneRec{Outputs: rec.Outputs, Usage: rec.Usage}
+			d.recs[rec.Axis][rec.ID] = doneRec{Outputs: rec.Outputs, Usage: rec.Usage, Samples: rec.Samples, SamplesUsage: rec.SamplesUsage}
 			d.total++
 		}
 		off += int64(len(line))
@@ -726,6 +820,9 @@ func genString(g *GenStamp) string {
 func (r *caseRun) adopt(rec doneRec) {
 	copy(r.outputs, rec.Outputs)
 	r.usages = append([]CallUsage(nil), rec.Usage...)
+	if rec.Samples != nil {
+		r.samples, r.samplesUsage = rec.Samples, rec.SamplesUsage
+	}
 	for _, u := range r.usages {
 		if u.Finish == "length" {
 			r.truncated++
@@ -843,6 +940,9 @@ func newDumpRecord(axis string, r caseRun, gen *GenStamp) dumpRecord {
 	}
 	if len(r.usages) > 0 {
 		rec.Usage = r.usages
+	}
+	if r.samples != nil {
+		rec.Samples, rec.SamplesUsage = r.samples, r.samplesUsage
 	}
 	return rec
 }

@@ -158,6 +158,20 @@ is simply re-run on resume. `-dry-run` never writes (and is rejected together
 with `-dump-append`). Use this for corpus generation (design 02, KW3); the
 plain `-dump-outputs` path is unchanged (truncate + end-of-run write).
 
+`-samples N` (1–64, default 1) asks for N samples per chat request: sample
+0 is the unchanged request (client seed — bit-compatible with every previous
+run), sample s>0 carries `seed+s` on the wire (`SamplingOpts.Seed`, new);
+requests at temperature 0 are issued only once (deterministic — further
+samples would be duplicates). `outputs`/`usage` and the whole report stay
+sample 0 (a `-samples 8` run is score-identical to `-samples 1`, only the
+call count and throughput grow); all samples land in the dump as
+`samples`/`samples_usage` matrices `[request][sample]` (including sample 0,
+omitted for `-samples 1`). Sampling runs at pipeline temperatures —
+`-temperature-override` together with `-samples >1` is refused (a corpus with
+a forced temperature is a different distribution). With `-dump-append` a case
+is only written once every sample succeeded (a failed extra sample makes the
+case incomplete and it is re-run on resume).
+
 `-spec-config '<json>'` stamps structured speculative-decoding provenance
 into the report env (`env.spec`: `algorithm`, `drafter_path`,
 `drafter_sha256`, `drafter_sha_verified`, `gamma`, `engine_build` — an image

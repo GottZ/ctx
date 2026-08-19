@@ -9,14 +9,19 @@ import (
 // Im Dry-Run bleiben die outputs leere Strings (Parse schlägt fehl,
 // parse_rate 0 — der Lauf validiert Daten + Prompt-Bau ohne HTTP).
 type caseRun struct {
-	c          *Case
-	reqs       []ChatRequest // die gebauten Requests (Dump-v2: system/user/params je Slot)
-	outputs    []string      // ein Eintrag pro ChatRequest der Achse
-	usages     []CallUsage   // parallel zu outputs: usage/finish/think_stripped je Request
-	callErr    error         // erster Transport-Fehler (nil im Dry-Run)
-	contextErr bool     // mind. ein Call an der Context-Grenze abgelehnt
-	truncated  int      // Calls mit finish_reason "length" (Output-Budget gerissen)
-	thinkStrip int      // Calls mit client-seitig entferntem <think>-Block
+	c       *Case
+	reqs    []ChatRequest // die gebauten Requests (Dump-v2: system/user/params je Slot)
+	outputs []string      // ein Eintrag pro ChatRequest der Achse
+	usages  []CallUsage   // parallel zu outputs: usage/finish/think_stripped je Request
+	// samples/samplesUsage (KW4): [Request][Sample] inkl. Sample 0 — nur bei
+	// Samples>1 belegt; temp-0-Requests tragen genau ein Element.
+	samples      [][]string
+	samplesUsage [][]CallUsage
+	sampleErr    bool  // mind. ein Sample s>0 gescheitert (Fall unvollständig für den Korpus)
+	callErr      error // erster Transport-Fehler (nil im Dry-Run)
+	contextErr   bool  // mind. ein Call an der Context-Grenze abgelehnt
+	truncated    int   // Calls mit finish_reason "length" (Output-Budget gerissen)
+	thinkStrip   int   // Calls mit client-seitig entferntem <think>-Block
 }
 
 // CallUsage ist die per-Request-Attribution eines Falls (Dump-v2, design/02
@@ -41,22 +46,22 @@ type CaseScore struct {
 
 // AxisResult ist das aggregierte Ergebnis einer Achse.
 type AxisResult struct {
-	N               int                       `json:"n"`
-	ParseRate       float64                   `json:"parse_rate"`
-	PrimaryMetric   string                    `json:"primary_metric"`
-	PrimaryScore    float64                   `json:"primary_score"`
-	CI95Low         float64                   `json:"ci95_low"`
-	CI95High        float64                   `json:"ci95_high"`
-	Secondary       map[string]float64        `json:"secondary,omitempty"`
-	Confusion       map[string]map[string]int `json:"confusion,omitempty"` // nur links: gold-Typ → prädizierter Typ
-	SilverShare     float64                   `json:"silver_share"`
-	LabelQuality    string                    `json:"label_quality"` // "gold" | "silver" (>50 % silver-Cases)
-	TransportErrors int                       `json:"transport_errors"`
-	ContextErrors   int                       `json:"context_errors"`    // Fälle, vom Server an der Context-Grenze abgelehnt
-	TruncatedOutputs int                      `json:"truncated_outputs"` // Fälle mit finish_reason "length" (max_tokens gerissen)
-	ThinkStripped   int                       `json:"think_stripped,omitempty"` // Fälle mit entferntem <think>-Block
-	Prospective     bool                      `json:"prospective,omitempty"` // Achse ohne echte ctx-Pipeline
-	PerCase         []CaseScore               `json:"per_case,omitempty"`
+	N                int                       `json:"n"`
+	ParseRate        float64                   `json:"parse_rate"`
+	PrimaryMetric    string                    `json:"primary_metric"`
+	PrimaryScore     float64                   `json:"primary_score"`
+	CI95Low          float64                   `json:"ci95_low"`
+	CI95High         float64                   `json:"ci95_high"`
+	Secondary        map[string]float64        `json:"secondary,omitempty"`
+	Confusion        map[string]map[string]int `json:"confusion,omitempty"` // nur links: gold-Typ → prädizierter Typ
+	SilverShare      float64                   `json:"silver_share"`
+	LabelQuality     string                    `json:"label_quality"` // "gold" | "silver" (>50 % silver-Cases)
+	TransportErrors  int                       `json:"transport_errors"`
+	ContextErrors    int                       `json:"context_errors"`           // Fälle, vom Server an der Context-Grenze abgelehnt
+	TruncatedOutputs int                       `json:"truncated_outputs"`        // Fälle mit finish_reason "length" (max_tokens gerissen)
+	ThinkStripped    int                       `json:"think_stripped,omitempty"` // Fälle mit entferntem <think>-Block
+	Prospective      bool                      `json:"prospective,omitempty"`    // Achse ohne echte ctx-Pipeline
+	PerCase          []CaseScore               `json:"per_case,omitempty"`
 }
 
 // axisDef bindet eine Achse an ihren Prompt-Bau und ihren Scorer.

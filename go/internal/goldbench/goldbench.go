@@ -69,7 +69,7 @@ type Config struct {
 	TimeoutSec  int      // HTTP-Timeout pro Call in Sekunden
 	Verbose     bool     // per_case-Ergebnisse in den Report aufnehmen
 	GitRev      string   // Env-Stamp: git-Revision des Baus
-	ServerNote    string // freier Provenienz-Text (Server-Flags/Build) für den Env-Stamp
+	ServerNote  string   // freier Provenienz-Text (Server-Flags/Build) für den Env-Stamp
 	// MaxTokensMult skaliert das per-Achse-max_tokens-Budget (Default 1 =
 	// pipeline-treu). >1 ist eine DOKUMENTIERTE Abweichung für Reasoning-
 	// Modelle, deren Denk-Tokens das Antwort-Budget verbrauchen — Scores
@@ -92,6 +92,13 @@ type Config struct {
 	// Zeile zusätzlich system/user/params/usage je Request-Slot und den
 	// gen-Stempel — Volltext-Prompt-Träger, Datei daher immer 0600.
 	DumpOutputs string
+	// Samples (KW4, design/02 §4.4): Anzahl Samples je Request (Default/0/1 =
+	// eins). Sample 0 bleibt der bisherige Request (Client-Seed), Sample s>0
+	// trägt Seed+s; temp-0-Requests werden NICHT mehrfach gebaut (Skip beim
+	// Request-Bau — deterministisch, wäre nur Duplikat). outputs/usage bleiben
+	// flach (Sample 0 — Scorer und Bestands-Reader unberührt), alle Samples
+	// landen im Dump als samples/samples_usage-Matrizen [Request][Sample].
+	Samples int
 	// DumpAppend (KW3, design/02 §4.3): statt End-of-Run-Dump schreibt jeder
 	// Worker den fertigen Fall SOFORT (mutex-serialisiert, O_APPEND) in
 	// DumpOutputs; vor dem Lauf wird die bestehende Datei gelesen — schon

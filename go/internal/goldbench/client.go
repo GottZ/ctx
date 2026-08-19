@@ -26,6 +26,11 @@ type SamplingOpts struct {
 	TopP        float64 `json:"top_p,omitempty"`       // 0 = weglassen
 	MaxTokens   int     `json:"max_tokens,omitempty"`  // 0 = weglassen
 	JSONFormat  bool    `json:"json_format,omitempty"` // response_format {"type":"json_object"} — classify (internal/llm/classify.go:181 Format:"json")
+	// Seed je Request (KW4, Mehrfach-Sampling): 0 = Client-Seed (Sample 0 bleibt
+	// bitkompatibel zur Historie); Sample s>0 trägt cfg.Seed+s — ohne dieses Feld
+	// trügen alle N Wire-Requests denselben Seed und Server, die seed honorieren,
+	// lieferten N identische Samples.
+	Seed int64 `json:"seed,omitempty"`
 }
 
 // ChatRequest ist ein einzelner Prompt-Abruf (System + User + Sampling).
@@ -185,6 +190,9 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult
 		TopP:        req.Opts.TopP,
 		MaxTokens:   req.Opts.MaxTokens,
 		Seed:        c.seed,
+	}
+	if req.Opts.Seed != 0 {
+		body.Seed = req.Opts.Seed
 	}
 	if req.Opts.JSONFormat {
 		body.ResponseFormat = &struct {

@@ -59,6 +59,7 @@ func run() error {
 		maxTokMult  = flag.Float64("max-tokens-mult", 1, "skaliert das per-Achse-max_tokens-Budget (>1 = dokumentierte Abweichung von der Pipeline-Treue, für Reasoning-Modelle)")
 		extraBody   = flag.String("extra-body", "", "JSON-Objekt, das in jeden Chat-Request gemerged wird (z. B. '{\"chat_template_kwargs\":{\"enable_thinking\":false}}')")
 		tempOv      = flag.Float64("temperature-override", -1, "fixe Temperatur statt der Pipeline-Temperaturen (<0 = aus; dokumentierte Mock-Treue-Abweichung für modellkarten-pure Läufe)")
+		samples     = flag.Int("samples", 1, "Samples je Request (KW4): Sample 0 = bisheriger Request, s>0 mit Seed+s; temp-0-Requests nur 1×; outputs/Report bleiben Sample 0, alle Samples im Dump (samples/samples_usage)")
 		dumpAppend  = flag.Bool("dump-append", false, "mit -dump-outputs: inkrementeller Dump (Fall sofort geschrieben, O_APPEND) + Fall-Resume — bereits gedumpte (axis,id) werden übersprungen; gen-Stempel muss zur Datei passen (KW3)")
 		dumpOut     = flag.String("dump-outputs", "", "JSONL-Pfad für die rohen Modell-Antworten (Dump-v2: axis,id,outputs + system/user/params/usage je Request-Slot, gen; 0600; Basis für offline-Re-Scoring)")
 		specConfig  = flag.String("spec-config", "", "JSON-Objekt {algorithm,drafter_path,drafter_sha256,gamma,engine_build,target_quant,kv_cache_dtype,train_step} — strukturierte Spec-Provenienz im Report-Env (drafter_path lokal lesbar ⇒ sha256 wird selbst berechnet und gegen die Deklaration geprüft)")
@@ -121,8 +122,15 @@ func run() error {
 		TempOverride:  *tempOv,
 		DumpOutputs:   *dumpOut,
 		DumpAppend:    *dumpAppend,
+		Samples:       *samples,
 	}
 
+	if *samples < 1 || *samples > 64 {
+		return fmt.Errorf("-samples muss zwischen 1 und 64 liegen (ist %d)", *samples)
+	}
+	if *samples > 1 && *tempOv >= 0 {
+		return fmt.Errorf("-samples >1 mit -temperature-override ist kein Korpus-Pfad (verfälschte Verteilung) — Pipeline-Temperaturen nutzen")
+	}
 	if *dumpAppend && *dumpOut == "" {
 		return fmt.Errorf("-dump-append braucht -dump-outputs")
 	}

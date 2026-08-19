@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -532,5 +534,147 @@ func TestDumpAppendSinkErrorCancels(t *testing.T) {
 				t.Fatalf("sink error must not be attributed to the case: %v", r.callErr)
 			}
 		}
+	}
+}
+
+// TestSamplesSeedAndMatrix pinnt KW4 (design/02 §4.4/§7): Sample 0 bleibt der bisherige
+// Request (Client-Seed = cfg.Seed), Sample s>0 trägt Seed+s auf dem WIRE (ROT-Referenz:
+// ohne SamplingOpts.Seed trugen alle N Requests denselben Seed — client.go:187 hart c.seed);
+// temp-0-Requests werden genau 1× gebaut (Skip-Beweis); outputs bleibt flach (Bestands-
+// Reader grün), samples/samples_usage sind [Request][Sample]-Matrizen; der Report ist
+// score-identisch zum -samples-1-Lauf (Sample-0-Isolation), nur die Call-Zahl wächst.
+func TestSamplesSeedAndMatrix(t *testing.T) {
+	inner := fakeChatServer(t)
+	defer inner.Close()
+	var mu sync.Mutex
+	seeds := map[string][]int64{} // system-prompt-prefix → Seeds in Ankunftsreihenfolge
+	temps := map[string]float64{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Messages    []struct{ Content string } `json:"messages"`
+			Seed        int64                      `json:"seed"`
+			Temperature float64                    `json:"temperature"`
+		}
+		_ = json.Unmarshal(body, &req)
+		key := ""
+		if len(req.Messages) > 0 {
+			key = req.Messages[0].Content
+			if len(key) > 40 {
+				key = key[:40]
+			}
+		}
+		mu.Lock()
+		seeds[key] = append(seeds[key], req.Seed)
+		temps[key] = req.Temperature
+		mu.Unlock()
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	base := Config{DataDir: testDataDir(t), Endpoint: srv.URL, Model: "fake-model",
+		N: 1, Concurrency: 3, Seed: 20260812, TimeoutSec: 30, TempOverride: -1,
+		GenStamp: &GenStamp{Engine: "fake"}}
+	one := base
+	one.DumpOutputs = filepath.Join(dir, "s1.jsonl")
+	rep1, err := Run(context.Background(), one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls1 := 0
+	for _, v := range seeds {
+		calls1 += len(v)
+	}
+	seeds, temps = map[string][]int64{}, map[string]float64{}
+
+	three := base
+	three.Samples, three.DumpOutputs = 3, filepath.Join(dir, "s3.jsonl")
+	rep3, err := Run(context.Background(), three)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Wire: temp>0-Prompts tragen 3 Seeds {seed, seed+1, seed+2}; temp-0-Prompts genau 1 Request mit dem Client-Seed.
+	sawTemp0, sawMulti := false, false
+	for key, v := range seeds {
+		if temps[key] <= 0 {
+			sawTemp0 = true
+			for _, sd := range v {
+				if sd != base.Seed {
+					t.Fatalf("temp-0 request %q must carry the client seed only, got %v", key, v)
+				}
+			}
+			continue
+		}
+		sawMulti = true
+		got := map[int64]int{}
+		for _, sd := range v {
+			got[sd]++
+		}
+		for s := int64(0); s < 3; s++ {
+			if got[base.Seed+s] == 0 {
+				t.Fatalf("prompt %q: seed %d missing on the wire (seeds %v)", key, base.Seed+s, v)
+			}
+		}
+	}
+	if !sawTemp0 || !sawMulti {
+		t.Fatalf("test needs both temp-0 and temp>0 prompts (temp0=%v multi=%v)", sawTemp0, sawMulti)
+	}
+	calls3 := 0
+	for _, v := range seeds {
+		calls3 += len(v)
+	}
+	if calls3 <= calls1 || calls3 >= 3*calls1 {
+		t.Fatalf("samples=3 must call more than samples=1 but less than 3× (temp-0 skip): %d vs %d", calls3, calls1)
+	}
+	// Score-Isolation: Composite + Achsen-Scores identisch (Sample 0 ist derselbe Request).
+	if rep3.Composite != rep1.Composite {
+		t.Fatalf("-samples 3 must not move the composite: %v vs %v", rep3.Composite, rep1.Composite)
+	}
+	for ax := range rep1.Axes {
+		if rep3.Axes[ax].PrimaryScore != rep1.Axes[ax].PrimaryScore {
+			t.Fatalf("axis %s: score moved with samples: %v vs %v", ax, rep3.Axes[ax].PrimaryScore, rep1.Axes[ax].PrimaryScore)
+		}
+	}
+	// Bestands-Reader + Matrix-Form.
+	if n, err := v1DumpReader(three.DumpOutputs); err != nil || n != len(Axes) {
+		t.Fatalf("v1 reader over samples dump: n=%d err=%v", n, err)
+	}
+	f, _ := os.Open(three.DumpOutputs)
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<26)
+	rows, withMatrix := 0, 0
+	for sc.Scan() {
+		var rec dumpRecord
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			t.Fatal(err)
+		}
+		rows++
+		if rec.Samples == nil {
+			continue
+		}
+		withMatrix++
+		if len(rec.Samples) != len(rec.Outputs) || len(rec.SamplesUsage) != len(rec.Outputs) {
+			t.Fatalf("%s/%s: samples matrix must be [Request][Sample], got %d/%d rows for %d outputs", rec.Axis, rec.ID, len(rec.Samples), len(rec.SamplesUsage), len(rec.Outputs))
+		}
+		for i := range rec.Outputs {
+			want := 3
+			if rec.Params[i].Temperature <= 0 {
+				want = 1
+			}
+			if len(rec.Samples[i]) != want || rec.Samples[i][0] != rec.Outputs[i] {
+				t.Fatalf("%s/%s req %d (temp %v): %d samples (want %d), sample0==output %v", rec.Axis, rec.ID, i, rec.Params[i].Temperature, len(rec.Samples[i]), want, rec.Samples[i][0] == rec.Outputs[i])
+			}
+		}
+	}
+	if rows != len(Axes) || withMatrix != rows {
+		t.Fatalf("samples dump: rows=%d withMatrix=%d (want %d/%d)", rows, withMatrix, len(Axes), len(Axes))
+	}
+	// -samples-1-Dump trägt KEINE Matrizen (byte-form zu KW2 stabil).
+	b, _ := os.ReadFile(one.DumpOutputs)
+	if strings.Contains(string(b), `"samples"`) {
+		t.Fatal("samples=1 dump must not carry samples matrices")
 	}
 }
