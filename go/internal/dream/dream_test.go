@@ -728,6 +728,16 @@ func TestParseLinks_WrapperForm(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// Duplicate keys must not fake a lone empty array: Go keeps the
+			// LAST one, so the decoded map holds a single empty array while
+			// the raw text carried a usable link. Booking that as a
+			// "nothing to link" verdict would lose the link to a multi-day
+			// cooldown — the key count is taken from the text instead.
+			name:    "duplicate-key-hiding-a-link-errors",
+			raw:     `{"relationships":[` + linkA + `],"relationships":[]}`,
+			wantErr: true,
+		},
+		{
 			// Multi-key with an empty array still errors: an empty sibling
 			// must not book a "nothing to link" verdict while a populated
 			// key may exist (constraint 3 — regression pin stays).

@@ -243,14 +243,49 @@ func parseWrappedLinks(body string) ([]Link, bool) {
 	// a success with zero links is safe. Multi-key wrappers keep declining
 	// (constraint 3): an empty sibling like "warnings" must not terminate
 	// the scan while a populated "relationships" key may still exist.
-	if len(wrapper) == 1 {
-		for _, v := range wrapper {
-			if isEmptyJSONArray(v) {
-				return nil, true
-			}
-		}
+	//
+	// "Lone" is decided on the TEXT, not on the decoded map: Go keeps the
+	// last of duplicate JSON keys, so a repeated key would collapse a
+	// two-entry text into a one-entry map — see topLevelValues.
+	if vals, ok := topLevelValues(body); ok && len(vals) == 1 && isEmptyJSONArray(vals[0]) {
+		return nil, true
 	}
 	return nil, false
+}
+
+// topLevelValues returns the value of every key that textually appears at the
+// top level of a JSON object, in emission order, DUPLICATES INCLUDED. It exists
+// because len(map) lies about the wrapper's shape: encoding/json keeps the last
+// of duplicate keys, so {"relationships":[<link>],"relationships":[]} decodes
+// into a one-entry map holding the empty array — the lone-key verdict would
+// book it as an inert "nothing to link" although the raw text carried a usable
+// link. Walking the tokens counts what the model actually emitted. Returns
+// ok=false for anything that is not a well-formed top-level object; the caller
+// then declines and the hard parse error (transient retry) stays reachable.
+func topLevelValues(body string) ([]json.RawMessage, bool) {
+	dec := json.NewDecoder(strings.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, false
+	}
+	if delim, isDelim := tok.(json.Delim); !isDelim || delim != '{' {
+		return nil, false
+	}
+	out := make([]json.RawMessage, 0, 4)
+	for dec.More() {
+		if _, err := dec.Token(); err != nil { // the key
+			return nil, false
+		}
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			return nil, false
+		}
+		out = append(out, val)
+	}
+	if _, err := dec.Token(); err != nil { // the closing brace
+		return nil, false
+	}
+	return out, true
 }
 
 // isEmptyJSONArray reports whether v holds a JSON array with no elements.
