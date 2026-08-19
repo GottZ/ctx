@@ -214,6 +214,11 @@ type DreamConfig struct {
 	// TemporalTimeout bounds the dream-temporal Phase-2 LLM review (seconds).
 	// Default 90 matches the legacy ValidateTimeout constant; raise for slow
 	// reasoning models (nemotron-super-trt needs >90s on full prompts).
+	// DEFAULT ONLY: the Phase-2 call runs under role dream, so a timeouts.dream
+	// entry on the serving context_backends row takes precedence (Backend.
+	// TimeoutFor, walked in llm.ChatChainVia). On such a row raise the row
+	// value instead — it bounds dream eval/keywords/recurrence too, while this
+	// key is temporal-only.
 	TemporalTimeout time.Duration `key:"dream.temporal_timeout" env:"CTX_DREAM_TEMPORAL_TIMEOUT" default:"90" mut:"hot" tenancy:"global-only"`
 
 	Backoff BackoffConfig

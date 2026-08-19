@@ -50,7 +50,10 @@ type Router struct {
 	Blocktypes *blocktype.Registry
 	// TemporalTimeout bounds the dream-temporal Phase-2 LLM review. 0 = the
 	// package ValidateTimeout default (legacy behavior). Set from
-	// config.Dream.TemporalTimeout by the scheduler (newRouter).
+	// config.Dream.TemporalTimeout by the scheduler (newRouter). It reaches
+	// chat() as the defTimeout, i.e. as the DEFAULT of that call: a
+	// timeouts.dream entry on the serving row wins (Backend.TimeoutFor in the
+	// llm.ChatChainVia walk), because the call resolves under role dream.
 	TemporalTimeout time.Duration
 	// Language is the daily-synthesis report language, read from config
 	// Dream.Language by the caller that builds the router (scheduler:
