@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/GottZ/ctx/internal/dream"
 )
 
 // validCfg returns a Validate-clean config built from canonical keys.
@@ -165,6 +168,14 @@ func TestValidateTable(t *testing.T) {
 		{"V16 zero ok", map[string]string{"dream.temporal_timeout": "0"}, "dream.temporal_timeout", -1},
 		{"V16 raised ok", map[string]string{"dream.temporal_timeout": "180"}, "dream.temporal_timeout", -1},
 		{"V16 negative rejected", map[string]string{"dream.temporal_timeout": "-30"}, "dream.temporal_timeout", SeverityError},
+
+		// V16b — the cycle-budget warn. 400s is the last value that leaves
+		// keywords (120s) + eval (180s) their ceilings inside the 700s cycle;
+		// from 700s on the cycle deadline cuts the call before the key can
+		// take effect. Warn only — the operator may know their own latencies.
+		{"V16b at budget ok", map[string]string{"dream.temporal_timeout": "400"}, "dream.temporal_timeout", -1},
+		{"V16b starves link stages", map[string]string{"dream.temporal_timeout": "401"}, "dream.temporal_timeout", SeverityWarn},
+		{"V16b beyond cycle", map[string]string{"dream.temporal_timeout": "900"}, "dream.temporal_timeout", SeverityWarn},
 	}
 
 	for _, c := range cases {
@@ -218,6 +229,19 @@ func TestValidateNormalizesLanguage(t *testing.T) {
 func TestValidateLanguageDefaultIsLegacy(t *testing.T) {
 	if got := defaultFor("dream.language"); got != "" {
 		t.Fatalf("dream.language default = %q, want empty (legacy German report)", got)
+	}
+}
+
+// TestValidateTemporalTimeoutBudget pins the derived V16b threshold against
+// the number the operations docs name. The constant is computed from the
+// dream constants, so a retune there moves it silently — this test is where
+// the move becomes visible and the docs clause gets corrected.
+func TestValidateTemporalTimeoutBudget(t *testing.T) {
+	if temporalTimeoutBudget != 400*time.Second {
+		t.Errorf("temporal timeout budget = %v, want 400s (docs/operations.md names it)", temporalTimeoutBudget)
+	}
+	if dream.CycleTimeout != 700*time.Second {
+		t.Errorf("dream cycle timeout = %v, want 700s (docs/operations.md names it)", dream.CycleTimeout)
 	}
 }
 

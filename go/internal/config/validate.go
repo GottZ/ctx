@@ -30,6 +30,14 @@ const (
 
 var dreamLanguageRe = regexp.MustCompile(dreamLanguagePattern)
 
+// temporalTimeoutBudget is the largest dream.temporal_timeout that still
+// leaves the two LLM stages behind Phase-2 temporal their own ceilings inside
+// one dream cycle (V16b): the whole cycle runs under dream.CycleTimeout, and
+// temporal is step 1b — keyword extraction (KeywordsTimeout) and relationship
+// evaluation (DreamTimeout) follow it and write the links. Derived from the
+// dream constants, not mirrored, so it cannot drift when they are retuned.
+const temporalTimeoutBudget = dream.CycleTimeout - (dream.KeywordsTimeout + dream.DreamTimeout)
+
 // Validate checks the cross-field invariants V1–V14 and returns all findings.
 // WARN classes with "today's silent fallback" semantics (V5 prompt version,
 // V6 back-off, V10 parallelism clamp) NORMALIZE the config in place — exactly
@@ -341,6 +349,19 @@ func validateDream(c *Config) []Issue {
 	if d := c.Dream.TemporalTimeout; d < 0 {
 		issues = append(issues, Issue{Field: "dream.temporal_timeout", Severity: SeverityError,
 			Msg: fmt.Sprintf("temporal timeout %v must be >= 0 (0 = package default %v)", d, dream.ValidateTimeout)})
+	} else if d > temporalTimeoutBudget {
+		// V16b — the cycle-budget WARN. Not a clamp: the operator may know
+		// their keyword/eval calls finish far inside their own ceilings, and
+		// the runtime already fails safely (the cycle deadline cuts the call).
+		// Warn only, in the V10 spirit of making a downstream truncation
+		// visible at boot.
+		msg := fmt.Sprintf("temporal timeout %v leaves only %v of the %v dream cycle for keywords (%v) + eval (%v) — the link-writing stages can be starved",
+			d, dream.CycleTimeout-d, dream.CycleTimeout, dream.KeywordsTimeout, dream.DreamTimeout)
+		if d >= dream.CycleTimeout {
+			msg = fmt.Sprintf("temporal timeout %v is not below the %v dream cycle budget — the cycle deadline cuts the Phase-2 call first, so the value cannot take effect",
+				d, dream.CycleTimeout)
+		}
+		issues = append(issues, Issue{Field: "dream.temporal_timeout", Severity: SeverityWarn, Msg: msg})
 	}
 
 	return issues
