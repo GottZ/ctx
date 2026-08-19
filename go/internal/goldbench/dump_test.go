@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -568,6 +569,17 @@ func TestSamplesSeedAndMatrix(t *testing.T) {
 		seeds[key] = append(seeds[key], req.Seed)
 		temps[key] = req.Temperature
 		mu.Unlock()
+		// Seed-Echo (Review KW4 F3): die keywords-Achse antwortet mit dem empfangenen
+		// Seed als Keyword — so sind Sample-0-Isolation und Sample-Reihenfolge
+		// prüfbar (der Fake liefert sonst für jeden Seed dieselbe Antwort).
+		if len(req.Messages) > 0 && strings.Contains(req.Messages[0].Content, "extract conceptual keywords") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": fmt.Sprintf(`["seed-%d"]`, req.Seed)}, "finish_reason": "stop"}},
+				"usage":   map[string]any{"prompt_tokens": 10, "completion_tokens": 3},
+			})
+			return
+		}
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
 		inner.Config.Handler.ServeHTTP(w, r)
 	}))
@@ -664,8 +676,23 @@ func TestSamplesSeedAndMatrix(t *testing.T) {
 			if rec.Params[i].Temperature <= 0 {
 				want = 1
 			}
-			if len(rec.Samples[i]) != want || rec.Samples[i][0] != rec.Outputs[i] {
+			if len(rec.Samples[i]) != want || rec.Samples[i][0] != rec.Outputs[i] || len(rec.SamplesUsage[i]) != want {
 				t.Fatalf("%s/%s req %d (temp %v): %d samples (want %d), sample0==output %v", rec.Axis, rec.ID, i, rec.Params[i].Temperature, len(rec.Samples[i]), want, rec.Samples[i][0] == rec.Outputs[i])
+			}
+			// params trägt bei k>1 den Sample-0-Seed (Standalone-Rekonstruierbarkeit).
+			if rec.Params[i].Seed != base.Seed {
+				t.Fatalf("%s/%s req %d: params.seed=%d want %d", rec.Axis, rec.ID, i, rec.Params[i].Seed, base.Seed)
+			}
+			if rec.Axis == "keywords" {
+				// Seed-Echo: outputs = Client-Seed, samples[s] = seed+s in Reihenfolge.
+				if rec.Outputs[i] != fmt.Sprintf(`["seed-%d"]`, base.Seed) {
+					t.Fatalf("keywords output must be sample 0 (client seed): %q", rec.Outputs[i])
+				}
+				for sIdx, o := range rec.Samples[i] {
+					if o != fmt.Sprintf(`["seed-%d"]`, base.Seed+int64(sIdx)) {
+						t.Fatalf("keywords sample %d = %q, want seed+%d", sIdx, o, sIdx)
+					}
+				}
 			}
 		}
 	}
@@ -676,5 +703,79 @@ func TestSamplesSeedAndMatrix(t *testing.T) {
 	b, _ := os.ReadFile(one.DumpOutputs)
 	if strings.Contains(string(b), `"samples"`) {
 		t.Fatal("samples=1 dump must not carry samples matrices")
+	}
+}
+
+// TestSamplesAppendGates pinnt die KW4-Review-Findings F1/F4/F10: (a) ein Sample s>0, das
+// scheitert, hält den Fall aus dem Append-Dump zurück (fail_stats.sample_errors), der Resume
+// mit funktionierendem Server schreibt ihn; (b) Resume mit anderem k ⇒ Abbruch (k-Gate);
+// (c) recComplete-Matrixregeln; (d) env.samples gestempelt.
+func TestSamplesAppendGates(t *testing.T) {
+	inner := fakeChatServer(t)
+	defer inner.Close()
+	var failSeed atomic.Int64 // Requests mit diesem Seed antworten 500
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Seed int64 `json:"seed"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if fs := failSeed.Load(); fs != 0 && req.Seed == fs {
+			http.Error(w, "kaputt", http.StatusInternalServerError)
+			return
+		}
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	gen := &GenStamp{Engine: "fake"}
+	dump := filepath.Join(t.TempDir(), "k.jsonl")
+	cfg := Config{DataDir: testDataDir(t), Endpoint: srv.URL, Model: "fake-model", Axes: []string{"keywords", "title"},
+		N: 1, Concurrency: 2, Seed: 20260812, TimeoutSec: 30, GenStamp: gen, TempOverride: -1,
+		DumpOutputs: dump, DumpAppend: true, Samples: 3}
+	// (a) Sample 2 (seed+2) scheitert ⇒ Fälle mit temp>0 werden NICHT geschrieben, Report zählt sample_errors.
+	failSeed.Store(cfg.Seed + 2)
+	rep, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.FailStats.SampleErrors == 0 || rep.FailStats.TransportErrors != 0 || rep.Env.Samples != 3 {
+		t.Fatalf("sample error must be counted as sample_errors (not transport) and env.samples stamped: %+v samples=%d", rep.FailStats, rep.Env.Samples)
+	}
+	n, _ := countLines(t, dump)
+	if n != 0 {
+		t.Fatalf("cases with a failed sample must be withheld from the append dump, got %d lines", n)
+	}
+	// Server repariert ⇒ Resume schreibt die Fälle komplett.
+	failSeed.Store(0)
+	if _, err := Run(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if n, dups := countLines(t, dump); n != 2 || dups != 0 {
+		t.Fatalf("resume after fix: lines=%d dups=%d (want 2/0)", n, dups)
+	}
+	// (b) k-Gate: Resume mit -samples 8 gegen die k=3-Datei ⇒ Abbruch; mit k=1 ebenso.
+	for _, k := range []int{8, 1} {
+		c2 := cfg
+		c2.Samples = k
+		if _, err := Run(context.Background(), c2); err == nil || !strings.Contains(err.Error(), "Datei-k ≠ Lauf-k") {
+			t.Fatalf("resume with samples=%d against k=3 file must abort, got %v", k, err)
+		}
+	}
+	// (c) recComplete-Matrixregeln.
+	okRec := dumpRecord{Axis: "a", ID: "1", Outputs: []string{"x"}, Samples: [][]string{{"x", "y"}}, SamplesUsage: [][]CallUsage{{{}, {}}}}
+	if !recComplete(okRec) {
+		t.Fatal("well-formed record must be complete")
+	}
+	for name, rec := range map[string]dumpRecord{
+		"leere Zeile":      {Axis: "a", ID: "1", Outputs: []string{"x"}, Samples: [][]string{{}}, SamplesUsage: [][]CallUsage{{}}},
+		"usage ≠ samples":  {Axis: "a", ID: "1", Outputs: []string{"x"}, Samples: [][]string{{"x", "y"}}, SamplesUsage: [][]CallUsage{{{}}}},
+		"Zeilen ≠ outputs": {Axis: "a", ID: "1", Outputs: []string{"x"}, Samples: [][]string{{"x"}, {"y"}}, SamplesUsage: [][]CallUsage{{{}}, {{}}}},
+		"sample-err":       {Axis: "a", ID: "1", Outputs: []string{"x"}, Samples: [][]string{{"x", "y"}}, SamplesUsage: [][]CallUsage{{{}, {Err: "500"}}}},
+		"leeres sample":    {Axis: "a", ID: "1", Outputs: []string{"x"}, Samples: [][]string{{"x", ""}}, SamplesUsage: [][]CallUsage{{{}, {}}}},
+	} {
+		if recComplete(rec) {
+			t.Fatalf("recComplete(%s) must be false", name)
+		}
 	}
 }

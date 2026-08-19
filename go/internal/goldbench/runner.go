@@ -36,6 +36,7 @@ type FailStats struct {
 	TruncatedOutputs int `json:"truncated_outputs"`
 	TransportErrors  int `json:"transport_errors"`
 	ThinkStripped    int `json:"think_stripped,omitempty"` // Fälle mit client-seitig entferntem <think>-Block
+	SampleErrors     int `json:"sample_errors,omitempty"`  // Fälle mit gescheitertem Sample s>0 (KW4) — nicht im Append-Dump, Resume fährt sie neu
 }
 
 type Report struct {
@@ -75,6 +76,9 @@ type EnvStamp struct {
 	// -dump-append bleiben byte-stabil).
 	ResumedCases  int `json:"resumed_cases,omitempty"`
 	ExecutedCases int `json:"executed_cases,omitempty"`
+	// Samples (KW4): k je Request; omitempty ⇒ k=1-Läufe byte-stabil. throughput
+	// eines k>1-Laufs zählt alle Samples — daran erkennbar.
+	Samples int `json:"samples,omitempty"`
 }
 
 // stampConcurrency liefert das Lauf-Regime für den EnvStamp: 0 im Dry-Run
@@ -111,15 +115,12 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		return nil, err
 	}
 
+	if err := validateDumpConfig(cfg); err != nil {
+		return nil, err
+	}
 	// KW3: bestehenden Append-Dump lesen — Done-Set (axis,id) + Stamp-Gate.
 	var done *dumpDone
 	if cfg.DumpAppend {
-		if cfg.DumpOutputs == "" {
-			return nil, errors.New("goldbench: dump-append braucht dump-outputs")
-		}
-		if cfg.GenStamp == nil {
-			return nil, errors.New("goldbench: dump-append braucht einen gen-Stempel (Stamp-Resume-Gate)")
-		}
 		if done, err = loadDumpDone(cfg.DumpOutputs, cfg.GenStamp); err != nil {
 			return nil, err
 		}
@@ -165,6 +166,9 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		if err := sink.Close(); err != nil {
 			return nil, err
 		}
+		if withheld := countSampleErr(axisRuns); withheld > 0 {
+			fmt.Fprintf(os.Stderr, "[dump-append] %d Fälle wegen gescheitertem Sample s>0 NICHT geschrieben — Resume fährt sie neu (fail_stats.sample_errors)\n", withheld)
+		}
 	case cfg.DumpAppend:
 		// Dry-Run mit -dump-append: NUR lesen (Stamp-Gate, Done-Set) — der
 		// End-of-Run-Writer würde die Append-Datei per O_TRUNC vernichten.
@@ -209,6 +213,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			Spec:          cfg.SpecConfig,
 			ResumedCases:  resumed,
 			ExecutedCases: executedCases(cfg, resumed, len(jobs)),
+			Samples:       stampSamples(cfg),
 		},
 		Axes: map[string]AxisResult{},
 	}
@@ -219,6 +224,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		report.FailStats.TruncatedOutputs += res.TruncatedOutputs
 		report.FailStats.TransportErrors += res.TransportErrors
 		report.FailStats.ThinkStripped += res.ThinkStripped
+		report.FailStats.SampleErrors += res.SampleErrors
 	}
 	applyComposites(report, axes)
 	return report, nil
@@ -289,6 +295,21 @@ func buildRuns(cfg Config, axes []string, registry map[string]axisDef, done *dum
 				if len(rec.Outputs) != len(reqs) {
 					return nil, nil, nil, 0, fmt.Errorf("goldbench: dump-append: %s/%s: %d Output-Slots in der Datei, %d Requests gebaut — Dump passt nicht zur Achsen-Definition", axis, c.ID, len(rec.Outputs), len(reqs))
 				}
+				// KW4 k-Gate (Review F1): die Datei darf nie zwei k mischen —
+				// erwartete Zeilenlänge je Slot = sampleCount; Datei ohne
+				// Matrizen bei k>1 (oder umgekehrt) ⇒ Abbruch statt stummem Mix.
+				for si, rq := range reqs {
+					want := sampleCount(cfg, rq)
+					got := 1
+					if rec.Samples != nil {
+						got = len(rec.Samples[si])
+					} else if cfg.Samples > 1 {
+						got = 0
+					}
+					if got != want {
+						return nil, nil, nil, 0, fmt.Errorf("goldbench: dump-append: %s/%s Slot %d: %d Samples in der Datei, Lauf erwartet %d (-samples %d) — Datei-k ≠ Lauf-k, Abbruch statt Mix", axis, c.ID, si, got, want, cfg.Samples)
+					}
+				}
 				runs[i].adopt(rec)
 				resumed++
 				continue
@@ -320,7 +341,9 @@ type callStats struct {
 }
 
 // record verbucht einen Call und druckt „Test x von y" + laufenden Durchsatz
-// auf stderr — sichtbar im Run-Log, ohne den Report zu verschmutzen.
+// auf stderr — sichtbar im Run-Log, ohne den Report zu verschmutzen. Jede
+// Zeile: ~100 KB pro Voll-Pass (bei k=8 ≈ 0,7 MB), dafür sekundenaktuelle
+// Dashboard-Kachel auch in prompt-lastigen Achsen langsamer Modelle.
 func (s *callStats) record(res ChatResult) {
 	n := s.doneReqs.Add(1)
 	s.promptToks.Add(int64(res.PromptTokens))
@@ -334,9 +357,10 @@ func (s *callStats) record(res ChatResult) {
 
 // caller fährt die Requests EINES Falls (alle Slots, alle Samples) gegen den Server.
 type caller struct {
-	client *Client
-	cfg    Config
-	st     *callStats
+	client   *Client
+	cfg      Config
+	st       *callStats
+	haveSink bool // Append-Dump aktiv: ein Sample-Fehler macht den Fall unschreibbar ⇒ Rest-Slots entfallen (F9)
 }
 
 // runCase: je Request-Slot die Sample-Schleife (KW4) — s=0 ist der bisherige
@@ -355,9 +379,15 @@ func (c *caller) runCase(ctx context.Context, run *caseRun, reqs []ChatRequest) 
 			req.Opts.Temperature = c.cfg.TempOverride
 		}
 		// Effektive Sampling-Parameter zurückschreiben — der Dump (params)
-		// soll das tatsächlich Gesendete tragen.
+		// soll das tatsächlich Gesendete tragen; bei k>1 inklusive des Sample-0-
+		// Seeds (Standalone-Rekonstruierbarkeit des Korpus: Sample s = seed+s).
+		// k=1 bleibt ohne seed (Byte-Form zu KW2 stabil).
+		if c.cfg.Samples > 1 {
+			req.Opts.Seed = c.cfg.Seed
+		}
 		run.reqs[i].Opts = req.Opts
-		for s := 0; s < sampleCount(c.cfg, req); s++ {
+		ns := sampleCount(c.cfg, req)
+		for s := 0; s < ns; s++ {
 			if ctx.Err() != nil {
 				run.callErr = ctx.Err()
 				return
@@ -365,6 +395,8 @@ func (c *caller) runCase(ctx context.Context, run *caseRun, reqs []ChatRequest) 
 			sreq := req
 			if s > 0 {
 				sreq.Opts.Seed = c.cfg.Seed + int64(s)
+			} else if c.cfg.Samples <= 1 {
+				sreq.Opts.Seed = 0 // Client-Seed (Historie)
 			}
 			res, err := c.client.ChatWithUsage(ctx, sreq)
 			c.st.record(res)
@@ -403,6 +435,11 @@ func (c *caller) runCase(ctx context.Context, run *caseRun, reqs []ChatRequest) 
 			}
 			run.outputs[i] = res.Content
 		}
+		// F9: ein Fall, der nicht mehr geschrieben werden kann (Fall-Fehler; mit
+		// Sink auch Sample-Fehler), bekommt keine weiteren Slots — spart k× Calls.
+		if run.callErr != nil || (c.haveSink && run.sampleErr) {
+			return
+		}
 	}
 }
 
@@ -434,7 +471,7 @@ func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[st
 		}
 	}
 	st := &callStats{total: total, start: time.Now()}
-	cl := &caller{client: client, cfg: cfg, st: st}
+	cl := &caller{client: client, cfg: cfg, st: st, haveSink: sink != nil}
 
 	jobCh := make(chan job)
 	var wg sync.WaitGroup
@@ -484,6 +521,55 @@ func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[st
 		return fmt.Errorf("goldbench: run abgebrochen: %w", err)
 	}
 	return nil
+}
+
+// validateDumpConfig prüft die Dump-/Sampling-Leitplanken VOR jedem Lauf.
+// KW4: k>1 nur mit Dump (sonst k× GPU-Zeit ins Leere), Seed ≥ 0 (Seed+s == 0
+// fiele auf den Client-Seed zurück — Duplikat), kein seed-Key im extra_body
+// (bei Client-Seed 0 füllte er die omitempty-Lücke von Sample 0). KW3:
+// dump-append braucht Dump-Pfad + gen-Stempel (Stamp-Resume-Gate).
+func validateDumpConfig(cfg Config) error {
+	if cfg.Samples > 1 {
+		if cfg.DumpOutputs == "" && !cfg.DryRun {
+			return errors.New("goldbench: -samples >1 braucht -dump-outputs (die Samples landen nur im Dump)")
+		}
+		if cfg.Seed < 0 {
+			return errors.New("goldbench: -samples >1 braucht -seed >= 0 (Seed+s darf nie 0 werden)")
+		}
+		if strings.Contains(cfg.ExtraBody, `"seed"`) {
+			return errors.New("goldbench: -samples >1 verträgt keinen seed-Key im -extra-body")
+		}
+	}
+	if cfg.DumpAppend {
+		if cfg.DumpOutputs == "" {
+			return errors.New("goldbench: dump-append braucht dump-outputs")
+		}
+		if cfg.GenStamp == nil {
+			return errors.New("goldbench: dump-append braucht einen gen-Stempel (Stamp-Resume-Gate)")
+		}
+	}
+	return nil
+}
+
+// countSampleErr zählt Fälle mit gescheitertem Sample s>0 (KW4 F8).
+func countSampleErr(axisRuns map[string][]caseRun) int {
+	n := 0
+	for _, runs := range axisRuns {
+		for _, r := range runs {
+			if r.sampleErr {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// stampSamples liefert k für den EnvStamp (0 = Feld weg: k=1 oder Dry-Run).
+func stampSamples(cfg Config) int {
+	if cfg.DryRun || cfg.Samples <= 1 {
+		return 0
+	}
+	return cfg.Samples
 }
 
 // executedCases liefert die in diesem Prozess gecallten Fälle (0 im Dry-Run).
@@ -540,13 +626,16 @@ func scoreAxisRuns(def axisDef, runs []caseRun, verbose bool) AxisResult {
 	}
 	res.CI95Low, res.CI95High = bootstrapCI(scores, 20260812+ciSeed)
 
-	silver, transportErrs, contextErrs, truncated, thinkStripped := 0, 0, 0, 0, 0
+	silver, transportErrs, contextErrs, truncated, thinkStripped, sampleErrs := 0, 0, 0, 0, 0, 0
 	for _, r := range runs {
 		if r.c.LabelQuality == "silver" {
 			silver++
 		}
 		if r.thinkStrip > 0 {
 			thinkStripped++
+		}
+		if r.sampleErr {
+			sampleErrs++
 		}
 		// Fail-Metrik: Context-Ablehnungen getrennt von echten Transport-Fehlern
 		// zählen — beide reißen den Fall (Score 0), aber nur einer ist ein
@@ -570,6 +659,7 @@ func scoreAxisRuns(def axisDef, runs []caseRun, verbose bool) AxisResult {
 	res.ContextErrors = contextErrs
 	res.TruncatedOutputs = truncated
 	res.ThinkStripped = thinkStripped
+	res.SampleErrors = sampleErrs
 	if verbose {
 		res.PerCase = perCase
 	}
@@ -714,6 +804,17 @@ func recComplete(rec dumpRecord) bool {
 	}
 	// KW4: ein gescheitertes oder leeres Sample macht den Fall unvollständig —
 	// der Resume fährt ihn komplett neu (Korpus-Vollständigkeit vor Sparsamkeit).
+	// Matrix-Form: eine Zeile je Slot, ≥1 Sample je Zeile, usage parallel.
+	if rec.Samples != nil {
+		if len(rec.Samples) != len(rec.Outputs) || len(rec.SamplesUsage) != len(rec.Samples) {
+			return false
+		}
+		for i, row := range rec.Samples {
+			if len(row) == 0 || len(rec.SamplesUsage[i]) != len(row) {
+				return false
+			}
+		}
+	}
 	for _, row := range rec.SamplesUsage {
 		for _, u := range row {
 			if u.Err != "" {

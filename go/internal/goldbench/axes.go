@@ -60,6 +60,7 @@ type AxisResult struct {
 	ContextErrors    int                       `json:"context_errors"`           // Fälle, vom Server an der Context-Grenze abgelehnt
 	TruncatedOutputs int                       `json:"truncated_outputs"`        // Fälle mit finish_reason "length" (max_tokens gerissen)
 	ThinkStripped    int                       `json:"think_stripped,omitempty"` // Fälle mit entferntem <think>-Block
+	SampleErrors     int                       `json:"sample_errors,omitempty"`  // Fälle mit gescheitertem Sample s>0 (KW4; Report unberührt, Korpus-Fall unvollständig)
 	Prospective      bool                      `json:"prospective,omitempty"`    // Achse ohne echte ctx-Pipeline
 	PerCase          []CaseScore               `json:"per_case,omitempty"`
 }

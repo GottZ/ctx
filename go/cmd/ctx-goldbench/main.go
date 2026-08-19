@@ -128,6 +128,12 @@ func run() error {
 	if *samples < 1 || *samples > 64 {
 		return fmt.Errorf("-samples muss zwischen 1 und 64 liegen (ist %d)", *samples)
 	}
+	if *samples > 1 && *dumpOut == "" && !*dryRun {
+		return fmt.Errorf("-samples >1 braucht -dump-outputs (die Samples landen nur im Dump)")
+	}
+	if *samples > 1 && *seed < 0 {
+		return fmt.Errorf("-samples >1 braucht -seed >= 0")
+	}
 	if *samples > 1 && *tempOv >= 0 {
 		return fmt.Errorf("-samples >1 mit -temperature-override ist kein Korpus-Pfad (verfälschte Verteilung) — Pipeline-Temperaturen nutzen")
 	}
