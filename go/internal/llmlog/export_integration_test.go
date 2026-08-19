@@ -165,6 +165,17 @@ func TestExportKW1(t *testing.T) {
 		if sum.RowsTotal != 1 || sum.RowsBody != 1 || sum.CountGate != 1 {
 			t.Fatalf("until pin: total=%d body=%d gate=%d", sum.RowsTotal, sum.RowsBody, sum.CountGate)
 		}
+		// Review F2: ein explizites -until in der Zukunft/Gegenwart wird auf
+		// DB-now()−Marge gedeckelt — das Summary trägt das effektive Until.
+		buf.Reset()
+		before := time.Now()
+		sum, err = llmlog.Export(ctx, pool, &buf, llmlog.ExportOptions{Until: time.Now().Add(time.Hour), UntilMargin: 30 * time.Minute})
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		if !sum.Until.Before(before.Add(-29 * time.Minute)) {
+			t.Fatalf("until must be clamped to now()-margin, got %v (now %v)", sum.Until, before)
+		}
 	})
 
 	// ── Rescue-first: add the evicted row.

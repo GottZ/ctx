@@ -144,8 +144,11 @@ final `count(*)` gate run in their own short `READ ONLY` transaction (no write p
 construction; no hours-long snapshot pinning the database's xmin horizon on large tables). The
 window is stable regardless: `-until` defaults to the database `now()` **minus one minute**
 (commit margin — `created_at` is the insert's transaction start, the commit may land up to the
-insert timeout later), the table is append-only inside a closed window, and retention NULLs
-bodies without deleting rows. Keyset pagination is `ORDER BY created_at, id`; the cursor
+insert timeout later) and an explicit `-until` later than that is **clamped to the same margin**
+(the summary's `until` is the effective bound — an open window would lose not-yet-committed rows
+from every later delta), the table is append-only inside a closed window, and retention NULLs
+bodies without deleting rows. Keyset pagination is `ORDER BY t.created_at, t.id` (input columns —
+a bare `id` would bind to the `id::text` output column and sort by text collation); the cursor
 carries a redundant `created_at >=` so the planner uses the hypertable's `created_at` index and
 chunk exclusion.
 
@@ -160,7 +163,9 @@ Containment is fail-closed and checked before any DB connection: the target dire
 `-summary` directory) must have no group/other bits (`0700` or stricter) and must not resolve
 under `/tmp`, `/var/tmp` or `/dev/shm`; the file is created `O_EXCL` with mode `0600` only after
 the connection is up (a config/DB failure leaves no empty file behind) and is never overwritten.
-Exit codes: `0` clean · `1` perimeter, config, DB or I/O error · `2` NULL bodies found — the
+Exit codes: `0` clean · `1` perimeter, config, DB or I/O error (including a failed `fsync` of
+the output or `-summary` write — this takes precedence over 2/3, because "file complete, keep it"
+is only true once it is durably on disk) · `2` NULL bodies found — the
 export still ran to completion first (rescue-first; `-strict` aborts at the first NULL instead)
 · `3` count gate violated. The export contains unanonymized prompt bodies — keep it inside the
 same trust boundary as the database itself.

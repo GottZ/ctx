@@ -146,6 +146,11 @@ func run(args []string, stderr io.Writer) int {
 	}
 
 	switch {
+	case syncErr != nil || summaryErr != nil:
+		// Vor den Export-Klassen (Review F4): Exit 2/3 bedeuten „Datei
+		// vollständig, behalten" — das ist ohne erfolgreichen fsync nicht
+		// belegt; ein Persistenz-Fehler ist immer Exit 1.
+		return 1
 	case errors.Is(exportErr, llmlog.ErrBodiesEvicted):
 		say("ctx-llmlog-export: ALARM:", exportErr)
 		return 2
@@ -154,8 +159,6 @@ func run(args []string, stderr io.Writer) int {
 		return 3
 	case exportErr != nil:
 		say("ctx-llmlog-export:", exportErr)
-		return 1
-	case syncErr != nil || summaryErr != nil:
 		return 1
 	}
 	return 0

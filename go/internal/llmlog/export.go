@@ -191,7 +191,11 @@ func pageSQL(where string, args []any, cursor bool, lastTS time.Time, lastID str
 			len(args)-1, len(args)-1, len(args))
 	}
 	args = append(args, limit)
-	return exportSelect + where + fmt.Sprintf(" ORDER BY created_at, id LIMIT $%d", len(args)), args
+	// ORDER BY über die INPUT-Spalten (t.…): ein bloßes `id` bindet in
+	// PostgreSQL an die Output-Spalte `id::text` (Name bleibt „id") — Text-
+	// Kollation statt uuid-Ordnung, während der Keyset-Cursor uuid vergleicht
+	// (Review F3; EXPLAIN zeigte `Sort Key: t.created_at, ((t.id)::text)`).
+	return exportSelect + where + fmt.Sprintf(" ORDER BY t.created_at, t.id LIMIT $%d", len(args)), args
 }
 
 // Export schreibt alle Zeilen des Fensters als JSONL nach w und liefert den
@@ -222,11 +226,18 @@ func Export(ctx context.Context, pool *pgxpool.Pool, w io.Writer, opts ExportOpt
 		margin = time.Minute
 	}
 
+	// Until IMMER auf DB-now()−Marge deckeln — auch ein explizit gesetztes
+	// -until (Review F2): ein offenes Fenster bis „jetzt" verliert Zeilen,
+	// deren Insert noch nicht committed ist, für immer aus jedem Delta-Lauf
+	// (created_at liegt dann unter dem Watermark) oder lässt das count(*)-Gate
+	// grundlos reißen. Das Summary trägt das EFFEKTIVE Until.
+	var pin time.Time
+	if err := pool.QueryRow(ctx, `SELECT now() - $1::interval`, margin).Scan(&pin); err != nil {
+		return sum, fmt.Errorf("llmlog export: pin until: %w", err)
+	}
 	until := opts.Until
-	if until.IsZero() {
-		if err := pool.QueryRow(ctx, `SELECT now() - $1::interval`, margin).Scan(&until); err != nil {
-			return sum, fmt.Errorf("llmlog export: pin until: %w", err)
-		}
+	if until.IsZero() || until.After(pin) {
+		until = pin
 	}
 	sum.Until = until
 	if !opts.Since.IsZero() {
