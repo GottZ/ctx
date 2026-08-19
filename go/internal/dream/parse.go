@@ -245,12 +245,29 @@ func parseWrappedLinks(body string) ([]Link, bool) {
 	// the scan while a populated "relationships" key may still exist.
 	if len(wrapper) == 1 {
 		for _, v := range wrapper {
-			if strings.TrimSpace(string(v)) == "[]" {
+			if isEmptyJSONArray(v) {
 				return nil, true
 			}
 		}
 	}
 	return nil, false
+}
+
+// isEmptyJSONArray reports whether v holds a JSON array with no elements.
+// The test is structural rather than a byte compare against "[]": a
+// json.RawMessage keeps the interior bytes verbatim, so the whitespace drift
+// models actually emit — "[ ]", "[\n  ]", any pretty-printed variant — would
+// slip past a literal compare and land back on the hard unmarshal error. The
+// "[" prefix guard is load-bearing: JSON null unmarshals into a nil slice of
+// length 0, so without it {"<uuid>": null} would flip from the transient
+// parse error the zero-link contract demands into an inert zero-link success.
+func isEmptyJSONArray(v json.RawMessage) bool {
+	s := strings.TrimSpace(string(v))
+	if !strings.HasPrefix(s, "[") {
+		return false
+	}
+	var arr []json.RawMessage
+	return json.Unmarshal([]byte(s), &arr) == nil && len(arr) == 0
 }
 
 // stripCodeFence removes a leading ```json (or ```) fence and trailing ```

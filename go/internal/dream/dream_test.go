@@ -696,6 +696,38 @@ func TestParseLinks_WrapperForm(t *testing.T) {
 			wantFormat: formatFencedWrapped,
 		},
 		{
+			// Whitespace inside the brackets is the same verdict: the
+			// emptiness test is structural, not a byte compare against "[]".
+			name:       "single-key-empty-array-spaced",
+			raw:        `{"classifications": [ ]}`,
+			wantIDs:    []string{},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Pretty-printed relay output — the shape a json_object relay
+			// emits with indent enabled.
+			name:       "single-key-empty-array-pretty",
+			raw:        "{\n  \"classifications\": [\n  ]\n}",
+			wantIDs:    []string{},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Fenced pretty variant of the same drift.
+			name:       "fenced-single-key-empty-array-pretty",
+			raw:        "```json\n{\n  \"classifications\": [\n  ]\n}\n```",
+			wantIDs:    []string{},
+			wantFormat: formatFencedWrapped,
+		},
+		{
+			// A null value is NOT an empty array: the model emitted no
+			// verdict at all, which stays a transient parse error. Pins the
+			// "[" prefix guard in isEmptyJSONArray — JSON null unmarshals
+			// into a zero-length slice and would otherwise pass.
+			name:    "single-key-null-value-errors",
+			raw:     `{"classifications":null}`,
+			wantErr: true,
+		},
+		{
 			// Multi-key with an empty array still errors: an empty sibling
 			// must not book a "nothing to link" verdict while a populated
 			// key may exist (constraint 3 — regression pin stays).
