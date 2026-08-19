@@ -9,6 +9,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/llmlog"
 )
 
 // newTestRouter routes the dream tests through a seeded single-backend pool
@@ -246,6 +247,134 @@ func TestEvaluateRelationships_AllCandidatesNone_EmptyResult(t *testing.T) {
 	}
 	if len(links) != 0 {
 		t.Errorf("want 0 links, got %+v", links)
+	}
+}
+
+// --- Output-cap detection (noteCapHit) ---.
+
+// truncatedObjectMap is a real-shaped dream-eval answer cut off mid-JSON: the
+// object-map drift form (form 2) with the second key started but never closed,
+// exactly how a cap hit presents itself to parseLinks.
+const truncatedObjectMap = `{"` + uuidB + `":{"target_id":"` + uuidB + `","type":"topical","confidence":0.9}, "` + uuidC
+
+// capRespFunc returns a chatJSON stub that answers with content and reports
+// evalCount completion tokens, so a test can put the backend's own token count
+// exactly at (or below) the cap it was handed.
+func capRespFunc(content string, evalCount int) func(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error) {
+	return func(_ context.Context, _, _, _ string, _ *bool, _, _ string, _ llm.Options, _ time.Duration) (*llm.ChatResponse, error) {
+		return &llm.ChatResponse{
+			Message:      llm.Message{Role: "assistant", Content: content},
+			EvalCount:    evalCount,
+			PromptTokens: 100,
+		}, nil
+	}
+}
+
+// TestEvaluateRelationships_CapHitStillErrors pins that the cap-hit flag is
+// OBSERVABILITY ONLY: a truncated answer that consumed the whole budget still
+// returns the parse error, so the cooldown/re-pick path is untouched.
+func TestEvaluateRelationships_CapHitStillErrors(t *testing.T) {
+	opts := llm.Options{NumPredict: 600}
+	mockChatJSON(t, capRespFunc(truncatedObjectMap, opts.NumPredict))
+
+	links, err := EvaluateRelationships(context.Background(), nil, newTestRouter(), opts, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	if err == nil {
+		t.Fatal("want parse error for truncated object-map JSON, got nil")
+	}
+	if !errorContains(err, "parse links") {
+		t.Errorf("error not wrapped as parse-error: %v", err)
+	}
+	if len(links) != 0 {
+		t.Errorf("want no links from a truncated answer, got %+v", links)
+	}
+}
+
+// TestNoteCapHit drives the verdict itself. It runs against the helper rather
+// than through EvaluateRelationships because the llmlog entry that carries the
+// metadata is function-local and llmlog.Record is a no-op on a nil pool — the
+// package has no in-process recorder seam, only the DB-backed waitLlmlogRows
+// helper in the integration tests.
+func TestNoteCapHit(t *testing.T) {
+	tests := []struct {
+		name       string
+		evalCount  int
+		numPredict int
+		want       bool
+	}{
+		// Generation stopped exactly at the budget — the cap hit.
+		{"exactly-at-cap", 600, 600, true},
+		// Some backends count the stop token in, so > is a hit too.
+		{"over-cap", 601, 600, true},
+		// Malformed but well short of the budget: a real parse failure.
+		{"below-cap", 42, 600, false},
+		{"one-below-cap", 599, 600, false},
+		// Uncapped request (dailySynthesisOptions shape): nothing to hit.
+		{"uncapped", 900, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := &llmlog.Entry{Pipeline: "dream-eval"}
+			resp := &llm.ChatResponse{EvalCount: tt.evalCount}
+			got := noteCapHit(entry, resp, llm.Options{NumPredict: tt.numPredict})
+			if got != tt.want {
+				t.Fatalf("noteCapHit = %v, want %v", got, tt.want)
+			}
+			if tt.want {
+				if entry.Metadata["cap_hit"] != true {
+					t.Errorf("metadata cap_hit = %v, want true", entry.Metadata["cap_hit"])
+				}
+			} else if _, ok := entry.Metadata["cap_hit"]; ok {
+				t.Errorf("cap_hit must not be set below the cap, got %+v", entry.Metadata)
+			}
+		})
+	}
+}
+
+// TestNoteCapHit_NilInputs pins the guards: a nil entry or a nil response (the
+// LLM-error path, where resp is nil) must never be a cap hit and never panic.
+func TestNoteCapHit_NilInputs(t *testing.T) {
+	if noteCapHit(nil, &llm.ChatResponse{EvalCount: 600}, llm.Options{NumPredict: 600}) {
+		t.Error("nil entry must not report a cap hit")
+	}
+	if noteCapHit(&llmlog.Entry{Pipeline: "dream-eval"}, nil, llm.Options{NumPredict: 600}) {
+		t.Error("nil response must not report a cap hit")
+	}
+}
+
+// TestEvaluateRelationships_LinksParsedRecorded checks the counted-verdict side
+// of the same wave through the helper's sibling metadata key. The count itself
+// is asserted on the returned links (the entry is not reachable, see
+// TestNoteCapHit) — this pins that a well-formed answer under the cap takes the
+// success path and yields the parsed links.
+func TestEvaluateRelationships_LinksParsedRecorded(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"two-links", `[{"target_id":"` + uuidB + `","type":"topical","confidence":0.85},{"target_id":"` + uuidC + `","type":"factual","confidence":0.9}]`, 2},
+		{"zero-link-verdict", `[]`, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := llm.Options{NumPredict: 600}
+			mockChatJSON(t, capRespFunc(tt.content, 120))
+
+			links, err := EvaluateRelationships(context.Background(), nil, newTestRouter(), opts,
+				srcBlock(uuidA), []BlockInfo{candBlock(uuidB), candBlock(uuidC)})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(links) != tt.want {
+				t.Fatalf("want %d links, got %d: %+v", tt.want, len(links), links)
+			}
+			// The same inputs the success path hands noteCapHit must NOT
+			// read as a cap hit — 120 tokens is far under the 600 budget.
+			entry := &llmlog.Entry{Pipeline: "dream-eval"}
+			if noteCapHit(entry, &llm.ChatResponse{EvalCount: 120}, opts) {
+				t.Error("a well-formed answer under the cap must not be flagged cap_hit")
+			}
+		})
 	}
 }
 

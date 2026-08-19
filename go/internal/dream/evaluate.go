@@ -160,9 +160,24 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 	}
 	if err != nil {
 		entry.Err = fmt.Errorf("parse: %w", err)
-		slog.Warn("dream: failed to parse LLM response", "error", err, "raw", resp.Message.Content)
+		if noteCapHit(entry, resp, opts) {
+			slog.Warn("dream: response hit the output cap — truncated JSON",
+				"num_predict", opts.NumPredict, "completion_tokens", resp.EvalCount,
+				"error", err, "raw", resp.Message.Content)
+		} else {
+			slog.Warn("dream: failed to parse LLM response", "error", err, "raw", resp.Message.Content)
+		}
 		return nil, fmt.Errorf("dream: parse links: %w", err)
 	}
+	// Zero-link verdicts are a real answer ("no candidate relates"), not a
+	// failure, and until now they were indistinguishable in context_llm_log
+	// from a run that never got that far — parse_format only says HOW the
+	// answer was shaped, never how much it carried. One int makes them
+	// countable without a new format token.
+	if entry.Metadata == nil {
+		entry.Metadata = map[string]any{}
+	}
+	entry.Metadata["links_parsed"] = len(links)
 
 	// Operator floor for links the model named without a strength signal
 	// (Floored, PR #12): lift to dream.link_floor_confidence (default 0.9,
@@ -198,6 +213,40 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 	}
 
 	return valid, nil
+}
+
+// noteCapHit flags a parse failure that is really an output-cap truncation and
+// reports whether it did. Returns false (and touches nothing) for every other
+// parse failure.
+//
+// The pipeline is otherwise BLIND to the cap: llm.ChatResponse carries no
+// finish_reason / done_reason — neither wire format decodes it on the
+// non-streaming path dream uses — so a cap-truncated answer looks exactly like
+// malformed output. Both book the parse error, the 5-minute transient cooldown
+// and a re-pick, which means a backend that deterministically overruns the cap
+// re-burns one eval call every five minutes with nothing in the log to say why.
+//
+// The available signal is provider-agnostic: EvalCount is the backend's own
+// completion-token count and opts.NumPredict is the cap this call site sent.
+// Generation stopping at the budget while the JSON does not parse is the cap
+// hit. >= rather than ==: some backends count the stop token in. NumPredict
+// <= 0 means uncapped — nothing to hit. Known blind spot: a backend row's
+// model_map num_predict/max_tokens override is applied inside the chain walk
+// (applyModelParams on a local copy) and is not visible here, so on such rows
+// the flag compares against the DreamOptions default, not the effective cap —
+// a heuristic until ChatResponse carries the provider's finish_reason.
+//
+// Observability only: the caller still returns the parse error and the cooldown
+// path is unchanged.
+func noteCapHit(entry *llmlog.Entry, resp *llm.ChatResponse, opts llm.Options) bool {
+	if entry == nil || resp == nil || opts.NumPredict <= 0 || resp.EvalCount < opts.NumPredict {
+		return false
+	}
+	if entry.Metadata == nil {
+		entry.Metadata = map[string]any{}
+	}
+	entry.Metadata["cap_hit"] = true
+	return true
 }
 
 // buildEvalPrompt constructs the user prompt for relationship evaluation and
