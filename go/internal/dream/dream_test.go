@@ -728,6 +728,30 @@ func TestParseLinks_WrapperForm(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// Canonical json_object relay shape with nothing to report. The
+			// prose key cannot be the sibling constraint 3 defends, so the
+			// single empty array is as unambiguous as the bare "[]".
+			name:       "prose-plus-empty-relationships",
+			raw:        `{"reasoning":"none","relationships":[]}`,
+			wantIDs:    []string{},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Same shape as a relay emits it with indent enabled.
+			name:       "prose-plus-empty-pretty",
+			raw:        "{\n  \"reasoning\": \"none\",\n  \"relationships\": [\n  ]\n}",
+			wantIDs:    []string{},
+			wantFormat: formatWrapped,
+		},
+		{
+			// Prose does not lift the two-array bar: with a second array
+			// present the response stays ambiguous and must retry, even
+			// though both arrays happen to be empty here.
+			name:    "prose-plus-two-empty-arrays-errors",
+			raw:     `{"reasoning":"x","warnings":[],"relationships":[]}`,
+			wantErr: true,
+		},
+		{
 			// Duplicate keys must not fake a lone empty array: Go keeps the
 			// LAST one, so the decoded map holds a single empty array while
 			// the raw text carried a usable link. Booking that as a

@@ -235,22 +235,49 @@ func parseWrappedLinks(body string) ([]Link, bool) {
 		}
 		return links, true
 	}
-	// Single-key empty-array wrapper, e.g. {"classifications": []}: the model
-	// explicitly says "nothing to link" — the same verdict as the bare "[]"
-	// sentinel, which parseLinks accepts at its head. The multi-key scan
-	// above already declined (no array yielded a link), and a LONE key whose
-	// value is an empty array cannot hide links elsewhere, so treating it as
-	// a success with zero links is safe. Multi-key wrappers keep declining
-	// (constraint 3): an empty sibling like "warnings" must not terminate
-	// the scan while a populated "relationships" key may still exist.
-	//
-	// "Lone" is decided on the TEXT, not on the decoded map: Go keeps the
-	// last of duplicate JSON keys, so a repeated key would collapse a
-	// two-entry text into a one-entry map — see topLevelValues.
-	if vals, ok := topLevelValues(body); ok && len(vals) == 1 && isEmptyJSONArray(vals[0]) {
+	// Lone empty-array wrapper, e.g. {"classifications": []} or
+	// {"reasoning": "none", "relationships": []}: the model explicitly says
+	// "nothing to link" — the same verdict as the bare "[]" sentinel, which
+	// parseLinks accepts at its head. The scan above already declined (no
+	// array yielded a link), and when the response carries exactly ONE array
+	// there is no sibling array left that could hold the links constraint 3
+	// protects. Two or more arrays keep declining, so {"warnings": [],
+	// "notes": []} stays the transient error it has to be.
+	if isLoneEmptyArrayWrapper(body) {
 		return nil, true
 	}
 	return nil, false
+}
+
+// isLoneEmptyArrayWrapper reports whether the wrapper's only ARRAY-valued
+// top-level key holds an empty array — the unambiguous "nothing to link"
+// verdict. Prose keys are ignored on purpose: the canonical json_object relay
+// shape with nothing to report is {"reasoning": "...", "relationships": []},
+// and a commentary string can never be the array constraint 3 defends. What
+// the constraint rules out is a SECOND array that might still hold links, so
+// the count that decides is the number of array-valued keys, not of keys.
+//
+// Keys are counted on the TEXT (topLevelValues), not on the decoded map: Go
+// keeps the last of duplicate JSON keys, so a repeated key would otherwise
+// collapse two emitted arrays into one and re-open exactly the hole this
+// guards.
+func isLoneEmptyArrayWrapper(body string) bool {
+	vals, ok := topLevelValues(body)
+	if !ok {
+		return false
+	}
+	arrays, empty := 0, false
+	for _, val := range vals {
+		if !strings.HasPrefix(strings.TrimSpace(string(val)), "[") {
+			continue
+		}
+		arrays++
+		if arrays > 1 {
+			return false
+		}
+		empty = isEmptyJSONArray(val)
+	}
+	return arrays == 1 && empty
 }
 
 // topLevelValues returns the value of every key that textually appears at the
