@@ -64,12 +64,19 @@ Output a JSON array of {target_id, type, confidence}. Empty [] when no candidate
 // Tuned for qwen3.6:27b non-thinking mode per vendor recommendation,
 // validated against qwen3.5:27b baseline in /tmp/bench_l2 (Session 24).
 //
-// NumPredict 600 (was 400): object-map drift (form 2, qwen3.8-local) emits
-// each link as {uuid: {target_id, type, confidence}} — roughly 2x the token
-// cost of the array form the prompt requests, because the uuid repeats as both
-// map key AND target_id value. Five entries in that form need ~500-600 tokens,
-// so 400 truncated mid-JSON ("unexpected end of JSON input") and the whole
-// evaluation was lost. 600 fits the prompt's "Maximum 5 entries" with margin.
+// NumPredict 600 (was 400): object-map drift (form 2, qwen3.8-local) emits each
+// link as {uuid: {target_id, type, confidence}} instead of the array the prompt
+// asks for, and the uuid repeats as both map key AND target_id value. Measured
+// with the Qwen3 tokenizer, the object-map form costs about 1.5x the array form:
+// five entries are ~420 tokens compact / ~500 pretty-printed, against ~250 / ~330
+// for the array form (~85-100 tokens per object-map entry). 400 therefore
+// truncated the pretty variant mid-JSON ("unexpected end of JSON input") and the
+// whole evaluation was lost. 600 covers the prompt's "Maximum 5 entries" in the
+// worst measured form with ~100 tokens of margin. Not raised further on purpose:
+// on OpenAI-style backends max_tokens is charged against the context window, so
+// an over-generous cap gets long prompts rejected. Per-backend tuning belongs in
+// the serving row's model_map params (num_predict / max_tokens, merged by
+// applyModelParams in llm/chain.go), which override this default at dispatch.
 func DreamOptions() llm.Options {
 	return llm.Options{
 		Temperature: 0.7,

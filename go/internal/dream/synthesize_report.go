@@ -131,9 +131,11 @@ func langName(primary string) string {
 // dailySynthesisOptions are the LLM sampling options for the daily report.
 // Sampling params match DreamOptions (qwen3.6:27b non-thinking tuning), but
 // deliberately WITHOUT NumPredict: the prompt requests a 200-400 word report
-// (~600-900 tokens) and the model terminates via EOS — the shared 400-token
-// dream-eval cap truncated every report mid-sentence for 66 days (all
-// dream-daily-synthesis llm_log rows at exactly completion_tokens=400).
+// (~600-900 tokens) and the model terminates via EOS — sharing the dream-eval
+// cap (400 tokens at the time) truncated every report mid-sentence for 66 days
+// (all dream-daily-synthesis llm_log rows at exactly completion_tokens=400).
+// The dream-eval cap is 600 today and still too tight for a report, so the
+// omission stands on its own reasoning, not on that one number.
 // Runaway generation stays bounded by DailySynthesisTimeout + the backend's
 // context window; a cost cap for paid backends belongs in the chain-level
 // num_predict override (llm/chain.go), not hardcoded into the pipeline.
