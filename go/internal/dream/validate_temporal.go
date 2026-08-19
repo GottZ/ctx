@@ -82,6 +82,17 @@ func temporalTimeout(r *Router) time.Duration {
 	return ValidateTimeout
 }
 
+// temporalReview issues the Phase-2 LLM call for one block. It is a method of
+// its own so the resolved timeout has a seam a test can reach: temporalTimeout
+// is only the DEFAULT handed to the chain walk, and what finally lands on the
+// wire (a timeouts.dream row entry wins, Backend.TimeoutFor) is decided inside
+// llm.ChatChainVia — unobservable from ValidateTemporal, which needs a pool.
+func (r *Router) temporalReview(ctx context.Context, block *BlockInfo, userPrompt string, opts llm.Options,
+) (*llm.ChatResponse, *backends.Backend, []llm.ChainAttempt, error) {
+	return r.chat(ctx, backends.RoleDream, block.Sensitivity,
+		temporalValidationPrompt, userPrompt, opts, temporalTimeout(r))
+}
+
 // ValidateTemporal runs the two-phase temporal validation for a block.
 // Phase 1: deterministic re-extraction. Phase 2: LLM review.
 // Non-fatal — errors are logged but don't stop the dream cycle.
@@ -148,8 +159,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
 
 	start := time.Now()
-	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, block.Sensitivity,
-		temporalValidationPrompt, userPrompt, validateOpts, temporalTimeout(r))
+	resp, served, attempts, err := r.temporalReview(ctx, block, userPrompt, validateOpts)
 	entry.Duration = time.Since(start)
 	entry.Err = err
 	r.applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, attempts, err)
