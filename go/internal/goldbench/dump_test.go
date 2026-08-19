@@ -276,7 +276,7 @@ func TestDumpAppendResume(t *testing.T) {
 	gen := &GenStamp{Engine: "fake", EngineVersion: "0", Image: "img@sha256:0", TemplateSHA256: "t"}
 	base := Config{
 		DataDir: testDataDir(t), Endpoint: srv.URL, Model: "fake-model",
-		N: 1, Concurrency: 1, Seed: 20260812, TimeoutSec: 30, GenStamp: gen, TempOverride: -1,
+		N: 1, Concurrency: 4, Seed: 20260812, TimeoutSec: 30, GenStamp: gen, TempOverride: -1,
 	}
 	run := func(ctx context.Context, dump string, appendMode bool) (*Report, error) {
 		cfg := base
@@ -286,7 +286,8 @@ func TestDumpAppendResume(t *testing.T) {
 
 	// Referenz: voller Lauf, n Fälle, c Calls.
 	ref := filepath.Join(dir, "ref.jsonl")
-	if _, err := run(context.Background(), ref, false); err != nil {
+	refRep, err := run(context.Background(), ref, false)
+	if err != nil {
 		t.Fatal(err)
 	}
 	nAll, _ := countLines(t, ref)
@@ -349,6 +350,19 @@ func TestDumpAppendResume(t *testing.T) {
 	if rep == nil || len(rep.Axes) != len(Axes) {
 		t.Fatalf("resume report incomplete: %+v", rep)
 	}
+	// Parität: ein resumed Report scored wie der Volllauf (adopt trägt Outputs UND usage) …
+	if rep.Composite != refRep.Composite || rep.FailStats != refRep.FailStats {
+		t.Fatalf("resume report must equal full run: composite %v vs %v, fail_stats %+v vs %+v", rep.Composite, refRep.Composite, rep.FailStats, refRep.FailStats)
+	}
+	for ax, r := range rep.Axes {
+		if r.PrimaryScore != refRep.Axes[ax].PrimaryScore {
+			t.Fatalf("axis %s: resume score %v != full %v", ax, r.PrimaryScore, refRep.Axes[ax].PrimaryScore)
+		}
+	}
+	// … und ist als Resume gestempelt (Durchsatz misst nur den Restlauf).
+	if rep.Env.ResumedCases != nPart || rep.Env.ExecutedCases != nAll-nPart {
+		t.Fatalf("env resume stamp: resumed=%d executed=%d (want %d/%d)", rep.Env.ResumedCases, rep.Env.ExecutedCases, nPart, nAll-nPart)
+	}
 	// Doppel-Lauf mit -dump-append ⇒ 0 Calls, Datei unverändert.
 	before, _ := os.ReadFile(app)
 	calls.Store(0)
@@ -367,15 +381,156 @@ func TestDumpAppendResume(t *testing.T) {
 		t.Fatalf("foreign gen stamp must abort with ErrDumpStamp, got %v", err)
 	}
 	cfg.GenStamp = nil
-	if _, err := Run(context.Background(), cfg); !errors.Is(err, ErrDumpStamp) {
-		t.Fatalf("missing gen stamp against stamped file must abort, got %v", err)
+	if _, err := Run(context.Background(), cfg); err == nil || errors.Is(err, ErrDumpStamp) {
+		t.Fatalf("dump-append without gen stamp must be refused before reading, got %v", err)
 	}
+	// Dry-Run + -dump-append schreibt NIE (Review F1: der End-of-Run-Writer würde truncaten).
+	cfg.GenStamp = gen
+	cfg.DryRun = true
+	if _, err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("dry-run with append: %v", err)
+	}
+	cfg.DryRun = false
 	after2, _ := os.ReadFile(app)
 	if string(after2) != string(after) {
-		t.Fatal("stamp abort must not touch the file")
+		t.Fatal("stamp abort / dry-run must not touch the file")
 	}
 	// Resume-Dump ist v1-lesbar.
 	if n, err := v1DumpReader(app); err != nil || n != nAll {
 		t.Fatalf("v1 reader over append dump: n=%d err=%v", n, err)
+	}
+}
+
+// TestDumpAppendLoaderGates pinnt die Datei-seitigen Gates des Resume (Review KW3 F2/F4/F7/F8 +
+// Doku-Zusagen): gescheiterte Legacy-Records zählen nicht als erledigt; eine abgerissene
+// Schlusszeile wird toleriert und abgeschnitten; zwei vollständige Records derselben (axis,id)
+// und Zeilen ohne axis/id sind rot; eine zweite Instanz auf derselben Datei bekommt
+// ErrDumpLocked; ein Record mit falscher Slot-Zahl ist rot.
+func TestDumpAppendLoaderGates(t *testing.T) {
+	gen := &GenStamp{Engine: "fake", EngineVersion: "0", Image: "img@sha256:0", TemplateSHA256: "t"}
+	line := func(axis, id string, outputs []string, usage []CallUsage) string {
+		b, _ := json.Marshal(dumpRecord{Axis: axis, ID: id, Outputs: outputs, Usage: usage, Gen: gen})
+		return string(b) + "\n"
+	}
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// F2: Fehl-Record (usage.err / leerer Output) ⇒ nicht done; späterer vollständiger gewinnt.
+	p := write("legacy.jsonl",
+		line("title", "a", []string{""}, []CallUsage{{Err: "transport: reset"}})+
+			line("title", "b", []string{"ok"}, nil)+
+			line("title", "a", []string{"ok-later"}, nil))
+	d, err := loadDumpDone(p, gen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.lookup("title", "a"); !ok || d.total != 2 {
+		t.Fatalf("failed record must not be done, later complete one must win: total=%d", d.total)
+	}
+	if r, _ := d.lookup("title", "a"); r.Outputs[0] != "ok-later" {
+		t.Fatalf("later complete record must win, got %q", r.Outputs[0])
+	}
+	// Duplikat zweier VOLLSTÄNDIGER Records ⇒ rot.
+	p = write("dup.jsonl", line("title", "a", []string{"x"}, nil)+line("title", "a", []string{"y"}, nil))
+	if _, err := loadDumpDone(p, gen); err == nil || !strings.Contains(err.Error(), "Duplikat") {
+		t.Fatalf("duplicate complete records must be refused, got %v", err)
+	}
+	// Zeile ohne axis/id ⇒ rot.
+	p = write("noaxis.jsonl", `{"id":"a","outputs":["x"]}`+"\n")
+	if _, err := loadDumpDone(p, gen); err == nil || !strings.Contains(err.Error(), "ohne axis/id") {
+		t.Fatalf("line without axis must be refused, got %v", err)
+	}
+	// F4: abgerissene Schlusszeile ⇒ toleriert, validLen = Ende der letzten vollständigen Zeile;
+	// der Appender schneidet dort ab und hängt sauber an.
+	good := line("title", "a", []string{"x"}, nil)
+	p = write("torn.jsonl", good+`{"axis":"title","id":"b","outputs":["yy`)
+	d, err = loadDumpDone(p, gen)
+	if err != nil || d.total != 1 || d.validLen != int64(len(good)) {
+		t.Fatalf("torn tail must be tolerated: err=%v total=%d validLen=%d want %d", err, d.total, d.validLen, len(good))
+	}
+	ap, err := openDumpAppender(p, d.validLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ap.write(dumpRecord{Axis: "title", ID: "b", Outputs: []string{"yes"}, Gen: gen}); err != nil {
+		t.Fatal(err)
+	}
+	// F7: zweite Instanz auf derselben Datei ⇒ ErrDumpLocked.
+	if _, err := openDumpAppender(p, -1); !errors.Is(err, ErrDumpLocked) {
+		t.Fatalf("second appender must be refused by flock, got %v", err)
+	}
+	if err := ap.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if n, dups := countLines(t, p); n != 2 || dups != 0 {
+		t.Fatalf("after torn-tail append: lines=%d dups=%d (want 2/0)", n, dups)
+	}
+	// Ein Parse-Fehler, der NICHT die Schlusszeile ist, bleibt rot.
+	p = write("mid.jsonl", `{"axis":"title","id":"b","outputs":["yy`+"\n"+good)
+	if _, err := loadDumpDone(p, gen); err == nil {
+		t.Fatal("mid-file parse error must stay fatal")
+	}
+	// F8: Slot-Zahl ≠ Requests ⇒ rot (sensitivity hat 2 Slots).
+	srv := fakeChatServer(t)
+	defer srv.Close()
+	cases, err := LoadCases(testDataDir(t), "sensitivity")
+	if err != nil || len(cases) == 0 {
+		t.Skipf("sensitivity cases: %v", err)
+	}
+	id := SampleCases(cases, 1, 20260812)[0].ID
+	p = write("slots.jsonl", line("sensitivity", id, []string{"only-one-slot"}, nil))
+	cfg := Config{DataDir: testDataDir(t), Endpoint: srv.URL, Model: "fake-model", Axes: []string{"sensitivity"},
+		N: 1, Concurrency: 1, Seed: 20260812, TimeoutSec: 30, GenStamp: gen, TempOverride: -1, DumpOutputs: p, DumpAppend: true}
+	if _, err := Run(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "Output-Slots") {
+		t.Fatalf("slot mismatch must be refused, got %v", err)
+	}
+}
+
+// TestDumpAppendSinkErrorCancels pinnt Review KW3 F5: ein Schreibfehler des Append-Sinks
+// bricht den Lauf sofort ab (kein Weiterfahren gegen die GPU ohne Persistenz) und ist als
+// ErrDumpWrite klassifiziert — nicht als Transport-Fehler des Falls.
+func TestDumpAppendSinkErrorCancels(t *testing.T) {
+	srv := fakeChatServer(t)
+	defer srv.Close()
+	var calls atomic.Int64
+	cnt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer cnt.Close()
+	gen := &GenStamp{Engine: "fake"}
+	cfg := Config{DataDir: testDataDir(t), Endpoint: cnt.URL, Model: "fake-model",
+		N: 1, Concurrency: 2, Seed: 20260812, TimeoutSec: 30, GenStamp: gen, TempOverride: -1}
+	axes, _ := resolveAxes(nil, axisRegistry())
+	axisRuns, jobs, _, _, err := buildRuns(cfg, axes, axisRegistry(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "sink.jsonl")
+	ap, err := openDumpAppender(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ap.f.Close() // Sink kaputt: jeder Flush scheitert (simuliert ENOSPC/EIO)
+	ap.f = nil       // Close() idempotent halten
+	err = executeJobs(context.Background(), cfg, jobs, axisRuns, &dumpAppender{f: os.NewFile(^uintptr(0), "broken"), buf: ap.buf, enc: ap.enc, path: p})
+	if !errors.Is(err, ErrDumpWrite) {
+		t.Fatalf("sink failure must surface as ErrDumpWrite, got %v", err)
+	}
+	if c := calls.Load(); c >= int64(len(jobs)) {
+		t.Fatalf("run must stop after the first sink error: %d calls for %d jobs", c, len(jobs))
+	}
+	// Der Fall selbst trägt KEINEN Transport-Fehler (er wird beim Resume nachgeholt).
+	for _, runs := range axisRuns {
+		for _, r := range runs {
+			if r.callErr != nil && !errors.Is(r.callErr, context.Canceled) {
+				t.Fatalf("sink error must not be attributed to the case: %v", r.callErr)
+			}
+		}
 	}
 }

@@ -130,20 +130,33 @@ optional `gen` engine stamp passed via
 symlinked path or a foreign-owned file fails immediately, not after hours of
 GPU time.
 
-`-dump-append` (with `-dump-outputs`) switches the dump from end-of-run to
-**incremental**: every finished case is written immediately (mutex-serialized
-`O_APPEND` line; a case with a transport error or an aborted call is *not*
+`-dump-append` (with `-dump-outputs` **and** `-gen-stamp`, both mandatory)
+switches the dump from end-of-run to **incremental**: every finished case is
+written immediately (mutex-serialized `O_APPEND` line, flushed per case,
+`fsync` on close; a case with a transport error or an aborted call is *not*
 written), and before the run the existing file is read into a done-set —
-cases already present (`axis`,`id`) are neither re-called nor re-written,
-their outputs feed the report. Resuming after an abort (Ctrl-C, `kill -9`,
-crash) is therefore the identical invocation; a second full run makes zero
-calls. Stamp-resume gate: every line of the existing file must carry the same
-`gen` stamp as the live `-gen-stamp` (none == none) — a mismatch aborts
-instead of silently mixing two engine/quant/template distributions in one
-corpus file. Duplicate `(axis,id)` lines or lines without `axis`/`id` are
-refused as well (the resume never guesses). Use this for corpus generation
-(design 02, KW3); the plain `-dump-outputs` path is unchanged (truncate +
-end-of-run write).
+cases already present (`axis`,`id`) with a *complete* record (every slot has
+an output, no `usage.err`) are neither re-called nor re-written, their
+outputs and usage feed the report (scores and fail_stats equal a full run;
+`env.resumed_cases` / `env.executed_cases` mark the report, and
+`throughput` measures only the executed rest). Resuming after an abort
+(Ctrl-C, `kill -9`, ENOSPC) is the identical invocation; a second full run
+makes zero calls. Failed records in legacy (end-of-run) dumps do not count as
+done — they are re-run and a later complete record wins; two *complete*
+records for one `(axis,id)` are refused. Stamp-resume gate: every line of the
+existing file must carry the same `gen` stamp as the live `-gen-stamp`
+(`engine`, `engine_version`, `image`, `template_sha256`, `model`) — a
+mismatch aborts instead of silently mixing two distributions in one corpus
+file; put everything that defines the distribution (model/target/quant,
+template) into the stamp. One torn last line (abort mid-write, no trailing
+newline) is tolerated and truncated before appending; any other parse error,
+lines without `axis`/`id`, or a mismatching slot count are refused (the
+resume never guesses). The file is `flock`ed exclusively — a second driver on
+the same file fails instead of writing duplicates. A sink write error
+(ENOSPC/EIO) cancels the run immediately (`ErrDumpWrite`); the current case
+is simply re-run on resume. `-dry-run` never writes (and is rejected together
+with `-dump-append`). Use this for corpus generation (design 02, KW3); the
+plain `-dump-outputs` path is unchanged (truncate + end-of-run write).
 
 `-spec-config '<json>'` stamps structured speculative-decoding provenance
 into the report env (`env.spec`: `algorithm`, `drafter_path`,

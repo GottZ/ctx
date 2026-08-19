@@ -98,7 +98,9 @@ type Config struct {
 	// gedumpte Fälle (axis,id) werden weder neu gecallt noch neu geschrieben
 	// (Wiederaufnahme nach Abbruch = identischer Aufruf), ihr Output geht in
 	// den Report ein. Stamp-Resume-Gate: weicht der gen-Stempel der Datei vom
-	// Live-GenStamp ab ⇒ Abbruch statt Append. Erfordert DumpOutputs.
+	// Live-GenStamp ab ⇒ Abbruch statt Append. Erfordert DumpOutputs UND
+	// GenStamp (ohne Stempel gäbe es kein Gate); im Dry-Run wird NIE
+	// geschrieben (Datei bleibt unberührt).
 	DumpAppend bool
 	// GenStamp stempelt jede Dump-Zeile mit der erzeugenden Engine
 	// (Engine, Version, Image-Digest, Template-Hash) — Homogenitäts-Beleg des
@@ -116,6 +118,9 @@ type GenStamp struct {
 	EngineVersion  string `json:"engine_version,omitempty"`
 	Image          string `json:"image,omitempty"`
 	TemplateSHA256 string `json:"template_sha256,omitempty"`
+	// Model identifiziert Target (+ Quant/Checkpoint) der Erzeugung — Teil des
+	// Stamp-Resume-Gates (KW3): Engine/Image allein trennen zwei Targets nicht.
+	Model string `json:"model,omitempty"`
 }
 
 // LoadCases lädt die Gold-Fälle einer Achse aus <dir>/<axis>.jsonl und

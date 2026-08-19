@@ -64,6 +64,10 @@ func Markdown(report *Report) string {
 			report.Throughput.PromptTokPerSec, report.Throughput.CompletionTokPerSec,
 			report.Throughput.WallSeconds, report.Throughput.PromptTokens, report.Throughput.CompletionTokens)
 	}
+	if report.Env.ResumedCases > 0 {
+		fmt.Fprintf(&b, "Resume (-dump-append): %d Fälle aus dem Dump übernommen, %d in diesem Lauf gecallt — Durchsatz misst nur den Restlauf\n",
+			report.Env.ResumedCases, report.Env.ExecutedCases)
+	}
 	fmt.Fprintf(&b, "\nRisse: context %d · truncated %d · transport %d\n",
 		report.FailStats.ContextErrors, report.FailStats.TruncatedOutputs, report.FailStats.TransportErrors)
 	fmt.Fprintf(&b, "\n**Composite: %.4f**", report.Composite)

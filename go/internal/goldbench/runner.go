@@ -69,6 +69,12 @@ type EnvStamp struct {
 	// Spec ist die strukturierte Spec-Provenienz (-spec-config); nil bei
 	// Läufen ohne Flag (byte-stabil zum v4-Protokoll).
 	Spec *SpecConfig `json:"spec,omitempty"`
+	// ResumedCases/ExecutedCases (KW3): Fälle aus dem Append-Dump übernommen
+	// vs. in diesem Prozess gecallt. Throughput misst NUR die gecallten —
+	// ein Resume-Report ist daran als solcher erkennbar (omitempty: Läufe ohne
+	// -dump-append bleiben byte-stabil).
+	ResumedCases  int `json:"resumed_cases,omitempty"`
+	ExecutedCases int `json:"executed_cases,omitempty"`
 }
 
 // stampConcurrency liefert das Lauf-Regime für den EnvStamp: 0 im Dry-Run
@@ -106,10 +112,13 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 
 	// KW3: bestehenden Append-Dump lesen — Done-Set (axis,id) + Stamp-Gate.
-	var done map[string]map[string]dumpRecord
+	var done *dumpDone
 	if cfg.DumpAppend {
 		if cfg.DumpOutputs == "" {
 			return nil, errors.New("goldbench: dump-append braucht dump-outputs")
+		}
+		if cfg.GenStamp == nil {
+			return nil, errors.New("goldbench: dump-append braucht einen gen-Stempel (Stamp-Resume-Gate)")
 		}
 		if done, err = loadDumpDone(cfg.DumpOutputs, cfg.GenStamp); err != nil {
 			return nil, err
@@ -135,12 +144,14 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	// geschrieben); geschlossen auf JEDEM Rückweg, auch nach Abbruch.
 	var sink *dumpAppender
 	if cfg.DumpAppend && !cfg.DryRun {
-		fmt.Fprintf(os.Stderr, "[resume] %d Fälle aus %s übernommen, %d offen\n", resumed, cfg.DumpOutputs, len(jobs))
 		var err error
-		if sink, err = openDumpAppender(cfg.DumpOutputs); err != nil {
+		if sink, err = openDumpAppender(cfg.DumpOutputs, done.validLen); err != nil {
 			return nil, err
 		}
 		defer func() { _ = sink.Close() }()
+		outside := done.total - resumed
+		fmt.Fprintf(os.Stderr, "[resume] %s: %d Fälle übernommen, %d offen, %d Datei-Zeilen außerhalb der Stichprobe/Achsen\n",
+			cfg.DumpOutputs, resumed, len(jobs), outside)
 	}
 
 	if !cfg.DryRun {
@@ -149,11 +160,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 
-	if sink != nil {
+	switch {
+	case sink != nil:
 		if err := sink.Close(); err != nil {
 			return nil, err
 		}
-	} else if cfg.DumpOutputs != "" {
+	case cfg.DumpAppend:
+		// Dry-Run mit -dump-append: NUR lesen (Stamp-Gate, Done-Set) — der
+		// End-of-Run-Writer würde die Append-Datei per O_TRUNC vernichten.
+	case cfg.DumpOutputs != "":
 		if err := dumpOutputs(cfg.DumpOutputs, axes, axisRuns, cfg.GenStamp); err != nil {
 			return nil, err
 		}
@@ -192,6 +207,8 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			NPerAxis:      nPerAxis,
 			Concurrency:   stampConcurrency(cfg),
 			Spec:          cfg.SpecConfig,
+			ResumedCases:  resumed,
+			ExecutedCases: executedCases(cfg, resumed, len(jobs)),
 		},
 		Axes: map[string]AxisResult{},
 	}
@@ -227,7 +244,7 @@ func resolveAxes(requested []string, registry map[string]axisDef) ([]string, err
 // Daten auch im Dry-Run — ein Fall, dessen Prompt nicht baubar ist, ist ein
 // Datenfehler). Fälle aus dem Done-Set (KW3-Resume) werden übernommen statt
 // gecallt; Rückgabe: Runs je Achse, Job-Liste, n je Achse, Anzahl übernommen.
-func buildRuns(cfg Config, axes []string, registry map[string]axisDef, done map[string]map[string]dumpRecord) (
+func buildRuns(cfg Config, axes []string, registry map[string]axisDef, done *dumpDone) (
 	map[string][]caseRun, []job, map[string]int, int, error,
 ) {
 	axisRuns := map[string][]caseRun{}
@@ -248,9 +265,12 @@ func buildRuns(cfg Config, axes []string, registry map[string]axisDef, done map[
 				return nil, nil, nil, 0, err
 			}
 			runs[i] = caseRun{c: c, reqs: reqs, outputs: make([]string, len(reqs))}
-			if rec, ok := done[axis][c.ID]; ok && !cfg.DryRun {
+			if rec, ok := done.lookup(axis, c.ID); ok && !cfg.DryRun {
 				// Resume: Fall liegt im Dump — Output/usage übernehmen, kein
 				// Call, kein erneutes Schreiben (Skip VOR dem Job-Bau).
+				if len(rec.Outputs) != len(reqs) {
+					return nil, nil, nil, 0, fmt.Errorf("goldbench: dump-append: %s/%s: %d Output-Slots in der Datei, %d Requests gebaut — Dump passt nicht zur Achsen-Definition", axis, c.ID, len(rec.Outputs), len(reqs))
+				}
 				runs[i].adopt(rec)
 				resumed++
 				continue
@@ -273,7 +293,14 @@ func buildRuns(cfg Config, axes []string, registry map[string]axisDef, done map[
 // executeJobs fährt die LLM-Calls nebenläufig über einen Worker-Pool.
 // Transport-Fehler landen im caseRun (der Fall scored 0), sie brechen den
 // Lauf nicht ab — abgesehen von Context-Cancel.
-func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[string][]caseRun, sink *dumpAppender) error {
+func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[string][]caseRun, sink *dumpAppender) error {
+	// Eigener Cancel-Scope: ein Schreibfehler des Append-Sinks (ENOSPC, EIO)
+	// stoppt den Lauf sofort — weiter gegen die GPU zu fahren, ohne zu
+	// persistieren, wäre verbrannte Zeit (Review KW3 F5).
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	var sinkErr error
+	var sinkErrOnce sync.Once
 	client := NewClient(cfg.Endpoint, cfg.Model, cfg.APIKey, cfg.Seed,
 		time.Duration(cfg.TimeoutSec)*time.Second)
 	if err := client.SetExtraBody(cfg.ExtraBody); err != nil {
@@ -349,10 +376,15 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 				// KW3: fertigen Fall sofort persistieren — nur VOLLSTÄNDIGE
 				// Fälle (kein Abbruch, kein Transport-Fehler): so holt der
 				// Resume Fehlschläge nach, statt sie als erledigt zu überspringen.
+				// Der Fall selbst ist vollständig (kein Transport-Fehler) — ein
+				// Persistenz-Fehler ist eine eigene Klasse: Lauf abbrechen, der
+				// Fall wird beim Resume nachgeholt (er steht nicht in der Datei).
 				if sink != nil && run.callErr == nil {
 					if err := sink.write(newDumpRecord(j.axis, *run, cfg.GenStamp)); err != nil {
-						run.callErr = err
-						fmt.Fprintf(os.Stderr, "[dump-append] %s/%s: %v\n", j.axis, run.c.ID, err)
+						sinkErrOnce.Do(func() {
+							sinkErr = fmt.Errorf("%w: %s/%s: %w", ErrDumpWrite, j.axis, run.c.ID, err)
+							cancel()
+						})
 					}
 				}
 			}
@@ -373,10 +405,22 @@ func executeJobs(ctx context.Context, cfg Config, jobs []job, axisRuns map[strin
 		CompletionTokens: complToks.Load(),
 		ReasoningTokens:  reasonToks.Load(),
 	}
+	if sinkErr != nil {
+		return sinkErr
+	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("goldbench: run abgebrochen: %w", err)
 	}
 	return nil
+}
+
+// executedCases liefert die in diesem Prozess gecallten Fälle (0 im Dry-Run).
+func executedCases(cfg Config, resumed, jobs int) int {
+	if cfg.DryRun || !cfg.DumpAppend {
+		return 0
+	}
+	_ = resumed
+	return jobs
 }
 
 // applyBudgetMult skaliert ein per-Achse-max_tokens-Budget mit dem
@@ -540,33 +584,102 @@ func dumpOutputs(path string, axes []string, axisRuns map[string][]caseRun, gen 
 // Verteilungen stumm mischen (design/02 §4.3 Stamp-Resume-Gate).
 var ErrDumpStamp = errors.New("goldbench: dump-append: gen-Stempel der Datei weicht vom Live-Stempel ab — Abbruch statt Append")
 
-// loadDumpDone liest eine bestehende Append-Datei und liefert das Done-Set
-// (axis → id → Record). Stamp-Gate: JEDE Zeile muss denselben gen-Stempel
-// tragen wie der Live-Lauf (nil == nil eingeschlossen). Fehlende Datei =
-// leeres Set. Eine Zeile ohne axis/id oder ein (axis,id)-Duplikat ist ein
-// Datenfehler (fail-closed — der Resume darf nicht raten).
-func loadDumpDone(path string, gen *GenStamp) (map[string]map[string]dumpRecord, error) {
-	done := map[string]map[string]dumpRecord{}
+// ErrDumpWrite: der Append-Sink konnte einen fertigen Fall nicht persistieren
+// (ENOSPC/EIO) — der Lauf bricht ab, der Fall wird beim Resume nachgeholt.
+var ErrDumpWrite = errors.New("goldbench: dump-append: Schreibfehler — Lauf abgebrochen")
+
+// ErrDumpLocked: die Append-Datei ist von einem anderen Prozess gesperrt
+// (flock) — zwei Treiber auf einer Datei schrieben Duplikate.
+var ErrDumpLocked = errors.New("goldbench: dump-append: Datei von einem anderen Prozess gesperrt (flock)")
+
+// doneRec ist der übernommene Anteil eines gedumpten Falls (nur was adopt
+// braucht — die Volltext-Prompts bleiben auf der Platte, Review KW3 F9).
+type doneRec struct {
+	Outputs []string
+	Usage   []CallUsage
+}
+
+// dumpDone ist das Done-Set einer Append-Datei.
+type dumpDone struct {
+	recs     map[string]map[string]doneRec // axis → id → letzter VOLLSTÄNDIGER Record
+	total    int                           // vollständige Records in der Datei
+	validLen int64                         // Byte-Länge bis zur letzten vollständigen Zeile (Torn-Tail-Toleranz)
+}
+
+func (d *dumpDone) lookup(axis, id string) (doneRec, bool) {
+	if d == nil {
+		return doneRec{}, false
+	}
+	r, ok := d.recs[axis][id]
+	return r, ok
+}
+
+// recComplete: ein Record zählt nur als erledigt, wenn jeder Slot einen Output
+// trägt und keinen Fehler — Legacy-/Fremd-Dumps (End-of-Run-Writer) enthalten
+// auch gescheiterte Fälle; die dürfen beim Resume nicht als erledigt einfrieren
+// (Review KW3 F2). Ein zweiter, vollständiger Record derselben (axis,id) nach
+// einem gescheiterten ist deshalb legitim und gewinnt; zwei VOLLSTÄNDIGE sind ein
+// Duplikat (Datenfehler, fail-closed).
+func recComplete(rec dumpRecord) bool {
+	if len(rec.Outputs) == 0 {
+		return false
+	}
+	for _, o := range rec.Outputs {
+		if o == "" {
+			return false
+		}
+	}
+	for _, u := range rec.Usage {
+		if u.Err != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// loadDumpDone liest eine bestehende Append-Datei und liefert das Done-Set.
+// Stamp-Gate: JEDE Zeile muss denselben gen-Stempel tragen wie der Live-Lauf.
+// Fehlende Datei = leeres Set. Eine Zeile ohne axis/id ist ein Datenfehler.
+// Torn-Tail: genau EINE unvollständige letzte Zeile ohne abschließendes
+// Newline (Abbruch mitten im Write) wird toleriert — validLen zeigt auf das
+// Ende der letzten vollständigen Zeile, der Appender schneidet dort ab
+// (Review KW3 F4); jeder andere Parse-Fehler bleibt fail-closed.
+func loadDumpDone(path string, gen *GenStamp) (*dumpDone, error) {
+	d := &dumpDone{recs: map[string]map[string]doneRec{}}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return done, nil
+		return d, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("goldbench: dump-append: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 1<<28)
+	rd := bufio.NewReaderSize(f, 1<<20)
+	var off int64
 	n := 0
-	for sc.Scan() {
+	for {
+		line, rerr := rd.ReadBytes('\n')
+		if len(line) == 0 && rerr != nil {
+			break
+		}
 		n++
-		line := sc.Bytes()
-		if len(strings.TrimSpace(string(line))) == 0 {
+		complete := len(line) > 0 && line[len(line)-1] == '\n'
+		trimmed := strings.TrimSpace(string(line))
+		if trimmed == "" {
+			off += int64(len(line))
+			if rerr != nil {
+				break
+			}
 			continue
 		}
 		var rec dumpRecord
-		if err := json.Unmarshal(line, &rec); err != nil {
-			return nil, fmt.Errorf("goldbench: dump-append: Zeile %d: %w", n, err)
+		if uerr := json.Unmarshal([]byte(trimmed), &rec); uerr != nil {
+			if !complete && rerr != nil {
+				// abgerissene Schlusszeile: tolerieren, Länge NICHT vorrücken
+				fmt.Fprintf(os.Stderr, "[dump-append] %s: abgerissene letzte Zeile %d (%d Bytes) wird verworfen und überschrieben\n", path, n, len(line))
+				break
+			}
+			return nil, fmt.Errorf("goldbench: dump-append: Zeile %d: %w", n, uerr)
 		}
 		if rec.Axis == "" || rec.ID == "" {
 			return nil, fmt.Errorf("goldbench: dump-append: Zeile %d ohne axis/id", n)
@@ -574,18 +687,23 @@ func loadDumpDone(path string, gen *GenStamp) (map[string]map[string]dumpRecord,
 		if !sameGenStamp(rec.Gen, gen) {
 			return nil, fmt.Errorf("%w (Zeile %d: Datei %s, Lauf %s)", ErrDumpStamp, n, genString(rec.Gen), genString(gen))
 		}
-		if done[rec.Axis] == nil {
-			done[rec.Axis] = map[string]dumpRecord{}
+		if recComplete(rec) {
+			if d.recs[rec.Axis] == nil {
+				d.recs[rec.Axis] = map[string]doneRec{}
+			}
+			if _, dup := d.recs[rec.Axis][rec.ID]; dup {
+				return nil, fmt.Errorf("goldbench: dump-append: Zeile %d: Duplikat (%s,%s) — zwei vollständige Records", n, rec.Axis, rec.ID)
+			}
+			d.recs[rec.Axis][rec.ID] = doneRec{Outputs: rec.Outputs, Usage: rec.Usage}
+			d.total++
 		}
-		if _, dup := done[rec.Axis][rec.ID]; dup {
-			return nil, fmt.Errorf("goldbench: dump-append: Zeile %d: Duplikat (%s,%s)", n, rec.Axis, rec.ID)
+		off += int64(len(line))
+		if rerr != nil {
+			break
 		}
-		done[rec.Axis][rec.ID] = rec
 	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("goldbench: dump-append: %w", err)
-	}
-	return done, nil
+	d.validLen = off
+	return d, nil
 }
 
 func sameGenStamp(a, b *GenStamp) bool {
@@ -605,12 +723,8 @@ func genString(g *GenStamp) string {
 
 // adopt übernimmt einen gedumpten Fall in den caseRun (Resume): Outputs und
 // usage-Slots wie persistiert, Zähler aus den Slots rekonstruiert.
-func (r *caseRun) adopt(rec dumpRecord) {
-	if len(rec.Outputs) == len(r.outputs) {
-		copy(r.outputs, rec.Outputs)
-	} else {
-		r.outputs = append([]string(nil), rec.Outputs...)
-	}
+func (r *caseRun) adopt(rec doneRec) {
+	copy(r.outputs, rec.Outputs)
 	r.usages = append([]CallUsage(nil), rec.Usage...)
 	for _, u := range r.usages {
 		if u.Finish == "length" {
@@ -626,14 +740,19 @@ func (r *caseRun) adopt(rec dumpRecord) {
 // fertigem Fall, mutex-serialisiert (alle Worker dieses Prozesses; genau ein
 // Prozess je Datei — die Treiber skippen auf Datei-Ebene), O_APPEND.
 type dumpAppender struct {
-	mu  sync.Mutex
-	f   *os.File
-	enc *json.Encoder
-	buf *bufio.Writer
-	n   int
+	mu   sync.Mutex
+	f    *os.File
+	enc  *json.Encoder
+	buf  *bufio.Writer
+	n    int
+	path string
 }
 
-func openDumpAppender(path string) (*dumpAppender, error) {
+// openDumpAppender öffnet die Append-Datei exklusiv (flock LOCK_EX|LOCK_NB —
+// ein zweiter Treiber auf derselben Datei bekommt ErrDumpLocked statt
+// Duplikate zu schreiben, Review KW3 F7) und schneidet eine abgerissene
+// Schlusszeile ab (validLen aus loadDumpDone; 0 = neue/leere Datei).
+func openDumpAppender(path string, validLen int64) (*dumpAppender, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("goldbench: dump-append: %w", err)
@@ -642,7 +761,17 @@ func openDumpAppender(path string) (*dumpAppender, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("goldbench: dump-append: chmod: %w", err)
 	}
-	a := &dumpAppender{f: f}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s: %w", ErrDumpLocked, path, err)
+	}
+	if st, err := f.Stat(); err == nil && validLen >= 0 && st.Size() > validLen {
+		if err := f.Truncate(validLen); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("goldbench: dump-append: truncate torn tail: %w", err)
+		}
+	}
+	a := &dumpAppender{f: f, path: path}
 	a.buf = bufio.NewWriterSize(f, 1<<20)
 	a.enc = json.NewEncoder(a.buf)
 	return a, nil
@@ -681,7 +810,8 @@ func (a *dumpAppender) Close() error {
 		_ = f.Close()
 		return fmt.Errorf("goldbench: dump-append: fsync: %w", err)
 	}
-	return f.Close()
+	fmt.Fprintf(os.Stderr, "[dump-append] %s: %d Fälle geschrieben, fsync ok\n", a.path, a.n)
+	return f.Close() // gibt auch das flock frei
 }
 
 // preflightDumpPath öffnet den Dump-Pfad wie dumpOutputs (O_NOFOLLOW, 0600,

@@ -63,7 +63,7 @@ func run() error {
 		dumpOut     = flag.String("dump-outputs", "", "JSONL-Pfad für die rohen Modell-Antworten (Dump-v2: axis,id,outputs + system/user/params/usage je Request-Slot, gen; 0600; Basis für offline-Re-Scoring)")
 		specConfig  = flag.String("spec-config", "", "JSON-Objekt {algorithm,drafter_path,drafter_sha256,gamma,engine_build,target_quant,kv_cache_dtype,train_step} — strukturierte Spec-Provenienz im Report-Env (drafter_path lokal lesbar ⇒ sha256 wird selbst berechnet und gegen die Deklaration geprüft)")
 		parseLog    = flag.String("parse-englog", "", "Standalone-Modus: Engine-Stdout-Log (vLLM/SGLang, auto-erkannt) parsen und SpecStats-JSON auf stdout ausgeben; kein Bench-Lauf (Exit 2 = keine Messfenster, 3 = mehrere Boots/Format)")
-		genStamp    = flag.String("gen-stamp", "", "JSON-Objekt {engine,engine_version,image,template_sha256} — Engine-Stempel je Dump-Zeile (Dump-v2, Korpus-Homogenität)")
+		genStamp    = flag.String("gen-stamp", "", "JSON-Objekt {engine,engine_version,image,template_sha256,model} — Engine-Stempel je Dump-Zeile (Dump-v2, Korpus-Homogenität; Pflicht mit -dump-append)")
 	)
 	flag.Parse()
 
@@ -126,11 +126,17 @@ func run() error {
 	if *dumpAppend && *dumpOut == "" {
 		return fmt.Errorf("-dump-append braucht -dump-outputs")
 	}
+	if *dumpAppend && *genStamp == "" {
+		return fmt.Errorf("-dump-append braucht -gen-stamp (Stamp-Resume-Gate; engine/engine_version/image/template_sha256/model)")
+	}
+	if *dumpAppend && *dryRun {
+		return fmt.Errorf("-dump-append mit -dry-run ist sinnlos (Dry-Run schreibt nie) — -dry-run ohne -dump-append fahren")
+	}
 
 	if *genStamp != "" {
 		var gs goldbench.GenStamp
 		if err := goldbench.DecodeStrictObject(*genStamp, &gs); err != nil {
-			return fmt.Errorf("-gen-stamp: %w (erlaubt: engine, engine_version, image, template_sha256)", err)
+			return fmt.Errorf("-gen-stamp: %w (erlaubt: engine, engine_version, image, template_sha256, model)", err)
 		}
 		if gs == (goldbench.GenStamp{}) {
 			return fmt.Errorf("-gen-stamp: leerer Stempel")
