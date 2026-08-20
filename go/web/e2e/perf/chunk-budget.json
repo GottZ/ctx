@@ -67,6 +67,7 @@
     "node-hover.js": 34000,
     "model.js": 29200,
     "graph-client.js": 17600,
-    "purify.es.js": 12800
+    "purify.es.js": 12800,
+    "SettingsPage.js": 11500
   }
 }

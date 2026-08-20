@@ -66,6 +66,8 @@ export interface SettingView {
   source: SettingSource
   default: unknown
   sensitive?: boolean
+  /** Registry description (config.keyDescriptions) — UI hint + search corpus. */
+  description?: string
 }
 
 // Source: go/internal/handler/settings.go (HandleList).
@@ -320,6 +322,17 @@ export interface DreamStatsResponse {
   unchecked: number
   pending_recheck: number
   backoff: DreamBackoffStats
+}
+
+// Source: go/internal/handler/context_manage.go (handleDreamBackoffRestamp) —
+// the dream-backoff-restamp manage action answer: how many block cooldown
+// stamps were recomputed under the current policy, and how many were left
+// alone because they carry a transient (minutes-scale) claim stamp.
+export interface DreamBackoffRestampResponse {
+  success: true
+  action: 'dream-backoff-restamp'
+  restamped: number
+  skipped_transient: number
 }
 
 // Source: go/internal/handler/status.go (llm24hRow) — telemetry aggregate, NO

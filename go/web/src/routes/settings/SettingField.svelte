@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { SettingView } from '../../lib/api/types'
+  import { highlightRanges, type FuzzyResult } from '../../lib/fuzzy'
+  import Highlight from '../../lib/components/Highlight.svelte'
   import {
     formatValue,
     isEditable,
@@ -10,9 +12,15 @@
   } from '../../lib/settings'
   import type { SettingsModel } from './model.svelte'
 
-  let { setting, model }: { setting: SettingView; model: SettingsModel } = $props()
+  let {
+    setting,
+    model,
+    result = null,
+  }: { setting: SettingView; model: SettingsModel; result?: FuzzyResult | null } = $props()
 
   const key = $derived(setting.key)
+  const keyRanges = $derived(result === null ? [] : highlightRanges(result.hits, 'key'))
+  const descRanges = $derived(result === null ? [] : highlightRanges(result.hits, 'description'))
   const widget = $derived(widgetFor(setting.type))
   const editable = $derived(isEditable(setting))
   const note = $derived(mutabilityNote(setting))
@@ -30,7 +38,7 @@
 
 <div class="field" class:dirty>
   <div class="head">
-    <label class="key" for={key}>{key}</label>
+    <label class="key" for={key}><Highlight text={key} ranges={keyRanges} /></label>
     <span class="badge source-{setting.source}" title="effective-value source">{setting.source}</span>
     {#if setting.sensitive}
       <span class="badge sensitive" title="secret-class key — values are masked everywhere">sensitive</span>
@@ -42,6 +50,10 @@
       <code class="env">{setting.env_var}</code>
     {/if}
   </div>
+
+  {#if setting.description}
+    <p class="desc"><Highlight text={setting.description} ranges={descRanges} /></p>
+  {/if}
 
   <div class="row">
     {#if widget === 'switch' && !setting.sensitive}
@@ -233,6 +245,13 @@
     margin: 0;
     font-size: var(--fs-xs);
     color: var(--text-faint);
+  }
+
+  .desc {
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    max-width: 72ch;
   }
 
   .problem {

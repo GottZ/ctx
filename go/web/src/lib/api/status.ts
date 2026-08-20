@@ -5,6 +5,7 @@
 
 import { apiFetch } from '../api'
 import type {
+  DreamBackoffRestampResponse,
   DreamStatsResponse,
   HealthStatus,
   LLMLogDetailResponse,
@@ -64,6 +65,20 @@ export function fetchDreamStats(): Promise<DreamStatsResponse> {
   return apiFetch<DreamStatsResponse>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'dream-stats' }),
+  })
+}
+
+/**
+ * Re-evaluate the back-off pipeline under the CURRENT policy (manage action;
+ * admin-gated server-side): every non-transient cooldown stamp is recomputed
+ * as dream_checked_at + curve(eval_count, last_inert). The settings curve
+ * editor calls this right after a Save of dream.backoff_* keys so the policy
+ * change governs the whole corpus immediately, not only future cycles.
+ */
+export function restampDreamBackoff(): Promise<DreamBackoffRestampResponse> {
+  return apiFetch<DreamBackoffRestampResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'dream-backoff-restamp' }),
   })
 }
 
