@@ -125,16 +125,27 @@ func TestHandlePut_RestartOnly409(t *testing.T) {
 // embed.model is mut:"coupled" — a hot flip would change the vector space
 // without a re-embed migration. Must stay 409 even though embed.HOST became
 // overridable (coupled:embed-cache, X2).
+// Since the superseded gate (Entflechtungs-Welle Stufe 1) embed.model 409s
+// as SUPERSEDED before the coupled branch is reached — every coupled key is
+// also an f3 backend-tuple key, so the pool pointer is the actionable
+// message (a legacy override would be a dead seed either way). The coupled
+// branch itself stays pinned below via a synthetic KeyInfo, so a future
+// coupled-but-not-superseded key keeps its re-embed hint.
 func TestHandlePut_CoupledModel409(t *testing.T) {
 	rec := settingsRouterAs(t, adminAR(), http.MethodPut, "/api/settings/embed.model", `{"value":"other-model"}`)
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 for coupled embed.model", rec.Code)
+		t.Fatalf("status = %d, want 409 for superseded+coupled embed.model", rec.Code)
 	}
 	var resp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	errMsg, _ := resp["error"].(string)
-	if !strings.Contains(errMsg, "re-embed") {
-		t.Errorf("error = %q, want re-embed migration hint", errMsg)
+	if !strings.Contains(errMsg, "backend pool") {
+		t.Errorf("error = %q, want backend-pool pointer (superseded wins over coupled)", errMsg)
+	}
+
+	msg, blocked := mutabilityBlock(config.KeyInfo{Key: "future.coupled", Mutability: "coupled"})
+	if !blocked || !strings.Contains(msg, "re-embed") {
+		t.Errorf("plain coupled branch = (%q, %v), want blocked with re-embed hint", msg, blocked)
 	}
 }
 
@@ -292,5 +303,39 @@ func TestBuild_EmbedHostOverrideAdmitted(t *testing.T) {
 	c2, _ := config.Build([]config.Override{{Key: "embed.model", Value: "other"}}, nil)
 	if c2.Source("embed.model") == "settings" {
 		t.Errorf("embed.model (coupled) must NOT be override-admissible")
+	}
+}
+
+// TestMutabilityBlockSuperseded pins the superseded gate (Entflechtungs-Welle
+// Stufe 1): a PUT on an f3:context_backends key must 409 with a pointer to
+// the backend pool — its settings override would be a dead bootstrap seed
+// that LOOKS live while the pool serves something else. Non-superseded hot
+// keys stay writable, and the restart/coupled messages keep their env hint.
+func TestMutabilityBlockSuperseded(t *testing.T) {
+	info, ok := config.KeyByName("chat.host")
+	if !ok {
+		t.Fatal("chat.host missing from registry")
+	}
+	if info.Superseded == "" {
+		t.Fatal("chat.host lost its superseded tag — this test guards the 409 gate")
+	}
+	msg, blocked := mutabilityBlock(info)
+	if !blocked {
+		t.Error("superseded key chat.host must be write-blocked")
+	}
+	if !strings.Contains(msg, "backend pool") {
+		t.Errorf("block message must point at the backend pool, got %q", msg)
+	}
+
+	// embed.host is coupled:embed-cache AND superseded — superseded wins.
+	embed, _ := config.KeyByName("embed.host")
+	if _, blocked := mutabilityBlock(embed); !blocked {
+		t.Error("embed.host (superseded + coupled:embed-cache) must be write-blocked")
+	}
+
+	// A live hot key stays writable.
+	hot, _ := config.KeyByName("dream.backoff_factor")
+	if _, blocked := mutabilityBlock(hot); blocked {
+		t.Error("dream.backoff_factor (hot, not superseded) must stay writable")
 	}
 }

@@ -20,6 +20,7 @@ type KeyInfo struct {
 	Tenancy    string // tenant-overridable | global-only (MT3-W2): the settings UI hides per-tenant editing on global-only keys
 	Default    any    // registry default, rendered like RenderValue
 	Desc       string // one-line operator description (keyDescriptions) — UI hint + search corpus
+	Superseded string // "" | "f3:context_backends": the value's living home moved (backend pool); the key remains as bootstrap seed only
 }
 
 // typeNames maps the registry leaf types to their wire names. The names are
@@ -62,6 +63,7 @@ var keyInfos = sync.OnceValue(func() []KeyInfo {
 			Tenancy:    e.Tenancy,
 			Default:    renderField(e, reflect.ValueOf(e.defVal), SurfaceAPI),
 			Desc:       desc,
+			Superseded: e.Superseded,
 		})
 	}
 	return out

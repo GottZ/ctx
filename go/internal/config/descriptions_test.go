@@ -32,3 +32,24 @@ func TestKeyInfosCarryDesc(t *testing.T) {
 		}
 	}
 }
+
+// TestSupersededExposed pins the API surface of the superseded tag: the 29
+// f3:context_backends keys carry it through Keys() (settings UI legacy
+// section + PUT 409), and structural keys do not.
+func TestSupersededExposed(t *testing.T) {
+	superseded := 0
+	for _, info := range Keys() {
+		if info.Superseded != "" {
+			superseded++
+			if info.Superseded != "f3:context_backends" {
+				t.Errorf("%s: unexpected superseded value %q", info.Key, info.Superseded)
+			}
+		}
+	}
+	if superseded != 29 {
+		t.Errorf("superseded key count = %d, want 29 (chat/chat_fallback/embed/dream/dream_embed/rerank tuples)", superseded)
+	}
+	if info, _ := KeyByName("dream.backoff_mode"); info.Superseded != "" {
+		t.Error("dream.backoff_mode must not be superseded")
+	}
+}

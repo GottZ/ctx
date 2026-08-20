@@ -91,6 +91,7 @@ type settingView struct {
 	Default    any    `json:"default"`
 	Sensitive  bool   `json:"sensitive,omitempty"`
 	Desc       string `json:"description,omitempty"`
+	Superseded string `json:"superseded,omitempty"`
 }
 
 // apiSource maps the snapshot source vocabulary to the API one: the override
@@ -184,6 +185,7 @@ func (h *SettingsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 			Default:    info.Default,
 			Sensitive:  info.Sensitive,
 			Desc:       info.Desc,
+			Superseded: info.Superseded,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "settings": views})
@@ -223,6 +225,7 @@ func (h *SettingsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 			Default:    info.Default,
 			Sensitive:  info.Sensitive,
 			Desc:       info.Desc,
+			Superseded: info.Superseded,
 		},
 		"audit": audit,
 	})
@@ -492,7 +495,14 @@ func actorID(r *http.Request) *string {
 
 // mutabilityBlock rejects writes on keys the override layer cannot serve
 // (§7.3: no pending-restart state in F2; coupled = vector space).
+// Superseded keys (f3:context_backends) block FIRST: their living value is a
+// backend-pool row — a settings override would write a dead bootstrap seed
+// that looks live in the UI while the pool serves something else. DELETE
+// stays allowed (removing a stale override is cleanup, not configuration).
 func mutabilityBlock(info config.KeyInfo) (string, bool) {
+	if info.Superseded != "" {
+		return fmt.Sprintf("%s is superseded by the backend pool — edit the pool row instead (web /settings/backends or `ctx backends`); the key remains only as a first-boot bootstrap seed", info.Key), true
+	}
 	switch info.Mutability {
 	case "hot", "coupled:embed-cache":
 		return "", false

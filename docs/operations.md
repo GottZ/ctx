@@ -68,6 +68,8 @@ Every var below can also carry a runtime override in `context_settings` (precede
 
 The **`mut` column** is the mutability class per key: **hot** keys take effect without a restart (snapshot consumers pick them up on the next request/cycle); **restart** keys are process wiring (DB connection, listener, worker-goroutine count — runtime writes rejected with 409); **coupled** keys carry a side-effect obligation (embed host/protocol changes flush `context_embed_cache` on apply; an embed **model** change changes the vector space, needs a re-embed migration and stays env-only, 409).
 
+**Superseded backend tuples.** The `CTX_{CHAT,CHAT_FALLBACK,EMBED,DREAM,DREAM_EMBED,RERANK}_*` connection tuples are **bootstrap seeds only**: they fill the initial backend-pool rows on a first boot with an empty pool and are inert afterwards — the pool rows (`ctx backends`, web `/settings/backends`) are the living configuration. Settings-writes on these 29 keys answer `409 superseded` ([Settings API](api.md#settings-api)); on an installed system the env values may simply be left empty. One exception still reads its legacy value at runtime: `CTX_EMBED_MODEL` feeds the status channel-probe (`status.channel_probe_interval`) — keep it set while that probe is enabled.
+
 | Var | Default | Mut | Purpose |
 |-----|---------|-----|---------|
 | `CTX_BASE_URL` / `CTX_KEY` | – | – | CLI client config (`~/.config/ctx/config`), not a server key |

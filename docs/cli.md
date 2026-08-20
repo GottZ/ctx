@@ -46,7 +46,7 @@ The `ctx` CLI reads its config from `~/.config/ctx/config` (`CTX_BASE_URL` + `CT
 
 | Command | Description |
 |---------|-------------|
-| `ctx settings [list\|get\|set\|unset]` | Runtime settings overrides (alias `cfg`; reads included). TTY: table, pipe: JSON; `get` leads with the key's registry description; `set` takes the value as argument or stdin; API failures (422/409/403) exit 1 with the server's reason |
+| `ctx settings [list\|get\|set\|unset]` | Runtime settings overrides (alias `cfg`; reads included). TTY: table, pipe: JSON; `get` leads with the key's registry description and flags superseded backend-tuple keys (pool is the living config); `set` takes the value as argument or stdin; API failures (422/409/403) exit 1 with the server's reason |
 | `ctx secrets [list\|set\|rotate\|rm]` | Sealed provider credentials (alias `sec`). Write-only: values go in via stdin ONLY (`echo "$KEY" \| ctx secrets set <name>` — an argv value is rejected, it would leak via /proc and shell history); list shows metadata + `referenced_by`, never values; `rm` exits 1 with a 409 while settings reference the secret |
 | `ctx backends [list\|create\|update\|delete\|test]` | LLM backend pool. TTY: table with live status, pipe: JSON; `create`/`update` take a JSON spec as argument or stdin; API failures exit 1 |
 | `ctx types [list\|get <name>]` | Block-type registry reads (**any valid key**): list the types visible to your key (shipped `_global` set + your tenant's overlay, each with a `source` badge) or inspect one type's policy config. TTY: table, pipe: JSON; a 404 (unknown/foreign type) exits 1 |
