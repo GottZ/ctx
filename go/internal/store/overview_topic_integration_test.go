@@ -292,10 +292,17 @@ func TestW7LegacyProbeUsesIndexes(t *testing.T) {
 		t.Fatalf("the probe does not bind BOTH existing indexes index-only:\n%s", got)
 	}
 
-	// RED PROBE: the pre-K2-5 shape on the same data.
+	// RED PROBE: the pre-K2-5 shape on the same data. Deliberately NOT pinned
+	// to "Seq Scan": the seq-vs-filtered-index choice for this shape is a
+	// knife-edge cost decision that flipped under concurrent package load on
+	// both harnesses (observed 2026-08-19 pre-template and 2026-08-20
+	// post-template — VACUUM ANALYZE runs above, so statistics are not the
+	// variable). The STRUCTURAL claim K2-5 makes is that the old shape can
+	// never be served index-only (it always pays heap visits for the
+	// topic_id filter) — assert exactly that instead of one loser plan.
 	red := plan(store.OverviewLegacyProbeSeqScanSQL)
-	if !strings.Contains(red, "Seq Scan on graph_cluster_node") {
-		t.Fatalf("red probe did not reproduce the sequential scan — the gate proves nothing:\n%s", red)
+	if strings.Contains(red, "Index Only Scan") {
+		t.Fatalf("red probe ran index-only — the gate proves nothing:\n%s", red)
 	}
 
 	// And it still answers the question the EXISTS answered. Unassigned rows
