@@ -163,6 +163,14 @@ func buildShared() {
 			"TS_TUNE_MEMORY":   "2GB",
 			"TS_TUNE_NUM_CPUS": "2",
 		}),
+		// No TimescaleDB background workers in the test cluster: no migration
+		// registers policies/jobs, so they are pure liability here — every
+		// per-test DROP DATABASE WITH (FORCE) tears down a per-DB scheduler
+		// worker, and that teardown races the launcher. The two CI postmaster
+		// deaths (runs 32363351979 + 32365157495, different tests, both
+		// mid-DROP/CREATE churn, never reproduced locally where the window is
+		// tiny) match that race, not OOM (oom_killed=false on inspection).
+		testcontainers.WithCmdArgs("-c", "timescaledb.max_background_workers=0"),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
