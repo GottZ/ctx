@@ -284,6 +284,12 @@ This matters operationally right now: the current in-process compute path peaks 
 
 `graph_overview.run_retention` (`CTX_GRAPH_OVERVIEW_RUN_RETENTION`, seconds, default 90 d, hot) trims the journal in batches after the rebuild tick, never inside the persist transaction. `0` keeps every row — a deliberate forensic window, not an accident.
 
+### Migration 131: `dream_last_inert` — the inert standing survives its stamp
+
+A dream cycle that writes no links stamps its block *further up* the same back-off curve (`dream.backoff_inert_offset`); until now that outcome lived only inside the resulting `dream_cooldown_until` value and was lost the moment you asked "what would this block's cooldown be under a *different* policy?". Migration 131 adds `context_blocks.dream_last_inert` (boolean, default `false`, metadata-only ADD COLUMN — no table rewrite at any corpus size): `SetDreamCooldown` records the cycle outcome alongside the stamp, and the `dream-backoff-restamp` manage action reads it to re-evaluate the whole corpus under a freshly saved policy **without** collapsing inert blocks onto the active base (at the default offset 7 / exp 1.6 that collapse would re-open mature inert blocks a factor ~29 too early and flood the dream queue after every save).
+
+No backfill, deliberately: historic stamps do not carry their policy generation, so the inert outcome is not reconstructible. Existing blocks read `false` on their *first* restamp (back-off only delays, never loses links) and converge to the true value with their next completed cycle.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.

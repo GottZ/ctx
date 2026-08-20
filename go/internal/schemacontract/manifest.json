@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 130,
-    "migration_count": 129,
+    "migration_max": 131,
+    "migration_count": 130,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -902,6 +902,12 @@
           "type": "text",
           "not_null": false,
           "storage": "x"
+        },
+        {
+          "name": "dream_last_inert",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
         }
       ],
       "row_security": false

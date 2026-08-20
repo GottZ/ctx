@@ -141,6 +141,11 @@ func TestActionTier_Classification(t *testing.T) {
 		// dream-link-resolve (curation wave 2026-07-26): tierOpen like
 		// guard-resolve — isolation is writableBlockScopes in the store layer.
 		{"dream-link-resolve", "", tierOpen},
+		// dream-backoff-restamp (Settings-Kurven-Welle): tierTenantAdmin — a
+		// bulk mutation of dream scheduling, isolated to the caller's OWN
+		// entitlement (HomeScope + AllowedScopes, never grant-widened
+		// ReadScopes) in the handler.
+		{"dream-backoff-restamp", "", tierTenantAdmin},
 		{"unknown-action", "", tierOpen},
 	}
 	for _, c := range cases {

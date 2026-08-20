@@ -15,6 +15,7 @@ import (
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -32,7 +33,43 @@ func (h *ManageHandler) dispatchDreamAction(w http.ResponseWriter, r *http.Reque
 		h.handleDreamMode(w, r, req)
 	case "dream-link-resolve":
 		h.handleDreamLinkResolve(w, r, ar, req)
+	case "dream-backoff-restamp":
+		h.handleDreamBackoffRestamp(w, r, ar)
 	}
+}
+
+// handleDreamBackoffRestamp re-evaluates every existing cooldown stamp under
+// the CURRENT back-off policy (dream.RestampBackoff): the settings UI calls
+// this right after a dream.backoff_* save, so the new curve governs the
+// whole corpus immediately instead of only future cycles (stamps written
+// under the old policy would otherwise persist for up to the old cap).
+//
+// Scope binding: HomeScope + AllowedScopes — the key's OWN entitlement,
+// deliberately NOT ar.ReadScopes: read scopes may carry cross-tenant grants
+// (T17), and a granted reader must not mutate a foreign tenant's dream
+// scheduling. The policy snapshot mirrors handleDreamStats so a stats fetch
+// right after the restamp renders exactly the applied generation.
+func (h *ManageHandler) handleDreamBackoffRestamp(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
+	ctx := r.Context()
+	reqID := RequestIDFromContext(ctx)
+	scopes := append([]string{ar.HomeScope}, ar.AllowedScopes...)
+	linkable := h.dreamLinkableTypes(ctx)
+	restamped, skippedTransient, err := dream.RestampBackoff(ctx, h.pool, scopes, linkable, h.cfg.Snapshot().DreamBackoff()) //nolint:forbidigo // MT 06 BLIND: dream back-off is a server-global scheduler policy (the dream loop is process-wide), not tenant-scoped — same marker as handleDreamStats.
+	if err != nil {
+		slog.Error("manage: dream-backoff-restamp failed", "error", err, "request_id", reqID)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "dream backoff restamp failed",
+		})
+		return
+	}
+	slog.Info("manage: dream back-off pipeline re-evaluated",
+		"restamped", restamped, "skipped_transient", skippedTransient, "request_id", reqID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":           true,
+		"action":            "dream-backoff-restamp",
+		"restamped":         restamped,
+		"skipped_transient": skippedTransient,
+	})
 }
 
 // handleDreamLinkResolve resolves ONE dream link (confirm|delete). Wire shape

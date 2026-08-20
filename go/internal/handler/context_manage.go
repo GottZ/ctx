@@ -173,7 +173,13 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// cyclop headroom (§9.2 conflict surface, max-complexity 25) — the
 		// guard trio moves to the established dispatch* helper pattern.
 		h.dispatchGuardAction(w, r, authResult, req)
-	case "dream-stats", "dream-review", "dream-mode", "dream-link-resolve":
+	case "dream-stats", "dream-review", "dream-mode", "dream-link-resolve",
+		// dream-backoff-restamp (Settings-Kurven-Welle): re-evaluates every
+		// cooldown stamp under the current policy after a dream.backoff_*
+		// save — folded into the dream family arm (cyclop budget); the tier
+		// (tierTenantAdmin, own-entitlement scope binding) lives in
+		// actionTier, not here (routing ⟂ tier).
+		"dream-backoff-restamp":
 		// Dream family folded into one arm (dream-link-resolve wave,
 		// 2026-07-26) — the guard-trio dispatch* idiom: the fold FREES two
 		// HandleManage branches while adding the curation action (cyclop
@@ -598,6 +604,15 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 			return tierServerAdmin, true
 		}
 		return tierOpen, true
+	case "dream-backoff-restamp":
+		// A corpus mutation, but tenant-isolated by construction: the handler
+		// binds the UPDATE to HomeScope + AllowedScopes (never the grant-widened
+		// ReadScopes), so a caller only re-schedules its OWN blocks — the A8
+		// precondition "open only what is already isolated". tierTenantAdmin
+		// matches the settings surface that triggers it (RequireAdminOrTenantAdmin
+		// gates the dream.backoff_* PUTs); a plain member must not bulk-rewrite
+		// dream scheduling. EXPLICIT entry mandatory (§5.1, S9-pinned).
+		return tierTenantAdmin, true
 	case "dream-link-resolve":
 		// Dream-link curation (2026-07-26): tierOpen like guard-resolve —
 		// the write gate is writableBlockScopes in the store layer

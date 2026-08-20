@@ -637,6 +637,55 @@ func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes, linkab
 	return out, nil
 }
 
+// RestampBackoff re-evaluates every existing cooldown stamp under the given
+// policy: dream_cooldown_until becomes dream_checked_at + curve(dream_eval_count,
+// dream_last_inert) — the same CASE as SetDreamCooldown, but WITHOUT the
+// count increment and anchored at the stored checked_at instead of now().
+// This is the immediacy half of a settings change: the policy itself is hot
+// for FUTURE cycles, but stamps written under the old curve would otherwise
+// govern the corpus for up to the old cap. Called by the manage action
+// dream-backoff-restamp right after a dream.backoff_* save.
+//
+// Transient claim stamps (an in-flight worker claim or a transient-error
+// retry, both minutes-scale) are recognized by their sub-hour span — the
+// curve's floor is 1h, SetDreamCooldownMinutes writes 5m — and left alone:
+// restamping a live claim would let a sibling worker pick the same block.
+// A new stamp landing in the past simply makes the block eligible now; the
+// scheduler pulls it on its normal cadence.
+func RestampBackoff(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string, bc BackoffConfig) (restamped, skippedTransient int64, err error) {
+	off := bc.InertOffset
+	row := pool.QueryRow(ctx,
+		`WITH eligible AS (
+			SELECT id, (dream_cooldown_until - dream_checked_at) < interval '1 hour' AS transient
+			FROM context_blocks
+			WHERE dream_checked_at IS NOT NULL
+			  AND dream_cooldown_until IS NOT NULL
+			  AND `+dreamEligibleWhere("$2")+`
+			  AND scope = ANY($1::text[])
+		), upd AS (
+			UPDATE context_blocks b SET
+				dream_cooldown_until = b.dream_checked_at + GREATEST(1.0, LEAST($6::float8,
+					CASE $7::text
+						WHEN 'exp'    THEN $3::float8 * power($4::float8, GREATEST(0, b.dream_eval_count - $5 + CASE WHEN b.dream_last_inert THEN $8 ELSE 0 END)::float8)
+						WHEN 'log'    THEN $3::float8 * (1 + $4::float8 * ln(1 + GREATEST(0, b.dream_eval_count - $5 + CASE WHEN b.dream_last_inert THEN $8 ELSE 0 END)::float8))
+						WHEN 'linear' THEN $3::float8 + $4::float8 * 24.0 * GREATEST(0, b.dream_eval_count - $5 + CASE WHEN b.dream_last_inert THEN $8 ELSE 0 END)::float8
+						ELSE (CASE WHEN b.dream_last_inert THEN $9::float8 ELSE $10::float8 END) * 24.0
+					END
+				)) * interval '1 hour'
+			FROM eligible e
+			WHERE b.id = e.id AND NOT e.transient
+			RETURNING b.id
+		)
+		SELECT (SELECT count(*) FROM upd), (SELECT count(*) FROM eligible WHERE transient)`,
+		scopes, linkable, bc.MinHours, bc.Factor, bc.Grace, bc.CapHours, bc.Mode,
+		off, float64(CooldownInertDays), float64(CooldownActiveDays),
+	)
+	if err := row.Scan(&restamped, &skippedTransient); err != nil {
+		return 0, 0, fmt.Errorf("dream: backoff restamp: %w", err)
+	}
+	return restamped, skippedTransient, nil
+}
+
 // SetDreamCooldown marks a block as dream-checked, increments its completed-cycle
 // counter, and sets the back-off cooldown (in hours) derived from the new count.
 // inert=true (no links found this cycle) applies the inert offset so the block
@@ -655,6 +704,7 @@ func SetDreamCooldown(ctx context.Context, pool *pgxpool.Pool, blockID string, i
 		`UPDATE context_blocks SET
 			dream_eval_count = dream_eval_count + 1,
 			dream_checked_at = now(),
+			dream_last_inert = $8::bool,
 			dream_cooldown_until = now() + GREATEST(1.0, LEAST($5::float8,
 				CASE $6::text
 					WHEN 'exp'    THEN $2::float8 * power($3::float8, GREATEST(0, (dream_eval_count + 1) - $4 + $7)::float8)
