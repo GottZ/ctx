@@ -212,15 +212,25 @@ func TestValidateLanguageDefaultIsLegacy(t *testing.T) {
 }
 
 // TestValidateTemporalTimeoutBudget pins the derived V16b threshold against
-// the number the operations docs name. The constant is computed from the
-// dream constants, so a retune there moves it silently — this test is where
-// the move becomes visible and the docs clause gets corrected.
+// the number the operations docs name. The budget is computed from the
+// effective (hot) cycle deadline, so a retune there moves it silently — this
+// test is where the move becomes visible and the docs clause gets corrected.
 func TestValidateTemporalTimeoutBudget(t *testing.T) {
-	if temporalTimeoutBudget != 400*time.Second {
-		t.Errorf("temporal timeout budget = %v, want 400s (docs/operations.md names it)", temporalTimeoutBudget)
+	// Default (unset) cycle: package CycleTimeout 700 → budget 400.
+	if got := temporalTimeoutBudgetOf(&Config{Dream: DreamConfig{CycleTimeout: 0}}); got != 400*time.Second {
+		t.Errorf("temporal timeout budget (default cycle) = %v, want 400s (docs/operations.md names it)", got)
 	}
+	// The package constant is the fallback default; a configured
+	// dream.cycle_timeout must not change it.
 	if dream.CycleTimeout != 700*time.Second {
-		t.Errorf("dream cycle timeout = %v, want 700s (docs/operations.md names it)", dream.CycleTimeout)
+		t.Errorf("dream.CycleTimeout = %v, want 700s (the package default)", dream.CycleTimeout)
+	}
+	// A raised cycle timeout widens the budget: 2400 − keywords 120 − eval
+	// 180 = 2100, so a temporal_timeout that used to WARN (V16b) no longer
+	// does once the cycle is raised — the whole point of making the cycle
+	// configurable.
+	if got := temporalTimeoutBudgetOf(&Config{Dream: DreamConfig{CycleTimeout: 2400 * time.Second}}); got != 2100*time.Second {
+		t.Errorf("temporal timeout budget (2400s cycle) = %v, want 2100s", got)
 	}
 }
 

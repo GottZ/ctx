@@ -55,6 +55,13 @@ type Router struct {
 	// timeouts.dream entry on the serving row wins (Backend.TimeoutFor in the
 	// llm.ChatChainVia walk), because the call resolves under role dream.
 	TemporalTimeout time.Duration
+	// CycleTimeout bounds the WHOLE dream cycle (seconds) — the enclosing
+	// context.WithTimeout in RunDreamCycle. 0 = the package CycleTimeout
+	// default (legacy behavior). Set from config.Dream.CycleTimeout by the
+	// scheduler (newRouter); resolved via CycleTimeoutFor, which falls back
+	// to the constant when unset so a missing value never changes the
+	// cycle's deadline.
+	CycleTimeout time.Duration
 	// Language is the daily-synthesis report language, read from config
 	// Dream.Language by the caller that builds the router (scheduler:
 	// per-iteration; synthesize handler: per-request — so the hot key is
