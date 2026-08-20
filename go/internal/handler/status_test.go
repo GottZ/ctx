@@ -165,9 +165,14 @@ func TestStatusGoldenKeys(t *testing.T) {
 		Success:  true,
 		Health:   healthResponse{Status: "ok", Services: map[string]string{"database": "ok"}},
 		Backends: []backends.BackendStatus{{ID: "b1", Name: "n", Trust: backends.TrustFull, Roles: []string{"chat"}, EffectiveState: "active"}},
-		Dream:    dreamStatus{Mode: "on", NextPendingAt: &next},
-		LLM24h:   []llm24hRow{{Backend: "n", Pipeline: "p"}},
-		Profiles: &[]statusProfile{{Name: "eject", Scope: "_global", Label: "Eject-Modus", Active: false, MemberCount: 2}},
+		// A02-W4 (design/02 §4.1c): the named-reason line. Server-admin-only and
+		// omitempty — this fixture pins the PRESENT wire shape; the empty-pool
+		// derivation and the absent case live in TestStatusAdvisoryEmptyPool, the
+		// public-surface boundary in TestHealthBodyOmitsPoolAdvisory.
+		Advisories: []advisoryRow{{Subject: backends.AdvisorySubjectPool, State: backends.AdvisoryStateEmpty}},
+		Dream:      dreamStatus{Mode: "on", NextPendingAt: &next},
+		LLM24h:     []llm24hRow{{Backend: "n", Pipeline: "p"}},
+		Profiles:   &[]statusProfile{{Name: "eject", Scope: "_global", Label: "Eject-Modus", Active: false, MemberCount: 2}},
 		// MW12: server-admin fixture carries the full dispatch section (one
 		// target + one bucket) so the wire shape is pinned; dispatch_tenant
 		// stays null on the admin path.
@@ -252,7 +257,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	assertKeys(t, "status", b, []string{
-		"success", "as_of", "health", "backends", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
+		"success", "as_of", "health", "backends", "advisories", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
 		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall", "embed_migration", "guard_review",
 		"guard_review_by_scope",
 	})
@@ -261,6 +266,14 @@ func TestStatusGoldenKeys(t *testing.T) {
 	if err := json.Unmarshal(b, &top); err != nil {
 		t.Fatalf("unmarshal top: %v", err)
 	}
+	// A02-W4: the advisory row's wire shape — {subject, state}, a closed pair,
+	// no prose field a consumer would have to parse.
+	var advs []json.RawMessage
+	if err := json.Unmarshal(top["advisories"], &advs); err != nil {
+		t.Fatalf("unmarshal advisories: %v", err)
+	}
+	assertKeys(t, "advisories.row", advs[0], []string{"subject", "state"})
+
 	assertKeys(t, "dream", top["dream"], []string{
 		"mode", "throttle_interval_s", "pickable_now", "in_cooldown", "never_dreamed",
 		"awaiting_embed", "incoming_1h", "incoming_6h", "next_pending_at", "last_cycle_at",
@@ -633,6 +646,77 @@ func TestChannelProbeNoEmbedBackend(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStatusAdvisoryEmptyPool is the A02-W4 gate (design/02 §7 W4): an empty
+// backend pool yields the NAMED reason `backend_pool: empty` on the admin
+// status frame, and a pool that holds rows yields no advisory key at all. The
+// negative half is the load-bearing one — an advisory that also fires on a
+// seeded system is noise, and noise is how a real fresh-install signal gets
+// ignored.
+func TestStatusAdvisoryEmptyPool(t *testing.T) {
+	c := &StatusCollector{}
+
+	t.Run("empty pool names the reason", func(t *testing.T) {
+		resp := c.assemble(&cheapSnapshot{backends: nil}, nil, nil)
+		if len(resp.Advisories) != 1 {
+			t.Fatalf("advisories = %+v, want exactly the one empty-pool reason", resp.Advisories)
+		}
+		got := resp.Advisories[0]
+		if got.Subject != backends.AdvisorySubjectPool || got.State != backends.AdvisoryStateEmpty {
+			t.Errorf("advisory = %+v, want {%s %s}", got, backends.AdvisorySubjectPool, backends.AdvisoryStateEmpty)
+		}
+		b, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(b), `"advisories":[{"subject":"backend_pool","state":"empty"}]`) {
+			t.Errorf("wire = %s, want the explicit backend_pool/empty advisory", b)
+		}
+		// The advisory explains the SAME array the frame serves: `backends` is
+		// [] here, and only the named reason tells that apart from a section
+		// that was never filled.
+		if !strings.Contains(string(b), `"backends":[]`) {
+			t.Errorf("wire = %s, want the empty backends array the advisory explains", b)
+		}
+	})
+
+	t.Run("seeded pool carries no advisory", func(t *testing.T) {
+		resp := c.assemble(&cheapSnapshot{
+			backends: []backends.BackendStatus{{
+				ID: "b1", Name: "chat-primary", Trust: backends.TrustFull,
+				Roles: []string{backends.RoleSynthesis}, EffectiveState: "active",
+			}},
+		}, nil, nil)
+		if len(resp.Advisories) != 0 {
+			t.Errorf("advisories = %+v on a seeded pool, want none", resp.Advisories)
+		}
+		b, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		// omitempty: the key must be ABSENT, not an empty array — a seeded
+		// installation keeps the pre-W4 key set byte-identical.
+		if strings.Contains(string(b), `"advisories"`) {
+			t.Errorf("wire = %s, want no advisories key at all on a seeded pool", b)
+		}
+	})
+
+	// A disabled row is still a row: the advisory is a POOL-EMPTINESS signal,
+	// not a serving-eligibility one. Serving eligibility already has its own
+	// named states (channel_probe.state, effective_state) — folding them in
+	// here would give one name two meanings.
+	t.Run("disabled rows are not an empty pool", func(t *testing.T) {
+		resp := c.assemble(&cheapSnapshot{
+			backends: []backends.BackendStatus{{
+				ID: "b1", Name: "chat-primary", Trust: backends.TrustFull,
+				Roles: []string{backends.RoleSynthesis}, Enabled: false, EffectiveState: "disabled",
+			}},
+		}, nil, nil)
+		if len(resp.Advisories) != 0 {
+			t.Errorf("advisories = %+v, want none — a disabled row is not an empty pool", resp.Advisories)
+		}
+	})
 }
 
 // TestBuildStatusProfiles is the U01-W7 status-frame gate (replaces the retired

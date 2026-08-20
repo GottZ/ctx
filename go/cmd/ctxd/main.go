@@ -41,6 +41,27 @@ func backendBootstrapInput(c *config.Config) backends.BootstrapInput {
 	}
 }
 
+// advisePoolEmptyBoot logs the A02-W4 empty-pool advisory (design/02 §4.1c).
+// Once the seed path leaves the boot, an empty context_backends is the ordinary
+// state of a fresh install until someone seeds it — no chain serves, every query
+// dies on the embed call, and nothing in the boot log says why. This names the
+// reason at the one moment the operator is watching, and names it the SAME way
+// the admin status surface does (backends.AdvisorySubjectPool/AdvisoryStateEmpty
+// → `backend_pool: empty`), so a log line and a status frame describe one state
+// with one vocabulary.
+//
+// Fires on EVERY boot, not just the first: a pool emptied later is the same
+// state as one never seeded. Deliberately NOT folded into the neighbouring
+// reload error — a failed Reload keeps the previous snapshot (pool.go), so a
+// genuinely empty pool only ever arrives on the success path.
+func advisePoolEmptyBoot(p *backends.Pool) {
+	if len(p.Snapshot()) != 0 {
+		return
+	}
+	slog.Warn("backends: pool is empty — no LLM roles will serve; seed via 'ctx backends seed' or the web UI (docs/operations.md#backends)",
+		"advisory", backends.AdvisorySubjectPool, "state", backends.AdvisoryStateEmpty)
+}
+
 // defaultListenAddr mirrors the registry default for server.listen_addr
 // (pinned against drift by TestBootDefaults). The -health mode needs it
 // WITHOUT the full config load: it must work in a crash-looping container
@@ -254,6 +275,8 @@ func main() {
 	if err := backendPool.Reload(ctx); err != nil {
 		slog.Error("backends: initial reload failed — pool starts empty", "error", err)
 	}
+	// A02-W4 (design/02 §4.1c): name the empty pool in the boot log.
+	advisePoolEmptyBoot(backendPool)
 	// A04-W4 (design/04 §3.2b): the boot half of the embed-cache coupled diff.
 	// The listener's diff rides the NOTIFY funnel and therefore only sees edits
 	// made while this process runs; a pool row or disable profile edited by psql

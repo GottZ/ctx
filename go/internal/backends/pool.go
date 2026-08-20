@@ -667,6 +667,26 @@ type BackendStatus struct {
 	LastOK             string   `json:"last_ok,omitempty"`
 }
 
+// AdvisorySubjectPool and AdvisoryStateEmpty name the empty-pool advisory
+// (design/02 §4.1c, A02-W4). Rendered as `backend_pool: empty`, they are the
+// ONE named reason for "this pool holds no rows at all" — a state that becomes
+// NORMAL once the seed path leaves the boot: a fresh install has an empty pool
+// until someone seeds it, and nothing about that is a fault. It needs a name
+// because the wire cannot otherwise tell it apart: an empty `backends` array
+// reads identically whether the pool is empty or the section was never filled
+// (the probeRow.State precedent, status_db.go).
+//
+// The pair belongs in the boot log and on the ADMIN-AUTHENTICATED status
+// surface ONLY. It deliberately does NOT reach the public /health body:
+// /health is unauthenticated, uncached and public (pingHost's doctrine,
+// health.go), so a named "freshly provisioned, not yet configured" marker
+// there would be an anonymous fingerprinting signal in exactly the window of
+// weakest supervision. /health keeps its generic `unhealthy`.
+const (
+	AdvisorySubjectPool = "backend_pool"
+	AdvisoryStateEmpty  = "empty"
+)
+
 // Status merges the current snapshot with live health for the admin surface.
 func (p *Pool) Status() []BackendStatus {
 	snap := p.snap.Load()

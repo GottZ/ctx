@@ -147,6 +147,13 @@ func TestStatusPerTenantView(t *testing.T) {
 		if strings.Contains(string(b), `"embed_migration"`) {
 			t.Errorf("tenant /api/status wire payload carries an embed_migration key (metadata leak, Bruchpfad 9): %s", b)
 		}
+		// A02-W4 (design/02 §4.1c): the named empty-pool reason describes the
+		// GLOBAL serving topology — server-admin-only, same wire-absence pin.
+		// A tenant sees its own scope's backends; whether the server as a whole
+		// has ever been seeded is not its business.
+		if strings.Contains(string(b), `"advisories"`) {
+			t.Errorf("tenant /api/status wire payload carries an advisories key (server-global leak): %s", b)
+		}
 	})
 
 	t.Run("dispatch_exposure_matrix", func(t *testing.T) {

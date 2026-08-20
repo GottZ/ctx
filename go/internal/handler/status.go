@@ -125,6 +125,22 @@ type statusResponse struct {
 	Dream          dreamStatus              `json:"dream"`
 	LLM24h         []llm24hRow              `json:"llm_24h"`
 	LLM24hComplete bool                     `json:"llm_24h_complete"`
+	// Advisories carries the server-admin-only NAMED reasons for states the
+	// rest of the frame can only show as an absence (A02-W4, design/02 §4.1c).
+	// Today exactly one rides here: `backend_pool: empty`. It exists because
+	// Backends above normalises nil to [] (assemble) — an empty pool and a
+	// section that was never filled render as the same two bytes, and only a
+	// name tells a fresh install ("nobody has seeded yet") from a fault. This
+	// is the pool-wide relative of channel_probe.state (status_db.go, A04-W2):
+	// same posture, one level up.
+	//
+	// omitempty + server-admin-only, the Profiles/DB/GraphCache convention
+	// (:144/:162): PRESENT only when there IS something to say, and ABSENT on
+	// the per-tenant path (SnapshotForTenant never calls assemble — global
+	// serving topology is server-global and goes tenants nothing). The named
+	// reason must NOT reach the public /health body either; that boundary is
+	// its own negative needle in health_test.go.
+	Advisories []advisoryRow `json:"advisories,omitempty"`
 	// Profiles is the disable-profile registry line (U01-W7): the {name, scope,
 	// label, active, member_count} of every profile in the pool snapshot, ORDER
 	// BY name (the diffKey-stable order, §4.5-5). It REPLACES the retired
@@ -224,6 +240,17 @@ type statusResponse struct {
 	// TestStatusEventCarriesEveryDualPathField — the push frame cannot carry a
 	// per-caller predicate before the per-scope frame build (S11).
 	GuardReviewByScope map[string]*guardReviewStatus `json:"guard_review_by_scope,omitempty"`
+}
+
+// advisoryRow is one named reason on the admin status surface (A02-W4):
+// {subject, state}, both from a closed vocabulary defined next to the thing
+// they describe (backends.AdvisorySubjectPool / AdvisoryStateEmpty). Two
+// fields, not one prose string, so a consumer can switch on the state instead
+// of matching a sentence — and so the pair stays greppable when a later wave
+// adds a second subject.
+type advisoryRow struct {
+	Subject string `json:"subject"`
+	State   string `json:"state"`
 }
 
 // guardReviewStatus is the /api/status guard_review block wire shape (guard
@@ -1303,11 +1330,21 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 	if pf == nil {
 		pf = []statusProfile{}
 	}
+	// A02-W4: the empty-pool advisory, derived from the SAME slice this frame
+	// serves as `backends` (not from a second backendPool call) — so the reason
+	// can never contradict the array it explains, even across a reload landing
+	// mid-tick. nil when there is nothing to say → the key is omitted, and the
+	// pre-W4 key set stays byte-identical for every seeded installation.
+	var adv []advisoryRow
+	if len(be) == 0 {
+		adv = []advisoryRow{{Subject: backends.AdvisorySubjectPool, State: backends.AdvisoryStateEmpty}}
+	}
 	return statusResponse{
 		Success:        true,
 		AsOf:           cheap.asOf,
 		Health:         cheap.health,
 		Backends:       be,
+		Advisories:     adv,
 		Dream:          d,
 		LLM24h:         l,
 		LLM24hComplete: cheap.llm24hComplete,
