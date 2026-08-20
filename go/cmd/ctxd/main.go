@@ -254,6 +254,19 @@ func main() {
 	if err := backendPool.Reload(ctx); err != nil {
 		slog.Error("backends: initial reload failed — pool starts empty", "error", err)
 	}
+	// A04-W4 (design/04 §3.2b): the boot half of the embed-cache coupled diff.
+	// The listener's diff rides the NOTIFY funnel and therefore only sees edits
+	// made while this process runs; a pool row or disable profile edited by psql
+	// with ctxd stopped leaves no notification behind, and the listener baseline
+	// is then taken FROM that edited pool. This compares the loaded pool against
+	// the fingerprint on record (migration 132) and flushes context_embed_cache
+	// if they differ. Runs here — after the reload, before the scheduler builds
+	// the listener — so stamp and in-memory baseline describe one topology.
+	// Non-fatal like the two steps above; nothing is stamped on a failing path,
+	// so the next boot retries.
+	if err := events.ReconcileCoupledFingerprint(ctx, pool, backendPool); err != nil {
+		slog.Error("backends: embed-cache coupled fingerprint reconcile failed — stale vectors may serve until the next boot or coupled write", "error", err)
+	}
 
 	// Vorhaben E (wave MW2, carrying the W1 construction leftover — design/01
 	// §7 W1: "Konstruktion in cmd/ctxd/main.go, Reload-Anbindung"): the ONE

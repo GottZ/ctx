@@ -295,6 +295,8 @@ fi
 # sobald die deployte CLI "contract" kennt — kein Script-Change nötig.
 #
 # ⚠ Die Fallback-Zahlen sind handgepflegt und hängen am Migrations-Stand:
+# 56/42 gilt ab Migration 132 (context_embed_cache_meta — der Boot-Abgleich des
+# Embed-Caches, Achse 04/A04-W4); 55/42 ab Mig 131 (dream_last_inert);
 # 55/41 gilt ab Migration 130 (graph_overview_run — das Lauf-Journal der
 # Wurzel-Map, Achse 04/S2); 54/41 ab Mig 129 (context_digest_state fällt;
 # 54/41 ab Mig 127 mit graph_cluster_topic_edge + _super + _super_member;
@@ -306,9 +308,10 @@ fi
 # gegen eine frisch migrierte DB und wird rot, wenn sie hier auseinanderlaufen.
 T="T07 SCHEMA_INTEGRITY"
 
-# Zähl-Fallback-Erwartung, an Migration 131 gebunden (siehe Kommentar oben;
-# 131 fügt context_blocks.dream_last_inert hinzu → 42 Spalten).
-T07_EXPECT_TABLES=55
+# Zähl-Fallback-Erwartung, an Migration 132 gebunden (siehe Kommentar oben;
+# 131 fügt context_blocks.dream_last_inert hinzu → 42 Spalten; 132 fügt die
+# Tabelle context_embed_cache_meta hinzu → 56 Tabellen).
+T07_EXPECT_TABLES=56
 T07_EXPECT_COLUMNS=42
 
 t07_count_fallback() {
@@ -319,7 +322,7 @@ t07_count_fallback() {
   if [[ "$tc" == "$T07_EXPECT_TABLES" ]] && [[ "$col" == "$T07_EXPECT_COLUMNS" ]]; then
     pass "$T (contract-CLI nicht verfügbar — Zähl-Fallback (Prä-Deploy); tables=$tc, columns=$col; $reason)"
   else
-    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 131), got tables=$tc columns=$col"
+    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 132), got tables=$tc columns=$col"
   fi
 }
 

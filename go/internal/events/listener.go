@@ -128,8 +128,9 @@ type SettingsWriteHandler struct {
 // construction. Boot publishes the first pool snapshot BEFORE the listener is
 // built (cmd/ctxd/main.go), so the baseline is the live serving topology and a
 // boot without an intervening edit diffs empty — W3 never flushes at boot. The
-// remaining boot case (an edit made while ctxd was down) is W4's persisted
-// fingerprint, deliberately not this wave.
+// remaining boot case (an edit made while ctxd was down) is covered since W4 by
+// the persisted fingerprint (ReconcileCoupledFingerprint, coupled_fingerprint.go),
+// which main.go runs against the same loaded pool before this handler exists.
 func NewSettingsWriteHandler(pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool, blocktypes *blocktype.Registry) *SettingsWriteHandler {
 	return &SettingsWriteHandler{
 		pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes,
@@ -220,6 +221,15 @@ func (h *SettingsWriteHandler) flushIfCoupledChanged(ctx context.Context) {
 		return
 	}
 	h.coupledPrev = cur
+	// A04-W4: the in-memory stand alone dies with the process. Stamping the
+	// same set on record is what keeps the NEXT boot from re-diffing against a
+	// pre-flush fingerprint and flushing a cache this one already emptied — and
+	// it is what makes the boot check see only the edits it is there for.
+	// A failed stamp is logged, not returned: the flush already happened, so the
+	// worst case is one redundant flush at the next boot (fail-closed).
+	if err := storeCoupledFingerprint(ctx, h.pool, cur); err != nil {
+		slog.Error("listener: persisting embed-cache coupled fingerprint failed — the next boot re-diffs against the stale stamp and may flush again", "error", err)
+	}
 	slog.Info("listener: embed-cache-coupled pool topology changed — flushed context_embed_cache",
 		"rows", n, "pairs", len(cur))
 }

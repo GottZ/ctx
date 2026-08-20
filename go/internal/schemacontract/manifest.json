@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 131,
-    "migration_count": 130,
+    "migration_max": 132,
+    "migration_count": 131,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1277,6 +1277,35 @@
         },
         {
           "name": "last_access",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_embed_cache_meta": {
+      "columns": [
+        {
+          "name": "singleton",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "coupled_fingerprint",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "coupled_pair_n",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
           "type": "timestamp with time zone",
           "not_null": true,
           "storage": "p"
@@ -4071,6 +4100,9 @@
     },
     "context_dream_links_pkey": {
       "def_hash": "55d64774e009cb873d103d3c7aa445304fddbf25cd8a1791f0c9c3ffff3dd109"
+    },
+    "context_embed_cache_meta_pkey": {
+      "def_hash": "54d9edd408069d98ba56280701971e2d61e4aeab86bbdbe0087ab0555daba4bd"
     },
     "context_embed_cache_pkey": {
       "def_hash": "4f1bd9c1ec05f655c3c25785f75ecc4fa840f92a7db43181be0f8e30d4121b6f"
