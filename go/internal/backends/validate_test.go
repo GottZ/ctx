@@ -365,6 +365,55 @@ func TestVersionedRootRejected(t *testing.T) {
 	}
 }
 
+// TestValidateUserinfoRejected is the pool-side pendant of the config check
+// V7 (validateHostURL): a base_url carrying userinfo is a write-time 422, and
+// the rejection itself must not repeat the credential — the error text is the
+// one place a leak would reappear after the guard fired.
+func TestValidateUserinfoRejected(t *testing.T) {
+	const needle = "sk-live-0123456789abcdef"
+
+	for _, host := range []string{
+		"https://x:" + needle + "@api.example.com",
+		"http://x:" + needle + "@api.example.com",
+		"https://" + needle + "@api.example.com", // username-only shape
+		"https://x:" + needle + "@api.example.com/base",
+	} {
+		b := validBackend()
+		b.Host = host
+		_, errs := ValidateBackend(&b)
+		if !fieldHit(errs, "base_url") {
+			t.Errorf("userinfo base_url %q passed validation", strings.Replace(host, needle, "REDACTED", 1))
+			continue
+		}
+		for _, e := range errs {
+			if strings.Contains(e.Message, needle) {
+				t.Errorf("credential echoed back in the %s error: %s", e.Field, e.Message)
+			}
+		}
+	}
+
+	// Empty userinfo is still userinfo — url.Parse yields a non-nil User.
+	b := validBackend()
+	b.Host = "https://@api.example.com"
+	if _, errs := ValidateBackend(&b); !fieldHit(errs, "base_url") {
+		t.Error("empty userinfo base_url passed validation")
+	}
+
+	// Negative: userinfo-free URLs stay accepted — including an @ in the
+	// path, which is not userinfo.
+	for _, host := range []string{
+		"https://api.example.com",
+		"http://backend.example:8089",
+		"https://api.example.com/tenant@acme",
+	} {
+		b := validBackend()
+		b.Host = host
+		if _, errs := ValidateBackend(&b); fieldHit(errs, "base_url") {
+			t.Errorf("userinfo-free base_url %q rejected", host)
+		}
+	}
+}
+
 func TestScoreDomainResolution(t *testing.T) {
 	b := Backend{}
 	if got := b.ScoreDomain(); got != ScoreDomainAuto {

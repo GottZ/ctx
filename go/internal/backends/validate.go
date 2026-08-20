@@ -128,8 +128,21 @@ func validateIdentity(b *Backend) (errs []FieldError) {
 	}
 
 	u, err := url.Parse(b.Host)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	switch {
+	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
 		errs = append(errs, FieldError{"base_url", "must be an absolute http(s) URL"})
+	case u.User != nil:
+		// Pool-side pendant of the config check V7. userinfo in base_url
+		// bypasses the field-name-based secret masking everywhere the host
+		// flows: it is echoed by every backend list/create response (the
+		// handler redacts api_key, not the URL), lands in error logs, and
+		// via the audit hook permanently in the append-only settings audit.
+		// Same opsec edge as headerDenylist above, same escape hatch:
+		// api_key_ref. The message never echoes anything derived from the
+		// input — url.Redacted() masks only the password and would still
+		// carry the username.
+		errs = append(errs, FieldError{"base_url",
+			"credentials in base_url are not allowed (they would leak into every list response, log line and the append-only audit) — use api_key_ref instead: create the secret first"})
 	}
 
 	errs = append(errs, validateVersionedRoot(b)...)

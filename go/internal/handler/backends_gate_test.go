@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -312,5 +313,100 @@ func TestBackendListNeverLeaksResolvedKeys(t *testing.T) {
 	}
 	if !strings.Contains(body, "openrouter-api-key") {
 		t.Fatal("api_key_ref (name) missing from backend-list")
+	}
+}
+
+// backendFieldErrors decodes the "fields" array of a writeBackendValidation
+// body and reports whether the named field is among them.
+func backendFieldErrors(t *testing.T, body string, field string) bool {
+	t.Helper()
+	var parsed struct {
+		Fields []backends.FieldError `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("decode validation body: %v (%s)", err, body)
+	}
+	for _, f := range parsed.Fields {
+		if f.Field == field {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBackendWriteRejectsUserinfo is the write-path half of the V7 pendant:
+// a base_url with embedded credentials is refused on create AND update, and
+// the credential surfaces nowhere afterwards. The needle probe covers the two
+// reachable sinks (response body, log stream); the third — the append-only
+// settings audit — is covered structurally: the store pool is nil here, so
+// any path reaching the audit hook would panic instead of returning 422
+// (same doctrine as manageReqWithPool).
+func TestBackendWriteRejectsUserinfo(t *testing.T) {
+	const needle = "sk-live-needle-0123456789abcdef"
+	const poisoned = "https://x:" + needle + "@api.example.com"
+
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	bp := backends.NewPool(nil, nil)
+	bp.SeedSnapshotForTest([]backends.Backend{{
+		ID: "0190-test", Name: "cloud", Host: "https://api.example.com",
+		Protocol: backends.ProtocolOpenAI, ProviderClass: backends.ProviderGeneric,
+		Trust: backends.TrustNoCredentials, Locality: backends.LocalityExternal,
+		Roles:    []string{backends.RoleSynthesis},
+		ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
+		Enabled:  true,
+	}})
+
+	for _, c := range []struct {
+		name string
+		req  map[string]any
+	}{
+		{"create", map[string]any{"action": "backend-create", "data": map[string]any{
+			"name": "cloud2", "base_url": poisoned, "locality": "external",
+			"roles": []string{"synthesis"}, "model_map": map[string]any{"default": "m"},
+		}}},
+		{"update", map[string]any{"action": "backend-update", "id": "0190-test",
+			"data": map[string]any{"base_url": poisoned}}},
+	} {
+		rec := manageReqWithPool(t, adminAR(), bp, c.req)
+		body := rec.Body.String()
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status %d, want 422 (body %s)", c.name, rec.Code,
+				strings.ReplaceAll(body, needle, "REDACTED"))
+			continue
+		}
+		if !backendFieldErrors(t, body, "base_url") {
+			t.Errorf("%s: no base_url field error: %s", c.name,
+				strings.ReplaceAll(body, needle, "REDACTED"))
+		}
+		if !strings.Contains(body, "api_key_ref") {
+			t.Errorf("%s: error does not name the escape hatch api_key_ref: %s", c.name, body)
+		}
+		if strings.Contains(body, needle) {
+			t.Errorf("%s: credential echoed in the response body", c.name)
+		}
+	}
+
+	if strings.Contains(logBuf.String(), needle) {
+		t.Errorf("credential leaked into the log stream: %s",
+			strings.ReplaceAll(logBuf.String(), needle, "LEAKED"))
+	}
+
+	// Negative: the same write without userinfo is NOT stopped by this guard —
+	// it runs past validation into the store layer, where the nil pgx pool
+	// panics; manageReqWithPool turns that panic into a Fatal, so the clean
+	// URL is probed at the validation boundary instead.
+	rec := manageReqWithPool(t, adminAR(), bp, map[string]any{
+		"action": "backend-update", "id": "0190-test",
+		"data": map[string]any{"base_url": "https://api.example.com", "model_map": map[string]any{}},
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("clean-URL probe: status %d, want 422 from the model_map gate", rec.Code)
+	}
+	if backendFieldErrors(t, rec.Body.String(), "base_url") {
+		t.Errorf("userinfo-free base_url rejected: %s", rec.Body.String())
 	}
 }
