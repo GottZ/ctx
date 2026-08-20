@@ -547,6 +547,17 @@ jobs:
             docker save timescale/timescaledb-ha:pg18 -o ~/.cache/docker-images/timescaledb-ha-pg18.tar
           fi
 
+      - name: Start docker-events recorder
+        run: |
+          # Runs for the job's lifetime; the post-mortem step reads the file.
+          # `docker events` names WHO ends a container (die/kill/oom + exit
+          # code + signal) — docker inspect's OOMKilled flag is notoriously
+          # false-negative under cgroup v2, and the ring buffer may be empty.
+          nohup docker events \
+            --filter type=container \
+            --format '{{.Time}} {{.Action}} {{.Actor.Attributes.name}} image={{.Actor.Attributes.image}} exitCode={{.Actor.Attributes.exitCode}} signal={{.Actor.Attributes.signal}}' \
+            > "$RUNNER_TEMP/docker-events.log" 2>&1 &
+
       - name: Resolve shard packages
         id: shard
         working-directory: go
@@ -580,10 +591,18 @@ jobs:
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             EXTRA_FLAGS="-v -coverprofile=coverage-integration.out -covermode=atomic"
           fi
+          # -p 1: one package binary — and therefore ONE shared Postgres
+          # container — at a time. The default (= NumCPU = 2 on these
+          # runners) ran two clusters with concurrent bulk seeds; three
+          # heavy-shard container deaths (runs 32363351979/32365157495/
+          # 32366043025, each mid-seed, exit=137, oom_killed=false, empty
+          # ring buffer) all happened under that doubled load profile the
+          # old seconds-lived containers never produced.
           go test \
             $EXTRA_FLAGS \
             -tags=integration \
             -count=1 \
+            -p 1 \
             -timeout=15m \
             ${{ steps.shard.outputs.packages }}
 
@@ -601,8 +620,15 @@ jobs:
             docker inspect "${id}" --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}'
             docker logs --tail 60 "${id}" 2>&1 || true
           done
-          echo "=== dmesg oom traces ==="
-          sudo dmesg 2>/dev/null | grep -iE "oom|killed process" | tail -20 || true
+          echo "=== docker events (recorder) ==="
+          grep -vE " (create|attach|connect|disconnect|start|exec_) " "$RUNNER_TEMP/docker-events.log" 2>/dev/null | tail -40 || true
+          echo "=== kernel log (oom traces) ==="
+          # dmesg came back EMPTY on these runners with stderr swallowed —
+          # try both sources unfiltered-tail so an access failure is visible.
+          sudo dmesg | tail -30 || echo "dmesg failed"
+          sudo journalctl -k --no-pager | grep -iE "oom|killed process" | tail -20 || true
+          echo "=== memory snapshot ==="
+          free -m || true
 
       - name: Upload integration coverage
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
