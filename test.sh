@@ -306,9 +306,10 @@ fi
 # gegen eine frisch migrierte DB und wird rot, wenn sie hier auseinanderlaufen.
 T="T07 SCHEMA_INTEGRITY"
 
-# Zähl-Fallback-Erwartung, an Migration 130 gebunden (siehe Kommentar oben).
+# Zähl-Fallback-Erwartung, an Migration 131 gebunden (siehe Kommentar oben;
+# 131 fügt context_blocks.dream_last_inert hinzu → 42 Spalten).
 T07_EXPECT_TABLES=55
-T07_EXPECT_COLUMNS=41
+T07_EXPECT_COLUMNS=42
 
 t07_count_fallback() {
   local reason="$1"
@@ -318,7 +319,7 @@ t07_count_fallback() {
   if [[ "$tc" == "$T07_EXPECT_TABLES" ]] && [[ "$col" == "$T07_EXPECT_COLUMNS" ]]; then
     pass "$T (contract-CLI nicht verfügbar — Zähl-Fallback (Prä-Deploy); tables=$tc, columns=$col; $reason)"
   else
-    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 129), got tables=$tc columns=$col"
+    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 131), got tables=$tc columns=$col"
   fi
 }
 
