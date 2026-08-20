@@ -52,7 +52,7 @@ func secretsCmd(getClient func() (*Client, error)) *cobra.Command {
 			"metadata and which settings keys reference each secret (secret_ref).",
 		Example: `  ctx secrets
   echo "$OPENROUTER_KEY" | ctx secrets set openrouter-main
-  ctx settings set chat.api_key openrouter-main
+  ctx backends update <id> '{"api_key_ref":"openrouter-main"}'
   ctx secrets rm openrouter-main`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSecretsList(getClient)
@@ -162,7 +162,7 @@ func runSecretsPut(getClient func() (*Client, error), name, value string) error 
 		PrintJSON(resp)
 		return err
 	}
-	fmt.Printf("%s: %sd (value sealed; reference it via a secret_ref setting, e.g. `ctx settings set chat.api_key %s`)\n",
+	fmt.Printf("%s: %sd (value sealed; reference it from a backend-pool row, e.g. `ctx backends update <id> '{\"api_key_ref\":\"%s\"}'`)\n",
 		payload.Name, payload.Action, payload.Name)
 	return nil
 }

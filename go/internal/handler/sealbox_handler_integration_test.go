@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -110,11 +111,25 @@ func TestSecretsAPI_Integration(t *testing.T) {
 			t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 		}
 		scanClean(rec, "PUT create")
-		rec = do(router, http.MethodPut, "/api/settings/chat.api_key", `{"value":"prov-main"}`)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("reference via settings: %d %s", rec.Code, rec.Body.String())
+		// Reference via SQL + reload: the settings PUT on chat.api_key 409s
+		// since the Entflechtungs-Welle (superseded backend-tuple key) — the
+		// row shape referenced_by/rotation propagate over is unchanged, and
+		// legacy rows from pre-wave installs still exist.
+		{
+			tx, err := pool.Begin(context.Background())
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			if err := store.UpsertSetting(context.Background(), tx, "chat.api_key", store.GlobalScope, json.RawMessage(`"prov-main"`), nil); err != nil {
+				t.Fatalf("upsert secret_ref: %v", err)
+			}
+			if err := tx.Commit(context.Background()); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			if err := settings.Reload(context.Background(), pool, cfgStore); err != nil {
+				t.Fatalf("reload: %v", err)
+			}
 		}
-		scanClean(rec, "PUT settings secret_ref")
 		if got := cfgStore.Snapshot().Chat.APIKey; got != valueA {
 			t.Fatalf("snapshot = %q, want value A resolved", got)
 		}

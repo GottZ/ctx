@@ -143,18 +143,24 @@ func TestSecretsTenantAPI_Integration(t *testing.T) {
 		// Tenant A opts in (operator-seeded, out of band — a tenant cannot self-grant).
 		seedSettingScope(t, pool, store.AllowSharedSecretsKey, "tenanta", `true`)
 
-		// A with opt-in: 200, the ref resolves via the gated _global fallback.
+		// Since the Entflechtungs-Welle the settings PUT on chat.api_key
+		// (superseded backend-tuple key) answers 409 for EVERY tier — the
+		// checkSecretRef opt-in validation guarded this now-closed write
+		// path; the resolve-side opt-in gate (settings.Reload fallback) and
+		// the cross-scope referenced_by scan (Gate 8) live on. The reference
+		// row itself is operator-seeded (the same break-glass shape legacy
+		// installs carry).
 		rec = api.as(tenantAdmin("tenanta")).do(t, http.MethodPut, "/api/settings/chat.api_key", `{"value":"openrouter-main"}`)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("A (opt-in) chat.api_key=openrouter-main = %d, want 200 (red if checkSecretRef is tenant-only) body=%s",
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("A chat.api_key PUT = %d, want 409 (superseded gate, tier-independent) body=%s",
 				rec.Code, rec.Body.String())
 		}
-		// B without opt-in: 422, strict isolation.
 		rec = api.as(tenantAdmin("tenantb")).do(t, http.MethodPut, "/api/settings/chat.api_key", `{"value":"openrouter-main"}`)
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("B (no opt-in) chat.api_key=openrouter-main = %d, want 422 (red if the fallback is ungated) body=%s",
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("B chat.api_key PUT = %d, want 409 (superseded gate, tier-independent) body=%s",
 				rec.Code, rec.Body.String())
 		}
+		seedSettingScope(t, pool, "chat.api_key", "tenanta", `"openrouter-main"`)
 	})
 
 	// Gate 8: operator DELETE of a _global secret an opt-in tenant references via
