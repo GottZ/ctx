@@ -12,6 +12,9 @@
 //   - GUARD PIN (04-W5 §5.7): DELETE on a secret referenced ONLY by a backend
 //     pool row → 409 carrying the BACKEND remediation, not the settings one;
 //     mixed reference sets name both; clearing both references frees the delete
+//   - ROTATION PIN (04-W6 §5.8): a rotation reaches the BACKEND POOL over the
+//     real NOTIFY funnel — API rotation AND psql-shape rotation both leave the
+//     new plaintext in the pool snapshot's in-memory APIKey
 //   - response scan: no submitted value in ANY secrets/settings response
 //   - ReencryptSweep: prev-key rows re-seal (key_version bump, readable
 //     with current alone), foreign-key rows stay untouched, no-PREV = no-op
@@ -30,12 +33,16 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
@@ -307,6 +314,142 @@ func TestSecretsAPI_Integration(t *testing.T) {
 		rec = do(router, http.MethodDelete, "/api/secrets/"+secretName, "")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("unreferenced delete = %d %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// ROTATION PIN (04-W6 §3.4/§4.3/§5.8): a rotation must reach the BACKEND
+	// POOL, not only the config snapshot. Backends carry no key of their own —
+	// they name an F2 secret via api_key_ref, and the pool resolves it into an
+	// in-memory APIKey at reload time. Before this wave nothing reloaded the
+	// pool on a secret write: an operator rotating a leaked provider key saw
+	// 200, and the chain kept authenticating with the OLD key until the next
+	// restart or an unrelated backend-row write — the incident path was dead.
+	//
+	// The pin runs over the REAL funnel: a dedicated LISTEN connection takes
+	// the notification the 051 trg_secrets_notify actually emitted and hands
+	// exactly that to the production listener handler. The test NEVER calls
+	// bp.Reload itself — a manual reload would assert the resolver, which was
+	// never in doubt, and would be green even with the incident path dead.
+	//
+	// Negative probe (2026-08-21): with the context_secrets branch removed
+	// from events/listener.go, both rotation assertions fail red (the pool
+	// keeps value A) while the baseline assertion stays green. Restored → green.
+	t.Run("RotationPropagatesToBackendPool", func(t *testing.T) {
+		const secretName = "prov-rotate"
+		const backendName = "pool-rotate-be"
+		const valueC = "PROVIDER-KEY-C-" + "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+		// LISTEN before the first write, so no notification of this subtest can
+		// be missed between the write and the wait.
+		lc, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire LISTEN conn: %v", err)
+		}
+		defer lc.Release()
+		if _, err := lc.Exec(ctx, "LISTEN ctx_settings_write"); err != nil {
+			t.Fatalf("LISTEN: %v", err)
+		}
+		// waitEntity returns the next REAL notification carrying that entity.
+		// Notifications for other entities are discarded here exactly as the
+		// listener discards what it has no branch for.
+		waitEntity := func(entity string) *pgconn.Notification {
+			t.Helper()
+			wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			for {
+				n, err := lc.Conn().WaitForNotification(wctx)
+				if err != nil {
+					t.Fatalf("WaitForNotification(%s): %v", entity, err)
+				}
+				var p struct{ Entity string }
+				if err := json.Unmarshal([]byte(n.Payload), &p); err != nil {
+					t.Fatalf("notify payload %q: %v", n.Payload, err)
+				}
+				if p.Entity == entity {
+					return n
+				}
+			}
+		}
+
+		// The production wiring: pool with the real secret resolver, listener
+		// handler on top of it (cmd/ctxd/main.go shape, dispatcher-less).
+		bp := backends.NewPool(pool, settings.BackendSecretResolver(pool))
+		lh := events.NewSettingsWriteHandler(pool, cfgStore, bp, nil)
+		deliver := func(entity string) {
+			t.Helper()
+			if err := lh.HandleNotification(ctx, waitEntity(entity), nil); err != nil {
+				t.Fatalf("listener HandleNotification(%s): %v", entity, err)
+			}
+		}
+		poolKey := func() string {
+			t.Helper()
+			for _, b := range bp.Snapshot() {
+				if b.Name == backendName {
+					return b.APIKey
+				}
+			}
+			t.Fatalf("backend %q missing from the pool snapshot", backendName)
+			return ""
+		}
+
+		rec := do(router, http.MethodPut, "/api/secrets/"+secretName, `{"value":"`+valueA+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+		}
+		scanClean(rec, "PUT create (rotation pin)")
+
+		// Baseline over the funnel too: the row write's own notification is
+		// what publishes the first snapshot. A failure here is fixture or
+		// resolver, not the wave.
+		insertBackendSecretRef(t, pool, backendName, store.GlobalScope, secretName)
+		deliver("context_backends")
+		if got := poolKey(); got != valueA {
+			t.Fatalf("baseline pool APIKey = %q, want value A (resolver/fixture broken — the pin below would be meaningless)", got)
+		}
+
+		// (1) Rotation through the API handler.
+		rec = do(router, http.MethodPut, "/api/secrets/"+secretName, `{"value":"`+valueB+`"}`)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"action":"rotate"`) {
+			t.Fatalf("rotate: %d %s", rec.Code, rec.Body.String())
+		}
+		scanClean(rec, "PUT rotate (rotation pin)")
+		deliver("context_secrets")
+		if got := poolKey(); got != valueB {
+			t.Errorf("pool APIKey after API rotation = %q, want value B — the rotation never reached the serving chain", got)
+		}
+
+		// (2) psql-shape rotation: sealed row written straight to
+		// context_secrets, no handler and no settings.Reload in between. Same
+		// trigger, same branch, same assertion.
+		{
+			box, err := sealbox.New(keyHex, "")
+			if err != nil {
+				t.Fatalf("sealbox: %v", err)
+			}
+			nonce, ciphertext, err := box.Seal(secretName, store.GlobalScope, []byte(valueC))
+			if err != nil {
+				t.Fatalf("seal: %v", err)
+			}
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			if _, err := store.PutSecret(ctx, tx, secretName, store.GlobalScope, nonce, ciphertext, 1, nil); err != nil {
+				t.Fatalf("put secret: %v", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+		}
+		deliver("context_secrets")
+		if got := poolKey(); got != valueC {
+			t.Errorf("pool APIKey after psql rotation = %q, want value C — the funnel misses direct DB writes", got)
+		}
+
+		// Leave no dangling reference behind for the sweep subtest.
+		if _, err := pool.Exec(ctx,
+			`UPDATE context_backends SET api_key_ref=NULL WHERE name=$1`, backendName); err != nil {
+			t.Fatalf("clear api_key_ref: %v", err)
 		}
 	})
 

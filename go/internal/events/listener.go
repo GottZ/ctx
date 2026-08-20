@@ -312,6 +312,31 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 		}
 		return nil
 	}
+	// Secret write branch (A04-W6, design/04 §4.3). The 051 trg_secrets_notify
+	// rides this same channel with entity=context_secrets. Backends do not
+	// carry their key in context_backends — they name it via api_key_ref, and
+	// the pool resolves it in-memory at reload time (pool.go, SecretResolver).
+	// Without this branch a rotation only ever reloaded the config snapshot,
+	// so the serving chain kept authenticating with the OLD key until the next
+	// boot or the next unrelated backend-row write — the incident path (a
+	// leaked provider key) was structurally dead. Reloading here covers both
+	// writers, because the funnel does: the API handler AND a direct psql edit
+	// fire the same trigger.
+	//
+	// Deliberately NOT done here: refreshDispatchPolicy (a secret carries no
+	// `limits`, the derived policy would be identical — same reasoning as the
+	// profile branch) and flushIfCoupledChanged (the coupled set is host/
+	// protocol pairs; a rotated key is not a vector-space change).
+	//
+	// The reload runs for tenant-scope secret writes too, before the
+	// scope-sensitive settings handling below: the pool holds rows of every
+	// scope in one snapshot, and re-resolving it is O(backends) — the same
+	// cost the two pool branches above already pay per notification.
+	if p.Entity == "context_secrets" && h.backendPool != nil {
+		if err := h.backendPool.Reload(ctx); err != nil {
+			slog.Warn("listener: backend pool reload after secret write failed — previous snapshot stays active", "error", err)
+		}
+	}
 	// Scope-carried lazy invalidation (MT T32, 03-W6). A tenant-scope settings
 	// or secrets write does NOT change the _global base generation —
 	// settings.Reload reads scope='_global' exclusively (reload.go) — so a full
