@@ -149,6 +149,20 @@ func buildShared() {
 		tcpostgres.WithDatabase("ctxtest"),
 		tcpostgres.WithUsername("ctxtest"),
 		tcpostgres.WithPassword("ctxtest"),
+		// Cap timescaledb-tune's sizing: the image tunes shared_buffers to
+		// 25% of HOST memory, which on a 7GB CI runner hands the SHARED
+		// container ~1.75GB before a single test runs. With the per-test
+		// containers that was survivable (each lived seconds); the shared
+		// cluster accumulates buffer-cache + per-DB timescale workers across
+		// the whole package and died mid-suite once on CI (2026-08-20, run
+		// 32363351979: EOF during the ANN seed, every later connection
+		// reset — OOM suspected, unproven; the post-mortem CI step now
+		// records the evidence). 2GB/2CPU is deterministic across CI and
+		// local runs — test workloads never need production sizing.
+		testcontainers.WithEnv(map[string]string{
+			"TS_TUNE_MEMORY":   "2GB",
+			"TS_TUNE_NUM_CPUS": "2",
+		}),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).

@@ -587,6 +587,23 @@ jobs:
             -timeout=15m \
             ${{ steps.shard.outputs.packages }}
 
+      - name: Container post-mortem (on failure)
+        if: failure()
+        run: |
+          # The template-database harness shares ONE Postgres container per
+          # test binary — if it dies mid-suite (first suspect on 7GB runners:
+          # OOM), every later test fails with connection resets and the root
+          # cause is invisible in Go output. This dumps the hard evidence:
+          # docker's OOMKilled flag + exit code + the container's last log
+          # lines, for every container of the test image.
+          for id in $(docker ps -aq --filter "ancestor=timescale/timescaledb-ha:pg18"); do
+            echo "=== container ${id} ==="
+            docker inspect "${id}" --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}'
+            docker logs --tail 60 "${id}" 2>&1 || true
+          done
+          echo "=== dmesg oom traces ==="
+          sudo dmesg 2>/dev/null | grep -iE "oom|killed process" | tail -20 || true
+
       - name: Upload integration coverage
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
