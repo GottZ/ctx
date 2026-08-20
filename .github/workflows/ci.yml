@@ -447,17 +447,25 @@ jobs:
       - name: Run unit tests
         working-directory: go
         run: |
+          # Coverage + -v only on nightly/dispatch (2026-08-20): atomic
+          # coverage instruments every memory access (~10-30% overhead under
+          # -race) and nobody consumes the artifact on push runs — the nightly
+          # keeps the observability. Failure output stays visible without -v
+          # (go test prints failing tests' logs regardless).
+          EXTRA_FLAGS=""
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            EXTRA_FLAGS="-v -coverprofile=coverage.out -covermode=atomic"
+          fi
           go test \
-            -v \
+            $EXTRA_FLAGS \
             -short \
             -race \
             -count=1 \
             -timeout=5m \
-            -coverprofile=coverage.out \
-            -covermode=atomic \
             ./...
 
       - name: Upload coverage
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: coverage-unit
@@ -564,16 +572,22 @@ jobs:
           # I/O — the "hanging" test in both panic dumps had run for only
           # 2s, it was merely the one on the clock when the package budget
           # expired. 15m absorbs runner weather; a REAL hang still fails.
+          # Coverage + -v only on nightly/dispatch — same rationale as the
+          # unit job: unconsumed on push runs, atomic instrumentation costs
+          # real minutes on the pipeline's critical path.
+          EXTRA_FLAGS=""
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            EXTRA_FLAGS="-v -coverprofile=coverage-integration.out -covermode=atomic"
+          fi
           go test \
-            -v \
+            $EXTRA_FLAGS \
             -tags=integration \
             -count=1 \
             -timeout=15m \
-            -coverprofile=coverage-integration.out \
-            -covermode=atomic \
             ${{ steps.shard.outputs.packages }}
 
       - name: Upload integration coverage
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: coverage-integration-${{ matrix.shard }}
