@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
@@ -320,7 +319,6 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	_, baseIssues := settings.BuildFromRowsScoped(r.Context(), h.pool, baseRows, rs, ws, allowShared)
 	warnings := newWarnings(candIssues, baseIssues)
-	warnings = append(warnings, pairingWarnings(key, candidate)...)
 
 	// Previous effective value + source, masked, BEFORE the swap. The override
 	// map is precedence-aware so a tenant's own ref name shows, not _global's.
@@ -593,26 +591,6 @@ func newWarnings(cand, base []config.Issue) []string {
 		}
 	}
 	return out
-}
-
-// pairingWarnings implements the X3 advisory (risk 8): a .host override whose
-// sibling .protocol still comes from env/default is the classic wire-format
-// mismatch (ollama path against an openai server = 404). Data stays data —
-// this warns, it never blocks.
-func pairingWarnings(key string, candidate *config.Config) []string {
-	group, field, _ := strings.Cut(key, ".")
-	if field != "host" {
-		return nil
-	}
-	protoKey := group + ".protocol"
-	if _, ok := config.KeyByName(protoKey); !ok {
-		return nil
-	}
-	if candidate.Source(protoKey) == "settings" {
-		return nil
-	}
-	return []string{fmt.Sprintf(
-		"%s changed without %s — pair host+protocol+api_key in one migration step (wire-format mismatch otherwise)", key, protoKey)}
 }
 
 func (h *SettingsHandler) unknownKey(w http.ResponseWriter, key string) {

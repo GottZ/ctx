@@ -267,27 +267,6 @@ func TestNormalizedJSON(t *testing.T) {
 	}
 }
 
-func TestPairingWarnings(t *testing.T) {
-	resetRegistryEnv(t)
-	// Host overridden, protocol still env/default → advisory.
-	c1, _ := config.Build([]config.Override{{Key: "chat.host", Value: "http://other:8089"}}, nil)
-	if w := pairingWarnings("chat.host", c1); len(w) != 1 || !strings.Contains(w[0], "chat.protocol") {
-		t.Errorf("warnings = %v, want one naming chat.protocol", w)
-	}
-	// Host AND protocol overridden → silent.
-	c2, _ := config.Build([]config.Override{
-		{Key: "chat.host", Value: "http://other:8089"},
-		{Key: "chat.protocol", Value: "openai"},
-	}, nil)
-	if w := pairingWarnings("chat.host", c2); len(w) != 0 {
-		t.Errorf("warnings = %v, want none when paired", w)
-	}
-	// Non-host keys never warn.
-	if w := pairingWarnings("rerank.blend_weight", c1); len(w) != 0 {
-		t.Errorf("warnings = %v, want none for non-host key", w)
-	}
-}
-
 // The X2 admission change: coupled:embed-cache keys (embed.host) ARE
 // override-admissible, plain coupled (embed.model) stays rejected.
 func TestBuild_EmbedHostOverrideAdmitted(t *testing.T) {
