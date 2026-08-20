@@ -566,12 +566,13 @@ jobs:
       - name: Run integration tests
         working-directory: go
         run: |
-          # -timeout is PER PACKAGE. internal/handler legitimately exceeded
-          # 10m on nightly runners twice (2026-07-26 + 2026-08-02): ~500
-          # testcontainer starts across the suite under slow shared-runner
-          # I/O — the "hanging" test in both panic dumps had run for only
-          # 2s, it was merely the one on the clock when the package budget
-          # expired. 15m absorbs runner weather; a REAL hang still fails.
+          # -timeout is PER PACKAGE. Historically internal/handler exceeded
+          # 10m on nightly runners twice (2026-07-26 + 2026-08-02) when the
+          # suite still booted ~500 containers; since the template-database
+          # harness (internal/testdb, 2026-08-20) each package boots ONE
+          # container and copies a migrated template per test, so packages
+          # run far below the budget. 15m stays as weather headroom; a REAL
+          # hang still fails.
           # Coverage + -v only on nightly/dispatch — same rationale as the
           # unit job: unconsumed on push runs, atomic instrumentation costs
           # real minutes on the pipeline's critical path.
