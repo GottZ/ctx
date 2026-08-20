@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `ctx` CLI reads its config from `~/.config/ctx/config` (`CTX_BASE_URL` + `CTX_KEY`). On a TTY most commands render a table; when piped they emit JSON. See [operations](operations.md#configure-the-cli-endpoint) for setup.
+The `ctx` CLI reads its config from `~/.config/ctx/config` (`CTX_BASE_URL` + `CTX_KEY`). On a TTY most commands render a table; when piped they emit JSON. See [operations](operations.md#first-run-ctx-init) for setup (`ctx init` writes that config, and seeds the backend pool while it is at it).
 
 ## Core
 

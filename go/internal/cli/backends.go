@@ -28,9 +28,14 @@ import (
 // backendRow mirrors the server's backendView wire shape (subset for the
 // table; raw JSON carries everything).
 type backendRow struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	BaseURL        string   `json:"base_url"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	BaseURL string `json:"base_url"`
+	// Scope separates the shared _global pool from tenant-owned rows; the init
+	// wizard needs it to tell "a role is served" from "a role is served for
+	// some tenant" (the table below stays scope-free — a tenant-admin sees only
+	// its own rows anyway).
+	Scope          string   `json:"scope"`
 	Trust          string   `json:"trust"`
 	Locality       string   `json:"locality"`
 	Roles          []string `json:"roles"`

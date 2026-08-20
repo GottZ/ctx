@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // Version is set by main.go from ldflags. Used by the init command.
@@ -115,9 +118,19 @@ func displayConfigPath(path string) string {
 type initResult struct {
 	ConfigOK     bool
 	ServerOK     bool
+	BackendsOK   bool
 	VersionOK    bool
 	HooksOK      bool
 	StatuslineOK bool
+}
+
+// initSummaryOK is the wizard's closing verdict. Backends and Version are
+// tracked but deliberately NOT summed into it: both steps can end short of ✓
+// for reasons that are none of init's business — a key below server-admin, an
+// offline GitHub — and neither invalidates what init actually configures.
+// init exits 0 regardless; the per-step line carries the detail.
+func initSummaryOK(r initResult) bool {
+	return r.ConfigOK && r.ServerOK && r.HooksOK && r.StatuslineOK
 }
 
 func stepConfig() (Config, bool) {
@@ -192,7 +205,282 @@ func stepServer(cfg Config) bool {
 	return true // degraded is still usable
 }
 
-// ── Step 3: Version check ──────────────────────────────────────────.
+// ── Step 3: Backend pool ───────────────────────────────────────────.
+
+// The backends step is the interactive twin of `ctx backends seed` (design/02
+// §4.1b). It never re-implements the seed: where the serving roles are
+// missing, it collects the topology through prompts and hands it to
+// runBackendsSeed — so the server-admin gate, the full-trust posture, the
+// secrets-before-rows order and the per-row idempotency are literally the same
+// code on both paths.
+//
+// Two properties are deliberate. The step DEGRADES instead of aborting: a key
+// below server-admin (a tenant-admin included — its writes would be pinned to
+// its own scope and leave the shared pool dead) leaves init fully usable for
+// hooks and statusline, which is what a non-admin runs it for. And it reports
+// REACHABILITY, not existence: a pool of dead rows is exactly what an
+// unconfigured env bootstrap leaves behind, and a bare "pool not empty" check
+// would wave that through green.
+
+// legacyDefaultHost is the base_url the env-era bootstrap wrote when nothing
+// was configured. Inside the ctx container it points at the container itself,
+// so these rows are dead by construction on the canonical compose install.
+const legacyDefaultHost = "http://localhost:11434"
+
+// legacyDefaultNames are the two row names that same bootstrap used. Together
+// with the host they form the fingerprint of a pool nobody ever configured —
+// worth naming, because its repair is a replacement (--force), not an edit.
+var legacyDefaultNames = map[string]bool{"herbert-chat": true, "llama-embed": true}
+
+// seedRoleProbes are the roles the step verifies — the two the seed writes,
+// and the two whose empty chain stops the store: no embed backend fails every
+// query at the embedding step, no synthesis backend leaves it without an
+// answer.
+var seedRoleProbes = []struct{ role, label string }{
+	{backends.RoleSynthesis, "chat"},
+	{backends.RoleEmbed, "embed"},
+}
+
+// backendsAsk is the step's input surface. It is a pair of functions rather
+// than one io.Reader because the api-key answer must not travel like the
+// others: it is read WITHOUT echo (F2-W8 — a secret in the terminal scrollback
+// is a leaked secret), and both halves are injected in tests.
+type backendsAsk struct {
+	line   func(question string) string
+	secret func(question string) (string, error)
+}
+
+func terminalAsk() backendsAsk {
+	return backendsAsk{line: prompt, secret: promptSecret}
+}
+
+// promptSecret reads one value without echoing it. A failure is not silently
+// downgraded to an echoing read: it names the non-interactive path instead.
+func promptSecret(question string) (string, error) {
+	fmt.Print(question)
+	value, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	if err != nil {
+		return "", fmt.Errorf("cannot read the key without echoing it (%w) — this needs a terminal; "+
+			"seed non-interactively with `ctx backends seed --file seed.json` instead", err)
+	}
+	return strings.TrimSpace(string(value)), nil
+}
+
+func stepBackends(cfg Config) bool {
+	return runBackendsStep(NewClient(cfg), terminalAsk())
+}
+
+func runBackendsStep(c *Client, ask backendsAsk) bool {
+	// Pre-check first, list second: a key below server-admin must never reach a
+	// write, and the reason it cannot is the same one the seed states.
+	if err := requireServerAdminForSeed(c); err != nil {
+		return backendsStepDegraded(err)
+	}
+	rows, err := backendsStepPool(c)
+	if err != nil {
+		return backendsStepDegraded(err)
+	}
+	if missing := missingSeedRoles(rows); len(missing) > 0 {
+		spec, err := askSeedSpec(ask, missing)
+		if err != nil {
+			fmt.Println(label("Backends", "not seeded %s", failMark()))
+			fmt.Println(indentHint(err.Error()))
+			return false
+		}
+		if err := runBackendsSeed(func() (*Client, error) { return c, nil }, spec, false); err != nil {
+			fmt.Println(label("Backends", "seed failed %s", failMark()))
+			fmt.Println(indentHint(err.Error()))
+			return false
+		}
+		// Re-read: backend-list renders the pool SNAPSHOT, which the create
+		// refreshed through reloadAfterMutation — so the probe below sees the
+		// rows that were just written.
+		if rows, err = backendsStepPool(c); err != nil {
+			return backendsStepDegraded(err)
+		}
+	}
+	return probeSeedRoles(c, rows)
+}
+
+// backendsStepDegraded is the ✗-without-abort exit: the pool could not be
+// verified — a key below server-admin, or a pool read that failed — init keeps
+// going, and the line says how to seed later. The reason comes from the seed's
+// own gate, so both paths give the operator the same sentence.
+func backendsStepDegraded(err error) bool {
+	fmt.Println(label("Backends", "not verified %s", failMark()))
+	fmt.Println(indentHint(firstLine(err)))
+	fmt.Println(indentHint("seed the pool later via `ctx backends seed` (server-admin key) — docs/operations.md#backends"))
+	return false
+}
+
+func indentHint(s string) string {
+	return "         " + strings.ReplaceAll(strings.TrimSpace(s), "\n", "\n         ")
+}
+
+func firstLine(err error) string {
+	line, _, _ := strings.Cut(err.Error(), "\n")
+	return line
+}
+
+// backendsStepPool reads the pool through the same manage action the CLI list
+// uses.
+func backendsStepPool(c *Client) ([]backendRow, error) {
+	resp, _, err := c.Do(http.MethodPost, "/api/manage", map[string]any{"action": "backend-list"})
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSettingsEnvelope(resp); err != nil {
+		return nil, fmt.Errorf("pool read failed: %w", err)
+	}
+	var payload struct {
+		Backends []backendRow `json:"backends"`
+	}
+	if err := json.Unmarshal(resp, &payload); err != nil {
+		return nil, fmt.Errorf("unparseable backend-list response: %s", truncateForError(resp))
+	}
+	return payload.Backends, nil
+}
+
+// poolRowForRole picks the row that would actually serve a role: enabled, in
+// the _global scope the seed targets, first hit in pool order (the list
+// arrives priority DESC, so the first match is the primary). A tenant-scoped
+// row of the same role does NOT count — it cannot serve the shared pipelines.
+func poolRowForRole(rows []backendRow, role string) (backendRow, bool) {
+	for _, r := range rows {
+		if !r.Enabled || r.Scope != backends.GlobalScope {
+			continue
+		}
+		for _, have := range r.Roles {
+			if have == role {
+				return r, true
+			}
+		}
+	}
+	return backendRow{}, false
+}
+
+func missingSeedRoles(rows []backendRow) []string {
+	var missing []string
+	for _, want := range seedRoleProbes {
+		if _, ok := poolRowForRole(rows, want.role); !ok {
+			missing = append(missing, want.role)
+		}
+	}
+	return missing
+}
+
+// askSeedSpec collects the single-host topology the wizard can express. Both
+// legs get the same host, protocol and key — anything beyond that (split
+// hosts, separate credentials, dream-only rows) is normal pool management
+// through `ctx backends create`, not a first seed.
+func askSeedSpec(ask backendsAsk, missing []string) (seedSpec, error) {
+	fmt.Println(indentHint("no serving backend for: " + strings.Join(missing, ", ")))
+	host := ask.line("  ? Backend host (e.g. http://localhost:11434): ")
+	if host == "" {
+		return seedSpec{}, errors.New("no host given — nothing was written")
+	}
+	protocol := ask.line("  ? Protocol, ollama or openai [ollama]: ")
+	if protocol == "" {
+		protocol = string(backends.ProtocolOllama)
+	}
+	chatModel := ask.line("  ? Chat model: ")
+	embedModel := ask.line("  ? Embedding model: ")
+	key := ""
+	if answerIsYes(ask.line("  ? Does the host need an API key? [y/N]: ")) {
+		v, err := ask.secret("  ? API key (not echoed): ")
+		if err != nil {
+			return seedSpec{}, err
+		}
+		key = v
+	}
+	return seedSpec{
+		Chat:  seedBackend{Host: host, Protocol: protocol, Model: chatModel, APIKey: key},
+		Embed: seedBackend{Host: host, Protocol: protocol, Model: embedModel, APIKey: key},
+	}, nil
+}
+
+func answerIsYes(answer string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(answer)), "y")
+}
+
+// probeSeedRoles is the functional check the step ends on: one backend-test
+// per role against the row that would serve it. Everything short of a
+// reachable row is a named hint, never an abort — a dead backend is an
+// operational fact, and init's job is to make it visible.
+func probeSeedRoles(c *Client, rows []backendRow) bool {
+	ok := true
+	parts := make([]string, 0, len(seedRoleProbes))
+	var hints []string
+	for _, want := range seedRoleProbes {
+		row, found := poolRowForRole(rows, want.role)
+		if !found {
+			parts = append(parts, want.label+": none")
+			hints = append(hints, fmt.Sprintf("no enabled %s backend in %s — `ctx backends seed` writes one",
+				want.role, backends.GlobalScope))
+			ok = false
+			continue
+		}
+		reachable, err := probeBackendRow(c, row)
+		switch {
+		case err != nil:
+			parts = append(parts, fmt.Sprintf("%s: %s (unprobed)", want.label, row.Name))
+			hints = append(hints, fmt.Sprintf("%s could not be probed: %s", row.Name, firstLine(err)))
+			ok = false
+		case reachable:
+			parts = append(parts, fmt.Sprintf("%s: %s", want.label, row.Name))
+		default:
+			parts = append(parts, fmt.Sprintf("%s: %s (unreachable)", want.label, row.Name))
+			hints = append(hints, deadRowHint(row))
+			ok = false
+		}
+	}
+	mark := okMark()
+	if !ok {
+		mark = warnMark()
+	}
+	fmt.Println(label("Backends", "%s %s", strings.Join(parts, ", "), mark))
+	for _, h := range hints {
+		fmt.Println(indentHint(h))
+	}
+	return ok
+}
+
+func probeBackendRow(c *Client, row backendRow) (bool, error) {
+	resp, _, err := c.Do(http.MethodPost, "/api/manage", map[string]any{"action": "backend-test", "id": row.ID})
+	if err != nil {
+		return false, err
+	}
+	if err := checkSettingsEnvelope(resp); err != nil {
+		return false, err
+	}
+	var out struct {
+		Reachable bool `json:"reachable"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		return false, fmt.Errorf("unparseable backend-test response: %s", truncateForError(resp))
+	}
+	return out.Reachable, nil
+}
+
+// deadRowHint names the repair. The legacy-default fingerprint gets its own
+// wording because its repair differs: those rows are not a configuration to
+// fix but the residue of an env bootstrap that ran with nothing configured —
+// they are replaced, and only --force gets past the seed's foreign-row guard.
+func deadRowHint(row backendRow) string {
+	if legacyDefaultRow(row) {
+		return fmt.Sprintf("%s (%s) is unreachable and carries the env-era default fingerprint — "+
+			"replace it with `ctx backends seed --force`", row.Name, row.BaseURL)
+	}
+	return fmt.Sprintf("%s (%s) is unreachable — `ctx backends test %s` shows the failing check",
+		row.Name, row.BaseURL, row.ID)
+}
+
+func legacyDefaultRow(row backendRow) bool {
+	return legacyDefaultNames[row.Name] && strings.TrimSuffix(row.BaseURL, "/") == legacyDefaultHost
+}
+
+// ── Step 4: Version check ──────────────────────────────────────────.
 
 type githubRelease struct {
 	TagName string `json:"tag_name"`
@@ -243,7 +531,7 @@ func stepVersion() bool {
 	return true
 }
 
-// ── Step 4: Claude Code hooks ──────────────────────────────────────.
+// ── Step 5: Claude Code hooks ──────────────────────────────────────.
 
 const hookCmdBrief = "ctx brief --hook"
 const hookCmdPersist = "ctx persist --hook"
@@ -388,7 +676,7 @@ func stepHooks() bool {
 	return true
 }
 
-// ── Step 5: Statusline ─────────────────────────────────────────────.
+// ── Step 6: Statusline ─────────────────────────────────────────────.
 
 const statuslineCmd2 = "ctx statusline"
 
@@ -441,9 +729,10 @@ func initCmd() *cobra.Command {
 
   1. Config file (~/.config/ctx/config) — API key and base URL
   2. Server connection — /health endpoint reachability
-  3. Version — compare local version against latest GitHub release
-  4. Claude Code hooks — SubagentStart/SubagentStop in settings.json
-  5. Statusline — ctx statusline in settings.json
+  3. Backend pool — seeds chat + embed backends when none serve (server-admin key)
+  4. Version — compare local version against latest GitHub release
+  5. Claude Code hooks — SubagentStart/SubagentStop in settings.json
+  6. Statusline — ctx statusline in settings.json
 
 Idempotent: re-running shows status for each item, only changes what's missing.
 Respects NO_COLOR environment variable for plain text output.`,
@@ -471,18 +760,25 @@ func runInit() error {
 		fmt.Println(label("Server", "skipped (no config) %s", skipMark()))
 	}
 
-	// Step 3: Version
+	// Step 3: Backend pool (needs a reachable server and a key)
+	if result.ConfigOK && result.ServerOK {
+		result.BackendsOK = stepBackends(cfg)
+	} else {
+		fmt.Println(label("Backends", "skipped (no server) %s", skipMark()))
+	}
+
+	// Step 4: Version
 	result.VersionOK = stepVersion()
 
-	// Step 4: Hooks
+	// Step 5: Hooks
 	result.HooksOK = stepHooks()
 
-	// Step 5: Statusline
+	// Step 6: Statusline
 	result.StatuslineOK = stepStatusline()
 
-	// Step 6: Summary
+	// Step 7: Summary
 	fmt.Println()
-	allGood := result.ConfigOK && result.ServerOK && result.HooksOK && result.StatuslineOK
+	allGood := initSummaryOK(result)
 	if allGood {
 		if noColor() {
 			fmt.Println("  [ok] ready")

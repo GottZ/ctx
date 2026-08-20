@@ -49,13 +49,25 @@ go install github.com/GottZ/ctx/cmd/ctx@latest
 Point the CLI at your ctx host:
 
 ```bash
+ctx init      # config, server check, backend pool, Claude Code hooks, statusline
+```
+
+`ctx init` asks for base URL and API key, writes `~/.config/ctx/config`, and checks the server. With a server-admin key it also seeds the **backend pool** — the chat and embedding backend ctx serves from — when no backend serves those roles yet, and probes the ones it finds; with any other key it skips that step and says so. Re-running it changes only what is missing.
+
+<details>
+<summary>Or configure it by hand</summary>
+
+```bash
 mkdir -p ~/.config/ctx
 cat > ~/.config/ctx/config << 'EOF'
 CTX_BASE_URL=https://your-ctx-host.example
 CTX_KEY=your-api-key-here
 EOF
-ctx health    # DB + Ollama connectivity
+ctx health                                  # DB + backend connectivity
+ctx backends seed --host http://gpu:11434 \
+  --model qwen3 --embed-model qwen3-embedding   # first backends, non-interactive
 ```
+</details>
 
 Running the server (Go daemon + PostgreSQL 18 + pgvector) is `docker compose up -d ctx`. Full setup, env vars and Claude Code integration are in [operations](docs/operations.md); building from source in [development](docs/development.md).
 

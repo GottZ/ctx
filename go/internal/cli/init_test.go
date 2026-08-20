@@ -2,8 +2,12 @@ package cli
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -291,6 +295,373 @@ func TestClaudeSettingsPath(t *testing.T) {
 	want := filepath.Join(dir, "settings.json")
 	if got := claudeSettingsPath(); got != want {
 		t.Errorf("claudeSettingsPath() = %q, want %q", got, want)
+	}
+}
+
+// ── Step 3: backend pool (A02-W3) ──────────────────────────────────
+//
+// The step's contract is the seed's contract seen from the wizard: it must not
+// write below server-admin, it must produce the same full-trust payloads
+// `ctx backends seed` produces, it must never echo an api_key, and it must
+// report reachability instead of mere existence — while never turning any of
+// that into a non-zero exit.
+
+// initMock is a manage/secrets server standing in for ctxd.
+type initMock struct {
+	t         *testing.T
+	srv       *httptest.Server
+	whoami    map[string]any
+	rows      []map[string]any
+	reachable map[string]bool
+
+	mu      sync.Mutex
+	creates []map[string]any
+	secrets map[string]string
+	actions []string
+}
+
+func newInitMock(t *testing.T, whoami map[string]any, rows []map[string]any) *initMock {
+	t.Helper()
+	m := &initMock{t: t, whoami: whoami, rows: rows, reachable: map[string]bool{}, secrets: map[string]string{}}
+	m.srv = httptest.NewServer(http.HandlerFunc(m.route))
+	t.Cleanup(m.srv.Close)
+	return m
+}
+
+func (m *initMock) client() *Client {
+	return NewClient(Config{BaseURL: m.srv.URL, Key: "test-key"})
+}
+
+func (m *initMock) route(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/api/whoami":
+		writeMockJSON(w, m.whoami)
+	case r.URL.Path == "/api/secrets" && r.Method == http.MethodGet:
+		m.mu.Lock()
+		names := make([]map[string]any, 0, len(m.secrets))
+		for name := range m.secrets {
+			names = append(names, map[string]any{"name": name})
+		}
+		m.mu.Unlock()
+		writeMockJSON(w, map[string]any{"success": true, "secrets": names})
+	case strings.HasPrefix(r.URL.Path, "/api/secrets/") && r.Method == http.MethodPut:
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		m.mu.Lock()
+		m.secrets[strings.TrimPrefix(r.URL.Path, "/api/secrets/")] = body["value"]
+		m.mu.Unlock()
+		writeMockJSON(w, map[string]any{"success": true})
+	case r.URL.Path == "/api/manage":
+		m.manage(w, r)
+	default:
+		m.t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		writeMockJSON(w, map[string]any{"success": false, "error": "unexpected"})
+	}
+}
+
+func (m *initMock) manage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string         `json:"action"`
+		ID     string         `json:"id"`
+		Data   map[string]any `json:"data"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	m.mu.Lock()
+	m.actions = append(m.actions, req.Action)
+	m.mu.Unlock()
+
+	switch req.Action {
+	case "backend-list":
+		m.mu.Lock()
+		rows := append([]map[string]any{}, m.rows...)
+		m.mu.Unlock()
+		writeMockJSON(w, map[string]any{"success": true, "backends": rows})
+	case "backend-create":
+		m.mu.Lock()
+		m.creates = append(m.creates, req.Data)
+		name, _ := req.Data["name"].(string)
+		m.rows = append(m.rows, map[string]any{
+			"id": "id-" + name, "name": name, "scope": "_global", "enabled": true,
+			"base_url": req.Data["base_url"], "roles": req.Data["roles"],
+		})
+		m.reachable["id-"+name] = true
+		m.mu.Unlock()
+		writeMockJSON(w, map[string]any{"success": true})
+	case "backend-test":
+		m.mu.Lock()
+		ok := m.reachable[req.ID]
+		m.mu.Unlock()
+		writeMockJSON(w, map[string]any{"success": true, "reachable": ok, "latency_ms": 1})
+	default:
+		m.t.Errorf("unexpected manage action %q", req.Action)
+		writeMockJSON(w, map[string]any{"success": false, "error": "unexpected action"})
+	}
+}
+
+func (m *initMock) did(action string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, a := range m.actions {
+		if a == action {
+			return true
+		}
+	}
+	return false
+}
+
+func writeMockJSON(w http.ResponseWriter, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// scriptedAsk replays fixed answers; the secret half records whether it was
+// used at all, so "the key never travels the echoing path" is assertable.
+func scriptedAsk(lines []string, secret string) (backendsAsk, *int) {
+	i := 0
+	secretCalls := 0
+	return backendsAsk{
+		line: func(string) string {
+			if i >= len(lines) {
+				return ""
+			}
+			answer := lines[i]
+			i++
+			return answer
+		},
+		secret: func(string) (string, error) {
+			secretCalls++
+			return secret, nil
+		},
+	}, &secretCalls
+}
+
+var serverAdmin = map[string]any{"success": true, "admin": true, "role": "admin", "home_scope": "_global"}
+
+func TestInitBackendsStepSeedsEmptyPool(t *testing.T) {
+	m := newInitMock(t, serverAdmin, nil)
+	ask, secretCalls := scriptedAsk([]string{"http://gpu:11434", "", "qwen3", "qwen3-embedding", "n"}, "")
+
+	var ok bool
+	out := captureStdout(t, func() { ok = runBackendsStep(m.client(), ask) })
+	if !ok {
+		t.Fatalf("a freshly seeded, reachable pool must end the step green; output:\n%s", out)
+	}
+	if *secretCalls != 0 {
+		t.Errorf("no api_key was asked for, the no-echo prompt must not run (%d calls)", *secretCalls)
+	}
+	if len(m.creates) != 2 {
+		t.Fatalf("want 2 backend-create calls, got %d", len(m.creates))
+	}
+	byName := map[string]map[string]any{}
+	for _, c := range m.creates {
+		name, _ := c["name"].(string)
+		byName[name] = c
+	}
+	for _, name := range []string{seedChatName, seedEmbedName} {
+		payload, found := byName[name]
+		if !found {
+			t.Fatalf("wizard did not create %q — got %v", name, m.creates)
+		}
+		if payload["trust"] != "full-trust" {
+			t.Errorf("%s: trust = %v, want full-trust", name, payload["trust"])
+		}
+		if payload["confirm_trust_elevation"] != true {
+			t.Errorf("%s: confirm_trust_elevation = %v, want true", name, payload["confirm_trust_elevation"])
+		}
+		if payload["scope"] != "_global" {
+			t.Errorf("%s: scope = %v, want _global", name, payload["scope"])
+		}
+		if payload["protocol"] != "ollama" {
+			t.Errorf("%s: protocol = %v, want the ollama default for an empty answer", name, payload["protocol"])
+		}
+		if payload["base_url"] != "http://gpu:11434" {
+			t.Errorf("%s: base_url = %v", name, payload["base_url"])
+		}
+	}
+	if !m.did("backend-test") {
+		t.Error("the step must PROBE the seeded rows — existence alone is not a serving signal")
+	}
+}
+
+func TestInitBackendsStepSealsAPIKeyWithoutEcho(t *testing.T) {
+	m := newInitMock(t, serverAdmin, nil)
+	ask, secretCalls := scriptedAsk([]string{"https://api.example.com", "openai", "big", "big-embed", "y"}, "sk-live")
+
+	var ok bool
+	out := captureStdout(t, func() { ok = runBackendsStep(m.client(), ask) })
+	if !ok {
+		t.Fatalf("seed with a key must succeed; output:\n%s", out)
+	}
+	if *secretCalls != 1 {
+		t.Errorf("the api_key must be read exactly once through the no-echo prompt, got %d", *secretCalls)
+	}
+	if len(m.secrets) == 0 {
+		t.Fatal("no secret was sealed — the key would have had to travel in the row")
+	}
+	for _, c := range m.creates {
+		body, _ := json.Marshal(c)
+		if strings.Contains(string(body), "sk-live") {
+			t.Fatalf("plaintext api_key leaked into a backend-create payload: %s", body)
+		}
+		if c["api_key_ref"] == nil {
+			t.Errorf("%v: api_key_ref missing although a key was given", c["name"])
+		}
+	}
+	if strings.Contains(out, "sk-live") {
+		t.Error("the api_key must never reach the terminal")
+	}
+}
+
+// Negative probe 1: neither a plain key nor a tenant-admin key may reach a
+// write — and init keeps running either way.
+func TestInitBackendsStepRefusesBelowServerAdmin(t *testing.T) {
+	cases := []struct {
+		name   string
+		whoami map[string]any
+	}{
+		{"non-admin", map[string]any{"success": true, "admin": false, "role": "user", "home_scope": "acme"}},
+		{"tenant-admin", map[string]any{"success": true, "admin": false, "role": "owner", "home_scope": "acme"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newInitMock(t, tc.whoami, nil)
+			ask, secretCalls := scriptedAsk([]string{"http://gpu:11434", "", "m", "e", "n"}, "")
+
+			var ok bool
+			out := captureStdout(t, func() { ok = runBackendsStep(m.client(), ask) })
+			if ok {
+				t.Error("a key below server-admin must not report a verified pool")
+			}
+			if len(m.creates) != 0 || m.did("backend-create") {
+				t.Errorf("no row may be written: %v", m.creates)
+			}
+			if m.did("backend-list") {
+				t.Error("the tier gate must come before the pool read")
+			}
+			if *secretCalls != 0 {
+				t.Error("no prompting may happen once the tier gate refused")
+			}
+			if !strings.Contains(out, "server-admin key") || !strings.Contains(out, "ctx backends seed") {
+				t.Errorf("the hint must name the missing tier and the later seed path; got:\n%s", out)
+			}
+			if !strings.Contains(out, "docs/operations.md#backends") {
+				t.Errorf("the hint must point at the runbook anchor; got:\n%s", out)
+			}
+		})
+	}
+}
+
+// Negative probe 2: a populated but dead pool is a named hint, not an abort —
+// and the env-era default rows are named as what they are.
+func TestInitBackendsStepNamesDeadLegacyRows(t *testing.T) {
+	rows := []map[string]any{
+		{"id": "id-chat", "name": "herbert-chat", "scope": "_global", "enabled": true,
+			"base_url": legacyDefaultHost, "roles": []string{"synthesis", "chat"}},
+		{"id": "id-embed", "name": "llama-embed", "scope": "_global", "enabled": true,
+			"base_url": legacyDefaultHost, "roles": []string{"embed"}},
+	}
+	m := newInitMock(t, serverAdmin, rows)
+	ask, _ := scriptedAsk(nil, "")
+
+	var ok bool
+	out := captureStdout(t, func() { ok = runBackendsStep(m.client(), ask) })
+	if ok {
+		t.Error("dead rows must not pass as a serving pool")
+	}
+	if len(m.creates) != 0 {
+		t.Errorf("a populated pool must not be seeded over: %v", m.creates)
+	}
+	if !strings.Contains(out, "herbert-chat") || !strings.Contains(out, "unreachable") {
+		t.Errorf("the dead row must be named; got:\n%s", out)
+	}
+	if !strings.Contains(out, "ctx backends seed --force") {
+		t.Errorf("the legacy fingerprint must name --force as the replacement path; got:\n%s", out)
+	}
+}
+
+// A tenant row of the same role does not make the shared pipelines serve.
+func TestPoolRowForRoleIgnoresTenantRows(t *testing.T) {
+	rows := []backendRow{
+		{ID: "t", Name: "tenant-chat", Scope: "acme", Enabled: true, Roles: []string{"synthesis"}},
+		{ID: "d", Name: "disabled", Scope: "_global", Enabled: false, Roles: []string{"embed"}},
+	}
+	if _, ok := poolRowForRole(rows, "synthesis"); ok {
+		t.Error("a tenant-scoped row must not count as serving the _global pool")
+	}
+	if _, ok := poolRowForRole(rows, "embed"); ok {
+		t.Error("a disabled row must not count as serving")
+	}
+	if got := missingSeedRoles(rows); len(got) != 2 {
+		t.Errorf("missingSeedRoles = %v, want both roles missing", got)
+	}
+}
+
+func TestDeadRowHintDistinguishesLegacyFingerprint(t *testing.T) {
+	legacy := backendRow{ID: "x", Name: "llama-embed", BaseURL: legacyDefaultHost + "/"}
+	if !legacyDefaultRow(legacy) {
+		t.Fatal("a trailing slash must not hide the fingerprint")
+	}
+	if !contains(deadRowHint(legacy), "--force") {
+		t.Errorf("legacy hint lacks the replacement path: %s", deadRowHint(legacy))
+	}
+	own := backendRow{ID: "019e", Name: "chat-primary", BaseURL: "http://gpu:11434"}
+	if legacyDefaultRow(own) {
+		t.Error("a seeded row must never be mistaken for the env-era default")
+	}
+	if hint := deadRowHint(own); contains(hint, "--force") || !contains(hint, "ctx backends test 019e") {
+		t.Errorf("a configured row is repaired, not replaced: %s", hint)
+	}
+}
+
+// The step never turns into a non-zero exit: its verdict stays out of the
+// summary, so a non-admin's init still ends "ready".
+func TestInitSummaryIgnoresBackendsVerdict(t *testing.T) {
+	base := initResult{ConfigOK: true, ServerOK: true, HooksOK: true, StatuslineOK: true}
+	if !initSummaryOK(base) {
+		t.Fatal("baseline should be ready")
+	}
+	if !initSummaryOK(initResult{ConfigOK: true, ServerOK: true, HooksOK: true, StatuslineOK: true, BackendsOK: false}) {
+		t.Error("a degraded backends step must not flip the summary — init stays usable for non-admins")
+	}
+	if initSummaryOK(initResult{ConfigOK: true, ServerOK: true, HooksOK: false, StatuslineOK: true, BackendsOK: true}) {
+		t.Error("the steps init actually owns must still count")
+	}
+}
+
+// PIN (design/02 §4.1b, corrected review finding): a fresh install after the
+// cut answers /health with 503 + status "unhealthy" because its pool is empty.
+// stepServer reads the BODY and ignores the status code — exactly that keeps
+// the wizard usable as the onboarding path. A later "hardening" that refuses
+// unhealthy or checks resp.StatusCode would break the only seeding route and
+// must fail here first.
+func TestStepServerAcceptsUnhealthy503(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"unhealthy","services":{"database":"ok"}}`))
+	}))
+	defer srv.Close()
+
+	var ok bool
+	out := captureStdout(t, func() { ok = stepServer(Config{BaseURL: srv.URL, Key: "k"}) })
+	if !ok {
+		t.Fatalf("init must accept unhealthy/503 — an empty pool is the state it exists to fix; output:\n%s", out)
+	}
+	if !strings.Contains(out, "unhealthy") {
+		t.Errorf("the state must still be shown, not swallowed; got:\n%s", out)
+	}
+}
+
+func TestStepServerRejectsUnparseableBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	var ok bool
+	_ = captureStdout(t, func() { ok = stepServer(Config{BaseURL: srv.URL, Key: "k"}) })
+	if ok {
+		t.Error("an unparseable /health body is not a reachable ctx server")
 	}
 }
 

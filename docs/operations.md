@@ -1,6 +1,22 @@
 # Operations
 
-## Configure the CLI endpoint
+## First run: ctx init
+
+```bash
+ctx init
+```
+
+The wizard is the documented first-run path and is idempotent — it reports every item and only changes what is missing:
+
+1. **Config** — asks for base URL and API key, writes `~/.config/ctx/config` (mode 0600).
+2. **Server** — reads `/health`. A `degraded` or `unhealthy` server is shown but accepted: an install whose [backend pool](#backends) is still empty answers `unhealthy` with HTTP 503 by design, and that is precisely the state the next step fixes.
+3. **Backend pool** — lists the pool and, when no enabled `_global` row serves the `synthesis` or `embed` role, asks for host, protocol, chat model, embedding model and an optional API key, then runs the same seed `ctx backends seed` runs (same server-admin gate, same full-trust posture, same sealed-secret handling — the key is read without echo and never lands in the row). Afterwards, and whenever it finds a pool already populated, it **probes** each serving row and names the dead ones. A key below server-admin is not an error here: the step says so, points at `ctx backends seed`, and init carries on — hooks and statusline do not need an admin key.
+4. **Version** — compares the local build against the latest GitHub release.
+5. **Hooks** — `SubagentStart` / `SubagentStop` in Claude Code's `settings.json`.
+6. **Statusline** — `ctx statusline` in the same file.
+
+<details>
+<summary>Configuring the endpoint by hand instead</summary>
 
 ```bash
 # Linux/macOS
@@ -11,26 +27,28 @@ CTX_KEY=your-api-key-here
 EOF
 ```
 
-<details>
-<summary>Windows (PowerShell)</summary>
-
 ```powershell
+# Windows (PowerShell)
 New-Item -ItemType Directory -Force "$env:APPDATA\ctx"
 @"
 CTX_BASE_URL=https://your-ctx-host.example
 CTX_KEY=your-api-key-here
 "@ | Set-Content "$env:APPDATA\ctx\config"
 ```
+
+The backend pool then has to be seeded explicitly — see [Backends](#backends).
 </details>
 
 Verify:
 
 ```bash
-ctx health    # DB + Ollama connectivity
+ctx health    # DB + backend connectivity
 ctx stats     # Block count, categories, storage
 ```
 
 ## Claude Code integration (optional)
+
+`ctx init` (steps 5 and 6 above) writes the hooks and the statusline for you; below is the same thing by hand.
 
 **Statusline** — live block count, health, and rate limits:
 
@@ -113,7 +131,7 @@ The **`mut` column** is the mutability class per key: **hot** keys take effect w
 
 **Compose gap.** An env var only reaches the container if the `docker-compose.yml` `environment:` block declares it — setting an undeclared one in `.env` alone does nothing. Of the 177 env names the registry parses, 90 are declared in the `ctx` service block and **87 are not** (the block carries 100 names in total; the extra ten — the three `CTX_CAMO_*`, both `CTX_SECRETS_KEY*`, both `CTX_BOOTSTRAP_*`, `CTX_CANONICAL_ISSUER`, `CTX_OAUTH_REDIRECT_EXTRA`, `CTX_SETTINGS_DISABLE` — are read raw, outside the registry). Treat the count as a snapshot, not a contract: the authority is the boot dump, where a var that never arrived shows `"default"` as its source. The undeclared set is not a backlog: newer subsystems are deliberately settings-first and are meant to be driven through the [Settings API](api.md#settings-api) rather than a redeploy. The largest groups are `CTX_RECALL_CHECK_*` (13), `CTX_GRAPH_CACHE_*` (10), `CTX_EMBED_MIGRATION_*` (7), `CTX_DREAM_BACKOFF_*` (6), `CTX_RETRIEVAL_SELECTOR_*` (5), `CTX_DREAM_EMBED_*` (5), `CTX_EMBED_BACKFILL_*` (4), `CTX_PROJECT_EVENTS_*` (4) and the nine `CTX_DISPATCH_*`; the long-standing singles are `CTX_DREAM_IDLE_WAIT`, `CTX_DREAM_PARALLELISM`, `CTX_PROMPT_VERSION`, `CONTEXT_DB_SSLMODE` and the dashboard knobs `CTX_LLMLOG_MAX_LIMIT` / `CTX_EVENTS_TICK_INTERVAL` / `CTX_EVENTS_QUEUE_STATS_INTERVAL`. To pin one at the container level anyway, add it to the compose `environment:` block; otherwise set a `context_settings` override under its **settings key** (`recall_check.interval`, `graph_cache.enabled`, `retrieval.selector.enabled`, … — the registry's key names, which are what the Settings API and the boot dump speak).
 
-**First run on a fresh DB.** The bootstrap pair above is the ops answer to the henhouse-egg gap (no key exists yet to create the first key). Order: set `CTX_BOOTSTRAP_ADMIN_KEY` in `.env` (`openssl rand -hex 32`; the compose `environment:` block declares it — the compose-gap rule above applies) → boot → create the real keys with it (`ctx keys create <label> --home <scope>`, see [cli](cli.md)) → remove the bootstrap key from `.env`. On any later boot with a populated `context_api_keys` it is a no-op anyway (fail-closed), but a plaintext admin credential has no business staying in `.env`.
+**First run on a fresh DB.** The bootstrap pair above is the ops answer to the henhouse-egg gap (no key exists yet to create the first key). Order: set `CTX_BOOTSTRAP_ADMIN_KEY` in `.env` (`openssl rand -hex 32`; the compose `environment:` block declares it — the compose-gap rule above applies) → boot → create the real keys with it (`ctx keys create <label> --home <scope>`, see [cli](cli.md)) → remove the bootstrap key from `.env`. On any later boot with a populated `context_api_keys` it is a no-op anyway (fail-closed), but a plaintext admin credential has no business staying in `.env`. With the first real key in hand, point the CLI at the server and finish the first run there: `ctx init` (or `ctx backends seed`) gives the fresh install its [backend pool](#backends) — until it serves a `synthesis` and an `embed` backend, `/health` answers `unhealthy` with HTTP 503 and queries fail on the embedding step.
 
 **Three default-off gates.** `retrieval.selector.enabled`, `graph_cache.serve_ego` and `graph_cache.serve_expand` ship **false** on purpose, and so does `graph_cache.enabled`. Each guards a built, tested engine that is deliberately dark until its evidence lands — the selector until the `recall_check` measurements exist to justify a dispatch threshold, the two serve flags until the graph-cache bench (E-05-1). Flipping them is an operational settings change, not a deploy, and every one of them is `hot` and **global-only**: they dimension process-shared resources (one CSR snapshot, one HNSW index, one buffer pool), so a per-tenant override would touch nothing tenant-private and could only mis-tune the shared thing. None of the three groups carries strict parsing — a malformed value logs a WARN and keeps the protective default instead of aborting the boot, the right degradation for an operational knob (unlike the security-ceiling caps, which do abort).
 
@@ -174,7 +192,9 @@ same trust boundary as the database itself.
 
 ## Backends
 
-The backend pool (`context_backends`) is the living LLM configuration — `ctx backends` lists and manages it, the web UI at `/settings/backends` does the same visually. On an installation whose pool is still empty, `ctx backends seed` writes the first two rows without any interaction:
+The backend pool (`context_backends`) is the living LLM configuration — `ctx backends` lists and manages it, the web UI at `/settings/backends` does the same visually.
+
+Two ways in on a fresh installation. Interactively, [`ctx init`](#first-run-ctx-init) asks for host, protocol and the two models, seeds the pool and probes what it wrote — the same code path, wrapped in prompts. Non-interactively (scripts, CI, cloud-init), `ctx backends seed` writes the first two rows without any interaction:
 
 ```bash
 ctx backends seed --host http://gpu-host:11434 --model qwen3 --embed-model qwen3-embedding
@@ -198,6 +218,7 @@ What to know before running it:
 - **`api_key` never lands in the table.** It is sealed into an F2 secret first and the row carries only the reference, so the server needs a configured `CTX_SECRETS_KEY` (`openssl rand -hex 32`) before a spec with `api_key` can be seeded. Without one the run aborts and writes nothing — there is no plaintext fallback.
 - **It is idempotent per row.** A run interrupted between the two creates is completed by simply running it again. Rows *outside* the pair it manages abort the run instead (`--force` overrides only that check), so an already-configured pool is never touched by accident.
 - **A seed file is transient, not config.** It carries the api_key in the clear: `chmod 0600`, delete it after the seed, never commit it.
+- **A pool that exists is not a pool that serves.** `ctx init` probes each serving row and names the dead ones; `ctx backends test <id>` does it for a single row. Rows named `herbert-chat` / `llama-embed` on `http://localhost:11434` are the residue of an env bootstrap that ran with nothing configured — inside the ctx container that URL is the container itself. They are replaced, not repaired: `ctx backends seed --force`.
 
 ## GPU-host maintenance (eject)
 
