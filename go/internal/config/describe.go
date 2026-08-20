@@ -19,6 +19,7 @@ type KeyInfo struct {
 	Guard      string // "" | "sensitivity-downgrade": lowering needs a confirm flag (F3 §3.5)
 	Tenancy    string // tenant-overridable | global-only (MT3-W2): the settings UI hides per-tenant editing on global-only keys
 	Default    any    // registry default, rendered like RenderValue
+	Desc       string // one-line operator description (keyDescriptions) — UI hint + search corpus
 }
 
 // typeNames maps the registry leaf types to their wire names. The names are
@@ -44,6 +45,13 @@ var typeNames = map[reflect.Type]string{
 var keyInfos = sync.OnceValue(func() []KeyInfo {
 	out := make([]KeyInfo, 0, len(registry()))
 	for _, e := range registry() {
+		desc, ok := keyDescriptions[e.Key]
+		if !ok || desc == "" {
+			// Same fail-loud posture as a malformed registry tag: a key
+			// without a description is a programmer error, caught by any
+			// test touching the registry — never a silent blank UI row.
+			panic("config: key " + e.Key + " has no entry in keyDescriptions")
+		}
 		out = append(out, KeyInfo{
 			Key:        e.Key,
 			EnvVar:     envVarByKey()[e.Key],
@@ -53,6 +61,7 @@ var keyInfos = sync.OnceValue(func() []KeyInfo {
 			Guard:      e.Guard,
 			Tenancy:    e.Tenancy,
 			Default:    renderField(e, reflect.ValueOf(e.defVal), SurfaceAPI),
+			Desc:       desc,
 		})
 	}
 	return out

@@ -90,6 +90,7 @@ type settingView struct {
 	Source     string `json:"source"`
 	Default    any    `json:"default"`
 	Sensitive  bool   `json:"sensitive,omitempty"`
+	Desc       string `json:"description,omitempty"`
 }
 
 // apiSource maps the snapshot source vocabulary to the API one: the override
@@ -182,6 +183,7 @@ func (h *SettingsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 			Source:     apiSource(c.Source(info.Key)),
 			Default:    info.Default,
 			Sensitive:  info.Sensitive,
+			Desc:       info.Desc,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "settings": views})
@@ -220,6 +222,7 @@ func (h *SettingsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 			Source:     apiSource(c.Source(info.Key)),
 			Default:    info.Default,
 			Sensitive:  info.Sensitive,
+			Desc:       info.Desc,
 		},
 		"audit": audit,
 	})

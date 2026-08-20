@@ -294,12 +294,13 @@ Three invariants: the stage never ADDS or removes a result (injection is its own
 Runtime config editing over the `context_settings` override layer. **Admin-gated including reads** — the effective config (hosts, models, thresholds) is operational intelligence, and a non-admin key that can read it can also enumerate what to attack. (Tenant-admins reach a two-scope view — see [multi-tenancy](multi-tenancy.md#per-tenant-settings--secrets).)
 
 ```
-GET    /api/settings           # every registry key: value, source, type, mutability, default
+GET    /api/settings           # every registry key: value, source, type, mutability, default, description
 GET    /api/settings/{key}     # single key + last 10 audit rows (action, actor, via)
 PUT    /api/settings/{key}     # body {"value": <scalar>} — validated BEFORE persist
 DELETE /api/settings/{key}     # drop the override, revert to env/default
 ```
 
+- **Key descriptions.** Every registry key carries a one-line operator `description` (registry map `config.keyDescriptions`, completeness boot-enforced + test-pinned): what the value controls, its unit semantics and the practical effect of changing it. Rendered under the key in the settings UI and part of its fuzzy-search corpus.
 - **Validation before persist.** A PUT builds the candidate config through the same path the reload uses; a value the build would reject or ignore is a `422` and never reaches the table (no row, no audit entry). Unknown keys are `404`; `restart`/`coupled` keys are `409` with the env var to set instead. String inputs are normalized to their registry type before persist (`"0.7"` → the number `0.7`).
 - **Hot effect.** After commit the handler swaps the snapshot — the next request/cycle runs with the new value, no restart. Direct `psql` edits arrive through the NOTIFY listener with the same effect (audited as `via='sql'`).
 - **Masking rule.** Any response position carrying the effective value of a sensitive key renders `"(set via env)"` when the value comes from env (incl. `previous.value` on PUT and the post-revert `value` on DELETE). DB-sourced sensitive values render the secret **name** (`secret_ref`), never resolved material.
