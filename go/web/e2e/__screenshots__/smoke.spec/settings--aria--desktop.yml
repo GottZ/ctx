@@ -19,6 +19,12 @@
       - listitem:
         - link "Keys & Members":
           - /url: /tenant
+      - listitem:
+        - link "Backends":
+          - /url: /tenant/backends
+      - listitem:
+        - link "Guard Review":
+          - /url: /guard
   - group "Server":
     - paragraph: Server
     - list:
@@ -53,24 +59,27 @@
     - text: ; overrides apply on the fly
   - link "Backend pool & vault → manage provider backends, trust tiers and API-key secrets":
     - /url: /settings/backends
+  - link "Kategorie-Farben → Graph-Hue pro Kategorie überschreiben (AM-2) — Rad zeigt die Abstände perceptuell":
+    - /url: /settings/hues
+  - searchbox "search settings"
+  - button "expand all"
+  - button "collapse all"
+  - navigation "setting categories":
+    - button "pool 1"
+    - button "dream 7"
+    - button "server 1"
   - region "pool settings":
-    - heading "pool" [level=2]
+    - button "pool 1":
+      - heading "pool" [level=2]
+      - text: ""
     - button "Save" [disabled]
-    - text: pool.default_block_sensitivity db
-    - textbox "pool.default_block_sensitivity":
-      - /placeholder: ""
-      - text: internal
-    - button "reset"
   - region "dream settings":
-    - heading "dream" [level=2]
+    - button "dream 7":
+      - heading "dream" [level=2]
+      - text: ""
     - button "Save" [disabled]
-    - text: dream.enabled env
-    - switch "dream.enabled" [checked]
   - region "server settings":
-    - heading "server" [level=2]
+    - button "server 1":
+      - heading "server" [level=2]
+      - text: ""
     - button "Save" [disabled]
-    - text: server.timezone db restart
-    - textbox "server.timezone" [disabled]:
-      - /placeholder: IANA name, e.g. Europe/Berlin
-      - text: Europe/Berlin
-    - paragraph: restart-only; set it via env (no env var exists for this key) and restart

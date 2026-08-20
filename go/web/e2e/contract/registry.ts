@@ -295,24 +295,35 @@ export const contracts: PageContract[] = [
         'Settings-Katalog ist eine bounded, server-definierte Konfigurationsliste (Dutzende Keys, kein nutzergetriebenes Wachstum) — keine 10k-Dimension.',
     },
     flowDoc:
-      'Admin editiert eine Einstellung im Katalog (Edit-Roundtrip, §7-PV7): dream.enabled-Switch kippen → Save der Gruppe → genau EIN PUT /api/settings/dream.enabled mit {value:false} auf dem Draht (postData-Assert) → Echo wendet source=db an und der Dirty-Zähler verschwindet.',
+      'Admin editiert eine Einstellung im Katalog (Edit-Roundtrip, §7-PV7): dream-Karte aufklappen (Karten starten eingeklappt) → dream.enabled-Switch kippen → Save der Gruppe → genau EIN PUT /api/settings/dream.enabled mit {value:false} auf dem Draht (postData-Assert) → Echo wendet source=db an und der Dirty-Zähler verschwindet. Danach Fuzzy-Suche als Zweit-Probe: Tippfehler-Query findet den Key über die Levenshtein-Stufe.',
     primaryFlow: async (page, session) => {
       const content = page.locator('main.content')
-      await expect(content).toContainText('dream.enabled')
-      await expect(content).toContainText('pool.default_block_sensitivity')
+      // Collapsed index view: the prefixes read as card headers, key fields
+      // are not mounted yet (Settings-Rework: cards start collapsed).
+      const card = page.locator('section.card[aria-label="dream settings"]')
+      await expect(card).toBeVisible()
+      await expect(content).toContainText('pool')
 
       // Edit-Roundtrip (design 06 §4.1: /settings = Edit-Roundtrip, nie der
-      // Empty-State). dream.enabled is a hot bool → role=switch checkbox.
-      const card = page.locator('section.card[aria-label="dream settings"]')
+      // Empty-State). Expand the dream card first; dream.enabled is a hot
+      // bool → role=switch checkbox.
+      await card.locator('button.disclosure').click()
       const sw = card.locator('[id="dream.enabled"]')
       await expect(sw).toBeChecked() // fixture value true
+      // The dream card mounts the back-off curve editor over the six
+      // dream.backoff_* fixture keys — the curve renders, not its
+      // "curve paused" invalid-draft notice.
+      await expect(card.locator('.curve svg')).toBeVisible()
       await sw.click()
       await expect(card).toContainText('1 unsaved')
       await card.getByRole('button', { name: 'Save' }).click()
 
       // Applied echo: the PUT response flips the source badge env → db and
-      // clears the dirty marker (drafts re-sync to the stored value).
-      await expect(card.locator('span.badge.source-db')).toBeVisible()
+      // clears the dirty marker (drafts re-sync to the stored value). Scoped
+      // to the dream.enabled field — the backoff fixture rows carry their
+      // own db badges (strict mode).
+      const enabledField = card.locator('.field', { has: page.locator('[id="dream.enabled"]') })
+      await expect(enabledField.locator('span.badge.source-db')).toBeVisible()
       await expect(card).not.toContainText('unsaved')
       await expect(sw).not.toBeChecked()
 
@@ -320,6 +331,14 @@ export const contracts: PageContract[] = [
       const puts = session.calls.filter((x) => x.method === 'PUT' && x.path === '/api/settings/dream.enabled')
       expect(puts, 'the group save issues exactly ONE PUT for the one dirty key').toHaveLength(1)
       expect(puts[0].body, 'PUT body carries the toggled scalar').toEqual({ value: false })
+
+      // Fuzzy search (Levenshtein tier: "timezome" is neither substring nor
+      // in-order subsequence of "timezone" — only the edit-distance tier
+      // reaches it): the typo query still surfaces the key, non-matching
+      // groups leave the page.
+      await page.getByRole('searchbox', { name: 'search settings' }).fill('timezome')
+      await expect(content).toContainText('server.timezone')
+      await expect(card).not.toBeVisible()
     },
     mobile: MOBILE_PV4_EXEMPT,
   },

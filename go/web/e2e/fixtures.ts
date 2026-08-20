@@ -196,12 +196,21 @@ function statusFixture(): Record<string, unknown> {
   }
 }
 
-/** SettingView[] (types.ts:37) — a few rows so the reading-mode list has body. */
+/** SettingView[] (types.ts:37) — a few rows so the reading-mode list has body.
+ *  The six dream.backoff_* keys feed the BackoffCurve editor (a missing key
+ *  would render its "curve paused" notice instead of the curve); description
+ *  mirrors the registry keyDescriptions surface. */
 function settingsFixture(): Record<string, unknown>[] {
   return [
-    { key: 'pool.default_block_sensitivity', type: 'string', mutability: 'hot', value: 'internal', source: 'db', default: 'credentials' },
-    { key: 'dream.enabled', type: 'bool', mutability: 'hot', value: true, source: 'env', default: false },
-    { key: 'server.timezone', type: 'timezone', mutability: 'restart', value: 'Europe/Berlin', source: 'db', default: 'UTC' },
+    { key: 'pool.default_block_sensitivity', type: 'string', mutability: 'hot', value: 'internal', source: 'db', default: 'credentials', description: 'Sensitivity assigned to new blocks without an explicit classification' },
+    { key: 'dream.enabled', type: 'bool', mutability: 'hot', value: true, source: 'env', default: false, description: 'Master switch for the background dream pipeline' },
+    { key: 'dream.backoff_mode', type: 'string', mutability: 'hot', value: 'exp', source: 'default', default: 'exp', description: 'Curve shaping how the re-dream interval grows with a block eval count' },
+    { key: 'dream.backoff_factor', type: 'float', mutability: 'hot', value: 1.6, source: 'default', default: 1.6, description: 'Curve steepness; higher cools mature blocks off faster' },
+    { key: 'dream.backoff_grace', type: 'int', mutability: 'hot', value: 1, source: 'db', default: 0, description: 'Free eval cycles before the back-off curve starts growing' },
+    { key: 'dream.backoff_cap', type: 'hours', mutability: 'hot', value: '45d', source: 'default', default: '45d', description: 'Ceiling on the re-dream cooldown' },
+    { key: 'dream.backoff_min', type: 'hours', mutability: 'hot', value: '12h', source: 'default', default: '12h', description: 'Cooldown floor at eval count 0' },
+    { key: 'dream.backoff_inert_offset', type: 'int', mutability: 'hot', value: 2, source: 'db', default: 7, description: 'Extra curve steps applied when a cycle finds no links' },
+    { key: 'server.timezone', type: 'timezone', mutability: 'restart', value: 'Europe/Berlin', source: 'db', default: 'UTC', description: 'IANA timezone used to render timestamps' },
   ]
 }
 
@@ -571,6 +580,10 @@ function manageFixture(
       return { success: true, scope: 'home', by_source: { default: 8 }, run: classifyRun(true) }
     case 'blocks-classify-status':
       return { success: true, scope: 'home', by_source: { default: 8 }, run: classifyRun(false) }
+    case 'dream-backoff-restamp':
+      // DreamBackoffRestampResponse (types.ts) — the settings curve editor
+      // fires this once per completed dream.backoff_* save.
+      return { success: true, action: 'dream-backoff-restamp', restamped: 5, skipped_transient: 0 }
     case 'dream-stats':
       // DreamStatsResponse (types.ts) — the back-off histogram the DreamTile
       // fetches once per moved last_cycle_at. Counts stay coherent with the
