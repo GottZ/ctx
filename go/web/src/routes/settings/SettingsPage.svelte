@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { listSettings } from '../../lib/api/settings'
+  import { groupDomId } from '../../lib/settings'
   import { session } from '../../lib/auth.svelte'
   import { Resource } from '../../lib/resource.svelte'
   import { SettingsModel } from './model.svelte'
@@ -35,7 +36,7 @@
 
   function jumpTo(prefix: string): void {
     ui.expand(prefix)
-    document.getElementById(`settings-${prefix}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    document.getElementById(groupDomId(prefix))?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
   function onPageKeydown(e: KeyboardEvent): void {

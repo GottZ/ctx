@@ -1,11 +1,13 @@
 <script lang="ts">
-  import type { SettingsGroup } from '../../lib/settings'
+  import { groupDomId, type SettingsGroup } from '../../lib/settings'
   import type { SettingsModel } from './model.svelte'
   import type { SettingsUi } from './ui.svelte'
   import SettingField from './SettingField.svelte'
   import BackoffCurve from './BackoffCurve.svelte'
 
   let { group, model, ui }: { group: SettingsGroup; model: SettingsModel; ui: SettingsUi } = $props()
+
+  const domId = $derived(groupDomId(group.prefix))
 
   const dirtyCount = $derived(model.dirtyKeys(group.prefix).length)
   const visible = $derived(ui.visibleSettings(group.settings))
@@ -19,13 +21,13 @@
   )
 </script>
 
-<section class="card" aria-label="{group.prefix} settings" id="settings-{group.prefix}">
+<section class="card" aria-label="{group.prefix} settings" id={domId}>
   <header class:open>
     <button
       class="disclosure"
       type="button"
       aria-expanded={open}
-      aria-controls="settings-{group.prefix}-fields"
+      aria-controls="{domId}-fields"
       disabled={ui.searching || dirtyCount > 0}
       onclick={() => ui.toggle(group.prefix)}
     >
@@ -36,17 +38,27 @@
     {#if dirtyCount > 0}
       <span class="dirty-count">{dirtyCount} unsaved</span>
     {/if}
-    <button
-      class="save"
-      type="button"
-      disabled={dirtyCount === 0 || model.saving}
-      onclick={() => void model.saveGroup(group.prefix)}
-    >
-      {model.saving ? 'Saving…' : 'Save'}
-    </button>
+    {#if !group.legacy}
+      <button
+        class="save"
+        type="button"
+        disabled={dirtyCount === 0 || model.saving}
+        onclick={() => void model.saveGroup(group.prefix)}
+      >
+        {model.saving ? 'Saving…' : 'Save'}
+      </button>
+    {/if}
   </header>
   {#if open}
-    <div class="fields" id="settings-{group.prefix}-fields">
+    <div class="fields" id="{domId}-fields">
+      {#if group.legacy}
+        <p class="legacy-banner" role="note">
+          These keys are <strong>superseded by the backend pool</strong> — the live serving values are pool
+          rows (<a href="/settings/backends">Backend pool &amp; vault</a> or <code>ctx backends</code>).
+          They remain read-only here because they still seed a first boot with an empty pool; a PUT answers
+          409.
+        </p>
+      {/if}
       {#if showCurve}
         <BackoffCurve {model} />
       {/if}
@@ -135,5 +147,17 @@
     display: flex;
     flex-direction: column;
     padding: var(--space-1) 0;
+  }
+
+  .legacy-banner {
+    margin: var(--space-1) var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .legacy-banner a {
+    color: var(--accent);
   }
 </style>

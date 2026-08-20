@@ -10,7 +10,9 @@ import {
   draftFor,
   formatValue,
   groupByPrefix,
+  groupDomId,
   isEditable,
+  LEGACY_PREFIX,
   mutabilityNote,
   parseDraft,
   selectOptions,
@@ -167,5 +169,51 @@ describe('crossFieldIssues (mirror of validate.go V1/V2/V3)', () => {
 
   it('stays silent on an incomplete catalog (missing keys)', () => {
     expect(crossFieldIssues(effectiveOf({}))).toEqual([])
+  })
+})
+
+describe('superseded keys (Entflechtungs-Welle Stufe 1)', () => {
+  const superseded: SettingView = {
+    key: 'chat.host',
+    type: 'string',
+    mutability: 'hot',
+    value: '',
+    source: 'default',
+    default: '',
+    superseded: 'f3:context_backends',
+  }
+  const live: SettingView = {
+    key: 'dream.backoff_factor',
+    type: 'float',
+    mutability: 'hot',
+    value: 1.6,
+    source: 'default',
+    default: 1.6,
+  }
+
+  it('isEditable: superseded is read-only even at mutability hot', () => {
+    expect(isEditable(superseded)).toBe(false)
+    expect(isEditable(live)).toBe(true)
+  })
+
+  it('mutabilityNote points at the backend pool', () => {
+    expect(mutabilityNote(superseded)).toContain('backend-pool')
+  })
+
+  it('groupByPrefix collects superseded keys in ONE trailing legacy group', () => {
+    const groups = groupByPrefix([live, superseded, { ...superseded, key: 'embed.host' }])
+    expect(groups.map((g) => g.prefix)).toEqual(['dream', LEGACY_PREFIX])
+    const legacy = groups[1]
+    expect(legacy.legacy).toBe(true)
+    expect(legacy.settings.map((s) => s.key)).toEqual(['chat.host', 'embed.host'])
+  })
+
+  it('groupByPrefix emits no legacy group without superseded keys', () => {
+    expect(groupByPrefix([live]).map((g) => g.prefix)).toEqual(['dream'])
+  })
+
+  it('groupDomId strips non-word characters (HTML ids must not carry spaces)', () => {
+    expect(groupDomId(LEGACY_PREFIX)).toBe('settings-legacy-superseded-')
+    expect(groupDomId('dream')).toBe('settings-dream')
   })
 })

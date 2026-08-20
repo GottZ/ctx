@@ -68,6 +68,9 @@ export interface SettingView {
   sensitive?: boolean
   /** Registry description (config.keyDescriptions) — UI hint + search corpus. */
   description?: string
+  /** Non-empty ("f3:context_backends") = the value's living home is the
+   *  backend pool; the key is a first-boot bootstrap seed, PUT answers 409. */
+  superseded?: string
 }
 
 // Source: go/internal/handler/settings.go (HandleList).
