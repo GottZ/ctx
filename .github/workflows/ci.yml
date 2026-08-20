@@ -465,8 +465,18 @@ jobs:
           retention-days: 7
 
   # ─── Stage 3: Integration Tests ───────────────────────────────────────────────
+  # Sharded 4-way (2026-08-20): the un-sharded job serially ran ~22m and was
+  # the whole pipeline's critical path (next-longest job: web at ~4.5m).
+  # Public repo ⇒ parallel standard runners are free, so the shards cost
+  # nothing and the wall-clock drops to the slowest shard. Cut by measured
+  # package runtimes (local -tags=integration run 2026-08-20): handler and
+  # store each dominate alone; overview/guard/events/rrf/dream form the heavy
+  # middle; `rest` is the COMPLEMENT computed via go list at run time, so a
+  # NEW package with integration tests always lands in a shard automatically —
+  # never silently untested. The chosen package list is echoed into the log so
+  # every run shows what it actually covered.
   integration-tests:
-    name: Integration Tests
+    name: Integration Tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
     # 25 (was 20): the handler package alone may take up to its 15m package
     # budget on slow nightly runners — see the -timeout note below.
@@ -474,6 +484,19 @@ jobs:
     needs: [unit-tests]
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: handler
+            packages: "./internal/handler/..."
+          - shard: store
+            packages: "./internal/store/..."
+          - shard: heavy
+            packages: "./internal/overview/... ./internal/guard/... ./internal/events/... ./internal/rrf/... ./internal/dream/..."
+          - shard: rest
+            # Complement of the explicit shards above — computed at run time.
+            packages: ""
 
     env:
       TESTCONTAINERS_RYUK_DISABLED: "false"
@@ -516,6 +539,22 @@ jobs:
             docker save timescale/timescaledb-ha:pg18 -o ~/.cache/docker-images/timescaledb-ha-pg18.tar
           fi
 
+      - name: Resolve shard packages
+        id: shard
+        working-directory: go
+        run: |
+          # The `rest` shard is the complement of every explicitly-sharded
+          # path — the union of all shards is ./... BY CONSTRUCTION, so a new
+          # package can never fall between the shards. The list is echoed so
+          # each run documents its actual coverage.
+          if [ -n "${{ matrix.packages }}" ]; then
+            PKGS="${{ matrix.packages }}"
+          else
+            PKGS=$(go list ./... | grep -vE '/internal/(handler|store|overview|guard|events|rrf|dream)(/|$)' | tr '\n' ' ')
+          fi
+          echo "Shard '${{ matrix.shard }}' packages: ${PKGS}"
+          echo "packages=${PKGS}" >> "$GITHUB_OUTPUT"
+
       - name: Run integration tests
         working-directory: go
         run: |
@@ -532,12 +571,12 @@ jobs:
             -timeout=15m \
             -coverprofile=coverage-integration.out \
             -covermode=atomic \
-            ./...
+            ${{ steps.shard.outputs.packages }}
 
       - name: Upload integration coverage
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: coverage-integration
+          name: coverage-integration-${{ matrix.shard }}
           path: go/coverage-integration.out
           retention-days: 7
 
