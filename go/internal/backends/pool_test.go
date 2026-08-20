@@ -418,3 +418,53 @@ func TestBuildDisabledBy_SortedAndActiveOnly(t *testing.T) {
 		t.Fatalf("buildDisabledBy nicht ordnungsstabil: %v vs %v", got, got2)
 	}
 }
+
+// primaryModelFixture: one role, two serving candidates with DISTINCT models —
+// the priority head and its failover. That is the minimal shape in which
+// "which model would answer" has an observable answer.
+func primaryModelFixture() []Backend {
+	return []Backend{
+		{ID: "1", Name: "embed-head", Trust: TrustFull, Roles: []string{RoleEmbed},
+			Priority: 100, Enabled: true, Model: "head-embed"},
+		{ID: "2", Name: "embed-failover", Trust: TrustFull, Roles: []string{RoleEmbed},
+			Priority: 50, Enabled: true, Model: "failover-embed"},
+		{ID: "3", Name: "embed-off", Trust: TrustFull, Roles: []string{RoleEmbed},
+			Priority: 200, Enabled: false, Model: "off-embed"},
+	}
+}
+
+// TestPrimaryModelProfileAware is the A04-W1 gate: a backend that is enabled
+// but sits in an ACTIVE disable-profile is excluded from the chain (the sole
+// exclusion mechanism since U01-W5), so PrimaryModel must name the FAILOVER
+// model, not the profile-disabled one. Against the pre-W1 stand this FAILS —
+// PrimaryModel checked only Enabled/HasRole and kept returning "head-embed".
+func TestPrimaryModelProfileAware(t *testing.T) {
+	// No active profile: the priority head answers, the disabled row never does.
+	p := seedPool(primaryModelFixture())
+	if got := p.PrimaryModel(RoleEmbed); got != "head-embed" {
+		t.Fatalf("PrimaryModel = %q, want %q (priority head, no profile active)", got, "head-embed")
+	}
+
+	// Active profile "wartung" disables the head → the failover answers.
+	p = seedPoolWithDisabledBy(primaryModelFixture(), map[string]string{"1": "wartung"})
+	if got := p.PrimaryModel(RoleEmbed); got != "failover-embed" {
+		t.Fatalf("PrimaryModel = %q, want %q (head profile-disabled, failover answers)", got, "failover-embed")
+	}
+	// Cross-check against the serving truth: the chain head carries that model.
+	if names := chainNames(t, p, RoleEmbed, SensCredentials); len(names) == 0 || names[0] != "embed-failover" {
+		t.Fatalf("chain head = %v, PrimaryModel must track it", names)
+	}
+
+	// Every serving candidate profile-disabled → nobody qualifies. The enabled
+	// column is untouched by profiles, so only the disabledBy arm can see this.
+	p = seedPoolWithDisabledBy(primaryModelFixture(), map[string]string{"1": "wartung", "2": "wartung"})
+	if got := p.PrimaryModel(RoleEmbed); got != "" {
+		t.Fatalf("PrimaryModel = %q, want the empty string (all candidates profile-disabled)", got)
+	}
+
+	// Unrelated role membership does not leak: disabling the embed head leaves
+	// a synthesis lookup on the untouched fixture alone.
+	if got := p.PrimaryModel(RoleSynthesis); got != "" {
+		t.Fatalf("PrimaryModel(synthesis) = %q, want the empty string (no synthesis role in fixture)", got)
+	}
+}

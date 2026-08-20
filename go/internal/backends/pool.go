@@ -547,16 +547,27 @@ func (p *Pool) RoleConfigured(role string) bool {
 	return false
 }
 
-// PrimaryModel names the model of the highest-priority enabled backend for a
-// role — "the model that WOULD answer". Used for the response model field
-// when the LLM step is skipped (score filter); empty when none qualifies.
+// PrimaryModel names the model of the highest-priority serving-eligible
+// backend for a role — "the model that WOULD answer". Used for the response
+// model field when the LLM step is skipped (score filter); empty when none
+// qualifies.
+//
+// Serving-eligible means enabled AND not disabled by an ACTIVE profile — the
+// same qualification the chain applies (Chain, the disabledBy arm above; since
+// U01-W5 the ONLY exclusion mechanism, and profile membership lives in
+// disabledBy, NOT in the enabled column). Without the profile check the
+// "WOULD answer" claim broke as soon as a disable-profile was active: the
+// answer would come from the failover backend while this returned the model of
+// the disabled one. Trust and cooldown stay out on purpose — trust depends on
+// the caller's sensitivity (not known here) and cooldown only reorders the
+// chain, it never removes a backend.
 func (p *Pool) PrimaryModel(role string) string {
 	snap := p.snap.Load()
 	best := -1
 	model := ""
 	for i := range snap.backends {
 		b := &snap.backends[i]
-		if !b.Enabled || !b.HasRole(role) {
+		if !b.Enabled || !b.HasRole(role) || snap.disabledBy[b.ID] != "" {
 			continue
 		}
 		if b.Priority > best {
