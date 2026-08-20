@@ -571,6 +571,35 @@ function manageFixture(
       return { success: true, scope: 'home', by_source: { default: 8 }, run: classifyRun(true) }
     case 'blocks-classify-status':
       return { success: true, scope: 'home', by_source: { default: 8 }, run: classifyRun(false) }
+    case 'dream-stats':
+      // DreamStatsResponse (types.ts) — the back-off histogram the DreamTile
+      // fetches once per moved last_cycle_at. Counts stay coherent with the
+      // statusFixture dream block (17 blocks total, 12 never dreamed).
+      return {
+        success: true,
+        action: 'dream-stats',
+        total_blocks: 17,
+        dream_checked: 5,
+        dream_links: 3,
+        coverage_pct: 29.4,
+        unchecked: 12,
+        pending_recheck: 1,
+        backoff: {
+          mode: 'exp',
+          factor: 1.6,
+          grace: 1,
+          min_hours: 12,
+          cap_hours: 1080,
+          inert_offset: 2,
+          max_eval_count: 3,
+          truncated: false,
+          levels: [
+            { eval_count: 0, blocks: 12, cooldown_hours: 12 },
+            { eval_count: 1, blocks: 3, cooldown_hours: 12 },
+            { eval_count: 3, blocks: 2, cooldown_hours: 30.7 },
+          ],
+        },
+      }
     default:
       // HARD default (design 06 §2.3). Was {success:true} — it absorbed EVERY
       // un-mocked action silently, the single highest false-positive risk (Inventur

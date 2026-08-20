@@ -6,8 +6,20 @@
   // client's floor so a late SSE frame cannot revert the mode.
   import { setDreamMode, type DreamMode, type DreamModeResponse } from '../../lib/api/status'
   import type { DreamStatus } from '../../lib/api/types'
+  import { DreamBackoffModel, fmtHours } from './dream-backoff.svelte'
 
   let { dream, onApplied }: { dream: DreamStatus; onApplied: (r: DreamModeResponse) => void } = $props()
+
+  // Back-off histogram (the `ctx dream stats` view): fed by every status
+  // merge; the model throttles the O(n) dream-stats fetch to moved
+  // last_cycle_at stamps (see dream-backoff.svelte.ts).
+  const backoff = new DreamBackoffModel()
+  $effect(() => {
+    backoff.sync(dream.last_cycle_at)
+  })
+
+  const bo = $derived(backoff.data?.backoff ?? null)
+  const maxLevelBlocks = $derived(bo ? Math.max(1, ...bo.levels.map((l) => l.blocks)) : 1)
 
   let busy = $state(false)
   let err = $state<string | null>(null)
@@ -70,6 +82,41 @@
       </div>
     {/each}
   </div>
+
+  {#if bo && backoff.data}
+    <div class="backoff" aria-label="re-dream back-off distribution">
+      <div class="bo-head">
+        <span class="bo-title">re-dream back-off</span>
+        <span class="bo-policy">
+          mode={bo.mode} factor={bo.factor} min={fmtHours(bo.min_hours)} grace={bo.grace} cap={fmtHours(
+            bo.cap_hours,
+          )} · inert +{bo.inert_offset}
+        </span>
+      </div>
+      <div class="bo-coverage">
+        checked {backoff.data.dream_checked}/{backoff.data.total_blocks}
+        ({Math.round(backoff.data.coverage_pct)}%) · links {backoff.data.dream_links} · unchecked {backoff
+          .data.unchecked}
+      </div>
+      <div class="bo-levels">
+        {#each bo.levels as l (l.eval_count)}
+          <span class="bo-n">n={l.eval_count}</span>
+          <span class="bo-count">{l.blocks}</span>
+          <span class="bo-bar">
+            <span class="bo-fill" style:width={`${(l.blocks / maxLevelBlocks) * 100}%`}></span>
+          </span>
+          <span class="bo-cd">→ {fmtHours(l.cooldown_hours)}</span>
+        {/each}
+      </div>
+      {#if bo.truncated}
+        <div class="bo-note">… list truncated (max eval_count {bo.max_eval_count})</div>
+      {/if}
+    </div>
+  {:else if backoff.status === 'error'}
+    <div class="backoff bo-note" aria-label="re-dream back-off distribution">
+      back-off distribution unavailable ({backoff.error?.message ?? 'fetch failed'})
+    </div>
+  {/if}
 
   <dl class="meta">
     <div>
@@ -166,6 +213,72 @@
     letter-spacing: var(--label-tracking);
     text-transform: uppercase;
   }
+  .backoff {
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+  }
+  .bo-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+  .bo-title {
+    color: var(--text-faint);
+    font-size: var(--label-size);
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+  }
+  .bo-policy,
+  .bo-coverage {
+    color: var(--text-dim);
+    font-size: var(--fs-sm);
+  }
+  .bo-coverage {
+    margin-top: var(--space-1);
+  }
+  .bo-levels {
+    margin-top: var(--space-2);
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    align-items: center;
+    column-gap: var(--space-2);
+    row-gap: 2px;
+  }
+  .bo-n {
+    color: var(--text-faint);
+  }
+  .bo-count {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .bo-bar {
+    display: block;
+    height: 0.75rem;
+    background: var(--surface-2);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .bo-fill {
+    display: block;
+    height: 100%;
+    min-width: 2px;
+    background: var(--accent);
+    opacity: 0.75;
+    border-radius: var(--radius);
+  }
+  .bo-cd {
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .bo-note {
+    margin-top: var(--space-1);
+    color: var(--text-faint);
+  }
+
   .meta {
     margin: 0;
     display: flex;

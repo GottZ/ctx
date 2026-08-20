@@ -4,7 +4,13 @@
 // non-admin degradation path (no auth, name-free).
 
 import { apiFetch } from '../api'
-import type { HealthStatus, LLMLogDetailResponse, LLMLogResponse, StatusResponse } from './types'
+import type {
+  DreamStatsResponse,
+  HealthStatus,
+  LLMLogDetailResponse,
+  LLMLogResponse,
+  StatusResponse,
+} from './types'
 
 export function fetchStatus(): Promise<StatusResponse> {
   return apiFetch<StatusResponse>('/api/status')
@@ -45,6 +51,20 @@ export interface DreamModeResponse {
   mode: DreamMode
   interval: number
   as_of: string
+}
+
+/**
+ * Fetch the dream back-off distribution (dream-stats manage action — the same
+ * source `ctx dream stats` renders, so CLI and web stay in parity). Server-side
+ * this runs an O(n) GROUP BY over context_blocks (R12 names the 1M+ follow-up),
+ * so callers throttle: DreamBackoffModel refetches only when last_cycle_at
+ * moves and at most once per its min interval.
+ */
+export function fetchDreamStats(): Promise<DreamStatsResponse> {
+  return apiFetch<DreamStatsResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'dream-stats' }),
+  })
 }
 
 /** Toggle the dream scheduler mode (manage action; admin-gated server-side). */

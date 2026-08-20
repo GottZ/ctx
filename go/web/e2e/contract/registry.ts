@@ -127,6 +127,13 @@ export const contracts: PageContract[] = [
       await expect(dream.locator('.stat', { hasText: 'pickable now' })).toContainText('4')
       await expect(dream.locator('.stat', { hasText: 'never dreamed' })).toContainText('12')
       await expect(dream.locator('.stat', { hasText: 'incoming 6h' })).toContainText('9')
+      // Back-off histogram (dream-stats fixture): policy line + one level row
+      // per occupied eval count, cooldown rendered through fmtHours.
+      await expect(dream).toContainText('re-dream back-off')
+      await expect(dream).toContainText('mode=exp')
+      const levels = dream.locator('.bo-levels')
+      await expect(levels).toContainText('n=0')
+      await expect(levels).toContainText('→ 1.3d') // 30.7h at n=3
       await expect(dream).toContainText('throttle')
       // Backend pool tile: the one fixture backend, row-complete.
       const pool = page.locator('section.card[aria-label="backend pool"]')

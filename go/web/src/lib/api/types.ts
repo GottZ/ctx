@@ -283,6 +283,45 @@ export interface DreamStatus {
   last_cycle_at: string | null
 }
 
+// Source: go/internal/dream/dream.go (BackoffLevel) — one occupied
+// dream_eval_count level of the corpus maturity distribution.
+export interface DreamBackoffLevel {
+  eval_count: number
+  blocks: number
+  cooldown_hours: number
+}
+
+// Source: go/internal/dream/dream.go (BackoffStats) — the active re-dream
+// back-off policy plus the per-eval-count maturity distribution the CLI
+// renders as the `ctx dream stats` histogram.
+export interface DreamBackoffStats {
+  mode: string
+  factor: number
+  grace: number
+  min_hours: number
+  cap_hours: number
+  inert_offset: number
+  max_eval_count: number
+  truncated: boolean
+  levels: DreamBackoffLevel[]
+}
+
+// Source: go/internal/handler/context_manage.go (handleDreamStats) — the
+// dream-stats manage action answer. queue duplicates the status frame's
+// DreamStatus counters and is not consumed by the web; backoff + the coverage
+// counters are what the back-off histogram renders.
+export interface DreamStatsResponse {
+  success: true
+  action: 'dream-stats'
+  total_blocks: number
+  dream_checked: number
+  dream_links: number
+  coverage_pct: number
+  unchecked: number
+  pending_recheck: number
+  backoff: DreamBackoffStats
+}
+
 // Source: go/internal/handler/status.go (llm24hRow) — telemetry aggregate, NO
 // prompt/response bodies.
 export interface LLM24hRow {
