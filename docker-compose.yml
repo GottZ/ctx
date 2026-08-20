@@ -73,6 +73,7 @@ services:
       CTX_DREAM_MODEL: ${CTX_DREAM_MODEL:-}
       CTX_DREAM_NUM_CTX: ${CTX_DREAM_NUM_CTX:-0}
       CTX_DREAM_THINK: ${CTX_DREAM_THINK:-}
+      CTX_DREAM_PARALLELISM: ${CTX_DREAM_PARALLELISM:-1}
       # CTX_DREAM_EMBED_* (separate dream-embedding endpoint) is no longer wired
       # here: live it was identical to CTX_EMBED_*, and the backend pool (053)
       # dedups an identical tuple onto the llama-embed row's dream-embed role.
