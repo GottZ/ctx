@@ -440,6 +440,15 @@ func (p *Pool) SeedSnapshotForTest(bs []Backend) {
 	p.snap.Store(&snapshot{backends: bs, version: -1, loadedAt: time.Now()})
 }
 
+// SeedSnapshotDisabledByForTest is SeedSnapshotForTest plus a precomputed
+// disabledBy map (backend_id → comma-joined SORTED active-profile names, the
+// shape buildDisabledBy produces at Reload). Test seam only, and a separate
+// one because profile membership never touches the Enabled column: the
+// "enabled but profile-disabled" state — the one the chain and PrimaryModel
+// exclude — is unreachable through the fixture above.
+func (p *Pool) SeedSnapshotDisabledByForTest(bs []Backend, disabledBy map[string]string) {
+	p.snap.Store(&snapshot{backends: bs, disabledBy: disabledBy, version: -1, loadedAt: time.Now()})
+}
 
 // VisibleTo reports whether a backend in scope bScope may be reached by caller
 // tenant (04-W2/T34, egress isolation). Exported so the admin surface (T37,

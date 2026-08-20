@@ -493,6 +493,148 @@ func TestChannelProbeIfDueDefaultOffNeverInvoked(t *testing.T) {
 	}
 }
 
+// probeEmbedPool builds a collector whose probe function records the model it
+// was handed and how often it ran, over a statically seeded backend pool.
+func probeEmbedPool(bs []backends.Backend, disabledBy map[string]string) (*StatusCollector, *[]string) {
+	bp := backends.NewPool(nil, nil)
+	if disabledBy == nil {
+		bp.SeedSnapshotForTest(bs)
+	} else {
+		bp.SeedSnapshotDisabledByForTest(bs, disabledBy)
+	}
+	var seen []string
+	c := &StatusCollector{backendPool: bp}
+	c.channelProbeRun = func(_ context.Context, _ *pgxpool.Pool, embedModel string, _, _ []string) *probeRow {
+		seen = append(seen, embedModel)
+		return &probeRow{MeasuredAt: time.Now().UTC()}
+	}
+	return c, &seen
+}
+
+func probeArmedCfg() *config.Config {
+	return &config.Config{
+		Status: config.StatusConfig{ChannelProbeInterval: time.Minute},
+		// Deliberately divergent from every fixture's pool model: the probe must
+		// follow the serving chain, never this env echo (A04-W2 / design/04 §3.1).
+		Embed:     config.EmbedConfig{Model: "stale-env-model"},
+		Scheduler: config.SchedulerConfig{ReadScopes: []string{"private"}},
+	}
+}
+
+// TestChannelProbeModelFromPool is the A04-W2 gate, half (a) (design/04 §4.6
+// Pin H): the probe model is Pool.PrimaryModel(RoleEmbed) — the model the embed
+// chain WOULD ask — and not cfg.Embed.Model. Against the pre-W2 stand this
+// FAILS: the probe was handed the config echo ("stale-env-model"), which on any
+// deployment with an edited embed row measures the WRONG model and silently
+// finds no cache row at all.
+func TestChannelProbeModelFromPool(t *testing.T) {
+	bs := []backends.Backend{
+		{ID: "1", Name: "embed-head", Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed},
+			Priority: 100, Enabled: true, Model: "pool-embed"},
+		{ID: "2", Name: "embed-failover", Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed},
+			Priority: 50, Enabled: true, Model: "failover-embed"},
+	}
+	c, seen := probeEmbedPool(bs, nil)
+	cfg := probeArmedCfg()
+
+	row := c.channelProbeIfDue(context.Background(), cfg)
+	if row == nil || row.State != "" {
+		t.Fatalf("channelProbeIfDue = %+v, want a measured row (no state stamp)", row)
+	}
+	if want := []string{"pool-embed"}; !reflect.DeepEqual(*seen, want) {
+		t.Fatalf("channelProbeRun models = %v, want %v (PrimaryModel(embed), NOT cfg.Embed.Model)", *seen, want)
+	}
+	if c.channelProbe.Load() != row || c.channelProbeAt.Load() == 0 {
+		t.Error("a measured row must be stored AND stamp the probe cadence")
+	}
+
+	// Failover truth: profile-disabling the head moves the probe onto the model
+	// that would actually answer (rests on PrimaryModel's A04-W1 correction).
+	c, seen = probeEmbedPool(bs, map[string]string{"1": "wartung"})
+	if row := c.channelProbeIfDue(context.Background(), cfg); row == nil || row.State != "" {
+		t.Fatalf("channelProbeIfDue = %+v, want a measured row", row)
+	}
+	if want := []string{"failover-embed"}; !reflect.DeepEqual(*seen, want) {
+		t.Fatalf("channelProbeRun models = %v, want %v (head profile-disabled)", *seen, want)
+	}
+}
+
+// TestChannelProbeNoEmbedBackend is the A04-W2 gate, half (b) (design/04 §4.1 +
+// §4.6 Pin H): with no serving-eligible embed backend the probe function is
+// never called (no no-op query on an empty model name) AND the status carries the
+// explicit "no embed backend" state instead of a null that would be
+// indistinguishable from "probe deliberately off".
+func TestChannelProbeNoEmbedBackend(t *testing.T) {
+	cases := map[string]struct {
+		backends   []backends.Backend
+		disabledBy map[string]string
+	}{
+		"empty pool": {},
+		"enabled but profile-disabled": {
+			backends: []backends.Backend{
+				{ID: "1", Name: "embed-head", Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed},
+					Priority: 100, Enabled: true, Model: "pool-embed"},
+			},
+			disabledBy: map[string]string{"1": "wartung"},
+		},
+		"embed row without a model": {
+			backends: []backends.Backend{
+				{ID: "1", Name: "embed-head", Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed},
+					Priority: 100, Enabled: true},
+			},
+		},
+		"only non-embed roles": {
+			backends: []backends.Backend{
+				{ID: "1", Name: "gpu", Trust: backends.TrustFull, Roles: []string{backends.RoleSynthesis},
+					Priority: 100, Enabled: true, Model: "chat-model"},
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, seen := probeEmbedPool(tc.backends, tc.disabledBy)
+			row := c.channelProbeIfDue(context.Background(), probeArmedCfg())
+			if len(*seen) != 0 {
+				t.Fatalf("channelProbeRun ran with models %v — it must never run without a serving-eligible embed backend", *seen)
+			}
+			if row == nil {
+				t.Fatal("channelProbeIfDue = nil — null means \"probe off\"; a missing embed backend is a degraded deployment and must say so")
+			}
+			if row.State != probeStateNoEmbedBackend {
+				t.Errorf("state = %q, want %q", row.State, probeStateNoEmbedBackend)
+			}
+			if row.SemanticMs != nil || row.FtsDeMs != nil || row.FtsEnMs != nil || row.TrigramMs != nil {
+				t.Errorf("state row carries a measurement: %+v — nothing was measured", row)
+			}
+			if row.MeasuredAt.IsZero() {
+				t.Error("state row must carry the instant the state was observed")
+			}
+			// Stored actively: it REPLACES a stale earlier reading rather than
+			// leaving the cadence branch serving a measurement from before the
+			// backend vanished. The cadence stamp stays untouched — no
+			// measurement happened, so the next due rebuild probes for real.
+			if c.channelProbe.Load() != row {
+				t.Error("the state row must be stored, replacing any stale previous row")
+			}
+			if c.channelProbeAt.Load() != 0 {
+				t.Error("channelProbeAt must stay untouched — the state row is not a measurement")
+			}
+			// Wire shape: the state is visible to a reader, and the five
+			// measured-row keys stay present (Gate 1's golden shape holds).
+			b, err := json.Marshal(row)
+			if err != nil {
+				t.Fatalf("marshal probeRow: %v", err)
+			}
+			assertKeys(t, "db.channel_probe", b, []string{
+				"semantic_ms", "fts_de_ms", "fts_en_ms", "trigram_ms", "measured_at", "state",
+			})
+			if !strings.Contains(string(b), `"state":"no embed backend"`) {
+				t.Errorf("wire = %s, want the explicit no-embed-backend state", b)
+			}
+		})
+	}
+}
+
 // TestBuildStatusProfiles is the U01-W7 status-frame gate (replaces the retired
 // W5 gaming.active deploy-probe): the disable-profile registry maps onto the
 // slim frame shape ORDER BY name, carries scope (the splice key), and reports

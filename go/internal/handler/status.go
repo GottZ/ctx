@@ -921,7 +921,33 @@ func (c *StatusCollector) channelProbeIfDue(ctx context.Context, cfg *config.Con
 	if c.blocktypes != nil {
 		visible = c.blocktypes.Snapshot().VisibleTypes()
 	}
-	row := c.channelProbeRun(ctx, c.pool, cfg.Embed.Model, cfg.Scheduler.ReadScopes, visible)
+	// A04-W2 (design/04 §3.1/§4.1): the probe model is the SERVING truth — the
+	// model of the backend the embed chain would actually ask — not the config
+	// echo of the first-boot seed (cfg.Embed.Model). context_embed_cache keys on
+	// (text_hash, model) and the pool chain is what writes it, so any deployment
+	// whose embed row was ever edited probed a stale model name and silently
+	// found nothing. PrimaryModel is serving-eligible-aware since A04-W1 (enabled
+	// AND not profile-disabled), so an active disable profile no longer points
+	// the probe at the model of a backend that cannot answer.
+	model := ""
+	if c.backendPool != nil { // nil pool = test wiring, same convention as blocktypes above
+		model = c.backendPool.PrimaryModel(backends.RoleEmbed)
+	}
+	if model == "" {
+		// Gate BEFORE the call, not a no-op query on an empty model name: without a
+		// serving-eligible embed backend (or with an embed row that carries no
+		// model_map default) there is nothing to probe. Stamped as an explicit
+		// state and stored actively, which also replaces the otherwise stale
+		// previous row that the cadence branch above would keep serving.
+		// channelProbeAt stays UNSTAMPED on purpose: no measurement happened, so
+		// this must not consume the probe cadence — once an embed backend shows
+		// up, the next due rebuild probes for real instead of serving this state
+		// row until the interval has elapsed.
+		row := probeRowNoBackend()
+		c.channelProbe.Store(row)
+		return row
+	}
+	row := c.channelProbeRun(ctx, c.pool, model, cfg.Scheduler.ReadScopes, visible)
 	c.channelProbe.Store(row)
 	c.channelProbeAt.Store(time.Now().UnixNano())
 	return row

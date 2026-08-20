@@ -42,6 +42,9 @@ type dbStatus struct {
 	// run (channelProbeIfDue's own cadence gate — see status.go), or the
 	// probe ran but found no matching context_embed_cache row (Gate 3, never
 	// an error). NEVER a zero-valued probeRow standing in for "not measured".
+	// A FOURTH case is deliberately NOT null since A04-W2: no serving-eligible
+	// embed backend exists at all — that carries a State-stamped row instead,
+	// see probeRowNoBackend below.
 	ChannelProbe *probeRow `json:"channel_probe"`
 }
 
@@ -94,12 +97,33 @@ type hnswRow struct {
 // mirroring the rest of this file's resilience posture) — MeasuredAt is only
 // set when the probe transaction actually ran (nil dbStatus.ChannelProbe
 // covers both "off" and "cache miss", design/03 §4.7's documented skip).
+//
+// State names a probe that did NOT measure because a documented precondition
+// was missing (A04-W2). It is omitempty on purpose: a measured row keeps the
+// exact five-key wire shape it has always had (Gate 1's golden), and the key
+// only appears when there IS something to say.
 type probeRow struct {
 	SemanticMs *float64  `json:"semantic_ms"`
 	FtsDeMs    *float64  `json:"fts_de_ms"`
 	FtsEnMs    *float64  `json:"fts_en_ms"`
 	TrigramMs  *float64  `json:"trigram_ms"`
 	MeasuredAt time.Time `json:"measured_at"`
+	State      string    `json:"state,omitempty"`
+}
+
+// probeStateNoEmbedBackend is the State of a probe skipped because the backend
+// pool holds no serving-eligible embed backend (design/04 §4.1, A04-W2).
+const probeStateNoEmbedBackend = "no embed backend"
+
+// probeRowNoBackend stamps the explicit "no embed backend" state (design/04
+// §4.1). The probe model comes from the serving chain since A04-W2, and an
+// empty chain is a DEGRADED deployment — reporting it as a null ChannelProbe
+// would make it indistinguishable from "probe deliberately off" (interval<=0,
+// the same null). The row carries no channel measurement (all four stay null,
+// no query ran) and a fresh MeasuredAt, so a reader sees WHEN the state was
+// observed, not a stale reading from before the backend disappeared.
+func probeRowNoBackend() *probeRow {
+	return &probeRow{MeasuredAt: time.Now().UTC(), State: probeStateNoEmbedBackend}
 }
 
 // hnswIndexName is the one ANN index this section reports on (design/03
