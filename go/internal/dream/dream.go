@@ -119,6 +119,19 @@ type BlockInfo struct {
 // Must exceed DreamTimeout (evaluate call) + keyword-embed + RRF overhead.
 const CycleTimeout = 700 * time.Second
 
+// CycleTimeoutFor resolves the whole-cycle deadline: a router value > 0 wins
+// (config.Dream.CycleTimeout, hot), otherwise the package CycleTimeout
+// constant (legacy behavior). The enclosing context.WithTimeout in
+// RunDreamCycle and the scheduler's outer cycle context both read this, so
+// a single knob bounds the whole cycle; 0 is the documented "package
+// default" sentinel, mirroring temporalTimeout's contract.
+func CycleTimeoutFor(r *Router) time.Duration {
+	if r != nil && r.CycleTimeout > 0 {
+		return r.CycleTimeout
+	}
+	return CycleTimeout
+}
+
 // Throttle is called between GPU-intensive steps to allow cooldown.
 // Returns an error if the context was cancelled during the wait.
 type Throttle func(ctx context.Context) error
@@ -149,7 +162,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 		return 0, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, CycleTimeout)
+	ctx, cancel := context.WithTimeout(ctx, CycleTimeoutFor(r))
 	defer cancel()
 
 	// ONE policy snapshot per cycle (WF T8, blocktype doctrine): pick

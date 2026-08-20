@@ -213,6 +213,17 @@ type DreamConfig struct {
 	// value instead — it bounds dream eval/keywords/recurrence too, while this
 	// key is temporal-only.
 	TemporalTimeout time.Duration `key:"dream.temporal_timeout" env:"CTX_DREAM_TEMPORAL_TIMEOUT" default:"90" mut:"hot" tenancy:"global-only"`
+	// CycleTimeout bounds the WHOLE dream cycle (seconds) — the single
+	// context.WithTimeout in RunDreamCycle that wraps pick → temporal →
+	// keywords → RRF → eval → recurrence. Default 700 matches the legacy
+	// package CycleTimeout constant; raise for slow reasoning models
+	// (Qwen3.8-27B-NVFP4 needs >700s on full 16-20-candidate prompts).
+	// DEFAULT ONLY: a timeouts.dream entry on the serving context_backends
+	// row takes precedence per call (Backend.TimeoutFor, walked in
+	// llm.ChatChainVia); raise that row value instead on a configured row —
+	// it bounds eval/keywords/recurrence per call, while this key bounds
+	// the enclosing cycle.
+	CycleTimeout time.Duration `key:"dream.cycle_timeout" env:"CTX_DREAM_CYCLE_TIMEOUT" default:"700" mut:"hot" tenancy:"global-only"`
 
 	Backoff BackoffConfig
 }
