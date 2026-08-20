@@ -7,9 +7,11 @@
 //   - 422 BEFORE persist (invalid value leaves no row, no audit)
 //   - §3.4 masking E2E: env plaintext marker never appears in ANY settings
 //     response (PUT previous.value, DELETE value, GET value)
-//   - secret_ref gate: format reject + unknown-secret reject (the plaintext-
-//     in-audit trap)
-//   - X2 flush probe: embed.host write empties context_embed_cache,
+//   - secret_ref gate: sensitive keys are superseded backend-tuple keys —
+//     the 409 pool pointer fires before any format check, nothing persists
+//     (the living provider-key path is the pool row's api_key_ref)
+//   - X2 flush probe: PUT embed.host is 409-closed (no flush on a blocked
+//     write); the DELETE revert of a legacy override row still flushes,
 //     a non-coupled write does not (negative probe)
 //   - NOTIFY handler: events.SettingsWriteHandler reloads the snapshot
 //
@@ -254,20 +256,21 @@ func TestSettingsAPI_Integration(t *testing.T) {
 	})
 
 	t.Run("SecretRefGate", func(t *testing.T) {
-		// Format reject: an uppercase provider-key-shaped value never reaches
-		// the table (the plaintext-in-audit trap).
-		rec := api.do(t, http.MethodPut, "/api/settings/chat.api_key", `{"value":"SK-PROVIDER-KEY-SHAPED-VALUE"}`)
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("format probe status = %d, want 422", rec.Code)
-		}
-		// Existence reject.
-		rec = api.do(t, http.MethodPut, "/api/settings/chat.api_key", `{"value":"ghost-ref"}`)
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("unknown-secret probe status = %d, want 422", rec.Code)
-		}
-		resp := api.envelope(t, rec)
-		if msg, _ := resp["error"].(string); !strings.Contains(msg, "create the secret first") {
-			t.Errorf("error = %q, want the create-first hint", msg)
+		// Entflechtungs-Welle Stufe 1: every sensitive settings key is a
+		// superseded backend-tuple key (chat.api_key & co) — the 409 pool
+		// pointer fires BEFORE any secret_ref format/existence check, so a
+		// provider-key-shaped plaintext can never reach table or audit via
+		// this route anymore. The living path for provider keys is the pool
+		// row's api_key_ref (`ctx backends` + `ctx secrets`).
+		for _, body := range []string{`{"value":"SK-PROVIDER-KEY-SHAPED-VALUE"}`, `{"value":"ghost-ref"}`} {
+			rec := api.do(t, http.MethodPut, "/api/settings/chat.api_key", body)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("PUT %s status = %d, want 409 (superseded gate)", body, rec.Code)
+			}
+			resp := api.envelope(t, rec)
+			if msg, _ := resp["error"].(string); !strings.Contains(msg, "backend pool") {
+				t.Errorf("error = %q, want the backend-pool pointer", msg)
+			}
 		}
 		var n int
 		if err := pool.QueryRow(ctx,
@@ -275,7 +278,7 @@ func TestSettingsAPI_Integration(t *testing.T) {
 			t.Fatalf("count: %v", err)
 		}
 		if n != 0 {
-			t.Errorf("rejected secret_ref persisted a row")
+			t.Errorf("blocked PUT persisted a row")
 		}
 	})
 
@@ -306,20 +309,25 @@ func TestSettingsAPI_Integration(t *testing.T) {
 			}
 		}
 
-		// PUT secret_ref over the env value: previous.value must be masked —
-		// this is the §3.4 migration-flow leak, negatively pinned.
-		rec = api.do(t, http.MethodPut, "/api/settings/chat.api_key", `{"value":"prov-main"}`)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("PUT secret_ref status = %d body=%s", rec.Code, rec.Body.String())
-		}
-		scan(rec, "PUT previous.value")
-		resp := api.envelope(t, rec)
-		prev, _ := resp["previous"].(map[string]any)
-		if prev["value"] != maskedEnvValue || prev["source"] != "env" {
-			t.Errorf("previous = %v, want masked env", prev)
-		}
-		if resp["value"] != "prov-main" {
-			t.Errorf("value = %v, want the secret_ref name", resp["value"])
+		// db-sourced state via SQL + reload (the psql/break-glass shape) —
+		// the settings PUT route 409s on superseded keys since the
+		// Entflechtungs-Welle, but a legacy override row can still EXIST
+		// (pre-wave installs, direct SQL), and every read surface must mask
+		// it exactly as before.
+		{
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			if err := store.UpsertSetting(ctx, tx, "chat.api_key", store.GlobalScope, json.RawMessage(`"prov-main"`), nil); err != nil {
+				t.Fatalf("upsert secret_ref: %v", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			if err := settings.Reload(ctx, pool, cfgStore); err != nil {
+				t.Fatalf("reload: %v", err)
+			}
 		}
 		// The snapshot resolved the plaintext (that is the point) — but no
 		// response surface may carry it.
@@ -328,7 +336,7 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		}
 		rec = api.do(t, http.MethodGet, "/api/settings/chat.api_key", "")
 		scan(rec, "GET single (db-sourced)")
-		resp = api.envelope(t, rec)
+		resp := api.envelope(t, rec)
 		setting, _ := resp["setting"].(map[string]any)
 		if setting["value"] != "prov-main" {
 			t.Errorf("GET db-sourced sensitive value = %v, want ref name", setting["value"])
@@ -362,33 +370,42 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		if cacheCount() != 1 {
 			t.Errorf("non-coupled write flushed the cache")
 		}
-		// Coupled write (embed.host): cache must be empty afterwards.
+		// PUT embed.host is CLOSED since the Entflechtungs-Welle (superseded
+		// 409 fires before the coupled path) — and the blocked write must
+		// not flush anything either.
 		rec = api.do(t, http.MethodPut, "/api/settings/embed.host", `{"value":"http://flush-probe:9999"}`)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("PUT embed.host status = %d body=%s", rec.Code, rec.Body.String())
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("PUT embed.host status = %d, want 409 (superseded)", rec.Code)
 		}
-		if cacheCount() != 0 {
-			t.Errorf("embed.host write did not flush context_embed_cache (X2)")
+		if cacheCount() != 1 {
+			t.Errorf("blocked embed.host PUT flushed the cache")
 		}
-		resp := api.envelope(t, rec)
-		warnings, _ := resp["warnings"].([]any)
-		found := false
-		for _, w := range warnings {
-			if s, _ := w.(string); strings.Contains(s, "embed.protocol") {
-				found = true
+		// The living coupled path is the DELETE revert of a legacy override
+		// row (allowed for superseded keys — cleanup): seed the row via SQL,
+		// then DELETE — the effective embed host changes, so the X2 flush
+		// obligation still fires.
+		{
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			if err := store.UpsertSetting(ctx, tx, "embed.host", store.GlobalScope, json.RawMessage(`"http://legacy-override:9999"`), nil); err != nil {
+				t.Fatalf("upsert embed.host: %v", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			if err := settings.Reload(ctx, pool, cfgStore); err != nil {
+				t.Fatalf("reload: %v", err)
 			}
 		}
-		if !found {
-			t.Errorf("PUT embed.host without protocol carries no pairing warning (X3): %v", warnings)
-		}
-		// DELETE (revert to env host) is also a coupled change → flush again.
 		seedCache()
 		rec = api.do(t, http.MethodDelete, "/api/settings/embed.host", "")
 		if rec.Code != http.StatusOK {
-			t.Fatalf("DELETE embed.host status = %d", rec.Code)
+			t.Fatalf("DELETE embed.host status = %d body=%s", rec.Code, rec.Body.String())
 		}
 		if cacheCount() != 0 {
-			t.Errorf("embed.host DELETE (revert) did not flush the cache")
+			t.Errorf("embed.host DELETE (revert) did not flush the cache (X2)")
 		}
 	})
 
