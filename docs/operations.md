@@ -172,6 +172,33 @@ export still ran to completion first (rescue-first; `-strict` aborts at the firs
 · `3` count gate violated. The export contains unanonymized prompt bodies — keep it inside the
 same trust boundary as the database itself.
 
+## Backends
+
+The backend pool (`context_backends`) is the living LLM configuration — `ctx backends` lists and manages it, the web UI at `/settings/backends` does the same visually. On an installation whose pool is still empty, `ctx backends seed` writes the first two rows without any interaction:
+
+```bash
+ctx backends seed --host http://gpu-host:11434 --model qwen3 --embed-model qwen3-embedding
+# or, for anything beyond one host and two models:
+ctx backends seed --file seed.json
+```
+
+The SeedSpec file has one object per role; everything except `host` and `model` is optional (`protocol` defaults to `ollama`, `trust` to `full-trust`, `name` to `chat-primary` / `embed-primary`):
+
+```json
+{
+  "chat":  {"host": "http://gpu-host:11434", "model": "qwen3", "num_ctx": 32768, "think": false},
+  "embed": {"host": "http://gpu-host:11434", "model": "qwen3-embedding"}
+}
+```
+
+What to know before running it:
+
+- **A server-admin key is required.** A tenant-admin's writes would be pinned to its own tenant scope — the seed refuses instead of reporting success over a shared pool that stays empty.
+- **The rows are seeded `full-trust`**, which is what lets them serve your own blocks (the pool's default block sensitivity is `credentials`, and a `public` backend is filtered out of that chain). Set `"trust"` per role in the spec to deviate deliberately.
+- **`api_key` never lands in the table.** It is sealed into an F2 secret first and the row carries only the reference, so the server needs a configured `CTX_SECRETS_KEY` (`openssl rand -hex 32`) before a spec with `api_key` can be seeded. Without one the run aborts and writes nothing — there is no plaintext fallback.
+- **It is idempotent per row.** A run interrupted between the two creates is completed by simply running it again. Rows *outside* the pair it manages abort the run instead (`--force` overrides only that check), so an already-configured pool is never touched by accident.
+- **A seed file is transient, not config.** It carries the api_key in the clear: `chmod 0600`, delete it after the seed, never commit it.
+
 ## GPU-host maintenance (eject)
 
 To take a GPU host (e.g. `herbert`) down for maintenance without dropping in-flight work, use the eject toggle as a quiesce gate. The disable profile takes the host's backends out of every NEW chain; requests already on the wire finish normally (a 27B synthesis ≤60s, an in-flight dream cycle ≤700s). The runbook: **activate the profile → watch the DispatchTile until `inflight=0` for that origin → then service the host.** `ctx eject on` (or the disable-profiles card on the backends settings page) activates it; the status page's DispatchTile shows `inflight`/`waitQ` per origin live, so `inflight=0` is the safe-to-stop signal. `ctx eject off` restores the host to the pool. There is no active drain — a waiting lease already holds its chain, and failover + cooldown heal the dead-host case on their own; the DispatchTile is the quiesce monitor, not an automated barrier. See [security](security.md#trust--sensitivity-gating) for the toggle's admin gating and persistence semantics.

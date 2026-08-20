@@ -6,6 +6,7 @@
 //	ctx backends update <id> '{"enabled":false}'
 //	ctx backends delete <id>
 //	ctx backends test <id> [--probe-chat]
+//	ctx backends seed --file seed.json   # first seed of an empty pool
 //
 // Every subcommand parses the response envelope: success:false (422
 // validation, 403 non-admin, 404 unknown id) reaches stderr with exit
@@ -108,6 +109,7 @@ func backendsCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 	testCmd.Flags().BoolVar(&probeChat, "probe-chat", false, "additionally run a 1-token chat against the default model")
 	cmd.AddCommand(testCmd)
+	cmd.AddCommand(backendsSeedCmd(getClient))
 	return cmd
 }
 
