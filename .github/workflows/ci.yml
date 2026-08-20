@@ -473,16 +473,19 @@ jobs:
           retention-days: 7
 
   # ─── Stage 3: Integration Tests ───────────────────────────────────────────────
-  # Sharded 4-way (2026-08-20): the un-sharded job serially ran ~22m and was
+  # Sharded 5-way (2026-08-20): the un-sharded job serially ran ~22m and was
   # the whole pipeline's critical path (next-longest job: web at ~4.5m).
   # Public repo ⇒ parallel standard runners are free, so the shards cost
   # nothing and the wall-clock drops to the slowest shard. Cut by measured
-  # package runtimes (local -tags=integration run 2026-08-20): handler and
-  # store each dominate alone; overview/guard/events/rrf/dream form the heavy
-  # middle; `rest` is the COMPLEMENT computed via go list at run time, so a
-  # NEW package with integration tests always lands in a shard automatically —
-  # never silently untested. The chosen package list is echoed into the log so
-  # every run shows what it actually covered.
+  # package runtimes UNDER THE TEMPLATE HARNESS + -p 1 (2026-08-20, local:
+  # guard 211s, overview 167s, events 55s, dream 35s, rrf 25s — the original
+  # 4-way cut predated the template harness, which shrank handler/store and
+  # left guard+overview carrying ~77% of the old heavy shard). guard runs
+  # alone; heavy keeps overview/events/rrf/dream; `rest` is the COMPLEMENT
+  # computed via go list at run time, so a NEW package with integration tests
+  # always lands in a shard automatically — never silently untested. The
+  # chosen package list is echoed into the log so every run shows what it
+  # actually covered.
   integration-tests:
     name: Integration Tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -500,8 +503,10 @@ jobs:
             packages: "./internal/handler/..."
           - shard: store
             packages: "./internal/store/..."
+          - shard: guard
+            packages: "./internal/guard/..."
           - shard: heavy
-            packages: "./internal/overview/... ./internal/guard/... ./internal/events/... ./internal/rrf/... ./internal/dream/..."
+            packages: "./internal/overview/... ./internal/events/... ./internal/rrf/... ./internal/dream/..."
           - shard: rest
             # Complement of the explicit shards above — computed at run time.
             packages: ""
