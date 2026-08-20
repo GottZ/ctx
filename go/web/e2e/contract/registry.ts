@@ -339,6 +339,16 @@ export const contracts: PageContract[] = [
       await page.getByRole('searchbox', { name: 'search settings' }).fill('timezome')
       await expect(content).toContainText('server.timezone')
       await expect(card).not.toBeVisible()
+      await page.getByRole('searchbox', { name: 'search settings' }).fill('')
+
+      // Legacy pseudo-group (Entflechtungs-Welle Stufe 1): the superseded
+      // fixture key renders in the trailing card — read-only field, banner
+      // pointing at the backend pool, no Save button.
+      const legacy = page.locator('section.card[aria-label="legacy (superseded) settings"]')
+      await legacy.locator('button.disclosure').click()
+      await expect(legacy).toContainText('superseded by the backend pool')
+      await expect(legacy.locator('[id="chat.host"]')).toBeDisabled()
+      await expect(legacy.getByRole('button', { name: 'Save' })).toHaveCount(0)
     },
     mobile: MOBILE_PV4_EXEMPT,
   },

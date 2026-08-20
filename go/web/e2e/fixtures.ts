@@ -211,6 +211,9 @@ function settingsFixture(): Record<string, unknown>[] {
     { key: 'dream.backoff_min', type: 'hours', mutability: 'hot', value: '12h', source: 'default', default: '12h', description: 'Cooldown floor at eval count 0' },
     { key: 'dream.backoff_inert_offset', type: 'int', mutability: 'hot', value: 2, source: 'db', default: 7, description: 'Extra curve steps applied when a cycle finds no links' },
     { key: 'server.timezone', type: 'timezone', mutability: 'restart', value: 'Europe/Berlin', source: 'db', default: 'UTC', description: 'IANA timezone used to render timestamps' },
+    // Superseded key (Entflechtungs-Welle Stufe 1): renders in the trailing
+    // legacy pseudo-group, read-only, badge "superseded".
+    { key: 'chat.host', type: 'string', mutability: 'hot', value: 'http://spark:30000', source: 'env', default: '', description: 'Base URL of the primary chat backend', superseded: 'f3:context_backends' },
   ]
 }
 
