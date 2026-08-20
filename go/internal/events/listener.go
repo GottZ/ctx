@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5"
@@ -106,14 +108,120 @@ type SettingsWriteHandler struct {
 	// (MW2 carrying the W1 construction leftover, design/01 §3.1 + N9). nil
 	// (tests, pre-wire) leaves both refreshes inert.
 	dispatcher *dispatch.Dispatcher
+	// coupledPrev is the embed-cache-coupled set of the pool as of the last
+	// SUCCESSFUL flush — or, until the first one, of the snapshot this handler
+	// was constructed on (A04-W3, design/04 §4.2). It is only ever read and
+	// written from the single pgxlisten handler goroutine.
+	coupledPrev coupledSet
+	// flush is embedcache.Flush behind a seam: the failure posture of §4.2(b)
+	// (log-and-continue, but coupledPrev stays behind so the NEXT notification
+	// retries) is only pinnable with an injectable error. nil = the real flush.
+	flush func(ctx context.Context, pool *pgxpool.Pool) (int64, error)
 }
 
 // NewSettingsWriteHandler creates the hot-reload notification handler.
 // blocktypes may be nil (tests, pre-T3 wiring): the block-type entity branch
 // is then inert and block_type writes fall through to the settings reload —
 // harmless, just registry-invisible.
+//
+// The coupled baseline is taken here, from the pool as it stands at
+// construction. Boot publishes the first pool snapshot BEFORE the listener is
+// built (cmd/ctxd/main.go), so the baseline is the live serving topology and a
+// boot without an intervening edit diffs empty — W3 never flushes at boot. The
+// remaining boot case (an edit made while ctxd was down) is W4's persisted
+// fingerprint, deliberately not this wave.
 func NewSettingsWriteHandler(pool *pgxpool.Pool, cfg *config.Store, backendPool *backends.Pool, blocktypes *blocktype.Registry) *SettingsWriteHandler {
-	return &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes}
+	return &SettingsWriteHandler{
+		pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes,
+		coupledPrev: coupledSetOf(backendPool),
+	}
+}
+
+// coupledPair is one connection identity of an embed-writing backend. Model is
+// deliberately NOT part of it: context_embed_cache keys on (text_hash, model),
+// so a model change addresses different rows anyway — the same reasoning the
+// config-side EmbedCacheCoupledChanged has carried since G16
+// (settings/reload.go). Host/protocol is what silently changes the vector SPACE
+// under an unchanged model name.
+type coupledPair struct {
+	host     string
+	protocol string
+}
+
+// coupledSet is the embed-cache-coupled fingerprint of a pool snapshot: the set
+// of (host, protocol) pairs over all serving-eligible backends carrying an
+// embed role (design/04 §3.2a).
+type coupledSet map[coupledPair]struct{}
+
+// coupledSetOf derives the coupled set from the pool's current snapshot.
+//
+// Serving-eligible means enabled AND not disabled by an ACTIVE profile — the
+// same qualification the chain applies (backends.Pool.Chain), because that is
+// what decides who WRITES the cache. Defining the set over the enabled column
+// alone would miss the profile path entirely: profiles never touch that column
+// (membership lives in disabledBy), yet disabling one backend hands serving to
+// a failover that may answer from a different host under the same model name —
+// exactly the cross-space case this diff exists for.
+//
+// Snapshot and DisabledBy are two atomic loads, so a pool reload racing between
+// them can yield a mixed set. That is benign and self-correcting: every pool
+// row and profile write rides the notify funnel, so the racing reload brings
+// its own notification and this diff runs again on a settled snapshot. A phantom
+// set can therefore only cause one extra flush (fail-closed direction), never a
+// missed one.
+func coupledSetOf(p *backends.Pool) coupledSet {
+	if p == nil {
+		return coupledSet{}
+	}
+	rows := p.Snapshot()
+	disabledBy := p.DisabledBy()
+	out := make(coupledSet, len(rows))
+	for i := range rows {
+		b := &rows[i]
+		if !b.Enabled || disabledBy[b.ID] != "" {
+			continue
+		}
+		if !b.HasRole(backends.RoleEmbed) && !b.HasRole(backends.RoleDreamEmbed) {
+			continue
+		}
+		out[coupledPair{host: b.Host, protocol: string(b.Protocol)}] = struct{}{}
+	}
+	return out
+}
+
+// flushIfCoupledChanged flushes context_embed_cache when the coupled set of the
+// now-active pool snapshot differs from the last flushed one (A04-W3,
+// design/04 §4.2). Called after every pool reload in this handler — the funnel
+// that carries API writes AND psql edits (053/092 triggers, same channel).
+//
+// A FAILED pool reload keeps the previous snapshot active, so the set is
+// identical and nothing is flushed — no flush on a read that did not happen.
+//
+// The failure posture differs from settings.Reload on purpose: that path
+// returns the error, here it is logged and the handler continues (a returned
+// error is connection-level for pgxlisten). What makes the retry real instead
+// of a phrase is that coupledPrev is advanced ONLY after a successful flush:
+// the next notification re-diffs against the un-flushed stand and tries again.
+func (h *SettingsWriteHandler) flushIfCoupledChanged(ctx context.Context) {
+	if h.backendPool == nil || h.pool == nil {
+		return
+	}
+	cur := coupledSetOf(h.backendPool)
+	if maps.Equal(h.coupledPrev, cur) {
+		return
+	}
+	flush := h.flush
+	if flush == nil {
+		flush = embedcache.Flush
+	}
+	n, err := flush(ctx, h.pool)
+	if err != nil {
+		slog.Error("listener: embed-cache flush after coupled pool change failed — stale vectors may serve", "error", err)
+		return
+	}
+	h.coupledPrev = cur
+	slog.Info("listener: embed-cache-coupled pool topology changed — flushed context_embed_cache",
+		"rows", n, "pairs", len(cur))
 }
 
 // settingsNotifyPayload mirrors the notify_settings_write() trigger payload
@@ -149,6 +257,10 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 		// unchanged previous snapshot — idempotent, never a policy from a
 		// failed read.
 		h.refreshDispatchPolicy()
+		// The pool is the serving truth for the embed cache too: a base_url or
+		// protocol edit on an embed row moves the vector space under an
+		// unchanged model name (A04-W3, design/04 §4.2).
+		h.flushIfCoupledChanged(ctx)
 		return nil
 	}
 	// Disable-profile entity branch (Web-UX U01-W1, design/01 §4.1/N9): the 092
@@ -163,6 +275,10 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 		if err := h.backendPool.Reload(ctx); err != nil {
 			slog.Warn("listener: backend pool reload failed — previous snapshot stays active", "error", err)
 		}
+		// Same coupled diff as the row branch: a profile that ejects an embed
+		// backend hands serving to a failover, and that failover may embed on a
+		// different host under the same model name (design/04 §3.2a).
+		h.flushIfCoupledChanged(ctx)
 		return nil
 	}
 	// Block-type registry entity branch (WF T3, design 01 §4.3): the 072
@@ -253,6 +369,11 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 			slog.Warn("listener: backend pool backlog reload failed — previous snapshot stays active", "error", err)
 		}
 		h.refreshDispatchPolicy()
+		// A backend or profile write during the disconnect window carries the
+		// same coupled semantics as one on the wire; its NOTIFY is gone, so the
+		// diff here is the only thing that sees it. Unchanged topology diffs
+		// empty, so a plain reconnect never flushes.
+		h.flushIfCoupledChanged(ctx)
 	}
 	if h.blocktypes != nil {
 		if err := h.blocktypes.Reload(ctx, h.pool); err != nil {
@@ -288,8 +409,13 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 	listener.Handle(channelLinkWrite, &LinkWriteHandler{scheduler: scheduler})
 	// dispatcher comes from the owning scheduler (SetDispatcher, boot
 	// happens-before Run): the reload owner pushes re-mapped settings/policy
-	// into it (MW2; nil = inert, exactly like blocktypes).
-	listener.Handle(channelSettingsWrite, &SettingsWriteHandler{pool: pool, cfg: cfg, backendPool: backendPool, blocktypes: blocktypes, dispatcher: scheduler.dispatcher})
+	// into it (MW2; nil = inert, exactly like blocktypes). Built through the
+	// constructor since A04-W3 so the coupled baseline is taken from the
+	// already-loaded boot pool — a struct literal would start at the empty set
+	// and flush the embed cache on the first backend write after every boot.
+	settingsHandler := NewSettingsWriteHandler(pool, cfg, backendPool, blocktypes)
+	settingsHandler.dispatcher = scheduler.dispatcher
+	listener.Handle(channelSettingsWrite, settingsHandler)
 	// W9: forward ctx_project_write (081) to the SSE domain-event hub. Registered
 	// ONLY when the hub is wired — a nil hub leaves the channel un-LISTENed, so
 	// the 081 notifies are Postgres no-ops (the listener-discard invariant also
