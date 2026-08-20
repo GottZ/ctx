@@ -8,6 +8,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // isUniqueViolation reports a 23505 unique-constraint error (duplicate name).
@@ -186,6 +187,63 @@ func UpdateBackendPriority(ctx context.Context, tx pgx.Tx, id string, priority i
 		return fmt.Errorf("store: backend %s vanished during reorder despite row lock", id)
 	}
 	return nil
+}
+
+// BackendSecretRef is one context_backends row's pointer at an F2 secret: the
+// row NAME (what an operator edits) and the api_key_ref it carries. Never a
+// resolved value — reference counting reads ROWS, not the pool snapshot (same
+// doctrine as the settings scan: the snapshot holds resolved plaintext and is
+// useless for counting references, and it may lag the DB).
+type BackendSecretRef struct {
+	Name      string
+	APIKeyRef string
+}
+
+// BackendSecretRefsMulti lists the pool rows in scopes whose api_key_ref is
+// set — the pool half of the sealbox delete guard's reference union (04-W5
+// §3.3). Since F3 made the pool the living home of provider credentials, a
+// secret referenced ONLY by a pool row was deletable: the guard scanned
+// context_settings alone, so DELETE answered 200, deleteSealed removed the
+// plaintext and the backend went keyless at the next resolver pass — the
+// fail-open class the guard exists to prevent (§5.7).
+//
+// scopes is the caller's VISIBLE scope set, identical to the settings scan
+// (writeScope plus opt-in tenant scopes): scanning wider would let a
+// tenant-admin enumerate foreign provider topology through referenced_by
+// (§5.5).
+//
+// Fail-closed exactly like LoadSettingOverridesMulti: an empty slice or an
+// empty element is an error, never a scan that silently matches nothing.
+func BackendSecretRefsMulti(ctx context.Context, pool *pgxpool.Pool, scopes []string) ([]BackendSecretRef, error) {
+	if len(scopes) == 0 {
+		return nil, fmt.Errorf("backends: at least one scope is required")
+	}
+	for _, s := range scopes {
+		if s == "" {
+			return nil, fmt.Errorf("backends: empty scope is not allowed")
+		}
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT name, api_key_ref FROM context_backends
+		  WHERE scope = ANY($1::text[])
+		    AND api_key_ref IS NOT NULL AND btrim(api_key_ref) <> ''
+		  ORDER BY name`,
+		scopes)
+	if err != nil {
+		return nil, fmt.Errorf("backends: load secret refs: %w", err)
+	}
+	defer rows.Close()
+
+	var refs []BackendSecretRef
+	for rows.Next() {
+		var ref BackendSecretRef
+		if err := rows.Scan(&ref.Name, &ref.APIKeyRef); err != nil {
+			return nil, fmt.Errorf("backends: scan secret ref: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
 }
 
 // DeleteBackend removes one row by id (hard delete — llmlog references by

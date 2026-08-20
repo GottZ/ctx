@@ -212,8 +212,9 @@ export function isEmptySpec(spec: BackendSpec): boolean {
 // ---- secret usage join (design §3.5: derived "fehlt" status) ----------------
 
 export interface SecretUsage {
-  /** secret name → backend names referencing it via api_key_ref (client-side;
-   *  the server's referenced_by covers settings keys only). */
+  /** secret name → backend names referencing it via api_key_ref (client-side
+   *  join over the loaded lists; the server reports the same rows in
+   *  referenced_by as "backend:<name>" since 04-W5). */
   backendsBySecret: Map<string, string[]>
   /** refs pointing at a non-existent secret — the derived "fehlt" status. */
   dangling: { source: 'backend' | 'setting'; ref: string; secret: string }[]

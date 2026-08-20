@@ -9,6 +9,9 @@
 //     one immediately (green) — no settings write in between
 //   - DELETE on a referenced secret → 409 with the referencing keys;
 //     after unsetting the reference → delete + snapshot fail-open
+//   - GUARD PIN (04-W5 §5.7): DELETE on a secret referenced ONLY by a backend
+//     pool row → 409 carrying the BACKEND remediation, not the settings one;
+//     mixed reference sets name both; clearing both references frees the delete
 //   - response scan: no submitted value in ANY secrets/settings response
 //   - ReencryptSweep: prev-key rows re-seal (key_version bump, readable
 //     with current alone), foreign-key rows stay untouched, no-PREV = no-op
@@ -29,6 +32,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/config"
@@ -37,6 +41,22 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
+
+// insertBackendSecretRef seeds one pool row that references an F2 secret by
+// name — the fixture shape of the 04-W5 delete guard. Raw SQL like
+// insertBackendRoles: the guard reads ROWS, so the row only has to exist and
+// carry api_key_ref; DDL defaults cover the rest.
+func insertBackendSecretRef(t *testing.T, pool *pgxpool.Pool, name, scope, apiKeyRef string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO context_backends (name, base_url, scope, api_key_ref, roles, model_map)
+		 VALUES ($1,$2,$3,$4,'{chat}','{"default":"stub-model"}') RETURNING id`,
+		name, "https://"+name+".example.com/v1", scope, apiKeyRef).Scan(&id); err != nil {
+		t.Fatalf("insert backend %s: %v", name, err)
+	}
+	return id
+}
 
 func freshKeyHexHandler(t *testing.T) string {
 	t.Helper()
@@ -198,6 +218,95 @@ func TestSecretsAPI_Integration(t *testing.T) {
 		rec = do(router, http.MethodDelete, "/api/secrets/prov-main", "")
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("second delete: %d, want 404", rec.Code)
+		}
+	})
+
+	// GUARD PIN (04-W5 §5.7): a secret whose ONLY reference is a backend pool
+	// row must not be deletable. Before the referencedBy union this DELETE
+	// answered 200 — deleteSealed + reload dropped the plaintext and the
+	// backend went keyless at the next resolver pass (chat/embed calls failing
+	// or, worse, leaving without auth). The 409 text must carry the BACKEND
+	// remediation: "unset the setting" is wrong for a pool row and names an
+	// endpoint that retires with the registry cut.
+	//
+	// Negative probe (2026-08-21): with the pool half of referencedBy removed
+	// (the store.BackendSecretRefsMulti block in sealbox.go), this subtest
+	// fails red at the first assertion — DELETE = 200 and the backend row keeps
+	// a dangling api_key_ref. Restored → green.
+	t.Run("BackendReferencedDelete409", func(t *testing.T) {
+		const secretName = "prov-pool"
+		const backendName = "pool-guard-be"
+
+		rec := do(router, http.MethodPut, "/api/secrets/"+secretName, `{"value":"`+valueA+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+		}
+		insertBackendSecretRef(t, pool, backendName, store.GlobalScope, secretName)
+
+		// The list surfaces the pool reference under the backend: prefix.
+		rec = do(router, http.MethodGet, "/api/secrets", "")
+		if !strings.Contains(rec.Body.String(), `"backend:`+backendName+`"`) {
+			t.Errorf("list lacks the pool reference: %s", rec.Body.String())
+		}
+		scanClean(rec, "GET list with pool ref")
+
+		rec = do(router, http.MethodDelete, "/api/secrets/"+secretName, "")
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("backend-referenced delete = %d, want 409 (fail-open §5.7)", rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, `"backend:`+backendName+`"`) {
+			t.Errorf("409 lacks the referencing pool row: %s", body)
+		}
+		if !strings.Contains(body, "api_key_ref") {
+			t.Errorf("409 lacks the backend remediation: %s", body)
+		}
+		if strings.Contains(body, "/api/settings/") {
+			t.Errorf("409 carries the SETTINGS remediation for a pool-only reference: %s", body)
+		}
+		// The guard did not just answer 409 — the row is still there.
+		if exists, err := store.SecretExists(ctx, pool, secretName, store.GlobalScope); err != nil || !exists {
+			t.Fatalf("secret gone despite 409 (exists=%v err=%v)", exists, err)
+		}
+
+		// Mixed reference set: both remediations, both entries.
+		{
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			if err := store.UpsertSetting(ctx, tx, "chat.api_key", store.GlobalScope, json.RawMessage(`"`+secretName+`"`), nil); err != nil {
+				t.Fatalf("upsert secret_ref: %v", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+		}
+		rec = do(router, http.MethodDelete, "/api/secrets/"+secretName, "")
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("mixed-referenced delete = %d, want 409", rec.Code)
+		}
+		body = rec.Body.String()
+		if !strings.Contains(body, `"chat.api_key"`) || !strings.Contains(body, `"backend:`+backendName+`"`) {
+			t.Errorf("mixed 409 lacks one reference type: %s", body)
+		}
+		if !strings.Contains(body, "api_key_ref") || !strings.Contains(body, "/api/settings/") {
+			t.Errorf("mixed 409 lacks one remediation: %s", body)
+		}
+
+		// Clear BOTH references → the delete goes through. This is the green
+		// half of the guard: it blocks references, not deletes as such.
+		rec = do(router, http.MethodDelete, "/api/settings/chat.api_key", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("unset settings reference: %d %s", rec.Code, rec.Body.String())
+		}
+		if _, err := pool.Exec(ctx,
+			`UPDATE context_backends SET api_key_ref=NULL WHERE name=$1`, backendName); err != nil {
+			t.Fatalf("clear api_key_ref: %v", err)
+		}
+		rec = do(router, http.MethodDelete, "/api/secrets/"+secretName, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("unreferenced delete = %d %s", rec.Code, rec.Body.String())
 		}
 	})
 

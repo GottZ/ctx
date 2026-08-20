@@ -5,7 +5,8 @@
 //                             (§7.5: a hash prefix is an offline oracle).
 // PUT    /api/secrets/{name}  create or rotate; the value travels in the body
 //                             and NEVER appears in any response or log
-// DELETE /api/secrets/{name}  409 while a secret_ref setting references it;
+// DELETE /api/secrets/{name}  409 while a secret_ref setting OR a backend
+//                             pool row (api_key_ref, 04-W5) references it;
 //                             otherwise delete + reload (revocation must
 //                             empty the snapshot immediately)
 //
@@ -91,11 +92,7 @@ func (h *SecretsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]secretView, 0, len(metas))
 	for _, m := range metas {
-		rb := refs[m.Name]
-		if rb == nil {
-			rb = []string{}
-		}
-		views = append(views, secretView{SecretMeta: m, ReferencedBy: rb})
+		views = append(views, secretView{SecretMeta: m, ReferencedBy: refs[m.Name].list()})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "secrets": views})
 }
@@ -162,9 +159,11 @@ func (h *SecretsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleDelete implements DELETE /api/secrets/{name}. A referenced secret is
-// a 409 with the referencing keys — deleting it would silently flip those
-// settings to fail-open. An unreferenced delete reloads: revocation must
-// remove the plaintext from the snapshot immediately.
+// a 409 listing its references — deleting it would silently flip those
+// settings to fail-open, or strip a live backend of its provider key at the
+// next resolver pass (04-W5 §5.7). The remediation text follows the reference
+// TYPE. An unreferenced delete reloads: revocation must remove the plaintext
+// from the snapshot immediately.
 func (h *SecretsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	refs, err := h.referencedBy(r)
@@ -172,11 +171,11 @@ func (h *SecretsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, "secrets: reference scan failed", err)
 		return
 	}
-	if keys := refs[name]; len(keys) > 0 {
+	if rs := refs[name]; !rs.empty() {
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"success": false,
-			"error":   fmt.Sprintf("secret %q is referenced by settings — unset them first (DELETE /api/settings/{key})", name),
-			"referenced_by": keys,
+			"success":       false,
+			"error":         rs.remediation(name),
+			"referenced_by": rs.list(),
 		})
 		return
 	}
@@ -198,9 +197,61 @@ func (h *SecretsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "name": name, "deleted": true})
 }
 
-// referencedBy maps secret name → settings keys whose override row is a
-// secret_ref to it. Source of truth are the override ROWS (the snapshot
-// carries resolved plaintext, useless for reference counting).
+// backendRefPrefix marks a referenced_by entry as a backend pool row rather
+// than a settings key. One flat list keeps the wire shape of referenced_by
+// unchanged (a string array); the prefix is what tells a consumer — FE, CLI,
+// operator — which remediation applies.
+const backendRefPrefix = "backend:"
+
+// secretRefs is one secret's reference set, split by reference TYPE. The type
+// decides the 409 remediation (04-W5 §3.3): a settings reference is unset with
+// DELETE /api/settings/{key}, a pool reference by clearing the row's
+// api_key_ref — the settings hint is simply wrong for a pool row, and it names
+// an endpoint that retires with the registry cut.
+type secretRefs struct {
+	settings []string // config keys whose secret_ref override row names the secret
+	backends []string // context_backends row names whose api_key_ref names it
+}
+
+// list renders the wire shape of referenced_by: settings keys verbatim,
+// backend rows under backendRefPrefix. Never nil — an unreferenced secret
+// serializes as an empty array, as it always did.
+func (s secretRefs) list() []string {
+	out := make([]string, 0, len(s.settings)+len(s.backends))
+	out = append(out, s.settings...)
+	for _, name := range s.backends {
+		out = append(out, backendRefPrefix+name)
+	}
+	return out
+}
+
+// empty reports that nothing references the secret — the only state in which
+// HandleDelete may proceed.
+func (s secretRefs) empty() bool { return len(s.settings)+len(s.backends) == 0 }
+
+// remediation is the 409 body text: it names the way OUT per reference type.
+// Scope-safe by construction — it echoes only names the caller's own scan
+// produced, so it can never disclose a foreign tenant's pool topology (§5.5).
+func (s secretRefs) remediation(name string) string {
+	switch {
+	case len(s.settings) > 0 && len(s.backends) > 0:
+		return fmt.Sprintf("secret %q is referenced by settings and by backend pool rows — "+
+			"unset the settings (DELETE /api/settings/{key}) and clear the rows' api_key_ref first", name)
+	case len(s.backends) > 0:
+		return fmt.Sprintf("secret %q is referenced by backend pool rows — clear their api_key_ref first "+
+			`(ctx backends update <id> '{"api_key_ref":""}')`, name)
+	default:
+		return fmt.Sprintf("secret %q is referenced by settings — unset them first (DELETE /api/settings/{key})", name)
+	}
+}
+
+// referencedBy maps secret name → its reference set: settings keys whose
+// override row is a secret_ref to it, UNION the backend pool rows whose
+// api_key_ref names it (04-W5 §3.3). Source of truth are the ROWS on both
+// sides (the snapshots carry resolved plaintext, useless for reference
+// counting). Without the pool half the guard is fail-open on every
+// installation whose provider keys live in the pool — which is where F3 put
+// them (§5.7).
 //
 // Scope (§5.7, the reference-integrity barrier — NOT a crypto check, so the AAD
 // is irrelevant here): a tenant-admin's DELETE scans its OWN scope. An operator's
@@ -208,8 +259,10 @@ func (h *SecretsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 // can be referenced VIA the gated fallback by an opted-in tenant's setting, and
 // missing that reference would let the tenant setting silently fail-open to
 // env/default. Without any opt-in tenant the set degenerates to today's
-// _global-only scan.
-func (h *SecretsHandler) referencedBy(r *http.Request) (map[string][]string, error) {
+// _global-only scan. The pool scan runs on the SAME scope set, deliberately:
+// a wider scan would answer a tenant-admin's DELETE with foreign backend row
+// names, i.e. enumerate another tenant's provider topology (§5.5).
+func (h *SecretsHandler) referencedBy(r *http.Request) (map[string]secretRefs, error) {
 	ws := writeScope(AuthResultFromContext(r.Context()))
 	scopes := []string{ws}
 	if ws == store.GlobalScope {
@@ -230,7 +283,7 @@ func (h *SecretsHandler) referencedBy(r *http.Request) (map[string][]string, err
 			sensitive[info.Key] = true
 		}
 	}
-	refs := map[string][]string{}
+	refs := map[string]secretRefs{}
 	seen := map[string]map[string]bool{} // name → set of keys (dedup across scopes)
 	for _, row := range rows {
 		if !sensitive[row.Key] {
@@ -247,7 +300,22 @@ func (h *SecretsHandler) referencedBy(r *http.Request) (map[string][]string, err
 			continue
 		}
 		seen[name][row.Key] = true
-		refs[name] = append(refs[name], row.Key)
+		rs := refs[name]
+		rs.settings = append(rs.settings, row.Key)
+		refs[name] = rs
+	}
+
+	// Pool half of the union (§3.3). Row names are UNIQUE across scopes
+	// (uq_backends_name, migration 053), so no dedup is needed here; the query
+	// orders by name, keeping referenced_by stable between calls.
+	poolRefs, err := store.BackendSecretRefsMulti(r.Context(), h.pool, scopes)
+	if err != nil {
+		return nil, err
+	}
+	for _, ref := range poolRefs {
+		rs := refs[ref.APIKeyRef]
+		rs.backends = append(rs.backends, ref.Name)
+		refs[ref.APIKeyRef] = rs
 	}
 	return refs, nil
 }

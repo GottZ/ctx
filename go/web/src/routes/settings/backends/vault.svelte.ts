@@ -4,10 +4,11 @@
 // "fehlt" derivation is a pure join (lib/backends secretUsage) the form runs
 // over secrets × backends × settings — it is not state held here.
 //
-// Note: the server's DELETE-409 only fires for SETTINGS references; a secret
-// used solely by a backend api_key_ref deletes silently (the server's
-// referencedBy scans settings overrides only). The form therefore warns from
-// the client-side join before deleting, not just on the 409.
+// Note: since 04-W5 the server's DELETE-409 also fires for BACKEND references
+// (referencedBy unions context_settings secret_refs with context_backends
+// api_key_ref, prefix "backend:"). The client-side join stays the EARLY
+// warning — it shows usage in the list without a delete attempt — but it is no
+// longer the only thing standing between a delete and a keyless backend.
 
 import { toApiError, type ApiError } from '../../../lib/api'
 import { deleteSecret, listSecrets, putSecret } from '../../../lib/api/vault'

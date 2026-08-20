@@ -11,6 +11,9 @@
 //   - Gate 8: an operator's _global-secret DELETE that an opt-in tenant
 //     references via the fallback is a 409, not a silent fail-open (§5.7)
 //   - Gate 9: no submitted secret value in any tenant response
+//   - Gate 10 (04-W5 §5.5): the api_key_ref half of referencedBy is scoped
+//     like the settings scan — a foreign tenant's pool row appears in neither
+//     the list nor the delete-guard 409
 //
 // Run with:
 //
@@ -181,6 +184,51 @@ func TestSecretsTenantAPI_Integration(t *testing.T) {
 	t.Run("Gate9_NoSecretValueLeak", func(t *testing.T) {
 		scanClean(t, api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/secrets", "").Body.String(), "A GET list")
 		scanClean(t, api.as(operatorAR()).do(t, http.MethodGet, "/api/secrets", "").Body.String(), "operator GET list")
+	})
+
+	// Gate 10 (04-W5 §5.5) — SCOPE NEGATIVE PROBE for the pool half of
+	// referencedBy. Two pool rows reference the SAME secret name from two
+	// tenants. Tenant A's view — list AND the delete-guard 409 — may name its
+	// own row and nothing else: a referenced_by that leaked the foreign row
+	// would hand a tenant-admin another tenant's provider topology (row names
+	// are operator-chosen and describe the provider), and it would do so
+	// through a read every tenant-admin has.
+	//
+	// Negative probe (2026-08-21): scanning the pool without the scope
+	// predicate (scope = ANY(scopes) dropped from BackendSecretRefsMulti) turns
+	// the two "must not appear" assertions red while everything else stays
+	// green — the leak is invisible to the positive assertions alone.
+	t.Run("Gate10_BackendRefScopeIsolation", func(t *testing.T) {
+		insertBackendSecretRef(t, pool, "ta-provider", "tenanta", "sec-a")
+		insertBackendSecretRef(t, pool, "tb-provider", "tenantb", "sec-a")
+
+		rec := api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/secrets", "")
+		if !strings.Contains(rec.Body.String(), `"backend:ta-provider"`) {
+			t.Errorf("A's list lacks A's own pool reference: %s", rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "tb-provider") {
+			t.Errorf("A's list leaks tenant B's pool row: %s", rec.Body.String())
+		}
+
+		rec = api.as(tenantAdmin("tenanta")).do(t, http.MethodDelete, "/api/secrets/sec-a", "")
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("A DELETE sec-a = %d, want 409 (own pool row references it)", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"backend:ta-provider"`) {
+			t.Errorf("409 lacks A's own pool row: %s", rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "tb-provider") {
+			t.Errorf("409 leaks tenant B's pool row: %s", rec.Body.String())
+		}
+		scanClean(t, rec.Body.String(), "A DELETE 409")
+
+		// Counter-direction: B has no secret of that name at all, so B's own
+		// row must not conjure a reference into A's scope either — B's list
+		// stays free of sec-a (Gate 5's isolation, unchanged by the union).
+		rec = api.as(tenantAdmin("tenantb")).do(t, http.MethodGet, "/api/secrets", "")
+		if strings.Contains(rec.Body.String(), "sec-a") {
+			t.Errorf("B's list leaks tenant A's secret name through the pool join: %s", rec.Body.String())
+		}
 	})
 }
 
