@@ -41,6 +41,7 @@ type settingRow struct {
 	Source     string          `json:"source"`
 	Default    any             `json:"default"`
 	Sensitive  bool            `json:"sensitive"`
+	Desc       string          `json:"description"`
 }
 
 // settingAuditRow mirrors store.SettingAudit on the wire.
@@ -236,6 +237,9 @@ func runSettingsGet(getClient func() (*Client, error), key string) error {
 	}
 	s := payload.Setting
 	fmt.Printf("%s\n", s.Key)
+	if s.Desc != "" {
+		fmt.Printf("  %s\n", s.Desc)
+	}
 	fmt.Printf("  value:      %v\n", renderCell(s.Value))
 	fmt.Printf("  source:     %s\n", s.Source)
 	fmt.Printf("  default:    %v\n", renderCell(s.Default))
