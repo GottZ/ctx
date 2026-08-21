@@ -73,6 +73,140 @@ func advisePoolEmptyBoot(p *backends.Pool) {
 		"advisory", backends.AdvisorySubjectPool, "state", backends.AdvisoryStateEmpty)
 }
 
+// Deprecation labels of the A06-A1 boot sweep, in the vocabulary A02-W5 opened
+// at the dying seed path (`deprecation=env_backend_seed`): one attribute names
+// WHICH deprecated surface a line is about, so an operator can grep the whole
+// deprecation window out of a JSON boot log with a single key.
+const (
+	deprecationRetiredEnv = "retired_env"
+	deprecationRetiredRow = "retired_settings_row"
+)
+
+// retiredMajor is the release the 29 backend tuple keys disappear in (E1:
+// v5.0.0). Spelled once — it is the anchor the whole runbook is written around
+// ("before v5 / from v5 on", design/06 §8 E1d), and a boot line that named a
+// different version than the docs would send operators looking for a release
+// that does not exist.
+const retiredMajor = "v5.0.0"
+
+// warnRetiredEnvVarsBoot names every still-set env var of the 29 retired
+// backend tuple keys in the boot log (A06-A1, design/06 §3.4 #1).
+//
+// Why a log line is the load-bearing channel here: this project has exactly
+// three ways to reach an installation — the release body, the docs, and the
+// boot log — and only the last one reaches a CONCRETE deployment without
+// anybody reading anything first (design/06 §6.1). The deprecation window is
+// the last release in which these vars still do something; after the cut they
+// are read by nothing, and an operator who never saw this line would carry a
+// dead .env forward believing it configures his backends.
+//
+// The os.Getenv read is the X1 carve-out the design grants (§3.4/§3.5): it
+// feeds the WARNING and never a config value, so the "no raw env as a
+// configuration source" rule is untouched. It deliberately mirrors FromEnv's
+// emptiness test byte for byte (load.go:291-296, empty env == unset) — a
+// TrimSpace here would report a var the loader treats as set, or stay silent on
+// one it honours, and either direction makes the sweep lie about the
+// installation it is describing.
+//
+// Three texts, because three situations need three different actions:
+//   - the var is the effective source → remove it, the pool owns the value now;
+//   - a settings row shadows it → the var is already inert, but it must still
+//     go, and telling the operator to "configure backends" would describe work
+//     he has demonstrably done. Without this branch the double-configuration
+//     class (row AND env) would hear nothing at all in the window and would
+//     first learn of the problem after the break (design/06 §3.4 #1, §6.1);
+//   - CTX_EMBED_MODEL → see retiredEnvWarning.
+func warnRetiredEnvVarsBoot(cfg *config.Config) {
+	for _, key := range config.RetiredKeyNames() {
+		info, ok := config.KeyByName(key)
+		if !ok {
+			continue // registry cut already landed — the row sweep still applies
+		}
+		if info.EnvVar == "" || os.Getenv(info.EnvVar) == "" {
+			continue
+		}
+		msg, shadowed := retiredEnvWarning(info.EnvVar, key, cfg.Source(key))
+		slog.Warn(msg,
+			"deprecation", deprecationRetiredEnv,
+			"key", key, "env", info.EnvVar, "shadowed", shadowed)
+	}
+}
+
+// retiredEnvWarning picks the operator text for one still-set retired env var
+// and reports whether a settings row currently shadows it.
+//
+// CTX_EMBED_MODEL is the one var this window must NOT tell anybody to delete.
+// The design wrote its exception around the status channel probe; α2 (E5,
+// decided "vorher in α") already moved that probe onto the pool, so that
+// justification is spent — but the exception itself survives on two others
+// that α2 did not touch. (1) On THIS version the var is still the embed model
+// of the first-boot backend seed, and since α12 the seed fires precisely when
+// the tuples differ from the registry defaults: an operator who deletes
+// CTX_EMBED_MODEL while keeping the rest of his embed tuple still seeds — with
+// the registry default "qwen3-embedding:8b" instead of his own model, silently
+// (config.go:170; the live .env runs "qwen3-embedding-8b", one character
+// apart). (2) The rollback path documented in design/06 §3.3 leads to v4.37 or
+// older, and THOSE binaries do read the var for the channel probe. A uniform
+// "remove the env var" would therefore be a degradation this release caused
+// itself — the same failure mode the design's exception was built to prevent,
+// reached through a different door.
+func retiredEnvWarning(envVar, key, source string) (string, bool) {
+	if key == "embed.model" {
+		return "settings: " + envVar + " is set — retired in " + retiredMajor +
+			", but on this version it still supplies the embed model of the first-boot backend seed, " +
+			"and a rollback to v4.37 or older reads it again for the status channel probe; " +
+			"keep it until you have upgraded to " + retiredMajor, false
+	}
+	if source == config.SourceSettings || source == config.SourceTenant {
+		return "settings: " + envVar + " is set but shadowed by a settings row — retired in " +
+			retiredMajor + "; remove the env var", true
+	}
+	return "settings: " + envVar + " is set — retired in " + retiredMajor +
+		"; the value only feeds the first-boot seed; configure backends via 'ctx backends' and remove the env var", false
+}
+
+// warnRetiredSettingRowsBoot names every context_settings row that still sits
+// on one of the 29 retired keys, in EVERY scope (A06-A1, design/06 §3.4 #2).
+//
+// These rows are the half of the problem an env sweep cannot see. They live in
+// the database, they survive an .env cleanup, and their runtime effect is
+// either dead already (the coupled model keys are not admitted, build.go) or
+// merely a duplicate of what the backend pool serves — so nothing in normal
+// operation makes them visible. What makes them urgent is the CLOSING window:
+// DELETE /api/settings/<key> answers today and answers 404 after the cut, in
+// every scope, which locks tenant admins out of their own api_key rows
+// (design/06 §3.3 step 2a, §5.3). The line is therefore an expiring
+// instruction, not a status report.
+//
+// The embed-cache hint rides along on the coupled:embed-cache keys because the
+// recommended DELETE has a price: it changes the effective value and flushes
+// the process-wide, scope-less embed cache for ALL tenants (reload.go:136-145).
+// A cold cache is a latency and provider-cost spike, not an error — but a WARN
+// that recommends an action must not hide the action's cost.
+//
+// Never fatal, like every other boot advisory: a failed sweep degrades to one
+// line saying the sweep failed. A deprecation notice must not be the thing that
+// stops a daemon that served queries yesterday.
+func warnRetiredSettingRowsBoot(ctx context.Context, pool *pgxpool.Pool) {
+	refs, err := store.SettingRowsForKeys(ctx, pool, config.RetiredKeyNames())
+	if err != nil {
+		slog.Warn("settings: retired-key row sweep failed — superseded settings rows cannot be reported this boot",
+			"deprecation", deprecationRetiredRow, "error", err)
+		return
+	}
+	for _, ref := range refs {
+		msg := "settings: a settings row still holds retired key " + ref.Key + " — retired in " + retiredMajor +
+			"; remove it with DELETE /api/settings/" + ref.Key + " while this version still answers (from " +
+			retiredMajor + " on the key answers 404 in every scope)"
+		if info, ok := config.KeyByName(ref.Key); ok && info.Mutability == "coupled:embed-cache" {
+			msg += "; that DELETE flushes the embed cache for ALL tenants — expect a cold-cache latency and provider-cost spike, not an error"
+		}
+		slog.Warn(msg,
+			"deprecation", deprecationRetiredRow,
+			"key", ref.Key, "scope", ref.Scope)
+	}
+}
+
 // defaultListenAddr mirrors the registry default for server.listen_addr
 // (pinned against drift by TestBootDefaults). The -health mode needs it
 // WITHOUT the full config load: it must work in a crash-looping container
@@ -252,6 +386,17 @@ func main() {
 	effCfg, effIssues := settings.Bootstrap(ctx, pool, cc, issues)
 	cfgStore := config.NewStore(effCfg)
 	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...) //nolint:forbidigo // MT 06 BLIND: boot-time effective-config dump — the _global generation, no tenant exists at boot.
+
+	// A06-A1 (design/06 §3.4): the deprecation window's own channel. Named
+	// here, right after the effective generation exists, because the env sweep
+	// needs Source(key) to tell a live env var from one a settings row already
+	// shadows — and before the backend bootstrap below, so the operator reads
+	// "these sources are retired" before he reads what the dying seed path did
+	// with them. Both halves are advisory only: nothing here changes a value,
+	// and a boot with every retired source set behaves exactly as it did
+	// yesterday.
+	warnRetiredEnvVarsBoot(effCfg)
+	warnRetiredSettingRowsBoot(ctx, pool)
 
 	// Evokoa-Clean-Room Achse 03 (design/03 §4.5, wave W03-3): the
 	// schema-contract check. AFTER settings.Bootstrap — the effective

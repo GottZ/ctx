@@ -106,6 +106,60 @@ func LoadSettingOverridesMulti(ctx context.Context, pool *pgxpool.Pool, scopes [
 	return overrides, rows.Err()
 }
 
+// SettingRowRef identifies one context_settings row without its value: the
+// (key, scope) primary key alone. The deprecation sweep that consumes it
+// reports WHERE a superseded row lives, never WHAT it says — half of the 29
+// retired keys are secret-class, and a boot log line is the last place a
+// resolved api_key may surface (§3.3 log invariant).
+type SettingRowRef struct {
+	Key   string `json:"key"`
+	Scope string `json:"scope"`
+}
+
+// SettingRowsForKeys returns every context_settings row on the given keys, in
+// EVERY scope, ordered by key then scope. Deliberately scope-blind where the
+// rest of this file is scope-addressed: its caller is the A06-A1 boot sweep
+// over the retired backend tuple keys, and those rows can sit in tenant scopes
+// (the 6 *.api_key keys are tenant-overridable) that no _global-addressed read
+// would ever see — a sweep that missed them would tell an operator his
+// installation is clean while a tenant override still shadows the pool
+// (design/06 §3.3 step 2a, §5.3).
+//
+// Fail-closed on an empty input like LoadSettingOverridesMulti: key = ANY('{}')
+// would silently match nothing and report a clean installation for the wrong
+// reason.
+func SettingRowsForKeys(ctx context.Context, pool *pgxpool.Pool, keys []string) ([]SettingRowRef, error) {
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("settings: at least one key is required")
+	}
+	for _, k := range keys {
+		if k == "" {
+			return nil, fmt.Errorf("settings: empty key is not allowed")
+		}
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT key, scope
+		 FROM context_settings
+		 WHERE key = ANY($1::text[])
+		 ORDER BY key, scope`,
+		keys)
+	if err != nil {
+		return nil, fmt.Errorf("settings: load rows for keys: %w", err)
+	}
+	defer rows.Close()
+
+	var refs []SettingRowRef
+	for rows.Next() {
+		var r SettingRowRef
+		if err := rows.Scan(&r.Key, &r.Scope); err != nil {
+			return nil, fmt.Errorf("settings: scan row ref: %w", err)
+		}
+		refs = append(refs, r)
+	}
+	return refs, rows.Err()
+}
+
 // AllowSharedSecretsKey is the global-only opt-in flag a tenant's _global
 // secret fallback is gated on (03-W5 / D2). It is read DIRECTLY at the TENANT
 // scope, NOT through the config snapshot: the registry classifies it

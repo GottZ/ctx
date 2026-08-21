@@ -74,6 +74,23 @@ func RetiredEnvNames() []string {
 	return out
 }
 
+// RetiredKeyNames returns the canonical settings keys of the retirement,
+// sorted — the name source of the boot-time row-shadow sweep (A06-A1,
+// design/06 §3.4 #2), which looks for context_settings rows on exactly these
+// keys across every scope. RetiredEnvNames() cannot serve that sweep: the
+// context_settings rows are keyed by the canonical key, not by the env name,
+// and deriving one from the other outside this file would plant the second
+// transcript the whole file exists to prevent. Same sorted-for-diffability
+// contract as RetiredEnvNames().
+func RetiredKeyNames() []string {
+	out := make([]string, 0, len(retiredSettingKeys))
+	for key := range retiredSettingKeys {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // retiredEnvName derives the env var of a retired key: "CTX_" + the upper-cased
 // key with '.' replaced by '_'. The derivation is mechanical for all 29 keys —
 // retired_test.go pins it against the live registry entries for as long as both
