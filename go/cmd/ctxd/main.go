@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -81,54 +82,115 @@ func bootLoadBackendPool(ctx context.Context, p *backends.Pool, reload, reconcil
 // at the dying seed path (`deprecation=env_backend_seed`): one attribute names
 // WHICH deprecated surface a line is about, so an operator can grep the whole
 // deprecation window out of a JSON boot log with a single key.
-const deprecationRetiredRow = "retired_settings_row"
+const (
+	deprecationRetiredEnv = "retired_env"
+	deprecationRetiredRow = "retired_settings_row"
+)
 
-// TODO(beta13-tombstone): the ENV half of the boot sweep is MISSING between β8 and
-// β13, deliberately and visibly.
+// retiredEnvTripwireSuffixes selects the VALUE-BEARING half of the 29 retired
+// env names: the 6 `_HOST`, the 6 `_API_KEY` and the 5 `_MODEL` vars (design/01
+// §4 W9, "Liste geschnitten auf wert-tragende Keys").
 //
-// warnRetiredEnvVarsBoot and its `deprecation=retired_env` label lived here
-// until β8. The sweep read its per-key wording from c.sources (env var vs.
-// shadowing settings row), so it could only ever speak about keys the loader
-// still knew — and β8 cut the last of the 29 out of the registry. design/06 §4
-// Phase A #1 wrote the hand-over into the plan before the first key moved: "im
-// Schnitt wird er durch den Tombstone 3.5 ersetzt, weil c.sources die Keys dann
-// nicht mehr kennt." Its test file went with it in the same commit; the β3
-// partition pin that guarded the shrinking sweep fataled by design once the
-// live half emptied ("this sweep is spent, β13's tombstone owns the statement
-// now").
+// The other twelve — protocols, the fallback timeout, num_ctx, think — carry no
+// topology. Their compose scaffold defaults are hard-wired non-empty
+// (`${CTX_CHAT_PROTOCOL:-ollama}` and friends), so a sweep over them would warn
+// about every unmodified v4 compose file on the installed base while telling
+// nobody anything: "your protocol is still ollama" is not a lost configuration.
+// Alert fatigue on twelve certain false positives would bury the seventeen that
+// can actually mean a dead host or an ignored provider key.
 //
-// What is NOT covered right now: a deployment that still has a non-empty
-// CTX_CHAT_HOST (or any of the other 28) in its environment boots SILENTLY. The
-// loader ignores the var — fromSources is registry-driven — and nothing says so.
-// That is exactly the silent-ignore fail-open design/06 §5.1 names as the first
-// break path of the cut.
+// Suffix matching rather than a second transcript of seventeen names: the names
+// come from config.RetiredEnvNames() and the suffix is what the CLASS is made
+// of, so a key added to or dropped from the retirement moves this list with it.
+// retiredsources_test.go pins the resulting partition (6/6/5 = 17 of 29) so a
+// suffix that ever started matching something else shows up as a count.
+var retiredEnvTripwireSuffixes = []string{"_HOST", "_API_KEY", "_MODEL"}
+
+// retiredEnvScaffoldDefaults are the two values the tripwire must stay silent
+// about (design/01 §4 W9, "Scaffold-Default-Ausnahmen").
 //
-// β13 owes the replacement (design/01 §4 W9 / design/06 §3.5): a STATIC name
-// list — config.RetiredEnvNames() is the source, this file the consumer — swept
-// with os.LookupEnv, with (a) a value filter (set-but-empty is not set: a
-// v4-era compose file materializes all 29 as `${VAR:-}`), (b) the list cut to
-// value-bearing keys (hosts, api_keys, models — not
-// protocols/timeouts/num_ctx/think/parallelism, whose compose scaffold defaults
-// are hard-wired non-empty), (c) the known scaffold-default VALUES of
-// CTX_RERANK_HOST/CTX_RERANK_MODEL exempted, and (d) name-only lines, never
-// values (six of the names are api_key vars).
+// These two vars were the only members of the value-bearing seventeen whose
+// compose scaffold shipped a non-empty default (`${CTX_RERANK_HOST:-http://ctx-rerank:8082}`),
+// so on an unmodified v4 compose file they arrive set, non-empty, and identical
+// on every installation that never touched rerank. Warning about them would be
+// a guaranteed false positive on exactly the cohort this sweep exists for. A
+// DIFFERENT value is a real operator choice and still warns — the exemption is
+// value-scoped, not name-scoped.
+var retiredEnvScaffoldDefaults = map[string]string{
+	"CTX_RERANK_HOST":  "http://ctx-rerank:8082",
+	"CTX_RERANK_MODEL": "bge-reranker-v2-m3",
+}
+
+// retiredEnvTripwireNames returns the env names the boot tripwire sweeps: the
+// value-bearing subset of config.RetiredEnvNames(), in that list's sorted order.
+func retiredEnvTripwireNames() []string {
+	all := config.RetiredEnvNames()
+	out := make([]string, 0, len(all))
+	for _, name := range all {
+		for _, suffix := range retiredEnvTripwireSuffixes {
+			if strings.HasSuffix(name, suffix) {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// warnRetiredEnvVarsBoot is the K4 tombstone tripwire: the ENV half of the boot
+// sweep, rebuilt on a static name list after the registry cut took the old one
+// away (design/01 §4 W9, design/06 §3.5; TODO(beta13-tombstone) discharged).
 //
-// The tense in (a)/(b)/(c) is deliberate and dates from β12: the repo's own
-// docker-compose.yml no longer declares any of the 29, so on a deployment that
-// took the new compose file with the release, the vars never reach the process
-// and the sweep is structurally blind — silent by construction, not by bug. Its
-// reach is the deployments that did NOT update their compose (foreign copies do
-// not travel with a release) plus every non-compose form — binary, systemd, k8s
-// — where a .env or a unit file still exports them. That two-part reach is what
-// design/01 §9 hands to β13 to state in docs/operations.md; the scaffold-default
-// exemptions above stay because the files that still carry them are exactly the
-// v4-era compose copies the sweep is left to serve.
+// The gap it closes: fromSources is registry-driven, and from this release on
+// the registry has never heard of chat.host. A deployment that still exports
+// CTX_CHAT_HOST therefore boots in perfect silence — the loader does not ignore
+// the var with a complaint, it does not see it at all. design/06 §5.1 names that
+// silent-ignore as the first break path of the cut, and a boot log is the only
+// one of the project's three communication channels that reaches a CONCRETE
+// deployment without anybody reading anything first (§6.1).
 //
-// The ROW half below survives unchanged: it keys off config.RetiredKeyNames(),
-// which the cut does not touch, so it keeps reporting leftover context_settings
-// rows in every scope. The reminder pin lives in retiredsources_test.go
-// (TestRetiredEnvSweepIsOwedToBeta13) — it keeps the ingredient list from rotting
-// while it has no consumer.
+// Its predecessor read each key's wording from c.sources (live env var vs.
+// shadowing settings row) and could only speak about keys the loader still knew;
+// it died with its subject in β8. This one asks the environment directly, which
+// is the X1 carve-out the design grants twice (§3.4, §3.5): the read feeds the
+// WARNING and never a config value, so "no raw env as a configuration source"
+// stands. The emptiness test mirrors FromEnv byte for byte (load.go:296, empty
+// env == unset) — a TrimSpace here would describe a different installation than
+// the loader sees.
+//
+// Three filters, each of them the difference between a signal and noise:
+//
+//   - VALUE FILTER. A v4-era compose file materialises all 29 as `${VAR:-}`, so
+//     every one of them is SET and empty on the whole compose cohort. An
+//     existence scan would have printed up to 29 lines per boot there.
+//   - VALUE-BEARING SUBSET (retiredEnvTripwireSuffixes).
+//   - SCAFFOLD DEFAULTS (retiredEnvScaffoldDefaults).
+//
+// NAME-ONLY, never values: six of the seventeen names are api_key vars, and a
+// boot log travels into log aggregators and support bundles. The line carries
+// the var NAME and the way out; the value stays where it is. retiredsources_test.go
+// probes that negatively with a needle.
+//
+// The text does not say "remove it now" on purpose. Runbook order is: boot v5,
+// verify the pool, THEN strip .env and the compose declarations (design/05 §9
+// sentence 4, design/06 §3.3 steps 3+5) — the vars are the safety net of a
+// binary rollback until v5 is verified, and this is also why the WARN is the
+// runbook's built-in progress signal: expected in step 3, gone after step 5.
+func warnRetiredEnvVarsBoot() {
+	for _, name := range retiredEnvTripwireNames() {
+		val, set := os.LookupEnv(name)
+		if !set || val == "" {
+			continue
+		}
+		if def, exempt := retiredEnvScaffoldDefaults[name]; exempt && val == def {
+			continue
+		}
+		slog.Warn("settings: retired env var "+name+" is set — ignored since "+retiredMajor+
+			"; the backend pool owns this value now (inspect it with 'ctx backends list'), and the"+
+			" upgrade runbook removes the var after v5 is verified (docs/operations.md)",
+			"deprecation", deprecationRetiredEnv, "env", name)
+	}
+}
 
 // retiredMajor is the release the 29 backend tuple keys disappear in (E1:
 // v5.0.0). Spelled once — it is the anchor the whole runbook is written around
@@ -341,14 +403,21 @@ func main() {
 	cfgStore := config.NewStore(effCfg)
 	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...) //nolint:forbidigo // MT 06 BLIND: boot-time effective-config dump — the _global generation, no tenant exists at boot.
 
-	// A06-A1 (design/06 §3.4): the deprecation window's own channel. Named
-	// here, right after the effective generation exists, because the env sweep
-	// needs Source(key) to tell a live env var from one a settings row already
-	// shadows — and before the backend bootstrap below, so the operator reads
-	// "these sources are retired" before he reads what the dying seed path did
-	// with them. Both halves are advisory only: nothing here changes a value,
-	// and a boot with every retired source set behaves exactly as it did
-	// yesterday.
+	// A06-A1 / K4 (design/06 §3.4 + §3.5): the retirement's own boot channel,
+	// both halves side by side — env vars the loader no longer sees, and
+	// settings rows on keys the registry no longer knows.
+	//
+	// The site is inherited rather than chosen: the pair lived here through the
+	// deprecation window because the env half then read Source(key) and needed
+	// the effective generation to exist. The tombstone rebuild dropped that
+	// dependency (static list, os.LookupEnv), so the env sweep could now run at
+	// any point of the boot — it stays next to its sibling because an operator
+	// greps `deprecation=` for ONE block, and two halves of one message split
+	// across the log would read as two unrelated problems.
+	//
+	// Both halves are advisory only: nothing here changes a value, and a boot
+	// with every retired source set behaves exactly as one with none.
+	warnRetiredEnvVarsBoot()
 	warnRetiredSettingRowsBoot(ctx, pool)
 
 	// Evokoa-Clean-Room Achse 03 (design/03 §4.5, wave W03-3): the
