@@ -41,6 +41,17 @@ func backendBootstrapInput(c *config.Config) backends.BootstrapInput {
 	}
 }
 
+// backendSeedDefaults is the comparison base of the conditional env seed
+// (A02-W5, design/02 §4.1d): the bootstrap input as it looks on an
+// installation where nobody touched a single backend key. Built through
+// backendBootstrapInput like the live snapshot is, so accessor inheritance
+// (dream inherits chat, dream-embed inherits embed) is resolved identically
+// on both sides of the comparison. Retires with the seed path in the
+// β-Schnitt (design/02 §7 W6).
+func backendSeedDefaults() backends.BootstrapInput {
+	return backendBootstrapInput(config.Defaults())
+}
+
 // advisePoolEmptyBoot logs the A02-W4 empty-pool advisory (design/02 §4.1c).
 // Once the seed path leaves the boot, an empty context_backends is the ordinary
 // state of a fresh install until someone seeds it — no chain serves, every query
@@ -268,8 +279,15 @@ func main() {
 	// context_backends when empty; afterwards the TABLE is the source of
 	// truth. Both steps are non-fatal — P1 has no pool consumer yet, and a
 	// degraded pool must not block a boot that served queries yesterday.
+	//
+	// A02-W5 (design/02 §4.1d): the seed is conditional on the tuples having
+	// been configured at all. The comparison base is the SAME assembly run
+	// over the registry defaults — same accessors, same inheritance
+	// resolution — so the verdict compares like with like instead of against
+	// a hand-copied list of default values that would rot on the first
+	// registry edit.
 	backendPool := backends.NewPool(pool, settings.BackendSecretResolver(pool))
-	if _, err := backends.Bootstrap(ctx, pool, backendBootstrapInput(cfgStore.Snapshot())); err != nil { //nolint:forbidigo // MT 06 BLIND: boot-time backend pool bootstrap reads the _global generation, no tenant exists at boot.
+	if _, err := backends.Bootstrap(ctx, pool, backendBootstrapInput(cfgStore.Snapshot()), backendSeedDefaults()); err != nil { //nolint:forbidigo // MT 06 BLIND: boot-time backend pool bootstrap reads the _global generation, no tenant exists at boot.
 		slog.Error("backends: bootstrap failed", "error", err)
 	}
 	if err := backendPool.Reload(ctx); err != nil {

@@ -264,6 +264,21 @@ func fromSources(lookup func(key string) (string, bool)) (*Config, []Issue) {
 	return c, issues
 }
 
+// Defaults builds a Config from the registry defaults alone — no env, no
+// settings. It is the comparison base of the A02-W5 conditional env
+// bootstrap (design/02 §4.1d, §9: "W5s Default-Vergleich braucht die
+// Registry-Defaults als exportierte Vergleichsbasis"): a snapshot whose
+// backend tuples are byte-identical to this one was configured by nobody,
+// and the env-era seed stays a no-op instead of writing dead localhost rows
+// onto a fresh install.
+//
+// No Issues can arise — the default path never parses a raw value — so the
+// slice is dropped rather than pushed onto every caller.
+func Defaults() *Config {
+	c, _ := fromSources(func(string) (string, bool) { return "", false })
+	return c
+}
+
 // FromEnv parses the environment into a Config: fromSources with an env
 // lookup (registry maps key → env var; env:"-" fields skip the env source).
 // Callers run Validate afterwards and abort on HasErrors.

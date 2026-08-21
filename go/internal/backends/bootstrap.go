@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -32,11 +33,50 @@ type BootstrapInput struct {
 	RerankTimeoutS int // seconds, the rerank package constant
 }
 
+// MatchesDefaults reports whether these tuples are byte-identical to the
+// registry defaults — i.e. not one of the 29 backend keys was moved by env
+// OR by settings (X1 holds: the caller compares the EFFECTIVE snapshot, so a
+// settings row counts as configured).
+//
+// Deliberately a whole-struct comparison instead of a field checklist: every
+// tuple field that can be configured has to count, and a checklist silently
+// loses a field the day the tuple grows one. The rerank leg travels in the
+// same struct and therefore in the same verdict.
+func (in BootstrapInput) MatchesDefaults(defaults BootstrapInput) bool {
+	return reflect.DeepEqual(in, defaults)
+}
+
 // Bootstrap seeds context_backends from the env-era tuples exactly once:
-// when the table is empty. After it ran, the TABLE is the source of truth —
-// the CTX_*_HOST env vars only feed this path (bridge until P7). ON CONFLICT
-// keeps a double-start race idempotent (risk 6.10).
-func Bootstrap(ctx context.Context, q ExecQuerier, in BootstrapInput) (int, error) {
+// when the table is empty AND the tuples carry actual operator configuration.
+// After it ran, the TABLE is the source of truth — the CTX_*_HOST env vars
+// only feed this path (bridge until P7). ON CONFLICT keeps a double-start
+// race idempotent (risk 6.10).
+//
+// A02-W5 (design/02 §4.1d): the seed is CONDITIONAL. An input identical to
+// the registry defaults is a no-op — the table stays empty and the W4
+// advisory takes over. Without this the env seed won the fresh-install race
+// against every replacement path: `ctx backends seed` and the init wizard go
+// through the running API, so the first ctxd boot had already written two
+// dead http://localhost:11434 rows (localhost inside the ctx container is the
+// container), the wizard saw a non-empty pool, and the seed command refused.
+// The named residual risk is the operator who really does run Ollama on
+// localhost with untouched default models: he loses the auto-seed and gets
+// the advisory plus a one-liner seed command instead.
+//
+// The default check runs BEFORE the probe: it needs no round trip, and on a
+// populated table both paths return (0, nil) anyway.
+//
+// This whole path dies in the β-Schnitt (design/02 §7 W6); until then every
+// boot that actually seeds says so — see the deprecation WARN below.
+func Bootstrap(ctx context.Context, q ExecQuerier, in, defaults BootstrapInput) (int, error) {
+	if in.MatchesDefaults(defaults) {
+		// Debug, not Warn: an unconfigured install is the ordinary case this
+		// wave exists for, and the operator-facing signal is the W4 advisory
+		// after the reload — one state, one warning.
+		slog.Debug("backends: env-era seed skipped — backend config is untouched registry default")
+		return 0, nil
+	}
+
 	rows, err := q.Query(ctx, `SELECT EXISTS (SELECT 1 FROM context_backends)`)
 	if err != nil {
 		return 0, fmt.Errorf("backends: bootstrap probe: %w", err)
@@ -55,6 +95,12 @@ func Bootstrap(ctx context.Context, q ExecQuerier, in BootstrapInput) (int, erro
 	if exists {
 		return 0, nil
 	}
+
+	// A02-W5: the deprecation window carries its signal AT the dying path,
+	// and only where it is actually used — this line is reached exactly when
+	// a configured env really seeds an empty table.
+	slog.Warn("backends: env-based backend seed is deprecated and will be removed in the next major — migrate to 'ctx backends seed' (docs/operations.md#backends)",
+		"deprecation", "env_backend_seed")
 
 	seed, warnings := BootstrapRows(in)
 	for _, w := range warnings {

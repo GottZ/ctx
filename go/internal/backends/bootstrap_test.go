@@ -1,8 +1,13 @@
 package backends
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Synthetic fixture hosts (RFC-2606) — never real deployment topology.
@@ -195,5 +200,103 @@ func TestBootstrapLocalityDerivation(t *testing.T) {
 	cpu := rowByName(t, rows, "llama-cpu")
 	if cpu.Locality != LocalityLocal {
 		t.Errorf("loopback host locality = %s, want local", cpu.Locality)
+	}
+}
+
+// --- A02-W5: the conditional env seed (design/02 §4.1d).
+
+// refusingQuerier fails every database call. It is the probe for "did the
+// bootstrap touch the database at all": the default short-circuit has to
+// return before the EXISTS query, so any contact surfaces as an error.
+type refusingQuerier struct {
+	queries int
+	execs   int
+}
+
+func (r *refusingQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	r.queries++
+	return nil, errors.New("refusingQuerier: bootstrap must not probe here")
+}
+
+func (r *refusingQuerier) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	r.execs++
+	return pgconn.CommandTag{}, errors.New("refusingQuerier: bootstrap must not insert here")
+}
+
+// TestBootstrapSkipsDefaultIdenticalInput is the W5 gate at unit level: an
+// input byte-identical to the registry defaults is a no-op that never reaches
+// the database — the fresh install keeps its empty table for the replacement
+// seed path, and the W4 advisory names the state.
+//
+// Mutation probe: drop the MatchesDefaults early return in Bootstrap and this
+// goes red on the refusingQuerier error.
+func TestBootstrapSkipsDefaultIdenticalInput(t *testing.T) {
+	defaults := bootstrapFixture() // stands in for the registry defaults here
+	q := &refusingQuerier{}
+
+	n, err := Bootstrap(context.Background(), q, bootstrapFixture(), defaults)
+	if err != nil {
+		t.Fatalf("Bootstrap on default-identical input: %v, want no-op", err)
+	}
+	if n != 0 {
+		t.Errorf("inserted = %d, want 0", n)
+	}
+	if q.queries != 0 || q.execs != 0 {
+		t.Errorf("database touched (%d queries, %d execs) — the default check must return first",
+			q.queries, q.execs)
+	}
+}
+
+// TestBootstrapStillRunsForConfiguredInput is the negative half: ONE moved
+// field is enough to make the input configured again, and the seed path must
+// stay fully alive for that population — W5 conditionalizes the path, W6
+// removes it. Reaching the probe is the assertion; the refusingQuerier turns
+// it into a visible error.
+func TestBootstrapStillRunsForConfiguredInput(t *testing.T) {
+	defaults := bootstrapFixture()
+	in := bootstrapFixture()
+	in.Chat.Host = "http://configured.example:8089"
+
+	q := &refusingQuerier{}
+	if _, err := Bootstrap(context.Background(), q, in, defaults); err == nil {
+		t.Fatal("configured input returned without probing the table — the env seed died a wave early")
+	}
+	if q.queries != 1 {
+		t.Errorf("queries = %d, want 1 (the EXISTS probe)", q.queries)
+	}
+}
+
+// TestMatchesDefaultsCoversEveryTupleField pins the whole-struct semantics:
+// each configurable leg of the input — including the rerank fields and the
+// optional fallback pointer — flips the verdict on its own. A field checklist
+// would pass this test only by accident and lose the next added field.
+func TestMatchesDefaultsCoversEveryTupleField(t *testing.T) {
+	defaults := bootstrapFixture()
+	if !bootstrapFixture().MatchesDefaults(defaults) {
+		t.Fatal("identical inputs must match — comparison base is broken")
+	}
+
+	cases := map[string]func(*BootstrapInput){
+		"chat host":     func(in *BootstrapInput) { in.Chat.Host = "http://other.example:8089" },
+		"chat api key":  func(in *BootstrapInput) { in.Chat.APIKey = "sk-configured" },
+		"chat num_ctx":  func(in *BootstrapInput) { in.Chat.NumCtx = 4096 },
+		"chat think":    func(in *BootstrapInput) { in.Chat.Think = "true" },
+		"embed model":   func(in *BootstrapInput) { in.Embed.Model = "other-embed" },
+		"dream model":   func(in *BootstrapInput) { in.Dream.Model = "other-dream" },
+		"dream embed":   func(in *BootstrapInput) { in.DreamEmbed.Host = "http://other.example:8090" },
+		"fallback gone": func(in *BootstrapInput) { in.Fallback = nil },
+		"fallback host": func(in *BootstrapInput) { in.Fallback.Host = "http://127.0.0.1:9099" },
+		"rerank host":   func(in *BootstrapInput) { in.RerankHost = "" },
+		"rerank model":  func(in *BootstrapInput) { in.RerankModel = "other-rerank" },
+		"rerank key":    func(in *BootstrapInput) { in.RerankKey = "sk-configured" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := bootstrapFixture()
+			mutate(&in)
+			if in.MatchesDefaults(defaults) {
+				t.Errorf("a moved %s still counts as untouched default", name)
+			}
+		})
 	}
 }
