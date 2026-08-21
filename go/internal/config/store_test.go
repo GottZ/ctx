@@ -9,16 +9,25 @@ import (
 	"time"
 )
 
-// generation builds a Validate-clean config whose chat tuple is internally
-// branded: host, api_key and model all carry the same generation marker, so a
-// torn read (host of gen A + key of gen B) is detectable.
+// generation builds a Validate-clean config that is internally BRANDED: four
+// fields in four different groups all carry the same generation marker, so a
+// torn read (one field of gen A next to another of gen B) is detectable.
+//
+// The brand rode on the chat tuple until β8 — host, api_key and model were three
+// co-located strings of one role, which made "internally consistent" easy to
+// read. With the tuple gone the brand is spread across four unrelated groups
+// instead, and that is strictly BETTER for what this fixture is for: the store
+// publishes ONE *Config per generation, so consistency is a property of the
+// whole struct, not of one group inside it. Fields chosen for taking an
+// arbitrary marker string unchanged — no Validate normalization (that would
+// rewrite the brand) and no shape gate (dream.language would reject it).
 func generation(t *testing.T, marker string) *Config {
 	t.Helper()
 	c, issues := cfgFrom(t, map[string]string{
-		"chat.host":             "http://" + marker + ".example:8089",
-		"chat.api_key":          "sk-" + marker + "-0123456789abcdefghijklmn",
-		"chat.model":            "model-" + marker,
-		"scheduler.read_scopes": "scope-" + marker + ",shared",
+		"digest.mode":               marker,
+		"cluster.centroid_work_mem": "mem-" + marker,
+		"contract.mode":             "mode-" + marker,
+		"scheduler.read_scopes":     "scope-" + marker + ",shared",
 	})
 	if len(issues) != 0 {
 		t.Fatalf("generation %s: unexpected issues %v", marker, issues)
@@ -26,13 +35,24 @@ func generation(t *testing.T, marker string) *Config {
 	return c
 }
 
+// brandOf reads a generation's four branded fields back as one slice, in the
+// order the fixture writes them.
+func brandOf(c *Config) []string {
+	return []string{
+		c.Digest.Mode,
+		c.ClusterOps.CentroidWorkMem,
+		c.Contract.Mode,
+		c.Scheduler.ReadScopes[0],
+	}
+}
+
 // TestStoreSnapshotConsistencyUnderRace runs under -race: 8 readers pull
-// snapshots and assert the chat tuple plus ReadScopes are internally
-// consistent (single generation) while a writer flips generations. The
-// red-proof for this mechanism is documented in the wave report: with the
-// atomic.Pointer temporarily replaced by a plain *Config field, `go test
-// -race` reports the data race this store exists to prevent — the same class
-// as the legacy 4-field llm.ChatFallback package-var swap (torn read).
+// snapshots and assert that all four branded fields belong to ONE generation
+// while a writer flips generations. The red-proof for this mechanism is
+// documented in the wave report: with the atomic.Pointer temporarily replaced
+// by a plain *Config field, `go test -race` reports the data race this store
+// exists to prevent — the same class as the legacy 4-field llm.ChatFallback
+// package-var swap (torn read).
 func TestStoreSnapshotConsistencyUnderRace(t *testing.T) {
 	genA := generation(t, "gen-a")
 	genB := generation(t, "gen-b")
@@ -48,18 +68,16 @@ func TestStoreSnapshotConsistencyUnderRace(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
 				cfg := store.Snapshot()
-				b := cfg.ChatBackend()
+				brand := brandOf(cfg)
 				marker := "gen-a"
-				if strings.Contains(b.Host, "gen-b") {
+				if strings.Contains(brand[0], "gen-b") {
 					marker = "gen-b"
 				}
-				if !strings.Contains(b.APIKey, marker) || !strings.Contains(b.Model, marker) {
-					t.Errorf("torn tuple: host=%q key=%q model=%q", b.Host, b.APIKey, b.Model)
-					return
-				}
-				if cfg.Scheduler.ReadScopes[0] != "scope-"+marker {
-					t.Errorf("torn scopes: host=%q scopes=%v", b.Host, cfg.Scheduler.ReadScopes)
-					return
+				for _, field := range brand {
+					if !strings.Contains(field, marker) {
+						t.Errorf("torn generation (%s expected): %q", marker, brand)
+						return
+					}
 				}
 			}
 		}()

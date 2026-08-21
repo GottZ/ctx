@@ -64,13 +64,15 @@ func fieldPath(rt reflect.Type, path []int) []string {
 // Delta 4, pinned by TestEmbedDimsRetired). A field joining or leaving this
 // set changes boot semantics and must fail here first.
 //
-// dream.num_ctx left the set with its tuple in β6 and embed.num_ctx with its
-// own in β7 — not reclassifications but removals, so the fatal-parse semantics
-// of the survivors are unchanged. chat.num_ctx goes the same way in β8.
+// dream.num_ctx left the set with its tuple in β6, embed.num_ctx with its own
+// in β7 and chat.num_ctx with the last one in β8 — not reclassifications but
+// removals, so the fatal-parse semantics of the survivors are unchanged. The
+// class stays richly occupied (server.db_port is the boot-fatal exemplar
+// cmd/ctxd's TestBootFatalSemantics runs on); the three num_ctx keys were never
+// more than three of its members.
 func TestRegistryStrictSet(t *testing.T) {
 	want := map[string]bool{
 		"server.db_port":         true,
-		"chat.num_ctx":           true,
 		"query.rate_limit_write": true,
 		"query.rate_limit_read":  true,
 		"query.timezone":         true,
@@ -202,10 +204,19 @@ func TestRegistryStrictSet(t *testing.T) {
 // TestRegistrySecretSet pins the masking classes: machine-generated keys are
 // "fp" (fingerprint-eligible in the boot dump), the human-chosen db password
 // is "presence" (never fingerprinted — offline dictionary oracle).
+//
+// The fp class is EMPTY since β8. Its six carriers were the provider api_keys of
+// the backend tuples, and chat.api_key was the last; a provider credential is a
+// context_backends.api_key_ref now, resolved at the pool. The class itself stays
+// valid registry vocabulary and is deliberately still asserted here — this map
+// is what refuses a new key sliding into either class, or the db password
+// sliding out of "presence" into the fingerprintable one. What the empty class
+// costs in coverage is paid on the injected-registry vehicle
+// (synthreg_test.go): the resolver strecke and the fingerprint masking run
+// there on a synthetic fp key over the production code path.
 func TestRegistrySecretSet(t *testing.T) {
 	want := map[string]string{
 		"server.db_password": "presence",
-		"chat.api_key":       "fp",
 	}
 	got := map[string]string{}
 	for _, e := range registry() {
@@ -239,18 +250,23 @@ func TestRegistrySecretSet(t *testing.T) {
 // embed left it in β7 the chat_fallback way: the group WAS its tuple, so
 // nothing of it survives to assert anything about. Note that "embed" is a
 // group name, not a prefix — embed_backfill.* and embed_migration.* are
-// separate groups, were never superseded, and the strings.Cut below has always
-// treated them as such.
+// separate groups, were never superseded, and the strings.Cut this loop used to
+// perform always treated them as such. chat left it in β8 the same way, and it
+// was the last: with no marked group left, the switch has no arms and the pin
+// collapses into its remaining half — NO key is marked.
+//
+// That half is the one worth keeping for the one wave it still has. superseded
+// is a lifetime marker with a finished lifetime (config.go tag contract): a key
+// taking it now would be claiming a replacement in context_backends that the
+// cut train has already carried out. The marker itself, with the API field, the
+// 409 branch, the CLI hint and the FE legacy card, is removed in β9 (E11) — and
+// this test goes with it, together with descriptions_test.go's
+// TestSupersededExposed.
 func TestRegistrySupersededSet(t *testing.T) {
 	for _, e := range registry() {
-		group, _, _ := strings.Cut(e.Key, ".")
-		isRoleTuple := group == "chat"
-		want := ""
-		if isRoleTuple {
-			want = "f3:context_backends"
-		}
-		if e.Superseded != want {
-			t.Errorf("%s: superseded = %q, want %q", e.Key, e.Superseded, want)
+		if e.Superseded != "" {
+			t.Errorf("%s: superseded = %q, want %q — the marker is unoccupied since β8 and is removed in β9",
+				e.Key, e.Superseded, "")
 		}
 	}
 }
@@ -306,12 +322,15 @@ func TestRegistryEnvNamespace(t *testing.T) {
 // tag-doc block; §3.3 lists a representative subset, this is the normative set.
 func TestRegistryTenancySet(t *testing.T) {
 	overridable := map[string]bool{
-		// the provider api_key secret_ref (TENANT-DECISION: per-tenant creds);
-		// rerank.api_key left the allowlist with the β3 tuple cut,
-		// chat_fallback.api_key with the β4 one, dream_embed.api_key with the β5
-		// one, dream.api_key with the β6 one, embed.api_key with the β7 one —
-		// chat.api_key is the last of the six and goes in β8
-		"chat.api_key": true,
+		// The six provider api_key secret_refs were the archetype of this class
+		// (TENANT-DECISION: per-tenant credentials) and all six have left it:
+		// rerank.api_key with the β3 tuple cut, chat_fallback.api_key with β4,
+		// dream_embed.api_key with β5, dream.api_key with β6, embed.api_key with
+		// β7 and chat.api_key with β8. A tenant still brings its own provider
+		// credential — through the pool row's api_key_ref, resolved at the
+		// tenant's own scope (settings.BuildFromRowsScoped), not through a
+		// config key. Nothing about the class changed, only its membership.
+		//
 		// the re-dream back-off curve (atomic per-tenant unit)
 		"dream.backoff_mode": true, "dream.backoff_factor": true, "dream.backoff_grace": true,
 		"dream.backoff_cap": true, "dream.backoff_min": true, "dream.backoff_inert_offset": true,
@@ -385,8 +404,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 64 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 64 (change it with intent)", got)
+	if got := len(overridable); got != 63 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 63 (change it with intent)", got)
 	}
 	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
 	// tenant override here would flush the process-wide embed cache / flip the

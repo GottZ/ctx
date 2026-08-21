@@ -8,8 +8,10 @@ package settings
 //	    value active; unreachable DB ⇒ WARN + env-only config
 //	(d) kill switch CTX_SETTINGS_DISABLE=1 ⇒ overrides ignored, one log line
 //	    (nil pool proves the DB is never touched)
-//	(e) leak scan: secret_ref set + known plaintext marker ⇒ marker in NO
-//	    slog line across boot build, boot dump and reload (§3.3 invariant)
+//	(e) leak scan: a known plaintext marker on every sensitive path the
+//	    settings layer still has ⇒ marker in NO slog line across boot build,
+//	    boot dump and reload (§3.3 invariant). The secret_ref half of this
+//	    gate lost its subject in β8 — see TestLeakScanBootBuildReload.
 //
 // Fixture hygiene: documentation hosts (RFC 2606), runtime-concatenated
 // markers, never secret-shaped literals.
@@ -18,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -228,19 +229,25 @@ func TestScalarValue(t *testing.T) {
 	}
 }
 
+// TestToOverridesWarnsWithoutEmbeddingValue pins the value-free WARN at the
+// row-conversion layer. The motivating case was a corrupt value on a SENSITIVE
+// key — it could BE a pasted plaintext secret — and chat.api_key carried it
+// until β8; no registry key is sensitive-and-admittable any more (see
+// TestLeakScanBootBuildReload). The rule the test states never depended on the
+// class: toOverrides runs BEFORE the registry entry is consulted at all, so the
+// "name key and reason, never the raw value" contract is unconditional here and
+// digest.mode (free-form string, unvalidated) carries it as well as any key.
 func TestToOverridesWarnsWithoutEmbeddingValue(t *testing.T) {
-	// A corrupt value on a sensitive key could BE a pasted plaintext secret —
-	// the WARN must name key and reason, never the raw value.
 	pasted := "PASTED-" + strings.Repeat("v", 30)
 	overrides, issues := toOverrides([]store.SettingOverride{
-		row("chat.model", `"db-model"`),
-		row("chat.api_key", `{"oops":"`+pasted+`"}`),
+		row("dream.language", `"pt-br"`),
+		row("digest.mode", `{"oops":"`+pasted+`"}`),
 	}, []string{store.GlobalScope})
-	if len(overrides) != 1 || overrides[0].Key != "chat.model" {
-		t.Fatalf("overrides = %+v, want exactly chat.model", overrides)
+	if len(overrides) != 1 || overrides[0].Key != "dream.language" {
+		t.Fatalf("overrides = %+v, want exactly dream.language", overrides)
 	}
-	if len(issues) != 1 || issues[0].Field != "chat.api_key" {
-		t.Fatalf("issues = %+v, want one on chat.api_key", issues)
+	if len(issues) != 1 || issues[0].Field != "digest.mode" {
+		t.Fatalf("issues = %+v, want one on digest.mode", issues)
 	}
 	if strings.Contains(issues[0].Msg, pasted) {
 		t.Errorf("WARN embeds the raw value: %q", issues[0].Msg)
@@ -317,7 +324,7 @@ func TestBootstrapKillSwitchSkipsDB(t *testing.T) {
 
 func TestReloadKillSwitchRebuildsEnvOnly(t *testing.T) {
 	resetEnv(t)
-	t.Setenv("CTX_CHAT_MODEL", "env-model")
+	t.Setenv("CTX_DREAM_LANGUAGE", "pt-br")
 	t.Setenv(EnvDisable, "1")
 	buf := captureLogs(t)
 	envCfg, _ := envBuild(t)
@@ -327,9 +334,9 @@ func TestReloadKillSwitchRebuildsEnvOnly(t *testing.T) {
 		t.Fatalf("Reload with kill switch: %v", err)
 	}
 	snap := st.Snapshot()
-	if snap.Chat.Model != "env-model" || snap.Source("chat.model") != "env" {
-		t.Errorf("snapshot must be the env build: model=%q source=%q",
-			snap.Chat.Model, snap.Source("chat.model"))
+	if snap.Dream.Language != "pt-br" || snap.Source("dream.language") != "env" {
+		t.Errorf("snapshot must be the env build: language=%q source=%q",
+			snap.Dream.Language, snap.Source("dream.language"))
 	}
 	if !strings.Contains(buf.String(), "override layer disabled") {
 		t.Errorf("missing kill-switch log line, log: %s", buf.String())
@@ -361,72 +368,75 @@ func TestReloadKeepsOldSnapshotOnLoadFailure(t *testing.T) {
 
 // --- Gate (e): leak scan over the full boot/build/reload log surface ---.
 
+// TestLeakScanBootBuildReload is THE leak scan, re-cut in β8. It still asserts
+// the §3.3 invariant — no sensitive value reaches an slog line across boot
+// build, boot dump, takeover line and both reload surfaces — but on the paths
+// the settings layer still HAS.
+//
+// What the chat cut took from it: the secret:"fp" strecke. chat.api_key was the
+// last registered carrier of that class, so no settings row can reach
+// build.go's secret branch any more (server.db_password is sensitive but
+// mut:"restart", i.e. dropped by admitOverride BEFORE any parse, redaction or
+// resolver call). With it went two of the three markers this test used to
+// carry: the resolver-provided secret_ref plaintext and the plaintext
+// mistakenly stored AS the ref value. Both statements are alive and pinned one
+// layer down, on an injected synthetic registry entry that still carries the
+// class: config/synthreg_test.go, TestSynthSecretRefResolutionEndToEnd and
+// TestSynthSecretRefWarningNeverEchoesTheRefValue. Asserting them here would
+// need a fixture that no longer reaches the branch — so they are NOT asserted
+// here.
+//
+// What is left is genuine and rides three real needles:
+//
+//	(a) envSecret on CONTEXT_DB_PASSWORD — the env path is untouched by the cut.
+//	    The value lands in the snapshot and is rendered into the boot dump under
+//	    secret:"presence", so a broken mask shows the marker. A REAL secret on a
+//	    REAL live path.
+//	(b) a healthy dream.language row holds the row → snapshot → logApplied
+//	    strecke open with a NON-secret value: without an applied override the
+//	    takeover line would be empty and (a)/(c) would be scanned over a log
+//	    surface that never saw the override layer work.
+//	(c) rowSecret on a server.db_password ROW pins the DROP path. Be precise
+//	    about what this proves: admitOverride formats that WARN from e.Mut
+//	    alone, so it is value-free BY CONSTRUCTION — the needle does not catch a
+//	    message that was written to echo the value, it catches a future edit
+//	    that starts echoing it (and any other line on the way: the toOverrides
+//	    conversion, logIssues, logApplied, the boot dump). That is the whole
+//	    claim, and it is worth having because server.db_password is the only
+//	    sensitive key a row can still name.
 func TestLeakScanBootBuildReload(t *testing.T) {
 	resetEnv(t)
-	// Three markers, assembled at runtime (never key-shaped literals):
-	// an env-provided secret, a resolver-provided secret_ref plaintext, and
-	// a plaintext mistakenly stored AS the ref value (pre-W6 write gate).
+	// Two markers, assembled at runtime (never key-shaped literals).
 	envSecret := "ENVMARKER-" + strings.Repeat("e", 30)
-	dbSecret := "DBMARKER-" + strings.Repeat("d", 30)
-	pastedSecret := "PASTEDMARKER-" + strings.Repeat("p", 30)
+	rowSecret := "ROWMARKER-" + strings.Repeat("r", 30)
 
-	t.Setenv("CTX_CHAT_HOST", "http://chat.example:8089")
-	// The env-provided secret rode on CTX_DREAM_API_KEY until β6 and on
-	// CTX_EMBED_API_KEY until β7; a var the registry no longer reads would put
-	// the marker nowhere and make the scan vacuous. chat.api_key is the LAST
-	// registered secret:"fp" key, and the scan needs it for three paths at once
-	// — env value, resolved secret_ref, and pasted plaintext — which cannot
-	// coexist on one key in one generation. So the boot surface is built TWICE
-	// on the same key: once where the ref resolves (the env value is shadowed),
-	// once where it does not (the override is dropped and the env value
-	// survives into snapshot and boot dump). Every marker still rides a real
-	// path; only the number of generations changed.
-	t.Setenv("CTX_CHAT_API_KEY", envSecret)
+	t.Setenv("CONTEXT_DB_PASSWORD", envSecret)
 	buf := captureLogs(t)
 
 	rows := []store.SettingOverride{
-		row("chat.api_key", `"prov-main"`),     // resolves to dbSecret
-		row("rerank.blend_weight", `"kaputt"`), // corrupt-value WARN path
-		row("chat.model", `"db-model"`),        // healthy non-secret override
-	}
-	// The resolver error path needs a REGISTERED secret key — a row on a cut key
-	// is dropped as unknown before the resolver ever sees it, and the pasted
-	// plaintext would then be scanned for in a log surface it never reached. It
-	// rode on chat_fallback.api_key until β4 and on embed.api_key until β7.
-	pastedRows := []store.SettingOverride{
-		row("chat.api_key", `"`+pastedSecret+`"`), // ref value IS a plaintext ⇒ resolver error path
-	}
-	resolve := func(name string) (string, error) {
-		if name == "prov-main" {
-			return dbSecret, nil
-		}
-		// Mirrors the store.ResolveSecret contract: name-free, value-free.
-		return "", fmt.Errorf("secrets: no such secret in scope %q — create it first", store.GlobalScope)
+		row("server.db_password", `"`+rowSecret+`"`), // drop path: mut:"restart" ⇒ WARN before any parse
+		row("rerank.blend_weight", `"kaputt"`),       // corrupt-value WARN path
+		row("dream.language", `"pt-br"`),             // healthy override, non-secret value
 	}
 
 	// Boot surface: build, issue lines, takeover line, effective boot dump.
-	cfg, issues := buildWith(rows, resolve, []string{store.GlobalScope})
+	// resolve is nil — after β8 no admittable key is secret-class, so a resolver
+	// would never be called; passing one would fake a path the build no longer
+	// has.
+	cfg, issues := buildWith(rows, nil, []string{store.GlobalScope})
 	logIssues(issues)
 	logApplied(cfg, rows)
 	slog.Info("config: effective", config.BootDumpArgs(cfg, issues)...)
 
-	if cfg.Chat.APIKey != dbSecret {
-		t.Fatalf("secret_ref did not resolve in-memory")
+	if cfg.Dream.Language != "pt-br" || cfg.Source("dream.language") != config.SourceSettings {
+		t.Fatalf("healthy override missing (language=%q source=%q) — the takeover line would be empty and the scan would prove nothing",
+			cfg.Dream.Language, cfg.Source("dream.language"))
 	}
-	if cfg.Chat.Model != "db-model" {
-		t.Fatalf("healthy override missing — scan would prove nothing")
+	if cfg.Server.DBPass != envSecret {
+		t.Fatalf("the env marker must be the effective db password — otherwise it rides nothing")
 	}
-
-	// Second generation: the same key, the resolver error path. The dropped
-	// override lets the env marker through into snapshot and boot dump, which
-	// is the surface the env half of the scan is about.
-	pastedCfg, pastedIssues := buildWith(pastedRows, resolve, []string{store.GlobalScope})
-	logIssues(pastedIssues)
-	logApplied(pastedCfg, pastedRows)
-	slog.Info("config: effective", config.BootDumpArgs(pastedCfg, pastedIssues)...)
-
-	if pastedCfg.Chat.APIKey != envSecret {
-		t.Fatalf("the unresolvable ref must leave the env value active — the env marker would ride nothing")
+	if cfg.Source("server.db_password") == config.SourceSettings {
+		t.Fatalf("a server.db_password ROW must never become the effective value — the drop path is what this needle pins")
 	}
 
 	// Reload surfaces: kill-switch rebuild (Replace path) + load failure.
@@ -442,15 +452,19 @@ func TestLeakScanBootBuildReload(t *testing.T) {
 
 	logs := buf.String()
 	for name, marker := range map[string]string{
-		"env secret": envSecret, "resolved secret_ref": dbSecret, "pasted ref value": pastedSecret,
+		"env secret (CONTEXT_DB_PASSWORD)": envSecret,
+		"dropped row value":                rowSecret,
 	} {
 		if strings.Contains(logs, marker) {
 			t.Errorf("LEAK: %s marker found in logs:\n%s", name, logs)
 		}
 	}
-	// Sanity: the scan saw real content — key names and the harmless ref
-	// name ARE logged (the takeover must be visible, §W4 gate b).
-	for _, want := range []string{"chat.api_key", "rerank.blend_weight", "overrides active", "config: effective"} {
+	// Sanity: the scan saw real content — key names ARE logged, including the
+	// dropped one (the takeover and the drop must both be visible, §W4 gate b).
+	for _, want := range []string{
+		"server.db_password", "dream.language", "rerank.blend_weight",
+		"overrides active", "config: effective",
+	} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("scan surface incomplete — %q missing from logs", want)
 		}

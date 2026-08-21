@@ -144,10 +144,13 @@ func TestSettingsTenantAPI_Integration(t *testing.T) {
 	for _, v := range config.EnvVars() {
 		t.Setenv(v, "")
 	}
-	t.Setenv("CONTEXT_DB_PASSWORD", "test-password")
 	t.Setenv(settings.EnvDisable, "")
+	// MARKER VEHICLE (β8): the leak-scan marker used to ride on
+	// CTX_CHAT_API_KEY. With the chat tuple gone, server.db_password is the
+	// registry's only sensitive key (secret:"presence", env-only), so
+	// CONTEXT_DB_PASSWORD is what an env-sourced secret looks like now.
 	const envMarker = "ENV-PLAINTEXT-MARKER-aaaaaaaaaaaaaaaaaaaaaaaa"
-	t.Setenv("CTX_CHAT_API_KEY", envMarker)
+	t.Setenv("CONTEXT_DB_PASSWORD", envMarker)
 	t.Setenv(sealbox.EnvKey, freshMasterKey(t))
 	t.Setenv(sealbox.EnvKeyPrev, "")
 
@@ -257,6 +260,13 @@ func TestSettingsTenantAPI_Integration(t *testing.T) {
 	t.Run("Gate9_NoPlaintextLeak", func(t *testing.T) {
 		scan(t, api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/settings", ""), "tenant GET list")
 		scan(t, api.as(operatorAR()).do(t, http.MethodGet, "/api/settings", ""), "operator GET list")
-		scan(t, api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/settings/chat.api_key", ""), "tenant GET chat.api_key")
+		// Vehicle swap (β8): chat.api_key left the registry. The single-key GET
+		// runs on server.db_password so the scan still meets a REAL rendered
+		// response (masked env-sourced secret) instead of a 404 body.
+		rec := api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/settings/server.db_password", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("tenant GET server.db_password = %d body=%s — the scan below would prove nothing", rec.Code, rec.Body.String())
+		}
+		scan(t, rec, "tenant GET server.db_password")
 	})
 }

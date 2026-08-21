@@ -10,7 +10,6 @@ package config
 // literals, not even synthetic ones (scanners match FORM, not authenticity).
 
 import (
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,8 +40,8 @@ func warnFor(t *testing.T, issues []Issue, field, substr string) {
 
 func TestBuildNoOverridesIdenticalToEnvBuild(t *testing.T) {
 	resetBuildEnv(t)
-	t.Setenv("CTX_CHAT_HOST", "http://chat.example:8089")
-	t.Setenv("CTX_CHAT_NUM_CTX", "4096")
+	t.Setenv("CTX_DIGEST_MODE", "env-mode")
+	t.Setenv("CTX_RERANK_MAX_DOCS", "4096")
 	t.Setenv("CTX_RERANK_BLEND_WEIGHT", "0.5")
 	t.Setenv("CTX_READ_SCOPES", "private,shared")
 	t.Setenv("CTX_TIMEZONE", "Europe/Berlin")
@@ -104,17 +103,21 @@ func TestBuildPrecedenceMatrix(t *testing.T) {
 		wantDB      any
 		get         func(c *Config) any
 	}{
+		// The string and int rows rode on chat.model/chat.num_ctx until β8 cut
+		// the tuple. Both are pure type carriers — the matrix asserts the
+		// precedence ladder once per Go TYPE, not once per key — so they simply
+		// moved to live keys of the same types.
 		{
-			name: "string", key: "chat.model", envVar: "CTX_CHAT_MODEL",
-			envVal: "env-model", dbVal: "db-model",
-			wantDefault: "qwen3.5:9b", wantEnv: "env-model", wantDB: "db-model",
-			get: func(c *Config) any { return c.Chat.Model },
+			name: "string", key: "digest.mode", envVar: "CTX_DIGEST_MODE",
+			envVal: "env-mode", dbVal: "db-mode",
+			wantDefault: "full", wantEnv: "env-mode", wantDB: "db-mode",
+			get: func(c *Config) any { return c.Digest.Mode },
 		},
 		{
-			name: "int", key: "chat.num_ctx", envVar: "CTX_CHAT_NUM_CTX",
+			name: "int", key: "rerank.max_docs", envVar: "CTX_RERANK_MAX_DOCS",
 			envVal: "1111", dbVal: "2222",
-			wantDefault: 0, wantEnv: 1111, wantDB: 2222,
-			get: func(c *Config) any { return c.Chat.NumCtx },
+			wantDefault: 50, wantEnv: 1111, wantDB: 2222,
+			get: func(c *Config) any { return c.Rerank.MaxDocs },
 		},
 		{
 			name: "float", key: "rerank.blend_weight", envVar: "CTX_RERANK_BLEND_WEIGHT",
@@ -148,12 +151,15 @@ func TestBuildPrecedenceMatrix(t *testing.T) {
 			wantDB:      []string{"gamma", "delta"},
 			get:         func(c *Config) any { return c.Scheduler.ReadScopes },
 		},
-		{
-			name: "protocol", key: "chat.protocol", envVar: "CTX_CHAT_PROTOCOL",
-			envVal: "openai", dbVal: "ollama",
-			wantDefault: "ollama", wantEnv: "openai", wantDB: "ollama",
-			get: func(c *Config) any { return string(c.Chat.Protocol) },
-		},
+		// The protocol row died with chat.protocol in β8 and has no successor
+		// here: it was the LAST typProtocol field in the registry, as chat.think
+		// was the last typThink one. Unlike the string and int rows above this is
+		// not a vehicle swap — there is no live key of either type to swap to.
+		// The two parsers stay (they are generic registry vocabulary, and a
+		// backends.Protocol is still what a pool row carries), so their coverage
+		// moved down one layer to TestParserForUnoccupiedTypes, which drives
+		// parserFor directly. Restoring a row here needs a real registry carrier
+		// first.
 		{
 			name: "timezone-strict-tagged", key: "query.timezone", envVar: "CTX_TIMEZONE",
 			envVal: "Europe/Berlin", dbVal: "America/New_York",
@@ -214,16 +220,19 @@ func TestBuildOverrideOnEnvLessKey(t *testing.T) {
 
 func TestBuildAdmissionRejections(t *testing.T) {
 	resetBuildEnv(t)
-	t.Setenv("CTX_CHAT_NUM_CTX", "4096")
+	t.Setenv("CTX_GRAPH_OVERVIEW_LABEL_BATCH", "4096")
 
 	c, issues := Build([]Override{
-		{Key: "nope.nope", Value: "1"},                     // unknown key (Risk 7: code downgrade)
-		{Key: "dream.parallelism", Value: "4"},             // mut:"restart"
-		{Key: "server.db_host", Value: "db.example"},       // mut:"restart" (DSN group, circular)
-		{Key: "rerank.blend_weight", Value: "kaputt"},      // unparseable float
-		{Key: "chat.num_ctx", Value: "not-a-number"},       // parse:"strict" field — DB stays WARN (W17)
-		{Key: "query.timezone", Value: "Atlantis/Nowhere"}, // strict timezone — DB stays WARN
-		{Key: "scheduler.read_scopes", Value: " , "},       // no usable scope
+		{Key: "nope.nope", Value: "1"},                // unknown key (Risk 7: code downgrade)
+		{Key: "dream.parallelism", Value: "4"},        // mut:"restart"
+		{Key: "server.db_host", Value: "db.example"},  // mut:"restart" (DSN group, circular)
+		{Key: "rerank.blend_weight", Value: "kaputt"}, // unparseable float
+		// The strict-int row rode on chat.num_ctx until β8 cut the tuple; the
+		// statement is about the parse:"strict" CLASS, not about that key, and
+		// the class still has 33 registry carriers.
+		{Key: "graph_overview.label_batch", Value: "not-a-number"}, // parse:"strict" field — DB stays WARN (W17)
+		{Key: "query.timezone", Value: "Atlantis/Nowhere"},         // strict timezone — DB stays WARN
+		{Key: "scheduler.read_scopes", Value: " , "},               // no usable scope
 	}, nil)
 
 	if HasErrors(issues) {
@@ -241,19 +250,19 @@ func TestBuildAdmissionRejections(t *testing.T) {
 	// handler/settings_test.go, which needs no registry carrier.
 	warnFor(t, issues, "server.db_host", `mutability "restart"`)
 	warnFor(t, issues, "rerank.blend_weight", "invalid number")
-	warnFor(t, issues, "chat.num_ctx", "invalid integer")
+	warnFor(t, issues, "graph_overview.label_batch", "invalid integer")
 	warnFor(t, issues, "query.timezone", "unknown timezone")
 	warnFor(t, issues, "scheduler.read_scopes", "no non-empty scope")
 
 	// Env/default values stay active for every rejected override.
-	if c.Dream.Parallelism != 1 || c.Rerank.BlendWeight != 1.0 || c.Chat.NumCtx != 4096 {
+	if c.Dream.Parallelism != 1 || c.Rerank.BlendWeight != 1.0 || c.GraphOverview.LabelBatch != 4096 {
 		t.Errorf("rejected overrides leaked into the config: %+v", c)
 	}
 	if c.Query.Timezone != time.UTC {
 		t.Errorf("Timezone = %v, want UTC", c.Query.Timezone)
 	}
-	if c.Source("chat.num_ctx") != "env" {
-		t.Errorf("chat.num_ctx source = %q, want env", c.Source("chat.num_ctx"))
+	if c.Source("graph_overview.label_batch") != "env" {
+		t.Errorf("graph_overview.label_batch source = %q, want env", c.Source("graph_overview.label_batch"))
 	}
 }
 
@@ -264,7 +273,7 @@ func TestBuildValidationDropsOffenderKeepsRest(t *testing.T) {
 
 	c, issues := Build([]Override{
 		{Key: "rerank.blend_weight", Value: "1.5"}, // parses, V9 SeverityError
-		{Key: "chat.model", Value: "db-model"},     // healthy
+		{Key: "digest.mode", Value: "db-mode"},     // healthy
 	}, nil)
 
 	if HasErrors(issues) {
@@ -277,9 +286,9 @@ func TestBuildValidationDropsOffenderKeepsRest(t *testing.T) {
 	if c.Source("rerank.blend_weight") != "default" {
 		t.Errorf("source = %q, want default after drop", c.Source("rerank.blend_weight"))
 	}
-	if c.Chat.Model != "db-model" || c.Source("chat.model") != "settings" {
-		t.Errorf("healthy override must survive the drop pass: model=%q source=%q",
-			c.Chat.Model, c.Source("chat.model"))
+	if c.Digest.Mode != "db-mode" || c.Source("digest.mode") != "settings" {
+		t.Errorf("healthy override must survive the drop pass: mode=%q source=%q",
+			c.Digest.Mode, c.Source("digest.mode"))
 	}
 }
 
@@ -314,59 +323,16 @@ func TestBuildCrossFieldWithdrawsAllOverrides(t *testing.T) {
 	}
 }
 
-// --- secret_ref resolution ---.
-
-func TestBuildSecretRefResolution(t *testing.T) {
-	resetBuildEnv(t)
-	// Marker assembled at runtime — never a key-shaped literal (≥ fpMinLen so
-	// the dump path exercises the fingerprint branch, not presence-only).
-	plaintext := "RESOLVED-" + strings.Repeat("p", 24)
-
-	t.Run("resolves to plaintext in-memory", func(t *testing.T) {
-		called := ""
-		c, issues := Build([]Override{{Key: "chat.api_key", Value: "prov-main"}},
-			func(name string) (string, error) {
-				called = name
-				return plaintext, nil
-			})
-		if HasErrors(issues) {
-			t.Fatalf("unexpected errors: %v", issues)
-		}
-		if called != "prov-main" {
-			t.Errorf("resolver called with %q, want prov-main", called)
-		}
-		if c.Chat.APIKey != plaintext {
-			t.Errorf("APIKey not resolved (got %q)", c.Chat.APIKey)
-		}
-		if c.Source("chat.api_key") != "settings" {
-			t.Errorf("source = %q, want settings", c.Source("chat.api_key"))
-		}
-		// The resolved value must never surface in any issue message.
-		for _, is := range issues {
-			if strings.Contains(is.Msg, plaintext) {
-				t.Errorf("issue message leaks resolved plaintext: %q", is.Msg)
-			}
-		}
-	})
-
-	t.Run("resolver failure keeps env value", func(t *testing.T) {
-		t.Setenv("CTX_CHAT_API_KEY", "env-key-"+strings.Repeat("e", 24))
-		c, issues := Build([]Override{{Key: "chat.api_key", Value: "prov-main"}},
-			func(string) (string, error) { return "", fmt.Errorf("no such secret") })
-		warnFor(t, issues, "chat.api_key", "secret_ref resolution failed")
-		if !strings.HasPrefix(c.Chat.APIKey, "env-key-") {
-			t.Errorf("env value must stay active, got %q", c.Chat.APIKey)
-		}
-		if c.Source("chat.api_key") != "env" {
-			t.Errorf("source = %q, want env", c.Source("chat.api_key"))
-		}
-	})
-
-	t.Run("nil resolver ignores the override", func(t *testing.T) {
-		c, issues := Build([]Override{{Key: "chat.api_key", Value: "prov-main"}}, nil)
-		warnFor(t, issues, "chat.api_key", "no secret resolver available")
-		if c.Chat.APIKey != "" {
-			t.Errorf("APIKey = %q, want empty default", c.Chat.APIKey)
-		}
-	})
-}
+// TestBuildSecretRefResolution died with chat.api_key in β8. It drove the three
+// outcomes of admitOverride's secret branch — resolve, resolver error, no
+// resolver — on the registry's last secret:"fp" key. The strecke is very much
+// alive; what it lost is a MEMBER: server.db_password is the only sensitive key
+// left, and it is mut:"restart", so admitOverride drops a row on it before the
+// secret branch is ever reached (a substitution there would have been a test
+// that passes without touching the code it names).
+//
+// The three outcomes moved one layer out, onto the injected-registry vehicle:
+// synthreg_test.go's TestSynthSecretRefResolutionEndToEnd runs them through the
+// real Build on a synthetic fp key transplanted onto a live field, and
+// TestSynthSecretRefWarningNeverEchoesTheRefValue keeps the pasted-plaintext
+// leak probe this test carried in its first subtest.

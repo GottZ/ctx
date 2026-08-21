@@ -81,10 +81,42 @@ func bootLoadBackendPool(ctx context.Context, p *backends.Pool, reload, reconcil
 // at the dying seed path (`deprecation=env_backend_seed`): one attribute names
 // WHICH deprecated surface a line is about, so an operator can grep the whole
 // deprecation window out of a JSON boot log with a single key.
-const (
-	deprecationRetiredEnv = "retired_env"
-	deprecationRetiredRow = "retired_settings_row"
-)
+const deprecationRetiredRow = "retired_settings_row"
+
+// TODO(beta13-tombstone): the ENV half of the boot sweep is MISSING between β8 and
+// β13, deliberately and visibly.
+//
+// warnRetiredEnvVarsBoot and its `deprecation=retired_env` label lived here
+// until β8. The sweep read its per-key wording from c.sources (env var vs.
+// shadowing settings row), so it could only ever speak about keys the loader
+// still knew — and β8 cut the last of the 29 out of the registry. design/06 §4
+// Phase A #1 wrote the hand-over into the plan before the first key moved: "im
+// Schnitt wird er durch den Tombstone 3.5 ersetzt, weil c.sources die Keys dann
+// nicht mehr kennt." Its test file went with it in the same commit; the β3
+// partition pin that guarded the shrinking sweep fataled by design once the
+// live half emptied ("this sweep is spent, β13's tombstone owns the statement
+// now").
+//
+// What is NOT covered right now: a deployment that still has a non-empty
+// CTX_CHAT_HOST (or any of the other 28) in its environment boots SILENTLY. The
+// loader ignores the var — fromSources is registry-driven — and nothing says so.
+// That is exactly the silent-ignore fail-open design/06 §5.1 names as the first
+// break path of the cut.
+//
+// β13 owes the replacement (design/01 §4 W9 / design/06 §3.5): a STATIC name
+// list — config.RetiredEnvNames() is the source, this file the consumer — swept
+// with os.LookupEnv, with (a) a value filter (set-but-empty is not set: compose
+// materializes all 29 as `${VAR:-}`), (b) the list cut to value-bearing keys
+// (hosts, api_keys, models — not protocols/timeouts/num_ctx/think/parallelism,
+// whose compose scaffold defaults are hard-wired non-empty), (c) the known
+// scaffold-default VALUES of CTX_RERANK_HOST/CTX_RERANK_MODEL exempted, and
+// (d) name-only lines, never values (six of the names are api_key vars).
+//
+// The ROW half below survives unchanged: it keys off config.RetiredKeyNames(),
+// which the cut does not touch, so it keeps reporting leftover context_settings
+// rows in every scope. The reminder pin lives in retiredsources_test.go
+// (TestRetiredEnvSweepIsOwedToBeta13) — it keeps the ingredient list from rotting
+// while it has no consumer.
 
 // retiredMajor is the release the 29 backend tuple keys disappear in (E1:
 // v5.0.0). Spelled once — it is the anchor the whole runbook is written around
@@ -92,82 +124,6 @@ const (
 // different version than the docs would send operators looking for a release
 // that does not exist.
 const retiredMajor = "v5.0.0"
-
-// warnRetiredEnvVarsBoot names every still-set env var of the 29 retired
-// backend tuple keys in the boot log (A06-A1, design/06 §3.4 #1).
-//
-// Why a log line is the load-bearing channel here: this project has exactly
-// three ways to reach an installation — the release body, the docs, and the
-// boot log — and only the last one reaches a CONCRETE deployment without
-// anybody reading anything first (design/06 §6.1). The deprecation window is
-// the last release in which these vars still do something; after the cut they
-// are read by nothing, and an operator who never saw this line would carry a
-// dead .env forward believing it configures his backends.
-//
-// The os.Getenv read is the X1 carve-out the design grants (§3.4/§3.5): it
-// feeds the WARNING and never a config value, so the "no raw env as a
-// configuration source" rule is untouched. It deliberately mirrors FromEnv's
-// emptiness test byte for byte (load.go:291-296, empty env == unset) — a
-// TrimSpace here would report a var the loader treats as set, or stay silent on
-// one it honours, and either direction makes the sweep lie about the
-// installation it is describing.
-//
-// Two texts, because two situations need two different actions:
-//   - the var is the effective source → remove it, the pool owns the value now;
-//   - a settings row shadows it → the var is already inert, but it must still
-//     go, and telling the operator to "configure backends" would describe work
-//     he has demonstrably done. Without this branch the double-configuration
-//     class (row AND env) would hear nothing at all in the window and would
-//     first learn of the problem after the break (design/06 §3.4 #1, §6.1).
-//
-// A third text existed until β7: CTX_EMBED_MODEL was the one var this sweep
-// must never call for removal, because a rollback to v4.37 or older reads it
-// again for the status channel probe. β7 cut embed.model out of the registry,
-// so the KeyByName lookup below misses it and the sweep says NOTHING about the
-// var — which satisfies the must-not by silence, and is what every other cut
-// key gets too. The instruction itself is now owed by the β13 tombstone sweep,
-// the static name list that will speak about cut keys again.
-func warnRetiredEnvVarsBoot(cfg *config.Config) {
-	for _, key := range config.RetiredKeyNames() {
-		info, ok := config.KeyByName(key)
-		if !ok {
-			continue // registry cut already landed — the row sweep still applies
-		}
-		if info.EnvVar == "" || os.Getenv(info.EnvVar) == "" {
-			continue
-		}
-		msg, shadowed := retiredEnvWarning(info.EnvVar, cfg.Source(key))
-		slog.Warn(msg,
-			"deprecation", deprecationRetiredEnv,
-			"key", key, "env", info.EnvVar, "shadowed", shadowed)
-	}
-}
-
-// retiredEnvWarning picks the operator text for one still-set retired env var
-// and reports whether a settings row currently shadows it.
-//
-// The CTX_EMBED_MODEL exception lived here until β7. It was the one var the
-// sweep must NOT tell anybody to delete: the design wrote the exception around
-// the status channel probe, which α2 (E5) moved onto the pool; α13 carried it
-// on a second reason (the var still fed the first-boot backend seed) which β1
-// spent by removing that seed; what survived was the rollback path (design/06
-// §3.3) — it leads to v4.37 or older, and THOSE binaries do read the var for
-// the channel probe, so a uniform "remove the env var" would be a degradation
-// this release caused itself, reached through the rollback door.
-//
-// β7 cut embed.model out of the registry, and the caller skips keys the
-// registry no longer knows — so this function is never reached with it and the
-// branch would have been unreachable code carrying a live instruction. The
-// must-not is now met by silence; carrying the KEEP-IT text forward is the β13
-// tombstone sweep's job, where cut keys get a voice again.
-func retiredEnvWarning(envVar, source string) (string, bool) {
-	if source == config.SourceSettings || source == config.SourceTenant {
-		return "settings: " + envVar + " is set but shadowed by a settings row — retired in " +
-			retiredMajor + "; remove the env var", true
-	}
-	return "settings: " + envVar + " is set — retired in " + retiredMajor +
-		"; the backend pool owns this value now; configure backends via 'ctx backends' and remove the env var", false
-}
 
 // warnRetiredSettingRowsBoot names every context_settings row that still sits
 // on one of the 29 retired keys, in EVERY scope (A06-A1, design/06 §3.4 #2).
@@ -381,7 +337,6 @@ func main() {
 	// with them. Both halves are advisory only: nothing here changes a value,
 	// and a boot with every retired source set behaves exactly as it did
 	// yesterday.
-	warnRetiredEnvVarsBoot(effCfg)
 	warnRetiredSettingRowsBoot(ctx, pool)
 
 	// Evokoa-Clean-Room Achse 03 (design/03 §4.5, wave W03-3): the

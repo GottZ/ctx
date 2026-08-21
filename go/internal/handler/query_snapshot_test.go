@@ -60,12 +60,12 @@ func (s *countingStore) SnapshotForTenant(context.Context, string) *config.Confi
 
 // snapshotTestConfig builds a minimal request-path config. Since F3-P3 the
 // embed tuple comes from the backend POOL, not the config snapshot — the
-// config carries only the request-path tuning surface here.
+// config carries only the request-path tuning surface here. The chat tuple
+// that used to sit here (host/protocol/model) followed in β8; the V-checks it
+// satisfied on the way through config.Validate (V4 protocol, V7 host URL)
+// retired with it.
 func snapshotTestConfig() *config.Config {
 	return &config.Config{
-		Chat: config.ChatConfig{
-			Host: "http://chat.invalid", Protocol: "ollama", Model: "test-chat",
-		},
 		// Rerank/Graph stay zero-valued = disabled (no heartbeat, no sidecar).
 		Query: config.QueryConfig{Timezone: time.UTC}, // RateLimitRead 0 = disabled
 	}

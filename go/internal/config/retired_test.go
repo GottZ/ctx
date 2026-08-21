@@ -42,14 +42,17 @@ var retiredKeysGolden = []string{
 // per-wave count into an invariant.
 //
 // Empty at β2 by construction: the preparation wave writes the end form, the
-// cut waves fill the list (29 → 26 → 22 → 17 → 11 → 6 → 0 registered). Once the
-// chat tuple lands here (β8) this file asserts exactly
-// `Registry ∩ retiredSettingKeys = ∅` plus the full EnvVars() inversion — the
-// chat.host positive probe that no wave before the cut could run, since the
-// registry is reflection-built and cannot be faked in a test (registry.go).
+// cut waves fill the list (29 → 26 → 22 → 17 → 11 → 6 → 0 registered). β8
+// landed the chat tuple, so the ratchet is FULL and this file now asserts
+// exactly `Registry ∩ retiredSettingKeys = ∅` plus the full EnvVars()
+// inversion — including the chat.host positive probe that no wave before the
+// cut could run, since the registry is reflection-built and cannot be faked in
+// a test (registry.go).
 // Lexically sorted, not in cut order (the pin below requires it) — the wave
 // comments name the commit each block arrived with.
 var retiredKeysAlreadyCut = []string{
+	// β8 — chat
+	"chat.api_key", "chat.host", "chat.model", "chat.num_ctx", "chat.protocol", "chat.think",
 	// β4 — chat_fallback
 	"chat_fallback.api_key", "chat_fallback.host", "chat_fallback.protocol", "chat_fallback.timeout",
 	// β6 — dream

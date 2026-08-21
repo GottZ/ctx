@@ -34,58 +34,32 @@ type swapStore struct {
 	p atomic.Pointer[config.Config]
 }
 
-func (s *swapStore) Snapshot() *config.Config { return s.p.Load() }
-func (s *swapStore) SnapshotForRequest(context.Context) *config.Config { return s.p.Load() }
+func (s *swapStore) Snapshot() *config.Config                                 { return s.p.Load() }
+func (s *swapStore) SnapshotForRequest(context.Context) *config.Config        { return s.p.Load() }
 func (s *swapStore) SnapshotForTenant(context.Context, string) *config.Config { return s.p.Load() }
 
-// healthTestConfig wires the config-side ping roles to the given hosts and
-// plants distinctive synthetic strings in every name-carrying field. The
-// needles derived from it must not surface in the public body.
+// healthTestConfig is the config side of the fixture. It has one field left:
+// the dream master switch, which decides whether the dream role is aggregated
+// at all.
 //
-// The dream role lost its config-side tuple with the β6 registry cut and the
-// embed role with the β7 one; both are covered from the pool instead, where
-// healthTestPool's rows carry their own host, model and api_key needles, so
-// each role keeps its full needle set on the surface that actually serves it.
-// The dreamHost and embedHost parameters went with the fields they filled.
-// Chat is the last config-side tuple and leaves in β8.
-func healthTestConfig(chatHost string) *config.Config {
+// It used to carry a host, a model and an api_key per ping role, and the leak
+// scan took its needles from there. Every one of those fields left with its
+// registry tuple — dream in β6, embed in β7, chat in β8 — and none of them was
+// ever read by health.go: the handler resolves each role out of the POOL
+// (roleReachable over the snapshot). The needles followed the data (A04-W9,
+// design/04 §4.6 D): they come from the seeded pool rows now, which is the
+// surface that actually serves, so the invariant is pinned on the live data
+// flow instead of on a config echo nothing consumed.
+func healthTestConfig() *config.Config {
 	return &config.Config{
-		Chat: config.ChatConfig{
-			Host: chatHost, Model: "needle-chat-model-g14", APIKey: "sk-needle-chat-0123456789abcdefg",
-		},
 		Dream: config.DreamConfig{Enabled: true},
 	}
 }
 
-// healthNeedles lists every config-derived string that must stay out of the
-// response body: full host URLs, their bare host:port forms, model names and
-// API keys.
-func healthNeedles(cfg *config.Config) []string {
-	needles := []string{
-		cfg.Chat.Host,
-		strings.TrimPrefix(cfg.Chat.Host, "http://"),
-		cfg.Chat.Model,
-		cfg.Chat.APIKey,
-	}
-	out := needles[:0]
-	for _, n := range needles {
-		if n != "" {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
-// healthTestPool builds the F3 pool snapshot the health aggregation reads:
-// one backend per historical ping role, each with a distinctive name that
-// must never surface in the public body (extra needles).
-//
-// The dream row also carries a model and an api_key since β6, the embed row
-// since β7. Those values used to reach the leak scan through
-// cfg.Dream.Model/APIKey and cfg.Embed.Model/APIKey; with the tuples gone the
-// pool is where a model name and credential of those roles live, so that is
-// where the needles come from — the coverage stays, the vehicle follows the
-// data (design/01 §5.6).
+// healthTestPool builds the F3 pool snapshot the health aggregation reads: one
+// backend per ping role, each carrying a distinctive name, host, model and
+// api_key. Those four strings per row ARE the leak-scan needle set — see
+// healthNeedles.
 func healthTestPool(embedHost, chatHost, dreamHost string) *backends.Pool {
 	bp := backends.NewPool(nil, nil)
 	bp.SeedSnapshotForTest([]backends.Backend{
@@ -93,6 +67,7 @@ func healthTestPool(embedHost, chatHost, dreamHost string) *backends.Pool {
 			Model: "needle-embed-model-g14", APIKey: "sk-needle-embed-0123456789abcdef",
 			Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed}},
 		{ID: "c", Name: "needle-backend-chat", Host: chatHost, Enabled: true,
+			Model: "needle-chat-model-g14", APIKey: "sk-needle-chat-0123456789abcdefg",
 			Trust: backends.TrustFull, Roles: []string{backends.RoleSynthesis}},
 		{ID: "d", Name: "needle-backend-dream", Host: dreamHost, Enabled: true,
 			Model: "needle-dream-model-g14", APIKey: "sk-needle-dream-0123456789abcdef",
@@ -101,10 +76,35 @@ func healthTestPool(embedHost, chatHost, dreamHost string) *backends.Pool {
 	return bp
 }
 
-var poolNameNeedles = []string{
-	"needle-backend-embed", "needle-backend-chat", "needle-backend-dream",
-	"needle-dream-model-g14", "sk-needle-dream-0123456789abcdef",
-	"needle-embed-model-g14", "sk-needle-embed-0123456789abcdef",
+// healthNeedles derives, from the pool snapshot the handler is about to read,
+// every backend string that must stay out of the public /health body: the row
+// NAME, the full host URL, its bare host:port form, the model name and the api
+// key. Deriving instead of transcribing is the point — a row gaining another
+// name-carrying field, or a fixture host changing, extends the scan by itself,
+// where a hand-written list would silently keep asserting the old strings.
+//
+// The bare host:port form matters on its own: the ping error path renders
+// `dial tcp <host:port>`, so a body that leaked an error string would carry the
+// topology WITHOUT the scheme and slip past a full-URL-only scan.
+//
+// Empty fields are skipped: a needle of "" matches every body and would turn
+// the scan into a tautology.
+func healthNeedles(bp *backends.Pool) []string {
+	var out []string
+	for _, b := range bp.Snapshot() {
+		for _, n := range []string{
+			b.Name,
+			b.Host,
+			strings.TrimPrefix(b.Host, "http://"),
+			b.Model,
+			b.APIKey,
+		} {
+			if n != "" {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
 }
 
 // closedPortHost reserves a loopback port and closes it again: connecting
@@ -194,17 +194,17 @@ func TestHealthShapeInvariant(t *testing.T) {
 		}))
 		t.Cleanup(backend.Close)
 
-		cfg := healthTestConfig(backend.URL)
 		st := &swapStore{}
-		st.p.Store(cfg)
+		st.p.Store(healthTestConfig())
 
+		bp := healthTestPool(backend.URL, backend.URL, backend.URL)
 		rec := httptest.NewRecorder()
-		NewHealthHandler(pool, st, healthTestPool(backend.URL, backend.URL, backend.URL), nil).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+		NewHealthHandler(pool, st, bp, nil).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, want 503 (DB down in unit test)", rec.Code)
 		}
-		assertHealthBody(t, rec.Body.Bytes(), append(healthNeedles(cfg), poolNameNeedles...))
+		assertHealthBody(t, rec.Body.Bytes(), healthNeedles(bp))
 
 		var resp struct {
 			Services map[string]string `json:"services"`
@@ -219,17 +219,17 @@ func TestHealthShapeInvariant(t *testing.T) {
 
 	t.Run("backends down", func(t *testing.T) {
 		down := closedPortHost(t)
-		cfg := healthTestConfig(down)
 		st := &swapStore{}
-		st.p.Store(cfg)
+		st.p.Store(healthTestConfig())
 
+		bp := healthTestPool(down, down, down)
 		rec := httptest.NewRecorder()
-		NewHealthHandler(pool, st, healthTestPool(down, down, down), nil).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+		NewHealthHandler(pool, st, bp, nil).Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, want 503", rec.Code)
 		}
-		assertHealthBody(t, rec.Body.Bytes(), append(healthNeedles(cfg), poolNameNeedles...))
+		assertHealthBody(t, rec.Body.Bytes(), healthNeedles(bp))
 
 		var resp struct {
 			Status   string            `json:"status"`
@@ -269,7 +269,7 @@ func TestHealthBodyOmitsPoolAdvisory(t *testing.T) {
 	// state the advisory names. roleReachable sees zero candidates for every
 	// role, so the aggregate is unhealthy/503, exactly as design/02 §5.1 says.
 	st := &swapStore{}
-	st.p.Store(healthTestConfig(""))
+	st.p.Store(healthTestConfig())
 	empty := backends.NewPool(nil, nil)
 	empty.SeedSnapshotForTest(nil)
 
@@ -324,7 +324,7 @@ func TestHealthPingsSnapshotTargets(t *testing.T) {
 	t.Cleanup(srvB.Close)
 
 	st := &swapStore{}
-	st.p.Store(healthTestConfig(srvA.URL))
+	st.p.Store(healthTestConfig())
 	bp := healthTestPool(srvA.URL, srvA.URL, srvA.URL)
 	h := NewHealthHandler(pool, st, bp, nil)
 

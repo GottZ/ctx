@@ -3,21 +3,22 @@
 // Integration probes for the F2-W6 secrets API and the §3.6 master-key
 // re-encrypt sweep, against a real PG18 testcontainer:
 //
-//   - create→reference→rotate roundtrip; ROTATION PROPAGATION negatively
-//     probed: with the handler→reload link severed, the snapshot keeps the
-//     OLD plaintext (red), with the production handler it carries the new
-//     one immediately (green) — no settings write in between
-//   - DELETE on a referenced secret → 409 with the referencing keys;
-//     after unsetting the reference → delete + snapshot fail-open
 //   - GUARD PIN (04-W5 §5.7): DELETE on a secret referenced ONLY by a backend
 //     pool row → 409 carrying the BACKEND remediation, not the settings one;
-//     mixed reference sets name both; clearing both references frees the delete
-//   - ROTATION PIN (04-W6 §5.8): a rotation reaches the BACKEND POOL over the
-//     real NOTIFY funnel — API rotation AND psql-shape rotation both leave the
-//     new plaintext in the pool snapshot's in-memory APIKey
-//   - response scan: no submitted value in ANY secrets/settings response
+//     clearing the reference frees the delete, a second delete is 404
+//   - remediation unit pin: the three-way branch of secretRefs.remediation,
+//     including the mixed arm no live reference set can produce any more
+//   - ROTATION PIN (04-W6 §5.8): create→rotate roundtrip and rotation metadata;
+//     a rotation reaches the BACKEND POOL over the real NOTIFY funnel — API
+//     rotation AND psql-shape rotation both leave the new plaintext in the pool
+//     snapshot's in-memory APIKey
+//   - response scan: no submitted value in ANY secrets response
 //   - ReencryptSweep: prev-key rows re-seal (key_version bump, readable
 //     with current alone), foreign-key rows stay untouched, no-PREV = no-op
+//
+// The settings-side half of all of this (secret_ref rows, the config snapshot
+// carrying a resolved plaintext) died with the chat tuple in β8 — see the
+// comment above BackendReferencedDelete409.
 //
 // Run with:
 //
@@ -130,103 +131,39 @@ func TestSecretsAPI_Integration(t *testing.T) {
 		}
 	}
 
-	t.Run("CreateReferenceRotate_Propagation", func(t *testing.T) {
-		// Create the secret, reference it from chat.api_key (settings API),
-		// snapshot resolves value A.
-		rec := do(router, http.MethodPut, "/api/secrets/prov-main", `{"value":"`+valueA+`"}`)
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"action":"create"`) {
-			t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
-		}
-		scanClean(rec, "PUT create")
-		// Reference via SQL + reload: the settings PUT on chat.api_key 409s
-		// since the Entflechtungs-Welle (superseded backend-tuple key) — the
-		// row shape referenced_by/rotation propagate over is unchanged, and
-		// legacy rows from pre-wave installs still exist.
-		{
-			tx, err := pool.Begin(context.Background())
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			if err := store.UpsertSetting(context.Background(), tx, "chat.api_key", store.GlobalScope, json.RawMessage(`"prov-main"`), nil); err != nil {
-				t.Fatalf("upsert secret_ref: %v", err)
-			}
-			if err := tx.Commit(context.Background()); err != nil {
-				t.Fatalf("commit: %v", err)
-			}
-			if err := settings.Reload(context.Background(), pool, cfgStore); err != nil {
-				t.Fatalf("reload: %v", err)
-			}
-		}
-		if got := cfgStore.Snapshot().Chat.APIKey; got != valueA {
-			t.Fatalf("snapshot = %q, want value A resolved", got)
-		}
-
-		// NEGATIVE PROBE (red half): a handler whose reload link is severed
-		// persists the rotation but the snapshot keeps the OLD plaintext —
-		// exactly the silent-inert incident-response path the gate forbids.
-		severed := NewSecretsHandler(pool, cfgStore)
-		severed.reload = func(*http.Request) error { return nil }
-		rec = do(newRouter(severed, nil), http.MethodPut, "/api/secrets/prov-main", `{"value":"`+valueB+`"}`)
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"action":"rotate"`) {
-			t.Fatalf("severed rotate: %d %s", rec.Code, rec.Body.String())
-		}
-		if got := cfgStore.Snapshot().Chat.APIKey; got != valueA {
-			t.Fatalf("red half failed: snapshot already %q — something else reloads, the probe is meaningless", got)
-		}
-
-		// Green half: the production handler. Rotate back to A… no — rotate
-		// AGAIN to B through the real chain (the row already carries B; the
-		// reload is what was missing). The snapshot must carry B afterwards,
-		// with NO settings write in between.
-		rec = do(router, http.MethodPut, "/api/secrets/prov-main", `{"value":"`+valueB+`"}`)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("rotate: %d %s", rec.Code, rec.Body.String())
-		}
-		scanClean(rec, "PUT rotate")
-		if got := cfgStore.Snapshot().Chat.APIKey; got != valueB {
-			t.Errorf("snapshot = %q, want value B — rotation did not propagate", got)
-		}
-
-		// List: metadata + referenced_by, never material.
-		rec = do(router, http.MethodGet, "/api/secrets", "")
-		scanClean(rec, "GET list")
-		if !strings.Contains(rec.Body.String(), `"referenced_by":["chat.api_key"]`) {
-			t.Errorf("list lacks referenced_by chat.api_key: %s", rec.Body.String())
-		}
-		if !strings.Contains(rec.Body.String(), `"rotated_at"`) {
-			t.Errorf("list lacks rotation metadata: %s", rec.Body.String())
-		}
-	})
-
-	t.Run("DeleteReferenced409_ThenUnsetAndDelete", func(t *testing.T) {
-		rec := do(router, http.MethodDelete, "/api/secrets/prov-main", "")
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("referenced delete: %d, want 409", rec.Code)
-		}
-		if !strings.Contains(rec.Body.String(), "chat.api_key") {
-			t.Errorf("409 lacks the referencing key: %s", rec.Body.String())
-		}
-		scanClean(rec, "DELETE 409")
-
-		// Unset the reference, then delete: snapshot falls back to env
-		// (empty here) — revocation empties the live credential.
-		rec = do(router, http.MethodDelete, "/api/settings/chat.api_key", "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("unset reference: %d %s", rec.Code, rec.Body.String())
-		}
-		rec = do(router, http.MethodDelete, "/api/secrets/prov-main", "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
-		}
-		scanClean(rec, "DELETE ok")
-		if got := cfgStore.Snapshot().Chat.APIKey; got != "" {
-			t.Errorf("snapshot after revocation = %q, want empty", got)
-		}
-		rec = do(router, http.MethodDelete, "/api/secrets/prov-main", "")
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("second delete: %d, want 404", rec.Code)
-		}
-	})
+	// CreateReferenceRotate_Propagation and DeleteReferenced409_ThenUnsetAndDelete
+	// died with the chat tuple in β8. Both were built on the SETTINGS side of the
+	// secret strecke: a config key holding a secret_ref, and the config snapshot
+	// carrying the resolved plaintext (cfgStore.Snapshot().Chat.APIKey). After
+	// the cut no registry key is sensitive — chat.api_key was the last secret:"fp"
+	// carrier — and server.db_password, the only sensitive key left, is
+	// mut:"restart", so admitOverride drops any row on it before a snapshot could
+	// resolve anything. There is no key left that a settings-side secret_ref can
+	// live on, hence no vehicle for either subtest.
+	//
+	// Where each statement lives now:
+	//
+	//   - create→reference→rotate→propagate: RotationPropagatesToBackendPool
+	//     below. It is the STRONGER form of the same statement — the reference
+	//     is a pool row's api_key_ref (where F3 actually put provider keys) and
+	//     the propagation runs over the REAL NOTIFY funnel instead of the
+	//     handler's own reload call. The rotation metadata assertion
+	//     ("rotated_at" appears only after a rotation) moved there with it.
+	//   - the "action":"create" / "action":"rotate" envelope and the
+	//     no-material response scan: RotationPropagatesToBackendPool.
+	//   - 409 on a referenced secret, unset-then-delete, second delete = 404:
+	//     BackendReferencedDelete409 below, on the pool half.
+	//
+	// What is genuinely GONE is the severed-reload NEGATIVE PROBE: it asserted
+	// that SecretsHandler.reload (settings.Reload) is load-bearing, by showing
+	// the config snapshot keeping the OLD plaintext when the link is cut. That
+	// link is still live code (sealbox.go h.reload), but it can no longer have
+	// an observable effect — no config key resolves a secret, so severed and
+	// production handler now produce identical snapshots. Keeping the probe
+	// would have meant keeping a test that is green either way. The incident
+	// path it guarded (a rotation that does not reach the serving chain) is
+	// guarded pool-side instead, with its own negative probe documented on
+	// RotationPropagatesToBackendPool.
 
 	// GUARD PIN (04-W5 §5.7): a secret whose ONLY reference is a backend pool
 	// row must not be deletable. Before the referencedBy union this DELETE
@@ -276,37 +213,19 @@ func TestSecretsAPI_Integration(t *testing.T) {
 			t.Fatalf("secret gone despite 409 (exists=%v err=%v)", exists, err)
 		}
 
-		// Mixed reference set: both remediations, both entries.
-		{
-			tx, err := pool.Begin(ctx)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			if err := store.UpsertSetting(ctx, tx, "chat.api_key", store.GlobalScope, json.RawMessage(`"`+secretName+`"`), nil); err != nil {
-				t.Fatalf("upsert secret_ref: %v", err)
-			}
-			if err := tx.Commit(ctx); err != nil {
-				t.Fatalf("commit: %v", err)
-			}
-		}
-		rec = do(router, http.MethodDelete, "/api/secrets/"+secretName, "")
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("mixed-referenced delete = %d, want 409", rec.Code)
-		}
-		body = rec.Body.String()
-		if !strings.Contains(body, `"chat.api_key"`) || !strings.Contains(body, `"backend:`+backendName+`"`) {
-			t.Errorf("mixed 409 lacks one reference type: %s", body)
-		}
-		if !strings.Contains(body, "api_key_ref") || !strings.Contains(body, "/api/settings/") {
-			t.Errorf("mixed 409 lacks one remediation: %s", body)
-		}
+		// The MIXED reference set (a settings row AND a pool row on the same
+		// secret, both remediations in one 409) died with the chat tuple in β8.
+		// referencedBy is still the UNION of both halves — untouched — but its
+		// settings half is now structurally unreachable: no registry key is
+		// sensitive any more, so no settings row can BE a secret_ref, so
+		// secretRefs.settings is always empty in a live scan. That leaves
+		// secretRefs.remediation's three-way branch reachable only in its
+		// backends-only form over HTTP. The two other arms are pinned without a
+		// DB in TestSecretRefsRemediationBranches below, so the branch stays
+		// covered for the day a settings-side secret carrier returns.
 
-		// Clear BOTH references → the delete goes through. This is the green
-		// half of the guard: it blocks references, not deletes as such.
-		rec = do(router, http.MethodDelete, "/api/settings/chat.api_key", "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("unset settings reference: %d %s", rec.Code, rec.Body.String())
-		}
+		// Clear the reference → the delete goes through. This is the green half
+		// of the guard: it blocks references, not deletes as such.
 		if _, err := pool.Exec(ctx,
 			`UPDATE context_backends SET api_key_ref=NULL WHERE name=$1`, backendName); err != nil {
 			t.Fatalf("clear api_key_ref: %v", err)
@@ -314,6 +233,13 @@ func TestSecretsAPI_Integration(t *testing.T) {
 		rec = do(router, http.MethodDelete, "/api/secrets/"+secretName, "")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("unreferenced delete = %d %s", rec.Code, rec.Body.String())
+		}
+		scanClean(rec, "DELETE ok")
+		// Migrated from DeleteReferenced409_ThenUnsetAndDelete: the row is
+		// really gone, so a second delete is an ordinary 404.
+		rec = do(router, http.MethodDelete, "/api/secrets/"+secretName, "")
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("second delete: %d, want 404", rec.Code)
 		}
 	})
 
@@ -393,10 +319,36 @@ func TestSecretsAPI_Integration(t *testing.T) {
 		}
 
 		rec := do(router, http.MethodPut, "/api/secrets/"+secretName, `{"value":"`+valueA+`"}`)
-		if rec.Code != http.StatusOK {
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"action":"create"`) {
 			t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 		}
 		scanClean(rec, "PUT create (rotation pin)")
+
+		// Migrated from CreateReferenceRotate_Propagation: the list surfaces
+		// rotation METADATA and never material. rotated_at is omitempty, so its
+		// absence before the first rotation is what makes the presence check
+		// after it a statement rather than a field-name grep.
+		listRotatedAt := func(label string) *time.Time {
+			t.Helper()
+			rec := do(router, http.MethodGet, "/api/secrets", "")
+			scanClean(rec, label)
+			var resp struct {
+				Secrets []secretView `json:"secrets"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal list: %v", err)
+			}
+			for _, s := range resp.Secrets {
+				if s.Name == secretName {
+					return s.RotatedAt
+				}
+			}
+			t.Fatalf("secret %q missing from the list", secretName)
+			return nil
+		}
+		if got := listRotatedAt("GET list (pre-rotation)"); got != nil {
+			t.Errorf("rotated_at = %v before any rotation, want absent", got)
+		}
 
 		// Baseline over the funnel too: the row write's own notification is
 		// what publishes the first snapshot. A failure here is fixture or
@@ -413,6 +365,9 @@ func TestSecretsAPI_Integration(t *testing.T) {
 			t.Fatalf("rotate: %d %s", rec.Code, rec.Body.String())
 		}
 		scanClean(rec, "PUT rotate (rotation pin)")
+		if got := listRotatedAt("GET list (post-rotation)"); got == nil {
+			t.Errorf("list lacks rotation metadata after a rotation")
+		}
 		deliver("context_secrets")
 		if got := poolKey(); got != valueB {
 			t.Errorf("pool APIKey after API rotation = %q, want value B — the rotation never reached the serving chain", got)

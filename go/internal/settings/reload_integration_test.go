@@ -1,10 +1,12 @@
 //go:build integration
 
 // Integration probes for F2-W4 against a real PG18 testcontainer: the full
-// Bootstrap/Reload pipeline over context_settings + context_secrets,
-// including the §5 negative probes that NEED a database — corrupt JSONB row,
-// secret_ref roundtrip through the real sealbox, wrong master key, and the
-// pre-051 "table missing" boot (DROP TABLE, destructive, runs last).
+// Bootstrap/Reload pipeline over context_settings, including the §5 negative
+// probes that NEED a database — corrupt JSONB row and the pre-051 "table
+// missing" boot (DROP TABLE, destructive, runs last).
+//
+// The context_secrets half of this file died with the chat tuple in β8; see
+// the note on TestSettingsReload_Integration.
 //
 // Run with:
 //
@@ -13,10 +15,7 @@ package settings_test
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -29,16 +28,11 @@ import (
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
-// freshKeyHex generates a master key at runtime — fixtures never carry
-// key-shaped literals.
-func freshKeyHex(t *testing.T) string {
-	t.Helper()
-	raw := make([]byte, sealbox.KeySize)
-	if _, err := rand.Read(raw); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
-	return hex.EncodeToString(raw)
-}
+// freshKeyHex died with the secret-resolution subtests in β8 — no fixture in
+// this file needs a master key any more. It survives (with its runtime-
+// generation rule: fixtures never carry key-shaped literals) in
+// handler/sealbox_*_integration_test.go, where the sealbox still has a live
+// consumer.
 
 func resetEnvIT(t *testing.T) {
 	t.Helper()
@@ -68,6 +62,36 @@ func upsertIT(t *testing.T, pool *pgxpool.Pool, key, jsonVal string) {
 	}
 }
 
+// TestSettingsReload_Integration drives the boot → reload → env-fallback value
+// chain over a real context_settings table.
+//
+// The secret-resolution half of this test died with the chat tuple in β8. It
+// sealed a provider key through the REAL crypto path (Seal → PutSecret) and
+// asserted that eff.Chat.APIKey carried the plaintext — the only settings-side
+// consumer the sealbox ever had. chat.api_key was the last registry key with
+// secret:"fp", and the one sensitive key left (server.db_password) is
+// mut:"restart", so admitOverride drops its row before the resolver is even
+// consulted: no fixture in this package can reach the secret branch any more.
+// The strecke itself is not gone, it is asserted where it still runs —
+//
+//   - config/synthreg_test.go (TestSynthSecretRefResolutionEndToEnd,
+//     TestSynthSecretRefWarningNeverEchoesTheRefValue) pins the settings-side
+//     resolver contract on an injected synthetic fp-class registry entry:
+//     resolve → plaintext, resolution failure → env/default stays, nil resolver
+//     → env/default stays, and no WARN echoing the ref value.
+//   - handler/sealbox_handler_integration_test.go (CreateReferenceRotate_
+//     Propagation, RotationPropagatesToBackendPool) is the LIVING end-to-end
+//     secret path: a context_backends.api_key_ref sealed, rotated and resolved
+//     into the serving pool.
+//   - handler/sealbox_tenant_integration_test.go (Gate6_AADCrossScopeAuthError)
+//     carries the ResolveSecret error-hygiene probe (auth failure, no plaintext
+//     in the error) that used to ride the WrongMasterKey subtest here.
+//
+// WrongMasterKeyDegradesToEnvValue died whole: its subject was "a broken master
+// key degrades a SENSITIVE SETTINGS key to its env value", and with no such key
+// left there is nothing to degrade. Its env-fallback statement is not lost —
+// the corrupt rerank.blend_weight row in BootstrapAppliesOverrides asserts the
+// same "unusable override ⇒ env value stays active" tolerance over the DB path.
 func TestSettingsReload_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -77,37 +101,11 @@ func TestSettingsReload_Integration(t *testing.T) {
 
 	resetEnvIT(t)
 	t.Setenv("CTX_RERANK_BLEND_WEIGHT", "0.4")
-	envAPIKey := "env-key-" + strings.Repeat("e", 24)
-	t.Setenv("CTX_CHAT_API_KEY", envAPIKey)
+	t.Setenv("CTX_DREAM_LANGUAGE", "de")
 
-	// Sealed secret through the REAL crypto path (Seal → PutSecret).
-	keyHex := freshKeyHex(t)
-	t.Setenv(sealbox.EnvKey, keyHex)
-	box, err := sealbox.New(keyHex, "")
-	if err != nil {
-		t.Fatalf("sealbox: %v", err)
-	}
-	secretPlain := "DBSECRET-" + strings.Repeat("s", 32)
-	nonce, ct, err := box.Seal("prov-main", store.GlobalScope, []byte(secretPlain))
-	if err != nil {
-		t.Fatalf("seal: %v", err)
-	}
-	{
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			t.Fatalf("begin: %v", err)
-		}
-		if _, err := store.PutSecret(ctx, tx, "prov-main", store.GlobalScope, nonce, ct, 1, nil); err != nil {
-			t.Fatalf("put secret: %v", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			t.Fatalf("commit secret: %v", err)
-		}
-	}
-
-	// Override rows: healthy string, secret_ref, corrupt value (§5 probe).
-	upsertIT(t, pool, "chat.model", `"db-model"`)
-	upsertIT(t, pool, "chat.api_key", `"prov-main"`)
+	// Override rows: healthy string, corrupt value (§5 probe). dream.language
+	// replaces chat.model as the healthy global-only string vehicle (β8).
+	upsertIT(t, pool, "dream.language", `"pt-br"`)
 	upsertIT(t, pool, "rerank.blend_weight", `"kaputt"`)
 
 	envCfg, envIssues := config.FromEnv()
@@ -116,16 +114,14 @@ func TestSettingsReload_Integration(t *testing.T) {
 		t.Fatalf("env fixture invalid: %v", envIssues)
 	}
 
-	t.Run("BootstrapAppliesOverridesAndResolvesSecret", func(t *testing.T) {
+	t.Run("BootstrapAppliesOverrides", func(t *testing.T) {
 		eff, issues := settings.Bootstrap(ctx, pool, envCfg, envIssues)
 		if config.HasErrors(issues) {
 			t.Fatalf("bootstrap must stay error-free: %v", issues)
 		}
-		if eff.Chat.Model != "db-model" || eff.Source("chat.model") != "settings" {
-			t.Errorf("chat.model = %q (source %q), want db-model/settings", eff.Chat.Model, eff.Source("chat.model"))
-		}
-		if eff.Chat.APIKey != secretPlain {
-			t.Errorf("secret_ref did not resolve through the real sealbox path")
+		if eff.Dream.Language != "pt-br" || eff.Source("dream.language") != "settings" {
+			t.Errorf("dream.language = %q (source %q), want pt-br/settings",
+				eff.Dream.Language, eff.Source("dream.language"))
 		}
 		// Corrupt row: WARN + env value active (boot tolerance, W17).
 		if eff.Rerank.BlendWeight != 0.4 || eff.Source("rerank.blend_weight") != "env" {
@@ -136,41 +132,33 @@ func TestSettingsReload_Integration(t *testing.T) {
 
 	t.Run("ReloadPicksUpSQLEdit", func(t *testing.T) {
 		st := config.NewStore(envCfg)
-		upsertIT(t, pool, "chat.model", `"db-model-2"`)
+		upsertIT(t, pool, "dream.language", `"en-gb"`)
 		if err := settings.Reload(ctx, pool, st); err != nil {
 			t.Fatalf("reload: %v", err)
 		}
 		snap := st.Snapshot()
-		if snap.Chat.Model != "db-model-2" || snap.Source("chat.model") != "settings" {
-			t.Errorf("snapshot after reload: model=%q source=%q", snap.Chat.Model, snap.Source("chat.model"))
-		}
-		if snap.Chat.APIKey != secretPlain {
-			t.Errorf("reload must re-resolve the secret_ref")
+		if snap.Dream.Language != "en-gb" || snap.Source("dream.language") != "settings" {
+			t.Errorf("snapshot after reload: language=%q source=%q",
+				snap.Dream.Language, snap.Source("dream.language"))
 		}
 	})
 
-	t.Run("WrongMasterKeyDegradesToEnvValue", func(t *testing.T) {
-		t.Setenv(sealbox.EnvKey, freshKeyHex(t)) // different key — Open must fail
+	t.Run("RowRemovalFallsBackToEnv", func(t *testing.T) {
+		// The env-fallback link of the value chain, over the DB path: delete the
+		// row and the next reload must hand the key back to CTX_DREAM_LANGUAGE.
+		if _, err := pool.Exec(ctx,
+			`DELETE FROM context_settings WHERE key=$1 AND scope=$2`,
+			"dream.language", store.GlobalScope); err != nil {
+			t.Fatalf("delete row: %v", err)
+		}
 		st := config.NewStore(envCfg)
 		if err := settings.Reload(ctx, pool, st); err != nil {
-			t.Fatalf("reload must not fail on an unresolvable secret_ref: %v", err)
+			t.Fatalf("reload: %v", err)
 		}
-		if got := st.Snapshot().Chat.APIKey; got != envAPIKey {
-			t.Errorf("APIKey = %q, want env fallback", got)
-		}
-
-		// Direct ResolveSecret probe: the error names neither the secret nor
-		// any material (the ref value could be a pasted plaintext pre-W6).
-		wrongBox, err := sealbox.New(freshKeyHex(t), "")
-		if err != nil {
-			t.Fatalf("sealbox: %v", err)
-		}
-		_, rerr := store.ResolveSecret(ctx, pool, wrongBox, "prov-main", store.GlobalScope)
-		if rerr == nil {
-			t.Fatalf("ResolveSecret with wrong key must fail")
-		}
-		if strings.Contains(rerr.Error(), "prov-main") || strings.Contains(rerr.Error(), secretPlain) {
-			t.Errorf("ResolveSecret error leaks name/material: %v", rerr)
+		snap := st.Snapshot()
+		if snap.Dream.Language != "de" || snap.Source("dream.language") != "env" {
+			t.Errorf("after row removal: language=%q source=%q, want de/env",
+				snap.Dream.Language, snap.Source("dream.language"))
 		}
 	})
 

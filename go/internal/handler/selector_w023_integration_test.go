@@ -23,7 +23,6 @@ import (
 	pgvec "github.com/pgvector/pgvector-go"
 
 	"github.com/GottZ/ctx/internal/auth"
-	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -94,9 +93,10 @@ func w023Config(enabled bool) *config.Config {
 	return &config.Config{
 		// The non-selector fields only exist so config.Store.Replace passes
 		// Validate on the runtime-flip path (G3) — the F2 settings-write gate
-		// rejects a generation with SeverityError issues.
+		// rejects a generation with SeverityError issues. The chat.protocol
+		// field that used to sit here retired in β8 with V4
+		// (validateBackendTuples), the only check that read it.
 		Server: config.ServerConfig{DBPass: "test-password"},
-		Chat:   config.ChatConfig{Protocol: backends.ProtocolOllama},
 		Graph:  config.GraphConfig{HopDepth: 1},        // Enabled stays false
 		Query:  config.QueryConfig{Timezone: time.UTC}, // RateLimitRead 0 = disabled
 		Selector: config.SelectorConfig{

@@ -42,9 +42,8 @@ func healthRequestWithCode(t *testing.T, pool *pgxpool.Pool) (int, healthProbeBo
 	}))
 	t.Cleanup(backend.Close)
 
-	cfg := healthTestConfig(backend.URL)
 	st := &swapStore{}
-	st.p.Store(cfg)
+	st.p.Store(healthTestConfig())
 
 	hh := NewHealthHandler(pool, st, healthTestPool(backend.URL, backend.URL, backend.URL), nil)
 	rec := httptest.NewRecorder()

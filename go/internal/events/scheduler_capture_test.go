@@ -70,10 +70,10 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 			DB: "ctx", DBUser: "ctx", DBPass: "documentation-value",
 			DBHost: "db.example", DBPort: 5432, DBSSL: "disable", ListenAddr: ":0",
 		},
-		Chat: config.ChatConfig{
-			Host: "http://chat.example", Protocol: backends.ProtocolOllama,
-			Model: "chat-model", NumCtx: 4096, Think: "false",
-		},
+		// The chat tuple left the registry in β8, and with it V4 (protocol
+		// typo) and V7 (host URL hygiene) — the two checks this literal existed
+		// to satisfy. A Validate-clean fixture needs no host/protocol fields at
+		// all now; which backend serves a chat call is a pool question.
 		Dream: config.DreamConfig{
 			// The dream backend tuple left the registry in β6 — which backend
 			// serves the pipeline is a pool question now.

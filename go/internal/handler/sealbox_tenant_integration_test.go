@@ -6,10 +6,11 @@
 //   - Gate 5: tenant A's secret is invisible to tenant B's ListSecretMeta (S5)
 //   - Gate 6: a tenant-A ciphertext on a tenant-B row fails to open — AAD
 //     name+scope binding, no plaintext in the error (§5.3, store level)
-//   - Gate 7: with allow_shared_secrets a tenant may secret_ref a _global-only
-//     secret (200); without the opt-in it is rejected (422, strict isolation)
-//   - Gate 8: an operator's _global-secret DELETE that an opt-in tenant
-//     references via the fallback is a 409, not a silent fail-open (§5.7)
+//   - Gate 7: the allow_shared_secrets opt-in is SECRET-scoped — it never
+//     became a general per-tenant write gate (both tiers write a
+//     tenant-overridable key into their own scope). Its secret_ref half died
+//     with the chat tuple in β8, see the comment on the subtest
+//   - Gate 8: died with the chat tuple in β8, see the comment where it stood
 //   - Gate 9: no submitted secret value in any tenant response
 //   - Gate 10 (04-W5 §5.5): a tenant-admin has NO api_key_ref half at all —
 //     pool references bind to the _global secret of that name (the resolver
@@ -140,9 +141,24 @@ func TestSecretsTenantAPI_Integration(t *testing.T) {
 		}
 	})
 
-	// Gate 7: secret_ref to a _global-only secret — opt-in gates 200 vs 422.
+	// Gate 7 — the surviving half. The SECRET_REF half of this gate (with
+	// allow_shared_secrets a tenant may secret_ref a _global-only secret: 200,
+	// without the opt-in: 422; after Stufe 1: 409 for every tier) died with the
+	// chat tuple in β8. It needed a SENSITIVE, TENANT-OVERRIDABLE settings key
+	// to carry the ref, and the registry has none left: chat.api_key was the
+	// last secret:"fp" key, and server.db_password — the only sensitive key
+	// remaining — is env-only, global-only and mut:"restart". checkSecretRef is
+	// therefore unreachable from any live key; the resolve-side opt-in gate
+	// (settings.Reload's _global fallback) is likewise without a subject.
+	//
+	// What survives, and is asserted here, is the TIER statement itself:
+	// allow_shared_secrets is a SECRET-scoped opt-in and never was a general
+	// per-tenant write gate. Both tiers — opted-in A and never-opted-in B —
+	// write an ordinary tenant-overridable key into their OWN scope. The
+	// asymmetry the seeding establishes is what Gate 11 below relies on.
 	t.Run("Gate7_SharedSecretOptInGate", func(t *testing.T) {
-		// Operator creates the _global-only shared secret.
+		// Operator creates the _global-only shared secret. It stays in place:
+		// Gate 9 scans the operator's list against its value.
 		rec := api.as(operatorAR()).do(t, http.MethodPut, "/api/secrets/openrouter-main", `{"value":"`+valueShared+`"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("operator create shared secret = %d body=%s", rec.Code, rec.Body.String())
@@ -150,39 +166,65 @@ func TestSecretsTenantAPI_Integration(t *testing.T) {
 		// Tenant A opts in (operator-seeded, out of band — a tenant cannot self-grant).
 		seedSettingScope(t, pool, store.AllowSharedSecretsKey, "tenanta", `true`)
 
-		// Since the Entflechtungs-Welle the settings PUT on chat.api_key
-		// (superseded backend-tuple key) answers 409 for EVERY tier — the
-		// checkSecretRef opt-in validation guarded this now-closed write
-		// path; the resolve-side opt-in gate (settings.Reload fallback) and
-		// the cross-scope referenced_by scan (Gate 8) live on. The reference
-		// row itself is operator-seeded (the same break-glass shape legacy
-		// installs carry).
-		rec = api.as(tenantAdmin("tenanta")).do(t, http.MethodPut, "/api/settings/chat.api_key", `{"value":"openrouter-main"}`)
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("A chat.api_key PUT = %d, want 409 (superseded gate, tier-independent) body=%s",
+		// rerank.enabled is hot and tenant-overridable — the vehicle the tier
+		// statement needs. Opt-in tier must make NO difference to it.
+		rec = api.as(tenantAdmin("tenanta")).do(t, http.MethodPut, "/api/settings/rerank.enabled", `{"value":true}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("A (opted in) rerank.enabled PUT = %d, want 200 body=%s", rec.Code, rec.Body.String())
+		}
+		rec = api.as(tenantAdmin("tenantb")).do(t, http.MethodPut, "/api/settings/rerank.enabled", `{"value":true}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("B (NOT opted in) rerank.enabled PUT = %d, want 200 — allow_shared_secrets is not a general write gate; body=%s",
 				rec.Code, rec.Body.String())
 		}
-		rec = api.as(tenantAdmin("tenantb")).do(t, http.MethodPut, "/api/settings/chat.api_key", `{"value":"openrouter-main"}`)
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("B chat.api_key PUT = %d, want 409 (superseded gate, tier-independent) body=%s",
-				rec.Code, rec.Body.String())
+		// Each write landed in its OWN scope, none in _global.
+		for _, scope := range []string{"tenanta", "tenantb"} {
+			var v string
+			if err := pool.QueryRow(ctx,
+				`SELECT value::text FROM context_settings WHERE key='rerank.enabled' AND scope=$1`, scope).Scan(&v); err != nil {
+				t.Fatalf("row for scope %s: %v", scope, err)
+			}
+			if v != "true" {
+				t.Errorf("scope %s row = %q, want true", scope, v)
+			}
 		}
-		seedSettingScope(t, pool, "chat.api_key", "tenanta", `"openrouter-main"`)
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM context_settings WHERE key='rerank.enabled' AND scope=$1`, store.GlobalScope).Scan(&n); err != nil {
+			t.Fatalf("count _global: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("a tenant write created a _global rerank.enabled row")
+		}
 	})
 
-	// Gate 8: operator DELETE of a _global secret an opt-in tenant references via
-	// the fallback is a 409, not a silent fail-open of the tenant setting.
-	t.Run("Gate8_CrossScopeReferencedBy409", func(t *testing.T) {
-		rec := api.as(operatorAR()).do(t, http.MethodDelete, "/api/secrets/openrouter-main", "")
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("operator DELETE shared secret = %d, want 409 (red if referencedBy scans _global only) body=%s",
-				rec.Code, rec.Body.String())
-		}
-		if !strings.Contains(rec.Body.String(), "chat.api_key") {
-			t.Errorf("409 lacks the cross-scope referencing key: %s", rec.Body.String())
-		}
-		scanClean(t, rec.Body.String(), "DELETE 409")
-	})
+	// Gate8_CrossScopeReferencedBy409 died with the chat tuple in β8.
+	//
+	// What it pinned: referencedBy's SETTINGS scope set is wider than the
+	// caller's own scope. An operator deleting a _global secret had to scan
+	// _global AND every opt-in tenant scope, because an opted-in tenant could
+	// reference that secret through the gated fallback; missing the reference
+	// would have let the tenant's setting silently fail-open to env/default.
+	// The assertion was a 409 naming the OPT-IN TENANT's key on an operator's
+	// _global DELETE.
+	//
+	// Why it has no vehicle: the reference it needed is a SETTINGS ROW that is
+	// a secret_ref, in a TENANT scope. After the cut no registry key is
+	// sensitive, so no settings row anywhere — _global or tenant — can be a
+	// secret_ref, and secretRefs.settings is empty in every live scan. The
+	// state the gate guarded cannot be constructed, not even by direct SQL: a
+	// planted row on a non-sensitive key is a plain value, and one on a retired
+	// key is dropped by the reload with the unknown-key WARN.
+	//
+	// referencedBy itself is UNTOUCHED — both halves of the union, and the
+	// widened settings scope set with it. The surviving reference guard is the
+	// POOL half, which is where F3 actually put provider keys: Gate 10 (a
+	// tenant-admin has no pool half at all) and Gate 11 (a NON-opt-in tenant's
+	// pool row blocks the operator's _global delete — the same fail-open class
+	// this gate guarded, on the half that still has carriers) below, plus
+	// BackendReferencedDelete409 in sealbox_handler_integration_test.go.
+	// The settings-side arms of secretRefs.remediation are pinned without a DB
+	// in TestSecretRefsRemediationBranches, same file.
 
 	// Gate 9: no submitted secret value in any tenant response.
 	t.Run("Gate9_NoSecretValueLeak", func(t *testing.T) {

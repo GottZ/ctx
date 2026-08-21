@@ -44,9 +44,9 @@ func TestHealthBlocktypeRegistryField(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(backend.Close)
-	cfg := healthTestConfig(backend.URL)
 	st := &swapStore{}
-	st.p.Store(cfg)
+	st.p.Store(healthTestConfig())
+	bp := healthTestPool(backend.URL, backend.URL, backend.URL)
 
 	for _, tc := range []struct {
 		name string
@@ -59,7 +59,7 @@ func TestHealthBlocktypeRegistryField(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			h := NewHealthHandler(pool, st, healthTestPool(backend.URL, backend.URL, backend.URL), tc.bt)
+			h := NewHealthHandler(pool, st, bp, tc.bt)
 			h.Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 			var resp struct {
@@ -71,11 +71,13 @@ func TestHealthBlocktypeRegistryField(t *testing.T) {
 			if resp.BlocktypeRegistry != tc.want {
 				t.Errorf("blocktype_registry = %q, want %q", resp.BlocktypeRegistry, tc.want)
 			}
-			// poolNameNeedles joins the sweep in β7: two of the three roles
-			// now carry their model and credential in the pool row rather
-			// than the config, so a config-only needle list would have
-			// quietly narrowed what this body is scanned for.
-			assertHealthBody(t, rec.Body.Bytes(), append(healthNeedles(cfg), poolNameNeedles...))
+			// The needle set is derived from the pool snapshot the handler
+			// reads (A04-W9). It absorbed the config-side needles wave by
+			// wave — dream in β6, embed in β7, chat in β8 — as each role's
+			// host, model and credential moved into its backend row; a
+			// config-derived list would by now be empty and this scan a
+			// tautology.
+			assertHealthBody(t, rec.Body.Bytes(), healthNeedles(bp))
 		})
 	}
 }

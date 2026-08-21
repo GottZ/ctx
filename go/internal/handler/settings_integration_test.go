@@ -6,10 +6,11 @@
 //   - PUT/GET/DELETE roundtrip with hot snapshot effect and audit attribution
 //   - 422 BEFORE persist (invalid value leaves no row, no audit)
 //   - §3.4 masking E2E: env plaintext marker never appears in ANY settings
-//     response (PUT previous.value, DELETE value, GET value)
-//   - secret_ref gate: sensitive keys are superseded backend-tuple keys —
-//     the 409 pool pointer fires before any format check, nothing persists
-//     (the living provider-key path is the pool row's api_key_ref)
+//     response (GET list, GET single, DELETE value). Since β8 the marker rides
+//     on CONTEXT_DB_PASSWORD — server.db_password is the only sensitive key
+//     the registry has left, and it is env-only by construction
+//   - row roundtrip over the reload path: an SQL-written override row reaches
+//     the snapshot, renders on GET and falls back on DELETE (live hot key)
 //   - retired embed row (β7): a psql-shaped row on a cut embed key is dropped
 //     with the unknown-key WARN and flushes NOTHING — the settings-side
 //     embed-cache flush left with the tuple, an admitted live write is the
@@ -80,47 +81,39 @@ func TestSettingsAPI_Integration(t *testing.T) {
 	ctx := context.Background()
 
 	// Clean env base + the fixtures the probes need. CTX_RERANK_BLEND_WEIGHT
-	// gives DELETE a visible env revert target; CTX_CHAT_API_KEY carries the
+	// gives DELETE a visible env revert target; CONTEXT_DB_PASSWORD carries the
 	// leak-scan marker.
+	//
+	// MARKER VEHICLE (β8): the marker used to ride on CTX_CHAT_API_KEY. With
+	// the chat tuple gone, server.db_password is the registry's ONLY sensitive
+	// key — secret:"presence", env-only, mut:"restart". That makes it the right
+	// carrier for the env half of §3.4 (an env-sourced sensitive value renders
+	// as maskedEnvValue on every surface) and, at the same time, structurally
+	// unable to carry the settings-row half: admitOverride drops a restart-class
+	// row before it can reach a snapshot.
 	for _, v := range config.EnvVars() {
 		t.Setenv(v, "")
 	}
-	t.Setenv("CONTEXT_DB_PASSWORD", "test-password")
 	t.Setenv(settings.EnvDisable, "")
 	t.Setenv("CTX_RERANK_BLEND_WEIGHT", "0.4")
 	const envMarker = "ENV-PLAINTEXT-MARKER-aaaaaaaaaaaaaaaaaaaaaaaa"
-	t.Setenv("CTX_CHAT_API_KEY", envMarker)
+	t.Setenv("CONTEXT_DB_PASSWORD", envMarker)
 
-	// Master key + one sealed secret through the real crypto path, so the
-	// secret_ref candidate build resolves.
+	// Master key so settings.Reload runs its real crypto wiring. The SEALED
+	// SECRET this fixture used to plant (prov-main + a resolved-plaintext
+	// marker) went with the chat tuple in β8: no registry key is sensitive any
+	// more, so nothing on the settings side can hold a secret_ref, and a scan
+	// for its plaintext in a settings response would be green by construction.
+	// The sealed-secret strecke is pinned where it still has a subject — the
+	// secrets API and the backend pool (sealbox_handler_integration_test.go,
+	// sealbox_tenant_integration_test.go) and, at config level, on the
+	// injected-registry vehicle (config/synthreg_test.go).
 	rawKey := make([]byte, sealbox.KeySize)
 	if _, err := rand.Read(rawKey); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	keyHex := hex.EncodeToString(rawKey)
-	t.Setenv(sealbox.EnvKey, keyHex)
+	t.Setenv(sealbox.EnvKey, hex.EncodeToString(rawKey))
 	t.Setenv(sealbox.EnvKeyPrev, "")
-	box, err := sealbox.New(keyHex, "")
-	if err != nil {
-		t.Fatalf("sealbox: %v", err)
-	}
-	const secretPlain = "RESOLVED-PLAINTEXT-MARKER-bbbbbbbbbbbbbbbbbbbb"
-	nonce, ct, err := box.Seal("prov-main", store.GlobalScope, []byte(secretPlain))
-	if err != nil {
-		t.Fatalf("seal: %v", err)
-	}
-	{
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			t.Fatalf("begin: %v", err)
-		}
-		if _, err := store.PutSecret(ctx, tx, "prov-main", store.GlobalScope, nonce, ct, 1, nil); err != nil {
-			t.Fatalf("put secret: %v", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			t.Fatalf("commit secret: %v", err)
-		}
-	}
 
 	// Acting admin key (real row → audit attribution is verifiable E2E).
 	actor, _, err := store.CreateApiKey(ctx, pool, "settings-api-actor", "private", nil, "")
@@ -258,46 +251,42 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		}
 	})
 
-	t.Run("SecretRefGate", func(t *testing.T) {
-		// Entflechtungs-Welle Stufe 1: every sensitive settings key is a
-		// superseded backend-tuple key (chat.api_key & co) — the 409 pool
-		// pointer fires BEFORE any secret_ref format/existence check, so a
-		// provider-key-shaped plaintext can never reach table or audit via
-		// this route anymore. The living path for provider keys is the pool
-		// row's api_key_ref (`ctx backends` + `ctx secrets`).
-		for _, body := range []string{`{"value":"SK-PROVIDER-KEY-SHAPED-VALUE"}`, `{"value":"ghost-ref"}`} {
-			rec := api.do(t, http.MethodPut, "/api/settings/chat.api_key", body)
-			if rec.Code != http.StatusConflict {
-				t.Fatalf("PUT %s status = %d, want 409 (superseded gate)", body, rec.Code)
-			}
-			resp := api.envelope(t, rec)
-			if msg, _ := resp["error"].(string); !strings.Contains(msg, "backend pool") {
-				t.Errorf("error = %q, want the backend-pool pointer", msg)
-			}
-		}
-		var n int
-		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM context_settings WHERE key = 'chat.api_key'`).Scan(&n); err != nil {
-			t.Fatalf("count: %v", err)
-		}
-		if n != 0 {
-			t.Errorf("blocked PUT persisted a row")
-		}
-	})
+	// SecretRefGate died with the chat tuple in β8. It pinned the ORDER of two
+	// gates on a sensitive key: the superseded 409 fires BEFORE any secret_ref
+	// format/existence check, so a provider-key-shaped plaintext could never
+	// reach table or audit through PUT /api/settings/{key}.
+	//
+	// It has no vehicle left, on either half of its subject. chat.api_key was
+	// the registry's LAST secret:"fp" key, and it was also the last key
+	// carrying the superseded marker — so after the cut there is no key that is
+	// sensitive, and none that is superseded either. server.db_password is the
+	// only sensitive key left, but it is mut:"restart": HandlePut answers the
+	// restart-only 409 and admitOverride drops any row on it, so it can never
+	// reach the secret_ref gate this test stood in front of. What the retired
+	// keys answer now is a plain 404 (unknown key, decision E13) — pinned in a
+	// later wave, deliberately not here.
+	//
+	// Where the statements live now:
+	//   - secret_ref resolution + the ref-value leak guard: the injected-
+	//     registry vehicle, config/synthreg_test.go
+	//     (TestSynthSecretRefResolutionEndToEnd,
+	//     TestSynthSecretRefWarningNeverEchoesTheRefValue).
+	//   - the masking rule per source: settings_test.go, on synthetic KeyInfos
+	//     (TestRenderEffective_*) plus the env half E2E below.
+	//   - the superseded 409 branch itself: settings_test.go,
+	//     TestMutabilityBlockSuperseded (synthetic KeyInfo; the machinery is
+	//     live but unoccupied until β9 removes it).
 
 	t.Run("MaskingE2E_NoPlaintextInAnyResponse", func(t *testing.T) {
 		scan := func(rec *httptest.ResponseRecorder, label string) {
 			t.Helper()
-			body := rec.Body.String()
-			if strings.Contains(body, envMarker) {
+			if body := rec.Body.String(); strings.Contains(body, envMarker) {
 				t.Errorf("%s leaks the env plaintext marker: %s", label, body)
-			}
-			if strings.Contains(body, secretPlain) {
-				t.Errorf("%s leaks the resolved secret plaintext: %s", label, body)
 			}
 		}
 
-		// GET list while chat.api_key is env-sourced.
+		// GET list while server.db_password is env-sourced: the ONLY sensitive
+		// key the registry still has, and the marker must not survive it.
 		rec := api.do(t, http.MethodGet, "/api/settings", "")
 		scan(rec, "GET list (env-sourced)")
 		var list struct {
@@ -306,24 +295,61 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 			t.Fatalf("unmarshal list: %v", err)
 		}
+		var seen bool
 		for _, s := range list.Settings {
-			if s.Key == "chat.api_key" && s.Value != maskedEnvValue {
-				t.Errorf("GET chat.api_key value = %v, want %q", s.Value, maskedEnvValue)
+			if s.Key == "server.db_password" {
+				seen = true
+				if s.Value != maskedEnvValue {
+					t.Errorf("GET server.db_password value = %v, want %q", s.Value, maskedEnvValue)
+				}
 			}
 		}
+		if !seen {
+			t.Fatal("server.db_password missing from the list — the scan above proved nothing")
+		}
 
-		// db-sourced state via SQL + reload (the psql/break-glass shape) —
-		// the settings PUT route 409s on superseded keys since the
-		// Entflechtungs-Welle, but a legacy override row can still EXIST
-		// (pre-wave installs, direct SQL), and every read surface must mask
-		// it exactly as before.
+		// GET single on the same key: same masking, same scan.
+		rec = api.do(t, http.MethodGet, "/api/settings/server.db_password", "")
+		scan(rec, "GET single (env-sourced sensitive)")
+		resp := api.envelope(t, rec)
+		setting, _ := resp["setting"].(map[string]any)
+		if setting["value"] != maskedEnvValue || setting["source"] != "env" {
+			t.Errorf("GET single value/source = %v/%v, want masked/env", setting["value"], setting["source"])
+		}
+
+		// The ROW-SOURCED SENSITIVE half of this subtest died with the chat
+		// tuple in β8. It pinned: an SQL-planted secret_ref row is resolved
+		// into the snapshot as plaintext, while every read surface renders the
+		// harmless ref NAME instead. No registry key can carry that state any
+		// more — server.db_password is sensitive but restart-class, so
+		// admitOverride drops its row before a snapshot ever sees it, and no
+		// other key is sensitive at all. The statement is pinned on synthetic
+		// KeyInfos in settings_test.go (TestRenderEffective_DBSensitiveShowsRefName,
+		// including the row-vanished presence floor) and, at config level, on
+		// the injected-registry vehicle in config/synthreg_test.go
+		// (TestSynthSecretRefResolutionEndToEnd, TestSynthMaskSecretPerClass).
+		//
+		// Its NEGATIVE-PROBE value is kept below on a live non-sensitive key:
+		// an SQL-written row must still reach the snapshot, render on GET and
+		// fall back on DELETE — that is the pipeline the dead half rode on, and
+		// without it "nothing leaked" would be provable by a reload that simply
+		// never runs.
+	})
+
+	// SQLRowRoundtripOverReload is the surviving half of the old masking E2E:
+	// row written around the API (psql/break-glass shape) → reload → snapshot →
+	// GET renders it → DELETE → snapshot falls back. digest.mode is hot,
+	// global-only and unvalidated, so it carries the pipeline without pulling a
+	// validator into the statement.
+	t.Run("SQLRowRoundtripOverReload", func(t *testing.T) {
+		const rowValue = "sql-planted-mode"
 		{
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				t.Fatalf("begin: %v", err)
 			}
-			if err := store.UpsertSetting(ctx, tx, "chat.api_key", store.GlobalScope, json.RawMessage(`"prov-main"`), nil); err != nil {
-				t.Fatalf("upsert secret_ref: %v", err)
+			if err := store.UpsertSetting(ctx, tx, "digest.mode", store.GlobalScope, json.RawMessage(`"`+rowValue+`"`), nil); err != nil {
+				t.Fatalf("upsert digest.mode: %v", err)
 			}
 			if err := tx.Commit(ctx); err != nil {
 				t.Fatalf("commit: %v", err)
@@ -332,31 +358,27 @@ func TestSettingsAPI_Integration(t *testing.T) {
 				t.Fatalf("reload: %v", err)
 			}
 		}
-		// The snapshot resolved the plaintext (that is the point) — but no
-		// response surface may carry it.
-		if got := cfgStore.Snapshot().Chat.APIKey; got != secretPlain {
-			t.Fatalf("snapshot Chat.APIKey = %q, want the resolved secret", got)
+		if got := cfgStore.Snapshot().Digest.Mode; got != rowValue {
+			t.Fatalf("snapshot digest.mode = %q, want the planted row value", got)
 		}
-		rec = api.do(t, http.MethodGet, "/api/settings/chat.api_key", "")
-		scan(rec, "GET single (db-sourced)")
+		rec := api.do(t, http.MethodGet, "/api/settings/digest.mode", "")
 		resp := api.envelope(t, rec)
 		setting, _ := resp["setting"].(map[string]any)
-		if setting["value"] != "prov-main" {
-			t.Errorf("GET db-sourced sensitive value = %v, want ref name", setting["value"])
+		if setting["value"] != rowValue || setting["source"] != "db" {
+			t.Errorf("GET value/source = %v/%v, want %q/db", setting["value"], setting["source"], rowValue)
 		}
 
-		// DELETE reverts to env: the response value is the masked placeholder.
-		rec = api.do(t, http.MethodDelete, "/api/settings/chat.api_key", "")
+		// DELETE reverts to the registry default (no CTX_DIGEST_MODE set).
+		rec = api.do(t, http.MethodDelete, "/api/settings/digest.mode", "")
 		if rec.Code != http.StatusOK {
-			t.Fatalf("DELETE status = %d", rec.Code)
+			t.Fatalf("DELETE status = %d body=%s", rec.Code, rec.Body.String())
 		}
-		scan(rec, "DELETE value")
 		resp = api.envelope(t, rec)
-		if resp["value"] != maskedEnvValue || resp["source"] != "env" {
-			t.Errorf("DELETE response = %v/%v, want masked/env", resp["value"], resp["source"])
+		if resp["source"] != "default" || resp["value"] == rowValue {
+			t.Errorf("DELETE response = %v/%v, want the default value/source", resp["value"], resp["source"])
 		}
-		if got := cfgStore.Snapshot().Chat.APIKey; got != envMarker {
-			t.Errorf("snapshot after revert = %q, want the env value", got)
+		if got := cfgStore.Snapshot().Digest.Mode; got == rowValue {
+			t.Errorf("snapshot still carries the deleted row value %q", got)
 		}
 	})
 
@@ -440,7 +462,9 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		if err := store.UpsertSetting(ctx, tx, "chat.model", store.GlobalScope, json.RawMessage(`"sql-edited-model"`), nil); err != nil {
+		// Vehicle swap (β8): chat.model left the registry; dream.language is a
+		// live hot key and carries the same statement unchanged.
+		if err := store.UpsertSetting(ctx, tx, "dream.language", store.GlobalScope, json.RawMessage(`"pt-br"`), nil); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -449,11 +473,11 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		// Settings-entity payload: the backend pool is not consulted on this
 		// path (G25 added the parameter for entity=context_backends reloads).
 		h := events.NewSettingsWriteHandler(pool, cfgStore, backends.NewPool(pool, nil), nil)
-		if err := h.HandleNotification(ctx, &pgconn.Notification{Channel: "ctx_settings_write", Payload: `{"entity":"context_settings","key":"chat.model","op":"INSERT"}`}, nil); err != nil {
+		if err := h.HandleNotification(ctx, &pgconn.Notification{Channel: "ctx_settings_write", Payload: `{"entity":"context_settings","key":"dream.language","op":"INSERT"}`}, nil); err != nil {
 			t.Fatalf("notify handler: %v", err)
 		}
-		if got := cfgStore.Snapshot().Chat.Model; got != "sql-edited-model" {
-			t.Errorf("snapshot chat.model = %q, want sql-edited-model (NOTIFY reload path)", got)
+		if got := cfgStore.Snapshot().Dream.Language; got != "pt-br" {
+			t.Errorf("snapshot dream.language = %q, want pt-br (NOTIFY reload path)", got)
 		}
 	})
 }

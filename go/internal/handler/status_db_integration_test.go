@@ -384,16 +384,15 @@ func TestStatusDBAsyncCadenceHotInterval(t *testing.T) {
 }
 
 // validTestConfig builds the minimal config.Config that passes Validate (a
-// zero-value Config fails on chat.protocol, server.db_password,
-// graph.hop_depth — chat_fallback.protocol left the V4 list with its tuple in
-// β4, dream.protocol with its own in β6, embed.protocol in β7, which leaves
-// chat.protocol as the list's last entry) — needed because store.Replace
-// re-validates the WHOLE config, not just
-// the field under test (Gate G6's hot-reload probe,
+// zero-value Config fails on server.db_password and graph.hop_depth) — needed
+// because store.Replace re-validates the WHOLE config, not just the field
+// under test (Gate G6's hot-reload probe,
 // TestStatusDBAsyncCadenceHotInterval).
+//
+// The chat.protocol field this fixture used to carry retired in β8 together
+// with V4 (validateBackendTuples) — the last check that demanded it.
 func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 	return &config.Config{
-		Chat:   config.ChatConfig{Protocol: backends.ProtocolOllama},
 		Server: config.ServerConfig{DBPass: "x"},
 		Graph:  config.GraphConfig{HopDepth: 1},
 		Events: config.EventsConfig{DBStatsInterval: dbStatsInterval},

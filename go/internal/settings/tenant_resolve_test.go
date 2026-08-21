@@ -177,7 +177,7 @@ func TestToOverridesMalformedFallthrough(t *testing.T) {
 func TestToOverridesSingleScopeByteIdentical(t *testing.T) {
 	resetEnv(t)
 	rows := []store.SettingOverride{
-		row("chat.model", `"db-model"`),
+		row("dream.language", `"pt-br"`), // chat.model until β8
 		row("rerank.blend_weight", `0.5`),
 		row("query.score_threshold", `0.2`),
 	}
@@ -203,21 +203,23 @@ func TestToOverridesSingleScopeByteIdentical(t *testing.T) {
 
 // TestBuildFromRowsSingleScopeMatchesEnv exercises the BuildFromRows entry
 // (the W5 handler + Bootstrap/Reload path) with {_global}-only rows and checks
-// the effective config carries the override — same as the pre-W3 build.
+// the effective config carries the override — same as the pre-W3 build. The
+// env-shadowing pair rode on chat.model/CTX_CHAT_MODEL until β8;
+// dream.language/CTX_DREAM_LANGUAGE is the global-only successor.
 func TestBuildFromRowsSingleScopeMatchesEnv(t *testing.T) {
 	resetEnv(t)
-	t.Setenv("CTX_CHAT_MODEL", "env-model")
+	t.Setenv("CTX_DREAM_LANGUAGE", "de")
 
 	cfg, issues := BuildFromRows(t.Context(), nil, []store.SettingOverride{
-		row("chat.model", `"db-model"`),
+		row("dream.language", `"pt-br"`),
 	}, []string{store.GlobalScope})
 
 	if config.HasErrors(issues) {
 		t.Fatalf("unexpected errors: %v", issues)
 	}
-	if cfg.Chat.Model != "db-model" || cfg.Source("chat.model") != "settings" {
-		t.Errorf("BuildFromRows({_global}): model=%q source=%q, want db-model/settings",
-			cfg.Chat.Model, cfg.Source("chat.model"))
+	if cfg.Dream.Language != "pt-br" || cfg.Source("dream.language") != "settings" {
+		t.Errorf("BuildFromRows({_global}): language=%q source=%q, want pt-br/settings",
+			cfg.Dream.Language, cfg.Source("dream.language"))
 	}
 }
 
@@ -228,7 +230,7 @@ func TestToOverridesIssueDeterminism(t *testing.T) {
 	rows := []store.SettingOverride{
 		tenantRow("gaming.active", testTenant, `true`), // gated
 		row("rerank.blend_weight", `"kaputt"`),         // malformed
-		row("chat.api_key", `{"oops":"x"}`),            // malformed object
+		row("dream.language", `{"oops":"x"}`),          // malformed object (chat.api_key until β8)
 	}
 	a := toOverridesIssueKeys(rows)
 	b := toOverridesIssueKeys(rows)

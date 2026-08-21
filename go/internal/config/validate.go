@@ -2,11 +2,9 @@ package config
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 
-	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 )
 
@@ -40,7 +38,8 @@ const temporalTimeoutBudget = dream.CycleTimeout - (dream.KeywordsTimeout + drea
 
 // Validate checks the surviving cross-field invariants and returns all
 // findings. The V-numbers are historical labels, not a contiguous range — the
-// cut train has retired V1, V8, V12 and V13 with the tuples they read.
+// cut train retired V1, V4, V7, V8, V12 and V13 with the six backend tuples
+// they read (validateBackendTuples, gone in β8; the history is below).
 // WARN classes with "today's silent fallback" semantics (V5 prompt version,
 // V6 back-off, V10 parallelism clamp) NORMALIZE the config in place — exactly
 // what llm's init(), dream.SetBackoffConfig and the scheduler clamp did
@@ -48,90 +47,35 @@ const temporalTimeoutBudget = dream.CycleTimeout - (dream.KeywordsTimeout + drea
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateBackendTuples(c)...) // V4, V7 (V1 cut in β6)
-	issues = append(issues, validateQuery(c)...)         // V2, V5, V11
-	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
-	issues = append(issues, validateDream(c)...)         // V6, V10, V14
+	issues = append(issues, validateQuery(c)...)       // V2, V5, V9b, V9c, V11
+	issues = append(issues, validateRerankGraph(c)...) // V3, V9
+	issues = append(issues, validateDream(c)...)       // V6, V10, V14, V15, V16
 	return issues
 }
 
-func validateBackendTuples(c *Config) []Issue {
-	var issues []Issue
-
-	// V7 — host URLs: parseable, http(s), no trailing slash (would double on
-	// path join), no userinfo (would bypass the field-name-based secret
-	// masking everywhere hosts flow: dump, error logs, F2 API).
-	for _, h := range []struct{ key, host string }{
-		{"chat.host", c.Chat.Host},
-	} {
-		if h.host == "" {
-			continue
-		}
-		issues = append(issues, validateHostURL(h.key, h.host)...)
-	}
-
-	// V4 — protocol typos fell silently onto the ollama wire path until now
-	// (chatWithFormat: != "openai" ⇒ ollama) → 404 on llama.cpp. Delta 6.
-	// The allowEmpty column left with dream_embed.protocol in β5: it was the
-	// only inheriting protocol key, so every remaining entry carries a
-	// non-empty default and an empty value here is a real typo class.
-	for _, p := range []struct {
-		key   string
-		proto backends.Protocol
-	}{
-		{"chat.protocol", c.Chat.Protocol},
-	} {
-		if p.proto != backends.ProtocolOllama && p.proto != backends.ProtocolOpenAI {
-			issues = append(issues, Issue{Field: p.key, Severity: SeverityError,
-				Msg: fmt.Sprintf("unknown protocol %q — must be %q or %q (typos silently selected the ollama wire path before F1)",
-					string(p.proto), backends.ProtocolOllama, backends.ProtocolOpenAI)})
-		}
-	}
-
-	// V1 retired with the dream chat tuple in β6 (design/01 §7 W5). It compared
-	// dream.num_ctx against chat.num_ctx on a shared host and called the
-	// divergence an ollama dual-runner (VRAM OOM), a WARN under openai where the
-	// parameter is discarded on the wire. All three of its inputs are gone, and
-	// the statement is not rebuildable here: the pool decides which rows serve
-	// role dream and role synthesis, Validate never sees the pool (config
-	// validation is parameter-pure), and two rows on one host is a topology an
-	// operator chooses — design/01 §5.5 rules it out explicitly ("nicht
-	// nachbauen, der Pool kennt Prioritäten und Rollen").
-
-	// V12 retired with the dream_embed tuple in β5 (design/01 §7 W4). It was
-	// the credential boundary of the dream-embed inheritance — a foreign
-	// dream-embed host with no own key would have sent the embed credential as
-	// Bearer to that foreign host on every keyword embed and backfill. The
-	// inheritance it guarded no longer exists: the pool resolves dream embeds
-	// per ROW (dream/router.go), and a row carries its own api_key_ref.
-
-	return issues
-}
-
-// validateHostURL implements the V7 checks for one host field. On url.Parse
-// FAILURE the error text is never embedded — (*url.Error).Error() carries the
-// raw input including any userinfo password (§3.5).
-func validateHostURL(key, host string) []Issue {
-	u, err := url.Parse(host)
-	if err != nil {
-		return []Issue{{Field: key, Severity: SeverityError,
-			Msg: "host URL is not parseable (raw value withheld — it may embed credentials)"}}
-	}
-	var issues []Issue
-	if u.Scheme != "http" && u.Scheme != "https" {
-		issues = append(issues, Issue{Field: key, Severity: SeverityError,
-			Msg: fmt.Sprintf("host URL %s: scheme must be http or https", u.Redacted())})
-	}
-	if strings.HasSuffix(host, "/") {
-		issues = append(issues, Issue{Field: key, Severity: SeverityError,
-			Msg: fmt.Sprintf("host URL %s: trailing slash doubles on path join — drop it", u.Redacted())})
-	}
-	if u.User != nil {
-		issues = append(issues, Issue{Field: key, Severity: SeverityError,
-			Msg: "credentials in host URL not allowed — use api_key (F2: secret_ref)"})
-	}
-	return issues
-}
+// validateBackendTuples and validateHostURL retired with the chat tuple in β8
+// (design/01 §7 W7), the last of the six they read. What each check said, and
+// where its statement lives now — none of them was dropped without a successor
+// or an explicit ruling:
+//
+//   - V7 (host URLs: parseable, http(s), no trailing slash, NO USERINFO) was
+//     the security-carrying one: a credential inside a host URL bypasses the
+//     field-name-based secret masking everywhere hosts flow — dump, error logs,
+//     the F2 API. Its pendant is on the LIVING write path since α3: a base_url
+//     with userinfo is a 422 FieldError at the pool boundary
+//     (backends/validate.go validateIdentity), which is where hosts are
+//     configured now. The rendering guard redactHostURL (dump.go) is untouched
+//     and still covers the .host namespace convention.
+//   - V4 (protocol typos: anything but ollama/openai fell silently onto the
+//     ollama wire path → 404 against llama.cpp) is enforced at the same
+//     boundary: validateIdentity rejects a row whose protocol is not one of
+//     openai, ollama, rerank.
+//   - V1 (dual-runner VRAM WARN, β6), V12 (dream-embed credential boundary,
+//     β5), V8 and V13 (rerank host reachability WARNs, β3) are NOT rebuildable
+//     here and are not rebuilt: each compared fields of two tuples, and which
+//     rows serve which role is a pool question that Validate — parameter-pure,
+//     it never sees the pool — cannot ask. design/01 §5.5 rules V1 out by name
+//     ("nicht nachbauen, der Pool kennt Prioritäten und Rollen").
 
 func validateQuery(c *Config) []Issue {
 	var issues []Issue

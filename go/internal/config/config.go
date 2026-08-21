@@ -59,32 +59,40 @@ type Hours float64
 //	         fpMinLen, boot dump only) | presence (human-chosen values: never
 //	         fingerprinted — an unsalted hash prefix would be an offline
 //	         dictionary oracle)
-//	superseded  lifetime marker: F3 context_backends rows replace these keys
-//	         (the table is the ONLY topology source since β1 — no boot-time
-//	         seed reads these keys any more)
+//	superseded  lifetime marker of the F3 retirement: it named the keys the
+//	         context_backends rows had replaced. UNOCCUPIED since β8 — the chat
+//	         tuple was the last carrier, and no key may take the tag again (a
+//	         retired name back in the registry would revive every stale row on
+//	         it, config/retired.go). The marker itself, with the API field, the
+//	         409 branch, the CLI hint and the FE legacy card it feeds, is
+//	         removed in β9 (E11); until then it is live, working machinery with
+//	         no members.
 //	tenancy  tenant-overridable | global-only (MANDATORY — MT3-W2): may a
 //	         tenant override this key on top of _global, or does it live in
 //	         _global only? A missing/unknown value is a boot panic, so no key
 //	         escapes the classification. Classification rule: a key is
 //	         tenant-overridable only when overriding it per-tenant touches
 //	         NOTHING process-shared — it affects solely that tenant's own
-//	         query/chat/dream/policy resolution (retrieval tuning, rate limits,
-//	         scope/sensitivity policy, per-tenant chat budgets, the provider
-//	         api_key secret_refs). Everything that touches a host/physical or
-//	         process-wide resource is global-only: the DSN/listener (restart),
-//	         the backend HOST/MODEL/PROTOCOL tuples (topology — per-tenant
-//	         backends come from the F3 pool's scope dimension, not these legacy
-//	         keys), the embed-cache-coupled keys (a tenant flush nukes the
-//	         shared cache — R-SCALE6), gaming.active (GPU is one host), the
+//	         query/dream/policy resolution (retrieval tuning, rate limits,
+//	         scope/sensitivity policy, per-tenant budgets). Everything that
+//	         touches a host/physical or process-wide resource is global-only:
+//	         the DSN/listener (restart), gaming.active (GPU is one host), the
 //	         scheduler cadences and offline jobs, and the server egress-audit
 //	         retention. Fail-closed default for any NEW key: global-only.
+//	         History: the class was written around the six backend tuples —
+//	         their HOST/MODEL/PROTOCOL keys were the archetypal global-only
+//	         topology, their api_key secret_refs the archetypal tenant-
+//	         overridable per-tenant credential, and the embed-cache-coupled
+//	         keys the reason a tenant may not reach a process-wide cache
+//	         (R-SCALE6). All of them left the registry in β3–β8; per-tenant
+//	         backends and per-tenant credentials come from the F3 pool's own
+//	         scope dimension now. The rule is unchanged, only its examples.
 
 // Config is the complete runtime configuration. One immutable value per
 // generation; consumers take one snapshot per operation and pass values down
 // as parameters.
 type Config struct {
 	Server         ServerConfig
-	Chat           ChatConfig
 	Dream          DreamConfig
 	Rerank         RerankConfig
 	Graph          GraphConfig
@@ -127,28 +135,31 @@ type ServerConfig struct {
 	ListenAddr string `key:"server.listen_addr" env:"LISTEN_ADDR" default:":8080" mut:"restart" tenancy:"global-only"`
 }
 
-// ChatConfig is the primary chat/synthesis backend tuple.
-type ChatConfig struct {
-	Host string `key:"chat.host" env:"CTX_CHAT_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	// TENANT-DECISION(provider-api-key): the provider api_key secret_ref
-	// (chat.api_key, the last one — rerank.api_key left the registry with the
-	// β3 tuple cut, chat_fallback.api_key with the β4 one, dream_embed.api_key
-	// with the β5 one, dream.api_key with the β6 one, embed.api_key with the β7
-	// one) is tenant-overridable — a tenant
-	// brings its own provider
-	// credential (resolved per-tenant by the 03-W3..W5 secret resolver,
-	// isolation gated by tenant.allow_shared_secrets
-	// §4.3). Alt: global-only with credentials flowing ONLY through the F3 pool's
-	// scope+AAD path; umentscheidbar because the per-tenant secret resolver
-	// (W3-W5) is not built yet and may consolidate on the pool. §3.3 lists these
-	// as tenant-overridable; the HOST/MODEL topology stays global (pool owns
-	// per-tenant backends). Pausable: no consumer until W3.
-	APIKey   string             `key:"chat.api_key" env:"CTX_CHAT_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
-	Protocol backends.Protocol  `key:"chat.protocol" env:"CTX_CHAT_PROTOCOL" default:"ollama" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	Model    string             `key:"chat.model" env:"CTX_CHAT_MODEL" default:"qwen3.5:9b" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	NumCtx   int                `key:"chat.num_ctx" env:"CTX_CHAT_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends" tenancy:"global-only"`
-	Think    backends.ThinkMode `key:"chat.think" env:"CTX_CHAT_THINK" default:"false" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-}
+// ChatConfig died with the primary chat/synthesis tuple in β8 — the LAST of the
+// six backend tuples to leave the registry, and with it the whole class. Three
+// contracts ended here, none of them silently:
+//
+//   - chat.api_key was the last carrier of secret:"fp". The class stays valid
+//     registry vocabulary and is now unoccupied; server.db_password (presence,
+//     env-only, mut:"restart") is the only sensitive key left, and it is never
+//     admitted as a settings row — so no registry key can reach the settings-
+//     side secret_ref resolver any more. The resolver itself is live and pinned
+//     on an injected synthetic registry (config/synthreg_test.go).
+//     Its TENANT-DECISION(provider-api-key) is settled by removal: a tenant
+//     brings its own provider credential through the pool row's api_key_ref,
+//     resolved at the tenant's own scope, never through a config key.
+//   - chat.host was the last carrier of the .host namespace. redactHostURL
+//     (dump.go) keeps guarding the convention for every FUTURE .host key; today
+//     it has none.
+//   - chat.protocol and chat.host were the last inputs of V4 and V7, so
+//     validateBackendTuples and validateHostURL are gone with them (validate.go
+//     carries the history). The userinfo rejection V7 stood for lives on the
+//     pool write path since α3 (backends/validate.go validateIdentity).
+//
+// Which backend serves a synthesis call is a pool question: the query path
+// resolves the role-synthesis chain out of context_backends and reads host,
+// credential, protocol, model, context window and think mode off the serving
+// row (backends.Backend, llm.ChatChainVia).
 
 // EmbedConfig died with the query-path embed tuple in β7. Its five keys were
 // the last carriers of two mutability classes: mut:"coupled" (embed.model, the
@@ -1038,6 +1049,19 @@ type PoolConfig struct {
 	// eject disable-profile (092), read live from the pool snapshot. Any leftover
 	// gaming.* rows in context_settings are inert — admitOverride drops them as
 	// unknown keys (build.go), so no delete-migration is needed.
+	//
+	// The 29 backend tuple keys retired in β3–β8 went the OTHER way, deliberately
+	// (E4, design/01 §8): a delete migration removes their rows in every scope
+	// and an `unset` audit row records each removal. The precedent above does not
+	// carry, and the difference is the reason: gaming.* were two non-sensitive
+	// global-only booleans with no env var, no documented deployment surface and
+	// no foreign users. The tuple keys were the historically primary
+	// configuration surface — six of them secret_ref-capable and
+	// tenant-overridable, all of them printed in .env.example and compose. A left
+	// row there is not just noise: an inert *.api_key row's secret_ref stops
+	// counting as a reference (handler/sealbox.go referencedBy reads the
+	// registry's sensitive set), so the secret it points at loses its delete
+	// guard while the row remains invisible to every list and UI.
 }
 
 // BlobWriteLimit resolves the effective /api/blob/store budget of this
@@ -1411,17 +1435,13 @@ func (c *Config) Source(key string) string {
 	return c.sources[key]
 }
 
-// ChatBackend returns the primary chat tuple, 1:1 from Chat.*.
-func (c *Config) ChatBackend() backends.Backend {
-	return backends.Backend{
-		Host:     c.Chat.Host,
-		APIKey:   c.Chat.APIKey,
-		Protocol: c.Chat.Protocol,
-		Model:    c.Chat.Model,
-		NumCtx:   c.Chat.NumCtx,
-		Think:    c.Chat.Think,
-	}
-}
+// ChatBackend died with the primary chat tuple in β8 — the last of the five
+// tuple accessors, and the one the other four resolved against. It returned a
+// backends.Backend built 1:1 from Chat.*; its last caller was the boot-time
+// backend seed that β1 removed, which is why the accessor outlived every one of
+// its runtime consumers. A synthesis backend is chosen from the pool now
+// (role synthesis, backends.Pool), and the row IS the backends.Backend this
+// used to assemble.
 
 // DreamBackend died with the dream chat tuple in β6. It resolved Model, NumCtx
 // and Think onto Chat.* whenever the dream field was zero (Delta 1), with V1

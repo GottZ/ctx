@@ -1,8 +1,6 @@
 package config
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -30,45 +28,34 @@ func group(t *testing.T, dump map[string]any, name string) map[string]any {
 	return g
 }
 
-// TestMaskSecretPerClass pins §3.5: fp-class keys of fpMinLen+ render a
-// sha256 fingerprint ONLY in the boot dump; short keys and the presence-class
-// db password render "set" everywhere; SurfaceAPI never fingerprints.
+// TestMaskSecretPerClass pins §3.5 for the class that still has a member: the
+// human-chosen db password is "presence" and renders "set" on every surface,
+// never a fingerprint (an unsalted hash prefix of a human-chosen value is an
+// offline dictionary oracle).
+//
+// The fp half of this test — long value fingerprinted in the boot dump, short
+// value presence-only, unset value empty, API surface never fingerprinting —
+// rode on chat.api_key, the registry's LAST secret:"fp" key, and left with it
+// in β8. It did not lose its subject, only its member: maskSecret's fpMinLen
+// branch is untouched and now runs on the injected-registry vehicle
+// (synthreg_test.go, TestSynthMaskSecretPerClass), which drives renderField
+// with a synthetic fp entry over all four cases. Substituting server.db_password
+// here would have been the opposite of coverage — it can never take the branch.
 func TestMaskSecretPerClass(t *testing.T) {
-	vals := map[string]string{
-		"chat.api_key":       longKey,
-		"server.db_password": longKey, // long but human-class: still presence-only
-	}
-
-	boot := dumpFor(t, vals, SurfaceBootDump)
-	sum := sha256.Sum256([]byte(longKey))
-	wantFP := "set:sha256:" + hex.EncodeToString(sum[:4])
-	if got := group(t, boot, "chat")["api_key"]; got != wantFP {
-		t.Errorf("boot dump long fp key = %v, want %s", got, wantFP)
-	}
-	// The SHORT fp key rode on embed.api_key until β7 cut the tuple. chat.api_key
-	// is the last fp key in the registry, so the length classes separate over two
-	// dumps instead of two keys — the branch under test is maskSecret's fpMinLen
-	// threshold, which reads the VALUE, not the key.
-	short := dumpFor(t, map[string]string{"chat.api_key": shortKey}, SurfaceBootDump)
-	if got := group(t, short, "chat")["api_key"]; got != "set" {
-		t.Errorf("boot dump short fp key = %v, want presence-only 'set'", got)
-	}
+	boot := dumpFor(t, map[string]string{"server.db_password": longKey}, SurfaceBootDump)
 	if got := group(t, boot, "server")["db_password"]; got != "set" {
 		t.Errorf("boot dump db password = %v, want 'set' (never fingerprinted)", got)
 	}
-	// The unset-secret probe rode on dream.api_key until β6 cut the tuple. The
-	// surviving fp key carries a value in this fixture, so it moves onto a
-	// further dump built without one — the same statement about the same branch
-	// (maskSecret returns the empty string for an empty value), just no longer
-	// borrowing a key that is about to leave.
-	unset := dumpFor(t, map[string]string{}, SurfaceBootDump)
-	if got := group(t, unset, "chat")["api_key"]; got != "" {
-		t.Errorf("unset secret = %v, want empty string", got)
+	api := dumpFor(t, map[string]string{"server.db_password": longKey}, SurfaceAPI)
+	if got := group(t, api, "server")["db_password"]; got != "set" {
+		t.Errorf("API surface db password = %v, want 'set'", got)
 	}
-
-	api := dumpFor(t, vals, SurfaceAPI)
-	if got := group(t, api, "chat")["api_key"]; got != "set" {
-		t.Errorf("API surface must never fingerprint, got %v", got)
+	// The empty-value branch of maskSecret, on the one key that can still reach
+	// it: cfgFrom injects a password only when the fixture omits it, so an
+	// explicit empty string is the way to render an unset secret.
+	unset := dumpFor(t, map[string]string{"server.db_password": ""}, SurfaceBootDump)
+	if got := group(t, unset, "server")["db_password"]; got != "" {
+		t.Errorf("unset secret = %v, want empty string", got)
 	}
 }
 
@@ -76,54 +63,35 @@ func TestMaskSecretPerClass(t *testing.T) {
 // secret on both surfaces. Red-proof: drop the e.Secret branch in renderField
 // and this fails on every surface.
 func TestDumpNeverLeaksSecretValues(t *testing.T) {
+	// The fp-class half of this sweep left with chat.api_key in β8; the
+	// presence-class half is the whole sweep now. shortKey is deliberately the
+	// value: it is below fpMinLen, so a regression that started fingerprinting
+	// presence keys would still not print it — what this test catches is the
+	// raw value appearing anywhere in the rendered dump.
 	vals := map[string]string{
-		"chat.api_key":       longKey,
 		"server.db_password": shortKey,
 	}
 	for s, name := range map[Surface]string{SurfaceBootDump: "boot", SurfaceAPI: "api"} {
 		rendered := fmt.Sprintf("%v", dumpFor(t, vals, s))
-		if strings.Contains(rendered, longKey) || strings.Contains(rendered, shortKey) {
+		if strings.Contains(rendered, shortKey) {
 			t.Errorf("%s surface leaks a raw secret: %s", name, rendered)
 		}
 	}
 }
 
-// TestDumpRedactsHostURLs pins the §3.5 URL convention on the dump itself:
-// host fields pass through (*url.URL).Redacted(), so a userinfo password is
-// masked even in the window before Validate aborts the boot; unparseable
-// URLs are withheld entirely ((*url.Error).Error() would embed them raw).
-func TestDumpRedactsHostURLs(t *testing.T) {
-	const secret = "hunter2-secret-marker"
-	dump := dumpFor(t, map[string]string{
-		"chat.host": "http://admin:" + secret + "@chat.example:8089",
-	}, SurfaceBootDump)
-
-	rendered := fmt.Sprintf("%v", dump)
-	if strings.Contains(rendered, secret) {
-		t.Fatalf("dump leaks a userinfo password: %s", rendered)
-	}
-	if got := group(t, dump, "chat")["host"]; got != "http://admin:xxxxx@chat.example:8089" {
-		t.Errorf("parseable userinfo host = %v, want stdlib-redacted form", got)
-	}
-	// The unparseable half rode on embed.host until β7 cut the tuple; chat.host
-	// is the last .host key, so the two url.Parse outcomes separate over two
-	// dumps instead of two keys. redactHostURL branches on the PARSE RESULT, not
-	// on which key reached it (the namespace convention picks the fields).
-	bad := dumpFor(t, map[string]string{
-		"chat.host": "http://admin:" + secret + "@bad host:8081",
-	}, SurfaceBootDump)
-	if strings.Contains(fmt.Sprintf("%v", bad), secret) {
-		t.Fatalf("dump leaks a userinfo password of an unparseable host: %v", bad)
-	}
-	if got, ok := group(t, bad, "chat")["host"].(string); !ok || strings.Contains(got, "bad host") {
-		t.Errorf("unparseable host must be withheld, got %v", got)
-	}
-	// Hosts without credentials render unchanged — the dump stays useful.
-	clean := dumpFor(t, map[string]string{"chat.host": "http://chat.example:8089"}, SurfaceBootDump)
-	if got := group(t, clean, "chat")["host"]; got != "http://chat.example:8089" {
-		t.Errorf("clean host must render verbatim, got %v", got)
-	}
-}
+// TestDumpRedactsHostURLs died with chat.host in β8 — the last .host key in the
+// registry. It pinned the §3.5 URL convention on the dump: a host field passes
+// through (*url.URL).Redacted(), so a userinfo password is masked even in the
+// window before Validate aborts the boot, and an unparseable URL is withheld
+// entirely because (*url.Error).Error() would embed it raw.
+//
+// redactHostURL itself is untouched and deliberately kept: it selects on the KEY
+// SUFFIX, not on a field list, so it is a standing guard for whatever .host key
+// is added next rather than a chat.* artifact. Its three cases (parseable
+// userinfo, unparseable, clean) moved to synthreg_test.go's
+// TestSynthHostKeyIsRedacted, which drives renderField with a synthetic
+// legacy.demo.host entry plus a non-.host control proving the suffix is what
+// selects redaction.
 
 // TestDumpInheritMarkers died with inheritMarkers in β6. It pinned both halves
 // of the renderField branch: a zero field rendered its "(inherit …)" marker, a
@@ -135,7 +103,7 @@ func TestDumpRedactsHostURLs(t *testing.T) {
 
 func TestDumpSourcesAndRendering(t *testing.T) {
 	dump := dumpFor(t, map[string]string{
-		"chat.host":         "http://chat.example:8089",
+		"digest.mode":       "env-mode",
 		"dream.backoff_cap": "45d",
 		"dream.backoff_min": "12h",
 		// The time.Duration rendering probe rode on chat_fallback.timeout until
@@ -150,10 +118,11 @@ func TestDumpSourcesAndRendering(t *testing.T) {
 		t.Fatal("dump has no sources map")
 	}
 	// The "default" side of the source probe rode on dream.host until β6 cut the
-	// tuple. dream.language is the same statement on a key no cut wave touches:
-	// unset in this fixture, therefore "default".
-	if sources["chat.host"] != "env" || sources["dream.language"] != "default" {
-		t.Errorf("sources: chat.host=%q dream.language=%q", sources["chat.host"], sources["dream.language"])
+	// tuple, the "env" side on chat.host until β8 cut the last one. Both sides
+	// sit on keys no cut wave touches now: digest.mode is provided by this
+	// fixture, dream.language is not.
+	if sources["digest.mode"] != "env" || sources["dream.language"] != "default" {
+		t.Errorf("sources: digest.mode=%q dream.language=%q", sources["digest.mode"], sources["dream.language"])
 	}
 
 	dream := group(t, dump, "dream")

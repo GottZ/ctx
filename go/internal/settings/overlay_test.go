@@ -32,7 +32,7 @@ func TestHasScope(t *testing.T) {
 			row("rerank.blend_weight", `0.4`),
 			tenantRow("rerank.blend_weight", tenant, `0.6`),
 		}, true},
-		{"tenant row only", []store.SettingOverride{tenantRow("chat.model", tenant, `"m"`)}, true},
+		{"tenant row only", []store.SettingOverride{tenantRow("rerank.enabled", tenant, `true`)}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,16 +85,20 @@ func TestTenantRestartKeyGated(t *testing.T) {
 // tenant carries Source "tenant" — in the SAME build. RED against threading the
 // tenant scope into the sources map for every override (which would mislabel the
 // operator's _global value as tenant-sourced).
+//
+// The _global side rode on chat.model until β8; dream.language carries it now
+// (global-only, so a _global row IS the operator path, and V14 accepts the
+// BCP-47-shaped value verbatim).
 func TestTenantOverlayInheritsBaseLabel(t *testing.T) {
 	resetEnv(t)
 	cfg, _ := buildWith([]store.SettingOverride{
-		row("chat.model", `"global-model"`),               // _global only ⇒ "settings"
+		row("dream.language", `"pt-br"`),                    // _global only ⇒ "settings"
 		tenantRow("rerank.blend_weight", testTenant, `0.6`), // tenant ⇒ "tenant"
 	}, nil, globalAndTenant)
 
-	if cfg.Chat.Model != "global-model" || cfg.Source("chat.model") != config.SourceSettings {
-		t.Errorf("_global-won key: got %q source %q, want global-model/settings",
-			cfg.Chat.Model, cfg.Source("chat.model"))
+	if cfg.Dream.Language != "pt-br" || cfg.Source("dream.language") != config.SourceSettings {
+		t.Errorf("_global-won key: got %q source %q, want pt-br/settings",
+			cfg.Dream.Language, cfg.Source("dream.language"))
 	}
 	if cfg.Rerank.BlendWeight != 0.6 || cfg.Source("rerank.blend_weight") != config.SourceTenant {
 		t.Errorf("tenant-won key: got %v source %q, want 0.6/tenant",

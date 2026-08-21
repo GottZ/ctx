@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +27,11 @@ func severityFor(issues []Issue, field string) Severity {
 }
 
 // TestValidateTable covers the surviving invariants, one good and one bad
-// fixture per invariant. The Delta-6 classes (V2/V4/V7-malformed/V9) are
-// additionally pinned as old-boots/new-ERROR fixtures against the legacy
-// reference implementation in cmd/ctxd/golden_test.go.
+// fixture per invariant. The surviving Delta-6 classes (V2 and the V9 family)
+// are additionally pinned as old-boots/new-ERROR fixtures at boot level in
+// cmd/ctxd; V4 and V7, the two other members of that group, retired with the
+// last backend tuple in β8 (their blocks below record where each statement
+// went).
 func TestValidateTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -59,21 +60,14 @@ func TestValidateTable(t *testing.T) {
 			"rerank.blend_weight": "0.5", "graph.enabled": "true",
 		}, "rerank.blend_weight", -1},
 
-		// V4 — protocol typos fell silently onto the ollama wire path.
-		{"V4 chat typo", map[string]string{"chat.protocol": "olama"}, "chat.protocol", SeverityError},
-		// The case-sensitivity probe rode on dream.protocol until β6 and on
-		// embed.protocol until β7; chat.protocol is the LAST list entry, so it
-		// carries every half of the loop's breadth alone until β8 takes the
-		// loop itself. Sharing the key with the typo case above costs no
-		// coverage: the table asserts per-case input → field, and "olama" and
-		// "openAI" are different rejection reasons (unknown value vs. wrong
-		// case of a known one).
-		{"V4 chat case typo", map[string]string{"chat.protocol": "openAI"}, "chat.protocol", SeverityError},
-		// The V4 allowEmpty column left with dream_embed.protocol in β5 — it
-		// was the only protocol key that inherited when empty. Every remaining
-		// entry has a non-empty default, so an empty protocol is a typo now and
-		// this case asserts exactly that (it rode on embed.protocol until β7).
-		{"V4 chat empty", map[string]string{"chat.protocol": ""}, "chat.protocol", SeverityError},
+		// V4 retired with the chat tuple in β8 (design/01 §7 W7), the last of the
+		// six protocol keys it read — rerank in β3, chat_fallback in β4,
+		// dream_embed in β5, dream in β6, embed in β7. It rejected anything but
+		// ollama/openai because chatWithFormat treated every unknown value as
+		// ollama, so a typo silently produced a 404 against a llama.cpp endpoint.
+		// The statement is not lost, it moved to where a protocol is configured
+		// now: backends/validate.go validateIdentity refuses a row whose protocol
+		// is not openai, ollama or rerank, at write time and with a FieldError.
 
 		// V5 — unknown prompt version: WARN + fall back to v5.2 (legacy init()).
 		{"V5 unknown", map[string]string{"query.prompt_version": "v7"}, "query.prompt_version", SeverityWarn},
@@ -83,31 +77,17 @@ func TestValidateTable(t *testing.T) {
 		{"V6 mode", map[string]string{"dream.backoff_mode": "banana"}, "dream.backoff_mode", SeverityWarn},
 		{"V6 mode off ok", map[string]string{"dream.backoff_mode": "off"}, "dream.backoff_mode", -1},
 
-		// V7 — host URL hygiene.
-		{"V7 scheme", map[string]string{"chat.host": "ftp://chat.example"}, "chat.host", SeverityError},
-		// The trailing-slash case rode on embed.host until β7 cut the tuple.
-		// chat.host is the last V7 entry, so from here every case in this block
-		// addresses it — the four inputs are four different rejection reasons
-		// of validateHostURL, which is what the table asserts per case.
-		{"V7 trailing slash", map[string]string{"chat.host": "http://chat.example/"}, "chat.host", SeverityError},
-		// β3 moved this case off rerank.host onto the fallback host, β4 moves it
-		// again — onto chat.host, the one V7 entry that outlives the list itself
-		// (design/01 §7: the loop and validateHostURL leave in β8).
-		{"V7 userinfo", map[string]string{"chat.host": "http://user:hunter2@chat.example"}, "chat.host", SeverityError},
-		// The unparseable case rode on dream.host until β6; chat.host is the
-		// entry that outlives the list, and the withheld-value assertion it
-		// carries is about validateHostURL's error branch, not about which host
-		// reached it.
-		{"V7 unparseable", map[string]string{"chat.host": "http://user:hunter2@bad host"}, "chat.host", SeverityError},
-		// The empty-host continue of the V7 loop. It rode on the one list entry
-		// whose DEFAULT was empty (chat_fallback.host until β4, dream_embed.host
-		// until β5), then on embed.host until β7; chat.host defaults to a real
-		// URL, so the case states the same thing from the settings side: a
-		// present-but-empty override (lookupMap counts it as provided, what an
-		// F2 row can deliver and FromEnv cannot) still takes the skip and does
-		// not become a scheme error. That is the branch's live caller class
-		// after the cut.
-		{"V7 empty host skipped", map[string]string{"chat.host": ""}, "chat.host", -1},
+		// V7 retired with chat.host in β8 (design/01 §7 W7) — the last of the six
+		// host keys, and with it validateHostURL. Its four rejection reasons were
+		// unparseable, non-http(s) scheme, trailing slash (doubles on path join)
+		// and USERINFO, the security-carrying one: a credential inside a host URL
+		// bypasses the field-name-based secret masking everywhere hosts flow —
+		// dump, error logs, the F2 API. That reason has lived on the pool write
+		// path since α3, ahead of this removal by design: backends/validate.go
+		// validateIdentity answers a base_url with userinfo with a FieldError,
+		// and the rendering guard redactHostURL (dump.go) still covers the .host
+		// namespace convention for whatever key takes it next (pinned in
+		// synthreg_test.go). The empty-host skip went with the loop that had it.
 
 		// V8 retired with rerank.host in β3 (design/01 §7 W2): "enabled without
 		// host" is a pool question now, and Validate does not see the pool.
@@ -268,35 +248,27 @@ func TestValidateRerankHeartbeatWarnsRetired(t *testing.T) {
 	}
 }
 
-// TestValidateUserinfoNeverLeaks proves the §3.5 convention: the password of
-// a userinfo host appears NEITHER in any issue message NOR in the redacted
-// dump — including the url.Parse-failure path, where (*url.Error).Error()
-// would embed the raw URL.
-func TestValidateUserinfoNeverLeaks(t *testing.T) {
-	const secret = "hunter2-secret-marker"
-	for name, host := range map[string]string{
-		"parseable":   "http://admin:" + secret + "@chat.example:8089",
-		"unparseable": "http://admin:" + secret + "@bad host:8089",
-	} {
-		t.Run(name, func(t *testing.T) {
-			cfg := validCfg(t, map[string]string{"chat.host": host})
-			issues := Validate(cfg)
-			if severityFor(issues, "chat.host") != SeverityError {
-				t.Fatalf("userinfo host must be a V7 ERROR, got %v", issues)
-			}
-			for _, is := range issues {
-				if strings.Contains(is.Msg, secret) {
-					t.Errorf("issue message leaks the userinfo password: %s", is.Msg)
-				}
-			}
-			rendered := fmt.Sprintf("%v", cfg.Redacted(SurfaceBootDump))
-			if strings.Contains(rendered, secret) {
-				// The host FIELD itself necessarily carries the raw value
-				// (boot aborts on the ERROR before any dump in main), but the
-				// convention is defense in depth: assert anyway so a future
-				// "dump before validate" refactor cannot silently leak.
-				t.Errorf("redacted dump leaks the userinfo password")
-			}
-		})
-	}
-}
+// TestValidateUserinfoNeverLeaks died with V7 in β8 (design/01 §7 W7 names it
+// by name: "TestValidateUserinfoNeverLeaks stirbt HIER, sein Schutzinhalt lebt
+// seit W1a am Pool"). It proved the §3.5 convention on both url.Parse outcomes:
+// the password of a userinfo host appeared neither in a validation issue nor in
+// the redacted dump, including the parse-FAILURE path where (*url.Error).Error()
+// would have embedded the raw URL.
+//
+// Both halves are alive elsewhere, and deliberately landed BEFORE this removal
+// rather than after it:
+//
+//   - The rejection: backends/validate.go validateIdentity refuses a base_url
+//     with userinfo at the pool write path (α3), with a message that derives
+//     nothing from the input — pinned in backends/validate_test.go including
+//     the needle probe that the token reaches no response, log or audit line.
+//     That is where a host is configured now, so the guard sits on the live
+//     path instead of on a config field nothing could set.
+//   - The rendering: redactHostURL still runs on every key whose name ends in
+//     .host, and synthreg_test.go's TestSynthHostKeyIsRedacted drives it on a
+//     synthetic .host entry over both url.Parse outcomes plus a non-.host
+//     control.
+//
+// What is genuinely gone is the COMBINATION at config level — validate and dump
+// asserted in one pass — and it is gone because its precondition is: no config
+// key can carry a host any more.

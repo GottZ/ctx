@@ -9,6 +9,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/backends"
 )
 
 // lookupMap adapts a map keyed by CANONICAL REGISTRY KEY to the fromSources
@@ -118,6 +120,47 @@ func TestParseBoolExactMatch(t *testing.T) {
 	}
 }
 
+// TestParserForUnoccupiedTypes keeps the two parser arms that lost their last
+// registry carrier in β8 exercised: chat.protocol was the only typProtocol
+// field, chat.think the only typThink one. Both arms stay in parserFor because
+// they are generic registry vocabulary — a protocol and a think mode are what a
+// backends.Backend carries, and a future key of either type must not find a nil
+// parser (buildEntry rejects an unsupported field type outright, so the failure
+// would be a boot panic on the next registry build).
+//
+// This is deliberately the LOWEST altitude that still has a subject. The
+// precedence matrix in build_test.go dropped its protocol row instead of
+// substituting one, because there is no key to substitute; here the parser is
+// the subject and needs none.
+func TestParserForUnoccupiedTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+		in   string
+		want any
+	}{
+		{"protocol", typProtocol, "openai", backends.Protocol("openai")},
+		{"protocol passes typos through", typProtocol, "olama", backends.Protocol("olama")},
+		{"think", typThink, "true", backends.ThinkMode("true")},
+		{"think empty", typThink, "", backends.ThinkMode("")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := parserFor(tc.typ)
+			if p == nil {
+				t.Fatalf("parserFor(%v) is nil — a key of this type would fail buildEntry", tc.typ)
+			}
+			got, err := p(tc.in, nil)
+			if err != nil || got != tc.want {
+				t.Errorf("parser(%q) = (%v, %v), want (%v, nil)", tc.in, got, err, tc.want)
+			}
+		})
+	}
+	// Both parsers are deliberately TOLERANT: they convert without validating,
+	// which is why V4 had to exist at all and why its successor lives at the
+	// pool write path (backends/validate.go validateIdentity) rather than here.
+	// Asserting the tolerance is what keeps that reasoning checkable.
+}
+
 func TestParseDurationSeconds(t *testing.T) {
 	if v, err := parseDurationSeconds("420", nil); err != nil || v.(time.Duration) != 420*time.Second {
 		t.Errorf("parseDurationSeconds(420) = (%v, %v), want 7m0s", v, err)
@@ -156,8 +199,8 @@ func TestFromSourcesDefaultsAreClean(t *testing.T) {
 	if c.Source("server.db_password") != "env" {
 		t.Errorf("db_password source = %q, want env", c.Source("server.db_password"))
 	}
-	if c.Source("chat.host") != "default" {
-		t.Errorf("chat.host source = %q, want default", c.Source("chat.host"))
+	if c.Source("digest.mode") != "default" {
+		t.Errorf("digest.mode source = %q, want default", c.Source("digest.mode"))
 	}
 	if c.Source("nonexistent.key") != "" {
 		t.Errorf("unknown key source = %q, want empty", c.Source("nonexistent.key"))
@@ -198,7 +241,7 @@ func TestFromSourcesStrictMalformedErrors(t *testing.T) {
 	// field (today's getEnvInt fatal paths). The value stays default so the
 	// rest of the dump remains renderable before the boot abort.
 	for _, key := range []string{
-		"server.db_port", "chat.num_ctx",
+		"server.db_port", "graph_overview.label_batch",
 		"query.rate_limit_write", "query.rate_limit_read",
 	} {
 		_, issues := cfgFrom(t, map[string]string{key: "not_a_number"})
@@ -230,24 +273,25 @@ func TestFromEnvReadsEnvironment(t *testing.T) {
 		t.Setenv(v, "")
 	}
 	t.Setenv("CONTEXT_DB_PASSWORD", "test-password")
-	t.Setenv("CTX_CHAT_HOST", "http://chat.example:8089")
+	t.Setenv("CTX_DIGEST_MODE", "env-mode")
 	t.Setenv("CTX_DREAM_BACKOFF_CAP", "45d")
 
 	c, issues := FromEnv()
 	if len(issues) != 0 {
 		t.Fatalf("unexpected issues: %v", issues)
 	}
-	if c.Chat.Host != "http://chat.example:8089" {
-		t.Errorf("Chat.Host = %q", c.Chat.Host)
+	if c.Digest.Mode != "env-mode" {
+		t.Errorf("Digest.Mode = %q", c.Digest.Mode)
 	}
 	if c.Dream.Backoff.CapHours != Hours(45*24) {
 		t.Errorf("CapHours = %v, want 1080", c.Dream.Backoff.CapHours)
 	}
-	// The "default" side rode on dream.host until β6 cut the tuple;
-	// dream.language is unset in this fixture and outlives the cut train.
-	if c.Source("chat.host") != "env" || c.Source("dream.language") != "default" {
-		t.Errorf("sources wrong: chat.host=%q dream.language=%q",
-			c.Source("chat.host"), c.Source("dream.language"))
+	// The "env" side rode on dream.host until β6, embed.host until β7 and
+	// chat.host until β8 cut the last tuple; digest.mode is set in this fixture
+	// and, like dream.language on the "default" side, outlives the cut train.
+	if c.Source("digest.mode") != "env" || c.Source("dream.language") != "default" {
+		t.Errorf("sources wrong: digest.mode=%q dream.language=%q",
+			c.Source("digest.mode"), c.Source("dream.language"))
 	}
 	// Empty env == unset (legacy getEnv semantics). It rode on embed.host until
 	// β7 cut the tuple; server.listen_addr is a string key with a non-empty

@@ -69,7 +69,9 @@ func resetRegistryEnv(t *testing.T) {
 // SECURITY PROPERTY (G16/F4-O4): every /api/settings route — reads included —
 // requires an admin key. Without the gate, any valid key (friend tenant, the
 // MCP remote token circulating through claude.ai/Cloudflare) could read the
-// effective server config and flip chat.host / inject secret_refs.
+// effective server config and flip any hot key under it. (The concrete abuse
+// this line named until β8 — flip chat.host, inject a secret_ref — retired
+// with the chat tuple; the gate's subject is the whole namespace, not one key.)
 //
 // Negative probe (2026-06-11): this test was run against MountSettings with
 // the RequireAdmin line removed first — every subtest failed (nil-pool panic
@@ -179,14 +181,31 @@ func TestHandlePut_NonScalar422(t *testing.T) {
 
 // Below: §3.4 masking rule (unit surface; the env-plaintext E2E probe lives
 // in the integration test).
+//
+// VEHICLE NOTE (β8): the sensitive arms of renderEffective used to be driven
+// by config.KeyByName("chat.api_key") — the registry's last secret:"fp" key.
+// After the chat tuple left, NO registry key is Sensitive that could ever
+// reach this function: server.db_password is secret:"presence", but it is also
+// mut:"restart", so admitOverride drops its row long before a snapshot or an
+// override map carries it.
+//
+// renderEffective takes a config.KeyInfo by VALUE, so the branch selector is a
+// plain struct field, not a registry lookup — the tests below build the
+// KeyInfo SYNTHETICALLY and put a LIVE key NAME inside it (digest.mode: hot,
+// global-only, unvalidated string), so c.Source(info.Key) still resolves
+// through the real snapshot machinery ("env" / "settings" / default). Only the
+// Sensitive bit is synthetic; every code path under test is production.
 
 func TestRenderEffective_EnvSensitiveMasked(t *testing.T) {
 	resetRegistryEnv(t)
 	const marker = "ENV-PLAINTEXT-MARKER-aaaaaaaaaaaaaaaaaaaaaaaa"
-	t.Setenv("CTX_CHAT_API_KEY", marker)
+	t.Setenv("CTX_DIGEST_MODE", marker)
 	c, _ := config.FromEnv()
 
-	info, _ := config.KeyByName("chat.api_key")
+	info := config.KeyInfo{Key: "digest.mode", Sensitive: true}
+	if c.Source(info.Key) != "env" {
+		t.Fatalf("fixture: source = %q, want env", c.Source(info.Key))
+	}
 	got := renderEffective(c, info, nil)
 	if got != maskedEnvValue {
 		t.Errorf("env-sourced sensitive value = %v, want %q", got, maskedEnvValue)
@@ -199,7 +218,10 @@ func TestRenderEffective_EnvSensitiveMasked(t *testing.T) {
 func TestRenderEffective_DefaultSensitiveEmpty(t *testing.T) {
 	resetRegistryEnv(t)
 	c, _ := config.FromEnv()
-	info, _ := config.KeyByName("chat.api_key")
+	info := config.KeyInfo{Key: "digest.mode", Sensitive: true}
+	if c.Source(info.Key) != "default" && c.Source(info.Key) != "" {
+		t.Fatalf("fixture: source = %q, want default", c.Source(info.Key))
+	}
 	if got := renderEffective(c, info, nil); got != "" {
 		t.Errorf("default-sourced sensitive value = %v, want empty", got)
 	}
@@ -207,20 +229,28 @@ func TestRenderEffective_DefaultSensitiveEmpty(t *testing.T) {
 
 // DB-sourced sensitive keys render the secret_ref NAME from the override row
 // — never the resolved plaintext sitting in the snapshot.
+//
+// The DIVERGENCE between snapshot and row is what the branch exists for, and
+// it is reproduced faithfully here: the fixture writes the "plaintext" into
+// the snapshot field (Build with the marker as the override value) while the
+// override MAP carries the harmless ref name — exactly the shape the live
+// secret_ref resolver produced when chat.api_key still existed.
 func TestRenderEffective_DBSensitiveShowsRefName(t *testing.T) {
 	resetRegistryEnv(t)
 	const plaintext = "RESOLVED-PLAINTEXT-MARKER-bbbbbbbbbbbbbbbbbbbb"
-	resolve := func(name string) (string, error) { return plaintext, nil }
-	c, issues := config.Build([]config.Override{{Key: "chat.api_key", Value: "prov-main"}}, resolve)
+	c, issues := config.Build([]config.Override{{Key: "digest.mode", Value: plaintext}}, nil)
 	if config.HasErrors(issues) {
 		t.Fatalf("fixture build: %v", issues)
 	}
-	if c.Source("chat.api_key") != "settings" {
-		t.Fatalf("fixture: source = %q, want settings", c.Source("chat.api_key"))
+	if c.Source("digest.mode") != "settings" {
+		t.Fatalf("fixture: source = %q, want settings", c.Source("digest.mode"))
+	}
+	if c.Digest.Mode != plaintext {
+		t.Fatalf("fixture: snapshot must carry the resolved-plaintext stand-in, got %q", c.Digest.Mode)
 	}
 
-	info, _ := config.KeyByName("chat.api_key")
-	overrides := map[string]json.RawMessage{"chat.api_key": json.RawMessage(`"prov-main"`)}
+	info := config.KeyInfo{Key: "digest.mode", Sensitive: true}
+	overrides := map[string]json.RawMessage{"digest.mode": json.RawMessage(`"prov-main"`)}
 	got := renderEffective(c, info, overrides)
 	if got != "prov-main" {
 		t.Errorf("db-sourced sensitive value = %v, want the ref name", got)
@@ -228,19 +258,49 @@ func TestRenderEffective_DBSensitiveShowsRefName(t *testing.T) {
 	if s, _ := got.(string); strings.Contains(s, plaintext) {
 		t.Errorf("resolved plaintext leaked into the rendering")
 	}
-	// Fail-safe floor: even the raw RenderValue path is presence-only.
-	if v, _ := config.RenderValue(c, "chat.api_key"); v != "set" {
-		t.Errorf("RenderValue fail-safe = %v, want \"set\"", v)
+
+	// Presence floor: the row vanished between load and render — the branch
+	// must fall back to "set", never to the snapshot value.
+	if got := renderEffective(c, info, nil); got != "set" {
+		t.Errorf("row-vanished floor = %v, want \"set\"", got)
 	}
+	if s, _ := renderEffective(c, info, nil).(string); strings.Contains(s, plaintext) {
+		t.Errorf("presence floor leaked the snapshot value")
+	}
+
+	// The "even the raw config.RenderValue path is presence-only" assertion
+	// this test used to carry needed a REGISTRY-sensitive key: RenderValue
+	// reads the Sensitive class off the entry, which a synthetic KeyInfo
+	// cannot reach. It moved to the injected-registry vehicle in
+	// config/synthreg_test.go (TestSynthMaskSecretPerClass, the
+	// renderField(..., SurfaceAPI) == "set" arm).
 }
 
-func TestRenderEffective_NonSensitiveHostRedacted(t *testing.T) {
+// TestRenderEffective_NonSensitiveVerbatim is what is left of
+// TestRenderEffective_NonSensitiveHostRedacted. The non-sensitive arm —
+// renderEffective delegates to config.RenderValue and returns the value
+// verbatim — keeps its subject on any live key and is asserted below on a real
+// registry KeyInfo.
+//
+// The HOST half died with chat.host in β8: it was the registry's last ".host"
+// key, and the namespace convention (redactHostURL runs on the key SUFFIX, so
+// it guards the next .host key somebody adds) cannot be pinned on a faked
+// KeyInfo here — the redaction happens inside config.renderField, which
+// resolves the entry out of the real registry. That statement now lives on the
+// injected-registry vehicle: config/synthreg_test.go, TestSynthHostKeyIsRedacted.
+func TestRenderEffective_NonSensitiveVerbatim(t *testing.T) {
 	resetRegistryEnv(t)
-	t.Setenv("CTX_CHAT_HOST", "http://chat-host:11434")
+	t.Setenv("CTX_DIGEST_MODE", "compact")
 	c, _ := config.FromEnv()
-	info, _ := config.KeyByName("chat.host")
-	if got := renderEffective(c, info, nil); got != "http://chat-host:11434" {
-		t.Errorf("plain host = %v, want verbatim URL", got)
+	info, ok := config.KeyByName("digest.mode")
+	if !ok {
+		t.Fatal("digest.mode missing from registry")
+	}
+	if info.Sensitive {
+		t.Fatal("digest.mode became sensitive — this test needs the non-sensitive arm")
+	}
+	if got := renderEffective(c, info, nil); got != "compact" {
+		t.Errorf("non-sensitive value = %v, want the verbatim value", got)
 	}
 }
 
@@ -293,17 +353,22 @@ func TestNormalizedJSON(t *testing.T) {
 // the backend pool — its settings override would be a dead bootstrap seed
 // that LOOKS live while the pool serves something else. Non-superseded hot
 // keys stay writable, and the restart/coupled messages keep their env hint.
+//
+// VEHICLE NOTE (β8): the gate used to be driven by config.KeyByName("chat.host"),
+// the last of the six backend tuples to leave. After the cut NO registry key
+// carries the superseded marker any more — the machinery (KeyInfo.Superseded,
+// this branch, the handler 409, the CLI hint, the FE legacy card) is live but
+// unoccupied, exactly like the coupled classes above. It is therefore pinned
+// the same way: a synthetic KeyInfo straight into mutabilityBlock, which reads
+// the marker off the value and never consults the registry.
+//
+// This test dies WITH the machinery in β9, when KeyInfo.Superseded and the
+// branch it selects are removed — not before.
 func TestMutabilityBlockSuperseded(t *testing.T) {
-	info, ok := config.KeyByName("chat.host")
-	if !ok {
-		t.Fatal("chat.host missing from registry")
-	}
-	if info.Superseded == "" {
-		t.Fatal("chat.host lost its superseded tag — this test guards the 409 gate")
-	}
+	info := config.KeyInfo{Key: "future.superseded", Superseded: "f3:context_backends", Mutability: "hot"}
 	msg, blocked := mutabilityBlock(info)
 	if !blocked {
-		t.Error("superseded key chat.host must be write-blocked")
+		t.Error("a superseded key must be write-blocked")
 	}
 	if !strings.Contains(msg, "backend pool") {
 		t.Errorf("block message must point at the backend pool, got %q", msg)
@@ -314,8 +379,15 @@ func TestMutabilityBlockSuperseded(t *testing.T) {
 	// synthetic KeyInfo (TestMutabilityBlockCoupledBranches), which needs no
 	// registry carrier.
 
-	// A live hot key stays writable.
-	hot, _ := config.KeyByName("dream.backoff_factor")
+	// A live hot key stays writable — the registry-backed negative control that
+	// keeps the synthetic positive above from being a tautology.
+	hot, ok := config.KeyByName("dream.backoff_factor")
+	if !ok {
+		t.Fatal("dream.backoff_factor missing from registry")
+	}
+	if hot.Superseded != "" {
+		t.Fatalf("dream.backoff_factor became superseded — pick another live hot key")
+	}
 	if _, blocked := mutabilityBlock(hot); blocked {
 		t.Error("dream.backoff_factor (hot, not superseded) must stay writable")
 	}

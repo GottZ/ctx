@@ -25,9 +25,9 @@ func secretsRouterAs(t *testing.T, ar *auth.AuthResult, method, path, body strin
 		})
 	})
 	h := &SecretsHandler{
-		pool:    nil,
-		cfg:     testCfgStore(t),
-		reload:  func(*http.Request) error { return nil },
+		pool:   nil,
+		cfg:    testCfgStore(t),
+		reload: func(*http.Request) error { return nil },
 		// The real no-key failure shape: New("") names the env var, no values.
 		openBox: func() (*sealbox.Box, error) { return sealbox.New("", "") },
 	}
@@ -100,5 +100,60 @@ func TestSecretsPut_NoMasterKey503(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "sk-something") {
 		t.Errorf("error path echoed the submitted value")
+	}
+}
+
+// TestSecretRefsRemediationBranches pins all three arms of
+// secretRefs.remediation without a DB. The BACKENDS-ONLY arm is the only one a
+// live reference scan can still produce (β8: no registry key is sensitive, so
+// secretRefs.settings is always empty in practice) — the settings-only and
+// MIXED arms would otherwise have lost their coverage together with
+// chat.api_key, while the code stays live and load-bearing for the day a
+// settings-side secret carrier returns.
+//
+// It lives in the unit file, not next to the guard in
+// sealbox_handler_integration_test.go: it needs no database, and a pin behind
+// the integration tag would sit out every `-short` run and every CI stage that
+// has no PostgreSQL — which is most of them.
+func TestSecretRefsRemediationBranches(t *testing.T) {
+	const name = "prov-x"
+	cases := []struct {
+		label      string
+		refs       secretRefs
+		wantSub    []string
+		wantAbsent []string
+	}{
+		{
+			label:      "backends only",
+			refs:       secretRefs{backends: []string{"be-1"}},
+			wantSub:    []string{name, "api_key_ref"},
+			wantAbsent: []string{"/api/settings/"},
+		},
+		{
+			label:      "settings only",
+			refs:       secretRefs{settings: []string{"future.secret_key"}},
+			wantSub:    []string{name, "/api/settings/"},
+			wantAbsent: []string{"api_key_ref"},
+		},
+		{
+			label:   "mixed",
+			refs:    secretRefs{settings: []string{"future.secret_key"}, backends: []string{"be-1"}},
+			wantSub: []string{name, "api_key_ref", "/api/settings/"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			got := c.refs.remediation(name)
+			for _, sub := range c.wantSub {
+				if !strings.Contains(got, sub) {
+					t.Errorf("remediation = %q, want it to name %q", got, sub)
+				}
+			}
+			for _, sub := range c.wantAbsent {
+				if strings.Contains(got, sub) {
+					t.Errorf("remediation = %q, must not name %q (wrong way out for this reference type)", got, sub)
+				}
+			}
+		})
 	}
 }
