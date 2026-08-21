@@ -384,19 +384,19 @@ func TestStatusDBAsyncCadenceHotInterval(t *testing.T) {
 }
 
 // validTestConfig builds the minimal config.Config that passes Validate (a
-// zero-value Config fails on chat/chat_fallback/embed/dream.protocol,
-// server.db_password, graph.hop_depth) — needed because store.Replace
-// re-validates the WHOLE config, not just the field under test (Gate G6's
-// hot-reload probe, TestStatusDBAsyncCadenceHotInterval).
+// zero-value Config fails on chat/embed/dream.protocol, server.db_password,
+// graph.hop_depth — chat_fallback.protocol left the V4 list with its tuple in
+// β4) — needed because store.Replace re-validates the WHOLE config, not just
+// the field under test (Gate G6's hot-reload probe,
+// TestStatusDBAsyncCadenceHotInterval).
 func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 	return &config.Config{
-		Chat:     config.ChatConfig{Protocol: backends.ProtocolOllama},
-		Fallback: config.FallbackConfig{Protocol: backends.ProtocolOpenAI},
-		Embed:    config.EmbedConfig{Protocol: backends.ProtocolOllama},
-		Dream:    config.DreamConfig{Protocol: backends.ProtocolOllama},
-		Server:   config.ServerConfig{DBPass: "x"},
-		Graph:    config.GraphConfig{HopDepth: 1},
-		Events:   config.EventsConfig{DBStatsInterval: dbStatsInterval},
+		Chat:   config.ChatConfig{Protocol: backends.ProtocolOllama},
+		Embed:  config.EmbedConfig{Protocol: backends.ProtocolOllama},
+		Dream:  config.DreamConfig{Protocol: backends.ProtocolOllama},
+		Server: config.ServerConfig{DBPass: "x"},
+		Graph:  config.GraphConfig{HopDepth: 1},
+		Events: config.EventsConfig{DBStatsInterval: dbStatsInterval},
 	}
 }
 

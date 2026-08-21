@@ -67,12 +67,11 @@ func TestMaskSecretPerClass(t *testing.T) {
 // and this fails on every surface.
 func TestDumpNeverLeaksSecretValues(t *testing.T) {
 	vals := map[string]string{
-		"chat.api_key":          longKey,
-		"chat_fallback.api_key": longKey,
-		"embed.api_key":         longKey,
-		"dream.api_key":         longKey,
-		"dream_embed.api_key":   longKey,
-		"server.db_password":    shortKey,
+		"chat.api_key":        longKey,
+		"embed.api_key":       longKey,
+		"dream.api_key":       longKey,
+		"dream_embed.api_key": longKey,
+		"server.db_password":  shortKey,
 	}
 	for s, name := range map[Surface]string{SurfaceBootDump: "boot", SurfaceAPI: "api"} {
 		rendered := fmt.Sprintf("%v", dumpFor(t, vals, s))
@@ -129,10 +128,14 @@ func TestDumpInheritMarkers(t *testing.T) {
 
 func TestDumpSourcesAndRendering(t *testing.T) {
 	dump := dumpFor(t, map[string]string{
-		"chat.host":             "http://chat.example:8089",
-		"dream.backoff_cap":     "45d",
-		"dream.backoff_min":     "12h",
-		"chat_fallback.timeout": "420",
+		"chat.host":         "http://chat.example:8089",
+		"dream.backoff_cap": "45d",
+		"dream.backoff_min": "12h",
+		// The time.Duration rendering probe rode on chat_fallback.timeout until
+		// β4 cut it. dream.idle_wait carries the same two properties — the
+		// bare-int-seconds parse (load.go parseDurationSeconds) and the
+		// Duration.String() render — on a key no cut wave touches.
+		"dream.idle_wait": "420",
 	}, SurfaceBootDump)
 
 	sources, ok := dump["sources"].(map[string]string)
@@ -147,8 +150,8 @@ func TestDumpSourcesAndRendering(t *testing.T) {
 	if dream["backoff_cap"] != "45d" || dream["backoff_min"] != "12h" {
 		t.Errorf("hours rendering: cap=%v min=%v", dream["backoff_cap"], dream["backoff_min"])
 	}
-	if got := group(t, dump, "chat_fallback")["timeout"]; got != "7m0s" {
-		t.Errorf("timeout rendering = %v, want 7m0s", got)
+	if got := dream["idle_wait"]; got != "7m0s" {
+		t.Errorf("duration rendering = %v, want 7m0s", got)
 	}
 	if got := group(t, dump, "query")["timezone"]; got != "UTC" {
 		t.Errorf("timezone rendering = %v, want UTC", got)

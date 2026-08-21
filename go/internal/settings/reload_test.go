@@ -336,10 +336,16 @@ func TestLeakScanBootBuildReload(t *testing.T) {
 	buf := captureLogs(t)
 
 	rows := []store.SettingOverride{
-		row("chat.api_key", `"prov-main"`),                 // resolves to dbSecret
-		row("chat_fallback.api_key", `"`+pastedSecret+`"`), // ref value IS a plaintext ⇒ resolver error path
-		row("rerank.blend_weight", `"kaputt"`),             // corrupt-value WARN path
-		row("chat.model", `"db-model"`),                    // healthy non-secret override
+		row("chat.api_key", `"prov-main"`), // resolves to dbSecret
+		// The resolver error path needs a REGISTERED secret key — a row on a cut
+		// key is dropped as unknown before the resolver ever sees it, and the
+		// pasted-plaintext marker would then be scanned for in a log surface it
+		// never reached. It rode on chat_fallback.api_key until β4 cut the tuple;
+		// embed.api_key is the same class (secret:"fp", tenant-overridable) and
+		// outlives dream_embed's.
+		row("embed.api_key", `"`+pastedSecret+`"`), // ref value IS a plaintext ⇒ resolver error path
+		row("rerank.blend_weight", `"kaputt"`),     // corrupt-value WARN path
+		row("chat.model", `"db-model"`),            // healthy non-secret override
 	}
 	resolve := func(name string) (string, error) {
 		if name == "prov-main" {

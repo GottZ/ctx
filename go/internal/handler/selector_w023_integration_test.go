@@ -95,13 +95,12 @@ func w023Config(enabled bool) *config.Config {
 		// The non-selector fields only exist so config.Store.Replace passes
 		// Validate on the runtime-flip path (G3) — the F2 settings-write gate
 		// rejects a generation with SeverityError issues.
-		Server:   config.ServerConfig{DBPass: "test-password"},
-		Chat:     config.ChatConfig{Protocol: backends.ProtocolOllama},
-		Fallback: config.FallbackConfig{Protocol: backends.ProtocolOllama},
-		Embed:    config.EmbedConfig{Protocol: backends.ProtocolOllama},
-		Dream:    config.DreamConfig{Protocol: backends.ProtocolOllama},
-		Graph:    config.GraphConfig{HopDepth: 1},        // Enabled stays false
-		Query:    config.QueryConfig{Timezone: time.UTC}, // RateLimitRead 0 = disabled
+		Server: config.ServerConfig{DBPass: "test-password"},
+		Chat:   config.ChatConfig{Protocol: backends.ProtocolOllama},
+		Embed:  config.EmbedConfig{Protocol: backends.ProtocolOllama},
+		Dream:  config.DreamConfig{Protocol: backends.ProtocolOllama},
+		Graph:  config.GraphConfig{HopDepth: 1},        // Enabled stays false
+		Query:  config.QueryConfig{Timezone: time.UTC}, // RateLimitRead 0 = disabled
 		Selector: config.SelectorConfig{
 			Enabled:        enabled,
 			ExactMax:       w023ExactMax,

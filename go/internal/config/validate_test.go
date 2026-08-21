@@ -89,11 +89,19 @@ func TestValidateTable(t *testing.T) {
 		// V7 — host URL hygiene.
 		{"V7 scheme", map[string]string{"chat.host": "ftp://chat.example"}, "chat.host", SeverityError},
 		{"V7 trailing slash", map[string]string{"embed.host": "http://embed.example/"}, "embed.host", SeverityError},
-		// β3 moved this case off rerank.host (cut with the tuple) onto the
-		// fallback host — one of the five hosts still in the V7 list.
-		{"V7 userinfo", map[string]string{"chat_fallback.host": "http://user:hunter2@fallback.example"}, "chat_fallback.host", SeverityError},
+		// β3 moved this case off rerank.host onto the fallback host, β4 moves it
+		// again — onto chat.host, the one V7 entry that outlives the list itself
+		// (design/01 §7: the remaining hosts leave in β5/β6/β7, the loop and
+		// validateHostURL in β8). Sharing the key with the scheme case above
+		// costs no coverage: the table asserts per-case input → field, and the
+		// loop's breadth is carried by the scheme/trailing-slash/unparseable
+		// cases sitting on three different hosts.
+		{"V7 userinfo", map[string]string{"chat.host": "http://user:hunter2@chat.example"}, "chat.host", SeverityError},
 		{"V7 unparseable", map[string]string{"dream.host": "http://user:hunter2@bad host"}, "dream.host", SeverityError},
-		{"V7 empty fallback host ok", map[string]string{}, "chat_fallback.host", -1},
+		// The empty-host continue of the V7 loop. It needs a host key whose
+		// DEFAULT is empty; after the chat_fallback cut dream_embed.host is the
+		// only one left in the list (config.go: dream_embed inherits from embed).
+		{"V7 empty host skipped", map[string]string{}, "dream_embed.host", -1},
 
 		// V8 retired with rerank.host in β3 (design/01 §7 W2): "enabled without
 		// host" is a pool question now, and Validate does not see the pool.
@@ -135,8 +143,9 @@ func TestValidateTable(t *testing.T) {
 		// V13 retired with rerank.host in β3 (design/01 §7 W2): its condition
 		// read Fallback.Host AND Rerank.Host, and whether a heartbeat-capable
 		// cross-encoder is armed is a pool question after the cut. Its two cases
-		// are gone with it; that a plain fallback host now draws no WARN at all
-		// is asserted by TestValidateRerankHeartbeatWarnsRetired below.
+		// are gone with it; since β4 both of its operands are out of the
+		// registry, so no fixture can state the condition at all — what is left
+		// of the claim lives in TestValidateRerankHeartbeatWarnsRetired below.
 
 		// V14 — dream.language reaches an LLM system prompt verbatim, so the
 		// shape gate is an ERROR, not a tolerant fallback. Empty is the
@@ -242,21 +251,24 @@ func TestValidateTemporalTimeoutBudget(t *testing.T) {
 }
 
 // TestValidateRerankHeartbeatWarnsRetired is what is left of
-// TestValidateV13DoubleWarnWithV8 after β3. The old test pinned the deliberate
-// double-WARN of V8 (judge path without heartbeat) and V13 (unprotected
-// fallback synthesis); both keyed on rerank.host and retired with the tuple.
+// TestValidateV13DoubleWarnWithV8 after β3 and β4. The original pinned the
+// deliberate double-WARN of V8 (judge path without heartbeat) and V13
+// (unprotected fallback synthesis); both keyed on rerank.host and retired with
+// that tuple, so β3 kept the test inverted — the exact fixture that used to
+// produce two WARNs must now produce none.
 //
-// It is kept, inverted, rather than deleted: the exact fixture that used to
-// produce two WARNs must now produce none. That is the wave's behaviour claim
-// stated positively — a later re-introduction of either check on a config field
-// (rather than on the pool, where the dispatch actually lives) fails here.
+// β4 shrinks it to the V8 half. V13's second condition was Fallback.Host, and
+// with the chat_fallback tuple out of the registry the fixture row for it is
+// not merely irrelevant, it is unreadable: cfgFrom loads through the registry
+// (load.go fromSources), so a value under a cut key is never looked up and
+// would silently assert nothing. What survives is the statement that still has
+// a subject — rerank.enabled alone must not produce a config-level issue, on
+// rerank.host or anywhere else in the rerank group. Whether a heartbeat-capable
+// cross-encoder is actually live is a pool question (design/01 §7 W2).
 func TestValidateRerankHeartbeatWarnsRetired(t *testing.T) {
-	cfg := validCfg(t, map[string]string{
-		"chat_fallback.host": "http://fallback.example:8090",
-		"rerank.enabled":     "true",
-	})
+	cfg := validCfg(t, map[string]string{"rerank.enabled": "true"})
 	for _, is := range Validate(cfg) {
-		if is.Field == "rerank.host" || is.Field == "chat_fallback.host" {
+		if strings.HasPrefix(is.Field, "rerank.") {
 			t.Errorf("V8/V13 retired in β3, got issue on %s: %s", is.Field, is.Msg)
 		}
 	}

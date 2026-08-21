@@ -151,9 +151,14 @@ func renderHours(h Hours) string {
 	return fmt.Sprintf("%gh", f)
 }
 
-// dumpGroupOrder fixes the attribute order of the boot record.
+// dumpGroupOrder fixes the attribute order of the boot record. A name whose
+// keys have all left the registry is dropped here in the same wave: BootDumpArgs
+// skips groups Redacted did not produce, so a stale name would be invisible
+// rather than wrong — and invisible dead ordering is what this list must not
+// accumulate over the cut train (design/01 §3, "dumpGroupOrder auf 6 Gruppen").
+// chat_fallback left with its tuple in β4.
 var dumpGroupOrder = []string{
-	"server", "chat", "chat_fallback", "embed", "dream", "dream_embed",
+	"server", "chat", "embed", "dream", "dream_embed",
 	"rerank", "graph", "query", "scheduler",
 }
 

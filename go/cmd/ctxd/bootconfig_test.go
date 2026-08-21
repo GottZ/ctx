@@ -86,15 +86,11 @@ func TestBootDefaults(t *testing.T) {
 		t.Errorf("registry default %q != -health mode fallback %q", cc.Server.ListenAddr, defaultListenAddr)
 	}
 
-	// Chat + fallback.
+	// Chat (the fallback tuple left the registry in β4).
 	if cc.Chat.Host != "http://localhost:11434" || cc.Chat.APIKey != "" ||
 		cc.Chat.Protocol != "ollama" || cc.Chat.Model != "qwen3.5:9b" ||
 		cc.Chat.NumCtx != 0 || cc.Chat.Think != "false" {
 		t.Errorf("chat defaults drifted: %+v", cc.Chat)
-	}
-	if cc.Fallback.Host != "" || cc.Fallback.Protocol != "openai" ||
-		cc.Fallback.Timeout != 420*time.Second {
-		t.Errorf("fallback defaults drifted: %+v", cc.Fallback)
 	}
 
 	// Embed + dream embed.
@@ -172,10 +168,6 @@ func TestBootEnvWiring(t *testing.T) {
 		"CTX_CHAT_PROTOCOL": "openai", "CTX_CHAT_MODEL": "test-chat-27b",
 		"CTX_CHAT_NUM_CTX": "98304", "CTX_CHAT_THINK": "false",
 
-		"CTX_CHAT_FALLBACK_HOST":     "http://fallback.example:8090",
-		"CTX_CHAT_FALLBACK_API_KEY":  "sk-fallback-0123456789abcdefghij",
-		"CTX_CHAT_FALLBACK_PROTOCOL": "openai", "CTX_CHAT_FALLBACK_TIMEOUT": "300",
-
 		"CTX_RERANK_ENABLED":  "true",
 		"CTX_RERANK_MAX_DOCS": "40", "CTX_RERANK_BLEND_WEIGHT": "0.5",
 
@@ -237,11 +229,6 @@ func TestBootEnvWiring(t *testing.T) {
 		cc.Chat.Protocol != "openai" || cc.Chat.Model != "test-chat-27b" ||
 		cc.Chat.NumCtx != 98304 || cc.Chat.Think != "false" {
 		t.Errorf("chat wiring: %+v", cc.Chat)
-	}
-	if cc.Fallback.Host != "http://fallback.example:8090" ||
-		cc.Fallback.APIKey != "sk-fallback-0123456789abcdefghij" ||
-		cc.Fallback.Protocol != "openai" || cc.Fallback.Timeout != 300*time.Second {
-		t.Errorf("fallback wiring: %+v", cc.Fallback)
 	}
 	if !cc.Rerank.Enabled || cc.Rerank.MaxDocs != 40 || cc.Rerank.BlendWeight != 0.5 {
 		t.Errorf("rerank wiring: %+v", cc.Rerank)

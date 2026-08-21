@@ -139,7 +139,7 @@ func parseFloatValue(raw string, _ any) (any, error) {
 }
 
 // parseDurationSeconds keeps the legacy bare-int-seconds form of
-// CTX_CHAT_FALLBACK_TIMEOUT / CTX_DREAM_IDLE_WAIT.
+// CTX_DREAM_IDLE_WAIT and every other time.Duration key.
 func parseDurationSeconds(raw string, _ any) (any, error) {
 	n, err := strconv.Atoi(raw)
 	if err != nil {

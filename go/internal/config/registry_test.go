@@ -202,12 +202,11 @@ func TestRegistryStrictSet(t *testing.T) {
 // is "presence" (never fingerprinted — offline dictionary oracle).
 func TestRegistrySecretSet(t *testing.T) {
 	want := map[string]string{
-		"server.db_password":    "presence",
-		"chat.api_key":          "fp",
-		"chat_fallback.api_key": "fp",
-		"embed.api_key":         "fp",
-		"dream.api_key":         "fp",
-		"dream_embed.api_key":   "fp",
+		"server.db_password":  "presence",
+		"chat.api_key":        "fp",
+		"embed.api_key":       "fp",
+		"dream.api_key":       "fp",
+		"dream_embed.api_key": "fp",
 	}
 	got := map[string]string{}
 	for _, e := range registry() {
@@ -227,14 +226,17 @@ func TestRegistrySecretSet(t *testing.T) {
 // The rerank group left this switch in β3: its tuple keys are out of the
 // registry entirely, so the loop now asserts the OTHER half of the statement
 // for what is left of the group — rerank.enabled/max_docs/blend_weight are
-// live, unmarked keys. That the three cut names stay out of the registry is
+// live, unmarked keys. chat_fallback left it in β4, and left nothing behind:
+// all four of its keys were tuple keys, so the group has no surviving half to
+// assert anything about. Keeping the case label would pin a branch no registry
+// entry can reach any more. That the cut names stay out of the registry is
 // retired_test.go's ratchet, not this pin.
 func TestRegistrySupersededSet(t *testing.T) {
 	for _, e := range registry() {
 		group, _, _ := strings.Cut(e.Key, ".")
 		isRoleTuple := false
 		switch group {
-		case "chat", "chat_fallback", "embed", "dream_embed":
+		case "chat", "embed", "dream_embed":
 			isRoleTuple = true
 		case "dream":
 			switch e.Key {
@@ -305,8 +307,9 @@ func TestRegistryEnvNamespace(t *testing.T) {
 func TestRegistryTenancySet(t *testing.T) {
 	overridable := map[string]bool{
 		// the provider api_key secret_refs (TENANT-DECISION: per-tenant creds);
-		// rerank.api_key left the allowlist with the β3 tuple cut
-		"chat.api_key": true, "chat_fallback.api_key": true, "embed.api_key": true,
+		// rerank.api_key left the allowlist with the β3 tuple cut,
+		// chat_fallback.api_key with the β4 one
+		"chat.api_key": true, "embed.api_key": true,
 		"dream.api_key": true, "dream_embed.api_key": true,
 		// the re-dream back-off curve (atomic per-tenant unit)
 		"dream.backoff_mode": true, "dream.backoff_factor": true, "dream.backoff_grace": true,
@@ -381,8 +384,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 68 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 68 (change it with intent)", got)
+	if got := len(overridable); got != 67 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 67 (change it with intent)", got)
 	}
 	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
 	// a tenant override here would flush the process-wide embed cache / flip the

@@ -61,7 +61,6 @@ func validateBackendTuples(c *Config) []Issue {
 	// masking everywhere hosts flow: dump, error logs, F2 API).
 	for _, h := range []struct{ key, host string }{
 		{"chat.host", c.Chat.Host},
-		{"chat_fallback.host", c.Fallback.Host},
 		{"embed.host", c.Embed.Host},
 		{"dream.host", c.Dream.Host},
 		{"dream_embed.host", c.Dream.Embed.Host},
@@ -80,7 +79,6 @@ func validateBackendTuples(c *Config) []Issue {
 		allowEmpty bool // dream_embed inherits when empty
 	}{
 		{"chat.protocol", c.Chat.Protocol, false},
-		{"chat_fallback.protocol", c.Fallback.Protocol, false},
 		{"embed.protocol", c.Embed.Protocol, false},
 		{"dream.protocol", c.Dream.Protocol, false},
 		{"dream_embed.protocol", c.Dream.Embed.Protocol, true},

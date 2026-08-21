@@ -83,7 +83,6 @@ type Hours float64
 type Config struct {
 	Server         ServerConfig
 	Chat           ChatConfig
-	Fallback       FallbackConfig
 	Embed          EmbedConfig
 	Dream          DreamConfig
 	Rerank         RerankConfig
@@ -131,30 +130,20 @@ type ServerConfig struct {
 type ChatConfig struct {
 	Host string `key:"chat.host" env:"CTX_CHAT_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 	// TENANT-DECISION(provider-api-key): the provider api_key secret_refs
-	// (chat/chat_fallback/embed/dream/dream_embed — rerank.api_key left the
-	// registry with the β3 tuple cut) are tenant-overridable
+	// (chat/embed/dream/dream_embed — rerank.api_key left the registry with the
+	// β3 tuple cut, chat_fallback.api_key with the β4 one) are tenant-overridable
 	// — a tenant brings its own provider credential (resolved per-tenant by the
 	// 03-W3..W5 secret resolver, isolation gated by tenant.allow_shared_secrets
 	// §4.3). Alt: global-only with credentials flowing ONLY through the F3 pool's
 	// scope+AAD path; umentscheidbar because the per-tenant secret resolver
 	// (W3-W5) is not built yet and may consolidate on the pool. §3.3 lists these
-	// six as tenant-overridable; the HOST/MODEL topology stays global (pool owns
+	// as tenant-overridable; the HOST/MODEL topology stays global (pool owns
 	// per-tenant backends). Pausable: no consumer until W3.
 	APIKey   string             `key:"chat.api_key" env:"CTX_CHAT_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
 	Protocol backends.Protocol  `key:"chat.protocol" env:"CTX_CHAT_PROTOCOL" default:"ollama" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 	Model    string             `key:"chat.model" env:"CTX_CHAT_MODEL" default:"qwen3.5:9b" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 	NumCtx   int                `key:"chat.num_ctx" env:"CTX_CHAT_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends" tenancy:"global-only"`
 	Think    backends.ThinkMode `key:"chat.think" env:"CTX_CHAT_THINK" default:"false" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-}
-
-// FallbackConfig is the emergency chat backend for query-path synthesis,
-// engaged only on transport-level unavailability of the primary. Empty host =
-// off. Model is inherited from the primary (today's semantics).
-type FallbackConfig struct {
-	Host     string            `key:"chat_fallback.host" env:"CTX_CHAT_FALLBACK_HOST" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	APIKey   string            `key:"chat_fallback.api_key" env:"CTX_CHAT_FALLBACK_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
-	Protocol backends.Protocol `key:"chat_fallback.protocol" env:"CTX_CHAT_FALLBACK_PROTOCOL" default:"openai" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	Timeout  time.Duration     `key:"chat_fallback.timeout" env:"CTX_CHAT_FALLBACK_TIMEOUT" default:"420" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 }
 
 // EmbedConfig is the query-path embedding backend tuple. Model is
@@ -1451,21 +1440,6 @@ func (c *Config) ChatBackend() backends.Backend {
 		Model:    c.Chat.Model,
 		NumCtx:   c.Chat.NumCtx,
 		Think:    c.Chat.Think,
-	}
-}
-
-// ChatFallbackBackend returns the emergency synthesis backend, or nil when no
-// fallback host is configured. Model stays empty = inherit the primary model
-// at the call site (today's chatWithFallback semantics).
-func (c *Config) ChatFallbackBackend() *backends.Backend {
-	if c.Fallback.Host == "" {
-		return nil
-	}
-	return &backends.Backend{
-		Host:     c.Fallback.Host,
-		APIKey:   c.Fallback.APIKey,
-		Protocol: c.Fallback.Protocol,
-		Timeout:  c.Fallback.Timeout,
 	}
 }
 

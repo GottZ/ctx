@@ -99,24 +99,12 @@ func TestDreamBackoffConversion(t *testing.T) {
 	}
 }
 
-// TestChatFallbackBackend pins nil-when-off and the Timeout carry.
-func TestChatFallbackBackend(t *testing.T) {
-	off, _ := cfgFrom(t, map[string]string{})
-	if off.ChatFallbackBackend() != nil {
-		t.Error("empty fallback host must yield nil")
-	}
-	on, _ := cfgFrom(t, map[string]string{
-		"chat_fallback.host":    "http://fallback.example:8090",
-		"chat_fallback.timeout": "300",
-	})
-	fb := on.ChatFallbackBackend()
-	if fb == nil || fb.Host != "http://fallback.example:8090" || fb.Timeout.Seconds() != 300 {
-		t.Errorf("ChatFallbackBackend() = %+v", fb)
-	}
-	if fb.Model != "" {
-		t.Errorf("fallback model must stay empty (= inherit primary at call site), got %q", fb.Model)
-	}
-}
+// TestChatFallbackBackend died with the chat_fallback tuple in β4. It pinned
+// the accessor's nil-when-off contract and the bare-int-seconds carry into
+// Backend.Timeout; the accessor had no caller left (the query path's fallback
+// leg moved to the pool with F3-P2, llm/client.go:154), and the seconds parse
+// it exercised on the way is pinned on a living Duration key in
+// TestDumpSourcesAndRendering (dream.idle_wait).
 
 // TestDSN pins the legacy DSN shape including URL-encoding of credentials.
 func TestDSN(t *testing.T) {

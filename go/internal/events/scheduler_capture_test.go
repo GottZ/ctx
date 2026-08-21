@@ -74,7 +74,6 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 			Host: "http://chat.example", Protocol: backends.ProtocolOllama,
 			Model: "chat-model", NumCtx: 4096, Think: "false",
 		},
-		Fallback: config.FallbackConfig{Protocol: backends.ProtocolOpenAI},
 		Embed: config.EmbedConfig{
 			Host: "http://embed.example", Protocol: backends.ProtocolOllama, Model: "embed-model",
 		},

@@ -47,7 +47,11 @@ var retiredKeysGolden = []string{
 // `Registry ∩ retiredSettingKeys = ∅` plus the full EnvVars() inversion — the
 // chat.host positive probe that no wave before the cut could run, since the
 // registry is reflection-built and cannot be faked in a test (registry.go).
+// Lexically sorted, not in cut order (the pin below requires it) — the wave
+// comments name the commit each block arrived with.
 var retiredKeysAlreadyCut = []string{
+	// β4 — chat_fallback
+	"chat_fallback.api_key", "chat_fallback.host", "chat_fallback.protocol", "chat_fallback.timeout",
 	// β3 — rerank
 	"rerank.api_key", "rerank.host", "rerank.model",
 }
