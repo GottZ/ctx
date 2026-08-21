@@ -172,8 +172,31 @@ fi
 
 STAGED_MIGRATIONS=$(git diff --cached --name-only --diff-filter=ACMR -- 'go/migrations/*.sql' 2>/dev/null)
 if [ -n "$STAGED_MIGRATIONS" ]; then
+    # Comment-only carve-out: a staged diff that touches nothing but SQL
+    # comment lines ('-- …') or blank lines in MODIFIED migrations cannot
+    # change the generated manifest by construction — the generator reads
+    # schema state, not prose. Added/renamed/copied migrations never qualify.
+    # Any non-comment changed line keeps the full gate. (Decision 2026-08-21,
+    # v5.0.0 pre-tag: baseline header rationale fix; regeneration verified
+    # byte-identical before this carve-out was written.)
+    COMMENT_ONLY=1
+    if [ -n "$(git diff --cached --name-only --diff-filter=ACR -- 'go/migrations/*.sql' 2>/dev/null)" ]; then
+        COMMENT_ONLY=0
+    else
+        while IFS= read -r line; do
+            stripped=$(printf '%s' "$line" | sed 's/^[+-][[:space:]]*//')
+            case "$stripped" in
+                ''|--*) ;;
+                *) COMMENT_ONLY=0; break ;;
+            esac
+        done <<EOF
+$(git diff --cached -U0 -- 'go/migrations/*.sql' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)')
+EOF
+    fi
     MANIFEST_STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- 'go/internal/schemacontract/manifest.json' 2>/dev/null)
-    if [ -z "$MANIFEST_STAGED" ]; then
+    if [ "$COMMENT_ONLY" = "1" ]; then
+        printf 'pre-commit: Gate 3 — comment-only migration diff, manifest regeneration not required\n'
+    elif [ -z "$MANIFEST_STAGED" ]; then
         printf '\n'
         printf 'pre-commit: REJECTED — migration(s) staged without a manifest regeneration:\n'
         printf '%s\n' "$STAGED_MIGRATIONS" | sed 's/^/  /'
