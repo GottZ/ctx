@@ -29,7 +29,7 @@
     "@types/markdown-it": "14.1.2",
     "@types/node": "26.1.1",
     "@types/three": "0.185.4",
-    "dompurify": "3.4.11",
+    "dompurify": "3.4.13",
     "eventsource-parser": "3.1.0",
     "graphology": "0.26.0",
     "graphology-layout-forceatlas2": "0.10.1",
