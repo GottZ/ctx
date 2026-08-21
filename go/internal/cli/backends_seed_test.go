@@ -245,6 +245,91 @@ func TestWithOrphanSecretNoteNamesLeftovers(t *testing.T) {
 	}
 }
 
+// A present target row is only a legitimate no-op when it actually SERVES the
+// leg it occupies. Existence alone was the gap: a re-run over a disabled,
+// profile-held or role-stripped row reported a clean skip and exit 0 while the
+// role stayed dead.
+func TestSeedRowBlockerJudgesPresentRows(t *testing.T) {
+	rows := mustRows(t, seedSpec{
+		Chat:  seedBackend{Host: "http://gpu:11434", Model: "qwen3"},
+		Embed: seedBackend{Host: "http://gpu:11434", Model: "qwen3-embed"},
+	})
+	chat := rows[seedChatName]
+
+	healthy := backendRow{ID: "id-c", Name: seedChatName, Scope: "_global", Enabled: true,
+		EffectiveState: "active", Roles: chat.roles}
+	if b, bad := seedRowBlocker(chat, healthy); bad {
+		t.Errorf("a serving row must stay a plain skip, got blocker %v", b)
+	}
+	// A cooldown row still serves — it is only demoted inside the chain.
+	cooling := healthy
+	cooling.EffectiveState = "cooldown"
+	if b, bad := seedRowBlocker(chat, cooling); bad {
+		t.Errorf("cooldown must not count as unserved, got %v", b)
+	}
+	// A found row carrying only PART of the leg's roles is a topology choice,
+	// not a broken seed — as long as the lead role is there (the partial-seed
+	// probe in the integration gate depends on this staying a no-op).
+	partial := healthy
+	partial.Roles = []string{"synthesis", "chat"}
+	if b, bad := seedRowBlocker(chat, partial); bad {
+		t.Errorf("extra roles are pool management, not a seed failure, got %v", b)
+	}
+
+	cases := []struct {
+		name       string
+		have       backendRow
+		wantReason string
+		wantRepair string
+	}{
+		{"disabled", backendRow{ID: "id-c", Name: seedChatName, Enabled: false,
+			EffectiveState: "disabled", Roles: chat.roles},
+			"disabled", `ctx backends update id-c '{"enabled":true}'`},
+		{"profile-disabled", backendRow{ID: "id-c", Name: seedChatName, Enabled: true,
+			EffectiveState: "profile-disabled", DisabledByProfiles: []string{"eject"}, Roles: chat.roles},
+			"eject", "ctx eject off"},
+		{"role stripped", backendRow{ID: "id-c", Name: seedChatName, Enabled: true,
+			EffectiveState: "active", Roles: []string{"chat"}},
+			"synthesis", `ctx backends update id-c '{"roles":["synthesis"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, bad := seedRowBlocker(chat, tc.have)
+			if !bad {
+				t.Fatalf("%s must not pass as served", tc.name)
+			}
+			if b.role != "synthesis" {
+				t.Errorf("blocker role = %q, want the leg's lead role synthesis", b.role)
+			}
+			if !strings.Contains(b.reason, tc.wantReason) {
+				t.Errorf("reason %q must name %q", b.reason, tc.wantReason)
+			}
+			if !strings.Contains(b.repair, tc.wantRepair) {
+				t.Errorf("repair %q must name %q", b.repair, tc.wantRepair)
+			}
+			if !strings.Contains(b.String(), seedChatName) {
+				t.Errorf("the printed line must name the row: %s", b)
+			}
+		})
+	}
+}
+
+func TestSeedRowLeadRoleIsTheLegsReason(t *testing.T) {
+	rows := mustRows(t, seedSpec{
+		Chat:  seedBackend{Host: "http://gpu:11434", Model: "qwen3"},
+		Embed: seedBackend{Host: "http://gpu:11434", Model: "qwen3-embed"},
+	})
+	if got := rows[seedChatName].leadRole(); got != "synthesis" {
+		t.Errorf("chat leg lead role = %q, want synthesis", got)
+	}
+	if got := rows[seedEmbedName].leadRole(); got != "embed" {
+		t.Errorf("embed leg lead role = %q, want embed", got)
+	}
+	if got := (seedRow{}).leadRole(); got != "" {
+		t.Errorf("a roleless row has no lead role, got %q", got)
+	}
+}
+
 type errorString string
 
 func (e errorString) Error() string { return string(e) }

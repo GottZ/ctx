@@ -574,8 +574,15 @@ func TestInitBackendsStepNamesDeadLegacyRows(t *testing.T) {
 	if !strings.Contains(out, "herbert-chat") || !strings.Contains(out, "unreachable") {
 		t.Errorf("the dead row must be named; got:\n%s", out)
 	}
-	if !strings.Contains(out, "ctx backends seed --force") {
-		t.Errorf("the legacy fingerprint must name --force as the replacement path; got:\n%s", out)
+	// The remediation has to be one that actually removes the legacy rows.
+	// `seed --force` only skips the foreign-row guard and CREATES the target
+	// rows — the legacy pair would stay enabled at priority 100 next to them,
+	// dead members of every failover chain.
+	if !strings.Contains(out, "ctx backends delete id-chat") {
+		t.Errorf("the legacy fingerprint must name the removal command; got:\n%s", out)
+	}
+	if strings.Contains(out, "replace it with `ctx backends seed --force`") {
+		t.Errorf("the hint must not promise that --force replaces the legacy rows; got:\n%s", out)
 	}
 }
 
@@ -596,13 +603,62 @@ func TestPoolRowForRoleIgnoresTenantRows(t *testing.T) {
 	}
 }
 
+// A row held by an ACTIVE disable-profile is out of every chain (Chain's
+// disabledBy arm) although its enabled column still says true. Counting it as
+// serving is the false-green case: the wizard reports a verified pool while
+// every query dies at the embedding step.
+func TestPoolRowForRoleExcludesProfileDisabled(t *testing.T) {
+	rows := []backendRow{
+		{ID: "e", Name: "embed-primary", Scope: "_global", Enabled: true, Roles: []string{"embed"},
+			EffectiveState: "profile-disabled", DisabledByProfiles: []string{"eject"}},
+		{ID: "c", Name: "chat-primary", Scope: "_global", Enabled: true, Roles: []string{"synthesis"},
+			EffectiveState: "cooldown"},
+	}
+	if _, ok := poolRowForRole(rows, "embed"); ok {
+		t.Error("a profile-disabled row must not count as serving — it is out of every chain")
+	}
+	if _, ok := poolRowForRole(rows, "synthesis"); !ok {
+		t.Error("cooldown only reorders the chain, it must not disqualify a row")
+	}
+	if got := missingSeedRoles(rows); len(got) != 1 || got[0] != "embed" {
+		t.Errorf("missingSeedRoles = %v, want exactly [embed]", got)
+	}
+}
+
+// backend-list renders the pool snapshot in load order (ORDER BY scope, name),
+// NOT priority DESC. The probe must therefore SELECT the chain head instead of
+// taking the first match, or a dead primary hides behind an alphabetically
+// earlier failover row (false green) and vice versa (false red).
+func TestPoolRowForRolePicksHighestPriority(t *testing.T) {
+	rows := []backendRow{
+		{ID: "a", Name: "aaa-failover", Scope: "_global", Enabled: true, Roles: []string{"synthesis"}, Priority: 10},
+		{ID: "z", Name: "zzz-primary", Scope: "_global", Enabled: true, Roles: []string{"synthesis"}, Priority: 100},
+	}
+	row, ok := poolRowForRole(rows, "synthesis")
+	if !ok || row.ID != "z" {
+		t.Errorf("poolRowForRole picked %+v, want the priority-100 chain head zzz-primary", row)
+	}
+	// Equal priority falls back to Chain's tie-break: name ASC.
+	rows[0].Priority = 100
+	if row, _ = poolRowForRole(rows, "synthesis"); row.ID != "a" {
+		t.Errorf("equal priority must tie-break by name like Chain does, got %+v", row)
+	}
+}
+
 func TestDeadRowHintDistinguishesLegacyFingerprint(t *testing.T) {
 	legacy := backendRow{ID: "x", Name: "llama-embed", BaseURL: legacyDefaultHost + "/"}
 	if !legacyDefaultRow(legacy) {
 		t.Fatal("a trailing slash must not hide the fingerprint")
 	}
-	if !contains(deadRowHint(legacy), "--force") {
-		t.Errorf("legacy hint lacks the replacement path: %s", deadRowHint(legacy))
+	// The legacy repair is a REMOVAL, not `seed --force`: --force skips the
+	// foreign-row guard and creates the target rows, leaving the legacy pair
+	// enabled at priority 100 in every failover chain.
+	hint := deadRowHint(legacy)
+	if !contains(hint, "ctx backends delete x") {
+		t.Errorf("legacy hint lacks the removal command: %s", hint)
+	}
+	if contains(hint, "replace it with") {
+		t.Errorf("legacy hint still promises a replacement --force does not perform: %s", hint)
 	}
 	own := backendRow{ID: "019e", Name: "chat-primary", BaseURL: "http://gpu:11434"}
 	if legacyDefaultRow(own) {

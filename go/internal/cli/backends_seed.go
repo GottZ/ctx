@@ -88,12 +88,27 @@ type seedSpec struct {
 // that has to exist before the row may reference it.
 type seedRow struct {
 	name string
+	// roles is the leg's routing table, in designed order.
+	roles []string
 	// secretName is the api_key_ref the row will carry ("" = no credential).
 	secretName string
 	// secretValue is the plaintext to seal ("" = the ref is expected to exist
 	// already, the api_key_ref-only case).
 	secretValue string
 	payload     map[string]any
+}
+
+// leadRole is the role the leg exists for: the first of its list, and the one
+// whose empty chain stops the store (no embed backend fails every query at the
+// embedding step, no synthesis backend leaves it without an answer). The
+// trailing roles (translate, chat, digest, dream on the chat leg) are pool
+// management — a row found without them is a topology choice, not a failed
+// seed, and rewriting it is exactly what a seed must never do.
+func (r seedRow) leadRole() string {
+	if len(r.roles) == 0 {
+		return ""
+	}
+	return r.roles[0]
 }
 
 // seedResult is the machine-readable summary (pipe path). The human path
@@ -104,6 +119,26 @@ type seedResult struct {
 	Created []string `json:"created"`
 	Skipped []string `json:"skipped"`
 	Secrets []string `json:"secrets"`
+	// Unserved names target rows that exist but do not serve their leg's role.
+	// They are neither created (the name is taken) nor skipped as fine — they
+	// are the reason success is false.
+	Unserved []string `json:"unserved,omitempty"`
+}
+
+// seedBlocker is a present target row that cannot serve the leg it occupies.
+// The name is taken, so the seed must neither write a second row nor rewrite
+// the one it found — but reporting the run as a clean no-op would be a lie: the
+// role stays unserved. Named, with the exact repair, and the run exits non-zero.
+type seedBlocker struct {
+	name   string
+	role   string
+	reason string
+	repair string
+}
+
+func (b seedBlocker) String() string {
+	return fmt.Sprintf("%s: present, but does not serve %s — %s. Repair: %s",
+		b.name, b.role, b.reason, b.repair)
 }
 
 func backendsSeedCmd(getClient func() (*Client, error)) *cobra.Command {
@@ -292,7 +327,7 @@ func seedRowFor(in seedBackend, defaultName string, roles []string, label string
 		payload["provider_class"] = in.ProviderClass
 	}
 
-	row := seedRow{name: name, payload: payload}
+	row := seedRow{name: name, roles: roles, payload: payload}
 	switch {
 	case in.APIKeyRef != "":
 		row.secretName = in.APIKeyRef
@@ -331,11 +366,7 @@ func runBackendsSeed(getClient func() (*Client, error), spec seedSpec, force boo
 	}
 	// The target set is what this spec describes; anything else in the pool is
 	// a foreign row.
-	targets := map[string]bool{}
-	for _, r := range rows {
-		targets[r.name] = true
-	}
-	present, err := seedPoolState(c, targets, force)
+	present, blocked, err := seedPoolState(c, rows, force)
 	if err != nil {
 		return err
 	}
@@ -343,6 +374,13 @@ func runBackendsSeed(getClient func() (*Client, error), spec seedSpec, force boo
 	var missing []seedRow
 	res := seedResult{Success: true, Scope: backends.GlobalScope}
 	for _, r := range rows {
+		if b, bad := blocked[r.name]; bad {
+			// Still skipped — see seedPoolState — but never as a success.
+			Errorf("%s", b)
+			res.Unserved = append(res.Unserved, r.name)
+			res.Success = false
+			continue
+		}
 		if present[r.name] {
 			Errorf("%s: already present — skipped", r.name)
 			res.Skipped = append(res.Skipped, r.name)
@@ -370,7 +408,18 @@ func runBackendsSeed(getClient func() (*Client, error), spec seedSpec, force boo
 			res.Skipped = append(res.Skipped, r.name)
 		}
 	}
-	return printSeedResult(res)
+	if perr := printSeedResult(res); perr != nil {
+		return perr
+	}
+	if !res.Success {
+		// The result document goes out first (success:false, unserved listed),
+		// then the run fails: a pipe consumer gets the machine-readable truth AND
+		// a non-zero exit, instead of one or the other.
+		return fmt.Errorf("%d target row(s) exist but do not serve their role: %s — the pool is NOT seeded. "+
+			"Repair them as printed above, or `ctx backends delete <id>` and re-run the seed",
+			len(res.Unserved), strings.Join(res.Unserved, ", "))
+	}
+	return nil
 }
 
 // requireServerAdminForSeed is pre-check 1 (design/02 §4.1a): the seed targets
@@ -402,41 +451,82 @@ func requireServerAdminForSeed(c *Client) error {
 }
 
 // seedPoolState reads the pool and applies the foreign-row guard. It returns
-// which target rows already exist in _global. A target name in a FOREIGN scope
-// counts as a foreign row, not as present — seeding _global must not be
-// satisfied by a tenant's row of the same name.
-func seedPoolState(c *Client, targets map[string]bool, force bool) (map[string]bool, error) {
+// which target rows already exist in _global, plus the blockers among them: a
+// present row that does NOT serve its leg's lead role. A target name in a
+// FOREIGN scope counts as a foreign row, not as present — seeding _global must
+// not be satisfied by a tenant's row of the same name.
+//
+// "Present" alone was never a serving signal (the same gap the init wizard's
+// probe closes on the other side): a re-run over a target row that is disabled,
+// held by an active disable-profile, or stripped of its role reported a clean
+// no-op and exit 0 while the role stayed dead. The row is still SKIPPED — the
+// name is taken, a second row would be a duplicate and rewriting the found row
+// would silently rotate live topology — but it is named, and the run fails.
+func seedPoolState(c *Client, rows []seedRow, force bool) (map[string]bool, map[string]seedBlocker, error) {
 	resp, _, err := c.Do(http.MethodPost, "/api/manage", map[string]any{"action": "backend-list"})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := checkSettingsEnvelope(resp); err != nil {
-		return nil, fmt.Errorf("pool read failed: %w", err)
+		return nil, nil, fmt.Errorf("pool read failed: %w", err)
 	}
 	var payload struct {
-		Backends []struct {
-			Name  string `json:"name"`
-			Scope string `json:"scope"`
-		} `json:"backends"`
+		Backends []backendRow `json:"backends"`
 	}
 	if err := json.Unmarshal(resp, &payload); err != nil {
-		return nil, fmt.Errorf("unparseable backend-list response: %s", truncateForError(resp))
+		return nil, nil, fmt.Errorf("unparseable backend-list response: %s", truncateForError(resp))
+	}
+	targets := make(map[string]seedRow, len(rows))
+	for _, r := range rows {
+		targets[r.name] = r
 	}
 	present := map[string]bool{}
+	blocked := map[string]seedBlocker{}
 	var foreign []string
 	for _, b := range payload.Backends {
-		if targets[b.Name] && b.Scope == backends.GlobalScope {
-			present[b.Name] = true
+		target, isTarget := targets[b.Name]
+		if !isTarget || b.Scope != backends.GlobalScope {
+			foreign = append(foreign, b.Name)
 			continue
 		}
-		foreign = append(foreign, b.Name)
+		present[b.Name] = true
+		if blocker, bad := seedRowBlocker(target, b); bad {
+			blocked[b.Name] = blocker
+		}
 	}
 	if len(foreign) > 0 && !force {
-		return nil, fmt.Errorf("pool already contains %d row(s) outside the seed target set (%s) — "+
+		return nil, nil, fmt.Errorf("pool already contains %d row(s) outside the seed target set (%s) — "+
 			"this installation is configured, not fresh. Re-run with --force to seed anyway. Nothing was written",
 			len(foreign), strings.Join(foreign, ", "))
 	}
-	return present, nil
+	return present, blocked, nil
+}
+
+// seedRowBlocker judges one present target row against the leg it occupies.
+// Serving-eligibility is read exactly as Chain reads it (enabled AND no active
+// disable-profile — cooldown is transient and never disqualifies), and the role
+// check is the lead role only: extra roles are pool management, a missing lead
+// role means the pipeline the leg exists for has no backend at all.
+func seedRowBlocker(target seedRow, have backendRow) (seedBlocker, bool) {
+	role := target.leadRole()
+	b := seedBlocker{name: have.Name, role: role}
+	switch {
+	case !have.Enabled || have.EffectiveState == backendStateDisabled:
+		b.reason = "the row is disabled"
+		b.repair = fmt.Sprintf("ctx backends update %s '{\"enabled\":true}'", have.ID)
+	case have.EffectiveState == backendStateProfileDisabled:
+		b.reason = "an active disable-profile holds it"
+		if len(have.DisabledByProfiles) > 0 {
+			b.reason = fmt.Sprintf("the active disable-profile(s) %s hold it", strings.Join(have.DisabledByProfiles, ", "))
+		}
+		b.repair = "deactivate that profile (`ctx eject off` for the reserved `eject` profile)"
+	case role != "" && !have.hasRole(role):
+		b.reason = fmt.Sprintf("its roles (%s) do not carry %s", strings.Join(have.Roles, ", "), role)
+		b.repair = fmt.Sprintf("ctx backends update %s '{\"roles\":[\"%s\"]}'", have.ID, strings.Join(target.roles, "\",\""))
+	default:
+		return seedBlocker{}, false
+	}
+	return b, true
 }
 
 // seedSecrets seals every pending api_key and then verifies, through the
@@ -574,6 +664,10 @@ func printSeedResult(res seedResult) error {
 	}
 	if len(res.Secrets) > 0 {
 		fmt.Printf("  sealed:  %s\n", strings.Join(res.Secrets, ", "))
+	}
+	if len(res.Unserved) > 0 {
+		fmt.Printf("  UNSERVED: %s — present rows that do not serve their role (see above)\n",
+			strings.Join(res.Unserved, ", "))
 	}
 	fmt.Println("verify with `ctx backends` and probe reachability with `ctx backends test <id>`")
 	return nil

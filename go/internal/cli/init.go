@@ -342,22 +342,33 @@ func backendsStepPool(c *Client) ([]backendRow, error) {
 	return payload.Backends, nil
 }
 
-// poolRowForRole picks the row that would actually serve a role: enabled, in
-// the _global scope the seed targets, first hit in pool order (the list
-// arrives priority DESC, so the first match is the primary). A tenant-scoped
-// row of the same role does NOT count — it cannot serve the shared pipelines.
+// poolRowForRole picks the row that would actually serve a role: in the
+// _global scope the seed targets, serving-eligible (enabled AND not held by an
+// ACTIVE disable-profile — the qualification Chain/PrimaryModel apply, read off
+// the effective_state the list merges in), and the HIGHEST PRIORITY among
+// those. A tenant-scoped row of the same role does NOT count — it cannot serve
+// the shared pipelines.
+//
+// Neither half is cosmetic. Without the effective_state check the single
+// enabled _global embed row could sit in an active disable profile: the wizard
+// reports green while every query dies at the embedding step. And the list does
+// NOT arrive priority DESC — handleBackendList renders the pool snapshot in
+// load order (loadBackendsSQL: ORDER BY scope, name) — so a "first match" would
+// probe the alphabetically first row instead of the chain head: false red on a
+// dead low-priority row, false green on a dead primary. The tie-break mirrors
+// Chain's: priority DESC, then name ASC.
 func poolRowForRole(rows []backendRow, role string) (backendRow, bool) {
+	best := backendRow{}
+	found := false
 	for _, r := range rows {
-		if !r.Enabled || r.Scope != backends.GlobalScope {
+		if r.Scope != backends.GlobalScope || !r.servingEligible() || !r.hasRole(role) {
 			continue
 		}
-		for _, have := range r.Roles {
-			if have == role {
-				return r, true
-			}
+		if !found || r.Priority > best.Priority || (r.Priority == best.Priority && r.Name < best.Name) {
+			best, found = r, true
 		}
 	}
-	return backendRow{}, false
+	return best, found
 }
 
 func missingSeedRoles(rows []backendRow) []string {
@@ -416,7 +427,7 @@ func probeSeedRoles(c *Client, rows []backendRow) bool {
 		row, found := poolRowForRole(rows, want.role)
 		if !found {
 			parts = append(parts, want.label+": none")
-			hints = append(hints, fmt.Sprintf("no enabled %s backend in %s — `ctx backends seed` writes one",
+			hints = append(hints, fmt.Sprintf("no serving %s backend in %s — `ctx backends seed` writes one",
 				want.role, backends.GlobalScope))
 			ok = false
 			continue
@@ -466,11 +477,21 @@ func probeBackendRow(c *Client, row backendRow) (bool, error) {
 // deadRowHint names the repair. The legacy-default fingerprint gets its own
 // wording because its repair differs: those rows are not a configuration to
 // fix but the residue of an env bootstrap that ran with nothing configured —
-// they are replaced, and only --force gets past the seed's foreign-row guard.
+// they have to LEAVE the pool.
+//
+// The hint deliberately does NOT offer `seed --force` as a replacement. --force
+// skips exactly one thing, the foreign-row guard; it then CREATES the target
+// rows and leaves everything else untouched. The legacy rows would stay enabled
+// at priority 100 next to the new ones — dead members of every failover chain,
+// each costing a health-probe timeout. Removing them first is the only order
+// that actually replaces them.
 func deadRowHint(row backendRow) string {
 	if legacyDefaultRow(row) {
 		return fmt.Sprintf("%s (%s) is unreachable and carries the env-era default fingerprint — "+
-			"replace it with `ctx backends seed --force`", row.Name, row.BaseURL)
+			"`ctx backends seed --force` would ADD rows next to it, not replace it: remove it first with "+
+			"`ctx backends delete %s`, then run `ctx backends seed` (parking it instead, "+
+			"`ctx backends update %s '{\"enabled\":false}'`, keeps it out of the chains but leaves the seed needing --force)",
+			row.Name, row.BaseURL, row.ID, row.ID)
 	}
 	return fmt.Sprintf("%s (%s) is unreachable — `ctx backends test %s` shows the failing check",
 		row.Name, row.BaseURL, row.ID)

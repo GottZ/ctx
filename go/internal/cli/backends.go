@@ -44,6 +44,43 @@ type backendRow struct {
 	EffectiveState string   `json:"effective_state"`
 	CooldownS      int      `json:"cooldown_remaining_s"`
 	LastError      string   `json:"last_error"`
+	// DisabledByProfiles names the ACTIVE disable-profiles holding this row
+	// (backends_manage.go handleBackendList, omitted when none). It is what
+	// turns "profile-disabled" from a state into a repair instruction.
+	DisabledByProfiles []string `json:"disabled_by_profiles"`
+}
+
+// The effective_state values backends.Pool.Status() emits (pool.go). Only these
+// two mean "this row is out of every chain"; "cooldown" merely reorders it and
+// "active" is the normal case.
+const (
+	backendStateDisabled        = "disabled"
+	backendStateProfileDisabled = "profile-disabled"
+)
+
+// servingEligible reports whether a row would take part in a chain at all —
+// the SAME qualification Chain and PrimaryModel apply (pool.go): enabled AND
+// not held by an ACTIVE disable-profile. Trust and cooldown deliberately stay
+// out: trust depends on the caller's sensitivity, and cooldown only demotes a
+// row inside the chain, it never removes it.
+//
+// An empty effective_state means the list carried no live status for the row
+// (an older server, or a row that left the snapshot between rows and status);
+// the enabled column then decides alone, which is the pre-status behaviour.
+func (r backendRow) servingEligible() bool {
+	if !r.Enabled {
+		return false
+	}
+	return r.EffectiveState != backendStateDisabled && r.EffectiveState != backendStateProfileDisabled
+}
+
+func (r backendRow) hasRole(role string) bool {
+	for _, have := range r.Roles {
+		if have == role {
+			return true
+		}
+	}
+	return false
 }
 
 func backendsCmd(getClient func() (*Client, error)) *cobra.Command {

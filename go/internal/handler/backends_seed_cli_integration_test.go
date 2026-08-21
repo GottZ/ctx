@@ -398,6 +398,67 @@ func TestBackendsSeedCLI_PartialSeedCompletes(t *testing.T) {
 	}
 }
 
+// TestBackendsSeedCLI_PresentButUnservedFails is negative probe 6: a target row
+// whose NAME is taken but which does not serve its leg's lead role — disabled,
+// or stripped of the role — must not report a clean no-op. The row is still
+// skipped (a second row would be a duplicate, and rewriting the found one would
+// silently rotate live topology), but it is named with its repair, the result
+// document says success:false, and the run exits non-zero.
+func TestBackendsSeedCLI_PresentButUnservedFails(t *testing.T) {
+	sh := newSeedHarness(t, seedTestKeyHex, false)
+	if _, err := sh.pool.Exec(sh.ctx,
+		`INSERT INTO context_backends (name, base_url, scope, roles, model_map, trust, priority, enabled)
+		 VALUES ('chat-primary','http://gpu-host:11434','_global','{chat}','{"default":"qwen3"}','full-trust',100,true),
+		        ('embed-primary','http://gpu-host:11434','_global','{embed,dream-embed}','{"default":"qwen3-embed"}','full-trust',100,false)`,
+	); err != nil {
+		t.Fatalf("insert unserved rows: %v", err)
+	}
+	// See the note in the foreign-row probe: the reload stands in for NOTIFY.
+	if err := sh.bp.Reload(sh.ctx); err != nil {
+		t.Fatalf("pool reload: %v", err)
+	}
+
+	out, err := sh.seed("--file", sh.specFile(seedSpecTwoHosts))
+	if err == nil {
+		t.Fatal("a present-but-unserved target row must not pass as a seeded pool")
+	}
+	for _, want := range []string{"chat-primary", "embed-primary", "NOT seeded"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the failure must mention %q, got: %v", want, err)
+		}
+	}
+	var res struct {
+		Success  bool     `json:"success"`
+		Created  []string `json:"created"`
+		Skipped  []string `json:"skipped"`
+		Unserved []string `json:"unserved"`
+	}
+	if jerr := json.Unmarshal([]byte(out), &res); jerr != nil {
+		t.Fatalf("stdout is not the result envelope: %v (%s)", jerr, out)
+	}
+	if res.Success {
+		t.Error("success must be false while a target role stays unserved")
+	}
+	if len(res.Unserved) != 2 {
+		t.Errorf("unserved = %v, want both target rows", res.Unserved)
+	}
+	if len(res.Created) != 0 || len(res.Skipped) != 0 {
+		t.Errorf("an unserved row is neither created nor a clean skip: created=%v skipped=%v", res.Created, res.Skipped)
+	}
+	if got := len(sh.rows()); got != 2 {
+		t.Errorf("the failing run changed the row count to %d — it must not write", got)
+	}
+	// The rows keep their shape: the seed names the repair, it does not perform it.
+	var roles []string
+	if err := sh.pool.QueryRow(sh.ctx,
+		`SELECT roles FROM context_backends WHERE name='chat-primary'`).Scan(&roles); err != nil {
+		t.Fatalf("read chat-primary: %v", err)
+	}
+	if len(roles) != 1 || roles[0] != "chat" {
+		t.Errorf("the unserved row was rewritten: roles = %v", roles)
+	}
+}
+
 // TestBackendsSeedCLI_SealsAPIKeyIntoSecret proves the credential path end to
 // end: the plaintext key travels ONLY to /api/secrets, the row gets the ref,
 // and the ref exists before the row referencing it is written.
