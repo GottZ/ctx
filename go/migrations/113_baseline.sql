@@ -3,7 +3,7 @@
 -- =============================================================================
 -- v5 requires the last v4.x release (v4.38.0) as its upgrade floor
 -- (docs/operations.md, "The v4.x hop is mandatory"), so every database that
--- reaches v5 through the supported path already carries versions 001-133.
+-- reaches v5 through the supported path already carries versions 001-132.
 -- That makes the individual files below dead weight on the upgrade path and
 -- pure setup cost on the fresh-install path — this file replaces them.
 --

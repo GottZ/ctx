@@ -291,7 +291,7 @@ The `create` disk pre-flight statfs's the ctx container's own root filesystem (`
 
 ### The migration baseline: 001–113 ship as one file
 
-v5 requires the v4.x hop (see [migration 133](#migration-133-the-backend-tuple-rows-are-deleted--and-the-upgrade-hop-that-has-to-come-first) below), so every database that reaches it through the supported path has already applied migrations 001–133. That made the first 112 files dead weight on the upgrade path and pure setup cost on the fresh-install path, and v5 replaces them with a single `113_baseline.sql`. The chain is 21 files instead of 132; nothing about what a database ends up containing changed.
+v5 requires the v4.x hop (see [migration 133](#migration-133-the-backend-tuple-rows-are-deleted--and-the-upgrade-hop-that-has-to-come-first) below), so every database that reaches it through the supported path has already applied migrations 001–132. That made the first 112 files dead weight on the upgrade path and pure setup cost on the fresh-install path, and v5 replaces them with a single `113_baseline.sql`. The chain is 21 files instead of 132; nothing about what a database ends up containing changed.
 
 **Which path your database takes is decided the same way it always was** — by version number in `_migrations`, not by inspecting the schema:
 
