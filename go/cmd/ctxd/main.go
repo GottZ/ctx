@@ -105,12 +105,24 @@ const deprecationRetiredRow = "retired_settings_row"
 //
 // β13 owes the replacement (design/01 §4 W9 / design/06 §3.5): a STATIC name
 // list — config.RetiredEnvNames() is the source, this file the consumer — swept
-// with os.LookupEnv, with (a) a value filter (set-but-empty is not set: compose
-// materializes all 29 as `${VAR:-}`), (b) the list cut to value-bearing keys
-// (hosts, api_keys, models — not protocols/timeouts/num_ctx/think/parallelism,
-// whose compose scaffold defaults are hard-wired non-empty), (c) the known
-// scaffold-default VALUES of CTX_RERANK_HOST/CTX_RERANK_MODEL exempted, and
-// (d) name-only lines, never values (six of the names are api_key vars).
+// with os.LookupEnv, with (a) a value filter (set-but-empty is not set: a
+// v4-era compose file materializes all 29 as `${VAR:-}`), (b) the list cut to
+// value-bearing keys (hosts, api_keys, models — not
+// protocols/timeouts/num_ctx/think/parallelism, whose compose scaffold defaults
+// are hard-wired non-empty), (c) the known scaffold-default VALUES of
+// CTX_RERANK_HOST/CTX_RERANK_MODEL exempted, and (d) name-only lines, never
+// values (six of the names are api_key vars).
+//
+// The tense in (a)/(b)/(c) is deliberate and dates from β12: the repo's own
+// docker-compose.yml no longer declares any of the 29, so on a deployment that
+// took the new compose file with the release, the vars never reach the process
+// and the sweep is structurally blind — silent by construction, not by bug. Its
+// reach is the deployments that did NOT update their compose (foreign copies do
+// not travel with a release) plus every non-compose form — binary, systemd, k8s
+// — where a .env or a unit file still exports them. That two-part reach is what
+// design/01 §9 hands to β13 to state in docs/operations.md; the scaffold-default
+// exemptions above stay because the files that still carry them are exactly the
+// v4-era compose copies the sweep is left to serve.
 //
 // The ROW half below survives unchanged: it keys off config.RetiredKeyNames(),
 // which the cut does not touch, so it keeps reporting leftover context_settings

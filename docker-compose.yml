@@ -51,49 +51,33 @@ services:
       # (comma-separated exact URIs; loopback is always allowed by rule).
       CTX_CANONICAL_ISSUER: ${CTX_CANONICAL_ISSUER:-https://${CTX_HOSTNAME}}
       CTX_OAUTH_REDIRECT_EXTRA: ${CTX_OAUTH_REDIRECT_EXTRA:-}
-      CTX_EMBED_HOST: ${CTX_EMBED_HOST}
-      CTX_EMBED_API_KEY: ${CTX_EMBED_API_KEY:-}
-      CTX_EMBED_PROTOCOL: ${CTX_EMBED_PROTOCOL:-}
-      CTX_EMBED_MODEL: ${CTX_EMBED_MODEL}
-      CTX_EMBED_NUM_CTX: ${CTX_EMBED_NUM_CTX:-}
-      CTX_CHAT_HOST: ${CTX_CHAT_HOST}
-      CTX_CHAT_API_KEY: ${CTX_CHAT_API_KEY:-}
-      CTX_CHAT_PROTOCOL: ${CTX_CHAT_PROTOCOL:-}
-      CTX_CHAT_MODEL: ${CTX_CHAT_MODEL}
-      CTX_CHAT_THINK: ${CTX_CHAT_THINK:-}
-      CTX_CHAT_NUM_CTX: ${CTX_CHAT_NUM_CTX:-}
-      CTX_CHAT_FALLBACK_HOST: ${CTX_CHAT_FALLBACK_HOST:-}
-      CTX_CHAT_FALLBACK_API_KEY: ${CTX_CHAT_FALLBACK_API_KEY:-}
-      CTX_CHAT_FALLBACK_PROTOCOL: ${CTX_CHAT_FALLBACK_PROTOCOL:-}
-      CTX_CHAT_FALLBACK_TIMEOUT: ${CTX_CHAT_FALLBACK_TIMEOUT:-}
+      # Backend topology — the endpoints themselves (host, protocol, model,
+      # num_ctx, think, API key, per role chat / synthesis / embed / dream /
+      # dream-embed / rerank) — is NOT configured here. It lives as rows in the
+      # backend pool (`context_backends`, migration 053): `ctx backends` on the
+      # CLI, /settings/backends in the web UI, `ctx init` or `ctx backends seed`
+      # on a fresh install. The 29 CTX_{CHAT,CHAT_FALLBACK,EMBED,DREAM,
+      # DREAM_EMBED,RERANK}_* declarations that stood here are retired in
+      # v5.0.0: nothing reads them any more, and leaving them in a .env is
+      # inert. Upgrade path and the reason: docs/operations.md.
       CTX_DREAM_ENABLED: ${CTX_DREAM_ENABLED:-false}
-      CTX_DREAM_HOST: ${CTX_DREAM_HOST:-}
-      CTX_DREAM_API_KEY: ${CTX_DREAM_API_KEY:-}
-      CTX_DREAM_PROTOCOL: ${CTX_DREAM_PROTOCOL:-}
-      CTX_DREAM_MODEL: ${CTX_DREAM_MODEL:-}
-      CTX_DREAM_NUM_CTX: ${CTX_DREAM_NUM_CTX:-}
-      CTX_DREAM_THINK: ${CTX_DREAM_THINK:-}
       CTX_DREAM_PARALLELISM: ${CTX_DREAM_PARALLELISM:-1}
-      # CTX_DREAM_EMBED_* (separate dream-embedding endpoint) is no longer wired
-      # here: live it was identical to CTX_EMBED_*, and the backend pool (053)
-      # dedups an identical tuple onto the llama-embed row's dream-embed role.
-      # To run a SEPARATE dream-embed backend, create a pool row instead
-      # (`ctx backends`, role dream-embed); config.go still reads these vars for
-      # the one-time bootstrap of an empty context_backends if you re-add them.
-      # Reranker (post-RRF re-score). Default ON since Wave 3.5: the surface-gold
-      # counter-probe showed the cross-encoder earns its keep on real-user
-      # queries (nDCG@10 +0.164, MRR +0.169 on judge-annotated answer gold)
-      # while blend 0.5 keeps it neutral on latent gold — graph+ce-bw0.5 is the
-      # best arm on BOTH gold sets. The ~80-90s/query path stays proxy-safe via
-      # the query body-heartbeat. Disable with CTX_RERANK_ENABLED=false.
-      # RERANK_HOST dispatches: empty => LLM-as-judge on the chat model; set =>
-      # local cross-encoder sidecar (service below). BLEND_WEIGHT/MAX_DOCS are
-      # cross-encoder sweep knobs (quality, not latency — CPU rerank ~1s/doc
-      # is intentionally not a constraint; the client timeout is sized for 50).
-      CTX_RERANK_ENABLED: ${CTX_RERANK_ENABLED:-true}
-      CTX_RERANK_HOST: ${CTX_RERANK_HOST:-}
-      CTX_RERANK_API_KEY: ${CTX_RERANK_API_KEY:-}
-      CTX_RERANK_MODEL: ${CTX_RERANK_MODEL:-}
+      # Reranker (post-RRF re-score). Opt-in since v5.0.0, and the default is
+      # OFF for the same reason the tuples above are gone: whether a reranker
+      # exists is a pool question, and a fresh install has no row of role
+      # rerank. Without such a row the dispatch silently degrades to
+      # LLM-as-judge on the chat model (~80-90s/query — proxy-safe via the
+      # query body-heartbeat, but nobody chose it), so an ON default would sell
+      # a slow path as a feature. The cross-encoder itself earns its keep where
+      # a row does exist: the Wave-3.5 surface-gold counter-probe measured
+      # nDCG@10 +0.164 and MRR +0.169 on judge-annotated answer gold, with
+      # blend 0.5 neutral on latent gold (graph+ce-bw0.5 = best arm on BOTH
+      # gold sets). To use the `ctx-rerank` sidecar below: create a pool row
+      # targeting it (`ctx backends`), then set CTX_RERANK_ENABLED=true.
+      # BLEND_WEIGHT/MAX_DOCS are cross-encoder sweep knobs (quality, not
+      # latency — CPU rerank ~1s/doc is intentionally not a constraint; the
+      # client timeout is sized for 50).
+      CTX_RERANK_ENABLED: ${CTX_RERANK_ENABLED:-false}
       CTX_RERANK_MAX_DOCS: ${CTX_RERANK_MAX_DOCS:-50}
       # BLEND_WEIGHT default 0.5 (not 1.0): the Wave-3 sweep showed pure
       # cross-encoder (bw1.0) discards the RRF prior and re-ranks latent neighbors
@@ -352,7 +336,8 @@ services:
   # Useful for Dream embedding on CPU (frees GPU for query-path).
   # Mount your GGUF models into /models. Route Dream embedding here via a pool
   # row (`ctx backends`, role dream-embed, base_url http://llama-embed:8081,
-  # protocol openai) — not env vars (see the dream-embed note above).
+  # protocol openai) — the pool is the only route (see the backend-topology
+  # note in the ctx service above).
   #
   # llama-embed:
   #   image: ghcr.io/ggml-org/llama.cpp:server
@@ -376,10 +361,12 @@ services:
   #     retries: 3
   #     start_period: 15s
 
-  # llama.cpp CPU-only cross-encoder reranker sidecar (Wave 2, default-on
-  # since Wave 3.5 — see the CTX_RERANK_* block above). bge-reranker-v2-m3
-  # (XLM-RoBERTa, multilingual de+en) over the cohere-style /v1/rerank
-  # endpoint; ctx reaches it at http://ctx-rerank:8082; all-local, $0. The
+  # llama.cpp CPU-only cross-encoder reranker sidecar (Wave 2, opt-in since
+  # v5.0.0 — see the CTX_RERANK_ENABLED block above). Starting the container
+  # engages nothing on its own: ctx reaches a reranker only through a pool row
+  # of role rerank pointing at http://ctx-rerank:8082 (`ctx backends`), with
+  # CTX_RERANK_ENABLED=true. bge-reranker-v2-m3 (XLM-RoBERTa, multilingual
+  # de+en) over the cohere-style /v1/rerank endpoint; all-local, $0. The
   # real oversized-input guard is ctx's app-side per-doc clamp
   # (rrf.RerankCrossEncoderContentLimit, ~2048 chars): a single query+doc
   # pair longer than the batch kills the server PROCESS (not a graceful
@@ -421,9 +408,15 @@ services:
       start_period: 30s
 
   # llama.cpp CPU emergency fallback for the query path (synthesis only).
-  # Engaged by ctx via CTX_CHAT_FALLBACK_HOST when the primary GPU chat
-  # backend is unreachable at transport level (host down/Gaming-Mode) — never
-  # on HTTP errors or slow responses. Same MTP-GGUF as production → identical
+  # Engaged when a low-priority pool row targets it (e.g. name `llama-cpu`,
+  # prio 10, role synthesis, base_url http://llama-cpu:8090 — `ctx backends`);
+  # a fresh install has no such row until someone creates one. The chain walks
+  # to it when the higher-priority row fails in a way that earns a failover —
+  # transport (host down/Gaming-Mode), gateway 5xx, rate limit, auth, billing;
+  # a slow-but-alive backend keeps the call (timeouts stop the walk unless
+  # pool.failover_on_timeout says otherwise) and so does a plain 500. Because
+  # the failover is a pool decision, priority — not an env var — is what makes
+  # this the LAST resort. Same MTP-GGUF as production → identical
   # answer quality at CPU speed (~2.25 tok/s tg, 74 tok/s pp ⇒ a 500-token
   # synthesis takes 4.5-5.5 min; the response-body heartbeat keeps buffering
   # reverse proxies alive). ctx-size 32k suffices: the openai path never sends

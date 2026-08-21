@@ -8,18 +8,6 @@ import (
 	"testing"
 )
 
-// retirementMarker is the marker every .env.example line that still names one
-// of the 29 retired backend tuple vars has to carry. It names the release the
-// var disappears in, so the marker doubles as the answer to the only question
-// a reader of that line has ("until when does this work?") — a bare "DEPRECATED"
-// would pass a gate and tell an operator nothing.
-//
-// It is spelled here and in cmd/ctxd's retiredMajor; the two cannot share a
-// constant (config must not import the daemon, and a doc marker is not config),
-// so the pin is this comment plus the fact that a version bump that touches one
-// and not the other makes the docs and the boot log name different releases.
-const retirementMarker = "retired v5.0.0"
-
 // envExampleRelPath locates the tracked template from this package: config →
 // internal → go → repo root. Deliberately the ONE tracked file, never a glob:
 // the frozen .deploy-v4.* tag worktrees carry their own .env.example copies of
@@ -66,89 +54,81 @@ func readEnvExample(t *testing.T) []string {
 	return strings.Split(string(raw), "\n")
 }
 
-// TestEnvExampleRetiredVarsAreMarked is the A06-A2 gate (design/06 §7 A2, using
-// the §3.0 pattern): after the deprecation rewrite, every line of .env.example
-// that still names one of the 29 retired backend tuple vars is marked as
-// retired, and none of them is a live example any more.
+// TestEnvExampleNamesNoRetiredVar is the A03-W2 gate of the cut (design/03 §7
+// W2: "grep … .env.example = 0", using the §3.0 pattern): after the rewrite the
+// template does not name a single one of the 29 retired backend tuple vars —
+// not as an assignment, not as a commented example, not as prose.
 //
-// Why the template needs a gate of its own and not just a careful edit: example
-// material is deployment surface at this project's scale (design/06 §6.3). Every
-// fresh install starts as `cp .env.example .env`, so an unmarked assignment in
-// here does not merely document the dying surface — it KEEPS CREATING new
-// deployments on it, months after the docs said it was going away. The template
-// is the one file where a stale line writes itself into other people's systems.
+// This replaces the two α14 gates that guarded the DEPRECATION WINDOW, and the
+// replacement is a deliberate inversion, not a relaxation:
 //
-// Two assertions, because "marked" and "inert" are different failures:
+//   - TestEnvExampleRetiredVarsAreMarked required every mention to carry the
+//     "retired v5.0.0" marker. With zero mentions there is nothing left to
+//     mark, and absence is the strictly stronger property — a marked line
+//     still passes a name into a fresh .env, an absent one cannot.
+//   - TestEnvExampleNamesEveryRetiredVar required the template to spell out
+//     all 29, so that deleting the notice could not be the cheap way to green.
+//     That pin was right for α (v4.38 still READ the vars: the file a fresh
+//     install copies was also the file that configured them). It is wrong for
+//     the cut. .env.example is copied verbatim into every new installation, so
+//     from v5 on the completeness pin would write 29 dead names into .env files
+//     that never had them, to serve a reader who is not there — the operator
+//     upgrading from v4 reads his OWN .env, plus the two channels design/03 §6
+//     names as the whole documented contract: docs/operations.md (β13) and the
+//     release body / tag annotation (β14). Neither is this file.
 //
-//   - marked: a line that names a retired var without the marker is a line that
-//     tells a reader to use it. This is the literal A2 gate ("only retired-marked
-//     lines survive; an active unmarked example = red").
-//   - inert: a retired var may still be DECLARED here (four of them are, so the
-//     compose environment: block keeps interpolating without a warning until it
-//     is cut), but it must be declared EMPTY. A non-empty value is a value the
-//     template hands a fresh install for a surface that no longer configures
-//     anything: β1 removed the boot seed, so the line cannot produce backends —
-//     it can only make the boot sweep warn about a var the operator never
-//     chose, and teach the reader that backend topology lives in .env. The
-//     backend pool is the only topology source; the template must not suggest
-//     a second one (design/06 §5.2).
-func TestEnvExampleRetiredVarsAreMarked(t *testing.T) {
+// What survives from the old direction is the destination pin below: the
+// template must still point at the replacement path, so the deletion cannot
+// turn into a silent hole.
+func TestEnvExampleNamesNoRetiredVar(t *testing.T) {
 	pattern := retiredEnvPattern(t)
-	assignment := regexp.MustCompile(`^\s*(CTX_[A-Z0-9_]+)\s*=(.*)$`)
-
 	for i, line := range readEnvExample(t) {
-		if !pattern.MatchString(line) {
-			continue
-		}
-		lineNo := i + 1
-		if !strings.Contains(line, retirementMarker) {
-			t.Errorf(".env.example:%d names a retired backend tuple var without the %q marker: %s",
-				lineNo, retirementMarker, strings.TrimSpace(line))
-		}
-		m := assignment.FindStringSubmatch(line)
-		if m == nil {
-			continue // comment or prose — the marker check above is the whole rule
-		}
-		value := strings.TrimSpace(strings.SplitN(m[2], "#", 2)[0])
-		if value != "" {
-			t.Errorf(".env.example:%d assigns retired var %s a value (%q) — the template must not seed a backend pool; see 'ctx backends seed'",
-				lineNo, m[1], value)
+		if m := pattern.FindString(line); m != "" {
+			t.Errorf(".env.example:%d names retired backend tuple var %s: %s — the pool is the configuration surface (`ctx backends`), and the full retirement notice lives in docs/operations.md",
+				i+1, m, strings.TrimSpace(line))
 		}
 	}
 }
 
-// TestEnvExampleNamesEveryRetiredVar pins the notice's COMPLETENESS against the
-// one list (K4): .env.example spells out all 29 names the boot log names.
+// TestComposeDeclaresNoRetiredVar is the A03-W3 gate (design/03 §7 W3: the
+// `environment:` block of the ctx service declares none of the 29 any more)
+// in durable form. The design specified it as a one-off shell grep over
+// `docker compose config --format json`; written as a test it keeps holding
+// after the wave, which is what the cut needs — a re-added declaration is not
+// a cosmetic regression but a resurrected configuration channel: it would put
+// a name back on the container environment that nothing reads, and the boot
+// tombstone owed by β13 would then warn about a var the operator never chose.
 //
-// The direction matters. The marker gate above only constrains names that ARE
-// mentioned; on its own, the cheapest way to make it green forever is to delete
-// the deprecation section entirely — and an operator upgrading from a .env he
-// wrote two years ago would then find no trace of the vars he is running. This
-// test is what makes deletion a red gate instead of a shortcut, and it is why
-// the section lists the full set rather than a representative sample.
+// It is the negative twin of TestClusterComposeDeclaresEveryKey (gate (ii),
+// cluster_c0_test.go) and shares its scanner, so both speak about exactly the
+// same block: a knob the container cannot receive is not a knob, and a name
+// the container receives for nothing is not a knob either.
 //
-// It is also a drift pin in the other direction: when the tuple set grows or a
-// name changes in retired.go, the template goes red until the notice follows.
-func TestEnvExampleNamesEveryRetiredVar(t *testing.T) {
-	body := strings.Join(readEnvExample(t), "\n")
+// Note the asymmetry with the .env.example gate above: this one reads NAMES,
+// not lines, because the block's prose is where the cut is explained ("the 29
+// CTX_{CHAT,…}_* declarations that stood here are retired in v5.0.0"). A
+// comment may say the word; a declaration may not exist.
+func TestComposeDeclaresNoRetiredVar(t *testing.T) {
+	declared := ctxServiceEnvNames(t)
 	for _, name := range RetiredEnvNames() {
-		if !regexp.MustCompile(`\b` + name + `\b`).MatchString(body) {
-			t.Errorf(".env.example never names retired var %s — the deprecation notice must list all 29", name)
+		if declared[name] {
+			t.Errorf("docker-compose.yml still declares retired var %s in the ctx service environment: block — backend topology lives in the pool (`ctx backends`), not on the container environment",
+				name)
 		}
 	}
 }
 
-// TestEnvExampleNamesTheReplacement keeps the α line honest: this release is
-// replacement-first, so the file that announces the retirement has to name the
-// path that replaces it. A deprecation notice without a destination is the
-// failure mode E13 already ruled out on the wire (404, no hint in the response,
-// the destination lives in the docs) — the template is one of the places that
-// has to carry it.
+// TestEnvExampleNamesTheReplacement keeps the template honest in the direction
+// the absence gate cannot: the file that no longer names the retired surface
+// has to name the one that replaces it. Written for α as "a deprecation notice
+// without a destination", it matters more after the cut, not less — a fresh
+// install now finds NO backend configuration in this file at all, and the only
+// thing standing between that and a puzzled operator is the pointer.
 func TestEnvExampleNamesTheReplacement(t *testing.T) {
 	body := strings.Join(readEnvExample(t), "\n")
 	for _, want := range []string{"ctx init", "ctx backends seed", "docs/operations.md"} {
 		if !strings.Contains(body, want) {
-			t.Errorf(".env.example does not name %q — the retirement notice must point at the replacement path", want)
+			t.Errorf(".env.example does not name %q — the template must point at the replacement path", want)
 		}
 	}
 }
