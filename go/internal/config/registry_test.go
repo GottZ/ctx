@@ -202,11 +202,10 @@ func TestRegistryStrictSet(t *testing.T) {
 // is "presence" (never fingerprinted — offline dictionary oracle).
 func TestRegistrySecretSet(t *testing.T) {
 	want := map[string]string{
-		"server.db_password":  "presence",
-		"chat.api_key":        "fp",
-		"embed.api_key":       "fp",
-		"dream.api_key":       "fp",
-		"dream_embed.api_key": "fp",
+		"server.db_password": "presence",
+		"chat.api_key":       "fp",
+		"embed.api_key":      "fp",
+		"dream.api_key":      "fp",
 	}
 	got := map[string]string{}
 	for _, e := range registry() {
@@ -226,17 +225,17 @@ func TestRegistrySecretSet(t *testing.T) {
 // The rerank group left this switch in β3: its tuple keys are out of the
 // registry entirely, so the loop now asserts the OTHER half of the statement
 // for what is left of the group — rerank.enabled/max_docs/blend_weight are
-// live, unmarked keys. chat_fallback left it in β4, and left nothing behind:
-// all four of its keys were tuple keys, so the group has no surviving half to
-// assert anything about. Keeping the case label would pin a branch no registry
-// entry can reach any more. That the cut names stay out of the registry is
-// retired_test.go's ratchet, not this pin.
+// live, unmarked keys. chat_fallback left it in β4 and dream_embed in β5, both
+// leaving nothing behind: all of their keys were tuple keys, so neither group
+// has a surviving half to assert anything about. Keeping the case labels would
+// pin branches no registry entry can reach any more. That the cut names stay
+// out of the registry is retired_test.go's ratchet, not this pin.
 func TestRegistrySupersededSet(t *testing.T) {
 	for _, e := range registry() {
 		group, _, _ := strings.Cut(e.Key, ".")
 		isRoleTuple := false
 		switch group {
-		case "chat", "embed", "dream_embed":
+		case "chat", "embed":
 			isRoleTuple = true
 		case "dream":
 			switch e.Key {
@@ -308,9 +307,8 @@ func TestRegistryTenancySet(t *testing.T) {
 	overridable := map[string]bool{
 		// the provider api_key secret_refs (TENANT-DECISION: per-tenant creds);
 		// rerank.api_key left the allowlist with the β3 tuple cut,
-		// chat_fallback.api_key with the β4 one
-		"chat.api_key": true, "embed.api_key": true,
-		"dream.api_key": true, "dream_embed.api_key": true,
+		// chat_fallback.api_key with the β4 one, dream_embed.api_key with the β5 one
+		"chat.api_key": true, "embed.api_key": true, "dream.api_key": true,
 		// the re-dream back-off curve (atomic per-tenant unit)
 		"dream.backoff_mode": true, "dream.backoff_factor": true, "dream.backoff_grace": true,
 		"dream.backoff_cap": true, "dream.backoff_min": true, "dream.backoff_inert_offset": true,
@@ -384,14 +382,18 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 67 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 67 (change it with intent)", got)
+	if got := len(overridable); got != 66 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 66 (change it with intent)", got)
 	}
-	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
-	// a tenant override here would flush the process-wide embed cache / flip the
-	// server GPU switch. Also exercises IsGlobalOnly incl. its fail-closed path.
+	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
+	// tenant override here would flush the process-wide embed cache / flip the
+	// server GPU switch. Two of the five were dream_embed.host/protocol; they
+	// left the registry in β5, and an unregistered name says nothing about this
+	// invariant any more — IsGlobalOnly answers true for every unknown key, so
+	// keeping them would have turned two real assertions into a second copy of
+	// the fail-closed case below. Their absence is retired_test.go's ratchet.
 	for _, k := range []string{"gaming.active", "embed.host", "embed.protocol",
-		"dream_embed.host", "dream_embed.protocol", "nonexistent.key"} {
+		"nonexistent.key"} {
 		if !IsGlobalOnly(k) {
 			t.Errorf("%s must be global-only", k)
 		}

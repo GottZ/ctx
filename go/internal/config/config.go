@@ -130,10 +130,11 @@ type ServerConfig struct {
 type ChatConfig struct {
 	Host string `key:"chat.host" env:"CTX_CHAT_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 	// TENANT-DECISION(provider-api-key): the provider api_key secret_refs
-	// (chat/embed/dream/dream_embed — rerank.api_key left the registry with the
-	// β3 tuple cut, chat_fallback.api_key with the β4 one) are tenant-overridable
-	// — a tenant brings its own provider credential (resolved per-tenant by the
-	// 03-W3..W5 secret resolver, isolation gated by tenant.allow_shared_secrets
+	// (chat/embed/dream — rerank.api_key left the registry with the β3 tuple
+	// cut, chat_fallback.api_key with the β4 one, dream_embed.api_key with the
+	// β5 one) are tenant-overridable — a tenant brings its own provider
+	// credential (resolved per-tenant by the 03-W3..W5 secret resolver,
+	// isolation gated by tenant.allow_shared_secrets
 	// §4.3). Alt: global-only with credentials flowing ONLY through the F3 pool's
 	// scope+AAD path; umentscheidbar because the per-tenant secret resolver
 	// (W3-W5) is not built yet and may consolidate on the pool. §3.3 lists these
@@ -163,9 +164,11 @@ type EmbedConfig struct {
 }
 
 // DreamConfig is the dream pipeline: its own chat tuple (model/num_ctx/think
-// inherit from chat when zero), an optional separate embed tuple (field-by-
-// field inheritance from embed, credential boundary V12), and the back-off
-// policy.
+// inherit from chat when zero) and the back-off policy. The separate dream
+// embedding tuple left in β5 — which backend embeds dream jobs is a pool
+// question (context_backends, role dream-embed, resolved in dream/router.go),
+// and with the tuple went both its field-by-field inheritance from embed and
+// the V12 credential boundary that guarded that inheritance.
 type DreamConfig struct {
 	Enabled  bool               `key:"dream.enabled" env:"CTX_DREAM_ENABLED" default:"false" mut:"restart" tenancy:"global-only"`
 	Host     string             `key:"dream.host" env:"CTX_DREAM_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
@@ -174,8 +177,6 @@ type DreamConfig struct {
 	Model    string             `key:"dream.model" env:"CTX_DREAM_MODEL" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 	NumCtx   int                `key:"dream.num_ctx" env:"CTX_DREAM_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends" tenancy:"global-only"`
 	Think    backends.ThinkMode `key:"dream.think" env:"CTX_DREAM_THINK" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-
-	Embed DreamEmbedConfig
 
 	// idle_wait (scheduler cadence) and parallelism (process-wide worker count,
 	// restart) are background-pipeline infrastructure — global-only.
@@ -213,18 +214,6 @@ type DreamConfig struct {
 	TemporalTimeout time.Duration `key:"dream.temporal_timeout" env:"CTX_DREAM_TEMPORAL_TIMEOUT" default:"90" mut:"hot" tenancy:"global-only"`
 
 	Backoff BackoffConfig
-}
-
-// DreamEmbedConfig is the optional separate dream embedding tuple. Empty
-// fields inherit from EmbedConfig field by field (DreamEmbedBackend).
-type DreamEmbedConfig struct {
-	// dream_embed.host/protocol are NAMED global-only (embed-cache coupled, same
-	// R-SCALE6 shared-cache flush as embed.host/protocol).
-	Host     string            `key:"dream_embed.host" env:"CTX_DREAM_EMBED_HOST" default:"" mut:"coupled:embed-cache" superseded:"f3:context_backends" tenancy:"global-only"`
-	APIKey   string            `key:"dream_embed.api_key" env:"CTX_DREAM_EMBED_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
-	Protocol backends.Protocol `key:"dream_embed.protocol" env:"CTX_DREAM_EMBED_PROTOCOL" default:"" mut:"coupled:embed-cache" superseded:"f3:context_backends" tenancy:"global-only"`
-	Model    string            `key:"dream_embed.model" env:"CTX_DREAM_EMBED_MODEL" default:"" mut:"coupled" superseded:"f3:context_backends" tenancy:"global-only"`
-	NumCtx   int               `key:"dream_embed.num_ctx" env:"CTX_DREAM_EMBED_NUM_CTX" default:"0" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 }
 
 // BackoffConfig is the re-dream back-off policy (curve by eval count).
@@ -1468,35 +1457,12 @@ func (c *Config) DreamBackend() backends.Backend {
 	return b
 }
 
-// DreamEmbedBackend returns the dream embedding tuple with field-by-field
-// fallback onto Embed.* (today's scheduler semantics). The cross-host
-// credential case — APIKey inheriting although Host does not — is rejected by
-// V12 at validation time instead of silently changing the inheritance here.
-func (c *Config) DreamEmbedBackend() backends.Backend {
-	b := backends.Backend{
-		Host:     c.Dream.Embed.Host,
-		APIKey:   c.Dream.Embed.APIKey,
-		Protocol: c.Dream.Embed.Protocol,
-		Model:    c.Dream.Embed.Model,
-		NumCtx:   c.Dream.Embed.NumCtx,
-	}
-	if b.Host == "" {
-		b.Host = c.Embed.Host
-	}
-	if b.APIKey == "" {
-		b.APIKey = c.Embed.APIKey
-	}
-	if b.Protocol == "" {
-		b.Protocol = c.Embed.Protocol
-	}
-	if b.Model == "" {
-		b.Model = c.Embed.Model
-	}
-	if b.NumCtx == 0 {
-		b.NumCtx = c.Embed.NumCtx
-	}
-	return b
-}
+// DreamEmbedBackend died with the dream_embed tuple in β5. It resolved the
+// tuple field by field onto Embed.*, with V12 rejecting the one case the
+// fallback could not decide safely (an own host but an inherited credential).
+// The pool answers both questions now: dream/router.go:130-142 chains role
+// dream-embed when a row carries it and falls back to role embed otherwise,
+// and a pool row's api_key_ref never travels to another row's host.
 
 // EmbedBackend returns the query-path embedding tuple, 1:1 from Embed.*.
 func (c *Config) EmbedBackend() backends.Backend {

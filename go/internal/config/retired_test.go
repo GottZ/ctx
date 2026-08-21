@@ -52,6 +52,8 @@ var retiredKeysGolden = []string{
 var retiredKeysAlreadyCut = []string{
 	// β4 — chat_fallback
 	"chat_fallback.api_key", "chat_fallback.host", "chat_fallback.protocol", "chat_fallback.timeout",
+	// β5 — dream_embed
+	"dream_embed.api_key", "dream_embed.host", "dream_embed.model", "dream_embed.num_ctx", "dream_embed.protocol",
 	// β3 — rerank
 	"rerank.api_key", "rerank.host", "rerank.model",
 }

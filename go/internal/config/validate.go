@@ -46,7 +46,7 @@ const temporalTimeoutBudget = dream.CycleTimeout - (dream.KeywordsTimeout + drea
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateBackendTuples(c)...) // V1, V4, V7, V12
+	issues = append(issues, validateBackendTuples(c)...) // V1, V4, V7
 	issues = append(issues, validateQuery(c)...)         // V2, V5, V11
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14
@@ -63,7 +63,6 @@ func validateBackendTuples(c *Config) []Issue {
 		{"chat.host", c.Chat.Host},
 		{"embed.host", c.Embed.Host},
 		{"dream.host", c.Dream.Host},
-		{"dream_embed.host", c.Dream.Embed.Host},
 	} {
 		if h.host == "" {
 			continue
@@ -73,19 +72,17 @@ func validateBackendTuples(c *Config) []Issue {
 
 	// V4 — protocol typos fell silently onto the ollama wire path until now
 	// (chatWithFormat: != "openai" ⇒ ollama) → 404 on llama.cpp. Delta 6.
+	// The allowEmpty column left with dream_embed.protocol in β5: it was the
+	// only inheriting protocol key, so every remaining entry carries a
+	// non-empty default and an empty value here is a real typo class.
 	for _, p := range []struct {
-		key        string
-		proto      backends.Protocol
-		allowEmpty bool // dream_embed inherits when empty
+		key   string
+		proto backends.Protocol
 	}{
-		{"chat.protocol", c.Chat.Protocol, false},
-		{"embed.protocol", c.Embed.Protocol, false},
-		{"dream.protocol", c.Dream.Protocol, false},
-		{"dream_embed.protocol", c.Dream.Embed.Protocol, true},
+		{"chat.protocol", c.Chat.Protocol},
+		{"embed.protocol", c.Embed.Protocol},
+		{"dream.protocol", c.Dream.Protocol},
 	} {
-		if p.allowEmpty && p.proto == "" {
-			continue
-		}
 		if p.proto != backends.ProtocolOllama && p.proto != backends.ProtocolOpenAI {
 			issues = append(issues, Issue{Field: p.key, Severity: SeverityError,
 				Msg: fmt.Sprintf("unknown protocol %q — must be %q or %q (typos silently selected the ollama wire path before F1)",
@@ -107,15 +104,12 @@ func validateBackendTuples(c *Config) []Issue {
 				c.Dream.NumCtx, c.Chat.NumCtx)})
 	}
 
-	// V12 — credential boundary of the dream-embed inheritance: with a
-	// foreign dream-embed host and no own key, the field-by-field fallback
-	// would send the embed credential as Bearer to the FOREIGN host on every
-	// keyword embed and backfill, silently.
-	if c.Dream.Embed.Host != "" && c.Dream.Embed.Host != c.Embed.Host &&
-		c.Dream.Embed.APIKey == "" && c.Embed.APIKey != "" {
-		issues = append(issues, Issue{Field: "dream_embed.api_key", Severity: SeverityError,
-			Msg: "credential would be inherited across hosts — set dream_embed.api_key explicitly (F2: secret_ref) or leave dream_embed.host empty"})
-	}
+	// V12 retired with the dream_embed tuple in β5 (design/01 §7 W4). It was
+	// the credential boundary of the dream-embed inheritance — a foreign
+	// dream-embed host with no own key would have sent the embed credential as
+	// Bearer to that foreign host on every keyword embed and backfill. The
+	// inheritance it guarded no longer exists: the pool resolves dream embeds
+	// per ROW (dream/router.go), and a row carries its own api_key_ref.
 
 	return issues
 }

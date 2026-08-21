@@ -93,14 +93,10 @@ func TestBootDefaults(t *testing.T) {
 		t.Errorf("chat defaults drifted: %+v", cc.Chat)
 	}
 
-	// Embed + dream embed.
+	// Embed (the separate dream-embed tuple left the registry in β5).
 	if cc.Embed.Host != "http://localhost:11434" || cc.Embed.Protocol != "ollama" ||
 		cc.Embed.Model != "qwen3-embedding:8b" || cc.Embed.NumCtx != 0 {
 		t.Errorf("embed defaults drifted: %+v", cc.Embed)
-	}
-	if cc.Dream.Embed.Host != "" || cc.Dream.Embed.Protocol != "" ||
-		cc.Dream.Embed.Model != "" || cc.Dream.Embed.NumCtx != 0 {
-		t.Errorf("dream embed defaults drifted (must inherit via empty): %+v", cc.Dream.Embed)
 	}
 
 	// Dream + back-off.
@@ -189,11 +185,6 @@ func TestBootEnvWiring(t *testing.T) {
 		"CTX_DREAM_PROTOCOL": "openai", "CTX_DREAM_MODEL": "test-dream-27b",
 		"CTX_DREAM_NUM_CTX": "98304", "CTX_DREAM_THINK": "true",
 
-		"CTX_DREAM_EMBED_HOST":     "http://embed.example:8081",
-		"CTX_DREAM_EMBED_API_KEY":  "sk-dream-embed-0123456789abcdefg",
-		"CTX_DREAM_EMBED_PROTOCOL": "openai", "CTX_DREAM_EMBED_MODEL": "test-embed-8b",
-		"CTX_DREAM_EMBED_NUM_CTX": "2048",
-
 		"CTX_DREAM_IDLE_WAIT": "30", "CTX_DREAM_PARALLELISM": "4",
 		"CTX_DREAM_BACKOFF_MODE": "log", "CTX_DREAM_BACKOFF_FACTOR": "2.5",
 		"CTX_DREAM_BACKOFF_GRACE": "3", "CTX_DREAM_BACKOFF_CAP": "30d",
@@ -248,12 +239,6 @@ func TestBootEnvWiring(t *testing.T) {
 		cc.Dream.NumCtx != 98304 || cc.Dream.Think != "true" ||
 		cc.Dream.IdleWait != 30*time.Second || cc.Dream.Parallelism != 4 {
 		t.Errorf("dream wiring: %+v", cc.Dream)
-	}
-	if cc.Dream.Embed.Host != "http://embed.example:8081" ||
-		cc.Dream.Embed.APIKey != "sk-dream-embed-0123456789abcdefg" ||
-		cc.Dream.Embed.Protocol != "openai" || cc.Dream.Embed.Model != "test-embed-8b" ||
-		cc.Dream.Embed.NumCtx != 2048 {
-		t.Errorf("dream embed wiring: %+v", cc.Dream.Embed)
 	}
 	if cc.Dream.Backoff.Mode != "log" || cc.Dream.Backoff.Factor != 2.5 ||
 		cc.Dream.Backoff.Grace != 3 || cc.Dream.Backoff.CapHours != config.Hours(30*24) ||
@@ -347,10 +332,8 @@ func TestBootDelta6Pinned(t *testing.T) {
 		{"V9 blend weight range", map[string]string{"CTX_RERANK_BLEND_WEIGHT": "1.5"}, "rerank.blend_weight"},
 		{"V9 hop depth zero", map[string]string{"CTX_GRAPH_EXPAND_HOP_DEPTH": "0"}, "graph.hop_depth"},
 		{"V9 negative rate limit", map[string]string{"CTX_RATE_LIMIT_WRITE": "-1"}, "query.rate_limit_write"},
-		{"V12 cross-host credential", map[string]string{
-			"CTX_EMBED_API_KEY":    "sk-embed-0123456789abcdefghijklmn",
-			"CTX_DREAM_EMBED_HOST": "http://other-embed.example:8081",
-		}, "dream_embed.api_key"},
+		// The V12 cross-host credential case retired with the dream_embed tuple
+		// in β5 — the inheritance it guarded is a pool question now.
 		{"V1 dual-runner num_ctx (ollama)", map[string]string{
 			"CTX_CHAT_NUM_CTX": "98304", "CTX_DREAM_NUM_CTX": "32768",
 		}, "dream.num_ctx"},

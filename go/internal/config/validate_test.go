@@ -73,10 +73,11 @@ func TestValidateTable(t *testing.T) {
 		// V4 — protocol typos fell silently onto the ollama wire path.
 		{"V4 chat typo", map[string]string{"chat.protocol": "olama"}, "chat.protocol", SeverityError},
 		{"V4 dream typo", map[string]string{"dream.protocol": "openAI"}, "dream.protocol", SeverityError},
-		{"V4 dream_embed empty inherits ok", map[string]string{}, "dream_embed.protocol", -1},
-		{"V4 dream_embed garbage", map[string]string{
-			"dream_embed.protocol": "garbage",
-		}, "dream_embed.protocol", SeverityError},
+		// The V4 allowEmpty column left with dream_embed.protocol in β5 — it
+		// was the only protocol key that inherited when empty. Every remaining
+		// entry has a non-empty default, so an empty protocol is a typo now and
+		// the embed case below asserts exactly that.
+		{"V4 embed empty", map[string]string{"embed.protocol": ""}, "embed.protocol", SeverityError},
 
 		// V5 — unknown prompt version: WARN + fall back to v5.2 (legacy init()).
 		{"V5 unknown", map[string]string{"query.prompt_version": "v7"}, "query.prompt_version", SeverityWarn},
@@ -98,10 +99,14 @@ func TestValidateTable(t *testing.T) {
 		// cases sitting on three different hosts.
 		{"V7 userinfo", map[string]string{"chat.host": "http://user:hunter2@chat.example"}, "chat.host", SeverityError},
 		{"V7 unparseable", map[string]string{"dream.host": "http://user:hunter2@bad host"}, "dream.host", SeverityError},
-		// The empty-host continue of the V7 loop. It needs a host key whose
-		// DEFAULT is empty; after the chat_fallback cut dream_embed.host is the
-		// only one left in the list (config.go: dream_embed inherits from embed).
-		{"V7 empty host skipped", map[string]string{}, "dream_embed.host", -1},
+		// The empty-host continue of the V7 loop. It rode on the one list entry
+		// whose DEFAULT was empty (chat_fallback.host until β4, dream_embed.host
+		// until β5); all three survivors default to a real URL, so the case now
+		// states the same thing from the settings side: a present-but-empty
+		// override (lookupMap counts it as provided, what an F2 row can deliver
+		// and FromEnv cannot) still takes the skip and does not become a scheme
+		// error. That is the branch's live caller class after the cut.
+		{"V7 empty host skipped", map[string]string{"embed.host": ""}, "embed.host", -1},
 
 		// V8 retired with rerank.host in β3 (design/01 §7 W2): "enabled without
 		// host" is a pool question now, and Validate does not see the pool.
@@ -122,23 +127,11 @@ func TestValidateTable(t *testing.T) {
 		// V11 — required password (legacy LoadConfig check).
 		{"V11 missing", map[string]string{"server.db_password": ""}, "server.db_password", SeverityError},
 
-		// V12 — credential inheritance across hosts.
-		{"V12 cross-host", map[string]string{
-			"embed.api_key":    "sk-embed-0123456789abcdefghijklmn",
-			"dream_embed.host": "http://other-embed.example:8081",
-		}, "dream_embed.api_key", SeverityError},
-		{"V12 same host ok", map[string]string{
-			"embed.api_key":    "sk-embed-0123456789abcdefghijklmn",
-			"dream_embed.host": "http://localhost:11434",
-		}, "dream_embed.api_key", -1},
-		{"V12 own key ok", map[string]string{
-			"embed.api_key":       "sk-embed-0123456789abcdefghijklmn",
-			"dream_embed.host":    "http://other-embed.example:8081",
-			"dream_embed.api_key": "sk-dream-0123456789abcdefghijklmn",
-		}, "dream_embed.api_key", -1},
-		{"V12 keyless ok", map[string]string{
-			"dream_embed.host": "http://other-embed.example:8081",
-		}, "dream_embed.api_key", -1},
+		// V12 retired with the dream_embed tuple in β5 (design/01 §7 W4): it
+		// guarded the field-by-field inheritance dream_embed→embed against
+		// carrying the embed credential to a foreign dream-embed host. With the
+		// tuple gone there is no inheritance to guard — the pool resolves dream
+		// embeds per row, and a row's api_key_ref never travels to another row.
 
 		// V13 retired with rerank.host in β3 (design/01 §7 W2): its condition
 		// read Fallback.Host AND Rerank.Host, and whether a heartbeat-capable

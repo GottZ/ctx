@@ -61,24 +61,13 @@ func TestDreamBackendInheritance(t *testing.T) {
 	}
 }
 
-// TestDreamEmbedBackendInheritance pins the field-by-field fallback onto
-// Embed.* (today's scheduler semantics; the cross-host credential case is
-// V12's job, not this derivation's).
-func TestDreamEmbedBackendInheritance(t *testing.T) {
-	cfg, _ := cfgFrom(t, map[string]string{
-		"embed.host": "http://embed.example:8081", "embed.model": "embed-8b",
-		"embed.num_ctx": "2048", "embed.protocol": "openai",
-		"dream_embed.model": "dream-embed-4b",
-	})
-	got := cfg.DreamEmbedBackend()
-	want := backends.Backend{
-		Host: "http://embed.example:8081", Protocol: backends.ProtocolOpenAI,
-		Model: "dream-embed-4b", NumCtx: 2048,
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("DreamEmbedBackend() = %+v, want %+v", got, want)
-	}
-}
+// TestDreamEmbedBackendInheritance died with the dream_embed tuple in β5. It
+// pinned the field-by-field fallback onto Embed.* (an own model over an
+// inherited host/protocol/num_ctx); the cross-host credential case it left to
+// V12 went with the same wave. Both statements live on in the pool: role
+// dream-embed with a fallback to role embed (dream/router.go:130-142, covered
+// in the dream package), and a per-row api_key_ref that no fallback can carry
+// to a foreign host.
 
 // TestDreamBackoffConversion pins the converter to the dream-stage parameter
 // struct (F1-W6 — replaces the 6 dream package vars), including the

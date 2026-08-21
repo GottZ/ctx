@@ -39,14 +39,9 @@ const fpMinLen = 24
 // inheritMarkers annotates zero-valued fields whose runtime value comes from
 // another group (the resolved accessors in config.go).
 var inheritMarkers = map[string]string{
-	"dream.model":          "(inherit chat)",
-	"dream.num_ctx":        "(inherit chat)",
-	"dream.think":          "(inherit chat)",
-	"dream_embed.host":     "(inherit embed)",
-	"dream_embed.api_key":  "(inherit embed)",
-	"dream_embed.protocol": "(inherit embed)",
-	"dream_embed.model":    "(inherit embed)",
-	"dream_embed.num_ctx":  "(inherit embed)",
+	"dream.model":   "(inherit chat)",
+	"dream.num_ctx": "(inherit chat)",
+	"dream.think":   "(inherit chat)",
 }
 
 // Redacted renders the effective config as nested maps: one object per key
@@ -156,9 +151,9 @@ func renderHours(h Hours) string {
 // skips groups Redacted did not produce, so a stale name would be invisible
 // rather than wrong — and invisible dead ordering is what this list must not
 // accumulate over the cut train (design/01 §3, "dumpGroupOrder auf 6 Gruppen").
-// chat_fallback left with its tuple in β4.
+// chat_fallback left with its tuple in β4, dream_embed in β5.
 var dumpGroupOrder = []string{
-	"server", "chat", "embed", "dream", "dream_embed",
+	"server", "chat", "embed", "dream",
 	"rerank", "graph", "query", "scheduler",
 }
 

@@ -156,6 +156,44 @@ func TestToOverridesGlobalOnlyTenantGate(t *testing.T) {
 	})
 }
 
+// TestEmbedCacheCoupledChangedOperatorPath is the positive half the R-SCALE6
+// sub-case above never made: the tenant gate proves what must NOT flush, and
+// on its own it would stay green against a function that reports nothing at
+// all. Since β5 that is a live risk — the dream_embed half of the comparison
+// went with its tuple, leaving the embed host/protocol pair as the whole
+// settings-side coupled surface.
+//
+// The model case pins the deliberate non-coverage: context_embed_cache keys on
+// (text_hash, model), so a model change addresses other rows by itself and
+// needs no flush (same reasoning as events/listener.go's coupledPair).
+func TestEmbedCacheCoupledChangedOperatorPath(t *testing.T) {
+	resetEnv(t)
+	base, _ := config.Build(nil, nil)
+
+	cases := []struct {
+		name string
+		key  string
+		val  string
+		want bool
+	}{
+		{"operator embed.host move", "embed.host", `"http://embed.example:9999"`, true},
+		{"operator embed.protocol switch", "embed.protocol", `"openai"`, true},
+		{"model change alone", "embed.model", `"other-embed-4b"`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			overrides, _ := toOverrides([]store.SettingOverride{row(c.key, c.val)}, []string{store.GlobalScope})
+			if len(overrides) != 1 {
+				t.Fatalf("_global override on %s must pass the gate, got %+v", c.key, overrides)
+			}
+			next, _ := config.Build(overrides, nil)
+			if got := EmbedCacheCoupledChanged(base, next); got != c.want {
+				t.Errorf("EmbedCacheCoupledChanged after %s = %v, want %v", c.key, got, c.want)
+			}
+		})
+	}
+}
+
 // --- JSONB unwrapping ---.
 
 func TestScalarValue(t *testing.T) {

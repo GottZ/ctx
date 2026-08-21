@@ -67,11 +67,10 @@ func TestMaskSecretPerClass(t *testing.T) {
 // and this fails on every surface.
 func TestDumpNeverLeaksSecretValues(t *testing.T) {
 	vals := map[string]string{
-		"chat.api_key":        longKey,
-		"embed.api_key":       longKey,
-		"dream.api_key":       longKey,
-		"dream_embed.api_key": longKey,
-		"server.db_password":  shortKey,
+		"chat.api_key":       longKey,
+		"embed.api_key":      longKey,
+		"dream.api_key":      longKey,
+		"server.db_password": shortKey,
 	}
 	for s, name := range map[Surface]string{SurfaceBootDump: "boot", SurfaceAPI: "api"} {
 		rendered := fmt.Sprintf("%v", dumpFor(t, vals, s))
@@ -116,9 +115,8 @@ func TestDumpInheritMarkers(t *testing.T) {
 			t.Errorf("dream.%s = %v, want '(inherit chat)'", key, got)
 		}
 	}
-	if got := group(t, dump, "dream_embed")["host"]; got != "(inherit embed)" {
-		t.Errorf("dream_embed.host = %v, want '(inherit embed)'", got)
-	}
+	// The five dream_embed markers left with their tuple in β5; the three
+	// dream→chat markers above are the whole map until β6 takes them too.
 
 	set := dumpFor(t, map[string]string{"dream.model": "dream-model-x"}, SurfaceBootDump)
 	if got := group(t, set, "dream")["model"]; got != "dream-model-x" {
@@ -174,6 +172,11 @@ func TestRenderHours(t *testing.T) {
 
 // TestBootDumpArgsShape pins the slog-args contract: alternating key/value
 // pairs, fixed group order, sources + issues at the end.
+//
+// It doubles as the group-absence gate of the cut train, measured in β5: a
+// name left in dumpGroupOrder for a group whose keys all went (dream_embed) is
+// skipped by BootDumpArgs but still lands in want — the comparison fails, so
+// the dead ordering is caught here and needs no pin of its own.
 func TestBootDumpArgsShape(t *testing.T) {
 	c, _ := cfgFrom(t, map[string]string{})
 	issues := []Issue{{Field: "rerank.blend_weight", Severity: SeverityWarn, Msg: "test"}}

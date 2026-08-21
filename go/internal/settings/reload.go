@@ -104,10 +104,10 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, envCfg *config.Config, e
 // error the previous snapshot stays active — the WARN names what failed.
 //
 // X2 (G16): when the swap changes an embed-cache-coupled value (effective
-// embed/dream_embed host or protocol — including a DELETE reverting to env
-// and a psql edit arriving via NOTIFY), the embed cache is flushed AFTER the
-// swap: post-swap only the new backend fills it, whereas a pre-swap flush
-// would let in-flight requests on the old snapshot repollute it for good.
+// embed host or protocol — including a DELETE reverting to env and a psql edit
+// arriving via NOTIFY), the embed cache is flushed AFTER the swap: post-swap
+// only the new backend fills it, whereas a pre-swap flush would let in-flight
+// requests on the old snapshot repollute it for good.
 func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 	var rows []store.SettingOverride
 	if Disabled() {
@@ -148,15 +148,19 @@ func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 
 // EmbedCacheCoupledChanged reports whether the EFFECTIVE embed-cache-coupled
 // values differ between two generations: the host/protocol of the query-path
-// and dream embed tuples (resolved through the dream_embed→embed inheritance,
-// so an embed.host change that propagates into the dream tuple counts).
-// Model changes are deliberately NOT covered — the cache keys on model, and
-// model stays mut:"coupled" (re-embed migration, not overridable).
+// embed tuple. Model changes are deliberately NOT covered — the cache keys on
+// model, and model stays mut:"coupled" (re-embed migration, not overridable).
+//
+// The dream half left with the dream_embed tuple in β5: it was the same two
+// values resolved through the dream_embed→embed inheritance, so with the tuple
+// gone it could only ever have repeated the embed comparison. Settings-side
+// this is the whole coupled surface now; a pool row that moves an embed-role
+// backend to another host is fingerprinted and flushed on the pool side
+// (events/listener.go coupledSet, α5) — settings and pool guard one cache from
+// two ends, and neither statement is the other's.
 func EmbedCacheCoupledChanged(a, b *config.Config) bool {
 	ae, be := a.EmbedBackend(), b.EmbedBackend()
-	ad, bd := a.DreamEmbedBackend(), b.DreamEmbedBackend()
-	return ae.Host != be.Host || ae.Protocol != be.Protocol ||
-		ad.Host != bd.Host || ad.Protocol != bd.Protocol
+	return ae.Host != be.Host || ae.Protocol != be.Protocol
 }
 
 // loadOverrideRows reads the global-scope override rows.

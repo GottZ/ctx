@@ -129,7 +129,8 @@ func admitOverride(o Override, resolve SecretResolver) (admittedOverride, *Issue
 		// state in F2), coupled keys need a re-embed migration no override can
 		// deliver, and the server.* DSN group must stay env-only — the pool
 		// that LOADED the override is bound to the env DSN (circular).
-		// coupled:embed-cache keys (embed/dream_embed host+protocol) ARE
+		// coupled:embed-cache keys (embed host+protocol; the dream_embed pair
+		// left the registry in β5) ARE
 		// overridable since G16: the settings write path flushes
 		// context_embed_cache when their effective values change (X2), which
 		// removes the stale-vector hazard (R5) that kept them pinned.
