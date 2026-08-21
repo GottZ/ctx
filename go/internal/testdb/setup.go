@@ -112,9 +112,22 @@ func SetupTestDBWithDSN(t *testing.T) (*pgxpool.Pool, string) {
 // not-yet-115 database, nothing implicitly stamped ahead of it.
 func SetupTestDBUpTo(t *testing.T, maxVersion int) *pgxpool.Pool {
 	t.Helper()
-	ensureShared(t)
-	pool, _ := newDatabase(t, "", maxVersion)
+	pool, _ := SetupTestDBUpToWithDSN(t, maxVersion)
 	return pool
+}
+
+// SetupTestDBUpToWithDSN behaves exactly like SetupTestDBUpTo but also returns
+// the database's connection string — the capped counterpart of
+// SetupTestDBWithDSN. It exists for tests that have to complete the migration
+// chain through a pool of their OWN making rather than the plain
+// pgxpool.New one handed out here: store.NewPool attaches the notice handler
+// that carries a migration's RAISE NOTICE into the process log (migration 133,
+// β11), and a test asserting on that transport has to run the migration over a
+// production-shaped pool, not a bare test pool.
+func SetupTestDBUpToWithDSN(t *testing.T, maxVersion int) (*pgxpool.Pool, string) {
+	t.Helper()
+	ensureShared(t)
+	return newDatabase(t, "", maxVersion)
 }
 
 // ensureShared boots the shared container + template exactly once per

@@ -359,6 +359,24 @@ docker exec n8n-db-1 psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" \
 
 The cache refills from normal traffic; there is no state to restore. If the embed host was never moved, do nothing — from the seeded stamp on, the offline window is closed for good. The stamp is diagnostic, too: `SELECT coupled_pair_n, updated_at FROM context_embed_cache_meta;` reads as "this many embed connection identities were on record as of then".
 
+### Migration 133: the backend tuple rows are deleted — and the upgrade hop that has to come first
+
+The 29 `chat.*` / `chat_fallback.*` / `embed.*` / `dream.*` / `dream_embed.*` / `rerank.*` connection keys are gone from the settings registry in v5.0.0 (see "Retiring them (v5.0.0)" under [Environment variables](#environment-variables)). Migration 133 removes what is left of them in the database: every `context_settings` row on one of those keys, **in every scope** — the global ones and the tenant-scoped `*.api_key` overrides alike. It touches no schema and no other key.
+
+Deleting rather than leaving them inert is the point. An unregistered key's row is ignored, but only for as long as nobody registers that name again; the day a future release ships something called `rerank.model`, a years-old row would quietly become live configuration on every installation that still carried it — with no warning, nothing in the settings list, and no reference visible from the secrets API. After this migration the rows do not exist, so they cannot come back.
+
+**What it tells you.** When it actually deletes something, the migration writes three lines into the boot log (`docker compose logs ctx`): how many rows went, that their values live in the backend pool now (`ctx backends list`), that this upgrade is supported **from the 4.38 line only** — if you jumped here from anything older, roll back, migrate to last 4.x, verify the pool, then come back — and where the deleted values are. On a database that has no such rows it says nothing.
+
+**Recovering a value.** Every delete is recorded by the ordinary settings audit trigger as an `unset` with the old value attached, marked with the migration's request id:
+
+```bash
+docker exec n8n-db-1 psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
+  "SELECT entity_key, scope, old_value FROM context_settings_audit
+    WHERE metadata->>'request_id' = 'migration-133-retire-backend-tuples';"
+```
+
+Restore what you find **into the backend pool** (`ctx backends`), not as a settings row — writing these keys back through the settings API is not possible any more, and on v4.37 and later it was already refused. Two consequences worth planning for: keep the `CTX_*` tuple variables in your `.env` until the v5 boot is verified — after this migration they are the only remaining source a rollback to 4.x can read — and check `GET /api/secrets` afterwards for sealbox entries whose `referenced_by` is now empty, because a deleted `*.api_key` row took its reference with it while the secret itself stays.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.

@@ -7,9 +7,34 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgxvec "github.com/pgvector/pgvector-go/pgx"
 )
+
+// logPgNotice forwards a server notice to slog. WARNING and above land as
+// warnings, everything below (NOTICE/INFO/LOG/DEBUG) as info — the severity is
+// the server's judgement, carried through rather than flattened into one
+// level. Called from pgx's connection reader: it must not block and must not
+// touch the pool it belongs to.
+func logPgNotice(_ *pgconn.PgConn, n *pgconn.Notice) {
+	if n == nil {
+		return
+	}
+	attrs := []any{"severity", n.Severity, "code", n.Code}
+	if n.Detail != "" {
+		attrs = append(attrs, "detail", n.Detail)
+	}
+	if n.Hint != "" {
+		attrs = append(attrs, "hint", n.Hint)
+	}
+	switch n.Severity {
+	case "WARNING", "ERROR", "FATAL", "PANIC":
+		slog.Warn(n.Message, attrs...)
+	default:
+		slog.Info(n.Message, attrs...)
+	}
+}
 
 // NewPool creates a pgxpool with pgvector type registration on each connection.
 // It retries connecting up to 10 times with exponential backoff (1s, 2s, 4s, ...),
@@ -23,6 +48,17 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		return pgxvec.RegisterTypes(ctx, conn)
 	}
+
+	// Postgres NOTICE/WARNING messages reach the process log. Without a
+	// handler pgx discards them silently — which made every RAISE NOTICE a
+	// migration ever wrote (092, 094, 115 and now 133) a message to nobody.
+	// The delete migration of the backend-tuple retirement depends on this
+	// transport: after decision E13 the API answers a plain 404 on the 29
+	// retired keys, so the boot log is one of the four places that carry the
+	// move at all (BREAKING tag annotation, runbook, README hop, this).
+	// Steady-state traffic produces no notices — they come from DDL and from
+	// explicit RAISE, i.e. from the migration phase of a boot.
+	config.ConnConfig.OnNotice = logPgNotice
 
 	// Explicit pool sizing and health check configuration.
 	config.MaxConns = 20
