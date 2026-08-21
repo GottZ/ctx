@@ -100,17 +100,29 @@ func TestWarnRetiredSettingRowsBoot(t *testing.T) {
 			"level=WARN",
 			"key=chat.host", "scope=" + store.GlobalScope,
 			"key=chat.api_key", "scope=acme",
-			"DELETE /api/settings/chat.host",
 			"v5.0.0",
+			// The remedy has to be EXECUTABLE against this binary. It is the
+			// cut itself (E13), so the settings API answers 404 on all 29 keys
+			// and the row is only reachable through SQL — scope included, or
+			// the operator deletes the other tenants' rows along with it.
+			`DELETE FROM context_settings WHERE key = 'chat.host' AND scope = '` + store.GlobalScope + `'`,
+			`DELETE FROM context_settings WHERE key = 'chat.api_key' AND scope = 'acme'`,
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("log = %q, want %q", out, want)
 			}
 		}
-		// The instruction expires — that is the whole reason this line exists in
-		// the window rather than after the break.
+		// Mutation probe for the E13 alignment: reinstate the pre-v5 wording
+		// ("remove it with DELETE /api/settings/<key> while this version still
+		// answers") and both SQL rows above go red — that line names a route
+		// this very binary 404s.
+		if strings.Contains(out, "DELETE /api/settings/") {
+			t.Errorf("log = %q, must not point at the settings API — it answers 404 for every retired key", out)
+		}
+		// The reason the API path is closed is still named, so the operator
+		// does not read the SQL as a shortcut around a working endpoint.
 		if !strings.Contains(out, "404") {
-			t.Errorf("log = %q, want the closing of the cleanup path named", out)
+			t.Errorf("log = %q, want the closed API path named", out)
 		}
 		// No value, ever: half the retired keys are secret-class, and a resolved
 		// api_key in a boot log is the leak the §3.3 log invariant forbids.

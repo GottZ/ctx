@@ -186,21 +186,25 @@ func checkBaselinePrecondition(ctx context.Context, pool *pgxpool.Pool, maxVersi
 		return nil
 	}
 
+	// One aggregate, one round trip. All three verdicts come from the same
+	// scan of the same table snapshot instead of from two sequential queries
+	// — the boot pays one query where it used to pay two, and no state can
+	// change between the row count and the baseline probe.
+	//
+	// count(*) stays the fresh-install discriminator rather than
+	// max(version) = 0: "zero rows" is the definition the runner has always
+	// used (see above), and folding it into the max would silently reclassify
+	// a table whose only row is version 0 from pre-baseline to fresh.
 	var applied, maxApplied int
+	var hasBaseline bool
 	if err := pool.QueryRow(ctx,
-		"SELECT count(*), COALESCE(max(version), 0) FROM _migrations",
-	).Scan(&applied, &maxApplied); err != nil {
+		"SELECT count(*), COALESCE(max(version), 0), COALESCE(bool_or(version = $1), false) FROM _migrations",
+		migrations.BaselineVersion,
+	).Scan(&applied, &maxApplied, &hasBaseline); err != nil {
 		return fmt.Errorf("reading migration history: %w", err)
 	}
 	if applied == 0 {
 		return nil // fresh install — the baseline is the whole history
-	}
-
-	var hasBaseline bool
-	if err := pool.QueryRow(ctx,
-		"SELECT EXISTS(SELECT 1 FROM _migrations WHERE version = $1)", migrations.BaselineVersion,
-	).Scan(&hasBaseline); err != nil {
-		return fmt.Errorf("checking baseline version: %w", err)
 	}
 	if hasBaseline {
 		return nil
@@ -226,7 +230,27 @@ func checkBaselinePrecondition(ctx context.Context, pool *pgxpool.Pool, maxVersi
 // the baseline's own ledger instead, which writes the same values the files
 // hashed to before the fold — migrations.Folded() carries them, and the
 // schema contract checks them from there.
+//
+// The steady-state cost is one SELECT. Both loops below are keyed on
+// `checksum IS NULL`, so on a database that has completed one boot every one
+// of their ~130 UPDATEs matches zero rows — 130 round trips, 130 write-path
+// statements and 130 WAL-eligible transactions on EVERY boot, to do nothing.
+// The EXISTS probe collapses that to a single indexed read; the loops keep
+// their own IS NULL predicates, which stay the actual correctness gate (the
+// probe only decides whether there is anything to do at all, and it is
+// re-evaluated on every call — a row forced back to NULL still gets repaired
+// by the next one).
 func BackfillChecksums(ctx context.Context, pool *pgxpool.Pool) error {
+	var pending bool
+	if err := pool.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM _migrations WHERE checksum IS NULL)",
+	).Scan(&pending); err != nil {
+		return fmt.Errorf("probing for unstamped migration rows: %w", err)
+	}
+	if !pending {
+		return nil
+	}
+
 	// Folded versions first: their files are gone, so the checksum has to
 	// come from the folded chain. A fresh install already got these from the
 	// baseline's ledger; this is the repair path for a database that reached

@@ -17,18 +17,33 @@ import (
 // the server's judgement, carried through rather than flattened into one
 // level. Called from pgx's connection reader: it must not block and must not
 // touch the pool it belongs to.
+//
+// The level is decided on SeverityUnlocalized, never on Severity: the latter
+// is translated by the server's lc_messages, so a German-locale Postgres
+// sends "WARNUNG" and a French one "ATTENTION". Switching on those made the
+// severity mapping silently locale-dependent — every warning from a
+// non-English server fell through to Info, which is the one direction that
+// loses signal (the migration RAISE traffic this handler exists to carry
+// would be downgraded exactly where an operator is least likely to notice).
+// SeverityUnlocalized is protocol-fixed English and has been sent since
+// Postgres 9.6; the localized field remains the fallback for anything older
+// or for a server that omits it.
 func logPgNotice(_ *pgconn.PgConn, n *pgconn.Notice) {
 	if n == nil {
 		return
 	}
-	attrs := []any{"severity", n.Severity, "code", n.Code}
+	severity := n.SeverityUnlocalized
+	if severity == "" {
+		severity = n.Severity
+	}
+	attrs := []any{"severity", severity, "code", n.Code}
 	if n.Detail != "" {
 		attrs = append(attrs, "detail", n.Detail)
 	}
 	if n.Hint != "" {
 		attrs = append(attrs, "hint", n.Hint)
 	}
-	switch n.Severity {
+	switch severity {
 	case "WARNING", "ERROR", "FATAL", "PANIC":
 		slog.Warn(n.Message, attrs...)
 	default:

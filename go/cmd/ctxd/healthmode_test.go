@@ -13,10 +13,17 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/handler"
 )
 
 // healthServer answers one canned /health document with one status code.
@@ -133,11 +140,33 @@ func TestHealthUnreachableFails(t *testing.T) {
 
 // TestHealthCheckURL pins the crash-loop-safe address resolution: LISTEN_ADDR
 // raw, registry default as fallback (TestBootDefaults pins that the constant
-// and the registry agree).
+// and the registry agree), and the PORT — never the bind host — carried into
+// the probe URL.
+//
+// The host-qualified rows are the ones that matter: `0.0.0.0:8080` is the
+// explicit spelling of the default bind and what hardened compose/k8s
+// deployments set, and the concatenating predecessor turned it into
+// `http://localhost0.0.0.0:8080/health` — a container that can never pass its
+// own healthcheck.
+//
+// Mutation probe: restore `fmt.Sprintf("http://localhost%s/health", addr)` as
+// the only body and every host-qualified row goes red while the two historic
+// ones stay green.
 func TestHealthCheckURL(t *testing.T) {
 	cases := map[string]string{
+		// Historic shapes — unchanged.
 		"":      "http://localhost" + defaultListenAddr + "/health",
 		":9090": "http://localhost:9090/health",
+		":8080": "http://localhost:8080/health",
+		// Host-qualified: the host is dropped, the port survives.
+		"0.0.0.0:8080":   "http://localhost:8080/health",
+		"127.0.0.1:9000": "http://localhost:9000/health",
+		"[::]:8080":      "http://localhost:8080/health",
+		"localhost:8080": "http://localhost:8080/health",
+		// Unparsable: fail-closed on the historic concatenation, which cannot
+		// resolve. A LISTEN_ADDR the server cannot bind must not produce a
+		// probe that passes.
+		"garbage": "http://localhostgarbage/health",
 	}
 	for addr, want := range cases {
 		got := healthCheckURL(func(k string) string {
@@ -149,5 +178,46 @@ func TestHealthCheckURL(t *testing.T) {
 		if got != want {
 			t.Errorf("LISTEN_ADDR=%q → %q, want %q", addr, got, want)
 		}
+	}
+}
+
+// TestHealthProbeReadsTheRealHandlerShape is the cross-package pin the probe
+// otherwise lacks: runHealthCheck re-declares /health's wire shape as a local
+// anonymous struct (services map, "database" key), so a rename on the handler
+// side would leave every probe test above green while the shipped probe stops
+// finding the verdict it exists to read.
+//
+// The document under test is produced by handler.HealthStatus itself, not by a
+// literal in this file. A dead pool is enough to exercise it — it yields
+// services.database = "error", and what is pinned is that the probe REACHES
+// that verdict (the "database <state>" diagnostic) rather than falling into
+// its unjudgeable branch ("carries no services.database"), which is exactly
+// what a renamed field or a restructured services map would produce.
+func TestHealthProbeReadsTheRealHandlerShape(t *testing.T) {
+	// 127.0.0.1:1 refuses immediately — no timeout budget, no live database.
+	pool, err := pgxpool.New(context.Background(), "postgres://ctx:ctx@127.0.0.1:1/ctx?connect_timeout=1")
+	if err != nil {
+		t.Fatalf("build dead pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	captureBootLog(t) // the dead pool makes HealthStatus log — keep the test output clean
+	doc := handler.HealthStatus(ctx, pool, nil, false, "ok")
+
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal real health document: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := runHealthCheck(healthServer(t, http.StatusServiceUnavailable, string(body)), &stderr)
+	if got != 1 {
+		t.Errorf("exit code %d, want 1 — a dead database must fail the probe", got)
+	}
+	if !strings.Contains(stderr.String(), "database error") {
+		t.Errorf("probe diagnostic = %q, want the database verdict from the real handler document (%s) — "+
+			"the probe's wire-shape copy has drifted from handler.HealthStatus", stderr.String(), body)
 	}
 }

@@ -9,7 +9,11 @@ import (
 	"io/fs"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -208,4 +212,102 @@ func TestMigrationsChecksum(t *testing.T) {
 				version, filename, *checksum, want.filename, want.checksum)
 		}
 	}
+}
+
+// queryCounter counts every statement a pool sends, via pgx's query tracer.
+// It is the only honest instrument for this property: pg_stat_database's
+// counters are flushed on a timer (PGSTAT_MIN_INTERVAL) and would lag a
+// sub-second test, and BackfillChecksums takes a *pgxpool.Pool, so there is
+// nothing else to intercept.
+type queryCounter struct{ n atomic.Int64 }
+
+func (c *queryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.n.Add(1)
+	return ctx
+}
+
+func (c *queryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// tracedPool opens a second pool onto the same test database, with a counter
+// on every statement.
+func tracedPool(t *testing.T, dsn string) (*pgxpool.Pool, *queryCounter) {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+	counter := &queryCounter{}
+	cfg.ConnConfig.Tracer = counter
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("open traced pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool, counter
+}
+
+// TestBackfillChecksumsSkipsWhenNothingIsPending pins the boot cost of the
+// backfill. Both of its loops are keyed on `checksum IS NULL`, so on any
+// database that has completed one boot every single one of their ~130 UPDATEs
+// matches zero rows — the function was ~130 round trips and ~130 write-path
+// statements per boot to change nothing. The EXISTS probe makes the ordinary
+// case exactly one statement.
+//
+// The second half is what keeps the optimisation honest: the probe is
+// re-evaluated per call, so a row that goes back to NULL is still repaired.
+// A guard cached across calls, or hoisted to a package-level "already done",
+// would pass the first subtest and fail this one.
+//
+// Mutation probe: delete the EXISTS guard and the no-op subtest goes red with
+// a statement count in the hundreds.
+func TestBackfillChecksumsSkipsWhenNothingIsPending(t *testing.T) {
+	pool, dsn := testdb.SetupTestDBWithDSN(t) // fully migrated AND backfilled
+	ctx := context.Background()
+
+	traced, counter := tracedPool(t, dsn)
+
+	t.Run("no NULL checksums costs one statement", func(t *testing.T) {
+		var pending int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM _migrations WHERE checksum IS NULL`).Scan(&pending); err != nil {
+			t.Fatalf("precondition: %v", err)
+		}
+		if pending != 0 {
+			t.Fatalf("precondition: %d NULL checksums, want 0 — the setup did not backfill", pending)
+		}
+
+		counter.n.Store(0)
+		if err := store.BackfillChecksums(ctx, traced); err != nil {
+			t.Fatalf("BackfillChecksums: %v", err)
+		}
+		if got := counter.n.Load(); got != 1 {
+			t.Errorf("statements sent = %d, want 1 (the EXISTS probe) — a boot with nothing to stamp "+
+				"must not send one UPDATE per chain version", got)
+		}
+	})
+
+	t.Run("a row back at NULL is still repaired", func(t *testing.T) {
+		const version = 114 // an ordinary file above the fold line
+		if _, err := pool.Exec(ctx, `UPDATE _migrations SET checksum = NULL WHERE version = $1`, version); err != nil {
+			t.Fatalf("force version %d to NULL: %v", version, err)
+		}
+
+		counter.n.Store(0)
+		if err := store.BackfillChecksums(ctx, traced); err != nil {
+			t.Fatalf("BackfillChecksums after forcing NULL: %v", err)
+		}
+		if got := counter.n.Load(); got <= 1 {
+			t.Errorf("statements sent = %d, want the loops to run — the guard cached its verdict", got)
+		}
+
+		var checksum *string
+		if err := pool.QueryRow(ctx, `SELECT checksum FROM _migrations WHERE version = $1`, version).Scan(&checksum); err != nil {
+			t.Fatalf("read back version %d: %v", version, err)
+		}
+		if checksum == nil {
+			t.Fatal("version 114 is still NULL — the guard skipped a database that had work to do")
+		}
+		if want := sha256Hex(t, "114_embed_migrations.sql"); *checksum != want {
+			t.Errorf("version 114 re-stamped to %s, want %s", *checksum, want)
+		}
+	})
 }

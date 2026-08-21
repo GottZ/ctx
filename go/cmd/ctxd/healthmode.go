@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 )
@@ -43,12 +44,32 @@ const healthBodyCap = 1 << 20 // 1 MiB
 // healthCheckURL builds the local probe URL. It reads LISTEN_ADDR RAW and
 // falls back to the registry default: the probe must work in a crash-looping
 // container where the full config load (settings overlay, DB) cannot run.
+//
+// Only the PORT carries over from LISTEN_ADDR; the host is always localhost.
+// LISTEN_ADDR is a BIND address, not a dial target, and the two forms an
+// operator actually writes differ: the host-less `:8080` concatenates into a
+// working URL, while the equally ordinary `0.0.0.0:8080` — the explicit
+// spelling of the same bind, and what a k8s or hardened compose deployment
+// tends to set — used to concatenate into `http://localhost0.0.0.0:8080`,
+// i.e. a probe that can never reach its own server and reports every such
+// container permanently unhealthy. Dialing the wildcard verbatim would be
+// wrong too (0.0.0.0 and [::] are not addresses of anything); the probe runs
+// INSIDE the container, so localhost is the one host that is always right.
+//
+// An unparsable LISTEN_ADDR keeps the historic concatenation. It produces an
+// unresolvable URL, which is the fail-closed answer: a value the server
+// itself cannot bind must not yield a probe that passes, and runHealthCheck
+// names the address in its transport error.
 func healthCheckURL(getenv func(string) string) string {
 	addr := getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = defaultListenAddr
 	}
-	return fmt.Sprintf("http://localhost%s/health", addr)
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Sprintf("http://localhost%s/health", addr)
+	}
+	return fmt.Sprintf("http://localhost:%s/health", port)
 }
 
 // runHealthCheck implements the -health mode against url and returns the

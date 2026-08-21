@@ -206,11 +206,20 @@ const retiredMajor = "v5.0.0"
 // the database, they survive an .env cleanup, and their runtime effect is
 // either dead already (the coupled model keys are not admitted, build.go) or
 // merely a duplicate of what the backend pool serves — so nothing in normal
-// operation makes them visible. What makes them urgent is the CLOSING window:
-// DELETE /api/settings/<key> answers today and answers 404 after the cut, in
-// every scope, which locks tenant admins out of their own api_key rows
-// (design/06 §3.3 step 2a, §5.3). The line is therefore an expiring
-// instruction, not a status report.
+// operation makes them visible.
+//
+// The instruction it carries is SQL, not an API call. This binary IS the cut
+// (E13): the 29 keys left the registry with it, so DELETE /api/settings/<key>
+// answers 404 in every scope — including for the tenant admins whose own
+// api_key rows these are (design/06 §3.3 step 2a, §5.3). Migration 133 sweeps
+// the rows that existed at upgrade time; a row this sweep still finds was
+// written around the API afterwards, and the same way is the only way out of
+// it. Naming the closed route instead would send an operator to a 404 and
+// leave the row where it is — an advisory whose remedy does not execute is
+// worse than none, because it also reads as a remedy already attempted.
+// The precedent is the migration-132 embed-cache advisory
+// (internal/events/coupled_fingerprint.go), which names its DELETE the same
+// way.
 //
 // The embed-cache hint rode along on the coupled:embed-cache keys until β7,
 // because the recommended DELETE had a price: it changed the effective value
@@ -231,9 +240,13 @@ func warnRetiredSettingRowsBoot(ctx context.Context, pool *pgxpool.Pool) {
 		return
 	}
 	for _, ref := range refs {
+		// name-only, like the whole sweep: key and scope are identifiers the
+		// operator needs to act, the row's VALUE never appears (six of the 29
+		// are api_key keys, and a boot log travels into aggregators).
 		msg := "settings: a settings row still holds retired key " + ref.Key + " — retired in " + retiredMajor +
-			"; remove it with DELETE /api/settings/" + ref.Key + " while this version still answers (from " +
-			retiredMajor + " on the key answers 404 in every scope)"
+			"; the settings API answers 404 for it in every scope, so remove the row in the database: " +
+			"DELETE FROM context_settings WHERE key = '" + ref.Key + "' AND scope = '" + ref.Scope + "' " +
+			"(docs/operations.md, Migration 133)"
 		slog.Warn(msg,
 			"deprecation", deprecationRetiredRow,
 			"key", ref.Key, "scope", ref.Scope)
