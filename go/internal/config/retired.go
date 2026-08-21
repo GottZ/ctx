@@ -93,8 +93,10 @@ func RetiredKeyNames() []string {
 
 // retiredEnvName derives the env var of a retired key: "CTX_" + the upper-cased
 // key with '.' replaced by '_'. The derivation is mechanical for all 29 keys —
-// retired_test.go pins it against the live registry entries for as long as both
-// exist, so a hand-written second list can never drift in.
+// retired_test.go pins it against the live registry entry for as long as the
+// key has one, and against the ABSENCE of the name from EnvVars() once its
+// wave cut it, so a hand-written second list can never drift in from either
+// side of the cut.
 func retiredEnvName(key string) string {
 	return "CTX_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
 }

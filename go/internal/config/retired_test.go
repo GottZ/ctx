@@ -6,69 +6,157 @@ import (
 	"testing"
 )
 
-// TestRetiredKeysMatchSupersededRegistry is the sync pin of the retirement
-// list: retiredSettingKeys covers EXACTLY the keys the live registry marks
-// superseded — no more, no less. As long as both lists exist (until the
-// registry cut removes the 29 keys and the superseded tag with them), a key
-// that joins or leaves the superseded set without following into retired.go
-// fails here first — a hand-maintained second transcript of 29 strings can
-// never drift in silently.
+// retiredKeysGolden is the static 29-name expectation of the retirement — the
+// half of the α15 pin that has to outlive its own subject. Until this wave the
+// completeness check compared retiredSettingKeys against the live superseded
+// registry set; that expectation evaporates tuple by tuple as the cut waves
+// land and says nothing at all once the last one is gone. A hand-written golden
+// is the only expectation that still holds after the cut: an edit to the map —
+// a lost key would silently shrink the env sweep, the boot row sweep and the
+// delete migration's second list, a stray one would sweep a living key — fails
+// here without borrowing its truth from the thing being removed.
 //
-// It doubles as the TRANSITIONAL form of the collision pin: set equality with
-// the superseded set proves that every retired key is today still registered
-// AND carries a lifetime marker — no name in the map is a live, unmarked
-// config key. After the cut the invariant flips to its end form
-// (Registry ∩ retiredSettingKeys = ∅) and the expectation becomes the static
-// 29-name list; the pin is permanent either way, because it is what stops a
-// future release from re-registering one of these names.
-func TestRetiredKeysMatchSupersededRegistry(t *testing.T) {
-	superseded := map[string]bool{}
-	for _, info := range Keys() {
-		if info.Superseded != "" {
-			superseded[info.Key] = true
+// Grouped by the wave that removes the tuple from the registry, in cut order.
+var retiredKeysGolden = []string{
+	// β3 — rerank
+	"rerank.api_key", "rerank.host", "rerank.model",
+	// β4 — chat_fallback
+	"chat_fallback.api_key", "chat_fallback.host", "chat_fallback.protocol", "chat_fallback.timeout",
+	// β5 — dream_embed
+	"dream_embed.api_key", "dream_embed.host", "dream_embed.model", "dream_embed.num_ctx", "dream_embed.protocol",
+	// β6 — dream
+	"dream.api_key", "dream.host", "dream.model", "dream.num_ctx", "dream.protocol", "dream.think",
+	// β7 — embed
+	"embed.api_key", "embed.host", "embed.model", "embed.num_ctx", "embed.protocol",
+	// β8 — chat
+	"chat.api_key", "chat.host", "chat.model", "chat.num_ctx", "chat.protocol", "chat.think",
+}
+
+// retiredKeysAlreadyCut carries the retired keys whose registry entry is GONE.
+// It is the ratchet of the cut train: every key wave moves its tuple here in
+// the same commit that deletes the struct fields, and the pin below refuses
+// both halves of a mismatch — a key cut without its line (the registry lookup
+// misses where the pin expects a hit) and a line without the cut (the lookup
+// hits where the pin expects a miss). The expectation can neither be loosened
+// ahead of the removal nor be left stale behind one, which is what turns a
+// per-wave count into an invariant.
+//
+// Empty at β2 by construction: the preparation wave writes the end form, the
+// cut waves fill the list (29 → 26 → 22 → 17 → 11 → 6 → 0 registered). Once the
+// chat tuple lands here (β8) this file asserts exactly
+// `Registry ∩ retiredSettingKeys = ∅` plus the full EnvVars() inversion — the
+// chat.host positive probe that no wave before the cut could run, since the
+// registry is reflection-built and cannot be faked in a test (registry.go).
+var retiredKeysAlreadyCut = []string{}
+
+// TestRetiredKeysMatchGoldenList pins the map contents against the static
+// 29-name list: the retirement covers exactly the six backend role tuples, no
+// more, no less. Together with TestRetiredKeysLeaveTheRegistryWithTheirWave it
+// replaces the α15 set-equality against the superseded registry set — same two
+// statements (the list is complete, no name on it is a live config key), but
+// only the second one still consults a registry that is about to lose these
+// keys.
+func TestRetiredKeysMatchGoldenList(t *testing.T) {
+	golden := map[string]bool{}
+	for _, key := range retiredKeysGolden {
+		if golden[key] {
+			t.Errorf("retiredKeysGolden lists %s twice", key)
 		}
+		golden[key] = true
 	}
-	if len(superseded) != 29 {
-		t.Fatalf("registry carries %d superseded keys, want 29 (the backend role tuples)", len(superseded))
+	if len(golden) != 29 {
+		t.Fatalf("retiredKeysGolden carries %d distinct keys, want 29 (the six backend role tuples)", len(golden))
 	}
-	if len(retiredSettingKeys) != len(superseded) {
-		t.Errorf("retiredSettingKeys has %d entries, superseded registry set has %d",
-			len(retiredSettingKeys), len(superseded))
+	if len(retiredSettingKeys) != len(golden) {
+		t.Errorf("retiredSettingKeys has %d entries, golden list has %d", len(retiredSettingKeys), len(golden))
 	}
 	for key := range retiredSettingKeys {
-		if !superseded[key] {
-			info, registered := KeyByName(key)
-			t.Errorf("retired key %s is not superseded in the registry (registered=%v, superseded=%q)",
-				key, registered, info.Superseded)
+		if !golden[key] {
+			t.Errorf("retiredSettingKeys carries %s, which is not in the golden list", key)
 		}
 	}
-	for key := range superseded {
+	for key := range golden {
 		if _, ok := retiredSettingKeys[key]; !ok {
-			t.Errorf("superseded key %s is missing from retiredSettingKeys", key)
+			t.Errorf("golden key %s is missing from retiredSettingKeys", key)
 		}
 	}
 }
 
-// TestRetiredEnvNamesMatchRegistry pins the mechanical key → env derivation
-// against the living registry tags: every name RetiredEnvNames() produces is
-// the env var the registry actually reads for that key, and it is still part
-// of EnvVars(). This is what lets the boot WARN and the tombstone tripwire
-// consume a DERIVED list instead of a third transcript — if the derivation
-// were wrong for even one key, the sweep would watch a var nobody ever sets.
-func TestRetiredEnvNamesMatchRegistry(t *testing.T) {
+// TestRetiredKeysLeaveTheRegistryWithTheirWave is the collision pin in its end
+// form, ratcheted through the cut train. The invariant it protects is permanent
+// and outlives the cut: no name in retiredSettingKeys is a live, unmarked
+// config key — before its wave because the registry entry still carries the
+// superseded marker, after its wave because there is no registry entry left.
+// That is what stops a future release from re-registering one of these names:
+// a re-registered name would silently make every stale row on it effective
+// configuration again (build.go admits any registered key) and would shadow the
+// retirement wherever it is documented.
+//
+// E13 (404, not 410) is why this file is the whole contract on the config side:
+// the retired keys answer through the ordinary unknownKey path, so "retired"
+// means precisely "not in the registry" — there is no tombstone response that
+// could carry the statement instead.
+func TestRetiredKeysLeaveTheRegistryWithTheirWave(t *testing.T) {
+	cut := map[string]bool{}
+	for _, key := range retiredKeysAlreadyCut {
+		if _, ok := retiredSettingKeys[key]; !ok {
+			t.Errorf("retiredKeysAlreadyCut lists %s, which is not a retired key at all", key)
+		}
+		if cut[key] {
+			t.Errorf("retiredKeysAlreadyCut lists %s twice", key)
+		}
+		cut[key] = true
+	}
+	if !sort.StringsAreSorted(retiredKeysAlreadyCut) {
+		t.Errorf("retiredKeysAlreadyCut is not sorted: %v", retiredKeysAlreadyCut)
+	}
+
+	for key := range retiredSettingKeys {
+		info, registered := KeyByName(key)
+		switch {
+		case cut[key] && registered:
+			t.Errorf("%s is listed as cut but the registry still carries it (superseded=%q) — "+
+				"a retired name back in the registry revives every stale row on it", key, info.Superseded)
+		case !cut[key] && !registered:
+			t.Errorf("%s is gone from the registry but missing from retiredKeysAlreadyCut — "+
+				"the cut wave moves its tuple into the ratchet in the same commit", key)
+		case !cut[key] && info.Superseded == "":
+			t.Errorf("%s is registered without a superseded marker — a retired name is either "+
+				"marked for its remaining lifetime or gone", key)
+		}
+	}
+}
+
+// TestRetiredEnvNamesFollowTheCut pins the mechanical key → env derivation and
+// inverts the α15 EnvVars() assertion wave by wave. Before its cut a retired
+// key's derived name must BE the env var the registry reads for it and must be
+// part of EnvVars() — that is what lets the boot WARN and the β13 tripwire
+// consume a derived list instead of a third transcript of 29 strings. After its
+// cut the same name must be ABSENT from EnvVars(): the cut wave is only done
+// when the env surface is gone with the key, not just the struct field. With
+// the ratchet empty the second half is dormant; with it full this test is the
+// per-tuple env absence gate of every key wave (design/01 W3: "EnvVars()
+// enthält keine CTX_CHAT_FALLBACK_*").
+func TestRetiredEnvNamesFollowTheCut(t *testing.T) {
 	live := map[string]bool{}
 	for _, name := range EnvVars() {
 		live[name] = true
 	}
+	cut := map[string]bool{}
+	for _, key := range retiredKeysAlreadyCut {
+		cut[key] = true
+	}
+
 	for key := range retiredSettingKeys {
-		info, ok := KeyByName(key)
-		if !ok {
-			t.Errorf("retired key %s is not in the registry — cannot verify its env name", key)
-			continue
-		}
 		derived := retiredEnvName(key)
-		if derived != info.EnvVar {
+		if info, registered := KeyByName(key); registered && derived != info.EnvVar {
 			t.Errorf("%s: derived env name %q, registry tag %q", key, derived, info.EnvVar)
+		}
+		if cut[key] {
+			if live[derived] {
+				t.Errorf("%s is cut but %q is still in EnvVars() — the env surface must go with the key", key, derived)
+			}
+			continue
 		}
 		if !live[derived] {
 			t.Errorf("%s: derived env name %q is not in EnvVars()", key, derived)
