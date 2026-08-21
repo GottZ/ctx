@@ -47,7 +47,10 @@ var retiredKeysGolden = []string{
 // `Registry ∩ retiredSettingKeys = ∅` plus the full EnvVars() inversion — the
 // chat.host positive probe that no wave before the cut could run, since the
 // registry is reflection-built and cannot be faked in a test (registry.go).
-var retiredKeysAlreadyCut = []string{}
+var retiredKeysAlreadyCut = []string{
+	// β3 — rerank
+	"rerank.api_key", "rerank.host", "rerank.model",
+}
 
 // TestRetiredKeysMatchGoldenList pins the map contents against the static
 // 29-name list: the retirement covers exactly the six backend role tuples, no

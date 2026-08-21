@@ -162,14 +162,46 @@ func TestWarnRetiredEnvVarsBoot(t *testing.T) {
 	})
 
 	// Coverage pin: the sweep watches the whole retirement, not the handful of
-	// names a test author happened to think of. Every retired env name set at
-	// once must produce exactly one line each — a key that silently loses its
-	// env source, or a second line per var, shows up here and nowhere else.
-	t.Run("every retired env name is swept exactly once", func(t *testing.T) {
+	// names a test author happened to think of. Every retired env name that is
+	// still a registry key must produce exactly one line — a key that silently
+	// loses its env source, or a second line per var, shows up here and nowhere
+	// else.
+	//
+	// The partition is the cut train showing through, and it is the designed
+	// hand-over, not a relaxation. This sweep reads its per-key wording from
+	// c.sources (env vs. settings row), so it can only speak about keys the
+	// loader still knows: "im Schnitt wird er durch den Tombstone 3.5 ersetzt,
+	// weil c.sources die Keys dann nicht mehr kennt" (design/06 §4 Phase A #1).
+	// The replacement — a static name list with the value filter and the
+	// scaffold-default exceptions of design/01 §4 W9 — is β13. Widening THIS
+	// sweep onto cut keys instead would fire on every unchanged v4 compose file,
+	// where CTX_RERANK_HOST carries the scaffold default the design names
+	// explicitly as a must-not-warn (design/01 §4, W9 bullet 2).
+	//
+	// So both halves are pinned: one line per still-registered name, and NOT A
+	// WORD about a name whose key has been cut. The second half is what keeps
+	// the gap visible until β13 closes it — a silent partial sweep would look
+	// exactly like a working one.
+	t.Run("every registered retired env name is swept exactly once", func(t *testing.T) {
 		resetAllEnv(t)
-		names := config.RetiredEnvNames()
-		for _, name := range names {
+
+		registered := map[string]bool{}
+		for _, key := range config.RetiredKeyNames() {
+			if info, ok := config.KeyByName(key); ok {
+				registered[info.EnvVar] = true
+			}
+		}
+		var live, cut []string
+		for _, name := range config.RetiredEnvNames() {
 			t.Setenv(name, "x")
+			if registered[name] {
+				live = append(live, name)
+			} else {
+				cut = append(cut, name)
+			}
+		}
+		if len(live) == 0 {
+			t.Fatal("no retired key is registered any more — this sweep is spent, β13's tombstone owns the statement now")
 		}
 		buf := captureBootLog(t)
 
@@ -177,12 +209,18 @@ func TestWarnRetiredEnvVarsBoot(t *testing.T) {
 		warnRetiredEnvVarsBoot(cfg)
 
 		out := buf.String()
-		if n := strings.Count(out, "deprecation=retired_env"); n != len(names) {
-			t.Errorf("log carries %d retired_env lines, want %d (one per retired env var)", n, len(names))
+		if n := strings.Count(out, "deprecation=retired_env"); n != len(live) {
+			t.Errorf("log carries %d retired_env lines, want %d (one per registered retired env var)", n, len(live))
 		}
-		for _, name := range names {
+		for _, name := range live {
 			if !strings.Contains(out, "env="+name) {
 				t.Errorf("log = %q, want a line for %s", out, name)
+			}
+		}
+		for _, name := range cut {
+			if strings.Contains(out, name) {
+				t.Errorf("log = %q names %s — a cut key has no c.sources entry to describe; "+
+					"the tombstone sweep (β13) is what warns about it", out, name)
 			}
 		}
 	})

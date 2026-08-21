@@ -130,8 +130,9 @@ type ServerConfig struct {
 // ChatConfig is the primary chat/synthesis backend tuple.
 type ChatConfig struct {
 	Host string `key:"chat.host" env:"CTX_CHAT_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	// TENANT-DECISION(provider-api-key): the 6 provider api_key secret_refs
-	// (chat/chat_fallback/embed/dream/dream_embed/rerank) are tenant-overridable
+	// TENANT-DECISION(provider-api-key): the provider api_key secret_refs
+	// (chat/chat_fallback/embed/dream/dream_embed — rerank.api_key left the
+	// registry with the β3 tuple cut) are tenant-overridable
 	// — a tenant brings its own provider credential (resolved per-tenant by the
 	// 03-W3..W5 secret resolver, isolation gated by tenant.allow_shared_secrets
 	// §4.3). Alt: global-only with credentials flowing ONLY through the F3 pool's
@@ -250,16 +251,17 @@ type BackoffConfig struct {
 	InertOffset int     `key:"dream.backoff_inert_offset" env:"CTX_DREAM_BACKOFF_INERT_OFFSET" default:"7" mut:"hot" tenancy:"tenant-overridable"`
 }
 
-// RerankConfig is the post-RRF rerank stage. Host empty = LLM-as-judge on the
-// chat model; set = cross-encoder sidecar.
+// RerankConfig is the post-RRF rerank stage. Since the β3 cut it carries the
+// query-time knobs only: WHICH reranker runs is a pool question — a rerank-role
+// row dispatches to the cross-encoder sidecar, no such row leaves the
+// LLM-as-judge path (handler/query.go). host/api_key/model retired with the
+// tuple (retired.go names their pool destinations).
 type RerankConfig struct {
-	// Per-tenant rerank tuning (enabled/max_docs/blend_weight — blend_weight
-	// §3.3-listed) is query-time, isolation-safe. host/model are backend topology
-	// (superseded by the F3 pool's scope dimension) → global-only.
+	// All three surviving keys are query-time tuning of the tenant's OWN
+	// queries — isolation-safe, so the whole group is tenant-overridable
+	// (blend_weight §3.3-listed). The topology half of the group, which had to
+	// stay global-only because it named a backend, is gone with the cut.
 	Enabled     bool    `key:"rerank.enabled" env:"CTX_RERANK_ENABLED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
-	Host        string  `key:"rerank.host" env:"CTX_RERANK_HOST" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	APIKey      string  `key:"rerank.api_key" env:"CTX_RERANK_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
-	Model       string  `key:"rerank.model" env:"CTX_RERANK_MODEL" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 	MaxDocs     int     `key:"rerank.max_docs" env:"CTX_RERANK_MAX_DOCS" default:"50" mut:"hot" tenancy:"tenant-overridable"`
 	BlendWeight float64 `key:"rerank.blend_weight" env:"CTX_RERANK_BLEND_WEIGHT" default:"1.0" mut:"hot" tenancy:"tenant-overridable"`
 }
@@ -1537,9 +1539,6 @@ func (c *Config) EmbedBackend() backends.Backend {
 func (c *Config) RerankRRF() rrf.RerankConfig {
 	return rrf.RerankConfig{
 		Enabled:     c.Rerank.Enabled,
-		Host:        c.Rerank.Host,
-		APIKey:      c.Rerank.APIKey,
-		Model:       c.Rerank.Model,
 		MaxDocs:     c.Rerank.MaxDocs,
 		BlendWeight: c.Rerank.BlendWeight,
 	}

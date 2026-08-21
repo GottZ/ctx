@@ -120,9 +120,9 @@ func TestBootDefaults(t *testing.T) {
 		t.Errorf("backoff defaults drifted: %+v", cc.Dream.Backoff)
 	}
 
-	// Rerank: stage off, judge dispatch (empty host), sweep knobs.
-	if cc.Rerank.Enabled || cc.Rerank.Host != "" || cc.Rerank.Model != "" ||
-		cc.Rerank.MaxDocs != 50 || cc.Rerank.BlendWeight != 1.0 {
+	// Rerank: stage off, sweep knobs. The dispatch fields (host/api_key/model)
+	// retired with the tuple in β3 — which reranker runs is a pool question.
+	if cc.Rerank.Enabled || cc.Rerank.MaxDocs != 50 || cc.Rerank.BlendWeight != 1.0 {
 		t.Errorf("rerank defaults drifted: %+v", cc.Rerank)
 	}
 
@@ -176,9 +176,7 @@ func TestBootEnvWiring(t *testing.T) {
 		"CTX_CHAT_FALLBACK_API_KEY":  "sk-fallback-0123456789abcdefghij",
 		"CTX_CHAT_FALLBACK_PROTOCOL": "openai", "CTX_CHAT_FALLBACK_TIMEOUT": "300",
 
-		"CTX_RERANK_ENABLED": "true", "CTX_RERANK_HOST": "http://rerank.example:8082",
-		"CTX_RERANK_API_KEY":  "sk-rerank-0123456789abcdefghijkl",
-		"CTX_RERANK_MODEL":    "test-reranker-m3",
+		"CTX_RERANK_ENABLED":  "true",
 		"CTX_RERANK_MAX_DOCS": "40", "CTX_RERANK_BLEND_WEIGHT": "0.5",
 
 		"CTX_GRAPH_EXPAND_ENABLED": "true", "CTX_GRAPH_EXPAND_DIRECTED": "false",
@@ -245,10 +243,7 @@ func TestBootEnvWiring(t *testing.T) {
 		cc.Fallback.Protocol != "openai" || cc.Fallback.Timeout != 300*time.Second {
 		t.Errorf("fallback wiring: %+v", cc.Fallback)
 	}
-	if !cc.Rerank.Enabled || cc.Rerank.Host != "http://rerank.example:8082" ||
-		cc.Rerank.APIKey != "sk-rerank-0123456789abcdefghijkl" ||
-		cc.Rerank.Model != "test-reranker-m3" ||
-		cc.Rerank.MaxDocs != 40 || cc.Rerank.BlendWeight != 0.5 {
+	if !cc.Rerank.Enabled || cc.Rerank.MaxDocs != 40 || cc.Rerank.BlendWeight != 0.5 {
 		t.Errorf("rerank wiring: %+v", cc.Rerank)
 	}
 	g := cc.Graph

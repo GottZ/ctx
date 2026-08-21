@@ -152,12 +152,12 @@ func TestSynthesisSettings(t *testing.T) {
 // TestRRFConversions pins the 1:1 mapping into the rrf parameter structs.
 func TestRRFConversions(t *testing.T) {
 	cfg, _ := cfgFrom(t, map[string]string{
-		"rerank.enabled": "true", "rerank.host": "http://rerank.example:8082",
+		"rerank.enabled":  "true",
 		"rerank.max_docs": "40", "rerank.blend_weight": "0.5",
 		"graph.enabled": "true", "graph.hop_depth": "2", "graph.boost_weight": "0.25",
 	})
 	rc := cfg.RerankRRF()
-	if !rc.Enabled || rc.Host != "http://rerank.example:8082" || rc.MaxDocs != 40 || rc.BlendWeight != 0.5 {
+	if !rc.Enabled || rc.MaxDocs != 40 || rc.BlendWeight != 0.5 {
 		t.Errorf("RerankRRF() = %+v", rc)
 	}
 	gc := cfg.GraphRRF()

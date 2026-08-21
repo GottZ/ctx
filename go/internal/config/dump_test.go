@@ -72,7 +72,6 @@ func TestDumpNeverLeaksSecretValues(t *testing.T) {
 		"embed.api_key":         longKey,
 		"dream.api_key":         longKey,
 		"dream_embed.api_key":   longKey,
-		"rerank.api_key":        longKey,
 		"server.db_password":    shortKey,
 	}
 	for s, name := range map[Surface]string{SurfaceBootDump: "boot", SurfaceAPI: "api"} {

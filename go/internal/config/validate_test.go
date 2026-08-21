@@ -89,15 +89,14 @@ func TestValidateTable(t *testing.T) {
 		// V7 — host URL hygiene.
 		{"V7 scheme", map[string]string{"chat.host": "ftp://chat.example"}, "chat.host", SeverityError},
 		{"V7 trailing slash", map[string]string{"embed.host": "http://embed.example/"}, "embed.host", SeverityError},
-		{"V7 userinfo", map[string]string{"rerank.host": "http://user:hunter2@rerank.example"}, "rerank.host", SeverityError},
+		// β3 moved this case off rerank.host (cut with the tuple) onto the
+		// fallback host — one of the five hosts still in the V7 list.
+		{"V7 userinfo", map[string]string{"chat_fallback.host": "http://user:hunter2@fallback.example"}, "chat_fallback.host", SeverityError},
 		{"V7 unparseable", map[string]string{"dream.host": "http://user:hunter2@bad host"}, "dream.host", SeverityError},
 		{"V7 empty fallback host ok", map[string]string{}, "chat_fallback.host", -1},
 
-		// V8 — rerank enabled without host = LLM-judge without heartbeat.
-		{"V8 judge path", map[string]string{"rerank.enabled": "true"}, "rerank.host", SeverityWarn},
-		{"V8 ce path ok", map[string]string{
-			"rerank.enabled": "true", "rerank.host": "http://rerank.example:8082",
-		}, "rerank.host", -1},
+		// V8 retired with rerank.host in β3 (design/01 §7 W2): "enabled without
+		// host" is a pool question now, and Validate does not see the pool.
 
 		// V9 — range garbage produces silent scoring chaos.
 		{"V9 blend high", map[string]string{"rerank.blend_weight": "1.5"}, "rerank.blend_weight", SeverityError},
@@ -133,14 +132,11 @@ func TestValidateTable(t *testing.T) {
 			"dream_embed.host": "http://other-embed.example:8081",
 		}, "dream_embed.api_key", -1},
 
-		// V13 — fallback synthesis without a heartbeat-capable rerank stage.
-		{"V13 fallback unprotected", map[string]string{
-			"chat_fallback.host": "http://fallback.example:8090",
-		}, "chat_fallback.host", SeverityWarn},
-		{"V13 ce shields ok", map[string]string{
-			"chat_fallback.host": "http://fallback.example:8090",
-			"rerank.enabled":     "true", "rerank.host": "http://rerank.example:8082",
-		}, "chat_fallback.host", -1},
+		// V13 retired with rerank.host in β3 (design/01 §7 W2): its condition
+		// read Fallback.Host AND Rerank.Host, and whether a heartbeat-capable
+		// cross-encoder is armed is a pool question after the cut. Its two cases
+		// are gone with it; that a plain fallback host now draws no WARN at all
+		// is asserted by TestValidateRerankHeartbeatWarnsRetired below.
 
 		// V14 — dream.language reaches an LLM system prompt verbatim, so the
 		// shape gate is an ERROR, not a tolerant fallback. Empty is the
@@ -245,20 +241,24 @@ func TestValidateTemporalTimeoutBudget(t *testing.T) {
 	}
 }
 
-// TestValidateV13DoubleWarnWithV8 pins the deliberate double-WARN: judge path
-// without heartbeat (V8) AND unprotected fallback (V13) are two paths with
-// two consequences.
-func TestValidateV13DoubleWarnWithV8(t *testing.T) {
+// TestValidateRerankHeartbeatWarnsRetired is what is left of
+// TestValidateV13DoubleWarnWithV8 after β3. The old test pinned the deliberate
+// double-WARN of V8 (judge path without heartbeat) and V13 (unprotected
+// fallback synthesis); both keyed on rerank.host and retired with the tuple.
+//
+// It is kept, inverted, rather than deleted: the exact fixture that used to
+// produce two WARNs must now produce none. That is the wave's behaviour claim
+// stated positively — a later re-introduction of either check on a config field
+// (rather than on the pool, where the dispatch actually lives) fails here.
+func TestValidateRerankHeartbeatWarnsRetired(t *testing.T) {
 	cfg := validCfg(t, map[string]string{
 		"chat_fallback.host": "http://fallback.example:8090",
 		"rerank.enabled":     "true",
 	})
-	issues := Validate(cfg)
-	if severityFor(issues, "rerank.host") != SeverityWarn {
-		t.Error("expected V8 WARN on rerank.host")
-	}
-	if severityFor(issues, "chat_fallback.host") != SeverityWarn {
-		t.Error("expected V13 WARN on chat_fallback.host")
+	for _, is := range Validate(cfg) {
+		if is.Field == "rerank.host" || is.Field == "chat_fallback.host" {
+			t.Errorf("V8/V13 retired in β3, got issue on %s: %s", is.Field, is.Msg)
+		}
 	}
 }
 

@@ -33,9 +33,16 @@ func TestKeyInfosCarryDesc(t *testing.T) {
 	}
 }
 
-// TestSupersededExposed pins the API surface of the superseded tag: the 29
-// f3:context_backends keys carry it through Keys() (settings UI legacy
-// section + PUT 409), and structural keys do not.
+// TestSupersededExposed pins the API surface of the superseded tag: the
+// f3:context_backends keys STILL IN THE REGISTRY carry it through Keys()
+// (settings UI legacy section + PUT 409), and structural keys do not.
+//
+// The count follows the cut train down (29 → 26 → 22 → 17 → 11 → 6 → 0, β3…β8)
+// and this pin dies with the mechanism in β9. It is deliberately NOT the
+// completeness statement of the retirement — a wave that removed a tuple and
+// simply lowered this number would look identical to one that lost a key. That
+// statement lives in retired_test.go, where the golden list stays at 29 and the
+// ratchet has to name every key the registry lost.
 func TestSupersededExposed(t *testing.T) {
 	superseded := 0
 	for _, info := range Keys() {
@@ -46,8 +53,8 @@ func TestSupersededExposed(t *testing.T) {
 			}
 		}
 	}
-	if superseded != 29 {
-		t.Errorf("superseded key count = %d, want 29 (chat/chat_fallback/embed/dream/dream_embed/rerank tuples)", superseded)
+	if superseded != 26 {
+		t.Errorf("superseded key count = %d, want 26 (chat/chat_fallback/embed/dream/dream_embed tuples — rerank cut in β3)", superseded)
 	}
 	if info, _ := KeyByName("dream.backoff_mode"); info.Superseded != "" {
 		t.Error("dream.backoff_mode must not be superseded")

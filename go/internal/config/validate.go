@@ -48,7 +48,7 @@ func Validate(c *Config) []Issue {
 	var issues []Issue
 	issues = append(issues, validateBackendTuples(c)...) // V1, V4, V7, V12
 	issues = append(issues, validateQuery(c)...)         // V2, V5, V11
-	issues = append(issues, validateRerankGraph(c)...)   // V3, V8, V9, V13
+	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14
 	return issues
 }
@@ -65,7 +65,6 @@ func validateBackendTuples(c *Config) []Issue {
 		{"embed.host", c.Embed.Host},
 		{"dream.host", c.Dream.Host},
 		{"dream_embed.host", c.Dream.Embed.Host},
-		{"rerank.host", c.Rerank.Host},
 	} {
 		if h.host == "" {
 			continue
@@ -246,22 +245,15 @@ func validateRerankGraph(c *Config) []Issue {
 			Msg: "blend_weight 1.0 with graph expansion enabled: pure cross-encoder order overrides graph-injected neighbors (Wave-3: destructive) — consider 0.5"})
 	}
 
-	// V8 — legal LLM-judge path, but it runs without the body heartbeat:
-	// judge queries >60s die at the reverse proxy. Make it a conscious choice.
-	if c.Rerank.Enabled && c.Rerank.Host == "" {
-		issues = append(issues, Issue{Field: "rerank.host", Severity: SeverityWarn,
-			Msg: "rerank enabled without host = LLM-as-judge path, which runs WITHOUT the body heartbeat — judge queries >60s die at the reverse proxy"})
-	}
-
-	// V13 — third unprotected long-runner besides V8 (deliberate double-WARN:
-	// two paths, two consequences): the heartbeat gate keys on the rerank
-	// config, so fallback synthesis (~391s measured) runs against the
-	// ABSOLUTE 120s WriteTimeout. Structural fix = gate broadening (X4, G26).
-	// Spec form: Fallback.Host != "" && !(Rerank.Enabled && Rerank.Host != "").
-	if c.Fallback.Host != "" && (!c.Rerank.Enabled || c.Rerank.Host == "") {
-		issues = append(issues, Issue{Field: "chat_fallback.host", Severity: SeverityWarn,
-			Msg: "fallback synthesis path runs without heartbeat; responses >120s die at server WriteTimeout / >60s at reverse proxy"})
-	}
+	// V8 and V13 retired with the rerank tuple (β3, design/01 §7 W2). Both keyed
+	// on rerank.host as the config-side name of the cross-encoder dispatch:
+	// V8 warned that "enabled without host" means the LLM-judge path without the
+	// body heartbeat, V13 that a fallback-synthesis host is unprotected unless
+	// that same cross-encoder is armed. With the key gone the question is a pool
+	// question — whether a rerank-role row serves — and Validate never sees the
+	// pool (config validation is parameter-pure). Neither check is rebuildable
+	// here, and neither was a correctness gate: both are WARNs about a timeout
+	// risk the runtime already meets by failing open (query.go, rrf/rerank.go).
 
 	return issues
 }

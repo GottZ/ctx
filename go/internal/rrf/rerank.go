@@ -47,24 +47,18 @@ const (
 	RerankCrossEncoderContentLimit = 2048
 )
 
-// RerankConfig selects and parameterizes the post-RRF rerank stage. Enabled is
-// the master gate for BOTH paths. Host then dispatches: empty => the existing
-// LLM-as-judge on the chat model; non-empty => the local cross-encoder sidecar
-// (RerankCrossEncoder). The cross-encoder fields are the A/B sweep surface.
+// RerankConfig parameterizes the post-RRF rerank stage. Enabled is the master
+// gate for BOTH paths; the DISPATCH between them is not in here and never was
+// in practice — the caller resolves a rerank-role backend from the F3 pool and
+// passes its base_url, key and model to RerankCrossEncoder directly
+// (handler/query.go), falling back to the LLM-as-judge path when the pool
+// serves no such role. The Host/APIKey/Model fields carried the same values a
+// second time from the config side, were filled but never read, and retired
+// with the rerank tuple (β3, design/01 §7 W2).
 type RerankConfig struct {
 	// Enabled gates the whole stage. False (default) = no rerank, results pass
 	// through in RRF/graph order.
 	Enabled bool
-
-	// Host: cross-encoder sidecar base URL (e.g. http://ctx-rerank:8082). Empty
-	// keeps the legacy LLM-judge path; setting it switches to the cross-encoder.
-	Host string
-
-	// APIKey: optional bearer token for the sidecar (local llama.cpp needs none).
-	APIKey string
-
-	// Model: model name sent in the rerank request body.
-	Model string
 
 	// MaxDocs: how many top candidates to send to the cross-encoder (<=0 =>
 	// RerankCrossEncoderMaxDocs).

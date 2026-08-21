@@ -208,7 +208,6 @@ func TestRegistrySecretSet(t *testing.T) {
 		"embed.api_key":         "fp",
 		"dream.api_key":         "fp",
 		"dream_embed.api_key":   "fp",
-		"rerank.api_key":        "fp",
 	}
 	got := map[string]string{}
 	for _, e := range registry() {
@@ -224,6 +223,12 @@ func TestRegistrySecretSet(t *testing.T) {
 // TestRegistrySupersededSet pins the lifetime markers: the role-tuple keys
 // are replaced by F3 context_backends rows (since β1 the table is the only
 // topology source — no boot-time seed reads these keys any more).
+//
+// The rerank group left this switch in β3: its tuple keys are out of the
+// registry entirely, so the loop now asserts the OTHER half of the statement
+// for what is left of the group — rerank.enabled/max_docs/blend_weight are
+// live, unmarked keys. That the three cut names stay out of the registry is
+// retired_test.go's ratchet, not this pin.
 func TestRegistrySupersededSet(t *testing.T) {
 	for _, e := range registry() {
 		group, _, _ := strings.Cut(e.Key, ".")
@@ -235,11 +240,6 @@ func TestRegistrySupersededSet(t *testing.T) {
 			switch e.Key {
 			case "dream.host", "dream.api_key", "dream.protocol", "dream.model",
 				"dream.num_ctx", "dream.think":
-				isRoleTuple = true
-			}
-		case "rerank":
-			switch e.Key {
-			case "rerank.host", "rerank.api_key", "rerank.model":
 				isRoleTuple = true
 			}
 		}
@@ -304,13 +304,15 @@ func TestRegistryEnvNamespace(t *testing.T) {
 // tag-doc block; §3.3 lists a representative subset, this is the normative set.
 func TestRegistryTenancySet(t *testing.T) {
 	overridable := map[string]bool{
-		// the 6 provider api_key secret_refs (TENANT-DECISION: per-tenant creds)
+		// the provider api_key secret_refs (TENANT-DECISION: per-tenant creds);
+		// rerank.api_key left the allowlist with the β3 tuple cut
 		"chat.api_key": true, "chat_fallback.api_key": true, "embed.api_key": true,
-		"dream.api_key": true, "dream_embed.api_key": true, "rerank.api_key": true,
+		"dream.api_key": true, "dream_embed.api_key": true,
 		// the re-dream back-off curve (atomic per-tenant unit)
 		"dream.backoff_mode": true, "dream.backoff_factor": true, "dream.backoff_grace": true,
 		"dream.backoff_cap": true, "dream.backoff_min": true, "dream.backoff_inert_offset": true,
-		// rerank query-time tuning (host/model stay global — F3 pool topology)
+		// rerank query-time tuning — since β3 the whole surviving group (the
+		// topology half went with the tuple cut)
 		"rerank.enabled": true, "rerank.max_docs": true, "rerank.blend_weight": true,
 		// graph query-time expansion tuning (all knobs)
 		"graph.enabled": true, "graph.directed": true, "graph.hop_depth": true,
@@ -379,8 +381,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 69 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 69 (change it with intent)", got)
+	if got := len(overridable); got != 68 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 68 (change it with intent)", got)
 	}
 	// The five NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant:
 	// a tenant override here would flush the process-wide embed cache / flip the
