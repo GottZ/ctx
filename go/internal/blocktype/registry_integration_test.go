@@ -155,7 +155,7 @@ func TestRegistryGolden_Integration(t *testing.T) {
 		// Re-exec the RAW migration file (the runner skips by version — the
 		// idempotency claim is about the file body: CREATE IF NOT EXISTS,
 		// DROP TRIGGER IF EXISTS, ON CONFLICT DO NOTHING).
-		sqlBytes, err := migrations.FS.ReadFile("072_block_type_registry.sql")
+		sqlBytes, err := migrations.Section("072_block_type_registry.sql")
 		if err != nil {
 			t.Fatalf("read embedded migration: %v", err)
 		}
@@ -325,7 +325,7 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 			t.Errorf("no ERROR 'builtin row missing' for knowledge — silent merge: %+v", capture.records)
 		}
 		// Restore the seed row (the 072 file is idempotent — re-exec re-seeds).
-		sqlBytes, err := migrations.FS.ReadFile("072_block_type_registry.sql")
+		sqlBytes, err := migrations.Section("072_block_type_registry.sql")
 		if err != nil {
 			t.Fatalf("read embedded migration: %v", err)
 		}

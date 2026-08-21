@@ -153,7 +153,7 @@ func TestEmbedProvenance_Integration(t *testing.T) {
 		// M072/075 golden-test line) end-to-end; its steps are all
 		// idempotent (IF EXISTS/IF NOT EXISTS, and a repeat DROP DEFAULT is
 		// a no-op), so re-running it must converge the simulated stale row.
-		sqlBytes, err := migrations.FS.ReadFile("109_embed_provenance.sql")
+		sqlBytes, err := migrations.Section("109_embed_provenance.sql")
 		if err != nil {
 			t.Fatalf("read embedded 109: %v", err)
 		}

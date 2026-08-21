@@ -149,6 +149,54 @@ type migRow struct {
 	checksum *string
 }
 
+// checkFoldedMigrations is the migration-integrity check for the versions
+// that no longer ship as their own file. Their expected identity comes from
+// migrations.Folded() instead of from the embedded FS — same comparison,
+// same severity, same strength, only a different source of truth for what
+// the row should say. It returns the drifts plus the set of versions it has
+// settled, so the caller's file-based loops can leave them alone.
+func checkFoldedMigrations(dbByVersion map[int]migRow, checksumColExists bool) ([]Drift, map[int]migrations.FoldedMigration) {
+	var drifts []Drift
+	byVersion := map[int]migrations.FoldedMigration{}
+
+	for _, f := range migrations.Folded() {
+		byVersion[f.Version] = f
+		object := fmt.Sprintf("_migrations:%d", f.Version)
+
+		row, ok := dbByVersion[f.Version]
+		if !ok {
+			drifts = append(drifts, Drift{
+				Class: ClassMigrationIntegrity, Severity: SeverityBreaking, Object: object,
+				Detail: fmt.Sprintf("%s folded into %s but not applied (version gap)", f.Filename, migrations.BaselineFile),
+			})
+			continue
+		}
+		if row.filename != f.Filename {
+			drifts = append(drifts, Drift{
+				Class: ClassMigrationIntegrity, Severity: SeverityBreaking, Object: object,
+				Detail: fmt.Sprintf("recorded as %s, folded chain expects %s", row.filename, f.Filename),
+			})
+			continue
+		}
+		if !checksumColExists {
+			continue // already flagged once by the caller; no per-row checksum to compare
+		}
+		switch {
+		case row.checksum == nil:
+			drifts = append(drifts, Drift{
+				Class: ClassMigrationIntegrity, Severity: SeverityBreaking, Object: object,
+				Detail: "checksum not backfilled",
+			})
+		case *row.checksum != f.Checksum:
+			drifts = append(drifts, Drift{
+				Class: ClassMigrationIntegrity, Severity: SeverityBreaking, Object: object,
+				Detail: "checksum mismatch — applied file differs from the folded chain",
+			})
+		}
+	}
+	return drifts, byVersion
+}
+
 // checkMigrationIntegrity compares the embedded migration chain against
 // _migrations (design/03 §4.2). It tolerates a pre-108 database (checksum
 // column absent) by degrading to a filename-only read instead of erroring —
@@ -218,7 +266,18 @@ func checkMigrationIntegrity(ctx context.Context, pool *pgxpool.Pool) ([]Drift, 
 		embeddedByVersion[f.version] = f
 	}
 
+	// The fold (Stufe-2-Welle beta15) split the chain in two: versions
+	// 001-113 no longer ship as files, they ship as sections of
+	// 113_baseline.sql. Checking them FIRST also settles version 113, whose
+	// embedded file (the baseline) carries a different name and checksum than
+	// the row every database — fresh or upgraded — records for it.
+	foldedDrifts, foldedByVersion := checkFoldedMigrations(dbByVersion, checksumColExists)
+	drifts = append(drifts, foldedDrifts...)
+
 	for _, f := range embedded {
+		if _, isFolded := foldedByVersion[f.version]; isFolded {
+			continue // settled above, against the folded chain's identity
+		}
 		row, ok := dbByVersion[f.version]
 		if !ok {
 			drifts = append(drifts, Drift{
@@ -249,6 +308,9 @@ func checkMigrationIntegrity(ctx context.Context, pool *pgxpool.Pool) ([]Drift, 
 	}
 
 	for v, row := range dbByVersion {
+		if _, ok := foldedByVersion[v]; ok {
+			continue
+		}
 		if _, ok := embeddedByVersion[v]; !ok {
 			drifts = append(drifts, Drift{
 				Class: ClassMigrationIntegrity, Severity: SeverityBreaking,

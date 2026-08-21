@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -18,7 +19,8 @@ import (
 )
 
 // checksum is carried in the CREATE from the start (not added via ALTER
-// here) because a fresh DB applies 001-107 before 108 ever runs — the
+// here) because a fresh DB applies 001-107 before 108 ever runs (since the
+// v5 fold: their sections, inside 113_baseline.sql, in that order) — the
 // record-INSERT below writes checksum from migration 001 onward, so the
 // column must exist before the first INSERT. Migration 108 backfills it
 // idempotently (ADD COLUMN IF NOT EXISTS) for pre-existing databases; both
@@ -34,6 +36,15 @@ CREATE TABLE IF NOT EXISTS _migrations (
 // RunMigrations applies all pending SQL migrations from the embedded FS.
 // Each migration runs in its own transaction. Already-applied migrations
 // (tracked by version number in _migrations) are skipped.
+//
+// Since the v5 fold the chain starts with 113_baseline.sql, which carries
+// the effect of migrations 001-113 and records every one of them in
+// _migrations under its original filename and checksum. Nothing about the
+// loop below changes: a fresh database has no version 113 and applies the
+// baseline, a database upgraded through v4.38.0 has it and skips it exactly
+// like any other applied migration. Only the third case — a database that
+// stopped inside the folded range — needs a word of its own, and that is
+// checkBaselinePrecondition.
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	return RunMigrationsUpTo(ctx, pool, math.MaxInt)
 }
@@ -55,6 +66,10 @@ func RunMigrationsUpTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) 
 	// Ensure the tracking table exists (idempotent).
 	if _, err := pool.Exec(ctx, migrationsTable); err != nil {
 		return fmt.Errorf("creating _migrations table: %w", err)
+	}
+
+	if err := checkBaselinePrecondition(ctx, pool, maxVersion); err != nil {
+		return err
 	}
 
 	// Collect and sort .sql files from the embedded FS.
@@ -146,6 +161,57 @@ func RunMigrationsUpTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) 
 	return nil
 }
 
+// ErrPreBaselineDatabase reports a database that carries migration history
+// but not the version the v5 baseline folds up to. Such a database is below
+// the supported upgrade floor: the SQL that would carry it from where it
+// stands to the baseline no longer ships as individual files.
+var ErrPreBaselineDatabase = errors.New("database predates the migration baseline")
+
+// checkBaselinePrecondition enforces the one contract the fold introduces:
+// the baseline replaces migrations 001-113, so it can only be applied to a
+// database that has none of them, and it may only be SKIPPED by a database
+// that has all of them. The runner's per-version bookkeeping decides both
+// cases on its own — this check exists for the third case, a database that
+// stopped somewhere inside the folded range. Without it that database would
+// either re-run the baseline over existing objects or run 114+ against a
+// half-built schema; with it, it gets told what to do instead.
+//
+// Deliberately keyed on _migrations rows, not on schema shape: a database
+// with zero rows is a fresh install by the same definition the runner has
+// always used, and everything else has to be able to name where it stands.
+func checkBaselinePrecondition(ctx context.Context, pool *pgxpool.Pool, maxVersion int) error {
+	if maxVersion < migrations.BaselineVersion {
+		// The caller asked for a prefix of the chain that does not reach the
+		// baseline at all (capped test setups). Nothing to enforce.
+		return nil
+	}
+
+	var applied, maxApplied int
+	if err := pool.QueryRow(ctx,
+		"SELECT count(*), COALESCE(max(version), 0) FROM _migrations",
+	).Scan(&applied, &maxApplied); err != nil {
+		return fmt.Errorf("reading migration history: %w", err)
+	}
+	if applied == 0 {
+		return nil // fresh install — the baseline is the whole history
+	}
+
+	var hasBaseline bool
+	if err := pool.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM _migrations WHERE version = $1)", migrations.BaselineVersion,
+	).Scan(&hasBaseline); err != nil {
+		return fmt.Errorf("checking baseline version: %w", err)
+	}
+	if hasBaseline {
+		return nil
+	}
+
+	return fmt.Errorf("%w: highest applied migration is %d, baseline folds 001-%d — "+
+		"upgrade this database with the last v4.x release (v4.38.0) first, then come back "+
+		"(docs/operations.md, \"The v4.x hop is mandatory\")",
+		ErrPreBaselineDatabase, maxApplied, migrations.BaselineVersion)
+}
+
 // BackfillChecksums stamps sha256(hex) checksums onto _migrations rows that
 // still carry NULL — pre-108 applies (the column did not exist yet) and
 // M031+ self-record rows (the file's own INSERT predates this package's
@@ -154,7 +220,27 @@ func RunMigrationsUpTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) 
 // the SQL that originally produced it if the migration file is later edited
 // (it should not be, but this function cannot see history, only the present
 // binary). Idempotent — after the first boot, every UPDATE affects 0 rows.
+//
+// Rows for folded versions (001-113) are outside its reach by construction:
+// their files are gone, so it never sees them. They get their checksums from
+// the baseline's own ledger instead, which writes the same values the files
+// hashed to before the fold — migrations.Folded() carries them, and the
+// schema contract checks them from there.
 func BackfillChecksums(ctx context.Context, pool *pgxpool.Pool) error {
+	// Folded versions first: their files are gone, so the checksum has to
+	// come from the folded chain. A fresh install already got these from the
+	// baseline's ledger; this is the repair path for a database that reached
+	// v4.38.0 but never completed a boot there, whose rows would otherwise
+	// stay NULL forever and read as drift to the schema contract.
+	for _, f := range migrations.Folded() {
+		if _, err := pool.Exec(ctx,
+			"UPDATE _migrations SET checksum = $1 WHERE version = $2 AND filename = $3 AND checksum IS NULL",
+			f.Checksum, f.Version, f.Filename,
+		); err != nil {
+			return fmt.Errorf("backfilling checksum for folded migration %d: %w", f.Version, err)
+		}
+	}
+
 	entries, err := fs.ReadDir(migrations.FS, ".")
 	if err != nil {
 		return fmt.Errorf("reading embedded migrations: %w", err)
@@ -162,7 +248,10 @@ func BackfillChecksums(ctx context.Context, pool *pgxpool.Pool) error {
 
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".sql") {
+		if e.IsDir() || !strings.HasSuffix(name, ".sql") || name == migrations.BaselineFile {
+			// The baseline shares its version with the last folded migration
+			// and the row belongs to that one — stamping the baseline's own
+			// hash onto it would invent a third identity for version 113.
 			continue
 		}
 		parts := strings.SplitN(name, "_", 2)

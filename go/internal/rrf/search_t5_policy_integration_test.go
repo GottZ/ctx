@@ -283,7 +283,7 @@ func TestT5_SingleSignatureAndIdempotency(t *testing.T) {
 	// signature (M112 owns its own idempotency double-run in the W02-1 G1
 	// gate, gen15_w021_integration_test.go).
 	for _, file := range []string{"073_rrf_policy_params.sql", "112_rrf_gen15_dual_arm.sql"} {
-		sqlBytes, err := migrations.FS.ReadFile(file)
+		sqlBytes, err := migrations.Section(file)
 		if err != nil {
 			t.Fatalf("read embedded migration %s: %v", file, err)
 		}

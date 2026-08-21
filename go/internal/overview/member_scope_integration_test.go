@@ -100,7 +100,7 @@ func TestMemberScope_Migration087Backfill(t *testing.T) {
 	}
 
 	// Re-apply the real 087 file (embedded FS = what the runner executes).
-	sql, err := migrations.FS.ReadFile("087_member_scope.sql")
+	sql, err := migrations.Section("087_member_scope.sql")
 	if err != nil {
 		t.Fatalf("read embedded 087: %v", err)
 	}

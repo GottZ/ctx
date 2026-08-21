@@ -54,7 +54,7 @@ func TestMigration075_DropIsMeta_BehaviourMatchesContract(t *testing.T) {
 
 	// Idempotency: re-apply the REAL embedded file twice more (no test-local
 	// SQL copy — fixture-collusion guard, the M072 golden-test line).
-	sqlBytes, err := migrations.FS.ReadFile("075_drop_is_meta.sql")
+	sqlBytes, err := migrations.Section("075_drop_is_meta.sql")
 	if err != nil {
 		t.Fatalf("read embedded 075: %v", err)
 	}

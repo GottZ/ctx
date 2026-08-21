@@ -490,7 +490,7 @@ func TestCtxAuthTenant_Integration(t *testing.T) {
 	// and assert no error + ctx_auth still resolves the 8-col shape. Proves the
 	// migration is safely re-runnable (2×-idempotent gate).
 	t.Run("migration_060_idempotent", func(t *testing.T) {
-		ddl, err := migrations.FS.ReadFile("060_ctx_auth_tenant.sql")
+		ddl, err := migrations.Section("060_ctx_auth_tenant.sql")
 		if err != nil {
 			t.Fatalf("read embedded 060: %v", err)
 		}

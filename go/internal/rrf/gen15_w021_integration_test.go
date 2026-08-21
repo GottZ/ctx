@@ -234,7 +234,7 @@ func TestGen15W021_G1_DefaultCompat(t *testing.T) {
 		`DROP FUNCTION ctx_rrf(halfvec, TEXT, TEXT, TEXT[], TEXT, TEXT[], INT, TEXT, TEXT, TEXT[], TEXT[], DOUBLE PRECISION[], TEXT[], TEXT[], UUID[], TEXT, INTEGER, INTEGER)`); err != nil {
 		t.Fatalf("drop Gen-15 signature: %v", err)
 	}
-	body073, err := migrations.FS.ReadFile("073_rrf_policy_params.sql")
+	body073, err := migrations.Section("073_rrf_policy_params.sql")
 	if err != nil {
 		t.Fatalf("read embedded 073: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestGen15W021_G1_DefaultCompat(t *testing.T) {
 
 	// Migrate forward again: execute the embedded 112 body TWICE (raw-body
 	// idempotency claim: DROP IF EXISTS both signatures + CREATE OR REPLACE).
-	body112, err := migrations.FS.ReadFile("112_rrf_gen15_dual_arm.sql")
+	body112, err := migrations.Section("112_rrf_gen15_dual_arm.sql")
 	if err != nil {
 		t.Fatalf("read embedded 112: %v", err)
 	}

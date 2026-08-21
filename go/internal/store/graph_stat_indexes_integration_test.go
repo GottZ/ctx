@@ -4,11 +4,11 @@ package store_test
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/testdb"
+	"github.com/GottZ/ctx/migrations"
 )
 
 // TestGraphStatIndexes_M106 is the W04-4 gate (plan graph-structural
@@ -82,7 +82,7 @@ func TestGraphStatIndexes_M106(t *testing.T) {
 	}
 
 	// (3) double-run idempotence: replay the shipped file verbatim.
-	sql, err := os.ReadFile("../../migrations/106_graph_stat_indexes.sql")
+	sql, err := migrations.Section("106_graph_stat_indexes.sql")
 	if err != nil {
 		t.Fatalf("read migration file: %v", err)
 	}

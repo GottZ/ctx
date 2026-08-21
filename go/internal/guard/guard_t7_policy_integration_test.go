@@ -213,7 +213,7 @@ func TestT7GuardPolicy(t *testing.T) {
 	// GATE 7 (idempotency): re-applying the raw 074 file is a no-op —
 	// DROP IF EXISTS both signatures + CREATE + IF NOT EXISTS + ON CONFLICT.
 	t.Run("Migration074Idempotent", func(t *testing.T) {
-		raw, err := migrations.FS.ReadFile("074_guard_check_type_policy.sql")
+		raw, err := migrations.Section("074_guard_check_type_policy.sql")
 		if err != nil {
 			t.Fatalf("read 074 from embed FS: %v", err)
 		}

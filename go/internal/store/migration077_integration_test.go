@@ -15,9 +15,11 @@ import (
 // TestMigration077_WorkflowStatus pins Achse-02 Welle I-B migration 077
 // (design/02 §3.3): after the full chain context_blocks carries a nullable
 // workflow_status VARCHAR(50) column (col_count 39→40 vs M075) and the partial
-// keyset board index idx_blocks_workflow_board. The runner's gap handling
-// (076→077→078: live already has 78 recorded, 77 free) and idempotency of the
-// real embedded file are proven directly.
+// keyset board index idx_blocks_workflow_board. Idempotency of the real
+// migration source is proven directly. The runner's gap handling
+// (076→077→078: live already has 78 recorded, 77 free) was proven here too
+// until the beta15 fold moved 077 inside the baseline; step (5) now pins what
+// a deleted folded row does and points at where the gap property lives.
 func TestMigration077_WorkflowStatus(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -82,11 +84,17 @@ func TestMigration077_WorkflowStatus(t *testing.T) {
 		}
 	}
 
-	// (5) GAP HANDLING: delete the 077 record while 078 stays, re-run the runner.
-	// The runner must re-apply the missing lower version regardless of the higher
-	// applied one (live truth: version 78 present, 77 was the reserved gap). The
-	// migration body is idempotent (ADD COLUMN IF NOT EXISTS / CREATE INDEX IF
-	// NOT EXISTS), so the re-apply is a clean no-op that re-records 77.
+	// (5) GAP HANDLING, post-fold (beta15): version 77 lives inside
+	// 113_baseline.sql now, so deleting its row no longer makes the runner do
+	// anything — the baseline is keyed on version 113 and that row is
+	// untouched. The property the earlier version of this step asserted (a
+	// missing lower version gets re-applied regardless of a higher applied
+	// one) is unchanged in the runner and still pinned, on a version that
+	// still ships as its own file: schemacontract's
+	// TestBaselineFoldMigrationIntegrity/RunnerStillClosesGapsAboveTheFold.
+	// A deleted folded row is not silently tolerated either — the same test's
+	// MissingFoldedRowIsSeen has the schema contract report it as breaking
+	// migration_integrity drift.
 	if _, err := pool.Exec(ctx, `DELETE FROM _migrations WHERE version=77`); err != nil {
 		t.Fatalf("delete 077 record: %v", err)
 	}
@@ -100,16 +108,23 @@ func TestMigration077_WorkflowStatus(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM _migrations WHERE version=78)`).Scan(&still78); err != nil {
 		t.Fatalf("78 probe: %v", err)
 	}
-	if !reRecorded {
-		t.Error("runner did not re-apply the missing version 77 (gap handling broken)")
+	if reRecorded {
+		t.Error("version 77 came back — the runner re-applied a folded version, which would mean the baseline ran over a live schema")
 	}
 	if !still78 {
 		t.Error("version 78 vanished after re-run")
 	}
+	// Restore the row so the rest of this test runs on a consistent chain.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO _migrations (version, filename, checksum) VALUES (77, '077_workflow_status.sql', $1)`,
+		foldedChecksum(t, 77),
+	); err != nil {
+		t.Fatalf("restore 077 record: %v", err)
+	}
 
 	// (6) Direct idempotency of the REAL embedded file (no test-local SQL copy —
 	// fixture-collusion guard, the M075/M072 line): re-apply twice more.
-	sqlBytes, err := migrations.FS.ReadFile("077_workflow_status.sql")
+	sqlBytes, err := migrations.Section("077_workflow_status.sql")
 	if err != nil {
 		t.Fatalf("read embedded 077: %v", err)
 	}
@@ -129,4 +144,16 @@ func TestMigration077_WorkflowStatus(t *testing.T) {
 	if idxCount != 1 {
 		t.Errorf("board index count = %d after re-applies, want 1", idxCount)
 	}
+}
+
+// foldedChecksum returns the checksum the folded chain records for a version.
+func foldedChecksum(t *testing.T, version int) string {
+	t.Helper()
+	for _, f := range migrations.Folded() {
+		if f.Version == version {
+			return f.Checksum
+		}
+	}
+	t.Fatalf("version %d is not part of the folded chain", version)
+	return ""
 }

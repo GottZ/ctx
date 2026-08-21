@@ -28,7 +28,7 @@ import (
 // doubles as the idempotency proof on a clean corpus.
 func runM105(t *testing.T, pool *pgxpool.Pool) error {
 	t.Helper()
-	sql, err := migrations.FS.ReadFile("105_structural_class_collision_preflight.sql")
+	sql, err := migrations.Section("105_structural_class_collision_preflight.sql")
 	if err != nil {
 		t.Fatalf("read embedded 105: %v", err)
 	}

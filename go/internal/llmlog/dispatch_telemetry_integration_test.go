@@ -13,7 +13,6 @@ package llmlog_test
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"testing"
 	"time"
 
@@ -184,7 +183,7 @@ func TestDispatchTelemetryMigrationOnChunkedHypertable(t *testing.T) {
 
 	// Replay the EMBEDDED migration twice, each in its own transaction like
 	// the runner (idempotence: IF NOT EXISTS + ON CONFLICT).
-	sql, err := fs.ReadFile(migrations.FS, "091_dispatch_telemetry.sql")
+	sql, err := migrations.Section("091_dispatch_telemetry.sql")
 	if err != nil {
 		t.Fatalf("read embedded 091: %v", err)
 	}

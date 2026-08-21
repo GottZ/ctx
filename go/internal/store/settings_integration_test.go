@@ -408,7 +408,7 @@ func TestSettingsStore_Integration(t *testing.T) {
 
 		// GREEN: restore the real 051 function (idempotent re-apply of the
 		// migration file) and prove the same write shape audits NULL/NULL.
-		sql, err := migrations.FS.ReadFile("051_settings_store.sql")
+		sql, err := migrations.Section("051_settings_store.sql")
 		if err != nil {
 			t.Fatalf("read 051: %v", err)
 		}

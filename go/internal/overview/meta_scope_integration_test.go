@@ -164,7 +164,7 @@ func TestMetaScope_B5(t *testing.T) {
 		}
 
 		// Re-apply the real 088 file (embedded FS = what the runner executes).
-		sql, err := migrations.FS.ReadFile("088_meta_scope_pk.sql")
+		sql, err := migrations.Section("088_meta_scope_pk.sql")
 		if err != nil {
 			t.Fatalf("read embedded 088: %v", err)
 		}

@@ -37,7 +37,7 @@ import (
 // Kollusions-Guard: keine test-lokale SQL-Kopie).
 func readEmbedded092(t *testing.T) (string, error) {
 	t.Helper()
-	b, err := migrations.FS.ReadFile("092_disable_profiles.sql")
+	b, err := migrations.Section("092_disable_profiles.sql")
 	return string(b), err
 }
 

@@ -44,9 +44,32 @@ func TestMigrationVersionsUnique(t *testing.T) {
 	if count == 0 {
 		t.Fatal("no migrations parsed — embed or parse broken")
 	}
-	// Pin the MW10 migration is present under its final number.
-	if got := seen[91]; got != "091_dispatch_telemetry.sql" {
+	// Pin the MW10 migration is present under its final number. Since the
+	// fold it lives inside the baseline rather than as its own file, so the
+	// identity comes from the folded chain — the same assertion, one layer
+	// further in.
+	got := ""
+	for _, f := range migrations.Folded() {
+		if f.Version == 91 {
+			got = f.Filename
+		}
+	}
+	if got != "091_dispatch_telemetry.sql" {
 		t.Errorf("migration 091 = %q, want 091_dispatch_telemetry.sql (dispatch telemetry, design/05 §3.1)", got)
+	}
+
+	// The fold line itself: versions at or below it ship inside the baseline,
+	// versions above it ship as files. A file that reappears below the line
+	// would collide with a section the baseline already applies and would be
+	// skipped silently by the very bookkeeping this test guards.
+	for v, name := range seen {
+		if v <= migrations.BaselineVersion && name != migrations.BaselineFile {
+			t.Errorf("%s sits at version %d, at or below the fold line %d — its effect is already inside %s",
+				name, v, migrations.BaselineVersion, migrations.BaselineFile)
+		}
+	}
+	if seen[migrations.BaselineVersion] != migrations.BaselineFile {
+		t.Errorf("version %d = %q, want the baseline %q", migrations.BaselineVersion, seen[migrations.BaselineVersion], migrations.BaselineFile)
 	}
 }
 

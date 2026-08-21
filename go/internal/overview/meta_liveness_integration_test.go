@@ -45,7 +45,7 @@ func columnShape(t *testing.T, pool *pgxpool.Pool, table, column string) (nullab
 func applyMigrationFile(t *testing.T, pool *pgxpool.Pool, name string) {
 	t.Helper()
 	ctx := context.Background()
-	sql, err := migrations.FS.ReadFile(name)
+	sql, err := migrations.Section(name)
 	if err != nil {
 		t.Fatalf("read embedded %s: %v", name, err)
 	}

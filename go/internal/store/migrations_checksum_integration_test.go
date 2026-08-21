@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io/fs"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,21 +16,47 @@ import (
 	"github.com/GottZ/ctx/migrations"
 )
 
-// embeddedMigrationCount counts the .sql files the runner and the backfill
-// both iterate — the oracle for "every row got stamped".
-func embeddedMigrationCount(t *testing.T) int {
+// expectedRow is the identity a _migrations row should carry for one version.
+type expectedRow struct {
+	filename string
+	checksum string
+}
+
+// expectedMigrationRows is the oracle for "every row got stamped, with the
+// right value". It has two halves since the fold: versions 001-113 live
+// inside 113_baseline.sql and are expected under the filename and checksum
+// they had as files (the baseline's ledger writes exactly those), every
+// version above the fold line is expected under its own file's sha256.
+//
+// The baseline file itself is deliberately NOT an entry: its version is
+// covered by the folded half, which is why a fresh database and one upgraded
+// through v4.38.0 end up with identical _migrations content.
+func expectedMigrationRows(t *testing.T) map[int]expectedRow {
 	t.Helper()
+	want := map[int]expectedRow{}
+	for _, f := range migrations.Folded() {
+		want[f.Version] = expectedRow{filename: f.Filename, checksum: f.Checksum}
+	}
+
 	entries, err := fs.ReadDir(migrations.FS, ".")
 	if err != nil {
 		t.Fatalf("reading embedded migrations: %v", err)
 	}
-	n := 0
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			n++
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".sql") || name == migrations.BaselineFile {
+			continue
 		}
+		v, err := strconv.Atoi(strings.SplitN(name, "_", 2)[0])
+		if err != nil {
+			continue
+		}
+		if _, dup := want[v]; dup {
+			t.Fatalf("version %d ships both as %s and inside the baseline", v, name)
+		}
+		want[v] = expectedRow{filename: name, checksum: sha256Hex(t, name)}
 	}
-	return n
+	return want
 }
 
 // sha256Hex returns the lowercase hex sha256 of the named embedded file, the
@@ -53,10 +80,12 @@ func TestMigrationsChecksum(t *testing.T) {
 	pool := testdb.SetupTestDB(t) // already runs RunMigrations + BackfillChecksums
 	ctx := context.Background()
 
-	wantCount := embeddedMigrationCount(t)
+	wantRows := expectedMigrationRows(t)
+	wantCount := len(wantRows)
 
-	// (1) 0 NULL checksums, row count == embedded file count, every checksum
-	// is 64 hex chars and matches its file's sha256.
+	// (1) 0 NULL checksums, one row per chain version (files above the fold
+	// line plus the versions folded into the baseline), every checksum 64 hex
+	// chars and matching the sha256 of the SQL that defined that version.
 	rows, err := pool.Query(ctx, `SELECT version, filename, checksum FROM _migrations ORDER BY version`)
 	if err != nil {
 		t.Fatalf("select _migrations: %v", err)
@@ -78,9 +107,16 @@ func TestMigrationsChecksum(t *testing.T) {
 		if len(*checksum) != 64 {
 			t.Errorf("version %d (%s): checksum length = %d, want 64", version, filename, len(*checksum))
 		}
-		want := sha256Hex(t, filename)
-		if *checksum != want {
-			t.Errorf("version %d (%s): checksum = %s, want %s", version, filename, *checksum, want)
+		want, known := wantRows[version]
+		if !known {
+			t.Errorf("version %d (%s): recorded but not part of the chain", version, filename)
+			continue
+		}
+		if filename != want.filename {
+			t.Errorf("version %d: filename = %s, want %s", version, filename, want.filename)
+		}
+		if *checksum != want.checksum {
+			t.Errorf("version %d (%s): checksum = %s, want %s", version, filename, *checksum, want.checksum)
 		}
 	}
 	rows.Close()
@@ -88,7 +124,7 @@ func TestMigrationsChecksum(t *testing.T) {
 		t.Fatalf("iterate _migrations: %v", err)
 	}
 	if gotCount != wantCount {
-		t.Errorf("_migrations row count = %d, want %d (embedded .sql files)", gotCount, wantCount)
+		t.Errorf("_migrations row count = %d, want %d (folded versions + embedded .sql files above the fold)", gotCount, wantCount)
 	}
 
 	var nullCount int
@@ -144,25 +180,32 @@ func TestMigrationsChecksum(t *testing.T) {
 	}
 
 	// (3b) A pre-existing row forced back to NULL gets re-filled by the next
-	// backfill with the checksum of its embedded file (version 1).
-	if _, err := pool.Exec(ctx, `UPDATE _migrations SET checksum = NULL WHERE version = 1`); err != nil {
-		t.Fatalf("force version 1 checksum to NULL: %v", err)
-	}
-	if err := store.BackfillChecksums(ctx, pool); err != nil {
-		t.Fatalf("BackfillChecksums after forcing version 1 NULL: %v", err)
-	}
+	// backfill. Both halves of the chain have to survive that: version 1 is
+	// folded (its checksum comes from migrations.Folded(), its file is gone)
+	// and version 114 is an ordinary embedded file. Before the fold only the
+	// second half existed; a folded row that could not be re-filled would
+	// read as permanent drift to the schema contract.
+	for _, version := range []int{1, 114} {
+		if _, err := pool.Exec(ctx, `UPDATE _migrations SET checksum = NULL WHERE version = $1`, version); err != nil {
+			t.Fatalf("force version %d checksum to NULL: %v", version, err)
+		}
+		if err := store.BackfillChecksums(ctx, pool); err != nil {
+			t.Fatalf("BackfillChecksums after forcing version %d NULL: %v", version, err)
+		}
 
-	var filenameV1 string
-	var checksumV1 *string
-	if err := pool.QueryRow(ctx,
-		`SELECT filename, checksum FROM _migrations WHERE version = 1`,
-	).Scan(&filenameV1, &checksumV1); err != nil {
-		t.Fatalf("select version 1 after re-backfill: %v", err)
-	}
-	if checksumV1 == nil {
-		t.Fatal("version 1 checksum still NULL after re-backfill")
-	}
-	if want := sha256Hex(t, filenameV1); *checksumV1 != want {
-		t.Errorf("version 1 re-backfilled checksum = %s, want %s", *checksumV1, want)
+		var filename string
+		var checksum *string
+		if err := pool.QueryRow(ctx,
+			`SELECT filename, checksum FROM _migrations WHERE version = $1`, version,
+		).Scan(&filename, &checksum); err != nil {
+			t.Fatalf("select version %d after re-backfill: %v", version, err)
+		}
+		if checksum == nil {
+			t.Fatalf("version %d checksum still NULL after re-backfill", version)
+		}
+		if want := wantRows[version]; filename != want.filename || *checksum != want.checksum {
+			t.Errorf("version %d re-backfilled to (%s, %s), want (%s, %s)",
+				version, filename, *checksum, want.filename, want.checksum)
+		}
 	}
 }
