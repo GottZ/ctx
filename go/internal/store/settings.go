@@ -108,7 +108,7 @@ func LoadSettingOverridesMulti(ctx context.Context, pool *pgxpool.Pool, scopes [
 
 // SettingRowRef identifies one context_settings row without its value: the
 // (key, scope) primary key alone. The deprecation sweep that consumes it
-// reports WHERE a superseded row lives, never WHAT it says — half of the 29
+// reports WHERE a retired-key row lives, never WHAT it says — half of the 29
 // retired keys are secret-class, and a boot log line is the last place a
 // resolved api_key may surface (§3.3 log invariant).
 type SettingRowRef struct {

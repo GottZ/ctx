@@ -43,9 +43,7 @@
     {#if setting.sensitive}
       <span class="badge sensitive" title="secret-class key — values are masked everywhere">sensitive</span>
     {/if}
-    {#if setting.superseded}
-      <span class="badge locked" title={note}>superseded</span>
-    {:else if !editable}
+    {#if !editable}
       <span class="badge locked" title={note}>{setting.mutability}</span>
     {/if}
     {#if setting.env_var}

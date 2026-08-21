@@ -134,10 +134,11 @@ func TestHandlePut_RestartOnly409(t *testing.T) {
 //
 // The HTTP half this test used to carry (PUT /api/settings/embed.model ⇒ 409
 // with the backend-pool pointer, "superseded wins over coupled") went with the
-// key: after the cut no registry key is both superseded and coupled, so the
-// precedence has no natural subject. It is asserted synthetically instead —
-// the ORDER of the checks in mutabilityBlock is the statement, and that is
-// key-independent.
+// key in β7, and the precedence statement it was reduced to went with the
+// mechanic in β9 (E11): mutabilityBlock has no superseded arm left to be first.
+// What remains here are the two coupled arms themselves, plus the live hot key
+// as the registry-backed negative control that keeps the synthetic positives
+// from being tautologies.
 func TestMutabilityBlockCoupledBranches(t *testing.T) {
 	msg, blocked := mutabilityBlock(config.KeyInfo{Key: "future.coupled", Mutability: "coupled"})
 	if !blocked || !strings.Contains(msg, "re-embed") {
@@ -152,11 +153,16 @@ func TestMutabilityBlockCoupledBranches(t *testing.T) {
 		t.Errorf("coupled:embed-cache branch = (%q, %v), want unblocked (X2 admission)", msg, blocked)
 	}
 
-	// Superseded is checked FIRST — a key carrying both gets the pool pointer,
-	// not the re-embed hint.
-	both := config.KeyInfo{Key: "future.both", Mutability: "coupled", Superseded: "f3:context_backends"}
-	if msg, blocked := mutabilityBlock(both); !blocked || !strings.Contains(msg, "backend pool") {
-		t.Errorf("superseded+coupled = (%q, %v), want the backend-pool pointer (superseded wins)", msg, blocked)
+	// Registry-backed negative control (inherited from the retired
+	// TestMutabilityBlockSuperseded): a live hot key stays writable, so the two
+	// synthetic positives above are not asserting a function that blocks
+	// everything.
+	hot, ok := config.KeyByName("dream.backoff_factor")
+	if !ok {
+		t.Fatal("dream.backoff_factor missing from registry")
+	}
+	if _, blocked := mutabilityBlock(hot); blocked {
+		t.Error("dream.backoff_factor (hot) must stay writable")
 	}
 }
 
@@ -348,47 +354,16 @@ func TestNormalizedJSON(t *testing.T) {
 // config/build.go itself is exercised by its restart cases
 // (config/build_test.go, TestBuildAdmissionRejections).
 
-// TestMutabilityBlockSuperseded pins the superseded gate (Entflechtungs-Welle
-// Stufe 1): a PUT on an f3:context_backends key must 409 with a pointer to
-// the backend pool — its settings override would be a dead bootstrap seed
-// that LOOKS live while the pool serves something else. Non-superseded hot
-// keys stay writable, and the restart/coupled messages keep their env hint.
+// TestMutabilityBlockSuperseded died with its subject in β9 (E11). It pinned
+// the superseded gate of Entflechtungs-Welle Stufe 1: a PUT on an
+// f3:context_backends key answered 409 with a pointer to the backend pool,
+// because a settings override on such a key would have been a dead bootstrap
+// seed that LOOKS live while the pool serves something else.
 //
-// VEHICLE NOTE (β8): the gate used to be driven by config.KeyByName("chat.host"),
-// the last of the six backend tuples to leave. After the cut NO registry key
-// carries the superseded marker any more — the machinery (KeyInfo.Superseded,
-// this branch, the handler 409, the CLI hint, the FE legacy card) is live but
-// unoccupied, exactly like the coupled classes above. It is therefore pinned
-// the same way: a synthetic KeyInfo straight into mutabilityBlock, which reads
-// the marker off the value and never consults the registry.
-//
-// This test dies WITH the machinery in β9, when KeyInfo.Superseded and the
-// branch it selects are removed — not before.
-func TestMutabilityBlockSuperseded(t *testing.T) {
-	info := config.KeyInfo{Key: "future.superseded", Superseded: "f3:context_backends", Mutability: "hot"}
-	msg, blocked := mutabilityBlock(info)
-	if !blocked {
-		t.Error("a superseded key must be write-blocked")
-	}
-	if !strings.Contains(msg, "backend pool") {
-		t.Errorf("block message must point at the backend pool, got %q", msg)
-	}
-
-	// The "embed.host is coupled:embed-cache AND superseded — superseded wins"
-	// case left with the tuple in β7; the precedence is now pinned on a
-	// synthetic KeyInfo (TestMutabilityBlockCoupledBranches), which needs no
-	// registry carrier.
-
-	// A live hot key stays writable — the registry-backed negative control that
-	// keeps the synthetic positive above from being a tautology.
-	hot, ok := config.KeyByName("dream.backoff_factor")
-	if !ok {
-		t.Fatal("dream.backoff_factor missing from registry")
-	}
-	if hot.Superseded != "" {
-		t.Fatalf("dream.backoff_factor became superseded — pick another live hot key")
-	}
-	if _, blocked := mutabilityBlock(hot); blocked {
-		t.Error("dream.backoff_factor (hot, not superseded) must stay writable")
-	}
-}
+// Its subject had already lost its registry carrier in β8 (chat.host was the
+// last of the six tuples) and was pinned on a synthetic KeyInfo from then on.
+// With KeyInfo.Superseded and the branch it selected removed, a PUT on one of
+// the 29 retired names takes the ordinary unknownKey path — 404, not 409 (E13);
+// that contract is pinned in β10, deliberately not here. The live-hot negative
+// control this test carried moved into TestMutabilityBlockCoupledBranches
+// above.

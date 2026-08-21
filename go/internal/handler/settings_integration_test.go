@@ -273,9 +273,9 @@ func TestSettingsAPI_Integration(t *testing.T) {
 	//     TestSynthSecretRefWarningNeverEchoesTheRefValue).
 	//   - the masking rule per source: settings_test.go, on synthetic KeyInfos
 	//     (TestRenderEffective_*) plus the env half E2E below.
-	//   - the superseded 409 branch itself: settings_test.go,
-	//     TestMutabilityBlockSuperseded (synthetic KeyInfo; the machinery is
-	//     live but unoccupied until β9 removes it).
+	//   - the superseded 409 branch itself: nowhere any more. β9 removed the
+	//     whole mechanic (E11); the branch it guarded no longer exists, and a
+	//     PUT on a retired name answers the ordinary 404.
 
 	t.Run("MaskingE2E_NoPlaintextInAnyResponse", func(t *testing.T) {
 		scan := func(rec *httptest.ResponseRecorder, label string) {

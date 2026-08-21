@@ -152,7 +152,7 @@ const retiredMajor = "v5.0.0"
 func warnRetiredSettingRowsBoot(ctx context.Context, pool *pgxpool.Pool) {
 	refs, err := store.SettingRowsForKeys(ctx, pool, config.RetiredKeyNames())
 	if err != nil {
-		slog.Warn("settings: retired-key row sweep failed — superseded settings rows cannot be reported this boot",
+		slog.Warn("settings: retired-key row sweep failed — retired settings rows cannot be reported this boot",
 			"deprecation", deprecationRetiredRow, "error", err)
 		return
 	}

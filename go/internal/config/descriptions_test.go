@@ -33,27 +33,13 @@ func TestKeyInfosCarryDesc(t *testing.T) {
 	}
 }
 
-// TestSupersededExposed pins the API surface of the superseded tag: which keys
-// carry it through Keys() — the settings UI legacy section and the PUT 409 read
-// it from there.
-//
-// The count followed the cut train down (29 → 26 → 22 → 17 → 11 → 6 → 0,
-// β3…β8) and has arrived at ZERO: chat was the last marked tuple. What the pin
-// asserts from here is the end state — no key is exposed as superseded — and it
-// dies with the mechanism itself in β9 (E11), together with
-// registry_test.go's TestRegistrySupersededSet.
+// TestSupersededExposed died with its subject in β9 (E11): it pinned which keys
+// Keys() exposed as superseded — first a shrinking count (29 → 26 → 22 → 17 →
+// 11 → 6 → 0 across β3…β8), from β8 on the end state "no key is". With
+// KeyInfo.Superseded gone there is no surface left to assert about.
 //
 // It was deliberately never the completeness statement of the retirement: a
-// wave that removed a tuple and simply lowered this number would have looked
+// wave that removed a tuple and simply lowered its number would have looked
 // identical to one that LOST a key. That statement lives in retired_test.go,
-// where the golden list stays at 29 and the ratchet has to name every key the
-// registry lost — which is also why zero here is not the wave's proof of work.
-func TestSupersededExposed(t *testing.T) {
-	for _, info := range Keys() {
-		if info.Superseded != "" {
-			t.Errorf("%s is exposed as superseded=%q — the marker has been unoccupied since β8; "+
-				"a new carrier would claim a replacement in context_backends that the cut train already made",
-				info.Key, info.Superseded)
-		}
-	}
-}
+// where the golden list stays at 29 and the ratchet names every key the
+// registry lost — and it is unaffected by this removal.

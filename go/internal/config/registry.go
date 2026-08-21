@@ -13,14 +13,13 @@ import (
 // settings key to its env var, type, default, mutability, secret class and
 // parse strictness. F2 validates settings-writes against exactly this table.
 type entry struct {
-	Key        string // canonical settings key, e.g. "rerank.blend_weight"
-	EnvVar     string // env var name; "-" = no env source (settings-only from F2)
-	Mut        string // hot | restart | coupled | coupled:embed-cache
-	Secret     string // "" | "fp" | "presence"
-	Strict     bool   // parse:"strict" — malformed value is a boot abort
-	Superseded string // "" | "f3:context_backends" (lifetime marker)
-	Guard      string // "" | "sensitivity-downgrade" — lowering needs a confirm flag (F3 §3.5)
-	Tenancy    string // tenant-overridable | global-only — MT3-W2: may a tenant override this key on top of _global?
+	Key     string // canonical settings key, e.g. "rerank.blend_weight"
+	EnvVar  string // env var name; "-" = no env source (settings-only from F2)
+	Mut     string // hot | restart | coupled | coupled:embed-cache
+	Secret  string // "" | "fp" | "presence"
+	Strict  bool   // parse:"strict" — malformed value is a boot abort
+	Guard   string // "" | "sensitivity-downgrade" — lowering needs a confirm flag (F3 §3.5)
+	Tenancy string // tenant-overridable | global-only — MT3-W2: may a tenant override this key on top of _global?
 
 	defRaw string       // raw default tag value
 	defVal any          // default parsed through the same typed parser
@@ -182,17 +181,16 @@ func buildEntry(owner string, f reflect.StructField, key string, path []int) (en
 	}
 
 	e := entry{
-		Key:        key,
-		EnvVar:     env,
-		Mut:        mut,
-		Secret:     secret,
-		Strict:     parse == "strict",
-		Superseded: f.Tag.Get("superseded"),
-		Guard:      guard,
-		Tenancy:    tenancy,
-		defRaw:     def,
-		path:       path,
-		typ:        f.Type,
+		Key:     key,
+		EnvVar:  env,
+		Mut:     mut,
+		Secret:  secret,
+		Strict:  parse == "strict",
+		Guard:   guard,
+		Tenancy: tenancy,
+		defRaw:  def,
+		path:    path,
+		typ:     f.Type,
 	}
 	if parserFor(e.typ) == nil {
 		return entry{}, fmt.Errorf("%s: unsupported field type %s", loc, e.typ)

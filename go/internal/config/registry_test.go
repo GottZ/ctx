@@ -229,55 +229,30 @@ func TestRegistrySecretSet(t *testing.T) {
 	}
 }
 
-// TestRegistrySupersededSet pins the lifetime markers: the role-tuple keys
-// are replaced by F3 context_backends rows (since β1 the table is the only
-// topology source — no boot-time seed reads these keys any more).
+// TestRegistrySupersededSet died with its subject in β9 (E11). It pinned the
+// `superseded` lifetime marker group by group as the cut train emptied it
+// (rerank β3, chat_fallback β4, dream_embed β5, dream β6, embed β7, chat β8),
+// ending as the single statement "no registry key carries the marker". The
+// entry field, the KeyInfo field, the PUT 409, the CLI hint and the FE legacy
+// card are gone with this wave, so nothing is left to pin — and the marker can
+// no longer be the thing that keeps a retired NAME out of the registry. That
+// job was never really its own: it belongs to retired_test.go's collision pin,
+// which reads the registry directly.
 //
-// The rerank group left this switch in β3: its tuple keys are out of the
-// registry entirely, so the loop now asserts the OTHER half of the statement
-// for what is left of the group — rerank.enabled/max_docs/blend_weight are
-// live, unmarked keys. chat_fallback left it in β4 and dream_embed in β5, both
-// leaving nothing behind: all of their keys were tuple keys, so neither group
-// has a surviving half to assert anything about. Keeping the case labels would
-// pin branches no registry entry can reach any more. That the cut names stay
-// out of the registry is retired_test.go's ratchet, not this pin.
-//
-// dream left it in β6 the rerank way, not the chat_fallback way: the group
-// keeps twelve live keys (enabled, the scheduler pair, language, the two
-// retrieval knobs, the six back-off keys), and dropping the case is what makes
-// the loop assert of each of them that it carries NO marker.
-//
-// embed left it in β7 the chat_fallback way: the group WAS its tuple, so
-// nothing of it survives to assert anything about. Note that "embed" is a
-// group name, not a prefix — embed_backfill.* and embed_migration.* are
-// separate groups, were never superseded, and the strings.Cut this loop used to
-// perform always treated them as such. chat left it in β8 the same way, and it
-// was the last: with no marked group left, the switch has no arms and the pin
-// collapses into its remaining half — NO key is marked.
-//
-// That half is the one worth keeping for the one wave it still has. superseded
-// is a lifetime marker with a finished lifetime (config.go tag contract): a key
-// taking it now would be claiming a replacement in context_backends that the
-// cut train has already carried out. The marker itself, with the API field, the
-// 409 branch, the CLI hint and the FE legacy card, is removed in β9 (E11) — and
-// this test goes with it, together with descriptions_test.go's
-// TestSupersededExposed.
-func TestRegistrySupersededSet(t *testing.T) {
-	for _, e := range registry() {
-		if e.Superseded != "" {
-			t.Errorf("%s: superseded = %q, want %q — the marker is unoccupied since β8 and is removed in β9",
-				e.Key, e.Superseded, "")
-		}
-	}
-}
-
 // TestRegistryEnvNamespace pins the env-var naming: every env-sourced key
 // maps to a CTX_*/CONTEXT_*/LISTEN_ADDR var and the mapping is unique
 // (buildRegistry rejects duplicates; this guards the convention).
 func TestRegistryEnvNamespace(t *testing.T) {
 	// Settings-only keys (env:"-"): born in F2's context_settings, never
 	// migrated from env vars. scheduler.home_scope (F1) + the F3-P3 trust-
-	// gating policy surface + the F3-P6 gaming toggle (persistent by design).
+	// gating policy surface.
+	//
+	// gaming.active / gaming.disabled_backends left this list in β9 (α15
+	// finding): the F3-P6 toggle keys were unregistered in U01-W5, so the loop
+	// below — which walks registry() — could not reach them any more. An
+	// allowlist entry for a key that is not in the registry pins nothing and
+	// reads as if the key were still live. That they stay OUT of the registry
+	// is retired_test.go's TestGamingKeysStayOutOfTheRetiredList.
 	settingsOnly := map[string]bool{
 		"scheduler.home_scope":                  true,
 		"pool.default_query_sensitivity":        true,
@@ -287,8 +262,6 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"pool.blob_rate_limit_write":            true, // B2: blob write budget, born in settings like its pool siblings
 		"pool.external_num_ctx_fallback":        true, // H12: prompt-budget window floor, born in settings like its pool siblings
 		"pool.openrouter_window_ttl":            true, // E10-W2: AUTO-window discovery TTL, born in settings like its pool siblings
-		"gaming.active":                         true,
-		"gaming.disabled_backends":              true,
 		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
 		"tenant.allow_cross_tenant_block_grant": true, // MT T43 (07-W6): operator-set per-tenant cross-tenant block-grant opt-in (global-only)
 	}

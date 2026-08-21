@@ -59,14 +59,13 @@ type Hours float64
 //	         fpMinLen, boot dump only) | presence (human-chosen values: never
 //	         fingerprinted — an unsalted hash prefix would be an offline
 //	         dictionary oracle)
-//	superseded  lifetime marker of the F3 retirement: it named the keys the
-//	         context_backends rows had replaced. UNOCCUPIED since β8 — the chat
-//	         tuple was the last carrier, and no key may take the tag again (a
-//	         retired name back in the registry would revive every stale row on
-//	         it, config/retired.go). The marker itself, with the API field, the
-//	         409 branch, the CLI hint and the FE legacy card it feeds, is
-//	         removed in β9 (E11); until then it is live, working machinery with
-//	         no members.
+//	         (Historie: a `superseded` tag once marked the keys the
+//	         context_backends rows had replaced. Its last carrier, the chat
+//	         tuple, left the registry in β8; the tag, its API field, the PUT
+//	         409, the CLI hint and the FE legacy card were removed in β9 — E11,
+//	         complete teardown. That a retired NAME may never return to the
+//	         registry is now stated solely by the collision pin in
+//	         config/retired.go, which does not need a marker to say it.)
 //	tenancy  tenant-overridable | global-only (MANDATORY — MT3-W2): may a
 //	         tenant override this key on top of _global, or does it live in
 //	         _global only? A missing/unknown value is a boot panic, so no key

@@ -76,21 +76,16 @@ export function typeHint(type: string): string | null {
 
 /**
  * Whether the override layer can serve this key (handler/settings.go
- * mutabilityBlock): superseded keys 409 first (their living value is a
- * backend-pool row), hot and coupled:embed-cache PUT fine, restart and
- * coupled answer 409 — those render read-only up front, and so does any
- * unknown future mutability class.
+ * mutabilityBlock): hot and coupled:embed-cache PUT fine, restart and coupled
+ * answer 409 — those render read-only up front, and so does any unknown future
+ * mutability class.
  */
 export function isEditable(s: SettingView): boolean {
-  if (s.superseded) return false
   return s.mutability === 'hot' || s.mutability === 'coupled:embed-cache'
 }
 
 /** Inline note explaining the mutability class, mirroring the server texts. */
 export function mutabilityNote(s: SettingView): string | null {
-  if (s.superseded) {
-    return 'superseded — the live value is a backend-pool row (Backend pool & vault); this key only seeds a first boot with an empty pool'
-  }
   switch (s.mutability) {
     case 'hot':
       return null
@@ -113,15 +108,12 @@ function envHint(s: SettingView): string {
 export interface SettingsGroup {
   prefix: string
   settings: SettingView[]
-  /** The pseudo-group of superseded keys (legacy bootstrap seeds). */
-  legacy?: boolean
 }
 
-/** Card title of the pseudo-group collecting the superseded keys. */
-export const LEGACY_PREFIX = 'legacy (superseded)'
-
-/** DOM id of a group card — prefixes can carry spaces (LEGACY_PREFIX), and
- *  HTML ids must not, so both the card and the jump-nav derive it here. */
+/** DOM id of a group card — both the card and the jump-nav derive it here, so
+ *  a prefix and its anchor can never drift apart. The sanitizer stays as a
+ *  guard: registry prefixes are word tokens today, but the id is written into
+ *  HTML and a stray character would silently break the jump-nav target. */
 export function groupDomId(prefix: string): string {
   return `settings-${prefix.replace(/\W+/g, '-')}`
 }
@@ -130,20 +122,16 @@ export function groupDomId(prefix: string): string {
  * Group by key prefix, preserving registry order for both the groups and
  * the keys inside them (GET /api/settings renders registry order, §3.3:
  * prefix derivation instead of a second category source that could drift).
- * Superseded keys (f3:context_backends) leave their prefix card and collect
- * in ONE trailing legacy pseudo-group — their living value is a backend-pool
- * row, and mixing dead bootstrap seeds into the live cards is exactly the
- * doubled structure this split removes.
+ *
+ * Historie (β9, E11): a trailing "legacy (superseded)" pseudo-group used to
+ * collect the keys the backend pool had replaced. The last of them left the
+ * registry in β8, so the group could not be populated any more, and the marker
+ * that selected them is gone — every key now renders in its own prefix card.
  */
 export function groupByPrefix(settings: SettingView[]): SettingsGroup[] {
   const groups: SettingsGroup[] = []
   const byPrefix = new Map<string, SettingsGroup>()
-  const legacy: SettingsGroup = { prefix: LEGACY_PREFIX, settings: [], legacy: true }
   for (const s of settings) {
-    if (s.superseded) {
-      legacy.settings.push(s)
-      continue
-    }
     const prefix = s.key.split('.', 1)[0]
     let group = byPrefix.get(prefix)
     if (group === undefined) {
@@ -153,7 +141,6 @@ export function groupByPrefix(settings: SettingView[]): SettingsGroup[] {
     }
     group.settings.push(s)
   }
-  if (legacy.settings.length > 0) groups.push(legacy)
   return groups
 }
 
@@ -226,9 +213,17 @@ export interface CrossFieldIssue {
 }
 
 /**
- * Client mirror of the three known cross-field rules (V1/V2/V3 in
+ * Client mirror of the known cross-field rules (V2/V3 in
  * go/internal/config/validate.go) over the would-be effective values —
  * inline preview before the PUT round-trip; the candidate build decides.
+ *
+ * Historie (β9): V1 (dual-runner VRAM warning on a dream/chat num_ctx split
+ * over one host) was mirrored here too. Its server rule retired with the dream
+ * tuple in β6, and none of the five keys it read — dream.num_ctx, chat.num_ctx,
+ * dream.host, chat.host, dream.protocol — is a settings key any more, so the
+ * mirror could never fire again. Backend topology lives in the pool
+ * (design/01 §5.5 rules V1 out by name: it cannot be rebuilt against a table
+ * this preview never sees).
  */
 export function crossFieldIssues(effective: (key: string) => unknown): CrossFieldIssue[] {
   const issues: CrossFieldIssue[] = []
@@ -245,25 +240,6 @@ export function crossFieldIssues(effective: (key: string) => unknown): CrossFiel
       key: 'query.score_threshold',
       severity: 'error',
       message: `score_threshold ${score} > confident_threshold ${confident} makes low_confidence unreachable`,
-    })
-  }
-
-  // V1 — explicit dream/chat num_ctx split on the same host: two runner
-  // instances of one model (VRAM OOM under ollama → error there).
-  const dreamCtx = num('dream.num_ctx')
-  const chatCtx = num('chat.num_ctx')
-  if (
-    dreamCtx !== null &&
-    chatCtx !== null &&
-    dreamCtx > 0 &&
-    chatCtx > 0 &&
-    dreamCtx !== chatCtx &&
-    effective('dream.host') === effective('chat.host')
-  ) {
-    issues.push({
-      key: 'dream.num_ctx',
-      severity: effective('dream.protocol') === 'ollama' ? 'error' : 'warn',
-      message: `dream num_ctx ${dreamCtx} != chat num_ctx ${chatCtx} on the same host — two runner instances of one model (VRAM OOM under ollama)`,
     })
   }
 

@@ -38,27 +38,17 @@
     {#if dirtyCount > 0}
       <span class="dirty-count">{dirtyCount} unsaved</span>
     {/if}
-    {#if !group.legacy}
-      <button
-        class="save"
-        type="button"
-        disabled={dirtyCount === 0 || model.saving}
-        onclick={() => void model.saveGroup(group.prefix)}
-      >
-        {model.saving ? 'Saving…' : 'Save'}
-      </button>
-    {/if}
+    <button
+      class="save"
+      type="button"
+      disabled={dirtyCount === 0 || model.saving}
+      onclick={() => void model.saveGroup(group.prefix)}
+    >
+      {model.saving ? 'Saving…' : 'Save'}
+    </button>
   </header>
   {#if open}
     <div class="fields" id="{domId}-fields">
-      {#if group.legacy}
-        <p class="legacy-banner" role="note">
-          These keys are <strong>superseded by the backend pool</strong> — the live serving values are pool
-          rows (<a href="/settings/backends">Backend pool &amp; vault</a> or <code>ctx backends</code>).
-          They remain read-only here because they still seed a first boot with an empty pool; a PUT answers
-          409.
-        </p>
-      {/if}
       {#if showCurve}
         <BackoffCurve {model} />
       {/if}
@@ -149,15 +139,4 @@
     padding: var(--space-1) 0;
   }
 
-  .legacy-banner {
-    margin: var(--space-1) var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border: 1px dashed var(--border-strong);
-    border-radius: var(--radius);
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .legacy-banner a {
-    color: var(--accent);
-  }
 </style>

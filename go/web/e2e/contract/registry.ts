@@ -341,14 +341,15 @@ export const contracts: PageContract[] = [
       await expect(card).not.toBeVisible()
       await page.getByRole('searchbox', { name: 'search settings' }).fill('')
 
-      // Legacy pseudo-group (Entflechtungs-Welle Stufe 1): the superseded
-      // fixture key renders in the trailing card — read-only field, banner
-      // pointing at the backend pool, no Save button.
-      const legacy = page.locator('section.card[aria-label="legacy (superseded) settings"]')
-      await legacy.locator('button.disclosure').click()
-      await expect(legacy).toContainText('superseded by the backend pool')
-      await expect(legacy.locator('[id="chat.host"]')).toBeDisabled()
-      await expect(legacy.getByRole('button', { name: 'Save' })).toHaveCount(0)
+      // ABSENZ der Legacy-Karte (β9, E11 — Umkehr des Stufe-1-Contracts):
+      // the trailing "legacy (superseded)" pseudo-group used to collect the
+      // keys the backend pool had replaced. The mechanic was torn down
+      // completely (registry marker, API field, PUT 409, CLI hint, FE card),
+      // so the page must render NO such card and NO superseded badge — on a
+      // page that renders every other settings card fine (asserted above).
+      await expect(page.locator('section.card[aria-label="legacy (superseded) settings"]')).toHaveCount(0)
+      await expect(page.locator('section.card').filter({ hasText: 'superseded by the backend pool' })).toHaveCount(0)
+      await expect(content.locator('span.badge', { hasText: /^superseded$/ })).toHaveCount(0)
     },
     mobile: MOBILE_PV4_EXEMPT,
   },

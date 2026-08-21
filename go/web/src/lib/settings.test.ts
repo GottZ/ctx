@@ -12,7 +12,6 @@ import {
   groupByPrefix,
   groupDomId,
   isEditable,
-  LEGACY_PREFIX,
   mutabilityNote,
   parseDraft,
   selectOptions,
@@ -128,7 +127,10 @@ describe('formatValue', () => {
   })
 })
 
-describe('crossFieldIssues (mirror of validate.go V1/V2/V3)', () => {
+// The V1 case (dream/chat num_ctx split on one host) left with the mirror in β9:
+// its server rule retired with the dream tuple in β6 and every key it read is
+// out of the registry, so the branch was unreachable.
+describe('crossFieldIssues (mirror of validate.go V2/V3)', () => {
   function effectiveOf(values: Record<string, unknown>) {
     return (key: string) => values[key]
   }
@@ -139,25 +141,6 @@ describe('crossFieldIssues (mirror of validate.go V1/V2/V3)', () => {
     )
     expect(issues).toHaveLength(1)
     expect(issues[0]).toMatchObject({ key: 'query.score_threshold', severity: 'error' })
-  })
-
-  it('V1: num_ctx split on the same host warns, errors under ollama', () => {
-    const base = {
-      'dream.num_ctx': 4096,
-      'chat.num_ctx': 8192,
-      'dream.host': 'http://gpu:8089',
-      'chat.host': 'http://gpu:8089',
-      'dream.protocol': 'openai',
-    }
-    expect(crossFieldIssues(effectiveOf(base))[0]).toMatchObject({
-      key: 'dream.num_ctx',
-      severity: 'warn',
-    })
-    expect(crossFieldIssues(effectiveOf({ ...base, 'dream.protocol': 'ollama' }))[0]).toMatchObject({
-      severity: 'error',
-    })
-    expect(crossFieldIssues(effectiveOf({ ...base, 'chat.host': 'http://other:8089' }))).toEqual([])
-    expect(crossFieldIssues(effectiveOf({ ...base, 'dream.num_ctx': 0 }))).toEqual([])
   })
 
   it('V3: blend 1.0 with graph enabled warns', () => {
@@ -172,48 +155,19 @@ describe('crossFieldIssues (mirror of validate.go V1/V2/V3)', () => {
   })
 })
 
-describe('superseded keys (Entflechtungs-Welle Stufe 1)', () => {
-  const superseded: SettingView = {
-    key: 'chat.host',
-    type: 'string',
-    mutability: 'hot',
-    value: '',
-    source: 'default',
-    default: '',
-    superseded: 'f3:context_backends',
-  }
-  const live: SettingView = {
-    key: 'dream.backoff_factor',
-    type: 'float',
-    mutability: 'hot',
-    value: 1.6,
-    source: 'default',
-    default: 1.6,
-  }
-
-  it('isEditable: superseded is read-only even at mutability hot', () => {
-    expect(isEditable(superseded)).toBe(false)
-    expect(isEditable(live)).toBe(true)
-  })
-
-  it('mutabilityNote points at the backend pool', () => {
-    expect(mutabilityNote(superseded)).toContain('backend-pool')
-  })
-
-  it('groupByPrefix collects superseded keys in ONE trailing legacy group', () => {
-    const groups = groupByPrefix([live, superseded, { ...superseded, key: 'embed.host' }])
-    expect(groups.map((g) => g.prefix)).toEqual(['dream', LEGACY_PREFIX])
-    const legacy = groups[1]
-    expect(legacy.legacy).toBe(true)
-    expect(legacy.settings.map((s) => s.key)).toEqual(['chat.host', 'embed.host'])
-  })
-
-  it('groupByPrefix emits no legacy group without superseded keys', () => {
-    expect(groupByPrefix([live]).map((g) => g.prefix)).toEqual(['dream'])
-  })
-
-  it('groupDomId strips non-word characters (HTML ids must not carry spaces)', () => {
-    expect(groupDomId(LEGACY_PREFIX)).toBe('settings-legacy-superseded-')
+// The 'superseded keys (Entflechtungs-Welle Stufe 1)' block died with its
+// subject in β9 (E11): it pinned the read-only rendering, the backend-pool note
+// and the trailing "legacy (superseded)" pseudo-group. No API field, no marker,
+// no legacy card exists any more — every key renders in its own prefix card,
+// which the groupByPrefix block above asserts. The absence of the legacy card in
+// the rendered page is asserted at the e2e tier (e2e/contract/registry.ts).
+describe('groupDomId', () => {
+  it('derives the card/jump-nav anchor from the prefix', () => {
     expect(groupDomId('dream')).toBe('settings-dream')
+    expect(groupDomId('embed_backfill')).toBe('settings-embed_backfill')
+  })
+
+  it('sanitises characters an HTML id must not carry', () => {
+    expect(groupDomId('two words')).toBe('settings-two-words')
   })
 })

@@ -100,9 +100,15 @@ func TestRetiredKeysMatchGoldenList(t *testing.T) {
 
 // TestRetiredKeysLeaveTheRegistryWithTheirWave is the collision pin in its end
 // form, ratcheted through the cut train. The invariant it protects is permanent
-// and outlives the cut: no name in retiredSettingKeys is a live, unmarked
-// config key — before its wave because the registry entry still carries the
-// superseded marker, after its wave because there is no registry entry left.
+// and outlives the cut: no name in retiredSettingKeys is a live config key.
+//
+// Until β9 the pre-cut half of that sentence read "…or it carries the
+// superseded marker for its remaining lifetime". The marker was removed with
+// the whole mechanic (E11), and with the ratchet full there is no pre-cut half
+// left to legitimise: every retired name must simply be absent from the
+// registry. The third arm below therefore no longer inspects a marker — it
+// states outright that a registered retired name is a bug.
+//
 // That is what stops a future release from re-registering one of these names:
 // a re-registered name would silently make every stale row on it effective
 // configuration again (build.go admits any registered key) and would shadow the
@@ -128,17 +134,17 @@ func TestRetiredKeysLeaveTheRegistryWithTheirWave(t *testing.T) {
 	}
 
 	for key := range retiredSettingKeys {
-		info, registered := KeyByName(key)
+		_, registered := KeyByName(key)
 		switch {
 		case cut[key] && registered:
-			t.Errorf("%s is listed as cut but the registry still carries it (superseded=%q) — "+
-				"a retired name back in the registry revives every stale row on it", key, info.Superseded)
+			t.Errorf("%s is listed as cut but the registry still carries it — "+
+				"a retired name back in the registry revives every stale row on it", key)
 		case !cut[key] && !registered:
 			t.Errorf("%s is gone from the registry but missing from retiredKeysAlreadyCut — "+
 				"the cut wave moves its tuple into the ratchet in the same commit", key)
-		case !cut[key] && info.Superseded == "":
-			t.Errorf("%s is registered without a superseded marker — a retired name is either "+
-				"marked for its remaining lifetime or gone", key)
+		case !cut[key] && registered:
+			t.Errorf("%s is a retired key that is still registered — since β9 removed the "+
+				"superseded marker there is no legitimate pre-cut state left; a retired name is gone", key)
 		}
 	}
 }

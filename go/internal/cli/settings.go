@@ -42,7 +42,6 @@ type settingRow struct {
 	Default    any    `json:"default"`
 	Sensitive  bool   `json:"sensitive"`
 	Desc       string `json:"description"`
-	Superseded string `json:"superseded"`
 }
 
 // settingAuditRow mirrors store.SettingAudit on the wire.
@@ -240,9 +239,6 @@ func runSettingsGet(getClient func() (*Client, error), key string) error {
 	fmt.Printf("%s\n", s.Key)
 	if s.Desc != "" {
 		fmt.Printf("  %s\n", s.Desc)
-	}
-	if s.Superseded != "" {
-		fmt.Printf("  superseded: value lives in the backend pool (%s) — edit via `ctx backends`, not here\n", s.Superseded)
 	}
 	fmt.Printf("  value:      %v\n", renderCell(s.Value))
 	fmt.Printf("  source:     %s\n", s.Source)
