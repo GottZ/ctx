@@ -100,9 +100,15 @@ func tenantRow(key, scope, jsonVal string) store.SettingOverride {
 // tenant-scope override on a global-only key is DROPPED with a WARN before it
 // becomes a config.Override; a tenant-scope override on a tenant-overridable key
 // passes through; a _global override on a global-only key (the operator path)
-// is untouched. The embed.host sub-case is the R-SCALE6 guard — a tenant
-// override must not change the effective embed tuple, so the process-wide,
-// scope-less context_embed_cache is never flushed across all tenants.
+// is untouched.
+//
+// The R-SCALE6 sub-case that rode here (a tenant embed.host override must not
+// change the effective embed tuple, or the process-wide, scope-less
+// context_embed_cache would be flushed across all tenants) left with the embed
+// tuple in β7: both its key and the function it asserted against are gone, and
+// the cache it protected is guarded on the pool side alone now (α5,
+// events/listener.go). gaming.active carries the gate's statement — the drop
+// happens before the merge, per row, for every global-only key.
 func TestToOverridesGlobalOnlyTenantGate(t *testing.T) {
 	resetEnv(t)
 	const tenant = "work"
@@ -143,52 +149,47 @@ func TestToOverridesGlobalOnlyTenantGate(t *testing.T) {
 		}
 	})
 
-	t.Run("tenant embed.host override does not flush the shared cache (R-SCALE6)", func(t *testing.T) {
-		base, _ := config.Build(nil, nil)
-		gatedOverrides, _ := toOverrides([]store.SettingOverride{
-			tenantRow("embed.host", tenant, `"http://embed.example:9999"`),
-		}, []string{store.GlobalScope, tenant})
-		gated, _ := config.Build(gatedOverrides, nil)
-		if EmbedCacheCoupledChanged(base, gated) {
-			t.Errorf("tenant embed.host override must NOT change the effective embed tuple " +
-				"(would flush the process-wide context_embed_cache for all tenants)")
-		}
-	})
 }
 
-// TestEmbedCacheCoupledChangedOperatorPath is the positive half the R-SCALE6
-// sub-case above never made: the tenant gate proves what must NOT flush, and
-// on its own it would stay green against a function that reports nothing at
-// all. Since β5 that is a live risk — the dream_embed half of the comparison
-// went with its tuple, leaving the embed host/protocol pair as the whole
-// settings-side coupled surface.
+// TestRetiredEmbedRowIsDroppedNotApplied is the settings half of the β7 gate
+// (design/01 §7 W6, "embed-bezogene Row-Änderung erzeugt WARN-Drop und KEINEN
+// Flush"). The flush half needs the real cache table and lives in
+// handler/settings_integration_test.go (RetiredEmbedRowNoFlush); what is
+// provable without a database is the drop itself, and it is what makes the
+// flush unreachable: a row on one of the five cut embed keys never becomes a
+// config.Override at all, so no effective value moves and there is nothing a
+// flush could be owed to.
 //
-// The model case pins the deliberate non-coverage: context_embed_cache keys on
-// (text_hash, model), so a model change addresses other rows by itself and
-// needs no flush (same reasoning as events/listener.go's coupledPair).
-func TestEmbedCacheCoupledChangedOperatorPath(t *testing.T) {
+// It replaces TestEmbedCacheCoupledChangedOperatorPath, the positive pin β5
+// built for the function that died here. Both directions are asserted — the
+// row is dropped AND it is dropped for the retired-key reason, not because
+// some other gate happened to swallow it.
+func TestRetiredEmbedRowIsDroppedNotApplied(t *testing.T) {
 	resetEnv(t)
 	base, _ := config.Build(nil, nil)
 
-	cases := []struct {
-		name string
-		key  string
-		val  string
-		want bool
-	}{
-		{"operator embed.host move", "embed.host", `"http://embed.example:9999"`, true},
-		{"operator embed.protocol switch", "embed.protocol", `"openai"`, true},
-		{"model change alone", "embed.model", `"other-embed-4b"`, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			overrides, _ := toOverrides([]store.SettingOverride{row(c.key, c.val)}, []string{store.GlobalScope})
-			if len(overrides) != 1 {
-				t.Fatalf("_global override on %s must pass the gate, got %+v", c.key, overrides)
+	for _, key := range []string{"embed.host", "embed.protocol", "embed.model", "embed.api_key", "embed.num_ctx"} {
+		t.Run(key, func(t *testing.T) {
+			overrides, gateIssues := toOverrides(
+				[]store.SettingOverride{row(key, `"http://embed.example:9999"`)},
+				[]string{store.GlobalScope})
+			if len(gateIssues) != 0 {
+				t.Fatalf("the global-only gate must not be what drops %s: %+v", key, gateIssues)
 			}
-			next, _ := config.Build(overrides, nil)
-			if got := EmbedCacheCoupledChanged(base, next); got != c.want {
-				t.Errorf("EmbedCacheCoupledChanged after %s = %v, want %v", c.key, got, c.want)
+			next, issues := config.Build(overrides, nil)
+			warned := false
+			for _, is := range issues {
+				if is.Field == key && is.Severity == config.SeverityWarn &&
+					strings.Contains(is.Msg, "unknown settings key") {
+					warned = true
+				}
+			}
+			if !warned {
+				t.Errorf("row on retired %s must be dropped with the unknown-key WARN, got %+v", key, issues)
+			}
+			if next.Source(key) != base.Source(key) {
+				t.Errorf("retired %s changed its source to %q — the row was applied",
+					key, next.Source(key))
 			}
 		})
 	}
@@ -370,27 +371,30 @@ func TestLeakScanBootBuildReload(t *testing.T) {
 	pastedSecret := "PASTEDMARKER-" + strings.Repeat("p", 30)
 
 	t.Setenv("CTX_CHAT_HOST", "http://chat.example:8089")
-	// The env-provided secret rode on CTX_DREAM_API_KEY until β6 cut the dream
-	// tuple; a var the registry no longer reads would put the marker nowhere and
-	// make the scan vacuous. CTX_EMBED_API_KEY is the same class (secret:"fp")
-	// and stays effective here BECAUSE the embed.api_key row below fails to
-	// resolve: the override is dropped, so the env value survives into the
-	// snapshot and the boot dump — both markers ride the same key through two
-	// different paths.
-	t.Setenv("CTX_EMBED_API_KEY", envSecret)
+	// The env-provided secret rode on CTX_DREAM_API_KEY until β6 and on
+	// CTX_EMBED_API_KEY until β7; a var the registry no longer reads would put
+	// the marker nowhere and make the scan vacuous. chat.api_key is the LAST
+	// registered secret:"fp" key, and the scan needs it for three paths at once
+	// — env value, resolved secret_ref, and pasted plaintext — which cannot
+	// coexist on one key in one generation. So the boot surface is built TWICE
+	// on the same key: once where the ref resolves (the env value is shadowed),
+	// once where it does not (the override is dropped and the env value
+	// survives into snapshot and boot dump). Every marker still rides a real
+	// path; only the number of generations changed.
+	t.Setenv("CTX_CHAT_API_KEY", envSecret)
 	buf := captureLogs(t)
 
 	rows := []store.SettingOverride{
-		row("chat.api_key", `"prov-main"`), // resolves to dbSecret
-		// The resolver error path needs a REGISTERED secret key — a row on a cut
-		// key is dropped as unknown before the resolver ever sees it, and the
-		// pasted-plaintext marker would then be scanned for in a log surface it
-		// never reached. It rode on chat_fallback.api_key until β4 cut the tuple;
-		// embed.api_key is the same class (secret:"fp", tenant-overridable) and
-		// outlives dream_embed's.
-		row("embed.api_key", `"`+pastedSecret+`"`), // ref value IS a plaintext ⇒ resolver error path
-		row("rerank.blend_weight", `"kaputt"`),     // corrupt-value WARN path
-		row("chat.model", `"db-model"`),            // healthy non-secret override
+		row("chat.api_key", `"prov-main"`),     // resolves to dbSecret
+		row("rerank.blend_weight", `"kaputt"`), // corrupt-value WARN path
+		row("chat.model", `"db-model"`),        // healthy non-secret override
+	}
+	// The resolver error path needs a REGISTERED secret key — a row on a cut key
+	// is dropped as unknown before the resolver ever sees it, and the pasted
+	// plaintext would then be scanned for in a log surface it never reached. It
+	// rode on chat_fallback.api_key until β4 and on embed.api_key until β7.
+	pastedRows := []store.SettingOverride{
+		row("chat.api_key", `"`+pastedSecret+`"`), // ref value IS a plaintext ⇒ resolver error path
 	}
 	resolve := func(name string) (string, error) {
 		if name == "prov-main" {
@@ -411,6 +415,18 @@ func TestLeakScanBootBuildReload(t *testing.T) {
 	}
 	if cfg.Chat.Model != "db-model" {
 		t.Fatalf("healthy override missing — scan would prove nothing")
+	}
+
+	// Second generation: the same key, the resolver error path. The dropped
+	// override lets the env marker through into snapshot and boot dump, which
+	// is the surface the env half of the scan is about.
+	pastedCfg, pastedIssues := buildWith(pastedRows, resolve, []string{store.GlobalScope})
+	logIssues(pastedIssues)
+	logApplied(pastedCfg, pastedRows)
+	slog.Info("config: effective", config.BootDumpArgs(pastedCfg, pastedIssues)...)
+
+	if pastedCfg.Chat.APIKey != envSecret {
+		t.Fatalf("the unresolvable ref must leave the env value active — the env marker would ride nothing")
 	}
 
 	// Reload surfaces: kill-switch rebuild (Replace path) + load failure.

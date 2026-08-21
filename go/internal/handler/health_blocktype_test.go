@@ -44,7 +44,7 @@ func TestHealthBlocktypeRegistryField(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(backend.Close)
-	cfg := healthTestConfig(backend.URL, backend.URL)
+	cfg := healthTestConfig(backend.URL)
 	st := &swapStore{}
 	st.p.Store(cfg)
 
@@ -71,7 +71,11 @@ func TestHealthBlocktypeRegistryField(t *testing.T) {
 			if resp.BlocktypeRegistry != tc.want {
 				t.Errorf("blocktype_registry = %q, want %q", resp.BlocktypeRegistry, tc.want)
 			}
-			assertHealthBody(t, rec.Body.Bytes(), healthNeedles(cfg))
+			// poolNameNeedles joins the sweep in β7: two of the three roles
+			// now carry their model and credential in the pool row rather
+			// than the config, so a config-only needle list would have
+			// quietly narrowed what this body is scanned for.
+			assertHealthBody(t, rec.Body.Bytes(), append(healthNeedles(cfg), poolNameNeedles...))
 		})
 	}
 }

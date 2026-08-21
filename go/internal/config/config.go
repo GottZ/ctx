@@ -46,9 +46,11 @@ type Hours float64
 //	default  raw default value, parsed by the same typed parser as env input
 //	mut      hot | restart | coupled | coupled:embed-cache — F2 rejects
 //	         settings-writes on restart-only keys instead of silently
-//	         accepting them; coupled:embed-cache keys must flush
-//	         context_embed_cache on change (the cache keys only on
-//	         (prefix+text, model), not host/protocol — Auflage X2)
+//	         accepting them. Both coupled classes are UNOCCUPIED since β7:
+//	         their last carriers were the embed tuple, and the embed-cache
+//	         flush obligation moved to the pool write path (α5,
+//	         events/listener.go). A new key taking either tag inherits the
+//	         admission behaviour, not a settings-side flush.
 //	parse    strict (malformed value = boot abort, today's getEnvInt fatal
 //	         paths) | safe/default (malformed value = WARN + default, today's
 //	         getEnv*Safe paths). F2 may flip safe fields to strict via this
@@ -83,7 +85,6 @@ type Hours float64
 type Config struct {
 	Server         ServerConfig
 	Chat           ChatConfig
-	Embed          EmbedConfig
 	Dream          DreamConfig
 	Rerank         RerankConfig
 	Graph          GraphConfig
@@ -129,10 +130,11 @@ type ServerConfig struct {
 // ChatConfig is the primary chat/synthesis backend tuple.
 type ChatConfig struct {
 	Host string `key:"chat.host" env:"CTX_CHAT_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	// TENANT-DECISION(provider-api-key): the provider api_key secret_refs
-	// (chat/embed — rerank.api_key left the registry with the β3 tuple cut,
-	// chat_fallback.api_key with the β4 one, dream_embed.api_key with the β5
-	// one, dream.api_key with the β6 one) are tenant-overridable — a tenant
+	// TENANT-DECISION(provider-api-key): the provider api_key secret_ref
+	// (chat.api_key, the last one — rerank.api_key left the registry with the
+	// β3 tuple cut, chat_fallback.api_key with the β4 one, dream_embed.api_key
+	// with the β5 one, dream.api_key with the β6 one, embed.api_key with the β7
+	// one) is tenant-overridable — a tenant
 	// brings its own provider
 	// credential (resolved per-tenant by the 03-W3..W5 secret resolver,
 	// isolation gated by tenant.allow_shared_secrets
@@ -148,21 +150,14 @@ type ChatConfig struct {
 	Think    backends.ThinkMode `key:"chat.think" env:"CTX_CHAT_THINK" default:"false" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 }
 
-// EmbedConfig is the query-path embedding backend tuple. Model is
-// mut:"coupled": changing it changes the vector space and requires a
-// re-embed migration. Host/Protocol are coupled to the embed cache (X2).
-type EmbedConfig struct {
-	// embed.host/protocol are NAMED global-only (not just by fail-closed default):
-	// they are mut:"coupled:embed-cache", and a tenant override would change the
-	// effective embed tuple → embedcache.Flush nukes the process-wide, scope-less
-	// context_embed_cache for ALL tenants (R-SCALE6, cosine 0.997). Model stays
-	// global-only too (vector space — re-embed migration, not overridable).
-	Host     string            `key:"embed.host" env:"CTX_EMBED_HOST" default:"http://localhost:11434" mut:"coupled:embed-cache" superseded:"f3:context_backends" tenancy:"global-only"`
-	APIKey   string            `key:"embed.api_key" env:"CTX_EMBED_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
-	Protocol backends.Protocol `key:"embed.protocol" env:"CTX_EMBED_PROTOCOL" default:"ollama" mut:"coupled:embed-cache" superseded:"f3:context_backends" tenancy:"global-only"`
-	Model    string            `key:"embed.model" env:"CTX_EMBED_MODEL" default:"qwen3-embedding:8b" mut:"coupled" superseded:"f3:context_backends" tenancy:"global-only"`
-	NumCtx   int               `key:"embed.num_ctx" env:"CTX_EMBED_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends" tenancy:"global-only"`
-}
+// EmbedConfig died with the query-path embed tuple in β7. Its five keys were
+// the last carriers of two mutability classes: mut:"coupled" (embed.model, the
+// vector space) and mut:"coupled:embed-cache" (embed.host/protocol, the two
+// values that change the vector space under an unchanged model name). Both
+// classes stay valid registry vocabulary (validMut, registry.go) and are now
+// unoccupied; the cache obligation they carried lives entirely on the pool
+// side since α5 (events/listener.go coupledSet + the Migration-132
+// fingerprint), which is where an embed-role backend is actually chosen.
 
 // DreamConfig is the dream pipeline: the master switch, the scheduler cadence,
 // the report language and the back-off policy. Both backend tuples it once
@@ -1437,23 +1432,16 @@ func (c *Config) ChatBackend() backends.Backend {
 // own model_map and num_ctx — and "one runner or two" is a property of the rows
 // an operator enables, not of a field pair Validate could compare.
 
-// DreamEmbedBackend died with the dream_embed tuple in β5. It resolved the
-// tuple field by field onto Embed.*, with V12 rejecting the one case the
-// fallback could not decide safely (an own host but an inherited credential).
-// The pool answers both questions now: dream/router.go:130-142 chains role
-// dream-embed when a row carries it and falls back to role embed otherwise,
-// and a pool row's api_key_ref never travels to another row's host.
-
-// EmbedBackend returns the query-path embedding tuple, 1:1 from Embed.*.
-func (c *Config) EmbedBackend() backends.Backend {
-	return backends.Backend{
-		Host:     c.Embed.Host,
-		APIKey:   c.Embed.APIKey,
-		Protocol: c.Embed.Protocol,
-		Model:    c.Embed.Model,
-		NumCtx:   c.Embed.NumCtx,
-	}
-}
+// DreamEmbedBackend died with the dream_embed tuple in β5, EmbedBackend with
+// the embed tuple in β7. The first resolved its tuple field by field onto the
+// second, with V12 rejecting the one case the fallback could not decide safely
+// (an own host but an inherited credential); the second was the query-path
+// embedding tuple, 1:1 from Embed.*, and its last caller was the settings-side
+// EmbedCacheCoupledChanged that went with it. The pool answers all of it now:
+// dream/router.go:130-142 chains role dream-embed when a row carries it and
+// falls back to role embed otherwise, a pool row's api_key_ref never travels
+// to another row's host, and which model the embed chain would ask is
+// Pool.PrimaryModel(RoleEmbed) since α2.
 
 // RerankRRF converts the rerank group to the rrf-stage parameter struct.
 func (c *Config) RerankRRF() rrf.RerankConfig {

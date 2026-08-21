@@ -63,7 +63,6 @@ func validateBackendTuples(c *Config) []Issue {
 	// masking everywhere hosts flow: dump, error logs, F2 API).
 	for _, h := range []struct{ key, host string }{
 		{"chat.host", c.Chat.Host},
-		{"embed.host", c.Embed.Host},
 	} {
 		if h.host == "" {
 			continue
@@ -81,7 +80,6 @@ func validateBackendTuples(c *Config) []Issue {
 		proto backends.Protocol
 	}{
 		{"chat.protocol", c.Chat.Protocol},
-		{"embed.protocol", c.Embed.Protocol},
 	} {
 		if p.proto != backends.ProtocolOllama && p.proto != backends.ProtocolOpenAI {
 			issues = append(issues, Issue{Field: p.key, Severity: SeverityError,

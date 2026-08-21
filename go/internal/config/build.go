@@ -129,11 +129,14 @@ func admitOverride(o Override, resolve SecretResolver) (admittedOverride, *Issue
 		// state in F2), coupled keys need a re-embed migration no override can
 		// deliver, and the server.* DSN group must stay env-only — the pool
 		// that LOADED the override is bound to the env DSN (circular).
-		// coupled:embed-cache keys (embed host+protocol; the dream_embed pair
-		// left the registry in β5) ARE
-		// overridable since G16: the settings write path flushes
-		// context_embed_cache when their effective values change (X2), which
-		// removes the stale-vector hazard (R5) that kept them pinned.
+		// coupled:embed-cache is admitted here and has been UNOCCUPIED since
+		// β7 cut the embed tuple (its last carriers were embed host+protocol;
+		// the dream_embed pair left in β5). The admission was granted in G16
+		// because the settings write path flushed context_embed_cache on an
+		// effective change (X2) — that flush went with the tuple, so a NEW key
+		// taking this tag would be admitted WITHOUT one. Whoever adds the next
+		// carrier owes it a flush obligation, on the pool side (α5,
+		// events/listener.go) or here.
 		return admittedOverride{}, warn(fmt.Sprintf("key is not runtime-overridable (mutability %q) — override ignored", e.Mut))
 	}
 	if e.Secret != "" {

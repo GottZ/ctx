@@ -56,6 +56,8 @@ var retiredKeysAlreadyCut = []string{
 	"dream.api_key", "dream.host", "dream.model", "dream.num_ctx", "dream.protocol", "dream.think",
 	// β5 — dream_embed
 	"dream_embed.api_key", "dream_embed.host", "dream_embed.model", "dream_embed.num_ctx", "dream_embed.protocol",
+	// β7 — embed
+	"embed.api_key", "embed.host", "embed.model", "embed.num_ctx", "embed.protocol",
 	// β3 — rerank
 	"rerank.api_key", "rerank.host", "rerank.model",
 }

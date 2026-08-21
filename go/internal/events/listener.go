@@ -141,9 +141,10 @@ func NewSettingsWriteHandler(pool *pgxpool.Pool, cfg *config.Store, backendPool 
 // coupledPair is one connection identity of an embed-writing backend. Model is
 // deliberately NOT part of it: context_embed_cache keys on (text_hash, model),
 // so a model change addresses different rows anyway — the same reasoning the
-// config-side EmbedCacheCoupledChanged has carried since G16
-// (settings/reload.go). Host/protocol is what silently changes the vector SPACE
-// under an unchanged model name.
+// settings-side half carried from G16 until β7 cut the embed tuple that fed
+// it. Host/protocol is what silently changes the vector SPACE under an
+// unchanged model name, and since β7 this is the ONLY guard on that cache: a
+// settings row can no longer reach the embed topology at all.
 type coupledPair struct {
 	host     string
 	protocol string

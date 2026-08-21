@@ -74,9 +74,6 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 			Host: "http://chat.example", Protocol: backends.ProtocolOllama,
 			Model: "chat-model", NumCtx: 4096, Think: "false",
 		},
-		Embed: config.EmbedConfig{
-			Host: "http://embed.example", Protocol: backends.ProtocolOllama, Model: "embed-model",
-		},
 		Dream: config.DreamConfig{
 			// The dream backend tuple left the registry in β6 — which backend
 			// serves the pipeline is a pool question now.

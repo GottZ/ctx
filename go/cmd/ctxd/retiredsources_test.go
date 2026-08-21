@@ -4,12 +4,17 @@ package main
 // boot sweep.
 //
 // The row half needs a database and lives in retiredsources_integration_test.go.
-// What this file pins is the part that has no other guard: the WORDING. Three
-// situations get three texts, and each text is an instruction an operator will
-// act on — "remove it", "it is already shadowed, still remove it", "do NOT
-// remove this one". Getting the third one wrong is not a cosmetic bug: a
-// uniform removal call on CTX_EMBED_MODEL would make this very release the
-// cause of a silent model swap (see retiredEnvWarning for the two mechanisms).
+// What this file pins is the part that has no other guard: the WORDING. Two
+// situations get two texts, and each text is an instruction an operator will
+// act on — "remove it" and "it is already shadowed, still remove it".
+//
+// A third text existed until β7: "do NOT remove this one", for CTX_EMBED_MODEL,
+// whose deletion would break the v4.37 rollback's channel probe. β7 cut
+// embed.model out of the registry, so the sweep is silent about the var — and
+// the coverage of the must-not moved with it, into the partition pin below,
+// whose cut half asserts that NO word about a cut name appears in the log. That
+// is a strictly stronger statement than "no removal call"; carrying the
+// instruction itself forward is β13's tombstone sweep.
 
 import (
 	"strings"
@@ -22,9 +27,9 @@ import (
 // produce a line, and which line.
 //
 // Mutation probe: delete the `os.Getenv(info.EnvVar) == ""` guard in
-// warnRetiredEnvVarsBoot and both silence subtests go red; swap the
-// embed.model branch for the generic text and the CTX_EMBED_MODEL subtest goes
-// red on the removal call it must never contain.
+// warnRetiredEnvVarsBoot and both silence subtests go red; drop the
+// `!ok` continue and the partition pin goes red on every cut name it then
+// names, CTX_EMBED_MODEL among them.
 func TestWarnRetiredEnvVarsBoot(t *testing.T) {
 	// Gate (a): a set retired var is named, once, with the way out.
 	t.Run("set env var warns with the removal call", func(t *testing.T) {
@@ -137,29 +142,17 @@ func TestWarnRetiredEnvVarsBoot(t *testing.T) {
 		}
 	})
 
-	// Gate (e): the one var this window must not tell anybody to delete.
-	t.Run("CTX_EMBED_MODEL keeps its own text and no removal call", func(t *testing.T) {
-		resetAllEnv(t)
-		t.Setenv("CTX_EMBED_MODEL", "qwen3-embedding-8b")
-		buf := captureBootLog(t)
-
-		cfg, _ := config.FromEnv()
-		warnRetiredEnvVarsBoot(cfg)
-
-		out := buf.String()
-		if n := strings.Count(out, "deprecation=retired_env"); n != 1 {
-			t.Fatalf("log = %q, want exactly 1 retired_env line, got %d", out, n)
-		}
-		if !strings.Contains(out, "keep it until") {
-			t.Errorf("log = %q, want the keep-it instruction", out)
-		}
-		// The load-bearing negative. Since β1 removed the boot seed, the reason
-		// is the rollback path alone: removing this var breaks the v4.37
-		// rollback's channel probe, silently.
-		if strings.Contains(out, "remove the env var") {
-			t.Errorf("log = %q, must NOT call for removal of CTX_EMBED_MODEL", out)
-		}
-	})
+	// Gate (e) named CTX_EMBED_MODEL as the one var this window must not tell
+	// anybody to delete, and asserted both halves of its own text ("keep it
+	// until …", never "remove the env var"). β7 cut embed.model out of the
+	// registry; the sweep skips keys the registry no longer knows, so the var
+	// gets no line at all and the subtest's first assertion (exactly one
+	// retired_env line) could only be satisfied by re-registering the key.
+	//
+	// The must-not survives as an absence: the partition pin below sets EVERY
+	// retired env name and requires the cut ones — CTX_EMBED_MODEL now among
+	// them — to appear nowhere in the log. Probed: re-registering embed.model
+	// makes it a "live" name there and the generic removal text is what it gets.
 
 	// Coverage pin: the sweep watches the whole retirement, not the handful of
 	// names a test author happened to think of. Every retired env name that is

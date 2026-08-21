@@ -86,17 +86,12 @@ func TestBootDefaults(t *testing.T) {
 		t.Errorf("registry default %q != -health mode fallback %q", cc.Server.ListenAddr, defaultListenAddr)
 	}
 
-	// Chat (the fallback tuple left the registry in β4).
+	// Chat (the fallback tuple left the registry in β4, the embed tuple in β7 —
+	// chat is the last backend tuple with config-side defaults).
 	if cc.Chat.Host != "http://localhost:11434" || cc.Chat.APIKey != "" ||
 		cc.Chat.Protocol != "ollama" || cc.Chat.Model != "qwen3.5:9b" ||
 		cc.Chat.NumCtx != 0 || cc.Chat.Think != "false" {
 		t.Errorf("chat defaults drifted: %+v", cc.Chat)
-	}
-
-	// Embed (the separate dream-embed tuple left the registry in β5).
-	if cc.Embed.Host != "http://localhost:11434" || cc.Embed.Protocol != "ollama" ||
-		cc.Embed.Model != "qwen3-embedding:8b" || cc.Embed.NumCtx != 0 {
-		t.Errorf("embed defaults drifted: %+v", cc.Embed)
 	}
 
 	// Dream + back-off (the dream chat tuple left the registry in β6).
@@ -152,11 +147,6 @@ func TestBootEnvWiring(t *testing.T) {
 		"CONTEXT_DB_HOST":     "db.example", "CONTEXT_DB_PORT": "5433",
 		"CONTEXT_DB_SSLMODE": "require", "LISTEN_ADDR": ":9090",
 
-		"CTX_EMBED_HOST":     "http://embed.example:8081",
-		"CTX_EMBED_API_KEY":  "sk-embed-0123456789abcdefghijklmn",
-		"CTX_EMBED_PROTOCOL": "openai", "CTX_EMBED_MODEL": "test-embed-8b",
-		"CTX_EMBED_NUM_CTX": "2048",
-
 		"CTX_CHAT_HOST":     "http://192.0.2.10:8089",
 		"CTX_CHAT_API_KEY":  "sk-chat-0123456789abcdefghijklmn",
 		"CTX_CHAT_PROTOCOL": "openai", "CTX_CHAT_MODEL": "test-chat-27b",
@@ -205,12 +195,6 @@ func TestBootEnvWiring(t *testing.T) {
 		cc.Server.ListenAddr != ":9090" {
 		t.Errorf("server wiring: %+v", cc.Server)
 	}
-	if cc.Embed.Host != "http://embed.example:8081" ||
-		cc.Embed.APIKey != "sk-embed-0123456789abcdefghijklmn" ||
-		cc.Embed.Protocol != "openai" || cc.Embed.Model != "test-embed-8b" ||
-		cc.Embed.NumCtx != 2048 {
-		t.Errorf("embed wiring: %+v", cc.Embed)
-	}
 	if cc.Chat.Host != "http://192.0.2.10:8089" ||
 		cc.Chat.APIKey != "sk-chat-0123456789abcdefghijklmn" ||
 		cc.Chat.Protocol != "openai" || cc.Chat.Model != "test-chat-27b" ||
@@ -258,11 +242,11 @@ func TestBootFatalSemantics(t *testing.T) {
 		field string
 	}{
 		{"db port", map[string]string{"CONTEXT_DB_PORT": "not_a_port"}, "server.db_port"},
-		{"embed num_ctx", map[string]string{"CTX_EMBED_NUM_CTX": "abc"}, "embed.num_ctx"},
 		{"chat num_ctx", map[string]string{"CTX_CHAT_NUM_CTX": "abc"}, "chat.num_ctx"},
-		// The dream num_ctx case left with the tuple in β6 — CTX_DREAM_NUM_CTX
-		// is no longer read, so a malformed value has no parse path to be fatal
-		// on. Two strict num_ctx keys remain until β7/β8.
+		// The dream num_ctx case left with the tuple in β6 and the embed one
+		// with its own in β7 — CTX_DREAM_NUM_CTX / CTX_EMBED_NUM_CTX are no
+		// longer read, so a malformed value has no parse path to be fatal on.
+		// chat.num_ctx is the last strict num_ctx key and leaves in β8.
 		{"rate limit write", map[string]string{"CTX_RATE_LIMIT_WRITE": "abc"}, "query.rate_limit_write"},
 		{"rate limit read", map[string]string{"CTX_RATE_LIMIT_READ": "abc"}, "query.rate_limit_read"},
 		{"timezone", map[string]string{"CTX_TIMEZONE": "Nope/Nowhere"}, "query.timezone"},

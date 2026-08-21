@@ -10,9 +10,10 @@
 //   - secret_ref gate: sensitive keys are superseded backend-tuple keys —
 //     the 409 pool pointer fires before any format check, nothing persists
 //     (the living provider-key path is the pool row's api_key_ref)
-//   - X2 flush probe: PUT embed.host is 409-closed (no flush on a blocked
-//     write); the DELETE revert of a legacy override row still flushes,
-//     a non-coupled write does not (negative probe)
+//   - retired embed row (β7): a psql-shaped row on a cut embed key is dropped
+//     with the unknown-key WARN and flushes NOTHING — the settings-side
+//     embed-cache flush left with the tuple, an admitted live write is the
+//     negative probe next to it
 //   - NOTIFY handler: events.SettingsWriteHandler reloads the snapshot
 //
 // Run with:
@@ -21,10 +22,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -357,55 +360,76 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		}
 	})
 
-	t.Run("X2FlushProbe", func(t *testing.T) {
+	// RetiredEmbedRowNoFlush is the β7 gate of design/01 §7 W6 —
+	// "embed-bezogene Row-Änderung erzeugt WARN-Drop und KEINEN Flush" — and
+	// the successor of X2FlushProbe, which died with the settings-side flush.
+	//
+	// What X2FlushProbe asserted: a PUT on embed.host is 409-closed and flushes
+	// nothing, a non-coupled write flushes nothing, and the DELETE revert of a
+	// legacy override row DOES flush, because it moved the effective embed
+	// host. The last of those three is what β7 removed — the effective embed
+	// host no longer exists as a config value, so a row on the key cannot move
+	// anything and Reload has no flush left to owe. This test states the new
+	// end condition on the same real pipeline: SQL row on a cut key ⇒ dropped
+	// with a WARN ⇒ cache untouched, on a cache that was deliberately seeded
+	// first so an accidental flush would be visible as a count of 0.
+	t.Run("RetiredEmbedRowNoFlush", func(t *testing.T) {
 		seedCache()
 		if cacheCount() != 1 {
 			t.Fatalf("seed failed")
 		}
-		// Non-coupled write: cache must survive (negative probe).
+		// Negative probe kept from X2FlushProbe: a live, admitted write must
+		// not flush either — otherwise "no flush" would be provable by a
+		// reload path that simply never runs.
 		rec := api.do(t, http.MethodPut, "/api/settings/rerank.blend_weight", `{"value":0.6}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("PUT status = %d", rec.Code)
 		}
 		if cacheCount() != 1 {
-			t.Errorf("non-coupled write flushed the cache")
+			t.Errorf("admitted non-embed write flushed the cache")
 		}
-		// PUT embed.host is CLOSED since the Entflechtungs-Welle (superseded
-		// 409 fires before the coupled path) — and the blocked write must
-		// not flush anything either.
-		rec = api.do(t, http.MethodPut, "/api/settings/embed.host", `{"value":"http://flush-probe:9999"}`)
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("PUT embed.host status = %d, want 409 (superseded)", rec.Code)
+
+		// The row shape the field will actually meet: written around the API
+		// (psql / a pre-cut binary), then picked up by a reload.
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := store.UpsertSetting(ctx, tx, "embed.host", store.GlobalScope, json.RawMessage(`"http://legacy-override:9999"`), nil); err != nil {
+			t.Fatalf("upsert embed.host: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+
+		var logBuf bytes.Buffer
+		prevLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		reloadErr := settings.Reload(ctx, pool, cfgStore)
+		slog.SetDefault(prevLogger)
+		if reloadErr != nil {
+			t.Fatalf("reload: %v", reloadErr)
+		}
+
+		out := logBuf.String()
+		if !strings.Contains(out, "embed.host") || !strings.Contains(out, "unknown settings key") {
+			t.Errorf("log = %q, want the retired embed.host row dropped with the unknown-key WARN", out)
+		}
+		if strings.Contains(out, "flushed context_embed_cache") {
+			t.Errorf("log = %q, want no flush line — the settings-side flush left with the tuple", out)
 		}
 		if cacheCount() != 1 {
-			t.Errorf("blocked embed.host PUT flushed the cache")
+			t.Errorf("a dropped embed.host row flushed the cache — nothing on the settings side may still do that")
 		}
-		// The living coupled path is the DELETE revert of a legacy override
-		// row (allowed for superseded keys — cleanup): seed the row via SQL,
-		// then DELETE — the effective embed host changes, so the X2 flush
-		// obligation still fires.
-		{
-			tx, err := pool.Begin(ctx)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			if err := store.UpsertSetting(ctx, tx, "embed.host", store.GlobalScope, json.RawMessage(`"http://legacy-override:9999"`), nil); err != nil {
-				t.Fatalf("upsert embed.host: %v", err)
-			}
-			if err := tx.Commit(ctx); err != nil {
-				t.Fatalf("commit: %v", err)
-			}
-			if err := settings.Reload(ctx, pool, cfgStore); err != nil {
-				t.Fatalf("reload: %v", err)
-			}
-		}
-		seedCache()
+
+		// And the DELETE of that row — the one path that DID flush before β7 —
+		// is now an ordinary unknown-key 404 that leaves the cache alone.
 		rec = api.do(t, http.MethodDelete, "/api/settings/embed.host", "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("DELETE embed.host status = %d body=%s", rec.Code, rec.Body.String())
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("DELETE embed.host status = %d, want 404 (unknown key, E13)", rec.Code)
 		}
-		if cacheCount() != 0 {
-			t.Errorf("embed.host DELETE (revert) did not flush the cache (X2)")
+		if cacheCount() != 1 {
+			t.Errorf("DELETE on a retired key flushed the cache")
 		}
 	})
 

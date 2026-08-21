@@ -36,7 +36,6 @@ func group(t *testing.T, dump map[string]any, name string) map[string]any {
 func TestMaskSecretPerClass(t *testing.T) {
 	vals := map[string]string{
 		"chat.api_key":       longKey,
-		"embed.api_key":      shortKey,
 		"server.db_password": longKey, // long but human-class: still presence-only
 	}
 
@@ -46,15 +45,20 @@ func TestMaskSecretPerClass(t *testing.T) {
 	if got := group(t, boot, "chat")["api_key"]; got != wantFP {
 		t.Errorf("boot dump long fp key = %v, want %s", got, wantFP)
 	}
-	if got := group(t, boot, "embed")["api_key"]; got != "set" {
+	// The SHORT fp key rode on embed.api_key until β7 cut the tuple. chat.api_key
+	// is the last fp key in the registry, so the length classes separate over two
+	// dumps instead of two keys — the branch under test is maskSecret's fpMinLen
+	// threshold, which reads the VALUE, not the key.
+	short := dumpFor(t, map[string]string{"chat.api_key": shortKey}, SurfaceBootDump)
+	if got := group(t, short, "chat")["api_key"]; got != "set" {
 		t.Errorf("boot dump short fp key = %v, want presence-only 'set'", got)
 	}
 	if got := group(t, boot, "server")["db_password"]; got != "set" {
 		t.Errorf("boot dump db password = %v, want 'set' (never fingerprinted)", got)
 	}
-	// The unset-secret probe rode on dream.api_key until β6 cut the tuple. Both
-	// surviving fp keys carry a value in this fixture, so it moves onto a second
-	// dump built without one — the same statement about the same branch
+	// The unset-secret probe rode on dream.api_key until β6 cut the tuple. The
+	// surviving fp key carries a value in this fixture, so it moves onto a
+	// further dump built without one — the same statement about the same branch
 	// (maskSecret returns the empty string for an empty value), just no longer
 	// borrowing a key that is about to leave.
 	unset := dumpFor(t, map[string]string{}, SurfaceBootDump)
@@ -74,7 +78,6 @@ func TestMaskSecretPerClass(t *testing.T) {
 func TestDumpNeverLeaksSecretValues(t *testing.T) {
 	vals := map[string]string{
 		"chat.api_key":       longKey,
-		"embed.api_key":      longKey,
 		"server.db_password": shortKey,
 	}
 	for s, name := range map[Surface]string{SurfaceBootDump: "boot", SurfaceAPI: "api"} {
@@ -92,8 +95,7 @@ func TestDumpNeverLeaksSecretValues(t *testing.T) {
 func TestDumpRedactsHostURLs(t *testing.T) {
 	const secret = "hunter2-secret-marker"
 	dump := dumpFor(t, map[string]string{
-		"chat.host":  "http://admin:" + secret + "@chat.example:8089",
-		"embed.host": "http://admin:" + secret + "@bad host:8081",
+		"chat.host": "http://admin:" + secret + "@chat.example:8089",
 	}, SurfaceBootDump)
 
 	rendered := fmt.Sprintf("%v", dump)
@@ -103,7 +105,17 @@ func TestDumpRedactsHostURLs(t *testing.T) {
 	if got := group(t, dump, "chat")["host"]; got != "http://admin:xxxxx@chat.example:8089" {
 		t.Errorf("parseable userinfo host = %v, want stdlib-redacted form", got)
 	}
-	if got, ok := group(t, dump, "embed")["host"].(string); !ok || strings.Contains(got, "bad host") {
+	// The unparseable half rode on embed.host until β7 cut the tuple; chat.host
+	// is the last .host key, so the two url.Parse outcomes separate over two
+	// dumps instead of two keys. redactHostURL branches on the PARSE RESULT, not
+	// on which key reached it (the namespace convention picks the fields).
+	bad := dumpFor(t, map[string]string{
+		"chat.host": "http://admin:" + secret + "@bad host:8081",
+	}, SurfaceBootDump)
+	if strings.Contains(fmt.Sprintf("%v", bad), secret) {
+		t.Fatalf("dump leaks a userinfo password of an unparseable host: %v", bad)
+	}
+	if got, ok := group(t, bad, "chat")["host"].(string); !ok || strings.Contains(got, "bad host") {
 		t.Errorf("unparseable host must be withheld, got %v", got)
 	}
 	// Hosts without credentials render unchanged — the dump stays useful.

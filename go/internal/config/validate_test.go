@@ -61,15 +61,19 @@ func TestValidateTable(t *testing.T) {
 
 		// V4 — protocol typos fell silently onto the ollama wire path.
 		{"V4 chat typo", map[string]string{"chat.protocol": "olama"}, "chat.protocol", SeverityError},
-		// The case-sensitivity probe rode on dream.protocol until β6 cut the
-		// tuple; embed.protocol is the second and last remaining list entry, so
-		// it carries both halves of the loop's breadth now.
-		{"V4 embed case typo", map[string]string{"embed.protocol": "openAI"}, "embed.protocol", SeverityError},
+		// The case-sensitivity probe rode on dream.protocol until β6 and on
+		// embed.protocol until β7; chat.protocol is the LAST list entry, so it
+		// carries every half of the loop's breadth alone until β8 takes the
+		// loop itself. Sharing the key with the typo case above costs no
+		// coverage: the table asserts per-case input → field, and "olama" and
+		// "openAI" are different rejection reasons (unknown value vs. wrong
+		// case of a known one).
+		{"V4 chat case typo", map[string]string{"chat.protocol": "openAI"}, "chat.protocol", SeverityError},
 		// The V4 allowEmpty column left with dream_embed.protocol in β5 — it
 		// was the only protocol key that inherited when empty. Every remaining
 		// entry has a non-empty default, so an empty protocol is a typo now and
-		// the embed case below asserts exactly that.
-		{"V4 embed empty", map[string]string{"embed.protocol": ""}, "embed.protocol", SeverityError},
+		// this case asserts exactly that (it rode on embed.protocol until β7).
+		{"V4 chat empty", map[string]string{"chat.protocol": ""}, "chat.protocol", SeverityError},
 
 		// V5 — unknown prompt version: WARN + fall back to v5.2 (legacy init()).
 		{"V5 unknown", map[string]string{"query.prompt_version": "v7"}, "query.prompt_version", SeverityWarn},
@@ -81,13 +85,14 @@ func TestValidateTable(t *testing.T) {
 
 		// V7 — host URL hygiene.
 		{"V7 scheme", map[string]string{"chat.host": "ftp://chat.example"}, "chat.host", SeverityError},
-		{"V7 trailing slash", map[string]string{"embed.host": "http://embed.example/"}, "embed.host", SeverityError},
+		// The trailing-slash case rode on embed.host until β7 cut the tuple.
+		// chat.host is the last V7 entry, so from here every case in this block
+		// addresses it — the four inputs are four different rejection reasons
+		// of validateHostURL, which is what the table asserts per case.
+		{"V7 trailing slash", map[string]string{"chat.host": "http://chat.example/"}, "chat.host", SeverityError},
 		// β3 moved this case off rerank.host onto the fallback host, β4 moves it
 		// again — onto chat.host, the one V7 entry that outlives the list itself
-		// (design/01 §7: the remaining hosts leave in β7/β8, the loop and
-		// validateHostURL in β8). Sharing the key with the scheme case above
-		// costs no coverage: the table asserts per-case input → field, and the
-		// loop's breadth is carried by cases on both surviving hosts.
+		// (design/01 §7: the loop and validateHostURL leave in β8).
 		{"V7 userinfo", map[string]string{"chat.host": "http://user:hunter2@chat.example"}, "chat.host", SeverityError},
 		// The unparseable case rode on dream.host until β6; chat.host is the
 		// entry that outlives the list, and the withheld-value assertion it
@@ -96,12 +101,13 @@ func TestValidateTable(t *testing.T) {
 		{"V7 unparseable", map[string]string{"chat.host": "http://user:hunter2@bad host"}, "chat.host", SeverityError},
 		// The empty-host continue of the V7 loop. It rode on the one list entry
 		// whose DEFAULT was empty (chat_fallback.host until β4, dream_embed.host
-		// until β5); both survivors default to a real URL, so the case now
-		// states the same thing from the settings side: a present-but-empty
-		// override (lookupMap counts it as provided, what an F2 row can deliver
-		// and FromEnv cannot) still takes the skip and does not become a scheme
-		// error. That is the branch's live caller class after the cut.
-		{"V7 empty host skipped", map[string]string{"embed.host": ""}, "embed.host", -1},
+		// until β5), then on embed.host until β7; chat.host defaults to a real
+		// URL, so the case states the same thing from the settings side: a
+		// present-but-empty override (lookupMap counts it as provided, what an
+		// F2 row can deliver and FromEnv cannot) still takes the skip and does
+		// not become a scheme error. That is the branch's live caller class
+		// after the cut.
+		{"V7 empty host skipped", map[string]string{"chat.host": ""}, "chat.host", -1},
 
 		// V8 retired with rerank.host in β3 (design/01 §7 W2): "enabled without
 		// host" is a pool question now, and Validate does not see the pool.

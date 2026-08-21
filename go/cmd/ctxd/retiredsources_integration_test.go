@@ -39,8 +39,17 @@ import (
 // silence.
 //
 // Mutation probe: replace config.RetiredKeyNames() in warnRetiredSettingRowsBoot
-// with a single-element slice and the tenant-scope subtest goes red; drop the
-// coupled:embed-cache branch and the flush-hint subtest goes red.
+// with a single-element slice and the tenant-scope subtest goes red.
+//
+// The flush-hint subtest died in β7. It pinned that a row on a
+// coupled:embed-cache key ALSO named the price of the recommended DELETE — a
+// process-wide embed-cache flush for all tenants. Both carriers of that tag
+// (embed.host/protocol) left the registry with the tuple, and the flush they
+// referred to left with them: a DELETE on a cut key changes no effective value
+// and costs nothing, so the hint would have quoted a price that no longer
+// exists. Rows on the cut keys still get their ordinary line — the sweep reads
+// config.RetiredKeyNames(), not the registry, which the "rows are named across
+// every scope" subtest keeps asserting.
 func TestWarnRetiredSettingRowsBoot(t *testing.T) {
 	// Silence on a clean installation, and on rows for keys that survive the
 	// cut. The second half is the load-bearing one: a sweep that warned about
@@ -110,45 +119,36 @@ func TestWarnRetiredSettingRowsBoot(t *testing.T) {
 		}
 	})
 
-	// The recommended DELETE is not free on the embed-cache-coupled keys: it
-	// flushes the process-wide cache for all tenants. A warning that recommends
-	// an action while hiding its cost is worse than no warning.
-	t.Run("embed-cache coupled rows carry the flush cost", func(t *testing.T) {
+	// A row on a CUT key is still named. The sweep's key list is
+	// config.RetiredKeyNames(), which keeps all 29 names past the registry cut
+	// — this is the half that would silently disappear if the sweep were ever
+	// rewritten to walk the registry, and it is the class the field will
+	// mostly have (rows written before the cut).
+	t.Run("rows on cut keys are named too, without a flush cost", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		ctx := context.Background()
 
-		for _, row := range []struct{ key, value string }{
-			{"embed.host", `"http://legacy.example.com"`},
-			{"chat.model", `"qwen3.5:9b"`},
-		} {
-			if _, err := pool.Exec(ctx,
-				`INSERT INTO context_settings (key, scope, value) VALUES ($1, $2, $3::jsonb)`,
-				row.key, store.GlobalScope, row.value); err != nil {
-				t.Fatalf("insert %s: %v", row.key, err)
-			}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_settings (key, scope, value) VALUES ($1, $2, $3::jsonb)`,
+			"embed.host", store.GlobalScope, `"http://legacy.example.com"`); err != nil {
+			t.Fatalf("insert embed.host: %v", err)
 		}
 
 		buf := captureBootLog(t)
 		warnRetiredSettingRowsBoot(ctx, pool)
 
 		out := buf.String()
-		if n := strings.Count(out, "flushes the embed cache for ALL tenants"); n != 1 {
-			t.Errorf("log = %q, want the flush cost exactly once — on embed.host, not on chat.model", out)
+		if n := strings.Count(out, "deprecation=retired_settings_row"); n != 1 {
+			t.Fatalf("log = %q, want 1 retired_settings_row line for the cut key, got %d", out, n)
 		}
-		embedLine, chatLine := "", ""
-		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-			switch {
-			case strings.Contains(line, "key=embed.host"):
-				embedLine = line
-			case strings.Contains(line, "key=chat.model"):
-				chatLine = line
-			}
+		if !strings.Contains(out, "key=embed.host") {
+			t.Errorf("log = %q, want the cut key named", out)
 		}
-		if !strings.Contains(embedLine, "flushes the embed cache") {
-			t.Errorf("embed.host line = %q, want the flush cost", embedLine)
-		}
-		if strings.Contains(chatLine, "flushes the embed cache") {
-			t.Errorf("chat.model line = %q, must not claim an embed-cache flush", chatLine)
+		// The price the hint used to quote is gone with the settings-side
+		// flush; quoting it now would send an operator looking for a
+		// cold-cache spike that cannot happen.
+		if strings.Contains(out, "flushes the embed cache") {
+			t.Errorf("log = %q, must not claim an embed-cache flush — the settings-side flush left in β7", out)
 		}
 	})
 

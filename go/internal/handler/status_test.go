@@ -527,19 +527,23 @@ func probeEmbedPool(bs []backends.Backend, disabledBy map[string]string) (*Statu
 func probeArmedCfg() *config.Config {
 	return &config.Config{
 		Status: config.StatusConfig{ChannelProbeInterval: time.Minute},
-		// Deliberately divergent from every fixture's pool model: the probe must
-		// follow the serving chain, never this env echo (A04-W2 / design/04 §3.1).
-		Embed:     config.EmbedConfig{Model: "stale-env-model"},
+		// The deliberately divergent env echo (Embed.Model: "stale-env-model")
+		// left with the embed tuple in β7: there is no config field the probe
+		// could still follow instead of the serving chain, which is the
+		// structural end state of A04-W2 / design/04 §3.1. The pool-model
+		// assertions below are unchanged and now say it alone.
 		Scheduler: config.SchedulerConfig{ReadScopes: []string{"private"}},
 	}
 }
 
 // TestChannelProbeModelFromPool is the A04-W2 gate, half (a) (design/04 §4.6
 // Pin H): the probe model is Pool.PrimaryModel(RoleEmbed) — the model the embed
-// chain WOULD ask — and not cfg.Embed.Model. Against the pre-W2 stand this
-// FAILS: the probe was handed the config echo ("stale-env-model"), which on any
-// deployment with an edited embed row measures the WRONG model and silently
-// finds no cache row at all.
+// chain WOULD ask. Against the pre-W2 stand this FAILED: the probe was handed
+// the config echo ("stale-env-model"), which on any deployment with an edited
+// embed row measures the WRONG model and silently finds no cache row at all.
+// Since β7 the config alternative does not exist at all — the embed tuple left
+// the registry — so what the assertion states is chain priority, not a choice
+// between two sources.
 func TestChannelProbeModelFromPool(t *testing.T) {
 	bs := []backends.Backend{
 		{ID: "1", Name: "embed-head", Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed},
@@ -555,7 +559,7 @@ func TestChannelProbeModelFromPool(t *testing.T) {
 		t.Fatalf("channelProbeIfDue = %+v, want a measured row (no state stamp)", row)
 	}
 	if want := []string{"pool-embed"}; !reflect.DeepEqual(*seen, want) {
-		t.Fatalf("channelProbeRun models = %v, want %v (PrimaryModel(embed), NOT cfg.Embed.Model)", *seen, want)
+		t.Fatalf("channelProbeRun models = %v, want %v (PrimaryModel(embed): the head of the serving chain)", *seen, want)
 	}
 	if c.channelProbe.Load() != row || c.channelProbeAt.Load() == 0 {
 		t.Error("a measured row must be stored AND stamp the probe cadence")

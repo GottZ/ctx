@@ -112,14 +112,21 @@ const retiredMajor = "v5.0.0"
 // one it honours, and either direction makes the sweep lie about the
 // installation it is describing.
 //
-// Three texts, because three situations need three different actions:
+// Two texts, because two situations need two different actions:
 //   - the var is the effective source → remove it, the pool owns the value now;
 //   - a settings row shadows it → the var is already inert, but it must still
 //     go, and telling the operator to "configure backends" would describe work
 //     he has demonstrably done. Without this branch the double-configuration
 //     class (row AND env) would hear nothing at all in the window and would
-//     first learn of the problem after the break (design/06 §3.4 #1, §6.1);
-//   - CTX_EMBED_MODEL → see retiredEnvWarning.
+//     first learn of the problem after the break (design/06 §3.4 #1, §6.1).
+//
+// A third text existed until β7: CTX_EMBED_MODEL was the one var this sweep
+// must never call for removal, because a rollback to v4.37 or older reads it
+// again for the status channel probe. β7 cut embed.model out of the registry,
+// so the KeyByName lookup below misses it and the sweep says NOTHING about the
+// var — which satisfies the must-not by silence, and is what every other cut
+// key gets too. The instruction itself is now owed by the β13 tombstone sweep,
+// the static name list that will speak about cut keys again.
 func warnRetiredEnvVarsBoot(cfg *config.Config) {
 	for _, key := range config.RetiredKeyNames() {
 		info, ok := config.KeyByName(key)
@@ -129,7 +136,7 @@ func warnRetiredEnvVarsBoot(cfg *config.Config) {
 		if info.EnvVar == "" || os.Getenv(info.EnvVar) == "" {
 			continue
 		}
-		msg, shadowed := retiredEnvWarning(info.EnvVar, key, cfg.Source(key))
+		msg, shadowed := retiredEnvWarning(info.EnvVar, cfg.Source(key))
 		slog.Warn(msg,
 			"deprecation", deprecationRetiredEnv,
 			"key", key, "env", info.EnvVar, "shadowed", shadowed)
@@ -139,22 +146,21 @@ func warnRetiredEnvVarsBoot(cfg *config.Config) {
 // retiredEnvWarning picks the operator text for one still-set retired env var
 // and reports whether a settings row currently shadows it.
 //
-// CTX_EMBED_MODEL is the one var this sweep must NOT tell anybody to delete.
-// The design wrote its exception around the status channel probe, which α2
-// (E5) moved onto the pool; α13 then carried it on a second reason — the var
-// still fed the first-boot backend seed. β1 removed that seed, so THAT reason
-// is spent too. What survives is the rollback path (design/06 §3.3): it leads
-// to v4.37 or older, and THOSE binaries do read the var for the channel
-// probe. A uniform "remove the env var" would therefore be a degradation this
-// release caused itself, reached through the rollback door — the same failure
-// mode the design's exception was built to prevent.
-func retiredEnvWarning(envVar, key, source string) (string, bool) {
-	if key == "embed.model" {
-		return "settings: " + envVar + " is set — retired in " + retiredMajor +
-			"; the backend pool supplies the embed model now, but a rollback to v4.37 or older " +
-			"reads this var again for the status channel probe; " +
-			"keep it until you rule that rollback out", false
-	}
+// The CTX_EMBED_MODEL exception lived here until β7. It was the one var the
+// sweep must NOT tell anybody to delete: the design wrote the exception around
+// the status channel probe, which α2 (E5) moved onto the pool; α13 carried it
+// on a second reason (the var still fed the first-boot backend seed) which β1
+// spent by removing that seed; what survived was the rollback path (design/06
+// §3.3) — it leads to v4.37 or older, and THOSE binaries do read the var for
+// the channel probe, so a uniform "remove the env var" would be a degradation
+// this release caused itself, reached through the rollback door.
+//
+// β7 cut embed.model out of the registry, and the caller skips keys the
+// registry no longer knows — so this function is never reached with it and the
+// branch would have been unreachable code carrying a live instruction. The
+// must-not is now met by silence; carrying the KEEP-IT text forward is the β13
+// tombstone sweep's job, where cut keys get a voice again.
+func retiredEnvWarning(envVar, source string) (string, bool) {
 	if source == config.SourceSettings || source == config.SourceTenant {
 		return "settings: " + envVar + " is set but shadowed by a settings row — retired in " +
 			retiredMajor + "; remove the env var", true
@@ -176,11 +182,13 @@ func retiredEnvWarning(envVar, key, source string) (string, bool) {
 // (design/06 §3.3 step 2a, §5.3). The line is therefore an expiring
 // instruction, not a status report.
 //
-// The embed-cache hint rides along on the coupled:embed-cache keys because the
-// recommended DELETE has a price: it changes the effective value and flushes
-// the process-wide, scope-less embed cache for ALL tenants (reload.go:136-145).
-// A cold cache is a latency and provider-cost spike, not an error — but a WARN
-// that recommends an action must not hide the action's cost.
+// The embed-cache hint rode along on the coupled:embed-cache keys until β7,
+// because the recommended DELETE had a price: it changed the effective value
+// and flushed the process-wide, scope-less embed cache for ALL tenants. That
+// price is gone with the settings-side flush — a row on one of the five cut
+// embed keys reaches no config field any more, so its DELETE changes nothing
+// and costs nothing. Keeping the hint would have made this WARN quote a cost
+// that no longer exists, which is the same failure as hiding one.
 //
 // Never fatal, like every other boot advisory: a failed sweep degrades to one
 // line saying the sweep failed. A deprecation notice must not be the thing that
@@ -196,9 +204,6 @@ func warnRetiredSettingRowsBoot(ctx context.Context, pool *pgxpool.Pool) {
 		msg := "settings: a settings row still holds retired key " + ref.Key + " — retired in " + retiredMajor +
 			"; remove it with DELETE /api/settings/" + ref.Key + " while this version still answers (from " +
 			retiredMajor + " on the key answers 404 in every scope)"
-		if info, ok := config.KeyByName(ref.Key); ok && info.Mutability == "coupled:embed-cache" {
-			msg += "; that DELETE flushes the embed cache for ALL tenants — expect a cold-cache latency and provider-cost spike, not an error"
-		}
 		slog.Warn(msg,
 			"deprecation", deprecationRetiredRow,
 			"key", ref.Key, "scope", ref.Scope)

@@ -42,16 +42,14 @@ func (s *swapStore) SnapshotForTenant(context.Context, string) *config.Config { 
 // plants distinctive synthetic strings in every name-carrying field. The
 // needles derived from it must not surface in the public body.
 //
-// The dream role lost its config-side tuple with the β6 registry cut and is
-// covered from the pool instead: healthTestPool's dream row carries its own
-// host, model and api_key needles, so the third role keeps its full needle set
-// on the surface that actually serves it. The dreamHost parameter went with the
-// fields it filled.
-func healthTestConfig(embedHost, chatHost string) *config.Config {
+// The dream role lost its config-side tuple with the β6 registry cut and the
+// embed role with the β7 one; both are covered from the pool instead, where
+// healthTestPool's rows carry their own host, model and api_key needles, so
+// each role keeps its full needle set on the surface that actually serves it.
+// The dreamHost and embedHost parameters went with the fields they filled.
+// Chat is the last config-side tuple and leaves in β8.
+func healthTestConfig(chatHost string) *config.Config {
 	return &config.Config{
-		Embed: config.EmbedConfig{
-			Host: embedHost, Model: "needle-embed-model-g14", APIKey: "sk-needle-embed-0123456789abcdef",
-		},
 		Chat: config.ChatConfig{
 			Host: chatHost, Model: "needle-chat-model-g14", APIKey: "sk-needle-chat-0123456789abcdefg",
 		},
@@ -64,11 +62,10 @@ func healthTestConfig(embedHost, chatHost string) *config.Config {
 // API keys.
 func healthNeedles(cfg *config.Config) []string {
 	needles := []string{
-		cfg.Embed.Host, cfg.Chat.Host,
-		strings.TrimPrefix(cfg.Embed.Host, "http://"),
+		cfg.Chat.Host,
 		strings.TrimPrefix(cfg.Chat.Host, "http://"),
-		cfg.Embed.Model, cfg.Chat.Model,
-		cfg.Embed.APIKey, cfg.Chat.APIKey,
+		cfg.Chat.Model,
+		cfg.Chat.APIKey,
 	}
 	out := needles[:0]
 	for _, n := range needles {
@@ -83,15 +80,17 @@ func healthNeedles(cfg *config.Config) []string {
 // one backend per historical ping role, each with a distinctive name that
 // must never surface in the public body (extra needles).
 //
-// The dream row also carries a model and an api_key since β6. Those two values
-// used to reach the leak scan through cfg.Dream.Model/APIKey; with the tuple
-// gone the pool is where a dream model name and credential live, so that is
+// The dream row also carries a model and an api_key since β6, the embed row
+// since β7. Those values used to reach the leak scan through
+// cfg.Dream.Model/APIKey and cfg.Embed.Model/APIKey; with the tuples gone the
+// pool is where a model name and credential of those roles live, so that is
 // where the needles come from — the coverage stays, the vehicle follows the
 // data (design/01 §5.6).
 func healthTestPool(embedHost, chatHost, dreamHost string) *backends.Pool {
 	bp := backends.NewPool(nil, nil)
 	bp.SeedSnapshotForTest([]backends.Backend{
 		{ID: "e", Name: "needle-backend-embed", Host: embedHost, Enabled: true,
+			Model: "needle-embed-model-g14", APIKey: "sk-needle-embed-0123456789abcdef",
 			Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed}},
 		{ID: "c", Name: "needle-backend-chat", Host: chatHost, Enabled: true,
 			Trust: backends.TrustFull, Roles: []string{backends.RoleSynthesis}},
@@ -105,6 +104,7 @@ func healthTestPool(embedHost, chatHost, dreamHost string) *backends.Pool {
 var poolNameNeedles = []string{
 	"needle-backend-embed", "needle-backend-chat", "needle-backend-dream",
 	"needle-dream-model-g14", "sk-needle-dream-0123456789abcdef",
+	"needle-embed-model-g14", "sk-needle-embed-0123456789abcdef",
 }
 
 // closedPortHost reserves a loopback port and closes it again: connecting
@@ -194,7 +194,7 @@ func TestHealthShapeInvariant(t *testing.T) {
 		}))
 		t.Cleanup(backend.Close)
 
-		cfg := healthTestConfig(backend.URL, backend.URL)
+		cfg := healthTestConfig(backend.URL)
 		st := &swapStore{}
 		st.p.Store(cfg)
 
@@ -219,7 +219,7 @@ func TestHealthShapeInvariant(t *testing.T) {
 
 	t.Run("backends down", func(t *testing.T) {
 		down := closedPortHost(t)
-		cfg := healthTestConfig(down, down)
+		cfg := healthTestConfig(down)
 		st := &swapStore{}
 		st.p.Store(cfg)
 
@@ -269,7 +269,7 @@ func TestHealthBodyOmitsPoolAdvisory(t *testing.T) {
 	// state the advisory names. roleReachable sees zero candidates for every
 	// role, so the aggregate is unhealthy/503, exactly as design/02 §5.1 says.
 	st := &swapStore{}
-	st.p.Store(healthTestConfig("", ""))
+	st.p.Store(healthTestConfig(""))
 	empty := backends.NewPool(nil, nil)
 	empty.SeedSnapshotForTest(nil)
 
@@ -324,7 +324,7 @@ func TestHealthPingsSnapshotTargets(t *testing.T) {
 	t.Cleanup(srvB.Close)
 
 	st := &swapStore{}
-	st.p.Store(healthTestConfig(srvA.URL, srvA.URL))
+	st.p.Store(healthTestConfig(srvA.URL))
 	bp := healthTestPool(srvA.URL, srvA.URL, srvA.URL)
 	h := NewHealthHandler(pool, st, bp, nil)
 

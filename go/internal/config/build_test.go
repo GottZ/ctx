@@ -219,7 +219,6 @@ func TestBuildAdmissionRejections(t *testing.T) {
 	c, issues := Build([]Override{
 		{Key: "nope.nope", Value: "1"},                     // unknown key (Risk 7: code downgrade)
 		{Key: "dream.parallelism", Value: "4"},             // mut:"restart"
-		{Key: "embed.model", Value: "other"},               // mut:"coupled" (vector-space coupling)
 		{Key: "server.db_host", Value: "db.example"},       // mut:"restart" (DSN group, circular)
 		{Key: "rerank.blend_weight", Value: "kaputt"},      // unparseable float
 		{Key: "chat.num_ctx", Value: "not-a-number"},       // parse:"strict" field — DB stays WARN (W17)
@@ -232,7 +231,14 @@ func TestBuildAdmissionRejections(t *testing.T) {
 	}
 	warnFor(t, issues, "nope.nope", "unknown settings key")
 	warnFor(t, issues, "dream.parallelism", `mutability "restart"`)
-	warnFor(t, issues, "embed.model", `mutability "coupled"`)
+	// The mut:"coupled" case rode on embed.model, the tag's only carrier, until
+	// β7 cut the embed tuple. The class stays valid registry vocabulary
+	// (validMut) with nothing in it, and admitOverride treats every non-hot,
+	// non-coupled:embed-cache value identically — the two restart cases here
+	// exercise the same branch and quote the same message with a different %q.
+	// The COUPLED-SPECIFIC operator text (the re-embed hint) is a handler
+	// concern and stays pinned on a synthetic KeyInfo in
+	// handler/settings_test.go, which needs no registry carrier.
 	warnFor(t, issues, "server.db_host", `mutability "restart"`)
 	warnFor(t, issues, "rerank.blend_weight", "invalid number")
 	warnFor(t, issues, "chat.num_ctx", "invalid integer")

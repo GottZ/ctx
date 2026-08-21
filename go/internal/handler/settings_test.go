@@ -122,30 +122,39 @@ func TestHandlePut_RestartOnly409(t *testing.T) {
 	}
 }
 
-// embed.model is mut:"coupled" — a hot flip would change the vector space
-// without a re-embed migration. Must stay 409 even though embed.HOST became
-// overridable (coupled:embed-cache, X2).
-// Since the superseded gate (Entflechtungs-Welle Stufe 1) embed.model 409s
-// as SUPERSEDED before the coupled branch is reached — every coupled key is
-// also an f3 backend-tuple key, so the pool pointer is the actionable
-// message (a legacy override would be a dead seed either way). The coupled
-// branch itself stays pinned below via a synthetic KeyInfo, so a future
-// coupled-but-not-superseded key keeps its re-embed hint.
-func TestHandlePut_CoupledModel409(t *testing.T) {
-	rec := settingsRouterAs(t, adminAR(), http.MethodPut, "/api/settings/embed.model", `{"value":"other-model"}`)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 for superseded+coupled embed.model", rec.Code)
-	}
-	var resp map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	errMsg, _ := resp["error"].(string)
-	if !strings.Contains(errMsg, "backend pool") {
-		t.Errorf("error = %q, want backend-pool pointer (superseded wins over coupled)", errMsg)
-	}
-
+// TestMutabilityBlockCoupledBranches pins the two coupled arms of
+// mutabilityBlock on synthetic KeyInfos. Both classes lost their last registry
+// carriers with the embed tuple in β7 — embed.model was the only mut:"coupled"
+// key, embed.host/protocol the only coupled:embed-cache ones — so a
+// registry-backed vehicle no longer exists, while the branches themselves stay
+// live vocabulary (validMut, config/registry.go) that the next key taking
+// either tag will land in.
+//
+// The HTTP half this test used to carry (PUT /api/settings/embed.model ⇒ 409
+// with the backend-pool pointer, "superseded wins over coupled") went with the
+// key: after the cut no registry key is both superseded and coupled, so the
+// precedence has no natural subject. It is asserted synthetically instead —
+// the ORDER of the checks in mutabilityBlock is the statement, and that is
+// key-independent.
+func TestMutabilityBlockCoupledBranches(t *testing.T) {
 	msg, blocked := mutabilityBlock(config.KeyInfo{Key: "future.coupled", Mutability: "coupled"})
 	if !blocked || !strings.Contains(msg, "re-embed") {
 		t.Errorf("plain coupled branch = (%q, %v), want blocked with re-embed hint", msg, blocked)
+	}
+
+	// coupled:embed-cache is the ADMITTED arm: it must fall through unblocked,
+	// exactly like "hot".
+	if msg, blocked := mutabilityBlock(config.KeyInfo{
+		Key: "future.embedcache", Mutability: "coupled:embed-cache",
+	}); blocked {
+		t.Errorf("coupled:embed-cache branch = (%q, %v), want unblocked (X2 admission)", msg, blocked)
+	}
+
+	// Superseded is checked FIRST — a key carrying both gets the pool pointer,
+	// not the re-embed hint.
+	both := config.KeyInfo{Key: "future.both", Mutability: "coupled", Superseded: "f3:context_backends"}
+	if msg, blocked := mutabilityBlock(both); !blocked || !strings.Contains(msg, "backend pool") {
+		t.Errorf("superseded+coupled = (%q, %v), want the backend-pool pointer (superseded wins)", msg, blocked)
 	}
 }
 
@@ -267,23 +276,17 @@ func TestNormalizedJSON(t *testing.T) {
 	}
 }
 
-// The X2 admission change: coupled:embed-cache keys (embed.host) ARE
-// override-admissible, plain coupled (embed.model) stays rejected.
-func TestBuild_EmbedHostOverrideAdmitted(t *testing.T) {
-	resetRegistryEnv(t)
-	c, issues := config.Build([]config.Override{{Key: "embed.host", Value: "http://new-embed:8090"}}, nil)
-	if config.HasErrors(issues) {
-		t.Fatalf("build: %v", issues)
-	}
-	if c.Source("embed.host") != "settings" || c.Embed.Host != "http://new-embed:8090" {
-		t.Errorf("embed.host override not admitted: %q (source %q)", c.Embed.Host, c.Source("embed.host"))
-	}
-
-	c2, _ := config.Build([]config.Override{{Key: "embed.model", Value: "other"}}, nil)
-	if c2.Source("embed.model") == "settings" {
-		t.Errorf("embed.model (coupled) must NOT be override-admissible")
-	}
-}
+// TestBuild_EmbedHostOverrideAdmitted died with the embed tuple in β7. It
+// pinned the X2 admission change at config.Build level: coupled:embed-cache
+// keys (embed.host) ARE override-admissible, plain coupled (embed.model) is
+// not. Both classes are unoccupied after the cut, and config.Build resolves
+// against the REAL registry (entryByKey, build.go) — a synthetic key cannot
+// reach that path, so the statement has no vehicle left at this level; it is
+// design/01 §3's "Klassen bleiben gültig, unbesetzt". What is still asserted
+// synthetically is the handler-side arm of the same distinction, in
+// TestMutabilityBlockCoupledBranches above. The admission branch in
+// config/build.go itself is exercised by its restart cases
+// (config/build_test.go, TestBuildAdmissionRejections).
 
 // TestMutabilityBlockSuperseded pins the superseded gate (Entflechtungs-Welle
 // Stufe 1): a PUT on an f3:context_backends key must 409 with a pointer to
@@ -306,11 +309,10 @@ func TestMutabilityBlockSuperseded(t *testing.T) {
 		t.Errorf("block message must point at the backend pool, got %q", msg)
 	}
 
-	// embed.host is coupled:embed-cache AND superseded — superseded wins.
-	embed, _ := config.KeyByName("embed.host")
-	if _, blocked := mutabilityBlock(embed); !blocked {
-		t.Error("embed.host (superseded + coupled:embed-cache) must be write-blocked")
-	}
+	// The "embed.host is coupled:embed-cache AND superseded — superseded wins"
+	// case left with the tuple in β7; the precedence is now pinned on a
+	// synthetic KeyInfo (TestMutabilityBlockCoupledBranches), which needs no
+	// registry carrier.
 
 	// A live hot key stays writable.
 	hot, _ := config.KeyByName("dream.backoff_factor")

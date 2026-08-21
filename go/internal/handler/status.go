@@ -950,7 +950,8 @@ func (c *StatusCollector) channelProbeIfDue(ctx context.Context, cfg *config.Con
 	}
 	// A04-W2 (design/04 §3.1/§4.1): the probe model is the SERVING truth — the
 	// model of the backend the embed chain would actually ask — not the config
-	// echo of the first-boot seed (cfg.Embed.Model). context_embed_cache keys on
+	// echo of the first-boot seed (the embed tuple, whose last field left the
+	// registry in β7). context_embed_cache keys on
 	// (text_hash, model) and the pool chain is what writes it, so any deployment
 	// whose embed row was ever edited probed a stale model name and silently
 	// found nothing. PrimaryModel is serving-eligible-aware since A04-W1 (enabled

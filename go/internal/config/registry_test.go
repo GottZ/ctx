@@ -64,13 +64,12 @@ func fieldPath(rt reflect.Type, path []int) []string {
 // Delta 4, pinned by TestEmbedDimsRetired). A field joining or leaving this
 // set changes boot semantics and must fail here first.
 //
-// dream.num_ctx left the set with its tuple in β6 — not a reclassification but
-// a removal, so the fatal-parse semantics of the survivors are unchanged. The
-// remaining two num_ctx keys go the same way in β7 and β8.
+// dream.num_ctx left the set with its tuple in β6 and embed.num_ctx with its
+// own in β7 — not reclassifications but removals, so the fatal-parse semantics
+// of the survivors are unchanged. chat.num_ctx goes the same way in β8.
 func TestRegistryStrictSet(t *testing.T) {
 	want := map[string]bool{
 		"server.db_port":         true,
-		"embed.num_ctx":          true,
 		"chat.num_ctx":           true,
 		"query.rate_limit_write": true,
 		"query.rate_limit_read":  true,
@@ -207,7 +206,6 @@ func TestRegistrySecretSet(t *testing.T) {
 	want := map[string]string{
 		"server.db_password": "presence",
 		"chat.api_key":       "fp",
-		"embed.api_key":      "fp",
 	}
 	got := map[string]string{}
 	for _, e := range registry() {
@@ -237,10 +235,16 @@ func TestRegistrySecretSet(t *testing.T) {
 // keeps twelve live keys (enabled, the scheduler pair, language, the two
 // retrieval knobs, the six back-off keys), and dropping the case is what makes
 // the loop assert of each of them that it carries NO marker.
+//
+// embed left it in β7 the chat_fallback way: the group WAS its tuple, so
+// nothing of it survives to assert anything about. Note that "embed" is a
+// group name, not a prefix — embed_backfill.* and embed_migration.* are
+// separate groups, were never superseded, and the strings.Cut below has always
+// treated them as such.
 func TestRegistrySupersededSet(t *testing.T) {
 	for _, e := range registry() {
 		group, _, _ := strings.Cut(e.Key, ".")
-		isRoleTuple := group == "chat" || group == "embed"
+		isRoleTuple := group == "chat"
 		want := ""
 		if isRoleTuple {
 			want = "f3:context_backends"
@@ -302,11 +306,12 @@ func TestRegistryEnvNamespace(t *testing.T) {
 // tag-doc block; §3.3 lists a representative subset, this is the normative set.
 func TestRegistryTenancySet(t *testing.T) {
 	overridable := map[string]bool{
-		// the provider api_key secret_refs (TENANT-DECISION: per-tenant creds);
+		// the provider api_key secret_ref (TENANT-DECISION: per-tenant creds);
 		// rerank.api_key left the allowlist with the β3 tuple cut,
 		// chat_fallback.api_key with the β4 one, dream_embed.api_key with the β5
-		// one, dream.api_key with the β6 one
-		"chat.api_key": true, "embed.api_key": true,
+		// one, dream.api_key with the β6 one, embed.api_key with the β7 one —
+		// chat.api_key is the last of the six and goes in β8
+		"chat.api_key": true,
 		// the re-dream back-off curve (atomic per-tenant unit)
 		"dream.backoff_mode": true, "dream.backoff_factor": true, "dream.backoff_grace": true,
 		"dream.backoff_cap": true, "dream.backoff_min": true, "dream.backoff_inert_offset": true,
@@ -380,18 +385,20 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 65 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 65 (change it with intent)", got)
+	if got := len(overridable); got != 64 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 64 (change it with intent)", got)
 	}
 	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
 	// tenant override here would flush the process-wide embed cache / flip the
-	// server GPU switch. Two of the five were dream_embed.host/protocol; they
-	// left the registry in β5, and an unregistered name says nothing about this
-	// invariant any more — IsGlobalOnly answers true for every unknown key, so
-	// keeping them would have turned two real assertions into a second copy of
-	// the fail-closed case below. Their absence is retired_test.go's ratchet.
-	for _, k := range []string{"gaming.active", "embed.host", "embed.protocol",
-		"nonexistent.key"} {
+	// server GPU switch. Four of the five were the embed-cache-coupled pairs:
+	// dream_embed.host/protocol left the registry in β5, embed.host/protocol in
+	// β7. An unregistered name says nothing about this invariant any more —
+	// IsGlobalOnly answers true for every unknown key, so keeping them would
+	// have turned real assertions into extra copies of the fail-closed case
+	// below. Their absence is retired_test.go's ratchet. gaming.active is the
+	// one NAMED global-only key that survives the cut train, and it carries the
+	// positive half of the statement alone from here on.
+	for _, k := range []string{"gaming.active", "nonexistent.key"} {
 		if !IsGlobalOnly(k) {
 			t.Errorf("%s must be global-only", k)
 		}

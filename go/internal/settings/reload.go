@@ -30,7 +30,6 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
-	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -103,11 +102,14 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, envCfg *config.Config, e
 // settings/secrets handlers (W5/W6) and the NOTIFY listener (G16). On any
 // error the previous snapshot stays active — the WARN names what failed.
 //
-// X2 (G16): when the swap changes an embed-cache-coupled value (effective
-// embed host or protocol — including a DELETE reverting to env and a psql edit
-// arriving via NOTIFY), the embed cache is flushed AFTER the swap: post-swap
-// only the new backend fills it, whereas a pre-swap flush would let in-flight
-// requests on the old snapshot repollute it for good.
+// X2 (G16) ended here in β7. Reload used to flush context_embed_cache after a
+// swap that moved the effective embed host or protocol; both values left the
+// registry with the embed tuple, so no settings row can reach the embed
+// topology any more — a row on one of the five cut keys is dropped as unknown
+// (build.go admitOverride) and changes nothing to flush over. The obligation
+// itself did not disappear, it moved to where an embed backend is now chosen:
+// the pool write path fingerprints (host, protocol) over the serving-eligible
+// embed rows and flushes on change (α5, events/listener.go coupledSet).
 func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 	var rows []store.SettingOverride
 	if Disabled() {
@@ -124,7 +126,6 @@ func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 	cfg, issues := BuildFromRows(ctx, pool, rows, []string{store.GlobalScope})
 	logIssues(issues)
 
-	prev := st.Snapshot() //nolint:forbidigo // MT 06 OWNER: the _global reload reads the pre-swap base generation to diff embed-cache-coupled values (X2/G16); it builds and Replaces the _global base, not a tenant generation.
 	if err := st.Replace(cfg); err != nil {
 		// Replace re-validates; errors here mean an env-level invariant broke
 		// (unreachable while env is immutable per process, but never silent).
@@ -132,35 +133,7 @@ func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 		return fmt.Errorf("settings: reload: %w", err)
 	}
 	logApplied(cfg, rows)
-
-	if EmbedCacheCoupledChanged(prev, cfg) {
-		n, err := embedcache.Flush(ctx, pool)
-		if err != nil {
-			// The new snapshot is live either way; a failed flush leaves stale
-			// vectors serving (R5) — loud, and the next coupled write retries.
-			slog.Error("settings: embed-cache flush after coupled change failed — stale vectors may serve", "error", err)
-			return fmt.Errorf("settings: reload: embed cache flush: %w", err)
-		}
-		slog.Info("settings: embed-cache-coupled value changed — flushed context_embed_cache", "rows", n)
-	}
 	return nil
-}
-
-// EmbedCacheCoupledChanged reports whether the EFFECTIVE embed-cache-coupled
-// values differ between two generations: the host/protocol of the query-path
-// embed tuple. Model changes are deliberately NOT covered — the cache keys on
-// model, and model stays mut:"coupled" (re-embed migration, not overridable).
-//
-// The dream half left with the dream_embed tuple in β5: it was the same two
-// values resolved through the dream_embed→embed inheritance, so with the tuple
-// gone it could only ever have repeated the embed comparison. Settings-side
-// this is the whole coupled surface now; a pool row that moves an embed-role
-// backend to another host is fingerprinted and flushed on the pool side
-// (events/listener.go coupledSet, α5) — settings and pool guard one cache from
-// two ends, and neither statement is the other's.
-func EmbedCacheCoupledChanged(a, b *config.Config) bool {
-	ae, be := a.EmbedBackend(), b.EmbedBackend()
-	return ae.Host != be.Host || ae.Protocol != be.Protocol
 }
 
 // loadOverrideRows reads the global-scope override rows.
@@ -306,9 +279,11 @@ func poolResolver(ctx context.Context, pool *pgxpool.Pool) (config.SecretResolve
 //     higher-priority tenant row win the precedence merge and then get dropped,
 //     so the key would lose its legitimate _global value (a regression). Gating
 //     first leaves only the _global row on a global-only key, which wins
-//     correctly. Fail-closed against a tenant flipping a server-wide switch,
-//     most critically the embed-cache-coupled keys whose flush nukes the
-//     process-wide shared cache for ALL tenants (R-SCALE6).
+//     correctly. Fail-closed against a tenant flipping a server-wide switch —
+//     the class the R-SCALE6 example was written around (the embed-cache-coupled
+//     keys, whose flush nuked the process-wide shared cache for ALL tenants)
+//     left the registry in β7, but the gate is key-agnostic and keeps every
+//     NAMED global-only key, gaming.active among them, out of tenant reach.
 //  2. precedence merge of the survivors, deduped BY KEY, Go-materialized: per
 //     key the row with the highest scopePriority position wins, INDEPENDENT of
 //     row order (a scope absent from the slice ranks lowest, defensively). The

@@ -147,10 +147,12 @@ func renderHours(h Hours) string {
 // skips groups Redacted did not produce, so a stale name would be invisible
 // rather than wrong — and invisible dead ordering is what this list must not
 // accumulate over the cut train (design/01 §3, "dumpGroupOrder auf 6 Gruppen").
-// chat_fallback left with its tuple in β4, dream_embed in β5. "dream" STAYS:
-// β6 cut the group's backend tuple, not the group — twelve keys (enabled, the
-// scheduler pair, language, the two retrieval knobs, the six back-off keys)
-// still render under it.
+// chat_fallback left with its tuple in β4, dream_embed in β5, embed in β7 (the
+// group was nothing BUT its tuple — embed_backfill and embed_migration are
+// their own groups and are untouched). "dream" STAYS: β6 cut the group's
+// backend tuple, not the group — twelve keys (enabled, the scheduler pair,
+// language, the two retrieval knobs, the six back-off keys) still render
+// under it.
 //
 // The list is a CURATED SUBSET of the rendered groups, not a cover: Redacted
 // produces every registry group, this names the ones the boot record carries.
@@ -158,7 +160,7 @@ func renderHours(h Hours) string {
 // of TestBootDumpArgsShape's comparison, so only the stale-name direction is
 // gated. Prune a name here solely when its LAST key left the registry.
 var dumpGroupOrder = []string{
-	"server", "chat", "embed", "dream",
+	"server", "chat", "dream",
 	"rerank", "graph", "query", "scheduler",
 }
 
