@@ -570,13 +570,23 @@ func (p *Pool) RoleConfigured(role string) bool {
 // the disabled one. Trust and cooldown stay out on purpose — trust depends on
 // the caller's sensitivity (not known here) and cooldown only reorders the
 // chain, it never removes a backend.
+//
+// The answer describes the SERVER-GLOBAL serving truth: only shared backends
+// (Scope == GlobalScope, plus the test-only unscoped row) are candidates, and
+// the qualification runs through the same VisibleTo predicate Chain uses as its
+// egress gate — here for a caller without a tenant, which is what a global
+// surface is. Without that term one tenant-private row of higher priority
+// steered every server-global consumer: the admin channel probe would measure a
+// model no global caller can reach, and a query response could echo a foreign
+// tenant's model name. A tenant-aware variant would need the tenant as a
+// parameter and is deliberately NOT this function.
 func (p *Pool) PrimaryModel(role string) string {
 	snap := p.snap.Load()
 	best := -1
 	model := ""
 	for i := range snap.backends {
 		b := &snap.backends[i]
-		if !b.Enabled || !b.HasRole(role) || snap.disabledBy[b.ID] != "" {
+		if !VisibleTo(b.Scope, "") || !b.Enabled || !b.HasRole(role) || snap.disabledBy[b.ID] != "" {
 			continue
 		}
 		if b.Priority > best {

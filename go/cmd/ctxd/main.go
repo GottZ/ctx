@@ -73,6 +73,41 @@ func advisePoolEmptyBoot(p *backends.Pool) {
 		"advisory", backends.AdvisorySubjectPool, "state", backends.AdvisoryStateEmpty)
 }
 
+// bootLoadBackendPool is the boot seam around the initial pool read: the load
+// itself, and the two steps that are only MEANINGFUL on a pool that was
+// actually read — the empty-pool advisory and the embed-cache coupled
+// fingerprint reconcile. Both run on the SUCCESS path only.
+//
+// A failed reload keeps the snapshot the pool had (pool.go) — at boot that is
+// the empty NewPool snapshot, which is a state nobody observed rather than a
+// state anybody configured. Running the two steps on it anyway told the
+// operator "pool is empty" about a pool that was merely unreadable, and — the
+// expensive half — handed the reconcile the EMPTY coupled set, a perfectly
+// legitimate fingerprint value: mismatch against the stand on record, full
+// context_embed_cache flush, and the empty set stamped as the new truth. The
+// next healthy boot then mismatches against THAT stamp and flushes a second
+// time. Two cold-cache spikes out of a read that never happened.
+//
+// The listener guards exactly this (listener.go: a failed reload leaves
+// coupledPrev untouched, so no diff is taken); the boot path now does too. The
+// failure stays non-fatal and unstamped, so the next boot — or the next
+// coupled NOTIFY — retries against an un-advanced stand.
+//
+// reload and reconcile are parameters so the seam is testable without a
+// database: the interesting states are "reload failed" and "reload succeeded",
+// and both are unreachable through a live pgxpool in a unit test.
+func bootLoadBackendPool(ctx context.Context, p *backends.Pool, reload, reconcile func(context.Context) error) {
+	if err := reload(ctx); err != nil {
+		slog.Error("backends: initial reload failed — pool starts empty", "error", err)
+		return
+	}
+	// A02-W4 (design/02 §4.1c): name the empty pool in the boot log.
+	advisePoolEmptyBoot(p)
+	if err := reconcile(ctx); err != nil {
+		slog.Error("backends: embed-cache coupled fingerprint reconcile failed — stale vectors may serve until the next boot or coupled write", "error", err)
+	}
+}
+
 // Deprecation labels of the A06-A1 boot sweep, in the vocabulary A02-W5 opened
 // at the dying seed path (`deprecation=env_backend_seed`): one attribute names
 // WHICH deprecated surface a line is about, so an operator can grep the whole
@@ -435,24 +470,19 @@ func main() {
 	if _, err := backends.Bootstrap(ctx, pool, backendBootstrapInput(cfgStore.Snapshot()), backendSeedDefaults()); err != nil { //nolint:forbidigo // MT 06 BLIND: boot-time backend pool bootstrap reads the _global generation, no tenant exists at boot.
 		slog.Error("backends: bootstrap failed", "error", err)
 	}
-	if err := backendPool.Reload(ctx); err != nil {
-		slog.Error("backends: initial reload failed — pool starts empty", "error", err)
-	}
-	// A02-W4 (design/02 §4.1c): name the empty pool in the boot log.
-	advisePoolEmptyBoot(backendPool)
-	// A04-W4 (design/04 §3.2b): the boot half of the embed-cache coupled diff.
-	// The listener's diff rides the NOTIFY funnel and therefore only sees edits
-	// made while this process runs; a pool row or disable profile edited by psql
-	// with ctxd stopped leaves no notification behind, and the listener baseline
-	// is then taken FROM that edited pool. This compares the loaded pool against
-	// the fingerprint on record (migration 132) and flushes context_embed_cache
-	// if they differ. Runs here — after the reload, before the scheduler builds
-	// the listener — so stamp and in-memory baseline describe one topology.
-	// Non-fatal like the two steps above; nothing is stamped on a failing path,
-	// so the next boot retries.
-	if err := events.ReconcileCoupledFingerprint(ctx, pool, backendPool); err != nil {
-		slog.Error("backends: embed-cache coupled fingerprint reconcile failed — stale vectors may serve until the next boot or coupled write", "error", err)
-	}
+	// A04-W4 (design/04 §3.2b): the reconcile below is the boot half of the
+	// embed-cache coupled diff. The listener's diff rides the NOTIFY funnel and
+	// therefore only sees edits made while this process runs; a pool row or
+	// disable profile edited by psql with ctxd stopped leaves no notification
+	// behind, and the listener baseline is then taken FROM that edited pool. It
+	// compares the loaded pool against the fingerprint on record (migration 132)
+	// and flushes context_embed_cache if they differ. Runs here — after the
+	// reload, before the scheduler builds the listener — so stamp and in-memory
+	// baseline describe one topology. Non-fatal like the two steps above;
+	// nothing is stamped on a failing path, so the next boot retries.
+	bootLoadBackendPool(ctx, backendPool, backendPool.Reload, func(ctx context.Context) error {
+		return events.ReconcileCoupledFingerprint(ctx, pool, backendPool)
+	})
 
 	// Vorhaben E (wave MW2, carrying the W1 construction leftover — design/01
 	// §7 W1: "Konstruktion in cmd/ctxd/main.go, Reload-Anbindung"): the ONE

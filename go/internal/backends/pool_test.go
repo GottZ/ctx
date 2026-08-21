@@ -468,3 +468,54 @@ func TestPrimaryModelProfileAware(t *testing.T) {
 		t.Fatalf("PrimaryModel(synthesis) = %q, want the empty string (no synthesis role in fixture)", got)
 	}
 }
+
+// TestPrimaryModelGlobalOnly is the scope half of the same gate: PrimaryModel
+// answers for the SERVER-GLOBAL serving truth, so a tenant-private row is never
+// a candidate — not even at the top of the priority order.
+//
+// Both consumers are global surfaces. The admin channel probe (handler
+// status.go, A04-W2) measures context_embed_cache under the model name the
+// GLOBAL embed chain writes; steered by a tenant's model name it probes a key
+// that surface never writes and reports a miss on a healthy cache. The query
+// response model field (handler query.go) would echo one tenant's model name
+// into every other tenant's answer — a topology disclosure across the very
+// boundary Chain's egress gate exists for. Before A01/A02 the value came from
+// cfg.Embed.Model, which was global by construction; the pool move inherited
+// the priority order without inheriting the scope filter.
+//
+// Mutation probe: drop the VisibleTo term from PrimaryModel and both halves go
+// red — the tenant head wins the first, the tenant-only pool answers the second.
+func TestPrimaryModelGlobalOnly(t *testing.T) {
+	// A tenant row outranks every shared row: priority is a within-scope
+	// ordering, and nothing stops a tenant from configuring the highest one.
+	mixed := []Backend{
+		{ID: "1", Name: "embed-shared", Scope: GlobalScope, Trust: TrustFull,
+			Roles: []string{RoleEmbed}, Priority: 50, Enabled: true, Model: "shared-embed"},
+		{ID: "2", Name: "embed-tenant", Scope: "tenantA", Trust: TrustFull,
+			Roles: []string{RoleEmbed}, Priority: 900, Enabled: true, Model: "tenant-embed"},
+	}
+	p := seedPool(mixed)
+	if got := p.PrimaryModel(RoleEmbed); got != "shared-embed" {
+		t.Fatalf("PrimaryModel = %q, want %q — a tenant-private row steered a server-global surface", got, "shared-embed")
+	}
+	// Cross-check against the serving truth for a caller without a tenant: the
+	// chain drops the tenant row on the same predicate.
+	if names := chainNames(t, p, RoleEmbed, SensCredentials); len(names) != 1 || names[0] != "embed-shared" {
+		t.Fatalf("untenanted chain = %v, want only the shared backend — PrimaryModel must track it", names)
+	}
+
+	// Only tenant-private embed rows exist: globally, nothing serves. The empty
+	// string is the honest answer and both consumers already handle it (the probe
+	// stamps its explicit "no embed backend" state instead of measuring).
+	if got := seedPool(mixed[1:]).PrimaryModel(RoleEmbed); got != "" {
+		t.Fatalf("PrimaryModel = %q, want the empty string (no shared embed backend)", got)
+	}
+
+	// The test-seeded unscoped row (Scope == "", pre-062 shape; the DB enforces
+	// NOT NULL DEFAULT '_global') stays a candidate — VisibleTo has treated it as
+	// shared since 04-W2, and PrimaryModel must not invent a second reading of
+	// one column.
+	if got := seedPool(primaryModelFixture()).PrimaryModel(RoleEmbed); got != "head-embed" {
+		t.Fatalf("PrimaryModel = %q, want %q — an unscoped row is shared, exactly as VisibleTo reads it", got, "head-embed")
+	}
+}
