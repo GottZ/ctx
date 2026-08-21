@@ -18,7 +18,9 @@ function catalog(): SettingView[] {
     view({ key: 'rerank.max_docs', type: 'int', value: 50 }),
     view({ key: 'graph.enabled', type: 'bool', value: true }),
     view({ key: 'server.db', type: 'string', value: 'ctx', mutability: 'restart' }),
-    view({ key: 'chat.api_key', type: 'string', value: '(set via env)', sensitive: true }),
+    // Vehicle swap (β10): chat.api_key left the registry with the chat
+    // tuple; server.db_password is the sensitive key the cut left standing.
+    view({ key: 'server.db_password', type: 'string', value: 'set', sensitive: true }),
   ]
 }
 
@@ -162,13 +164,13 @@ describe('SettingsModel', () => {
     const api = stubApi()
     const m = new SettingsModel(api)
     m.load(catalog())
-    expect(m.drafts['chat.api_key']).toBe('')
-    expect(m.isDirty('chat.api_key')).toBe(false)
+    expect(m.drafts['server.db_password']).toBe('')
+    expect(m.isDirty('server.db_password')).toBe(false)
 
-    m.drafts['chat.api_key'] = 'openrouter-main'
-    await m.saveGroup('chat')
+    m.drafts['server.db_password'] = 'openrouter-main'
+    await m.saveGroup('server')
 
-    expect(api.calls).toEqual([{ kind: 'put', key: 'chat.api_key', value: 'openrouter-main' }])
+    expect(api.calls).toEqual([{ kind: 'put', key: 'server.db_password', value: 'openrouter-main' }])
   })
 
   it('mirrors the cross-field rules over drafted values', () => {

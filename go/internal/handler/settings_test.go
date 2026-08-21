@@ -109,6 +109,148 @@ func TestHandlePut_UnknownKey404(t *testing.T) {
 	}
 }
 
+// unknownKeyControl is the typo that never existed and never will: the
+// reference answer of the unknownKey path. The 404 contract of the retirement
+// is stated as an EQUALITY against it, not as a hand-copied literal — a hint
+// field, a distinct wording or a different status on the retired names would
+// break the equality even if someone updated the literal alongside.
+const unknownKeyControl = "nope.key"
+
+// TestRetiredKeysAnswer404LikeAnyUnknownKey is the E13 contract pin of the
+// whole retirement: GET, PUT and DELETE on each of the 29 keys whose home moved
+// to the F3 backend pool answer EXACTLY what the same verb answers for a typo —
+// same status, same headers, same body byte for byte, only the key name
+// differs. Per DECISIONS.md E13 there is deliberately no tombstone status, no
+// hint field and nothing else on the wire that would let a client tell a
+// retired key from a misspelled one; the move targets are communicated through
+// the BREAKING tag, the runbook, the README upgrade hop and the delete
+// migration's notice instead (config/retired.go).
+//
+// The table is driven by config.RetiredKeyNames() rather than by a local list,
+// so the pin covers the retirement instead of a sample of it: the collision pin
+// in config/retired_test.go already guarantees Registry ∩ retired = ∅, and this
+// one turns that emptiness into an observable HTTP contract.
+//
+// Byte equality is expressible as a plain string substitution because none of
+// the key names contains a character that JSON escapes — the substitution is
+// verified against the control answer itself before the loop runs.
+//
+// The equality is RELATIVE (retired key vs. typo) and is therefore blind by
+// construction to a change that hits both — so the absolute half of E13 is
+// asserted separately on the control answer: the envelope carries exactly
+// success and error, nothing that could be a tombstone or a move hint.
+//
+// Negative probes (2026-08-21): (1) unknownKey was given a "moved_to" field for
+// the retired names only — all 87 subtests red on the body comparison while the
+// status stayed 404, i.e. the pin binds the BODY, not just the code. (2) The
+// same field added UNCONDITIONALLY — the relative comparison stayed green (both
+// sides moved), the envelope-shape assertion went red. (3) The early
+// `if !ok { h.unknownKey; return }` in HandlePut was replaced by a fall through
+// to mutabilityBlock — the PUT half went red on status. (4) The control key was
+// pointed at a live key (rerank.enabled) — the guard below fires before the
+// loop, so the pin cannot silently degrade into comparing two live answers.
+func TestRetiredKeysAnswer404LikeAnyUnknownKey(t *testing.T) {
+	retired := config.RetiredKeyNames()
+	if len(retired) != 29 {
+		t.Fatalf("RetiredKeyNames() = %d names, want 29 — the retirement changed size, revisit this contract", len(retired))
+	}
+	verbs := []struct {
+		name   string
+		method string
+		body   string
+	}{
+		{"GET", http.MethodGet, ""},
+		{"PUT", http.MethodPut, `{"value":"x"}`},
+		{"DELETE", http.MethodDelete, ""},
+	}
+	for _, v := range verbs {
+		control := settingsRouterAs(t, adminAR(), v.method, "/api/settings/"+unknownKeyControl, v.body)
+		if control.Code != http.StatusNotFound {
+			t.Fatalf("%s control %q = %d, want 404 — the reference answer is not an unknown-key answer", v.name, unknownKeyControl, control.Code)
+		}
+		if _, live := config.KeyByName(unknownKeyControl); live {
+			t.Fatalf("control key %q is registered — it must be a typo, not a key", unknownKeyControl)
+		}
+		if !strings.Contains(control.Body.String(), unknownKeyControl) {
+			t.Fatalf("%s control body %q does not name the key — the substitution below would compare nothing", v.name, control.Body.String())
+		}
+		var envelope map[string]any
+		if err := json.Unmarshal(control.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("%s control body %q: %v", v.name, control.Body.String(), err)
+		}
+		if len(envelope) != 2 || envelope["success"] != false {
+			t.Errorf("%s unknown-key envelope = %v, want exactly {success:false, error:…} — E13 allows no tombstone or move hint on the wire", v.name, envelope)
+		}
+		if _, ok := envelope["error"].(string); !ok {
+			t.Errorf("%s unknown-key envelope has no error string: %v", v.name, envelope)
+		}
+		for _, key := range retired {
+			t.Run(v.name+"/"+key, func(t *testing.T) {
+				rec := settingsRouterAs(t, adminAR(), v.method, "/api/settings/"+key, v.body)
+				if rec.Code != control.Code {
+					t.Fatalf("status = %d, want %d (the ordinary unknown-key answer, E13)", rec.Code, control.Code)
+				}
+				want := strings.ReplaceAll(control.Body.String(), unknownKeyControl, key)
+				if got := rec.Body.String(); got != want {
+					t.Errorf("body = %s, want %s — a retired key must be indistinguishable from a typo on the wire", got, want)
+				}
+				if got, wantCT := rec.Header().Get("Content-Type"), control.Header().Get("Content-Type"); got != wantCT {
+					t.Errorf("Content-Type = %q, want %q", got, wantCT)
+				}
+			})
+		}
+	}
+}
+
+// TestLiveKeysNeverTakeTheUnknownKeyPath is the contrast arm of the pin above:
+// the unknown-key answer must stay confined to keys that are not in the
+// registry. Every live key is fired with a non-scalar value, which every branch
+// of HandlePut rejects BEFORE any DB access (409 for restart/coupled keys, 422
+// for the rest) — so the whole registry can be swept through the nil-pool
+// harness in one pass.
+//
+// Without this arm a widened unknown path (say: unknownKey on every key whose
+// value fails to resolve) would satisfy the retirement pin perfectly while
+// swallowing the live surface.
+//
+// Negative probe (2026-08-21): KeyByName was made to report !ok for
+// "rerank.enabled" while Keys() still listed it — the subtest for that key went
+// red on both the status and the body assertion.
+func TestLiveKeysNeverTakeTheUnknownKeyPath(t *testing.T) {
+	control := settingsRouterAs(t, adminAR(), http.MethodPut, "/api/settings/"+unknownKeyControl, `{"value":[1,2]}`)
+	if control.Code != http.StatusNotFound {
+		t.Fatalf("control = %d, want 404", control.Code)
+	}
+	unknownMarker := strings.SplitN(control.Body.String(), unknownKeyControl, 2)[0]
+	if len(unknownMarker) < 16 {
+		t.Fatalf("unknown-key body %q has no prefix to recognise it by", control.Body.String())
+	}
+	keys := config.Keys()
+	if len(keys) < 100 {
+		t.Fatalf("registry has %d keys — too few to be the live surface, the sweep would prove nothing", len(keys))
+	}
+	// Three named keys on top of the registry sweep: if a live key were retired
+	// by accident it would vanish from Keys() and the sweep alone would not
+	// notice. These three carry the classes the retirement emptied (hot,
+	// tenant-overridable, secret) and must stay live for it.
+	for _, key := range []string{"dream.language", "rerank.enabled", "server.db_password"} {
+		if _, ok := config.KeyByName(key); !ok {
+			t.Errorf("%s is not registered — the retirement took a live key with it", key)
+		}
+	}
+	for _, info := range keys {
+		t.Run(info.Key, func(t *testing.T) {
+			rec := settingsRouterAs(t, adminAR(), http.MethodPut, "/api/settings/"+info.Key, `{"value":[1,2]}`)
+			if rec.Code == http.StatusNotFound {
+				t.Fatalf("status = 404 — a registered key must never take the unknown-key path")
+			}
+			if strings.Contains(rec.Body.String(), unknownMarker) {
+				t.Errorf("body = %s, want anything but the unknown-key answer", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandlePut_RestartOnly409(t *testing.T) {
 	rec := settingsRouterAs(t, adminAR(), http.MethodPut, "/api/settings/dream.parallelism", `{"value":4}`)
 	if rec.Code != http.StatusConflict {

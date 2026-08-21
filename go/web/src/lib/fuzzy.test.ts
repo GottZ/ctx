@@ -81,7 +81,10 @@ describe('fuzzyMatch — multi-token AND across fields', () => {
 
   it('weights the key above the description on equal-quality hits', () => {
     const a = fuzzyMatch('dream', [
-      { id: 'key', text: 'dream.think', weight: 1 },
+      // Vehicle swap (β10): dream.think left the registry with the dream
+      // tuple. dream.language carries the same shape — the token has to land
+      // equally well in both fields, so only the weight can order them.
+      { id: 'key', text: 'dream.language', weight: 1 },
       { id: 'description', text: 'dream toggle', weight: 0.7 },
     ])
     expect(a?.hits[0].field).toBe('key')

@@ -28,6 +28,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -379,6 +380,79 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		}
 		if got := cfgStore.Snapshot().Digest.Mode; got == rowValue {
 			t.Errorf("snapshot still carries the deleted row value %q", got)
+		}
+	})
+
+	// RetiredKeys404OverTheRealStack is the E13 contract on the mounted stack:
+	// the unit pin (settings_test.go, TestRetiredKeysAnswer404LikeAnyUnknownKey)
+	// states the wire equality against a typo on a nil pool; this one states the
+	// SIDE EFFECTS of that answer against a live database — a retired key writes
+	// no context_settings row, no audit row, and its DELETE reports nothing it
+	// might have removed.
+	//
+	// It is the successor of the two Stufe-1 subjects that died with the cut:
+	// the PUT-409 secret_ref gate (its tombstone sits above) and the
+	// DELETE-cleanup case, which stopped being a cleanup path the moment the
+	// keys left the registry — design/06 §3.3 step 2 turns that into the runbook
+	// order "räume die Rows VOR dem Update", and β11 into the delete migration.
+	//
+	// Negative probe (2026-08-21): HandlePut's early unknownKey return was
+	// removed — all 29 PUT rows went red on status (the fall-through hands
+	// mutabilityBlock a zero KeyInfo, which answers 409). The row and audit
+	// counters stayed at 0 in that probe, and that is the honest finding: no
+	// mutation of the lookup alone gets an unknown key past the build gate to
+	// persist. They are asserted anyway because they are the arm that would
+	// catch a persist-first regression, and the live contrast at the end of the
+	// subtest is what keeps them from being vacuous — it fails if a write that
+	// SHOULD leave an audit row leaves none.
+	t.Run("RetiredKeys404OverTheRealStack", func(t *testing.T) {
+		retired := config.RetiredKeyNames()
+		if len(retired) != 29 {
+			t.Fatalf("RetiredKeyNames() = %d, want 29", len(retired))
+		}
+		rowCount := func(key string) int {
+			var n int
+			if err := pool.QueryRow(ctx,
+				`SELECT count(*) FROM context_settings WHERE key = $1`, key).Scan(&n); err != nil {
+				t.Fatalf("row count %s: %v", key, err)
+			}
+			return n
+		}
+		for _, key := range retired {
+			for _, v := range []struct{ method, body string }{
+				{http.MethodGet, ""},
+				{http.MethodPut, `{"value":"http://legacy:9999"}`},
+				{http.MethodDelete, ""},
+			} {
+				rec := api.do(t, v.method, "/api/settings/"+key, v.body)
+				if rec.Code != http.StatusNotFound {
+					t.Errorf("%s %s = %d body=%s, want 404 (unknown key, E13)", v.method, key, rec.Code, rec.Body.String())
+					continue
+				}
+				resp := api.envelope(t, rec)
+				if resp["success"] != false || !strings.Contains(fmt.Sprint(resp["error"]), "unknown settings key") {
+					t.Errorf("%s %s body = %v, want the ordinary unknown-key envelope", v.method, key, resp)
+				}
+			}
+			if n := rowCount(key); n != 0 {
+				t.Errorf("%s left %d context_settings row(s) — a 404 must not persist", key, n)
+			}
+			if n := auditCount(key); n != 0 {
+				t.Errorf("%s left %d audit row(s) — a 404 is not a settings event", key, n)
+			}
+		}
+		// Contrast on the same stack: a live key still travels the full write
+		// path. Without it the loop above would also pass on a server that
+		// answered 404 to everything.
+		rec := api.do(t, http.MethodPut, "/api/settings/rerank.max_docs", `{"value":42}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("live PUT status = %d body=%s, want 200", rec.Code, rec.Body.String())
+		}
+		if n := auditCount("rerank.max_docs"); n == 0 {
+			t.Error("live PUT wrote no audit row — the contrast arm is not exercising the write path")
+		}
+		if rec := api.do(t, http.MethodDelete, "/api/settings/rerank.max_docs", ""); rec.Code != http.StatusOK {
+			t.Fatalf("live DELETE status = %d, want 200", rec.Code)
 		}
 	})
 

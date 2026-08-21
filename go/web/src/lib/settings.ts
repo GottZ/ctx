@@ -147,9 +147,11 @@ export function groupByPrefix(settings: SettingView[]): SettingsGroup[] {
 /**
  * Initial draft text for a setting. Sensitive values are masked server-side
  * and a PUT takes a secret NAME, so their drafts always start empty; a
- * non-conforming rendering (e.g. dream_embed.num_ctx's "(inherit embed)"
- * string on an int key) also starts empty — the rendered value shows as
- * placeholder instead, so the draft never round-trips a display artifact.
+ * non-conforming rendering (any string where the widget wants a number or a
+ * boolean — the inherit markers that used to produce those, e.g.
+ * dream_embed.num_ctx's "(inherit embed)", retired in β5/β6) also starts
+ * empty — the rendered value shows as placeholder instead, so the draft never
+ * round-trips a display artifact.
  */
 export function draftFor(s: SettingView): string {
   if (s.sensitive) return ''

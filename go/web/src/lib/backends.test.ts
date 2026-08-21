@@ -200,8 +200,13 @@ describe('fieldErrors', () => {
 
 describe('splitSecretRefs', () => {
   it('splits the flat referenced_by by its "backend:" prefix', () => {
-    expect(splitSecretRefs(['chat.api_key', 'backend:openrouter', 'embed.api_key'])).toEqual({
-      settings: ['chat.api_key', 'embed.api_key'],
+    // Vehicle swap (β10): the six *.api_key keys left the registry, so
+    // server.db_password is the only live settings key that can appear in a
+    // referenced_by list at all. The function is key-agnostic — it splits on
+    // the prefix, not on the registry — and the second settings entry stays
+    // because multiplicity and order are part of what it must preserve.
+    expect(splitSecretRefs(['server.db_password', 'backend:openrouter', 'dream.language'])).toEqual({
+      settings: ['server.db_password', 'dream.language'],
       backends: ['openrouter'],
     })
   })
@@ -231,7 +236,7 @@ describe('splitSecretRefs', () => {
 
 describe('secretUsage', () => {
   const secrets: SecretMeta[] = [
-    { name: 'or.key', key_version: 1, created_at: 't', referenced_by: ['chat.api_key'] },
+    { name: 'or.key', key_version: 1, created_at: 't', referenced_by: ['server.db_password'] },
   ]
 
   // An INTACT backend ref is not the client's business any more: the server
@@ -250,15 +255,15 @@ describe('secretUsage', () => {
   })
 
   it('flags a db-sourced sensitive setting pointing at a missing secret', () => {
-    const settings = [setting({ key: 'chat.api_key', sensitive: true, source: 'db', value: 'gone' })]
+    const settings = [setting({ key: 'server.db_password', sensitive: true, source: 'db', value: 'gone' })]
     const u = secretUsage(secrets, [], settings)
-    expect(u.dangling).toContainEqual({ source: 'setting', ref: 'chat.api_key', secret: 'gone' })
+    expect(u.dangling).toContainEqual({ source: 'setting', ref: 'server.db_password', secret: 'gone' })
   })
 
   it('ignores env-sourced and non-sensitive settings (no secret name there)', () => {
     const settings = [
-      setting({ key: 'chat.api_key', sensitive: true, source: 'env', value: '(set via env)' }),
-      setting({ key: 'rerank.host', sensitive: false, source: 'db', value: 'something' }),
+      setting({ key: 'server.db_password', sensitive: true, source: 'env', value: 'set' }),
+      setting({ key: 'dream.language', sensitive: false, source: 'db', value: 'something' }),
     ]
     const u = secretUsage(secrets, [], settings)
     expect(u.dangling).toEqual([])

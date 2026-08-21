@@ -69,14 +69,19 @@ describe('isEditable / mutabilityNote', () => {
 
 describe('groupByPrefix', () => {
   it('groups on the prefix before the first dot, preserving order', () => {
+    // Vehicle swap (β10): the chat/chat_fallback keys left the registry with
+    // their tuples. The shape the case needs is unchanged — two keys sharing a
+    // prefix, a foreign key between them, and one prefix carrying an underscore
+    // so the split is provably on the first DOT, not on the separator that
+    // looks like one. graph_overview.* is a live carrier of that shape.
     const groups = groupByPrefix([
-      view({ key: 'chat.host', type: 'string' }),
-      view({ key: 'chat.model', type: 'string' }),
+      view({ key: 'dream.language', type: 'string' }),
+      view({ key: 'dream.parallelism', type: 'int' }),
       view({ key: 'rerank.enabled', type: 'bool' }),
-      view({ key: 'chat_fallback.host', type: 'string' }),
+      view({ key: 'graph_overview.engine', type: 'string' }),
     ])
-    expect(groups.map((g) => g.prefix)).toEqual(['chat', 'rerank', 'chat_fallback'])
-    expect(groups[0].settings.map((s) => s.key)).toEqual(['chat.host', 'chat.model'])
+    expect(groups.map((g) => g.prefix)).toEqual(['dream', 'rerank', 'graph_overview'])
+    expect(groups[0].settings.map((s) => s.key)).toEqual(['dream.language', 'dream.parallelism'])
   })
 })
 
@@ -88,11 +93,19 @@ describe('draftFor', () => {
   })
 
   it('starts empty for sensitive keys — the PUT takes a secret name', () => {
-    expect(draftFor(view({ key: 'chat.api_key', type: 'string', value: '(set via env)', sensitive: true }))).toBe('')
+    // Vehicle swap (β10): chat.api_key left the registry with the chat tuple.
+    // server.db_password is the one sensitive key the cut left standing, so the
+    // fixture now names a key the server would actually mask.
+    expect(draftFor(view({ key: 'server.db_password', type: 'string', value: 'set', sensitive: true }))).toBe('')
   })
 
   it('starts empty for display artifacts (string rendering on an int key)', () => {
-    expect(draftFor(view({ key: 'dream_embed.num_ctx', type: 'int', value: '(inherit embed)' }))).toBe('')
+    // The concrete artifact this case was written for — dream_embed.num_ctx
+    // rendering "(inherit embed)" — died with the inherit markers in β5/β6.
+    // The guard it pins did not: widgetFor('int') still refuses any non-number
+    // rendering, whatever the server sends, and dream.parallelism is a live int
+    // key to state that on.
+    expect(draftFor(view({ key: 'dream.parallelism', type: 'int', value: '(unset)' }))).toBe('')
   })
 })
 

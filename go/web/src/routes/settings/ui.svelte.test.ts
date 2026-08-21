@@ -70,7 +70,11 @@ describe('SettingsUi — search', () => {
   const settings = [
     view('dream.backoff_factor', 1.6, 'growth base of the exponential curve'),
     view('dream.backoff_min', '12h', 'cooldown floor at eval count 0'),
-    view('chat.model', 'qwen3', 'model name requested from the chat backend'),
+    // Vehicle swap (β10): chat.model left the registry with the chat tuple.
+    // What the row has to be is a live key OUTSIDE dream.backoff* whose VALUE
+    // carries a token that appears nowhere else — that is what the
+    // value-matching case below queries for.
+    view('query.timezone', 'Europe/Berlin', 'IANA zone for scheduling and digest windows'),
   ]
 
   it('is off for a blank query and preserves registry order', () => {
@@ -94,8 +98,8 @@ describe('SettingsUi — search', () => {
     const ui = new SettingsUi(memStorage())
     ui.query = 'exponential'
     expect(ui.visibleSettings(settings).map((r) => r.setting.key)).toEqual(['dream.backoff_factor'])
-    ui.query = 'qwen3'
-    expect(ui.visibleSettings(settings).map((r) => r.setting.key)).toEqual(['chat.model'])
+    ui.query = 'berlin'
+    expect(ui.visibleSettings(settings).map((r) => r.setting.key)).toEqual(['query.timezone'])
   })
 
   it('tolerates a typo (Levenshtein tier) end to end', () => {
@@ -107,7 +111,7 @@ describe('SettingsUi — search', () => {
 
 describe('searchFields', () => {
   it('masks sensitive values out of the corpus', () => {
-    const s: SettingView = { ...view('chat.api_key', 'set'), sensitive: true }
+    const s: SettingView = { ...view('server.db_password', 'set'), sensitive: true }
     const value = searchFields(s).find((f) => f.id === 'value')
     expect(value?.text).toBe('')
   })

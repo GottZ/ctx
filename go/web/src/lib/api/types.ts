@@ -622,9 +622,10 @@ export interface LLMLogDetailResponse {
 // fingerprint is ever returned (pinned by the server response-scan test).
 // rotated_at is omitempty (absent until first rotation); referenced_by is
 // always present and carries BOTH reference types since 04-W5: a settings key
-// verbatim ("chat.api_key") and a backend pool row under the "backend:" prefix
-// ("backend:openrouter"). splitSecretRefs (lib/backends.ts) is the one place
-// that takes the list apart.
+// verbatim ("server.db_password" — the six *.api_key keys this line used to
+// name retired with their tuples) and a backend pool row under the "backend:"
+// prefix ("backend:openrouter"). splitSecretRefs (lib/backends.ts) is the one
+// place that takes the list apart.
 export interface SecretMeta {
   name: string
   key_version: number

@@ -256,6 +256,62 @@ func TestSettingsTenantAPI_Integration(t *testing.T) {
 		}
 	})
 
+	// Gate 10 (β10, E13): the retirement has no tier. The six *.api_key keys
+	// were the tenant-overridable half of the 29 — a tenant admin could hold a
+	// private override on them, which is why design/04 §4.6 C singled them out.
+	// After the cut they are unknown keys in EVERY world: tenant admin and
+	// operator alike get the ordinary 404, and no scope grows a row from the
+	// attempt.
+	//
+	// The member arm is the part that only this file can state: the admin gate
+	// is middleware and runs BEFORE the registry lookup, so a non-admin still
+	// gets 403 rather than 404 — the retirement did not turn /api/settings into
+	// a key-existence oracle for tenant members.
+	//
+	// Negative probe (2026-08-21): RequireAdminOrTenantAdmin was dropped from
+	// MountSettings — the member arm went 404 (the probing hole), while the
+	// tenant-admin arm stayed green, i.e. the two arms are independent.
+	t.Run("Gate10_RetiredKeysAre404InEveryTier", func(t *testing.T) {
+		var tenantOverridable []string
+		for _, key := range config.RetiredKeyNames() {
+			if strings.HasSuffix(key, ".api_key") {
+				tenantOverridable = append(tenantOverridable, key)
+			}
+		}
+		if len(tenantOverridable) != 6 {
+			t.Fatalf("retired *.api_key keys = %d, want 6 (the tenant-overridable half of the 29)", len(tenantOverridable))
+		}
+		for _, key := range tenantOverridable {
+			for _, caller := range []struct {
+				name string
+				ar   *auth.AuthResult
+			}{
+				{"tenant-admin", tenantAdmin("tenanta")},
+				{"operator", operatorAR()},
+			} {
+				for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+					rec := api.as(caller.ar).do(t, method, "/api/settings/"+key, `{"value":"sneak"}`)
+					if rec.Code != http.StatusNotFound {
+						t.Errorf("%s %s %s = %d body=%s, want 404 (unknown key, E13)", caller.name, method, key, rec.Code, rec.Body.String())
+					}
+				}
+			}
+			if v, ok := scopeRowValue(t, pool, key, "tenanta"); ok {
+				t.Errorf("%s grew a tenanta row = %q — a 404 must not persist", key, v)
+			}
+			if v, ok := scopeRowValue(t, pool, key, store.GlobalScope); ok {
+				t.Errorf("%s grew a _global row = %q — a 404 must not persist", key, v)
+			}
+			// The gate still fires first: a member is refused before the
+			// registry is consulted, so the answer cannot distinguish a retired
+			// key from a live one.
+			rec := api.as(tenantMember("tenanta")).do(t, http.MethodPut, "/api/settings/"+key, `{"value":"sneak"}`)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("member PUT %s = %d, want 403 — the admin gate must precede the registry lookup", key, rec.Code)
+			}
+		}
+	})
+
 	// Gate 9: no env plaintext marker in any tenant response surface.
 	t.Run("Gate9_NoPlaintextLeak", func(t *testing.T) {
 		scan(t, api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/settings", ""), "tenant GET list")

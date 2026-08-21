@@ -51,7 +51,7 @@ function occurrences(haystack: string, needle: string): number {
 
 describe('deleteConfirmText', () => {
   it('names settings when only settings reference the secret', () => {
-    expect(deleteConfirmText({ settings: ['chat.api_key'], backends: [] })).toBe(
+    expect(deleteConfirmText({ settings: ['server.db_password'], backends: [] })).toBe(
       'blocked by settings — delete will 409',
     )
   })
@@ -63,7 +63,7 @@ describe('deleteConfirmText', () => {
   })
 
   it('names both types when both reference it', () => {
-    expect(deleteConfirmText({ settings: ['chat.api_key'], backends: ['openrouter'] })).toBe(
+    expect(deleteConfirmText({ settings: ['server.db_password'], backends: ['openrouter'] })).toBe(
       'blocked by settings and backends — delete will 409',
     )
   })
@@ -81,8 +81,8 @@ describe('deleteConfirmText', () => {
 
 describe('VaultForm reference rendering', () => {
   it('splits one referenced_by into settings and backend refs', () => {
-    const text = textOf(html([secret('or.key', ['chat.api_key', 'backend:openrouter'])]))
-    expect(text).toContain('setting chat.api_key')
+    const text = textOf(html([secret('or.key', ['server.db_password', 'backend:openrouter'])]))
+    expect(text).toContain('setting server.db_password')
     expect(text).toContain('backend openrouter')
     // The prefix is consumed by the split, never rendered raw.
     expect(text).not.toContain('backend:openrouter')
