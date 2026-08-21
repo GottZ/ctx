@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,49 +16,19 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
-	"github.com/GottZ/ctx/internal/rerank"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// backendBootstrapInput assembles the env-era tuples for the one-time pool
-// bootstrap from the effective config snapshot. Lives here (not in
-// internal/backends) because backends cannot import config — config already
-// imports backends for the tuple type.
-func backendBootstrapInput(c *config.Config) backends.BootstrapInput {
-	return backends.BootstrapInput{
-		Chat:           c.ChatBackend(),
-		Fallback:       c.ChatFallbackBackend(),
-		Embed:          c.EmbedBackend(),
-		Dream:          c.DreamBackend(),
-		DreamEmbed:     c.DreamEmbedBackend(),
-		RerankHost:     c.Rerank.Host,
-		RerankKey:      c.Rerank.APIKey,
-		RerankModel:    c.Rerank.Model,
-		RerankTimeoutS: int(rerank.Timeout.Seconds()),
-	}
-}
-
-// backendSeedDefaults is the comparison base of the conditional env seed
-// (A02-W5, design/02 §4.1d): the bootstrap input as it looks on an
-// installation where nobody touched a single backend key. Built through
-// backendBootstrapInput like the live snapshot is, so accessor inheritance
-// (dream inherits chat, dream-embed inherits embed) is resolved identically
-// on both sides of the comparison. Retires with the seed path in the
-// β-Schnitt (design/02 §7 W6).
-func backendSeedDefaults() backends.BootstrapInput {
-	return backendBootstrapInput(config.Defaults())
-}
-
 // advisePoolEmptyBoot logs the A02-W4 empty-pool advisory (design/02 §4.1c).
-// Once the seed path leaves the boot, an empty context_backends is the ordinary
-// state of a fresh install until someone seeds it — no chain serves, every query
-// dies on the embed call, and nothing in the boot log says why. This names the
-// reason at the one moment the operator is watching, and names it the SAME way
-// the admin status surface does (backends.AdvisorySubjectPool/AdvisoryStateEmpty
-// → `backend_pool: empty`), so a log line and a status frame describe one state
-// with one vocabulary.
+// Now that the seed path has left the boot (β1), an empty context_backends is
+// the ordinary state of a fresh install until someone seeds it — no chain
+// serves, every query dies on the embed call, and nothing in the boot log
+// says why. This names the reason at the one moment the operator is watching,
+// and names it the SAME way the admin status surface does
+// (backends.AdvisorySubjectPool/AdvisoryStateEmpty → `backend_pool: empty`),
+// so a log line and a status frame describe one state with one vocabulary.
 //
 // Fires on EVERY boot, not just the first: a pool emptied later is the same
 // state as one never seeded. Deliberately NOT folded into the neighbouring
@@ -170,34 +139,28 @@ func warnRetiredEnvVarsBoot(cfg *config.Config) {
 // retiredEnvWarning picks the operator text for one still-set retired env var
 // and reports whether a settings row currently shadows it.
 //
-// CTX_EMBED_MODEL is the one var this window must NOT tell anybody to delete.
-// The design wrote its exception around the status channel probe; α2 (E5,
-// decided "vorher in α") already moved that probe onto the pool, so that
-// justification is spent — but the exception itself survives on two others
-// that α2 did not touch. (1) On THIS version the var is still the embed model
-// of the first-boot backend seed, and since α12 the seed fires precisely when
-// the tuples differ from the registry defaults: an operator who deletes
-// CTX_EMBED_MODEL while keeping the rest of his embed tuple still seeds — with
-// the registry default "qwen3-embedding:8b" instead of his own model, silently
-// (config.go:170; the live .env runs "qwen3-embedding-8b", one character
-// apart). (2) The rollback path documented in design/06 §3.3 leads to v4.37 or
-// older, and THOSE binaries do read the var for the channel probe. A uniform
-// "remove the env var" would therefore be a degradation this release caused
-// itself — the same failure mode the design's exception was built to prevent,
-// reached through a different door.
+// CTX_EMBED_MODEL is the one var this sweep must NOT tell anybody to delete.
+// The design wrote its exception around the status channel probe, which α2
+// (E5) moved onto the pool; α13 then carried it on a second reason — the var
+// still fed the first-boot backend seed. β1 removed that seed, so THAT reason
+// is spent too. What survives is the rollback path (design/06 §3.3): it leads
+// to v4.37 or older, and THOSE binaries do read the var for the channel
+// probe. A uniform "remove the env var" would therefore be a degradation this
+// release caused itself, reached through the rollback door — the same failure
+// mode the design's exception was built to prevent.
 func retiredEnvWarning(envVar, key, source string) (string, bool) {
 	if key == "embed.model" {
 		return "settings: " + envVar + " is set — retired in " + retiredMajor +
-			", but on this version it still supplies the embed model of the first-boot backend seed, " +
-			"and a rollback to v4.37 or older reads it again for the status channel probe; " +
-			"keep it until you have upgraded to " + retiredMajor, false
+			"; the backend pool supplies the embed model now, but a rollback to v4.37 or older " +
+			"reads this var again for the status channel probe; " +
+			"keep it until you rule that rollback out", false
 	}
 	if source == config.SourceSettings || source == config.SourceTenant {
 		return "settings: " + envVar + " is set but shadowed by a settings row — retired in " +
 			retiredMajor + "; remove the env var", true
 	}
 	return "settings: " + envVar + " is set — retired in " + retiredMajor +
-		"; the value only feeds the first-boot seed; configure backends via 'ctx backends' and remove the env var", false
+		"; the backend pool owns this value now; configure backends via 'ctx backends' and remove the env var", false
 }
 
 // warnRetiredSettingRowsBoot names every context_settings row that still sits
@@ -296,26 +259,9 @@ func bootstrapAdminKeyBoot(ctx context.Context, pool *pgxpool.Pool) {
 }
 
 func main() {
-	// Health check mode: /ctx -health makes an HTTP request to the local server.
-	// Used as Docker healthcheck in distroless containers (no curl/wget available).
-	if len(os.Args) > 1 && os.Args[1] == "-health" {
-		addr := os.Getenv("LISTEN_ADDR")
-		if addr == "" {
-			addr = defaultListenAddr
-		}
-		url := fmt.Sprintf("http://localhost%s/health", addr)
-		resp, err := http.Get(url) //nolint:gosec,noctx // healthcheck is fire-and-forget
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "health check failed: %v\n", err)
-			os.Exit(1)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusOK {
-			fmt.Fprintf(os.Stderr, "health check returned status %d\n", resp.StatusCode)
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
+	// Health check mode: /ctx -health probes the local server with serving
+	// semantics (E9) and never returns in that case — see healthmode.go.
+	dispatchHealthMode()
 
 	// Break-glass decrypt mode: /ctx -secret-decrypt reads one
 	// nonce_b64:ct_b64:name:scope record from stdin and prints the plaintext.
@@ -454,22 +400,13 @@ func main() {
 	// single-tenant deployment (no per-tenant rows) inherits the base anyway.
 	cfgStore.SetOverlay(settings.TenantOverlay(pool))
 
-	// F3-P1: backend pool. The one-time bootstrap reads the EFFECTIVE
-	// snapshot (X1: settings>env precedence, never raw os.Getenv) and seeds
-	// context_backends when empty; afterwards the TABLE is the source of
-	// truth. Both steps are non-fatal — P1 has no pool consumer yet, and a
-	// degraded pool must not block a boot that served queries yesterday.
-	//
-	// A02-W5 (design/02 §4.1d): the seed is conditional on the tuples having
-	// been configured at all. The comparison base is the SAME assembly run
-	// over the registry defaults — same accessors, same inheritance
-	// resolution — so the verdict compares like with like instead of against
-	// a hand-copied list of default values that would rot on the first
-	// registry edit.
+	// F3-P1: backend pool. context_backends is the ONLY source of backend
+	// topology — there is no boot-time seed any more (A02-W6/β1, design/02
+	// §4.2): a fresh install boots with an empty pool and the W4 advisory
+	// below, and gets its rows from `ctx backends seed`, the `ctx init`
+	// wizard or the web UI. Loading stays non-fatal — a degraded pool must
+	// not block a boot that served queries yesterday.
 	backendPool := backends.NewPool(pool, settings.BackendSecretResolver(pool))
-	if _, err := backends.Bootstrap(ctx, pool, backendBootstrapInput(cfgStore.Snapshot()), backendSeedDefaults()); err != nil { //nolint:forbidigo // MT 06 BLIND: boot-time backend pool bootstrap reads the _global generation, no tenant exists at boot.
-		slog.Error("backends: bootstrap failed", "error", err)
-	}
 	// A04-W4 (design/04 §3.2b): the reconcile below is the boot half of the
 	// embed-cache coupled diff. The listener's diff rides the NOTIFY funnel and
 	// therefore only sees edits made while this process runs; a pool row or
@@ -478,7 +415,7 @@ func main() {
 	// compares the loaded pool against the fingerprint on record (migration 132)
 	// and flushes context_embed_cache if they differ. Runs here — after the
 	// reload, before the scheduler builds the listener — so stamp and in-memory
-	// baseline describe one topology. Non-fatal like the two steps above;
+	// baseline describe one topology. Non-fatal like the load above;
 	// nothing is stamped on a failing path, so the next boot retries.
 	bootLoadBackendPool(ctx, backendPool, backendPool.Reload, func(ctx context.Context) error {
 		return events.ReconcileCoupledFingerprint(ctx, pool, backendPool)

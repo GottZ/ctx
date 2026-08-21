@@ -222,8 +222,8 @@ func TestRegistrySecretSet(t *testing.T) {
 }
 
 // TestRegistrySupersededSet pins the lifetime markers: the role-tuple keys
-// are replaced by F3 context_backends rows (bootstrap reads the EFFECTIVE
-// snapshot, not raw env — Auflage X1).
+// are replaced by F3 context_backends rows (since β1 the table is the only
+// topology source — no boot-time seed reads these keys any more).
 func TestRegistrySupersededSet(t *testing.T) {
 	for _, e := range registry() {
 		group, _, _ := strings.Cut(e.Key, ".")

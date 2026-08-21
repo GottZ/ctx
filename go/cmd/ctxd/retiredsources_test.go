@@ -132,7 +132,7 @@ func TestWarnRetiredEnvVarsBoot(t *testing.T) {
 		}
 		// The env-source text must NOT appear: it would tell the operator to go
 		// configure a pool he is evidently already past.
-		if strings.Contains(out, "only feeds the first-boot seed") {
+		if strings.Contains(out, "the backend pool owns this value now") {
 			t.Errorf("log = %q, want the shadow text INSTEAD of the env-source text", out)
 		}
 	})
@@ -153,9 +153,9 @@ func TestWarnRetiredEnvVarsBoot(t *testing.T) {
 		if !strings.Contains(out, "keep it until") {
 			t.Errorf("log = %q, want the keep-it instruction", out)
 		}
-		// The load-bearing negative. Removing this var on v4.38 re-seeds with the
-		// registry default model on a fresh pool and breaks the v4.37 rollback's
-		// channel probe — both silent.
+		// The load-bearing negative. Since β1 removed the boot seed, the reason
+		// is the rollback path alone: removing this var breaks the v4.37
+		// rollback's channel probe, silently.
 		if strings.Contains(out, "remove the env var") {
 			t.Errorf("log = %q, must NOT call for removal of CTX_EMBED_MODEL", out)
 		}

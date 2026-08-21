@@ -85,13 +85,13 @@ func readEnvExample(t *testing.T) []string {
 //     lines survive; an active unmarked example = red").
 //   - inert: a retired var may still be DECLARED here (four of them are, so the
 //     compose environment: block keeps interpolating without a warning until it
-//     is cut), but it must be declared EMPTY. A non-empty value would re-arm the
-//     conditional first-boot seed of A02-W5 — MatchesDefaults compares against
-//     the registry defaults, so any deviating value in the template makes a
-//     fresh install seed http://localhost:11434 pool rows again instead of
-//     staying empty and loud (design/06 §5.2). That is precisely the fail-late
-//     mode the whole retirement was designed to avoid, and it would enter
-//     through the example file rather than through code.
+//     is cut), but it must be declared EMPTY. A non-empty value is a value the
+//     template hands a fresh install for a surface that no longer configures
+//     anything: β1 removed the boot seed, so the line cannot produce backends —
+//     it can only make the boot sweep warn about a var the operator never
+//     chose, and teach the reader that backend topology lives in .env. The
+//     backend pool is the only topology source; the template must not suggest
+//     a second one (design/06 §5.2).
 func TestEnvExampleRetiredVarsAreMarked(t *testing.T) {
 	pattern := retiredEnvPattern(t)
 	assignment := regexp.MustCompile(`^\s*(CTX_[A-Z0-9_]+)\s*=(.*)$`)

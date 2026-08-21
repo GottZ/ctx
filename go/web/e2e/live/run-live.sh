@@ -46,8 +46,11 @@ docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up --build -d
 # migrations + the PV10a bootstrap (main.go order), so ANY HTTP status means
 # fully booted. We do NOT wait for /health==200: /health pings the LLM backends
 # (embed/synthesis), which the e2e stack deliberately has none of — it tests
-# UI/API/enforcement/SSE, not inference. /api/whoami without a key returns 401
-# once the router serves, which is the readiness signal.
+# UI/API/enforcement/SSE, not inference, so this stack's /health answers 503 by
+# design and always will. (That state is exactly what β1/E9 taught `/ctx
+# -health` to accept as serving; this poll predates it and stays because it
+# needs no image at all.) /api/whoami without a key returns 401 once the router
+# serves, which is the readiness signal.
 echo "run-live: waiting for ctxd to serve at $BASE_URL"
 for i in $(seq 1 90); do
   code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/whoami" 2>/dev/null || echo 000)"

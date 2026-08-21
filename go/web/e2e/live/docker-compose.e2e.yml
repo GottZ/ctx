@@ -60,8 +60,10 @@ services:
       CTX_BOOTSTRAP_RUN_ID: ${CTX_BOOTSTRAP_RUN_ID}
     ports:
       - "127.0.0.1:18099:8080"
-    # No container healthcheck: the only in-image probe is `/ctx -health`, which
-    # demands /health==200 — and /health pings the LLM backends (embed /
-    # synthesis) that this stack deliberately runs WITHOUT. It would report
-    # unhealthy forever. Nothing depends on ctx being "healthy"; run-live.sh
-    # polls /api/whoami directly for readiness (any HTTP status = serving).
+    # No container healthcheck. Since β1 (E9) `/ctx -health` would in fact pass
+    # here — it judges serving, not greenness, so this stack's deliberately
+    # absent LLM backends no longer make it fail. It stays off because nothing
+    # depends on ctx being "healthy" and a probe every 30s buys this throwaway
+    # stack nothing; run-live.sh polls /api/whoami directly for readiness (any
+    # HTTP status = serving), which is also the readiness signal a pre-β1 image
+    # would need.

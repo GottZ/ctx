@@ -58,7 +58,8 @@ type Hours float64
 //	         fingerprinted — an unsalted hash prefix would be an offline
 //	         dictionary oracle)
 //	superseded  lifetime marker: F3 context_backends rows replace these keys
-//	         (bootstrap MUST read the effective snapshot, not raw env — X1)
+//	         (the table is the ONLY topology source since β1 — no boot-time
+//	         seed reads these keys any more)
 //	tenancy  tenant-overridable | global-only (MANDATORY — MT3-W2): may a
 //	         tenant override this key on top of _global, or does it live in
 //	         _global only? A missing/unknown value is a boot panic, so no key

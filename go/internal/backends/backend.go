@@ -31,13 +31,14 @@ const (
 	RoleDream      = "dream"
 	RoleDigest     = "digest"
 	RoleChat       = "chat"
-	RoleDreamEmbed = "dream-embed" // bootstrap split when CTX_DREAM_EMBED_* diverges
+	RoleDreamEmbed = "dream-embed" // dream embeds on its own backend, apart from query embed
 	RoleClassify   = "classify"    // G41 sensitivity audit — hard-local, no external escape hatch
 )
 
 // CoreRoles lists the roles the validation treats as known. dream-embed is
-// included: it exists so the bootstrap never silently drops the historical
-// query-embed vs dream-embed split.
+// included: it carries the query-embed vs dream-embed split the env era
+// expressed through a separate CTX_DREAM_EMBED_* tuple, so a pool can still
+// send the two workloads to different backends.
 var CoreRoles = []string{
 	RoleSynthesis, RoleTranslate, RoleEmbed, RoleRerank,
 	RoleDream, RoleDigest, RoleChat, RoleDreamEmbed, RoleClassify,
