@@ -6,6 +6,7 @@ The `ctx` CLI reads its config from `~/.config/ctx/config` (`CTX_BASE_URL` + `CT
 
 | Command | Description |
 |---------|-------------|
+| `ctx init` | First-run wizard, idempotent — it reports every item and changes only what is missing: `~/.config/ctx/config` (base URL + key, mode 0600), a `/health` read, the **backend pool** (seeds it exactly like `ctx backends seed` when no `_global` row serves `synthesis`/`embed`, then probes the serving rows and names the dead ones), a version check against the latest release, and Claude Code's `SubagentStart`/`SubagentStop` hooks + statusline. A key below server-admin only skips the pool step (it says so and points at `ctx backends seed`); hooks and statusline need no admin key. See [operations](operations.md#first-run-ctx-init) |
 | `ctx query question` | Hybrid search + LLM synthesis (formatted, `--json` for raw) |
 | `ctx save <cat> <title> - <content>` | Upsert knowledge block |
 | `ctx save --tag tag1,tag2 <cat> <title>` | Upsert with tags |
