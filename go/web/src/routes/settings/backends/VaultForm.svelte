@@ -1,12 +1,37 @@
+<script module lang="ts">
+  import type { SecretRefs } from '../../../lib/backends'
+
+  /**
+   * The delete-confirm line. Both reference types END in a 409 since 04-W5 —
+   * the server's guard scans settings AND pool rows — so the text names the
+   * blocker instead of predicting different outcomes per type. Exported for the
+   * unit gate (the ConnState pattern): the branch is behind a click and a
+   * server-rendered probe never reaches it.
+   */
+  export function deleteConfirmText(refs: SecretRefs): string {
+    if (refs.settings.length > 0 && refs.backends.length > 0) {
+      return 'blocked by settings and backends — delete will 409'
+    }
+    if (refs.settings.length > 0) return 'blocked by settings — delete will 409'
+    if (refs.backends.length > 0) {
+      return `blocked by backend ${refs.backends.join(', ')} — delete will 409`
+    }
+    return 'delete?'
+  }
+</script>
+
 <script lang="ts">
   // Secrets vault (design §3.5). Write-only: values go in via RedactedInput and
-  // are never read back. Each secret shows where it is referenced — settings
-  // keys from the server's referenced_by, backends from the client-side
-  // api_key_ref join (the server's referenced_by does NOT cover backends, so a
-  // backend-only secret deletes without a 409; we warn before deleting). The
-  // dangling block lists refs whose secret is missing (the derived "fehlt").
+  // are never read back. Each secret shows where it is referenced, BOTH kinds
+  // straight from the server's referenced_by (04-W5): settings keys verbatim,
+  // backend pool rows under the "backend:" prefix, taken apart by
+  // splitSecretRefs. Either kind blocks the DELETE with a 409 — the server's
+  // scan is the same one the guard runs, so the confirm text can state the
+  // outcome instead of guessing at it. The dangling block lists refs whose
+  // secret is missing (the derived "fehlt"), the one direction referenced_by
+  // cannot carry.
   import { toApiError } from '../../../lib/api'
-  import type { SecretUsage } from '../../../lib/backends'
+  import { splitSecretRefs, type SecretUsage } from '../../../lib/backends'
   import RedactedInput from './RedactedInput.svelte'
   import type { VaultModel } from './vault.svelte'
 
@@ -22,10 +47,6 @@
 
   function fmt(iso: string | undefined): string {
     return iso ? iso.slice(0, 16).replace('T', ' ') : ''
-  }
-
-  function backendsUsing(name: string): string[] {
-    return usage.backendsBySecret.get(name) ?? []
   }
 
   async function createSecret(value: string): Promise<boolean> {
@@ -88,9 +109,8 @@
   {:else}
     <ul class="list">
       {#each vault.secrets as s (s.name)}
-        {@const settingsRefs = s.referenced_by}
-        {@const backendRefs = backendsUsing(s.name)}
-        {@const referenced = settingsRefs.length > 0 || backendRefs.length > 0}
+        {@const refs = splitSecretRefs(s.referenced_by)}
+        {@const referenced = refs.settings.length > 0 || refs.backends.length > 0}
         <li class="secret">
           <div class="meta-row">
             <span class="name">{s.name}</span>
@@ -103,8 +123,8 @@
           {#if referenced}
             <p class="refs">
               referenced by:
-              {#each settingsRefs as k (k)}<code class="ref">setting {k}</code>{/each}
-              {#each backendRefs as b (b)}<code class="ref">backend {b}</code>{/each}
+              {#each refs.settings as k (k)}<code class="ref">setting {k}</code>{/each}
+              {#each refs.backends as b (b)}<code class="ref">backend {b}</code>{/each}
             </p>
           {:else}
             <p class="refs none">no references</p>
@@ -114,13 +134,7 @@
             <RedactedInput submitLabel="rotate" busy={vault.busyName === s.name} onsubmit={(v) => rotate(s.name, v)} />
             {#if confirmDelete === s.name}
               <span class="confirm-del">
-                {#if settingsRefs.length > 0}
-                  blocked by settings — delete will 409
-                {:else if backendRefs.length > 0}
-                  used by {backendRefs.join(', ')} — leaves a dead ref
-                {:else}
-                  delete?
-                {/if}
+                {deleteConfirmText(refs)}
                 <button type="button" class="danger" onclick={() => void remove(s.name)}>yes</button>
                 <button type="button" class="ghost" onclick={() => (confirmDelete = null)}>no</button>
               </span>

@@ -1,14 +1,15 @@
 // Secrets-vault editing state (design 04-§3.5). Holds the secret metadata list
 // and its load status; put/delete call the write-only API and reload. Mutations
-// THROW ApiError on failure (the form surfaces it per-row). The "in use" /
-// "fehlt" derivation is a pure join (lib/backends secretUsage) the form runs
-// over secrets × backends × settings — it is not state held here.
+// THROW ApiError on failure (the form surfaces it per-row). The "fehlt"
+// derivation is a pure scan (lib/backends secretUsage) the form runs over
+// secrets × backends × settings — it is not state held here.
 //
 // Note: since 04-W5 the server's DELETE-409 also fires for BACKEND references
 // (referencedBy unions context_settings secret_refs with context_backends
-// api_key_ref, prefix "backend:"). The client-side join stays the EARLY
-// warning — it shows usage in the list without a delete attempt — but it is no
-// longer the only thing standing between a delete and a keyless backend.
+// api_key_ref, prefix "backend:"), and the same union is what each secret's
+// referenced_by carries. The form therefore RENDERS the server's list rather
+// than re-deriving the intact refs client-side; the client scan is left with
+// the dangling direction alone, which referenced_by cannot express.
 
 import { toApiError, type ApiError } from '../../../lib/api'
 import { deleteSecret, listSecrets, putSecret } from '../../../lib/api/vault'

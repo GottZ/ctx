@@ -1,7 +1,8 @@
 // Pool-editor pure-logic gates: trust ranks + elevation (the confirm trigger),
 // the priority sort, model_map row<->object conversion, the create spec and the
 // update diff (raw-key-presence semantics: only changed keys, an emptied list
-// clears), and the secret-usage join (backend api_key_ref + dangling settings).
+// clears), the referenced_by split (settings keys vs "backend:" pool rows) and
+// the dangling scan (refs whose secret is gone).
 
 import { describe, expect, it } from 'vitest'
 import { ApiError } from './api'
@@ -17,6 +18,7 @@ import {
   rowsToModelMap,
   secretUsage,
   sortBackends,
+  splitSecretRefs,
   trustRank,
 } from './backends'
 
@@ -196,15 +198,48 @@ describe('fieldErrors', () => {
   })
 })
 
+describe('splitSecretRefs', () => {
+  it('splits the flat referenced_by by its "backend:" prefix', () => {
+    expect(splitSecretRefs(['chat.api_key', 'backend:openrouter', 'embed.api_key'])).toEqual({
+      settings: ['chat.api_key', 'embed.api_key'],
+      backends: ['openrouter'],
+    })
+  })
+
+  it('treats a settings key that merely CONTAINS "backend" as a settings key', () => {
+    // Only the prefix marks a pool row; a key like backend.pool.enabled is a
+    // settings key and must not land in the backends bucket.
+    expect(splitSecretRefs(['backend.pool.enabled', 'backends:weird'])).toEqual({
+      settings: ['backend.pool.enabled', 'backends:weird'],
+      backends: [],
+    })
+  })
+
+  it('strips only the first prefix — a row named like a prefix stays intact', () => {
+    expect(splitSecretRefs(['backend:backend:odd']).backends).toEqual(['backend:odd'])
+  })
+
+  it('drops a bare prefix instead of rendering an anonymous reference', () => {
+    expect(splitSecretRefs(['backend:'])).toEqual({ settings: [], backends: [] })
+  })
+
+  it('handles the empty and the absent list', () => {
+    expect(splitSecretRefs([])).toEqual({ settings: [], backends: [] })
+    expect(splitSecretRefs(undefined)).toEqual({ settings: [], backends: [] })
+  })
+})
+
 describe('secretUsage', () => {
   const secrets: SecretMeta[] = [
     { name: 'or.key', key_version: 1, created_at: 't', referenced_by: ['chat.api_key'] },
   ]
 
-  it('joins backend api_key_ref to its secret', () => {
+  // An INTACT backend ref is not the client's business any more: the server
+  // reports it in referenced_by as "backend:router" (splitSecretRefs below).
+  // Re-deriving it here showed the same reference twice under two labels.
+  it('stays silent about a backend ref whose secret exists', () => {
     const backends = [item({ name: 'router', api_key_ref: 'or.key' })]
     const u = secretUsage(secrets, backends, [])
-    expect(u.backendsBySecret.get('or.key')).toEqual(['router'])
     expect(u.dangling).toEqual([])
   })
 

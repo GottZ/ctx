@@ -209,36 +209,76 @@ export function isEmptySpec(spec: BackendSpec): boolean {
   return Object.keys(spec).length === 0
 }
 
+// ---- referenced_by split (server truth, 04-W5) ------------------------------
+
+/** Marks a referenced_by entry as a backend pool row (handler/sealbox.go
+ *  backendRefPrefix). Everything else is a settings key, verbatim. */
+export const BACKEND_REF_PREFIX = 'backend:'
+
+/** One secret's references, split by TYPE — the shape the UI renders and the
+ *  delete-confirm text keys off. Both kinds block a DELETE with 409. */
+export interface SecretRefs {
+  /** config keys whose secret_ref override names the secret */
+  settings: string[]
+  /** context_backends row names whose api_key_ref names it */
+  backends: string[]
+}
+
+/**
+ * Splits GET /api/secrets `referenced_by` into its two reference types. The
+ * server sends ONE flat array; the "backend:" prefix is what tells the two
+ * apart, and this is the only place that knows it.
+ *
+ * Deliberately the single source of truth for what references a secret: the
+ * server scans context_settings AND context_backends across every scope it may
+ * see, which is strictly more than the FE's loaded lists. A bare "backend:"
+ * (empty row name) cannot occur — the server only emits rows with a name — and
+ * is dropped rather than rendered as an anonymous reference.
+ */
+export function splitSecretRefs(referencedBy: readonly string[] | undefined): SecretRefs {
+  const refs: SecretRefs = { settings: [], backends: [] }
+  for (const entry of referencedBy ?? []) {
+    if (entry.startsWith(BACKEND_REF_PREFIX)) {
+      const name = entry.slice(BACKEND_REF_PREFIX.length)
+      if (name !== '') refs.backends.push(name)
+      continue
+    }
+    refs.settings.push(entry)
+  }
+  return refs
+}
+
 // ---- secret usage join (design §3.5: derived "fehlt" status) ----------------
 
 export interface SecretUsage {
-  /** secret name → backend names referencing it via api_key_ref (client-side
-   *  join over the loaded lists; the server reports the same rows in
-   *  referenced_by as "backend:<name>" since 04-W5). */
-  backendsBySecret: Map<string, string[]>
   /** refs pointing at a non-existent secret — the derived "fehlt" status. */
   dangling: { source: 'backend' | 'setting'; ref: string; secret: string }[]
 }
 
+/**
+ * Scans the loaded lists for refs whose secret does not exist ("fehlt").
+ *
+ * Only the DANGLING direction — the intact direction (which refs a secret has)
+ * is server truth via splitSecretRefs, and re-deriving it here produced the
+ * same reference twice under two labels. The server also scans rows the FE
+ * never loads, so a client join could only ever be a subset of it.
+ *
+ * The dangling direction is the half the server cannot report: referenced_by
+ * hangs off EXISTING secret rows, so a ref naming a secret that is gone
+ * appears in no secret's list at all.
+ */
 export function secretUsage(
   secrets: SecretMeta[],
   backends: BackendListItem[],
   settings: SettingView[],
 ): SecretUsage {
   const known = new Set(secrets.map((s) => s.name))
-  const backendsBySecret = new Map<string, string[]>()
   const dangling: SecretUsage['dangling'] = []
 
   for (const b of backends) {
     const ref = b.api_key_ref
     if (!ref) continue
-    if (known.has(ref)) {
-      const list = backendsBySecret.get(ref) ?? []
-      list.push(b.name)
-      backendsBySecret.set(ref, list)
-    } else {
-      dangling.push({ source: 'backend', ref: b.name, secret: ref })
-    }
+    if (!known.has(ref)) dangling.push({ source: 'backend', ref: b.name, secret: ref })
   }
 
   // sensitive db-sourced settings carry the secret_ref name as their value
@@ -248,5 +288,5 @@ export function secretUsage(
     if (!known.has(s.value)) dangling.push({ source: 'setting', ref: s.key, secret: s.value })
   }
 
-  return { backendsBySecret, dangling }
+  return { dangling }
 }

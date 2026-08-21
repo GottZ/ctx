@@ -624,7 +624,10 @@ export interface LLMLogDetailResponse {
 // (secretView). Write-only by design: NO ciphertext, nonce, value or
 // fingerprint is ever returned (pinned by the server response-scan test).
 // rotated_at is omitempty (absent until first rotation); referenced_by is
-// always present (the settings keys whose secret_ref points at this secret).
+// always present and carries BOTH reference types since 04-W5: a settings key
+// verbatim ("chat.api_key") and a backend pool row under the "backend:" prefix
+// ("backend:openrouter"). splitSecretRefs (lib/backends.ts) is the one place
+// that takes the list apart.
 export interface SecretMeta {
   name: string
   key_version: number

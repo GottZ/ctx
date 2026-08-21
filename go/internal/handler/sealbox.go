@@ -5,8 +5,9 @@
 //                             (§7.5: a hash prefix is an offline oracle).
 // PUT    /api/secrets/{name}  create or rotate; the value travels in the body
 //                             and NEVER appears in any response or log
-// DELETE /api/secrets/{name}  409 while a secret_ref setting OR a backend
-//                             pool row (api_key_ref, 04-W5) references it;
+// DELETE /api/secrets/{name}  409 while a secret_ref setting OR — for a
+//                             _global (server-admin) delete — a backend pool
+//                             row (api_key_ref, 04-W5) references it;
 //                             otherwise delete + reload (revocation must
 //                             empty the snapshot immediately)
 //
@@ -253,19 +254,34 @@ func (s secretRefs) remediation(name string) string {
 // installation whose provider keys live in the pool — which is where F3 put
 // them (§5.7).
 //
-// Scope (§5.7, the reference-integrity barrier — NOT a crypto check, so the AAD
-// is irrelevant here): a tenant-admin's DELETE scans its OWN scope. An operator's
-// _global DELETE scans _global AND every opt-in tenant scope — a _global secret
-// can be referenced VIA the gated fallback by an opted-in tenant's setting, and
-// missing that reference would let the tenant setting silently fail-open to
-// env/default. Without any opt-in tenant the set degenerates to today's
-// _global-only scan. The pool scan runs on the SAME scope set, deliberately:
-// a wider scan would answer a tenant-admin's DELETE with foreign backend row
-// names, i.e. enumerate another tenant's provider topology (§5.5).
+// SETTINGS scope (§5.7, the reference-integrity barrier — NOT a crypto check,
+// so the AAD is irrelevant here): a tenant-admin's DELETE scans its OWN scope.
+// An operator's _global DELETE scans _global AND every opt-in tenant scope — a
+// _global secret can be referenced VIA the gated fallback by an opted-in
+// tenant's setting, and missing that reference would let the tenant setting
+// silently fail-open to env/default. Without any opt-in tenant the set
+// degenerates to the _global-only scan.
+//
+// POOL scope is a DIFFERENT question and deliberately NOT the settings scope
+// set. settings.BackendSecretResolver resolves every api_key_ref against
+// GlobalScope alone (reload.go), so a pool reference binds to the _GLOBAL
+// secret of that name regardless of the ROW's scope. Two consequences:
+//
+//   - server-admin (writeScope == _global): scan ALL scopes. The old
+//     scope-filtered scan skipped the rows of non-opt-in tenants, so deleting
+//     a _global secret those rows resolve answered 200 and left them keyless
+//     at the next resolver pass — fail-open (§5.7).
+//   - tenant-admin: NO pool scan. Its DELETE can only remove a TENANT-scope
+//     secret, and no pool reference binds to one; a name-matched pool row is a
+//     different secret entirely, so counting it produced a false 409 whose
+//     remediation pointed at a working backend. Skipping the scan outright
+//     (rather than filtering it) also keeps referenced_by free of any pool
+//     enumeration surface for tenants (§5.5) by construction.
 func (h *SecretsHandler) referencedBy(r *http.Request) (map[string]secretRefs, error) {
 	ws := writeScope(AuthResultFromContext(r.Context()))
 	scopes := []string{ws}
-	if ws == store.GlobalScope {
+	isGlobal := ws == store.GlobalScope
+	if isGlobal {
 		optIn, err := store.OptInTenantScopes(r.Context(), h.pool)
 		if err != nil {
 			return nil, err
@@ -305,14 +321,30 @@ func (h *SecretsHandler) referencedBy(r *http.Request) (map[string]secretRefs, e
 		refs[name] = rs
 	}
 
-	// Pool half of the union (§3.3). Row names are UNIQUE across scopes
-	// (uq_backends_name, migration 053), so no dedup is needed here; the query
-	// orders by name, keeping referenced_by stable between calls.
-	poolRefs, err := store.BackendSecretRefsMulti(r.Context(), h.pool, scopes)
+	// Pool half of the union (§3.3), _global callers only — see the scope note
+	// above. Row names are unique only PER SCOPE since migration 062
+	// (uq_backends_scope_name), so the all-scopes scan can see the same name
+	// twice; dedup by name keeps referenced_by a set. Two same-named rows
+	// collapse into one entry — for the operator (the only caller here) that is
+	// a remediation hint, not an identifier: clearing api_key_ref on both rows
+	// of that name is exactly what the 409 asks for. The query orders by name,
+	// keeping referenced_by stable between calls.
+	if !isGlobal {
+		return refs, nil
+	}
+	poolRefs, err := store.BackendSecretRefsAll(r.Context(), h.pool)
 	if err != nil {
 		return nil, err
 	}
+	seenRow := map[string]map[string]bool{} // secret name → set of row names
 	for _, ref := range poolRefs {
+		if seenRow[ref.APIKeyRef] == nil {
+			seenRow[ref.APIKeyRef] = map[string]bool{}
+		}
+		if seenRow[ref.APIKeyRef][ref.Name] {
+			continue
+		}
+		seenRow[ref.APIKeyRef][ref.Name] = true
 		rs := refs[ref.APIKeyRef]
 		rs.backends = append(rs.backends, ref.Name)
 		refs[ref.APIKeyRef] = rs

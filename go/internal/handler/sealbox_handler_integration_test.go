@@ -237,9 +237,9 @@ func TestSecretsAPI_Integration(t *testing.T) {
 	// endpoint that retires with the registry cut.
 	//
 	// Negative probe (2026-08-21): with the pool half of referencedBy removed
-	// (the store.BackendSecretRefsMulti block in sealbox.go), this subtest
-	// fails red at the first assertion — DELETE = 200 and the backend row keeps
-	// a dangling api_key_ref. Restored → green.
+	// (the store.BackendSecretRefsAll block in sealbox.go), this subtest fails
+	// red at the first assertion — DELETE = 200 and the backend row keeps a
+	// dangling api_key_ref. Restored → green.
 	t.Run("BackendReferencedDelete409", func(t *testing.T) {
 		const secretName = "prov-pool"
 		const backendName = "pool-guard-be"

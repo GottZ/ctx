@@ -199,37 +199,32 @@ type BackendSecretRef struct {
 	APIKeyRef string
 }
 
-// BackendSecretRefsMulti lists the pool rows in scopes whose api_key_ref is
-// set — the pool half of the sealbox delete guard's reference union (04-W5
-// §3.3). Since F3 made the pool the living home of provider credentials, a
-// secret referenced ONLY by a pool row was deletable: the guard scanned
-// context_settings alone, so DELETE answered 200, deleteSealed removed the
-// plaintext and the backend went keyless at the next resolver pass — the
+// BackendSecretRefsAll lists EVERY pool row whose api_key_ref is set, across
+// all scopes — the pool half of the sealbox delete guard's reference union
+// (04-W5 §3.3). Since F3 made the pool the living home of provider
+// credentials, a secret referenced ONLY by a pool row was deletable: the guard
+// scanned context_settings alone, so DELETE answered 200, deleteSealed removed
+// the plaintext and the backend went keyless at the next resolver pass — the
 // fail-open class the guard exists to prevent (§5.7).
 //
-// scopes is the caller's VISIBLE scope set, identical to the settings scan
-// (writeScope plus opt-in tenant scopes): scanning wider would let a
-// tenant-admin enumerate foreign provider topology through referenced_by
-// (§5.5).
+// Deliberately UNSCOPED, and only ever called for a _global (server-admin)
+// delete. settings.BackendSecretResolver resolves EVERY api_key_ref against
+// GlobalScope alone, so a pool row's reference binds to the _global secret of
+// that name no matter which scope the ROW lives in. A scope-filtered scan
+// therefore missed the rows of non-opt-in tenants and answered 200 for a
+// _global secret those rows resolve — the very fail-open class above, one
+// level deeper. Tenant-admin callers get NO pool scan at all (their DELETE
+// only ever removes a tenant-scope secret, which no pool reference binds to),
+// so this function can never surface foreign provider topology to a tenant
+// (§5.5): the isolation is structural, not a filter.
 //
-// Fail-closed exactly like LoadSettingOverridesMulti: an empty slice or an
-// empty element is an error, never a scan that silently matches nothing.
-func BackendSecretRefsMulti(ctx context.Context, pool *pgxpool.Pool, scopes []string) ([]BackendSecretRef, error) {
-	if len(scopes) == 0 {
-		return nil, fmt.Errorf("backends: at least one scope is required")
-	}
-	for _, s := range scopes {
-		if s == "" {
-			return nil, fmt.Errorf("backends: empty scope is not allowed")
-		}
-	}
-
+// Fail-closed by construction: with no scope predicate there is no empty-slice
+// footgun (`scope = ANY('{}')` silently matching nothing) to guard against.
+func BackendSecretRefsAll(ctx context.Context, pool *pgxpool.Pool) ([]BackendSecretRef, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT name, api_key_ref FROM context_backends
-		  WHERE scope = ANY($1::text[])
-		    AND api_key_ref IS NOT NULL AND btrim(api_key_ref) <> ''
-		  ORDER BY name`,
-		scopes)
+		  WHERE api_key_ref IS NOT NULL AND btrim(api_key_ref) <> ''
+		  ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("backends: load secret refs: %w", err)
 	}
