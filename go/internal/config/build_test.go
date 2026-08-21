@@ -278,28 +278,33 @@ func TestBuildValidationDropsOffenderKeepsRest(t *testing.T) {
 }
 
 // A cross-field error NOT attributable to any override withdraws ALL
-// overrides — degraded, loud, never fatal (the V1 issue is addressed to
-// dream.num_ctx, which is not the overridden field).
+// overrides — degraded, loud, never fatal.
+//
+// The vehicle rode on V1 until β6 cut the dream chat tuple: raising
+// chat.num_ctx away from dream.num_ctx on a shared host produced an ERROR
+// addressed to dream.num_ctx, a field no override had touched. V2 has the same
+// shape and outlives the cut train — the inverted-threshold error is ALWAYS
+// addressed to query.score_threshold, whichever of the pair moved. Overriding
+// confident_threshold downwards therefore produces an error dropOffenders
+// cannot attribute, which is exactly the branch under test.
 func TestBuildCrossFieldWithdrawsAllOverrides(t *testing.T) {
 	resetBuildEnv(t)
-	t.Setenv("CTX_CHAT_HOST", "http://llm.example:8089")
-	t.Setenv("CTX_DREAM_HOST", "http://llm.example:8089")
-	t.Setenv("CTX_CHAT_NUM_CTX", "2048")
-	t.Setenv("CTX_DREAM_NUM_CTX", "2048")
+	t.Setenv("CTX_SCORE_THRESHOLD", "0.001")
+	t.Setenv("CTX_CONFIDENT_THRESHOLD", "0.02")
 
-	// Raising chat.num_ctx alone splits it from dream.num_ctx on the same
-	// ollama host ⇒ V1 SeverityError on dream.num_ctx (dual-runner OOM).
-	c, issues := Build([]Override{{Key: "chat.num_ctx", Value: "4096"}}, nil)
+	// Lowering confident_threshold below the env score_threshold ⇒ V2
+	// SeverityError on query.score_threshold, which is not the overridden field.
+	c, issues := Build([]Override{{Key: "query.confident_threshold", Value: "0.0005"}}, nil)
 
 	if HasErrors(issues) {
 		t.Fatalf("override layer must never produce errors, got: %v", issues)
 	}
 	warnFor(t, issues, "settings", "withdrawing all")
-	if c.Chat.NumCtx != 2048 {
-		t.Errorf("ChatNumCtx = %d, want env 2048 after withdrawal", c.Chat.NumCtx)
+	if c.Query.ConfidentThreshold != 0.02 {
+		t.Errorf("ConfidentThreshold = %v, want env 0.02 after withdrawal", c.Query.ConfidentThreshold)
 	}
-	if c.Source("chat.num_ctx") != "env" {
-		t.Errorf("source = %q, want env", c.Source("chat.num_ctx"))
+	if c.Source("query.confident_threshold") != "env" {
+		t.Errorf("source = %q, want env", c.Source("query.confident_threshold"))
 	}
 }
 

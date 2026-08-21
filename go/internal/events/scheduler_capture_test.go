@@ -78,8 +78,9 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 			Host: "http://embed.example", Protocol: backends.ProtocolOllama, Model: "embed-model",
 		},
 		Dream: config.DreamConfig{
-			Enabled: true, Host: "http://dream.example", Protocol: backends.ProtocolOllama,
-			Model: "dream-model", IdleWait: 20 * time.Second, Parallelism: 1,
+			// The dream backend tuple left the registry in β6 — which backend
+			// serves the pipeline is a pool question now.
+			Enabled: true, IdleWait: 20 * time.Second, Parallelism: 1,
 			Backoff: config.BackoffConfig{
 				Mode: "exp", Factor: 1.6, Grace: 0,
 				CapHours: config.Hours(1080), MinHours: config.Hours(backoffMinHours), InertOffset: 7,

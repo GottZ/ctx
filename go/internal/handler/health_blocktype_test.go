@@ -44,7 +44,7 @@ func TestHealthBlocktypeRegistryField(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(backend.Close)
-	cfg := healthTestConfig(backend.URL, backend.URL, backend.URL)
+	cfg := healthTestConfig(backend.URL, backend.URL)
 	st := &swapStore{}
 	st.p.Store(cfg)
 

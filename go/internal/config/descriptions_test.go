@@ -53,8 +53,8 @@ func TestSupersededExposed(t *testing.T) {
 			}
 		}
 	}
-	if superseded != 17 {
-		t.Errorf("superseded key count = %d, want 17 (chat/embed/dream tuples — rerank cut in β3, chat_fallback in β4, dream_embed in β5)", superseded)
+	if superseded != 11 {
+		t.Errorf("superseded key count = %d, want 11 (chat/embed tuples — rerank cut in β3, chat_fallback in β4, dream_embed in β5, dream in β6)", superseded)
 	}
 	if info, _ := KeyByName("dream.backoff_mode"); info.Superseded != "" {
 		t.Error("dream.backoff_mode must not be superseded")

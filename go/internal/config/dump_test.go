@@ -52,7 +52,13 @@ func TestMaskSecretPerClass(t *testing.T) {
 	if got := group(t, boot, "server")["db_password"]; got != "set" {
 		t.Errorf("boot dump db password = %v, want 'set' (never fingerprinted)", got)
 	}
-	if got := group(t, boot, "dream")["api_key"]; got != "" {
+	// The unset-secret probe rode on dream.api_key until β6 cut the tuple. Both
+	// surviving fp keys carry a value in this fixture, so it moves onto a second
+	// dump built without one — the same statement about the same branch
+	// (maskSecret returns the empty string for an empty value), just no longer
+	// borrowing a key that is about to leave.
+	unset := dumpFor(t, map[string]string{}, SurfaceBootDump)
+	if got := group(t, unset, "chat")["api_key"]; got != "" {
 		t.Errorf("unset secret = %v, want empty string", got)
 	}
 
@@ -69,7 +75,6 @@ func TestDumpNeverLeaksSecretValues(t *testing.T) {
 	vals := map[string]string{
 		"chat.api_key":       longKey,
 		"embed.api_key":      longKey,
-		"dream.api_key":      longKey,
 		"server.db_password": shortKey,
 	}
 	for s, name := range map[Surface]string{SurfaceBootDump: "boot", SurfaceAPI: "api"} {
@@ -108,21 +113,13 @@ func TestDumpRedactsHostURLs(t *testing.T) {
 	}
 }
 
-func TestDumpInheritMarkers(t *testing.T) {
-	dump := dumpFor(t, map[string]string{}, SurfaceBootDump)
-	for key, field := range map[string]string{"model": "model", "num_ctx": "num_ctx", "think": "think"} {
-		if got := group(t, dump, "dream")[field]; got != "(inherit chat)" {
-			t.Errorf("dream.%s = %v, want '(inherit chat)'", key, got)
-		}
-	}
-	// The five dream_embed markers left with their tuple in β5; the three
-	// dream→chat markers above are the whole map until β6 takes them too.
-
-	set := dumpFor(t, map[string]string{"dream.model": "dream-model-x"}, SurfaceBootDump)
-	if got := group(t, set, "dream")["model"]; got != "dream-model-x" {
-		t.Errorf("set dream.model = %v, want verbatim value", got)
-	}
-}
+// TestDumpInheritMarkers died with inheritMarkers in β6. It pinned both halves
+// of the renderField branch: a zero field rendered its "(inherit …)" marker, a
+// set one its verbatim value. The five dream_embed markers left in β5, the
+// three dream→chat markers with DreamBackend in β6, and an empty map plus a
+// branch no key can reach is not a thing to keep a test around for. The
+// verbatim half is not lost — every non-secret, non-host key in
+// TestDumpSourcesAndRendering asserts exactly that.
 
 func TestDumpSourcesAndRendering(t *testing.T) {
 	dump := dumpFor(t, map[string]string{
@@ -140,8 +137,11 @@ func TestDumpSourcesAndRendering(t *testing.T) {
 	if !ok {
 		t.Fatal("dump has no sources map")
 	}
-	if sources["chat.host"] != "env" || sources["dream.host"] != "default" {
-		t.Errorf("sources: chat.host=%q dream.host=%q", sources["chat.host"], sources["dream.host"])
+	// The "default" side of the source probe rode on dream.host until β6 cut the
+	// tuple. dream.language is the same statement on a key no cut wave touches:
+	// unset in this fixture, therefore "default".
+	if sources["chat.host"] != "env" || sources["dream.language"] != "default" {
+		t.Errorf("sources: chat.host=%q dream.language=%q", sources["chat.host"], sources["dream.language"])
 	}
 
 	dream := group(t, dump, "dream")

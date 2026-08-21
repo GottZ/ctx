@@ -27,10 +27,10 @@ func severityFor(issues []Issue, field string) Severity {
 	return worst
 }
 
-// TestValidateTable covers V1–V13, one good and one bad fixture per
-// invariant. The Delta-6 classes (V2/V4/V7-malformed/V9/V12) are additionally
-// pinned as old-boots/new-ERROR fixtures against the legacy reference
-// implementation in cmd/ctxd/golden_test.go.
+// TestValidateTable covers the surviving invariants, one good and one bad
+// fixture per invariant. The Delta-6 classes (V2/V4/V7-malformed/V9) are
+// additionally pinned as old-boots/new-ERROR fixtures against the legacy
+// reference implementation in cmd/ctxd/golden_test.go.
 func TestValidateTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -38,21 +38,10 @@ func TestValidateTable(t *testing.T) {
 		field   string   // issue field to inspect
 		want    Severity // -1 = no issue expected on field
 	}{
-		// V1 — divergent num_ctx, same host: ERROR under ollama, WARN under openai.
-		{"V1 ollama same host", map[string]string{
-			"chat.num_ctx": "98304", "dream.num_ctx": "32768",
-		}, "dream.num_ctx", SeverityError},
-		{"V1 openai same host", map[string]string{
-			"chat.num_ctx": "98304", "dream.num_ctx": "32768",
-			"dream.protocol": "openai",
-		}, "dream.num_ctx", SeverityWarn},
-		{"V1 different host ok", map[string]string{
-			"chat.num_ctx": "98304", "dream.num_ctx": "32768",
-			"dream.host": "http://other.example:11434",
-		}, "dream.num_ctx", -1},
-		{"V1 inherit ok", map[string]string{
-			"chat.num_ctx": "98304",
-		}, "dream.num_ctx", -1},
+		// V1 retired with the dream chat tuple in β6 (design/01 §7 W5). Its four
+		// cases read dream.num_ctx against chat.num_ctx on a shared host; all
+		// three input fields are gone and the statement is a pool statement now
+		// (design/01 §5.5: not rebuilt here).
 
 		// V2 — inverted thresholds make low_confidence unreachable.
 		{"V2 inverted", map[string]string{
@@ -72,7 +61,10 @@ func TestValidateTable(t *testing.T) {
 
 		// V4 — protocol typos fell silently onto the ollama wire path.
 		{"V4 chat typo", map[string]string{"chat.protocol": "olama"}, "chat.protocol", SeverityError},
-		{"V4 dream typo", map[string]string{"dream.protocol": "openAI"}, "dream.protocol", SeverityError},
+		// The case-sensitivity probe rode on dream.protocol until β6 cut the
+		// tuple; embed.protocol is the second and last remaining list entry, so
+		// it carries both halves of the loop's breadth now.
+		{"V4 embed case typo", map[string]string{"embed.protocol": "openAI"}, "embed.protocol", SeverityError},
 		// The V4 allowEmpty column left with dream_embed.protocol in β5 — it
 		// was the only protocol key that inherited when empty. Every remaining
 		// entry has a non-empty default, so an empty protocol is a typo now and
@@ -92,16 +84,19 @@ func TestValidateTable(t *testing.T) {
 		{"V7 trailing slash", map[string]string{"embed.host": "http://embed.example/"}, "embed.host", SeverityError},
 		// β3 moved this case off rerank.host onto the fallback host, β4 moves it
 		// again — onto chat.host, the one V7 entry that outlives the list itself
-		// (design/01 §7: the remaining hosts leave in β5/β6/β7, the loop and
+		// (design/01 §7: the remaining hosts leave in β7/β8, the loop and
 		// validateHostURL in β8). Sharing the key with the scheme case above
 		// costs no coverage: the table asserts per-case input → field, and the
-		// loop's breadth is carried by the scheme/trailing-slash/unparseable
-		// cases sitting on three different hosts.
+		// loop's breadth is carried by cases on both surviving hosts.
 		{"V7 userinfo", map[string]string{"chat.host": "http://user:hunter2@chat.example"}, "chat.host", SeverityError},
-		{"V7 unparseable", map[string]string{"dream.host": "http://user:hunter2@bad host"}, "dream.host", SeverityError},
+		// The unparseable case rode on dream.host until β6; chat.host is the
+		// entry that outlives the list, and the withheld-value assertion it
+		// carries is about validateHostURL's error branch, not about which host
+		// reached it.
+		{"V7 unparseable", map[string]string{"chat.host": "http://user:hunter2@bad host"}, "chat.host", SeverityError},
 		// The empty-host continue of the V7 loop. It rode on the one list entry
 		// whose DEFAULT was empty (chat_fallback.host until β4, dream_embed.host
-		// until β5); all three survivors default to a real URL, so the case now
+		// until β5); both survivors default to a real URL, so the case now
 		// states the same thing from the settings side: a present-but-empty
 		// override (lookupMap counts it as provided, what an F2 row can deliver
 		// and FromEnv cannot) still takes the skip and does not become a scheme

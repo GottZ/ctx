@@ -198,7 +198,7 @@ func TestFromSourcesStrictMalformedErrors(t *testing.T) {
 	// field (today's getEnvInt fatal paths). The value stays default so the
 	// rest of the dump remains renderable before the boot abort.
 	for _, key := range []string{
-		"server.db_port", "embed.num_ctx", "chat.num_ctx", "dream.num_ctx",
+		"server.db_port", "embed.num_ctx", "chat.num_ctx",
 		"query.rate_limit_write", "query.rate_limit_read",
 	} {
 		_, issues := cfgFrom(t, map[string]string{key: "not_a_number"})
@@ -243,9 +243,11 @@ func TestFromEnvReadsEnvironment(t *testing.T) {
 	if c.Dream.Backoff.CapHours != Hours(45*24) {
 		t.Errorf("CapHours = %v, want 1080", c.Dream.Backoff.CapHours)
 	}
-	if c.Source("chat.host") != "env" || c.Source("dream.host") != "default" {
-		t.Errorf("sources wrong: chat.host=%q dream.host=%q",
-			c.Source("chat.host"), c.Source("dream.host"))
+	// The "default" side rode on dream.host until β6 cut the tuple;
+	// dream.language is unset in this fixture and outlives the cut train.
+	if c.Source("chat.host") != "env" || c.Source("dream.language") != "default" {
+		t.Errorf("sources wrong: chat.host=%q dream.language=%q",
+			c.Source("chat.host"), c.Source("dream.language"))
 	}
 	// Empty env == unset (legacy getEnv semantics).
 	if c.Embed.Host != "http://localhost:11434" {

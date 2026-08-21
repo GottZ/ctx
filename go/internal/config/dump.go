@@ -36,13 +36,12 @@ const (
 // (51–164 chars) sit far above the threshold.
 const fpMinLen = 24
 
-// inheritMarkers annotates zero-valued fields whose runtime value comes from
-// another group (the resolved accessors in config.go).
-var inheritMarkers = map[string]string{
-	"dream.model":   "(inherit chat)",
-	"dream.num_ctx": "(inherit chat)",
-	"dream.think":   "(inherit chat)",
-}
+// inheritMarkers died with the last inheriting tuple in β6. It annotated
+// zero-valued fields whose runtime value came from another group — the five
+// dream_embed markers "(inherit embed)" left in β5, the three dream markers
+// "(inherit chat)" with DreamBackend in β6. No registry key inherits from
+// another key any more: a backend row carries its own base_url, model_map and
+// num_ctx, so a zero field in the dump means zero, not "ask the neighbour".
 
 // Redacted renders the effective config as nested maps: one object per key
 // group, field names == registry key suffixes (1:1 greppable against the F2
@@ -72,9 +71,6 @@ func (c *Config) Redacted(surface Surface) map[string]any {
 func renderField(e entry, v reflect.Value, surface Surface) any {
 	if e.Secret != "" {
 		return maskSecret(e, v.String(), surface)
-	}
-	if marker, ok := inheritMarkers[e.Key]; ok && v.IsZero() {
-		return marker
 	}
 	if strings.HasSuffix(e.Key, ".host") {
 		return redactHostURL(v.String())
@@ -151,7 +147,16 @@ func renderHours(h Hours) string {
 // skips groups Redacted did not produce, so a stale name would be invisible
 // rather than wrong — and invisible dead ordering is what this list must not
 // accumulate over the cut train (design/01 §3, "dumpGroupOrder auf 6 Gruppen").
-// chat_fallback left with its tuple in β4, dream_embed in β5.
+// chat_fallback left with its tuple in β4, dream_embed in β5. "dream" STAYS:
+// β6 cut the group's backend tuple, not the group — twelve keys (enabled, the
+// scheduler pair, language, the two retrieval knobs, the six back-off keys)
+// still render under it.
+//
+// The list is a CURATED SUBSET of the rendered groups, not a cover: Redacted
+// produces every registry group, this names the ones the boot record carries.
+// Measured in β6: dropping a name whose group still renders shrinks both sides
+// of TestBootDumpArgsShape's comparison, so only the stale-name direction is
+// gated. Prune a name here solely when its LAST key left the registry.
 var dumpGroupOrder = []string{
 	"server", "chat", "embed", "dream",
 	"rerank", "graph", "query", "scheduler",

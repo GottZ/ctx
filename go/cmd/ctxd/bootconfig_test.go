@@ -99,10 +99,8 @@ func TestBootDefaults(t *testing.T) {
 		t.Errorf("embed defaults drifted: %+v", cc.Embed)
 	}
 
-	// Dream + back-off.
-	if cc.Dream.Enabled || cc.Dream.Host != "http://localhost:11434" ||
-		cc.Dream.Protocol != "ollama" || cc.Dream.Model != "" ||
-		cc.Dream.NumCtx != 0 || cc.Dream.Think != "" ||
+	// Dream + back-off (the dream chat tuple left the registry in β6).
+	if cc.Dream.Enabled ||
 		cc.Dream.IdleWait != 20*time.Second || cc.Dream.Parallelism != 1 {
 		t.Errorf("dream defaults drifted: %+v", cc.Dream)
 	}
@@ -180,11 +178,9 @@ func TestBootEnvWiring(t *testing.T) {
 		"CTX_GRAPH_EXPAND_WEIGHT_RECURRENT":         "0.95",
 		"CTX_GRAPH_EXPAND_NEW_PLACEMENT_FRAC":       "0.45",
 
-		"CTX_DREAM_ENABLED": "true", "CTX_DREAM_HOST": "http://192.0.2.10:8089",
-		"CTX_DREAM_API_KEY":  "sk-dream-0123456789abcdefghijklm",
-		"CTX_DREAM_PROTOCOL": "openai", "CTX_DREAM_MODEL": "test-dream-27b",
-		"CTX_DREAM_NUM_CTX": "98304", "CTX_DREAM_THINK": "true",
-
+		"CTX_DREAM_ENABLED": "true",
+		// The six CTX_DREAM_* tuple vars left the env surface with the registry
+		// cut in β6 — retired_test.go asserts their absence from EnvVars().
 		"CTX_DREAM_IDLE_WAIT": "30", "CTX_DREAM_PARALLELISM": "4",
 		"CTX_DREAM_BACKOFF_MODE": "log", "CTX_DREAM_BACKOFF_FACTOR": "2.5",
 		"CTX_DREAM_BACKOFF_GRACE": "3", "CTX_DREAM_BACKOFF_CAP": "30d",
@@ -233,10 +229,7 @@ func TestBootEnvWiring(t *testing.T) {
 		g.WeightRecurrent != 0.95 || g.NewPlacementFrac != 0.45 {
 		t.Errorf("graph wiring: %+v", g)
 	}
-	if !cc.Dream.Enabled || cc.Dream.Host != "http://192.0.2.10:8089" ||
-		cc.Dream.APIKey != "sk-dream-0123456789abcdefghijklm" ||
-		cc.Dream.Protocol != "openai" || cc.Dream.Model != "test-dream-27b" ||
-		cc.Dream.NumCtx != 98304 || cc.Dream.Think != "true" ||
+	if !cc.Dream.Enabled ||
 		cc.Dream.IdleWait != 30*time.Second || cc.Dream.Parallelism != 4 {
 		t.Errorf("dream wiring: %+v", cc.Dream)
 	}
@@ -267,7 +260,9 @@ func TestBootFatalSemantics(t *testing.T) {
 		{"db port", map[string]string{"CONTEXT_DB_PORT": "not_a_port"}, "server.db_port"},
 		{"embed num_ctx", map[string]string{"CTX_EMBED_NUM_CTX": "abc"}, "embed.num_ctx"},
 		{"chat num_ctx", map[string]string{"CTX_CHAT_NUM_CTX": "abc"}, "chat.num_ctx"},
-		{"dream num_ctx", map[string]string{"CTX_DREAM_NUM_CTX": "abc"}, "dream.num_ctx"},
+		// The dream num_ctx case left with the tuple in β6 — CTX_DREAM_NUM_CTX
+		// is no longer read, so a malformed value has no parse path to be fatal
+		// on. Two strict num_ctx keys remain until β7/β8.
 		{"rate limit write", map[string]string{"CTX_RATE_LIMIT_WRITE": "abc"}, "query.rate_limit_write"},
 		{"rate limit read", map[string]string{"CTX_RATE_LIMIT_READ": "abc"}, "query.rate_limit_read"},
 		{"timezone", map[string]string{"CTX_TIMEZONE": "Nope/Nowhere"}, "query.timezone"},
@@ -333,10 +328,10 @@ func TestBootDelta6Pinned(t *testing.T) {
 		{"V9 hop depth zero", map[string]string{"CTX_GRAPH_EXPAND_HOP_DEPTH": "0"}, "graph.hop_depth"},
 		{"V9 negative rate limit", map[string]string{"CTX_RATE_LIMIT_WRITE": "-1"}, "query.rate_limit_write"},
 		// The V12 cross-host credential case retired with the dream_embed tuple
-		// in β5 — the inheritance it guarded is a pool question now.
-		{"V1 dual-runner num_ctx (ollama)", map[string]string{
-			"CTX_CHAT_NUM_CTX": "98304", "CTX_DREAM_NUM_CTX": "32768",
-		}, "dream.num_ctx"},
+		// in β5 — the inheritance it guarded is a pool question now. The V1
+		// dual-runner case went the same way in β6 with the dream chat tuple:
+		// two runners on one host is a property of the enabled pool rows, and
+		// Validate does not see the pool (design/01 §5.5).
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -38,7 +38,9 @@ var dreamLanguageRe = regexp.MustCompile(dreamLanguagePattern)
 // dream constants, not mirrored, so it cannot drift when they are retuned.
 const temporalTimeoutBudget = dream.CycleTimeout - (dream.KeywordsTimeout + dream.DreamTimeout)
 
-// Validate checks the cross-field invariants V1–V14 and returns all findings.
+// Validate checks the surviving cross-field invariants and returns all
+// findings. The V-numbers are historical labels, not a contiguous range — the
+// cut train has retired V1, V8, V12 and V13 with the tuples they read.
 // WARN classes with "today's silent fallback" semantics (V5 prompt version,
 // V6 back-off, V10 parallelism clamp) NORMALIZE the config in place — exactly
 // what llm's init(), dream.SetBackoffConfig and the scheduler clamp did
@@ -46,7 +48,7 @@ const temporalTimeoutBudget = dream.CycleTimeout - (dream.KeywordsTimeout + drea
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateBackendTuples(c)...) // V1, V4, V7
+	issues = append(issues, validateBackendTuples(c)...) // V4, V7 (V1 cut in β6)
 	issues = append(issues, validateQuery(c)...)         // V2, V5, V11
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14
@@ -62,7 +64,6 @@ func validateBackendTuples(c *Config) []Issue {
 	for _, h := range []struct{ key, host string }{
 		{"chat.host", c.Chat.Host},
 		{"embed.host", c.Embed.Host},
-		{"dream.host", c.Dream.Host},
 	} {
 		if h.host == "" {
 			continue
@@ -81,7 +82,6 @@ func validateBackendTuples(c *Config) []Issue {
 	}{
 		{"chat.protocol", c.Chat.Protocol},
 		{"embed.protocol", c.Embed.Protocol},
-		{"dream.protocol", c.Dream.Protocol},
 	} {
 		if p.proto != backends.ProtocolOllama && p.proto != backends.ProtocolOpenAI {
 			issues = append(issues, Issue{Field: p.key, Severity: SeverityError,
@@ -90,19 +90,15 @@ func validateBackendTuples(c *Config) []Issue {
 		}
 	}
 
-	// V1 — chat and dream with explicitly different num_ctx on the same host:
-	// under ollama that means two runner instances of the same model (VRAM
-	// OOM); under openai the parameter is discarded on the wire → WARN only.
-	if c.Dream.NumCtx > 0 && c.Chat.NumCtx > 0 && c.Dream.NumCtx != c.Chat.NumCtx &&
-		c.Dream.Host == c.Chat.Host {
-		sev := SeverityWarn
-		if c.Dream.Protocol == backends.ProtocolOllama {
-			sev = SeverityError
-		}
-		issues = append(issues, Issue{Field: "dream.num_ctx", Severity: sev,
-			Msg: fmt.Sprintf("dream num_ctx %d != chat num_ctx %d on the same host — two runner instances of one model (VRAM OOM under ollama)",
-				c.Dream.NumCtx, c.Chat.NumCtx)})
-	}
+	// V1 retired with the dream chat tuple in β6 (design/01 §7 W5). It compared
+	// dream.num_ctx against chat.num_ctx on a shared host and called the
+	// divergence an ollama dual-runner (VRAM OOM), a WARN under openai where the
+	// parameter is discarded on the wire. All three of its inputs are gone, and
+	// the statement is not rebuildable here: the pool decides which rows serve
+	// role dream and role synthesis, Validate never sees the pool (config
+	// validation is parameter-pure), and two rows on one host is a topology an
+	// operator chooses — design/01 §5.5 rules it out explicitly ("nicht
+	// nachbauen, der Pool kennt Prioritäten und Rollen").
 
 	// V12 retired with the dream_embed tuple in β5 (design/01 §7 W4). It was
 	// the credential boundary of the dream-embed inheritance — a foreign

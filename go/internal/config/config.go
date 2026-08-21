@@ -130,9 +130,10 @@ type ServerConfig struct {
 type ChatConfig struct {
 	Host string `key:"chat.host" env:"CTX_CHAT_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
 	// TENANT-DECISION(provider-api-key): the provider api_key secret_refs
-	// (chat/embed/dream — rerank.api_key left the registry with the β3 tuple
-	// cut, chat_fallback.api_key with the β4 one, dream_embed.api_key with the
-	// β5 one) are tenant-overridable — a tenant brings its own provider
+	// (chat/embed — rerank.api_key left the registry with the β3 tuple cut,
+	// chat_fallback.api_key with the β4 one, dream_embed.api_key with the β5
+	// one, dream.api_key with the β6 one) are tenant-overridable — a tenant
+	// brings its own provider
 	// credential (resolved per-tenant by the 03-W3..W5 secret resolver,
 	// isolation gated by tenant.allow_shared_secrets
 	// §4.3). Alt: global-only with credentials flowing ONLY through the F3 pool's
@@ -163,20 +164,15 @@ type EmbedConfig struct {
 	NumCtx   int               `key:"embed.num_ctx" env:"CTX_EMBED_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends" tenancy:"global-only"`
 }
 
-// DreamConfig is the dream pipeline: its own chat tuple (model/num_ctx/think
-// inherit from chat when zero) and the back-off policy. The separate dream
-// embedding tuple left in β5 — which backend embeds dream jobs is a pool
-// question (context_backends, role dream-embed, resolved in dream/router.go),
-// and with the tuple went both its field-by-field inheritance from embed and
-// the V12 credential boundary that guarded that inheritance.
+// DreamConfig is the dream pipeline: the master switch, the scheduler cadence,
+// the report language and the back-off policy. Both backend tuples it once
+// carried have left — the embedding tuple in β5, its own chat tuple in β6.
+// Which backend serves a dream job is a pool question (context_backends, roles
+// dream and dream-embed, resolved in dream/router.go), and with the tuples went
+// the field-by-field inheritance from chat/embed as well as the two checks that
+// guarded it (V1 dual-runner num_ctx, V12 credential boundary).
 type DreamConfig struct {
-	Enabled  bool               `key:"dream.enabled" env:"CTX_DREAM_ENABLED" default:"false" mut:"restart" tenancy:"global-only"`
-	Host     string             `key:"dream.host" env:"CTX_DREAM_HOST" default:"http://localhost:11434" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	APIKey   string             `key:"dream.api_key" env:"CTX_DREAM_API_KEY" default:"" mut:"hot" secret:"fp" superseded:"f3:context_backends" tenancy:"tenant-overridable"`
-	Protocol backends.Protocol  `key:"dream.protocol" env:"CTX_DREAM_PROTOCOL" default:"ollama" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	Model    string             `key:"dream.model" env:"CTX_DREAM_MODEL" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
-	NumCtx   int                `key:"dream.num_ctx" env:"CTX_DREAM_NUM_CTX" default:"0" mut:"hot" parse:"strict" superseded:"f3:context_backends" tenancy:"global-only"`
-	Think    backends.ThinkMode `key:"dream.think" env:"CTX_DREAM_THINK" default:"" mut:"hot" superseded:"f3:context_backends" tenancy:"global-only"`
+	Enabled bool `key:"dream.enabled" env:"CTX_DREAM_ENABLED" default:"false" mut:"restart" tenancy:"global-only"`
 
 	// idle_wait (scheduler cadence) and parallelism (process-wide worker count,
 	// restart) are background-pipeline infrastructure — global-only.
@@ -1432,30 +1428,14 @@ func (c *Config) ChatBackend() backends.Backend {
 	}
 }
 
-// DreamBackend returns the dream chat tuple with the inheritance chain
-// resolved: Model/Think inherit from chat when empty, NumCtx inherits from
-// chat when 0 (Delta 1 — unified with the daily-synthesis derivation; V1
-// guards the divergent-NumCtx dual-runner case).
-func (c *Config) DreamBackend() backends.Backend {
-	b := backends.Backend{
-		Host:     c.Dream.Host,
-		APIKey:   c.Dream.APIKey,
-		Protocol: c.Dream.Protocol,
-		Model:    c.Dream.Model,
-		NumCtx:   c.Dream.NumCtx,
-		Think:    c.Dream.Think,
-	}
-	if b.Model == "" {
-		b.Model = c.Chat.Model
-	}
-	if b.NumCtx == 0 {
-		b.NumCtx = c.Chat.NumCtx
-	}
-	if b.Think == "" {
-		b.Think = c.Chat.Think
-	}
-	return b
-}
+// DreamBackend died with the dream chat tuple in β6. It resolved Model, NumCtx
+// and Think onto Chat.* whenever the dream field was zero (Delta 1), with V1
+// rejecting the one divergence that costs VRAM rather than correctness — a
+// second runner of the same model on the same host. Both statements are pool
+// statements now: the dream dispatch resolves the role-dream chain and nothing
+// else (dream/router.go chat, gated by dream.go:141), every row carrying its
+// own model_map and num_ctx — and "one runner or two" is a property of the rows
+// an operator enables, not of a field pair Validate could compare.
 
 // DreamEmbedBackend died with the dream_embed tuple in β5. It resolved the
 // tuple field by field onto Embed.*, with V12 rejecting the one case the

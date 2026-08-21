@@ -98,7 +98,6 @@ func w023Config(enabled bool) *config.Config {
 		Server: config.ServerConfig{DBPass: "test-password"},
 		Chat:   config.ChatConfig{Protocol: backends.ProtocolOllama},
 		Embed:  config.EmbedConfig{Protocol: backends.ProtocolOllama},
-		Dream:  config.DreamConfig{Protocol: backends.ProtocolOllama},
 		Graph:  config.GraphConfig{HopDepth: 1},        // Enabled stays false
 		Query:  config.QueryConfig{Timezone: time.UTC}, // RateLimitRead 0 = disabled
 		Selector: config.SelectorConfig{

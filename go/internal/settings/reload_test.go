@@ -370,7 +370,14 @@ func TestLeakScanBootBuildReload(t *testing.T) {
 	pastedSecret := "PASTEDMARKER-" + strings.Repeat("p", 30)
 
 	t.Setenv("CTX_CHAT_HOST", "http://chat.example:8089")
-	t.Setenv("CTX_DREAM_API_KEY", envSecret)
+	// The env-provided secret rode on CTX_DREAM_API_KEY until β6 cut the dream
+	// tuple; a var the registry no longer reads would put the marker nowhere and
+	// make the scan vacuous. CTX_EMBED_API_KEY is the same class (secret:"fp")
+	// and stays effective here BECAUSE the embed.api_key row below fails to
+	// resolve: the override is dropped, so the env value survives into the
+	// snapshot and the boot dump — both markers ride the same key through two
+	// different paths.
+	t.Setenv("CTX_EMBED_API_KEY", envSecret)
 	buf := captureLogs(t)
 
 	rows := []store.SettingOverride{

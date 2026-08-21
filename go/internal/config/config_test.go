@@ -4,62 +4,16 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 )
 
-// TestDreamBackendInheritance pins the derivation that replaces the 3×
-// duplicated fallback chain, including Delta 1 (decision §7.2: NumCtx
-// inherits from chat when 0 — unified with the daily-synthesis derivation).
-func TestDreamBackendInheritance(t *testing.T) {
-	cases := []struct {
-		name string
-		vals map[string]string
-		want backends.Backend
-	}{
-		{
-			"full inherit",
-			map[string]string{
-				"chat.model": "chat-27b", "chat.num_ctx": "98304", "chat.think": "true",
-			},
-			backends.Backend{
-				Host: "http://localhost:11434", Protocol: backends.ProtocolOllama,
-				Model: "chat-27b", NumCtx: 98304, Think: "true",
-			},
-		},
-		{
-			"explicit dream wins",
-			map[string]string{
-				"chat.model": "chat-27b", "chat.num_ctx": "98304", "chat.think": "true",
-				"dream.model": "dream-9b", "dream.num_ctx": "32768", "dream.think": "false",
-				"dream.host": "http://dream.example:8089",
-			},
-			backends.Backend{
-				Host: "http://dream.example:8089", Protocol: backends.ProtocolOllama,
-				Model: "dream-9b", NumCtx: 32768, Think: "false",
-			},
-		},
-		{
-			"partial: model own, num_ctx+think inherited (Delta 1)",
-			map[string]string{
-				"chat.model": "chat-27b", "chat.num_ctx": "98304", "chat.think": "false",
-				"dream.model": "dream-9b",
-			},
-			backends.Backend{
-				Host: "http://localhost:11434", Protocol: backends.ProtocolOllama,
-				Model: "dream-9b", NumCtx: 98304, Think: "false",
-			},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			cfg, _ := cfgFrom(t, c.vals)
-			if got := cfg.DreamBackend(); !reflect.DeepEqual(got, c.want) {
-				t.Errorf("DreamBackend() = %+v, want %+v", got, c.want)
-			}
-		})
-	}
-}
+// TestDreamBackendInheritance died with the dream chat tuple in β6. It pinned
+// the field-by-field fallback onto Chat.* (model/think when empty, num_ctx when
+// 0 — Delta 1, unified with the daily-synthesis derivation), the last of the
+// three duplicated fallback chains F1 replaced. The pool states it per row now:
+// role dream resolves its own chain with its own model_map and num_ctx
+// (dream/router.go, covered in the dream package), and nothing falls back onto
+// the synthesis row's fields.
 
 // TestDreamEmbedBackendInheritance died with the dream_embed tuple in β5. It
 // pinned the field-by-field fallback onto Embed.* (an own model over an
