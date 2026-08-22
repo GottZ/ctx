@@ -47,6 +47,7 @@ type Options struct {
 	PresencePenalty float64 `json:"presence_penalty,omitempty"`
 	NumPredict      int     `json:"num_predict,omitempty"`
 	NumCtx          int     `json:"num_ctx,omitempty"`
+<<<<<<< HEAD
 	// NumPredictScale multiplies NumPredict once the chain has RESOLVED it —
 	// after a model_map num_predict/max_tokens override, inside
 	// applyModelParams, which is the only point where the effective cap of an
@@ -59,6 +60,14 @@ type Options struct {
 	// scale factor is a ctx-internal instruction, not a sampling parameter any
 	// backend knows.
 	NumPredictScale float64 `json:"-"`
+	// CapLocked marks NumPredict as NOT overridable by model_map
+	// num_predict/max_tokens params (applyModelParams). Extraction phases
+	// with a hard budget — dream keyword generation (200) — use it so a
+	// serving row's generous eval cap (e.g. 1200) cannot silently inflate a
+	// phase whose degenerate output then burns tokens to the cap and
+	// truncates the JSON (prod: BRADES block, 9× completion_tokens=1200,
+	// "keywords too few (1)"). JSON-tagged off: never a wire field.
+	CapLocked bool `json:"-"`
 	// Extra carries model_map params that have no dedicated Options field
 	// (e.g. chat_template_kwargs.enable_thinking for vLLM/LiteLLM-served
 	// models) to the OpenAI wire path. JSON-tagged off on purpose: Ollama's

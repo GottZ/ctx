@@ -248,3 +248,32 @@ func TestModelMapExtraPassthrough(t *testing.T) {
 		t.Errorf("model_map temperature leaked over extra_body: %s", body)
 	}
 }
+
+// TestCapLockedResistsModelMapOverride pins the CapLocked contract: a phase
+// with a hard budget (dream keyword extraction, 200) must keep its cap even
+// when the serving row's model_map carries a generous num_predict/max_tokens
+// for another phase of the same role (dream eval 1200). Without this, a
+// degenerate model output on a specific block burns tokens to the eval cap
+// and truncates the extraction JSON (prod: BRADES block, 9× "keywords too
+// few (1)" with completion_tokens=1200).
+func TestCapLockedResistsModelMapOverride(t *testing.T) {
+	b := backends.Backend{}
+	opts, _ := applyModelParams(
+		Options{NumPredict: 200, CapLocked: true},
+		map[string]any{"max_tokens": 1200},
+		&b,
+	)
+	if opts.NumPredict != 200 {
+		t.Errorf("CapLocked phase got NumPredict=%d, want 200 (model_map override must not apply)", opts.NumPredict)
+	}
+
+	// Control: without CapLocked the override applies as documented.
+	opts2, _ := applyModelParams(
+		Options{NumPredict: 200},
+		map[string]any{"max_tokens": 1200},
+		&b,
+	)
+	if opts2.NumPredict != 1200 {
+		t.Errorf("non-locked phase got NumPredict=%d, want 1200 (override must apply)", opts2.NumPredict)
+	}
+}

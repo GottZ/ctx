@@ -67,6 +67,7 @@ func keywordOptions() llm.Options {
 	return llm.Options{
 		Temperature: 0.1,
 		NumPredict:  200,
+		CapLocked:   true, // keep the extraction budget hard — see applyModelParams
 	}
 }
 

@@ -433,7 +433,14 @@ func applyModelParams(base Options, params map[string]any, b *backends.Backend) 
 		case "presence_penalty":
 			base.PresencePenalty = toFloat(v, base.PresencePenalty)
 		case "num_predict", "max_tokens":
-			base.NumPredict = int(toFloat(v, float64(base.NumPredict)))
+			// CapLocked phases (dream keyword extraction) keep their hard
+			// budget: a serving row's generous cap for another phase of the
+			// same role (dream eval 1200) must not inflate an extraction
+			// phase whose degenerate output then burns tokens to the cap and
+			// truncates its JSON (prod: BRADES block, 9× "too few (1)").
+			if !base.CapLocked {
+				base.NumPredict = int(toFloat(v, float64(base.NumPredict)))
+			}
 		case "think":
 			if tv, ok := v.(bool); ok {
 				t := tv
