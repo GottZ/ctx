@@ -59,6 +59,14 @@ type Options struct {
 	// scale factor is a ctx-internal instruction, not a sampling parameter any
 	// backend knows.
 	NumPredictScale float64 `json:"-"`
+	// Extra carries model_map params that have no dedicated Options field
+	// (e.g. chat_template_kwargs.enable_thinking for vLLM/LiteLLM-served
+	// models) to the OpenAI wire path. JSON-tagged off on purpose: Ollama's
+	// /api/chat `options` block must not receive arbitrary keys. Merged into
+	// the OpenAI request body AFTER marshal and BEFORE the backend's
+	// extra_body — a backend row's extra_body therefore still wins on key
+	// collision (applyOpenAIBodyExtras, last write wins).
+	Extra map[string]any `json:"-"`
 }
 
 // ChatResponse is the unified response from any provider.
@@ -286,6 +294,15 @@ func chatOpenAI(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
+	if len(opts.Extra) > 0 {
+		// model_map params without a dedicated Options field reach the wire
+		// here (last write wins within the map). Runs BEFORE the backend
+		// extra_body merge so a backend row's extra_body keeps precedence.
+		body, err = mergeJSONFields(body, opts.Extra)
+		if err != nil {
+			return nil, fmt.Errorf("llm: merge model_map params: %w", err)
+		}
+	}
 	body, err = applyOpenAIBodyExtras(body, &b)
 	if err != nil {
 		return nil, fmt.Errorf("llm: merge extra_body: %w", err)
@@ -342,6 +359,25 @@ func chatOpenAI(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 		out.ProviderRequestID = result.ID
 	}
 	return out, nil
+}
+
+// mergeJSONFields merges extra top-level fields into a marshaled JSON request
+// body, last write wins on key collision. Same shape as the backend extra_body
+// merge inside applyOpenAIBodyExtras (marshal, merge, re-marshal) — kept
+// separate because that path adds provider enforcement and must stay the
+// final word on the body.
+func mergeJSONFields(body []byte, extra map[string]any) ([]byte, error) {
+	if len(extra) == 0 {
+		return body, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	for k, v := range extra {
+		m[k] = v
+	}
+	return json.Marshal(m)
 }
 
 // applyOpenAIBodyExtras merges b.ExtraBody into the marshaled request (last

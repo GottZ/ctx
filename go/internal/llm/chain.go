@@ -439,6 +439,23 @@ func applyModelParams(base Options, params map[string]any, b *backends.Backend) 
 				t := tv
 				think = &t
 			}
+		default:
+			// Passthrough: a model_map param with no dedicated Options field
+			// (chat_template_kwargs, provider-specific knobs) is carried to
+			// the OpenAI wire path via Options.Extra instead of being
+			// silently dropped. The documented contract — "model_map params
+			// override the code default at dispatch" (evaluate.go
+			// DreamOptions comment) — previously only honoured the fixed
+			// Options keys, so e.g. a chat_template_kwargs.enable_thinking
+			// disable in the serving row never reached the request, while
+			// chatOpenAI's OpenRouter-only `reasoning` field went out instead
+			// (a shape non-OpenRouter providers like vLLM/LiteLLM ignore →
+			// thinking stays on, output runs into the token cap, structured
+			// JSON answers arrive truncated).
+			if base.Extra == nil {
+				base.Extra = make(map[string]any)
+			}
+			base.Extra[k] = v
 		}
 	}
 	if base.NumPredictScale > 1 && base.NumPredict > 0 {

@@ -201,3 +201,50 @@ func TestChatChainWirePathFollowsEachLinksProtocol(t *testing.T) {
 	}
 	assertWire(t, rec, "/v1/chat/completions", `"max_tokens"`)
 }
+
+// TestModelMapExtraPassthrough pins the wire contract of model_map params
+// with no dedicated Options field (chat_template_kwargs, provider-specific
+// knobs): applyModelParams must carry them into Options.Extra, and chatOpenAI
+// must merge them into the request body BEFORE the backend's extra_body —
+// which keeps precedence on key collision (applyOpenAIBodyExtras, last write
+// wins). Regression for the v5.0.0 dream/translate failure: a
+// chat_template_kwargs.enable_thinking disable in the serving row was silently
+// dropped, chatOpenAI sent the OpenRouter-only `reasoning` field instead, and
+// non-OpenRouter providers (vLLM/LiteLLM) kept thinking → structured JSON
+// answers truncated at the token cap.
+func TestModelMapExtraPassthrough(t *testing.T) {
+	rec := newWireRecorder(t, "ok")
+	b := rec.backend(backends.ProtocolOpenAI)
+	b.ID, b.Name = "wire", "wire"
+	b.Trust = backends.TrustFull
+	b.Enabled = true
+	b.ExtraBody = map[string]any{"temperature": 99} // backend wins on collision
+
+	opts, think := applyModelParams(Options{NumPredict: 5}, map[string]any{
+		"think":                false,
+		"chat_template_kwargs": map[string]any{"enable_thinking": false},
+		"temperature":          0.7,
+	}, &b)
+	if think == nil || *think {
+		t.Fatalf("think = %v, want false", think)
+	}
+	if _, ok := opts.Extra["chat_template_kwargs"]; !ok {
+		t.Fatalf("chat_template_kwargs not carried to Options.Extra: %+v", opts.Extra)
+	}
+
+	if _, err := Chat(context.Background(), b, "sys", "user", opts, 5*time.Second); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	_, body := rec.recorded()
+	for _, want := range []string{`"chat_template_kwargs"`, `"enable_thinking"`, `"max_tokens":5`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %s: %s", want, body)
+		}
+	}
+	if !strings.Contains(body, `"temperature":99`) {
+		t.Errorf("backend extra_body precedence broken (want temperature 99): %s", body)
+	}
+	if strings.Contains(body, `"temperature":0.7`) {
+		t.Errorf("model_map temperature leaked over extra_body: %s", body)
+	}
+}
