@@ -808,6 +808,12 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 		}
 
 		for _, res := range results {
+			// Enforce the aggregate candidate cap BEFORE appending from this
+			// batch. The post-batch check below alone lets a final full batch
+			// overshoot MaxCandidatesPerKeyword*MaxKeywords.
+			if len(candidates) >= MaxCandidatesPerKeyword*MaxKeywords {
+				break
+			}
 			if seen[res.ID] {
 				continue
 			}
