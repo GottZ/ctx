@@ -89,7 +89,14 @@ else's environment — that led to a fix landing in the repository.
   was lost; the shipped fix keeps his 600 (re-measured with the Qwen3
   tokenizer at ≈1.5× the array form), turns the exact pin into a lower-bound
   guard and adds `cap_hit` / `links_parsed` llmlog telemetry so the next
-  cap-truncation is countable instead of invisible.
+  cap-truncation is countable instead of invisible. Also PR
+  [#36](https://github.com/GottZ/ctx/pull/36): the dream candidate loop
+  checked its aggregate cap only after a whole keyword batch had been
+  appended, so cycles reached 28–29 candidates against the declared 25 and
+  inflated every dream-eval prompt; the shipped fix keeps his pre-append
+  guard, hardened with a pure fold helper whose table test discriminates the
+  old and new folds (26–29 vs exactly 25) and with `candidates_capped`
+  llmlog telemetry so a cap that fires is countable.
 - **DojoGenesis** ([@DojoGenesis](https://github.com/DojoGenesis)) —
   [#16](https://github.com/GottZ/ctx/issues/16) / PR
   [#17](https://github.com/GottZ/ctx/pull/17): first boot on a fresh database
