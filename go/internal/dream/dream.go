@@ -76,7 +76,13 @@ const (
 	// persistent outage doesn't spin-retry every 20s.
 	CooldownTransientMinutes = 5
 
-	// MaxKeywords is the number of keywords extracted per block.
+	// MaxKeywords is the keyword-count factor of the aggregate candidate cap
+	// (MaxCandidatesPerKeyword*MaxKeywords, enforced in appendCandidates and
+	// modelled by promptguard's dream-eval budget row). It does NOT bound the
+	// keyword list itself: GenerateKeywords' prompt asks for 5 to 8 concepts
+	// (keywords.go) and nothing truncates the result, so a cycle can run more
+	// than MaxKeywords searches. Clamping the list is a separate decision —
+	// it would drop the topics keywords 6-8 cover.
 	MaxKeywords = 5
 
 	// MaxCandidatesPerKeyword limits RRF results per keyword search.
@@ -807,34 +813,7 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 			continue
 		}
 
-		for _, res := range results {
-			// Enforce the aggregate candidate cap BEFORE appending from this
-			// batch. The post-batch check below alone lets a final full batch
-			// overshoot MaxCandidatesPerKeyword*MaxKeywords.
-			if len(candidates) >= MaxCandidatesPerKeyword*MaxKeywords {
-				break
-			}
-			if seen[res.ID] {
-				continue
-			}
-			// Same-scope filter (V5).
-			if res.Scope != source.Scope {
-				continue
-			}
-			// Exclude index blocks as candidates — structural listings, not content.
-			if res.Category == "index" {
-				continue
-			}
-			seen[res.ID] = true
-			candidates = append(candidates, BlockInfo{
-				ID:        res.ID,
-				Title:     res.Title,
-				Category:  res.Category,
-				Content:   res.Content,
-				Scope:     res.Scope,
-				UpdatedAt: res.UpdatedAt,
-			})
-		}
+		candidates = appendCandidates(candidates, seen, results, source.Scope)
 
 		// Cap total candidates.
 		if len(candidates) >= MaxCandidatesPerKeyword*MaxKeywords {
@@ -891,6 +870,56 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 	}
 
 	return candidates, nil
+}
+
+// appendCandidates folds one keyword's RRF batch into the running candidate
+// set and returns the grown slice. Pure by construction — no pool, no router,
+// no I/O — so the whole cap/dedup/filter policy of the keyword loop is
+// table-testable without a database (candidatecap_test.go).
+//
+// The aggregate cap MaxCandidatesPerKeyword*MaxKeywords is enforced BEFORE
+// every append, not once per batch. It has to be: nothing clamps the keyword
+// list to MaxKeywords (the keyword prompt asks for 5 to 8 concepts,
+// keywords.go), so a cycle can run more than MaxKeywords batches, and with a
+// post-batch check alone the batch that crosses the cap still appends in full
+// — ending the cycle at up to cap+MaxCandidatesPerKeyword-1 candidates (29
+// observed in production). MaxCandidatesPerKeyword*MaxKeywords is also the
+// item count promptguard's budget gate models for dream-eval
+// (internal/promptguard/budget_gate_test.go, "dream-eval" row, against
+// promptguard.BudgetDreamEval); the gate's declared worst case is the real
+// worst case only while this guard stands.
+//
+// seen is mutated: it enters carrying the source block ID and every candidate
+// already collected, and leaves carrying the newly appended ones. Skipped
+// results — duplicate, cross-scope (V5), index category — cost nothing
+// against the cap.
+func appendCandidates(candidates []BlockInfo, seen map[string]bool, results []rrf.SearchResult, sourceScope string) []BlockInfo {
+	for _, res := range results {
+		if len(candidates) >= MaxCandidatesPerKeyword*MaxKeywords {
+			break
+		}
+		if seen[res.ID] {
+			continue
+		}
+		// Same-scope filter (V5).
+		if res.Scope != sourceScope {
+			continue
+		}
+		// Exclude index blocks as candidates — structural listings, not content.
+		if res.Category == "index" {
+			continue
+		}
+		seen[res.ID] = true
+		candidates = append(candidates, BlockInfo{
+			ID:        res.ID,
+			Title:     res.Title,
+			Category:  res.Category,
+			Content:   res.Content,
+			Scope:     res.Scope,
+			UpdatedAt: res.UpdatedAt,
+		})
+	}
+	return candidates
 }
 
 // Stats returns dream processing statistics, filtered by scope. Eligibility
