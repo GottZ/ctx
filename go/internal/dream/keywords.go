@@ -346,17 +346,24 @@ func ExtractKeywords(title, content string, limit int) []string {
 }
 
 // tokenize splits text into lowercase tokens, stripping punctuation.
+// Path separators and symbol clusters (\, /, ., =, @, ->, :) act as token
+// boundaries so dense technical content (Windows paths, dot-separated
+// identifiers, key=value pairs) yields searchable terms instead of one
+// giant glued token (prod 2026-08-23: BRADES blocks). Hyphens inside a
+// word are preserved so "streaming-pc" stays one term.
 func tokenize(text string) []string {
 	var tokens []string
 	for _, word := range strings.Fields(text) {
-		// Strip leading/trailing punctuation.
-		clean := strings.TrimFunc(word, func(r rune) bool {
+		parts := strings.FieldsFunc(word, func(r rune) bool {
 			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-'
 		})
-		if clean == "" {
-			continue
+		for _, part := range parts {
+			lower := strings.ToLower(part)
+			if len(lower) < 2 {
+				continue
+			}
+			tokens = append(tokens, lower)
 		}
-		tokens = append(tokens, strings.ToLower(clean))
 	}
 	return tokens
 }
