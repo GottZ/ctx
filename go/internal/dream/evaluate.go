@@ -217,6 +217,14 @@ func evaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 		candidateIDs[c.ID] = true
 	}
 	valid := filterValidCandidates(links, candidateIDs)
+	if noteDroppedInvalid(entry, len(links), len(valid)) && len(valid) == 0 {
+		// Every link the model named was rejected. The function still returns
+		// a zero-link success, which the cycle books as "nothing to link" and
+		// answers with the multi-day inert back-off — so this line is the only
+		// place the loss is visible while it happens.
+		slog.Warn("dream: every parsed link dropped by the candidate filter",
+			"block_id", source.ID, "links_parsed", len(links), "parse_format", format)
+	}
 
 	if capped, dropped := applyHardCap(valid, MaxLinksPerCycle); dropped > 0 {
 		if entry.Metadata == nil {
@@ -245,6 +253,42 @@ func noteCandidatesCapped(entry *llmlog.Entry, capped int) {
 		entry.Metadata = map[string]any{}
 	}
 	entry.Metadata["candidates_capped"] = capped
+}
+
+// noteDroppedInvalid stamps how many parsed links filterValidCandidates
+// rejected — non-UUID targets, ids outside the candidate set (hallucinations),
+// unknown relationship types, out-of-range or below-floor confidences — and
+// reports whether it wrote anything. Nothing is written when nothing dropped,
+// for the reason noteCandidatesCapped states: a key present on every row
+// cannot be counted, and 0 is the common case.
+//
+// The count is directly comparable to links_parsed because the two stages
+// between them preserve it — applyLinkFloor rewrites confidences in place and
+// enforceSupersedesDirection downgrades a relationship rather than dropping
+// the link, so both return exactly what they were given. A row reading
+// "links_parsed n, links_dropped_invalid n" is therefore the signature of the
+// silent zero-link cycle: the model answered, nothing survived, and the block
+// went into the inert back-off anyway.
+//
+// Observability only: the caller still returns (valid, nil) in that case; no
+// cooldown, retry or error path changes here. Whether a fully dropped parse
+// should instead become a transient error is a separate decision that needs
+// the rate this counter measures — the transient path has no attempt counter,
+// so a backend answering deterministically with hallucinated ids would re-burn
+// one eval on the same block every five minutes forever.
+//
+// Split out for the reachability reason noteCapHit documents: the llmlog entry
+// is function-local, so the stamp is only testable as its own function.
+func noteDroppedInvalid(entry *llmlog.Entry, parsed, valid int) bool {
+	dropped := parsed - valid
+	if entry == nil || dropped <= 0 {
+		return false
+	}
+	if entry.Metadata == nil {
+		entry.Metadata = map[string]any{}
+	}
+	entry.Metadata["links_dropped_invalid"] = dropped
+	return true
 }
 
 // noteCapHit flags a parse failure that is really an output-cap truncation and

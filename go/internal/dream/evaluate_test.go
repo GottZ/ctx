@@ -428,6 +428,97 @@ func TestEvaluateRelationships_LinksParsedRecorded(t *testing.T) {
 	}
 }
 
+// --- Candidate-filter drop counter (noteDroppedInvalid, issue #27) ---.
+
+// TestNoteDroppedInvalid pins the counter that makes filterValidCandidates'
+// five bare continues countable. Driven as its own function for the
+// reachability reason TestNoteCapHit documents: the llmlog entry never leaves
+// evaluateRelationships.
+func TestNoteDroppedInvalid(t *testing.T) {
+	tests := []struct {
+		name        string
+		parsed      int
+		valid       int
+		wantWritten bool
+		wantValue   int
+	}{
+		// The healthy majority — every parsed link survived, so no key.
+		{"nothing-dropped", 3, 3, false, 0},
+		// The silent-inert signature: the model answered, nothing survived.
+		{"all-dropped", 2, 0, true, 2},
+		{"partial-drop", 5, 3, true, 2},
+		// Zero-link verdict ("[]"): nothing parsed, nothing dropped.
+		{"zero-link-verdict", 0, 0, false, 0},
+		// Defensive: more survivors than parsed is a caller bug, not a row.
+		{"negative-is-ignored", 1, 2, false, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := &llmlog.Entry{Pipeline: "dream-eval"}
+			written := noteDroppedInvalid(entry, tt.parsed, tt.valid)
+			if written != tt.wantWritten {
+				t.Fatalf("noteDroppedInvalid = %v, want %v", written, tt.wantWritten)
+			}
+			got, ok := entry.Metadata["links_dropped_invalid"]
+			if ok != tt.wantWritten {
+				t.Fatalf("links_dropped_invalid present = %v, want %v (metadata %+v)", ok, tt.wantWritten, entry.Metadata)
+			}
+			if tt.wantWritten && got != tt.wantValue {
+				t.Errorf("links_dropped_invalid = %v, want %d", got, tt.wantValue)
+			}
+		})
+	}
+}
+
+// TestNoteDroppedInvalid_KeepsSiblingMetadata pins that the stamp lands beside
+// the keys evaluateRelationships writes before it (parse_format, links_parsed)
+// instead of replacing the map, and that a nil entry does not panic.
+func TestNoteDroppedInvalid_KeepsSiblingMetadata(t *testing.T) {
+	entry := &llmlog.Entry{Pipeline: "dream-eval", Metadata: map[string]any{"links_parsed": 4}}
+	noteDroppedInvalid(entry, 4, 1)
+	if entry.Metadata["links_parsed"] != 4 {
+		t.Errorf("sibling metadata lost: %+v", entry.Metadata)
+	}
+	if entry.Metadata["links_dropped_invalid"] != 3 {
+		t.Errorf("links_dropped_invalid = %v, want 3", entry.Metadata["links_dropped_invalid"])
+	}
+	if noteDroppedInvalid(nil, 4, 1) {
+		t.Error("nil entry must not report a write")
+	}
+}
+
+// TestEvaluateRelationships_AllLinksDropped_CountedNotErrored drives the whole
+// function with an answer whose single UUID is well-formed but outside the
+// candidate set — the hallucination case that ends as a zero-link success and
+// books the inert back-off. Two things are pinned: the behaviour does NOT
+// change (0 links, nil error), and the numbers that reach the counter on this
+// path produce the metadata key. The stamp is asserted on the helper because
+// the entry is function-local and llmlog.Record is a no-op on a nil pool (see
+// TestNoteCapHit) — the same split TestEvaluateRelationships_LinksParsedRecorded
+// uses.
+func TestEvaluateRelationships_AllLinksDropped_CountedNotErrored(t *testing.T) {
+	mockChatJSON(t, constResp(`[{"target_id":"`+uuidG+`","type":"topical","confidence":0.9}]`))
+
+	links, err := EvaluateRelationships(context.Background(), nil, newTestRouter(), llm.Options{},
+		srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	if err != nil {
+		t.Fatalf("a fully filtered answer must stay a zero-link success: %v", err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("want 0 links, got %+v", links)
+	}
+
+	// Same parsed/valid pair the filtered path hands the counter: 1 parsed,
+	// 0 survivors.
+	entry := &llmlog.Entry{Pipeline: "dream-eval", Metadata: map[string]any{"links_parsed": 1}}
+	if !noteDroppedInvalid(entry, 1, len(links)) {
+		t.Fatal("a fully dropped parse must be counted")
+	}
+	if entry.Metadata["links_dropped_invalid"] != 1 {
+		t.Errorf("links_dropped_invalid = %v, want 1", entry.Metadata["links_dropped_invalid"])
+	}
+}
+
 // --- filterValidCandidates Pure-Function Tests (covers NaN/Inf branches) ---.
 
 func TestFilterValidCandidates_NaNConfidence_Dropped(t *testing.T) {
