@@ -699,7 +699,7 @@ func (c *StatusCollector) Snapshot(ctx context.Context) statusResponse {
 		qInterval = 30 * time.Second
 	}
 	if !c.broadcasting.Load() && stale(c.qsAt.Load(), qInterval) {
-		c.scanQueueAsync(cfg.Scheduler.ReadScopes)
+		c.scanQueueAsync(cfg.Scheduler.ReadScopes, qInterval)
 	}
 
 	dbInterval := cfg.Events.DBStatsInterval
@@ -707,7 +707,7 @@ func (c *StatusCollector) Snapshot(ctx context.Context) statusResponse {
 		dbInterval = 60 * time.Second
 	}
 	if !c.broadcasting.Load() && stale(c.dbStatsAt.Load(), dbInterval) {
-		c.scanDBStatsAsync(cfg)
+		c.scanDBStatsAsync(cfg, dbInterval)
 	}
 
 	return c.assemble(cur, c.qs.Load(), c.dbStats.Load())
@@ -815,14 +815,14 @@ func (c *StatusCollector) refreshForBroadcast(ctx context.Context) statusRespons
 		qInterval = 30 * time.Second
 	}
 	if stale(c.qsAt.Load(), qInterval) {
-		c.scanQueueAsync(cfg.Scheduler.ReadScopes)
+		c.scanQueueAsync(cfg.Scheduler.ReadScopes, qInterval)
 	}
 	dbInterval := cfg.Events.DBStatsInterval
 	if dbInterval <= 0 {
 		dbInterval = 60 * time.Second
 	}
 	if stale(c.dbStatsAt.Load(), dbInterval) {
-		c.scanDBStatsAsync(cfg)
+		c.scanDBStatsAsync(cfg, dbInterval)
 	}
 	return c.assemble(snap, c.qs.Load(), c.dbStats.Load())
 }
@@ -859,8 +859,23 @@ func (c *StatusCollector) refreshCheapAsync() {
 
 // scanQueueAsync runs the O(n) dream-queue scan in the background; the CAS
 // guard makes N concurrent stale readers trigger ONE scan per interval.
-func (c *StatusCollector) scanQueueAsync(scopes []string) {
+//
+// interval is the caller's queue_stats_interval and closes the gap between
+// the caller's staleness decision and this CAS: a reader reads a stale qsAt,
+// gets descheduled, and reaches the CAS only after the flight it was racing
+// has landed — the flag is free again by then, so it would win and rescan
+// data that is one instruction old. The flight stamps qsAt BEFORE releasing
+// the flag (the deferred Store below runs last), so a winner that re-reads
+// qsAt under the flag sees that landing and can hand the flag back. What this
+// saves is one full-scan CTE over context_blocks with no covering index — at
+// 10M+ blocks a doubled poll burst is real load, not a test artefact (R12).
+// A FAILED flight never stamps qsAt, so the next reader still rescans.
+func (c *StatusCollector) scanQueueAsync(scopes []string, interval time.Duration) {
 	if !c.qsScan.CompareAndSwap(false, true) {
+		return
+	}
+	if !stale(c.qsAt.Load(), interval) {
+		c.qsScan.Store(false) // someone else landed while we were between check and CAS
 		return
 	}
 	go func() {
@@ -898,8 +913,15 @@ func (c *StatusCollector) scanQueueAsync(scopes []string) {
 // it stays with its sibling QueueStats source that already owns this lazy,
 // read-triggered refresh shape (Snapshot/refreshForBroadcast call it on
 // staleness; nothing runs on a bare timer while no one is polling).
-func (c *StatusCollector) scanDBStatsAsync(cfg *config.Config) {
+//
+// interval is the caller's db_stats_interval and serves the same post-CAS
+// re-check as scanQueueAsync's above — same idiom, same reason.
+func (c *StatusCollector) scanDBStatsAsync(cfg *config.Config, interval time.Duration) {
 	if !c.dbStatsScan.CompareAndSwap(false, true) {
+		return
+	}
+	if !stale(c.dbStatsAt.Load(), interval) {
+		c.dbStatsScan.Store(false) // someone else landed while we were between check and CAS
 		return
 	}
 	go func() {

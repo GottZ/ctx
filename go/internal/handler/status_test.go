@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -785,5 +786,93 @@ func TestStatusEventCarriesProfiles(t *testing.T) {
 	}
 	if se2 := statusEventOf(statusResponse{}); se2.Profiles == nil {
 		t.Error("nil profiles pointer must deref to a non-nil empty slice")
+	}
+}
+
+// TestScanQueueAsyncRechecksStalenessAfterCAS pins the window between a
+// reader's staleness decision and its single-flight CAS (#30). The
+// interleaving is built here, not raced for: reader A takes the flight and
+// lands it (qs stored, qsAt stamped, flag released), and only THEN does
+// reader B — which decided "stale" back when qsAt was still 0 — reach the
+// CAS. Without the post-CAS re-check B wins the free flag and repeats the
+// O(n) queue scan; with it, B hands the flag straight back.
+func TestScanQueueAsyncRechecksStalenessAfterCAS(t *testing.T) {
+	const interval = 30 * time.Second
+
+	var scans int32
+	c := NewStatusCollector(nil, backends.NewPool(nil, nil), nil, config.NewStore(&config.Config{}), nil, nil)
+	c.queueDepth = func(_ context.Context, _ *pgxpool.Pool, _, _ []string) (*dream.QueueStats, error) {
+		atomic.AddInt32(&scans, 1)
+		return &dream.QueueStats{}, nil
+	}
+
+	// Reader A: qsAt == 0, so the section is stale and A takes the flight.
+	c.scanQueueAsync(nil, interval)
+	waitUntil(t, 10*time.Second, "reader A's queue flight to land", func() bool {
+		return c.qsAt.Load() != 0 && !c.qsScan.Load()
+	})
+	if got := atomic.LoadInt32(&scans); got != 1 {
+		t.Fatalf("reader A must run exactly 1 scan, got %d", got)
+	}
+
+	// Reader B: its stale() ran before A landed; it reaches the CAS only now.
+	c.scanQueueAsync(nil, interval)
+	// Either outcome of a missing re-check is caught without polling: the
+	// second flight is still running (flag taken) or it already finished (the
+	// counter moved). Both are false after a correct hand-back.
+	if c.qsScan.Load() {
+		t.Fatalf("a late CAS winner must release qsScan immediately, not start a second flight")
+	}
+	if got := atomic.LoadInt32(&scans); got != 1 {
+		t.Fatalf("a late CAS winner must NOT repeat the O(n) queue scan within the interval, got %d scans", got)
+	}
+}
+
+// TestScanDBStatsAsyncRechecksStalenessAfterCAS is the db-section twin of
+// TestScanQueueAsyncRechecksStalenessAfterCAS — same window, same fix
+// (status.go, scanDBStatsAsync).
+func TestScanDBStatsAsyncRechecksStalenessAfterCAS(t *testing.T) {
+	const interval = 60 * time.Second
+
+	var builds int32
+	cfg := &config.Config{}
+	c := NewStatusCollector(nil, backends.NewPool(nil, nil), nil, config.NewStore(cfg), nil, nil)
+	c.dbStatsBuild = func(_ context.Context, _ *pgxpool.Pool) *dbStatus {
+		atomic.AddInt32(&builds, 1)
+		return &dbStatus{MigrationsApplied: 1}
+	}
+
+	c.scanDBStatsAsync(cfg, interval)
+	waitUntil(t, 10*time.Second, "reader A's db-section flight to land", func() bool {
+		return c.dbStatsAt.Load() != 0 && !c.dbStatsScan.Load()
+	})
+	if got := atomic.LoadInt32(&builds); got != 1 {
+		t.Fatalf("reader A must run exactly 1 build, got %d", got)
+	}
+
+	c.scanDBStatsAsync(cfg, interval)
+	if c.dbStatsScan.Load() {
+		t.Fatalf("a late CAS winner must release dbStatsScan immediately, not start a second flight")
+	}
+	if got := atomic.LoadInt32(&builds); got != 1 {
+		t.Fatalf("a late CAS winner must NOT repeat the db-section build within the interval, got %d builds", got)
+	}
+}
+
+// waitUntil polls cond until it holds or d elapses. The deadline is a deadlock
+// guard, not a timing assumption — assertions key on collector state, never on
+// elapsed time (#30). It lives in the untagged file so the integration probes
+// and the unit tests above share one helper.
+func waitUntil(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s", d, what)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

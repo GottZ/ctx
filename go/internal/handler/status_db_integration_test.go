@@ -444,21 +444,3 @@ func waitForInt32(t *testing.T, v *int32, want int32) {
 		return atomic.LoadInt32(v) >= want
 	})
 }
-
-// waitUntil polls cond until it holds or d elapses. The deadline is a deadlock
-// guard, not a timing assumption: it is generous because the integration
-// binary shares one runner with the whole ~700s package (#30, nightly
-// 32211634765 — that runtime is normal, not a load signal).
-func waitUntil(t *testing.T, d time.Duration, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(d)
-	for {
-		if cond() {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for %s", d, what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
