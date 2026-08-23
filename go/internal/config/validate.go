@@ -56,7 +56,7 @@ func Validate(c *Config) []Issue {
 	var issues []Issue
 	issues = append(issues, validateQuery(c)...)       // V2, V5, V9b, V9c, V11
 	issues = append(issues, validateRerankGraph(c)...) // V3, V9
-	issues = append(issues, validateDream(c)...)       // V6, V10, V14, V15, V16
+	issues = append(issues, validateDream(c)...)       // V6, V10, V14, V15, V16, V16b, V16c
 	return issues
 }
 
@@ -268,6 +268,28 @@ func validateDream(c *Config) []Issue {
 	if f := c.Dream.LinkFloorConfidence; f < 0 || f > 1 {
 		issues = append(issues, Issue{Field: "dream.link_floor_confidence", Severity: SeverityError,
 			Msg: fmt.Sprintf("link floor confidence %g must be within [0,1]", f)})
+	}
+
+	// V16c — dream.cycle_timeout sign and floor, on the key itself. The sign
+	// half is V16's class: CycleTimeoutFor reads <= 0 as "unset" and silently
+	// substitutes the package CycleTimeout, so a negative value would present
+	// as a configured deadline in the settings surface while the runtime
+	// serves 700s. 0 stays legal — it IS the documented "package default"
+	// sentinel. The floor half is a WARN in the V16b spirit, not a clamp: an
+	// operator may knowingly run a corpus whose calls finish far inside their
+	// ceilings. Below keywords + eval, though, the cycle deadline cuts the
+	// link-writing stages before they can start, the block ends its cycle
+	// without a cooldown and is re-picked next cycle — a silent, self-
+	// sustaining starvation loop that today only surfaces as a V16b WARN
+	// filed under dream.temporal_timeout, a key the operator never touched.
+	// This names the key they did change.
+	if d := c.Dream.CycleTimeout; d < 0 {
+		issues = append(issues, Issue{Field: "dream.cycle_timeout", Severity: SeverityError,
+			Msg: fmt.Sprintf("cycle timeout %v must be >= 0 (0 = package default %v)", d, dream.CycleTimeout)})
+	} else if floor := dream.KeywordsTimeout + dream.DreamTimeout; d > 0 && d < floor {
+		issues = append(issues, Issue{Field: "dream.cycle_timeout", Severity: SeverityWarn,
+			Msg: fmt.Sprintf("cycle timeout %v is below the %v floor (keywords %v + eval %v) — the cycle deadline cuts the link-writing stages before they run, so the block ends without a cooldown and is re-picked every cycle",
+				d, floor, dream.KeywordsTimeout, dream.DreamTimeout)})
 	}
 
 	// V16 — dream.temporal_timeout sign. Same class as V9b/V9c: the consumer

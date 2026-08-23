@@ -223,6 +223,12 @@ type DreamConfig struct {
 	// llm.ChatChainVia); raise that row value instead on a configured row —
 	// it bounds eval/keywords/recurrence per call, while this key bounds
 	// the enclosing cycle.
+	// Validated by V16c (validateDream): a negative value is an ERROR — 0 is
+	// the "package default" sentinel and a negative one would render as a
+	// configured deadline while CycleTimeoutFor served the constant — and a
+	// positive value below dream.KeywordsTimeout + dream.DreamTimeout is a
+	// WARN on this key, because such a cycle is cut before the link-writing
+	// stages run.
 	CycleTimeout time.Duration `key:"dream.cycle_timeout" env:"CTX_DREAM_CYCLE_TIMEOUT" default:"700" mut:"hot" tenancy:"global-only"`
 
 	Backoff BackoffConfig
