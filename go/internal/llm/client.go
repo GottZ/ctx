@@ -61,10 +61,22 @@ type Options struct {
 // ProviderRequestID from the response id (async audit via
 // GET /api/v1/generation?id=…). Local backends leave all three zero —
 // llmlog's cost_usd stays NULL by construction.
+//
+// FinishReason is the non-stream twin of StreamResult.FinishReason
+// (stream.go): the provider's own stop reason for this completion, decoded
+// from done_reason (Ollama) resp. choices[0].finish_reason (OpenAI). Observed
+// values are stop | length | tool_calls | content_filter; "" when the provider
+// reports none — several OpenAI-compatible servers omit the field entirely, so
+// an empty value is "unknown", never "stop". The value stays RAW: the two
+// vocabularies are not normalized or translated into one another here, because
+// a consumer that wants to distinguish providers can only do so on what the
+// provider actually said. length is the output-cap signal the dream pipeline
+// reads to tell a truncated answer from a malformed one.
 type ChatResponse struct {
 	Message           Message
 	EvalCount         int
 	PromptTokens      int
+	FinishReason      string
 	CostUSD           *float64
 	ServedModel       string
 	ProviderRequestID string
@@ -85,6 +97,11 @@ type ollamaChatResponse struct {
 	Message         Message `json:"message"`
 	EvalCount       int     `json:"eval_count"`
 	PromptEvalCount int     `json:"prompt_eval_count"`
+	// DoneReason is Ollama's stop reason on the final (non-streaming) object:
+	// "stop" on a natural end, "length" when num_predict cut the generation.
+	// Absent on older Ollama builds and on /api/chat lookalikes — the zero
+	// value then travels as the documented "unknown".
+	DoneReason string `json:"done_reason"`
 }
 
 // --- OpenAI wire format ---.
@@ -130,6 +147,10 @@ type openAIChatResponse struct {
 			Content   string `json:"content"`
 			Reasoning string `json:"reasoning"`
 		} `json:"message"`
+		// FinishReason is the OpenAI stop reason of this choice — the same
+		// field the SSE path reads per delta (stream.go). Only choice 0 is
+		// consumed, mirroring the Message above.
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		CompletionTokens int      `json:"completion_tokens"`
@@ -215,6 +236,7 @@ func chatOllama(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 		Message:      result.Message,
 		EvalCount:    result.EvalCount,
 		PromptTokens: result.PromptEvalCount,
+		FinishReason: result.DoneReason,
 	}, nil
 }
 
@@ -296,6 +318,7 @@ func chatOpenAI(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 		Message:      Message{Role: choice.Role, Content: content},
 		EvalCount:    result.Usage.CompletionTokens,
 		PromptTokens: result.Usage.PromptTokens,
+		FinishReason: result.Choices[0].FinishReason,
 	}
 	// Provider provenance is an openrouter-class contract (design 03 §2.7.4):
 	// local /v1 servers also echo a model string, but only OpenRouter's may
