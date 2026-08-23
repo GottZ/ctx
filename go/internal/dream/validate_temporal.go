@@ -71,6 +71,27 @@ type TemporalReview struct {
 	FalsePositives []string            `json:"false_positives,omitempty"`
 }
 
+// parseTemporalReview decodes ONE Phase-2 answer, tolerating a ```json (or
+// bare ```) fence around it — the same stripCodeFence the link parser applies
+// (parse.go), idempotent on bare JSON, so nothing changes for a backend that
+// answers plainly.
+//
+// The fence tolerance is not cosmetic. This decode is the only consumer of the
+// Phase-2 answer, and its failure path is NON-FATAL: ValidateTemporal logs a
+// WARN and returns nil, while the caller stamps dream_temporal_validated_at
+// regardless ("Mark validated even on non-fatal LLM failure", dream.go). So a
+// fenced answer is not retried — the dates the LLM found are dropped silently
+// until the block's CONTENT changes, which for a settled block can be never.
+// A relay that accepts the JSON-mode request and answers in a fence anyway
+// costs a block its temporal findings for good, and says so only in a WARN.
+func parseTemporalReview(raw string) (*TemporalReview, error) {
+	var review TemporalReview
+	if err := json.Unmarshal([]byte(stripCodeFence(strings.TrimSpace(raw))), &review); err != nil {
+		return nil, err
+	}
+	return &review, nil
+}
+
 // temporalTimeout resolves the Phase-2 LLM review timeout: the router's
 // configured value wins when the scheduler sets one (config key
 // dream.temporal_timeout), otherwise the package ValidateTimeout default —
@@ -176,10 +197,10 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 		return nil
 	}
 
-	var review TemporalReview
-	if err := json.Unmarshal([]byte(resp.Message.Content), &review); err != nil {
-		entry.Err = fmt.Errorf("parse: %w", err)
-		slog.Warn("dream: temporal phase2 parse failed", "block_id", block.ID, "error", err, "raw", resp.Message.Content)
+	review, parseErr := parseTemporalReview(resp.Message.Content)
+	if parseErr != nil {
+		entry.Err = fmt.Errorf("parse: %w", parseErr)
+		slog.Warn("dream: temporal phase2 parse failed", "block_id", block.ID, "error", parseErr, "raw", resp.Message.Content)
 		return nil
 	}
 

@@ -100,6 +100,50 @@ func TestTemporalReviewParse_Empty(t *testing.T) {
 	}
 }
 
+// TestParseTemporalReviewFences pins the fence tolerance of the Phase-2
+// decode. The two fenced rows FAILED before parseTemporalReview existed —
+// json.Unmarshal on the raw content reported "invalid character '`'" — and the
+// failure is invisible in production: it is non-fatal, and
+// dream_temporal_validated_at is stamped anyway, so the block is not re-dreamed
+// for it. Reverting the stripCodeFence call turns these rows red.
+func TestParseTemporalReviewFences(t *testing.T) {
+	const payload = `{"dates":[{"date":"2026-03-15","source":"explicit"}]}`
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "bare", raw: payload},
+		{name: "json fenced", raw: "```json\n" + payload + "\n```"},
+		{name: "bare fenced", raw: "```\n" + payload + "\n```"},
+		{name: "fenced with surrounding whitespace", raw: "\n  ```json\n" + payload + "\n```\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			review, err := parseTemporalReview(tt.raw)
+			if err != nil {
+				t.Fatalf("parseTemporalReview(%q): %v", tt.raw, err)
+			}
+			if len(review.Dates) != 1 {
+				t.Fatalf("dates = %d, want 1", len(review.Dates))
+			}
+			if review.Dates[0].Date != "2026-03-15" {
+				t.Errorf("date = %q, want 2026-03-15", review.Dates[0].Date)
+			}
+		})
+	}
+}
+
+// TestParseTemporalReviewProse keeps the failure that MUST stay a failure:
+// commentary around the JSON is not extracted. The stage's answer contract is
+// a single object, and a "grab the first {...}" scanner is the leniency class
+// the link parser's zero-link contract exists to refuse.
+func TestParseTemporalReviewProse(t *testing.T) {
+	if _, err := parseTemporalReview("Here is the review: {\"dates\":[]}"); err == nil {
+		t.Error("prose-wrapped answer parsed, want a parse error")
+	}
+}
+
 func TestContainsDate_Empty(t *testing.T) {
 	if containsDate(nil, time.Now()) {
 		t.Error("empty slice should never contain a date")
