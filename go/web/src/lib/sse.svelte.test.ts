@@ -415,20 +415,42 @@ describe('SseClient — liveness watchdog', () => {
 
     void sse.connect()
     expect(sse.status).toBe('connecting') // first attempt announces itself
-    await vi.advanceTimersByTimeAsync(1)
+    // Settle the rejected fetch WITHOUT moving the clock: the first reconnect
+    // timer is armed during this flush, so any advance here would shift the
+    // band measurement below by exactly that amount (a 0 ms tick still drains
+    // the microtask queue — it yields to a real macrotask once).
+    await vi.advanceTimersByTimeAsync(0)
     expect(sse.status).toBe('error')
 
-    // Two backoff rounds: the retry happens (fetch count grows), the display
-    // never flaps back to 'connecting'.
+    // Two backoff rounds: exactly ONE retry per round, and the display never
+    // flaps back to 'connecting'. A FIXED window over a JITTERED exponential
+    // backoff (sse.svelte.ts:235 — retryMs * (0.5 + Math.random()), doubling to
+    // a 30s cap) is a coin flip, and it flaked in CI both ways: a round whose
+    // retries all landed early leaves the next delay outgrowing the 10s window
+    // and asserts on zero calls (#31, run 32234106583: "expected 5 to be
+    // greater than 5"), and the same drift pushes the pending wait past the 30s
+    // recovery advance below (run 32608414735: "expected 'error' to be 'open'").
+    // advanceTimersToNextTimerAsync runs the pending reconnect timer itself —
+    // the only timer alive in this phase, since the watchdog is armed on the
+    // success path (sse.svelte.ts:153) and this phase never connects.
     for (let i = 0; i < 2; i++) {
       const before = fetchMock.mock.calls.length
-      await vi.advanceTimersByTimeAsync(10_000)
-      expect(fetchMock.mock.calls.length).toBeGreaterThan(before)
+      const at = Date.now()
+      await vi.advanceTimersToNextTimerAsync()
+      const waited = Date.now() - at
+      // Round i's pending wait was scheduled with retryMs = 1000 · 2^i, so it
+      // sits in that step's jitter band — the behavioural pin on the schedule.
+      expect(waited).toBeGreaterThanOrEqual(500 * 2 ** i)
+      expect(waited).toBeLessThan(1_500 * 2 ** i)
+      expect(fetchMock.mock.calls.length).toBe(before + 1)
       expect(sse.status).toBe('error')
     }
 
     // A succeeding connect leaves the backoff: 'open', and a LATER fresh
-    // connect (after close) announces 'connecting' again.
+    // connect (after close) announces 'connecting' again. The 30s window is
+    // deterministic once the loop above is: the pending wait was scheduled with
+    // retryMs = 4_000 (which is why #retryMs reads 8_000 here), so it is
+    // < 6_000 ms and always fires inside the advance.
     const s = openStream()
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(s.res))
     await vi.advanceTimersByTimeAsync(30_000)
