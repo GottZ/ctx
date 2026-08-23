@@ -38,7 +38,7 @@ func TestRunDigest_IncludeFalseType_AbsentFromTopicMap(t *testing.T) {
 		t.Fatalf("set type: %v", err)
 	}
 
-	if err := digest.RunDigest(ctx, pool, reg, digest.ModeFull, homeScope, homeScope, []string{homeScope}); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, digest.ModeFull, "", homeScope, homeScope, []string{homeScope}); err != nil {
 		t.Fatalf("RunDigest: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestRunDigest_IncludeFalseType_AbsentFromTopicMap(t *testing.T) {
 // — never a silent unfiltered digest.
 func TestRunDigest_NilRegistry_FailsLoud(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
-	if err := digest.RunDigest(context.Background(), pool, nil, digest.ModeFull, "private", "private", []string{"private"}); err == nil {
+	if err := digest.RunDigest(context.Background(), pool, nil, digest.ModeFull, "", "private", "private", []string{"private"}); err == nil {
 		t.Fatal("RunDigest with nil registry must fail loudly, got nil error")
 	}
 }

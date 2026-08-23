@@ -131,7 +131,7 @@ func TestDropDigestState_DigestGoldenUnchanged(t *testing.T) {
 
 	run := func(phase string) string {
 		t.Helper()
-		if err := digest.RunDigest(ctx, pool, reg, "full", "_global", "private", []string{"private"}); err != nil {
+		if err := digest.RunDigest(ctx, pool, reg, "full", "", "_global", "private", []string{"private"}); err != nil {
 			t.Fatalf("%s: RunDigest: %v", phase, err)
 		}
 		var content string

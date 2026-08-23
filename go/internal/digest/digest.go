@@ -31,7 +31,15 @@ import (
 // topic-map index title/row. Pre-T12 the registry ignored its argument, so the
 // background loop passing homeScope was harmless; now the tenant key must be the
 // tenant scope (default tenant → "_global" → base generation, unchanged).
-func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, mode, tenantScope, homeScope string, readScopes []string) error {
+//
+// language is the corpus language (dream.language). It reaches only ONE byte of
+// this package — the stub pointer of ModeStub — and it arrives as a PARAMETER
+// rather than through a config read because .golangci.yml depguard bars
+// internal/digest from importing internal/config. Empty or a German tag keeps
+// the frozen German stub, every other tag renders English; both callers on the
+// production path pass cfg.Dream.Language.
+func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry,
+	mode, language, tenantScope, homeScope string, readScopes []string) error {
 	if blocktypes == nil {
 		return fmt.Errorf("digest: nil block-type registry (wiring bug)")
 	}
@@ -47,7 +55,7 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 		slog.Debug("digest: off, leaving the topic map untouched", "scope", homeScope)
 		return nil
 	case ModeStub:
-		return writeStub(ctx, pool, set, homeScope)
+		return writeStub(ctx, pool, set, homeScope, language)
 	}
 
 	// Fetch block metadata (no content), sieved by digest.include (WF T8,
@@ -189,12 +197,43 @@ func Normalize(mode string) string {
 	}
 }
 
+// stubLanguage reduces a dream.language value to its primary subtag, the same
+// reduction dream.reportLanguage, topiclabel.promptLanguage and rootmap
+// .mapLanguage apply. A LOCAL copy for the same reason they are: this package
+// may not import internal/config (depguard config-layering), and the language
+// SURFACE is deliberately not shared between the packages that render text —
+// only the KEY is (E3-01, one language knob per corpus).
+func stubLanguage(lang string) string {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if i := strings.IndexByte(lang, '-'); i >= 0 {
+		lang = lang[:i]
+	}
+	return lang
+}
+
 // stubText is the ~300 B pointer the linear map becomes. It is a CONSTANT
 // shape on purpose: no wall clock, no counts, nothing that moves. A stub that
 // re-renders differently every minute would trade an 80 KB rewrite per cycle
 // for a 300 B one — smaller, but the same pointless write, and the content
 // comparison below could not skip it.
-func stubText(homeScope string) string {
+//
+// The language is the only thing that varies, and it varies at most once per
+// corpus: the empty tag and every German tag keep the byte-frozen German stub
+// (no live block is rewritten), every other tag renders English — the same two
+// tables and the same primary-subtag rule the root map it points AT uses. A
+// pointer that speaks a different language than its target would be a worse
+// forwarding address than none.
+//
+// What survives translation verbatim: the two CLI lines. They are commands, and
+// a translated command does not run.
+func stubText(homeScope, language string) string {
+	if lang := stubLanguage(language); lang != "" && lang != "de" {
+		return "This map has been superseded.\n" +
+			"The root map of this scope is called: root-map-" + homeScope + "\n" +
+			"  ctx search index query:root-map    ·    ctx get <id from the result list>\n" +
+			"It groups by topic clusters (Louvain over the dream graph) rather than by\n" +
+			"category and is capped at ~15 KB. Produced by the overview rebuild cycle.\n"
+	}
 	return "Diese Karte wurde abgelöst.\n" +
 		"Die Wurzel-Map dieses Scopes heißt: root-map-" + homeScope + "\n" +
 		"  ctx search index query:root-map    ·    ctx get <id aus der Trefferliste>\n" +
@@ -212,9 +251,9 @@ func stubText(homeScope string) string {
 // forwarding address, and it reaches the consumers exactly where they search
 // (E2-02/E9-02 — the stub carries the transition; archiving the two dead
 // scope blocks is its own decided wave).
-func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, homeScope string) error {
+func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, homeScope, language string) error {
 	title := "topic-map-" + homeScope
-	text := stubText(homeScope)
+	text := stubText(homeScope, language)
 
 	old, found, err := store.MapBlockContent(ctx, pool, "index", title, homeScope)
 	if err != nil {

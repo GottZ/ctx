@@ -75,7 +75,7 @@ func TestDigestModeFullIsUnchanged(t *testing.T) {
 	aID := weSeed(t, pool, "learnings", "a-learning")
 	cID := weSeed(t, pool, "learnings", "c-learning")
 
-	if err := digest.RunDigest(ctx, pool, reg, "full", "private", "private", []string{"private"}); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, "full", "", "private", "private", []string{"private"}); err != nil {
 		t.Fatalf("RunDigest(full): %v", err)
 	}
 	got, ok := weReadMap(t, pool)
@@ -110,12 +110,12 @@ func TestDigestModeStub(t *testing.T) {
 	reg := weRegistry(t, pool)
 	weSeed(t, pool, "learnings", "stub-fixture")
 
-	if err := digest.RunDigest(ctx, pool, reg, "full", "private", "private", []string{"private"}); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, "full", "", "private", "private", []string{"private"}); err != nil {
 		t.Fatalf("RunDigest(full): %v", err)
 	}
 	full, _ := weReadMap(t, pool)
 
-	if err := digest.RunDigest(ctx, pool, reg, "stub", "private", "private", []string{"private"}); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, "stub", "", "private", "private", []string{"private"}); err != nil {
 		t.Fatalf("RunDigest(stub): %v", err)
 	}
 	stub, ok := weReadMap(t, pool)
@@ -139,7 +139,7 @@ func TestDigestModeStub(t *testing.T) {
 
 	// A second stub run writes NOTHING: the text has no moving part, so the
 	// 60 s debounce cannot turn it into a rewrite treadmill.
-	if err := digest.RunDigest(ctx, pool, reg, "stub", "private", "private", []string{"private"}); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, "stub", "", "private", "private", []string{"private"}); err != nil {
 		t.Fatalf("RunDigest(stub, again): %v", err)
 	}
 	again, _ := weReadMap(t, pool)
@@ -156,13 +156,13 @@ func TestDigestModeOff(t *testing.T) {
 	reg := weRegistry(t, pool)
 	weSeed(t, pool, "learnings", "off-fixture")
 
-	if err := digest.RunDigest(ctx, pool, reg, "full", "private", "private", []string{"private"}); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, "full", "", "private", "private", []string{"private"}); err != nil {
 		t.Fatalf("RunDigest(full): %v", err)
 	}
 	before, _ := weReadMap(t, pool)
 
 	weSeed(t, pool, "learnings", "off-fixture-2") // a corpus change off must ignore
-	if err := digest.RunDigest(ctx, pool, reg, "off", "private", "private", []string{"private"}); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, "off", "", "private", "private", []string{"private"}); err != nil {
 		t.Fatalf("RunDigest(off): %v", err)
 	}
 	after, ok := weReadMap(t, pool)
@@ -174,7 +174,7 @@ func TestDigestModeOff(t *testing.T) {
 	}
 
 	// And on a scope that never had a map, off creates none.
-	if err := digest.RunDigest(ctx, pool, reg, "off", "work", "work", []string{"work"}); err != nil {
+	if err := digest.RunDigest(ctx, pool, reg, "off", "", "work", "work", []string{"work"}); err != nil {
 		t.Fatalf("RunDigest(off, fresh scope): %v", err)
 	}
 	var n int
