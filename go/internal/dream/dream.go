@@ -24,22 +24,37 @@ import (
 // SetChatJSONForTest in export_test.go) to inject ChatResponse values without
 // touching the HTTP transport. The loose (host, apiKey, model, think)
 // signature is deliberately stable across the F1 signature waves so the
-// override closures in every dream test file keep compiling. nil outside
-// tests — dreamChatJSON then takes the production wire path, which is the
-// only place the backend's protocol is read.
+// override closures in every dream test file keep compiling — the jsonMode
+// parameter dreamChat gained deliberately did NOT widen it: an installed seam
+// answers canned content, where the wire's JSON mode has no meaning. Every
+// statement about that mode therefore belongs in a test with the seam
+// UNINSTALLED (dream_protocol_test.go). nil outside tests — dreamChat then
+// takes the production wire path, which is the only place the backend's
+// protocol and the JSON mode are read.
 var chatJSON func(ctx context.Context, host, apiKey, model string, think *bool, systemPrompt, userPrompt string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error)
 
-// dreamChatJSON routes one dream LLM call. With the chatJSON test seam
-// installed it forwards the backend's loose tuple there; in production it
-// calls llm.ChatJSON with the full backend, whose Protocol selects the wire
-// path (/api/chat vs /v1/chat/completions). The dream.Protocol package var
-// died here in F1-W6: the protocol now arrives only inside the
-// backends.Backend parameter of the public dream entry points.
-func dreamChatJSON(ctx context.Context, chatB backends.Backend, systemPrompt, userPrompt string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error) {
+// dreamChat routes one dream LLM call. With the chatJSON test seam installed
+// it forwards the backend's loose tuple there; in production it calls llm with
+// the full backend, whose Protocol selects the wire path (/api/chat vs
+// /v1/chat/completions). The dream.Protocol package var died here in F1-W6:
+// the protocol now arrives only inside the backends.Backend parameter of the
+// public dream entry points.
+//
+// jsonMode picks llm.ChatJSON (OpenAI response_format:{"type":"json_object"} /
+// Ollama top-level "format":"json") over the plain llm.Chat. It is a PER-CALL
+// parameter, not a property of the router: the four parsing stages and the
+// daily synthesis disagree about it permanently — the synthesis prompt asks
+// for prose and its answer is stored verbatim, so a grammar there can only
+// corrupt the artefact, while the parsing stages want the constraint by
+// default.
+func dreamChat(ctx context.Context, chatB backends.Backend, systemPrompt, userPrompt string, opts llm.Options, timeout time.Duration, jsonMode bool) (*llm.ChatResponse, error) {
 	if chatJSON != nil {
 		return chatJSON(ctx, chatB.Host, chatB.APIKey, chatB.Model, chatB.Think.Ptr(), systemPrompt, userPrompt, opts, timeout)
 	}
-	return llm.ChatJSON(ctx, chatB, systemPrompt, userPrompt, opts, timeout)
+	if jsonMode {
+		return llm.ChatJSON(ctx, chatB, systemPrompt, userPrompt, opts, timeout)
+	}
+	return llm.Chat(ctx, chatB, systemPrompt, userPrompt, opts, timeout)
 }
 
 const (

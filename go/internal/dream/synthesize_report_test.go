@@ -5,6 +5,10 @@ package dream_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -417,6 +421,71 @@ func TestGenerateDailyReport_LLMError(t *testing.T) {
 	msg := err.Error()
 	if !strings.Contains(msg, "synthesize report") || !strings.Contains(msg, "ollama exploded") {
 		t.Errorf("error not wrapped as expected: %v", err)
+	}
+}
+
+// TestGenerateDailyReport_WireCarriesNoJSONMode is the end-to-end statement
+// about the CALL SITE, and it is the reason this file's other tests cannot
+// make it: they install the chatJSON seam, which never reaches a wire, so the
+// mode of the request is unobservable to them. Here the seam stays
+// uninstalled, the seeded pool row points at a recording httptest backend, and
+// the assertion is on the request body the daily synthesis actually sent.
+//
+// What it protects: the synthesis prompt asks for continuous prose and the
+// answer is stored verbatim as the report body — asking a grammar-enforcing
+// backend for a JSON object there produced report blocks whose body was a JSON
+// envelope with a made-up key. Reverting the call site to r.chat turns this
+// red; nothing else in the package does.
+func TestGenerateDailyReport_WireCarriesNoJSONMode(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	seedDecisionRows(t, pool, reportScope)
+	seedSynthesisBlock(t, pool, reportScope)
+
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		body = string(raw)
+		fmt.Fprint(w, `{"message":{"role":"assistant","content":"Tagesbericht als Fliesstext."},"eval_count":10,"prompt_eval_count":20}`)
+	}))
+	defer srv.Close()
+
+	r := testRouterFor(srv.URL, "m", backends.ProtocolOllama)
+	reg := blocktype.NewRegistry()
+	reg.Boot(ctx, pool)
+	if reg.Health() != blocktype.HealthOK {
+		t.Fatalf("registry boot degraded: %s", reg.Health())
+	}
+	r.Blocktypes = reg
+
+	blockID, err := dream.GenerateDailyReport(ctx, pool, r, reportScope)
+	if err != nil {
+		t.Fatalf("generate report: %v", err)
+	}
+	if blockID == "" {
+		t.Fatal("want block_id, got empty string")
+	}
+	if body == "" {
+		t.Fatal("no request reached the recording backend — the assertion below would be vacuous")
+	}
+	if strings.Contains(body, `"format":"json"`) {
+		t.Errorf("daily synthesis request carries the Ollama JSON-mode marker\nbody: %s", body)
+	}
+
+	// The stored body is what the model said, byte for byte — the corruption
+	// this guards against is visible exactly here.
+	var content string
+	if err := pool.QueryRow(ctx,
+		`SELECT content FROM context_blocks WHERE id = $1::uuid`, blockID,
+	).Scan(&content); err != nil {
+		t.Fatalf("read report block: %v", err)
+	}
+	if content != "Tagesbericht als Fliesstext." {
+		t.Errorf("report body = %q, want the verbatim model answer", content)
 	}
 }
 

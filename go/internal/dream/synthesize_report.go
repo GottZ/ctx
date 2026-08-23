@@ -295,7 +295,15 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
 
 	start := time.Now()
-	resp, served, attempts, err := r.chat(ctx, backends.RoleDigest, backends.SensInternal,
+	// chatPlain, NOT chat: this stage asks for continuous prose ("Schreibe als
+	// Fließtext" / "Write as continuous prose", dailySynthesisPromptFor) and
+	// the answer is stored VERBATIM as the report block's body a few lines
+	// below — no JSON is decoded anywhere on this path. On a backend that
+	// really enforces the JSON mode the marker is therefore not a validator
+	// but a corruptor: the "Tagesbericht <date>" body comes back as a JSON
+	// envelope with a made-up key. It stays plain unconditionally — the
+	// pipeline's JSON-mode setting has nothing to decide here.
+	resp, served, attempts, err := r.chatPlain(ctx, backends.RoleDigest, backends.SensInternal,
 		sysPrompt, userPrompt, dailySynthesisOptions(), DailySynthesisTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err

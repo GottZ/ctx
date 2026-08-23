@@ -134,20 +134,45 @@ func (r *Router) available(role string) bool {
 	return err == nil
 }
 
-// chat resolves the chain for role at required and walks it through the
-// dream chatJSON seam — llm.ChatChainVia owns the attempt loop (Classify
-// doctrine, health reporting), dreamChatJSON keeps every wire call mockable
-// by the existing test seam. An empty chain returns *ErrNoEligibleBackend
-// for the call site's fail semantics (design 03 §2.4 dream/digest rows).
+// chat is the JSON-mode call of the four dream stages that PARSE their
+// answer (eval, keywords, recurrence, temporal). See chatMode.
 func (r *Router) chat(ctx context.Context, role string, required backends.Sensitivity,
 	systemPrompt, userPrompt string, baseOpts llm.Options, defTimeout time.Duration,
+) (*llm.ChatResponse, *backends.Backend, []llm.ChainAttempt, error) {
+	return r.chatMode(ctx, role, required, systemPrompt, userPrompt, baseOpts, defTimeout, true)
+}
+
+// chatPlain is the same walk without the JSON-mode marker on the wire — the
+// call of a stage whose answer is PROSE and is never decoded. Today that is
+// the daily synthesis alone (synthesize_report.go); asking a grammar-enforcing
+// backend for a JSON object there does not validate anything, it corrupts the
+// stored report.
+func (r *Router) chatPlain(ctx context.Context, role string, required backends.Sensitivity,
+	systemPrompt, userPrompt string, baseOpts llm.Options, defTimeout time.Duration,
+) (*llm.ChatResponse, *backends.Backend, []llm.ChainAttempt, error) {
+	return r.chatMode(ctx, role, required, systemPrompt, userPrompt, baseOpts, defTimeout, false)
+}
+
+// chatMode resolves the chain for role at required and walks it through the
+// dream chatJSON seam — llm.ChatChainVia owns the attempt loop (Classify
+// doctrine, health reporting), dreamChat keeps every wire call mockable by the
+// existing test seam. An empty chain returns *ErrNoEligibleBackend for the
+// call site's fail semantics (design 03 §2.4 dream/digest rows).
+//
+// jsonMode travels as a PARAMETER rather than as a router field on purpose:
+// the two call classes above are a property of the STAGE, not of the install,
+// so no configuration can make them agree. A router field would have to be
+// re-set around the synthesis call to express that, which is the kind of
+// ambient state F1-W6 removed from this package.
+func (r *Router) chatMode(ctx context.Context, role string, required backends.Sensitivity,
+	systemPrompt, userPrompt string, baseOpts llm.Options, defTimeout time.Duration, jsonMode bool,
 ) (*llm.ChatResponse, *backends.Backend, []llm.ChainAttempt, error) {
 	chain, err := r.Pool.Chain(role, required, r.Tenant) // iterated tenant, see available()
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	return llm.ChatChainVia(ctx, func(ctx context.Context, b backends.Backend, sys, usr string, opts llm.Options, timeout time.Duration) (*llm.ChatResponse, error) {
-		return dreamChatJSON(ctx, b, sys, usr, opts, timeout)
+		return dreamChat(ctx, b, sys, usr, opts, timeout, jsonMode)
 	}, chain, role, systemPrompt, userPrompt, baseOpts, defTimeout, r.Report, r.Admit)
 }
 
