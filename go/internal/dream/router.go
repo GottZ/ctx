@@ -86,6 +86,16 @@ type Router struct {
 	// parser's per-type floors (the conservative PR-#12 semantics) — routers
 	// built without config wiring (tests) change nothing.
 	LinkFloor float64
+	// CapRetryFactor scales the output cap of ONE retry after a link
+	// evaluation was truncated at that cap, read from config
+	// Dream.EvalCapRetryFactor by the caller that builds the router
+	// (scheduler: per-iteration, so the hot key is hot). Values <= 1 — the
+	// zero value of a router built without config wiring included — disable
+	// the retry entirely and leave the pre-issue-#26 behaviour byte-identical:
+	// one call, the plain parse error, the transient cooldown. Applied in
+	// evaluateRelationships, which hands it to llm.Options.NumPredictScale so
+	// the scaling lands on the RESOLVED cap inside the chain walk.
+	CapRetryFactor float64
 }
 
 // TypeSet resolves the tenant's block-type policy set for this router's

@@ -57,7 +57,7 @@ func Validate(c *Config) []Issue {
 	var issues []Issue
 	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V11
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
-	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18
+	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	return issues
@@ -436,6 +436,21 @@ func validateDream(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "dream.num_predict", Severity: SeverityWarn,
 			Msg: fmt.Sprintf("num_predict %d is below the built-in default of %d tokens — five links in the object-map drift form cost ~500 tokens pretty-printed, so answers can be truncated mid-JSON and are then indistinguishable from malformed output (parse error, transient cooldown, re-pick; metadata.cap_hit is the only signal)",
 				n, dream.DefaultNumPredict)})
+	}
+
+	// V19 — dream.eval_cap_retry_factor sign. Not V17's walk (that one is
+	// typed and visits duration keys only) and not V18's either (that check
+	// owns a token count whose 0 is a "package default" sentinel): here the
+	// documented off-switch is the whole range <= 1, so 0 and 1 are ordinary
+	// legal values meaning "no retry" and need no warning. A NEGATIVE factor
+	// is the one shape with no reading at all — it renders in the settings
+	// surface as a configured multiplier while the retry is off, and if it
+	// ever reached the scaling it would SHRINK the cap it is meant to widen.
+	// Fatal, the class every other "renders as configured, serves something
+	// else" knob gets.
+	if f := c.Dream.EvalCapRetryFactor; f < 0 {
+		issues = append(issues, Issue{Field: "dream.eval_cap_retry_factor", Severity: SeverityError,
+			Msg: fmt.Sprintf("eval cap retry factor %g must be >= 0 — values <= 1 disable the retry, a negative one renders as a configured multiplier while disabling it", f)})
 	}
 
 	return issues

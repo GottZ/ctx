@@ -359,6 +359,22 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 		if errors.Is(err, dispatch.ErrPreempted) {
 			slog.Info("dream: evaluation preempted by interactive demand — transient cooldown, no back-off advance",
 				"block_id", block.ID)
+		} else if errors.Is(err, ErrOutputCapHit) {
+			// The answer was truncated at the output cap AND again on the
+			// bounded retry at r.CapRetryFactor times the resolved cap
+			// (evaluateRelationships escalates only after the retry was
+			// actually spent). The transient path is the wrong home for that:
+			// it has no attempt counter, so the block would re-burn one eval
+			// call every five minutes on a prompt that will not fit. Book it
+			// as a completed-but-inert eval instead — dream_eval_count + 1,
+			// dream_last_inert, InertOffset on the back-off curve — the same
+			// booking a "nothing relates" verdict gets. The block is not
+			// abandoned: it re-dreams later on the curve, and after the cap or
+			// the factor is raised the next cycle links it normally.
+			slog.Warn("dream: eval hit the output cap twice — booking a completed-but-inert eval",
+				"block_id", block.ID, "num_predict", opts.NumPredict, "factor", r.CapRetryFactor)
+			_ = SetDreamCooldown(ctx, pool, block.ID, true /* inert: cap hit twice */, backoff)
+			return 0, err
 		} else {
 			slog.Warn("dream: evaluation failed", "block_id", block.ID, "error", err)
 		}

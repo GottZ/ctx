@@ -2,6 +2,7 @@ package dream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -123,6 +124,46 @@ type Link struct {
 	Floored bool `json:"-"`
 }
 
+// ErrOutputCapHit marks an evaluation whose answer was truncated at the
+// output cap TWICE — once on the regular attempt and once more on the bounded
+// retry at dream.eval_cap_retry_factor times the resolved cap. It is the one
+// eval outcome RunDreamCycle does not treat as a transient failure: the block
+// is booked as a completed-but-inert eval (back-off advance) instead of being
+// re-picked in five minutes, because a prompt that overruns twice the cap will
+// overrun it again unchanged. A SINGLE cap hit never carries this sentinel —
+// neither with the retry off (the key is a kill switch) nor when the retry
+// cannot take effect (an extra_body.max_tokens row) — so nothing escalates on
+// a path that has not actually been retried.
+var ErrOutputCapHit = errors.New("dream: eval output cap hit")
+
+// evalRequest is everything two attempts at the same evaluation share: the
+// built prompt and the derived gate/telemetry inputs. Assembled once so a
+// retry re-sends the IDENTICAL prompt — no shrinking, no candidate
+// re-planning, so the retry isolates the cap as the single variable.
+type evalRequest struct {
+	system, user string
+	blockIDs     []string
+	required     backends.Sensitivity
+	source       BlockInfo
+	candidates   []BlockInfo
+	candidateIDs map[string]bool
+	capped       int
+}
+
+// attemptResult is one wire call's outcome as the retry decision needs it.
+//
+// capHit is separate from err ON PURPOSE, rather than a sentinel wrapped into
+// err by evalAttempt: the very same truncation must surface as a PLAIN parse
+// error when it will not be retried (retry off, or a row the retry cannot
+// affect) and as ErrOutputCapHit only after the retry was actually spent.
+// Only the caller knows which of the two it is, so only the caller wraps.
+type attemptResult struct {
+	links  []Link
+	served *backends.Backend
+	capHit bool
+	err    error
+}
+
 // EvaluateRelationships asks the LLM to classify relationships between a source block
 // and candidate blocks found via keyword search. Returns validated links.
 // pool may be nil — if provided, the LLM request/response is logged via llmlog.
@@ -138,56 +179,147 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 // aggregate cap dropped before this set was handed over (searchByKeywords).
 // The exported form passes 0 — a caller that assembled its own candidate set
 // has no cap of ours to report.
+//
+// It owns the cap-hit RETRY POLICY; evalAttempt owns one wire call. At most
+// two calls are ever made, each with its own llmlog row (token and cost
+// accounting is per wire call — a hidden second call inside one row would
+// corrupt both). The policy:
+//
+//   - anything but a cap hit returns straight through, unchanged;
+//   - a cap hit with CapRetryFactor <= 1 returns the PLAIN parse error — the
+//     key is a kill switch, and with it off this function behaves exactly as
+//     it did before the retry existed;
+//   - a cap hit on a row whose extra_body pins a numeric max_tokens ALSO
+//     returns the plain parse error: that value outbids Options.NumPredict on
+//     the wire (applyOpenAIBodyExtras merges last-write-wins, which is why
+//     autowindow.resolveMaxOut ranks it higher too), so the retry would send
+//     the identical cap, hit it again and book the block inert for a row
+//     setting. Skipping keeps "no escalation on a retry that cannot work";
+//   - otherwise ONE retry at NumPredictScale = CapRetryFactor. The scaling is
+//     applied inside the chain walk, on the cap that attempt RESOLVES to
+//     (llm.applyModelParams), so a model_map num_predict override is scaled
+//     rather than bypassed;
+//   - a cap hit on that retry — and only then — returns ErrOutputCapHit.
 func evaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, source BlockInfo, candidates []BlockInfo, capped int) ([]Link, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
 
-	systemPrompt, userPrompt := buildEvalPrompt(source, candidates)
+	req := buildEvalRequest(source, candidates, capped)
+
+	res := evalAttempt(ctx, pool, r, req, opts, false)
+	if !res.capHit {
+		return res.links, res.err
+	}
+
+	switch {
+	case r.CapRetryFactor <= 1 || opts.NumPredict <= 0:
+		// Retry disabled (or an uncapped call site, which cannot be scaled):
+		// today's behaviour, plain parse error, transient cooldown.
+		return nil, res.err
+	case rowPinsMaxTokens(res.served):
+		slog.Warn("dream: output cap hit on a backend row that pins extra_body.max_tokens — retry skipped, it would send the same cap",
+			"block_id", source.ID, "backend", backendName(res.served),
+			"num_predict", opts.NumPredict, "factor", r.CapRetryFactor)
+		return nil, res.err
+	}
+
+	retryOpts := opts
+	retryOpts.NumPredictScale = r.CapRetryFactor
+	retry := evalAttempt(ctx, pool, r, req, retryOpts, true)
+	if retry.capHit {
+		return nil, fmt.Errorf("%w: %w", ErrOutputCapHit, retry.err)
+	}
+	return retry.links, retry.err
+}
+
+// buildEvalRequest assembles the per-evaluation invariants: the guarded
+// prompt, the block-id list for the llmlog row, the folded sensitivity the
+// chain resolves at (max over source + every candidate — a zero value folds to
+// credentials, fail-closed) and the candidate-id set the answer is filtered
+// against.
+func buildEvalRequest(source BlockInfo, candidates []BlockInfo, capped int) *evalRequest {
+	system, user := buildEvalPrompt(source, candidates)
 	blockIDs := make([]string, 0, 1+len(candidates))
 	blockIDs = append(blockIDs, source.ID)
 	sensParts := make([]backends.Sensitivity, 0, 1+len(candidates))
 	sensParts = append(sensParts, source.Sensitivity)
+	candidateIDs := make(map[string]bool, len(candidates))
 	for _, c := range candidates {
 		blockIDs = append(blockIDs, c.ID)
 		sensParts = append(sensParts, c.Sensitivity)
+		candidateIDs[c.ID] = true
 	}
-	required := backends.MaxSensitivity(sensParts...)
+	return &evalRequest{
+		system: system, user: user,
+		blockIDs:     blockIDs,
+		required:     backends.MaxSensitivity(sensParts...),
+		source:       source,
+		candidates:   candidates,
+		candidateIDs: candidateIDs,
+		capped:       capped,
+	}
+}
+
+// evalAttempt performs ONE link-evaluation wire call and turns its answer into
+// validated links. It owns its own llmlog entry and deferred Record, so the
+// retry above produces a SECOND row rather than overwriting the first: one row
+// per wire call is what makes token counts, durations and costs add up, and
+// the retry row is identifiable by metadata.cap_retry.
+//
+// retry only marks the row; the widened cap travels in opts.NumPredictScale.
+func evalAttempt(ctx context.Context, pool *pgxpool.Pool, r *Router, req *evalRequest, opts llm.Options, retry bool) attemptResult {
 	dreamVer := int16(Version)
 
 	// Log entry mutated through the function; deferred Record (closure deref at
 	// trigger time) captures final state including parse errors that surface
-	// after the LLM call. Registered AFTER the empty-candidates early-return so
-	// no zero-duration no-op rows pollute the log.
+	// after the LLM call. Reached only past the caller's empty-candidates
+	// early-return, so no zero-duration no-op rows pollute the log.
 	entry := &llmlog.Entry{
 		Pipeline:      "dream-eval",
-		RequestSystem: systemPrompt,
-		RequestUser:   userPrompt,
-		BlockIDs:      blockIDs,
+		RequestSystem: req.system,
+		RequestUser:   req.user,
+		BlockIDs:      req.blockIDs,
 		DreamVersion:  &dreamVer,
 	}
 	// Stamped BEFORE the call, not next to links_capped after it: the cap
 	// fired during retrieval, so the count belongs on the row even when the
 	// eval times out or the answer fails to parse — those are exactly the
-	// cycles where a shortened candidate set is worth seeing.
-	noteCandidatesCapped(entry, capped)
+	// cycles where a shortened candidate set is worth seeing. On BOTH attempt
+	// rows: the retry evaluates the same shortened set.
+	noteCandidatesCapped(entry, req.capped)
+	if retry {
+		if entry.Metadata == nil {
+			entry.Metadata = map[string]any{}
+		}
+		entry.Metadata["cap_retry"] = true
+	}
 	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
 
 	start := time.Now()
-	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, required,
-		systemPrompt, userPrompt, opts, DreamTimeout)
+	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, req.required,
+		req.system, req.user, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
-	r.applyChainTelemetry(entry, backends.RoleDream, required, served, attempts, err)
+	r.applyChainTelemetry(entry, backends.RoleDream, req.required, served, attempts, err)
 
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
+		// The provider's own stop reason, raw (issue #26). Recorded on
+		// SUCCESS too: "which backends actually report one" is only
+		// answerable from the rows where nothing went wrong.
+		if resp.FinishReason != "" {
+			if entry.Metadata == nil {
+				entry.Metadata = map[string]any{}
+			}
+			entry.Metadata["finish_reason"] = resp.FinishReason
+		}
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("dream: evaluate: %w", err)
+		return attemptResult{served: served, err: fmt.Errorf("dream: evaluate: %w", err)}
 	}
 
 	links, format, err := parseLinks(resp.Message.Content)
@@ -199,14 +331,16 @@ func evaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 	}
 	if err != nil {
 		entry.Err = fmt.Errorf("parse: %w", err)
-		if noteCapHit(entry, resp, opts) {
+		hit := capHit(entry, resp, opts)
+		if hit {
 			slog.Warn("dream: response hit the output cap — truncated JSON",
-				"num_predict", opts.NumPredict, "completion_tokens", resp.EvalCount,
+				"num_predict", effectiveCap(opts), "completion_tokens", resp.EvalCount,
+				"finish_reason", resp.FinishReason, "cap_retry", retry,
 				"error", err, "raw", resp.Message.Content)
 		} else {
 			slog.Warn("dream: failed to parse LLM response", "error", err, "raw", resp.Message.Content)
 		}
-		return nil, fmt.Errorf("dream: parse links: %w", err)
+		return attemptResult{served: served, capHit: hit, err: fmt.Errorf("dream: parse links: %w", err)}
 	}
 	// Zero-link verdicts are a real answer ("no candidate relates"), not a
 	// failure, and until now they were indistinguishable in context_llm_log
@@ -229,37 +363,79 @@ func evaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 	// len-diff telemetry here was structurally dead (downgrade never changes
 	// the count) — the function now reports the downgrade count itself.
 	var dirDowngraded int
-	links, dirDowngraded = enforceSupersedesDirection(links, source.CreatedAt, candidates)
+	links, dirDowngraded = enforceSupersedesDirection(links, req.source.CreatedAt, req.candidates)
 	if dirDowngraded > 0 {
-		if entry.Metadata == nil {
-			entry.Metadata = map[string]any{}
-		}
 		entry.Metadata["supersedes_direction_downgraded"] = dirDowngraded
 	}
 
-	candidateIDs := make(map[string]bool)
-	for _, c := range candidates {
-		candidateIDs[c.ID] = true
-	}
-	valid := filterValidCandidates(links, candidateIDs)
+	valid := filterValidCandidates(links, req.candidateIDs)
 	if noteDroppedInvalid(entry, len(links), len(valid)) && len(valid) == 0 {
 		// Every link the model named was rejected. The function still returns
 		// a zero-link success, which the cycle books as "nothing to link" and
 		// answers with the multi-day inert back-off — so this line is the only
 		// place the loss is visible while it happens.
 		slog.Warn("dream: every parsed link dropped by the candidate filter",
-			"block_id", source.ID, "links_parsed", len(links), "parse_format", format)
+			"block_id", req.source.ID, "links_parsed", len(links), "parse_format", format)
 	}
 
 	if capped, dropped := applyHardCap(valid, MaxLinksPerCycle); dropped > 0 {
-		if entry.Metadata == nil {
-			entry.Metadata = map[string]any{}
-		}
 		entry.Metadata["links_capped"] = dropped
 		valid = capped
 	}
 
-	return valid, nil
+	return attemptResult{links: valid, served: served}
+}
+
+// effectiveCap is the output cap the attempt carrying opts actually SENDS —
+// the base cap times the scale, matching what applyModelParams computes inside
+// the chain walk. The distinction is load-bearing on the retry: opts.NumPredict
+// there is still the BASE cap (the scaling happens on a chain-local copy, which
+// this package never sees), so a token heuristic against it would classify any
+// retry answer whose length lands between the two caps as a second cap hit —
+// and book the block inert for what is an ordinary parse failure.
+//
+// Still only an approximation of the wire cap on a row that overrides
+// num_predict in its model_map: that value is scaled by the same factor, so the
+// ratio holds while the absolute number does not. Which is precisely why the
+// token heuristic below runs ONLY where the provider reports no stop reason.
+func effectiveCap(opts llm.Options) int {
+	if opts.NumPredictScale <= 1 {
+		return opts.NumPredict
+	}
+	return int(float64(opts.NumPredict) * opts.NumPredictScale)
+}
+
+// rowPinsMaxTokens reports whether the serving backend row carries a positive
+// numeric extra_body.max_tokens — the one configuration a scaled NumPredict
+// cannot outbid, because ExtraBody is merged over the marshalled body last
+// (llm.applyOpenAIBodyExtras) and therefore wins on the wire.
+//
+// The two accepted shapes mirror llm's numericValue: a settings/JSONB round
+// trip yields float64, a Go-built row int. Anything else (a string "4096", a
+// nested object) is not a cap this check can reason about, so it does not
+// suppress the retry — the retry is the conservative branch, the skip is the
+// exception.
+func rowPinsMaxTokens(b *backends.Backend) bool {
+	if b == nil {
+		return false
+	}
+	switch n := b.ExtraBody["max_tokens"].(type) {
+	case float64:
+		return n > 0
+	case int:
+		return n > 0
+	default:
+		return false
+	}
+}
+
+// backendName is the log-safe name of the row that answered; served is nil on
+// paths that never reached a backend.
+func backendName(b *backends.Backend) string {
+	if b == nil {
+		return ""
+	}
+	return b.Name
 }
 
 // noteCandidatesCapped stamps the aggregate candidate cap's drop count onto a
@@ -267,7 +443,7 @@ func evaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 // cap. Nothing is written when the cap did not bind — a metadata key that
 // appears on every row cannot be counted, and 0 is the overwhelming majority.
 //
-// Split out for the same reason noteCapHit is: the llmlog entry lives inside
+// Split out for the same reason capHit is: the llmlog entry lives inside
 // evaluateRelationships and never leaves it, so the stamp is only reachable
 // for a unit test as its own function.
 func noteCandidatesCapped(entry *llmlog.Entry, capped int) {
@@ -302,7 +478,7 @@ func noteCandidatesCapped(entry *llmlog.Entry, capped int) {
 // so a backend answering deterministically with hallucinated ids would re-burn
 // one eval on the same block every five minutes forever.
 //
-// Split out for the reachability reason noteCapHit documents: the llmlog entry
+// Split out for the reachability reason capHit documents: the llmlog entry
 // is function-local, so the stamp is only testable as its own function.
 func noteDroppedInvalid(entry *llmlog.Entry, parsed, valid int) bool {
 	dropped := parsed - valid
@@ -316,42 +492,54 @@ func noteDroppedInvalid(entry *llmlog.Entry, parsed, valid int) bool {
 	return true
 }
 
-// noteCapHit flags a parse failure that is really an output-cap truncation and
-// reports whether it did. Returns false (and touches nothing) for every other
-// parse failure.
+// capHit decides whether a parse failure is really an output-cap truncation,
+// stamps the verdict onto the entry (cap_hit plus cap_hit_source, so the two
+// signals stay distinguishable in the log) and reports it. Returns false and
+// touches nothing for every other parse failure.
 //
-// The pipeline is otherwise BLIND to the cap: llm.ChatResponse carries no
-// finish_reason / done_reason — neither wire format decodes it on the
-// non-streaming path dream uses — so a cap-truncated answer looks exactly like
-// malformed output. Both book the parse error, the 5-minute transient cooldown
-// and a re-pick, which means a backend that deterministically overruns the cap
-// re-burns one eval call every five minutes with nothing in the log to say why.
+// Two signals, in strict precedence:
 //
-// The available signal is provider-agnostic: EvalCount is the backend's own
-// completion-token count and opts.NumPredict is the cap this call site sent.
-// Generation stopping at the budget while the JSON does not parse is the cap
-// hit. >= rather than ==: some backends count the stop token in. NumPredict
-// <= 0 means uncapped — nothing to hit, and unreachable from config: 0 on
-// dream.num_predict is the package-default sentinel, so the options this sees
-// always carry a positive cap. Known blind spot: a backend row's model_map
-// num_predict/max_tokens override is applied inside the chain walk
-// (applyModelParams on a local copy) and is not visible here, so on such rows
-// the flag compares against the cap this call site SENT — since dream.
-// num_predict the configured one rather than the constant, which makes the
-// heuristic exact on every install that tunes the key and leaves only the row
-// override blind — a heuristic until ChatResponse carries the provider's
-// finish_reason.
+//  1. The PROVIDER's own stop reason. Since issue #26 the non-streaming path
+//     decodes done_reason (Ollama) / choices[0].finish_reason (OpenAI), and
+//     "length" is the cap hit stated outright. EqualFold because the value is
+//     deliberately not normalised on the way in.
+//  2. The token HEURISTIC, and ONLY where the provider reported nothing at
+//     all: generation stopping at the budget while the JSON does not parse is
+//     the cap hit. >= rather than ==, because some backends count the stop
+//     token in. This half stays because plenty of OpenAI-compatible servers
+//     report no stop reason — it is the floor, not the primary signal, and
+//     cap_hit_source says which of the two spoke so an operator can see when
+//     it becomes retirable.
 //
-// Observability only: the caller still returns the parse error and the cooldown
-// path is unchanged.
-func noteCapHit(entry *llmlog.Entry, resp *llm.ChatResponse, opts llm.Options) bool {
-	if entry == nil || resp == nil || opts.NumPredict <= 0 || resp.EvalCount < opts.NumPredict {
+// The heuristic is gated on an EMPTY stop reason rather than merely ranked
+// below it: a provider that says "stop" has answered the question, and letting
+// the token count overrule that would misclassify exactly the case the retry
+// makes expensive — a malformed answer on the RETRY attempt, whose length
+// naturally lands between the base and the scaled cap, would be read as a
+// second cap hit and book the block inert (see effectiveCap).
+//
+// NumPredict <= 0 means uncapped — nothing for the heuristic to compare
+// against, and unreachable from config: 0 on dream.num_predict is the
+// package-default sentinel, so the options this sees always carry a positive
+// cap. A stated "length" is honoured even then; the provider knows its own cap.
+func capHit(entry *llmlog.Entry, resp *llm.ChatResponse, opts llm.Options) bool {
+	if entry == nil || resp == nil {
+		return false
+	}
+	var source string
+	switch {
+	case strings.EqualFold(resp.FinishReason, "length"):
+		source = "finish_reason"
+	case resp.FinishReason == "" && opts.NumPredict > 0 && resp.EvalCount >= effectiveCap(opts):
+		source = "tokens"
+	default:
 		return false
 	}
 	if entry.Metadata == nil {
 		entry.Metadata = map[string]any{}
 	}
 	entry.Metadata["cap_hit"] = true
+	entry.Metadata["cap_hit_source"] = source
 	return true
 }
 

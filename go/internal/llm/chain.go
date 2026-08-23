@@ -405,6 +405,14 @@ func ApplyDispatchOutcome(entry *llmlog.Entry, attempts []ChainAttempt, err erro
 // applyModelParams merges ModelSpec.Params field-wise over the code-default
 // options and resolves the think toggle (params.think wins over the row's
 // legacy Think field). NumCtx always comes from the row.
+//
+// Options.NumPredictScale is applied LAST, on the merged result: a caller that
+// wants a wider output cap for one attempt (dream's bounded cap-hit retry)
+// means the cap this attempt will actually send, and that is only known here —
+// after a model_map num_predict/max_tokens param has overwritten the caller's
+// value. Scaling on the caller side instead would be a no-op on exactly the
+// rows that set such a param. resolveMaxOut (autowindow) walks this same
+// function, so the window math sees the scaled cap too.
 func applyModelParams(base Options, params map[string]any, b *backends.Backend) (Options, *bool) {
 	think := b.Think.Ptr()
 	if b.NumCtx > 0 {
@@ -432,6 +440,9 @@ func applyModelParams(base Options, params map[string]any, b *backends.Backend) 
 				think = &t
 			}
 		}
+	}
+	if base.NumPredictScale > 1 && base.NumPredict > 0 {
+		base.NumPredict = int(float64(base.NumPredict) * base.NumPredictScale)
 	}
 	return base, think
 }

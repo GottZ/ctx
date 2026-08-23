@@ -612,6 +612,7 @@ func (s *Scheduler) newRouter(cfg *config.Config, tenant string) *dream.Router {
 		Blocktypes:      s.blocktypes,
 		Language:        cfg.Dream.Language,
 		LinkFloor:       cfg.Dream.LinkFloorConfidence,
+		CapRetryFactor:  cfg.Dream.EvalCapRetryFactor,
 		TemporalTimeout: cfg.Dream.TemporalTimeout,
 		CycleTimeout:    cfg.Dream.CycleTimeout,
 	}

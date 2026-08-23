@@ -251,6 +251,19 @@ func TestValidateTable(t *testing.T) {
 		{"V18 raised ok", map[string]string{"dream.num_predict": "1200"}, "dream.num_predict", -1},
 		{"V18 negative rejected", map[string]string{"dream.num_predict": "-1"}, "dream.num_predict", SeverityError},
 		{"V18 below default warns", map[string]string{"dream.num_predict": "300"}, "dream.num_predict", SeverityWarn},
+
+		// V19 — dream.eval_cap_retry_factor (issue #26). A float64, so V17's
+		// typed duration walk does not reach it either, and unlike V18 there
+		// is no floor half: the documented off-switch is the whole range
+		// <= 1, so 0 and 1 are ordinary settings ("no retry") and must stay
+		// silent. Only a negative factor has no reading at all — it renders
+		// as a configured multiplier while the retry is off.
+		{"V19 default ok", map[string]string{}, "dream.eval_cap_retry_factor", -1},
+		{"V19 zero is off, not an issue", map[string]string{"dream.eval_cap_retry_factor": "0"}, "dream.eval_cap_retry_factor", -1},
+		{"V19 one is off, not an issue", map[string]string{"dream.eval_cap_retry_factor": "1"}, "dream.eval_cap_retry_factor", -1},
+		{"V19 fractional above one ok", map[string]string{"dream.eval_cap_retry_factor": "1.5"}, "dream.eval_cap_retry_factor", -1},
+		{"V19 raised ok", map[string]string{"dream.eval_cap_retry_factor": "4"}, "dream.eval_cap_retry_factor", -1},
+		{"V19 negative rejected", map[string]string{"dream.eval_cap_retry_factor": "-2"}, "dream.eval_cap_retry_factor", SeverityError},
 	}
 
 	for _, c := range cases {

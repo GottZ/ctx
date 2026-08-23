@@ -22,6 +22,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"dream.temporal_timeout":                         "Seconds allowed for the temporal Phase-2 LLM review; a timeouts.dream override on the serving backend row takes precedence",
 	"dream.cycle_timeout":                            "Seconds one whole dream cycle (pick, temporal, keywords, RRF, eval, recurrence) may run; the outer ceiling a timeouts.dream row can only shorten",
 	"dream.num_predict":                              "Output-token cap of the dream link-evaluation and recurrence-confirm calls; 0 = the built-in default, a model_map param on the row wins",
+	"dream.eval_cap_retry_factor":                    "Scales the output cap of one retry after a dream link evaluation hit the cap; 1 or less disables the retry, a second hit books the block inert",
 	"dream.backoff_mode":                             "Curve shaping how the re-dream interval grows with a block's eval count: exp, log, linear, or off (fixed active/inert cooldown days)",
 	"dream.backoff_factor":                           "Curve steepness: growth base for exp, log coefficient, or days-per-step slope for linear; higher cools mature blocks off faster",
 	"dream.backoff_grace":                            "Free eval cycles before the back-off curve starts growing; 0 grows from the very first dream",

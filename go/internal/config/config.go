@@ -268,6 +268,35 @@ type DreamConfig struct {
 	// default was measured against. WARN, not a clamp: a shorter cap is a
 	// legitimate setting for an install whose backend answers compactly.
 	NumPredict int `key:"dream.num_predict" env:"CTX_DREAM_NUM_PREDICT" default:"600" mut:"hot" tenancy:"global-only"`
+	// EvalCapRetryFactor scales the output cap of ONE bounded retry after the
+	// link evaluation hit that cap. A cap hit is now detectable rather than
+	// inferable (the provider's finish_reason since issue #26, the
+	// completion-tokens heuristic where the provider reports none), so the
+	// cycle no longer has to book a truncated answer as ordinary malformed
+	// output: it re-asks once at factor x the RESOLVED cap — resolved meaning
+	// after a model_map num_predict/max_tokens override, since the scaling
+	// happens where that override is applied (llm.applyModelParams).
+	// <= 1 DISABLES the retry and restores today's behaviour exactly: one
+	// call, the plain parse error, the 5-minute transient cooldown, a re-pick.
+	// The key is a true kill switch — nothing else changes with it off.
+	// A SECOND cap hit is booked as a completed-but-inert eval
+	// (dream_eval_count + 1, dream_last_inert, the inert back-off offset)
+	// instead of the 5-minute transient: an answer that overruns twice the
+	// cap is far more plausibly prompt-specific (the eval prompt scales with
+	// the candidate count) than a permanent backend defect, and the transient
+	// path has no attempt counter — without the escalation such a block
+	// re-burns one eval call every five minutes forever.
+	// LIMIT: a serving context_backends row whose extra_body carries a
+	// numeric max_tokens outbids Options.NumPredict on the wire
+	// (applyOpenAIBodyExtras merges last-write-wins), so the retry could not
+	// take effect there. The pipeline detects that row and SKIPS the retry,
+	// returning the plain parse error — the "no behaviour change when the
+	// retry cannot take effect" side, not a silent inert booking. Tune
+	// extra_body.max_tokens on such rows instead.
+	// Validated by V19 (validateDream): a negative value is an ERROR — the
+	// off-semantics are <= 1, and a negative factor would render as a
+	// configured multiplier while shrinking the cap if it ever applied.
+	EvalCapRetryFactor float64 `key:"dream.eval_cap_retry_factor" env:"CTX_DREAM_EVAL_CAP_RETRY_FACTOR" default:"2" mut:"hot" tenancy:"global-only"`
 
 	Backoff BackoffConfig
 }

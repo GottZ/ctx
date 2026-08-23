@@ -3,6 +3,7 @@ package dream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -250,12 +251,16 @@ func TestEvaluateRelationships_AllCandidatesNone_EmptyResult(t *testing.T) {
 	}
 }
 
-// --- Output-cap detection (noteCapHit) ---.
+// --- Output-cap detection and the bounded retry (issue #26) ---.
 
 // truncatedObjectMap is a real-shaped dream-eval answer cut off mid-JSON: the
 // object-map drift form (form 2) with the second key started but never closed,
 // exactly how a cap hit presents itself to parseLinks.
 const truncatedObjectMap = `{"` + uuidB + `":{"target_id":"` + uuidB + `","type":"topical","confidence":0.9}, "` + uuidC
+
+// validArray is a well-formed answer in the shape the prompt asks for — what
+// the retry is supposed to get once the cap is wide enough.
+const validArray = `[{"target_id":"` + uuidB + `","type":"topical","confidence":0.85}]`
 
 // capRespFunc returns a chatJSON stub that answers with content and reports
 // evalCount completion tokens, so a test can put the backend's own token count
@@ -270,80 +275,382 @@ func capRespFunc(content string, evalCount int) func(ctx context.Context, host, 
 	}
 }
 
-// TestEvaluateRelationships_CapHitStillErrors pins that the cap-hit flag is
-// OBSERVABILITY ONLY: a truncated answer that consumed the whole budget still
-// returns the parse error, so the cooldown/re-pick path is untouched.
-func TestEvaluateRelationships_CapHitStillErrors(t *testing.T) {
-	opts := llm.Options{NumPredict: 600}
-	mockChatJSON(t, capRespFunc(truncatedObjectMap, opts.NumPredict))
+// scriptedAnswer is one entry of a per-call script: what the backend answers
+// on attempt n.
+type scriptedAnswer struct {
+	content      string
+	evalCount    int
+	finishReason string
+}
 
-	links, err := EvaluateRelationships(context.Background(), nil, newTestRouter(), opts, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
-	if err == nil {
-		t.Fatal("want parse error for truncated object-map JSON, got nil")
+// scriptedChat installs a chatJSON seam that walks answers in order and
+// records the Options of every call. The recorded Options are the ones the
+// chain walk RESOLVED (llm.ChatChainVia hands applyModelParams' output to the
+// seam), so a test can assert the effective output cap of each attempt rather
+// than the caller's intent.
+func scriptedChat(t *testing.T, answers ...scriptedAnswer) *[]llm.Options {
+	t.Helper()
+	seen := make([]llm.Options, 0, len(answers))
+	mockChatJSON(t, func(_ context.Context, _, _, _ string, _ *bool, _, _ string, opts llm.Options, _ time.Duration) (*llm.ChatResponse, error) {
+		seen = append(seen, opts)
+		a := answers[len(answers)-1]
+		if len(seen) <= len(answers) {
+			a = answers[len(seen)-1]
+		}
+		return &llm.ChatResponse{
+			Message:      llm.Message{Role: "assistant", Content: a.content},
+			EvalCount:    a.evalCount,
+			PromptTokens: 100,
+			FinishReason: a.finishReason,
+		}, nil
+	})
+	return &seen
+}
+
+// retryRouter is newTestRouter with the cap-hit retry armed at factor.
+func retryRouter(factor float64) *Router {
+	r := newTestRouter()
+	r.CapRetryFactor = factor
+	return r
+}
+
+// TestEvaluateRelationships_CapHitRetriesAtScaledCap is spec test 1: a
+// truncated first answer is re-asked ONCE at factor x the cap, and the second
+// answer's links are returned.
+//
+// The cap assertion is on opts.NumPredict at the seam — 600 on call 1, 1200 on
+// call 2 — not on NumPredictScale. The scale field only proves it was copied;
+// the number the backend is actually told is the behaviour, and it exists only
+// after applyModelParams ran inside the chain walk.
+func TestEvaluateRelationships_CapHitRetriesAtScaledCap(t *testing.T) {
+	opts := llm.Options{NumPredict: 600}
+	seen := scriptedChat(t,
+		scriptedAnswer{truncatedObjectMap, 600, "length"},
+		scriptedAnswer{validArray, 300, "stop"},
+	)
+
+	links, err := EvaluateRelationships(context.Background(), nil, retryRouter(2), opts,
+		srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	if err != nil {
+		t.Fatalf("the retry answer parses — want no error, got %v", err)
 	}
-	if !errorContains(err, "parse links") {
-		t.Errorf("error not wrapped as parse-error: %v", err)
+	if len(links) != 1 {
+		t.Fatalf("want the retry's 1 link, got %+v", links)
 	}
-	if len(links) != 0 {
-		t.Errorf("want no links from a truncated answer, got %+v", links)
+	if len(*seen) != 2 {
+		t.Fatalf("want exactly 2 wire calls, got %d", len(*seen))
+	}
+	if got := (*seen)[0].NumPredict; got != 600 {
+		t.Errorf("call 1 sent num_predict %d, want the base 600", got)
+	}
+	if got := (*seen)[1].NumPredict; got != 1200 {
+		t.Errorf("call 2 sent num_predict %d, want the scaled 1200", got)
 	}
 }
 
-// TestNoteCapHit drives the verdict itself. It runs against the helper rather
-// than through EvaluateRelationships because the llmlog entry that carries the
-// metadata is function-local and llmlog.Record is a no-op on a nil pool — the
-// package has no in-process recorder seam, only the DB-backed waitLlmlogRows
-// helper in the integration tests.
-func TestNoteCapHit(t *testing.T) {
-	tests := []struct {
-		name       string
-		evalCount  int
-		numPredict int
-		want       bool
-	}{
-		// Generation stopped exactly at the budget — the cap hit.
-		{"exactly-at-cap", 600, 600, true},
-		// Some backends count the stop token in, so > is a hit too.
-		{"over-cap", 601, 600, true},
-		// Malformed but well short of the budget: a real parse failure.
-		{"below-cap", 42, 600, false},
-		{"one-below-cap", 599, 600, false},
-		// Uncapped request (dailySynthesisOptions shape): nothing to hit.
-		{"uncapped", 900, 0, false},
+// TestEvaluateRelationships_DoubleCapHit_Sentinel is spec test 2: the retry
+// hits the cap again, so the error carries ErrOutputCapHit — the signal
+// RunDreamCycle books as a completed-but-inert eval. Exactly two calls: the
+// retry is bounded, never a loop.
+func TestEvaluateRelationships_DoubleCapHit_Sentinel(t *testing.T) {
+	seen := scriptedChat(t,
+		scriptedAnswer{truncatedObjectMap, 600, "length"},
+		scriptedAnswer{truncatedObjectMap, 1200, "length"},
+	)
+
+	links, err := EvaluateRelationships(context.Background(), nil, retryRouter(2),
+		llm.Options{NumPredict: 600}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	if err == nil {
+		t.Fatal("want an error after two cap hits, got nil")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			entry := &llmlog.Entry{Pipeline: "dream-eval"}
-			resp := &llm.ChatResponse{EvalCount: tt.evalCount}
-			got := noteCapHit(entry, resp, llm.Options{NumPredict: tt.numPredict})
-			if got != tt.want {
-				t.Fatalf("noteCapHit = %v, want %v", got, tt.want)
+	if !errors.Is(err, ErrOutputCapHit) {
+		t.Errorf("second cap hit must carry ErrOutputCapHit, got %v", err)
+	}
+	if !errorContains(err, "parse links") {
+		t.Errorf("the underlying parse error must survive the wrap: %v", err)
+	}
+	if len(links) != 0 {
+		t.Errorf("want no links, got %+v", links)
+	}
+	if len(*seen) != 2 {
+		t.Errorf("want exactly 2 wire calls (bounded retry), got %d", len(*seen))
+	}
+}
+
+// TestEvaluateRelationships_RetryDisabled_PlainParseError is spec test 3 and
+// the kill-switch pin: with dream.eval_cap_retry_factor <= 1 the function
+// behaves exactly as it did before the retry existed — ONE call, the plain
+// parse error, no sentinel, so RunDreamCycle books the 5-minute transient
+// cooldown and re-picks. It also covers the zero value, i.e. every Router
+// built without config wiring.
+func TestEvaluateRelationships_RetryDisabled_PlainParseError(t *testing.T) {
+	for _, factor := range []float64{0, 1} {
+		t.Run(fmt.Sprintf("factor-%g", factor), func(t *testing.T) {
+			seen := scriptedChat(t, scriptedAnswer{truncatedObjectMap, 600, "length"})
+
+			links, err := EvaluateRelationships(context.Background(), nil, retryRouter(factor),
+				llm.Options{NumPredict: 600}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+			if err == nil {
+				t.Fatal("want parse error for truncated object-map JSON, got nil")
 			}
-			if tt.want {
-				if entry.Metadata["cap_hit"] != true {
-					t.Errorf("metadata cap_hit = %v, want true", entry.Metadata["cap_hit"])
-				}
-			} else if _, ok := entry.Metadata["cap_hit"]; ok {
-				t.Errorf("cap_hit must not be set below the cap, got %+v", entry.Metadata)
+			if !errorContains(err, "parse links") {
+				t.Errorf("error not wrapped as parse-error: %v", err)
+			}
+			if errors.Is(err, ErrOutputCapHit) {
+				t.Error("a cap hit that was never retried must not escalate to the inert booking")
+			}
+			if len(links) != 0 {
+				t.Errorf("want no links from a truncated answer, got %+v", links)
+			}
+			if len(*seen) != 1 {
+				t.Errorf("want exactly 1 wire call with the retry off, got %d", len(*seen))
 			}
 		})
 	}
 }
 
-// TestNoteCapHit_NilInputs pins the guards: a nil entry or a nil response (the
+// TestEvaluateRelationships_OrdinaryParseFailure_NoRetry is spec test 4: a
+// malformed answer well under the cap, with the provider reporting a natural
+// stop, is ordinary drift — one call, plain parse error, no sentinel. Pins
+// that the retry does not double the cost of every parse failure.
+func TestEvaluateRelationships_OrdinaryParseFailure_NoRetry(t *testing.T) {
+	seen := scriptedChat(t, scriptedAnswer{`not json at all`, 42, "stop"})
+
+	_, err := EvaluateRelationships(context.Background(), nil, retryRouter(2),
+		llm.Options{NumPredict: 600}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	if err == nil {
+		t.Fatal("want a parse error, got nil")
+	}
+	if errors.Is(err, ErrOutputCapHit) {
+		t.Errorf("ordinary drift must not be classified as a cap hit: %v", err)
+	}
+	if len(*seen) != 1 {
+		t.Errorf("want exactly 1 wire call, got %d", len(*seen))
+	}
+}
+
+// TestEvaluateRelationships_RetryFailsBelowScaledCap_NoSentinel is spec test
+// 4's twin for the RETRY attempt, and the regression guard for the heuristic's
+// reference cap. The retry answers malformed with finish_reason "stop" and 900
+// completion tokens — above the base 600, below the scaled 1200. Compared
+// against the BASE cap (which is what opts.NumPredict still holds on this
+// side of the chain walk) that would read as a second cap hit and book the
+// block inert for an ordinary parse failure. It must stay a plain parse error.
+func TestEvaluateRelationships_RetryFailsBelowScaledCap_NoSentinel(t *testing.T) {
+	seen := scriptedChat(t,
+		scriptedAnswer{truncatedObjectMap, 600, "length"},
+		scriptedAnswer{`{"garbage": `, 900, "stop"},
+	)
+
+	_, err := EvaluateRelationships(context.Background(), nil, retryRouter(2),
+		llm.Options{NumPredict: 600}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	if err == nil {
+		t.Fatal("want a parse error from the malformed retry answer, got nil")
+	}
+	if errors.Is(err, ErrOutputCapHit) {
+		t.Errorf("a retry failure between the base and the scaled cap is not a second cap hit: %v", err)
+	}
+	if len(*seen) != 2 {
+		t.Errorf("want exactly 2 wire calls, got %d", len(*seen))
+	}
+}
+
+// TestEvaluateRelationships_NoStopReason_RetriesOnTokenHeuristic is spec test
+// 5: the provider reports no stop reason at all (the common OpenAI-compatible
+// case), so the token heuristic carries the verdict and the retry still fires.
+func TestEvaluateRelationships_NoStopReason_RetriesOnTokenHeuristic(t *testing.T) {
+	seen := scriptedChat(t,
+		scriptedAnswer{truncatedObjectMap, 600, ""},
+		scriptedAnswer{validArray, 300, ""},
+	)
+
+	links, err := EvaluateRelationships(context.Background(), nil, retryRouter(2),
+		llm.Options{NumPredict: 600}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(links) != 1 || len(*seen) != 2 {
+		t.Fatalf("want 1 link from 2 calls, got %d links from %d calls", len(links), len(*seen))
+	}
+	// The source of that verdict is only observable on the helper: the llmlog
+	// entry is function-local and llmlog.Record is a no-op on a nil pool (see
+	// TestCapHit).
+	entry := &llmlog.Entry{Pipeline: "dream-eval"}
+	if !capHit(entry, &llm.ChatResponse{EvalCount: 600}, llm.Options{NumPredict: 600}) {
+		t.Fatal("a silent provider at the budget must still read as a cap hit")
+	}
+	if entry.Metadata["cap_hit_source"] != "tokens" {
+		t.Errorf("cap_hit_source = %v, want tokens", entry.Metadata["cap_hit_source"])
+	}
+}
+
+// TestEvaluateRelationships_ExtraBodyMaxTokensRow_SkipsRetry pins verifier
+// correction 2: on a row whose extra_body pins max_tokens, the scaled
+// Options.NumPredict never reaches the wire (extra_body is merged last), so
+// the retry would send the identical cap, hit it again and book the block
+// inert for a row setting. The retry is skipped and the plain parse error
+// returned — one call, no sentinel.
+func TestEvaluateRelationships_ExtraBodyMaxTokensRow_SkipsRetry(t *testing.T) {
+	for _, pinned := range []any{float64(600), 600} {
+		t.Run(fmt.Sprintf("%T", pinned), func(t *testing.T) {
+			r := retryRouter(2)
+			p := backends.NewPool(nil, nil)
+			p.SeedSnapshotForTest([]backends.Backend{{
+				ID: "pinned-backend-id", Name: "pinned-backend",
+				Host: "h", APIKey: "k",
+				Trust: backends.TrustFull, Locality: "lan",
+				Roles:     []string{backends.RoleDream},
+				ModelMap:  map[string]backends.ModelSpec{"default": {Model: "m"}},
+				ExtraBody: map[string]any{"max_tokens": pinned},
+				Priority:  100, Enabled: true,
+			}})
+			r.Pool = p
+			seen := scriptedChat(t, scriptedAnswer{truncatedObjectMap, 600, "length"})
+
+			_, err := EvaluateRelationships(context.Background(), nil, r,
+				llm.Options{NumPredict: 600}, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+			if err == nil {
+				t.Fatal("want the plain parse error, got nil")
+			}
+			if errors.Is(err, ErrOutputCapHit) {
+				t.Error("a retry that cannot take effect must not escalate to the inert booking")
+			}
+			if len(*seen) != 1 {
+				t.Errorf("want exactly 1 wire call (retry skipped), got %d", len(*seen))
+			}
+		})
+	}
+}
+
+// TestCapHit drives the verdict itself. It runs against the helper rather
+// than through EvaluateRelationships because the llmlog entry that carries the
+// metadata is function-local and llmlog.Record is a no-op on a nil pool — the
+// package has no in-process recorder seam, only the DB-backed waitLlmlogRows
+// helper in the integration tests.
+func TestCapHit(t *testing.T) {
+	tests := []struct {
+		name       string
+		evalCount  int
+		numPredict int
+		scale      float64
+		finish     string
+		want       bool
+		wantSource string
+	}{
+		// The provider states it outright — token count irrelevant.
+		{"finish-reason-length", 12, 600, 0, "length", true, "finish_reason"},
+		{"finish-reason-length-cased", 12, 600, 0, "LENGTH", true, "finish_reason"},
+		// A stated natural stop is an answer: the token count must not
+		// overrule it, or the retry attempt below would misfire.
+		{"finish-reason-stop-at-cap", 600, 600, 0, "stop", false, ""},
+		{"finish-reason-tool-calls", 900, 600, 0, "tool_calls", false, ""},
+		// Provider silent: the heuristic carries it.
+		{"silent-exactly-at-cap", 600, 600, 0, "", true, "tokens"},
+		// Some backends count the stop token in, so > is a hit too.
+		{"silent-over-cap", 601, 600, 0, "", true, "tokens"},
+		// Malformed but well short of the budget: a real parse failure.
+		{"silent-below-cap", 42, 600, 0, "", false, ""},
+		{"silent-one-below-cap", 599, 600, 0, "", false, ""},
+		// Uncapped request (dailySynthesisOptions shape): nothing to hit.
+		{"silent-uncapped", 900, 0, 0, "", false, ""},
+		// THE retry rows: opts.NumPredict is still the base cap on this side
+		// of the chain walk, so the comparison must scale it. 900 tokens under
+		// a 600x2 cap is not a cap hit; 1200 is.
+		{"retry-below-scaled-cap", 900, 600, 2, "", false, ""},
+		{"retry-at-scaled-cap", 1200, 600, 2, "", true, "tokens"},
+		// A scale <= 1 leaves the reference cap alone.
+		{"scale-one-is-base-cap", 600, 600, 1, "", true, "tokens"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := &llmlog.Entry{Pipeline: "dream-eval"}
+			resp := &llm.ChatResponse{EvalCount: tt.evalCount, FinishReason: tt.finish}
+			got := capHit(entry, resp, llm.Options{NumPredict: tt.numPredict, NumPredictScale: tt.scale})
+			if got != tt.want {
+				t.Fatalf("capHit = %v, want %v", got, tt.want)
+			}
+			if tt.want {
+				if entry.Metadata["cap_hit"] != true {
+					t.Errorf("metadata cap_hit = %v, want true", entry.Metadata["cap_hit"])
+				}
+				if entry.Metadata["cap_hit_source"] != tt.wantSource {
+					t.Errorf("cap_hit_source = %v, want %q", entry.Metadata["cap_hit_source"], tt.wantSource)
+				}
+			} else if _, ok := entry.Metadata["cap_hit"]; ok {
+				t.Errorf("cap_hit must not be set here, got %+v", entry.Metadata)
+			}
+		})
+	}
+}
+
+// TestCapHit_NilInputs pins the guards: a nil entry or a nil response (the
 // LLM-error path, where resp is nil) must never be a cap hit and never panic.
-func TestNoteCapHit_NilInputs(t *testing.T) {
-	if noteCapHit(nil, &llm.ChatResponse{EvalCount: 600}, llm.Options{NumPredict: 600}) {
+func TestCapHit_NilInputs(t *testing.T) {
+	if capHit(nil, &llm.ChatResponse{EvalCount: 600, FinishReason: "length"}, llm.Options{NumPredict: 600}) {
 		t.Error("nil entry must not report a cap hit")
 	}
-	if noteCapHit(&llmlog.Entry{Pipeline: "dream-eval"}, nil, llm.Options{NumPredict: 600}) {
+	if capHit(&llmlog.Entry{Pipeline: "dream-eval"}, nil, llm.Options{NumPredict: 600}) {
 		t.Error("nil response must not report a cap hit")
+	}
+}
+
+// TestEffectiveCap pins the reference cap the token heuristic compares
+// against: the base cap times a scale above 1, the base cap otherwise.
+func TestEffectiveCap(t *testing.T) {
+	tests := []struct {
+		name string
+		opts llm.Options
+		want int
+	}{
+		{"unscaled", llm.Options{NumPredict: 600}, 600},
+		{"scale-below-one", llm.Options{NumPredict: 600, NumPredictScale: 0.5}, 600},
+		{"scale-one", llm.Options{NumPredict: 600, NumPredictScale: 1}, 600},
+		{"scale-two", llm.Options{NumPredict: 600, NumPredictScale: 2}, 1200},
+		{"scale-fractional", llm.Options{NumPredict: 600, NumPredictScale: 1.5}, 900},
+		{"uncapped", llm.Options{NumPredictScale: 2}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveCap(tt.opts); got != tt.want {
+				t.Errorf("effectiveCap = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRowPinsMaxTokens pins the retry-suppression predicate: only a POSITIVE
+// numeric extra_body.max_tokens (both JSONB round-trip shapes) suppresses the
+// retry. Anything else falls through to the retry, which is the conservative
+// branch.
+func TestRowPinsMaxTokens(t *testing.T) {
+	if rowPinsMaxTokens(nil) {
+		t.Error("a nil served backend must not suppress the retry")
+	}
+	tests := []struct {
+		name string
+		body map[string]any
+		want bool
+	}{
+		{"no-extra-body", map[string]any{}, false},
+		{"float-shape", map[string]any{"max_tokens": float64(4096)}, true},
+		{"int-shape", map[string]any{"max_tokens": 4096}, true},
+		{"zero-is-no-pin", map[string]any{"max_tokens": float64(0)}, false},
+		{"negative-is-no-pin", map[string]any{"max_tokens": -1}, false},
+		{"string-is-not-a-cap-we-can-read", map[string]any{"max_tokens": "4096"}, false},
+		{"other-keys-ignored", map[string]any{"provider": map[string]any{"zdr": true}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rowPinsMaxTokens(&backends.Backend{ExtraBody: tt.body}); got != tt.want {
+				t.Errorf("rowPinsMaxTokens = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
 // TestNoteCandidatesCapped pins the aggregate-candidate-cap counter that
 // searchByKeywords hands to evaluateRelationships (PR #36 hardening). Same
-// reachability constraint as TestNoteCapHit: the entry never leaves
+// reachability constraint as TestCapHit: the entry never leaves
 // evaluateRelationships, so the stamp is tested as its own function.
 func TestNoteCandidatesCapped(t *testing.T) {
 	tests := []struct {
@@ -394,7 +701,7 @@ func TestNoteCandidatesCapped_KeepsSiblingMetadata(t *testing.T) {
 // TestEvaluateRelationships_LinksParsedRecorded checks the counted-verdict side
 // of the same wave through the helper's sibling metadata key. The count itself
 // is asserted on the returned links (the entry is not reachable, see
-// TestNoteCapHit) — this pins that a well-formed answer under the cap takes the
+// TestCapHit) — this pins that a well-formed answer under the cap takes the
 // success path and yields the parsed links.
 func TestEvaluateRelationships_LinksParsedRecorded(t *testing.T) {
 	tests := []struct {
@@ -418,10 +725,10 @@ func TestEvaluateRelationships_LinksParsedRecorded(t *testing.T) {
 			if len(links) != tt.want {
 				t.Fatalf("want %d links, got %d: %+v", tt.want, len(links), links)
 			}
-			// The same inputs the success path hands noteCapHit must NOT
+			// The same inputs the success path hands capHit must NOT
 			// read as a cap hit — 120 tokens is far under the 600 budget.
 			entry := &llmlog.Entry{Pipeline: "dream-eval"}
-			if noteCapHit(entry, &llm.ChatResponse{EvalCount: 120}, opts) {
+			if capHit(entry, &llm.ChatResponse{EvalCount: 120}, opts) {
 				t.Error("a well-formed answer under the cap must not be flagged cap_hit")
 			}
 		})
@@ -432,7 +739,7 @@ func TestEvaluateRelationships_LinksParsedRecorded(t *testing.T) {
 
 // TestNoteDroppedInvalid pins the counter that makes filterValidCandidates'
 // five bare continues countable. Driven as its own function for the
-// reachability reason TestNoteCapHit documents: the llmlog entry never leaves
+// reachability reason TestCapHit documents: the llmlog entry never leaves
 // evaluateRelationships.
 func TestNoteDroppedInvalid(t *testing.T) {
 	tests := []struct {
@@ -494,7 +801,7 @@ func TestNoteDroppedInvalid_KeepsSiblingMetadata(t *testing.T) {
 // change (0 links, nil error), and the numbers that reach the counter on this
 // path produce the metadata key. The stamp is asserted on the helper because
 // the entry is function-local and llmlog.Record is a no-op on a nil pool (see
-// TestNoteCapHit) — the same split TestEvaluateRelationships_LinksParsedRecorded
+// TestCapHit) — the same split TestEvaluateRelationships_LinksParsedRecorded
 // uses.
 func TestEvaluateRelationships_AllLinksDropped_CountedNotErrored(t *testing.T) {
 	mockChatJSON(t, constResp(`[{"target_id":"`+uuidG+`","type":"topical","confidence":0.9}]`))

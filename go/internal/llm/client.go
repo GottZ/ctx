@@ -47,6 +47,18 @@ type Options struct {
 	PresencePenalty float64 `json:"presence_penalty,omitempty"`
 	NumPredict      int     `json:"num_predict,omitempty"`
 	NumCtx          int     `json:"num_ctx,omitempty"`
+	// NumPredictScale multiplies NumPredict once the chain has RESOLVED it —
+	// after a model_map num_predict/max_tokens override, inside
+	// applyModelParams, which is the only point where the effective cap of an
+	// attempt is known. A caller-side doubling would be a no-op on precisely
+	// the rows that override the cap. Values <= 1 (the zero value included)
+	// change nothing, so every existing call site is untouched.
+	//
+	// json:"-" is load-bearing: this whole struct is marshalled verbatim as
+	// the Ollama request's "options" object (see ollamaChatRequest), and a
+	// scale factor is a ctx-internal instruction, not a sampling parameter any
+	// backend knows.
+	NumPredictScale float64 `json:"-"`
 }
 
 // ChatResponse is the unified response from any provider.
