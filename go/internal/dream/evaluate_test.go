@@ -341,6 +341,56 @@ func TestNoteCapHit_NilInputs(t *testing.T) {
 	}
 }
 
+// TestNoteCandidatesCapped pins the aggregate-candidate-cap counter that
+// searchByKeywords hands to evaluateRelationships (PR #36 hardening). Same
+// reachability constraint as TestNoteCapHit: the entry never leaves
+// evaluateRelationships, so the stamp is tested as its own function.
+func TestNoteCandidatesCapped(t *testing.T) {
+	tests := []struct {
+		name   string
+		capped int
+		want   bool // key present on the entry
+	}{
+		// The cycle collected fewer than the cap allows — the overwhelming
+		// majority, and the reason 0 must NOT be written.
+		{"cap-did-not-bind", 0, false},
+		// The production worst case the PR reported: 29 collected, 25 kept.
+		{"worst-case-overshoot", 4, true},
+		{"single-drop", 1, true},
+		// Defensive: a negative count is a caller bug, never a metadata row.
+		{"negative-is-ignored", -1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := &llmlog.Entry{Pipeline: "dream-eval"}
+			noteCandidatesCapped(entry, tt.capped)
+			got, ok := entry.Metadata["candidates_capped"]
+			if ok != tt.want {
+				t.Fatalf("candidates_capped present = %v, want %v (metadata %+v)", ok, tt.want, entry.Metadata)
+			}
+			if tt.want && got != tt.capped {
+				t.Errorf("candidates_capped = %v, want %d", got, tt.capped)
+			}
+		})
+	}
+}
+
+// TestNoteCandidatesCapped_KeepsSiblingMetadata pins that the stamp lands
+// beside the keys evaluateRelationships writes later (parse_format,
+// links_parsed, links_capped) instead of replacing the map, and that a nil
+// entry — the shape every other note* helper tolerates — does not panic.
+func TestNoteCandidatesCapped_KeepsSiblingMetadata(t *testing.T) {
+	entry := &llmlog.Entry{Pipeline: "dream-eval", Metadata: map[string]any{"parse_format": "array"}}
+	noteCandidatesCapped(entry, 3)
+	if entry.Metadata["parse_format"] != "array" {
+		t.Errorf("sibling metadata lost: %+v", entry.Metadata)
+	}
+	if entry.Metadata["candidates_capped"] != 3 {
+		t.Errorf("candidates_capped = %v, want 3", entry.Metadata["candidates_capped"])
+	}
+	noteCandidatesCapped(nil, 3) // must not panic
+}
+
 // TestEvaluateRelationships_LinksParsedRecorded checks the counted-verdict side
 // of the same wave through the helper's sibling metadata key. The count itself
 // is asserted on the returned links (the entry is not reachable, see

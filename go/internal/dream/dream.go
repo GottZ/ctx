@@ -252,7 +252,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	}
 
 	// Step 3: Search per keyword via RRF.
-	candidates, err := searchByKeywords(ctx, pool, r, typeSet, keywords, readScopes, block)
+	candidates, capped, err := searchByKeywords(ctx, pool, r, typeSet, keywords, readScopes, block)
 	if err != nil {
 		slog.Warn("dream: keyword search failed", "block_id", block.ID, "error", err)
 		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
@@ -265,9 +265,17 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 		return 0, nil
 	}
 
+	// candidate_cap_hit / candidates_capped make a bound that FIRED countable
+	// instead of inferable. It is not a pure cost saving: the dropped hits are
+	// candidates the eval never sees, and a cycle whose only link would have
+	// come from one of them writes zero links and is booked inert below
+	// (SetDreamCooldown, up to dream.backoff_cap days). The same count reaches
+	// context_llm_log on the dream-eval row (evaluateRelationships).
 	slog.Info("dream: candidates found",
 		"block_id", block.ID,
 		"candidate_count", len(candidates),
+		"candidate_cap_hit", capped > 0,
+		"candidates_capped", capped,
 	)
 
 	// Throttle: after embed (keywords) → before LLM (evaluation).
@@ -276,7 +284,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	}
 
 	// Step 4: LLM evaluation.
-	links, err := EvaluateRelationships(ctx, pool, r, opts, *block, candidates)
+	links, err := evaluateRelationships(ctx, pool, r, opts, *block, candidates, capped)
 	if err != nil {
 		// Preempt semantics pin (MW19, design/02 §4.6 dream-eval row): a
 		// dispatcher preempt is a scheduling decision, not a quality signal
@@ -747,10 +755,17 @@ func SetDreamCooldownMinutes(ctx context.Context, pool *pgxpool.Pool, blockID st
 // configured, embed otherwise) at the SOURCE block's sensitivity — the
 // keywords derive from its content (design 03 §2.2, call-site #9). One slim
 // llmlog row per wire call; cache hits are no egress and log nothing.
-func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSet *blocktype.Set, keywords []string, scopes []string, source *BlockInfo) ([]BlockInfo, error) {
+//
+// The second return value is how many retrieved candidates the aggregate cap
+// dropped (see appendCandidates) — 0 on every cycle the cap did not bind. It
+// is telemetry, not an error signal: the caller stamps it onto the dream-eval
+// llmlog row so a cap that fires is countable in context_llm_log instead of
+// silently shortening the eval input.
+func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSet *blocktype.Set, keywords []string, scopes []string, source *BlockInfo) ([]BlockInfo, int, error) {
 	seen := make(map[string]bool)
 	seen[source.ID] = true // Exclude source block.
 	var candidates []BlockInfo
+	capped := 0
 	embedFailures := 0
 
 	chain, embedRole, err := r.EmbedChain(source.Sensitivity)
@@ -758,7 +773,7 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 		// Trust/gaming-empty chain: no keyword can embed this cycle — the
 		// caller applies the transient cooldown (never escalate across the
 		// trust border).
-		return nil, fmt.Errorf("dream: keyword embed chain: %w", err)
+		return nil, 0, fmt.Errorf("dream: keyword embed chain: %w", err)
 	}
 
 	// WF T5 (design/01 §4.4 #4) / T8: typeSet is the cycle's ONE
@@ -766,7 +781,7 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 	// the compiled-in builtin set. nil = wiring bug, fail loudly (an rrf
 	// call with an empty allowlist would reject anyway).
 	if typeSet == nil {
-		return nil, fmt.Errorf("dream: no block-type policy set (registry not wired)")
+		return nil, 0, fmt.Errorf("dream: no block-type policy set (registry not wired)")
 	}
 	visibleTypes := typeSet.VisibleTypes()
 
@@ -793,7 +808,7 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 			slog.Debug("dream: embed keyword failed", "keyword", kw, "error", err)
 			// Fail fast if majority of embeddings fail (Ollama likely down).
 			if embedFailures > len(keywords)/2 {
-				return nil, fmt.Errorf("dream: too many embedding failures (%d/%d)", embedFailures, len(keywords))
+				return nil, 0, fmt.Errorf("dream: too many embedding failures (%d/%d)", embedFailures, len(keywords))
 			}
 			continue
 		}
@@ -813,7 +828,9 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 			continue
 		}
 
-		candidates = appendCandidates(candidates, seen, results, source.Scope)
+		var dropped int
+		candidates, dropped = appendCandidates(candidates, seen, results, source.Scope)
+		capped += dropped
 
 		// Cap total candidates.
 		if len(candidates) >= MaxCandidatesPerKeyword*MaxKeywords {
@@ -869,13 +886,20 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 		}
 	}
 
-	return candidates, nil
+	return candidates, capped, nil
 }
 
 // appendCandidates folds one keyword's RRF batch into the running candidate
-// set and returns the grown slice. Pure by construction — no pool, no router,
-// no I/O — so the whole cap/dedup/filter policy of the keyword loop is
-// table-testable without a database (candidatecap_test.go).
+// set and returns the grown slice plus the number of hits the aggregate cap
+// dropped. Pure by construction — no pool, no router, no I/O — so the whole
+// cap/dedup/filter policy of the keyword loop is table-testable without a
+// database (candidatecap_test.go).
+//
+// The drop count is the honest one: only results that passed every filter and
+// would have been appended are counted, never a duplicate, a cross-scope hit
+// or an index block — those were never candidates. It accrues in the batch
+// that crosses the cap and in no other: the caller's post-batch break ends the
+// keyword loop right after, so nothing further is even retrieved.
 //
 // The aggregate cap MaxCandidatesPerKeyword*MaxKeywords is enforced BEFORE
 // every append, not once per batch. It has to be: nothing clamps the keyword
@@ -893,11 +917,9 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 // already collected, and leaves carrying the newly appended ones. Skipped
 // results — duplicate, cross-scope (V5), index category — cost nothing
 // against the cap.
-func appendCandidates(candidates []BlockInfo, seen map[string]bool, results []rrf.SearchResult, sourceScope string) []BlockInfo {
+func appendCandidates(candidates []BlockInfo, seen map[string]bool, results []rrf.SearchResult, sourceScope string) ([]BlockInfo, int) {
+	dropped := 0
 	for _, res := range results {
-		if len(candidates) >= MaxCandidatesPerKeyword*MaxKeywords {
-			break
-		}
 		if seen[res.ID] {
 			continue
 		}
@@ -907,6 +929,13 @@ func appendCandidates(candidates []BlockInfo, seen map[string]bool, results []rr
 		}
 		// Exclude index blocks as candidates — structural listings, not content.
 		if res.Category == "index" {
+			continue
+		}
+		// The aggregate cap, enforced before the append. Counting instead of
+		// breaking leaves the candidate set bit-identical — past the cap the
+		// loop body only reads — and buys the drop count.
+		if len(candidates) >= MaxCandidatesPerKeyword*MaxKeywords {
+			dropped++
 			continue
 		}
 		seen[res.ID] = true
@@ -919,7 +948,7 @@ func appendCandidates(candidates []BlockInfo, seen map[string]bool, results []rr
 			UpdatedAt: res.UpdatedAt,
 		})
 	}
-	return candidates
+	return candidates, dropped
 }
 
 // Stats returns dream processing statistics, filtered by scope. Eligibility

@@ -105,6 +105,15 @@ type Link struct {
 // at the max over every involved block's sensitivity (design 03 §2.2, dream
 // row); a zero-value sensitivity folds to credentials (fail-closed).
 func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, source BlockInfo, candidates []BlockInfo) ([]Link, error) {
+	return evaluateRelationships(ctx, pool, r, opts, source, candidates, 0)
+}
+
+// evaluateRelationships is EvaluateRelationships plus the retrieval telemetry
+// only the dream cycle can supply: capped is how many retrieved candidates the
+// aggregate cap dropped before this set was handed over (searchByKeywords).
+// The exported form passes 0 — a caller that assembled its own candidate set
+// has no cap of ours to report.
+func evaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, source BlockInfo, candidates []BlockInfo, capped int) ([]Link, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -132,6 +141,11 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 		BlockIDs:      blockIDs,
 		DreamVersion:  &dreamVer,
 	}
+	// Stamped BEFORE the call, not next to links_capped after it: the cap
+	// fired during retrieval, so the count belongs on the row even when the
+	// eval times out or the answer fails to parse — those are exactly the
+	// cycles where a shortened candidate set is worth seeing.
+	noteCandidatesCapped(entry, capped)
 	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
 
 	start := time.Now()
@@ -213,6 +227,24 @@ func EvaluateRelationships(ctx context.Context, pool *pgxpool.Pool, r *Router, o
 	}
 
 	return valid, nil
+}
+
+// noteCandidatesCapped stamps the aggregate candidate cap's drop count onto a
+// dream-eval entry, mirroring how links_capped records the MaxLinksPerCycle
+// cap. Nothing is written when the cap did not bind — a metadata key that
+// appears on every row cannot be counted, and 0 is the overwhelming majority.
+//
+// Split out for the same reason noteCapHit is: the llmlog entry lives inside
+// evaluateRelationships and never leaves it, so the stamp is only reachable
+// for a unit test as its own function.
+func noteCandidatesCapped(entry *llmlog.Entry, capped int) {
+	if entry == nil || capped <= 0 {
+		return
+	}
+	if entry.Metadata == nil {
+		entry.Metadata = map[string]any{}
+	}
+	entry.Metadata["candidates_capped"] = capped
 }
 
 // noteCapHit flags a parse failure that is really an output-cap truncation and

@@ -83,7 +83,7 @@ func ccBuildBatches(specs []ccBatchSpec) [][]rrf.SearchResult {
 // checked only AFTER a batch has been appended in full. It is the mutant the
 // behavioural rows below must discriminate against — remove the in-loop guard
 // from appendCandidates and the production fold becomes exactly this.
-func ccFoldBase(candidates []BlockInfo, seen map[string]bool, results []rrf.SearchResult, sourceScope string) []BlockInfo {
+func ccFoldBase(candidates []BlockInfo, seen map[string]bool, results []rrf.SearchResult, sourceScope string) ([]BlockInfo, int) {
 	for _, res := range results {
 		if seen[res.ID] {
 			continue
@@ -104,22 +104,25 @@ func ccFoldBase(candidates []BlockInfo, seen map[string]bool, results []rrf.Sear
 			UpdatedAt: res.UpdatedAt,
 		})
 	}
-	return candidates
+	return candidates, 0
 }
 
 // ccRunCycle replays the keyword loop of searchByKeywords over prebuilt
 // batches with the given fold: fold the batch, then the post-batch break.
-func ccRunCycle(fold func([]BlockInfo, map[string]bool, []rrf.SearchResult, string) []BlockInfo, batches [][]rrf.SearchResult) []BlockInfo {
+func ccRunCycle(fold func([]BlockInfo, map[string]bool, []rrf.SearchResult, string) ([]BlockInfo, int), batches [][]rrf.SearchResult) ([]BlockInfo, int) {
 	seen := map[string]bool{ccSourceID: true}
 	var candidates []BlockInfo
+	capped := 0
 	for _, batch := range batches {
-		candidates = fold(candidates, seen, batch, ccScope)
+		var dropped int
+		candidates, dropped = fold(candidates, seen, batch, ccScope)
+		capped += dropped
 		// Cap total candidates (the post-batch break in searchByKeywords).
 		if len(candidates) >= ccCap {
 			break
 		}
 	}
-	return candidates
+	return candidates, capped
 }
 
 // ccSeed returns n already-collected candidates plus the matching `seen` map,
@@ -142,47 +145,55 @@ func TestAppendCandidatesEnforcesAggregateCapPerAppend(t *testing.T) {
 	fullBatch := ccBuildBatches([]ccBatchSpec{{fresh: MaxCandidatesPerKeyword}})[0]
 
 	tests := []struct {
-		name    string
-		seeded  int
-		batch   []rrf.SearchResult
-		want    int
-		wantNew int // appended out of this batch
+		name        string
+		seeded      int
+		batch       []rrf.SearchResult
+		want        int
+		wantNew     int // appended out of this batch
+		wantDropped int // reported as lost to the cap
 	}{
 		{
-			name:    "one-slot-left-takes-one",
-			seeded:  ccCap - 1,
-			batch:   fullBatch,
-			want:    ccCap,
-			wantNew: 1,
+			name:        "one-slot-left-takes-one",
+			seeded:      ccCap - 1,
+			batch:       fullBatch,
+			want:        ccCap,
+			wantNew:     1,
+			wantDropped: MaxCandidatesPerKeyword - 1,
 		},
 		{
-			name:    "cap-reached-takes-none",
-			seeded:  ccCap,
-			batch:   fullBatch,
-			want:    ccCap,
-			wantNew: 0,
+			name:        "cap-reached-takes-none",
+			seeded:      ccCap,
+			batch:       fullBatch,
+			want:        ccCap,
+			wantNew:     0,
+			wantDropped: MaxCandidatesPerKeyword,
 		},
 		{
-			name:    "empty-batch-changes-nothing",
-			seeded:  3,
-			batch:   nil,
-			want:    3,
-			wantNew: 0,
+			name:        "empty-batch-changes-nothing",
+			seeded:      3,
+			batch:       nil,
+			want:        3,
+			wantNew:     0,
+			wantDropped: 0,
 		},
 		{
 			name:   "skips-do-not-consume-the-cap",
 			seeded: ccCap - 5,
 			// 2 appendable hits behind 3 results every filter drops.
-			batch:   ccBuildBatches([]ccBatchSpec{{fresh: 2, dup: 1, crossScope: 1, index: 1}})[0],
-			want:    ccCap - 3,
-			wantNew: 2,
+			batch:       ccBuildBatches([]ccBatchSpec{{fresh: 2, dup: 1, crossScope: 1, index: 1}})[0],
+			want:        ccCap - 3,
+			wantNew:     2,
+			wantDropped: 0, // filtered results are not "lost to the cap"
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			candidates, seen := ccSeed(tt.seeded)
-			got := appendCandidates(candidates, seen, tt.batch, ccScope)
+			got, dropped := appendCandidates(candidates, seen, tt.batch, ccScope)
+			if dropped != tt.wantDropped {
+				t.Errorf("dropped %d candidates to the cap, want %d", dropped, tt.wantDropped)
+			}
 			if len(got) != tt.want {
 				t.Fatalf("candidate count: got %d, want %d", len(got), tt.want)
 			}
@@ -217,7 +228,10 @@ func TestAppendCandidatesKeepsFilterSemantics(t *testing.T) {
 	batch := ccBuildBatches([]ccBatchSpec{{fresh: 2, dup: 2, crossScope: 2, index: 2}})[0]
 	seen := map[string]bool{ccSourceID: true}
 
-	got := appendCandidates(nil, seen, batch, ccScope)
+	got, dropped := appendCandidates(nil, seen, batch, ccScope)
+	if dropped != 0 {
+		t.Errorf("nothing was near the cap, yet %d results were reported dropped", dropped)
+	}
 	if len(got) != 2 {
 		t.Fatalf("want the 2 appendable hits, got %d: %+v", len(got), got)
 	}
@@ -233,7 +247,7 @@ func TestAppendCandidatesKeepsFilterSemantics(t *testing.T) {
 		}
 	}
 	// Folding the same batch again must add nothing — `seen` now covers it.
-	if again := appendCandidates(got, seen, batch, ccScope); len(again) != 2 {
+	if again, _ := appendCandidates(got, seen, batch, ccScope); len(again) != 2 {
 		t.Errorf("re-folding the same batch appended again: got %d, want 2", len(again))
 	}
 }
@@ -298,8 +312,8 @@ func TestKeywordCycleStaysWithinAggregateCap(t *testing.T) {
 			if len(tt.specs) <= MaxKeywords {
 				t.Fatalf("row runs %d batches, needs more than MaxKeywords=%d to be reachable", len(tt.specs), MaxKeywords)
 			}
-			guarded := ccRunCycle(appendCandidates, ccBuildBatches(tt.specs))
-			base := ccRunCycle(ccFoldBase, ccBuildBatches(tt.specs))
+			guarded, capped := ccRunCycle(appendCandidates, ccBuildBatches(tt.specs))
+			base, _ := ccRunCycle(ccFoldBase, ccBuildBatches(tt.specs))
 
 			if len(guarded) != ccCap {
 				t.Errorf("guarded fold: got %d candidates, want exactly %d", len(guarded), ccCap)
@@ -309,6 +323,13 @@ func TestKeywordCycleStaysWithinAggregateCap(t *testing.T) {
 			}
 			if tt.wantBase <= ccCap {
 				t.Fatalf("row does not discriminate: base %d is within the cap %d", tt.wantBase, ccCap)
+			}
+			// The reported drop count IS the overshoot the base fold produces:
+			// what the cycle lost is exactly what the pre-PR fold kept too many
+			// of. This is the number that reaches context_llm_log as
+			// candidates_capped on the dream-eval row.
+			if want := tt.wantBase - ccCap; capped != want {
+				t.Errorf("candidates_capped: got %d, want %d (base %d - cap %d)", capped, want, tt.wantBase, ccCap)
 			}
 			// Below the cap nothing changed: the guarded set is the base set
 			// truncated, same IDs in the same RRF order.
