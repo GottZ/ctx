@@ -155,6 +155,29 @@ func TestValidateTable(t *testing.T) {
 		{"V16b at budget ok", map[string]string{"dream.temporal_timeout": "400"}, "dream.temporal_timeout", -1},
 		{"V16b starves link stages", map[string]string{"dream.temporal_timeout": "401"}, "dream.temporal_timeout", SeverityWarn},
 		{"V16b beyond cycle", map[string]string{"dream.temporal_timeout": "900"}, "dream.temporal_timeout", SeverityWarn},
+
+		// V16b × dream.cycle_timeout — the PR's headline claim, pinned at the
+		// Validate level rather than only on the budget helper: raising the
+		// cycle widens the window a temporal_timeout may occupy, and the
+		// widened window still has a ceiling. Without the effective-cycle
+		// read in validateDream the middle case warns and this goes red.
+		{"V16b raised cycle widens the window", map[string]string{
+			"dream.temporal_timeout": "900", "dream.cycle_timeout": "2400",
+		}, "dream.temporal_timeout", -1},
+		{"V16b raised cycle still has a ceiling", map[string]string{
+			"dream.temporal_timeout": "2300", "dream.cycle_timeout": "2400",
+		}, "dream.temporal_timeout", SeverityWarn},
+
+		// V16c — dream.cycle_timeout sign and floor, on the key itself. 0 is
+		// the "package default" sentinel; a negative value reads as a
+		// configured deadline but means 700s; below keywords (120s) + eval
+		// (180s) every cycle is cut before the link-writing stages run.
+		{"V16c default ok", map[string]string{}, "dream.cycle_timeout", -1},
+		{"V16c zero ok", map[string]string{"dream.cycle_timeout": "0"}, "dream.cycle_timeout", -1},
+		{"V16c raised ok", map[string]string{"dream.cycle_timeout": "2400"}, "dream.cycle_timeout", -1},
+		{"V16c negative rejected", map[string]string{"dream.cycle_timeout": "-30"}, "dream.cycle_timeout", SeverityError},
+		{"V16c below floor warns", map[string]string{"dream.cycle_timeout": "60"}, "dream.cycle_timeout", SeverityWarn},
+		{"V16c at floor ok", map[string]string{"dream.cycle_timeout": "300"}, "dream.cycle_timeout", -1},
 	}
 
 	for _, c := range cases {
