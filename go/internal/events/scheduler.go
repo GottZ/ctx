@@ -1840,7 +1840,12 @@ func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router, read
 
 	// Dream gets its own context with the cycle timeout, independent of parent ctx.
 	// Register the cancel fn so SetDreamMode(Off) can abort in-flight work.
-	dreamCtx, cancel := context.WithTimeout(context.Background(), dream.CycleTimeoutFor(&dream.Router{CycleTimeout: cfg.Dream.CycleTimeout}))
+	// The router is the iteration's own (newRouter, never nil) and already
+	// carries cfg.Dream.CycleTimeout — reading it here keeps the outer
+	// context and RunDreamCycle's inner one on ONE source of truth instead
+	// of two reads of the same config that a later tenant-scoped or
+	// handler-built router could let diverge.
+	dreamCtx, cancel := context.WithTimeout(context.Background(), dream.CycleTimeoutFor(router))
 	s.dreamCycleMu.Lock()
 	s.dreamCycleCancel = cancel
 	s.dreamCycleMu.Unlock()

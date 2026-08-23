@@ -119,17 +119,33 @@ type BlockInfo struct {
 // Must exceed DreamTimeout (evaluate call) + keyword-embed + RRF overhead.
 const CycleTimeout = 700 * time.Second
 
-// CycleTimeoutFor resolves the whole-cycle deadline: a router value > 0 wins
-// (config.Dream.CycleTimeout, hot), otherwise the package CycleTimeout
-// constant (legacy behavior). The enclosing context.WithTimeout in
-// RunDreamCycle and the scheduler's outer cycle context both read this, so
-// a single knob bounds the whole cycle; 0 is the documented "package
-// default" sentinel, mirroring temporalTimeout's contract.
-func CycleTimeoutFor(r *Router) time.Duration {
-	if r != nil && r.CycleTimeout > 0 {
-		return r.CycleTimeout
+// CycleTimeoutOf resolves the whole-cycle deadline from the bare configured
+// value: > 0 wins (config.Dream.CycleTimeout, hot), otherwise the package
+// CycleTimeout constant (legacy behavior). 0 is the documented "package
+// default" sentinel, mirroring temporalTimeout's contract; a negative value
+// cannot reach a running cycle (config V16c is an ERROR on it) and falls back
+// here as the second line of defence.
+//
+// This is the scalar form for callers that hold the duration but no router —
+// internal/config's Validate, which is parameter-pure and has no business
+// constructing a Router to read one number.
+func CycleTimeoutOf(d time.Duration) time.Duration {
+	if d > 0 {
+		return d
 	}
 	return CycleTimeout
+}
+
+// CycleTimeoutFor is CycleTimeoutOf for callers that hold the cycle's router:
+// the enclosing context.WithTimeout in RunDreamCycle and the scheduler's
+// outer cycle context both read it, so one knob bounds the whole cycle and
+// both contexts read the same field of the same struct. A nil router resolves
+// to the package default.
+func CycleTimeoutFor(r *Router) time.Duration {
+	if r == nil {
+		return CycleTimeout
+	}
+	return CycleTimeoutOf(r.CycleTimeout)
 }
 
 // Throttle is called between GPU-intensive steps to allow cooldown.
