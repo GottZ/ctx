@@ -60,10 +60,29 @@ import (
 // but the termination condition of a loop.
 const maxAttempts = 3
 
-// callTimeout bounds one label call. A name is two to five words; a chain that
-// needs longer than this is queueing, not thinking, and the batch has 199 more
-// topics to get to.
+// callTimeout is the DEFAULT budget of one label call, overridable through
+// graph_overview.label_timeout (Config.CallTimeout). A name is two to five
+// words; a chain that needs longer than this is queueing, not thinking, and the
+// batch has 199 more topics to get to.
+//
+// The budget is TOTAL — it starts before the dispatch admission queue, not at
+// the wire — which is why it needs to be configurable at all: on a saturated
+// pool a label can spend all of it waiting for a slot and abort with
+// `acquire_expired` without ever reaching a model (issue #37).
 const callTimeout = 90 * time.Second
+
+// callTimeoutOf resolves the effective budget: a configured
+// graph_overview.label_timeout wins, anything non-positive falls back to the
+// package default. Non-positive rather than zero-only because the resolver is
+// the LAST line of defence — config's V17 already rejects a negative duration
+// at boot and on the settings write, and an unwired caller (tests, a future
+// embedder) must not end up with a deadline in the past.
+func callTimeoutOf(c Config) time.Duration {
+	if c.CallTimeout > 0 {
+		return c.CallTimeout
+	}
+	return callTimeout
+}
 
 // Pipeline is the llmlog channel name of this arm.
 const Pipeline = "cluster-label"
@@ -83,11 +102,15 @@ const (
 // config snapshot: internal/config is layered to cmd/handler/events/settings
 // only, and a background package reading it directly would break that.
 type Config struct {
-	Enabled                 bool
-	Batch                   int
-	MinTopics               int
-	PromptMaxTitles         int
-	Interval                time.Duration
+	Enabled         bool
+	Batch           int
+	MinTopics       int
+	PromptMaxTitles int
+	Interval        time.Duration
+	// CallTimeout is the resolved graph_overview.label_timeout — the TOTAL
+	// budget of one label, admission queue wait included. 0 = the package
+	// default (tests, an unwired caller).
+	CallTimeout             time.Duration
 	CredentialsFallbackOnly bool
 	Language                string
 	// VisibleTypes is the resolved retrieval allowlist. EMPTY is a wiring bug,
@@ -453,7 +476,7 @@ func labelOne(ctx context.Context, d Deps, c candidate, st *Stats) time.Duration
 	system := systemPromptFor(d.Cfg.Language, nonce)
 	user := buildUser(nonce, core)
 
-	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, callTimeoutOf(d.Cfg))
 	wire := time.Now()
 	answer, model, err := d.Chat(callCtx, d, required, system, user, c.coreBlocks)
 	took := time.Since(wire)
@@ -631,9 +654,14 @@ func ChainCall(ctx context.Context, d Deps, required backends.Sensitivity, syste
 		// Temperature near-deterministic (a name is not a creative act) and a
 		// tight output budget: the whole answer is one short JSON object, and
 		// an unbounded budget on a background arm is GPU time nobody asked for.
-		Opts:       llm.Options{Temperature: 0.2, NumPredict: 128},
-		Format:     "json",
-		DefTimeout: callTimeout,
+		Opts:   llm.Options{Temperature: 0.2, NumPredict: 128},
+		Format: "json",
+		// The SAME resolved budget as the outer deadline, not the constant:
+		// leaving this on the default would re-cap the wire call at 90 s
+		// through llm's own WithTimeout (the smaller of the two wins), so a
+		// raised graph_overview.label_timeout would buy queue time it could
+		// never spend on the model.
+		DefTimeout: callTimeoutOf(d.Cfg),
 		BlockIDs:   blockIDs,
 		// Provenance: label_model has to name the model that ANSWERED, not the
 		// one the pool would have picked.

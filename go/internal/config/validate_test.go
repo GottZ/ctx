@@ -203,6 +203,36 @@ func TestValidateTable(t *testing.T) {
 		{"V17 backoff base zero ok", map[string]string{"embed_backfill.backoff_base": "0"}, "embed_backfill.backoff_base", -1},
 		{"V17 ttl negative", map[string]string{"writes.confirm_ttl": "-600"}, "writes.confirm_ttl", SeverityError},
 		{"V17 ttl zero ok", map[string]string{"writes.confirm_ttl": "0"}, "writes.confirm_ttl", -1},
+
+		// V17b — graph_overview.label_timeout against the label cadence
+		// (issue #37). The key's SIGN half is V17's, exactly like V16/V16c
+		// after the fold: the negative row below asserts the ERROR the
+		// generic walk files, and the exactly-one-issue half is pinned by
+		// TestValidateRejectsNegativeOnEveryDurationKey. 0 is the "package
+		// default" sentinel (topiclabel's 90 s constant), and the default 90
+		// sits far below the 3600 s cadence, so a stock config is clean.
+		//
+		// Equality is deliberately NOT a warn: a tick whose single label
+		// exactly fills the interval has not outlasted it.
+		{"V17b default ok", map[string]string{}, "graph_overview.label_timeout", -1},
+		{"V17b zero ok", map[string]string{"graph_overview.label_timeout": "0"}, "graph_overview.label_timeout", -1},
+		{"V17b raised below interval ok", map[string]string{"graph_overview.label_timeout": "600"}, "graph_overview.label_timeout", -1},
+		{"V17b at interval ok", map[string]string{
+			"graph_overview.label_timeout": "600", "graph_overview.label_interval": "600",
+		}, "graph_overview.label_timeout", -1},
+		{"V17b above interval warns", map[string]string{
+			"graph_overview.label_timeout": "700", "graph_overview.label_interval": "600",
+		}, "graph_overview.label_timeout", SeverityWarn},
+		{"V17b above default interval warns", map[string]string{
+			"graph_overview.label_timeout": "7200",
+		}, "graph_overview.label_timeout", SeverityWarn},
+		{"V17b negative rejected", map[string]string{"graph_overview.label_timeout": "-1"}, "graph_overview.label_timeout", SeverityError},
+		// The sentinel guard: 0 means "package default", so it must not be
+		// COMPARED against the interval — a sentinel is not a budget, and
+		// warning about it would name a value the operator never set.
+		{"V17b zero sentinel is never compared", map[string]string{
+			"graph_overview.label_timeout": "0", "graph_overview.label_interval": "30",
+		}, "graph_overview.label_timeout", -1},
 	}
 
 	for _, c := range cases {
@@ -228,14 +258,39 @@ func issuesOn(issues []Issue, field string) []Issue {
 	return out
 }
 
+// TestV17bIsAdvisoryOnly pins the SEVERITY CLASS of the label-timeout warn,
+// which the severity table above cannot state: SeverityWarn is log-only —
+// boot logs it and continues, and Store.Replace rejects on HasErrors alone,
+// so a settings write that raises graph_overview.label_timeout past the
+// cadence is a 200 with a warning, never a 422. A future "tighten it to an
+// error" would pass the table row and fail here, which is the point.
+func TestV17bIsAdvisoryOnly(t *testing.T) {
+	issues := Validate(validCfg(t, map[string]string{
+		"graph_overview.label_timeout":  "700",
+		"graph_overview.label_interval": "600",
+	}))
+
+	got := issuesOn(issues, "graph_overview.label_timeout")
+	if len(got) != 1 {
+		t.Fatalf("label_timeout 700 > interval 600 produced %d issues on the field, want exactly 1: %v", len(got), got)
+	}
+	if got[0].Severity != SeverityWarn {
+		t.Errorf("V17b severity = %v, want SeverityWarn (advisory, never a clamp): %v", got[0].Severity, got[0])
+	}
+	if HasErrors(issues) {
+		t.Errorf("V17b made the whole config fatal — boot would abort and the settings write would 422: %v", issues)
+	}
+}
+
 // wantDurationKeys is the number of typDuration keys in the registry, counted
-// at the basis stand (37, dream.cycle_timeout included). It is a DRIFT GUARD,
+// at the basis stand (38, dream.cycle_timeout and graph_overview.label_timeout
+// included). It is a DRIFT GUARD,
 // not a fact worth asserting for its own sake: V17 is a generic walk, so a
 // duration key added later is covered automatically — but a key that silently
 // changes TYPE (seconds → int, or a struct field that stops being a
 // time.Duration) would leave the walk without anyone noticing. Raise this
 // number in the same commit that adds a duration key.
-const wantDurationKeys = 37
+const wantDurationKeys = 38
 
 // TestValidateRejectsNegativeOnEveryDurationKey is the registry-wide form of
 // V17 (issue #29): before it, exactly two of the seconds keys had a sign check

@@ -98,11 +98,21 @@ type fakeChat struct {
 	// before runs at the start of every call — the hook the tombstone race gate
 	// uses to retire the topic between selection and write.
 	before func()
+	// budgets records what was LEFT of the call's deadline when the seam was
+	// reached, one entry per call. Issue #37's gate reads it: the deadline the
+	// dispatch seam sees is the deadline the admission queue then spends from,
+	// so this is the observable of "the label budget is configurable".
+	budgets []time.Duration
 }
 
-func (f *fakeChat) fn(_ context.Context, _ Deps, required backends.Sensitivity, _, user string, _ []string) (string, string, error) {
+func (f *fakeChat) fn(ctx context.Context, _ Deps, required backends.Sensitivity, _, user string, _ []string) (string, string, error) {
 	if f.before != nil {
 		f.before()
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		f.budgets = append(f.budgets, time.Until(dl))
+	} else {
+		f.budgets = append(f.budgets, 0)
 	}
 	i := f.calls
 	f.calls++
@@ -638,6 +648,47 @@ SELECT x.topic_id, x.scope, x.core_hash, x.core_blocks, x.size, x.category_count
 		}
 		if st.Labeled == st.Selected {
 			t.Fatalf("the whole batch ran despite the time brake (%d/%d)", st.Labeled, st.Selected)
+		}
+	})
+
+	// ── Issue #37: the label budget reaches the CALL, not just the resolver.
+	//
+	// This is the gate a resolver table cannot state. The deadline is attached
+	// before the call enters dispatch admission, so what the seam sees IS the
+	// budget the queue wait is then spent from — read it off the context and
+	// the wiring is either there or it is not. A build that wires only
+	// ChainCall's DefTimeout and leaves labelOne's WithTimeout on the constant
+	// passes every other gate in this file and fails here.
+	//
+	// The window is one-sided by design: Run reaches the seam a few
+	// milliseconds after the deadline is set (core read, prompt build), so the
+	// remaining budget is slightly BELOW the configured one and never above
+	// it. A generous lower bound keeps the gate off the CI clock.
+	t.Run("issue-37 the configured label timeout is the deadline the call carries", func(t *testing.T) {
+		const scope = "w6budget"
+		core := []string{w6Block(t, pool, scope, "budget core", "internal", 950)}
+		topic := w6Topic(t, pool, scope, core)
+
+		chat := &fakeChat{}
+		if st := Run(ctx, w6Deps(pool, chat, func(d *Deps) { d.Cfg.CallTimeout = 20 * time.Second }), []string{scope}); st.Labeled != 1 {
+			t.Fatalf("labeled=%d, want 1", st.Labeled)
+		}
+		if len(chat.budgets) != 1 {
+			t.Fatalf("recorded %d budgets, want 1", len(chat.budgets))
+		}
+		if got := chat.budgets[0]; got <= 15*time.Second || got > 20*time.Second {
+			t.Fatalf("configured budget reached the call as %v, want (15s, 20s] — a 20s label_timeout must not arrive as the 90s constant", got)
+		}
+
+		// Unset, the same path carries the package default — the no-behaviour-
+		// change half of the key.
+		mustExec(t, pool, `UPDATE graph_cluster_topic SET label_stale=true WHERE topic_id=$1::uuid`, topic)
+		chat2 := &fakeChat{}
+		if st := Run(ctx, w6Deps(pool, chat2, nil), []string{scope}); st.Labeled != 1 {
+			t.Fatalf("default run: labeled=%d, want 1", st.Labeled)
+		}
+		if got := chat2.budgets[0]; got <= callTimeout-5*time.Second || got > callTimeout {
+			t.Fatalf("unset budget reached the call as %v, want just under the %v package default", got, callTimeout)
 		}
 	})
 

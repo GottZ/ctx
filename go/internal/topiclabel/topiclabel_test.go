@@ -306,6 +306,36 @@ func TestPercentiles(t *testing.T) {
 	}
 }
 
+// Issue #37 — the graph_overview.label_timeout resolver. The table is the
+// SENTINEL contract, not the wiring: 0 is "the caller did not configure one"
+// (an unwired embedder, every fixture in this file), and a negative value can
+// only arrive from a caller that bypassed config's V17 — both have to land on
+// the package default rather than on a deadline that is already in the past.
+//
+// That the two production sites actually ASK the resolver is a different
+// statement, and a resolver table cannot make it: see the deadline gate in
+// topiclabel_integration_test.go, which reads the deadline off the context the
+// dispatch seam receives.
+func TestCallTimeoutOf(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  time.Duration
+		want time.Duration
+	}{
+		{"unset falls back to the package default", 0, callTimeout},
+		{"negative falls back rather than expiring at once", -30 * time.Second, callTimeout},
+		{"a configured budget wins", 600 * time.Second, 600 * time.Second},
+		{"a budget below the default wins too", 5 * time.Second, 5 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := callTimeoutOf(Config{CallTimeout: c.cfg}); got != c.want {
+				t.Errorf("callTimeoutOf(%v) = %v, want %v", c.cfg, got, c.want)
+			}
+		})
+	}
+}
+
 func TestTopNIsDeterministic(t *testing.T) {
 	counts := map[string]int{"beta": 2, "alpha": 2, "gamma": 5, "delta": 1}
 	got := strings.Join(topN(counts, 3), ",")

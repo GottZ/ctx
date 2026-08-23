@@ -489,6 +489,30 @@ type GraphOverviewConfig struct {
 	// credentials core out of the LLM path entirely and leaves it with its
 	// deterministic fallback name.
 	LabelCredentialsFallbackOnly bool `key:"graph_overview.label_credentials_fallback_only" env:"CTX_GRAPH_OVERVIEW_LABEL_CREDENTIALS_FALLBACK_ONLY" default:"false" mut:"hot" tenancy:"global-only"`
+	// LabelTimeout is the budget of ONE topic label, in seconds. The default 90
+	// is the legacy topiclabel package constant verbatim, so an unset key is
+	// the behaviour that shipped.
+	//
+	// It is a TOTAL budget, not a wire ceiling — and that distinction is the
+	// whole point of the key (issue #37). The deadline is attached BEFORE the
+	// call enters the dispatch admission queue (topiclabel labelOne →
+	// llm.ChainCall → dispatch Acquire), so the queue wait is spent from the
+	// same 90 s the model call then has to finish inside. On a saturated
+	// single-backend pool that is not a theoretical split: the label can burn
+	// the entire budget waiting for a slot and die with `acquire_expired`
+	// before it ever reaches a wire.
+	//
+	// A `timeouts.digest` entry on the serving context_backends row is
+	// therefore NOT the knob for that situation. It bounds only the wire call,
+	// and it is additionally clamped by this key — the outer deadline is
+	// already running when the per-backend one is applied, so the smaller of
+	// the two wins and a row value above this key cannot take effect. Raise
+	// THIS key first, the row second.
+	//
+	// global-only for the verbatim GraphOverviewConfig rationale: labelling is
+	// one background job producing one shared artefact, so its budget steers a
+	// process resource, not a tenant's own query resolution.
+	LabelTimeout time.Duration `key:"graph_overview.label_timeout" env:"CTX_GRAPH_OVERVIEW_LABEL_TIMEOUT" default:"90" mut:"hot" tenancy:"global-only"`
 }
 
 // RootMapConfig is the Achse-02 root-map surface (plan-cluster-topicmap

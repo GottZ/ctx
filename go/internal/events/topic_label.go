@@ -105,6 +105,7 @@ func (s *Scheduler) labelTopicsOnce(ctx context.Context, bt backgroundTenant) {
 			MinTopics:               cfg.GraphOverview.LabelMinTopics,
 			PromptMaxTitles:         cfg.GraphOverview.LabelPromptMaxTitles,
 			Interval:                cfg.GraphOverview.LabelInterval,
+			CallTimeout:             cfg.GraphOverview.LabelTimeout,
 			CredentialsFallbackOnly: cfg.GraphOverview.LabelCredentialsFallbackOnly,
 			// E3-01: ONE language knob per corpus. The label surface inherits
 			// dream.language rather than growing a second switch — a per-tenant

@@ -67,6 +67,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"graph_overview.label_min_topics":                "Minimum living topics a scope needs before LLM labelling runs at all; below it no LLM call is made and the fallback names carry the map",
 	"graph_overview.label_prompt_max_titles":         "Maximum core-block titles included in one labelling prompt; a token-budget resource bound (~24 titles is roughly 600-800 tokens)",
 	"graph_overview.label_credentials_fallback_only": "When on, topics with a credentials core skip the LLM entirely and keep their deterministic fallback name; stage 3 of label hardening",
+	"graph_overview.label_timeout":                   "Seconds one topic label may spend in total, dispatch queue wait included; a timeouts.digest row bounds only the wire call and is clamped by this",
 	"root_map.enabled":                               "Master gate for the root-map background job; while off the scheduler's map production returns before its first query",
 	"root_map.budget_bytes":                          "Byte ceiling for the rendered root map; the renderer measures and stops at it, and values above the 50 KB block write cap are refused",
 	"root_map.small_cluster_max":                     "Cluster size at or below which clusters are only counted in one collector line instead of rendered as individual topics",

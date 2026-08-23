@@ -55,10 +55,41 @@ func temporalTimeoutBudgetOf(c *Config) time.Duration {
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateQuery(c)...)       // V2, V5, V9b, V9c, V11
-	issues = append(issues, validateRerankGraph(c)...) // V3, V9
-	issues = append(issues, validateDream(c)...)       // V6, V10, V14, V15, V16b, V16c
-	issues = append(issues, validateDurations(c)...)   // V17
+	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V11
+	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
+	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c
+	issues = append(issues, validateGraphOverview(c)...) // V17b
+	issues = append(issues, validateDurations(c)...)     // V17
+	return issues
+}
+
+// validateGraphOverview holds the label arm's cross-field invariants.
+//
+// V17b — graph_overview.label_timeout against graph_overview.label_interval.
+// The sign half of the key is NOT here: it is V17's class and the generic
+// duration walk already owns it, so a per-key check would only double-report
+// (the statement TestValidateRejectsNegativeOnEveryDurationKey pins).
+//
+// What is key-specific is the relation to the cadence. runBatch checks its
+// overrun brake BEFORE each label (topiclabel runBatch), so a label already
+// running when the tick reaches label_interval is not cut — it finishes on
+// its own budget. With label_timeout above label_interval a tick can
+// therefore outlast its interval by up to one label_timeout, and the batch
+// ends after a single label because the brake trips on the next pass. That
+// is a legitimate configuration for a slow backend with a short cadence, so
+// this is a WARN in the V16b spirit and never a clamp: SeverityWarn is
+// log-only — boot logs it and continues, Store.Replace rejects on
+// SeverityError alone, so a settings write carrying it is a 200, not a 422.
+func validateGraphOverview(c *Config) []Issue {
+	var issues []Issue
+
+	to, iv := c.GraphOverview.LabelTimeout, c.GraphOverview.LabelInterval
+	if to > 0 && iv > 0 && to > iv {
+		issues = append(issues, Issue{Field: "graph_overview.label_timeout", Severity: SeverityWarn,
+			Msg: fmt.Sprintf("label timeout %v exceeds the %v label interval — the overrun brake is checked before each label, so a tick can outlast its interval by up to one label timeout and the batch ends after a single label",
+				to, iv)})
+	}
+
 	return issues
 }
 
