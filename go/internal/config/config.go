@@ -218,11 +218,27 @@ type DreamConfig struct {
 	// keywords → RRF → eval → recurrence. Default 700 matches the legacy
 	// package CycleTimeout constant; raise for slow reasoning models
 	// (Qwen3.8-27B-NVFP4 needs >700s on full 16-20-candidate prompts).
-	// DEFAULT ONLY: a timeouts.dream entry on the serving context_backends
-	// row takes precedence per call (Backend.TimeoutFor, walked in
-	// llm.ChatChainVia); raise that row value instead on a configured row —
-	// it bounds eval/keywords/recurrence per call, while this key bounds
-	// the enclosing cycle.
+	// OUTER CEILING, not a default: a timeouts.dream entry on the serving
+	// context_backends row (Backend.TimeoutFor, walked in llm.ChatChainVia)
+	// still bounds each single call — but that call runs on a CHILD of the
+	// cycle context (dispatch.Acquire derives runCtx from it, llm.ChatJSON
+	// puts the per-call WithTimeout under that), and a child can never
+	// outlive its parent's deadline. So a row value above the remaining
+	// cycle budget has no effect at all: the row value can only SHORTEN a
+	// call, never lengthen one. Raise THIS key first, and use the row value
+	// only to cap individual calls below it.
+	// Necessary but not sufficient: without such a row the per-call
+	// ceilings are the code defaults — eval dream.DreamTimeout 180s,
+	// keywords dream.KeywordsTimeout 120s — so on a stock row an eval that
+	// needs 600-690s is cut at 180s no matter how high this key is. The
+	// recipe is two steps, row first: (1) timeouts.dream >= the expected
+	// eval duration, (2) this key >= temporal + keywords + eval +
+	// recurrence.
+	// SHUTDOWN: the cycle context is rooted at context.Background() so that
+	// SetDreamMode(Off) owns its cancellation; SIGTERM therefore does NOT
+	// cut an in-flight cycle — Scheduler.Wait() drains it, unbounded by the
+	// 15s HTTP shutdown budget. Raising this key raises the worst-case
+	// shutdown wait by the same amount.
 	// Validated by V16c (validateDream): a negative value is an ERROR — 0 is
 	// the "package default" sentinel and a negative one would render as a
 	// configured deadline while CycleTimeoutFor served the constant — and a
