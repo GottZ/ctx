@@ -54,6 +54,8 @@ type Router struct {
 	// chat() as the defTimeout, i.e. as the DEFAULT of that call: a
 	// timeouts.dream entry on the serving row wins (Backend.TimeoutFor in the
 	// llm.ChatChainVia walk), because the call resolves under role dream.
+	// That row value is itself cut by CycleTimeout below — it bounds ONE
+	// call inside a cycle, never the cycle.
 	TemporalTimeout time.Duration
 	// CycleTimeout bounds the WHOLE dream cycle (seconds) — the enclosing
 	// context.WithTimeout in RunDreamCycle. 0 = the package CycleTimeout
@@ -61,6 +63,11 @@ type Router struct {
 	// scheduler (newRouter); resolved via CycleTimeoutFor, which falls back
 	// to the constant when unset so a missing value never changes the
 	// cycle's deadline.
+	// Unlike TemporalTimeout this is NOT a per-call default that a row can
+	// outbid: it is the OUTER ceiling. Every call inside the cycle — a
+	// timeouts.dream row override included — runs on a descendant of the
+	// cycle context, so the row value can only shorten a call. A row value
+	// above the remaining cycle budget never takes effect.
 	CycleTimeout time.Duration
 	// Language is the daily-synthesis report language, read from config
 	// Dream.Language by the caller that builds the router (scheduler:
