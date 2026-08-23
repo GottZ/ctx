@@ -20,6 +20,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"dream.language":                                 "Language tag for the daily-synthesis report; empty or de keeps the legacy German Tagesbericht series, other tags localize title and prompt",
 	"dream.link_floor_confidence":                    "Confidence [0,1] assigned to LLM links returned without a strength signal; default 0.9 keeps them above the graph-expansion retrieval gate",
 	"dream.temporal_timeout":                         "Seconds allowed for the temporal Phase-2 LLM review; a timeouts.dream override on the serving backend row takes precedence",
+	"dream.cycle_timeout":                            "Seconds one whole dream cycle (pick, temporal, keywords, RRF, eval, recurrence) may run; the outer ceiling a timeouts.dream row can only shorten",
 	"dream.backoff_mode":                             "Curve shaping how the re-dream interval grows with a block's eval count: exp, log, linear, or off (fixed active/inert cooldown days)",
 	"dream.backoff_factor":                           "Curve steepness: growth base for exp, log coefficient, or days-per-step slope for linear; higher cools mature blocks off faster",
 	"dream.backoff_grace":                            "Free eval cycles before the back-off curve starts growing; 0 grows from the very first dream",
