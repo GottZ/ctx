@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -56,7 +57,58 @@ func Validate(c *Config) []Issue {
 	var issues []Issue
 	issues = append(issues, validateQuery(c)...)       // V2, V5, V9b, V9c, V11
 	issues = append(issues, validateRerankGraph(c)...) // V3, V9
-	issues = append(issues, validateDream(c)...)       // V6, V10, V14, V15, V16, V16b, V16c
+	issues = append(issues, validateDream(c)...)       // V6, V10, V14, V15, V16b, V16c
+	issues = append(issues, validateDurations(c)...)   // V17
+	return issues
+}
+
+// validateDurations is V17: the sign check over EVERY seconds-typed key
+// (typDuration) in the registry, walked generically instead of key by key.
+//
+// The statement is the one V9b/V9c and V16/V16c made per key, and it holds
+// for all of them: every consumer of a duration key reads a non-positive
+// value as "unset" and substitutes its own default, so a negative value
+// SERVES the default while the settings surface RENDERS it as a configured
+// duration — the operator reads `-30s`, the runtime runs 700s, and nothing
+// in between says so. At fleet scale that is a diagnosis killer, which is
+// why the class is fatal (boot abort / 422 on the settings write) and not a
+// tolerant WARN.
+//
+// Generic on purpose: the class has no key-specific half worth writing 37
+// times, and a duration key added later is covered without a second edit
+// here. That is also why V16 and V16c's sign halves were FOLDED into this
+// walk rather than exempted from it — an allowlist of "keys with their own
+// sign check" would have to be maintained in lockstep with every future
+// per-key check, and forgetting it double-reports the same field.
+//
+// 0 is NOT checked. What zero means is per key — "package default" for the
+// dream timeouts, "off" for status.channel_probe_interval, "retry
+// immediately" for the embed back-off bases — and this walk does not have
+// that knowledge. Hardening the two back-off bases to `> 0` is its own
+// change, on its own issue.
+//
+// The type assertion is safe by construction: typDuration is
+// reflect.TypeOf(time.Duration(0)) (registry.go), so every entry carrying it
+// has a time.Duration leaf field — a checked assertion would test the
+// registry builder, not this code. Same reflective field walk RenderValue
+// (describe.go) already uses.
+//
+// Field MUST stay the canonical registry key: build.go's dropOffenders
+// attributes a failing override by Field, and an error it cannot attribute
+// withdraws ALL DB overrides of that generation instead of just the offender.
+func validateDurations(c *Config) []Issue {
+	var issues []Issue
+	rv := reflect.ValueOf(c).Elem()
+	for _, e := range registry() {
+		if e.typ != typDuration {
+			continue
+		}
+		if d := rv.FieldByIndex(e.path).Interface().(time.Duration); d < 0 {
+			issues = append(issues, Issue{Field: e.Key, Severity: SeverityError,
+				Msg: fmt.Sprintf("%s %v must be >= 0 — a negative duration renders as a configured value in the settings surface while the consumer reads it as unset and serves its own default (what 0 means stays per key)",
+					e.Key, d)})
+		}
+	}
 	return issues
 }
 
@@ -270,56 +322,60 @@ func validateDream(c *Config) []Issue {
 			Msg: fmt.Sprintf("link floor confidence %g must be within [0,1]", f)})
 	}
 
-	// V16c — dream.cycle_timeout sign and floor, on the key itself. The sign
-	// half is V16's class: CycleTimeoutOf reads <= 0 as "unset" and silently
-	// substitutes the package CycleTimeout, so a negative value would present
-	// as a configured deadline in the settings surface while the runtime
-	// serves 700s. 0 stays legal — it IS the documented "package default"
-	// sentinel. The floor half is a WARN in the V16b spirit, not a clamp: an
+	// V16c — dream.cycle_timeout floor, on the key itself. Its SIGN half is
+	// gone from here: it was V16's class ("negative reads as configured but
+	// serves the package default"), and that class is now the generic V17
+	// walk over every duration key (validateDurations). Folding it there
+	// rather than exempting this key keeps the block free of a "has its own
+	// sign check" allowlist. 0 stays legal — it IS the documented "package
+	// default" sentinel, and V17 leaves zero alone too.
+	//
+	// The floor half is key-specific and stays: a WARN in the V16b spirit,
+	// not a clamp, because an
 	// operator may knowingly run a corpus whose calls finish far inside their
 	// ceilings. Below keywords + eval, though, the cycle deadline cuts the
 	// link-writing stages before they can start, the block ends its cycle
 	// without a cooldown and is re-picked next cycle — a silent, self-
-	// sustaining starvation loop that today only surfaces as a V16b WARN
-	// filed under dream.temporal_timeout, a key the operator never touched.
-	// This names the key they did change.
-	if d := c.Dream.CycleTimeout; d < 0 {
-		issues = append(issues, Issue{Field: "dream.cycle_timeout", Severity: SeverityError,
-			Msg: fmt.Sprintf("cycle timeout %v must be >= 0 (0 = package default %v)", d, dream.CycleTimeout)})
-	} else if floor := dream.KeywordsTimeout + dream.DreamTimeout; d > 0 && d < floor {
+	// sustaining starvation loop that would otherwise surface only as a V16b
+	// WARN filed under dream.temporal_timeout, a key the operator never
+	// touched. This names the key they did change. The `d > 0` guard already
+	// kept negatives out of this branch before the fold.
+	if d, floor := c.Dream.CycleTimeout, dream.KeywordsTimeout+dream.DreamTimeout; d > 0 && d < floor {
 		issues = append(issues, Issue{Field: "dream.cycle_timeout", Severity: SeverityWarn,
 			Msg: fmt.Sprintf("cycle timeout %v is below the %v floor (keywords %v + eval %v) — the cycle deadline cuts the link-writing stages before they run, so the block ends without a cooldown and is re-picked every cycle",
 				d, floor, dream.KeywordsTimeout, dream.DreamTimeout)})
 	}
 
-	// V16 — dream.temporal_timeout sign. Same class as V9b/V9c: the consumer
-	// (dream.temporalTimeout) reads <= 0 as "unset" and silently substitutes
-	// the package ValidateTimeout, so a negative value would present as a
-	// configured duration in the settings surface while meaning the default.
-	// 0 stays legal — it IS the documented "package default" sentinel.
-	if d := c.Dream.TemporalTimeout; d < 0 {
-		issues = append(issues, Issue{Field: "dream.temporal_timeout", Severity: SeverityError,
-			Msg: fmt.Sprintf("temporal timeout %v must be >= 0 (0 = package default %v)", d, dream.ValidateTimeout)})
-	} else {
+	// V16 — dream.temporal_timeout sign — folded into V17 for the same reason
+	// as V16c's: one generic registry walk instead of a per-key check that
+	// the other 35 seconds keys never got. What remains here is V16b, the
+	// key-specific cycle-budget WARN.
+	//
+	// The `d >= 0` guard preserves the sign check's ownership of negative
+	// values now that its branch is gone — it replaces the `else` that branch
+	// used to provide. It is load-bearing, not decoration:
+	// temporalTimeoutBudgetOf turns NEGATIVE once dream.cycle_timeout is set
+	// below keywords + eval, so without it a value V17 already ERRORs on
+	// would collect a second, misleading budget WARN on top.
+	if d := c.Dream.TemporalTimeout; d >= 0 && d > temporalTimeoutBudgetOf(c) {
+		// V16b — the cycle-budget WARN. Not a clamp: the operator may
+		// know their keyword/eval calls finish far inside their own
+		// ceilings, and the runtime already fails safely (the cycle
+		// deadline cuts the call). Warn only, in the V10 spirit of
+		// making a downstream truncation visible at boot.
+		//
 		// Effective whole-cycle deadline: the hot dream.cycle_timeout wins
 		// (CycleTimeoutOf), else the package CycleTimeout default. The
 		// budget and the "cannot take effect" gate read it, so a raised
 		// cycle timeout widens the window instead of warning spuriously.
 		cycle := dream.CycleTimeoutOf(c.Dream.CycleTimeout)
-		if d > temporalTimeoutBudgetOf(c) {
-			// V16b — the cycle-budget WARN. Not a clamp: the operator may
-			// know their keyword/eval calls finish far inside their own
-			// ceilings, and the runtime already fails safely (the cycle
-			// deadline cuts the call). Warn only, in the V10 spirit of
-			// making a downstream truncation visible at boot.
-			msg := fmt.Sprintf("temporal timeout %v leaves only %v of the %v dream cycle for keywords (%v) + eval (%v) — the link-writing stages can be starved",
-				d, cycle-d, cycle, dream.KeywordsTimeout, dream.DreamTimeout)
-			if d >= cycle {
-				msg = fmt.Sprintf("temporal timeout %v is not below the %v dream cycle budget — the cycle deadline cuts the Phase-2 call first, so the value cannot take effect",
-					d, cycle)
-			}
-			issues = append(issues, Issue{Field: "dream.temporal_timeout", Severity: SeverityWarn, Msg: msg})
+		msg := fmt.Sprintf("temporal timeout %v leaves only %v of the %v dream cycle for keywords (%v) + eval (%v) — the link-writing stages can be starved",
+			d, cycle-d, cycle, dream.KeywordsTimeout, dream.DreamTimeout)
+		if d >= cycle {
+			msg = fmt.Sprintf("temporal timeout %v is not below the %v dream cycle budget — the cycle deadline cuts the Phase-2 call first, so the value cannot take effect",
+				d, cycle)
 		}
+		issues = append(issues, Issue{Field: "dream.temporal_timeout", Severity: SeverityWarn, Msg: msg})
 	}
 
 	return issues

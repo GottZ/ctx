@@ -169,8 +169,42 @@ func TestParseDurationSeconds(t *testing.T) {
 		t.Error("parseDurationSeconds should reject non-integer input (legacy getEnvIntSafe semantics)")
 	}
 	// Negative passes the parser — exactly like the legacy strconv.Atoi paths.
+	// The sign is V17's job in Validate, where it is fatal for EVERY duration
+	// key; rejecting it here would degrade 33 of the 37 to WARN + default.
 	if v, err := parseDurationSeconds("-5", nil); err != nil || v.(time.Duration) != -5*time.Second {
 		t.Errorf("parseDurationSeconds(-5) = (%v, %v), want -5s (legacy equivalence)", v, err)
+	}
+}
+
+// TestParseDurationSecondsOverflow pins the range guard that only the PARSER
+// can hold (issue #29): `n * time.Second` wraps for |n| > maxDurationSeconds,
+// and the wrap lands on a plausible SMALL duration — 9223372036854 s renders
+// as -775.808ms, 9223372036855 s as 224.192ms — so no downstream range check,
+// V17 included, can tell the result from a configured value. A rejected input
+// must therefore never produce a Duration at all.
+func TestParseDurationSecondsOverflow(t *testing.T) {
+	if v, err := parseDurationSeconds("9223372036", nil); err != nil || v.(time.Duration) != 9223372036*time.Second {
+		t.Errorf("parseDurationSeconds(9223372036) = (%v, %v), want the largest representable value", v, err)
+	}
+	if v, err := parseDurationSeconds("-9223372036", nil); err != nil || v.(time.Duration) != -9223372036*time.Second {
+		t.Errorf("parseDurationSeconds(-9223372036) = (%v, %v), want the smallest representable value", v, err)
+	}
+	for _, raw := range []string{
+		"9223372037",          // first value past the ceiling
+		"-9223372037",         // first value past the floor
+		"9223372036854",       // the issue's report: wraps to -775.808ms
+		"9223372036855",       // wraps to a plausible POSITIVE 224.192ms
+		"-9223372036854",      // the mirror: a huge negative wraps positive
+		"9223372036854775807", // math.MaxInt64: Atoi ACCEPTS it on a 64-bit int, the multiply wraps to -1s
+	} {
+		v, err := parseDurationSeconds(raw, nil)
+		if err == nil {
+			t.Errorf("parseDurationSeconds(%s) = %v, want an error (out of range)", raw, v)
+			continue
+		}
+		if v != nil {
+			t.Errorf("parseDurationSeconds(%s) rejected but returned %v — a rejected value must yield no Duration", raw, v)
+		}
 	}
 }
 

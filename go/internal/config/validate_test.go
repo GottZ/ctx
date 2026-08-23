@@ -143,6 +143,10 @@ func TestValidateTable(t *testing.T) {
 		// V16 — dream.temporal_timeout sign. 0 is the documented "package
 		// default" sentinel and must stay clean; a negative value reads as a
 		// configured duration but means the default, so it is an ERROR.
+		// The negative case is served by V17 since the fold (the per-key
+		// branch is gone) — kept here unchanged BECAUSE it must stay green
+		// across that move, and because it is the double-report pin: exactly
+		// one issue on the field, asserted below the table.
 		{"V16 default ok", map[string]string{}, "dream.temporal_timeout", -1},
 		{"V16 zero ok", map[string]string{"dream.temporal_timeout": "0"}, "dream.temporal_timeout", -1},
 		{"V16 raised ok", map[string]string{"dream.temporal_timeout": "180"}, "dream.temporal_timeout", -1},
@@ -178,6 +182,27 @@ func TestValidateTable(t *testing.T) {
 		{"V16c negative rejected", map[string]string{"dream.cycle_timeout": "-30"}, "dream.cycle_timeout", SeverityError},
 		{"V16c below floor warns", map[string]string{"dream.cycle_timeout": "60"}, "dream.cycle_timeout", SeverityWarn},
 		{"V16c at floor ok", map[string]string{"dream.cycle_timeout": "300"}, "dream.cycle_timeout", -1},
+
+		// V17 — the sign check over every seconds-typed key. One fixture per
+		// CONSUMER CLASS, because "negative" means something different behind
+		// each: a poll interval that would fire on every tick
+		// (graph_cache.rebuild_interval, hardDue unguarded), a strict-parse
+		// age reference (dispatch.lease_max_age), a back-off base that lands
+		// in a Postgres make_interval (embed_backfill.backoff_base), and a
+		// TTL whose <= 0 branch writes expires_at NULL, i.e. a pending write
+		// that never expires (writes.confirm_ttl). The "0" twin of each row
+		// pins that V17 leaves zero alone — what it means is per key, and the
+		// two back-off bases read it as "retry immediately", not as "off".
+		// The registry-wide version of this statement is
+		// TestValidateRejectsNegativeOnEveryDurationKey below.
+		{"V17 poll interval negative", map[string]string{"graph_cache.rebuild_interval": "-30"}, "graph_cache.rebuild_interval", SeverityError},
+		{"V17 poll interval zero ok", map[string]string{"graph_cache.rebuild_interval": "0"}, "graph_cache.rebuild_interval", -1},
+		{"V17 strict key negative", map[string]string{"dispatch.lease_max_age": "-30"}, "dispatch.lease_max_age", SeverityError},
+		{"V17 strict key zero ok", map[string]string{"dispatch.lease_max_age": "0"}, "dispatch.lease_max_age", -1},
+		{"V17 backoff base negative", map[string]string{"embed_backfill.backoff_base": "-30"}, "embed_backfill.backoff_base", SeverityError},
+		{"V17 backoff base zero ok", map[string]string{"embed_backfill.backoff_base": "0"}, "embed_backfill.backoff_base", -1},
+		{"V17 ttl negative", map[string]string{"writes.confirm_ttl": "-600"}, "writes.confirm_ttl", SeverityError},
+		{"V17 ttl zero ok", map[string]string{"writes.confirm_ttl": "0"}, "writes.confirm_ttl", -1},
 	}
 
 	for _, c := range cases {
@@ -188,6 +213,91 @@ func TestValidateTable(t *testing.T) {
 				t.Errorf("severity on %s = %v, want %v (issues: %v)", c.field, got, c.want, issues)
 			}
 		})
+	}
+}
+
+// issuesOn returns every issue Validate filed against one field — severityFor
+// collapses to the worst one, which cannot see a DOUBLE report.
+func issuesOn(issues []Issue, field string) []Issue {
+	var out []Issue
+	for _, is := range issues {
+		if is.Field == field {
+			out = append(out, is)
+		}
+	}
+	return out
+}
+
+// wantDurationKeys is the number of typDuration keys in the registry, counted
+// at the basis stand (37, dream.cycle_timeout included). It is a DRIFT GUARD,
+// not a fact worth asserting for its own sake: V17 is a generic walk, so a
+// duration key added later is covered automatically — but a key that silently
+// changes TYPE (seconds → int, or a struct field that stops being a
+// time.Duration) would leave the walk without anyone noticing. Raise this
+// number in the same commit that adds a duration key.
+const wantDurationKeys = 37
+
+// TestValidateRejectsNegativeOnEveryDurationKey is the registry-wide form of
+// V17 (issue #29): before it, exactly two of the seconds keys had a sign check
+// (dream.temporal_timeout V16, dream.cycle_timeout V16c) and the other 35
+// accepted -30, stored it, and rendered it as `-30s` in the settings surface
+// while every consumer read it as "unset" and served its own default.
+//
+// "Exactly one issue on the field" is the second half of the statement: the
+// V16/V16c sign branches were FOLDED into the walk rather than exempted from
+// it, so a re-introduced per-key sign check would double-report here.
+func TestValidateRejectsNegativeOnEveryDurationKey(t *testing.T) {
+	seen := 0
+	for _, e := range registry() {
+		if e.typ != typDuration {
+			continue
+		}
+		seen++
+		t.Run(e.Key, func(t *testing.T) {
+			// Production write path: the value rides the same typed parser a
+			// settings row or an env var would (fromSources), never a
+			// hand-built struct.
+			issues := Validate(validCfg(t, map[string]string{e.Key: "-1"}))
+			got := issuesOn(issues, e.Key)
+			if len(got) != 1 {
+				t.Fatalf("%s = -1 produced %d issues on the field, want exactly 1: %v", e.Key, len(got), got)
+			}
+			if got[0].Severity != SeverityError {
+				t.Errorf("%s = -1 severity = %v, want SeverityError (boot abort / 422 on the settings write): %v",
+					e.Key, got[0].Severity, got[0])
+			}
+		})
+	}
+	if seen != wantDurationKeys {
+		t.Errorf("registry holds %d typDuration keys, want %d — a duration key was added or changed type; "+
+			"confirm V17 still covers it and update wantDurationKeys", seen, wantDurationKeys)
+	}
+}
+
+// TestValidateFoldedSignChecksReportOnce pins the fold decision at the two
+// keys that used to carry their own sign check. Both keep their key-specific
+// halves (V16b's cycle budget, V16c's floor) and both must file exactly ONE
+// issue on a negative value — the failure mode a "V17 skips keys with their
+// own check" allowlist would have traded for an allowlist to maintain.
+func TestValidateFoldedSignChecksReportOnce(t *testing.T) {
+	for _, key := range []string{"dream.temporal_timeout", "dream.cycle_timeout"} {
+		t.Run(key, func(t *testing.T) {
+			got := issuesOn(Validate(validCfg(t, map[string]string{key: "-30"})), key)
+			if len(got) != 1 || got[0].Severity != SeverityError {
+				t.Fatalf("%s = -30 produced %v, want exactly one SeverityError", key, got)
+			}
+		})
+	}
+	// The sharp edge of the fold: below its floor the cycle timeout makes the
+	// V16b budget NEGATIVE (60s − keywords 120s − eval 180s = −240s), so a
+	// negative temporal_timeout would clear `d > budget` and collect a second,
+	// misleading WARN on top of its V17 error. The `d >= 0` guard in
+	// validateDream is what keeps this at one issue.
+	got := issuesOn(Validate(validCfg(t, map[string]string{
+		"dream.temporal_timeout": "-30", "dream.cycle_timeout": "60",
+	})), "dream.temporal_timeout")
+	if len(got) != 1 || got[0].Severity != SeverityError {
+		t.Fatalf("temporal -30 under a 60s cycle produced %v, want exactly one SeverityError", got)
 	}
 }
 

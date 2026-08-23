@@ -292,6 +292,47 @@ func TestBuildValidationDropsOffenderKeepsRest(t *testing.T) {
 	}
 }
 
+// TestBuildOutOfRangeDurationOverridesDropped is the issue-#29 class pin at
+// the surface an operator actually touches: a settings row. Both halves of
+// "out of range" are checked, because they take DIFFERENT routes to the same
+// outcome — the negative one parses cleanly and is dropped by Validate (V17,
+// SeverityError → dropOffenders), the overflowing one never becomes a value
+// at all (parseDurationSeconds rejects it, admitOverride WARNs). Before the
+// wave both were applied: `-30` rendered as `-30s` and `9223372036855` as
+// `224.192ms`, each with source "settings".
+//
+// The WARN is what the settings PUT turns into a 422 (handler/settings.go
+// checks the resulting source, then reads the issue for that key), so the
+// per-key attribution asserted here is the API contract, not decoration.
+func TestBuildOutOfRangeDurationOverridesDropped(t *testing.T) {
+	resetBuildEnv(t)
+
+	c, issues := Build([]Override{
+		{Key: "graph_cache.rebuild_interval", Value: "-30"},     // parses, V17 SeverityError
+		{Key: "root_map.count_timeout", Value: "9223372036855"}, // never parses (wraps to 224.192ms)
+		{Key: "graph_cache.debounce_window", Value: "120"},      // healthy
+	}, nil)
+
+	if HasErrors(issues) {
+		t.Fatalf("override layer must never produce errors, got: %v", issues)
+	}
+	warnFor(t, issues, "graph_cache.rebuild_interval", "settings override dropped")
+	warnFor(t, issues, "root_map.count_timeout", "out of range")
+
+	if c.GraphCache.RebuildInterval != 21600*time.Second || c.Source("graph_cache.rebuild_interval") != "default" {
+		t.Errorf("rebuild_interval = %v (source %q), want the 6h default after the drop",
+			c.GraphCache.RebuildInterval, c.Source("graph_cache.rebuild_interval"))
+	}
+	if c.RootMap.CountTimeout != 5*time.Second || c.Source("root_map.count_timeout") != "default" {
+		t.Errorf("count_timeout = %v (source %q), want the 5s default — the wrapped value must never reach the config",
+			c.RootMap.CountTimeout, c.Source("root_map.count_timeout"))
+	}
+	if c.GraphCache.DebounceWindow != 120*time.Second || c.Source("graph_cache.debounce_window") != "settings" {
+		t.Errorf("healthy override must survive the drop pass: debounce=%v source=%q",
+			c.GraphCache.DebounceWindow, c.Source("graph_cache.debounce_window"))
+	}
+}
+
 // A cross-field error NOT attributable to any override withdraws ALL
 // overrides — degraded, loud, never fatal.
 //

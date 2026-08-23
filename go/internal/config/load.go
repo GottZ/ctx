@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"slices"
@@ -138,12 +139,31 @@ func parseFloatValue(raw string, _ any) (any, error) {
 	return f, nil
 }
 
+// maxDurationSeconds is the largest whole second a time.Duration can hold —
+// beyond it the `n * time.Second` multiply below wraps.
+const maxDurationSeconds = int64(math.MaxInt64) / int64(time.Second)
+
 // parseDurationSeconds keeps the legacy bare-int-seconds form of
 // CTX_DREAM_IDLE_WAIT and every other time.Duration key.
+//
+// The range check is the parser's own class of statement — "unrepresentable
+// as this type", the same class as "abc" — and it can live NOWHERE else: the
+// wrap produces a PLAUSIBLE SMALL POSITIVE duration (9223372036854 s renders
+// as -775.808ms, 9223372036855 s as 224.192ms), so no downstream range check
+// can tell it from a configured value. Symmetric on purpose — a large
+// negative input wraps into the positive range just as invisibly.
+//
+// The SIGN is deliberately NOT checked here: -30 is representable, and
+// rejecting it in the parser would degrade 33 of the 37 seconds keys to
+// WARN + registry default (only the four parse:"strict" dispatch.* keys
+// abort). Negatives are V17's job in Validate, which is fatal for every key.
 func parseDurationSeconds(raw string, _ any) (any, error) {
 	n, err := strconv.Atoi(raw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid seconds value %q", raw)
+	}
+	if int64(n) > maxDurationSeconds || int64(n) < -maxDurationSeconds {
+		return nil, fmt.Errorf("seconds value %q out of range (max ±%d s)", raw, maxDurationSeconds)
 	}
 	return time.Duration(n) * time.Second, nil
 }
