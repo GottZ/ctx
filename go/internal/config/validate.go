@@ -32,7 +32,7 @@ var dreamLanguageRe = regexp.MustCompile(dreamLanguagePattern)
 // temporalTimeoutBudgetOf is the largest dream.temporal_timeout that still
 // leaves the two LLM stages behind Phase-2 temporal their own ceilings inside
 // a cycle of the given whole-cycle deadline (V16b): the whole cycle runs
-// under CycleTimeoutFor, and temporal is step 1b — keyword extraction
+// under CycleTimeoutOf, and temporal is step 1b — keyword extraction
 // (KeywordsTimeout) and relationship evaluation (DreamTimeout) follow it and
 // write the links. Derived from the cycle deadline, not mirrored, so it
 // cannot drift when the timeouts are retuned. It reads the effective (hot)
@@ -40,7 +40,7 @@ var dreamLanguageRe = regexp.MustCompile(dreamLanguagePattern)
 // dream.cycle_timeout widens the budget accordingly instead of warning
 // spuriously.
 func temporalTimeoutBudgetOf(c *Config) time.Duration {
-	return dream.CycleTimeoutFor(&dream.Router{CycleTimeout: c.Dream.CycleTimeout}) - (dream.KeywordsTimeout + dream.DreamTimeout)
+	return dream.CycleTimeoutOf(c.Dream.CycleTimeout) - (dream.KeywordsTimeout + dream.DreamTimeout)
 }
 
 // Validate checks the surviving cross-field invariants and returns all
@@ -271,7 +271,7 @@ func validateDream(c *Config) []Issue {
 	}
 
 	// V16c — dream.cycle_timeout sign and floor, on the key itself. The sign
-	// half is V16's class: CycleTimeoutFor reads <= 0 as "unset" and silently
+	// half is V16's class: CycleTimeoutOf reads <= 0 as "unset" and silently
 	// substitutes the package CycleTimeout, so a negative value would present
 	// as a configured deadline in the settings surface while the runtime
 	// serves 700s. 0 stays legal — it IS the documented "package default"
@@ -302,10 +302,10 @@ func validateDream(c *Config) []Issue {
 			Msg: fmt.Sprintf("temporal timeout %v must be >= 0 (0 = package default %v)", d, dream.ValidateTimeout)})
 	} else {
 		// Effective whole-cycle deadline: the hot dream.cycle_timeout wins
-		// (CycleTimeoutFor), else the package CycleTimeout default. The
+		// (CycleTimeoutOf), else the package CycleTimeout default. The
 		// budget and the "cannot take effect" gate read it, so a raised
 		// cycle timeout widens the window instead of warning spuriously.
-		cycle := dream.CycleTimeoutFor(&dream.Router{CycleTimeout: c.Dream.CycleTimeout})
+		cycle := dream.CycleTimeoutOf(c.Dream.CycleTimeout)
 		if d > temporalTimeoutBudgetOf(c) {
 			// V16b — the cycle-budget WARN. Not a clamp: the operator may
 			// know their keyword/eval calls finish far inside their own
