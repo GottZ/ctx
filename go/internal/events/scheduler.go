@@ -1859,7 +1859,14 @@ func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router, read
 		cancel()
 	}()
 
-	dreamOpts := dream.DreamOptions()
+	// Output cap for the cycle's chat calls. cfg is the ITERATION's snapshot
+	// (runDreamLoop, SnapshotForTenant per cycle), so dream.num_predict is
+	// read fresh every cycle — that is what makes the key hot. 0 = the
+	// package default (DreamOptionsFor). These options are consumed by BOTH
+	// the link evaluation and the recurrence confirm, which is the key's
+	// documented scope; the serving row's model_map num_predict / max_tokens
+	// still wins over it at dispatch.
+	dreamOpts := dream.DreamOptionsFor(cfg.Dream.NumPredict)
 
 	// Build throttle function based on current dream mode.
 	throttle := dream.NoThrottle

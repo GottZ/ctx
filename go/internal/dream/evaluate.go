@@ -60,30 +60,55 @@ Types:
 Output a JSON array of {target_id, type, confidence}. Empty [] when no candidate relates. Maximum 5 entries.`
 )
 
-// DreamOptions returns Ollama options for dream evaluation.
-// Tuned for qwen3.6:27b non-thinking mode per vendor recommendation,
-// validated against qwen3.5:27b baseline in /tmp/bench_l2 (Session 24).
+// DefaultNumPredict is the PACKAGE default for the output cap of the dream
+// chat calls that share DreamOptions (link evaluation + recurrence confirm).
+// Untyped on purpose: config pins its own default tag against this constant.
 //
-// NumPredict 600 (was 400): object-map drift (form 2, qwen3.8-local) emits each
-// link as {uuid: {target_id, type, confidence}} instead of the array the prompt
-// asks for, and the uuid repeats as both map key AND target_id value. Measured
-// with the Qwen3 tokenizer, the object-map form costs about 1.5x the array form:
-// five entries are ~420 tokens compact / ~500 pretty-printed, against ~250 / ~330
-// for the array form (~85-100 tokens per object-map entry). 400 therefore
-// truncated the pretty variant mid-JSON ("unexpected end of JSON input") and the
-// whole evaluation was lost. 600 covers the prompt's "Maximum 5 entries" in the
-// worst measured form with ~100 tokens of margin. Not raised further on purpose:
-// on OpenAI-style backends max_tokens is charged against the context window, so
-// an over-generous cap gets long prompts rejected. Per-backend tuning belongs in
-// the serving row's model_map params (num_predict / max_tokens, merged by
-// applyModelParams in llm/chain.go), which override this default at dispatch.
+// 600 (was 400): object-map drift (form 2, qwen3.8-local) emits each link as
+// {uuid: {target_id, type, confidence}} instead of the array the prompt asks
+// for, and the uuid repeats as both map key AND target_id value. Measured with
+// the Qwen3 tokenizer, the object-map form costs about 1.5x the array form:
+// five entries are ~420 tokens compact / ~500 pretty-printed, against ~250 /
+// ~330 for the array form (~85-100 tokens per object-map entry). 400 therefore
+// truncated the pretty variant mid-JSON ("unexpected end of JSON input") and
+// the whole evaluation was lost. 600 covers the prompt's "Maximum 5 entries"
+// in the worst measured form with ~100 tokens of margin. The DEFAULT is not
+// raised further on purpose: on OpenAI-style backends max_tokens is charged
+// against the context window, so an over-generous cap gets long prompts
+// rejected — which is why dream.num_predict exists as an opt-in per install
+// rather than a higher constant for everyone.
+const DefaultNumPredict = 600
+
+// DreamOptions returns Ollama options for dream evaluation on the package
+// default cap. DreamOptionsFor is the configured form; this is the no-config
+// caller's shorthand (tests, bench axes).
 func DreamOptions() llm.Options {
-	return llm.Options{
+	return DreamOptionsFor(0)
+}
+
+// DreamOptionsFor returns the dream evaluation options with numPredict as the
+// output cap, falling back to DefaultNumPredict when it is not positive — 0 is
+// the documented "package default" sentinel of dream.num_predict, and Validate
+// (V18) already rejected a negative value, so this only has to be total.
+// Sampling is tuned for qwen3.6:27b non-thinking mode per vendor
+// recommendation, validated against the qwen3.5:27b baseline (Session 24).
+//
+// The scheduler passes cfg.Dream.NumPredict here, per cycle, so the key is hot.
+// The cap is a DEFAULT in the same sense dream.temporal_timeout is: per-backend
+// tuning belongs in the serving row's model_map params (num_predict /
+// max_tokens, merged by applyModelParams in llm/chain.go), which override
+// whatever this returns at dispatch.
+func DreamOptionsFor(numPredict int) llm.Options {
+	opts := llm.Options{
 		Temperature: 0.7,
 		TopP:        0.8,
 		TopK:        20,
-		NumPredict:  600,
+		NumPredict:  DefaultNumPredict,
 	}
+	if numPredict > 0 {
+		opts.NumPredict = numPredict
+	}
+	return opts
 }
 
 // Link represents a cross-reference between two blocks.
@@ -306,11 +331,16 @@ func noteDroppedInvalid(entry *llmlog.Entry, parsed, valid int) bool {
 // completion-token count and opts.NumPredict is the cap this call site sent.
 // Generation stopping at the budget while the JSON does not parse is the cap
 // hit. >= rather than ==: some backends count the stop token in. NumPredict
-// <= 0 means uncapped — nothing to hit. Known blind spot: a backend row's
-// model_map num_predict/max_tokens override is applied inside the chain walk
+// <= 0 means uncapped — nothing to hit, and unreachable from config: 0 on
+// dream.num_predict is the package-default sentinel, so the options this sees
+// always carry a positive cap. Known blind spot: a backend row's model_map
+// num_predict/max_tokens override is applied inside the chain walk
 // (applyModelParams on a local copy) and is not visible here, so on such rows
-// the flag compares against the DreamOptions default, not the effective cap —
-// a heuristic until ChatResponse carries the provider's finish_reason.
+// the flag compares against the cap this call site SENT — since dream.
+// num_predict the configured one rather than the constant, which makes the
+// heuristic exact on every install that tunes the key and leaves only the row
+// override blind — a heuristic until ChatResponse carries the provider's
+// finish_reason.
 //
 // Observability only: the caller still returns the parse error and the cooldown
 // path is unchanged.

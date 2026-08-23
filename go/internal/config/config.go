@@ -246,6 +246,28 @@ type DreamConfig struct {
 	// WARN on this key, because such a cycle is cut before the link-writing
 	// stages run.
 	CycleTimeout time.Duration `key:"dream.cycle_timeout" env:"CTX_DREAM_CYCLE_TIMEOUT" default:"700" mut:"hot" tenancy:"global-only"`
+	// NumPredict caps the OUTPUT tokens of the dream chat calls that share
+	// DreamOptions: link evaluation and the recurrence confirm (the
+	// scheduler builds one options value for the cycle and both consume it).
+	// Not every dream call — temporal keeps its own 1000 and copies only
+	// NumCtx from these options, keywords has its own 200.
+	// Default 600 = the measured worst case of the object-map drift form
+	// (five links, pretty-printed, ~500 tokens on the Qwen3 tokenizer) plus
+	// margin; raise it when a backend's drift form is wordier still, which
+	// today needs a rebuild or a per-row param edit. 0 = the package default
+	// (dream.DefaultNumPredict), which the registry default is pinned to.
+	// DEFAULT ONLY: a num_predict / max_tokens param in the serving
+	// context_backends row's model_map takes precedence at dispatch
+	// (applyModelParams, walked in llm.ChatChainVia) — the same precedence
+	// story as dream.temporal_timeout against a timeouts.dream row entry.
+	// On such a row tune the row value instead.
+	// Validated by V18 (validateDream): a negative value is an ERROR — 0 is
+	// the sentinel and a negative one would render as a configured cap while
+	// DreamOptionsFor served the constant — and a positive value BELOW the
+	// package default is a WARN, because it reopens the truncation the
+	// default was measured against. WARN, not a clamp: a shorter cap is a
+	// legitimate setting for an install whose backend answers compactly.
+	NumPredict int `key:"dream.num_predict" env:"CTX_DREAM_NUM_PREDICT" default:"600" mut:"hot" tenancy:"global-only"`
 
 	Backoff BackoffConfig
 }

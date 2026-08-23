@@ -57,7 +57,7 @@ func Validate(c *Config) []Issue {
 	var issues []Issue
 	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V11
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
-	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c
+	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	return issues
@@ -407,6 +407,35 @@ func validateDream(c *Config) []Issue {
 				d, cycle)
 		}
 		issues = append(issues, Issue{Field: "dream.temporal_timeout", Severity: SeverityWarn, Msg: msg})
+	}
+
+	// V18 — dream.num_predict sign and floor. The sign half is NOT V17's:
+	// that walk is typed, it visits typDuration fields only, and this key is
+	// a plain token count (typInt). Same failure mode though — a negative
+	// value renders as a configured cap in the settings surface while
+	// DreamOptionsFor serves the package default — so it gets the same ERROR
+	// class, on its own check rather than by widening the duration walk to a
+	// type whose zero and negative values mean something different per key.
+	// 0 stays legal: it IS the documented "package default" sentinel.
+	//
+	// The floor half is a WARN in the V16b/V16c spirit, never a clamp. Below
+	// dream.DefaultNumPredict the operator reopens exactly the regression the
+	// default was measured against: five links in the object-map drift form
+	// cost ~500 tokens pretty-printed, and a cap under that truncates the
+	// answer mid-JSON, which the pipeline cannot tell from malformed output —
+	// it books a parse error, a 5-minute transient cooldown and a re-pick,
+	// burning one eval call per block per five minutes with only
+	// metadata.cap_hit in the llmlog to say why. It stays a WARN because an
+	// install whose backend answers compactly may knowingly buy latency with
+	// a shorter cap.
+	if n := c.Dream.NumPredict; n < 0 {
+		issues = append(issues, Issue{Field: "dream.num_predict", Severity: SeverityError,
+			Msg: fmt.Sprintf("num_predict %d must be >= 0 — 0 is the package-default sentinel (%d tokens), a negative value renders as a configured cap while the default is served",
+				n, dream.DefaultNumPredict)})
+	} else if n > 0 && n < dream.DefaultNumPredict {
+		issues = append(issues, Issue{Field: "dream.num_predict", Severity: SeverityWarn,
+			Msg: fmt.Sprintf("num_predict %d is below the built-in default of %d tokens — five links in the object-map drift form cost ~500 tokens pretty-printed, so answers can be truncated mid-JSON and are then indistinguishable from malformed output (parse error, transient cooldown, re-pick; metadata.cap_hit is the only signal)",
+				n, dream.DefaultNumPredict)})
 	}
 
 	return issues

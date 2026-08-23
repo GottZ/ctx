@@ -233,6 +233,24 @@ func TestValidateTable(t *testing.T) {
 		{"V17b zero sentinel is never compared", map[string]string{
 			"graph_overview.label_timeout": "0", "graph_overview.label_interval": "30",
 		}, "graph_overview.label_timeout", -1},
+
+		// V18 — dream.num_predict (issue #28). Unlike V16/V16c the sign half
+		// is NOT V17's: the generic walk is typed and visits duration fields
+		// only, so a typInt key needs its own check — the negative row below
+		// is the one that goes red if it is dropped, and no other check in
+		// the tree would catch it.
+		//
+		// 0 is the package-default sentinel and stays clean; raising is a
+		// plain ok; below the built-in default warns (truncation the default
+		// was measured against) but never clamps — the value the operator
+		// set is the value DreamOptionsFor serves, which is pinned on the
+		// dream side by TestDreamOptionsFor.
+		{"V18 default ok", map[string]string{}, "dream.num_predict", -1},
+		{"V18 zero ok", map[string]string{"dream.num_predict": "0"}, "dream.num_predict", -1},
+		{"V18 at default ok", map[string]string{"dream.num_predict": "600"}, "dream.num_predict", -1},
+		{"V18 raised ok", map[string]string{"dream.num_predict": "1200"}, "dream.num_predict", -1},
+		{"V18 negative rejected", map[string]string{"dream.num_predict": "-1"}, "dream.num_predict", SeverityError},
+		{"V18 below default warns", map[string]string{"dream.num_predict": "300"}, "dream.num_predict", SeverityWarn},
 	}
 
 	for _, c := range cases {
@@ -396,6 +414,51 @@ func TestValidateNormalizesLanguage(t *testing.T) {
 func TestValidateLanguageDefaultIsLegacy(t *testing.T) {
 	if got := defaultFor("dream.language"); got != "" {
 		t.Fatalf("dream.language default = %q, want empty (legacy German report)", got)
+	}
+}
+
+// TestDefaultNumPredictMatchesRegistry pins the dream.num_predict default tag
+// to the package constant the dream-side lower bound guards
+// (TestDreamOptions_NumPredictCoversObjectMapForm), and both to the number the
+// operations docs name. Neither side can see the other: the struct tag is a
+// string literal parsed at registry build, the constant is a compile-time int
+// in another package. Without this pin a retune of one silently leaves an
+// install running the other, and the sentinel contract ("0 = the built-in
+// default") would name a value the config default disagrees with.
+//
+// defaultFor returns the PARSED default as an any, hence the type assertion —
+// comparing the interface against the untyped constant would not compile.
+func TestDefaultNumPredictMatchesRegistry(t *testing.T) {
+	def, ok := defaultFor("dream.num_predict").(int)
+	if !ok {
+		t.Fatalf("dream.num_predict default is %T, want int", defaultFor("dream.num_predict"))
+	}
+	if def != dream.DefaultNumPredict {
+		t.Errorf("dream.num_predict default tag = %d, want dream.DefaultNumPredict (%d)", def, dream.DefaultNumPredict)
+	}
+	if dream.DefaultNumPredict != 600 {
+		t.Errorf("dream.DefaultNumPredict = %d, want 600 (docs/operations.md names it in the env table)", dream.DefaultNumPredict)
+	}
+}
+
+// TestV18BelowDefaultIsAdvisoryOnly is TestV17bIsAdvisoryOnly for the output
+// cap: a cap below the measured object-map cost is a WARN, exactly once on the
+// key, and non-fatal — boot continues and a settings write raising it is a 200,
+// not a 422 (Store.Replace rejects on HasErrors alone). The decision it pins is
+// "warn, never clamp": an install whose backend answers compactly may buy
+// latency with a shorter cap, and DreamOptionsFor serves the value it was given.
+func TestV18BelowDefaultIsAdvisoryOnly(t *testing.T) {
+	issues := Validate(validCfg(t, map[string]string{"dream.num_predict": "300"}))
+
+	got := issuesOn(issues, "dream.num_predict")
+	if len(got) != 1 {
+		t.Fatalf("num_predict 300 produced %d issues on the field, want exactly 1: %v", len(got), got)
+	}
+	if got[0].Severity != SeverityWarn {
+		t.Errorf("V18 below-default severity = %v, want SeverityWarn: %v", got[0].Severity, got[0])
+	}
+	if HasErrors(issues) {
+		t.Errorf("a below-default cap made the whole config fatal — boot would abort and the settings write would 422: %v", issues)
 	}
 }
 
