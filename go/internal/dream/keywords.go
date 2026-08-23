@@ -137,7 +137,24 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 		}
 		return keywords, nil
 	}
-	return nil, fmt.Errorf("dream: keyword generation failed after %d attempts: %w", KeywordsMaxRetries, lastErr)
+
+	// LLM keyword extraction degenerated on all retries (budget cap, reasoning
+	// burn, content that makes the model collapse — e.g. dense Windows-path
+	// blocks on Nemotron 3.5 Lightning, prod 2026-08-23). Fall back to the
+	// deterministic tokenizer instead of parking the block: the block still
+	// gets searched/evaluated this cycle, and the expensive LLM path is
+	// skipped on its next picks until content changes. ExtractKeywords is
+	// stopword-filtered, deterministic, and title-biased — good enough for
+	// the RRF candidate search that follows.
+	slog.Warn("dream: LLM keyword generation exhausted retries, falling back to deterministic ExtractKeywords",
+		"block_id", block.ID, "error", lastErr)
+	fallback := ExtractKeywords(block.Title, block.Content, MaxKeywords)
+	if len(fallback) < MinKeywords {
+		// Even the deterministic path found nothing meaningful — park the block
+		// as before (12h) so the scheduler stops burning cycles on it.
+		return nil, fmt.Errorf("dream: keyword generation failed after %d attempts: %w", KeywordsMaxRetries, lastErr)
+	}
+	return fallback, nil
 }
 
 // buildKeywordPrompt wraps the block in the XML-escaped template the prompt expects.
