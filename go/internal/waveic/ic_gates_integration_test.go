@@ -129,7 +129,7 @@ func TestICDreamPicksIssueNotComment(t *testing.T) {
 	linkable := set.DreamLinkableTypes()
 	picked := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		b, err := dream.PickBlock(ctx, pool, linkable, nil) // nil scopes: this probe is type- not tenant-scoped (T12)
+		b, err := dream.PickBlock(ctx, pool, linkable, nil, dream.PickClaimTTL(nil)) // nil scopes: this probe is type- not tenant-scoped (T12)
 		if err != nil {
 			t.Fatalf("PickBlock: %v", err)
 		}

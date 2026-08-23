@@ -54,6 +54,45 @@ func TestCycleTimeoutFor(t *testing.T) {
 	}
 }
 
+// TestPickClaimTTLCoversTheCycle pins the claim arithmetic: the transient
+// claim PickBlock writes must outlive the cycle that holds the block, or a
+// sibling worker (dream.parallelism, up to 16) re-picks it mid-cycle and both
+// cycles dream the same block version. The bare CooldownTransientMinutes the
+// claim used to be is kept only as a FLOOR, so a very short cycle recovers
+// from a crash exactly as promptly as before.
+func TestPickClaimTTLCoversTheCycle(t *testing.T) {
+	const floor = CooldownTransientMinutes * time.Minute
+	tests := []struct {
+		name   string
+		router *Router
+		want   time.Duration
+	}{
+		// 700s default + 1min grace = 760s, already above the 300s floor —
+		// so even the unchanged deployment gets a claim that covers its
+		// cycle, which the 5-minute constant never did.
+		{"unset cycle uses the package default", &Router{}, CycleTimeout + pickClaimGrace},
+		{"nil router uses the package default", nil, CycleTimeout + pickClaimGrace},
+		// 120s + 60s = 180s < 300s: the floor wins.
+		{"short cycle keeps the 5min floor", &Router{CycleTimeout: 120 * time.Second}, floor},
+		// The PR's own documented value: 2400s + 60s.
+		{"raised cycle scales the claim", &Router{CycleTimeout: 2400 * time.Second}, 2460 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PickClaimTTL(tt.router)
+			if got != tt.want {
+				t.Errorf("PickClaimTTL() = %v, want %v", got, tt.want)
+			}
+			if cycle := CycleTimeoutFor(tt.router); got <= cycle {
+				t.Errorf("PickClaimTTL() = %v does not outlive the %v cycle it protects", got, cycle)
+			}
+			if got < floor {
+				t.Errorf("PickClaimTTL() = %v is below the %v crash-recovery floor", got, floor)
+			}
+		})
+	}
+}
+
 // TestRunDreamCycleConsumesRouterCycleTimeout pins the FIRST of the three
 // consumption sites — the resolver test above only exercises the pure
 // function, so reverting dream.go's `context.WithTimeout(ctx,
