@@ -77,6 +77,19 @@ type Router struct {
 	// dream/synthesize_report.go). Only the daily-synthesis path reads it;
 	// the per-block dream pipeline is language-agnostic.
 	Language string
+	// JSONMode is the wire policy of the four dream stages that PARSE their
+	// answer, read from config Dream.JSONMode by the caller that builds the
+	// router (scheduler: per-iteration, so the hot key is hot). Resolved via
+	// wantJSONMode: the zero value "" and "strict" send the dialect's
+	// JSON-mode marker — legacy behavior, byte-identical for routers built
+	// without config wiring — and only "off" sends plain chat, leaving the
+	// package's parsers as the sole validator.
+	//
+	// The daily synthesis does NOT read this field: it goes through chatPlain
+	// unconditionally, because its answer is prose stored verbatim. That is
+	// why the setting is a per-call parameter below and not a policy of the
+	// whole router.
+	JSONMode string
 	// LinkFloor is the raw confidence assigned to links the LLM named
 	// without a strength signal (drift forms with absent confidence — PR
 	// #12), read from config Dream.LinkFloorConfidence by the caller that
@@ -134,12 +147,14 @@ func (r *Router) available(role string) bool {
 	return err == nil
 }
 
-// chat is the JSON-mode call of the four dream stages that PARSE their
-// answer (eval, keywords, recurrence, temporal). See chatMode.
+// chat is the call of the four dream stages that PARSE their answer (eval,
+// keywords, recurrence, temporal). Whether it asks the backend for JSON mode
+// follows config dream.json_mode via wantJSONMode — strict (the default) is
+// the historical wire. See chatMode.
 func (r *Router) chat(ctx context.Context, role string, required backends.Sensitivity,
 	systemPrompt, userPrompt string, baseOpts llm.Options, defTimeout time.Duration,
 ) (*llm.ChatResponse, *backends.Backend, []llm.ChainAttempt, error) {
-	return r.chatMode(ctx, role, required, systemPrompt, userPrompt, baseOpts, defTimeout, true)
+	return r.chatMode(ctx, role, required, systemPrompt, userPrompt, baseOpts, defTimeout, wantJSONMode(r))
 }
 
 // chatPlain is the same walk without the JSON-mode marker on the wire — the

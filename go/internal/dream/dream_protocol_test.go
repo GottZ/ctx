@@ -108,6 +108,70 @@ func TestDreamChatJSONModeOnTheWire(t *testing.T) {
 	}
 }
 
+// TestRouterJSONModeReachesTheWire is the statement that matters for
+// dream.json_mode: the CONFIGURED value, carried on the router the scheduler
+// builds, decides what a parsing stage puts on the wire. A unit test of
+// wantJSONMode alone would be near-tautological — it would still pass with
+// chat() ignoring its result, which is exactly the mutation that undoes the
+// whole key.
+//
+// Untagged on purpose (SeedSnapshotForTest is a production method, used the
+// same way by router_test.go and validate_temporal_test.go): a
+// `//go:build integration` file would be invisible to `go test -short` and the
+// regression would ship silently.
+//
+// The stage driven is the temporal Phase-2 review — one r.chat call under role
+// dream, no DB needed. The seam stays UNINSTALLED so the request reaches the
+// recording backend.
+func TestRouterJSONModeReachesTheWire(t *testing.T) {
+	var body string
+	srv := recordWireBody(t, &body)
+
+	tests := []struct {
+		name       string
+		mode       string
+		protocol   backends.Protocol
+		wantMarker bool
+	}{
+		{name: "ollama unset is strict", mode: "", protocol: backends.ProtocolOllama, wantMarker: true},
+		{name: "ollama strict", mode: JSONModeStrict, protocol: backends.ProtocolOllama, wantMarker: true},
+		{name: "ollama off", mode: JSONModeOff, protocol: backends.ProtocolOllama, wantMarker: false},
+		{name: "openai unset is strict", mode: "", protocol: backends.ProtocolOpenAI, wantMarker: true},
+		{name: "openai strict", mode: JSONModeStrict, protocol: backends.ProtocolOpenAI, wantMarker: true},
+		{name: "openai off", mode: JSONModeOff, protocol: backends.ProtocolOpenAI, wantMarker: false},
+		// V20 normalizes on the config path; a hand-built router must not
+		// answer differently to the same intent.
+		{name: "openai off is case- and space-insensitive", mode: "  OFF ", protocol: backends.ProtocolOpenAI, wantMarker: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body = ""
+			p := backends.NewPool(nil, nil)
+			p.SeedSnapshotForTest([]backends.Backend{{
+				ID: "json-mode-backend", Name: "json-mode-backend",
+				Host: srv.URL, APIKey: "k", Protocol: tt.protocol,
+				Trust: backends.TrustFull, Locality: "lan",
+				Roles:    []string{backends.RoleDream},
+				ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
+				Priority: 100, Enabled: true,
+			}})
+			r := &Router{Pool: p, Admit: testAdmit(), JSONMode: tt.mode}
+
+			block := srcBlock(uuidA)
+			if _, _, _, err := r.temporalReview(context.Background(), &block, "user prompt", llm.Options{}); err != nil {
+				t.Fatalf("temporalReview: %v", err)
+			}
+			if body == "" {
+				t.Fatal("no request reached the recording backend")
+			}
+			marker := jsonModeMarker(tt.protocol)
+			if got := strings.Contains(body, marker); got != tt.wantMarker {
+				t.Errorf("JSONMode=%q: body carries %s = %v, want %v\nbody: %s", tt.mode, marker, got, tt.wantMarker, body)
+			}
+		})
+	}
+}
+
 // Regression: an installed chatJSON test seam intercepts the call (no wire
 // traffic) and receives the loose tuple of the SAME backend the entry point
 // got — the seam contract every dream test file builds its overrides on.

@@ -57,7 +57,7 @@ func Validate(c *Config) []Issue {
 	var issues []Issue
 	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V11
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
-	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19
+	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	return issues
@@ -343,6 +343,10 @@ func validateDream(c *Config) []Issue {
 		}
 	}
 
+	// V20 — dream.json_mode enum (own function: this block is at the cyclop
+	// ceiling, and an enum check has no cross-field half to keep here).
+	issues = append(issues, validateDreamJSONMode(c)...)
+
 	// V15 — dream.link_floor_confidence range. The value becomes the raw
 	// confidence of every link the LLM names without a strength signal; an
 	// out-of-range float would either die at the write gate (silent no-op
@@ -454,6 +458,32 @@ func validateDream(c *Config) []Issue {
 	}
 
 	return issues
+}
+
+// validateDreamJSONMode is V20 — the dream.json_mode enum. It normalizes like
+// every other case-insensitive key (trim + lower, IN PLACE, the V-order
+// pattern) and then accepts exactly "" (the legacy sentinel), "strict" and
+// "off". The two accepted spellings are the dream package's own constants, the
+// same relation V16c has to KeywordsTimeout: config validates against the
+// consumer, never against a second copy of its vocabulary.
+//
+// Deliberately NOT the V6 warn-and-reset shape. There an unknown value
+// silently becomes the registry default — and the default here is strict, the
+// setting an operator reaching for this key is trying to leave. A typo ("of",
+// "false", "plain") would keep the grammar on the wire while GET /api/settings
+// renders their value, and the symptom they are chasing is a backend decoding
+// at half speed, which no log line attributes to this key. Fatal instead: boot
+// aborts, the settings PUT is a 422.
+func validateDreamJSONMode(c *Config) []Issue {
+	c.Dream.JSONMode = strings.ToLower(strings.TrimSpace(c.Dream.JSONMode))
+	switch c.Dream.JSONMode {
+	case "", dream.JSONModeStrict, dream.JSONModeOff:
+		return nil
+	default:
+		return []Issue{{Field: "dream.json_mode", Severity: SeverityError,
+			Msg: fmt.Sprintf("json mode %q must be %q or %q — empty reads as %q (legacy default)",
+				c.Dream.JSONMode, dream.JSONModeStrict, dream.JSONModeOff, dream.JSONModeStrict)}}
+	}
 }
 
 // v6 emits the V6 WARN for one back-off field and resets it to its registry

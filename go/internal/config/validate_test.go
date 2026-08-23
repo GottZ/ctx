@@ -140,6 +140,21 @@ func TestValidateTable(t *testing.T) {
 			"dream.language": "de-aaaaaaaa-bbbbbbbb-cccccccc-dddddddd",
 		}, "dream.language", SeverityError},
 
+		// V20 — dream.json_mode enum. The default and the empty legacy
+		// sentinel stay clean, "off" is the documented opt-out, and anything
+		// else is an ERROR rather than the V6 warn-and-reset: an unknown value
+		// there would silently mean strict, i.e. a typo'd opt-out keeps the
+		// grammar on the wire while the settings surface shows the operator's
+		// value.
+		{"V20 default ok", map[string]string{}, "dream.json_mode", -1},
+		{"V20 empty ok", map[string]string{"dream.json_mode": ""}, "dream.json_mode", -1},
+		{"V20 strict ok", map[string]string{"dream.json_mode": "strict"}, "dream.json_mode", -1},
+		{"V20 off ok", map[string]string{"dream.json_mode": "off"}, "dream.json_mode", -1},
+		{"V20 mixed case ok", map[string]string{"dream.json_mode": "  OFF "}, "dream.json_mode", -1},
+		{"V20 unknown mode rejected", map[string]string{"dream.json_mode": "fast"}, "dream.json_mode", SeverityError},
+		{"V20 near-miss opt-out rejected", map[string]string{"dream.json_mode": "of"}, "dream.json_mode", SeverityError},
+		{"V20 boolean rejected", map[string]string{"dream.json_mode": "false"}, "dream.json_mode", SeverityError},
+
 		// V16 — dream.temporal_timeout sign. 0 is the documented "package
 		// default" sentinel and must stay clean; a negative value reads as a
 		// configured duration but means the default, so it is an ERROR.
@@ -417,6 +432,23 @@ func TestValidateNormalizesLanguage(t *testing.T) {
 	}
 	if cfg.Dream.Language != "de-de" {
 		t.Errorf("language = %q, want normalized %q", cfg.Dream.Language, "de-de")
+	}
+}
+
+// TestValidateNormalizesJSONMode pins V20's in-place trim+lower and the
+// default's identity with the dream-side constant. The default is the
+// release-critical half: anything but strict would change the wire of every
+// existing install on upgrade.
+func TestValidateNormalizesJSONMode(t *testing.T) {
+	cfg := validCfg(t, map[string]string{"dream.json_mode": "  OFF "})
+	if issues := Validate(cfg); severityFor(issues, "dream.json_mode") != -1 {
+		t.Errorf("normalized mode must validate clean, got %v", issues)
+	}
+	if cfg.Dream.JSONMode != dream.JSONModeOff {
+		t.Errorf("json mode = %q, want normalized %q", cfg.Dream.JSONMode, dream.JSONModeOff)
+	}
+	if got := defaultFor("dream.json_mode"); got != dream.JSONModeStrict {
+		t.Fatalf("dream.json_mode default = %q, want %q (today's wire)", got, dream.JSONModeStrict)
 	}
 }
 

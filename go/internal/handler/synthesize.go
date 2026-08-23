@@ -122,6 +122,12 @@ func (h *SynthesizeHandler) dailyAdmission() llm.Admission {
 // request, not captured at wiring time: dream.language is mut:"hot", and the
 // scheduler's newRouter reads it per iteration — the two trigger paths of one
 // pipeline must not disagree about how hot a hot key is.
+//
+// dream.json_mode is deliberately ABSENT here, and its absence is not the
+// asymmetry the paragraph above warns about: the synthesis stage sends plain
+// chat unconditionally (dream/synthesize_report.go, Router.chatPlain) because
+// its answer is prose stored verbatim. There is no per-request value to read —
+// the key governs the four parsing stages, which this handler never triggers.
 func (h *SynthesizeHandler) dailyRouter(ctx context.Context) *dream.Router {
 	return &dream.Router{
 		Pool:       h.backendPool,

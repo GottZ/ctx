@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -55,6 +56,36 @@ func dreamChat(ctx context.Context, chatB backends.Backend, systemPrompt, userPr
 		return llm.ChatJSON(ctx, chatB, systemPrompt, userPrompt, opts, timeout)
 	}
 	return llm.Chat(ctx, chatB, systemPrompt, userPrompt, opts, timeout)
+}
+
+// The two accepted values of config dream.json_mode. They live here, next to
+// the resolver that reads them, because config validates AGAINST this package
+// (the layering allows config → dream, never the reverse) — the same relation
+// V16c has to KeywordsTimeout and V18 to DefaultNumPredict.
+const (
+	// JSONModeStrict sends the dialect's JSON-mode marker on the four parsing
+	// stages. Today's behavior and the default.
+	JSONModeStrict = "strict"
+	// JSONModeOff sends plain chat there: the JSON contract stays in the
+	// prompt and the local parsers are the only validator.
+	JSONModeOff = "off"
+)
+
+// wantJSONMode resolves the wire policy of ONE parsing dream stage from the
+// router, mirroring temporalTimeout: an unset router field (a router built
+// without config wiring — every test, and any caller predating the key) reads
+// as strict, so nothing changes without an explicit opt-out. Only the exact
+// normalized "off" turns the marker off; config V20 rejects everything else
+// long before it reaches here, and a hand-built router with a typo keeps the
+// safe half of the pair.
+//
+// The nil check is parity with temporalTimeout, not a reachable state: chat is
+// a method, so the receiver exists at every call site.
+func wantJSONMode(r *Router) bool {
+	if r == nil {
+		return true
+	}
+	return strings.ToLower(strings.TrimSpace(r.JSONMode)) != JSONModeOff
 }
 
 const (

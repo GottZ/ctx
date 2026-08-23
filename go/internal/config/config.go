@@ -192,6 +192,32 @@ type DreamConfig struct {
 	// other tag switches title/tag/system-prompt to English + the named
 	// language. V14 validates the shape (see validateDream).
 	Language string `key:"dream.language" env:"CTX_DREAM_LANGUAGE" default:"" mut:"hot" tenancy:"global-only"`
+	// JSONMode is the WIRE policy of the four dream stages that PARSE their
+	// answer — link evaluation, keyword extraction, the recurrence confirm and
+	// the temporal Phase-2 review.
+	//
+	// "strict" (the default) is today's behavior byte for byte: the request
+	// carries the dialect's JSON-mode marker (OpenAI
+	// response_format:{"type":"json_object"}, Ollama top-level
+	// "format":"json"). "off" sends plain chat; the JSON contract stays in the
+	// prompt and the package's local parsers become the ONLY validator, which
+	// is what they already are on every answer that arrives well-formed. The
+	// empty string reads as strict (legacy sentinel, same doctrine as
+	// dream.language "" and the timeout keys' 0); anything else is fatal at
+	// boot / 422s the settings write (V20) — a typo must not silently mean
+	// strict, because the failure it hides is a slow backend, not a wrong one.
+	//
+	// Why it exists: on a grammar-enforcing runtime the constraint costs
+	// roughly half the decode throughput (and disables speculative decoding on
+	// some), and the dream pipeline is the throughput floor of the corpus. The
+	// key is hot, so an operator can A/B it on a live install without a
+	// restart, and global-only, because the wire policy belongs to whoever
+	// operates the backend, not to a tenant.
+	//
+	// The daily-synthesis stage is NOT covered and never sends the marker: its
+	// answer is prose stored verbatim, so JSON mode there is corruption, not
+	// validation (dream/synthesize_report.go).
+	JSONMode string `key:"dream.json_mode" env:"CTX_DREAM_JSON_MODE" default:"strict" mut:"hot" tenancy:"global-only"`
 	// LinkFloorConfidence is the raw confidence assigned to relationship
 	// links the LLM names WITHOUT a strength signal (string-map drift form,
 	// absent confidence fields — PR #12). The default 0.9 keeps such links

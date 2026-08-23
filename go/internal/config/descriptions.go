@@ -18,6 +18,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"dream.idle_wait":                                "Seconds the dream scheduler sleeps when no block is eligible; eligible blocks are still processed back-to-back",
 	"dream.parallelism":                              "Number of concurrent dream workers (clamped to 1-16, restart required); higher values load the chat backend harder",
 	"dream.language":                                 "Language tag for the daily-synthesis report; empty or de keeps the legacy German Tagesbericht series, other tags localize title and prompt",
+	"dream.json_mode":                                "Wire policy of the four parsing dream stages: strict sends the backend's JSON mode, off sends plain chat and leaves the local parsers as the only validator; the prose daily report never uses JSON mode",
 	"dream.link_floor_confidence":                    "Confidence [0,1] assigned to LLM links returned without a strength signal; default 0.9 keeps them above the graph-expansion retrieval gate",
 	"dream.temporal_timeout":                         "Seconds allowed for the temporal Phase-2 LLM review; a timeouts.dream override on the serving backend row takes precedence",
 	"dream.cycle_timeout":                            "Seconds one whole dream cycle (pick, temporal, keywords, RRF, eval, recurrence) may run; the outer ceiling a timeouts.dream row can only shorten",
