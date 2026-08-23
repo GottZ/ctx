@@ -141,7 +141,16 @@ else's environment — that led to a fix landing in the repository.
   hot-reloadable `dream.temporal_timeout` key with its byte-identical default,
   hardened with the `timeouts.dream` row-precedence documentation, a V16 sign
   check, a V16b cycle-budget warning and a wire-level test that pins both the
-  call site and the precedence.
+  call site and the precedence. Also PR
+  [#32](https://github.com/GottZ/ctx/pull/32): the whole dream cycle ran
+  under a hardcoded 700 s deadline that slow reasoning models overrun, so the
+  tail stages timed out inside the cycle and the block was re-picked every
+  cycle; the shipped feature keeps his hot `dream.cycle_timeout` key with
+  its byte-identical default, hardened with the settings-registry
+  description the v5 surface requires, a V16c sign-and-floor check, tests
+  that pin all three consumption sites and the hot reload, a pick claim that
+  now outlives the configured cycle, and precedence docs corrected for an
+  outer-ceiling key.
 
 ## How to be listed
 
