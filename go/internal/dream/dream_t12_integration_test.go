@@ -94,7 +94,7 @@ func TestT12_DreamPickTenantIsolation_Integration(t *testing.T) {
 	// 2. A's cycle (A's allowlist, A's scopes): A's only block is a reference,
 	//    excluded by the override ⇒ nothing pickable. Proves the override skips
 	//    A's block of that type.
-	gotA, err := dream.PickBlock(ctx, pool, setA.DreamLinkableTypes(), []string{scopeA})
+	gotA, err := dream.PickBlock(ctx, pool, setA.DreamLinkableTypes(), []string{scopeA}, dream.PickClaimTTL(nil))
 	if err != nil {
 		t.Fatalf("PickBlock(A): %v", err)
 	}
@@ -106,7 +106,7 @@ func TestT12_DreamPickTenantIsolation_Integration(t *testing.T) {
 	//    NEVER A's — the scope conjunct binds the pick to the iterating tenant.
 	//    RED without the conjunct: A's older+lower-quality block sorts first and
 	//    would be picked, so gotB.Scope would be A (foreign-tenant bleed).
-	gotB, err := dream.PickBlock(ctx, pool, setB.DreamLinkableTypes(), []string{scopeB})
+	gotB, err := dream.PickBlock(ctx, pool, setB.DreamLinkableTypes(), []string{scopeB}, dream.PickClaimTTL(nil))
 	if err != nil {
 		t.Fatalf("PickBlock(B): %v", err)
 	}

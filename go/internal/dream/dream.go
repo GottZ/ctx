@@ -136,6 +136,38 @@ func CycleTimeoutOf(d time.Duration) time.Duration {
 	return CycleTimeout
 }
 
+// pickClaimGrace is the head-room PickClaimTTL adds on top of the cycle
+// deadline: the claim has to outlive the LAST statement of the cycle, not
+// just the deadline itself — the tail bookkeeping (quality score, cooldown,
+// canonical promotion) still runs after it.
+const pickClaimGrace = 1 * time.Minute
+
+// PickClaimTTL sizes the transient claim PickBlock writes onto the block it
+// hands out, from the cycle's effective whole-cycle deadline.
+//
+// The claim is the ONLY thing keeping a sibling dream worker off an in-flight
+// block (Welle-49): the row lock is gone the moment the pick statement
+// returns. It was a bare CooldownTransientMinutes = 5 min, which was already
+// 2.3x short of the 700s constant on root, and dream.cycle_timeout turns that
+// mismatch into an operator-settable one — at the 2400s this PR documents,
+// a 5-minute claim expires eight times inside a single cycle and the
+// parallelism fix is a no-op for every cycle.
+//
+// So: cycle + grace, with the 5 minutes kept as a FLOOR so crash recovery of
+// a very short cycle stays as prompt as it is today. Crash recovery of a long
+// cycle degrades to cycle+1min, which is the honest bound anyway — a worker
+// cannot hold a block longer than its own cycle context allows.
+//
+// CooldownTransientMinutes itself stays what it is for the explicit error
+// paths (keyword generation exhausted, eval failure, temporal failure): those
+// are post-cycle retry delays, not claims.
+func PickClaimTTL(r *Router) time.Duration {
+	if claim := CycleTimeoutFor(r) + pickClaimGrace; claim > CooldownTransientMinutes*time.Minute {
+		return claim
+	}
+	return CooldownTransientMinutes * time.Minute
+}
+
 // CycleTimeoutFor is CycleTimeoutOf for callers that hold the cycle's router:
 // the enclosing context.WithTimeout in RunDreamCycle and the scheduler's
 // outer cycle context both read it, so one knob bounds the whole cycle and
@@ -196,7 +228,7 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	// be bound to the tenant's own scopes or A's policy would govern B's blocks
 	// (design/01 §7-T12). readScopes is read_scopes ∩ owned; single-tenant it is
 	// the raw read window, so the pick set is byte-identical to pre-T12 there.
-	block, err := PickBlock(ctx, pool, typeSet.DreamLinkableTypes(), readScopes)
+	block, err := PickBlock(ctx, pool, typeSet.DreamLinkableTypes(), readScopes, PickClaimTTL(r))
 	if err != nil {
 		return 0, fmt.Errorf("dream: pick: %w", err)
 	}
@@ -476,11 +508,20 @@ func dreamEligibleWhere(typesParam string) string {
 // pool.QueryRow(... FOR UPDATE SKIP LOCKED) releases the row lock as soon as
 // the statement returns, so a multi-second RunDreamCycle that followed had no
 // protection from a sibling worker picking the same block. Fix: UPDATE … FROM
-// subquery sets a transient cooldown (CooldownTransientMinutes) atomically with
-// the pick, so other workers see the cooldown active and SKIP. On successful
-// cycle completion the caller overrides with the real outcome cooldown
-// (CooldownActiveDays / CooldownInertDays). On crash the transient claim
-// expires after 5 min and the block re-enters the queue.
+// subquery sets a transient cooldown atomically with the pick, so other
+// workers see the cooldown active and SKIP. On successful cycle completion the
+// caller overrides with the real outcome cooldown (CooldownActiveDays /
+// CooldownInertDays). On crash the claim expires and the block re-enters the
+// queue.
+//
+// claim is how long that TTL runs, rounded up to whole seconds. It MUST cover
+// the caller's whole cycle — a claim shorter than the cycle expires while the
+// worker still holds the block, and any sibling worker (dream.parallelism, up
+// to 16) then legitimately re-picks it, re-runs the whole LLM pipeline on it,
+// and both cycles write links/quality-score/cooldown for the same block
+// version. RunDreamCycle sizes it with PickClaimTTL; see there for why a bare
+// CooldownTransientMinutes cannot be the answer once the cycle deadline is an
+// operator-settable knob.
 // scopes (WF T12) is the iterating tenant's ENTITLEMENT-CLAMPED read window
 // (read_scopes ∩ owned) — the pick is bound to `scope = ANY(scopes)` so a
 // tenant's DreamLinkableTypes allowlist is applied ONLY to that tenant's blocks.
@@ -490,17 +531,20 @@ func dreamEligibleWhere(typesParam string) string {
 // conjunct — the tenant-less single pass (backgroundTenants fail-safe
 // {_global, nil} → raw read_scopes... but a caller may pass nil) stays
 // byte-identical to the pre-T12 unrestricted pick.
-func PickBlock(ctx context.Context, pool *pgxpool.Pool, linkable []string, scopes []string) (*BlockInfo, error) {
+func PickBlock(ctx context.Context, pool *pgxpool.Pool, linkable []string, scopes []string, claim time.Duration) (*BlockInfo, error) {
 	var block BlockInfo
 	scopeConjunct := ""
-	args := []any{CooldownTransientMinutes, linkable}
+	// Whole seconds, rounded UP: the claim must never come out shorter than
+	// the cycle it protects. The unit moved from minutes to seconds with the
+	// claim itself — a cycle deadline is a seconds-grained knob.
+	args := []any{int(math.Ceil(claim.Seconds())), linkable}
 	if len(scopes) > 0 {
 		scopeConjunct = "\n\t\t\t  AND scope = ANY($3::text[])"
 		args = append(args, scopes)
 	}
 	err := pool.QueryRow(ctx,
 		`UPDATE context_blocks
-		SET dream_cooldown_until = now() + ($1 * interval '1 minute')
+		SET dream_cooldown_until = now() + ($1 * interval '1 second')
 		WHERE id = (
 			SELECT id FROM context_blocks
 			WHERE `+dreamEligibleWhere("$2")+`
