@@ -401,6 +401,142 @@ func TestParseLinks_ObjectForm_DeterministicOrder(t *testing.T) {
 	}
 }
 
+// --- parseLinks ID/Type Normalisation (issue #27) ---.
+//
+// Every case below parsed as a SUCCESS before the fix and was then filtered to
+// zero links, which downstream reads as "no candidate relates" and books the
+// multi-day inert back-off — the loss is invisible in the log. The tests
+// therefore run parse → filterValidCandidates against a candidate set and
+// assert the survivor, not the struct field: the field is the mechanism, the
+// survivor is the effect.
+
+// normUUID is the sole candidate every normalisation case must reach.
+const normUUID = "019d0000-0000-7000-8000-000000000002"
+
+// upperUUID is normUUID as the model emitted it under case drift. uuidPattern
+// matches lower-case hex only, so this id fails the very first gate in
+// filterValidCandidates unless the parser folds it.
+const upperUUID = "019D0000-0000-7000-8000-000000000002"
+
+func TestParseLinks_NormalisesIDsAndTypesAcrossDriftForms(t *testing.T) {
+	cases := []struct {
+		name       string
+		raw        string
+		wantFormat string
+	}{
+		// Drift form: canonical array.
+		{"array-upper-id", `[{"target_id":"` + upperUUID + `","type":"topical","confidence":0.9}]`, formatArray},
+		{"array-padded-id", `[{"target_id":"  ` + normUUID + `  ","type":"topical","confidence":0.9}]`, formatArray},
+		{"array-cased-type", `[{"target_id":"` + normUUID + `","type":"Topical","confidence":0.9}]`, formatArray},
+		{"array-padded-type", `[{"target_id":"` + normUUID + `","type":" topical ","confidence":0.9}]`, formatArray},
+		{"fenced-array-upper-id", "```json\n[{\"target_id\":\"" + upperUUID + "\",\"type\":\"topical\",\"confidence\":0.9}]\n```", formatFencedArray},
+		// Drift form 1: single flat object.
+		{"flatsingle-upper-id", `{"target_id":"` + upperUUID + `","type":"topical","confidence":0.9}`, formatObject},
+		{"flatsingle-cased-type", `{"target_id":"` + normUUID + `","type":"Causal","confidence":0.9}`, formatObject},
+		// Drift form 2: object map.
+		{"objmap-upper-key", `{"` + upperUUID + `":{"type":"topical","confidence":0.9}}`, formatObject},
+		{"objmap-padded-key", `{"  ` + normUUID + `  ":{"type":"topical","confidence":0.9}}`, formatObject},
+		{"objmap-cased-type", `{"` + normUUID + `":{"type":"TOPICAL","confidence":0.9}}`, formatObject},
+		{"objmap-inner-target-id", `{"link1":{"target_id":"` + normUUID + `","type":"topical","confidence":0.9}}`, formatObject},
+		{"objmap-inner-upper-target-id", `{"link1":{"target_id":"` + upperUUID + `","type":"topical","confidence":0.9}}`, formatObject},
+		// Drift form 0: named wrapper (normalises through the recursion).
+		{"wrapped-upper-id", `{"relationships":[{"target_id":"` + upperUUID + `","type":"topical","confidence":0.9}]}`, formatWrapped},
+		// Drift form 3: string map — the form that already normalised. Control:
+		// its behaviour must be unchanged by the central pass.
+		{"stringmap-upper-key-and-type", `{"` + upperUUID + `":"TOPICAL"}`, formatStringMap},
+	}
+	candidateIDs := map[string]bool{normUUID: true}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			links, format, err := parseLinks(c.raw)
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			if format != c.wantFormat {
+				t.Errorf("format = %q, want %q", format, c.wantFormat)
+			}
+			valid := filterValidCandidates(links, candidateIDs)
+			if len(valid) != 1 {
+				t.Fatalf("want 1 surviving link, got %d (parsed %+v)", len(valid), links)
+			}
+			if valid[0].TargetID != normUUID {
+				t.Errorf("target = %q, want %q", valid[0].TargetID, normUUID)
+			}
+			if !validRelationships[valid[0].Relationship] {
+				t.Errorf("relationship %q not normalised into the known set", valid[0].Relationship)
+			}
+		})
+	}
+}
+
+// TestParseLinks_ObjectMap_TargetPrecedence pins WHICH id wins in drift form 2,
+// where the map key and the entry's own target_id can disagree. The rule is
+// shape-based (see objectMapTarget): a UUID-shaped inner field is the model's
+// answer, anything else leaves the key in charge — so the fix can only add
+// links, never lose one that parses today.
+func TestParseLinks_ObjectMap_TargetPrecedence(t *testing.T) {
+	const otherUUID = "019d0000-0000-7000-8000-000000000003"
+	cases := []struct {
+		name   string
+		raw    string
+		wantID string
+	}{
+		// The shape from the issue: key is a label, inner field the answer.
+		{"label-key-uuid-inner", `{"link1":{"target_id":"` + normUUID + `","type":"topical","confidence":0.9}}`, normUUID},
+		// Both are UUIDs and disagree — the inner one is the answer.
+		{"conflict-inner-wins", `{"` + otherUUID + `":{"target_id":"` + normUUID + `","type":"topical","confidence":0.9}}`, normUUID},
+		// Inner field is prose: the UUID key must survive, not be replaced by
+		// an id that could never clear filterValidCandidates.
+		{"garbage-inner-key-survives", `{"` + normUUID + `":{"target_id":"see key","type":"topical","confidence":0.9}}`, normUUID},
+		{"empty-inner-key-survives", `{"` + normUUID + `":{"target_id":"","type":"topical","confidence":0.9}}`, normUUID},
+		// No inner field at all — the historical shape, unchanged.
+		{"absent-inner-key-survives", `{"` + normUUID + `":{"type":"topical","confidence":0.9}}`, normUUID},
+		// Neither is a UUID: passthrough stays the key (downstream filters).
+		{"neither-uuid-key-survives", `{"link1":{"target_id":"nope","type":"topical","confidence":0.9}}`, "link1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			links, format, err := parseLinks(c.raw)
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			if format != formatObject {
+				t.Errorf("format = %q, want %q", format, formatObject)
+			}
+			if len(links) != 1 || links[0].TargetID != c.wantID {
+				t.Fatalf("want single link to %q, got %+v", c.wantID, links)
+			}
+		})
+	}
+}
+
+// TestParseLinks_NormalisationKeepsZeroLinkContract pins the residue the
+// central normalisation deliberately does NOT reach: it runs AFTER the parse,
+// so every "entries present, none usable" verdict is still decided on the raw
+// output. A cased type with no confidence stays a degenerate parse error
+// (transient retry) rather than becoming a floored silent success —
+// confidenceOrFloor cannot floor a type it does not recognise, and inventing a
+// confidence for it is a different decision from folding case.
+func TestParseLinks_NormalisationKeepsZeroLinkContract(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"objmap-cased-type-absent-confidence", `{"` + normUUID + `":{"type":"Topical"}}`},
+		{"array-cased-type-absent-confidence", `[{"target_id":"` + normUUID + `","type":"Topical"}]`},
+		{"objmap-null-value", `{"` + normUUID + `":null}`},
+		{"objmap-unusable-confidence", `{"` + normUUID + `":{"type":"topical","confidence":"vibes"}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			links, _, err := parseLinks(c.raw)
+			if err == nil {
+				t.Fatalf("want parse error (transient retry), got links=%+v", links)
+			}
+		})
+	}
+}
+
 // --- parseLinks String-Map Drift Tests (deepseek-v4-flash, 2026-08-01) ---.
 //
 // Drift form 3: the model collapses the array-of-objects into a terse

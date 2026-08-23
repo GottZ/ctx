@@ -21,8 +21,45 @@ const (
 	formatFencedStringMap = "fenced-string-map"
 )
 
-// parseLinks parses the LLM JSON response into Link structs.
-// Tolerates the drift patterns observed in production:
+// parseLinks parses the LLM JSON response into Link structs and normalises the
+// two identity-bearing fields of every link it returns — see parseLinksRaw for
+// the shapes it tolerates and normalizeLinks for what normalisation means.
+//
+// The split exists so the zero-link contract stays computed on the RAW parse:
+// every "entries present, none usable" check inside parseLinksRaw counts what
+// the model emitted, and normalisation never adds or removes a link, so the
+// error/success verdict is bit-identical to the un-normalised parser.
+func parseLinks(raw string) ([]Link, string, error) {
+	links, format, err := parseLinksRaw(raw)
+	return normalizeLinks(links), format, err
+}
+
+// normalizeLinks lower-cases and trims TargetID and Relationship of every link,
+// in place. Both fields are matched EXACTLY downstream — filterValidCandidates
+// tests TargetID against uuidPattern (lower-case hex only) and against the
+// candidate-ID set, and Relationship against validRelationships /
+// minRawConfidence, both lower-case keyed — so an upper-cased UUID or a
+// capitalised "Topical" from the model parses as a success and is then dropped
+// to zero links, which downstream books as a "nothing to link" verdict and
+// sends the block into the multi-day inert back-off. That silent loss is the
+// bug this closes (issue #27); the string-map form already normalised for the
+// same reason (parseStringMapLinks), it just did it alone.
+//
+// Pure, nil-safe and idempotent — parseWrappedLinks recurses through parseLinks
+// (see its array branch), so wrapped links normalise twice, which is a no-op.
+// Normalising here rather than per drift form keeps the four remaining forms
+// free of the concern and makes a newly added form normalised by construction.
+func normalizeLinks(links []Link) []Link {
+	for i := range links {
+		links[i].TargetID = strings.ToLower(strings.TrimSpace(links[i].TargetID))
+		links[i].Relationship = strings.ToLower(strings.TrimSpace(links[i].Relationship))
+	}
+	return links
+}
+
+// parseLinksRaw parses the LLM JSON response into Link structs, verbatim: the
+// caller (parseLinks) normalises. Tolerates the drift patterns observed in
+// production:
 //   - Named-wrapper form (cloud relays, PR #11 review): {"<key>": [ <links> ], ...}
 //   - Single flat object form (Welle 49): {"target_id": "...", "type": ..., ...}
 //   - Object-map form (audit S25, 2026-05-03): {"<uuid>": {"type": "...", "confidence": <float|string>}, ...}
@@ -36,8 +73,8 @@ const (
 // Returns (links, format, err). format is one of formatArray | formatObject |
 // formatWrapped | formatStringMap or their fenced-* variants;
 // empty for empty/sentinel inputs and for parse errors. Map→slice conversion
-// sorts by TargetID for deterministic downstream behavior.
-func parseLinks(raw string) ([]Link, string, error) {
+// sorts by map key for deterministic downstream behavior.
+func parseLinksRaw(raw string) ([]Link, string, error) {
 	trimmed := strings.TrimSpace(raw)
 	wasFenced := strings.HasPrefix(trimmed, "```")
 	body := stripCodeFence(trimmed)
@@ -361,10 +398,20 @@ func stripCodeFence(raw string) string {
 // wrapper-map with IDs as keys and {type, confidence} struct values.
 // Returns ok=false when body is not such a map; degenerate=true when it IS
 // one with entries but none was usable (the caller surfaces that as a parse
-// error under the zero-link contract). Map→slice conversion sorts by
-// TargetID for deterministic downstream behavior.
+// error under the zero-link contract). Map→slice conversion sorts by map key
+// for deterministic downstream behavior.
+//
+// The entry value carries its own target_id whenever the model emits one —
+// live dream-eval rows show both {"<uuid>": {"target_id": "<same uuid>", ...}}
+// (the id duplicated) and {"link1": {"target_id": "<uuid>", ...}}, where the
+// key is a mere LABEL and the inner field is the model's actual answer.
+// Reading only the key silently turned the labelled shape into a link to
+// "link1", which filterValidCandidates then dropped — a zero-link success that
+// books the inert back-off instead of the link the model named (issue #27).
+// See objectMapTarget for which of the two wins.
 func parseObjectMapLinks(body string) (links []Link, degenerate, ok bool) {
 	var obj map[string]struct {
+		TargetID   string          `json:"target_id"`
 		Type       string          `json:"type"`
 		Confidence json.RawMessage `json:"confidence"`
 	}
@@ -383,9 +430,28 @@ func parseObjectMapLinks(body string) (links []Link, degenerate, ok bool) {
 		if !confOK {
 			continue
 		}
-		out = append(out, Link{TargetID: id, Relationship: v.Type, Confidence: conf, Floored: floored})
+		out = append(out, Link{TargetID: objectMapTarget(id, v.TargetID), Relationship: v.Type, Confidence: conf, Floored: floored})
 	}
 	return out, len(obj) > 0 && len(out) == 0, true
+}
+
+// objectMapTarget resolves drift form 2's two competing id sources: the inner
+// target_id wins when it is UUID-shaped after normalisation, otherwise the map
+// key stays the target.
+//
+// The precedence is deliberately keyed on the SHAPE, not on non-emptiness. A
+// model that fills the field with prose ("target_id": "see key") next to a
+// UUID key would otherwise lose a link that parses today, which is exactly the
+// silent-drop failure mode this fix exists to remove — so the rule can only
+// ever add links, never take one away. Where both are UUIDs and they disagree,
+// the inner one is the model's answer and the key its bookkeeping; picking the
+// inner one costs nothing, because filterValidCandidates remains the
+// authoritative gate and admits neither id unless it is in the candidate set.
+func objectMapTarget(key, inner string) string {
+	if uuidPattern.MatchString(strings.ToLower(strings.TrimSpace(inner))) {
+		return inner
+	}
+	return key
 }
 
 // confidenceOrFloor resolves an entry's confidence. A present value goes
