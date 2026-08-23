@@ -123,6 +123,9 @@ func (h *DigestHandler) runRootMap(ctx context.Context, auth *auth.AuthResult, c
 			CountTimeout:       cfg.RootMap.CountTimeout,
 			RebuildInterval:    cfg.GraphOverview.RebuildInterval,
 			SuperEnabled:       cfg.RootMap.SuperEnabled,
+			// E3-01: same corpus language knob as the labels; both digest triggers
+			// must render the same bytes or content idempotency collapses.
+			Language: cfg.Dream.Language,
 		},
 		auth.HomeScope, auth.ReadScopes)
 	if err != nil {

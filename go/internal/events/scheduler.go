@@ -1158,6 +1158,9 @@ func (s *Scheduler) renderRootMap(ctx context.Context, bt backgroundTenant) {
 			CountTimeout:       cfgT.RootMap.CountTimeout,
 			RebuildInterval:    cfgT.GraphOverview.RebuildInterval,
 			SuperEnabled:       cfgT.RootMap.SuperEnabled,
+			// E3-01: the map's scaffolding follows the same corpus language knob
+			// as the cluster labels it prints.
+			Language: cfgT.Dream.Language,
 		},
 		effectiveHomeScope(cfgT.Scheduler.HomeScope, bt.owned),
 		intersectWindow(cfgT.Scheduler.ReadScopes, bt.owned))

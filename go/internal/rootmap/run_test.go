@@ -114,7 +114,7 @@ func TestRunRefusesEmptyHomeScope(t *testing.T) {
 func TestTypePolicyDerivation(t *testing.T) {
 	set := blocktype.NewRegistry().Snapshot()
 
-	opTypes, rationale := rootmap.OperationalTypes(set)
+	opTypes, rationale := rootmap.OperationalTypes(set, "")
 	if len(opTypes) != 1 || opTypes[0] != "checkpoint" {
 		t.Fatalf("operational types = %v, want [checkpoint]", opTypes)
 	}

@@ -151,6 +151,19 @@ type Input struct {
 	SmallClusterMax      int    // root_map.small_cluster_max
 	FormatVersion        int    // 0 ⇒ FormatVersion
 	OperationalRationale string // one clause explaining WHY those types are operational
+
+	// Language is the corpus language: the dream.language value, raw OR already
+	// normalized — both are accepted, because Render normalizes again and has
+	// callers that never touch the config path. Only the PRIMARY SUBTAG decides,
+	// so "de-CH" is German.
+	//
+	// It selects the scaffolding table and the number format, never the labels:
+	// those are produced by the label pipeline, which reads the SAME key
+	// (E3-01 — one language knob per corpus). Two tables exist and only two:
+	// the empty tag and any German tag keep the frozen legacy German, every
+	// other tag renders English. That is what keeps an unknown tag (fr, tr, ja)
+	// a CONSISTENT map instead of German scaffolding around English labels.
+	Language string
 }
 
 // Rendered is the map plus the numbers it printed. The numbers come back
@@ -181,6 +194,12 @@ func Render(in Input) (Rendered, error) {
 		return Rendered{}, err
 	}
 
+	// One table lookup for the whole render. Threading it explicitly (rather
+	// than re-resolving it inside every writer) is what makes the two prefix
+	// passes provably identical: a writer that resolved its own table could
+	// disagree with the measuring loop about the length of the map.
+	p := phrasesFor(in.Language)
+
 	// The head line names the rendered mass, which is only known AFTER the
 	// measuring loop — and the loop needs the head length. The circle is broken
 	// with an UPPER BOUND instead of a second pass: rendering the head with the
@@ -200,15 +219,15 @@ func Render(in Input) (Rendered, error) {
 	// otherwise get: the coarse level must never be able to push the fine one out
 	// entirely, and half is the same relational split the identity axis uses for
 	// the substance core rather than another tuning knob.
-	super, superShown := renderSuper(in, len(renderPrefix(in, bound, "")))
+	super, superShown := renderSuper(in, len(renderPrefix(in, bound, "", p)), p)
 
-	if n := len(renderPrefix(in, bound, super)) + in.FooterReserveBytes; n > in.BudgetBytes {
+	if n := len(renderPrefix(in, bound, super, p)) + in.FooterReserveBytes; n > in.BudgetBytes {
 		return Rendered{}, fmt.Errorf("rootmap: budget %d B too small: head+coverage plus footer reserve need %d B",
 			in.BudgetBytes, n)
 	}
 
 	cov := in.Coverage
-	body, rendered, blocks := renderRows(in, len(renderPrefix(in, bound, super)))
+	body, rendered, blocks := renderRows(in, len(renderPrefix(in, bound, super, p)), p)
 	cov.RenderedRows, cov.RenderedBlocks = rendered, blocks
 	cov.CappedClusterN = cov.ClusterTotal - cov.RenderedRows - cov.SmallClusterN
 	cov.CappedBlocks = cov.ClusteredBlocks - cov.RenderedBlocks - cov.SmallClusterSize
@@ -223,19 +242,19 @@ func Render(in Input) (Rendered, error) {
 	// "the window shows no clusters" catches both; the wording below tells them
 	// apart, and AllowsUpsert refuses the write where it matters.
 	if rendered == 0 && cov.ClusterTotal == 0 {
-		out := renderPrefix(in, cov, super) + emptyStatement(in)
+		out := renderPrefix(in, cov, super, p) + emptyStatement(in, p)
 		if len(out) > in.BudgetBytes {
 			return Rendered{}, fmt.Errorf("rootmap: empty map %d B over budget %d B", len(out), in.BudgetBytes)
 		}
 		return Rendered{Text: out, Coverage: cov, Empty: true, SuperRows: superShown}, nil
 	}
 
-	footer := renderFooter(in, cov)
+	footer := renderFooter(in, cov, p)
 	if len(footer) > in.FooterReserveBytes {
 		return Rendered{}, fmt.Errorf("rootmap: footer %d B over reserve %d B", len(footer), in.FooterReserveBytes)
 	}
 
-	out := renderPrefix(in, cov, super) + body + footer
+	out := renderPrefix(in, cov, super, p) + body + footer
 	if len(out) > in.BudgetBytes {
 		return Rendered{}, fmt.Errorf("rootmap: rendered %d B over budget %d B", len(out), in.BudgetBytes)
 	}

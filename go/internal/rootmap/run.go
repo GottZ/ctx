@@ -56,8 +56,30 @@ const (
 // SENTENCE that keeps a future session from re-escalating 83 % "missing
 // coverage" is a decision record. A type absent from the registry never reaches
 // the map, so the table can only under-declare, never invent a line.
+//
+// The clause is RENDERED TEXT (it lands inside the coverage line), so it follows
+// the corpus language like every other phrase. The type NAMES do not — they are
+// registry keys.
 var operationalRationales = map[string]string{
 	"checkpoint": "hermes-Compaction-Artefakte",
+}
+
+// operationalRationalesEN is the English twin of operationalRationales. Same
+// keys, translated clauses — a key present in one table and missing in the other
+// would drop the WHY from exactly one language's map.
+var operationalRationalesEN = map[string]string{
+	"checkpoint": "hermes compaction artefacts",
+}
+
+// rationalesFor picks the clause table for a corpus language, using the same two
+// branches as the renderer's phrases.
+func rationalesFor(lang string) map[string]string {
+	switch mapLanguage(lang) {
+	case "", "de":
+		return operationalRationales
+	default:
+		return operationalRationalesEN
+	}
 }
 
 // Config is the root_map.* policy snapshot for ONE run plus the two cadence
@@ -77,6 +99,15 @@ type Config struct {
 	// turning the flag off makes the section disappear from the next map
 	// immediately instead of waiting for the rebuild that clears the rows.
 	SuperEnabled bool
+	// Language is dream.language, passed straight through to Input.Language: the
+	// map's fixed scaffolding and its number format follow the SAME knob as the
+	// cluster labels (E3-01 — one language per corpus, not two). Empty or a
+	// German tag keeps the frozen legacy German; every other tag renders English.
+	//
+	// A flip rewrites each root map exactly once and then goes quiet again: the
+	// content comparison below is on bytes, so the new wording is a single write
+	// per scope, not a per-cycle one.
+	Language string
 }
 
 // Result says what the run did and, when it did nothing, why. Skipped is never
@@ -235,7 +266,7 @@ func gather(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, cfg Con
 		return Input{}, fmt.Errorf("rootmap: meta read: %w", err)
 	}
 
-	opTypes, opRationale := OperationalTypes(set)
+	opTypes, opRationale := OperationalTypes(set, cfg.Language)
 	active, activeKnown, err := store.ActiveBlockCount(ctx, pool, readScopes, cfg.CountTimeout)
 	if err != nil {
 		return Input{}, fmt.Errorf("rootmap: corpus count: %w", err)
@@ -297,6 +328,7 @@ func gather(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, cfg Con
 		FooterReserveBytes:   cfg.FooterReserveBytes,
 		SmallClusterMax:      cfg.SmallClusterMax,
 		OperationalRationale: opRationale,
+		Language:             cfg.Language,
 	}, nil
 }
 
@@ -386,13 +418,14 @@ func tenantCount(ctx context.Context, pool *pgxpool.Pool) int {
 // the joined rationale for them (E11-02 / A02-2). Sorted — the map's text is
 // compared byte for byte against the stored one, so every list it prints has to
 // have a stable order.
-func OperationalTypes(set *blocktype.Set) ([]string, string) {
+func OperationalTypes(set *blocktype.Set, lang string) ([]string, string) {
 	if set == nil {
 		return nil, ""
 	}
+	rationales := rationalesFor(lang)
 	var names, why []string
 	for _, name := range outsideCut(set) {
-		if r, ok := operationalRationales[name]; ok {
+		if r, ok := rationales[name]; ok {
 			names = append(names, name)
 			why = append(why, r)
 		}
@@ -473,6 +506,13 @@ func metadataFor(in Input, r Rendered, cfg Config, homeScope string) map[string]
 		"modularity":           in.Freshness.Modularity,
 		"resolution":           in.Freshness.Resolution,
 		"budget_bytes":         cfg.BudgetBytes,
+		// The normalized primary subtag of the scaffolding language, so a
+		// consumer can branch without parsing prose. NOT a FormatVersion bump:
+		// the line structure is unchanged, only the words. Note the arrival
+		// time — metadata rides along with a CONTENT write (the byte comparison
+		// above returns early when the text matches), so an existing German or
+		// untagged map only gains this key on its next rewrite.
+		"language": mapLanguage(in.Language),
 	}
 	if in.Freshness.ComputedAt != nil {
 		md["cluster_computed_at"] = in.Freshness.ComputedAt.UTC().Format(time.RFC3339)
