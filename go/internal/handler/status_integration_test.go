@@ -29,13 +29,33 @@ func (fakeDreamMode) GetDreamMode() (int32, time.Duration) { return events.Dream
 // TestStatusCollectorSingleFlight proves the collector topology: N concurrent
 // readers trigger exactly ONE dream-queue scan (the O(n) full-scan CTE), not N
 // — the whole reason the collector exists (design 04 §3.6 / R12).
+//
+// The proof is a BARRIER, not a timing window (#30): the injected queueDepth
+// holds the first flight open until the test releases it, so c.qsScan stays
+// taken for the whole burst — it is acquired synchronously in the winning
+// reader's own stack (status.go, scanQueueAsync's CAS) and released only by
+// the flight goroutine's defer. Every later reader therefore MUST lose the
+// CAS, whatever the scheduler does with it. The old shape instead waited on
+// the scan COUNTER and then read: the counter moves inside queueDepth, one
+// step before the goroutine stamps qsAt, so a reader could observe a finished
+// flight with an unstamped qsAt and legitimately start a second scan — the
+// nightly's "got 2".
 func TestStatusCollectorSingleFlight(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 
 	var scans int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	// Never leave the held flight blocked, even on a t.Fatal below.
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+
 	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}), nil, nil)
 	c.queueDepth = func(_ context.Context, _ *pgxpool.Pool, _, _ []string) (*dream.QueueStats, error) {
-		atomic.AddInt32(&scans, 1)
+		if atomic.AddInt32(&scans, 1) == 1 {
+			close(entered)
+			<-release // hold the first flight open for the whole burst
+		}
 		return &dream.QueueStats{}, nil
 	}
 
@@ -49,17 +69,33 @@ func TestStatusCollectorSingleFlight(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Wait for the single async scan goroutine to land.
-	deadline := time.Now().Add(2 * time.Second)
-	for atomic.LoadInt32(&scans) < 1 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no queue scan started for 4 concurrent readers") // deadlock guard, not the assertion
 	}
-	// A further read must NOT rescan: qsAt is fresh now (< queue_stats_interval).
-	c.Snapshot(context.Background())
-	time.Sleep(100 * time.Millisecond)
 
+	// (1) In-flight dedup: 4 concurrent readers plus one more read taken while
+	// the flight is still running must cost ONE QueueDepth scan — the CAS
+	// single-flight in scanQueueAsync.
+	c.Snapshot(context.Background())
 	if got := atomic.LoadInt32(&scans); got != 1 {
-		t.Errorf("expected exactly 1 QueueDepth scan for N readers, got %d", got)
+		t.Fatalf("N concurrent readers + a read during the flight must cost exactly 1 QueueDepth scan (CAS single-flight, scanQueueAsync), got %d", got)
+	}
+
+	releaseOnce()
+	waitUntil(t, 10*time.Second, "the queue flight to stamp qsAt and release qsScan", func() bool {
+		return c.qsAt.Load() != 0 && !c.qsScan.Load()
+	})
+
+	// (2) Interval dedup: qsAt is fresh now, so a further read stays inside the
+	// queue_stats_interval (0 → the 30s fallback) and must not rescan.
+	c.Snapshot(context.Background())
+	if got := atomic.LoadInt32(&scans); got != 1 {
+		t.Errorf("a read inside queue_stats_interval must not rescan, got %d scans", got)
+	}
+	if c.qs.Load() == nil {
+		t.Errorf("qs must be populated after the flight landed")
 	}
 }
 

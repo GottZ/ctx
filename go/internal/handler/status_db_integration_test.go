@@ -309,14 +309,29 @@ func TestStatusDBAsyncCadenceNotInBuildCheap(t *testing.T) {
 // single-flight guarantee TestStatusCollectorSingleFlight proves for the
 // dream-queue scan, exercised here via the dbStatsBuild injection point
 // (mirrors the queueDepth field's existing test seam).
+//
+// Same barrier shape as its sibling (#30): the held dbStatsBuild keeps
+// c.dbStatsScan taken for the whole burst instead of a widened sleep window,
+// so losing the CAS is structural rather than probable. Holding the BUILD is
+// what matters — it is the first step of the flight goroutine; the stamp wait
+// below is tight because the only step between build and stamp,
+// channelProbeIfDue, is a no-op under config.Config{} (status.channel_probe_
+// interval 0 means permanently off, E-03-5).
 func TestStatusDBAsyncCadenceSingleFlight(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 
 	var builds int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+
 	c := NewStatusCollector(pool, backends.NewPool(nil, nil), fakeDreamMode{}, config.NewStore(&config.Config{}), nil, nil)
-	c.dbStatsBuild = func(ctx context.Context, _ *pgxpool.Pool) *dbStatus {
-		atomic.AddInt32(&builds, 1)
-		time.Sleep(20 * time.Millisecond) // widen the race window
+	c.dbStatsBuild = func(_ context.Context, _ *pgxpool.Pool) *dbStatus {
+		if atomic.AddInt32(&builds, 1) == 1 {
+			close(entered)
+			<-release // hold the first flight open for the whole burst
+		}
 		return &dbStatus{MigrationsApplied: 1}
 	}
 
@@ -330,16 +345,30 @@ func TestStatusDBAsyncCadenceSingleFlight(t *testing.T) {
 	}
 	wg.Wait()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for atomic.LoadInt32(&builds) < 1 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no db-section build started for 6 concurrent readers") // deadlock guard, not the assertion
 	}
-	// A further immediate read must NOT rebuild: dbStatsAt is fresh.
-	c.Snapshot(context.Background())
-	time.Sleep(50 * time.Millisecond)
 
+	// (1) In-flight dedup: the burst plus a read taken while the build is still
+	// running must cost ONE db-section build (CAS single-flight in
+	// scanDBStatsAsync).
+	c.Snapshot(context.Background())
 	if got := atomic.LoadInt32(&builds); got != 1 {
-		t.Errorf("expected exactly 1 db-section build for N concurrent readers, got %d", got)
+		t.Fatalf("N concurrent readers + a read during the flight must cost exactly 1 db-section build (CAS single-flight, scanDBStatsAsync), got %d", got)
+	}
+
+	releaseOnce()
+	waitUntil(t, 10*time.Second, "the db-section flight to stamp dbStatsAt and release dbStatsScan", func() bool {
+		return c.dbStatsAt.Load() != 0 && !c.dbStatsScan.Load()
+	})
+
+	// (2) Interval dedup: dbStatsAt is fresh, so a further read stays inside
+	// db_stats_interval (0 → the 60s fallback) and must not rebuild.
+	c.Snapshot(context.Background())
+	if got := atomic.LoadInt32(&builds); got != 1 {
+		t.Errorf("a read inside db_stats_interval must not rebuild, got %d builds", got)
 	}
 	if c.dbStats.Load() == nil {
 		t.Errorf("dbStats must be populated after the async build lands")
@@ -363,7 +392,13 @@ func TestStatusDBAsyncCadenceHotInterval(t *testing.T) {
 	}
 
 	c.Snapshot(context.Background())
-	waitForInt32(t, &builds, 1)
+	// Wait for the STAMP, not for the build counter (#30): dbStatsBuild bumps
+	// the counter one step before scanDBStatsAsync stamps dbStatsAt, so a
+	// counter-keyed wait can return while the section still looks stale — and
+	// the very next line asserts that a second read does not rebuild.
+	waitUntil(t, 10*time.Second, "the first db-section build to stamp dbStatsAt", func() bool {
+		return c.dbStatsAt.Load() != 0 && !c.dbStatsScan.Load()
+	})
 
 	// Interval is 1h — an immediate second read must NOT trigger a rebuild.
 	c.Snapshot(context.Background())
@@ -399,14 +434,31 @@ func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 	}
 }
 
+// waitForInt32 waits for a counter to REACH want. Only safe where nothing is
+// asserted about collector state afterwards — a counter bumped inside an async
+// flight moves before that flight has stamped anything (#30); use waitUntil on
+// the stamp itself whenever the next line reads qsAt/dbStatsAt.
 func waitForInt32(t *testing.T, v *int32, want int32) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if atomic.LoadInt32(v) >= want {
+	waitUntil(t, 10*time.Second, fmt.Sprintf("build count >= %d", want), func() bool {
+		return atomic.LoadInt32(v) >= want
+	})
+}
+
+// waitUntil polls cond until it holds or d elapses. The deadline is a deadlock
+// guard, not a timing assumption: it is generous because the integration
+// binary shares one runner with the whole ~700s package (#30, nightly
+// 32211634765 — that runtime is normal, not a load signal).
+func waitUntil(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		if cond() {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s", d, what)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for build count >= %d, got %d", want, atomic.LoadInt32(v))
 }
