@@ -47,7 +47,6 @@ type Options struct {
 	PresencePenalty float64 `json:"presence_penalty,omitempty"`
 	NumPredict      int     `json:"num_predict,omitempty"`
 	NumCtx          int     `json:"num_ctx,omitempty"`
-<<<<<<< HEAD
 	// NumPredictScale multiplies NumPredict once the chain has RESOLVED it —
 	// after a model_map num_predict/max_tokens override, inside
 	// applyModelParams, which is the only point where the effective cap of an
