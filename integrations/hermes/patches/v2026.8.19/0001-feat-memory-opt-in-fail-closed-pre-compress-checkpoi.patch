@@ -1,0 +1,649 @@
+From 3ae5bb3aafe56871699a4bf937ac4325501bba62 Mon Sep 17 00:00:00 2001
+From: Jan-Stefan Janetzky <git@gottz.de>
+Date: Mon, 24 Aug 2026 16:55:11 +0200
+Subject: [PATCH] feat(memory): opt-in fail-closed pre-compress checkpoint
+ contract (API v1)
+
+Context compression is intentionally lossy. Deployments that archive
+transcript evidence to an external durable store before compaction had no
+way to guarantee the archive actually happened: MemoryManager.on_pre_compress
+swallows provider failures by design, so a failed archive silently degraded
+into data loss.
+
+This adds an opt-in, provider-agnostic checkpoint contract:
+
+- memory_provider: PRE_COMPRESS_CHECKPOINT_API_VERSION = 1; providers opt in
+  by advertising pre_compress_checkpoint_api_version. Version 0 keeps the
+  historical best-effort hook semantics.
+- memory_manager: supports_pre_compress_checkpoint() capability probe;
+  on_pre_compress(require_checkpoint=True) propagates checkpoint-provider
+  failures and raises when no capable provider completed the checkpoint.
+- conversation_compression: new compression.checkpoint_required config key
+  (default false). When enabled, compaction fails closed with
+  BLOCKED_MISSING_PREREQUISITE (the uncompressed transcript is preserved)
+  unless a checkpoint-capable provider confirms the durable checkpoint.
+  Providers receive normalized direct user/assistant evidence: tool rows,
+  system messages, tool-call wrappers, and prior compaction summaries are
+  filtered host-side into one stable contract. codex_app_server compaction
+  is rejected under the gate because it exposes no truthful pre-compaction
+  transcript boundary.
+- hermes_state: persistent _compressed_summary column so summary provenance
+  survives process restarts; only the resume model history carries the
+  marker, keeping get_messages_as_conversation on its existing contract.
+- gateway: the lossy hygiene/auto-compact paths load the memory provider
+  (skip_memory=False) so a required checkpoint also guards those rewrites.
+
+The gate arms only on an explicit boolean True (bare-MagicMock agents in
+existing tests have truthy auto-attributes). Default behavior is unchanged:
+checkpoint_required=false preserves best-effort semantics for all existing
+providers. Contract tests in tests/agent/test_pre_compress_checkpoint_contract.py.
+---
+ agent/agent_init.py                           |   4 +
+ agent/conversation_compression.py             |  91 +++++++++-
+ agent/memory_manager.py                       |  49 +++++-
+ agent/memory_provider.py                      |   7 +
+ gateway/run.py                                |   6 +-
+ gateway/slash_commands.py                     |   6 +-
+ hermes_cli/config_defaults.py                 |   3 +
+ hermes_state.py                               |  23 ++-
+ hermes_state_common.py                        |   1 +
+ run_agent.py                                  |   1 +
+ .../test_pre_compress_checkpoint_contract.py  | 158 ++++++++++++++++++
+ 11 files changed, 337 insertions(+), 12 deletions(-)
+ create mode 100644 tests/agent/test_pre_compress_checkpoint_contract.py
+
+diff --git a/agent/agent_init.py b/agent/agent_init.py
+index db92f18487..9a52aa8d46 100644
+--- a/agent/agent_init.py
++++ b/agent/agent_init.py
+@@ -2229,6 +2229,9 @@ def init_agent(
+                 compression_threshold_tokens = None
+         except (TypeError, ValueError):
+             compression_threshold_tokens = None
++    compression_checkpoint_required = is_truthy_value(
++        _compression_cfg.get("checkpoint_required"), default=False
++    )
+     # In-place compaction: when True, compress_context() rewrites the message
+     # list + rebuilds the system prompt WITHOUT rotating the session id (no
+     # parent_session_id chain, no `name #N` renumber). See #38763 and
+@@ -2761,6 +2764,7 @@ def init_agent(
+         _cc._micro_compact_defrag_threshold_tokens = (
+             compression_micro_compact_defrag_tokens
+         )
++    agent.compression_checkpoint_required = compression_checkpoint_required
+     agent.codex_app_server_auto_compaction = codex_app_server_auto_compaction
+     agent.codex_responses_native_compaction = codex_responses_native_compaction
+     agent.codex_responses_compact_threshold = codex_responses_compact_threshold
+diff --git a/agent/conversation_compression.py b/agent/conversation_compression.py
+index a2b2643bf3..5b9194ff28 100644
+--- a/agent/conversation_compression.py
++++ b/agent/conversation_compression.py
+@@ -71,6 +71,7 @@ from agent.context_engine import (
+     automatic_compaction_status_message,
+     sanitize_memory_context,
+ )
++from agent.memory_provider import PRE_COMPRESS_CHECKPOINT_API_VERSION
+ from agent.model_metadata import (
+     estimate_messages_tokens_rough,
+     estimate_request_tokens_rough,
+@@ -1090,6 +1091,16 @@ def run_compress_context_with_progress_timeout(
+             # the host unwinds, so the detached worker can never publish.
+             fence.revoke_commit_admission()
+ 
++class CompressionCheckpointUnavailable(RuntimeError):
++    """Raised when required durable pre-compress checkpointing is unavailable."""
++
++
++def _checkpoint_blocked(reason: str) -> CompressionCheckpointUnavailable:
++    return CompressionCheckpointUnavailable(
++        "BLOCKED_MISSING_PREREQUISITE: required pre-compress checkpoint "
++        f"unavailable: {reason}"
++    )
++
+ 
+ def _lock_api_is_absent_on_session_db(lock_db: Any) -> bool:
+     """Whether the live in-memory SessionDB class structurally predates locks.
+@@ -1519,6 +1530,33 @@ class _CompressionActivityHeartbeat:
+                 return
+             self._touch("context compression in progress")
+ 
++def _direct_messages_for_pre_compress_memory(messages: Any) -> list[dict[str, Any]]:
++    """Return direct user/assistant evidence safe for memory checkpointing.
++
++    Compression summaries are derivative context, not new source evidence. Tool
++    rows, system messages, and assistant tool-call wrappers are likewise omitted
++    so memory providers receive one normalized host contract instead of having
++    to infer Hermes transcript internals independently.
++    """
++    # Deferred import: context_compressor imports turn_context, which imports
++    # this module — a module-level import here would close that cycle
++    # (upstream introduced the turn_context edge with the api_content work).
++    from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY
++
++    direct_messages: list[dict[str, Any]] = []
++    for message in messages or []:
++        if not isinstance(message, dict):
++            continue
++        role = message.get("role")
++        if role not in {"user", "assistant"}:
++            continue
++        if message.get(COMPRESSED_SUMMARY_METADATA_KEY):
++            continue
++        if role == "assistant" and message.get("tool_calls"):
++            continue
++        direct_messages.append(message)
++    return direct_messages
++
+ 
+ class _CompressionLockLeaseRefresher:
+     def __init__(
+@@ -2319,7 +2357,18 @@ def compress_context(
+     # The memory-provider context handoff below is intentionally Hermes-only:
+     # the app server does not expose its native summary prompt, so there is no
+     # truthful injection point for ``on_pre_compress()`` return text here.
++    # `is True` (not bool()): unit tests drive this path with bare MagicMock
++    # agents whose auto-created attributes are truthy; the gate must only arm
++    # on the explicit boolean set by agent_init from config.
++    checkpoint_required = (
++        getattr(agent, "compression_checkpoint_required", False) is True
++    )
+     if getattr(agent, "api_mode", None) == "codex_app_server":
++        if checkpoint_required:
++            raise _checkpoint_blocked(
++                "codex_app_server owns the authoritative thread and does not "
++                "expose a truthful pre-compaction transcript boundary"
++            )
+         _codex_fence_entered = False
+         if commit_fence is not None:
+             _codex_fence_entered = commit_fence.begin_commit(
+@@ -2935,9 +2984,47 @@ def compress_context(
+         # wants surfaced inside the compression summary; capture and forward it
+         # instead of silently discarding the provider's return value.
+         memory_context = ""
+-        if agent._memory_manager:
++        memory_manager = getattr(agent, "_memory_manager", None)
++        direct_messages = _direct_messages_for_pre_compress_memory(messages)
++        if checkpoint_required:
++            supports_checkpoint = getattr(
++                memory_manager, "supports_pre_compress_checkpoint", None
++            )
++            if memory_manager is None or not callable(supports_checkpoint):
++                raise _checkpoint_blocked(
++                    f"no active provider implements checkpoint API "
++                    f"v{PRE_COMPRESS_CHECKPOINT_API_VERSION}"
++                )
+             try:
+-                _maybe_ctx = agent._memory_manager.on_pre_compress(messages)
++                compatible = bool(
++                    supports_checkpoint(PRE_COMPRESS_CHECKPOINT_API_VERSION)
++                )
++            except Exception as exc:
++                raise _checkpoint_blocked("provider capability probe failed") from exc
++            if not compatible:
++                raise _checkpoint_blocked(
++                    f"active provider does not implement checkpoint API "
++                    f"v{PRE_COMPRESS_CHECKPOINT_API_VERSION}"
++                )
++            try:
++                _maybe_ctx = memory_manager.on_pre_compress(
++                    direct_messages,
++                    require_checkpoint=True,
++                    checkpoint_api_version=PRE_COMPRESS_CHECKPOINT_API_VERSION,
++                )
++            except Exception as exc:
++                logger.warning(
++                    "Required pre-compress checkpoint failed (%s)",
++                    type(exc).__name__,
++                )
++                raise _checkpoint_blocked(
++                    f"provider checkpoint API v{PRE_COMPRESS_CHECKPOINT_API_VERSION} failed"
++                ) from exc
++            if isinstance(_maybe_ctx, str):
++                memory_context = sanitize_memory_context(_maybe_ctx)
++        elif memory_manager:
++            try:
++                _maybe_ctx = memory_manager.on_pre_compress(direct_messages)
+                 if isinstance(_maybe_ctx, str):
+                     memory_context = sanitize_memory_context(_maybe_ctx)
+             except Exception:
+diff --git a/agent/memory_manager.py b/agent/memory_manager.py
+index 5b57dd16f4..fdd779cbba 100644
+--- a/agent/memory_manager.py
++++ b/agent/memory_manager.py
+@@ -33,7 +33,7 @@ import threading
+ from concurrent.futures import Future, ThreadPoolExecutor, wait
+ from typing import Any, Callable, Dict, List, Optional
+ 
+-from agent.memory_provider import MemoryProvider
++from agent.memory_provider import MemoryProvider, PRE_COMPRESS_CHECKPOINT_API_VERSION
+ from agent.skill_commands import extract_user_instruction_from_skill_message
+ from tools.registry import tool_error
+ 
+@@ -1021,14 +1021,47 @@ class MemoryManager:
+                     provider.name, e,
+                 )
+ 
+-    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
++    def supports_pre_compress_checkpoint(
++        self,
++        api_version: int = PRE_COMPRESS_CHECKPOINT_API_VERSION,
++    ) -> bool:
++        """Return whether an active provider guarantees checkpoint API support."""
++        for provider in self._providers:
++            try:
++                provider_version = int(
++                    getattr(provider, "pre_compress_checkpoint_api_version", 0)
++                )
++            except (TypeError, ValueError):
++                continue
++            if provider_version >= api_version:
++                return True
++        return False
++
++    def on_pre_compress(
++        self,
++        messages: List[Dict[str, Any]],
++        *,
++        require_checkpoint: bool = False,
++        checkpoint_api_version: int = PRE_COMPRESS_CHECKPOINT_API_VERSION,
++    ) -> str:
+         """Notify all providers before context compression.
+ 
+         Returns combined text from providers to include in the compression
+-        summary prompt. Empty string if no provider contributes.
++        summary prompt. Empty string if no provider contributes. When
++        ``require_checkpoint`` is true, at least one provider advertising the
++        requested checkpoint API must return successfully; its exception is
++        propagated so the caller can preserve the uncompressed transcript.
+         """
+         parts = []
++        checkpoint_succeeded = False
+         for provider in self._providers:
++            try:
++                provider_version = int(
++                    getattr(provider, "pre_compress_checkpoint_api_version", 0)
++                )
++            except (TypeError, ValueError):
++                provider_version = 0
++            is_checkpoint_provider = provider_version >= checkpoint_api_version
+             try:
+                 result = provider.on_pre_compress(messages)
+                 if result and result.strip():
+@@ -1038,6 +1071,16 @@ class MemoryManager:
+                     "Memory provider '%s' on_pre_compress failed: %s",
+                     provider.name, e,
+                 )
++                if require_checkpoint and is_checkpoint_provider:
++                    raise
++            else:
++                if is_checkpoint_provider:
++                    checkpoint_succeeded = True
++        if require_checkpoint and not checkpoint_succeeded:
++            raise RuntimeError(
++                "No active memory provider completed pre-compress checkpoint "
++                f"API v{checkpoint_api_version}"
++            )
+         return "\n\n".join(parts)
+ 
+     @staticmethod
+diff --git a/agent/memory_provider.py b/agent/memory_provider.py
+index 317ad73d5a..5f6fdd0b9b 100644
+--- a/agent/memory_provider.py
++++ b/agent/memory_provider.py
+@@ -41,6 +41,8 @@ from typing import Any, Dict, List, Optional
+ 
+ logger = logging.getLogger(__name__)
+ 
++PRE_COMPRESS_CHECKPOINT_API_VERSION = 1
++
+ # Default glyph for the deterministic memory indicators. Providers override
+ # per-status with their own brand mark (e.g. Hindsight uses "👁️").
+ INDICATOR_GLYPH = "🧠"
+@@ -104,6 +106,11 @@ def is_trivial_prompt(text: Optional[str]) -> bool:
+ class MemoryProvider(ABC):
+     """Abstract base class for memory providers."""
+ 
++    # Providers that durably checkpoint every successful on_pre_compress()
++    # call may opt into this host contract by setting the current version.
++    # Version 0 preserves the historical best-effort hook semantics.
++    pre_compress_checkpoint_api_version = 0
++
+     @property
+     @abstractmethod
+     def name(self) -> str:
+diff --git a/gateway/run.py b/gateway/run.py
+index 84604b303b..8b07f454d2 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -19484,7 +19484,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+                                     model=_hyg_model,
+                                     max_iterations=4,
+                                     quiet_mode=True,
+-                                    skip_memory=True,
++                                    # Hygiene performs the same lossy rewrite
++                                    # as normal compression.  Keep the memory
++                                    # provider active so a required checkpoint
++                                    # is created before any transcript mutation.
++                                    skip_memory=False,
+                                     enabled_toolsets=["memory"],
+                                     session_id=session_entry.session_id,
+                                     session_db=_hyg_session_db,
+diff --git a/gateway/slash_commands.py b/gateway/slash_commands.py
+index cd54164bd0..b71ff577cf 100644
+--- a/gateway/slash_commands.py
++++ b/gateway/slash_commands.py
+@@ -4322,7 +4322,11 @@ class GatewaySlashCommandsMixin:
+                 model=model,
+                 max_iterations=4,
+                 quiet_mode=True,
+-                skip_memory=True,
++                # This agent performs a lossy rewrite.  When
++                # compression.checkpoint_required is enabled it must load the
++                # configured memory provider so _compress_context() can create
++                # the required pre-compression checkpoint.
++                skip_memory=False,
+                 enabled_toolsets=["memory"],
+                 session_id=session_entry.session_id,
+                 session_db=getattr(self._session_db, "_db", self._session_db),
+diff --git a/hermes_cli/config_defaults.py b/hermes_cli/config_defaults.py
+index cf3769c0c7..e5eff14c25 100644
+--- a/hermes_cli/config_defaults.py
++++ b/hermes_cli/config_defaults.py
+@@ -721,6 +721,9 @@ DEFAULT_CONFIG = {
+ 
+     "compression": {
+         "enabled": True,
++        "checkpoint_required": False, # Fail closed before lossy compaction unless an
++                                      # active memory provider confirms checkpoint API
++                                      # compatibility and completes the checkpoint.
+         "progress_notices": False,    # opt-in (#52995): when True, routine compression
+                                       # progress statuses (compacting/preflight/pre-API/
+                                       # idle/retry) are delivered to chat gateway
+diff --git a/hermes_state.py b/hermes_state.py
+index 9fdc820035..f6b0d0284d 100644
+--- a/hermes_state.py
++++ b/hermes_state.py
+@@ -9282,6 +9282,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+         platform_message_id: str = None,
+         observed: bool = False,
+         effect_disposition: Optional[str] = None,
++        _compressed_summary: bool = False,
+         timestamp: Any = None,
+         api_content: Optional[str] = None,
+         display_kind: Optional[str] = None,
+@@ -9357,8 +9358,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+                 """INSERT INTO messages (session_id, role, content, tool_call_id,
+                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
+                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
+-                   codex_message_items, platform_message_id, observed, active, api_content, display_kind, display_metadata)
+-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
++                   codex_message_items, platform_message_id, observed, _compressed_summary, active, api_content, display_kind, display_metadata)
++                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 (
+                     session_id,
+                     role,
+@@ -9377,6 +9378,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+                     codex_message_items_json,
+                     platform_message_id,
+                     1 if observed else 0,
++                    1 if _compressed_summary else 0,
+                     1,
+                     _scrub_surrogates(api_content) if isinstance(api_content, str) else None,
+                     _scrub_surrogates(display_kind) if isinstance(display_kind, str) else None,
+@@ -9788,8 +9790,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+                 """INSERT INTO messages (session_id, role, content, tool_call_id,
+                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
+                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
+-                   codex_message_items, platform_message_id, observed, active, api_content, display_kind, display_metadata)
+-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
++                   codex_message_items, platform_message_id, observed, _compressed_summary, active, api_content, display_kind, display_metadata)
++                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 (
+                     session_id,
+                     role,
+@@ -9808,6 +9810,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+                     codex_message_items_json,
+                     platform_msg_id,
+                     1 if msg.get("observed") else 0,
++                    1 if msg.get("_compressed_summary") else 0,
+                     1,
+                     _scrub_surrogates(api_content) if isinstance(api_content, str) else None,
+                     _scrub_surrogates(msg.get("display_kind")) if isinstance(msg.get("display_kind"), str) else None,
+@@ -10252,6 +10255,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+         result = []
+         for row in rows:
+             msg = dict(row)
++            if msg.pop("_compressed_summary", 0):
++                msg["_compressed_summary"] = True
+             if "content" in msg:
+                 msg["content"] = self._decode_content(msg["content"])
+             if msg.get("tool_calls"):
+@@ -10526,7 +10531,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+     _CONVERSATION_ROW_COLUMNS = (
+         "id, role, content, tool_call_id, tool_calls, tool_name, effect_disposition, "
+         "finish_reason, reasoning, reasoning_content, reasoning_details, "
+-        "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp, "
++        "codex_reasoning_items, codex_message_items, platform_message_id, observed, "
++        "_compressed_summary, timestamp, "
+         "api_content, display_kind, display_metadata"
+     )
+ 
+@@ -10538,6 +10544,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+         include_ancestors: bool,
+         repair_alternation: bool,
+         include_row_ids: bool = False,
++        include_summary_markers: bool = False,
+     ) -> List[Dict[str, Any]]:
+         """Decode fetched message rows into the OpenAI conversation format.
+ 
+@@ -10574,6 +10581,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+                 decoded = self._decode_display_metadata(row["display_metadata"])
+                 if decoded is not None:
+                     msg["display_metadata"] = decoded
++            if include_summary_markers and row["_compressed_summary"]:
++                msg["_compressed_summary"] = True
+             if row["timestamp"]:
+                 msg["timestamp"] = row["timestamp"]
+             if row["tool_call_id"]:
+@@ -10710,6 +10719,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
+             include_ancestors=False,
+             repair_alternation=True,
+             include_row_ids=True,
++            # ctx-checkpoint: the resumed model history must keep the summary
++            # marker so pre-compress checkpointing can exclude derivative
++            # summaries after a process restart (marker survives restart).
++            include_summary_markers=True,
+         )
+         display_history = self._rows_to_conversation(
+             rows,
+diff --git a/hermes_state_common.py b/hermes_state_common.py
+index 58b3744859..267e825a50 100644
+--- a/hermes_state_common.py
++++ b/hermes_state_common.py
+@@ -336,6 +336,7 @@ CREATE TABLE IF NOT EXISTS messages (
+     codex_message_items TEXT,
+     platform_message_id TEXT,
+     observed INTEGER DEFAULT 0,
++    _compressed_summary INTEGER NOT NULL DEFAULT 0,
+     active INTEGER NOT NULL DEFAULT 1,
+     compacted INTEGER NOT NULL DEFAULT 0,
+     api_content TEXT,
+diff --git a/run_agent.py b/run_agent.py
+index 6237738141..59da535d2f 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -2343,6 +2343,7 @@ class AIAgent:
+                     "reasoning_details": msg.get("reasoning_details"),
+                     "codex_reasoning_items": msg.get("codex_reasoning_items"),
+                     "codex_message_items": msg.get("codex_message_items"),
++                    "_compressed_summary": bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)),
+                     "timestamp": _row_timestamp,
+                     "api_content": _row_api_content,
+                     # Standalone reference handoffs are always hidden, even
+diff --git a/tests/agent/test_pre_compress_checkpoint_contract.py b/tests/agent/test_pre_compress_checkpoint_contract.py
+new file mode 100644
+index 0000000000..89e9fea14d
+--- /dev/null
++++ b/tests/agent/test_pre_compress_checkpoint_contract.py
+@@ -0,0 +1,158 @@
++"""Host-side contract tests for the opt-in pre-compress checkpoint API (v1).
++
++The contract has three parts:
++- providers opt in by advertising ``pre_compress_checkpoint_api_version``;
++- ``MemoryManager`` exposes capability probing and a ``require_checkpoint``
++  mode whose failure must propagate instead of being swallowed;
++- the compression host normalizes messages to direct user/assistant evidence
++  before handing them to providers.
++"""
++
++import pytest
++
++from agent.conversation_compression import (
++    CompressionCheckpointUnavailable,
++    _checkpoint_blocked,
++    _direct_messages_for_pre_compress_memory,
++)
++from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY
++from agent.memory_manager import MemoryManager
++from agent.memory_provider import (
++    PRE_COMPRESS_CHECKPOINT_API_VERSION,
++    MemoryProvider,
++)
++
++
++class _BaseStubProvider(MemoryProvider):
++    def __init__(self, name="stub"):
++        self._name = name
++        self.pre_compress_calls = []
++
++    @property
++    def name(self):
++        return self._name
++
++    def is_available(self):
++        return True
++
++    def initialize(self, session_id, **kwargs):
++        return None
++
++    def get_tool_schemas(self):
++        return []
++
++    def on_pre_compress(self, messages):
++        self.pre_compress_calls.append(messages)
++        return f"{self._name} context"
++
++
++class _CheckpointProvider(_BaseStubProvider):
++    pre_compress_checkpoint_api_version = PRE_COMPRESS_CHECKPOINT_API_VERSION
++
++
++class _FailingCheckpointProvider(_CheckpointProvider):
++    def on_pre_compress(self, messages):
++        raise RuntimeError("durable store unreachable")
++
++
++class _FailingLegacyProvider(_BaseStubProvider):
++    def on_pre_compress(self, messages):
++        raise RuntimeError("legacy best-effort failure")
++
++
++def test_provider_base_class_defaults_to_best_effort_api_version_zero():
++    assert MemoryProvider.pre_compress_checkpoint_api_version == 0
++
++
++def test_direct_messages_filter_keeps_only_direct_source_evidence():
++    messages = [
++        {"role": "system", "content": "system prompt"},
++        {"role": "user", "content": "durable user decision"},
++        {"role": "assistant", "content": "direct assistant answer"},
++        {"role": "assistant", "content": "call", "tool_calls": [{"id": "t1"}]},
++        {"role": "tool", "content": "tool output", "tool_call_id": "t1"},
++        {
++            "role": "assistant",
++            "content": "previous compaction summary",
++            COMPRESSED_SUMMARY_METADATA_KEY: True,
++        },
++        "not-a-dict",
++    ]
++
++    direct = _direct_messages_for_pre_compress_memory(messages)
++
++    assert [m["content"] for m in direct] == [
++        "durable user decision",
++        "direct assistant answer",
++    ]
++
++
++def test_manager_advertises_checkpoint_capability_only_with_capable_provider():
++    # The host allows one external provider per manager, so capability is
++    # probed on two separate managers.
++    legacy_manager = MemoryManager()
++    legacy_manager.add_provider(_BaseStubProvider("legacy"))
++    assert legacy_manager.supports_pre_compress_checkpoint(
++        PRE_COMPRESS_CHECKPOINT_API_VERSION
++    ) is False
++
++    durable_manager = MemoryManager()
++    durable_manager.add_provider(_CheckpointProvider("durable"))
++    assert durable_manager.supports_pre_compress_checkpoint(
++        PRE_COMPRESS_CHECKPOINT_API_VERSION
++    ) is True
++
++
++def test_manager_require_checkpoint_raises_without_capable_provider():
++    manager = MemoryManager()
++    manager.add_provider(_BaseStubProvider("legacy"))
++
++    with pytest.raises(RuntimeError, match="pre-compress checkpoint"):
++        manager.on_pre_compress(
++            [{"role": "user", "content": "evidence"}],
++            require_checkpoint=True,
++            checkpoint_api_version=PRE_COMPRESS_CHECKPOINT_API_VERSION,
++        )
++
++
++def test_manager_require_checkpoint_propagates_checkpoint_provider_failure():
++    manager = MemoryManager()
++    manager.add_provider(_FailingCheckpointProvider("durable"))
++
++    with pytest.raises(RuntimeError, match="durable store unreachable"):
++        manager.on_pre_compress(
++            [{"role": "user", "content": "evidence"}],
++            require_checkpoint=True,
++            checkpoint_api_version=PRE_COMPRESS_CHECKPOINT_API_VERSION,
++        )
++
++
++def test_manager_require_checkpoint_succeeds_and_returns_provider_context():
++    manager = MemoryManager()
++    durable = _CheckpointProvider("durable")
++    manager.add_provider(durable)
++
++    combined = manager.on_pre_compress(
++        [{"role": "user", "content": "evidence"}],
++        require_checkpoint=True,
++        checkpoint_api_version=PRE_COMPRESS_CHECKPOINT_API_VERSION,
++    )
++
++    assert "durable context" in combined
++    assert durable.pre_compress_calls
++
++
++def test_manager_best_effort_mode_keeps_historical_swallow_semantics():
++    manager = MemoryManager()
++    manager.add_provider(_FailingLegacyProvider("legacy"))
++
++    combined = manager.on_pre_compress([{"role": "user", "content": "evidence"}])
++
++    assert combined == ""
++
++
++def test_checkpoint_blocked_error_is_prefixed_and_typed():
++    error = _checkpoint_blocked("no active provider")
++    assert isinstance(error, CompressionCheckpointUnavailable)
++    assert str(error).startswith("BLOCKED_MISSING_PREREQUISITE:")
++    assert "no active provider" in str(error)
+-- 
+2.54.0
+

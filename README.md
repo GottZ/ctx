@@ -109,6 +109,7 @@ Using a shared memory *well* takes discipline against drift — see [using ctx e
 | [Operations](docs/operations.md) | Setup, environment variables, boot validation, backups, deploy & migrations |
 | [Development](docs/development.md) | Building, the Svelte web UI, tests, visual baseline governance, git hooks |
 | [Using ctx effectively](docs/using-ctx-effectively.md) | Memory drift, agent discipline, RLHF calibration |
+| [Hermes integration](integrations/hermes/README.md) | `ctx_checkpoint` memory provider for [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) — durable, fail-closed pre-compaction checkpoints |
 
 ## Built with AI agents
 
