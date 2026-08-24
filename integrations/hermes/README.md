@@ -24,12 +24,22 @@ key/value + bearer-token pass) before anything leaves the process.
 
 | Mode | Host | Guarantee |
 |------|------|-----------|
-| best-effort | stock Hermes | checkpoint is attempted before compaction; a failure is logged and compaction proceeds (upstream hook semantics) |
-| **fail-closed** | patched Hermes (see `patches/`) | compaction is **blocked** unless a checkpoint-capable provider confirms the durable checkpoint; the uncompressed transcript is preserved |
+| **best-effort** (start here) | stock Hermes | checkpoint is attempted before compaction; a failure is logged and compaction proceeds (upstream hook semantics) |
+| fail-closed | host with the checkpoint contract | compaction is **blocked** unless a checkpoint-capable provider confirms the durable checkpoint; the uncompressed transcript is preserved |
 
-The fail-closed gate is the point of this integration: a memory system you
-only *hope* ran is not a memory system. The patch series adds an opt-in,
-provider-agnostic checkpoint contract (API v1) to the Hermes core:
+The plugin is a plain Hermes **user plugin** — install it into
+`$HERMES_HOME/plugins/` on a completely stock Hermes and it works today in
+best-effort mode (since upstream v2026.8.18, provider text is forwarded into
+the compaction summary).
+
+The fail-closed gate is what makes it a real guarantee: a memory system you
+only *hope* ran is not a memory system. The host-side contract is **proposed
+upstream** — issue
+[NousResearch/hermes-agent#93986](https://github.com/NousResearch/hermes-agent/issues/93986),
+PR [NousResearch/hermes-agent#93996](https://github.com/NousResearch/hermes-agent/pull/93996).
+Once merged, fail-closed mode needs no patches at all. Until then, `patches/`
+carries the same change as a reviewed patch series per pinned upstream
+release. The contract is opt-in and provider-agnostic (API v1):
 
 - `MemoryProvider.pre_compress_checkpoint_api_version` — provider opt-in
 - `MemoryManager.supports_pre_compress_checkpoint()` + strict
@@ -69,7 +79,7 @@ Activate with `memory.provider: ctx_checkpoint`. The provider talks to ctx
 through Hermes' own MCP dispatch, so any ctx reachable as an MCP server works
 — no extra credentials inside the plugin.
 
-## Fail-closed host (patch series + image build)
+## Fail-closed host (until #93996 is merged: patch series + image build)
 
 `patches/<upstream-tag>/` carries one reviewed patch per pinned upstream
 release, plus SHA-256 manifests of the touched files **before**
