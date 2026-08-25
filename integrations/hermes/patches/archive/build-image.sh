@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# ARCHIVED — the checkpoint contract is upstream since 2026-08-25 (merged as
+# NousResearch/hermes-agent#94639, tip `1ee524f77d`). A host at or after that
+# commit needs no patches; do not run this against such a source tree. Kept
+# only to reconstruct or audit hosts pinned to v2026.8.19 or earlier. See
+# README.md next to this file.
+#
 # Build a Hermes image with the fail-closed pre-compress checkpoint contract.
 #
 # Reproducible: clones the pinned upstream tag, verifies the baseline SHA-256
@@ -19,7 +25,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_ROOT="${SCRIPT_DIR}/../patches"
+PATCH_ROOT="${SCRIPT_DIR}"
 REPO="https://github.com/NousResearch/hermes-agent.git"
 TAG=""
 SRC=""
@@ -35,7 +41,7 @@ while [ $# -gt 0 ]; do
         --workdir)      WORKDIR="$2"; shift 2 ;;
         --image)        IMAGE="$2"; shift 2 ;;
         --skip-build)   SKIP_BUILD=1; shift ;;
-        -h|--help)      sed -n '2,18p' "$0"; exit 0 ;;
+        -h|--help)      sed -n '2,24p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done

@@ -24,8 +24,8 @@ key/value + bearer-token pass) before anything leaves the process.
 
 | Mode | Host | Guarantee |
 |------|------|-----------|
-| **best-effort** (start here) | stock Hermes | checkpoint is attempted before compaction; a failure is logged and compaction proceeds (upstream hook semantics) |
-| fail-closed | host with the checkpoint contract | compaction is **blocked** unless a checkpoint-capable provider confirms the durable checkpoint; the uncompressed transcript is preserved |
+| **best-effort** (start here) | any Hermes | checkpoint is attempted before compaction; a failure is logged and compaction proceeds (historical hook semantics, contract version 1) |
+| fail-closed | Hermes carrying the checkpoint contract (version 2) | compaction is **blocked** unless a checkpoint-capable provider confirms the durable checkpoint; the uncompressed transcript is preserved |
 
 The plugin is a plain Hermes **user plugin** — install it into
 `$HERMES_HOME/plugins/` on a completely stock Hermes and it works today in
@@ -33,25 +33,34 @@ best-effort mode (since upstream v2026.8.18, provider text is forwarded into
 the compaction summary).
 
 The fail-closed gate is what makes it a real guarantee: a memory system you
-only *hope* ran is not a memory system. The host-side contract is **proposed
-upstream** — issue
-[NousResearch/hermes-agent#93986](https://github.com/NousResearch/hermes-agent/issues/93986),
-PR [NousResearch/hermes-agent#93996](https://github.com/NousResearch/hermes-agent/pull/93996).
-Once merged, fail-closed mode needs no patches at all. Until then, `patches/`
-carries the same change as a reviewed patch series per pinned upstream
-release. The contract is opt-in and provider-agnostic (API v1):
+only *hope* ran is not a memory system. The host-side contract is **upstream**
+— issue
+[NousResearch/hermes-agent#93986](https://github.com/NousResearch/hermes-agent/issues/93986)
+→ PR
+[#93996](https://github.com/NousResearch/hermes-agent/pull/93996)
+→ merged 2026-08-25 as
+[#94639](https://github.com/NousResearch/hermes-agent/pull/94639)
+(tip commit `1ee524f77d1c84a6ee1ae58341e633d8a9b6ef1d`). Fail-closed mode
+needs no patches on a host that carries the merge.
 
-- `MemoryProvider.pre_compress_checkpoint_api_version` — provider opt-in
+Upstream numbered the contract while merging: **v1 is the implicit historical
+best-effort behaviour every provider is already on, v2 is the opt-in
+fail-closed checkpoint contract.** It stays opt-in and provider-agnostic:
+
+- `PRE_COMPRESS_CHECKPOINT_API_VERSION = 2` in `agent/memory_provider.py`;
+  providers opt in via `MemoryProvider.pre_compress_checkpoint_api_version`
+  (class default stays `1`)
 - `MemoryManager.supports_pre_compress_checkpoint()` + strict
   `on_pre_compress(require_checkpoint=True)` (failures propagate)
 - `compression.checkpoint_required` config gate (default `false`) — fails
   closed with `BLOCKED_MISSING_PREREQUISITE` before any lossy rewrite,
-  including the gateway hygiene/auto-compact paths
+  including the gateway hygiene/auto-compact paths and post-turn
+  micro-compaction (`agent/turn_finalizer.py`)
 - a persistent `_compressed_summary` message marker so derivative summaries
   stay excluded from checkpoints across process restarts
 
-Everything is default-off: an unpatched config behaves exactly like stock
-Hermes, and the patched core without this plugin behaves like stock Hermes.
+Everything is default-off: an untouched config behaves exactly like stock
+Hermes, and the contract without this plugin behaves like stock Hermes.
 
 ## Install (plugin, both modes)
 
@@ -79,35 +88,43 @@ Activate with `memory.provider: ctx_checkpoint`. The provider talks to ctx
 through Hermes' own MCP dispatch, so any ctx reachable as an MCP server works
 — no extra credentials inside the plugin.
 
-## Fail-closed host (until #93996 is merged: patch series + image build)
+## Fail-closed host (stock Hermes, no patches)
 
-`patches/<upstream-tag>/` carries one reviewed patch per pinned upstream
-release, plus SHA-256 manifests of the touched files **before**
-(`baseline.sha256`) and **after** (`patched.sha256`) patching. The build
-script refuses to patch a source state it does not recognize — never patch
-blind over an unknown Hermes version.
+Any Hermes carrying the merge already has the contract: any release cut after
+2026-08-25, or `main` at/after `1ee524f77d`. Since the last tag before the
+merge is `v2026.8.19`, that currently means running from `main` until the next
+release is cut.
+
+Probe the host you are about to enable the gate on:
 
 ```bash
-scripts/build-image.sh --upstream-tag v2026.8.19            # clone, verify, patch, build
-scripts/build-image.sh --upstream-tag v2026.8.19 --skip-build   # patched tree only
+grep -n "PRE_COMPRESS_CHECKPOINT_API_VERSION" agent/memory_provider.py
+# ...:PRE_COMPRESS_CHECKPOINT_API_VERSION = 2   ← fail-closed capable
+# no match, or = 1                              ← best-effort only
 ```
 
-Then enable the gate:
+`scripts/install.sh --hermes-src <hermes-checkout>` runs the same probe and
+reports the resulting mode. Then enable the gate:
 
 ```yaml
 compression:
   checkpoint_required: true
 ```
 
-> **Warning:** on a stock host this key is silently ignored — compaction
+> **Warning:** on a host older than the merge — anything without that
+> constant, or reporting version 1 — this key is silently ignored. Compaction
 > keeps running without a guaranteed checkpoint while the config suggests
-> otherwise. Enable it only on a host built from the patch series (probe:
-> `grep PRE_COMPRESS_CHECKPOINT_API_VERSION agent/memory_provider.py`).
+> otherwise. Enable it only when the probe reports v2 or higher.
 
-Contract tests ship on both sides: host-side in the patch
-(`tests/agent/test_pre_compress_checkpoint_contract.py`, 8 tests) and
-provider-side in `plugin/ctx_checkpoint/tests/test_provider_contract.py`
-(6 tests, mocked MCP dispatch — no live ctx needed).
+Contract tests ship on both sides: host-side upstream in
+`tests/agent/test_pre_compress_checkpoint_contract.py` (17 tests on `main`)
+and provider-side here in
+`plugin/ctx_checkpoint/tests/test_provider_contract.py` (6 tests, mocked MCP
+dispatch — no live ctx needed).
+
+The pre-merge patch series that used to supply the contract is retired and
+kept for history under `patches/archive/` — see its README before touching
+anything in there.
 
 ## Recall path
 
@@ -131,17 +148,20 @@ and manifest are deliberately small so routine recall stays cheap.
   transcript.
 - No LLM in the critical path — the checkpoint is deterministic and fast,
   and cannot be taken down by a slow or failing summarizer model.
-- The scripts never deploy: building an image, switching a container, and
-  editing configs are deliberate operator steps.
+- The installer never deploys: editing configs, switching a container, and
+  restarting Hermes are deliberate operator steps.
 
 ## Versions
 
-- Plugin: see `plugin/ctx_checkpoint/VERSION` (currently 0.4.0, live-proven).
-- Patch series: one directory per supported upstream tag under `patches/`.
+- Plugin: see `plugin/ctx_checkpoint/VERSION`.
+- Host contract: `PRE_COMPRESS_CHECKPOINT_API_VERSION` in the Hermes host —
+  v2 is fail-closed, v1 is historical best-effort.
+- Retired patch series: `patches/archive/`, last entry `v2026.8.19`.
 
 ## Licensing
 
-The plugin and scripts are part of ctx (MPL-2.0). The patch series modifies
+The plugin and scripts are part of ctx (MPL-2.0). The archived patch series
+under `patches/archive/` modifies
 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
-(MIT); the patches carry unmodified context lines from that codebase and are
-intended for upstreaming.
+(MIT); those patches carry unmodified context lines from that codebase and
+have been upstreamed.

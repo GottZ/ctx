@@ -12,7 +12,10 @@
 #   --hermes-home PATH  Hermes home (default: $HERMES_HOME, then /opt/data if
 #                       it holds a config.yaml, then ~/.hermes)
 #   --hermes-src PATH   Hermes source checkout/installation to probe for the
-#                       fail-closed checkpoint contract (optional)
+#                       fail-closed checkpoint contract (optional). Reports
+#                       the host's PRE_COMPRESS_CHECKPOINT_API_VERSION; v2 or
+#                       higher is fail-closed capable, v1 is the historical
+#                       best-effort hook.
 #   --dry-run           Show what would happen without writing anything
 
 set -euo pipefail
@@ -28,7 +31,7 @@ while [ $# -gt 0 ]; do
         --hermes-home) HERMES_HOME_ARG="$2"; shift 2 ;;
         --hermes-src)  HERMES_SRC="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=1; shift ;;
-        -h|--help)     sed -n '2,17p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '2,19p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -73,13 +76,27 @@ fi
 # ---------------------------------------------------------------------------
 # Host capability probe: does this Hermes know the fail-closed contract?
 # ---------------------------------------------------------------------------
+#
+# The contract is versioned: v1 is the implicit historical best-effort hook
+# every provider is already on, v2 is the opt-in fail-closed checkpoint
+# contract (upstream since 2026-08-25, merged as NousResearch/hermes-agent
+# #94639). Only v2 or higher can honour compression.checkpoint_required.
 MODE="unknown (no --hermes-src given)"
 if [ -n "$HERMES_SRC" ]; then
-    if grep -q "PRE_COMPRESS_CHECKPOINT_API_VERSION" \
-        "${HERMES_SRC}/agent/memory_provider.py" 2>/dev/null; then
-        MODE="fail-closed capable (checkpoint contract present)"
+    PROVIDER_PY="${HERMES_SRC}/agent/memory_provider.py"
+    HOST_API=""
+    if [ -f "$PROVIDER_PY" ]; then
+        HOST_API="$(sed -n \
+            's/^[[:space:]]*PRE_COMPRESS_CHECKPOINT_API_VERSION[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+            "$PROVIDER_PY")"
+        HOST_API="${HOST_API%%$'\n'*}"   # first match only
+    fi
+    if [ -z "$HOST_API" ]; then
+        MODE="stock host older than the upstream merge (best-effort only)"
+    elif [ "$HOST_API" -ge 2 ]; then
+        MODE="fail-closed capable (checkpoint contract v${HOST_API})"
     else
-        MODE="stock host (best-effort only)"
+        MODE="NOT fail-closed capable (checkpoint contract v${HOST_API}, needs v2+)"
     fi
 fi
 echo "Host mode:      ${MODE}"
@@ -102,10 +119,12 @@ Next steps (manual, operator-owned):
          chunk_chars: 36000               # source part size (1k..40k)
          sensitivity: internal            # ctx sensitivity for stored blocks
 
-3. Fail-closed gate — ONLY on a patched host (see ../patches/):
+3. Fail-closed gate — ONLY on a host carrying the upstream checkpoint
+   contract (API v2; any Hermes release cut after 2026-08-25, or main
+   at/after 1ee524f77d):
      compression:
        checkpoint_required: true
-   WARNING: on a stock (unpatched) Hermes this key is silently ignored.
+   WARNING: on a Hermes older than that merge this key is silently ignored.
    Compaction then keeps running WITHOUT a guaranteed checkpoint even
    though the config suggests otherwise. Enable it only when the host
    probe above reports "fail-closed capable".
