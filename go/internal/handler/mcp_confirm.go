@@ -54,11 +54,13 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		ttl = snap.Writes.ConfirmTTL
 	}
 
-	// The MCP store tool carries no scope field (decision D4) — the
-	// storeRequest mapping leaves it empty: scope resolves to home_scope
-	// (scopeExplicit=false at execute time). The type IS a field since N-26
-	// and is validated HERE, before staging: a card must never promise a
-	// write the confirm cannot execute.
+	// Scope and type both ride into the gates here, and for the same reason: a
+	// card must never promise a write the confirm cannot execute. The scope
+	// was ALREADY refused in mcpStoreHandler if it lies outside
+	// writableBlockScopes (E-M4 — the gate runs ahead of the stage branch, so
+	// no card exists for a foreign scope); running it again through the chain
+	// is what puts the RESOLVED scope into res.WriteScope, which the canonical
+	// payload below binds and the confirm re-validates (D1-M1).
 	res, rej := runStageWriteGates(ctx, cfg.Pool, set, ar, storeRequest{
 		Category:    input.Category,
 		Title:       input.Title,
@@ -67,6 +69,7 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		Metadata:    input.Metadata,
 		Sensitivity: input.Sensitivity,
 		Type:        input.Type,
+		Scope:       input.Scope,
 	}, defaultSens, rateLimit, reqID)
 	if rej != nil {
 		return errResultReject(rej), nil, nil

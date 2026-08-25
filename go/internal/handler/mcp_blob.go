@@ -71,11 +71,14 @@ type blobStoreInput struct {
 	// transport for nothing.
 	File string `json:"file,omitempty" jsonschema:"payload as base64 (use this for binary data)"`
 	Text string `json:"text,omitempty" jsonschema:"payload as UTF-8 text (alternative to file; exactly one of the two)"`
-	// NO scope field — decision D4, the same line the block `store` tool
-	// holds: an MCP writer writes its key's home scope, and a foreign-scope
-	// MCP write is a decision about the write surface, not a property of this
-	// wave. The shared core keeps its Scope parameter (REST fills it); this
-	// arm passes the empty string, which resolves to ar.HomeScope.
+	// Scope, since E-M4 (2026-08-25) — which SUPERSEDES decision D4, the line
+	// this field's absence used to hold together with the block `store` tool.
+	// D4 kept the MCP transport home-scope-only while REST /api/blob/store
+	// took an explicit scope, i.e. one principal got two authorisation answers
+	// for one scope depending on which transport it used. The field adds no
+	// authority: the shared core gates it through resolveWriteScope (the block
+	// write gate verbatim), and empty still resolves to ar.HomeScope.
+	Scope    string         `json:"scope,omitempty" jsonschema:"optional target scope; default = the key's home scope; must be a scope the key may write"`
 	Tags     []string       `json:"tags,omitempty" jsonschema:"optional tags for filtering"`
 	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"optional metadata object"`
 	// The blob-to-block edge, optional in phase 1 (W02-10). A writer that
@@ -84,9 +87,12 @@ type blobStoreInput struct {
 	ContextBlockID string `json:"context_block_id,omitempty" jsonschema:"optional UUID of the context block this payload belongs to (phase 2 blob_link sets it later)"`
 }
 
-// blobLinkInput is phase 2 (W02-10): both fields required, no scope field
-// (decision D4, as for blob_store) — the blob's own scope decides, and it is
-// the caller's key that has to be able to write it.
+// blobLinkInput is phase 2 (W02-10): both fields required, and no scope field
+// even after E-M4 gave blob_store one. Not an oversight and not the old D4
+// line either: this call ADDRESSES an existing blob by id, so the scope is
+// already decided — it is the blob's own — and a `scope` argument could only
+// contradict it. What the caller needs is the right to write THAT scope, which
+// store.UpdateBlobBlockRef enforces through writableBlockScopes.
 type blobLinkInput struct {
 	ID             string `json:"id" jsonschema:"UUID of the blob to link (blob_store returned it)"`
 	ContextBlockID string `json:"context_block_id" jsonschema:"UUID of the context block this blob belongs to"`
@@ -107,7 +113,7 @@ type blobFetchInput struct {
 func registerBlobTools(server *mcp.Server, cfg MCPConfig) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "blob_store",
-		Description: "Store a binary or text payload as a blob. Upserts on (category, title, scope). Runs the same gates as POST /api/blob/store; a key with the confirm_writes capability gets the call STAGED instead of executed.",
+		Description: "Store a binary or text payload as a blob. Upserts on (category, title, scope); writes the key's home scope unless an explicit scope the key may write is given. Runs the same gates as POST /api/blob/store; a key with the confirm_writes capability gets the call STAGED instead of executed.",
 	}, mcpBlobStoreHandler(cfg))
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -152,14 +158,17 @@ func mcpBlobStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobStoreInput, any] 
 			return errResultReject(rej), nil, nil
 		}
 
-		// Scope stays EMPTY (D4): the core resolves it to ar.HomeScope, which
-		// is byte-identical to what the block store tool writes. The field is
-		// absent from the tool, so there is nothing here to pass through.
+		// Scope goes through untouched (E-M4): empty resolves to ar.HomeScope
+		// in the core, a named one is gated there by resolveWriteScope — the
+		// same function REST /api/blob/store runs, ahead of the budget. This
+		// handler decides nothing about it; deciding here is how the two
+		// transports would drift apart again.
 		in := blobWriteInput{
 			Category: input.Category,
 			Title:    input.Title,
 			Filename: input.Filename,
 			MimeType: input.MimeType,
+			Scope:    input.Scope,
 			Data:     data,
 			Tags:     input.Tags,
 			Metadata: input.Metadata,

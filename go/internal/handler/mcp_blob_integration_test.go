@@ -7,10 +7,14 @@
 // below was vacuously red. What the probes actually pin is that the new
 // surface did not get its OWN copies of the four mechanisms:
 //
-//	a HomeScopeOnly       — an MCP blob write lands in ar.HomeScope even when
-//	                        the key holds further write scopes (decision D4:
-//	                        MCP write tools carry no scope field), while the
-//	                        REST route keeps its explicit-scope gate
+//	a HomeScopeOnly       — an MCP blob write WITHOUT a scope field lands in
+//	                        ar.HomeScope even when the key holds further write
+//	                        scopes, while the REST route keeps its
+//	                        explicit-scope gate. (W02-8 wrote this as "the tool
+//	                        has no scope field at all", decision D4; E-M4 gave
+//	                        it an optional one, and the probe kept its value as
+//	                        the DEFAULT pin — the explicit-scope arm lives in
+//	                        mcp_write_scope_integration_test.go)
 //	b StagingParity       — a confirm_writes key gets a payload_hash, not an id;
 //	                        confirm executes the server-held write; a payload
 //	                        over pool.blob_stage_max_bytes is REFUSED by name
@@ -163,18 +167,19 @@ func TestMCPBlobTools(t *testing.T) {
 	}
 
 	t.Run("a_HomeScopeOnly", func(t *testing.T) {
-		// Decision D4: an MCP write tool carries no scope field, so a blob
-		// written over MCP lands in the key's HOME scope — even for a key that
-		// demonstrably holds a second write scope. The probe holds both halves
-		// together, because the interesting failure is the silent one: a tool
-		// that grew a scope field, or a core that resolved an empty scope to
-		// something other than home_scope, would still store a blob and only
-		// the scope column would say where.
+		// A blob_store call that names NO scope lands in the key's HOME scope
+		// — even for a key that demonstrably holds a second write scope. The
+		// probe holds both halves together, because the interesting failure is
+		// the silent one: a core that resolved an empty scope to something
+		// other than home_scope would still store a blob, and only the scope
+		// column would say where.
 		//
-		// What this subtest does NOT claim: that a foreign scope is REFUSED
-		// over MCP. Without the field there is nothing to refuse — the
-		// explicit-scope gate is the REST route's, and blob_write_scope_
-		// integration_test.go is its belege (a/b/c/d there).
+		// Written under decision D4 (the tool had no scope field at all), it
+		// survives E-M4 unchanged as the DEFAULT pin: the field is optional,
+		// and its absence must keep resolving byte-identically to this. The
+		// explicit-scope arm and the scope_denied verdict are probed in
+		// mcp_write_scope_integration_test.go; the REST-side belege stay in
+		// blob_write_scope_integration_test.go (a/b/c/d there).
 		//
 		// The one-path claim of this wave is carried structurally instead:
 		// both surfaces run blobWriteGate/executeBlobWrite (blob_core.go), and
@@ -198,7 +203,7 @@ func TestMCPBlobTools(t *testing.T) {
 			t.Fatalf("read stored scope: %v", err)
 		}
 		if scope != "w28a" {
-			t.Errorf("MCP blob write landed in scope %q, want the home scope w28a — the tool carries no scope field (D4)", scope)
+			t.Errorf("MCP blob write landed in scope %q, want the home scope w28a — a call that names no scope resolves to it (E-M4 default)", scope)
 		}
 
 		// The key really does hold w28b as a write scope: the REST route,

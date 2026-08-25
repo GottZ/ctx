@@ -109,17 +109,12 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 
 	// Scope validation: the write scope must be one the key may write — its
 	// home_scope or 'shared' if allowed (writableBlockScopes, the same gate as
-	// manage update/delete).
-	writeScope := authResult.HomeScope
-	scopeExplicit := false
-	if req.Scope != "" {
-		scopeExplicit = true
-		if contains(writableBlockScopes(authResult), req.Scope) {
-			writeScope = req.Scope
-		} else {
-			writeJSONReject(w, classScopeDenied.reject("Cannot write to requested scope"))
-			return
-		}
+	// manage update/delete). Since E-M4 the rule lives in resolveWriteScope,
+	// shared verbatim with the stage gates and the blob write core.
+	writeScope, scopeExplicit, scopeRej := resolveWriteScope(authResult, req.Scope)
+	if scopeRej != nil {
+		writeJSONReject(w, scopeRej)
+		return
 	}
 
 	// Rate limit check (writes/min, 0 = disabled). MT 06-C5: the limit now
@@ -315,6 +310,35 @@ func writableBlockScopes(ar *auth.AuthResult) []string {
 		}
 	}
 	return scopes
+}
+
+// resolveWriteScope is the ONE evaluation of the write-scope gate on top of
+// that set: an absent (empty) request scope resolves to the key's home scope,
+// a NAMED one has to lie in writableBlockScopes(ar) or the write is refused
+// with the single scope_denied verdict.
+//
+// It became a function on 2026-08-25 (E-M4), when the MCP `store` and
+// `blob_store` tools grew an optional `scope` of their own. Until then the
+// rule was spelled out inline at three sites (REST /api/store, the stage
+// gates, blobWriteGate) — and a fourth and fifth surface reaching the gate is
+// exactly the moment a copied formula starts to drift. The blob surface
+// already paid that bill once (Gap-C0-c, wave B3: a second, narrower formula
+// refused every blob write to a scope whose BLOCKS the same key could write),
+// so the formula now has one name and one call site per surface.
+//
+// explicit reports whether the caller NAMED the scope — it is what
+// store.UpsertBlock takes as scopeExplicit. The function is PURE: a surface
+// that has to know the resolved scope before the gate chain runs (the MCP
+// store tool's scoped hash-NOOP check) may call it twice without risking a
+// second, disagreeing verdict.
+func resolveWriteScope(ar *auth.AuthResult, requested string) (scope string, explicit bool, rej *writeReject) {
+	if requested == "" {
+		return ar.HomeScope, false, nil
+	}
+	if !contains(writableBlockScopes(ar), requested) {
+		return "", false, classScopeDenied.reject("Cannot write to requested scope")
+	}
+	return requested, true, nil
 }
 
 // writeJSON writes a JSON response with the given status code.

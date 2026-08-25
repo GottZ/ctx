@@ -422,10 +422,11 @@ func TestMCPStoreGateChain(t *testing.T) {
 	})
 
 	t.Run("g_ScopeGolden", func(t *testing.T) {
-		// GREEN pre-fix and after: the MCP store tool carries NO scope field
-		// (decision D4), so the block lands in the key's home_scope with
-		// scopeExplicit=false — routing the arm through runStageWriteGates must
-		// not move a single byte of that.
+		// GREEN pre-fix and after: a store call that names NO scope lands in
+		// the key's home_scope with scopeExplicit=false — routing the arm
+		// through runStageWriteGates must not move a single byte of that.
+		// (Written under decision D4, when the tool had no scope field at all;
+		// E-M4 made the field optional and this stayed the DEFAULT pin.)
 		_, privCtx, privAR := mkKey("gc-g-private", "private", nil, false)
 		if privAR.HomeScope != "private" {
 			t.Fatalf("fixture: home scope = %q, want private", privAR.HomeScope)

@@ -144,23 +144,22 @@ func blobTextPayload(text string) ([]byte, *writeReject) {
 // blobWriteGate is step 3: the scope gate, then the write budget.
 //
 // The ORDER is the mechanism, not a preference. The scope gate resolves
-// through writableBlockScopes — the SINGLE eval point of the write gate
-// (078/E4b), shared verbatim with the block write path, which is what keeps
-// the blob surface from re-deriving its own narrower formula (Gap-C0-c). It
-// stays AHEAD of the budget so a scope the key may not write is refused
-// before any budget is booked: spraying foreign scopes must not drain a
-// legitimate key's quota.
+// through resolveWriteScope → writableBlockScopes — the SINGLE eval point of
+// the write gate (078/E4b), shared verbatim with the block write path, which
+// is what keeps the blob surface from re-deriving its own narrower formula
+// (Gap-C0-c). It stays AHEAD of the budget so a scope the key may not write is
+// refused before any budget is booked: spraying foreign scopes must not drain
+// a legitimate key's quota. Since E-M4 (2026-08-25) BOTH transports fill
+// in.Scope — the MCP blob_store tool has an optional `scope` field of its own
+// — so this ordering guarantee now protects the MCP surface too.
 //
 // The returned logID is the booked intent's audit row — the caller attributes
 // the stored blob to it (direct path) or leaves it unattributed (staged path,
 // where no blob exists yet).
 func blobWriteGate(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, ar *auth.AuthResult, in blobWriteInput, reqID string) (writeScope, logID string, rej *writeReject) {
-	writeScope = ar.HomeScope
-	if in.Scope != "" {
-		if !contains(writableBlockScopes(ar), in.Scope) {
-			return "", "", classScopeDenied.reject("Cannot write to requested scope")
-		}
-		writeScope = in.Scope
+	writeScope, _, rej = resolveWriteScope(ar, in.Scope)
+	if rej != nil {
+		return "", "", rej
 	}
 
 	logID, rej = meterBlobWrite(ctx, pool, cfg, ar, reqID)

@@ -8,12 +8,16 @@
 // update STAGED (op 'update') with a TOCTOU pin (D1-M3): the block's
 // updated_at at stage time is hash-bound (CanonicalWrite.BaseUpdatedAt), and
 // the confirm rejects — without consuming the token — when the block changed
-// in between. Like the store tool (decision D4) the update tool carries NO
-// scope field, and no sensitivity field either: those stay REST-only (their
-// guard flows — downgrade confirm — live there). The type axis parted ways
-// with them in N-26: the store tool takes an explicit `type` (registry-
-// validated, manual provenance), the update tool still does not — re-typing
-// an existing block runs through REST manage-update.
+// in between. The update tool carries NO scope field and no sensitivity
+// field: those stay REST-only, because on an EXISTING block both are guard
+// flows — a scope move sweeps the link tables (GD5/K8), a sensitivity
+// downgrade needs the confirm — and neither is a property of the write this
+// tool performs. E-M4 (2026-08-25) gave the store and blob_store tools an
+// optional `scope`, and deliberately not this one: there the field NAMES where
+// a new row goes, here it would MOVE an existing one. The type axis parted
+// ways in N-26 for the same shape of reason: the store tool takes an explicit
+// `type` (registry-validated, manual provenance), the update tool does not —
+// re-typing an existing block runs through REST manage-update.
 package handler
 
 import (

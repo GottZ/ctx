@@ -166,9 +166,16 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	}
 
 	// op 'store': execute over the SAME path as the direct store tools
-	// (upsert + classify + temporal). scopeExplicit=false mirrors the staging
-	// surfaces (no scope input; cw.Scope is the resolved home_scope from
-	// stage time, re-validated above).
+	// (upsert + classify + temporal). cw.Scope is the scope the stage gates
+	// RESOLVED — the key's home scope, or, since E-M4, the explicit scope the
+	// staging call named and passed the gate with — re-validated above against
+	// the key's current rights.
+	//
+	// scopeExplicit stays false, and E-M4 does not change that: the flag only
+	// adds `scope = EXCLUDED.scope` to the ON CONFLICT UPDATE, whose conflict
+	// target is (category, title, scope) — the conflicting row therefore
+	// already carries this scope, and the assignment can move nothing. A
+	// staged write lands in cw.Scope either way.
 	sens := store.SensitivityWrite{
 		Value:    backends.Sensitivity(cw.Sensitivity),
 		Manual:   cw.SensitivityManual,

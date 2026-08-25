@@ -80,16 +80,12 @@ func runStageWriteGates(
 	metadata := req.Metadata
 	sens, metadata = applyWriteDetector(req.Content, reqID, sens, metadata)
 
-	// Scope gate: same formula as every block write site.
-	writeScope := ar.HomeScope
-	scopeExplicit := false
-	if req.Scope != "" {
-		scopeExplicit = true
-		if contains(writableBlockScopes(ar), req.Scope) {
-			writeScope = req.Scope
-		} else {
-			return nil, classScopeDenied.reject("Cannot write to requested scope")
-		}
+	// Scope gate: same formula as every block write site — literally the same
+	// function since E-M4 (resolveWriteScope), which is what lets the MCP
+	// store tool's own `scope` field reach REST's verdict without a copy.
+	writeScope, scopeExplicit, scopeRej := resolveWriteScope(ar, req.Scope)
+	if scopeRej != nil {
+		return nil, scopeRej
 	}
 
 	// Write rate limit (0 = disabled). Staging COUNTS as write intent: an LLM

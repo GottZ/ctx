@@ -86,6 +86,17 @@ type storeInput struct {
 	// gate chain (unknown name ⇒ rejected, fail-closed) — an MCP writer now
 	// reaches the same axis REST /api/store has taken since WF T10.
 	Type string `json:"type,omitempty" jsonschema:"explicit block type name from the registry (e.g. reference, checkpoint); omit to let the title classifier decide"`
+	// E-M4 (2026-08-25) SUPERSEDES decision D4, which kept the MCP write tools
+	// scope-free: an MCP writer always wrote its key's home scope, while the
+	// same key over REST /api/store could name any scope its rights covered.
+	// That was one principal with two authorisation answers for one scope, and
+	// the narrower one silently attached to the transport an agent actually
+	// uses. The field carries no new authority — it is gated by
+	// resolveWriteScope, the same function REST runs, so a scope outside
+	// writableBlockScopes is scope_denied here exactly as it is there, and an
+	// absent/empty value resolves to ar.HomeScope byte-identically to the
+	// pre-E-M4 behaviour.
+	Scope string `json:"scope,omitempty" jsonschema:"optional target scope; default = the key's home scope; must be a scope the key may write"`
 }
 
 type searchInput struct {
@@ -126,7 +137,7 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// store
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "store",
-		Description: "Save or update a knowledge block. Upserts on (category, title, scope).",
+		Description: "Save or update a knowledge block. Upserts on (category, title, scope). Writes the key's home scope unless an explicit scope the key may write is given.",
 	}, mcpStoreHandler(cfg))
 
 	// search
@@ -248,7 +259,24 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		if ar == nil { // T07/L7 fail-closed (design/01 §5.4): never fall back to the default tenant
 			return classUnauthorized.errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
-		scope := ar.HomeScope
+		// The scope gate, ahead of the NOOP check (E-M4). Both halves of that
+		// placement are load-bearing:
+		//
+		//   - the NOOP check is scoped, so it has to run against the scope
+		//     this call would WRITE. Resolving it afterwards would ask the
+		//     home scope whether a write to a foreign scope is a no-op, and
+		//     answer "No change needed" for a block that does not exist
+		//     where the caller asked for it. REST has always ordered it this
+		//     way (context_store.go: scope gate, then HashNOOPCheck).
+		//   - a refusal here also precedes the D-W5 stage branch, so a
+		//     flagged key never gets a CARD for a scope it may not write.
+		//
+		// The gate chain below evaluates the same function again; it is pure,
+		// so the second evaluation cannot disagree with this one.
+		scope, _, scopeRej := resolveWriteScope(ar, input.Scope)
+		if scopeRej != nil {
+			return errResultReject(scopeRej), nil, nil
+		}
 
 		// Hash NOOP check. Runs BEFORE the D-W5 stage branch on purpose: an
 		// identical-content call is a no-op for flagged keys too — no card
@@ -298,12 +326,13 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		// Running the chain closes that split by construction — a gate added to
 		// the chain now reaches all three surfaces at once.
 		//
-		// The MCP store tool carries no scope field (decision D4), so the
-		// storeRequest mapping leaves Scope empty: WriteScope resolves to the
+		// Scope IS a field since E-M4 (superseding D4): empty resolves to the
 		// home scope with ScopeExplicit=false — byte-identical to the value this
-		// handler passed before. The type IS a field since N-26: empty keeps the
-		// auto-classify behaviour, a named type is validated by the chain
-		// (validateTypeNameAgainstSet) and written as manual provenance.
+		// handler passed before — and a named scope runs the chain's scope gate,
+		// which is resolveWriteScope, the same one REST /api/store runs. The
+		// type IS a field since N-26: empty keeps the auto-classify behaviour, a
+		// named type is validated by the chain (validateTypeNameAgainstSet) and
+		// written as manual provenance.
 		//
 		// res is threaded into the upsert (sensitivity, detector metadata,
 		// scope): the gates must DECIDE the write, not merely veto it. The chain
@@ -316,6 +345,7 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			Metadata:    input.Metadata,
 			Sensitivity: input.Sensitivity,
 			Type:        input.Type,
+			Scope:       input.Scope,
 		}, defaultSens, rateLimit, RequestIDFromContext(ctx))
 		if rej != nil {
 			return errResultReject(rej), nil, nil
