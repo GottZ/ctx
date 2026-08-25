@@ -94,6 +94,13 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 		EmbedMigration: config.EmbedMigrationConfig{
 			BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour,
 		},
+		// A03-W03-3: the distiller group's sizing keys carry fatal floors
+		// (V25), the same class as the two back-off bases above — a zero-value
+		// group is exactly the "renders as a configured size, acts as an
+		// off-switch" shape Validate rejects. Taken WHOLE from the registry
+		// instead of field by field, so a key added to the group needs no edit
+		// here. Not wire-active in these tests: distill.enabled stays false.
+		Distill: config.Defaults().Distill,
 		Query: config.QueryConfig{
 			ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: "v5.2",
 		},

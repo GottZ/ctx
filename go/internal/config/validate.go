@@ -7,8 +7,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/promptguard"
 )
+
+// sharedScope is the one scope name V22 refuses for distill.scope. A literal
+// here rather than store.GlobalScope's neighbour constant: config is
+// parameter-pure and imports no storage layer, and the name is a wire value of
+// the tenancy model, not of a package.
+const sharedScope = "shared"
 
 // Prompt versions accepted by V5. Mirrors llm.PromptVersionV52/V6 — kept as
 // literals here because the layering rule forbids importing config from llm
@@ -61,6 +69,167 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
+	issues = append(issues, validateDistill(c)...)       // V22, V23, V24, V25
+	return issues
+}
+
+// validateDistill holds the four cross-field invariants of the distiller group
+// (design/03 §5.4, §5.5, §6.4; wave A03-W03-3). All four are fatal: boot drops
+// the offending override, a settings PUT is a 422 — the class every "renders as
+// configured, acts as something else" knob in this file gets.
+//
+// The group has no consumer yet. That is deliberate and it is exactly why the
+// checks come WITH the keys rather than after them: the arm that will read
+// distill.scope writes foreign content into a scope, and a validation added
+// later would have to be added against an already-configurable key.
+//
+// Field stays the canonical registry key for all four — build.go's
+// dropOffenders attributes a failing override by Field, and an unattributable
+// error withdraws ALL DB overrides of that generation instead of the offender.
+func validateDistill(c *Config) []Issue {
+	var issues []Issue
+	d := &c.Distill
+
+	// V22 — distill.scope may never be "shared". Normalized in place first
+	// (trim + lower, the V14/V20 pattern), because a check that " Shared "
+	// walks past is not a fail-closed check.
+	//
+	// EMPTY stays legal and is the default: it is the inheritance path
+	// (effectiveHomeScope over scheduler.home_scope), the same path every other
+	// arm takes. Any other scope name is the operator's business — the arm
+	// writes there and nowhere else.
+	//
+	// Why "shared" specifically: in this one case it would be a propagation
+	// path for FOREIGN content across the tenant border. The arm's material is
+	// a single operator's agent transcript, and shared is the one scope where
+	// that material would reach readers it was never collected for.
+	//
+	// This key is only half the guard, and the design is explicit that it must
+	// be: it validates what is EXPLICITLY set, never what is INHERITED. The
+	// runtime half — the inherited path resolving to shared — is gate 5 of the
+	// arm (skipped/scope_forbidden), which belongs to the wave that builds the
+	// arm. Neither half covers the other's case.
+	d.Scope = strings.ToLower(strings.TrimSpace(d.Scope))
+	if d.Scope == sharedScope {
+		issues = append(issues, Issue{Field: "distill.scope", Severity: SeverityError,
+			Msg: fmt.Sprintf("distill.scope %q is refused: the distiller writes FOREIGN transcript content, and %q would carry it across the tenant border — leave it empty to inherit scheduler.home_scope, or name a scope of this operator",
+				sharedScope, sharedScope)})
+	}
+
+	// V23 — distill.block_sensitivity floor. The type parser already rejects
+	// anything outside the four defined levels, so what is left here is the
+	// FLOOR: "internal" (rank 1). "public" (rank 0) is a 422.
+	//
+	// The value is the ONLY lever over the block's life cycle (§5.5): embed
+	// backfill, dream, digest and query synthesis each derive their required
+	// backend trust from the block's sensitivity, and none of them sets
+	// LocalOnly. A public insight block full of raw tool output would be
+	// eligible for every backend the pool has.
+	//
+	// The floor does NOT claim to close every external path — the design says
+	// plainly that no sensitivity value excludes both live external rows, and
+	// the remaining one is a documented exception on the arm's egress gate.
+	// What the floor does is remove the value that would open all of them.
+	if r := d.BlockSensitivity.Rank(); r < backends.SensInternal.Rank() {
+		issues = append(issues, Issue{Field: "distill.block_sensitivity", Severity: SeverityError,
+			Msg: fmt.Sprintf("distill.block_sensitivity %q is below the %q floor — insight blocks carry raw foreign tool output, and every later consumer (embed backfill, dream, digest, synthesis) derives which backends may see a block from this value alone",
+				d.BlockSensitivity, backends.SensInternal)})
+	}
+
+	issues = append(issues, validateDistillBudget(d)...) // V24
+	issues = append(issues, validateDistillCounters(d)...)
+	return issues
+}
+
+// validateDistillBudget is V24: the prompt-budget coupling. One distill batch
+// is rows_per_call rows at max_row_runes each plus the nonce-bound rule, and
+// that product must fit promptguard.BudgetDistill.
+//
+// The same arithmetic runs in TestDistillDefaultsFitPromptBudget against the
+// registry DEFAULTS — on THIS side of the layering border, because promptguard
+// may not import config and hand-copied numbers would assert nothing (the note
+// on promptguard.BudgetDistill carries the reasoning). Both halves are needed
+// and neither is redundant: the static gate catches a raised default at
+// `go test`, this check catches a raised OVERRIDE at boot / on the settings
+// write — a live install can outgrow a budget its compiled defaults still fit,
+// and the symptom would be a prompt the assembler silently cuts instead of a
+// refused write.
+//
+// Config validating against the CONSUMER's constant, never a second copy of it,
+// is the same relation V16c has to dream.KeywordsTimeout. promptguard imports
+// nothing from this package, so the direction is free of a cycle.
+//
+// int64 on purpose: the product of two operator-supplied ints is the one place
+// in this file where an overflow could turn a refusal into an accept.
+func validateDistillBudget(d *DistillConfig) []Issue {
+	if d.RowsPerCall < 1 || d.MaxRowRunes < 1 {
+		return nil // the range check below owns this shape; no product to take
+	}
+	worst := int64(d.RowsPerCall)*int64(d.MaxRowRunes) + int64(promptguard.RuleReserve)
+	if worst <= int64(promptguard.BudgetDistill) {
+		return nil
+	}
+	return []Issue{{Field: "distill.rows_per_call", Severity: SeverityError,
+		Msg: fmt.Sprintf("distill.rows_per_call %d x distill.max_row_runes %d + rule reserve %d = %d runes exceeds the %d-rune distill prompt budget — lower either key, or raise promptguard.BudgetDistill AND re-check it against the smallest context window the digest role's chain can resolve to",
+			d.RowsPerCall, d.MaxRowRunes, promptguard.RuleReserve, worst, promptguard.BudgetDistill)}}
+}
+
+// validateDistillCounters is V25: the range half of the group — the counted
+// keys, since the generic V17 walk is typed and visits duration keys only.
+//
+// Two readings of zero, deliberately kept apart:
+//
+//   - spend_max_calls 0 is the DOCUMENTED kill switch (guard off, effective
+//     from the next tick because the snapshot is re-read per iteration), and
+//     the retention pairs' 0 is the recall_check no-op ("keep forever"). Those
+//     stay legal; only their negatives are refused, on the house grounds that a
+//     negative renders as a configured number while acting as the off-switch.
+//   - the sizing keys have NO safe zero. rows_per_call 0 or max_row_runes 0
+//     means no batch can ever be built, rows_per_read 0 means every read
+//     returns nothing, max_sessions_per_run 0 means no source is ever
+//     considered, max_block_runes 0 means every written block is empty. Each of
+//     them is a silent second off-switch next to distill.enabled — one that the
+//     settings surface renders as a configured size.
+//
+// breaker_failures is the one whose floor is not obvious: 0 would open the
+// circuit breaker at zero failures, i.e. permanently, before the arm has ever
+// tried. That is not "breaker off", it is "arm off with a misleading name", so
+// the floor is 1 — one failure, one open.
+func validateDistillCounters(d *DistillConfig) []Issue {
+	var issues []Issue
+	for _, k := range []struct {
+		key  string
+		val  int
+		min  int
+		note string
+	}{
+		{"distill.rows_per_call", d.RowsPerCall, 1, "no batch could ever be assembled"},
+		{"distill.max_row_runes", d.MaxRowRunes, 1, "every selected row would be cut to nothing"},
+		{"distill.rows_per_read", d.RowsPerRead, 1, "every read of the source would return nothing"},
+		{"distill.max_sessions_per_run", d.MaxSessionsPerRun, 1, "no source would ever be considered"},
+		{"distill.max_block_runes", d.MaxBlockRunes, 1, "every written block would be empty"},
+		{"distill.breaker_failures", d.BreakerFailures, 1, "the breaker would stand open before the first attempt"},
+		{"distill.min_row_runes", d.MinRowRunes, 0, "a negative substance threshold has no reading"},
+		{"distill.initial_backfill_rows", d.InitialBackfillRows, 0, "0 is the documented cold start at the head of the source"},
+		{"distill.spend_max_calls", d.SpendMaxCalls, 0, "0 is the documented kill switch that disables the guard"},
+		{"distill.retention_days", d.RetentionDays, 0, "0 is the documented no-op that keeps rows forever"},
+		{"distill.seen_retention_days", d.SeenRetentionDays, 0, "0 is the documented no-op that keeps hashes forever"},
+	} {
+		if k.val < k.min {
+			issues = append(issues, Issue{Field: k.key, Severity: SeverityError,
+				Msg: fmt.Sprintf("%s %d must be >= %d — %s, and the settings surface would still render it as a configured value",
+					k.key, k.val, k.min, k.note)})
+		}
+	}
+
+	// The journal's source identity must have a name. An empty label collapses
+	// every source into a source_key that starts with ":", so two different
+	// state.db files would share one watermark series — a silent data merge,
+	// not a cosmetic default.
+	if strings.TrimSpace(d.SourceLabel) == "" {
+		issues = append(issues, Issue{Field: "distill.source_label", Severity: SeverityError,
+			Msg: "distill.source_label must not be empty — it is the stable half of the journal's source key, and an empty label would merge the watermark series of every configured source into one"})
+	}
 	return issues
 }
 

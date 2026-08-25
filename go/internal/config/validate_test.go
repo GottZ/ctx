@@ -347,13 +347,15 @@ func TestV17bIsAdvisoryOnly(t *testing.T) {
 
 // wantDurationKeys is the number of typDuration keys in the registry, counted
 // at the basis stand (38, dream.cycle_timeout and graph_overview.label_timeout
-// included). It is a DRIFT GUARD,
+// included) plus the six the distiller group added in A03-W03-3
+// (distill.interval, session_quiet_for, call_timeout, spend_window,
+// spend_backoff, breaker_cooldown). It is a DRIFT GUARD,
 // not a fact worth asserting for its own sake: V17 is a generic walk, so a
 // duration key added later is covered automatically — but a key that silently
 // changes TYPE (seconds → int, or a struct field that stops being a
 // time.Duration) would leave the walk without anyone noticing. Raise this
 // number in the same commit that adds a duration key.
-const wantDurationKeys = 38
+const wantDurationKeys = 44
 
 // TestValidateRejectsNegativeOnEveryDurationKey is the registry-wide form of
 // V17 (issue #29): before it, exactly two of the seconds keys had a sign check

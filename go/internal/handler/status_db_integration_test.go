@@ -435,6 +435,11 @@ func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 		// registry defaults, not wire-active here.
 		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		EmbedMigration: config.EmbedMigrationConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
+		// A03-W03-3: same class as the two lines above — the distiller group's
+		// sizing keys carry fatal floors (V25), so a zero-valued group fails
+		// the whole-config re-validation Replace runs. Taken WHOLE from the
+		// registry so a key added to the group needs no edit here.
+		Distill: config.Defaults().Distill,
 	}
 }
 

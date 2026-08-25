@@ -9,6 +9,11 @@
 // promptguard. `package promptguard_test` is what makes that legal — a gate
 // that had to hand-copy the numbers would assert nothing.
 //
+// The same rule is why BudgetDistill (A03-W03-3) is guarded on the CONFIG side
+// instead of here: its two item constants are settings keys, internal/config
+// may not be imported from this package (F1 layering, enforced by depguard),
+// and hand-copied numbers would assert nothing. See the note above the table.
+//
 // The daily report is the one pipeline whose volume is NOT expressible in
 // exported constants: three of its sections carry no SQL LIMIT at all. That
 // half of the gate reads the source file, exactly like the H11 call-site test
@@ -57,10 +62,23 @@ type budgetCase struct {
 	budget   int
 }
 
-// pipelines are the five prompt paths that carry foreign text. The two
-// pipelines with no foreign text at all (query-translate, query-temporal —
-// the caller's own query only) are absent by the same reasoning that keeps
-// them out of the H11 call-site guard list.
+// pipelines are the prompt paths that carry foreign text AND express their
+// volume in Go constants. The two pipelines with no foreign text at all
+// (query-translate, query-temporal — the caller's own query only) are absent by
+// the same reasoning that keeps them out of the H11 call-site guard list.
+//
+// distill-insights (BudgetDistill, A03-W03-3) is absent for a different reason,
+// and it is a layering statement rather than an omission: its item cap and item
+// count are CONFIG KEYS (distill.max_row_runes x distill.rows_per_call), and the
+// F1 layering rule forbids internal/config from being imported here — hard, via
+// depguard, external test package included. Hand-copied numbers would assert
+// nothing, which is this file's own doctrine, so the gate lives on the other
+// side of the border instead: config.TestDistillDefaultsFitPromptBudget runs
+// exactly this arithmetic against the registry DEFAULTS, and V24
+// (config.validateDistill) runs it against a live OVERRIDE — the half no
+// compile-time gate on either side can see. Both read promptguard.BudgetDistill
+// and promptguard.RuleReserve directly; the direction config -> promptguard is
+// the allowed one.
 func foreignTextPipelines() []budgetCase {
 	return []budgetCase{
 		{
@@ -90,6 +108,8 @@ func foreignTextPipelines() []budgetCase {
 			items:    1, // exactly ONE block per audit question
 			budget:   promptguard.BudgetClassifyAudit,
 		},
+		// distill-insights is ABSENT from this table on purpose, and its budget
+		// is guarded no less closely for it — see the note above the table.
 	}
 }
 

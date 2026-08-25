@@ -103,6 +103,13 @@ func w023Config(enabled bool) *config.Config {
 		// registry defaults, not wire-active here.
 		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		EmbedMigration: config.EmbedMigrationConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
+		// A03-W03-3: the distiller group has fatal floors on its sizing keys
+		// (V25), so a zero-valued group fails Validate the same way
+		// graph.hop_depth and the two back-off bases above do. Taken WHOLE from
+		// the registry rather than spelled out field by field — a hand-copied
+		// subset would need an edit for every key the group gains, which is the
+		// maintenance this fixture keeps re-learning.
+		Distill: config.Defaults().Distill,
 		Selector: config.SelectorConfig{
 			Enabled:        enabled,
 			ExactMax:       w023ExactMax,

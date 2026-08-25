@@ -54,6 +54,29 @@ const (
 	// its sections carry no SQL LIMIT and are bounded only by their vocabulary
 	// (see TestDailyReportUnlimitedSectionCount).
 	BudgetDailyReport = 12000
+	// BudgetDistill is distill-insights: distill.rows_per_call rows at
+	// distill.max_row_runes each, plus the code-generated wrapper markup.
+	//
+	// The one budget whose item cap and item count are CONFIG values, not Go
+	// constants — and therefore the one whose gate does NOT live next to the
+	// others in budget_gate_test.go: the F1 layering rule forbids importing
+	// internal/config from this package, external test package included. Both
+	// halves of the guard sit on the config side instead, reading this constant
+	// and RuleReserve from here: TestDistillDefaultsFitPromptBudget covers the
+	// compiled defaults, V24 (config/validate.go) refuses a settings write that
+	// would outgrow this number.
+	//
+	// Derived, not set. 24 000 runes ≈ 13 333 prompt tokens at the pessimistic
+	// 9/5 ratio above; at the default cap (4 000) and batch size (5) the
+	// payload is 20 000 runes and the rest is rule + wrapper markup. Why not
+	// larger, when the serving row offers a 262 144-token window: this is a
+	// BACKGROUND, BATCHED pipeline, so its budget decides the CALL COUNT per
+	// generation — and the call count, not the prompt size, is what the spend
+	// guard watches. A bigger budget would lower the count but raise the
+	// prefill time of each call, i.e. lengthen exactly the decode occupancy the
+	// arm's quiet-gate exists to avoid. Small, frequent, interruptible calls
+	// are the right grain for a background arm.
+	BudgetDistill = 24000
 )
 
 // Reserves the budget gate charges for the two non-item parts of a prompt.

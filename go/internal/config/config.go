@@ -117,6 +117,7 @@ type Config struct {
 	EmbedMigration EmbedMigrationConfig
 	RecallCheck    RecallCheckConfig
 	Selector       SelectorConfig
+	Distill        DistillConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -1563,6 +1564,262 @@ type SelectorConfig struct {
 	GreyMax        int           `key:"retrieval.selector.grey_max" env:"CTX_RETRIEVAL_SELECTOR_GREY_MAX" default:"65536" mut:"hot" tenancy:"global-only"`
 	GreyScanTuples int           `key:"retrieval.selector.grey_scan_tuples" env:"CTX_RETRIEVAL_SELECTOR_GREY_SCAN_TUPLES" default:"60000" mut:"hot" tenancy:"global-only"`
 	StatsTTL       time.Duration `key:"retrieval.selector.stats_ttl" env:"CTX_RETRIEVAL_SELECTOR_STATS_TTL" default:"60" mut:"hot" tenancy:"global-only"`
+}
+
+// DistillConfig is the ctxd distiller arm (Achse A03, design/03): a scheduler
+// arm that reads a FOREIGN, read-only SQLite state.db of an agent runtime,
+// selects archived tool output from it and distills it into insight blocks.
+//
+// THIS GROUP HAS NO CONSUMER YET (wave W03-3). It is the policy half of the
+// doctrine the design states in §4: mechanism = code, policy = data. Every
+// number that can change with operation — cadence, budgets, thresholds, path,
+// category, scope — is a key here; every number that can only change with a
+// code change — the prompt rune budget, the quote minimum — is a constant with
+// a test (promptguard.BudgetDistill).
+//
+// EVERY key is tenancy:"global-only", and the reason is stronger than the
+// registry's fail-closed default (§5.4): a state.db is a SINGLE artifact of a
+// SINGLE operator. Running the arm over the tenant iteration would write the
+// same foreign content into several scopes. The arm does not iterate tenants,
+// so no key here has a per-tenant reading.
+//
+// Mutability follows the arm's structure, which the design copies from
+// recall_check (§4.2, "Struktur exakt nach recall_check.go"): the snapshot is
+// re-read once per iteration, so every gate, budget and threshold is
+// mut:"hot" — including the master switch, exactly as recall_check.enabled is.
+// Enabled is NOT restart-class despite dream.enabled being the source of its
+// DEFAULT (false, §4.2 gate 0): dream's arm decides at process start whether
+// to run, this arm evaluates gate 0 per tick and books a skip_reason for it,
+// and a restart-class master switch would make that gate unreachable code.
+//
+// The default is OFF, and that is a load-bearing default, not caution: a
+// vanilla ctx install has no agent runtime next to it, and E03-1 requires that
+// ctx stays complete without one. A default-on arm would accumulate a journal
+// of "source unreachable" on every install that never asked for a distiller.
+type DistillConfig struct {
+	// Enabled is gate 0 (§4.2). A disabled arm writes NO journal row at all —
+	// only a debug log — which is what keeps a vanilla install's journal empty.
+	Enabled bool `key:"distill.enabled" env:"CTX_DISTILL_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+
+	// ── Source identity ────────────────────────────────────────────────────
+	//
+	// SourcePath is the read-only state.db the arm opens per tick (gate 1).
+	// EMPTY is the default and means "no source configured": nothing to open,
+	// the arm stays inert. That empty default is the second half of the
+	// default-off posture — an install that flips distill.enabled without
+	// naming a path still cannot reach a foreign file.
+	//
+	// The path is NOT part of the journal's source identity (SourceLabel is,
+	// below): a path in a data row would be an infrastructure statement in a
+	// data row, and a mount change would silently tear the watermark
+	// derivation apart (design §3.1).
+	SourcePath string `key:"distill.source_path" env:"CTX_DISTILL_SOURCE_PATH" default:"" mut:"hot" tenancy:"global-only"`
+	// SourceLabel is the stable half of the journal's source_key
+	// ("<label>:<session_id>", §3.1) and therefore of the DERIVED watermark.
+	// Changing it renames every source: the new key has no journal history, so
+	// the arm restarts that source at initial_backfill_rows. That consequence
+	// is on the key's description, because it is the operator-visible half.
+	SourceLabel string `key:"distill.source_label" env:"CTX_DISTILL_SOURCE_LABEL" default:"hermes" mut:"hot" tenancy:"global-only"`
+
+	// ── Cadence and gates (§4.2) ───────────────────────────────────────────
+	//
+	// Interval is the tick cadence in SECONDS (house convention:
+	// parseDurationSeconds, unitless seconds). 15 min, and deliberately NOT
+	// anchored to a wall clock the way runDailySynthesis (03:00) and
+	// runRecallCheck (offpeak_hour) are: compaction is event-driven, and a
+	// night window would mean the insights of a working session reach the
+	// corpus the next morning — after the context cut they exist for. The
+	// off-peak behavior comes from the gates, not from the clock.
+	Interval time.Duration `key:"distill.interval" env:"CTX_DISTILL_INTERVAL" default:"900" mut:"hot" tenancy:"global-only"`
+	// SessionQuietFor is gate 3 (§4.2), in seconds: how long the youngest live
+	// row of a session must have been quiet before the arm touches that
+	// session. It measures the load the ctx-side demand gate CANNOT see — a
+	// human working in the foreign runtime, whose every keystroke needs the
+	// same decode capacity. 0 turns the gate OFF, which is the documented
+	// setting for the snapshot access variant (§4.0 variant S), where the
+	// measurement would be stale by construction and therefore wrong rather
+	// than merely imprecise.
+	SessionQuietFor time.Duration `key:"distill.session_quiet_for" env:"CTX_DISTILL_SESSION_QUIET_FOR" default:"600" mut:"hot" tenancy:"global-only"`
+	// MaxSessionsPerRun caps how many sources one tick may touch; the arm
+	// rotates over the rest round-robin (§6.3). This bounds the READ order,
+	// not the call budget — those are two mechanisms (spend_max_calls is the
+	// other one), and the design names conflating them as a first-draft error.
+	MaxSessionsPerRun int `key:"distill.max_sessions_per_run" env:"CTX_DISTILL_MAX_SESSIONS_PER_RUN" default:"4" mut:"hot" tenancy:"global-only"`
+
+	// ── Selection (§4.3) ───────────────────────────────────────────────────
+	//
+	// RowsPerRead is the mandatory LIMIT on every read of the foreign file
+	// (§6.3 consequence 1). The foreign schema carries no index the arm may
+	// rely on, so an unbounded read is the one shape that turns a background
+	// tick into a multi-second scan of a multi-GB file.
+	RowsPerRead int `key:"distill.rows_per_read" env:"CTX_DISTILL_ROWS_PER_READ" default:"400" mut:"hot" tenancy:"global-only"`
+	// MinRowRunes drops rows without substance before they cost anything
+	// (exit codes, "ok", empty tool answers). Measured, not guessed: the mean
+	// tool row is ~2 183 chars, and the tool families under 200 runes are
+	// exactly the ones whose answers carry no insight.
+	MinRowRunes int `key:"distill.min_row_runes" env:"CTX_DISTILL_MIN_ROW_RUNES" default:"200" mut:"hot" tenancy:"global-only"`
+	// MaxRowRunes is the HEAD cap per surviving row. Head, not tail: the
+	// live distribution has max 54 998 at mean 2 183, and the outliers are
+	// terminal dumps and entity listings whose value sits in the head
+	// (command, first hits) and whose tail is repetition.
+	//
+	// Coupled to promptguard.BudgetDistill through V24 (validate.go) and
+	// through the static gate TestDistillDefaultsFitPromptBudget: this
+	// value times RowsPerCall plus the rule reserve must fit the budget.
+	MaxRowRunes int `key:"distill.max_row_runes" env:"CTX_DISTILL_MAX_ROW_RUNES" default:"4000" mut:"hot" tenancy:"global-only"`
+	// RowsPerCall is the batch size, i.e. the UPPER BOUND of rows per LLM
+	// call; promptguard.Assemble is the safety net that cuts earlier for
+	// unusually long rows (§4.3 rule 6, "whichever hits first"). It is the
+	// second input of the V24 budget coupling, which is what makes it a real
+	// key with a test instead of a number in a comment.
+	RowsPerCall int `key:"distill.rows_per_call" env:"CTX_DISTILL_ROWS_PER_CALL" default:"5" mut:"hot" tenancy:"global-only"`
+	// InitialBackfillRows is the cold-start depth when a source is seen for
+	// the first time and the journal derives watermark 0: the arm starts N
+	// ARCHIVED ROWS OF THAT SESSION below its head. 0 (the default) = start at
+	// the head, i.e. ignore the backlog — the honest default against a
+	// multi-GB file whose whole history would otherwise enter the spend guard
+	// in one run.
+	//
+	// The unit is ROWS OF THE SESSION, never an id delta: ids are a GLOBAL
+	// autoincrement over every session of the same file (live: 307 sessions in
+	// one file), so subtracting a row count from a global id yields a fraction
+	// of N on interleaved sessions. The key says rows, so it must mean rows —
+	// the semantics gate for this belongs to the reader wave (W03-2/§3.2).
+	InitialBackfillRows int `key:"distill.initial_backfill_rows" env:"CTX_DISTILL_INITIAL_BACKFILL_ROWS" default:"0" mut:"hot" tenancy:"global-only"`
+
+	// ── The call (§4.4) ────────────────────────────────────────────────────
+	//
+	// LocalOnly keeps the distill call on local/LAN backends regardless of
+	// trust. Default TRUE, and it is the mitigation of bruch path B5: raw tool
+	// output is the most hostile foreign text in the system — it contains
+	// verbatim what a terminal read from the internet, plus the hostnames,
+	// paths and usernames of a private infrastructure. llm.ChainCall.LocalOnly
+	// discards external backends AFTER the trust gate, so this holds even
+	// against a full-trust external row.
+	//
+	// It covers the CALL only. The block's life after the write (embed
+	// backfill, dream, digest, synthesis) has no per-block locality switch in
+	// ctx — that chain is sensitivity x trust, and trust is a property of the
+	// backend row (§5.5). BlockSensitivity below is that half's lever.
+	LocalOnly bool `key:"distill.local_only" env:"CTX_DISTILL_LOCAL_ONLY" default:"true" mut:"hot" tenancy:"global-only"`
+	// CallTimeout is the default per-call wire timeout in seconds; a timeouts
+	// entry on the serving backend row takes precedence, same relation
+	// dream.temporal_timeout has.
+	//
+	// Derived from the two neighbours rather than set: graph_overview
+	// .label_timeout is 90 s for a digest-role call of ~24 titles at 128
+	// predict tokens. One distill batch carries up to BudgetDistill runes of
+	// prefill (~13 333 tokens) and 640 predict tokens — several times the
+	// label's work on both sides — so 180 s is twice the label ceiling and
+	// still a fifth of the default interval, i.e. a hung call can never
+	// outlast its own cadence.
+	CallTimeout time.Duration `key:"distill.call_timeout" env:"CTX_DISTILL_CALL_TIMEOUT" default:"180" mut:"hot" tenancy:"global-only"`
+
+	// ── The write path (§4.5) ──────────────────────────────────────────────
+	//
+	// Scope is the target scope of the insight blocks. EMPTY (the default) is
+	// the INHERITANCE path — effectiveHomeScope over scheduler.home_scope,
+	// like every other arm. "shared" is refused with 422 by V22 (validate.go),
+	// fail-closed BEFORE operation: shared would be, in this one case, a
+	// propagation path for foreign content across the tenant border.
+	//
+	// The key alone is not the whole guard, and the design is explicit about
+	// why: it only validates what is EXPLICITLY set, never what is inherited.
+	// The runtime half — the inherited path resolving to shared — is gate 5 of
+	// the arm (skipped/scope_forbidden), built in W03-5.
+	Scope string `key:"distill.scope" env:"CTX_DISTILL_SCOPE" default:"" mut:"hot" tenancy:"global-only"`
+	// Category is the block category the insights are written to. It is also
+	// half of the upsert identity (category, title, scope), so changing it
+	// starts a new series rather than rewriting the old one.
+	Category string `key:"distill.category" env:"CTX_DISTILL_CATEGORY" default:"session-insights" mut:"hot" tenancy:"global-only"`
+	// CheckpointCategory is where the arm LOOKS for the checkpoint manifest it
+	// links its blocks to (metadata.manifest_id, §4.5). A neighbour's category,
+	// not its own — hence a key: if that neighbour renames its default, this
+	// follows without a code change. No hit is not an error; manifest_id stays
+	// NULL and the block is written anyway (the distiller is the checkpoint's
+	// neighbour, not its child).
+	CheckpointCategory string `key:"distill.checkpoint_category" env:"CTX_DISTILL_CHECKPOINT_CATEGORY" default:"compaction-checkpoints" mut:"hot" tenancy:"global-only"`
+	// MaxBlockRunes caps one insight block. 6 000 is above the ~1-1.5k
+	// zettelkasten doctrine on purpose (decision E03-4): an insight block is an
+	// EVIDENCE COLLECTION (claim plus quote per line), not one concept. E03-4
+	// settled the number as revisable, which is exactly what a key is.
+	MaxBlockRunes int `key:"distill.max_block_runes" env:"CTX_DISTILL_MAX_BLOCK_RUNES" default:"6000" mut:"hot" tenancy:"global-only"`
+	// BlockSensitivity is the sensitivity stamped on every insight block, and
+	// the only lever over the block's LIFE CYCLE (§5.5, bruch path B11): every
+	// later consumer — embed backfill, dream, digest, query synthesis — derives
+	// its required trust from the block's sensitivity, and none of them sets
+	// LocalOnly. Without an explicit value the write would fall back to the DDL
+	// default, which is the shape in which a forgotten assignment goes silent.
+	//
+	// Default "credentials" per decision E03-7 (operator: "configurable,
+	// default: like credentials"). That is the deliberate deviation from the
+	// design's "personal": it closes the no-credentials external egress path.
+	// It does NOT close a full-trust external row — the design says so plainly
+	// (§5.5: no sensitivity value excludes both live external rows), and the
+	// remaining path is the documented exception the W03-9 egress gate carries,
+	// not a claim this key makes.
+	//
+	// Hard floor "internal", enforced by V23: "public" is a 422. NOT
+	// guard:"sensitivity-downgrade" — the floor already fails closed at the
+	// bottom, and the guard would additionally turn the legitimate
+	// credentials -> personal move into a confirm dance, which the wave gate
+	// explicitly requires to be a plain accept.
+	BlockSensitivity backends.Sensitivity `key:"distill.block_sensitivity" env:"CTX_DISTILL_BLOCK_SENSITIVITY" default:"credentials" mut:"hot" tenancy:"global-only"`
+
+	// ── The spend guard (§4.6) ─────────────────────────────────────────────
+	//
+	// The division of labor is explicit and taken from the reference
+	// implementation: BREAKER = failures, GUARD = success without an end.
+	//
+	// SpendWindow is the window the guard counts calls in, in seconds. 1 h sits
+	// well below the measured compaction distance (~2 h 27 min), so two healthy
+	// generations never fall into the same window.
+	SpendWindow time.Duration `key:"distill.spend_window" env:"CTX_DISTILL_SPEND_WINDOW" default:"3600" mut:"hot" tenancy:"global-only"`
+	// SpendMaxCalls is the call ceiling inside that window, counted DURABLY
+	// over context_llm_log rather than in process — a restart loop is the one
+	// state in which an in-process window would be blind.
+	//
+	// 40: one generation is ~25 calls, plus head room for a second in the same
+	// window. Whoever produces a THIRD compacts every 20 minutes, which is a
+	// loop and not a rhythm, and withdrawal is the right answer there.
+	//
+	// 0 is the documented KILL SWITCH — guard off, effective from the next
+	// tick, because the snapshot is re-read per iteration. Negative is not a
+	// second off-switch but a value that renders as configured while acting as
+	// off, so V25 rejects it.
+	SpendMaxCalls int `key:"distill.spend_max_calls" env:"CTX_DISTILL_SPEND_MAX_CALLS" default:"40" mut:"hot" tenancy:"global-only"`
+	// SpendBackoff is how long a source rests after tripping the budget, in
+	// seconds. 2 h spans a typical compaction distance: a loop is braked
+	// effectively, a healthy rhythm loses at most one generation — and that one
+	// is not lost but POSTPONED, because the watermark stays put and the next
+	// run picks the range up.
+	SpendBackoff time.Duration `key:"distill.spend_backoff" env:"CTX_DISTILL_SPEND_BACKOFF" default:"7200" mut:"hot" tenancy:"global-only"`
+	// BreakerFailures is how many consecutive failures open the in-process
+	// circuit breaker per backend. 3, not the reference implementation's 2: a
+	// failed attempt here is consequence-free (the arm is fail-open), and the
+	// evidence gate produces an additional legitimate failure class ("the model
+	// returned only unsupported insights"), so 2 would be too sharp.
+	BreakerFailures int `key:"distill.breaker_failures" env:"CTX_DISTILL_BREAKER_FAILURES" default:"3" mut:"hot" tenancy:"global-only"`
+	// BreakerCooldown is how long an open breaker rests, in seconds. Exactly
+	// one interval, and the number carries a statement: after a failure series
+	// the NEXT tick is skipped and the one after it is a real attempt. (The
+	// first draft wrote 10 min "rounded up to a multiple of the interval" —
+	// 10 is not a multiple of 15, so the reason was empty.)
+	BreakerCooldown time.Duration `key:"distill.breaker_cooldown" env:"CTX_DISTILL_BREAKER_COOLDOWN" default:"900" mut:"hot" tenancy:"global-only"`
+
+	// ── Retention (§6.2) ───────────────────────────────────────────────────
+	//
+	// The BLOCKS get no retention on purpose — they are knowledge, not
+	// telemetry, and live under the ordinary guard/archive regime. These two
+	// keys cover the arm's own bookkeeping, both as one line in the 6 h janitor
+	// bundle, both with the recall_check no-op semantics: 0 keeps forever.
+	//
+	// RetentionDays is the run journal's horizon.
+	RetentionDays int `key:"distill.retention_days" env:"CTX_DISTILL_RETENTION_DAYS" default:"90" mut:"hot" tenancy:"global-only"`
+	// SeenRetentionDays is the cross-run dedup ledger's horizon — shorter,
+	// because a content hash is only useful for as long as the same output
+	// keeps coming back.
+	SeenRetentionDays int `key:"distill.seen_retention_days" env:"CTX_DISTILL_SEEN_RETENTION_DAYS" default:"30" mut:"hot" tenancy:"global-only"`
 }
 
 // Source reports the origin of a registry key in this snapshot:
