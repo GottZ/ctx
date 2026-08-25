@@ -25,13 +25,27 @@ type Guard struct {
 // A root whose basename is not DirName is accepted only with allowOutside —
 // otherwise a typo would silently open a second, unprotected gold directory.
 func NewGuard(root string, allowOutside bool) (*Guard, error) {
+	return NewNamedGuard(root, DirName, allowOutside)
+}
+
+// NewNamedGuard is NewGuard with an explicit expected basename. The B-W5 sweep
+// driver writes into two directories that are NOT the gold directory itself —
+// its dump sink (`dumps/` beneath the gold root) and the plan's `reports/` —
+// and both need the same confinement, the same 0700 creation and the same
+// symlink-resistant Resolve. Duplicating the guard for them would mean two
+// implementations of one rule, and the second one is always the weaker.
+//
+// wantBase is the basename the caller expects; an empty string skips the name
+// check for a caller that has no naming convention to defend. allowOutside
+// waives it either way and is recorded in the report.
+func NewNamedGuard(root, wantBase string, allowOutside bool) (*Guard, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
 	abs = filepath.Clean(abs)
-	if filepath.Base(abs) != DirName && !allowOutside {
-		return nil, fmt.Errorf("%w: root %q is not a %q directory", ErrOutsideGoldset, abs, DirName)
+	if wantBase != "" && filepath.Base(abs) != wantBase && !allowOutside {
+		return nil, fmt.Errorf("%w: root %q is not a %q directory", ErrOutsideGoldset, abs, wantBase)
 	}
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return nil, err

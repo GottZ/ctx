@@ -134,6 +134,13 @@ The package also carries the paired statistics an A/B comparison needs:
 `PairedDiffCI` (the bootstrap CI of a per-case difference vector, with the
 confidence level as an explicit parameter, so a multiplicity correction
 travels with the comparison instead of being baked into the estimator).
+Retrieval rankings are scored through `RecallAtK`, `MRRAtK`, `HitAtK` and
+`NDCGRanked`, which take an ORDERED LIST OF IDS rather than the score vector
+plus positional labels `NDCGBinary` takes — both shapes exist because
+converting between them at every call site is where a metric quietly turns into
+a different metric. All four return 0 for "no labels" and "no ranking" rather
+than NaN: a slice mean is taken over these values, and one NaN would erase a
+whole column of a report instead of costing one case.
 
 `-dump-outputs <path>` writes every raw model answer as JSONL
 (`{axis,id,outputs}`) before any parsing — the substrate for offline
@@ -298,6 +305,70 @@ contamination-suspect hits. It also records `build_vcs_revision` from Go's build
 stamp — named for the build, not the draw, because in a linked git worktree Go's
 repository walk can land on the enclosing checkout. Reports cite a query as
 `slice + index + sha256` prefix; full texts stay in the gold directory.
+
+### Arm-weight sweep: ctx-armsweep
+
+`ctx-armsweep` measures the four fusion weights `ctx_rrf` has always carried
+(semantic 0.45, `fts_de` 0.20, `fts_en` 0.25, trigram 0.10, k = 60) against the
+gold set `ctx-goldset` builds. It rides the admin-gated `arm_ranks` seam on
+`POST /api/query`, records the per-arm ranks a real request produced, and
+re-fuses them offline under 16 configurations. Three subcommands, deliberately
+separate runs:
+
+```bash
+cd go && go build ./cmd/ctx-armsweep
+./ctx-armsweep prime                                   # pins + embed cache warm-up, nothing scored
+./ctx-armsweep dump  -pins pins-<run>.jsonl            # measurement run V0
+./ctx-armsweep dump  -pins pins-<run>.jsonl            # measurement run V0' (same pins)
+./ctx-armsweep score -dump dumps/<A>.jsonl -dump-b dumps/<B>.jsonl
+```
+
+Four properties are enforced by the tool, not by discipline:
+
+- **Pins, or nothing.** `prime` captures the translation and temporal-expansion
+  results as pins; `dump` refuses a case without one instead of falling back to
+  the unpinned path. A partly pinned run is neither a pinned nor an unpinned
+  measurement, and the difference would be invisible in the artefact.
+- **Drift protocol.** Every dump is bracketed by a corpus census (per type:
+  `count`, `max(created_at)`, `max(updated_at)`, null embeddings; plus the
+  lifecycle stamps of the labelled blocks). A mutated or vanished gold block, a
+  **retrievable** type jumping from 0 to >0 null embeddings, or more than ±0.5 %
+  movement in the retrievable block count discards the run — the file is renamed
+  to `.aborted`, never deleted, because it is the only record of the drift.
+  Excluded types are exempt from the null-embedding rule: the live corpus holds
+  thousands there as standing policy.
+- **Retry budget.** Two retries per query on transport/5xx faults, then the case
+  is EXCLUDED and listed — never replaced by a substitute, which would change
+  the population a report is computed over without saying so. A 4xx from the
+  seam is a configuration error and stops the run at once. Exclusions apply as
+  the UNION over the dump pair.
+- **Deterministic reports.** `score` touches no network and no clock beyond one
+  header line, so two runs over the same dump produce byte-identical bodies.
+  Reports cite a case as `slice + index + sha256` prefix; dumps and pins carry
+  the effective query texts and therefore live inside the gold directory at 0600
+  under the same path guard, with `-allow-outside-goldset` as the only override
+  and `allow_outside_goldset: true` in the report when it was used.
+
+`V0` and `V0'` are the same configuration on two independent dumps: their
+disagreement is the instrument's noise floor. Gate **G-NOISE** (Recall@5
+discordance ≤ 5 % and a paired 95 % CI of ΔnDCG@10 containing 0) must pass, or
+the report marks itself uninterpretable and no variant is a result. Gate
+**G-WIN** is decided on `G-Q-HOLD` alone — the half of the seeded 50/50 split
+that was not derived on. V1 is the single pre-registered primary comparison at
+95 %; the other 13 run at 1−0.05/13 and, if they clear, are labelled "candidate,
+unconfirmed".
+
+The census reaches the driver as an **additive, opt-in, server-admin-only**
+`drift` section of the existing `POST /api/manage` `stats` action — not as a new
+endpoint. A stats request that does not ask for it gets the byte-identical
+response it always got, which matters because the statusline polls that action.
+
+What the instrument does **not** measure is everything after `ctx_rrf`: gravity,
+cluster injection, graph expansion, the aggregate fold and the rerank stage are
+recorded (delivered order in the dump, stage config in the env stamp) and never
+re-simulated. Details, the operating notes (off-peak, `-concurrency 1`, not
+alongside dream) and the `via_post_stage` caveat live in
+[`go/cmd/ctx-armsweep/README.md`](../go/cmd/ctx-armsweep/README.md).
 
 ### Wire-contract freeze (workflow UI)
 

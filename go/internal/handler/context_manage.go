@@ -157,7 +157,7 @@ func (h *ManageHandler) HandleManage(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case "stats":
-		h.handleStats(w, r, authResult)
+		h.handleStats(w, r, authResult, req)
 	case "get":
 		h.handleGet(w, r, authResult, req)
 	case "list-categories":
@@ -720,7 +720,7 @@ func isGamingModeMutation(req manageRequest) bool {
 	return d.Mode != ""
 }
 
-func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
+func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
 
@@ -738,6 +738,11 @@ func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *
 		"success": true,
 		"stats":   stats,
 	}
+	if drift, ok := h.driftCensus(w, r, ar, req); ok && drift != nil {
+		resp["drift"] = drift
+	} else if !ok {
+		return // driftCensus already wrote the error response
+	}
 
 	// Dream backlog + incoming forecast at a glance — surfaces whether the GPU
 	// is busy now and how much load is queued to drop out of cooldown soon.
@@ -749,6 +754,79 @@ func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// driftCensusRequest is the OPT-IN payload of the stats action's drift section
+// (design 04 §4.7, wave B-W5). Absent or false ⇒ the stats response is
+// byte-identical to what it always was.
+type driftCensusRequest struct {
+	// Drift asks for the per-type census alone. Supplying GoldIDs implies it,
+	// so the sweep driver sends one field, not two.
+	Drift   bool     `json:"drift"`
+	GoldIDs []string `json:"gold_ids"`
+}
+
+// driftCensus renders the ADDITIVE drift section of the stats response.
+//
+// Three properties, in the order they matter:
+//
+//  1. It is opt-in. A stats request that does not ask gets the response it
+//     always got — no new key, no extra query, no cost. The census is four
+//     aggregates over context_blocks grouped by type; at the 1M+ target that is
+//     a scan, and it must never ride along on the ordinary stats poll (the
+//     statusline calls that endpoint).
+//  2. It is server-admin only. The section discloses the type composition of
+//     the whole visible corpus and the lifecycle stamps of addressed blocks —
+//     server-global observability, the same class /api/status' db section is
+//     gated at. The stats ACTION itself stays tierOpen: a non-admin asking for
+//     the section gets 403 and an unchanged response otherwise, so the gate
+//     adds a capability rather than removing one.
+//  3. It is scope-filtered anyway. store.GetDriftCensus takes ar.ReadScopes
+//     like every other read — the admin gate is on top of the scope predicate,
+//     never instead of it.
+//
+// Returns (section, true) on success, (nil, true) when nothing was asked for,
+// and (nil, false) after having written an error response itself.
+func (h *ManageHandler) driftCensus(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) (*store.DriftCensus, bool) {
+	if len(req.Data) == 0 || string(req.Data) == "null" {
+		return nil, true
+	}
+	var d driftCensusRequest
+	if err := json.Unmarshal(req.Data, &d); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": "Invalid data payload for stats",
+		})
+		return nil, false
+	}
+	if !d.Drift && len(d.GoldIDs) == 0 {
+		return nil, true
+	}
+	if !requireAdminAction(w, ar) {
+		return nil, false
+	}
+
+	ctx := r.Context()
+	census, err := store.GetDriftCensus(ctx, h.pool, ar.ReadScopes, h.retrievableTypes(ctx), d.GoldIDs)
+	if err != nil {
+		slog.Error("manage: drift census error", "error", err, "request_id", RequestIDFromContext(ctx))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "Internal server error",
+		})
+		return nil, false
+	}
+	return census, true
+}
+
+// retrievableTypes is the retrieval allowlist from the per-request registry
+// snapshot — the same source the query path reads it from. An unwired registry
+// yields an empty list, which makes the census report zero retrievable blocks
+// rather than silently counting excluded types as retrievable.
+func (h *ManageHandler) retrievableTypes(ctx context.Context) []string {
+	if h.blocktypes == nil {
+		slog.Warn("manage: block-type registry not wired — drift census reports no retrievable types")
+		return nil
+	}
+	return h.blocktypes.SnapshotForRequest(ctx).VisibleTypes()
 }
 
 func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
