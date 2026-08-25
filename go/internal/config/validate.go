@@ -63,7 +63,7 @@ func temporalTimeoutBudgetOf(c *Config) time.Duration {
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V11
+	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
 	issues = append(issues, validateGraphOverview(c)...) // V17b
@@ -409,6 +409,14 @@ func validateQuery(c *Config) []Issue {
 			issues = append(issues, Issue{Field: r.key, Severity: SeverityError,
 				Msg: fmt.Sprintf("rate limit %d must be >= 0", r.val)})
 		}
+	}
+
+	// V9d (W02-8) — a negative staging cap has no reading at all: 0 already
+	// carries the "no blob staging" meaning, so anything below it would render
+	// as a configured byte count while the runtime treated it as the switch.
+	if c.Pool.BlobStageMaxBytes < 0 {
+		issues = append(issues, Issue{Field: "pool.blob_stage_max_bytes", Severity: SeverityError,
+			Msg: fmt.Sprintf("staged blob payload cap %d must be >= 0 (0 = blob staging disabled)", c.Pool.BlobStageMaxBytes)})
 	}
 
 	// V9b (H12) — a negative context-window fallback is range garbage in the

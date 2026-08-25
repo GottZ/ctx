@@ -1137,6 +1137,32 @@ type PoolConfig struct {
 	// Settings-only like its PoolConfig siblings; tenant-overridable like the
 	// block limit it falls back to.
 	BlobRateLimitWrite int `key:"pool.blob_rate_limit_write" env:"-" default:"10" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	// BlobStageMaxBytes caps the DECODED payload one confirm_writes key may
+	// have STAGED on the MCP blob_store tool (W02-8/N-28). It exists because
+	// the staged path holds the authoritative payload SERVER-SIDE, in
+	// context_pending_writes, until the write is confirmed or its TTL
+	// (writes.confirm_ttl) runs out — a 50 MB upload, the blob surface's own
+	// ceiling, would sit in a JSONB column for that whole window, and a key
+	// that never confirms could park one per distinct payload.
+	//
+	// A payload above the cap is REFUSED with a named reason. It is
+	// deliberately NOT written directly instead: the flag's whole point is
+	// that this principal's writes go through a confirmation, and a size that
+	// quietly restores the direct path would be a bypass of exactly the gate
+	// the operator switched on.
+	//
+	// 0 does NOT mean "unlimited" here — it disables blob STAGING entirely, so
+	// a confirm_writes key cannot store blobs at all. That is the fail-closed
+	// reading of the value, and it is the one an operator can act on: the
+	// alternative (0 = no cap) would turn the key that bounds a server-held
+	// buffer into the switch that unbounds it. The rate-limit siblings' 0-is-
+	// off convention does not carry — it governs a counter, not a buffer.
+	//
+	// Default 1 MiB: it holds the ~180 kB of one externalized tool-payload
+	// batch with room to spare, and 1 MiB of base64 in a JSONB column is a
+	// bounded cost per staged write. Settings-only and tenant-overridable like
+	// its PoolConfig siblings.
+	BlobStageMaxBytes int `key:"pool.blob_stage_max_bytes" env:"-" default:"1048576" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	// ExternalNumCtxFallback is the operator-declared context window, in
 	// TOKENS, for chain members whose row declares none (context_backends
 	// .num_ctx IS NULL — H12 / decision E10). It is the ONLY way a prompt

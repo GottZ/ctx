@@ -152,6 +152,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"pool.scope_sensitivity_floor":                   "JSON map of scope to minimum sensitivity; raises the effective sensitivity of blocks in that scope, never lowers it",
 	"pool.llm_audit_min_sensitivity":                 "Floor under the LLM audit's sensitivity verdict; the classification may rate a block higher than this but never lower",
 	"pool.blob_rate_limit_write":                     "Maximum blob uploads per API key per 60-second window; 0 falls back to the block write limit rather than unlimited",
+	"pool.blob_stage_max_bytes":                      "Largest decoded payload a confirm_writes key may have staged on the MCP blob_store tool; a bigger one is refused by name instead of written direct, and 0 disables blob staging for such keys entirely",
 	"pool.external_num_ctx_fallback":                 "Assumed context window in tokens for external backends that declare none; 0 means prompts carrying foreign text are refused",
 	"pool.openrouter_window_ttl":                     "Cache lifetime in seconds for OpenRouter per-provider context-window discovery; 0 turns discovery off",
 	"tenant.allow_shared_secrets":                    "Operator-set per-tenant opt-in letting secret refs fall back to shared _global provider keys; false keeps strict isolation",

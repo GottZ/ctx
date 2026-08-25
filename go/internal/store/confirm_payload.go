@@ -62,7 +62,26 @@ type CanonicalWrite struct {
 	// UTC/RFC3339Nano. The confirm rejects — without consuming the token —
 	// when the block's updated_at no longer matches (lost-update protection).
 	BaseUpdatedAt string `json:"base_updated_at,omitempty"`
+
+	// Blob form only (op OpBlobStore, W02-8) — all three omitempty and
+	// appended last, so every existing 'store'/'update' canonicalization keeps
+	// its exact bytes and every payload_hash a client already holds stays
+	// confirmable.
+	//
+	// Data is the DECODED payload; encoding/json renders a []byte as base64,
+	// which makes the canonical form deterministic without a second encoding
+	// decision here. The hash therefore binds the payload itself — a confirm
+	// can no more alter the bytes than it can alter a block's content.
+	Filename string `json:"filename,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	Data     []byte `json:"data,omitempty"`
 }
+
+// OpBlobStore is the third staged op (W02-8), beside 'store' and 'update'.
+// context_pending_writes.op is a free TEXT column, so the value needs no
+// migration; what it does need is to be spelled in ONE place, because the
+// stage site, the tamper check and the execute arm all compare against it.
+const OpBlobStore = "blob_store"
 
 // Canonical returns the canonical JSON bytes of the write: fixed field order,
 // sorted tags and update_fields (input slices untouched), metadata keys

@@ -154,6 +154,12 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 		out := executeConfirm(ctx, cfg.Pool, cfg.Blocktypes, ar, input.PayloadHash)
 		switch out.Kind {
 		case confirmOK:
+			if out.Op == store.OpBlobStore {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and stored blob: %s (id: %s, category: %s, %d bytes)",
+						out.Blob.Title, out.Blob.ID, out.Blob.Category, out.Blob.FileSize))},
+				}, nil, nil
+			}
 			verb := "stored"
 			if out.Op == "update" {
 				verb = "updated"

@@ -60,11 +60,12 @@ const (
 // confirmOutcome is the typed result of executeConfirm.
 type confirmOutcome struct {
 	Kind    confirmKind
-	Op      string       // 'store' | 'update' (set from the staged payload once known)
-	Block   *store.Block // on confirmOK
-	Scope   string       // on confirmScopeRejected
-	BlockID string       // on confirmTOCTOUDrift (the update target)
-	Err     error        // on confirmInfraErr / confirmExecErr
+	Op      string          // 'store' | 'update' | 'blob_store' (from the staged payload once known)
+	Block   *store.Block    // on confirmOK for a block op
+	Blob    *store.BlobMeta // on confirmOK for op 'blob_store' (W02-8)
+	Scope   string          // on confirmScopeRejected
+	BlockID string          // on confirmTOCTOUDrift (the update target)
+	Err     error           // on confirmInfraErr / confirmExecErr
 }
 
 // executeConfirm runs the complete confirm sequence for one payload hash,
@@ -87,7 +88,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 		slog.Error("confirm: staged payload unmarshal failed", "error", err, "pending_id", pw.ID)
 		return confirmOutcome{Kind: confirmUnreadable}
 	}
-	if (cw.Op != "store" && cw.Op != "update") || cw.Scope != pw.Scope {
+	if (cw.Op != "store" && cw.Op != "update" && cw.Op != store.OpBlobStore) || cw.Scope != pw.Scope {
 		// A row/payload scope or op mismatch would mean the stage row was
 		// tampered with — indistinguishable from a miss on purpose.
 		return confirmOutcome{Kind: confirmMiss}
@@ -122,6 +123,21 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 			return confirmOutcome{Kind: confirmMiss}
 		}
 		return confirmOutcome{Kind: confirmInfraErr, Op: cw.Op, Err: err}
+	}
+
+	// op 'blob_store' (W02-8): the upsert, and nothing else. No booking — the
+	// budget was charged at stage time (mcpStageBlobStore), exactly as it is
+	// for a staged block write; no classify, no temporal enrichment, because a
+	// blob is not a retrieval source. The scope was re-validated above through
+	// the same writableBlockScopes formula, so a right shrunk after staging
+	// rejects here as it does for a block.
+	if cw.Op == store.OpBlobStore {
+		blob, err := store.UpsertBlob(ctx, pool, cw.Category, cw.Title, cw.Filename, cw.MimeType, cw.Scope, cw.Data, cw.Tags, cw.Metadata)
+		if err != nil {
+			slog.Error("confirm: confirmed blob write execute failed", "error", err, "pending_id", pw.ID)
+			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
+		}
+		return confirmOutcome{Kind: confirmOK, Op: cw.Op, Blob: blob}
 	}
 
 	if cw.Op == "update" {

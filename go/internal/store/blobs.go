@@ -150,6 +150,54 @@ func GetBlobByID(ctx context.Context, pool *pgxpool.Pool, id string, readScopes 
 	return b, nil
 }
 
+// GetBlobRangeByID retrieves a blob's metadata plus a BYTE RANGE of its
+// payload, filtered by readScopes. file_size stays the size of the WHOLE blob;
+// Data carries only the requested window.
+//
+// The slice is cut in the DATABASE (substring over the bytea column), not in
+// Go after a full read: GetBlobByID selects the complete data column, so a
+// 50-byte read of a 50 MB blob would otherwise move 50 MB through the pool and
+// into the process for every ranged fetch. At target scale that is the
+// difference between a drill-down and an out-of-memory class of request.
+//
+// The offsets address the STORED bytes. context_blobs.data is written
+// uncompressed (UpsertBlob stores what it is handed; the space saving comes
+// from TOAST, transparently, below this layer), so a byte range is meaningful
+// and stable — a position addressed today reads the same tomorrow. Postgres
+// substring() is 1-based, hence offset+1; an offset past the end yields an
+// empty window rather than an error, which is the honest answer for "there is
+// nothing there" and lets a caller detect the end by a short read.
+func GetBlobRangeByID(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []string, offset, length int) (*Blob, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
+	if offset < 0 || length < 0 {
+		return nil, fmt.Errorf("store: get blob range: offset %d / length %d must be >= 0", offset, length)
+	}
+
+	b := &Blob{}
+	err := pool.QueryRow(ctx,
+		`SELECT id, context_block_id, category, title, filename, mime_type, file_size,
+			COALESCE(checksum, ''), storage_type, substring(data FROM $3 FOR $4),
+			tags, metadata, scope, created_at, updated_at
+		FROM context_blobs
+		WHERE id = $1 AND scope = ANY($2::text[])
+		LIMIT 1`,
+		id, readScopes, offset+1, length,
+	).Scan(
+		&b.ID, &b.ContextBlockID, &b.Category, &b.Title, &b.Filename, &b.MimeType,
+		&b.FileSize, &b.Checksum, &b.StorageType, &b.Data, &b.Tags, &b.Metadata,
+		&b.Scope, &b.CreatedAt, &b.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get blob range by id: %w", err)
+	}
+	return b, nil
+}
+
 // GetBlobByCategoryTitle retrieves a blob by category+title, filtered by readScopes.
 func GetBlobByCategoryTitle(ctx context.Context, pool *pgxpool.Pool, category, title string, readScopes []string, metaOnly bool) (*Blob, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)

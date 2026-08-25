@@ -172,6 +172,11 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// Guard W3: review-queue tools (guard_list/guard_resolve), REST manage
 	// guard-list/guard-resolve parity incl. the ids[] batch contract.
 	registerGuardTools(server, cfg)
+
+	// W02-8: blob_store/blob_fetch on the shared blob write core — one scope
+	// path with /api/blob/store, staging parity for confirm_writes keys, and
+	// ranged reads so a payload is drilled into rather than pulled whole.
+	registerBlobTools(server, cfg)
 }
 
 // Tool handlers.

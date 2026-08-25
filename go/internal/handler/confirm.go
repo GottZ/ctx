@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/store"
 )
 
 // ConfirmHandler serves POST /api/confirm.
@@ -63,6 +64,19 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 	out := executeConfirm(r.Context(), h.pool, h.blocktypes, ar, req.PayloadHash)
 	switch out.Kind {
 	case confirmOK:
+		// W02-8: a confirmed blob write answers a `blob` object, never an
+		// empty `block` one — the SPA reads the key that names what happened.
+		if out.Op == store.OpBlobStore {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"success": true,
+				"op":      out.Op,
+				"blob": map[string]any{
+					"id": out.Blob.ID, "title": out.Blob.Title, "category": out.Blob.Category,
+					"scope": out.Blob.Scope, "file_size": out.Blob.FileSize,
+				},
+			})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"success": true,
 			"op":      out.Op,
