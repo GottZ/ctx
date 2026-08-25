@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -60,6 +61,12 @@ const KeywordsMaxRetries = 3
 // MinKeywords is the smallest LLM output we accept before retrying.
 // Fewer than this indicates a degenerate response (truncation, bad JSON).
 const MinKeywords = 3
+
+// MaxObjectDriftKeywords caps how many VALUES the object-drift parse salvages
+// from a {"key":"value"} answer. 8 mirrors the upper bound the array prompt
+// asks for ("Return 5 to 8 concepts") — a drift-happy model can emit dozens
+// of pairs, and every keyword feeds an RRF candidate search.
+const MaxObjectDriftKeywords = 8
 
 // keywordOptions returns Ollama options tuned for short JSON-array extraction.
 // NumCtx stays unset here: the chain walk merges it from the serving
@@ -203,12 +210,24 @@ func parseKeywords(raw string) ([]string, error) {
 	}
 	// Object-drift: try to unmarshal as map[string]string / map[string]any and
 	// take the VALUES. Only when the raw looks like an object ({...}).
+	// Iterate the KEYS sorted so the result is deterministic (Go map order is
+	// randomized), and cap at MaxObjectDriftKeywords — every keyword feeds an
+	// RRF candidate search, and a drift-happy model can emit dozens of pairs
+	// while the array prompt asks for 5-8.
 	if strings.HasPrefix(raw, "{") {
 		var obj map[string]any
 		if err := json.Unmarshal([]byte(raw), &obj); err == nil {
-			for _, v := range obj {
-				if s, ok := v.(string); ok {
+			keys := make([]string, 0, len(obj))
+			for k := range obj {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if s, ok := obj[k].(string); ok {
 					list = append(list, s)
+					if len(list) == MaxObjectDriftKeywords {
+						break
+					}
 				}
 			}
 			if len(list) >= MinKeywords {
