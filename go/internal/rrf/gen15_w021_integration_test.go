@@ -317,11 +317,13 @@ func TestGen15W021_G1_DefaultCompat(t *testing.T) {
 
 // TestGen15W021_G2_ParitySentinel is the §5.1 permanent sentinel: identical
 // call in both modes against the adversarial fixture corpus → equal result
-// SETS, defined as set equality after the declared NULL-embedding behaviour
-// (§4.5 Delta 2: exact arm never surfaces a NULL-embedding block via the
-// semantic channel; the ann arm keeps the Gen-14 seq-scan behaviour — ranks
-// with NULL cosine). RED: a skewed variant whose exact arm lost the
-// type-allowlist conjunct MUST break parity (rogue block appears).
+// SETS. Since Migration 134 (ctx_rrf Generation 16) that is plain set
+// equality: the declared Semantik-Delta 2 of Gen 15 — exact arm filters
+// NULL embeddings, ann arm keeps the Gen-14 seq-scan behaviour — is gone,
+// both arms carry the embedding filter, and the sentinel no longer needs an
+// exception for the NULL-embedding fixture. RED: a skewed variant whose
+// exact arm lost the type-allowlist conjunct MUST break parity (rogue block
+// appears).
 func TestGen15W021_G2_ParitySentinel(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -379,22 +381,26 @@ func TestGen15W021_G2_ParitySentinel(t *testing.T) {
 		}
 	}
 
-	// Declared NULL-embedding behaviour, asserted per arm (§4.5 Delta 2).
+	// NULL-embedding behaviour, asserted per arm. Migration 134 (ctx_rrf
+	// Generation 16, Issue #40 Bug 5) retired the Gen-14 asymmetry: the ann
+	// arm carries the same embedding filter as the exact arm, so neither arm
+	// hands the NULL-embedding block a rank any more.
 	if exactSet[idNull] {
 		t.Error("exact arm surfaced the NULL-embedding block — embedding IS NOT NULL filter missing")
 	}
-	if !annSet[idNull] {
-		t.Error("ann arm did not surface the NULL-embedding block (declared Gen-14 seq-scan behaviour on a small corpus)")
-	} else {
-		for _, r := range annRows {
-			if r.id == idNull && r.cos != nil {
-				t.Errorf("NULL-embedding block carries non-NULL cosine %v in ann arm", *r.cos)
-			}
+	if annSet[idNull] {
+		t.Error("ann arm surfaced the NULL-embedding block — Gen-16 embedding filter missing in the ann arm")
+	}
+	// Unreachable while the filter holds, kept as the second, independent
+	// witness: a NULL-embedding block can never carry a cosine.
+	for _, r := range annRows {
+		if r.id == idNull && r.cos != nil {
+			t.Errorf("NULL-embedding block carries non-NULL cosine %v in ann arm", *r.cos)
 		}
 	}
 
-	// Parity: set equality after removing the declared-delta fixture.
-	delete(annSet, idNull)
+	// Parity: plain set equality — since Gen 16 both semantic arms are truly
+	// set-equal on this fixture, so the sentinel needs no delta exception.
 	if len(annSet) != len(expected) || len(exactSet) != len(expected) {
 		t.Fatalf("parity size: ann=%v exact=%v want=%v", annSet, exactSet, expected)
 	}

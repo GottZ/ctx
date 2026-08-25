@@ -147,8 +147,11 @@ func TestSelectorW022_G3_ExactOnSmallScope(t *testing.T) {
 		t.Logf("G3 GREEN: exact arm == brute-force reference (%d rows, identical order): %v", len(got), got)
 	}
 
-	// Declared Semantik-Delta 2 (§4.5): the exact arm never surfaces the
-	// NULL-embedding block; the Ist/ann path (zero policy) does on this corpus.
+	// NULL-embedding behaviour through the Go path. Since Migration 134
+	// (ctx_rrf Generation 16, Issue #40 Bug 5) neither path surfaces the
+	// NULL-embedding block: the declared Semantik-Delta 2 of Gen 15 — ann
+	// keeps the Gen-14 seq-scan behaviour — was retired, so the two paths are
+	// truly set-equal here.
 	istRes, istDec, err := rrf.Search(ctx, pool, emb, "zzqqxx", "zzqqxx",
 		[]string{scope}, nil, nil, 50, "", "", testVisibleTypes, nil, nil, nil, nil, nil, rrf.SelectorPolicy{})
 	if err != nil {
@@ -158,15 +161,14 @@ func TestSelectorW022_G3_ExactOnSmallScope(t *testing.T) {
 		t.Errorf("zero-policy decision = %+v, want {ann, disabled, probe_ms 0}", istDec)
 	}
 	istSet, exactSet := w022Set(w022IDs(istRes)), w022Set(got)
-	if !istSet[idNull] {
-		t.Error("ann path did not surface the NULL-embedding block (declared Gen-14 seq-scan behaviour)")
+	if istSet[idNull] {
+		t.Error("ann path surfaced the NULL-embedding block — Gen-16 embedding filter missing in the ann arm")
 	}
 	if exactSet[idNull] {
 		t.Error("exact path surfaced the NULL-embedding block — embedding filter missing")
 	}
-	delete(istSet, idNull)
 	if len(istSet) != len(exactSet) {
-		t.Fatalf("parity after the declared delta: ann=%v exact=%v", istSet, exactSet)
+		t.Fatalf("parity between the semantic arms: ann=%v exact=%v", istSet, exactSet)
 	}
 	for id := range exactSet {
 		if !istSet[id] {

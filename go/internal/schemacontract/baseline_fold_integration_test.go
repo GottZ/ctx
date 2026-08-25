@@ -15,10 +15,10 @@
 //     pg_dump comparison against the real pre-fold chain recorded in the
 //     wave's commit message.
 //   - G2 upgrade from the last v4.x release: a database that already carries
-//     001-132 applies ONLY migration 133 — the baseline is skipped, nothing
-//     is re-applied, seeded and operator data survive (RED: take version 113
-//     out of _migrations and the runner refuses the database instead of
-//     rebuilding over it).
+//     001-132 applies ONLY the migrations above 132 — the baseline is
+//     skipped, nothing is re-applied, seeded and operator data survive (RED:
+//     take version 113 out of _migrations and the runner refuses the database
+//     instead of rebuilding over it).
 //   - G3 repeatability: the runner path is a no-op on both kinds of database,
 //     and the baseline is atomic — a failure inside it leaves nothing behind,
 //     which is what makes a fresh install recoverable by booting again.
@@ -32,7 +32,11 @@ package schemacontract
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"math"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,10 +47,38 @@ import (
 )
 
 // lastV4Migration is the highest version the last v4.x release (v4.38.0)
-// ships — the state every supported upgrade to v5 starts from. 133 is the
-// v5-only migration that has to be the ONLY thing that runs on such a
+// ships — the state every supported upgrade to v5 starts from. Everything
+// above it (v5OnlyMigrations) has to be the ONLY thing that runs on such a
 // database.
 const lastV4Migration = 132
+
+// v5OnlyMigrations is every embedded migration above lastV4Migration, read
+// from the embedded FS rather than pinned to a literal: a new migration then
+// widens this gate instead of breaking it.
+func v5OnlyMigrations(t *testing.T) []int {
+	t.Helper()
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	if err != nil {
+		t.Fatalf("reading embedded migrations: %v", err)
+	}
+	var out []int
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		v, err := strconv.Atoi(strings.SplitN(name, "_", 2)[0])
+		if err != nil || v <= lastV4Migration {
+			continue
+		}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		t.Fatalf("no migration above version %d — the upgrade gate would be vacuous", lastV4Migration)
+	}
+	sort.Ints(out)
+	return out
+}
 
 // migrationRow is one _migrations row, without the wall-clock column.
 type migrationRow struct {
@@ -250,12 +282,15 @@ func TestBaselineUpgradeFromLastV4(t *testing.T) {
 		t.Fatalf("seed retired settings row: %v", err)
 	}
 
+	v5Only := v5OnlyMigrations(t)
 	before := readMigrationRows(ctx, t, pool)
 	if _, ok := before[lastV4Migration]; !ok {
 		t.Fatalf("replayed database does not carry version %d", lastV4Migration)
 	}
-	if _, ok := before[133]; ok {
-		t.Fatal("replayed database already carries version 133")
+	for _, v := range v5Only {
+		if _, ok := before[v]; ok {
+			t.Fatalf("replayed database already carries version %d", v)
+		}
 	}
 
 	if err := store.RunMigrations(ctx, pool); err != nil {
@@ -266,11 +301,14 @@ func TestBaselineUpgradeFromLastV4(t *testing.T) {
 	}
 
 	after := readMigrationRows(ctx, t, pool)
-	if len(after) != len(before)+1 {
-		t.Errorf("_migrations rows after the hop = %d, want %d (exactly migration 133)", len(after), len(before)+1)
+	if len(after) != len(before)+len(v5Only) {
+		t.Errorf("_migrations rows after the hop = %d, want %d (exactly the v5-only migrations %v)",
+			len(after), len(before)+len(v5Only), v5Only)
 	}
-	if _, ok := after[133]; !ok {
-		t.Error("migration 133 did not run")
+	for _, v := range v5Only {
+		if _, ok := after[v]; !ok {
+			t.Errorf("migration %d did not run", v)
+		}
 	}
 	for v, want := range before {
 		got, ok := after[v]
