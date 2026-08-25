@@ -283,6 +283,25 @@ type scriptedAnswer struct {
 	finishReason string
 }
 
+// TestEvaluateRelationships_CapHitStillErrors pins that the cap-hit flag is
+// OBSERVABILITY ONLY: a truncated answer that consumed the whole budget still
+// returns the parse error, so the cooldown/re-pick path is untouched.
+func TestEvaluateRelationships_CapHitStillErrors(t *testing.T) {
+	opts := llm.Options{NumPredict: 1200}
+	mockChatJSON(t, capRespFunc(truncatedObjectMap, opts.NumPredict))
+
+	links, err := EvaluateRelationships(context.Background(), nil, newTestRouter(), opts, srcBlock(uuidA), []BlockInfo{candBlock(uuidB)})
+	if err == nil {
+		t.Fatal("want parse error for truncated object-map JSON, got nil")
+	}
+	if !errorContains(err, "parse links") {
+		t.Errorf("error not wrapped as parse-error: %v", err)
+	}
+	if len(links) != 0 {
+		t.Errorf("want no links from a truncated answer, got %+v", links)
+	}
+}
+
 // scriptedChat installs a chatJSON seam that walks answers in order and
 // records the Options of every call. The recorded Options are the ones the
 // chain walk RESOLVED (llm.ChatChainVia hands applyModelParams' output to the

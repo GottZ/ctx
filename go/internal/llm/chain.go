@@ -433,12 +433,45 @@ func applyModelParams(base Options, params map[string]any, b *backends.Backend) 
 		case "presence_penalty":
 			base.PresencePenalty = toFloat(v, base.PresencePenalty)
 		case "num_predict", "max_tokens":
-			base.NumPredict = int(toFloat(v, float64(base.NumPredict)))
+			// CapLocked phases (dream keyword extraction) keep their hard
+			// budget: a serving row's generous cap for another phase of the
+			// same role (dream eval 1200) must not inflate an extraction
+			// phase whose degenerate output then burns tokens to the cap and
+			// truncates its JSON (prod: BRADES block, 9× "too few (1)").
+			if !base.CapLocked {
+				base.NumPredict = int(toFloat(v, float64(base.NumPredict)))
+			}
 		case "think":
 			if tv, ok := v.(bool); ok {
 				t := tv
 				think = &t
 			}
+		case "chat_template_kwargs":
+			// Pass-through to the wire (OpenAI protocol): vLLM/LiteLLM-served
+			// models (Nemotron 3.5 Lightning) expose the thinking toggle only
+			// through chat_template_kwargs.enable_thinking; the OpenRouter-only
+			// `reasoning` field chatOpenAI derives from think=false is ignored
+			// by them, so without this passthrough the model keeps thinking and
+			// structured JSON answers hit the token cap truncated.
+			// Ollama protocol: intentionally NOT forwarded — /api/chat options
+			// must stay free of unknown keys (the Ollama wire path never reads
+			// Options.Extra).
+			if base.Extra == nil {
+				base.Extra = make(map[string]any)
+			}
+			base.Extra[k] = v
+		default:
+			// Pass-through for any other model_map param without a dedicated
+			// Options field (provider-specific knobs). The documented contract
+			// — "model_map params override the code default at dispatch"
+			// (dream/evaluate.go DreamOptions comment) — previously only
+			// honoured the fixed Options keys; unknown keys were silently
+			// dropped. Only meaningful on the OpenAI wire path; Ollama's
+			// options block is never fed from Extra.
+			if base.Extra == nil {
+				base.Extra = make(map[string]any)
+			}
+			base.Extra[k] = v
 		}
 	}
 	if base.NumPredictScale > 1 && base.NumPredict > 0 {

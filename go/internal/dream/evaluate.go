@@ -78,6 +78,15 @@ Output a JSON array of {target_id, type, confidence}. Empty [] when no candidate
 // against the context window, so an over-generous cap gets long prompts
 // rejected — which is why dream.num_predict exists as an opt-in per install
 // rather than a higher constant for everyone.
+//
+// PROD 2026-08-22/24 (Nemotron 3.5 Lightning): some models served through
+// vLLM/LiteLLM ignore "Maximum 5 entries" and enumerate every candidate
+// (~40 tokens per pretty-printed array entry). 600 truncated the JSON with
+// 10+ candidates, 1200 with 21-28 candidates ("parse links: unexpected end
+// of JSON input"). Set dream.num_predict=1600 (covers ~30 entries) on such
+// installs — still far below the 12000 that previously let reasoning tokens
+// blow the budget. Backends that obey the 5-entry instruction stay well
+// under it (measured 61-315 tokens).
 const DefaultNumPredict = 600
 
 // DreamOptions returns Ollama options for dream evaluation on the package
