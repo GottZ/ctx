@@ -195,6 +195,7 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
         self._session_id = ""
         self._root_session_id = ""
         self._platform = ""
+        self._agent_context = ""
 
     @property
     def name(self) -> str:
@@ -214,6 +215,15 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
         self._session_id = str(session_id or "")
         self._root_session_id = self._session_id
         self._platform = str(kwargs.get("platform") or "")
+        # Upstream vocabulary: "primary", "subagent", "cron", "flush"
+        # (agent/memory_provider.py, initialize() docstring). Since
+        # NousResearch/hermes-agent#94983 the five fork sites inherit the
+        # configured provider under an armed checkpoint gate and initialize
+        # their own instance with agent_context="subagent", so a fork's working
+        # transcript reaches this archive as evidence in its own right. We
+        # label it rather than drop it; an absent or empty kwarg stays empty
+        # instead of claiming "primary" about a host that never said so.
+        self._agent_context = str(kwargs.get("agent_context") or "")
 
     def on_session_switch(
         self,
@@ -256,6 +266,7 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
             "root_session_id": root,
             "active_session_id": self._session_id,
             "platform": self._platform,
+            "agent_context": self._agent_context,
             "sha256": digest,
             "warnings": ["W1", "W3", "W5", "W9", "W18", "W19", "W21"],
             "invalidated_by": "A verified correction or transcript-recovery finding",

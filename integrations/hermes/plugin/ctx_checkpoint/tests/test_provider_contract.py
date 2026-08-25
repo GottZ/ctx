@@ -231,3 +231,48 @@ def test_provider_links_new_manifest_to_previous_head_manifest_before_head_updat
     assert manifest_args["metadata"]["parent_manifest_id"] == previous_manifest_id
     assert previous_manifest_id in manifest_args["content"]
     assert "019f6000-0000-7000-8000-000000000094" in calls[4][1]["content"]
+
+
+def _store_metadata_for(**initialize_kwargs):
+    """Return the metadata of every block written for one checkpoint run."""
+    calls = []
+    counter = 100
+
+    def dispatch(name, args, **kwargs):
+        nonlocal counter
+        calls.append((name, args))
+        if name == "mcp__ctx__search":
+            return json.dumps({"result": "[]"})
+        block_id = f"019f6000-0000-7000-8000-{counter:012d}"
+        counter += 1
+        return json.dumps({"id": block_id})
+
+    provider = CtxCheckpointMemoryProvider(dispatch=dispatch)
+    provider.initialize("session-fork", **initialize_kwargs)
+    provider.on_pre_compress(
+        [{"role": "user", "content": "fork evidence worth archiving"}]
+    )
+    return [args["metadata"] for name, args in calls if name == "mcp__ctx__store"]
+
+
+def test_subagent_fork_checkpoint_is_labelled_in_every_block_metadata():
+    metadata = _store_metadata_for(platform="cli", agent_context="subagent")
+
+    assert len(metadata) == 3
+    assert all(entry["agent_context"] == "subagent" for entry in metadata)
+    assert all(entry["platform"] == "cli" for entry in metadata)
+
+
+def test_missing_agent_context_stays_empty_instead_of_claiming_primary():
+    metadata = _store_metadata_for(platform="cli")
+
+    assert len(metadata) == 3
+    assert all(entry["agent_context"] == "" for entry in metadata)
+    assert all(entry["platform"] == "cli" for entry in metadata)
+
+
+def test_agent_context_and_platform_are_independent_metadata_keys():
+    metadata = _store_metadata_for(platform="telegram", agent_context="cron")
+
+    assert all(entry["platform"] == "telegram" for entry in metadata)
+    assert all(entry["agent_context"] == "cron" for entry in metadata)

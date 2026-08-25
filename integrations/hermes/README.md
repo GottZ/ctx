@@ -155,7 +155,7 @@ compression:
 Contract tests ship on both sides: host-side upstream in
 `tests/agent/test_pre_compress_checkpoint_contract.py` (17 tests on `main`)
 and provider-side here in
-`plugin/ctx_checkpoint/tests/test_provider_contract.py` (6 tests, mocked MCP
+`plugin/ctx_checkpoint/tests/test_provider_contract.py` (9 tests, mocked MCP
 dispatch — no live ctx needed).
 
 The pre-merge patch series that used to supply the contract is retired and
