@@ -84,6 +84,16 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 			},
 		},
 		Graph: config.GraphConfig{HopDepth: 1},
+		// V21 (issue #38): the embed back-off bases must be > 0 — a
+		// zero-value fixture would be exactly the retry-immediately config
+		// Validate now rejects. Registry defaults (60s/24h), not wire-active
+		// in these tests.
+		EmbedBackfill: config.EmbedBackfillConfig{
+			BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour,
+		},
+		EmbedMigration: config.EmbedMigrationConfig{
+			BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour,
+		},
 		Query: config.QueryConfig{
 			ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: "v5.2",
 		},
