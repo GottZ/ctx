@@ -736,9 +736,13 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// master gate closed the decision is {ann, disabled} and this line stays
 	// byte-identical to the pre-selector state, same doctrine as the
 	// access-log metadata in logAccess.
+	// sql_limit is the CLAMPED window ctx_rrf ran with: internal_limit is what
+	// this pipeline computed, and only the clamped value explains result_count
+	// when the two differ.
 	searchAttrs := []any{
 		"result_count", len(results),
 		"internal_limit", internalLimit,
+		"sql_limit", selectorDec.SQLLimit,
 		"user_limit", limit,
 		"request_id", requestID,
 	}

@@ -146,9 +146,7 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 	if len(dampedTypes) != len(dampedFactors) {
 		return nil, SelectorDecision{}, fmt.Errorf("rrf: damped types/factors length mismatch (%d != %d)", len(dampedTypes), len(dampedFactors))
 	}
-	if limit < 1 || limit > 200 {
-		limit = 5
-	}
+	limit = clampSearchLimit(limit)
 
 	// Build halfvec from float32 slice.
 	hv := pgvec.NewHalfVector(embedding)
@@ -206,6 +204,7 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 		return boundedProbe(ctx, pool, scopes, limit)
 	}
 	decision := decide(ctx, probe, poolStatsEstimator(pool), scopes, grantedBlockIDs, policy)
+	decision.SQLLimit = limit
 
 	exec := func(ctx context.Context, mode string, scanTuples, exactCap any) ([]SearchResult, error) {
 		args := []any{hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam,

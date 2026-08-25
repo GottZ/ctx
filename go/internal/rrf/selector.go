@@ -71,6 +71,15 @@ type SelectorDecision struct {
 	Reason   string  // see the Reason* constants
 	Estimate int     // probe count (exact, ≤ ExactMax+1) or pg_stats estimate
 	ProbeMs  float64 // probe roundtrip duration; 0 when no probe ran
+
+	// SQLLimit is the CLAMPED p_limit that ctx_rrf actually received, so an
+	// operator's log carries the effective window instead of the value the
+	// caller computed before the clamp (Issue #40 Bug 1: the two diverged
+	// silently, and result_count then looked like a thin corpus). It rides
+	// this struct because it is per-search mechanism metadata on the exact
+	// path the decision already travels; 0 means the search never reached
+	// the clamp (an early fail-closed reject).
+	SQLLimit int
 }
 
 // selectorProbe is the injected cardinality probe. Injecting it (instead of

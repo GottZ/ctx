@@ -73,8 +73,11 @@ type childFold struct {
 // factor on the base internal limit, not a shrink to limit×2. Doc deviation
 // recorded in design/02 §4.4 handling; the ×2 factor is kept.
 const (
-	overFetchFactor  = 2
-	overFetchHardCap = 500
+	overFetchFactor = 2
+	// Derived, never a literal of its own: this ceiling and the clamp inside
+	// rrf.Search bound the SAME value from two sides, and as two independent
+	// literals they drifted apart (Issue #40 Bug 1).
+	overFetchHardCap = rrf.MaxSearchLimit
 )
 
 // aggregateOverFetchLimit returns a widened internal limit when the caller's read
