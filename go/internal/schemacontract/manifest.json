@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 134,
-    "migration_count": 22,
+    "migration_max": 135,
+    "migration_count": 23,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3353,6 +3353,184 @@
       ],
       "row_security": false
     },
+    "distill_run": {
+      "columns": [
+        {
+          "name": "run_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "source_key",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "root_session_id",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "outcome",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "skip_reason",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "watermark_from",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "watermark_to",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "gen",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rows_seen",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rows_selected",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rows_dropped_cred",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rows_dropped_dup",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rows_dropped_enc",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "chars_selected",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "calls",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "call_budget",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "insights_kept",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "insights_rejected",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "blocks_written",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "manifest_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "model",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "plan_strategy",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "error",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "distill_seen": {
+      "columns": [
+        {
+          "name": "source_key",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "row_hash",
+          "type": "bytea",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "last_seen",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
     "graph_cluster_centroid": {
       "columns": [
         {
@@ -4212,6 +4390,12 @@
     "context_write_log_pkey": {
       "def_hash": "d6b8348197b1d21d56683fe93c2efcbc8726541f0a1ea2a760cda1ff092338b9"
     },
+    "distill_run_pkey": {
+      "def_hash": "f36a169056ff709d49a6d8e974d964ff7bbae1c2612463b4c45126d0d332ae4d"
+    },
+    "distill_seen_pkey": {
+      "def_hash": "06f4523a65ddb53b58bd3fa2b166300cea7b0e35c1a39d7624033ed4b18bcb3b"
+    },
     "graph_cluster_centroid_pkey": {
       "def_hash": "bf3130cbd94f5448866e9889782d3b2ec98848b3da63f3fbea53cc4fd75f3281"
     },
@@ -4314,6 +4498,9 @@
     "idx_block_type": {
       "def_hash": "e1a70683f83d8b5188d741975e6081a8646b535068216ef164d52b954949e4be"
     },
+    "idx_blocks_checkpoint_root": {
+      "def_hash": "a4e43540fd3680ee2e72fc4205e159ff03386b911ef0564f510deaa75fa7bbbd"
+    },
     "idx_blocks_dream_keywords_pending": {
       "def_hash": "96b81ec6793fb5c9a1ad34b52f78213f215af1bbcf93bf108118b0a48b80043e"
     },
@@ -4370,6 +4557,18 @@
     },
     "idx_context_ts_en": {
       "def_hash": "bf74ac9715e82e8452e3f44f1df317a3b9ad9bf3768f8ed9f7c3bd50eb5375d6"
+    },
+    "idx_distill_run_running": {
+      "def_hash": "3175786738dcb952be04b622aefd6b4ffad9075e02a1eef8de3c44eb5eec54ac"
+    },
+    "idx_distill_run_source": {
+      "def_hash": "3c7f009c6d5ef3a305703103ed8becf3880a99aa56dbf8f20715c8d8c9ac9fb4"
+    },
+    "idx_distill_run_tripped": {
+      "def_hash": "b44f02cd2d9fec23be1a0242d0f754835e5353b2e3167cff72507b9c699a6004"
+    },
+    "idx_distill_seen_age": {
+      "def_hash": "1539962a03617a0e90ca6f06e913cdc03e08fdfb962ac9e7f344159e96b3e43a"
     },
     "idx_dream_links_confidence": {
       "def_hash": "6116a7b2554f0dad8821c872653fba21b7fafc391e64a951602dbcf5deb0743c"
