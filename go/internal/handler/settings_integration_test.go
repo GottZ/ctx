@@ -229,6 +229,49 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		}
 	})
 
+	// E-M6: the semantic floor is a REFUSAL switch, so its API surface gets its
+	// own probe rather than riding on the blend-weight vehicle above — hot
+	// effect (an operator turns the gate on without a restart), the V26 range
+	// refusal at the PUT (1.0 would silently stop answering queries), and the
+	// DELETE back to the 0 default that means "off".
+	t.Run("SemanticFloorHotRoundtripAndRangeRefusal", func(t *testing.T) {
+		if got := cfgStore.Snapshot().Query.SemanticFloor; got != 0 {
+			t.Fatalf("semantic_floor starts at %v, want the 0 default (gate off)", got)
+		}
+		rec := api.do(t, http.MethodPut, "/api/settings/query.semantic_floor", `{"value":"0.42"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if resp := api.envelope(t, rec); resp["value"] != 0.42 || resp["source"] != "db" {
+			t.Errorf("PUT response = %v/%v, want 0.42/db", resp["value"], resp["source"])
+		}
+		if got := cfgStore.Snapshot().Query.SemanticFloor; got != 0.42 {
+			t.Errorf("snapshot semantic_floor = %v, want 0.42 — mut:hot means the next query already gates", got)
+		}
+
+		// V26 at the surface an operator touches. The refusal must leave the
+		// working 0.42 in place: a rejected floor may never become a stricter one.
+		rec = api.do(t, http.MethodPut, "/api/settings/query.semantic_floor", `{"value":1.0}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("PUT 1.0 status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+		}
+		rec = api.do(t, http.MethodPut, "/api/settings/query.semantic_floor", `{"value":-0.1}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("PUT -0.1 status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+		}
+		if got := cfgStore.Snapshot().Query.SemanticFloor; got != 0.42 {
+			t.Errorf("snapshot semantic_floor = %v after two refusals, want the surviving 0.42", got)
+		}
+
+		rec = api.do(t, http.MethodDelete, "/api/settings/query.semantic_floor", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("DELETE status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if got := cfgStore.Snapshot().Query.SemanticFloor; got != 0 {
+			t.Errorf("snapshot semantic_floor = %v after DELETE, want the 0 default", got)
+		}
+	})
+
 	t.Run("InvalidValue422BeforePersist", func(t *testing.T) {
 		before := auditCount("rerank.blend_weight")
 		snapBefore := cfgStore.Snapshot()

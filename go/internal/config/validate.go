@@ -63,7 +63,7 @@ func temporalTimeoutBudgetOf(c *Config) time.Duration {
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11
+	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11, V26
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
 	issues = append(issues, validateGraphOverview(c)...) // V17b
@@ -387,6 +387,19 @@ func validateQuery(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "query.score_threshold", Severity: SeverityError,
 			Msg: fmt.Sprintf("score_threshold %g > confident_threshold %g makes low_confidence unreachable",
 				c.Query.ScoreThreshold, c.Query.ConfidentThreshold)})
+	}
+
+	// V26 (E-M6) — query.semantic_floor is compared against a COSINE
+	// SIMILARITY, so the only values that can ever fire live in [0,1): 1.0
+	// demands a verbatim match of the query against a stored block and would
+	// refuse every real question without ever calling the LLM, and a negative
+	// value presents as a configured number in the settings surface while the
+	// gate reads <= 0 as "off" — the same silent-off shape V9b/V9c refuse.
+	// Fatal, not a clamp: a floor is a rejection switch, and guessing what an
+	// operator meant by 1.0 would decide for them which questions get answered.
+	if c.Query.SemanticFloor < 0 || c.Query.SemanticFloor >= 1 {
+		issues = append(issues, Issue{Field: "query.semantic_floor", Severity: SeverityError,
+			Msg: fmt.Sprintf("semantic floor %g must be >= 0 and < 1 (0 = off)", c.Query.SemanticFloor)})
 	}
 
 	// V5 — today's llm init() semantics: log + fall back to v5.2.

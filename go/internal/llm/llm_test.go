@@ -230,8 +230,8 @@ func TestFormatAnswer(t *testing.T) {
 		want string
 	}{
 		{"normal text", "The service runs on port 443 [1].", "The service runs on port 443 [1]."},
-		{"exact no relevant", "NO_RELEVANT_SOURCES", noRelevantReplacement},
-		{"no relevant with newline suffix", "NO_RELEVANT_SOURCES\nsome extra", noRelevantReplacement},
+		{"exact no relevant", "NO_RELEVANT_SOURCES", NoRelevantReplacement},
+		{"no relevant with newline suffix", "NO_RELEVANT_SOURCES\nsome extra", NoRelevantReplacement},
 		{"trailing no relevant marker", "Answer here. NO_RELEVANT_SOURCES", "Answer here."},
 		{
 			"double trailing marker",
@@ -244,7 +244,7 @@ func TestFormatAnswer(t *testing.T) {
 		{
 			"only marker after stripping becomes replacement",
 			"  NO_RELEVANT_SOURCES  ",
-			noRelevantReplacement,
+			NoRelevantReplacement,
 		},
 		{"text before marker is preserved", "Port 443. NO_RELEVANT_SOURCES", "Port 443."},
 	}

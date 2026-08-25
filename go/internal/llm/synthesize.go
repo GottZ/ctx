@@ -34,17 +34,23 @@ const (
 	// NoRelevantResponse is the LLM's rejection marker.
 	NoRelevantResponse = "NO_RELEVANT_SOURCES"
 
-	// noRelevantReplacement is the user-facing rejection text emitted when the LLM
+	// NoRelevantReplacement is the user-facing rejection text emitted when the LLM
 	// returns NO_RELEVANT_SOURCES. Kept English so the exact substring "I don't know"
 	// matches CRAG-style judge regexes and stays locale-agnostic across mixed-language
 	// corpora. (Welle-47 P2 / v2.0.0 C4 — replaces previous German phrasing that
 	// caused CRAG-Judge mis-classifications: 3/10 refusals scored as hallucinations
 	// instead of missing.)
-	noRelevantReplacement = "I don't know based on the available sources."
+	//
+	// Exported since E-M6: a caller may decide BEFORE the LLM that no retrieved
+	// source relates to the question (the handler's semantic floor gate). It
+	// must then emit this exact string, because the answer text is the only part
+	// of a refusal that downstream judges and eval harnesses read — a second
+	// phrasing for the same verdict would split them.
+	NoRelevantReplacement = "I don't know based on the available sources."
 
 	// noResultsTemplate is the user-facing text emitted when the score filter
 	// removes all sources before the LLM is called. Kept English for the same
-	// reason as noRelevantReplacement.
+	// reason as NoRelevantReplacement.
 	noResultsTemplate = "I don't know based on the available sources for: %s"
 )
 
@@ -743,7 +749,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 // low_confidence instead of no_relevant_blocks_found — preserving the RRF signal.
 // Returns the adjusted confidence and whether the LLM rejected.
 func ApplyConfidenceOverride(answer, confidence string) (string, bool) {
-	if !strings.HasPrefix(answer, noRelevantReplacement) {
+	if !strings.HasPrefix(answer, NoRelevantReplacement) {
 		return confidence, false
 	}
 	// LLM rejected. Only override to no_relevant if RRF wasn't confident.
@@ -768,7 +774,7 @@ func FormatAnswer(raw string) string {
 
 	// Full rejection or starts with rejection marker.
 	if answer == NoRelevantResponse || strings.HasPrefix(answer, NoRelevantResponse+"\n") {
-		return noRelevantReplacement
+		return NoRelevantReplacement
 	}
 
 	// Strip trailing NO_RELEVANT_SOURCES.
@@ -777,7 +783,7 @@ func FormatAnswer(raw string) string {
 	}
 
 	if answer == "" {
-		return noRelevantReplacement
+		return NoRelevantReplacement
 	}
 
 	return answer

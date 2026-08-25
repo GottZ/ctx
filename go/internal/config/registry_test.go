@@ -345,6 +345,10 @@ func TestRegistryTenancySet(t *testing.T) {
 		// query-path tuning
 		"query.score_threshold": true, "query.confident_threshold": true, "query.prompt_version": true,
 		"query.timezone": true, "query.rate_limit_write": true, "query.rate_limit_read": true,
+		// E-M6: same class as the two thresholds above — the semantic floor
+		// decides whether a tenant's OWN query is worth a synthesis call, and
+		// the separating value is a property of that tenant's corpus.
+		"query.semantic_floor": true,
 		// per-tenant scope resolution (consumer MUST intersect with entitlements — T38)
 		"scheduler.read_scopes": true, "scheduler.home_scope": true,
 		// per-tenant trust policy
@@ -399,8 +403,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 65 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 65 (change it with intent)", got)
+	if got := len(overridable); got != 66 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 66 (change it with intent)", got)
 	}
 	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
 	// tenant override here would flush the process-wide embed cache / flip the

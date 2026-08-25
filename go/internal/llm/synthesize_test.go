@@ -337,10 +337,10 @@ func TestNoRelevantReplacement_ContainsCRAGSentinel(t *testing.T) {
 	// CRAG local_evaluation.py matches IDK refusals on the lowercase substring
 	// "i don't know". Any future re-wording MUST preserve this anchor — or
 	// update every downstream judge in lockstep. Don't break the contract silently.
-	if !strings.Contains(strings.ToLower(noRelevantReplacement), "i don't know") {
+	if !strings.Contains(strings.ToLower(NoRelevantReplacement), "i don't know") {
 		t.Errorf(
-			"noRelevantReplacement = %q must contain lowercased substring %q for CRAG judge compatibility",
-			noRelevantReplacement, "i don't know",
+			"NoRelevantReplacement = %q must contain lowercased substring %q for CRAG judge compatibility",
+			NoRelevantReplacement, "i don't know",
 		)
 	}
 }
@@ -350,9 +350,9 @@ func TestNoRelevantReplacement_IsASCII(t *testing.T) {
 	// transliteration surface area that produced the prior "verfuegbaren"
 	// (no-ä keyboard) artefact. If a future locale-aware variant is added,
 	// gate it behind an explicit OutputLanguage signal — not a string toggle.
-	for i, r := range noRelevantReplacement {
+	for i, r := range NoRelevantReplacement {
 		if r > 127 {
-			t.Errorf("noRelevantReplacement contains non-ASCII rune %q at byte %d", r, i)
+			t.Errorf("NoRelevantReplacement contains non-ASCII rune %q at byte %d", r, i)
 		}
 	}
 }
@@ -386,7 +386,7 @@ func TestConfidenceOverride_DetectsEnglishRejectionPrefix(t *testing.T) {
 	// ApplyConfidenceOverride relies on the answer-prefix to detect rejection.
 	// After v2.0.0 C4 the prefix is English — the override logic must continue
 	// to fire on the new wording, otherwise LLMRejected is silently dropped.
-	answer := FormatAnswer(NoRelevantResponse) // → noRelevantReplacement
+	answer := FormatAnswer(NoRelevantResponse) // → NoRelevantReplacement
 	newConf, rejected := ApplyConfidenceOverride(answer, ConfidenceConfident)
 	if !rejected {
 		t.Errorf("ApplyConfidenceOverride on English IDK reply: rejected=false, want true (answer=%q)", answer)

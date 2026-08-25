@@ -52,6 +52,30 @@ func TestValidateTable(t *testing.T) {
 			"query.score_threshold": "0.008", "query.confident_threshold": "0.008",
 		}, "query.score_threshold", -1},
 
+		// V26 (E-M6) — query.semantic_floor is a cosine similarity: [0,1) or it
+		// cannot fire. 1.0 would demand a verbatim corpus match and refuse every
+		// real question without an LLM call; a negative value renders as a
+		// configured number while the gate reads it as off.
+		{"V26 floor one rejected", map[string]string{
+			"query.semantic_floor": "1.0",
+		}, "query.semantic_floor", SeverityError},
+		{"V26 floor above one rejected", map[string]string{
+			"query.semantic_floor": "1.5",
+		}, "query.semantic_floor", SeverityError},
+		{"V26 negative floor rejected", map[string]string{
+			"query.semantic_floor": "-0.1",
+		}, "query.semantic_floor", SeverityError},
+		{"V26 default zero ok", map[string]string{}, "query.semantic_floor", -1},
+		{"V26 explicit zero ok", map[string]string{
+			"query.semantic_floor": "0",
+		}, "query.semantic_floor", -1},
+		{"V26 mid-range ok", map[string]string{
+			"query.semantic_floor": "0.45",
+		}, "query.semantic_floor", -1},
+		{"V26 just under one ok", map[string]string{
+			"query.semantic_floor": "0.999",
+		}, "query.semantic_floor", -1},
+
 		// V3 — pure CE order over graph-injected neighbors (Wave-3: destructive).
 		{"V3 blend 1.0 + graph", map[string]string{
 			"rerank.blend_weight": "1.0", "graph.enabled": "true",

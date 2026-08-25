@@ -1079,6 +1079,39 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Step 7c: Semantic floor — the post-fusion confidence gate (E-M6). Reads
+	// the FINAL result set (fused, boosted, reranked, truncated) and refuses
+	// off-topic queries deterministically instead of paying a synthesis call for
+	// the LLM to refuse them. Off by default (query.semantic_floor = 0), and
+	// while it is off evalSemanticFloor returns a zero verdict, so the pipeline
+	// below is byte-identical to the pre-E-M6 one. The rule and the reason the
+	// lexical clause exists are in semantic_floor.go.
+	//
+	// The response shape is the one the score-filter refusal already produces
+	// (llm.Synthesize Step 1): empty sources, no eval_count, model filled from
+	// the pool below — with the answer text of an LLM refusal, because that is
+	// the verdict this gate substitutes for.
+	if fd := evalSemanticFloor(results, cfg.Query.SemanticFloor, cfg.Query.ConfidentThreshold); fd.Reject {
+		slog.Info("semantic floor: rejected without synthesis",
+			"best_cos", fd.BestCos,
+			"floor", cfg.Query.SemanticFloor,
+			"lexical", fd.Lexical,
+			"source_count", len(results),
+			"request_id", requestID,
+		)
+		go h.logAccess(ar, results, query, selectorDec)
+		hb.finish(http.StatusOK, queryResponse{
+			Success:             true,
+			Answer:              llm.NoRelevantReplacement,
+			Sources:             buildSourceResponses(nil, supersedesMap, false),
+			Confidence:          llm.ConfidenceNoRelevant,
+			Model:               h.backendPool.PrimaryModel(backends.RoleSynthesis),
+			Translated:          translated,
+			ActivatedDimWeights: activatedDimWeights(temporalResult),
+		})
+		return
+	}
+
 	// Step 8: Synthesize (filter, confidence, reorder, LLM call).
 	// Uses originalQuery so the LLM answers in the user's language.
 	// Temporal dates are passed for conditional date context in the synthesis prompt.

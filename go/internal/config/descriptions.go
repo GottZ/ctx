@@ -113,6 +113,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: SchlÃ
 	"graph_cache.serve_expand":                       "Lets query-time graph expansion answer from the CSR cache snapshot instead of SQL, with automatic SQL fallback on a stale snapshot",
 	"query.score_threshold":                          "Minimum RRF score a retrieved source needs to enter answer synthesis; raising it drops weaker sources from answers",
 	"query.confident_threshold":                      "Top-source RRF score required to label an answer confident; below it confidence downgrades to low â€” must stay above score_threshold",
+	"query.semantic_floor":                           "Minimum cosine similarity the best embedding-matched result must reach before a query is worth an LLM call; below it, and with no lexical-only hit carrying the result set, the answer is refused without synthesis. 0 = off",
 	"query.prompt_version":                           "Selects the synthesis system prompt generation (v5.2 or v6); values outside these are rejected at config load",
 	"query.timezone":                                 "IANA timezone used to interpret temporal queries and render timestamps; empty means UTC",
 	"query.rate_limit_write":                         "Maximum write operations per API key in a 60-second window; 0 disables write rate limiting",

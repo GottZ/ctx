@@ -333,6 +333,34 @@ func TestBuildOutOfRangeDurationOverridesDropped(t *testing.T) {
 	}
 }
 
+// TestBuildSemanticFloorOverrideDropped is the V26 half of the class above at
+// the surface an operator touches. The E-M6 gate is a REFUSAL switch: an
+// out-of-range floor that survived the drop pass would silently stop answering
+// queries, so the boot path must fall back to the 0 default (= gate off) and
+// say so per key — the same attribution handler/settings.go turns into the 422.
+func TestBuildSemanticFloorOverrideDropped(t *testing.T) {
+	resetBuildEnv(t)
+
+	c, issues := Build([]Override{
+		{Key: "query.semantic_floor", Value: "1.0"},        // parses, V26 SeverityError
+		{Key: "query.confident_threshold", Value: "0.009"}, // healthy neighbour
+	}, nil)
+
+	if HasErrors(issues) {
+		t.Fatalf("override layer must never produce errors, got: %v", issues)
+	}
+	warnFor(t, issues, "query.semantic_floor", "settings override dropped")
+
+	if c.Query.SemanticFloor != 0 || c.Source("query.semantic_floor") != "default" {
+		t.Errorf("semantic_floor = %v (source %q), want the 0 default after the drop — a refusal switch may never boot out of range",
+			c.Query.SemanticFloor, c.Source("query.semantic_floor"))
+	}
+	if c.Query.ConfidentThreshold != 0.009 || c.Source("query.confident_threshold") != "settings" {
+		t.Errorf("healthy override must survive the drop pass: confident_threshold=%v source=%q",
+			c.Query.ConfidentThreshold, c.Source("query.confident_threshold"))
+	}
+}
+
 // A cross-field error NOT attributable to any override withdraws ALL
 // overrides — degraded, loud, never fatal.
 //

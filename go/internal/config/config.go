@@ -814,6 +814,35 @@ type QueryConfig struct {
 	Timezone           *time.Location `key:"query.timezone" env:"CTX_TIMEZONE" default:"" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	RateLimitWrite     int            `key:"query.rate_limit_write" env:"CTX_RATE_LIMIT_WRITE" default:"100" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	RateLimitRead      int            `key:"query.rate_limit_read" env:"CTX_RATE_LIMIT_READ" default:"0" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	// SemanticFloor is the post-fusion confidence gate (E-M6). The 4-Way RRF
+	// fusion is purely RANK-based: the semantic arm always returns its 75
+	// nearest neighbours no matter how far away they are, so an off-topic query
+	// still produces a rank-1 semantic hit (0.45/61 = 0.0074) that a single
+	// lexical graze lifts past ConfidentThreshold. The result set then looks
+	// answerable, and the only thing that says otherwise is a full synthesis
+	// call whose entire output is a refusal.
+	//
+	// The floor is the distance signal the fusion throws away: a MINIMUM cosine
+	// similarity the best embedding-compared result must reach before the
+	// question is worth an LLM call. It is deliberately NOT a candidate filter
+	// inside the arm (that kills recall on DE↔EN and terse phrasings and acts
+	// BEFORE fusion) — it reads the fused set and only decides go/no-go.
+	//
+	// 0 = off, and off is the shipped default: the separating value is a
+	// property of the CORPUS (how far the nearest neighbour of a foreign
+	// question lands), so it can only be set from a measurement of the corpus
+	// it guards. Range is [0,1) — see V26 in validate.go.
+	//
+	// Measured on the live corpus (2026-08-25, 39 of the 47 eval queries):
+	// off-topic questions top out at 0.407 nearest-neighbour similarity, the
+	// weakest genuine question sits at 0.437, and nothing lies between them —
+	// 0.42 separates the two classes with room on both sides. Those are ONE
+	// corpus's numbers and deliberately not the default: a floor shipped
+	// pre-armed would start refusing questions on installs nobody measured.
+	//
+	// tenant-overridable like the two thresholds above and for the same reason:
+	// it changes only how that tenant's OWN queries are answered.
+	SemanticFloor float64 `key:"query.semantic_floor" env:"CTX_SEMANTIC_FLOOR" default:"0" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // DigestConfig is the LINEAR topic map's remaining knob (plan-cluster-topicmap
