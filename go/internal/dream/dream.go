@@ -337,8 +337,8 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	if len(keywords) == 0 {
 		generated, genErr := GenerateKeywords(ctx, pool, r, block)
 		if genErr != nil {
-			slog.Warn("dream: LLM keyword generation exhausted retries, transient cooldown",
-				"block_id", block.ID, "error", genErr)
+			slog.Warn("dream: keyword generation failed (LLM + deterministic fallback), parking block",
+				"block_id", block.ID, "cooldown_minutes", CooldownKeywordFailMinutes, "error", genErr)
 			// Not the 5-min transient cooldown: a block that deterministically
 			// fails keyword extraction (degenerate model output on its content)
 			// would re-pick every ~6 min and stall the cycle. Park it 12h.
