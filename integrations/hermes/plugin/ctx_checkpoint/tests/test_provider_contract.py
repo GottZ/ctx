@@ -33,7 +33,7 @@ def test_provider_publishes_versioned_stable_head_with_bounded_frame():
         [{"role": "user", "content": "durable source decision"}]
     )
 
-    assert provider.pre_compress_checkpoint_api_version == 1
+    assert provider.pre_compress_checkpoint_api_version == 2
     assert [name for name, _ in calls] == [
         "mcp__ctx__search",
         "mcp__ctx__store",
@@ -138,7 +138,7 @@ def test_memory_manager_accepts_provider_as_required_checkpoint_api_v1():
     frame = manager.on_pre_compress(
         [{"role": "user", "content": "manager integration evidence"}],
         require_checkpoint=True,
-        checkpoint_api_version=1,
+        checkpoint_api_version=2,
     )
 
     assert "019f6000-0000-7000-8000-000000000073" in frame

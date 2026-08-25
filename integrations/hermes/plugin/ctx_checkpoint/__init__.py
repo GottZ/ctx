@@ -179,7 +179,11 @@ def _parse_tool_result(raw: Any) -> tuple[Optional[str], Optional[str], Optional
 class CtxCheckpointMemoryProvider(MemoryProvider):
     """Archive redacted direct conversation evidence before compaction."""
 
-    pre_compress_checkpoint_api_version = 1
+    # 2 = fail-closed checkpoint contract as merged upstream (NousResearch/hermes-agent#94639,
+    # 2026-08-25). Upstream renumbered: 1 now means the historical best-effort hook, the
+    # fail-closed gate requires >= 2. Backward-compatible with the v1-contract images
+    # (their gate checks >= 1). Input shape is unchanged (normalized direct evidence).
+    pre_compress_checkpoint_api_version = 2
 
     def __init__(
         self,
