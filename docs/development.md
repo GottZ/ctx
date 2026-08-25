@@ -123,6 +123,18 @@ throughput block as `reasoning_tokens` where the server reports it, so the
 reasoning tax is measured instead of inferred from truncations. Dataset card,
 axis table and anonymization method: [github.com/GottZ/ctx-bench](https://github.com/GottZ/ctx-bench).
 
+The scoring primitives themselves live in `internal/evalscore` — micro-F1,
+token-F1, nDCG@k, the aggregation helpers, the `pg_trgm` similarity
+reimplementation and the seeded percentile bootstrap CI — so a second
+evaluation harness scores against the same kernels instead of forking them;
+`internal/goldbench` delegates to them and keeps only the metrics tied to a
+ctx axis contract (the keyword/tagging prediction cap and substring match).
+The package also carries the paired statistics an A/B comparison needs:
+`McNemar` (exact binomial, the `b/c/discordant/net/p` table) and
+`PairedDiffCI` (the bootstrap CI of a per-case difference vector, with the
+confidence level as an explicit parameter, so a multiplicity correction
+travels with the comparison instead of being baked into the estimator).
+
 `-dump-outputs <path>` writes every raw model answer as JSONL
 (`{axis,id,outputs}`) before any parsing — the substrate for offline
 re-scoring (judge-based or retrieval-functional evaluation) without repeating
