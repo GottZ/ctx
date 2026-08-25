@@ -60,6 +60,42 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
+	issues = append(issues, validateEmbedBackoff(c)...)  // V21
+	return issues
+}
+
+// validateEmbedBackoff is V21 (issue #38): the two embed back-off bases must
+// be strictly positive. Their consumer (store/embed_failures.go) plugs the
+// base straight into Postgres' make_interval as `base * 2^attempts` — with
+// base 0 every failure memo computes next_attempt_at = now(), so the memo
+// parks nothing and a failing embed backend is retried in a tight loop. At
+// the target scale (10M+ blocks) that is a self-inflicted DoS of the embed
+// lane, which is why the class is fatal (boot drops the offending override /
+// 422 on the settings write) and not a WARN: unlike the duration keys whose
+// 0 means "off" or "package default", these two have NO safe zero reading.
+//
+// graph_cache.debounce_window was named in the same issue and deliberately
+// stays legal at 0: its consumer compares `quiet >= DebounceWindow` inside a
+// poll-bounded scheduler arm that min_rebuild_interval brakes independently,
+// so 0 means "rebuild on the next poll without a quiet requirement" — a
+// legitimate setting, now documented on the key.
+//
+// The negative half of both keys stays V17's (generic duration walk); this
+// check owns exactly the zero.
+func validateEmbedBackoff(c *Config) []Issue {
+	var issues []Issue
+	for _, k := range []struct {
+		key string
+		val time.Duration
+	}{
+		{"embed_backfill.backoff_base", c.EmbedBackfill.BackoffBase},
+		{"embed_migration.backoff_base", c.EmbedMigration.BackoffBase},
+	} {
+		if k.val == 0 {
+			issues = append(issues, Issue{Field: k.key, Severity: SeverityError,
+				Msg: fmt.Sprintf("%s must be > 0 — the consumer reads 0 as \"retry immediately\" (base * 2^attempts stays 0), so the failure memo parks nothing and a failing embed backend is retried in a tight loop", k.key)})
+		}
+	}
 	return issues
 }
 
@@ -115,8 +151,8 @@ func validateGraphOverview(c *Config) []Issue {
 // 0 is NOT checked. What zero means is per key — "package default" for the
 // dream timeouts, "off" for status.channel_probe_interval, "retry
 // immediately" for the embed back-off bases — and this walk does not have
-// that knowledge. Hardening the two back-off bases to `> 0` is its own
-// change, on its own issue.
+// that knowledge. The two back-off bases carry their own `> 0` check
+// (V21, validateEmbedBackoff, issue #38).
 //
 // The type assertion is safe by construction: typDuration is
 // reflect.TypeOf(time.Duration(0)) (registry.go), so every entry carrying it

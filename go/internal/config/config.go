@@ -1410,7 +1410,9 @@ type EmbedBackfillConfig struct {
 	// server-side in the upsert (store.RecordEmbedFailure) to avoid a
 	// read-then-write race across concurrent pickers. Bare seconds, like
 	// the other duration keys (contract.recheck_interval convention).
-	// Default 1min base / 24h cap (design/04 §4.4).
+	// Default 1min base / 24h cap (design/04 §4.4). Validated by V21
+	// (validateEmbedBackoff, issue #38): 0 is an ERROR — the consumer reads
+	// it as "retry immediately", a tight loop against a failing backend.
 	BackoffBase time.Duration `key:"embed_backfill.backoff_base" env:"CTX_EMBED_BACKFILL_BACKOFF_BASE" default:"60" mut:"hot" tenancy:"global-only"`
 	BackoffCap  time.Duration `key:"embed_backfill.backoff_cap" env:"CTX_EMBED_BACKFILL_BACKOFF_CAP" default:"86400" mut:"hot" tenancy:"global-only"`
 }
@@ -1443,7 +1445,8 @@ type EmbedMigrationConfig struct {
 	// migration-scoped failure memos (context_embed_failures rows with
 	// migration_id set) — server-side exponent, bare seconds, exactly the
 	// embed_backfill.backoff_* mechanics. Default 1min base / 24h cap
-	// (design §4.4).
+	// (design §4.4). Validated by V21 like its backfill sibling: 0 is an
+	// ERROR (retry-immediately tight loop).
 	BackoffBase time.Duration `key:"embed_migration.backoff_base" env:"CTX_EMBED_MIGRATION_BACKOFF_BASE" default:"60" mut:"hot" tenancy:"global-only"`
 	BackoffCap  time.Duration `key:"embed_migration.backoff_cap" env:"CTX_EMBED_MIGRATION_BACKOFF_CAP" default:"86400" mut:"hot" tenancy:"global-only"`
 	// VerifySampleN is the W04-5 verify gate's sampling knob (design/04

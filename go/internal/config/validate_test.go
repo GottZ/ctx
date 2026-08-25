@@ -215,7 +215,24 @@ func TestValidateTable(t *testing.T) {
 		{"V17 strict key negative", map[string]string{"dispatch.lease_max_age": "-30"}, "dispatch.lease_max_age", SeverityError},
 		{"V17 strict key zero ok", map[string]string{"dispatch.lease_max_age": "0"}, "dispatch.lease_max_age", -1},
 		{"V17 backoff base negative", map[string]string{"embed_backfill.backoff_base": "-30"}, "embed_backfill.backoff_base", SeverityError},
-		{"V17 backoff base zero ok", map[string]string{"embed_backfill.backoff_base": "0"}, "embed_backfill.backoff_base", -1},
+
+		// V21 (issue #38) — the two embed back-off bases own their zero: the
+		// consumer reads 0 as "retry immediately" (base * 2^attempts stays
+		// 0), so the failure memo parks nothing and a failing embed backend
+		// is retried in a tight loop. This deliberately flips the former
+		// "V17 backoff base zero ok" fixture — that row pinned the walk's
+		// neutrality on zero, not the key's safety; the per-key ruling the
+		// V17 comment deferred lands here. Signal change is this commit's
+		// visible decision, not a fold-in (W19).
+		{"V21 backfill base zero rejected", map[string]string{"embed_backfill.backoff_base": "0"}, "embed_backfill.backoff_base", SeverityError},
+		{"V21 migration base zero rejected", map[string]string{"embed_migration.backoff_base": "0"}, "embed_migration.backoff_base", SeverityError},
+		{"V21 backfill base default ok", map[string]string{}, "embed_backfill.backoff_base", -1},
+		{"V21 backfill base positive ok", map[string]string{"embed_backfill.backoff_base": "30"}, "embed_backfill.backoff_base", -1},
+		{"V21 migration base positive ok", map[string]string{"embed_migration.backoff_base": "120"}, "embed_migration.backoff_base", -1},
+		// The named-but-cleared third key of issue #38: debounce_window 0 is
+		// poll-bounded (min_rebuild_interval brakes independently) and stays
+		// a legal "rebuild on next poll" setting.
+		{"V21 debounce window zero stays ok", map[string]string{"graph_cache.debounce_window": "0"}, "graph_cache.debounce_window", -1},
 		{"V17 ttl negative", map[string]string{"writes.confirm_ttl": "-600"}, "writes.confirm_ttl", SeverityError},
 		{"V17 ttl zero ok", map[string]string{"writes.confirm_ttl": "0"}, "writes.confirm_ttl", -1},
 
