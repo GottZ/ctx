@@ -254,10 +254,13 @@ func (s *Set) DigestTypes() []string { return s.digestTypes }
 func (s *Set) OverviewTypes() []string { return s.overviewTypes }
 
 // AggregateTypes returns the types with retrieval=aggregate-to-parent — the
-// input to the WF T11 query-handler fold (QueryHandler.foldAggregates). Empty
-// on the builtin set (no builtin type aggregates; the comment seed ships
-// excluded, flipped only in the I-E era), so the fold is a zero-DB no-op on the
-// current corpus (eval baseline-neutral).
+// input to the WF T11 query-handler fold (QueryHandler.foldAggregates). NOT
+// empty on the builtin set: the comment type carries
+// RetrievalAggregateToParent since the I-E era (builtin.go, migration 085
+// flipped it from retrieval=excluded). What keeps the fold a zero-DB no-op is
+// therefore the corpus, not the type list — it stays still only while no
+// aggregate-typed block exists in the queried scope, and starts folding the
+// moment one is written.
 func (s *Set) AggregateTypes() []string { return s.aggregate }
 
 // Classify runs every type's classify rules in (priority, name) order,

@@ -5,8 +5,10 @@
 //  1. Linear (Distance-only): Power-Law p=1.5 on absolute day distance.
 //     Blocks closer to the query's target date get boosted.
 //  2. Cyclic (GottZ Cyclic Phase Model): Multi-dimensional Gaussian decay
-//     on normalized phases [0,1) per dimension (weekday, month, quarter,
-//     week, year). Blocks matching the query's cyclic pattern get boosted
+//     on normalized phases [0,1] per dimension (weekday, month, quarter,
+//     week, year). The upper end is closed and reachable: the last value of a
+//     cycle normalizes to 1.0, which CyclicDistance folds onto 0.0 — the same
+//     point on the ring. Blocks matching the query's cyclic pattern get boosted
 //     continuously — Tuesday-blocks strongly for "dienstags" query,
 //     Wednesday-blocks weakly, Saturday-blocks near-zero.
 //
@@ -24,12 +26,36 @@ import (
 )
 
 // GravityParams controls the temporal gravity computation.
+//
+// Every field except TargetDate is optional, so every zero value carries a
+// meaning and each one is documented at its field. The two filters (Direction,
+// Cutoff) switch OFF when unset, Power falls back to its default, and
+// BoostWeight 0 turns the reranker off entirely — there is no hidden default
+// behind it (Issue #40, findings 2 and 8c).
 type GravityParams struct {
-	TargetDate  time.Time
-	Direction   string  // "past", "future", "both"
-	Cutoff      int     // max distance in days
-	Power       float64 // falloff exponent (default 1.5)
-	BoostWeight float64 // max boost fraction (default 0.30)
+	// TargetDate is the date the query anchors on. Required — every distance
+	// is measured against it.
+	TargetDate time.Time
+
+	// Direction restricts which side of TargetDate may contribute: "past"
+	// drops dates after it, "future" drops dates before it. Zero value (empty
+	// string): no direction filter, identical to "both".
+	Direction string
+
+	// Cutoff is the maximum absolute distance in days a date may have and
+	// still contribute. Zero value (and any non-positive value): no distance
+	// filter — the same convention as Direction, since both fields are
+	// filters. A caller that wants a bounded window must set it explicitly.
+	Cutoff int
+
+	// Power is the falloff exponent of the power law. Zero value: the 1.5
+	// default is applied; see the power profile on ComputeGravity.
+	Power float64
+
+	// BoostWeight is the maximum boost fraction ApplyGravityBoost may add
+	// (0.30 = up to +30%). Zero value: gravity is off and ApplyGravityBoost
+	// returns its input untouched. No default is substituted — 0 means off.
+	BoostWeight float64
 }
 
 // ComputeGravity returns the total gravitational score for a set of dates
@@ -68,8 +94,10 @@ func ComputeGravity(dates []time.Time, params GravityParams) float64 {
 			continue
 		}
 
-		// Cutoff filter
-		if math.Abs(distDays) > float64(params.Cutoff) {
+		// Cutoff filter — Cutoff <= 0 means no distance filter at all.
+		// Filtering on a zero cutoff would keep only exact timestamp equality
+		// and silently reduce the reranker to a no-op (Issue #40, finding 8c).
+		if params.Cutoff > 0 && math.Abs(distDays) > float64(params.Cutoff) {
 			continue
 		}
 
@@ -94,12 +122,11 @@ func ComputeGravity(dates []time.Time, params GravityParams) float64 {
 // ApplyGravityBoost reranks search results using temporal gravity.
 // Blocks without dates get boost_factor=1.0 (neutral — no penalty).
 // Returns re-sorted results. Original RRF scores preserved in RRFScoreOriginal.
+// A zero params.BoostWeight returns the input untouched — gravity off, no
+// RRFScoreOriginal written (see GravityParams).
 func ApplyGravityBoost(results []SearchResult, blockDates map[string][]time.Time, params GravityParams) []SearchResult {
 	if len(results) == 0 || params.BoostWeight == 0 {
 		return results
-	}
-	if params.BoostWeight == 0 {
-		params.BoostWeight = 0.30
 	}
 
 	// Compute gravity for each result
@@ -157,7 +184,10 @@ var DimensionSigma = map[string]float64{
 }
 
 // CyclicDistance returns the minimum wrap-around distance between two phases
-// on a unit circle. Phases are in [0,1) by convention. Result is in [0, 0.5].
+// on a unit circle. Phases are in [0,1] — the interval is closed, because the
+// last value of a cycle normalizes to exactly 1.0 (week 53, monthday 31,
+// seasonal 366). The wrap below maps 1.0 onto 0.0, which is correct for a
+// ring: both name the same point. Result is in [0, 0.5].
 //
 // Monday (0/7) vs Sunday (6/7):
 //
@@ -188,7 +218,10 @@ func GaussianDecay(distance, sigma float64) float64 {
 	return math.Exp(-(distance * distance) / (2.0 * sigma * sigma))
 }
 
-// DimensionPhase converts an EAV (dimension, value) pair to a phase in [0,1).
+// DimensionPhase converts an EAV (dimension, value) pair to a phase in [0,1].
+// The upper end is reachable — week 53, monthday 31 and seasonal 366 each
+// normalize to exactly 1.0 — and CyclicDistance folds 1.0 onto 0.0, the same
+// point on the ring. Callers must not assume phase < 1.0.
 // Matches the encoding used by store.ExpandDimensions:
 //
 //	weekday: ISO 1-7 (Mon=1..Sun=7) → (v-1)/7
@@ -250,6 +283,8 @@ func DimensionPhase(dimension, value string) (float64, error) {
 }
 
 // QueryPhase converts a target date to a phase for a given dimension.
+// Same [0,1] range as DimensionPhase, upper end included: ISO week 53, day 31
+// and year-day 366 all normalize to 1.0.
 // Mirrors store.ExpandDimensions encoding:
 //
 //	2026-03-31 (Tuesday, March, Q1, week 14)
