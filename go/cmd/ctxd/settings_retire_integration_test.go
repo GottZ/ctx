@@ -44,6 +44,12 @@ const (
 	retireRequestID        = "migration-133-retire-backend-tuples"
 	retireHopHint          = "migrate to last 4.x"
 
+	// settingEntity is the entity_type the settings audit trigger stamps on
+	// its rows. context_settings_audit is a SHARED table — the block-type
+	// trigger writes into it too — so every count this gate makes a claim
+	// about is narrowed to this entity; see the append-only subtest.
+	settingEntity = "setting"
+
 	// contrastKey is a LIVING key that survived the registry cut and shares
 	// the `rerank.` prefix with three retired ones — the closest neighbour the
 	// array literal could plausibly over-reach into. It is seeded at both a
@@ -111,10 +117,16 @@ func TestMigration133RetiresBackendTupleRows(t *testing.T) {
 	insertSettingRow(t, pool, contrastKey, tenantScopes[0], `false`)
 
 	wantDeleted := len(retired) + tenantSeeded // 29 + 12 = 41
-	auditBefore := countAudit(t, pool, "")
+	auditBefore := countAudit(t, pool, settingEntity, "")
 	if auditBefore == 0 {
 		t.Fatalf("no audit rows after seeding %d settings rows — the 051 audit trigger is not firing, and every assertion below would be vacuous", wantDeleted+2)
 	}
+	// Foreign entities present before the chain runs (the block-type seeds of
+	// 113_baseline.sql go through the same audit table). Captured so the
+	// append-only subtest can name what the chain added on top of them.
+	foreignBefore, foreignBeforeBreakdown := countForeignAudit(t, pool)
+	t.Logf("audit rows after seeding: %d for entity_type=%q, %d for other entities (%s)",
+		auditBefore, settingEntity, foreignBefore, foreignBeforeBreakdown)
 
 	// Run the rest of the chain over a PRODUCTION-shaped pool: store.NewPool
 	// is what cmd/ctxd builds before store.RunMigrations, and it is the thing
@@ -164,7 +176,7 @@ func TestMigration133RetiresBackendTupleRows(t *testing.T) {
 	})
 
 	t.Run("each delete left an attributable unset in the audit", func(t *testing.T) {
-		marked := countAudit(t, pool, retireRequestID)
+		marked := countAudit(t, pool, settingEntity, retireRequestID)
 		if marked != wantDeleted {
 			t.Errorf("audit rows carrying request_id %q = %d, want %d (one per deleted row)", retireRequestID, marked, wantDeleted)
 		}
@@ -205,11 +217,56 @@ func TestMigration133RetiresBackendTupleRows(t *testing.T) {
 		}
 	})
 
-	t.Run("the pre-existing audit history is untouched", func(t *testing.T) {
-		total := countAudit(t, pool, "")
+	t.Run("the pre-existing settings audit history is untouched", func(t *testing.T) {
+		// The claim is append-only for the SETTINGS history, not for every
+		// row of context_settings_audit. That table is shared: the block-type
+		// trigger trg_block_types_audit (audit_block_type_write,
+		// 113_baseline.sql:7384) writes into it as well, with
+		// entity_type = 'block_type'. RunMigrations above applies the WHOLE
+		// remaining chain, not just 133, and two of those later files touch
+		// context_block_types — 136_tool_evidence_block_types.sql seeds the
+		// two tool-* rows, 138_tool_types_untrusted.sql updates the same two —
+		// so four foreign audit rows legitimately appear here that say nothing
+		// about whether migration 133 rewrote or dropped settings history.
+		// Counting the whole table would make this gate fail on every future
+		// registry migration; counting entity_type = 'setting' keeps it
+		// pinning exactly the invariant it is named after.
+		total := countAudit(t, pool, settingEntity, "")
 		if total != auditBefore+wantDeleted {
-			t.Errorf("audit rows total = %d, want %d (%d before + %d unsets) — append-only was violated",
-				total, auditBefore+wantDeleted, auditBefore, wantDeleted)
+			t.Errorf("audit rows for entity_type=%q = %d, want %d (%d before + %d unsets) — append-only was violated",
+				settingEntity, total, auditBefore+wantDeleted, auditBefore, wantDeleted)
+		}
+
+		// The foreign rows are still held to two things, so that this subtest
+		// keeps seeing what it is here to see: they must be plain SQL-side
+		// migration writes, and none of them may be attributed to migration
+		// 133 (no timestamp comparison needed — the marker IS the attribution).
+		foreignAfter, foreignAfterBreakdown := countForeignAudit(t, pool)
+		t.Logf("audit rows of other entities: %d before the chain (%s), %d after (%s)",
+			foreignBefore, foreignBeforeBreakdown, foreignAfter, foreignAfterBreakdown)
+
+		var notSQL int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM context_settings_audit
+			 WHERE entity_type <> $1
+			   AND metadata->>'via' IS DISTINCT FROM 'sql'`, settingEntity,
+		).Scan(&notSQL); err != nil {
+			t.Fatalf("inspect foreign audit rows: %v", err)
+		}
+		if notSQL != 0 {
+			t.Errorf("%d audit row(s) of other entities are not plain SQL-side migration writes — something other than the migration chain wrote here", notSQL)
+		}
+
+		var misattributed int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM context_settings_audit
+			 WHERE entity_type <> $1 AND metadata->>'request_id' = $2`, settingEntity, retireRequestID,
+		).Scan(&misattributed); err != nil {
+			t.Fatalf("inspect foreign audit rows for the retire marker: %v", err)
+		}
+		if misattributed != 0 {
+			t.Errorf("%d audit row(s) of other entities carry request_id %q — migration %d reached beyond context_settings",
+				misattributed, retireRequestID, retireMigrationVersion)
 		}
 	})
 
@@ -227,7 +284,9 @@ func TestMigration133RetiresBackendTupleRows(t *testing.T) {
 	})
 
 	t.Run("a second application changes and says nothing", func(t *testing.T) {
-		auditBeforeRerun := countAudit(t, pool, "")
+		// Unfiltered on purpose: nothing but the re-applied file runs here, so
+		// a re-run must not append a row of ANY entity, not merely no setting.
+		auditBeforeRerun := countAudit(t, pool, "", "")
 		logs.reset()
 
 		// RunMigrations cannot serve here: version 133 is recorded now and
@@ -235,7 +294,7 @@ func TestMigration133RetiresBackendTupleRows(t *testing.T) {
 		// the statement's idempotency (pattern: applyM121Again).
 		applyRetireMigrationAgain(t, prodPool)
 
-		if got := countAudit(t, pool, ""); got != auditBeforeRerun {
+		if got := countAudit(t, pool, "", ""); got != auditBeforeRerun {
 			t.Errorf("audit grew from %d to %d on the second application — the DELETE is not a no-op on an already-clean database", auditBeforeRerun, got)
 		}
 		if out := logs.String(); strings.Contains(out, retireHopHint) {
@@ -284,22 +343,56 @@ func insertSettingRow(t *testing.T, pool *pgxpool.Pool, key, scope, jsonValue st
 	}
 }
 
-// countAudit counts audit rows; a non-empty requestID narrows to the rows the
-// migration marked.
-func countAudit(t *testing.T, pool *pgxpool.Pool, requestID string) int {
+// countAudit counts audit rows. A non-empty entityType narrows to one entity —
+// context_settings_audit is shared with the block-type trigger, so a claim
+// about settings history has to say so — and a non-empty requestID narrows
+// further to the rows the migration marked. Empty means "do not narrow".
+func countAudit(t *testing.T, pool *pgxpool.Pool, entityType, requestID string) int {
 	t.Helper()
 	var n int
-	var err error
-	if requestID == "" {
-		err = pool.QueryRow(context.Background(), `SELECT count(*) FROM context_settings_audit`).Scan(&n)
-	} else {
-		err = pool.QueryRow(context.Background(),
-			`SELECT count(*) FROM context_settings_audit WHERE metadata->>'request_id' = $1`, requestID).Scan(&n)
-	}
-	if err != nil {
-		t.Fatalf("count audit rows (request_id=%q): %v", requestID, err)
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM context_settings_audit
+		 WHERE ($1 = '' OR entity_type = $1)
+		   AND ($2 = '' OR metadata->>'request_id' = $2)`, entityType, requestID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count audit rows (entity_type=%q, request_id=%q): %v", entityType, requestID, err)
 	}
 	return n
+}
+
+// countForeignAudit counts the audit rows that belong to some OTHER entity
+// than a setting and describes them by entity_type and action, so the test log
+// names who else writes into the shared table rather than leaving a bare number.
+func countForeignAudit(t *testing.T, pool *pgxpool.Pool) (int, string) {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT entity_type, action, count(*)
+		  FROM context_settings_audit
+		 WHERE entity_type <> $1
+		 GROUP BY entity_type, action
+		 ORDER BY entity_type, action`, settingEntity)
+	if err != nil {
+		t.Fatalf("break down foreign audit rows: %v", err)
+	}
+	defer rows.Close()
+	total := 0
+	var parts []string
+	for rows.Next() {
+		var entity, action string
+		var n int
+		if err := rows.Scan(&entity, &action, &n); err != nil {
+			t.Fatalf("scan foreign audit breakdown: %v", err)
+		}
+		total += n
+		parts = append(parts, fmt.Sprintf("%s/%s=%d", entity, action, n))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read foreign audit breakdown: %v", err)
+	}
+	if len(parts) == 0 {
+		return 0, "none"
+	}
+	return total, strings.Join(parts, " ")
 }
 
 func migrationApplied(t *testing.T, pool *pgxpool.Pool, version int) bool {
