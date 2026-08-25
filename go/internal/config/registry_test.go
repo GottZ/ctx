@@ -166,6 +166,12 @@ func TestRegistryStrictSet(t *testing.T) {
 		// while the runtime held a different one — on the key that decides how
 		// much unconfirmed payload may sit in context_pending_writes.
 		"pool.blob_stage_max_bytes": true,
+		// W02-9: the scan cap decides how much of a payload the credentials
+		// detector reads, and its 0 is a switch ("scan nothing") too. A typo'd
+		// value silently defaulting to 16 MiB would present as a tightened
+		// operator limit while the runtime scanned far more — or, read the
+		// other way, hide that the net was never narrowed at all.
+		"pool.blob_scan_max_bytes": true,
 		// H12: the context-window fallback is the ONE key that decides whether a
 		// prompt carrying foreign text may be built for a chain member without a
 		// declared window. A typo'd value silently defaulting to 0 would flip the
@@ -267,6 +273,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"pool.llm_audit_min_sensitivity":        true, // D4 §4.5-c: G41 audit verdict floor, born in settings like its pool siblings
 		"pool.blob_rate_limit_write":            true, // B2: blob write budget, born in settings like its pool siblings
 		"pool.blob_stage_max_bytes":             true, // W02-8: staged blob payload cap, born in settings like its pool siblings
+		"pool.blob_scan_max_bytes":              true, // W02-9: blob payload scan cap, born in settings like its pool siblings
 		"pool.external_num_ctx_fallback":        true, // H12: prompt-budget window floor, born in settings like its pool siblings
 		"pool.openrouter_window_ttl":            true, // E10-W2: AUTO-window discovery TTL, born in settings like its pool siblings
 		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
@@ -354,6 +361,10 @@ func TestRegistryTenancySet(t *testing.T) {
 		// above: it bounds only the OWN tenant's server-held stage payloads,
 		// and a tenant that stages larger evidence pays for it in its own rows
 		"pool.blob_stage_max_bytes": true,
+		// W02-9 per-tenant blob scan cap — same class again: it decides how
+		// deeply the tenant's OWN payloads are read, and a tenant storing
+		// larger evidence pays the scan cost in its own writes
+		"pool.blob_scan_max_bytes": true,
 		// H12 per-tenant prompt-budget window floor — it only ever bounds the
 		// tenant's OWN prompts, so a tenant on a stricter provider tier may
 		// declare its own
@@ -388,8 +399,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 64 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 64 (change it with intent)", got)
+	if got := len(overridable); got != 65 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 65 (change it with intent)", got)
 	}
 	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
 	// tenant override here would flush the process-wide embed cache / flip the

@@ -1163,6 +1163,32 @@ type PoolConfig struct {
 	// bounded cost per staged write. Settings-only and tenant-overridable like
 	// its PoolConfig siblings.
 	BlobStageMaxBytes int `key:"pool.blob_stage_max_bytes" env:"-" default:"1048576" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	// BlobScanMaxBytes caps how much of a DECODED blob payload the credentials
+	// detector reads on the shared blob write core (W02-9/BP-8). The block path
+	// needs no such key — a block is capped at 50 KB, so its scan is free; a
+	// blob is capped at 50 MB, and the detector is regex work over every byte
+	// of it on a synchronous write path.
+	//
+	// A payload above the cap is STORED, with metadata.sensitivity='unscanned'.
+	// That is deliberately not fail-closed, and it is the same decision the
+	// non-UTF-8 case makes: the live corpus is binary uploads and the 61 blobs
+	// that predate any Go write path, and refusing them — or calling them
+	// credentials — would turn a scanner into an outage. The unscanned state is
+	// WRITTEN rather than left implicit, so the limit is a visible property of
+	// the row instead of something a reader has to infer from a missing field.
+	//
+	// 0 means the scan is OFF: every payload is stored 'unscanned'. Unlike
+	// pool.blob_stage_max_bytes, where 0 is the fail-closed reading (no
+	// staging), 0 here can only ever mean "do not look" — there is no payload
+	// size at which "scan nothing" protects anything. Negative is range garbage
+	// in the only direction that matters (it would read as a configured byte
+	// count while the runtime treated it as off), so it is a boot abort / 422.
+	//
+	// Default 16 MiB: it covers every payload this surface is built for by
+	// three orders of magnitude (an externalized tool-payload batch is ~180 kB)
+	// while keeping the worst case a bounded fraction of the 50 MB ceiling.
+	// Settings-only and tenant-overridable like its PoolConfig siblings.
+	BlobScanMaxBytes int `key:"pool.blob_scan_max_bytes" env:"-" default:"16777216" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	// ExternalNumCtxFallback is the operator-declared context window, in
 	// TOKENS, for chain members whose row declares none (context_backends
 	// .num_ctx IS NULL — H12 / decision E10). It is the ONLY way a prompt

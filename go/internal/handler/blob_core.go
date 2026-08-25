@@ -26,8 +26,11 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -211,17 +214,115 @@ func meterBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, ar
 	return logID, nil
 }
 
-// executeBlobWrite is the whole write: gate → budget → upsert → attribution.
-// Steps 1 and 2 (fields, decode) belong to the transport, which is where the
-// payload's encoding lives; everything from the scope gate on is identical for
-// every surface and lives here.
+// Blob sensitivity metadata keys. context_blobs has no sensitivity COLUMN and
+// this wave adds none — metadata is JSONB, the classification is a property of
+// the payload rather than a new axis of the schema, and a column would have to
+// answer for the 61 rows that predate any Go write path.
+const (
+	blobMetaSensitivity = "sensitivity"
+	blobMetaKind        = "sensitivity_kind"
+	blobMetaEntropy     = "entropy_flags"
+
+	// blobSensUnscanned is the third value beside the four backends levels: the
+	// scan did not run. It is written rather than left implicit so an operator
+	// can tell "looked, found nothing" from "never looked" — the 61 live blobs
+	// carry no field at all and are read the same way (design §3.5).
+	blobSensUnscanned = "unscanned"
+)
+
+// scanBlobPayload is the blob layer's own credentials net (BP-8): the block
+// path has run sensitivity.Scan on every write since G40, the blob path ran
+// nothing, and the payload it carries is the secret-densest text class in the
+// corpus (tool output — terminal, read_file, execute_code).
+//
+// It is KIND-DIFFERENTIATED, and that is the whole design decision. The block
+// path treats every Scan hit as credentials because a block is a retrieval
+// source: a false positive there costs one answer, a false negative leaks a
+// key into a foreign prompt. A blob is neither retrievable nor a prompt part —
+// it is the evidence a drill-down reaches for. So:
+//
+//   - a STRUCTURED hit (PEM header, JWT, AWS key id, vendor token prefix,
+//     high-entropy secret assignment) raises to credentials, upgrade-only,
+//     exactly as applyWriteDetector does for a block;
+//   - a GENERIC high-entropy hit (64+ hex run, base64 blob) raises NOTHING and
+//     is recorded in entropy_flags. Docker digests, git trees and SHA sums are
+//     what these payloads are FULL of, and they are the lines a reader came
+//     for — a scanner that gates them makes the evidence unreadable at exactly
+//     the interesting place (design §4.4);
+//   - unscannable (not UTF-8, or larger than pool.blob_scan_max_bytes, or the
+//     cap at 0) is recorded as 'unscanned' and the write goes THROUGH. Not
+//     fail-closed, deliberately: every binary upload and every one of the 61
+//     live blobs would otherwise be collateral (§3.5). The limit is named in
+//     the row instead of inherited in silence.
+//
+// The detector only ever RAISES over a caller-supplied metadata.sensitivity.
+// A caller may rate its own payload higher than the scan did and keep that
+// rating; it may not talk the scan down, which is the same asymmetry the block
+// write path holds.
+//
+// The returned map is the metadata to store. Never the matched secret — the
+// kind and the entropy flag are labels, and a detector that echoed its finding
+// into a column would be the leak it prevents.
+func scanBlobPayload(ctx context.Context, cfg ConfigStore, in blobWriteInput, reqID string) map[string]any {
+	scanMax := 0
+	if cfg != nil {
+		scanMax = cfg.SnapshotForRequest(ctx).Pool.BlobScanMaxBytes
+	}
+
+	metadata := in.Metadata
+	set := func(k string, v any) {
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata[k] = v
+	}
+
+	if scanMax <= 0 || len(in.Data) > scanMax || !utf8.Valid(in.Data) {
+		set(blobMetaSensitivity, blobSensUnscanned)
+		return metadata
+	}
+
+	m, hit := sensitivity.Scan(string(in.Data))
+	if !hit {
+		return metadata
+	}
+	if m.EntropyOnly() {
+		// An observation, not a verdict. One Scan call yields one match, so
+		// this is the strongest generic rule that fired — the list shape is
+		// what a later reader (or a re-scan) can extend without a migration.
+		set(blobMetaEntropy, []any{m.Kind})
+		return metadata
+	}
+
+	// Upgrade-only: a caller that already declared credentials keeps its own
+	// value, everything below is overruled.
+	if cur, _ := metadata[blobMetaSensitivity].(string); cur != string(backends.SensCredentials) {
+		set(blobMetaSensitivity, string(backends.SensCredentials))
+	}
+	set(blobMetaKind, m.Kind)
+	slog.Info("blob-store: credentials pattern detected — payload classified credentials",
+		"kind", m.Kind, "request_id", reqID)
+	return metadata
+}
+
+// executeBlobWrite is the whole write: gate → budget → scan → upsert →
+// attribution. Steps 1 and 2 (fields, decode) belong to the transport, which is
+// where the payload's encoding lives; everything from the scope gate on is
+// identical for every surface and lives here.
 func executeBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, ar *auth.AuthResult, in blobWriteInput, reqID string) (*store.BlobMeta, *blobReject) {
 	writeScope, logID, rej := blobWriteGate(ctx, pool, cfg, ar, in, reqID)
 	if rej != nil {
 		return nil, blobRejection(rej)
 	}
 
-	blob, err := store.UpsertBlob(ctx, pool, in.Category, in.Title, in.Filename, in.MimeType, writeScope, in.Data, in.Tags, in.Metadata)
+	// The scan sits AFTER the gate, unlike its block twin (stage_gates.go runs
+	// applyWriteDetector before the scope check). The reason is size, not
+	// taste: a block is capped at 50 KB and its scan is free, a blob is capped
+	// at 50 MB and its scan is regex work over every byte — a request that the
+	// scope gate is about to refuse must not pay for it first.
+	metadata := scanBlobPayload(ctx, cfg, in, reqID)
+
+	blob, err := store.UpsertBlob(ctx, pool, in.Category, in.Title, in.Filename, in.MimeType, writeScope, in.Data, in.Tags, metadata)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "23") {

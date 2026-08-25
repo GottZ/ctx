@@ -80,6 +80,28 @@ var (
 			"(?:sum)?\\s*[:=]?\\s*[\"'`(<\\[]*\\s*$")
 )
 
+// The two GENERIC kinds. They are named because a caller has to be able to
+// tell them apart from the structured ones without re-listing every rule
+// above: a structured hit is a credential, a generic hit is a high-entropy run
+// that MAY be one. Only the payload layer makes anything of that distinction
+// (handler/blob_core.go, W02-9) — on a block, both still mean credentials.
+const (
+	KindBase64Blob = "base64-blob"
+	KindHexBlob    = "hex-blob"
+)
+
+// EntropyOnly reports whether a Match came from one of the two generic
+// high-entropy rules rather than from a structured signal.
+//
+// The list is CLOSED and positive on purpose: a rule added to Scan above
+// without a thought about this method reads as structured, which is the
+// direction that keeps a caller's gate shut. The inverse spelling (list the
+// structured kinds, default to generic) would turn every future rule into a
+// silent downgrade at whatever call site trusts this answer.
+func (m Match) EntropyOnly() bool {
+	return m.Kind == KindBase64Blob || m.Kind == KindHexBlob
+}
+
 // hashLabelWindow is how many bytes before a hex run reHashLabel may search —
 // generous enough for `fingerprint: "` plus whitespace, small enough to keep
 // the label ADJACENT (a mention three sentences earlier must not whitelist).
@@ -144,11 +166,11 @@ func Scan(content string) (Match, bool) {
 	}
 	for _, blob := range reBase64Blob.FindAllString(content, -1) {
 		if len(blob) >= base64MinLen && shannonEntropy(blob) >= base64MinEntropy {
-			return Match{Kind: "base64-blob", Reason: "high-entropy base64 blob"}, true
+			return Match{Kind: KindBase64Blob, Reason: "high-entropy base64 blob"}, true
 		}
 	}
 	if hexBlobUnlabelled(content) {
-		return Match{Kind: "hex-blob", Reason: "long hex blob (>=64 chars)"}, true
+		return Match{Kind: KindHexBlob, Reason: "long hex blob (>=64 chars)"}, true
 	}
 	return Match{}, false
 }

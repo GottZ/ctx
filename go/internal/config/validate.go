@@ -419,6 +419,14 @@ func validateQuery(c *Config) []Issue {
 			Msg: fmt.Sprintf("staged blob payload cap %d must be >= 0 (0 = blob staging disabled)", c.Pool.BlobStageMaxBytes)})
 	}
 
+	// V9e (W02-9) — same shape as V9d, one step further: 0 already means "scan
+	// nothing", so a negative scan cap would present as a configured byte count
+	// while the runtime read it as the switch.
+	if c.Pool.BlobScanMaxBytes < 0 {
+		issues = append(issues, Issue{Field: "pool.blob_scan_max_bytes", Severity: SeverityError,
+			Msg: fmt.Sprintf("blob scan cap %d must be >= 0 (0 = payload scan disabled)", c.Pool.BlobScanMaxBytes)})
+	}
+
 	// V9b (H12) — a negative context-window fallback is range garbage in the
 	// one direction that matters: ChainRuneBudget reads <= 0 as "unset" and
 	// refuses, so a negative value would silently mean "off" while reading as
