@@ -1044,6 +1044,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			RRFScoreOriginal: r.RRFScoreOriginal,
 			AgeDays:          ageDays,
 			Sensitivity:      r.Sensitivity,
+			// W02-4: foreign-text framing, resolved from the SAME registry
+			// snapshot that produced the visibility allowlist this result came
+			// through — so the flag and the type's admission to retrieval can
+			// never come from two generations.
+			Untrusted: typeSet.IsUntrusted(r.TypeName),
 		}
 	}
 

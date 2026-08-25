@@ -85,6 +85,12 @@ func foreignTextPipelines() []budgetCase {
 			pipeline: "query-synthesize",
 			itemCap:  llm.MaxBlockChars,
 			items:    llm.MaxPromptSources,
+			// W02-4: the untrusted framing sentence is a SECOND code-side rule,
+			// spliced in whenever a foreign-text source is in the prompt, and
+			// RuleReserve pays for the nonce rule only. Charged from the
+			// constant rather than a copied number — the same doctrine as
+			// TestRuleReserveCoversRule.
+			fixed:    utf8.RuneCountInString(llm.UntrustedSourceRule),
 			question: true,
 			budget:   promptguard.BudgetSynthesis,
 		},

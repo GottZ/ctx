@@ -228,6 +228,12 @@ func builtinPolicies() []Policy {
 				Kind:           RetrievalDamped,
 				DampingFactor:  toolEvidenceDamping,
 				IntentPatterns: fresh(toolEvidencePatterns),
+				// Foreign text by definition (W02-4): the payload is captured
+				// tool output — commands, file names, stderr — every byte of
+				// which a third party can shape. Damping keeps it from flooding
+				// the ranking; this flag keeps the synthesis prompt from
+				// reading what survives as knowledge or as an instruction.
+				Untrusted: true,
 			},
 			Guard:    GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
 			Dream:    DreamPolicy{Linkable: false},
@@ -250,6 +256,9 @@ func builtinPolicies() []Policy {
 				Kind:           RetrievalDamped,
 				DampingFactor:  toolOverviewDamping,
 				IntentPatterns: fresh(toolOverviewPatterns),
+				// Same foreign-text reasoning as tool-evidence: summarising
+				// attacker-shapable output does not launder it.
+				Untrusted: true,
 			},
 			Guard:    GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
 			Dream:    DreamPolicy{Linkable: false},

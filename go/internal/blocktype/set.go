@@ -26,6 +26,7 @@ type Set struct {
 	digestTypes    []string // digest.include
 	overviewTypes  []string // overview.include
 	aggregate      []string // retrieval == aggregate-to-parent
+	untrusted      []string // retrieval.untrusted (foreign-text framing, W02-4)
 	damped         []dampedEntry
 	classifyOrder  []Policy // sorted by (priority, name)
 	// structuralClasses is the sorted DISTINCT union of every type's
@@ -97,6 +98,9 @@ func NewSet(policies []Policy) (*Set, error) {
 		}
 		if p.Retrieval.Kind == RetrievalAggregateToParent {
 			s.aggregate = append(s.aggregate, n)
+		}
+		if p.Retrieval.Untrusted {
+			s.untrusted = append(s.untrusted, n)
 		}
 		if p.Guard.Check {
 			s.guardCheck = append(s.guardCheck, n)
@@ -180,6 +184,28 @@ func (s *Set) DampedTypesFor(query string) ([]string, []float64) {
 		factors = append(factors, d.factor)
 	}
 	return names, factors
+}
+
+// UntrustedTypes returns the types carrying retrieval.untrusted, sorted —
+// the foreign-text classes whose blocks the synthesis prompt frames as
+// observation data (W02-4). Derived at NewSet like every other list here;
+// callers must not mutate it.
+func (s *Set) UntrustedTypes() []string { return s.untrusted }
+
+// IsUntrusted reports whether blocks of this type are foreign text and must be
+// framed as observation data in the synthesis prompt. This is the per-source
+// lookup behind llm.Source.Untrusted (handler/query.go, step 7).
+//
+// An unknown name resolves to false, mirroring GuardSameScopeOnly rather than
+// the fail-closed visibility line, and the two reasons are different in kind:
+// an unregistered name cannot reach a prompt at all (VisibleTypes comes from
+// the SAME snapshot, and RRF's allowlist is fail-closed), while the EMPTY name
+// is the real caller — a Source built outside the registry path carries no
+// type, and defaulting that to true would splice the rule into prompts nothing
+// asked to reframe.
+func (s *Set) IsUntrusted(name string) bool {
+	p, ok := s.policies[name]
+	return ok && p.Retrieval.Untrusted
 }
 
 // GuardCheckTypes returns the types whose blocks enter the guard batch.

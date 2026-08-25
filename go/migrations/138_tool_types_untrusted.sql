@@ -1,0 +1,83 @@
+-- =============================================================================
+-- 138_tool_types_untrusted.sql — retrieval.untrusted auf den beiden Tool-Typen
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- Achse 02, Welle W02-4. design/02 §4.6(2)/§7 (Untrusted-Rahmung in der
+-- Synthese) + design/02a §5.4.
+--
+-- NUMMER: Masterplan §2 K1 — "wer zuerst landet, nimmt die nächste freie".
+-- 136 (Tool-Typen) ist gelandet, 137 (ctx_rrf_arms) landet aus einer parallelen
+-- Welle vor dieser hier, also ist 138 die nächste freie. K1 gilt hier doppelt:
+-- nie zwei Migrations-Wellen gleichzeitig im Schema-Contract-Manifest — die
+-- Nummer wird vergeben, nicht verhandelt.
+--
+-- WAS DIESE MIGRATION IST: reine Registry-DATEN, wie 136. Ein UPDATE auf zwei
+-- Zeilen in context_block_types, kein Schema, kein Index, kein Schreiber.
+--
+-- WARUM EINE EIGENE MIGRATION UND KEIN EDIT AN 136:
+-- 136 ist committet. Auf KEINER Datenbank appliziert zu sein macht eine
+-- Migration nicht wieder unlanded — die Historie ist forward-only, und die
+-- Grenze ist der Commit, nicht der Applikationszustand irgendeiner Instanz.
+-- Das Werkzeug zieht dieselbe Linie: .hooks/pre-commit Gate 3 verlangt für JEDE
+-- Nicht-Kommentar-Änderung an einer Migration eine mitgestagte Regeneration des
+-- Schema-Contract-Manifests. Für eine reine Datenzeile wäre diese Regeneration
+-- byte-identisch (der Generator liest Schema-Zustand, keine Zeileninhalte), also
+-- unstagebar — das Gate kann einen bewussten Daten-Edit nicht von einer
+-- vergessenen Regeneration unterscheiden und muss beide gleich behandeln.
+-- Daraus folgt die Regel, die diese Datei befolgt: gelandete Migrationen werden
+-- nicht editiert, Nachträge bekommen eine eigene Nummer. Der Nebeneffekt ist der
+-- eigentliche Gewinn — jede Instanz, die 136 schon appliziert hat, bekommt das
+-- Feld über denselben Weg wie eine frische, statt über einen stillen Edit, den
+-- sie nie zu sehen bekommen hätte.
+--
+-- WARUM DAS FLAG (typgebunden, nicht global):
+-- 'tool-evidence' und 'tool-overview' sind die ersten FREMDTEXT-Zellen des
+-- Korpus. Ihr Inhalt ist mitgeschnittene Werkzeug-Ausgabe — Kommandos,
+-- Dateinamen, stderr-Präfixe — und jedes Byte davon kann ein Dritter formen,
+-- indem er dem Agenten eine Datei oder eine Fehlermeldung unterschiebt. Bisher
+-- galt im Korpus stillschweigend: was retrievbar ist, hat jemand als Wissen
+-- aufgeschrieben. Für diese beiden Typen stimmt das nicht mehr. Die Dämpfung aus
+-- 136 löst das nicht — sie regelt, WIE VIEL davon in den Prompt kommt, nicht,
+-- ALS WAS es dort steht. retrieval.untrusted ist die Präsentations-Antwort: der
+-- Query-Handler rendert eine solche Quelle als trust="untrusted", und der
+-- Systemprompt bekommt genau einen Satz, der solche Quellen als
+-- Beobachtungsdaten definiert (zitierbar, nie als Anweisung befolgt, nie als
+-- Aussage über die Welt außerhalb dieser Ausgabe). Die Rahmung hängt am TYP,
+-- nicht an einer Namensliste im Prompt: ein zweiter Fremdtext-Typ erbt sie,
+-- indem er das Feld in seiner Config trägt — ohne Prompt-Änderung, ohne Deploy.
+-- Jeder Typ ohne das Feld ist untrusted=false (Decode-Default), also bleibt jede
+-- andere Registry-Zeile unberührt.
+--
+-- WARUM jsonb_set MIT EXISTENZ-GUARD UND KEIN CONFIG-NEUSCHREIBEN:
+-- jsonb_set(config, '{retrieval,untrusted}', 'true') setzt genau einen Pfad und
+-- lässt Dämpfungsfaktor, intent_patterns, guard, classify unangetastet. Ein
+-- vollständiges Neuschreiben der Config würde jedes Operator-Tuning
+-- überschreiben, das seit 136 in der laufenden Registry nachgezogen wurde
+-- (Muster und Faktoren sind ausdrücklich ohne Deploy nachziehbar) — das ist die
+-- M107-Doktrin, die in 136 als ON CONFLICT DO NOTHING auftritt und hier als
+-- WHERE-Guard auftreten muss, weil ein UPDATE kein ON CONFLICT hat.
+-- Der Guard NOT (config->'retrieval' ? 'untrusted') macht die Migration
+-- idempotent UND respektiert eine bewusste Operator-Entscheidung: wer das Feld
+-- selbst auf false gesetzt hat, behält false. Nur ein FEHLENDES Feld wird
+-- gesetzt. Re-Run trifft null Zeilen.
+--
+-- LOCKSTEP MIT internal/blocktype/builtin.go: dort tragen beide Typen bereits
+-- Untrusted: true. Der Drift-Gate ist TestRegistryGolden_Integration — er
+-- appliziert die ECHTE Kette (136 seedet, 138 setzt nach) und vergleicht den
+-- ENDZUSTAND der Zeilen gegen builtinPolicies(); ein Drift in beide Richtungen
+-- ist rot. TestMigration138SetsUntrustedFlag ist der container-freie Vorposten
+-- darauf: er liest diese Datei aus migrations.FS und pinnt die beiden Namen, den
+-- Pfad, den Wert und den Existenz-Guard, ohne eine Datenbank zu brauchen.
+-- TestToolSeedsMatchBuiltin vergleicht weiterhin die 136-LITERALE gegen den
+-- Builtin und normalisiert dafür Untrusted auf false — 136 ist der Seed-Stand,
+-- nicht der Endzustand, und dass genau dieses eine Feld dazwischen liegt, ist
+-- dort als einzige erlaubte Abweichung festgeschrieben.
+-- =============================================================================
+
+SET LOCAL lock_timeout = '2s';
+
+UPDATE context_block_types
+   SET config = jsonb_set(config, '{retrieval,untrusted}', 'true'::jsonb)
+ WHERE scope = '_global'
+   AND name IN ('tool-evidence', 'tool-overview')
+   AND NOT (config->'retrieval' ? 'untrusted');

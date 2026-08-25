@@ -344,6 +344,15 @@ func TestToolPatternsDriveEngine(t *testing.T) {
 // The integration golden test does the same against a real DB (and covers the
 // whole registry); this one runs in `go test -short` and needs no container,
 // so a drift is caught before the container suite is even started.
+//
+// SCOPE, since W02-4: 136 is the SEED state, not the end state. Migration 138
+// adds retrieval.untrusted to both rows afterwards, so exactly one field is
+// allowed to differ between these literals and builtin.go — and only in one
+// direction (seed false, builtin true). Everything else still has to match byte
+// for byte. The end state after the WHOLE chain is what
+// TestRegistryGolden_Integration compares, and that is the lockstep truth;
+// this probe covers the container-free part of it plus the 138 assertions in
+// TestMigration138SetsUntrustedFlag.
 func TestToolSeedsMatchBuiltin(t *testing.T) {
 	cfgs := migration136Configs(t)
 	s := builtinTestSet(t)
@@ -356,8 +365,23 @@ func TestToolSeedsMatchBuiltin(t *testing.T) {
 		if !ok {
 			t.Fatalf("builtin set carries no %q (migration/builtin drift)", name)
 		}
+		// The one carve-out, asserted rather than assumed: the seed must NOT
+		// carry the flag and the builtin MUST — if either side moves, the
+		// carve-out itself is wrong and this is where it goes red, instead of
+		// silently widening into "untrusted never matters here".
+		if seed.Retrieval.Untrusted {
+			t.Errorf("migration 136 seed %q already carries retrieval.untrusted — "+
+				"138 would be a no-op and this normalisation is now hiding a real drift", name)
+		}
+		if !got.Retrieval.Untrusted {
+			t.Errorf("builtin %q lost retrieval.untrusted — migration 138 sets it, so the "+
+				"registry golden would go red against the compiled-in set", name)
+		}
+		got.Retrieval.Untrusted = false
+
 		if diff := policyDiff(seed, got); diff != "" {
-			t.Errorf("seed/builtin drift for %q:\n%s", name, diff)
+			t.Errorf("seed/builtin drift for %q (retrieval.untrusted normalised away — "+
+				"migration 138 owns that field):\n%s", name, diff)
 		}
 	}
 }

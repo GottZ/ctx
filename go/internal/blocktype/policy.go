@@ -135,6 +135,21 @@ type RetrievalPolicy struct {
 	// damping for that query (factor 1.0) — generalizes the retired
 	// rrf.AuditTrailFactor (a pure engine, rrf.MatchesAny, remains).
 	IntentPatterns []string
+	// Untrusted marks the type as FOREIGN TEXT: its blocks carry material an
+	// attacker can shape (tool output, file names, error prefixes), not
+	// knowledge somebody wrote. The synthesis presentation layer renders such
+	// a source as trust="untrusted" and adds one system-prompt sentence that
+	// defines those sources as observation data — quotable, never followed as
+	// an instruction, never a fact about the world outside that output
+	// (design/02 §4.6(2)/§7, W02-4).
+	//
+	// Deliberately a RETRIEVAL-side flag rather than a prompt-side type list:
+	// the framing has to travel with the type, so a second foreign-text type
+	// inherits it by carrying the key in its registry row — no prompt edit, no
+	// deploy. On an excluded type the flag is INERT (such a block reaches no
+	// prompt) but not invalid: validatePolicy leaves it alone so the row stays
+	// loadable if the type is later flipped to damped.
+	Untrusted bool
 }
 
 // GuardPolicy — participation of a type in the dedup guard.
@@ -261,6 +276,10 @@ type cfgRetrieval struct {
 	Policy         *string  `json:"policy"`
 	DampingFactor  *float64 `json:"damping_factor"`
 	IntentPatterns []string `json:"intent_patterns"`
+	// Untrusted is a pointer like every other present/absent field: absent is
+	// false (no pre-W02-4 row carries the key, and defaulting to true would
+	// frame the whole knowledge corpus as tool output).
+	Untrusted *bool `json:"untrusted"`
 }
 
 type cfgGuard struct {
@@ -364,6 +383,9 @@ func applyEnvelope(p *Policy, env *cfgEnvelope) error {
 			return err
 		}
 		p.Retrieval.IntentPatterns = r.IntentPatterns
+		if r.Untrusted != nil {
+			p.Retrieval.Untrusted = *r.Untrusted
+		}
 	}
 	if g := env.Guard; g != nil {
 		if g.Check != nil {
@@ -462,6 +484,12 @@ func applyClassify(p *Policy, c *cfgClassify) error {
 }
 
 // validatePolicy enforces the cross-field rules of vocabulary v1 (§3.3).
+//
+// retrieval.untrusted deliberately carries NO cross-field rule. On an excluded
+// type it is inert — such a block never reaches a prompt, so there is nothing
+// to frame — but inert is not invalid: rejecting it would make a row unloadable
+// for a value that changes no behaviour, and it would break the one order an
+// operator actually uses (set the flag, then flip the type to damped).
 func validatePolicy(p *Policy) error {
 	switch p.Retrieval.Kind {
 	case RetrievalFullPass, RetrievalExcluded:
