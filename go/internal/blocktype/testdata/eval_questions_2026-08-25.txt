@@ -1,0 +1,61 @@
+# Falsch-Lift-Fixture — die Frage-Spalte der eval-Suite.
+#
+# Quelle:   eval.sh, Funktion define_test_cases() (ab Zeile 136 zum
+#           Stichtag), Feld 3 des '|'-getrennten Formats
+#           ID|typ|FRAGE|confidence|keywords|kommentar|source_titles.
+# Stichtag: 2026-08-25 (Welle W02-2).
+# Anzahl:   47 Fragen (S01-S10, B01-B05, N01-N05, K01-K05, M01-M05,
+#           I01-I08, T01-T04, R01-R05).
+#
+# Zweck: Messkorpus für die Falsch-Lift-Rate der intent_patterns eines
+# damped-Typs. Kopie statt Laufzeit-Parse von eval.sh, weil ein Go-Unit-Test
+# kein Shell-Skript einliest; ein Drift zwischen eval.sh und dieser Datei
+# verschiebt die gemessene Rate, nicht die Semantik des Gates. Zeilen mit '#'
+# und Leerzeilen werden ignoriert.
+What embedding model does the context store use?
+How does the Write Guard detect duplicates?
+What are the scope values in the multi-tenant system?
+What is the PostgreSQL version and what extension is used for vectors?
+What LLM model is used for synthesis in the context-agent?
+How does the blob storage authenticate requests?
+What is the RRF fusion strategy used in retrieval?
+What are the Write Guard similarity thresholds?
+What happened with the qwen3.5:9b model evaluation?
+What is the Matryoshka truncation dimension for embeddings?
+Welches Embedding-Modell wird verwendet?
+Wie funktioniert der Write Guard?
+Was ist der PostgreSQL Mount-Pfad?
+Welche Scope-Werte gibt es im Multi-Tenant-System?
+Was ist das Problem mit qwen3.5:9b?
+What is the recipe for Kartoffelsuppe?
+How do I configure a Kubernetes cluster with Istio?
+What is the capital of France?
+How to set up a React Native app with Expo?
+What are the best restaurants in Berlin?
+What is the context-agent workflow ID?
+What database name does the context store use?
+What is the Ollama embedding model name?
+What port does Ollama run on?
+What is the native embedding dimension before Matryoshka truncation?
+Why was qwen3:4b-instruct chosen over qwen3.5:9b and what are the token differences?
+What is the full auth flow from API key to scope filtering?
+What are the Write Guard similarity thresholds and what action happens at each level?
+What are the differences between context-search and context-agent?
+How does the bilingual retrieval gap affect German queries and what is the fix?
+Zeig mir die Write Guard Thresholds
+List all scope values
+Nenn die Modelle die im System laufen
+Describe the RRF retrieval strategy
+Zeig Scopes
+Show me how auth works in the context store
+Liste alle Kategorien im Context Store auf
+Explain the blob storage authentication
+Was wurde letzte Woche im Context Store geändert?
+Welche Architektur-Entscheidungen wurden im März 2026 getroffen?
+What embedding changes happened recently?
+What happened at night during the infrastructure work?
+Write Guard
+embedding model
+blob storage
+multi-tenant scope
+key_hash auth migration

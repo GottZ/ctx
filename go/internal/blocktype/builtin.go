@@ -31,8 +31,58 @@ var auditPatterns = []string{
 // seeded as data in M072.
 const auditTrailDamping = 0.3
 
-// builtinPolicies returns fresh copies of the six builtin type policies (the
-// four M035 enum classes + the issue/comment workflow types, Welle I-C). Fresh
+// toolEvidencePatterns / toolOverviewPatterns are the compiled-in mirrors of
+// the M136 intent-pattern seeds (auditPatterns precedent above). Deliberately
+// multi-word and domain-specific: DampedTypesFor lifts a type COMPLETELY on
+// the first rrf.MatchesAny hit, and MatchesAny is a case-insensitive SUBSTRING
+// test — generic single words ("tool", "exit", "shell") would disable the
+// damping for a large share of ordinary queries. The false-lift rate against
+// the 47 eval questions is measured, not asserted (tool_evidence_test.go).
+var toolEvidencePatterns = []string{
+	"tool index",
+	"tool output",
+	"tool call",
+	"tool-ausgabe",
+	"stderr",
+	"stdout",
+	"exit code",
+	"exit-code",
+	"traceback",
+	"kommando",
+	"befehl",
+	"kommandozeile",
+	"welches kommando",
+	"welcher befehl",
+	"terminal-ausgabe",
+	"shell-befehl",
+}
+
+var toolOverviewPatterns = []string{
+	"tool overview",
+	"werkzeug-übersicht",
+	"welche werkzeuge",
+	"welche kommandos",
+	"welche befehle",
+	"welche dateien",
+	"tool-fehler",
+	"fehlgeschlagene calls",
+	"artefakt-übersicht",
+	"was wurde bearbeitet",
+}
+
+// toolEvidenceDamping is sharper than auditTrailDamping: the tool-index
+// population grows with every compaction and is near-duplicate BY
+// CONSTRUCTION. toolOverviewDamping is milder because the overview axis is
+// upsert-stable (one block per axis per root session) — the flooding argument
+// that drives 0.15 does not apply to it. Both seeded as data in M136.
+const (
+	toolEvidenceDamping = 0.15
+	toolOverviewDamping = 0.35
+)
+
+// builtinPolicies returns fresh copies of the nine builtin type policies (the
+// four M035 enum classes + the issue/comment workflow types, Welle I-C +
+// checkpoint, M107 + the two tool-evidence axes, M136). Fresh
 // slices per call: Policies end up in immutable
 // Sets — shared backing arrays between generations would let one Set's
 // consumer observe another's mutation.
@@ -40,6 +90,11 @@ func builtinPolicies() []Policy {
 	patterns := func() []string {
 		out := make([]string, len(auditPatterns))
 		copy(out, auditPatterns)
+		return out
+	}
+	fresh := func(src []string) []string {
+		out := make([]string, len(src))
+		copy(out, src)
 		return out
 	}
 	return []Policy{
@@ -145,6 +200,63 @@ func builtinPolicies() []Policy {
 			Overview:  OverviewPolicy{Include: false},
 			Parent:    ParentPolicy{Mode: ParentModeRequired, Relationship: "comment-of"},
 			Classify:  ClassifyRules{Priority: DefaultClassifyPriority},
+		},
+		// ── Tool-evidence axes (design/02 §3.1 + design/02a §3, M136) ────────
+		// tool-evidence: the per-compaction tool index. A SEPARATE type from
+		// checkpoint precisely because checkpoint is retrieval=excluded: an
+		// excluded type gets no embed slot and never answers "which command was
+		// that again?" — and that question IS the purpose of this axis
+		// (checkpoint resolves over exact IDs, this one over queries; two
+		// resolution modes, two types). Damped at 0.15 rather than full-pass
+		// because the population grows with every compaction and is
+		// near-duplicate BY CONSTRUCTION (same tools, similar commands,
+		// overlapping windows) — at the 1M+ target scale that floods candidate
+		// sets and overflows the reranker slot window, the same mechanic that
+		// forced 107 to exclude transcript parts outright. Out of every
+		// autonomous pipeline for the checkpoint reason verbatim: the guard's
+		// default archive lane would archive consecutive indices as duplicates
+		// and break the manifest→index ID chain (2026-07-20 dangling-manifest
+		// incident). Priority 19 is BELOW audit-trail's 20, not above it:
+		// Classify runs ascending / first match wins, and the title carries the
+		// ROOT SESSION NAME — a root containing "session"/"audit"/"baseline"/
+		// "reset" would hand the block to audit-trail, which guards AND dreams.
+		// The reverse cannot happen: "compaction checkpoint tool index" is a
+		// four-word chain that occurs in no real audit-trail or checkpoint title.
+		{
+			Name: "tool-evidence", Scope: globalScope, Builtin: true,
+			Retrieval: RetrievalPolicy{
+				Kind:           RetrievalDamped,
+				DampingFactor:  toolEvidenceDamping,
+				IntentPatterns: fresh(toolEvidencePatterns),
+			},
+			Guard:    GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
+			Dream:    DreamPolicy{Linkable: false},
+			Digest:   DigestPolicy{Include: false},
+			Overview: OverviewPolicy{Include: false},
+			Parent:   ParentPolicy{Mode: ParentModeNone},
+			Classify: ClassifyRules{Priority: 19, TitlePatterns: []string{"compaction checkpoint tool index"}},
+		},
+		// tool-overview: the per-root-session tool summary. Same pipeline
+		// posture as tool-evidence, but damped at 0.35 instead of 0.15 — the
+		// flooding argument does not apply here: the axis is upsert-stable (one
+		// block per axis per root session), so the population stays small. 0.35
+		// sits just above the historical audit-trail 0.3 line. Priority 18 for
+		// the same first-match-wins reason as tool-evidence; the two title
+		// patterns are disjoint, so their order relative to each other is
+		// inconsequential.
+		{
+			Name: "tool-overview", Scope: globalScope, Builtin: true,
+			Retrieval: RetrievalPolicy{
+				Kind:           RetrievalDamped,
+				DampingFactor:  toolOverviewDamping,
+				IntentPatterns: fresh(toolOverviewPatterns),
+			},
+			Guard:    GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
+			Dream:    DreamPolicy{Linkable: false},
+			Digest:   DigestPolicy{Include: false},
+			Overview: OverviewPolicy{Include: false},
+			Parent:   ParentPolicy{Mode: ParentModeNone},
+			Classify: ClassifyRules{Priority: 18, TitlePatterns: []string{"compaction tool overview"}},
 		},
 		// checkpoint: ID-anchored evidence blocks (compaction-checkpoint
 		// manifests + transcript source parts, migration 107). Resolution runs

@@ -46,10 +46,15 @@ func blocktypeNotify(name, scope string) *pgconn.Notification {
 func dampedFactor(t *testing.T, s *blocktype.Set) float64 {
 	t.Helper()
 	names, factors := s.DampedTypesFor("zzz probe query zzz")
-	if len(names) != 1 || names[0] != "audit-trail" {
-		t.Fatalf("damped types = %v, want [audit-trail]", names)
+	for i, n := range names {
+		if n == "audit-trail" {
+			return factors[i]
+		}
 	}
-	return factors[0]
+	// Since M136 the arrays carry two more damped builtins (tool-evidence,
+	// tool-overview); the probe reads audit-trail's slot, not the array length.
+	t.Fatalf("damped types = %v, want audit-trail among them", names)
+	return 0
 }
 
 func TestBlocktypeNotifyDispatch_Integration(t *testing.T) {

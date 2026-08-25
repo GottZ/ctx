@@ -16,9 +16,11 @@ func builtinTestSet(t *testing.T) *Set {
 
 func TestBuiltinSetShape(t *testing.T) {
 	s := builtinTestSet(t)
-	// Seven builtins since M107: the four M035 enum classes + issue/comment
-	// (Welle I-C) + checkpoint (ID-anchored evidence, out of every pipeline).
-	want := []string{"audit-trail", "checkpoint", "comment", "issue", "knowledge", "reference", "system-meta"}
+	// Nine builtins since M136: the four M035 enum classes + issue/comment
+	// (Welle I-C) + checkpoint (ID-anchored evidence, out of every pipeline) +
+	// the two tool-evidence axes (query-anchored evidence, damped instead of
+	// excluded — that difference IS why they are not checkpoint).
+	want := []string{"audit-trail", "checkpoint", "comment", "issue", "knowledge", "reference", "system-meta", "tool-evidence", "tool-overview"}
 	if got := s.Names(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Names() = %v, want %v", got, want)
 	}
@@ -28,18 +30,21 @@ func TestBuiltinSetShape(t *testing.T) {
 	// Retrieval-visible = full-pass|damped|aggregate. issue is full-pass; comment
 	// is aggregate-to-parent (I-E flip) — hence VISIBLE (it ranks in RRF, then
 	// folds onto its parent issue). system-meta + checkpoint stay excluded
-	// (checkpoint evidence resolves over exact IDs only, M107).
-	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "comment", "issue", "knowledge", "reference"}) {
-		t.Errorf("VisibleTypes() = %v (system-meta + checkpoint must be excluded; comment is aggregate-visible)", got)
+	// (checkpoint evidence resolves over exact IDs only, M107); the two M136
+	// tool types are damped and therefore VISIBLE — a query-anchored evidence
+	// block that never ranks would be pointless.
+	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "comment", "issue", "knowledge", "reference", "tool-evidence", "tool-overview"}) {
+		t.Errorf("VisibleTypes() = %v (system-meta + checkpoint must be excluded; comment is aggregate-visible, the tool types damped-visible)", got)
 	}
-	// guard.check: the 4 builtins + issue; comment + checkpoint are OUT
-	// (guard.check=false — consecutive checkpoints are near-duplicates by
-	// construction, the default archive lane broke ID chains, M107).
+	// guard.check: the 4 builtins + issue; comment, checkpoint and the two M136
+	// tool types are OUT (guard.check=false — consecutive evidence blocks of one
+	// session are near-duplicates by construction, the default archive lane
+	// broke ID chains, M107 / M136).
 	if got := s.GuardCheckTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference", "system-meta"}) {
-		t.Errorf("GuardCheckTypes() = %v, want 4 builtins + issue (comment + checkpoint out)", got)
+		t.Errorf("GuardCheckTypes() = %v, want 4 builtins + issue (comment + checkpoint + tool types out)", got)
 	}
 	if got := s.GuardCandidateTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "issue", "knowledge", "reference", "system-meta"}) {
-		t.Errorf("GuardCandidateTypes() = %v, want 4 builtins + issue (comment + checkpoint out)", got)
+		t.Errorf("GuardCandidateTypes() = %v, want 4 builtins + issue (comment + checkpoint + tool types out)", got)
 	}
 	// The four M035 classes keep the guard bestand — archive persist + cross-
 	// scope candidates. Builtins are constructed directly (not via DecodePolicy),
@@ -90,6 +95,21 @@ func TestBuiltinSetShape(t *testing.T) {
 	}
 }
 
+// dampedFactorFor returns the damping factor DampedTypesFor reports for one
+// type, and whether the type is damped for that query at all (false = intent
+// lift). Since M136 the arrays carry three damped builtins, so an exact
+// DeepEqual against the whole array would pin unrelated types; the audit-trail
+// contract below is about audit-trail alone.
+func dampedFactorFor(s *Set, query, typeName string) (float64, bool) {
+	names, factors := s.DampedTypesFor(query)
+	for i, n := range names {
+		if n == typeName {
+			return factors[i], true
+		}
+	}
+	return 0, false
+}
+
 // TestDampedTypesForAuditTrailGolden pins the generalized damping against
 // FIXED expectations captured from rrf.AuditTrailFactor before T4 retired it
 // (lift ⇔ the old factor was 1.0). The old function is gone — these literals
@@ -109,15 +129,17 @@ func TestDampedTypesForAuditTrailGolden(t *testing.T) {
 		{"", false},
 	}
 	for _, tc := range cases {
-		names, factors := s.DampedTypesFor(tc.query)
+		factor, damped := dampedFactorFor(s, tc.query, "audit-trail")
 		if tc.lift {
-			if len(names) != 0 {
-				t.Errorf("query %q: damped %v, want intent lift (empty arrays)", tc.query, names)
+			if damped {
+				names, _ := s.DampedTypesFor(tc.query)
+				t.Errorf("query %q: damped %v, want audit-trail lifted out", tc.query, names)
 			}
 			continue
 		}
-		if !reflect.DeepEqual(names, []string{"audit-trail"}) || !reflect.DeepEqual(factors, []float64{0.3}) {
-			t.Errorf("query %q: (%v, %v), want ([audit-trail], [0.3])", tc.query, names, factors)
+		if !damped || factor != 0.3 {
+			names, factors := s.DampedTypesFor(tc.query)
+			t.Errorf("query %q: (%v, %v), want audit-trail damped at 0.3", tc.query, names, factors)
 		}
 	}
 }
@@ -209,7 +231,9 @@ func TestNewSetRejectsBrokenDefaults(t *testing.T) {
 func TestBuiltinPatternsDriveEngine(t *testing.T) {
 	s := builtinTestSet(t)
 	for _, probe := range auditPatterns {
-		if names, _ := s.DampedTypesFor("xx " + probe + " yy"); len(names) != 0 {
+		// Only audit-trail's own lift is asserted: since M136 the damping
+		// arrays carry two more builtins that these patterns do not address.
+		if _, damped := dampedFactorFor(s, "xx "+probe+" yy", "audit-trail"); damped {
 			t.Errorf("pattern %q does not lift audit-trail damping via the engine", probe)
 		}
 		if name, matched := s.Classify("xx "+probe+" yy", nil); !matched || name != "audit-trail" {

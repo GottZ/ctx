@@ -85,12 +85,18 @@ func installCapture(t *testing.T) *logCapture {
 
 func dampingOf(t *testing.T, s *blocktype.Set) float64 {
 	t.Helper()
-	// A query no intent pattern matches — audit-trail stays damped.
+	// A query no intent pattern matches — audit-trail stays damped. Since M136
+	// two more damped builtins (tool-evidence, tool-overview) ride the same
+	// arrays, so the probe picks audit-trail's slot instead of pinning the
+	// array length.
 	names, factors := s.DampedTypesFor("zzz probe query zzz")
-	if len(names) != 1 || names[0] != "audit-trail" {
-		t.Fatalf("damped types = %v, want [audit-trail]", names)
+	for i, n := range names {
+		if n == "audit-trail" {
+			return factors[i]
+		}
 	}
-	return factors[0]
+	t.Fatalf("damped types = %v, want audit-trail among them", names)
+	return 0
 }
 
 // TestRegistryGolden_Integration is the fixed-source drift gate (§4.1 R1):
@@ -166,10 +172,11 @@ func TestRegistryGolden_Integration(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_block_types`).Scan(&n); err != nil {
 			t.Fatalf("count: %v", err)
 		}
-		// 7 since M107: 072 seeds 4, 084 seeds issue+comment, 107 seeds
-		// checkpoint; re-running 072 (ON CONFLICT DO NOTHING) adds none.
-		if n != 7 {
-			t.Errorf("rows after double-run = %d, want 7", n)
+		// 9 since M136: 072 seeds 4, 084 seeds issue+comment, 107 seeds
+		// checkpoint, 136 seeds tool-evidence+tool-overview; re-running 072
+		// (ON CONFLICT DO NOTHING) adds none.
+		if n != 9 {
+			t.Errorf("rows after double-run = %d, want 9", n)
 		}
 	})
 
@@ -181,10 +188,11 @@ func TestRegistryGolden_Integration(t *testing.T) {
 			    AND metadata->>'via' = 'sql'`).Scan(&n); err != nil {
 			t.Fatalf("audit count: %v", err)
 		}
-		// 7 since M107: 4 seed inserts from 072 + issue/comment from 084 +
-		// checkpoint from 107, all via=sql (migration path, no api_key_id).
-		if n != 7 {
-			t.Errorf("block_type insert audit rows = %d, want 7 (seed inserts, via=sql)", n)
+		// 9 since M136: 4 seed inserts from 072 + issue/comment from 084 +
+		// checkpoint from 107 + the two tool types from 136, all via=sql
+		// (migration path, no api_key_id).
+		if n != 9 {
+			t.Errorf("block_type insert audit rows = %d, want 9 (seed inserts, via=sql)", n)
 		}
 	})
 
