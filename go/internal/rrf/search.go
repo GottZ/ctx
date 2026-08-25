@@ -128,25 +128,90 @@ type MatchedComment struct {
 // metadata are wired in W02-3) — it carries strategy metadata only, never
 // content (§5.5).
 func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, visibleTypes []string, dampedTypes []string, dampedFactors []float64, categoriesExclude []string, typesExclude []string, grantedBlockIDs []string, policy SelectorPolicy) ([]SearchResult, SelectorDecision, error) {
-	// Fail-closed core BEFORE the selector (§5.3): empty scopes / empty type
-	// allowlist reject, and no probe ever runs for a request that must not
-	// retrieve anything.
+	return SearchTx(ctx, pool, pool, embedding, query, querySpaced, scopes, category, tags, limit, temporal, queryOR,
+		visibleTypes, dampedTypes, dampedFactors, categoriesExclude, typesExclude, grantedBlockIDs, policy)
+}
+
+// SearchTx is Search with the STATEMENT surface split off from the POOL (B-W2,
+// design/04 §4.4). q carries the probe and the ctx_rrf statement; pool stays
+// because poolStatsEstimator's snapshot cache is keyed on a pool (a catalog
+// read plus process-level cache, not a per-call statement) and cannot be
+// expressed over a Querier.
+//
+// Search delegates here with q == pool, so the ~20 existing call sites and
+// their wire behaviour are untouched — the whole seam is additive.
+//
+// WHY THE PROBE RUNS ON q, NOT ON pool: boundedProbe counts rows the ctx_rrf
+// call is about to search. On the pool, inside a measurement transaction, the
+// probe would read a NEWER snapshot than the statement whose strategy it
+// decides — a concurrent bulk insert between the two would produce a decision
+// that describes a corpus the statement never sees, and the arm ranks would
+// then be attributed to the wrong strategy. Routing it through q makes probe,
+// fusion and arms one coherent snapshot. On the live path q IS the pool, so
+// nothing changes there.
+func SearchTx(ctx context.Context, pool *pgxpool.Pool, q Querier, embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, visibleTypes []string, dampedTypes []string, dampedFactors []float64, categoriesExclude []string, typesExclude []string, grantedBlockIDs []string, policy SelectorPolicy) ([]SearchResult, SelectorDecision, error) {
+	limit = clampSearchLimit(limit)
+	base, err := rrfBaseArgs(embedding, query, querySpaced, scopes, category, tags, limit,
+		temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, categoriesExclude, typesExclude, grantedBlockIDs)
+	if err != nil {
+		return nil, SelectorDecision{}, err
+	}
+
+	// Achse 02: the strategy dispatch. The policy clamps (§5.4) are applied
+	// ONCE here so the warn logs fire once per search, not once per derivation.
+	if policy.Enabled {
+		policy = clampPolicy(policy)
+	}
+	probe := func(ctx context.Context, scopes []string, limit int) (int, error) {
+		return boundedProbe(ctx, q, scopes, limit)
+	}
+	decision := decide(ctx, probe, poolStatsEstimator(pool), scopes, grantedBlockIDs, policy)
+	decision.SQLLimit = limit
+
+	exec := func(ctx context.Context, mode string, scanTuples, exactCap any) ([]SearchResult, error) {
+		sql := rrfQueryLegacy
+		args := base
+		if !isIstParams(mode, scanTuples, exactCap) {
+			// Only a non-Ist strategy needs the Gen-15 parameter surface. The
+			// Ist path keeps the literal legacy statement — byte-identical wire
+			// behaviour AND callable against a pre-Gen-15 function.
+			sql = rrfQueryGen15
+			// Copy before appending: base is shared with the retry attempt and
+			// with any later ctx_rrf_arms call over the same arguments; an
+			// in-place append would let one attempt overwrite the next one's
+			// selector positions.
+			args = append(append(make([]any, 0, len(base)+3), base...), mode, scanTuples, exactCap)
+		}
+		return queryRRF(ctx, q, sql, args)
+	}
+
+	return runSelected(ctx, decision, policy, exec)
+}
+
+// rrfBaseArgs builds the 15 leading ctx_rrf arguments and applies the
+// fail-closed core (§5.3): empty embedding / empty scopes / empty type
+// allowlist reject BEFORE the selector, so no probe ever runs for a request
+// that must not retrieve anything.
+//
+// It is shared with ArmRanksTx (B-W2) on purpose: ctx_rrf_arms keeps positions
+// 1-18 byte-identical to ctx_rrf (migration 137), and a second hand-written
+// argument list is exactly the drift the parity gate cannot see.
+func rrfBaseArgs(embedding []float32, query, querySpaced string, scopes []string, category *string, tags []string, limit int, temporal string, queryOR string, visibleTypes []string, dampedTypes []string, dampedFactors []float64, categoriesExclude []string, typesExclude []string, grantedBlockIDs []string) ([]any, error) {
 	if len(embedding) == 0 {
-		return nil, SelectorDecision{}, fmt.Errorf("rrf: empty embedding")
+		return nil, fmt.Errorf("rrf: empty embedding")
 	}
 	if len(scopes) == 0 {
-		return nil, SelectorDecision{}, fmt.Errorf("rrf: empty scopes")
+		return nil, fmt.Errorf("rrf: empty scopes")
 	}
 	// Fail-closed allowlist guard (§3.5 invariant 1): NULL/empty
 	// p_types_visible means 0 hits by design — a caller that reaches this
 	// point without a resolved type set has a wiring bug, surface it loudly.
 	if len(visibleTypes) == 0 {
-		return nil, SelectorDecision{}, fmt.Errorf("rrf: empty visible-types allowlist (block-type registry not wired?)")
+		return nil, fmt.Errorf("rrf: empty visible-types allowlist (block-type registry not wired?)")
 	}
 	if len(dampedTypes) != len(dampedFactors) {
-		return nil, SelectorDecision{}, fmt.Errorf("rrf: damped types/factors length mismatch (%d != %d)", len(dampedTypes), len(dampedFactors))
+		return nil, fmt.Errorf("rrf: damped types/factors length mismatch (%d != %d)", len(dampedTypes), len(dampedFactors))
 	}
-	limit = clampSearchLimit(limit)
 
 	// Build halfvec from float32 slice.
 	hv := pgvec.NewHalfVector(embedding)
@@ -195,32 +260,8 @@ func Search(ctx context.Context, pool *pgxpool.Pool, embedding []float32, query,
 		grantedBlockIDsParam = grantedBlockIDs
 	}
 
-	// Achse 02: the strategy dispatch. The policy clamps (§5.4) are applied
-	// ONCE here so the warn logs fire once per search, not once per derivation.
-	if policy.Enabled {
-		policy = clampPolicy(policy)
-	}
-	probe := func(ctx context.Context, scopes []string, limit int) (int, error) {
-		return boundedProbe(ctx, pool, scopes, limit)
-	}
-	decision := decide(ctx, probe, poolStatsEstimator(pool), scopes, grantedBlockIDs, policy)
-	decision.SQLLimit = limit
-
-	exec := func(ctx context.Context, mode string, scanTuples, exactCap any) ([]SearchResult, error) {
-		args := []any{hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam,
-			visibleTypes, dampedTypesParam, dampedFactorsParam, categoriesExcludeParam, typesExcludeParam, grantedBlockIDsParam}
-		sql := rrfQueryLegacy
-		if !isIstParams(mode, scanTuples, exactCap) {
-			// Only a non-Ist strategy needs the Gen-15 parameter surface. The
-			// Ist path keeps the literal legacy statement — byte-identical wire
-			// behaviour AND callable against a pre-Gen-15 function.
-			sql = rrfQueryGen15
-			args = append(args, mode, scanTuples, exactCap)
-		}
-		return queryRRF(ctx, pool, sql, args)
-	}
-
-	return runSelected(ctx, decision, policy, exec)
+	return []any{hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam,
+		visibleTypes, dampedTypesParam, dampedFactorsParam, categoriesExcludeParam, typesExcludeParam, grantedBlockIDsParam}, nil
 }
 
 const rrfQueryCols = `SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at, type_name`
@@ -236,8 +277,8 @@ const rrfQueryGen15 = rrfQueryCols + `
 		 FROM ctx_rrf($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10::text[], $11::text[], $12::float8[], $13::text[], $14::text[], $15::uuid[], $16::text, $17::int, $18::int)`
 
 // queryRRF runs one ctx_rrf statement and scans the result rows.
-func queryRRF(ctx context.Context, pool *pgxpool.Pool, sql string, args []any) ([]SearchResult, error) {
-	rows, err := pool.Query(ctx, sql, args...)
+func queryRRF(ctx context.Context, q Querier, sql string, args []any) ([]SearchResult, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: query ctx_rrf: %w", err)
 	}

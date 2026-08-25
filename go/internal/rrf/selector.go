@@ -102,9 +102,9 @@ type rrfExec func(ctx context.Context, mode string, scanTuples, exactCap any) ([
 //
 // The probe decides the STRATEGY, never the VISIBILITY — it counts only what
 // the caller's read scopes already expose (§5.5).
-func boundedProbe(ctx context.Context, pool *pgxpool.Pool, scopes []string, limit int) (int, error) {
+func boundedProbe(ctx context.Context, q Querier, scopes []string, limit int) (int, error) {
 	var n int
-	err := pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT count(*) FROM (
 			SELECT 1 FROM context_blocks
 			WHERE scope = ANY($1::text[]) AND NOT is_archived

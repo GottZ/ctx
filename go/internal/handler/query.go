@@ -27,6 +27,7 @@ import (
 	"github.com/GottZ/ctx/internal/rrf"
 	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -227,6 +228,29 @@ type queryRequest struct {
 	// to each source on the retrieval-only path (F6 ctx_query tool delegation).
 	// Default false ⇒ eval.sh / A-B sweep responses are byte-for-byte unchanged.
 	IncludeContent bool `json:"include_content,omitempty"`
+
+	// --- B-W2 measurement seam (design/04 §4.4). ADMIN ONLY, retrieval-only,
+	// read-only. These three exist so the arm-weight sweep (B-W5/B-W7) can
+	// observe the fusion inputs of a REAL request: an external driver cannot
+	// reproduce translation, temporal normalisation, the query-prefixed
+	// embedding and the selector decision, so the measurement has to ride the
+	// production path instead of imitating it.
+
+	// ArmRanks turns the request into a measurement: ctx_rrf and its per-arm
+	// sister ctx_rrf_arms run in ONE RepeatableRead/ReadOnly transaction and
+	// the response carries an extra arm_ranks block. Requires admin AND
+	// synthesize:false — see the gate block in HandleQuery. Absent/false is
+	// the byte-identical production path (no transaction, no second statement).
+	ArmRanks *bool `json:"arm_ranks,omitempty"`
+	// PinnedTranslation replaces the TranslateQuery result, so a sweep can
+	// repeat a query across runs without paying an LLM roundtrip whose output
+	// is not stable. Only legal together with arm_ranks.
+	PinnedTranslation *string `json:"pinned_translation,omitempty"`
+	// PinnedTemporal replaces the temporal FTS expansion AFTER the
+	// deterministic rules ran; the empty string means "explicitly no temporal
+	// expansion". It suppresses the LLM temporal fallback (the only
+	// non-deterministic half of that stage). Only legal together with arm_ranks.
+	PinnedTemporal *string `json:"pinned_temporal,omitempty"`
 }
 
 // maxRetrievalSnippet caps the per-source content attached when include_content
@@ -246,6 +270,49 @@ type queryResponse struct {
 	// boost ran with (GottZ Cyclic Phase Model) — the eval-cyclic dim_weight_pass
 	// assert reads this field. Omitted when the query had no temporal treatment.
 	ActivatedDimWeights map[string]float64 `json:"activated_dim_weights,omitempty"`
+	// ArmRanks is the B-W2 measurement block. nil (omitempty) for every request
+	// that did not ask for it, which is every production request — the wire
+	// stays byte-identical without the flag.
+	ArmRanks *armRanksBlock `json:"arm_ranks,omitempty"`
+}
+
+// armRanksBlock is what a measurement request gets on top of the normal
+// retrieval-only response (design/04 §4.4). Everything in it is either a
+// number, an id or the query text the CALLER already sent — no block content,
+// no titles, no scopes; ctx_rrf_arms itself projects no content at all
+// (migration 137 header).
+//
+// Rows and FusionOrder are the two halves of the sweep input: the raw per-arm
+// ranks, and the order the LIVE fusion produced from them — captured directly
+// out of rrf.SearchTx, BEFORE gravity, cluster, graph, fold and truncation, so
+// the two describe the same stage and an offline re-fusion is comparable
+// against it.
+//
+// The Effective* fields close the reproducibility gap the pins exist for: they
+// report what actually went into the statement after translation and temporal
+// normalisation, so a sweep run can be replayed exactly.
+type armRanksBlock struct {
+	Rows                 []rrf.ArmRow      `json:"rows"`
+	FusionOrder          []string          `json:"fusion_order"`
+	EffectiveQuery       string            `json:"effective_query"`
+	EffectiveQuerySpaced string            `json:"effective_query_spaced"`
+	EffectiveTemporal    string            `json:"effective_temporal"`
+	EmbedModel           string            `json:"embed_model"`
+	EmbedCacheHit        bool              `json:"embed_cache_hit"`
+	Selector             armSelectorReport `json:"selector"`
+}
+
+// armSelectorReport is the Achse-02 decision in the shape SQL received it:
+// mode/reason/estimate from the decision itself, scan_tuples/exact_cap from the
+// SAME mapping the statement used (rrf.SelectorSQLArgs). null means the
+// parameter was left on its SQL default. Mode is the POST-retry value — after
+// an exact_cap_hit the decision degrades to ann, and that is what ran.
+type armSelectorReport struct {
+	Mode       string `json:"mode"`
+	Reason     string `json:"reason"`
+	Estimate   int    `json:"estimate"`
+	ScanTuples *int   `json:"scan_tuples"`
+	ExactCap   *int   `json:"exact_cap"`
 }
 
 // collectDimWeights splits DimensionWeights into the linear share and the
@@ -497,6 +564,40 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Step 2b: B-W2 measurement gates (design/04 §4.4). Fail-closed and BEFORE
+	// any work — ahead of the rate-limit roundtrip, the sensitivity scan and
+	// every LLM stage, so a rejected measurement request costs one comparison
+	// and nothing else.
+	//
+	// Order is load-bearing: the admin gate runs FIRST, so a non-admin never
+	// learns from the status code whether the rest of the request would have
+	// been well-formed. The synthesize gate is second because a measurement
+	// that reached synthesis would pay an LLM call inside the read-only
+	// transaction and hold the snapshot for the duration of it — the seam is
+	// retrieval-only by construction, not by convention. The pin gate is last
+	// and refuses pins outside a measurement outright: a pinned translation on
+	// the production path would be a way to steer retrieval past the
+	// translation stage, and there is no legitimate caller for that.
+	armRanks := req.ArmRanks != nil && *req.ArmRanks
+	if armRanks && !ar.IsAdmin {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"success": false, "error": "arm_ranks requires an admin key",
+		})
+		return
+	}
+	if armRanks && (req.Synthesize == nil || *req.Synthesize) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": "arm_ranks requires synthesize:false",
+		})
+		return
+	}
+	if !armRanks && (req.PinnedTranslation != nil || req.PinnedTemporal != nil) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": "pinned_translation/pinned_temporal require arm_ranks:true",
+		})
+		return
+	}
+
 	// Read rate limit check (0 = disabled).
 	if rateLimitRead := cfg.Query.RateLimitRead; rateLimitRead > 0 {
 		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, ar.ApiKeyID, "query")
@@ -562,7 +663,20 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	searchQuery := query
 	translated := false
 
-	if llm.DetectGerman(query) {
+	if req.PinnedTranslation != nil {
+		// B-W2: the pin REPLACES the whole detect+translate branch, wire call
+		// included. A sweep that re-runs the same query hundreds of times must
+		// not re-pay (and re-vary) a translation; pinning it is what makes two
+		// runs comparable. translated stays honest — it reports whether the
+		// text that went into retrieval differs from the text the user sent,
+		// which is the same claim it makes on the live path.
+		searchQuery = *req.PinnedTranslation
+		translated = searchQuery != originalQuery
+		slog.Info("query translation pinned (arm_ranks measurement)",
+			"translated", translated,
+			"request_id", requestID,
+		)
+	} else if llm.DetectGerman(query) {
 		slog.Info("german detected, translating",
 			"request_id", requestID,
 		)
@@ -601,8 +715,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"fts_terms", temporal,
 			"request_id", requestID,
 		)
-	} else if llm.HasTemporalIntent(originalQuery) {
+	} else if req.PinnedTemporal == nil && llm.HasTemporalIntent(originalQuery) {
 		// LLM fallback: query seems temporal but rules couldn't parse it.
+		// Skipped under a temporal pin — the fallback is the one
+		// non-deterministic half of this stage, and the pin exists to remove
+		// exactly that variance from a sweep run.
 		var err error
 		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, querySens, originalQuery, now, ar.ApiKeyID, h.admission())
 		if err != nil {
@@ -618,6 +735,20 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				"request_id", requestID,
 			)
 		}
+	}
+
+	// B-W2: the pin replaces the FTS EXPANSION, deliberately after the rules
+	// and deliberately not touching temporalResult. The rules keep running on
+	// originalQuery, so the gravity stage below still sees the dates the query
+	// really carries; only the string that reaches ctx_rrf's p_temporal is
+	// pinned. "" is a legitimate pin value and means "no temporal expansion" —
+	// which is why the field is a pointer and not a plain string.
+	if req.PinnedTemporal != nil {
+		temporal = *req.PinnedTemporal
+		slog.Info("temporal expansion pinned (arm_ranks measurement)",
+			"fts_terms", temporal,
+			"request_id", requestID,
+		)
 	}
 
 	// Step 3c: Temporal prefix for embedding augmentation — DISABLED.
@@ -644,6 +775,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "embedding failed"})
 		return
 	}
+	// B-W2: the model that keys the embed cache and, on a miss, answers the
+	// wire call. Read from the chain head exactly like embedcache does, so the
+	// reported model cannot diverge from the one that produced the vector.
+	embedModel := embChain[0].ModelFor(backends.RoleEmbed).Model
 	embedding, embServed, embAttempts, embWired, err := embedcache.EmbedChain(
 		ctx, h.pool, embChain, backends.RoleEmbed, embedQuery, embed.PrefixQuery,
 		embedcache.ReportFunc(llm.PoolReporter(h.backendPool)), h.embedAdmission())
@@ -721,7 +856,24 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Wire compat (seam 17, closed in WF T10): types_exclude is the canonical
 	// wire name for the request-level p_types_exclude; block_roles_exclude
 	// stays as the documented legacy alias — both present ⇒ union.
-	results, selectorDec, err := rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, req.CategoriesExclude, unionExcludes(req.TypesExclude, req.BlockRolesExclude), grantedBlockIDs, selectorPolicy)
+	var (
+		results     []rrf.SearchResult
+		selectorDec rrf.SelectorDecision
+		armRows     []rrf.ArmRow
+	)
+	if armRanks {
+		results, selectorDec, armRows, err = h.armSweepSearch(ctx, armSweepParams{
+			embedding: embedding, query: searchQuery, querySpaced: querySpaced,
+			scopes: ar.ReadScopes, category: req.Category, tags: req.Tags, limit: internalLimit,
+			temporal: temporal, queryOR: queryOR, visibleTypes: visibleTypes,
+			dampedTypes: dampedTypes, dampedFactors: dampedFactors,
+			categoriesExclude: req.CategoriesExclude,
+			typesExclude:      unionExcludes(req.TypesExclude, req.BlockRolesExclude),
+			grantedBlockIDs:   grantedBlockIDs, policy: selectorPolicy,
+		})
+	} else {
+		results, selectorDec, err = rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, req.CategoriesExclude, unionExcludes(req.TypesExclude, req.BlockRolesExclude), grantedBlockIDs, selectorPolicy)
+	}
 	if err != nil {
 		slog.Error("rrf search failed",
 			"error", err,
@@ -729,6 +881,18 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "search failed"})
 		return
+	}
+
+	// B-W2: the fusion order as ctx_rrf handed it over — captured HERE, before
+	// gravity, cluster, graph, fold and truncation touch the slice. Anywhere
+	// later it would be a different claim (the delivered ranking), and the
+	// sweep needs the one the arm ranks actually explain.
+	var fusionOrder []string
+	if armRanks {
+		fusionOrder = make([]string, len(results))
+		for i := range results {
+			fusionOrder[i] = results[i].ID
+		}
 	}
 
 	// Achse-02 instrumentation (design/02 §4.7 #1): the decision rides the
@@ -1068,19 +1232,49 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				maxScore = raw
 			}
 		}
-		go h.logAccess(ar, results, query, selectorDec)
+		go h.logAccess(ar, results, query, selectorDec, accessSourceFor(armRanks))
 		slog.Info("query pipeline complete (retrieval-only)",
 			"source_count", len(sources),
 			"translated", translated,
+			"arm_ranks", armRanks,
 			"request_id", requestID,
 		)
-		hb.finish(http.StatusOK, queryResponse{
+		resp := queryResponse{
 			Success:             true,
 			Sources:             buildSourceResponses(sources, supersedesMap, req.IncludeContent),
 			Confidence:          llm.ClassifyConfidence(maxScore, cfg.SynthesisSettings()),
 			Translated:          translated,
 			ActivatedDimWeights: activatedDimWeights(temporalResult),
-		})
+		}
+		if armRanks {
+			_, scanTuples, exactCap := rrf.SelectorSQLArgs(selectorDec, selectorPolicy)
+			resp.ArmRanks = &armRanksBlock{
+				Rows:                 armRows,
+				FusionOrder:          fusionOrder,
+				EffectiveQuery:       searchQuery,
+				EffectiveQuerySpaced: querySpaced,
+				EffectiveTemporal:    temporal,
+				EmbedModel:           embedModel,
+				// embWired is true exactly when a wire call happened, so its
+				// negation is the cache hit — the same signal the llmlog row
+				// above is gated on, not a second bookkeeping of it.
+				EmbedCacheHit: !embWired,
+				Selector: armSelectorReport{
+					// The THREE-valued policy mode (ann|exact|grey), not the
+					// two-valued p_semantic_mode SQL saw: grey is ann with a
+					// raised scan budget, and scan_tuples right below already
+					// carries that half. Collapsing them here would make the
+					// two fields say the same thing twice and lose the
+					// distinction the sweep correlates on.
+					Mode:       selectorDec.Mode,
+					Reason:     selectorDec.Reason,
+					Estimate:   selectorDec.Estimate,
+					ScanTuples: scanTuples,
+					ExactCap:   exactCap,
+				},
+			}
+		}
+		hb.finish(http.StatusOK, resp)
 		return
 	}
 
@@ -1104,7 +1298,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"source_count", len(results),
 			"request_id", requestID,
 		)
-		go h.logAccess(ar, results, query, selectorDec)
+		go h.logAccess(ar, results, query, selectorDec, accessSourceAgent)
 		hb.finish(http.StatusOK, queryResponse{
 			Success:             true,
 			Answer:              llm.NoRelevantReplacement,
@@ -1169,7 +1363,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 9: Access log (async, non-blocking).
-	go h.logAccess(ar, results, query, selectorDec)
+	go h.logAccess(ar, results, query, selectorDec, accessSourceAgent)
 
 	// Step 10: Build response.
 	respSources := buildSourceResponses(synthResult.Sources, supersedesMap, false)
@@ -1202,6 +1396,112 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	hb.finish(http.StatusOK, resp)
 }
 
+// Access-log provenance (B-W2). "agent" is the value every production query
+// has written since the table existed and stays untouched; "armsweep" marks
+// the rows an admin measurement request produced.
+const (
+	accessSourceAgent    = "agent"
+	accessSourceArmSweep = "armsweep"
+)
+
+// accessSourceFor picks the provenance label for one request.
+func accessSourceFor(armRanks bool) string {
+	if armRanks {
+		return accessSourceArmSweep
+	}
+	return accessSourceAgent
+}
+
+// armSweepTimeout bounds BOTH the statement and the idle time of the
+// measurement transaction. It is deliberately generous compared to a live
+// query: ctx_rrf_arms returns the FULL candidate set of four arms instead of a
+// top-k, and on a 1M+ corpus that is a much wider result than the fusion ever
+// materialises. It is a ceiling against a stuck snapshot, not a latency
+// budget — B-W5 couples the working value to the measured p95 x 5 once the
+// sweep has p95 numbers to couple to.
+const armSweepTimeout = "30s"
+
+// armSweepParams carries the retrieval arguments through the measurement seam.
+// A struct rather than a 16-parameter method signature: the same list already
+// travels as positional arguments into rrf.SearchTx and rrf.ArmRanksTx, and a
+// third positional copy in between is where a swapped pair of []string
+// arguments would hide (categoriesExclude/typesExclude are type-identical).
+type armSweepParams struct {
+	embedding         []float32
+	query             string
+	querySpaced       string
+	scopes            []string
+	category          *string
+	tags              []string
+	limit             int
+	temporal          string
+	queryOR           string
+	visibleTypes      []string
+	dampedTypes       []string
+	dampedFactors     []float64
+	categoriesExclude []string
+	typesExclude      []string
+	grantedBlockIDs   []string
+	policy            rrf.SelectorPolicy
+}
+
+// armSweepSearch is the B-W2 measurement seam: ctx_rrf and ctx_rrf_arms in ONE
+// REPEATABLE READ / READ ONLY transaction (design/04 §4.4).
+//
+// Both properties are load-bearing, and neither is decoration:
+//
+//   - REPEATABLE READ gives the two statements ONE snapshot. Two autocommit
+//     statements would let a concurrent write land between them, and the arm
+//     ranks would then describe a candidate set the fusion never saw — a
+//     measurement that is wrong without ever looking wrong.
+//   - The ann arm sets hnsw.* via SET LOCAL, which in a function without its
+//     own SET clause lives until the END OF TRANSACTION, not the end of the
+//     call (migration 137 header). Only inside one transaction do both
+//     functions search the same ANN candidate space.
+//   - READ ONLY is the fail-closed half: this path exists to observe, and the
+//     transaction is structurally incapable of writing. The rollback in the
+//     defer therefore has nothing to undo — it just releases the snapshot.
+//
+// Errors are NOT fail-open. A measurement that silently degraded to whatever
+// the pool happened to return would be worse than no measurement, so a failing
+// statement fails the request; the caller maps it onto the same 500 the
+// ordinary search error takes.
+func (h *QueryHandler) armSweepSearch(ctx context.Context, p armSweepParams) ([]rrf.SearchResult, rrf.SelectorDecision, []rrf.ArmRow, error) {
+	tx, err := h.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, rrf.SelectorDecision{}, nil, fmt.Errorf("arm_ranks: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only tx: nothing to lose, and rollback after return is a no-op
+
+	// SET LOCAL, so both bounds die with the transaction and never leak onto
+	// the pooled connection's next user.
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+armSweepTimeout+"'"); err != nil {
+		return nil, rrf.SelectorDecision{}, nil, fmt.Errorf("arm_ranks: set statement_timeout: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL idle_in_transaction_session_timeout = '"+armSweepTimeout+"'"); err != nil {
+		return nil, rrf.SelectorDecision{}, nil, fmt.Errorf("arm_ranks: set idle_in_transaction_session_timeout: %w", err)
+	}
+
+	// pool stays the pool (poolStatsEstimator is a pool property); the probe
+	// and the ctx_rrf statement travel through tx.
+	results, dec, err := rrf.SearchTx(ctx, h.pool, tx, p.embedding, p.query, p.querySpaced, p.scopes,
+		p.category, p.tags, p.limit, p.temporal, p.queryOR, p.visibleTypes, p.dampedTypes, p.dampedFactors,
+		p.categoriesExclude, p.typesExclude, p.grantedBlockIDs, p.policy)
+	if err != nil {
+		return nil, dec, nil, err
+	}
+
+	// dec is post-retry: after an exact_cap_hit runSelected rewrote Mode, so
+	// the arms call reproduces the arguments the fusion ACTUALLY ran with.
+	rows, err := rrf.ArmRanksTx(ctx, tx, dec, p.policy, p.embedding, p.query, p.querySpaced, p.scopes,
+		p.category, p.tags, p.limit, p.temporal, p.queryOR, p.visibleTypes, p.dampedTypes, p.dampedFactors,
+		p.categoriesExclude, p.typesExclude, p.grantedBlockIDs)
+	if err != nil {
+		return nil, dec, nil, err
+	}
+	return results, dec, rows, nil
+}
+
 // selectorInstrumented reports whether an Achse-02 decision carries strategy
 // information worth recording (design/02 §4.7). A disabled selector yields
 // {ann, disabled} and a path that never reached rrf yields the zero value — in
@@ -1223,7 +1523,14 @@ func selectorInstrumented(dec rrf.SelectorDecision) bool {
 // per-row redundancy (~40 B JSONB) is the price for zero new tables; a
 // query-level telemetry sink is Achse-03 territory (§9.2). The decision is
 // strategy metadata only — never query content, titles or block ids (§5.5).
-func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult, queryText string, dec rrf.SelectorDecision) {
+// source is the metadata.source value of every row this call writes.
+// Production requests write accessSourceAgent, unchanged since the table
+// existed; a B-W2 measurement request writes accessSourceArmSweep. The rows
+// are NOT suppressed for a measurement — an admin-triggered retrieval against
+// the live corpus is exactly what an access log is for — but they are
+// LABELLED, so a later G-REAL selection over real traffic can exclude the
+// sweep instead of silently mixing synthetic reads into its statistics.
+func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult, queryText string, dec rrf.SelectorDecision, source string) {
 	if ar == nil || ar.ApiKeyID == "" || len(results) == 0 {
 		return
 	}
@@ -1238,7 +1545,7 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 		metadata := map[string]interface{}{
 			"score":  math.Round(r.RRFScore*10000) / 10000,
 			"scope":  r.Scope,
-			"source": "agent",
+			"source": source,
 		}
 		if withSelector {
 			metadata["sel_mode"] = dec.Mode
