@@ -150,7 +150,20 @@ else's environment — that led to a fix landing in the repository.
   description the v5 surface requires, a V16c sign-and-floor check, tests
   that pin all three consumption sites and the hot reload, a pick claim that
   now outlives the configured cycle, and precedence docs corrected for an
-  outer-ceiling key.
+  outer-ceiling key. Also PR
+  [#39](https://github.com/GottZ/ctx/pull/39): since the v5.0.0 pool
+  migration, `model_map` params without a dedicated Options field —
+  above all `chat_template_kwargs`, the only working thinking toggle on
+  vLLM/LiteLLM-served models — were silently dropped before the wire, so
+  dream-eval and query-temporal answers ran into the token cap truncated;
+  the shipped fix carries unknown params through `Options.Extra` to the
+  OpenAI wire path (backend `extra_body` keeps precedence), adds
+  `CapLocked` so extraction phases keep their hard budget, a deterministic
+  keyword fallback with a 12 h park instead of a 5-minute re-pick spin, a
+  path-splitting tokenizer and an object-drift keyword parse — hardened
+  with a deterministic, capped drift salvage, a synthetic-fixture test and
+  a truthful park log, plus a web editor for per-row `model_map` params
+  the passthrough made meaningful.
 
 ## How to be listed
 
