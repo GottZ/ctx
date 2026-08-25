@@ -70,7 +70,7 @@ func TestUpsertBlob_42P08_Regression(t *testing.T) {
 	t.Run("insert writes the row under the prepared-statement exec mode", func(t *testing.T) {
 		data := blobBytes(32)
 		bm, err := store.UpsertBlob(ctx, pool, "reference", "b1-insert", "probe.bin",
-			"application/octet-stream", "private", data, []string{"w-b1"}, map[string]any{"probe": "insert"})
+			"application/octet-stream", "private", data, []string{"w-b1"}, map[string]any{"probe": "insert"}, "")
 		if err != nil {
 			t.Fatalf("UpsertBlob: %v", err)
 		}
@@ -94,14 +94,14 @@ func TestUpsertBlob_42P08_Regression(t *testing.T) {
 	t.Run("second write updates the same row including the checksum", func(t *testing.T) {
 		first := blobBytes(32)
 		bm1, err := store.UpsertBlob(ctx, pool, "reference", "b1-upsert", "first.bin",
-			"application/octet-stream", "private", first, []string{"a"}, map[string]any{"gen": "1"})
+			"application/octet-stream", "private", first, []string{"a"}, map[string]any{"gen": "1"}, "")
 		if err != nil {
 			t.Fatalf("first UpsertBlob: %v", err)
 		}
 
 		second := blobBytes(64)
 		bm2, err := store.UpsertBlob(ctx, pool, "reference", "b1-upsert", "second.bin",
-			"text/plain", "private", second, []string{"b"}, map[string]any{"gen": "2"})
+			"text/plain", "private", second, []string{"b"}, map[string]any{"gen": "2"}, "")
 		if err != nil {
 			t.Fatalf("second UpsertBlob: %v", err)
 		}
@@ -141,7 +141,7 @@ func TestUpsertBlob_42P08_Regression(t *testing.T) {
 		// text rendering of the parameter would differ here.
 		data := []byte{0x00, 0xff, 0xfe, 0x80, 0x41, 0x0a, 0x00, 0xc3}
 		bm, err := store.UpsertBlob(ctx, pool, "reference", "b1-checksum", "raw.bin",
-			"application/octet-stream", "private", data, nil, nil)
+			"application/octet-stream", "private", data, nil, nil, "")
 		if err != nil {
 			t.Fatalf("UpsertBlob: %v", err)
 		}
@@ -155,7 +155,7 @@ func TestUpsertBlob_42P08_Regression(t *testing.T) {
 			t.Run(fmt.Sprintf("%dB", size), func(t *testing.T) {
 				data := blobBytes(size)
 				bm, err := store.UpsertBlob(ctx, pool, "reference", fmt.Sprintf("b1-size-%d", size),
-					"sweep.bin", "application/octet-stream", "private", data, nil, nil)
+					"sweep.bin", "application/octet-stream", "private", data, nil, nil, "")
 				if err != nil {
 					t.Fatalf("UpsertBlob(%d bytes): %v", size, err)
 				}

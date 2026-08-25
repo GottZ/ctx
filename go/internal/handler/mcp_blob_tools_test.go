@@ -1,4 +1,5 @@
-// W02-8 gate 1: the MCP tool list carries the two blob tools.
+// W02-8 gate 1: the MCP tool list carries the blob tools — the two write/read
+// tools of W02-8 plus blob_link, phase 2 of the two-phase write (W02-10).
 //
 // RED before this wave: registerTools registered twelve tools (query, store,
 // search, get, recent, update, confirm + the three issue tools + the two guard
@@ -60,7 +61,7 @@ func mcpToolNames(t *testing.T) []string {
 func TestMCPToolsListCarriesBlobTools(t *testing.T) {
 	names := mcpToolNames(t)
 
-	for _, want := range []string{"blob_store", "blob_fetch"} {
+	for _, want := range []string{"blob_store", "blob_fetch", "blob_link"} {
 		found := false
 		for _, got := range names {
 			if got == want {
@@ -76,8 +77,8 @@ func TestMCPToolsListCarriesBlobTools(t *testing.T) {
 	// The count is pinned in test.sh T17 against the live server. Pinning it
 	// here too is what makes the two agree: a tool added without touching T17
 	// fails at go test time instead of on a deployed system.
-	if len(names) != 14 {
-		t.Errorf("tools/list exports %d tools, want 14 (test.sh T17 pins the same number) — tools = %v",
+	if len(names) != 15 {
+		t.Errorf("tools/list exports %d tools, want 15 (test.sh T17 pins the same number) — tools = %v",
 			len(names), names)
 	}
 }

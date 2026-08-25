@@ -57,6 +57,13 @@ type blobWriteInput struct {
 	Data     []byte
 	Tags     []string
 	Metadata map[string]any
+	// ContextBlockID is the OPTIONAL blob-to-block edge (W02-10), empty =
+	// none. Phase 1 of the two-phase write (design/02 sec. 4.2) normally
+	// leaves it empty and phase 2 (blob_link) sets it, but a caller that
+	// already knows the block may write both in one call — the column is the
+	// same column either way, and a surface that accepted the edge only in
+	// phase 2 would force a second round trip for no reason.
+	ContextBlockID string
 }
 
 // blobReject is a blob-write rejection: the shared writeReject plus the
@@ -178,7 +185,10 @@ func blobWriteGate(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, ar 
 // The booking is SYNCHRONOUS and precedes the upsert, on purpose. A write that
 // dies in a constraint violation has already cost the decode, the checksum and
 // an INSERT attempt of up to 50 MB, so it must cost budget too — otherwise the
-// surface is free to hammer with payloads that never commit. And the row IS the
+// surface is free to hammer with payloads that never commit. The same reading
+// puts the block-ref gate (W02-10 A1) AFTER this booking: a reference to a
+// block the caller cannot see is an invalid request of exactly that class, and
+// probing block ids must cost the prober its budget. And the row IS the
 // budget: booked after the fact, the gate reads a counter that lags its own
 // writes and N concurrent requests all pass an empty one. A booking failure is
 // fail-closed (500) for the same reason: an unbookable write is an ungated one.
@@ -305,10 +315,43 @@ func scanBlobPayload(ctx context.Context, cfg ConfigStore, in blobWriteInput, re
 	return metadata
 }
 
-// executeBlobWrite is the whole write: gate → budget → scan → upsert →
-// attribution. Steps 1 and 2 (fields, decode) belong to the transport, which is
-// where the payload's encoding lives; everything from the scope gate on is
-// identical for every surface and lives here.
+// blobBlockRefNotFoundMsg is the ONE verdict for an unusable blob-to-block
+// reference (W02-10 A1). One constant, because the whole point is that a block
+// in a scope the caller cannot read and a UUID that exists nowhere answer
+// BYTE-IDENTICALLY — anything else turns the write surface into an existence
+// oracle over foreign scopes. A malformed id folds in here too (BlockVisible).
+const blobBlockRefNotFoundMsg = "Referenced context_block_id not found"
+
+// blobBlockRefGate is the A1 gate: the referenced block must be visible in the
+// caller's READ scopes before any surface may write the edge to it.
+//
+// It is a rejection of the CONSTRAINT class on purpose, not a new code. That
+// is the class the foreign key itself produced for the same request before
+// this gate existed (23503 → 422, blobConstraintError) — the gate changes WHICH
+// requests are refused and what they are told, not the vocabulary a client
+// branches on (Gap-C6-c: one code per rejection class, closed set).
+//
+// An empty reference is not a reference: phase 1 of the two-phase write leaves
+// the column NULL, which is the normal case and passes.
+func blobBlockRefGate(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, blockID, reqID string) *writeReject {
+	if blockID == "" {
+		return nil
+	}
+	visible, err := store.BlockVisible(ctx, pool, blockID, ar.ReadScopes)
+	if err != nil {
+		slog.Error("blob-store: block-ref visibility check error", "error", err, "request_id", reqID)
+		return classInternal.reject("Internal server error")
+	}
+	if !visible {
+		return classConstraint.reject(blobBlockRefNotFoundMsg)
+	}
+	return nil
+}
+
+// executeBlobWrite is the whole write: gate → budget → block-ref gate → scan →
+// upsert → attribution. Steps 1 and 2 (fields, decode) belong to the transport,
+// which is where the payload's encoding lives; everything from the scope gate
+// on is identical for every surface and lives here.
 func executeBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, ar *auth.AuthResult, in blobWriteInput, reqID string) (*store.BlobMeta, *blobReject) {
 	writeScope, logID, rej := blobWriteGate(ctx, pool, cfg, ar, in, reqID)
 	if rej != nil {
@@ -320,9 +363,13 @@ func executeBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, 
 	// taste: a block is capped at 50 KB and its scan is free, a blob is capped
 	// at 50 MB and its scan is regex work over every byte — a request that the
 	// scope gate is about to refuse must not pay for it first.
+	if rej := blobBlockRefGate(ctx, pool, ar, in.ContextBlockID, reqID); rej != nil {
+		return nil, blobRejection(rej)
+	}
+
 	metadata := scanBlobPayload(ctx, cfg, in, reqID)
 
-	blob, err := store.UpsertBlob(ctx, pool, in.Category, in.Title, in.Filename, in.MimeType, writeScope, in.Data, in.Tags, metadata)
+	blob, err := store.UpsertBlob(ctx, pool, in.Category, in.Title, in.Filename, in.MimeType, writeScope, in.Data, in.Tags, metadata, in.ContextBlockID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "23") {

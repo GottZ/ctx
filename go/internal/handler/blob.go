@@ -34,6 +34,12 @@ type blobStoreRequest struct {
 	Tags     []string       `json:"tags"`
 	Metadata map[string]any `json:"metadata"`
 	Scope    string         `json:"scope"`
+	// ContextBlockID is the optional blob-to-block edge (W02-10). Absent or
+	// empty writes NULL, which is what every request before this wave meant
+	// and still means. The referenced block must be visible in the key's read
+	// scopes; if it is not, the write is refused with the constraint verdict
+	// (blobBlockRefGate) rather than silently building a cross-scope edge.
+	ContextBlockID string `json:"context_block_id"`
 }
 
 // HandleBlobStore processes POST /api/blob/store.
@@ -81,6 +87,8 @@ func (h *BlobHandler) HandleBlobStore(w http.ResponseWriter, r *http.Request) {
 		Data:     data,
 		Tags:     req.Tags,
 		Metadata: req.Metadata,
+
+		ContextBlockID: req.ContextBlockID,
 	}, reqID)
 	if blobRej != nil {
 		writeBlobReject(w, blobRej)

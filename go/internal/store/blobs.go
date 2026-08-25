@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -66,7 +67,28 @@ type BlobStats struct {
 // rejects the PREPARE with "inconsistent types deduced for parameter $6"
 // (42P08) — which the pgx default exec mode (prepared statements) hits on
 // every single call.
-func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filename, mimeType, scope string, data []byte, tags []string, metadata map[string]any) (*BlobMeta, error) {
+//
+// contextBlockID is the edge to a context block (W02-10). The column has
+// existed since 113_baseline.sql:131, indexed at :261, and until this wave it
+// had no Go writer at all — 42 of the 61 live blobs carry it from the n8n era.
+// The EMPTY STRING means NULL (NULLIF($10, the empty string)::uuid), which is
+// how this tree already spells an optional string argument (scope for the home
+// scope, type for auto-classify) and keeps every caller free of pointer
+// juggling.
+//
+// It rides in DO UPDATE SET like every other column, so the row is what the
+// LAST write handed over: a re-upsert WITHOUT a block id CLEARS the edge. That
+// is the intended reading of the two-phase write (design/02 sec. 4.2) — phase 1
+// (blob_store) always precedes phase 2 (blob_link), so rewriting the payload
+// starts the pair over instead of inheriting a stale edge to an earlier
+// manifest. A caller that means "leave the edge alone" uses UpdateBlobBlockRef.
+//
+// The caller owns the VISIBILITY of the referenced block (BlockVisible): the
+// foreign key only knows whether a row exists, not whether this principal may
+// see it, so letting it decide would both build a cross-scope edge and answer
+// differently for "exists elsewhere" (write succeeds) than for "exists nowhere"
+// (23503).
+func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filename, mimeType, scope string, data []byte, tags []string, metadata map[string]any, contextBlockID string) (*BlobMeta, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -76,8 +98,8 @@ func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filena
 
 	bm := &BlobMeta{}
 	err := pool.QueryRow(ctx,
-		`INSERT INTO context_blobs (category, title, filename, mime_type, file_size, data, checksum, tags, metadata, scope)
-		VALUES ($1, $2, $3, $4, $5, $6::bytea, encode(digest($6::bytea, 'sha256'), 'hex'), $7, $8, $9)
+		`INSERT INTO context_blobs (category, title, filename, mime_type, file_size, data, checksum, tags, metadata, scope, context_block_id)
+		VALUES ($1, $2, $3, $4, $5, $6::bytea, encode(digest($6::bytea, 'sha256'), 'hex'), $7, $8, $9, NULLIF($10, '')::uuid)
 		ON CONFLICT (category, title, scope) DO UPDATE SET
 			filename = EXCLUDED.filename,
 			mime_type = EXCLUDED.mime_type,
@@ -87,11 +109,12 @@ func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filena
 			tags = EXCLUDED.tags,
 			metadata = EXCLUDED.metadata,
 			scope = EXCLUDED.scope,
+			context_block_id = EXCLUDED.context_block_id,
 			updated_at = now()
-		RETURNING id, category, title, filename, mime_type, file_size, checksum, storage_type, tags, metadata, scope, created_at, updated_at`,
-		category, title, filename, mimeType, len(data), data, tags, metadata, scope,
+		RETURNING id, context_block_id, category, title, filename, mime_type, file_size, checksum, storage_type, tags, metadata, scope, created_at, updated_at`,
+		category, title, filename, mimeType, len(data), data, tags, metadata, scope, contextBlockID,
 	).Scan(
-		&bm.ID, &bm.Category, &bm.Title, &bm.Filename, &bm.MimeType,
+		&bm.ID, &bm.ContextBlockID, &bm.Category, &bm.Title, &bm.Filename, &bm.MimeType,
 		&bm.FileSize, &bm.Checksum, &bm.StorageType, &bm.Tags, &bm.Metadata,
 		&bm.Scope, &bm.CreatedAt, &bm.UpdatedAt,
 	)
@@ -99,6 +122,133 @@ func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filena
 		return nil, fmt.Errorf("store: upsert blob: %w", err)
 	}
 	return bm, nil
+}
+
+// BlockVisible reports whether a context block exists in one of the given
+// scopes. It is the guard in front of every write of
+// context_blobs.context_block_id (W02-10 A1) and lives here, beside the blob
+// writers, because that edge is the only reason it exists.
+//
+// Why a lookup and not the foreign key. The FK knows one thing: whether a row
+// with that id exists ANYWHERE. Handing it the decision would (a) build an
+// edge from a blob in one scope to a block in another, and (b) answer a
+// reference to a block the caller cannot see with SUCCESS while answering a
+// reference to a block that exists nowhere with 23503 — an existence oracle
+// over foreign scopes, spelled in HTTP statuses.
+//
+// Fail-closed on an empty scope set (RequireScopes, design/01 sec. 5.4) like
+// every other read here. Archived blocks are NOT visible: is_archived is what
+// GetBlock reads as gone, and "visible" has to mean one thing in this tree.
+//
+// A MALFORMED id answers false, not an error — it must be indistinguishable
+// from a well-formed id that is out of reach (the tenantNotFound pattern,
+// tenant.go). The 22P02 comes from the ::uuid cast, server-side, which is why
+// the parameter is cast rather than bound as a uuid directly.
+func BlockVisible(ctx context.Context, pool *pgxpool.Pool, id string, scopes []string) (bool, error) {
+	if err := RequireScopes(scopes); err != nil { // T07 fail-closed (design/01 sec. 5.4)
+		return false, err
+	}
+	if id == "" {
+		return false, nil
+	}
+	var visible bool
+	err := pool.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM context_blocks
+			WHERE id = $1::uuid AND NOT is_archived AND scope = ANY($2::text[])
+		)`,
+		id, scopes,
+	).Scan(&visible)
+	if err != nil {
+		if isMalformedUUID(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("store: block visible: %w", err)
+	}
+	return visible, nil
+}
+
+// isMalformedUUID reports the 22P02 a ::uuid cast raises on a non-UUID string.
+// Same reading as tenantNotFound (tenant.go): malformed and absent must not be
+// distinguishable, or the error class itself becomes the side channel.
+func isMalformedUUID(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "22P02"
+}
+
+// UpdateBlobBlockRef sets context_blobs.context_block_id on an existing blob —
+// phase 2 of the two-phase blob write (design/02 sec. 4.2), and the whole
+// reason that write is two-phased: the payload has already crossed the wire,
+// the manifest block it belongs to did not exist yet when it did, and the
+// second step must not be a second 50 MB round trip.
+//
+// It is therefore an UPDATE of ONE column and NOT a re-upsert: file_size,
+// checksum, data and updated_at are untouched, so a link cannot be mistaken
+// for a payload rewrite by anything reading the row afterwards (there is no
+// trigger on context_blobs — updated_at is written by the upsert statement
+// itself, and this statement does not write it).
+//
+// The scope filter is the write gate, evaluated exactly once, here: the caller
+// passes writableBlockScopes(ar) — a link IS a write to the blob row. A blob
+// outside that set, a blob that does not exist, and a malformed id are ONE
+// answer (nil, nil): not found, no oracle.
+//
+// An EMPTY contextBlockID clears the edge (NULLIF). No surface exposes that
+// today — the MCP tool requires the field — but the store function spells the
+// column's full range rather than a subset of it.
+func UpdateBlobBlockRef(ctx context.Context, pool *pgxpool.Pool, id, contextBlockID string, writeScopes []string) (*BlobMeta, error) {
+	if err := RequireScopes(writeScopes); err != nil { // T07 fail-closed (design/01 sec. 5.4)
+		return nil, err
+	}
+	bm := &BlobMeta{}
+	err := pool.QueryRow(ctx,
+		`UPDATE context_blobs
+		SET context_block_id = NULLIF($2, '')::uuid
+		WHERE id = $1::uuid AND scope = ANY($3::text[])
+		RETURNING id, context_block_id, category, title, filename, mime_type, file_size,
+			COALESCE(checksum, ''), storage_type, tags, metadata, scope, created_at, updated_at`,
+		id, contextBlockID, writeScopes,
+	).Scan(
+		&bm.ID, &bm.ContextBlockID, &bm.Category, &bm.Title, &bm.Filename, &bm.MimeType,
+		&bm.FileSize, &bm.Checksum, &bm.StorageType, &bm.Tags, &bm.Metadata,
+		&bm.Scope, &bm.CreatedAt, &bm.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) || isMalformedUUID(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: update blob block ref: %w", err)
+	}
+	return bm, nil
+}
+
+// BlobWriteScope resolves the scope of a blob the caller may WRITE, or the
+// empty string when there is no such blob (absent, outside writeScopes, or a
+// malformed id — one answer, as in UpdateBlobBlockRef).
+//
+// It is the stage-time twin of that UPDATE: a staged blob_link card has to
+// name the scope it will execute under (the confirm re-validates exactly that
+// scope against the key's current rights, D1-M1), and staging must not write.
+// Same question, same fail-closed reading, no row touched.
+func BlobWriteScope(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) (string, error) {
+	if err := RequireScopes(writeScopes); err != nil { // T07 fail-closed (design/01 sec. 5.4)
+		return "", err
+	}
+	if id == "" {
+		return "", nil
+	}
+	var scope string
+	err := pool.QueryRow(ctx,
+		`SELECT scope FROM context_blobs WHERE id = $1::uuid AND scope = ANY($2::text[]) LIMIT 1`,
+		id, writeScopes,
+	).Scan(&scope)
+	if errors.Is(err, pgx.ErrNoRows) || isMalformedUUID(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: blob write scope: %w", err)
+	}
+	return scope, nil
 }
 
 // GetBlobByID retrieves a blob by ID, filtered by readScopes.

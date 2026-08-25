@@ -154,6 +154,19 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 		out := executeConfirm(ctx, cfg.Pool, cfg.Blocktypes, ar, input.PayloadHash)
 		switch out.Kind {
 		case confirmOK:
+			if out.Op == store.OpBlobLink {
+				// The edge is what this op wrote, so it is what the answer
+				// names — a link that reported only the blob would be
+				// indistinguishable from a no-op.
+				linked := ""
+				if out.Blob.ContextBlockID != nil {
+					linked = *out.Blob.ContextBlockID
+				}
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and linked blob: %s (id: %s, context_block_id: %s)",
+						out.Blob.Title, out.Blob.ID, linked))},
+				}, nil, nil
+			}
 			if out.Op == store.OpBlobStore {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and stored blob: %s (id: %s, category: %s, %d bytes)",
@@ -175,6 +188,8 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			return errResult(confirmTOCTOUGoneMsg), nil, nil
 		case confirmTOCTOUDrift:
 			return errResult(confirmTOCTOUDriftMsg(out.BlockID)), nil, nil
+		case confirmBlockRefGone:
+			return errResult(confirmBlockRefGoneMsg), nil, nil
 		case confirmUnreadable:
 			return errResult("confirm failed: staged payload unreadable"), nil, nil
 		case confirmExecErr:
@@ -183,6 +198,9 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			}
 			return errResult(fmt.Sprintf("confirmed write failed to execute: %v — the stage token is consumed; re-stage the write", out.Err)), nil, nil
 		case confirmExecGone:
+			if out.Op == store.OpBlobLink {
+				return errResult("confirmed blob_link failed to execute: blob no longer accessible — the stage token is consumed; re-stage the link"), nil, nil
+			}
 			return errResult("confirmed update failed to execute: block no longer accessible — the stage token is consumed; re-stage the update"), nil, nil
 		default: // confirmInfraErr
 			return errResult(fmt.Sprintf("confirm failed: %v", out.Err)), nil, nil

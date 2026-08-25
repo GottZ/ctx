@@ -128,3 +128,34 @@ func TestCanonicalRoundTrip(t *testing.T) {
 		t.Fatalf("round-trip tags not canonical-sorted: %v", back.Tags)
 	}
 }
+
+// W02-10: the blob-to-block edge is the LAST field and omitempty, so a write
+// that carries none canonicalizes to bytes without the key at all — every
+// payload_hash a client already holds for 'store'/'update'/'blob_store' stays
+// confirmable across this wave. The probe reads the canonical BYTES rather than
+// comparing two hashes: a field that silently rendered as "context_block_id":""
+// would still hash stably with itself and only break against a client that
+// staged before the upgrade.
+func TestCanonicalOmitsAnAbsentBlockRef(t *testing.T) {
+	_, canonical, err := baseWrite().PayloadHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(canonical), "context_block_id") {
+		t.Fatalf("a write without a block ref canonicalizes with the key present: %s", canonical)
+	}
+
+	withRef := baseWrite()
+	withRef.ContextBlockID = "0198cafe-0000-7000-8000-00000000beef"
+	refHash, refCanonical, err := withRef.PayloadHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(refCanonical), "context_block_id") {
+		t.Fatalf("a write WITH a block ref does not canonicalize it: %s", refCanonical)
+	}
+	plainHash, _, _ := baseWrite().PayloadHash()
+	if refHash == plainHash {
+		t.Fatal("the block ref is not hash-bound — a confirm could execute a different edge than the card promised")
+	}
+}

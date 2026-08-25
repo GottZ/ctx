@@ -1,5 +1,6 @@
 // W02-8: the MCP blob tools — blob_store over the shared blob write core
-// (blob_core.go), blob_fetch as a RANGED read.
+// (blob_core.go), blob_fetch as a RANGED read. W02-10 adds blob_link, phase 2
+// of the two-phase write.
 //
 // Why they exist: a provider that writes evidence over MCP had no way to put a
 // payload anywhere but into a block. The REST route /api/blob/store was the
@@ -14,6 +15,13 @@
 // a 50 MB payload to a model context is not a large answer, it is the end of
 // the context. offset/length address the stored (uncompressed) bytes, so a
 // caller that knows its own layout can pull one record instead of the file.
+//
+// Why the link is its own tool: the payload and the block that owns it cannot
+// both be written first (design/02 sec. 4.2). The manifest block carries the
+// blob id, so the blob has to exist before it; the blob carries the manifest id,
+// so the block has to exist before that. blob_link breaks the cycle at the
+// cheap end — one indexed UPDATE of one column, no payload on the wire — which
+// is why phase 2 is a link and not a second blob_store.
 package handler
 
 import (
@@ -70,6 +78,18 @@ type blobStoreInput struct {
 	// arm passes the empty string, which resolves to ar.HomeScope.
 	Tags     []string       `json:"tags,omitempty" jsonschema:"optional tags for filtering"`
 	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"optional metadata object"`
+	// The blob-to-block edge, optional in phase 1 (W02-10). A writer that
+	// already knows the owning block sets it here and needs no blob_link at
+	// all; the two-phase order exists for the writer that does NOT know it yet.
+	ContextBlockID string `json:"context_block_id,omitempty" jsonschema:"optional UUID of the context block this payload belongs to (phase 2 blob_link sets it later)"`
+}
+
+// blobLinkInput is phase 2 (W02-10): both fields required, no scope field
+// (decision D4, as for blob_store) — the blob's own scope decides, and it is
+// the caller's key that has to be able to write it.
+type blobLinkInput struct {
+	ID             string `json:"id" jsonschema:"UUID of the blob to link (blob_store returned it)"`
+	ContextBlockID string `json:"context_block_id" jsonschema:"UUID of the context block this blob belongs to"`
 }
 
 type blobFetchInput struct {
@@ -81,7 +101,7 @@ type blobFetchInput struct {
 	Length   int    `json:"length,omitempty" jsonschema:"bytes to return (default 262144, max 1048576; a larger value is refused, not clamped)"`
 }
 
-// registerBlobTools registers the two blob tools. Registration is
+// registerBlobTools registers the three blob tools. Registration is
 // unconditional, like every other tool file's: the tool list must not depend
 // on the calling key, or a client's tool cache would differ per principal.
 func registerBlobTools(server *mcp.Server, cfg MCPConfig) {
@@ -95,6 +115,26 @@ func registerBlobTools(server *mcp.Server, cfg MCPConfig) {
 		Description: "Read a blob by id (or category+title). Reads a BYTE RANGE by default (offset/length over the stored payload) so a large blob can be drilled into instead of pulled whole; meta_only returns metadata alone.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpBlobFetchHandler(cfg))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "blob_link",
+		Description: "Link an existing blob to a context block (phase 2 of the two-phase write): sets the blob's context_block_id in ONE indexed UPDATE without rewriting the payload. Books one blob write; a key with the confirm_writes capability gets the call STAGED instead of executed.",
+	}, mcpBlobLinkHandler(cfg))
+}
+
+// blobAnswer is the JSON shape both write tools answer with. The edge is
+// present only when it is set (W02-10 A5): an absent key says "no edge", an
+// empty string would say "an edge to nothing".
+func blobAnswer(blob *store.BlobMeta) map[string]any {
+	out := map[string]any{
+		"id": blob.ID, "category": blob.Category, "title": blob.Title,
+		"filename": blob.Filename, "mime_type": blob.MimeType,
+		"file_size": blob.FileSize, "checksum": blob.Checksum, "scope": blob.Scope,
+	}
+	if blob.ContextBlockID != nil {
+		out["context_block_id"] = *blob.ContextBlockID
+	}
+	return out
 }
 
 // mcpBlobStoreHandler is the MCP arm of the blob write path. It owns exactly
@@ -123,6 +163,8 @@ func mcpBlobStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobStoreInput, any] 
 			Data:     data,
 			Tags:     input.Tags,
 			Metadata: input.Metadata,
+
+			ContextBlockID: input.ContextBlockID,
 		}
 
 		// Staging branch (N-28), mirroring mcpStoreHandler: a confirm_writes
@@ -141,13 +183,149 @@ func mcpBlobStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobStoreInput, any] 
 		// JSON, not prose: the caller of this tool is a provider that has to
 		// keep the id (and, for a self-indexing payload, the size) to address
 		// the blob again.
-		out, _ := json.Marshal(map[string]any{
-			"id": blob.ID, "category": blob.Category, "title": blob.Title,
-			"filename": blob.Filename, "mime_type": blob.MimeType,
-			"file_size": blob.FileSize, "checksum": blob.Checksum, "scope": blob.Scope,
-		})
+		out, _ := json.Marshal(blobAnswer(blob))
 		return &mcp.CallToolResult{Content: []mcp.Content{textContent(string(out))}}, nil, nil
 	}
+}
+
+// blobLinkNotFoundMsg is the ONE verdict for a blob this key cannot link: no
+// such blob, a blob outside writableBlockScopes, and a malformed id are the
+// same sentence (store.UpdateBlobBlockRef / store.BlobWriteScope collapse all
+// three). A link is a WRITE to the blob row, so the scope set is the write
+// gate's, not the read one's (W02-10 A2).
+//
+// It carries the constraint CODE rather than none: on this surface an uncoded
+// IsError means STAGED (D3-C3), so a refusal without a code would read as a
+// staged write to every client that follows the documented rule.
+const blobLinkNotFoundMsg = "blob not found"
+
+// mcpBlobLinkHandler is phase 2 of the two-phase blob write.
+//
+// The ORDER is budget → block-ref gate → scoped UPDATE, and it is the same on
+// the staged arm below. The budget goes FIRST because this call has no
+// caller-supplied scope to refuse ahead of it (blob_store's scope gate has one)
+// — what it does have is two ids, and probing ids must cost the prober its
+// budget (see meterBlobWrite). The UPDATE's own scope filter is the write gate,
+// evaluated once, in the store layer.
+func mcpBlobLinkHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobLinkInput, any] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input blobLinkInput) (*mcp.CallToolResult, any, error) {
+		ar := AuthResultFromContext(ctx)
+		if ar == nil { // T07/L7 fail-closed (design/01 sec. 5.4): never fall back to the default tenant
+			return classUnauthorized.errResult("unauthorized: no resolved tenant identity"), nil, nil
+		}
+		if input.ID == "" || input.ContextBlockID == "" {
+			return classMissingFields.errResult("Missing required fields: id, context_block_id"), nil, nil
+		}
+
+		// Staging branch (N-28), like blob_store: a confirm_writes key never
+		// writes directly, on any surface it can reach — and an edge IS a write.
+		if ar.ConfirmWrites {
+			return mcpStageBlobLink(ctx, cfg, ar, input)
+		}
+
+		reqID := RequestIDFromContext(ctx)
+		logID, rej := meterBlobWrite(ctx, cfg.Pool, cfg.Cfg, ar, reqID)
+		if rej != nil {
+			return errResultReject(rej), nil, nil
+		}
+		if rej := blobBlockRefGate(ctx, cfg.Pool, ar, input.ContextBlockID, reqID); rej != nil {
+			return errResultReject(rej), nil, nil
+		}
+
+		blob, err := store.UpdateBlobBlockRef(ctx, cfg.Pool, input.ID, input.ContextBlockID, writableBlockScopes(ar))
+		if err != nil {
+			slog.Error("mcp blob_link: update error", "error", err, "request_id", reqID)
+			return classInternal.errResult("blob_link failed: internal error"), nil, nil
+		}
+		if blob == nil {
+			return errResultReject(classConstraint.reject(blobLinkNotFoundMsg)), nil, nil
+		}
+
+		// Same attribution as a payload write (fire-and-forget): the booked row
+		// names the blob it paid for, or the audit trail loses the reference.
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if logErr := store.AttributeAccessBlob(bgCtx, cfg.Pool, logID, blob.ID); logErr != nil {
+				slog.Error("mcp blob_link: write attribution error", "error", logErr, "request_id", reqID)
+			}
+		}()
+
+		out, _ := json.Marshal(blobAnswer(blob))
+		return &mcp.CallToolResult{Content: []mcp.Content{textContent(string(out))}}, nil, nil
+	}
+}
+
+// mcpStageBlobLink stages phase 2 for a confirm_writes key.
+//
+// No staging cap: the cap on the blob_store arm bounds a PAYLOAD held
+// server-side for the whole TTL, and a link holds two ids.
+//
+// The card names the blob's OWN scope, resolved here (BlobWriteScope) rather
+// than assumed to be the home scope: the confirm re-validates exactly that
+// scope against the key's rights at confirm time (D1-M1), so a card staged
+// under the wrong scope would re-validate the wrong thing.
+func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, input blobLinkInput) (*mcp.CallToolResult, any, error) {
+	reqID := RequestIDFromContext(ctx)
+	var ttl time.Duration
+	if cfg.Cfg != nil {
+		ttl = cfg.Cfg.SnapshotForRequest(ctx).Writes.ConfirmTTL
+	}
+
+	if _, rej := meterBlobWrite(ctx, cfg.Pool, cfg.Cfg, ar, reqID); rej != nil {
+		return errResultReject(rej), nil, nil
+	}
+	// The logID is deliberately dropped, as on the blob_store stage arm: at
+	// stage time the write has not happened, so there is nothing to attribute
+	// the booked row to. Charging at INTENT is why executeConfirm books nothing.
+	if rej := blobBlockRefGate(ctx, cfg.Pool, ar, input.ContextBlockID, reqID); rej != nil {
+		return errResultReject(rej), nil, nil
+	}
+
+	scope, err := store.BlobWriteScope(ctx, cfg.Pool, input.ID, writableBlockScopes(ar))
+	if err != nil {
+		slog.Error("mcp blob_link: stage scope lookup error", "error", err, "request_id", reqID)
+		return classInternal.errResult("stage failed: internal error"), nil, nil
+	}
+	if scope == "" {
+		return errResultReject(classConstraint.reject(blobLinkNotFoundMsg)), nil, nil
+	}
+
+	// ID carries the BLOB id here, not a block id — the field means "the row
+	// this op writes", which for op 'update' is a block and for op 'blob_link'
+	// is a blob (store.OpBlobLink documents the double use).
+	cw := store.CanonicalWrite{
+		Op:             store.OpBlobLink,
+		ID:             input.ID,
+		Scope:          scope,
+		ContextBlockID: input.ContextBlockID,
+	}
+	hash, canonical, err := cw.PayloadHash()
+	if err != nil {
+		slog.Error("mcp: canonicalize staged blob link failed", "error", err, "request_id", reqID)
+		return classInternal.errResult("stage failed: cannot canonicalize payload"), nil, nil
+	}
+
+	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, scope, store.OpBlobLink, "mcp", canonical, hash, ttl)
+	if err != nil {
+		slog.Error("mcp: stage pending blob link failed", "error", err, "request_id", reqID)
+		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
+	}
+
+	expiry := "never (writes.confirm_ttl = 0)"
+	if pw.ExpiresAt != nil {
+		expiry = fmt.Sprintf("%s (in %s)", pw.ExpiresAt.UTC().Format(time.RFC3339), time.Until(*pw.ExpiresAt).Round(time.Second))
+	}
+	// IsError=true and UNCODED, exactly as the blob_store stage card: the gates
+	// PASSED, so this is not a rejection.
+	return errResult(fmt.Sprintf(
+		"STAGED — NOT saved yet. This key requires write confirmation (confirm_writes).\n"+
+			"payload_hash: %s\n"+
+			"blob: %s → context_block_id %s\n"+
+			"expires: %s\n"+
+			"To execute this exact write, call the 'confirm' tool with this payload_hash. "+
+			"The server holds the authoritative payload; confirming cannot alter it.",
+		hash, input.ID, input.ContextBlockID, expiry)), nil, nil
 }
 
 // blobPayloadOf resolves the payload field and runs the two transport-side
@@ -213,6 +391,12 @@ func mcpStageBlobStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, 
 	if rej != nil {
 		return errResultReject(rej), nil, nil
 	}
+	// The A1 gate at STAGE time, in the direct path's order (D1-M2: a staged
+	// card is a promise the confirm will succeed). executeConfirm runs it again
+	// on the un-consumed row, because a read right can shrink in between.
+	if rej := blobBlockRefGate(ctx, cfg.Pool, ar, in.ContextBlockID, reqID); rej != nil {
+		return errResultReject(rej), nil, nil
+	}
 	// blobWriteGate booked the write INTENT (the logID above is deliberately
 	// dropped): at stage time no blob exists, and an unconfirmed stage may
 	// never produce one, so there is nothing to attribute the row to. Charging
@@ -239,6 +423,8 @@ func mcpStageBlobStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, 
 		Filename: in.Filename,
 		MimeType: in.MimeType,
 		Data:     in.Data,
+
+		ContextBlockID: in.ContextBlockID,
 	}
 	hash, canonical, err := cw.PayloadHash()
 	if err != nil {
@@ -316,6 +502,12 @@ func mcpBlobFetchHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobFetchInput, any] 
 			"file_size": blob.FileSize, "checksum": blob.Checksum,
 			"tags": blob.Tags, "metadata": blob.Metadata, "scope": blob.Scope,
 			"created_at": blob.CreatedAt, "updated_at": blob.UpdatedAt,
+		}
+		if blob.ContextBlockID != nil {
+			// W02-10 A5: present only when the edge is. A drill-down that
+			// arrived from the index this way can walk back to the block that
+			// owns the payload without a second lookup.
+			out["context_block_id"] = *blob.ContextBlockID
 		}
 		if !input.MetaOnly {
 			out["offset"] = input.Offset

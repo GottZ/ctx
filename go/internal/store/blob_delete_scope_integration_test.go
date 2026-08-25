@@ -44,7 +44,7 @@ func TestDeleteBlobScope(t *testing.T) {
 	seed := func(t *testing.T, title, scope string) string {
 		t.Helper()
 		bm, err := store.UpsertBlob(ctx, pool, "reference", title, title+".bin",
-			"application/octet-stream", scope, []byte("b3-delete"), nil, nil)
+			"application/octet-stream", scope, []byte("b3-delete"), nil, nil, "")
 		if err != nil {
 			t.Fatalf("seed blob %q in %q: %v", title, scope, err)
 		}

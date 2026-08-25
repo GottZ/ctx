@@ -66,15 +66,17 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 	case confirmOK:
 		// W02-8: a confirmed blob write answers a `blob` object, never an
 		// empty `block` one — the SPA reads the key that names what happened.
-		if out.Op == store.OpBlobStore {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"success": true,
-				"op":      out.Op,
-				"blob": map[string]any{
-					"id": out.Blob.ID, "title": out.Blob.Title, "category": out.Blob.Category,
-					"scope": out.Blob.Scope, "file_size": out.Blob.FileSize,
-				},
-			})
+		// W02-10: op 'blob_link' answers the same object, with the edge it just
+		// wrote (context_block_id) — for a link that IS the result.
+		if out.Blob != nil {
+			blob := map[string]any{
+				"id": out.Blob.ID, "title": out.Blob.Title, "category": out.Blob.Category,
+				"scope": out.Blob.Scope, "file_size": out.Blob.FileSize,
+			}
+			if out.Blob.ContextBlockID != nil {
+				blob["context_block_id"] = *out.Blob.ContextBlockID
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"success": true, "op": out.Op, "blob": blob})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -93,6 +95,9 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUGoneMsg})
 	case confirmTOCTOUDrift:
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUDriftMsg(out.BlockID)})
+	case confirmBlockRefGone:
+		// 409 like the TOCTOU rejects: the stage is intact, the world moved.
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmBlockRefGoneMsg})
 	case confirmUnreadable:
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "staged payload unreadable"})
 	case confirmExecErr:
@@ -106,10 +111,11 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 			"error":   fmt.Sprintf("confirmed %s failed to execute — the stage token is consumed; re-stage the %s", verb, noun),
 		})
 	case confirmExecGone:
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false,
-			"error":   "confirmed update failed to execute — block no longer accessible; the stage token is consumed; re-stage the update",
-		})
+		gone := "confirmed update failed to execute — block no longer accessible; the stage token is consumed; re-stage the update"
+		if out.Op == store.OpBlobLink {
+			gone = "confirmed blob_link failed to execute — blob no longer accessible; the stage token is consumed; re-stage the link"
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": gone})
 	default: // confirmInfraErr
 		slog.Error("confirm: infrastructure error", "error", out.Err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})

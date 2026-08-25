@@ -684,12 +684,13 @@ if $WITH_OLLAMA; then
     fail "$T" "expected answer containing postgresql/mount, got: ${answer:0:80}"
   fi
 
-  # T17 MCP_TOOLS_LIST — /mcp endpoint returns all 14 registered tools
+  # T17 MCP_TOOLS_LIST — /mcp endpoint returns all 15 registered tools
   # (query/store/search/get/recent/update/confirm in mcp.go — update+confirm
   # kamen mit F6-C6 Stage-then-Confirm, 6b7d63e — + W12 issue_create/
   # issue_comment/issue_state aus mcp_issues.go, fa6c806 — + guard W3
   # guard_list/guard_resolve aus mcp_guard.go — + W02-8 blob_store/blob_fetch
-  # aus mcp_blob.go; Registrierung ist unconditional, der Count ist
+  # aus mcp_blob.go, + W02-10 blob_link ebenda; Registrierung ist
+  # unconditional, der Count ist
   # key-unabhängig). Dieselbe Zahl steht in mcp_blob_tools_test.go: ein Tool
   # ohne Nachzug faellt dort schon im -short-Lauf auf, nicht erst hier.
   # Added after Session 24 bug: noOutput struct{} triggered outputSchema generation,
@@ -701,10 +702,10 @@ if $WITH_OLLAMA; then
     -H "Accept: application/json, text/event-stream" \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>/dev/null)
   tool_count=$(echo "$mcp_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('result',{}).get('tools',[])))" 2>/dev/null)
-  if [[ "$tool_count" == "14" ]]; then
+  if [[ "$tool_count" == "15" ]]; then
     pass "$T (tools=$tool_count)"
   else
-    fail "$T" "expected 14 tools, got: $tool_count (resp: ${mcp_resp:0:200})"
+    fail "$T" "expected 15 tools, got: $tool_count (resp: ${mcp_resp:0:200})"
   fi
 
   # T18 MCP_TOOL_CALL — recent tool returns actual text content (not empty {}).

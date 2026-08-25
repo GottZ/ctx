@@ -29,9 +29,13 @@ import (
 // from the JSONB column — JSONB normalizes key order and whitespace, so a
 // rehash of the stored column would not reproduce the staged hash.
 type CanonicalWrite struct {
-	Op       string `json:"op"`           // 'store' | 'update'
-	ID       string `json:"id,omitempty"` // update only (D-W6+): target block
-	Scope    string `json:"scope"`        // resolved write scope (post scope-gate)
+	Op string `json:"op"` // 'store' | 'update' | 'blob_store' | 'blob_link'
+	// ID names the row this op writes: for 'update' a block, for 'blob_link'
+	// (W02-10) a blob. One field for both, deliberately — a second id field
+	// would have to be omitempty as well and would leave two ways to spell the
+	// same thing, which the canonicalization contract cannot afford.
+	ID       string `json:"id,omitempty"`
+	Scope    string `json:"scope"` // resolved write scope (post scope-gate)
 	Category string `json:"category"`
 	Title    string `json:"title"`
 	Content  string `json:"content"`
@@ -75,6 +79,13 @@ type CanonicalWrite struct {
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
 	Data     []byte `json:"data,omitempty"`
+
+	// The blob-to-block edge (W02-10), carried by op OpBlobStore (phase 1 with
+	// an already-known block) AND op OpBlobLink (phase 2, where it is the whole
+	// payload). LAST field and omitempty, so every 'store'/'update'/'blob_store'
+	// canonicalization written before this wave keeps its exact bytes and every
+	// payload_hash a client already holds stays confirmable.
+	ContextBlockID string `json:"context_block_id,omitempty"`
 }
 
 // OpBlobStore is the third staged op (W02-8), beside 'store' and 'update'.
@@ -82,6 +93,12 @@ type CanonicalWrite struct {
 // migration; what it does need is to be spelled in ONE place, because the
 // stage site, the tamper check and the execute arm all compare against it.
 const OpBlobStore = "blob_store"
+
+// OpBlobLink is the fourth staged op (W02-10): phase 2 of the two-phase blob
+// write. Its canonical form is ID (the blob), Scope (the blob's own scope,
+// resolved at stage time) and ContextBlockID — no payload, because the payload
+// crossed the wire in phase 1 and a link must never move it again.
+const OpBlobLink = "blob_link"
 
 // Canonical returns the canonical JSON bytes of the write: fixed field order,
 // sorted tags and update_fields (input slices untouched), metadata keys
