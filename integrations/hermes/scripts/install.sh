@@ -15,7 +15,9 @@
 #                       fail-closed checkpoint contract (optional). Reports
 #                       the host's PRE_COMPRESS_CHECKPOINT_API_VERSION; v2 or
 #                       higher is fail-closed capable, v1 is the historical
-#                       best-effort hook.
+#                       best-effort hook. Also reports whether the host binds
+#                       plugin context engines to the gate (the pending
+#                       context-engine follow-up, compacts_outside_compress).
 #   --dry-run           Show what would happen without writing anything
 
 set -euo pipefail
@@ -31,7 +33,7 @@ while [ $# -gt 0 ]; do
         --hermes-home) HERMES_HOME_ARG="$2"; shift 2 ;;
         --hermes-src)  HERMES_SRC="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=1; shift ;;
-        -h|--help)     sed -n '2,19p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '2,21p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -81,7 +83,14 @@ fi
 # every provider is already on, v2 is the opt-in fail-closed checkpoint
 # contract (upstream since 2026-08-25, merged as NousResearch/hermes-agent
 # #94639). Only v2 or higher can honour compression.checkpoint_required.
+#
+# A second probe covers the context-engine follow-up (branch
+# feat/context-engine-compaction-authority, PR pending upstream). The merged
+# contract binds the built-in compaction paths, micro-compaction and the codex
+# app-server mode; a plugin context engine that compacts outside compress() is
+# bound only once the host carries compacts_outside_compress.
 MODE="unknown (no --hermes-src given)"
+ENGINE_BINDING="unknown (no --hermes-src given)"
 if [ -n "$HERMES_SRC" ]; then
     PROVIDER_PY="${HERMES_SRC}/agent/memory_provider.py"
     HOST_API=""
@@ -98,8 +107,21 @@ if [ -n "$HERMES_SRC" ]; then
     else
         MODE="NOT fail-closed capable (checkpoint contract v${HOST_API}, needs v2+)"
     fi
+
+    ENGINE_PY="${HERMES_SRC}/agent/context_engine.py"
+    ENGINE_HITS=0
+    if [ -f "$ENGINE_PY" ]; then
+        ENGINE_HITS="$(grep -c compacts_outside_compress "$ENGINE_PY" || true)"
+        ENGINE_HITS="${ENGINE_HITS:-0}"
+    fi
+    if [ "$ENGINE_HITS" -ge 1 ]; then
+        ENGINE_BINDING="present (compacts_outside_compress)"
+    else
+        ENGINE_BINDING="absent (host predates the context-engine follow-up — a plugin context engine can compact past the gate)"
+    fi
 fi
 echo "Host mode:      ${MODE}"
+echo "Engine binding: ${ENGINE_BINDING}"
 
 cat <<'NEXT'
 
@@ -128,6 +150,14 @@ Next steps (manual, operator-owned):
    Compaction then keeps running WITHOUT a guaranteed checkpoint even
    though the config suggests otherwise. Enable it only when the host
    probe above reports "fail-closed capable".
+   With "Engine binding: absent" the gate covers the built-in compaction
+   paths only: if you run a PLUGIN CONTEXT ENGINE, compaction it performs
+   outside compress() (from on_turn_complete() or its own scheduler) never
+   reaches the checkpoint, so checkpoint_required is not fully fail-closed
+   on that host. Hosts using the built-in compressor are unaffected.
+   NOTE: an armed gate trades availability for the guarantee — if the
+   checkpoint provider is unavailable, the session HALTS instead of
+   compacting unarchived context.
 
 4. Restart Hermes yourself when you are ready.
 NEXT
