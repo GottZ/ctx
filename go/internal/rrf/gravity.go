@@ -119,8 +119,55 @@ func ComputeGravity(dates []time.Time, params GravityParams) float64 {
 	return total
 }
 
+// maxDateGravity returns the largest score a single date can contribute to
+// ComputeGravity — the absolute anchor of the linear path.
+//
+// It falls out of the formula: the distance is clamped to at least 0.5 days
+// (see ComputeGravity), and the sharpest exponent any date can draw is the
+// forward one, power*1.2. The strongest possible term is therefore
+// 1/0.5^(power*1.2) = 2^(power*1.2); at the production power of 1.5 that is
+// 2^1.8 ≈ 3.482. Derived rather than frozen as a literal, so a changed power
+// moves the anchor with it. The Power zero value resolves the same way it does
+// in ComputeGravity (see GravityParams).
+//
+// Per block the sum over several dates is unbounded, so callers saturate at
+// this anchor instead of normalizing (Issue #40, finding 3).
+func maxDateGravity(power float64) float64 {
+	if power == 0 {
+		power = 1.5
+	}
+	return math.Pow(2, power*1.2)
+}
+
+// cyclicGravityAnchor returns the largest value ComputeCyclicGravity can return
+// for these weights — the absolute anchor of the cyclic path.
+//
+// ComputeCyclicGravity sums weight*best with best = GaussianDecay(...) in
+// [0,1], so the maximum is reached when every scorable dimension decays to
+// exactly 1.0: the sum of those weights. The admission rules mirror
+// ComputeCyclicGravity, otherwise the ratio would leave [0,1] in one direction
+// or the other — "linear" belongs to the linear path, a dimension without a
+// sigma cannot be scored and contributes nothing, and a non-positive weight
+// adds no reachable mass. A return value of 0 means nothing here is scorable;
+// the caller must skip the boost rather than divide (Issue #40, finding 3).
+func cyclicGravityAnchor(dimWeights map[string]float64) float64 {
+	var sum float64
+	for dim, weight := range dimWeights {
+		if dim == "linear" || weight <= 0 {
+			continue
+		}
+		if _, ok := DimensionSigma[dim]; !ok {
+			continue
+		}
+		sum += weight
+	}
+	return sum
+}
+
 // ApplyGravityBoost reranks search results using temporal gravity.
 // Blocks without dates get boost_factor=1.0 (neutral — no penalty).
+// The boost saturates against maxDateGravity, so the factor of a block depends
+// on that block alone and not on what else is in the window.
 // Returns re-sorted results. Original RRF scores preserved in RRFScoreOriginal.
 // A zero params.BoostWeight returns the input untouched — gravity off, no
 // RRFScoreOriginal written (see GravityParams).
@@ -131,30 +178,32 @@ func ApplyGravityBoost(results []SearchResult, blockDates map[string][]time.Time
 
 	// Compute gravity for each result
 	gravities := make([]float64, len(results))
-	maxGrav := 0.001 // avoid division by zero
-
 	for i, r := range results {
 		if dates, ok := blockDates[r.ID]; ok && len(dates) > 0 {
-			g := ComputeGravity(dates, params)
-			gravities[i] = g
-			if g > maxGrav {
-				maxGrav = g
-			}
+			gravities[i] = ComputeGravity(dates, params)
 		}
 	}
 
-	// Apply normalized boost
+	// Apply saturating boost. The anchor is the strongest single date this
+	// power admits (maxDateGravity), not the strongest candidate in the window:
+	// a block earns the full boost by sitting on the target date, never by
+	// being the least bad match in a window that holds no good one. A block
+	// with several close dates saturates instead of running away, because the
+	// per-block sum is unbounded (Issue #40, finding 3).
+	anchor := maxDateGravity(params.Power)
 	boosted := make([]SearchResult, len(results))
 	copy(boosted, results)
 	for i := range boosted {
 		origScore := boosted[i].RRFScore
 		boosted[i].RRFScoreOriginal = &origScore
-		factor := 1.0 + params.BoostWeight*(gravities[i]/maxGrav)
+		factor := 1.0 + params.BoostWeight*math.Min(gravities[i]/anchor, 1.0)
 		boosted[i].RRFScore *= factor
 	}
 
-	// Sort by boosted score descending
-	sort.Slice(boosted, func(i, j int) bool {
+	// Sort by boosted score descending. Stable, so blocks that tie keep the
+	// order the RRF stage gave them and the same query returns the same
+	// ranking twice (Issue #40, side finding N2).
+	sort.SliceStable(boosted, func(i, j int) bool {
 		return boosted[i].RRFScore > boosted[j].RRFScore
 	})
 
@@ -397,6 +446,10 @@ func ComputeCyclicGravity(dimWeights map[string]float64, blockDims []TemporalDim
 // boostWeight: max multiplicative boost (0.30 = up to 30% score increase)
 //
 // Blocks with no matching dimensions get factor=1.0 (neutral, no penalty).
+// The boost is anchored against cyclicGravityAnchor — the score a block would
+// reach by matching every scorable dimension exactly — so the factor of a block
+// depends on that block alone and not on what else is in the window. Weights
+// that name nothing scorable leave the results untouched.
 func ApplyCyclicGravityBoost(
 	results []SearchResult,
 	blockDims map[string][]TemporalDim,
@@ -408,31 +461,38 @@ func ApplyCyclicGravityBoost(
 		return results
 	}
 
+	// The anchor is what a perfect match scores, not what the best block in
+	// this window happens to score. Without it a query for Tuesday that finds
+	// no Tuesday block lifts the nearest Wednesday block onto the full boost,
+	// flattening the 1.000 / 0.128 / 0.00027 gradation the sigmas are
+	// calibrated for (Issue #40, finding 3). Zero means no dimension here can
+	// be scored, so there is nothing to boost — and nothing to divide by.
+	anchor := cyclicGravityAnchor(dimWeights)
+	if anchor <= 0 {
+		return results
+	}
+
 	// Compute cyclic gravity per block.
 	gravities := make([]float64, len(results))
-	maxGrav := 0.001
 	for i, r := range results {
 		if dims, ok := blockDims[r.ID]; ok {
-			g := ComputeCyclicGravity(dimWeights, dims, queryDate)
-			gravities[i] = g
-			if g > maxGrav {
-				maxGrav = g
-			}
+			gravities[i] = ComputeCyclicGravity(dimWeights, dims, queryDate)
 		}
 	}
 
-	// Apply normalized boost.
+	// Apply the anchored boost.
 	boosted := make([]SearchResult, len(results))
 	copy(boosted, results)
 	for i := range boosted {
 		origScore := boosted[i].RRFScore
 		boosted[i].RRFScoreOriginal = &origScore
-		factor := 1.0 + boostWeight*(gravities[i]/maxGrav)
+		factor := 1.0 + boostWeight*(gravities[i]/anchor)
 		boosted[i].RRFScore *= factor
 	}
 
-	// Sort by boosted score descending.
-	sort.Slice(boosted, func(i, j int) bool {
+	// Sort by boosted score descending. Stable, so blocks that tie keep the
+	// order the RRF stage gave them (Issue #40, side finding N2).
+	sort.SliceStable(boosted, func(i, j int) bool {
 		return boosted[i].RRFScore > boosted[j].RRFScore
 	})
 

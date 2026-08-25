@@ -365,7 +365,13 @@ func TestApplyGravityBoost_SingleTemporalBlock(t *testing.T) {
 	}
 }
 
-func TestApplyGravityBoost_NormalizesToMaxGravity(t *testing.T) {
+// TestApplyGravityBoost_ExactHitGetsFullBoost was
+// TestApplyGravityBoost_NormalizesToMaxGravity until the boost stopped being
+// normalized against the strongest candidate in the window (Issue #40,
+// finding 3). What it asserts is unchanged and still holds: a block sitting on
+// the target date earns the whole boost. Only the reason changed — the block
+// now reaches the absolute anchor instead of defining it.
+func TestApplyGravityBoost_ExactHitGetsFullBoost(t *testing.T) {
 	results := makeResults("a", "b")
 	blockDates := map[string][]time.Time{
 		"a": {mustDate("2026-03-29")}, // exact match (max gravity)
@@ -379,7 +385,7 @@ func TestApplyGravityBoost_NormalizesToMaxGravity(t *testing.T) {
 		BoostWeight: 0.30,
 	}
 	boosted := ApplyGravityBoost(results, blockDates, params)
-	// "a" should get the full boost (gravity/maxGrav = 1.0) → factor = 1.30
+	// "a" should get the full boost (gravity/anchor = 1.0) → factor = 1.30
 	var aResult SearchResult
 	for _, r := range boosted {
 		if r.ID == "a" {
