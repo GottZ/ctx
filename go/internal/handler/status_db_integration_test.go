@@ -431,6 +431,10 @@ func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 		Server: config.ServerConfig{DBPass: "x"},
 		Graph:  config.GraphConfig{HopDepth: 1},
 		Events: config.EventsConfig{DBStatsInterval: dbStatsInterval},
+		// V21 (#38): the embed back-off bases must be > 0 to pass Validate —
+		// registry defaults, not wire-active here.
+		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
+		EmbedMigration: config.EmbedMigrationConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 	}
 }
 
