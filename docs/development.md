@@ -53,10 +53,21 @@ The mono is **JetBrains Mono v2.304** (SIL Open Font License 1.1; the licence sh
 ```bash
 bash state.sh                       # Live system state
 bash test.sh --with-ollama          # 18 system + retrieval + MCP tests
-bash eval.sh                        # 43 eval tests (baseline regression)
+bash eval.sh                        # 47 eval tests (baseline regression)
 bash eval.sh --update-baseline      # Set a new baseline
+bash eval.sh --no-warmup            # Skip the unscored warm-up pass (development runs)
 cd go && go test ./... -short       # Go unit tests
 ```
+
+`eval.sh` fires every query **twice**: an unscored warm-up pass, then the scored
+pass. That is the old "run it twice, score run 2" rule moved into the script, and
+it roughly doubles the runtime (~6-10 min instead of ~3-5). `--no-warmup` gets the
+single pass back for quick development runs — expect cold-start noise in it.
+
+The five `R` cases are labelled **search-endpt** in the report because they measure
+`/api/search` (`store.SearchBlocks`), **not** `ctx_rrf`. Only the synthesis cases
+(`/api/query`) exercise the 4-Way RRF. The JSON keys stay `retrieval` / `R0x` — the
+baseline compares on them.
 
 MCP tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18.
 

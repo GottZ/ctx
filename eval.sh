@@ -4,13 +4,16 @@
 # Usage: bash eval.sh                  — full eval (retrieval + synthesis)
 #        bash eval.sh --retrieval-only  — skip synthesis tests (faster)
 #        bash eval.sh --update-baseline — run + save results as new baseline
+#        bash eval.sh --no-warmup       — skip the unscored warm-up pass (development runs)
 #        bash eval.sh --internal        — bypass reverse-proxy (uses http://ctx:8080 from n8nintern network; override via CTX_INTERNAL_URL)
 #
 # Requires: curl, python3, jq (optional, python3 fallback)
-# Runtime: ~3-5 minutes (Ollama on-prem, sequential queries)
+# Runtime: ~6-10 minutes — the warm-up pass fires the same queries as the scored
+#          pass, so the default run costs roughly twice a single pass.
+#          ~3-5 minutes with --no-warmup (Ollama on-prem, sequential queries).
 #
 # ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
-# Evaluates GottZ 4-Way RRF retrieval quality across 47 test queries.
+# Evaluates GottZ 4-Way RRF retrieval and synthesis across 47 test queries.
 # Source: https://github.com/GottZ/ctx
 
 set -uo pipefail
@@ -33,13 +36,42 @@ RESULTS_FILE="${RESULTS_DIR}/eval-results-$(date +%s).json"
 RETRIEVAL_ONLY=false
 UPDATE_BASELINE=false
 INTERNAL=false
+WARMUP=true
 for arg in "$@"; do
   case "$arg" in
     --retrieval-only) RETRIEVAL_ONLY=true ;;
     --update-baseline) UPDATE_BASELINE=true ;;
     --internal) INTERNAL=true ;;
+    --no-warmup) WARMUP=false ;;
   esac
 done
+
+# --- Warm-up pass ---------------------------------------------------------
+# A first run against a cold system reports flags that a second, identical run
+# does not — the operating rule used to be "run eval.sh twice, score run 2".
+# That rule lives here now: unless --no-warmup is given, every scored pass is
+# preceded by an unscored pass over the *same* queries whose results are
+# discarded (no verdicts, no counters, nothing in the results JSON).
+#
+# What the warm-up actually warms, as far as this repo can show:
+#   * context_embed_cache — query embeddings are cached by (text_hash, model)
+#     (go/internal/embedcache/embedcache.go), so the second pass over identical
+#     query strings does not re-embed.
+#   * PostgreSQL shared_buffers / OS page cache — the HNSW index
+#     (idx_embedding_hnsw, go/migrations/115_*) and the block rows behind it are
+#     read from disk on first touch.
+# Anything else a cold first request pays for on the serving side is warmed as a
+# side effect; this script does not measure it and makes no claim about it.
+#
+# SCORING gates the scoring half of the two test functions. During the warm-up
+# the functions still issue their requests but return right after them, and the
+# pass reports progress as one dot per test on FD 3 (see below).
+SCORING=true
+
+# FD 3 is the real stdout. The warm-up pass runs with stdout redirected to
+# /dev/null so its per-test lines and section headings stay out of the report;
+# the progress dots go to FD 3 and therefore end up wherever stdout points.
+exec 3>&1
 
 # Webhook selection: --internal bypasses the reverse-proxy that drops 22-67% of
 # LLM responses (Welle 35). Uses the ctx container DNS-name resolvable from the
@@ -90,6 +122,10 @@ except:
 # Format: ID|TYPE|QUERY|EXPECTED_CONFIDENCE|KEYWORDS(comma-sep)|DESCRIPTION|SOURCE_TITLES(optional)
 #
 # TYPE: retrieval = api/search (no LLM), synthesis = api/query (LLM)
+#       NOTE: the "retrieval" type name is a JSON key the baseline compares on and
+#       therefore fixed, but it is NOT a measurement of the 4-Way RRF. The R-tests
+#       hit /api/search → store.SearchBlocks; only the synthesis tests (/api/query)
+#       go through ctx_rrf. Read the R-rows as search-endpoint quality, nothing more.
 # EXPECTED_CONFIDENCE: confident|low|none|any (for retrieval tests)
 # KEYWORDS: comma-separated strings that MUST appear in the answer (case-insensitive)
 #           OR-alternatives: use ~ separator (e.g. "german~deutsch" matches either)
@@ -155,7 +191,7 @@ T02|synthesis|Welche Architektur-Entscheidungen wurden im März 2026 getroffen?|
 T03|synthesis|What embedding changes happened recently?|confident|embedding~embed|EN temporal, recent
 T04|synthesis|What happened at night during the infrastructure work?|any||LLM fallback: night triggers intent but escapes all matchers (confidence varies)
 
-# --- RETRIEVAL QUALITY (api/search, no LLM — tests vector+FTS ranking) ---
+# --- SEARCH-ENDPOINT QUALITY (api/search, no LLM — NOT ctx_rrf, see note above) ---
 R01|retrieval|Write Guard|any|write guard|Top result relevance
 R02|retrieval|embedding model|any|embedding|Embedding-related blocks
 R03|retrieval|blob storage|any|blob|Blob-related blocks
@@ -189,6 +225,10 @@ run_synthesis_test() {
   resp=$(api "$WEBHOOK/api/query" "{\"query\":$escaped_query}" 120)
   t_end=$(date +%s%3N)
   latency_ms=$(( t_end - t_start ))
+
+  # Warm-up pass: the request was the point, the response is discarded. Return
+  # before any scoring so counters and RESULTS_JSON stay untouched.
+  if ! $SCORING; then printf '.' >&3; return 0; fi
 
   # Parse response — handle timeouts and error responses
   local source_titles_raw=""
@@ -330,6 +370,10 @@ run_retrieval_test() {
   t_end=$(date +%s%3N)
   latency_ms=$(( t_end - t_start ))
 
+  # Warm-up pass: the request was the point, the response is discarded. Return
+  # before any scoring so counters and RESULTS_JSON stay untouched.
+  if ! $SCORING; then printf '.' >&3; return 0; fi
+
   count=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
   titles=$(echo "$resp" | python3 -c "
 import sys,json
@@ -423,93 +467,118 @@ fi
 echo "Store OK: $total_blocks blocks"
 echo ""
 
-# --- Retrieval Tests ---
-echo "--- Retrieval Tests (api/search, no LLM) ---"
-echo ""
-
-while IFS='|' read -r id type query expected_conf keywords desc; do
-  # Skip comments and empty lines
-  [[ "$id" =~ ^#.*$ ]] && continue
-  [[ -z "$id" ]] && continue
-  [[ "$type" != "retrieval" ]] && continue
-  run_retrieval_test "$id" "$query" "$expected_conf" "$keywords" "$desc"
-done < <(define_test_cases)
-
-if ! $RETRIEVAL_ONLY; then
-  echo ""
-  echo "--- Synthesis Tests (api/query, LLM) ---"
+run_all_tests() {
+  # --- Search-endpoint tests ---
+  # These five R-tests measure /api/search (store.SearchBlocks), NOT ctx_rrf.
+  echo "--- Search-endpoint Tests (api/search, no LLM — not ctx_rrf) ---"
   echo ""
 
-  # Confident
-  echo "  -- Confident (known facts) --"
-  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
+  while IFS='|' read -r id type query expected_conf keywords desc; do
+    # Skip comments and empty lines
     [[ "$id" =~ ^#.*$ ]] && continue
     [[ -z "$id" ]] && continue
-    [[ "$type" != "synthesis" ]] && continue
-    [[ ! "$id" =~ ^S ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
+    [[ "$type" != "retrieval" ]] && continue
+    run_retrieval_test "$id" "$query" "$expected_conf" "$keywords" "$desc"
   done < <(define_test_cases)
 
-  echo ""
-  echo "  -- Bilingual (DE query, EN content) --"
-  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
-    [[ "$id" =~ ^#.*$ ]] && continue
-    [[ -z "$id" ]] && continue
-    [[ "$type" != "synthesis" ]] && continue
-    [[ ! "$id" =~ ^B ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
-  done < <(define_test_cases)
+  if ! $RETRIEVAL_ONLY; then
+    echo ""
+    echo "--- Synthesis Tests (api/query, LLM) ---"
+    echo ""
 
-  echo ""
-  echo "  -- Negative (should reject) --"
-  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
-    [[ "$id" =~ ^#.*$ ]] && continue
-    [[ -z "$id" ]] && continue
-    [[ "$type" != "synthesis" ]] && continue
-    [[ ! "$id" =~ ^N ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
-  done < <(define_test_cases)
+    # Confident
+    echo "  -- Confident (known facts) --"
+    while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
+      [[ "$id" =~ ^#.*$ ]] && continue
+      [[ -z "$id" ]] && continue
+      [[ "$type" != "synthesis" ]] && continue
+      [[ ! "$id" =~ ^S ]] && continue
+      run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
+    done < <(define_test_cases)
 
-  echo ""
-  echo "  -- Keyword / Specific Facts --"
-  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
-    [[ "$id" =~ ^#.*$ ]] && continue
-    [[ -z "$id" ]] && continue
-    [[ "$type" != "synthesis" ]] && continue
-    [[ ! "$id" =~ ^K ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
-  done < <(define_test_cases)
+    echo ""
+    echo "  -- Bilingual (DE query, EN content) --"
+    while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
+      [[ "$id" =~ ^#.*$ ]] && continue
+      [[ -z "$id" ]] && continue
+      [[ "$type" != "synthesis" ]] && continue
+      [[ ! "$id" =~ ^B ]] && continue
+      run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
+    done < <(define_test_cases)
 
-  echo ""
-  echo "  -- Imperative (command-style queries) --"
-  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
-    [[ "$id" =~ ^#.*$ ]] && continue
-    [[ -z "$id" ]] && continue
-    [[ "$type" != "synthesis" ]] && continue
-    [[ ! "$id" =~ ^I ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
-  done < <(define_test_cases)
+    echo ""
+    echo "  -- Negative (should reject) --"
+    while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
+      [[ "$id" =~ ^#.*$ ]] && continue
+      [[ -z "$id" ]] && continue
+      [[ "$type" != "synthesis" ]] && continue
+      [[ ! "$id" =~ ^N ]] && continue
+      run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
+    done < <(define_test_cases)
 
-  echo ""
-  echo "  -- Multi-hop (cross-block reasoning) --"
-  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
-    [[ "$id" =~ ^#.*$ ]] && continue
-    [[ -z "$id" ]] && continue
-    [[ "$type" != "synthesis" ]] && continue
-    [[ ! "$id" =~ ^M ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
-  done < <(define_test_cases)
+    echo ""
+    echo "  -- Keyword / Specific Facts --"
+    while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
+      [[ "$id" =~ ^#.*$ ]] && continue
+      [[ -z "$id" ]] && continue
+      [[ "$type" != "synthesis" ]] && continue
+      [[ ! "$id" =~ ^K ]] && continue
+      run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
+    done < <(define_test_cases)
 
+    echo ""
+    echo "  -- Imperative (command-style queries) --"
+    while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
+      [[ "$id" =~ ^#.*$ ]] && continue
+      [[ -z "$id" ]] && continue
+      [[ "$type" != "synthesis" ]] && continue
+      [[ ! "$id" =~ ^I ]] && continue
+      run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
+    done < <(define_test_cases)
+
+    echo ""
+    echo "  -- Multi-hop (cross-block reasoning) --"
+    while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
+      [[ "$id" =~ ^#.*$ ]] && continue
+      [[ -z "$id" ]] && continue
+      [[ "$type" != "synthesis" ]] && continue
+      [[ ! "$id" =~ ^M ]] && continue
+      run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
+    done < <(define_test_cases)
+
+    echo ""
+    echo "  -- Temporal (temporal references) --"
+    while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
+      [[ "$id" =~ ^#.*$ ]] && continue
+      [[ -z "$id" ]] && continue
+      [[ "$type" != "synthesis" ]] && continue
+      [[ ! "$id" =~ ^T ]] && continue
+      run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
+    done < <(define_test_cases)
+  fi
+}
+
+# --- Warm-up pass (not scored) ---
+# Same queries, same endpoints, results thrown away. See the SCORING block near
+# the top for what this warms and why the rule lives in the script now.
+if $WARMUP; then
+  echo "--- warm-up pass (not scored) ---"
+  warmup_start=$(date +%s)
+  SCORING=false
+  run_all_tests >/dev/null
+  SCORING=true
   echo ""
-  echo "  -- Temporal (temporal references) --"
-  while IFS='|' read -r id type query expected_conf keywords desc source_titles; do
-    [[ "$id" =~ ^#.*$ ]] && continue
-    [[ -z "$id" ]] && continue
-    [[ "$type" != "synthesis" ]] && continue
-    [[ ! "$id" =~ ^T ]] && continue
-    run_synthesis_test "$id" "$query" "$expected_conf" "$keywords" "$desc" "$source_titles"
-  done < <(define_test_cases)
+  echo "warm-up done in $(( $(date +%s) - warmup_start ))s — results discarded, scoring starts now."
+  echo ""
+else
+  echo "--- warm-up pass SKIPPED (--no-warmup) — cold-start flags are expected ---"
+  echo ""
 fi
+
+# The scored pass. START_TIME is re-armed here so elapsed_seconds keeps meaning
+# "duration of the scored pass" and stays comparable with older baselines.
+START_TIME=$(date +%s)
+run_all_tests
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
@@ -640,6 +709,12 @@ if s.get('source_checks', 0) > 0:
 print(f'  Elapsed:            {data[\"elapsed_seconds\"]}s')
 print()
 
+# Display labels. The dict KEYS ('retrieval', by_type keys, test IDs) are what the
+# baseline compares on and stay as they are; only what a human reads is renamed.
+# 'retrieval' measures /api/search (store.SearchBlocks), not ctx_rrf — the old
+# label invited exactly the reading these five tests cannot support.
+LABELS = {'retrieval': 'search-endpt'}
+
 # Category breakdown
 print('  Category        Pass  Fail  Total  Rate')
 print('  ' + '-' * 46)
@@ -648,15 +723,18 @@ for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'mult
     if c['total'] == 0:
         continue
     rate = round(c['pass'] / c['total'] * 100) if c['total'] else 0
-    print(f'  {cat:16s}  {c[\"pass\"]:4d}  {c[\"fail\"]:4d}  {c[\"total\"]:5d}  {rate}%')
+    print(f'  {LABELS.get(cat, cat):16s}  {c[\"pass\"]:4d}  {c[\"fail\"]:4d}  {c[\"total\"]:5d}  {rate}%')
 
+print()
+print('  search-endpt = the five R-tests against /api/search (store.SearchBlocks).')
+print('  They do NOT exercise ctx_rrf; the synthesis rows above do.')
 print()
 
 # Latency breakdown
 print('  Type            P50     P95     Mean')
 print('  ' + '-' * 40)
 for t, v in data['by_type'].items():
-    print(f'  {t:16s}  {v[\"latency_p50\"]:5d}ms {v[\"latency_p95\"]:5d}ms {v[\"latency_mean\"]:5d}ms')
+    print(f'  {LABELS.get(t, t):16s}  {v[\"latency_p50\"]:5d}ms {v[\"latency_p95\"]:5d}ms {v[\"latency_mean\"]:5d}ms')
 
 print()
 
@@ -701,6 +779,9 @@ with open('$BASELINE_FILE') as f:
 cs = current['summary']
 bs = baseline['summary']
 
+# Display labels only — see the summary block. Keys stay untouched.
+LABELS = {'retrieval': 'search-endpt (/api/search)'}
+
 regressions = []
 improvements = []
 
@@ -731,7 +812,7 @@ for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'mult
     c_rate = cc['pass'] / cc['total'] * 100
     b_rate = bc['pass'] / bc['total'] * 100
     if c_rate < b_rate - 15:
-        regressions.append(f'{cat}: {b_rate:.0f}% -> {c_rate:.0f}% (REGRESSION)')
+        regressions.append(f'{LABELS.get(cat, cat)}: {b_rate:.0f}% -> {c_rate:.0f}% (REGRESSION)')
 
 # Latency regression (p95 > 2x baseline AND absolute increase > 500ms)
 # Low absolute values (e.g. 89ms->202ms) are just jitter, not regressions
@@ -740,7 +821,7 @@ for t in current['by_type']:
         cp95 = current['by_type'][t].get('latency_p95', 0)
         bp95 = baseline['by_type'][t].get('latency_p95', 0)
         if bp95 > 0 and cp95 > bp95 * 2 and (cp95 - bp95) > 500:
-            regressions.append(f'{t} P95 latency: {bp95}ms -> {cp95}ms (>2x REGRESSION)')
+            regressions.append(f'{LABELS.get(t, t)} P95 latency: {bp95}ms -> {cp95}ms (>2x REGRESSION)')
 
 if regressions:
     print('  REGRESSIONS DETECTED:')
