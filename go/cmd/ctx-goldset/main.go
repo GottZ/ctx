@@ -1,0 +1,265 @@
+// ctx-goldset — builds stage 1 of the retrieval gold set (design 04 §4.5):
+// the query sets G-KI, G-Q and G-REAL plus the provenance stamp.
+//
+// Subcommands:
+//
+//	ki      draw known-item cases (title paraphrase + constructive label)
+//	q       generate content-derived questions on-prem (raw + hand-check sample)
+//	qfinal  drop hand-check rejects, trim to n, apply the seeded DERIV/HOLD split
+//	real    draw real access-log queries with the redaction sweep
+//	stamp   refresh file digests and the corpus contamination stamp
+//
+// Every write is confined to the gold directory; the only override is
+// -allow-outside-goldset and it is recorded in the stamp. The database
+// connection is read-only.
+//
+// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Source: https://github.com/GottZ/ctx
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"runtime/debug"
+	"strings"
+	"time"
+
+	"github.com/GottZ/ctx/internal/goldset"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "ctx-goldset:", err)
+		if errors.Is(err, goldset.ErrNotOnPrem) || errors.Is(err, goldset.ErrOutsideGoldset) {
+			os.Exit(2)
+		}
+		os.Exit(1)
+	}
+}
+
+// common carries the flags every subcommand shares.
+type common struct {
+	dir          string
+	allowOutside bool
+	envFile      string
+	dsn          string
+	seed         int64
+	splitSeed    int64
+}
+
+func (c *common) bind(fs *flag.FlagSet) {
+	fs.StringVar(&c.dir, "dir", "", "gold directory (default: .project/"+goldset.DirName+" next to the repo)")
+	fs.BoolVar(&c.allowOutside, "allow-outside-goldset", false, "permit writes outside the gold directory (recorded in the stamp)")
+	fs.StringVar(&c.envFile, "env-file", "/compose/n8n/.env", "env file supplying CONTEXT_DB_*")
+	fs.StringVar(&c.dsn, "dsn", "", "postgres DSN (default: built from CONTEXT_DB_*)")
+	fs.Int64Var(&c.seed, "seed", 20260812, "sampling seed")
+	fs.Int64Var(&c.splitSeed, "split-seed", 20260825, "seed for the G-Q DERIV/HOLD partition")
+}
+
+func run() error {
+	if len(os.Args) < 2 {
+		return fmt.Errorf("usage: ctx-goldset <ki|q|qfinal|real|stamp> [flags]")
+	}
+	cmd := os.Args[1]
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	var c common
+	c.bind(fs)
+
+	switch cmd {
+	case "ki":
+		n := fs.Int("n", 300, "target case count")
+		minContent := fs.Int("min-content", 200, "minimum block content length")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdKI(&c, *n, *minContent)
+	case "q":
+		n := fs.Int("n", 225, "blocks to attempt (target n plus reserve)")
+		minContent := fs.Int("min-content", 400, "minimum block content length")
+		backend := fs.String("backend", "spark-chat", "context_backends row supplying the generator")
+		model := fs.String("model", "", "model id override (default: model_map.default)")
+		conc := fs.Int("concurrency", 2, "parallel LLM calls (capped at 2 — the endpoint is production serving)")
+		timeout := fs.Int("timeout", 180, "per-call timeout in seconds")
+		check := fs.Float64("handcheck-frac", 0.10, "fraction of raw cases written to the hand-check sample")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdQ(&c, qOpts{n: *n, minContent: *minContent, backend: *backend, model: *model,
+			concurrency: *conc, timeout: time.Duration(*timeout) * time.Second, checkFrac: *check})
+	case "qfinal":
+		n := fs.Int("n", 200, "final case count")
+		drop := fs.String("drop", "", "comma-separated raw indices rejected by the hand check")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdQFinal(&c, *n, *drop)
+	case "real":
+		n := fs.Int("n", 150, "target case count")
+		days := fs.Int("days", 180, "access-log window in days")
+		minLen := fs.Int("min-len", 3, "minimum query length (exclusive)")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdReal(&c, *n, *days, *minLen)
+	case "stamp":
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdStamp(&c)
+	default:
+		return fmt.Errorf("unknown subcommand %q", cmd)
+	}
+}
+
+// ------------------------------------------------------------- plumbing.
+
+func (c *common) guard() (*goldset.Guard, error) {
+	dir := c.dir
+	if dir == "" {
+		dir = defaultGoldDir()
+	}
+	return goldset.NewGuard(dir, c.allowOutside)
+}
+
+// defaultGoldDir points at the private .project submodule. It is an absolute
+// path on purpose: agent worktrees have no .project, and a relative default
+// would quietly create a second gold directory inside a worktree.
+func defaultGoldDir() string {
+	if v := os.Getenv("CTX_GOLDSET_DIR"); v != "" {
+		return v
+	}
+	return "/compose/n8n/.project/" + goldset.DirName
+}
+
+func (c *common) open(ctx context.Context) (*goldset.DB, error) {
+	dsn := c.dsn
+	if dsn == "" {
+		var err error
+		if dsn, err = dsnFromEnv(c.envFile); err != nil {
+			return nil, err
+		}
+	}
+	return goldset.Open(ctx, dsn)
+}
+
+// dsnFromEnv builds the read-only DSN from CONTEXT_DB_*, preferring the process
+// environment and falling back to the env file.
+func dsnFromEnv(envFile string) (string, error) {
+	vals := map[string]string{}
+	if b, err := os.ReadFile(envFile); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			k, v, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			vals[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+	}
+	get := func(key, def string) string {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
+		if v := vals[key]; v != "" {
+			return v
+		}
+		return def
+	}
+	user, pass := get("CONTEXT_DB_USER", ""), get("CONTEXT_DB_PASSWORD", "")
+	db := get("CONTEXT_DB", "context_store")
+	host := get("CONTEXT_GOLDSET_DB_HOST", get("CONTEXT_DB_HOST", "localhost"))
+	port := get("CONTEXT_DB_PORT", "5432")
+	if user == "" || pass == "" {
+		return "", fmt.Errorf("CONTEXT_DB_USER/CONTEXT_DB_PASSWORD missing (env or %s)", envFile)
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		urlEscape(user), urlEscape(pass), host, port, db), nil
+}
+
+func urlEscape(s string) string {
+	r := strings.NewReplacer("@", "%40", ":", "%3A", "/", "%2F", "?", "%3F", "#", "%23", "%", "%25")
+	return r.Replace(s)
+}
+
+// buildRev reads the VCS stamp Go embedded at build time, with the dirty flag
+// appended. Deliberately NOT `git rev-parse` in a subprocess: spawning one is
+// an argued exception in this module (internal/llm/exec_ban_test.go) and a
+// provenance field does not argue it.
+//
+// Caveat the stamp must not hide: Go resolves the repository by walking up from
+// the package directory, and in a linked git worktree that walk can land on the
+// enclosing checkout instead of the worktree. The value therefore identifies
+// the BUILD, not necessarily the commit the gold set was drawn under — which is
+// why the field is named for the build and carries "-dirty" verbatim.
+func buildRev() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	rev, dirty := "", false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev != "" && dirty {
+		return rev + "-dirty"
+	}
+	return rev
+}
+
+// updateStamp applies fn to the stamp on disk and writes it back.
+func updateStamp(g *goldset.Guard, fn func(*goldset.Stamp)) error {
+	p, err := g.Resolve(goldset.FileStamp)
+	if err != nil {
+		return err
+	}
+	s, err := goldset.ReadStamp(p)
+	if err != nil {
+		return err
+	}
+	if s.Version == 0 {
+		s.Version = 1
+	}
+	if s.Slices == nil {
+		s.Slices = map[string]goldset.SliceStamp{}
+	}
+	s.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	s.BuildRev = buildRev()
+	s.AllowOutsideGoldset = s.AllowOutsideGoldset || g.AllowOutside()
+	fn(&s)
+	return goldset.WriteStamp(p, s)
+}
+
+// writeSlice persists a slice file and records its digest and n in the stamp.
+func writeSlice(g *goldset.Guard, c *common, name, file string, cases []goldset.Case, fill func(*goldset.SliceStamp)) error {
+	p, err := g.Resolve(file)
+	if err != nil {
+		return err
+	}
+	if err := goldset.WriteJSONL(p, cases); err != nil {
+		return err
+	}
+	digest, err := goldset.FileDigest(p)
+	if err != nil {
+		return err
+	}
+	return updateStamp(g, func(s *goldset.Stamp) {
+		st := s.Slices[name]
+		st.N, st.File, st.SHA256 = len(cases), file, digest
+		if fill != nil {
+			fill(&st)
+		}
+		s.Slices[name] = st
+		s.SampleSeed, s.SplitSeed = c.seed, c.splitSeed
+	})
+}

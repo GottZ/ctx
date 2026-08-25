@@ -250,6 +250,55 @@ then retired, since the base axis replays the production prompt and would
 double the change. Promoted hardenings so far: the rerank count-match sentence
 and the cluster-label single-key sentence (A/B 2026-08-15).
 
+### Retrieval gold set: ctx-goldset
+
+`ctx-goldset` builds the query sets that the retrieval-weight measurement scores
+against. It is a sibling of `ctx-goldbench` and shares its determinism
+discipline (fixed default seed, provenance stamp), but it reads the live store
+instead of a dataset repo. Three slices, reported separately and never pooled —
+the known-item slice is structurally trigram-friendly, so a mean across slices
+would transfer a figure between instruments that do not share one:
+
+```bash
+cd go && go build ./cmd/ctx-goldset
+./ctx-goldset ki     -n 300                 # query = paraphrased title, gold = that block
+./ctx-goldset q      -n 225 -concurrency 2  # content-derived questions, on-prem generator
+./ctx-goldset qfinal -n 200 -drop 12,77     # hand-check rejects out, seeded DERIV/HOLD split
+./ctx-goldset real   -n 150                 # real access-log queries, redaction sweep
+./ctx-goldset stamp                         # refresh digests + corpus contamination stamp
+```
+
+Four rules are enforced by the tool, not by discipline:
+
+- **Path guard.** Every write is confined to
+  `.project/goldset-retrieval-2026-08/` (private submodule, root-only, untracked,
+  CI skips it — gold data is never a `context_blocks` row, or it would sort
+  itself into the measurement it exists for). A relative name is joined to that
+  root, an escaping or symlinked path is refused, and files are written 0600.
+  `--allow-outside-goldset` is the only override and is recorded in the stamp.
+- **On-prem generator.** `q` is the one point where private block content
+  reaches a model. The backend row must declare `locality` `local`/`lan` **and**
+  resolve to a private host — the registry column is editable state, not a
+  proof, so a mislabelled row still aborts (exit 2). The row's own `extra_body`
+  travels into the request, which is how `enable_thinking=false` stays set for
+  qwen38 on SGLang.
+- **Redaction sweep.** G-REAL texts run through `internal/sensitivity` plus a
+  Bearer-token rule. A hit is **discarded**, never carried on redacted — a
+  part-redacted query is no longer a real query. The draw also filters
+  `metadata->>'source' <> 'armsweep'`, so the sweep driver's own logged queries
+  cannot be resampled as user queries.
+- **Read-only DB.** The connection sets `default_transaction_read_only=on`; the
+  tool cannot write to the corpus it measures.
+
+`STAMP.json` carries generator model/endpoint/locality, the frozen prompt's
+sha256, the sampling and split seeds, the DERIV/HOLD fingerprint, per-slice `n`
+and discard counts (a measured zero is emitted, not omitted), and the corpus
+`max(created_at)` at draw time — the reference against which later scoring flags
+contamination-suspect hits. It also records `build_vcs_revision` from Go's build
+stamp — named for the build, not the draw, because in a linked git worktree Go's
+repository walk can land on the enclosing checkout. Reports cite a query as
+`slice + index + sha256` prefix; full texts stay in the gold directory.
+
 ### Wire-contract freeze (workflow UI)
 
 The workflow-UI API client (`go/web/src/lib/api/issues.ts`, `types-registry.ts`) and the SPA e2e/vitest fixtures both eat the **same** contract-freeze JSONs in `go/web/src/lib/api/__fixtures__/*.json` (issue list/detail/comments/board/mutate, project list, sync status, type list). Those files are re-serialized from the live handler structs (W6/W7/W11/W4/types) by the Go golden `TestContractFreezeGolden` (`internal/handler/contract_freeze_golden_test.go`) — a drift on either side turns it red before deploy (closes the fixture-drift gap: the FE mocks can no longer diverge silently from the Go wire). To regenerate the JSONs after an intentional wire change, review the diff from:
