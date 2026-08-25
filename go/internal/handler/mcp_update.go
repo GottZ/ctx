@@ -9,8 +9,11 @@
 // updated_at at stage time is hash-bound (CanonicalWrite.BaseUpdatedAt), and
 // the confirm rejects — without consuming the token — when the block changed
 // in between. Like the store tool (decision D4) the update tool carries NO
-// scope/type/sensitivity field: those stay REST-only (their guard flows —
-// downgrade confirm, registry validation — live there).
+// scope field, and no sensitivity field either: those stay REST-only (their
+// guard flows — downgrade confirm — live there). The type axis parted ways
+// with them in N-26: the store tool takes an explicit `type` (registry-
+// validated, manual provenance), the update tool still does not — re-typing
+// an existing block runs through REST manage-update.
 package handler
 
 import (

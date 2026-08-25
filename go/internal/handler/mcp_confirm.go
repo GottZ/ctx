@@ -54,9 +54,11 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		ttl = snap.Writes.ConfirmTTL
 	}
 
-	// The MCP store tool carries no scope/type field (decision D4) — the
-	// storeRequest mapping leaves both empty: scope resolves to home_scope
-	// (scopeExplicit=false at execute time), type stays auto-classify.
+	// The MCP store tool carries no scope field (decision D4) — the
+	// storeRequest mapping leaves it empty: scope resolves to home_scope
+	// (scopeExplicit=false at execute time). The type IS a field since N-26
+	// and is validated HERE, before staging: a card must never promise a
+	// write the confirm cannot execute.
 	res, rej := runStageWriteGates(ctx, cfg.Pool, set, ar, storeRequest{
 		Category:    input.Category,
 		Title:       input.Title,
@@ -64,6 +66,7 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		Tags:        input.Tags,
 		Metadata:    input.Metadata,
 		Sensitivity: input.Sensitivity,
+		Type:        input.Type,
 	}, defaultSens, rateLimit, reqID)
 	if rej != nil {
 		return errResultReject(rej), nil, nil
@@ -80,6 +83,10 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		Sensitivity:       string(res.Sens.Value),
 		SensitivityManual: res.Sens.Manual,
 		SensitivityDetect: res.Sens.Detector,
+		// omitempty: a type-less store canonicalizes to the exact pre-N-26
+		// bytes, so a hash a client already holds stays confirmable across
+		// the upgrade.
+		Type: input.Type,
 	}
 	hash, canonical, err := cw.PayloadHash()
 	if err != nil {

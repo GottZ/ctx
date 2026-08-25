@@ -79,6 +79,13 @@ type storeInput struct {
 	Tags        []string       `json:"tags,omitempty" jsonschema:"optional tags for filtering"`
 	Metadata    map[string]any `json:"metadata,omitempty" jsonschema:"optional metadata object"`
 	Sensitivity string         `json:"sensitivity,omitempty" jsonschema:"content sensitivity for trust gating: credentials|personal|internal|public (default from settings, fail-closed)"`
+	// N-26: the explicit block type. Omitted = the title classifier keeps
+	// guessing (type_source='auto'); named = the writer ASSERTS the type and
+	// the block carries type_source='manual', which the auto-classifier never
+	// re-touches. Validated against the per-request registry snapshot in the
+	// gate chain (unknown name ⇒ rejected, fail-closed) — an MCP writer now
+	// reaches the same axis REST /api/store has taken since WF T10.
+	Type string `json:"type,omitempty" jsonschema:"explicit block type name from the registry (e.g. reference, checkpoint); omit to let the title classifier decide"`
 }
 
 type searchInput struct {
@@ -286,10 +293,12 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		// Running the chain closes that split by construction — a gate added to
 		// the chain now reaches all three surfaces at once.
 		//
-		// The MCP store tool carries no scope/type field (decision D4), so the
-		// storeRequest mapping leaves both empty: WriteScope resolves to the
+		// The MCP store tool carries no scope field (decision D4), so the
+		// storeRequest mapping leaves Scope empty: WriteScope resolves to the
 		// home scope with ScopeExplicit=false — byte-identical to the value this
-		// handler passed before — and the type stays auto-classify.
+		// handler passed before. The type IS a field since N-26: empty keeps the
+		// auto-classify behaviour, a named type is validated by the chain
+		// (validateTypeNameAgainstSet) and written as manual provenance.
 		//
 		// res is threaded into the upsert (sensitivity, detector metadata,
 		// scope): the gates must DECIDE the write, not merely veto it. The chain
@@ -301,13 +310,14 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			Tags:        input.Tags,
 			Metadata:    input.Metadata,
 			Sensitivity: input.Sensitivity,
+			Type:        input.Type,
 		}, defaultSens, rateLimit, RequestIDFromContext(ctx))
 		if rej != nil {
 			return errResultReject(rej), nil, nil
 		}
 
 		// Upsert.
-		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, "")
+		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, input.Type)
 		if err != nil {
 			return classInternal.errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
 		}
