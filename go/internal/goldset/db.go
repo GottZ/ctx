@@ -85,6 +85,34 @@ func (d *DB) RetrievableBlocks(ctx context.Context, seed int64, limit, minConten
 	return out, rows.Err()
 }
 
+// BlocksByIDs loads the pooled candidates for the judgement template, keyed by
+// id. It deliberately does NOT apply retrievableFilter: an id that reached the
+// pool was retrievable when the sweep ran, and hiding one that has since been
+// archived would silently shorten a candidate list a judge is asked to work
+// through completely. A missing id simply has no entry in the map.
+func (d *DB) BlocksByIDs(ctx context.Context, ids []string) (map[string]Block, error) {
+	out := make(map[string]Block, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := d.conn.Query(ctx, `
+		SELECT b.id::text, b.title, b.content, b.type_name, coalesce(b.language, '')
+		FROM context_blocks b
+		WHERE b.id::text = ANY($1)`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var b Block
+		if err := rows.Scan(&b.ID, &b.Title, &b.Content, &b.TypeName, &b.Language); err != nil {
+			return nil, err
+		}
+		out[b.ID] = b
+	}
+	return out, rows.Err()
+}
+
 // CorpusMaxCreatedAt is the contamination stamp of §5.3(c): every top-k hit
 // created after this instant is flagged as contamination-suspect at score time.
 func (d *DB) CorpusMaxCreatedAt(ctx context.Context) (string, error) {

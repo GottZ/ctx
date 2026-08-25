@@ -7,6 +7,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/goldset"
 )
 
 // Pin freezes the two non-deterministic stages of the query path for one gold
@@ -63,18 +65,15 @@ type PrimeStamp struct {
 // Top-20 per arm BY RANK — the union of four solo-arm heads is the standard
 // pooling construction, and taking it per arm rather than from the fused order
 // is what keeps the pool from inheriting the very weighting under test.
-type PoolEntry struct {
-	Slice       string   `json:"slice"`
-	Index       int      `json:"index"`
-	QuerySHA256 string   `json:"query_sha256"`
-	Semantic    []string `json:"semantic"`
-	FTSDe       []string `json:"fts_de"`
-	FTSEn       []string `json:"fts_en"`
-	Trigram     []string `json:"trigram"`
-}
+//
+// The definition moved to internal/goldset in wave B-W6, where the judgement
+// template that consumes this file is built. The dependency runs armsweep ->
+// goldset and cannot run back, so an alias is what keeps ONE struct for the
+// format both waves write and read.
+type PoolEntry = goldset.PoolEntry
 
 // PoolDepth is the per-arm pooling depth.
-const PoolDepth = 20
+const PoolDepth = goldset.PoolDepth
 
 // WritePins persists a pin file as JSONL, sorted by case key.
 func WritePins(path string, pins []Pin) error {
@@ -119,25 +118,10 @@ func WritePool(path string, entries []PoolEntry) error {
 	return writeJSONL(path, len(sorted), func(enc *json.Encoder, i int) error { return enc.Encode(sorted[i]) })
 }
 
-// ReadPool loads a pooling file.
-func ReadPool(path string) ([]PoolEntry, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var out []PoolEntry
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var e PoolEntry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, err)
-		}
-		out = append(out, e)
-	}
-	return out, nil
-}
+// ReadPool loads a pooling file. One reader, in the package that owns the
+// format — the judgement tooling of B-W6 must not be able to disagree with the
+// driver about what a pool file says.
+func ReadPool(path string) ([]PoolEntry, error) { return goldset.ReadPool(path) }
 
 // writeJSONL is the shared 0600 JSONL writer.
 func writeJSONL(path string, n int, encode func(*json.Encoder, int) error) error {

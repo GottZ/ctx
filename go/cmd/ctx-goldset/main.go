@@ -7,6 +7,8 @@
 //	q       generate content-derived questions on-prem (raw + hand-check sample)
 //	qfinal  drop hand-check rejects, trim to n, apply the seeded DERIV/HOLD split
 //	real    draw real access-log queries with the redaction sweep
+//	pool    build the blind judgement template for G-REAL from the pooling dump
+//	ingest  read the filled-in judgements back in as G-REAL relevance labels
 //	stamp   refresh file digests and the corpus contamination stamp
 //
 // Every write is confined to the gold directory; the only override is
@@ -61,7 +63,7 @@ func (c *common) bind(fs *flag.FlagSet) {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: ctx-goldset <ki|q|qfinal|real|stamp> [flags]")
+		return fmt.Errorf("usage: ctx-goldset <ki|q|qfinal|real|pool|ingest|stamp> [flags]")
 	}
 	cmd := os.Args[1]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
@@ -104,6 +106,26 @@ func run() error {
 			return err
 		}
 		return cmdReal(&c, *n, *days, *minLen)
+	case "pool":
+		poolFile := fs.String("pool", "", "Pool-Datei aus `ctx-armsweep prime` (Vorgabe: die einzige pool-*.jsonl im Gold-Verzeichnis)")
+		control := fs.Int("control", 5, "gleichverteilt gezogene Kontroll-Blöcke je Query (deklarierte Rest-Verzerrungs-Sonde)")
+		excerpt := fs.Int("excerpt", 600, "Zeichen Blockinhalt je Kandidat in der Vorlage")
+		out := fs.String("out", "", "Basisname der Urteils-Vorlage (Vorgabe: judge-<Lauf-ID>)")
+		dry := fs.Bool("dry-run", false, "nur die Kennzahlen melden, nichts schreiben")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdPool(&c, poolOpts{poolFile: *poolFile, out: *out,
+			control: *control, excerpt: *excerpt, dryRun: *dry})
+	case "ingest":
+		judged := fs.String("judged", "", "ausgefüllte Urteils-Vorlage (JSONL oder Markdown)")
+		key := fs.String("key", "", "Schlüsseldatei der Vorlage (Vorgabe: "+keyPrefix+"<Lauf-ID>.json)")
+		out := fs.String("out", goldset.FileReal, "zu labelnde Slice-Datei")
+		stampName := fs.String("stamp", goldset.FileStamp, "Stempel, in den der G-REAL-Steckbrief gemischt wird")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdIngest(&c, *judged, *key, *out, *stampName)
 	case "stamp":
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			return err

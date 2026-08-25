@@ -272,8 +272,13 @@ cd go && go build ./cmd/ctx-goldset
 ./ctx-goldset q      -n 225 -concurrency 2  # content-derived questions, on-prem generator
 ./ctx-goldset qfinal -n 200 -drop 12,77     # hand-check rejects out, seeded DERIV/HOLD split
 ./ctx-goldset real   -n 150                 # real access-log queries, redaction sweep
+./ctx-goldset pool   -control 5             # blind pooled judgement template for G-REAL (stage 2)
+./ctx-goldset ingest -judged judge-<run>.md # the filled-in judgements back in as labels
 ./ctx-goldset stamp                         # refresh digests + corpus contamination stamp
 ```
+
+`pool` and `ingest` are stage 2 and belong to the pooling construction described
+under [Blind relevance judgements](#blind-relevance-judgements-for-g-real-pool--ingest).
 
 Four rules are enforced by the tool, not by discipline:
 
@@ -369,6 +374,55 @@ recorded (delivered order in the dump, stage config in the env stamp) and never
 re-simulated. Details, the operating notes (off-peak, `-concurrency 1`, not
 alongside dream) and the `via_post_stage` caveat live in
 [`go/cmd/ctx-armsweep/README.md`](../go/cmd/ctx-armsweep/README.md).
+
+### Blind relevance judgements for G-REAL: `pool` / `ingest`
+
+G-REAL is drawn from the access log and therefore has no constructive label —
+nobody wrote down which block answers a question a user once asked. Stage 2
+supplies the labels from a human judgement over a **pooled, blinded** candidate
+list. The tooling is `ctx-goldset pool` and `ctx-goldset ingest`; the judging in
+between is a human act and is deliberately not automated.
+
+```bash
+./ctx-armsweep prime                                   # writes pool-<run>.jsonl (top-20 per arm, G-REAL)
+./ctx-goldset  pool   -control 5                       # judge-<run>.jsonl + judge-<run>.md + pool-key-<run>.json
+#              … a human fills in the first column …
+./ctx-goldset  ingest -judged judge-<run>.md           # labels g-real.jsonl, merges the G-REAL profile
+./ctx-goldset  stamp                                   # refresh digests, STAMP.json final
+```
+
+The construction is pre-registered (design 04 §4.5) and enforced by the tool:
+
+- **Pool.** Per query the union of the top-20 of all four solo arms, taken per
+  arm rather than from the fused order, so the pool does not inherit the very
+  weighting under measurement.
+- **Control sample.** Plus five blocks drawn uniformly (seeded) from the
+  retrievable set, excluding what is already pooled. Pooling bias is the
+  declared residual of this method; the control sample is what makes it a
+  NUMBER — the share of uniform draws a judge calls relevant lands in the stamp
+  as `control_hit_rate`. Without the key file that rate is not computable, and
+  the ingest refuses rather than stamping a zero that would read as "no bias".
+- **Blind.** The template carries the query, the block id, the title and a
+  600-character excerpt — no rank, no arm, no marker for a control draw, and no
+  such field even in the JSONL. The candidate→control mapping lives in a
+  separate `pool-key-<run>.json` read only at ingest time. The order is a
+  seeded permutation derived from the seed AND the query digest, so every query
+  has its own reproducible order instead of one order a judge could learn.
+- **No silent negatives.** The verdict vocabulary is `1`/`0`/`y`/`n`; a row left
+  at `_` is an error naming the line, never a "not relevant". A query whose pool
+  holds nothing relevant KEEPS its place with empty `gold_ids` and is counted as
+  `no_relevant` — dropping it would remove exactly the queries retrieval is
+  worst at, and every later metric would be computed over a population selected
+  by the thing under measurement.
+
+Both template forms are equivalent: the markdown table is one keystroke per row
+at a fixed offset for a run of roughly twelve thousand rows, the JSONL is the
+same content for a script. `ingest` detects which one it was given, backs up
+`g-real.jsonl` to `.bak-<date>` before rewriting it, and merges the G-REAL
+profile (`n`, `labelled`, `no_relevant`, `pool_p50`, `pool_max`,
+`control_hit_rate`, `pool_run_id`, `pool_seed`, judgement file and digest) into
+`STAMP.json` on the RAW document — a field written by another wave survives the
+rewrite instead of being dropped by a typed round trip.
 
 ### Wire-contract freeze (workflow UI)
 

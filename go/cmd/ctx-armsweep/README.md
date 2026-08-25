@@ -25,6 +25,15 @@ cd go && go build ./cmd/ctx-armsweep
 `pool-<Lauf>.jsonl`: die Top-20 je Arm, Eingabe für die Relevanz-Urteile in
 Welle B-W6. Nichts wird gescort.
 
+Aus dieser Datei baut `ctx-goldset pool` die blinde Urteils-Vorlage (Vereinigung
+der vier Arm-Köpfe plus fünf gleichverteilt gezogene Kontroll-Blöcke, dedupliziert,
+seed-permutiert, ohne Score, Arm oder Rang), ein Mensch urteilt, und
+`ctx-goldset ingest` schreibt die Labels nach `g-real.jsonl` samt
+Kontroll-Trefferquote in den Stempel. Ablauf und Regeln:
+[`docs/development.md`](../../../docs/development.md) — Abschnitt „Blind relevance
+judgements for G-REAL". Solange G-REAL ungelabelt ist, rechnet `score` den Slice
+als „unlabelled, skipped".
+
 **`dump`** fährt dieselben Queries MIT Pins. Ein fehlender Pin ist ein Fehler,
 kein stiller Rückfall auf den ungepinnten Pfad — ein teils gepinnter Lauf ist
 weder das eine noch das andere, und der Unterschied wäre im Artefakt unsichtbar.

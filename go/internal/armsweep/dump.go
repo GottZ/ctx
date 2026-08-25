@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/GottZ/ctx/internal/goldset"
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
@@ -86,9 +87,11 @@ type Record struct {
 // re-point at a different query if a slice were ever regenerated.
 func (r Record) Key() string { return CaseKey(r.Slice, r.Index, r.QuerySHA256) }
 
-// CaseKey builds the cross-artefact case key.
+// CaseKey builds the cross-artefact case key. The key format is shared with the
+// judgement tooling of B-W6, so it has exactly one definition
+// (goldset.CaseKey) and this is the driver-side name for it.
 func CaseKey(slice string, index int, sha string) string {
-	return fmt.Sprintf("%s/%d/%s", slice, index, sha)
+	return goldset.CaseKey(slice, index, sha)
 }
 
 // ShortSHA is the digest prefix a report may carry. Full texts never leave the

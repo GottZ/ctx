@@ -162,7 +162,12 @@ func WriteJSONL(path string, cases []Case) error {
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// O_CREATE applies fileMode only when the file did not exist, so a rewrite
+	// of an already world-readable slice would keep it that way.
+	return os.Chmod(path, fileMode)
 }
 
 // ReadJSONL reads a slice file back.
