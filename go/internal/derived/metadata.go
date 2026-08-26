@@ -21,7 +21,8 @@ package derived
 // StripReserved at the writer is defence in depth, not the whole defence: the
 // same filter belongs in store.UpsertBlock, where the hole is not specific to
 // derived writers (any MCP or REST client can send guard_checked_at today).
-// That is a pre-wave at D-05 (§4.5.2). Neither makes the other unnecessary.
+// That pre-wave (D-05 V-W3, §4.5.2) has landed: UpsertBlock strips the key
+// on both upsert paths (cee34c78). Neither makes the other unnecessary.
 var ReservedMetadataKeys = []string{
 	"guard_checked_at",
 	"guard_status",
