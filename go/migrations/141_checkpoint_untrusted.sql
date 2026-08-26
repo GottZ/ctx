@@ -1,0 +1,103 @@
+-- =============================================================================
+-- 141_checkpoint_untrusted.sql — retrieval.untrusted auf dem checkpoint-Typ
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- Achse 05 (Empirische Validierung), Welle V-W7. design/05 §7 (Zeile V-W7) +
+-- §5 B2 (Prompt-Injection-Laundering über eine abgeleitete Ebene);
+-- DECISIONS.md E-12.
+--
+-- NUMMER: Masterplan §2 K1 — „wer zuerst landet, nimmt die nächste freie".
+-- Gelandet sind 138, 139 und 140, also ist 141 die nächste freie. Keine zweite
+-- Migrations-Welle läuft parallel (K1).
+--
+-- WAS DIESE MIGRATION IST: reine Registry-DATEN, wie 138. Ein UPDATE auf EINE
+-- Zeile in context_block_types, kein Schema, kein Index, kein Schreiber. Die
+-- Retrieval-POLICY bleibt unangetastet: checkpoint ist und bleibt 'excluded'.
+--
+-- WARUM EINE EIGENE MIGRATION UND KEIN EDIT AM SEED:
+-- Der checkpoint-Seed stammt aus M107 und liegt seit dem Migrations-Fold in
+-- 113_baseline.sql. Beide sind gelandet, und gelandete Migrationen werden nicht
+-- editiert — die Historie ist forward-only, und die Grenze ist der Commit, nicht
+-- der Applikationszustand irgendeiner Instanz. Das Werkzeug zieht dieselbe
+-- Linie: .hooks/pre-commit Gate 3 verlangt für JEDE Nicht-Kommentar-Änderung an
+-- einer Migration eine mitgestagte Regeneration des Schema-Contract-Manifests;
+-- für eine reine Datenzeile wäre diese Regeneration byte-identisch und damit
+-- unstageable. Das Gate kann einen bewussten Daten-Edit nicht von einer
+-- vergessenen Regeneration unterscheiden und muss beide gleich behandeln.
+-- Dieselbe Begründung, die 138 gegenüber 136 trägt (siehe deren Kopf), trägt
+-- 141 gegenüber dem Baseline-Seed. Der Nebeneffekt ist wieder der eigentliche
+-- Gewinn: jede bereits laufende Instanz bekommt das Feld über denselben Weg wie
+-- eine frische, statt über einen stillen Edit, den sie nie zu sehen bekäme.
+--
+-- WARUM DAS FLAG AUF checkpoint:
+-- 138 hat 'tool-evidence' und 'tool-overview' als Fremdtext-Zellen markiert.
+-- 'checkpoint' trägt dieselbe Eigenschaft eine Ebene höher: der Inhalt ist
+-- Transkript-Prosa aus Compaction-Checkpoints, und die reproduziert
+-- Werkzeug-Ausgaben, geholte Web-Inhalte und fremde Agenten-Prompts. Ein Dritter
+-- formt also einen Teil jedes Bytes, das dieser Typ führt.
+--
+-- Dass checkpoint bisher UNGEFLAGGT war, ist keine Aussage über seine
+-- Vertrauenswürdigkeit, sondern eine Folge seiner Quarantäne: als
+-- retrieval='excluded' erreicht der Typ nie einen Synthese-Prompt, deshalb
+-- brauchte er die Rahmung nie. Die abgeleitete Wissens-Ebene hebt genau diese
+-- Quarantäne auf — sie destilliert Checkpoint-Prosa in retrievbare Blöcke — und
+-- muss die Eigenschaft deshalb an der Quelle LESEN können. Die Regel, die ein
+-- abgeleiteter Typ fährt, ist fail-closed: untrusted, es sei denn, JEDE seiner
+-- Quellklassen ist nachweislich erstpartei-erzeugt (design/05 §5 B2). Bliebe
+-- checkpoint ungeflaggt, antwortete diese Regel „erstpartei" — und die
+-- abgeleitete Ebene würde Fremdtext zu Wissen waschen. Das ist der ganze
+-- Zweck dieser Migration; sie ist Vorbedingung, nicht Wirkung.
+--
+-- WARUM DAS FLAG HIER INERT IST UND TROTZDEM GÜLTIG:
+-- retrieval.untrusted ist eine Präsentations-Eigenschaft: handler/query.go liest
+-- sie je Quelle beim Bau des Synthese-Prompts (Set.IsUntrusted), llm/synthesize
+-- rendert trust="untrusted". Auf einem 'excluded'-Typ kommt es dazu nie, also
+-- ändert diese Migration heute KEINE einzige Antwort — ctx_rrf sieht das Feld
+-- gar nicht (die Funktion bekommt VisibleTypes() und DampedTypesFor(), beide aus
+-- der POLICY abgeleitet). validatePolicy weist das Feld auf einem excluded-Typ
+-- ausdrücklich nicht ab (RetrievalPolicy.Untrusted-Doc: „On an excluded type the
+-- flag is INERT […] but not invalid"), damit die Zeile ladbar bleibt, falls der
+-- Typ je auf 'damped' gestellt wird. Genau diese Trennung ist auch das
+-- Nicht-Regressions-Gate der Welle: eine Variante, die den Typ nebenbei auf
+-- 'damped' setzt, macht 5 900 Transkript-Teile korpusweit retrievbar und ist in
+-- internal/rrf als Sonde gegengeprobt.
+--
+-- WARUM jsonb_set MIT EXISTENZ-GUARD UND KEIN CONFIG-NEUSCHREIBEN:
+-- jsonb_set(config, '{retrieval,untrusted}', 'true') setzt genau einen Pfad und
+-- lässt classify.priority und classify.title_patterns unangetastet. Ein
+-- vollständiges Neuschreiben der Config würde jedes Operator-Tuning
+-- überschreiben, das seit M107 nachgezogen wurde — bei checkpoint ist das nicht
+-- hypothetisch: M120 hat das zweite Titel-Muster genau so nachgetragen, und
+-- 120_checkpoint_head_title_pattern.sql hält ausdrücklich fest, dass ein
+-- Operator die Muster weiter tunen darf. Das ist die M107-Doktrin, die in 136
+-- als ON CONFLICT DO NOTHING auftritt und hier als WHERE-Guard auftreten muss,
+-- weil ein UPDATE kein ON CONFLICT hat.
+-- Der Guard NOT (config->'retrieval' ? 'untrusted') macht die Migration
+-- idempotent UND respektiert eine bewusste Operator-Entscheidung: wer das Feld
+-- selbst auf false gesetzt hat, behält false. Nur ein FEHLENDES Feld wird
+-- gesetzt. Re-Run trifft null Zeilen.
+--
+-- LOCKSTEP MIT internal/blocktype/builtin.go: dort trägt checkpoint seit
+-- derselben Welle Untrusted: true. Der Drift-Gate ist
+-- TestRegistryGolden_Integration — er appliziert die ECHTE Kette (Baseline
+-- seedet, 141 setzt nach) und vergleicht den ENDZUSTAND der Zeilen gegen
+-- builtinPolicies(); ein Drift in beide Richtungen ist rot (belegt: die
+-- Go-Änderung allein macht ihn rot, genau auf diesem einen Feld).
+-- TestMigration141SetsCheckpointUntrusted ist der container-freie Vorposten
+-- darauf: er liest DIESE Datei aus migrations.FS und pinnt den Namen, den Pfad,
+-- den Wert und den Existenz-Guard, ohne eine Datenbank zu brauchen;
+-- TestMigration141LeavesPolicyAlone verbietet ihr die Policy-Tokens.
+-- Einen Unit-Vergleich Seed-Literal gegen Builtin gibt es für checkpoint —
+-- anders als für die 136-Typen (TestToolSeedsMatchBuiltin) — nicht, also ist
+-- hier auch keine „einzige erlaubte Abweichung" zu normalisieren;
+-- TestCheckpointSeedLacksUntrusted pinnt stattdessen die Prämisse, auf der
+-- diese Migration steht: das Seed-Literal führt das Feld nicht.
+-- =============================================================================
+
+SET LOCAL lock_timeout = '2s';
+
+UPDATE context_block_types
+   SET config = jsonb_set(config, '{retrieval,untrusted}', 'true'::jsonb)
+ WHERE scope = '_global'
+   AND name = 'checkpoint'
+   AND NOT (config->'retrieval' ? 'untrusted');

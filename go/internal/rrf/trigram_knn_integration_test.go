@@ -673,12 +673,15 @@ func TestVW4IndexGuard(t *testing.T) {
 		}
 		// The migration must still LAND: the function bodies are the half that
 		// works without the index, and a chain that stops here would take the
-		// whole deploy with it.
+		// whole deploy with it. `< 140` rather than `!= 140` (V-W7, migration
+		// 141): the claim is that 140 landed, and the chain keeps growing past
+		// it — an equality here would go red for every later migration without
+		// saying anything about this guard.
 		var version int
 		if err := pool.QueryRow(ctx, "SELECT max(version) FROM _migrations").Scan(&version); err != nil {
 			t.Fatalf("read _migrations: %v", err)
 		}
-		if version != 140 {
+		if version < 140 {
 			t.Fatalf("_migrations tops out at %d — 140 must land even when it declines to build the index", version)
 		}
 		t.Logf("guard branch 2: at a reported 1000000 rows 140 lands without %s; the arm keeps the pre-140 sequential scan until the operator builds it out-of-band", vw4Index)
@@ -720,7 +723,8 @@ func vw4MigrateCapturingNotices(t *testing.T, ctx context.Context, dsn string) [
 	if err := pool.QueryRow(ctx, "SELECT max(version) FROM _migrations").Scan(&version); err != nil {
 		t.Fatalf("read _migrations: %v", err)
 	}
-	if version != 140 {
+	// `< 140`, not `!= 140` — see the note in TestVW4IndexGuard (V-W7).
+	if version < 140 {
 		t.Fatalf("_migrations tops out at %d — 140 must land in every guard branch", version)
 	}
 	mu.Lock()

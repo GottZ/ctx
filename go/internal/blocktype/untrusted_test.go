@@ -62,9 +62,21 @@ func TestDecodePolicy_UntrustedTypoRejected(t *testing.T) {
 }
 
 // TestSet_UntrustedLookup is Gate 4b: the derived Set lookup over the builtin
-// set. tool-evidence and tool-overview carry the flag, the knowledge line does
-// not, and the excluded checkpoint type does not either (it never reaches a
-// prompt, so flagging it would assert a framing nothing renders).
+// set. tool-evidence, tool-overview and — since V-W7 — checkpoint carry the
+// flag; the knowledge line does not.
+//
+// WHY CHECKPOINT MOVED (V-W7, design/05 §5 B2): W02-4 read the flag as a
+// PROMPT-rendering property, and on an excluded type nothing renders, so
+// checkpoint was left at false. A derived layer inverts that reading: a
+// distiller that quotes checkpoint prose has to be able to ASK whether its
+// source is foreign text, and the only place that answer can live is the
+// source type. Checkpoint prose quotes tool output, web content and foreign
+// agent prompts, so the fail-closed rule ("a derived type is untrusted unless
+// EVERY source class is provably first-party") needs this side of the lookup
+// to be true — otherwise the derived layer launders foreign text into
+// knowledge. The flag stays INERT here: the type remains retrieval=excluded,
+// so no prompt changes today (see the ctx_rrf non-regression probe in
+// internal/rrf and the inert_on_excluded case above).
 func TestSet_UntrustedLookup(t *testing.T) {
 	s, err := NewSet(builtinPolicies())
 	if err != nil {
@@ -77,7 +89,9 @@ func TestSet_UntrustedLookup(t *testing.T) {
 		"knowledge":     false,
 		"reference":     false,
 		"audit-trail":   false,
-		"checkpoint":    false,
+		// V-W7: foreign text by construction (transcript prose that quotes
+		// tool output and foreign prompts), inert while excluded.
+		"checkpoint": true,
 		// Unknown names resolve to false, mirroring GuardSameScopeOnly: an
 		// unregistered name cannot reach the prompt in the first place (the
 		// visibility allowlist comes from the SAME snapshot, fail-closed), and
@@ -92,7 +106,7 @@ func TestSet_UntrustedLookup(t *testing.T) {
 	}
 
 	got := s.UntrustedTypes()
-	want := []string{"tool-evidence", "tool-overview"}
+	want := []string{"checkpoint", "tool-evidence", "tool-overview"}
 	if !slices.Equal(got, want) {
 		t.Errorf("UntrustedTypes() = %v, want %v (sorted, derived at NewSet)", got, want)
 	}

@@ -285,13 +285,31 @@ func builtinPolicies() []Policy {
 		// audit-trail; writers SHOULD still set type=checkpoint explicitly.
 		{
 			Name: "checkpoint", Scope: globalScope, Builtin: true,
-			Retrieval: RetrievalPolicy{Kind: RetrievalExcluded},
-			Guard:     GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
-			Dream:     DreamPolicy{Linkable: false},
-			Digest:    DigestPolicy{Include: false},
-			Overview:  OverviewPolicy{Include: false},
-			Parent:    ParentPolicy{Mode: ParentModeNone},
-			Classify:  ClassifyRules{Priority: 30, TitlePatterns: []string{"compaction source", "compaction checkpoint"}},
+			Retrieval: RetrievalPolicy{
+				Kind: RetrievalExcluded,
+				// Foreign text for the same reason as the two tool axes, one
+				// level up (V-W7, migration 141): transcript prose reproduces
+				// tool output, fetched web content and foreign agent prompts,
+				// so a third party shapes part of what this type carries.
+				//
+				// The flag is INERT here — an excluded type never reaches a
+				// synthesis prompt, so nothing renders trust="untrusted"
+				// today — and it is set anyway, because a DERIVED type that
+				// distils this material has to be able to READ the property at
+				// its source. The rule such a type runs is fail-closed:
+				// untrusted unless EVERY source class is provably first-party.
+				// With checkpoint unflagged that rule answers "first-party"
+				// and the derived layer launders foreign text into knowledge.
+				// Being excluded is WHY the flag was never needed before, not
+				// evidence that the content is trustworthy.
+				Untrusted: true,
+			},
+			Guard:    GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
+			Dream:    DreamPolicy{Linkable: false},
+			Digest:   DigestPolicy{Include: false},
+			Overview: OverviewPolicy{Include: false},
+			Parent:   ParentPolicy{Mode: ParentModeNone},
+			Classify: ClassifyRules{Priority: 30, TitlePatterns: []string{"compaction source", "compaction checkpoint"}},
 		},
 	}
 }
