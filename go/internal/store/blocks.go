@@ -224,14 +224,28 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 		metadata = map[string]any{}
 	}
 
+	// Reserved metadata keys are stripped from caller-supplied metadata on
+	// BOTH upsert paths (Wissens-Ebenen V-W3, design/05 §2.2 row S3): today
+	// exactly `guard_checked_at`, in the same expression form UpdateBlock
+	// already uses (:715-732). guardPendingWhere (guard/guard.go:65-70) takes
+	// a block out of the guard batch as soon as that key is non-NULL — an
+	// unfiltered write-through would let any client, and every future derived
+	// writer (they all go through UpsertBlock), silently remove its own block
+	// from the duplicate check. Fail-open.
+	//
+	// The INSERT value carries the strip because a fresh block takes the
+	// INSERT branch and never sees the ON CONFLICT clause. EXCLUDED.metadata
+	// is the already-evaluated insert value, so the conflict clause's strip is
+	// belt-and-braces: it keeps the invariant local to the assignment that
+	// actually writes the conflicting row.
 	insertCols := "category, tags, title, content, metadata, scope"
-	insertVals := "$1, $2, $3, $4, $5, $6"
+	insertVals := "$1, $2, $3, $4, $5::jsonb - 'guard_checked_at', $6"
 	args := []any{category, tags, title, content, metadata, scope}
 
 	setClauses := []string{
 		"content = EXCLUDED.content",
 		"tags = EXCLUDED.tags",
-		"metadata = EXCLUDED.metadata",
+		"metadata = EXCLUDED.metadata - 'guard_checked_at'",
 		"updated_at = now()",
 	}
 	if scopeExplicit {
