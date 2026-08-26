@@ -20,18 +20,28 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// ArmRow is one ctx_rrf_arms output row (migration 137): the raw per-arm ranks
-// of one candidate plus the two multiplicative factors ctx_rrf folds into its
-// score. A nil rank means the block is NOT in that arm — which is exactly the
-// information an offline weight sweep needs, so the pointers are deliberate
-// and NOT flattened to 0 (rank 0 does not exist; 1 is the best rank).
+// ArmRow is one ctx_rrf_arms output row (migration 137, ninth column added in
+// 142): the raw per-arm ranks of one candidate plus the two multiplicative
+// factors ctx_rrf folds into its score. A nil rank means the block is NOT in
+// that arm — which is exactly the information an offline weight sweep needs, so
+// the pointers are deliberate and NOT flattened to 0 (rank 0 does not exist; 1
+// is the best rank).
 //
 // CosSim is nil for a candidate only the lexical arms found (the E-M6 rescue
 // clause in 137). MassFactor/TypeFactor arrive already COALESCEd, the same way
 // the fusion consumes them.
 //
-// No content, no title, no scope: the function projects identity and numbers
-// only (137 header, "WARUM KEINE INHALTE IM RETURN"), and this struct keeps
+// TypeName is the block's registry type (M-W1, migration 142). It is NOT
+// redundant with TypeFactor: the factor is not injective — two damped types may
+// carry the same value and every undamped type carries 1.0 — so a dump can
+// reconstruct a per-type damping sweep from the NAME and cannot from the
+// factor. It arrives non-empty from 142 onwards; the empty string means the row
+// came out of a dump written BEFORE 142 (the field simply was not there), not
+// that a block has no type.
+//
+// No content, no title, no scope: the function projects identity, numbers and
+// one registry classification (137 header, "WARUM KEINE INHALTE IM RETURN"; 142
+// header for why a type name does not move that line), and this struct keeps
 // that promise on the Go side.
 type ArmRow struct {
 	ID           string   `json:"id"`
@@ -42,6 +52,7 @@ type ArmRow struct {
 	CosSim       *float64 `json:"cos_sim"`
 	MassFactor   float64  `json:"mass_factor"`
 	TypeFactor   float64  `json:"type_factor"`
+	TypeName     string   `json:"type_name"`
 }
 
 // armsQuery calls ctx_rrf_arms over the SAME 18-position argument surface as
@@ -50,7 +61,7 @@ type ArmRow struct {
 // deliberately NOT passed: their SQL defaults are the literals ctx_rrf uses,
 // so the default call is deckungsgleich with the live fusion. A sweep over the
 // caps is a later wave and gets its own parameters then.
-const armsQuery = `SELECT id, rank_semantic, rank_fts_de, rank_fts_en, rank_trigram, cos_sim, mass_factor, type_factor
+const armsQuery = `SELECT id, rank_semantic, rank_fts_de, rank_fts_en, rank_trigram, cos_sim, mass_factor, type_factor, type_name
 		 FROM ctx_rrf_arms($1, $2, $3, $4::text[], $5, $6::text[], $7, $8, $9, $10::text[], $11::text[], $12::float8[], $13::text[], $14::text[], $15::uuid[], $16::text, $17::int, $18::int)`
 
 // ArmRanksTx runs ctx_rrf_arms for a search that has ALREADY run through
@@ -114,7 +125,7 @@ func queryRRFArms(ctx context.Context, q Querier, args []any) ([]ArmRow, error) 
 	for rows.Next() {
 		var r ArmRow
 		if err := rows.Scan(&r.ID, &r.RankSemantic, &r.RankFTSDe, &r.RankFTSEn, &r.RankTrigram,
-			&r.CosSim, &r.MassFactor, &r.TypeFactor); err != nil {
+			&r.CosSim, &r.MassFactor, &r.TypeFactor, &r.TypeName); err != nil {
 			return nil, fmt.Errorf("rrf: scan arm row: %w", err)
 		}
 		out = append(out, r)

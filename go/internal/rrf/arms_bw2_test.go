@@ -12,9 +12,11 @@ import (
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
-// bw2ArmCols is the ctx_rrf_arms projection, in order.
+// bw2ArmCols is the ctx_rrf_arms projection, in order. type_name is the ninth
+// column migration 142 added (M-W1); it sits at the END, which is what lets the
+// scan grow without renumbering anything above it.
 var bw2ArmCols = []string{"id", "rank_semantic", "rank_fts_de", "rank_fts_en",
-	"rank_trigram", "cos_sim", "mass_factor", "type_factor"}
+	"rank_trigram", "cos_sim", "mass_factor", "type_factor", "type_name"}
 
 // bw2MockArgs is the $1..$15 matcher prefix; the three selector positions are
 // spelled out by each test.
@@ -46,8 +48,8 @@ func TestArmRanksTxScan(t *testing.T) {
 	defer mock.Close()
 
 	rows := mock.NewRows(bw2ArmCols).
-		AddRow("11111111-1111-7000-9000-000000000001", ptrInt(1), ptrInt(3), nil, nil, bw2Float(0.87), 1.0, 0.3).
-		AddRow("11111111-1111-7000-9000-000000000002", nil, nil, ptrInt(2), ptrInt(7), nil, 0.5, 1.0)
+		AddRow("11111111-1111-7000-9000-000000000001", ptrInt(1), ptrInt(3), nil, nil, bw2Float(0.87), 1.0, 0.3, "audit-trail").
+		AddRow("11111111-1111-7000-9000-000000000002", nil, nil, ptrInt(2), ptrInt(7), nil, 0.5, 1.0, "knowledge")
 	mock.ExpectQuery(`FROM ctx_rrf_arms\(`).
 		WithArgs(bw2MockArgs(rrf.ModeANN, nil, nil)...).
 		WillReturnRows(rows)
@@ -70,6 +72,12 @@ func TestArmRanksTxScan(t *testing.T) {
 	}
 	if got[0].TypeFactor != 0.3 || got[1].MassFactor != 0.5 {
 		t.Errorf("factors mis-scanned: type=%v mass=%v", got[0].TypeFactor, got[1].MassFactor)
+	}
+	// M-W1: the ninth column. Both rows carry an UNDAMPED-vs-damped pair whose
+	// factors differ, so a scan that read the name off the wrong column would
+	// have to disagree here as well.
+	if got[0].TypeName != "audit-trail" || got[1].TypeName != "knowledge" {
+		t.Errorf("type_name mis-scanned: %q / %q", got[0].TypeName, got[1].TypeName)
 	}
 	// A lexical-only candidate: no cosine, and that is data, not an error.
 	if got[1].CosSim != nil {
