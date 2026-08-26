@@ -380,9 +380,36 @@ func cmdStamp(c *common) error {
 	if err != nil {
 		return err
 	}
+	active, err := db.ActiveCount(ctx)
+	if err != nil {
+		return err
+	}
 	if err := updateStamp(g, func(s *goldset.Stamp) {
 		s.CorpusMaxCreatedAt = maxCreated
 		s.RetrievableBlocks = retrievable
+		s.Population = &goldset.Population{
+			Definition: populationDefinition, Retrievable: retrievable, Active: active,
+		}
+		// Backfill the declared construction profile of the stage-1 slices. They
+		// were drawn before the profiles existed; leaving three slices without a
+		// declared bias in the same file as four with one would read as if only
+		// the new ones had a method.
+		for name, st := range s.Slices {
+			if st.Profile != nil {
+				continue
+			}
+			p, ok := goldset.ProfileFor(name)
+			if !ok {
+				continue
+			}
+			if name == goldset.SliceQ && s.Generator != nil {
+				gen := *s.Generator
+				gen.PromptSHA256 = goldset.PromptSHA256For(goldset.SliceQ)
+				p.Generator = &gen
+			}
+			st.Profile = &p
+			s.Slices[name] = st
+		}
 		for name, st := range s.Slices {
 			if p, resErr := g.Resolve(st.File); resErr == nil {
 				if d, digErr := goldset.FileDigest(p); digErr == nil {

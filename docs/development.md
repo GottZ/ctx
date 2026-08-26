@@ -333,7 +333,7 @@ and the cluster-label single-key sentence (A/B 2026-08-15).
 `ctx-goldset` builds the query sets that the retrieval-weight measurement scores
 against. It is a sibling of `ctx-goldbench` and shares its determinism
 discipline (fixed default seed, provenance stamp), but it reads the live store
-instead of a dataset repo. Three slices, reported separately and never pooled —
+instead of a dataset repo. Seven slices, reported separately and never pooled —
 the known-item slice is structurally trigram-friendly, so a mean across slices
 would transfer a figure between instruments that do not share one:
 
@@ -343,10 +343,41 @@ cd go && go build ./cmd/ctx-goldset
 ./ctx-goldset q      -n 225 -concurrency 2  # content-derived questions, on-prem generator
 ./ctx-goldset qfinal -n 200 -drop 12,77     # hand-check rejects out, seeded DERIV/HOLD split
 ./ctx-goldset real   -n 150                 # real access-log queries, redaction sweep
+./ctx-goldset sess        -n 120            # session windows, gold = daily reports + window blocks
+./ctx-goldset mh          -n 100            # dream-link bridges at confidence >= 0.7, gold = both ends
+./ctx-goldset glob        -n 80             # aggregating tag questions, gold judged later
+./ctx-goldset glob-konstr -n 50             # the same question family with cluster gold — FLOOR CHECK
 ./ctx-goldset pool   -control 5             # blind pooled judgement template for G-REAL (stage 2)
 ./ctx-goldset ingest -judged judge-<run>.md # the filled-in judgements back in as labels
 ./ctx-goldset stamp                         # refresh digests + corpus contamination stamp
 ```
+
+`-dry-run` draws and counts the candidates of the four multi-gold generators
+without a single model call — the way to check a construction before spending
+the one generation run a slice gets.
+
+**Why the multi-gold slices exist.** G-KI, G-Q and G-REAL carry exactly one gold
+id per case. A one-gold slice cannot show the use of an aggregating layer; it can
+only punish it as displacement of the single gold block. `G-SESS`, `G-MH` and
+`G-GLOB` are multi-gold by construction, and the scorers already handle it —
+`evalscore.RecallAtK` and `NDCGRanked` take a gold set.
+
+**`G-GLOB-KONSTR` is a floor check, not a result.** Its gold comes from
+`graph_cluster_member`, which is circular against the graph layer it would judge:
+a catalog block finding cluster members would score as retrieval quality. It is
+therefore reported as its own row (`rollout_criterion: false`) and left out of
+`armsweep.ReportSlices()`, which is the set every gate walks. `FloorSlices()`
+names it; `CensusSlices()` is what the report census iterates.
+
+Two construction rules are stated in the stamp rather than in a commit message.
+The **session window** is half-open `[day 00:00Z, day+1 00:00Z)` over the date in
+the daily report's TITLE (a report written after midnight still belongs to the
+day it names); span windows are disjoint runs of consecutive reported days, and a
+window whose gold set exceeds `-max-gold` is dropped rather than trimmed, because
+trimming would label genuinely relevant blocks irrelevant. The **dream-link
+floor** is the constant `goldset.MinDreamConfidence = 0.7`: the link audit
+measures 56 % correctness overall but 100 % at 0.7 and above, so below the floor
+roughly half the gold would be wrong.
 
 `pool` and `ingest` are stage 2 and belong to the pooling construction described
 under [Blind relevance judgements](#blind-relevance-judgements-for-g-real-pool--ingest).
@@ -359,15 +390,19 @@ Four rules are enforced by the tool, not by discipline:
   itself into the measurement it exists for). A relative name is joined to that
   root, an escaping or symlinked path is refused, and files are written 0600.
   `--allow-outside-goldset` is the only override and is recorded in the stamp.
-- **On-prem generator.** `q` is the one point where private block content
-  reaches a model. The backend row must declare `locality` `local`/`lan` **and**
-  resolve to a private host — the registry column is editable state, not a
-  proof, so a mislabelled row still aborts (exit 2). The row's own `extra_body`
-  travels into the request, which is how `enable_thinking=false` stays set for
-  qwen38 on SGLang.
-- **Redaction sweep.** G-REAL texts run through `internal/sensitivity` plus a
-  Bearer-token rule. A hit is **discarded**, never carried on redacted — a
-  part-redacted query is no longer a real query. The draw also filters
+- **On-prem generator.** `q`, `sess`, `mh`, `glob` and `glob-konstr` are the
+  points where private block content reaches a model. The backend row must
+  declare `locality` `local`/`lan` **and** resolve to a private host — the
+  registry column is editable state, not a proof, so a mislabelled row still
+  aborts (exit 2). The same assertion runs again at stamp-write time
+  (`RequireOnPremStamp`): a stamp that would record an external endpoint is
+  never written, because the stamp is what a later reader trusts. The row's own
+  `extra_body` travels into the request, which is how `enable_thinking=false`
+  stays set for qwen38 on SGLang.
+- **Redaction sweep.** G-REAL texts and every generated question run through
+  `internal/sensitivity` plus a Bearer-token rule. A hit is **discarded**, never
+  carried on redacted — a part-redacted query is no longer a real query. The
+  draw also filters
   `metadata->>'source' <> 'armsweep'`, so the sweep driver's own logged queries
   cannot be resampled as user queries.
 - **Read-only DB.** The connection sets `default_transaction_read_only=on`; the
@@ -375,8 +410,11 @@ Four rules are enforced by the tool, not by discipline:
 
 `STAMP.json` carries generator model/endpoint/locality, the frozen prompt's
 sha256, the sampling and split seeds, the DERIV/HOLD fingerprint, per-slice `n`
-and discard counts (a measured zero is emitted, not omitted), and the corpus
-`max(created_at)` at draw time — the reference against which later scoring flags
+and discard counts (a measured zero is emitted, not omitted), a per-slice
+**profile** (construction, gold source, declared bias, rollout role, window rule
+or confidence floor, and the model that wrote the questions), the `population`
+block that names the ground set a figure was drawn from instead of implying one,
+and the corpus `max(created_at)` at draw time — the reference against which later scoring flags
 contamination-suspect hits. It also records `build_vcs_revision` from Go's build
 stamp — named for the build, not the draw, because in a linked git worktree Go's
 repository walk can land on the enclosing checkout. Reports cite a query as

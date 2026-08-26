@@ -3,13 +3,23 @@
 //
 // Subcommands:
 //
-//	ki      draw known-item cases (title paraphrase + constructive label)
-//	q       generate content-derived questions on-prem (raw + hand-check sample)
-//	qfinal  drop hand-check rejects, trim to n, apply the seeded DERIV/HOLD split
-//	real    draw real access-log queries with the redaction sweep
-//	pool    build the blind judgement template for G-REAL from the pooling dump
-//	ingest  read the filled-in judgements back in as G-REAL relevance labels
-//	stamp   refresh file digests and the corpus contamination stamp
+//	ki           draw known-item cases (title paraphrase + constructive label)
+//	q            generate content-derived questions on-prem (raw + hand-check sample)
+//	qfinal       drop hand-check rejects, trim to n, apply the seeded DERIV/HOLD split
+//	real         draw real access-log queries with the redaction sweep
+//	sess         build G-SESS: session-window questions, gold from reports + timestamps
+//	mh           build G-MH: multi-hop questions over dream links at confidence >= 0.7
+//	glob         build G-GLOB: aggregating questions over corpus tags, gold judged later
+//	glob-konstr  build the G-GLOB floor check with gold from graph_cluster_member
+//	pool         build the blind judgement template for G-REAL from the pooling dump
+//	ingest       read the filled-in judgements back in as G-REAL relevance labels
+//	stamp        refresh file digests and the corpus contamination stamp
+//
+// The four multi-gold slices (design/05 §4.5) exist because a one-gold slice
+// cannot show the use of an aggregating layer — it can only punish it. Their
+// questions are written by the same on-prem chain as `q`, and `glob-konstr` is
+// a declared FLOOR CHECK: its gold is circular against the graph layer, so it
+// is reported but never a rollout criterion.
 //
 // Every write is confined to the gold directory; the only override is
 // -allow-outside-goldset and it is recorded in the stamp. The database
@@ -52,6 +62,37 @@ type common struct {
 	splitSeed    int64
 }
 
+// defaultSliceN is the target case count per new slice (design/05 §4.5).
+//
+// The floor check gets the smallest target, and that is a corpus fact rather
+// than a preference: the live graph holds 54 clusters, 37 of them with at least
+// three retrievable members, and the gold cap leaves 23 — three aspects each.
+// A floor check only has to be big enough to read.
+func defaultSliceN(cmd string) int {
+	switch cmd {
+	case "sess":
+		return 120
+	case "mh":
+		return 100
+	case "glob":
+		return 80
+	default:
+		return 50
+	}
+}
+
+// bindSlices binds the flags the four multi-gold generators share.
+func bindSlices(fs *flag.FlagSet, o *slicesOpts, cmd string) {
+	fs.IntVar(&o.n, "n", defaultSliceN(cmd), "target case count")
+	fs.IntVar(&o.minContent, "min-content", 400, "minimum block content length")
+	fs.StringVar(&o.backend, "backend", "spark-chat", "context_backends row supplying the generator")
+	fs.StringVar(&o.model, "model", "", "model id override (default: model_map.default)")
+	fs.IntVar(&o.concurrency, "concurrency", 2, "parallel LLM calls (capped at 2 — the endpoint is production serving)")
+	fs.IntVar(&o.timeoutSec, "timeout", 180, "per-call timeout in seconds")
+	fs.IntVar(&o.maxGold, "max-gold", 40, "drop a case whose constructive gold set exceeds this (it would measure coverage, not ranking)")
+	fs.BoolVar(&o.dryRun, "dry-run", false, "draw and count the candidates, make no model call, write nothing")
+}
+
 func (c *common) bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.dir, "dir", "", "gold directory (default: .project/"+goldset.DirName+" next to the repo)")
 	fs.BoolVar(&c.allowOutside, "allow-outside-goldset", false, "permit writes outside the gold directory (recorded in the stamp)")
@@ -63,7 +104,7 @@ func (c *common) bind(fs *flag.FlagSet) {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: ctx-goldset <ki|q|qfinal|real|pool|ingest|stamp> [flags]")
+		return fmt.Errorf("usage: ctx-goldset <ki|q|qfinal|real|sess|mh|glob|glob-konstr|pool|ingest|stamp> [flags]")
 	}
 	cmd := os.Args[1]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
@@ -106,6 +147,26 @@ func run() error {
 			return err
 		}
 		return cmdReal(&c, *n, *days, *minLen)
+	case "sess", "mh", "glob", "glob-konstr":
+		o := slicesOpts{}
+		bindSlices(fs, &o, cmd)
+		spanLen := fs.Int("span", 3, "sess: reported days per span window (span windows fill the gap between reports and target n)")
+		minBlocks := fs.Int("min-blocks", 8, "glob: minimum retrievable blocks a tag must carry")
+		minMembers := fs.Int("min-members", 3, "glob-konstr: minimum retrievable members a cluster must carry")
+		titles := fs.Int("titles", 12, "glob/glob-konstr: member titles shown to the generator")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		switch cmd {
+		case "sess":
+			return cmdSess(&c, o, *spanLen)
+		case "mh":
+			return cmdMH(&c, o)
+		case "glob":
+			return cmdGlob(&c, o, *minBlocks, *titles)
+		default:
+			return cmdGlobKonstr(&c, o, *minMembers, *titles)
+		}
 	case "pool":
 		poolFile := fs.String("pool", "", "Pool-Datei aus `ctx-armsweep prime` (Vorgabe: die einzige pool-*.jsonl im Gold-Verzeichnis)")
 		control := fs.Int("control", 5, "gleichverteilt gezogene Kontroll-Blöcke je Query (deklarierte Rest-Verzerrungs-Sonde)")

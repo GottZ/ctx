@@ -94,11 +94,21 @@ func abortSuffix(v DriftVerdict) string {
 }
 
 func writeSliceSection(b *strings.Builder, slices []SliceProfile) {
-	b.WriteString("## Slices\n\n| Slice | n | gelabelt | temporal | Hinweis |\n|---|---:|---:|---:|---|\n")
+	b.WriteString("## Slices\n\n| Slice | n | gelabelt | temporal | Rollout-Kriterium | Hinweis |\n|---|---:|---:|---:|---|---|\n")
 	for _, s := range slices {
-		fmt.Fprintf(b, "| %s | %d | %d | %.1f %% | %s |\n", s.Slice, s.N, s.Labelled, 100*s.TemporalShare, orDash(s.Note))
+		fmt.Fprintf(b, "| %s | %d | %d | %.1f %% | %s | %s |\n",
+			s.Slice, s.N, s.Labelled, 100*s.TemporalShare, rolloutMark(s.RolloutCriterion), orDash(s.Note))
 	}
 	b.WriteString("\n")
+}
+
+// rolloutMark spells the floor-check role out in the table rather than leaving
+// it to whoever remembers which slice name is a floor.
+func rolloutMark(ok bool) string {
+	if ok {
+		return "ja"
+	}
+	return "**nein (Boden-Check)**"
 }
 
 func writeNoiseSection(b *strings.Builder, gates []NoiseGate) {

@@ -63,7 +63,11 @@ type SliceProfile struct {
 	Labelled      int     `json:"labelled"`
 	Unlabelled    bool    `json:"unlabelled"`
 	TemporalShare float64 `json:"temporal_share"`
-	Note          string  `json:"note,omitempty"`
+	// RolloutCriterion is false for floor slices. It is carried per ROW rather
+	// than left implicit in the slice name so a reader of the JSON cannot mix
+	// a floor figure into a rollout argument.
+	RolloutCriterion bool   `json:"rollout_criterion"`
+	Note             string `json:"note,omitempty"`
 }
 
 // ReportBody is the deterministic half of a report.
@@ -117,7 +121,7 @@ func Score(in ScoreInput) ReportBody {
 	body := ReportBody{
 		Version: ReportVersion,
 		Env:     buildEnv(in),
-		Slices:  buildSliceProfiles(recsA),
+		Slices:  BuildSliceProfiles(recsA),
 	}
 
 	labelled := labelledCounts(recsA)
@@ -293,7 +297,10 @@ func CombinedDigest(files []SliceDigest) string {
 	return goldset.SHA256Hex(strings.Join(lines, "\n"))
 }
 
-func buildSliceProfiles(recs []Record) []SliceProfile {
+// BuildSliceProfiles is the report's slice census. It walks CensusSlices, so a
+// floor slice gets its own row — and carries RolloutCriterion=false on it —
+// while every gate in this package keeps walking ReportSlices and never sees it.
+func BuildSliceProfiles(recs []Record) []SliceProfile {
 	counts := labelledCounts(recs)
 	temporal := map[string]int{}
 	for _, rec := range recs {
@@ -301,15 +308,22 @@ func buildSliceProfiles(recs []Record) []SliceProfile {
 			temporal[SliceKeyOf(rec)]++
 		}
 	}
-	out := make([]SliceProfile, 0, len(ReportSlices()))
-	for _, slice := range ReportSlices() {
+	floor := map[string]bool{}
+	for _, s := range FloorSlices() {
+		floor[s] = true
+	}
+	out := make([]SliceProfile, 0, len(CensusSlices()))
+	for _, slice := range CensusSlices() {
 		c, ok := counts[slice]
 		if !ok {
 			continue
 		}
 		p := SliceProfile{Slice: slice, N: c[0], Labelled: c[1],
-			Unlabelled: c[1] == 0, TemporalShare: TemporalShare(c[0], temporal[slice])}
+			Unlabelled: c[1] == 0, TemporalShare: TemporalShare(c[0], temporal[slice]),
+			RolloutCriterion: !floor[slice]}
 		switch {
+		case floor[slice]:
+			p.Note = "floor check: gold is constructive and circular against the layer it would judge — never a rollout criterion"
 		case c[1] == 0:
 			p.Note = "unlabelled, skipped — relevance judgements land in wave B-W6"
 		case c[1] < c[0]:

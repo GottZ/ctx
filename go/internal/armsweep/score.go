@@ -42,10 +42,36 @@ const (
 	SliceQDeriv   = goldset.SliceQ + "-" + goldset.SplitDeriv
 	SliceQHold    = goldset.SliceQ + "-" + goldset.SplitHold
 	SliceRealName = goldset.SliceReal
+	// The multi-gold slices of M-W5. They are report slices like any other:
+	// their cases carry several gold ids, which the scorers already handle
+	// because RecallAtK and NDCGRanked take a gold SET.
+	SliceSess = goldset.SliceSess
+	SliceMH   = goldset.SliceMH
+	SliceGlob = goldset.SliceGlob
+	// SliceGlobKonstr is a FLOOR slice: reported, never a rollout criterion.
+	SliceGlobKonstr = goldset.SliceGlobKonstr
 )
 
-// ReportSlices is the canonical slice order of every report.
-func ReportSlices() []string { return []string{SliceKI, SliceQDeriv, SliceQHold, SliceRealName} }
+// ReportSlices is the canonical slice order of every report, and it is exactly
+// the set a rollout decision may be read off. Floor checks are deliberately
+// absent — see FloorSlices.
+func ReportSlices() []string {
+	return []string{SliceKI, SliceQDeriv, SliceQHold, SliceRealName, SliceSess, SliceMH, SliceGlob}
+}
+
+// FloorSlices are measured and reported but must NEVER decide a rollout: their
+// gold is circular against the layer they would judge. G-GLOB-KONSTR takes its
+// gold from graph_cluster_member, so a catalog block finding cluster members
+// would score as retrieval quality (design/05 §4.5, "the circular trap").
+//
+// The separation is structural rather than a note in a report: every gate in
+// this package walks ReportSlices, so a floor slice cannot reach one by
+// accident.
+func FloorSlices() []string { return []string{SliceGlobKonstr} }
+
+// CensusSlices is the row order of the report's slice census: the rollout
+// slices plus the floor checks, each with its own row.
+func CensusSlices() []string { return append(ReportSlices(), FloorSlices()...) }
 
 // SliceKeyOf maps a record to its report slice.
 func SliceKeyOf(rec Record) string {

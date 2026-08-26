@@ -1,5 +1,7 @@
-// Package goldset builds stage 1 of the retrieval gold set (design 04 §4.5):
-// the three query slices G-KI, G-Q and G-REAL plus the provenance stamp.
+// Package goldset builds the retrieval gold set: the query slices G-KI, G-Q and
+// G-REAL of stage 1 (design 04 §4.5), the multi-gold slices G-SESS, G-MH,
+// G-GLOB and the floor check G-GLOB-KONSTR added in wave M-W5 (design 05 §4.5),
+// plus the provenance stamp that binds all of them to how they were drawn.
 //
 // The gold set is FILE data, never a context_blocks row (§3.3) — a block
 // holding the gold answer to a gold query would sort itself into the very
@@ -24,13 +26,35 @@ import (
 	"strings"
 )
 
-// Slice identifiers (design 04 §4.5). Never pooled across slices — G-KI is
-// structurally trigram-friendly and a mean over slices would transfer a figure
-// between instruments that do not share one.
+// Slice identifiers (design 04 §4.5, design 05 §4.5). Never pooled across
+// slices — G-KI is structurally trigram-friendly and a mean over slices would
+// transfer a figure between instruments that do not share one.
+//
+// The three multi-gold slices of wave M-W5 answer a structural gap: G-KI, G-Q
+// and G-REAL carry exactly ONE gold id per case, and a one-gold slice cannot
+// show the use of an aggregating layer — it can only punish it as displacement
+// of the single gold block.
 const (
 	SliceKI   = "G-KI"
 	SliceQ    = "G-Q"
 	SliceReal = "G-REAL"
+	// SliceSess is the session-window slice: "what was worked on at X on this
+	// day/period". Gold is constructive — daily reports plus the knowledge
+	// blocks created inside the window — and therefore NOT circular against
+	// the insight layer it exists to measure.
+	SliceSess = "G-SESS"
+	// SliceMH is the multi-hop slice: two blocks bridged by a dream link at
+	// confidence >= MinDreamConfidence, with a question that needs both.
+	SliceMH = "G-MH"
+	// SliceGlob is the global/aggregating slice. Its gold is judged, not
+	// constructed (E-9), so the generated case carries the query and its pool
+	// reference only.
+	SliceGlob = "G-GLOB"
+	// SliceGlobKonstr is the FLOOR CHECK for SliceGlob: same question family,
+	// but gold taken from graph_cluster_member. That gold is circular against
+	// the graph layer — a catalog block IS the cluster — so this slice is
+	// never a rollout criterion, exactly the role G-KI has today.
+	SliceGlobKonstr = "G-GLOB-KONSTR"
 )
 
 // Halves of the seeded 50/50 G-Q partition (§4.6): variants are derived on
@@ -42,10 +66,14 @@ const (
 
 // File names inside the gold directory.
 const (
-	FileKI    = "g-ki.jsonl"
-	FileQ     = "g-q.jsonl"
-	FileReal  = "g-real.jsonl"
-	FileStamp = "STAMP.json"
+	FileKI         = "g-ki.jsonl"
+	FileQ          = "g-q.jsonl"
+	FileReal       = "g-real.jsonl"
+	FileSess       = "g-sess.jsonl"
+	FileMH         = "g-mh.jsonl"
+	FileGlob       = "g-glob.jsonl"
+	FileGlobKonstr = "g-glob-konstr.jsonl"
+	FileStamp      = "STAMP.json"
 )
 
 // DirName is the mandated gold directory name (§3.3). It lives under the
@@ -70,8 +98,14 @@ type Case struct {
 	// Split is DERIV or HOLD, G-Q only.
 	Split string `json:"split,omitempty"`
 	// Origin names how the query was constructed: title-paraphrase,
-	// llm-question or access-log.
+	// llm-question, access-log, session-window, dream-bridge, tag-aggregate
+	// or cluster-aggregate.
 	Origin string `json:"origin"`
+	// PoolRef names the construction source in a form a later judgement run can
+	// resolve back to a candidate pool: "window:2026-08-18..2026-08-20",
+	// "link:<src>|<dst>", "tag:<name>" or "cluster:<uuid>". G-GLOB carries no
+	// gold, so without this reference its cases could not be pooled at all.
+	PoolRef string `json:"pool_ref,omitempty"`
 	// SourceTitle is the unparaphrased block title (G-KI only) — kept so the
 	// paraphrase stays auditable against its input.
 	SourceTitle string `json:"source_title,omitempty"`
@@ -107,12 +141,26 @@ type SliceStamp struct {
 	DiscardedRedaction int `json:"discarded_redaction"`
 	DiscardedGenerator int `json:"discarded_generator"`
 	DiscardedHandcheck int `json:"discarded_handcheck"`
-	HandcheckN         int `json:"handcheck_n,omitempty"`
-	SplitDeriv         int `json:"split_deriv,omitempty"`
-	SplitHold          int `json:"split_hold,omitempty"`
+	// DiscardedConstruction counts candidates the construction rule itself
+	// rejected before any model saw them — a window whose gold set exceeds the
+	// cap, a dream link below the confidence floor, a cluster too small to
+	// carry an aggregating question.
+	DiscardedConstruction int `json:"discarded_construction,omitempty"`
+	// GoldIDs is the total number of gold labels the slice carries. For the
+	// multi-gold slices this is NOT n, and the drift census is sized on it
+	// (design/05 F-25).
+	GoldIDs       int `json:"gold_ids,omitempty"`
+	GoldIDsMedian int `json:"gold_ids_median,omitempty"`
+	HandcheckN    int `json:"handcheck_n,omitempty"`
+	SplitDeriv    int `json:"split_deriv,omitempty"`
+	SplitHold     int `json:"split_hold,omitempty"`
 	// SplitFingerprint is the digest of the DERIV/HOLD partition — the seed
 	// plus this value make the split reproducible and checkable.
 	SplitFingerprint string `json:"split_fingerprint,omitempty"`
+	// Profile is the declared construction of the slice: how it was built, what
+	// it is biased towards, and which model wrote its questions. A slice
+	// without one is a number without a method.
+	Profile *SliceProfile `json:"profile,omitempty"`
 }
 
 // Stamp is the gold provenance file (§4.5, §5.3c).
@@ -125,12 +173,16 @@ type Stamp struct {
 	// CorpusMaxCreatedAt is max(created_at) over context_blocks at draw time.
 	// The score step flags any query whose top-k holds a block created after
 	// this instant as contamination-suspect (§5.3c).
-	CorpusMaxCreatedAt string                `json:"corpus_max_created_at"`
-	RetrievableBlocks  int                   `json:"retrievable_blocks"`
-	SampleSeed         int64                 `json:"sample_seed"`
-	SplitSeed          int64                 `json:"split_seed"`
-	Generator          *Generator            `json:"generator,omitempty"`
-	Slices             map[string]SliceStamp `json:"slices"`
+	CorpusMaxCreatedAt string `json:"corpus_max_created_at"`
+	RetrievableBlocks  int    `json:"retrievable_blocks"`
+	// Population is the K9 answer: there is no single canonical corpus count,
+	// so every measurement names the ground set it drew from instead of
+	// implying one.
+	Population *Population           `json:"population,omitempty"`
+	SampleSeed int64                 `json:"sample_seed"`
+	SplitSeed  int64                 `json:"split_seed"`
+	Generator  *Generator            `json:"generator,omitempty"`
+	Slices     map[string]SliceStamp `json:"slices"`
 	// AllowOutsideGoldset records a set --allow-outside-goldset override so the
 	// report can declare it (§3.3, §4.8).
 	AllowOutsideGoldset bool `json:"allow_outside_goldset"`
@@ -199,9 +251,30 @@ func FileDigest(path string) (string, error) {
 	return SHA256Hex(string(b)), nil
 }
 
+// Population answers K9 (masterplan): the retrievable ground set has no single
+// canonical size — 1 384 retrieval-visible, 1 407 including system-meta, and
+// the overview node cut counts differently again. A measurement therefore
+// states its own ground set rather than pointing at "the" corpus count.
+type Population struct {
+	// Definition is the filter in words, so a reader can reproduce the number.
+	Definition string `json:"definition"`
+	// Retrievable is the size of that ground set.
+	Retrievable int `json:"retrievable"`
+	// Active is every non-archived block, retrievable or not — the second
+	// figure that makes the first one readable.
+	Active int `json:"active"`
+}
+
 // WriteStamp persists the provenance file at mode 0600, keys sorted for a
 // stable byte image.
+//
+// The on-prem assertion runs HERE rather than only at call time (§5 B6): the
+// stamp is what a later reader trusts, so a stamp that would record an external
+// endpoint aborts the build instead of reaching disk.
 func WriteStamp(path string, s Stamp) error {
+	if err := RequireOnPremStamp(s); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
