@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -307,6 +308,77 @@ func (cfg MCPConfig) mcpTypeSnapshot(ctx context.Context) *blocktype.Set {
 	return cfg.Blocktypes.SnapshotForRequest(ctx)
 }
 
+// mcpQuerySource is the part of /api/query's source DTO (sourceResponse,
+// query.go) the query tool renders. CitationIndex is deliberately NOT
+// `omitempty`-shaped as a value: absent and 0 have to stay distinguishable,
+// because absent means "this source never entered the prompt" while a number
+// means "the model saw it under exactly this id".
+type mcpQuerySource struct {
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	Category      string `json:"category"`
+	CitationIndex *int   `json:"citation_index"`
+}
+
+// mcpNoCitationMarker replaces the number for a source that never entered the
+// prompt. ASCII on purpose, and deliberately not a dash: it must be impossible
+// to read as an ordinal (or as a truncated one) by the model consuming this
+// text, and it has to survive transports that drop non-ASCII runes.
+const mcpNoCitationMarker = "[n/a]"
+
+// renderMCPQuerySources writes the tool's "Sources:" section.
+//
+// The number in front of a source is the <source id="N"> ordinal it carried in
+// the prompt (`citation_index`, V-W1), not its position in the response. For
+// n >= 3 the two differ: the response keeps retrieval order while the prompt
+// list went through the low-confidence cap (llm/synthesize.go:710-712), the
+// token budget (fitSourcesToBudget, :549-613) and LostInMiddleReorder
+// (:322-331). Numbering by
+// position therefore printed "[2]" in front of a source that the answer's "[2]"
+// does not name — the same offset V-W1 closed on the REST seam, one level up.
+//
+// The cited sources are sorted by that ordinal so the list reads in the order
+// the answer refers to it. Sources without an ordinal never reached the prompt,
+// so the answer cannot be citing them: they keep the response order behind the
+// cited ones and are marked instead of numbered.
+//
+// A response in which NO source carries an ordinal is a retrieval-only answer
+// (or a server from before V-W1). That list keeps position numbering and is
+// byte-identical to what this tool emitted before V-W1b.
+func renderMCPQuerySources(sb *strings.Builder, sources []mcpQuerySource) {
+	if len(sources) == 0 {
+		return
+	}
+	cited := make([]mcpQuerySource, 0, len(sources))
+	uncited := make([]mcpQuerySource, 0, len(sources))
+	for _, s := range sources {
+		if s.CitationIndex == nil {
+			uncited = append(uncited, s)
+			continue
+		}
+		cited = append(cited, s)
+	}
+
+	sb.WriteString("\n\nSources:\n")
+	if len(cited) == 0 {
+		for i, s := range sources {
+			fmt.Fprintf(sb, "[%d] %s (%s) id:%s\n", i+1, s.Title, s.Category, s.ID)
+		}
+		return
+	}
+	// Stable: two sources can only share an ordinal if the server contradicts
+	// itself, and even then the response order decides — never the sort.
+	sort.SliceStable(cited, func(i, j int) bool {
+		return *cited[i].CitationIndex < *cited[j].CitationIndex
+	})
+	for _, s := range cited {
+		fmt.Fprintf(sb, "[%d] %s (%s) id:%s\n", *s.CitationIndex, s.Title, s.Category, s.ID)
+	}
+	for _, s := range uncited {
+		fmt.Fprintf(sb, "%s %s (%s) id:%s\n", mcpNoCitationMarker, s.Title, s.Category, s.ID)
+	}
+}
+
 // Tool handlers.
 
 func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
@@ -345,14 +417,10 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 		cfg.QueryHandler.ServeHTTP(rec, internalReq)
 
 		var qr struct {
-			Answer     string `json:"answer"`
-			Confidence string `json:"confidence"`
-			Sources    []struct {
-				ID       string `json:"id"`
-				Title    string `json:"title"`
-				Category string `json:"category"`
-			} `json:"sources"`
-			Error string `json:"error"`
+			Answer     string           `json:"answer"`
+			Confidence string           `json:"confidence"`
+			Sources    []mcpQuerySource `json:"sources"`
+			Error      string           `json:"error"`
 		}
 		if err := json.Unmarshal(rec.body, &qr); err != nil {
 			return errResult("failed to parse query response"), nil, err
@@ -363,12 +431,7 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 
 		var sb strings.Builder
 		sb.WriteString(qr.Answer)
-		if len(qr.Sources) > 0 {
-			sb.WriteString("\n\nSources:\n")
-			for i, s := range qr.Sources {
-				fmt.Fprintf(&sb, "[%d] %s (%s) id:%s\n", i+1, s.Title, s.Category, s.ID)
-			}
-		}
+		renderMCPQuerySources(&sb, qr.Sources)
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(sb.String())},
