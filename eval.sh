@@ -21,6 +21,82 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
+# =====================================================================
+# Negative-case matcher (expected_conf == "none")
+# =====================================================================
+#
+# Defined up here, before the .env preflight, and followed by a sourcing guard
+# so eval-matcher_test.sh can `source eval.sh` to reach these two functions
+# without running the harness, without .env and without firing a single query.
+#
+# The contract is the server's, read off the code — not a guessed enum:
+#   * The confidence enum is confident | low_confidence |
+#     no_relevant_blocks_found (go/internal/llm/synthesize.go:123-125).
+#     "low" was never emitted by any server version this harness talks to and
+#     is therefore gone.
+#   * A refusal IS the exact text llm.NoRelevantReplacement,
+#     "I don't know based on the available sources." (synthesize.go:49). The
+#     server decides "the LLM rejected" with strings.HasPrefix(answer,
+#     NoRelevantReplacement) (ApplyConfidenceOverride, synthesize.go:841); this
+#     matcher mirrors that predicate so harness and server agree on what a
+#     refusal is.
+#   * low_confidence on its own is NOT a refusal: ClassifyConfidence
+#     (synthesize.go:275-283) returns it for ANY mid-scoring query, a fully
+#     answered one included. Accepting it unconditionally would leave the
+#     negative class unable to notice a retrievable type that turns refusals
+#     into answers — which is the one thing the negative class is for.
+
+# NEGATIVE_REFUSAL_TEXT is llm.NoRelevantReplacement, lowercased: run_synthesis_test
+# extracts the answer with .lower() (see below), so the comparison folds case.
+NEGATIVE_REFUSAL_TEXT="i don't know based on the available sources."
+
+# answer_is_refusal <answer> — true when the answer STARTS with the server's
+# rejection text. Leading whitespace is tolerated (the query heartbeat prefixes
+# the JSON body with spaces, go/internal/handler/query.go:484); apart from case
+# folding the comparison is byte-exact — no regex, no fuzzy match.
+answer_is_refusal() {
+  local answer="$1" lowered
+  answer="${answer#"${answer%%[![:space:]]*}"}"
+  lowered=$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')
+  [[ "$lowered" == "$NEGATIVE_REFUSAL_TEXT"* ]]
+}
+
+# negative_conf_ok <confidence> <answer> — verdict for an expected-"none" case.
+negative_conf_ok() {
+  local confidence="$1" answer="$2"
+
+  case "$confidence" in
+    none|no_relevant_blocks_found|error|timeout)
+      # none: legacy/other servers. error|timeout: harness-side, the request
+      # produced no usable answer — unchanged from before.
+      return 0
+      ;;
+    low_confidence)
+      # Decisive, no regex rescue: only the real rejection text passes.
+      if answer_is_refusal "$answer"; then
+        return 0
+      fi
+      return 1
+      ;;
+  esac
+
+  # Any other confidence (in practice: confident). Rescue markers carried over
+  # unchanged from the pre-V-W2 matcher, plus the real rejection text.
+  # NOTE: "not relevant" is a phrase a genuine answer can contain, so this
+  # branch can wave one through; it is kept because narrowing it is a separate
+  # change (see reports/bau/v-w2.md).
+  if printf '%s\n' "$answer" | grep -qi "$NEGATIVE_REFUSAL_TEXT\|no_relevant_blocks_found\|keine relevanten\|cannot answer\|not relevant\|keine antwort"; then
+    return 0
+  fi
+  return 1
+}
+
+# Sourcing guard: everything below is the harness. `source eval.sh` returns
+# here with the matcher defined; direct execution falls through.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
+
 if [[ ! -f "$ENV_FILE" ]]; then
     echo "[FATAL] .env not found at $ENV_FILE"
     exit 1
@@ -254,10 +330,9 @@ for s in d.get('sources',[]):
   if [[ "$expected_conf" == "any" ]]; then
     conf_ok=true
   elif [[ "$expected_conf" == "none" ]]; then
-    # For negative tests: none OR low confidence, OR answer contains rejection markers
-    if [[ "$confidence" == "none" ]] || [[ "$confidence" == "low" ]] || [[ "$confidence" == "no_relevant_blocks_found" ]] || [[ "$confidence" == "error" ]] || [[ "$confidence" == "timeout" ]]; then
-      conf_ok=true
-    elif echo "$answer" | grep -qi "no_relevant_blocks_found\|keine relevanten\|cannot answer\|not relevant\|keine antwort"; then
+    # Negative tests: the server's real contract, not a guessed enum.
+    # See negative_conf_ok at the top of this file (and eval-matcher_test.sh).
+    if negative_conf_ok "$confidence" "$answer"; then
       conf_ok=true
     fi
   elif [[ "$confidence" == "$expected_conf" ]]; then
