@@ -235,3 +235,100 @@ func TestSampling(t *testing.T) {
 		}
 	})
 }
+
+// seedLogRowMeta inserts one action='query' access-log row with an explicit
+// metadata document; meta == nil writes SQL NULL. The column is nullable —
+// migrations/113_baseline.sql:160 declares `metadata JSONB DEFAULT '{}'`
+// without NOT NULL — which is why the exclusion predicate must be NULL-safe.
+func seedLogRowMeta(t *testing.T, pool *pgxpool.Pool, text string, meta *string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO context_access_log (action, query_text, metadata, created_at)
+		 VALUES ('query', $1, $2::jsonb, now() - make_interval(secs => 60))`,
+		text, meta)
+	if err != nil {
+		t.Fatalf("seed log row %q: %v", text, err)
+	}
+}
+
+// vecMatches identifies a sampled vector by its seed fixture — the sampler
+// returns vectors, not texts, so the deterministic seed is the label.
+func vecMatches(a, b []float32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if d := a[i] - b[i]; d > 1e-6 || d < -1e-6 {
+			return false
+		}
+	}
+	return true
+}
+
+// TestSamplingArmsweepExclusion pins design/05 §5 B4 (the instrument must not
+// contaminate the corpus it measures) for the second access-log consumer: the
+// driver's own arm_ranks requests log their query text into context_access_log
+// with metadata.source='armsweep', so a single sweep of ~950 queries would
+// otherwise dominate the recall check's query distribution. Same predicate as
+// goldset/db.go:141. The NULL-metadata fixture is the reason that predicate is
+// IS DISTINCT FROM and not <>.
+func TestSamplingArmsweepExclusion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	metaArmsweep := `{"source":"armsweep"}`
+	metaAgent := `{"source":"agent"}`
+	fixtures := []struct {
+		label string
+		text  string
+		meta  *string
+		omit  bool // let the column DEFAULT '{}' apply — the live shape
+		seed  int64
+		want  bool
+	}{
+		{label: "armsweep", text: "aw the driver arm_ranks sweep query", meta: &metaArmsweep, seed: 21, want: false},
+		{label: "agent", text: "ag what is the rrf policy", meta: &metaAgent, seed: 22, want: true},
+		{label: "null-metadata", text: "nm how does the guard work", meta: nil, seed: 23, want: true},
+		{label: "default-metadata", text: "dm which types are retrievable", omit: true, seed: 24, want: true},
+	}
+	for _, f := range fixtures {
+		if f.omit {
+			seedLogRow(t, pool, "query", f.text, time.Minute)
+		} else {
+			seedLogRowMeta(t, pool, f.text, f.meta)
+		}
+		seedCacheEntry(t, pool, f.text, f.seed)
+	}
+
+	vecs, err := recall.SampleLogQueries(ctx, pool, sampleModel, 10)
+	if err != nil {
+		t.Fatalf("SampleLogQueries: %v", err)
+	}
+	got := map[string]bool{}
+	for i, v := range vecs {
+		label := ""
+		for _, f := range fixtures {
+			if vecMatches(v, seededVec(f.seed)) {
+				label = f.label
+				break
+			}
+		}
+		if label == "" {
+			t.Errorf("sampled vector %d matches none of the seeded fixtures", i)
+			continue
+		}
+		got[label] = true
+	}
+	for _, f := range fixtures {
+		switch {
+		case f.want && !got[f.label]:
+			t.Errorf("fixture %q (%q) missing from the sample — the armsweep filter must not drain the source", f.label, f.text)
+		case !f.want && got[f.label]:
+			t.Errorf("fixture %q (%q) present in the sample — metadata.source='armsweep' rows must be excluded (design/05 §5 B4)", f.label, f.text)
+		}
+	}
+	t.Logf("sampled %d vectors, labels present: %v", len(vecs), got)
+}

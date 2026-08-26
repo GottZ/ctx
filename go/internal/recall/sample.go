@@ -177,6 +177,14 @@ func PlanStrata(ctx context.Context, pool *pgxpool.Pool, registry *blocktype.Reg
 // (e) pins the touch-freedom). model is the effective embed model string
 // (injected by the caller); empty means "no cache join possible" and returns
 // nil — the loo path covers the run, wire-free doctrine intact.
+//
+// The source != 'armsweep' predicate is mandatory (design/05 §5 B4): the
+// ctx-armsweep driver's own arm_ranks requests log their query text into this
+// very table, so a single sweep of ~950 constructed queries would dominate the
+// daily recall check's query distribution. Same wording as the one other
+// consumer that already filters (goldset/db.go:141); IS DISTINCT FROM because
+// metadata is nullable and its DEFAULT '{}' has no 'source' key either — a
+// plain <> would drain the real queries this sampler exists for.
 func SampleLogQueries(ctx context.Context, pool *pgxpool.Pool, model string, limit int) ([][]float32, error) {
 	if model == "" || limit <= 0 {
 		return nil, nil
@@ -185,6 +193,7 @@ func SampleLogQueries(ctx context.Context, pool *pgxpool.Pool, model string, lim
 		`SELECT query_text FROM context_access_log
 		 WHERE action = 'query' AND query_text IS NOT NULL
 		   AND created_at > now() - make_interval(days => $1)
+		   AND metadata->>'source' IS DISTINCT FROM 'armsweep'
 		 ORDER BY created_at DESC`,
 		logWindowDays,
 	)
