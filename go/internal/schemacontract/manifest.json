@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 139,
-    "migration_count": 27,
+    "migration_max": 140,
+    "migration_count": 28,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -4820,6 +4820,9 @@
     "idx_trgm_title": {
       "def_hash": "c2ff3765d84a4db2a5cfcf5faf6987290ffc2f1fb149fb1773882269d7e94aa8"
     },
+    "idx_trgm_title_gist": {
+      "def_hash": "4fe7ec3d7f6d3a7b1f8b8000b607a5a9331b86a32ffde172ceae92ba8e0e7d0e"
+    },
     "idx_web_sessions_family": {
       "def_hash": "92437c88975964778b40587f074694d90fd6cf02d2bccfdefbe7bbff11b2b7c8"
     },
@@ -4934,10 +4937,10 @@
       "src_hash": "979a26794c4f6b5d723c9065d848cb1e715987fc6b8778174d974661da727ec7"
     },
     "ctx_rrf(p_embedding halfvec, p_query text, p_query_spaced text, p_scopes text[], p_category text, p_tags text[], p_limit integer, p_temporal text, p_query_or text, p_types_visible text[], p_damped_types text[], p_damped_factors double precision[], p_categories_exclude text[], p_types_exclude text[], p_granted_block_ids uuid[], p_semantic_mode text, p_scan_tuples integer, p_exact_cap integer)": {
-      "src_hash": "d3bca8764cd343638c1f1b35db01eaaf099d4cc849c7add0fce291801d1fa3c1"
+      "src_hash": "7c7fc1f7be121fd37cdd652754f66df62a0f1d1e045946deb414512f7b23a1ca"
     },
     "ctx_rrf_arms(p_embedding halfvec, p_query text, p_query_spaced text, p_scopes text[], p_category text, p_tags text[], p_limit integer, p_temporal text, p_query_or text, p_types_visible text[], p_damped_types text[], p_damped_factors double precision[], p_categories_exclude text[], p_types_exclude text[], p_granted_block_ids uuid[], p_semantic_mode text, p_scan_tuples integer, p_exact_cap integer, p_cap_semantic integer, p_cap_fts_de integer, p_cap_fts_en integer, p_cap_trigram integer, p_trgm_threshold double precision)": {
-      "src_hash": "473160b4b4d65db4534abb5e47de6c715980445caf4072f3cf0612c9b730adaf"
+      "src_hash": "8367cb056330eab6a10d3bb8a18aef321ef6e597ea726327eeee02416660b0f0"
     },
     "mark_guard_dirty()": {
       "src_hash": "bb49dcca30b0f002ce40fd258d63330f6c62cd3de3d09740520cfb1f15bae09d"

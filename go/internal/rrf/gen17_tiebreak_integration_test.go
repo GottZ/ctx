@@ -290,8 +290,15 @@ func TestBW1bGen17TieOrderRedGreen(t *testing.T) {
 	}
 
 	// ---- apply 139 -------------------------------------------------------
-	if err := store.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("apply remaining migrations (139): %v", err)
+	// Capped at 139 on purpose. This gate measures the delta of ONE migration
+	// by running the same corpus before and after it, so anything the chain
+	// applies beyond 139 lands in the GREEN pass only and is charged to 139 by
+	// mistake. An uncapped RunMigrations made that happen the moment 140
+	// (trigram KNN, V-W4) touched ctx_rrf and ctx_rrf_arms: the candidate set
+	// moved between the two passes and bw1bAssertSameSetAndScores read it as
+	// 139 breaking its own score-neutrality promise.
+	if err := store.RunMigrationsUpTo(ctx, pool, 139); err != nil {
+		t.Fatalf("apply migration 139: %v", err)
 	}
 	if got := bw1bInstalledOrderBy(t, ctx, pool); got != "ORDER BY r.score DESC, cb.id" {
 		t.Fatalf("post-139 ctx_rrf ends with %q, want %q", got, "ORDER BY r.score DESC, cb.id")
