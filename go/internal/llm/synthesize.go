@@ -228,6 +228,25 @@ type Source struct {
 	RRFScoreOriginal *float64 `json:"rrf_score_original,omitempty"`
 	AgeDays          int      `json:"age_days"`
 
+	// CitationIndex is the id="N" ordinal this source carried in the RENDERED
+	// synthesis prompt — the number the model writes as [N] (V-W1, design/05
+	// §2.2 seam S1). nil means the source never reached the prompt, so no [N]
+	// can refer to it: the low-confidence cap kept it out, or the H12 budget
+	// pass dropped it.
+	//
+	// It exists because prompt order is NOT response order. Three stages sit
+	// between them — LowConfidenceMaxSources, LostInMiddleReorder and
+	// fitSourcesToBudget — and for n >= 3 only [1] coincides. Without the
+	// ordinal a client resolving "[2]" against sources[1] reads a different
+	// block, and every citation-fidelity metric taken over the API measures
+	// that offset instead of the model.
+	//
+	// Serialized (unlike Sensitivity and Untrusted) precisely because it is
+	// the resolution key a consumer needs; a pointer so "not in the prompt" is
+	// distinguishable from an ordinal, and omitempty so a response without a
+	// synthesis step keeps its pre-wave bytes.
+	CitationIndex *int `json:"citation_index,omitempty"`
+
 	// Sensitivity is the scope-floor-adjusted classification from the batch
 	// lookup (F3 §2.3). Feeds the synthesis trust gate over the FINAL prompt
 	// set; never serialized (the zero value of a forgotten assignment acts as
@@ -610,6 +629,37 @@ func applyBudgetTelemetry(entry *llmlog.Entry, rep promptguard.Report) {
 	entry.Metadata["promptguard_dropped"] = rep.Dropped + rep.Truncated
 }
 
+// applyCitationIndexes stamps every response source with the <source id="N">
+// ordinal it carried in the rendered prompt, and leaves the ones that never
+// reached the prompt at nil (V-W1). promptSources must be the FINAL prompt set
+// — the slice BuildPrompt rendered, whose position i is exactly the id="i+1"
+// the model was told to cite.
+//
+// Identity is the block ID, not the slice position: promptSources is a
+// permuted, capped and budget-trimmed subset of the same Source values, so
+// positions do not correspond by construction. Titles are deliberately not
+// used — two blocks may share one.
+func applyCitationIndexes(responseSources, promptSources []Source) {
+	if len(promptSources) == 0 {
+		return
+	}
+	ordinals := make(map[string]int, len(promptSources))
+	for i, s := range promptSources {
+		// First occurrence wins. A prompt carries one element per block (the
+		// retrieval rows are one per block id), so the duplicate case is
+		// theoretical; if it ever happens, the lower ordinal is the one the
+		// model reads first.
+		if _, ok := ordinals[s.ID]; !ok {
+			ordinals[s.ID] = i + 1
+		}
+	}
+	for i := range responseSources {
+		if n, ok := ordinals[responseSources[i].ID]; ok {
+			responseSources[i].CitationIndex = &n
+		}
+	}
+}
+
 // Synthesize runs the full LLM synthesis pipeline:
 // filter -> confidence -> low-confidence limiting -> reorder -> gate ->
 // prompt -> chain.
@@ -747,6 +797,14 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 
 	// Step 8: Build prompt over the fitted source set.
 	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates, settings)
+
+	// Step 8a (V-W1): resolve the citation ordinals. It happens HERE and not
+	// at step 3, because llmSources is only final now: the cap (step 4), the
+	// reorder (step 5) and the budget pass (step 7) all change which source
+	// carries which id="N", and the budget pass in particular can remove a
+	// source that the reorder had already numbered. Additive — nothing about
+	// the response set's contents or order changes.
+	applyCitationIndexes(responseSources, llmSources)
 
 	// Step 8b (E10-W2): the per-request provider constraint. Measured on the
 	// RENDERED prompt — the budget charged the parts, the builder wrapped

@@ -141,6 +141,33 @@ func TestBuildSourceResponses(t *testing.T) {
 	}
 }
 
+// TestBuildSourceResponses_CitationIndex is the API half of V-W1: the ordinal
+// the synthesis step resolved has to reach the wire, and a source without one
+// must leave the field out entirely — a "citation_index": 0 would name source
+// id="0", which no prompt ever renders.
+func TestBuildSourceResponses_CitationIndex(t *testing.T) {
+	two := 2
+	out := buildSourceResponses([]llm.Source{
+		{ID: "a", Title: "A", CitationIndex: &two},
+		{ID: "b", Title: "B"},
+	}, nil, false)
+	if out[0].CitationIndex == nil || *out[0].CitationIndex != 2 {
+		t.Errorf("source[0] CitationIndex = %v, want 2", out[0].CitationIndex)
+	}
+	if out[1].CitationIndex != nil {
+		t.Errorf("source[1] CitationIndex = %v, want nil", *out[1].CitationIndex)
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); !strings.Contains(got, `"citation_index":2`) {
+		t.Errorf("citation_index missing from the wire shape: %s", got)
+	} else if strings.Count(got, "citation_index") != 1 {
+		t.Errorf("the source without an ordinal serialized the key anyway: %s", got)
+	}
+}
+
 func TestBuildSourceResponses_NilMap(t *testing.T) {
 	// A nil supersedes map must not panic and yields no SupersededBy.
 	out := buildSourceResponses([]llm.Source{{ID: "a", Title: "A"}}, nil, false)

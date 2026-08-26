@@ -371,6 +371,12 @@ type sourceResponse struct {
 	RRFScoreOriginal *float64 `json:"rrf_score_original,omitempty"`
 	SupersededBy     *string  `json:"superseded_by,omitempty"`
 	Content          string   `json:"content,omitempty"` // only when include_content (F6 ctx_query)
+	// CitationIndex is the <source id="N"> ordinal this source carried in the
+	// synthesis prompt — what a "[N]" in the answer refers to (V-W1). Absent
+	// on the retrieval-only path (no prompt was built) and on a source the
+	// low-confidence cap or the prompt budget kept out of the prompt, so the
+	// retrieval-only / eval.sh response bytes are unchanged.
+	CitationIndex *int `json:"citation_index,omitempty"`
 }
 
 // buildSourceResponses maps retrieval sources to the API response shape,
@@ -387,6 +393,7 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 			AgeDays:          s.AgeDays,
 			RerankScore:      s.RerankScore,
 			RRFScoreOriginal: s.RRFScoreOriginal,
+			CitationIndex:    s.CitationIndex,
 		}
 		if includeContent && s.Content != "" {
 			if r := []rune(s.Content); len(r) > maxRetrievalSnippet {
