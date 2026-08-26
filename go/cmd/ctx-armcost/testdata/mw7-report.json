@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-08-26T00:00:00Z",
+  "since": "2026-08-19T00:00:00Z",
+  "until": "2026-08-26T00:00:00Z",
+  "rows_in_window": 44,
+  "count_gate": 44,
+  "pipelines": [
+    {
+      "key": "dream-daily-synthesis",
+      "n": 20,
+      "occupancy_seconds": 508.5,
+      "wire_seconds": 520,
+      "p50_duration_ms": 25000,
+      "p95_duration_ms": 31000,
+      "prompt_tokens": 900,
+      "prompt_tokens_null": 2,
+      "completion_tokens": 13840,
+      "completion_tokens_null": 0,
+      "errors": 1,
+      "error_rate": 0.05,
+      "dispatch_aborts": 0,
+      "duration_null": 0,
+      "queue_wait_null": 3
+    }
+  ],
+  "interactive_p95": {
+    "window_ms": 1600,
+    "window_n": 20,
+    "prior_ms": 1000,
+    "prior_n": 20,
+    "prior_since": "2026-08-12T00:00:00Z",
+    "factor": 1.6,
+    "threshold": 1.5,
+    "exceeded": true,
+    "note": "p95 interactive 1600 ms (n=20) gegen 1000 ms davor (n=20) ⇒ Faktor 1,60 — ÜBERSCHRITTEN (\u003e 1,5 ⇒ Abbruchkriterium)"
+  },
+  "cost_usd_note": "cost_usd: in 2 von 44 Zeilen gesetzt — nicht verwendet",
+  "footnotes": [
+    "Verzerrung (fire-and-forget): llmlog.Record schreibt asynchron in einer eigenen Goroutine mit 5-s-Deadline, Fehler nur slog.Debug (llmlog/llmlog.go:135-143) — eine Zählung aus derselben Tabelle sieht laufende Calls nicht und misst systematisch zu niedrig.",
+    "Verzerrung (nullInt): 0 wird beim Insert zu NULL (llmlog/llmlog.go:192-197) — Token-Summen sind systematisch lückenhaft; die (null)-Spalten zählen die betroffenen Zeilen.",
+    "Befund M-W7 (Code gegen design/05 §4.7): seit MW10 misst duration_ms auf jedem Pfad, der queue_wait_ms setzt, bereits NUR den Wire-Call (llm/chain.go:284-295, chat/engine.go:551-553, handler/query.go:1791-1794) — die Design-Formel zieht die Lease-Wartezeit dort ein zweites Mal ab. belegung_s ist damit eine UNTERGRENZE, wire_s (Σ duration_ms) die Obergrenze; die Differenz ist exakt Σ queue_wait_ms der Zeilen mit gesetztem Wert."
+  ]
+}

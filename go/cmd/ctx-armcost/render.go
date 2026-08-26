@@ -42,6 +42,9 @@ func renderTable(w io.Writer, rep Report) error {
 		b.WriteString("\n")
 		writeBuckets(&b, "dispatch_class", rep.Classes)
 	}
+	if rep.PerTopic != nil {
+		writePerTopic(&b, *rep.PerTopic)
+	}
 
 	fmt.Fprintf(&b, "\nNicht-Störungs-Kennzahl: %s\n", rep.Interactive.Note)
 	b.WriteString("\nFußzeilen (Pflicht):\n")
@@ -50,6 +53,89 @@ func renderTable(w io.Writer, rep Report) error {
 	}
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// stamp rendert einen optionalen Zeitpunkt; „—" statt einer erfundenen Null.
+func stamp(t *time.Time) string {
+	if t == nil {
+		return "—"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// hours rendert eine optionale Stundenzahl.
+func hours(h *float64) string {
+	if h == nil {
+		return "—"
+	}
+	return de(*h, 1)
+}
+
+// clip kürzt ein Label auf Tabellenbreite. Das JSON trägt es vollständig.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
+// writePerTopic rendert die V-W5-Sicht: Kopf mit Fenster und Zuordnungs-Bilanz,
+// die Topic-Tabelle (Topics OHNE Call stehen mit 0 darin, nicht draußen), die
+// Verteilung und die erschöpften Topics als eigene Sektion.
+func writePerTopic(b *strings.Builder, pt PerTopicReport) {
+	a := pt.Assignment
+	fmt.Fprintf(b, "\nLabel-Arm-Telemetrie je Topic — arm=%s\n", pt.Arm)
+	fmt.Fprintf(b, "Topic-Fenster: %s .. %s  (%s d, ab der Geburt des ältesten lebenden Topics)\n",
+		pt.Since.UTC().Format(time.RFC3339), pt.Until.UTC().Format(time.RFC3339),
+		de(pt.Until.Sub(pt.Since).Hours()/24, 2))
+	fmt.Fprintf(b, "Zeilen des Arms: %d · zugeordnet %d · mehrdeutig %d (max %d Topics/Zeile) · "+
+		"nicht zugeordnet %d (nur pensioniert %d, ohne block_ids %d)\n",
+		a.ArmRows, a.AssignedRows, a.AmbiguousRows, a.MaxTopicsPerRow,
+		a.UnassignedRows, a.UnassignedRetiredOnly, a.RowsWithoutBlockIDs)
+
+	tw := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintf(tw, "topic_id\tscope\tcalls\texakt\tmehrd.\tbelegung_s\twire_s\tcalls/h\tleben_h\tletzter_call\tatt\tstale\tsrc\tcore_n\tlabel\n")
+	var sum TopicCalls
+	for _, t := range pt.Topics {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%t\t%s\t%d\t%s\n",
+			t.TopicID, t.Scope, t.Calls, t.CallsExact, t.CallsAmbiguous,
+			de(t.OccupancySeconds, 1), de(t.WireSeconds, 1), de(t.CallsPerHour, 3),
+			de(t.LifetimeHours, 1), stamp(t.LastCall), t.LabelAttempts, t.LabelStale,
+			t.LabelSource, t.CoreN, clip(t.Label, 40))
+		sum.Calls += t.Calls
+		sum.CallsExact += t.CallsExact
+		sum.CallsAmbiguous += t.CallsAmbiguous
+		sum.OccupancySeconds += t.OccupancySeconds
+		sum.WireSeconds += t.WireSeconds
+	}
+	// Σ zählt mehrdeutige Zeilen mehrfach — genau deshalb steht die
+	// Zuordnungs-Bilanz darüber und die Mehrdeutigkeit in einer eigenen Spalte.
+	_, _ = fmt.Fprintf(tw, "Σ (%d Topics)\t\t%d\t%d\t%d\t%s\t%s\t\t\t\t\t\t\t\t\n",
+		pt.LivingTopics, sum.Calls, sum.CallsExact, sum.CallsAmbiguous,
+		de(sum.OccupancySeconds, 1), de(sum.WireSeconds, 1))
+	_ = tw.Flush()
+
+	fmt.Fprintf(b, "\nVerteilung über %d lebende Topics (Nullen zählen mit): "+
+		"Calls je Topic p50 %s / p95 %s · Calls je Lebensstunde p50 %s / p95 %s (max %s)\n",
+		pt.LivingTopics, de(pt.CallsP50, 1), de(pt.CallsP95, 1),
+		de(pt.CallsPerHourP50, 3), de(pt.CallsPerHourP95, 3), de(pt.CallsPerHourMax, 3))
+
+	fmt.Fprintf(b, "\nErschöpfte Topics (lebend, label_stale AND label_attempts >= %d): %d von %d\n",
+		pt.ExhaustedAttempts, len(pt.ExhaustedTopics), pt.LivingTopics)
+	etw := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintf(etw, "topic_id\tscope\tatt\tsrc\tlabel_built_at\talter_h\tcalls\tletzter_call\tcore_n\tlabel\n")
+	for _, t := range pt.ExhaustedTopics {
+		_, _ = fmt.Fprintf(etw, "%s\t%s\t%d\t%s\t%s\t%s\t%d\t%s\t%d\t%s\n",
+			t.TopicID, t.Scope, t.LabelAttempts, t.LabelSource, stamp(t.LabelBuiltAt),
+			hours(t.LabelAgeHours), t.Calls, stamp(t.LastCall), t.CoreN, clip(t.Label, 40))
+	}
+	_ = etw.Flush()
+
+	b.WriteString("\nNotizen zur Per-Topic-Sicht:\n")
+	for _, n := range pt.Notes {
+		fmt.Fprintf(b, "  - %s\n", n)
+	}
 }
 
 // writeBuckets rendert eine Gruppierung als ausgerichtete Tabelle.

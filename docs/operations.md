@@ -230,7 +230,8 @@ live-counted numbers and nothing else.
 ```bash
 cd go && go build ./cmd/ctx-armcost
 CONTEXT_DB_HOST=<db> ./ctx-armcost -out /secure/dir/armcost-$(date +%F).json \
-  [-since <RFC3339>] [-until <RFC3339>] [-days 7] [-by-class=false]
+  [-since <RFC3339>] [-until <RFC3339>] [-days 7] [-by-class=false] \
+  [-arm cluster-label -per-topic]
 ```
 
 Per group it reports `n`, the occupancy sum in seconds, `wire_s` (Σ `duration_ms`), p50/p95
@@ -254,14 +255,36 @@ so token sums are patchy (the `(null)` columns count the affected rows); and, si
 design formula subtracts the lease wait a second time — `belegung_s` is a lower bound, `wire_s` an
 upper one.
 
+**Per-topic view of one arm** (`-arm cluster-label -per-topic`, both flags or neither). It answers
+the question the label arm's dead end raises: how many model calls does a single cluster topic cost
+over its life, and which living topics are stuck at `label_attempts >= 3` with a stale core. The
+section carries its OWN window — from the birth of the oldest *living* topic to the pinned `until`,
+i.e. "since the first run" — while the cost tables keep the rolling `-days` window; both windows are
+printed. Every living topic is listed, including the ones that never saw a call (they show `0`, they
+are not missing), plus the exhausted ones again as their own section with the age of their label.
+
+`context_llm_log` carries no `topic_id`, so the attribution is reconstructed from the arm's code:
+`block_ids` of a `cluster-label` row IS one topic's core array at tick time (`topiclabel.go:481`
+hands `core_blocks` to the chain call, `llm/chain.go:688` writes it onto the row), and
+`graph_cluster_topic.core_blocks` is the copy of that core which survives the node teardown
+(`overview/topic.go:944-949`). The rule is therefore an **overlap plus a time bound** —
+`block_ids && core_blocks AND log.created_at >= topic.created_at` — never set equality, because the
+stored core is only the youngest generation. Equality is reported separately as the `exakt` column.
+A row that touches two living topics is counted at **both** and additionally counted as ambiguous;
+wherever `mehrd. > 0`, that row's numbers are upper bounds. The report prints the full assignment
+balance sheet (assigned / ambiguous / unassigned / retired-only / rows without `block_ids` — the K9
+rejection lines / rows before the window) so the per-topic numbers have a denominator. The view is a
+measurement only: it changes nothing about the arm.
+
 Same containment and transaction discipline as `ctx-llmlog-export`: every query runs in its own
 short `READ ONLY` transaction (SQLSTATE `25006` on any write, by construction), the window is
 pinned to the database `now()` **minus one minute**, a `count(*)` gate over the same window must
 match the summed group counts, and the `-out` JSON is created `O_EXCL` with mode `0600` in a
 directory with no group/other bits that does not resolve under `/tmp`. Exit codes: `0` clean · `1`
-perimeter, config, DB or I/O error · `3` count gate violated · `4` the non-disruption metric broke
-its threshold. The table and the JSON file are written on `3` and `4` as well — they are the
-evidence.
+perimeter, config, DB or I/O error · `2` misuse of the `-arm`/`-per-topic` pair (only together, and
+only for an arm whose attribution rule is implemented — nothing is written and the database is never
+touched) · `3` count gate violated · `4` the non-disruption metric broke its threshold. The table and
+the JSON file are written on `3` and `4` as well — they are the evidence.
 
 ## Backends
 

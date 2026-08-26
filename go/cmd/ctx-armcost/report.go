@@ -82,6 +82,10 @@ type Options struct {
 	Until   time.Time     // exklusiv; Zeitpunkt Null oder später als der Pin = DB-now() − untilMargin
 	Window  time.Duration // Fensterbreite, wenn Since leer ist
 	ByClass bool          // zusätzlich je dispatch_class gruppieren
+	// Arm schaltet die Per-Topic-Sicht eines einzelnen Arms zu (V-W5). Leer =
+	// aus; die Zuordnungs-Regel ist arm-spezifisch, deshalb gibt es keinen
+	// Default-Arm (run() weist alles außer armClusterLabel mit Exit 2 ab).
+	Arm string
 }
 
 // Bucket sind die Kennzahlen einer Gruppe (pipeline oder dispatch_class).
@@ -136,6 +140,10 @@ type Report struct {
 	Pipelines    []Bucket       `json:"pipelines"`
 	Classes      []Bucket       `json:"dispatch_classes,omitempty"`
 	Interactive  InteractiveP95 `json:"interactive_p95"`
+	// PerTopic ist die V-W5-Sicht eines einzelnen Arms je Topic. NIL, wenn
+	// -arm/-per-topic nicht gesetzt sind — dann ist der Report byte-identisch
+	// zum M-W7-Stand (omitempty greift auf dem Zeiger).
+	PerTopic *PerTopicReport `json:"per_topic,omitempty"`
 	// CostUSDNote ist die Pflicht-Provenienz-Zeile. cost_usd erscheint im
 	// ganzen Report NUR hier und NIE als Kennzahl.
 	CostUSDNote string `json:"cost_usd_note"`
@@ -204,6 +212,16 @@ func buildReport(ctx context.Context, pool *pgxpool.Pool, opts Options) (Report,
 
 	if rep.Interactive, err = queryInteractive(ctx, pool, since, until); err != nil {
 		return rep, fmt.Errorf("armcost: interactive p95: %w", err)
+	}
+
+	// V-W5: die Per-Topic-Sicht hängt an ihrem eigenen Fenster (Geburt des
+	// ältesten lebenden Topics .. until), nicht am rollenden Kosten-Fenster.
+	if opts.Arm != "" {
+		pt, ptErr := buildPerTopic(ctx, pool, opts.Arm, until, since)
+		if ptErr != nil {
+			return rep, ptErr
+		}
+		rep.PerTopic = &pt
 	}
 
 	if rep.RowsInWindow != rep.CountGate {

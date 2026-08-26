@@ -1,0 +1,15 @@
+ctx-armcost — Belegungs-Bilanz in GPU-Sekunden
+Fenster:  2026-08-19T00:00:00Z .. 2026-08-26T00:00:00Z  (7,00 d)
+Zeilen:   44 (Zähl-Gate count(*) = 44)
+cost_usd: in 2 von 44 Zeilen gesetzt — nicht verwendet
+
+pipeline               n   belegung_s  wire_s  p50_ms  p95_ms  prompt_tok (null)  compl_tok (null)  fehler  quote  abort  dur_null  qw_null
+dream-daily-synthesis  20  508,5       520,0   25000   31000   900 (2)            13840 (0)         1       5,0 %  0      0         3
+Σ                      20  508,5       520,0                   900 (2)            13840 (0)         1       5,0 %  0      0         3
+
+Nicht-Störungs-Kennzahl: p95 interactive 1600 ms (n=20) gegen 1000 ms davor (n=20) ⇒ Faktor 1,60 — ÜBERSCHRITTEN (> 1,5 ⇒ Abbruchkriterium)
+
+Fußzeilen (Pflicht):
+  - Verzerrung (fire-and-forget): llmlog.Record schreibt asynchron in einer eigenen Goroutine mit 5-s-Deadline, Fehler nur slog.Debug (llmlog/llmlog.go:135-143) — eine Zählung aus derselben Tabelle sieht laufende Calls nicht und misst systematisch zu niedrig.
+  - Verzerrung (nullInt): 0 wird beim Insert zu NULL (llmlog/llmlog.go:192-197) — Token-Summen sind systematisch lückenhaft; die (null)-Spalten zählen die betroffenen Zeilen.
+  - Befund M-W7 (Code gegen design/05 §4.7): seit MW10 misst duration_ms auf jedem Pfad, der queue_wait_ms setzt, bereits NUR den Wire-Call (llm/chain.go:284-295, chat/engine.go:551-553, handler/query.go:1791-1794) — die Design-Formel zieht die Lease-Wartezeit dort ein zweites Mal ab. belegung_s ist damit eine UNTERGRENZE, wire_s (Σ duration_ms) die Obergrenze; die Differenz ist exakt Σ queue_wait_ms der Zeilen mit gesetztem Wert.

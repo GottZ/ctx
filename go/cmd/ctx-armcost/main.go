@@ -14,12 +14,15 @@
 //	set -a; . .env; set +a
 //	CONTEXT_DB_HOST=<db-ip> ctx-armcost -out /secure/dir/armcost-2026-08-26.json
 //	ctx-armcost -out r.json -since 2026-08-19T00:00:00Z -until 2026-08-26T00:00:00Z
+//	ctx-armcost -out r.json -arm=cluster-label -per-topic
 //
-// Exit-Codes: 0 = sauber · 3 = Zähl-Gate verletzt · 4 = die
-// Nicht-Störungs-Kennzahl reißt (interactive-p95 > Faktor 1,5 gegen das
-// gleich lange Fenster davor — Abbruchkriterium jeder Mess-Welle) · 1 = alles
-// andere (Perimeter, Config, DB, I/O). Tabelle und JSON-Datei entstehen auch
-// bei 3 und 4: sie sind der Beleg.
+// Exit-Codes: 0 = sauber · 2 = Aufruffehler des Flag-Paars -arm/-per-topic
+// (nur zusammen gültig, nur für einen Arm mit bekannter Zuordnungs-Regel) ·
+// 3 = Zähl-Gate verletzt · 4 = die Nicht-Störungs-Kennzahl reißt
+// (interactive-p95 > Faktor 1,5 gegen das gleich lange Fenster davor —
+// Abbruchkriterium jeder Mess-Welle) · 1 = alles andere (Perimeter, Config,
+// DB, I/O). Tabelle und JSON-Datei entstehen auch bei 3 und 4: sie sind der
+// Beleg. Bei 2 entsteht nichts — der Lauf hat die Datenbank nie berührt.
 //
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
@@ -63,6 +66,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		untilStr = fs.String("until", "", "created_at < (RFC3339; leer oder später = DB-now() − 1 min — Fenster-Pinning mit Commit-Marge)")
 		days     = fs.Float64("days", 7, "Fensterbreite in Tagen, wenn -since fehlt")
 		byClass  = fs.Bool("by-class", true, "zusätzlich je dispatch_class gruppieren")
+		arm      = fs.String("arm", "", "Arm der Per-Topic-Sicht (nur zusammen mit -per-topic; heute nur "+armClusterLabel+")")
+		perTopic = fs.Bool("per-topic", false, "Per-Topic-Sicht des mit -arm gewählten Arms (V-W5)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -77,7 +82,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		say("ctx-armcost: -out ist Pflicht")
 		return 1
 	}
-	opts := Options{ByClass: *byClass, Window: time.Duration(*days * float64(24*time.Hour))}
+	// -arm/-per-topic: nur zusammen gültig, und nur für einen Arm, dessen
+	// Zuordnungs-Regel dieses Werkzeug kennt. Fail-closed VOR jeder
+	// DB-Berührung — Exit 2 ist ein Aufruffehler, kein Messergebnis.
+	if code, err := checkArm(*arm, *perTopic); err != nil {
+		say("ctx-armcost:", err)
+		return code
+	}
+	opts := Options{ByClass: *byClass, Arm: *arm, Window: time.Duration(*days * float64(24*time.Hour))}
 	var err error
 	if *sinceStr != "" {
 		if opts.Since, err = time.Parse(time.RFC3339Nano, *sinceStr); err != nil {
@@ -136,6 +148,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 4
 	}
 	return 0
+}
+
+// checkArm prüft das Flag-Paar der Per-Topic-Sicht (V-W5) und liefert den
+// Exit-Code, mit dem run() abbricht. Getrennt von run(), damit der Kontrakt
+// ohne CLI-Rahmen prüfbar ist.
+func checkArm(arm string, perTopic bool) (int, error) {
+	switch {
+	case arm == "" && !perTopic:
+		return 0, nil
+	case arm == "":
+		return 2, fmt.Errorf("-per-topic verlangt -arm=%s", armClusterLabel)
+	case !perTopic:
+		return 2, fmt.Errorf("-arm=%s verlangt -per-topic (eine andere Sicht auf einen einzelnen Arm gibt es nicht)", arm)
+	case arm != armClusterLabel:
+		return 2, fmt.Errorf("%w (bekommen: %q)", errUnsupportedArm, arm)
+	}
+	return 0, nil
 }
 
 // writeReportFile schreibt den Report als eingerücktes JSON in eine frische
