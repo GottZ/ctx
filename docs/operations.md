@@ -219,6 +219,50 @@ export still ran to completion first (rescue-first; `-strict` aborts at the firs
 · `3` count gate violated. The export contains unanonymized prompt bodies — keep it inside the
 same trust boundary as the database itself.
 
+### GPU-second cost report: ctx-armcost
+
+`ctx-armcost` is a SELECT-only cost report over `context_llm_log`, grouped by `pipeline` and by
+`dispatch_class`. **The currency is the GPU second, not the dollar.** `cost_usd` is set in a
+handful of rows on an on-prem serving stack and is deliberately *not* carried as a metric — the
+report prints one provenance line (`cost_usd: in k von n Zeilen gesetzt — nicht verwendet`) with
+live-counted numbers and nothing else.
+
+```bash
+cd go && go build ./cmd/ctx-armcost
+CONTEXT_DB_HOST=<db> ./ctx-armcost -out /secure/dir/armcost-$(date +%F).json \
+  [-since <RFC3339>] [-until <RFC3339>] [-days 7] [-by-class=false]
+```
+
+Per group it reports `n`, the occupancy sum in seconds, `wire_s` (Σ `duration_ms`), p50/p95
+duration, prompt/completion token sums with the count of rows where they are NULL, the error
+count and rate, `dispatch_abort` rows, and the rows without a duration or without a queue wait.
+Two numbers, not one, carry the cost: `belegung_s` follows the design formula
+`(duration_ms - COALESCE(queue_wait_ms, 0)) / 1000`, while `wire_s` omits the subtraction.
+They differ by exactly Σ `queue_wait_ms`, and the report says which of the two bounds the truth —
+see the mandatory footnotes below.
+
+The **non-disruption metric** is the gate every measurement campaign runs against: p95 of the
+`interactive` class inside the window versus p95 of the equally long window immediately before it.
+A factor above **1.5** means the campaign disturbed live traffic and its dump is discarded rather
+than partially scored. The rule text is printed in every report, green or red.
+
+Three footnotes are part of the output, not decoration — without them no number here is
+interpretable: `llmlog.Record` writes asynchronously in its own goroutine, so a count from the same
+table never sees in-flight calls and is systematically low; `nullInt` turns 0 into NULL on insert,
+so token sums are patchy (the `(null)` columns count the affected rows); and, since MW10,
+`duration_ms` on every path that sets `queue_wait_ms` already measures the wire call alone, so the
+design formula subtracts the lease wait a second time — `belegung_s` is a lower bound, `wire_s` an
+upper one.
+
+Same containment and transaction discipline as `ctx-llmlog-export`: every query runs in its own
+short `READ ONLY` transaction (SQLSTATE `25006` on any write, by construction), the window is
+pinned to the database `now()` **minus one minute**, a `count(*)` gate over the same window must
+match the summed group counts, and the `-out` JSON is created `O_EXCL` with mode `0600` in a
+directory with no group/other bits that does not resolve under `/tmp`. Exit codes: `0` clean · `1`
+perimeter, config, DB or I/O error · `3` count gate violated · `4` the non-disruption metric broke
+its threshold. The table and the JSON file are written on `3` and `4` as well — they are the
+evidence.
+
 ## Backends
 
 The backend pool (`context_backends`) is the living LLM configuration — `ctx backends` lists and manages it, the web UI at `/settings/backends` does the same visually.
