@@ -152,11 +152,53 @@ compression:
 > unarchived: that stand-still *is* the promise of fail-closed, not a side
 > effect of it.
 
+## Runtime contract negotiation
+
+The plugin does not hard-code the contract version it declares. On every read
+of `pre_compress_checkpoint_api_version` (a property — the host reads it as
+`int(getattr(provider, ...))` on the instance) it **probes the loading host**
+and declares the **minimum of both sides**:
+
+- **Host probe** (`_probe_host_checkpoint_api()`): reads
+  `agent.memory_provider.PRE_COMPRESS_CHECKPOINT_API_VERSION` and checks
+  whether `agent.conversation_compression` exposes the v3 helper
+  `_tool_evidence_for_pre_compress_memory` as a callable. Result: 3 only when
+  the constant is ≥ 3 **and** the helper exists; 2 when the constant is ≥ 2;
+  otherwise 1. The probe never raises — a missing module, a non-int constant
+  or an import error all yield 2, the conservative gate-compatible answer for
+  a host that loads this plugin at all.
+- **Plugin ceiling** (`PLUGIN_CHECKPOINT_API_MAX`, currently 2): the highest
+  contract this plugin implements. It is raised to 3 once the tool-index
+  renderer lands (W02-5); the negotiation then flips without further code
+  changes.
+- **Declared version** = `max(2, min(host, plugin))`. The plugin implements v2
+  completely, so 2 is the floor even on a v1 host (whose gate checks `>= 1`).
+
+Every checkpoint block (parts, manifest, head) records the negotiation in its
+metadata, and the head body repeats the negotiated value as
+`Checkpoint API version: <n>`:
+
+| Field | Meaning |
+|-------|---------|
+| `host_checkpoint_api` | what the probe found on the host (1, 2 or 3) |
+| `checkpoint_api_version` | what the plugin declared — the negotiated value |
+| `tool_index_status` | `absent` when no `tool_evidence` reached the call; `received-unrendered` when the host sent it |
+
+**v3 host before W02-5:** `on_pre_compress(messages, *, tool_evidence=None,
+**kwargs)` tolerates the v3 keyword and any future ones, but this version
+does **not** render tool evidence. A v3 host still gets a complete prose
+checkpoint, declared and labelled as v2; if the host sends `tool_evidence`
+anyway, the blocks carry `tool_index_status: received-unrendered` and the
+plugin logs one warning per provider instance — no error, no blocked
+compaction.
+
 Contract tests ship on both sides: host-side upstream in
 `tests/agent/test_pre_compress_checkpoint_contract.py` (17 tests on `main`)
-and provider-side here in
-`plugin/ctx_checkpoint/tests/test_provider_contract.py` (9 tests, mocked MCP
-dispatch — no live ctx needed).
+and provider-side here in `plugin/ctx_checkpoint/tests/` (32 tests, mocked
+MCP dispatch — no live ctx needed): `test_provider_contract.py` (9) covers
+the checkpoint chain, `test_contract_negotiation.py` (23) the runtime
+negotiation against the real host on `PYTHONPATH` plus a monkeypatched v3
+host.
 
 The pre-merge patch series that used to supply the contract is retired and
 kept for history under `patches/archive/` — see its README before touching
@@ -189,9 +231,16 @@ and manifest are deliberately small so routine recall stays cheap.
 
 ## Versions
 
-- Plugin: see `plugin/ctx_checkpoint/VERSION`.
+- Plugin: see `plugin/ctx_checkpoint/VERSION` (0.4.3: runtime contract
+  negotiation, `tool_evidence` keyword tolerance, `host_checkpoint_api` /
+  `checkpoint_api_version` / `tool_index_status` metadata).
+- Plugin contract ceiling: `PLUGIN_CHECKPOINT_API_MAX = 2` in
+  `plugin/ctx_checkpoint/__init__.py` — the declared version is negotiated
+  at runtime as `max(2, min(host, plugin))`, see
+  [Runtime contract negotiation](#runtime-contract-negotiation).
 - Host contract: `PRE_COMPRESS_CHECKPOINT_API_VERSION` in the Hermes host —
-  v2 is fail-closed, v1 is historical best-effort.
+  v2 is fail-closed, v1 is historical best-effort; v3 (upstream follow-up,
+  `tool_evidence` channel) is detected by the probe but not yet rendered.
 - Context-engine binding: follow-up **pending upstream** (branch
   `feat/context-engine-compaction-authority`, on top of `main`; PR not yet
   opened). Probe a host with

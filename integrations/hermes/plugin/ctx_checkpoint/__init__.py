@@ -9,9 +9,11 @@ blocks and returns stable block IDs for deterministic inclusion in the handoff.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import logging
 import re
+import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -41,6 +43,90 @@ _GENERIC_SECRET_RE = re.compile(
     r"password|passwd|authorization)\b(\s*[:=]\s*)([^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*")
+
+# Highest checkpoint contract THIS plugin implements. 2 = the fail-closed contract as
+# merged upstream (NousResearch/hermes-agent#94639, 2026-08-25; upstream renumbered:
+# 1 is the historical best-effort hook, the fail-closed gate requires >= 2). Raised to
+# 3 in W02-5, once the tool-index renderer lands and ``tool_evidence`` is actually
+# rendered into the checkpoint — until then the plugin must never declare 3, even on
+# a host that offers it.
+PLUGIN_CHECKPOINT_API_MAX = 2
+# Host-side marker of the v3 contract: the helper in ``agent.conversation_compression``
+# that collects tool evidence for the pre-compress memory handoff. Its presence (as a
+# callable) is what distinguishes a real v3 host from one that merely bumped the
+# constant.
+HOST_V3_FEATURE = "_tool_evidence_for_pre_compress_memory"
+_HOST_CONTRACT_MODULE = "agent.memory_provider"
+_HOST_FEATURE_MODULE = "agent.conversation_compression"
+_HOST_CONTRACT_CONSTANT = "PRE_COMPRESS_CHECKPOINT_API_VERSION"
+# Assumed host contract when the probe cannot decide. A host that loads this provider
+# is at least v2 per the contract documentation (the fail-closed gate is what this
+# plugin exists for); when not even the host module is reachable, 2 is the
+# conservative, gate-compatible answer: it never claims a tool-evidence channel that
+# was not proven, and a v1-host gate (``>= 1``) accepts it as well.
+_PROBE_FALLBACK_API = 2
+
+
+def _load_host_module(name: str):
+    """Return an already-imported host module, importing it only as a fallback."""
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    return importlib.import_module(name)
+
+
+def _probe_host_checkpoint_api() -> int:
+    """Return the checkpoint contract version the loading host actually carries.
+
+    3 only when ``PRE_COMPRESS_CHECKPOINT_API_VERSION`` is >= 3 AND the host exposes
+    ``HOST_V3_FEATURE`` as a callable; otherwise 2 when the constant is >= 2;
+    otherwise 1. Pure: no state, and no exception leaves this function — any failure
+    (module missing, constant missing or not an int, import error) yields
+    ``_PROBE_FALLBACK_API``. Logging stays at debug level so a probe can never turn
+    into operator noise.
+    """
+    try:
+        contract = _load_host_module(_HOST_CONTRACT_MODULE)
+        version = getattr(contract, _HOST_CONTRACT_CONSTANT, None)
+        if isinstance(version, bool) or not isinstance(version, int):
+            logger.debug(
+                "ctx checkpoint host probe: %s.%s is %r, not an int; assuming v%d",
+                _HOST_CONTRACT_MODULE,
+                _HOST_CONTRACT_CONSTANT,
+                version,
+                _PROBE_FALLBACK_API,
+            )
+            return _PROBE_FALLBACK_API
+        if version >= 3:
+            features = _load_host_module(_HOST_FEATURE_MODULE)
+            if callable(getattr(features, HOST_V3_FEATURE, None)):
+                return 3
+            logger.debug(
+                "ctx checkpoint host probe: constant %d but %s.%s missing; reporting v2",
+                version,
+                _HOST_FEATURE_MODULE,
+                HOST_V3_FEATURE,
+            )
+            return 2
+        return 2 if version >= 2 else 1
+    except Exception:
+        logger.debug(
+            "ctx checkpoint host probe failed; assuming v%d",
+            _PROBE_FALLBACK_API,
+            exc_info=True,
+        )
+        return _PROBE_FALLBACK_API
+
+
+def _negotiate_checkpoint_api(host_api: int) -> int:
+    """Contract this plugin declares: min(host, plugin), never below 2.
+
+    The plugin implements v2 completely, so 2 is the floor even for a v1 host
+    (whose gate checks ``>= 1`` and therefore accepts it). The ceiling is
+    ``PLUGIN_CHECKPOINT_API_MAX`` — read at call time so raising it in W02-5 flips the
+    negotiation without touching this function.
+    """
+    return max(2, min(host_api, PLUGIN_CHECKPOINT_API_MAX))
 
 
 class CtxCheckpointError(RuntimeError):
@@ -179,11 +265,22 @@ def _parse_tool_result(raw: Any) -> tuple[Optional[str], Optional[str], Optional
 class CtxCheckpointMemoryProvider(MemoryProvider):
     """Archive redacted direct conversation evidence before compaction."""
 
-    # 2 = fail-closed checkpoint contract as merged upstream (NousResearch/hermes-agent#94639,
-    # 2026-08-25). Upstream renumbered: 1 now means the historical best-effort hook, the
-    # fail-closed gate requires >= 2. Backward-compatible with the v1-contract images
-    # (their gate checks >= 1). Input shape is unchanged (normalized direct evidence).
-    pre_compress_checkpoint_api_version = 2
+    @property
+    def pre_compress_checkpoint_api_version(self) -> int:
+        """Negotiated checkpoint contract, re-evaluated on every read.
+
+        ``min(host capability, PLUGIN_CHECKPOINT_API_MAX)``, never below 2. Today
+        that is 2 on every host: the fail-closed contract as merged upstream
+        (NousResearch/hermes-agent#94639, 2026-08-25; upstream renumbered — 1 is
+        the historical best-effort hook, the fail-closed gate requires >= 2).
+        Backward-compatible with the v1-contract images (their gate checks
+        ``>= 1``); the input shape is unchanged (normalized direct evidence).
+
+        The host reads this as ``int(getattr(provider, ...))`` on the instance
+        (``agent/memory_manager.py``); a property satisfies that path and always
+        returns an ``int``.
+        """
+        return _negotiate_checkpoint_api(_probe_host_checkpoint_api())
 
     def __init__(
         self,
@@ -196,6 +293,7 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
         self._root_session_id = ""
         self._platform = ""
         self._agent_context = ""
+        self._tool_evidence_warned = False
 
     @property
     def name(self) -> str:
@@ -240,7 +338,21 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return []
 
-    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+    def on_pre_compress(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        tool_evidence: Optional[List[Dict[str, Any]]] = None,
+        **_kwargs: Any,
+    ) -> str:
+        # Keyword tolerance (design 02-tool-evidenz §4.2): a v3 host may send
+        # ``tool_evidence`` and further keywords without breaking this plugin.
+        # ``tool_evidence`` is NOT rendered in this version — it is only labelled
+        # honestly in the metadata; the prose checkpoint stays complete either way.
+        host_api = _probe_host_checkpoint_api()
+        negotiated_api = _negotiate_checkpoint_api(host_api)
+        tool_index_status = self._tool_index_status(tool_evidence)
+
         rendered = self._render_direct_evidence(messages)
         if not rendered:
             raise CtxCheckpointError(
@@ -267,6 +379,9 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
             "active_session_id": self._session_id,
             "platform": self._platform,
             "agent_context": self._agent_context,
+            "host_checkpoint_api": host_api,
+            "checkpoint_api_version": negotiated_api,
+            "tool_index_status": tool_index_status,
             "sha256": digest,
             "warnings": ["W1", "W3", "W5", "W9", "W18", "W19", "W21"],
             "invalidated_by": "A verified correction or transcript-recovery finding",
@@ -336,7 +451,7 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
             "Stable read entrypoint for the latest confirmed pre-compaction "
             "checkpoint of this root session. Load the manifest next; load source "
             "blocks only when exact wording or provenance is needed.\n\n"
-            f"- Checkpoint API version: 1\n"
+            f"- Checkpoint API version: {negotiated_api}\n"
             f"- Root session: `{root}`\n"
             f"- Active session: `{self._session_id}`\n"
             f"- Latest manifest: `{manifest_id}`\n"
@@ -348,7 +463,6 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
             content=head,
             metadata={
                 **common_metadata,
-                "checkpoint_api_version": 1,
                 "latest_manifest_id": manifest_id,
                 "source_block_count": len(chunk_ids),
             },
@@ -419,6 +533,27 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
                 "ctx checkpoint head is missing a valid latest_manifest_id"
             )
         return manifest_id
+
+    def _tool_index_status(self, tool_evidence: Any) -> str:
+        """Label whether tool evidence reached this call — never whether it was used.
+
+        ``"absent"`` when the host sent nothing; ``"received-unrendered"`` when a
+        value arrived (a v3 host sending the kwarg despite our declared 2, or any
+        host sending it unconditionally). Warned once per instance, never raised:
+        the prose checkpoint is complete without it.
+        """
+        if tool_evidence is None:
+            return "absent"
+        if not self._tool_evidence_warned:
+            self._tool_evidence_warned = True
+            logger.warning(
+                "ctx checkpoint received tool_evidence (%d entries) but this plugin "
+                "(contract max v%d) does not render it yet; stored as "
+                "tool_index_status=received-unrendered",
+                len(tool_evidence) if isinstance(tool_evidence, (list, tuple)) else -1,
+                PLUGIN_CHECKPOINT_API_MAX,
+            )
+        return "received-unrendered"
 
     def _server_name(self) -> str:
         return str(self._config.get("mcp_server") or "ctx")
