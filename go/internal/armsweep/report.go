@@ -38,7 +38,14 @@ type EnvStamp struct {
 	MigrationsMax       int                `json:"migrations_max"`
 	PostFusionStages    map[string]any     `json:"post_fusion_stages"`
 	AllowOutsideGoldset bool               `json:"allow_outside_goldset"`
-	Dumps               []DumpProvenance   `json:"dumps"`
+	// InstanceKind/ShadowTypes/AllowLiveInstance carry gate (l) into the report
+	// (§5 B4b): which instance the numbers came from, which shadow types were
+	// measured, and whether the measure-copy requirement was overridden. The
+	// override is only ever legitimate when it is visible.
+	InstanceKind      string           `json:"instance_kind,omitempty"`
+	ShadowTypes       []string         `json:"shadow_types,omitempty"`
+	AllowLiveInstance bool             `json:"allow_live_instance,omitempty"`
+	Dumps             []DumpProvenance `json:"dumps"`
 }
 
 // DumpProvenance is one measured dump as the report cites it.
@@ -337,6 +344,12 @@ func buildEnv(in ScoreInput) EnvStamp {
 		MigrationsMax:       in.StampA.MigrationsMax,
 		PostFusionStages:    in.StampA.PostFusionStages,
 		AllowOutsideGoldset: in.StampA.AllowOutsideGoldset || (in.StampB != nil && in.StampB.AllowOutsideGoldset),
+		InstanceKind:        in.StampA.InstanceKind,
+		ShadowTypes:         in.StampA.ShadowTypes,
+		// Both overrides are OR-ed across the dump pair for the same reason: a
+		// report over two dumps inherits the weakest provenance of the two, and
+		// stating otherwise would let one clean dump launder the other.
+		AllowLiveInstance: in.StampA.AllowLiveInstance || (in.StampB != nil && in.StampB.AllowLiveInstance),
 	}
 	env.GoldSHA256 = CombinedDigest(in.StampA.SliceFiles)
 	env.Dumps = append(env.Dumps, dumpProvenance("A", in.StampA))

@@ -16,6 +16,14 @@ import (
 // cmdPrime runs the unpinned pass and writes pins, the prime stamp and — for
 // G-REAL — the pooling file.
 func cmdPrime(ctx context.Context, c *common) error {
+	// Shadow types belong to the conditional DUMP, never to priming: the pins a
+	// prime collects have to be the same for the base and the conditional run,
+	// and a prime that measured a different corpus than the one it pins for
+	// would make the two dumps incomparable in a way no stamp would show.
+	// Refused rather than ignored — a silently dropped flag is worse.
+	if len(c.shadowTypeNames()) > 0 {
+		return fmt.Errorf("-shadow-types gilt nur für `dump` (der Prime-Lauf sammelt Pins für BEIDE Dumps)")
+	}
 	gold, err := c.goldGuard()
 	if err != nil {
 		return err
@@ -110,11 +118,23 @@ func cmdDump(ctx context.Context, c *common, pinFile string) error {
 	if err != nil {
 		return err
 	}
+
+	// Gate (l) BEFORE the first measurement request (design/05 §5 B4b): a
+	// shadow dump belongs into a restored measure copy, because the shadow
+	// corpus it measures spends index budget on every production query of the
+	// instance it lives in. The kind the instance reported goes into the stamp
+	// either way — also under the override, so the report cannot hide it.
+	instanceKind, err := c.gateInstance(ctx, r)
+	if err != nil {
+		return err
+	}
+
 	recs, stamp, err := r.Dump(ctx, cases, pins, goldIDsOf(cases), goldStamp.CorpusMaxCreatedAt)
 	if err != nil {
 		return err
 	}
 
+	stamp.InstanceKind, stamp.AllowLiveInstance = instanceKind, c.allowLive
 	stamp.PinFile, stamp.PinSHA256 = pinFile, pinDigest
 	stamp.PinRunID = strings.TrimSuffix(strings.TrimPrefix(pinFile, "pins-"), ".jsonl")
 	stamp.AllowOutsideGoldset = c.allowOutside
@@ -159,6 +179,25 @@ func cmdDump(ctx context.Context, c *common, pinFile string) error {
 		return fmt.Errorf("%w: %s", errDumpAborted, stamp.DumpFile)
 	}
 	return nil
+}
+
+// gateInstance runs gate (l) and reports what it found. A dry run asks nothing:
+// it never touches an instance, so there is no instance to make a claim about —
+// and the stamp of a dry run says so by carrying no kind at all.
+func (c *common) gateInstance(ctx context.Context, r *armsweep.Runner) (string, error) {
+	if c.dryRun || len(r.ShadowTypes) == 0 {
+		return "", nil
+	}
+	kind, err := armsweep.GateInstanceKind(ctx, r.Client, r.ShadowTypes, c.allowLive)
+	if err != nil {
+		return kind, err
+	}
+	if c.allowLive && kind != armsweep.InstanceKindMeasureCopy {
+		fmt.Fprintf(os.Stderr,
+			"WARNUNG: Schatten-Dump gegen %s=%q — nur wegen -allow-live-instance; steht im Report.\n",
+			armsweep.SettingInstanceKind, kind)
+	}
+	return kind, nil
 }
 
 // cmdScore is the offline half: no instance, no clock beyond the header line.

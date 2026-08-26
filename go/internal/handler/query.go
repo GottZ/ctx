@@ -251,6 +251,17 @@ type queryRequest struct {
 	// expansion". It suppresses the LLM temporal fallback (the only
 	// non-deterministic half of that stage). Only legal together with arm_ranks.
 	PinnedTemporal *string `json:"pinned_temporal,omitempty"`
+
+	// ShadowTypes is the M-W2 shadow-visibility seam (design/05 §4.2): the
+	// named types are added to p_types_visible for ctx_rrf and ctx_rrf_arms,
+	// and for NOTHING else — the post-fusion stages keep the unwidened
+	// allowlist, and every row of a shadow type is dropped before sources[] is
+	// built. It exists so an offline A/B can measure a corpus that must not be
+	// live yet; the seven fail-closed gates and their reasons live in
+	// query_shadow.go. Empty/omitted is the byte-identical measurement path.
+	// REST only, deliberately: MCP is a production tool surface, not a
+	// measurement one.
+	ShadowTypes []string `json:"shadow_types,omitempty"`
 }
 
 // maxRetrievalSnippet caps the per-source content attached when include_content
@@ -278,9 +289,9 @@ type queryResponse struct {
 
 // armRanksBlock is what a measurement request gets on top of the normal
 // retrieval-only response (design/04 §4.4). Everything in it is either a
-// number, an id or the query text the CALLER already sent — no block content,
-// no titles, no scopes; ctx_rrf_arms itself projects no content at all
-// (migration 137 header).
+// number, an id, a TYPE NAME or the query text the CALLER already sent — no
+// block content, no titles, no scopes; ctx_rrf_arms projects the registry type
+// of a candidate (migration 142, M-W1) and nothing else about it.
 //
 // Rows and FusionOrder are the two halves of the sweep input: the raw per-arm
 // ranks, and the order the LIVE fusion produced from them — captured directly
@@ -605,6 +616,23 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Step 2c: M-W2 shadow gates (design/05 §4.2). Same place and same doctrine
+	// as the block above — fail-closed, before any work — with one addition:
+	// G4/G5 need the registry, so the gate takes the per-request type snapshot
+	// here and Step 6 below reads the SAME generation from the same registry.
+	// A request that names no shadow type passes through untouched.
+	//
+	// G6 is not a refusal but a correction, and it happens here rather than at
+	// the rerank step so nothing between the two can read a rerank config the
+	// shadow path is not entitled to.
+	if status, msg, detail := shadowGate(&req, ar.IsAdmin, armRanks,
+		h.blocktypes.SnapshotForRequest(ctx)); status != 0 {
+		slog.Warn("shadow_types refused", "status", status, "reason", detail, "request_id", requestID)
+		writeJSON(w, status, map[string]any{"success": false, "error": msg})
+		return
+	}
+	rerankCfg = forceRerankOffForShadow(rerankCfg, req.ShadowTypes)
+
 	// Read rate limit check (0 = disabled).
 	if rateLimitRead := cfg.Query.RateLimitRead; rateLimitRead > 0 {
 		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, ar.ApiKeyID, "query")
@@ -644,6 +672,23 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		querySens = backends.MaxSensitivity(querySens, backends.SensCredentials)
 		slog.Warn("query: credentials pattern in query text — sensitivity raised to credentials",
 			"kind", m.Kind, "request_id", requestID)
+	}
+
+	// Step 2d: the chain-locality obligation of the shadow seam (design/05
+	// §4.2), placed HERE because querySens is what the embed and translate
+	// chains will be resolved with, and it is final only after the credentials
+	// detector above. Still ahead of every wire call, so a refused shadow
+	// request costs two chain resolutions and nothing else.
+	//
+	// The status is 4xx and not 5xx by design: the sweep driver treats 5xx as
+	// retryable and would spend its budget and then EXCLUDE the case, turning a
+	// configuration refusal into a quietly incomplete dump.
+	if detail, ok := h.shadowChainLocality(req.ShadowTypes, querySens, ar.HomeScope); !ok {
+		slog.Warn("shadow_types refused: chain is not lan-local", "reason", detail, "request_id", requestID)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": "shadow_types requires lan-local backend chains",
+		})
+		return
 	}
 
 	// Clamp limit: 1-MaxPromptSources, default 5. The upper bound is named in
@@ -842,6 +887,23 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	visibleTypes := typeSet.VisibleTypes()
 	dampedTypes, dampedFactors := typeSet.DampedTypesFor(req.Query)
 
+	// M-W2 (design/05 §4.2): the SECOND slice, and its reach is the whole
+	// point. visibleTypes stays the one truth of the production path — cluster
+	// boost, graph expansion and the aggregate fold keep it unwidened, so a
+	// shadow block can never be INTRODUCED by a post-fusion stage. Only the two
+	// measurement statements below see measureVisibleTypes.
+	//
+	// Both slices come from the SAME per-request registry snapshot, so this is
+	// not a second visibility authority (§5 B1): what is separated here is
+	// reach, not authority. Without shadow_types the two are the same slice
+	// value and the path is byte-identical to production.
+	//
+	// The price, named openly: the shadow path measures the FUSION level, not
+	// "what a user would get". Whether a catalog block would be injected via the
+	// cluster boost is not answerable this way — that needs a real registry flip
+	// and is therefore a measurement AFTER a release, not before one.
+	measureVisibleTypes := measureVisibleTypesFor(visibleTypes, req.ShadowTypes)
+
 	// T40b (design/07 §4.2): resolve the caller's block-grant set ONCE and feed
 	// it into both the RRF retrieval OR-arm and the downstream GraphExpand. Same
 	// fail-closed helper as the MCP paths (resolveGrants): a resolver error logs
@@ -872,7 +934,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		results, selectorDec, armRows, err = h.armSweepSearch(ctx, armSweepParams{
 			embedding: embedding, query: searchQuery, querySpaced: querySpaced,
 			scopes: ar.ReadScopes, category: req.Category, tags: req.Tags, limit: internalLimit,
-			temporal: temporal, queryOR: queryOR, visibleTypes: visibleTypes,
+			temporal: temporal, queryOR: queryOR, measureVisibleTypes: measureVisibleTypes,
 			dampedTypes: dampedTypes, dampedFactors: dampedFactors,
 			categoriesExclude: req.CategoriesExclude,
 			typesExclude:      unionExcludes(req.TypesExclude, req.BlockRolesExclude),
@@ -1197,6 +1259,14 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		results = results[:limit]
 	}
 
+	// Step 6f: M-W2 (design/05 §4.2) — shadow rows leave the pipeline HERE, one
+	// step before anything is built out of them. Everything downstream of this
+	// line (sources, the confidence classification, the access log) therefore
+	// never sees a shadow block; the measurement keeps them, because arm_ranks
+	// was captured from the fusion long before this point and carries ids and
+	// numbers only. Without shadow_types this is the same slice, unfiltered.
+	results = dropShadowResults(results, req.ShadowTypes)
+
 	// Step 7: Convert RRF results to LLM source format.
 	now = time.Now()
 	sources := make([]llm.Source, len(results))
@@ -1443,8 +1513,12 @@ type armSweepParams struct {
 	limit             int
 	temporal          string
 	queryOR           string
-	visibleTypes      []string
-	dampedTypes       []string
+	// measureVisibleTypes is the WIDENED type allowlist of §4.2: the production
+	// slice plus the shadow types this request passed the gates for. Named for
+	// its reach, so a future edit cannot confuse it with the narrow slice the
+	// post-fusion stages take.
+	measureVisibleTypes []string
+	dampedTypes         []string
 	dampedFactors     []float64
 	categoriesExclude []string
 	typesExclude      []string
@@ -1492,7 +1566,7 @@ func (h *QueryHandler) armSweepSearch(ctx context.Context, p armSweepParams) ([]
 	// pool stays the pool (poolStatsEstimator is a pool property); the probe
 	// and the ctx_rrf statement travel through tx.
 	results, dec, err := rrf.SearchTx(ctx, h.pool, tx, p.embedding, p.query, p.querySpaced, p.scopes,
-		p.category, p.tags, p.limit, p.temporal, p.queryOR, p.visibleTypes, p.dampedTypes, p.dampedFactors,
+		p.category, p.tags, p.limit, p.temporal, p.queryOR, p.measureVisibleTypes, p.dampedTypes, p.dampedFactors,
 		p.categoriesExclude, p.typesExclude, p.grantedBlockIDs, p.policy)
 	if err != nil {
 		return nil, dec, nil, err
@@ -1501,7 +1575,7 @@ func (h *QueryHandler) armSweepSearch(ctx context.Context, p armSweepParams) ([]
 	// dec is post-retry: after an exact_cap_hit runSelected rewrote Mode, so
 	// the arms call reproduces the arguments the fusion ACTUALLY ran with.
 	rows, err := rrf.ArmRanksTx(ctx, tx, dec, p.policy, p.embedding, p.query, p.querySpaced, p.scopes,
-		p.category, p.tags, p.limit, p.temporal, p.queryOR, p.visibleTypes, p.dampedTypes, p.dampedFactors,
+		p.category, p.tags, p.limit, p.temporal, p.queryOR, p.measureVisibleTypes, p.dampedTypes, p.dampedFactors,
 		p.categoriesExclude, p.typesExclude, p.grantedBlockIDs)
 	if err != nil {
 		return nil, dec, nil, err

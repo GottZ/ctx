@@ -133,6 +133,22 @@ type ServerConfig struct {
 	DBPort     int    `key:"server.db_port" env:"CONTEXT_DB_PORT" default:"5432" mut:"restart" parse:"strict" tenancy:"global-only"`
 	DBSSL      string `key:"server.db_sslmode" env:"CONTEXT_DB_SSLMODE" default:"disable" mut:"restart" tenancy:"global-only"`
 	ListenAddr string `key:"server.listen_addr" env:"LISTEN_ADDR" default:":8080" mut:"restart" tenancy:"global-only"`
+	// InstanceKind is what this process claims to BE: "live" (default) or
+	// "measure-copy" — a corpus restored from backups/*.dump for the shadow
+	// measurement programme (design/05 §5 B4b, M-W2). The armsweep driver reads
+	// it off the measured instance and refuses to dump shadow types against an
+	// instance that does not carry "measure-copy"; the dump stamp records it, so
+	// a later compare can refuse a mixed pair.
+	//
+	// Restart-only and global-only ON PURPOSE, and both halves are load-bearing:
+	// the identity of a corpus is a property of the process that serves it, and
+	// a hot or tenant-overridable key would let a settings write turn the live
+	// instance into a "measure copy" for the duration of one dump. The value is
+	// NOT validated against the two names: an unknown value fails the driver
+	// gate like every other non-"measure-copy" value, which is the fail-closed
+	// direction, and a boot that refuses to start over a typo in a provenance
+	// label would trade a refused measurement for a refused service.
+	InstanceKind string `key:"server.instance_kind" env:"CTX_INSTANCE_KIND" default:"live" mut:"restart" tenancy:"global-only"`
 }
 
 // ChatConfig died with the primary chat/synthesis tuple in β8 — the LAST of the

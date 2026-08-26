@@ -35,6 +35,11 @@ type Runner struct {
 	Retries     int
 	Limit       *int
 	DryRun      bool
+	// ShadowTypes rides every measurement request of this run (M-W2). Empty is
+	// the ordinary dump, and then the request body carries no such key at all.
+	// The caller is responsible for having passed GateInstanceKind first — the
+	// runner measures, it does not decide where it may measure.
+	ShadowTypes []string
 	// Logf is the progress sink. It NEVER receives a query text: a sweep log on
 	// a shared host would otherwise carry the private corpus' queries.
 	Logf func(format string, args ...any)
@@ -175,6 +180,21 @@ type DumpStamp struct {
 	// AllowOutsideGoldset records the path-guard override for the report.
 	AllowOutsideGoldset bool `json:"allow_outside_goldset"`
 
+	// InstanceKind is what the MEASURED instance said it is (§5 B4b): "live" or
+	// "measure-copy", read off server.instance_kind at dump time. Empty on a
+	// dump that named no shadow types — such a run makes no claim about the
+	// instance and none should be invented for it. It is a stamp field rather
+	// than a report footnote because the campaign rule "all dumps of one
+	// campaign come from ONE instance" (F-32) has to be gateable later.
+	InstanceKind string `json:"instance_kind,omitempty"`
+	// ShadowTypes records which shadow types the dump was measured WITH — the
+	// difference between a base dump and a conditional one, in the artefact
+	// instead of in somebody's memory of how it was run.
+	ShadowTypes []string `json:"shadow_types,omitempty"`
+	// AllowLiveInstance records the gate-(l) override for the report, the same
+	// way AllowOutsideGoldset records the path-guard one.
+	AllowLiveInstance bool `json:"allow_live_instance,omitempty"`
+
 	Before DriftStamp   `json:"drift_before"`
 	After  DriftStamp   `json:"drift_after"`
 	Drift  DriftVerdict `json:"drift_verdict"`
@@ -227,6 +247,7 @@ func (r *Runner) Dump(ctx context.Context, cases []goldset.Case, pins map[string
 		RunID:            r.RunID,
 		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
 		BaseURL:          r.Client.BaseURL,
+		ShadowTypes:      r.ShadowTypes,
 		Slices:           sliceNamesOf(cases),
 		Records:          len(res.records),
 		Before:           before,
@@ -322,7 +343,8 @@ func (r *Runner) sweep(ctx context.Context, cases []goldset.Case, pins map[strin
 
 // one measures a single case, spending the retry budget on retryable failures.
 func (r *Runner) one(ctx context.Context, c goldset.Case, pins map[string]Pin) outcome {
-	req := QueryRequest{Query: c.Query, Synthesize: false, ArmRanks: true, Limit: r.Limit}
+	req := QueryRequest{Query: c.Query, Synthesize: false, ArmRanks: true, Limit: r.Limit,
+		ShadowTypes: r.ShadowTypes}
 	if pins != nil {
 		p := pins[CaseKey(c.Slice, c.Index, c.QuerySHA256)]
 		tr, tmp := p.Translation, p.Temporal

@@ -22,8 +22,13 @@
 //	./ctx-armsweep score -dump dumps/A.jsonl -dump-b dumps/B.jsonl
 //	./ctx-armsweep score -dump dumps/A.jsonl -damping-type checkpoint
 //
-// Jeder Schreibvorgang ist auf `dumps/` bzw. `reports/` eingegrenzt; einziger
-// Override ist -allow-outside-goldset, und er steht im Report.
+// Jeder Schreibvorgang ist auf `dumps/` bzw. `reports/` eingegrenzt; Override
+// ist -allow-outside-goldset, und er steht im Report.
+//
+// `dump` kennt zusätzlich -shadow-types (M-W2, design/05 §4.2): die genannten
+// Typen werden für die zwei Mess-Statements sichtbar geschaltet. Das verlangt
+// eine als Mess-Kopie gestempelte Instanz (§5 B4b) — Exit 5, wenn nicht;
+// Override -allow-live-instance, ebenfalls im Report ausgewiesen.
 //
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
@@ -57,6 +62,11 @@ func main() {
 			os.Exit(3)
 		case errors.Is(err, errDumpAborted), errors.Is(err, armsweep.ErrDumpPredatesTypeName):
 			os.Exit(4)
+		case errors.Is(err, armsweep.ErrNotMeasureCopy):
+			// Its own code, not 3: the seam did not refuse anything here — the
+			// DRIVER refused to point a shadow dump at a production corpus, and
+			// a scheduler that retries on a gate refusal must not retry on this.
+			os.Exit(5)
 		}
 		os.Exit(1)
 	}
@@ -87,6 +97,10 @@ type common struct {
 	runID        string
 	retries      int
 	quiet        bool
+	// shadowTypes/allowLive are the M-W2 measurement widening and its
+	// instance-kind override (design/05 §4.2/§5 B4b).
+	shadowTypes string
+	allowLive   bool
 }
 
 func (c *common) bind(fs *flag.FlagSet) {
@@ -103,6 +117,22 @@ func (c *common) bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.runID, "run-id", "", "Lauf-Kennung (Vorgabe: UTC-Zeitstempel)")
 	fs.IntVar(&c.retries, "retries", armsweep.DefaultRetries, "Retry-Budget je Query; danach Ausschluss")
 	fs.BoolVar(&c.quiet, "quiet", false, "keine Fortschrittsmeldungen")
+	fs.StringVar(&c.shadowTypes, "shadow-types", "",
+		"Schatten-Typen als CSV (nur `dump`; admin-gegatet, verlangt eine Mess-Kopie)")
+	fs.BoolVar(&c.allowLive, "allow-live-instance", false,
+		"Schatten-Dump gegen eine NICHT als Mess-Kopie gestempelte Instanz erlauben (wird im Report ausgewiesen)")
+}
+
+// shadowTypeNames splits the CSV, dropping empty entries — an empty flag is
+// simply "no shadow types" and must not become a request naming "".
+func (c *common) shadowTypeNames() []string {
+	var out []string
+	for _, s := range strings.Split(c.shadowTypes, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func run() error {
@@ -216,6 +246,7 @@ func (c *common) runner(gold, dumps *goldset.Guard) (*armsweep.Runner, error) {
 	r := &armsweep.Runner{
 		Client: cl, GoldDir: gold, DumpDir: dumps,
 		RunID: c.id(), Concurrency: c.concurrency, Retries: c.retries, DryRun: c.dryRun,
+		ShadowTypes: c.shadowTypeNames(),
 	}
 	if c.limit > 0 {
 		l := c.limit

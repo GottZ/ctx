@@ -150,6 +150,25 @@ type RetrievalPolicy struct {
 	// prompt) but not invalid: validatePolicy leaves it alone so the row stays
 	// loadable if the type is later flipped to damped.
 	Untrusted bool
+	// ShadowMeasurable admits the type to the arm_ranks measurement seam: only
+	// a type carrying this flag may be named in a `shadow_types` request, which
+	// adds it to p_types_visible for ctx_rrf/ctx_rrf_arms and for NOTHING else
+	// (design/05 §4.2 gate G5, M-W2).
+	//
+	// It is its OWN field, default false, and that is the whole point. The rule
+	// it replaces was "a shadow type must be retrieval.policy=excluded" — and
+	// live exactly two types satisfy that: checkpoint (5 955 blocks, 13 of them
+	// sensitivity=credentials) and system-meta. The rule would have opened the
+	// one pile whose protection rests on "not retrievable" (changelog F-1). A
+	// separate flag makes measurability a DELIBERATE, auditable setting per type
+	// instead of a side effect of another policy; the handler additionally keeps
+	// a hard deny-list for those two names that no flag can override.
+	//
+	// Like Untrusted it carries no cross-field rule: on a visible type it is
+	// inert (the type is in p_types_visible anyway), and rejecting the
+	// combination would make a row unloadable for a value that changes no
+	// behaviour.
+	ShadowMeasurable bool
 }
 
 // GuardPolicy — participation of a type in the dedup guard.
@@ -280,6 +299,10 @@ type cfgRetrieval struct {
 	// false (no pre-W02-4 row carries the key, and defaulting to true would
 	// frame the whole knowledge corpus as tool output).
 	Untrusted *bool `json:"untrusted"`
+	// ShadowMeasurable is a pointer for the same reason: absent is false, and
+	// the gate that reads it must be able to tell "not set" from "set false"
+	// when an operator audits a row.
+	ShadowMeasurable *bool `json:"shadow_measurable"`
 }
 
 type cfgGuard struct {
@@ -386,6 +409,9 @@ func applyEnvelope(p *Policy, env *cfgEnvelope) error {
 		if r.Untrusted != nil {
 			p.Retrieval.Untrusted = *r.Untrusted
 		}
+		if r.ShadowMeasurable != nil {
+			p.Retrieval.ShadowMeasurable = *r.ShadowMeasurable
+		}
 	}
 	if g := env.Guard; g != nil {
 		if g.Check != nil {
@@ -484,6 +510,11 @@ func applyClassify(p *Policy, c *cfgClassify) error {
 }
 
 // validatePolicy enforces the cross-field rules of vocabulary v1 (§3.3).
+//
+// retrieval.shadow_measurable carries no cross-field rule either, for the same
+// reason and with the same consequence: it is meaningful only on an excluded
+// type, inert on a visible one (which is in p_types_visible anyway), and the
+// gate that reads it is fail-closed on every other axis (M-W2, §4.2 G4/G5).
 //
 // retrieval.untrusted deliberately carries NO cross-field rule. On an excluded
 // type it is inert — such a block never reaches a prompt, so there is nothing

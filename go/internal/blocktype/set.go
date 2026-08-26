@@ -203,9 +203,32 @@ func (s *Set) UntrustedTypes() []string { return s.untrusted }
 // is the real caller — a Source built outside the registry path carries no
 // type, and defaulting that to true would splice the rule into prompts nothing
 // asked to reframe.
+//
+// M-W2 note: the first half of that argument — "an unregistered name cannot
+// reach a prompt at all" — rests on the retrieval allowlist coming from this
+// same snapshot. The shadow seam widens that allowlist from the REQUEST, so the
+// invariant now holds because gate G4 refuses a name that is not a key of
+// s.policies BEFORE any policy is consulted (design/05 §4.2, changelog F-10).
+// Without G4 a typo'd shadow type would arrive here as "not untrusted" — the
+// fail-open answer to a question the caller had no right to ask.
 func (s *Set) IsUntrusted(name string) bool {
 	p, ok := s.policies[name]
 	return ok && p.Retrieval.Untrusted
+}
+
+// IsShadowMeasurable reports whether the type may be named in a `shadow_types`
+// measurement request (design/05 §4.2, gate G5). Unknown name ⇒ false, and this
+// one is fail-CLOSED on purpose, the opposite decision from IsUntrusted above:
+// there the empty name is the real caller, here every caller is a request body
+// asking for visibility it does not otherwise have.
+//
+// Deliberately no precomputed list beside visible/untrusted/…: a set of shadow
+// types would be a second thing to keep in sync, and the only consumer is a
+// per-name lookup on a request that already failed six other gates if it got
+// this far.
+func (s *Set) IsShadowMeasurable(name string) bool {
+	p, ok := s.policies[name]
+	return ok && p.Retrieval.ShadowMeasurable
 }
 
 // GuardCheckTypes returns the types whose blocks enter the guard batch.

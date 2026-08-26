@@ -127,6 +127,24 @@ herausführt — auch über einen Symlink —, wird abgewiesen. Einziger Overrid
 `-allow-outside-goldset`, und er steht als `allow_outside_goldset: true` im
 Report.
 
+## Schatten-Dumps (`-shadow-types`, M-W2)
+
+`dump` kann Typen benennen, die im Ergebnis unsichtbar sind (`retrieval.policy =
+excluded` **plus** `retrieval.shadow_measurable = true`): sie werden für
+`ctx_rrf` und `ctx_rrf_arms` dieser Anfrage sichtbar geschaltet und für nichts
+sonst. So misst ein Cond-Dump einen Korpus, der noch nicht live sein darf.
+
+Das Instrument verweigert einen solchen Dump gegen eine Instanz, die sich nicht
+als Mess-Kopie ausweist (`server.instance_kind = measure-copy`, gelesen von der
+gemessenen Instanz) — **Exit 5**. Grund: ein Schatten-Block ist eine echte
+Zeile mit Embedding und tsvector, und weder der HNSW- noch die beiden
+GIN-Indexe sind partiell; er kostet also auf **jeder Produktionsanfrage**
+Scan-Budget. Deshalb gehört der Schatten-Korpus in eine wiederhergestellte
+Kopie. Override `-allow-live-instance`; Instanz-Art, Schatten-Typen und
+Override stehen im Stempel und im Report.
+
+`prime` weist `-shadow-types` ab: Pins gelten für beide Dumps eines Paares.
+
 Gold-Daten liegen im privaten `.project`-Submodule (root-only, 0600, nicht im
 Repository). Dumps und Pins tragen die effektiven Query-Texte und liegen
 deshalb im selben Verzeichnis unter denselben Rechten. **Reports tun das nicht:**

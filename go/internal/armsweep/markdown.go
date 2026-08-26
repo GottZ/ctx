@@ -73,6 +73,11 @@ func writeEnvSection(b *strings.Builder, env EnvStamp) {
 	}
 	b.WriteString("\n")
 	fmt.Fprintf(b, "- Pfad-Guard-Override `--allow-outside-goldset`: %s\n", yesNo(env.AllowOutsideGoldset))
+	if len(env.ShadowTypes) > 0 || env.InstanceKind != "" {
+		fmt.Fprintf(b, "- Instanz-Art (`%s`): `%s`\n", SettingInstanceKind, orDash(env.InstanceKind))
+		fmt.Fprintf(b, "- Schatten-Typen der Messung: `%s`\n", strings.Join(env.ShadowTypes, "`, `"))
+		fmt.Fprintf(b, "- Mess-Kopie-Override `-allow-live-instance`: %s\n", yesNo(env.AllowLiveInstance))
+	}
 	for _, d := range env.Dumps {
 		fmt.Fprintf(b, "- Dump %s: `%s` (Lauf `%s`, %d Fälle, Pins `%s`/`%s`, p50 %d ms, p95 %d ms)%s\n",
 			d.Role, d.File, d.RunID, d.Records, d.PinFile, ShortSHA(d.PinSHA256),

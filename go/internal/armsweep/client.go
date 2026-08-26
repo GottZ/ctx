@@ -58,6 +58,13 @@ type QueryRequest struct {
 	Limit             *int    `json:"limit,omitempty"`
 	PinnedTranslation *string `json:"pinned_translation,omitempty"`
 	PinnedTemporal    *string `json:"pinned_temporal,omitempty"`
+	// ShadowTypes is the M-W2 measurement widening (design/05 §4.2): the named
+	// types join p_types_visible for this request's two SQL statements only.
+	// omitempty is load-bearing — without it every ordinary dump would send a
+	// key that a pre-M-W2 instance has never seen, and the request body of a
+	// normal run would stop being byte-identical to the one that was measured
+	// before the wave.
+	ShadowTypes []string `json:"shadow_types,omitempty"`
 }
 
 // ArmRanksBlock mirrors handler.armRanksBlock on the wire.
