@@ -70,6 +70,14 @@ func NewMCPHandler(cfg MCPConfig) http.Handler {
 type queryInput struct {
 	Question string `json:"question" jsonschema:"the question to answer using hybrid search + LLM synthesis"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"max sources to return (default 5)"`
+	// V-W6: the MCP-only type filters of the RETRIEVAL tools. `types` CUTS
+	// against the request's visible allowlist — it never assigns visibility;
+	// see resolveMCPVisibleTypes for the two rejections and for why
+	// recentInput's raw predicate is deliberately not the model. Both fields
+	// absent ⇒ the delegated request body is byte-identical to before they
+	// existed.
+	Types        []string `json:"types,omitempty" jsonschema:"restrict retrieval to these block types; each name must be a retrieval-visible type (unknown or non-visible name is an error)"`
+	TypesExclude []string `json:"types_exclude,omitempty" jsonschema:"exclude these block types from retrieval"`
 }
 
 type storeInput struct {
@@ -108,6 +116,15 @@ type searchInput struct {
 	// eighth tool: a new tool raises the selection load of every MCP client,
 	// an optional argument on a known one does not (design/03 §4.8).
 	Cluster string `json:"cluster,omitempty" jsonschema:"restrict to one topic by its stable handle (from the graph surfaces)"`
+	// V-W6: same two fields, same semantics as on queryInput — `types` cuts
+	// against the visible allowlist. This is STRICTER than the identically
+	// named field on REST /api/search, which is a pure opt-in bind parameter
+	// and deliberately keeps retrieval-excluded types browseable (searchRequest,
+	// context_search.go). The MCP tools are a model's retrieval surface, not the
+	// operator browse route, and the A/B measurement they exist for must not be
+	// able to name a type retrieval policy keeps out.
+	Types        []string `json:"types,omitempty" jsonschema:"restrict results to these block types; each name must be a retrieval-visible type (unknown or non-visible name is an error)"`
+	TypesExclude []string `json:"types_exclude,omitempty" jsonschema:"exclude these block types from the results"`
 }
 
 type getInput struct {
@@ -190,6 +207,106 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	registerBlobTools(server, cfg)
 }
 
+// Type filters of the MCP retrieval tools (V-W6, design/05 §7).
+
+// mcpTypeFilterUnwired is the fail-closed answer when a retrieval tool is asked
+// for a type filter while the block-type registry is not wired: without a
+// snapshot there is no visible set to cut against, and answering the request
+// unfiltered would silently WIDEN what the caller asked to narrow.
+const mcpTypeFilterUnwired = "type filter unavailable: block-type registry not wired"
+
+// resolveMCPVisibleTypes turns the `types` argument of the MCP retrieval tools
+// into the effective allowlist: intersect(set.VisibleTypes(), requested).
+//
+// `types` CUTS, it does not assign. Two rejections keep that honest instead of
+// silent:
+//
+//   - an UNKNOWN name (not in the registry snapshot) is a caller error. Folding
+//     it into an empty intersection would answer a typo with "nothing matched",
+//     which reads as a statement about the corpus.
+//   - a name that EXISTS but is not retrieval-visible (checkpoint, system-meta)
+//     is refused as well. Admitting it would widen retrieval visibility for
+//     EVERY key without an admin gate — the very surface design/05 §4.2 gates
+//     sevenfold — and dropping it silently would let the caller believe the
+//     filter applied. There is no admin bypass here; shadow visibility is its
+//     own wave (M-W2).
+//
+// recentInput's `types` (a raw `type_name = ANY($n)` with no policy check at
+// all, mcpRecentHandler below) is deliberately NOT the model.
+//
+// An empty/absent request list returns (nil, "") and the caller then passes nil
+// — behaviour byte-identical to the time before the field existed. The second
+// return value is the rejection text, empty when there is none.
+func resolveMCPVisibleTypes(set *blocktype.Set, requested []string) ([]string, string) {
+	if len(requested) == 0 {
+		return nil, ""
+	}
+	if set == nil {
+		return nil, mcpTypeFilterUnwired
+	}
+	visible := make(map[string]bool, len(set.VisibleTypes()))
+	for _, name := range set.VisibleTypes() {
+		visible[name] = true
+	}
+	cut := make([]string, 0, len(requested))
+	seen := make(map[string]bool, len(requested))
+	for _, name := range requested {
+		if _, ok := set.Resolve(name); !ok {
+			return nil, fmt.Sprintf("unknown block type %q", name)
+		}
+		if !visible[name] {
+			return nil, fmt.Sprintf("block type %q is not retrieval-visible", name)
+		}
+		if !seen[name] {
+			seen[name] = true
+			cut = append(cut, name)
+		}
+	}
+	return cut, ""
+}
+
+// mcpQueryTypesExclude folds the query tool's positive cut into the ONE seam
+// /api/query already speaks: types_exclude → p_types_exclude.
+//
+// ctx_rrf applies `type_name = ANY(p_types_visible) AND type_name !=
+// ALL(p_types_exclude)` (139:180-181) and p_types_visible is the handler's own
+// Set.VisibleTypes(), so excluding the COMPLEMENT of the cut inside that set IS
+// the cut — one filter mechanism, no second one, and no positive `types` on the
+// REST request (queryRequest stays restrict-only by decision, query.go).
+//
+// cut is non-empty only after resolveMCPVisibleTypes accepted it, which implies
+// set != nil.
+func mcpQueryTypesExclude(set *blocktype.Set, cut, explicitExclude []string) []string {
+	if len(cut) == 0 {
+		return explicitExclude
+	}
+	keep := make(map[string]bool, len(cut))
+	for _, name := range cut {
+		keep[name] = true
+	}
+	visible := set.VisibleTypes()
+	complement := make([]string, 0, len(visible))
+	for _, name := range visible {
+		if !keep[name] {
+			complement = append(complement, name)
+		}
+	}
+	// unionExcludes dedupes and is monotone-restrictive — the same fold the REST
+	// handler runs over types_exclude ∪ block_roles_exclude. The MCP fields get
+	// NO legacy alias of their own.
+	return unionExcludes(explicitExclude, complement)
+}
+
+// mcpTypeSnapshot is the per-call registry view the retrieval tools cut against.
+// nil when the registry is not wired; resolveMCPVisibleTypes then fails closed
+// for a request that actually asked for a filter.
+func (cfg MCPConfig) mcpTypeSnapshot(ctx context.Context) *blocktype.Set {
+	if cfg.Blocktypes == nil {
+		return nil
+	}
+	return cfg.Blocktypes.SnapshotForRequest(ctx)
+}
+
 // Tool handlers.
 
 func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
@@ -202,10 +319,25 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 			limit = 5
 		}
 
+		// V-W6 type filter, resolved BEFORE the delegation so a rejected filter
+		// never costs a retrieval round trip. ONE registry snapshot per call:
+		// the cut and its complement must not come from two generations.
+		typeSet := cfg.mcpTypeSnapshot(ctx)
+		cut, rejection := resolveMCPVisibleTypes(typeSet, input.Types)
+		if rejection != "" {
+			return errResult(rejection), nil, nil
+		}
+
 		// Delegate to the internal /api/query handler for full pipeline
 		// (temporal, embedding, RRF, gravity, rerank, supersedes, synthesis).
 		// The ctx already carries the AuthResult from MCP auth middleware.
-		body, _ := json.Marshal(map[string]any{"query": input.Question, "limit": limit})
+		payload := map[string]any{"query": input.Question, "limit": limit}
+		// The key is added ONLY when a filter was asked for, so a request
+		// without both fields marshals to the exact bytes it did before V-W6.
+		if excl := mcpQueryTypesExclude(typeSet, cut, input.TypesExclude); len(excl) > 0 {
+			payload["types_exclude"] = excl
+		}
+		body, _ := json.Marshal(payload)
 		internalReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/api/query", io.NopCloser(strings.NewReader(string(body))))
 		internalReq.Header.Set("Content-Type", "application/json")
 
@@ -399,6 +531,13 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 		}
 		scopes := ar.ReadScopes
 
+		// V-W6 type filter, ahead of every pool touch: a rejected filter must
+		// not cost a grant lookup or a search statement.
+		cut, rejection := resolveMCPVisibleTypes(cfg.mcpTypeSnapshot(ctx), input.Types)
+		if rejection != "" {
+			return errResult(rejection), nil, nil
+		}
+
 		limit := input.Limit
 		if limit <= 0 {
 			limit = 10
@@ -418,7 +557,10 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 		}
 
 		grants := resolveGrants(ctx, cfg.Pool, ar)
-		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil, grants, nil, nil, clusterFacet)
+		// cut/TypesExclude ride the store layer's EXISTING type parameters (WF
+		// T10) — the same bind parameters /api/search fills. nil/nil when the
+		// caller named neither field, i.e. the pre-V-W6 call.
+		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil, grants, cut, input.TypesExclude, clusterFacet)
 		if err != nil {
 			return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
 		}
