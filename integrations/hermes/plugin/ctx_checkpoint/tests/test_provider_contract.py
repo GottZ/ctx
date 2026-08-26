@@ -115,7 +115,7 @@ def test_provider_upserts_same_head_title_for_new_transcript_digest():
     assert "019f6000-0000-7000-8000-000000000065" in calls[7][1]["content"]
 
 
-def test_memory_manager_accepts_provider_as_required_checkpoint_api_v1():
+def test_memory_manager_accepts_provider_as_required_checkpoint_api_v2():
     ids = iter(
         [
             "019f6000-0000-7000-8000-000000000071",

@@ -25,7 +25,7 @@ key/value + bearer-token pass) before anything leaves the process.
 | Mode | Host | Guarantee |
 |------|------|-----------|
 | **best-effort** (start here) | any Hermes | checkpoint is attempted before compaction; a failure is logged and compaction proceeds (historical hook semantics, contract version 1) |
-| fail-closed | Hermes carrying the checkpoint contract (version 2) | compaction is **blocked** unless a checkpoint-capable provider confirms the durable checkpoint; the uncompressed transcript is preserved |
+| fail-closed | Hermes carrying the checkpoint contract (version 2; a version-3 host with the `tool_evidence` channel is detected at runtime, see [Runtime contract negotiation](#runtime-contract-negotiation)) | compaction is **blocked** unless a checkpoint-capable provider confirms the durable checkpoint; the uncompressed transcript is preserved |
 
 The plugin is a plain Hermes **user plugin** — install it into
 `$HERMES_HOME/plugins/` on a completely stock Hermes and it works today in
@@ -49,7 +49,8 @@ fail-closed checkpoint contract.** It stays opt-in and provider-agnostic:
 
 - `PRE_COMPRESS_CHECKPOINT_API_VERSION = 2` in `agent/memory_provider.py`;
   providers opt in via `MemoryProvider.pre_compress_checkpoint_api_version`
-  (class default stays `1`)
+  (class default stays `1`; this plugin serves it as a property negotiated
+  against the host on every read — `max(2, min(host, plugin))`)
 - `MemoryManager.supports_pre_compress_checkpoint()` + strict
   `on_pre_compress(require_checkpoint=True)` (failures propagate)
 - `compression.checkpoint_required` config gate (default `false`) — fails

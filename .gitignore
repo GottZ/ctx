@@ -35,3 +35,6 @@ go/web/dist/*
 *.swo
 *~
 Thumbs.db
+
+# Python bytecode (hermes plugin tests)
+__pycache__/
