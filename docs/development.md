@@ -69,6 +69,43 @@ The five `R` cases are labelled **search-endpt** in the report because they meas
 (`/api/query`) exercise the 4-Way RRF. The JSON keys stay `retrieval` / `R0x` — the
 baseline compares on them.
 
+#### What a run records about the corpus
+
+Every result file carries the census of the corpus the run measured against:
+`by_block_type` (block count per **retrievable** type) and `population` (their sum,
+the number a pass rate is a rate *of*). `total_blocks` alone cannot separate a real
+retrieval regression from a corpus that grew a new retrievable type. The census comes
+from one extra read — the admin-gated drift section of the `stats` action — taken with
+`CTX_ADMIN_KEY` from `.env` if it is set, otherwise with the harness key. It is
+optional in every sense: without admin rights `by_block_type` is `null`, the reason
+stands in `census_source`, and the eval run is unaffected.
+
+#### `--update-baseline` leaves a record
+
+Before it copies the result file over `.eval-baseline.json`, the script writes
+`.eval-baseline.diff` next to it: both run timestamps, the `summary` delta, pass/total
+per category, the **list of test cases whose verdict flipped** in either direction, and
+the census delta. With no previous baseline the file holds the single line
+`no previous baseline`. Moving a gate is allowed; moving it without a trace is not —
+paste the diff into the commit that moves the baseline.
+
+#### Test categories
+
+A test ID's first letter selects its category, and the registry that maps the two lives
+**once**, in `EVAL_CATEGORIES` at the top of `eval.sh` — the summary table, the results
+JSON and the 15-pp per-category regression threshold all read it from there. An ID
+whose prefix is not registered counts into no category and is watched by no threshold,
+so a new case class means a new registry entry first. `G` (`derived`) is registered and
+**deliberately has no cases yet**; the regression check lists it under `EMPTY
+CATEGORIES` rather than letting a category with nothing in it read as one that passed.
+
+Both script gates run without a server, without `.env` and without firing a query:
+
+```bash
+bash eval-matcher_test.sh           # negative-case matcher contract
+bash eval-instrument_test.sh        # census, baseline diff, category registry
+```
+
 MCP tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18.
 
 ### Redaction & truncation marker register (`internal/redact`)

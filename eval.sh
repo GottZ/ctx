@@ -91,8 +91,307 @@ negative_conf_ok() {
   return 1
 }
 
+# =====================================================================
+# Instrumentation (Welle M-W6)
+# =====================================================================
+#
+# Three things the harness could not show before, all defined up here — above
+# the sourcing guard — so eval-instrument_test.sh reaches them without .env,
+# without a running server and without firing a single query:
+#
+#   1. EVAL_CATEGORIES — ONE category registry. It used to live in two places
+#      (the aggregation dict and the regression check's category list), so a
+#      test ID with a new prefix counted into NO category and was watched by NO
+#      threshold. Both python blocks read it from the environment now.
+#   2. eval_census_json — the per-block-type census of the corpus the run
+#      measured against. Without it a pass-rate change is not attributable:
+#      total_blocks alone cannot tell a new retrievable type from a real
+#      retrieval regression.
+#   3. eval_baseline_diff — what --update-baseline actually changed, written
+#      next to the baseline BEFORE the cp. The cp stays; it is no longer
+#      traceless (design/05 §4.6 (3)).
+
+# Category registry: category name -> test-ID prefix. Insertion order is the
+# display order of the summary table and the regression check.
+#
+# 'derived' (prefix G) is registered WITHOUT any test case on purpose. The
+# cases arrive with the first derived level that goes live; until then the
+# category is reported as EMPTY (total 0) rather than being silently absent —
+# an unregistered prefix is the failure mode this registry exists to prevent.
+export EVAL_CATEGORIES='{"confident":"S","bilingual":"B","negative":"N","keyword":"K","imperative":"I","multihop":"M","temporal":"T","retrieval":"R","derived":"G"}'
+
+# eval_census_json — reads a /api/manage {"action":"stats"} response on STDIN
+# and prints one line of JSON:
+#   {"by_block_type": {type: count} | null, "population": int | null,
+#    "census_source": "..."}
+#
+# by_block_type covers the RETRIEVABLE, non-archived types only — the
+# population a query can actually reach — and the server decides which types
+# those are (store.GetDriftCensus marks each row `retrievable` from the
+# block-type registry snapshot, go/internal/store/drift.go:104-108). The
+# harness deliberately does NOT re-derive that rule; a second opinion about
+# retrieval visibility is exactly the drift this field is meant to expose.
+#
+# The census section is admin-gated and opt-in (handler/context_manage.go:790-806).
+# Nothing here is fatal: a caller without admin rights, an unreachable server or
+# a malformed response yields by_block_type=null plus the reason in
+# census_source. The eval run itself is unaffected.
+EVAL_CENSUS_PY=$(cat <<'PY'
+import json, sys
+
+
+def emit(by_type, population, source):
+    json.dump({'by_block_type': by_type, 'population': population,
+               'census_source': source}, sys.stdout)
+    sys.stdout.write('\n')
+
+
+raw = sys.stdin.read()
+try:
+    doc = json.loads(raw) if raw.strip() else None
+except ValueError:
+    doc = None
+if not isinstance(doc, dict):
+    emit(None, None, 'unavailable: stats response is not a JSON object')
+    sys.exit(0)
+
+drift = doc.get('drift')
+if not isinstance(drift, dict):
+    reason = doc.get('error') or 'stats response carries no drift section'
+    emit(None, None, 'unavailable: %s' % str(reason)[:120])
+    sys.exit(0)
+
+by_type = {}
+for row in drift.get('types') or []:
+    if isinstance(row, dict) and row.get('retrievable'):
+        by_type[row.get('type_name')] = row.get('count')
+population = sum(v for v in by_type.values() if isinstance(v, int))
+source = 'manage stats drift @ %s' % (drift.get('at') or 'unknown')
+
+# The server sums the same rows itself; a disagreement means the census was
+# read wrong and must not pass as a clean number.
+server_total = drift.get('retrievable_blocks')
+if isinstance(server_total, int) and server_total != population:
+    source += ' (MISMATCH: server retrievable_blocks=%d)' % server_total
+emit(by_type, population, source)
+PY
+)
+
+# Reads the stats response on STDIN (python3 -c leaves stdin to the program).
+eval_census_json() {
+  python3 -c "$EVAL_CENSUS_PY"
+}
+
+# eval_baseline_diff <results-file> <baseline-file> <out-file> — writes the
+# record of what a baseline update changes and prints a one-line digest.
+#
+# Called BEFORE the cp, because afterwards the old baseline no longer exists.
+# With no previous baseline the out-file holds the single line
+# "no previous baseline" — the file is written either way so a stale diff from
+# an earlier update can never be mistaken for the current one.
+EVAL_BASELINE_DIFF_PY=$(cat <<'PY'
+import json, os, sys
+from datetime import datetime, timezone
+
+cur_path, base_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+with open(cur_path) as fh:
+    cur = json.load(fh)
+
+if not os.path.exists(base_path):
+    with open(out_path, 'w') as fh:
+        fh.write('no previous baseline\n')
+    print('  Baseline diff: no previous baseline')
+    sys.exit(0)
+
+with open(base_path) as fh:
+    old = json.load(fh)
+
+categories = json.loads(os.environ.get('EVAL_CATEGORIES') or '{}')
+
+
+def verdicts(doc):
+    return {r.get('id'): r.get('verdict') for r in doc.get('results') or []}
+
+
+ov, cv = verdicts(old), verdicts(cur)
+flips = [{'id': tid, 'from': ov.get(tid), 'to': cv.get(tid)}
+         for tid in sorted(set(ov) | set(cv)) if ov.get(tid) != cv.get(tid)]
+counts = {
+    'pass_to_fail': sum(1 for f in flips if f['from'] == 'PASS' and f['to'] == 'FAIL'),
+    'fail_to_pass': sum(1 for f in flips if f['from'] == 'FAIL' and f['to'] == 'PASS'),
+    'added': sum(1 for f in flips if f['from'] is None),
+    'removed': sum(1 for f in flips if f['to'] is None),
+}
+
+by_cat = {}
+for name in categories:
+    oc = (old.get('by_category') or {}).get(name) or {}
+    cc = (cur.get('by_category') or {}).get(name) or {}
+    by_cat[name] = {'from': [oc.get('pass', 0), oc.get('total', 0)],
+                    'to': [cc.get('pass', 0), cc.get('total', 0)]}
+
+ob, cb = old.get('by_block_type'), cur.get('by_block_type')
+changed = {}
+if isinstance(ob, dict) or isinstance(cb, dict):
+    names = set((ob or {})) | set((cb or {}))
+    changed = {n: [(ob or {}).get(n), (cb or {}).get(n)]
+               for n in sorted(names) if (ob or {}).get(n) != (cb or {}).get(n)}
+
+diff = {
+    'at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'baseline_file': base_path,
+    'results_file': cur_path,
+    'timestamps': {'from': old.get('timestamp'), 'to': cur.get('timestamp')},
+    'summary': {'from': old.get('summary'), 'to': cur.get('summary')},
+    'by_category': by_cat,
+    'flips': flips,
+    'flip_counts': counts,
+    'by_block_type': {'from': ob, 'to': cb, 'changed': changed},
+    'population': {'from': old.get('population'), 'to': cur.get('population')},
+    'census_source': {'from': old.get('census_source'), 'to': cur.get('census_source')},
+}
+with open(out_path, 'w') as fh:
+    json.dump(diff, fh, indent=2)
+    fh.write('\n')
+
+os_ = old.get('summary') or {}
+cs_ = cur.get('summary') or {}
+
+
+# A file written before the census existed has no population — say so, do not
+# print a Python None into an operator's terminal.
+def pop(v):
+    return 'n/a' if v is None else v
+
+
+line = '  Baseline diff: %s/%s -> %s/%s passed, %d flips (P->F %d, F->P %d), population %s -> %s' % (
+    os_.get('passed'), os_.get('total'), cs_.get('passed'), cs_.get('total'),
+    len(flips), counts['pass_to_fail'], counts['fail_to_pass'],
+    pop(old.get('population')), pop(cur.get('population')))
+print(line)
+worse = [f['id'] for f in flips if f['from'] == 'PASS' and f['to'] == 'FAIL']
+if worse:
+    print('  Baseline diff: PASS->FAIL: %s' % ', '.join(worse))
+PY
+)
+
+eval_baseline_diff() {
+  python3 -c "$EVAL_BASELINE_DIFF_PY" "$1" "$2" "$3"
+}
+
+# eval_aggregate <results-array-file> <total_blocks> <elapsed_s> <timestamp> <out-file>
+#   census object (eval_census_json output) on STDIN
+#
+# The whole results-JSON build. It reads the result records from a FILE instead
+# of taking them through shell interpolation, which is what makes the golden
+# test possible: an existing eval-results-*.json can be fed straight back
+# through this function and must reproduce its own summary/by_category.
+EVAL_AGGREGATE_PY=$(cat <<'PY'
+import json, os, sys
+
+array_path, total_blocks, elapsed, timestamp, out_path = sys.argv[1:6]
+
+with open(array_path) as fh:
+    results = json.load(fh)
+raw_census = sys.stdin.read().strip()
+census = json.loads(raw_census) if raw_census else {}
+
+# Compute aggregates
+total = len(results)
+passed = sum(1 for r in results if r['verdict'] == 'PASS')
+failed = sum(1 for r in results if r['verdict'] == 'FAIL')
+
+by_type = {}
+for r in results:
+    t = r.get('type', 'unknown')
+    if t not in by_type:
+        by_type[t] = {'pass': 0, 'fail': 0, 'total': 0, 'latencies': []}
+    by_type[t]['total'] += 1
+    by_type[t]['latencies'].append(r.get('latency_ms', 0))
+    if r['verdict'] == 'PASS':
+        by_type[t]['pass'] += 1
+    else:
+        by_type[t]['fail'] += 1
+
+# Compute latency stats per type
+for t in by_type:
+    lats = sorted(by_type[t]['latencies'])
+    n = len(lats)
+    by_type[t]['latency_p50'] = lats[n // 2] if n else 0
+    by_type[t]['latency_p95'] = lats[int(n * 0.95)] if n else 0
+    by_type[t]['latency_mean'] = sum(lats) // n if n else 0
+    del by_type[t]['latencies']
+
+# By category — prefixes come from the ONE registry (EVAL_CATEGORIES).
+categories = {name: {'prefix': prefix, 'pass': 0, 'fail': 0}
+              for name, prefix in json.loads(os.environ['EVAL_CATEGORIES']).items()}
+for r in results:
+    for cat, info in categories.items():
+        if r['id'].startswith(info['prefix']):
+            if r['verdict'] == 'PASS':
+                info['pass'] += 1
+            else:
+                info['fail'] += 1
+            break
+
+# All keyword stats
+total_kw_hits = sum(r.get('keyword_hits', 0) for r in results if r.get('keyword_total', 0) > 0)
+total_kw_expected = sum(r.get('keyword_total', 0) for r in results if r.get('keyword_total', 0) > 0)
+keyword_hit_rate = round(total_kw_hits / total_kw_expected * 100, 1) if total_kw_expected else 0
+
+# False positive rate (negative tests that returned confident)
+neg_tests = [r for r in results if r['id'].startswith('N')]
+false_positives = sum(1 for r in neg_tests if r.get('confidence') == 'confident')
+fp_rate = round(false_positives / len(neg_tests) * 100, 1) if neg_tests else 0
+
+# Source-level assertion stats
+src_checked = [r for r in results if r.get('source_total', 0) > 0]
+src_total_patterns = sum(r['source_total'] for r in src_checked)
+src_total_hits = sum(r['source_hits'] for r in src_checked)
+src_tests_pass = sum(1 for r in src_checked if r['source_hits'] == r['source_total'])
+src_hit_rate = round(src_total_hits / src_total_patterns * 100, 1) if src_total_patterns else 0
+
+output = {
+    'timestamp': timestamp,
+    'total_blocks': int(total_blocks),
+    # Corpus census of THIS run (M-W6): which retrievable types, how many
+    # blocks each, and their sum as the population every rate below is a rate
+    # OF. Null when the census was not reachable — census_source says why.
+    'by_block_type': census.get('by_block_type'),
+    'population': census.get('population'),
+    'census_source': census.get('census_source', 'unavailable: no census taken'),
+    'elapsed_seconds': int(elapsed),
+    'summary': {
+        'total': total,
+        'passed': passed,
+        'failed': failed,
+        'pass_rate': round(passed / total * 100, 1) if total else 0,
+        'keyword_hit_rate': keyword_hit_rate,
+        'false_positive_rate': fp_rate,
+        'source_checks': len(src_checked),
+        'source_hit_rate': src_hit_rate,
+    },
+    'by_type': by_type,
+    'by_category': {k: {'pass': v['pass'], 'fail': v['fail'], 'total': v['pass'] + v['fail']} for k, v in categories.items()},
+    'results': results,
+}
+
+with open(out_path, 'w') as fh:
+    json.dump(output, fh, indent=2)
+
+print()
+PY
+)
+
+# Census object on STDIN, everything else in argv.
+eval_aggregate() {
+  python3 -c "$EVAL_AGGREGATE_PY" "$@"
+}
+
 # Sourcing guard: everything below is the harness. `source eval.sh` returns
-# here with the matcher defined; direct execution falls through.
+# here with the matcher and the instrumentation defined; direct execution falls
+# through.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   return 0
 fi
@@ -105,6 +404,8 @@ set -a; source "$ENV_FILE"; set +a
 
 KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}"
 BASELINE_FILE="${SCRIPT_DIR}/.eval-baseline.json"
+# Written by --update-baseline, next to the baseline it replaces (M-W6).
+BASELINE_DIFF_FILE="${SCRIPT_DIR}/.eval-baseline.diff"
 RESULTS_DIR="${SCRIPT_DIR}/.eval-results"
 mkdir -p "$RESULTS_DIR"
 RESULTS_FILE="${RESULTS_DIR}/eval-results-$(date +%s).json"
@@ -165,11 +466,16 @@ fi
 # Helpers
 # =====================================================================
 
+# api <url> <body> [timeout] [key] — key defaults to the harness key, so every
+# call that existed before this parameter behaves exactly as it did. Only the
+# block-type census (M-W6) passes a different one: its stats section is
+# admin-gated, and the harness key is not an admin key.
 api() {
   local timeout="${3:-120}"
+  local key="${4:-$KEY_PRIVATE}"
   curl -s --max-time "$timeout" -X POST "$1" \
     -H "Content-Type: application/json" \
-    -H "X-Context-Key: $KEY_PRIVATE" \
+    -H "X-Context-Key: $key" \
     -d "$2" 2>/dev/null
 }
 
@@ -540,6 +846,26 @@ if (( total_blocks < 100 )); then
   exit 1
 fi
 echo "Store OK: $total_blocks blocks"
+
+# Block-type census (M-W6), taken ONCE per run like total_blocks and in a
+# SEPARATE request: the drift section is admin-gated, and a non-admin key asking
+# for it gets a 403 for the whole stats call (handler/context_manage.go:804) —
+# which would take the preflight down with it. CTX_ADMIN_KEY comes out of the
+# same .env this script already sources; where it is absent the harness key is
+# tried (it is the admin key on some installs), and where that fails too the
+# run continues with by_block_type=null and the reason recorded in the results
+# file. No new secret has to be provisioned for an eval run.
+census=$(api "$WEBHOOK/api/manage" '{"action":"stats","data":{"drift":true}}' 60 "${CTX_ADMIN_KEY:-$KEY_PRIVATE}")
+CENSUS_JSON=$(printf '%s' "$census" | eval_census_json)
+echo "Census: $(printf '%s' "$CENSUS_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+bt = d.get('by_block_type')
+if bt is None:
+    print(d.get('census_source'))
+else:
+    print('%d retrievable blocks in %d types (%s)' % (d.get('population') or 0, len(bt), ', '.join(sorted(bt))))
+" 2>/dev/null || echo "unavailable")"
 echo ""
 
 run_all_tests() {
@@ -662,99 +988,15 @@ ELAPSED=$(( END_TIME - START_TIME ))
 # Results JSON
 # =====================================================================
 
-python3 -c "
-import json, sys
-
-results = [$(IFS=','; echo "${RESULTS_JSON[*]}")]
-timestamp = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
-
-# Compute aggregates
-total = len(results)
-passed = sum(1 for r in results if r['verdict'] == 'PASS')
-failed = sum(1 for r in results if r['verdict'] == 'FAIL')
-
-by_type = {}
-for r in results:
-    t = r.get('type', 'unknown')
-    if t not in by_type:
-        by_type[t] = {'pass': 0, 'fail': 0, 'total': 0, 'latencies': []}
-    by_type[t]['total'] += 1
-    by_type[t]['latencies'].append(r.get('latency_ms', 0))
-    if r['verdict'] == 'PASS':
-        by_type[t]['pass'] += 1
-    else:
-        by_type[t]['fail'] += 1
-
-# Compute latency stats per type
-for t in by_type:
-    lats = sorted(by_type[t]['latencies'])
-    n = len(lats)
-    by_type[t]['latency_p50'] = lats[n // 2] if n else 0
-    by_type[t]['latency_p95'] = lats[int(n * 0.95)] if n else 0
-    by_type[t]['latency_mean'] = sum(lats) // n if n else 0
-    del by_type[t]['latencies']
-
-# By category (S=confident, B=bilingual, N=negative, K=keyword, M=multihop, T=temporal, R=retrieval)
-categories = {
-    'confident': {'prefix': 'S', 'pass': 0, 'fail': 0},
-    'bilingual': {'prefix': 'B', 'pass': 0, 'fail': 0},
-    'negative':  {'prefix': 'N', 'pass': 0, 'fail': 0},
-    'keyword':   {'prefix': 'K', 'pass': 0, 'fail': 0},
-    'imperative': {'prefix': 'I', 'pass': 0, 'fail': 0},
-    'multihop':  {'prefix': 'M', 'pass': 0, 'fail': 0},
-    'temporal':  {'prefix': 'T', 'pass': 0, 'fail': 0},
-    'retrieval': {'prefix': 'R', 'pass': 0, 'fail': 0},
-}
-for r in results:
-    for cat, info in categories.items():
-        if r['id'].startswith(info['prefix']):
-            if r['verdict'] == 'PASS':
-                info['pass'] += 1
-            else:
-                info['fail'] += 1
-            break
-
-# All keyword stats
-total_kw_hits = sum(r.get('keyword_hits', 0) for r in results if r.get('keyword_total', 0) > 0)
-total_kw_expected = sum(r.get('keyword_total', 0) for r in results if r.get('keyword_total', 0) > 0)
-keyword_hit_rate = round(total_kw_hits / total_kw_expected * 100, 1) if total_kw_expected else 0
-
-# False positive rate (negative tests that returned confident)
-neg_tests = [r for r in results if r['id'].startswith('N')]
-false_positives = sum(1 for r in neg_tests if r.get('confidence') == 'confident')
-fp_rate = round(false_positives / len(neg_tests) * 100, 1) if neg_tests else 0
-
-# Source-level assertion stats
-src_checked = [r for r in results if r.get('source_total', 0) > 0]
-src_total_patterns = sum(r['source_total'] for r in src_checked)
-src_total_hits = sum(r['source_hits'] for r in src_checked)
-src_tests_pass = sum(1 for r in src_checked if r['source_hits'] == r['source_total'])
-src_hit_rate = round(src_total_hits / src_total_patterns * 100, 1) if src_total_patterns else 0
-
-output = {
-    'timestamp': timestamp,
-    'total_blocks': $total_blocks,
-    'elapsed_seconds': $ELAPSED,
-    'summary': {
-        'total': total,
-        'passed': passed,
-        'failed': failed,
-        'pass_rate': round(passed / total * 100, 1) if total else 0,
-        'keyword_hit_rate': keyword_hit_rate,
-        'false_positive_rate': fp_rate,
-        'source_checks': len(src_checked),
-        'source_hit_rate': src_hit_rate,
-    },
-    'by_type': by_type,
-    'by_category': {k: {'pass': v['pass'], 'fail': v['fail'], 'total': v['pass']+v['fail']} for k, v in categories.items()},
-    'results': results,
-}
-
-with open('$RESULTS_FILE', 'w') as f:
-    json.dump(output, f, indent=2)
-
-print()
-" 2>/dev/null
+# The result records go through a FILE instead of shell interpolation, which
+# is what makes the aggregation a function eval-instrument_test.sh can call
+# (M-W6). The census object rides in on stdin; stderr stays silenced exactly
+# as it was when this block was inline.
+RESULTS_ARRAY_FILE="${RESULTS_DIR}/.results-array-$$.json"
+printf '[%s]' "$(IFS=','; echo "${RESULTS_JSON[*]}")" > "$RESULTS_ARRAY_FILE"
+printf '%s' "$CENSUS_JSON" | eval_aggregate "$RESULTS_ARRAY_FILE" "$total_blocks" \
+  "$ELAPSED" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RESULTS_FILE" 2>/dev/null
+rm -f "$RESULTS_ARRAY_FILE"
 
 # =====================================================================
 # Summary Table
@@ -767,7 +1009,7 @@ echo "================================================================="
 echo ""
 
 python3 -c "
-import json
+import json, os
 
 with open('$RESULTS_FILE') as f:
     data = json.load(f)
@@ -782,6 +1024,11 @@ print(f'  False positive rate:{s[\"false_positive_rate\"]}%')
 if s.get('source_checks', 0) > 0:
     print(f'  Source checks:      {s[\"source_checks\"]} tests, {s[\"source_hit_rate\"]}% pattern hit rate')
 print(f'  Elapsed:            {data[\"elapsed_seconds\"]}s')
+# The population every rate above is a rate OF (M-W6, Masterplan K9).
+if data.get('population') is not None:
+    print(f'  Population:         {data[\"population\"]} retrievable of {data[\"total_blocks\"]} blocks')
+else:
+    print(f'  Population:         unavailable — {data.get(\"census_source\")}')
 print()
 
 # Display labels. The dict KEYS ('retrieval', by_type keys, test IDs) are what the
@@ -790,10 +1037,10 @@ print()
 # label invited exactly the reading these five tests cannot support.
 LABELS = {'retrieval': 'search-endpt'}
 
-# Category breakdown
+# Category breakdown — order comes from the ONE registry (EVAL_CATEGORIES).
 print('  Category        Pass  Fail  Total  Rate')
 print('  ' + '-' * 46)
-for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'multihop', 'temporal', 'retrieval']:
+for cat in json.loads(os.environ['EVAL_CATEGORIES']):
     c = data['by_category'].get(cat, {'pass':0,'fail':0,'total':0})
     if c['total'] == 0:
         continue
@@ -844,7 +1091,7 @@ if [[ -f "$BASELINE_FILE" ]]; then
   echo ""
 
   python3 -c "
-import json, sys
+import json, os, sys
 
 with open('$RESULTS_FILE') as f:
     current = json.load(f)
@@ -878,11 +1125,22 @@ if cs['false_positive_rate'] > bs['false_positive_rate'] + 10:
 elif cs['false_positive_rate'] < bs['false_positive_rate'] - 10:
     improvements.append(f'False positive rate: {bs[\"false_positive_rate\"]}% -> {cs[\"false_positive_rate\"]}% (IMPROVED)')
 
-# Per-category regressions
-for cat in ['confident', 'bilingual', 'negative', 'keyword', 'imperative', 'multihop', 'temporal', 'retrieval']:
+# Per-category regressions — the category set comes from the ONE registry
+# (EVAL_CATEGORIES), so a newly registered prefix is watched here from the day
+# it is registered instead of from the day someone remembers this list.
+#
+# A registered category with no test cases is REPORTED as empty rather than
+# skipped in silence: the 15-pp threshold cannot say anything about 0 cases,
+# and a category that says nothing must not read as a category that passed.
+# It is informational — never a regression, so it does not move the exit code.
+empty = []
+for cat in json.loads(os.environ['EVAL_CATEGORIES']):
     cc = current['by_category'].get(cat, {'pass':0, 'total':0})
     bc = baseline['by_category'].get(cat, {'pass':0, 'total':0})
-    if bc['total'] == 0 or cc['total'] == 0:
+    if cc['total'] == 0:
+        empty.append(f'{LABELS.get(cat, cat)} (baseline: {bc[\"total\"]} cases)')
+        continue
+    if bc['total'] == 0:
         continue
     c_rate = cc['pass'] / cc['total'] * 100
     b_rate = bc['pass'] / bc['total'] * 100
@@ -914,6 +1172,24 @@ if not regressions and not improvements:
     print('  No significant changes vs baseline.')
     print()
 
+if empty:
+    print('  EMPTY CATEGORIES (registered, no test cases — not evaluated):')
+    for e in empty:
+        print(f'    -- {e}')
+    print()
+
+# Corpus drift (M-W6): a pass-rate move is only attributable against the
+# population it was measured on. Informational, never a regression.
+cp, bp = current.get('population'), baseline.get('population')
+if cp is not None or bp is not None:
+    print(f'  Population: {bp} -> {cp} retrievable blocks')
+    cbt = current.get('by_block_type') or {}
+    bbt = baseline.get('by_block_type') or {}
+    moved = [f'{n}: {bbt.get(n, \"absent\")} -> {cbt.get(n, \"absent\")}' for n in sorted(set(cbt) | set(bbt)) if cbt.get(n) != bbt.get(n)]
+    if moved:
+        print('    types changed: ' + ', '.join(moved))
+    print()
+
 # Print baseline date
 print(f'  Baseline: {baseline[\"timestamp\"]} ({baseline[\"summary\"][\"total\"]} tests, {baseline[\"summary\"][\"pass_rate\"]}% pass rate)')
 print()
@@ -932,8 +1208,12 @@ fi
 # =====================================================================
 
 if $UPDATE_BASELINE; then
+  # BEFORE the cp — afterwards the baseline this run replaces is gone. Moving a
+  # gate is allowed; moving it without a trace is not (design/05 §4.6 (3)).
+  eval_baseline_diff "$RESULTS_FILE" "$BASELINE_FILE" "$BASELINE_DIFF_FILE"
   cp "$RESULTS_FILE" "$BASELINE_FILE"
   echo "Baseline updated: $BASELINE_FILE"
+  echo "Baseline diff:    $BASELINE_DIFF_FILE"
   echo ""
 fi
 
