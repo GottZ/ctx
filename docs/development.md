@@ -71,6 +71,23 @@ baseline compares on them.
 
 MCP tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18.
 
+### Redaction & truncation marker register (`internal/redact`)
+
+Every literal the pipeline writes **into** text it later reads back lives in
+`internal/redact`, and nowhere else: `Redacted` (`[redacted]` — the cross-scope
+replacement in `store.GuardList`), `Truncated` (`[... truncated]` —
+`promptguard.Assemble` plus the synthesis and classify prompt builders) and
+`Markers`, the case-folded negative list that `internal/derived` gate G4 rejects
+a quote on.
+
+`go test -short ./internal/redact/` walks every non-test `.go` file below `go/`
+and goes red on any marker literal outside that package. It is AST-based, so a
+marker *named in a comment* is not a finding — only string literals are. The
+point is fail-closed-ness of a write-time gate: a writer that spells its own
+marker out is a marker the reader does not know, and every quote carrying it
+would pass G4 silently. Add a new marker to `redact` first; the register is what
+the reader consumes.
+
 ### Model benchmark: ctx-goldbench
 
 `ctx-goldbench` measures how well an arbitrary OpenAI-compatible model performs ctx's

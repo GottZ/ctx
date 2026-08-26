@@ -12,6 +12,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/clustersql"
+	"github.com/GottZ/ctx/internal/redact"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -1434,7 +1435,7 @@ func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, cat
 		CASE
 			WHEN mb.id IS NULL THEN NULL
 			WHEN mb.scope = ANY($%d) THEN mb.title
-			ELSE '[redacted]'
+			ELSE '`+redact.Redacted+`'
 		END AS matched_title,
 		b.metadata->>'guard_checked_at' AS checked_at,
 		b.updated_at

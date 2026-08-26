@@ -12,6 +12,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/promptguard"
+	"github.com/GottZ/ctx/internal/redact"
 	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -478,7 +479,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 		// Truncation runs BEFORE the guard, so the cap keeps measuring the
 		// original text rather than a CGJ-inflated one (same order as
 		// buildClassifyUser).
-		content := util.TruncateRunesWithSuffix(src.Content, "[... truncated]", MaxBlockChars)
+		content := util.TruncateRunesWithSuffix(src.Content, redact.Truncated, MaxBlockChars)
 
 		// Title and category stay in their ATTRIBUTE positions — no ClampLine:
 		// unlike the dream header lines (design 04 §2.3-c2) this position is
@@ -559,7 +560,7 @@ func fitSourcesToBudget(systemPrompt, question string, sources []Source, budget 
 		parts = append(parts, promptguard.Part{
 			Kind:     sourceMarkerKind,
 			Ref:      strconv.Itoa(i + 1),
-			Payload:  util.TruncateRunesWithSuffix(src.Content, "[... truncated]", MaxBlockChars) + src.Title + src.Category,
+			Payload:  util.TruncateRunesWithSuffix(src.Content, redact.Truncated, MaxBlockChars) + src.Title + src.Category,
 			Priority: promptguard.PriorityContent,
 		})
 	}
@@ -599,7 +600,7 @@ func fitSourcesToBudget(systemPrompt, question string, sources []Source, budget 
 			continue
 		}
 		if room < utf8.RuneCountInString(src.Content) {
-			src.Content = util.TruncateRunesSuffix(src.Content, "[... truncated]", room)
+			src.Content = util.TruncateRunesSuffix(src.Content, redact.Truncated, room)
 			truncated++
 		}
 		kept = append(kept, src)

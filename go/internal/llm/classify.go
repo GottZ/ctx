@@ -20,6 +20,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/promptguard"
+	"github.com/GottZ/ctx/internal/redact"
 	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -101,9 +102,9 @@ const ClassifyContentLimit = 8000
 
 const (
 	// classifyTruncSuffix keeps the truncation VISIBLE to the model — it must
-	// know it is judging an excerpt, not a whole block. Same literal as the
-	// synthesis path (internal/llm/synthesize.go:308).
-	classifyTruncSuffix = "[... truncated]"
+	// know it is judging an excerpt, not a whole block. The same constant as
+	// the synthesis path and promptguard.Assemble (M-W4a register).
+	classifyTruncSuffix = redact.Truncated
 
 	// classifySeparator divides the code-generated question from the guarded
 	// block. It stays outside the marker: a payload can reproduce the byte

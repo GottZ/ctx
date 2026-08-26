@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/GottZ/ctx/internal/redact"
 	"github.com/GottZ/ctx/internal/util"
 )
 
@@ -91,8 +92,9 @@ var ErrRuleOverBudget = errors.New("promptguard: budget below the unshortenable 
 const partSeparator = "\n\n"
 
 // truncMarker keeps a shortening VISIBLE to the model — it must know it is
-// reading an excerpt. Same literal as the synthesis and classify paths.
-const truncMarker = "[... truncated]"
+// reading an excerpt. The same constant as the synthesis and classify paths,
+// and the same one internal/derived reads back as a negative list (M-W4a).
+const truncMarker = redact.Truncated
 
 // minPartRunes is the floor under which a shortened part is dropped whole
 // instead. A part cut down to a few runes is not a shorter source, it is a

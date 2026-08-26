@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/promptguard"
+	"github.com/GottZ/ctx/internal/redact"
 	"github.com/GottZ/ctx/internal/sensitivity"
 )
 
@@ -88,7 +89,7 @@ func distinctSources(claims []Claim) int {
 // "[... truncated]" is promptguard.Assemble's truncation marker
 // (promptguard/assemble.go:95). A quote whose substance is half redaction
 // marks is a citation about nothing.
-var redactionMarkers = []string{"[redacted", "[... truncated]"}
+var redactionMarkers = redact.Markers
 
 // CiteGate runs G0–G7 over every claim of ONE block, in the order of the table
 // in §4.4.1 (cheap before expensive), and returns the survivors plus the
