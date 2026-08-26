@@ -142,6 +142,23 @@ a different metric. All four return 0 for "no labels" and "no ranking" rather
 than NaN: a slice mean is taken over these values, and one NaN would erase a
 whole column of a report instead of costing one case.
 
+Two further ranking metrics cover what those four cannot see. In a corpus that
+keeps derived blocks (catalogue, insight) next to the sources they were built
+from, a derived block can push its own source blocks out of the top-k without
+Recall or nDCG moving, because both sides of that trade are relevant.
+`SRecallAtK` (subtopic recall) therefore counts covered FACETS instead of
+covered documents, and `AlphaNDCG` discounts a facet that an earlier position
+already served by `(1−α)` per repeat — `AlphaNDCGDefault` is 0.5, a constant
+rather than a config key, because a metric whose parameter moves between two
+reports compares nothing. A facet is whatever the caller declares; for ctx it
+is a gold block of the source set, and a derived block covers exactly the
+facets of its `source_block_ids`. α-nDCG is normalised against a GREEDY ideal
+ranking — choosing the true ideal is NP-hard — and the result is deliberately
+not clamped to 1, because the greedy ideal is a lower bound and a clamp would
+report exactly the case worth looking at as a perfect score. The normaliser
+depends on the judgements, k and α only, never on the ranking, so a
+base/condition comparison stays sound regardless.
+
 `-dump-outputs <path>` writes every raw model answer as JSONL
 (`{axis,id,outputs}`) before any parsing — the substrate for offline
 re-scoring (judge-based or retrieval-functional evaluation) without repeating
