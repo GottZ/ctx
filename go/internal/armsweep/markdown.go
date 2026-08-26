@@ -27,6 +27,7 @@ func RenderMarkdown(generatedAt string, body ReportBody) string {
 	writeConfigSection(&b, body.Configs)
 	writeComparisonSection(&b, body.Comparisons)
 	writeWinSection(&b, body.Wins)
+	writeDampingSection(&b, body.DampingType, body.Damping)
 	writeExcludedSection(&b, body.Excluded)
 	writeNotesSection(&b, body.Notes)
 	writeScopeSection(&b)
@@ -176,6 +177,38 @@ func writeWinSection(b *strings.Builder, wins []WinGate) {
 	for _, w := range wins {
 		for _, r := range w.Reasons {
 			fmt.Fprintf(b, "- %s: %s\n", w.Config, r)
+		}
+	}
+	b.WriteString("\n")
+}
+
+// writeDampingSection renders the M-W8 curve as its own family.
+//
+// It is a separate section rather than ten more rows under „Konfigurationen"
+// because it answers a different question: not „which weight vector wins" but
+// „what is this type's damping factor worth", and it carries no G-WIN verdict
+// on purpose — the optimum is reported to whoever sets the registry value, not
+// applied by this tool.
+func writeDampingSection(b *strings.Builder, typeName string, cfgs []ConfigResult) {
+	if len(cfgs) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "## Damping-Kurve (Typ `%s`)\n\n", typeName)
+	b.WriteString("Zehn Stützstellen auf Dump A, Gewichte und `k` durchgehend wie V0. " +
+		"Der Ist-Faktor der Registry ist eine der Stützstellen; die Kurve wird **berichtet**, " +
+		"nicht geschaltet, und steht bewusst außerhalb der Varianten-Tabelle und ihres " +
+		"Bonferroni-Niveaus.\n\n")
+	b.WriteString("| Stützstelle | Faktor | Slice | n | nDCG@10 | Recall@5 | MRR@10 |\n")
+	b.WriteString("|---|---:|---|---:|---:|---:|---:|\n")
+	for _, c := range cfgs {
+		factor := c.Config.Damping[typeName]
+		for _, s := range c.Slices {
+			if s.Unlabelled {
+				fmt.Fprintf(b, "| %s | %.2f | %s | %d | — | — | — |\n", c.Config.Name, factor, s.Slice, s.N)
+				continue
+			}
+			fmt.Fprintf(b, "| %s | %.2f | %s | %d | %.4f | %.4f | %.4f |\n",
+				c.Config.Name, factor, s.Slice, s.N, s.NDCG10, s.Recall5, s.MRR10)
 		}
 	}
 	b.WriteString("\n")

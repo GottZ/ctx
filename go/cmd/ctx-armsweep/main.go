@@ -12,11 +12,15 @@
 //	       Drift-Stempel.
 //	score  einen Dump (oder ein Dump-Paar) unter 16 Konfigurationen neu
 //	       fusioniert, je Slice gescort, über G-NOISE und G-WIN gegattert.
+//	       Mit -damping-type zusätzlich die Damping-Kurve eines Blocktyps über
+//	       zehn Stützstellen — eigene Report-Sektion, kein G-WIN-Urteil, und
+//	       nur über Dumps ab Migration 142 (sonst Exit 4).
 //
 //	go build ./cmd/ctx-armsweep
 //	./ctx-armsweep prime -slices G-KI,G-Q,G-REAL
 //	./ctx-armsweep dump  -pins pins-20260826T090000Z.jsonl
 //	./ctx-armsweep score -dump dumps/A.jsonl -dump-b dumps/B.jsonl
+//	./ctx-armsweep score -dump dumps/A.jsonl -damping-type checkpoint
 //
 // Jeder Schreibvorgang ist auf `dumps/` bzw. `reports/` eingegrenzt; einziger
 // Override ist -allow-outside-goldset, und er steht im Report.
@@ -51,7 +55,7 @@ func main() {
 			os.Exit(2)
 		case errors.Is(err, armsweep.ErrGateRefused):
 			os.Exit(3)
-		case errors.Is(err, errDumpAborted):
+		case errors.Is(err, errDumpAborted), errors.Is(err, armsweep.ErrDumpPredatesTypeName):
 			os.Exit(4)
 		}
 		os.Exit(1)
@@ -62,6 +66,10 @@ func main() {
 // code because a scheduler has to tell "the run failed" from "the run was
 // clean but the corpus moved underneath it" — the second is a finding, not a
 // bug, and the artefact on disk is evidence either way.
+//
+// armsweep.ErrDumpPredatesTypeName shares exit 4: it is the same class of
+// verdict — the run was well-formed and the DUMP was rejected, here because a
+// damping curve was asked of an artefact measured before migration 142.
 var errDumpAborted = errors.New("dump verworfen (Drift-Protokoll)")
 
 // common carries the flags every subcommand shares.
@@ -126,10 +134,11 @@ func run() error {
 		dumpB := fs.String("dump-b", "", "zweiter Dump für die V0'-Replikate (ohne ihn ist G-NOISE nicht auswertbar)")
 		outDir := fs.String("reports", defaultReportDir(), "Report-Verzeichnis")
 		name := fs.String("name", "", "Basisname der Report-Dateien (Vorgabe: armsweep-<Lauf-ID>)")
+		damping := fs.String("damping-type", "", "Blocktyp, dessen Damping-Kurve zusätzlich gefahren wird (10 Stützstellen; verlangt Dumps ab Migration 142)")
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			return err
 		}
-		return cmdScore(&c, *dumpA, *dumpB, *outDir, *name)
+		return cmdScore(&c, *dumpA, *dumpB, *outDir, *name, *damping)
 	default:
 		return fmt.Errorf("unbekanntes Unterkommando %q", cmd)
 	}

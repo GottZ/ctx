@@ -2,6 +2,7 @@ package armsweep
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -83,8 +84,15 @@ type ReportBody struct {
 	Configs       []ConfigResult `json:"configs"`
 	Comparisons   []Comparison   `json:"comparisons"`
 	Wins          []WinGate      `json:"win_gate"`
-	Excluded      []ExcludedCase `json:"excluded"`
-	Notes         []string       `json:"notes"`
+	// Damping is the M-W8 curve: one ConfigResult per support point of ONE
+	// type, reported as its own family. Absent — and, being omitempty, absent
+	// from the bytes as well — when no damping type was swept, so a report
+	// scored the way every report before this wave was scored is byte-identical
+	// to the one that wave produced.
+	Damping     []ConfigResult `json:"damping,omitempty"`
+	DampingType string         `json:"damping_type,omitempty"`
+	Excluded    []ExcludedCase `json:"excluded"`
+	Notes       []string       `json:"notes"`
 }
 
 // ReportHeader is the volatile line. Everything that would break byte-identity
@@ -104,16 +112,37 @@ type ScoreInput struct {
 	RecordsB []Record
 	StampB   *DumpStamp
 
+	// DampingType names the block type whose damping curve is swept (M-W8).
+	// Empty means no curve: the report is exactly the one this instrument
+	// produced before the wave, and a pre-142 dump stays scorable.
+	DampingType string
+
 	Seed        int64
 	GitRevision string
 	GoldStamp   goldset.Stamp
 }
 
+// ErrDumpPredatesTypeName refuses a damping sweep over a dump measured before
+// migration 142.
+//
+// The failure it prevents is silent, not loud: such a dump carries the empty
+// string in every row's TypeName, so every damping lookup misses, every support
+// point falls back to the dump's own factor, and the curve comes out FLAT —
+// ten identical rows that read as "damping does not matter on this corpus"
+// while in truth nothing was damped at all. There is no defensible default
+// here, which is why this is an error and not a note in the report.
+var ErrDumpPredatesTypeName = errors.New("dump predates migration 142: its rows carry no type_name, so a damping curve over it would be flat by construction, not by measurement")
+
 // Score is the whole offline evaluation: re-fuse, measure, gate, report.
 //
 // It touches no clock, no network and no randomness beyond the seed it is
-// handed, which is what makes gate (c) achievable at all.
-func Score(in ScoreInput) ReportBody {
+// handed, which is what makes gate (c) achievable at all. The only error it
+// returns is the damping refusal above: everything else it can measure, it
+// measures and reports, including its own failed gates.
+func Score(in ScoreInput) (ReportBody, error) {
+	if err := checkDampingDumps(in); err != nil {
+		return ReportBody{}, err
+	}
 	excluded := unionExcluded(in.StampA, in.StampB)
 	recsA := dropExcluded(in.RecordsA, excluded)
 	recsB := dropExcluded(in.RecordsB, excluded)
@@ -172,9 +201,48 @@ func Score(in ScoreInput) ReportBody {
 	}
 
 	body.Comparisons, body.Wins = compareAll(all, setsA, v0B, noiseCmp, unlab, in.Seed)
+
+	if in.DampingType != "" {
+		body.DampingType = in.DampingType
+		body.Damping = scoreConfigs(DampingConfigs(in.DampingType), recsA, nil, unlab, in.Seed)
+		body.Notes = append(body.Notes, fmt.Sprintf(
+			"damping curve over %q: %d support points on dump A, live weights throughout. Reported, never gated — the optimum of this curve is a finding for the registry, not a rollout criterion (design 05 §6.1). It is deliberately absent from the variant table above, whose Bonferroni level is fixed at %d comparisons.",
+			in.DampingType, len(DampingStops), SecondaryComparisons))
+	}
+
 	body.Excluded = excluded
 	body.Notes = append(body.Notes, unlabelledNotes(labelled)...)
-	return body
+	return body, nil
+}
+
+// checkDampingDumps is the M-W1-review gate: a damping sweep may only run over
+// dumps that actually recorded a type name.
+//
+// Both dumps are checked, not only the one the curve is scored on. The B dump
+// feeds V0' and therefore G-NOISE, and a pair whose halves were measured across
+// the 142 boundary is not a replicate pair at all — refusing it here costs a
+// re-dump and hides nothing.
+func checkDampingDumps(in ScoreInput) error {
+	if in.DampingType == "" {
+		return nil
+	}
+	stamps := []struct {
+		role  string
+		stamp *DumpStamp
+	}{{"A", &in.StampA}}
+	if in.StampB != nil {
+		stamps = append(stamps, struct {
+			role  string
+			stamp *DumpStamp
+		}{"B", in.StampB})
+	}
+	for _, s := range stamps {
+		if s.stamp.MigrationsMax < TypeNameMigration {
+			return fmt.Errorf("damping sweep over %q refused: dump %s (%s) was measured at migrations_max %d, below %d: %w",
+				in.DampingType, s.role, s.stamp.DumpFile, s.stamp.MigrationsMax, TypeNameMigration, ErrDumpPredatesTypeName)
+		}
+	}
+	return nil
 }
 
 // scoreConfigs measures every configuration over the right dump. V0' is the

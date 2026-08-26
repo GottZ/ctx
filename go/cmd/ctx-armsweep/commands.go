@@ -162,7 +162,7 @@ func cmdDump(ctx context.Context, c *common, pinFile string) error {
 }
 
 // cmdScore is the offline half: no instance, no clock beyond the header line.
-func cmdScore(c *common, dumpA, dumpB, outDir, name string) error {
+func cmdScore(c *common, dumpA, dumpB, outDir, name, dampingType string) error {
 	if dumpA == "" {
 		return fmt.Errorf("-dump ist Pflicht")
 	}
@@ -184,7 +184,7 @@ func cmdScore(c *common, dumpA, dumpB, outDir, name string) error {
 		return err
 	}
 	in := armsweep.ScoreInput{
-		RecordsA: recsA, StampA: stampA,
+		RecordsA: recsA, StampA: stampA, DampingType: dampingType,
 		Seed: c.seed, GitRevision: buildRev(), GoldStamp: goldStamp,
 	}
 	if dumpB != "" {
@@ -194,7 +194,10 @@ func cmdScore(c *common, dumpA, dumpB, outDir, name string) error {
 		}
 		in.RecordsB, in.StampB = recsB, &stampB
 	}
-	body := armsweep.Score(in)
+	body, err := armsweep.Score(in)
+	if err != nil {
+		return err
+	}
 
 	reports, err := c.reportGuard(outDir)
 	if err != nil {
@@ -219,9 +222,18 @@ func cmdScore(c *common, dumpA, dumpB, outDir, name string) error {
 	if err := armsweep.WriteMarkdown(mdPath, generatedAt, body); err != nil {
 		return err
 	}
-	fmt.Printf("score: %d Konfigurationen, G-NOISE %s → %s\n",
-		len(body.Configs), interpretable(body.Interpretable), jsonPath)
+	fmt.Printf("score: %d Konfigurationen%s, G-NOISE %s → %s\n",
+		len(body.Configs), dampingNote(body), interpretable(body.Interpretable), jsonPath)
 	return nil
+}
+
+// dampingNote names the second family in the summary line. Silent when no
+// damping type was swept, so the line of a plain run is the line it always was.
+func dampingNote(body armsweep.ReportBody) string {
+	if len(body.Damping) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" + %d Damping-Stützstellen auf %q", len(body.Damping), body.DampingType)
 }
 
 func interpretable(v bool) string {

@@ -58,11 +58,33 @@ type Weights struct {
 	Trigram  float64 `json:"trigram"`
 }
 
+// TypeNameMigration is the migration that added `type_name` to the
+// ctx_rrf_arms return (M-W1). A dump written by an instance below it carries
+// the empty string in every row's TypeName — not because those blocks have no
+// type, but because the column did not exist yet. Every damping decision in
+// this package is keyed on that name, which is why the number is a constant
+// here and a refusal in Score rather than a comment.
+const TypeNameMigration = 142
+
 // Config is one fusion configuration under test (§4.6).
 type Config struct {
 	Name    string  `json:"name"`
 	Weights Weights `json:"weights"`
 	K       float64 `json:"k"`
+	// Damping replaces the per-row type_factor for the types it names
+	// (type_name → factor, wave M-W8). It is the one input of the fusion the
+	// live registry owns rather than the dump: the factor sits in
+	// blocktype/builtin.go, it multiplies into the score AFTER arm membership
+	// is decided (139:335-338, and the arm CTEs never see it), and therefore a
+	// dump that recorded the name of each candidate's type can be re-fused at
+	// any damping value without measuring anything again.
+	//
+	// A row whose TypeName is not in the map — including every row of a dump
+	// written before migration 142, where the name is empty — keeps the factor
+	// the dump recorded. That is the reproduction path, and it is the reason
+	// the empty name is never a map key: an old dump must re-fuse to exactly
+	// the numbers it re-fused to before this field existed.
+	Damping map[string]float64 `json:"damping,omitempty"`
 	// MergeFTS collapses the two FTS arms into one whose rank is
 	// min(rank_de, rank_en) — configuration V1, the only structural change in
 	// the set. Everything else moves numbers.
@@ -128,22 +150,42 @@ func FusedIDs(f []Fused) []string {
 // case.
 func scoreRow(r rrf.ArmRow, cfg Config) float64 {
 	w := cfg.Weights
+	tf := typeFactor(r, cfg)
 	deRank, enRank, enWeight := r.RankFTSDe, r.RankFTSEn, w.FTSEn
 	if cfg.MergeFTS {
 		deRank, enRank, enWeight = minRank(r.RankFTSDe, r.RankFTSEn), nil, 0
 	}
 	if cfg.FactorsOutside {
-		return r.MassFactor * r.TypeFactor *
+		return r.MassFactor * tf *
 			(w.Semantic*recip(r.RankSemantic, cfg.K) +
 				w.FTSDe*recip(deRank, cfg.K) +
 				enWeight*recip(enRank, cfg.K) +
 				w.Trigram*recip(r.RankTrigram, cfg.K))
 	}
-	mt := r.MassFactor * r.TypeFactor
+	mt := r.MassFactor * tf
 	return w.Semantic*mt*recip(r.RankSemantic, cfg.K) +
 		w.FTSDe*mt*recip(deRank, cfg.K) +
 		enWeight*mt*recip(enRank, cfg.K) +
 		w.Trigram*mt*recip(r.RankTrigram, cfg.K)
+}
+
+// typeFactor is the one place the fusion decides whether a candidate's type
+// damping comes from the dump or from the configuration.
+//
+// The empty TypeName is checked BEFORE the map, not after: without that line a
+// pre-142 dump would agree with `Damping{"": x}` on every row at once, which is
+// the single substitution that turns a damping sweep into a silent global
+// rescale of the whole dump. A map that names no type at all (the 14 static
+// configurations) never reaches the lookup, so their arithmetic is the same
+// expression it was before this field existed.
+func typeFactor(r rrf.ArmRow, cfg Config) float64 {
+	if len(cfg.Damping) == 0 || r.TypeName == "" {
+		return r.TypeFactor
+	}
+	if f, ok := cfg.Damping[r.TypeName]; ok {
+		return f
+	}
+	return r.TypeFactor
 }
 
 // recip mirrors `COALESCE(1.0 / (k + rank), 0)`: a missing arm contributes

@@ -57,6 +57,35 @@ vorab festgelegte Primärvergleichung und wird bei 95 % gelesen; die übrigen 13
 laufen bei 1 − 0,05/13 und heißen, wenn sie durchkommen, „Kandidat,
 unbestätigt".
 
+## Die Damping-Kurve (Welle M-W8)
+
+```bash
+./ctx-armsweep score -dump dumps/<A>.jsonl -damping-type checkpoint
+```
+
+`-damping-type` hängt eine **zweite Familie** an den Report: die Damping-Kurve
+eines Blocktyps über zehn Stützstellen — 0,05 · 0,10 · 0,15 · 0,20 · 0,30 · 0,35
+· 0,50 · 0,70 · 0,85 · 1,00. Das Gitter enthält jeden Faktor, den die Registry
+heute vergibt (`toolEvidenceDamping` 0,15, `auditTrailDamping` 0,3,
+`toolOverviewDamping` 0,35, ungedämpft 1,0), damit der Ist-Zustand immer eine
+der Stützstellen ist und das Optimum daneben steht statt daran vorbei.
+
+Warum das offline geht: seit Migration 142 trägt jede Dump-Zeile ihren
+`type_name`, und `type_factor` wirkt multiplikativ **nach** der Arm-Zugehörigkeit
+— die Arm-CTEs sehen ihn nicht. Die ganze Kurve wird also aus einem einzigen
+Dump neu fusioniert, ohne noch einmal zu messen.
+
+Die Kurve steht in einer **eigenen** Report-Sektion und bekommt bewusst **kein**
+G-WIN-Urteil: das Optimum ist ein Befund für den, der den Registry-Wert setzt,
+und zehn zusätzliche Zeilen in der Varianten-Tabelle würden deren fest
+verdrahtetes Bonferroni-Niveau über 13 Vergleiche stillschweigend aufweichen.
+
+Ein Dump, der **vor** Migration 142 gemessen wurde, wird bei angeforderter Kurve
+hart abgewiesen (Exit 4) — nicht auf einen Vorgabewert zurückgesetzt. Solche
+Zeilen tragen keinen Typnamen; die Kurve käme flach heraus, und zwar per
+Konstruktion statt per Messung. Läufe **ohne** `-damping-type` sind von alledem
+unberührt und über Alt-Dumps unverändert lauffähig.
+
 ## Betrieb
 
 - **Off-Peak fahren, nicht parallel zu Dream.** Das ist eine Betriebsnotiz,

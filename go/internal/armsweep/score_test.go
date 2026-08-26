@@ -141,12 +141,12 @@ func TestReportIsByteIdentical(t *testing.T) {
 		{Slice: in.RecordsB[40].Slice, Index: in.RecordsB[40].Index, QuerySHA256: in.RecordsB[40].QuerySHA256, Attempts: 3, Reason: "connection reset"},
 		{Slice: in.RecordsB[3].Slice, Index: 3, QuerySHA256: in.RecordsB[3].QuerySHA256, Attempts: 3, Reason: "embed backend down"},
 	}
-	first, err := armsweep.MarshalBody(armsweep.Score(in))
+	first, err := armsweep.MarshalBody(mustScore(t, in))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	for i := 0; i < 8; i++ {
-		again, err := armsweep.MarshalBody(armsweep.Score(in))
+		again, err := armsweep.MarshalBody(mustScore(t, in))
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
@@ -161,7 +161,7 @@ func TestReportIsByteIdentical(t *testing.T) {
 // timestamp lives in the header line, and everything below it is stable.
 func TestReportFileIsByteIdenticalBelowTheHeader(t *testing.T) {
 	dir := t.TempDir()
-	body := armsweep.Score(synthInput(t, true))
+	body := mustScore(t, synthInput(t, true))
 	p1, p2 := filepath.Join(dir, "a.json"), filepath.Join(dir, "b.json")
 	if err := armsweep.WriteReport(p1, "2026-08-26T10:00:00Z", body); err != nil {
 		t.Fatalf("write 1: %v", err)
@@ -193,7 +193,7 @@ func TestReportFileIsByteIdenticalBelowTheHeader(t *testing.T) {
 // TestMarkdownIsByteIdenticalBelowTheHeader pins the same property for the
 // human-readable half.
 func TestMarkdownIsByteIdenticalBelowTheHeader(t *testing.T) {
-	body := armsweep.Score(synthInput(t, true))
+	body := mustScore(t, synthInput(t, true))
 	a := armsweep.RenderMarkdown("2026-08-26T10:00:00Z", body)
 	b := armsweep.RenderMarkdown("2026-08-26T23:59:59Z", body)
 	if a == b {
@@ -235,7 +235,7 @@ func firstDiff(a, b []byte) string {
 // disagree about nothing, so the gate must pass. Without this half the negative
 // probe below could pass for the wrong reason.
 func TestNoiseGatePassesOnACleanReplicate(t *testing.T) {
-	body := armsweep.Score(synthInput(t, true))
+	body := mustScore(t, synthInput(t, true))
 	if len(body.Noise) == 0 {
 		t.Fatal("no G-NOISE verdict although a second dump was supplied")
 	}
@@ -256,7 +256,7 @@ func TestNoiseGateFailsOnAPerturbedReplicate(t *testing.T) {
 	in := synthInput(t, true)
 	in.RecordsB = perturbRanks(in.RecordsB, 10, 424242)
 
-	body := armsweep.Score(in)
+	body := mustScore(t, in)
 	failed := false
 	for _, g := range body.Noise {
 		t.Logf("slice %s: discordance %.4f (limit %.2f), CI [%.5f, %.5f], pass=%v",
@@ -301,7 +301,7 @@ func perturbRanks(recs []armsweep.Record, swaps int, seed uint64) []armsweep.Rec
 // (they land in B-W6), so the slice is REPORTED and skipped — never scored as
 // a column of zeros that would read as "this configuration is terrible here".
 func TestUnlabelledSliceIsSkippedNotScored(t *testing.T) {
-	body := armsweep.Score(synthInput(t, true))
+	body := mustScore(t, synthInput(t, true))
 
 	var real *armsweep.SliceProfile
 	for i := range body.Slices {
@@ -349,7 +349,7 @@ func TestExclusionsAreTheUnionOverTheDumpPair(t *testing.T) {
 		{Slice: fromB.Slice, Index: fromB.Index, QuerySHA256: fromB.QuerySHA256, Attempts: 3, Reason: "statement timeout"},
 	}
 
-	body := armsweep.Score(in)
+	body := mustScore(t, in)
 	if len(body.Excluded) != 2 {
 		t.Fatalf("report lists %d exclusions, want the union of 2: %+v", len(body.Excluded), body.Excluded)
 	}
@@ -357,7 +357,7 @@ func TestExclusionsAreTheUnionOverTheDumpPair(t *testing.T) {
 		t.Error("exclusion list is not key-sorted — the report would not be byte-stable")
 	}
 
-	base := armsweep.Score(synthInput(t, true))
+	base := mustScore(t, synthInput(t, true))
 	for i, s := range body.Slices {
 		if s.Slice == fromA.Slice || s.Slice == armsweep.SliceKeyOf(fromB) {
 			if s.N >= base.Slices[i].N {
@@ -371,7 +371,7 @@ func TestExclusionsAreTheUnionOverTheDumpPair(t *testing.T) {
 // second dump G-NOISE has nothing to measure, so nothing may be read as a
 // result — and the report has to say so rather than omitting the gate.
 func TestSingleDumpCannotBeInterpreted(t *testing.T) {
-	body := armsweep.Score(synthInput(t, false))
+	body := mustScore(t, synthInput(t, false))
 	if body.Interpretable {
 		t.Error("a single dump was marked interpretable")
 	}
@@ -386,7 +386,7 @@ func TestSingleDumpCannotBeInterpreted(t *testing.T) {
 // TestReportCoversAllSixteenConfigurations pins the column set and the report
 // order, V6a/V6b derived in place.
 func TestReportCoversAllSixteenConfigurations(t *testing.T) {
-	body := armsweep.Score(synthInput(t, true))
+	body := mustScore(t, synthInput(t, true))
 	if len(body.Configs) != 16 {
 		t.Fatalf("%d configurations in the report, want 16", len(body.Configs))
 	}
@@ -410,7 +410,7 @@ func TestReportCoversAllSixteenConfigurations(t *testing.T) {
 // comparison at 0.95, every other variant is read at 1−0.05/13 and labelled a
 // candidate rather than a result.
 func TestWinGateLevels(t *testing.T) {
-	body := armsweep.Score(synthInput(t, true))
+	body := mustScore(t, synthInput(t, true))
 	seen := map[string]armsweep.WinGate{}
 	for _, w := range body.Wins {
 		seen[w.Config] = w

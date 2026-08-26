@@ -75,6 +75,47 @@ func staticConfigs() []Config {
 	)
 }
 
+// DampingStops are the ten support points of the damping curve (M-W8, design
+// 05 §4.3/§6.1) — a family of its own, not four more entries in the weight
+// sweep.
+//
+// The grid is not uniform and is not meant to be: it contains EVERY factor the
+// live registry currently assigns (`toolEvidenceDamping` 0.15,
+// `auditTrailDamping` 0.3, `toolOverviewDamping` 0.35, blocktype/builtin.go
+// :79/:80/:32) plus the undamped 1.0, so whatever the swept type's live factor
+// is, the curve contains the status quo and the report can show the measured
+// optimum NEXT TO it instead of on a grid that misses it by 0.02. The rest of
+// the points thicken the low end, where the multiplicative factor still changes
+// the ranking; between 0.85 and 1.0 it mostly does not.
+var DampingStops = []float64{0.05, 0.10, 0.15, 0.20, 0.30, 0.35, 0.50, 0.70, 0.85, 1.00}
+
+// DampingName is the report label of one support point. The factor is IN the
+// name because a damping table read without its configuration column is the
+// one table in this report where the reader would otherwise have to guess.
+func DampingName(factor float64) string { return fmt.Sprintf("D%.2f", factor) }
+
+// DampingConfigs is the damping curve for ONE type: the live weight vector at
+// every support point, differing in nothing but the factor.
+//
+// Weights and k stay at V0 on purpose. The curve answers "what is this type's
+// damping worth", and a family that moved two things at once would answer
+// neither question. That is also why these configurations are reported in
+// their own section and never enter the variant-vs-V0 table: G-WIN reads its
+// Bonferroni level off SecondaryComparisons, a fixed 13, and ten more rows in
+// that table would silently loosen every level in it.
+func DampingConfigs(typeName string) []Config {
+	out := make([]Config, 0, len(DampingStops))
+	for _, f := range DampingStops {
+		out = append(out, Config{
+			Name: DampingName(f), Weights: LiveWeights, K: LiveK,
+			Damping: map[string]float64{typeName: f},
+			Note: fmt.Sprintf("damping curve: type_factor of %q forced to %.2f; live weights, k=%g",
+				typeName, f, LiveK),
+		})
+	}
+	return out
+}
+
 // ConfigNames is the canonical report column order, V6a/V6b included at their
 // derived position. A report that reordered its columns between runs would
 // break the byte-identity gate, so the order lives here and nowhere else.

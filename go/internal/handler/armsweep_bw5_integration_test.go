@@ -629,9 +629,12 @@ func TestBW5RetryBudget(t *testing.T) {
 
 	// The exclusion union over the dump pair: one clean dump, one with the
 	// exclusion ⇒ the report drops the case from BOTH.
-	body := armsweep.Score(armsweep.ScoreInput{
+	body, serr := armsweep.Score(armsweep.ScoreInput{
 		RecordsA: recs, StampA: stamp, RecordsB: recs2, StampB: &stamp2, Seed: 20260812,
 	})
+	if serr != nil {
+		t.Fatalf("score: %v", serr)
+	}
 	if len(body.Excluded) != 1 {
 		t.Errorf("report lists %d exclusions, want the union of 1: %+v", len(body.Excluded), body.Excluded)
 	}

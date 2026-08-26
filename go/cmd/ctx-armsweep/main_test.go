@@ -79,7 +79,7 @@ func TestDryRunPipeline(t *testing.T) {
 	}
 
 	reports := filepath.Join(t.TempDir(), armsweep.ReportDirName)
-	if err := cmdScore(c, "testrun.jsonl", "", reports, "r"); err != nil {
+	if err := cmdScore(c, "testrun.jsonl", "", reports, "r", ""); err != nil {
 		t.Fatalf("score: %v", err)
 	}
 	body, err := armsweep.ReadReportBody(filepath.Join(reports, "r.json"))
@@ -115,14 +115,14 @@ func TestReportGuardRefusesAForeignDirectory(t *testing.T) {
 	}
 
 	foreign := filepath.Join(t.TempDir(), "somewhere-else")
-	err := cmdScore(c, "testrun.jsonl", "", foreign, "r")
+	err := cmdScore(c, "testrun.jsonl", "", foreign, "r", "")
 	if !errors.Is(err, goldset.ErrOutsideGoldset) {
 		t.Fatalf("score into %q returned %v, want ErrOutsideGoldset", foreign, err)
 	}
 
 	over := dryCommon(dir)
 	over.allowOutside = true
-	if err := cmdScore(over, "testrun.jsonl", "", foreign, "r"); err != nil {
+	if err := cmdScore(over, "testrun.jsonl", "", foreign, "r", ""); err != nil {
 		t.Fatalf("score with the override: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(foreign, "r.json")); err != nil {

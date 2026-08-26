@@ -472,6 +472,20 @@ that was not derived on. V1 is the single pre-registered primary comparison at
 95 %; the other 13 run at 1−0.05/13 and, if they clear, are labelled "candidate,
 unconfirmed".
 
+`score -damping-type <block type>` adds a **second family**: the damping curve of
+one block type over ten support points (0.05, 0.10, 0.15, 0.20, 0.30, 0.35, 0.50,
+0.70, 0.85, 1.00 — the grid contains every factor the registry currently assigns,
+so the status quo is always one of the points). Since migration 142 every dump
+row carries its `type_name`, and `type_factor` multiplies into the score *after*
+arm membership is decided, so the whole curve is re-fused from one dump without
+measuring anything again. It is reported in its own section and deliberately
+carries **no** G-WIN verdict: the optimum is a finding for whoever sets the
+registry value, and ten extra rows in the variant table would silently loosen its
+fixed 13-comparison Bonferroni level. Asking for a curve over a dump measured
+before migration 142 is a hard refusal (exit 4), not a fallback — such a dump has
+no type names, so the curve would come out flat by construction rather than by
+measurement.
+
 The census reaches the driver as an **additive, opt-in, server-admin-only**
 `drift` section of the existing `POST /api/manage` `stats` action — not as a new
 endpoint. A stats request that does not ask for it gets the byte-identical
