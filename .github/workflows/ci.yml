@@ -68,6 +68,15 @@ jobs:
           version: v2.11.4
           working-directory: go
           args: --timeout=5m
+          # Kein Analyse-Cache (2026-08-26): der Cache-Key der Action trägt das
+          # Go-Patchlevel nicht. Als der Runner von go1.26.6 auf go1.26.7 wechselte,
+          # wurde der unter 1.26.6 gefüllte Cache (Key …-go-2955-2d35…) restauriert
+          # und staticcheck meldete SA5011 auf zehn unveränderte, korrekte
+          # `if x == nil { t.Fatal }`-Stellen (v5.7.0-Lauf 32944991742; Nachtlauf
+          # 03:22Z mit 1.26.6 und demselben Key war grün). Dieselbe Klasse wie die
+          # lokale Cache-Kontamination bei parallelen Worktrees — und vermutlich
+          # auch der Vorfall vom 05.08. (s. o.). Lint dauert ohne Cache ~1 min.
+          skip-cache: true
           only-new-issues: ${{ github.event_name == 'pull_request' }}
 
   # ─── Stage 1b: Web (frontend gate, parallel to Lint) ─────────────────────────
