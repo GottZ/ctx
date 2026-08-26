@@ -11,7 +11,6 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
-	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -228,28 +227,21 @@ func blockSizeLimit(category, title, content string) string {
 	return ""
 }
 
-// applyWriteDetector runs the G40 credentials scanner over content. On a hit it
-// returns the sensitivity raised UPGRADE-ONLY to credentials with Detector set
-// (source='pattern' in the upsert) and metadata carrying the secret-free reason
-// — never the matched secret. A hit only ever RAISES: it overrides a too-low
-// manual/default classification but leaves an already-credentials block intact.
-// No hit ⇒ inputs returned unchanged.
+// applyWriteDetector is the request-scoped wrapper around the ONE detector
+// implementation, store.ApplyWriteDetector (Wissens-Ebenen V-W8): the verdict
+// itself — upgrade-only to credentials, Detector set (source='pattern' in the
+// upsert), metadata carrying the secret-free reason and never the matched
+// secret — lives in the store, where UpsertBlock applies it to every write
+// path. The handler keeps this call because the STAGED path needs the verdict
+// before the write: it is pinned into the hash-bound canonical payload
+// (store/confirm_payload.go:47-51). Only the logging is handler-local — this is
+// the sole caller that owns a request id.
 func applyWriteDetector(content, reqID string, sens store.SensitivityWrite, metadata map[string]any) (store.SensitivityWrite, map[string]any) {
-	m, hit := sensitivity.Scan(content)
-	if !hit {
-		return sens, metadata
+	sens, metadata, m := store.ApplyWriteDetector(content, sens, metadata)
+	if m != nil {
+		slog.Info("store: credentials pattern detected — sensitivity forced to credentials",
+			"kind", m.Kind, "request_id", reqID)
 	}
-	if sens.Value.Rank() < backends.SensCredentials.Rank() {
-		sens.Value = backends.SensCredentials
-	}
-	sens.Manual = false
-	sens.Detector = true
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	metadata["sensitivity_detector"] = map[string]any{"kind": m.Kind, "reason": m.Reason}
-	slog.Info("store: credentials pattern detected — sensitivity forced to credentials",
-		"kind", m.Kind, "request_id", reqID)
 	return sens, metadata
 }
 

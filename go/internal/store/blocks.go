@@ -224,6 +224,17 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 		metadata = map[string]any{}
 	}
 
+	// G40 credentials detector on EVERY upsert path (Wissens-Ebenen V-W8,
+	// design/05 §7 row V-W8 and §5 B3). Before this it ran in the handler only
+	// (context_store.go:107, stage_gates.go:81), so digest, dream, rootmap and
+	// the ingest block path wrote credentials-bearing content with the DDL
+	// defaults and no verdict. The handler keeps its own call — there the
+	// verdict must exist BEFORE the write, because the staged path pins it
+	// into the hash-bound canonical payload (confirm_payload.go:47-51) — and
+	// the two applications are idempotent: upgrade-only, same scan, same
+	// single metadata key.
+	sens, metadata, _ = ApplyWriteDetector(content, sens, metadata)
+
 	// Reserved metadata keys are stripped from caller-supplied metadata on
 	// BOTH upsert paths (Wissens-Ebenen V-W3, design/05 §2.2 row S3): today
 	// exactly `guard_checked_at`, in the same expression form UpdateBlock
