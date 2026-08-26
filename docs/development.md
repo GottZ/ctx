@@ -384,6 +384,11 @@ The census reaches the driver as an **additive, opt-in, server-admin-only**
 `drift` section of the existing `POST /api/manage` `stats` action — not as a new
 endpoint. A stats request that does not ask for it gets the byte-identical
 response it always got, which matters because the statusline polls that action.
+`gold_ids` carries at most **10 000** ids per census — enough for the multi-gold
+slices, and a hard error above it rather than a silent truncation, because a
+dropped id would come back as an absent block and read as drift. The lifecycle
+lookup runs in chunks of 1 000 underneath; the answer stays ordered by id, so
+the chunking is invisible to the driver.
 
 What the instrument does **not** measure is everything after `ctx_rrf`: gravity,
 cluster injection, graph expansion, the aggregate fold and the rerank stage are

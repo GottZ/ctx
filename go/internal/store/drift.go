@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -54,11 +56,31 @@ type BlockLifecycle struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// maxDriftGoldIDs caps the id list a single census may be asked about. The gold
-// set is 650 queries with at most one label each today; the cap is the order of
-// magnitude above that, so a malformed request cannot turn the census into an
-// unbounded id scan.
-const maxDriftGoldIDs = 2000
+// maxDriftGoldIDs caps the id list a single census may be asked about, so a
+// malformed request cannot turn the census into an unbounded id scan.
+//
+// The at-most-one-label-per-query gold set the old cap of 2000 was cut for
+// ends with wave M-W5: the multi-gold slices G-SESS/G-MH/G-GLOB put the
+// planned campaign at roughly 2130 ids (design 05 §4.5, §6.5), which the old
+// cap refused outright. The cap is now the order of magnitude above THAT.
+//
+// It stays a HARD error, never a silent truncation: an id quietly dropped
+// from the request would come back as an absent block, and absence is exactly
+// the signal the drift protocol reads as "the gold block vanished".
+const maxDriftGoldIDs = 10000
+
+// driftGoldIDChunk is how many ids one lifecycle statement carries. The cap
+// bounds the REQUEST, this bounds the single statement's parameter array — a
+// full-cap census is ten bounded index probes instead of one 10000-element
+// array match, which is what keeps the census usable at the 1M+ target.
+//
+// Chunk results are merged, then sorted by id and deduplicated. That
+// reproduces the single statement this replaces exactly: `ORDER BY id` for the
+// order, `= ANY(...)` set semantics for a repeated id. Sorting the TEXT form
+// is the same order Postgres' uuid comparison gives — a uuid renders as
+// fixed-width lowercase hex with dashes at fixed offsets, so a lexicographic
+// comparison of the text is a byte comparison of the value.
+const driftGoldIDChunk = 1000
 
 // GetDriftCensus takes one census over readScopes. visibleTypes is the
 // retrieval allowlist from the block-type registry snapshot — passed in rather
@@ -115,25 +137,41 @@ func GetDriftCensus(ctx context.Context, pool *pgxpool.Pool, readScopes, visible
 	if len(goldIDs) == 0 {
 		return c, nil
 	}
+	for start := 0; start < len(goldIDs); start += driftGoldIDChunk {
+		end := min(start+driftGoldIDChunk, len(goldIDs))
+		if err := appendGoldLifecycles(ctx, pool, c, goldIDs[start:end], readScopes); err != nil {
+			return nil, err
+		}
+	}
+	slices.SortFunc(c.GoldIDs, func(a, b BlockLifecycle) int { return strings.Compare(a.ID, b.ID) })
+	c.GoldIDs = slices.CompactFunc(c.GoldIDs, func(a, b BlockLifecycle) bool { return a.ID == b.ID })
+	return c, nil
+}
+
+// appendGoldLifecycles runs the lifecycle statement over ONE chunk of ids and
+// appends what it found. The caller orders and deduplicates the merged result;
+// the per-chunk `ORDER BY id` is kept so a single-chunk census hands the rows
+// over in the same order it always did, before the merge sort even runs.
+func appendGoldLifecycles(ctx context.Context, pool *pgxpool.Pool, c *DriftCensus, ids, readScopes []string) error {
 	gr, err := pool.Query(ctx,
 		`SELECT id::text, created_at, updated_at
 		   FROM context_blocks
 		  WHERE id = ANY($1::uuid[]) AND scope = ANY($2::text[]) AND NOT is_archived
 		  ORDER BY id`,
-		goldIDs, readScopes)
+		ids, readScopes)
 	if err != nil {
-		return nil, fmt.Errorf("store: drift census gold ids: %w", err)
+		return fmt.Errorf("store: drift census gold ids: %w", err)
 	}
 	defer gr.Close()
 	for gr.Next() {
 		var b BlockLifecycle
 		if err := gr.Scan(&b.ID, &b.CreatedAt, &b.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("store: drift census gold scan: %w", err)
+			return fmt.Errorf("store: drift census gold scan: %w", err)
 		}
 		c.GoldIDs = append(c.GoldIDs, b)
 	}
 	if err := gr.Err(); err != nil {
-		return nil, fmt.Errorf("store: drift census gold rows: %w", err)
+		return fmt.Errorf("store: drift census gold rows: %w", err)
 	}
-	return c, nil
+	return nil
 }
