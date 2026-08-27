@@ -79,6 +79,22 @@ const (
 	BudgetDistill = 24000
 )
 
+// PipelineDistill is the llmlog pipeline name of the distiller — ONE authority
+// for a string three consumers depend on agreeing about (wave A02-7, review #3).
+//
+// It lives here rather than in the arm because the arm cannot be the authority:
+// internal/config imports this package (the allowed direction) and the arm
+// imports config, so a constant owned by internal/events could never be read by
+// BudgetDistill's own gates. The shape is topiclabel.Pipeline's — the string is
+// a constant, not a literal repeated per call site.
+//
+// What agreement buys: the budget above is written FOR this pipeline, the spend
+// guard (events/distill_spend.go) counts context_llm_log rows carrying this
+// name, and the A02-8 call will stamp it. Two spellings would not fail loudly —
+// they would leave the guard a permanently empty window over a busy arm, i.e.
+// fail OPEN, which is the one direction this guard must never take.
+const PipelineDistill = "distill-insights"
+
 // Reserves the budget gate charges for the two non-item parts of a prompt.
 const (
 	// RuleReserve is the rune cost of the nonce-bound security sentence

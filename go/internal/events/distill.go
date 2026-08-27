@@ -46,17 +46,23 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/distillsource"
 	"github.com/GottZ/ctx/internal/distillsource/ctxcheckpoint"
+	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/store"
 )
 
 // The journal's skip vocabulary, verbatim from dr_skip_reason_known
-// (135_distill_run.sql:151-155). Only the reasons this wave can produce are
-// named; budget/breaker/session_live belong to A02-7/8/10.
+// (135_distill_run.sql:147-150). Only the reasons the arm can produce are
+// named; breaker/session_live belong to A02-8/10.
 const (
 	distillSkipSourceUnreachable = "source_unreachable"
 	distillSkipNoNewRows         = "no_new_rows"
 	distillSkipDemand            = "demand"
 	distillSkipScopeForbidden    = "scope_forbidden"
+	// budget is the spend guard's one word (A02-7): the source is resting on a
+	// standing trip, its clamp came out at zero, or the guard could not
+	// establish its own state. The TRANSITION into that condition is not a skip
+	// at all but its own outcome, distillOutcomeBudgetTripped.
+	distillSkipBudget = "budget"
 	//nolint:gosec // G101 false positive: a skip-reason CLASS from the journal's dr_skip_reason_known CHECK, not a credential value (webhookSecretPrefix precedent).
 	distillSkipWatermarkRegression = "watermark_regression"
 )
@@ -88,7 +94,27 @@ const (
 	distillOutcomeSkipped = "skipped"
 	distillOutcomeFailed  = "failed"
 	distillOutcomeKilled  = "killed"
+	// budget_tripped is the TRANSITION row of the spend guard (A02-7) and the
+	// only durable state the back-off has: idx_distill_run_tripped (135:190-192)
+	// indexes exactly these rows, and the back-off is derived from their
+	// started_at. It is written on the transition INTO the braked state and not
+	// again while the answer stays the same — the ticks that follow are ordinary
+	// skips while a back-off stands, and the state-change rule covers the case
+	// where none does (spend_backoff = 0, review #5).
+	distillOutcomeBudgetTripped = "budget_tripped"
 )
+
+// distillPipeline is the arm's name in context_llm_log. It is vocabulary, not a
+// label: the spend guard counts the rows carrying it (§4.6.2) and the A02-8 call
+// stamps it.
+//
+// REFERENCED, not repeated (review #3). promptguard owns the string next to
+// BudgetDistill, the budget written for this very pipeline, because that package
+// is below internal/config and can therefore be read by both sides; a second
+// spelling here would not fail loudly but leave the guard a permanently empty
+// window over a busy arm. TestDistillPipelineIdentity pins the value so a
+// rename stays a visible decision rather than a silent disarm.
+const distillPipeline = promptguard.PipelineDistill
 
 // distillForbiddenScope is the one scope name gate 5 refuses outright, and it
 // is refused even when the operator owns it. V22 (config/validate.go:118-122)
@@ -268,6 +294,14 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 		return false
 	}
 
+	// THE SPEND GUARD (§4.6, A02-7), once per tick and between the candidate
+	// list and the first session. Both halves of that placement are load-
+	// bearing: it needs the list to know how many sources share one window, and
+	// it must stand before the first of them can spend it. What it bounds is the
+	// call of A02-8 — today it clamps a run that makes none, and journals the
+	// clamp so the arithmetic is checkable once there is one.
+	plan := s.distillBudget(ctx, d, d.CtxSourceLabel, scope, refs)
+
 	for _, ref := range refs {
 		if ctx.Err() != nil {
 			return true // shutdown mid-tick; the remaining roots wait for the next one
@@ -295,12 +329,38 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 			s.distillFail(ctx, tickKey, "", distillErrSchemaUntrusted)
 			continue
 		}
+		// The guard's dispatch, and it distinguishes a POLICY answer from a
+		// FAULT. A trip writes the transition row that starts the back-off; a
+		// rest is the ordinary skip that follows it; a fault is a failure row
+		// carrying an error class, because "budget" on the journal's only
+		// surface would name a policy where a database outage stood (review #6).
+		// All three are throttled by the state-change rule of §4.5.3 — a
+		// permanently braked or permanently broken arm would otherwise write 96
+		// identical rows a day per source, and the first row already carries the
+		// timestamp that makes the state visible.
+		switch plan.verdict(ref.Session) {
+		case distillVerdictTrip:
+			s.distillTrip(ctx, distillSourceKey(d.CtxSourceLabel, scope, ref.Session), ref.Session)
+			continue
+		case distillVerdictRest:
+			s.distillSkip(ctx, distillSourceKey(d.CtxSourceLabel, scope, ref.Session),
+				ref.Session, distillSkipBudget, false)
+			continue
+		case distillVerdictFail:
+			s.distillFail(ctx, distillSourceKey(d.CtxSourceLabel, scope, ref.Session),
+				ref.Session, distillErrQueryFailed)
+			continue
+		case distillVerdictRun:
+		}
 		s.distillSession(ctx, distillTick{
 			src:      src,
 			label:    d.CtxSourceLabel,
 			scope:    scope,
 			dumpDir:  dumpDir,
 			maxItems: d.RowsPerRead,
+			// The clamp of THIS tick, carried to the journal rather than
+			// enforced: the call it bounds arrives with A02-8.
+			callBudget: plan.perSource,
 			// Taken as configured, never clamped: the sizing keys are
 			// config.validateDistillCounters' authority (validate.go:409-429),
 			// and a clamp here would be a second one with the opposite policy.
@@ -327,6 +387,12 @@ type distillTick struct {
 	maxItems int
 	maxRunes int
 	minRunes int
+
+	// callBudget is the spend guard's per-source clamp for this tick (§4.6.2),
+	// resolved once with everything else so a hot config change cannot move it
+	// mid-tick. It is written to distill_run.call_budget and consumed by the
+	// call of A02-8; 0 is "unclamped", never "no calls" (distill_spend.go).
+	callBudget int
 }
 
 // distillSession runs gate 4 and the regression check for ONE root session,
@@ -384,7 +450,7 @@ func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess stri
 
 	// Material above the watermark ⇒ the two-phase row (135:20-27): INSERT
 	// running first, UPDATE per batch, UPDATE at the end.
-	runID, err := s.distillStartRun(ctx, key, sess, wm)
+	runID, err := s.distillStartRun(ctx, key, sess, wm, t.callBudget)
 	if err != nil {
 		slog.Error("scheduler: distiller could not open run row", "source_key", key, "error", err)
 		return
@@ -676,6 +742,17 @@ func (s *Scheduler) distillSameAnswer(ctx context.Context, key, outcome, reason 
 		return lastSkip == reason
 	case distillOutcomeFailed:
 		return lastErr == reason
+	case distillOutcomeBudgetTripped:
+		// THIRD application of the same rule, and the reason is the one
+		// distillFail already writes out: the rule does not care which column
+		// carries the answer. A trip row is a transition — it says "the budget
+		// just ran out" — and with spend_backoff = 0 (this half's off-switch)
+		// the arm re-trips every tick, which without the rule is 384 rows a day
+		// against a permanently full window, in a journal kept 90 days and
+		// served over /api. The FIRST trip row stands with its timestamp; a
+		// trip that follows any other answer writes again, so the back-off
+		// clock still advances (probe: ATripAfterASkipWritesAgain).
+		return lastSkip == reason
 	default:
 		// running/partial/ok/killed carry no repeated answer to suppress; a
 		// caller asking about them is asking the wrong question, and answering
@@ -721,17 +798,23 @@ func (s *Scheduler) distillWriteRow(ctx context.Context, key, sess, outcome, ski
 // distillStartRun opens the running row (phase one). watermark_to starts EQUAL
 // to watermark_from — "nothing achieved yet" — and only a batch whose insights
 // are durable may raise it (A02-6).
-func (s *Scheduler) distillStartRun(ctx context.Context, key, sess string, wm int64) (string, error) {
+//
+// call_budget is written HERE and never updated, for the same reason gen is
+// written at INSERT time (135:107-112): it is the clamp this run was opened
+// under, and a later value would describe a different tick. It is a statement
+// about the budget, not a counter of calls — `calls` is that counter and stays
+// 0 until A02-8.
+func (s *Scheduler) distillStartRun(ctx context.Context, key, sess string, wm int64, callBudget int) (string, error) {
 	var runID string
 	// gen stays at its column DEFAULT of 0: it is the generation number of the
 	// WRITTEN block (135:107-112, "reine Lesbarkeit"), and this wave writes no
 	// block. Counting it here would invent a number nothing refers to.
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO distill_run
-		    (source_key, root_session_id, outcome, watermark_from, watermark_to)
-		VALUES ($1, $2, $3, $4, $4)
+		    (source_key, root_session_id, outcome, watermark_from, watermark_to, call_budget)
+		VALUES ($1, $2, $3, $4, $4, $5)
 		RETURNING run_id::text`,
-		key, distillNull(sess), distillOutcomeRunning, wm).Scan(&runID)
+		key, distillNull(sess), distillOutcomeRunning, wm, callBudget).Scan(&runID)
 	if err != nil {
 		return "", fmt.Errorf("distill: opening run row for %q: %w", key, err)
 	}

@@ -228,6 +228,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"distill.block_sensitivity":                      "Sensitivity stamped on every insight block and the only lever over which backends may ever see it; hard floor internal, public is refused with 422",
 	"distill.spend_window":                           "Seconds of the sliding window the call budget is counted in, durably over the LLM log so a restart loop cannot blind the guard",
 	"distill.spend_max_calls":                        "Maximum distill calls inside one spend window before a source trips into back-off; 0 is the documented kill switch that disables the guard",
+	"distill.spend_max_gpu_seconds":                  "GPU seconds the distiller may consume inside one spend window, summed over the LLM log's duration; the axis that actually binds, because the call ceiling counts a ten-times more expensive answer as one call too, and 0 is the kill switch of this axis alone",
 	"distill.spend_backoff":                          "Seconds a source rests after tripping the call budget; the watermark stays put, so the skipped range is postponed rather than lost",
 	"distill.breaker_failures":                       "Consecutive failures that open the per-backend circuit breaker; must be at least 1, since 0 would open it before any failure",
 	"distill.breaker_cooldown":                       "Seconds an open breaker rests; one full interval means the next tick is skipped and the one after it is a real attempt",

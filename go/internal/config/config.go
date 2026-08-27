@@ -2009,6 +2009,31 @@ type DistillConfig struct {
 	// second off-switch but a value that renders as configured while acting as
 	// off, so V25 rejects it.
 	SpendMaxCalls int `key:"distill.spend_max_calls" env:"CTX_DISTILL_SPEND_MAX_CALLS" default:"40" mut:"hot" tenancy:"global-only"`
+	// SpendMaxGPUSeconds is the SHARP half of the same window, and it exists
+	// because the call axis cannot see the cost it is supposed to cap (NA-12):
+	// at the measured 38,92 ms per output token a 640-token answer costs ten
+	// times a 64-token one, and the call window counts both as 1. A guard that
+	// cannot see the expensive axis bewacht the wrong one, so the two run side
+	// by side — the call ceiling as the coarse second deck, this one as the
+	// ceiling that actually binds (EA-2).
+	//
+	// 240 GPU-seconds per window is the PROPORTIONALITY statement of §4.6.1 in
+	// a number: the largest single consumer measured over 24 h is dream-eval at
+	// 5 642 GPU-s (5 642 / 24 = 235 GPU-s per hour), and the distiller is
+	// Veredelung next to a product that already runs. It may therefore reach —
+	// never exceed — today's biggest background consumer. At the §6.2 cost band
+	// that is 24 calls per hour at the cheap end and 7 at the expensive one,
+	// against a call ceiling of 40 that stands unchanged: whichever axis binds
+	// first is the one that describes the real load.
+	//
+	// Counted in whole seconds against a millisecond column on purpose: the
+	// operator's unit here is "how much of the GPU hour does this arm get", and
+	// a millisecond key would render six digits for a question asked in dozens.
+	//
+	// 0 is the kill switch of THIS axis alone, exactly like spend_max_calls is
+	// of its own — both at 0 is the guard off, and V25 refuses the negative
+	// that would render as a configured budget while acting as an off-switch.
+	SpendMaxGPUSeconds int `key:"distill.spend_max_gpu_seconds" env:"CTX_DISTILL_SPEND_MAX_GPU_SECONDS" default:"240" mut:"hot" tenancy:"global-only"`
 	// SpendBackoff is how long a source rests after tripping the budget, in
 	// seconds. 2 h spans a typical compaction distance: a loop is braked
 	// effectively, a healthy rhythm loses at most one generation — and that one

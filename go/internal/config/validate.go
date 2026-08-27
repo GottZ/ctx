@@ -73,7 +73,7 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
-	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V31
+	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V32
 	return issues
 }
 
@@ -182,8 +182,9 @@ func validateDistill(c *Config) []Issue {
 
 	issues = append(issues, validateDistillBudget(d)...) // V24
 	issues = append(issues, validateDistillCounters(d)...)
-	issues = append(issues, validateDistillCtxSource(d)...) // V28, V29, V30
-	issues = append(issues, validateDistillDryRunDir(d)...) // V31
+	issues = append(issues, validateDistillSpendWindow(d)...) // V32
+	issues = append(issues, validateDistillCtxSource(d)...)   // V28, V29, V30
+	issues = append(issues, validateDistillDryRunDir(d)...)   // V31
 	return issues
 }
 
@@ -437,6 +438,36 @@ func validateDistillBudget(d *DistillConfig) []Issue {
 			d.RowsPerCall, d.MaxRowRunes, promptguard.RuleReserve, worst, promptguard.BudgetDistill)}}
 }
 
+// validateDistillSpendWindow is V32: the spend window may not be zero.
+//
+// It is the DENOMINATOR of both ceilings, not a third switch beside them.
+// `created_at > now() - make_interval(secs => 0)` is `created_at > now()`, i.e.
+// the empty set, so both axes read 0 and every budget passes — measured: 1 000
+// own rows at 30 000 ms with spend_max_calls = 40 and spend_max_gpu_seconds =
+// 240 armed closed `ok` with `call_budget = 40`. That is the guard's ONLY
+// fail-open path; every other failure in it (an unreadable back-off, an
+// unreadable window) stops the arm.
+//
+// The design does not define this zero, which is why it is refused rather than
+// documented: §4.6 names exactly one kill switch ("spend_max_calls = 0 ist der
+// Kill-Switch", design/02:1522), and docs/operations.md spells the 0 reading
+// out for every other key of the group while saying nothing for _SPEND_WINDOW.
+// The class is the one validateDistillCounters names for its sizing keys — "a
+// silent second off-switch next to distill.enabled, one that the settings
+// surface renders as a configured size" — and the settings surface does exactly
+// that here: it keeps rendering both budgets while neither can ever bind.
+//
+// Only the zero. The negative half is V17's generic duration walk, so a
+// per-key sign check would double-report (the shape validateEmbedBackoff
+// established for the same question on embed_backfill.backoff_base).
+func validateDistillSpendWindow(d *DistillConfig) []Issue {
+	if d.SpendWindow != 0 {
+		return nil
+	}
+	return []Issue{{Field: "distill.spend_window", Severity: SeverityError,
+		Msg: "distill.spend_window must be > 0 — it is the window BOTH spend ceilings are counted in, so 0 makes the guard count an empty range and pass every budget while the settings surface keeps rendering spend_max_calls and spend_max_gpu_seconds as configured limits; switch the guard off with spend_max_calls = 0 and spend_max_gpu_seconds = 0 instead"}}
+}
+
 // validateDistillCounters is V25: the range half of the group — the counted
 // keys, since the generic V17 walk is typed and visits duration keys only.
 //
@@ -480,6 +511,11 @@ func validateDistillCounters(d *DistillConfig) []Issue {
 		{"distill.min_row_runes", d.MinRowRunes, 0, "a negative substance threshold has no reading"},
 		{"distill.initial_backfill_rows", d.InitialBackfillRows, 0, "0 is the documented cold start at the head of the source"},
 		{"distill.spend_max_calls", d.SpendMaxCalls, 0, "0 is the documented kill switch that disables the guard"},
+		// The GPU axis reads its 0 exactly like the call axis reads its own
+		// (wave A02-7): each ceiling is armed on its own, both at 0 is the guard
+		// off. A negative is refused for the house reason — it renders as a
+		// configured budget while acting as an off-switch.
+		{"distill.spend_max_gpu_seconds", d.SpendMaxGPUSeconds, 0, "0 is the documented kill switch of the GPU-second axis"},
 		{"distill.retention_days", d.RetentionDays, 0, "0 is the documented no-op that keeps rows forever"},
 		{"distill.seen_retention_days", d.SeenRetentionDays, 0, "0 is the documented no-op that keeps hashes forever"},
 	} {
