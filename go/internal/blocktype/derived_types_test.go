@@ -113,12 +113,12 @@ func TestMigration143Shape(t *testing.T) {
 		}
 	}
 	// The field D-01 §7's wave brief forbids explicitly: retrieval.
-	// shadow_measurable does not exist on this base (it arrives with M-W2), so
-	// a row carrying it would be unloadable — DecodePolicy has
-	// DisallowUnknownFields on every level.
+	// shadow_measurable (added by M-W2) stays unset here — K7/E-4 seed both
+	// types excluded, and flipping a type to shadow-measurable is a deliberate,
+	// auditable wave of its own, never a side effect of the seed.
 	if strings.Contains(stmt, "shadow_measurable") {
-		t.Errorf("%s carries shadow_measurable — the field does not exist in this build's "+
-			"policy vocabulary and DisallowUnknownFields would make both rows unloadable", migration143File)
+		t.Errorf("%s carries shadow_measurable — enabling shadow measurement is a "+
+			"separate wave with its own review, not part of the seed", migration143File)
 	}
 }
 
